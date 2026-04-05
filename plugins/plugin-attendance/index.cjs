@@ -14792,10 +14792,14 @@ module.exports = {
 	            return
 	          }
           const maybeConstraint = String(error?.constraint ?? '')
+          const hasCsvUploadSource = Boolean(resolveImportUploadFileId(parsed.data))
           const isIdempotencyUnique = Boolean(idempotencyKey)
             && String(error?.code ?? '') === '23505'
             && maybeConstraint.includes('uq_attendance_import_batches_idempotency_key')
-          if ((isIdempotencyUnique || Boolean(idempotencyKey)) && await hasImportBatchIdempotencyColumn(db)) {
+          const isConcurrentUploadCleanupRace = Boolean(idempotencyKey)
+            && hasCsvUploadSource
+            && String(error?.code ?? '') === 'ENOENT'
+          if ((isIdempotencyUnique || isConcurrentUploadCleanupRace) && await hasImportBatchIdempotencyColumn(db)) {
             try {
               for (let attempt = 0; attempt < 4; attempt += 1) {
                 const existing = await loadIdempotentImportBatch(db, orgId, idempotencyKey)

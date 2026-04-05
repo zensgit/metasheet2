@@ -2661,12 +2661,16 @@ describe('Attendance Plugin Integration', () => {
 
     const cycleSeed = Number.parseInt(runSuffix, 36)
     const safeCycleSeed = Number.isFinite(cycleSeed) ? Math.max(0, cycleSeed) : Date.now()
-    const cycleYear = 2040 + (safeCycleSeed % 20)
-    const cycleMonthNumber = (Math.floor(safeCycleSeed / 7) % 12) + 1
+    const cycleAnchor = new Date(Date.UTC(3000, 0, 1) + (safeCycleSeed % (365 * 4000)) * 24 * 60 * 60 * 1000)
+    cycleAnchor.setUTCDate(1)
+    const cycleYear = cycleAnchor.getUTCFullYear()
+    const cycleMonthNumber = cycleAnchor.getUTCMonth() + 1
     const cycleMonth = String(cycleMonthNumber).padStart(2, '0')
     const cycleAnchorDate = `${cycleYear}-${cycleMonth}-01`
-    const generateMonthNumber = cycleMonthNumber === 12 ? 1 : cycleMonthNumber + 1
-    const generateYear = cycleMonthNumber === 12 ? cycleYear + 1 : cycleYear
+    const generateAnchor = new Date(Date.UTC(cycleYear, cycleMonthNumber - 1, 1))
+    generateAnchor.setUTCMonth(generateAnchor.getUTCMonth() + 1)
+    const generateMonthNumber = generateAnchor.getUTCMonth() + 1
+    const generateYear = generateAnchor.getUTCFullYear()
 
     const payrollCycleCreateRes = await requestJson(`${baseUrl}/api/attendance/payroll-cycles`, {
       method: 'POST',
