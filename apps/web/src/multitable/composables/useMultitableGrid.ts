@@ -11,6 +11,7 @@ import type {
   PatchResult,
 } from '../types'
 import { MultitableApiClient, multitableClient } from '../api/client'
+import { isPropertyHiddenField } from '../utils/field-permissions'
 
 // --- Sort / Filter types ---
 
@@ -178,7 +179,11 @@ export function useMultitableGrid(opts: {
   // Field visibility
   const hiddenFieldIds = ref<string[]>([])
   const visibleFields = computed(() =>
-    fields.value.filter((f) => !hiddenFieldIds.value.includes(f.id) && fieldPermissions.value[f.id]?.visible !== false),
+    fields.value.filter((f) =>
+      !hiddenFieldIds.value.includes(f.id)
+      && !isPropertyHiddenField(f)
+      && fieldPermissions.value[f.id]?.visible !== false,
+    ),
   )
   const readOnlyFieldIds = computed(() =>
     fields.value

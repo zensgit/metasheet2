@@ -47,6 +47,18 @@ describe('useMultitableGrid', () => {
     expect(grid.visibleFields.value.map((f) => f.id)).toEqual(['f1'])
   })
 
+  it('excludes property-hidden fields even when scoped permissions are missing', () => {
+    const grid = useMultitableGrid({ sheetId: ref('s1'), viewId: ref('v1'), client })
+    grid.fields.value = [
+      { id: 'f1', name: 'A', type: 'string' },
+      { id: 'f2', name: 'Secret', type: 'string', property: { hidden: true } },
+      { id: 'f3', name: 'View Hidden', type: 'string' },
+    ]
+    grid.hiddenFieldIds.value = ['f3']
+
+    expect(grid.visibleFields.value.map((f) => f.id)).toEqual(['f1'])
+  })
+
   it('loads initial view data when sheetId/viewId are preselected', async () => {
     const fetchFn = vi.fn(async (input: string) => {
       if (!input.startsWith('/api/multitable/view')) throw new Error(`Unexpected request: ${input}`)

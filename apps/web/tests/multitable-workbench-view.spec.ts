@@ -182,15 +182,28 @@ vi.mock('../src/multitable/components/MetaViewTabBar.vue', () => ({
 vi.mock('../src/multitable/components/MetaToolbar.vue', () => ({
   default: defineComponent({
     name: 'MetaToolbar',
+    props: {
+      fields: { type: Array, default: () => [] },
+    },
     emits: ['import'],
     render() {
+      const fieldIds = (this.$props.fields as Array<{ id?: string }>)
+        .map((field) => field.id ?? '')
+        .filter((fieldId) => fieldId.length > 0)
+        .join(',')
       return h(
-        'button',
-        {
-          'data-open-import': 'true',
-          onClick: () => this.$emit('import'),
-        },
-        'open-import',
+        'div',
+        { 'data-toolbar-field-ids': fieldIds },
+        [
+          h(
+            'button',
+            {
+              'data-open-import': 'true',
+              onClick: () => this.$emit('import'),
+            },
+            'open-import',
+          ),
+        ],
       )
     },
   }),
@@ -410,10 +423,19 @@ vi.mock('../src/multitable/components/MetaLinkPicker.vue', () => ({ default: stu
 vi.mock('../src/multitable/components/MetaFieldManager.vue', () => ({
   default: defineComponent({
     name: 'MetaFieldManager',
+    props: {
+      visible: { type: Boolean, default: false },
+      fields: { type: Array, default: () => [] },
+    },
     emits: ['create-field', 'update:dirty'],
     render() {
+      const fieldIds = (this.$props.fields as Array<{ id?: string }>)
+        .map((field) => field.id ?? '')
+        .filter((fieldId) => fieldId.length > 0)
+        .join(',')
       return h(
         'div',
+        { 'data-field-manager-field-ids': fieldIds },
         [
           h(
             'button',
@@ -462,11 +484,19 @@ vi.mock('../src/multitable/components/MetaViewManager.vue', () => ({
     name: 'MetaViewManager',
     props: {
       visible: { type: Boolean, default: false },
+      fields: { type: Array, default: () => [] },
     },
     emits: ['close', 'update:dirty'],
     render() {
       if (!this.$props.visible) return null
-      return h('div', { 'data-view-manager': 'true' }, [
+      const fieldIds = (this.$props.fields as Array<{ id?: string }>)
+        .map((field) => field.id ?? '')
+        .filter((fieldId) => fieldId.length > 0)
+        .join(',')
+      return h('div', {
+        'data-view-manager': 'true',
+        'data-view-manager-field-ids': fieldIds,
+      }, [
         h(
           'button',
           {
@@ -564,11 +594,17 @@ vi.mock('../src/multitable/components/MetaImportModal.vue', () => ({
     name: 'MetaImportModal',
     props: {
       visible: { type: Boolean, default: false },
+      fields: { type: Array, default: () => [] },
     },
     emits: ['update:dirty', 'close', 'cancel-import', 'import'],
     render() {
       if (!this.$props.visible) return null
+      const fieldIds = (this.$props.fields as Array<{ id?: string }>)
+        .map((field) => field.id ?? '')
+        .filter((fieldId) => fieldId.length > 0)
+        .join(',')
       return h('div', [
+        h('div', { 'data-import-field-ids': fieldIds }),
         h(
           'button',
           {
@@ -818,6 +854,50 @@ describe('MultitableWorkbench view wiring', () => {
     app.mount(container!)
     return Object.assign(hostState, { externalContextResults, workbenchRef })
   }
+
+  it('filters property-hidden fields from manager surfaces while keeping view-hidden fields configurable', async () => {
+    workbenchMock.fields.value = [
+      { id: 'fld_title', name: 'Title', type: 'string' },
+      { id: 'fld_view_hidden', name: 'View Hidden', type: 'string' },
+      { id: 'fld_secret', name: 'Secret', type: 'string', property: { hidden: true } },
+    ]
+    gridMock.fields.value = [
+      { id: 'fld_title', name: 'Title', type: 'string' },
+      { id: 'fld_view_hidden', name: 'View Hidden', type: 'string' },
+      { id: 'fld_secret', name: 'Secret', type: 'string', property: { hidden: true } },
+    ]
+    gridMock.hiddenFieldIds.value = ['fld_view_hidden']
+    workbenchMock.fieldPermissions.value = {
+      fld_title: { visible: true, readOnly: false },
+      fld_view_hidden: { visible: false, readOnly: false },
+      fld_secret: { visible: false, readOnly: false },
+    }
+
+    mountWorkbench()
+    await flushUi()
+
+    expect(container!.querySelector('[data-toolbar-field-ids]')?.getAttribute('data-toolbar-field-ids'))
+      .toBe('fld_title,fld_view_hidden')
+
+    const managerButtons = Array.from(container!.querySelectorAll('.mt-workbench__mgr-btn')) as HTMLButtonElement[]
+    managerButtons.find((button) => button.textContent?.includes('Fields'))?.click()
+    await flushUi()
+
+    expect(container!.querySelector('[data-field-manager-field-ids]')?.getAttribute('data-field-manager-field-ids'))
+      .toBe('fld_title,fld_view_hidden')
+
+    container!.querySelector<HTMLButtonElement>('[data-open-import="true"]')!.click()
+    await flushUi()
+
+    expect(container!.querySelector('[data-import-field-ids]')?.getAttribute('data-import-field-ids'))
+      .toBe('fld_title,fld_view_hidden')
+
+    managerButtons.find((button) => button.textContent?.includes('Views'))?.click()
+    await flushUi()
+
+    expect(container!.querySelector('[data-view-manager-field-ids]')?.getAttribute('data-view-manager-field-ids'))
+      .toBe('fld_title,fld_view_hidden')
+  })
 
   it('syncs external base/sheet/view props after mount', async () => {
     const hostState = mountWorkbench()
