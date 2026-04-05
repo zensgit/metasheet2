@@ -1217,7 +1217,7 @@ function deriveFieldPermissions(
     fields.map((field) => [
       field.id,
       {
-        visible: !hiddenFieldIds.has(field.id),
+        visible: !hiddenFieldIds.has(field.id) && !isFieldPermissionHidden(field),
         readOnly: readOnly || isFieldAlwaysReadOnly(field),
       },
     ]),
@@ -1228,6 +1228,11 @@ function isFieldAlwaysReadOnly(field: Pick<UniverMetaField, 'type' | 'property'>
   if (field.type === 'formula' || field.type === 'lookup' || field.type === 'rollup') return true
   const property = field.property ?? {}
   return property.readonly === true || property.readOnly === true
+}
+
+function isFieldPermissionHidden(field: Pick<UniverMetaField, 'property'>): boolean {
+  const property = normalizeJson(field.property)
+  return property.hidden === true || property.visible === false
 }
 
 function deriveViewPermissions(
@@ -1252,6 +1257,70 @@ function deriveRowActions(capabilities: MultitableCapabilities): MultitableRowAc
     canDelete: capabilities.canDeleteRecord,
     canComment: capabilities.canComment,
   }
+}
+
+type FieldMutationGuard = {
+  type: UniverMetaField['type']
+  options?: string[]
+  readOnly: boolean
+  hidden: boolean
+  link?: LinkFieldConfig | null
+}
+
+function buildFieldMutationGuardMap(fields: UniverMetaField[]): Map<string, FieldMutationGuard> {
+  return new Map(
+    fields.map((field) => {
+      const property = normalizeJson(field.property)
+      const base: FieldMutationGuard = {
+        type: field.type,
+        readOnly: isFieldAlwaysReadOnly(field),
+        hidden: isFieldPermissionHidden(field),
+      }
+      if (field.type === 'select') {
+        return [field.id, { ...base, options: field.options?.map((option) => option.value) ?? [] }] as const
+      }
+      if (field.type === 'link') {
+        return [field.id, { ...base, link: parseLinkFieldConfig(property) }] as const
+      }
+      return [field.id, base] as const
+    }),
+  )
+}
+
+function filterVisiblePropertyFields(fields: UniverMetaField[]): UniverMetaField[] {
+  return fields.filter((field) => !isFieldPermissionHidden(field))
+}
+
+function filterRecordDataByFieldIds(data: unknown, allowedFieldIds: Set<string>): Record<string, unknown> {
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return {}
+  return Object.fromEntries(
+    Object.entries(data as Record<string, unknown>).filter(([fieldId]) => allowedFieldIds.has(fieldId)),
+  )
+}
+
+function filterRecordFieldSummaryMap<T>(
+  summaryMap: Record<string, Record<string, T>> | undefined,
+  allowedFieldIds: Set<string>,
+): Record<string, Record<string, T>> | undefined {
+  if (!summaryMap) return undefined
+  return Object.fromEntries(
+    Object.entries(summaryMap).map(([recordId, fieldSummaries]) => [
+      recordId,
+      Object.fromEntries(
+        Object.entries(fieldSummaries).filter(([fieldId]) => allowedFieldIds.has(fieldId)),
+      ),
+    ]),
+  )
+}
+
+function filterSingleRecordFieldSummaryMap<T>(
+  summaryMap: Record<string, T> | undefined,
+  allowedFieldIds: Set<string>,
+): Record<string, T> | undefined {
+  if (!summaryMap) return undefined
+  return Object.fromEntries(
+    Object.entries(summaryMap).filter(([fieldId]) => allowedFieldIds.has(fieldId)),
+  )
 }
 
 function toSummaryDisplay(value: unknown): string {
@@ -2828,8 +2897,12 @@ export function univerMetaRouter(): Router {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
       }
 
-      const fieldTypeById = new Map(fields.map((f) => [f.id, f.type] as const))
-      const searchableFieldIds = fields.filter((field) => isSearchableFieldType(field.type)).map((field) => field.id)
+      const visiblePropertyFields = filterVisiblePropertyFields(fields)
+      const visiblePropertyFieldIds = new Set(visiblePropertyFields.map((field) => field.id))
+      const fieldTypeById = new Map(visiblePropertyFields.map((f) => [f.id, f.type] as const))
+      const searchableFieldIds = visiblePropertyFields
+        .filter((field) => isSearchableFieldType(field.type))
+        .map((field) => field.id)
       const warnings: string[] = []
 
       const ignoredSortFieldIds = rawSortRules
@@ -2857,9 +2930,9 @@ export function univerMetaRouter(): Router {
       const relationalLinkFields = fields
         .map((f) => (f.type === 'link' ? { fieldId: f.id, cfg: parseLinkFieldConfig(f.property) } : null))
         .filter((v): v is { fieldId: string; cfg: LinkFieldConfig } => !!v && !!v.cfg)
-      const attachmentFields = fields.filter((field) => field.type === 'attachment')
+      const attachmentFields = visiblePropertyFields.filter((field) => field.type === 'attachment')
       const computedFieldIdSet = new Set(
-        fields.filter((f) => f.type === 'lookup' || f.type === 'rollup').map((f) => f.id),
+        visiblePropertyFields.filter((f) => f.type === 'lookup' || f.type === 'rollup').map((f) => f.id),
       )
 
       let rows: UniverMetaRecord[] = []
@@ -2965,7 +3038,7 @@ export function univerMetaRouter(): Router {
         }
 
         if (hasSearch) {
-          all = all.filter((record) => recordMatchesSearch(record, fields, search))
+          all = all.filter((record) => recordMatchesSearch(record, visiblePropertyFields, search))
         }
 
         if (filterInfo) {
@@ -3070,25 +3143,34 @@ export function univerMetaRouter(): Router {
         relationalLinkFields,
         linkValuesByRecord,
       )
+      for (const row of rows) {
+        row.data = filterRecordDataByFieldIds(row.data, visiblePropertyFieldIds)
+      }
       const linkSummaries = includeLinkSummaries
-        ? serializeLinkSummaryMap(
-            await buildLinkSummaries(
-              pool.query.bind(pool),
-              rows,
-              relationalLinkFields,
-              linkValuesByRecord,
+        ? filterRecordFieldSummaryMap(
+            serializeLinkSummaryMap(
+              await buildLinkSummaries(
+                pool.query.bind(pool),
+                rows,
+                relationalLinkFields,
+                linkValuesByRecord,
+              ),
             ),
+            visiblePropertyFieldIds,
           )
         : undefined
       const attachmentSummaries = attachmentFields.length > 0
-        ? serializeAttachmentSummaryMap(
-            await buildAttachmentSummaries(
-              pool.query.bind(pool),
-              req,
-              sheetId,
-              rows,
-              attachmentFields,
+        ? filterRecordFieldSummaryMap(
+            serializeAttachmentSummaryMap(
+              await buildAttachmentSummaries(
+                pool.query.bind(pool),
+                req,
+                sheetId,
+                rows,
+                attachmentFields,
+              ),
             ),
+            visiblePropertyFieldIds,
           )
         : undefined
       const access = await resolveRequestAccess(req)
@@ -3113,7 +3195,7 @@ export function univerMetaRouter(): Router {
 
       const view: UniverMetaView = {
         id: sheetId,
-        fields,
+        fields: visiblePropertyFields,
         rows,
         ...(linkSummaries ? { linkSummaries } : {}),
         ...(attachmentSummaries ? { attachmentSummaries } : {}),
@@ -3175,7 +3257,8 @@ export function univerMetaRouter(): Router {
       }
 
       const hiddenFieldIds = new Set(resolved.view?.hiddenFieldIds ?? [])
-      const visibleFields = fields.filter((field) => !hiddenFieldIds.has(field.id))
+      const visibleFields = fields.filter((field) => !hiddenFieldIds.has(field.id) && !isFieldPermissionHidden(field))
+      const visibleFieldIds = new Set(visibleFields.map((field) => field.id))
       const fieldPermissions = deriveFieldPermissions(fields, capabilities, {
         hiddenFieldIds: resolved.view?.hiddenFieldIds ?? [],
         allowCreateOnly: !record,
@@ -3188,16 +3271,22 @@ export function univerMetaRouter(): Router {
       })
       const attachmentFields = visibleFields.filter((field) => field.type === 'attachment')
       const attachmentSummaries = record && attachmentFields.length > 0
-        ? serializeAttachmentSummaryMap(
-            await buildAttachmentSummaries(
-              pool.query.bind(pool),
-              req,
-              sheetId,
-              [record],
-              attachmentFields,
-            ),
-          )[record.id] ?? {}
+        ? filterSingleRecordFieldSummaryMap(
+            serializeAttachmentSummaryMap(
+              await buildAttachmentSummaries(
+                pool.query.bind(pool),
+                req,
+                sheetId,
+                [record],
+                attachmentFields,
+              ),
+            )[record.id] ?? {},
+            visibleFieldIds,
+          )
         : undefined
+      if (record) {
+        record.data = filterRecordDataByFieldIds(record.data, visibleFieldIds)
+      }
 
       return res.json({
         ok: true,
@@ -3270,28 +3359,7 @@ export function univerMetaRouter(): Router {
       }
 
       const fields = await loadFieldsForSheet(pool.query.bind(pool), view.sheetId)
-      const fieldById = new Map<string, { type: UniverMetaField['type']; options?: string[]; readonly?: boolean; link?: LinkFieldConfig | null }>()
-      for (const field of fields) {
-        const property = normalizeJson(field.property)
-        const readonly = property.readonly === true
-        if (field.type === 'select') {
-          fieldById.set(field.id, {
-            type: field.type,
-            readonly,
-            options: field.options?.map((option) => option.value) ?? [],
-          })
-          continue
-        }
-        if (field.type === 'link') {
-          fieldById.set(field.id, {
-            type: field.type,
-            readonly,
-            link: parseLinkFieldConfig(field.property),
-          })
-          continue
-        }
-        fieldById.set(field.id, { type: field.type, readonly })
-      }
+      const fieldById = buildFieldMutationGuardMap(fields)
 
       const hiddenFieldIds = new Set(view.hiddenFieldIds ?? [])
       const data = parsed.data.data ?? {}
@@ -3305,11 +3373,15 @@ export function univerMetaRouter(): Router {
           fieldErrors[fieldId] = 'Unknown field'
           continue
         }
+        if (field.hidden) {
+          fieldErrors[fieldId] = 'Field is hidden'
+          continue
+        }
         if (hiddenFieldIds.has(fieldId)) {
           fieldErrors[fieldId] = 'Field is not available in this form'
           continue
         }
-        if (field.readonly === true || field.type === 'lookup' || field.type === 'rollup') {
+        if (field.readOnly === true || field.type === 'lookup' || field.type === 'rollup') {
           fieldErrors[fieldId] = 'Field is readonly'
           continue
         }
@@ -3389,12 +3461,13 @@ export function univerMetaRouter(): Router {
       }
 
       if (Object.keys(fieldErrors).length > 0) {
+        const hiddenOnly = Object.values(fieldErrors).every((message) => message === 'Field is hidden')
         const readonlyOnly = Object.values(fieldErrors).every((message) => message === 'Field is readonly')
-        return res.status(readonlyOnly ? 403 : 400).json({
+        return res.status(hiddenOnly || readonlyOnly ? 403 : 400).json({
           ok: false,
           error: {
-            code: readonlyOnly ? 'FIELD_READONLY' : 'VALIDATION_ERROR',
-            message: readonlyOnly ? 'Readonly field update rejected' : 'Validation failed',
+            code: hiddenOnly ? 'FIELD_HIDDEN' : readonlyOnly ? 'FIELD_READONLY' : 'VALIDATION_ERROR',
+            message: hiddenOnly ? 'Hidden field update rejected' : readonlyOnly ? 'Readonly field update rejected' : 'Validation failed',
             fieldErrors,
           },
         })
@@ -3498,25 +3571,31 @@ export function univerMetaRouter(): Router {
         version: Number(row.version ?? nextVersion),
         data: normalizeJson(row.data),
       }
+      const visibleFormFields = fields.filter((field) => !hiddenFieldIds.has(field.id) && !isFieldPermissionHidden(field))
+      const visibleFormFieldIds = new Set(visibleFormFields.map((field) => field.id))
 
       const relationalLinkFields = fields
         .map((field) => (field.type === 'link' ? { fieldId: field.id, cfg: parseLinkFieldConfig(field.property) } : null))
         .filter((value): value is RelationalLinkField => !!value && !!value.cfg)
-      const attachmentFields = fields.filter((field) => field.type === 'attachment')
+      const attachmentFields = visibleFormFields.filter((field) => field.type === 'attachment')
       const linkValuesByRecord = await loadLinkValuesByRecord(pool.query.bind(pool), [record.id], relationalLinkFields)
       for (const { fieldId } of relationalLinkFields) {
         record.data[fieldId] = linkValuesByRecord.get(record.id)?.get(fieldId) ?? []
       }
+      record.data = filterRecordDataByFieldIds(record.data, visibleFormFieldIds)
       const attachmentSummaries = attachmentFields.length > 0
-        ? serializeAttachmentSummaryMap(
-            await buildAttachmentSummaries(
-              pool.query.bind(pool),
-              req,
-              view.sheetId,
-              [record],
-              attachmentFields,
-            ),
-          )[record.id] ?? {}
+        ? filterSingleRecordFieldSummaryMap(
+            serializeAttachmentSummaryMap(
+              await buildAttachmentSummaries(
+                pool.query.bind(pool),
+                req,
+                view.sheetId,
+                [record],
+                attachmentFields,
+              ),
+            )[record.id] ?? {},
+            visibleFormFieldIds,
+          )
         : undefined
 
       publishMultitableSheetRealtime({
@@ -3619,28 +3698,7 @@ export function univerMetaRouter(): Router {
       }
 
       const fields = await loadFieldsForSheet(pool.query.bind(pool), sheetId)
-      const fieldById = new Map<string, { type: UniverMetaField['type']; options?: string[]; readonly?: boolean; link?: LinkFieldConfig | null }>()
-      for (const field of fields) {
-        const property = normalizeJson(field.property)
-        const readonly = property.readonly === true
-        if (field.type === 'select') {
-          fieldById.set(field.id, {
-            type: field.type,
-            readonly,
-            options: field.options?.map((option) => option.value) ?? [],
-          })
-          continue
-        }
-        if (field.type === 'link') {
-          fieldById.set(field.id, {
-            type: field.type,
-            readonly,
-            link: parseLinkFieldConfig(field.property),
-          })
-          continue
-        }
-        fieldById.set(field.id, { type: field.type, readonly })
-      }
+      const fieldById = buildFieldMutationGuardMap(fields)
 
       const data = parsed.data.data ?? {}
       const fieldErrors: Record<string, string> = {}
@@ -3653,7 +3711,11 @@ export function univerMetaRouter(): Router {
           fieldErrors[fieldId] = 'Unknown field'
           continue
         }
-        if (field.readonly === true || field.type === 'lookup' || field.type === 'rollup') {
+        if (field.hidden) {
+          fieldErrors[fieldId] = 'Field is hidden'
+          continue
+        }
+        if (field.readOnly === true || field.type === 'lookup' || field.type === 'rollup') {
           fieldErrors[fieldId] = 'Field is readonly'
           continue
         }
@@ -3728,12 +3790,13 @@ export function univerMetaRouter(): Router {
       }
 
       if (Object.keys(fieldErrors).length > 0) {
+        const hiddenOnly = Object.values(fieldErrors).every((message) => message === 'Field is hidden')
         const readonlyOnly = Object.values(fieldErrors).every((message) => message === 'Field is readonly')
-        return res.status(readonlyOnly ? 403 : 400).json({
+        return res.status(hiddenOnly || readonlyOnly ? 403 : 400).json({
           ok: false,
           error: {
-            code: readonlyOnly ? 'FIELD_READONLY' : 'VALIDATION_ERROR',
-            message: readonlyOnly ? 'Readonly field update rejected' : 'Validation failed',
+            code: hiddenOnly ? 'FIELD_HIDDEN' : readonlyOnly ? 'FIELD_READONLY' : 'VALIDATION_ERROR',
+            message: hiddenOnly ? 'Hidden field update rejected' : readonlyOnly ? 'Readonly field update rejected' : 'Validation failed',
             fieldErrors,
           },
         })
@@ -3811,25 +3874,31 @@ export function univerMetaRouter(): Router {
         version: Number(row.version ?? nextVersion),
         data: normalizeJson(row.data),
       }
+      const visiblePropertyFields = filterVisiblePropertyFields(fields)
+      const visiblePropertyFieldIds = new Set(visiblePropertyFields.map((field) => field.id))
 
       const relationalLinkFields = fields
         .map((field) => (field.type === 'link' ? { fieldId: field.id, cfg: parseLinkFieldConfig(field.property) } : null))
         .filter((value): value is RelationalLinkField => !!value && !!value.cfg)
-      const attachmentFields = fields.filter((field) => field.type === 'attachment')
+      const attachmentFields = visiblePropertyFields.filter((field) => field.type === 'attachment')
       const linkValuesByRecord = await loadLinkValuesByRecord(pool.query.bind(pool), [record.id], relationalLinkFields)
       for (const { fieldId } of relationalLinkFields) {
         record.data[fieldId] = linkValuesByRecord.get(record.id)?.get(fieldId) ?? []
       }
+      record.data = filterRecordDataByFieldIds(record.data, visiblePropertyFieldIds)
       const attachmentSummaries = attachmentFields.length > 0
-        ? serializeAttachmentSummaryMap(
-            await buildAttachmentSummaries(
-              pool.query.bind(pool),
-              req,
-              sheetId,
-              [record],
-              attachmentFields,
-            ),
-          )[record.id] ?? {}
+        ? filterSingleRecordFieldSummaryMap(
+            serializeAttachmentSummaryMap(
+              await buildAttachmentSummaries(
+                pool.query.bind(pool),
+                req,
+                sheetId,
+                [record],
+                attachmentFields,
+              ),
+            )[record.id] ?? {},
+            visiblePropertyFieldIds,
+          )
         : undefined
 
       return res.json({
@@ -3915,7 +3984,6 @@ export function univerMetaRouter(): Router {
       }
 
       const fields = await loadFieldsForSheet(pool.query.bind(pool), sheetId)
-      const attachmentFields = fields.filter((field) => field.type === 'attachment')
       const record: UniverMetaRecord = {
         id: String(row.id),
         version: Number(row.version ?? 1),
@@ -3930,17 +3998,28 @@ export function univerMetaRouter(): Router {
         record.data[fieldId] = linkValuesByRecord.get(record.id)?.get(fieldId) ?? []
       }
       await applyLookupRollup(pool.query.bind(pool), fields, [record], relationalLinkFields, linkValuesByRecord)
-      const linkSummaries = await buildLinkSummaries(pool.query.bind(pool), [record], relationalLinkFields, linkValuesByRecord)
-      const attachmentSummaries = attachmentFields.length > 0
-        ? serializeAttachmentSummaryMap(
-            await buildAttachmentSummaries(
-              pool.query.bind(pool),
-              req,
-              sheetId,
-              [record],
-              attachmentFields,
-            ),
-          )[record.id] ?? {}
+      const visiblePropertyFields = filterVisiblePropertyFields(fields)
+      const visiblePropertyFieldIds = new Set(visiblePropertyFields.map((field) => field.id))
+      record.data = filterRecordDataByFieldIds(record.data, visiblePropertyFieldIds)
+      const linkSummaries = filterSingleRecordFieldSummaryMap(
+        Object.fromEntries(
+          Array.from((await buildLinkSummaries(pool.query.bind(pool), [record], relationalLinkFields, linkValuesByRecord)).get(record.id)?.entries() ?? []),
+        ),
+        visiblePropertyFieldIds,
+      )
+      const attachmentSummaries = visiblePropertyFields.some((field) => field.type === 'attachment')
+        ? filterSingleRecordFieldSummaryMap(
+            serializeAttachmentSummaryMap(
+              await buildAttachmentSummaries(
+                pool.query.bind(pool),
+                req,
+                sheetId,
+                [record],
+                visiblePropertyFields.filter((field) => field.type === 'attachment'),
+              ),
+            )[record.id] ?? {},
+            visiblePropertyFieldIds,
+          )
         : undefined
 
       const access = await resolveRequestAccess(req)
@@ -3956,7 +4035,7 @@ export function univerMetaRouter(): Router {
         data: {
           sheet,
           ...(viewConfig ? { view: viewConfig } : {}),
-          fields,
+          fields: visiblePropertyFields,
           record,
           capabilities,
           fieldPermissions,
@@ -3972,9 +4051,7 @@ export function univerMetaRouter(): Router {
             containerType: 'meta_sheet',
             containerId: sheet.id,
           },
-          linkSummaries: Object.fromEntries(
-            Array.from(linkSummaries.get(record.id)?.entries() ?? []).map(([fieldId, summaries]) => [fieldId, summaries]),
-          ),
+          linkSummaries,
           ...(attachmentSummaries ? { attachmentSummaries } : {}),
         },
       })
@@ -4731,22 +4808,10 @@ export function univerMetaRouter(): Router {
       }
 
       const fields = (fieldRes.rows as any[]).map(serializeFieldRow)
-      const attachmentFields = fields.filter((field) => field.type === 'attachment')
-      const fieldById = new Map<string, { type: UniverMetaField['type']; options?: string[]; readonly?: boolean; link?: LinkFieldConfig | null }>()
-      for (const f of fields) {
-        const prop = normalizeJson(f.property)
-        const isReadonly = prop.readonly === true
-        if (f.type === 'select') {
-          const options = f.options?.map((o) => o.value) ?? []
-          fieldById.set(String(f.id), { type: f.type, options, readonly: isReadonly })
-          continue
-        }
-        if (f.type === 'link') {
-          fieldById.set(String(f.id), { type: f.type, readonly: isReadonly, link: parseLinkFieldConfig(f.property) })
-          continue
-        }
-        fieldById.set(String(f.id), { type: f.type, readonly: isReadonly })
-      }
+      const visiblePropertyFields = filterVisiblePropertyFields(fields)
+      const visiblePropertyFieldIds = new Set(visiblePropertyFields.map((field) => field.id))
+      const attachmentFields = visiblePropertyFields.filter((field) => field.type === 'attachment')
+      const fieldById = buildFieldMutationGuardMap(fields)
 
       const changesByRecord = new Map<string, typeof parsed.data.changes>()
       for (const change of parsed.data.changes) {
@@ -4773,8 +4838,15 @@ export function univerMetaRouter(): Router {
             })
           }
 
+          if (field.hidden) {
+            return res.status(403).json({
+              ok: false,
+              error: { code: 'FIELD_HIDDEN', message: `Field is hidden: ${change.fieldId}` },
+            })
+          }
+
           // P0.3: Field-level readonly permission check
-          if (field.readonly === true) {
+          if (field.readOnly === true) {
             return res.status(403).json({
               ok: false,
               error: { code: 'FIELD_READONLY', message: `Field is readonly: ${change.fieldId}` },
@@ -4983,7 +5055,7 @@ export function univerMetaRouter(): Router {
 
       let computedRecords: Array<{ recordId: string; data: Record<string, unknown> }> | undefined
       let updatedRowsForSummaries: UniverMetaRecord[] = []
-      const computedFieldIds = fields.filter((f) => f.type === 'lookup' || f.type === 'rollup')
+      const computedFieldIds = visiblePropertyFields.filter((f) => f.type === 'lookup' || f.type === 'rollup')
       if (updates.length > 0 && (computedFieldIds.length > 0 || attachmentFields.length > 0)) {
         const recordIds = updates.map((u) => u.recordId)
         const recordRes = await pool.query(
@@ -5014,11 +5086,14 @@ export function univerMetaRouter(): Router {
           relationalLinkFields,
           linkValuesByRecord,
         )
+        for (const row of rows) {
+          row.data = filterRecordDataByFieldIds(row.data, visiblePropertyFieldIds)
+        }
 
         if (computedFieldIds.length > 0) {
           computedRecords = rows.map((row) => ({
             recordId: row.id,
-            data: extractLookupRollupData(fields, row.data),
+            data: extractLookupRollupData(visiblePropertyFields, row.data),
           }))
         }
       }
@@ -5031,35 +5106,41 @@ export function univerMetaRouter(): Router {
         : []
       const sameSheetRelated = relatedRecords
         .filter((record) => record.sheetId === sheetId)
-        .map((record) => ({ recordId: record.recordId, data: record.data }))
+        .map((record) => ({ recordId: record.recordId, data: filterRecordDataByFieldIds(record.data, visiblePropertyFieldIds) }))
       const crossSheetRelated = relatedRecords.filter((record) => record.sheetId !== sheetId)
       const mergedRecords = mergeComputedRecords(computedRecords, sameSheetRelated)
       const relationalLinkFields = fields
         .map((field) => (field.type === 'link' ? { fieldId: field.id, cfg: parseLinkFieldConfig(field.property) } : null))
         .filter((value): value is RelationalLinkField => !!value && !!value.cfg)
       const patchLinkSummaries = relationalLinkFields.length > 0 && updates.length > 0
-        ? serializeLinkSummaryMap(
-            await buildLinkSummaries(
-              pool.query.bind(pool),
-              updates.map((update) => ({ id: update.recordId, version: 0, data: {} })),
-              relationalLinkFields,
-              await loadLinkValuesByRecord(
+        ? filterRecordFieldSummaryMap(
+            serializeLinkSummaryMap(
+              await buildLinkSummaries(
                 pool.query.bind(pool),
-                updates.map((update) => update.recordId),
+                updates.map((update) => ({ id: update.recordId, version: 0, data: {} })),
                 relationalLinkFields,
+                await loadLinkValuesByRecord(
+                  pool.query.bind(pool),
+                  updates.map((update) => update.recordId),
+                  relationalLinkFields,
+                ),
               ),
             ),
+            visiblePropertyFieldIds,
           )
         : undefined
       const patchAttachmentSummaries = attachmentFields.length > 0 && updatedRowsForSummaries.length > 0
-        ? serializeAttachmentSummaryMap(
-            await buildAttachmentSummaries(
-              pool.query.bind(pool),
-              req,
-              sheetId,
-              updatedRowsForSummaries,
-              attachmentFields,
+        ? filterRecordFieldSummaryMap(
+            serializeAttachmentSummaryMap(
+              await buildAttachmentSummaries(
+                pool.query.bind(pool),
+                req,
+                sheetId,
+                updatedRowsForSummaries,
+                attachmentFields,
+              ),
             ),
+            visiblePropertyFieldIds,
           )
         : undefined
 
