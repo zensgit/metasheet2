@@ -123,6 +123,55 @@ describe('useMultitableComments', () => {
     expect(state.comments.value[0].resolved).toBe(true)
   })
 
+  it('updates comments in-place', async () => {
+    const fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      ok: true,
+      data: {
+        comment: {
+          id: 'c1',
+          spreadsheetId: 's1',
+          rowId: 'r1',
+          mentions: ['user_2'],
+          authorId: 'u1',
+          content: 'edited',
+          resolved: false,
+          createdAt: '2026-01-01',
+          updatedAt: '2026-01-02',
+        },
+      },
+    }), { status: 200 }))
+    ;(client as any).fetch = fetch
+    const state = useMultitableComments(client)
+    state.comments.value = [{ id: 'c1', containerId: 's1', targetId: 'r1', fieldId: null, mentions: [], authorId: 'u1', content: 'hello', resolved: false, createdAt: '2026-01-01' }]
+
+    await state.updateComment('c1', { content: 'edited', mentions: ['user_2'] })
+
+    expect(fetch).toHaveBeenCalledWith('/api/comments/c1', expect.objectContaining({
+      method: 'PATCH',
+      body: JSON.stringify({ content: 'edited', mentions: ['user_2'] }),
+    }))
+    expect(state.comments.value[0]).toMatchObject({
+      id: 'c1',
+      content: 'edited',
+      mentions: ['user_2'],
+      updatedAt: '2026-01-02',
+    })
+  })
+
+  it('removes deleted comments locally', async () => {
+    ;(client as any).fetch = vi.fn().mockResolvedValue(new Response(null, { status: 204 }))
+    const state = useMultitableComments(client)
+    state.comments.value = [
+      { id: 'c1', containerId: 's1', targetId: 'r1', fieldId: null, mentions: [], authorId: 'u1', content: 'hello', resolved: false, createdAt: '2026-01-01' },
+      { id: 'c2', containerId: 's1', targetId: 'r1', fieldId: null, mentions: [], authorId: 'u2', content: 'reply', resolved: false, createdAt: '2026-01-01', parentId: 'c1' },
+    ]
+
+    await state.deleteComment('c2')
+
+    expect(state.comments.value).toHaveLength(1)
+    expect(state.comments.value[0].id).toBe('c1')
+  })
+
   it('rethrows add comment errors while keeping draft state in caller', async () => {
     ;(client as any).fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({ ok: false, error: { message: 'comment failed' } }), { status: 500 }))
     const state = useMultitableComments(client)

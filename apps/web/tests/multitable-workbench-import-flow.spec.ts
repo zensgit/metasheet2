@@ -62,9 +62,13 @@ vi.mock('../src/multitable/composables/useMultitableComments', () => ({
     loading: ref(false),
     submitting: ref(false),
     resolvingIds: ref<string[]>([]),
+    updatingIds: ref<string[]>([]),
+    deletingIds: ref<string[]>([]),
     error: ref<string | null>(null),
     loadComments: vi.fn(),
     addComment: vi.fn(),
+    updateComment: vi.fn(),
+    deleteComment: vi.fn(),
     resolveComment: vi.fn(),
   }),
 }))

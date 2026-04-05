@@ -19,6 +19,27 @@ export class CommentValidationError extends Error {
   }
 }
 
+export class CommentNotFoundError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'CommentNotFoundError'
+  }
+}
+
+export class CommentAccessError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'CommentAccessError'
+  }
+}
+
+export class CommentConflictError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'CommentConflictError'
+  }
+}
+
 export interface Comment {
   id: string
   spreadsheetId: string
@@ -79,7 +100,7 @@ type MentionGroupedCountRow = {
 }
 
 type CommentActivityPayload = {
-  kind: 'created' | 'resolved'
+  kind: 'created' | 'updated' | 'resolved' | 'deleted'
   spreadsheetId: string
   rowId: string
   fieldId?: string
@@ -94,6 +115,73 @@ export class CommentService {
     private collabService: CollabService,
     private logger: ILogger,
   ) {}
+
+  async updateComment(commentId: string, userId: string, data: {
+    content: string
+    mentions?: string[]
+  }): Promise<Comment> {
+    const existing = await this.getRequiredCommentRow(commentId)
+    const normalizedUserId = this.normalizeUserId(userId)
+    this.assertCommentAuthor(existing, normalizedUserId, 'Only the author can edit this comment')
+    if (existing.resolved) {
+      throw new CommentConflictError('Resolved comments cannot be edited')
+    }
+
+    const previousMentions = this.parseMentionList(existing.mentions)
+    const mentions = this.normalizeMentions(data.mentions ?? this.parseMentions(data.content))
+
+    await db
+      .updateTable('meta_comments')
+      .set({
+        content: data.content,
+        mentions: JSON.stringify(mentions),
+        updated_at: nowTimestamp(),
+      })
+      .where('id', '=', commentId)
+      .execute()
+
+    const comment = await this.getComment(commentId)
+    if (!comment) {
+      throw new Error('Updated comment could not be reloaded')
+    }
+
+    this.publishCommentUpdated(comment, normalizedUserId)
+
+    for (const mentionUserId of mentions) {
+      if (!mentionUserId || mentionUserId === normalizedUserId || previousMentions.includes(mentionUserId)) continue
+      this.collabService.sendTo(mentionUserId, 'comment:mention', {
+        spreadsheetId: comment.spreadsheetId,
+        rowId: comment.rowId,
+        fieldId: comment.fieldId,
+        comment,
+      })
+    }
+
+    return comment
+  }
+
+  async deleteComment(commentId: string, userId: string): Promise<void> {
+    const existing = await this.getRequiredCommentRow(commentId)
+    const normalizedUserId = this.normalizeUserId(userId)
+    this.assertCommentAuthor(existing, normalizedUserId, 'Only the author can delete this comment')
+
+    const childComment = await db
+      .selectFrom('meta_comments')
+      .select('id')
+      .where('parent_id', '=', commentId)
+      .executeTakeFirst()
+
+    if (childComment) {
+      throw new CommentConflictError('Comments with replies cannot be deleted')
+    }
+
+    await db.transaction().execute(async (trx) => {
+      await trx.deleteFrom('meta_comment_reads').where('comment_id', '=', commentId).execute()
+      await trx.deleteFrom('meta_comments').where('id', '=', commentId).execute()
+    })
+
+    this.publishCommentDeleted(existing, normalizedUserId)
+  }
 
   async createComment(data: {
     spreadsheetId: string
@@ -587,6 +675,96 @@ export class CommentService {
         } satisfies CommentActivityPayload,
       )
     }
+  }
+
+  private normalizeUserId(userId: string): string {
+    const normalized = userId.trim()
+    if (!normalized) {
+      throw new CommentAccessError('Authenticated user required')
+    }
+    return normalized
+  }
+
+  private async getRequiredCommentRow(commentId: string): Promise<CommentRow> {
+    const row = await db
+      .selectFrom('meta_comments')
+      .selectAll()
+      .where('id', '=', commentId)
+      .executeTakeFirst()
+
+    if (!row) {
+      throw new CommentNotFoundError('Comment not found')
+    }
+
+    return row
+  }
+
+  private assertCommentAuthor(row: Pick<CommentRow, 'author_id'>, userId: string, message: string): void {
+    if (row.author_id !== userId) {
+      throw new CommentAccessError(message)
+    }
+  }
+
+  private publishCommentUpdated(comment: Comment, authorId: string): void {
+    const payload = {
+      spreadsheetId: comment.spreadsheetId,
+      rowId: comment.rowId,
+      fieldId: comment.fieldId,
+      comment,
+    }
+    this.collabService.broadcastTo(
+      buildCommentRecordRoom({ spreadsheetId: comment.spreadsheetId, rowId: comment.rowId }),
+      'comment:updated',
+      payload,
+    )
+    this.collabService.broadcastTo(
+      buildCommentSheetRoom({ spreadsheetId: comment.spreadsheetId }),
+      'comment:updated',
+      payload,
+    )
+    this.collabService.broadcastTo(
+      buildCommentInboxRoom(),
+      'comment:activity',
+      {
+        kind: 'updated',
+        spreadsheetId: comment.spreadsheetId,
+        rowId: comment.rowId,
+        fieldId: comment.fieldId,
+        commentId: comment.id,
+        authorId,
+      } satisfies CommentActivityPayload,
+    )
+  }
+
+  private publishCommentDeleted(row: CommentRow, authorId: string): void {
+    const payload = {
+      spreadsheetId: row.spreadsheet_id,
+      rowId: row.row_id,
+      fieldId: row.field_id ?? undefined,
+      commentId: row.id,
+    }
+    this.collabService.broadcastTo(
+      buildCommentRecordRoom({ spreadsheetId: row.spreadsheet_id, rowId: row.row_id }),
+      'comment:deleted',
+      payload,
+    )
+    this.collabService.broadcastTo(
+      buildCommentSheetRoom({ spreadsheetId: row.spreadsheet_id }),
+      'comment:deleted',
+      payload,
+    )
+    this.collabService.broadcastTo(
+      buildCommentInboxRoom(),
+      'comment:activity',
+      {
+        kind: 'deleted',
+        spreadsheetId: row.spreadsheet_id,
+        rowId: row.row_id,
+        fieldId: row.field_id ?? undefined,
+        commentId: row.id,
+        authorId,
+      } satisfies CommentActivityPayload,
+    )
   }
 
   private async getComment(id: string): Promise<Comment | undefined> {

@@ -11,6 +11,8 @@ export function useMultitableComments(client?: MultitableApiClient) {
   const error = ref<string | null>(null)
   const submitting = ref(false)
   const resolvingIds = ref<string[]>([])
+  const updatingIds = ref<string[]>([])
+  const deletingIds = ref<string[]>([])
 
   async function loadComments(params: CommentsTarget) {
     loading.value = true
@@ -57,9 +59,44 @@ export function useMultitableComments(client?: MultitableApiClient) {
     }
   }
 
+  async function updateComment(commentId: string, input: { content: string; mentions?: string[] }) {
+    error.value = null
+    if (!updatingIds.value.includes(commentId)) {
+      updatingIds.value = [...updatingIds.value, commentId]
+    }
+    try {
+      const data = await api.updateComment(commentId, input)
+      if (data.comment) upsertComment(data.comment)
+      return data.comment ?? null
+    } catch (e: any) {
+      error.value = e.message ?? 'Failed to update comment'
+      throw e
+    } finally {
+      updatingIds.value = updatingIds.value.filter((id) => id !== commentId)
+    }
+  }
+
+  async function deleteComment(commentId: string) {
+    error.value = null
+    if (!deletingIds.value.includes(commentId)) {
+      deletingIds.value = [...deletingIds.value, commentId]
+    }
+    try {
+      await api.deleteComment(commentId)
+      applyDeletedComment(commentId)
+    } catch (e: any) {
+      error.value = e.message ?? 'Failed to delete comment'
+      throw e
+    } finally {
+      deletingIds.value = deletingIds.value.filter((id) => id !== commentId)
+    }
+  }
+
   function clearComments() {
     comments.value = []
     error.value = null
+    updatingIds.value = []
+    deletingIds.value = []
   }
 
   function upsertComment(comment: MultitableComment) {
@@ -78,17 +115,31 @@ export function useMultitableComments(client?: MultitableApiClient) {
     }
   }
 
+  function applyUpdatedComment(comment: MultitableComment) {
+    upsertComment(comment)
+  }
+
+  function applyDeletedComment(commentId: string) {
+    comments.value = comments.value.filter((item) => item.id !== commentId)
+  }
+
   return {
     comments,
     loading,
     error,
     submitting,
     resolvingIds,
+    updatingIds,
+    deletingIds,
     loadComments,
     addComment,
+    updateComment,
+    deleteComment,
     resolveComment,
     clearComments,
     upsertComment,
     applyResolvedComment,
+    applyUpdatedComment,
+    applyDeletedComment,
   }
 }

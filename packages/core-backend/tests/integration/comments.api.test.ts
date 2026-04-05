@@ -293,6 +293,120 @@ describe('Comments API', () => {
     expect(resolvedListJson.data.items.some((item: any) => item.id === comment.id)).toBe(true)
   })
 
+  it('updates authored comments and only deletes leaf comments', async () => {
+    if (!baseUrl) return
+
+    const ts = Date.now()
+    const baseId = `base_comments_edit_${ts}`.slice(0, 50)
+    const spreadsheetId = `sheet_comments_edit_${ts}`.slice(0, 50)
+    const viewId = `view_comments_edit_${ts}`.slice(0, 50)
+    const rowId = `rec_comments_edit_${ts}`.slice(0, 50)
+    const pool = poolManager.get()
+
+    await pool.query('INSERT INTO meta_bases (id, name) VALUES ($1, $2)', [baseId, 'Comments Edit Base'])
+    createdBaseIds.push(baseId)
+    await pool.query('INSERT INTO meta_sheets (id, base_id, name) VALUES ($1, $2, $3)', [
+      spreadsheetId,
+      baseId,
+      'Comments Edit Sheet',
+    ])
+    createdSheetIds.push(spreadsheetId)
+    await pool.query('INSERT INTO meta_views (id, sheet_id, name, type) VALUES ($1, $2, $3, $4)', [
+      viewId,
+      spreadsheetId,
+      'Edit Comments',
+      'grid',
+    ])
+    createdViewIds.push(viewId)
+
+    const authorToken = (await (await fetch(`${baseUrl}/api/auth/dev-token?userId=user_edit_author`)).json()).token as string
+    const otherToken = (await (await fetch(`${baseUrl}/api/auth/dev-token?userId=user_edit_other`)).json()).token as string
+
+    const rootRes = await fetch(`${baseUrl}/api/comments`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${authorToken}`,
+      },
+      body: JSON.stringify({
+        spreadsheetId,
+        rowId,
+        fieldId: 'fld_note',
+        content: 'Root @[Reviewer](user_edit_other)',
+        mentions: ['user_edit_other'],
+      }),
+    })
+    expect(rootRes.status).toBe(201)
+    const rootComment = (await rootRes.json()).data?.comment
+    createdCommentIds.push(rootComment.id)
+
+    const patchRes = await fetch(`${baseUrl}/api/comments/${rootComment.id}`, {
+      method: 'PATCH',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${authorToken}`,
+      },
+      body: JSON.stringify({
+        content: 'Edited @[Reviewer](user_edit_other)',
+        mentions: ['user_edit_other'],
+      }),
+    })
+    expect(patchRes.status).toBe(200)
+    const patchJson = await patchRes.json()
+    expect(patchJson.data.comment.content).toBe('Edited @[Reviewer](user_edit_other)')
+    expect(patchJson.data.comment.mentions).toEqual(['user_edit_other'])
+    expect(typeof patchJson.data.comment.updatedAt).toBe('string')
+
+    const forbiddenPatchRes = await fetch(`${baseUrl}/api/comments/${rootComment.id}`, {
+      method: 'PATCH',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${otherToken}`,
+      },
+      body: JSON.stringify({
+        content: 'Hijack',
+      }),
+    })
+    expect(forbiddenPatchRes.status).toBe(403)
+
+    const replyRes = await fetch(`${baseUrl}/api/comments`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${otherToken}`,
+      },
+      body: JSON.stringify({
+        spreadsheetId,
+        rowId,
+        parentId: rootComment.id,
+        content: 'Reply',
+      }),
+    })
+    expect(replyRes.status).toBe(201)
+    const replyComment = (await replyRes.json()).data?.comment
+    createdCommentIds.push(replyComment.id)
+
+    const conflictDeleteRes = await fetch(`${baseUrl}/api/comments/${rootComment.id}`, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${authorToken}` },
+    })
+    expect(conflictDeleteRes.status).toBe(409)
+
+    const deleteReplyRes = await fetch(`${baseUrl}/api/comments/${replyComment.id}`, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${otherToken}` },
+    })
+    expect(deleteReplyRes.status).toBe(204)
+
+    const listAfterDeleteRes = await fetch(`${baseUrl}/api/comments?spreadsheetId=${spreadsheetId}`, {
+      headers: { Authorization: `Bearer ${authorToken}` },
+    })
+    expect(listAfterDeleteRes.status).toBe(200)
+    const listAfterDeleteJson = await listAfterDeleteRes.json()
+    expect(listAfterDeleteJson.data.items.some((item: any) => item.id === replyComment.id)).toBe(false)
+    expect(listAfterDeleteJson.data.items.some((item: any) => item.id === rootComment.id)).toBe(true)
+  })
+
   it('returns mention-aware unresolved comment summaries for the current requester', async () => {
     if (!baseUrl) return
 
@@ -746,6 +860,36 @@ describe('Comments API', () => {
       authorId: 'user_ws_author',
     })
 
+    const updatedActivity = new Promise<any>((resolve, reject) => {
+      const t = setTimeout(() => reject(new Error('update activity timeout')), 3000)
+      socket.on('comment:activity', (payload: any) => {
+        if (payload?.kind !== 'updated' || payload?.commentId !== createdComment.id) return
+        clearTimeout(t)
+        resolve(payload)
+      })
+    })
+
+    const updateRes = await fetch(`${baseUrl}/api/comments/${createdComment.id}`, {
+      method: 'PATCH',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${authorToken}`,
+      },
+      body: JSON.stringify({
+        content: 'Realtime inbox activity edited',
+      }),
+    })
+    expect(updateRes.status).toBe(200)
+
+    await expect(updatedActivity).resolves.toEqual({
+      kind: 'updated',
+      spreadsheetId,
+      rowId,
+      fieldId: 'fld_note',
+      commentId: createdComment.id,
+      authorId: 'user_ws_author',
+    })
+
     const resolvedActivity = new Promise<any>((resolve, reject) => {
       const t = setTimeout(() => reject(new Error('resolve activity timeout')), 3000)
       socket.on('comment:activity', (payload: any) => {
@@ -767,6 +911,46 @@ describe('Comments API', () => {
       rowId,
       fieldId: 'fld_note',
       commentId: createdComment.id,
+    })
+
+    const leafRes = await fetch(`${baseUrl}/api/comments`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${authorToken}`,
+      },
+      body: JSON.stringify({
+        spreadsheetId,
+        rowId,
+        content: 'Delete me',
+      }),
+    })
+    expect(leafRes.status).toBe(201)
+    const leafJson = await leafRes.json()
+    const leafComment = leafJson.data.comment as { id: string }
+    createdCommentIds.push(leafComment.id)
+
+    const deletedActivity = new Promise<any>((resolve, reject) => {
+      const t = setTimeout(() => reject(new Error('delete activity timeout')), 3000)
+      socket.on('comment:activity', (payload: any) => {
+        if (payload?.kind !== 'deleted' || payload?.commentId !== leafComment.id) return
+        clearTimeout(t)
+        resolve(payload)
+      })
+    })
+
+    const deleteRes = await fetch(`${baseUrl}/api/comments/${leafComment.id}`, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${authorToken}` },
+    })
+    expect(deleteRes.status).toBe(204)
+
+    await expect(deletedActivity).resolves.toEqual({
+      kind: 'deleted',
+      spreadsheetId,
+      rowId,
+      commentId: leafComment.id,
+      authorId: 'user_ws_author',
     })
 
     socket.close()

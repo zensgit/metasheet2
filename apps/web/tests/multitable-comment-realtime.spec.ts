@@ -106,11 +106,35 @@ describe('useMultitableCommentRealtime', () => {
     })
     await flushUi(2)
     expect(reloadSelectedRecordComments).toHaveBeenCalledTimes(2)
-    expect(refreshUnreadCount).toHaveBeenCalledTimes(1)
+    expect(refreshUnreadCount).toHaveBeenCalledTimes(2)
 
-    handlers.get('comment:resolved')?.({ commentId: 'c2' })
+    handlers.get('comment:resolved')?.({ commentId: 'c2', rowId: 'rec_1', authorId: 'user_other' })
     await flushUi(2)
     expect(reloadSelectedRecordComments).toHaveBeenCalledTimes(3)
+
+    handlers.get('comment:updated')?.({
+      comment: {
+        id: 'c3',
+        spreadsheetId: 'sheet_ops',
+        rowId: 'rec_1',
+        authorId: 'user_other',
+        content: 'edited',
+        resolved: false,
+        createdAt: '2026-04-04T00:02:00.000Z',
+      },
+    })
+    await flushUi(2)
+    expect(reloadSelectedRecordComments).toHaveBeenCalledTimes(4)
+    expect(refreshUnreadCount).toHaveBeenCalledTimes(4)
+
+    handlers.get('comment:deleted')?.({
+      commentId: 'c3',
+      rowId: 'rec_1',
+      authorId: 'user_other',
+    })
+    await flushUi(2)
+    expect(reloadSelectedRecordComments).toHaveBeenCalledTimes(5)
+    expect(refreshUnreadCount).toHaveBeenCalledTimes(5)
 
     sheetId.value = 'sheet_finance'
     await flushUi(4)

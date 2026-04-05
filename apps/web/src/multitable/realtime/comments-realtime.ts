@@ -7,6 +7,11 @@ export type MultitableCommentCreatedEvent = {
   comment?: Partial<MultitableComment> | null
 }
 
+export type MultitableCommentUpdatedEvent = {
+  spreadsheetId?: string
+  comment?: Partial<MultitableComment> | null
+}
+
 export type MultitableCommentResolvedEvent = {
   spreadsheetId?: string
   rowId?: string | null
@@ -14,9 +19,18 @@ export type MultitableCommentResolvedEvent = {
   commentId?: string | null
 }
 
+export type MultitableCommentDeletedEvent = {
+  spreadsheetId?: string
+  rowId?: string | null
+  fieldId?: string | null
+  commentId?: string | null
+}
+
 export type MultitableCommentsRealtimeHandlers = {
-  onCommentCreated: (payload: MultitableCommentCreatedEvent) => void
-  onCommentResolved: (payload: MultitableCommentResolvedEvent) => void
+  onCommentCreated?: (payload: MultitableCommentCreatedEvent) => void
+  onCommentUpdated?: (payload: MultitableCommentUpdatedEvent) => void
+  onCommentResolved?: (payload: MultitableCommentResolvedEvent) => void
+  onCommentDeleted?: (payload: MultitableCommentDeletedEvent) => void
 }
 
 export type MultitableCommentsRealtimeScope = {
@@ -72,8 +86,10 @@ export const subscribeToMultitableCommentSheetRealtime: MultitableCommentSheetRe
   }
 
   socket.on('connect', handleConnect)
-  socket.on('comment:created', handlers.onCommentCreated)
-  socket.on('comment:resolved', handlers.onCommentResolved)
+  if (handlers.onCommentCreated) socket.on('comment:created', handlers.onCommentCreated)
+  if (handlers.onCommentUpdated) socket.on('comment:updated', handlers.onCommentUpdated)
+  if (handlers.onCommentResolved) socket.on('comment:resolved', handlers.onCommentResolved)
+  if (handlers.onCommentDeleted) socket.on('comment:deleted', handlers.onCommentDeleted)
   if (socket.connected) handleConnect()
 
   return () => {
@@ -81,8 +97,10 @@ export const subscribeToMultitableCommentSheetRealtime: MultitableCommentSheetRe
       socket.emit('leave-comment-sheet', { spreadsheetId })
     }
     socket.off('connect', handleConnect)
-    socket.off('comment:created', handlers.onCommentCreated)
-    socket.off('comment:resolved', handlers.onCommentResolved)
+    if (handlers.onCommentCreated) socket.off('comment:created', handlers.onCommentCreated)
+    if (handlers.onCommentUpdated) socket.off('comment:updated', handlers.onCommentUpdated)
+    if (handlers.onCommentResolved) socket.off('comment:resolved', handlers.onCommentResolved)
+    if (handlers.onCommentDeleted) socket.off('comment:deleted', handlers.onCommentDeleted)
     socket.disconnect()
   }
 }
@@ -99,8 +117,10 @@ export const subscribeToMultitableCommentsRealtime: MultitableCommentsRealtimeSu
   }
 
   socket.on('connect', handleConnect)
-  socket.on('comment:created', handlers.onCommentCreated)
-  socket.on('comment:resolved', handlers.onCommentResolved)
+  if (handlers.onCommentCreated) socket.on('comment:created', handlers.onCommentCreated)
+  if (handlers.onCommentUpdated) socket.on('comment:updated', handlers.onCommentUpdated)
+  if (handlers.onCommentResolved) socket.on('comment:resolved', handlers.onCommentResolved)
+  if (handlers.onCommentDeleted) socket.on('comment:deleted', handlers.onCommentDeleted)
   if (socket.connected) handleConnect()
 
   return () => {
@@ -108,8 +128,10 @@ export const subscribeToMultitableCommentsRealtime: MultitableCommentsRealtimeSu
       emitRoomSubscription(socket, 'leave-comment-record', scope)
     }
     socket.off('connect', handleConnect)
-    socket.off('comment:created', handlers.onCommentCreated)
-    socket.off('comment:resolved', handlers.onCommentResolved)
+    if (handlers.onCommentCreated) socket.off('comment:created', handlers.onCommentCreated)
+    if (handlers.onCommentUpdated) socket.off('comment:updated', handlers.onCommentUpdated)
+    if (handlers.onCommentResolved) socket.off('comment:resolved', handlers.onCommentResolved)
+    if (handlers.onCommentDeleted) socket.off('comment:deleted', handlers.onCommentDeleted)
     socket.disconnect()
   }
 }

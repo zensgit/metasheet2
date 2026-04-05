@@ -141,6 +141,11 @@ export interface CommentCreateInput {
     mentions?: string[];
 }
 
+export interface CommentUpdateInput {
+    content: string;
+    mentions?: string[];
+}
+
 export interface CommentRecord {
     id: string;
     spreadsheetId: string;
@@ -197,6 +202,8 @@ export interface CommentMentionCandidate {
 
 export interface ICommentService {
     createComment(data: CommentCreateInput): Promise<CommentRecord>;
+    updateComment(commentId: string, userId: string, data: CommentUpdateInput): Promise<CommentRecord>;
+    deleteComment(commentId: string, userId: string): Promise<void>;
     getComments(spreadsheetId: string, options?: CommentQueryOptions): Promise<{ items: CommentRecord[]; total: number }>;
     listMentionCandidates(
       spreadsheetId: string,

@@ -4,6 +4,8 @@ import { MultitableApiClient, multitableClient, normalizeMultitableComment } fro
 import {
   subscribeToMultitableCommentsRealtime,
   type MultitableCommentCreatedEvent,
+  type MultitableCommentDeletedEvent,
+  type MultitableCommentUpdatedEvent,
   type MultitableCommentResolvedEvent,
   type MultitableCommentsRealtimeScope,
   type MultitableCommentsRealtimeSubscribe,
@@ -85,7 +87,9 @@ export function useMultitableCommentPresence(client?: MultitableApiClient, optio
     stopRealtimeSubscription()
     unsubscribeRealtime = subscribeRealtime(realtimeScope, {
       onCommentCreated: handleRealtimeCreated,
+      onCommentUpdated: handleRealtimeUpdated,
       onCommentResolved: handleRealtimeResolved,
+      onCommentDeleted: handleRealtimeDeleted,
     })
     activeRealtimeScopeKey = nextScopeKey
   }
@@ -173,6 +177,23 @@ export function useMultitableCommentPresence(client?: MultitableApiClient, optio
     }
 
     presenceByRecordId.value = nextPresence
+    void refreshActivePresence()
+  }
+
+  function handleRealtimeUpdated(payload: MultitableCommentUpdatedEvent) {
+    const comment = payload.comment && typeof payload.comment === 'object'
+      ? normalizeMultitableComment(payload.comment as Partial<MultitableComment>)
+      : null
+    if (!comment || !activeScope || comment.containerId !== activeScope.containerId || !activeTargetIdSet.has(comment.targetId)) return
+    void refreshActivePresence()
+  }
+
+  function handleRealtimeDeleted(payload: MultitableCommentDeletedEvent) {
+    const spreadsheetId = typeof payload.spreadsheetId === 'string' ? payload.spreadsheetId : null
+    const rowId = typeof payload.rowId === 'string' ? payload.rowId : null
+    if (!activeScope || !rowId) return
+    if (spreadsheetId && spreadsheetId !== activeScope.containerId) return
+    if (!activeTargetIdSet.has(rowId)) return
     void refreshActivePresence()
   }
 

@@ -184,10 +184,15 @@
         :target-field-id="activeCommentFieldId"
         :scope-label="commentsScopeLabel"
         :reply-to-comment-id="selectedReplyCommentId"
+        :editing-comment-id="selectedEditingCommentId"
         :draft="commentDraft" :submitting="commentsState.submitting.value" :error="commentsState.error.value"
         :resolving-ids="commentsState.resolvingIds.value"
+        :updating-ids="commentsState.updatingIds.value"
+        :deleting-ids="commentsState.deletingIds.value"
+        :current-user-id="currentUserId"
         :mention-suggestions="commentMentionSuggestions"
-        @close="onCloseComments" @submit="onSubmitComment" @resolve="onResolveComment" @reply="onReplyToComment" @cancel-reply="onCancelCommentReply" @update:draft="commentDraft = $event"
+        :composer-initial-mentions="commentComposerInitialMentions"
+        @close="onCloseComments" @submit="onSubmitComment" @resolve="onResolveComment" @reply="onReplyToComment" @edit="onEditComment" @delete="onDeleteComment" @cancel-reply="onCancelCommentReply" @cancel-edit="onCancelCommentEdit" @update:draft="commentDraft = $event"
       />
     </div>
     <div v-if="showShortcuts" class="mt-workbench__shortcuts-overlay" @click.self="showShortcuts = false">
@@ -241,6 +246,7 @@
 <script setup lang="ts">
 import { ref, computed, nextTick, onMounted, onBeforeUnmount, watch } from 'vue'
 import { useRouter } from 'vue-router'
+import { useAuth } from '../../composables/useAuth'
 import type {
   LinkedRecordSummary,
   MetaAttachment,
@@ -308,6 +314,7 @@ const emit = defineEmits<{
 
 const role = ref<MultitableRole>(props.role ?? 'editor')
 const router = useRouter()
+const auth = useAuth()
 const workbench = useMultitableWorkbench({ initialBaseId: props.baseId, initialSheetId: props.sheetId, initialViewId: props.viewId })
 const capabilitySource = computed(() => workbench.capabilities.value ?? role.value)
 const caps = useMultitableCapabilities(capabilitySource)
@@ -324,6 +331,7 @@ const selectedRecordId = ref<string | null>(null)
 const showComments = ref(false)
 const selectedCommentFieldId = ref<string | null>(null)
 const selectedReplyCommentId = ref<string | null>(null)
+const selectedEditingCommentId = ref<string | null>(null)
 const showMentionPopover = ref(false)
 const linkPickerVisible = ref(false)
 const linkPickerField = ref<MetaField | null>(null)
@@ -335,6 +343,7 @@ const bases = ref<MetaBase[]>([])
 const activeBaseId = computed(() => workbench.activeBaseId.value)
 const toastRef = ref<InstanceType<typeof MetaToast> | null>(null)
 const commentDraft = ref('')
+const currentUserId = ref<string | null>(null)
 const commentMentionSuggestions = ref<MetaCommentMentionSuggestion[]>([])
 const commentMentionSuggestionsLoadedForSheetId = ref<string | null>(null)
 const searchText = ref('')
@@ -548,6 +557,14 @@ const selectedCommentField = computed<MetaField | null>(() => {
   return grid.fields.value.find((field) => field.id === fieldId) ?? null
 })
 const commentsScopeLabel = computed(() => selectedCommentField.value?.name ?? null)
+const activeEditingComment = computed(() => (
+  selectedEditingCommentId.value
+    ? commentsState.comments.value.find((comment) => comment.id === selectedEditingCommentId.value) ?? null
+    : null
+))
+const commentComposerInitialMentions = computed(() => (
+  activeEditingComment.value ? buildEditingMentionSuggestions(activeEditingComment.value) : []
+))
 const sheetPresenceLabel = computed(() => (
   sheetPresenceState.activeCollaboratorCount.value === 1 ? 'active collaborator' : 'active collaborators'
 ))
@@ -606,6 +623,49 @@ function pushUniqueIds(target: string[], ids: string[]) {
   for (const id of ids) {
     if (!target.includes(id)) target.push(id)
   }
+}
+
+function resetCommentInteractionState() {
+  selectedCommentFieldId.value = null
+  selectedReplyCommentId.value = null
+  selectedEditingCommentId.value = null
+  commentDraft.value = ''
+  highlightedCommentId.value = null
+}
+
+function parseCommentMentionTokens(content: string): MetaCommentMentionSuggestion[] {
+  const seen = new Set<string>()
+  const mentions: MetaCommentMentionSuggestion[] = []
+  for (const match of content.matchAll(/@\[([^\]]+)\]\(([^)]+)\)/g)) {
+    const label = match[1]?.trim()
+    const id = match[2]?.trim()
+    if (!label || !id || seen.has(id)) continue
+    seen.add(id)
+    mentions.push({ id, label })
+  }
+  return mentions
+}
+
+function formatCommentDraftContent(content: string): string {
+  return content.replace(/@\[([^\]]+)\]\(([^)]+)\)/g, (_match, label) => `@${label}`)
+}
+
+function buildEditingMentionSuggestions(comment: { content: string; mentions: string[] }): MetaCommentMentionSuggestion[] {
+  const byId = new Map<string, MetaCommentMentionSuggestion>()
+  for (const token of parseCommentMentionTokens(comment.content)) {
+    byId.set(token.id, token)
+  }
+  for (const suggestion of commentMentionSuggestions.value) {
+    if (byId.has(suggestion.id)) {
+      byId.set(suggestion.id, { ...suggestion })
+    }
+  }
+  for (const mentionId of comment.mentions) {
+    if (byId.has(mentionId)) continue
+    const suggestion = commentMentionSuggestions.value.find((item) => item.id === mentionId)
+    byId.set(mentionId, suggestion ? { ...suggestion } : { id: mentionId, label: mentionId })
+  }
+  return [...byId.values()]
 }
 
 function normalizeImportLookupKey(value: string): string {
@@ -868,9 +928,11 @@ async function selectRecord(recordId: string, opts?: { openComments?: boolean; h
   if (!opts?.openComments) {
     selectedCommentFieldId.value = null
     selectedReplyCommentId.value = null
+    selectedEditingCommentId.value = null
   } else {
     selectedCommentFieldId.value = opts.targetFieldId ?? null
     selectedReplyCommentId.value = null
+    selectedEditingCommentId.value = null
   }
   showComments.value = opts?.openComments === true
   await loadCommentsForRecord(recordId, {
@@ -1044,18 +1106,27 @@ async function onFormSubmit(data: Record<string, unknown>) {
 async function onSubmitComment(payload: { content: string; mentions: string[] }) {
   if (!selectedRecordCommentsScope.value) return
   try {
-    await commentsState.addComment({
-      ...selectedRecordCommentsScope.value,
-      content: payload.content,
-      mentions: payload.mentions,
-      targetFieldId: activeCommentFieldId.value ?? undefined,
-      parentId: selectedReplyCommentId.value ?? undefined,
-    })
+    if (selectedEditingCommentId.value) {
+      await commentsState.updateComment(selectedEditingCommentId.value, {
+        content: payload.content,
+        mentions: payload.mentions,
+      })
+      showSuccess('Comment updated')
+    } else {
+      await commentsState.addComment({
+        ...selectedRecordCommentsScope.value,
+        content: payload.content,
+        mentions: payload.mentions,
+        targetFieldId: activeCommentFieldId.value ?? undefined,
+        parentId: selectedReplyCommentId.value ?? undefined,
+      })
+      showSuccess('Comment added')
+    }
     commentDraft.value = ''
     selectedReplyCommentId.value = null
-    showSuccess('Comment added')
+    selectedEditingCommentId.value = null
   } catch (e: any) {
-    showError(commentsState.error.value ?? e.message ?? 'Failed to add comment')
+    showError(commentsState.error.value ?? e.message ?? (selectedEditingCommentId.value ? 'Failed to update comment' : 'Failed to add comment'))
   }
 }
 
@@ -1065,6 +1136,35 @@ async function onResolveComment(commentId: string) {
     showSuccess('Comment resolved')
   } catch (e: any) {
     showError(commentsState.error.value ?? e.message ?? 'Failed to resolve comment')
+  }
+}
+
+function onEditComment(commentId: string) {
+  const comment = commentsState.comments.value.find((item) => item.id === commentId)
+  if (!comment) return
+  selectedEditingCommentId.value = comment.id
+  selectedReplyCommentId.value = null
+  selectedCommentFieldId.value = comment.targetFieldId ?? comment.fieldId ?? null
+  commentDraft.value = formatCommentDraftContent(comment.content)
+  showComments.value = true
+}
+
+async function onDeleteComment(commentId: string) {
+  try {
+    await commentsState.deleteComment(commentId)
+    if (selectedEditingCommentId.value === commentId) {
+      selectedEditingCommentId.value = null
+      commentDraft.value = ''
+    }
+    if (selectedReplyCommentId.value === commentId) {
+      selectedReplyCommentId.value = null
+    }
+    if (highlightedCommentId.value === commentId) {
+      highlightedCommentId.value = null
+    }
+    showSuccess('Comment deleted')
+  } catch (e: any) {
+    showError(commentsState.error.value ?? e.message ?? 'Failed to delete comment')
   }
 }
 
@@ -1255,25 +1355,20 @@ function onCloseDrawer() {
   if (!confirmDiscardRecordChanges()) return
   selectedRecordId.value = null
   showComments.value = false
-  selectedCommentFieldId.value = null
-  selectedReplyCommentId.value = null
-  commentDraft.value = ''
-  highlightedCommentId.value = null
+  resetCommentInteractionState()
 }
 
 function onToggleComments() {
   if (showComments.value) {
     if (!confirmDiscardCommentDraft()) return
     showComments.value = false
-    selectedCommentFieldId.value = null
-    selectedReplyCommentId.value = null
-    commentDraft.value = ''
-    highlightedCommentId.value = null
+    resetCommentInteractionState()
     return
   }
   showComments.value = true
   selectedCommentFieldId.value = null
   selectedReplyCommentId.value = null
+  selectedEditingCommentId.value = null
   void commentInboxState.refreshUnreadCount().catch(() => undefined)
 }
 
@@ -1281,6 +1376,7 @@ function onToggleFieldComments(field: MetaField) {
   if (!selectedRecordId.value) return
   selectedCommentFieldId.value = field.id
   selectedReplyCommentId.value = null
+  selectedEditingCommentId.value = null
   showComments.value = true
   commentDraft.value = ''
   void loadCommentsForRecord(selectedRecordId.value, {
@@ -1292,6 +1388,7 @@ function onOpenRecordComments(recordId: string) {
   void selectRecord(recordId, { openComments: true }).then(() => {
     selectedCommentFieldId.value = null
     selectedReplyCommentId.value = null
+    selectedEditingCommentId.value = null
   })
 }
 
@@ -1299,11 +1396,13 @@ function onOpenGridFieldComments(payload: { recordId: string; fieldId: string })
   void selectRecord(payload.recordId, { openComments: true }).then(() => {
     selectedCommentFieldId.value = payload.fieldId
     selectedReplyCommentId.value = null
+    selectedEditingCommentId.value = null
   })
 }
 
 function onReplyToComment(commentId: string) {
   selectedReplyCommentId.value = commentId
+  selectedEditingCommentId.value = null
   showComments.value = true
 }
 
@@ -1311,13 +1410,15 @@ function onCancelCommentReply() {
   selectedReplyCommentId.value = null
 }
 
+function onCancelCommentEdit() {
+  selectedEditingCommentId.value = null
+  commentDraft.value = ''
+}
+
 function onCloseComments() {
   if (!confirmDiscardCommentDraft()) return
   showComments.value = false
-  selectedCommentFieldId.value = null
-  selectedReplyCommentId.value = null
-  commentDraft.value = ''
-  highlightedCommentId.value = null
+  resetCommentInteractionState()
 }
 
 function confirmDiscardContextChanges() {
@@ -1345,9 +1446,7 @@ function discardWorkbenchDraftsForExternalContextChange() {
   formErrorMessage.value = null
   formFieldErrors.value = {}
   showComments.value = false
-  selectedCommentFieldId.value = null
-  selectedReplyCommentId.value = null
-  highlightedCommentId.value = null
+  resetCommentInteractionState()
   selectedRecordId.value = null
   deepLinkedRecord.value = null
   deepLinkedRecordLinkSummaries.value = {}
@@ -1917,9 +2016,7 @@ function removeLocalRealtimeRecord(recordId: string): boolean {
   if (selectedRecordId.value === recordId) {
     selectedRecordId.value = null
     showComments.value = false
-    selectedCommentFieldId.value = null
-    selectedReplyCommentId.value = null
-    highlightedCommentId.value = null
+    resetCommentInteractionState()
     clearDeepLinkedRecordState()
     handled = true
   } else if (deepLinkedRecord.value?.id === recordId) {
@@ -2045,7 +2142,9 @@ watch(
     void ensureCommentMentionSuggestions(true)
     unsubscribeMentionRealtime = subscribeToMultitableCommentSheetRealtime(sheetId, {
       onCommentCreated: mentionInboxState.onRealtimeCommentCreated,
+      onCommentUpdated: mentionInboxState.onRealtimeCommentUpdated,
       onCommentResolved: mentionInboxState.onRealtimeCommentResolved,
+      onCommentDeleted: mentionInboxState.onRealtimeCommentDeleted,
     })
   },
   { immediate: true },
@@ -2098,6 +2197,9 @@ watch(
 
 onMounted(async () => {
   window.addEventListener('beforeunload', onBeforeUnload)
+  void auth.getCurrentUserId().then((userId) => {
+    currentUserId.value = userId
+  }).catch(() => undefined)
   try {
     await loadBases()
     if (workbench.activeBaseId.value) {
