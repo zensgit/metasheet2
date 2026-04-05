@@ -411,6 +411,33 @@ describe('useMultitableGrid', () => {
     expect(grid.error.value).toBeNull()
   })
 
+  it('rejects patchCell when scoped rowActions disallow edits', async () => {
+    const fetchFn = vi.fn(async (input: string) => {
+      if (!input.startsWith('/api/multitable/patch')) throw new Error(`Unexpected request: ${input}`)
+      return new Response(JSON.stringify({ ok: true, data: {} }), { status: 200 })
+    })
+
+    const grid = useMultitableGrid({
+      sheetId: ref(''),
+      viewId: ref(''),
+      client: new MultitableApiClient({ fetchFn }),
+    })
+
+    grid.fields.value = [{ id: 'f1', name: 'Title', type: 'string' }]
+    grid.rows.value = [{ id: 'r1', version: 1, data: { f1: 'before' } }]
+    grid.rowActions.value = {
+      canEdit: false,
+      canDelete: true,
+      canComment: true,
+    }
+
+    await grid.patchCell('r1', 'f1', 'patched', 1)
+
+    expect(fetchFn).not.toHaveBeenCalled()
+    expect(grid.rows.value[0].data.f1).toBe('before')
+    expect(grid.error.value).toBe('Record editing is not allowed for this row.')
+  })
+
   it('captures VERSION_CONFLICT state and preserves optimistic rollback', async () => {
     const fetchFn = vi.fn(async (input: string) => {
       if (!input.startsWith('/api/multitable/patch')) throw new Error(`Unexpected request: ${input}`)
@@ -446,6 +473,31 @@ describe('useMultitableGrid', () => {
       nextLinkSummaries: undefined,
     })
     expect(grid.error.value).toBe('Row changed elsewhere')
+  })
+
+  it('rejects deleteRecord when scoped rowActions disallow deletes', async () => {
+    const fetchFn = vi.fn(async (input: string) => {
+      if (!input.startsWith('/api/multitable/records/')) throw new Error(`Unexpected request: ${input}`)
+      return new Response(JSON.stringify({ ok: true, data: {} }), { status: 200 })
+    })
+
+    const grid = useMultitableGrid({
+      sheetId: ref(''),
+      viewId: ref(''),
+      client: new MultitableApiClient({ fetchFn }),
+    })
+
+    grid.rows.value = [{ id: 'r1', version: 1, data: { f1: 'before' } }]
+    grid.rowActions.value = {
+      canEdit: true,
+      canDelete: false,
+      canComment: true,
+    }
+
+    await expect(grid.deleteRecord('r1')).resolves.toBe(false)
+
+    expect(fetchFn).not.toHaveBeenCalled()
+    expect(grid.error.value).toBe('Record deletion is not allowed for this row.')
   })
 
   it('reloads and reapplies pending conflict edits', async () => {

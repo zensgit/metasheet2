@@ -297,7 +297,7 @@ vi.mock('../src/multitable/components/MetaRecordDrawer.vue', () => ({
       visible: { type: Boolean, default: false },
       record: { type: Object, default: null },
     },
-    emits: ['close', 'toggle-comments', 'comment-field', 'navigate'],
+    emits: ['close', 'toggle-comments', 'comment-field', 'navigate', 'delete', 'patch'],
     render() {
       if (!this.$props.visible) return null
       const recordId = (this.$props.record as { id?: string } | null)?.id ?? ''
@@ -333,6 +333,22 @@ vi.mock('../src/multitable/components/MetaRecordDrawer.vue', () => ({
             onClick: () => this.$emit('navigate', 'rec_2'),
           },
           'navigate-record',
+        ),
+        h(
+          'button',
+          {
+            'data-delete-record': 'true',
+            onClick: () => this.$emit('delete'),
+          },
+          'delete-record',
+        ),
+        h(
+          'button',
+          {
+            'data-patch-record': 'fld_title',
+            onClick: () => this.$emit('patch', 'fld_title', 'Patched title'),
+          },
+          'patch-record',
         ),
       ])
     },
@@ -531,7 +547,19 @@ vi.mock('../src/multitable/components/MetaViewManager.vue', () => ({
     },
   }),
 }))
-vi.mock('../src/multitable/components/MetaKanbanView.vue', () => ({ default: stubComponent('MetaKanbanView') }))
+vi.mock('../src/multitable/components/MetaKanbanView.vue', () => ({
+  default: defineComponent({
+    name: 'MetaKanbanView',
+    props: {
+      canEdit: { type: Boolean, default: false },
+    },
+    render() {
+      return h('div', {
+        'data-kanban-can-edit': String(this.$props.canEdit),
+      })
+    },
+  }),
+}))
 vi.mock('../src/multitable/components/MetaGalleryView.vue', () => ({
   default: defineComponent({
     name: 'MetaGalleryView',
@@ -565,10 +593,13 @@ vi.mock('../src/multitable/components/MetaTimelineView.vue', () => ({
     name: 'MetaTimelineView',
     props: {
       viewConfig: { type: Object, default: null },
+      canEdit: { type: Boolean, default: false },
     },
     emits: ['update-view-config', 'patch-dates'],
     render() {
-      return h('div', [
+      return h('div', {
+        'data-timeline-can-edit': String(this.$props.canEdit),
+      }, [
         h(
           'button',
           {
@@ -1350,6 +1381,28 @@ describe('MultitableWorkbench view wiring', () => {
     expect(gridMock.loadViewData).toHaveBeenCalled()
   })
 
+  it('passes scoped row edit gating into kanban and timeline views', async () => {
+    workbenchMock.views.value = [
+      { id: 'view_kanban', sheetId: 'sheet_orders', name: 'Kanban', type: 'kanban' },
+      { id: 'view_timeline', sheetId: 'sheet_orders', name: 'Timeline', type: 'timeline', config: { zoom: 'week' } },
+    ]
+    gridMock.rowActions.value = {
+      canEdit: false,
+      canDelete: true,
+      canComment: true,
+    }
+
+    mountWorkbench({ viewId: 'view_kanban' })
+    await flushUi()
+
+    expect(container!.querySelector('[data-kanban-can-edit]')?.getAttribute('data-kanban-can-edit')).toBe('false')
+
+    workbenchMock.activeViewId.value = 'view_timeline'
+    await flushUi()
+
+    expect(container!.querySelector('[data-timeline-can-edit]')?.getAttribute('data-timeline-can-edit')).toBe('false')
+  })
+
   it('patches timeline date updates through patchRecords and refreshes the active page', async () => {
     mountWorkbench({ viewId: 'view_timeline' })
     await flushUi()
@@ -1367,6 +1420,45 @@ describe('MultitableWorkbench view wiring', () => {
     })
     expect(gridMock.loadViewData).toHaveBeenCalled()
     expect(showSuccessSpy).toHaveBeenCalledWith('Timeline updated')
+  })
+
+  it('blocks timeline patch updates when scoped rowActions disallow edits', async () => {
+    gridMock.rowActions.value = {
+      canEdit: false,
+      canDelete: true,
+      canComment: true,
+    }
+
+    mountWorkbench({ viewId: 'view_timeline' })
+    await flushUi()
+
+    container!.querySelector<HTMLButtonElement>('[data-timeline-patch="true"]')!.click()
+    await flushUi()
+
+    expect(workbenchMock.client.patchRecords).not.toHaveBeenCalled()
+    expect(gridMock.loadViewData).not.toHaveBeenCalled()
+    expect(showErrorSpy).toHaveBeenCalledWith('Record editing is not allowed for this row.')
+  })
+
+  it('blocks form submit updates when scoped rowActions disallow edits', async () => {
+    workbenchMock.views.value = [
+      { id: 'view_form', sheetId: 'sheet_orders', name: 'Form', type: 'form' },
+    ]
+    workbenchMock.activeViewId.value = 'view_form'
+    gridMock.rowActions.value = {
+      canEdit: false,
+      canDelete: false,
+      canComment: true,
+    }
+
+    mountWorkbench({ viewId: 'view_form', recordId: 'rec_1' })
+    await flushUi()
+
+    container!.querySelector<HTMLButtonElement>('[data-form-submit="true"]')!.click()
+    await flushUi()
+
+    expect(workbenchMock.client.submitForm).not.toHaveBeenCalled()
+    expect(showErrorSpy).toHaveBeenCalledWith('Record editing is not allowed for this row.')
   })
 
   it('prompts before switching records when record-scoped drafts are present', async () => {

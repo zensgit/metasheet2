@@ -90,7 +90,7 @@
           :group-info="workbench.activeView.value?.groupInfo"
           :view-config="workbench.activeView.value?.config"
           :link-summaries="grid.linkSummaries.value" :attachment-summaries="grid.attachmentSummaries.value"
-          :can-create="caps.canCreateRecord.value" :can-edit="caps.canEditRecord.value"
+          :can-create="caps.canCreateRecord.value" :can-edit="effectiveRowActions.canEdit"
           :can-comment="effectiveRowActions.canComment"
           :comment-presence="commentPresenceState.presenceByRecordId.value"
           @select-record="onSelectRecord" @patch-cell="onPatchCell" @create-record="onKanbanCreateRecord"
@@ -130,7 +130,7 @@
           :rows="grid.rows.value" :fields="scopedAllFields" :loading="grid.loading.value"
           :view-config="workbench.activeView.value?.config"
           :link-summaries="grid.linkSummaries.value" :attachment-summaries="grid.attachmentSummaries.value"
-          :can-create="caps.canCreateRecord.value" :can-edit="caps.canEditRecord.value"
+          :can-create="caps.canCreateRecord.value" :can-edit="effectiveRowActions.canEdit"
           :can-comment="effectiveRowActions.canComment"
           :comment-presence="commentPresenceState.presenceByRecordId.value"
           @select-record="onSelectRecord" @create-record="onKanbanCreateRecord"
@@ -407,6 +407,24 @@ function showError(msg: string) {
 
 function showSuccess(msg: string) {
   toastRef.value?.showSuccess(msg)
+}
+
+function ensureCanCreateRecord(): boolean {
+  if (caps.canCreateRecord.value) return true
+  showError('Record creation is not allowed in this view.')
+  return false
+}
+
+function ensureCanEditRecord(): boolean {
+  if (effectiveRowActions.value.canEdit) return true
+  showError('Record editing is not allowed for this row.')
+  return false
+}
+
+function ensureCanDeleteRecord(): boolean {
+  if (effectiveRowActions.value.canDelete) return true
+  showError('Record deletion is not allowed for this row.')
+  return false
 }
 
 const activeViewType = computed(() => {
@@ -986,7 +1004,10 @@ function onSearchTextUpdate(text: string) {
 function onClearFilters() { grid.clearFilters(); grid.applySortFilter() }
 function onSetConjunction(c: FilterConjunction) { grid.filterConjunction.value = c; grid.sortFilterDirty.value = true }
 
-async function onPatchCell(recordId: string, fieldId: string, value: unknown, version: number) { await grid.patchCell(recordId, fieldId, value, version) }
+async function onPatchCell(recordId: string, fieldId: string, value: unknown, version: number) {
+  if (!ensureCanEditRecord()) return
+  await grid.patchCell(recordId, fieldId, value, version)
+}
 async function onTimelinePatchDates(payload: {
   recordId: string
   version: number
@@ -995,6 +1016,7 @@ async function onTimelinePatchDates(payload: {
   startValue: string
   endValue: string
 }) {
+  if (!ensureCanEditRecord()) return
   try {
     await workbench.client.patchRecords({
       sheetId: workbench.activeSheetId.value || undefined,
@@ -1013,10 +1035,17 @@ async function onTimelinePatchDates(payload: {
     showError(error?.message ?? 'Failed to update timeline dates')
   }
 }
-async function onAddRecord() { await grid.createRecord() }
-async function onKanbanCreateRecord(data: Record<string, unknown>) { await grid.createRecord(data) }
+async function onAddRecord() {
+  if (!ensureCanCreateRecord()) return
+  await grid.createRecord()
+}
+async function onKanbanCreateRecord(data: Record<string, unknown>) {
+  if (!ensureCanCreateRecord()) return
+  await grid.createRecord(data)
+}
 async function onDeleteRecord() {
   if (!selectedRecordId.value) return
+  if (!ensureCanDeleteRecord()) return
   const deleted = await grid.deleteRecord(selectedRecordId.value)
   if (deleted) {
     selectedRecordId.value = null
@@ -1050,6 +1079,7 @@ async function onRetryConflict() {
 
 async function onDrawerPatch(fieldId: string, value: unknown) {
   if (!selectedRecordResolved.value) return
+  if (!ensureCanEditRecord()) return
   const record = selectedRecordResolved.value
   await grid.patchCell(record.id, fieldId, value, record.version)
   if (grid.error.value) {
@@ -1069,6 +1099,7 @@ async function onDrawerPatch(fieldId: string, value: unknown) {
 async function onFormSubmit(data: Record<string, unknown>) {
   const viewId = workbench.activeViewId.value
   if (viewId && activeViewType.value === 'form') {
+    if (!(selectedRecordResolved.value ? ensureCanEditRecord() : ensureCanCreateRecord())) return
     try {
       formSubmitting.value = true
       formSuccessMessage.value = null
@@ -1099,13 +1130,17 @@ async function onFormSubmit(data: Record<string, unknown>) {
       await replayPendingExternalContextIfReady()
     }
   } else if (selectedRecordResolved.value) {
+    if (!ensureCanEditRecord()) return
     const changes = Object.entries(data).filter(([k, v]) => v !== selectedRecordResolved.value!.data[k]).map(([fieldId, value]) => ({ recordId: selectedRecordResolved.value!.id, fieldId, value, expectedVersion: selectedRecordResolved.value!.version }))
     if (changes.length) {
       await workbench.client.patchRecords({ sheetId: workbench.activeSheetId.value || undefined, viewId: viewId || undefined, changes })
       await grid.loadViewData(grid.page.value.offset)
       showSuccess('Record updated')
     }
-  } else await grid.createRecord(data)
+  } else {
+    if (!ensureCanCreateRecord()) return
+    await grid.createRecord(data)
+  }
 }
 
 async function onSubmitComment(payload: { content: string; mentions: string[] }) {
@@ -1178,6 +1213,7 @@ function onGridLinkPicker(ctx: { recordId: string; field: MetaField }) { const r
 async function onLinkPickerConfirm(payload: { recordIds: string[]; summaries: LinkedRecordSummary[] }) {
   linkPickerVisible.value = false
   if (!linkPickerRecordId.value || !linkPickerField.value) return
+  if (!ensureCanEditRecord()) return
   const recordId = linkPickerRecordId.value
   const fieldId = linkPickerField.value.id
   const previousSummaries = selectedRecordLinkSummaries.value[fieldId] ?? grid.linkSummaries.value[recordId]?.[fieldId]
@@ -1914,6 +1950,7 @@ function startDialogMetaRefresh() {
 
 // --- Bulk delete ---
 async function onBulkDelete(recordIds: string[]) {
+  if (!ensureCanDeleteRecord()) return
   try {
     await Promise.all(recordIds.map((rid) => grid.deleteRecord(rid)))
     if (selectedRecordId.value && recordIds.includes(selectedRecordId.value)) selectedRecordId.value = null
