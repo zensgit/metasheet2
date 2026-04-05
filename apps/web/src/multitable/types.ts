@@ -253,6 +253,16 @@ export interface MultitableCommentInboxPage {
   offset: number
 }
 
+export interface MultitableSheetPresenceUser {
+  id: string
+}
+
+export interface MultitableSheetPresence {
+  sheetId: string
+  activeCount: number
+  users: MultitableSheetPresenceUser[]
+}
+
 // --- Link records ---
 export interface LinkedRecordSummary {
   id: string

@@ -5,6 +5,7 @@ const showErrorSpy = vi.fn()
 const showSuccessSpy = vi.fn()
 const pushSpy = vi.fn().mockResolvedValue(undefined)
 const useMultitableSheetRealtimeMock = vi.fn()
+let sheetPresenceStateMock: any
 
 vi.mock('vue-router', async () => {
   const actual = await vi.importActual<typeof import('vue-router')>('vue-router')
@@ -112,6 +113,17 @@ vi.mock('../src/multitable/composables/useMultitableCommentRealtime', () => ({
 
 vi.mock('../src/multitable/composables/useMultitableSheetRealtime', () => ({
   useMultitableSheetRealtime: (...args: unknown[]) => useMultitableSheetRealtimeMock(...args),
+}))
+
+vi.mock('../src/multitable/composables/useMultitableSheetPresence', () => ({
+  useMultitableSheetPresence: () => (sheetPresenceStateMock = {
+    presence: ref(null),
+    activeUsers: ref([] as Array<{ id: string }>),
+    activeCollaborators: ref([] as Array<{ id: string }>),
+    activeCollaboratorCount: computed(() => sheetPresenceStateMock?.activeCollaborators.value.length ?? 0),
+    reconnect: vi.fn(),
+    disconnect: vi.fn(),
+  }),
 }))
 
 vi.mock('../src/multitable/composables/useMultitableCommentPresence', () => ({
@@ -750,6 +762,7 @@ describe('MultitableWorkbench view wiring', () => {
     addCommentSpy = vi.fn()
     resolveCommentSpy = vi.fn()
     mentionInboxSummaryMock = null
+    sheetPresenceStateMock = null
     useMultitableSheetRealtimeMock.mockReset()
     subscribeToMultitableCommentSheetRealtimeMock.mockReset()
     workbenchMock = createWorkbenchMock()
@@ -1495,6 +1508,22 @@ describe('MultitableWorkbench view wiring', () => {
     expect(chip).not.toBeNull()
     expect(chip!.textContent).toContain('Mentions')
     expect(chip!.textContent).toContain('2')
+  })
+
+  it('shows an active collaborator chip when other users are viewing the same sheet', async () => {
+    mountWorkbench()
+    await flushUi()
+
+    expect(container!.querySelector('.mt-workbench__presence-chip')).toBeNull()
+
+    sheetPresenceStateMock.activeCollaborators.value = [{ id: 'user_a' }, { id: 'user_b' }]
+    await flushUi()
+
+    const chip = container!.querySelector<HTMLDivElement>('.mt-workbench__presence-chip')
+    expect(chip).not.toBeNull()
+    expect(chip?.textContent).toContain('2')
+    expect(chip?.textContent).toContain('active collaborators')
+    expect(chip?.getAttribute('title')).toBe('user_a, user_b')
   })
 
   it('opens the mention popover and selects a mentioned record', async () => {

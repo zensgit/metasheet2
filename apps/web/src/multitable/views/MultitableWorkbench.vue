@@ -17,6 +17,14 @@
     </div>
     <MetaViewTabBar :sheets="workbench.sheets.value" :views="visibleWorkbenchViews" :active-sheet-id="workbench.activeSheetId.value" :active-view-id="workbench.activeViewId.value" :can-create-sheet="caps.canManageFields.value" @select-sheet="onSelectSheet" @select-view="onSelectView" @create-sheet="onCreateSheet" />
     <div class="mt-workbench__actions">
+      <div
+        v-if="sheetPresenceState.activeCollaboratorCount.value > 0"
+        class="mt-workbench__presence-chip"
+        :title="sheetPresenceTitle"
+      >
+        &#x1F465; <strong>{{ sheetPresenceState.activeCollaboratorCount.value }}</strong>
+        <span>{{ sheetPresenceLabel }}</span>
+      </div>
       <button
         v-if="mentionInboxState.summary.value && mentionInboxState.summary.value.unresolvedMentionCount > 0"
         class="mt-workbench__mention-chip"
@@ -260,6 +268,7 @@ import { useMultitableCommentPresence } from '../composables/useMultitableCommen
 import { useMultitableCommentInbox } from '../composables/useMultitableCommentInbox'
 import { useMultitableCommentInboxSummary } from '../composables/useMultitableCommentInboxSummary'
 import { useMultitableCommentRealtime } from '../composables/useMultitableCommentRealtime'
+import { useMultitableSheetPresence } from '../composables/useMultitableSheetPresence'
 import { useMultitableSheetRealtime } from '../composables/useMultitableSheetRealtime'
 import { subscribeToMultitableCommentSheetRealtime } from '../realtime/comments-realtime'
 import MetaViewTabBar from '../components/MetaViewTabBar.vue'
@@ -306,6 +315,9 @@ const commentsState = useMultitableComments()
 const commentPresenceState = useMultitableCommentPresence()
 const commentInboxState = useMultitableCommentInbox()
 const mentionInboxState = useMultitableCommentInboxSummary()
+const sheetPresenceState = useMultitableSheetPresence({
+  sheetId: computed(() => workbench.activeSheetId.value || undefined),
+})
 
 const selectedRecordId = ref<string | null>(null)
 const showComments = ref(false)
@@ -535,6 +547,13 @@ const selectedCommentField = computed<MetaField | null>(() => {
   return grid.fields.value.find((field) => field.id === fieldId) ?? null
 })
 const commentsScopeLabel = computed(() => selectedCommentField.value?.name ?? null)
+const sheetPresenceLabel = computed(() => (
+  sheetPresenceState.activeCollaboratorCount.value === 1 ? 'active collaborator' : 'active collaborators'
+))
+const sheetPresenceTitle = computed(() => {
+  const ids = sheetPresenceState.activeCollaborators.value.map((user) => user.id)
+  return ids.length > 0 ? ids.join(', ') : 'No active collaborators'
+})
 const conflictFieldName = computed(() => {
   const fieldId = grid.conflict.value?.fieldId
   if (!fieldId) return 'cell'
@@ -2181,6 +2200,8 @@ defineExpose({
 }
 .mt-workbench__conflict-btn--primary { background: #f59e0b; border-color: #f59e0b; color: #fff; }
 .mt-workbench__actions { display: flex; gap: 6px; padding: 4px 16px 0; }
+.mt-workbench__presence-chip { display: inline-flex; align-items: center; gap: 4px; padding: 3px 10px; border: 1px solid #91caff; border-radius: 12px; background: #e6f4ff; color: #0958d9; font-size: 12px; }
+.mt-workbench__presence-chip strong { font-weight: 600; color: #003eb3; }
 .mt-workbench__mention-chip { display: inline-flex; align-items: center; gap: 4px; padding: 3px 10px; border: 1px solid #e6a23c; border-radius: 12px; background: #fdf6ec; font-size: 12px; cursor: pointer; color: #e6a23c; }
 .mt-workbench__mention-chip:hover { background: #faecd8; border-color: #d48806; }
 .mt-workbench__mention-chip strong { font-weight: 600; color: #d48806; }

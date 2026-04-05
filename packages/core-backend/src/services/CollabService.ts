@@ -7,6 +7,8 @@ import { buildCommentInboxRoom, buildCommentRecordRoom, buildCommentSheetRoom } 
 
 export class CollabService {
   private io: SocketServer | null = null
+  private sheetPresenceBySheet = new Map<string, Map<string, Set<string>>>()
+  private sheetMembershipBySocket = new Map<string, Set<string>>()
 
   constructor(
     private logger: ILogger,
@@ -57,6 +59,71 @@ export class CollabService {
     return spreadsheetId || null
   }
 
+  private normalizeSheetId(payload: unknown): string | null {
+    if (typeof payload !== 'string') return null
+    const sheetId = payload.trim()
+    return sheetId || null
+  }
+
+  private buildSheetRoom(sheetId: string): string {
+    return `sheet:${sheetId}`
+  }
+
+  private trackSocketSheetMembership(socketId: string, sheetId: string) {
+    const current = this.sheetMembershipBySocket.get(socketId) ?? new Set<string>()
+    current.add(sheetId)
+    this.sheetMembershipBySocket.set(socketId, current)
+  }
+
+  private untrackSocketSheetMembership(socketId: string, sheetId: string) {
+    const current = this.sheetMembershipBySocket.get(socketId)
+    if (!current) return
+    current.delete(sheetId)
+    if (current.size === 0) {
+      this.sheetMembershipBySocket.delete(socketId)
+      return
+    }
+    this.sheetMembershipBySocket.set(socketId, current)
+  }
+
+  private addSheetPresence(sheetId: string, userId: string, socketId: string) {
+    const sheetPresence = this.sheetPresenceBySheet.get(sheetId) ?? new Map<string, Set<string>>()
+    const sockets = sheetPresence.get(userId) ?? new Set<string>()
+    sockets.add(socketId)
+    sheetPresence.set(userId, sockets)
+    this.sheetPresenceBySheet.set(sheetId, sheetPresence)
+  }
+
+  private removeSheetPresence(sheetId: string, userId: string, socketId: string) {
+    const sheetPresence = this.sheetPresenceBySheet.get(sheetId)
+    if (!sheetPresence) return
+    const sockets = sheetPresence.get(userId)
+    if (!sockets) return
+    sockets.delete(socketId)
+    if (sockets.size === 0) {
+      sheetPresence.delete(userId)
+    } else {
+      sheetPresence.set(userId, sockets)
+    }
+    if (sheetPresence.size === 0) {
+      this.sheetPresenceBySheet.delete(sheetId)
+      return
+    }
+    this.sheetPresenceBySheet.set(sheetId, sheetPresence)
+  }
+
+  private emitSheetPresence(sheetId: string) {
+    if (!this.io) return
+    const activeUsers = [...(this.sheetPresenceBySheet.get(sheetId)?.keys() ?? [])]
+      .sort((left, right) => left.localeCompare(right))
+      .map((id) => ({ id }))
+    this.io.to(this.buildSheetRoom(sheetId)).emit('sheet:presence', {
+      sheetId,
+      activeCount: activeUsers.length,
+      users: activeUsers,
+    })
+  }
+
   initialize(httpServer: HttpServer): void {
     this.io = new SocketServer(httpServer, {
       cors: {
@@ -78,18 +145,39 @@ export class CollabService {
       }
 
       socket.on('disconnect', () => {
+        const userId = this.getUserIdFromSocket(socket)
+        const sheetIds = [...(this.sheetMembershipBySocket.get(socket.id) ?? [])]
+        for (const sheetId of sheetIds) {
+          if (userId) this.removeSheetPresence(sheetId, userId, socket.id)
+          this.untrackSocketSheetMembership(socket.id, sheetId)
+          this.emitSheetPresence(sheetId)
+        }
         this.logger.info(`WebSocket client disconnected: ${socket.id}`)
       })
 
-      socket.on('join-sheet', (sheetId: string) => {
-        socket.join(`sheet:${sheetId}`)
-        this.logger.info(`Client ${socket.id} joined sheet:${sheetId}`)
+      socket.on('join-sheet', (payload: unknown) => {
+        const sheetId = this.normalizeSheetId(payload)
+        if (!sheetId) return
+        const room = this.buildSheetRoom(sheetId)
+        const userId = this.getUserIdFromSocket(socket)
+        socket.join(room)
+        this.trackSocketSheetMembership(socket.id, sheetId)
+        if (userId) this.addSheetPresence(sheetId, userId, socket.id)
+        this.logger.info(`Client ${socket.id} joined ${room}`)
         socket.emit('joined', { sheetId })
+        this.emitSheetPresence(sheetId)
       })
 
-      socket.on('leave-sheet', (sheetId: string) => {
-        socket.leave(`sheet:${sheetId}`)
-        this.logger.info(`Client ${socket.id} left sheet:${sheetId}`)
+      socket.on('leave-sheet', (payload: unknown) => {
+        const sheetId = this.normalizeSheetId(payload)
+        if (!sheetId) return
+        const room = this.buildSheetRoom(sheetId)
+        const userId = this.getUserIdFromSocket(socket)
+        socket.leave(room)
+        if (userId) this.removeSheetPresence(sheetId, userId, socket.id)
+        this.untrackSocketSheetMembership(socket.id, sheetId)
+        this.logger.info(`Client ${socket.id} left ${room}`)
+        this.emitSheetPresence(sheetId)
       })
 
       socket.on('join-comment-record', (payload: unknown) => {
