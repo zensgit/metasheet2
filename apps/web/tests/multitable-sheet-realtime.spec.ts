@@ -57,16 +57,24 @@ describe('useMultitableSheetRealtime', () => {
   it('joins sheet rooms and reloads the page for remote record updates only', async () => {
     const reloadCurrentSheetPage = vi.fn().mockResolvedValue(undefined)
     const reloadSelectedRecordContext = vi.fn().mockResolvedValue(undefined)
+    const mergeRemoteRecord = vi.fn().mockResolvedValue(true)
+    const removeLocalRecord = vi.fn().mockReturnValue(true)
     const sheetId = ref('sheet_ops')
     const selectedRecordId = ref('rec_1')
+    const visibleRecordIds = ref(['rec_1', 'rec_2'])
+    const structuralFieldIds = ref(['fld_status'])
 
     app = createApp(defineComponent({
       setup() {
         useMultitableSheetRealtime({
           sheetId,
           selectedRecordId,
+          visibleRecordIds,
+          structuralFieldIds,
           reloadCurrentSheetPage,
           reloadSelectedRecordContext,
+          mergeRemoteRecord,
+          removeLocalRecord,
         })
         return () => h('div')
       },
@@ -83,13 +91,15 @@ describe('useMultitableSheetRealtime', () => {
         spreadsheetId: 'sheet_ops',
         actorId: 'user_other',
         kind: 'record-updated',
+        fieldIds: ['fld_title'],
         recordIds: ['rec_1'],
       },
     })
     await flushUi(4)
 
-    expect(reloadCurrentSheetPage).toHaveBeenCalledTimes(1)
-    expect(reloadSelectedRecordContext).toHaveBeenCalledWith('rec_1')
+    expect(mergeRemoteRecord).toHaveBeenCalledWith('rec_1')
+    expect(reloadCurrentSheetPage).not.toHaveBeenCalled()
+    expect(reloadSelectedRecordContext).not.toHaveBeenCalled()
 
     handlers.get('sheet:op')?.({
       type: 'cell-update',
@@ -101,7 +111,7 @@ describe('useMultitableSheetRealtime', () => {
       },
     })
     await flushUi(3)
-    expect(reloadCurrentSheetPage).toHaveBeenCalledTimes(1)
+    expect(mergeRemoteRecord).toHaveBeenCalledTimes(1)
 
     handlers.get('sheet:op')?.({
       type: 'cell-update',
@@ -109,12 +119,51 @@ describe('useMultitableSheetRealtime', () => {
         spreadsheetId: 'sheet_ops',
         actorId: 'user_other',
         kind: 'record-updated',
+        fieldIds: ['fld_status'],
+        recordIds: ['rec_1'],
+      },
+    })
+    await flushUi(4)
+    expect(reloadCurrentSheetPage).toHaveBeenCalledTimes(1)
+    expect(reloadSelectedRecordContext).toHaveBeenCalledWith('rec_1')
+
+    handlers.get('sheet:op')?.({
+      type: 'cell-update',
+      data: {
+        spreadsheetId: 'sheet_ops',
+        actorId: 'user_other',
+        kind: 'record-updated',
+        fieldIds: ['fld_title'],
         recordIds: ['rec_2'],
       },
     })
     await flushUi(4)
+    expect(mergeRemoteRecord).toHaveBeenCalledWith('rec_2')
+    expect(reloadCurrentSheetPage).toHaveBeenCalledTimes(1)
+
+    handlers.get('sheet:op')?.({
+      type: 'cell-update',
+      data: {
+        spreadsheetId: 'sheet_ops',
+        actorId: 'user_other',
+        kind: 'record-deleted',
+        recordIds: ['rec_2'],
+      },
+    })
+    await flushUi(4)
+    expect(removeLocalRecord).toHaveBeenCalledWith('rec_2')
+
+    handlers.get('sheet:op')?.({
+      type: 'cell-update',
+      data: {
+        spreadsheetId: 'sheet_ops',
+        actorId: 'user_other',
+        kind: 'record-created',
+        recordIds: ['rec_3'],
+      },
+    })
+    await flushUi(4)
     expect(reloadCurrentSheetPage).toHaveBeenCalledTimes(2)
-    expect(reloadSelectedRecordContext).toHaveBeenCalledTimes(1)
 
     sheetId.value = 'sheet_finance'
     await flushUi(4)

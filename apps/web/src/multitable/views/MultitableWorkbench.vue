@@ -478,6 +478,17 @@ const visibleCommentPresenceRecordIds = computed(() => {
   }
   return nextIds
 })
+const structuralRealtimeFieldIds = computed(() => {
+  const next = new Set<string>()
+  for (const rule of grid.sortRules.value) {
+    if (rule.fieldId) next.add(rule.fieldId)
+  }
+  for (const rule of grid.filterRules.value) {
+    if (rule.fieldId) next.add(rule.fieldId)
+  }
+  if (grid.groupFieldId.value) next.add(grid.groupFieldId.value)
+  return [...next]
+})
 const selectedRecordCommentPresence = computed(() => (
   selectedRecordId.value ? commentPresenceState.presenceByRecordId.value[selectedRecordId.value] ?? null : null
 ))
@@ -1792,6 +1803,67 @@ async function resolveDeepLink(recordId: string, options?: { openComments?: bool
   }
 }
 
+function clearDeepLinkedRecordState() {
+  deepLinkedRecord.value = null
+  deepLinkedRecordLinkSummaries.value = {}
+  deepLinkedRecordAttachmentSummaries.value = {}
+  deepLinkedRecordCommentsScope.value = null
+  deepLinkedRecordFieldPermissions.value = {}
+  deepLinkedRecordViewPermissions.value = {}
+  deepLinkedRecordRowActions.value = null
+}
+
+async function mergeRemoteRecordContext(recordId: string): Promise<boolean> {
+  if (!recordId) return false
+  const inPage = grid.rows.value.some((row) => row.id === recordId)
+  const isSelected = selectedRecordId.value === recordId
+  if (!inPage && !isSelected) return false
+  if (activeViewType.value === 'form' && isSelected) {
+    await loadStandaloneForm()
+    return true
+  }
+
+  try {
+    const ctx = await workbench.client.getRecord(recordId, {
+      sheetId: workbench.activeSheetId.value || undefined,
+      viewId: workbench.activeViewId.value || undefined,
+    })
+    const mergedInPage = grid.mergeRemoteRecord(ctx.record, {
+      linkSummaries: ctx.linkSummaries,
+      attachmentSummaries: ctx.attachmentSummaries,
+    })
+    if (selectedRecordId.value === recordId) {
+      deepLinkedRecord.value = ctx.record
+      deepLinkedRecordLinkSummaries.value = ctx.linkSummaries ?? {}
+      deepLinkedRecordAttachmentSummaries.value = ctx.attachmentSummaries ?? {}
+      deepLinkedRecordCommentsScope.value = ctx.commentsScope
+      deepLinkedRecordFieldPermissions.value = ctx.fieldPermissions ?? {}
+      deepLinkedRecordViewPermissions.value = ctx.viewPermissions ?? {}
+      deepLinkedRecordRowActions.value = ctx.rowActions ?? null
+    }
+    return mergedInPage || selectedRecordId.value === recordId
+  } catch {
+    return false
+  }
+}
+
+function removeLocalRealtimeRecord(recordId: string): boolean {
+  let handled = grid.removeRemoteRecord(recordId)
+  if (selectedRecordId.value === recordId) {
+    selectedRecordId.value = null
+    showComments.value = false
+    selectedCommentFieldId.value = null
+    selectedReplyCommentId.value = null
+    highlightedCommentId.value = null
+    clearDeepLinkedRecordState()
+    handled = true
+  } else if (deepLinkedRecord.value?.id === recordId) {
+    clearDeepLinkedRecordState()
+    handled = true
+  }
+  return handled
+}
+
 async function refreshSelectedRecordContext(recordId: string) {
   if (!recordId || selectedRecordId.value !== recordId) return
   if (activeViewType.value === 'form') {
@@ -2020,10 +2092,14 @@ useMultitableCommentRealtime({
 useMultitableSheetRealtime({
   sheetId: computed(() => workbench.activeSheetId.value || undefined),
   selectedRecordId,
+  visibleRecordIds: visibleCommentPresenceRecordIds,
+  structuralFieldIds: structuralRealtimeFieldIds,
   reloadCurrentSheetPage: async () => {
     await grid.reloadCurrentPage()
   },
   reloadSelectedRecordContext: refreshSelectedRecordContext,
+  mergeRemoteRecord: mergeRemoteRecordContext,
+  removeLocalRecord: removeLocalRealtimeRecord,
 })
 
 defineExpose({

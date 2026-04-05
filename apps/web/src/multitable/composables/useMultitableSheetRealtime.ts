@@ -13,14 +13,28 @@ type SheetOpEvent = {
     kind?: string
     recordId?: string
     recordIds?: string[]
+    fieldIds?: string[]
   } | null
+}
+
+type NormalizedSheetOpEvent = {
+  spreadsheetId: string
+  actorId: string
+  kind: string
+  recordId: string
+  recordIds: string[]
+  fieldIds: string[]
 }
 
 type UseMultitableSheetRealtimeOptions = {
   sheetId: MaybeReactive<string | null | undefined>
   selectedRecordId?: MaybeReactive<string | null | undefined>
+  visibleRecordIds?: MaybeReactive<string[] | null | undefined>
+  structuralFieldIds?: MaybeReactive<string[] | null | undefined>
   reloadCurrentSheetPage: () => Promise<void>
   reloadSelectedRecordContext?: (recordId: string) => Promise<void>
+  mergeRemoteRecord?: (recordId: string) => Promise<boolean>
+  removeLocalRecord?: (recordId: string) => Promise<boolean> | boolean
 }
 
 function readValue<T>(source: MaybeReactive<T>): T {
@@ -37,13 +51,34 @@ function normalizeSheetOpEvent(payload: SheetOpEvent | null | undefined) {
   const recordIds = Array.isArray(data?.recordIds)
     ? data.recordIds.filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
     : []
+  const fieldIds = Array.isArray(data?.fieldIds)
+    ? data.fieldIds.filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
+    : []
   return {
     spreadsheetId,
     actorId,
     kind: typeof data?.kind === 'string' ? data.kind : '',
     recordId,
     recordIds,
+    fieldIds,
   }
+}
+
+function uniqueIds(values: string[]): string[] {
+  return [...new Set(values.filter((value) => value.trim().length > 0))]
+}
+
+function intersects(left: string[], right: string[]): boolean {
+  if (left.length === 0 || right.length === 0) return false
+  const rightSet = new Set(right)
+  return left.some((value) => rightSet.has(value))
+}
+
+function buildTargetRecordIds(event: NormalizedSheetOpEvent): string[] {
+  return uniqueIds([
+    ...(event.recordId ? [event.recordId] : []),
+    ...event.recordIds,
+  ])
 }
 
 export function useMultitableSheetRealtime(options: UseMultitableSheetRealtimeOptions) {
@@ -56,6 +91,7 @@ export function useMultitableSheetRealtime(options: UseMultitableSheetRealtimeOp
   let refreshInFlight = false
   let refreshQueued = false
   let queuedSelectedRecordId: string | null = null
+  let eventChain: Promise<void> = Promise.resolve()
 
   function cleanupSocket() {
     if (socket) {
@@ -92,6 +128,57 @@ export function useMultitableSheetRealtime(options: UseMultitableSheetRealtimeOp
     }
   }
 
+  async function handleEvent(event: NormalizedSheetOpEvent) {
+    const selectedRecordId = readValue(options.selectedRecordId ?? null)?.trim() || null
+    const visibleRecordIds = uniqueIds(readValue(options.visibleRecordIds ?? []) ?? [])
+    const structuralFieldIds = uniqueIds(readValue(options.structuralFieldIds ?? []) ?? [])
+    const targetRecordIds = buildTargetRecordIds(event)
+    const localTargetRecordIds = targetRecordIds.filter((recordId) => (
+      visibleRecordIds.includes(recordId) || (selectedRecordId != null && recordId === selectedRecordId)
+    ))
+    const shouldRefreshSelectedRecord = Boolean(
+      selectedRecordId &&
+      targetRecordIds.includes(selectedRecordId),
+    )
+
+    if (event.kind === 'record-created') {
+      await flushRefreshQueue(shouldRefreshSelectedRecord ? selectedRecordId : null)
+      return
+    }
+
+    if (event.kind === 'record-deleted') {
+      let handled = false
+      for (const recordId of localTargetRecordIds) {
+        const removed = await options.removeLocalRecord?.(recordId)
+        handled = Boolean(removed) || handled
+      }
+      if (!handled && targetRecordIds.length > 0) return
+      return
+    }
+
+    if (!localTargetRecordIds.length) return
+
+    if (intersects(event.fieldIds, structuralFieldIds)) {
+      await flushRefreshQueue(shouldRefreshSelectedRecord ? selectedRecordId : null)
+      return
+    }
+
+    if (!options.mergeRemoteRecord) {
+      await flushRefreshQueue(shouldRefreshSelectedRecord ? selectedRecordId : null)
+      return
+    }
+
+    let mergeHandled = false
+    for (const recordId of localTargetRecordIds) {
+      const merged = await options.mergeRemoteRecord(recordId)
+      mergeHandled = merged || mergeHandled
+    }
+
+    if (!mergeHandled) {
+      await flushRefreshQueue(shouldRefreshSelectedRecord ? selectedRecordId : null)
+    }
+  }
+
   async function ensureSocket(): Promise<Socket | null> {
     if (socket) return socket
     if (connectionPromise) return connectionPromise
@@ -112,12 +199,9 @@ export function useMultitableSheetRealtime(options: UseMultitableSheetRealtimeOp
           const event = normalizeSheetOpEvent(payload)
           if (!event.spreadsheetId || event.spreadsheetId !== activeSheetId) return
           if (event.actorId && currentUserId && event.actorId === currentUserId) return
-          const selectedRecordId = readValue(options.selectedRecordId ?? null)?.trim() || null
-          const shouldRefreshSelectedRecord = Boolean(
-            selectedRecordId &&
-            (event.recordId === selectedRecordId || event.recordIds.includes(selectedRecordId)),
-          )
-          void flushRefreshQueue(shouldRefreshSelectedRecord ? selectedRecordId : null)
+          eventChain = eventChain
+            .then(() => handleEvent(event))
+            .catch(() => undefined)
         })
 
         socket = nextSocket

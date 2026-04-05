@@ -141,6 +141,7 @@ type MultitableSheetRealtimePayload = {
   kind: 'record-created' | 'record-updated' | 'record-deleted' | 'attachment-updated'
   recordId?: string
   recordIds?: string[]
+  fieldIds?: string[]
 }
 
 type RecordSummaryPage = {
@@ -3520,6 +3521,7 @@ export function univerMetaRouter(): Router {
         kind: 'record-updated',
         recordId: record.id,
         recordIds: [record.id],
+        fieldIds: Object.keys(patch),
       })
 
       return res.json({
@@ -4369,6 +4371,7 @@ export function univerMetaRouter(): Router {
           kind: 'attachment-updated',
           recordId: updatedRecordRealtimeScope.recordId,
           recordIds: [updatedRecordRealtimeScope.recordId],
+          fieldIds: typeof attachmentRow.field_id === 'string' ? [attachmentRow.field_id] : undefined,
         })
       }
 
@@ -4577,6 +4580,7 @@ export function univerMetaRouter(): Router {
         kind: 'record-created',
         recordId,
         recordIds: [recordId],
+        fieldIds: Object.keys(patch),
       })
       return res.json({ ok: true, data: { record: { id: recordId, version, data: patch } } })
     } catch (err) {
@@ -5033,6 +5037,7 @@ export function univerMetaRouter(): Router {
           source: 'multitable',
           kind: 'record-updated',
           recordIds: updates.map((update) => update.recordId),
+          fieldIds: [...new Set(Array.from(changesByRecord.values()).flatMap((changes) => changes.map((change) => change.fieldId)))],
         })
       }
 

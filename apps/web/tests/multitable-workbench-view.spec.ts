@@ -725,6 +725,8 @@ function createGridMock() {
     patchCell: vi.fn(),
     createRecord: vi.fn(),
     deleteRecord: vi.fn(),
+    mergeRemoteRecord: vi.fn().mockReturnValue(true),
+    removeRemoteRecord: vi.fn().mockReturnValue(true),
     loadViewData: vi.fn(),
     reloadCurrentPage: vi.fn(),
     dismissConflict: vi.fn(),
@@ -806,8 +808,12 @@ describe('MultitableWorkbench view wiring', () => {
     expect(useMultitableSheetRealtimeMock).toHaveBeenCalledTimes(1)
     expect(useMultitableSheetRealtimeMock.mock.calls[0]?.[0]).toEqual(expect.objectContaining({
       selectedRecordId: expect.any(Object),
+      visibleRecordIds: expect.any(Object),
+      structuralFieldIds: expect.any(Object),
       reloadCurrentSheetPage: expect.any(Function),
       reloadSelectedRecordContext: expect.any(Function),
+      mergeRemoteRecord: expect.any(Function),
+      removeLocalRecord: expect.any(Function),
     }))
 
     workbenchMock.syncExternalContext.mockClear()
@@ -822,6 +828,42 @@ describe('MultitableWorkbench view wiring', () => {
       sheetId: 'sheet_deals',
       viewId: 'view_board',
     })
+  })
+
+  it('hydrates local realtime merge handlers with record context', async () => {
+    mountWorkbench()
+    await flushUi()
+
+    workbenchMock.client.getRecord.mockResolvedValue({
+      record: { id: 'rec_1', version: 7, data: { fld_title: 'Remote Alpha' } },
+      linkSummaries: { fld_link: [{ id: 'rec_link', label: 'Linked row' }] },
+      attachmentSummaries: { fld_files: [{ id: 'att_1', filename: 'brief.txt', mimeType: 'text/plain', size: 10, url: '/x', thumbnailUrl: null, uploadedAt: null }] },
+      commentsScope: { targetType: 'meta_record', targetId: 'rec_1', containerType: 'meta_sheet', containerId: 'sheet_orders' },
+      fieldPermissions: {},
+      viewPermissions: {},
+      rowActions: null,
+    })
+
+    const realtimeOptions = useMultitableSheetRealtimeMock.mock.calls[0]?.[0] as {
+      mergeRemoteRecord: (recordId: string) => Promise<boolean>
+      removeLocalRecord: (recordId: string) => boolean
+    }
+
+    await expect(realtimeOptions.mergeRemoteRecord('rec_1')).resolves.toBe(true)
+    expect(workbenchMock.client.getRecord).toHaveBeenCalledWith('rec_1', {
+      sheetId: 'sheet_orders',
+      viewId: 'view_grid',
+    })
+    expect(gridMock.mergeRemoteRecord).toHaveBeenCalledWith(
+      { id: 'rec_1', version: 7, data: { fld_title: 'Remote Alpha' } },
+      expect.objectContaining({
+        linkSummaries: { fld_link: [{ id: 'rec_link', label: 'Linked row' }] },
+        attachmentSummaries: { fld_files: [expect.objectContaining({ id: 'att_1' })] },
+      }),
+    )
+
+    expect(realtimeOptions.removeLocalRecord('rec_2')).toBe(true)
+    expect(gridMock.removeRemoteRecord).toHaveBeenCalledWith('rec_2')
   })
 
   it('opens workflow designer with multitable context when automation is enabled', async () => {

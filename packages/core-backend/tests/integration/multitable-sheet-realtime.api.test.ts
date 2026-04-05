@@ -99,6 +99,7 @@ describe('Multitable sheet realtime events', () => {
       kind: 'record-created',
       recordId: response.body.data.record.id,
       recordIds: [response.body.data.record.id],
+      fieldIds: ['fld_title'],
     }))
   })
 
@@ -163,6 +164,7 @@ describe('Multitable sheet realtime events', () => {
       kind: 'record-updated',
       recordId: 'rec_1',
       recordIds: ['rec_1'],
+      fieldIds: ['fld_title'],
     })
   })
 
@@ -209,6 +211,7 @@ describe('Multitable sheet realtime events', () => {
       source: 'multitable',
       kind: 'record-updated',
       recordIds: ['rec_1'],
+      fieldIds: ['fld_title'],
     })
   })
 })
