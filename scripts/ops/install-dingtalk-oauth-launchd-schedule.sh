@@ -5,6 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 AGENT_DIR="${AGENT_DIR:-${HOME}/Library/LaunchAgents}"
 LOG_ROOT="${LOG_ROOT:-${HOME}/Library/Logs/metasheet2/dingtalk-oauth}"
 STABILITY_INTERVAL_SECONDS="${STABILITY_INTERVAL_SECONDS:-7200}"
+WINDOW_INTERVAL_SECONDS="${WINDOW_INTERVAL_SECONDS:-600}"
 DRILL_HOUR="${DRILL_HOUR:-20}"
 DRILL_MINUTE="${DRILL_MINUTE:-0}"
 SUMMARY_HOUR="${SUMMARY_HOUR:-20}"
@@ -72,7 +73,7 @@ function write_drill_plist() {
   <key>ProgramArguments</key>
   <array>
     <string>/bin/bash</string>
-    <string>${ROOT_DIR}/scripts/ops/dingtalk-oauth-schedule-run.sh</string>
+    <string>${ROOT_DIR}/scripts/ops/dingtalk-oauth-schedule-window.sh</string>
     <string>drill</string>
   </array>
   <key>WorkingDirectory</key>
@@ -85,7 +86,17 @@ function write_drill_plist() {
     <string>${HOME}</string>
     <key>LOG_ROOT</key>
     <string>${LOG_ROOT}</string>
+    <key>DRILL_HOUR</key>
+    <string>${DRILL_HOUR}</string>
+    <key>DRILL_MINUTE</key>
+    <string>${DRILL_MINUTE}</string>
+    <key>SUMMARY_HOUR</key>
+    <string>${SUMMARY_HOUR}</string>
+    <key>SUMMARY_MINUTE</key>
+    <string>${SUMMARY_MINUTE}</string>
   </dict>
+  <key>StartInterval</key>
+  <integer>${WINDOW_INTERVAL_SECONDS}</integer>
   <key>StartCalendarInterval</key>
   <dict>
     <key>Hour</key>
@@ -93,6 +104,8 @@ function write_drill_plist() {
     <key>Minute</key>
     <integer>${DRILL_MINUTE}</integer>
   </dict>
+  <key>RunAtLoad</key>
+  <$( [[ "${RUN_AT_LOAD}" == "true" ]] && echo true || echo false )/>
   <key>StandardOutPath</key>
   <string>${LOG_ROOT}/launchd-drill.stdout.log</string>
   <key>StandardErrorPath</key>
@@ -113,7 +126,7 @@ function write_summary_plist() {
   <key>ProgramArguments</key>
   <array>
     <string>/bin/bash</string>
-    <string>${ROOT_DIR}/scripts/ops/dingtalk-oauth-schedule-run.sh</string>
+    <string>${ROOT_DIR}/scripts/ops/dingtalk-oauth-schedule-window.sh</string>
     <string>summary</string>
   </array>
   <key>WorkingDirectory</key>
@@ -126,7 +139,17 @@ function write_summary_plist() {
     <string>${HOME}</string>
     <key>LOG_ROOT</key>
     <string>${LOG_ROOT}</string>
+    <key>DRILL_HOUR</key>
+    <string>${DRILL_HOUR}</string>
+    <key>DRILL_MINUTE</key>
+    <string>${DRILL_MINUTE}</string>
+    <key>SUMMARY_HOUR</key>
+    <string>${SUMMARY_HOUR}</string>
+    <key>SUMMARY_MINUTE</key>
+    <string>${SUMMARY_MINUTE}</string>
   </dict>
+  <key>StartInterval</key>
+  <integer>${WINDOW_INTERVAL_SECONDS}</integer>
   <key>StartCalendarInterval</key>
   <dict>
     <key>Hour</key>
@@ -134,6 +157,8 @@ function write_summary_plist() {
     <key>Minute</key>
     <integer>${SUMMARY_MINUTE}</integer>
   </dict>
+  <key>RunAtLoad</key>
+  <$( [[ "${RUN_AT_LOAD}" == "true" ]] && echo true || echo false )/>
   <key>StandardOutPath</key>
   <string>${LOG_ROOT}/launchd-summary.stdout.log</string>
   <key>StandardErrorPath</key>
@@ -163,6 +188,7 @@ info "Installed ${DRILL_PLIST}"
 info "Installed ${SUMMARY_PLIST}"
 info "Log root: ${LOG_ROOT}"
 info "Stability interval: ${STABILITY_INTERVAL_SECONDS}s"
+info "Window interval: ${WINDOW_INTERVAL_SECONDS}s"
 info "Drill schedule: ${DRILL_HOUR}:$(printf '%02d' "${DRILL_MINUTE}")"
 info "Summary schedule: ${SUMMARY_HOUR}:$(printf '%02d' "${SUMMARY_MINUTE}")"
 

@@ -14,7 +14,7 @@ function print_agent() {
   local label="$1"
   echo "### ${label}"
   if launchctl print "gui/${USER_ID}/${label}" >/tmp/"${label}".launchd 2>/dev/null; then
-    rg -n "state =|path =|last exit code =|runs =|program =" /tmp/"${label}".launchd || cat /tmp/"${label}".launchd
+    rg -n "state =|path =|last exit code =|runs =|program =|StartInterval|descriptor =|Hour|Minute" /tmp/"${label}".launchd || cat /tmp/"${label}".launchd
   else
     echo "not-loaded"
   fi
