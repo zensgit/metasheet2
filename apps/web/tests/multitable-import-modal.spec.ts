@@ -138,6 +138,50 @@ describe('MetaImportModal', () => {
     container.remove()
   })
 
+  it('filters readonly fields out of import mapping options', async () => {
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+
+    const app = createApp({
+      render() {
+        return h(MetaImportModal, {
+          visible: true,
+          fields: [
+            { id: 'fld_title', name: 'Title', type: 'string' },
+            { id: 'fld_locked', name: 'Locked', type: 'string', property: { readonly: true } },
+            { id: 'fld_formula', name: 'Score', type: 'formula' },
+          ],
+          importing: false,
+          result: null,
+          onClose: vi.fn(),
+          onImport: vi.fn(),
+        })
+      },
+    })
+
+    app.mount(container)
+    await flushUi()
+
+    const textarea = document.body.querySelector('.meta-import__textarea') as HTMLTextAreaElement
+    textarea.value = 'Title\tLocked\nAlpha\tSecret'
+    textarea.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+
+    ;(document.body.querySelector('.meta-import__btn--primary') as HTMLButtonElement)?.click()
+    await flushUi()
+
+    const mappingOptions = Array.from(document.body.querySelectorAll('.meta-import__field-select option'))
+      .map((option) => option.textContent?.trim() ?? '')
+      .filter(Boolean)
+
+    expect(mappingOptions).toContain('Title')
+    expect(mappingOptions).not.toContain('Locked')
+    expect(mappingOptions).not.toContain('Score')
+
+    app.unmount()
+    container.remove()
+  })
+
   it('emits dirty state and confirms before closing an unsaved import draft', async () => {
     const container = document.createElement('div')
     document.body.appendChild(container)

@@ -217,7 +217,7 @@
     <MetaImportModal
       :visible="showImportModal"
       :sheet-id="workbench.activeSheetId.value"
-      :fields="propertyVisibleGridFields"
+      :fields="importSurfaceFields"
       :field-resolvers="importFieldResolvers"
       :importing="importSubmitting"
       :result="importResult"
@@ -472,6 +472,26 @@ const readOnlyFieldIds = computed(() =>
     .filter(([, permission]) => permission.readOnly)
     .map(([fieldId]) => fieldId),
 )
+const importSurfaceFields = computed(() =>
+  propertyVisibleGridFields.value.filter((field) => {
+    const permission = effectiveFieldPermissions.value[field.id]
+    return permission?.visible !== false && permission?.readOnly !== true
+  }),
+)
+const importFieldResolvers = computed<Record<string, ImportValueResolver>>(() => {
+  const resolvers: Record<string, ImportValueResolver> = {}
+  for (const field of importSurfaceFields.value) {
+    if (!isLinkField(field)) continue
+    resolvers[field.id] = async (rawValue, currentField) => {
+      if (isPersonField(currentField)) {
+        const resolver = await getPeopleResolver(currentField)
+        return resolver ? resolver(rawValue, currentField) : null
+      }
+      return resolveLinkedImportValue(rawValue, currentField)
+    }
+  }
+  return resolvers
+})
 const formReadOnly = computed(() => {
   return selectedRecordResolved.value ? !effectiveRowActions.value.canEdit : !caps.canCreateRecord.value
 })
@@ -825,21 +845,6 @@ async function resolveLinkedImportValue(rawValue: string, field: MetaField): Pro
 
 const propertyVisibleWorkbenchFields = computed(() => filterPropertyVisibleFields(workbench.fields.value))
 const propertyVisibleGridFields = computed(() => filterPropertyVisibleFields(grid.fields.value))
-
-const importFieldResolvers = computed<Record<string, ImportValueResolver>>(() => {
-  const resolvers: Record<string, ImportValueResolver> = {}
-  for (const field of propertyVisibleWorkbenchFields.value) {
-    if (!isLinkField(field)) continue
-    resolvers[field.id] = async (rawValue, currentField) => {
-      if (isPersonField(currentField)) {
-        const resolver = await getPeopleResolver(currentField)
-        return resolver ? resolver(rawValue, currentField) : null
-      }
-      return resolveLinkedImportValue(rawValue, currentField)
-    }
-  }
-  return resolvers
-})
 
 const uploadAttachmentFn: MetaAttachmentUploadFn = async (file: File, context?: MetaAttachmentUploadContext) =>
   workbench.client.uploadAttachment(file, {
@@ -1795,7 +1800,7 @@ function closeImportModal() {
 
 // --- CSV export ---
 function onExportCsv() {
-  const visibleFields = grid.visibleFields.value
+  const visibleFields = scopedGridFields.value
   if (!visibleFields.length) return
   const header = visibleFields.map((f) => csvEscape(f.name)).join(',')
   const rows = grid.rows.value.map((row) =>
