@@ -80,6 +80,10 @@ vi.mock('../src/multitable/composables/useMultitableCommentRealtime', () => ({
   useMultitableCommentRealtime: vi.fn(),
 }))
 
+vi.mock('../src/multitable/composables/useMultitableSheetRealtime', () => ({
+  useMultitableSheetRealtime: vi.fn(),
+}))
+
 vi.mock('../src/multitable/components/MetaViewTabBar.vue', () => ({
   default: stubComponent('MetaViewTabBar'),
 }))

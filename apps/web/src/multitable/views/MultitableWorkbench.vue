@@ -260,6 +260,7 @@ import { useMultitableCommentPresence } from '../composables/useMultitableCommen
 import { useMultitableCommentInbox } from '../composables/useMultitableCommentInbox'
 import { useMultitableCommentInboxSummary } from '../composables/useMultitableCommentInboxSummary'
 import { useMultitableCommentRealtime } from '../composables/useMultitableCommentRealtime'
+import { useMultitableSheetRealtime } from '../composables/useMultitableSheetRealtime'
 import { subscribeToMultitableCommentSheetRealtime } from '../realtime/comments-realtime'
 import MetaViewTabBar from '../components/MetaViewTabBar.vue'
 import MetaToolbar from '../components/MetaToolbar.vue'
@@ -1791,6 +1792,33 @@ async function resolveDeepLink(recordId: string, options?: { openComments?: bool
   }
 }
 
+async function refreshSelectedRecordContext(recordId: string) {
+  if (!recordId || selectedRecordId.value !== recordId) return
+  if (activeViewType.value === 'form') {
+    await loadStandaloneForm()
+    return
+  }
+  const inPage = grid.rows.value.some((row) => row.id === recordId)
+  if (inPage) return
+
+  try {
+    const ctx = await workbench.client.getRecord(recordId, {
+      sheetId: workbench.activeSheetId.value || undefined,
+      viewId: workbench.activeViewId.value || undefined,
+    })
+    if (selectedRecordId.value !== recordId) return
+    deepLinkedRecord.value = ctx.record
+    deepLinkedRecordLinkSummaries.value = ctx.linkSummaries ?? {}
+    deepLinkedRecordAttachmentSummaries.value = ctx.attachmentSummaries ?? {}
+    deepLinkedRecordCommentsScope.value = ctx.commentsScope
+    deepLinkedRecordFieldPermissions.value = ctx.fieldPermissions ?? {}
+    deepLinkedRecordViewPermissions.value = ctx.viewPermissions ?? {}
+    deepLinkedRecordRowActions.value = ctx.rowActions ?? null
+  } catch {
+    // Silent best-effort refresh; explicit fetch paths surface errors.
+  }
+}
+
 // Override selectedRecord to also consider deep-linked record
 const selectedRecordResolved = computed<MetaRecord | null>(() => {
   if (selectedRecordId.value) {
@@ -1987,6 +2015,15 @@ useMultitableCommentRealtime({
   refreshUnreadCount: async () => {
     await commentInboxState.refreshUnreadCount()
   },
+})
+
+useMultitableSheetRealtime({
+  sheetId: computed(() => workbench.activeSheetId.value || undefined),
+  selectedRecordId,
+  reloadCurrentSheetPage: async () => {
+    await grid.reloadCurrentPage()
+  },
+  reloadSelectedRecordContext: refreshSelectedRecordContext,
 })
 
 defineExpose({

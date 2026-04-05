@@ -4,6 +4,7 @@ import * as path from 'path'
 import { Router } from 'express'
 import { z } from 'zod'
 import { poolManager } from '../integration/db/connection-pool'
+import { eventBus } from '../integration/events/event-bus'
 import { rbacGuard } from '../rbac/rbac'
 import { isAdmin, listUserPermissions } from '../rbac/service'
 import { StorageServiceImpl } from '../services/StorageService'
@@ -131,6 +132,15 @@ type MultitableAttachment = {
   url: string
   thumbnailUrl: string | null
   uploadedAt: string | null
+}
+
+type MultitableSheetRealtimePayload = {
+  spreadsheetId: string
+  actorId?: string | null
+  source: 'multitable'
+  kind: 'record-created' | 'record-updated' | 'record-deleted' | 'attachment-updated'
+  recordId?: string
+  recordIds?: string[]
 }
 
 type RecordSummaryPage = {
@@ -1258,6 +1268,20 @@ function buildAttachmentUrl(req: Request, attachmentId: string, thumbnail: boole
   const host = req.get('host') || 'localhost:8900'
   const query = thumbnail ? '?thumbnail=true' : ''
   return `${protocol}://${host}/api/multitable/attachments/${encodeURIComponent(attachmentId)}${query}`
+}
+
+function getRequestActorId(req: Request): string | null {
+  const actorId = req.user?.id
+  return typeof actorId === 'string' && actorId.trim().length > 0 ? actorId.trim() : null
+}
+
+function publishMultitableSheetRealtime(payload: MultitableSheetRealtimePayload): void {
+  if (!payload.spreadsheetId) return
+  try {
+    eventBus.publish('spreadsheet.cell.updated', payload)
+  } catch (err) {
+    console.warn('[univer-meta] failed to publish multitable sheet realtime update', err)
+  }
 }
 
 function isImageMimeType(mimeType: string | null | undefined): boolean {
@@ -3489,6 +3513,15 @@ export function univerMetaRouter(): Router {
           )[record.id] ?? {}
         : undefined
 
+      publishMultitableSheetRealtime({
+        spreadsheetId: view.sheetId,
+        actorId: getRequestActorId(req),
+        source: 'multitable',
+        kind: 'record-updated',
+        recordId: record.id,
+        recordIds: [record.id],
+      })
+
       return res.json({
         ok: true,
         data: {
@@ -4276,6 +4309,7 @@ export function univerMetaRouter(): Router {
 
     try {
       const pool = poolManager.get()
+      let updatedRecordRealtimeScope: { sheetId: string; recordId: string } | null = null
       const attachmentRes = await pool.query(
         `SELECT id, sheet_id, record_id, field_id, storage_file_id
          FROM multitable_attachments
@@ -4309,6 +4343,7 @@ export function univerMetaRouter(): Router {
                  WHERE id = $2 AND sheet_id = $3`,
                 [JSON.stringify({ [fieldId]: nextIds }), recordId, sheetId],
               )
+              updatedRecordRealtimeScope = { sheetId, recordId }
             }
           }
         }
@@ -4324,6 +4359,17 @@ export function univerMetaRouter(): Router {
         await storage.delete(String(attachmentRow.storage_file_id))
       } catch {
         // best-effort storage cleanup
+      }
+
+      if (updatedRecordRealtimeScope) {
+        publishMultitableSheetRealtime({
+          spreadsheetId: updatedRecordRealtimeScope.sheetId,
+          actorId: getRequestActorId(req),
+          source: 'multitable',
+          kind: 'attachment-updated',
+          recordId: updatedRecordRealtimeScope.recordId,
+          recordIds: [updatedRecordRealtimeScope.recordId],
+        })
       }
 
       return res.json({ ok: true, data: { deleted: attachmentId } })
@@ -4524,6 +4570,14 @@ export function univerMetaRouter(): Router {
       })
 
       const version = Number((recordRes.rows[0] as any)?.version ?? 1)
+      publishMultitableSheetRealtime({
+        spreadsheetId: sheetId,
+        actorId: getRequestActorId(req),
+        source: 'multitable',
+        kind: 'record-created',
+        recordId,
+        recordIds: [recordId],
+      })
       return res.json({ ok: true, data: { record: { id: recordId, version, data: patch } } })
     } catch (err) {
       if (err instanceof ValidationError) {
@@ -4550,13 +4604,16 @@ export function univerMetaRouter(): Router {
 
     try {
       const pool = poolManager.get()
+      let deletedSheetId: string | null = null
       await pool.transaction(async ({ query }) => {
-        const recordRes = await query('SELECT id, version FROM meta_records WHERE id = $1 FOR UPDATE', [recordId])
+        const recordRes = await query('SELECT id, sheet_id, version FROM meta_records WHERE id = $1 FOR UPDATE', [recordId])
         if ((recordRes as any).rows.length === 0) {
           throw new NotFoundError(`Record not found: ${recordId}`)
         }
 
-        const serverVersion = Number((recordRes as any).rows[0]?.version ?? 1)
+        const currentRow: any = (recordRes as any).rows[0]
+        deletedSheetId = typeof currentRow?.sheet_id === 'string' ? currentRow.sheet_id : null
+        const serverVersion = Number(currentRow?.version ?? 1)
         if (typeof expectedVersion === 'number' && expectedVersion !== serverVersion) {
           throw new VersionConflictError(recordId, serverVersion)
         }
@@ -4569,6 +4626,17 @@ export function univerMetaRouter(): Router {
 
         await query('DELETE FROM meta_records WHERE id = $1', [recordId])
       })
+
+      if (deletedSheetId) {
+        publishMultitableSheetRealtime({
+          spreadsheetId: deletedSheetId,
+          actorId: getRequestActorId(req),
+          source: 'multitable',
+          kind: 'record-deleted',
+          recordId,
+          recordIds: [recordId],
+        })
+      }
 
       return res.json({ ok: true, data: { deleted: recordId } })
     } catch (err) {
@@ -4957,6 +5025,16 @@ export function univerMetaRouter(): Router {
             ),
           )
         : undefined
+
+      if (updates.length > 0) {
+        publishMultitableSheetRealtime({
+          spreadsheetId: sheetId,
+          actorId: getRequestActorId(req),
+          source: 'multitable',
+          kind: 'record-updated',
+          recordIds: updates.map((update) => update.recordId),
+        })
+      }
 
       return res.json({
         ok: true,

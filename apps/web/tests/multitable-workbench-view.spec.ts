@@ -4,6 +4,7 @@ import { computed, createApp, defineComponent, h, nextTick, reactive, ref, type 
 const showErrorSpy = vi.fn()
 const showSuccessSpy = vi.fn()
 const pushSpy = vi.fn().mockResolvedValue(undefined)
+const useMultitableSheetRealtimeMock = vi.fn()
 
 vi.mock('vue-router', async () => {
   const actual = await vi.importActual<typeof import('vue-router')>('vue-router')
@@ -107,6 +108,10 @@ vi.mock('../src/multitable/composables/useMultitableCommentInboxSummary', () => 
 
 vi.mock('../src/multitable/composables/useMultitableCommentRealtime', () => ({
   useMultitableCommentRealtime: vi.fn(),
+}))
+
+vi.mock('../src/multitable/composables/useMultitableSheetRealtime', () => ({
+  useMultitableSheetRealtime: (...args: unknown[]) => useMultitableSheetRealtimeMock(...args),
 }))
 
 vi.mock('../src/multitable/composables/useMultitableCommentPresence', () => ({
@@ -738,6 +743,7 @@ describe('MultitableWorkbench view wiring', () => {
     addCommentSpy = vi.fn()
     resolveCommentSpy = vi.fn()
     mentionInboxSummaryMock = null
+    useMultitableSheetRealtimeMock.mockReset()
     subscribeToMultitableCommentSheetRealtimeMock.mockReset()
     workbenchMock = createWorkbenchMock()
     gridMock = createGridMock()
@@ -796,6 +802,13 @@ describe('MultitableWorkbench view wiring', () => {
   it('syncs external base/sheet/view props after mount', async () => {
     const hostState = mountWorkbench()
     await flushUi()
+
+    expect(useMultitableSheetRealtimeMock).toHaveBeenCalledTimes(1)
+    expect(useMultitableSheetRealtimeMock.mock.calls[0]?.[0]).toEqual(expect.objectContaining({
+      selectedRecordId: expect.any(Object),
+      reloadCurrentSheetPage: expect.any(Function),
+      reloadSelectedRecordContext: expect.any(Function),
+    }))
 
     workbenchMock.syncExternalContext.mockClear()
 
