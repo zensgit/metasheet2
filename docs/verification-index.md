@@ -766,15 +766,15 @@ Entry points:
 
 - Univer full suite:
   - Run: `bash scripts/verify-univer-all.sh`
-  - Outputs under `artifacts/univer-poc/` (see `verification-*.md/json` files)
+  - Current behavior: compatibility wrapper around `scripts/verify-univer-ui-smoke.mjs`
+  - Output: `artifacts/univer-poc/verify-univer-all.json`
   - Latest report: `docs/verification-univer-all-20260101_0103.md`
   - Report: `docs/verification-univer-all-2025-12-27.md`
   - Core mode attempt (blocked in automation): `docs/verification-univer-all-core-2025-12-27.md`
   - Core mode + windowing: `docs/verification-univer-all-core-windowing-2025-12-27.md`
   - Optional flags:
     - `BACKEND_MODE=core` (use Meta(DB))
-    - `RUN_WINDOWING=true`
-    - `RUN_EDITABLE_DEMO=false` (skip editable demo)
+  - Legacy flags `RUN_WINDOWING` and `RUN_EDITABLE_DEMO` are ignored by the compatibility wrapper.
 
 ## CI / Nightly
 
