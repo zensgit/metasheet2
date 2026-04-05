@@ -3120,16 +3120,26 @@ function normalizeAssignmentPayload(value) {
 
 function normalizeShiftPayload(value) {
   const payload = normalizeObjectPayload(value)
-  return {
-    ...payload,
-    workStartTime: firstDefinedValue(payload.workStartTime, payload.work_start_time, payload.startTime, payload.start_time),
-    workEndTime: firstDefinedValue(payload.workEndTime, payload.work_end_time, payload.endTime, payload.end_time),
-    isOvernight: firstDefinedValue(payload.isOvernight, payload.is_overnight),
-    lateGraceMinutes: firstDefinedValue(payload.lateGraceMinutes, payload.late_grace_minutes),
-    earlyGraceMinutes: firstDefinedValue(payload.earlyGraceMinutes, payload.early_grace_minutes),
-    roundingMinutes: firstDefinedValue(payload.roundingMinutes, payload.rounding_minutes),
-    workingDays: firstDefinedValue(payload.workingDays, payload.working_days),
-  }
+  const normalized = { ...payload }
+  normalized.workStartTime = firstDefinedValue(payload.workStartTime, payload.work_start_time, payload.startTime, payload.start_time)
+  normalized.workEndTime = firstDefinedValue(payload.workEndTime, payload.work_end_time, payload.endTime, payload.end_time)
+  normalized.isOvernight = firstDefinedValue(payload.isOvernight, payload.is_overnight)
+  normalized.lateGraceMinutes = firstDefinedValue(payload.lateGraceMinutes, payload.late_grace_minutes)
+  normalized.earlyGraceMinutes = firstDefinedValue(payload.earlyGraceMinutes, payload.early_grace_minutes)
+  normalized.roundingMinutes = firstDefinedValue(payload.roundingMinutes, payload.rounding_minutes)
+  normalized.workingDays = firstDefinedValue(payload.workingDays, payload.working_days)
+  delete normalized.work_start_time
+  delete normalized.startTime
+  delete normalized.start_time
+  delete normalized.work_end_time
+  delete normalized.endTime
+  delete normalized.end_time
+  delete normalized.is_overnight
+  delete normalized.late_grace_minutes
+  delete normalized.early_grace_minutes
+  delete normalized.rounding_minutes
+  delete normalized.working_days
+  return normalized
 }
 
 function normalizeApprovalStepPayload(value) {
@@ -6839,7 +6849,7 @@ function createRbacHelpers(db, logger) {
     }
   }
 
-  function withPermission(permission, handler) {
+  function withAnyPermission(permissions, handler) {
     return async (req, res, next) => {
       const userId = getUserId(req)
       if (!userId) {
@@ -6855,7 +6865,17 @@ function createRbacHelpers(db, logger) {
       try {
         const admin = await isAdmin(userId)
         if (!admin) {
-          const allowed = await userHasPermission(userId, permission)
+          let allowed = false
+          for (const permission of permissions) {
+            if (permission === 'attendance:approve' && await userHasPermission(userId, 'attendance:admin')) {
+              allowed = true
+              break
+            }
+            if (await userHasPermission(userId, permission)) {
+              allowed = true
+              break
+            }
+          }
           if (!allowed) {
             res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: 'Insufficient permissions' } })
             return
@@ -6869,14 +6889,22 @@ function createRbacHelpers(db, logger) {
     }
   }
 
-  async function canAccessOtherUsers(userId) {
+  async function hasAttendanceAdminAccess(userId) {
     if (process.env.RBAC_BYPASS === 'true') return true
     if (await isAdmin(userId)) return true
-    if (await userHasPermission(userId, 'attendance:admin')) return true
+    return userHasPermission(userId, 'attendance:admin')
+  }
+
+  function withPermission(permission, handler) {
+    return withAnyPermission([permission], handler)
+  }
+
+  async function canAccessOtherUsers(userId) {
+    if (await hasAttendanceAdminAccess(userId)) return true
     return userHasPermission(userId, 'attendance:approve')
   }
 
-  return { withPermission, canAccessOtherUsers }
+  return { hasAttendanceAdminAccess, withAnyPermission, withPermission, canAccessOtherUsers }
 }
 
 function normalizeApprovalSteps(value) {
@@ -6931,7 +6959,7 @@ module.exports = {
   async activate(context) {
     const db = context.api.database
     const logger = context.logger
-    const { withPermission, canAccessOtherUsers } = createRbacHelpers(db, logger)
+    const { hasAttendanceAdminAccess, withAnyPermission, withPermission, canAccessOtherUsers } = createRbacHelpers(db, logger)
     const emitEvent = (type, data) => {
       if (context.api?.events?.emit) {
         context.api.events.emit(type, data)
@@ -10728,7 +10756,10 @@ module.exports = {
           if (action === 'approve') {
             const canApprove = await isApproverAllowed(trx, requesterId, currentStep, logger)
             if (!canApprove) {
-              throw new HttpError(403, 'FORBIDDEN', 'Not authorized for this approval step')
+              const adminOverride = await hasAttendanceAdminAccess(requesterId)
+              if (!adminOverride) {
+                throw new HttpError(403, 'FORBIDDEN', 'Not authorized for this approval step')
+              }
             }
           }
 
@@ -11028,13 +11059,13 @@ module.exports = {
     context.api.http.addRoute(
       'POST',
       '/api/attendance/requests/:id/approve',
-      withPermission('attendance:approve', async (req, res) => resolveRequest(req, res, 'approve'))
+      withAnyPermission(['attendance:approve', 'attendance:admin'], async (req, res) => resolveRequest(req, res, 'approve'))
     )
 
     context.api.http.addRoute(
       'POST',
       '/api/attendance/requests/:id/reject',
-      withPermission('attendance:approve', async (req, res) => resolveRequest(req, res, 'reject'))
+      withAnyPermission(['attendance:approve', 'attendance:admin'], async (req, res) => resolveRequest(req, res, 'reject'))
     )
 
     context.api.http.addRoute(
@@ -14760,46 +14791,55 @@ module.exports = {
 	            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
 	            return
 	          }
-	          const maybeConstraint = String(error?.constraint ?? '')
-	          const isIdempotencyUnique = Boolean(idempotencyKey)
-	            && String(error?.code ?? '') === '23505'
-	            && maybeConstraint.includes('uq_attendance_import_batches_idempotency_key')
-		          if (isIdempotencyUnique && await hasImportBatchIdempotencyColumn(db)) {
-		            try {
-		              const existing = await loadIdempotentImportBatch(db, orgId, idempotencyKey)
-			              if (existing) {
-			                const existingRowCount = existing.imported + existing.skipped
-			                const existingEngine = resolveImportEngineFromMeta(existing.meta, existingRowCount)
-			                res.json({
-			                  ok: true,
-			                  data: {
-			                    batchId: existing.batchId,
-			                    imported: existing.imported,
-			                    processedRows: existing.imported,
-			                    failedRows: existing.skipped,
-			                    elapsedMs: 0,
-			                    engine: existingEngine,
-			                    recordUpsertStrategy: resolveImportRecordUpsertStrategyFromMeta(
-			                      existing.meta,
-			                      existingRowCount,
-			                      existingEngine
-			                    ),
-			                    items: [],
-			                    skipped: [],
-			                    csvWarnings: [],
-	                    groupWarnings: [],
-	                    meta: existing.meta,
-	                    idempotent: true,
-	                  },
-	                })
-	                return
-	              }
-	            } catch (_error) {
-	              // Fall through to generic error response.
-	            }
-	          }
-	          logger.error('Attendance import commit failed', error)
-	          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to import attendance' } })
+          const maybeConstraint = String(error?.constraint ?? '')
+          const hasCsvUploadSource = Boolean(resolveImportUploadFileId(parsed.data))
+          const isIdempotencyUnique = Boolean(idempotencyKey)
+            && String(error?.code ?? '') === '23505'
+            && maybeConstraint.includes('uq_attendance_import_batches_idempotency_key')
+          const isConcurrentUploadCleanupRace = Boolean(idempotencyKey)
+            && hasCsvUploadSource
+            && String(error?.code ?? '') === 'ENOENT'
+          if ((isIdempotencyUnique || isConcurrentUploadCleanupRace) && await hasImportBatchIdempotencyColumn(db)) {
+            try {
+              for (let attempt = 0; attempt < 4; attempt += 1) {
+                const existing = await loadIdempotentImportBatch(db, orgId, idempotencyKey)
+                if (existing) {
+                  const existingRowCount = existing.imported + existing.skipped
+                  const existingEngine = resolveImportEngineFromMeta(existing.meta, existingRowCount)
+                  res.json({
+                    ok: true,
+                    data: {
+                      batchId: existing.batchId,
+                      imported: existing.imported,
+                      processedRows: existing.imported,
+                      failedRows: existing.skipped,
+                      elapsedMs: 0,
+                      engine: existingEngine,
+                      recordUpsertStrategy: resolveImportRecordUpsertStrategyFromMeta(
+                        existing.meta,
+                        existingRowCount,
+                        existingEngine
+                      ),
+                      items: [],
+                      skipped: [],
+                      csvWarnings: [],
+                      groupWarnings: [],
+                      meta: existing.meta,
+                      idempotent: true,
+                    },
+                  })
+                  return
+                }
+                if (attempt < 3) {
+                  await new Promise((resolve) => setTimeout(resolve, 25))
+                }
+              }
+            } catch (_error) {
+              // Fall through to generic error response.
+            }
+          }
+          logger.error('Attendance import commit failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to import attendance' } })
 	        }
       })
     )

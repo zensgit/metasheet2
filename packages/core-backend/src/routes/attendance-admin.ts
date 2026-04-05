@@ -33,12 +33,6 @@ const ATTENDANCE_ROLE_TEMPLATES: Record<AttendanceRoleTemplateId, {
   },
 }
 
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
-
-function isUuid(value: string): boolean {
-  return UUID_RE.test(value.trim())
-}
-
 function csvCell(value: unknown): string {
   if (value === null || value === undefined) return ''
   const text = typeof value === 'string' ? value : typeof value === 'number' ? String(value) : JSON.stringify(value)
@@ -255,10 +249,6 @@ function normalizeBatchUserIds(rawIds: unknown[]): { userIds: string[]; invalidU
     const id = String(value || '').trim()
     if (!id || seen.has(id)) continue
     seen.add(id)
-    if (!isUuid(id)) {
-      invalidUserIds.push(id)
-      continue
-    }
     userIds.push(id)
   }
 

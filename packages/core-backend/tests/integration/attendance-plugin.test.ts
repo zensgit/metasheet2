@@ -2661,12 +2661,16 @@ describe('Attendance Plugin Integration', () => {
 
     const cycleSeed = Number.parseInt(runSuffix, 36)
     const safeCycleSeed = Number.isFinite(cycleSeed) ? Math.max(0, cycleSeed) : Date.now()
-    const cycleYear = 2040 + (safeCycleSeed % 20)
-    const cycleMonthNumber = (Math.floor(safeCycleSeed / 7) % 12) + 1
+    const cycleAnchor = new Date(Date.UTC(3000, 0, 1) + (safeCycleSeed % (365 * 4000)) * 24 * 60 * 60 * 1000)
+    cycleAnchor.setUTCDate(1)
+    const cycleYear = cycleAnchor.getUTCFullYear()
+    const cycleMonthNumber = cycleAnchor.getUTCMonth() + 1
     const cycleMonth = String(cycleMonthNumber).padStart(2, '0')
     const cycleAnchorDate = `${cycleYear}-${cycleMonth}-01`
-    const generateMonthNumber = cycleMonthNumber === 12 ? 1 : cycleMonthNumber + 1
-    const generateYear = cycleMonthNumber === 12 ? cycleYear + 1 : cycleYear
+    const generateAnchor = new Date(Date.UTC(cycleYear, cycleMonthNumber - 1, 1))
+    generateAnchor.setUTCMonth(generateAnchor.getUTCMonth() + 1)
+    const generateMonthNumber = generateAnchor.getUTCMonth() + 1
+    const generateYear = generateAnchor.getUTCFullYear()
 
     const payrollCycleCreateRes = await requestJson(`${baseUrl}/api/attendance/payroll-cycles`, {
       method: 'POST',
@@ -3698,7 +3702,6 @@ describe('Attendance Plugin Integration', () => {
     if (!baseUrl) return
 
     const runSuffix = Date.now().toString(36)
-    const uniqueSeed = Array.from(runSuffix).reduce((total, ch) => total + ch.charCodeAt(0), 0)
     const tokenRes = await requestJson(
       `${baseUrl}/api/auth/dev-token?userId=attendance-holiday-item-${runSuffix}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
@@ -3706,11 +3709,10 @@ describe('Attendance Plugin Integration', () => {
     expect(token).toBeTruthy()
     if (!token) return
 
-    const holidayDate = [
-      String(2040 + (uniqueSeed % 10)).padStart(4, '0'),
-      String(((uniqueSeed * 3) % 12) + 1).padStart(2, '0'),
-      String(((uniqueSeed * 7) % 28) + 1).padStart(2, '0'),
-    ].join('-')
+    const futureDayOffset = Number.parseInt(runSuffix, 36) % (365 * 4000)
+    const holidayDate = new Date(Date.UTC(3000, 0, 1) + (futureDayOffset * 24 * 60 * 60 * 1000))
+      .toISOString()
+      .slice(0, 10)
     const holidayCreateRes = await requestJson(`${baseUrl}/api/attendance/holidays`, {
       method: 'POST',
       headers: {
