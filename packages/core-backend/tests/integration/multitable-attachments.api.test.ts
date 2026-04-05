@@ -240,6 +240,11 @@ describe('Multitable attachment API', () => {
         recordId: 'rec_ops_1',
         recordIds: ['rec_ops_1'],
         fieldIds: ['fld_files'],
+        recordPatches: [{
+          recordId: 'rec_ops_1',
+          version: 3,
+          patch: { fld_files: ['att_keep'] },
+        }],
       })
       await expect(fs.stat(path.join(attachmentPath, storedPath))).rejects.toThrow()
     } finally {

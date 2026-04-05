@@ -489,6 +489,26 @@ const structuralRealtimeFieldIds = computed(() => {
   if (grid.groupFieldId.value) next.add(grid.groupFieldId.value)
   return [...next]
 })
+
+function isCellRealtimeLocallyPatchable(fieldId: string): boolean {
+  const field = grid.fields.value.find((candidate) => candidate.id === fieldId)
+  if (!field) return false
+  return !['link', 'attachment', 'lookup', 'rollup', 'formula'].includes(field.type)
+}
+
+function patchDeepLinkedRealtimeRecord(recordId: string, version: number | undefined, patch: Record<string, unknown>): boolean {
+  if (deepLinkedRecord.value?.id !== recordId) return false
+  deepLinkedRecord.value = {
+    ...deepLinkedRecord.value,
+    version: typeof version === 'number' ? version : deepLinkedRecord.value.version,
+    data: {
+      ...deepLinkedRecord.value.data,
+      ...patch,
+    },
+  }
+  return true
+}
+
 const selectedRecordCommentPresence = computed(() => (
   selectedRecordId.value ? commentPresenceState.presenceByRecordId.value[selectedRecordId.value] ?? null : null
 ))
@@ -1847,6 +1867,28 @@ async function mergeRemoteRecordContext(recordId: string): Promise<boolean> {
   }
 }
 
+async function applyRemoteRecordPatchContext(payload: {
+  recordId: string
+  version?: number
+  fieldIds: string[]
+  patch: Record<string, unknown>
+}): Promise<boolean> {
+  const fieldIds = payload.fieldIds.length > 0 ? payload.fieldIds : Object.keys(payload.patch)
+  if (!payload.recordId || fieldIds.length === 0) return false
+  if (fieldIds.some((fieldId) => !isCellRealtimeLocallyPatchable(fieldId))) return false
+
+  let handled = grid.applyRemoteRecordPatch(payload.recordId, {
+    version: payload.version,
+    patch: payload.patch,
+  })
+
+  if (patchDeepLinkedRealtimeRecord(payload.recordId, payload.version, payload.patch)) {
+    handled = true
+  }
+
+  return handled
+}
+
 function removeLocalRealtimeRecord(recordId: string): boolean {
   let handled = grid.removeRemoteRecord(recordId)
   if (selectedRecordId.value === recordId) {
@@ -2098,6 +2140,7 @@ useMultitableSheetRealtime({
     await grid.reloadCurrentPage()
   },
   reloadSelectedRecordContext: refreshSelectedRecordContext,
+  applyRemoteRecordPatch: applyRemoteRecordPatchContext,
   mergeRemoteRecord: mergeRemoteRecordContext,
   removeLocalRecord: removeLocalRealtimeRecord,
 })
