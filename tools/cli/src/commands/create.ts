@@ -53,7 +53,7 @@ export async function createCommand(name: string | undefined, options: CreateOpt
         message: 'Display name:',
         default: (answers: any) => {
           const n = name || answers.name
-          return n.split('-').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ')
+          return n.split('-').map((w: string) => w.charAt(0).toUpperCase() + w.slice(1)).join(' ')
         }
       },
       {
