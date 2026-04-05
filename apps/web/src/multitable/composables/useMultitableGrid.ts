@@ -404,6 +404,16 @@ export function useMultitableGrid(opts: {
 
   // --- Record CRUD ---
 
+  function rejectRowEdit(): false {
+    error.value = 'Record editing is not allowed for this row.'
+    return false
+  }
+
+  function rejectRowDelete(): false {
+    error.value = 'Record deletion is not allowed for this row.'
+    return false
+  }
+
   async function createRecord(data?: Record<string, unknown>) {
     error.value = null
     try {
@@ -420,6 +430,7 @@ export function useMultitableGrid(opts: {
 
   async function deleteRecord(recordId: string): Promise<boolean> {
     error.value = null
+    if (rowActions.value?.canDelete === false) return rejectRowDelete()
     try {
       const row = rows.value.find((r) => r.id === recordId)
       await client.deleteRecord(recordId, row?.version)
@@ -447,6 +458,7 @@ export function useMultitableGrid(opts: {
   ) {
     error.value = null
     conflict.value = null
+    if (rowActions.value?.canEdit === false) return rejectRowEdit()
     const row = rows.value.find((r) => r.id === recordId)
     const oldValue = row?.data[fieldId]
     const oldLinkSummaries = options?.previousLinkSummaries ?? linkSummaries.value[recordId]?.[fieldId]
@@ -493,6 +505,7 @@ export function useMultitableGrid(opts: {
 
   async function undo() {
     if (!canUndo.value) return
+    if (rowActions.value?.canEdit === false) return void rejectRowEdit()
     const edit = editHistory.value[historyIndex.value]
     historyIndex.value--
     const row = rows.value.find((r) => r.id === edit.recordId)
@@ -511,6 +524,7 @@ export function useMultitableGrid(opts: {
 
   async function redo() {
     if (!canRedo.value) return
+    if (rowActions.value?.canEdit === false) return void rejectRowEdit()
     historyIndex.value++
     const edit = editHistory.value[historyIndex.value]
     const row = rows.value.find((r) => r.id === edit.recordId)
