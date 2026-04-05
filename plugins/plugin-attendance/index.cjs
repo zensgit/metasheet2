@@ -7666,7 +7666,7 @@ module.exports = {
 	      const numeric = Number(rowCount ?? 0)
 	      const thresholdReached = Number.isFinite(numeric) && numeric >= ATTENDANCE_IMPORT_COPY_THRESHOLD_ROWS
 	      const isBulkEngine = String(engine ?? '').trim().toLowerCase() === 'bulk'
-	      if (ATTENDANCE_IMPORT_COPY_ENABLED && thresholdReached && isBulkEngine) {
+	      if (thresholdReached && isBulkEngine) {
 	        return 'staging'
 	      }
 	      return 'unnest'
@@ -7690,7 +7690,7 @@ module.exports = {
 	      const numeric = Number(rowCount ?? 0)
 	      const thresholdReached = Number.isFinite(numeric) && numeric >= ATTENDANCE_IMPORT_COPY_THRESHOLD_ROWS
 	      const isBulkEngine = String(engine ?? '').trim().toLowerCase() === 'bulk'
-	      if (ATTENDANCE_IMPORT_COPY_ENABLED && thresholdReached && isBulkEngine) {
+	      if (thresholdReached && isBulkEngine) {
 	        return 'staging'
 	      }
 	      return 'unnest'
@@ -7918,9 +7918,30 @@ module.exports = {
 
 	    const getQueueService = () => context?.services?.queue
 
+	    const buildImportJobProjectionSql = () => `
+	      SELECT
+	        id,
+	        org_id,
+	        batch_id,
+	        created_by,
+	        idempotency_key,
+	        status,
+	        progress,
+	        total,
+	        error,
+	        started_at,
+	        finished_at,
+	        created_at,
+	        updated_at,
+	        CASE
+	          WHEN payload IS NULL THEN NULL
+	          ELSE payload - 'rows' - 'entries' - 'csvText'
+	        END AS payload
+	      FROM attendance_import_jobs`
+
 	    const loadImportJob = async (jobId, orgId) => {
 	      const rows = await db.query(
-	        'SELECT * FROM attendance_import_jobs WHERE id = $1 AND org_id = $2',
+	        `${buildImportJobProjectionSql()} WHERE id = $1 AND org_id = $2`,
 	        [jobId, orgId]
 	      )
 	      return rows.length ? rows[0] : null
@@ -7929,7 +7950,7 @@ module.exports = {
 	    const loadImportJobByIdempotencyKey = async (orgId, idempotencyKey) => {
 	      if (!idempotencyKey) return null
 	      const rows = await db.query(
-	        `SELECT * FROM attendance_import_jobs
+	        `${buildImportJobProjectionSql()}
 	         WHERE org_id = $1 AND idempotency_key = $2
 	         ORDER BY created_at DESC
 	         LIMIT 1`,
@@ -8187,97 +8208,195 @@ module.exports = {
 	      )
 	    }
 
+	    const activeAsyncImportJobIds = new Set()
+
 	    const processAsyncImportCommitJob = async ({ jobId }) => {
 	      const rowId = String(jobId || '').trim()
-	      if (!rowId) return
+	      if (!rowId || activeAsyncImportJobIds.has(rowId)) return
 
-	      const jobRows = await db.query('SELECT * FROM attendance_import_jobs WHERE id = $1', [rowId])
-	      if (!jobRows.length) return
+	      activeAsyncImportJobIds.add(rowId)
+	      try {
+	        const jobRows = await db.query('SELECT * FROM attendance_import_jobs WHERE id = $1', [rowId])
+	        if (!jobRows.length) return
 
-	      const jobRow = jobRows[0]
-	      const orgId = jobRow.org_id ?? DEFAULT_ORG_ID
-	      const batchId = jobRow.batch_id
-	      const requesterId = jobRow.created_by
-	      const payload = normalizeMetadata(jobRow.payload)
-	      const isPreviewJob = payload?.__jobType === 'preview'
-	      const status = normalizeImportJobStatus(jobRow.status)
-	      const idempotencyKey = typeof jobRow.idempotency_key === 'string' ? jobRow.idempotency_key : null
-	      if (status === 'completed') return
+	        const jobRow = jobRows[0]
+	        const orgId = jobRow.org_id ?? DEFAULT_ORG_ID
+	        const batchId = jobRow.batch_id
+	        const requesterId = jobRow.created_by
+	        const payload = normalizeMetadata(jobRow.payload)
+	        const isPreviewJob = payload?.__jobType === 'preview'
+	        const status = normalizeImportJobStatus(jobRow.status)
+	        const idempotencyKey = typeof jobRow.idempotency_key === 'string' ? jobRow.idempotency_key : null
+	        if (status === 'completed') return
 
-	      if (!isPreviewJob) {
-	        // If the batch already exists, treat the job as complete (idempotent re-run).
-	        try {
-	          const batchRows = await db.query(
-	            'SELECT id, status, meta, row_count FROM attendance_import_batches WHERE id = $1 AND org_id = $2',
-	            [batchId, orgId]
-	          )
-	          if (batchRows.length && String(batchRows[0].status ?? '').toLowerCase() === 'committed') {
-	            const batchMeta = normalizeMetadata(batchRows[0].meta)
-	            const rowCount = Math.max(0, Number(batchRows[0].row_count ?? jobRow.total ?? 0))
-	            const { skippedCount, skippedRows } = extractImportJobSkippedSummary(batchMeta)
-	            const processedRows = Math.max(0, rowCount - skippedCount)
+	        if (!isPreviewJob) {
+	          // If the batch already exists, treat the job as complete (idempotent re-run).
+	          try {
+	            const batchRows = await db.query(
+	              'SELECT id, status, meta, row_count FROM attendance_import_batches WHERE id = $1 AND org_id = $2',
+	              [batchId, orgId]
+	            )
+	            if (batchRows.length && String(batchRows[0].status ?? '').toLowerCase() === 'committed') {
+	              const batchMeta = normalizeMetadata(batchRows[0].meta)
+	              const rowCount = Math.max(0, Number(batchRows[0].row_count ?? jobRow.total ?? 0))
+	              const { skippedCount, skippedRows } = extractImportJobSkippedSummary(batchMeta)
+	              const processedRows = Math.max(0, rowCount - skippedCount)
+	              await updateImportJobProgress({
+	                jobId: rowId,
+	                orgId,
+	                status: 'completed',
+	                progress: rowCount,
+	                total: rowCount,
+	                error: null,
+	                finishedAt: true,
+	              })
+	              await db.query(
+	                'UPDATE attendance_import_jobs SET payload = $3::jsonb, updated_at = now() WHERE id = $1 AND org_id = $2',
+	                [
+	                  rowId,
+	                  orgId,
+	                  JSON.stringify(
+	                    buildAsyncCommitJobSummaryPayload({
+	                      basePayload: payload,
+	                      rowCount,
+	                      processedRows,
+	                      failedRows: skippedCount,
+	                      elapsedMs: 0,
+	                      engine: resolveImportEngineFromMeta(batchMeta, rowCount) || resolveImportEngineFromMeta(payload, rowCount),
+	                      recordUpsertStrategy: resolveImportRecordUpsertStrategyFromMeta(
+	                        batchMeta,
+	                        rowCount,
+	                        resolveImportEngineFromMeta(batchMeta, rowCount) || resolveImportEngineFromMeta(payload, rowCount)
+	                      ),
+	                      itemsInsertStrategy: resolveImportItemsInsertStrategyFromMeta(
+	                        batchMeta,
+	                        rowCount,
+	                        resolveImportEngineFromMeta(batchMeta, rowCount) || resolveImportEngineFromMeta(payload, rowCount)
+	                      ),
+	                      chunkConfig: batchMeta?.chunkConfig ?? resolveImportChunkConfig(
+	                        resolveImportEngineFromMeta(batchMeta, rowCount) || resolveImportEngineFromMeta(payload, rowCount)
+	                      ),
+	                      skippedCount,
+	                      skippedRows,
+	                      idempotencyKey,
+	                    })
+	                  ),
+	                ]
+	              )
+	              return
+	            }
+	          } catch (_error) {
+	            // Ignore and proceed - batch may not exist yet.
+	          }
+	        }
+
+	        await updateImportJobProgress({ jobId: rowId, orgId, status: 'running', startedAt: true })
+
+	        if (isPreviewJob) {
+	          try {
+	            await processAsyncImportPreviewJob({
+	              rowId,
+	              orgId,
+	              requesterId,
+	              payload,
+	            })
+	          } catch (error) {
+	            const message = String(error?.message ?? error ?? 'Unknown error')
+	            logger.error('Attendance async import preview failed', error)
 	            await updateImportJobProgress({
 	              jobId: rowId,
 	              orgId,
-	              status: 'completed',
-	              progress: rowCount,
-	              total: rowCount,
-	              error: null,
+	              status: 'failed',
+	              error: message,
 	              finishedAt: true,
 	            })
-	            await db.query(
-	              'UPDATE attendance_import_jobs SET payload = $3::jsonb, updated_at = now() WHERE id = $1 AND org_id = $2',
-	              [
-	                rowId,
-	                orgId,
-	                JSON.stringify(
-	                  buildAsyncCommitJobSummaryPayload({
-	                    basePayload: payload,
-	                    rowCount,
-	                    processedRows,
-	                    failedRows: skippedCount,
-	                    elapsedMs: 0,
-	                    engine: resolveImportEngineFromMeta(batchMeta, rowCount) || resolveImportEngineFromMeta(payload, rowCount),
-	                    recordUpsertStrategy: resolveImportRecordUpsertStrategyFromMeta(
-	                      batchMeta,
-	                      rowCount,
-	                      resolveImportEngineFromMeta(batchMeta, rowCount) || resolveImportEngineFromMeta(payload, rowCount)
-	                    ),
-	                    itemsInsertStrategy: resolveImportItemsInsertStrategyFromMeta(
-	                      batchMeta,
-	                      rowCount,
-	                      resolveImportEngineFromMeta(batchMeta, rowCount) || resolveImportEngineFromMeta(payload, rowCount)
-	                    ),
-	                    chunkConfig: batchMeta?.chunkConfig ?? resolveImportChunkConfig(
-	                      resolveImportEngineFromMeta(batchMeta, rowCount) || resolveImportEngineFromMeta(payload, rowCount)
-	                    ),
-	                    skippedCount,
-	                    skippedRows,
-	                    idempotencyKey,
-	                  })
-	                ),
-	              ]
-	            )
-	            return
 	          }
-	        } catch (_error) {
-	          // Ignore and proceed - batch may not exist yet.
+	          return
 	        }
-	      }
 
-	      await updateImportJobProgress({ jobId: rowId, orgId, status: 'running', startedAt: true })
+	        let lastProgressWriteAt = 0
+	        let lastProgressValue = -1
+	        const onProgress = async ({ imported, total }) => {
+	          const now = Date.now()
+	          const nextProgress = Number(imported ?? 0)
+	          const nextTotal = Number(total ?? 0)
+	          if (!Number.isFinite(nextProgress) || !Number.isFinite(nextTotal)) return
+	          if (nextProgress === lastProgressValue && now - lastProgressWriteAt < ATTENDANCE_IMPORT_ASYNC_PROGRESS_MIN_INTERVAL_MS) return
+	          if (now - lastProgressWriteAt < ATTENDANCE_IMPORT_ASYNC_PROGRESS_MIN_INTERVAL_MS && nextProgress < lastProgressValue + 300) return
 
-	      if (isPreviewJob) {
+	          lastProgressWriteAt = now
+	          lastProgressValue = nextProgress
+	          await updateImportJobProgress({
+	            jobId: rowId,
+	            orgId,
+	            progress: nextProgress,
+	            total: nextTotal,
+	          })
+	        }
+
 	        try {
-	          await processAsyncImportPreviewJob({
-	            rowId,
+	          const commitResult = await commitAttendanceImportPayload({
+	            payload,
 	            orgId,
 	            requesterId,
-	            payload,
+	            batchId,
+	            idempotencyKey,
+	            onProgress,
 	          })
+
+	          await updateImportJobProgress({
+	            jobId: rowId,
+	            orgId,
+	            status: 'completed',
+	            progress: commitResult.imported ?? 0,
+	            total: commitResult.rowCount ?? 0,
+	            error: null,
+	            finishedAt: true,
+	          })
+
+	          const { skippedCount, skippedRows } = extractImportJobSkippedSummary(
+	            commitResult,
+	            commitResult?.meta,
+	            commitResult?.summary
+	          )
+	          // Drop large payload after completion while preserving compact progress metadata.
+		          const summaryPayload = buildAsyncCommitJobSummaryPayload({
+		            basePayload: payload,
+		            rowCount: commitResult.rowCount ?? commitResult.imported ?? 0,
+		            processedRows: commitResult.processedRows ?? commitResult.rowCount ?? 0,
+		            failedRows: Math.max(0, Number(commitResult.failedRows ?? skippedCount ?? 0)),
+		            elapsedMs: Number(commitResult.elapsedMs ?? 0),
+		            engine: commitResult.engine ?? resolveImportEngineFromMeta(payload, commitResult.rowCount ?? 0),
+		            recordUpsertStrategy:
+		              commitResult.recordUpsertStrategy
+		              ?? commitResult?.meta?.recordUpsertStrategy
+		              ?? resolveImportRecordUpsertStrategyFromMeta(
+		                payload,
+		                commitResult.rowCount ?? commitResult.imported ?? 0,
+		                commitResult.engine ?? resolveImportEngineFromMeta(payload, commitResult.rowCount ?? 0)
+		              ),
+		            itemsInsertStrategy:
+		              commitResult.itemsInsertStrategy
+		              ?? commitResult?.meta?.itemsInsertStrategy
+		              ?? resolveImportItemsInsertStrategyFromMeta(
+		                payload,
+		                commitResult.rowCount ?? commitResult.imported ?? 0,
+		                commitResult.engine ?? resolveImportEngineFromMeta(payload, commitResult.rowCount ?? 0)
+		              ),
+		            chunkConfig: commitResult?.meta?.chunkConfig ?? resolveImportChunkConfig(
+		              commitResult.engine ?? resolveImportEngineFromMeta(payload, commitResult.rowCount ?? 0)
+		            ),
+		            skippedCount,
+		            skippedRows,
+		            idempotencyKey,
+		          })
+	          await db.query(
+	            'UPDATE attendance_import_jobs SET payload = $3::jsonb, updated_at = now() WHERE id = $1 AND org_id = $2',
+	            [rowId, orgId, JSON.stringify(summaryPayload)]
+	          )
 	        } catch (error) {
 	          const message = String(error?.message ?? error ?? 'Unknown error')
-	          logger.error('Attendance async import preview failed', error)
+	          logger.error('Attendance async import commit failed', error)
 	          await updateImportJobProgress({
 	            jobId: rowId,
 	            orgId,
@@ -8286,99 +8405,8 @@ module.exports = {
 	            finishedAt: true,
 	          })
 	        }
-	        return
-	      }
-
-	      let lastProgressWriteAt = 0
-	      let lastProgressValue = -1
-	      const onProgress = async ({ imported, total }) => {
-	        const now = Date.now()
-	        const nextProgress = Number(imported ?? 0)
-	        const nextTotal = Number(total ?? 0)
-	        if (!Number.isFinite(nextProgress) || !Number.isFinite(nextTotal)) return
-	        if (nextProgress === lastProgressValue && now - lastProgressWriteAt < ATTENDANCE_IMPORT_ASYNC_PROGRESS_MIN_INTERVAL_MS) return
-	        if (now - lastProgressWriteAt < ATTENDANCE_IMPORT_ASYNC_PROGRESS_MIN_INTERVAL_MS && nextProgress < lastProgressValue + 300) return
-
-	        lastProgressWriteAt = now
-	        lastProgressValue = nextProgress
-	        await updateImportJobProgress({
-	          jobId: rowId,
-	          orgId,
-	          progress: nextProgress,
-	          total: nextTotal,
-	        })
-	      }
-
-	      try {
-	        const commitResult = await commitAttendanceImportPayload({
-	          payload,
-	          orgId,
-	          requesterId,
-	          batchId,
-	          idempotencyKey,
-	          onProgress,
-	        })
-
-	        await updateImportJobProgress({
-	          jobId: rowId,
-	          orgId,
-	          status: 'completed',
-	          progress: commitResult.imported ?? 0,
-	          total: commitResult.rowCount ?? 0,
-	          error: null,
-	          finishedAt: true,
-	        })
-
-	        const { skippedCount, skippedRows } = extractImportJobSkippedSummary(
-	          commitResult,
-	          commitResult?.meta,
-	          commitResult?.summary
-	        )
-	        // Drop large payload after completion while preserving compact progress metadata.
-		        const summaryPayload = buildAsyncCommitJobSummaryPayload({
-		          basePayload: payload,
-		          rowCount: commitResult.rowCount ?? commitResult.imported ?? 0,
-		          processedRows: commitResult.processedRows ?? commitResult.rowCount ?? 0,
-		          failedRows: Math.max(0, Number(commitResult.failedRows ?? skippedCount ?? 0)),
-		          elapsedMs: Number(commitResult.elapsedMs ?? 0),
-		          engine: commitResult.engine ?? resolveImportEngineFromMeta(payload, commitResult.rowCount ?? 0),
-		          recordUpsertStrategy:
-		            commitResult.recordUpsertStrategy
-		            ?? commitResult?.meta?.recordUpsertStrategy
-		            ?? resolveImportRecordUpsertStrategyFromMeta(
-		              payload,
-		              commitResult.rowCount ?? commitResult.imported ?? 0,
-		              commitResult.engine ?? resolveImportEngineFromMeta(payload, commitResult.rowCount ?? 0)
-		            ),
-		          itemsInsertStrategy:
-		            commitResult.itemsInsertStrategy
-		            ?? commitResult?.meta?.itemsInsertStrategy
-		            ?? resolveImportItemsInsertStrategyFromMeta(
-		              payload,
-		              commitResult.rowCount ?? commitResult.imported ?? 0,
-		              commitResult.engine ?? resolveImportEngineFromMeta(payload, commitResult.rowCount ?? 0)
-		            ),
-		          chunkConfig: commitResult?.meta?.chunkConfig ?? resolveImportChunkConfig(
-		            commitResult.engine ?? resolveImportEngineFromMeta(payload, commitResult.rowCount ?? 0)
-		          ),
-		          skippedCount,
-		          skippedRows,
-		          idempotencyKey,
-		        })
-	        await db.query(
-	          'UPDATE attendance_import_jobs SET payload = $3::jsonb, updated_at = now() WHERE id = $1 AND org_id = $2',
-	          [rowId, orgId, JSON.stringify(summaryPayload)]
-	        )
-	      } catch (error) {
-	        const message = String(error?.message ?? error ?? 'Unknown error')
-	        logger.error('Attendance async import commit failed', error)
-	        await updateImportJobProgress({
-	          jobId: rowId,
-	          orgId,
-	          status: 'failed',
-	          error: message,
-	          finishedAt: true,
-	        })
+	      } finally {
+	        activeAsyncImportJobIds.delete(rowId)
 	      }
 	    }
 
@@ -9242,6 +9270,7 @@ module.exports = {
 	      })
 	    }
 
+	    const attendanceImportAsyncStartupCutoff = new Date().toISOString()
 	    if (ATTENDANCE_IMPORT_ASYNC_ENABLED) {
 	      // Re-enqueue queued/running jobs on startup (e.g. after a restart). This is best-effort and
 	      // should run for both queue-backed and fallback in-process modes.
@@ -9251,9 +9280,10 @@ module.exports = {
 	            `SELECT id, org_id
 	             FROM attendance_import_jobs
 	             WHERE status IN ('queued', 'running')
+	               AND created_at < $1::timestamptz
 	             ORDER BY created_at ASC
 	             LIMIT 50`,
-	            []
+	            [attendanceImportAsyncStartupCutoff]
 	          )
 	          for (const row of rows) {
 	            await enqueueImportJob(row.id)
