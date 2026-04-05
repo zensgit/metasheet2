@@ -53,6 +53,11 @@ export interface GridConflictState {
   nextLinkSummaries?: LinkedRecordSummary[]
 }
 
+type RemoteRecordMergeOptions = {
+  linkSummaries?: Record<string, LinkedRecordSummary[]>
+  attachmentSummaries?: Record<string, MetaAttachment[]>
+}
+
 // --- Serialisation helpers ---
 
 export function buildSortInfo(rules: SortRule[]): { rules: Array<{ fieldId: string; desc: boolean }> } | undefined {
@@ -609,6 +614,71 @@ export function useMultitableGrid(opts: {
     }
   }
 
+  function replaceRecordLinkSummaries(recordId: string, summaries?: Record<string, LinkedRecordSummary[]>) {
+    const normalized = summaries && Object.keys(summaries).length > 0 ? summaries : null
+    if (!normalized) {
+      const next = { ...linkSummaries.value }
+      delete next[recordId]
+      linkSummaries.value = next
+      return
+    }
+    linkSummaries.value = {
+      ...linkSummaries.value,
+      [recordId]: normalized,
+    }
+  }
+
+  function replaceRecordAttachmentSummaries(recordId: string, summaries?: Record<string, MetaAttachment[]>) {
+    const normalized = summaries && Object.keys(summaries).length > 0 ? summaries : null
+    if (!normalized) {
+      const next = { ...attachmentSummaries.value }
+      delete next[recordId]
+      attachmentSummaries.value = next
+      return
+    }
+    attachmentSummaries.value = {
+      ...attachmentSummaries.value,
+      [recordId]: normalized,
+    }
+  }
+
+  function mergeRemoteRecord(record: MetaRecord, options?: RemoteRecordMergeOptions): boolean {
+    const index = rows.value.findIndex((row) => row.id === record.id)
+    if (index < 0) return false
+    const nextRows = [...rows.value]
+    nextRows[index] = {
+      ...nextRows[index],
+      version: record.version,
+      data: { ...record.data },
+    }
+    rows.value = nextRows
+    replaceRecordLinkSummaries(record.id, options?.linkSummaries)
+    replaceRecordAttachmentSummaries(record.id, options?.attachmentSummaries)
+    return true
+  }
+
+  function removeRemoteRecord(recordId: string): boolean {
+    const nextRows = rows.value.filter((row) => row.id !== recordId)
+    if (nextRows.length === rows.value.length) return false
+    rows.value = nextRows
+
+    const nextLinkSummaries = { ...linkSummaries.value }
+    delete nextLinkSummaries[recordId]
+    linkSummaries.value = nextLinkSummaries
+
+    const nextAttachmentSummaries = { ...attachmentSummaries.value }
+    delete nextAttachmentSummaries[recordId]
+    attachmentSummaries.value = nextAttachmentSummaries
+
+    const nextTotal = Math.max(0, Number(page.value.total ?? nextRows.length) - 1)
+    page.value = {
+      ...page.value,
+      total: nextTotal,
+      hasMore: page.value.offset + nextRows.length < nextTotal,
+    }
+    return true
+  }
+
   // --- Column width ---
 
   function setColumnWidth(fieldId: string, width: number) {
@@ -645,6 +715,7 @@ export function useMultitableGrid(opts: {
     addFilterRule, updateFilterRule, removeFilterRule, clearFilters,
     applySortFilter,
     createRecord, deleteRecord, patchCell,
+    mergeRemoteRecord, removeRemoteRecord,
     undo, redo, clearEditHistory, dismissConflict, retryConflict,
     setColumnWidth, setGroupField,
     setSearchQuery,
