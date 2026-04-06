@@ -1203,6 +1203,55 @@ describe('Multitable sheet-scoped permissions API', () => {
     })
   })
 
+  test('allows records summary when sheet read grant exists without global multitable permission', async () => {
+    const { app } = await createApp({
+      queryHandler: async (sql, params) => {
+        if (sql.includes('SELECT id FROM meta_sheets WHERE id = $1 AND deleted_at IS NULL')) {
+          expect(params).toEqual(['sheet_open'])
+          return { rows: [{ id: 'sheet_open' }] }
+        }
+        if (sql.includes('FROM spreadsheet_permissions')) {
+          expect(params).toEqual(['user_sheet_acl_1', ['sheet_open']])
+          return {
+            rows: [{ sheet_id: 'sheet_open', perm_code: 'spreadsheet:read', subject_type: 'user' }],
+          }
+        }
+        if (sql.includes('SELECT id, name, type FROM meta_fields WHERE sheet_id = $1 ORDER BY "order" ASC, id ASC')) {
+          expect(params).toEqual(['sheet_open'])
+          return {
+            rows: [{ id: 'fld_title', name: 'Title', type: 'string' }],
+          }
+        }
+        if (sql.includes('SELECT id, data FROM meta_records WHERE sheet_id = $1 ORDER BY created_at ASC, id ASC')) {
+          expect(params).toEqual(['sheet_open'])
+          return {
+            rows: [
+              { id: 'rec_1', data: { fld_title: 'Alpha' } },
+              { id: 'rec_2', data: { fld_title: 'Beta' } },
+            ],
+          }
+        }
+        throw new Error(`Unhandled SQL in test: ${sql}`)
+      },
+    })
+
+    const response = await request(app)
+      .get('/api/multitable/records-summary')
+      .query({ sheetId: 'sheet_open' })
+      .expect(200)
+
+    expect(response.body.data.records).toEqual([
+      { id: 'rec_1', display: 'Alpha' },
+      { id: 'rec_2', display: 'Beta' },
+    ])
+    expect(response.body.data.page).toMatchObject({
+      offset: 0,
+      limit: 50,
+      total: 2,
+      hasMore: false,
+    })
+  })
+
   test('rejects link options when target sheet permission has no read access', async () => {
     const { app } = await createApp({
       tokenPerms: ['multitable:read'],
@@ -1243,6 +1292,68 @@ describe('Multitable sheet-scoped permissions API', () => {
       ok: false,
       error: { code: 'FORBIDDEN', message: 'Insufficient permissions' },
     })
+  })
+
+  test('allows link options when source and target sheets are readable via sheet grants', async () => {
+    const { app } = await createApp({
+      queryHandler: async (sql, params) => {
+        if (sql.includes('SELECT id, sheet_id, name, type, property FROM meta_fields WHERE id = $1')) {
+          expect(params).toEqual(['fld_vendor_link'])
+          return {
+            rows: [{
+              id: 'fld_vendor_link',
+              sheet_id: 'sheet_source',
+              name: 'Vendor',
+              type: 'link',
+              property: { foreignSheetId: 'sheet_target' },
+            }],
+          }
+        }
+        if (sql.includes('FROM spreadsheet_permissions')) {
+          if (JSON.stringify(params) === JSON.stringify(['user_sheet_acl_1', ['sheet_source']])) {
+            return { rows: [{ sheet_id: 'sheet_source', perm_code: 'spreadsheet:read', subject_type: 'user' }] }
+          }
+          if (JSON.stringify(params) === JSON.stringify(['user_sheet_acl_1', ['sheet_target']])) {
+            return { rows: [{ sheet_id: 'sheet_target', perm_code: 'spreadsheet:write-own', subject_type: 'user' }] }
+          }
+        }
+        if (sql.includes('SELECT id, base_id, name, description FROM meta_sheets WHERE id = $1')) {
+          expect(params).toEqual(['sheet_target'])
+          return { rows: [{ id: 'sheet_target', base_id: 'base_ops', name: 'Vendors', description: null }] }
+        }
+        if (sql.includes('SELECT id, name, type FROM meta_fields WHERE sheet_id = $1 ORDER BY "order" ASC, id ASC')) {
+          expect(params).toEqual(['sheet_target'])
+          return {
+            rows: [{ id: 'fld_vendor_name', name: 'Vendor Name', type: 'string' }],
+          }
+        }
+        if (sql.includes('SELECT id, data FROM meta_records WHERE sheet_id = $1 ORDER BY created_at ASC, id ASC')) {
+          expect(params).toEqual(['sheet_target'])
+          return {
+            rows: [
+              { id: 'vendor_1', data: { fld_vendor_name: 'Acme' } },
+              { id: 'vendor_2', data: { fld_vendor_name: 'Globex' } },
+            ],
+          }
+        }
+        throw new Error(`Unhandled SQL in test: ${sql}`)
+      },
+    })
+
+    const response = await request(app)
+      .get('/api/multitable/fields/fld_vendor_link/link-options')
+      .expect(200)
+
+    expect(response.body.data.targetSheet).toEqual({
+      id: 'sheet_target',
+      baseId: 'base_ops',
+      name: 'Vendors',
+      description: null,
+    })
+    expect(response.body.data.records).toEqual([
+      { id: 'vendor_1', display: 'Acme' },
+      { id: 'vendor_2', display: 'Globex' },
+    ])
   })
 
   test('redacts lookup, rollup, and link summaries when foreign sheet permission has no read access', async () => {
