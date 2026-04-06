@@ -31,6 +31,20 @@ export async function up(db: Kysely<unknown>): Promise<void> {
   `.execute(db)
 
   await sql`
+    DO $$
+    BEGIN
+      IF EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conname = 'spreadsheet_permissions_pkey'
+          AND conrelid = 'spreadsheet_permissions'::regclass
+      ) THEN
+        ALTER TABLE spreadsheet_permissions DROP CONSTRAINT spreadsheet_permissions_pkey;
+      END IF;
+    END $$;
+  `.execute(db)
+
+  await sql`
     ALTER TABLE spreadsheet_permissions
     ALTER COLUMN user_id DROP NOT NULL
   `.execute(db)
@@ -43,20 +57,6 @@ export async function up(db: Kysely<unknown>): Promise<void> {
   await sql`
     ALTER TABLE spreadsheet_permissions
     ALTER COLUMN subject_id SET NOT NULL
-  `.execute(db)
-
-  await sql`
-    DO $$
-    BEGIN
-      IF EXISTS (
-        SELECT 1
-        FROM pg_constraint
-        WHERE conname = 'spreadsheet_permissions_pkey'
-          AND conrelid = 'spreadsheet_permissions'::regclass
-      ) THEN
-        ALTER TABLE spreadsheet_permissions DROP CONSTRAINT spreadsheet_permissions_pkey;
-      END IF;
-    END $$;
   `.execute(db)
 
   await sql`
@@ -111,13 +111,13 @@ export async function down(db: Kysely<unknown>): Promise<void> {
 
   await sql`
     ALTER TABLE spreadsheet_permissions
-    ADD CONSTRAINT spreadsheet_permissions_pkey
-    PRIMARY KEY (sheet_id, user_id, perm_code)
+    ALTER COLUMN user_id SET NOT NULL
   `.execute(db)
 
   await sql`
     ALTER TABLE spreadsheet_permissions
-    ALTER COLUMN user_id SET NOT NULL
+    ADD CONSTRAINT spreadsheet_permissions_pkey
+    PRIMARY KEY (sheet_id, user_id, perm_code)
   `.execute(db)
 
   await sql`
