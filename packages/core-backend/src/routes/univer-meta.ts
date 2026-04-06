@@ -1589,6 +1589,28 @@ function applyContextSheetReadGrant(
   }
 }
 
+async function filterReadableSheetRowsForAccess<T extends { id: string }>(
+  query: QueryFn,
+  sheetRows: T[],
+  access: ResolvedRequestAccess,
+  baseCapabilities?: MultitableCapabilities,
+): Promise<T[]> {
+  if (sheetRows.length === 0 || access.isAdminRole) return sheetRows
+  const effectiveCapabilities = baseCapabilities ?? deriveCapabilities(access.permissions, access.isAdminRole)
+  const scopeMap = await loadSheetPermissionScopeMap(
+    query,
+    sheetRows.map((row) => String(row.id)),
+    access.userId,
+  )
+  return sheetRows.filter((row) =>
+    canReadWithSheetGrant(
+      effectiveCapabilities,
+      scopeMap.get(String(row.id)),
+      access.isAdminRole,
+    ),
+  )
+}
+
 async function resolveSheetCapabilities(
   req: Request,
   query: QueryFn,
@@ -2543,9 +2565,13 @@ class PermissionError extends Error {
 export function univerMetaRouter(): Router {
   const router = Router()
 
-  router.get('/bases', rbacGuard('multitable', 'read'), async (_req: Request, res: Response) => {
+  router.get('/bases', async (req: Request, res: Response) => {
     try {
       const pool = poolManager.get()
+      const access = await resolveRequestAccess(req)
+      if (!access.userId) {
+        return res.status(401).json({ error: 'Authentication required' })
+      }
       const result = await pool.query(
         `SELECT id, name, icon, color, owner_id, workspace_id
          FROM meta_bases
@@ -2553,7 +2579,27 @@ export function univerMetaRouter(): Router {
          ORDER BY created_at ASC
          LIMIT 200`,
       )
-      const bases = result.rows.map((row: any) => serializeBaseRow(row))
+      const visibleSheetRows = filterVisibleSheetRows((
+        await pool.query(
+          'SELECT id, base_id, name, description FROM meta_sheets WHERE deleted_at IS NULL ORDER BY created_at ASC LIMIT 200',
+        )
+      ).rows as any[])
+      const readableSheetRows = await filterReadableSheetRowsForAccess(
+        pool.query.bind(pool),
+        visibleSheetRows.map((row: any) => ({
+          id: String(row.id),
+          base_id: typeof row.base_id === 'string' ? row.base_id : null,
+        })),
+        access,
+      )
+      const readableBaseIds = new Set(
+        readableSheetRows
+          .map((row) => row.base_id)
+          .filter((baseId): baseId is string => typeof baseId === 'string' && baseId.length > 0),
+      )
+      const bases = result.rows
+        .filter((row: any) => readableBaseIds.has(String(row.id)))
+        .map((row: any) => serializeBaseRow(row))
       return res.json({ ok: true, data: { bases } })
     } catch (err) {
       const hint = getDbNotReadyMessage(err)
@@ -2781,13 +2827,22 @@ export function univerMetaRouter(): Router {
     }
   })
 
-  router.get('/sheets', rbacGuard('multitable', 'read'), async (_req: Request, res: Response) => {
+  router.get('/sheets', async (req: Request, res: Response) => {
     try {
       const pool = poolManager.get()
+      const access = await resolveRequestAccess(req)
+      if (!access.userId) {
+        return res.status(401).json({ error: 'Authentication required' })
+      }
       const result = await pool.query(
         'SELECT id, base_id, name, description FROM meta_sheets WHERE deleted_at IS NULL ORDER BY created_at ASC LIMIT 200',
       )
-      const sheets = filterVisibleSheetRows((result.rows ?? []) as any[]).map((r: any) => ({
+      const readableSheetRows = await filterReadableSheetRowsForAccess(
+        pool.query.bind(pool),
+        filterVisibleSheetRows((result.rows ?? []) as any[]),
+        access,
+      )
+      const sheets = readableSheetRows.map((r: any) => ({
         id: String(r.id),
         baseId: typeof r.base_id === 'string' ? r.base_id : null,
         name: String(r.name),
