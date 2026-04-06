@@ -269,9 +269,9 @@ describe('Multitable sheet-scoped permissions API', () => {
 
     expect(response.body.data.capabilities).toMatchObject({
       canRead: true,
-      canCreateRecord: false,
-      canEditRecord: false,
-      canDeleteRecord: false,
+      canCreateRecord: true,
+      canEditRecord: true,
+      canDeleteRecord: true,
       canManageFields: false,
       canManageSheetAccess: false,
       canManageViews: false,
@@ -410,13 +410,13 @@ describe('Multitable sheet-scoped permissions API', () => {
 
     expect(formResponse.body.data.capabilities).toMatchObject({
       canRead: true,
-      canCreateRecord: false,
-      canEditRecord: false,
-      canDeleteRecord: false,
+      canCreateRecord: true,
+      canEditRecord: true,
+      canDeleteRecord: true,
     })
     expect(formResponse.body.data.rowActions).toEqual({
-      canEdit: false,
-      canDelete: false,
+      canEdit: true,
+      canDelete: true,
       canComment: false,
     })
 
@@ -426,12 +426,13 @@ describe('Multitable sheet-scoped permissions API', () => {
 
     expect(recordResponse.body.data.capabilities).toMatchObject({
       canRead: true,
-      canEditRecord: false,
-      canDeleteRecord: false,
+      canCreateRecord: true,
+      canEditRecord: true,
+      canDeleteRecord: true,
     })
     expect(recordResponse.body.data.rowActions).toEqual({
-      canEdit: false,
-      canDelete: false,
+      canEdit: true,
+      canDelete: true,
       canComment: false,
     })
   })
@@ -541,7 +542,7 @@ describe('Multitable sheet-scoped permissions API', () => {
 
   test('returns owner-scoped row action overrides when sheet permission is write-own', async () => {
     const { app } = await createApp({
-      tokenPerms: ['multitable:read', 'multitable:write', 'comments:write'],
+      tokenPerms: ['comments:write'],
       queryHandler: async (sql, params) => {
         if (sql.includes('FROM spreadsheet_permissions')) {
           expect(params).toEqual(['user_sheet_acl_1', ['sheet_ops']])
@@ -612,9 +613,9 @@ describe('Multitable sheet-scoped permissions API', () => {
     })
   })
 
-  test('returns record-specific row actions and rejects foreign patches when sheet permission is write-own', async () => {
+  test('returns record-specific row actions and rejects foreign deletes when sheet permission is write-own without global multitable permission', async () => {
     const { app } = await createApp({
-      tokenPerms: ['multitable:read', 'multitable:write', 'comments:write'],
+      tokenPerms: ['comments:write'],
       queryHandler: async (sql, params) => {
         if (sql.includes('FROM spreadsheet_permissions')) {
           expect(params).toEqual(['user_sheet_acl_1', ['sheet_ops']])
@@ -702,6 +703,178 @@ describe('Multitable sheet-scoped permissions API', () => {
       ok: false,
       error: { code: 'FORBIDDEN', message: 'Record deletion is not allowed for this row' },
     })
+  })
+
+  test('allows create, form submit, patch, and own delete when sheet permission is write-own without global multitable permission', async () => {
+    const records = new Map<string, { id: string; sheetId: string; version: number; data: Record<string, unknown>; createdBy: string | null }>([
+      ['rec_owned', { id: 'rec_owned', sheetId: 'sheet_ops', version: 3, data: { fld_name: 'Mine' }, createdBy: 'user_sheet_acl_1' }],
+    ])
+
+    const { app } = await createApp({
+      tokenPerms: ['comments:write'],
+      queryHandler: async (sql, params) => {
+        if (sql.includes('FROM spreadsheet_permissions')) {
+          expect(params).toEqual(['user_sheet_acl_1', ['sheet_ops']])
+          return {
+            rows: [
+              { sheet_id: 'sheet_ops', perm_code: 'spreadsheet:read', subject_type: 'user' },
+              { sheet_id: 'sheet_ops', perm_code: 'spreadsheet:write-own', subject_type: 'user' },
+            ],
+          }
+        }
+        if (sql.includes('SELECT id FROM meta_sheets WHERE id = $1 AND deleted_at IS NULL')) {
+          expect(params).toEqual(['sheet_ops'])
+          return { rows: [{ id: 'sheet_ops' }] }
+        }
+        if (sql.includes('SELECT id, base_id, name, description FROM meta_sheets WHERE id = $1')) {
+          expect(params).toEqual(['sheet_ops'])
+          return { rows: [{ id: 'sheet_ops', base_id: 'base_ops', name: 'Ops', description: null }] }
+        }
+        if (sql.includes('SELECT id, sheet_id, name, type, filter_info, sort_info, group_info, hidden_field_ids, config FROM meta_views WHERE id = $1')) {
+          expect(params).toEqual(['view_form_ops'])
+          return {
+            rows: [{
+              id: 'view_form_ops',
+              sheet_id: 'sheet_ops',
+              name: 'Ops Form',
+              type: 'form',
+              filter_info: {},
+              sort_info: {},
+              group_info: {},
+              hidden_field_ids: [],
+              config: {},
+            }],
+          }
+        }
+        if (sql.includes('SELECT id, type, property FROM meta_fields WHERE sheet_id = $1')) {
+          expect(params).toEqual(['sheet_ops'])
+          return {
+            rows: [{ id: 'fld_name', type: 'string', property: {} }],
+          }
+        }
+        if (sql.includes('SELECT id, name, type, property, "order" FROM meta_fields WHERE sheet_id = $1')) {
+          expect(params).toEqual(['sheet_ops'])
+          return {
+            rows: [{ id: 'fld_name', name: 'Name', type: 'string', property: {}, order: 1 }],
+          }
+        }
+        if (sql.includes('SELECT id, name, type, property FROM meta_fields WHERE sheet_id = $1')) {
+          expect(params).toEqual(['sheet_ops'])
+          return {
+            rows: [{ id: 'fld_name', name: 'Name', type: 'string', property: {} }],
+          }
+        }
+        if (sql.includes('INSERT INTO meta_records (id, sheet_id, data, version, created_by)')) {
+          const [recordId, sheetId, dataJson, _version, createdBy] = params as [string, string, string, number, string]
+          const next = {
+            id: recordId,
+            sheetId,
+            version: 1,
+            data: JSON.parse(dataJson),
+            createdBy,
+          }
+          records.set(recordId, next)
+          return { rows: [{ id: recordId, version: 1 }] }
+        }
+        if (sql.includes('SELECT id, version, data FROM meta_records WHERE id = $1 AND sheet_id = $2')) {
+          const recordId = String(params?.[0] ?? '')
+          expect(params?.[1]).toEqual('sheet_ops')
+          const row = records.get(recordId)
+          return {
+            rows: row ? [{ id: row.id, version: row.version, data: row.data }] : [],
+          }
+        }
+        if (sql.includes('SELECT id, version, created_by FROM meta_records WHERE sheet_id = $1 AND id = $2 FOR UPDATE')) {
+          expect(params?.[0]).toEqual('sheet_ops')
+          const recordId = String(params?.[1] ?? '')
+          const row = records.get(recordId)
+          return {
+            rows: row ? [{ id: row.id, version: row.version, created_by: row.createdBy }] : [],
+          }
+        }
+        if (sql.includes('UPDATE meta_records') && sql.includes('WHERE sheet_id = $2 AND id = $3')) {
+          const patch = JSON.parse(String(params?.[0] ?? '{}')) as Record<string, unknown>
+          const recordId = String(params?.[2] ?? '')
+          const row = records.get(recordId)
+          if (!row) return { rows: [] }
+          row.version += 1
+          row.data = { ...row.data, ...patch }
+          records.set(recordId, row)
+          return { rows: [{ version: row.version }] }
+        }
+        if (sql.includes('SELECT record_id FROM meta_links WHERE foreign_record_id = ANY($1::text[])')) {
+          expect(params).toEqual([['rec_owned']])
+          return { rows: [] }
+        }
+        if (sql.includes('SELECT id, sheet_id, created_by FROM meta_records WHERE id = $1')) {
+          expect(params).toEqual(['rec_owned'])
+          const row = records.get('rec_owned')
+          return {
+            rows: row ? [{ id: row.id, sheet_id: row.sheetId, created_by: row.createdBy }] : [],
+          }
+        }
+        if (sql.includes('SELECT id, sheet_id, version FROM meta_records WHERE id = $1 FOR UPDATE')) {
+          expect(params).toEqual(['rec_owned'])
+          const row = records.get('rec_owned')
+          return {
+            rows: row ? [{ id: row.id, sheet_id: row.sheetId, version: row.version }] : [],
+          }
+        }
+        if (sql.includes('DELETE FROM meta_links WHERE record_id = $1 OR foreign_record_id = $1')) {
+          expect(params).toEqual(['rec_owned'])
+          return { rows: [] }
+        }
+        if (sql.includes('DELETE FROM meta_records WHERE id = $1')) {
+          expect(params).toEqual(['rec_owned'])
+          records.delete('rec_owned')
+          return { rows: [] }
+        }
+        throw new Error(`Unhandled SQL in test: ${sql}`)
+      },
+    })
+
+    const createResponse = await request(app)
+      .post('/api/multitable/records')
+      .send({ sheetId: 'sheet_ops', data: { fld_name: 'Created via grid' } })
+      .expect(200)
+    expect(createResponse.body.data.record).toMatchObject({
+      version: 1,
+      data: { fld_name: 'Created via grid' },
+    })
+
+    const submitResponse = await request(app)
+      .post('/api/multitable/views/view_form_ops/submit')
+      .send({ data: { fld_name: 'Created via form' } })
+      .expect(200)
+    expect(submitResponse.body.data.mode).toBe('create')
+    expect(submitResponse.body.data.record).toMatchObject({
+      version: 1,
+      data: { fld_name: 'Created via form' },
+    })
+
+    const patchResponse = await request(app)
+      .post('/api/multitable/patch')
+      .send({
+        sheetId: 'sheet_ops',
+        changes: [{
+          recordId: 'rec_owned',
+          fieldId: 'fld_name',
+          value: 'Mine updated',
+          expectedVersion: 3,
+        }],
+      })
+      .expect(200)
+    expect(patchResponse.body.data.updated).toEqual([{ recordId: 'rec_owned', version: 4 }])
+    expect(records.get('rec_owned')?.data).toEqual({ fld_name: 'Mine updated' })
+
+    const deleteResponse = await request(app)
+      .delete('/api/multitable/records/rec_owned')
+      .expect(200)
+    expect(deleteResponse.body).toEqual({
+      ok: true,
+      data: { deleted: 'rec_owned' },
+    })
+    expect(records.has('rec_owned')).toBe(false)
   })
 
   test('rejects field, view, person preset, and sheet management when sheet permission is read-only', async () => {

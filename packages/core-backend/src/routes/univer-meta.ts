@@ -1599,6 +1599,23 @@ function applyContextSheetReadGrant(
   }
 }
 
+function applyContextSheetRecordWriteGrant(
+  capabilities: MultitableCapabilities,
+  scope: SheetPermissionScope | undefined,
+  isAdminRole: boolean,
+): MultitableCapabilities {
+  const scoped = applyContextSheetReadGrant(capabilities, scope, isAdminRole)
+  if (isAdminRole || !scope?.hasAssignments) return scoped
+  const canWriteAnyRecord = scope.canRead && (scope.canWrite || scope.canWriteOwn)
+  if (!canWriteAnyRecord) return scoped
+  return {
+    ...scoped,
+    canCreateRecord: true,
+    canEditRecord: true,
+    canDeleteRecord: true,
+  }
+}
+
 async function filterReadableSheetRowsForAccess<T extends { id: string }>(
   query: QueryFn,
   sheetRows: T[],
@@ -1632,7 +1649,7 @@ async function resolveSheetCapabilities(
   const sheetScope = scopeMap.get(sheetId)
   return {
     access,
-    capabilities: applySheetPermissionScope(baseCapabilities, sheetScope, access.isAdminRole),
+    capabilities: applyContextSheetRecordWriteGrant(baseCapabilities, sheetScope, access.isAdminRole),
     ...(sheetScope ? { sheetScope } : {}),
   }
 }
@@ -1648,7 +1665,7 @@ async function resolveSheetReadableCapabilities(
   const sheetScope = scopeMap.get(sheetId)
   return {
     access,
-    capabilities: applyContextSheetReadGrant(baseCapabilities, sheetScope, access.isAdminRole),
+    capabilities: applyContextSheetRecordWriteGrant(baseCapabilities, sheetScope, access.isAdminRole),
     ...(sheetScope ? { sheetScope } : {}),
   }
 }
@@ -2772,7 +2789,7 @@ export function univerMetaRouter(): Router {
         return sendForbidden(res)
       }
       const capabilities = effectiveSheetId
-        ? applyContextSheetReadGrant(
+        ? applyContextSheetRecordWriteGrant(
             baseCapabilities,
             sheetPermissionScopeMap.get(effectiveSheetId),
             access.isAdminRole,
@@ -4181,7 +4198,7 @@ export function univerMetaRouter(): Router {
     }
   })
 
-  router.post('/views/:viewId/submit', rbacGuard('multitable', 'write'), async (req: Request, res: Response) => {
+  router.post('/views/:viewId/submit', async (req: Request, res: Response) => {
     const viewId = typeof req.params.viewId === 'string' ? req.params.viewId.trim() : ''
     if (!viewId) {
       return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'viewId is required' } })
@@ -4209,6 +4226,9 @@ export function univerMetaRouter(): Router {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${view.sheetId}` } })
       }
       const { access, capabilities, sheetScope } = await resolveSheetCapabilities(req, pool.query.bind(pool), view.sheetId)
+      if (!access.userId) {
+        return res.status(401).json({ error: 'Authentication required' })
+      }
       const canWriteFormRecord = parsed.data.recordId ? capabilities.canEditRecord : capabilities.canCreateRecord
       if (!canWriteFormRecord) return sendForbidden(res)
 
@@ -5405,7 +5425,7 @@ export function univerMetaRouter(): Router {
     }
   })
 
-  router.post('/records', rbacGuard('multitable', 'write'), async (req: Request, res: Response) => {
+  router.post('/records', async (req: Request, res: Response) => {
     const schema = z.object({
       viewId: z.string().min(1).optional(),
       sheetId: z.string().min(1).optional(),
@@ -5434,7 +5454,10 @@ export function univerMetaRouter(): Router {
       if (sheetRes.rows.length === 0) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
       }
-      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      const { access, capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      if (!access.userId) {
+        return res.status(401).json({ error: 'Authentication required' })
+      }
       if (!capabilities.canCreateRecord) return sendForbidden(res)
 
       const fieldRes = await pool.query(
@@ -5625,7 +5648,7 @@ export function univerMetaRouter(): Router {
     }
   })
 
-  router.delete('/records/:recordId', rbacGuard('multitable', 'write'), async (req: Request, res: Response) => {
+  router.delete('/records/:recordId', async (req: Request, res: Response) => {
     const recordId = typeof req.params.recordId === 'string' ? req.params.recordId : ''
     if (!recordId) {
       return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'recordId is required' } })
@@ -5637,6 +5660,9 @@ export function univerMetaRouter(): Router {
     try {
       const pool = poolManager.get()
       const access = await resolveRequestAccess(req)
+      if (!access.userId) {
+        return res.status(401).json({ error: 'Authentication required' })
+      }
       let deletedSheetId: string | null = null
       const recordRes = await pool.query('SELECT id, sheet_id, created_by FROM meta_records WHERE id = $1', [recordId])
       if (recordRes.rows.length === 0) {
@@ -5709,7 +5735,7 @@ export function univerMetaRouter(): Router {
     }
   })
 
-  router.post('/patch', rbacGuard('multitable', 'write'), async (req: Request, res: Response) => {
+  router.post('/patch', async (req: Request, res: Response) => {
     const schema = z.object({
       viewId: z.string().min(1).optional(),
       sheetId: z.string().min(1).optional(),
@@ -5734,6 +5760,9 @@ export function univerMetaRouter(): Router {
       })
       const sheetId = resolved.sheetId
       const { access, capabilities, sheetScope } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      if (!access.userId) {
+        return res.status(401).json({ error: 'Authentication required' })
+      }
       if (!capabilities.canEditRecord) return sendForbidden(res)
 
       const fieldRes = await pool.query(
