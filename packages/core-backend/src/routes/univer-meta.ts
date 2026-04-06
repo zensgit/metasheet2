@@ -4939,7 +4939,7 @@ export function univerMetaRouter(): Router {
    *
    * Returns: { ok: true, data: { records: [{id, display}], page: {offset, limit, total, hasMore} } }
    */
-  router.get('/records-summary', rbacGuard('multitable', 'read'), async (req: Request, res: Response) => {
+  router.get('/records-summary', async (req: Request, res: Response) => {
     const sheetId = typeof req.query.sheetId === 'string' ? req.query.sheetId.trim() : ''
     const displayFieldId = typeof req.query.displayFieldId === 'string' ? req.query.displayFieldId.trim() : null
     const search = typeof req.query.search === 'string' ? req.query.search.trim().toLowerCase() : ''
@@ -4960,7 +4960,10 @@ export function univerMetaRouter(): Router {
       if (sheetRes.rows.length === 0) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
       }
-      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      const { access, capabilities } = await resolveSheetReadableCapabilities(req, pool.query.bind(pool), sheetId)
+      if (!access.userId) {
+        return res.status(401).json({ error: 'Authentication required' })
+      }
       if (!capabilities.canRead) return sendForbidden(res)
 
       const summary = await loadRecordSummaries(pool.query.bind(pool), sheetId, {
@@ -4986,7 +4989,7 @@ export function univerMetaRouter(): Router {
     }
   })
 
-  router.get('/fields/:fieldId/link-options', rbacGuard('multitable', 'read'), async (req: Request, res: Response) => {
+  router.get('/fields/:fieldId/link-options', async (req: Request, res: Response) => {
     const fieldId = typeof req.params.fieldId === 'string' ? req.params.fieldId.trim() : ''
     const recordId = typeof req.query.recordId === 'string' ? req.query.recordId.trim() : undefined
     const search = typeof req.query.search === 'string' ? req.query.search.trim().toLowerCase() : ''
@@ -5013,7 +5016,14 @@ export function univerMetaRouter(): Router {
       if (field.type !== 'link') {
         return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: `Field is not a link field: ${fieldId}` } })
       }
-      const { capabilities: sourceCapabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), String(fieldRow.sheet_id))
+      const { access: sourceAccess, capabilities: sourceCapabilities } = await resolveSheetReadableCapabilities(
+        req,
+        pool.query.bind(pool),
+        String(fieldRow.sheet_id),
+      )
+      if (!sourceAccess.userId) {
+        return res.status(401).json({ error: 'Authentication required' })
+      }
       if (!sourceCapabilities.canRead) return sendForbidden(res)
 
       const linkConfig = parseLinkFieldConfig(field.property)
@@ -5025,7 +5035,7 @@ export function univerMetaRouter(): Router {
       if (!targetSheet) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Target sheet not found: ${linkConfig.foreignSheetId}` } })
       }
-      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), linkConfig.foreignSheetId)
+      const { capabilities } = await resolveSheetReadableCapabilities(req, pool.query.bind(pool), linkConfig.foreignSheetId)
       if (!capabilities.canRead) return sendForbidden(res)
 
       let selected: LinkedRecordSummary[] = []
