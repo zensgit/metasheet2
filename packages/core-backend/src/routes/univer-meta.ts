@@ -1543,6 +1543,28 @@ function applySheetPermissionScope(
   }
 }
 
+function canReadWithSheetGrant(
+  capabilities: MultitableCapabilities,
+  scope: SheetPermissionScope | undefined,
+  isAdminRole: boolean,
+): boolean {
+  if (applySheetPermissionScope(capabilities, scope, isAdminRole).canRead) return true
+  return !isAdminRole && !capabilities.canRead && scope?.canRead === true
+}
+
+function applyContextSheetReadGrant(
+  capabilities: MultitableCapabilities,
+  scope: SheetPermissionScope | undefined,
+  isAdminRole: boolean,
+): MultitableCapabilities {
+  const scoped = applySheetPermissionScope(capabilities, scope, isAdminRole)
+  if (scoped.canRead || !scope?.canRead || isAdminRole || capabilities.canRead) return scoped
+  return {
+    ...scoped,
+    canRead: true,
+  }
+}
+
 async function resolveSheetCapabilities(
   req: Request,
   query: QueryFn,
@@ -2562,7 +2584,7 @@ export function univerMetaRouter(): Router {
     }
   })
 
-  router.get('/context', rbacGuard('multitable', 'read'), async (req: Request, res: Response) => {
+  router.get('/context', async (req: Request, res: Response) => {
     const baseId = typeof req.query.baseId === 'string' ? req.query.baseId.trim() : ''
     const sheetId = typeof req.query.sheetId === 'string' ? req.query.sheetId.trim() : ''
     const viewId = typeof req.query.viewId === 'string' ? req.query.viewId.trim() : ''
@@ -2576,6 +2598,9 @@ export function univerMetaRouter(): Router {
     try {
       const pool = poolManager.get()
       const access = await resolveRequestAccess(req)
+      if (!access.userId) {
+        return res.status(401).json({ error: 'Authentication required' })
+      }
       const baseCapabilities = deriveCapabilities(access.permissions, access.isAdminRole)
 
       let resolvedBaseId = baseId || null
@@ -2634,11 +2659,11 @@ export function univerMetaRouter(): Router {
         access.userId,
       )
       const readableSheetRows = visibleSheetRows.filter((row) =>
-        applySheetPermissionScope(
+        canReadWithSheetGrant(
           baseCapabilities,
           sheetPermissionScopeMap.get(String(row.id)),
           access.isAdminRole,
-        ).canRead,
+        ),
       )
 
       const effectiveSheetId =
@@ -2647,8 +2672,11 @@ export function univerMetaRouter(): Router {
       if (resolvedSheetId && !readableSheetRows.some((row) => String(row.id) === resolvedSheetId)) {
         return sendForbidden(res)
       }
+      if (!baseCapabilities.canRead && !effectiveSheetId) {
+        return sendForbidden(res)
+      }
       const capabilities = effectiveSheetId
-        ? applySheetPermissionScope(
+        ? applyContextSheetReadGrant(
             baseCapabilities,
             sheetPermissionScopeMap.get(effectiveSheetId),
             access.isAdminRole,
