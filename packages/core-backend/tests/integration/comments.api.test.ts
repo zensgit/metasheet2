@@ -561,6 +561,55 @@ describe('Comments API', () => {
     expect(replyComment.fieldId).toBe(fieldId)
   })
 
+  it('filters listed comments by field scope when fieldId is provided', async () => {
+    if (!baseUrl) return
+
+    const ts = Date.now()
+    const spreadsheetId = `sheet_field_filter_${ts}`.slice(0, 50)
+    const rowId = `rec_field_filter_${ts}`.slice(0, 50)
+    const token = (await (await fetch(`${baseUrl}/api/auth/dev-token?userId=user_2`)).json()).token as string
+
+    const create = async (payload: { fieldId?: string; content: string }) => {
+      const response = await fetch(`${baseUrl}/api/comments`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          spreadsheetId,
+          rowId,
+          fieldId: payload.fieldId,
+          content: payload.content,
+        }),
+      })
+      expect(response.status).toBe(201)
+      const json = await response.json()
+      createdCommentIds.push(json.data.comment.id)
+      return json.data.comment
+    }
+
+    const titleComment = await create({ fieldId: 'fld_title', content: 'Title note' })
+    await create({ fieldId: 'fld_status', content: 'Status note' })
+    await create({ content: 'Record note' })
+
+    const response = await fetch(`${baseUrl}/api/comments?spreadsheetId=${spreadsheetId}&rowId=${rowId}&fieldId=fld_title`, {
+      headers: { Authorization: `Bearer ${token}` },
+    })
+    expect(response.status).toBe(200)
+
+    const json = await response.json()
+    expect(json.data.total).toBe(1)
+    expect(json.data.items).toHaveLength(1)
+    expect(json.data.items[0]).toMatchObject({
+      id: titleComment.id,
+      spreadsheetId,
+      rowId,
+      fieldId: 'fld_title',
+      content: 'Title note',
+    })
+  })
+
   it('rejects invalid parent comment scopes and reply-to-reply chains', async () => {
     if (!baseUrl) return
 

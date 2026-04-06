@@ -37,7 +37,7 @@ describe('useMultitableComments', () => {
       targetId: 'rec_scope',
       targetFieldId: 'fld_notes',
     })
-    expect(fetch).toHaveBeenCalledWith('/api/comments?spreadsheetId=sheet_scope&rowId=rec_scope')
+    expect(fetch).toHaveBeenCalledWith('/api/comments?spreadsheetId=sheet_scope&rowId=rec_scope&fieldId=fld_notes')
   })
 
   it('adds comment and prepends', async () => {

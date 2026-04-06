@@ -104,6 +104,7 @@ export function commentsRouter(injector?: Injector): Router {
     const schema = z.object({
       spreadsheetId: z.string().min(1),
       rowId: z.string().min(1).optional(),
+      fieldId: z.string().min(1).optional(),
       resolved: z.boolean().optional(),
       limit: z.number().int().nonnegative().optional(),
       offset: z.number().int().nonnegative().optional(),
@@ -111,6 +112,7 @@ export function commentsRouter(injector?: Injector): Router {
     const parsed = schema.safeParse({
       spreadsheetId: readQueryValue(req.query.spreadsheetId),
       rowId: readQueryValue(req.query.rowId),
+      fieldId: readQueryValue(req.query.fieldId),
       resolved: parseBoolean(readQueryValue(req.query.resolved)),
       limit: parseNumberParam(readQueryValue(req.query.limit)),
       offset: parseNumberParam(readQueryValue(req.query.offset)),
@@ -124,6 +126,7 @@ export function commentsRouter(injector?: Injector): Router {
       const offset = clampOffset(parsed.data.offset)
       const options: CommentQueryOptions = {
         rowId: parsed.data.rowId,
+        fieldId: parsed.data.fieldId,
         resolved: parsed.data.resolved,
         limit,
         offset,

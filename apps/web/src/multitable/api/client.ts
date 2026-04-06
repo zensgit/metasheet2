@@ -498,6 +498,7 @@ export class MultitableApiClient {
     const res = await this.fetch(`/api/comments${qs({
       spreadsheetId: normalized.containerId,
       rowId: normalized.targetId,
+      fieldId: normalized.targetFieldId ?? undefined,
     })}`)
     const data = await parseJson<{ comments?: RawComment[]; items?: RawComment[] }>(res)
     return normalizeCommentsList(data)

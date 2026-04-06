@@ -288,6 +288,10 @@ export class CommentService {
       query = query.where('row_id', '=', options.rowId)
     }
 
+    if (options?.fieldId) {
+      query = query.where('field_id', '=', options.fieldId)
+    }
+
     if (typeof options?.resolved === 'boolean') {
       query = query.where('resolved', '=', options.resolved)
     }
