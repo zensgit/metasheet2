@@ -5244,7 +5244,7 @@ export function univerMetaRouter(): Router {
     }
   })
 
-  router.get('/attachments/:attachmentId', rbacGuard('multitable', 'read'), async (req: Request, res: Response) => {
+  router.get('/attachments/:attachmentId', async (req: Request, res: Response) => {
     const attachmentId = typeof req.params.attachmentId === 'string' ? req.params.attachmentId.trim() : ''
     if (!attachmentId) {
       return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'attachmentId is required' } })
@@ -5253,7 +5253,7 @@ export function univerMetaRouter(): Router {
     try {
       const pool = poolManager.get()
       const attachmentRes = await pool.query(
-        `SELECT id, storage_file_id, filename, original_name, mime_type, size
+        `SELECT id, sheet_id, storage_file_id, filename, original_name, mime_type, size
          FROM multitable_attachments
          WHERE id = $1 AND deleted_at IS NULL`,
         [attachmentId],
@@ -5262,15 +5262,12 @@ export function univerMetaRouter(): Router {
       if (!row) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Attachment not found: ${attachmentId}` } })
       }
-      const sheetIdRes = await pool.query(
-        `SELECT sheet_id
-         FROM multitable_attachments
-         WHERE id = $1 AND deleted_at IS NULL`,
-        [attachmentId],
-      )
-      const sheetId = typeof (sheetIdRes.rows[0] as any)?.sheet_id === 'string' ? String((sheetIdRes.rows[0] as any).sheet_id) : ''
+      const sheetId = typeof row.sheet_id === 'string' ? row.sheet_id : ''
       if (sheetId) {
-        const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+        const { access, capabilities } = await resolveSheetReadableCapabilities(req, pool.query.bind(pool), sheetId)
+        if (!access.userId) {
+          return res.status(401).json({ error: 'Authentication required' })
+        }
         if (!capabilities.canRead) return sendForbidden(res)
       }
 

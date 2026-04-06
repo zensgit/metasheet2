@@ -24,6 +24,7 @@ async function createApp(args: {
   queryHandler?: QueryHandler
   fallbackPermissions?: string[]
   attachmentPath: string
+  mockStorageDownload?: Buffer
 }) {
   vi.resetModules()
   process.env.ATTACHMENT_PATH = args.attachmentPath
@@ -39,6 +40,23 @@ async function createApp(args: {
   vi.doMock('../../src/integration/events/event-bus', () => ({
     eventBus: { publish: publishSpy },
   }))
+  if (args.mockStorageDownload) {
+    const downloadSpy = vi.fn(async () => args.mockStorageDownload as Buffer)
+    vi.doMock('../../src/services/StorageService', async () => {
+      const actual = await vi.importActual<any>('../../src/services/StorageService')
+      return {
+        ...actual,
+        StorageServiceImpl: {
+          ...actual.StorageServiceImpl,
+          createLocalService: vi.fn(() => ({
+            download: downloadSpy,
+          })),
+        },
+      }
+    })
+  } else {
+    vi.doUnmock('../../src/services/StorageService')
+  }
 
   const { poolManager } = await import('../../src/integration/db/connection-pool')
   const { univerMetaRouter } = await import('../../src/routes/univer-meta')
@@ -86,6 +104,10 @@ describe('Multitable attachment API', () => {
             expect(params).toEqual(['fld_files', 'sheet_ops'])
             return { rows: [{ id: 'fld_files', type: 'attachment' }] }
           }
+          if (sql.includes('FROM spreadsheet_permissions')) {
+            expect(params).toEqual(['user_multitable_attachments', ['sheet_ops']])
+            return { rows: [] }
+          }
           if (sql.includes('INSERT INTO multitable_attachments')) {
             uploadedAttachmentId = String(params?.[0] ?? '')
             storedFileId = String(params?.[4] ?? '')
@@ -103,9 +125,10 @@ describe('Multitable attachment API', () => {
           }
           if (sql.includes('FROM multitable_attachments') && sql.includes('storage_file_id')) {
             expect(params).toEqual([uploadedAttachmentId])
-            return {
+          return {
               rows: [{
                 id: uploadedAttachmentId,
+                sheet_id: 'sheet_ops',
                 storage_file_id: storedFileId,
                 filename: 'brief.txt',
                 original_name: 'brief.txt',
@@ -145,6 +168,141 @@ describe('Multitable attachment API', () => {
     }
   })
 
+  test('allows attachment download when sheet read grant exists without global multitable permission', async () => {
+    const attachmentPath = await fs.mkdtemp(path.join(os.tmpdir(), 'multitable-attachment-read-scope-'))
+
+    try {
+      const { app } = await createApp({
+        attachmentPath,
+        mockStorageDownload: Buffer.from('scoped attachment'),
+        queryHandler: async (sql, params) => {
+          if (sql.includes('FROM multitable_attachments') && sql.includes('storage_file_id')) {
+            expect(params).toEqual(['att_sheet_scope'])
+            return {
+              rows: [{
+                id: 'att_sheet_scope',
+                sheet_id: 'sheet_acl',
+                storage_file_id: 'storage_att_sheet_scope',
+                filename: 'scope.txt',
+                original_name: 'scope.txt',
+                mime_type: 'text/plain',
+                size: 17,
+              }],
+            }
+          }
+          if (sql.includes('FROM spreadsheet_permissions')) {
+            expect(params).toEqual(['user_multitable_attachments', ['sheet_acl']])
+            return {
+              rows: [{ sheet_id: 'sheet_acl', perm_code: 'spreadsheet:read', subject_type: 'user' }],
+            }
+          }
+          throw new Error(`Unhandled SQL in test: ${sql}`)
+        },
+      })
+
+      const response = await request(app)
+        .get('/api/multitable/attachments/att_sheet_scope')
+        .expect(200)
+
+      expect(response.headers['content-type']).toContain('text/plain')
+      expect(response.text).toBe('scoped attachment')
+    } finally {
+      await fs.rm(attachmentPath, { recursive: true, force: true })
+    }
+  })
+
+  test('allows attachment download when sheet write-own grant exists without global multitable permission', async () => {
+    const attachmentPath = await fs.mkdtemp(path.join(os.tmpdir(), 'multitable-attachment-own-scope-'))
+
+    try {
+      const { app } = await createApp({
+        attachmentPath,
+        mockStorageDownload: Buffer.from('owner scoped attachment'),
+        queryHandler: async (sql, params) => {
+          if (sql.includes('FROM multitable_attachments') && sql.includes('storage_file_id')) {
+            expect(params).toEqual(['att_sheet_write_own'])
+            return {
+              rows: [{
+                id: 'att_sheet_write_own',
+                sheet_id: 'sheet_acl',
+                storage_file_id: 'storage_att_sheet_write_own',
+                filename: 'own.txt',
+                original_name: 'own.txt',
+                mime_type: 'text/plain',
+                size: 23,
+              }],
+            }
+          }
+          if (sql.includes('FROM spreadsheet_permissions')) {
+            expect(params).toEqual(['user_multitable_attachments', ['sheet_acl']])
+            return {
+              rows: [{
+                sheet_id: 'sheet_acl',
+                perm_code: 'spreadsheet:write-own',
+                subject_type: 'user',
+              }],
+            }
+          }
+          throw new Error(`Unhandled SQL in test: ${sql}`)
+        },
+      })
+
+      const response = await request(app)
+        .get('/api/multitable/attachments/att_sheet_write_own')
+        .expect(200)
+
+      expect(response.headers['content-type']).toContain('text/plain')
+      expect(response.text).toBe('owner scoped attachment')
+    } finally {
+      await fs.rm(attachmentPath, { recursive: true, force: true })
+    }
+  })
+
+  test('rejects attachment download when sheet permission has no read access', async () => {
+    const attachmentPath = await fs.mkdtemp(path.join(os.tmpdir(), 'multitable-attachment-read-blocked-'))
+
+    try {
+      const { app } = await createApp({
+        attachmentPath,
+        mockStorageDownload: Buffer.from('blocked attachment'),
+        queryHandler: async (sql, params) => {
+          if (sql.includes('FROM multitable_attachments') && sql.includes('storage_file_id')) {
+            expect(params).toEqual(['att_sheet_blocked'])
+            return {
+              rows: [{
+                id: 'att_sheet_blocked',
+                sheet_id: 'sheet_acl',
+                storage_file_id: 'storage_att_sheet_blocked',
+                filename: 'blocked.txt',
+                original_name: 'blocked.txt',
+                mime_type: 'text/plain',
+                size: 18,
+              }],
+            }
+          }
+          if (sql.includes('FROM spreadsheet_permissions')) {
+            expect(params).toEqual(['user_multitable_attachments', ['sheet_acl']])
+            return {
+              rows: [{ sheet_id: 'sheet_acl', perm_code: 'spreadsheet:comment', subject_type: 'user' }],
+            }
+          }
+          throw new Error(`Unhandled SQL in test: ${sql}`)
+        },
+      })
+
+      const response = await request(app)
+        .get('/api/multitable/attachments/att_sheet_blocked')
+        .expect(403)
+
+      expect(response.body).toEqual({
+        ok: false,
+        error: { code: 'FORBIDDEN', message: 'Insufficient permissions' },
+      })
+    } finally {
+      await fs.rm(attachmentPath, { recursive: true, force: true })
+    }
+  })
+
   test('deletes an attachment and removes it from the owning record field', async () => {
     const attachmentPath = await fs.mkdtemp(path.join(os.tmpdir(), 'multitable-attachment-delete-'))
     let storedPath = ''
@@ -162,8 +320,16 @@ describe('Multitable attachment API', () => {
           if (sql.includes('SELECT id, type FROM meta_fields WHERE id = $1 AND sheet_id = $2')) {
             return { rows: [{ id: 'fld_files', type: 'attachment' }] }
           }
+          if (sql.includes('FROM spreadsheet_permissions')) {
+            expect(params).toEqual(['user_multitable_attachments', ['sheet_ops']])
+            return { rows: [] }
+          }
           if (sql.includes('SELECT id FROM meta_records WHERE id = $1 AND sheet_id = $2')) {
             return { rows: [{ id: 'rec_ops_1' }] }
+          }
+          if (sql.includes('SELECT id, created_by FROM meta_records WHERE id = $1 AND sheet_id = $2')) {
+            expect(params).toEqual(['rec_ops_1', 'sheet_ops'])
+            return { rows: [{ id: 'rec_ops_1', created_by: 'user_multitable_attachments' }] }
           }
           if (sql.includes('INSERT INTO multitable_attachments')) {
             uploadedAttachmentId = String(params?.[0] ?? '')
@@ -200,6 +366,12 @@ describe('Multitable attachment API', () => {
                 version: 2,
                 data: { fld_files: [uploadedAttachmentId, 'att_keep'] },
               }],
+            }
+          }
+          if (sql.includes('SELECT id, created_by FROM meta_records WHERE sheet_id = $1 AND id = ANY($2::text[])')) {
+            expect(params).toEqual(['sheet_ops', ['rec_ops_1']])
+            return {
+              rows: [{ id: 'rec_ops_1', created_by: 'user_multitable_attachments' }],
             }
           }
           if (sql.includes('UPDATE meta_records') && sql.includes('version = version + 1')) {
