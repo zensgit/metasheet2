@@ -172,6 +172,25 @@ export interface MetaCapabilities {
   canManageAutomation: boolean
 }
 
+export type MetaSheetPermissionAccessLevel = 'read' | 'write' | 'write-own'
+
+export interface MetaSheetPermissionEntry {
+  userId: string
+  accessLevel: MetaSheetPermissionAccessLevel
+  permissions: string[]
+  name: string | null
+  email: string | null
+  isActive: boolean
+}
+
+export interface MetaSheetPermissionCandidate {
+  id: string
+  label: string
+  subtitle?: string | null
+  isActive: boolean
+  accessLevel?: MetaSheetPermissionAccessLevel | null
+}
+
 // --- Comments ---
 export interface MetaCommentsScope {
   targetType: string

@@ -1166,6 +1166,25 @@ type SheetPermissionScope = {
   canWriteOwn: boolean
 }
 
+type MultitableSheetAccessLevel = 'read' | 'write' | 'write-own'
+
+type MultitableSheetPermissionEntry = {
+  userId: string
+  accessLevel: MultitableSheetAccessLevel
+  permissions: string[]
+  name: string | null
+  email: string | null
+  isActive: boolean
+}
+
+type MultitableSheetPermissionCandidate = {
+  id: string
+  label: string
+  subtitle: string | null
+  isActive: boolean
+  accessLevel: MultitableSheetAccessLevel | null
+}
+
 const SHEET_READ_PERMISSION_CODES = new Set([
   'spreadsheet:read',
   'spreadsheet:write',
@@ -1189,6 +1208,24 @@ const SHEET_OWN_WRITE_PERMISSION_CODES = new Set([
   'spreadsheets:write-own',
   'multitable:write-own',
 ])
+
+const MANAGED_SHEET_PERMISSION_CODES = [
+  'spreadsheet:read',
+  'spreadsheet:write',
+  'spreadsheet:write-own',
+  'spreadsheets:read',
+  'spreadsheets:write',
+  'spreadsheets:write-own',
+  'multitable:read',
+  'multitable:write',
+  'multitable:write-own',
+]
+
+const CANONICAL_SHEET_PERMISSION_CODE_BY_ACCESS_LEVEL: Record<MultitableSheetAccessLevel, string> = {
+  read: 'spreadsheet:read',
+  write: 'spreadsheet:write',
+  'write-own': 'spreadsheet:write-own',
+}
 
 async function resolveRequestAccess(req: Request): Promise<ResolvedRequestAccess> {
   const userId = req.user?.id?.toString() ?? req.user?.sub?.toString() ?? req.user?.userId?.toString() ?? ''
@@ -1253,6 +1290,106 @@ function summarizeSheetPermissionCodes(codes: string[]): SheetPermissionScope {
     canWrite: codes.some((code) => SHEET_WRITE_PERMISSION_CODES.has(code)),
     canWriteOwn: codes.some((code) => SHEET_OWN_WRITE_PERMISSION_CODES.has(code)),
   }
+}
+
+function deriveSheetAccessLevel(codes: string[]): MultitableSheetAccessLevel | null {
+  const normalized = normalizePermissionCodes(codes)
+  if (normalized.some((code) => SHEET_WRITE_PERMISSION_CODES.has(code))) return 'write'
+  if (normalized.some((code) => SHEET_OWN_WRITE_PERMISSION_CODES.has(code))) return 'write-own'
+  if (normalized.some((code) => SHEET_READ_PERMISSION_CODES.has(code))) return 'read'
+  return null
+}
+
+async function listSheetPermissionEntries(
+  query: QueryFn,
+  sheetId: string,
+): Promise<MultitableSheetPermissionEntry[]> {
+  const result = await query(
+    `SELECT
+        sp.user_id,
+        ARRAY_AGG(sp.perm_code ORDER BY sp.perm_code) AS permission_codes,
+        u.name,
+        u.email,
+        u.is_active
+     FROM spreadsheet_permissions sp
+     LEFT JOIN users u ON u.id = sp.user_id
+     WHERE sp.sheet_id = $1
+     GROUP BY sp.user_id, u.name, u.email, u.is_active
+     ORDER BY COALESCE(NULLIF(u.name, ''), NULLIF(u.email, ''), sp.user_id) ASC`,
+    [sheetId],
+  )
+
+  return (result.rows as Array<{
+    user_id: string
+    permission_codes?: string[]
+    name?: string | null
+    email?: string | null
+    is_active?: boolean | null
+  }>)
+    .map((row) => {
+      const permissions = normalizePermissionCodes(row.permission_codes)
+      const accessLevel = deriveSheetAccessLevel(permissions)
+      if (!accessLevel) return null
+      return {
+        userId: String(row.user_id),
+        accessLevel,
+        permissions,
+        name: typeof row.name === 'string' ? row.name : null,
+        email: typeof row.email === 'string' ? row.email : null,
+        isActive: row.is_active !== false,
+      } satisfies MultitableSheetPermissionEntry
+    })
+    .filter((entry): entry is MultitableSheetPermissionEntry => !!entry)
+}
+
+async function listSheetPermissionCandidates(
+  query: QueryFn,
+  sheetId: string,
+  params: { q?: string; limit: number },
+): Promise<MultitableSheetPermissionCandidate[]> {
+  const q = params.q?.trim() ?? ''
+  const term = q ? `%${q}%` : '%'
+  const result = await query(
+    `SELECT
+        u.id,
+        u.name,
+        u.email,
+        u.is_active,
+        COALESCE(
+          ARRAY_AGG(sp.perm_code ORDER BY sp.perm_code) FILTER (WHERE sp.perm_code IS NOT NULL),
+          ARRAY[]::text[]
+        ) AS permission_codes
+     FROM users u
+     LEFT JOIN spreadsheet_permissions sp
+       ON sp.sheet_id = $1
+      AND sp.user_id = u.id
+     WHERE ($2 = '' OR u.id ILIKE $3 OR u.email ILIKE $3 OR COALESCE(u.name, '') ILIKE $3)
+     GROUP BY u.id, u.name, u.email, u.is_active
+     ORDER BY
+       CASE WHEN u.is_active THEN 0 ELSE 1 END,
+       COALESCE(NULLIF(u.name, ''), NULLIF(u.email, ''), u.id) ASC
+     LIMIT $4`,
+    [sheetId, q, term, params.limit],
+  )
+
+  return (result.rows as Array<{
+    id: string
+    name?: string | null
+    email?: string | null
+    is_active?: boolean | null
+    permission_codes?: string[]
+  }>)
+    .map((row) => {
+      const name = typeof row.name === 'string' ? row.name.trim() : ''
+      const email = typeof row.email === 'string' ? row.email.trim() : ''
+      return {
+        id: String(row.id),
+        label: name || email || String(row.id),
+        subtitle: email || (name && name !== String(row.id) ? String(row.id) : null),
+        isActive: row.is_active !== false,
+        accessLevel: deriveSheetAccessLevel(normalizePermissionCodes(row.permission_codes)),
+      } satisfies MultitableSheetPermissionCandidate
+    })
 }
 
 async function loadSheetPermissionScopeMap(
@@ -2470,6 +2607,123 @@ export function univerMetaRouter(): Router {
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
       console.error('[univer-meta] list sheets failed:', err)
       return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to list sheets' } })
+    }
+  })
+
+  router.get('/sheets/:sheetId/permissions', rbacGuard('multitable', 'read'), async (req: Request, res: Response) => {
+    const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
+    if (!sheetId) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId is required' } })
+    }
+
+    try {
+      const pool = poolManager.get()
+      const sheet = await loadSheetRow(pool.query.bind(pool), sheetId)
+      if (!sheet) {
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
+      }
+      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      if (!capabilities.canManageFields) return sendForbidden(res)
+
+      const items = await listSheetPermissionEntries(pool.query.bind(pool), sheetId)
+      return res.json({ ok: true, data: { items } })
+    } catch (err) {
+      const hint = getDbNotReadyMessage(err)
+      if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
+      console.error('[univer-meta] list sheet permissions failed:', err)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to list sheet permissions' } })
+    }
+  })
+
+  router.get('/sheets/:sheetId/permission-candidates', rbacGuard('multitable', 'read'), async (req: Request, res: Response) => {
+    const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
+    if (!sheetId) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId is required' } })
+    }
+
+    const q = typeof req.query.q === 'string' ? req.query.q.trim() : ''
+    const rawLimit = typeof req.query.limit === 'string' ? Number(req.query.limit) : undefined
+    const limit = Number.isFinite(rawLimit) ? Math.min(50, Math.max(1, Math.floor(rawLimit as number))) : 20
+
+    try {
+      const pool = poolManager.get()
+      const sheet = await loadSheetRow(pool.query.bind(pool), sheetId)
+      if (!sheet) {
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
+      }
+      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      if (!capabilities.canManageFields) return sendForbidden(res)
+
+      const items = await listSheetPermissionCandidates(pool.query.bind(pool), sheetId, { q, limit })
+      return res.json({ ok: true, data: { items, total: items.length, limit, query: q } })
+    } catch (err) {
+      const hint = getDbNotReadyMessage(err)
+      if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
+      console.error('[univer-meta] list sheet permission candidates failed:', err)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to list sheet permission candidates' } })
+    }
+  })
+
+  router.put('/sheets/:sheetId/permissions/:userId', rbacGuard('multitable', 'write'), async (req: Request, res: Response) => {
+    const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
+    const userId = typeof req.params.userId === 'string' ? req.params.userId.trim() : ''
+    if (!sheetId || !userId) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId and userId are required' } })
+    }
+
+    const schema = z.object({
+      accessLevel: z.enum(['read', 'write', 'write-own', 'none']),
+    })
+    const parsed = schema.safeParse(req.body)
+    if (!parsed.success) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+    }
+
+    try {
+      const pool = poolManager.get()
+      const sheet = await loadSheetRow(pool.query.bind(pool), sheetId)
+      if (!sheet) {
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
+      }
+      const { access, capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      if (!capabilities.canManageFields) return sendForbidden(res)
+
+      const userResult = await pool.query(
+        'SELECT id, name, email, is_active FROM users WHERE id = $1',
+        [userId],
+      )
+      if (userResult.rows.length === 0) {
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `User not found: ${userId}` } })
+      }
+
+      await pool.transaction(async ({ query }) => {
+        await query(
+          'DELETE FROM spreadsheet_permissions WHERE sheet_id = $1 AND user_id = $2 AND perm_code = ANY($3::text[])',
+          [sheetId, userId, MANAGED_SHEET_PERMISSION_CODES],
+        )
+        if (parsed.data.accessLevel !== 'none') {
+          await query(
+            'INSERT INTO spreadsheet_permissions(sheet_id, user_id, perm_code) VALUES ($1, $2, $3)',
+            [sheetId, userId, CANONICAL_SHEET_PERMISSION_CODE_BY_ACCESS_LEVEL[parsed.data.accessLevel]],
+          )
+        }
+      })
+
+      const items = await listSheetPermissionEntries(pool.query.bind(pool), sheetId)
+      const entry = items.find((item) => item.userId === userId) ?? null
+      return res.json({
+        ok: true,
+        data: {
+          userId,
+          accessLevel: parsed.data.accessLevel,
+          entry,
+        },
+      })
+    } catch (err) {
+      const hint = getDbNotReadyMessage(err)
+      if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
+      console.error('[univer-meta] update sheet permission failed:', err)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to update sheet permission' } })
     }
   })
 

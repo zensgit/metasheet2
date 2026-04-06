@@ -568,6 +568,40 @@ vi.mock('../src/multitable/components/MetaViewManager.vue', () => ({
     },
   }),
 }))
+vi.mock('../src/multitable/components/MetaSheetPermissionManager.vue', () => ({
+  default: defineComponent({
+    name: 'MetaSheetPermissionManager',
+    props: {
+      visible: { type: Boolean, default: false },
+      sheetId: { type: String, default: '' },
+    },
+    emits: ['close', 'updated'],
+    render() {
+      if (!this.$props.visible) return null
+      return h('div', {
+        'data-sheet-permission-manager': 'true',
+        'data-sheet-permission-manager-sheet-id': this.$props.sheetId,
+      }, [
+        h(
+          'button',
+          {
+            'data-sheet-permission-updated': 'true',
+            onClick: () => this.$emit('updated'),
+          },
+          'permission-updated',
+        ),
+        h(
+          'button',
+          {
+            'data-close-sheet-permission-manager': 'true',
+            onClick: () => this.$emit('close'),
+          },
+          'close-permission-manager',
+        ),
+      ])
+    },
+  }),
+}))
 vi.mock('../src/multitable/components/MetaKanbanView.vue', () => ({
   default: defineComponent({
     name: 'MetaKanbanView',
@@ -792,6 +826,9 @@ function createWorkbenchMock() {
       createView: vi.fn(),
       updateView: vi.fn(),
       deleteView: vi.fn(),
+      listSheetPermissions: vi.fn().mockResolvedValue({ items: [] }),
+      listSheetPermissionCandidates: vi.fn().mockResolvedValue({ items: [] }),
+      updateSheetPermission: vi.fn().mockResolvedValue({}),
       patchRecords: vi.fn(),
       submitForm: vi.fn(),
     },
@@ -1008,6 +1045,28 @@ describe('MultitableWorkbench view wiring', () => {
 
     expect(container!.querySelector('[data-view-manager-field-ids]')?.getAttribute('data-view-manager-field-ids'))
       .toBe('fld_title,fld_view_hidden')
+  })
+
+  it('opens sheet access manager and refreshes sheet state after updates', async () => {
+    mountWorkbench()
+    await flushUi()
+
+    const managerButtons = Array.from(container!.querySelectorAll('.mt-workbench__mgr-btn')) as HTMLButtonElement[]
+    managerButtons.find((button) => button.textContent?.includes('Access'))?.click()
+    await flushUi()
+
+    expect(container!.querySelector('[data-sheet-permission-manager]')).not.toBeNull()
+    expect(container!.querySelector('[data-sheet-permission-manager-sheet-id]')?.getAttribute('data-sheet-permission-manager-sheet-id'))
+      .toBe('sheet_orders')
+
+    workbenchMock.loadSheetMeta.mockClear()
+    gridMock.loadViewData.mockClear()
+
+    container!.querySelector<HTMLButtonElement>('[data-sheet-permission-updated="true"]')!.click()
+    await flushUi()
+
+    expect(workbenchMock.loadSheetMeta).toHaveBeenCalledWith('sheet_orders')
+    expect(gridMock.loadViewData).toHaveBeenCalledWith(0)
   })
 
   it('filters readonly fields from import surfaces', async () => {
