@@ -277,19 +277,21 @@ function normalizeCommentMentionSuggestions(
 function normalizeSheetPermissionEntry(
   payload: Partial<MetaSheetPermissionEntry> | null | undefined,
 ): MetaSheetPermissionEntry | null {
-  const userId = typeof payload?.userId === 'string' ? payload.userId : ''
+  const subjectType = payload?.subjectType === 'user' || payload?.subjectType === 'role' ? payload.subjectType : null
+  const subjectId = typeof payload?.subjectId === 'string' ? payload.subjectId : ''
   const accessLevel = payload?.accessLevel
-  if (!userId || (accessLevel !== 'read' && accessLevel !== 'write' && accessLevel !== 'write-own')) {
+  if (!subjectType || !subjectId || (accessLevel !== 'read' && accessLevel !== 'write' && accessLevel !== 'write-own')) {
     return null
   }
   return {
-    userId,
+    subjectType,
+    subjectId,
     accessLevel,
     permissions: Array.isArray(payload?.permissions)
       ? payload.permissions.filter((value): value is string => typeof value === 'string')
       : [],
-    name: typeof payload?.name === 'string' || payload?.name === null ? payload.name ?? null : null,
-    email: typeof payload?.email === 'string' || payload?.email === null ? payload.email ?? null : null,
+    label: typeof payload?.label === 'string' ? payload.label : subjectId,
+    subtitle: typeof payload?.subtitle === 'string' || payload?.subtitle === null ? payload.subtitle ?? null : null,
     isActive: payload?.isActive !== false,
   }
 }
@@ -312,11 +314,13 @@ function normalizeSheetPermissionCandidates(
   const items: MetaSheetPermissionCandidate[] = []
   if (Array.isArray(payload?.items)) {
     for (const item of payload.items) {
-      const id = typeof item?.id === 'string' ? item.id : ''
+      const subjectType = item?.subjectType === 'user' || item?.subjectType === 'role' ? item.subjectType : null
+      const subjectId = typeof item?.subjectId === 'string' ? item.subjectId : ''
       const label = typeof item?.label === 'string' ? item.label : ''
-      if (!id || !label) continue
+      if (!subjectType || !subjectId || !label) continue
       items.push({
-        id,
+        subjectType,
+        subjectId,
         label,
         subtitle: typeof item?.subtitle === 'string' || item?.subtitle === null ? item.subtitle ?? null : null,
         isActive: item?.isActive !== false,
@@ -409,21 +413,24 @@ export class MultitableApiClient {
 
   async updateSheetPermission(
     sheetId: string,
-    userId: string,
+    subjectType: 'user' | 'role',
+    subjectId: string,
     accessLevel: MetaSheetPermissionAccessLevel | 'none',
-  ): Promise<{ userId: string; accessLevel: MetaSheetPermissionAccessLevel | 'none'; entry: MetaSheetPermissionEntry | null }> {
-    const res = await this.fetch(`/api/multitable/sheets/${encodeURIComponent(sheetId)}/permissions/${encodeURIComponent(userId)}`, {
+  ): Promise<{ subjectType: 'user' | 'role'; subjectId: string; accessLevel: MetaSheetPermissionAccessLevel | 'none'; entry: MetaSheetPermissionEntry | null }> {
+    const res = await this.fetch(`/api/multitable/sheets/${encodeURIComponent(sheetId)}/permissions/${encodeURIComponent(subjectType)}/${encodeURIComponent(subjectId)}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ accessLevel }),
     })
     const data = await parseJson<{
-      userId?: string
+      subjectType?: 'user' | 'role'
+      subjectId?: string
       accessLevel?: MetaSheetPermissionAccessLevel | 'none'
       entry?: Partial<MetaSheetPermissionEntry> | null
     }>(res)
     return {
-      userId: typeof data?.userId === 'string' ? data.userId : userId,
+      subjectType: data?.subjectType === 'user' || data?.subjectType === 'role' ? data.subjectType : subjectType,
+      subjectId: typeof data?.subjectId === 'string' ? data.subjectId : subjectId,
       accessLevel: data?.accessLevel === 'read' || data?.accessLevel === 'write' || data?.accessLevel === 'write-own' || data?.accessLevel === 'none'
         ? data.accessLevel
         : accessLevel,

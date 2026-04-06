@@ -752,7 +752,9 @@ export interface SheetsTable {
 
 export interface SpreadsheetPermissionsTable {
   sheet_id: string
-  user_id: string
+  user_id: string | null
+  subject_type: string
+  subject_id: string
   perm_code: string
   created_at: CreatedAt
 }

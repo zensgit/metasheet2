@@ -45,19 +45,31 @@ describe('MetaSheetPermissionManager', () => {
       listSheetPermissions: vi.fn().mockResolvedValue({
         items: [
           {
-            userId: 'user_1',
+            subjectType: 'user',
+            subjectId: 'user_1',
             accessLevel: 'write',
             permissions: ['spreadsheet.read', 'spreadsheet.write'],
-            name: 'Alex',
-            email: 'alex@example.com',
+            label: 'Alex',
+            subtitle: 'alex@example.com',
+            isActive: true,
+          },
+          {
+            subjectType: 'role',
+            subjectId: 'role_ops',
+            accessLevel: 'read',
+            permissions: ['spreadsheet.read'],
+            label: 'Ops Reviewers',
+            subtitle: 'role_ops',
             isActive: true,
           },
         ],
       }),
       listSheetPermissionCandidates: vi.fn().mockResolvedValue({
         items: [
-          { id: 'user_1', label: 'Alex', subtitle: 'alex@example.com', isActive: true, accessLevel: 'write' },
-          { id: 'user_2', label: 'Jamie', subtitle: 'jamie@example.com', isActive: true, accessLevel: null },
+          { subjectType: 'user', subjectId: 'user_1', label: 'Alex', subtitle: 'alex@example.com', isActive: true, accessLevel: 'write' },
+          { subjectType: 'user', subjectId: 'user_2', label: 'Jamie', subtitle: 'jamie@example.com', isActive: true, accessLevel: null },
+          { subjectType: 'role', subjectId: 'role_ops', label: 'Ops Reviewers', subtitle: 'role_ops', isActive: true, accessLevel: 'read' },
+          { subjectType: 'role', subjectId: 'role_ops_writer', label: 'Ops Writers', subtitle: 'role_ops_writer', isActive: true, accessLevel: null },
         ],
       }),
       updateSheetPermission: vi.fn().mockResolvedValue({}),
@@ -68,12 +80,15 @@ describe('MetaSheetPermissionManager', () => {
 
     expect(client.listSheetPermissions).toHaveBeenCalledWith('sheet_orders')
     expect(client.listSheetPermissionCandidates).toHaveBeenCalledWith('sheet_orders', { q: undefined, limit: 12 })
-    expect(container!.querySelector('[data-sheet-permission-entry="user_1"]')).not.toBeNull()
-    expect(container!.querySelector('[data-sheet-permission-candidate="user_1"]')).toBeNull()
-    expect(container!.querySelector('[data-sheet-permission-candidate="user_2"]')).not.toBeNull()
+    expect(container!.querySelector('[data-sheet-permission-entry="user:user_1"]')).not.toBeNull()
+    expect(container!.querySelector('[data-sheet-permission-entry="role:role_ops"]')).not.toBeNull()
+    expect(container!.querySelector('[data-sheet-permission-candidate="user:user_1"]')).toBeNull()
+    expect(container!.querySelector('[data-sheet-permission-candidate="role:role_ops"]')).toBeNull()
+    expect(container!.querySelector('[data-sheet-permission-candidate="user:user_2"]')).not.toBeNull()
+    expect(container!.querySelector('[data-sheet-permission-candidate="role:role_ops_writer"]')).not.toBeNull()
   })
 
-  it('updates sheet access for a candidate and emits updated', async () => {
+  it('updates role-based sheet access for a candidate and omits write-own from role options', async () => {
     const updatedSpy = vi.fn()
     const client = {
       listSheetPermissions: vi.fn()
@@ -81,11 +96,12 @@ describe('MetaSheetPermissionManager', () => {
         .mockResolvedValueOnce({
           items: [
             {
-              userId: 'user_2',
-              accessLevel: 'write-own',
-              permissions: ['spreadsheet.read', 'spreadsheet.write.own'],
-              name: 'Jamie',
-              email: 'jamie@example.com',
+              subjectType: 'role',
+              subjectId: 'role_ops_writer',
+              accessLevel: 'write',
+              permissions: ['spreadsheet.read', 'spreadsheet.write'],
+              label: 'Ops Writers',
+              subtitle: 'role_ops_writer',
               isActive: true,
             },
           ],
@@ -93,12 +109,12 @@ describe('MetaSheetPermissionManager', () => {
       listSheetPermissionCandidates: vi.fn()
         .mockResolvedValueOnce({
           items: [
-            { id: 'user_2', label: 'Jamie', subtitle: 'jamie@example.com', isActive: true, accessLevel: null },
+            { subjectType: 'role', subjectId: 'role_ops_writer', label: 'Ops Writers', subtitle: 'role_ops_writer', isActive: true, accessLevel: null },
           ],
         })
         .mockResolvedValueOnce({
           items: [
-            { id: 'user_2', label: 'Jamie', subtitle: 'jamie@example.com', isActive: true, accessLevel: 'write-own' },
+            { subjectType: 'role', subjectId: 'role_ops_writer', label: 'Ops Writers', subtitle: 'role_ops_writer', isActive: true, accessLevel: 'write' },
           ],
         }),
       updateSheetPermission: vi.fn().mockResolvedValue({}),
@@ -107,16 +123,18 @@ describe('MetaSheetPermissionManager', () => {
     mountManager({ client, onUpdated: updatedSpy })
     await flushUi()
 
-    const select = container!.querySelector('[data-sheet-permission-candidate="user_2"] .meta-sheet-perm__select') as HTMLSelectElement
-    select.value = 'write-own'
+    const select = container!.querySelector('[data-sheet-permission-candidate="role:role_ops_writer"] .meta-sheet-perm__select') as HTMLSelectElement
+    const optionValues = Array.from(select.options).map((option) => option.value)
+    expect(optionValues).toEqual(['read', 'write'])
+    select.value = 'write'
     select.dispatchEvent(new Event('change', { bubbles: true }))
     await flushUi()
 
-    ;(container!.querySelector('[data-sheet-permission-candidate="user_2"] .meta-sheet-perm__action--primary') as HTMLButtonElement).click()
+    ;(container!.querySelector('[data-sheet-permission-candidate="role:role_ops_writer"] .meta-sheet-perm__action--primary') as HTMLButtonElement).click()
     await flushUi()
 
-    expect(client.updateSheetPermission).toHaveBeenCalledWith('sheet_orders', 'user_2', 'write-own')
+    expect(client.updateSheetPermission).toHaveBeenCalledWith('sheet_orders', 'role', 'role_ops_writer', 'write')
     expect(updatedSpy).toHaveBeenCalledTimes(1)
-    expect(container!.querySelector('[data-sheet-permission-entry="user_2"]')).not.toBeNull()
+    expect(container!.querySelector('[data-sheet-permission-entry="role:role_ops_writer"]')).not.toBeNull()
   })
 })

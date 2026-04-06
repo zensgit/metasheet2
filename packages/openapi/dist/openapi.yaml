@@ -1817,10 +1817,17 @@ components:
         - read
         - write
         - write-own
+    MultitableSheetPermissionSubjectType:
+      type: string
+      enum:
+        - user
+        - role
     MultitableSheetPermissionEntry:
       type: object
       properties:
-        userId:
+        subjectType:
+          $ref: '#/components/schemas/MultitableSheetPermissionSubjectType'
+        subjectId:
           type: string
         accessLevel:
           $ref: '#/components/schemas/MultitableSheetPermissionAccessLevel'
@@ -1828,25 +1835,26 @@ components:
           type: array
           items:
             type: string
-        name:
+        label:
           type: string
-          nullable: true
-        email:
+        subtitle:
           type: string
           nullable: true
         isActive:
           type: boolean
       required:
-        - userId
+        - subjectType
+        - subjectId
         - accessLevel
         - permissions
-        - name
-        - email
+        - label
         - isActive
     MultitableSheetPermissionCandidate:
       type: object
       properties:
-        id:
+        subjectType:
+          $ref: '#/components/schemas/MultitableSheetPermissionSubjectType'
+        subjectId:
           type: string
         label:
           type: string
@@ -1860,7 +1868,8 @@ components:
             - $ref: '#/components/schemas/MultitableSheetPermissionAccessLevel'
           nullable: true
       required:
-        - id
+        - subjectType
+        - subjectId
         - label
         - isActive
     MultitableFieldCapability:
@@ -9483,7 +9492,7 @@ paths:
           $ref: '#/components/responses/NotFound'
   /api/multitable/sheets/{sheetId}/permission-candidates:
     get:
-      summary: List candidate users for sheet permission authoring
+      summary: List candidate people and roles for sheet permission authoring
       security:
         - bearerAuth: []
       parameters:
@@ -9538,9 +9547,9 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
-  /api/multitable/sheets/{sheetId}/permissions/{userId}:
+  /api/multitable/sheets/{sheetId}/permissions/{subjectType}/{subjectId}:
     put:
-      summary: Set a sheet access level for a user
+      summary: Set a sheet access level for a person or role
       security:
         - bearerAuth: []
       parameters:
@@ -9550,7 +9559,12 @@ paths:
           schema:
             type: string
         - in: path
-          name: userId
+          name: subjectType
+          required: true
+          schema:
+            $ref: '#/components/schemas/MultitableSheetPermissionSubjectType'
+        - in: path
+          name: subjectId
           required: true
           schema:
             type: string
@@ -9583,7 +9597,10 @@ paths:
                   data:
                     type: object
                     properties:
-                      userId:
+                      subjectType:
+                        $ref: >-
+                          #/components/schemas/MultitableSheetPermissionSubjectType
+                      subjectId:
                         type: string
                       accessLevel:
                         type: string
@@ -9598,7 +9615,8 @@ paths:
                               #/components/schemas/MultitableSheetPermissionEntry
                         nullable: true
                     required:
-                      - userId
+                      - subjectType
+                      - subjectId
                       - accessLevel
                       - entry
         '400':

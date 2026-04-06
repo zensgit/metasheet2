@@ -173,18 +173,21 @@ export interface MetaCapabilities {
 }
 
 export type MetaSheetPermissionAccessLevel = 'read' | 'write' | 'write-own'
+export type MetaSheetPermissionSubjectType = 'user' | 'role'
 
 export interface MetaSheetPermissionEntry {
-  userId: string
+  subjectType: MetaSheetPermissionSubjectType
+  subjectId: string
   accessLevel: MetaSheetPermissionAccessLevel
   permissions: string[]
-  name: string | null
-  email: string | null
+  label: string
+  subtitle?: string | null
   isActive: boolean
 }
 
 export interface MetaSheetPermissionCandidate {
-  id: string
+  subjectType: MetaSheetPermissionSubjectType
+  subjectId: string
   label: string
   subtitle?: string | null
   isActive: boolean
