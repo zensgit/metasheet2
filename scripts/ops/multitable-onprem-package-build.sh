@@ -39,6 +39,7 @@ REQUIRED_PATHS=(
   "scripts/ops/attendance-onprem-package-install.sh"
   "scripts/ops/attendance-onprem-package-upgrade.sh"
   "scripts/ops/attendance-onprem-healthcheck.sh"
+  "scripts/ops/attendance-onprem-start-pm2.ps1"
   "scripts/ops/attendance-wsl-portproxy-refresh.ps1"
   "scripts/ops/attendance-wsl-portproxy-task.ps1"
   "scripts/ops/multitable-onprem-deploy-easy.sh"
