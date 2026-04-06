@@ -126,6 +126,7 @@ export const ICommentService = createIdentifier<ICommentService>('comment-servic
 
 export interface CommentQueryOptions {
     rowId?: string;
+    fieldId?: string;
     resolved?: boolean;
     limit?: number;
     offset?: number;
