@@ -438,6 +438,46 @@ describe('useMultitableGrid', () => {
     expect(grid.error.value).toBe('Record editing is not allowed for this row.')
   })
 
+  it('allows patchCell when a record-scoped rowActionOverride grants edit access', async () => {
+    const fetchFn = vi.fn(async (input: string) => {
+      if (!input.startsWith('/api/multitable/patch')) throw new Error(`Unexpected request: ${input}`)
+      return new Response(JSON.stringify({
+        ok: true,
+        data: {
+          updated: [{ recordId: 'r1', version: 2 }],
+          records: [{ recordId: 'r1', data: { f1: 'patched' } }],
+        },
+      }), { status: 200 })
+    })
+
+    const grid = useMultitableGrid({
+      sheetId: ref(''),
+      viewId: ref(''),
+      client: new MultitableApiClient({ fetchFn }),
+    })
+
+    grid.fields.value = [{ id: 'f1', name: 'Title', type: 'string' }]
+    grid.rows.value = [{ id: 'r1', version: 1, data: { f1: 'before' } }]
+    grid.rowActions.value = {
+      canEdit: false,
+      canDelete: false,
+      canComment: true,
+    }
+    grid.rowActionOverrides.value = {
+      r1: {
+        canEdit: true,
+        canDelete: false,
+        canComment: true,
+      },
+    }
+
+    await grid.patchCell('r1', 'f1', 'patched', 1)
+
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    expect(grid.rows.value[0].data.f1).toBe('patched')
+    expect(grid.error.value).toBeNull()
+  })
+
   it('captures VERSION_CONFLICT state and preserves optimistic rollback', async () => {
     const fetchFn = vi.fn(async (input: string) => {
       if (!input.startsWith('/api/multitable/patch')) throw new Error(`Unexpected request: ${input}`)
@@ -498,6 +538,38 @@ describe('useMultitableGrid', () => {
 
     expect(fetchFn).not.toHaveBeenCalled()
     expect(grid.error.value).toBe('Record deletion is not allowed for this row.')
+  })
+
+  it('allows deleteRecord when a record-scoped rowActionOverride grants delete access', async () => {
+    const fetchFn = vi.fn(async (input: string) => {
+      if (!input.startsWith('/api/multitable/records/')) throw new Error(`Unexpected request: ${input}`)
+      return new Response(JSON.stringify({ ok: true, data: {} }), { status: 200 })
+    })
+
+    const grid = useMultitableGrid({
+      sheetId: ref(''),
+      viewId: ref(''),
+      client: new MultitableApiClient({ fetchFn }),
+    })
+
+    grid.rows.value = [{ id: 'r1', version: 1, data: { f1: 'before' } }]
+    grid.rowActions.value = {
+      canEdit: false,
+      canDelete: false,
+      canComment: true,
+    }
+    grid.rowActionOverrides.value = {
+      r1: {
+        canEdit: false,
+        canDelete: true,
+        canComment: true,
+      },
+    }
+
+    await expect(grid.deleteRecord('r1')).resolves.toBe(true)
+
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    expect(grid.error.value).toBeNull()
   })
 
   it('reloads and reapplies pending conflict edits', async () => {

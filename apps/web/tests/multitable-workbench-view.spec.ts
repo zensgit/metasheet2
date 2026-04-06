@@ -801,7 +801,7 @@ function createGridMock() {
     { id: 'fld_title', name: 'Title', type: 'string', order: 1 },
     { id: 'fld_status', name: 'Status', type: 'select', order: 2, options: [{ value: 'todo' }] },
   ])
-  return {
+  const mock = {
     fields,
     rows: ref([
       { id: 'rec_1', version: 1, data: { fld_title: 'Alpha' } },
@@ -826,6 +826,7 @@ function createGridMock() {
     fieldPermissions: ref({}),
     viewPermission: ref(null),
     rowActions: ref(null),
+    rowActionOverrides: ref<Record<string, { canEdit: boolean; canDelete: boolean; canComment: boolean }>>({}),
     conflict: ref(null),
     error: ref<string | null>(null),
     sortFilterDirty: ref(false),
@@ -854,6 +855,13 @@ function createGridMock() {
     setColumnWidth: vi.fn(),
     setSearchQuery: vi.fn(),
   }
+  mock.resolveRowActions = vi.fn((recordId?: string | null) => {
+    if (recordId && mock.rowActionOverrides.value[recordId]) {
+      return mock.rowActionOverrides.value[recordId]
+    }
+    return mock.rowActions.value
+  })
+  return mock
 }
 
 describe('MultitableWorkbench view wiring', () => {

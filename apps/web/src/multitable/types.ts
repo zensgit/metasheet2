@@ -114,6 +114,7 @@ export interface MetaScopedPermissions {
   fieldPermissions?: Record<string, MetaFieldPermission>
   viewPermissions?: Record<string, MetaViewPermission>
   rowActions?: MetaRowActions
+  rowActionOverrides?: Record<string, MetaRowActions>
 }
 
 // --- Context (GET /api/multitable/context) ---

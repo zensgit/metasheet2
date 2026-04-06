@@ -144,9 +144,10 @@
           :rows="grid.rows.value" :visible-fields="scopedGridFields" :sort-rules="grid.sortRules.value"
           :loading="grid.loading.value" :current-page="grid.currentPage.value" :total-pages="grid.totalPages.value"
           :start-index="pageStartIndex" :selected-record-id="selectedRecordId" :can-edit="effectiveRowActions.canEdit"
-          :can-delete="effectiveRowActions.canDelete" :field-read-only-ids="readOnlyFieldIds" :column-widths="grid.columnWidths.value"
+          :can-delete="gridAllowsAnyDelete" :field-read-only-ids="readOnlyFieldIds" :column-widths="grid.columnWidths.value"
+          :row-action-overrides="grid.rowActionOverrides.value"
           :link-summaries="grid.linkSummaries.value" :attachment-summaries="grid.attachmentSummaries.value"
-          :enable-multi-select="effectiveRowActions.canDelete"
+          :enable-multi-select="gridAllowsAnyDelete"
           :group-field="grid.groupField.value"
           :search-text="searchText" :row-density="rowDensity"
           :upload-fn="uploadAttachmentFn"
@@ -415,14 +416,16 @@ function ensureCanCreateRecord(): boolean {
   return false
 }
 
-function ensureCanEditRecord(): boolean {
-  if (effectiveRowActions.value.canEdit) return true
+function ensureCanEditRecord(recordId?: string | null): boolean {
+  const allowed = recordId ? (grid.resolveRowActions(recordId)?.canEdit ?? effectiveRowActions.value.canEdit) : effectiveRowActions.value.canEdit
+  if (allowed) return true
   showError('Record editing is not allowed for this row.')
   return false
 }
 
-function ensureCanDeleteRecord(): boolean {
-  if (effectiveRowActions.value.canDelete) return true
+function ensureCanDeleteRecord(recordId?: string | null): boolean {
+  const allowed = recordId ? (grid.resolveRowActions(recordId)?.canDelete ?? effectiveRowActions.value.canDelete) : effectiveRowActions.value.canDelete
+  if (allowed) return true
   showError('Record deletion is not allowed for this row.')
   return false
 }
@@ -473,6 +476,10 @@ const effectiveRowActions = computed<MetaRowActions>(() => {
   if (activeViewType.value === 'form' && standaloneFormRowActions.value) {
     return standaloneFormRowActions.value
   }
+  if (selectedRecordId.value) {
+    const selectedRowActions = grid.resolveRowActions(selectedRecordId.value)
+    if (selectedRowActions) return selectedRowActions
+  }
   return grid.rowActions.value ?? {
     canEdit: caps.canEditRecord.value,
     canDelete: caps.canDeleteRecord.value,
@@ -489,6 +496,9 @@ const readOnlyFieldIds = computed(() =>
   Object.entries(effectiveFieldPermissions.value)
     .filter(([, permission]) => permission.readOnly)
     .map(([fieldId]) => fieldId),
+)
+const gridAllowsAnyDelete = computed(() =>
+  effectiveRowActions.value.canDelete || Object.values(grid.rowActionOverrides.value).some((actions) => actions.canDelete),
 )
 const importSurfaceFields = computed(() =>
   propertyVisibleGridFields.value.filter((field) => {
@@ -996,7 +1006,7 @@ function onClearFilters() { grid.clearFilters(); grid.applySortFilter() }
 function onSetConjunction(c: FilterConjunction) { grid.filterConjunction.value = c; grid.sortFilterDirty.value = true }
 
 async function onPatchCell(recordId: string, fieldId: string, value: unknown, version: number) {
-  if (!ensureCanEditRecord()) return
+  if (!ensureCanEditRecord(recordId)) return
   await grid.patchCell(recordId, fieldId, value, version)
 }
 async function onTimelinePatchDates(payload: {
@@ -1007,7 +1017,7 @@ async function onTimelinePatchDates(payload: {
   startValue: string
   endValue: string
 }) {
-  if (!ensureCanEditRecord()) return
+  if (!ensureCanEditRecord(payload.recordId)) return
   try {
     await workbench.client.patchRecords({
       sheetId: workbench.activeSheetId.value || undefined,
@@ -1036,7 +1046,7 @@ async function onKanbanCreateRecord(data: Record<string, unknown>) {
 }
 async function onDeleteRecord() {
   if (!selectedRecordId.value) return
-  if (!ensureCanDeleteRecord()) return
+  if (!ensureCanDeleteRecord(selectedRecordId.value)) return
   const deleted = await grid.deleteRecord(selectedRecordId.value)
   if (deleted) {
     selectedRecordId.value = null
@@ -1070,8 +1080,8 @@ async function onRetryConflict() {
 
 async function onDrawerPatch(fieldId: string, value: unknown) {
   if (!selectedRecordResolved.value) return
-  if (!ensureCanEditRecord()) return
   const record = selectedRecordResolved.value
+  if (!ensureCanEditRecord(record.id)) return
   await grid.patchCell(record.id, fieldId, value, record.version)
   if (grid.error.value) {
     showError(grid.error.value)
@@ -1090,7 +1100,7 @@ async function onDrawerPatch(fieldId: string, value: unknown) {
 async function onFormSubmit(data: Record<string, unknown>) {
   const viewId = workbench.activeViewId.value
   if (viewId && activeViewType.value === 'form') {
-    if (!(selectedRecordResolved.value ? ensureCanEditRecord() : ensureCanCreateRecord())) return
+    if (!(selectedRecordResolved.value ? ensureCanEditRecord(selectedRecordResolved.value.id) : ensureCanCreateRecord())) return
     try {
       formSubmitting.value = true
       formSuccessMessage.value = null
@@ -1121,7 +1131,7 @@ async function onFormSubmit(data: Record<string, unknown>) {
       await replayPendingExternalContextIfReady()
     }
   } else if (selectedRecordResolved.value) {
-    if (!ensureCanEditRecord()) return
+    if (!ensureCanEditRecord(selectedRecordResolved.value.id)) return
     const changes = Object.entries(data).filter(([k, v]) => v !== selectedRecordResolved.value!.data[k]).map(([fieldId, value]) => ({ recordId: selectedRecordResolved.value!.id, fieldId, value, expectedVersion: selectedRecordResolved.value!.version }))
     if (changes.length) {
       await workbench.client.patchRecords({ sheetId: workbench.activeSheetId.value || undefined, viewId: viewId || undefined, changes })
@@ -1204,8 +1214,8 @@ function onGridLinkPicker(ctx: { recordId: string; field: MetaField }) { const r
 async function onLinkPickerConfirm(payload: { recordIds: string[]; summaries: LinkedRecordSummary[] }) {
   linkPickerVisible.value = false
   if (!linkPickerRecordId.value || !linkPickerField.value) return
-  if (!ensureCanEditRecord()) return
   const recordId = linkPickerRecordId.value
+  if (!ensureCanEditRecord(recordId)) return
   const fieldId = linkPickerField.value.id
   const previousSummaries = selectedRecordLinkSummaries.value[fieldId] ?? grid.linkSummaries.value[recordId]?.[fieldId]
   const row = grid.rows.value.find((r) => r.id === recordId)
@@ -1916,7 +1926,7 @@ function startDialogMetaRefresh() {
 
 // --- Bulk delete ---
 async function onBulkDelete(recordIds: string[]) {
-  if (!ensureCanDeleteRecord()) return
+  if (recordIds.some((recordId) => !ensureCanDeleteRecord(recordId))) return
   try {
     await Promise.all(recordIds.map((rid) => grid.deleteRecord(rid)))
     if (selectedRecordId.value && recordIds.includes(selectedRecordId.value)) selectedRecordId.value = null

@@ -46,12 +46,12 @@
                 @click="emit('select-record', row.id)"
               >
                 <td v-if="enableMultiSelect" class="meta-grid__check-col" @click.stop>
-                  <input type="checkbox" :checked="selectedIds.has(row.id)" @change="toggleSelectRow(row.id)" />
+                  <input type="checkbox" :checked="selectedIds.has(row.id)" :disabled="!resolveRowActions(row.id).canDelete" @change="toggleSelectRow(row.id)" />
                 </td>
                 <td class="meta-grid__row-num">
                   <span>{{ startIndex + flatIndex(group, ri) + 1 }}</span>
                   <button
-                    v-if="canComment"
+                    v-if="resolveRowActions(row.id).canComment"
                     type="button"
                     class="meta-grid__comment-action"
                     :class="rowCommentActionClass(row.id)"
@@ -66,7 +66,7 @@
                   v-for="(field, ci) in visibleFields"
                   :key="field.id"
                   class="meta-grid__cell"
-                  :class="{ 'meta-grid__cell--editing': isEditing(row.id, field.id), 'meta-grid__cell--readonly': !isEditable(field), 'meta-grid__cell--focused': focusRow === flatIndex(group, ri) && focusCol === ci }"
+                  :class="{ 'meta-grid__cell--editing': isEditing(row.id, field.id), 'meta-grid__cell--readonly': !isEditable(row.id, field), 'meta-grid__cell--focused': focusRow === flatIndex(group, ri) && focusCol === ci }"
                   :style="cellStyle(field.id)"
                   @dblclick="startEdit(row, field)"
                   @click.stop="onCellClick(flatIndex(group, ri), ci, row.id)"
@@ -92,7 +92,7 @@
                     :attachment-summaries="props.attachmentSummaries?.[row.id]?.[field.id]"
                   />
                   <button
-                    v-if="canComment && focusRow === flatIndex(group, ri) && focusCol === ci"
+                    v-if="resolveRowActions(row.id).canComment && focusRow === flatIndex(group, ri) && focusCol === ci"
                     type="button"
                     class="meta-grid__field-comment-action"
                     :class="fieldCommentActionClass(row.id, field.id)"
@@ -124,13 +124,13 @@
               @click="emit('select-record', row.id)"
             >
               <td v-if="enableMultiSelect" class="meta-grid__check-col" @click.stop>
-                <input type="checkbox" :checked="selectedIds.has(row.id)" @change="toggleSelectRow(row.id)" />
+                <input type="checkbox" :checked="selectedIds.has(row.id)" :disabled="!resolveRowActions(row.id).canDelete" @change="toggleSelectRow(row.id)" />
               </td>
               <td class="meta-grid__row-num">
                 <button class="meta-grid__expand-btn" :class="{ 'meta-grid__expand-btn--open': expandedRowIds.has(row.id) }" :aria-label="expandedRowIds.has(row.id) ? 'Collapse row' : 'Expand row'" @click.stop="toggleRowExpand(row.id)">&#x25B6;</button>
                 <span>{{ startIndex + ri + 1 }}</span>
                 <button
-                  v-if="canComment"
+                  v-if="resolveRowActions(row.id).canComment"
                   type="button"
                   class="meta-grid__comment-action"
                   :class="rowCommentActionClass(row.id)"
@@ -147,7 +147,7 @@
                 role="gridcell"
                 :aria-label="field.name"
                 class="meta-grid__cell"
-                :class="{ 'meta-grid__cell--editing': isEditing(row.id, field.id), 'meta-grid__cell--readonly': !isEditable(field), 'meta-grid__cell--focused': focusRow === ri && focusCol === ci }"
+                :class="{ 'meta-grid__cell--editing': isEditing(row.id, field.id), 'meta-grid__cell--readonly': !isEditable(row.id, field), 'meta-grid__cell--focused': focusRow === ri && focusCol === ci }"
                 :style="cellStyle(field.id)"
                 @dblclick="startEdit(row, field)"
                 @click.stop="onCellClick(ri, ci, row.id)"
@@ -173,7 +173,7 @@
                   :attachment-summaries="props.attachmentSummaries?.[row.id]?.[field.id]"
                 />
                 <button
-                  v-if="canComment && focusRow === ri && focusCol === ci"
+                  v-if="resolveRowActions(row.id).canComment && focusRow === ri && focusCol === ci"
                   type="button"
                   class="meta-grid__field-comment-action"
                   :class="fieldCommentActionClass(row.id, field.id)"
@@ -242,6 +242,7 @@ import type {
   MetaAttachmentDeleteFn,
   MetaAttachmentUploadFn,
   MetaField,
+  MetaRowActions,
   MetaRecord,
   MultitableCommentPresenceSummary,
   RowDensity,
@@ -273,6 +274,7 @@ const props = defineProps<{
   selectedRecordId?: string | null
   canEdit: boolean
   canDelete?: boolean
+  rowActionOverrides?: Record<string, MetaRowActions>
   fieldReadOnlyIds?: string[]
   columnWidths?: Record<string, number>
   linkSummaries?: Record<string, Record<string, { id: string; display: string }[]>>
@@ -314,7 +316,15 @@ function toggleRowExpand(rowId: string) {
   expandedRowIds.value = s
 }
 
-const allSelected = computed(() => filteredRows.value.length > 0 && selectedIds.value.size === filteredRows.value.length)
+const selectableRowIds = computed(() =>
+  filteredRows.value
+    .filter((row) => resolveRowActions(row.id).canDelete)
+    .map((row) => row.id),
+)
+const allSelected = computed(() =>
+  selectableRowIds.value.length > 0
+  && selectableRowIds.value.every((recordId) => selectedIds.value.has(recordId)),
+)
 
 // Server-side search replaces client-side filtering.
 // filteredRows now passes through rows directly (search is handled by the API).
@@ -361,11 +371,12 @@ const displayRows = computed(() => {
 
 function toggleSelectAll() {
   if (allSelected.value) selectedIds.value = new Set()
-  else selectedIds.value = new Set(filteredRows.value.map((r) => r.id))
+  else selectedIds.value = new Set(selectableRowIds.value)
   emit('selection-change', [...selectedIds.value])
 }
 
 function toggleSelectRow(recordId: string) {
+  if (!resolveRowActions(recordId).canDelete) return
   const s = new Set(selectedIds.value)
   if (s.has(recordId)) s.delete(recordId)
   else s.add(recordId)
@@ -393,7 +404,15 @@ function flatIndex(group: RowGroup, localIdx: number): number {
 
 const getSortDir = (fid: string) => props.sortRules.find((r) => r.fieldId === fid)?.direction ?? null
 const isSortable = (f: MetaField) => !['link', 'lookup', 'rollup'].includes(f.type)
-const isEditable = (f: MetaField) => props.canEdit && EDITABLE.has(f.type) && !props.fieldReadOnlyIds?.includes(f.id)
+function resolveRowActions(recordId: string): MetaRowActions {
+  return props.rowActionOverrides?.[recordId] ?? {
+    canEdit: props.canEdit,
+    canDelete: props.canDelete !== false,
+    canComment: props.canComment !== false,
+  }
+}
+const isEditable = (recordId: string, f: MetaField) =>
+  resolveRowActions(recordId).canEdit && EDITABLE.has(f.type) && !props.fieldReadOnlyIds?.includes(f.id)
 const isEditing = (rid: string, fid: string) => editCell.value?.recordId === rid && editCell.value?.fieldId === fid
 
 function cellStyle(fid: string) {
@@ -430,7 +449,7 @@ function onCellClick(ri: number, ci: number, rid: string) {
 }
 
 function startEdit(row: MetaRecord, field: MetaField) {
-  if (!isEditable(field)) return
+  if (!isEditable(row.id, field)) return
   editCell.value = { recordId: row.id, fieldId: field.id, value: row.data[field.id] ?? null }
 }
 
@@ -462,7 +481,7 @@ async function pasteFocusedCell() {
   if (focusRow.value < 0 || focusCol.value < 0) return
   const row = displayRows.value[focusRow.value]
   const field = props.visibleFields[focusCol.value]
-  if (!row || !field || !isEditable(field)) return
+  if (!row || !field || !isEditable(row.id, field)) return
   try {
     const text = await navigator.clipboard.readText()
     const value = field.type === 'number' && text !== '' ? Number(text) : text

@@ -65,7 +65,7 @@ describe('Multitable record and form context API', () => {
     const { app } = await createApp({
       tokenPerms: ['multitable:read', 'comments:write'],
       queryHandler: async (sql, params) => {
-        if (sql.includes('SELECT id, sheet_id, version, data FROM meta_records WHERE id = $1')) {
+        if (sql.includes('SELECT id, sheet_id, version, data, created_by FROM meta_records WHERE id = $1')) {
           expect(params).toEqual(['rec_1'])
           return {
             rows: [{
@@ -205,7 +205,10 @@ describe('Multitable record and form context API', () => {
             ],
           }
         }
-        if (sql.includes('SELECT id, version, data FROM meta_records WHERE id = $1 AND sheet_id = $2')) {
+        if (
+          sql.includes('SELECT id, version, data FROM meta_records WHERE id = $1 AND sheet_id = $2')
+          || sql.includes('SELECT id, version, data, created_by FROM meta_records WHERE id = $1 AND sheet_id = $2')
+        ) {
           expect(params).toEqual(['rec_existing', 'sheet_ops'])
           return {
             rows: [{ id: 'rec_existing', version: 5, data: { fld_title: 'Existing record', fld_internal: 'secret', fld_files: ['att_form_1'] } }],
@@ -289,7 +292,7 @@ describe('Multitable record and form context API', () => {
             }],
           }
         }
-        if (sql.includes('SELECT id, sheet_id, version, data FROM meta_records WHERE id = $1 AND sheet_id = $2')) {
+        if (sql.includes('SELECT id, sheet_id, version, data, created_by FROM meta_records WHERE id = $1 AND sheet_id = $2')) {
           expect(params).toEqual(['rec_perm_1', 'sheet_ops'])
           return {
             rows: [{
@@ -306,7 +309,10 @@ describe('Multitable record and form context API', () => {
             }],
           }
         }
-        if (sql.includes('SELECT id, version, data FROM meta_records WHERE id = $1 AND sheet_id = $2')) {
+        if (
+          sql.includes('SELECT id, version, data FROM meta_records WHERE id = $1 AND sheet_id = $2')
+          || sql.includes('SELECT id, version, data, created_by FROM meta_records WHERE id = $1 AND sheet_id = $2')
+        ) {
           expect(params).toEqual(['rec_perm_1', 'sheet_ops'])
           return {
             rows: [{
@@ -322,7 +328,7 @@ describe('Multitable record and form context API', () => {
             }],
           }
         }
-        if (sql.includes('SELECT id, sheet_id, version, data FROM meta_records WHERE id = $1')) {
+        if (sql.includes('SELECT id, sheet_id, version, data, created_by FROM meta_records WHERE id = $1')) {
           expect(params).toEqual(['rec_perm_1'])
           return {
             rows: [{
@@ -744,7 +750,7 @@ describe('Multitable record and form context API', () => {
           expect(params).toEqual(['sheet_vendors', ['vendor_1']])
           return { rows: [{ id: 'vendor_1' }] }
         }
-        if (sql.includes('SELECT id, version FROM meta_records WHERE id = $1 AND sheet_id = $2 FOR UPDATE')) {
+        if (sql.includes('SELECT id, version, created_by FROM meta_records WHERE id = $1 AND sheet_id = $2 FOR UPDATE')) {
           expect(params).toEqual(['rec_existing', 'sheet_ops'])
           return { rows: [{ id: 'rec_existing', version: 5 }] }
         }
@@ -762,7 +768,10 @@ describe('Multitable record and form context API', () => {
           expect(params?.[3]).toBe('vendor_1')
           return { rows: [] }
         }
-        if (sql.includes('SELECT id, version, data FROM meta_records WHERE id = $1 AND sheet_id = $2')) {
+        if (
+          sql.includes('SELECT id, version, data FROM meta_records WHERE id = $1 AND sheet_id = $2')
+          || sql.includes('SELECT id, version, data, created_by FROM meta_records WHERE id = $1 AND sheet_id = $2')
+        ) {
           expect(params).toEqual(['rec_existing', 'sheet_ops'])
           return {
             rows: [{
@@ -846,7 +855,10 @@ describe('Multitable record and form context API', () => {
     const { app } = await createApp({
       tokenPerms: ['multitable:write', 'comments:write'],
       queryHandler: async (sql, params) => {
-        if (sql.includes('SELECT id, sheet_id FROM meta_records WHERE id = $1')) {
+        if (
+          sql.includes('SELECT id, sheet_id FROM meta_records WHERE id = $1')
+          || sql.includes('SELECT id, sheet_id, created_by FROM meta_records WHERE id = $1')
+        ) {
           expect(params).toEqual(['rec_existing'])
           return { rows: [{ id: 'rec_existing', sheet_id: 'sheet_ops' }] }
         }
@@ -874,7 +886,7 @@ describe('Multitable record and form context API', () => {
           expect(params).toEqual(['sheet_vendors', ['vendor_1']])
           return { rows: [{ id: 'vendor_1' }] }
         }
-        if (sql.includes('SELECT id, version FROM meta_records WHERE id = $1 AND sheet_id = $2 FOR UPDATE')) {
+        if (sql.includes('SELECT id, version, created_by FROM meta_records WHERE id = $1 AND sheet_id = $2 FOR UPDATE')) {
           expect(params).toEqual(['rec_existing', 'sheet_ops'])
           return { rows: [{ id: 'rec_existing', version: 3 }] }
         }
@@ -892,7 +904,10 @@ describe('Multitable record and form context API', () => {
           expect(params?.[3]).toBe('vendor_1')
           return { rows: [] }
         }
-        if (sql.includes('SELECT id, version, data FROM meta_records WHERE id = $1 AND sheet_id = $2')) {
+        if (
+          sql.includes('SELECT id, version, data FROM meta_records WHERE id = $1 AND sheet_id = $2')
+          || sql.includes('SELECT id, version, data, created_by FROM meta_records WHERE id = $1 AND sheet_id = $2')
+        ) {
           expect(params).toEqual(['rec_existing', 'sheet_ops'])
           return {
             rows: [{
@@ -974,7 +989,10 @@ describe('Multitable record and form context API', () => {
     const { app } = await createApp({
       tokenPerms: ['multitable:write'],
       queryHandler: async (sql, params) => {
-        if (sql.includes('SELECT id, sheet_id FROM meta_records WHERE id = $1 AND sheet_id = $2')) {
+        if (
+          sql.includes('SELECT id, sheet_id FROM meta_records WHERE id = $1 AND sheet_id = $2')
+          || sql.includes('SELECT id, sheet_id, created_by FROM meta_records WHERE id = $1 AND sheet_id = $2')
+        ) {
           expect(params).toEqual(['rec_missing', 'sheet_ops'])
           return { rows: [] }
         }
@@ -1010,7 +1028,7 @@ describe('Multitable record and form context API', () => {
             ],
           }
         }
-        if (sql.includes('SELECT id, version FROM meta_records WHERE sheet_id = $1 AND id = $2 FOR UPDATE')) {
+        if (sql.includes('SELECT id, version, created_by FROM meta_records WHERE sheet_id = $1 AND id = $2 FOR UPDATE')) {
           expect(params).toEqual(['sheet_orders', 'rec_1'])
           return { rows: [{ id: 'rec_1', version: 2 }] }
         }
@@ -1101,7 +1119,7 @@ describe('Multitable record and form context API', () => {
             ],
           }
         }
-        if (sql.includes('SELECT id, version FROM meta_records WHERE sheet_id = $1 AND id = $2 FOR UPDATE')) {
+        if (sql.includes('SELECT id, version, created_by FROM meta_records WHERE sheet_id = $1 AND id = $2 FOR UPDATE')) {
           expect(params).toEqual(['sheet_orders', 'rec_1'])
           return { rows: [{ id: 'rec_1', version: 7 }] }
         }
