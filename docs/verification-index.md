@@ -14,6 +14,15 @@ Entry points:
   - Verification: `docs/development/github-stability-recording-lite-verification-20260403.md`
   - Notes: records on-prem stability snapshots into GitHub Actions artifacts without triggering the Slack drill; becomes live once merged to the default branch.
 
+## 2026-04-06 GitHub Stability Summary Polish
+
+- GitHub stability summary polish:
+  - Workflow: `.github/workflows/dingtalk-oauth-stability-recording-lite.yml`
+  - Script: `scripts/ops/github-dingtalk-oauth-stability-summary.py`
+  - Design: `docs/development/github-stability-summary-polish-design-20260406.md`
+  - Verification: `docs/development/github-stability-summary-polish-verification-20260406.md`
+  - Notes: adds machine-readable `summary.json`, failure reasons, and next actions while keeping GitHub in passive recording mode.
+
 ## 2026-04-03 On-Prem Docker GC
 
 - Remote Docker garbage collection:
