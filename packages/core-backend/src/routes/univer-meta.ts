@@ -1605,6 +1605,22 @@ async function resolveSheetCapabilities(
   }
 }
 
+async function resolveSheetReadableCapabilities(
+  req: Request,
+  query: QueryFn,
+  sheetId: string,
+): Promise<{ access: ResolvedRequestAccess; capabilities: MultitableCapabilities; sheetScope?: SheetPermissionScope }> {
+  const access = await resolveRequestAccess(req)
+  const baseCapabilities = deriveCapabilities(access.permissions, access.isAdminRole)
+  const scopeMap = await loadSheetPermissionScopeMap(query, [sheetId], access.userId)
+  const sheetScope = scopeMap.get(sheetId)
+  return {
+    access,
+    capabilities: applyContextSheetReadGrant(baseCapabilities, sheetScope, access.isAdminRole),
+    ...(sheetScope ? { sheetScope } : {}),
+  }
+}
+
 async function resolveReadableSheetIds(
   req: Request,
   query: QueryFn,
@@ -3611,7 +3627,7 @@ export function univerMetaRouter(): Router {
     }
   })
 
-  router.get('/view', rbacGuard('multitable', 'read'), async (req: Request, res: Response) => {
+  router.get('/view', async (req: Request, res: Response) => {
     const sheetIdParam = typeof req.query.sheetId === 'string' ? req.query.sheetId.trim() : undefined
     const viewIdParam = typeof req.query.viewId === 'string' ? req.query.viewId.trim() : undefined
     const seed = req.query.seed === 'true'
@@ -3630,6 +3646,11 @@ export function univerMetaRouter(): Router {
       })
       const sheetId = resolved.sheetId
       const viewConfig = resolved.view
+      const { access, capabilities, sheetScope } = await resolveSheetReadableCapabilities(req, pool.query.bind(pool), sheetId)
+      if (!access.userId) {
+        return res.status(401).json({ error: 'Authentication required' })
+      }
+      if (!capabilities.canRead) return sendForbidden(res)
       const rawSortRules = viewConfig ? parseMetaSortRules(viewConfig.sortInfo) : []
       const rawFilterInfo = viewConfig ? parseMetaFilterInfo(viewConfig.filterInfo) : null
       if (seed) {
@@ -3924,8 +3945,6 @@ export function univerMetaRouter(): Router {
             visiblePropertyFieldIds,
           )
         : undefined
-      const { access, capabilities, sheetScope } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
-      if (!capabilities.canRead) return sendForbidden(res)
       const rowActionOverrides = buildRowActionOverrides(
         rows,
         requiresOwnWriteRowPolicy(sheetScope, access.isAdminRole)
@@ -3979,7 +3998,7 @@ export function univerMetaRouter(): Router {
     }
   })
 
-  router.get('/form-context', rbacGuard('multitable', 'read'), async (req: Request, res: Response) => {
+  router.get('/form-context', async (req: Request, res: Response) => {
     const sheetIdParam = typeof req.query.sheetId === 'string' ? req.query.sheetId.trim() : undefined
     const viewIdParam = typeof req.query.viewId === 'string' ? req.query.viewId.trim() : undefined
     const recordIdParam = typeof req.query.recordId === 'string' ? req.query.recordId.trim() : undefined
@@ -3991,14 +4010,17 @@ export function univerMetaRouter(): Router {
         viewId: viewIdParam,
       })
       const sheetId = resolved.sheetId
+      const { access, capabilities, sheetScope } = await resolveSheetReadableCapabilities(req, pool.query.bind(pool), sheetId)
+      if (!access.userId) {
+        return res.status(401).json({ error: 'Authentication required' })
+      }
+      if (!capabilities.canRead) return sendForbidden(res)
       const sheet = await loadSheetRow(pool.query.bind(pool), sheetId)
       if (!sheet) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
       }
 
       const fields = await loadFieldsForSheet(pool.query.bind(pool), sheetId)
-      const { access, capabilities, sheetScope } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
-      if (!capabilities.canRead) return sendForbidden(res)
 
       let record: UniverMetaRecord | undefined
       if (recordIdParam) {
@@ -4719,7 +4741,7 @@ export function univerMetaRouter(): Router {
     }
   })
 
-  router.get('/records/:recordId', rbacGuard('multitable', 'read'), async (req: Request, res: Response) => {
+  router.get('/records/:recordId', async (req: Request, res: Response) => {
     const recordId = typeof req.params.recordId === 'string' ? req.params.recordId.trim() : ''
     const sheetIdParam = typeof req.query.sheetId === 'string' ? req.query.sheetId.trim() : undefined
     const viewIdParam = typeof req.query.viewId === 'string' ? req.query.viewId.trim() : undefined
@@ -4755,6 +4777,11 @@ export function univerMetaRouter(): Router {
       }
 
       sheetId = String(row.sheet_id)
+      const { access, capabilities, sheetScope } = await resolveSheetReadableCapabilities(req, pool.query.bind(pool), sheetId)
+      if (!access.userId) {
+        return res.status(401).json({ error: 'Authentication required' })
+      }
+      if (!capabilities.canRead) return sendForbidden(res)
       const sheet = await loadSheetRow(pool.query.bind(pool), sheetId)
       if (!sheet) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
@@ -4800,8 +4827,6 @@ export function univerMetaRouter(): Router {
           )
         : undefined
 
-      const { access, capabilities, sheetScope } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
-      if (!capabilities.canRead) return sendForbidden(res)
       const fieldPermissions = deriveFieldPermissions(fields, capabilities, {
         hiddenFieldIds: viewConfig?.hiddenFieldIds ?? [],
       })
