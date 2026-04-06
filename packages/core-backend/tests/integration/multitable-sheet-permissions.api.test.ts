@@ -317,6 +317,154 @@ describe('Multitable sheet-scoped permissions API', () => {
     })
   })
 
+  test('allows view when sheet read grant exists without global multitable permission', async () => {
+    const { app } = await createApp({
+      queryHandler: async (sql, params) => {
+        if (sql.includes('FROM spreadsheet_permissions')) {
+          expect(params).toEqual(['user_sheet_acl_1', ['sheet_ops']])
+          return {
+            rows: [{ sheet_id: 'sheet_ops', perm_code: 'spreadsheet:read', subject_type: 'user' }],
+          }
+        }
+        if (sql.includes('SELECT id, name FROM meta_sheets WHERE id = $1 AND deleted_at IS NULL')) {
+          expect(params).toEqual(['sheet_ops'])
+          return { rows: [{ id: 'sheet_ops', name: 'Orders' }] }
+        }
+        if (sql.includes('SELECT id, name, type, property, "order" FROM meta_fields WHERE sheet_id = $1 ORDER BY "order" ASC')) {
+          expect(params).toEqual(['sheet_ops'])
+          return {
+            rows: [{ id: 'fld_name', name: 'Name', type: 'string', property: {}, order: 1 }],
+          }
+        }
+        if (sql.includes('SELECT id, version, data FROM meta_records WHERE sheet_id = $1 ORDER BY created_at ASC, id ASC')) {
+          expect(params).toEqual(['sheet_ops'])
+          return { rows: [] }
+        }
+        throw new Error(`Unhandled SQL in test: ${sql}`)
+      },
+    })
+
+    const response = await request(app)
+      .get('/api/multitable/view')
+      .query({ sheetId: 'sheet_ops' })
+      .expect(200)
+
+    expect(response.body.data.meta.permissions.fieldPermissions).toEqual({
+      fld_name: {
+        visible: true,
+        readOnly: true,
+      },
+    })
+    expect(response.body.data.meta.permissions.rowActions).toEqual({
+      canEdit: false,
+      canDelete: false,
+      canComment: false,
+    })
+  })
+
+  test('allows form and record context when sheet write-own grant exists without global multitable permission', async () => {
+    const { app } = await createApp({
+      queryHandler: async (sql, params) => {
+        if (sql.includes('FROM spreadsheet_permissions')) {
+          expect(params).toEqual(['user_sheet_acl_1', ['sheet_ops']])
+          return {
+            rows: [
+              { sheet_id: 'sheet_ops', perm_code: 'spreadsheet:read', subject_type: 'user' },
+              { sheet_id: 'sheet_ops', perm_code: 'spreadsheet:write-own', subject_type: 'user' },
+            ],
+          }
+        }
+        if (sql.includes('SELECT id, base_id, name, description FROM meta_sheets WHERE id = $1 AND deleted_at IS NULL')) {
+          expect(params).toEqual(['sheet_ops'])
+          return { rows: [{ id: 'sheet_ops', base_id: 'base_ops', name: 'Orders', description: null }] }
+        }
+        if (sql.includes('SELECT id, name, type, property, "order" FROM meta_fields WHERE sheet_id = $1 ORDER BY "order" ASC, id ASC')) {
+          expect(params).toEqual(['sheet_ops'])
+          return {
+            rows: [{ id: 'fld_name', name: 'Name', type: 'string', property: {}, order: 1 }],
+          }
+        }
+        if (sql.includes('SELECT id, version, data, created_by FROM meta_records WHERE id = $1 AND sheet_id = $2')) {
+          expect(params).toEqual(['rec_owned', 'sheet_ops'])
+          return {
+            rows: [{ id: 'rec_owned', version: 3, data: { fld_name: 'Mine' }, created_by: 'user_sheet_acl_1' }],
+          }
+        }
+        if (sql.includes('SELECT id, sheet_id, version, data, created_by FROM meta_records WHERE id = $1')) {
+          expect(params).toEqual(['rec_owned'])
+          return {
+            rows: [{ id: 'rec_owned', sheet_id: 'sheet_ops', version: 3, data: { fld_name: 'Mine' }, created_by: 'user_sheet_acl_1' }],
+          }
+        }
+        throw new Error(`Unhandled SQL in test: ${sql}`)
+      },
+    })
+
+    const formResponse = await request(app)
+      .get('/api/multitable/form-context')
+      .query({ sheetId: 'sheet_ops', recordId: 'rec_owned' })
+      .expect(200)
+
+    expect(formResponse.body.data.capabilities).toMatchObject({
+      canRead: true,
+      canCreateRecord: false,
+      canEditRecord: false,
+      canDeleteRecord: false,
+    })
+    expect(formResponse.body.data.rowActions).toEqual({
+      canEdit: false,
+      canDelete: false,
+      canComment: false,
+    })
+
+    const recordResponse = await request(app)
+      .get('/api/multitable/records/rec_owned')
+      .expect(200)
+
+    expect(recordResponse.body.data.capabilities).toMatchObject({
+      canRead: true,
+      canEditRecord: false,
+      canDeleteRecord: false,
+    })
+    expect(recordResponse.body.data.rowActions).toEqual({
+      canEdit: false,
+      canDelete: false,
+      canComment: false,
+    })
+  })
+
+  test('rejects view, form-context, and record context when neither global multitable permission nor sheet grant exists', async () => {
+    const { app } = await createApp({
+      queryHandler: async (sql, params) => {
+        if (sql.includes('FROM spreadsheet_permissions')) {
+          expect(params).toEqual(['user_sheet_acl_1', ['sheet_ops']])
+          return { rows: [] }
+        }
+        if (sql.includes('SELECT id, sheet_id, version, data, created_by FROM meta_records WHERE id = $1')) {
+          expect(params).toEqual(['rec_1'])
+          return {
+            rows: [{ id: 'rec_1', sheet_id: 'sheet_ops', version: 1, data: { fld_name: 'Blocked' }, created_by: 'user_sheet_acl_2' }],
+          }
+        }
+        throw new Error(`Unhandled SQL in test: ${sql}`)
+      },
+    })
+
+    await request(app)
+      .get('/api/multitable/view')
+      .query({ sheetId: 'sheet_ops' })
+      .expect(403)
+
+    await request(app)
+      .get('/api/multitable/form-context')
+      .query({ sheetId: 'sheet_ops' })
+      .expect(403)
+
+    await request(app)
+      .get('/api/multitable/records/rec_1')
+      .expect(403)
+  })
+
   test('rejects create, patch, delete, and form submit when sheet permission is read-only', async () => {
     const { app } = await createApp({
       tokenPerms: ['multitable:read', 'multitable:write', 'comments:write'],
