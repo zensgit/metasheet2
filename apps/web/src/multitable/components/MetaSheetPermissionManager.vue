@@ -4,7 +4,7 @@
       <div class="meta-sheet-perm__header">
         <div>
           <h4 class="meta-sheet-perm__title">Manage Access</h4>
-          <p class="meta-sheet-perm__subtitle">Grant sheet-level access to people or roles. Write-own remains user-only.</p>
+          <p class="meta-sheet-perm__subtitle">Override sheet-level access for eligible people or roles. Write-own remains user-only.</p>
         </div>
         <button class="meta-sheet-perm__close" type="button" @click="requestClose">&times;</button>
       </div>
@@ -66,7 +66,7 @@
 
         <section class="meta-sheet-perm__section">
           <div class="meta-sheet-perm__section-header">
-            <strong>Add people or roles</strong>
+            <strong>Eligible people or roles</strong>
           </div>
           <input
             v-model="search"
@@ -75,8 +75,8 @@
             placeholder="Search people or roles"
             data-sheet-permission-search="true"
           />
-          <div v-if="candidatesLoading" class="meta-sheet-perm__empty">Searching people and roles…</div>
-          <div v-else-if="!availableCandidates.length" class="meta-sheet-perm__empty">No matching people or roles.</div>
+          <div v-if="candidatesLoading" class="meta-sheet-perm__empty">Searching eligible people and roles…</div>
+          <div v-else-if="!availableCandidates.length" class="meta-sheet-perm__empty">No matching eligible people or roles.</div>
           <template v-else>
             <div class="meta-sheet-perm__section-header">
               <strong>People</strong>
@@ -113,7 +113,7 @@
                 :disabled="busySubjectKey === subjectKey(candidate.subjectType, candidate.subjectId)"
                 @click="grantCandidate(candidate.subjectType, candidate.subjectId)"
               >
-                Grant
+                Apply
               </button>
             </div>
 
@@ -152,7 +152,7 @@
                 :disabled="busySubjectKey === subjectKey(candidate.subjectType, candidate.subjectId)"
                 @click="grantCandidate(candidate.subjectType, candidate.subjectId)"
               >
-                Grant
+                Apply
               </button>
             </div>
           </template>
@@ -337,16 +337,16 @@ async function updateSubjectAccess(
 async function applyEntry(subjectType: MetaSheetPermissionSubjectType, subjectId: string) {
   const nextAccessLevel = entryDrafts.value[subjectKey(subjectType, subjectId)]
   if (!nextAccessLevel) return
-  await updateSubjectAccess(subjectType, subjectId, nextAccessLevel, 'Sheet access updated')
+  await updateSubjectAccess(subjectType, subjectId, nextAccessLevel, 'Sheet access override updated')
 }
 
 async function removeEntry(subjectType: MetaSheetPermissionSubjectType, subjectId: string) {
-  await updateSubjectAccess(subjectType, subjectId, 'none', 'Sheet access removed')
+  await updateSubjectAccess(subjectType, subjectId, 'none', 'Sheet access override removed')
 }
 
 async function grantCandidate(subjectType: MetaSheetPermissionSubjectType, subjectId: string) {
   const key = subjectKey(subjectType, subjectId)
-  await updateSubjectAccess(subjectType, subjectId, candidateDrafts.value[key] ?? 'read', 'Sheet access granted')
+  await updateSubjectAccess(subjectType, subjectId, candidateDrafts.value[key] ?? 'read', 'Sheet access override saved')
 }
 
 watch(

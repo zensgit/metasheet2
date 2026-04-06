@@ -20,13 +20,14 @@ async function createApp(args: {
   tokenRoles?: string[]
   requestPermissions?: string[]
   requestRole?: string
+  userPermissionMap?: Record<string, string[]>
   queryHandler: QueryHandler
 }) {
   vi.resetModules()
   vi.doMock('../../src/rbac/service', () => ({
     isAdmin: vi.fn().mockResolvedValue(false),
     userHasPermission: vi.fn().mockResolvedValue(false),
-    listUserPermissions: vi.fn().mockResolvedValue([]),
+    listUserPermissions: vi.fn().mockImplementation(async (userId: string) => args.userPermissionMap?.[userId] ?? []),
     invalidateUserPerms: vi.fn(),
     getPermCacheStatus: vi.fn(),
   }))
@@ -451,6 +452,9 @@ describe('Multitable sheet-scoped permissions API', () => {
   test('lists sheet permission entries and permission candidates for full sheet writers', async () => {
     const { app } = await createApp({
       tokenPerms: ['multitable:read', 'multitable:write'],
+      userPermissionMap: {
+        user_alpha: ['multitable:read'],
+      },
       queryHandler: async (sql, params) => {
         if (sql.includes('SELECT id, base_id, name, description FROM meta_sheets WHERE id = $1')) {
           expect(params).toEqual(['sheet_ops'])
@@ -502,6 +506,10 @@ describe('Multitable sheet-scoped permissions API', () => {
               },
             ],
           }
+        }
+        if (sql.includes('SELECT permission_code FROM role_permissions WHERE role_id = $1')) {
+          expect(params).toEqual(['role_ops_writer'])
+          return { rows: [{ permission_code: 'multitable:write' }] }
         }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
@@ -622,6 +630,96 @@ describe('Multitable sheet-scoped permissions API', () => {
       canManageFields: false,
       canManageViews: false,
       canComment: true,
+    })
+  })
+
+  test('filters permission candidates that lack global multitable access', async () => {
+    const { app } = await createApp({
+      tokenPerms: ['multitable:read', 'multitable:write'],
+      userPermissionMap: {
+        user_allowed: ['multitable:write'],
+      },
+      queryHandler: async (sql, params) => {
+        if (sql.includes('SELECT id, base_id, name, description FROM meta_sheets WHERE id = $1')) {
+          expect(params).toEqual(['sheet_ops'])
+          return { rows: [{ id: 'sheet_ops', base_id: 'base_ops', name: 'Ops', description: null }] }
+        }
+        if (sql.includes('FROM spreadsheet_permissions') && sql.includes('sheet_id = ANY')) {
+          expect(params).toEqual(['user_sheet_acl_1', ['sheet_ops']])
+          return { rows: [{ sheet_id: 'sheet_ops', perm_code: 'spreadsheet:write', subject_type: 'user' }] }
+        }
+        if (sql.includes('WITH user_candidates AS') && sql.includes('role_candidates AS')) {
+          expect(params).toEqual(['sheet_ops', '', '%', 20])
+          return {
+            rows: [
+              {
+                subject_type: 'user',
+                subject_id: 'user_allowed',
+                user_name: 'Allowed User',
+                user_email: 'allowed@example.com',
+                user_is_active: true,
+                permission_codes: [],
+              },
+              {
+                subject_type: 'user',
+                subject_id: 'user_scope_only',
+                user_name: 'Scope Only User',
+                user_email: 'scope@example.com',
+                user_is_active: true,
+                permission_codes: ['spreadsheet:read'],
+              },
+              {
+                subject_type: 'role',
+                subject_id: 'role_allowed',
+                role_name: 'Allowed Role',
+                user_is_active: true,
+                permission_codes: [],
+              },
+              {
+                subject_type: 'role',
+                subject_id: 'role_scope_only',
+                role_name: 'Scope Only Role',
+                user_is_active: true,
+                permission_codes: ['spreadsheet:read'],
+              },
+            ],
+          }
+        }
+        if (sql.includes('SELECT permission_code FROM role_permissions WHERE role_id = $1')) {
+          if (params?.[0] === 'role_allowed') return { rows: [{ permission_code: 'multitable:read' }] }
+          if (params?.[0] === 'role_scope_only') return { rows: [] }
+          throw new Error(`Unexpected role permission lookup: ${params?.[0]}`)
+        }
+        throw new Error(`Unhandled SQL in test: ${sql}`)
+      },
+    })
+
+    const response = await request(app)
+      .get('/api/multitable/sheets/sheet_ops/permission-candidates')
+      .expect(200)
+
+    expect(response.body.data).toEqual({
+      items: [
+        {
+          subjectType: 'user',
+          subjectId: 'user_allowed',
+          label: 'Allowed User',
+          subtitle: 'allowed@example.com',
+          isActive: true,
+          accessLevel: null,
+        },
+        {
+          subjectType: 'role',
+          subjectId: 'role_allowed',
+          label: 'Allowed Role',
+          subtitle: 'role_allowed',
+          isActive: true,
+          accessLevel: null,
+        },
+      ],
+      total: 2,
+      limit: 20,
+      query: '',
     })
   })
 

@@ -1447,7 +1447,7 @@ async function listSheetPermissionCandidates(
     [sheetId, q, term, params.limit],
   )
 
-  return (result.rows as Array<{
+  const candidates = (result.rows as Array<{
     subject_type: string
     subject_id: string
     user_name?: string | null
@@ -1475,6 +1475,30 @@ async function listSheetPermissionCandidates(
         accessLevel: deriveSheetAccessLevel(normalizePermissionCodes(row.permission_codes)),
       } satisfies MultitableSheetPermissionCandidate
     })
+
+  const eligibility = await Promise.all(
+    candidates.map(async (candidate) => {
+      if (candidate.subjectType === 'role') {
+        if (candidate.subjectId === 'admin') return true
+        const result = await query(
+          'SELECT permission_code FROM role_permissions WHERE role_id = $1',
+          [candidate.subjectId],
+        )
+        const permissions = normalizePermissionCodes(
+          (result.rows as Array<{ permission_code?: string | null }>).map((row) => row.permission_code ?? ''),
+        )
+        return hasPermission(permissions, 'multitable:read') || hasPermission(permissions, 'multitable:write')
+      }
+
+      const [permissions, admin] = await Promise.all([
+        listUserPermissions(candidate.subjectId),
+        isAdmin(candidate.subjectId),
+      ])
+      return admin || hasPermission(permissions, 'multitable:read') || hasPermission(permissions, 'multitable:write')
+    }),
+  )
+
+  return candidates.filter((_candidate, index) => eligibility[index])
 }
 
 async function loadSheetPermissionScopeMap(
