@@ -39,6 +39,25 @@ function Write-Info {
   Write-Host "[multitable-onprem-apply-package] $Message"
 }
 
+function New-ShortTempDirectory {
+  param([string]$Prefix = 'mspa')
+
+  $tempBase = [System.IO.Path]::GetTempPath()
+  if ([string]::IsNullOrWhiteSpace($tempBase) -or -not (Test-Path -LiteralPath $tempBase)) {
+    throw 'System temp directory is unavailable'
+  }
+
+  for ($index = 0; $index -lt 5; $index += 1) {
+    $candidate = Join-Path $tempBase ($Prefix + '-' + [System.Guid]::NewGuid().ToString('N').Substring(0, 12))
+    if (-not (Test-Path -LiteralPath $candidate)) {
+      New-Item -ItemType Directory -Force -Path $candidate | Out-Null
+      return $candidate
+    }
+  }
+
+  throw "Failed to allocate a temporary directory under $tempBase"
+}
+
 function Require-Command {
   param([string]$Name)
 
@@ -108,12 +127,8 @@ if (-not (Test-Path -LiteralPath $resolvedEnvFile)) {
 }
 
 $outputLogs = Join-Path $resolvedRoot 'output\logs'
-$extractParent = Join-Path $resolvedRoot 'output\deploy'
 New-Item -ItemType Directory -Force -Path $outputLogs | Out-Null
-New-Item -ItemType Directory -Force -Path $extractParent | Out-Null
-
-$extractRoot = Join-Path $extractParent ("package-apply-" + [System.Guid]::NewGuid().ToString('N'))
-New-Item -ItemType Directory -Force -Path $extractRoot | Out-Null
+$extractRoot = New-ShortTempDirectory -Prefix 'mspa'
 
 try {
   Write-Info "Package archive: $resolvedArchive"
