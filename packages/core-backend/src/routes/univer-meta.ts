@@ -1670,7 +1670,7 @@ async function resolveReadableSheetIds(
   const scopeMap = await loadSheetPermissionScopeMap(query, uniqueSheetIds, access.userId)
   const readableSheetIds = new Set<string>()
   for (const sheetId of uniqueSheetIds) {
-    if (applySheetPermissionScope(baseCapabilities, scopeMap.get(sheetId), access.isAdminRole).canRead) {
+    if (canReadWithSheetGrant(baseCapabilities, scopeMap.get(sheetId), access.isAdminRole)) {
       readableSheetIds.add(sheetId)
     }
   }
