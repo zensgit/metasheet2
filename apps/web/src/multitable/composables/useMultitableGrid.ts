@@ -166,6 +166,7 @@ export function useMultitableGrid(opts: {
   const fieldPermissions = ref<Record<string, MetaFieldPermission>>({})
   const viewPermission = ref<MetaViewPermission | null>(null)
   const rowActions = ref<MetaRowActions | null>(null)
+  const rowActionOverrides = ref<Record<string, MetaRowActions>>({})
   const loading = ref(false)
   const error = ref<string | null>(null)
   const conflict = ref<GridConflictState | null>(null)
@@ -277,6 +278,7 @@ export function useMultitableGrid(opts: {
         : null
       viewPermission.value = nextViewPermission
       rowActions.value = data.meta?.permissions?.rowActions ?? null
+      rowActionOverrides.value = data.meta?.permissions?.rowActionOverrides ?? {}
       if (serverPage) page.value = serverPage
       if (data.view) syncFromView(data.view)
     } catch (e: any) {
@@ -414,6 +416,13 @@ export function useMultitableGrid(opts: {
     return false
   }
 
+  function resolveRowActions(recordId?: string | null): MetaRowActions | null {
+    if (recordId && rowActionOverrides.value[recordId]) {
+      return rowActionOverrides.value[recordId]
+    }
+    return rowActions.value
+  }
+
   async function createRecord(data?: Record<string, unknown>) {
     error.value = null
     try {
@@ -430,7 +439,7 @@ export function useMultitableGrid(opts: {
 
   async function deleteRecord(recordId: string): Promise<boolean> {
     error.value = null
-    if (rowActions.value?.canDelete === false) return rejectRowDelete()
+    if (resolveRowActions(recordId)?.canDelete === false) return rejectRowDelete()
     try {
       const row = rows.value.find((r) => r.id === recordId)
       await client.deleteRecord(recordId, row?.version)
@@ -458,7 +467,7 @@ export function useMultitableGrid(opts: {
   ) {
     error.value = null
     conflict.value = null
-    if (rowActions.value?.canEdit === false) return rejectRowEdit()
+    if (resolveRowActions(recordId)?.canEdit === false) return rejectRowEdit()
     const row = rows.value.find((r) => r.id === recordId)
     const oldValue = row?.data[fieldId]
     const oldLinkSummaries = options?.previousLinkSummaries ?? linkSummaries.value[recordId]?.[fieldId]
@@ -505,8 +514,8 @@ export function useMultitableGrid(opts: {
 
   async function undo() {
     if (!canUndo.value) return
-    if (rowActions.value?.canEdit === false) return void rejectRowEdit()
     const edit = editHistory.value[historyIndex.value]
+    if (resolveRowActions(edit.recordId)?.canEdit === false) return void rejectRowEdit()
     historyIndex.value--
     const row = rows.value.find((r) => r.id === edit.recordId)
     if (row) row.data[edit.fieldId] = edit.oldValue
@@ -524,9 +533,10 @@ export function useMultitableGrid(opts: {
 
   async function redo() {
     if (!canRedo.value) return
-    if (rowActions.value?.canEdit === false) return void rejectRowEdit()
-    historyIndex.value++
-    const edit = editHistory.value[historyIndex.value]
+    const nextHistoryIndex = historyIndex.value + 1
+    const edit = editHistory.value[nextHistoryIndex]
+    if (resolveRowActions(edit.recordId)?.canEdit === false) return void rejectRowEdit()
+    historyIndex.value = nextHistoryIndex
     const row = rows.value.find((r) => r.id === edit.recordId)
     if (row) row.data[edit.fieldId] = edit.newValue
     setLinkSummaries(edit.recordId, edit.fieldId, edit.newLinkSummaries)
@@ -742,7 +752,7 @@ export function useMultitableGrid(opts: {
 
   return {
     // State
-    fields, rows, linkSummaries, attachmentSummaries, fieldPermissions, viewPermission, rowActions, loading, error, conflict, page, hiddenFieldIds, visibleFields, readOnlyFieldIds,
+    fields, rows, linkSummaries, attachmentSummaries, fieldPermissions, viewPermission, rowActions, rowActionOverrides, loading, error, conflict, page, hiddenFieldIds, visibleFields, readOnlyFieldIds,
     sortRules, filterRules, filterConjunction, sortFilterDirty,
     columnWidths, groupFieldId, groupField,
     editHistory, historyIndex, canUndo, canRedo,
@@ -759,6 +769,6 @@ export function useMultitableGrid(opts: {
     mergeRemoteRecord, applyRemoteRecordPatch, removeRemoteRecord,
     undo, redo, clearEditHistory, dismissConflict, retryConflict,
     setColumnWidth, setGroupField,
-    setSearchQuery,
+    setSearchQuery, resolveRowActions,
   }
 }

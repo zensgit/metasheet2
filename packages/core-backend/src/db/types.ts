@@ -626,6 +626,7 @@ export interface MetaRecordsTable {
   sheet_id: string
   data: JSONColumnType<Record<string, unknown>>
   version: number
+  created_by: string | null
   created_at: CreatedAt
   updated_at: UpdatedAt
 }

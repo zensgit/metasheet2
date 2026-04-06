@@ -24,6 +24,7 @@ type UniverMetaRecord = {
   id: string
   version: number
   data: Record<string, unknown>
+  createdBy?: string | null
 }
 
 type UniverMetaView = {
@@ -117,6 +118,7 @@ type MultitableScopedPermissions = {
   fieldPermissions?: Record<string, MultitableFieldPermission>
   viewPermissions?: Record<string, MultitableViewPermission>
   rowActions?: MultitableRowActions
+  rowActionOverrides?: Record<string, MultitableRowActions>
 }
 
 type LinkedRecordSummary = {
@@ -1161,21 +1163,31 @@ type SheetPermissionScope = {
   hasAssignments: boolean
   canRead: boolean
   canWrite: boolean
+  canWriteOwn: boolean
 }
 
 const SHEET_READ_PERMISSION_CODES = new Set([
   'spreadsheet:read',
   'spreadsheet:write',
+  'spreadsheet:write-own',
   'spreadsheets:read',
   'spreadsheets:write',
+  'spreadsheets:write-own',
   'multitable:read',
   'multitable:write',
+  'multitable:write-own',
 ])
 
 const SHEET_WRITE_PERMISSION_CODES = new Set([
   'spreadsheet:write',
   'spreadsheets:write',
   'multitable:write',
+])
+
+const SHEET_OWN_WRITE_PERMISSION_CODES = new Set([
+  'spreadsheet:write-own',
+  'spreadsheets:write-own',
+  'multitable:write-own',
 ])
 
 async function resolveRequestAccess(req: Request): Promise<ResolvedRequestAccess> {
@@ -1239,6 +1251,7 @@ function summarizeSheetPermissionCodes(codes: string[]): SheetPermissionScope {
     hasAssignments: codes.length > 0,
     canRead: codes.some((code) => SHEET_READ_PERMISSION_CODES.has(code)),
     canWrite: codes.some((code) => SHEET_WRITE_PERMISSION_CODES.has(code)),
+    canWriteOwn: codes.some((code) => SHEET_OWN_WRITE_PERMISSION_CODES.has(code)),
   }
 }
 
@@ -1280,11 +1293,12 @@ function applySheetPermissionScope(
   isAdminRole: boolean,
 ): MultitableCapabilities {
   if (isAdminRole || !scope?.hasAssignments) return capabilities
+  const canWriteAnyRecord = scope.canWrite || scope.canWriteOwn
   return {
     canRead: capabilities.canRead && scope.canRead,
-    canCreateRecord: capabilities.canCreateRecord && scope.canWrite,
-    canEditRecord: capabilities.canEditRecord && scope.canWrite,
-    canDeleteRecord: capabilities.canDeleteRecord && scope.canWrite,
+    canCreateRecord: capabilities.canCreateRecord && canWriteAnyRecord,
+    canEditRecord: capabilities.canEditRecord && canWriteAnyRecord,
+    canDeleteRecord: capabilities.canDeleteRecord && canWriteAnyRecord,
     canManageFields: capabilities.canManageFields && scope.canWrite,
     canManageViews: capabilities.canManageViews && scope.canWrite,
     canComment: capabilities.canComment && scope.canRead,
@@ -1296,13 +1310,15 @@ async function resolveSheetCapabilities(
   req: Request,
   query: QueryFn,
   sheetId: string,
-): Promise<{ access: ResolvedRequestAccess; capabilities: MultitableCapabilities }> {
+): Promise<{ access: ResolvedRequestAccess; capabilities: MultitableCapabilities; sheetScope?: SheetPermissionScope }> {
   const access = await resolveRequestAccess(req)
   const baseCapabilities = deriveCapabilities(access.permissions, access.isAdminRole)
   const scopeMap = await loadSheetPermissionScopeMap(query, [sheetId], access.userId)
+  const sheetScope = scopeMap.get(sheetId)
   return {
     access,
-    capabilities: applySheetPermissionScope(baseCapabilities, scopeMap.get(sheetId), access.isAdminRole),
+    capabilities: applySheetPermissionScope(baseCapabilities, sheetScope, access.isAdminRole),
+    ...(sheetScope ? { sheetScope } : {}),
   }
 }
 
@@ -1361,6 +1377,100 @@ function deriveRowActions(capabilities: MultitableCapabilities): MultitableRowAc
     canDelete: capabilities.canDeleteRecord,
     canComment: capabilities.canComment,
   }
+}
+
+function requiresOwnWriteRowPolicy(
+  scope: SheetPermissionScope | undefined,
+  isAdminRole: boolean,
+): boolean {
+  return !isAdminRole && !!scope?.hasAssignments && scope.canWriteOwn && !scope.canWrite
+}
+
+function deriveDefaultRowActions(
+  capabilities: MultitableCapabilities,
+  scope: SheetPermissionScope | undefined,
+  isAdminRole: boolean,
+): MultitableRowActions {
+  if (!requiresOwnWriteRowPolicy(scope, isAdminRole)) {
+    return deriveRowActions(capabilities)
+  }
+  return {
+    canEdit: false,
+    canDelete: false,
+    canComment: capabilities.canComment,
+  }
+}
+
+function deriveRecordRowActions(
+  capabilities: MultitableCapabilities,
+  scope: SheetPermissionScope | undefined,
+  access: ResolvedRequestAccess,
+  createdBy: string | null | undefined,
+): MultitableRowActions {
+  if (!requiresOwnWriteRowPolicy(scope, access.isAdminRole)) {
+    return deriveRowActions(capabilities)
+  }
+
+  const isCreator = !!createdBy && !!access.userId && createdBy === access.userId
+  return {
+    canEdit: capabilities.canEditRecord && isCreator,
+    canDelete: capabilities.canDeleteRecord && isCreator,
+    canComment: capabilities.canComment,
+  }
+}
+
+async function loadRecordCreatorMap(
+  query: QueryFn,
+  sheetId: string,
+  recordIds: string[],
+): Promise<Map<string, string | null>> {
+  if (recordIds.length === 0) return new Map()
+  try {
+    const result = await query(
+      'SELECT id, created_by FROM meta_records WHERE sheet_id = $1 AND id = ANY($2::text[])',
+      [sheetId, recordIds],
+    )
+    return new Map(
+      (result.rows as Array<{ id: string; created_by: string | null }>).map((row) => [
+        String(row.id),
+        typeof row.created_by === 'string' ? row.created_by : null,
+      ]),
+    )
+  } catch (err) {
+    if (err instanceof Error && err.message.includes('column') && err.message.includes('created_by')) {
+      return new Map()
+    }
+    throw err
+  }
+}
+
+function buildRowActionOverrides(
+  records: Array<Pick<UniverMetaRecord, 'id'>>,
+  creatorMap: Map<string, string | null>,
+  capabilities: MultitableCapabilities,
+  scope: SheetPermissionScope | undefined,
+  access: ResolvedRequestAccess,
+): Record<string, MultitableRowActions> | undefined {
+  if (!requiresOwnWriteRowPolicy(scope, access.isAdminRole)) return undefined
+  const overrides: Record<string, MultitableRowActions> = {}
+  for (const record of records) {
+    const rowActions = deriveRecordRowActions(capabilities, scope, access, creatorMap.get(record.id))
+    if (rowActions.canEdit || rowActions.canDelete || rowActions.canComment !== capabilities.canComment) {
+      overrides[record.id] = rowActions
+    }
+  }
+  return Object.keys(overrides).length > 0 ? overrides : undefined
+}
+
+function ensureRecordWriteAllowed(
+  capabilities: MultitableCapabilities,
+  scope: SheetPermissionScope | undefined,
+  access: ResolvedRequestAccess,
+  createdBy: string | null | undefined,
+  action: 'edit' | 'delete',
+): boolean {
+  const rowActions = deriveRecordRowActions(capabilities, scope, access, createdBy)
+  return action === 'edit' ? rowActions.canEdit : rowActions.canDelete
 }
 
 type FieldMutationGuard = {
@@ -3332,13 +3442,23 @@ export function univerMetaRouter(): Router {
             visiblePropertyFieldIds,
           )
         : undefined
-      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      const { access, capabilities, sheetScope } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canRead) return sendForbidden(res)
+      const rowActionOverrides = buildRowActionOverrides(
+        rows,
+        requiresOwnWriteRowPolicy(sheetScope, access.isAdminRole)
+          ? await loadRecordCreatorMap(pool.query.bind(pool), sheetId, rows.map((row) => row.id))
+          : new Map(),
+        capabilities,
+        sheetScope,
+        access,
+      )
       const permissions: MultitableScopedPermissions = {
         fieldPermissions: deriveFieldPermissions(fields, capabilities, {
           hiddenFieldIds: viewConfig?.hiddenFieldIds ?? [],
         }),
-        rowActions: deriveRowActions(capabilities),
+        rowActions: deriveDefaultRowActions(capabilities, sheetScope, access.isAdminRole),
+        ...(rowActionOverrides ? { rowActionOverrides } : {}),
         ...(viewConfig ? { viewPermissions: deriveViewPermissions([viewConfig], capabilities) } : {}),
       }
 
@@ -3395,13 +3515,13 @@ export function univerMetaRouter(): Router {
       }
 
       const fields = await loadFieldsForSheet(pool.query.bind(pool), sheetId)
-      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      const { access, capabilities, sheetScope } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canRead) return sendForbidden(res)
 
       let record: UniverMetaRecord | undefined
       if (recordIdParam) {
         const recordRes = await pool.query(
-          'SELECT id, version, data FROM meta_records WHERE id = $1 AND sheet_id = $2',
+          'SELECT id, version, data, created_by FROM meta_records WHERE id = $1 AND sheet_id = $2',
           [recordIdParam, sheetId],
         )
         const row: any = recordRes.rows[0]
@@ -3412,6 +3532,7 @@ export function univerMetaRouter(): Router {
           id: String(row.id),
           version: Number(row.version ?? 1),
           data: normalizeJson(row.data),
+          createdBy: typeof row.created_by === 'string' ? row.created_by : null,
         }
       }
 
@@ -3423,11 +3544,13 @@ export function univerMetaRouter(): Router {
         allowCreateOnly: !record,
       })
       const viewPermissions = resolved.view ? deriveViewPermissions([resolved.view], capabilities) : {}
-      const rowActions = deriveRowActions(record ? capabilities : {
-        ...capabilities,
-        canEditRecord: capabilities.canCreateRecord,
-        canDeleteRecord: false,
-      })
+      const rowActions = record
+        ? deriveRecordRowActions(capabilities, sheetScope, access, record.createdBy)
+        : deriveRecordRowActions({
+            ...capabilities,
+            canEditRecord: capabilities.canCreateRecord,
+            canDeleteRecord: false,
+          }, sheetScope, access, null)
       const attachmentFields = visibleFields.filter((field) => field.type === 'attachment')
       const attachmentSummaries = record && attachmentFields.length > 0
         ? filterSingleRecordFieldSummaryMap(
@@ -3516,7 +3639,7 @@ export function univerMetaRouter(): Router {
       if (!sheet) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${view.sheetId}` } })
       }
-      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), view.sheetId)
+      const { access, capabilities, sheetScope } = await resolveSheetCapabilities(req, pool.query.bind(pool), view.sheetId)
       const canWriteFormRecord = parsed.data.recordId ? capabilities.canEditRecord : capabilities.canCreateRecord
       if (!canWriteFormRecord) return sendForbidden(res)
 
@@ -3642,13 +3765,17 @@ export function univerMetaRouter(): Router {
       await pool.transaction(async ({ query }) => {
         if (recordId) {
           const currentRes = await query(
-            'SELECT id, version FROM meta_records WHERE id = $1 AND sheet_id = $2 FOR UPDATE',
+            'SELECT id, version, created_by FROM meta_records WHERE id = $1 AND sheet_id = $2 FOR UPDATE',
             [recordId, view.sheetId],
           )
           if ((currentRes as any).rows.length === 0) {
             throw new NotFoundError(`Record not found: ${recordId}`)
           }
-          const serverVersion = Number((currentRes as any).rows[0]?.version ?? 1)
+          const currentRow: any = (currentRes as any).rows[0]
+          if (!ensureRecordWriteAllowed(capabilities, sheetScope, access, typeof currentRow?.created_by === 'string' ? currentRow.created_by : null, 'edit')) {
+            throw new ValidationError('Record editing is not allowed for this row')
+          }
+          const serverVersion = Number(currentRow?.version ?? 1)
           if (typeof parsed.data.expectedVersion === 'number' && parsed.data.expectedVersion !== serverVersion) {
             throw new VersionConflictError(recordId, serverVersion)
           }
@@ -3699,10 +3826,10 @@ export function univerMetaRouter(): Router {
         }
 
         const insertRes = await query(
-          `INSERT INTO meta_records (id, sheet_id, data, version)
-           VALUES ($1, $2, $3::jsonb, 1)
+          `INSERT INTO meta_records (id, sheet_id, data, version, created_by)
+           VALUES ($1, $2, $3::jsonb, 1, $4)
            RETURNING id, version`,
-          [resultRecordId, view.sheetId, JSON.stringify(patch)],
+          [resultRecordId, view.sheetId, JSON.stringify(patch), getRequestActorId(req)],
         )
         resultRecordId = String((insertRes as any).rows[0]?.id ?? resultRecordId)
         nextVersion = Number((insertRes as any).rows[0]?.version ?? 1)
@@ -3858,7 +3985,7 @@ export function univerMetaRouter(): Router {
       if (!sheet) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
       }
-      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      const { access, capabilities, sheetScope } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canEditRecord) return sendForbidden(res)
 
       const fields = await loadFieldsForSheet(pool.query.bind(pool), sheetId)
@@ -3969,13 +4096,17 @@ export function univerMetaRouter(): Router {
       let nextVersion = 1
       await pool.transaction(async ({ query }) => {
         const currentRes = await query(
-          'SELECT id, version FROM meta_records WHERE id = $1 AND sheet_id = $2 FOR UPDATE',
+          'SELECT id, version, created_by FROM meta_records WHERE id = $1 AND sheet_id = $2 FOR UPDATE',
           [recordId, sheetId],
         )
         if ((currentRes as any).rows.length === 0) {
           throw new NotFoundError(`Record not found: ${recordId}`)
         }
-        const serverVersion = Number((currentRes as any).rows[0]?.version ?? 1)
+        const currentRow: any = (currentRes as any).rows[0]
+        if (!ensureRecordWriteAllowed(capabilities, sheetScope, access, typeof currentRow?.created_by === 'string' ? currentRow.created_by : null, 'edit')) {
+          throw new ValidationError('Record editing is not allowed for this row')
+        }
+        const serverVersion = Number(currentRow?.version ?? 1)
         if (typeof parsed.data.expectedVersion === 'number' && parsed.data.expectedVersion !== serverVersion) {
           throw new VersionConflictError(recordId, serverVersion)
         }
@@ -4129,11 +4260,11 @@ export function univerMetaRouter(): Router {
 
       const recordRes = sheetId
         ? await pool.query(
-          'SELECT id, sheet_id, version, data FROM meta_records WHERE id = $1 AND sheet_id = $2',
+          'SELECT id, sheet_id, version, data, created_by FROM meta_records WHERE id = $1 AND sheet_id = $2',
           [recordId, sheetId],
         )
         : await pool.query(
-          'SELECT id, sheet_id, version, data FROM meta_records WHERE id = $1',
+          'SELECT id, sheet_id, version, data, created_by FROM meta_records WHERE id = $1',
           [recordId],
         )
       const row: any = recordRes.rows[0]
@@ -4152,6 +4283,7 @@ export function univerMetaRouter(): Router {
         id: String(row.id),
         version: Number(row.version ?? 1),
         data: normalizeJson(row.data),
+        createdBy: typeof row.created_by === 'string' ? row.created_by : null,
       }
 
       const relationalLinkFields = fields
@@ -4186,13 +4318,13 @@ export function univerMetaRouter(): Router {
           )
         : undefined
 
-      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      const { access, capabilities, sheetScope } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canRead) return sendForbidden(res)
       const fieldPermissions = deriveFieldPermissions(fields, capabilities, {
         hiddenFieldIds: viewConfig?.hiddenFieldIds ?? [],
       })
       const viewPermissions = viewConfig ? deriveViewPermissions([viewConfig], capabilities) : {}
-      const rowActions = deriveRowActions(capabilities)
+      const rowActions = deriveRecordRowActions(capabilities, sheetScope, access, record.createdBy)
 
       return res.json({
         ok: true,
@@ -4419,7 +4551,7 @@ export function univerMetaRouter(): Router {
           if (sheetRes.rows.length === 0) {
             return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
           }
-          const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+          const { access, capabilities, sheetScope } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
           if (!capabilities.canEditRecord) return sendForbidden(res)
 
           if (fieldId) {
@@ -4438,11 +4570,15 @@ export function univerMetaRouter(): Router {
 
           if (recordId) {
             const recordRes = await pool.query(
-              'SELECT id FROM meta_records WHERE id = $1 AND sheet_id = $2',
+              'SELECT id, created_by FROM meta_records WHERE id = $1 AND sheet_id = $2',
               [recordId, sheetId],
             )
-            if (recordRes.rows.length === 0) {
+            const recordRow: any = recordRes.rows[0]
+            if (!recordRow) {
               return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Record not found: ${recordId}` } })
+            }
+            if (!ensureRecordWriteAllowed(capabilities, sheetScope, access, typeof recordRow?.created_by === 'string' ? recordRow.created_by : null, 'edit')) {
+              return sendForbidden(res, 'Record editing is not allowed for this row')
             }
           }
 
@@ -4589,7 +4725,7 @@ export function univerMetaRouter(): Router {
         patch: Record<string, unknown>
       } | null = null
       const attachmentRes = await pool.query(
-        `SELECT id, sheet_id, record_id, field_id, storage_file_id
+        `SELECT id, sheet_id, record_id, field_id, storage_file_id, created_by
          FROM multitable_attachments
          WHERE id = $1 AND deleted_at IS NULL`,
         [attachmentId],
@@ -4598,8 +4734,23 @@ export function univerMetaRouter(): Router {
       if (!attachmentRow) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Attachment not found: ${attachmentId}` } })
       }
+      const access = await resolveRequestAccess(req)
       const sheetCapabilities = await resolveSheetCapabilities(req, pool.query.bind(pool), String(attachmentRow.sheet_id))
       if (!sheetCapabilities.capabilities.canEditRecord) return sendForbidden(res)
+      if (typeof attachmentRow.record_id === 'string' && attachmentRow.record_id) {
+        const creatorMap = await loadRecordCreatorMap(
+          pool.query.bind(pool),
+          String(attachmentRow.sheet_id),
+          [String(attachmentRow.record_id)],
+        )
+        if (!ensureRecordWriteAllowed(
+          sheetCapabilities.capabilities,
+          sheetCapabilities.sheetScope,
+          access,
+          creatorMap.get(String(attachmentRow.record_id)),
+          'edit',
+        )) return sendForbidden(res, 'Record editing is not allowed for this row')
+      }
 
       await pool.transaction(async ({ query }) => {
         const recordId = typeof attachmentRow.record_id === 'string' ? attachmentRow.record_id : null
@@ -4842,10 +4993,10 @@ export function univerMetaRouter(): Router {
       const recordId = `rec_${randomUUID()}`
       const recordRes = await pool.transaction(async ({ query }) => {
         const inserted = await query(
-          `INSERT INTO meta_records (id, sheet_id, data, version)
-           VALUES ($1, $2, $3::jsonb, 1)
+          `INSERT INTO meta_records (id, sheet_id, data, version, created_by)
+           VALUES ($1, $2, $3::jsonb, 1, $4)
            RETURNING version`,
-          [recordId, sheetId, JSON.stringify(patch)],
+          [recordId, sheetId, JSON.stringify(patch), getRequestActorId(req)],
         )
 
         if (linkUpdates.size > 0) {
@@ -4905,15 +5056,23 @@ export function univerMetaRouter(): Router {
 
     try {
       const pool = poolManager.get()
+      const access = await resolveRequestAccess(req)
       let deletedSheetId: string | null = null
-      const recordRes = await pool.query('SELECT id, sheet_id FROM meta_records WHERE id = $1', [recordId])
+      const recordRes = await pool.query('SELECT id, sheet_id, created_by FROM meta_records WHERE id = $1', [recordId])
       if (recordRes.rows.length === 0) {
         throw new NotFoundError(`Record not found: ${recordId}`)
       }
       deletedSheetId = typeof (recordRes.rows[0] as any)?.sheet_id === 'string' ? String((recordRes.rows[0] as any).sheet_id) : null
       if (deletedSheetId) {
-        const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), deletedSheetId)
+        const { capabilities, sheetScope } = await resolveSheetCapabilities(req, pool.query.bind(pool), deletedSheetId)
         if (!capabilities.canDeleteRecord) return sendForbidden(res)
+        if (!ensureRecordWriteAllowed(
+          capabilities,
+          sheetScope,
+          access,
+          typeof (recordRes.rows[0] as any)?.created_by === 'string' ? String((recordRes.rows[0] as any).created_by) : null,
+          'delete',
+        )) return sendForbidden(res, 'Record deletion is not allowed for this row')
       }
       await pool.transaction(async ({ query }) => {
         const recordRes = await query('SELECT id, sheet_id, version FROM meta_records WHERE id = $1 FOR UPDATE', [recordId])
@@ -4994,7 +5153,7 @@ export function univerMetaRouter(): Router {
         viewId: parsed.data.viewId,
       })
       const sheetId = resolved.sheetId
-      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      const { access, capabilities, sheetScope } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canEditRecord) return sendForbidden(res)
 
       const fieldRes = await pool.query(
@@ -5124,14 +5283,17 @@ export function univerMetaRouter(): Router {
         for (const [recordId, changes] of changesByRecord.entries()) {
           const expectedVersion = Array.from(new Set(changes.map(c => c.expectedVersion).filter((v): v is number => typeof v === 'number')))[0]
           const recordRes = await query(
-            'SELECT id, version FROM meta_records WHERE sheet_id = $1 AND id = $2 FOR UPDATE',
+            'SELECT id, version, created_by FROM meta_records WHERE sheet_id = $1 AND id = $2 FOR UPDATE',
             [sheetId, recordId],
           )
           if (recordRes.rows.length === 0) {
             throw new NotFoundError(`Record not found: ${recordId}`)
           }
-
-          const serverVersion = Number((recordRes.rows[0] as any).version ?? 1)
+          const recordRow: any = recordRes.rows[0]
+          if (!ensureRecordWriteAllowed(capabilities, sheetScope, access, typeof recordRow?.created_by === 'string' ? recordRow.created_by : null, 'edit')) {
+            throw new ValidationError(`Record editing is not allowed for ${recordId}`)
+          }
+          const serverVersion = Number(recordRow?.version ?? 1)
           if (typeof expectedVersion === 'number' && expectedVersion !== serverVersion) {
             throw new VersionConflictError(recordId, serverVersion)
           }
