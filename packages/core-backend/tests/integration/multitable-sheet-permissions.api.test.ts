@@ -981,6 +981,335 @@ describe('Multitable sheet-scoped permissions API', () => {
     }
   })
 
+  test('lists fields and views when sheet permission is read-only without global multitable permission', async () => {
+    const { app } = await createApp({
+      queryHandler: async (sql, params) => {
+        if (sql.includes('FROM spreadsheet_permissions')) {
+          expect(params).toEqual(['user_sheet_acl_1', ['sheet_ops']])
+          return { rows: [{ sheet_id: 'sheet_ops', perm_code: 'spreadsheet:read', subject_type: 'user' }] }
+        }
+        if (sql.includes('SELECT id FROM meta_sheets WHERE id = $1 AND deleted_at IS NULL')) {
+          expect(params).toEqual(['sheet_ops'])
+          return { rows: [{ id: 'sheet_ops' }] }
+        }
+        if (sql.includes('SELECT id, name, type, property, "order" FROM meta_fields WHERE sheet_id = $1 ORDER BY "order" ASC, id ASC LIMIT 500')) {
+          expect(params).toEqual(['sheet_ops'])
+          return { rows: [{ id: 'fld_title', name: 'Title', type: 'string', property: {}, order: 0 }] }
+        }
+        if (sql.includes('SELECT id, sheet_id, name, type, filter_info, sort_info, group_info, hidden_field_ids, config FROM meta_views WHERE sheet_id = $1 ORDER BY created_at ASC LIMIT 200')) {
+          expect(params).toEqual(['sheet_ops'])
+          return {
+            rows: [
+              {
+                id: 'view_grid',
+                sheet_id: 'sheet_ops',
+                name: 'Grid',
+                type: 'grid',
+                filter_info: {},
+                sort_info: {},
+                group_info: {},
+                hidden_field_ids: [],
+                config: {},
+              },
+            ],
+          }
+        }
+        throw new Error(`Unhandled SQL in test: ${sql}`)
+      },
+    })
+
+    const fieldsResponse = await request(app)
+      .get('/api/multitable/fields')
+      .query({ sheetId: 'sheet_ops' })
+      .expect(200)
+
+    expect(fieldsResponse.body.data.fields).toEqual([
+      { id: 'fld_title', name: 'Title', type: 'string', property: {}, order: 0 },
+    ])
+
+    const viewsResponse = await request(app)
+      .get('/api/multitable/views')
+      .query({ sheetId: 'sheet_ops' })
+      .expect(200)
+
+    expect(viewsResponse.body.data.views).toEqual([
+      {
+        id: 'view_grid',
+        sheetId: 'sheet_ops',
+        name: 'Grid',
+        type: 'grid',
+        filterInfo: {},
+        sortInfo: {},
+        groupInfo: {},
+        hiddenFieldIds: [],
+        config: {},
+      },
+    ])
+  })
+
+  test('allows field and view management when sheet permission is write without global multitable permission', async () => {
+    const fields = new Map<string, any>([
+      ['fld_title', { id: 'fld_title', sheet_id: 'sheet_ops', name: 'Title', type: 'string', property: {}, order: 0 }],
+      ['fld_priority', { id: 'fld_priority', sheet_id: 'sheet_ops', name: 'Priority', type: 'string', property: {}, order: 1 }],
+      ['fld_person_user_id', { id: 'fld_person_user_id', sheet_id: 'sheet_people', name: 'User ID', type: 'string', property: {}, order: 0 }],
+      ['fld_person_name', { id: 'fld_person_name', sheet_id: 'sheet_people', name: 'Name', type: 'string', property: {}, order: 1 }],
+      ['fld_person_email', { id: 'fld_person_email', sheet_id: 'sheet_people', name: 'Email', type: 'string', property: {}, order: 2 }],
+      ['fld_person_avatar', { id: 'fld_person_avatar', sheet_id: 'sheet_people', name: 'Avatar URL', type: 'string', property: {}, order: 3 }],
+    ])
+    const views = new Map<string, any>([
+      ['view_grid', { id: 'view_grid', sheet_id: 'sheet_ops', name: 'Grid', type: 'grid', filter_info: {}, sort_info: {}, group_info: {}, hidden_field_ids: [], config: {} }],
+    ])
+
+    const fieldsForSheet = (sheetId: string) =>
+      Array.from(fields.values())
+        .filter((field) => field.sheet_id === sheetId)
+        .sort((a, b) => Number(a.order ?? 0) - Number(b.order ?? 0) || String(a.id).localeCompare(String(b.id)))
+
+    const viewsForSheet = (sheetId: string) =>
+      Array.from(views.values()).filter((view) => view.sheet_id === sheetId)
+
+    const { app } = await createApp({
+      queryHandler: async (sql, params) => {
+        if (sql.includes('FROM spreadsheet_permissions') && sql.includes('sheet_id = ANY')) {
+          expect(params).toEqual(['user_sheet_acl_1', ['sheet_ops']])
+          return { rows: [{ sheet_id: 'sheet_ops', perm_code: 'spreadsheet:write', subject_type: 'user' }] }
+        }
+        if (sql.includes('FROM meta_sheets s') && sql.includes('LEFT JOIN meta_bases')) {
+          expect(params).toEqual(['sheet_ops'])
+          return {
+            rows: [{ id: 'sheet_ops', base_id: 'base_ops', name: 'Ops', description: null }],
+          }
+        }
+        if (sql.includes('FROM meta_bases') && sql.includes('WHERE id = $1')) {
+          expect(params).toEqual(['base_ops'])
+          return {
+            rows: [{ id: 'base_ops', name: 'Ops Base', icon: 'table', color: '#1677ff', owner_id: 'owner_1', workspace_id: 'workspace_1' }],
+          }
+        }
+        if (sql.includes('FROM meta_sheets') && sql.includes('WHERE base_id = $1')) {
+          expect(params).toEqual(['base_ops'])
+          return {
+            rows: [
+              { id: 'sheet_ops', base_id: 'base_ops', name: 'Ops', description: null },
+              { id: 'sheet_people', base_id: 'base_ops', name: 'People', description: '__metasheet_system:people__' },
+            ],
+          }
+        }
+        if (sql.includes('SELECT id FROM meta_sheets WHERE id = $1 AND deleted_at IS NULL')) {
+          expect(params).toEqual(['sheet_ops'])
+          return { rows: [{ id: 'sheet_ops' }] }
+        }
+        if (sql.includes('SELECT id FROM meta_sheets WHERE id = $1')) {
+          expect(params).toEqual(['sheet_ops'])
+          return { rows: [{ id: 'sheet_ops' }] }
+        }
+        if (sql.includes('SELECT id, base_id, name, description FROM meta_sheets WHERE id = $1')) {
+          const sheetId = String(params?.[0] ?? '')
+          if (sheetId === 'sheet_ops') {
+            return { rows: [{ id: 'sheet_ops', base_id: 'base_ops', name: 'Ops', description: null }] }
+          }
+          if (sheetId === 'sheet_people') {
+            return { rows: [{ id: 'sheet_people', base_id: 'base_ops', name: 'People', description: '__metasheet_system:people__' }] }
+          }
+          throw new Error(`Unexpected sheet lookup: ${sheetId}`)
+        }
+        if (sql.includes('SELECT id, name, type, property, "order" FROM meta_fields WHERE sheet_id = $1 ORDER BY "order" ASC, id ASC LIMIT 500')) {
+          const sheetId = String(params?.[0] ?? '')
+          return { rows: fieldsForSheet(sheetId) }
+        }
+        if (sql.includes('SELECT id, name, type, property, "order" FROM meta_fields WHERE sheet_id = $1 ORDER BY "order" ASC, id ASC')) {
+          const sheetId = String(params?.[0] ?? '')
+          return { rows: fieldsForSheet(sheetId) }
+        }
+        if (sql.includes('SELECT id, name, type, "order" FROM meta_fields WHERE sheet_id = $1 ORDER BY "order" ASC, id ASC')) {
+          const sheetId = String(params?.[0] ?? '')
+          return {
+            rows: fieldsForSheet(sheetId).map((field) => ({
+              id: field.id,
+              name: field.name,
+              type: field.type,
+              order: field.order,
+            })),
+          }
+        }
+        if (sql.includes('SELECT COALESCE(MAX("order"), -1) AS max_order FROM meta_fields WHERE sheet_id = $1')) {
+          expect(params).toEqual(['sheet_ops'])
+          const rows = fieldsForSheet('sheet_ops')
+          return { rows: [{ max_order: rows.length > 0 ? rows[rows.length - 1]?.order ?? -1 : -1 }] }
+        }
+        if (sql.includes('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order")')) {
+          const [id, sheetId, name, type, propertyJson, order] = params as [string, string, string, string, string, number]
+          const row = {
+            id,
+            sheet_id: sheetId,
+            name,
+            type,
+            property: JSON.parse(propertyJson),
+            order,
+          }
+          fields.set(id, row)
+          return { rows: [{ id, name, type, property: row.property, order }] }
+        }
+        if (sql.includes('SELECT id, name, type, property, "order" FROM meta_fields WHERE id = $1')) {
+          const fieldId = String(params?.[0] ?? '')
+          const row = fields.get(fieldId)
+          return { rows: row ? [{ id: row.id, name: row.name, type: row.type, property: row.property, order: row.order }] : [] }
+        }
+        if (sql.includes('SELECT id, sheet_id FROM meta_fields WHERE id = $1')) {
+          const fieldId = String(params?.[0] ?? '')
+          const row = fields.get(fieldId)
+          return { rows: row ? [{ id: row.id, sheet_id: row.sheet_id }] : [] }
+        }
+        if (sql.includes('SELECT id, sheet_id, name, type, property, "order" FROM meta_fields WHERE id = $1')) {
+          const fieldId = String(params?.[0] ?? '')
+          const row = fields.get(fieldId)
+          return { rows: row ? [{ ...row }] : [] }
+        }
+        if (sql.includes('UPDATE meta_fields\n           SET name = $2, type = $3, property = $4::jsonb, "order" = $5, updated_at = now()')) {
+          const [fieldId, name, type, propertyJson, order] = params as [string, string, string, string, number]
+          const row = fields.get(fieldId)
+          if (!row) return { rows: [] }
+          row.name = name
+          row.type = type
+          row.property = JSON.parse(propertyJson)
+          row.order = order
+          fields.set(fieldId, row)
+          return { rows: [{ id: row.id, name: row.name, type: row.type, property: row.property, order: row.order }] }
+        }
+        if (sql.includes('FROM meta_views') && sql.includes('WHERE sheet_id = $1') && sql.includes('ORDER BY created_at ASC')) {
+          const sheetId = String(params?.[0] ?? '')
+          return { rows: viewsForSheet(sheetId) }
+        }
+        if (sql.includes('INSERT INTO meta_views (id, sheet_id, name, type, filter_info, sort_info, group_info, hidden_field_ids, config)')) {
+          const [id, sheetId, name, type, filterJson, sortJson, groupJson, hiddenJson, configJson] = params as [string, string, string, string, string, string, string, string, string]
+          views.set(id, {
+            id,
+            sheet_id: sheetId,
+            name,
+            type,
+            filter_info: JSON.parse(filterJson),
+            sort_info: JSON.parse(sortJson),
+            group_info: JSON.parse(groupJson),
+            hidden_field_ids: JSON.parse(hiddenJson),
+            config: JSON.parse(configJson),
+          })
+          return { rows: [] }
+        }
+        if (sql.includes('SELECT id, sheet_id, name, type, filter_info, sort_info, group_info, hidden_field_ids, config FROM meta_views WHERE id = $1')) {
+          const viewId = String(params?.[0] ?? '')
+          const row = views.get(viewId)
+          return { rows: row ? [{ ...row }] : [] }
+        }
+        if (sql.includes('UPDATE meta_views\n         SET name = $2, type = $3, filter_info = $4::jsonb, sort_info = $5::jsonb, group_info = $6::jsonb, hidden_field_ids = $7::jsonb, config = $8::jsonb')) {
+          const [viewId, name, type, filterJson, sortJson, groupJson, hiddenJson, configJson] = params as [string, string, string, string, string, string, string, string]
+          const row = views.get(viewId)
+          if (!row) return { rows: [] }
+          row.name = name
+          row.type = type
+          row.filter_info = JSON.parse(filterJson)
+          row.sort_info = JSON.parse(sortJson)
+          row.group_info = JSON.parse(groupJson)
+          row.hidden_field_ids = JSON.parse(hiddenJson)
+          row.config = JSON.parse(configJson)
+          views.set(viewId, row)
+          return { rows: [] }
+        }
+        if (sql.includes('SELECT id, email, name, avatar_url') && sql.includes('FROM users')) {
+          return { rows: [] }
+        }
+        throw new Error(`Unhandled SQL in test: ${sql}`)
+      },
+    })
+
+    const contextResponse = await request(app)
+      .get('/api/multitable/context')
+      .query({ sheetId: 'sheet_ops' })
+      .expect(200)
+
+    expect(contextResponse.body.data.capabilities).toMatchObject({
+      canRead: true,
+      canCreateRecord: true,
+      canEditRecord: true,
+      canDeleteRecord: true,
+      canManageFields: true,
+      canManageSheetAccess: false,
+      canManageViews: true,
+    })
+
+    const fieldsResponse = await request(app)
+      .get('/api/multitable/fields')
+      .query({ sheetId: 'sheet_ops' })
+      .expect(200)
+    expect(fieldsResponse.body.data.fields).toHaveLength(2)
+
+    const createFieldResponse = await request(app)
+      .post('/api/multitable/fields')
+      .send({ sheetId: 'sheet_ops', name: 'Status', type: 'string' })
+      .expect(201)
+    expect(createFieldResponse.body.data.field).toMatchObject({
+      name: 'Status',
+      type: 'string',
+    })
+
+    const preparePeopleResponse = await request(app)
+      .post('/api/multitable/person-fields/prepare')
+      .send({ sheetId: 'sheet_ops' })
+      .expect(200)
+    expect(preparePeopleResponse.body.data).toEqual({
+      targetSheet: {
+        id: 'sheet_people',
+        baseId: 'base_ops',
+        name: 'People',
+        description: '__metasheet_system:people__',
+      },
+      fieldProperty: {
+        foreignSheetId: 'sheet_people',
+        limitSingleRecord: true,
+        refKind: 'user',
+      },
+    })
+
+    const updateFieldResponse = await request(app)
+      .patch('/api/multitable/fields/fld_title')
+      .send({ name: 'Ticket Title' })
+      .expect(200)
+    expect(updateFieldResponse.body.data.field).toMatchObject({
+      id: 'fld_title',
+      name: 'Ticket Title',
+    })
+
+    const viewsResponse = await request(app)
+      .get('/api/multitable/views')
+      .query({ sheetId: 'sheet_ops' })
+      .expect(200)
+    expect(viewsResponse.body.data.views).toHaveLength(1)
+
+    const createViewResponse = await request(app)
+      .post('/api/multitable/views')
+      .send({ sheetId: 'sheet_ops', name: 'Board', type: 'kanban' })
+      .expect(201)
+    expect(createViewResponse.body.data.view).toMatchObject({
+      name: 'Board',
+      type: 'kanban',
+      sheetId: 'sheet_ops',
+    })
+
+    const updateViewResponse = await request(app)
+      .patch('/api/multitable/views/view_grid')
+      .send({ name: 'Main Grid' })
+      .expect(200)
+    expect(updateViewResponse.body.data.view).toMatchObject({
+      id: 'view_grid',
+      name: 'Main Grid',
+      type: 'grid',
+    })
+
+    const deleteSheetResponse = await request(app)
+      .delete('/api/multitable/sheets/sheet_ops')
+      .expect(403)
+    expect(deleteSheetResponse.body).toEqual({ error: 'Insufficient permissions' })
+  })
+
   test('lists sheet permission entries and permission candidates for full sheet writers', async () => {
     const { app } = await createApp({
       tokenPerms: ['multitable:read', 'multitable:write', 'multitable:share'],
@@ -1338,7 +1667,7 @@ describe('Multitable sheet-scoped permissions API', () => {
     })
   })
 
-  test('allows sheet permission authoring with multitable share even when field management is unavailable', async () => {
+  test('keeps sheet permission authoring available when multitable share is present alongside sheet write', async () => {
     const { app } = await createApp({
       tokenPerms: ['multitable:read', 'multitable:share'],
       queryHandler: async (sql, params) => {
@@ -1393,7 +1722,7 @@ describe('Multitable sheet-scoped permissions API', () => {
     ])
 
     expect(contextResponse.body.data.capabilities).toMatchObject({
-      canManageFields: false,
+      canManageFields: true,
       canManageSheetAccess: true,
     })
     expect(permissionsResponse.body.data.items).toEqual([
