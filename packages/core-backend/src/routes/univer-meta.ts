@@ -1151,7 +1151,34 @@ function normalizePermissionCodes(value: unknown): string[] {
     .filter((item) => item.length > 0)
 }
 
-async function resolveRequestAccess(req: Request): Promise<{ permissions: string[]; isAdminRole: boolean }> {
+type ResolvedRequestAccess = {
+  userId: string
+  permissions: string[]
+  isAdminRole: boolean
+}
+
+type SheetPermissionScope = {
+  hasAssignments: boolean
+  canRead: boolean
+  canWrite: boolean
+}
+
+const SHEET_READ_PERMISSION_CODES = new Set([
+  'spreadsheet:read',
+  'spreadsheet:write',
+  'spreadsheets:read',
+  'spreadsheets:write',
+  'multitable:read',
+  'multitable:write',
+])
+
+const SHEET_WRITE_PERMISSION_CODES = new Set([
+  'spreadsheet:write',
+  'spreadsheets:write',
+  'multitable:write',
+])
+
+async function resolveRequestAccess(req: Request): Promise<ResolvedRequestAccess> {
   const userId = req.user?.id?.toString() ?? req.user?.sub?.toString() ?? req.user?.userId?.toString() ?? ''
   const tokenRoles = normalizePermissionCodes(req.user?.roles)
   const tokenPerms = normalizePermissionCodes(req.user?.perms)
@@ -1160,18 +1187,19 @@ async function resolveRequestAccess(req: Request): Promise<{ permissions: string
   const isAdminRole = role === 'admin' || tokenRoles.includes('admin')
   const directPermissions = tokenPerms.length > 0 ? tokenPerms : resolvedPermissions
   if (!userId) {
-    return { permissions: directPermissions, isAdminRole }
+    return { userId, permissions: directPermissions, isAdminRole }
   }
 
   if (isAdminRole) {
-    return { permissions: directPermissions, isAdminRole: true }
+    return { userId, permissions: directPermissions, isAdminRole: true }
   }
 
   if (directPermissions.length > 0) {
-    return { permissions: directPermissions, isAdminRole: false }
+    return { userId, permissions: directPermissions, isAdminRole: false }
   }
 
   return {
+    userId,
     permissions: await listUserPermissions(userId),
     isAdminRole: await isAdmin(userId),
   }
@@ -1204,6 +1232,82 @@ function deriveCapabilities(permissions: string[], isAdminRole: boolean): Multit
     canComment,
     canManageAutomation,
   }
+}
+
+function summarizeSheetPermissionCodes(codes: string[]): SheetPermissionScope {
+  return {
+    hasAssignments: codes.length > 0,
+    canRead: codes.some((code) => SHEET_READ_PERMISSION_CODES.has(code)),
+    canWrite: codes.some((code) => SHEET_WRITE_PERMISSION_CODES.has(code)),
+  }
+}
+
+async function loadSheetPermissionScopeMap(
+  query: QueryFn,
+  sheetIds: string[],
+  userId: string,
+): Promise<Map<string, SheetPermissionScope>> {
+  if (!userId || sheetIds.length === 0) return new Map()
+  try {
+    const result = await query(
+      `SELECT sheet_id, perm_code
+       FROM spreadsheet_permissions
+       WHERE user_id = $1
+         AND sheet_id = ANY($2::text[])`,
+      [userId, sheetIds],
+    )
+    const grouped = new Map<string, string[]>()
+    for (const row of result.rows as Array<{ sheet_id: string; perm_code: string }>) {
+      const sheetId = typeof row.sheet_id === 'string' ? row.sheet_id : ''
+      const code = typeof row.perm_code === 'string' ? row.perm_code.trim() : ''
+      if (!sheetId || !code) continue
+      const current = grouped.get(sheetId) ?? []
+      current.push(code)
+      grouped.set(sheetId, current)
+    }
+    return new Map(
+      Array.from(grouped.entries()).map(([sheetId, codes]) => [sheetId, summarizeSheetPermissionCodes(codes)]),
+    )
+  } catch (err) {
+    if (isUndefinedTableError(err, 'spreadsheet_permissions')) return new Map()
+    throw err
+  }
+}
+
+function applySheetPermissionScope(
+  capabilities: MultitableCapabilities,
+  scope: SheetPermissionScope | undefined,
+  isAdminRole: boolean,
+): MultitableCapabilities {
+  if (isAdminRole || !scope?.hasAssignments) return capabilities
+  return {
+    canRead: capabilities.canRead && scope.canRead,
+    canCreateRecord: capabilities.canCreateRecord && scope.canWrite,
+    canEditRecord: capabilities.canEditRecord && scope.canWrite,
+    canDeleteRecord: capabilities.canDeleteRecord && scope.canWrite,
+    canManageFields: capabilities.canManageFields && scope.canWrite,
+    canManageViews: capabilities.canManageViews && scope.canWrite,
+    canComment: capabilities.canComment && scope.canRead,
+    canManageAutomation: capabilities.canManageAutomation && scope.canWrite,
+  }
+}
+
+async function resolveSheetCapabilities(
+  req: Request,
+  query: QueryFn,
+  sheetId: string,
+): Promise<{ access: ResolvedRequestAccess; capabilities: MultitableCapabilities }> {
+  const access = await resolveRequestAccess(req)
+  const baseCapabilities = deriveCapabilities(access.permissions, access.isAdminRole)
+  const scopeMap = await loadSheetPermissionScopeMap(query, [sheetId], access.userId)
+  return {
+    access,
+    capabilities: applySheetPermissionScope(baseCapabilities, scopeMap.get(sheetId), access.isAdminRole),
+  }
+}
+
+function sendForbidden(res: Response, message = 'Insufficient permissions') {
+  return res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message } })
 }
 
 function deriveFieldPermissions(
@@ -2085,7 +2189,7 @@ export function univerMetaRouter(): Router {
     try {
       const pool = poolManager.get()
       const access = await resolveRequestAccess(req)
-      const capabilities = deriveCapabilities(access.permissions, access.isAdminRole)
+      const baseCapabilities = deriveCapabilities(access.permissions, access.isAdminRole)
 
       let resolvedBaseId = baseId || null
       let resolvedSheetId = sheetId || null
@@ -2137,13 +2241,35 @@ export function univerMetaRouter(): Router {
         )
         : { rows: [] }
       const visibleSheetRows = filterVisibleSheetRows(((sheetListResult as any).rows ?? []) as any[])
+      const sheetPermissionScopeMap = await loadSheetPermissionScopeMap(
+        pool.query.bind(pool),
+        visibleSheetRows.map((row) => String(row.id)),
+        access.userId,
+      )
+      const readableSheetRows = visibleSheetRows.filter((row) =>
+        applySheetPermissionScope(
+          baseCapabilities,
+          sheetPermissionScopeMap.get(String(row.id)),
+          access.isAdminRole,
+        ).canRead,
+      )
 
       const effectiveSheetId =
         resolvedSheetId ??
-        (typeof visibleSheetRows[0]?.id === 'string' ? String(visibleSheetRows[0].id) : null)
+        (typeof readableSheetRows[0]?.id === 'string' ? String(readableSheetRows[0].id) : null)
+      if (resolvedSheetId && !readableSheetRows.some((row) => String(row.id) === resolvedSheetId)) {
+        return sendForbidden(res)
+      }
+      const capabilities = effectiveSheetId
+        ? applySheetPermissionScope(
+            baseCapabilities,
+            sheetPermissionScopeMap.get(effectiveSheetId),
+            access.isAdminRole,
+          )
+        : baseCapabilities
       const selectedSheet =
         (!isSystemPeopleSheetDescription(sheetRow?.description) ? sheetRow : null) ??
-        visibleSheetRows.find((row) => String(row.id) === effectiveSheetId) ??
+        readableSheetRows.find((row) => String(row.id) === effectiveSheetId) ??
         null
 
       const viewsResult = effectiveSheetId
@@ -2195,7 +2321,10 @@ export function univerMetaRouter(): Router {
             baseId: typeof row.base_id === 'string' ? row.base_id : null,
             name: String(row.name),
             description: typeof row.description === 'string' ? row.description : null,
-          })).filter((row: any) => !isSystemPeopleSheetDescription(row.description)),
+          })).filter((row: any) =>
+            !isSystemPeopleSheetDescription(row.description)
+            && readableSheetRows.some((visibleRow) => String(visibleRow.id) === String(row.id)),
+          ),
           views: serializedViews,
           capabilities,
           fieldPermissions,
@@ -2246,6 +2375,8 @@ export function univerMetaRouter(): Router {
       if (sheetRes.rows.length === 0) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
       }
+      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      if (!capabilities.canRead) return sendForbidden(res)
 
       const result = await pool.query(
         'SELECT id, name, type, property, "order" FROM meta_fields WHERE sheet_id = $1 ORDER BY "order" ASC, id ASC LIMIT 500',
@@ -2285,12 +2416,13 @@ export function univerMetaRouter(): Router {
 
     try {
       const pool = poolManager.get()
+      const sheetRes = await pool.query('SELECT id FROM meta_sheets WHERE id = $1 AND deleted_at IS NULL', [sheetId])
+      if (sheetRes.rows.length === 0) {
+        throw new NotFoundError(`Sheet not found: ${sheetId}`)
+      }
+      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      if (!capabilities.canManageFields) return sendForbidden(res)
       await pool.transaction(async ({ query }) => {
-        const sheetRes = await query('SELECT id FROM meta_sheets WHERE id = $1 AND deleted_at IS NULL', [sheetId])
-        if ((sheetRes as any).rows.length === 0) {
-          throw new NotFoundError(`Sheet not found: ${sheetId}`)
-        }
-
         const configError = await validateLookupRollupConfig(query, sheetId, type, property)
         if (configError) {
           throw new ValidationError(configError)
@@ -2350,9 +2482,11 @@ export function univerMetaRouter(): Router {
 
     try {
       const pool = poolManager.get()
+      const sourceSheet = await loadSheetRow(pool.query.bind(pool), parsed.data.sheetId)
+      if (!sourceSheet) throw new NotFoundError(`Sheet not found: ${parsed.data.sheetId}`)
+      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), parsed.data.sheetId)
+      if (!capabilities.canManageFields) return sendForbidden(res)
       const preset = await pool.transaction(async ({ query }) => {
-        const sourceSheet = await loadSheetRow(query as unknown as QueryFn, parsed.data.sheetId)
-        if (!sourceSheet) throw new NotFoundError(`Sheet not found: ${parsed.data.sheetId}`)
         const baseId = sourceSheet.baseId ?? await ensureLegacyBase(query as unknown as QueryFn)
         return ensurePeopleSheetPreset(query as unknown as QueryFn, baseId)
       })
@@ -2389,6 +2523,14 @@ export function univerMetaRouter(): Router {
 
     try {
       const pool = poolManager.get()
+      const existing = await pool.query(
+        'SELECT id, sheet_id FROM meta_fields WHERE id = $1',
+        [fieldId],
+      )
+      if (existing.rows.length === 0) throw new NotFoundError(`Field not found: ${fieldId}`)
+      const preflightSheetId = String((existing.rows[0] as any).sheet_id ?? '')
+      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), preflightSheetId)
+      if (!capabilities.canManageFields) return sendForbidden(res)
       let sheetId = ''
       const updated = await pool.transaction(async ({ query }) => {
         const existing = await query(
@@ -2490,6 +2632,11 @@ export function univerMetaRouter(): Router {
 
     try {
       const pool = poolManager.get()
+      const existing = await pool.query('SELECT id, sheet_id FROM meta_fields WHERE id = $1', [fieldId])
+      if (existing.rows.length === 0) throw new NotFoundError(`Field not found: ${fieldId}`)
+      const sheetId = String((existing.rows[0] as any).sheet_id ?? '')
+      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      if (!capabilities.canManageFields) return sendForbidden(res)
       const result = await pool.transaction(async ({ query }) => {
         const existing = await query('SELECT id, sheet_id, "order" FROM meta_fields WHERE id = $1', [fieldId])
         if ((existing as any).rows.length === 0) throw new NotFoundError(`Field not found: ${fieldId}`)
@@ -2567,13 +2714,15 @@ export function univerMetaRouter(): Router {
       if (sheetRes.rows.length === 0) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
       }
+      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      if (!capabilities.canRead) return sendForbidden(res)
 
       let result = await pool.query(
         'SELECT id, sheet_id, name, type, filter_info, sort_info, group_info, hidden_field_ids, config FROM meta_views WHERE sheet_id = $1 ORDER BY created_at ASC LIMIT 200',
         [sheetId],
       )
 
-      if (result.rows.length === 0) {
+      if (result.rows.length === 0 && capabilities.canManageViews) {
         const defaultId = buildId('view')
         await pool.query(
           `INSERT INTO meta_views (id, sheet_id, name, type, filter_info, sort_info, group_info, hidden_field_ids, config)
@@ -2637,6 +2786,8 @@ export function univerMetaRouter(): Router {
       if (sheetRes.rows.length === 0) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
       }
+      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      if (!capabilities.canManageViews) return sendForbidden(res)
 
       await pool.query(
         `INSERT INTO meta_views (id, sheet_id, name, type, filter_info, sort_info, group_info, hidden_field_ids, config)
@@ -2708,6 +2859,8 @@ export function univerMetaRouter(): Router {
       }
 
       const row: any = current.rows[0]
+      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), String(row.sheet_id))
+      if (!capabilities.canManageViews) return sendForbidden(res)
       const nextName = parsed.data.name ?? String(row.name)
       const nextType = parsed.data.type ?? String(row.type ?? 'grid')
       const nextFilter = parsed.data.filterInfo ?? normalizeJson(row.filter_info)
@@ -2762,10 +2915,13 @@ export function univerMetaRouter(): Router {
 
     try {
       const pool = poolManager.get()
-      const del = await pool.query('DELETE FROM meta_views WHERE id = $1', [viewId])
-      if ((del as any).rowCount === 0) {
+      const current = await pool.query('SELECT id, sheet_id FROM meta_views WHERE id = $1', [viewId])
+      if (current.rows.length === 0) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `View not found: ${viewId}` } })
       }
+      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), String((current.rows[0] as any).sheet_id ?? ''))
+      if (!capabilities.canManageViews) return sendForbidden(res)
+      await pool.query('DELETE FROM meta_views WHERE id = $1', [viewId])
       invalidateViewConfigCache(viewId)
       return res.json({ ok: true, data: { deleted: viewId } })
     } catch (err) {
@@ -2784,10 +2940,13 @@ export function univerMetaRouter(): Router {
 
     try {
       const pool = poolManager.get()
-      const del = await pool.query('DELETE FROM meta_sheets WHERE id = $1', [sheetId])
-      if ((del as any).rowCount === 0) {
+      const sheetRes = await pool.query('SELECT id FROM meta_sheets WHERE id = $1', [sheetId])
+      if (sheetRes.rows.length === 0) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
       }
+      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      if (!capabilities.canManageViews) return sendForbidden(res)
+      const del = await pool.query('DELETE FROM meta_sheets WHERE id = $1', [sheetId])
       invalidateSheetSummaryCache(sheetId)
       invalidateFieldCache(sheetId)
       invalidateViewConfigCache()
@@ -3173,8 +3332,8 @@ export function univerMetaRouter(): Router {
             visiblePropertyFieldIds,
           )
         : undefined
-      const access = await resolveRequestAccess(req)
-      const capabilities = deriveCapabilities(access.permissions, access.isAdminRole)
+      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      if (!capabilities.canRead) return sendForbidden(res)
       const permissions: MultitableScopedPermissions = {
         fieldPermissions: deriveFieldPermissions(fields, capabilities, {
           hiddenFieldIds: viewConfig?.hiddenFieldIds ?? [],
@@ -3236,8 +3395,8 @@ export function univerMetaRouter(): Router {
       }
 
       const fields = await loadFieldsForSheet(pool.query.bind(pool), sheetId)
-      const access = await resolveRequestAccess(req)
-      const capabilities = deriveCapabilities(access.permissions, access.isAdminRole)
+      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      if (!capabilities.canRead) return sendForbidden(res)
 
       let record: UniverMetaRecord | undefined
       if (recordIdParam) {
@@ -3357,6 +3516,9 @@ export function univerMetaRouter(): Router {
       if (!sheet) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${view.sheetId}` } })
       }
+      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), view.sheetId)
+      const canWriteFormRecord = parsed.data.recordId ? capabilities.canEditRecord : capabilities.canCreateRecord
+      if (!canWriteFormRecord) return sendForbidden(res)
 
       const fields = await loadFieldsForSheet(pool.query.bind(pool), view.sheetId)
       const fieldById = buildFieldMutationGuardMap(fields)
@@ -3696,6 +3858,8 @@ export function univerMetaRouter(): Router {
       if (!sheet) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
       }
+      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      if (!capabilities.canEditRecord) return sendForbidden(res)
 
       const fields = await loadFieldsForSheet(pool.query.bind(pool), sheetId)
       const fieldById = buildFieldMutationGuardMap(fields)
@@ -4022,8 +4186,8 @@ export function univerMetaRouter(): Router {
           )
         : undefined
 
-      const access = await resolveRequestAccess(req)
-      const capabilities = deriveCapabilities(access.permissions, access.isAdminRole)
+      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      if (!capabilities.canRead) return sendForbidden(res)
       const fieldPermissions = deriveFieldPermissions(fields, capabilities, {
         hiddenFieldIds: viewConfig?.hiddenFieldIds ?? [],
       })
@@ -4102,6 +4266,8 @@ export function univerMetaRouter(): Router {
       if (sheetRes.rows.length === 0) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
       }
+      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      if (!capabilities.canRead) return sendForbidden(res)
 
       const summary = await loadRecordSummaries(pool.query.bind(pool), sheetId, {
         displayFieldId,
@@ -4153,6 +4319,8 @@ export function univerMetaRouter(): Router {
       if (field.type !== 'link') {
         return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: `Field is not a link field: ${fieldId}` } })
       }
+      const { capabilities: sourceCapabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), String(fieldRow.sheet_id))
+      if (!sourceCapabilities.canRead) return sendForbidden(res)
 
       const linkConfig = parseLinkFieldConfig(field.property)
       if (!linkConfig) {
@@ -4163,6 +4331,8 @@ export function univerMetaRouter(): Router {
       if (!targetSheet) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Target sheet not found: ${linkConfig.foreignSheetId}` } })
       }
+      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), linkConfig.foreignSheetId)
+      if (!capabilities.canRead) return sendForbidden(res)
 
       let selected: LinkedRecordSummary[] = []
       if (recordId) {
@@ -4249,6 +4419,8 @@ export function univerMetaRouter(): Router {
           if (sheetRes.rows.length === 0) {
             return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
           }
+          const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+          if (!capabilities.canEditRecord) return sendForbidden(res)
 
           if (fieldId) {
             const fieldRes = await pool.query(
@@ -4371,6 +4543,17 @@ export function univerMetaRouter(): Router {
       if (!row) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Attachment not found: ${attachmentId}` } })
       }
+      const sheetIdRes = await pool.query(
+        `SELECT sheet_id
+         FROM multitable_attachments
+         WHERE id = $1 AND deleted_at IS NULL`,
+        [attachmentId],
+      )
+      const sheetId = typeof (sheetIdRes.rows[0] as any)?.sheet_id === 'string' ? String((sheetIdRes.rows[0] as any).sheet_id) : ''
+      if (sheetId) {
+        const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+        if (!capabilities.canRead) return sendForbidden(res)
+      }
 
       const storage = getAttachmentStorageService()
       const buffer = await storage.download(String(row.storage_file_id))
@@ -4415,6 +4598,8 @@ export function univerMetaRouter(): Router {
       if (!attachmentRow) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Attachment not found: ${attachmentId}` } })
       }
+      const sheetCapabilities = await resolveSheetCapabilities(req, pool.query.bind(pool), String(attachmentRow.sheet_id))
+      if (!sheetCapabilities.capabilities.canEditRecord) return sendForbidden(res)
 
       await pool.transaction(async ({ query }) => {
         const recordId = typeof attachmentRow.record_id === 'string' ? attachmentRow.record_id : null
@@ -4518,6 +4703,8 @@ export function univerMetaRouter(): Router {
       if (sheetRes.rows.length === 0) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
       }
+      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      if (!capabilities.canCreateRecord) return sendForbidden(res)
 
       const fieldRes = await pool.query(
         'SELECT id, type, property FROM meta_fields WHERE sheet_id = $1',
@@ -4719,6 +4906,15 @@ export function univerMetaRouter(): Router {
     try {
       const pool = poolManager.get()
       let deletedSheetId: string | null = null
+      const recordRes = await pool.query('SELECT id, sheet_id FROM meta_records WHERE id = $1', [recordId])
+      if (recordRes.rows.length === 0) {
+        throw new NotFoundError(`Record not found: ${recordId}`)
+      }
+      deletedSheetId = typeof (recordRes.rows[0] as any)?.sheet_id === 'string' ? String((recordRes.rows[0] as any).sheet_id) : null
+      if (deletedSheetId) {
+        const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), deletedSheetId)
+        if (!capabilities.canDeleteRecord) return sendForbidden(res)
+      }
       await pool.transaction(async ({ query }) => {
         const recordRes = await query('SELECT id, sheet_id, version FROM meta_records WHERE id = $1 FOR UPDATE', [recordId])
         if ((recordRes as any).rows.length === 0) {
@@ -4798,6 +4994,8 @@ export function univerMetaRouter(): Router {
         viewId: parsed.data.viewId,
       })
       const sheetId = resolved.sheetId
+      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      if (!capabilities.canEditRecord) return sendForbidden(res)
 
       const fieldRes = await pool.query(
         'SELECT id, name, type, property FROM meta_fields WHERE sheet_id = $1',
