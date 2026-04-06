@@ -10,7 +10,12 @@ type QueryResult = {
 type QueryHandler = (sql: string, params?: unknown[]) => QueryResult | Promise<QueryResult>
 
 function createMockPool(queryHandler: QueryHandler) {
-  const query = vi.fn(async (sql: string, params?: unknown[]) => queryHandler(sql, params))
+  const query = vi.fn(async (sql: string, params?: unknown[]) => {
+    if (sql.includes('FROM spreadsheet_permissions')) {
+      return { rows: [], rowCount: 0 }
+    }
+    return queryHandler(sql, params)
+  })
   const transaction = vi.fn(async (fn: (client: { query: typeof query }) => Promise<unknown>) => fn({ query }))
   return { query, transaction }
 }
@@ -525,6 +530,10 @@ describe('Multitable context API', () => {
     const { app } = await createApp({
       tokenPerms: ['multitable:write'],
       queryHandler: async (sql, params) => {
+        if (sql.includes('SELECT id FROM meta_sheets WHERE id = $1')) {
+          expect(params).toEqual(['sheet_ops'])
+          return { rows: [{ id: 'sheet_ops' }], rowCount: 1 }
+        }
         if (sql.includes('DELETE FROM meta_sheets WHERE id = $1')) {
           expect(params).toEqual(['sheet_ops'])
           return { rows: [], rowCount: 1 }
@@ -545,6 +554,10 @@ describe('Multitable context API', () => {
     const { app } = await createApp({
       tokenPerms: ['multitable:write'],
       queryHandler: async (sql, params) => {
+        if (sql.includes('SELECT id FROM meta_sheets WHERE id = $1')) {
+          expect(params).toEqual(['sheet_missing'])
+          return { rows: [], rowCount: 0 }
+        }
         if (sql.includes('DELETE FROM meta_sheets WHERE id = $1')) {
           expect(params).toEqual(['sheet_missing'])
           return { rows: [], rowCount: 0 }
@@ -770,6 +783,14 @@ describe('Multitable context API', () => {
                 property: {},
                 order: 3,
               }],
+            }
+          }
+          throw new Error(`Unexpected field lookup params: ${JSON.stringify(params)}`)
+        }
+        if (sql.includes('SELECT id, sheet_id FROM meta_fields WHERE id = $1')) {
+          if (params?.[0] === 'fld_due_date') {
+            return {
+              rows: [{ id: 'fld_due_date', sheet_id: 'sheet_ops' }],
             }
           }
           throw new Error(`Unexpected field lookup params: ${JSON.stringify(params)}`)

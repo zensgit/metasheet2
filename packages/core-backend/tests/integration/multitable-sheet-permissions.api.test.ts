@@ -1,0 +1,353 @@
+import express from 'express'
+import request from 'supertest'
+import { afterEach, describe, expect, test, vi } from 'vitest'
+
+type QueryResult = {
+  rows: any[]
+  rowCount?: number
+}
+
+type QueryHandler = (sql: string, params?: unknown[]) => QueryResult | Promise<QueryResult>
+
+function createMockPool(queryHandler: QueryHandler) {
+  const query = vi.fn(async (sql: string, params?: unknown[]) => queryHandler(sql, params))
+  const transaction = vi.fn(async (fn: (client: { query: typeof query }) => Promise<unknown>) => fn({ query }))
+  return { query, transaction }
+}
+
+async function createApp(args: {
+  tokenPerms?: string[]
+  tokenRoles?: string[]
+  requestPermissions?: string[]
+  requestRole?: string
+  queryHandler: QueryHandler
+}) {
+  vi.resetModules()
+  vi.doMock('../../src/rbac/service', () => ({
+    isAdmin: vi.fn().mockResolvedValue(false),
+    userHasPermission: vi.fn().mockResolvedValue(false),
+    listUserPermissions: vi.fn().mockResolvedValue([]),
+    invalidateUserPerms: vi.fn(),
+    getPermCacheStatus: vi.fn(),
+  }))
+
+  const { poolManager } = await import('../../src/integration/db/connection-pool')
+  const { univerMetaRouter } = await import('../../src/routes/univer-meta')
+  const mockPool = createMockPool(args.queryHandler)
+  vi.spyOn(poolManager, 'get').mockReturnValue(mockPool as any)
+
+  const app = express()
+  app.use(express.json())
+  app.use((req, _res, next) => {
+    req.user = {
+      id: 'user_sheet_acl_1',
+      role: args.requestRole,
+      permissions: args.requestPermissions,
+      roles: args.tokenRoles ?? [],
+      perms: args.tokenPerms ?? [],
+    }
+    next()
+  })
+  app.use('/api/multitable', univerMetaRouter())
+  return { app, mockPool }
+}
+
+describe('Multitable sheet-scoped permissions API', () => {
+  afterEach(() => {
+    vi.restoreAllMocks()
+    vi.resetModules()
+  })
+
+  test('narrows context and record actions when sheet permission is read-only', async () => {
+    const { app } = await createApp({
+      tokenPerms: ['multitable:read', 'multitable:write', 'comments:write'],
+      queryHandler: async (sql, params) => {
+        if (sql.includes('FROM meta_sheets s') && sql.includes('LEFT JOIN meta_bases')) {
+          expect(params).toEqual(['sheet_ops'])
+          return {
+            rows: [{ id: 'sheet_ops', base_id: 'base_ops', name: 'Orders', description: 'Ops records' }],
+          }
+        }
+        if (sql.includes('FROM meta_bases') && sql.includes('WHERE id = $1')) {
+          expect(params).toEqual(['base_ops'])
+          return {
+            rows: [{ id: 'base_ops', name: 'Ops Base', icon: 'table', color: '#1677ff', owner_id: 'owner_1', workspace_id: 'workspace_1' }],
+          }
+        }
+        if (sql.includes('FROM meta_sheets') && sql.includes('WHERE base_id = $1')) {
+          expect(params).toEqual(['base_ops'])
+          return {
+            rows: [{ id: 'sheet_ops', base_id: 'base_ops', name: 'Orders', description: 'Ops records' }],
+          }
+        }
+        if (sql.includes('FROM spreadsheet_permissions')) {
+          expect(params).toEqual(['user_sheet_acl_1', ['sheet_ops']])
+          return {
+            rows: [{ sheet_id: 'sheet_ops', perm_code: 'spreadsheet:read' }],
+          }
+        }
+        if (sql.includes('FROM meta_views') && sql.includes('WHERE sheet_id = $1')) {
+          expect(params).toEqual(['sheet_ops'])
+          return {
+            rows: [{ id: 'view_grid', sheet_id: 'sheet_ops', name: 'Grid', type: 'grid', filter_info: {}, sort_info: {}, group_info: {}, hidden_field_ids: [], config: {} }],
+          }
+        }
+        if (sql.includes('SELECT id, name, type, property, "order" FROM meta_fields WHERE sheet_id = $1')) {
+          expect(params).toEqual(['sheet_ops'])
+          return {
+            rows: [{ id: 'fld_name', name: 'Name', type: 'string', property: {}, order: 1 }],
+          }
+        }
+        if (sql.includes('SELECT id, base_id, name, description FROM meta_sheets WHERE id = $1')) {
+          expect(params).toEqual(['sheet_ops'])
+          return {
+            rows: [{ id: 'sheet_ops', base_id: 'base_ops', name: 'Orders', description: 'Ops records' }],
+          }
+        }
+        if (sql.includes('SELECT id, sheet_id, version, data FROM meta_records WHERE id = $1')) {
+          expect(params).toEqual(['rec_1'])
+          return {
+            rows: [{ id: 'rec_1', sheet_id: 'sheet_ops', version: 3, data: { fld_name: 'Order A' } }],
+          }
+        }
+        throw new Error(`Unhandled SQL in test: ${sql}`)
+      },
+    })
+
+    const contextResponse = await request(app)
+      .get('/api/multitable/context')
+      .query({ sheetId: 'sheet_ops' })
+      .expect(200)
+
+    expect(contextResponse.body.data.capabilities).toEqual({
+      canRead: true,
+      canCreateRecord: false,
+      canEditRecord: false,
+      canDeleteRecord: false,
+      canManageFields: false,
+      canManageViews: false,
+      canComment: true,
+      canManageAutomation: false,
+    })
+    expect(contextResponse.body.data.viewPermissions).toEqual({
+      view_grid: {
+        canAccess: true,
+        canConfigure: false,
+        canDelete: false,
+      },
+    })
+
+    const recordResponse = await request(app)
+      .get('/api/multitable/records/rec_1')
+      .expect(200)
+
+    expect(recordResponse.body.data.rowActions).toEqual({
+      canEdit: false,
+      canDelete: false,
+      canComment: true,
+    })
+    expect(recordResponse.body.data.capabilities).toMatchObject({
+      canRead: true,
+      canEditRecord: false,
+      canDeleteRecord: false,
+    })
+  })
+
+  test('rejects create, patch, delete, and form submit when sheet permission is read-only', async () => {
+    const { app } = await createApp({
+      tokenPerms: ['multitable:read', 'multitable:write', 'comments:write'],
+      queryHandler: async (sql, params) => {
+        if (sql.includes('FROM spreadsheet_permissions')) {
+          expect(params).toEqual(['user_sheet_acl_1', ['sheet_ops']])
+          return {
+            rows: [{ sheet_id: 'sheet_ops', perm_code: 'spreadsheet:read' }],
+          }
+        }
+        if (sql.includes('SELECT id FROM meta_sheets WHERE id = $1 AND deleted_at IS NULL')) {
+          expect(params).toEqual(['sheet_ops'])
+          return { rows: [{ id: 'sheet_ops' }] }
+        }
+        if (sql.includes('SELECT id, base_id, name, description FROM meta_sheets WHERE id = $1')) {
+          expect(params).toEqual(['sheet_ops'])
+          return { rows: [{ id: 'sheet_ops', base_id: 'base_ops', name: 'Ops', description: null }] }
+        }
+        if (sql.includes('SELECT id, sheet_id, name, type, filter_info, sort_info, group_info, hidden_field_ids, config FROM meta_views WHERE id = $1')) {
+          expect(params).toEqual(['view_form_ops'])
+          return {
+            rows: [{ id: 'view_form_ops', sheet_id: 'sheet_ops', name: 'Form', type: 'form', filter_info: {}, sort_info: {}, group_info: {}, hidden_field_ids: [], config: {} }],
+          }
+        }
+        if (sql.includes('SELECT id, sheet_id FROM meta_records WHERE id = $1')) {
+          expect(params).toEqual(['rec_1'])
+          return { rows: [{ id: 'rec_1', sheet_id: 'sheet_ops' }] }
+        }
+        throw new Error(`Unhandled SQL in test: ${sql}`)
+      },
+    })
+
+    const createResponse = await request(app)
+      .post('/api/multitable/records')
+      .send({ sheetId: 'sheet_ops', data: { fld_name: 'Blocked create' } })
+      .expect(403)
+    expect(createResponse.body).toEqual({
+      ok: false,
+      error: { code: 'FORBIDDEN', message: 'Insufficient permissions' },
+    })
+
+    const patchResponse = await request(app)
+      .patch('/api/multitable/records/rec_1')
+      .send({ data: { fld_name: 'Blocked patch' } })
+      .expect(403)
+    expect(patchResponse.body).toEqual({
+      ok: false,
+      error: { code: 'FORBIDDEN', message: 'Insufficient permissions' },
+    })
+
+    const deleteResponse = await request(app)
+      .delete('/api/multitable/records/rec_1')
+      .expect(403)
+    expect(deleteResponse.body).toEqual({
+      ok: false,
+      error: { code: 'FORBIDDEN', message: 'Insufficient permissions' },
+    })
+
+    const submitResponse = await request(app)
+      .post('/api/multitable/views/view_form_ops/submit')
+      .send({ data: { fld_name: 'Blocked submit' } })
+      .expect(403)
+    expect(submitResponse.body).toEqual({
+      ok: false,
+      error: { code: 'FORBIDDEN', message: 'Insufficient permissions' },
+    })
+  })
+
+  test('rejects field, view, person preset, and sheet management when sheet permission is read-only', async () => {
+    const { app } = await createApp({
+      tokenPerms: ['multitable:read', 'multitable:write'],
+      queryHandler: async (sql, params) => {
+        if (sql.includes('FROM spreadsheet_permissions')) {
+          if (JSON.stringify(params) === JSON.stringify(['user_sheet_acl_1', ['sheet_ops']])) {
+            return { rows: [{ sheet_id: 'sheet_ops', perm_code: 'spreadsheet:read' }] }
+          }
+        }
+        if (sql.includes('SELECT id FROM meta_sheets WHERE id = $1 AND deleted_at IS NULL')) {
+          expect(params).toEqual(['sheet_ops'])
+          return { rows: [{ id: 'sheet_ops' }] }
+        }
+        if (sql.includes('SELECT id FROM meta_sheets WHERE id = $1')) {
+          expect(params).toEqual(['sheet_ops'])
+          return { rows: [{ id: 'sheet_ops' }] }
+        }
+        if (sql.includes('SELECT id, base_id, name, description FROM meta_sheets WHERE id = $1')) {
+          expect(params).toEqual(['sheet_ops'])
+          return { rows: [{ id: 'sheet_ops', base_id: 'base_ops', name: 'Ops', description: null }] }
+        }
+        if (sql.includes('SELECT id, sheet_id FROM meta_fields WHERE id = $1')) {
+          expect(params).toEqual(['fld_title'])
+          return { rows: [{ id: 'fld_title', sheet_id: 'sheet_ops' }] }
+        }
+        if (sql.includes('SELECT id, sheet_id, name, type, filter_info, sort_info, group_info, hidden_field_ids, config FROM meta_views WHERE id = $1')) {
+          expect(params).toEqual(['view_grid'])
+          return {
+            rows: [{ id: 'view_grid', sheet_id: 'sheet_ops', name: 'Grid', type: 'grid', filter_info: {}, sort_info: {}, group_info: {}, hidden_field_ids: [], config: {} }],
+          }
+        }
+        if (sql.includes('SELECT id, sheet_id FROM meta_views WHERE id = $1')) {
+          expect(params).toEqual(['view_grid'])
+          return { rows: [{ id: 'view_grid', sheet_id: 'sheet_ops' }] }
+        }
+        throw new Error(`Unhandled SQL in test: ${sql}`)
+      },
+    })
+
+    const responses = [
+      await request(app).post('/api/multitable/fields').send({ sheetId: 'sheet_ops', name: 'Blocked Field', type: 'string' }),
+      await request(app).post('/api/multitable/person-fields/prepare').send({ sheetId: 'sheet_ops' }),
+      await request(app).patch('/api/multitable/fields/fld_title').send({ name: 'Blocked rename' }),
+      await request(app).delete('/api/multitable/fields/fld_title'),
+      await request(app).post('/api/multitable/views').send({ sheetId: 'sheet_ops', name: 'Blocked View', type: 'grid' }),
+      await request(app).patch('/api/multitable/views/view_grid').send({ name: 'Blocked view rename' }),
+      await request(app).delete('/api/multitable/views/view_grid'),
+      await request(app).delete('/api/multitable/sheets/sheet_ops'),
+    ]
+
+    for (const response of responses) {
+      expect(response.status).toBe(403)
+      expect(response.body).toEqual({
+        ok: false,
+        error: { code: 'FORBIDDEN', message: 'Insufficient permissions' },
+      })
+    }
+  })
+
+  test('rejects records summary when sheet permission has no read access', async () => {
+    const { app } = await createApp({
+      tokenPerms: ['multitable:read'],
+      queryHandler: async (sql, params) => {
+        if (sql.includes('SELECT id FROM meta_sheets WHERE id = $1 AND deleted_at IS NULL')) {
+          expect(params).toEqual(['sheet_locked'])
+          return { rows: [{ id: 'sheet_locked' }] }
+        }
+        if (sql.includes('FROM spreadsheet_permissions')) {
+          expect(params).toEqual(['user_sheet_acl_1', ['sheet_locked']])
+          return {
+            rows: [{ sheet_id: 'sheet_locked', perm_code: 'spreadsheet:comment' }],
+          }
+        }
+        throw new Error(`Unhandled SQL in test: ${sql}`)
+      },
+    })
+
+    const response = await request(app)
+      .get('/api/multitable/records-summary')
+      .query({ sheetId: 'sheet_locked' })
+      .expect(403)
+
+    expect(response.body).toEqual({
+      ok: false,
+      error: { code: 'FORBIDDEN', message: 'Insufficient permissions' },
+    })
+  })
+
+  test('rejects link options when target sheet permission has no read access', async () => {
+    const { app } = await createApp({
+      tokenPerms: ['multitable:read'],
+      queryHandler: async (sql, params) => {
+        if (sql.includes('SELECT id, sheet_id, name, type, property FROM meta_fields WHERE id = $1')) {
+          expect(params).toEqual(['fld_vendor_link'])
+          return {
+            rows: [{
+              id: 'fld_vendor_link',
+              sheet_id: 'sheet_source',
+              name: 'Vendor',
+              type: 'link',
+              property: { foreignSheetId: 'sheet_target' },
+            }],
+          }
+        }
+        if (sql.includes('FROM spreadsheet_permissions')) {
+          if (JSON.stringify(params) === JSON.stringify(['user_sheet_acl_1', ['sheet_source']])) {
+            return { rows: [{ sheet_id: 'sheet_source', perm_code: 'spreadsheet:read' }] }
+          }
+          if (JSON.stringify(params) === JSON.stringify(['user_sheet_acl_1', ['sheet_target']])) {
+            return { rows: [{ sheet_id: 'sheet_target', perm_code: 'spreadsheet:comment' }] }
+          }
+        }
+        if (sql.includes('SELECT id, base_id, name, description FROM meta_sheets WHERE id = $1')) {
+          expect(params).toEqual(['sheet_target'])
+          return { rows: [{ id: 'sheet_target', base_id: 'base_ops', name: 'Vendors', description: null }] }
+        }
+        throw new Error(`Unhandled SQL in test: ${sql}`)
+      },
+    })
+
+    const response = await request(app)
+      .get('/api/multitable/fields/fld_vendor_link/link-options')
+      .expect(403)
+
+    expect(response.body).toEqual({
+      ok: false,
+      error: { code: 'FORBIDDEN', message: 'Insufficient permissions' },
+    })
+  })
+})

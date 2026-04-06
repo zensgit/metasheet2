@@ -10,7 +10,12 @@ type QueryResult = {
 type QueryHandler = (sql: string, params?: unknown[]) => QueryResult | Promise<QueryResult>
 
 function createMockPool(queryHandler: QueryHandler) {
-  const query = vi.fn(async (sql: string, params?: unknown[]) => queryHandler(sql, params))
+  const query = vi.fn(async (sql: string, params?: unknown[]) => {
+    if (sql.includes('FROM spreadsheet_permissions')) {
+      return { rows: [], rowCount: 0 }
+    }
+    return queryHandler(sql, params)
+  })
   const transaction = vi.fn(async (fn: (client: { query: typeof query }) => Promise<unknown>) => fn({ query }))
   return { query, transaction }
 }
