@@ -151,6 +151,10 @@ describe('Multitable context API', () => {
       canComment: true,
       canManageAutomation: true,
     })
+    expect(response.body.data.capabilityOrigin).toEqual({
+      source: 'global-rbac',
+      hasSheetAssignments: false,
+    })
     expect(response.body.data.viewPermissions).toEqual({
       view_grid: {
         canAccess: true,
