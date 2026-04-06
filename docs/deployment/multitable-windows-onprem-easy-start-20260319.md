@@ -171,6 +171,8 @@ The packaged root now also includes Windows-native wrappers:
 
 These wrappers now call `scripts/ops/multitable-onprem-apply-package.ps1`, so a plain Windows Server 2022 host does not need bash or WSL just to apply a corrective package reroll.
 
+The PowerShell helper extracts the incoming archive into a short-lived system temp directory instead of a deep deploy-root subdirectory, which avoids common Windows long-path failures during `Expand-Archive`.
+
 ## 11) Delivery checklist
 
 Before handing this package to a customer or field team, also review:
