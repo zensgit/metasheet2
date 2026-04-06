@@ -613,7 +613,7 @@ describe('Multitable sheet-scoped permissions API', () => {
     })
   })
 
-  test('returns record-specific row actions and rejects foreign deletes when sheet permission is write-own without global multitable permission', async () => {
+  test('returns record-specific row actions and rejects foreign patch/delete when sheet permission is write-own without global multitable permission', async () => {
     const { app } = await createApp({
       tokenPerms: ['comments:write'],
       queryHandler: async (sql, params) => {
@@ -697,9 +697,18 @@ describe('Multitable sheet-scoped permissions API', () => {
     })
 
     const patchResponse = await request(app)
-      .delete('/api/multitable/records/rec_foreign')
+      .patch('/api/multitable/records/rec_foreign')
+      .send({ data: { fld_name: 'Blocked patch' } })
       .expect(403)
     expect(patchResponse.body).toEqual({
+      ok: false,
+      error: { code: 'FORBIDDEN', message: 'Record editing is not allowed for this row' },
+    })
+
+    const deleteResponse = await request(app)
+      .delete('/api/multitable/records/rec_foreign')
+      .expect(403)
+    expect(deleteResponse.body).toEqual({
       ok: false,
       error: { code: 'FORBIDDEN', message: 'Record deletion is not allowed for this row' },
     })
@@ -792,9 +801,27 @@ describe('Multitable sheet-scoped permissions API', () => {
             rows: row ? [{ id: row.id, version: row.version, created_by: row.createdBy }] : [],
           }
         }
+        if (sql.includes('SELECT id, version, created_by FROM meta_records WHERE id = $1 AND sheet_id = $2 FOR UPDATE')) {
+          expect(params?.[1]).toEqual('sheet_ops')
+          const recordId = String(params?.[0] ?? '')
+          const row = records.get(recordId)
+          return {
+            rows: row ? [{ id: row.id, version: row.version, created_by: row.createdBy }] : [],
+          }
+        }
         if (sql.includes('UPDATE meta_records') && sql.includes('WHERE sheet_id = $2 AND id = $3')) {
           const patch = JSON.parse(String(params?.[0] ?? '{}')) as Record<string, unknown>
           const recordId = String(params?.[2] ?? '')
+          const row = records.get(recordId)
+          if (!row) return { rows: [] }
+          row.version += 1
+          row.data = { ...row.data, ...patch }
+          records.set(recordId, row)
+          return { rows: [{ version: row.version }] }
+        }
+        if (sql.includes('UPDATE meta_records') && sql.includes('WHERE id = $2 AND sheet_id = $3')) {
+          const patch = JSON.parse(String(params?.[0] ?? '{}')) as Record<string, unknown>
+          const recordId = String(params?.[1] ?? '')
           const row = records.get(recordId)
           if (!row) return { rows: [] }
           row.version += 1
@@ -811,6 +838,13 @@ describe('Multitable sheet-scoped permissions API', () => {
           const row = records.get('rec_owned')
           return {
             rows: row ? [{ id: row.id, sheet_id: row.sheetId, created_by: row.createdBy }] : [],
+          }
+        }
+        if (sql.includes('SELECT id, sheet_id FROM meta_records WHERE id = $1')) {
+          expect(params).toEqual(['rec_owned'])
+          const row = records.get('rec_owned')
+          return {
+            rows: row ? [{ id: row.id, sheet_id: row.sheetId }] : [],
           }
         }
         if (sql.includes('SELECT id, sheet_id, version FROM meta_records WHERE id = $1 FOR UPDATE')) {
@@ -866,6 +900,17 @@ describe('Multitable sheet-scoped permissions API', () => {
       .expect(200)
     expect(patchResponse.body.data.updated).toEqual([{ recordId: 'rec_owned', version: 4 }])
     expect(records.get('rec_owned')?.data).toEqual({ fld_name: 'Mine updated' })
+
+    const directPatchResponse = await request(app)
+      .patch('/api/multitable/records/rec_owned')
+      .send({ data: { fld_name: 'Mine updated directly' }, expectedVersion: 4 })
+      .expect(200)
+    expect(directPatchResponse.body.data.record).toMatchObject({
+      id: 'rec_owned',
+      version: 5,
+      data: { fld_name: 'Mine updated directly' },
+    })
+    expect(records.get('rec_owned')?.data).toEqual({ fld_name: 'Mine updated directly' })
 
     const deleteResponse = await request(app)
       .delete('/api/multitable/records/rec_owned')

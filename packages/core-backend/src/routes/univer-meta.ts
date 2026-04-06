@@ -4533,7 +4533,7 @@ export function univerMetaRouter(): Router {
     }
   })
 
-  router.patch('/records/:recordId', rbacGuard('multitable', 'write'), async (req: Request, res: Response) => {
+  router.patch('/records/:recordId', async (req: Request, res: Response) => {
     const recordId = typeof req.params.recordId === 'string' ? req.params.recordId.trim() : ''
     if (!recordId) {
       return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'recordId is required' } })
@@ -4575,6 +4575,9 @@ export function univerMetaRouter(): Router {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
       }
       const { access, capabilities, sheetScope } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      if (!access.userId) {
+        return res.status(401).json({ error: 'Authentication required' })
+      }
       if (!capabilities.canEditRecord) return sendForbidden(res)
 
       const fields = await loadFieldsForSheet(pool.query.bind(pool), sheetId)
@@ -4693,7 +4696,7 @@ export function univerMetaRouter(): Router {
         }
         const currentRow: any = (currentRes as any).rows[0]
         if (!ensureRecordWriteAllowed(capabilities, sheetScope, access, typeof currentRow?.created_by === 'string' ? currentRow.created_by : null, 'edit')) {
-          throw new ValidationError('Record editing is not allowed for this row')
+          throw new PermissionError('Record editing is not allowed for this row')
         }
         const serverVersion = Number(currentRow?.version ?? 1)
         if (typeof parsed.data.expectedVersion === 'number' && parsed.data.expectedVersion !== serverVersion) {
@@ -4815,6 +4818,9 @@ export function univerMetaRouter(): Router {
       }
       if (err instanceof NotFoundError) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: err.message } })
+      }
+      if (err instanceof PermissionError) {
+        return sendForbidden(res, err.message)
       }
       if (err instanceof ValidationError) {
         return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: err.message } })
