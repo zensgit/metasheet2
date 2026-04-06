@@ -190,6 +190,7 @@ describe('backend capabilities in useMultitableCapabilities', () => {
       canEditRecord: true,
       canDeleteRecord: false,
       canManageFields: true,
+      canManageSheetAccess: false,
       canManageViews: false,
       canComment: true,
       canManageAutomation: false,
@@ -197,6 +198,7 @@ describe('backend capabilities in useMultitableCapabilities', () => {
     expect(caps.canRead.value).toBe(true)
     expect(caps.canCreateRecord.value).toBe(false)
     expect(caps.canManageFields.value).toBe(true)
+    expect(caps.canManageSheetAccess.value).toBe(false)
     expect(caps.canManageViews.value).toBe(false)
   })
 
@@ -206,5 +208,6 @@ describe('backend capabilities in useMultitableCapabilities', () => {
     expect(caps.canRead.value).toBe(true)
     expect(caps.canCreateRecord.value).toBe(false)
     expect(caps.canManageFields.value).toBe(false)
+    expect(caps.canManageSheetAccess.value).toBe(false)
   })
 })

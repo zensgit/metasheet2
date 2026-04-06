@@ -126,6 +126,7 @@ describe('Multitable sheet-scoped permissions API', () => {
       canEditRecord: false,
       canDeleteRecord: false,
       canManageFields: false,
+      canManageSheetAccess: false,
       canManageViews: false,
       canComment: true,
       canManageAutomation: false,
@@ -208,6 +209,7 @@ describe('Multitable sheet-scoped permissions API', () => {
       canEditRecord: false,
       canDeleteRecord: false,
       canManageFields: false,
+      canManageSheetAccess: false,
       canManageViews: false,
       canComment: false,
     })
@@ -271,6 +273,7 @@ describe('Multitable sheet-scoped permissions API', () => {
       canEditRecord: false,
       canDeleteRecord: false,
       canManageFields: false,
+      canManageSheetAccess: false,
       canManageViews: false,
       canComment: false,
     })
@@ -614,7 +617,7 @@ describe('Multitable sheet-scoped permissions API', () => {
 
   test('lists sheet permission entries and permission candidates for full sheet writers', async () => {
     const { app } = await createApp({
-      tokenPerms: ['multitable:read', 'multitable:write'],
+      tokenPerms: ['multitable:read', 'multitable:write', 'multitable:share'],
       userPermissionMap: {
         user_alpha: ['multitable:read'],
       },
@@ -791,6 +794,7 @@ describe('Multitable sheet-scoped permissions API', () => {
       canEditRecord: false,
       canDeleteRecord: false,
       canManageFields: false,
+      canManageSheetAccess: false,
       canManageViews: false,
       canComment: true,
     })
@@ -798,7 +802,7 @@ describe('Multitable sheet-scoped permissions API', () => {
 
   test('filters permission candidates that lack global multitable access', async () => {
     const { app } = await createApp({
-      tokenPerms: ['multitable:read', 'multitable:write'],
+      tokenPerms: ['multitable:read', 'multitable:write', 'multitable:share'],
       userPermissionMap: {
         user_allowed: ['multitable:write'],
       },
@@ -891,7 +895,7 @@ describe('Multitable sheet-scoped permissions API', () => {
     const insertCalls: Array<unknown[] | undefined> = []
 
     const { app } = await createApp({
-      tokenPerms: ['multitable:read', 'multitable:write'],
+      tokenPerms: ['multitable:read', 'multitable:write', 'multitable:share'],
       queryHandler: async (sql, params) => {
         if (sql.includes('SELECT id, base_id, name, description FROM meta_sheets WHERE id = $1')) {
           expect(params).toEqual(['sheet_ops'])
@@ -968,9 +972,80 @@ describe('Multitable sheet-scoped permissions API', () => {
     })
   })
 
+  test('allows sheet permission authoring with multitable share even when field management is unavailable', async () => {
+    const { app } = await createApp({
+      tokenPerms: ['multitable:read', 'multitable:share'],
+      queryHandler: async (sql, params) => {
+        if (sql.includes('SELECT id, base_id, name, description FROM meta_sheets WHERE id = $1')) {
+          expect(params).toEqual(['sheet_ops'])
+          return { rows: [{ id: 'sheet_ops', base_id: 'base_ops', name: 'Ops', description: null }] }
+        }
+        if (sql.includes('FROM spreadsheet_permissions') && sql.includes('sheet_id = ANY')) {
+          expect(params).toEqual(['user_sheet_acl_1', ['sheet_ops']])
+          return { rows: [{ sheet_id: 'sheet_ops', perm_code: 'spreadsheet:write', subject_type: 'user' }] }
+        }
+        if (sql.includes('FROM meta_sheets s') && sql.includes('LEFT JOIN meta_bases')) {
+          expect(params).toEqual(['sheet_ops'])
+          return { rows: [{ id: 'sheet_ops', base_id: 'base_ops', name: 'Ops', description: null }] }
+        }
+        if (sql.includes('FROM meta_bases') && sql.includes('WHERE id = $1')) {
+          expect(params).toEqual(['base_ops'])
+          return { rows: [{ id: 'base_ops', name: 'Ops Base', icon: 'table', color: '#1677ff', owner_id: 'owner_1', workspace_id: 'workspace_1' }] }
+        }
+        if (sql.includes('FROM meta_sheets') && sql.includes('WHERE base_id = $1')) {
+          expect(params).toEqual(['base_ops'])
+          return { rows: [{ id: 'sheet_ops', base_id: 'base_ops', name: 'Ops', description: null }] }
+        }
+        if (sql.includes('FROM meta_views') && sql.includes('WHERE sheet_id = $1')) {
+          expect(params).toEqual(['sheet_ops'])
+          return { rows: [] }
+        }
+        if (sql.includes('SELECT id, name, type, property, "order" FROM meta_fields WHERE sheet_id = $1')) {
+          expect(params).toEqual(['sheet_ops'])
+          return { rows: [] }
+        }
+        if (sql.includes('FROM spreadsheet_permissions sp') && sql.includes('GROUP BY sp.subject_type, sp.subject_id')) {
+          expect(params).toEqual(['sheet_ops'])
+          return {
+            rows: [{
+              subject_type: 'user',
+              subject_id: 'user_target',
+              permission_codes: ['spreadsheet:write'],
+              user_name: 'Target User',
+              user_email: 'target@example.com',
+              user_is_active: true,
+            }],
+          }
+        }
+        throw new Error(`Unhandled SQL in test: ${sql}`)
+      },
+    })
+
+    const [contextResponse, permissionsResponse] = await Promise.all([
+      request(app).get('/api/multitable/context').query({ sheetId: 'sheet_ops' }).expect(200),
+      request(app).get('/api/multitable/sheets/sheet_ops/permissions').expect(200),
+    ])
+
+    expect(contextResponse.body.data.capabilities).toMatchObject({
+      canManageFields: false,
+      canManageSheetAccess: true,
+    })
+    expect(permissionsResponse.body.data.items).toEqual([
+      {
+        subjectType: 'user',
+        subjectId: 'user_target',
+        accessLevel: 'write',
+        permissions: ['spreadsheet:write'],
+        label: 'Target User',
+        subtitle: 'target@example.com',
+        isActive: true,
+      },
+    ])
+  })
+
   test('rejects write-own grants for role subjects', async () => {
     const { app } = await createApp({
-      tokenPerms: ['multitable:read', 'multitable:write'],
+      tokenPerms: ['multitable:read', 'multitable:write', 'multitable:share'],
       queryHandler: async (sql, params) => {
         if (sql.includes('SELECT id, base_id, name, description FROM meta_sheets WHERE id = $1')) {
           expect(params).toEqual(['sheet_ops'])
@@ -997,7 +1072,7 @@ describe('Multitable sheet-scoped permissions API', () => {
 
   test('rejects sheet permission authoring for write-own scoped users', async () => {
     const { app } = await createApp({
-      tokenPerms: ['multitable:read', 'multitable:write'],
+      tokenPerms: ['multitable:read', 'multitable:write', 'multitable:share'],
       queryHandler: async (sql, params) => {
         if (sql.includes('SELECT id, base_id, name, description FROM meta_sheets WHERE id = $1')) {
           expect(params).toEqual(['sheet_ops'])
@@ -1016,6 +1091,37 @@ describe('Multitable sheet-scoped permissions API', () => {
       await request(app).get('/api/multitable/sheets/sheet_ops/permission-candidates'),
       await request(app).put('/api/multitable/sheets/sheet_ops/permissions/user/user_target').send({ accessLevel: 'read' }),
     ]
+
+    for (const response of responses) {
+      expect(response.status).toBe(403)
+      expect(response.body).toEqual({
+        ok: false,
+        error: { code: 'FORBIDDEN', message: 'Insufficient permissions' },
+      })
+    }
+  })
+
+  test('rejects sheet permission authoring when multitable write exists without share access', async () => {
+    const { app } = await createApp({
+      tokenPerms: ['multitable:read', 'multitable:write'],
+      queryHandler: async (sql, params) => {
+        if (sql.includes('SELECT id, base_id, name, description FROM meta_sheets WHERE id = $1')) {
+          expect(params).toEqual(['sheet_ops'])
+          return { rows: [{ id: 'sheet_ops', base_id: 'base_ops', name: 'Ops', description: null }] }
+        }
+        if (sql.includes('FROM spreadsheet_permissions') && sql.includes('sheet_id = ANY')) {
+          expect(params).toEqual(['user_sheet_acl_1', ['sheet_ops']])
+          return { rows: [{ sheet_id: 'sheet_ops', perm_code: 'spreadsheet:write', subject_type: 'user' }] }
+        }
+        throw new Error(`Unhandled SQL in test: ${sql}`)
+      },
+    })
+
+    const responses = await Promise.all([
+      request(app).get('/api/multitable/sheets/sheet_ops/permissions'),
+      request(app).get('/api/multitable/sheets/sheet_ops/permission-candidates'),
+      request(app).put('/api/multitable/sheets/sheet_ops/permissions/user/user_target').send({ accessLevel: 'read' }),
+    ])
 
     for (const response of responses) {
       expect(response.status).toBe(403)

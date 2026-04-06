@@ -9,6 +9,7 @@ export interface MultitableCapabilities {
   canEditRecord: Ref<boolean>
   canDeleteRecord: Ref<boolean>
   canManageFields: Ref<boolean>
+  canManageSheetAccess: Ref<boolean>
   canManageViews: Ref<boolean>
   canComment: Ref<boolean>
   canManageAutomation: Ref<boolean>
@@ -17,19 +18,19 @@ export interface MultitableCapabilities {
 const ROLE_CAPS: Record<MultitableRole, Record<string, boolean>> = {
   owner: {
     canRead: true, canCreateRecord: true, canEditRecord: true, canDeleteRecord: true,
-    canManageFields: true, canManageViews: true, canComment: true, canManageAutomation: true,
+    canManageFields: true, canManageSheetAccess: true, canManageViews: true, canComment: true, canManageAutomation: true,
   },
   editor: {
     canRead: true, canCreateRecord: true, canEditRecord: true, canDeleteRecord: true,
-    canManageFields: false, canManageViews: false, canComment: true, canManageAutomation: false,
+    canManageFields: false, canManageSheetAccess: false, canManageViews: false, canComment: true, canManageAutomation: false,
   },
   commenter: {
     canRead: true, canCreateRecord: false, canEditRecord: false, canDeleteRecord: false,
-    canManageFields: false, canManageViews: false, canComment: true, canManageAutomation: false,
+    canManageFields: false, canManageSheetAccess: false, canManageViews: false, canComment: true, canManageAutomation: false,
   },
   viewer: {
     canRead: true, canCreateRecord: false, canEditRecord: false, canDeleteRecord: false,
-    canManageFields: false, canManageViews: false, canComment: false, canManageAutomation: false,
+    canManageFields: false, canManageSheetAccess: false, canManageViews: false, canComment: false, canManageAutomation: false,
   },
 }
 
@@ -53,6 +54,7 @@ export function useMultitableCapabilities(
     canEditRecord: caps('canEditRecord'),
     canDeleteRecord: caps('canDeleteRecord'),
     canManageFields: caps('canManageFields'),
+    canManageSheetAccess: caps('canManageSheetAccess'),
     canManageViews: caps('canManageViews'),
     canComment: caps('canComment'),
     canManageAutomation: caps('canManageAutomation'),

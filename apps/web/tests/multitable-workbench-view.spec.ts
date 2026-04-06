@@ -68,6 +68,7 @@ vi.mock('../src/multitable/composables/useMultitableCapabilities', () => ({
     canEditRecord: computed(() => source?.value?.canEditRecord ?? true),
     canDeleteRecord: computed(() => source?.value?.canDeleteRecord ?? true),
     canManageFields: computed(() => source?.value?.canManageFields ?? true),
+    canManageSheetAccess: computed(() => source?.value?.canManageSheetAccess ?? true),
     canManageViews: computed(() => source?.value?.canManageViews ?? true),
     canComment: computed(() => source?.value?.canComment ?? true),
     canManageAutomation: computed(() => source?.value?.canManageAutomation ?? false),
@@ -844,6 +845,7 @@ function createWorkbenchMock() {
       canEditRecord: true,
       canDeleteRecord: true,
       canManageFields: true,
+      canManageSheetAccess: true,
       canManageViews: true,
       canComment: true,
       canManageAutomation: false,
@@ -1067,6 +1069,27 @@ describe('MultitableWorkbench view wiring', () => {
 
     expect(workbenchMock.loadSheetMeta).toHaveBeenCalledWith('sheet_orders')
     expect(gridMock.loadViewData).toHaveBeenCalledWith(0)
+  })
+
+  it('shows access manager independently from field manager capability', async () => {
+    workbenchMock.capabilities.value = {
+      canRead: true,
+      canCreateRecord: false,
+      canEditRecord: false,
+      canDeleteRecord: false,
+      canManageFields: false,
+      canManageSheetAccess: true,
+      canManageViews: false,
+      canComment: true,
+      canManageAutomation: false,
+    }
+
+    mountWorkbench()
+    await flushUi()
+
+    const managerButtons = Array.from(container!.querySelectorAll('.mt-workbench__mgr-btn')) as HTMLButtonElement[]
+    expect(managerButtons.some((button) => button.textContent?.includes('Fields'))).toBe(false)
+    expect(managerButtons.some((button) => button.textContent?.includes('Access'))).toBe(true)
   })
 
   it('filters readonly fields from import surfaces', async () => {
@@ -1472,6 +1495,7 @@ describe('MultitableWorkbench view wiring', () => {
       canEditRecord: false,
       canDeleteRecord: false,
       canManageFields: false,
+      canManageSheetAccess: false,
       canManageViews: false,
       canComment: true,
       canManageAutomation: false,
@@ -1492,6 +1516,7 @@ describe('MultitableWorkbench view wiring', () => {
       canEditRecord: false,
       canDeleteRecord: false,
       canManageFields: false,
+      canManageSheetAccess: false,
       canManageViews: false,
       canComment: true,
       canManageAutomation: false,
@@ -1693,6 +1718,7 @@ describe('MultitableWorkbench view wiring', () => {
         canEditRecord: true,
         canDeleteRecord: true,
         canManageFields: true,
+        canManageSheetAccess: true,
         canManageViews: true,
         canComment: true,
         canManageAutomation: false,

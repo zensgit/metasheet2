@@ -167,6 +167,7 @@ export interface MetaCapabilities {
   canEditRecord: boolean
   canDeleteRecord: boolean
   canManageFields: boolean
+  canManageSheetAccess: boolean
   canManageViews: boolean
   canComment: boolean
   canManageAutomation: boolean
