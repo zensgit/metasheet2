@@ -88,7 +88,7 @@
               </template>
             </p>
             <p v-else-if="hasSkippedImports">
-              Rows with duplicate values in the current primary import field were skipped.
+              Some rows were skipped as duplicates.
             </p>
             <p v-else>The selected records were imported successfully.</p>
           </div>

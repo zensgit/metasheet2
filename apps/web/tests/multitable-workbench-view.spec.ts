@@ -6,6 +6,9 @@ const showSuccessSpy = vi.fn()
 const pushSpy = vi.fn().mockResolvedValue(undefined)
 const useMultitableSheetRealtimeMock = vi.fn()
 let sheetPresenceStateMock: any
+const { bulkImportRecordsMock } = vi.hoisted(() => ({
+  bulkImportRecordsMock: vi.fn(),
+}))
 
 vi.mock('vue-router', async () => {
   const actual = await vi.importActual<typeof import('vue-router')>('vue-router')
@@ -148,7 +151,7 @@ vi.mock('../src/multitable/realtime/comments-realtime', () => ({
 }))
 
 vi.mock('../src/multitable/import/bulk-import', () => ({
-  bulkImportRecords: vi.fn(),
+  bulkImportRecords: bulkImportRecordsMock,
 }))
 
 vi.mock('../src/multitable/components/MetaViewTabBar.vue', () => ({
@@ -658,6 +661,21 @@ vi.mock('../src/multitable/components/MetaImportModal.vue', () => ({
           },
           'import-dirty',
         ),
+        h(
+          'button',
+          {
+            'data-import-submit': 'true',
+            onClick: () => this.$emit('import', {
+              records: [
+                { fld_title: 'Alpha', fld_status: 'Open' },
+                { fld_title: 'alpha', fld_status: 'Closed' },
+              ],
+              rowIndexes: [0, 1],
+              failures: [],
+            }),
+          },
+          'import-submit',
+        ),
       ])
     },
   }),
@@ -725,6 +743,10 @@ function createWorkbenchMock() {
       }),
       loadFormContext: vi.fn(),
       getRecord: vi.fn(),
+      listRecordSummaries: vi.fn().mockResolvedValue({
+        records: [{ id: 'rec_existing', display: 'Alpha' }],
+        displayMap: { rec_existing: 'Alpha' },
+      }),
       listCommentMentionSuggestions: vi.fn().mockResolvedValue({
         items: [{ id: 'user_jamie', label: 'Jamie', subtitle: 'jamie@example.com' }],
         total: 1,
@@ -846,6 +868,7 @@ describe('MultitableWorkbench view wiring', () => {
     sheetPresenceStateMock = null
     useMultitableSheetRealtimeMock.mockReset()
     subscribeToMultitableCommentSheetRealtimeMock.mockReset()
+    bulkImportRecordsMock.mockReset()
     workbenchMock = createWorkbenchMock()
     gridMock = createGridMock()
     container = document.createElement('div')
@@ -963,6 +986,42 @@ describe('MultitableWorkbench view wiring', () => {
 
     expect(container!.querySelector('[data-import-field-ids]')?.getAttribute('data-import-field-ids'))
       .toBe('fld_title')
+  })
+
+  it('imports duplicate first-field values without implicit dedupe', async () => {
+    bulkImportRecordsMock.mockResolvedValue({
+      attempted: 2,
+      succeeded: 2,
+      failed: 0,
+      firstError: null,
+      failures: [],
+    })
+    workbenchMock.fields.value = [
+      { id: 'fld_title', name: 'Title', type: 'string', order: 1 },
+      { id: 'fld_status', name: 'Status', type: 'string', order: 2 },
+    ]
+    gridMock.fields.value = [...workbenchMock.fields.value]
+
+    mountWorkbench()
+    await flushUi()
+
+    container!.querySelector<HTMLButtonElement>('[data-open-import="true"]')!.click()
+    await flushUi()
+
+    container!.querySelector<HTMLButtonElement>('[data-import-submit="true"]')!.click()
+    await flushUi()
+
+    expect(workbenchMock.client.listRecordSummaries).not.toHaveBeenCalled()
+    expect(bulkImportRecordsMock).toHaveBeenCalledTimes(1)
+    expect(bulkImportRecordsMock).toHaveBeenCalledWith(expect.objectContaining({
+      sheetId: 'sheet_orders',
+      viewId: 'view_grid',
+      records: [
+        { fld_title: 'Alpha', fld_status: 'Open' },
+        { fld_title: 'alpha', fld_status: 'Closed' },
+      ],
+    }))
+    expect(showSuccessSpy).toHaveBeenCalledWith('2 record(s) imported')
   })
 
   it('exports only scoped visible grid fields', async () => {

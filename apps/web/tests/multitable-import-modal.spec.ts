@@ -138,6 +138,42 @@ describe('MetaImportModal', () => {
     container.remove()
   })
 
+  it('uses generic duplicate copy in the result view', async () => {
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+
+    const app = createApp({
+      render() {
+        return h(MetaImportModal, {
+          visible: true,
+          fields: [{ id: 'fld_name', name: 'Name', type: 'string' }],
+          importing: false,
+          result: {
+            attempted: 2,
+            succeeded: 1,
+            failed: 0,
+            skipped: 1,
+            firstError: null,
+            failures: [
+              { index: 1, rowIndex: 1, fieldId: 'fld_name', skipped: true, message: 'Skipped duplicate row because Name already exists: alpha' },
+            ],
+          },
+          onClose: vi.fn(),
+          onImport: vi.fn(),
+        })
+      },
+    })
+
+    app.mount(container)
+    await flushUi()
+
+    expect(document.body.textContent).toContain('Some rows were skipped as duplicates.')
+    expect(document.body.textContent).not.toContain('current primary import field')
+
+    app.unmount()
+    container.remove()
+  })
+
   it('filters readonly fields out of import mapping options', async () => {
     const container = document.createElement('div')
     document.body.appendChild(container)
