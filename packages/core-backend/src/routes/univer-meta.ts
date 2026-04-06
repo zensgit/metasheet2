@@ -5143,7 +5143,7 @@ export function univerMetaRouter(): Router {
     }
   })
 
-  router.post('/attachments', rbacGuard('multitable', 'write'), async (req: Request, res: Response) => {
+  router.post('/attachments', async (req: Request, res: Response) => {
     try {
       if (!multitableUpload) {
         return res.status(500).json({ ok: false, error: { code: 'UPLOAD_UNAVAILABLE', message: 'Attachment upload not available - multer not installed' } })
@@ -5331,7 +5331,7 @@ export function univerMetaRouter(): Router {
     }
   })
 
-  router.delete('/attachments/:attachmentId', rbacGuard('multitable', 'write'), async (req: Request, res: Response) => {
+  router.delete('/attachments/:attachmentId', async (req: Request, res: Response) => {
     const attachmentId = typeof req.params.attachmentId === 'string' ? req.params.attachmentId.trim() : ''
     if (!attachmentId) {
       return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'attachmentId is required' } })
@@ -5372,6 +5372,14 @@ export function univerMetaRouter(): Router {
           creatorMap.get(String(attachmentRow.record_id)),
           'edit',
         )) return sendForbidden(res, 'Record editing is not allowed for this row')
+      } else if (!ensureRecordWriteAllowed(
+        sheetCapabilities.capabilities,
+        sheetCapabilities.sheetScope,
+        access,
+        typeof attachmentRow.created_by === 'string' ? attachmentRow.created_by : null,
+        'edit',
+      )) {
+        return sendForbidden(res, 'Attachment deletion is not allowed for this draft attachment')
       }
 
       await pool.transaction(async ({ query }) => {
