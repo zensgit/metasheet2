@@ -6,7 +6,13 @@ const showSuccessSpy = vi.fn()
 const pushSpy = vi.fn().mockResolvedValue(undefined)
 const useMultitableSheetRealtimeMock = vi.fn()
 let sheetPresenceStateMock: any
-const { bulkImportRecordsMock } = vi.hoisted(() => ({
+const { authAccessSnapshot, bulkImportRecordsMock } = vi.hoisted(() => ({
+  authAccessSnapshot: {
+    email: 'dev@example.com',
+    roles: [] as string[],
+    permissions: ['multitable:write'] as string[],
+    isAdmin: false,
+  },
   bulkImportRecordsMock: vi.fn(),
 }))
 
@@ -65,6 +71,13 @@ vi.mock('../src/multitable/composables/useMultitableCapabilities', () => ({
     canManageViews: computed(() => source?.value?.canManageViews ?? true),
     canComment: computed(() => source?.value?.canComment ?? true),
     canManageAutomation: computed(() => source?.value?.canManageAutomation ?? false),
+  }),
+}))
+
+vi.mock('../src/composables/useAuth', () => ({
+  useAuth: () => ({
+    getAccessSnapshot: () => authAccessSnapshot,
+    getCurrentUserId: vi.fn().mockResolvedValue('user_1'),
   }),
 }))
 
@@ -157,17 +170,22 @@ vi.mock('../src/multitable/import/bulk-import', () => ({
 vi.mock('../src/multitable/components/MetaViewTabBar.vue', () => ({
   default: defineComponent({
     name: 'MetaViewTabBar',
+    props: {
+      canCreateSheet: { type: Boolean, default: false },
+    },
     emits: ['create-sheet', 'select-sheet', 'select-view'],
     render() {
       return h('div', [
-        h(
-          'button',
-          {
-            'data-create-sheet': 'true',
-            onClick: () => this.$emit('create-sheet', 'Sheet 2'),
-          },
-          'create-sheet',
-        ),
+        this.$props.canCreateSheet
+          ? h(
+              'button',
+              {
+                'data-create-sheet': 'true',
+                onClick: () => this.$emit('create-sheet', 'Sheet 2'),
+              },
+              'create-sheet',
+            )
+          : null,
         h(
           'button',
           {
@@ -686,18 +704,31 @@ vi.mock('../src/multitable/components/MetaBasePicker.vue', () => ({
     name: 'MetaBasePicker',
     props: {
       activeBaseId: { type: String, default: '' },
+      canCreate: { type: Boolean, default: false },
     },
-    emits: ['select'],
+    emits: ['select', 'create'],
     render() {
-      return h(
-        'button',
-        {
-          'data-select-base': 'base_sales',
-          'data-active-base-id': this.$props.activeBaseId,
-          onClick: () => this.$emit('select', 'base_sales'),
-        },
-        this.$props.activeBaseId || 'no-base',
-      )
+      return h('div', [
+        h(
+          'button',
+          {
+            'data-select-base': 'base_sales',
+            'data-active-base-id': this.$props.activeBaseId,
+            onClick: () => this.$emit('select', 'base_sales'),
+          },
+          this.$props.activeBaseId || 'no-base',
+        ),
+        this.$props.canCreate
+          ? h(
+              'button',
+              {
+                'data-create-base': 'true',
+                onClick: () => this.$emit('create', 'Base 2'),
+              },
+              'create-base',
+            )
+          : null,
+      ])
     },
   }),
 }))
@@ -869,6 +900,10 @@ describe('MultitableWorkbench view wiring', () => {
     useMultitableSheetRealtimeMock.mockReset()
     subscribeToMultitableCommentSheetRealtimeMock.mockReset()
     bulkImportRecordsMock.mockReset()
+    authAccessSnapshot.email = 'dev@example.com'
+    authAccessSnapshot.roles = []
+    authAccessSnapshot.permissions = ['multitable:write']
+    authAccessSnapshot.isAdmin = false
     workbenchMock = createWorkbenchMock()
     gridMock = createGridMock()
     container = document.createElement('div')
@@ -1361,6 +1396,46 @@ describe('MultitableWorkbench view wiring', () => {
       baseId: 'base_sales',
       sheetId: 'sheet_new',
     })
+  })
+
+  it('keeps base and sheet creation available when the current sheet is read-only but the user still has global multitable write', async () => {
+    workbenchMock.capabilities.value = {
+      canRead: true,
+      canCreateRecord: false,
+      canEditRecord: false,
+      canDeleteRecord: false,
+      canManageFields: false,
+      canManageViews: false,
+      canComment: true,
+      canManageAutomation: false,
+    }
+    authAccessSnapshot.permissions = ['multitable:write']
+
+    mountWorkbench()
+    await flushUi()
+
+    expect(container!.querySelector('[data-create-base="true"]')).not.toBeNull()
+    expect(container!.querySelector('[data-create-sheet="true"]')).not.toBeNull()
+  })
+
+  it('hides base and sheet creation when global multitable write is absent', async () => {
+    workbenchMock.capabilities.value = {
+      canRead: true,
+      canCreateRecord: false,
+      canEditRecord: false,
+      canDeleteRecord: false,
+      canManageFields: false,
+      canManageViews: false,
+      canComment: true,
+      canManageAutomation: false,
+    }
+    authAccessSnapshot.permissions = ['multitable:read']
+
+    mountWorkbench()
+    await flushUi()
+
+    expect(container!.querySelector('[data-create-base="true"]')).toBeNull()
+    expect(container!.querySelector('[data-create-sheet="true"]')).toBeNull()
   })
 
   it('maps person field creation through the prepared link preset', async () => {

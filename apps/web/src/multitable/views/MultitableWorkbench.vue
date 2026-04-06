@@ -13,9 +13,9 @@
       </div>
     </div>
     <div v-if="bases.length" class="mt-workbench__base-bar">
-      <MetaBasePicker :bases="bases" :active-base-id="activeBaseId" :can-create="caps.canManageFields.value" @select="onSelectBase" @create="onCreateBase" />
+      <MetaBasePicker :bases="bases" :active-base-id="activeBaseId" :can-create="canCreateBasesAndSheets" @select="onSelectBase" @create="onCreateBase" />
     </div>
-    <MetaViewTabBar :sheets="workbench.sheets.value" :views="visibleWorkbenchViews" :active-sheet-id="workbench.activeSheetId.value" :active-view-id="workbench.activeViewId.value" :can-create-sheet="caps.canManageFields.value" @select-sheet="onSelectSheet" @select-view="onSelectView" @create-sheet="onCreateSheet" />
+    <MetaViewTabBar :sheets="workbench.sheets.value" :views="visibleWorkbenchViews" :active-sheet-id="workbench.activeSheetId.value" :active-view-id="workbench.activeViewId.value" :can-create-sheet="canCreateBasesAndSheets" @select-sheet="onSelectSheet" @select-view="onSelectView" @create-sheet="onCreateSheet" />
     <div class="mt-workbench__actions">
       <div
         v-if="sheetPresenceState.activeCollaboratorCount.value > 0"
@@ -400,6 +400,12 @@ let dialogMetaRefreshQueued = false
 let standaloneFormLoadVersion = 0
 let unsubscribeMentionRealtime: (() => void) | null = null
 
+function hasGrantedPermission(permissions: string[], code: string): boolean {
+  if (permissions.includes(code)) return true
+  const [resource] = code.split(':')
+  return permissions.includes(`${resource}:*`) || permissions.includes('*:*')
+}
+
 function showError(msg: string) {
   workbench.error.value = null
   toastRef.value?.showError(msg)
@@ -431,6 +437,10 @@ const activeViewType = computed(() => {
   if (props.mode === 'form') return 'form'
   if (props.mode === 'grid') return 'grid'
   return workbench.activeView.value?.type ?? 'grid'
+})
+const canCreateBasesAndSheets = computed(() => {
+  const access = auth.getAccessSnapshot()
+  return access.isAdmin || hasGrantedPermission(access.permissions, 'multitable:write')
 })
 const effectiveViewPermissions = computed<Record<string, MetaViewPermission>>(() => {
   const merged: Record<string, MetaViewPermission> = { ...workbench.viewPermissions.value }
@@ -1337,6 +1347,10 @@ async function onDeleteView(viewId: string) {
 
 // --- Sheet management ---
 async function onCreateSheet(name: string) {
+  if (!canCreateBasesAndSheets.value) {
+    showError('Sheet creation requires multitable write access.')
+    return
+  }
   if (!confirmDiscardContextChanges()) return
   try {
     const res = await workbench.client.createSheet({ name, baseId: workbench.activeBaseId.value || undefined, seed: true })
@@ -1650,6 +1664,10 @@ async function requestExternalContextSync(
 }
 
 async function onCreateBase(name: string) {
+  if (!canCreateBasesAndSheets.value) {
+    showError('Base creation requires multitable write access.')
+    return
+  }
   try {
     const res = await workbench.client.createBase({ name })
     bases.value.push(res.base)
