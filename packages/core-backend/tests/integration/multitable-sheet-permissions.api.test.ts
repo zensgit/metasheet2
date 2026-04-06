@@ -1227,4 +1227,95 @@ describe('Multitable sheet-scoped permissions API', () => {
       error: { code: 'FORBIDDEN', message: 'Insufficient permissions to read linked sheet: sheet_target' },
     })
   })
+
+  test('filters sheet listings to directly granted readable sheets without requiring global multitable read', async () => {
+    const { app } = await createApp({
+      tokenPerms: [],
+      queryHandler: async (sql, params) => {
+        if (sql.includes('SELECT id, base_id, name, description FROM meta_sheets WHERE deleted_at IS NULL ORDER BY created_at ASC LIMIT 200')) {
+          return {
+            rows: [
+              { id: 'sheet_allowed', base_id: 'base_allowed', name: 'Visible Orders', description: 'Ops records' },
+              { id: 'sheet_blocked', base_id: 'base_blocked', name: 'Hidden Payroll', description: 'Payroll records' },
+              { id: 'sheet_people', base_id: 'base_system', name: 'People', description: '__metasheet_system:people__' },
+            ],
+          }
+        }
+        if (sql.includes('FROM spreadsheet_permissions') && sql.includes('sheet_id = ANY')) {
+          expect(params).toEqual(['user_sheet_acl_1', ['sheet_allowed', 'sheet_blocked']])
+          return {
+            rows: [
+              { sheet_id: 'sheet_allowed', perm_code: 'spreadsheet:read', subject_type: 'user' },
+              { sheet_id: 'sheet_blocked', perm_code: 'spreadsheet:comment', subject_type: 'user' },
+            ],
+          }
+        }
+        throw new Error(`Unhandled SQL in test: ${sql}`)
+      },
+    })
+
+    const response = await request(app)
+      .get('/api/multitable/sheets')
+      .expect(200)
+
+    expect(response.body.data.sheets).toEqual([
+      {
+        id: 'sheet_allowed',
+        baseId: 'base_allowed',
+        name: 'Visible Orders',
+        description: 'Ops records',
+      },
+    ])
+  })
+
+  test('filters base listings to bases with at least one directly granted readable sheet', async () => {
+    const { app } = await createApp({
+      tokenPerms: [],
+      queryHandler: async (sql, params) => {
+        if (sql.includes('SELECT id, name, icon, color, owner_id, workspace_id') && sql.includes('FROM meta_bases')) {
+          return {
+            rows: [
+              { id: 'base_allowed', name: 'Visible Base', icon: 'table', color: '#1677ff', owner_id: 'owner_1', workspace_id: 'workspace_1' },
+              { id: 'base_blocked', name: 'Hidden Base', icon: 'lock', color: '#f5222d', owner_id: 'owner_2', workspace_id: 'workspace_1' },
+              { id: 'base_system', name: 'System Base', icon: 'users', color: '#722ed1', owner_id: 'owner_3', workspace_id: 'workspace_1' },
+            ],
+          }
+        }
+        if (sql.includes('SELECT id, base_id, name, description FROM meta_sheets WHERE deleted_at IS NULL ORDER BY created_at ASC LIMIT 200')) {
+          return {
+            rows: [
+              { id: 'sheet_allowed', base_id: 'base_allowed', name: 'Visible Orders', description: 'Ops records' },
+              { id: 'sheet_blocked', base_id: 'base_blocked', name: 'Hidden Payroll', description: 'Payroll records' },
+              { id: 'sheet_people', base_id: 'base_system', name: 'People', description: '__metasheet_system:people__' },
+            ],
+          }
+        }
+        if (sql.includes('FROM spreadsheet_permissions') && sql.includes('sheet_id = ANY')) {
+          expect(params).toEqual(['user_sheet_acl_1', ['sheet_allowed', 'sheet_blocked']])
+          return {
+            rows: [
+              { sheet_id: 'sheet_allowed', perm_code: 'spreadsheet:read', subject_type: 'user' },
+              { sheet_id: 'sheet_blocked', perm_code: 'spreadsheet:comment', subject_type: 'user' },
+            ],
+          }
+        }
+        throw new Error(`Unhandled SQL in test: ${sql}`)
+      },
+    })
+
+    const response = await request(app)
+      .get('/api/multitable/bases')
+      .expect(200)
+
+    expect(response.body.data.bases).toEqual([
+      {
+        id: 'base_allowed',
+        name: 'Visible Base',
+        icon: 'table',
+        color: '#1677ff',
+        ownerId: 'owner_1',
+        workspaceId: 'workspace_1',
+      },
+    ])
+  })
 })
