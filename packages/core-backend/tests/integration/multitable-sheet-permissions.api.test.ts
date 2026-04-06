@@ -1680,6 +1680,91 @@ describe('Multitable sheet-scoped permissions API', () => {
     ])
   })
 
+  test('allows lookup, rollup, and link summaries when foreign sheet is readable via direct sheet grant', async () => {
+    const { app } = await createApp({
+      queryHandler: async (sql, params) => {
+        if (sql.includes('SELECT id, sheet_id, version, data, created_by FROM meta_records WHERE id = $1')) {
+          expect(params).toEqual(['rec_order_1'])
+          return {
+            rows: [{
+              id: 'rec_order_1',
+              sheet_id: 'sheet_orders',
+              version: 4,
+              data: { fld_name: 'Order A' },
+              created_by: 'user_sheet_acl_1',
+            }],
+          }
+        }
+        if (sql.includes('SELECT id, base_id, name, description FROM meta_sheets WHERE id = $1')) {
+          expect(params).toEqual(['sheet_orders'])
+          return {
+            rows: [{ id: 'sheet_orders', base_id: 'base_ops', name: 'Orders', description: null }],
+          }
+        }
+        if (sql.includes('SELECT id, name, type, property, "order" FROM meta_fields WHERE sheet_id = $1')) {
+          if (params?.[0] === 'sheet_orders') {
+            return {
+              rows: [
+                { id: 'fld_name', name: 'Name', type: 'string', property: {}, order: 1 },
+                { id: 'fld_vendor_link', name: 'Vendor', type: 'link', property: { foreignSheetId: 'sheet_vendors' }, order: 2 },
+                { id: 'fld_vendor_name_lookup', name: 'Vendor Name', type: 'lookup', property: { linkFieldId: 'fld_vendor_link', targetFieldId: 'fld_vendor_name' }, order: 3 },
+                { id: 'fld_vendor_score_rollup', name: 'Vendor Score', type: 'rollup', property: { linkFieldId: 'fld_vendor_link', targetFieldId: 'fld_vendor_score', aggregation: 'max' }, order: 4 },
+              ],
+            }
+          }
+          if (params?.[0] === 'sheet_vendors') {
+            return {
+              rows: [
+                { id: 'fld_vendor_name', name: 'Vendor Name', type: 'string', property: {}, order: 1 },
+                { id: 'fld_vendor_score', name: 'Vendor Score', type: 'number', property: {}, order: 2 },
+              ],
+            }
+          }
+        }
+        if (sql.includes('FROM meta_links') && sql.includes('record_id = ANY($2::text[])')) {
+          expect(params).toEqual([['fld_vendor_link'], ['rec_order_1']])
+          return { rows: [{ field_id: 'fld_vendor_link', record_id: 'rec_order_1', foreign_record_id: 'vendor_1' }] }
+        }
+        if (sql.includes('SELECT id, data FROM meta_records WHERE sheet_id = $1 AND id = ANY($2::text[])')) {
+          if (params?.[0] === 'sheet_vendors') {
+            expect(params).toEqual(['sheet_vendors', ['vendor_1']])
+            return {
+              rows: [{ id: 'vendor_1', data: { fld_vendor_name: 'Acme', fld_vendor_score: 9 } }],
+            }
+          }
+        }
+        if (sql.includes('FROM spreadsheet_permissions')) {
+          if (JSON.stringify(params) === JSON.stringify(['user_sheet_acl_1', ['sheet_orders']])) {
+            return { rows: [{ sheet_id: 'sheet_orders', perm_code: 'spreadsheet:read' }] }
+          }
+          if (JSON.stringify(params) === JSON.stringify(['user_sheet_acl_1', ['sheet_vendors']])) {
+            return { rows: [{ sheet_id: 'sheet_vendors', perm_code: 'spreadsheet:write-own' }] }
+          }
+        }
+        throw new Error(`Unhandled SQL in test: ${sql}`)
+      },
+    })
+
+    const response = await request(app)
+      .get('/api/multitable/records/rec_order_1')
+      .expect(200)
+
+    expect(response.body.ok).toBe(true)
+    expect(response.body.data.record).toMatchObject({
+      id: 'rec_order_1',
+      version: 4,
+      data: {
+        fld_name: 'Order A',
+        fld_vendor_link: ['vendor_1'],
+        fld_vendor_name_lookup: ['Acme'],
+        fld_vendor_score_rollup: 9,
+      },
+    })
+    expect(response.body.data.linkSummaries).toEqual({
+      fld_vendor_link: [{ id: 'vendor_1', display: 'Acme' }],
+    })
+  })
+
   test('redacts lookup, rollup, and link summaries when foreign sheet permission has no read access', async () => {
     const { app } = await createApp({
       tokenPerms: ['multitable:read'],
