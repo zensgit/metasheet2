@@ -33,7 +33,7 @@ async function createApp(args: {
   vi.doMock('../../src/rbac/service', () => ({
     isAdmin: vi.fn().mockResolvedValue(false),
     userHasPermission: vi.fn().mockImplementation(async (_userId: string, code: string) => {
-      if (code === 'multitable:read' || code === 'multitable:write') {
+      if (code === 'multitable:read' || code === 'multitable:write' || code === 'multitable:share') {
         return args.fallbackHasPermission === true
       }
       return false
@@ -146,6 +146,7 @@ describe('Multitable context API', () => {
       canEditRecord: false,
       canDeleteRecord: false,
       canManageFields: false,
+      canManageSheetAccess: false,
       canManageViews: false,
       canComment: true,
       canManageAutomation: true,
@@ -322,6 +323,7 @@ describe('Multitable context API', () => {
       canEditRecord: true,
       canDeleteRecord: true,
       canManageFields: true,
+      canManageSheetAccess: true,
       canManageViews: true,
       canComment: true,
       canManageAutomation: true,
@@ -588,8 +590,11 @@ describe('Multitable context API', () => {
       .query({ baseId: 'base_ops' })
       .expect(403)
 
-    expect(response.body).toEqual({ error: 'Insufficient permissions' })
-    expect(mockPool.query).not.toHaveBeenCalled()
+    expect(response.body).toEqual({
+      ok: false,
+      error: { code: 'FORBIDDEN', message: 'Insufficient permissions' },
+    })
+    expect(mockPool.query).toHaveBeenCalledTimes(2)
   })
 
   test('hides the system people sheet from multitable context selection', async () => {

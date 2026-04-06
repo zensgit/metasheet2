@@ -5,7 +5,7 @@ import { Router } from 'express'
 import { z } from 'zod'
 import { poolManager } from '../integration/db/connection-pool'
 import { eventBus } from '../integration/events/event-bus'
-import { rbacGuard } from '../rbac/rbac'
+import { rbacGuard, rbacGuardAny } from '../rbac/rbac'
 import { isAdmin, listUserPermissions } from '../rbac/service'
 import { StorageServiceImpl } from '../services/StorageService'
 import { createUploadMiddleware, loadMulter } from '../types/multer'
@@ -92,6 +92,7 @@ type MultitableCapabilities = {
   canEditRecord: boolean
   canDeleteRecord: boolean
   canManageFields: boolean
+  canManageSheetAccess: boolean
   canManageViews: boolean
   canComment: boolean
   canManageAutomation: boolean
@@ -1284,6 +1285,7 @@ function hasPermission(permissions: string[], code: string): boolean {
 function deriveCapabilities(permissions: string[], isAdminRole: boolean): MultitableCapabilities {
   const canRead = isAdminRole || hasPermission(permissions, 'multitable:read') || hasPermission(permissions, 'multitable:write')
   const canWrite = isAdminRole || hasPermission(permissions, 'multitable:write')
+  const canManageSheetAccess = isAdminRole || hasPermission(permissions, 'multitable:share')
   const canComment = isAdminRole || hasPermission(permissions, 'comments:write') || hasPermission(permissions, 'comments:read')
   const canManageAutomation =
     isAdminRole ||
@@ -1298,6 +1300,7 @@ function deriveCapabilities(permissions: string[], isAdminRole: boolean): Multit
     canEditRecord: canWrite,
     canDeleteRecord: canWrite,
     canManageFields: canWrite,
+    canManageSheetAccess,
     canManageViews: canWrite,
     canComment,
     canManageAutomation,
@@ -1553,7 +1556,13 @@ function applySheetPermissionScope(
   scope: SheetPermissionScope | undefined,
   isAdminRole: boolean,
 ): MultitableCapabilities {
-  if (isAdminRole || !scope?.hasAssignments) return capabilities
+  if (isAdminRole) return capabilities
+  if (!scope?.hasAssignments) {
+    return {
+      ...capabilities,
+      canManageSheetAccess: capabilities.canManageSheetAccess && capabilities.canRead,
+    }
+  }
   const canWriteAnyRecord = scope.canWrite || scope.canWriteOwn
   return {
     canRead: capabilities.canRead && scope.canRead,
@@ -1561,6 +1570,7 @@ function applySheetPermissionScope(
     canEditRecord: capabilities.canEditRecord && canWriteAnyRecord,
     canDeleteRecord: capabilities.canDeleteRecord && canWriteAnyRecord,
     canManageFields: capabilities.canManageFields && scope.canWrite,
+    canManageSheetAccess: capabilities.canManageSheetAccess && scope.canWrite,
     canManageViews: capabilities.canManageViews && scope.canWrite,
     canComment: capabilities.canComment && scope.canRead,
     canManageAutomation: capabilities.canManageAutomation && scope.canWrite,
@@ -2873,7 +2883,7 @@ export function univerMetaRouter(): Router {
     }
   })
 
-  router.get('/sheets/:sheetId/permissions', rbacGuard('multitable', 'read'), async (req: Request, res: Response) => {
+  router.get('/sheets/:sheetId/permissions', rbacGuardAny(['multitable:read', 'multitable:share']), async (req: Request, res: Response) => {
     const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
     if (!sheetId) {
       return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId is required' } })
@@ -2886,7 +2896,7 @@ export function univerMetaRouter(): Router {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
       }
       const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
-      if (!capabilities.canManageFields) return sendForbidden(res)
+      if (!capabilities.canManageSheetAccess) return sendForbidden(res)
 
       const items = await listSheetPermissionEntries(pool.query.bind(pool), sheetId)
       return res.json({ ok: true, data: { items } })
@@ -2898,7 +2908,7 @@ export function univerMetaRouter(): Router {
     }
   })
 
-  router.get('/sheets/:sheetId/permission-candidates', rbacGuard('multitable', 'read'), async (req: Request, res: Response) => {
+  router.get('/sheets/:sheetId/permission-candidates', rbacGuardAny(['multitable:read', 'multitable:share']), async (req: Request, res: Response) => {
     const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
     if (!sheetId) {
       return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId is required' } })
@@ -2915,7 +2925,7 @@ export function univerMetaRouter(): Router {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
       }
       const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
-      if (!capabilities.canManageFields) return sendForbidden(res)
+      if (!capabilities.canManageSheetAccess) return sendForbidden(res)
 
       const items = await listSheetPermissionCandidates(pool.query.bind(pool), sheetId, { q, limit })
       return res.json({ ok: true, data: { items, total: items.length, limit, query: q } })
@@ -2927,7 +2937,7 @@ export function univerMetaRouter(): Router {
     }
   })
 
-  router.put('/sheets/:sheetId/permissions/:subjectType/:subjectId', rbacGuard('multitable', 'write'), async (req: Request, res: Response) => {
+  router.put('/sheets/:sheetId/permissions/:subjectType/:subjectId', rbacGuardAny(['multitable:write', 'multitable:share']), async (req: Request, res: Response) => {
     const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
     const subjectType = typeof req.params.subjectType === 'string' ? req.params.subjectType.trim() : ''
     const subjectId = typeof req.params.subjectId === 'string' ? req.params.subjectId.trim() : ''
@@ -2950,7 +2960,7 @@ export function univerMetaRouter(): Router {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
       }
       const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
-      if (!capabilities.canManageFields) return sendForbidden(res)
+      if (!capabilities.canManageSheetAccess) return sendForbidden(res)
 
       if (subjectType === 'role' && parsed.data.accessLevel === 'write-own') {
         return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'write-own is only supported for direct user grants' } })

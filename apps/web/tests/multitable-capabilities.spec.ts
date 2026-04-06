@@ -11,6 +11,7 @@ describe('useMultitableCapabilities', () => {
     expect(caps.canEditRecord.value).toBe(true)
     expect(caps.canDeleteRecord.value).toBe(true)
     expect(caps.canManageFields.value).toBe(true)
+    expect(caps.canManageSheetAccess.value).toBe(true)
     expect(caps.canManageViews.value).toBe(true)
     expect(caps.canComment.value).toBe(true)
     expect(caps.canManageAutomation.value).toBe(true)
@@ -20,6 +21,7 @@ describe('useMultitableCapabilities', () => {
     const caps = useMultitableCapabilities(ref<MultitableRole>('editor'))
     expect(caps.canEditRecord.value).toBe(true)
     expect(caps.canManageFields.value).toBe(false)
+    expect(caps.canManageSheetAccess.value).toBe(false)
     expect(caps.canManageViews.value).toBe(false)
     expect(caps.canManageAutomation.value).toBe(false)
   })
@@ -56,6 +58,7 @@ describe('useMultitableCapabilities', () => {
       canEditRecord: true,
       canDeleteRecord: false,
       canManageFields: true,
+      canManageSheetAccess: false,
       canManageViews: false,
       canComment: true,
       canManageAutomation: false,
@@ -66,6 +69,7 @@ describe('useMultitableCapabilities', () => {
     expect(caps.canCreateRecord.value).toBe(false)
     expect(caps.canEditRecord.value).toBe(true)
     expect(caps.canManageFields.value).toBe(true)
+    expect(caps.canManageSheetAccess.value).toBe(false)
     expect(caps.canManageViews.value).toBe(false)
   })
 })
