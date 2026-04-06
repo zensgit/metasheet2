@@ -138,6 +138,10 @@ describe('Multitable sheet-scoped permissions API', () => {
         canDelete: false,
       },
     })
+    expect(contextResponse.body.data.capabilityOrigin).toEqual({
+      source: 'sheet-scope',
+      hasSheetAssignments: true,
+    })
 
     const recordResponse = await request(app)
       .get('/api/multitable/records/rec_1')
@@ -152,6 +156,10 @@ describe('Multitable sheet-scoped permissions API', () => {
       canRead: true,
       canEditRecord: false,
       canDeleteRecord: false,
+    })
+    expect(recordResponse.body.data.capabilityOrigin).toEqual({
+      source: 'sheet-scope',
+      hasSheetAssignments: true,
     })
   })
 
@@ -212,6 +220,10 @@ describe('Multitable sheet-scoped permissions API', () => {
       canManageSheetAccess: false,
       canManageViews: false,
       canComment: false,
+    })
+    expect(response.body.data.capabilityOrigin).toEqual({
+      source: 'sheet-grant',
+      hasSheetAssignments: true,
     })
     expect(response.body.data.sheet?.id).toBe('sheet_ops')
   })
@@ -352,6 +364,10 @@ describe('Multitable sheet-scoped permissions API', () => {
       .query({ sheetId: 'sheet_ops' })
       .expect(200)
 
+    expect(response.body.data.meta.capabilityOrigin).toEqual({
+      source: 'sheet-grant',
+      hasSheetAssignments: true,
+    })
     expect(response.body.data.meta.permissions.fieldPermissions).toEqual({
       fld_name: {
         visible: true,

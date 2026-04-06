@@ -248,6 +248,10 @@ describe('Multitable record and form context API', () => {
       expect.objectContaining({ id: 'fld_title', name: 'Title' }),
       expect.objectContaining({ id: 'fld_files', name: 'Files' }),
     ])
+    expect(response.body.data.capabilityOrigin).toEqual({
+      source: 'global-rbac',
+      hasSheetAssignments: false,
+    })
     expect(response.body.data.record).toMatchObject({ id: 'rec_existing', version: 5 })
     expect(response.body.data.commentsScope).toMatchObject({
       targetType: 'meta_record',
@@ -418,6 +422,10 @@ describe('Multitable record and form context API', () => {
       canEdit: true,
       canDelete: true,
       canComment: true,
+    })
+    expect(recordResponse.body.data.capabilityOrigin).toEqual({
+      source: 'global-rbac',
+      hasSheetAssignments: false,
     })
   })
 

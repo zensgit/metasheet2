@@ -39,6 +39,7 @@ type UniverMetaView = {
     computedFilterSort?: boolean
     ignoredSortFieldIds?: string[]
     ignoredFilterFieldIds?: string[]
+    capabilityOrigin?: MultitableCapabilityOrigin
     permissions?: MultitableScopedPermissions
   }
   page?: {
@@ -96,6 +97,11 @@ type MultitableCapabilities = {
   canManageViews: boolean
   canComment: boolean
   canManageAutomation: boolean
+}
+
+type MultitableCapabilityOrigin = {
+  source: 'admin' | 'global-rbac' | 'sheet-grant' | 'sheet-scope'
+  hasSheetAssignments: boolean
 }
 
 type MultitableFieldPermission = {
@@ -1632,6 +1638,40 @@ function applyContextSheetSchemaWriteGrant(
   }
 }
 
+const MULTITABLE_CAPABILITY_KEYS: Array<keyof MultitableCapabilities> = [
+  'canRead',
+  'canCreateRecord',
+  'canEditRecord',
+  'canDeleteRecord',
+  'canManageFields',
+  'canManageSheetAccess',
+  'canManageViews',
+  'canComment',
+  'canManageAutomation',
+]
+
+function deriveCapabilityOrigin(
+  baseCapabilities: MultitableCapabilities,
+  effectiveCapabilities: MultitableCapabilities,
+  scope: SheetPermissionScope | undefined,
+  isAdminRole: boolean,
+): MultitableCapabilityOrigin {
+  const hasSheetAssignments = !!scope?.hasAssignments
+  if (isAdminRole) {
+    return { source: 'admin', hasSheetAssignments }
+  }
+  if (!hasSheetAssignments) {
+    return { source: 'global-rbac', hasSheetAssignments: false }
+  }
+  const expandsBaseCapabilities = MULTITABLE_CAPABILITY_KEYS.some(
+    (key) => !baseCapabilities[key] && effectiveCapabilities[key],
+  )
+  return {
+    source: expandsBaseCapabilities ? 'sheet-grant' : 'sheet-scope',
+    hasSheetAssignments: true,
+  }
+}
+
 async function filterReadableSheetRowsForAccess<T extends { id: string }>(
   query: QueryFn,
   sheetRows: T[],
@@ -1658,14 +1698,21 @@ async function resolveSheetCapabilities(
   req: Request,
   query: QueryFn,
   sheetId: string,
-): Promise<{ access: ResolvedRequestAccess; capabilities: MultitableCapabilities; sheetScope?: SheetPermissionScope }> {
+): Promise<{
+  access: ResolvedRequestAccess
+  capabilities: MultitableCapabilities
+  capabilityOrigin: MultitableCapabilityOrigin
+  sheetScope?: SheetPermissionScope
+}> {
   const access = await resolveRequestAccess(req)
   const baseCapabilities = deriveCapabilities(access.permissions, access.isAdminRole)
   const scopeMap = await loadSheetPermissionScopeMap(query, [sheetId], access.userId)
   const sheetScope = scopeMap.get(sheetId)
+  const capabilities = applyContextSheetSchemaWriteGrant(baseCapabilities, sheetScope, access.isAdminRole)
   return {
     access,
-    capabilities: applyContextSheetSchemaWriteGrant(baseCapabilities, sheetScope, access.isAdminRole),
+    capabilities,
+    capabilityOrigin: deriveCapabilityOrigin(baseCapabilities, capabilities, sheetScope, access.isAdminRole),
     ...(sheetScope ? { sheetScope } : {}),
   }
 }
@@ -1674,14 +1721,21 @@ async function resolveSheetReadableCapabilities(
   req: Request,
   query: QueryFn,
   sheetId: string,
-): Promise<{ access: ResolvedRequestAccess; capabilities: MultitableCapabilities; sheetScope?: SheetPermissionScope }> {
+): Promise<{
+  access: ResolvedRequestAccess
+  capabilities: MultitableCapabilities
+  capabilityOrigin: MultitableCapabilityOrigin
+  sheetScope?: SheetPermissionScope
+}> {
   const access = await resolveRequestAccess(req)
   const baseCapabilities = deriveCapabilities(access.permissions, access.isAdminRole)
   const scopeMap = await loadSheetPermissionScopeMap(query, [sheetId], access.userId)
   const sheetScope = scopeMap.get(sheetId)
+  const capabilities = applyContextSheetSchemaWriteGrant(baseCapabilities, sheetScope, access.isAdminRole)
   return {
     access,
-    capabilities: applyContextSheetSchemaWriteGrant(baseCapabilities, sheetScope, access.isAdminRole),
+    capabilities,
+    capabilityOrigin: deriveCapabilityOrigin(baseCapabilities, capabilities, sheetScope, access.isAdminRole),
     ...(sheetScope ? { sheetScope } : {}),
   }
 }
@@ -2804,13 +2858,22 @@ export function univerMetaRouter(): Router {
       if (!baseCapabilities.canRead && !effectiveSheetId) {
         return sendForbidden(res)
       }
+      const selectedSheetScope = effectiveSheetId
+        ? sheetPermissionScopeMap.get(effectiveSheetId)
+        : undefined
       const capabilities = effectiveSheetId
         ? applyContextSheetSchemaWriteGrant(
             baseCapabilities,
-            sheetPermissionScopeMap.get(effectiveSheetId),
+            selectedSheetScope,
             access.isAdminRole,
           )
         : baseCapabilities
+      const capabilityOrigin = deriveCapabilityOrigin(
+        baseCapabilities,
+        capabilities,
+        selectedSheetScope,
+        access.isAdminRole,
+      )
       const selectedSheet =
         (!isSystemPeopleSheetDescription(sheetRow?.description) ? sheetRow : null) ??
         readableSheetRows.find((row) => String(row.id) === effectiveSheetId) ??
@@ -2871,6 +2934,7 @@ export function univerMetaRouter(): Router {
           ),
           views: serializedViews,
           capabilities,
+          capabilityOrigin,
           fieldPermissions,
           viewPermissions,
         },
@@ -3744,7 +3808,7 @@ export function univerMetaRouter(): Router {
       })
       const sheetId = resolved.sheetId
       const viewConfig = resolved.view
-      const { access, capabilities, sheetScope } = await resolveSheetReadableCapabilities(req, pool.query.bind(pool), sheetId)
+      const { access, capabilities, capabilityOrigin, sheetScope } = await resolveSheetReadableCapabilities(req, pool.query.bind(pool), sheetId)
       if (!access.userId) {
         return res.status(401).json({ error: 'Authentication required' })
       }
@@ -4067,9 +4131,10 @@ export function univerMetaRouter(): Router {
             ...(hasFilterOrSort ? { computedFilterSort } : {}),
             ...(ignoredSortFieldIds.length > 0 ? { ignoredSortFieldIds } : {}),
             ...(ignoredFilterFieldIds.length > 0 ? { ignoredFilterFieldIds } : {}),
+            capabilityOrigin,
             permissions,
           }
-        : { permissions }
+        : { capabilityOrigin, permissions }
 
       const view: UniverMetaView = {
         id: sheetId,
@@ -4108,7 +4173,7 @@ export function univerMetaRouter(): Router {
         viewId: viewIdParam,
       })
       const sheetId = resolved.sheetId
-      const { access, capabilities, sheetScope } = await resolveSheetReadableCapabilities(req, pool.query.bind(pool), sheetId)
+      const { access, capabilities, capabilityOrigin, sheetScope } = await resolveSheetReadableCapabilities(req, pool.query.bind(pool), sheetId)
       if (!access.userId) {
         return res.status(401).json({ error: 'Authentication required' })
       }
@@ -4182,6 +4247,7 @@ export function univerMetaRouter(): Router {
           ...(resolved.view ? { view: resolved.view } : {}),
           fields: visibleFields,
           capabilities,
+          capabilityOrigin,
           fieldPermissions,
           ...(resolved.view ? { viewPermissions } : {}),
           ...(record ? { rowActions } : {}),
@@ -4884,7 +4950,7 @@ export function univerMetaRouter(): Router {
       }
 
       sheetId = String(row.sheet_id)
-      const { access, capabilities, sheetScope } = await resolveSheetReadableCapabilities(req, pool.query.bind(pool), sheetId)
+      const { access, capabilities, capabilityOrigin, sheetScope } = await resolveSheetReadableCapabilities(req, pool.query.bind(pool), sheetId)
       if (!access.userId) {
         return res.status(401).json({ error: 'Authentication required' })
       }
@@ -4948,6 +5014,7 @@ export function univerMetaRouter(): Router {
           fields: visiblePropertyFields,
           record,
           capabilities,
+          capabilityOrigin,
           fieldPermissions,
           ...(viewConfig ? { viewPermissions } : {}),
           rowActions,

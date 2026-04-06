@@ -90,6 +90,7 @@ export interface MetaViewMeta {
   computedFilterSort?: boolean
   ignoredSortFieldIds?: string[]
   ignoredFilterFieldIds?: string[]
+  capabilityOrigin?: MetaCapabilityOrigin
   permissions?: MetaScopedPermissions
 }
 
@@ -124,6 +125,7 @@ export interface MetaContext {
   sheets: MetaSheet[]
   views: MetaView[]
   capabilities: MetaCapabilities
+  capabilityOrigin?: MetaCapabilityOrigin
   fieldPermissions?: Record<string, MetaFieldPermission>
   viewPermissions?: Record<string, MetaViewPermission>
 }
@@ -135,6 +137,7 @@ export interface MetaRecordContext {
   fields: MetaField[]
   record: MetaRecord
   capabilities: MetaCapabilities
+  capabilityOrigin?: MetaCapabilityOrigin
   fieldPermissions?: Record<string, MetaFieldPermission>
   viewPermissions?: Record<string, MetaViewPermission>
   rowActions?: MetaRowActions
@@ -152,6 +155,7 @@ export interface MetaFormContext {
   view?: MetaView | null
   fields: MetaField[]
   capabilities: MetaCapabilities
+  capabilityOrigin?: MetaCapabilityOrigin
   fieldPermissions?: Record<string, MetaFieldPermission>
   viewPermissions?: Record<string, MetaViewPermission>
   rowActions?: MetaRowActions
@@ -171,6 +175,11 @@ export interface MetaCapabilities {
   canManageViews: boolean
   canComment: boolean
   canManageAutomation: boolean
+}
+
+export interface MetaCapabilityOrigin {
+  source: 'admin' | 'global-rbac' | 'sheet-grant' | 'sheet-scope'
+  hasSheetAssignments: boolean
 }
 
 export type MetaSheetPermissionAccessLevel = 'read' | 'write' | 'write-own'

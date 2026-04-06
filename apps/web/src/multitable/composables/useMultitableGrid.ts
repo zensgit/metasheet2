@@ -1,5 +1,6 @@
 import { ref, computed, watch, type Ref, type ComputedRef, type WatchStopHandle } from 'vue'
 import type {
+  MetaCapabilityOrigin,
   LinkedRecordSummary,
   MetaAttachment,
   MetaField,
@@ -165,6 +166,7 @@ export function useMultitableGrid(opts: {
   const attachmentSummaries = ref<Record<string, Record<string, MetaAttachment[]>>>({})
   const fieldPermissions = ref<Record<string, MetaFieldPermission>>({})
   const viewPermission = ref<MetaViewPermission | null>(null)
+  const capabilityOrigin = ref<MetaCapabilityOrigin | null>(null)
   const rowActions = ref<MetaRowActions | null>(null)
   const rowActionOverrides = ref<Record<string, MetaRowActions>>({})
   const loading = ref(false)
@@ -277,6 +279,7 @@ export function useMultitableGrid(opts: {
         ? (data.meta?.permissions?.viewPermissions?.[data.view.id] ?? null)
         : null
       viewPermission.value = nextViewPermission
+      capabilityOrigin.value = data.meta?.capabilityOrigin ?? null
       rowActions.value = data.meta?.permissions?.rowActions ?? null
       rowActionOverrides.value = data.meta?.permissions?.rowActionOverrides ?? {}
       if (serverPage) page.value = serverPage
@@ -752,7 +755,7 @@ export function useMultitableGrid(opts: {
 
   return {
     // State
-    fields, rows, linkSummaries, attachmentSummaries, fieldPermissions, viewPermission, rowActions, rowActionOverrides, loading, error, conflict, page, hiddenFieldIds, visibleFields, readOnlyFieldIds,
+    fields, rows, linkSummaries, attachmentSummaries, fieldPermissions, viewPermission, capabilityOrigin, rowActions, rowActionOverrides, loading, error, conflict, page, hiddenFieldIds, visibleFields, readOnlyFieldIds,
     sortRules, filterRules, filterConjunction, sortFilterDirty,
     columnWidths, groupFieldId, groupField,
     editHistory, historyIndex, canUndo, canRedo,

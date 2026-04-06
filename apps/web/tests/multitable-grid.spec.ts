@@ -68,6 +68,12 @@ describe('useMultitableGrid', () => {
           fields: [{ id: 'f1', name: 'Title', type: 'string' }],
           rows: [{ id: 'r1', version: 1, data: { f1: 'Ship pilot' } }],
           view: { id: 'v1', sheetId: 's1', name: 'Grid', type: 'grid', hiddenFieldIds: [] },
+          meta: {
+            capabilityOrigin: {
+              source: 'sheet-scope',
+              hasSheetAssignments: true,
+            },
+          },
           page: { offset: 0, limit: 50, total: 1, hasMore: false },
         },
       }), { status: 200 })
@@ -88,6 +94,10 @@ describe('useMultitableGrid', () => {
     expect(fetchFn.mock.calls[0]?.[0]).toContain('/api/multitable/view?sheetId=s1&viewId=v1')
     expect(grid.rows.value).toEqual([{ id: 'r1', version: 1, data: { f1: 'Ship pilot' } }])
     expect(grid.fields.value).toEqual([{ id: 'f1', name: 'Title', type: 'string' }])
+    expect(grid.capabilityOrigin.value).toEqual({
+      source: 'sheet-scope',
+      hasSheetAssignments: true,
+    })
   })
 
   it('ignores stale load responses and keeps the latest page data', async () => {
