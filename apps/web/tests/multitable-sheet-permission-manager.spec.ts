@@ -80,12 +80,17 @@ describe('MetaSheetPermissionManager', () => {
 
     expect(client.listSheetPermissions).toHaveBeenCalledWith('sheet_orders')
     expect(client.listSheetPermissionCandidates).toHaveBeenCalledWith('sheet_orders', { q: undefined, limit: 12 })
+    expect(container!.textContent).toContain('Override sheet-level access for eligible people or roles. Write-own remains user-only.')
     expect(container!.querySelector('[data-sheet-permission-entry="user:user_1"]')).not.toBeNull()
     expect(container!.querySelector('[data-sheet-permission-entry="role:role_ops"]')).not.toBeNull()
     expect(container!.querySelector('[data-sheet-permission-candidate="user:user_1"]')).toBeNull()
     expect(container!.querySelector('[data-sheet-permission-candidate="role:role_ops"]')).toBeNull()
     expect(container!.querySelector('[data-sheet-permission-candidate="user:user_2"]')).not.toBeNull()
     expect(container!.querySelector('[data-sheet-permission-candidate="role:role_ops_writer"]')).not.toBeNull()
+    expect((container!.querySelector('[data-sheet-permission-candidate="user:user_2"] .meta-sheet-perm__action--primary') as HTMLButtonElement).textContent)
+      .toContain('Apply')
+    expect((container!.querySelector('[data-sheet-permission-candidate="role:role_ops_writer"] .meta-sheet-perm__action--primary') as HTMLButtonElement).textContent)
+      .toContain('Apply')
   })
 
   it('updates role-based sheet access for a candidate and omits write-own from role options', async () => {
@@ -136,5 +141,6 @@ describe('MetaSheetPermissionManager', () => {
     expect(client.updateSheetPermission).toHaveBeenCalledWith('sheet_orders', 'role', 'role_ops_writer', 'write')
     expect(updatedSpy).toHaveBeenCalledTimes(1)
     expect(container!.querySelector('[data-sheet-permission-entry="role:role_ops_writer"]')).not.toBeNull()
+    expect(container!.querySelector('[data-sheet-permission-candidate="role:role_ops_writer"]')).toBeNull()
   })
 })
