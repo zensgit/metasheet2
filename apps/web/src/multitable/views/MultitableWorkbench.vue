@@ -295,7 +295,7 @@ import MetaToast from '../components/MetaToast.vue'
 import MetaImportModal from '../components/MetaImportModal.vue'
 import MetaMentionPopover from '../components/MetaMentionPopover.vue'
 import type { MetaBase } from '../types'
-import { bulkImportRecords, skipDuplicateImportRows } from '../import/bulk-import'
+import { bulkImportRecords } from '../import/bulk-import'
 import { extractImportTokens, type ImportBuildFailure, type ImportBuildResult, type ImportValueResolver } from '../import/delimited'
 import { filterPropertyVisibleFields } from '../utils/field-permissions'
 import { isLinkField, isPersonField } from '../utils/link-fields'
@@ -708,15 +708,6 @@ function buildEditingMentionSuggestions(comment: { content: string; mentions: st
 
 function normalizeImportLookupKey(value: string): string {
   return value.trim().toLowerCase()
-}
-
-function getImportPrimaryField(records: Array<Record<string, unknown>>) {
-  const importedFieldIds = new Set(records.flatMap((record) => Object.keys(record)))
-  // The current multitable model does not expose an explicit primary-key field yet,
-  // so import dedupe follows the first mapped field in sheet order.
-  return [...grid.fields.value]
-    .sort((left, right) => Number(left.order ?? 0) - Number(right.order ?? 0))
-    .find((field) => importedFieldIds.has(field.id)) ?? null
 }
 
 async function loadAllRecordSummaries(sheetId: string, displayFieldId: string) {
@@ -1704,34 +1695,9 @@ async function onBulkImport(payload: ImportBuildResult) {
   importSubmitting.value = true
   importResult.value = null
   try {
-    const primaryField = getImportPrimaryField(payload.records)
-    let recordsToImport = payload.records
-    let rowIndexesToImport = payload.rowIndexes
-    let skippedRows: ImportFailure[] = []
-
-    if (primaryField && workbench.activeSheetId.value && payload.records.length > 0) {
-      try {
-        const existingSummary = await loadAllRecordSummaries(workbench.activeSheetId.value, primaryField.id)
-        const existingKeys = existingSummary.records
-          .map((record) => normalizeImportLookupKey(record.display))
-          .filter((key) => key.length > 0)
-        const deduped = skipDuplicateImportRows({
-          records: payload.records,
-          rowIndexes: payload.rowIndexes,
-          primaryFieldId: primaryField.id,
-          primaryFieldName: primaryField.name,
-          existingKeys,
-        })
-        recordsToImport = deduped.records
-        rowIndexesToImport = deduped.rowIndexes
-        skippedRows = deduped.skippedRows.map((row) => ({
-          ...row,
-          retryable: false,
-        }))
-      } catch {
-        // Duplicate detection should not block imports when summary prefetch fails.
-      }
-    }
+    const recordsToImport = payload.records
+    const rowIndexesToImport = payload.rowIndexes
+    const skippedRows: ImportFailure[] = []
 
     const importRowsResult = recordsToImport.length > 0
       ? await bulkImportRecords({
