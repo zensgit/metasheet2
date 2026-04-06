@@ -4,7 +4,7 @@
       <div class="meta-sheet-perm__header">
         <div>
           <h4 class="meta-sheet-perm__title">Manage Access</h4>
-          <p class="meta-sheet-perm__subtitle">Grant sheet-level read, write, or write-own access.</p>
+          <p class="meta-sheet-perm__subtitle">Grant sheet-level access to people or roles. Write-own remains user-only.</p>
         </div>
         <button class="meta-sheet-perm__close" type="button" @click="requestClose">&times;</button>
       </div>
@@ -21,36 +21,43 @@
           <div v-else-if="!entries.length" class="meta-sheet-perm__empty">No sheet-specific access grants yet.</div>
           <div
             v-for="entry in entries"
-            :key="entry.userId"
+            :key="subjectKey(entry.subjectType, entry.subjectId)"
             class="meta-sheet-perm__row"
-            :data-sheet-permission-entry="entry.userId"
+            :data-sheet-permission-entry="subjectKey(entry.subjectType, entry.subjectId)"
           >
             <div class="meta-sheet-perm__identity">
-              <strong>{{ entry.name || entry.email || entry.userId }}</strong>
-              <span>{{ entry.email || entry.userId }}</span>
+              <strong>{{ entry.label }}</strong>
+              <span>{{ entry.subtitle || entry.subjectId }}</span>
             </div>
+            <span class="meta-sheet-perm__subject" :data-subject-type="entry.subjectType">{{ entry.subjectType === 'role' ? 'Role' : 'Person' }}</span>
             <span class="meta-sheet-perm__badge" :data-access-level="entry.accessLevel">{{ accessLevelLabel(entry.accessLevel) }}</span>
             <select
-              :value="entryDrafts[entry.userId] ?? entry.accessLevel"
+              :value="entryDrafts[subjectKey(entry.subjectType, entry.subjectId)] ?? entry.accessLevel"
               class="meta-sheet-perm__select"
-              :disabled="busyUserId === entry.userId"
-              @change="setEntryDraft(entry.userId, $event)"
+              :disabled="busySubjectKey === subjectKey(entry.subjectType, entry.subjectId)"
+              @change="setEntryDraft(entry.subjectType, entry.subjectId, $event)"
             >
-              <option v-for="option in ACCESS_LEVEL_OPTIONS" :key="option.value" :value="option.value">{{ option.label }}</option>
+              <option
+                v-for="option in accessLevelOptionsFor(entry.subjectType)"
+                :key="`${entry.subjectType}:${option.value}`"
+                :value="option.value"
+              >
+                {{ option.label }}
+              </option>
             </select>
             <button
               class="meta-sheet-perm__action"
               type="button"
-              :disabled="busyUserId === entry.userId || (entryDrafts[entry.userId] ?? entry.accessLevel) === entry.accessLevel"
-              @click="applyEntry(entry.userId)"
+              :disabled="busySubjectKey === subjectKey(entry.subjectType, entry.subjectId) || (entryDrafts[subjectKey(entry.subjectType, entry.subjectId)] ?? entry.accessLevel) === entry.accessLevel"
+              @click="applyEntry(entry.subjectType, entry.subjectId)"
             >
               Save
             </button>
             <button
               class="meta-sheet-perm__action meta-sheet-perm__action--danger"
               type="button"
-              :disabled="busyUserId === entry.userId"
-              @click="removeEntry(entry.userId)"
+              :disabled="busySubjectKey === subjectKey(entry.subjectType, entry.subjectId)"
+              @click="removeEntry(entry.subjectType, entry.subjectId)"
             >
               Remove
             </button>
@@ -59,44 +66,96 @@
 
         <section class="meta-sheet-perm__section">
           <div class="meta-sheet-perm__section-header">
-            <strong>Add people</strong>
+            <strong>Add people or roles</strong>
           </div>
           <input
             v-model="search"
             class="meta-sheet-perm__search"
             type="search"
-            placeholder="Search users by name or email"
+            placeholder="Search people or roles"
             data-sheet-permission-search="true"
           />
-          <div v-if="candidatesLoading" class="meta-sheet-perm__empty">Searching users…</div>
-          <div v-else-if="!availableCandidates.length" class="meta-sheet-perm__empty">No matching users.</div>
-          <div
-            v-for="candidate in availableCandidates"
-            :key="candidate.id"
-            class="meta-sheet-perm__row"
-            :data-sheet-permission-candidate="candidate.id"
-          >
-            <div class="meta-sheet-perm__identity">
-              <strong>{{ candidate.label }}</strong>
-              <span>{{ candidate.subtitle || candidate.id }}</span>
+          <div v-if="candidatesLoading" class="meta-sheet-perm__empty">Searching people and roles…</div>
+          <div v-else-if="!availableCandidates.length" class="meta-sheet-perm__empty">No matching people or roles.</div>
+          <template v-else>
+            <div class="meta-sheet-perm__section-header">
+              <strong>People</strong>
             </div>
-            <select
-              :value="candidateDrafts[candidate.id] ?? candidate.accessLevel ?? 'read'"
-              class="meta-sheet-perm__select"
-              :disabled="busyUserId === candidate.id"
-              @change="setCandidateDraft(candidate.id, $event)"
+            <div v-if="!peopleCandidates.length" class="meta-sheet-perm__empty">No matching people.</div>
+            <div
+              v-for="candidate in peopleCandidates"
+              :key="subjectKey(candidate.subjectType, candidate.subjectId)"
+              class="meta-sheet-perm__row"
+              :data-sheet-permission-candidate="subjectKey(candidate.subjectType, candidate.subjectId)"
             >
-              <option v-for="option in ACCESS_LEVEL_OPTIONS" :key="option.value" :value="option.value">{{ option.label }}</option>
-            </select>
-            <button
-              class="meta-sheet-perm__action meta-sheet-perm__action--primary"
-              type="button"
-              :disabled="busyUserId === candidate.id"
-              @click="grantCandidate(candidate.id)"
+              <div class="meta-sheet-perm__identity">
+                <strong>{{ candidate.label }}</strong>
+                <span>{{ candidate.subtitle || candidate.subjectId }}</span>
+              </div>
+              <span class="meta-sheet-perm__subject" data-subject-type="user">Person</span>
+              <select
+                :value="candidateDrafts[subjectKey(candidate.subjectType, candidate.subjectId)] ?? candidate.accessLevel ?? 'read'"
+                class="meta-sheet-perm__select"
+                :disabled="busySubjectKey === subjectKey(candidate.subjectType, candidate.subjectId)"
+                @change="setCandidateDraft(candidate.subjectType, candidate.subjectId, $event)"
+              >
+                <option
+                  v-for="option in accessLevelOptionsFor(candidate.subjectType)"
+                  :key="`${candidate.subjectType}:${option.value}`"
+                  :value="option.value"
+                >
+                  {{ option.label }}
+                </option>
+              </select>
+              <button
+                class="meta-sheet-perm__action meta-sheet-perm__action--primary"
+                type="button"
+                :disabled="busySubjectKey === subjectKey(candidate.subjectType, candidate.subjectId)"
+                @click="grantCandidate(candidate.subjectType, candidate.subjectId)"
+              >
+                Grant
+              </button>
+            </div>
+
+            <div class="meta-sheet-perm__section-header">
+              <strong>Roles</strong>
+            </div>
+            <div v-if="!roleCandidates.length" class="meta-sheet-perm__empty">No matching roles.</div>
+            <div
+              v-for="candidate in roleCandidates"
+              :key="subjectKey(candidate.subjectType, candidate.subjectId)"
+              class="meta-sheet-perm__row"
+              :data-sheet-permission-candidate="subjectKey(candidate.subjectType, candidate.subjectId)"
             >
-              Grant
-            </button>
-          </div>
+              <div class="meta-sheet-perm__identity">
+                <strong>{{ candidate.label }}</strong>
+                <span>{{ candidate.subtitle || candidate.subjectId }}</span>
+              </div>
+              <span class="meta-sheet-perm__subject" data-subject-type="role">Role</span>
+              <select
+                :value="candidateDrafts[subjectKey(candidate.subjectType, candidate.subjectId)] ?? candidate.accessLevel ?? 'read'"
+                class="meta-sheet-perm__select"
+                :disabled="busySubjectKey === subjectKey(candidate.subjectType, candidate.subjectId)"
+                @change="setCandidateDraft(candidate.subjectType, candidate.subjectId, $event)"
+              >
+                <option
+                  v-for="option in accessLevelOptionsFor(candidate.subjectType)"
+                  :key="`${candidate.subjectType}:${option.value}`"
+                  :value="option.value"
+                >
+                  {{ option.label }}
+                </option>
+              </select>
+              <button
+                class="meta-sheet-perm__action meta-sheet-perm__action--primary"
+                type="button"
+                :disabled="busySubjectKey === subjectKey(candidate.subjectType, candidate.subjectId)"
+                @click="grantCandidate(candidate.subjectType, candidate.subjectId)"
+              >
+                Grant
+              </button>
+            </div>
+          </template>
         </section>
       </div>
     </div>
@@ -110,6 +169,7 @@ import type {
   MetaSheetPermissionAccessLevel,
   MetaSheetPermissionCandidate,
   MetaSheetPermissionEntry,
+  MetaSheetPermissionSubjectType,
 } from '../types'
 
 const ACCESS_LEVEL_OPTIONS: Array<{ value: MetaSheetPermissionAccessLevel; label: string }> = [
@@ -117,6 +177,7 @@ const ACCESS_LEVEL_OPTIONS: Array<{ value: MetaSheetPermissionAccessLevel; label
   { value: 'write', label: 'Write' },
   { value: 'write-own', label: 'Write own' },
 ]
+const ROLE_ACCESS_LEVEL_OPTIONS = ACCESS_LEVEL_OPTIONS.filter((option) => option.value !== 'write-own')
 
 const props = defineProps<{
   visible: boolean
@@ -133,7 +194,7 @@ const entries = ref<MetaSheetPermissionEntry[]>([])
 const candidates = ref<MetaSheetPermissionCandidate[]>([])
 const loading = ref(false)
 const candidatesLoading = ref(false)
-const busyUserId = ref<string | null>(null)
+const busySubjectKey = ref<string | null>(null)
 const status = ref('')
 const error = ref('')
 const search = ref('')
@@ -141,13 +202,24 @@ const entryDrafts = ref<Record<string, MetaSheetPermissionAccessLevel>>({})
 const candidateDrafts = ref<Record<string, MetaSheetPermissionAccessLevel>>({})
 let searchTimer: number | null = null
 
+function subjectKey(subjectType: MetaSheetPermissionSubjectType, subjectId: string) {
+  return `${subjectType}:${subjectId}`
+}
+
 const availableCandidates = computed(() => {
-  const activeUserIds = new Set(entries.value.map((entry) => entry.userId))
-  return candidates.value.filter((candidate) => !activeUserIds.has(candidate.id))
+  const activeSubjectKeys = new Set(entries.value.map((entry) => subjectKey(entry.subjectType, entry.subjectId)))
+  return candidates.value.filter((candidate) => !activeSubjectKeys.has(subjectKey(candidate.subjectType, candidate.subjectId)))
 })
+
+const peopleCandidates = computed(() => availableCandidates.value.filter((candidate) => candidate.subjectType === 'user'))
+const roleCandidates = computed(() => availableCandidates.value.filter((candidate) => candidate.subjectType === 'role'))
 
 function accessLevelLabel(accessLevel: MetaSheetPermissionAccessLevel) {
   return ACCESS_LEVEL_OPTIONS.find((option) => option.value === accessLevel)?.label ?? accessLevel
+}
+
+function accessLevelOptionsFor(subjectType: MetaSheetPermissionSubjectType) {
+  return subjectType === 'role' ? ROLE_ACCESS_LEVEL_OPTIONS : ACCESS_LEVEL_OPTIONS
 }
 
 function requestClose() {
@@ -160,13 +232,15 @@ function clearMessages() {
 }
 
 function syncEntryDrafts(nextEntries: MetaSheetPermissionEntry[]) {
-  entryDrafts.value = Object.fromEntries(nextEntries.map((entry) => [entry.userId, entry.accessLevel]))
+  entryDrafts.value = Object.fromEntries(nextEntries.map((entry) => [subjectKey(entry.subjectType, entry.subjectId), entry.accessLevel]))
 }
 
 function syncCandidateDrafts(nextCandidates: MetaSheetPermissionCandidate[]) {
   const nextDrafts: Record<string, MetaSheetPermissionAccessLevel> = { ...candidateDrafts.value }
   for (const candidate of nextCandidates) {
-    nextDrafts[candidate.id] = candidate.accessLevel ?? nextDrafts[candidate.id] ?? 'read'
+    const key = subjectKey(candidate.subjectType, candidate.subjectId)
+    const fallback = candidate.subjectType === 'role' ? 'read' : 'read'
+    nextDrafts[key] = candidate.accessLevel ?? nextDrafts[key] ?? fallback
   }
   candidateDrafts.value = nextDrafts
 }
@@ -225,47 +299,54 @@ function scheduleCandidateRefresh() {
   }, 180)
 }
 
-function setEntryDraft(userId: string, event: Event) {
+function setEntryDraft(subjectType: MetaSheetPermissionSubjectType, subjectId: string, event: Event) {
   entryDrafts.value = {
     ...entryDrafts.value,
-    [userId]: (event.target as HTMLSelectElement).value as MetaSheetPermissionAccessLevel,
+    [subjectKey(subjectType, subjectId)]: (event.target as HTMLSelectElement).value as MetaSheetPermissionAccessLevel,
   }
 }
 
-function setCandidateDraft(userId: string, event: Event) {
+function setCandidateDraft(subjectType: MetaSheetPermissionSubjectType, subjectId: string, event: Event) {
   candidateDrafts.value = {
     ...candidateDrafts.value,
-    [userId]: (event.target as HTMLSelectElement).value as MetaSheetPermissionAccessLevel,
+    [subjectKey(subjectType, subjectId)]: (event.target as HTMLSelectElement).value as MetaSheetPermissionAccessLevel,
   }
 }
 
-async function updateUserAccess(userId: string, accessLevel: MetaSheetPermissionAccessLevel | 'none', successMessage: string) {
-  busyUserId.value = userId
+async function updateSubjectAccess(
+  subjectType: MetaSheetPermissionSubjectType,
+  subjectId: string,
+  accessLevel: MetaSheetPermissionAccessLevel | 'none',
+  successMessage: string,
+) {
+  const key = subjectKey(subjectType, subjectId)
+  busySubjectKey.value = key
   clearMessages()
   try {
-    await props.client.updateSheetPermission(props.sheetId, userId, accessLevel)
+    await props.client.updateSheetPermission(props.sheetId, subjectType, subjectId, accessLevel)
     await refreshAll()
     status.value = successMessage
     emit('updated')
   } catch (cause: any) {
     error.value = cause?.message ?? 'Failed to update sheet access'
   } finally {
-    busyUserId.value = null
+    busySubjectKey.value = null
   }
 }
 
-async function applyEntry(userId: string) {
-  const nextAccessLevel = entryDrafts.value[userId]
+async function applyEntry(subjectType: MetaSheetPermissionSubjectType, subjectId: string) {
+  const nextAccessLevel = entryDrafts.value[subjectKey(subjectType, subjectId)]
   if (!nextAccessLevel) return
-  await updateUserAccess(userId, nextAccessLevel, 'Sheet access updated')
+  await updateSubjectAccess(subjectType, subjectId, nextAccessLevel, 'Sheet access updated')
 }
 
-async function removeEntry(userId: string) {
-  await updateUserAccess(userId, 'none', 'Sheet access removed')
+async function removeEntry(subjectType: MetaSheetPermissionSubjectType, subjectId: string) {
+  await updateSubjectAccess(subjectType, subjectId, 'none', 'Sheet access removed')
 }
 
-async function grantCandidate(userId: string) {
-  await updateUserAccess(userId, candidateDrafts.value[userId] ?? 'read', 'Sheet access granted')
+async function grantCandidate(subjectType: MetaSheetPermissionSubjectType, subjectId: string) {
+  const key = subjectKey(subjectType, subjectId)
+  await updateSubjectAccess(subjectType, subjectId, candidateDrafts.value[key] ?? 'read', 'Sheet access granted')
 }
 
 watch(
@@ -364,7 +445,7 @@ onBeforeUnmount(() => {
 
 .meta-sheet-perm__row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 100px 120px auto auto;
+  grid-template-columns: minmax(0, 1fr) 88px 100px 120px auto auto;
   gap: 10px;
   align-items: center;
   padding: 10px 12px;
@@ -415,6 +496,23 @@ onBeforeUnmount(() => {
 .meta-sheet-perm__badge[data-access-level='write-own'] {
   background: #fef3c7;
   color: #92400e;
+}
+
+.meta-sheet-perm__subject {
+  display: inline-flex;
+  justify-content: center;
+  align-items: center;
+  padding: 4px 8px;
+  border-radius: 999px;
+  background: #eff6ff;
+  color: #1d4ed8;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.meta-sheet-perm__subject[data-subject-type='role'] {
+  background: #ede9fe;
+  color: #6d28d9;
 }
 
 .meta-sheet-perm__select,

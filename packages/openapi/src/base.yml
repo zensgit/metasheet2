@@ -1757,10 +1757,15 @@ components:
     MultitableSheetPermissionAccessLevel:
       type: string
       enum: [read, write, write-own]
+    MultitableSheetPermissionSubjectType:
+      type: string
+      enum: [user, role]
     MultitableSheetPermissionEntry:
       type: object
       properties:
-        userId:
+        subjectType:
+          $ref: '#/components/schemas/MultitableSheetPermissionSubjectType'
+        subjectId:
           type: string
         accessLevel:
           $ref: '#/components/schemas/MultitableSheetPermissionAccessLevel'
@@ -1768,25 +1773,26 @@ components:
           type: array
           items:
             type: string
-        name:
+        label:
           type: string
-          nullable: true
-        email:
+        subtitle:
           type: string
           nullable: true
         isActive:
           type: boolean
       required:
-        - userId
+        - subjectType
+        - subjectId
         - accessLevel
         - permissions
-        - name
-        - email
+        - label
         - isActive
     MultitableSheetPermissionCandidate:
       type: object
       properties:
-        id:
+        subjectType:
+          $ref: '#/components/schemas/MultitableSheetPermissionSubjectType'
+        subjectId:
           type: string
         label:
           type: string
@@ -1800,7 +1806,8 @@ components:
             - $ref: '#/components/schemas/MultitableSheetPermissionAccessLevel'
           nullable: true
       required:
-        - id
+        - subjectType
+        - subjectId
         - label
         - isActive
     MultitableFieldCapability:

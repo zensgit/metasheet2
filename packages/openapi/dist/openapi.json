@@ -2616,10 +2616,20 @@
           "write-own"
         ]
       },
+      "MultitableSheetPermissionSubjectType": {
+        "type": "string",
+        "enum": [
+          "user",
+          "role"
+        ]
+      },
       "MultitableSheetPermissionEntry": {
         "type": "object",
         "properties": {
-          "userId": {
+          "subjectType": {
+            "$ref": "#/components/schemas/MultitableSheetPermissionSubjectType"
+          },
+          "subjectId": {
             "type": "string"
           },
           "accessLevel": {
@@ -2631,11 +2641,10 @@
               "type": "string"
             }
           },
-          "name": {
-            "type": "string",
-            "nullable": true
+          "label": {
+            "type": "string"
           },
-          "email": {
+          "subtitle": {
             "type": "string",
             "nullable": true
           },
@@ -2644,18 +2653,21 @@
           }
         },
         "required": [
-          "userId",
+          "subjectType",
+          "subjectId",
           "accessLevel",
           "permissions",
-          "name",
-          "email",
+          "label",
           "isActive"
         ]
       },
       "MultitableSheetPermissionCandidate": {
         "type": "object",
         "properties": {
-          "id": {
+          "subjectType": {
+            "$ref": "#/components/schemas/MultitableSheetPermissionSubjectType"
+          },
+          "subjectId": {
             "type": "string"
           },
           "label": {
@@ -2678,7 +2690,8 @@
           }
         },
         "required": [
-          "id",
+          "subjectType",
+          "subjectId",
           "label",
           "isActive"
         ]
@@ -14853,7 +14866,7 @@
     },
     "/api/multitable/sheets/{sheetId}/permission-candidates": {
       "get": {
-        "summary": "List candidate users for sheet permission authoring",
+        "summary": "List candidate people and roles for sheet permission authoring",
         "security": [
           {
             "bearerAuth": []
@@ -14941,9 +14954,9 @@
         }
       }
     },
-    "/api/multitable/sheets/{sheetId}/permissions/{userId}": {
+    "/api/multitable/sheets/{sheetId}/permissions/{subjectType}/{subjectId}": {
       "put": {
-        "summary": "Set a sheet access level for a user",
+        "summary": "Set a sheet access level for a person or role",
         "security": [
           {
             "bearerAuth": []
@@ -14960,7 +14973,15 @@
           },
           {
             "in": "path",
-            "name": "userId",
+            "name": "subjectType",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/MultitableSheetPermissionSubjectType"
+            }
+          },
+          {
+            "in": "path",
+            "name": "subjectId",
             "required": true,
             "schema": {
               "type": "string"
@@ -15005,7 +15026,10 @@
                     "data": {
                       "type": "object",
                       "properties": {
-                        "userId": {
+                        "subjectType": {
+                          "$ref": "#/components/schemas/MultitableSheetPermissionSubjectType"
+                        },
+                        "subjectId": {
                           "type": "string"
                         },
                         "accessLevel": {
@@ -15027,7 +15051,8 @@
                         }
                       },
                       "required": [
-                        "userId",
+                        "subjectType",
+                        "subjectId",
                         "accessLevel",
                         "entry"
                       ]

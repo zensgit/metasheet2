@@ -1180,19 +1180,22 @@ type SheetPermissionScope = {
   canWriteOwn: boolean
 }
 
+type MultitableSheetPermissionSubjectType = 'user' | 'role'
 type MultitableSheetAccessLevel = 'read' | 'write' | 'write-own'
 
 type MultitableSheetPermissionEntry = {
-  userId: string
+  subjectType: MultitableSheetPermissionSubjectType
+  subjectId: string
   accessLevel: MultitableSheetAccessLevel
   permissions: string[]
-  name: string | null
-  email: string | null
+  label: string
+  subtitle: string | null
   isActive: boolean
 }
 
 type MultitableSheetPermissionCandidate = {
-  id: string
+  subjectType: MultitableSheetPermissionSubjectType
+  subjectId: string
   label: string
   subtitle: string | null
   isActive: boolean
@@ -1239,6 +1242,10 @@ const CANONICAL_SHEET_PERMISSION_CODE_BY_ACCESS_LEVEL: Record<MultitableSheetAcc
   read: 'spreadsheet:read',
   write: 'spreadsheet:write',
   'write-own': 'spreadsheet:write-own',
+}
+
+function isSheetPermissionSubjectType(value: unknown): value is MultitableSheetPermissionSubjectType {
+  return value === 'user' || value === 'role'
 }
 
 async function resolveRequestAccess(req: Request): Promise<ResolvedRequestAccess> {
@@ -1320,37 +1327,59 @@ async function listSheetPermissionEntries(
 ): Promise<MultitableSheetPermissionEntry[]> {
   const result = await query(
     `SELECT
-        sp.user_id,
+        sp.subject_type,
+        sp.subject_id,
         ARRAY_AGG(sp.perm_code ORDER BY sp.perm_code) AS permission_codes,
-        u.name,
-        u.email,
-        u.is_active
+        u.name AS user_name,
+        u.email AS user_email,
+        u.is_active AS user_is_active,
+        r.name AS role_name
      FROM spreadsheet_permissions sp
-     LEFT JOIN users u ON u.id = sp.user_id
+     LEFT JOIN users u
+       ON sp.subject_type = 'user'
+      AND u.id = sp.subject_id
+     LEFT JOIN roles r
+       ON sp.subject_type = 'role'
+      AND r.id = sp.subject_id
      WHERE sp.sheet_id = $1
-     GROUP BY sp.user_id, u.name, u.email, u.is_active
-     ORDER BY COALESCE(NULLIF(u.name, ''), NULLIF(u.email, ''), sp.user_id) ASC`,
+     GROUP BY sp.subject_type, sp.subject_id, u.name, u.email, u.is_active, r.name
+     ORDER BY
+       CASE WHEN sp.subject_type = 'user' THEN 0 ELSE 1 END,
+       CASE WHEN sp.subject_type = 'user' AND COALESCE(u.is_active, true) THEN 0 WHEN sp.subject_type = 'user' THEN 1 ELSE 0 END,
+       COALESCE(NULLIF(u.name, ''), NULLIF(u.email, ''), NULLIF(r.name, ''), sp.subject_id) ASC`,
     [sheetId],
   )
 
   return (result.rows as Array<{
-    user_id: string
+    subject_type: string
+    subject_id: string
     permission_codes?: string[]
-    name?: string | null
-    email?: string | null
-    is_active?: boolean | null
+    user_name?: string | null
+    user_email?: string | null
+    user_is_active?: boolean | null
+    role_name?: string | null
   }>)
     .map((row) => {
+      const subjectType = isSheetPermissionSubjectType(row.subject_type) ? row.subject_type : 'user'
+      const subjectId = String(row.subject_id)
       const permissions = normalizePermissionCodes(row.permission_codes)
       const accessLevel = deriveSheetAccessLevel(permissions)
       if (!accessLevel) return null
+      const userName = typeof row.user_name === 'string' ? row.user_name.trim() : ''
+      const userEmail = typeof row.user_email === 'string' ? row.user_email.trim() : ''
+      const roleName = typeof row.role_name === 'string' ? row.role_name.trim() : ''
       return {
-        userId: String(row.user_id),
+        subjectType,
+        subjectId,
         accessLevel,
         permissions,
-        name: typeof row.name === 'string' ? row.name : null,
-        email: typeof row.email === 'string' ? row.email : null,
-        isActive: row.is_active !== false,
+        label: subjectType === 'user'
+          ? userName || userEmail || subjectId
+          : roleName || subjectId,
+        subtitle: subjectType === 'user'
+          ? (userEmail || (userName && userName !== subjectId ? subjectId : null))
+          : (roleName && roleName !== subjectId ? subjectId : 'Role'),
+        isActive: subjectType === 'user' ? row.user_is_active !== false : true,
       } satisfies MultitableSheetPermissionEntry
     })
     .filter((entry): entry is MultitableSheetPermissionEntry => !!entry)
@@ -1364,43 +1393,85 @@ async function listSheetPermissionCandidates(
   const q = params.q?.trim() ?? ''
   const term = q ? `%${q}%` : '%'
   const result = await query(
-    `SELECT
-        u.id,
-        u.name,
-        u.email,
-        u.is_active,
-        COALESCE(
-          ARRAY_AGG(sp.perm_code ORDER BY sp.perm_code) FILTER (WHERE sp.perm_code IS NOT NULL),
-          ARRAY[]::text[]
-        ) AS permission_codes
-     FROM users u
-     LEFT JOIN spreadsheet_permissions sp
-       ON sp.sheet_id = $1
-      AND sp.user_id = u.id
-     WHERE ($2 = '' OR u.id ILIKE $3 OR u.email ILIKE $3 OR COALESCE(u.name, '') ILIKE $3)
-     GROUP BY u.id, u.name, u.email, u.is_active
-     ORDER BY
-       CASE WHEN u.is_active THEN 0 ELSE 1 END,
-       COALESCE(NULLIF(u.name, ''), NULLIF(u.email, ''), u.id) ASC
-     LIMIT $4`,
+    `WITH user_candidates AS (
+        SELECT
+          'user'::text AS subject_type,
+          u.id AS subject_id,
+          u.name AS user_name,
+          u.email AS user_email,
+          u.is_active AS user_is_active,
+          NULL::text AS role_name,
+          COALESCE(
+            ARRAY_AGG(sp.perm_code ORDER BY sp.perm_code) FILTER (WHERE sp.perm_code IS NOT NULL),
+            ARRAY[]::text[]
+          ) AS permission_codes
+        FROM users u
+        LEFT JOIN spreadsheet_permissions sp
+          ON sp.sheet_id = $1
+         AND sp.subject_type = 'user'
+         AND sp.subject_id = u.id
+        WHERE ($2 = '' OR u.id ILIKE $3 OR u.email ILIKE $3 OR COALESCE(u.name, '') ILIKE $3)
+        GROUP BY u.id, u.name, u.email, u.is_active
+      ),
+      role_candidates AS (
+        SELECT
+          'role'::text AS subject_type,
+          r.id AS subject_id,
+          NULL::text AS user_name,
+          NULL::text AS user_email,
+          true AS user_is_active,
+          r.name AS role_name,
+          COALESCE(
+            ARRAY_AGG(sp.perm_code ORDER BY sp.perm_code) FILTER (WHERE sp.perm_code IS NOT NULL),
+            ARRAY[]::text[]
+          ) AS permission_codes
+        FROM roles r
+        LEFT JOIN spreadsheet_permissions sp
+          ON sp.sheet_id = $1
+         AND sp.subject_type = 'role'
+         AND sp.subject_id = r.id
+        WHERE ($2 = '' OR r.id ILIKE $3 OR COALESCE(r.name, '') ILIKE $3)
+        GROUP BY r.id, r.name
+      )
+      SELECT *
+      FROM (
+        SELECT * FROM user_candidates
+        UNION ALL
+        SELECT * FROM role_candidates
+      ) candidates
+      ORDER BY
+        CASE WHEN subject_type = 'user' THEN 0 ELSE 1 END,
+        CASE WHEN user_is_active THEN 0 ELSE 1 END,
+        COALESCE(NULLIF(user_name, ''), NULLIF(user_email, ''), NULLIF(role_name, ''), subject_id) ASC
+      LIMIT $4`,
     [sheetId, q, term, params.limit],
   )
 
   return (result.rows as Array<{
-    id: string
-    name?: string | null
-    email?: string | null
-    is_active?: boolean | null
+    subject_type: string
+    subject_id: string
+    user_name?: string | null
+    user_email?: string | null
+    user_is_active?: boolean | null
+    role_name?: string | null
     permission_codes?: string[]
   }>)
     .map((row) => {
-      const name = typeof row.name === 'string' ? row.name.trim() : ''
-      const email = typeof row.email === 'string' ? row.email.trim() : ''
+      const subjectType = isSheetPermissionSubjectType(row.subject_type) ? row.subject_type : 'user'
+      const subjectId = String(row.subject_id)
+      const name = typeof row.user_name === 'string' ? row.user_name.trim() : ''
+      const email = typeof row.user_email === 'string' ? row.user_email.trim() : ''
+      const roleName = typeof row.role_name === 'string' ? row.role_name.trim() : ''
       return {
-        id: String(row.id),
-        label: name || email || String(row.id),
-        subtitle: email || (name && name !== String(row.id) ? String(row.id) : null),
-        isActive: row.is_active !== false,
+        subjectType,
+        subjectId,
+        label: subjectType === 'user'
+          ? (name || email || subjectId)
+          : (roleName || subjectId),
+        subtitle: subjectType === 'user'
+          ? (email || (name && name !== subjectId ? subjectId : null))
+          : (roleName && roleName !== subjectId ? subjectId : 'Role'),
+        isActive: subjectType === 'user' ? row.user_is_active !== false : true,
         accessLevel: deriveSheetAccessLevel(normalizePermissionCodes(row.permission_codes)),
       } satisfies MultitableSheetPermissionCandidate
     })
@@ -1414,26 +1485,41 @@ async function loadSheetPermissionScopeMap(
   if (!userId || sheetIds.length === 0) return new Map()
   try {
     const result = await query(
-      `SELECT sheet_id, perm_code
-       FROM spreadsheet_permissions
-       WHERE user_id = $1
-         AND sheet_id = ANY($2::text[])`,
+      `SELECT sp.sheet_id, sp.perm_code, sp.subject_type
+       FROM spreadsheet_permissions sp
+       WHERE sp.sheet_id = ANY($2::text[])
+         AND (
+           (sp.subject_type = 'user' AND sp.subject_id = $1)
+           OR (
+             sp.subject_type = 'role'
+             AND EXISTS (
+               SELECT 1
+               FROM user_roles ur
+               WHERE ur.user_id = $1
+                 AND ur.role_id = sp.subject_id
+             )
+           )
+         )`,
       [userId, sheetIds],
     )
-    const grouped = new Map<string, string[]>()
-    for (const row of result.rows as Array<{ sheet_id: string; perm_code: string }>) {
+    const grouped = new Map<string, { direct: string[]; role: string[] }>()
+    for (const row of result.rows as Array<{ sheet_id: string; perm_code: string; subject_type?: string }>) {
       const sheetId = typeof row.sheet_id === 'string' ? row.sheet_id : ''
       const code = typeof row.perm_code === 'string' ? row.perm_code.trim() : ''
       if (!sheetId || !code) continue
-      const current = grouped.get(sheetId) ?? []
-      current.push(code)
+      const current = grouped.get(sheetId) ?? { direct: [], role: [] }
+      if (row.subject_type === 'user') current.direct.push(code)
+      else current.role.push(code)
       grouped.set(sheetId, current)
     }
     return new Map(
-      Array.from(grouped.entries()).map(([sheetId, codes]) => [sheetId, summarizeSheetPermissionCodes(codes)]),
+      Array.from(grouped.entries()).map(([sheetId, codes]) => [
+        sheetId,
+        summarizeSheetPermissionCodes(codes.direct.length > 0 ? codes.direct : codes.role),
+      ]),
     )
   } catch (err) {
-    if (isUndefinedTableError(err, 'spreadsheet_permissions')) return new Map()
+    if (isUndefinedTableError(err, 'spreadsheet_permissions') || isUndefinedTableError(err, 'user_roles')) return new Map()
     throw err
   }
 }
@@ -2718,11 +2804,12 @@ export function univerMetaRouter(): Router {
     }
   })
 
-  router.put('/sheets/:sheetId/permissions/:userId', rbacGuard('multitable', 'write'), async (req: Request, res: Response) => {
+  router.put('/sheets/:sheetId/permissions/:subjectType/:subjectId', rbacGuard('multitable', 'write'), async (req: Request, res: Response) => {
     const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
-    const userId = typeof req.params.userId === 'string' ? req.params.userId.trim() : ''
-    if (!sheetId || !userId) {
-      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId and userId are required' } })
+    const subjectType = typeof req.params.subjectType === 'string' ? req.params.subjectType.trim() : ''
+    const subjectId = typeof req.params.subjectId === 'string' ? req.params.subjectId.trim() : ''
+    if (!sheetId || !subjectId || !isSheetPermissionSubjectType(subjectType)) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId, subjectType, and subjectId are required' } })
     }
 
     const schema = z.object({
@@ -2739,36 +2826,62 @@ export function univerMetaRouter(): Router {
       if (!sheet) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
       }
-      const { access, capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canManageFields) return sendForbidden(res)
 
-      const userResult = await pool.query(
-        'SELECT id, name, email, is_active FROM users WHERE id = $1',
-        [userId],
-      )
-      if (userResult.rows.length === 0) {
-        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `User not found: ${userId}` } })
+      if (subjectType === 'role' && parsed.data.accessLevel === 'write-own') {
+        return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'write-own is only supported for direct user grants' } })
+      }
+
+      if (subjectType === 'user') {
+        const userResult = await pool.query(
+          'SELECT id FROM users WHERE id = $1',
+          [subjectId],
+        )
+        if (userResult.rows.length === 0) {
+          return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `User not found: ${subjectId}` } })
+        }
+      } else {
+        const roleResult = await pool.query(
+          'SELECT id FROM roles WHERE id = $1',
+          [subjectId],
+        )
+        if (roleResult.rows.length === 0) {
+          return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Role not found: ${subjectId}` } })
+        }
       }
 
       await pool.transaction(async ({ query }) => {
         await query(
-          'DELETE FROM spreadsheet_permissions WHERE sheet_id = $1 AND user_id = $2 AND perm_code = ANY($3::text[])',
-          [sheetId, userId, MANAGED_SHEET_PERMISSION_CODES],
+          `DELETE FROM spreadsheet_permissions
+           WHERE sheet_id = $1
+             AND subject_type = $2
+             AND subject_id = $3
+             AND perm_code = ANY($4::text[])`,
+          [sheetId, subjectType, subjectId, MANAGED_SHEET_PERMISSION_CODES],
         )
         if (parsed.data.accessLevel !== 'none') {
           await query(
-            'INSERT INTO spreadsheet_permissions(sheet_id, user_id, perm_code) VALUES ($1, $2, $3)',
-            [sheetId, userId, CANONICAL_SHEET_PERMISSION_CODE_BY_ACCESS_LEVEL[parsed.data.accessLevel]],
+            `INSERT INTO spreadsheet_permissions(sheet_id, user_id, subject_type, subject_id, perm_code)
+             VALUES ($1, $2, $3, $4, $5)`,
+            [
+              sheetId,
+              subjectType === 'user' ? subjectId : null,
+              subjectType,
+              subjectId,
+              CANONICAL_SHEET_PERMISSION_CODE_BY_ACCESS_LEVEL[parsed.data.accessLevel],
+            ],
           )
         }
       })
 
       const items = await listSheetPermissionEntries(pool.query.bind(pool), sheetId)
-      const entry = items.find((item) => item.userId === userId) ?? null
+      const entry = items.find((item) => item.subjectType === subjectType && item.subjectId === subjectId) ?? null
       return res.json({
         ok: true,
         data: {
-          userId,
+          subjectType,
+          subjectId,
           accessLevel: parsed.data.accessLevel,
           entry,
         },
