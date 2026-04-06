@@ -305,6 +305,7 @@ function parseRollupFieldConfig(property: unknown): RollupFieldConfig | null {
 }
 
 async function validateLookupRollupConfig(
+  req: Request,
   query: QueryFn,
   sheetId: string,
   type: UniverMetaField['type'],
@@ -347,6 +348,11 @@ async function validateLookupRollupConfig(
   )
   if ((targetRes as any).rows.length === 0) {
     return `外表字段不存在：${config.targetFieldId}（sheetId=${linkCfg.foreignSheetId}）`
+  }
+
+  const { capabilities } = await resolveSheetCapabilities(req, query, linkCfg.foreignSheetId)
+  if (!capabilities.canRead) {
+    throw new PermissionError(`Insufficient permissions to read linked sheet: ${linkCfg.foreignSheetId}`)
   }
 
   return null
@@ -736,6 +742,7 @@ async function loadLinkValuesByRecord(
 }
 
 async function applyLookupRollup(
+  req: Request,
   query: QueryFn,
   fields: UniverMetaField[],
   rows: UniverMetaRecord[],
@@ -798,8 +805,11 @@ async function applyLookupRollup(
     }
   }
 
+  const readableForeignSheetIds = await resolveReadableSheetIds(req, query, foreignIdsBySheet.keys())
+
   const foreignRecordsBySheet = new Map<string, Map<string, Record<string, unknown>>>()
   for (const [foreignSheetId, ids] of foreignIdsBySheet.entries()) {
+    if (!readableForeignSheetIds.has(foreignSheetId)) continue
     if (ids.size === 0) continue
     const idList = Array.from(ids)
     const foreignRes = await query(
@@ -816,6 +826,7 @@ async function applyLookupRollup(
   const resolveLookupValues = (record: UniverMetaRecord, cfg: LookupFieldConfig): unknown[] => {
     const foreignSheetId = cfg.foreignSheetId ?? linkConfigById.get(cfg.linkFieldId)?.foreignSheetId
     if (!foreignSheetId) return []
+    if (!readableForeignSheetIds.has(foreignSheetId)) return []
     const linkIds = getLinkIds(record, cfg.linkFieldId)
     if (linkIds.length === 0) return []
     const foreignMap = foreignRecordsBySheet.get(foreignSheetId)
@@ -905,6 +916,7 @@ function mergeComputedRecords(
 }
 
 async function computeDependentLookupRollupRecords(
+  req: Request,
   query: QueryFn,
   updatedRecordIds: string[],
 ): Promise<RelatedComputedRecord[]> {
@@ -958,7 +970,9 @@ async function computeDependentLookupRollupRecords(
   }
 
   const results: RelatedComputedRecord[] = []
+  const readableSheetIds = await resolveReadableSheetIds(req, query, rowsBySheet.keys())
   for (const [sheetId, rows] of rowsBySheet.entries()) {
+    if (!readableSheetIds.has(sheetId)) continue
     const fields = fieldsBySheet.get(sheetId) ?? []
     if (fields.length === 0) continue
     const hasComputed = fields.some((f) => f.type === 'lookup' || f.type === 'rollup')
@@ -974,7 +988,7 @@ async function computeDependentLookupRollupRecords(
       relationalLinkFields,
     )
 
-    await applyLookupRollup(query, fields, rows, relationalLinkFields, linkValuesByRecord)
+    await applyLookupRollup(req, query, fields, rows, relationalLinkFields, linkValuesByRecord)
 
     for (const row of rows) {
       results.push({
@@ -1457,6 +1471,30 @@ async function resolveSheetCapabilities(
     capabilities: applySheetPermissionScope(baseCapabilities, sheetScope, access.isAdminRole),
     ...(sheetScope ? { sheetScope } : {}),
   }
+}
+
+async function resolveReadableSheetIds(
+  req: Request,
+  query: QueryFn,
+  sheetIds: Iterable<string>,
+): Promise<Set<string>> {
+  const uniqueSheetIds = Array.from(new Set(Array.from(sheetIds).filter((sheetId) => sheetId.trim().length > 0)))
+  if (uniqueSheetIds.length === 0) return new Set()
+
+  const access = await resolveRequestAccess(req)
+  if (access.isAdminRole) {
+    return new Set(uniqueSheetIds)
+  }
+
+  const baseCapabilities = deriveCapabilities(access.permissions, access.isAdminRole)
+  const scopeMap = await loadSheetPermissionScopeMap(query, uniqueSheetIds, access.userId)
+  const readableSheetIds = new Set<string>()
+  for (const sheetId of uniqueSheetIds) {
+    if (applySheetPermissionScope(baseCapabilities, scopeMap.get(sheetId), access.isAdminRole).canRead) {
+      readableSheetIds.add(sheetId)
+    }
+  }
+  return readableSheetIds
 }
 
 function sendForbidden(res: Response, message = 'Insufficient permissions') {
@@ -1947,6 +1985,7 @@ async function ensureAttachmentIdsExist(
 }
 
 async function buildLinkSummaries(
+  req: Request,
   query: QueryFn,
   rows: UniverMetaRecord[],
   relationalLinkFields: RelationalLinkField[],
@@ -1971,8 +2010,11 @@ async function buildLinkSummaries(
     }
   }
 
+  const readableSheetIds = await resolveReadableSheetIds(req, query, idsBySheet.keys())
+
   const displayFieldBySheet = new Map<string, string | null>()
   for (const [sheetId] of idsBySheet.entries()) {
+    if (!readableSheetIds.has(sheetId)) continue
     const fields = await loadFieldsForSheet(query, sheetId)
     const stringField = fields.find((field) => field.type === 'string')
     displayFieldBySheet.set(sheetId, stringField?.id ?? fields[0]?.id ?? null)
@@ -1980,6 +2022,7 @@ async function buildLinkSummaries(
 
   const foreignRecordsBySheet = new Map<string, Map<string, Record<string, unknown>>>()
   for (const [sheetId, ids] of idsBySheet.entries()) {
+    if (!readableSheetIds.has(sheetId)) continue
     const idList = Array.from(ids)
     if (idList.length === 0) continue
     const recordRes = await query(
@@ -1998,6 +2041,10 @@ async function buildLinkSummaries(
     const recordLinks = linkValuesByRecord.get(row.id) ?? new Map<string, string[]>()
     for (const { fieldId, cfg } of relationalLinkFields) {
       const ids = recordLinks.get(fieldId) ?? []
+      if (!readableSheetIds.has(cfg.foreignSheetId)) {
+        byField.set(fieldId, [])
+        continue
+      }
       const foreignMap = foreignRecordsBySheet.get(cfg.foreignSheetId)
       const displayFieldId = displayFieldBySheet.get(cfg.foreignSheetId) ?? null
       const summaries: LinkedRecordSummary[] = ids.map((id) => {
@@ -2351,6 +2398,13 @@ class ValidationError extends Error {
   constructor(public message: string) {
     super(message)
     this.name = 'ValidationError'
+  }
+}
+
+class PermissionError extends Error {
+  constructor(public message: string) {
+    super(message)
+    this.name = 'PermissionError'
   }
 }
 
@@ -2787,7 +2841,7 @@ export function univerMetaRouter(): Router {
       const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canManageFields) return sendForbidden(res)
       await pool.transaction(async ({ query }) => {
-        const configError = await validateLookupRollupConfig(query, sheetId, type, property)
+        const configError = await validateLookupRollupConfig(req, query, sheetId, type, property)
         if (configError) {
           throw new ValidationError(configError)
         }
@@ -2820,6 +2874,9 @@ export function univerMetaRouter(): Router {
     } catch (err: any) {
       if (err instanceof NotFoundError) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: err.message } })
+      }
+      if (err instanceof PermissionError) {
+        return sendForbidden(res, err.message)
       }
       if (err instanceof ValidationError) {
         return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: err.message } })
@@ -2915,7 +2972,7 @@ export function univerMetaRouter(): Router {
         )
         const desiredOrder = parsed.data.order
 
-        const configError = await validateLookupRollupConfig(query, sheetId, nextType, nextProperty)
+        const configError = await validateLookupRollupConfig(req, query, sheetId, nextType, nextProperty)
         if (configError) {
           throw new ValidationError(configError)
         }
@@ -2953,6 +3010,9 @@ export function univerMetaRouter(): Router {
     } catch (err: any) {
       if (err instanceof NotFoundError) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: err.message } })
+      }
+      if (err instanceof PermissionError) {
+        return sendForbidden(res, err.message)
       }
       if (err instanceof ValidationError) {
         return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: err.message } })
@@ -3552,6 +3612,7 @@ export function univerMetaRouter(): Router {
             relationalLinkFields,
           )
           await applyLookupRollup(
+            req,
             pool.query.bind(pool),
             fields,
             all,
@@ -3660,6 +3721,7 @@ export function univerMetaRouter(): Router {
       }
 
       await applyLookupRollup(
+        req,
         pool.query.bind(pool),
         fields,
         rows,
@@ -3673,6 +3735,7 @@ export function univerMetaRouter(): Router {
         ? filterRecordFieldSummaryMap(
             serializeLinkSummaryMap(
               await buildLinkSummaries(
+                req,
                 pool.query.bind(pool),
                 rows,
                 relationalLinkFields,
@@ -4547,13 +4610,13 @@ export function univerMetaRouter(): Router {
       for (const { fieldId } of relationalLinkFields) {
         record.data[fieldId] = linkValuesByRecord.get(record.id)?.get(fieldId) ?? []
       }
-      await applyLookupRollup(pool.query.bind(pool), fields, [record], relationalLinkFields, linkValuesByRecord)
+      await applyLookupRollup(req, pool.query.bind(pool), fields, [record], relationalLinkFields, linkValuesByRecord)
       const visiblePropertyFields = filterVisiblePropertyFields(fields)
       const visiblePropertyFieldIds = new Set(visiblePropertyFields.map((field) => field.id))
       record.data = filterRecordDataByFieldIds(record.data, visiblePropertyFieldIds)
       const linkSummaries = filterSingleRecordFieldSummaryMap(
         Object.fromEntries(
-          Array.from((await buildLinkSummaries(pool.query.bind(pool), [record], relationalLinkFields, linkValuesByRecord)).get(record.id)?.entries() ?? []),
+          Array.from((await buildLinkSummaries(req, pool.query.bind(pool), [record], relationalLinkFields, linkValuesByRecord)).get(record.id)?.entries() ?? []),
         ),
         visiblePropertyFieldIds,
       )
@@ -4736,6 +4799,7 @@ export function univerMetaRouter(): Router {
           [{ fieldId, cfg: linkConfig }],
         )
         const linkSummaries = await buildLinkSummaries(
+          req,
           pool.query.bind(pool),
           [{ id: recordId, version: 0, data: {} }],
           [{ fieldId, cfg: linkConfig }],
@@ -5694,6 +5758,7 @@ export function univerMetaRouter(): Router {
         )
 
         await applyLookupRollup(
+          req,
           pool.query.bind(pool),
           fields,
           rows,
@@ -5714,6 +5779,7 @@ export function univerMetaRouter(): Router {
 
       const relatedRecords = updates.length > 0
         ? await computeDependentLookupRollupRecords(
+            req,
             pool.query.bind(pool),
             updates.map((u) => u.recordId),
           )
@@ -5730,6 +5796,7 @@ export function univerMetaRouter(): Router {
         ? filterRecordFieldSummaryMap(
             serializeLinkSummaryMap(
               await buildLinkSummaries(
+                req,
                 pool.query.bind(pool),
                 updates.map((update) => ({ id: update.recordId, version: 0, data: {} })),
                 relationalLinkFields,
