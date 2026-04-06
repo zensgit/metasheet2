@@ -36,6 +36,7 @@
         <span class="mt-workbench__mention-chip-records">{{ mentionInboxState.summary.value.mentionedRecordCount }} records</span>
       </button>
       <button v-if="caps.canManageFields.value" class="mt-workbench__mgr-btn" @click="showFieldManager = true">&#x2699; Fields</button>
+      <button v-if="caps.canManageFields.value" class="mt-workbench__mgr-btn" @click="showPermissionManager = true">&#x1F512; Access</button>
       <button v-if="caps.canManageViews.value && canConfigureCurrentView" class="mt-workbench__mgr-btn" @click="showViewManager = true">&#x2630; Views</button>
       <button v-if="caps.canManageAutomation.value" class="mt-workbench__mgr-btn" @click="openWorkflowDesigner()">&#x2699; Workflow</button>
     </div>
@@ -241,6 +242,13 @@
       @update:dirty="viewManagerDirty = $event"
       @close="showViewManager = false" @create-view="onCreateView" @update-view="onUpdateView" @delete-view="onDeleteView"
     />
+    <MetaSheetPermissionManager
+      :visible="showPermissionManager"
+      :sheet-id="workbench.activeSheetId.value"
+      :client="workbench.client"
+      @close="showPermissionManager = false"
+      @updated="onSheetPermissionsUpdated"
+    />
   </div>
 </template>
 
@@ -287,6 +295,7 @@ import MetaCommentsDrawer from '../components/MetaCommentsDrawer.vue'
 import MetaLinkPicker from '../components/MetaLinkPicker.vue'
 import MetaFieldManager from '../components/MetaFieldManager.vue'
 import MetaViewManager from '../components/MetaViewManager.vue'
+import MetaSheetPermissionManager from '../components/MetaSheetPermissionManager.vue'
 import MetaBasePicker from '../components/MetaBasePicker.vue'
 import MetaKanbanView from '../components/MetaKanbanView.vue'
 import MetaGalleryView from '../components/MetaGalleryView.vue'
@@ -339,6 +348,7 @@ const linkPickerField = ref<MetaField | null>(null)
 const linkPickerRecordId = ref<string | null>(null)
 const linkPickerCurrentValue = ref<unknown>(null)
 const showFieldManager = ref(false)
+const showPermissionManager = ref(false)
 const showViewManager = ref(false)
 const bases = ref<MetaBase[]>([])
 const activeBaseId = computed(() => workbench.activeBaseId.value)
@@ -1355,6 +1365,18 @@ async function onDeleteView(viewId: string) {
   } catch (e: any) { showError(e.message ?? 'Failed to delete view') }
 }
 
+async function onSheetPermissionsUpdated() {
+  try {
+    await workbench.loadSheetMeta(workbench.activeSheetId.value)
+    await grid.loadViewData(grid.page.value.offset)
+    if (selectedRecordId.value) {
+      await refreshSelectedRecordContext(selectedRecordId.value)
+    }
+  } catch (e: any) {
+    showError(e.message ?? 'Failed to refresh sheet access')
+  }
+}
+
 // --- Sheet management ---
 async function onCreateSheet(name: string) {
   if (!canCreateBasesAndSheets.value) {
@@ -1918,7 +1940,7 @@ async function refreshDialogMeta() {
     // Keep dialog refresh silent; explicit save paths still surface errors.
   } finally {
     dialogMetaRefreshInFlight = false
-    const shouldRefresh = Boolean((showFieldManager.value || showViewManager.value || showImportModal.value) && workbench.activeSheetId.value)
+    const shouldRefresh = Boolean((showFieldManager.value || showPermissionManager.value || showViewManager.value || showImportModal.value) && workbench.activeSheetId.value)
     if (shouldRefresh && (dialogMetaRefreshQueued || workbench.activeSheetId.value !== activeSheetId)) {
       dialogMetaRefreshQueued = false
       void refreshDialogMeta()
@@ -2201,9 +2223,9 @@ watch(
 )
 
 watch(
-  [showFieldManager, showViewManager, showImportModal, () => workbench.activeSheetId.value],
-  ([fieldManagerVisible, viewManagerVisible, importVisible, activeSheetId], [_prevFieldVisible, _prevViewVisible, _prevImportVisible, prevSheetId]) => {
-    const shouldRefresh = Boolean((fieldManagerVisible || viewManagerVisible || importVisible) && activeSheetId)
+  [showFieldManager, showPermissionManager, showViewManager, showImportModal, () => workbench.activeSheetId.value],
+  ([fieldManagerVisible, permissionManagerVisible, viewManagerVisible, importVisible, activeSheetId], [_prevFieldVisible, _prevPermissionVisible, _prevViewVisible, _prevImportVisible, prevSheetId]) => {
+    const shouldRefresh = Boolean((fieldManagerVisible || permissionManagerVisible || viewManagerVisible || importVisible) && activeSheetId)
     if (!shouldRefresh) {
       stopDialogMetaRefresh()
       return

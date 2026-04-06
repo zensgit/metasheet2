@@ -1754,6 +1754,55 @@ components:
         - canManageViews
         - canComment
         - canManageAutomation
+    MultitableSheetPermissionAccessLevel:
+      type: string
+      enum: [read, write, write-own]
+    MultitableSheetPermissionEntry:
+      type: object
+      properties:
+        userId:
+          type: string
+        accessLevel:
+          $ref: '#/components/schemas/MultitableSheetPermissionAccessLevel'
+        permissions:
+          type: array
+          items:
+            type: string
+        name:
+          type: string
+          nullable: true
+        email:
+          type: string
+          nullable: true
+        isActive:
+          type: boolean
+      required:
+        - userId
+        - accessLevel
+        - permissions
+        - name
+        - email
+        - isActive
+    MultitableSheetPermissionCandidate:
+      type: object
+      properties:
+        id:
+          type: string
+        label:
+          type: string
+        subtitle:
+          type: string
+          nullable: true
+        isActive:
+          type: boolean
+        accessLevel:
+          allOf:
+            - $ref: '#/components/schemas/MultitableSheetPermissionAccessLevel'
+          nullable: true
+      required:
+        - id
+        - label
+        - isActive
     MultitableFieldCapability:
       type: object
       properties:

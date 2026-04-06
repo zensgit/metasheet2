@@ -448,6 +448,210 @@ describe('Multitable sheet-scoped permissions API', () => {
     }
   })
 
+  test('lists sheet permission entries and permission candidates for full sheet writers', async () => {
+    const { app } = await createApp({
+      tokenPerms: ['multitable:read', 'multitable:write'],
+      queryHandler: async (sql, params) => {
+        if (sql.includes('SELECT id, base_id, name, description FROM meta_sheets WHERE id = $1')) {
+          expect(params).toEqual(['sheet_ops'])
+          return { rows: [{ id: 'sheet_ops', base_id: 'base_ops', name: 'Ops', description: null }] }
+        }
+        if (sql.includes('FROM spreadsheet_permissions') && sql.includes('sheet_id = ANY')) {
+          expect(params).toEqual(['user_sheet_acl_1', ['sheet_ops']])
+          return { rows: [{ sheet_id: 'sheet_ops', perm_code: 'spreadsheet:write' }] }
+        }
+        if (sql.includes('FROM spreadsheet_permissions sp') && sql.includes('GROUP BY sp.user_id')) {
+          expect(params).toEqual(['sheet_ops'])
+          return {
+            rows: [
+              {
+                user_id: 'user_alpha',
+                permission_codes: ['spreadsheet:read'],
+                name: 'Alpha User',
+                email: 'alpha@example.com',
+                is_active: true,
+              },
+              {
+                user_id: 'user_beta',
+                permission_codes: ['spreadsheet:write-own'],
+                name: 'Beta User',
+                email: 'beta@example.com',
+                is_active: true,
+              },
+            ],
+          }
+        }
+        if (sql.includes('FROM users u') && sql.includes('LEFT JOIN spreadsheet_permissions sp')) {
+          expect(params).toEqual(['sheet_ops', 'alpha', '%alpha%', 20])
+          return {
+            rows: [
+              {
+                id: 'user_alpha',
+                name: 'Alpha User',
+                email: 'alpha@example.com',
+                is_active: true,
+                permission_codes: ['spreadsheet:read'],
+              },
+            ],
+          }
+        }
+        throw new Error(`Unhandled SQL in test: ${sql}`)
+      },
+    })
+
+    const listResponse = await request(app)
+      .get('/api/multitable/sheets/sheet_ops/permissions')
+      .expect(200)
+
+    expect(listResponse.body.data.items).toEqual([
+      {
+        userId: 'user_alpha',
+        accessLevel: 'read',
+        permissions: ['spreadsheet:read'],
+        name: 'Alpha User',
+        email: 'alpha@example.com',
+        isActive: true,
+      },
+      {
+        userId: 'user_beta',
+        accessLevel: 'write-own',
+        permissions: ['spreadsheet:write-own'],
+        name: 'Beta User',
+        email: 'beta@example.com',
+        isActive: true,
+      },
+    ])
+
+    const candidatesResponse = await request(app)
+      .get('/api/multitable/sheets/sheet_ops/permission-candidates')
+      .query({ q: 'alpha' })
+      .expect(200)
+
+    expect(candidatesResponse.body.data).toEqual({
+      items: [
+        {
+          id: 'user_alpha',
+          label: 'Alpha User',
+          subtitle: 'alpha@example.com',
+          isActive: true,
+          accessLevel: 'read',
+        },
+      ],
+      total: 1,
+      limit: 20,
+      query: 'alpha',
+    })
+  })
+
+  test('sets sheet permission access levels through the authoring endpoint', async () => {
+    const deleteCalls: Array<unknown[] | undefined> = []
+    const insertCalls: Array<unknown[] | undefined> = []
+
+    const { app } = await createApp({
+      tokenPerms: ['multitable:read', 'multitable:write'],
+      queryHandler: async (sql, params) => {
+        if (sql.includes('SELECT id, base_id, name, description FROM meta_sheets WHERE id = $1')) {
+          expect(params).toEqual(['sheet_ops'])
+          return { rows: [{ id: 'sheet_ops', base_id: 'base_ops', name: 'Ops', description: null }] }
+        }
+        if (sql.includes('FROM spreadsheet_permissions') && sql.includes('sheet_id = ANY')) {
+          expect(params).toEqual(['user_sheet_acl_1', ['sheet_ops']])
+          return { rows: [{ sheet_id: 'sheet_ops', perm_code: 'spreadsheet:write' }] }
+        }
+        if (sql.includes('SELECT id, name, email, is_active FROM users WHERE id = $1')) {
+          expect(params).toEqual(['user_target'])
+          return { rows: [{ id: 'user_target', name: 'Target User', email: 'target@example.com', is_active: true }] }
+        }
+        if (sql.includes('DELETE FROM spreadsheet_permissions WHERE sheet_id = $1 AND user_id = $2')) {
+          deleteCalls.push(params)
+          return { rows: [], rowCount: 2 }
+        }
+        if (sql.includes('INSERT INTO spreadsheet_permissions(sheet_id, user_id, perm_code) VALUES ($1, $2, $3)')) {
+          insertCalls.push(params)
+          return { rows: [], rowCount: 1 }
+        }
+        if (sql.includes('FROM spreadsheet_permissions sp') && sql.includes('GROUP BY sp.user_id')) {
+          expect(params).toEqual(['sheet_ops'])
+          return {
+            rows: [{
+              user_id: 'user_target',
+              permission_codes: ['spreadsheet:write-own'],
+              name: 'Target User',
+              email: 'target@example.com',
+              is_active: true,
+            }],
+          }
+        }
+        throw new Error(`Unhandled SQL in test: ${sql}`)
+      },
+    })
+
+    const response = await request(app)
+      .put('/api/multitable/sheets/sheet_ops/permissions/user_target')
+      .send({ accessLevel: 'write-own' })
+      .expect(200)
+
+    expect(deleteCalls).toEqual([[
+      'sheet_ops',
+      'user_target',
+      [
+        'spreadsheet:read',
+        'spreadsheet:write',
+        'spreadsheet:write-own',
+        'spreadsheets:read',
+        'spreadsheets:write',
+        'spreadsheets:write-own',
+        'multitable:read',
+        'multitable:write',
+        'multitable:write-own',
+      ],
+    ]])
+    expect(insertCalls).toEqual([['sheet_ops', 'user_target', 'spreadsheet:write-own']])
+    expect(response.body.data).toEqual({
+      userId: 'user_target',
+      accessLevel: 'write-own',
+      entry: {
+        userId: 'user_target',
+        accessLevel: 'write-own',
+        permissions: ['spreadsheet:write-own'],
+        name: 'Target User',
+        email: 'target@example.com',
+        isActive: true,
+      },
+    })
+  })
+
+  test('rejects sheet permission authoring for write-own scoped users', async () => {
+    const { app } = await createApp({
+      tokenPerms: ['multitable:read', 'multitable:write'],
+      queryHandler: async (sql, params) => {
+        if (sql.includes('SELECT id, base_id, name, description FROM meta_sheets WHERE id = $1')) {
+          expect(params).toEqual(['sheet_ops'])
+          return { rows: [{ id: 'sheet_ops', base_id: 'base_ops', name: 'Ops', description: null }] }
+        }
+        if (sql.includes('FROM spreadsheet_permissions') && sql.includes('sheet_id = ANY')) {
+          expect(params).toEqual(['user_sheet_acl_1', ['sheet_ops']])
+          return { rows: [{ sheet_id: 'sheet_ops', perm_code: 'spreadsheet:write-own' }] }
+        }
+        throw new Error(`Unhandled SQL in test: ${sql}`)
+      },
+    })
+
+    const responses = [
+      await request(app).get('/api/multitable/sheets/sheet_ops/permissions'),
+      await request(app).get('/api/multitable/sheets/sheet_ops/permission-candidates'),
+      await request(app).put('/api/multitable/sheets/sheet_ops/permissions/user_target').send({ accessLevel: 'read' }),
+    ]
+
+    for (const response of responses) {
+      expect(response.status).toBe(403)
+      expect(response.body).toEqual({
+        ok: false,
+        error: { code: 'FORBIDDEN', message: 'Insufficient permissions' },
+      })
+    }
+  })
+
   test('rejects records summary when sheet permission has no read access', async () => {
     const { app } = await createApp({
       tokenPerms: ['multitable:read'],

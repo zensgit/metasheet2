@@ -35,6 +35,9 @@ import type {
   MetaCommentsScope,
   MetaAttachment,
   MetaCommentMentionSuggestion,
+  MetaSheetPermissionAccessLevel,
+  MetaSheetPermissionCandidate,
+  MetaSheetPermissionEntry,
 } from '../types'
 import { apiFetch } from '../../utils/api'
 
@@ -271,6 +274,66 @@ function normalizeCommentMentionSuggestions(
   }
 }
 
+function normalizeSheetPermissionEntry(
+  payload: Partial<MetaSheetPermissionEntry> | null | undefined,
+): MetaSheetPermissionEntry | null {
+  const userId = typeof payload?.userId === 'string' ? payload.userId : ''
+  const accessLevel = payload?.accessLevel
+  if (!userId || (accessLevel !== 'read' && accessLevel !== 'write' && accessLevel !== 'write-own')) {
+    return null
+  }
+  return {
+    userId,
+    accessLevel,
+    permissions: Array.isArray(payload?.permissions)
+      ? payload.permissions.filter((value): value is string => typeof value === 'string')
+      : [],
+    name: typeof payload?.name === 'string' || payload?.name === null ? payload.name ?? null : null,
+    email: typeof payload?.email === 'string' || payload?.email === null ? payload.email ?? null : null,
+    isActive: payload?.isActive !== false,
+  }
+}
+
+function normalizeSheetPermissionEntries(
+  payload: { items?: Array<Partial<MetaSheetPermissionEntry>> } | null | undefined,
+): { items: MetaSheetPermissionEntry[] } {
+  return {
+    items: Array.isArray(payload?.items)
+      ? payload.items
+        .map((item) => normalizeSheetPermissionEntry(item))
+        .filter((item): item is MetaSheetPermissionEntry => !!item)
+      : [],
+  }
+}
+
+function normalizeSheetPermissionCandidates(
+  payload: { items?: Array<Partial<MetaSheetPermissionCandidate>>; total?: number; limit?: number; query?: string } | null | undefined,
+): { items: MetaSheetPermissionCandidate[]; total: number; limit: number; query: string } {
+  const items: MetaSheetPermissionCandidate[] = []
+  if (Array.isArray(payload?.items)) {
+    for (const item of payload.items) {
+      const id = typeof item?.id === 'string' ? item.id : ''
+      const label = typeof item?.label === 'string' ? item.label : ''
+      if (!id || !label) continue
+      items.push({
+        id,
+        label,
+        subtitle: typeof item?.subtitle === 'string' || item?.subtitle === null ? item.subtitle ?? null : null,
+        isActive: item?.isActive !== false,
+        accessLevel: item?.accessLevel === 'read' || item?.accessLevel === 'write' || item?.accessLevel === 'write-own'
+          ? item.accessLevel
+          : null,
+      })
+    }
+  }
+  return {
+    items,
+    total: typeof payload?.total === 'number' ? payload.total : 0,
+    limit: typeof payload?.limit === 'number' ? payload.limit : 0,
+    query: typeof payload?.query === 'string' ? payload.query : '',
+  }
+}
+
 function normalizeCommentsParams(params: { containerId: string; targetId: string; targetFieldId?: string | null } | MetaCommentsScope) {
   if ('containerType' in params) {
     return {
@@ -327,6 +390,45 @@ export class MultitableApiClient {
       body: JSON.stringify(input),
     })
     return parseJson(res)
+  }
+
+  async listSheetPermissions(sheetId: string): Promise<{ items: MetaSheetPermissionEntry[] }> {
+    const res = await this.fetch(`/api/multitable/sheets/${encodeURIComponent(sheetId)}/permissions`)
+    const data = await parseJson<{ items?: Array<Partial<MetaSheetPermissionEntry>> }>(res)
+    return normalizeSheetPermissionEntries(data)
+  }
+
+  async listSheetPermissionCandidates(
+    sheetId: string,
+    params?: { q?: string; limit?: number },
+  ): Promise<{ items: MetaSheetPermissionCandidate[]; total: number; limit: number; query: string }> {
+    const res = await this.fetch(`/api/multitable/sheets/${encodeURIComponent(sheetId)}/permission-candidates${qs(params ?? {})}`)
+    const data = await parseJson<{ items?: Array<Partial<MetaSheetPermissionCandidate>>; total?: number; limit?: number; query?: string }>(res)
+    return normalizeSheetPermissionCandidates(data)
+  }
+
+  async updateSheetPermission(
+    sheetId: string,
+    userId: string,
+    accessLevel: MetaSheetPermissionAccessLevel | 'none',
+  ): Promise<{ userId: string; accessLevel: MetaSheetPermissionAccessLevel | 'none'; entry: MetaSheetPermissionEntry | null }> {
+    const res = await this.fetch(`/api/multitable/sheets/${encodeURIComponent(sheetId)}/permissions/${encodeURIComponent(userId)}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ accessLevel }),
+    })
+    const data = await parseJson<{
+      userId?: string
+      accessLevel?: MetaSheetPermissionAccessLevel | 'none'
+      entry?: Partial<MetaSheetPermissionEntry> | null
+    }>(res)
+    return {
+      userId: typeof data?.userId === 'string' ? data.userId : userId,
+      accessLevel: data?.accessLevel === 'read' || data?.accessLevel === 'write' || data?.accessLevel === 'write-own' || data?.accessLevel === 'none'
+        ? data.accessLevel
+        : accessLevel,
+      entry: normalizeSheetPermissionEntry(data?.entry ?? null),
+    }
   }
 
   // --- Fields ---

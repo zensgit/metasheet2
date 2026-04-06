@@ -180,6 +180,131 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
+  /api/multitable/sheets/{sheetId}/permissions:
+    get:
+      summary: List sheet permission assignments
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: sheetId
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  data:
+                    type: object
+                    properties:
+                      items:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/MultitableSheetPermissionEntry'
+                    required: [items]
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /api/multitable/sheets/{sheetId}/permission-candidates:
+    get:
+      summary: List candidate users for sheet permission authoring
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: sheetId
+          required: true
+          schema: { type: string }
+        - in: query
+          name: q
+          schema: { type: string }
+        - in: query
+          name: limit
+          schema: { type: integer, default: 20 }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  data:
+                    type: object
+                    properties:
+                      items:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/MultitableSheetPermissionCandidate'
+                      total:
+                        type: integer
+                      limit:
+                        type: integer
+                      query:
+                        type: string
+                    required: [items, total, limit, query]
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /api/multitable/sheets/{sheetId}/permissions/{userId}:
+    put:
+      summary: Set a sheet access level for a user
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: sheetId
+          required: true
+          schema: { type: string }
+        - in: path
+          name: userId
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                accessLevel:
+                  type: string
+                  enum: [read, write, write-own, none]
+              required: [accessLevel]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  data:
+                    type: object
+                    properties:
+                      userId:
+                        type: string
+                      accessLevel:
+                        type: string
+                        enum: [read, write, write-own, none]
+                      entry:
+                        allOf:
+                          - $ref: '#/components/schemas/MultitableSheetPermissionEntry'
+                        nullable: true
+                    required: [userId, accessLevel, entry]
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
   /api/multitable/fields:
     get:
       summary: List multitable fields
