@@ -38,6 +38,7 @@ function verify_windows_entrypoints() {
   local root="$1"
   local start_script="${root}/deploy.bat"
   local remote_script="${root}/deploy-remote.bat"
+  local bootstrap_script="${root}/bootstrap-admin.bat"
 
   if ! search_fixed_string 'multitable-onprem-apply-package.ps1' "$start_script"; then
     die "deploy.bat must call the PowerShell-native multitable apply helper"
@@ -53,6 +54,14 @@ function verify_windows_entrypoints() {
 
   if [[ -n "$deploy_run_wrapper" ]] && ! search_fixed_string 'call "%~dp0deploy.bat" "%~1"' "$deploy_run_wrapper"; then
     die "$(basename "$deploy_run_wrapper") must delegate to deploy.bat"
+  fi
+
+  if ! search_fixed_string 'multitable-onprem-bootstrap-admin.ps1' "$bootstrap_script"; then
+    die "bootstrap-admin.bat must call the PowerShell-native multitable bootstrap helper"
+  fi
+
+  if [[ -n "$bootstrap_run_wrapper" ]] && ! search_fixed_string 'call "%~dp0bootstrap-admin.bat" "%~1" "%~2" "%~3"' "$bootstrap_run_wrapper"; then
+    die "$(basename "$bootstrap_run_wrapper") must delegate to bootstrap-admin.bat"
   fi
 }
 
@@ -240,10 +249,12 @@ required=(
   "packages/core-backend/dist/src/index.js"
   "packages/core-backend/dist/src/db/migrate.js"
   "packages/core-backend/package.json"
+  "bootstrap-admin.bat"
   "deploy.bat"
   "deploy-remote.bat"
   "plugins/plugin-attendance/plugin.json"
   "plugins/plugin-attendance/index.cjs"
+  "scripts/ops/multitable-onprem-bootstrap-admin.ps1"
   "scripts/ops/multitable-onprem-apply-package.sh"
   "scripts/ops/multitable-onprem-apply-package.ps1"
   "scripts/ops/multitable-onprem-package-install.sh"
@@ -266,6 +277,8 @@ done
 
 deploy_run_wrapper="$(find "$pkg_root" -maxdepth 1 -type f -name 'deploy-*.bat' ! -name 'deploy.bat' ! -name 'deploy-remote.bat' | head -n 1)"
 [[ -n "$deploy_run_wrapper" ]] || die "Required package content missing: deploy-<run>.bat"
+bootstrap_run_wrapper="$(find "$pkg_root" -maxdepth 1 -type f -name 'bootstrap-admin-*.bat' | head -n 1)"
+[[ -n "$bootstrap_run_wrapper" ]] || die "Required package content missing: bootstrap-admin-<run>.bat"
 verify_windows_entrypoints "$pkg_root"
 
 if [[ "$VERIFY_NO_GITHUB_LINKS" == "1" ]]; then

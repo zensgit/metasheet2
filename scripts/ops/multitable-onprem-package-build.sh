@@ -42,6 +42,7 @@ REQUIRED_PATHS=(
   "scripts/ops/attendance-onprem-start-pm2.ps1"
   "scripts/ops/attendance-wsl-portproxy-refresh.ps1"
   "scripts/ops/attendance-wsl-portproxy-task.ps1"
+  "scripts/ops/multitable-onprem-bootstrap-admin.ps1"
   "scripts/ops/multitable-onprem-deploy-easy.sh"
   "scripts/ops/multitable-onprem-apply-package.sh"
   "scripts/ops/multitable-onprem-apply-package.ps1"
@@ -148,6 +149,28 @@ setlocal
 call "%~dp0deploy.bat" "%~1"
 exit /b %ERRORLEVEL%
 EOF
+
+  cat > "${PACKAGE_ROOT}/bootstrap-admin.bat" <<'EOF'
+@echo off
+setlocal
+if "%~1"=="" (
+  echo Usage: bootstrap-admin.bat ^<admin-email^> ^<admin-password^> [admin-name]
+  exit /b 64
+)
+if "%~2"=="" (
+  echo Usage: bootstrap-admin.bat ^<admin-email^> ^<admin-password^> [admin-name]
+  exit /b 64
+)
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\ops\multitable-onprem-bootstrap-admin.ps1" -RootDir "%~dp0." -AdminEmail "%~1" -AdminPassword "%~2" -AdminName "%~3"
+exit /b %ERRORLEVEL%
+EOF
+
+  cat > "${PACKAGE_ROOT}/bootstrap-admin-${PACKAGE_RUN_LABEL}.bat" <<'EOF'
+@echo off
+setlocal
+call "%~dp0bootstrap-admin.bat" "%~1" "%~2" "%~3"
+exit /b %ERRORLEVEL%
+EOF
 }
 
 function cleanup() {
@@ -217,6 +240,8 @@ Server-side apply helpers:
   deploy.bat <package.zip|package.tgz>
   deploy-remote.bat <package.zip|package.tgz>
   deploy-${PACKAGE_RUN_LABEL}.bat <package.zip|package.tgz>
+  bootstrap-admin.bat <admin-email> <admin-password> [admin-name]
+  bootstrap-admin-${PACKAGE_RUN_LABEL}.bat <admin-email> <admin-password> [admin-name]
 EOF
 
 run rm -f "$ARCHIVE_TGZ_TMP_PATH" "$ARCHIVE_ZIP_TMP_PATH" "$ARCHIVE_TGZ_SHA_TMP_PATH" "$ARCHIVE_ZIP_SHA_TMP_PATH" "$METADATA_JSON_TMP_PATH"
