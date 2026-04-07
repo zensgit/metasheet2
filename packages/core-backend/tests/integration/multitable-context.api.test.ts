@@ -532,6 +532,73 @@ describe('Multitable context API', () => {
     expect(mockPool.transaction).toHaveBeenCalledTimes(1)
   })
 
+  test('allows create sheet under an owned base without global multitable write', async () => {
+    const { app, mockPool } = await createApp({
+      tokenPerms: [],
+      fallbackPermissions: [],
+      fallbackHasPermission: false,
+      queryHandler: async (sql, params) => {
+        if (sql.includes('SELECT id, owner_id FROM meta_bases WHERE id = $1 AND deleted_at IS NULL')) {
+          expect(params).toEqual(['base_ops'])
+          return {
+            rows: [{ id: 'base_ops', owner_id: 'user_multitable_1' }],
+          }
+        }
+        if (sql.includes('INSERT INTO meta_sheets')) {
+          expect(params).toEqual([
+            expect.any(String),
+            'base_ops',
+            'Owned Sheet',
+            'Created by base owner',
+          ])
+          return { rows: [], rowCount: 1 }
+        }
+        throw new Error(`Unhandled SQL in test: ${sql}`)
+      },
+    })
+
+    const response = await request(app)
+      .post('/api/multitable/sheets')
+      .send({ baseId: 'base_ops', name: 'Owned Sheet', description: 'Created by base owner' })
+      .expect(200)
+
+    expect(response.body.ok).toBe(true)
+    expect(response.body.data.sheet).toMatchObject({
+      baseId: 'base_ops',
+      name: 'Owned Sheet',
+      description: 'Created by base owner',
+      seeded: false,
+    })
+    expect(mockPool.transaction).toHaveBeenCalledTimes(1)
+  })
+
+  test('rejects create sheet under an unowned base without global multitable write', async () => {
+    const { app } = await createApp({
+      tokenPerms: [],
+      fallbackPermissions: [],
+      fallbackHasPermission: false,
+      queryHandler: async (sql, params) => {
+        if (sql.includes('SELECT id, owner_id FROM meta_bases WHERE id = $1 AND deleted_at IS NULL')) {
+          expect(params).toEqual(['base_ops'])
+          return {
+            rows: [{ id: 'base_ops', owner_id: 'someone_else' }],
+          }
+        }
+        throw new Error(`Unhandled SQL in test: ${sql}`)
+      },
+    })
+
+    const response = await request(app)
+      .post('/api/multitable/sheets')
+      .send({ baseId: 'base_ops', name: 'Blocked Sheet' })
+      .expect(403)
+
+    expect(response.body).toEqual({
+      ok: false,
+      error: { code: 'FORBIDDEN', message: 'Insufficient permissions' },
+    })
+  })
+
   test('deletes a multitable sheet by id', async () => {
     const { app } = await createApp({
       tokenPerms: ['multitable:write'],

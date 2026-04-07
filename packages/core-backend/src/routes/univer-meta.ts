@@ -3750,7 +3750,7 @@ export function univerMetaRouter(): Router {
     }
   })
 
-  router.post('/sheets', rbacGuard('multitable', 'write'), async (req: Request, res: Response) => {
+  router.post('/sheets', async (req: Request, res: Response) => {
     const schema = z.object({
       id: z.string().min(1).max(50).optional(),
       baseId: z.string().min(1).max(50).optional(),
@@ -3772,14 +3772,28 @@ export function univerMetaRouter(): Router {
 
     try {
       const pool = poolManager.get()
+      const access = await resolveRequestAccess(req)
+      const baseCapabilities = deriveCapabilities(access.permissions, access.isAdminRole)
       let baseId = requestedBaseId ?? null
       await pool.transaction(async ({ query }) => {
         if (!baseId) {
+          if (!baseCapabilities.canManageViews) {
+            throw new ValidationError('Insufficient permissions')
+          }
           baseId = await ensureLegacyBase(query as unknown as QueryFn)
         } else {
-          const baseRes = await query('SELECT id FROM meta_bases WHERE id = $1 AND deleted_at IS NULL', [baseId])
+          const baseRes = await query(
+            'SELECT id, owner_id FROM meta_bases WHERE id = $1 AND deleted_at IS NULL',
+            [baseId],
+          )
           if ((baseRes as any).rows.length === 0) {
             throw new NotFoundError(`Base not found: ${baseId}`)
+          }
+          const baseRow = (baseRes as any).rows[0] as { owner_id?: unknown }
+          const baseOwnerId = typeof baseRow.owner_id === 'string' ? baseRow.owner_id : null
+          const canCreateInBase = baseCapabilities.canManageViews || (baseOwnerId !== null && baseOwnerId === access.userId)
+          if (!canCreateInBase) {
+            throw new ValidationError('Insufficient permissions')
           }
         }
 
@@ -3800,6 +3814,9 @@ export function univerMetaRouter(): Router {
 
       return res.json({ ok: true, data: { sheet: { id: sheetId, baseId, name, description, seeded: seed } } })
     } catch (err) {
+      if (err instanceof ValidationError) {
+        return res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: err.message } })
+      }
       if (err instanceof NotFoundError) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: err.message } })
       }
