@@ -86,6 +86,10 @@ describe('plugin-after-sales default blueprint', () => {
       type: 'kanban',
       config: {
         groupFieldId: 'status',
+        cardFieldIds: ['ticketNo', 'title', 'priority', 'slaDueAt'],
+      },
+      groupInfo: {
+        fieldId: 'status',
       },
     })
   })

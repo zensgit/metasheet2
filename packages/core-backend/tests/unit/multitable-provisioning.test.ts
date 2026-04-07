@@ -329,4 +329,32 @@ describe('multitable provisioning helper', () => {
     expect(first.config).toEqual({ density: 'compact' })
     expect(views).toHaveLength(1)
   })
+
+  it('persists kanban group metadata for default board views', async () => {
+    const { query } = createQuery()
+
+    const result = await ensureView({
+      query,
+      projectId: 'tenant_42:after-sales',
+      sheetId: 'sheet_ticket',
+      descriptor: {
+        id: 'ticket-board',
+        objectId: 'serviceTicket',
+        name: 'Ticket Board',
+        type: 'kanban',
+        groupInfo: { fieldId: 'status' },
+        config: {
+          groupFieldId: 'status',
+          cardFieldIds: ['ticketNo', 'title', 'priority'],
+        },
+      },
+    })
+
+    expect(result.type).toBe('kanban')
+    expect(result.groupInfo).toEqual({ fieldId: 'status' })
+    expect(result.config).toEqual({
+      groupFieldId: 'status',
+      cardFieldIds: ['ticketNo', 'title', 'priority'],
+    })
+  })
 })
