@@ -125,6 +125,46 @@ describe('plugin-after-sales default blueprint', () => {
     })
   })
 
+  it('adds the serviceRecord multitable projection and schedule calendar view', () => {
+    const result = blueprint.buildDefaultBlueprint(manifest)
+    const objects = Array.isArray(result.objects) ? result.objects as Array<Record<string, unknown>> : []
+    const serviceRecord = objects.find((objectDescriptor) => objectDescriptor.id === 'serviceRecord')
+
+    expect(serviceRecord).toMatchObject({
+      id: 'serviceRecord',
+      name: 'Service Record',
+      backing: 'multitable',
+    })
+    expect(serviceRecord?.fields).toEqual([
+      expect.objectContaining({ id: 'ticketNo', type: 'string', required: true }),
+      expect.objectContaining({
+        id: 'visitType',
+        type: 'select',
+        required: true,
+        options: ['onsite', 'remote', 'pickup'],
+      }),
+      expect.objectContaining({ id: 'scheduledAt', type: 'date', required: true }),
+      expect.objectContaining({ id: 'completedAt', type: 'date', required: false }),
+      expect.objectContaining({ id: 'technicianName', type: 'string', required: false }),
+      expect.objectContaining({ id: 'workSummary', type: 'string', required: false }),
+      expect.objectContaining({
+        id: 'result',
+        type: 'select',
+        required: false,
+        options: ['resolved', 'partial', 'escalated'],
+      }),
+    ])
+    expect(result.views).toContainEqual({
+      id: 'serviceRecord-calendar',
+      objectId: 'serviceRecord',
+      name: 'Service Schedule',
+      type: 'calendar',
+      config: {
+        dateFieldId: 'scheduledAt',
+      },
+    })
+  })
+
   it('keeps service-only objects unchanged', () => {
     const result = blueprint.buildDefaultBlueprint(manifest)
     const objects = Array.isArray(result.objects) ? result.objects as Array<Record<string, unknown>> : []

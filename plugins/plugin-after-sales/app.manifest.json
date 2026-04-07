@@ -55,6 +55,11 @@
       "backing": "multitable"
     },
     {
+      "id": "serviceRecord",
+      "name": "Service Record",
+      "backing": "multitable"
+    },
+    {
       "id": "warrantyPolicy",
       "name": "Warranty Policy",
       "backing": "service"

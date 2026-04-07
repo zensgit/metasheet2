@@ -293,14 +293,16 @@ describe('plugin-after-sales routes', () => {
       'serviceTicket',
       'installedAsset',
       'customer',
+      'serviceRecord',
     ])
     expect(res.body.data.installResult.createdViews).toEqual([
       'ticket-board',
       'installedAsset-grid',
       'customer-grid',
+      'serviceRecord-calendar',
     ])
-    expect(ensureObject).toHaveBeenCalledTimes(3)
-    expect(ensureView).toHaveBeenCalledTimes(3)
+    expect(ensureObject).toHaveBeenCalledTimes(4)
+    expect(ensureView).toHaveBeenCalledTimes(4)
     expect(ensureView).toHaveBeenNthCalledWith(1, {
       projectId: 'tenant_42:after-sales',
       sheetId: 'sheet_serviceTicket',
@@ -326,6 +328,15 @@ describe('plugin-after-sales routes', () => {
         id: 'customer-grid',
         objectId: 'customer',
         type: 'grid',
+      }),
+    })
+    expect(ensureView).toHaveBeenNthCalledWith(4, {
+      projectId: 'tenant_42:after-sales',
+      sheetId: 'sheet_serviceRecord',
+      descriptor: expect.objectContaining({
+        id: 'serviceRecord-calendar',
+        objectId: 'serviceRecord',
+        type: 'calendar',
       }),
     })
     expect(db.rows).toHaveLength(1)

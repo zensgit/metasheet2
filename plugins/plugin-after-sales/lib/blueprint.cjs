@@ -102,6 +102,58 @@ function enrichObjectDescriptor(objectDescriptor) {
     }
   }
 
+  if (objectDescriptor.id === 'serviceRecord') {
+    return {
+      ...objectDescriptor,
+      fields: [
+        {
+          id: 'ticketNo',
+          name: 'Ticket No',
+          type: 'string',
+          required: true,
+        },
+        {
+          id: 'visitType',
+          name: 'Visit Type',
+          type: 'select',
+          required: true,
+          options: ['onsite', 'remote', 'pickup'],
+        },
+        {
+          id: 'scheduledAt',
+          name: 'Scheduled At',
+          type: 'date',
+          required: true,
+        },
+        {
+          id: 'completedAt',
+          name: 'Completed At',
+          type: 'date',
+          required: false,
+        },
+        {
+          id: 'technicianName',
+          name: 'Technician Name',
+          type: 'string',
+          required: false,
+        },
+        {
+          id: 'workSummary',
+          name: 'Work Summary',
+          type: 'string',
+          required: false,
+        },
+        {
+          id: 'result',
+          name: 'Result',
+          type: 'select',
+          required: false,
+          options: ['resolved', 'partial', 'escalated'],
+        },
+      ],
+    }
+  }
+
   if (objectDescriptor.id !== 'installedAsset') {
     return { ...objectDescriptor }
   }
@@ -192,6 +244,15 @@ function buildDefaultBlueprint(manifest) {
         name: 'Customers',
         type: 'grid',
         config: {},
+      },
+      {
+        id: 'serviceRecord-calendar',
+        objectId: 'serviceRecord',
+        name: 'Service Schedule',
+        type: 'calendar',
+        config: {
+          dateFieldId: 'scheduledAt',
+        },
       },
     ],
     automations: [],
