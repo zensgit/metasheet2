@@ -41,13 +41,13 @@
         <p class="after-sales-view__pill">v1 Project Enablement</p>
         <h2>Enable the after-sales project shell</h2>
         <p>
-          这一步会创建售后项目的账本记录，并通过 multitable provisioning seam 落下最小 installedAsset
-          对象。
+          这一步会创建售后项目的账本记录，并通过 multitable provisioning seam 落下最小售后数据投影。
         </p>
         <ul class="after-sales-view__list">
           <li>templateId 固定为 <code>after-sales-default</code></li>
           <li>v1 projectId 伪值为 <code>{{ defaultProjectId }}</code></li>
-          <li>当前会真实创建 installedAsset 对象及其基础字段</li>
+          <li>当前会真实创建 <code>serviceTicket</code> 与 <code>installedAsset</code> 对象</li>
+          <li>同时会创建默认 <code>ticket-board</code> 和 <code>installedAsset-grid</code> 视图</li>
         </ul>
         <div class="after-sales-view__action-row">
           <button class="after-sales-view__primary-btn" :disabled="installing" @click="triggerInstall('enable')">
@@ -109,7 +109,7 @@
         </article>
 
         <article class="after-sales-view__card">
-          <h2>Installed objects</h2>
+          <h2>Manifest objects</h2>
           <ul v-if="manifest?.objects?.length" class="after-sales-view__list">
             <li v-for="item in manifest.objects" :key="item.id">
               <strong>{{ item.name }}</strong> <span>({{ item.backing }})</span>
