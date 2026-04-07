@@ -11,6 +11,12 @@ const {
   buildRefundApprovalCommand,
   submitRefundApproval,
 } = require('./lib/refund-approval.cjs')
+const {
+  registerAfterSalesWorkflowHandlers,
+} = require('./lib/workflow-adapter.cjs')
+
+let activeContext = null
+let workflowSubscriptionIds = []
 
 // --------------------------------------------------------------------------
 // Local helpers
@@ -123,12 +129,31 @@ function sendForbidden(res) {
   })
 }
 
+function cleanupWorkflowSubscriptions() {
+  if (
+    activeContext &&
+    activeContext.api &&
+    activeContext.api.events &&
+    typeof activeContext.api.events.off === 'function'
+  ) {
+    for (const subscriptionId of workflowSubscriptionIds) {
+      if (subscriptionId) {
+        activeContext.api.events.off(subscriptionId)
+      }
+    }
+  }
+  workflowSubscriptionIds = []
+  activeContext = null
+}
+
 // --------------------------------------------------------------------------
 // Plugin entry
 // --------------------------------------------------------------------------
 
 module.exports = {
   async activate(context) {
+    cleanupWorkflowSubscriptions()
+    activeContext = context
     const logger = context.logger || console
 
     // Health / manifest probes (unchanged from skeleton)
@@ -282,6 +307,13 @@ module.exports = {
       },
     })
 
+    const workflowRuntime = registerAfterSalesWorkflowHandlers(context, {
+      appId: appManifest.id,
+    })
+    workflowSubscriptionIds = Array.isArray(workflowRuntime.subscriptions)
+      ? workflowRuntime.subscriptions
+      : []
+
     context.api.events.emit('after-sales.plugin.activated', {
       plugin: 'plugin-after-sales',
       appId: appManifest.id,
@@ -290,5 +322,7 @@ module.exports = {
     logger.info && logger.info('After-sales plugin activated')
   },
 
-  async deactivate() {},
+  async deactivate() {
+    cleanupWorkflowSubscriptions()
+  },
 }

@@ -280,4 +280,35 @@ describe('plugin-after-sales default blueprint', () => {
       }),
     ])
   })
+
+  it('declares the v1 automation catalog and template config defaults', () => {
+    const result = blueprint.buildDefaultBlueprint(manifest)
+
+    expect(result.automations).toEqual([
+      expect.objectContaining({
+        id: 'ticket-triage',
+        trigger: { event: 'ticket.created' },
+        enabled: true,
+      }),
+      expect.objectContaining({
+        id: 'sla-watcher',
+        trigger: expect.objectContaining({ event: 'ticket.overdue' }),
+        enabled: true,
+      }),
+      expect.objectContaining({
+        id: 'refund-approval',
+        trigger: { event: 'ticket.refundRequested' },
+        enabled: true,
+      }),
+    ])
+    expect(result.configDefaults).toEqual({
+      enableWarranty: true,
+      enableRefundApproval: true,
+      enableVisitScheduling: true,
+      enableFollowUp: true,
+      defaultSlaHours: 24,
+      urgentSlaHours: 4,
+      followUpAfterDays: 7,
+    })
+  })
 })

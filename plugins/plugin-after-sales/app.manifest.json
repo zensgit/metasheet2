@@ -84,7 +84,7 @@
     {
       "id": "refund-approval",
       "name": "Refund Approval",
-      "trigger": "ticket.refund-requested"
+      "trigger": "ticket.refundRequested"
     }
   ],
   "integrations": [

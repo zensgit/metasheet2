@@ -50,6 +50,8 @@ interface FakeContext {
       }
     }
     events: {
+      on: ReturnType<typeof vi.fn>
+      off: ReturnType<typeof vi.fn>
       emit: ReturnType<typeof vi.fn>
     }
   }
@@ -184,6 +186,8 @@ function createContext(): {
         },
       },
       events: {
+        on: vi.fn((eventName: string) => `sub:${eventName}`),
+        off: vi.fn(),
         emit: vi.fn(),
       },
     },
@@ -219,6 +223,7 @@ describe('plugin-after-sales routes', () => {
   let ensureView: ReturnType<typeof vi.fn>
   let db: FakeDatabase
   let communicationRegister: ReturnType<typeof vi.fn>
+  let eventsOn: ReturnType<typeof vi.fn>
 
   beforeEach(async () => {
     const setup = createContext()
@@ -227,6 +232,7 @@ describe('plugin-after-sales routes', () => {
     ensureView = setup.ensureView
     db = setup.db
     communicationRegister = setup.context.communication.register
+    eventsOn = setup.context.api.events.on
     await plugin.activate(setup.context)
   })
 
@@ -424,5 +430,12 @@ describe('plugin-after-sales routes', () => {
         sendNotificationTopic: expect.any(Function),
       }),
     )
+  })
+
+  it('registers workflow event listeners on activate', async () => {
+    expect(eventsOn).toHaveBeenCalledWith('ticket.created', expect.any(Function))
+    expect(eventsOn).toHaveBeenCalledWith('ticket.assigned', expect.any(Function))
+    expect(eventsOn).toHaveBeenCalledWith('ticket.refundRequested', expect.any(Function))
+    expect(eventsOn).toHaveBeenCalledWith('approval.pending', expect.any(Function))
   })
 })

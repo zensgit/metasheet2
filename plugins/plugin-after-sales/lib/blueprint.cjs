@@ -2,6 +2,57 @@
 
 const { getNotificationTopicSpecs } = require('./notification-adapter.cjs')
 
+const DEFAULT_TEMPLATE_CONFIG = Object.freeze({
+  enableWarranty: true,
+  enableRefundApproval: true,
+  enableVisitScheduling: true,
+  enableFollowUp: true,
+  defaultSlaHours: 24,
+  urgentSlaHours: 4,
+  followUpAfterDays: 7,
+})
+
+const DEFAULT_AUTOMATIONS = Object.freeze([
+  {
+    id: 'ticket-triage',
+    trigger: { event: 'ticket.created' },
+    conditions: [],
+    actions: [
+      { type: 'assign', assigneeRule: 'by-area-or-round-robin' },
+      { type: 'updateField', field: 'slaDueAt', value: '{{computeSlaDueAt(priority)}}' },
+      { type: 'sendNotification', topic: 'after-sales.ticket.assigned' },
+    ],
+    enabled: true,
+  },
+  {
+    id: 'sla-watcher',
+    trigger: {
+      event: 'ticket.overdue',
+      filter: [{ field: 'status', operator: 'in', value: ['new', 'assigned', 'inProgress'] }],
+    },
+    conditions: [],
+    actions: [
+      { type: 'updateField', field: 'priority', value: 'urgent' },
+      { type: 'sendNotification', topic: 'after-sales.ticket.overdue' },
+    ],
+    enabled: true,
+  },
+  {
+    id: 'refund-approval',
+    trigger: { event: 'ticket.refundRequested' },
+    conditions: [],
+    actions: [
+      { type: 'submitApproval', bridge: 'after-sales-refund' },
+      { type: 'sendNotification', topic: 'after-sales.approval.pending' },
+    ],
+    enabled: true,
+  },
+])
+
+function clone(value) {
+  return JSON.parse(JSON.stringify(value))
+}
+
 function enrichObjectDescriptor(objectDescriptor) {
   if (!objectDescriptor || typeof objectDescriptor !== 'object') {
     return objectDescriptor
@@ -361,13 +412,15 @@ function buildDefaultBlueprint(manifest) {
         config: {},
       },
     ],
-    automations: [],
+    automations: clone(DEFAULT_AUTOMATIONS),
     roles: [],
     notifications: getNotificationTopicSpecs(),
-    configDefaults: {},
+    configDefaults: clone(DEFAULT_TEMPLATE_CONFIG),
   }
 }
 
 module.exports = {
+  DEFAULT_AUTOMATIONS,
+  DEFAULT_TEMPLATE_CONFIG,
   buildDefaultBlueprint,
 }
