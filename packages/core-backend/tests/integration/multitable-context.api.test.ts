@@ -416,6 +416,17 @@ describe('Multitable context API', () => {
           ])
           return { rows: [], rowCount: 1 }
         }
+        if (sql.includes('FROM meta_sheets') && sql.includes('WHERE id = $1')) {
+          return {
+            rows: [{
+              id: params?.[0],
+              base_id: 'base_legacy',
+              name: 'Vendor Intake',
+              description: 'Main vendor list',
+            }],
+            rowCount: 1,
+          }
+        }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -429,6 +440,53 @@ describe('Multitable context API', () => {
     expect(response.body.data.sheet.baseId).toBe('base_legacy')
     expect(response.body.data.sheet.seeded).toBe(false)
     expect(mockPool.transaction).toHaveBeenCalledTimes(1)
+  })
+
+  test('returns 409 when creating a sheet that already exists', async () => {
+    const { app } = await createApp({
+      tokenPerms: ['multitable:write'],
+      queryHandler: async (sql, params) => {
+        if (sql.includes('INSERT INTO meta_bases')) {
+          expect(params?.[0]).toBe('base_legacy')
+          return { rows: [], rowCount: 1 }
+        }
+        if (sql.includes('INSERT INTO meta_sheets')) {
+          return { rows: [], rowCount: 0 }
+        }
+        throw new Error(`Unhandled SQL in test: ${sql}`)
+      },
+    })
+
+    const response = await request(app)
+      .post('/api/multitable/sheets')
+      .send({ id: 'sheet_vendor_intake', name: 'Vendor Intake' })
+      .expect(409)
+
+    expect(response.body.ok).toBe(false)
+    expect(response.body.error.code).toBe('CONFLICT')
+    expect(response.body.error.message).toBe('Sheet already exists: sheet_vendor_intake')
+  })
+
+  test('returns 404 when the requested base does not exist', async () => {
+    const { app } = await createApp({
+      tokenPerms: ['multitable:write'],
+      queryHandler: async (sql, params) => {
+        if (sql.includes('SELECT id FROM meta_bases WHERE id = $1 AND deleted_at IS NULL')) {
+          expect(params).toEqual(['base_missing'])
+          return { rows: [], rowCount: 0 }
+        }
+        throw new Error(`Unhandled SQL in test: ${sql}`)
+      },
+    })
+
+    const response = await request(app)
+      .post('/api/multitable/sheets')
+      .send({ baseId: 'base_missing', name: 'Vendor Intake' })
+      .expect(404)
+
+    expect(response.body.ok).toBe(false)
+    expect(response.body.error.code).toBe('NOT_FOUND')
+    expect(response.body.error.message).toBe('Base not found: base_missing')
   })
 
   test('deletes a multitable sheet by id', async () => {

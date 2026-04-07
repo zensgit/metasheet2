@@ -2,6 +2,7 @@
 
 const appManifest = require('./app.manifest.json')
 const installer = require('./lib/installer.cjs')
+const { buildDefaultBlueprint } = require('./lib/blueprint.cjs')
 
 // --------------------------------------------------------------------------
 // Local helpers
@@ -29,29 +30,6 @@ function getUserId(req) {
  * and/or user-uploaded templates become allowed.
  */
 const ALLOWED_TEMPLATE_IDS = new Set(['after-sales-default'])
-
-/**
- * Build a ProjectTemplateBlueprint from the plugin's app.manifest.json.
- *
- * v1 mapping is intentionally minimal: it only populates the structural
- * fields that runInstall's validateBlueprint will check. Automation / views /
- * roles / notifications arrays are left empty at this point — they will be
- * populated by the thin adapter layer in a follow-up commit (task #10).
- */
-function buildBlueprintFromManifest(manifest) {
-  return {
-    id: 'after-sales-default',
-    version: manifest.version || '0.1.0',
-    displayName: manifest.displayName || 'After Sales Default Template',
-    appId: manifest.id,
-    objects: Array.isArray(manifest.objects) ? manifest.objects.map((o) => ({ ...o })) : [],
-    views: [],
-    automations: [],
-    roles: [],
-    notifications: [],
-    configDefaults: {},
-  }
-}
 
 /**
  * Map InstallerError.code to HTTP status codes per
@@ -196,7 +174,7 @@ module.exports = {
               : {}
 
           const tenantId = getTenantId(req)
-          const blueprint = buildBlueprintFromManifest(appManifest)
+          const blueprint = buildDefaultBlueprint(appManifest)
 
           const result = await installer.runInstall({
             context,
