@@ -262,7 +262,11 @@ async function main() {
   const readinessGateReport = path.join(readinessRoot, 'gates', 'report.json')
   const readinessGateReportMd = path.join(readinessRoot, 'gates', 'report.md')
   const readinessGateLog = path.join(readinessRoot, 'gates', 'release-gate.log')
-  const readinessGateOperatorCommands = path.join(readinessRoot, 'gates', 'operator-commands.sh')
+  const readinessGateOperatorCommandsInGates = path.join(readinessRoot, 'gates', 'operator-commands.sh')
+  const readinessGateOperatorCommandsAtRoot = path.join(readinessRoot, 'operator-commands.sh')
+  const readinessGateOperatorCommands = await exists(readinessGateOperatorCommandsInGates)
+    ? readinessGateOperatorCommandsInGates
+    : readinessGateOperatorCommandsAtRoot
   const smokeReport = path.join(readinessRoot, 'smoke', 'report.json')
   const smokeReportMd = path.join(readinessRoot, 'smoke', 'report.md')
   const profileReport = path.join(readinessRoot, 'profile', 'report.json')

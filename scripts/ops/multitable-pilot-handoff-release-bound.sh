@@ -30,8 +30,11 @@ fi
 echo "[multitable-pilot-handoff-release-bound] Using on-prem gate report ${ONPREM_GATE_REPORT_JSON}" >&2
 echo "[multitable-pilot-handoff-release-bound] run_mode=${RUN_MODE}" >&2
 
+READINESS_ROOT="${READINESS_ROOT:-}"
+
 REQUIRE_ONPREM_GATE=true \
 REQUIRE_EXPLICIT_ONPREM_GATE=true \
 PILOT_RUN_MODE="${RUN_MODE}" \
 ONPREM_GATE_REPORT_JSON="${ONPREM_GATE_REPORT_JSON}" \
+READINESS_ROOT="${READINESS_ROOT}" \
 node scripts/ops/multitable-pilot-handoff.mjs
