@@ -63,6 +63,45 @@ function enrichObjectDescriptor(objectDescriptor) {
     }
   }
 
+  if (objectDescriptor.id === 'customer') {
+    return {
+      ...objectDescriptor,
+      fields: [
+        {
+          id: 'customerCode',
+          name: 'Customer Code',
+          type: 'string',
+          required: true,
+        },
+        {
+          id: 'name',
+          name: 'Name',
+          type: 'string',
+          required: true,
+        },
+        {
+          id: 'phone',
+          name: 'Phone',
+          type: 'string',
+          required: false,
+        },
+        {
+          id: 'email',
+          name: 'Email',
+          type: 'string',
+          required: false,
+        },
+        {
+          id: 'status',
+          name: 'Status',
+          type: 'select',
+          required: true,
+          options: ['active', 'inactive'],
+        },
+      ],
+    }
+  }
+
   if (objectDescriptor.id !== 'installedAsset') {
     return { ...objectDescriptor }
   }
@@ -144,6 +183,13 @@ function buildDefaultBlueprint(manifest) {
         id: 'installedAsset-grid',
         objectId: 'installedAsset',
         name: 'Installed Assets',
+        type: 'grid',
+        config: {},
+      },
+      {
+        id: 'customer-grid',
+        objectId: 'customer',
+        name: 'Customers',
         type: 'grid',
         config: {},
       },

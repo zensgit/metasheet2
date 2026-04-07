@@ -292,13 +292,15 @@ describe('plugin-after-sales routes', () => {
     expect(res.body.data.installResult.createdObjects).toEqual([
       'serviceTicket',
       'installedAsset',
+      'customer',
     ])
     expect(res.body.data.installResult.createdViews).toEqual([
       'ticket-board',
       'installedAsset-grid',
+      'customer-grid',
     ])
-    expect(ensureObject).toHaveBeenCalledTimes(2)
-    expect(ensureView).toHaveBeenCalledTimes(2)
+    expect(ensureObject).toHaveBeenCalledTimes(3)
+    expect(ensureView).toHaveBeenCalledTimes(3)
     expect(ensureView).toHaveBeenNthCalledWith(1, {
       projectId: 'tenant_42:after-sales',
       sheetId: 'sheet_serviceTicket',
@@ -314,6 +316,15 @@ describe('plugin-after-sales routes', () => {
       descriptor: expect.objectContaining({
         id: 'installedAsset-grid',
         objectId: 'installedAsset',
+        type: 'grid',
+      }),
+    })
+    expect(ensureView).toHaveBeenNthCalledWith(3, {
+      projectId: 'tenant_42:after-sales',
+      sheetId: 'sheet_customer',
+      descriptor: expect.objectContaining({
+        id: 'customer-grid',
+        objectId: 'customer',
         type: 'grid',
       }),
     })

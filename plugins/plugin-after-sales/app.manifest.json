@@ -50,6 +50,11 @@
       "backing": "multitable"
     },
     {
+      "id": "customer",
+      "name": "Customer",
+      "backing": "multitable"
+    },
+    {
       "id": "warrantyPolicy",
       "name": "Warranty Policy",
       "backing": "service"

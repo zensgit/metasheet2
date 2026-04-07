@@ -94,6 +94,37 @@ describe('plugin-after-sales default blueprint', () => {
     })
   })
 
+  it('adds the customer multitable projection and default grid view', () => {
+    const result = blueprint.buildDefaultBlueprint(manifest)
+    const objects = Array.isArray(result.objects) ? result.objects as Array<Record<string, unknown>> : []
+    const customer = objects.find((objectDescriptor) => objectDescriptor.id === 'customer')
+
+    expect(customer).toMatchObject({
+      id: 'customer',
+      name: 'Customer',
+      backing: 'multitable',
+    })
+    expect(customer?.fields).toEqual([
+      expect.objectContaining({ id: 'customerCode', type: 'string', required: true }),
+      expect.objectContaining({ id: 'name', type: 'string', required: true }),
+      expect.objectContaining({ id: 'phone', type: 'string', required: false }),
+      expect.objectContaining({ id: 'email', type: 'string', required: false }),
+      expect.objectContaining({
+        id: 'status',
+        type: 'select',
+        required: true,
+        options: ['active', 'inactive'],
+      }),
+    ])
+    expect(result.views).toContainEqual({
+      id: 'customer-grid',
+      objectId: 'customer',
+      name: 'Customers',
+      type: 'grid',
+      config: {},
+    })
+  })
+
   it('keeps service-only objects unchanged', () => {
     const result = blueprint.buildDefaultBlueprint(manifest)
     const objects = Array.isArray(result.objects) ? result.objects as Array<Record<string, unknown>> : []
