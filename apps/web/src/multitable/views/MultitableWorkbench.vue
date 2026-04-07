@@ -79,6 +79,7 @@
           v-if="activeViewType === 'form'"
           :fields="scopedAllFields" :hidden-field-ids="workbench.activeView.value?.hiddenFieldIds"
           :record="selectedRecordResolved" :loading="grid.loading.value"
+          :record-id="selectedRecordId"
           :read-only="formReadOnly"
           :field-permissions="effectiveFieldPermissions"
           :row-actions="effectiveRowActions"

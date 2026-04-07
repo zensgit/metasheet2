@@ -1755,6 +1755,37 @@ async function assignPersonViaDrawer(page, { searchValue, personFieldName, perso
   record('ui.person.assign', true, { personDisplay })
 }
 
+async function waitForAttachmentUploadsSettled(page, attachmentField, attachmentNames) {
+  const saveButton = page.getByRole('button', { name: 'Save' })
+  const deadline = Date.now() + timeoutMs
+
+  await attachmentField.getByText('Uploading...').waitFor({ state: 'visible', timeout: timeoutMs })
+
+  while (Date.now() < deadline) {
+    const uploadingVisible = await attachmentField.getByText('Uploading...').isVisible().catch(() => false)
+    const renderedNames = await attachmentField.locator('.meta-attachment-list__name').evaluateAll(
+      (nodes) => nodes.map((node) => node.textContent?.trim() ?? '').filter(Boolean),
+    ).catch(() => [])
+    const hasAllExpectedNames = attachmentNames.every((name) => renderedNames.includes(name))
+    const saveDisabled = await saveButton.isDisabled().catch(() => true)
+
+    if (!uploadingVisible && hasAllExpectedNames && !saveDisabled) {
+      return
+    }
+
+    await page.waitForTimeout(150)
+  }
+
+  const finalNames = await attachmentField.locator('.meta-attachment-list__name').evaluateAll(
+    (nodes) => nodes.map((node) => node.textContent?.trim() ?? '').filter(Boolean),
+  ).catch(() => [])
+  const uploadingVisible = await attachmentField.getByText('Uploading...').isVisible().catch(() => false)
+  const saveDisabled = await saveButton.isDisabled().catch(() => true)
+  throw new Error(
+    `Attachment uploads did not settle before submit: uploadingVisible=${uploadingVisible} saveDisabled=${saveDisabled} rendered=${JSON.stringify(finalNames)}`,
+  )
+}
+
 async function verifyFormUploadAndComments(page, { baseId, sheetId, viewId, recordId, attachmentFieldName, attachmentName }) {
   await page.goto(multitableUrl(baseId, sheetId, viewId, { mode: 'form', recordId }), { waitUntil: 'domcontentloaded', timeout: timeoutMs })
   await page.getByRole('button', { name: 'Save' }).waitFor({ state: 'visible', timeout: timeoutMs })
@@ -1770,8 +1801,7 @@ async function verifyFormUploadAndComments(page, { baseId, sheetId, viewId, reco
   fs.writeFileSync(uploadPath, `multitable smoke ${new Date().toISOString()}\n`)
   const attachmentField = page.locator('.meta-form-view__field').filter({ hasText: attachmentFieldName }).first()
   await attachmentField.locator('input[type="file"]').setInputFiles(uploadPath)
-  await attachmentField.getByText('Uploading...').waitFor({ state: 'visible', timeout: timeoutMs })
-  await attachmentField.getByText('Uploading...').waitFor({ state: 'hidden', timeout: timeoutMs })
+  await waitForAttachmentUploadsSettled(page, attachmentField, [attachmentName])
   await page.getByRole('button', { name: 'Save' }).click()
   await page.getByText('Changes saved').first().waitFor({ state: 'visible', timeout: timeoutMs })
 
@@ -1819,8 +1849,7 @@ async function verifyFormAttachmentLifecycle(page, {
 
   const attachmentField = page.locator('.meta-form-view__field').filter({ hasText: attachmentFieldName }).first()
   await attachmentField.locator('input[type="file"]').setInputFiles(uploads)
-  await attachmentField.getByText('Uploading...').waitFor({ state: 'visible', timeout: timeoutMs })
-  await attachmentField.getByText('Uploading...').waitFor({ state: 'hidden', timeout: timeoutMs })
+  await waitForAttachmentUploadsSettled(page, attachmentField, attachmentNames)
   await page.getByRole('button', { name: 'Save' }).click()
   await page.getByText('Changes saved').first().waitFor({ state: 'visible', timeout: timeoutMs })
 

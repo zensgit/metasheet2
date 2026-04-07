@@ -160,6 +160,7 @@ const props = defineProps<{
   fields: MetaField[]
   hiddenFieldIds?: string[]
   record?: MetaRecord | null
+  recordId?: string | null
   loading: boolean
   readOnly?: boolean
   submitting?: boolean
@@ -205,6 +206,7 @@ const hasUnsavedChanges = computed(() => {
 
 const hasPendingAttachmentActions = computed(() => Object.keys(attachmentActivity.value).length > 0)
 const formDirty = computed(() => hasUnsavedChanges.value || hasPendingAttachmentActions.value)
+const effectiveRecordId = computed(() => props.record?.id ?? props.recordId ?? undefined)
 
 function formFieldAffordance(fieldId: string) {
   return resolveFieldCommentAffordance(props.commentPresence, fieldId)
@@ -343,7 +345,7 @@ async function onFormFileSelect(fieldId: string, e: Event) {
     const newIds: string[] = []
     for (const file of Array.from(files)) {
       const attachment = await props.uploadFn(file, {
-        recordId: props.record?.id,
+        recordId: effectiveRecordId.value,
         fieldId,
       })
       rememberLocalAttachment(fieldId, attachment)
@@ -364,7 +366,7 @@ async function onRemoveAttachment(fieldId: string, attachmentId: string) {
     setAttachmentActivity(fieldId, 'removing')
     try {
       await props.deleteAttachmentFn(attachmentId, {
-        recordId: props.record?.id,
+        recordId: effectiveRecordId.value,
         fieldId,
       })
     } catch (error: any) {
@@ -387,7 +389,7 @@ async function onClearAttachments(fieldId: string) {
     try {
       for (const attachmentId of existingIds) {
         await props.deleteAttachmentFn(attachmentId, {
-          recordId: props.record?.id,
+          recordId: effectiveRecordId.value,
           fieldId,
         })
         forgetLocalAttachment(fieldId, attachmentId)

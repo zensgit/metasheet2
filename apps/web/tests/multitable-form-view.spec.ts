@@ -262,4 +262,62 @@ describe('MetaFormView attachment flow', () => {
     app.unmount()
     container.remove()
   })
+
+  it('uses recordId fallback when record is temporarily unavailable during attachment upload', async () => {
+    const uploadFn = vi.fn().mockResolvedValue({
+      id: 'att_fallback',
+      filename: 'fallback.pdf',
+      mimeType: 'application/pdf',
+      size: 2048,
+      url: 'https://files.example.com/fallback.pdf',
+      thumbnailUrl: null,
+      uploadedAt: '2026-03-25T01:00:00.000Z',
+    })
+
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+
+    const app = createApp({
+      render() {
+        return h(MetaFormView, {
+          fields: [
+            { id: 'fld_files', name: 'Files', type: 'attachment' },
+          ],
+          record: null,
+          recordId: 'rec_fallback',
+          loading: false,
+          readOnly: false,
+          uploadFn,
+          onSubmit: vi.fn(),
+          onOpenLinkPicker: vi.fn(),
+        })
+      },
+    })
+
+    app.mount(container)
+
+    const input = container.querySelector('.meta-form-view__file-input') as HTMLInputElement | null
+    const file = new File(['fallback'], 'fallback.pdf', { type: 'application/pdf' })
+    Object.defineProperty(input, 'files', {
+      value: {
+        0: file,
+        length: 1,
+        item: (index: number) => (index === 0 ? file : null),
+        [Symbol.iterator]: function* iterator() {
+          yield file
+        },
+      },
+      configurable: true,
+    })
+    input?.dispatchEvent(new Event('change'))
+    await flushUi()
+
+    expect(uploadFn).toHaveBeenCalledWith(file, {
+      recordId: 'rec_fallback',
+      fieldId: 'fld_files',
+    })
+
+    app.unmount()
+    container.remove()
+  })
 })
