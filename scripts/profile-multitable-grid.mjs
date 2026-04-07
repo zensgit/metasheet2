@@ -1,6 +1,7 @@
 import fs from 'fs'
 import path from 'path'
 import { chromium } from '@playwright/test'
+import { resolveMultitableAuthToken } from './multitable-auth.mjs'
 
 const apiBase = process.env.API_BASE || 'http://127.0.0.1:7778'
 const webBase = process.env.WEB_BASE || 'http://127.0.0.1:8899'
@@ -72,7 +73,7 @@ async function measure(name, fn, details = {}) {
   return value
 }
 
-async function getDevToken() {
+async function getAuthToken() {
   const perms = [
     'multitable:read',
     'multitable:write',
@@ -81,14 +82,13 @@ async function getDevToken() {
     'permissions:read',
     'permissions:write',
   ].join(',')
-  const url = `${apiBase}/api/auth/dev-token?userId=dev-admin&roles=admin&perms=${encodeURIComponent(perms)}`
-  const result = await fetchJson(url)
-  const token = result.json?.token || ''
-  record('api.dev-token', Boolean(result.res.ok && token), { status: result.res.status })
-  if (!result.res.ok || !token) {
-    throw new Error('Dev token unavailable')
-  }
-  return token
+  return resolveMultitableAuthToken({
+    apiBase,
+    envToken: process.env.AUTH_TOKEN || '',
+    fetchJson,
+    record,
+    perms,
+  })
 }
 
 async function fetchHealth() {
@@ -309,7 +309,7 @@ async function run() {
   fs.mkdirSync(outputDir, { recursive: true })
 
   await fetchHealth()
-  const token = await getDevToken()
+  const token = await getAuthToken()
   const bases = await fetchBases(token)
   let base = bases.find((item) => item.id === 'base_legacy') || bases[0]
   if (!base) {
