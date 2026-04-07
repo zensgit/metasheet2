@@ -54,6 +54,15 @@ interface FakeContext {
           sheetId: string
           data: Record<string, unknown>
         }) => Promise<unknown>
+        getRecord: (input: {
+          sheetId: string
+          recordId: string
+        }) => Promise<unknown>
+        patchRecord: (input: {
+          sheetId: string
+          recordId: string
+          changes: Record<string, unknown>
+        }) => Promise<unknown>
       }
     }
     events: {
@@ -150,6 +159,8 @@ function createContext(): {
   ensureObject: ReturnType<typeof vi.fn>
   ensureView: ReturnType<typeof vi.fn>
   createRecord: ReturnType<typeof vi.fn>
+  getRecord: ReturnType<typeof vi.fn>
+  patchRecord: ReturnType<typeof vi.fn>
   db: FakeDatabase
 } {
   const routes = new Map<string, RegisteredHandler>()
@@ -184,6 +195,31 @@ function createContext(): {
     version: 1,
     data: input.data,
   }))
+  const getRecord = vi.fn(async (input: { sheetId: string; recordId: string }) => ({
+    id: input.recordId,
+    sheetId: input.sheetId,
+    version: 3,
+    data: {
+      ticketNo: 'TK-2001',
+      title: 'No cooling output',
+      source: 'phone',
+      priority: 'high',
+      status: 'new',
+    },
+  }))
+  const patchRecord = vi.fn(async (input: { sheetId: string; recordId: string; changes: Record<string, unknown> }) => ({
+    id: input.recordId,
+    sheetId: input.sheetId,
+    version: 4,
+    data: {
+      ticketNo: 'TK-2001',
+      title: 'No cooling output',
+      source: 'phone',
+      priority: 'high',
+      status: 'new',
+      ...input.changes,
+    },
+  }))
 
   const context: FakeContext = {
     api: {
@@ -201,6 +237,8 @@ function createContext(): {
         },
         records: {
           createRecord,
+          getRecord,
+          patchRecord,
         },
       },
       events: {
@@ -218,7 +256,7 @@ function createContext(): {
     },
   }
 
-  return { context, routes, ensureObject, ensureView, createRecord, db }
+  return { context, routes, ensureObject, ensureView, createRecord, getRecord, patchRecord, db }
 }
 
 function buildReq(overrides: Record<string, unknown> = {}) {
@@ -240,6 +278,8 @@ describe('plugin-after-sales routes', () => {
   let ensureObject: ReturnType<typeof vi.fn>
   let ensureView: ReturnType<typeof vi.fn>
   let createRecord: ReturnType<typeof vi.fn>
+  let getRecord: ReturnType<typeof vi.fn>
+  let patchRecord: ReturnType<typeof vi.fn>
   let db: FakeDatabase
   let communicationRegister: ReturnType<typeof vi.fn>
   let eventsOn: ReturnType<typeof vi.fn>
@@ -251,6 +291,8 @@ describe('plugin-after-sales routes', () => {
     ensureObject = setup.ensureObject
     ensureView = setup.ensureView
     createRecord = setup.createRecord
+    getRecord = setup.getRecord
+    patchRecord = setup.patchRecord
     db = setup.db
     communicationRegister = setup.context.communication.register
     eventsOn = setup.context.api.events.on
@@ -442,6 +484,124 @@ describe('plugin-after-sales routes', () => {
     expect(res.statusCode).toBe(409)
     expect(res.body.error.code).toBe('AFTER_SALES_NOT_INSTALLED')
     expect(createRecord).not.toHaveBeenCalled()
+  })
+
+  it('requests a ticket refund by patching the record and emitting ticket.refundRequested', async () => {
+    const handler = routes.get('POST /api/after-sales/tickets/:ticketId/refund-request')
+    const res = new FakeResponse()
+
+    db.rows.push({
+      id: 'fake-uuid-1',
+      tenant_id: 'tenant_42',
+      app_id: 'after-sales',
+      project_id: 'tenant_42:after-sales',
+      template_id: 'after-sales-default',
+      template_version: '0.1.0',
+      mode: 'enable',
+      status: 'installed',
+      created_objects_json: JSON.stringify(['serviceTicket']),
+      created_views_json: JSON.stringify(['ticket-board']),
+      warnings_json: JSON.stringify([]),
+      display_name: 'After-sales',
+      config_json: JSON.stringify({}),
+      last_install_at: new Date(),
+      created_at: new Date(),
+    })
+
+    await handler?.(buildReq({
+      user: {
+        id: 'writer_42',
+        tenantId: 'tenant_42',
+        role: 'user',
+        roles: ['user'],
+        perms: ['after_sales:write'],
+      },
+      params: {
+        ticketId: 'rec_ticket_001',
+      },
+      body: {
+        refundAmount: 88.5,
+        requesterName: 'Alice',
+        reason: 'Damaged fan motor',
+      },
+    }), res)
+
+    expect(res.statusCode).toBe(202)
+    expect(getRecord).toHaveBeenCalledWith({
+      sheetId: 'tenant_42:after-sales:serviceTicket:sheet',
+      recordId: 'rec_ticket_001',
+    })
+    expect(patchRecord).toHaveBeenCalledWith({
+      sheetId: 'tenant_42:after-sales:serviceTicket:sheet',
+      recordId: 'rec_ticket_001',
+      changes: {
+        refundAmount: 88.5,
+      },
+    })
+    expect(eventsEmit).toHaveBeenCalledWith(
+      'ticket.refundRequested',
+      expect.objectContaining({
+        projectId: 'tenant_42:after-sales',
+        ticket: expect.objectContaining({
+          id: 'rec_ticket_001',
+          ticketNo: 'TK-2001',
+          refundAmount: 88.5,
+          requestedBy: 'writer_42',
+          requestedByName: 'Alice',
+          reason: 'Damaged fan motor',
+        }),
+      }),
+    )
+    expect(res.body.data.event).toEqual({
+      accepted: true,
+      event: 'ticket.refundRequested',
+    })
+  })
+
+  it('returns 404 when refund is requested for a missing ticket', async () => {
+    const handler = routes.get('POST /api/after-sales/tickets/:ticketId/refund-request')
+    const res = new FakeResponse()
+    getRecord.mockRejectedValueOnce(Object.assign(new Error('Record not found: rec_missing'), {
+      code: 'NOT_FOUND',
+    }))
+
+    db.rows.push({
+      id: 'fake-uuid-1',
+      tenant_id: 'tenant_42',
+      app_id: 'after-sales',
+      project_id: 'tenant_42:after-sales',
+      template_id: 'after-sales-default',
+      template_version: '0.1.0',
+      mode: 'enable',
+      status: 'installed',
+      created_objects_json: JSON.stringify(['serviceTicket']),
+      created_views_json: JSON.stringify(['ticket-board']),
+      warnings_json: JSON.stringify([]),
+      display_name: 'After-sales',
+      config_json: JSON.stringify({}),
+      last_install_at: new Date(),
+      created_at: new Date(),
+    })
+
+    await handler?.(buildReq({
+      user: {
+        id: 'writer_42',
+        tenantId: 'tenant_42',
+        role: 'user',
+        roles: ['user'],
+        perms: ['after_sales:write'],
+      },
+      params: {
+        ticketId: 'rec_missing',
+      },
+      body: {
+        refundAmount: 88.5,
+      },
+    }), res)
+
+    expect(res.statusCode).toBe(404)
+    expect(res.body.error.code).toBe('NOT_FOUND')
+    expect(patchRecord).not.toHaveBeenCalled()
   })
 
   it('emits ticket.created and returns accepted event metadata', async () => {
@@ -801,6 +961,7 @@ describe('plugin-after-sales routes', () => {
         emitTicketOverdue: expect.any(Function),
         emitFollowUpDue: expect.any(Function),
         createTicket: expect.any(Function),
+        requestTicketRefund: expect.any(Function),
       }),
     )
   })

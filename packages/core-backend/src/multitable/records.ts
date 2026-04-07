@@ -21,7 +21,27 @@ export type CreateMultitableRecordInput = {
   data: Record<string, unknown>
 }
 
+export type GetMultitableRecordInput = {
+  query: MultitableRecordsQueryFn
+  sheetId: string
+  recordId: string
+}
+
+export type PatchMultitableRecordInput = {
+  query: MultitableRecordsQueryFn
+  sheetId: string
+  recordId: string
+  changes: Record<string, unknown>
+}
+
 export type CreatedMultitableRecord = {
+  id: string
+  sheetId: string
+  version: number
+  data: Record<string, unknown>
+}
+
+export type LoadedMultitableRecord = {
   id: string
   sheetId: string
   version: number
@@ -102,6 +122,102 @@ function normalizeFieldValue(
   }
 }
 
+function normalizeRecordData(value: unknown): Record<string, unknown> {
+  if (value && typeof value === 'object' && !Array.isArray(value)) {
+    return value as Record<string, unknown>
+  }
+  if (typeof value === 'string' && value.trim()) {
+    try {
+      const parsed = JSON.parse(value)
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        return parsed as Record<string, unknown>
+      }
+    } catch {
+      return {}
+    }
+  }
+  return {}
+}
+
+function buildNormalizedPatch(
+  fields: Array<{ id: string; type: string; options?: Array<{ value: string }> }>,
+  data: Record<string, unknown>,
+): Record<string, unknown> {
+  const fieldById = new Map(fields.map((field) => [field.id, field]))
+  const patch: Record<string, unknown> = {}
+
+  for (const [fieldId, rawValue] of Object.entries(data ?? {})) {
+    const field = fieldById.get(fieldId)
+    if (!field) {
+      throw new MultitableRecordValidationError(`Unknown fieldId: ${fieldId}`)
+    }
+    patch[fieldId] = normalizeFieldValue(field, rawValue)
+  }
+
+  return patch
+}
+
+export async function getRecord(
+  input: GetMultitableRecordInput,
+): Promise<LoadedMultitableRecord> {
+  const recordRes = await input.query(
+    'SELECT id, sheet_id, version, data FROM meta_records WHERE id = $1 AND sheet_id = $2',
+    [input.recordId, input.sheetId],
+  )
+  const row = (recordRes.rows as any[])[0]
+  if (!row) {
+    throw new MultitableRecordNotFoundError(`Record not found: ${input.recordId}`)
+  }
+  return {
+    id: String(row.id),
+    sheetId: String(row.sheet_id),
+    version: Number(row.version ?? 1),
+    data: normalizeRecordData(row.data),
+  }
+}
+
+export async function patchRecord(
+  input: PatchMultitableRecordInput,
+): Promise<LoadedMultitableRecord> {
+  const query = input.query
+  const sheet = await loadSheetRow(query, input.sheetId)
+  if (!sheet) {
+    throw new MultitableRecordNotFoundError(`Sheet not found: ${input.sheetId}`)
+  }
+
+  const fields = await loadFieldsForSheet({ query }, input.sheetId)
+  if (fields.length === 0) {
+    throw new MultitableRecordNotFoundError(`Sheet not found: ${input.sheetId}`)
+  }
+
+  const existing = await getRecord({
+    query,
+    sheetId: input.sheetId,
+    recordId: input.recordId,
+  })
+  const patch = buildNormalizedPatch(fields, input.changes)
+  const nextData = {
+    ...existing.data,
+    ...patch,
+  }
+
+  const updated = await query(
+    `UPDATE meta_records
+     SET data = $1::jsonb, version = version + 1, updated_at = now()
+     WHERE id = $2 AND sheet_id = $3
+     RETURNING version`,
+    [JSON.stringify(nextData), input.recordId, input.sheetId],
+  )
+
+  const version = Number((updated.rows as any[])[0]?.version ?? existing.version + 1)
+  return {
+    id: existing.id,
+    sheetId: existing.sheetId,
+    version: Number.isFinite(version) ? version : existing.version + 1,
+    data: nextData,
+  }
+}
+
 export async function createRecord(
   input: CreateMultitableRecordInput,
 ): Promise<CreatedMultitableRecord> {
@@ -116,16 +232,7 @@ export async function createRecord(
     throw new MultitableRecordNotFoundError(`Sheet not found: ${input.sheetId}`)
   }
 
-  const fieldById = new Map(fields.map((field) => [field.id, field]))
-  const patch: Record<string, unknown> = {}
-
-  for (const [fieldId, rawValue] of Object.entries(input.data ?? {})) {
-    const field = fieldById.get(fieldId)
-    if (!field) {
-      throw new MultitableRecordValidationError(`Unknown fieldId: ${fieldId}`)
-    }
-    patch[fieldId] = normalizeFieldValue(field, rawValue)
-  }
+  const patch = buildNormalizedPatch(fields, input.data)
 
   const recordId = `rec_${randomUUID()}`
   const inserted = await query(

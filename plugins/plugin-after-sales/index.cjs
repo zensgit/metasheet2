@@ -16,6 +16,7 @@ const {
 } = require('./lib/workflow-adapter.cjs')
 const {
   buildCreateTicketCommand,
+  buildRequestRefundCommand,
   buildTicketCreatedEventPayload,
   buildRefundRequestedEventPayload,
   buildTicketOverdueEventPayload,
@@ -185,7 +186,9 @@ function getMultitableWriteApi(context) {
     !provisioning ||
     typeof provisioning.getObjectSheetId !== 'function' ||
     !records ||
-    typeof records.createRecord !== 'function'
+    typeof records.createRecord !== 'function' ||
+    typeof records.getRecord !== 'function' ||
+    typeof records.patchRecord !== 'function'
   ) {
     return null
   }
@@ -452,6 +455,127 @@ module.exports = {
           res.status(500).json({
             ok: false,
             error: { code: 'INTERNAL_ERROR', message: 'Failed to create after-sales ticket' },
+          })
+        }
+      },
+    )
+
+    context.api.http.addRoute(
+      'POST',
+      '/api/after-sales/tickets/:ticketId/refund-request',
+      async (req, res) => {
+        try {
+          const userId = getUserId(req)
+          if (!userId) {
+            sendUnauthorized(res)
+            return
+          }
+          if (!hasAfterSalesWriteAccess(req)) {
+            sendWriteForbidden(res)
+            return
+          }
+
+          const ticketId = typeof req?.params?.ticketId === 'string' ? req.params.ticketId.trim() : ''
+          if (!ticketId) {
+            res.status(400).json({
+              ok: false,
+              error: { code: 'VALIDATION_ERROR', message: 'ticketId is required' },
+            })
+            return
+          }
+
+          const multitableApi = getMultitableWriteApi(context)
+          if (!multitableApi) {
+            res.status(503).json({
+              ok: false,
+              error: {
+                code: 'MULTITABLE_UNAVAILABLE',
+                message: 'Multitable record writer is not available on plugin context',
+              },
+            })
+            return
+          }
+
+          const tenantId = getTenantId(req)
+          const current = await installer.loadCurrent(context, tenantId, appManifest.id)
+          if (!current || current.status === 'not-installed') {
+            res.status(409).json({
+              ok: false,
+              error: {
+                code: 'AFTER_SALES_NOT_INSTALLED',
+                message: 'After-sales must be installed before requesting refunds',
+              },
+            })
+            return
+          }
+
+          const projectId = current.projectId || installer.getProjectId(tenantId, appManifest.id)
+          const sheetId = multitableApi.provisioning.getObjectSheetId(projectId, 'serviceTicket')
+          const existingRecord = await multitableApi.records.getRecord({
+            sheetId,
+            recordId: ticketId,
+          })
+          const command = buildRequestRefundCommand((req && req.body) || {}, {
+            id: existingRecord.id,
+            ticketNo: existingRecord.data.ticketNo,
+            title: existingRecord.data.title,
+          })
+          const updatedRecord = await multitableApi.records.patchRecord({
+            sheetId,
+            recordId: ticketId,
+            changes: command.changes,
+          })
+
+          let event = { accepted: false, event: 'ticket.refundRequested' }
+          try {
+            const payload = buildRefundRequestedEventPayload({
+              ticket: command.eventTicket,
+            }, {
+              tenantId,
+              projectId,
+              requesterId: userId,
+            })
+            context.api.events.emit('ticket.refundRequested', payload)
+            event = { accepted: true, event: 'ticket.refundRequested' }
+          } catch (err) {
+            logger.error && logger.error('after-sales ticket.refundRequested emit after record patch failed', err)
+          }
+
+          res.status(202).json({
+            ok: true,
+            data: {
+              projectId,
+              ticket: {
+                id: updatedRecord.id,
+                version: updatedRecord.version,
+                data: updatedRecord.data,
+              },
+              event,
+            },
+          })
+        } catch (err) {
+          if (err && err.code === 'AFTER_SALES_EVENT_VALIDATION_FAILED') {
+            sendBadRequest(res, err)
+            return
+          }
+          if (err && err.code === 'VALIDATION_ERROR') {
+            res.status(400).json({
+              ok: false,
+              error: { code: err.code, message: err.message },
+            })
+            return
+          }
+          if (err && err.code === 'NOT_FOUND') {
+            res.status(404).json({
+              ok: false,
+              error: { code: err.code, message: err.message },
+            })
+            return
+          }
+          logger.error && logger.error('after-sales refund request failed', err)
+          res.status(500).json({
+            ok: false,
+            error: { code: 'INTERNAL_ERROR', message: 'Failed to request ticket refund' },
           })
         }
       },
@@ -743,6 +867,55 @@ module.exports = {
           event: {
             accepted: true,
             event: 'ticket.created',
+          },
+        }
+      },
+      async requestTicketRefund(args) {
+        const tenantId = (args && typeof args === 'object' && typeof args.tenantId === 'string' && args.tenantId.trim())
+          ? args.tenantId.trim()
+          : 'default'
+        const projectId = installer.getProjectId(tenantId, appManifest.id)
+        const ticketId = typeof args?.ticketId === 'string' ? args.ticketId.trim() : ''
+        if (!ticketId) {
+          throw new Error('ticketId is required')
+        }
+        const multitableApi = getMultitableWriteApi(context)
+        if (!multitableApi) {
+          throw new Error('Multitable record writer is not available on plugin context')
+        }
+        const sheetId = multitableApi.provisioning.getObjectSheetId(projectId, 'serviceTicket')
+        const existingRecord = await multitableApi.records.getRecord({
+          sheetId,
+          recordId: ticketId,
+        })
+        const command = buildRequestRefundCommand(args || {}, {
+          id: existingRecord.id,
+          ticketNo: existingRecord.data.ticketNo,
+          title: existingRecord.data.title,
+        })
+        const updatedRecord = await multitableApi.records.patchRecord({
+          sheetId,
+          recordId: ticketId,
+          changes: command.changes,
+        })
+        const payload = buildRefundRequestedEventPayload({
+          ticket: command.eventTicket,
+        }, {
+          tenantId,
+          projectId,
+          requesterId: typeof args?.requesterId === 'string' ? args.requesterId : 'system',
+        })
+        context.api.events.emit('ticket.refundRequested', payload)
+        return {
+          projectId,
+          ticket: {
+            id: updatedRecord.id,
+            version: updatedRecord.version,
+            data: updatedRecord.data,
+          },
+          event: {
+            accepted: true,
+            event: 'ticket.refundRequested',
           },
         }
       },

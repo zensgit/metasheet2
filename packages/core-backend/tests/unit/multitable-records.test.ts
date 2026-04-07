@@ -2,8 +2,10 @@ import { describe, expect, it } from 'vitest'
 
 import {
   createRecord,
+  getRecord,
   MultitableRecordNotFoundError,
   MultitableRecordValidationError,
+  patchRecord,
   type MultitableRecordsQueryFn,
 } from '../../src/multitable/records'
 
@@ -110,6 +112,25 @@ function createQuery(): {
       return { rows: [{ version: 1 }], rowCount: 1 }
     }
 
+    if (normalized.includes('FROM meta_records WHERE id = $1 AND sheet_id = $2')) {
+      const [recordId, sheetId] = params as [string, string]
+      return {
+        rows: records.filter((record) => record.id === recordId && record.sheet_id === sheetId),
+      }
+    }
+
+    if (normalized.startsWith('UPDATE meta_records')) {
+      const [dataJson, recordId, sheetId] = params as [string, string, string]
+      const existing = records.find((record) => record.id === recordId && record.sheet_id === sheetId)
+      if (!existing) return { rows: [], rowCount: 0 }
+      existing.data = JSON.parse(dataJson)
+      existing.version += 1
+      return {
+        rows: [{ version: existing.version }],
+        rowCount: 1,
+      }
+    }
+
     return { rows: [] }
   }
 
@@ -176,5 +197,67 @@ describe('multitable records helper', () => {
         priority: 'broken',
       },
     })).rejects.toBeInstanceOf(MultitableRecordValidationError)
+  })
+
+  it('loads an existing record by sheet and id', async () => {
+    const { query, records } = createQuery()
+    records.push({
+      id: 'rec_existing',
+      sheet_id: 'sheet_service_ticket',
+      data: {
+        ticketNo: 'TK-1001',
+        title: 'Broken compressor',
+        priority: 'urgent',
+      },
+      version: 2,
+    })
+
+    await expect(getRecord({
+      query,
+      sheetId: 'sheet_service_ticket',
+      recordId: 'rec_existing',
+    })).resolves.toEqual({
+      id: 'rec_existing',
+      sheetId: 'sheet_service_ticket',
+      version: 2,
+      data: {
+        ticketNo: 'TK-1001',
+        title: 'Broken compressor',
+        priority: 'urgent',
+      },
+    })
+  })
+
+  it('patches a supported field and increments version', async () => {
+    const { query, records } = createQuery()
+    records.push({
+      id: 'rec_existing',
+      sheet_id: 'sheet_service_ticket',
+      data: {
+        ticketNo: 'TK-1001',
+        title: 'Broken compressor',
+        priority: 'urgent',
+      },
+      version: 2,
+    })
+
+    await expect(patchRecord({
+      query,
+      sheetId: 'sheet_service_ticket',
+      recordId: 'rec_existing',
+      changes: {
+        refundAmount: '88.5',
+      },
+    })).resolves.toEqual({
+      id: 'rec_existing',
+      sheetId: 'sheet_service_ticket',
+      version: 3,
+      data: {
+        ticketNo: 'TK-1001',
+        title: 'Broken compressor',
+        priority: 'urgent',
+        refundAmount: 88.5,
+      },
+    })
   })
 })

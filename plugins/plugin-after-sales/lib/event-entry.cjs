@@ -156,6 +156,29 @@ function buildCreateTicketCommand(input) {
   }
 }
 
+function buildRequestRefundCommand(input, existingTicket) {
+  const ticket = existingTicket && typeof existingTicket === 'object' ? existingTicket : {}
+  const command = input && typeof input === 'object' && !Array.isArray(input) ? input : {}
+  const refundAmount = requiredNumber(command.refundAmount, 'refundAmount')
+
+  return {
+    changes: {
+      refundAmount,
+    },
+    eventTicket: {
+      id: requiredString(ticket.id, 'ticket.id'),
+      ticketNo: requiredString(ticket.ticketNo, 'ticket.ticketNo'),
+      title: requiredString(ticket.title, 'ticket.title'),
+      refundAmount,
+      requestedBy: optionalString(command.requestedBy),
+      requestedByName: optionalString(command.requestedByName ?? command.requesterName),
+      reason: optionalString(command.reason),
+      currency: optionalString(command.currency),
+      requestedAt: optionalString(command.requestedAt),
+    },
+  }
+}
+
 function buildTicketOverdueEventPayload(input, meta) {
   const ticket = input && typeof input.ticket === 'object' && !Array.isArray(input.ticket) ? input.ticket : {}
   const assignedTo = optionalRecipient(ticket.assignedTo)
@@ -217,6 +240,7 @@ function buildFollowUpDueEventPayload(input, meta) {
 
 module.exports = {
   buildCreateTicketCommand,
+  buildRequestRefundCommand,
   buildTicketCreatedEventPayload,
   buildRefundRequestedEventPayload,
   buildTicketOverdueEventPayload,

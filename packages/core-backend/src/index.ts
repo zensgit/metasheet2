@@ -46,6 +46,8 @@ import {
 } from './multitable/provisioning'
 import {
   createRecord as createMultitableRecord,
+  getRecord as getMultitableRecord,
+  patchRecord as patchMultitableRecord,
   type MultitableRecordsQueryFn,
 } from './multitable/records'
 import { installMetrics, requestMetricsMiddleware } from './metrics/metrics'
@@ -347,6 +349,45 @@ export class MetaSheetServer {
                 query: txQuery,
                 sheetId,
                 data,
+              })
+            })
+          },
+          getRecord: async ({ sheetId, recordId }) => {
+            const txQuery: MultitableRecordsQueryFn = async (sql, params) => {
+              const result = await poolManager.get().query(sql, params)
+              return {
+                rows: Array.isArray((result as { rows?: unknown[] }).rows)
+                  ? (result as { rows: unknown[] }).rows
+                  : [],
+                rowCount: typeof (result as { rowCount?: number }).rowCount === 'number'
+                  ? (result as { rowCount: number }).rowCount
+                  : undefined,
+              }
+            }
+            return getMultitableRecord({
+              query: txQuery,
+              sheetId,
+              recordId,
+            })
+          },
+          patchRecord: async ({ sheetId, recordId, changes }) => {
+            return poolManager.get().transaction(async ({ query }) => {
+              const txQuery: MultitableRecordsQueryFn = async (sql, params) => {
+                const result = await query(sql, params)
+                return {
+                  rows: Array.isArray((result as { rows?: unknown[] }).rows)
+                    ? (result as { rows: unknown[] }).rows
+                    : [],
+                  rowCount: typeof (result as { rowCount?: number }).rowCount === 'number'
+                    ? (result as { rowCount: number }).rowCount
+                    : undefined,
+                }
+              }
+              return patchMultitableRecord({
+                query: txQuery,
+                sheetId,
+                recordId,
+                changes,
               })
             })
           },

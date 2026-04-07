@@ -413,6 +413,25 @@ export interface MultitableRecordsAPI {
     version: number
     data: Record<string, unknown>
   }>
+  getRecord(input: {
+    sheetId: string
+    recordId: string
+  }): Promise<{
+    id: string
+    sheetId: string
+    version: number
+    data: Record<string, unknown>
+  }>
+  patchRecord(input: {
+    sheetId: string
+    recordId: string
+    changes: Record<string, unknown>
+  }): Promise<{
+    id: string
+    sheetId: string
+    version: number
+    data: Record<string, unknown>
+  }>
 }
 
 export interface MultitableAPI {
