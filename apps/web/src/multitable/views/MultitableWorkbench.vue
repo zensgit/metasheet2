@@ -40,6 +40,16 @@
       <button v-if="caps.canManageViews.value && canConfigureCurrentView" class="mt-workbench__mgr-btn" @click="showViewManager = true">&#x2630; Views</button>
       <button v-if="caps.canManageAutomation.value" class="mt-workbench__mgr-btn" @click="openWorkflowDesigner()">&#x2699; Workflow</button>
     </div>
+    <div
+      v-if="capabilityOriginNotice"
+      class="mt-workbench__capability-banner"
+      :class="`mt-workbench__capability-banner--${capabilityOriginNotice.source}`"
+      :data-capability-origin-source="capabilityOriginNotice.source"
+      data-capability-origin-banner="true"
+    >
+      <strong>{{ capabilityOriginNotice.title }}</strong>
+      <span>{{ capabilityOriginNotice.message }}</span>
+    </div>
     <MetaMentionPopover
       :visible="showMentionPopover"
       :items="mentionInboxState.summary.value?.items ?? []"
@@ -455,6 +465,7 @@ const canCreateBasesAndSheets = computed(() => {
   const access = auth.getAccessSnapshot()
   return access.isAdmin || hasGrantedPermission(access.permissions, 'multitable:write')
 })
+const activeCapabilityOrigin = computed(() => grid.capabilityOrigin.value ?? workbench.capabilityOrigin.value ?? null)
 const effectiveViewPermissions = computed<Record<string, MetaViewPermission>>(() => {
   const merged: Record<string, MetaViewPermission> = { ...workbench.viewPermissions.value }
   if (workbench.activeViewId.value && grid.viewPermission.value) {
@@ -474,6 +485,54 @@ const mentionDisplayFieldId = computed(() =>
   ?? null,
 )
 const canConfigureCurrentView = computed(() => currentViewPermission.value?.canConfigure ?? true)
+const limitedCapabilityLabels = computed(() => {
+  const labels: string[] = []
+  if (!caps.canCreateRecord.value) labels.push('record creation')
+  if (!caps.canEditRecord.value) labels.push('editing')
+  if (!caps.canDeleteRecord.value) labels.push('deletion')
+  if (!caps.canManageFields.value) labels.push('field changes')
+  if (!caps.canManageSheetAccess.value) labels.push('sheet access changes')
+  if (!caps.canManageViews.value) labels.push('view configuration')
+  return labels
+})
+const capabilityOriginNotice = computed(() => {
+  const origin = activeCapabilityOrigin.value
+  if (!origin) return null
+
+  if (origin.source === 'admin') {
+    return {
+      source: origin.source,
+      title: 'Admin access',
+      message: 'This sheet is available through your administrator role.',
+    }
+  }
+
+  if (origin.source === 'global-rbac') {
+    return {
+      source: origin.source,
+      title: 'Workspace role access',
+      message: 'This sheet follows your workspace multitable permissions.',
+    }
+  }
+
+  if (origin.source === 'sheet-grant') {
+    return {
+      source: origin.source,
+      title: 'Shared sheet access',
+      message: 'This sheet is available through a direct sheet share, not just your workspace role.',
+    }
+  }
+
+  const limitedActions = limitedCapabilityLabels.value
+  const scopeMessage = limitedActions.length > 0
+    ? `${formatListWithAnd(limitedActions)} ${limitedActions.length === 1 ? 'is' : 'are'} limited on this sheet.`
+    : 'Some actions are intentionally limited on this sheet.'
+  return {
+    source: origin.source,
+    title: 'Restricted sheet access',
+    message: `This sheet narrows your workspace permissions. ${scopeMessage}`,
+  }
+})
 const visibleWorkbenchViews = computed(() =>
   workbench.views.value.filter((view) => effectiveViewPermissions.value[view.id]?.canAccess !== false),
 )
@@ -691,6 +750,13 @@ function pushUniqueIds(target: string[], ids: string[]) {
   for (const id of ids) {
     if (!target.includes(id)) target.push(id)
   }
+}
+
+function formatListWithAnd(items: string[]): string {
+  if (items.length === 0) return ''
+  if (items.length === 1) return items[0]
+  if (items.length === 2) return `${items[0]} and ${items[1]}`
+  return `${items.slice(0, -1).join(', ')}, and ${items[items.length - 1]}`
 }
 
 function resetCommentInteractionState() {
@@ -2364,6 +2430,39 @@ defineExpose({
 }
 .mt-workbench__conflict-btn--primary { background: #f59e0b; border-color: #f59e0b; color: #fff; }
 .mt-workbench__actions { display: flex; gap: 6px; padding: 4px 16px 0; }
+.mt-workbench__capability-banner {
+  margin: 8px 16px 0;
+  padding: 8px 12px;
+  border: 1px solid #d9d9d9;
+  border-radius: 10px;
+  background: #fafafa;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: #595959;
+}
+.mt-workbench__capability-banner strong { font-weight: 600; color: inherit; }
+.mt-workbench__capability-banner--admin {
+  border-color: #87e8de;
+  background: #f6ffed;
+  color: #135200;
+}
+.mt-workbench__capability-banner--global-rbac {
+  border-color: #b7eb8f;
+  background: #f6ffed;
+  color: #237804;
+}
+.mt-workbench__capability-banner--sheet-grant {
+  border-color: #91d5ff;
+  background: #e6f4ff;
+  color: #0958d9;
+}
+.mt-workbench__capability-banner--sheet-scope {
+  border-color: #ffd591;
+  background: #fff7e6;
+  color: #ad6800;
+}
 .mt-workbench__presence-chip { display: inline-flex; align-items: center; gap: 4px; padding: 3px 10px; border: 1px solid #91caff; border-radius: 12px; background: #e6f4ff; color: #0958d9; font-size: 12px; }
 .mt-workbench__presence-chip strong { font-weight: 600; color: #003eb3; }
 .mt-workbench__mention-chip { display: inline-flex; align-items: center; gap: 4px; padding: 3px 10px; border: 1px solid #e6a23c; border-radius: 12px; background: #fdf6ec; font-size: 12px; cursor: pointer; color: #e6a23c; }
