@@ -38,6 +38,11 @@ import { messageBus } from './integration/messaging/message-bus'
 import { jwtAuthMiddleware, isWhitelisted } from './auth/jwt-middleware'
 import { authService } from './auth/AuthService'
 import { cache } from './cache-init'
+import {
+  ensureObject as ensureMultitableObject,
+  ensureView as ensureMultitableView,
+  type MultitableProvisioningQueryFn,
+} from './multitable/provisioning'
 import { installMetrics, requestMetricsMiddleware } from './metrics/metrics'
 import { getPoolStats } from './db/pg'
 import { isDatabaseSchemaError } from './utils/database-errors'
@@ -273,6 +278,47 @@ export class MetaSheetServer {
           update: async () => 0,
           delete: async () => 0
         })
+      },
+
+      multitable: {
+        provisioning: {
+          ensureObject: async ({ projectId, baseId, descriptor }) => {
+            return poolManager.get().transaction(async ({ query }) => {
+              const txQuery: MultitableProvisioningQueryFn = async (sql, params) => {
+                const result = await query(sql, params)
+                return {
+                  rows: Array.isArray((result as { rows?: unknown[] }).rows)
+                    ? (result as { rows: unknown[] }).rows
+                    : [],
+                }
+              }
+              return ensureMultitableObject({
+                query: txQuery,
+                projectId,
+                baseId,
+                descriptor,
+              })
+            })
+          },
+          ensureView: async ({ projectId, sheetId, descriptor }) => {
+            return poolManager.get().transaction(async ({ query }) => {
+              const txQuery: MultitableProvisioningQueryFn = async (sql, params) => {
+                const result = await query(sql, params)
+                return {
+                  rows: Array.isArray((result as { rows?: unknown[] }).rows)
+                    ? (result as { rows: unknown[] }).rows
+                    : [],
+                }
+              }
+              return ensureMultitableView({
+                query: txQuery,
+                projectId,
+                sheetId,
+                descriptor,
+              })
+            })
+          },
+        },
       },
 
       auth: {

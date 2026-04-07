@@ -133,7 +133,22 @@ interface FakeDatabase {
 }
 
 interface FakeContext {
-  api: { database: FakeDatabase }
+  api: {
+    database: FakeDatabase
+    multitable?: {
+      provisioning?: {
+        ensureObject: (input: {
+          projectId: string
+          descriptor: Record<string, unknown>
+        }) => Promise<unknown>
+        ensureView?: (input: {
+          projectId: string
+          sheetId: string
+          descriptor: Record<string, unknown>
+        }) => Promise<unknown>
+      }
+    }
+  }
 }
 
 function createFakeDatabase(): FakeDatabase {
@@ -381,6 +396,52 @@ describe('plugin-after-sales installer: runInstall enable mode', () => {
     // blueprint has 2 multitable + 1 service objects
     expect(result.createdObjects).toEqual(['customer', 'serviceTicket'])
     expect(result.createdObjects).not.toContain('warrantyPolicy')
+  })
+
+  it('calls multitable provisioning seam when available on context.api', async () => {
+    const ensureObject = vi.fn(async () => ({
+      baseId: 'base_legacy',
+      sheet: { id: 'sheet_customer', baseId: 'base_legacy', name: 'Any', description: null },
+      fields: [],
+    }))
+    const ensureView = vi.fn(async () => ({
+      id: 'view_ticket_board',
+      sheetId: 'sheet_customer',
+      name: 'Board',
+      type: 'kanban',
+      filterInfo: {},
+      sortInfo: {},
+      groupInfo: {},
+      hiddenFieldIds: [],
+      config: {},
+    }))
+    const input = buildRunInput({ mode: 'enable' }, db)
+    const blueprint = input.blueprint as { objects: Array<Record<string, unknown>> }
+    input.context.api.multitable = {
+      provisioning: {
+        ensureObject,
+        ensureView,
+      },
+    }
+
+    const result = await installer.runInstall(input)
+
+    expect(result.status).toBe('installed')
+    expect(ensureObject).toHaveBeenCalledTimes(2)
+    expect(ensureObject).toHaveBeenNthCalledWith(1, {
+      projectId: 'tenant_42:after-sales',
+      descriptor: blueprint.objects[0],
+    })
+    expect(ensureObject).toHaveBeenNthCalledWith(2, {
+      projectId: 'tenant_42:after-sales',
+      descriptor: blueprint.objects[1],
+    })
+    expect(ensureView).toHaveBeenCalledTimes(1)
+    expect(ensureView).toHaveBeenCalledWith({
+      projectId: 'tenant_42:after-sales',
+      sheetId: 'sheet_customer',
+      descriptor: { id: 'ticket-board', objectId: 'serviceTicket', type: 'kanban', name: 'Board' },
+    })
   })
 
   it('records createdViews from blueprint.views', async () => {

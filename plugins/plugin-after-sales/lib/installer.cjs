@@ -16,9 +16,8 @@
  *  6. loadCurrent — read the installed state for the GET /projects/current route
  *
  * Non-responsibilities (deferred):
- *  - Actual multitable object/view creation (commit 3 iterates blueprint
- *    declarations and records them as "created", real service calls are
- *    follow-up work — clearly marked with TODO(phase-1b) below).
+ *  - Automation registration, notification registration, RBAC application,
+ *    and approval bridge wiring.
  *  - Automation/notification/role registration (thin adapter layer is task #10).
  *  - Helper expression resolution (runs at automation execution time, not here).
  *  - Recipient placeholder expansion (runs in notification layer).
@@ -187,6 +186,16 @@ function parseJsonColumn(value, fallback) {
   return value
 }
 
+function getProvisioningApi(context) {
+  return context &&
+    context.api &&
+    context.api.multitable &&
+    context.api.multitable.provisioning &&
+    typeof context.api.multitable.provisioning.ensureObject === 'function'
+    ? context.api.multitable.provisioning
+    : null
+}
+
 /**
  * UPSERT a ledger row with terminal state. Caller supplies fully formed row.
  * Returns the persisted row (with id).
@@ -327,6 +336,8 @@ async function runInstall(input) {
 
   // Step 4: generate projectId (v1 pseudo value)
   const projectId = getProjectId(tenantId, blueprint.appId)
+  const provisioning = getProvisioningApi(context)
+  const objectSheetIds = new Map()
 
   // Step 5-10: execute installation
   // v1 SIMULATION: iterate blueprint declarations and treat them as "created".
@@ -339,8 +350,15 @@ async function runInstall(input) {
   try {
     for (const obj of blueprint.objects) {
       if (obj.backing === 'multitable') {
-        // TODO(phase-1b): call multitable service to create the table + fields
-        //   await context.api.multitable.createObject({ tenantId, projectId, descriptor: obj })
+        if (provisioning) {
+          const provisioned = await provisioning.ensureObject({
+            projectId,
+            descriptor: obj,
+          })
+          if (provisioned && provisioned.sheet && provisioned.sheet.id) {
+            objectSheetIds.set(obj.id, provisioned.sheet.id)
+          }
+        }
         createdObjects.push(obj.id)
       } else if (obj.backing === 'service' || obj.backing === 'hybrid') {
         // service/hybrid-backed objects are managed by the plugin's own service
@@ -349,8 +367,16 @@ async function runInstall(input) {
     }
 
     for (const view of blueprint.views || []) {
-      // TODO(phase-1b): call multitable view service to create the view
-      //   await context.api.multitable.createView({ tenantId, projectId, descriptor: view })
+      if (provisioning && typeof provisioning.ensureView === 'function') {
+        const sheetId = objectSheetIds.get(view.objectId)
+        if (sheetId) {
+          await provisioning.ensureView({
+            projectId,
+            sheetId,
+            descriptor: view,
+          })
+        }
+      }
       createdViews.push(view.id)
     }
 

@@ -5,10 +5,27 @@ import { Router } from 'express'
 import { z } from 'zod'
 import { poolManager } from '../integration/db/connection-pool'
 import { rbacGuard } from '../rbac/rbac'
-import { isAdmin, listUserPermissions } from '../rbac/service'
 import { StorageServiceImpl } from '../services/StorageService'
 import { createUploadMiddleware, loadMulter } from '../types/multer'
 import type { RequestWithFile } from '../types/multer'
+import { createSheet, createView, ensureLegacyBase } from '../multitable/provisioning'
+import {
+  deriveCapabilities,
+  deriveFieldPermissions,
+  deriveRowActions,
+  deriveViewPermissions,
+  resolveRequestAccess,
+} from '../multitable/access'
+import {
+  extractSelectOptions,
+  isPlainObject,
+  mapFieldType,
+  normalizeJson,
+  normalizeJsonArray,
+  sanitizeFieldProperty,
+  serializeFieldRow,
+} from '../multitable/field-codecs'
+import { loadFieldsForSheet, loadSheetRow, tryResolveView } from '../multitable/loaders'
 
 type UniverMetaField = {
   id: string
@@ -61,8 +78,6 @@ type UniverMetaViewConfig = {
 
 type QueryFn = (sql: string, params?: unknown[]) => Promise<{ rows: unknown[]; rowCount?: number | null }>
 
-const DEFAULT_BASE_ID = 'base_legacy'
-const DEFAULT_BASE_NAME = 'Migrated Base'
 const SYSTEM_PEOPLE_SHEET_NAME = 'People'
 const SYSTEM_PEOPLE_SHEET_DESCRIPTION = '__metasheet_system:people__'
 const ATTACHMENT_PATH = process.env.ATTACHMENT_PATH || path.join(process.cwd(), 'data', 'attachments')
@@ -157,46 +172,6 @@ type PeopleSheetPreset = {
 
 function buildId(prefix: string): string {
   return `${prefix}_${randomUUID()}`
-}
-
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return !!value && typeof value === 'object' && !Array.isArray(value)
-}
-
-function normalizeJson(value: unknown): Record<string, unknown> {
-  if (!value) return {}
-  if (isPlainObject(value)) return value
-  if (typeof value === 'string') {
-    try {
-      const parsed = JSON.parse(value) as unknown
-      if (isPlainObject(parsed)) return parsed
-    } catch {
-      return {}
-    }
-  }
-  return {}
-}
-
-function normalizeJsonArray(value: unknown): string[] {
-  if (!value) return []
-  if (Array.isArray(value)) {
-    return value
-      .map((v) => {
-        if (typeof v === 'string') return v.trim()
-        if (typeof v === 'number' && Number.isFinite(v)) return String(v)
-        return ''
-      })
-      .filter((v) => v.length > 0)
-  }
-  if (typeof value === 'string') {
-    try {
-      const parsed = JSON.parse(value) as unknown
-      return normalizeJsonArray(parsed)
-    } catch {
-      return []
-    }
-  }
-  return []
 }
 
 function isSystemPeopleSheetDescription(value: unknown): boolean {
@@ -414,136 +389,6 @@ function isUndefinedTableError(err: unknown, tableName: string): boolean {
   const msg = typeof (err as any)?.message === 'string' ? (err as any).message : ''
   if (code === '42P01') return msg.includes(tableName)
   return msg.includes(`relation \"${tableName}\" does not exist`)
-}
-
-function mapFieldType(type: string): UniverMetaField['type'] {
-  const normalized = type.trim().toLowerCase()
-  if (normalized === 'number') return 'number'
-  if (normalized === 'boolean' || normalized === 'checkbox') return 'boolean'
-  if (normalized === 'date' || normalized === 'datetime') return 'date'
-  if (normalized === 'formula') return 'formula'
-  if (normalized === 'select' || normalized === 'multiselect') return 'select'
-  if (normalized === 'link') return 'link'
-  if (normalized === 'lookup') return 'lookup'
-  if (normalized === 'rollup') return 'rollup'
-  if (normalized === 'attachment') return 'attachment'
-  return 'string'
-}
-
-function extractSelectOptions(property: unknown): Array<{ value: string; color?: string }> | undefined {
-  const obj = normalizeJson(property)
-  const raw = obj.options
-  if (!Array.isArray(raw)) return undefined
-
-  const options: Array<{ value: string; color?: string }> = []
-  for (const item of raw) {
-    if (!isPlainObject(item)) continue
-    const value = item.value
-    if (typeof value !== 'string' && typeof value !== 'number') continue
-    const color = typeof item.color === 'string' ? item.color : undefined
-    options.push({ value: String(value), ...(color ? { color } : {}) })
-  }
-
-  return options.length > 0 ? options : undefined
-}
-
-function sanitizeStringArray(value: unknown): string[] {
-  if (!Array.isArray(value)) return []
-  return value
-    .filter((item): item is string => typeof item === 'string')
-    .map((item) => item.trim())
-    .filter((item) => item.length > 0)
-}
-
-function sanitizeFieldProperty(type: UniverMetaField['type'], property: unknown): Record<string, unknown> {
-  const obj = normalizeJson(property)
-  if (type === 'select') {
-    const options = extractSelectOptions(obj) ?? []
-    return { ...obj, options }
-  }
-
-  if (type === 'link') {
-    const foreignSheetId = typeof (obj.foreignSheetId ?? obj.foreignDatasheetId ?? obj.datasheetId) === 'string'
-      ? String(obj.foreignSheetId ?? obj.foreignDatasheetId ?? obj.datasheetId).trim()
-      : ''
-    return {
-      ...obj,
-      ...(foreignSheetId ? { foreignSheetId, foreignDatasheetId: foreignSheetId } : {}),
-      limitSingleRecord: obj.limitSingleRecord === true,
-      ...(typeof obj.refKind === 'string' && obj.refKind.trim().length > 0 ? { refKind: obj.refKind.trim() } : {}),
-    }
-  }
-
-  if (type === 'lookup') {
-    const linkFieldId = typeof (obj.linkFieldId ?? obj.relatedLinkFieldId ?? obj.linkedFieldId ?? obj.sourceFieldId) === 'string'
-      ? String(obj.linkFieldId ?? obj.relatedLinkFieldId ?? obj.linkedFieldId ?? obj.sourceFieldId).trim()
-      : ''
-    const targetFieldId = typeof (obj.targetFieldId ?? obj.lookUpTargetFieldId ?? obj.lookupTargetFieldId ?? obj.lookupFieldId) === 'string'
-      ? String(obj.targetFieldId ?? obj.lookUpTargetFieldId ?? obj.lookupTargetFieldId ?? obj.lookupFieldId).trim()
-      : ''
-    const foreignSheetId = typeof (obj.foreignSheetId ?? obj.foreignDatasheetId ?? obj.datasheetId) === 'string'
-      ? String(obj.foreignSheetId ?? obj.foreignDatasheetId ?? obj.datasheetId).trim()
-      : ''
-    return {
-      ...obj,
-      ...(linkFieldId ? { linkFieldId, relatedLinkFieldId: linkFieldId } : {}),
-      ...(targetFieldId ? { targetFieldId, lookUpTargetFieldId: targetFieldId } : {}),
-      ...(foreignSheetId ? { foreignSheetId, foreignDatasheetId: foreignSheetId, datasheetId: foreignSheetId } : {}),
-    }
-  }
-
-  if (type === 'rollup') {
-    const linkFieldId = typeof (obj.linkFieldId ?? obj.linkedFieldId ?? obj.relatedLinkFieldId ?? obj.sourceFieldId) === 'string'
-      ? String(obj.linkFieldId ?? obj.linkedFieldId ?? obj.relatedLinkFieldId ?? obj.sourceFieldId).trim()
-      : ''
-    const targetFieldId = typeof (obj.targetFieldId ?? obj.lookUpTargetFieldId ?? obj.lookupTargetFieldId ?? obj.lookupFieldId) === 'string'
-      ? String(obj.targetFieldId ?? obj.lookUpTargetFieldId ?? obj.lookupTargetFieldId ?? obj.lookupFieldId).trim()
-      : ''
-    const foreignSheetId = typeof (obj.foreignSheetId ?? obj.foreignDatasheetId ?? obj.datasheetId) === 'string'
-      ? String(obj.foreignSheetId ?? obj.foreignDatasheetId ?? obj.datasheetId).trim()
-      : ''
-    const aggregation = parseRollupAggregation(obj.aggregation ?? obj.agg ?? obj.function ?? obj.rollupFunction) ?? 'count'
-    return {
-      ...obj,
-      ...(linkFieldId ? { linkFieldId, linkedFieldId: linkFieldId } : {}),
-      ...(targetFieldId ? { targetFieldId } : {}),
-      aggregation,
-      ...(foreignSheetId ? { foreignSheetId, foreignDatasheetId: foreignSheetId, datasheetId: foreignSheetId } : {}),
-    }
-  }
-
-  if (type === 'formula') {
-    return {
-      ...obj,
-      expression: typeof obj.expression === 'string' ? obj.expression.trim() : '',
-    }
-  }
-
-  if (type === 'attachment') {
-    const maxFiles = typeof obj.maxFiles === 'number' ? obj.maxFiles : Number(obj.maxFiles)
-    return {
-      ...obj,
-      ...(Number.isFinite(maxFiles) && maxFiles > 0 ? { maxFiles: Math.round(maxFiles) } : {}),
-      acceptedMimeTypes: sanitizeStringArray(obj.acceptedMimeTypes),
-    }
-  }
-
-  return obj
-}
-
-function serializeFieldRow(row: any): UniverMetaField {
-  const rawType = String(row.type ?? 'string')
-  const mappedType = mapFieldType(rawType)
-  const property = sanitizeFieldProperty(mappedType, row.property)
-  const order = Number(row.order ?? 0)
-  return {
-    id: String(row.id),
-    name: String(row.name),
-    type: mappedType,
-    ...(mappedType === 'select' ? { options: extractSelectOptions(property) } : {}),
-    order: Number.isFinite(order) ? order : 0,
-    property,
-  }
 }
 
 type MetaSortRule = { fieldId: string; desc: boolean }
@@ -1086,152 +931,6 @@ async function loadSheetSummary(
   return sheet
 }
 
-async function loadSheetFields(
-  pool: { query: QueryFn },
-  sheetId: string,
-): Promise<UniverMetaField[]> {
-  const cached = metaFieldCache.get(sheetId)
-  if (cached) return cached
-
-  const fieldRes = await pool.query(
-    'SELECT id, name, type, property, "order" FROM meta_fields WHERE sheet_id = $1 ORDER BY "order" ASC',
-    [sheetId],
-  )
-  const fields = fieldRes.rows.map((f: any) => serializeFieldRow(f))
-  metaFieldCache.set(sheetId, fields)
-  return fields
-}
-
-async function tryResolveView(pool: { query: QueryFn }, viewId: string): Promise<UniverMetaViewConfig | null> {
-  const cached = metaViewConfigCache.get(viewId)
-  if (cached) return cached
-
-  const result = await pool.query(
-    'SELECT id, sheet_id, name, type, filter_info, sort_info, group_info, hidden_field_ids, config FROM meta_views WHERE id = $1',
-    [viewId],
-  )
-  if (result.rows.length === 0) return null
-
-  const row: any = result.rows[0]
-  const view = {
-    id: String(row.id),
-    sheetId: String(row.sheet_id),
-    name: String(row.name),
-    type: String(row.type ?? 'grid'),
-    filterInfo: normalizeJson(row.filter_info),
-    sortInfo: normalizeJson(row.sort_info),
-    groupInfo: normalizeJson(row.group_info),
-    hiddenFieldIds: normalizeJsonArray(row.hidden_field_ids),
-    config: normalizeJson(row.config),
-  }
-  metaViewConfigCache.set(viewId, view)
-  return view
-}
-
-function normalizePermissionCodes(value: unknown): string[] {
-  if (!Array.isArray(value)) return []
-  return value
-    .map((item) => (typeof item === 'string' ? item.trim() : ''))
-    .filter((item) => item.length > 0)
-}
-
-async function resolveRequestAccess(req: Request): Promise<{ permissions: string[]; isAdminRole: boolean }> {
-  const userId = req.user?.id?.toString() ?? req.user?.sub?.toString() ?? req.user?.userId?.toString() ?? ''
-  const tokenRoles = normalizePermissionCodes(req.user?.roles)
-  const tokenPerms = normalizePermissionCodes(req.user?.perms)
-  const resolvedPermissions = normalizePermissionCodes((req.user as { permissions?: unknown } | undefined)?.permissions)
-  const role = typeof req.user?.role === 'string' ? req.user.role.trim() : ''
-  const isAdminRole = role === 'admin' || tokenRoles.includes('admin')
-  const directPermissions = tokenPerms.length > 0 ? tokenPerms : resolvedPermissions
-  if (!userId) {
-    return { permissions: directPermissions, isAdminRole }
-  }
-
-  if (isAdminRole) {
-    return { permissions: directPermissions, isAdminRole: true }
-  }
-
-  if (directPermissions.length > 0) {
-    return { permissions: directPermissions, isAdminRole: false }
-  }
-
-  return {
-    permissions: await listUserPermissions(userId),
-    isAdminRole: await isAdmin(userId),
-  }
-}
-
-function hasPermission(permissions: string[], code: string): boolean {
-  if (permissions.includes(code)) return true
-  const [resource] = code.split(':')
-  return permissions.includes(`${resource}:*`) || permissions.includes('*:*')
-}
-
-function deriveCapabilities(permissions: string[], isAdminRole: boolean): MultitableCapabilities {
-  const canRead = isAdminRole || hasPermission(permissions, 'multitable:read') || hasPermission(permissions, 'multitable:write')
-  const canWrite = isAdminRole || hasPermission(permissions, 'multitable:write')
-  const canComment = isAdminRole || hasPermission(permissions, 'comments:write') || hasPermission(permissions, 'comments:read')
-  const canManageAutomation =
-    isAdminRole ||
-    hasPermission(permissions, 'workflow:all') ||
-    hasPermission(permissions, 'workflow:write') ||
-    hasPermission(permissions, 'workflow:create') ||
-    hasPermission(permissions, 'workflow:execute')
-
-  return {
-    canRead,
-    canCreateRecord: canWrite,
-    canEditRecord: canWrite,
-    canDeleteRecord: canWrite,
-    canManageFields: canWrite,
-    canManageViews: canWrite,
-    canComment,
-    canManageAutomation,
-  }
-}
-
-function deriveFieldPermissions(
-  fields: UniverMetaField[],
-  capabilities: MultitableCapabilities,
-  opts?: { hiddenFieldIds?: string[]; allowCreateOnly?: boolean },
-): Record<string, MultitableFieldPermission> {
-  const hiddenFieldIds = new Set(opts?.hiddenFieldIds ?? [])
-  const readOnly = opts?.allowCreateOnly ? !capabilities.canCreateRecord : !capabilities.canEditRecord
-  return Object.fromEntries(
-    fields.map((field) => [
-      field.id,
-      {
-        visible: !hiddenFieldIds.has(field.id),
-        readOnly,
-      },
-    ]),
-  )
-}
-
-function deriveViewPermissions(
-  views: Array<Pick<UniverMetaViewConfig, 'id'>>,
-  capabilities: MultitableCapabilities,
-): Record<string, MultitableViewPermission> {
-  return Object.fromEntries(
-    views.map((view) => [
-      view.id,
-      {
-        canAccess: capabilities.canRead,
-        canConfigure: capabilities.canManageViews,
-        canDelete: capabilities.canManageViews,
-      },
-    ]),
-  )
-}
-
-function deriveRowActions(capabilities: MultitableCapabilities): MultitableRowActions {
-  return {
-    canEdit: capabilities.canEditRecord,
-    canDelete: capabilities.canDeleteRecord,
-    canComment: capabilities.canComment,
-  }
-}
-
 function toSummaryDisplay(value: unknown): string {
   if (typeof value === 'string') return value
   if (typeof value === 'number' || typeof value === 'boolean') return String(value)
@@ -1285,16 +984,6 @@ function serializeBaseRow(row: any): UniverMetaBase {
     ownerId: typeof row.owner_id === 'string' ? row.owner_id : null,
     workspaceId: typeof row.workspace_id === 'string' ? row.workspace_id : null,
   }
-}
-
-async function ensureLegacyBase(query: QueryFn): Promise<string> {
-  await query(
-    `INSERT INTO meta_bases (id, name, icon, color, owner_id, workspace_id)
-     VALUES ($1, $2, $3, $4, $5, $6)
-     ON CONFLICT (id) DO NOTHING`,
-    [DEFAULT_BASE_ID, DEFAULT_BASE_NAME, 'table', '#1677ff', null, null],
-  )
-  return DEFAULT_BASE_ID
 }
 
 async function ensurePeopleSheetPreset(query: QueryFn, baseId: string): Promise<PeopleSheetPreset> {
@@ -1435,32 +1124,6 @@ async function ensurePeopleSheetPreset(query: QueryFn, baseId: string): Promise<
   }
 }
 
-async function loadSheetRow(
-  query: QueryFn,
-  sheetId: string,
-): Promise<{ id: string; baseId: string | null; name: string; description: string | null } | null> {
-  const result = await query(
-    'SELECT id, base_id, name, description FROM meta_sheets WHERE id = $1 AND deleted_at IS NULL',
-    [sheetId],
-  )
-  const row: any = result.rows[0]
-  if (!row) return null
-  return {
-    id: String(row.id),
-    baseId: typeof row.base_id === 'string' ? row.base_id : null,
-    name: String(row.name),
-    description: typeof row.description === 'string' ? row.description : null,
-  }
-}
-
-async function loadFieldsForSheet(query: QueryFn, sheetId: string): Promise<UniverMetaField[]> {
-  const result = await query(
-    'SELECT id, name, type, property, "order" FROM meta_fields WHERE sheet_id = $1 ORDER BY "order" ASC, id ASC',
-    [sheetId],
-  )
-  return result.rows.map((row: any) => serializeFieldRow(row))
-}
-
 async function ensureAttachmentIdsExist(
   query: QueryFn,
   sheetId: string,
@@ -1517,7 +1180,7 @@ async function buildLinkSummaries(
 
   const displayFieldBySheet = new Map<string, string | null>()
   for (const [sheetId] of idsBySheet.entries()) {
-    const fields = await loadFieldsForSheet(query, sheetId)
+    const fields = await loadFieldsForSheet({ query }, sheetId, metaFieldCache)
     const stringField = fields.find((field) => field.type === 'string')
     displayFieldBySheet.set(sheetId, stringField?.id ?? fields[0]?.id ?? null)
   }
@@ -1714,7 +1377,7 @@ async function resolveMetaSheetId(
 
   if (sheetId) {
     if (!viewId) return { sheetId, view: null }
-    const view = await tryResolveView(pool, viewId)
+    const view = await tryResolveView(pool, viewId, metaViewConfigCache)
     if (!view) return { sheetId, view: null }
     if (view.sheetId !== sheetId) {
       throw new ConflictError(`View ${viewId} does not belong to sheet ${sheetId}`)
@@ -1726,7 +1389,7 @@ async function resolveMetaSheetId(
     throw new ValidationError('sheetId or viewId is required')
   }
 
-  const view = await tryResolveView(pool, viewId)
+  const view = await tryResolveView(pool, viewId, metaViewConfigCache)
   if (view) return { sheetId: view.sheetId, view }
 
   // Backward-compatible fallback: treat viewId as a sheetId when no view exists.
@@ -2052,7 +1715,7 @@ export function univerMetaRouter(): Router {
         : { rows: [] }
 
       const activeFields = effectiveSheetId
-        ? await loadFieldsForSheet(pool.query.bind(pool), effectiveSheetId)
+        ? await loadFieldsForSheet({ query: pool.query.bind(pool) }, effectiveSheetId, metaFieldCache)
         : []
       const serializedViews = (viewsResult as any).rows.map((row: any) => ({
         id: String(row.id),
@@ -2470,12 +2133,13 @@ export function univerMetaRouter(): Router {
 
       if (result.rows.length === 0) {
         const defaultId = buildId('view')
-        await pool.query(
-          `INSERT INTO meta_views (id, sheet_id, name, type, filter_info, sort_info, group_info, hidden_field_ids, config)
-           VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7::jsonb, $8::jsonb, $9::jsonb)
-           ON CONFLICT (id) DO NOTHING`,
-          [defaultId, sheetId, '默认视图', 'grid', '{}', '{}', '{}', '[]', '{}'],
-        )
+        await createView({
+          query: pool.query.bind(pool),
+          viewId: defaultId,
+          sheetId,
+          name: '默认视图',
+          type: 'grid',
+        })
         result = await pool.query(
           'SELECT id, sheet_id, name, type, filter_info, sort_info, group_info, hidden_field_ids, config FROM meta_views WHERE sheet_id = $1 ORDER BY created_at ASC LIMIT 200',
           [sheetId],
@@ -2533,32 +2197,32 @@ export function univerMetaRouter(): Router {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
       }
 
-      await pool.query(
-        `INSERT INTO meta_views (id, sheet_id, name, type, filter_info, sort_info, group_info, hidden_field_ids, config)
-         VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7::jsonb, $8::jsonb, $9::jsonb)`,
-        [
-          viewId,
-          sheetId,
-          name,
-          type,
-          JSON.stringify(parsed.data.filterInfo ?? {}),
-          JSON.stringify(parsed.data.sortInfo ?? {}),
-          JSON.stringify(parsed.data.groupInfo ?? {}),
-          JSON.stringify(parsed.data.hiddenFieldIds ?? []),
-          JSON.stringify(parsed.data.config ?? {}),
-        ],
-      )
-
-      const view: UniverMetaViewConfig = {
-        id: viewId,
+      const created = await createView({
+        query: pool.query.bind(pool),
+        viewId,
         sheetId,
         name,
         type,
-        filterInfo: parsed.data.filterInfo ?? {},
-        sortInfo: parsed.data.sortInfo ?? {},
-        groupInfo: parsed.data.groupInfo ?? {},
-        hiddenFieldIds: parsed.data.hiddenFieldIds ?? [],
-        config: parsed.data.config ?? {},
+        filterInfo: parsed.data.filterInfo,
+        sortInfo: parsed.data.sortInfo,
+        groupInfo: parsed.data.groupInfo,
+        hiddenFieldIds: parsed.data.hiddenFieldIds,
+        config: parsed.data.config,
+      })
+      if (!created.created || !created.view) {
+        return res.status(409).json({ ok: false, error: { code: 'CONFLICT', message: `View already exists: ${viewId}` } })
+      }
+
+      const view: UniverMetaViewConfig = {
+        id: created.view.id,
+        sheetId: created.view.sheetId,
+        name: created.view.name,
+        type: created.view.type,
+        filterInfo: created.view.filterInfo,
+        sortInfo: created.view.sortInfo,
+        groupInfo: created.view.groupInfo,
+        hiddenFieldIds: created.view.hiddenFieldIds,
+        config: created.view.config,
       }
 
       metaViewConfigCache.set(viewId, view)
@@ -2728,13 +2392,14 @@ export function univerMetaRouter(): Router {
           }
         }
 
-        const insert = await query(
-          `INSERT INTO meta_sheets (id, base_id, name, description)
-           VALUES ($1, $2, $3, $4)
-           ON CONFLICT (id) DO NOTHING`,
-          [sheetId, baseId, name, description],
-        )
-        if ((insert as any).rowCount === 0) {
+        const created = await createSheet({
+          query: query as unknown as QueryFn,
+          sheetId,
+          baseId,
+          name,
+          description,
+        })
+        if (!created.created) {
           throw new ConflictError(`Sheet already exists: ${sheetId}`)
         }
 
@@ -2785,7 +2450,7 @@ export function univerMetaRouter(): Router {
 
       const [sheet, fields] = await Promise.all([
         loadSheetSummary(pool as unknown as { query: QueryFn }, sheetId),
-        loadSheetFields(pool as unknown as { query: QueryFn }, sheetId),
+        loadFieldsForSheet(pool as unknown as { query: QueryFn }, sheetId, metaFieldCache),
       ])
 
       if (!sheet) {
@@ -3117,7 +2782,7 @@ export function univerMetaRouter(): Router {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
       }
 
-      const fields = await loadFieldsForSheet(pool.query.bind(pool), sheetId)
+      const fields = await loadFieldsForSheet({ query: pool.query.bind(pool) }, sheetId, metaFieldCache)
       const access = await resolveRequestAccess(req)
       const capabilities = deriveCapabilities(access.permissions, access.isAdminRole)
 
@@ -3223,7 +2888,7 @@ export function univerMetaRouter(): Router {
 
     try {
       const pool = poolManager.get()
-      const view = await tryResolveView(pool as unknown as { query: QueryFn }, viewId)
+      const view = await tryResolveView(pool as unknown as { query: QueryFn }, viewId, metaViewConfigCache)
       if (!view) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `View not found: ${viewId}` } })
       }
@@ -3233,7 +2898,7 @@ export function univerMetaRouter(): Router {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${view.sheetId}` } })
       }
 
-      const fields = await loadFieldsForSheet(pool.query.bind(pool), view.sheetId)
+      const fields = await loadFieldsForSheet({ query: pool.query.bind(pool) }, view.sheetId, metaFieldCache)
       const fieldById = new Map<string, { type: UniverMetaField['type']; options?: string[]; readonly?: boolean; link?: LinkFieldConfig | null }>()
       for (const field of fields) {
         const property = normalizeJson(field.property)
@@ -3567,7 +3232,7 @@ export function univerMetaRouter(): Router {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
       }
 
-      const fields = await loadFieldsForSheet(pool.query.bind(pool), sheetId)
+      const fields = await loadFieldsForSheet({ query: pool.query.bind(pool) }, sheetId, metaFieldCache)
       const fieldById = new Map<string, { type: UniverMetaField['type']; options?: string[]; readonly?: boolean; link?: LinkFieldConfig | null }>()
       for (const field of fields) {
         const property = normalizeJson(field.property)
@@ -3863,7 +3528,7 @@ export function univerMetaRouter(): Router {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
       }
 
-      const fields = await loadFieldsForSheet(pool.query.bind(pool), sheetId)
+      const fields = await loadFieldsForSheet({ query: pool.query.bind(pool) }, sheetId, metaFieldCache)
       const attachmentFields = fields.filter((field) => field.type === 'attachment')
       const record: UniverMetaRecord = {
         id: String(row.id),
