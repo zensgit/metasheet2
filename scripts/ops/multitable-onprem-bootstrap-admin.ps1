@@ -2,6 +2,7 @@ param(
   [string]$RootDir = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path,
   [string]$EnvFile = '',
   [string]$ApiBase = 'http://127.0.0.1/api',
+  [string]$PsqlPath = '',
   [string]$AdminEmail = '',
   [string]$AdminPassword = '',
   [string]$AdminName = 'Administrator',
@@ -148,9 +149,84 @@ function Invoke-NodeCapture {
   return ($output | Out-String).Trim()
 }
 
+function Resolve-PsqlCandidate {
+  param([string]$Candidate)
+
+  if ([string]::IsNullOrWhiteSpace($Candidate)) {
+    return $null
+  }
+
+  $trimmed = $Candidate.Trim().Trim('"')
+  if ([string]::IsNullOrWhiteSpace($trimmed)) {
+    return $null
+  }
+
+  if (Test-Path -LiteralPath $trimmed -PathType Container) {
+    $trimmed = Join-Path $trimmed 'psql.exe'
+  }
+
+  if (Test-Path -LiteralPath $trimmed -PathType Leaf) {
+    return [System.IO.Path]::GetFullPath($trimmed)
+  }
+
+  return $null
+}
+
+function Resolve-PsqlCommand {
+  param([string]$ExplicitPath = '')
+
+  $overrideCandidates = @(
+    $ExplicitPath,
+    [System.Environment]::GetEnvironmentVariable('PSQL_PATH'),
+    [System.Environment]::GetEnvironmentVariable('POSTGRES_BIN_DIR'),
+    [System.Environment]::GetEnvironmentVariable('PG_BIN')
+  )
+
+  foreach ($candidate in $overrideCandidates) {
+    $resolved = Resolve-PsqlCandidate -Candidate $candidate
+    if ($resolved) {
+      return $resolved
+    }
+  }
+
+  $command = Get-Command 'psql' -ErrorAction SilentlyContinue
+  if ($command -and -not [string]::IsNullOrWhiteSpace($command.Source)) {
+    return $command.Source
+  }
+
+  $searchRoots = @(
+    'C:\Program Files\PostgreSQL',
+    'C:\Program Files (x86)\PostgreSQL',
+    [System.Environment]::ExpandEnvironmentVariables('%ProgramFiles%\PostgreSQL'),
+    [System.Environment]::ExpandEnvironmentVariables('%ProgramFiles(x86)%\PostgreSQL')
+  ) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique
+
+  foreach ($root in $searchRoots) {
+    if (-not (Test-Path -LiteralPath $root -PathType Container)) {
+      continue
+    }
+
+    $versionDirs = Get-ChildItem -LiteralPath $root -Directory -ErrorAction SilentlyContinue | Sort-Object Name -Descending
+    foreach ($dir in $versionDirs) {
+      $resolved = Resolve-PsqlCandidate -Candidate (Join-Path $dir.FullName 'bin')
+      if ($resolved) {
+        return $resolved
+      }
+    }
+  }
+
+  $chocoResolved = Resolve-PsqlCandidate -Candidate 'C:\ProgramData\chocolatey\bin\psql.exe'
+  if ($chocoResolved) {
+    return $chocoResolved
+  }
+
+  throw 'Missing required command: psql. Add PostgreSQL bin to PATH or set PSQL_PATH / POSTGRES_BIN_DIR.'
+}
+
 function Invoke-PsqlCapture {
   param(
     [string]$Description,
+    [string]$PsqlCommand,
     [string]$DatabaseUrl,
     [string]$Sql,
     [string[]]$Variables = @(),
@@ -164,7 +240,7 @@ function Invoke-PsqlCapture {
     $psqlArgs += $entry
   }
 
-  $output = $Sql | & psql @psqlArgs
+  $output = $Sql | & $PsqlCommand @psqlArgs
   if ($LASTEXITCODE -ne 0) {
     throw "$Description failed"
   }
@@ -207,7 +283,7 @@ if ($resolvedAdminPassword.Length -lt 12) {
 
 Set-Location $resolvedRoot
 Require-Command -Name 'node'
-Require-Command -Name 'psql'
+$resolvedPsqlCommand = Resolve-PsqlCommand -ExplicitPath $PsqlPath
 
 Import-AppEnvFile -ResolvedEnvFile $resolvedEnvFile
 
@@ -229,7 +305,7 @@ if ($requireToken -ne '1') {
 }
 
 $uuidScript = @'
-console.log(require("crypto").randomUUID());
+console.log(require("node:crypto").randomUUID());
 '@
 $generatedUserId = Invoke-NodeCapture -Description 'Generate admin user id' -Script $uuidScript
 
@@ -272,7 +348,7 @@ WITH upserted AS (
 SELECT id FROM upserted LIMIT 1;
 '@
 
-$adminUserId = Invoke-PsqlCapture -Description "Upsert admin user ($resolvedAdminEmail)" -DatabaseUrl $databaseUrl -Sql $upsertSql -Variables @(
+$adminUserId = Invoke-PsqlCapture -Description "Upsert admin user ($resolvedAdminEmail)" -PsqlCommand $resolvedPsqlCommand -DatabaseUrl $databaseUrl -Sql $upsertSql -Variables @(
   "v_user_id=$generatedUserId",
   "v_email=$resolvedAdminEmail",
   "v_name=$resolvedAdminName",
@@ -304,7 +380,7 @@ WHERE p.code IN (
 ON CONFLICT (user_id, permission_code) DO NOTHING;
 '@
 
-[void](Invoke-PsqlCapture -Description "Grant admin roles and permissions ($adminUserId)" -DatabaseUrl $databaseUrl -Sql $grantSql -Variables @(
+[void](Invoke-PsqlCapture -Description "Grant admin roles and permissions ($adminUserId)" -PsqlCommand $resolvedPsqlCommand -DatabaseUrl $databaseUrl -Sql $grantSql -Variables @(
   "v_user_id=$adminUserId"
 ))
 

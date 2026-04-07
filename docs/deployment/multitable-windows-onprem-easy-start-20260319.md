@@ -181,6 +181,13 @@ After `deploy.bat` completes on a fresh Windows-only install, create the first a
 bootstrap-admin.bat admin@your-company.local <StrongPasswordAtLeast12Chars> Administrator
 ```
 
+If PostgreSQL is installed on Windows but `psql.exe` is not on `PATH`, the PowerShell helper now auto-probes common install roots such as `C:\Program Files\PostgreSQL\<version>\bin`. You can also override it explicitly:
+
+```bat
+set PSQL_PATH=C:\Program Files\PostgreSQL\17\bin\psql.exe
+bootstrap-admin.bat admin@your-company.local <StrongPasswordAtLeast12Chars> Administrator
+```
+
 ## 11) Delivery checklist
 
 Before handing this package to a customer or field team, also review:
