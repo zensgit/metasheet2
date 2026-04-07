@@ -14,6 +14,10 @@ const {
 const {
   registerAfterSalesWorkflowHandlers,
 } = require('./lib/workflow-adapter.cjs')
+const {
+  buildTicketCreatedEventPayload,
+  buildRefundRequestedEventPayload,
+} = require('./lib/event-entry.cjs')
 
 let activeContext = null
 let workflowSubscriptionIds = []
@@ -76,6 +80,29 @@ function hasInstallAdminAccess(req) {
   )
 }
 
+function hasAfterSalesWriteAccess(req) {
+  const user = req && req.user
+  if (!user || typeof user !== 'object') return false
+
+  const roles = new Set([
+    ...normalizeClaimValues(user.role),
+    ...normalizeClaimValues(user.roles),
+  ])
+  const permissions = new Set([
+    ...normalizeClaimValues(user.permissions),
+    ...normalizeClaimValues(user.perms),
+  ])
+
+  return (
+    roles.has('admin') ||
+    permissions.has('*:*') ||
+    permissions.has('admin') ||
+    permissions.has('admin:all') ||
+    permissions.has('after_sales:write') ||
+    permissions.has('after_sales:admin')
+  )
+}
+
 /**
  * v1 whitelist of template ids. v2 will expand this as templates proliferate
  * and/or user-uploaded templates become allowed.
@@ -126,6 +153,24 @@ function sendForbidden(res) {
   res.status(403).json({
     ok: false,
     error: { code: 'FORBIDDEN', message: 'Admin access required' },
+  })
+}
+
+function sendWriteForbidden(res) {
+  res.status(403).json({
+    ok: false,
+    error: { code: 'FORBIDDEN', message: 'After-sales write access required' },
+  })
+}
+
+function sendBadRequest(res, err) {
+  res.status(400).json({
+    ok: false,
+    error: {
+      code: err && err.code ? err.code : 'BAD_REQUEST',
+      message: err && err.message ? err.message : 'Bad request',
+      ...(err && err.details && typeof err.details === 'object' ? { details: err.details } : {}),
+    },
   })
 }
 
@@ -288,6 +333,98 @@ module.exports = {
       },
     )
 
+    context.api.http.addRoute(
+      'POST',
+      '/api/after-sales/events/ticket-created',
+      async (req, res) => {
+        try {
+          const userId = getUserId(req)
+          if (!userId) {
+            sendUnauthorized(res)
+            return
+          }
+          if (!hasAfterSalesWriteAccess(req)) {
+            sendWriteForbidden(res)
+            return
+          }
+
+          const tenantId = getTenantId(req)
+          const payload = buildTicketCreatedEventPayload((req && req.body) || {}, {
+            tenantId,
+            projectId: installer.getProjectId(tenantId, appManifest.id),
+            requesterId: userId,
+          })
+
+          context.api.events.emit('ticket.created', payload)
+          res.status(202).json({
+            ok: true,
+            data: {
+              accepted: true,
+              event: 'ticket.created',
+              projectId: payload.projectId,
+              ticketId: payload.ticket.id,
+            },
+          })
+        } catch (err) {
+          if (err && err.code === 'AFTER_SALES_EVENT_VALIDATION_FAILED') {
+            sendBadRequest(res, err)
+            return
+          }
+          logger.error && logger.error('after-sales ticket.created emit failed', err)
+          res.status(500).json({
+            ok: false,
+            error: { code: 'INTERNAL_ERROR', message: 'Failed to emit ticket.created' },
+          })
+        }
+      },
+    )
+
+    context.api.http.addRoute(
+      'POST',
+      '/api/after-sales/events/ticket-refund-requested',
+      async (req, res) => {
+        try {
+          const userId = getUserId(req)
+          if (!userId) {
+            sendUnauthorized(res)
+            return
+          }
+          if (!hasAfterSalesWriteAccess(req)) {
+            sendWriteForbidden(res)
+            return
+          }
+
+          const tenantId = getTenantId(req)
+          const payload = buildRefundRequestedEventPayload((req && req.body) || {}, {
+            tenantId,
+            projectId: installer.getProjectId(tenantId, appManifest.id),
+            requesterId: userId,
+          })
+
+          context.api.events.emit('ticket.refundRequested', payload)
+          res.status(202).json({
+            ok: true,
+            data: {
+              accepted: true,
+              event: 'ticket.refundRequested',
+              projectId: payload.projectId,
+              ticketId: payload.ticket.id,
+            },
+          })
+        } catch (err) {
+          if (err && err.code === 'AFTER_SALES_EVENT_VALIDATION_FAILED') {
+            sendBadRequest(res, err)
+            return
+          }
+          logger.error && logger.error('after-sales ticket.refundRequested emit failed', err)
+          res.status(500).json({
+            ok: false,
+            error: { code: 'INTERNAL_ERROR', message: 'Failed to emit ticket.refundRequested' },
+          })
+        }
+      },
+    )
+
     // Communication / events (unchanged from skeleton)
     context.communication.register('after-sales', {
       async getManifest() {
@@ -304,6 +441,30 @@ module.exports = {
       },
       async sendNotificationTopic(args) {
         return sendTopicNotification(context, args)
+      },
+      emitTicketCreated(args) {
+        const tenantId = (args && typeof args === 'object' && typeof args.tenantId === 'string' && args.tenantId.trim())
+          ? args.tenantId.trim()
+          : 'default'
+        const payload = buildTicketCreatedEventPayload(args || {}, {
+          tenantId,
+          projectId: installer.getProjectId(tenantId, appManifest.id),
+          requesterId: typeof args?.requesterId === 'string' ? args.requesterId : 'system',
+        })
+        context.api.events.emit('ticket.created', payload)
+        return { accepted: true, event: 'ticket.created', payload }
+      },
+      emitTicketRefundRequested(args) {
+        const tenantId = (args && typeof args === 'object' && typeof args.tenantId === 'string' && args.tenantId.trim())
+          ? args.tenantId.trim()
+          : 'default'
+        const payload = buildRefundRequestedEventPayload(args || {}, {
+          tenantId,
+          projectId: installer.getProjectId(tenantId, appManifest.id),
+          requesterId: typeof args?.requesterId === 'string' ? args.requesterId : 'system',
+        })
+        context.api.events.emit('ticket.refundRequested', payload)
+        return { accepted: true, event: 'ticket.refundRequested', payload }
       },
     })
 

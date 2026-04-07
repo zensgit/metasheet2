@@ -224,6 +224,7 @@ describe('plugin-after-sales routes', () => {
   let db: FakeDatabase
   let communicationRegister: ReturnType<typeof vi.fn>
   let eventsOn: ReturnType<typeof vi.fn>
+  let eventsEmit: ReturnType<typeof vi.fn>
 
   beforeEach(async () => {
     const setup = createContext()
@@ -233,6 +234,7 @@ describe('plugin-after-sales routes', () => {
     db = setup.db
     communicationRegister = setup.context.communication.register
     eventsOn = setup.context.api.events.on
+    eventsEmit = setup.context.api.events.emit
     await plugin.activate(setup.context)
   })
 
@@ -297,6 +299,157 @@ describe('plugin-after-sales routes', () => {
     expect(ensureObject).not.toHaveBeenCalled()
     expect(ensureView).not.toHaveBeenCalled()
     expect(db.rows).toHaveLength(0)
+  })
+
+  it('returns 403 for ticket-created when caller lacks after-sales write access', async () => {
+    const handler = routes.get('POST /api/after-sales/events/ticket-created')
+    const res = new FakeResponse()
+
+    await handler?.(buildReq({
+      user: {
+        id: 'user_42',
+        tenantId: 'tenant_42',
+        role: 'user',
+        roles: ['user'],
+        perms: ['after_sales:read'],
+      },
+      body: {
+        ticket: {
+          id: 'ticket_001',
+          ticketNo: 'TK-1001',
+          title: 'Broken compressor',
+          priority: 'urgent',
+        },
+      },
+    }), res)
+
+    expect(res.statusCode).toBe(403)
+    expect(res.body.error.code).toBe('FORBIDDEN')
+    expect(res.body.error.message).toBe('After-sales write access required')
+    expect(ensureObject).not.toHaveBeenCalled()
+  })
+
+  it('emits ticket.created and returns accepted event metadata', async () => {
+    const handler = routes.get('POST /api/after-sales/events/ticket-created')
+    const res = new FakeResponse()
+
+    await handler?.(buildReq({
+      user: {
+        id: 'writer_42',
+        tenantId: 'tenant_42',
+        role: 'user',
+        roles: ['user'],
+        perms: ['after_sales:write'],
+      },
+      body: {
+        ticket: {
+          id: 'ticket_001',
+          ticketNo: 'TK-1001',
+          title: 'Broken compressor',
+          priority: 'urgent',
+          assigneeCandidates: [
+            { id: 'tech_001', type: 'user' },
+          ],
+        },
+      },
+    }), res)
+
+    expect(res.statusCode).toBe(202)
+    expect(res.body).toEqual({
+      ok: true,
+      data: {
+        accepted: true,
+        event: 'ticket.created',
+        projectId: 'tenant_42:after-sales',
+        ticketId: 'ticket_001',
+      },
+    })
+    expect(eventsEmit).toHaveBeenCalledWith(
+      'ticket.created',
+      expect.objectContaining({
+        tenantId: 'tenant_42',
+        projectId: 'tenant_42:after-sales',
+        ticketNo: 'TK-1001',
+        title: 'Broken compressor',
+        ticket: expect.objectContaining({
+          id: 'ticket_001',
+          priority: 'urgent',
+        }),
+      }),
+    )
+  })
+
+  it('emits ticket.refundRequested with requester fallback and returns accepted metadata', async () => {
+    const handler = routes.get('POST /api/after-sales/events/ticket-refund-requested')
+    const res = new FakeResponse()
+
+    await handler?.(buildReq({
+      user: {
+        id: 'writer_42',
+        tenantId: 'tenant_42',
+        role: 'user',
+        roles: ['user'],
+        perms: ['after_sales:write'],
+      },
+      body: {
+        ticket: {
+          id: 'ticket_001',
+          ticketNo: 'TK-1001',
+          title: 'Refund request',
+          refundAmount: 88.5,
+        },
+      },
+    }), res)
+
+    expect(res.statusCode).toBe(202)
+    expect(res.body).toEqual({
+      ok: true,
+      data: {
+        accepted: true,
+        event: 'ticket.refundRequested',
+        projectId: 'tenant_42:after-sales',
+        ticketId: 'ticket_001',
+      },
+    })
+    expect(eventsEmit).toHaveBeenCalledWith(
+      'ticket.refundRequested',
+      expect.objectContaining({
+        tenantId: 'tenant_42',
+        projectId: 'tenant_42:after-sales',
+        ticketNo: 'TK-1001',
+        title: 'Refund request',
+        ticket: expect.objectContaining({
+          id: 'ticket_001',
+          refundAmount: 88.5,
+          requestedBy: 'writer_42',
+        }),
+      }),
+    )
+  })
+
+  it('returns 400 when refund-requested payload is malformed', async () => {
+    const handler = routes.get('POST /api/after-sales/events/ticket-refund-requested')
+    const res = new FakeResponse()
+
+    await handler?.(buildReq({
+      user: {
+        id: 'writer_42',
+        tenantId: 'tenant_42',
+        role: 'user',
+        roles: ['user'],
+        perms: ['after_sales:write'],
+      },
+      body: {
+        ticket: {
+          id: 'ticket_001',
+          ticketNo: 'TK-1001',
+          title: 'Refund request',
+        },
+      },
+    }), res)
+
+    expect(res.statusCode).toBe(400)
+    expect(res.body.error.code).toBe('AFTER_SALES_EVENT_VALIDATION_FAILED')
   })
 
   it('installs the default blueprint and returns project routes', async () => {
@@ -428,6 +581,8 @@ describe('plugin-after-sales routes', () => {
         buildRefundApprovalCommand: expect.any(Function),
         submitRefundApproval: expect.any(Function),
         sendNotificationTopic: expect.any(Function),
+        emitTicketCreated: expect.any(Function),
+        emitTicketRefundRequested: expect.any(Function),
       }),
     )
   })
