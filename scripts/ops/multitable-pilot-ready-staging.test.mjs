@@ -109,10 +109,10 @@ test('multitable pilot ready staging produces readiness with staging runner meta
     ok: true,
     rowCount: 2000,
     metrics: {
-      'ui.grid.open': { durationMs: 180 },
-      'ui.grid.search-hit': { durationMs: 80 },
-      'api.grid.initial-load': { durationMs: 12 },
-      'api.grid.search-hit': { durationMs: 9 },
+      'ui.grid.open': { durationMs: 3050 },
+      'ui.grid.search-hit': { durationMs: 820 },
+      'api.grid.initial-load': { durationMs: 280 },
+      'api.grid.search-hit': { durationMs: 205 },
     },
   }, null, 2))
   fs.writeFileSync(profileSummaryFixturePath, '# profile\n')
@@ -136,6 +136,7 @@ test('multitable pilot ready staging produces readiness with staging runner meta
       '    cp "${FAKE_PROFILE_SUMMARY}" "${OUTPUT_ROOT}/summary.md"',
       '    ;;',
       '  verify:multitable-grid-profile:summary)',
+      `    exec node ${repoRoot}/scripts/ops/multitable-grid-profile-summary.mjs`,
       '    ;;',
       '  *)',
       '    echo "unexpected pnpm command: ${cmd}" >&2',
@@ -184,6 +185,7 @@ test('multitable pilot ready staging produces readiness with staging runner meta
 
   const readiness = JSON.parse(fs.readFileSync(path.join(outputRoot, 'readiness.json'), 'utf8'))
   const readinessMd = fs.readFileSync(path.join(outputRoot, 'readiness.md'), 'utf8')
+  const profileSummary = fs.readFileSync(path.join(outputRoot, 'profile', 'summary.md'), 'utf8')
 
   assert.equal(readiness.ok, true)
   assert.equal(readiness.pilotRunner.runMode, 'staging')
@@ -192,6 +194,10 @@ test('multitable pilot ready staging produces readiness with staging runner meta
   assert.match(readiness.localRunner.reportMd, /staging-report\.md$/)
   assert.match(readinessMd, /## Pilot Runner/)
   assert.match(readinessMd, /Run mode: `staging`/)
+  assert.match(profileSummary, /`ui\.grid\.open` \| 3050\.00 ms \| 3500\.00 ms \| PASS/)
+  assert.match(profileSummary, /`ui\.grid\.search-hit` \| 820\.00 ms \| 1000\.00 ms \| PASS/)
+  assert.match(profileSummary, /`api\.grid\.initial-load` \| 280\.00 ms \| 300\.00 ms \| PASS/)
+  assert.match(profileSummary, /`api\.grid\.search-hit` \| 205\.00 ms \| 250\.00 ms \| PASS/)
   assert.match(fs.readFileSync(gateEnvLogPath, 'utf8'), /RUN_MODE=staging/)
   assert.match(fs.readFileSync(gateEnvLogPath, 'utf8'), /REPORT_MD=.*gates\/report\.md/)
   assert.match(fs.readFileSync(gateEnvLogPath, 'utf8'), /LOG_PATH=.*gates\/release-gate\.log/)

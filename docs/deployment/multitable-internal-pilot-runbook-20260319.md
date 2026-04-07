@@ -191,10 +191,13 @@ Grid profile thresholds for local readiness (`pnpm verify:multitable-pilot:ready
 
 Grid profile thresholds for staging / release readiness:
 
-- `ui.grid.open <= 350ms`
-- `ui.grid.search-hit <= 300ms`
-- `api.grid.initial-load <= 25ms`
-- `api.grid.search-hit <= 25ms`
+- `ui.grid.open <= 3500ms`
+- `ui.grid.search-hit <= 1000ms`
+- `api.grid.initial-load <= 300ms`
+- `api.grid.search-hit <= 250ms`
+
+These defaults are the public remote staging baseline for `pnpm verify:multitable-pilot:ready:staging:release-bound`.
+Keep using explicit env overrides if a tighter same-LAN or same-host staging budget is required.
 
 Build and test gate:
 
