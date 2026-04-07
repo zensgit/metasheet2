@@ -65,6 +65,13 @@ function verify_windows_entrypoints() {
   fi
 }
 
+function verify_root_runtime_dependencies() {
+  local root="$1"
+  local package_json="${root}/package.json"
+
+  search_fixed_string '"bcryptjs"' "$package_json" || die "root package.json must include bcryptjs for Windows bootstrap compatibility"
+}
+
 function write_optional_report() {
   local checksum_status="SKIPPED"
   local link_status="SKIPPED"
@@ -280,6 +287,7 @@ deploy_run_wrapper="$(find "$pkg_root" -maxdepth 1 -type f -name 'deploy-*.bat' 
 bootstrap_run_wrapper="$(find "$pkg_root" -maxdepth 1 -type f -name 'bootstrap-admin-*.bat' | head -n 1)"
 [[ -n "$bootstrap_run_wrapper" ]] || die "Required package content missing: bootstrap-admin-<run>.bat"
 verify_windows_entrypoints "$pkg_root"
+verify_root_runtime_dependencies "$pkg_root"
 
 if [[ "$VERIFY_NO_GITHUB_LINKS" == "1" ]]; then
   verify_no_github_links "$pkg_root"
