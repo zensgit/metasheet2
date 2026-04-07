@@ -168,10 +168,18 @@ The packaged root now also includes Windows-native wrappers:
 - `deploy.bat <package.zip|package.tgz>`: synchronous apply + upgrade
 - `deploy-runXX.bat <package.zip|package.tgz>`: same helper with the packaged run label baked in
 - `deploy-remote.bat <package.zip|package.tgz>`: detached background run that writes `output/logs/deploy-remote.log`
+- `bootstrap-admin.bat <admin-email> <admin-password> [admin-name]`: create or repair the initial admin user on a pure Windows host
+- `bootstrap-admin-runXX.bat <admin-email> <admin-password> [admin-name]`: same helper with the packaged run label baked in
 
 These wrappers now call `scripts/ops/multitable-onprem-apply-package.ps1`, so a plain Windows Server 2022 host does not need bash or WSL just to apply a corrective package reroll.
 
 The PowerShell helper extracts the incoming archive into a short-lived system temp directory instead of a deep deploy-root subdirectory, which avoids common Windows long-path failures during `Expand-Archive`.
+
+After `deploy.bat` completes on a fresh Windows-only install, create the first admin with:
+
+```bat
+bootstrap-admin.bat admin@your-company.local <StrongPasswordAtLeast12Chars> Administrator
+```
 
 ## 11) Delivery checklist
 
