@@ -38,6 +38,7 @@ interface FakeContext {
     }
     multitable?: {
       provisioning?: {
+        getObjectSheetId: (projectId: string, objectId: string) => string
         ensureObject: (input: {
           projectId: string
           descriptor: Record<string, unknown>
@@ -46,6 +47,12 @@ interface FakeContext {
           projectId: string
           sheetId: string
           descriptor: Record<string, unknown>
+        }) => Promise<unknown>
+      }
+      records?: {
+        createRecord: (input: {
+          sheetId: string
+          data: Record<string, unknown>
         }) => Promise<unknown>
       }
     }
@@ -142,6 +149,7 @@ function createContext(): {
   routes: Map<string, RegisteredHandler>
   ensureObject: ReturnType<typeof vi.fn>
   ensureView: ReturnType<typeof vi.fn>
+  createRecord: ReturnType<typeof vi.fn>
   db: FakeDatabase
 } {
   const routes = new Map<string, RegisteredHandler>()
@@ -170,6 +178,12 @@ function createContext(): {
     hiddenFieldIds: [],
     config: {},
   }))
+  const createRecord = vi.fn(async (input: { sheetId: string; data: Record<string, unknown> }) => ({
+    id: 'rec_ticket_001',
+    sheetId: input.sheetId,
+    version: 1,
+    data: input.data,
+  }))
 
   const context: FakeContext = {
     api: {
@@ -181,8 +195,12 @@ function createContext(): {
       },
       multitable: {
         provisioning: {
+          getObjectSheetId: (projectId: string, objectId: string) => `${projectId}:${objectId}:sheet`,
           ensureObject,
           ensureView,
+        },
+        records: {
+          createRecord,
         },
       },
       events: {
@@ -200,7 +218,7 @@ function createContext(): {
     },
   }
 
-  return { context, routes, ensureObject, ensureView, db }
+  return { context, routes, ensureObject, ensureView, createRecord, db }
 }
 
 function buildReq(overrides: Record<string, unknown> = {}) {
@@ -221,6 +239,7 @@ describe('plugin-after-sales routes', () => {
   let routes: Map<string, RegisteredHandler>
   let ensureObject: ReturnType<typeof vi.fn>
   let ensureView: ReturnType<typeof vi.fn>
+  let createRecord: ReturnType<typeof vi.fn>
   let db: FakeDatabase
   let communicationRegister: ReturnType<typeof vi.fn>
   let eventsOn: ReturnType<typeof vi.fn>
@@ -231,6 +250,7 @@ describe('plugin-after-sales routes', () => {
     routes = setup.routes
     ensureObject = setup.ensureObject
     ensureView = setup.ensureView
+    createRecord = setup.createRecord
     db = setup.db
     communicationRegister = setup.context.communication.register
     eventsOn = setup.context.api.events.on
@@ -327,6 +347,101 @@ describe('plugin-after-sales routes', () => {
     expect(res.body.error.code).toBe('FORBIDDEN')
     expect(res.body.error.message).toBe('After-sales write access required')
     expect(ensureObject).not.toHaveBeenCalled()
+  })
+
+  it('creates a service ticket record and emits ticket.created', async () => {
+    const handler = routes.get('POST /api/after-sales/tickets')
+    const res = new FakeResponse()
+
+    db.rows.push({
+      id: 'fake-uuid-1',
+      tenant_id: 'tenant_42',
+      app_id: 'after-sales',
+      project_id: 'tenant_42:after-sales',
+      template_id: 'after-sales-default',
+      template_version: '0.1.0',
+      mode: 'enable',
+      status: 'installed',
+      created_objects_json: JSON.stringify(['serviceTicket']),
+      created_views_json: JSON.stringify(['ticket-board']),
+      warnings_json: JSON.stringify([]),
+      display_name: 'After-sales',
+      config_json: JSON.stringify({}),
+      last_install_at: new Date(),
+      created_at: new Date(),
+    })
+
+    await handler?.(buildReq({
+      user: {
+        id: 'writer_42',
+        tenantId: 'tenant_42',
+        role: 'user',
+        roles: ['user'],
+        perms: ['after_sales:write'],
+      },
+      body: {
+        ticket: {
+          ticketNo: 'TK-2001',
+          title: 'No cooling output',
+          priority: 'high',
+          source: 'phone',
+          assigneeCandidates: [{ id: 'tech_001', type: 'user' }],
+        },
+      },
+    }), res)
+
+    expect(res.statusCode).toBe(201)
+    expect(createRecord).toHaveBeenCalledWith({
+      sheetId: 'tenant_42:after-sales:serviceTicket:sheet',
+      data: {
+        ticketNo: 'TK-2001',
+        title: 'No cooling output',
+        source: 'phone',
+        priority: 'high',
+        status: 'new',
+      },
+    })
+    expect(eventsEmit).toHaveBeenCalledWith(
+      'ticket.created',
+      expect.objectContaining({
+        projectId: 'tenant_42:after-sales',
+        ticket: expect.objectContaining({
+          id: 'rec_ticket_001',
+          ticketNo: 'TK-2001',
+          priority: 'high',
+        }),
+      }),
+    )
+    expect(res.body.data.ticket.id).toBe('rec_ticket_001')
+    expect(res.body.data.event).toEqual({
+      accepted: true,
+      event: 'ticket.created',
+    })
+  })
+
+  it('returns 409 when creating a ticket before install', async () => {
+    const handler = routes.get('POST /api/after-sales/tickets')
+    const res = new FakeResponse()
+
+    await handler?.(buildReq({
+      user: {
+        id: 'writer_42',
+        tenantId: 'tenant_42',
+        role: 'user',
+        roles: ['user'],
+        perms: ['after_sales:write'],
+      },
+      body: {
+        ticket: {
+          ticketNo: 'TK-2001',
+          title: 'No cooling output',
+        },
+      },
+    }), res)
+
+    expect(res.statusCode).toBe(409)
+    expect(res.body.error.code).toBe('AFTER_SALES_NOT_INSTALLED')
+    expect(createRecord).not.toHaveBeenCalled()
   })
 
   it('emits ticket.created and returns accepted event metadata', async () => {
@@ -685,6 +800,7 @@ describe('plugin-after-sales routes', () => {
         emitTicketRefundRequested: expect.any(Function),
         emitTicketOverdue: expect.any(Function),
         emitFollowUpDue: expect.any(Function),
+        createTicket: expect.any(Function),
       }),
     )
   })

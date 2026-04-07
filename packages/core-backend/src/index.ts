@@ -39,10 +39,15 @@ import { jwtAuthMiddleware, isWhitelisted } from './auth/jwt-middleware'
 import { authService } from './auth/AuthService'
 import { cache } from './cache-init'
 import {
+  getObjectSheetId as getProvisionedObjectSheetId,
   ensureObject as ensureMultitableObject,
   ensureView as ensureMultitableView,
   type MultitableProvisioningQueryFn,
 } from './multitable/provisioning'
+import {
+  createRecord as createMultitableRecord,
+  type MultitableRecordsQueryFn,
+} from './multitable/records'
 import { installMetrics, requestMetricsMiddleware } from './metrics/metrics'
 import { getPoolStats } from './db/pg'
 import { isDatabaseSchemaError } from './utils/database-errors'
@@ -286,6 +291,7 @@ export class MetaSheetServer {
 
       multitable: {
         provisioning: {
+          getObjectSheetId: (projectId, objectId) => getProvisionedObjectSheetId(projectId, objectId),
           ensureObject: async ({ projectId, baseId, descriptor }) => {
             return poolManager.get().transaction(async ({ query }) => {
               const txQuery: MultitableProvisioningQueryFn = async (sql, params) => {
@@ -319,6 +325,28 @@ export class MetaSheetServer {
                 projectId,
                 sheetId,
                 descriptor,
+              })
+            })
+          },
+        },
+        records: {
+          createRecord: async ({ sheetId, data }) => {
+            return poolManager.get().transaction(async ({ query }) => {
+              const txQuery: MultitableRecordsQueryFn = async (sql, params) => {
+                const result = await query(sql, params)
+                return {
+                  rows: Array.isArray((result as { rows?: unknown[] }).rows)
+                    ? (result as { rows: unknown[] }).rows
+                    : [],
+                  rowCount: typeof (result as { rowCount?: number }).rowCount === 'number'
+                    ? (result as { rowCount: number }).rowCount
+                    : undefined,
+                }
+              }
+              return createMultitableRecord({
+                query: txQuery,
+                sheetId,
+                data,
               })
             })
           },

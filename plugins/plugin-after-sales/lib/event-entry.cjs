@@ -28,6 +28,18 @@ function optionalString(value) {
   return typeof value === 'string' && value.trim() ? value.trim() : undefined
 }
 
+function normalizeEnumValue(value, field, allowed, fallback) {
+  const normalized = optionalString(value) || fallback
+  if (!allowed.includes(normalized)) {
+    throw createEventEntryError(
+      'AFTER_SALES_EVENT_VALIDATION_FAILED',
+      `${field} must be one of: ${allowed.join(', ')}`,
+      { field, allowed },
+    )
+  }
+  return normalized
+}
+
 function optionalRecipient(value) {
   if (!value) return undefined
   if (typeof value === 'string' && value.trim()) {
@@ -94,6 +106,56 @@ function buildRefundRequestedEventPayload(input, meta) {
   }
 }
 
+function buildCreateTicketCommand(input) {
+  const ticket = input && typeof input.ticket === 'object' && !Array.isArray(input.ticket) ? input.ticket : input || {}
+  const source = normalizeEnumValue(
+    ticket.source,
+    'ticket.source',
+    ['phone', 'email', 'web', 'wechat'],
+    'web',
+  )
+  const priority = normalizeEnumValue(
+    ticket.priority,
+    'ticket.priority',
+    ['low', 'normal', 'high', 'urgent'],
+    'normal',
+  )
+  const status = normalizeEnumValue(
+    ticket.status,
+    'ticket.status',
+    ['new', 'assigned', 'inProgress', 'done', 'closed'],
+    'new',
+  )
+  const refundAmount =
+    ticket.refundAmount == null || ticket.refundAmount === ''
+      ? undefined
+      : requiredNumber(ticket.refundAmount, 'ticket.refundAmount')
+
+  const eventTicket = {
+    ticketNo: requiredString(ticket.ticketNo ?? input.ticketNo, 'ticket.ticketNo'),
+    title: requiredString(ticket.title ?? input.title, 'ticket.title'),
+    source,
+    priority,
+    status,
+    assignedTo: optionalRecipient(ticket.assignedTo),
+    assignedSupervisor: optionalRecipient(ticket.assignedSupervisor),
+    assigneeCandidates: optionalRecipientList(ticket.assigneeCandidates),
+    technicianCandidates: optionalRecipientList(ticket.technicianCandidates),
+  }
+
+  return {
+    recordData: {
+      ticketNo: eventTicket.ticketNo,
+      title: eventTicket.title,
+      source,
+      priority,
+      status,
+      ...(typeof refundAmount === 'number' ? { refundAmount } : {}),
+    },
+    eventTicket,
+  }
+}
+
 function buildTicketOverdueEventPayload(input, meta) {
   const ticket = input && typeof input.ticket === 'object' && !Array.isArray(input.ticket) ? input.ticket : {}
   const assignedTo = optionalRecipient(ticket.assignedTo)
@@ -154,6 +216,7 @@ function buildFollowUpDueEventPayload(input, meta) {
 }
 
 module.exports = {
+  buildCreateTicketCommand,
   buildTicketCreatedEventPayload,
   buildRefundRequestedEventPayload,
   buildTicketOverdueEventPayload,

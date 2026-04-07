@@ -152,6 +152,14 @@ function stableMetaId(prefix: string, ...parts: string[]): string {
   return `${prefix}_${digest}`.slice(0, 50)
 }
 
+export function getObjectSheetId(projectId: string, objectId: string): string {
+  return stableMetaId('sheet', projectId, objectId)
+}
+
+export function getObjectViewId(projectId: string, objectId: string, viewId: string): string {
+  return stableMetaId('view', projectId, objectId, viewId)
+}
+
 function buildFieldProperty(
   field: MultitableProvisioningFieldDescriptor,
 ): Record<string, unknown> {
@@ -315,7 +323,7 @@ export async function ensureView(
   input: EnsureViewInput,
 ): Promise<MultitableProvisioningView> {
   const descriptor = input.descriptor
-  const viewId = stableMetaId('view', input.projectId, descriptor.objectId, descriptor.id)
+  const viewId = getObjectViewId(input.projectId, descriptor.objectId, descriptor.id)
   await input.query(
     `INSERT INTO meta_views (id, sheet_id, name, type, filter_info, sort_info, group_info, hidden_field_ids, config)
      VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7::jsonb, $8::jsonb, $9::jsonb)
@@ -386,7 +394,7 @@ export async function ensureObject(
   fields: MultitableProvisioningField[]
 }> {
   const baseId = input.baseId ?? await ensureLegacyBase(input.query)
-  const sheetId = stableMetaId('sheet', input.projectId, input.descriptor.id)
+  const sheetId = getObjectSheetId(input.projectId, input.descriptor.id)
   const sheet = await ensureSheet({
     query: input.query,
     sheetId,

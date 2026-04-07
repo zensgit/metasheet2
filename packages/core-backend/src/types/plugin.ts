@@ -364,6 +364,7 @@ export interface MultitableProvisioningViewDescriptor {
 }
 
 export interface MultitableProvisioningAPI {
+  getObjectSheetId(projectId: string, objectId: string): string
   ensureObject(input: {
     projectId: string
     baseId?: string | null
@@ -402,8 +403,21 @@ export interface MultitableProvisioningAPI {
   }>
 }
 
+export interface MultitableRecordsAPI {
+  createRecord(input: {
+    sheetId: string
+    data: Record<string, unknown>
+  }): Promise<{
+    id: string
+    sheetId: string
+    version: number
+    data: Record<string, unknown>
+  }>
+}
+
 export interface MultitableAPI {
   provisioning: MultitableProvisioningAPI
+  records: MultitableRecordsAPI
 }
 
 export interface FormulaAPI {

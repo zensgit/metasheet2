@@ -15,6 +15,7 @@ const {
   registerAfterSalesWorkflowHandlers,
 } = require('./lib/workflow-adapter.cjs')
 const {
+  buildCreateTicketCommand,
   buildTicketCreatedEventPayload,
   buildRefundRequestedEventPayload,
   buildTicketOverdueEventPayload,
@@ -176,6 +177,21 @@ function sendBadRequest(res, err) {
   })
 }
 
+function getMultitableWriteApi(context) {
+  const multitable = context && context.api && context.api.multitable
+  const provisioning = multitable && multitable.provisioning
+  const records = multitable && multitable.records
+  if (
+    !provisioning ||
+    typeof provisioning.getObjectSheetId !== 'function' ||
+    !records ||
+    typeof records.createRecord !== 'function'
+  ) {
+    return null
+  }
+  return { provisioning, records }
+}
+
 function cleanupWorkflowSubscriptions() {
   if (
     activeContext &&
@@ -330,6 +346,112 @@ module.exports = {
           res.status(500).json({
             ok: false,
             error: { code: 'INTERNAL_ERROR', message: 'Install failed' },
+          })
+        }
+      },
+    )
+
+    context.api.http.addRoute(
+      'POST',
+      '/api/after-sales/tickets',
+      async (req, res) => {
+        try {
+          const userId = getUserId(req)
+          if (!userId) {
+            sendUnauthorized(res)
+            return
+          }
+          if (!hasAfterSalesWriteAccess(req)) {
+            sendWriteForbidden(res)
+            return
+          }
+
+          const multitableApi = getMultitableWriteApi(context)
+          if (!multitableApi) {
+            res.status(503).json({
+              ok: false,
+              error: {
+                code: 'MULTITABLE_UNAVAILABLE',
+                message: 'Multitable record writer is not available on plugin context',
+              },
+            })
+            return
+          }
+
+          const tenantId = getTenantId(req)
+          const current = await installer.loadCurrent(context, tenantId, appManifest.id)
+          if (!current || current.status === 'not-installed') {
+            res.status(409).json({
+              ok: false,
+              error: {
+                code: 'AFTER_SALES_NOT_INSTALLED',
+                message: 'After-sales must be installed before creating tickets',
+              },
+            })
+            return
+          }
+
+          const projectId = current.projectId || installer.getProjectId(tenantId, appManifest.id)
+          const command = buildCreateTicketCommand((req && req.body) || {})
+          const sheetId = multitableApi.provisioning.getObjectSheetId(projectId, 'serviceTicket')
+          const record = await multitableApi.records.createRecord({
+            sheetId,
+            data: command.recordData,
+          })
+
+          let event = { accepted: false, event: 'ticket.created' }
+          try {
+            const payload = buildTicketCreatedEventPayload({
+              ticket: {
+                id: record.id,
+                ...command.eventTicket,
+              },
+            }, {
+              tenantId,
+              projectId,
+              requesterId: userId,
+            })
+            context.api.events.emit('ticket.created', payload)
+            event = { accepted: true, event: 'ticket.created' }
+          } catch (err) {
+            logger.error && logger.error('after-sales ticket.created emit after record create failed', err)
+          }
+
+          res.status(201).json({
+            ok: true,
+            data: {
+              projectId,
+              ticket: {
+                id: record.id,
+                version: record.version,
+                data: record.data,
+              },
+              event,
+            },
+          })
+        } catch (err) {
+          if (err && err.code === 'AFTER_SALES_EVENT_VALIDATION_FAILED') {
+            sendBadRequest(res, err)
+            return
+          }
+          if (err && err.code === 'VALIDATION_ERROR') {
+            res.status(400).json({
+              ok: false,
+              error: { code: err.code, message: err.message },
+            })
+            return
+          }
+          if (err && err.code === 'NOT_FOUND') {
+            res.status(404).json({
+              ok: false,
+              error: { code: err.code, message: err.message },
+            })
+            return
+          }
+          logger.error && logger.error('after-sales create ticket failed', err)
+          res.status(500).json({
+            ok: false,
+            error: { code: 'INTERNAL_ERROR', message: 'Failed to create after-sales ticket' },
           })
         }
       },
@@ -584,6 +706,45 @@ module.exports = {
         })
         context.api.events.emit('followup.due', payload)
         return { accepted: true, event: 'followup.due', payload }
+      },
+      async createTicket(args) {
+        const tenantId = (args && typeof args === 'object' && typeof args.tenantId === 'string' && args.tenantId.trim())
+          ? args.tenantId.trim()
+          : 'default'
+        const projectId = installer.getProjectId(tenantId, appManifest.id)
+        const multitableApi = getMultitableWriteApi(context)
+        if (!multitableApi) {
+          throw new Error('Multitable record writer is not available on plugin context')
+        }
+        const command = buildCreateTicketCommand(args || {})
+        const sheetId = multitableApi.provisioning.getObjectSheetId(projectId, 'serviceTicket')
+        const record = await multitableApi.records.createRecord({
+          sheetId,
+          data: command.recordData,
+        })
+        const payload = buildTicketCreatedEventPayload({
+          ticket: {
+            id: record.id,
+            ...command.eventTicket,
+          },
+        }, {
+          tenantId,
+          projectId,
+          requesterId: typeof args?.requesterId === 'string' ? args.requesterId : 'system',
+        })
+        context.api.events.emit('ticket.created', payload)
+        return {
+          projectId,
+          ticket: {
+            id: record.id,
+            version: record.version,
+            data: record.data,
+          },
+          event: {
+            accepted: true,
+            event: 'ticket.created',
+          },
+        }
       },
     })
 
