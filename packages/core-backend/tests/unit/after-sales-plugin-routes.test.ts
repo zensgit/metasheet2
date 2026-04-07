@@ -144,15 +144,23 @@ function createContext(): {
 } {
   const routes = new Map<string, RegisteredHandler>()
   const db = createFakeDatabase()
-  const ensureObject = vi.fn(async () => ({
-    baseId: 'base_legacy',
-    sheet: { id: 'sheet_fake', baseId: 'base_legacy', name: 'Installed Asset', description: null },
-    fields: [],
-  }))
-  const ensureView = vi.fn(async () => ({
-    id: 'view_fake',
-    sheetId: 'sheet_fake',
-    name: 'Installed Assets',
+  const ensureObject = vi.fn(async (input: { descriptor: Record<string, unknown> }) => {
+    const objectId = String(input.descriptor.id)
+    return {
+      baseId: 'base_legacy',
+      sheet: {
+        id: `sheet_${objectId}`,
+        baseId: 'base_legacy',
+        name: String(input.descriptor.name || objectId),
+        description: null,
+      },
+      fields: [],
+    }
+  })
+  const ensureView = vi.fn(async (input: { sheetId: string; descriptor: Record<string, unknown> }) => ({
+    id: `view_${String(input.descriptor.id)}`,
+    sheetId: input.sheetId,
+    name: String(input.descriptor.name || 'View'),
     type: 'grid',
     filterInfo: {},
     sortInfo: {},
@@ -279,9 +287,34 @@ describe('plugin-after-sales routes', () => {
       apiBase: '/api/after-sales',
     })
     expect(res.body.data.installResult.status).toBe('installed')
-    expect(res.body.data.installResult.createdViews).toEqual(['installedAsset-grid'])
-    expect(ensureObject).toHaveBeenCalledTimes(1)
-    expect(ensureView).toHaveBeenCalledTimes(1)
+    expect(res.body.data.installResult.createdObjects).toEqual([
+      'serviceTicket',
+      'installedAsset',
+    ])
+    expect(res.body.data.installResult.createdViews).toEqual([
+      'ticket-board',
+      'installedAsset-grid',
+    ])
+    expect(ensureObject).toHaveBeenCalledTimes(2)
+    expect(ensureView).toHaveBeenCalledTimes(2)
+    expect(ensureView).toHaveBeenNthCalledWith(1, {
+      projectId: 'tenant_42:after-sales',
+      sheetId: 'sheet_serviceTicket',
+      descriptor: expect.objectContaining({
+        id: 'ticket-board',
+        objectId: 'serviceTicket',
+        type: 'kanban',
+      }),
+    })
+    expect(ensureView).toHaveBeenNthCalledWith(2, {
+      projectId: 'tenant_42:after-sales',
+      sheetId: 'sheet_installedAsset',
+      descriptor: expect.objectContaining({
+        id: 'installedAsset-grid',
+        objectId: 'installedAsset',
+        type: 'grid',
+      }),
+    })
     expect(db.rows).toHaveLength(1)
   })
 

@@ -5,6 +5,62 @@ function enrichObjectDescriptor(objectDescriptor) {
     return objectDescriptor
   }
 
+  if (objectDescriptor.id === 'serviceTicket') {
+    return {
+      ...objectDescriptor,
+      provisioning: {
+        multitable: true,
+      },
+      fields: [
+        {
+          id: 'ticketNo',
+          name: 'Ticket No',
+          type: 'string',
+          required: true,
+        },
+        {
+          id: 'title',
+          name: 'Title',
+          type: 'string',
+          required: true,
+        },
+        {
+          id: 'source',
+          name: 'Source',
+          type: 'select',
+          required: true,
+          options: ['phone', 'email', 'web', 'wechat'],
+        },
+        {
+          id: 'priority',
+          name: 'Priority',
+          type: 'select',
+          required: true,
+          options: ['low', 'normal', 'high', 'urgent'],
+        },
+        {
+          id: 'status',
+          name: 'Status',
+          type: 'select',
+          required: true,
+          options: ['new', 'assigned', 'inProgress', 'done', 'closed'],
+        },
+        {
+          id: 'slaDueAt',
+          name: 'SLA Due At',
+          type: 'date',
+          required: false,
+        },
+        {
+          id: 'refundAmount',
+          name: 'Refund Amount',
+          type: 'number',
+          required: false,
+        },
+      ],
+    }
+  }
+
   if (objectDescriptor.id !== 'installedAsset') {
     return { ...objectDescriptor }
   }
@@ -69,6 +125,15 @@ function buildDefaultBlueprint(manifest) {
       ? manifest.objects.map((objectDescriptor) => enrichObjectDescriptor(objectDescriptor))
       : [],
     views: [
+      {
+        id: 'ticket-board',
+        objectId: 'serviceTicket',
+        name: 'Ticket Board',
+        type: 'kanban',
+        config: {
+          groupFieldId: 'status',
+        },
+      },
       {
         id: 'installedAsset-grid',
         objectId: 'installedAsset',

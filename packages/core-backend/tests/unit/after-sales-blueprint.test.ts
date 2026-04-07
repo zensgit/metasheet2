@@ -33,28 +33,68 @@ describe('plugin-after-sales default blueprint', () => {
         options: ['active', 'expired', 'decommissioned'],
       }),
     ])
-    expect(result.views).toEqual([
-      {
-        id: 'installedAsset-grid',
-        objectId: 'installedAsset',
-        name: 'Installed Assets',
-        type: 'grid',
-        config: {},
-      },
-    ])
+    expect(result.views).toContainEqual({
+      id: 'installedAsset-grid',
+      objectId: 'installedAsset',
+      name: 'Installed Assets',
+      type: 'grid',
+      config: {},
+    })
   })
 
-  it('keeps non-installedAsset objects unchanged', () => {
+  it('adds the serviceTicket multitable projection and default board view', () => {
     const result = blueprint.buildDefaultBlueprint(manifest)
     const objects = Array.isArray(result.objects) ? result.objects as Array<Record<string, unknown>> : []
     const serviceTicket = objects.find((objectDescriptor) => objectDescriptor.id === 'serviceTicket')
-    const warrantyPolicy = objects.find((objectDescriptor) => objectDescriptor.id === 'warrantyPolicy')
 
-    expect(serviceTicket).toEqual({
+    expect(serviceTicket).toMatchObject({
       id: 'serviceTicket',
       name: 'Service Ticket',
       backing: 'hybrid',
+      provisioning: {
+        multitable: true,
+      },
     })
+    expect(serviceTicket?.fields).toEqual([
+      expect.objectContaining({ id: 'ticketNo', type: 'string', required: true }),
+      expect.objectContaining({ id: 'title', type: 'string', required: true }),
+      expect.objectContaining({
+        id: 'source',
+        type: 'select',
+        required: true,
+        options: ['phone', 'email', 'web', 'wechat'],
+      }),
+      expect.objectContaining({
+        id: 'priority',
+        type: 'select',
+        required: true,
+        options: ['low', 'normal', 'high', 'urgent'],
+      }),
+      expect.objectContaining({
+        id: 'status',
+        type: 'select',
+        required: true,
+        options: ['new', 'assigned', 'inProgress', 'done', 'closed'],
+      }),
+      expect.objectContaining({ id: 'slaDueAt', type: 'date', required: false }),
+      expect.objectContaining({ id: 'refundAmount', type: 'number', required: false }),
+    ])
+    expect(result.views).toContainEqual({
+      id: 'ticket-board',
+      objectId: 'serviceTicket',
+      name: 'Ticket Board',
+      type: 'kanban',
+      config: {
+        groupFieldId: 'status',
+      },
+    })
+  })
+
+  it('keeps service-only objects unchanged', () => {
+    const result = blueprint.buildDefaultBlueprint(manifest)
+    const objects = Array.isArray(result.objects) ? result.objects as Array<Record<string, unknown>> : []
+    const warrantyPolicy = objects.find((objectDescriptor) => objectDescriptor.id === 'warrantyPolicy')
+
     expect(warrantyPolicy).toEqual({
       id: 'warrantyPolicy',
       name: 'Warranty Policy',

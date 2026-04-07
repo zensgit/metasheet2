@@ -196,6 +196,12 @@ function getProvisioningApi(context) {
     : null
 }
 
+function shouldProvisionObjectInMultitable(obj) {
+  if (!obj || typeof obj !== 'object') return false
+  if (obj.backing === 'multitable') return true
+  return obj.provisioning && typeof obj.provisioning === 'object' && obj.provisioning.multitable === true
+}
+
 /**
  * UPSERT a ledger row with terminal state. Caller supplies fully formed row.
  * Returns the persisted row (with id).
@@ -349,7 +355,7 @@ async function runInstall(input) {
 
   try {
     for (const obj of blueprint.objects) {
-      if (obj.backing === 'multitable') {
+      if (shouldProvisionObjectInMultitable(obj)) {
         if (provisioning) {
           const provisioned = await provisioning.ensureObject({
             projectId,
@@ -362,7 +368,8 @@ async function runInstall(input) {
         createdObjects.push(obj.id)
       } else if (obj.backing === 'service' || obj.backing === 'hybrid') {
         // service/hybrid-backed objects are managed by the plugin's own service
-        // layer, not by the template installer. Skipped intentionally.
+        // layer, not by the template installer. Skipped intentionally unless
+        // blueprint-level multitable projection is explicitly enabled.
       }
     }
 
