@@ -80,10 +80,10 @@
         "body": {
           "ok": true,
           "service": "yuantus-plm",
-          "version": "0.0.0",
-          "tenant_id": "tenant-1",
-          "org_id": "org-1",
-          "tenancy_mode": "header",
+          "version": "0.1.3",
+          "tenant_id": null,
+          "org_id": null,
+          "tenancy_mode": "db-per-tenant-org",
           "schema_mode": "shared",
           "audit_enabled": true
         },

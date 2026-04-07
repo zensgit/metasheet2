@@ -88,17 +88,34 @@ cp pacts/metasheet2-yuantus-plm.json \
 
 cd /Users/huazhou/Downloads/Github/Yuantus
 ./.venv/bin/python -m pytest \
-   src/yuantus/api/tests/test_pact_provider_yuantus_plm.py -q
+   src/yuantus/api/tests/test_pact_provider_yuantus_plm.py
 ```
 
-The verifier will:
+### Current verifier state (2026-04-08)
 
-1. Skip if `pact-python` is not installed (current default — `1 skipped`).
-2. Once `pact-python` is installed, start the FastAPI app on a free port,
-   verify each interaction, and fail if any provider response no longer
-   matches the contract shape.
+Wired end-to-end with `pact-python 3.2.1`. Verifier no longer skips —
+it actually starts the FastAPI app, replays each interaction, and reports
+real verification results.
 
-To install `pact-python` for actual verification:
+**Wave 1 baseline result: 1 passing, 5 failing.**
+
+| Interaction | State | Why |
+|---|---|---|
+| `GET /api/v1/health` | ✅ PASS | no auth / no provider state needed |
+| `POST /api/v1/auth/login` | ❌ FAIL | needs seeded test user (Wave 1.5) |
+| `GET /api/v1/search/` | ❌ FAIL | needs seeded item + auth token (Wave 1.5) |
+| `POST /api/v1/aml/apply` | ❌ FAIL | needs seeded test Part with id 01H...P1 (Wave 1.5) |
+| `GET /api/v1/bom/{id}/tree` | ❌ FAIL | needs seeded BOM relationship (Wave 1.5) |
+| `GET /api/v1/bom/compare` | ❌ FAIL | needs two seeded comparable items (Wave 1.5) |
+
+The 5 failing interactions are NOT shape drift — they fail because the
+provider state handler is currently a no-op and the requests hit a clean
+test database. Implementing real state seeding is tracked as Wave 1.5
+work; the deliberate break experiment in
+`Yuantus/docs/PACT_DELIBERATE_BREAK_EXPERIMENT_20260408.md` confirmed the
+gate correctly distinguishes "missing state" from "real shape drift".
+
+To install `pact-python` and run locally:
 
 ```bash
 ./.venv/bin/pip install pact-python
