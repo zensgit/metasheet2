@@ -141,7 +141,13 @@ function Invoke-NodeCapture {
   )
 
   Write-Info $Description
-  $tempScriptPath = Join-Path ([System.IO.Path]::GetTempPath()) (([System.IO.Path]::GetRandomFileName()) + '.cjs')
+  $tempRoot = if ($script:resolvedRoot -and -not [string]::IsNullOrWhiteSpace($script:resolvedRoot)) {
+    Join-Path $script:resolvedRoot '.tmp\node-bootstrap'
+  } else {
+    Join-Path ([System.IO.Path]::GetTempPath()) 'metasheet-node-bootstrap'
+  }
+  [System.IO.Directory]::CreateDirectory($tempRoot) | Out-Null
+  $tempScriptPath = Join-Path $tempRoot (([System.IO.Path]::GetRandomFileName()) + '.cjs')
   $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
   [System.IO.File]::WriteAllText($tempScriptPath, $Script, $utf8NoBom)
 
