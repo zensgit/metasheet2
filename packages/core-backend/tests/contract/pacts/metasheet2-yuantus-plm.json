@@ -1,0 +1,353 @@
+{
+  "consumer": {
+    "name": "Metasheet2"
+  },
+  "provider": {
+    "name": "YuantusPLM"
+  },
+  "metadata": {
+    "pactSpecification": {
+      "version": "3.0.0"
+    },
+    "claudeNote": "Hand-authored Wave 1 P0 contract per docs/PACT_FIRST_INTEGRATION_PLAN_20260407.md. Match-by-type, not match-by-value. Replace with @pact-foundation/pact generated artifact when that dep is approved. NOTE: codex's plan also listed GET /api/v1/aml/metadata/{type} in Wave 1, but PLMAdapter.ts does not currently call it; contract-first principle says we lock what is actually called, so metadata is deferred to Wave 2 (or earlier once PLMAdapter starts using it)."
+  },
+  "interactions": [
+    {
+      "description": "authenticate with tenant credentials and receive a JWT",
+      "providerStates": [
+        {
+          "name": "a tenant user with valid credentials exists"
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "path": "/api/v1/auth/login",
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": {
+          "tenant_id": "tenant-1",
+          "username": "metasheet-svc",
+          "password": "secret"
+        },
+        "matchingRules": {
+          "body": {
+            "$.tenant_id": { "matchers": [{ "match": "type" }] },
+            "$.username": { "matchers": [{ "match": "type" }] },
+            "$.password": { "matchers": [{ "match": "type" }] }
+          }
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": {
+          "access_token": "eyJhbGciOiJIUzI1NiJ9.example",
+          "token_type": "bearer",
+          "expires_in": 3600,
+          "tenant_id": "tenant-1",
+          "user_id": 1
+        },
+        "matchingRules": {
+          "body": {
+            "$.access_token": { "matchers": [{ "match": "type" }] },
+            "$.token_type": { "matchers": [{ "match": "type" }] },
+            "$.expires_in": { "matchers": [{ "match": "integer" }] },
+            "$.tenant_id": { "matchers": [{ "match": "type" }] },
+            "$.user_id": { "matchers": [{ "match": "integer" }] }
+          }
+        }
+      }
+    },
+    {
+      "description": "probe service health",
+      "providerStates": [
+        {
+          "name": "the provider is up"
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "path": "/api/v1/health"
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": {
+          "ok": true,
+          "service": "yuantus-plm",
+          "version": "0.0.0",
+          "tenant_id": "tenant-1",
+          "org_id": "org-1",
+          "tenancy_mode": "header",
+          "schema_mode": "shared",
+          "audit_enabled": true
+        },
+        "matchingRules": {
+          "body": {
+            "$.ok": { "matchers": [{ "match": "type" }] },
+            "$.service": { "matchers": [{ "match": "type" }] },
+            "$.version": { "matchers": [{ "match": "type" }] },
+            "$.tenancy_mode": { "matchers": [{ "match": "type" }] },
+            "$.schema_mode": { "matchers": [{ "match": "type" }] },
+            "$.audit_enabled": { "matchers": [{ "match": "type" }] }
+          }
+        }
+      }
+    },
+    {
+      "description": "search items by query string and item type",
+      "providerStates": [
+        {
+          "name": "at least one item of type Part exists"
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "path": "/api/v1/search/",
+        "query": {
+          "q": ["bracket"],
+          "item_type": ["Part"],
+          "limit": ["20"]
+        },
+        "headers": {
+          "Authorization": "Bearer eyJhbGciOiJIUzI1NiJ9.example"
+        },
+        "matchingRules": {
+          "header": {
+            "$.Authorization": {
+              "matchers": [{ "match": "regex", "regex": "^Bearer .+" }]
+            }
+          }
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": {
+          "total": 1,
+          "hits": [
+            {
+              "id": "01H000000000000000000000P1",
+              "item_type_id": "Part",
+              "config_id": "01H000000000000000000000C1",
+              "state": "Released",
+              "item_number": "P-0001",
+              "name": "Mounting Bracket",
+              "description": "Steel bracket",
+              "search_text": "P-0001 Mounting Bracket Steel bracket",
+              "created_at": "2026-01-01T00:00:00Z",
+              "updated_at": "2026-01-02T00:00:00Z",
+              "properties": {
+                "weight": "1.2"
+              }
+            }
+          ]
+        },
+        "matchingRules": {
+          "body": {
+            "$.total": { "matchers": [{ "match": "integer" }] },
+            "$.hits": { "matchers": [{ "match": "type", "min": 0 }] },
+            "$.hits[*].id": { "matchers": [{ "match": "type" }] },
+            "$.hits[*].item_type_id": { "matchers": [{ "match": "type" }] },
+            "$.hits[*].state": { "matchers": [{ "match": "type" }] },
+            "$.hits[*].properties": { "matchers": [{ "match": "type" }] }
+          }
+        }
+      }
+    },
+    {
+      "description": "fetch a single item by id through the AML apply RPC entry point",
+      "providerStates": [
+        {
+          "name": "an item with id 01H000000000000000000000P1 of type Part exists"
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "path": "/api/v1/aml/apply",
+        "headers": {
+          "Content-Type": "application/json",
+          "Authorization": "Bearer eyJhbGciOiJIUzI1NiJ9.example"
+        },
+        "body": {
+          "type": "Part",
+          "action": "get",
+          "id": "01H000000000000000000000P1"
+        },
+        "matchingRules": {
+          "header": {
+            "$.Authorization": {
+              "matchers": [{ "match": "regex", "regex": "^Bearer .+" }]
+            }
+          },
+          "body": {
+            "$.type": { "matchers": [{ "match": "type" }] },
+            "$.action": { "matchers": [{ "match": "regex", "regex": "^(get|add|update|delete)$" }] },
+            "$.id": { "matchers": [{ "match": "type" }] }
+          }
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": {
+          "count": 1,
+          "items": [
+            {
+              "id": "01H000000000000000000000P1",
+              "type": "Part",
+              "state": "Released",
+              "properties": {
+                "item_number": "P-0001",
+                "name": "Mounting Bracket"
+              }
+            }
+          ]
+        },
+        "matchingRules": {
+          "body": {
+            "$.count": { "matchers": [{ "match": "integer", "min": 0 }] },
+            "$.items": { "matchers": [{ "match": "type", "min": 0 }] },
+            "$.items[*].id": { "matchers": [{ "match": "type" }] },
+            "$.items[*].type": { "matchers": [{ "match": "type" }] },
+            "$.items[*].state": { "matchers": [{ "match": "type" }] },
+            "$.items[*].properties": { "matchers": [{ "match": "type" }] }
+          }
+        }
+      }
+    },
+    {
+      "description": "fetch a multi-level BOM tree for a top-level Part",
+      "providerStates": [
+        {
+          "name": "a Part with id 01H000000000000000000000P1 has at least one child"
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "path": "/api/v1/bom/01H000000000000000000000P1/tree",
+        "headers": {
+          "Authorization": "Bearer eyJhbGciOiJIUzI1NiJ9.example"
+        },
+        "matchingRules": {
+          "header": {
+            "$.Authorization": {
+              "matchers": [{ "match": "regex", "regex": "^Bearer .+" }]
+            }
+          }
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": {
+          "id": "01H000000000000000000000P1",
+          "item_number": "P-0001",
+          "name": "Mounting Bracket",
+          "state": "Released",
+          "created_on": "2026-01-01T00:00:00Z",
+          "modified_on": "2026-01-02T00:00:00Z",
+          "properties": {},
+          "children": [
+            {
+              "child": {
+                "id": "01H000000000000000000000P2",
+                "item_number": "P-0002",
+                "name": "Bolt M6",
+                "state": "Released",
+                "created_on": "2026-01-01T00:00:00Z",
+                "modified_on": "2026-01-01T00:00:00Z",
+                "properties": {},
+                "children": []
+              },
+              "relationship": {
+                "id": "01H000000000000000000000R1",
+                "source_id": "01H000000000000000000000P1",
+                "related_id": "01H000000000000000000000P2",
+                "quantity": 4,
+                "uom": "ea",
+                "find_num": "10",
+                "refdes": "B1",
+                "created_on": "2026-01-01T00:00:00Z",
+                "modified_on": "2026-01-01T00:00:00Z",
+                "properties": {}
+              }
+            }
+          ]
+        },
+        "matchingRules": {
+          "body": {
+            "$.id": { "matchers": [{ "match": "type" }] },
+            "$.children": { "matchers": [{ "match": "type", "min": 0 }] },
+            "$.children[*].child.id": { "matchers": [{ "match": "type" }] },
+            "$.children[*].relationship.id": { "matchers": [{ "match": "type" }] },
+            "$.children[*].relationship.quantity": { "matchers": [{ "match": "number" }] }
+          }
+        }
+      }
+    },
+    {
+      "description": "compare two BOM versions and report added/removed/changed entries",
+      "providerStates": [
+        {
+          "name": "two comparable BOM-bearing items 01H000000000000000000000P1 and 01H000000000000000000000P2 exist"
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "path": "/api/v1/bom/compare",
+        "query": {
+          "leftId": ["01H000000000000000000000P1"],
+          "rightId": ["01H000000000000000000000P2"]
+        },
+        "headers": {
+          "Authorization": "Bearer eyJhbGciOiJIUzI1NiJ9.example"
+        },
+        "matchingRules": {
+          "header": {
+            "$.Authorization": {
+              "matchers": [{ "match": "regex", "regex": "^Bearer .+" }]
+            }
+          }
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": {
+          "summary": {
+            "added": 0,
+            "removed": 0,
+            "changed": 0
+          },
+          "added": [],
+          "removed": [],
+          "changed": []
+        },
+        "matchingRules": {
+          "body": {
+            "$.summary.added": { "matchers": [{ "match": "integer", "min": 0 }] },
+            "$.summary.removed": { "matchers": [{ "match": "integer", "min": 0 }] },
+            "$.summary.changed": { "matchers": [{ "match": "integer", "min": 0 }] },
+            "$.added": { "matchers": [{ "match": "type", "min": 0 }] },
+            "$.removed": { "matchers": [{ "match": "type", "min": 0 }] },
+            "$.changed": { "matchers": [{ "match": "type", "min": 0 }] }
+          }
+        }
+      }
+    }
+  ]
+}
