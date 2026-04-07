@@ -136,7 +136,7 @@ test('multitable pilot ready local accepts local baseline profile defaults and w
       '    cp "${FAKE_PROFILE_SUMMARY}" "${OUTPUT_ROOT}/summary.md"',
       '    ;;',
       '  verify:multitable-grid-profile:summary)',
-      '    exec node /Users/huazhou/Downloads/Github/metasheet2-multitable-next/scripts/ops/multitable-grid-profile-summary.mjs',
+      `    exec node ${repoRoot}/scripts/ops/multitable-grid-profile-summary.mjs`,
       '    ;;',
       '  *)',
       '    echo "unexpected pnpm command: ${cmd}" >&2',
@@ -180,6 +180,7 @@ test('multitable pilot ready local accepts local baseline profile defaults and w
       FAKE_GATE_ENV_LOG: gateEnvLogPath,
       RUNNER_REPORT_BASENAME: 'local-report',
       PROFILE_RETRY_ON_FAIL: 'false',
+      PROFILE_USE_PREVIEW: 'false',
     },
     stdio: 'pipe',
   })

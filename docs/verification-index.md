@@ -23,6 +23,16 @@ Entry points:
   - Verification: `docs/development/github-stability-summary-polish-verification-20260406.md`
   - Notes: adds machine-readable `summary.json`, failure reasons, and next actions while keeping GitHub in passive recording mode.
 
+## 2026-04-07 Multitable Staging Profile Baseline
+
+- Multitable staging profile threshold follow-up:
+  - Script: `scripts/ops/multitable-pilot-ready-staging.sh`
+  - Tests: `scripts/ops/multitable-pilot-ready-staging.test.mjs`, `scripts/ops/multitable-pilot-ready-local.test.mjs`
+  - Design: `docs/development/multitable-staging-profile-baseline-20260407.md`
+  - Verification: `docs/development/multitable-staging-profile-baseline-verification-20260407.md`
+  - Deployment notes: `docs/deployment/multitable-internal-pilot-runbook-20260319.md`
+  - Notes: retunes the public staging grid-profile defaults so the release-bound wrapper reflects observed remote latency while preserving env overrides for stricter same-host rehearsals.
+
 ## 2026-04-03 On-Prem Docker GC
 
 - Remote Docker garbage collection:
