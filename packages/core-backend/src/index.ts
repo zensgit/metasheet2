@@ -76,6 +76,7 @@ import plmWorkbenchRouter from './routes/plm-workbench'
 import { univerMockRouter } from './routes/univer-mock'
 import { univerMetaRouter } from './routes/univer-meta'
 import { SnapshotService } from './services/SnapshotService'
+import { notificationService } from './services/NotificationService'
 import { cacheRegistry } from '../core/cache/CacheRegistry'
 import { loadObservabilityConfig } from './config/observability'
 import { initObservability } from './observability/otel'
@@ -820,6 +821,9 @@ export class MetaSheetServer {
       },
       api: coreApi,
       core: coreApi,
+      services: {
+        notification: notificationService,
+      } as unknown as import('./types/plugin').PluginServices,
       storage,
       config: {},
       communication,

@@ -3,6 +3,14 @@
 const appManifest = require('./app.manifest.json')
 const installer = require('./lib/installer.cjs')
 const { buildDefaultBlueprint } = require('./lib/blueprint.cjs')
+const {
+  getNotificationTopicSpecs,
+  sendTopicNotification,
+} = require('./lib/notification-adapter.cjs')
+const {
+  buildRefundApprovalCommand,
+  submitRefundApproval,
+} = require('./lib/refund-approval.cjs')
 
 // --------------------------------------------------------------------------
 // Local helpers
@@ -215,6 +223,18 @@ module.exports = {
     context.communication.register('after-sales', {
       async getManifest() {
         return appManifest
+      },
+      async getNotificationTopics() {
+        return getNotificationTopicSpecs()
+      },
+      buildRefundApprovalCommand(args) {
+        return buildRefundApprovalCommand(args)
+      },
+      async submitRefundApproval(args) {
+        return submitRefundApproval(context, args)
+      },
+      async sendNotificationTopic(args) {
+        return sendTopicNotification(context, args)
       },
     })
 

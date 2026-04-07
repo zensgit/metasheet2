@@ -1,5 +1,7 @@
 'use strict'
 
+const { getNotificationTopicSpecs } = require('./notification-adapter.cjs')
+
 function enrichObjectDescriptor(objectDescriptor) {
   if (!objectDescriptor || typeof objectDescriptor !== 'object') {
     return objectDescriptor
@@ -148,7 +150,7 @@ function buildDefaultBlueprint(manifest) {
     ],
     automations: [],
     roles: [],
-    notifications: [],
+    notifications: getNotificationTopicSpecs(),
     configDefaults: {},
   }
 }

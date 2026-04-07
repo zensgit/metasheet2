@@ -105,4 +105,34 @@ describe('plugin-after-sales default blueprint', () => {
       backing: 'service',
     })
   })
+
+  it('declares the v1 notification topic catalog', () => {
+    const result = blueprint.buildDefaultBlueprint(manifest)
+    const notifications = Array.isArray(result.notifications)
+      ? result.notifications as Array<Record<string, unknown>>
+      : []
+
+    expect(notifications).toEqual([
+      expect.objectContaining({
+        topic: 'after-sales.ticket.assigned',
+        event: 'ticket.assigned',
+        channels: ['feishu', 'email'],
+      }),
+      expect.objectContaining({
+        topic: 'after-sales.ticket.overdue',
+        event: 'ticket.overdue',
+        channels: ['feishu', 'email', 'webhook'],
+      }),
+      expect.objectContaining({
+        topic: 'after-sales.approval.pending',
+        event: 'approval.pending',
+        channels: ['feishu', 'email'],
+      }),
+      expect.objectContaining({
+        topic: 'after-sales.followup.due',
+        event: 'followup.due',
+        channels: ['feishu', 'email'],
+      }),
+    ])
+  })
 })

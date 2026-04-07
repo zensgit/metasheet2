@@ -215,6 +215,7 @@ describe('plugin-after-sales routes', () => {
   let ensureObject: ReturnType<typeof vi.fn>
   let ensureView: ReturnType<typeof vi.fn>
   let db: FakeDatabase
+  let communicationRegister: ReturnType<typeof vi.fn>
 
   beforeEach(async () => {
     const setup = createContext()
@@ -222,6 +223,7 @@ describe('plugin-after-sales routes', () => {
     ensureObject = setup.ensureObject
     ensureView = setup.ensureView
     db = setup.db
+    communicationRegister = setup.context.communication.register
     await plugin.activate(setup.context)
   })
 
@@ -337,5 +339,19 @@ describe('plugin-after-sales routes', () => {
     expect(first.statusCode).toBe(200)
     expect(second.statusCode).toBe(409)
     expect(second.body.error.code).toBe('already-installed')
+  })
+
+  it('registers notification and approval adapter methods on plugin communication api', async () => {
+    expect(communicationRegister).toHaveBeenCalledTimes(1)
+    expect(communicationRegister).toHaveBeenCalledWith(
+      'after-sales',
+      expect.objectContaining({
+        getManifest: expect.any(Function),
+        getNotificationTopics: expect.any(Function),
+        buildRefundApprovalCommand: expect.any(Function),
+        submitRefundApproval: expect.any(Function),
+        sendNotificationTopic: expect.any(Function),
+      }),
+    )
   })
 })
