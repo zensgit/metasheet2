@@ -22,6 +22,44 @@ PROFILE_RETRY_ON_FAIL="${PROFILE_RETRY_ON_FAIL:-true}"
 FALLBACK_OUTPUT_ROOT="${FALLBACK_OUTPUT_ROOT:-output/playwright/multitable-pilot-ready-local-current}"
 PILOT_DATABASE_URL="${PILOT_DATABASE_URL:-${DATABASE_URL:-postgresql://metasheet:metasheet@127.0.0.1:5435/metasheet}}"
 RUNNER_REPORT_BASENAME="${RUNNER_REPORT_BASENAME:-local-report}"
+PROFILE_USE_PREVIEW="${PROFILE_USE_PREVIEW:-true}"
+PROFILE_WEB_BASE="${PROFILE_WEB_BASE:-http://127.0.0.1:4173}"
+PROFILE_WEB_PID=""
+
+function parse_port() {
+  python3 - <<'PY' "$1"
+from urllib.parse import urlparse
+import sys
+url = urlparse(sys.argv[1])
+if url.port:
+    print(url.port)
+elif url.scheme == 'https':
+    print(443)
+else:
+    print(80)
+PY
+}
+
+function wait_for_url() {
+  local url="$1"
+  local name="$2"
+  for _ in $(seq 1 45); do
+    if curl -fsS "$url" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 1
+  done
+  echo "[multitable-pilot-ready-local] ERROR: ${name} failed to become ready: ${url}" >&2
+  return 1
+}
+
+function cleanup() {
+  if [[ -n "$PROFILE_WEB_PID" ]]; then
+    kill "$PROFILE_WEB_PID" >/dev/null 2>&1 || true
+  fi
+}
+
+trap cleanup EXIT INT TERM
 
 print_signoff_recovery_path() {
   local readiness_json="$1"
@@ -83,6 +121,22 @@ PILOT_DATABASE_URL="${PILOT_DATABASE_URL}" \
 RBAC_TOKEN_TRUST="${RBAC_TOKEN_TRUST:-true}" \
 pnpm verify:multitable-pilot:local
 
+PROFILE_WEB_BASE_EFFECTIVE="${WEB_BASE:-http://127.0.0.1:8899}"
+if [[ "${PROFILE_USE_PREVIEW}" == "true" ]]; then
+  PROFILE_WEB_BASE_EFFECTIVE="${PROFILE_WEB_BASE}"
+  echo "[multitable-pilot-ready-local] Building web preview bundle for profile" >&2
+  pnpm --filter @metasheet/web build
+  if ! curl -fsS "${PROFILE_WEB_BASE_EFFECTIVE}/" >/dev/null 2>&1; then
+    echo "[multitable-pilot-ready-local] Starting web preview for profile" >&2
+    PROFILE_WEB_PORT="$(parse_port "${PROFILE_WEB_BASE_EFFECTIVE}")"
+    pnpm --filter @metasheet/web preview --host 127.0.0.1 --port "${PROFILE_WEB_PORT}" >"${PROFILE_ROOT}/web-preview.log" 2>&1 &
+    PROFILE_WEB_PID=$!
+    wait_for_url "${PROFILE_WEB_BASE_EFFECTIVE}/" "web preview"
+  else
+    echo "[multitable-pilot-ready-local] Reusing running web preview at ${PROFILE_WEB_BASE_EFFECTIVE}" >&2
+  fi
+fi
+
 echo "[multitable-pilot-ready-local] Running multitable grid profile" >&2
 OUTPUT_ROOT="$PROFILE_ROOT" \
 ROW_COUNT="$ROW_COUNT" \
@@ -90,7 +144,7 @@ ENSURE_PLAYWRIGHT=false \
 HEADLESS="${HEADLESS:-true}" \
 TIMEOUT_MS="${TIMEOUT_MS:-30000}" \
 API_BASE="${API_BASE:-http://127.0.0.1:7778}" \
-WEB_BASE="${WEB_BASE:-http://127.0.0.1:8899}" \
+WEB_BASE="${PROFILE_WEB_BASE_EFFECTIVE}" \
 PILOT_DATABASE_URL="${PILOT_DATABASE_URL}" \
 RBAC_TOKEN_TRUST="${RBAC_TOKEN_TRUST:-true}" \
 pnpm profile:multitable-grid:local
@@ -113,7 +167,7 @@ pnpm verify:multitable-grid-profile:summary; then
   HEADLESS="${HEADLESS:-true}" \
   TIMEOUT_MS="${TIMEOUT_MS:-30000}" \
   API_BASE="${API_BASE:-http://127.0.0.1:7778}" \
-  WEB_BASE="${WEB_BASE:-http://127.0.0.1:8899}" \
+  WEB_BASE="${PROFILE_WEB_BASE_EFFECTIVE}" \
   PILOT_DATABASE_URL="${PILOT_DATABASE_URL}" \
   RBAC_TOKEN_TRUST="${RBAC_TOKEN_TRUST:-true}" \
   pnpm profile:multitable-grid:local
