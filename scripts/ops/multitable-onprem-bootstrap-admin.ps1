@@ -141,9 +141,17 @@ function Invoke-NodeCapture {
   )
 
   Write-Info $Description
-  $output = & node -e $Script @Arguments
-  if ($LASTEXITCODE -ne 0) {
-    throw "$Description failed"
+  $tempScriptPath = Join-Path ([System.IO.Path]::GetTempPath()) (([System.IO.Path]::GetRandomFileName()) + '.cjs')
+  $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+  [System.IO.File]::WriteAllText($tempScriptPath, $Script, $utf8NoBom)
+
+  try {
+    $output = & node $tempScriptPath @Arguments
+    if ($LASTEXITCODE -ne 0) {
+      throw "$Description failed"
+    }
+  } finally {
+    Remove-Item -LiteralPath $tempScriptPath -Force -ErrorAction SilentlyContinue
   }
 
   return ($output | Out-String).Trim()
