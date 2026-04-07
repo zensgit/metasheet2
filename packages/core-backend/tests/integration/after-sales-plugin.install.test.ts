@@ -275,4 +275,35 @@ describe('after-sales plugin install integration', () => {
       },
     ])
   })
+
+  it('rejects install for non-admin callers', async () => {
+    if (!baseUrl || !pool) return
+
+    const tokenRes = await requestJson(
+      `${baseUrl}/api/auth/dev-token?userId=after-sales-non-admin&roles=user&perms=after_sales:read`,
+    )
+    const token = (tokenRes.body as { token?: string } | undefined)?.token
+    expect(token).toBeTruthy()
+
+    const installRes = await requestJson(`${baseUrl}/api/after-sales/projects/install`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        templateId: 'after-sales-default',
+        displayName: 'Forbidden Install',
+      }),
+    })
+
+    expect(installRes.status).toBe(403)
+    expect(installRes.body).toEqual({
+      ok: false,
+      error: {
+        code: 'FORBIDDEN',
+        message: 'Admin access required',
+      },
+    })
+  })
 })

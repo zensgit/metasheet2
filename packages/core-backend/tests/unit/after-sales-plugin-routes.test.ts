@@ -204,6 +204,9 @@ function buildReq(overrides: Record<string, unknown> = {}) {
     user: {
       id: 'user_42',
       tenantId: 'tenant_42',
+      role: 'admin',
+      roles: ['admin'],
+      perms: ['*:*', 'after_sales:admin'],
     },
     body: {},
     ...overrides,
@@ -264,6 +267,30 @@ describe('plugin-after-sales routes', () => {
 
     expect(res.statusCode).toBe(400)
     expect(res.body.error.code).toBe('invalid-template-id')
+  })
+
+  it('returns 403 for install when caller lacks admin access', async () => {
+    const handler = routes.get('POST /api/after-sales/projects/install')
+    const res = new FakeResponse()
+
+    await handler?.(buildReq({
+      user: {
+        id: 'user_42',
+        tenantId: 'tenant_42',
+        role: 'user',
+        roles: ['user'],
+        perms: ['after_sales:read'],
+      },
+      body: {
+        templateId: 'after-sales-default',
+      },
+    }), res)
+
+    expect(res.statusCode).toBe(403)
+    expect(res.body.error.code).toBe('FORBIDDEN')
+    expect(ensureObject).not.toHaveBeenCalled()
+    expect(ensureView).not.toHaveBeenCalled()
+    expect(db.rows).toHaveLength(0)
   })
 
   it('installs the default blueprint and returns project routes', async () => {

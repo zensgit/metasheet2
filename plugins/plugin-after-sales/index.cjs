@@ -33,6 +33,43 @@ function getUserId(req) {
   return u.id || u.sub || u.userId || null
 }
 
+function normalizeClaimValues(input) {
+  if (Array.isArray(input)) {
+    return input
+      .map((value) => (typeof value === 'string' ? value.trim() : ''))
+      .filter(Boolean)
+  }
+  if (typeof input === 'string') {
+    return input
+      .split(',')
+      .map((value) => value.trim())
+      .filter(Boolean)
+  }
+  return []
+}
+
+function hasInstallAdminAccess(req) {
+  const user = req && req.user
+  if (!user || typeof user !== 'object') return false
+
+  const roles = new Set([
+    ...normalizeClaimValues(user.role),
+    ...normalizeClaimValues(user.roles),
+  ])
+  const permissions = new Set([
+    ...normalizeClaimValues(user.permissions),
+    ...normalizeClaimValues(user.perms),
+  ])
+
+  return (
+    roles.has('admin') ||
+    permissions.has('*:*') ||
+    permissions.has('admin') ||
+    permissions.has('admin:all') ||
+    permissions.has('after_sales:admin')
+  )
+}
+
 /**
  * v1 whitelist of template ids. v2 will expand this as templates proliferate
  * and/or user-uploaded templates become allowed.
@@ -76,6 +113,13 @@ function sendUnauthorized(res) {
   res.status(401).json({
     ok: false,
     error: { code: 'UNAUTHORIZED', message: 'User ID not found' },
+  })
+}
+
+function sendForbidden(res) {
+  res.status(403).json({
+    ok: false,
+    error: { code: 'FORBIDDEN', message: 'Admin access required' },
   })
 }
 
@@ -144,10 +188,6 @@ module.exports = {
     // Triggers the installer orchestrator. Accepts ProjectCreateRequest
     // (see #4 §4.1). The `projectId` field is ignored in v1; the installer
     // always generates `${tenantId}:after-sales`.
-    //
-    // TODO(phase-1b): add after_sales:admin permission check once a shared
-    // withPermission helper is available. For v1 we only require an
-    // authenticated user.
     // ------------------------------------------------------------------
     context.api.http.addRoute(
       'POST',
@@ -157,6 +197,10 @@ module.exports = {
           const userId = getUserId(req)
           if (!userId) {
             sendUnauthorized(res)
+            return
+          }
+          if (!hasInstallAdminAccess(req)) {
+            sendForbidden(res)
             return
           }
 
