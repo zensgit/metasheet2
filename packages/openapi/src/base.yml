@@ -1756,7 +1756,7 @@ components:
         - canManageAutomation
     MultitableSheetPermissionAccessLevel:
       type: string
-      enum: [read, write, write-own]
+      enum: [read, write, write-own, admin]
     MultitableSheetPermissionSubjectType:
       type: string
       enum: [user, role]

@@ -2613,7 +2613,8 @@
         "enum": [
           "read",
           "write",
-          "write-own"
+          "write-own",
+          "admin"
         ]
       },
       "MultitableSheetPermissionSubjectType": {
@@ -15001,6 +15002,7 @@
                       "read",
                       "write",
                       "write-own",
+                      "admin",
                       "none"
                     ]
                   }
@@ -15038,6 +15040,7 @@
                             "read",
                             "write",
                             "write-own",
+                            "admin",
                             "none"
                           ]
                         },

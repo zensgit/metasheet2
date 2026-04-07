@@ -182,7 +182,7 @@ export interface MetaCapabilityOrigin {
   hasSheetAssignments: boolean
 }
 
-export type MetaSheetPermissionAccessLevel = 'read' | 'write' | 'write-own'
+export type MetaSheetPermissionAccessLevel = 'read' | 'write' | 'write-own' | 'admin'
 export type MetaSheetPermissionSubjectType = 'user' | 'role'
 
 export interface MetaSheetPermissionEntry {
