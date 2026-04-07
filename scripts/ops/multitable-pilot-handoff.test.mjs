@@ -257,6 +257,123 @@ test('multitable pilot handoff promotes embed-host readiness evidence into top-l
   }
 })
 
+test('multitable pilot handoff accepts legacy root-level readiness operator commands', () => {
+  const stamp = `test-handoff-root-operator-${Date.now()}`
+  const packageName = `metasheet-multitable-onprem-${stamp}`
+  const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'multitable-handoff-root-operator-'))
+  const readinessRoot = path.join(repoRoot, 'output/playwright/multitable-pilot-ready-local', stamp)
+  const handoffOutputRoot = path.join(tmpRoot, 'handoff-output')
+  const gateRoot = path.join(repoRoot, 'output/releases/multitable-onprem/gates', `${stamp}-gate`)
+  const gateReportPath = path.join(gateRoot, 'report.json')
+  const packageJsonPath = path.join(repoRoot, 'output/releases/multitable-onprem', `${packageName}.json`)
+  const releasePackageRoot = path.join(repoRoot, 'output/releases/multitable-onprem/.build', packageName, packageName)
+  const deliveryRoot = path.join(repoRoot, 'output/delivery/multitable-onprem', packageName)
+  const releaseTgz = path.join(repoRoot, 'output/releases/multitable-onprem', `${packageName}.tgz`)
+  const releaseZip = path.join(repoRoot, 'output/releases/multitable-onprem', `${packageName}.zip`)
+
+  try {
+    writeFile(path.join(readinessRoot, 'readiness.md'), '# readiness\n')
+    writeFile(path.join(readinessRoot, 'readiness.json'), JSON.stringify({
+      ok: true,
+      localRunner: {
+        required: true,
+        available: true,
+        ok: true,
+        runMode: 'local',
+        report: path.join(readinessRoot, 'smoke', 'local-report.json'),
+        reportMd: path.join(readinessRoot, 'smoke', 'local-report.md'),
+        serviceModes: {
+          backend: 'reused',
+          web: 'started',
+        },
+      },
+      gates: {
+        operatorCommandEntries: [{ name: 'showArtifacts', command: '/tmp/operator-commands.sh show-artifacts' }],
+        operatorChecklist: [{ step: 1, title: 'Review gate report', artifact: '/tmp/gate/report.json' }],
+      },
+    }, null, 2))
+    writeFile(path.join(readinessRoot, 'gates', 'report.json'), JSON.stringify({ ok: true }, null, 2))
+    writeFile(path.join(readinessRoot, 'gates', 'report.md'), '# gate report\n')
+    writeFile(path.join(readinessRoot, 'gates', 'release-gate.log'), 'gate log\n')
+    writeFile(path.join(readinessRoot, 'operator-commands.sh'), '#!/usr/bin/env bash\n', true)
+    writeFile(path.join(readinessRoot, 'smoke', 'report.json'), JSON.stringify({ ok: true }, null, 2))
+    writeFile(path.join(readinessRoot, 'smoke', 'report.md'), '# smoke report\n')
+    writeFile(path.join(readinessRoot, 'smoke', 'local-report.json'), JSON.stringify({ ok: true }, null, 2))
+    writeFile(path.join(readinessRoot, 'smoke', 'local-report.md'), '# local report\n')
+    writeFile(path.join(readinessRoot, 'profile', 'report.json'), JSON.stringify({ ok: true }, null, 2))
+    writeFile(path.join(readinessRoot, 'profile', 'summary.md'), '# profile\n')
+
+    writeFile(packageJsonPath, JSON.stringify({ name: packageName }, null, 2))
+    writeFile(releaseTgz, 'tgz')
+    writeFile(releaseZip, 'zip')
+    writeFile(`${releaseTgz}.sha256`, 'sha')
+    writeFile(`${releaseZip}.sha256`, 'sha')
+    writeFile(path.join(repoRoot, 'output/releases/multitable-onprem', 'SHA256SUMS'), 'checksums\n')
+
+    writeFile(path.join(releasePackageRoot, 'scripts/ops/multitable-onprem-deploy-easy.sh'), '#!/usr/bin/env bash\n', true)
+    writeFile(path.join(releasePackageRoot, 'scripts/ops/multitable-onprem-package-install.sh'), '#!/usr/bin/env bash\n', true)
+    writeFile(path.join(releasePackageRoot, 'scripts/ops/multitable-onprem-healthcheck.sh'), '#!/usr/bin/env bash\n', true)
+    writeFile(path.join(releasePackageRoot, 'ops/systemd/metasheet-healthcheck.service.example'), '[Unit]\n')
+    writeFile(path.join(releasePackageRoot, 'ops/systemd/metasheet-healthcheck.timer.example'), '[Timer]\n')
+
+    writeFile(path.join(deliveryRoot, 'DELIVERY.json'), JSON.stringify({ ok: true }, null, 2))
+    writeFile(path.join(deliveryRoot, 'DELIVERY.md'), '# delivery\n')
+
+    writeFile(gateReportPath, JSON.stringify({
+      ok: true,
+      packageName,
+      packageJson: packageJsonPath,
+      operatorCommands: [{ name: 'showSignoffEvidence', command: '/tmp/release-gate/operator-commands.sh show-signoff-evidence' }],
+      operatorChecklist: [{ step: 1, title: 'Review gate status', artifact: '/tmp/release-gate/report.md' }],
+      signoffRecoveryPath: {
+        step1RunPreflight: 'bash ./artifacts/preflight/multitable-onprem-preflight.sh',
+        step2RepairInstruction: 'run the first quick fix',
+        step2RepairHelper: 'artifacts/preflight/multitable-onprem-repair-helper.sh',
+        step3ReturnEvidence: [
+          '/opt/metasheet/output/preflight/multitable-onprem-preflight.json',
+          '/opt/metasheet/output/preflight/multitable-onprem-preflight.md',
+        ],
+      },
+    }, null, 2))
+    writeFile(path.join(gateRoot, 'report.md'), '# gate\n')
+    writeFile(path.join(gateRoot, 'operator-commands.sh'), '#!/usr/bin/env bash\n', true)
+    writeFile(path.join(gateRoot, 'logs', 'build.log'), 'build\n')
+    writeFile(path.join(gateRoot, 'logs', 'verify-tgz.log'), 'verify tgz\n')
+    writeFile(path.join(gateRoot, 'logs', 'verify-zip.log'), 'verify zip\n')
+    writeFile(path.join(gateRoot, 'logs', 'delivery.log'), 'delivery\n')
+
+    execFileSync('node', ['scripts/ops/multitable-pilot-handoff.mjs'], {
+      cwd: repoRoot,
+      env: {
+        ...process.env,
+        READINESS_ROOT: readinessRoot,
+        HANDOFF_OUTPUT_ROOT: handoffOutputRoot,
+        ONPREM_GATE_REPORT_JSON: gateReportPath,
+        REQUIRE_ONPREM_GATE: 'true',
+        REQUIRE_EXPLICIT_ONPREM_GATE: 'true',
+      },
+      stdio: 'pipe',
+    })
+
+    const handoffRoot = path.join(handoffOutputRoot, stamp)
+    const handoffJson = JSON.parse(fs.readFileSync(path.join(handoffRoot, 'handoff.json'), 'utf8'))
+    assert.equal(handoffJson.ok, true)
+    assert.equal(handoffJson.artifactChecks.readinessGate.readinessGateOperatorCommands, true)
+    assert.equal(fs.existsSync(path.join(handoffRoot, 'gates', 'operator-commands.sh')), true)
+  } finally {
+    fs.rmSync(readinessRoot, { recursive: true, force: true })
+    fs.rmSync(gateRoot, { recursive: true, force: true })
+    fs.rmSync(path.join(repoRoot, 'output/releases/multitable-onprem', `${packageName}.json`), { force: true })
+    fs.rmSync(path.join(repoRoot, 'output/releases/multitable-onprem', `${packageName}.tgz`), { force: true })
+    fs.rmSync(path.join(repoRoot, 'output/releases/multitable-onprem', `${packageName}.zip`), { force: true })
+    fs.rmSync(path.join(repoRoot, 'output/releases/multitable-onprem', `${packageName}.tgz.sha256`), { force: true })
+    fs.rmSync(path.join(repoRoot, 'output/releases/multitable-onprem', `${packageName}.zip.sha256`), { force: true })
+    fs.rmSync(path.join(repoRoot, 'output/releases/multitable-onprem/.build', packageName), { recursive: true, force: true })
+    fs.rmSync(path.join(repoRoot, 'output/delivery/multitable-onprem', packageName), { recursive: true, force: true })
+    fs.rmSync(tmpRoot, { recursive: true, force: true })
+  }
+})
+
 test('multitable pilot handoff falls back to staging runner report names when staging readiness omits explicit report paths', () => {
   const stamp = `test-handoff-staging-${Date.now()}`
   const packageName = `metasheet-multitable-onprem-${stamp}`
