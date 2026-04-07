@@ -452,6 +452,106 @@ describe('plugin-after-sales routes', () => {
     expect(res.body.error.code).toBe('AFTER_SALES_EVENT_VALIDATION_FAILED')
   })
 
+  it('emits ticket.overdue and returns accepted metadata', async () => {
+    const handler = routes.get('POST /api/after-sales/events/ticket-overdue')
+    const res = new FakeResponse()
+
+    await handler?.(buildReq({
+      user: {
+        id: 'writer_42',
+        tenantId: 'tenant_42',
+        role: 'user',
+        roles: ['user'],
+        perms: ['after_sales:write'],
+      },
+      body: {
+        ticket: {
+          id: 'ticket_001',
+          ticketNo: 'TK-1001',
+          title: 'Overdue visit',
+          assignedTo: 'tech_001',
+          assignedSupervisor: 'lead_001',
+        },
+        overdueWebhook: {
+          id: 'https://hooks.example.com/after-sales-overdue',
+          type: 'webhook',
+        },
+      },
+    }), res)
+
+    expect(res.statusCode).toBe(202)
+    expect(res.body).toEqual({
+      ok: true,
+      data: {
+        accepted: true,
+        event: 'ticket.overdue',
+        projectId: 'tenant_42:after-sales',
+        ticketId: 'ticket_001',
+      },
+    })
+    expect(eventsEmit).toHaveBeenCalledWith(
+      'ticket.overdue',
+      expect.objectContaining({
+        tenantId: 'tenant_42',
+        projectId: 'tenant_42:after-sales',
+        assignedTo: expect.objectContaining({ id: 'tech_001', type: 'user' }),
+        overdueWebhook: expect.objectContaining({
+          id: 'https://hooks.example.com/after-sales-overdue',
+          type: 'webhook',
+        }),
+      }),
+    )
+  })
+
+  it('emits followup.due and returns accepted metadata', async () => {
+    const handler = routes.get('POST /api/after-sales/events/followup-due')
+    const res = new FakeResponse()
+
+    await handler?.(buildReq({
+      user: {
+        id: 'writer_42',
+        tenantId: 'tenant_42',
+        role: 'user',
+        roles: ['user'],
+        perms: ['after_sales:write'],
+      },
+      body: {
+        ticket: {
+          id: 'ticket_001',
+          ticketNo: 'TK-1001',
+          title: 'Follow-up call',
+        },
+        followUp: {
+          id: 'followup_001',
+          owner: {
+            id: 'csr_001',
+            type: 'user',
+          },
+        },
+      },
+    }), res)
+
+    expect(res.statusCode).toBe(202)
+    expect(res.body).toEqual({
+      ok: true,
+      data: {
+        accepted: true,
+        event: 'followup.due',
+        projectId: 'tenant_42:after-sales',
+        ticketId: 'ticket_001',
+        followUpId: 'followup_001',
+      },
+    })
+    expect(eventsEmit).toHaveBeenCalledWith(
+      'followup.due',
+      expect.objectContaining({
+        tenantId: 'tenant_42',
+        projectId: 'tenant_42:after-sales',
+        followUpOwner: expect.objectContaining({ id: 'csr_001', type: 'user' }),
+      }),
+    )
+  })
+
   it('installs the default blueprint and returns project routes', async () => {
     const handler = routes.get('POST /api/after-sales/projects/install')
     const res = new FakeResponse()
@@ -583,6 +683,8 @@ describe('plugin-after-sales routes', () => {
         sendNotificationTopic: expect.any(Function),
         emitTicketCreated: expect.any(Function),
         emitTicketRefundRequested: expect.any(Function),
+        emitTicketOverdue: expect.any(Function),
+        emitFollowUpDue: expect.any(Function),
       }),
     )
   })

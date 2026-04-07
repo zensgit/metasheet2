@@ -17,6 +17,8 @@ const {
 const {
   buildTicketCreatedEventPayload,
   buildRefundRequestedEventPayload,
+  buildTicketOverdueEventPayload,
+  buildFollowUpDueEventPayload,
 } = require('./lib/event-entry.cjs')
 
 let activeContext = null
@@ -425,6 +427,99 @@ module.exports = {
       },
     )
 
+    context.api.http.addRoute(
+      'POST',
+      '/api/after-sales/events/ticket-overdue',
+      async (req, res) => {
+        try {
+          const userId = getUserId(req)
+          if (!userId) {
+            sendUnauthorized(res)
+            return
+          }
+          if (!hasAfterSalesWriteAccess(req)) {
+            sendWriteForbidden(res)
+            return
+          }
+
+          const tenantId = getTenantId(req)
+          const payload = buildTicketOverdueEventPayload((req && req.body) || {}, {
+            tenantId,
+            projectId: installer.getProjectId(tenantId, appManifest.id),
+            requesterId: userId,
+          })
+
+          context.api.events.emit('ticket.overdue', payload)
+          res.status(202).json({
+            ok: true,
+            data: {
+              accepted: true,
+              event: 'ticket.overdue',
+              projectId: payload.projectId,
+              ticketId: payload.ticket.id,
+            },
+          })
+        } catch (err) {
+          if (err && err.code === 'AFTER_SALES_EVENT_VALIDATION_FAILED') {
+            sendBadRequest(res, err)
+            return
+          }
+          logger.error && logger.error('after-sales ticket.overdue emit failed', err)
+          res.status(500).json({
+            ok: false,
+            error: { code: 'INTERNAL_ERROR', message: 'Failed to emit ticket.overdue' },
+          })
+        }
+      },
+    )
+
+    context.api.http.addRoute(
+      'POST',
+      '/api/after-sales/events/followup-due',
+      async (req, res) => {
+        try {
+          const userId = getUserId(req)
+          if (!userId) {
+            sendUnauthorized(res)
+            return
+          }
+          if (!hasAfterSalesWriteAccess(req)) {
+            sendWriteForbidden(res)
+            return
+          }
+
+          const tenantId = getTenantId(req)
+          const payload = buildFollowUpDueEventPayload((req && req.body) || {}, {
+            tenantId,
+            projectId: installer.getProjectId(tenantId, appManifest.id),
+            requesterId: userId,
+          })
+
+          context.api.events.emit('followup.due', payload)
+          res.status(202).json({
+            ok: true,
+            data: {
+              accepted: true,
+              event: 'followup.due',
+              projectId: payload.projectId,
+              ticketId: payload.ticket.id,
+              followUpId: payload.followUp.id,
+            },
+          })
+        } catch (err) {
+          if (err && err.code === 'AFTER_SALES_EVENT_VALIDATION_FAILED') {
+            sendBadRequest(res, err)
+            return
+          }
+          logger.error && logger.error('after-sales followup.due emit failed', err)
+          res.status(500).json({
+            ok: false,
+            error: { code: 'INTERNAL_ERROR', message: 'Failed to emit followup.due' },
+          })
+        }
+      },
+    )
+
     // Communication / events (unchanged from skeleton)
     context.communication.register('after-sales', {
       async getManifest() {
@@ -465,6 +560,30 @@ module.exports = {
         })
         context.api.events.emit('ticket.refundRequested', payload)
         return { accepted: true, event: 'ticket.refundRequested', payload }
+      },
+      emitTicketOverdue(args) {
+        const tenantId = (args && typeof args === 'object' && typeof args.tenantId === 'string' && args.tenantId.trim())
+          ? args.tenantId.trim()
+          : 'default'
+        const payload = buildTicketOverdueEventPayload(args || {}, {
+          tenantId,
+          projectId: installer.getProjectId(tenantId, appManifest.id),
+          requesterId: typeof args?.requesterId === 'string' ? args.requesterId : 'system',
+        })
+        context.api.events.emit('ticket.overdue', payload)
+        return { accepted: true, event: 'ticket.overdue', payload }
+      },
+      emitFollowUpDue(args) {
+        const tenantId = (args && typeof args === 'object' && typeof args.tenantId === 'string' && args.tenantId.trim())
+          ? args.tenantId.trim()
+          : 'default'
+        const payload = buildFollowUpDueEventPayload(args || {}, {
+          tenantId,
+          projectId: installer.getProjectId(tenantId, appManifest.id),
+          requesterId: typeof args?.requesterId === 'string' ? args.requesterId : 'system',
+        })
+        context.api.events.emit('followup.due', payload)
+        return { accepted: true, event: 'followup.due', payload }
       },
     })
 

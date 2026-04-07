@@ -94,8 +94,69 @@ function buildRefundRequestedEventPayload(input, meta) {
   }
 }
 
+function buildTicketOverdueEventPayload(input, meta) {
+  const ticket = input && typeof input.ticket === 'object' && !Array.isArray(input.ticket) ? input.ticket : {}
+  const assignedTo = optionalRecipient(ticket.assignedTo)
+  const assignedSupervisor = optionalRecipient(ticket.assignedSupervisor)
+  const overdueWebhook = optionalRecipient(ticket.overdueWebhook ?? input.overdueWebhook)
+
+  return {
+    tenantId: requiredString(meta.tenantId, 'tenantId'),
+    projectId: requiredString(meta.projectId, 'projectId'),
+    ticketNo: requiredString(ticket.ticketNo ?? input.ticketNo, 'ticket.ticketNo'),
+    title: requiredString(ticket.title ?? input.title, 'ticket.title'),
+    assignedTo,
+    assignedSupervisor,
+    overdueWebhook,
+    ticket: {
+      id: requiredString(ticket.id, 'ticket.id'),
+      ticketNo: requiredString(ticket.ticketNo ?? input.ticketNo, 'ticket.ticketNo'),
+      title: requiredString(ticket.title ?? input.title, 'ticket.title'),
+      priority: optionalString(ticket.priority),
+      assignedTo,
+      assignedSupervisor,
+      overdueWebhook,
+      slaDueAt: optionalString(ticket.slaDueAt),
+      overdueAt: optionalString(ticket.overdueAt),
+    },
+  }
+}
+
+function buildFollowUpDueEventPayload(input, meta) {
+  const followUp = input && typeof input.followUp === 'object' && !Array.isArray(input.followUp) ? input.followUp : {}
+  const ticket = input && typeof input.ticket === 'object' && !Array.isArray(input.ticket) ? input.ticket : {}
+  const followUpOwner = optionalRecipient(followUp.owner ?? input.followUpOwner)
+
+  if (!followUpOwner) {
+    throw createEventEntryError('AFTER_SALES_EVENT_VALIDATION_FAILED', 'followUpOwner is required', {
+      field: 'followUpOwner',
+    })
+  }
+
+  return {
+    tenantId: requiredString(meta.tenantId, 'tenantId'),
+    projectId: requiredString(meta.projectId, 'projectId'),
+    ticketNo: requiredString(ticket.ticketNo ?? input.ticketNo, 'ticket.ticketNo'),
+    title: requiredString(ticket.title ?? input.title, 'ticket.title'),
+    followUpOwner,
+    ticket: {
+      id: requiredString(ticket.id, 'ticket.id'),
+      ticketNo: requiredString(ticket.ticketNo ?? input.ticketNo, 'ticket.ticketNo'),
+      title: requiredString(ticket.title ?? input.title, 'ticket.title'),
+    },
+    followUp: {
+      id: requiredString(followUp.id ?? input.followUpId, 'followUp.id'),
+      owner: followUpOwner,
+      dueAt: optionalString(followUp.dueAt ?? input.dueAt),
+      followUpType: optionalString(followUp.followUpType ?? input.followUpType),
+    },
+  }
+}
+
 module.exports = {
   buildTicketCreatedEventPayload,
   buildRefundRequestedEventPayload,
+  buildTicketOverdueEventPayload,
+  buildFollowUpDueEventPayload,
   createEventEntryError,
 }

@@ -217,6 +217,8 @@ function createWorkflowRuntime(context, options = {}) {
         projectId: runtimeContext.projectId,
         title: typeof payload.title === 'string' ? payload.title : ticket.title,
         ticketNo: typeof payload.ticketNo === 'string' ? payload.ticketNo : ticket.ticketNo,
+        assignedTo: assignedToValue,
+        assignedSupervisor: assignedSupervisorValue,
         ticket: {
           ...ticket,
           assignedTo: assignedToValue,
@@ -224,6 +226,7 @@ function createWorkflowRuntime(context, options = {}) {
           slaDueAt: computeSlaDueAt(ticket.priority, runtimeContext.config, options.now ? options.now() : new Date()),
         },
       }
+      nextPayload.slaDueAt = nextPayload.ticket.slaDueAt
 
       if (!assignedToValue) {
         context.logger?.warn?.('after-sales ticket-triage skipped: no assignee resolved', {
@@ -302,7 +305,12 @@ function createWorkflowRuntime(context, options = {}) {
       const roleRecipients = await resolveRoleRecipients(context, ['supervisor'])
       return sendNotification(context, {
         topic: 'after-sales.ticket.overdue',
-        payload,
+        payload: {
+          ...payload,
+          assignedTo: payload.assignedTo ?? getNamespacedObject(payload, 'ticket').assignedTo,
+          assignedSupervisor: payload.assignedSupervisor ?? getNamespacedObject(payload, 'ticket').assignedSupervisor,
+          overdueWebhook: payload.overdueWebhook ?? getNamespacedObject(payload, 'ticket').overdueWebhook,
+        },
         roleRecipients,
       })
     },
@@ -310,7 +318,10 @@ function createWorkflowRuntime(context, options = {}) {
     async onFollowUpDue(payload = {}) {
       return sendNotification(context, {
         topic: 'after-sales.followup.due',
-        payload,
+        payload: {
+          ...payload,
+          followUpOwner: payload.followUpOwner ?? getNamespacedObject(payload, 'followUp').owner,
+        },
         roleRecipients: {},
       })
     },
