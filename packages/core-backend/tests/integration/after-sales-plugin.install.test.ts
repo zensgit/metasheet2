@@ -10,6 +10,25 @@ import type { MetaSheetServer } from '../../src/index'
 
 type HttpResponse = { status: number; body?: unknown; raw: string }
 
+async function waitFor<T>(
+  producer: () => Promise<T>,
+  predicate: (value: T) => boolean,
+  options: { timeoutMs?: number; intervalMs?: number } = {},
+): Promise<T> {
+  const timeoutMs = options.timeoutMs ?? 3000
+  const intervalMs = options.intervalMs ?? 50
+  const start = Date.now()
+
+  while (true) {
+    const value = await producer()
+    if (predicate(value)) return value
+    if (Date.now() - start >= timeoutMs) {
+      return value
+    }
+    await new Promise((resolve) => setTimeout(resolve, intervalMs))
+  }
+}
+
 function requestJson(
   url: string,
   options: { method?: string; headers?: Record<string, string>; body?: string } = {},
@@ -82,6 +101,15 @@ describe('after-sales plugin install integration', () => {
 
   async function cleanupAfterSalesInstallArtifacts() {
     if (!pool || !schemaReady) return
+    await pool.query(
+      `DELETE FROM approval_assignments
+       WHERE instance_id IN (
+         SELECT id FROM approval_instances WHERE source_system = 'after-sales'
+       )`,
+    )
+    await pool.query(
+      `DELETE FROM approval_instances WHERE source_system = 'after-sales'`,
+    )
     await pool.query('DELETE FROM meta_views WHERE id = ANY($1::text[])', [META_VIEW_IDS])
     await pool.query('DELETE FROM meta_records WHERE sheet_id = ANY($1::text[])', [SHEET_IDS])
     await pool.query('DELETE FROM meta_fields WHERE sheet_id = ANY($1::text[])', [SHEET_IDS])
@@ -111,7 +139,9 @@ describe('after-sales plugin install integration', () => {
          UNION ALL SELECT to_regclass('public.meta_sheets') AS name
          UNION ALL SELECT to_regclass('public.meta_fields') AS name
          UNION ALL SELECT to_regclass('public.meta_views') AS name
-         UNION ALL SELECT to_regclass('public.meta_records') AS name`,
+         UNION ALL SELECT to_regclass('public.meta_records') AS name
+         UNION ALL SELECT to_regclass('public.approval_instances') AS name
+         UNION ALL SELECT to_regclass('public.approval_assignments') AS name`,
       )
       if (tables.rows.some((row) => !row.name)) return
       schemaReady = true
@@ -305,5 +335,185 @@ describe('after-sales plugin install integration', () => {
         message: 'Admin access required',
       },
     })
+  })
+
+  it('creates a ticket and requests refund through the real after-sales routes', async () => {
+    if (!baseUrl || !pool) return
+
+    const tokenRes = await requestJson(
+      `${baseUrl}/api/auth/dev-token?userId=after-sales-ticket-it&roles=admin&perms=*:*`,
+    )
+    const token = (tokenRes.body as { token?: string } | undefined)?.token
+    expect(token).toBeTruthy()
+
+    const installRes = await requestJson(`${baseUrl}/api/after-sales/projects/install`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        templateId: 'after-sales-default',
+        displayName: 'After Sales Ticket Flow',
+      }),
+    })
+    expect(installRes.status).toBe(200)
+
+    const createRes = await requestJson(`${baseUrl}/api/after-sales/tickets`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        ticket: {
+          ticketNo: 'TK-3001',
+          title: 'Outdoor unit not starting',
+          source: 'phone',
+          priority: 'high',
+          assigneeCandidates: [{ id: 'tech_001', type: 'user' }],
+        },
+      }),
+    })
+
+    expect(createRes.status).toBe(201)
+    const createBody = createRes.body as {
+      ok?: boolean
+      data?: {
+        ticket?: {
+          id?: string
+          version?: number
+          data?: Record<string, unknown>
+        }
+        event?: {
+          accepted?: boolean
+          event?: string
+        }
+      }
+    }
+    expect(createBody.ok).toBe(true)
+    expect(createBody.data?.event).toEqual({
+      accepted: true,
+      event: 'ticket.created',
+    })
+    expect(createBody.data?.ticket?.data).toMatchObject({
+      ticketNo: 'TK-3001',
+      title: 'Outdoor unit not starting',
+      source: 'phone',
+      priority: 'high',
+      status: 'new',
+    })
+
+    const createdTicketId = createBody.data?.ticket?.id
+    expect(createdTicketId).toBeTruthy()
+
+    const serviceTicketSheetId = stableMetaId('sheet', PROJECT_ID, 'serviceTicket')
+    const recordRes = await waitFor(
+      () => pool!.query<{ id: string; version: number; data: Record<string, unknown> }>(
+        'SELECT id, version, data FROM meta_records WHERE id = $1 AND sheet_id = $2',
+        [createdTicketId, serviceTicketSheetId],
+      ),
+      (result) => result.rows.length === 1,
+    )
+    expect(recordRes.rows).toHaveLength(1)
+    expect(recordRes.rows[0].data).toMatchObject({
+      ticketNo: 'TK-3001',
+      title: 'Outdoor unit not starting',
+      priority: 'high',
+      status: 'new',
+    })
+
+    const refundRes = await requestJson(
+      `${baseUrl}/api/after-sales/tickets/${createdTicketId}/refund-request`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          refundAmount: 88.5,
+          requesterName: 'After Sales Admin',
+          reason: 'Damaged inverter board',
+        }),
+      },
+    )
+
+    expect(refundRes.status).toBe(202)
+    const refundBody = refundRes.body as {
+      ok?: boolean
+      data?: {
+        ticket?: {
+          id?: string
+          version?: number
+          data?: Record<string, unknown>
+        }
+        event?: {
+          accepted?: boolean
+          event?: string
+        }
+      }
+    }
+    expect(refundBody.ok).toBe(true)
+    expect(refundBody.data?.event).toEqual({
+      accepted: true,
+      event: 'ticket.refundRequested',
+    })
+    expect(refundBody.data?.ticket?.data).toMatchObject({
+      ticketNo: 'TK-3001',
+      refundAmount: 88.5,
+    })
+
+    const patchedRecordRes = await waitFor(
+      () => pool!.query<{ id: string; version: number; data: Record<string, unknown> }>(
+        'SELECT id, version, data FROM meta_records WHERE id = $1 AND sheet_id = $2',
+        [createdTicketId, serviceTicketSheetId],
+      ),
+      (result) =>
+        result.rows.length === 1 &&
+        Number(result.rows[0].data?.refundAmount) === 88.5,
+    )
+    expect(Number(patchedRecordRes.rows[0].data.refundAmount)).toBe(88.5)
+    expect(Number(patchedRecordRes.rows[0].version)).toBeGreaterThanOrEqual(2)
+
+    const approvalRes = await waitFor(
+      () => pool!.query<{
+        id: string
+        status: string
+        workflow_key: string
+        business_key: string
+        metadata: Record<string, unknown>
+      }>(
+        `SELECT id, status, workflow_key, business_key, metadata
+         FROM approval_instances
+         WHERE workflow_key = 'after-sales-refund'
+           AND business_key = $1`,
+        [`after-sales:${PROJECT_ID}:ticket:${createdTicketId}:refund`],
+      ),
+      (result) => result.rows.length === 1,
+      { timeoutMs: 5000, intervalMs: 100 },
+    )
+    expect(approvalRes.rows).toHaveLength(1)
+    expect(approvalRes.rows[0]).toMatchObject({
+      status: 'pending',
+      workflow_key: 'after-sales-refund',
+      business_key: `after-sales:${PROJECT_ID}:ticket:${createdTicketId}:refund`,
+    })
+
+    const assignmentRes = await waitFor(
+      () => pool!.query<{ assignee_id: string; source_step: number }>(
+        `SELECT assignee_id, source_step
+         FROM approval_assignments
+         WHERE instance_id = $1
+         ORDER BY source_step ASC`,
+        [approvalRes.rows[0].id],
+      ),
+      (result) => result.rows.length === 2,
+      { timeoutMs: 5000, intervalMs: 100 },
+    )
+    expect(assignmentRes.rows).toEqual([
+      { assignee_id: 'finance', source_step: 1 },
+      { assignee_id: 'supervisor', source_step: 2 },
+    ])
   })
 })
