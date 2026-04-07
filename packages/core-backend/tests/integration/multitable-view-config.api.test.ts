@@ -67,6 +67,10 @@ describe('Multitable view config API', () => {
     const { app } = await createApp({
       tokenPerms: ['multitable:write'],
       queryHandler: async (sql, params) => {
+        if (sql.includes('SELECT sp.sheet_id, sp.perm_code, sp.subject_type')) {
+          expect(params).toEqual(['user_multitable_1', ['sheet_ops']])
+          return { rows: [] }
+        }
         if (sql.includes('SELECT id FROM meta_sheets WHERE id = $1')) {
           expect(params).toEqual(['sheet_ops'])
           return { rows: [{ id: 'sheet_ops' }] }
@@ -120,6 +124,10 @@ describe('Multitable view config API', () => {
     const { app } = await createApp({
       tokenPerms: ['multitable:write'],
       queryHandler: async (sql, params) => {
+        if (sql.includes('SELECT sp.sheet_id, sp.perm_code, sp.subject_type')) {
+          expect(params).toEqual(['user_multitable_1', ['sheet_ops']])
+          return { rows: [] }
+        }
         if (sql.includes('SELECT id, sheet_id, name, type, filter_info, sort_info, group_info, hidden_field_ids, config FROM meta_views WHERE id = $1')) {
           expect(params).toEqual(['view_kanban'])
           return {
@@ -178,6 +186,14 @@ describe('Multitable view config API', () => {
     const { app } = await createApp({
       tokenPerms: ['multitable:write'],
       queryHandler: async (sql, params) => {
+        if (sql.includes('SELECT id, sheet_id FROM meta_views WHERE id = $1')) {
+          expect(params).toEqual(['view_kanban'])
+          return { rows: [{ id: 'view_kanban', sheet_id: 'sheet_ops' }], rowCount: 1 }
+        }
+        if (sql.includes('SELECT sp.sheet_id, sp.perm_code, sp.subject_type')) {
+          expect(params).toEqual(['user_multitable_1', ['sheet_ops']])
+          return { rows: [] }
+        }
         if (sql.includes('DELETE FROM meta_views WHERE id = $1')) {
           expect(params).toEqual(['view_kanban'])
           return { rows: [], rowCount: 1 }
@@ -198,6 +214,10 @@ describe('Multitable view config API', () => {
     const { app } = await createApp({
       tokenPerms: ['multitable:write'],
       queryHandler: async (sql, params) => {
+        if (sql.includes('SELECT id, sheet_id FROM meta_views WHERE id = $1')) {
+          expect(params).toEqual(['view_missing'])
+          return { rows: [], rowCount: 0 }
+        }
         if (sql.includes('DELETE FROM meta_views WHERE id = $1')) {
           expect(params).toEqual(['view_missing'])
           return { rows: [], rowCount: 0 }
