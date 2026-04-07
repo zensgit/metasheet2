@@ -186,6 +186,27 @@ describe('after-sales workflow adapter', () => {
       },
     })
 
+    await runtime.onTicketOverdue({
+      ticketNo: 'TK-1001',
+      ticket: {
+        id: 'ticket_001',
+        assignedTo: 'tech_001',
+        assignedSupervisor: 'lead_001',
+      },
+      overdueWebhook: {
+        id: 'https://hooks.example.com/after-sales-overdue',
+        type: 'webhook',
+      },
+    })
+
+    await runtime.onFollowUpDue({
+      ticketNo: 'TK-1001',
+      followUpOwner: {
+        id: 'owner_001',
+        type: 'user',
+      },
+    })
+
     expect(sendTopicNotification).toHaveBeenNthCalledWith(
       1,
       context,
@@ -216,22 +237,47 @@ describe('after-sales workflow adapter', () => {
         },
       }),
     )
+    expect(sendTopicNotification).toHaveBeenNthCalledWith(
+      3,
+      context,
+      expect.objectContaining({
+        topic: 'after-sales.ticket.overdue',
+        roleRecipients: {
+          supervisor: [
+            { id: 'lead_001', type: 'user' },
+            { id: 'lead@example.com', type: 'email' },
+          ],
+        },
+      }),
+    )
+    expect(sendTopicNotification).toHaveBeenNthCalledWith(
+      4,
+      context,
+      expect.objectContaining({
+        topic: 'after-sales.followup.due',
+        roleRecipients: {},
+      }),
+    )
   })
 
-  it('registers the four v1 workflow event handlers', () => {
+  it('registers the six v1 workflow event handlers', () => {
     const context = createContext()
 
     const result = adapter.registerAfterSalesWorkflowHandlers(context)
 
     expect(context.api.events.on).toHaveBeenCalledWith('ticket.created', expect.any(Function))
     expect(context.api.events.on).toHaveBeenCalledWith('ticket.assigned', expect.any(Function))
+    expect(context.api.events.on).toHaveBeenCalledWith('ticket.overdue', expect.any(Function))
     expect(context.api.events.on).toHaveBeenCalledWith('ticket.refundRequested', expect.any(Function))
     expect(context.api.events.on).toHaveBeenCalledWith('approval.pending', expect.any(Function))
+    expect(context.api.events.on).toHaveBeenCalledWith('followup.due', expect.any(Function))
     expect(result.subscriptions).toEqual([
       'sub:ticket.created',
       'sub:ticket.assigned',
+      'sub:ticket.overdue',
       'sub:ticket.refundRequested',
       'sub:approval.pending',
+      'sub:followup.due',
     ])
   })
 })

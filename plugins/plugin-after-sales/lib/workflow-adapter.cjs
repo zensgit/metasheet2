@@ -297,6 +297,23 @@ function createWorkflowRuntime(context, options = {}) {
         roleRecipients,
       })
     },
+
+    async onTicketOverdue(payload = {}) {
+      const roleRecipients = await resolveRoleRecipients(context, ['supervisor'])
+      return sendNotification(context, {
+        topic: 'after-sales.ticket.overdue',
+        payload,
+        roleRecipients,
+      })
+    },
+
+    async onFollowUpDue(payload = {}) {
+      return sendNotification(context, {
+        topic: 'after-sales.followup.due',
+        payload,
+        roleRecipients: {},
+      })
+    },
   }
 }
 
@@ -310,8 +327,10 @@ function registerAfterSalesWorkflowHandlers(context, options = {}) {
 
   subscriptions.push(events.on('ticket.created', runtime.onTicketCreated))
   subscriptions.push(events.on('ticket.assigned', runtime.onTicketAssigned))
+  subscriptions.push(events.on('ticket.overdue', runtime.onTicketOverdue))
   subscriptions.push(events.on('ticket.refundRequested', runtime.onTicketRefundRequested))
   subscriptions.push(events.on('approval.pending', runtime.onApprovalPending))
+  subscriptions.push(events.on('followup.due', runtime.onFollowUpDue))
 
   return {
     subscriptions: subscriptions.filter(Boolean),
