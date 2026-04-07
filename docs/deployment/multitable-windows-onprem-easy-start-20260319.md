@@ -175,6 +175,8 @@ These wrappers now call `scripts/ops/multitable-onprem-apply-package.ps1`, so a 
 
 The PowerShell helper extracts the incoming archive into a short-lived system temp directory instead of a deep deploy-root subdirectory, which avoids common Windows long-path failures during `Expand-Archive`.
 
+The packaged Windows admin bootstrap helper also avoids `node -e` and writes a short-lived `.cjs` file into the system temp directory before invoking Node. This sidesteps the Node v24 + Windows PowerShell type-stripping issue that can break inline `node -e` calls even when `node.exe` itself is healthy.
+
 After `deploy.bat` completes on a fresh Windows-only install, create the first admin with:
 
 ```bat
