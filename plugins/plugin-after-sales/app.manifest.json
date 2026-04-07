@@ -60,6 +60,16 @@
       "backing": "multitable"
     },
     {
+      "id": "partItem",
+      "name": "Part Item",
+      "backing": "multitable"
+    },
+    {
+      "id": "followUp",
+      "name": "Follow Up",
+      "backing": "multitable"
+    },
+    {
       "id": "warrantyPolicy",
       "name": "Warranty Policy",
       "backing": "service"

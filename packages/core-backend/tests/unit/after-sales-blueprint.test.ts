@@ -165,6 +165,80 @@ describe('plugin-after-sales default blueprint', () => {
     })
   })
 
+  it('adds the partItem multitable projection and default grid view', () => {
+    const result = blueprint.buildDefaultBlueprint(manifest)
+    const objects = Array.isArray(result.objects) ? result.objects as Array<Record<string, unknown>> : []
+    const partItem = objects.find((objectDescriptor) => objectDescriptor.id === 'partItem')
+
+    expect(partItem).toMatchObject({
+      id: 'partItem',
+      name: 'Part Item',
+      backing: 'multitable',
+    })
+    expect(partItem?.fields).toEqual([
+      expect.objectContaining({ id: 'partNo', type: 'string', required: true }),
+      expect.objectContaining({ id: 'name', type: 'string', required: true }),
+      expect.objectContaining({
+        id: 'category',
+        type: 'select',
+        required: true,
+        options: ['spare', 'consumable'],
+      }),
+      expect.objectContaining({ id: 'stockQty', type: 'number', required: false }),
+      expect.objectContaining({
+        id: 'status',
+        type: 'select',
+        required: true,
+        options: ['available', 'reserved', 'consumed'],
+      }),
+    ])
+    expect(result.views).toContainEqual({
+      id: 'partItem-grid',
+      objectId: 'partItem',
+      name: 'Parts',
+      type: 'grid',
+      config: {},
+    })
+  })
+
+  it('adds the followUp multitable projection and default list view', () => {
+    const result = blueprint.buildDefaultBlueprint(manifest)
+    const objects = Array.isArray(result.objects) ? result.objects as Array<Record<string, unknown>> : []
+    const followUp = objects.find((objectDescriptor) => objectDescriptor.id === 'followUp')
+
+    expect(followUp).toMatchObject({
+      id: 'followUp',
+      name: 'Follow Up',
+      backing: 'multitable',
+    })
+    expect(followUp?.fields).toEqual([
+      expect.objectContaining({ id: 'ticketNo', type: 'string', required: true }),
+      expect.objectContaining({ id: 'customerName', type: 'string', required: true }),
+      expect.objectContaining({ id: 'dueAt', type: 'date', required: true }),
+      expect.objectContaining({
+        id: 'followUpType',
+        type: 'select',
+        required: true,
+        options: ['phone', 'message', 'onsite'],
+      }),
+      expect.objectContaining({ id: 'ownerName', type: 'string', required: false }),
+      expect.objectContaining({
+        id: 'status',
+        type: 'select',
+        required: true,
+        options: ['pending', 'done', 'skipped'],
+      }),
+      expect.objectContaining({ id: 'summary', type: 'string', required: false }),
+    ])
+    expect(result.views).toContainEqual({
+      id: 'followUp-grid',
+      objectId: 'followUp',
+      name: 'Follow Ups',
+      type: 'grid',
+      config: {},
+    })
+  })
+
   it('keeps service-only objects unchanged', () => {
     const result = blueprint.buildDefaultBlueprint(manifest)
     const objects = Array.isArray(result.objects) ? result.objects as Array<Record<string, unknown>> : []

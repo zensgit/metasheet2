@@ -154,6 +154,98 @@ function enrichObjectDescriptor(objectDescriptor) {
     }
   }
 
+  if (objectDescriptor.id === 'partItem') {
+    return {
+      ...objectDescriptor,
+      fields: [
+        {
+          id: 'partNo',
+          name: 'Part No',
+          type: 'string',
+          required: true,
+        },
+        {
+          id: 'name',
+          name: 'Name',
+          type: 'string',
+          required: true,
+        },
+        {
+          id: 'category',
+          name: 'Category',
+          type: 'select',
+          required: true,
+          options: ['spare', 'consumable'],
+        },
+        {
+          id: 'stockQty',
+          name: 'Stock Qty',
+          type: 'number',
+          required: false,
+        },
+        {
+          id: 'status',
+          name: 'Status',
+          type: 'select',
+          required: true,
+          options: ['available', 'reserved', 'consumed'],
+        },
+      ],
+    }
+  }
+
+  if (objectDescriptor.id === 'followUp') {
+    return {
+      ...objectDescriptor,
+      fields: [
+        {
+          id: 'ticketNo',
+          name: 'Ticket No',
+          type: 'string',
+          required: true,
+        },
+        {
+          id: 'customerName',
+          name: 'Customer Name',
+          type: 'string',
+          required: true,
+        },
+        {
+          id: 'dueAt',
+          name: 'Due At',
+          type: 'date',
+          required: true,
+        },
+        {
+          id: 'followUpType',
+          name: 'Follow Up Type',
+          type: 'select',
+          required: true,
+          options: ['phone', 'message', 'onsite'],
+        },
+        {
+          id: 'ownerName',
+          name: 'Owner Name',
+          type: 'string',
+          required: false,
+        },
+        {
+          id: 'status',
+          name: 'Status',
+          type: 'select',
+          required: true,
+          options: ['pending', 'done', 'skipped'],
+        },
+        {
+          id: 'summary',
+          name: 'Summary',
+          type: 'string',
+          required: false,
+        },
+      ],
+    }
+  }
+
   if (objectDescriptor.id !== 'installedAsset') {
     return { ...objectDescriptor }
   }
@@ -253,6 +345,20 @@ function buildDefaultBlueprint(manifest) {
         config: {
           dateFieldId: 'scheduledAt',
         },
+      },
+      {
+        id: 'partItem-grid',
+        objectId: 'partItem',
+        name: 'Parts',
+        type: 'grid',
+        config: {},
+      },
+      {
+        id: 'followUp-grid',
+        objectId: 'followUp',
+        name: 'Follow Ups',
+        type: 'grid',
+        config: {},
       },
     ],
     automations: [],

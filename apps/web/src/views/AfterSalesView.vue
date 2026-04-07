@@ -46,8 +46,8 @@
         <ul class="after-sales-view__list">
           <li>templateId 固定为 <code>after-sales-default</code></li>
           <li>v1 projectId 伪值为 <code>{{ defaultProjectId }}</code></li>
-          <li>当前会真实创建 <code>serviceTicket</code>、<code>installedAsset</code>、<code>customer</code> 和 <code>serviceRecord</code> 对象</li>
-          <li>同时会创建默认 <code>ticket-board</code>、<code>installedAsset-grid</code>、<code>customer-grid</code> 和 <code>serviceRecord-calendar</code> 视图</li>
+          <li>当前会真实创建售后模板的 6 个默认对象，覆盖工单、装机资产、客户、服务记录、配件和回访</li>
+          <li>同时会创建 6 个默认视图，包括 <code>ticket-board</code>、<code>serviceRecord-calendar</code> 等基础入口</li>
         </ul>
         <div class="after-sales-view__action-row">
           <button class="after-sales-view__primary-btn" :disabled="installing" @click="triggerInstall('enable')">
