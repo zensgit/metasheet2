@@ -132,7 +132,8 @@ function normalizeRecordData(value: unknown): Record<string, unknown> {
       if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
         return parsed as Record<string, unknown>
       }
-    } catch {
+    } catch (err) {
+      console.warn('[multitable.records] Failed to parse meta_records.data JSON', err)
       return {}
     }
   }

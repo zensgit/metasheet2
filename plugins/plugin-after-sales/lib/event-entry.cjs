@@ -28,6 +28,10 @@ function optionalString(value) {
   return typeof value === 'string' && value.trim() ? value.trim() : undefined
 }
 
+function isMissingInputValue(value) {
+  return value == null || (typeof value === 'string' && value.trim() === '')
+}
+
 function normalizeEnumValue(value, field, allowed, fallback) {
   const normalized = optionalString(value) || fallback
   if (!allowed.includes(normalized)) {
@@ -126,10 +130,9 @@ function buildCreateTicketCommand(input) {
     ['new', 'assigned', 'inProgress', 'done', 'closed'],
     'new',
   )
-  const refundAmount =
-    ticket.refundAmount == null || ticket.refundAmount === ''
-      ? undefined
-      : requiredNumber(ticket.refundAmount, 'ticket.refundAmount')
+  const refundAmount = isMissingInputValue(ticket.refundAmount)
+    ? undefined
+    : requiredNumber(ticket.refundAmount, 'ticket.refundAmount')
 
   const eventTicket = {
     ticketNo: requiredString(ticket.ticketNo ?? input.ticketNo, 'ticket.ticketNo'),

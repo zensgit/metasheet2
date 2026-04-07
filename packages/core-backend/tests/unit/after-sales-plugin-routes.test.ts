@@ -461,6 +461,58 @@ describe('plugin-after-sales routes', () => {
     })
   })
 
+  it('treats blank refundAmount as missing when creating a ticket', async () => {
+    const handler = routes.get('POST /api/after-sales/tickets')
+    const res = new FakeResponse()
+
+    db.rows.push({
+      id: 'fake-uuid-1',
+      tenant_id: 'tenant_42',
+      app_id: 'after-sales',
+      project_id: 'tenant_42:after-sales',
+      template_id: 'after-sales-default',
+      template_version: '0.1.0',
+      mode: 'enable',
+      status: 'installed',
+      created_objects_json: JSON.stringify(['serviceTicket']),
+      created_views_json: JSON.stringify(['ticket-board']),
+      warnings_json: JSON.stringify([]),
+      display_name: 'After-sales',
+      config_json: JSON.stringify({}),
+      last_install_at: new Date(),
+      created_at: new Date(),
+    })
+
+    await handler?.(buildReq({
+      user: {
+        id: 'writer_42',
+        tenantId: 'tenant_42',
+        role: 'user',
+        roles: ['user'],
+        perms: ['after_sales:write'],
+      },
+      body: {
+        ticket: {
+          ticketNo: 'TK-2002',
+          title: 'Rattling noise',
+          refundAmount: '   ',
+        },
+      },
+    }), res)
+
+    expect(res.statusCode).toBe(201)
+    expect(createRecord).toHaveBeenCalledWith({
+      sheetId: 'tenant_42:after-sales:serviceTicket:sheet',
+      data: {
+        ticketNo: 'TK-2002',
+        title: 'Rattling noise',
+        source: 'web',
+        priority: 'normal',
+        status: 'new',
+      },
+    })
+  })
+
   it('returns 409 when creating a ticket before install', async () => {
     const handler = routes.get('POST /api/after-sales/tickets')
     const res = new FakeResponse()

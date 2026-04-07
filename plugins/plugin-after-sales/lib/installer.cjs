@@ -166,22 +166,23 @@ function normalizeLedgerRow(raw) {
     templateVersion: raw.template_version,
     mode: raw.mode,
     status: raw.status,
-    createdObjects: parseJsonColumn(raw.created_objects_json, []),
-    createdViews: parseJsonColumn(raw.created_views_json, []),
-    warnings: parseJsonColumn(raw.warnings_json, []),
+    createdObjects: parseJsonColumn(raw.created_objects_json, [], 'created_objects_json'),
+    createdViews: parseJsonColumn(raw.created_views_json, [], 'created_views_json'),
+    warnings: parseJsonColumn(raw.warnings_json, [], 'warnings_json'),
     displayName: raw.display_name || '',
-    config: parseJsonColumn(raw.config_json, {}),
+    config: parseJsonColumn(raw.config_json, {}, 'config_json'),
     lastInstallAt: raw.last_install_at,
     createdAt: raw.created_at,
   }
 }
 
-function parseJsonColumn(value, fallback) {
+function parseJsonColumn(value, fallback, columnName) {
   if (value == null) return fallback
   if (typeof value === 'string') {
     try {
       return JSON.parse(value)
-    } catch {
+    } catch (err) {
+      console.warn(`[after-sales installer] Failed to parse ledger JSON column: ${columnName}`, err)
       return fallback
     }
   }
