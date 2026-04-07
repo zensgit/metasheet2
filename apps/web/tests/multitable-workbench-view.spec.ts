@@ -850,6 +850,10 @@ function createWorkbenchMock() {
       canComment: true,
       canManageAutomation: false,
     }),
+    capabilityOrigin: ref({
+      source: 'global-rbac',
+      hasSheetAssignments: false,
+    }),
     fieldPermissions: ref({}),
     viewPermissions: ref({}),
     activeView: computed(() => views.value.find((view) => view.id === activeViewId.value) ?? null),
@@ -895,6 +899,7 @@ function createGridMock() {
     attachmentSummaries: ref<Record<string, Record<string, unknown[]>>>({}),
     fieldPermissions: ref({}),
     viewPermission: ref(null),
+    capabilityOrigin: ref(null),
     rowActions: ref(null),
     rowActionOverrides: ref<Record<string, { canEdit: boolean; canDelete: boolean; canComment: boolean }>>({}),
     conflict: ref(null),
@@ -1090,6 +1095,77 @@ describe('MultitableWorkbench view wiring', () => {
     const managerButtons = Array.from(container!.querySelectorAll('.mt-workbench__mgr-btn')) as HTMLButtonElement[]
     expect(managerButtons.some((button) => button.textContent?.includes('Fields'))).toBe(false)
     expect(managerButtons.some((button) => button.textContent?.includes('Access'))).toBe(true)
+  })
+
+  it('shows a workspace role access banner by default', async () => {
+    mountWorkbench()
+    await flushUi()
+
+    const banner = container!.querySelector('[data-capability-origin-banner="true"]')
+    expect(banner).not.toBeNull()
+    expect(banner?.getAttribute('data-capability-origin-source')).toBe('global-rbac')
+    expect(banner?.textContent).toContain('Workspace role access')
+    expect(banner?.textContent).toContain('follows your workspace multitable permissions')
+  })
+
+  it('prefers grid capability origin when a sheet grant expands access', async () => {
+    workbenchMock.capabilityOrigin.value = {
+      source: 'global-rbac',
+      hasSheetAssignments: false,
+    }
+    gridMock.capabilityOrigin.value = {
+      source: 'sheet-grant',
+      hasSheetAssignments: true,
+    }
+
+    mountWorkbench()
+    await flushUi()
+
+    const banner = container!.querySelector('[data-capability-origin-banner="true"]')
+    expect(banner?.getAttribute('data-capability-origin-source')).toBe('sheet-grant')
+    expect(banner?.textContent).toContain('Shared sheet access')
+    expect(banner?.textContent).toContain('direct sheet share')
+  })
+
+  it('explains which actions are limited when sheet scope narrows access', async () => {
+    workbenchMock.capabilityOrigin.value = {
+      source: 'sheet-scope',
+      hasSheetAssignments: true,
+    }
+    workbenchMock.capabilities.value = {
+      canRead: true,
+      canCreateRecord: false,
+      canEditRecord: false,
+      canDeleteRecord: false,
+      canManageFields: false,
+      canManageSheetAccess: false,
+      canManageViews: true,
+      canComment: true,
+      canManageAutomation: false,
+    }
+
+    mountWorkbench()
+    await flushUi()
+
+    const banner = container!.querySelector('[data-capability-origin-banner="true"]')
+    expect(banner?.getAttribute('data-capability-origin-source')).toBe('sheet-scope')
+    expect(banner?.textContent).toContain('Restricted sheet access')
+    expect(banner?.textContent).toContain('record creation, editing, deletion, field changes, and sheet access changes are limited on this sheet')
+  })
+
+  it('shows an explicit admin access banner for administrator contexts', async () => {
+    workbenchMock.capabilityOrigin.value = {
+      source: 'admin',
+      hasSheetAssignments: false,
+    }
+
+    mountWorkbench()
+    await flushUi()
+
+    const banner = container!.querySelector('[data-capability-origin-banner="true"]')
+    expect(banner?.getAttribute('data-capability-origin-source')).toBe('admin')
+    expect(banner?.textContent).toContain('Admin access')
+    expect(banner?.textContent).toContain('administrator role')
   })
 
   it('filters readonly fields from import surfaces', async () => {
