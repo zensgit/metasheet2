@@ -77,6 +77,7 @@ import { univerMockRouter } from './routes/univer-mock'
 import { univerMetaRouter } from './routes/univer-meta'
 import { SnapshotService } from './services/SnapshotService'
 import { notificationService } from './services/NotificationService'
+import { AfterSalesApprovalBridgeService } from './services/AfterSalesApprovalBridgeService'
 import { cacheRegistry } from '../core/cache/CacheRegistry'
 import { loadObservabilityConfig } from './config/observability'
 import { initObservability } from './observability/otel'
@@ -117,6 +118,7 @@ export class MetaSheetServer {
   private observabilityEnabled = false
   private stopOperationAuditRetention?: () => void
   private stopMultitableAttachmentCleanup?: () => void
+  private afterSalesApprovalBridgeService = new AfterSalesApprovalBridgeService()
   // Optional bypass/degraded-mode flags for local debug
   private disableWorkflow = process.env.DISABLE_WORKFLOW === 'true'
   private disableEventBus = process.env.DISABLE_EVENT_BUS === 'true'
@@ -152,6 +154,7 @@ export class MetaSheetServer {
     this.setupMiddleware()
     // WebSocket setup is now handled by CollabService via start()
     this.initializeCache()
+    this.registerInternalPluginApis()
   }
 
   /**
@@ -767,6 +770,15 @@ export class MetaSheetServer {
     this.logger.info(`Cache: ${enabled ? 'observing' : 'disabled'} (impl: ${cacheRegistry.getStatus().implName})`)
 
     // Phase 3: Plugin will register RedisCache when FEATURE_CACHE_REDIS=true
+  }
+
+  private registerInternalPluginApis(): void {
+    this.pluginApis.set('after-sales-approval-bridge', {
+      submitRefundApproval: async (command: unknown) =>
+        this.afterSalesApprovalBridgeService.submitRefundApproval(
+          command as import('./services/AfterSalesApprovalBridgeService').AfterSalesRefundApprovalCommand,
+        ),
+    })
   }
 
   private createPluginContext(loaded: LoadedPlugin): PluginContext {

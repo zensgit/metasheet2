@@ -16,11 +16,13 @@
  *  6. loadCurrent — read the installed state for the GET /projects/current route
  *
  * Non-responsibilities (deferred):
- *  - Automation registration, notification registration, RBAC application,
- *    and approval bridge wiring.
- *  - Automation/notification/role registration (thin adapter layer is task #10).
+ *  - Automation registration and RBAC application.
+ *  - Install-time automation/role registration (thin adapter layer is task #10).
  *  - Helper expression resolution (runs at automation execution time, not here).
- *  - Recipient placeholder expansion (runs in notification layer).
+ *  - Recipient placeholder expansion and notification delivery (run in the
+ *    notification adapter layer).
+ *  - Refund approval submission orchestration (runs in the approval bridge
+ *    adapter layer).
  *
  * Invariants (hard constraints from design docs):
  *  - Ledger only records terminal states (installed|partial|failed). No
@@ -388,9 +390,7 @@ async function runInstall(input) {
     }
 
     // TODO(phase-1b): register AutomationRuleDraft via workflow service adapter
-    // TODO(phase-1b): register NotificationTopicSpec via notification adapter
     // TODO(phase-1b): apply RolePermissionMatrix via RBAC adapter
-    // TODO(phase-1b): register ApprovalBridgeService bridge 'after-sales-refund'
   } catch (err) {
     // Core-object failure: still write ledger row with status='failed' so the
     // current endpoint can return `failed` and the frontend can retry with
