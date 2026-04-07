@@ -56,8 +56,8 @@ describe('MetaSheetPermissionManager', () => {
           {
             subjectType: 'role',
             subjectId: 'role_ops',
-            accessLevel: 'read',
-            permissions: ['spreadsheet.read'],
+            accessLevel: 'admin',
+            permissions: ['spreadsheet.admin'],
             label: 'Ops Reviewers',
             subtitle: 'role_ops',
             isActive: true,
@@ -68,7 +68,7 @@ describe('MetaSheetPermissionManager', () => {
         items: [
           { subjectType: 'user', subjectId: 'user_1', label: 'Alex', subtitle: 'alex@example.com', isActive: true, accessLevel: 'write' },
           { subjectType: 'user', subjectId: 'user_2', label: 'Jamie', subtitle: 'jamie@example.com', isActive: true, accessLevel: null },
-          { subjectType: 'role', subjectId: 'role_ops', label: 'Ops Reviewers', subtitle: 'role_ops', isActive: true, accessLevel: 'read' },
+          { subjectType: 'role', subjectId: 'role_ops', label: 'Ops Reviewers', subtitle: 'role_ops', isActive: true, accessLevel: 'admin' },
           { subjectType: 'role', subjectId: 'role_ops_writer', label: 'Ops Writers', subtitle: 'role_ops_writer', isActive: true, accessLevel: null },
         ],
       }),
@@ -80,7 +80,7 @@ describe('MetaSheetPermissionManager', () => {
 
     expect(client.listSheetPermissions).toHaveBeenCalledWith('sheet_orders')
     expect(client.listSheetPermissionCandidates).toHaveBeenCalledWith('sheet_orders', { q: undefined, limit: 12 })
-    expect(container!.textContent).toContain('Override sheet-level access for eligible people or roles. Write-own remains user-only.')
+    expect(container!.textContent).toContain('Override sheet-level access for eligible people or roles. Admin includes sharing and sheet deletion. Write-own remains user-only.')
     expect(container!.querySelector('[data-sheet-permission-entry="user:user_1"]')).not.toBeNull()
     expect(container!.querySelector('[data-sheet-permission-entry="role:role_ops"]')).not.toBeNull()
     expect(container!.querySelector('[data-sheet-permission-candidate="user:user_1"]')).toBeNull()
@@ -93,7 +93,7 @@ describe('MetaSheetPermissionManager', () => {
       .toContain('Apply')
   })
 
-  it('updates role-based sheet access for a candidate and omits write-own from role options', async () => {
+  it('updates role-based sheet access for a candidate and keeps admin available while omitting write-own', async () => {
     const updatedSpy = vi.fn()
     const client = {
       listSheetPermissions: vi.fn()
@@ -130,7 +130,7 @@ describe('MetaSheetPermissionManager', () => {
 
     const select = container!.querySelector('[data-sheet-permission-candidate="role:role_ops_writer"] .meta-sheet-perm__select') as HTMLSelectElement
     const optionValues = Array.from(select.options).map((option) => option.value)
-    expect(optionValues).toEqual(['read', 'write'])
+    expect(optionValues).toEqual(['read', 'write', 'admin'])
     select.value = 'write'
     select.dispatchEvent(new Event('change', { bubbles: true }))
     await flushUi()

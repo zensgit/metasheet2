@@ -1817,6 +1817,7 @@ components:
         - read
         - write
         - write-own
+        - admin
     MultitableSheetPermissionSubjectType:
       type: string
       enum:
@@ -9581,6 +9582,7 @@ paths:
                     - read
                     - write
                     - write-own
+                    - admin
                     - none
               required:
                 - accessLevel
@@ -9608,6 +9610,7 @@ paths:
                           - read
                           - write
                           - write-own
+                          - admin
                           - none
                       entry:
                         allOf:

@@ -4,7 +4,7 @@
       <div class="meta-sheet-perm__header">
         <div>
           <h4 class="meta-sheet-perm__title">Manage Access</h4>
-          <p class="meta-sheet-perm__subtitle">Override sheet-level access for eligible people or roles. Write-own remains user-only.</p>
+          <p class="meta-sheet-perm__subtitle">Override sheet-level access for eligible people or roles. Admin includes sharing and sheet deletion. Write-own remains user-only.</p>
         </div>
         <button class="meta-sheet-perm__close" type="button" @click="requestClose">&times;</button>
       </div>
@@ -176,6 +176,7 @@ const ACCESS_LEVEL_OPTIONS: Array<{ value: MetaSheetPermissionAccessLevel; label
   { value: 'read', label: 'Read' },
   { value: 'write', label: 'Write' },
   { value: 'write-own', label: 'Write own' },
+  { value: 'admin', label: 'Admin' },
 ]
 const ROLE_ACCESS_LEVEL_OPTIONS = ACCESS_LEVEL_OPTIONS.filter((option) => option.value !== 'write-own')
 
@@ -496,6 +497,11 @@ onBeforeUnmount(() => {
 .meta-sheet-perm__badge[data-access-level='write-own'] {
   background: #fef3c7;
   color: #92400e;
+}
+
+.meta-sheet-perm__badge[data-access-level='admin'] {
+  background: #dbeafe;
+  color: #1d4ed8;
 }
 
 .meta-sheet-perm__subject {

@@ -280,7 +280,7 @@ function normalizeSheetPermissionEntry(
   const subjectType = payload?.subjectType === 'user' || payload?.subjectType === 'role' ? payload.subjectType : null
   const subjectId = typeof payload?.subjectId === 'string' ? payload.subjectId : ''
   const accessLevel = payload?.accessLevel
-  if (!subjectType || !subjectId || (accessLevel !== 'read' && accessLevel !== 'write' && accessLevel !== 'write-own')) {
+  if (!subjectType || !subjectId || (accessLevel !== 'read' && accessLevel !== 'write' && accessLevel !== 'write-own' && accessLevel !== 'admin')) {
     return null
   }
   return {
@@ -324,7 +324,7 @@ function normalizeSheetPermissionCandidates(
         label,
         subtitle: typeof item?.subtitle === 'string' || item?.subtitle === null ? item.subtitle ?? null : null,
         isActive: item?.isActive !== false,
-        accessLevel: item?.accessLevel === 'read' || item?.accessLevel === 'write' || item?.accessLevel === 'write-own'
+        accessLevel: item?.accessLevel === 'read' || item?.accessLevel === 'write' || item?.accessLevel === 'write-own' || item?.accessLevel === 'admin'
           ? item.accessLevel
           : null,
       })
@@ -431,7 +431,7 @@ export class MultitableApiClient {
     return {
       subjectType: data?.subjectType === 'user' || data?.subjectType === 'role' ? data.subjectType : subjectType,
       subjectId: typeof data?.subjectId === 'string' ? data.subjectId : subjectId,
-      accessLevel: data?.accessLevel === 'read' || data?.accessLevel === 'write' || data?.accessLevel === 'write-own' || data?.accessLevel === 'none'
+      accessLevel: data?.accessLevel === 'read' || data?.accessLevel === 'write' || data?.accessLevel === 'write-own' || data?.accessLevel === 'admin' || data?.accessLevel === 'none'
         ? data.accessLevel
         : accessLevel,
       entry: normalizeSheetPermissionEntry(data?.entry ?? null),

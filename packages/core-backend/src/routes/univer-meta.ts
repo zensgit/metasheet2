@@ -1185,10 +1185,11 @@ type SheetPermissionScope = {
   canRead: boolean
   canWrite: boolean
   canWriteOwn: boolean
+  canAdmin: boolean
 }
 
 type MultitableSheetPermissionSubjectType = 'user' | 'role'
-type MultitableSheetAccessLevel = 'read' | 'write' | 'write-own'
+type MultitableSheetAccessLevel = 'read' | 'write' | 'write-own' | 'admin'
 
 type MultitableSheetPermissionEntry = {
   subjectType: MultitableSheetPermissionSubjectType
@@ -1213,18 +1214,24 @@ const SHEET_READ_PERMISSION_CODES = new Set([
   'spreadsheet:read',
   'spreadsheet:write',
   'spreadsheet:write-own',
+  'spreadsheet:admin',
   'spreadsheets:read',
   'spreadsheets:write',
   'spreadsheets:write-own',
+  'spreadsheets:admin',
   'multitable:read',
   'multitable:write',
   'multitable:write-own',
+  'multitable:admin',
 ])
 
 const SHEET_WRITE_PERMISSION_CODES = new Set([
   'spreadsheet:write',
+  'spreadsheet:admin',
   'spreadsheets:write',
+  'spreadsheets:admin',
   'multitable:write',
+  'multitable:admin',
 ])
 
 const SHEET_OWN_WRITE_PERMISSION_CODES = new Set([
@@ -1233,22 +1240,32 @@ const SHEET_OWN_WRITE_PERMISSION_CODES = new Set([
   'multitable:write-own',
 ])
 
+const SHEET_ADMIN_PERMISSION_CODES = new Set([
+  'spreadsheet:admin',
+  'spreadsheets:admin',
+  'multitable:admin',
+])
+
 const MANAGED_SHEET_PERMISSION_CODES = [
   'spreadsheet:read',
   'spreadsheet:write',
   'spreadsheet:write-own',
+  'spreadsheet:admin',
   'spreadsheets:read',
   'spreadsheets:write',
   'spreadsheets:write-own',
+  'spreadsheets:admin',
   'multitable:read',
   'multitable:write',
   'multitable:write-own',
+  'multitable:admin',
 ]
 
 const CANONICAL_SHEET_PERMISSION_CODE_BY_ACCESS_LEVEL: Record<MultitableSheetAccessLevel, string> = {
   read: 'spreadsheet:read',
   write: 'spreadsheet:write',
   'write-own': 'spreadsheet:write-own',
+  admin: 'spreadsheet:admin',
 }
 
 function isSheetPermissionSubjectType(value: unknown): value is MultitableSheetPermissionSubjectType {
@@ -1319,11 +1336,13 @@ function summarizeSheetPermissionCodes(codes: string[]): SheetPermissionScope {
     canRead: codes.some((code) => SHEET_READ_PERMISSION_CODES.has(code)),
     canWrite: codes.some((code) => SHEET_WRITE_PERMISSION_CODES.has(code)),
     canWriteOwn: codes.some((code) => SHEET_OWN_WRITE_PERMISSION_CODES.has(code)),
+    canAdmin: codes.some((code) => SHEET_ADMIN_PERMISSION_CODES.has(code)),
   }
 }
 
 function deriveSheetAccessLevel(codes: string[]): MultitableSheetAccessLevel | null {
   const normalized = normalizePermissionCodes(codes)
+  if (normalized.some((code) => SHEET_ADMIN_PERMISSION_CODES.has(code))) return 'admin'
   if (normalized.some((code) => SHEET_WRITE_PERMISSION_CODES.has(code))) return 'write'
   if (normalized.some((code) => SHEET_OWN_WRITE_PERMISSION_CODES.has(code))) return 'write-own'
   if (normalized.some((code) => SHEET_READ_PERMISSION_CODES.has(code))) return 'read'
@@ -1576,7 +1595,7 @@ function applySheetPermissionScope(
     canEditRecord: capabilities.canEditRecord && canWriteAnyRecord,
     canDeleteRecord: capabilities.canDeleteRecord && canWriteAnyRecord,
     canManageFields: capabilities.canManageFields && scope.canWrite,
-    canManageSheetAccess: capabilities.canManageSheetAccess && scope.canWrite,
+    canManageSheetAccess: scope.canAdmin,
     canManageViews: capabilities.canManageViews && scope.canWrite,
     canComment: capabilities.canComment && scope.canRead,
     canManageAutomation: capabilities.canManageAutomation && scope.canWrite,
@@ -1635,6 +1654,7 @@ function applyContextSheetSchemaWriteGrant(
     ...scoped,
     canManageFields: true,
     canManageViews: true,
+    ...(scope.canAdmin ? { canManageSheetAccess: true } : {}),
   }
 }
 
@@ -2980,7 +3000,7 @@ export function univerMetaRouter(): Router {
     }
   })
 
-  router.get('/sheets/:sheetId/permissions', rbacGuardAny(['multitable:read', 'multitable:share']), async (req: Request, res: Response) => {
+  router.get('/sheets/:sheetId/permissions', async (req: Request, res: Response) => {
     const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
     if (!sheetId) {
       return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId is required' } })
@@ -3005,7 +3025,7 @@ export function univerMetaRouter(): Router {
     }
   })
 
-  router.get('/sheets/:sheetId/permission-candidates', rbacGuardAny(['multitable:read', 'multitable:share']), async (req: Request, res: Response) => {
+  router.get('/sheets/:sheetId/permission-candidates', async (req: Request, res: Response) => {
     const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
     if (!sheetId) {
       return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId is required' } })
@@ -3034,7 +3054,7 @@ export function univerMetaRouter(): Router {
     }
   })
 
-  router.put('/sheets/:sheetId/permissions/:subjectType/:subjectId', rbacGuardAny(['multitable:write', 'multitable:share']), async (req: Request, res: Response) => {
+  router.put('/sheets/:sheetId/permissions/:subjectType/:subjectId', async (req: Request, res: Response) => {
     const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
     const subjectType = typeof req.params.subjectType === 'string' ? req.params.subjectType.trim() : ''
     const subjectId = typeof req.params.subjectId === 'string' ? req.params.subjectId.trim() : ''
@@ -3043,7 +3063,7 @@ export function univerMetaRouter(): Router {
     }
 
     const schema = z.object({
-      accessLevel: z.enum(['read', 'write', 'write-own', 'none']),
+      accessLevel: z.enum(['read', 'write', 'write-own', 'admin', 'none']),
     })
     const parsed = schema.safeParse(req.body)
     if (!parsed.success) {
@@ -3699,7 +3719,7 @@ export function univerMetaRouter(): Router {
     }
   })
 
-  router.delete('/sheets/:sheetId', rbacGuard('multitable', 'write'), async (req: Request, res: Response) => {
+  router.delete('/sheets/:sheetId', async (req: Request, res: Response) => {
     const sheetId = req.params.sheetId
     if (!sheetId || typeof sheetId !== 'string') {
       return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId is required' } })
@@ -3711,8 +3731,12 @@ export function univerMetaRouter(): Router {
       if (sheetRes.rows.length === 0) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
       }
-      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
-      if (!capabilities.canManageViews) return sendForbidden(res)
+      const { capabilities, sheetScope } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      if (sheetScope?.hasAssignments) {
+        if (!capabilities.canManageSheetAccess) return sendForbidden(res)
+      } else if (!capabilities.canManageViews) {
+        return sendForbidden(res)
+      }
       const del = await pool.query('DELETE FROM meta_sheets WHERE id = $1', [sheetId])
       invalidateSheetSummaryCache(sheetId)
       invalidateFieldCache(sheetId)
