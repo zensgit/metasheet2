@@ -149,7 +149,10 @@ function Invoke-NodeCapture {
   [System.IO.Directory]::CreateDirectory($tempRoot) | Out-Null
   $tempScriptPath = Join-Path $tempRoot (([System.IO.Path]::GetRandomFileName()) + '.cjs')
   $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
-  [System.IO.File]::WriteAllText($tempScriptPath, $Script, $utf8NoBom)
+  $normalizedScript = @'
+process.argv.splice(1, 1);
+'@ + "`n" + $Script
+  [System.IO.File]::WriteAllText($tempScriptPath, $normalizedScript, $utf8NoBom)
 
   try {
     $output = & node $tempScriptPath @Arguments
