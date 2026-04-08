@@ -18,6 +18,8 @@ const DEFAULT_AUTOMATIONS = Object.freeze([
     trigger: { event: 'ticket.created' },
     conditions: [],
     actions: [
+      // This string is intentionally kept literal here. The workflow runtime
+      // is the only place that resolves the computeSlaDueAt(priority) helper.
       { type: 'assign', assigneeRule: 'by-area-or-round-robin' },
       { type: 'updateField', field: 'slaDueAt', value: '{{computeSlaDueAt(priority)}}' },
       { type: 'sendNotification', topic: 'after-sales.ticket.assigned' },
