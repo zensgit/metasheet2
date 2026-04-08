@@ -60,6 +60,44 @@ jobs:
     if: ${{ github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-latest
     steps:
+      - name: Sync deploy host files
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_SSH_KEY_B64: ${{ secrets.DEPLOY_SSH_KEY_B64 }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s' "$DEPLOY_SSH_KEY_B64" | base64 -d > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh_opts="-o StrictHostKeyChecking=no -o IdentitiesOnly=yes -i ~/.ssh/deploy_key"
+          DEPLOY_PATH="${DEPLOY_PATH:-metasheet2}"
+
+          remote_repo_path="$(
+            ssh $ssh_opts "$DEPLOY_USER@$DEPLOY_HOST" "DEPLOY_PATH='${DEPLOY_PATH}' bash -s" <<'EOF'
+          set -euo pipefail
+          if [[ "${DEPLOY_PATH}" == /* ]]; then
+            DEPLOY_REPO_PATH="${DEPLOY_PATH}"
+          elif [[ "${DEPLOY_PATH}" == ~/* ]]; then
+            DEPLOY_REPO_PATH="${HOME}/${DEPLOY_PATH#~/}"
+          else
+            DEPLOY_REPO_PATH="${HOME}/${DEPLOY_PATH}"
+          fi
+          mkdir -p "${DEPLOY_REPO_PATH}"
+          printf '%s' "${DEPLOY_REPO_PATH}"
+          EOF
+          )"
+
+          echo "sync remote_repo_path=${remote_repo_path}"
+
+          tar -czf - \
+            docker-compose.app.yml \
+            docker/nginx.conf \
+            scripts/ops/attendance-preflight.sh \
+          | ssh $ssh_opts "$DEPLOY_USER@$DEPLOY_HOST" \
+              "set -euo pipefail; mkdir -p '${remote_repo_path}/docker' '${remote_repo_path}/scripts/ops'; tar -xzf - -C '${remote_repo_path}'"
+
       - name: Remote deploy (with preflight logs)
         id: remote_deploy
         continue-on-error: true
@@ -115,7 +153,7 @@ jobs:
             '  git checkout main'
             '  git merge --ff-only origin/main'
             'else'
-            '  echo "[deploy][warn] DEPLOY_PATH is not a git repo: ${DEPLOY_PATH} (resolved: ${DEPLOY_REPO_PATH}); continuing with existing files"'
+            '  echo "[deploy][warn] DEPLOY_PATH is not a git repo: ${DEPLOY_PATH} (resolved: ${DEPLOY_REPO_PATH}); continuing with synced files"'
             '  echo "[deploy][warn] pwd=$(pwd)"'
             '  ls -la || true'
             'fi'
@@ -139,14 +177,27 @@ jobs:
             '  database_url="${database_url%\"}"'
             '  database_url="${database_url#\"}"'
             '  if [[ "${database_url}" == *"@postgres:"* || "${database_url}" == *"@127.0.0.1:"* || "${database_url}" == *"@localhost:"* ]]; then'
-            '    if grep -Eq "^DB_SSL=" "${ENV_FILE_PATH}"; then'
-            '      sed -i "s/^DB_SSL=.*/DB_SSL=false/" "${ENV_FILE_PATH}"'
-            '    else'
-            '      printf "\\nDB_SSL=false\\n" >> "${ENV_FILE_PATH}"'
-            '    fi'
+            '    python3 - "${ENV_FILE_PATH}" <<'\''PY'\'''
+            'from pathlib import Path'
+            'import sys'
+            'path = Path(sys.argv[1])'
+            'text = path.read_text()'
+            'lines = text.splitlines()'
+            'updated = []'
+            'replaced = False'
+            'for line in lines:'
+            '    if line.startswith("DB_SSL="):'
+            '        updated.append("DB_SSL=false")'
+            '        replaced = True'
+            '    else:'
+            '        updated.append(line)'
+            'if not replaced:'
+            '    updated.append("DB_SSL=false")'
+            'path.write_text("\\n".join(updated) + "\\n")'
+            'PY'
             '    echo "[deploy] local-postgres detected; forcing DB_SSL=false in ${ENV_FILE_PATH}"'
             '  fi'
-            'fi'
+          'fi'
             'for CONTAINER_NAME in metasheet-postgres metasheet-redis metasheet-backend metasheet-web; do'
             '  if docker ps -a --format "{{.Names}}" | grep -Fxq "${CONTAINER_NAME}"; then'
             '    echo "[deploy][warn] removing existing container ${CONTAINER_NAME} before recreate"'
