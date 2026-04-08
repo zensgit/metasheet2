@@ -48,18 +48,35 @@
         <button class="login-submit" type="submit" :disabled="submitting">
           {{ submitting ? text.submitting : text.submit }}
         </button>
+
+        <div v-if="dingtalkAvailable" class="login-divider">
+          <span>{{ text.alternative }}</span>
+        </div>
+
+        <button
+          v-if="dingtalkAvailable"
+          class="login-dingtalk"
+          type="button"
+          :disabled="dingtalkSubmitting"
+          @click="onLaunchDingTalk"
+        >
+          {{ dingtalkSubmitting ? text.dingtalkSubmitting : text.dingtalkSubmit }}
+        </button>
+
+        <p v-if="dingtalkErrorMessage" class="login-error">{{ dingtalkErrorMessage }}</p>
       </form>
     </div>
   </section>
 </template>
 
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useLocale } from '../composables/useLocale'
 import { useFeatureFlags } from '../stores/featureFlags'
 import { normalizePostLoginRedirect } from '../utils/authRedirect'
 import { apiFetch, clearStoredAuthState } from '../utils/api'
+import { readErrorMessage } from '../utils/error'
 
 interface AuthUserPayload {
   role?: unknown
@@ -85,6 +102,9 @@ const email = ref('')
 const password = ref('')
 const submitting = ref(false)
 const errorMessage = ref('')
+const dingtalkAvailable = ref(false)
+const dingtalkSubmitting = ref(false)
+const dingtalkErrorMessage = ref('')
 
 const text = computed(() => {
   if (isZh.value) {
@@ -98,8 +118,13 @@ const text = computed(() => {
       passwordPlaceholder: '请输入密码',
       submit: '登录',
       submitting: '登录中...',
+      alternative: '或者',
+      dingtalkSubmit: '使用钉钉登录',
+      dingtalkSubmitting: '跳转到钉钉中...',
       failed: '登录失败，请检查账号或密码。',
       networkError: '登录失败，请稍后再试。',
+      dingtalkUnavailable: '钉钉登录暂不可用，请稍后重试。',
+      dingtalkMissingUrl: '未获取到钉钉登录地址。',
     }
   }
   return {
@@ -112,8 +137,13 @@ const text = computed(() => {
     passwordPlaceholder: 'Enter password',
     submit: 'Sign in',
     submitting: 'Signing in...',
+    alternative: 'or',
+    dingtalkSubmit: 'Continue with DingTalk',
+    dingtalkSubmitting: 'Redirecting to DingTalk...',
     failed: 'Sign-in failed. Check your email or password.',
     networkError: 'Sign-in failed. Please try again.',
+    dingtalkUnavailable: 'DingTalk login is unavailable right now.',
+    dingtalkMissingUrl: 'No DingTalk login URL was returned.',
   }
 })
 
@@ -210,6 +240,54 @@ async function onSubmit(): Promise<void> {
     submitting.value = false
   }
 }
+
+async function probeDingTalkLogin(): Promise<void> {
+  try {
+    const response = await apiFetch('/api/auth/dingtalk/launch', {
+      method: 'GET',
+      suppressUnauthorizedRedirect: true,
+    })
+    dingtalkAvailable.value = response.ok
+  } catch {
+    dingtalkAvailable.value = false
+  }
+}
+
+async function onLaunchDingTalk(): Promise<void> {
+  dingtalkErrorMessage.value = ''
+  dingtalkSubmitting.value = true
+
+  try {
+    const redirectPath = normalizePostLoginRedirect(route.query.redirect)
+    const query = redirectPath ? `?redirect=${encodeURIComponent(redirectPath)}` : ''
+    const response = await apiFetch(`/api/auth/dingtalk/launch${query}`, {
+      method: 'GET',
+      suppressUnauthorizedRedirect: true,
+    })
+    const payload = await response.json().catch(() => null)
+
+    if (!response.ok || !payload?.success) {
+      dingtalkErrorMessage.value = readErrorMessage(payload, text.value.dingtalkUnavailable)
+      return
+    }
+
+    const launchUrl = typeof payload?.data?.url === 'string' ? payload.data.url : ''
+    if (!launchUrl) {
+      dingtalkErrorMessage.value = text.value.dingtalkMissingUrl
+      return
+    }
+
+    window.location.href = launchUrl
+  } catch (error) {
+    dingtalkErrorMessage.value = readErrorMessage(error, text.value.dingtalkUnavailable)
+  } finally {
+    dingtalkSubmitting.value = false
+  }
+}
+
+onMounted(() => {
+  void probeDingTalkLogin()
+})
 </script>
 
 <style scoped>
@@ -330,6 +408,38 @@ async function onSubmit(): Promise<void> {
 }
 
 .login-submit:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.login-divider {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: #6b7c93;
+  font-size: 12px;
+}
+
+.login-divider::before,
+.login-divider::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: #d9e4f2;
+}
+
+.login-dingtalk {
+  border: 1px solid #0089ff;
+  border-radius: 8px;
+  padding: 10px 14px;
+  background: #f3f9ff;
+  color: #0067c7;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.login-dingtalk:disabled {
   opacity: 0.6;
   cursor: default;
 }
