@@ -5,7 +5,20 @@
 
 import type { RequestHandler } from 'express'
 import type { Injector } from '@wendellhu/redi'
+import type {
+  MultitableProvisioningFieldDescriptor,
+  MultitableProvisioningFieldType,
+  MultitableProvisioningObjectDescriptor,
+  MultitableProvisioningViewDescriptor,
+} from '../multitable/contracts'
 import type { CollectionDefinition } from './collection'
+
+export type {
+  MultitableProvisioningFieldDescriptor,
+  MultitableProvisioningFieldType,
+  MultitableProvisioningObjectDescriptor,
+  MultitableProvisioningViewDescriptor,
+} from '../multitable/contracts'
 
 /**
  * 插件生命周期接口
@@ -335,34 +348,6 @@ export interface CoreAPI {
   vision?: VisionApi
 }
 
-export interface MultitableProvisioningFieldDescriptor {
-  id: string
-  name: string
-  type: 'string' | 'number' | 'boolean' | 'date' | 'formula' | 'select' | 'link' | 'lookup' | 'rollup' | 'attachment'
-  order?: number
-  options?: string[]
-  property?: Record<string, unknown>
-}
-
-export interface MultitableProvisioningObjectDescriptor {
-  id: string
-  name: string
-  description?: string | null
-  fields?: MultitableProvisioningFieldDescriptor[]
-}
-
-export interface MultitableProvisioningViewDescriptor {
-  id: string
-  objectId: string
-  name: string
-  type: string
-  filterInfo?: Record<string, unknown>
-  sortInfo?: Record<string, unknown>
-  groupInfo?: Record<string, unknown>
-  hiddenFieldIds?: string[]
-  config?: Record<string, unknown>
-}
-
 export interface MultitableProvisioningAPI {
   getObjectSheetId(projectId: string, objectId: string): string
   getFieldId(projectId: string, objectId: string, fieldId: string): string
@@ -382,7 +367,7 @@ export interface MultitableProvisioningAPI {
       id: string
       sheetId: string
       name: string
-      type: MultitableProvisioningFieldDescriptor['type']
+      type: MultitableProvisioningFieldType
       property: Record<string, unknown>
       order: number
     }>

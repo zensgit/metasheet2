@@ -1,49 +1,22 @@
 import { createHash } from 'crypto'
+import type {
+  MultitableProvisioningFieldDescriptor,
+  MultitableProvisioningFieldType,
+  MultitableProvisioningObjectDescriptor,
+  MultitableProvisioningViewDescriptor,
+} from './contracts'
+
+export type {
+  MultitableProvisioningFieldDescriptor,
+  MultitableProvisioningFieldType,
+  MultitableProvisioningObjectDescriptor,
+  MultitableProvisioningViewDescriptor,
+} from './contracts'
 
 export type MultitableProvisioningQueryFn = (
   sql: string,
   params?: unknown[],
 ) => Promise<{ rows: unknown[]; rowCount?: number | null }>
-
-export type MultitableProvisioningFieldType =
-  | 'string'
-  | 'number'
-  | 'boolean'
-  | 'date'
-  | 'formula'
-  | 'select'
-  | 'link'
-  | 'lookup'
-  | 'rollup'
-  | 'attachment'
-
-export type MultitableProvisioningFieldDescriptor = {
-  id: string
-  name: string
-  type: MultitableProvisioningFieldType
-  order?: number
-  options?: string[]
-  property?: Record<string, unknown>
-}
-
-export type MultitableProvisioningObjectDescriptor = {
-  id: string
-  name: string
-  description?: string | null
-  fields?: MultitableProvisioningFieldDescriptor[]
-}
-
-export type MultitableProvisioningViewDescriptor = {
-  id: string
-  objectId: string
-  name: string
-  type: string
-  filterInfo?: Record<string, unknown>
-  sortInfo?: Record<string, unknown>
-  groupInfo?: Record<string, unknown>
-  hiddenFieldIds?: string[]
-  config?: Record<string, unknown>
-}
 
 export type MultitableProvisioningSheet = {
   id: string
