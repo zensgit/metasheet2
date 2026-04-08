@@ -37,6 +37,8 @@ jobs:
           DEPLOY_COMPOSE_FILE: ${{ secrets.DEPLOY_COMPOSE_FILE }}
           CSV_MAX_ROWS: ${{ github.event.inputs.csv_max_rows || '100000' }}
           SKIP_HOST_SYNC: ${{ github.event.inputs.skip_host_sync || 'false' }}
+          DEPLOY_JWT_SECRET: ${{ secrets.DEPLOY_JWT_SECRET || secrets.JWT_SECRET || '' }}
+          DEPLOY_BCRYPT_SALT_ROUNDS: ${{ vars.DEPLOY_BCRYPT_SALT_ROUNDS || '12' }}
         run: |
           set -euo pipefail
           mkdir -p ~/.ssh
@@ -67,6 +69,8 @@ jobs:
             "DEPLOY_COMPOSE_FILE=\"${DEPLOY_COMPOSE_FILE}\""
             "CSV_MAX_ROWS=\"${CSV_MAX_ROWS}\""
             "SKIP_HOST_SYNC=\"${SKIP_HOST_SYNC}\""
+            "DEPLOY_JWT_SECRET=\"${DEPLOY_JWT_SECRET:-}\""
+            "DEPLOY_BCRYPT_SALT_ROUNDS=\"${DEPLOY_BCRYPT_SALT_ROUNDS:-12}\""
             'if [[ "${DEPLOY_PATH}" == /* ]]; then'
               '  DEPLOY_REPO_PATH="${DEPLOY_PATH}"'
             'elif [[ "${DEPLOY_PATH}" == ~/* ]]; then'
@@ -124,12 +128,57 @@ jobs:
               '    backup="${env_file}.bak.$(date -u +%Y%m%d-%H%M%S)"'
               '    cp "$env_file" "$backup"'
               '    echo "[attendance-env-reconcile] backup=$backup"'
-              '    if grep -qE "^${key}=" "$env_file"; then'
-              '      sed -i -E "s#^${key}=.*#${key}=${value}#g" "$env_file"'
-              '      echo "[attendance-env-reconcile] updated ${key}=${value}"'
+              '    python3 - "$env_file" "${value}" "${DEPLOY_JWT_SECRET:-}" "${DEPLOY_BCRYPT_SALT_ROUNDS:-12}" <<'\''PY'\'''
+              'from pathlib import Path'
+              'import sys'
+              'path = Path(sys.argv[1])'
+              'csv_max_rows = sys.argv[2]'
+              'deploy_jwt_secret = sys.argv[3].strip()'
+              'deploy_bcrypt_rounds = sys.argv[4].strip() or "12"'
+              'text = path.read_text()'
+              'lines = text.splitlines()'
+              'entries = {}'
+              'order = []'
+              'for line in lines:'
+              '    if "=" in line and not line.lstrip().startswith("#"):'
+              '        key, value = line.split("=", 1)'
+              '        if key not in entries:'
+              '            order.append(key)'
+              '        entries[key] = value'
+              'entries["ATTENDANCE_IMPORT_CSV_MAX_ROWS"] = csv_max_rows'
+              'if "ATTENDANCE_IMPORT_CSV_MAX_ROWS" not in order:'
+              '    order.append("ATTENDANCE_IMPORT_CSV_MAX_ROWS")'
+              'if not entries.get("JWT_SECRET") and deploy_jwt_secret:'
+              '    entries["JWT_SECRET"] = deploy_jwt_secret'
+              '    if "JWT_SECRET" not in order:'
+              '        order.append("JWT_SECRET")'
+              'if not entries.get("BCRYPT_SALT_ROUNDS"):'
+              '    entries["BCRYPT_SALT_ROUNDS"] = deploy_bcrypt_rounds'
+              '    if "BCRYPT_SALT_ROUNDS" not in order:'
+              '        order.append("BCRYPT_SALT_ROUNDS")'
+              'updated = []'
+              'existing_keys = {line.split("=", 1)[0] for line in lines if "=" in line and not line.lstrip().startswith("#")}'
+              'for line in lines:'
+              '    if "=" in line and not line.lstrip().startswith("#"):'
+              '        key = line.split("=", 1)[0]'
+              '        updated.append(f"{key}={entries[key]}")'
+              '    else:'
+              '        updated.append(line)'
+              'for key in order:'
+              '    if key not in existing_keys:'
+              '        updated.append(f"{key}={entries[key]}")'
+              'path.write_text("\\n".join(updated) + "\\n")'
+              'PY'
+              '    echo "[attendance-env-reconcile] ensured ${key}=${value}"'
+              '    if grep -qE "^JWT_SECRET=" "$env_file"; then'
+              '      echo "[attendance-env-reconcile] JWT_SECRET present"'
+              '    elif [[ -n "${DEPLOY_JWT_SECRET:-}" ]]; then'
+              '      echo "[attendance-env-reconcile] JWT_SECRET injected"'
               '    else'
-              '      printf "\n%s=%s\n" "$key" "$value" >> "$env_file"'
-              '      echo "[attendance-env-reconcile] appended ${key}=${value}"'
+              '      echo "[attendance-env-reconcile][warn] JWT_SECRET still missing and DEPLOY_JWT_SECRET was not provided"'
+              '    fi'
+              '    if grep -qE "^BCRYPT_SALT_ROUNDS=" "$env_file"; then'
+              '      echo "[attendance-env-reconcile] BCRYPT_SALT_ROUNDS present"'
               '    fi'
               '    applied_line="$(grep -E "^${key}=" "$env_file" | tail -n 1 || true)"'
               '    if [[ -z "$applied_line" ]]; then'
