@@ -167,6 +167,7 @@ function installerErrorToHttpStatus(code) {
     case installer.ERROR_CODES.VALIDATION_FAILED:
     case installer.ERROR_CODES.INVALID_TEMPLATE_ID:
       return 400
+    case installer.ERROR_CODES.LEDGER_READ_FAILED:
     case installer.ERROR_CODES.CORE_OBJECT_FAILED:
     case installer.ERROR_CODES.LEDGER_WRITE_FAILED:
       return 500

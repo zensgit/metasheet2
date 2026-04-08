@@ -27,6 +27,7 @@ interface FakeRowRaw {
 
 interface FakeDatabase {
   rows: FakeRowRaw[]
+  failNextQuery?: string
   query: (sql: string, params?: unknown[]) => Promise<FakeRowRaw[]>
 }
 
@@ -117,6 +118,11 @@ function createFakeDatabase(): FakeDatabase {
   const db: FakeDatabase = {
     rows: [],
     async query(sql: string, params: unknown[] = []) {
+      if (db.failNextQuery) {
+        const errorMessage = db.failNextQuery
+        db.failNextQuery = undefined
+        throw new Error(errorMessage)
+      }
       const normalized = sql.replace(/\s+/g, ' ').trim()
       if (normalized.startsWith('SELECT')) {
         const [tenantId, appId] = params as [string, string]
@@ -425,6 +431,23 @@ describe('plugin-after-sales routes', () => {
       ok: true,
       data: {
         status: 'not-installed',
+      },
+    })
+  })
+
+  it('surfaces ledger-read-failed for current when the ledger read throws', async () => {
+    const handler = routes.get('GET /api/after-sales/projects/current')
+    const res = new FakeResponse()
+    db.failNextQuery = 'simulated ledger read failure'
+
+    await handler?.(buildReq(), res)
+
+    expect(res.statusCode).toBe(500)
+    expect(res.body).toEqual({
+      ok: false,
+      error: {
+        code: 'ledger-read-failed',
+        message: 'failed to read install ledger: simulated ledger read failure',
       },
     })
   })
