@@ -133,13 +133,7 @@ function normalizeLinkIds(value: unknown): string[] {
     if (!trimmed) return []
     try {
       const parsed = JSON.parse(trimmed)
-      if (Array.isArray(parsed)) {
-        raw.push(...normalizeLinkIds(parsed))
-      } else if (trimmed.includes(',')) {
-        raw.push(...trimmed.split(','))
-      } else {
-        raw.push(trimmed)
-      }
+      raw.push(...normalizeLinkIds(parsed))
     } catch {
       if (trimmed.includes(',')) raw.push(...trimmed.split(','))
       else raw.push(trimmed)
@@ -335,10 +329,6 @@ async function replaceRecordLinks(
          ON CONFLICT DO NOTHING`,
         [`lnk_${randomUUID()}`, fieldId, recordId, foreignId],
       )
-    }
-
-    if (ids.length === 0) {
-      await query('DELETE FROM meta_links WHERE field_id = $1 AND record_id = $2', [fieldId, recordId])
     }
   }
 }
