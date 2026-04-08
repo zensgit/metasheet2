@@ -219,12 +219,14 @@ function syncFromRecord(record: MetaRecord | null | undefined) {
   if (record) Object.assign(formData, { ...record.data })
 }
 
-watch(() => props.record, (record) => {
+watch(() => props.record, (record, previousRecord) => {
   syncFromRecord(record)
-  localAttachmentSummaries.value = {}
   validationErrors.value = {}
   attachmentOperationErrors.value = {}
-  attachmentActivity.value = {}
+  if (record?.id !== previousRecord?.id) {
+    localAttachmentSummaries.value = {}
+    attachmentActivity.value = {}
+  }
 }, { immediate: true })
 
 watch(

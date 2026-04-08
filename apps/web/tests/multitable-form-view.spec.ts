@@ -262,4 +262,90 @@ describe('MetaFormView attachment flow', () => {
     app.unmount()
     container.remove()
   })
+
+  it('preserves uploaded attachment filenames across same-record hydration during multi-upload', async () => {
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+
+    const Harness = defineComponent({
+      setup() {
+        const record = ref({
+          id: 'rec_1',
+          version: 1,
+          data: {
+            fld_files: [],
+          },
+        })
+
+        const uploadFn = vi.fn(async (file: File) => {
+          if (file.name === 'beta.txt') {
+            record.value = {
+              id: 'rec_1',
+              version: 2,
+              data: {
+                fld_files: ['att_alpha', 'att_beta'],
+              },
+            }
+            await nextTick()
+          }
+
+          return {
+            id: file.name === 'alpha.txt' ? 'att_alpha' : 'att_beta',
+            filename: file.name,
+            mimeType: 'text/plain',
+            size: file.size,
+            url: `https://files.example.com/${file.name}`,
+            thumbnailUrl: null,
+            uploadedAt: '2026-03-25T01:00:00.000Z',
+          }
+        })
+
+        const submitSpy = vi.fn()
+        return { record, uploadFn, submitSpy }
+      },
+      render() {
+        return h(MetaFormView, {
+          fields: [
+            { id: 'fld_files', name: 'Files', type: 'attachment' },
+          ],
+          record: this.record,
+          loading: false,
+          readOnly: false,
+          uploadFn: this.uploadFn,
+          onSubmit: this.submitSpy,
+          onOpenLinkPicker: vi.fn(),
+        })
+      },
+    })
+
+    const app = createApp(Harness)
+    app.mount(container)
+
+    const input = container.querySelector('.meta-form-view__file-input') as HTMLInputElement | null
+    const alpha = new File(['alpha'], 'alpha.txt', { type: 'text/plain' })
+    const beta = new File(['beta'], 'beta.txt', { type: 'text/plain' })
+    Object.defineProperty(input, 'files', {
+      value: {
+        0: alpha,
+        1: beta,
+        length: 2,
+        item: (index: number) => (index === 0 ? alpha : index === 1 ? beta : null),
+        [Symbol.iterator]: function* iterator() {
+          yield alpha
+          yield beta
+        },
+      },
+      configurable: true,
+    })
+    input?.dispatchEvent(new Event('change'))
+    await flushUi(6)
+
+    const text = container.textContent ?? ''
+    expect(text).toContain('alpha.txt')
+    expect(text).toContain('beta.txt')
+    expect(text).not.toContain('att_alpha')
+
+    app.unmount()
+    container.remove()
+  })
 })
