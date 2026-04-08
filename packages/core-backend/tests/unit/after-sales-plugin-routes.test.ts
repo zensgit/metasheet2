@@ -96,6 +96,7 @@ interface FakeContext {
   }
   logger: {
     info: ReturnType<typeof vi.fn>
+    warn: ReturnType<typeof vi.fn>
     error: ReturnType<typeof vi.fn>
   }
 }
@@ -338,6 +339,7 @@ function createContext(): {
     },
     logger: {
       info: vi.fn(),
+      warn: vi.fn(),
       error: vi.fn(),
     },
   }
@@ -438,6 +440,37 @@ describe('plugin-after-sales routes', () => {
         status: 'not-installed',
       },
     })
+  })
+
+  it('warns once per request when tenantId is missing and falls back to default', async () => {
+    const handler = routes.get('GET /api/after-sales/projects/current')
+    const firstRes = new FakeResponse()
+    const secondRes = new FakeResponse()
+    const req = buildReq({
+      method: 'GET',
+      path: '/api/after-sales/projects/current',
+      user: {
+        id: 'user_42',
+        role: 'admin',
+        roles: ['admin'],
+        perms: ['*:*', 'after_sales:admin'],
+      },
+    })
+
+    await handler?.(req, firstRes)
+    await handler?.(req, secondRes)
+
+    expect(firstRes.statusCode).toBe(200)
+    expect(secondRes.statusCode).toBe(200)
+    expect(currentContext.logger.warn).toHaveBeenCalledTimes(1)
+    expect(currentContext.logger.warn).toHaveBeenCalledWith(
+      'After-sales request missing tenantId; falling back to default',
+      expect.objectContaining({
+        method: 'GET',
+        path: '/api/after-sales/projects/current',
+        userId: 'user_42',
+      }),
+    )
   })
 
   it('surfaces ledger-read-failed for current when the ledger read throws', async () => {
