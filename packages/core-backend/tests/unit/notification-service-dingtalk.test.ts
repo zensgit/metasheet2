@@ -84,4 +84,32 @@ describe('DingTalk notification channel', () => {
     expect(parsed.searchParams.get('timestamp')).toBe('1760000000000')
     expect(parsed.searchParams.get('sign')).toBeTruthy()
   })
+
+  it('does not retry non-retryable dingtalk webhook failures', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 400,
+      statusText: 'Bad Request',
+    })
+    global.fetch = fetchMock as typeof fetch
+
+    const service = new NotificationServiceImpl()
+    service.registerChannel(new DingTalkNotificationChannel({ maxAttempts: 3, retryDelayMs: 10 }))
+
+    const result = await service.send({
+      channel: 'dingtalk',
+      subject: 'Ops Alert',
+      content: 'Payload rejected.',
+      recipients: [
+        {
+          id: 'https://oapi.dingtalk.com/robot/send?access_token=robot-token',
+          type: 'group',
+        },
+      ],
+    })
+
+    expect(result.status).toBe('failed')
+    expect(result.failedReason).toContain('HTTP 400')
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
 })

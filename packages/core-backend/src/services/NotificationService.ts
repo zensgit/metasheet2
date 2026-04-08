@@ -68,6 +68,8 @@ function isRetryableStatus(status: number): boolean {
   return status === 408 || status === 429 || status >= 500
 }
 
+class NonRetryableNotificationError extends Error {}
+
 async function sleep(ms: number): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, ms))
 }
@@ -110,12 +112,15 @@ async function postJsonWithRetry(options: {
           await sleep(delay)
           continue
         }
-        throw new Error(message)
+        throw new NonRetryableNotificationError(message)
       }
 
       return
     } catch (error) {
       lastError = error as Error
+      if (error instanceof NonRetryableNotificationError) {
+        throw error
+      }
       if (attempt >= options.maxAttempts) break
       const delay = BackoffStrategy.calculate(attempt, {
         type: 'exponential',

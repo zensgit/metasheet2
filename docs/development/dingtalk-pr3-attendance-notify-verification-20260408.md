@@ -26,12 +26,13 @@ pnpm --filter @metasheet/core-backend test:integration:attendance
 ### Unit tests
 
 - `tests/unit/notification-service-dingtalk.test.ts` passed
-- Result: `2/2` tests passed
+- Result: `3/3` tests passed
 
 Covered cases:
 
 - DingTalk notification sends markdown robot payloads
 - DingTalk webhook signing appends `timestamp` and `sign`
+- DingTalk notification does not retry non-retryable `HTTP 400` webhook failures
 
 ### Attendance integration regression
 
