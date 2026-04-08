@@ -54,6 +54,7 @@ import {
   queryRecords as queryMultitableRecords,
   type MultitableRecordsQueryFn,
 } from './multitable/records'
+import { createPluginScopedMultitableApi } from './multitable/plugin-scope'
 import { installMetrics, requestMetricsMiddleware } from './metrics/metrics'
 import { getPoolStats } from './db/pg'
 import { isDatabaseSchemaError } from './utils/database-errors'
@@ -980,6 +981,12 @@ export class MetaSheetServer {
   private createPluginContext(loaded: LoadedPlugin): PluginContext {
     const coreApi = this.injector.get(ICoreAPI)
     const manifest = loaded.manifest
+    const pluginCoreApi = coreApi.multitable
+      ? {
+          ...coreApi,
+          multitable: createPluginScopedMultitableApi(coreApi.multitable, manifest.name),
+        }
+      : coreApi
     const storageCache = new Map<string, unknown>()
     const storage: PluginStorage = {
       async get<T = unknown>(key: string): Promise<T | null> {
@@ -1027,8 +1034,8 @@ export class MetaSheetServer {
         author: typeof manifest.author === 'string' ? manifest.author : manifest.author?.name,
         path: loaded.path,
       },
-      api: coreApi,
-      core: coreApi,
+      api: pluginCoreApi,
+      core: pluginCoreApi,
       services: {
         notification: notificationService,
       } as unknown as import('./types/plugin').PluginServices,
