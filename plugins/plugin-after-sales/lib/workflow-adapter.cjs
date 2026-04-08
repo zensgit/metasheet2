@@ -4,6 +4,11 @@ const installer = require('./installer.cjs')
 const { DEFAULT_TEMPLATE_CONFIG } = require('./blueprint.cjs')
 const { sendTopicNotification } = require('./notification-adapter.cjs')
 const { submitRefundApproval } = require('./refund-approval.cjs')
+const {
+  normalizeRecipientCandidate,
+  normalizeRecipientList,
+  serializeRecipientValue,
+} = require('./recipient-utils.cjs')
 
 const DEFAULT_APP_ID = 'after-sales'
 
@@ -19,36 +24,12 @@ function normalizeTemplateConfig(rawConfig) {
 }
 
 function computeSlaDueAt(priority, config = DEFAULT_TEMPLATE_CONFIG, now = new Date()) {
+  // v1 runtime helper whitelist: this is the only expression the workflow
+  // engine is allowed to evaluate for after-sales templates.
   const normalized = normalizeTemplateConfig(config)
   const baseTime = now instanceof Date ? now.getTime() : new Date(now).getTime()
   const hours = priority === 'urgent' ? normalized.urgentSlaHours : normalized.defaultSlaHours
   return new Date(baseTime + hours * 60 * 60 * 1000).toISOString()
-}
-
-function normalizeRecipientCandidate(value, fallbackType = 'user') {
-  if (!value) return null
-  if (typeof value === 'string' && value.trim()) {
-    return { id: value.trim(), type: fallbackType }
-  }
-  if (typeof value === 'object' && typeof value.id === 'string' && value.id.trim()) {
-    return {
-      id: value.id.trim(),
-      type: typeof value.type === 'string' && value.type.trim() ? value.type.trim() : fallbackType,
-      metadata: value.metadata && typeof value.metadata === 'object' ? value.metadata : undefined,
-    }
-  }
-  return null
-}
-
-function normalizeCandidateList(value) {
-  if (!Array.isArray(value)) return []
-  return value
-    .map((candidate) => normalizeRecipientCandidate(candidate))
-    .filter(Boolean)
-}
-
-function serializeRecipientValue(recipient) {
-  return recipient && typeof recipient.id === 'string' ? recipient.id : null
 }
 
 function getNamespacedObject(payload, key) {
@@ -79,7 +60,7 @@ function resolveRequestedAssignee(ticket) {
     }
   }
 
-  const candidates = normalizeCandidateList(ticket.assigneeCandidates || ticket.technicianCandidates)
+  const candidates = normalizeRecipientList(ticket.assigneeCandidates || ticket.technicianCandidates)
   if (candidates.length === 0) {
     return {
       assignedTo: null,

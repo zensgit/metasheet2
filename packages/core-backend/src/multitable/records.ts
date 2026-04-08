@@ -84,6 +84,12 @@ export type DeletedMultitableRecord = {
   version: number
 }
 
+type LoadedMultitableField = Awaited<ReturnType<typeof loadFieldsForSheet>>[number]
+type LinkFieldConfig = {
+  foreignSheetId: string
+  limitSingleRecord: boolean
+}
+
 function isFiniteNumber(value: unknown): value is number {
   return typeof value === 'number' && Number.isFinite(value)
 }
@@ -113,8 +119,62 @@ function normalizeSelectValue(
   return value
 }
 
+function normalizeLinkIds(value: unknown): string[] {
+  if (value === null || value === undefined) return []
+
+  const raw: string[] = []
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      if (typeof item === 'string') raw.push(item)
+      else if (typeof item === 'number' && Number.isFinite(item)) raw.push(String(item))
+    }
+  } else if (typeof value === 'string') {
+    const trimmed = value.trim()
+    if (!trimmed) return []
+    try {
+      const parsed = JSON.parse(trimmed)
+      raw.push(...normalizeLinkIds(parsed))
+    } catch {
+      if (trimmed.includes(',')) raw.push(...trimmed.split(','))
+      else raw.push(trimmed)
+    }
+  } else if (typeof value === 'number' && Number.isFinite(value)) {
+    raw.push(String(value))
+  }
+
+  const seen = new Set<string>()
+  return raw
+    .map((item) => item.trim())
+    .filter((item) => item.length > 0)
+    .filter((item) => {
+      if (seen.has(item)) return false
+      seen.add(item)
+      return true
+    })
+}
+
+function readLinkFieldConfig(field: LoadedMultitableField): LinkFieldConfig | null {
+  if (field.type !== 'link') return null
+
+  const property = field.property
+  const foreignSheetId =
+    typeof property?.foreignSheetId === 'string' && property.foreignSheetId.trim()
+      ? property.foreignSheetId.trim()
+      : typeof property?.foreignDatasheetId === 'string' && property.foreignDatasheetId.trim()
+        ? property.foreignDatasheetId.trim()
+        : typeof property?.datasheetId === 'string' && property.datasheetId.trim()
+          ? property.datasheetId.trim()
+          : ''
+
+  if (!foreignSheetId) return null
+  return {
+    foreignSheetId,
+    limitSingleRecord: property?.limitSingleRecord === true,
+  }
+}
+
 function normalizeFieldValue(
-  field: { id: string; type: string; options?: Array<{ value: string }> },
+  field: LoadedMultitableField,
   value: unknown,
 ): unknown {
   switch (field.type) {
@@ -146,7 +206,6 @@ function normalizeFieldValue(
         throw new MultitableRecordValidationError(`Formula must start with "=": ${field.id}`)
       }
       return value
-    case 'link':
     case 'lookup':
     case 'rollup':
     case 'attachment':
@@ -176,22 +235,102 @@ function normalizeRecordData(value: unknown): Record<string, unknown> {
   return {}
 }
 
-function buildNormalizedPatch(
-  fields: Array<{ id: string; type: string; options?: Array<{ value: string }> }>,
+async function validateLinkIds(
+  query: MultitableRecordsQueryFn,
+  fieldId: string,
+  config: LinkFieldConfig,
+  ids: string[],
+): Promise<void> {
+  if (config.limitSingleRecord && ids.length > 1) {
+    throw new MultitableRecordValidationError(`Only one linked record is allowed: ${fieldId}`)
+  }
+  const tooLong = ids.find((id) => id.length > 50)
+  if (tooLong) {
+    throw new MultitableRecordValidationError(`Link id too long: ${tooLong}`)
+  }
+  if (ids.length === 0) return
+
+  const exists = await query(
+    'SELECT id FROM meta_records WHERE sheet_id = $1 AND id = ANY($2::text[])',
+    [config.foreignSheetId, ids],
+  )
+  const found = new Set((exists.rows as any[]).map((row: any) => String(row.id)))
+  const missing = ids.filter((id) => !found.has(id))
+  if (missing.length > 0) {
+    throw new MultitableRecordValidationError(
+      `Linked record(s) not found in sheet ${config.foreignSheetId}: ${missing.join(', ')}`,
+    )
+  }
+}
+
+async function buildNormalizedPatch(
+  query: MultitableRecordsQueryFn,
+  fields: LoadedMultitableField[],
   data: Record<string, unknown>,
-): Record<string, unknown> {
+): Promise<{
+  patch: Record<string, unknown>
+  linkUpdates: Map<string, string[]>
+}> {
   const fieldById = new Map(fields.map((field) => [field.id, field]))
   const patch: Record<string, unknown> = {}
+  const linkUpdates = new Map<string, string[]>()
 
   for (const [fieldId, rawValue] of Object.entries(data ?? {})) {
     const field = fieldById.get(fieldId)
     if (!field) {
       throw new MultitableRecordValidationError(`Unknown fieldId: ${fieldId}`)
     }
+    if (field.type === 'link') {
+      const config = readLinkFieldConfig(field)
+      if (!config) {
+        throw new MultitableRecordValidationError(
+          `Link field is missing foreign sheet configuration: ${fieldId}`,
+        )
+      }
+      const ids = normalizeLinkIds(rawValue)
+      await validateLinkIds(query, fieldId, config, ids)
+      patch[fieldId] = ids
+      linkUpdates.set(fieldId, ids)
+      continue
+    }
     patch[fieldId] = normalizeFieldValue(field, rawValue)
   }
 
-  return patch
+  return { patch, linkUpdates }
+}
+
+async function replaceRecordLinks(
+  query: MultitableRecordsQueryFn,
+  recordId: string,
+  linkUpdates: Map<string, string[]>,
+): Promise<void> {
+  for (const [fieldId, ids] of linkUpdates.entries()) {
+    const currentLinks = await query(
+      'SELECT foreign_record_id FROM meta_links WHERE field_id = $1 AND record_id = $2',
+      [fieldId, recordId],
+    )
+    const existingIds = (currentLinks.rows as any[]).map((row: any) => String(row.foreign_record_id))
+    const existing = new Set(existingIds)
+    const next = new Set(ids)
+    const toDelete = existingIds.filter((id) => !next.has(id))
+    const toInsert = ids.filter((id) => !existing.has(id))
+
+    if (toDelete.length > 0) {
+      await query(
+        'DELETE FROM meta_links WHERE field_id = $1 AND record_id = $2 AND foreign_record_id = ANY($3::text[])',
+        [fieldId, recordId, toDelete],
+      )
+    }
+
+    for (const foreignId of toInsert) {
+      await query(
+        `INSERT INTO meta_links (id, field_id, record_id, foreign_record_id)
+         VALUES ($1, $2, $3, $4)
+         ON CONFLICT DO NOTHING`,
+        [`lnk_${randomUUID()}`, fieldId, recordId, foreignId],
+      )
+    }
+  }
 }
 
 function normalizePagingValue(value: unknown, field: string): number | undefined {
@@ -248,7 +387,7 @@ async function loadSheetAndFields(
   sheetId: string,
 ): Promise<{
   sheet: Awaited<ReturnType<typeof loadSheetRow>>
-  fields: Array<{ id: string; type: string; options?: Array<{ value: string }> }>
+  fields: LoadedMultitableField[]
 }> {
   const sheet = await loadSheetRow(query, sheetId)
   if (!sheet) {
@@ -368,7 +507,7 @@ export async function patchRecord(
     sheetId: input.sheetId,
     recordId: input.recordId,
   })
-  const patch = buildNormalizedPatch(fields, input.changes)
+  const { patch, linkUpdates } = await buildNormalizedPatch(query, fields, input.changes)
   const nextData = {
     ...existing.data,
     ...patch,
@@ -381,6 +520,10 @@ export async function patchRecord(
      RETURNING version`,
     [JSON.stringify(nextData), input.recordId, input.sheetId],
   )
+
+  if (linkUpdates.size > 0) {
+    await replaceRecordLinks(query, input.recordId, linkUpdates)
+  }
 
   const version = Number((updated.rows as any[])[0]?.version ?? existing.version + 1)
   return {
@@ -397,7 +540,7 @@ export async function createRecord(
   const query = input.query
   const { fields } = await loadSheetAndFields(query, input.sheetId)
 
-  const patch = buildNormalizedPatch(fields, input.data)
+  const { patch, linkUpdates } = await buildNormalizedPatch(query, fields, input.data)
 
   const recordId = `rec_${randomUUID()}`
   const inserted = await query(
@@ -406,6 +549,10 @@ export async function createRecord(
      RETURNING version`,
     [recordId, input.sheetId, JSON.stringify(patch)],
   )
+
+  if (linkUpdates.size > 0) {
+    await replaceRecordLinks(query, recordId, linkUpdates)
+  }
 
   const version = Number((inserted.rows as any[])[0]?.version ?? 1)
   return {
@@ -421,6 +568,8 @@ export async function deleteRecord(
 ): Promise<DeletedMultitableRecord> {
   const query = input.query
   await loadSheetAndFields(query, input.sheetId)
+
+  await query('DELETE FROM meta_links WHERE record_id = $1 OR foreign_record_id = $1', [input.recordId])
 
   const deleted = await query(
     `DELETE FROM meta_records

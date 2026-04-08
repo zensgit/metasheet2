@@ -20,6 +20,10 @@ import { sql } from 'kysely'
  * 11-step install flow completes, so a crash mid-install leaves no row and
  * callers can safely retry with `mode='enable'`.
  *
+ * Audit note: the `mode` column captures the last attempted install mode
+ * (`enable` or `reinstall`) at the time that row was written. It should not be
+ * interpreted as a durable statement of what the next caller intends to do.
+ *
  * v1 uniqueness: one row per (tenant_id, app_id). The `project_id` column is
  * already present and populated with the pseudo value `${tenantId}:${appId}`
  * so the v2 migration can simply swap the unique index to
@@ -36,6 +40,7 @@ export async function up(db: Kysely<unknown>): Promise<void> {
       project_id text NOT NULL,
       template_id text NOT NULL,
       template_version text NOT NULL,
+      -- Records the last attempted install mode written with this terminal row.
       mode text NOT NULL CHECK (mode IN ('enable', 'reinstall')),
       status text NOT NULL CHECK (status IN ('installed', 'partial', 'failed')),
       created_objects_json jsonb NOT NULL DEFAULT '[]'::jsonb,

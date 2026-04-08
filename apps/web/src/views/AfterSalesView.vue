@@ -36,6 +36,51 @@
       </button>
     </section>
 
+    <section class="after-sales-view__config-shell">
+      <article class="after-sales-view__card">
+        <div class="after-sales-view__section-header">
+          <div>
+            <p class="after-sales-view__pill">Config draft</p>
+            <h2>Minimal config editor</h2>
+            <p>
+              这里编辑的是下一次 install / reinstall 会提交的草稿。当前只暴露最小字段，保留其余默认配置。
+            </p>
+          </div>
+          <button class="after-sales-view__ghost-btn" :disabled="loading || installing || refreshing" @click="resetConfigDraft">
+            Reset to loaded config
+          </button>
+        </div>
+
+        <form class="after-sales-view__config-form" @submit.prevent>
+          <label class="after-sales-view__field">
+            <span>Default SLA hours</span>
+            <input v-model.number="configDraft.defaultSlaHours" class="after-sales-view__field-input" min="1" step="1" type="number" />
+          </label>
+          <label class="after-sales-view__field">
+            <span>Urgent SLA hours</span>
+            <input v-model.number="configDraft.urgentSlaHours" class="after-sales-view__field-input" min="1" step="1" type="number" />
+          </label>
+          <label class="after-sales-view__field">
+            <span>Follow-up days</span>
+            <input v-model.number="configDraft.followUpAfterDays" class="after-sales-view__field-input" min="1" step="1" type="number" />
+          </label>
+          <label class="after-sales-view__field after-sales-view__field--wide">
+            <span>Overdue webhook</span>
+            <input
+              v-model="configDraft.overdueWebhook"
+              class="after-sales-view__field-input"
+              placeholder="https://example.test/hooks/after-sales"
+              type="url"
+            />
+          </label>
+        </form>
+
+        <p class="after-sales-view__config-hint">
+          Install payload still targets the placeholder project ID <code>{{ placeholderProjectId }}</code>.
+        </p>
+      </article>
+    </section>
+
     <section v-if="current.status === 'not-installed'" class="after-sales-view__onboarding">
       <article class="after-sales-view__onboarding-card">
         <p class="after-sales-view__pill">v1 Project Enablement</p>
@@ -45,7 +90,7 @@
         </p>
         <ul class="after-sales-view__list">
           <li>templateId 固定为 <code>after-sales-default</code></li>
-          <li>v1 projectId 伪值为 <code>{{ defaultProjectId }}</code></li>
+          <li>v1 projectId 伪值为 <code>{{ placeholderProjectId }}</code></li>
           <li>当前会真实创建售后模板的 6 个默认对象，覆盖工单、装机资产、客户、服务记录、配件和回访</li>
           <li>同时会创建 6 个默认视图，包括 <code>ticket-board</code>、<code>serviceRecord-calendar</code> 等基础入口</li>
         </ul>
@@ -95,7 +140,7 @@
             </div>
             <div>
               <dt>Project ID</dt>
-              <dd><code>{{ current.projectId || defaultProjectId }}</code></dd>
+              <dd><code>{{ current.projectId || placeholderProjectId }}</code></dd>
             </div>
             <div>
               <dt>Display name</dt>
@@ -202,6 +247,7 @@ const DEFAULT_CONFIG = {
   defaultSlaHours: 24,
   urgentSlaHours: 4,
   followUpAfterDays: 7,
+  overdueWebhook: '',
 }
 
 const loading = ref(true)
@@ -211,8 +257,10 @@ const error = ref('')
 const showWarnings = ref(false)
 const manifest = ref<AfterSalesManifest | null>(null)
 const current = ref<CurrentResponse>({ status: 'not-installed' })
+const configDraft = ref({ ...DEFAULT_CONFIG })
+const baselineConfigDraft = ref({ ...DEFAULT_CONFIG })
 
-const defaultProjectId = computed(() => 'tenant:after-sales')
+const placeholderProjectId = 'tenant:after-sales'
 const warnings = computed(() => current.value.installResult?.warnings ?? [])
 const createdObjectLabels = computed(() => current.value.installResult?.createdObjects ?? [])
 const createdViewLabels = computed(() => current.value.installResult?.createdViews ?? [])
@@ -259,6 +307,49 @@ async function readEnvelope<T>(path: string, options?: RequestInit): Promise<T> 
   return ((payload as ApiEnvelope<T> | null)?.data ?? null) as T
 }
 
+function normalizeConfigDraft(config?: Record<string, unknown> | null) {
+  return {
+    ...DEFAULT_CONFIG,
+    enableWarranty: typeof config?.enableWarranty === 'boolean' ? config.enableWarranty : DEFAULT_CONFIG.enableWarranty,
+    enableRefundApproval: typeof config?.enableRefundApproval === 'boolean' ? config.enableRefundApproval : DEFAULT_CONFIG.enableRefundApproval,
+    enableVisitScheduling: typeof config?.enableVisitScheduling === 'boolean' ? config.enableVisitScheduling : DEFAULT_CONFIG.enableVisitScheduling,
+    enableFollowUp: typeof config?.enableFollowUp === 'boolean' ? config.enableFollowUp : DEFAULT_CONFIG.enableFollowUp,
+    defaultSlaHours: toPositiveNumber(config?.defaultSlaHours, DEFAULT_CONFIG.defaultSlaHours),
+    urgentSlaHours: toPositiveNumber(config?.urgentSlaHours, DEFAULT_CONFIG.urgentSlaHours),
+    followUpAfterDays: toPositiveNumber(config?.followUpAfterDays ?? config?.followUpDays, DEFAULT_CONFIG.followUpAfterDays),
+    overdueWebhook: toText(config?.overdueWebhook, DEFAULT_CONFIG.overdueWebhook),
+  }
+}
+
+function toPositiveNumber(value: unknown, fallback: number): number {
+  const next = typeof value === 'number' ? value : typeof value === 'string' ? Number(value) : Number.NaN
+  return Number.isFinite(next) && next > 0 ? next : fallback
+}
+
+function toText(value: unknown, fallback = ''): string {
+  if (typeof value === 'string') {
+    return value.trim()
+  }
+  return fallback
+}
+
+function resetConfigDraft() {
+  configDraft.value = { ...baselineConfigDraft.value }
+}
+
+function buildInstallConfig() {
+  return {
+    enableWarranty: configDraft.value.enableWarranty,
+    enableRefundApproval: configDraft.value.enableRefundApproval,
+    enableVisitScheduling: configDraft.value.enableVisitScheduling,
+    enableFollowUp: configDraft.value.enableFollowUp,
+    defaultSlaHours: toPositiveNumber(configDraft.value.defaultSlaHours, DEFAULT_CONFIG.defaultSlaHours),
+    urgentSlaHours: toPositiveNumber(configDraft.value.urgentSlaHours, DEFAULT_CONFIG.urgentSlaHours),
+    followUpAfterDays: toPositiveNumber(configDraft.value.followUpAfterDays, DEFAULT_CONFIG.followUpAfterDays),
+    ...(toText(configDraft.value.overdueWebhook) ? { overdueWebhook: toText(configDraft.value.overdueWebhook) } : {}),
+  }
+}
+
 async function loadManifest() {
   manifest.value = await readEnvelope<AfterSalesManifest>('/api/after-sales/app-manifest')
 }
@@ -267,6 +358,7 @@ async function refreshCurrentState() {
   refreshing.value = true
   try {
     current.value = await readEnvelope<CurrentResponse>('/api/after-sales/projects/current')
+    baselineConfigDraft.value = normalizeConfigDraft(current.value.config)
   } finally {
     refreshing.value = false
   }
@@ -282,6 +374,8 @@ async function loadView() {
     ])
     manifest.value = nextManifest
     current.value = nextCurrent
+    baselineConfigDraft.value = normalizeConfigDraft(nextCurrent.config)
+    configDraft.value = { ...baselineConfigDraft.value }
   } catch (err: any) {
     error.value = err?.message || 'Failed to load after-sales state'
   } finally {
@@ -299,10 +393,11 @@ async function triggerInstall(mode: 'enable' | 'reinstall') {
         templateId: TEMPLATE_ID,
         mode,
         displayName: current.value.displayName || manifest.value?.displayName || 'After Sales',
-        config: current.value.config ?? DEFAULT_CONFIG,
+        config: buildInstallConfig(),
       }),
     })
     await refreshCurrentState()
+    configDraft.value = { ...baselineConfigDraft.value }
   } catch (err: any) {
     error.value = err?.message || 'Failed to install after-sales template'
   } finally {
@@ -428,6 +523,7 @@ onMounted(() => {
 
 .after-sales-view__error-banner,
 .after-sales-view__warning-banner,
+.after-sales-view__config-shell,
 .after-sales-view__onboarding {
   display: grid;
   gap: 16px;
@@ -486,6 +582,14 @@ onMounted(() => {
   grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
 }
 
+.after-sales-view__section-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: flex-start;
+  margin-bottom: 16px;
+}
+
 .after-sales-view__card h2,
 .after-sales-view__onboarding-card h2,
 .after-sales-view__modal h2 {
@@ -530,6 +634,48 @@ onMounted(() => {
 .after-sales-view__meta dd {
   margin: 0;
   color: #0f172a;
+}
+
+.after-sales-view__config-form {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.after-sales-view__field {
+  display: grid;
+  gap: 6px;
+  color: #0f172a;
+}
+
+.after-sales-view__field span {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.after-sales-view__field--wide {
+  grid-column: 1 / -1;
+}
+
+.after-sales-view__field-input {
+  width: 100%;
+  min-height: 42px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid #cbd5e1;
+  background: #f8fafc;
+  color: #0f172a;
+}
+
+.after-sales-view__field-input:focus {
+  outline: 2px solid rgba(15, 118, 110, 0.28);
+  outline-offset: 1px;
+  border-color: #0f766e;
+}
+
+.after-sales-view__config-hint {
+  margin: 14px 0 0;
+  color: #475569;
 }
 
 .after-sales-view__pill {
@@ -628,6 +774,12 @@ code {
 
   .after-sales-view__hero-actions {
     align-items: stretch;
+  }
+
+  .after-sales-view__section-header,
+  .after-sales-view__config-form {
+    grid-template-columns: 1fr;
+    display: grid;
   }
 }
 </style>

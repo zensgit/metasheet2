@@ -736,12 +736,16 @@ function onPickerConfirm(payload: { recordIds: string[]; summaries: LinkedRecord
   }
 
   const label = payload.summaries.map((summary) => summary.display || summary.id).join(', ')
-  const failure = manualFixRows.value.find((item) => item.rowIndex === target.rowIndex && item.fieldId === target.fieldId)
-  const problemIndex = failure?.problemColumnIndexes[0]
-  if (typeof problemIndex === 'number') {
+  const problemIndexes = Object.entries(fieldMapping.value)
+    .filter(([, mappedFieldId]) => mappedFieldId === target.fieldId)
+    .map(([columnIndex]) => Number(columnIndex))
+    .filter((columnIndex) => Number.isInteger(columnIndex) && columnIndex >= 0)
+  if (problemIndexes.length > 0) {
     const nextRows = [...parsedRows.value]
     const currentRow = [...(nextRows[target.rowIndex] ?? [])]
-    currentRow[problemIndex] = label
+    for (const problemIndex of problemIndexes) {
+      currentRow[problemIndex] = label
+    }
     nextRows[target.rowIndex] = currentRow
     parsedRows.value = nextRows
   }

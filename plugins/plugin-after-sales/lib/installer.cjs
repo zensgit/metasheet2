@@ -35,12 +35,16 @@
  *    ledger-write-failed error (chicken-and-egg), handled by LEDGER_WRITE_FAILED.
  *  - `failed` retry is driven by the frontend choosing mode='reinstall' based on
  *    current.status. This orchestrator does NOT auto-downgrade enable to reinstall.
+ *  - The ledger `mode` field records the last attempted install mode for audit
+ *    and debugging. It is not a statement of future user intent.
  *
  * Non-goals (never do these in v1):
  *  - Drop, delete, truncate, alter-column on any multitable object
  *  - Inject types into packages/core-backend/src/db/types.ts
  *  - Implement a plugin-side migration runner
- *  - Evaluate any expression language beyond the computeSlaDueAt(priority) helper
+ *  - Evaluate any expression language beyond the computeSlaDueAt(priority) helper.
+ *    The install step only persists the literal automation value; helper
+ *    evaluation happens later in workflow runtime.
  */
 
 const LEDGER_TABLE = 'plugin_after_sales_template_installs'

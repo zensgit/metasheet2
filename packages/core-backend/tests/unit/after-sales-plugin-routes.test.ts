@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const plugin = require('../../../../plugins/plugin-after-sales/index.cjs') as {
   activate: (context: FakeContext) => Promise<void>
+  deactivate: () => Promise<void>
 }
 
 type RegisteredHandler = (req: any, res: FakeResponse) => Promise<void>
@@ -389,10 +390,13 @@ describe('plugin-after-sales routes', () => {
   let communicationRegister: ReturnType<typeof vi.fn>
   let communicationCall: ReturnType<typeof vi.fn>
   let eventsOn: ReturnType<typeof vi.fn>
+  let eventsOff: ReturnType<typeof vi.fn>
   let eventsEmit: ReturnType<typeof vi.fn>
+  let currentContext: FakeContext
 
   beforeEach(async () => {
     const setup = createContext()
+    currentContext = setup.context
     routes = setup.routes
     ensureObject = setup.ensureObject
     ensureView = setup.ensureView
@@ -406,6 +410,7 @@ describe('plugin-after-sales routes', () => {
     communicationRegister = setup.context.communication.register
     communicationCall = setup.context.communication.call
     eventsOn = setup.context.api.events.on
+    eventsOff = setup.context.api.events.off
     eventsEmit = setup.context.api.events.emit
     await plugin.activate(setup.context)
   })
@@ -1326,5 +1331,37 @@ describe('plugin-after-sales routes', () => {
     expect(eventsOn).toHaveBeenCalledWith('ticket.refundRequested', expect.any(Function))
     expect(eventsOn).toHaveBeenCalledWith('approval.pending', expect.any(Function))
     expect(eventsOn).toHaveBeenCalledWith('followup.due', expect.any(Function))
+  })
+
+  it('unsubscribes workflow event listeners on deactivate', async () => {
+    await plugin.deactivate()
+
+    expect(eventsOff).toHaveBeenCalledTimes(6)
+    expect(eventsOff).toHaveBeenNthCalledWith(1, 'sub:ticket.created')
+    expect(eventsOff).toHaveBeenNthCalledWith(2, 'sub:ticket.assigned')
+    expect(eventsOff).toHaveBeenNthCalledWith(3, 'sub:ticket.overdue')
+    expect(eventsOff).toHaveBeenNthCalledWith(4, 'sub:ticket.refundRequested')
+    expect(eventsOff).toHaveBeenNthCalledWith(5, 'sub:approval.pending')
+    expect(eventsOff).toHaveBeenNthCalledWith(6, 'sub:followup.due')
+  })
+
+  it('cleans up prior workflow subscriptions before re-activating', async () => {
+    const nextSetup = createContext()
+
+    await plugin.activate(nextSetup.context)
+
+    expect(currentContext.api.events.off).toHaveBeenCalledTimes(6)
+    expect(currentContext.api.events.off).toHaveBeenNthCalledWith(1, 'sub:ticket.created')
+    expect(currentContext.api.events.off).toHaveBeenNthCalledWith(2, 'sub:ticket.assigned')
+    expect(currentContext.api.events.off).toHaveBeenNthCalledWith(3, 'sub:ticket.overdue')
+    expect(currentContext.api.events.off).toHaveBeenNthCalledWith(4, 'sub:ticket.refundRequested')
+    expect(currentContext.api.events.off).toHaveBeenNthCalledWith(5, 'sub:approval.pending')
+    expect(currentContext.api.events.off).toHaveBeenNthCalledWith(6, 'sub:followup.due')
+    expect(nextSetup.context.api.events.on).toHaveBeenCalledWith('ticket.created', expect.any(Function))
+    expect(nextSetup.context.api.events.on).toHaveBeenCalledWith('ticket.assigned', expect.any(Function))
+    expect(nextSetup.context.api.events.on).toHaveBeenCalledWith('ticket.overdue', expect.any(Function))
+    expect(nextSetup.context.api.events.on).toHaveBeenCalledWith('ticket.refundRequested', expect.any(Function))
+    expect(nextSetup.context.api.events.on).toHaveBeenCalledWith('approval.pending', expect.any(Function))
+    expect(nextSetup.context.api.events.on).toHaveBeenCalledWith('followup.due', expect.any(Function))
   })
 })

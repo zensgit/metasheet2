@@ -6,6 +6,10 @@ const CHANNEL_TO_RECIPIENT_TYPE = Object.freeze({
   webhook: 'webhook',
 })
 
+const {
+  normalizeRecipientList,
+} = require('./recipient-utils.cjs')
+
 const TOPIC_SPECS = Object.freeze([
   {
     topic: 'after-sales.ticket.assigned',
@@ -70,24 +74,6 @@ function readPayloadValue(payload, keyPath) {
   return head[parts[1]]
 }
 
-function normalizeRecipientCandidate(value) {
-  if (Array.isArray(value)) {
-    return value.flatMap((item) => normalizeRecipientCandidate(item))
-  }
-  if (!value) return []
-  if (typeof value === 'string') {
-    return [{ id: value, type: 'user' }]
-  }
-  if (typeof value === 'object' && typeof value.id === 'string' && typeof value.type === 'string') {
-    return [{
-      id: value.id,
-      type: value.type,
-      metadata: value.metadata && typeof value.metadata === 'object' ? value.metadata : undefined,
-    }]
-  }
-  return []
-}
-
 function recipientMatchesChannel(recipient, channel) {
   return recipient.type === CHANNEL_TO_RECIPIENT_TYPE[channel]
 }
@@ -118,18 +104,18 @@ function resolveDefaultRecipients(input) {
     if (entry.startsWith('role:')) {
       const roleSlug = entry.slice('role:'.length)
       const roleValues = roleRecipients[roleSlug] || []
-      recipients.push(...normalizeRecipientCandidate(roleValues))
+      recipients.push(...normalizeRecipientList(roleValues))
       continue
     }
 
     const match = entry.match(/^\{\{([a-zA-Z0-9_.-]+)\}\}$/)
     if (!match) {
-      recipients.push(...normalizeRecipientCandidate(entry))
+      recipients.push(...normalizeRecipientList(entry))
       continue
     }
 
     const payloadValue = readPayloadValue(payload, match[1])
-    recipients.push(...normalizeRecipientCandidate(payloadValue))
+    recipients.push(...normalizeRecipientList(payloadValue))
   }
 
   return dedupeRecipients(recipients.filter((recipient) => recipientMatchesChannel(recipient, channel)))
