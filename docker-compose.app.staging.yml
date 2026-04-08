@@ -1,0 +1,61 @@
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: metasheet-staging-postgres
+    env_file:
+      - ${APP_ENV_FILE:-./docker/app.staging.env}
+    volumes:
+      - metasheet-staging-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U metasheet']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: metasheet-staging-redis
+    volumes:
+      - metasheet-staging-redis-data:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  backend:
+    image: ghcr.io/${IMAGE_OWNER:-zensgit}/metasheet2-backend:${IMAGE_TAG:-latest}
+    container_name: metasheet-staging-backend
+    env_file:
+      - ${APP_ENV_FILE:-./docker/app.staging.env}
+    volumes:
+      - metasheet-staging-attendance-import-data:/app/uploads/attendance-import
+    ports:
+      - '127.0.0.1:18900:8900'
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  web:
+    image: ghcr.io/${IMAGE_OWNER:-zensgit}/metasheet2-web:${IMAGE_TAG:-latest}
+    container_name: metasheet-staging-web
+    ports:
+      - '8082:80'
+    volumes:
+      - ./docker/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+volumes:
+  metasheet-staging-postgres-data:
+    driver: local
+  metasheet-staging-redis-data:
+    driver: local
+  metasheet-staging-attendance-import-data:
+    driver: local

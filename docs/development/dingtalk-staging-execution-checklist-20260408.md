@@ -23,13 +23,14 @@ Scope: shortest execution checklist for the staged rollout of `#725`, `#723`, an
 
 ## Execution order
 
-1. Deploy `#725`, `#723`, and `#724` together to staging.
-2. Verify DingTalk login once end-to-end.
-3. Verify directory credential test and one manual sync.
-4. Verify one attendance dry-run sync, then one real sync.
-5. Verify one DingTalk robot notification send.
-6. Re-run attendance once to confirm stable repeat behavior.
-7. Record any tenant-specific config adjustments before changing the PRs from draft.
+1. Prepare `docker/app.staging.env` from `docker/app.staging.env.example`.
+2. Deploy `#725`, `#723`, and `#724` together to staging with `bash scripts/ops/deploy-dingtalk-staging.sh`.
+3. Verify DingTalk login once end-to-end.
+4. Verify directory credential test and one manual sync.
+5. Verify one attendance dry-run sync, then one real sync.
+6. Verify one DingTalk robot notification send.
+7. Re-run attendance once to confirm stable repeat behavior.
+8. Record any tenant-specific config adjustments before changing the PRs from draft.
 
 ## Pass criteria
 
@@ -51,3 +52,4 @@ Scope: shortest execution checklist for the staged rollout of `#725`, `#723`, an
 
 - `docs/development/dingtalk-stack-merge-readiness-20260408.md`
 - `docs/development/dingtalk-live-tenant-validation-checklist-20260408.md`
+- `docs/development/dingtalk-staging-canary-deploy-20260408.md`
