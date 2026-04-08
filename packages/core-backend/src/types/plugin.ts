@@ -317,6 +317,7 @@ export interface CoreAPI {
   injector?: Injector
   http: HttpAPI
   database: DatabaseAPI
+  multitable?: MultitableAPI
   auth: AuthAPI
   events: EventAPI
   storage: StorageAPI
@@ -332,6 +333,111 @@ export interface CoreAPI {
   dedup?: DedupApi
   ai?: AiApi
   vision?: VisionApi
+}
+
+export interface MultitableProvisioningFieldDescriptor {
+  id: string
+  name: string
+  type: 'string' | 'number' | 'boolean' | 'date' | 'formula' | 'select' | 'link' | 'lookup' | 'rollup' | 'attachment'
+  order?: number
+  options?: string[]
+  property?: Record<string, unknown>
+}
+
+export interface MultitableProvisioningObjectDescriptor {
+  id: string
+  name: string
+  description?: string | null
+  fields?: MultitableProvisioningFieldDescriptor[]
+}
+
+export interface MultitableProvisioningViewDescriptor {
+  id: string
+  objectId: string
+  name: string
+  type: string
+  filterInfo?: Record<string, unknown>
+  sortInfo?: Record<string, unknown>
+  groupInfo?: Record<string, unknown>
+  hiddenFieldIds?: string[]
+  config?: Record<string, unknown>
+}
+
+export interface MultitableProvisioningAPI {
+  getObjectSheetId(projectId: string, objectId: string): string
+  getFieldId(projectId: string, objectId: string, fieldId: string): string
+  ensureObject(input: {
+    projectId: string
+    baseId?: string | null
+    descriptor: MultitableProvisioningObjectDescriptor
+  }): Promise<{
+    baseId: string
+    sheet: {
+      id: string
+      baseId: string | null
+      name: string
+      description: string | null
+    }
+    fields: Array<{
+      id: string
+      sheetId: string
+      name: string
+      type: MultitableProvisioningFieldDescriptor['type']
+      property: Record<string, unknown>
+      order: number
+    }>
+  }>
+  ensureView(input: {
+    projectId: string
+    sheetId: string
+    descriptor: MultitableProvisioningViewDescriptor
+  }): Promise<{
+    id: string
+    sheetId: string
+    name: string
+    type: string
+    filterInfo: Record<string, unknown>
+    sortInfo: Record<string, unknown>
+    groupInfo: Record<string, unknown>
+    hiddenFieldIds: string[]
+    config: Record<string, unknown>
+  }>
+}
+
+export interface MultitableRecordsAPI {
+  createRecord(input: {
+    sheetId: string
+    data: Record<string, unknown>
+  }): Promise<{
+    id: string
+    sheetId: string
+    version: number
+    data: Record<string, unknown>
+  }>
+  getRecord(input: {
+    sheetId: string
+    recordId: string
+  }): Promise<{
+    id: string
+    sheetId: string
+    version: number
+    data: Record<string, unknown>
+  }>
+  patchRecord(input: {
+    sheetId: string
+    recordId: string
+    changes: Record<string, unknown>
+  }): Promise<{
+    id: string
+    sheetId: string
+    version: number
+    data: Record<string, unknown>
+  }>
+}
+
+export interface MultitableAPI {
+  provisioning: MultitableProvisioningAPI
+  records: MultitableRecordsAPI
 }
 
 export interface FormulaAPI {

@@ -38,6 +38,19 @@ import { messageBus } from './integration/messaging/message-bus'
 import { jwtAuthMiddleware, isWhitelisted } from './auth/jwt-middleware'
 import { authService } from './auth/AuthService'
 import { cache } from './cache-init'
+import {
+  getObjectSheetId as getProvisionedObjectSheetId,
+  getObjectFieldId as getProvisionedObjectFieldId,
+  ensureObject as ensureMultitableObject,
+  ensureView as ensureMultitableView,
+  type MultitableProvisioningQueryFn,
+} from './multitable/provisioning'
+import {
+  createRecord as createMultitableRecord,
+  getRecord as getMultitableRecord,
+  patchRecord as patchMultitableRecord,
+  type MultitableRecordsQueryFn,
+} from './multitable/records'
 import { installMetrics, requestMetricsMiddleware } from './metrics/metrics'
 import { getPoolStats } from './db/pg'
 import { isDatabaseSchemaError } from './utils/database-errors'
@@ -72,6 +85,8 @@ import plmWorkbenchRouter from './routes/plm-workbench'
 import { univerMockRouter } from './routes/univer-mock'
 import { univerMetaRouter } from './routes/univer-meta'
 import { SnapshotService } from './services/SnapshotService'
+import { notificationService } from './services/NotificationService'
+import { AfterSalesApprovalBridgeService } from './services/AfterSalesApprovalBridgeService'
 import { cacheRegistry } from '../core/cache/CacheRegistry'
 import { loadObservabilityConfig } from './config/observability'
 import { initObservability } from './observability/otel'
@@ -112,6 +127,7 @@ export class MetaSheetServer {
   private observabilityEnabled = false
   private stopOperationAuditRetention?: () => void
   private stopMultitableAttachmentCleanup?: () => void
+  private afterSalesApprovalBridgeService = new AfterSalesApprovalBridgeService()
   // Optional bypass/degraded-mode flags for local debug
   private disableWorkflow = process.env.DISABLE_WORKFLOW === 'true'
   private disableEventBus = process.env.DISABLE_EVENT_BUS === 'true'
@@ -147,6 +163,7 @@ export class MetaSheetServer {
     this.setupMiddleware()
     // WebSocket setup is now handled by CollabService via start()
     this.initializeCache()
+    this.registerInternalPluginApis()
   }
 
   /**
@@ -274,6 +291,110 @@ export class MetaSheetServer {
           update: async () => 0,
           delete: async () => 0
         })
+      },
+
+      multitable: {
+        provisioning: {
+          getObjectSheetId: (projectId, objectId) => getProvisionedObjectSheetId(projectId, objectId),
+          getFieldId: (projectId, objectId, fieldId) => getProvisionedObjectFieldId(projectId, objectId, fieldId),
+          ensureObject: async ({ projectId, baseId, descriptor }) => {
+            return poolManager.get().transaction(async ({ query }) => {
+              const txQuery: MultitableProvisioningQueryFn = async (sql, params) => {
+                const result = await query(sql, params)
+                return {
+                  rows: Array.isArray((result as { rows?: unknown[] }).rows)
+                    ? (result as { rows: unknown[] }).rows
+                    : [],
+                }
+              }
+              return ensureMultitableObject({
+                query: txQuery,
+                projectId,
+                baseId,
+                descriptor,
+              })
+            })
+          },
+          ensureView: async ({ projectId, sheetId, descriptor }) => {
+            return poolManager.get().transaction(async ({ query }) => {
+              const txQuery: MultitableProvisioningQueryFn = async (sql, params) => {
+                const result = await query(sql, params)
+                return {
+                  rows: Array.isArray((result as { rows?: unknown[] }).rows)
+                    ? (result as { rows: unknown[] }).rows
+                    : [],
+                }
+              }
+              return ensureMultitableView({
+                query: txQuery,
+                projectId,
+                sheetId,
+                descriptor,
+              })
+            })
+          },
+        },
+        records: {
+          createRecord: async ({ sheetId, data }) => {
+            return poolManager.get().transaction(async ({ query }) => {
+              const txQuery: MultitableRecordsQueryFn = async (sql, params) => {
+                const result = await query(sql, params)
+                return {
+                  rows: Array.isArray((result as { rows?: unknown[] }).rows)
+                    ? (result as { rows: unknown[] }).rows
+                    : [],
+                  rowCount: typeof (result as { rowCount?: number }).rowCount === 'number'
+                    ? (result as { rowCount: number }).rowCount
+                    : undefined,
+                }
+              }
+              return createMultitableRecord({
+                query: txQuery,
+                sheetId,
+                data,
+              })
+            })
+          },
+          getRecord: async ({ sheetId, recordId }) => {
+            const txQuery: MultitableRecordsQueryFn = async (sql, params) => {
+              const result = await poolManager.get().query(sql, params)
+              return {
+                rows: Array.isArray((result as { rows?: unknown[] }).rows)
+                  ? (result as { rows: unknown[] }).rows
+                  : [],
+                rowCount: typeof (result as { rowCount?: number }).rowCount === 'number'
+                  ? (result as { rowCount: number }).rowCount
+                  : undefined,
+              }
+            }
+            return getMultitableRecord({
+              query: txQuery,
+              sheetId,
+              recordId,
+            })
+          },
+          patchRecord: async ({ sheetId, recordId, changes }) => {
+            return poolManager.get().transaction(async ({ query }) => {
+              const txQuery: MultitableRecordsQueryFn = async (sql, params) => {
+                const result = await query(sql, params)
+                return {
+                  rows: Array.isArray((result as { rows?: unknown[] }).rows)
+                    ? (result as { rows: unknown[] }).rows
+                    : [],
+                  rowCount: typeof (result as { rowCount?: number }).rowCount === 'number'
+                    ? (result as { rowCount: number }).rowCount
+                    : undefined,
+                }
+              }
+              return patchMultitableRecord({
+                query: txQuery,
+                sheetId,
+                recordId,
+                changes,
+              })
+            })
+          },
+        },
       },
 
       auth: {
@@ -728,6 +849,15 @@ export class MetaSheetServer {
     // Phase 3: Plugin will register RedisCache when FEATURE_CACHE_REDIS=true
   }
 
+  private registerInternalPluginApis(): void {
+    this.pluginApis.set('after-sales-approval-bridge', {
+      submitRefundApproval: async (command: unknown) =>
+        this.afterSalesApprovalBridgeService.submitRefundApproval(
+          command as import('./services/AfterSalesApprovalBridgeService').AfterSalesRefundApprovalCommand,
+        ),
+    })
+  }
+
   private createPluginContext(loaded: LoadedPlugin): PluginContext {
     const coreApi = this.injector.get(ICoreAPI)
     const manifest = loaded.manifest
@@ -780,6 +910,9 @@ export class MetaSheetServer {
       },
       api: coreApi,
       core: coreApi,
+      services: {
+        notification: notificationService,
+      } as unknown as import('./types/plugin').PluginServices,
       storage,
       config: {},
       communication,

@@ -7,6 +7,7 @@ const viewLoaders: Record<string, ViewLoader> = {
   GalleryView: () => import('./views/GalleryView.vue'),
   FormView: () => import('./views/FormView.vue'),
   AttendanceView: () => import('./views/AttendanceView.vue'),
+  AfterSalesView: () => import('./views/AfterSalesView.vue'),
   PlmProductView: () => import('./views/PlmProductView.vue'),
 }
 

@@ -1,0 +1,102 @@
+{
+  "id": "after-sales",
+  "version": "0.1.0",
+  "displayName": "After Sales",
+  "pluginId": "plugin-after-sales",
+  "boundedContext": {
+    "code": "after-sales",
+    "owner": "customer-success",
+    "description": "Service tickets, warranty handling, dispatch, and closure feedback."
+  },
+  "platformDependencies": [
+    "auth",
+    "rbac",
+    "multitable",
+    "workflow",
+    "approvals",
+    "comments",
+    "files",
+    "notifications",
+    "events"
+  ],
+  "navigation": [
+    {
+      "id": "after-sales-home",
+      "title": "After Sales",
+      "path": "/p/plugin-after-sales/after-sales",
+      "icon": "service",
+      "order": 60,
+      "location": "main-nav"
+    }
+  ],
+  "permissions": [
+    "after_sales:read",
+    "after_sales:write",
+    "after_sales:approve",
+    "after_sales:admin"
+  ],
+  "featureFlags": [
+    "afterSales"
+  ],
+  "objects": [
+    {
+      "id": "serviceTicket",
+      "name": "Service Ticket",
+      "backing": "hybrid"
+    },
+    {
+      "id": "installedAsset",
+      "name": "Installed Asset",
+      "backing": "multitable"
+    },
+    {
+      "id": "customer",
+      "name": "Customer",
+      "backing": "multitable"
+    },
+    {
+      "id": "serviceRecord",
+      "name": "Service Record",
+      "backing": "multitable"
+    },
+    {
+      "id": "partItem",
+      "name": "Part Item",
+      "backing": "multitable"
+    },
+    {
+      "id": "followUp",
+      "name": "Follow Up",
+      "backing": "multitable"
+    },
+    {
+      "id": "warrantyPolicy",
+      "name": "Warranty Policy",
+      "backing": "service"
+    }
+  ],
+  "workflows": [
+    {
+      "id": "ticket-triage",
+      "name": "Ticket Triage",
+      "trigger": "ticket.created"
+    },
+    {
+      "id": "refund-approval",
+      "name": "Refund Approval",
+      "trigger": "ticket.refundRequested"
+    }
+  ],
+  "integrations": [
+    {
+      "id": "crm-sync",
+      "type": "http",
+      "direction": "bidirectional"
+    },
+    {
+      "id": "erp-warranty",
+      "type": "http",
+      "direction": "bidirectional"
+    }
+  ]
+}

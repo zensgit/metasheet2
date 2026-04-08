@@ -1,0 +1,27 @@
+{
+  "manifestVersion": "2.0.0",
+  "name": "plugin-after-sales",
+  "version": "0.1.0",
+  "displayName": "After Sales",
+  "description": "Platform app skeleton for service tickets, warranty flows, and customer support operations.",
+  "author": { "name": "MetaSheet" },
+  "engine": { "metasheet": ">=2.0.0-0" },
+  "main": "index.cjs",
+  "capabilities": { "views": [], "workflows": [], "functions": [] },
+  "contributes": {
+    "views": [
+      {
+        "id": "after-sales",
+        "name": "After Sales",
+        "component": "AfterSalesView",
+        "location": "main-nav",
+        "order": 60
+      }
+    ]
+  },
+  "permissions": [
+    "http.addRoute",
+    "events.emit",
+    "events.listen"
+  ]
+}
