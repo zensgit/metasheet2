@@ -42,6 +42,20 @@ interface FakeContext {
       provisioning?: {
         getObjectSheetId: (projectId: string, objectId: string) => string
         getFieldId: (projectId: string, objectId: string, fieldId: string) => string
+        findObjectSheet?: (input: {
+          projectId: string
+          objectId: string
+        }) => Promise<{
+          id: string
+          baseId: string | null
+          name: string
+          description: string | null
+        } | null>
+        resolveFieldIds?: (input: {
+          projectId: string
+          objectId: string
+          fieldIds: string[]
+        }) => Promise<Record<string, string>>
         ensureObject: (input: {
           projectId: string
           descriptor: Record<string, unknown>
@@ -184,6 +198,10 @@ function createContext(): {
   routes: Map<string, RegisteredHandler>
   ensureObject: ReturnType<typeof vi.fn>
   ensureView: ReturnType<typeof vi.fn>
+  getObjectSheetId: ReturnType<typeof vi.fn>
+  getFieldId: ReturnType<typeof vi.fn>
+  findObjectSheet: ReturnType<typeof vi.fn>
+  resolveFieldIds: ReturnType<typeof vi.fn>
   listRecords: ReturnType<typeof vi.fn>
   queryRecords: ReturnType<typeof vi.fn>
   createRecord: ReturnType<typeof vi.fn>
@@ -224,6 +242,21 @@ function createContext(): {
   // the same physical-id shape the real multitable seam would use.
   const MOCK_PROJECT_ID = 'tenant_42:after-sales'
   const pk = (field: string) => `${MOCK_PROJECT_ID}:serviceTicket:${field}`
+  const getObjectSheetId = vi.fn((projectId: string, objectId: string) => `${projectId}:${objectId}:sheet`)
+  const getFieldId = vi.fn((projectId: string, objectId: string, fieldId: string) => `${projectId}:${objectId}:${fieldId}`)
+  const findObjectSheet = vi.fn(async (input: { projectId: string; objectId: string }) => ({
+    id: `${input.projectId}:${input.objectId}:sheet`,
+    baseId: 'base_legacy',
+    name: input.objectId,
+    description: null,
+  }))
+  const resolveFieldIds = vi.fn(async (input: {
+    projectId: string
+    objectId: string
+    fieldIds: string[]
+  }) => Object.fromEntries(
+    input.fieldIds.map((fieldId) => [fieldId, `${input.projectId}:${input.objectId}:${fieldId}`]),
+  ))
   const createRecord = vi.fn(async (input: { sheetId: string; data: Record<string, unknown> }) => ({
     id: 'rec_ticket_001',
     sheetId: input.sheetId,
@@ -313,8 +346,10 @@ function createContext(): {
       },
       multitable: {
         provisioning: {
-          getObjectSheetId: (projectId: string, objectId: string) => `${projectId}:${objectId}:sheet`,
-          getFieldId: (projectId: string, objectId: string, fieldId: string) => `${projectId}:${objectId}:${fieldId}`,
+          getObjectSheetId,
+          getFieldId,
+          findObjectSheet,
+          resolveFieldIds,
           ensureObject,
           ensureView,
         },
@@ -349,6 +384,10 @@ function createContext(): {
     routes,
     ensureObject,
     ensureView,
+    getObjectSheetId,
+    getFieldId,
+    findObjectSheet,
+    resolveFieldIds,
     listRecords,
     queryRecords,
     createRecord,
@@ -382,6 +421,10 @@ describe('plugin-after-sales routes', () => {
   let routes: Map<string, RegisteredHandler>
   let ensureObject: ReturnType<typeof vi.fn>
   let ensureView: ReturnType<typeof vi.fn>
+  let getObjectSheetId: ReturnType<typeof vi.fn>
+  let getFieldId: ReturnType<typeof vi.fn>
+  let findObjectSheet: ReturnType<typeof vi.fn>
+  let resolveFieldIds: ReturnType<typeof vi.fn>
   let listRecords: ReturnType<typeof vi.fn>
   let queryRecords: ReturnType<typeof vi.fn>
   let createRecord: ReturnType<typeof vi.fn>
@@ -402,6 +445,10 @@ describe('plugin-after-sales routes', () => {
     routes = setup.routes
     ensureObject = setup.ensureObject
     ensureView = setup.ensureView
+    getObjectSheetId = setup.getObjectSheetId
+    getFieldId = setup.getFieldId
+    findObjectSheet = setup.findObjectSheet
+    resolveFieldIds = setup.resolveFieldIds
     listRecords = setup.listRecords
     queryRecords = setup.queryRecords
     createRecord = setup.createRecord
@@ -608,6 +655,13 @@ describe('plugin-after-sales routes', () => {
         [stPk('status')]: 'new',
       },
     })
+    expect(findObjectSheet).toHaveBeenCalledWith({
+      projectId: 'tenant_42:after-sales',
+      objectId: 'serviceTicket',
+    })
+    expect(resolveFieldIds).toHaveBeenCalled()
+    expect(getObjectSheetId).not.toHaveBeenCalled()
+    expect(getFieldId).not.toHaveBeenCalled()
     expect(eventsEmit).toHaveBeenCalledWith(
       'ticket.created',
       expect.objectContaining({
@@ -765,6 +819,17 @@ describe('plugin-after-sales routes', () => {
       ],
       count: 1,
     })
+    expect(findObjectSheet).toHaveBeenCalledWith({
+      projectId: 'tenant_42:after-sales',
+      objectId: 'serviceTicket',
+    })
+    expect(resolveFieldIds).toHaveBeenCalledWith({
+      projectId: 'tenant_42:after-sales',
+      objectId: 'serviceTicket',
+      fieldIds: ['status'],
+    })
+    expect(getObjectSheetId).not.toHaveBeenCalled()
+    expect(getFieldId).not.toHaveBeenCalled()
   })
 
   it('requests a ticket refund by patching the record and emitting ticket.refundRequested', async () => {

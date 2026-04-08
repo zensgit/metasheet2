@@ -181,6 +181,14 @@ export function createPluginScopedMultitableApi(
         assertProjectIdAllowedForPlugin(pluginName, projectId)
         return multitable.provisioning.getFieldId(projectId, objectId, fieldId)
       },
+      findObjectSheet: async (input) => {
+        assertProjectIdAllowedForPlugin(pluginName, input.projectId)
+        return multitable.provisioning.findObjectSheet(input)
+      },
+      resolveFieldIds: async (input) => {
+        assertProjectIdAllowedForPlugin(pluginName, input.projectId)
+        return multitable.provisioning.resolveFieldIds(input)
+      },
       ensureObject: async (input) => {
         assertProjectIdAllowedForPlugin(pluginName, input.projectId)
         if (hooks.ensureObjectInScope) {
