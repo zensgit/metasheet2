@@ -137,6 +137,18 @@ export function getObjectFieldId(projectId: string, objectId: string, fieldId: s
   return stableMetaId('fld', projectId, objectId, fieldId)
 }
 
+export function resolveObjectFieldIds(
+  projectId: string,
+  objectId: string,
+  fieldIds: string[],
+): Record<string, string> {
+  const resolved: Record<string, string> = {}
+  for (const fieldId of fieldIds) {
+    resolved[fieldId] = getObjectFieldId(projectId, objectId, fieldId)
+  }
+  return resolved
+}
+
 function buildFieldProperty(
   field: MultitableProvisioningFieldDescriptor,
 ): Record<string, unknown> {
@@ -180,6 +192,14 @@ async function loadActiveSheet(
     name: String(row.name),
     description: typeof row.description === 'string' ? row.description : null,
   }
+}
+
+export async function findObjectSheet(
+  query: MultitableProvisioningQueryFn,
+  projectId: string,
+  objectId: string,
+): Promise<MultitableProvisioningSheet | null> {
+  return loadActiveSheet(query, getObjectSheetId(projectId, objectId))
 }
 
 async function loadActiveView(

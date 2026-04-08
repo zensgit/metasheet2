@@ -42,6 +42,20 @@ interface FakeContext {
       provisioning?: {
         getObjectSheetId: (projectId: string, objectId: string) => string
         getFieldId: (projectId: string, objectId: string, fieldId: string) => string
+        findObjectSheet?: (input: {
+          projectId: string
+          objectId: string
+        }) => Promise<{
+          id: string
+          baseId: string | null
+          name: string
+          description: string | null
+        } | null>
+        resolveFieldIds?: (input: {
+          projectId: string
+          objectId: string
+          fieldIds: string[]
+        }) => Promise<Record<string, string>>
         ensureObject: (input: {
           projectId: string
           descriptor: Record<string, unknown>
@@ -315,6 +329,19 @@ function createContext(): {
         provisioning: {
           getObjectSheetId: (projectId: string, objectId: string) => `${projectId}:${objectId}:sheet`,
           getFieldId: (projectId: string, objectId: string, fieldId: string) => `${projectId}:${objectId}:${fieldId}`,
+          findObjectSheet: async (input: { projectId: string; objectId: string }) => ({
+            id: `${input.projectId}:${input.objectId}:sheet`,
+            baseId: 'base_legacy',
+            name: input.objectId,
+            description: null,
+          }),
+          resolveFieldIds: async (input: {
+            projectId: string
+            objectId: string
+            fieldIds: string[]
+          }) => Object.fromEntries(
+            input.fieldIds.map((fieldId) => [fieldId, `${input.projectId}:${input.objectId}:${fieldId}`]),
+          ),
           ensureObject,
           ensureView,
         },
