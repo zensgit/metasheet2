@@ -39,8 +39,10 @@ import { jwtAuthMiddleware, isWhitelisted } from './auth/jwt-middleware'
 import { authService } from './auth/AuthService'
 import { cache } from './cache-init'
 import {
+  findObjectSheet as findProvisionedObjectSheet,
   getObjectSheetId as getProvisionedObjectSheetId,
   getObjectFieldId as getProvisionedObjectFieldId,
+  resolveObjectFieldIds as resolveProvisionedObjectFieldIds,
   ensureObject as ensureMultitableObject,
   ensureView as ensureMultitableView,
   type MultitableProvisioningQueryFn,
@@ -319,6 +321,23 @@ export class MetaSheetServer {
         provisioning: {
           getObjectSheetId: (projectId, objectId) => getProvisionedObjectSheetId(projectId, objectId),
           getFieldId: (projectId, objectId, fieldId) => getProvisionedObjectFieldId(projectId, objectId, fieldId),
+          findObjectSheet: async ({ projectId, objectId }) => {
+            const txQuery: MultitableProvisioningQueryFn = async (sql, params) => {
+              const result = await poolManager.get().query(sql, params)
+              return {
+                rows: Array.isArray((result as { rows?: unknown[] }).rows)
+                  ? (result as { rows: unknown[] }).rows
+                  : [],
+                rowCount: typeof (result as { rowCount?: number }).rowCount === 'number'
+                  ? (result as { rowCount: number }).rowCount
+                  : undefined,
+              }
+            }
+            return findProvisionedObjectSheet(txQuery, projectId, objectId)
+          },
+          resolveFieldIds: async ({ projectId, objectId, fieldIds }) => {
+            return resolveProvisionedObjectFieldIds(projectId, objectId, fieldIds)
+          },
           ensureObject: async ({ projectId, baseId, descriptor }) => {
             return poolManager.get().transaction(async ({ query }) => {
               const txQuery: MultitableProvisioningQueryFn = async (sql, params) => {

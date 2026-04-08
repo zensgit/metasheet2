@@ -351,6 +351,20 @@ export interface CoreAPI {
 export interface MultitableProvisioningAPI {
   getObjectSheetId(projectId: string, objectId: string): string
   getFieldId(projectId: string, objectId: string, fieldId: string): string
+  findObjectSheet(input: {
+    projectId: string
+    objectId: string
+  }): Promise<{
+    id: string
+    baseId: string | null
+    name: string
+    description: string | null
+  } | null>
+  resolveFieldIds(input: {
+    projectId: string
+    objectId: string
+    fieldIds: string[]
+  }): Promise<Record<string, string>>
   ensureObject(input: {
     projectId: string
     baseId?: string | null

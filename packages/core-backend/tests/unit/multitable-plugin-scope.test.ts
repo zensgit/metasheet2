@@ -89,6 +89,15 @@ describe('multitable plugin scope helper', () => {
       provisioning: {
         getObjectSheetId: vi.fn(() => 'sheet_1'),
         getFieldId: vi.fn(() => 'fld_1'),
+        findObjectSheet: vi.fn(async () => ({
+          id: 'sheet_1',
+          baseId: 'base_legacy',
+          name: 'Ticket',
+          description: null,
+        })),
+        resolveFieldIds: vi.fn(async () => ({
+          status: 'fld_1',
+        })),
         ensureObject: vi.fn(async () => ({
           baseId: 'base_legacy',
           sheet: { id: 'sheet_1', baseId: 'base_legacy', name: 'Ticket', description: null },
@@ -124,6 +133,19 @@ describe('multitable plugin scope helper', () => {
     expect(scoped.provisioning.getObjectSheetId('tenant_42:after-sales', 'serviceTicket')).toBe('sheet_1')
     expect(scoped.provisioning.getFieldId('tenant_42:after-sales', 'serviceTicket', 'status')).toBe('fld_1')
     await expect(
+      scoped.provisioning.findObjectSheet({
+        projectId: 'tenant_42:after-sales',
+        objectId: 'serviceTicket',
+      }),
+    ).resolves.toMatchObject({ id: 'sheet_1' })
+    await expect(
+      scoped.provisioning.resolveFieldIds({
+        projectId: 'tenant_42:after-sales',
+        objectId: 'serviceTicket',
+        fieldIds: ['status'],
+      }),
+    ).resolves.toEqual({ status: 'fld_1' })
+    await expect(
       scoped.provisioning.ensureObject({
         projectId: 'tenant_42:after-sales',
         descriptor: { id: 'serviceTicket', name: 'Ticket', fields: [] },
@@ -138,6 +160,19 @@ describe('multitable plugin scope helper', () => {
     expect(() =>
       scoped.provisioning.getFieldId('tenant_42:attendance', 'serviceTicket', 'status'),
     ).toThrow(MultitableProjectNamespaceError)
+    await expect(
+      scoped.provisioning.findObjectSheet({
+        projectId: 'tenant_42:attendance',
+        objectId: 'serviceTicket',
+      }),
+    ).rejects.toThrow(MultitableProjectNamespaceError)
+    await expect(
+      scoped.provisioning.resolveFieldIds({
+        projectId: 'tenant_42:attendance',
+        objectId: 'serviceTicket',
+        fieldIds: ['status'],
+      }),
+    ).rejects.toThrow(MultitableProjectNamespaceError)
     await expect(
       scoped.provisioning.ensureView({
         projectId: 'tenant_42:attendance',

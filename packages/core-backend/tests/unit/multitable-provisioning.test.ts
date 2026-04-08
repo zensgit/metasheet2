@@ -6,6 +6,8 @@ import {
   ensureLegacyBase,
   ensureObject,
   ensureView,
+  findObjectSheet,
+  resolveObjectFieldIds,
   type MultitableProvisioningQueryFn,
 } from '../../src/multitable/provisioning'
 
@@ -222,6 +224,32 @@ describe('multitable provisioning helper', () => {
     expect(bases).toHaveLength(1)
     expect(sheets).toHaveLength(1)
     expect(fields).toHaveLength(2)
+  })
+
+  it('finds provisioned sheets and resolves logical field ids without leaking hash details', async () => {
+    const { query } = createQuery()
+
+    const ensured = await ensureObject({
+      query,
+      projectId: 'tenant_42:after-sales',
+      descriptor: {
+        id: 'serviceTicket',
+        name: 'Service Ticket',
+        fields: [
+          { id: 'ticketNo', name: 'Ticket No', type: 'string' },
+          { id: 'status', name: 'Status', type: 'select', options: ['new', 'done'] },
+        ],
+      },
+    })
+
+    const sheet = await findObjectSheet(query, 'tenant_42:after-sales', 'serviceTicket')
+    const resolved = resolveObjectFieldIds('tenant_42:after-sales', 'serviceTicket', ['ticketNo', 'status'])
+
+    expect(sheet).toEqual(ensured.sheet)
+    expect(resolved).toEqual({
+      ticketNo: ensured.fields[0]?.id,
+      status: ensured.fields[1]?.id,
+    })
   })
 
   it('creates a sheet once and reports conflicts on repeats', async () => {

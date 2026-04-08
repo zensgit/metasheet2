@@ -26,17 +26,19 @@ const {
   buildFollowUpDueEventPayload,
 } = require('./lib/event-entry.cjs')
 const {
+  findObjectSheetId,
+  resolvePhysicalFieldIds,
   toPhysicalRecord,
   fromPhysicalRecord,
 } = require('./lib/multitable-helpers.cjs')
 
 const SERVICE_TICKET_FIELDS = ['ticketNo', 'title', 'source', 'priority', 'status', 'slaDueAt', 'refundAmount', 'refundStatus']
 
-function toPhysicalTicketData(provisioning, projectId, logicalData) {
+async function toPhysicalTicketData(provisioning, projectId, logicalData) {
   return toPhysicalRecord(provisioning, projectId, 'serviceTicket', logicalData)
 }
 
-function fromPhysicalTicketData(provisioning, projectId, physicalData) {
+async function fromPhysicalTicketData(provisioning, projectId, physicalData) {
   return fromPhysicalRecord(provisioning, projectId, 'serviceTicket', SERVICE_TICKET_FIELDS, physicalData)
 }
 
@@ -243,8 +245,10 @@ function getMultitableWriteApi(context) {
   const records = multitable && multitable.records
   if (
     !provisioning ||
-    typeof provisioning.getObjectSheetId !== 'function' ||
-    typeof provisioning.getFieldId !== 'function' ||
+    (typeof provisioning.findObjectSheet !== 'function' &&
+      typeof provisioning.getObjectSheetId !== 'function') ||
+    (typeof provisioning.resolveFieldIds !== 'function' &&
+      typeof provisioning.getFieldId !== 'function') ||
     !records ||
     typeof records.createRecord !== 'function' ||
     typeof records.getRecord !== 'function' ||
@@ -261,8 +265,10 @@ function getMultitableReadApi(context) {
   const records = multitable && multitable.records
   if (
     !provisioning ||
-    typeof provisioning.getObjectSheetId !== 'function' ||
-    typeof provisioning.getFieldId !== 'function' ||
+    (typeof provisioning.findObjectSheet !== 'function' &&
+      typeof provisioning.getObjectSheetId !== 'function') ||
+    (typeof provisioning.resolveFieldIds !== 'function' &&
+      typeof provisioning.getFieldId !== 'function') ||
     !records ||
     typeof records.getRecord !== 'function'
   ) {
@@ -298,15 +304,15 @@ async function handleRefundApprovalDecisionCallback(context, input) {
   }
 
   const refundStatus = decision === 'approved' ? 'approved' : 'rejected'
-  const sheetId = multitableApi.provisioning.getObjectSheetId(projectId, 'serviceTicket')
+  const sheetId = await findObjectSheetId(multitableApi.provisioning, projectId, 'serviceTicket')
   const updatedRecord = await multitableApi.records.patchRecord({
     sheetId,
     recordId: ticketId,
-    changes: toPhysicalTicketData(multitableApi.provisioning, projectId, {
+    changes: await toPhysicalTicketData(multitableApi.provisioning, projectId, {
       refundStatus,
     }),
   })
-  const logicalUpdated = fromPhysicalTicketData(multitableApi.provisioning, projectId, updatedRecord.data)
+  const logicalUpdated = await fromPhysicalTicketData(multitableApi.provisioning, projectId, updatedRecord.data)
 
   const payload = buildRefundDecisionEventPayload({
     decision: refundStatus,
@@ -551,7 +557,7 @@ module.exports = {
           }
 
           const projectId = current.projectId || installer.getProjectId(tenantId, appManifest.id)
-          const sheetId = multitableApi.provisioning.getObjectSheetId(projectId, 'serviceTicket')
+          const sheetId = await findObjectSheetId(multitableApi.provisioning, projectId, 'serviceTicket')
           const status = typeof req?.query?.status === 'string' && req.query.status.trim()
             ? req.query.status.trim()
             : null
@@ -568,9 +574,17 @@ module.exports = {
           const recordsApi = multitableApi.records
           let tickets
           if (typeof recordsApi.queryRecords === 'function') {
+            const physicalFieldIds = status
+              ? await resolvePhysicalFieldIds(
+                  multitableApi.provisioning,
+                  projectId,
+                  'serviceTicket',
+                  ['status'],
+                )
+              : {}
             const filters = status
               ? {
-                  [multitableApi.provisioning.getFieldId(projectId, 'serviceTicket', 'status')]: status,
+                  [physicalFieldIds.status || 'status']: status,
                 }
               : undefined
             tickets = await recordsApi.queryRecords({
@@ -598,18 +612,20 @@ module.exports = {
           }
 
           const logicalTickets = Array.isArray(tickets)
-            ? tickets
-                .map((ticket) => ({
-                  id: ticket.id,
-                  version: ticket.version,
-                  data: fromPhysicalTicketData(multitableApi.provisioning, projectId, ticket.data),
-                }))
-                .filter((ticket) => {
-                  if (status && ticket.data.status !== status) return false
-                  if (!search) return true
-                  const haystack = JSON.stringify(ticket.data).toLowerCase()
-                  return haystack.includes(search.toLowerCase())
-                })
+            ? (
+                await Promise.all(
+                  tickets.map(async (ticket) => ({
+                    id: ticket.id,
+                    version: ticket.version,
+                    data: await fromPhysicalTicketData(multitableApi.provisioning, projectId, ticket.data),
+                  })),
+                )
+              ).filter((ticket) => {
+                if (status && ticket.data.status !== status) return false
+                if (!search) return true
+                const haystack = JSON.stringify(ticket.data).toLowerCase()
+                return haystack.includes(search.toLowerCase())
+              })
             : []
 
           res.json({
@@ -686,12 +702,12 @@ module.exports = {
 
           const projectId = current.projectId || installer.getProjectId(tenantId, appManifest.id)
           const command = buildCreateTicketCommand((req && req.body) || {})
-          const sheetId = multitableApi.provisioning.getObjectSheetId(projectId, 'serviceTicket')
+          const sheetId = await findObjectSheetId(multitableApi.provisioning, projectId, 'serviceTicket')
           const record = await multitableApi.records.createRecord({
             sheetId,
-            data: toPhysicalTicketData(multitableApi.provisioning, projectId, command.recordData),
+            data: await toPhysicalTicketData(multitableApi.provisioning, projectId, command.recordData),
           })
-          const logicalRecordData = fromPhysicalTicketData(multitableApi.provisioning, projectId, record.data)
+          const logicalRecordData = await fromPhysicalTicketData(multitableApi.provisioning, projectId, record.data)
 
           let event = { accepted: false, event: 'ticket.created' }
           try {
@@ -801,7 +817,7 @@ module.exports = {
           }
 
           const projectId = current.projectId || installer.getProjectId(tenantId, appManifest.id)
-          const sheetId = multitableApi.provisioning.getObjectSheetId(projectId, 'serviceTicket')
+          const sheetId = await findObjectSheetId(multitableApi.provisioning, projectId, 'serviceTicket')
           const deleted = await multitableApi.records.deleteRecord({
             sheetId,
             recordId: ticketId,
@@ -890,12 +906,12 @@ module.exports = {
           }
 
           const projectId = current.projectId || installer.getProjectId(tenantId, appManifest.id)
-          const sheetId = multitableApi.provisioning.getObjectSheetId(projectId, 'serviceTicket')
+          const sheetId = await findObjectSheetId(multitableApi.provisioning, projectId, 'serviceTicket')
           const existingRecord = await multitableApi.records.getRecord({
             sheetId,
             recordId: ticketId,
           })
-          const logicalExisting = fromPhysicalTicketData(multitableApi.provisioning, projectId, existingRecord.data)
+          const logicalExisting = await fromPhysicalTicketData(multitableApi.provisioning, projectId, existingRecord.data)
           const command = buildRequestRefundCommand((req && req.body) || {}, {
             id: existingRecord.id,
             ticketNo: logicalExisting.ticketNo,
@@ -904,9 +920,9 @@ module.exports = {
           const updatedRecord = await multitableApi.records.patchRecord({
             sheetId,
             recordId: ticketId,
-            changes: toPhysicalTicketData(multitableApi.provisioning, projectId, command.changes),
+            changes: await toPhysicalTicketData(multitableApi.provisioning, projectId, command.changes),
           })
-          const logicalUpdated = fromPhysicalTicketData(multitableApi.provisioning, projectId, updatedRecord.data)
+          const logicalUpdated = await fromPhysicalTicketData(multitableApi.provisioning, projectId, updatedRecord.data)
 
           let event = { accepted: false, event: 'ticket.refundRequested' }
           try {
@@ -1299,12 +1315,12 @@ module.exports = {
           throw new Error('Multitable record writer is not available on plugin context')
         }
         const command = buildCreateTicketCommand(args || {})
-        const sheetId = multitableApi.provisioning.getObjectSheetId(projectId, 'serviceTicket')
+        const sheetId = await findObjectSheetId(multitableApi.provisioning, projectId, 'serviceTicket')
         const record = await multitableApi.records.createRecord({
           sheetId,
-          data: toPhysicalTicketData(multitableApi.provisioning, projectId, command.recordData),
+          data: await toPhysicalTicketData(multitableApi.provisioning, projectId, command.recordData),
         })
-        const logicalRecordData = fromPhysicalTicketData(multitableApi.provisioning, projectId, record.data)
+        const logicalRecordData = await fromPhysicalTicketData(multitableApi.provisioning, projectId, record.data)
         const payload = buildTicketCreatedEventPayload({
           ticket: {
             id: record.id,
@@ -1342,12 +1358,12 @@ module.exports = {
         if (!multitableApi) {
           throw new Error('Multitable record writer is not available on plugin context')
         }
-        const sheetId = multitableApi.provisioning.getObjectSheetId(projectId, 'serviceTicket')
+        const sheetId = await findObjectSheetId(multitableApi.provisioning, projectId, 'serviceTicket')
         const existingRecord = await multitableApi.records.getRecord({
           sheetId,
           recordId: ticketId,
         })
-        const logicalExisting = fromPhysicalTicketData(multitableApi.provisioning, projectId, existingRecord.data)
+        const logicalExisting = await fromPhysicalTicketData(multitableApi.provisioning, projectId, existingRecord.data)
         const command = buildRequestRefundCommand(args || {}, {
           id: existingRecord.id,
           ticketNo: logicalExisting.ticketNo,
@@ -1356,9 +1372,9 @@ module.exports = {
         const updatedRecord = await multitableApi.records.patchRecord({
           sheetId,
           recordId: ticketId,
-          changes: toPhysicalTicketData(multitableApi.provisioning, projectId, command.changes),
+          changes: await toPhysicalTicketData(multitableApi.provisioning, projectId, command.changes),
         })
-        const logicalUpdated = fromPhysicalTicketData(multitableApi.provisioning, projectId, updatedRecord.data)
+        const logicalUpdated = await fromPhysicalTicketData(multitableApi.provisioning, projectId, updatedRecord.data)
         const payload = buildRefundRequestedEventPayload({
           ticket: command.eventTicket,
         }, {
@@ -1389,12 +1405,20 @@ module.exports = {
         if (!multitableApi) {
           throw new Error('Multitable record reader is not available on plugin context')
         }
-        const sheetId = multitableApi.provisioning.getObjectSheetId(projectId, 'serviceTicket')
+        const sheetId = await findObjectSheetId(multitableApi.provisioning, projectId, 'serviceTicket')
         let records
         if (typeof multitableApi.records.queryRecords === 'function') {
+          const statusFieldIds = typeof args?.status === 'string' && args.status.trim()
+            ? await resolvePhysicalFieldIds(
+                multitableApi.provisioning,
+                projectId,
+                'serviceTicket',
+                ['status'],
+              )
+            : {}
           const filters = typeof args?.status === 'string' && args.status.trim()
             ? {
-                [multitableApi.provisioning.getFieldId(projectId, 'serviceTicket', 'status')]: args.status.trim(),
+                [statusFieldIds.status || 'status']: args.status.trim(),
               }
             : undefined
           records = await multitableApi.records.queryRecords({
@@ -1417,11 +1441,13 @@ module.exports = {
         return {
           projectId,
           tickets: Array.isArray(records)
-            ? records.map((record) => ({
-                id: record.id,
-                version: record.version,
-                data: fromPhysicalTicketData(multitableApi.provisioning, projectId, record.data),
-              }))
+            ? await Promise.all(
+                records.map(async (record) => ({
+                  id: record.id,
+                  version: record.version,
+                  data: await fromPhysicalTicketData(multitableApi.provisioning, projectId, record.data),
+                })),
+              )
             : [],
         }
       },
@@ -1438,7 +1464,7 @@ module.exports = {
         if (!multitableApi || typeof multitableApi.records.deleteRecord !== 'function') {
           throw new Error('Multitable record delete seam is not available on plugin context')
         }
-        const sheetId = multitableApi.provisioning.getObjectSheetId(projectId, 'serviceTicket')
+        const sheetId = await findObjectSheetId(multitableApi.provisioning, projectId, 'serviceTicket')
         const deleted = await multitableApi.records.deleteRecord({
           sheetId,
           recordId: ticketId,
