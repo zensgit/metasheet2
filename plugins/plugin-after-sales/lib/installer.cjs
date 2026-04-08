@@ -42,7 +42,9 @@
  *  - Drop, delete, truncate, alter-column on any multitable object
  *  - Inject types into packages/core-backend/src/db/types.ts
  *  - Implement a plugin-side migration runner
- *  - Evaluate any expression language beyond the computeSlaDueAt(priority) helper
+ *  - Evaluate any expression language beyond the computeSlaDueAt(priority) helper.
+ *    The install step only persists the literal automation value; helper
+ *    evaluation happens later in workflow runtime.
  */
 
 const LEDGER_TABLE = 'plugin_after_sales_template_installs'

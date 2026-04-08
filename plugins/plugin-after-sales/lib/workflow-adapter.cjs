@@ -24,6 +24,8 @@ function normalizeTemplateConfig(rawConfig) {
 }
 
 function computeSlaDueAt(priority, config = DEFAULT_TEMPLATE_CONFIG, now = new Date()) {
+  // v1 runtime helper whitelist: this is the only expression the workflow
+  // engine is allowed to evaluate for after-sales templates.
   const normalized = normalizeTemplateConfig(config)
   const baseTime = now instanceof Date ? now.getTime() : new Date(now).getTime()
   const hours = priority === 'urgent' ? normalized.urgentSlaHours : normalized.defaultSlaHours
