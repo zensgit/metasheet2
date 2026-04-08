@@ -1,16 +1,17 @@
 import { createHash } from 'crypto'
 import http from 'http'
+import { createRequire } from 'module'
 import net from 'net'
 import * as path from 'path'
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { Pool } from 'pg'
 
-import { ICoreAPI } from '../../src/di/identifiers'
 import type { MetaSheetServer } from '../../src/index'
 
 type HttpResponse = { status: number; body?: unknown; raw: string }
 type ExpectedField = { name: string; type: string }
+const require = createRequire(import.meta.url)
 
 async function waitFor<T>(
   producer: () => Promise<T>,
@@ -96,10 +97,6 @@ const META_VIEW_IDS = VIEW_IDS.map(({ objectId, viewId }) =>
 )
 const stFieldId = (objectId: string, fieldId: string) =>
   stableMetaId('fld', PROJECT_ID, objectId, fieldId)
-
-function getServerCoreApi(server: MetaSheetServer): any {
-  return (server as unknown as { injector: { get: (token: unknown) => unknown } }).injector.get(ICoreAPI)
-}
 
 const EXPECTED_OBJECTS = [
   {
@@ -453,15 +450,30 @@ describe('after-sales plugin install integration', () => {
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     expect(token).toBeTruthy()
 
-    const coreApi = getServerCoreApi(server)
-    const originalEnsureObject = coreApi.multitable.provisioning.ensureObject
+    const repoRoot = path.join(__dirname, '../../../../')
+    const installerModule = require(path.join(
+      repoRoot,
+      'plugins',
+      'plugin-after-sales',
+      'lib',
+      'installer.cjs',
+    ))
+    const originalRunInstall = installerModule.runInstall
     let failOnce = true
-    coreApi.multitable.provisioning.ensureObject = async (input: unknown) => {
-      if (failOnce) {
-        failOnce = false
+    installerModule.runInstall = async (input: any) => {
+      if (!failOnce) {
+        return originalRunInstall(input)
+      }
+      failOnce = false
+      const originalEnsureObject = input.context.api.multitable.provisioning.ensureObject
+      input.context.api.multitable.provisioning.ensureObject = async () => {
         throw new Error('simulated provisioning failure')
       }
-      return originalEnsureObject(input)
+      try {
+        return await originalRunInstall(input)
+      } finally {
+        input.context.api.multitable.provisioning.ensureObject = originalEnsureObject
+      }
     }
 
     try {
@@ -521,7 +533,7 @@ describe('after-sales plugin install integration', () => {
       expect(Array.isArray(failedLedgerRes.rows[0].warnings_json)).toBe(true)
       expect((failedLedgerRes.rows[0].warnings_json as unknown[]).length).toBeGreaterThan(0)
     } finally {
-      coreApi.multitable.provisioning.ensureObject = originalEnsureObject
+      installerModule.runInstall = originalRunInstall
     }
 
     const reinstallRes = await requestJson(`${baseUrl}/api/after-sales/projects/install`, {
