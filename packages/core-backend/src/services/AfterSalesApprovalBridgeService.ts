@@ -6,6 +6,10 @@ import type { ApprovalActionRequest, UnifiedApprovalDTO } from './approval-bridg
 import { ApprovalBridgeService } from './ApprovalBridgeService'
 
 const logger = new Logger('AfterSalesApprovalBridgeService')
+// After-sales talks about a "bridge" because that is the plugin-facing command
+// vocabulary. approval_instances stores the same identifier in workflow_key to
+// stay aligned with the wider unified approval schema and ApprovalBridgeService.
+// For after-sales v1 these names intentionally point to the same stable value.
 export const REFUND_WORKFLOW_KEY = 'after-sales-refund'
 const DEFAULT_ASSIGNMENT_ROLES = ['finance', 'supervisor'] as const
 

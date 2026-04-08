@@ -35,6 +35,8 @@
  *    ledger-write-failed error (chicken-and-egg), handled by LEDGER_WRITE_FAILED.
  *  - `failed` retry is driven by the frontend choosing mode='reinstall' based on
  *    current.status. This orchestrator does NOT auto-downgrade enable to reinstall.
+ *  - The ledger `mode` field records the last attempted install mode for audit
+ *    and debugging. It is not a statement of future user intent.
  *
  * Non-goals (never do these in v1):
  *  - Drop, delete, truncate, alter-column on any multitable object
