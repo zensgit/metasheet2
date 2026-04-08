@@ -54,7 +54,11 @@ import {
   queryRecords as queryMultitableRecords,
   type MultitableRecordsQueryFn,
 } from './multitable/records'
-import { createPluginScopedMultitableApi } from './multitable/plugin-scope'
+import {
+  assertPluginOwnsSheet,
+  claimPluginObjectScope,
+  createPluginScopedMultitableApi,
+} from './multitable/plugin-scope'
 import { installMetrics, requestMetricsMiddleware } from './metrics/metrics'
 import { getPoolStats } from './db/pg'
 import { isDatabaseSchemaError } from './utils/database-errors'
@@ -984,7 +988,46 @@ export class MetaSheetServer {
     const pluginCoreApi = coreApi.multitable
       ? {
           ...coreApi,
-          multitable: createPluginScopedMultitableApi(coreApi.multitable, manifest.name),
+          multitable: createPluginScopedMultitableApi(coreApi.multitable, manifest.name, {
+            claimObjectScope: async ({ projectId, objectId, sheetId, pluginName }) => {
+              await poolManager.get().transaction(async ({ query }) => {
+                const txQuery: MultitableProvisioningQueryFn = async (sql, params) => {
+                  const result = await query(sql, params)
+                  return {
+                    rows: Array.isArray((result as { rows?: unknown[] }).rows)
+                      ? (result as { rows: unknown[] }).rows
+                      : [],
+                    rowCount: typeof (result as { rowCount?: number }).rowCount === 'number'
+                      ? (result as { rowCount: number }).rowCount
+                      : undefined,
+                  }
+                }
+                await claimPluginObjectScope(txQuery, {
+                  pluginName,
+                  projectId,
+                  objectId,
+                  sheetId,
+                })
+              })
+            },
+            assertSheetScope: async ({ sheetId, pluginName }) => {
+              const txQuery: MultitableProvisioningQueryFn = async (sql, params) => {
+                const result = await poolManager.get().query(sql, params)
+                return {
+                  rows: Array.isArray((result as { rows?: unknown[] }).rows)
+                    ? (result as { rows: unknown[] }).rows
+                    : [],
+                  rowCount: typeof (result as { rowCount?: number }).rowCount === 'number'
+                    ? (result as { rowCount: number }).rowCount
+                    : undefined,
+                }
+              }
+              await assertPluginOwnsSheet(txQuery, {
+                pluginName,
+                sheetId,
+              })
+            },
+          }),
         }
       : coreApi
     const storageCache = new Map<string, unknown>()
