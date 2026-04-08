@@ -523,62 +523,85 @@ describe('after-sales plugin install integration', () => {
     expect(patchedRecordRes.rows[0].data[stFieldId('serviceTicket', 'refundStatus')]).toBe('pending')
     expect(Number(patchedRecordRes.rows[0].version)).toBeGreaterThanOrEqual(2)
 
-    const approvalRes = await waitFor(
-      () => pool!.query<{
-        id: string
-        status: string
-        workflow_key: string
-        business_key: string
-        metadata: Record<string, unknown>
-      }>(
-        `SELECT id, status, workflow_key, business_key, metadata
-         FROM approval_instances
-         WHERE workflow_key = 'after-sales-refund'
-           AND business_key = $1`,
-        [`after-sales:${PROJECT_ID}:ticket:${createdTicketId}:refund`],
-      ),
-      (result) => result.rows.length === 1,
-      { timeoutMs: 5000, intervalMs: 100 },
-    )
-    expect(approvalRes.rows).toHaveLength(1)
-    expect(approvalRes.rows[0]).toMatchObject({
-      status: 'pending',
-      workflow_key: 'after-sales-refund',
-      business_key: `after-sales:${PROJECT_ID}:ticket:${createdTicketId}:refund`,
-    })
-
-    const assignmentRes = await waitFor(
-      () => pool!.query<{ assignee_id: string; source_step: number }>(
-        `SELECT assignee_id, source_step
-         FROM approval_assignments
-         WHERE instance_id = $1
-         ORDER BY source_step ASC`,
-        [approvalRes.rows[0].id],
-      ),
-      (result) => result.rows.length === 2,
-      { timeoutMs: 5000, intervalMs: 100 },
-    )
-    expect(assignmentRes.rows).toEqual([
-      { assignee_id: 'finance', source_step: 1 },
-      { assignee_id: 'supervisor', source_step: 2 },
-    ])
-
-    const refundStatusRes = await requestJson(
-      `${baseUrl}/api/after-sales/tickets/${createdTicketId}/refund-approval`,
-      {
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
+    const refundStatusRes = await waitFor(
+      () =>
+        requestJson(`${baseUrl}/api/after-sales/tickets/${createdTicketId}/refund-approval`, {
+          headers: {
+            Authorization: `Bearer ${token}`,
+          },
+        }),
+      (result) => {
+        if (result.status !== 200) return false
+        const body = result.body as {
+          ok?: boolean
+          data?: {
+            projectId?: string
+            approval?: {
+              id?: string
+              status?: string
+              workflowKey?: string | null
+              businessKey?: string | null
+              assignments?: Array<{
+                assigneeId?: string
+                sourceStep?: number
+                isActive?: boolean
+              }>
+            }
+          }
+        }
+        return (
+          body.ok === true &&
+          body.data?.approval?.status === 'pending' &&
+          body.data?.approval?.workflowKey === 'after-sales-refund' &&
+          body.data?.approval?.businessKey ===
+            `after-sales:${PROJECT_ID}:ticket:${createdTicketId}:refund` &&
+          (body.data?.approval?.assignments?.length || 0) === 2
+        )
       },
+      { timeoutMs: 5000, intervalMs: 100 },
     )
     expect(refundStatusRes.status).toBe(200)
-    expect((refundStatusRes.body as any).data?.approval).toMatchObject({
-      id: approvalRes.rows[0].id,
+    const refundStatusBody = refundStatusRes.body as {
+      ok?: boolean
+      data?: {
+        projectId?: string
+        approval?: {
+          id?: string
+          status?: string
+          workflowKey?: string | null
+          businessKey?: string | null
+          assignments?: Array<{
+            assigneeId?: string
+            sourceStep?: number
+            isActive?: boolean
+          }>
+        }
+      }
+    }
+    expect(refundStatusBody.ok).toBe(true)
+    expect(refundStatusBody.data?.approval).toMatchObject({
       status: 'pending',
+      workflowKey: 'after-sales-refund',
+      businessKey: `after-sales:${PROJECT_ID}:ticket:${createdTicketId}:refund`,
+      assignments: [
+        {
+          assigneeId: 'finance',
+          sourceStep: 1,
+          isActive: true,
+        },
+        {
+          assigneeId: 'supervisor',
+          sourceStep: 2,
+          isActive: true,
+        },
+      ],
     })
 
+    const approvalId = refundStatusBody.data?.approval?.id
+    expect(approvalId).toBeTruthy()
+
     const approveRes = await requestJson(
-      `${baseUrl}/api/approvals/${approvalRes.rows[0].id}/actions`,
+      `${baseUrl}/api/approvals/${approvalId}/actions`,
       {
         method: 'POST',
         headers: {
@@ -606,17 +629,31 @@ describe('after-sales plugin install integration', () => {
     )
     expect(approvedRecordRes.rows[0].data[stFieldId('serviceTicket', 'refundStatus')]).toBe('approved')
 
-    const approvedStatusRes = await requestJson(
-      `${baseUrl}/api/after-sales/tickets/${createdTicketId}/refund-approval`,
-      {
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
+    const approvedStatusRes = await waitFor(
+      () =>
+        requestJson(`${baseUrl}/api/after-sales/tickets/${createdTicketId}/refund-approval`, {
+          headers: {
+            Authorization: `Bearer ${token}`,
+          },
+        }),
+      (result) => {
+        if (result.status !== 200) return false
+        const body = result.body as {
+          ok?: boolean
+          data?: {
+            approval?: {
+              id?: string
+              status?: string
+            }
+          }
+        }
+        return body.ok === true && body.data?.approval?.status === 'approved'
       },
+      { timeoutMs: 5000, intervalMs: 100 },
     )
     expect(approvedStatusRes.status).toBe(200)
     expect((approvedStatusRes.body as any).data?.approval).toMatchObject({
-      id: approvalRes.rows[0].id,
+      id: approvalId,
       status: 'approved',
     })
   })
