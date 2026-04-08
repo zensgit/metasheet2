@@ -5,6 +5,7 @@ import {
   MultitableProjectNamespaceError,
   MultitableSheetScopeError,
   assertProjectIdAllowedForPlugin,
+  assertPluginOwnsObject,
   assertPluginOwnsSheet,
   claimPluginObjectScope,
   createPluginScopedMultitableApi,
@@ -78,7 +79,11 @@ describe('multitable plugin scope helper', () => {
   })
 
   it('wraps provisioning methods with namespace checks', async () => {
-    const claimObjectScope = vi.fn(async () => {})
+    const ensureObjectInScope = vi.fn(async () => ({
+      baseId: 'base_legacy',
+      sheet: { id: 'sheet_scoped', baseId: 'base_legacy', name: 'Ticket', description: null },
+      fields: [],
+    }))
     const assertSheetScope = vi.fn(async () => {})
     const multitable = {
       provisioning: {
@@ -112,7 +117,7 @@ describe('multitable plugin scope helper', () => {
     }
 
     const scoped = createPluginScopedMultitableApi(multitable as any, 'plugin-after-sales', {
-      claimObjectScope,
+      ensureObjectInScope,
       assertSheetScope,
     })
 
@@ -124,7 +129,7 @@ describe('multitable plugin scope helper', () => {
         descriptor: { id: 'serviceTicket', name: 'Ticket', fields: [] },
       } as any),
     ).resolves.toMatchObject({
-      sheet: { id: 'sheet_1' },
+      sheet: { id: 'sheet_scoped' },
     })
 
     expect(() =>
@@ -141,12 +146,12 @@ describe('multitable plugin scope helper', () => {
       } as any),
     ).rejects.toThrow(MultitableProjectNamespaceError)
     await scoped.records.listRecords({ sheetId: 'sheet_1' })
-    expect(claimObjectScope).toHaveBeenCalledWith({
+    expect(ensureObjectInScope).toHaveBeenCalledWith({
       pluginName: 'plugin-after-sales',
       projectId: 'tenant_42:after-sales',
-      objectId: 'serviceTicket',
-      sheetId: 'sheet_1',
+      descriptor: { id: 'serviceTicket', name: 'Ticket', fields: [] },
     })
+    expect(multitable.provisioning.ensureObject).not.toHaveBeenCalled()
     expect(assertSheetScope).toHaveBeenCalledWith({
       pluginName: 'plugin-after-sales',
       sheetId: 'sheet_1',
@@ -207,5 +212,24 @@ describe('multitable plugin scope helper', () => {
         sheetId: 'sheet_other',
       }),
     ).rejects.toThrow(MultitableSheetScopeError)
+  })
+
+  it('blocks provisioning when a registered object belongs to another plugin', async () => {
+    const { query, rows } = createScopeQuery()
+
+    rows.push({
+      sheet_id: 'sheet_other',
+      project_id: 'tenant_42:after-sales',
+      object_id: 'serviceTicket',
+      plugin_name: 'plugin-attendance',
+    })
+
+    await expect(
+      assertPluginOwnsObject(query, {
+        pluginName: 'plugin-after-sales',
+        projectId: 'tenant_42:after-sales',
+        objectId: 'serviceTicket',
+      }),
+    ).rejects.toThrow(MultitableObjectScopeError)
   })
 })

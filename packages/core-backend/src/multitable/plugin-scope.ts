@@ -17,7 +17,17 @@ export type AssertPluginSheetScopeInput = {
   sheetId: string
 }
 
+export type AssertPluginObjectScopeInput = {
+  pluginName: string
+  projectId: string
+  objectId: string
+}
+
 export type MultitableScopeHooks = {
+  ensureObjectInScope?: (
+    input: Parameters<MultitableAPI['provisioning']['ensureObject']>[0] & { pluginName: string }
+  ) => ReturnType<MultitableAPI['provisioning']['ensureObject']>
+  assertObjectScope?: (input: AssertPluginObjectScopeInput) => Promise<void>
   claimObjectScope?: (input: ClaimPluginObjectScopeInput) => Promise<void>
   assertSheetScope?: (input: AssertPluginSheetScopeInput) => Promise<void>
 }
@@ -131,6 +141,31 @@ export async function assertPluginOwnsSheet(
   return true
 }
 
+export async function assertPluginOwnsObject(
+  query: MultitableScopeQueryFn,
+  input: AssertPluginObjectScopeInput,
+): Promise<boolean> {
+  const result = await query(
+    `SELECT sheet_id, plugin_name
+     FROM plugin_multitable_object_registry
+     WHERE project_id = $1 AND object_id = $2`,
+    [input.projectId, input.objectId],
+  )
+  const row = (result.rows as Array<{ sheet_id?: unknown; plugin_name?: unknown }>)[0]
+  if (!row) return false
+
+  const ownerPluginName = typeof row.plugin_name === 'string' ? row.plugin_name : ''
+  if (ownerPluginName && ownerPluginName !== input.pluginName) {
+    throw new MultitableObjectScopeError(
+      input.pluginName,
+      input.projectId,
+      input.objectId,
+      ownerPluginName,
+    )
+  }
+  return true
+}
+
 export function createPluginScopedMultitableApi(
   multitable: MultitableAPI,
   pluginName: string,
@@ -148,6 +183,17 @@ export function createPluginScopedMultitableApi(
       },
       ensureObject: async (input) => {
         assertProjectIdAllowedForPlugin(pluginName, input.projectId)
+        if (hooks.ensureObjectInScope) {
+          return hooks.ensureObjectInScope({
+            pluginName,
+            ...input,
+          })
+        }
+        await hooks.assertObjectScope?.({
+          pluginName,
+          projectId: input.projectId,
+          objectId: input.descriptor.id,
+        })
         const result = await multitable.provisioning.ensureObject(input)
         await hooks.claimObjectScope?.({
           pluginName,

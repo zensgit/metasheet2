@@ -55,6 +55,7 @@ import {
   type MultitableRecordsQueryFn,
 } from './multitable/records'
 import {
+  assertPluginOwnsObject,
   assertPluginOwnsSheet,
   claimPluginObjectScope,
   createPluginScopedMultitableApi,
@@ -989,6 +990,57 @@ export class MetaSheetServer {
       ? {
           ...coreApi,
           multitable: createPluginScopedMultitableApi(coreApi.multitable, manifest.name, {
+            ensureObjectInScope: async ({ pluginName, projectId, baseId, descriptor }) => {
+              return poolManager.get().transaction(async ({ query }) => {
+                const txQuery: MultitableProvisioningQueryFn = async (sql, params) => {
+                  const result = await query(sql, params)
+                  return {
+                    rows: Array.isArray((result as { rows?: unknown[] }).rows)
+                      ? (result as { rows: unknown[] }).rows
+                      : [],
+                    rowCount: typeof (result as { rowCount?: number }).rowCount === 'number'
+                      ? (result as { rowCount: number }).rowCount
+                      : undefined,
+                  }
+                }
+                await assertPluginOwnsObject(txQuery, {
+                  pluginName,
+                  projectId,
+                  objectId: descriptor.id,
+                })
+                const result = await ensureMultitableObject({
+                  query: txQuery,
+                  projectId,
+                  baseId,
+                  descriptor,
+                })
+                await claimPluginObjectScope(txQuery, {
+                  pluginName,
+                  projectId,
+                  objectId: descriptor.id,
+                  sheetId: result.sheet.id,
+                })
+                return result
+              })
+            },
+            assertObjectScope: async ({ projectId, objectId, pluginName }) => {
+              const txQuery: MultitableProvisioningQueryFn = async (sql, params) => {
+                const result = await poolManager.get().query(sql, params)
+                return {
+                  rows: Array.isArray((result as { rows?: unknown[] }).rows)
+                    ? (result as { rows: unknown[] }).rows
+                    : [],
+                  rowCount: typeof (result as { rowCount?: number }).rowCount === 'number'
+                    ? (result as { rowCount: number }).rowCount
+                    : undefined,
+                }
+              }
+              await assertPluginOwnsObject(txQuery, {
+                pluginName,
+                projectId,
+                objectId,
+              })
+            },
             claimObjectScope: async ({ projectId, objectId, sheetId, pluginName }) => {
               await poolManager.get().transaction(async ({ query }) => {
                 const txQuery: MultitableProvisioningQueryFn = async (sql, params) => {
