@@ -46,7 +46,7 @@
               这里编辑的是下一次 install / reinstall 会提交的草稿。当前只暴露最小字段，保留其余默认配置。
             </p>
           </div>
-          <button class="after-sales-view__ghost-btn" :disabled="loading || installing" @click="resetConfigDraft">
+          <button class="after-sales-view__ghost-btn" :disabled="loading || installing || refreshing" @click="resetConfigDraft">
             Reset to loaded config
           </button>
         </div>
@@ -337,6 +337,19 @@ function resetConfigDraft() {
   configDraft.value = { ...baselineConfigDraft.value }
 }
 
+function buildInstallConfig() {
+  return {
+    enableWarranty: configDraft.value.enableWarranty,
+    enableRefundApproval: configDraft.value.enableRefundApproval,
+    enableVisitScheduling: configDraft.value.enableVisitScheduling,
+    enableFollowUp: configDraft.value.enableFollowUp,
+    defaultSlaHours: toPositiveNumber(configDraft.value.defaultSlaHours, DEFAULT_CONFIG.defaultSlaHours),
+    urgentSlaHours: toPositiveNumber(configDraft.value.urgentSlaHours, DEFAULT_CONFIG.urgentSlaHours),
+    followUpAfterDays: toPositiveNumber(configDraft.value.followUpAfterDays, DEFAULT_CONFIG.followUpAfterDays),
+    ...(toText(configDraft.value.overdueWebhook) ? { overdueWebhook: toText(configDraft.value.overdueWebhook) } : {}),
+  }
+}
+
 async function loadManifest() {
   manifest.value = await readEnvelope<AfterSalesManifest>('/api/after-sales/app-manifest')
 }
@@ -380,16 +393,7 @@ async function triggerInstall(mode: 'enable' | 'reinstall') {
         templateId: TEMPLATE_ID,
         mode,
         displayName: current.value.displayName || manifest.value?.displayName || 'After Sales',
-        config: {
-          enableWarranty: configDraft.value.enableWarranty,
-          enableRefundApproval: configDraft.value.enableRefundApproval,
-          enableVisitScheduling: configDraft.value.enableVisitScheduling,
-          enableFollowUp: configDraft.value.enableFollowUp,
-          defaultSlaHours: configDraft.value.defaultSlaHours,
-          urgentSlaHours: configDraft.value.urgentSlaHours,
-          followUpAfterDays: configDraft.value.followUpAfterDays,
-          ...(configDraft.value.overdueWebhook ? { overdueWebhook: configDraft.value.overdueWebhook } : {}),
-        },
+        config: buildInstallConfig(),
       }),
     })
     await refreshCurrentState()
