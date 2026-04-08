@@ -3,7 +3,7 @@ import http from 'http'
 import net from 'net'
 import * as path from 'path'
 
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { Pool } from 'pg'
 
 import type { MetaSheetServer } from '../../src/index'
@@ -173,6 +173,14 @@ describe('after-sales plugin install integration', () => {
       await cleanupAfterSalesInstallArtifacts()
       await pool.end()
     }
+  })
+
+  beforeEach(async () => {
+    // Reset ledger and multitable artifacts between tests so each `it` block
+    // starts from a clean (tenant_id, app_id) state. Without this, the second
+    // and third tests would inherit the ledger row written by the first test
+    // and the `mode='enable'` install path would hit `already-installed`.
+    await cleanupAfterSalesInstallArtifacts()
   })
 
   it('installs the after-sales template into real multitable tables and exposes current state', async () => {
