@@ -22,6 +22,20 @@ const {
   buildTicketOverdueEventPayload,
   buildFollowUpDueEventPayload,
 } = require('./lib/event-entry.cjs')
+const {
+  toPhysicalRecord,
+  fromPhysicalRecord,
+} = require('./lib/multitable-helpers.cjs')
+
+const SERVICE_TICKET_FIELDS = ['ticketNo', 'title', 'source', 'priority', 'status', 'slaDueAt', 'refundAmount']
+
+function toPhysicalTicketData(provisioning, projectId, logicalData) {
+  return toPhysicalRecord(provisioning, projectId, 'serviceTicket', logicalData)
+}
+
+function fromPhysicalTicketData(provisioning, projectId, physicalData) {
+  return fromPhysicalRecord(provisioning, projectId, 'serviceTicket', SERVICE_TICKET_FIELDS, physicalData)
+}
 
 let activeContext = null
 let workflowSubscriptionIds = []
@@ -185,6 +199,7 @@ function getMultitableWriteApi(context) {
   if (
     !provisioning ||
     typeof provisioning.getObjectSheetId !== 'function' ||
+    typeof provisioning.getFieldId !== 'function' ||
     !records ||
     typeof records.createRecord !== 'function' ||
     typeof records.getRecord !== 'function' ||
@@ -399,8 +414,9 @@ module.exports = {
           const sheetId = multitableApi.provisioning.getObjectSheetId(projectId, 'serviceTicket')
           const record = await multitableApi.records.createRecord({
             sheetId,
-            data: command.recordData,
+            data: toPhysicalTicketData(multitableApi.provisioning, projectId, command.recordData),
           })
+          const logicalRecordData = fromPhysicalTicketData(multitableApi.provisioning, projectId, record.data)
 
           let event = { accepted: false, event: 'ticket.created' }
           try {
@@ -427,7 +443,7 @@ module.exports = {
               ticket: {
                 id: record.id,
                 version: record.version,
-                data: record.data,
+                data: logicalRecordData,
               },
               event,
             },
@@ -515,16 +531,18 @@ module.exports = {
             sheetId,
             recordId: ticketId,
           })
+          const logicalExisting = fromPhysicalTicketData(multitableApi.provisioning, projectId, existingRecord.data)
           const command = buildRequestRefundCommand((req && req.body) || {}, {
             id: existingRecord.id,
-            ticketNo: existingRecord.data.ticketNo,
-            title: existingRecord.data.title,
+            ticketNo: logicalExisting.ticketNo,
+            title: logicalExisting.title,
           })
           const updatedRecord = await multitableApi.records.patchRecord({
             sheetId,
             recordId: ticketId,
-            changes: command.changes,
+            changes: toPhysicalTicketData(multitableApi.provisioning, projectId, command.changes),
           })
+          const logicalUpdated = fromPhysicalTicketData(multitableApi.provisioning, projectId, updatedRecord.data)
 
           let event = { accepted: false, event: 'ticket.refundRequested' }
           try {
@@ -548,7 +566,7 @@ module.exports = {
               ticket: {
                 id: updatedRecord.id,
                 version: updatedRecord.version,
-                data: updatedRecord.data,
+                data: logicalUpdated,
               },
               event,
             },
@@ -844,8 +862,9 @@ module.exports = {
         const sheetId = multitableApi.provisioning.getObjectSheetId(projectId, 'serviceTicket')
         const record = await multitableApi.records.createRecord({
           sheetId,
-          data: command.recordData,
+          data: toPhysicalTicketData(multitableApi.provisioning, projectId, command.recordData),
         })
+        const logicalRecordData = fromPhysicalTicketData(multitableApi.provisioning, projectId, record.data)
         const payload = buildTicketCreatedEventPayload({
           ticket: {
             id: record.id,
@@ -862,7 +881,7 @@ module.exports = {
           ticket: {
             id: record.id,
             version: record.version,
-            data: record.data,
+            data: logicalRecordData,
           },
           event: {
             accepted: true,
@@ -888,16 +907,18 @@ module.exports = {
           sheetId,
           recordId: ticketId,
         })
+        const logicalExisting = fromPhysicalTicketData(multitableApi.provisioning, projectId, existingRecord.data)
         const command = buildRequestRefundCommand(args || {}, {
           id: existingRecord.id,
-          ticketNo: existingRecord.data.ticketNo,
-          title: existingRecord.data.title,
+          ticketNo: logicalExisting.ticketNo,
+          title: logicalExisting.title,
         })
         const updatedRecord = await multitableApi.records.patchRecord({
           sheetId,
           recordId: ticketId,
-          changes: command.changes,
+          changes: toPhysicalTicketData(multitableApi.provisioning, projectId, command.changes),
         })
+        const logicalUpdated = fromPhysicalTicketData(multitableApi.provisioning, projectId, updatedRecord.data)
         const payload = buildRefundRequestedEventPayload({
           ticket: command.eventTicket,
         }, {
@@ -911,7 +932,7 @@ module.exports = {
           ticket: {
             id: updatedRecord.id,
             version: updatedRecord.version,
-            data: updatedRecord.data,
+            data: logicalUpdated,
           },
           event: {
             accepted: true,

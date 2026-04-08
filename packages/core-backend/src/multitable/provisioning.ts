@@ -160,6 +160,10 @@ export function getObjectViewId(projectId: string, objectId: string, viewId: str
   return stableMetaId('view', projectId, objectId, viewId)
 }
 
+export function getObjectFieldId(projectId: string, objectId: string, fieldId: string): string {
+  return stableMetaId('fld', projectId, objectId, fieldId)
+}
+
 function buildFieldProperty(
   field: MultitableProvisioningFieldDescriptor,
 ): Record<string, unknown> {

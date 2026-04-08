@@ -39,6 +39,7 @@ interface FakeContext {
     multitable?: {
       provisioning?: {
         getObjectSheetId: (projectId: string, objectId: string) => string
+        getFieldId: (projectId: string, objectId: string, fieldId: string) => string
         ensureObject: (input: {
           projectId: string
           descriptor: Record<string, unknown>
@@ -189,6 +190,11 @@ function createContext(): {
     hiddenFieldIds: [],
     config: {},
   }))
+  // The mock getFieldId returns `${projectId}:${objectId}:${fieldId}`. Build
+  // physical record keys that match, so getRecord/patchRecord return data in
+  // the same physical-id shape the real multitable seam would use.
+  const MOCK_PROJECT_ID = 'tenant_42:after-sales'
+  const pk = (field: string) => `${MOCK_PROJECT_ID}:serviceTicket:${field}`
   const createRecord = vi.fn(async (input: { sheetId: string; data: Record<string, unknown> }) => ({
     id: 'rec_ticket_001',
     sheetId: input.sheetId,
@@ -200,11 +206,11 @@ function createContext(): {
     sheetId: input.sheetId,
     version: 3,
     data: {
-      ticketNo: 'TK-2001',
-      title: 'No cooling output',
-      source: 'phone',
-      priority: 'high',
-      status: 'new',
+      [pk('ticketNo')]: 'TK-2001',
+      [pk('title')]: 'No cooling output',
+      [pk('source')]: 'phone',
+      [pk('priority')]: 'high',
+      [pk('status')]: 'new',
     },
   }))
   const patchRecord = vi.fn(async (input: { sheetId: string; recordId: string; changes: Record<string, unknown> }) => ({
@@ -212,11 +218,11 @@ function createContext(): {
     sheetId: input.sheetId,
     version: 4,
     data: {
-      ticketNo: 'TK-2001',
-      title: 'No cooling output',
-      source: 'phone',
-      priority: 'high',
-      status: 'new',
+      [pk('ticketNo')]: 'TK-2001',
+      [pk('title')]: 'No cooling output',
+      [pk('source')]: 'phone',
+      [pk('priority')]: 'high',
+      [pk('status')]: 'new',
       ...input.changes,
     },
   }))
@@ -232,6 +238,7 @@ function createContext(): {
       multitable: {
         provisioning: {
           getObjectSheetId: (projectId: string, objectId: string) => `${projectId}:${objectId}:sheet`,
+          getFieldId: (projectId: string, objectId: string, fieldId: string) => `${projectId}:${objectId}:${fieldId}`,
           ensureObject,
           ensureView,
         },
@@ -272,6 +279,10 @@ function buildReq(overrides: Record<string, unknown> = {}) {
     ...overrides,
   }
 }
+
+// Physical field id helper matching the mock getFieldId: `${projectId}:${objectId}:${fieldId}`
+const MOCK_PROJECT_ID = 'tenant_42:after-sales'
+const stPk = (field: string) => `${MOCK_PROJECT_ID}:serviceTicket:${field}`
 
 describe('plugin-after-sales routes', () => {
   let routes: Map<string, RegisteredHandler>
@@ -436,11 +447,11 @@ describe('plugin-after-sales routes', () => {
     expect(createRecord).toHaveBeenCalledWith({
       sheetId: 'tenant_42:after-sales:serviceTicket:sheet',
       data: {
-        ticketNo: 'TK-2001',
-        title: 'No cooling output',
-        source: 'phone',
-        priority: 'high',
-        status: 'new',
+        [stPk('ticketNo')]: 'TK-2001',
+        [stPk('title')]: 'No cooling output',
+        [stPk('source')]: 'phone',
+        [stPk('priority')]: 'high',
+        [stPk('status')]: 'new',
       },
     })
     expect(eventsEmit).toHaveBeenCalledWith(
@@ -504,11 +515,11 @@ describe('plugin-after-sales routes', () => {
     expect(createRecord).toHaveBeenCalledWith({
       sheetId: 'tenant_42:after-sales:serviceTicket:sheet',
       data: {
-        ticketNo: 'TK-2002',
-        title: 'Rattling noise',
-        source: 'web',
-        priority: 'normal',
-        status: 'new',
+        [stPk('ticketNo')]: 'TK-2002',
+        [stPk('title')]: 'Rattling noise',
+        [stPk('source')]: 'web',
+        [stPk('priority')]: 'normal',
+        [stPk('status')]: 'new',
       },
     })
   })
@@ -587,7 +598,7 @@ describe('plugin-after-sales routes', () => {
       sheetId: 'tenant_42:after-sales:serviceTicket:sheet',
       recordId: 'rec_ticket_001',
       changes: {
-        refundAmount: 88.5,
+        [stPk('refundAmount')]: 88.5,
       },
     })
     expect(eventsEmit).toHaveBeenCalledWith(

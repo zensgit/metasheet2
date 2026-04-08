@@ -92,6 +92,8 @@ const SHEET_IDS = OBJECT_IDS.map((objectId) => stableMetaId('sheet', PROJECT_ID,
 const META_VIEW_IDS = VIEW_IDS.map(({ objectId, viewId }) =>
   stableMetaId('view', PROJECT_ID, objectId, viewId),
 )
+const stFieldId = (objectId: string, fieldId: string) =>
+  stableMetaId('fld', PROJECT_ID, objectId, fieldId)
 
 describe('after-sales plugin install integration', () => {
   let server: MetaSheetServer | undefined
@@ -425,10 +427,10 @@ describe('after-sales plugin install integration', () => {
     )
     expect(recordRes.rows).toHaveLength(1)
     expect(recordRes.rows[0].data).toMatchObject({
-      ticketNo: 'TK-3001',
-      title: 'Outdoor unit not starting',
-      priority: 'high',
-      status: 'new',
+      [stFieldId('serviceTicket', 'ticketNo')]: 'TK-3001',
+      [stFieldId('serviceTicket', 'title')]: 'Outdoor unit not starting',
+      [stFieldId('serviceTicket', 'priority')]: 'high',
+      [stFieldId('serviceTicket', 'status')]: 'new',
     })
 
     const refundRes = await requestJson(
@@ -479,9 +481,9 @@ describe('after-sales plugin install integration', () => {
       ),
       (result) =>
         result.rows.length === 1 &&
-        Number(result.rows[0].data?.refundAmount) === 88.5,
+        Number(result.rows[0].data?.[stFieldId('serviceTicket', 'refundAmount')]) === 88.5,
     )
-    expect(Number(patchedRecordRes.rows[0].data.refundAmount)).toBe(88.5)
+    expect(Number(patchedRecordRes.rows[0].data[stFieldId('serviceTicket', 'refundAmount')])).toBe(88.5)
     expect(Number(patchedRecordRes.rows[0].version)).toBeGreaterThanOrEqual(2)
 
     const approvalRes = await waitFor(

@@ -365,6 +365,7 @@ export interface MultitableProvisioningViewDescriptor {
 
 export interface MultitableProvisioningAPI {
   getObjectSheetId(projectId: string, objectId: string): string
+  getFieldId(projectId: string, objectId: string, fieldId: string): string
   ensureObject(input: {
     projectId: string
     baseId?: string | null

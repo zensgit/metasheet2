@@ -40,6 +40,7 @@ import { authService } from './auth/AuthService'
 import { cache } from './cache-init'
 import {
   getObjectSheetId as getProvisionedObjectSheetId,
+  getObjectFieldId as getProvisionedObjectFieldId,
   ensureObject as ensureMultitableObject,
   ensureView as ensureMultitableView,
   type MultitableProvisioningQueryFn,
@@ -294,6 +295,7 @@ export class MetaSheetServer {
       multitable: {
         provisioning: {
           getObjectSheetId: (projectId, objectId) => getProvisionedObjectSheetId(projectId, objectId),
+          getFieldId: (projectId, objectId, fieldId) => getProvisionedObjectFieldId(projectId, objectId, fieldId),
           ensureObject: async ({ projectId, baseId, descriptor }) => {
             return poolManager.get().transaction(async ({ query }) => {
               const txQuery: MultitableProvisioningQueryFn = async (sql, params) => {
