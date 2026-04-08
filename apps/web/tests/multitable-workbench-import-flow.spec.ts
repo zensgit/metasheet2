@@ -225,6 +225,7 @@ function createGridMock(fields: Array<Record<string, unknown>>) {
     groupFieldId: ref<string | null>(null),
     groupField: ref(null),
     hiddenFieldIds: ref<string[]>([]),
+    capabilityOrigin: ref('global-rbac'),
     columnWidths: ref<Record<string, number>>({}),
     linkSummaries: ref<Record<string, Record<string, unknown[]>>>({}),
     attachmentSummaries: ref<Record<string, Record<string, unknown[]>>>({}),
@@ -611,6 +612,106 @@ describe('MultitableWorkbench import flow', () => {
     const refreshedSelect = document.body.querySelector('.meta-import__field-select') as HTMLSelectElement | null
     expect(refreshedSelect?.value).toBe('fld_name')
     expect(refreshedSelect?.selectedOptions[0]?.textContent).toContain('Name Renamed')
+  })
+
+  it('preserves title when a people repair is reconciled after field drift in the workbench flow', async () => {
+    mountWorkbench([
+      { id: 'fld_title', name: 'Title', type: 'string' },
+      { id: 'fld_owner', name: 'Owner', type: 'link', property: { refKind: 'user', foreignSheetId: 'sheet_people', limitSingleRecord: true } },
+    ])
+
+    workbenchMock.client.listFields.mockResolvedValue({
+      fields: [
+        { id: 'fld_people_name', name: 'Name', type: 'string' },
+        { id: 'fld_people_email', name: 'Email', type: 'string' },
+      ],
+    })
+    workbenchMock.client.listRecordSummaries.mockImplementation(async ({ displayFieldId }: { displayFieldId: string }) => {
+      if (displayFieldId === 'fld_people_name') {
+        return {
+          records: [
+            { id: 'rec_owner_1', display: 'Owner' },
+            { id: 'rec_owner_2', display: 'Owner' },
+          ],
+          displayMap: {},
+          page: { offset: 0, limit: 200, total: 2, hasMore: false },
+        }
+      }
+      return {
+        records: [],
+        displayMap: {},
+        page: { offset: 0, limit: 200, total: 0, hasMore: false },
+      }
+    })
+    mockGlobalListLinkOptions.mockResolvedValue({
+      field: { id: 'fld_owner', name: 'Owner', type: 'link', property: { refKind: 'user', foreignSheetId: 'sheet_people', limitSingleRecord: true } },
+      targetSheet: { id: 'sheet_people', baseId: 'base_ops', name: 'People' },
+      selected: [],
+      records: [{ id: 'rec_owner_1', display: 'Owner Person' }],
+      page: { offset: 0, limit: 50, total: 1, hasMore: false },
+    })
+    workbenchMock.client.createRecord.mockResolvedValue({ record: { id: 'rec_people_fix', version: 1, data: {} } })
+
+    await flushUi()
+
+    container!.querySelector<HTMLButtonElement>('[data-open-import="true"]')!.click()
+    await flushUi()
+
+    const textarea = document.body.querySelector('.meta-import__textarea') as HTMLTextAreaElement
+    textarea.value = 'Title\tOwner\nAlpha\tOwner'
+    textarea.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+
+    ;(document.body.querySelector('.meta-import__btn--primary') as HTMLButtonElement)?.click()
+    await flushUi()
+
+    Array.from(document.body.querySelectorAll('.meta-import__actions .meta-import__btn'))
+      .find((button) => button.textContent?.includes('Import 1 record'))
+      ?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi(12)
+
+    Array.from(document.body.querySelectorAll('.meta-import__fix-picker-row .meta-import__btn'))
+      .find((button) => button.textContent?.includes('Choose person') || button.textContent?.includes('Choose people') || button.textContent?.includes('Select person'))
+      ?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi()
+
+    ;(document.body.querySelector('.meta-link-picker__item input[type="checkbox"]') as HTMLInputElement)?.click()
+    await flushUi()
+    ;(document.body.querySelector('.meta-link-picker__confirm') as HTMLButtonElement)?.click()
+    await flushUi(12)
+
+    workbenchMock.loadSheetMeta.mockImplementation(async () => {
+      workbenchMock.fields.value = [
+        { id: 'fld_title', name: 'Title', type: 'string' },
+        { id: 'fld_owner', name: 'Owner Repair', type: 'string', property: {} },
+      ] as any
+      return true
+    })
+
+    await vi.advanceTimersByTimeAsync(1300)
+    await flushUi(16)
+
+    expect(document.body.textContent).toContain('A selected linked-record repair for Owner Repair is no longer valid because the field changed type.')
+
+    Array.from(document.body.querySelectorAll('.meta-import__warning .meta-import__btn-inline'))
+      .find((button) => button.textContent?.includes('Reconcile draft'))
+      ?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi(12)
+
+    Array.from(document.body.querySelectorAll('.meta-import__actions .meta-import__btn'))
+      .find((button) => button.textContent?.includes('Apply fixes and retry'))
+      ?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi(20)
+
+    expect(workbenchMock.client.createRecord).toHaveBeenCalledTimes(1)
+    expect(workbenchMock.client.createRecord).toHaveBeenCalledWith({
+      sheetId: 'sheet_orders',
+      viewId: 'view_grid',
+      data: { fld_title: 'Alpha', fld_owner: 'Owner Person' },
+    }, expect.objectContaining({ signal: expect.any(AbortSignal) }))
+    expect(gridMock.loadViewData).toHaveBeenCalled()
+    expect(showSuccessSpy).toHaveBeenLastCalledWith('1 record(s) imported')
+    expect(document.body.querySelector('.meta-import-modal')).toBeNull()
   })
 
   it('cancels an in-flight import and closes the modal cleanly', async () => {

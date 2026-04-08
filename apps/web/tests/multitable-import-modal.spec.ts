@@ -595,6 +595,119 @@ describe('MetaImportModal', () => {
     container.remove()
   })
 
+  it('preserves non-problem mapped columns when a picker repair is reconciled after field drift', async () => {
+    mockListLinkOptions.mockResolvedValue({
+      field: { id: 'fld_owner', name: 'Owner', type: 'link', property: { refKind: 'user', foreignSheetId: 'sheet_people', limitSingleRecord: true } },
+      targetSheet: { id: 'sheet_people', baseId: 'base_1', name: 'People' },
+      selected: [],
+      records: [{ id: 'rec_owner_1', display: 'Owner Person' }],
+      page: { offset: 0, limit: 50, total: 1, hasMore: false },
+    })
+
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const importCalls: Array<{ records: Array<Record<string, unknown>>; failures: Array<{ rowIndex: number; message: string }> }> = []
+
+    const Harness = defineComponent({
+      setup() {
+        const visible = ref(true)
+        const importing = ref(false)
+        const result = ref<any>(null)
+        const fields = ref<any[]>([
+          { id: 'fld_title', name: 'Title', type: 'string' },
+          { id: 'fld_owner', name: 'Owner', type: 'link', property: { refKind: 'user', foreignSheetId: 'sheet_people', limitSingleRecord: true } },
+        ])
+        const fieldResolvers = {
+          fld_owner: async () => {
+            throw new Error('Multiple people match "Owner". Use email for an exact match.')
+          },
+        }
+
+        return {
+          visible,
+          importing,
+          result,
+          fields,
+          fieldResolvers,
+          onClose: vi.fn(),
+          onImport(payload: { records: Array<Record<string, unknown>>; failures: Array<{ rowIndex: number; message: string }> }) {
+            importCalls.push({ records: payload.records, failures: payload.failures })
+            result.value = {
+              attempted: payload.records.length + payload.failures.length,
+              succeeded: payload.records.length,
+              failed: payload.failures.length,
+              firstError: payload.failures[0]?.message ?? null,
+              failures: payload.failures,
+            }
+            importing.value = false
+          },
+        }
+      },
+      render() {
+        return h(MetaImportModal, {
+          visible: this.visible,
+          fields: this.fields,
+          fieldResolvers: this.fieldResolvers,
+          importing: this.importing,
+          result: this.result,
+          onClose: this.onClose,
+          onImport: this.onImport,
+        })
+      },
+    })
+
+    const app = createApp(Harness)
+    const vm = app.mount(container) as any
+    await flushUi()
+
+    const textarea = document.body.querySelector('.meta-import__textarea') as HTMLTextAreaElement
+    textarea.value = 'Title\tOwner\nAlpha\tOwner'
+    textarea.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+    ;(document.body.querySelector('.meta-import__btn--primary') as HTMLButtonElement)?.click()
+    await flushUi()
+
+    Array.from(document.body.querySelectorAll('.meta-import__actions .meta-import__btn'))
+      .find((button) => button.textContent?.includes('Import'))
+      ?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi()
+
+    Array.from(document.body.querySelectorAll('.meta-import__fix-picker-row .meta-import__btn'))
+      .find((button) => button.textContent?.includes('Choose person') || button.textContent?.includes('Choose people') || button.textContent?.includes('Select person'))
+      ?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi()
+
+    ;(document.body.querySelector('.meta-link-picker__item input[type="checkbox"]') as HTMLInputElement)?.click()
+    await flushUi()
+    ;(document.body.querySelector('.meta-link-picker__confirm') as HTMLButtonElement)?.click()
+    await flushUi()
+
+    vm.fields = [
+      { id: 'fld_title', name: 'Title', type: 'string' },
+      { id: 'fld_owner', name: 'Owner Repair', type: 'string', property: {} },
+    ]
+    await flushUi()
+
+    expect(document.body.textContent).toContain('A selected linked-record repair for Owner Repair is no longer valid because the field changed type.')
+
+    Array.from(document.body.querySelectorAll('.meta-import__warning .meta-import__btn-inline'))
+      .find((button) => button.textContent?.includes('Reconcile draft'))
+      ?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi()
+
+    Array.from(document.body.querySelectorAll('.meta-import__actions .meta-import__btn'))
+      .find((button) => button.textContent?.includes('Apply fixes and retry'))
+      ?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi()
+
+    expect(importCalls).toHaveLength(2)
+    expect(importCalls[1]?.records).toEqual([{ fld_title: 'Alpha', fld_owner: 'Owner Person' }])
+    expect(importCalls[1]?.failures).toEqual([])
+
+    app.unmount()
+    container.remove()
+  })
+
   it('restores a persisted import draft when reopened for the same sheet', async () => {
     const container = document.createElement('div')
     document.body.appendChild(container)

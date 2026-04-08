@@ -580,7 +580,7 @@ const gridAllowsAnyDelete = computed(() =>
   effectiveRowActions.value.canDelete || Object.values(grid.rowActionOverrides.value).some((actions) => actions.canDelete),
 )
 const importSurfaceFields = computed(() =>
-  propertyVisibleGridFields.value.filter((field) => {
+  propertyVisibleWorkbenchFields.value.filter((field) => {
     const permission = effectiveFieldPermissions.value[field.id]
     return permission?.visible !== false && permission?.readOnly !== true
   }),
