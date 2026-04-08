@@ -9,6 +9,7 @@ import { Pool } from 'pg'
 import type { MetaSheetServer } from '../../src/index'
 
 type HttpResponse = { status: number; body?: unknown; raw: string }
+type ExpectedField = { name: string; type: string }
 
 async function waitFor<T>(
   producer: () => Promise<T>,
@@ -94,6 +95,128 @@ const META_VIEW_IDS = VIEW_IDS.map(({ objectId, viewId }) =>
 )
 const stFieldId = (objectId: string, fieldId: string) =>
   stableMetaId('fld', PROJECT_ID, objectId, fieldId)
+
+const EXPECTED_OBJECTS = [
+  {
+    objectId: 'serviceTicket',
+    sheetName: 'Service Ticket',
+    fields: [
+      { name: 'Ticket No', type: 'string' },
+      { name: 'Title', type: 'string' },
+      { name: 'Source', type: 'select' },
+      { name: 'Priority', type: 'select' },
+      { name: 'Status', type: 'select' },
+      { name: 'SLA Due At', type: 'date' },
+      { name: 'Refund Amount', type: 'number' },
+      { name: 'Refund Status', type: 'select' },
+    ],
+    view: { id: 'ticket-board', name: 'Ticket Board', type: 'kanban' },
+  },
+  {
+    objectId: 'installedAsset',
+    sheetName: 'Installed Asset',
+    fields: [
+      { name: 'Asset Code', type: 'string' },
+      { name: 'Serial No', type: 'string' },
+      { name: 'Model', type: 'string' },
+      { name: 'Location', type: 'string' },
+      { name: 'Installed At', type: 'date' },
+      { name: 'Warranty Until', type: 'date' },
+      { name: 'Status', type: 'select' },
+    ],
+    view: { id: 'installedAsset-grid', name: 'Installed Assets', type: 'grid' },
+  },
+  {
+    objectId: 'customer',
+    sheetName: 'Customer',
+    fields: [
+      { name: 'Customer Code', type: 'string' },
+      { name: 'Name', type: 'string' },
+      { name: 'Phone', type: 'string' },
+      { name: 'Email', type: 'string' },
+      { name: 'Status', type: 'select' },
+    ],
+    view: { id: 'customer-grid', name: 'Customers', type: 'grid' },
+  },
+  {
+    objectId: 'serviceRecord',
+    sheetName: 'Service Record',
+    fields: [
+      { name: 'Ticket No', type: 'string' },
+      { name: 'Visit Type', type: 'select' },
+      { name: 'Scheduled At', type: 'date' },
+      { name: 'Completed At', type: 'date' },
+      { name: 'Technician Name', type: 'string' },
+      { name: 'Work Summary', type: 'string' },
+      { name: 'Result', type: 'select' },
+    ],
+    view: { id: 'serviceRecord-calendar', name: 'Service Schedule', type: 'calendar' },
+  },
+  {
+    objectId: 'partItem',
+    sheetName: 'Part Item',
+    fields: [
+      { name: 'Part No', type: 'string' },
+      { name: 'Name', type: 'string' },
+      { name: 'Category', type: 'select' },
+      { name: 'Stock Qty', type: 'number' },
+      { name: 'Status', type: 'select' },
+    ],
+    view: { id: 'partItem-grid', name: 'Parts', type: 'grid' },
+  },
+  {
+    objectId: 'followUp',
+    sheetName: 'Follow Up',
+    fields: [
+      { name: 'Ticket No', type: 'string' },
+      { name: 'Customer Name', type: 'string' },
+      { name: 'Due At', type: 'date' },
+      { name: 'Follow Up Type', type: 'select' },
+      { name: 'Owner Name', type: 'string' },
+      { name: 'Status', type: 'select' },
+      { name: 'Summary', type: 'string' },
+    ],
+    view: { id: 'followUp-grid', name: 'Follow Ups', type: 'grid' },
+  },
+] as const
+
+async function assertSheetFields(
+  pool: Pool,
+  objectId: string,
+  expectedSheetName: string,
+  expectedFields: ExpectedField[],
+) {
+  const sheetId = stableMetaId('sheet', PROJECT_ID, objectId)
+  const sheetRes = await pool.query<{ id: string; name: string }>(
+    'SELECT id, name FROM meta_sheets WHERE id = $1',
+    [sheetId],
+  )
+  expect(sheetRes.rows).toEqual([{ id: sheetId, name: expectedSheetName }])
+
+  const fieldRes = await pool.query<{ name: string; type: string }>(
+    `SELECT name, type
+     FROM meta_fields
+     WHERE sheet_id = $1
+     ORDER BY "order" ASC, id ASC`,
+    [sheetId],
+  )
+  expect(fieldRes.rows).toEqual(expectedFields)
+}
+
+async function assertView(
+  pool: Pool,
+  objectId: string,
+  viewId: string,
+  expectedName: string,
+  expectedType: string,
+) {
+  const metaViewId = stableMetaId('view', PROJECT_ID, objectId, viewId)
+  const viewRes = await pool.query<{ id: string; name: string; type: string }>(
+    'SELECT id, name, type FROM meta_views WHERE id = $1',
+    [metaViewId],
+  )
+  expect(viewRes.rows).toEqual([{ id: metaViewId, name: expectedName, type: expectedType }])
+}
 
 describe('after-sales plugin install integration', () => {
   let server: MetaSheetServer | undefined
@@ -279,48 +402,10 @@ describe('after-sales plugin install integration', () => {
       },
     ])
 
-    const installedAssetSheetId = stableMetaId('sheet', PROJECT_ID, 'installedAsset')
-    const installedAssetViewId = stableMetaId('view', PROJECT_ID, 'installedAsset', 'installedAsset-grid')
-
-    const sheetRes = await pool.query<{ id: string; name: string }>(
-      'SELECT id, name FROM meta_sheets WHERE id = $1',
-      [installedAssetSheetId],
-    )
-    expect(sheetRes.rows).toEqual([
-      {
-        id: installedAssetSheetId,
-        name: 'Installed Asset',
-      },
-    ])
-
-    const fieldRes = await pool.query<{ name: string; type: string }>(
-      `SELECT name, type
-       FROM meta_fields
-       WHERE sheet_id = $1
-       ORDER BY "order" ASC, id ASC`,
-      [installedAssetSheetId],
-    )
-    expect(fieldRes.rows).toEqual([
-      { name: 'Asset Code', type: 'string' },
-      { name: 'Serial No', type: 'string' },
-      { name: 'Model', type: 'string' },
-      { name: 'Location', type: 'string' },
-      { name: 'Installed At', type: 'date' },
-      { name: 'Warranty Until', type: 'date' },
-      { name: 'Status', type: 'select' },
-    ])
-
-    const viewRes = await pool.query<{ id: string; name: string; type: string }>(
-      'SELECT id, name, type FROM meta_views WHERE id = $1',
-      [installedAssetViewId],
-    )
-    expect(viewRes.rows).toEqual([
-      {
-        id: installedAssetViewId,
-        name: 'Installed Assets',
-        type: 'grid',
-      },
-    ])
+    for (const objectDef of EXPECTED_OBJECTS) {
+      await assertSheetFields(pool, objectDef.objectId, objectDef.sheetName, [...objectDef.fields])
+      await assertView(pool, objectDef.objectId, objectDef.view.id, objectDef.view.name, objectDef.view.type)
+    }
   })
 
   it('rejects install for non-admin callers', async () => {
