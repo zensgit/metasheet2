@@ -6,7 +6,6 @@ import * as path from 'path'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { Pool } from 'pg'
 
-import { ICoreAPI } from '../../src/di/identifiers'
 import type { MetaSheetServer } from '../../src/index'
 
 type HttpResponse = { status: number; body?: unknown; raw: string }
@@ -96,10 +95,6 @@ const META_VIEW_IDS = VIEW_IDS.map(({ objectId, viewId }) =>
 )
 const stFieldId = (objectId: string, fieldId: string) =>
   stableMetaId('fld', PROJECT_ID, objectId, fieldId)
-
-function getServerCoreApi(server: MetaSheetServer): any {
-  return (server as unknown as { injector: { get: (token: unknown) => unknown } }).injector.get(ICoreAPI)
-}
 
 const EXPECTED_OBJECTS = [
   {
@@ -453,16 +448,29 @@ describe('after-sales plugin install integration', () => {
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     expect(token).toBeTruthy()
 
-    const coreApi = getServerCoreApi(server)
-    const originalEnsureObject = coreApi.multitable.provisioning.ensureObject
-    let failOnce = true
-    coreApi.multitable.provisioning.ensureObject = async (input: unknown) => {
-      if (failOnce) {
-        failOnce = false
-        throw new Error('simulated provisioning failure')
-      }
-      return originalEnsureObject(input)
+    const serverRuntime = server as unknown as {
+      createPluginContext: (loaded: unknown) => any
+      deactivatePluginByName: (name: string) => Promise<unknown>
+      activatePluginByName: (name: string) => Promise<unknown>
     }
+    const originalCreatePluginContext = serverRuntime.createPluginContext.bind(serverRuntime)
+    let failOnce = true
+    serverRuntime.createPluginContext = (loaded: any) => {
+      const context = originalCreatePluginContext(loaded)
+      if (loaded?.manifest?.name === 'plugin-after-sales' && context?.api?.multitable?.provisioning) {
+        const originalEnsureObject = context.api.multitable.provisioning.ensureObject
+        context.api.multitable.provisioning.ensureObject = async (input: unknown) => {
+          if (failOnce) {
+            failOnce = false
+            throw new Error('simulated provisioning failure')
+          }
+          return originalEnsureObject(input)
+        }
+      }
+      return context
+    }
+    await serverRuntime.deactivatePluginByName('plugin-after-sales')
+    await serverRuntime.activatePluginByName('plugin-after-sales')
 
     try {
       const failedInstallRes = await requestJson(`${baseUrl}/api/after-sales/projects/install`, {
@@ -521,7 +529,9 @@ describe('after-sales plugin install integration', () => {
       expect(Array.isArray(failedLedgerRes.rows[0].warnings_json)).toBe(true)
       expect((failedLedgerRes.rows[0].warnings_json as unknown[]).length).toBeGreaterThan(0)
     } finally {
-      coreApi.multitable.provisioning.ensureObject = originalEnsureObject
+      serverRuntime.createPluginContext = originalCreatePluginContext
+      await serverRuntime.deactivatePluginByName('plugin-after-sales')
+      await serverRuntime.activatePluginByName('plugin-after-sales')
     }
 
     const reinstallRes = await requestJson(`${baseUrl}/api/after-sales/projects/install`, {
