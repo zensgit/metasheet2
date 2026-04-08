@@ -121,6 +121,80 @@ async function waitForPredicate(predicate, label) {
   throw new Error(`${label} timed out: ${JSON.stringify(lastValue)}`)
 }
 
+async function waitForActionButtonEnabled(button, label) {
+  return waitForPredicate(async () => {
+    const visible = await button.isVisible().catch(() => false)
+    const disabled = await button.isDisabled().catch(() => true)
+    const warningTexts = await button.page().locator('.meta-import__warning').allTextContents().catch(() => [])
+    const warningText = warningTexts.map((text) => text.trim()).filter(Boolean).join(' | ')
+    const fixesVisible = await button.page().locator('.meta-import__fixes').isVisible().catch(() => false)
+    return {
+      ok: visible && !disabled,
+      visible,
+      disabled,
+      warningText,
+      fixesVisible,
+    }
+  }, label)
+}
+
+async function ensureImportFieldMapped(page, { headerText, fieldId, label }) {
+  const mappingRow = page.locator('.meta-import__map-row').filter({ hasText: headerText }).first()
+  const fieldSelect = mappingRow.locator('.meta-import__field-select')
+  await fieldSelect.waitFor({ state: 'visible', timeout: timeoutMs })
+  const currentValue = await fieldSelect.inputValue().catch(() => '')
+  if (currentValue !== fieldId) {
+    await fieldSelect.selectOption(fieldId)
+  }
+  await waitForLocatorInputValue(fieldSelect, fieldId)
+  return waitForPredicate(async () => {
+    const value = await fieldSelect.inputValue().catch(() => '')
+    return {
+      ok: value === fieldId,
+      value,
+      headerText,
+      fieldId,
+    }
+  }, label)
+}
+
+async function ensureImportFieldMappedByColumnIndex(page, { columnIndex, fieldId, label }) {
+  const fieldSelect = page.locator('.meta-import__field-select').nth(columnIndex)
+  await fieldSelect.waitFor({ state: 'visible', timeout: timeoutMs })
+  const currentValue = await fieldSelect.inputValue().catch(() => '')
+  if (currentValue !== fieldId) {
+    await fieldSelect.selectOption(fieldId)
+  }
+  return waitForPredicate(async () => {
+    const value = await fieldSelect.inputValue().catch(() => '')
+    return {
+      ok: value === fieldId,
+      value,
+      columnIndex,
+      fieldId,
+    }
+  }, label)
+}
+
+async function selectLinkPickerOption(page, { display, label }) {
+  const pickerSearch = page.locator('.meta-link-picker__input')
+  await pickerSearch.fill(display)
+  const target = page.locator('.meta-link-picker__item').filter({ hasText: display }).first()
+  await waitForPredicate(async () => {
+    const visible = await target.isVisible().catch(() => false)
+    const loading = await page.locator('.meta-link-picker__loading').isVisible().catch(() => false)
+    const empty = await page.locator('.meta-link-picker__empty').isVisible().catch(() => false)
+    return {
+      ok: visible && !loading,
+      visible,
+      loading,
+      empty,
+      display,
+    }
+  }, label)
+  await target.click()
+}
+
 function headers(token, extra = {}) {
   return {
     Authorization: `Bearer ${token}`,
@@ -661,6 +735,37 @@ async function findRecordBySearch(token, sheetId, viewId, search) {
     attachmentSummaries: data?.attachmentSummaries ?? {},
     page: data?.page ?? null,
   }
+}
+
+async function waitForImportedGridRow(page, {
+  token,
+  baseId,
+  sheetId,
+  viewId,
+  searchValue,
+  label,
+}) {
+  const imported = await waitForPredicate(async () => {
+    const result = await findRecordBySearch(token, sheetId, viewId, searchValue)
+    return {
+      ok: !!result.row?.id,
+      rowId: result.row?.id ?? null,
+      total: result.page?.total ?? null,
+    }
+  }, `${label} api hydration`)
+
+  await page.reload({ waitUntil: 'domcontentloaded', timeout: timeoutMs })
+  await page.getByRole('searchbox', { name: 'Search records' }).waitFor({ state: 'visible', timeout: timeoutMs })
+  verifyDirectRouteEntry(page, {
+    checkName: 'ui.route.grid-entry',
+    baseId,
+    sheetId,
+    viewId,
+  })
+  const search = page.getByRole('searchbox', { name: 'Search records' })
+  await search.fill(searchValue)
+  await page.locator('.meta-grid__row').filter({ hasText: searchValue }).first().waitFor({ state: 'visible', timeout: timeoutMs })
+  return imported
 }
 
 function multitableUrl(baseId, sheetId, viewId, extra = {}) {
@@ -1402,7 +1507,9 @@ async function importRecordViaGrid(page, { baseId, sheetId, viewId, csvPath, sea
   await page.getByText('Import Records').waitFor({ state: 'visible', timeout: timeoutMs })
   await page.locator('input.meta-import__file-input[type="file"]').setInputFiles(csvPath)
   await page.getByRole('button', { name: 'Preview' }).click()
-  await page.getByRole('button', { name: /Import 1 record\(s\)/ }).click()
+  const importButton = page.getByRole('button', { name: /Import 1 record\(s\)/ })
+  await waitForActionButtonEnabled(importButton, 'grid import button enable')
+  await importButton.click()
   await page.getByText('1 record(s) imported').waitFor({ state: 'visible', timeout: timeoutMs })
 
   const search = page.getByRole('searchbox', { name: 'Search records' })
@@ -1481,7 +1588,9 @@ async function importRecordsViaGridWithRetry(page, {
     await page.getByText('Import Records').waitFor({ state: 'visible', timeout: timeoutMs })
     await page.locator('input.meta-import__file-input[type="file"]').setInputFiles(csvPath)
     await page.getByRole('button', { name: 'Preview' }).click()
-    await page.getByRole('button', { name: /Import 2 record\(s\)/ }).click()
+    const importButton = page.getByRole('button', { name: /Import 2 record\(s\)/ })
+    await waitForActionButtonEnabled(importButton, 'grid retry import button enable')
+    await importButton.click()
     await page.getByRole('button', { name: 'Retry failed rows' }).waitFor({ state: 'visible', timeout: timeoutMs })
     if (failedRetryRowAttempts < 2) {
       throw new Error(`Import retry interception did not exhaust transport retries. Attempts=${failedRetryRowAttempts}; observed titles: ${JSON.stringify(Array.from(observedImportTitles))}`)
@@ -1506,10 +1615,14 @@ async function importRecordsViaGridWithRetry(page, {
 }
 
 async function importRecordViaGridWithPeopleManualFix(page, {
+  token,
   baseId,
   sheetId,
   viewId,
   csvPath,
+  titleFieldId,
+  personFieldId,
+  personFieldName,
   importedRowTitle,
   personDisplay,
 }) {
@@ -1525,24 +1638,38 @@ async function importRecordViaGridWithPeopleManualFix(page, {
   await page.getByText('Import Records').waitFor({ state: 'visible', timeout: timeoutMs })
   await page.locator('input.meta-import__file-input[type="file"]').setInputFiles(csvPath)
   await page.getByRole('button', { name: 'Preview' }).click()
-  await page.getByRole('button', { name: /Import 1 record\(s\)/ }).click()
+  await ensureImportFieldMappedByColumnIndex(page, {
+    columnIndex: 0,
+    fieldId: titleFieldId,
+    label: 'people manual-fix title mapping',
+  })
+  await ensureImportFieldMappedByColumnIndex(page, {
+    columnIndex: 1,
+    fieldId: personFieldId,
+    label: 'people manual-fix owner mapping',
+  })
+  const importButton = page.getByRole('button', { name: /Import 1 record\(s\)/ })
+  await waitForActionButtonEnabled(importButton, 'grid people manual-fix import button enable')
+  await importButton.click()
   await page.locator('.meta-import__fixes').waitFor({ state: 'visible', timeout: timeoutMs })
   await page.getByRole('button', { name: /Select person|Select people|Choose person|Choose people/ }).click()
   await page.locator('.meta-link-picker').waitFor({ state: 'visible', timeout: timeoutMs })
-
-  const pickerSearch = page.locator('.meta-link-picker__input')
-  await pickerSearch.fill(personDisplay)
-  await page.waitForTimeout(400)
-  await page.locator('.meta-link-picker__item').filter({ hasText: personDisplay }).first().click()
+  await selectLinkPickerOption(page, {
+    display: personDisplay,
+    label: 'people manual-fix picker option',
+  })
   await page.getByRole('button', { name: 'Confirm' }).click()
   await page.locator('.meta-import__fix-selected').getByText(personDisplay).waitFor({ state: 'visible', timeout: timeoutMs })
   await page.getByRole('button', { name: 'Apply fixes and retry' }).click()
   await page.locator('.meta-import-overlay').waitFor({ state: 'hidden', timeout: timeoutMs })
-
-  const search = page.getByRole('searchbox', { name: 'Search records' })
-  await search.fill(importedRowTitle)
-  await page.getByText('1 rows').waitFor({ state: 'visible', timeout: timeoutMs })
-  await page.locator('.meta-grid__row').filter({ hasText: importedRowTitle }).first().waitFor({ state: 'visible', timeout: timeoutMs })
+  await waitForImportedGridRow(page, {
+    token,
+    baseId,
+    sheetId,
+    viewId,
+    searchValue: importedRowTitle,
+    label: 'people manual-fix import',
+  })
   await page.screenshot({ path: path.join(outputDir, 'grid-import-people-manual-fix.png'), fullPage: true })
   record('ui.import.people-manual-fix', true, {
     baseId,
@@ -1642,6 +1769,7 @@ async function verifyPeopleRepairReconcile(page, {
   baseId,
   sheetId,
   viewId,
+  titleFieldId,
   fieldId,
   fieldName,
   renamedFieldName,
@@ -1661,15 +1789,26 @@ async function verifyPeopleRepairReconcile(page, {
 
   await page.locator('.meta-import__textarea').fill(`Title\t${fieldName}\n${importedRowTitle}\t__needs_fix__`)
   await page.getByRole('button', { name: 'Preview' }).click()
-  await page.getByRole('button', { name: /Import 1 record\(s\)/ }).click()
+  await ensureImportFieldMappedByColumnIndex(page, {
+    columnIndex: 0,
+    fieldId: titleFieldId,
+    label: 'people repair title mapping',
+  })
+  await ensureImportFieldMappedByColumnIndex(page, {
+    columnIndex: 1,
+    fieldId,
+    label: 'people repair field mapping',
+  })
+  const importButton = page.getByRole('button', { name: /Import 1 record\(s\)/ })
+  await waitForActionButtonEnabled(importButton, 'grid people repair import button enable')
+  await importButton.click()
   await page.locator('.meta-import__fixes').waitFor({ state: 'visible', timeout: timeoutMs })
   await page.getByRole('button', { name: /Select person|Select people|Choose person|Choose people/ }).click()
   await page.locator('.meta-link-picker').waitFor({ state: 'visible', timeout: timeoutMs })
-
-  const pickerSearch = page.locator('.meta-link-picker__input')
-  await pickerSearch.fill(personDisplay)
-  await page.waitForTimeout(400)
-  await page.locator('.meta-link-picker__item').filter({ hasText: personDisplay }).first().click()
+  await selectLinkPickerOption(page, {
+    display: personDisplay,
+    label: 'people repair picker option',
+  })
   await page.getByRole('button', { name: 'Confirm' }).click()
   await page.locator('.meta-import__fix-selected').getByText(personDisplay).waitFor({ state: 'visible', timeout: timeoutMs })
 
@@ -1691,7 +1830,16 @@ async function verifyPeopleRepairReconcile(page, {
   await warning.waitFor({ state: 'hidden', timeout: timeoutMs })
 
   const pickerButtonsAfterReconcile = await page.getByRole('button', { name: /Select person|Select people|Choose person|Choose people/ }).count()
-  const applyDisabledAfterReconcile = await applyButton.isDisabled()
+  const applyState = await waitForActionButtonEnabled(applyButton, 'grid people repair apply button enable')
+  const applyDisabledAfterReconcile = applyState.disabled
+  const createRecordRequestPromise = page.waitForRequest(
+    (request) => request.method() === 'POST' && request.url().includes('/api/multitable/records'),
+    { timeout: timeoutMs },
+  ).catch(() => null)
+  const createRecordResponsePromise = page.waitForResponse(
+    (response) => response.request().method() === 'POST' && response.url().includes('/api/multitable/records'),
+    { timeout: timeoutMs },
+  ).catch(() => null)
   await applyButton.click()
   try {
     await page.locator('.meta-import-overlay').waitFor({ state: 'hidden', timeout: timeoutMs })
@@ -1709,10 +1857,50 @@ async function verifyPeopleRepairReconcile(page, {
     throw error
   }
 
-  const search = page.getByRole('searchbox', { name: 'Search records' })
-  await search.fill(importedRowTitle)
-  await page.getByText('1 rows').waitFor({ state: 'visible', timeout: timeoutMs })
-  await page.locator('.meta-grid__row').filter({ hasText: importedRowTitle }).first().waitFor({ state: 'visible', timeout: timeoutMs })
+  const createRecordRequest = await createRecordRequestPromise
+  const createRecordResponse = await createRecordResponsePromise
+  let createRecordPayload = null
+  let createRecordResponseBody = null
+  const createRecordStatus = createRecordResponse?.status?.() ?? null
+  if (createRecordRequest) {
+    try {
+      createRecordPayload = createRecordRequest.postDataJSON()
+    } catch {
+      createRecordPayload = createRecordRequest.postData() ?? null
+    }
+  }
+  if (createRecordResponse) {
+    try {
+      createRecordResponseBody = await createRecordResponse.json()
+    } catch {
+      createRecordResponseBody = await createRecordResponse.text().catch(() => null)
+    }
+  }
+
+  let imported
+  try {
+    imported = await waitForImportedGridRow(page, {
+      token,
+      baseId,
+      sheetId,
+      viewId,
+      searchValue: importedRowTitle,
+      label: 'people repair reconcile import',
+    })
+  } catch (error) {
+    record('ui.import.people-repair-reconcile-diagnostic', false, {
+      baseId,
+      sheetId,
+      viewId,
+      fieldId,
+      renamedFieldName,
+      importedRowTitle,
+      createRecordPayload,
+      createRecordStatus,
+      createRecordResponseBody,
+    })
+    throw error
+  }
 
   const ok = applyDisabledBeforeReconcile
     && warningText.includes(renamedFieldName)
@@ -1725,6 +1913,7 @@ async function verifyPeopleRepairReconcile(page, {
     fieldId,
     renamedFieldName,
     importedRowTitle,
+    importedRowId: imported.rowId ?? null,
     warningText,
     applyDisabledBeforeReconcile,
     applyDisabledAfterReconcile,
@@ -1745,10 +1934,10 @@ async function assignPersonViaDrawer(page, { searchValue, personFieldName, perso
   const personField = page.locator('.meta-record-drawer__field').filter({ hasText: personFieldName }).first()
   await personField.locator('.meta-record-drawer__link-btn').click()
   await page.locator('.meta-link-picker').waitFor({ state: 'visible', timeout: timeoutMs })
-  const pickerSearch = page.locator('.meta-link-picker__input')
-  await pickerSearch.fill(personDisplay)
-  await page.waitForTimeout(400)
-  await page.locator('.meta-link-picker__item').filter({ hasText: personDisplay }).first().click()
+  await selectLinkPickerOption(page, {
+    display: personDisplay,
+    label: 'drawer people picker option',
+  })
   await page.getByRole('button', { name: 'Confirm' }).click()
   await page.locator('.meta-record-drawer__link-summary').getByText(personDisplay).waitFor({ state: 'visible', timeout: timeoutMs })
   await page.getByText('Linked records updated').waitFor({ state: 'visible', timeout: timeoutMs })
@@ -1800,6 +1989,7 @@ async function verifyFormAttachmentLifecycle(page, {
   attachmentFieldId,
   attachmentNames,
   cleanupAttachmentIds,
+  onPersistedRecord,
 }) {
   await page.goto(multitableUrl(baseId, sheetId, viewId, { mode: 'form', recordId }), { waitUntil: 'domcontentloaded', timeout: timeoutMs })
   await page.getByRole('button', { name: 'Save' }).waitFor({ state: 'visible', timeout: timeoutMs })
@@ -1821,17 +2011,37 @@ async function verifyFormAttachmentLifecycle(page, {
   await attachmentField.locator('input[type="file"]').setInputFiles(uploads)
   await attachmentField.getByText('Uploading...').waitFor({ state: 'visible', timeout: timeoutMs })
   await attachmentField.getByText('Uploading...').waitFor({ state: 'hidden', timeout: timeoutMs })
+  for (const attachmentName of attachmentNames) {
+    await attachmentField.getByText(attachmentName, { exact: true }).waitFor({ state: 'visible', timeout: timeoutMs })
+  }
   await page.getByRole('button', { name: 'Save' }).click()
   await page.getByText('Changes saved').first().waitFor({ state: 'visible', timeout: timeoutMs })
 
-  const afterUpload = await fetchRecord(token, sheetId, recordId)
+  const uploadState = await waitForPredicate(async () => {
+    const afterUpload = await fetchRecord(token, sheetId, recordId)
+    const uploadedAttachments = afterUpload.attachmentSummaries?.[attachmentFieldId] ?? []
+    return {
+      ok: uploadedAttachments.length === attachmentNames.length,
+      afterUpload,
+      uploadedAttachments,
+      actual: uploadedAttachments.length,
+      recordVersion: afterUpload.record?.version ?? null,
+      fieldValue: afterUpload.record?.data?.[attachmentFieldId] ?? null,
+    }
+  }, 'form attachment upload persisted')
+  const afterUpload = uploadState.afterUpload
   const uploadedAttachments = afterUpload.attachmentSummaries?.[attachmentFieldId] ?? []
+  if (typeof onPersistedRecord === 'function') {
+    onPersistedRecord(afterUpload.record)
+  }
   if (uploadedAttachments.length !== attachmentNames.length) {
     record('api.form.attachment-upload', false, {
       recordId,
       fieldId: attachmentFieldId,
       expected: attachmentNames.length,
       actual: uploadedAttachments.length,
+      recordVersion: afterUpload.record?.version ?? null,
+      fieldValue: afterUpload.record?.data?.[attachmentFieldId] ?? null,
     })
     throw new Error(`Expected ${attachmentNames.length} uploaded attachment(s), got ${uploadedAttachments.length}`)
   }
@@ -2406,7 +2616,7 @@ async function verifyViewManagerPropReconcile(page, {
 
   const warning = page.locator('.meta-view-mgr__warning')
   const refresh = page.locator('.meta-view-mgr__refresh')
-  await waitForPredicate(async () => {
+  const reconcileState = await waitForPredicate(async () => {
     const warningVisible = await warning.isVisible().catch(() => false)
     const refreshVisible = !warningVisible && await refresh.isVisible().catch(() => false)
     const columnsValue = await columnsInput.inputValue()
@@ -2421,11 +2631,15 @@ async function verifyViewManagerPropReconcile(page, {
       cardSizeValue,
     }
   }, 'view manager prop reconcile signal')
-  const warningVisible = await warning.isVisible().catch(() => false)
-  const refreshVisible = !warningVisible && await refresh.isVisible().catch(() => false)
-  const closeDialogMessage = await dismissDialogAfterClick(page, async () => {
-    await page.locator('.meta-view-mgr__close').click()
-  })
+  const warningVisible = reconcileState.warningVisible
+  const refreshVisible = !warningVisible && reconcileState.refreshVisible
+  const warningText = warningVisible ? ((await warning.textContent())?.trim() ?? '') : ''
+  const refreshText = refreshVisible ? ((await refresh.textContent())?.trim() ?? '') : ''
+  const closeDialogMessage = warningVisible
+    ? await dismissDialogAfterClick(page, async () => {
+      await page.locator('.meta-view-mgr__close').click()
+    })
+    : null
   if (warningVisible) {
     await warning.waitFor({ state: 'visible', timeout: timeoutMs })
   } else if (refreshVisible) {
@@ -2437,17 +2651,40 @@ async function verifyViewManagerPropReconcile(page, {
     await warning.waitFor({ state: 'hidden', timeout: timeoutMs })
   }
 
-  const columnsValue = await columnsInput.inputValue()
-  const cardSizeValue = await page.locator('.meta-view-mgr__field').filter({ hasText: 'Card size' }).locator('select').inputValue()
-  const ok = closeDialogMessage === 'Discard unsaved view manager changes?'
+  const settledValues = await waitForPredicate(async () => {
+    const columnsValue = await columnsInput.inputValue()
+    const cardSizeValue = await page.locator('.meta-view-mgr__field').filter({ hasText: 'Card size' }).locator('select').inputValue()
+    return {
+      ok: columnsValue === String(expectedColumns) && cardSizeValue === expectedCardSize,
+      columnsValue,
+      cardSizeValue,
+    }
+  }, 'view manager prop reconcile values')
+  const columnsValue = settledValues.columnsValue
+  const cardSizeValue = settledValues.cardSizeValue
+  const warningPathOk = warningVisible
+    && warningText.includes('This view changed in the background')
+    && closeDialogMessage === 'Discard unsaved view manager changes?'
     && columnsValue === String(expectedColumns)
     && cardSizeValue === expectedCardSize
+  const liveRefreshPathOk = refreshVisible
+    && refreshText.includes('Latest view metadata loaded from the sheet context.')
+    && columnsValue === String(expectedColumns)
+    && cardSizeValue === expectedCardSize
+  const directSyncPathOk = !warningVisible
+    && !refreshVisible
+    && columnsValue === String(expectedColumns)
+    && cardSizeValue === expectedCardSize
+  const ok = warningPathOk || liveRefreshPathOk || directSyncPathOk
   record('ui.view-manager.prop-reconcile', ok, {
     baseId,
     sheetId,
     viewId,
     managedViewId,
+    reconcilePath: warningVisible ? 'warning' : refreshVisible ? 'refresh' : directSyncPathOk ? 'direct' : 'none',
     closeDialogMessage,
+    warningText,
+    refreshText,
     columnsValue,
     cardSizeValue,
   })
@@ -2605,7 +2842,6 @@ async function verifyViewManagerFieldSchemaReconcile(page, {
   if (await warning.isVisible().catch(() => false)) {
     await warning.waitFor({ state: 'visible', timeout: timeoutMs })
   }
-  const titleOptions = await page.locator('.meta-view-mgr__field').filter({ hasText: 'Title field' }).locator('option').allTextContents()
 
   await updateField(token, coverFieldId, {
     name: `${coverFieldRestoreName} (Archived)`,
@@ -2638,6 +2874,7 @@ async function verifyViewManagerFieldSchemaReconcile(page, {
   await warning.getByRole('button', { name: 'Reload latest' }).click()
   await warning.waitFor({ state: 'hidden', timeout: timeoutMs })
 
+  const titleOptionsAfterReload = await page.locator('.meta-view-mgr__field').filter({ hasText: 'Title field' }).locator('option').allTextContents()
   const coverFieldValueAfterReload = await page.locator('.meta-view-mgr__field').filter({ hasText: 'Cover field' }).locator('select').inputValue()
   const saveDisabledAfterReload = await saveButton.isDisabled()
 
@@ -2652,7 +2889,7 @@ async function verifyViewManagerFieldSchemaReconcile(page, {
     property: coverFieldRestoreProperty,
   })
 
-  const ok = titleOptions.includes(renamedTitleFieldName)
+  const ok = titleOptionsAfterReload.includes(renamedTitleFieldName)
     && warningText.includes('cover field is no longer an attachment field')
     && saveDisabledBeforeReload
     && coverFieldValueAfterReload === ''
@@ -2667,6 +2904,7 @@ async function verifyViewManagerFieldSchemaReconcile(page, {
     renamedTitleFieldName,
     coverFieldId,
     warningText,
+    titleOptionsAfterReload,
     saveDisabledBeforeReload,
     saveDisabledAfterReload,
     coverFieldValueAfterReload,
@@ -2873,6 +3111,7 @@ async function run() {
         baseId: base.id,
         sheetId: sheet.id,
         viewId: gridView.id,
+        titleFieldId: titleField.id,
         fieldId: tempPeopleRepairField.id,
         fieldName: tempPeopleRepairField.name,
         renamedFieldName: `${tempPeopleRepairField.name} Text`,
@@ -2881,10 +3120,14 @@ async function run() {
       })
 
       await importRecordViaGridWithPeopleManualFix(page, {
+        token,
         baseId: base.id,
         sheetId: sheet.id,
         viewId: gridView.id,
         csvPath: manualFixCsvPath,
+        titleFieldId: titleField.id,
+        personFieldId: personField.id,
+        personFieldName: personField.name,
         importedRowTitle: manualFixTitle,
         personDisplay: personChoice.display || personChoice.id,
       })
@@ -2951,6 +3194,7 @@ async function run() {
         attachmentFieldId: attachmentField.id,
         attachmentNames,
         cleanupAttachmentIds: attachmentIds,
+        onPersistedRecord: trackRecord,
       })
 
       const afterAttachment = await fetchRecord(token, sheet.id, recordId)

@@ -611,4 +611,70 @@ describe('MetaViewManager', () => {
 
     app.unmount()
   })
+
+  it('reloads latest field labels after a dirty gallery draft becomes stale', async () => {
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const updateSpy = vi.fn()
+
+    const Harness = defineComponent({
+      setup() {
+        const fields = ref([
+          { id: 'fld_name', name: 'Name', type: 'string' },
+          { id: 'fld_files', name: 'Files', type: 'attachment' },
+        ])
+        const views = ref([
+          { id: 'view_gallery', sheetId: 'sheet_1', name: 'Gallery', type: 'gallery', config: { titleFieldId: 'fld_name', coverFieldId: 'fld_files', columns: 2, cardSize: 'medium' } },
+        ])
+        return { fields, views, onUpdateView: updateSpy }
+      },
+      render() {
+        return h(MetaViewManager, {
+          visible: true,
+          sheetId: 'sheet_1',
+          activeViewId: 'view_gallery',
+          fields: this.fields,
+          views: this.views,
+          onUpdateView: this.onUpdateView,
+        })
+      },
+    })
+
+    const app = createApp(Harness)
+    const vm = app.mount(container) as any
+    await nextTick()
+
+    ;(container.querySelector('.meta-view-mgr__action[title="Configure"]') as HTMLButtonElement | null)?.click()
+    await nextTick()
+
+    const columnsInput = Array.from(container.querySelectorAll('.meta-view-mgr__config .meta-view-mgr__input'))
+      .find((input) => (input as HTMLInputElement).type === 'number') as HTMLInputElement
+    columnsInput.value = '4'
+    columnsInput.dispatchEvent(new Event('input', { bubbles: true }))
+    await nextTick()
+
+    vm.fields = [
+      { id: 'fld_name', name: 'Title', type: 'string' },
+      { id: 'fld_files', name: 'Files', type: 'string' },
+    ]
+    await nextTick()
+
+    expect(container.textContent).toContain('A selected cover field is no longer an attachment field. Reload latest before saving.')
+
+    ;(Array.from(container.querySelectorAll('.meta-view-mgr__btn-inline')) as HTMLButtonElement[])
+      .find((button) => button.textContent?.includes('Reload latest'))
+      ?.click()
+    await nextTick()
+
+    const titleSelectAfterReload = Array.from(container.querySelectorAll('.meta-view-mgr__config select'))[0] as HTMLSelectElement
+    const titleOptionsAfterReload = Array.from(titleSelectAfterReload.options).map((option) => option.textContent)
+    const coverSelectAfterReload = Array.from(container.querySelectorAll('.meta-view-mgr__config select'))[1] as HTMLSelectElement
+
+    expect(titleOptionsAfterReload).toContain('Title')
+    expect(titleOptionsAfterReload).not.toContain('Name')
+    expect(coverSelectAfterReload.value).toBe('')
+    expect(container.querySelector('.meta-view-mgr__warning')).toBeNull()
+
+    app.unmount()
+  })
 })

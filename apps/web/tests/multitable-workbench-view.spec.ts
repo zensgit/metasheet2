@@ -1189,6 +1189,28 @@ describe('MultitableWorkbench view wiring', () => {
       .toBe('fld_title')
   })
 
+  it('includes writable sheet fields that are hidden only in the current grid view', async () => {
+    workbenchMock.fields.value = [
+      { id: 'fld_title', name: 'Title', type: 'string' },
+      { id: 'fld_owner_repair', name: 'Owner Repair', type: 'link', property: { refKind: 'user', foreignSheetId: 'sheet_people', limitSingleRecord: true } },
+    ]
+    gridMock.fields.value = [...workbenchMock.fields.value]
+    gridMock.hiddenFieldIds.value = ['fld_owner_repair']
+    workbenchMock.fieldPermissions.value = {
+      fld_title: { visible: true, readOnly: false },
+      fld_owner_repair: { visible: true, readOnly: false },
+    }
+
+    mountWorkbench()
+    await flushUi()
+
+    container!.querySelector<HTMLButtonElement>('[data-open-import="true"]')!.click()
+    await flushUi()
+
+    expect(container!.querySelector('[data-import-field-ids]')?.getAttribute('data-import-field-ids'))
+      .toBe('fld_title,fld_owner_repair')
+  })
+
   it('imports duplicate first-field values without implicit dedupe', async () => {
     bulkImportRecordsMock.mockResolvedValue({
       attempted: 2,
