@@ -98,6 +98,14 @@ jobs:
         run: |
           pnpm --filter @metasheet/core-backend db:migrate
 
+      - name: Run required after-sales install integration
+        if: matrix.node-version == '20.x'
+        env:
+          DATABASE_URL: postgresql://postgres@localhost:5432/metasheet_test
+        run: |
+          test -n "$DATABASE_URL"
+          pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run tests/integration/after-sales-plugin.install.test.ts --reporter=dot
+
       - name: Start core backend (background)
         env:
           DATABASE_URL: postgresql://postgres@localhost:5432/metasheet_test
