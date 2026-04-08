@@ -4,6 +4,8 @@ import {
   AfterSalesApprovalBridgeService,
   REFUND_WORKFLOW_KEY,
   type AfterSalesRefundApprovalCommand,
+  type AfterSalesRefundApprovalCallbacks,
+  type AfterSalesRefundApprovalDecisionInput,
 } from '../../src/services/AfterSalesApprovalBridgeService'
 
 type ApprovalInstanceRow = {
@@ -28,6 +30,24 @@ type ApprovalAssignmentRow = {
   source_step: number
   is_active: boolean
   metadata: Record<string, unknown>
+}
+
+type ApprovalDto = {
+  id: string
+  sourceSystem: string
+  externalApprovalId: string | null
+  workflowKey: string
+  businessKey: string
+  title: string
+  status: string
+  requester: Record<string, unknown> | null
+  subject: Record<string, unknown> | null
+  policy: Record<string, unknown> | null
+  currentStep: number
+  totalSteps: number
+  assignments: Array<Record<string, unknown>>
+  createdAt: string
+  updatedAt: string
 }
 
 function createCommand(overrides: Partial<AfterSalesRefundApprovalCommand> = {}): AfterSalesRefundApprovalCommand {
@@ -69,15 +89,27 @@ function createDbFixture(existingPendingId?: string) {
   const rootQuery = vi.fn(async (sql: string, params: unknown[] = []) => {
     const normalized = sql.replace(/\s+/g, ' ').trim()
     if (normalized.startsWith('SELECT id FROM approval_instances')) {
-      if (existingPendingId) {
-        return { rows: [{ id: existingPendingId }], rowCount: 1 }
+      if (normalized.includes("status = 'pending'")) {
+        if (existingPendingId) {
+          return { rows: [{ id: existingPendingId }], rowCount: 1 }
+        }
+        const [, businessKey] = params as [string, string]
+        const row = instances.find(
+          (item) =>
+            item.workflow_key === REFUND_WORKFLOW_KEY &&
+            item.business_key === businessKey &&
+            item.status === 'pending',
+        )
+        return { rows: row ? [{ id: row.id }] : [], rowCount: row ? 1 : 0 }
       }
-      const [, businessKey] = params as [string, string]
+      const [, selector] = params as [string, string]
       const row = instances.find(
         (item) =>
           item.workflow_key === REFUND_WORKFLOW_KEY &&
-          item.business_key === businessKey &&
-          item.status === 'pending',
+          (item.id === selector ||
+            item.business_key === selector ||
+            item.subject_snapshot?.ticketId === selector ||
+            item.metadata?.ticketId === selector),
       )
       return { rows: row ? [{ id: row.id }] : [], rowCount: row ? 1 : 0 }
     }
@@ -145,6 +177,33 @@ function createDbFixture(existingPendingId?: string) {
     assignments,
     rootQuery,
     txQuery,
+  }
+}
+
+function createApprovalDto(id: string, status: string = 'pending'): ApprovalDto {
+  return {
+    id,
+    sourceSystem: 'after-sales',
+    externalApprovalId: null,
+    workflowKey: REFUND_WORKFLOW_KEY,
+    businessKey: 'after-sales:tenant_42:after-sales:ticket:ticket_001:refund',
+    title: 'Refund approval for TK-1001',
+    status,
+    requester: { id: 'user_42', name: 'Alice' },
+    subject: {
+      projectId: 'tenant_42:after-sales',
+      ticketId: 'ticket_001',
+      ticketNo: 'TK-1001',
+      title: 'Refund request',
+      refundAmount: 99,
+      currency: 'CNY',
+    },
+    policy: { sourceOfTruth: 'after-sales' },
+    currentStep: 1,
+    totalSteps: 2,
+    assignments: [],
+    createdAt: '2026-04-07T00:00:00.000Z',
+    updatedAt: '2026-04-07T00:00:00.000Z',
   }
 }
 
@@ -236,5 +295,217 @@ describe('AfterSalesApprovalBridgeService', () => {
     })
     expect(fixture.db.connect).not.toHaveBeenCalled()
     expect(fixture.instances).toHaveLength(0)
+  })
+
+  it('loads a refund approval status by ticket id', async () => {
+    const fixture = createDbFixture()
+    fixture.instances.push({
+      id: 'afs:lookup',
+      status: 'pending',
+      source_system: 'after-sales',
+      workflow_key: REFUND_WORKFLOW_KEY,
+      business_key: 'after-sales:tenant_42:after-sales:ticket:ticket_001:refund',
+      title: 'Refund approval for TK-1001',
+      requester_snapshot: { id: 'user_42', name: 'Alice' },
+      subject_snapshot: {
+        projectId: 'tenant_42:after-sales',
+        ticketId: 'ticket_001',
+        ticketNo: 'TK-1001',
+        title: 'Refund request',
+        refundAmount: 99,
+        currency: 'CNY',
+      },
+      policy_snapshot: { sourceOfTruth: 'after-sales' },
+      metadata: {
+        projectId: 'tenant_42:after-sales',
+        ticketId: 'ticket_001',
+      },
+      current_step: 1,
+      total_steps: 2,
+    })
+
+    const getApproval = vi.fn(async (approvalId: string) => createApprovalDto(approvalId))
+    const service = new AfterSalesApprovalBridgeService(
+      fixture.db as never,
+      { getApproval } as never,
+    )
+
+    const approval = await service.getRefundApproval('ticket_001')
+
+    expect(approval).toMatchObject({
+      id: 'afs:lookup',
+      status: 'pending',
+      businessKey: 'after-sales:tenant_42:after-sales:ticket:ticket_001:refund',
+    })
+    expect(getApproval).toHaveBeenCalledWith('afs:lookup')
+  })
+
+  it('dispatches an approved refund decision and invokes the approved callback', async () => {
+    const fixture = createDbFixture()
+    fixture.instances.push({
+      id: 'afs:decision',
+      status: 'pending',
+      source_system: 'after-sales',
+      workflow_key: REFUND_WORKFLOW_KEY,
+      business_key: 'after-sales:tenant_42:after-sales:ticket:ticket_001:refund',
+      title: 'Refund approval for TK-1001',
+      requester_snapshot: { id: 'user_42', name: 'Alice' },
+      subject_snapshot: {
+        projectId: 'tenant_42:after-sales',
+        ticketId: 'ticket_001',
+        ticketNo: 'TK-1001',
+        title: 'Refund request',
+        refundAmount: 99,
+        currency: 'CNY',
+      },
+      policy_snapshot: { sourceOfTruth: 'after-sales' },
+      metadata: {
+        projectId: 'tenant_42:after-sales',
+        ticketId: 'ticket_001',
+      },
+      current_step: 1,
+      total_steps: 2,
+    })
+
+    const approval = createApprovalDto('afs:decision', 'approved')
+    const dispatchAction = vi.fn(async () => approval)
+    const onDecision = vi.fn(async () => undefined)
+    const onApproved = vi.fn(async () => undefined)
+    const onRejected = vi.fn(async () => undefined)
+
+    const service = new AfterSalesApprovalBridgeService(
+      fixture.db as never,
+      { getApproval: vi.fn(), dispatchAction } as never,
+      {
+        onDecision,
+        onApproved,
+        onRejected,
+      } satisfies AfterSalesRefundApprovalCallbacks,
+    )
+
+    const result = await service.submitRefundApprovalDecision({
+      ticketId: 'ticket_001',
+      action: 'approve',
+      actorId: 'finance_1',
+      actorName: 'Finance One',
+      comment: 'approved',
+    })
+
+    expect(dispatchAction).toHaveBeenCalledWith(
+      'afs:decision',
+      {
+        action: 'approve',
+        comment: 'approved',
+      },
+      expect.objectContaining({
+        userId: 'finance_1',
+        userName: 'Finance One',
+      }),
+    )
+    expect(onDecision).toHaveBeenCalledWith(
+      approval,
+      expect.objectContaining({
+        ticketId: 'ticket_001',
+        action: 'approve',
+        actorId: 'finance_1',
+      }),
+    )
+    expect(onApproved).toHaveBeenCalledWith(
+      approval,
+      expect.objectContaining({
+        ticketId: 'ticket_001',
+        action: 'approve',
+        actorId: 'finance_1',
+      }),
+    )
+    expect(onRejected).not.toHaveBeenCalled()
+    expect(result).toMatchObject({
+      approvalId: 'afs:decision',
+      decision: 'approved',
+    })
+  })
+
+  it('dispatches a rejected refund decision and invokes the rejected callback', async () => {
+    const fixture = createDbFixture()
+    fixture.instances.push({
+      id: 'afs:decision-reject',
+      status: 'pending',
+      source_system: 'after-sales',
+      workflow_key: REFUND_WORKFLOW_KEY,
+      business_key: 'after-sales:tenant_42:after-sales:ticket:ticket_001:refund',
+      title: 'Refund approval for TK-1001',
+      requester_snapshot: { id: 'user_42', name: 'Alice' },
+      subject_snapshot: {
+        projectId: 'tenant_42:after-sales',
+        ticketId: 'ticket_001',
+        ticketNo: 'TK-1001',
+        title: 'Refund request',
+        refundAmount: 99,
+        currency: 'CNY',
+      },
+      policy_snapshot: { sourceOfTruth: 'after-sales' },
+      metadata: {
+        projectId: 'tenant_42:after-sales',
+        ticketId: 'ticket_001',
+      },
+      current_step: 1,
+      total_steps: 2,
+    })
+
+    const approval = createApprovalDto('afs:decision-reject', 'rejected')
+    const dispatchAction = vi.fn(async () => approval)
+    const onDecision = vi.fn(async () => undefined)
+    const onApproved = vi.fn(async () => undefined)
+    const onRejected = vi.fn(async () => undefined)
+
+    const service = new AfterSalesApprovalBridgeService(
+      fixture.db as never,
+      { getApproval: vi.fn(), dispatchAction } as never,
+      {
+        onDecision,
+        onApproved,
+        onRejected,
+      } satisfies AfterSalesRefundApprovalCallbacks,
+    )
+
+    const result = await service.submitRefundApprovalDecision({
+      businessKey: 'after-sales:tenant_42:after-sales:ticket:ticket_001:refund',
+      action: 'reject',
+      actorId: 'finance_1',
+      comment: 'not enough evidence',
+    })
+
+    expect(dispatchAction).toHaveBeenCalledWith(
+      'afs:decision-reject',
+      {
+        action: 'reject',
+        comment: 'not enough evidence',
+      },
+      expect.objectContaining({
+        userId: 'finance_1',
+        userName: undefined,
+      }),
+    )
+    expect(onDecision).toHaveBeenCalledWith(
+      approval,
+      expect.objectContaining({
+        businessKey: 'after-sales:tenant_42:after-sales:ticket:ticket_001:refund',
+        action: 'reject',
+        actorId: 'finance_1',
+      }),
+    )
+    expect(onRejected).toHaveBeenCalledWith(
+      approval,
+      expect.objectContaining({
+        businessKey: 'after-sales:tenant_42:after-sales:ticket:ticket_001:refund',
+        action: 'reject',
+        actorId: 'finance_1',
+      }),
+    )
+    expect(onApproved).not.toHaveBeenCalled()
+    expect(result).toMatchObject({
+      approvalId: 'afs:decision-reject',
+      decision: 'rejected',
+    })
   })
 })

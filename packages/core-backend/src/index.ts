@@ -47,8 +47,11 @@ import {
 } from './multitable/provisioning'
 import {
   createRecord as createMultitableRecord,
+  deleteRecord as deleteMultitableRecord,
   getRecord as getMultitableRecord,
+  listRecords as listMultitableRecords,
   patchRecord as patchMultitableRecord,
+  queryRecords as queryMultitableRecords,
   type MultitableRecordsQueryFn,
 } from './multitable/records'
 import { installMetrics, requestMetricsMiddleware } from './metrics/metrics'
@@ -87,6 +90,7 @@ import { univerMetaRouter } from './routes/univer-meta'
 import { SnapshotService } from './services/SnapshotService'
 import { notificationService } from './services/NotificationService'
 import { AfterSalesApprovalBridgeService } from './services/AfterSalesApprovalBridgeService'
+import type { UnifiedApprovalDTO } from './services/approval-bridge-types'
 import { cacheRegistry } from '../core/cache/CacheRegistry'
 import { loadObservabilityConfig } from './config/observability'
 import { initObservability } from './observability/otel'
@@ -127,7 +131,7 @@ export class MetaSheetServer {
   private observabilityEnabled = false
   private stopOperationAuditRetention?: () => void
   private stopMultitableAttachmentCleanup?: () => void
-  private afterSalesApprovalBridgeService = new AfterSalesApprovalBridgeService()
+  private afterSalesApprovalBridgeService: AfterSalesApprovalBridgeService
   // Optional bypass/degraded-mode flags for local debug
   private disableWorkflow = process.env.DISABLE_WORKFLOW === 'true'
   private disableEventBus = process.env.DISABLE_EVENT_BUS === 'true'
@@ -157,6 +161,18 @@ export class MetaSheetServer {
     
     // Bind CoreAPI to container (needed by PluginLoader)
     this.injector.add([ICoreAPI, { useValue: coreAPI }])
+    this.afterSalesApprovalBridgeService = new AfterSalesApprovalBridgeService(
+      undefined,
+      undefined,
+      {
+        onApproved: async (approval, decision) => {
+          await this.handleAfterSalesApprovalDecisionCallback(approval, decision)
+        },
+        onRejected: async (approval, decision) => {
+          await this.handleAfterSalesApprovalDecisionCallback(approval, decision)
+        },
+      },
+    )
     
     this.snapshotService = new SnapshotService()
 
@@ -335,6 +351,47 @@ export class MetaSheetServer {
           },
         },
         records: {
+          listRecords: async ({ sheetId, limit, offset }) => {
+            const txQuery: MultitableRecordsQueryFn = async (sql, params) => {
+              const result = await poolManager.get().query(sql, params)
+              return {
+                rows: Array.isArray((result as { rows?: unknown[] }).rows)
+                  ? (result as { rows: unknown[] }).rows
+                  : [],
+                rowCount: typeof (result as { rowCount?: number }).rowCount === 'number'
+                  ? (result as { rowCount: number }).rowCount
+                  : undefined,
+              }
+            }
+            return listMultitableRecords({
+              query: txQuery,
+              sheetId,
+              limit,
+              offset,
+            })
+          },
+          queryRecords: async ({ sheetId, filters, search, orderBy, limit, offset }) => {
+            const txQuery: MultitableRecordsQueryFn = async (sql, params) => {
+              const result = await poolManager.get().query(sql, params)
+              return {
+                rows: Array.isArray((result as { rows?: unknown[] }).rows)
+                  ? (result as { rows: unknown[] }).rows
+                  : [],
+                rowCount: typeof (result as { rowCount?: number }).rowCount === 'number'
+                  ? (result as { rowCount: number }).rowCount
+                  : undefined,
+              }
+            }
+            return queryMultitableRecords({
+              query: txQuery,
+              sheetId,
+              filters,
+              search,
+              orderBy,
+              limit,
+              offset,
+            })
+          },
           createRecord: async ({ sheetId, data }) => {
             return poolManager.get().transaction(async ({ query }) => {
               const txQuery: MultitableRecordsQueryFn = async (sql, params) => {
@@ -391,6 +448,26 @@ export class MetaSheetServer {
                 sheetId,
                 recordId,
                 changes,
+              })
+            })
+          },
+          deleteRecord: async ({ sheetId, recordId }) => {
+            return poolManager.get().transaction(async ({ query }) => {
+              const txQuery: MultitableRecordsQueryFn = async (sql, params) => {
+                const result = await query(sql, params)
+                return {
+                  rows: Array.isArray((result as { rows?: unknown[] }).rows)
+                    ? (result as { rows: unknown[] }).rows
+                    : [],
+                  rowCount: typeof (result as { rowCount?: number }).rowCount === 'number'
+                    ? (result as { rowCount: number }).rowCount
+                    : undefined,
+                }
+              }
+              return deleteMultitableRecord({
+                query: txQuery,
+                sheetId,
+                recordId,
               })
             })
           },
@@ -649,7 +726,10 @@ export class MetaSheetServer {
     this.app.use('/api/auth', authRouter)
 
     // 路由：审批（示例）
-    this.app.use(approvalsRouter({ injector: this.injector }))
+    this.app.use(approvalsRouter({
+      injector: this.injector,
+      afterSalesApprovalBridgeService: this.afterSalesApprovalBridgeService,
+    }))
     // 路由：审计日志（管理员）
     this.app.use(auditLogsRouter())
     // 路由：审批历史（从审计表衍生）
@@ -849,11 +929,50 @@ export class MetaSheetServer {
     // Phase 3: Plugin will register RedisCache when FEATURE_CACHE_REDIS=true
   }
 
+  private async handleAfterSalesApprovalDecisionCallback(
+    approval: UnifiedApprovalDTO,
+    decision: {
+      action: 'approve' | 'reject'
+      actorId: string
+      actorName?: string
+      comment?: string
+    },
+  ): Promise<void> {
+    const api = this.pluginApis.get('after-sales')
+    const handler = api?.handleRefundApprovalDecisionCallback
+    if (typeof handler !== 'function') {
+      this.logger.warn('after-sales approval callback skipped: plugin callback not registered')
+      return
+    }
+
+    try {
+      await handler({
+        approval,
+        projectId: approval.subject?.projectId,
+        ticketId: approval.subject?.ticketId,
+        decision: approval.status === 'approved' ? 'approved' : 'rejected',
+        actorId: decision.actorId,
+        actorName: decision.actorName,
+        comment: decision.comment,
+      })
+    } catch (error) {
+      this.logger.error('after-sales approval callback failed', error as Error)
+    }
+  }
+
   private registerInternalPluginApis(): void {
     this.pluginApis.set('after-sales-approval-bridge', {
       submitRefundApproval: async (command: unknown) =>
         this.afterSalesApprovalBridgeService.submitRefundApproval(
           command as import('./services/AfterSalesApprovalBridgeService').AfterSalesRefundApprovalCommand,
+        ),
+      getRefundApproval: async (input: unknown) =>
+        this.afterSalesApprovalBridgeService.getRefundApproval(
+          input as import('./services/AfterSalesApprovalBridgeService').AfterSalesRefundApprovalQueryInput,
+        ),
+      submitRefundApprovalDecision: async (input: unknown) =>
+        this.afterSalesApprovalBridgeService.submitRefundApprovalDecision(
+          input as import('./services/AfterSalesApprovalBridgeService').AfterSalesRefundApprovalDecisionInput,
         ),
     })
   }

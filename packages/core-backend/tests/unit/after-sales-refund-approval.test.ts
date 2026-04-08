@@ -4,7 +4,9 @@ import { describe, expect, it, vi } from 'vitest'
 const adapter = require('../../../../plugins/plugin-after-sales/lib/refund-approval.cjs') as {
   REFUND_APPROVAL_BRIDGE_ID: string
   buildRefundApprovalCommand: (input: Record<string, unknown>) => Record<string, unknown>
+  getRefundApproval: (context: Record<string, unknown>, input: Record<string, unknown>) => Promise<unknown>
   submitRefundApproval: (context: Record<string, unknown>, input: Record<string, unknown>) => Promise<unknown>
+  submitRefundApprovalDecision: (context: Record<string, unknown>, input: Record<string, unknown>) => Promise<unknown>
 }
 
 describe('after-sales refund approval adapter', () => {
@@ -86,6 +88,93 @@ describe('after-sales refund approval adapter', () => {
     expect(result).toEqual({
       ok: true,
       bridge: adapter.REFUND_APPROVAL_BRIDGE_ID,
+    })
+  })
+
+  it('queries refund approval status through the plugin communication seam', async () => {
+    const call = vi.fn(async (_plugin: string, _method: string, payload: Record<string, unknown>) => ({
+      ok: true,
+      approvalId: 'approval_001',
+      payload,
+    }))
+
+    const result = await adapter.getRefundApproval(
+      {
+        communication: {
+          call,
+        },
+      },
+      {
+        projectId: 'tenant_42:after-sales',
+        ticketId: 'ticket_001',
+      },
+    )
+
+    expect(call).toHaveBeenCalledWith(
+      'after-sales-approval-bridge',
+      'getRefundApproval',
+      {
+        projectId: 'tenant_42:after-sales',
+        ticketId: 'ticket_001',
+        businessKey: undefined,
+      },
+    )
+    expect(result).toEqual({
+      ok: true,
+      approvalId: 'approval_001',
+      payload: {
+        projectId: 'tenant_42:after-sales',
+        ticketId: 'ticket_001',
+        businessKey: undefined,
+      },
+    })
+  })
+
+  it('submits refund approval decisions through the plugin communication seam', async () => {
+    const call = vi.fn(async (_plugin: string, _method: string, payload: Record<string, unknown>) => ({
+      ok: true,
+      decision: 'approved',
+      payload,
+    }))
+
+    const result = await adapter.submitRefundApprovalDecision(
+      {
+        communication: {
+          call,
+        },
+      },
+      {
+        ticketId: 'ticket_001',
+        action: 'approve',
+        actorId: 'finance_1',
+        actorName: 'Finance One',
+        comment: 'approved',
+      },
+    )
+
+    expect(call).toHaveBeenCalledWith(
+      'after-sales-approval-bridge',
+      'submitRefundApprovalDecision',
+      {
+        ticketId: 'ticket_001',
+        businessKey: undefined,
+        action: 'approve',
+        actorId: 'finance_1',
+        actorName: 'Finance One',
+        comment: 'approved',
+      },
+    )
+    expect(result).toEqual({
+      ok: true,
+      decision: 'approved',
+      payload: {
+        ticketId: 'ticket_001',
+        businessKey: undefined,
+        action: 'approve',
+        actorId: 'finance_1',
+        actorName: 'Finance One',
+        comment: 'approved',
+      },
     })
   })
 })

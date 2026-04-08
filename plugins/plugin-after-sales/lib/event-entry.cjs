@@ -167,17 +167,57 @@ function buildRequestRefundCommand(input, existingTicket) {
   return {
     changes: {
       refundAmount,
+      refundStatus: 'pending',
     },
     eventTicket: {
       id: requiredString(ticket.id, 'ticket.id'),
       ticketNo: requiredString(ticket.ticketNo, 'ticket.ticketNo'),
       title: requiredString(ticket.title, 'ticket.title'),
       refundAmount,
+      refundStatus: 'pending',
       requestedBy: optionalString(command.requestedBy),
       requestedByName: optionalString(command.requestedByName ?? command.requesterName),
       reason: optionalString(command.reason),
       currency: optionalString(command.currency),
       requestedAt: optionalString(command.requestedAt),
+    },
+  }
+}
+
+function buildRefundDecisionEventPayload(input, meta) {
+  const ticket = input && typeof input.ticket === 'object' && !Array.isArray(input.ticket) ? input.ticket : {}
+  const approval = input && typeof input.approval === 'object' && !Array.isArray(input.approval) ? input.approval : {}
+  const decision = requiredString(input?.decision, 'decision')
+  if (decision !== 'approved' && decision !== 'rejected') {
+    throw createEventEntryError(
+      'AFTER_SALES_EVENT_VALIDATION_FAILED',
+      'decision must be approved or rejected',
+      { field: 'decision', allowed: ['approved', 'rejected'] },
+    )
+  }
+
+  return {
+    tenantId: requiredString(meta.tenantId, 'tenantId'),
+    projectId: requiredString(meta.projectId, 'projectId'),
+    decision,
+    ticketNo: requiredString(ticket.ticketNo ?? input.ticketNo, 'ticket.ticketNo'),
+    title: requiredString(ticket.title ?? input.title, 'ticket.title'),
+    ticket: {
+      id: requiredString(ticket.id, 'ticket.id'),
+      ticketNo: requiredString(ticket.ticketNo ?? input.ticketNo, 'ticket.ticketNo'),
+      title: requiredString(ticket.title ?? input.title, 'ticket.title'),
+      refundAmount: requiredNumber(ticket.refundAmount, 'ticket.refundAmount'),
+      refundStatus: decision,
+    },
+    approval: {
+      id: requiredString(approval.id ?? input.approvalId, 'approval.id'),
+      bridge: optionalString(approval.bridge ?? input.bridge) || 'after-sales-refund',
+      ticketId: requiredString(approval.ticketId ?? ticket.id, 'approval.ticketId'),
+      comment: optionalString(approval.comment ?? input.comment),
+    },
+    actor: {
+      id: requiredString(input?.actorId, 'actorId'),
+      name: optionalString(input?.actorName),
     },
   }
 }
@@ -244,6 +284,7 @@ function buildFollowUpDueEventPayload(input, meta) {
 module.exports = {
   buildCreateTicketCommand,
   buildRequestRefundCommand,
+  buildRefundDecisionEventPayload,
   buildTicketCreatedEventPayload,
   buildRefundRequestedEventPayload,
   buildTicketOverdueEventPayload,

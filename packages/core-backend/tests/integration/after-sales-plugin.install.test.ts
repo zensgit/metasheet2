@@ -104,6 +104,12 @@ describe('after-sales plugin install integration', () => {
   async function cleanupAfterSalesInstallArtifacts() {
     if (!pool || !schemaReady) return
     await pool.query(
+      `DELETE FROM approval_records
+       WHERE instance_id IN (
+         SELECT id FROM approval_instances WHERE source_system = 'after-sales'
+       )`,
+    )
+    await pool.query(
       `DELETE FROM approval_assignments
        WHERE instance_id IN (
          SELECT id FROM approval_instances WHERE source_system = 'after-sales'
@@ -143,6 +149,7 @@ describe('after-sales plugin install integration', () => {
          UNION ALL SELECT to_regclass('public.meta_views') AS name
          UNION ALL SELECT to_regclass('public.meta_records') AS name
          UNION ALL SELECT to_regclass('public.approval_instances') AS name
+         UNION ALL SELECT to_regclass('public.approval_records') AS name
          UNION ALL SELECT to_regclass('public.approval_assignments') AS name`,
       )
       if (tables.rows.some((row) => !row.name)) return
@@ -414,6 +421,34 @@ describe('after-sales plugin install integration', () => {
       status: 'new',
     })
 
+    const listRes = await requestJson(`${baseUrl}/api/after-sales/tickets?status=new`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    })
+    expect(listRes.status).toBe(200)
+    const listBody = listRes.body as {
+      ok?: boolean
+      data?: {
+        projectId?: string
+        count?: number
+        tickets?: Array<{
+          id?: string
+          data?: Record<string, unknown>
+        }>
+      }
+    }
+    expect(listBody.ok).toBe(true)
+    expect(listBody.data?.projectId).toBe(PROJECT_ID)
+    expect(listBody.data?.count).toBe(1)
+    expect(listBody.data?.tickets?.[0]).toMatchObject({
+      id: createBody.data?.ticket?.id,
+      data: expect.objectContaining({
+        ticketNo: 'TK-3001',
+        status: 'new',
+      }),
+    })
+
     const createdTicketId = createBody.data?.ticket?.id
     expect(createdTicketId).toBeTruthy()
 
@@ -472,6 +507,7 @@ describe('after-sales plugin install integration', () => {
     expect(refundBody.data?.ticket?.data).toMatchObject({
       ticketNo: 'TK-3001',
       refundAmount: 88.5,
+      refundStatus: 'pending',
     })
 
     const patchedRecordRes = await waitFor(
@@ -484,6 +520,7 @@ describe('after-sales plugin install integration', () => {
         Number(result.rows[0].data?.[stFieldId('serviceTicket', 'refundAmount')]) === 88.5,
     )
     expect(Number(patchedRecordRes.rows[0].data[stFieldId('serviceTicket', 'refundAmount')])).toBe(88.5)
+    expect(patchedRecordRes.rows[0].data[stFieldId('serviceTicket', 'refundStatus')]).toBe('pending')
     expect(Number(patchedRecordRes.rows[0].version)).toBeGreaterThanOrEqual(2)
 
     const approvalRes = await waitFor(
@@ -525,5 +562,62 @@ describe('after-sales plugin install integration', () => {
       { assignee_id: 'finance', source_step: 1 },
       { assignee_id: 'supervisor', source_step: 2 },
     ])
+
+    const refundStatusRes = await requestJson(
+      `${baseUrl}/api/after-sales/tickets/${createdTicketId}/refund-approval`,
+      {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      },
+    )
+    expect(refundStatusRes.status).toBe(200)
+    expect((refundStatusRes.body as any).data?.approval).toMatchObject({
+      id: approvalRes.rows[0].id,
+      status: 'pending',
+    })
+
+    const approveRes = await requestJson(
+      `${baseUrl}/api/approvals/${approvalRes.rows[0].id}/actions`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          action: 'approve',
+          comment: 'finance approved',
+        }),
+      },
+    )
+    expect(approveRes.status).toBe(200)
+    expect((approveRes.body as any).status).toBe('approved')
+
+    const approvedRecordRes = await waitFor(
+      () => pool!.query<{ id: string; version: number; data: Record<string, unknown> }>(
+        'SELECT id, version, data FROM meta_records WHERE id = $1 AND sheet_id = $2',
+        [createdTicketId, serviceTicketSheetId],
+      ),
+      (result) =>
+        result.rows.length === 1 &&
+        result.rows[0].data?.[stFieldId('serviceTicket', 'refundStatus')] === 'approved',
+      { timeoutMs: 5000, intervalMs: 100 },
+    )
+    expect(approvedRecordRes.rows[0].data[stFieldId('serviceTicket', 'refundStatus')]).toBe('approved')
+
+    const approvedStatusRes = await requestJson(
+      `${baseUrl}/api/after-sales/tickets/${createdTicketId}/refund-approval`,
+      {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      },
+    )
+    expect(approvedStatusRes.status).toBe(200)
+    expect((approvedStatusRes.body as any).data?.approval).toMatchObject({
+      id: approvalRes.rows[0].id,
+      status: 'approved',
+    })
   })
 })

@@ -9,13 +9,16 @@ const {
 } = require('./lib/notification-adapter.cjs')
 const {
   buildRefundApprovalCommand,
+  getRefundApproval,
   submitRefundApproval,
+  submitRefundApprovalDecision,
 } = require('./lib/refund-approval.cjs')
 const {
   registerAfterSalesWorkflowHandlers,
 } = require('./lib/workflow-adapter.cjs')
 const {
   buildCreateTicketCommand,
+  buildRefundDecisionEventPayload,
   buildRequestRefundCommand,
   buildTicketCreatedEventPayload,
   buildRefundRequestedEventPayload,
@@ -27,7 +30,7 @@ const {
   fromPhysicalRecord,
 } = require('./lib/multitable-helpers.cjs')
 
-const SERVICE_TICKET_FIELDS = ['ticketNo', 'title', 'source', 'priority', 'status', 'slaDueAt', 'refundAmount']
+const SERVICE_TICKET_FIELDS = ['ticketNo', 'title', 'source', 'priority', 'status', 'slaDueAt', 'refundAmount', 'refundStatus']
 
 function toPhysicalTicketData(provisioning, projectId, logicalData) {
   return toPhysicalRecord(provisioning, projectId, 'serviceTicket', logicalData)
@@ -121,6 +124,30 @@ function hasAfterSalesWriteAccess(req) {
   )
 }
 
+function hasAfterSalesReadAccess(req) {
+  const user = req && req.user
+  if (!user || typeof user !== 'object') return false
+
+  const roles = new Set([
+    ...normalizeClaimValues(user.role),
+    ...normalizeClaimValues(user.roles),
+  ])
+  const permissions = new Set([
+    ...normalizeClaimValues(user.permissions),
+    ...normalizeClaimValues(user.perms),
+  ])
+
+  return (
+    roles.has('admin') ||
+    permissions.has('*:*') ||
+    permissions.has('admin') ||
+    permissions.has('admin:all') ||
+    permissions.has('after_sales:read') ||
+    permissions.has('after_sales:write') ||
+    permissions.has('after_sales:admin')
+  )
+}
+
 /**
  * v1 whitelist of template ids. v2 will expand this as templates proliferate
  * and/or user-uploaded templates become allowed.
@@ -208,6 +235,99 @@ function getMultitableWriteApi(context) {
     return null
   }
   return { provisioning, records }
+}
+
+function getMultitableReadApi(context) {
+  const multitable = context && context.api && context.api.multitable
+  const provisioning = multitable && multitable.provisioning
+  const records = multitable && multitable.records
+  if (
+    !provisioning ||
+    typeof provisioning.getObjectSheetId !== 'function' ||
+    typeof provisioning.getFieldId !== 'function' ||
+    !records ||
+    typeof records.getRecord !== 'function'
+  ) {
+    return null
+  }
+  return { provisioning, records }
+}
+
+function resolveTenantIdFromProject(projectId) {
+  if (typeof projectId !== 'string') return 'default'
+  const [tenantId] = projectId.split(':')
+  return tenantId || 'default'
+}
+
+async function handleRefundApprovalDecisionCallback(context, input) {
+  const approval = input && typeof input.approval === 'object' ? input.approval : {}
+  const decision = input && typeof input === 'object' ? input.decision : null
+  const ticket = approval && typeof approval.subject === 'object' && approval.subject ? approval.subject : {}
+  const projectId = typeof ticket.projectId === 'string' && ticket.projectId.trim()
+    ? ticket.projectId.trim()
+    : (typeof input?.projectId === 'string' && input.projectId.trim() ? input.projectId.trim() : '')
+  const ticketId = typeof ticket.ticketId === 'string' && ticket.ticketId.trim()
+    ? ticket.ticketId.trim()
+    : (typeof input?.ticketId === 'string' && input.ticketId.trim() ? input.ticketId.trim() : '')
+
+  if (!projectId || !ticketId) {
+    throw new Error('projectId and ticketId are required to handle refund approval decisions')
+  }
+
+  const multitableApi = getMultitableWriteApi(context)
+  if (!multitableApi) {
+    throw new Error('Multitable record writer is not available on plugin context')
+  }
+
+  const refundStatus = decision === 'approved' ? 'approved' : 'rejected'
+  const sheetId = multitableApi.provisioning.getObjectSheetId(projectId, 'serviceTicket')
+  const updatedRecord = await multitableApi.records.patchRecord({
+    sheetId,
+    recordId: ticketId,
+    changes: toPhysicalTicketData(multitableApi.provisioning, projectId, {
+      refundStatus,
+    }),
+  })
+  const logicalUpdated = fromPhysicalTicketData(multitableApi.provisioning, projectId, updatedRecord.data)
+
+  const payload = buildRefundDecisionEventPayload({
+    decision: refundStatus,
+    actorId: typeof input?.actorId === 'string' ? input.actorId : 'system',
+    actorName: typeof input?.actorName === 'string' ? input.actorName : undefined,
+    comment: typeof input?.comment === 'string' ? input.comment : undefined,
+    ticket: {
+      id: updatedRecord.id,
+      ticketNo: logicalUpdated.ticketNo,
+      title: logicalUpdated.title,
+      refundAmount: logicalUpdated.refundAmount,
+    },
+    approval: {
+      id: typeof approval.id === 'string' ? approval.id : undefined,
+      bridge: 'after-sales-refund',
+      ticketId,
+      comment: typeof input?.comment === 'string' ? input.comment : undefined,
+    },
+  }, {
+    tenantId: resolveTenantIdFromProject(projectId),
+    projectId,
+  })
+  context.api.events.emit(
+    refundStatus === 'approved' ? 'refund.settled' : 'refund.rejected',
+    payload,
+  )
+
+  return {
+    projectId,
+    ticket: {
+      id: updatedRecord.id,
+      version: updatedRecord.version,
+      data: logicalUpdated,
+    },
+    event: {
+      accepted: true,
+      event: refundStatus === 'approved' ? 'refund.settled' : 'refund.rejected',
+    },
+  }
 }
 
 function cleanupWorkflowSubscriptions() {
@@ -370,6 +490,143 @@ module.exports = {
     )
 
     context.api.http.addRoute(
+      'GET',
+      '/api/after-sales/tickets',
+      async (req, res) => {
+        try {
+          const userId = getUserId(req)
+          if (!userId) {
+            sendUnauthorized(res)
+            return
+          }
+          if (!hasAfterSalesReadAccess(req)) {
+            res.status(403).json({
+              ok: false,
+              error: { code: 'FORBIDDEN', message: 'After-sales read access required' },
+            })
+            return
+          }
+
+          const multitableApi = getMultitableReadApi(context)
+          if (!multitableApi) {
+            res.status(503).json({
+              ok: false,
+              error: {
+                code: 'MULTITABLE_UNAVAILABLE',
+                message: 'Multitable record reader is not available on plugin context',
+              },
+            })
+            return
+          }
+
+          const tenantId = getTenantId(req)
+          const current = await installer.loadCurrent(context, tenantId, appManifest.id)
+          if (!current || current.status === 'not-installed') {
+            res.status(409).json({
+              ok: false,
+              error: {
+                code: 'AFTER_SALES_NOT_INSTALLED',
+                message: 'After-sales must be installed before listing tickets',
+              },
+            })
+            return
+          }
+
+          const projectId = current.projectId || installer.getProjectId(tenantId, appManifest.id)
+          const sheetId = multitableApi.provisioning.getObjectSheetId(projectId, 'serviceTicket')
+          const status = typeof req?.query?.status === 'string' && req.query.status.trim()
+            ? req.query.status.trim()
+            : null
+          const search = typeof req?.query?.search === 'string' && req.query.search.trim()
+            ? req.query.search.trim()
+            : null
+          const limit = typeof req?.query?.limit === 'string' && req.query.limit.trim()
+            ? Number(req.query.limit)
+            : undefined
+          const offset = typeof req?.query?.offset === 'string' && req.query.offset.trim()
+            ? Number(req.query.offset)
+            : undefined
+
+          const recordsApi = multitableApi.records
+          let tickets
+          if (typeof recordsApi.queryRecords === 'function') {
+            const filters = status
+              ? {
+                  [multitableApi.provisioning.getFieldId(projectId, 'serviceTicket', 'status')]: status,
+                }
+              : undefined
+            tickets = await recordsApi.queryRecords({
+              sheetId,
+              filters,
+              search,
+              limit,
+              offset,
+            })
+          } else if (typeof recordsApi.listRecords === 'function') {
+            tickets = await recordsApi.listRecords({
+              sheetId,
+              limit,
+              offset,
+            })
+          } else {
+            res.status(503).json({
+              ok: false,
+              error: {
+                code: 'MULTITABLE_UNAVAILABLE',
+                message: 'Multitable list/query seam is not available on plugin context',
+              },
+            })
+            return
+          }
+
+          const logicalTickets = Array.isArray(tickets)
+            ? tickets
+                .map((ticket) => ({
+                  id: ticket.id,
+                  version: ticket.version,
+                  data: fromPhysicalTicketData(multitableApi.provisioning, projectId, ticket.data),
+                }))
+                .filter((ticket) => {
+                  if (status && ticket.data.status !== status) return false
+                  if (!search) return true
+                  const haystack = JSON.stringify(ticket.data).toLowerCase()
+                  return haystack.includes(search.toLowerCase())
+                })
+            : []
+
+          res.json({
+            ok: true,
+            data: {
+              projectId,
+              tickets: logicalTickets,
+              count: logicalTickets.length,
+            },
+          })
+        } catch (err) {
+          if (err && err.code === 'VALIDATION_ERROR') {
+            res.status(400).json({
+              ok: false,
+              error: { code: err.code, message: err.message },
+            })
+            return
+          }
+          if (err && err.code === 'NOT_FOUND') {
+            res.status(404).json({
+              ok: false,
+              error: { code: err.code, message: err.message },
+            })
+            return
+          }
+          logger.error && logger.error('after-sales list tickets failed', err)
+          res.status(500).json({
+            ok: false,
+            error: { code: 'INTERNAL_ERROR', message: 'Failed to list after-sales tickets' },
+          })
+        }
+      },
+    )
+
+    context.api.http.addRoute(
       'POST',
       '/api/after-sales/tickets',
       async (req, res) => {
@@ -471,6 +728,95 @@ module.exports = {
           res.status(500).json({
             ok: false,
             error: { code: 'INTERNAL_ERROR', message: 'Failed to create after-sales ticket' },
+          })
+        }
+      },
+    )
+
+    context.api.http.addRoute(
+      'DELETE',
+      '/api/after-sales/tickets/:ticketId',
+      async (req, res) => {
+        try {
+          const userId = getUserId(req)
+          if (!userId) {
+            sendUnauthorized(res)
+            return
+          }
+          if (!hasAfterSalesWriteAccess(req)) {
+            sendWriteForbidden(res)
+            return
+          }
+
+          const ticketId = typeof req?.params?.ticketId === 'string' ? req.params.ticketId.trim() : ''
+          if (!ticketId) {
+            res.status(400).json({
+              ok: false,
+              error: { code: 'VALIDATION_ERROR', message: 'ticketId is required' },
+            })
+            return
+          }
+
+          const multitableApi = getMultitableWriteApi(context)
+          if (!multitableApi || typeof multitableApi.records.deleteRecord !== 'function') {
+            res.status(503).json({
+              ok: false,
+              error: {
+                code: 'MULTITABLE_UNAVAILABLE',
+                message: 'Multitable record delete seam is not available on plugin context',
+              },
+            })
+            return
+          }
+
+          const tenantId = getTenantId(req)
+          const current = await installer.loadCurrent(context, tenantId, appManifest.id)
+          if (!current || current.status === 'not-installed') {
+            res.status(409).json({
+              ok: false,
+              error: {
+                code: 'AFTER_SALES_NOT_INSTALLED',
+                message: 'After-sales must be installed before deleting tickets',
+              },
+            })
+            return
+          }
+
+          const projectId = current.projectId || installer.getProjectId(tenantId, appManifest.id)
+          const sheetId = multitableApi.provisioning.getObjectSheetId(projectId, 'serviceTicket')
+          const deleted = await multitableApi.records.deleteRecord({
+            sheetId,
+            recordId: ticketId,
+          })
+
+          res.json({
+            ok: true,
+            data: {
+              projectId,
+              ticketId: deleted.id,
+              version: deleted.version,
+              deleted: true,
+            },
+          })
+        } catch (err) {
+          if (err && err.code === 'VALIDATION_ERROR') {
+            res.status(400).json({
+              ok: false,
+              error: { code: err.code, message: err.message },
+            })
+            return
+          }
+          if (err && err.code === 'NOT_FOUND') {
+            res.status(404).json({
+              ok: false,
+              error: { code: err.code, message: err.message },
+            })
+            return
+          }
+          logger.error && logger.error('after-sales delete ticket failed', err)
+          res.status(500).json({
+            ok: false,
+            error: { code: 'INTERNAL_ERROR', message: 'Failed to delete after-sales ticket' },
           })
         }
       },
@@ -594,6 +940,73 @@ module.exports = {
           res.status(500).json({
             ok: false,
             error: { code: 'INTERNAL_ERROR', message: 'Failed to request ticket refund' },
+          })
+        }
+      },
+    )
+
+    context.api.http.addRoute(
+      'GET',
+      '/api/after-sales/tickets/:ticketId/refund-approval',
+      async (req, res) => {
+        try {
+          const userId = getUserId(req)
+          if (!userId) {
+            sendUnauthorized(res)
+            return
+          }
+          if (!hasAfterSalesReadAccess(req)) {
+            res.status(403).json({
+              ok: false,
+              error: { code: 'FORBIDDEN', message: 'After-sales read access required' },
+            })
+            return
+          }
+
+          const ticketId = typeof req?.params?.ticketId === 'string' ? req.params.ticketId.trim() : ''
+          if (!ticketId) {
+            res.status(400).json({
+              ok: false,
+              error: { code: 'VALIDATION_ERROR', message: 'ticketId is required' },
+            })
+            return
+          }
+
+          const tenantId = getTenantId(req)
+          const current = await installer.loadCurrent(context, tenantId, appManifest.id)
+          if (!current || current.status === 'not-installed') {
+            res.status(409).json({
+              ok: false,
+              error: {
+                code: 'AFTER_SALES_NOT_INSTALLED',
+                message: 'After-sales must be installed before querying refund approvals',
+              },
+            })
+            return
+          }
+
+          const projectId = current.projectId || installer.getProjectId(tenantId, appManifest.id)
+          const approval = await getRefundApproval(context, {
+            projectId,
+            ticketId,
+          })
+
+          res.json({
+            ok: true,
+            data: {
+              projectId,
+              approval: approval || null,
+            },
+          })
+        } catch (err) {
+          if (err && err.code === 'AFTER_SALES_APPROVAL_VALIDATION_FAILED') {
+            sendBadRequest(res, err)
+            return
+          }
+          logger.error && logger.error('after-sales refund approval status failed', err)
+          res.status(500).json({
+            ok: false,
+            error: { code: 'INTERNAL_ERROR', message: 'Failed to load refund approval status' },
           })
         }
       },
@@ -795,11 +1208,20 @@ module.exports = {
       buildRefundApprovalCommand(args) {
         return buildRefundApprovalCommand(args)
       },
+      async getRefundApproval(args) {
+        return getRefundApproval(context, args)
+      },
       async submitRefundApproval(args) {
         return submitRefundApproval(context, args)
       },
+      async submitRefundApprovalDecision(args) {
+        return submitRefundApprovalDecision(context, args)
+      },
       async sendNotificationTopic(args) {
         return sendTopicNotification(context, args)
+      },
+      async handleRefundApprovalDecisionCallback(args) {
+        return handleRefundApprovalDecisionCallback(context, args)
       },
       emitTicketCreated(args) {
         const tenantId = (args && typeof args === 'object' && typeof args.tenantId === 'string' && args.tenantId.trim())
@@ -938,6 +1360,76 @@ module.exports = {
             accepted: true,
             event: 'ticket.refundRequested',
           },
+        }
+      },
+      async listTickets(args) {
+        const tenantId = (args && typeof args === 'object' && typeof args.tenantId === 'string' && args.tenantId.trim())
+          ? args.tenantId.trim()
+          : 'default'
+        const projectId = installer.getProjectId(tenantId, appManifest.id)
+        const multitableApi = getMultitableReadApi(context)
+        if (!multitableApi) {
+          throw new Error('Multitable record reader is not available on plugin context')
+        }
+        const sheetId = multitableApi.provisioning.getObjectSheetId(projectId, 'serviceTicket')
+        let records
+        if (typeof multitableApi.records.queryRecords === 'function') {
+          const filters = typeof args?.status === 'string' && args.status.trim()
+            ? {
+                [multitableApi.provisioning.getFieldId(projectId, 'serviceTicket', 'status')]: args.status.trim(),
+              }
+            : undefined
+          records = await multitableApi.records.queryRecords({
+            sheetId,
+            filters,
+            search: typeof args?.search === 'string' ? args.search : undefined,
+            limit: args?.limit,
+            offset: args?.offset,
+          })
+        } else if (typeof multitableApi.records.listRecords === 'function') {
+          records = await multitableApi.records.listRecords({
+            sheetId,
+            limit: args?.limit,
+            offset: args?.offset,
+          })
+        } else {
+          throw new Error('Multitable list/query seam is not available on plugin context')
+        }
+
+        return {
+          projectId,
+          tickets: Array.isArray(records)
+            ? records.map((record) => ({
+                id: record.id,
+                version: record.version,
+                data: fromPhysicalTicketData(multitableApi.provisioning, projectId, record.data),
+              }))
+            : [],
+        }
+      },
+      async deleteTicket(args) {
+        const tenantId = (args && typeof args === 'object' && typeof args.tenantId === 'string' && args.tenantId.trim())
+          ? args.tenantId.trim()
+          : 'default'
+        const projectId = installer.getProjectId(tenantId, appManifest.id)
+        const ticketId = typeof args?.ticketId === 'string' ? args.ticketId.trim() : ''
+        if (!ticketId) {
+          throw new Error('ticketId is required')
+        }
+        const multitableApi = getMultitableWriteApi(context)
+        if (!multitableApi || typeof multitableApi.records.deleteRecord !== 'function') {
+          throw new Error('Multitable record delete seam is not available on plugin context')
+        }
+        const sheetId = multitableApi.provisioning.getObjectSheetId(projectId, 'serviceTicket')
+        const deleted = await multitableApi.records.deleteRecord({
+          sheetId,
+          recordId: ticketId,
+        })
+        return {
+          projectId,
+          ticketId: deleted.id,
+          version: deleted.version,
+          deleted: true,
         }
       },
     })

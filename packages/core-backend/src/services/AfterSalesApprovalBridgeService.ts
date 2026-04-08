@@ -2,6 +2,7 @@ import { randomUUID } from 'crypto'
 
 import { Logger } from '../core/logger'
 import { pool } from '../db/pg'
+import type { ApprovalActionRequest, UnifiedApprovalDTO } from './approval-bridge-types'
 import { ApprovalBridgeService } from './ApprovalBridgeService'
 
 const logger = new Logger('AfterSalesApprovalBridgeService')
@@ -48,10 +49,47 @@ export interface AfterSalesRefundApprovalCommand {
   assignmentRoles?: string[]
 }
 
+export interface AfterSalesRefundApprovalQueryInput {
+  approvalId?: string
+  businessKey?: string
+  ticketId?: string
+  projectId?: string
+}
+
+export interface AfterSalesRefundApprovalDecisionInput extends AfterSalesRefundApprovalQueryInput {
+  action: 'approve' | 'reject'
+  actorId: string
+  actorName?: string
+  comment?: string
+  ip?: string | null
+  userAgent?: string | null
+}
+
+export interface AfterSalesRefundApprovalCallbacks {
+  onDecision?: (
+    approval: UnifiedApprovalDTO,
+    decision: AfterSalesRefundApprovalDecisionInput,
+  ) => Promise<void> | void
+  onApproved?: (
+    approval: UnifiedApprovalDTO,
+    decision: AfterSalesRefundApprovalDecisionInput,
+  ) => Promise<void> | void
+  onRejected?: (
+    approval: UnifiedApprovalDTO,
+    decision: AfterSalesRefundApprovalDecisionInput,
+  ) => Promise<void> | void
+}
+
 export interface AfterSalesRefundApprovalSubmitResult {
   created: boolean
   approvalId: string
-  approval: Awaited<ReturnType<ApprovalBridgeService['getApproval']>>
+  approval: UnifiedApprovalDTO
+}
+
+export interface AfterSalesRefundApprovalDecisionResult {
+  approvalId: string
+  approval: UnifiedApprovalDTO
+  decision: 'approved' | 'rejected'
 }
 
 function requiredString(value: unknown, field: string): string {
@@ -77,6 +115,122 @@ function normalizeAssignmentRoles(value: unknown): string[] {
     .filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
     .map((item) => item.trim())
   return roles.length > 0 ? Array.from(new Set(roles)) : [...DEFAULT_ASSIGNMENT_ROLES]
+}
+
+function normalizeSelectorValue(value: unknown): string | undefined {
+  if (typeof value !== 'string') {
+    return undefined
+  }
+
+  const trimmed = value.trim()
+  return trimmed.length > 0 ? trimmed : undefined
+}
+
+function normalizeDecisionInput(
+  input: AfterSalesRefundApprovalDecisionInput,
+): AfterSalesRefundApprovalDecisionInput {
+  return {
+    approvalId: normalizeSelectorValue(input?.approvalId),
+    businessKey: normalizeSelectorValue(input?.businessKey),
+    ticketId: normalizeSelectorValue(input?.ticketId),
+    projectId: normalizeSelectorValue(input?.projectId),
+    action: input?.action,
+    actorId: requiredString(input?.actorId, 'actorId'),
+    actorName: normalizeSelectorValue(input?.actorName),
+    comment: normalizeSelectorValue(input?.comment),
+    ip: normalizeSelectorValue(input?.ip ?? undefined) || null,
+    userAgent: normalizeSelectorValue(input?.userAgent ?? undefined) || null,
+  }
+}
+
+function normalizeQueryInput(
+  input: string | AfterSalesRefundApprovalQueryInput,
+): AfterSalesRefundApprovalQueryInput {
+  if (typeof input === 'string') {
+    const value = input.trim()
+    return value.length > 0 ? { ticketId: value } : {}
+  }
+
+  return {
+    approvalId: normalizeSelectorValue(input?.approvalId),
+    businessKey: normalizeSelectorValue(input?.businessKey),
+    ticketId: normalizeSelectorValue(input?.ticketId),
+    projectId: normalizeSelectorValue(input?.projectId),
+  }
+}
+
+function buildRefundApprovalLookupQuery(
+  input: string | AfterSalesRefundApprovalQueryInput,
+): { sql: string; params: unknown[] } | null {
+  if (typeof input === 'string') {
+    const value = input.trim()
+    if (!value) {
+      return null
+    }
+
+    return {
+      sql: `SELECT id
+            FROM approval_instances
+            WHERE workflow_key = $1
+              AND (
+                id = $2
+                OR business_key = $2
+                OR subject_snapshot->>'ticketId' = $2
+                OR metadata->>'ticketId' = $2
+              )
+            ORDER BY created_at DESC
+            LIMIT 1`,
+      params: [REFUND_WORKFLOW_KEY, value],
+    }
+  }
+
+  const query = normalizeQueryInput(input)
+
+  if (query.approvalId) {
+    return {
+      sql: `SELECT id
+            FROM approval_instances
+            WHERE workflow_key = $1
+              AND id = $2
+            ORDER BY created_at DESC
+            LIMIT 1`,
+      params: [REFUND_WORKFLOW_KEY, query.approvalId],
+    }
+  }
+
+  const conditions: string[] = []
+  const params: unknown[] = [REFUND_WORKFLOW_KEY]
+  let paramIndex = 2
+
+  if (query.businessKey) {
+    conditions.push(`business_key = $${paramIndex++}`)
+    params.push(query.businessKey)
+  }
+
+  if (query.ticketId) {
+    const ticketParam = `$${paramIndex++}`
+    conditions.push(`(subject_snapshot->>'ticketId' = ${ticketParam} OR metadata->>'ticketId' = ${ticketParam})`)
+    params.push(query.ticketId)
+  }
+
+  if (query.projectId) {
+    conditions.push(`subject_snapshot->>'projectId' = $${paramIndex++}`)
+    params.push(query.projectId)
+  }
+
+  if (conditions.length === 0) {
+    return null
+  }
+
+  return {
+    sql: `SELECT id
+          FROM approval_instances
+          WHERE workflow_key = $1
+            AND ${conditions.join(' AND ')}
+          ORDER BY created_at DESC
+          LIMIT 1`,
+    params,
+  }
 }
 
 function normalizeCommand(input: AfterSalesRefundApprovalCommand): AfterSalesRefundApprovalCommand {
@@ -117,7 +271,84 @@ export class AfterSalesApprovalBridgeService {
   constructor(
     private readonly db: TransactionPool | null = pool as unknown as TransactionPool | null,
     private readonly approvalBridge: ApprovalBridgeService = new ApprovalBridgeService(null),
+    private readonly callbacks: AfterSalesRefundApprovalCallbacks = {},
   ) {}
+
+  async getRefundApproval(
+    input: string | AfterSalesRefundApprovalQueryInput,
+  ): Promise<UnifiedApprovalDTO | null> {
+    const approvalId = await this.lookupRefundApprovalId(input)
+    if (!approvalId) {
+      return null
+    }
+
+    return this.approvalBridge.getApproval(approvalId)
+  }
+
+  private async lookupRefundApprovalId(
+    input: string | AfterSalesRefundApprovalQueryInput,
+  ): Promise<string | null> {
+    if (!this.db) {
+      throw new Error('Database not available')
+    }
+
+    const lookup = buildRefundApprovalLookupQuery(input)
+    if (!lookup) {
+      return null
+    }
+
+    const result = await this.db.query<{ id: string }>(lookup.sql, lookup.params)
+    return result.rows[0]?.id ?? null
+  }
+
+  async submitRefundApprovalDecision(
+    rawInput: AfterSalesRefundApprovalDecisionInput,
+  ): Promise<AfterSalesRefundApprovalDecisionResult> {
+    if (!this.db) {
+      throw new Error('Database not available')
+    }
+
+    const input = normalizeDecisionInput(rawInput)
+    if (input.action !== 'approve' && input.action !== 'reject') {
+      throw new Error(`Unsupported action: ${String(input.action)}`)
+    }
+
+    const approvalId = await this.lookupRefundApprovalId(input)
+    if (!approvalId) {
+      throw new Error('Refund approval not found')
+    }
+
+    const updatedApproval = await this.approvalBridge.dispatchAction(
+      approvalId,
+      {
+        action: input.action,
+        comment: input.comment,
+      } as ApprovalActionRequest,
+      {
+        userId: input.actorId,
+        userName: input.actorName,
+        ip: input.ip,
+        userAgent: input.userAgent,
+      },
+    )
+
+    if (this.callbacks.onDecision) {
+      await this.callbacks.onDecision(updatedApproval, input)
+    }
+
+    const callback = updatedApproval.status === 'approved'
+      ? this.callbacks.onApproved
+      : this.callbacks.onRejected
+    if (callback) {
+      await callback(updatedApproval, input)
+    }
+
+    return {
+      approvalId: updatedApproval.id,
+      approval: updatedApproval,
+      decision: updatedApproval.status === 'approved' ? 'approved' : 'rejected',
+    }
+  }
 
   async submitRefundApproval(
     rawCommand: AfterSalesRefundApprovalCommand,
