@@ -75,6 +75,7 @@ export const AppRouteNames = {
   USER_PROFILE: 'user-profile',
   USER_SETTINGS: 'user-settings',
   USER_MANAGEMENT: 'user-management',
+  DIRECTORY_MANAGEMENT: 'directory-management',
 
   // Permission routes
   PERMISSION_MANAGEMENT: 'permission-management',
@@ -140,6 +141,7 @@ export interface AppRouteParams {
   'multitable-comment-inbox': Record<string, never>
   'user-settings': Record<string, never>
   'user-management': Record<string, never>
+  'directory-management': Record<string, never>
   'permission-management': Record<string, never>
   'role-management': Record<string, never>
   'admin-dashboard': Record<string, never>
