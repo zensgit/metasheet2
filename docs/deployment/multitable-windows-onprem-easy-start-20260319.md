@@ -149,6 +149,47 @@ BASE_URL="http://127.0.0.1" \
 scripts/ops/multitable-onprem-package-upgrade.sh
 ```
 
+## 10.1) One-command server-side package apply
+
+If the field team keeps losing the SSH session during a long upgrade, keep a fixed deploy entrypoint on the server and feed it the next archive:
+
+```bash
+cd /opt/metasheet
+chmod +x scripts/ops/multitable-onprem-apply-package.sh
+
+ENV_FILE=/opt/metasheet/docker/app.env \
+API_BASE="http://127.0.0.1/api" \
+BASE_URL="http://127.0.0.1" \
+scripts/ops/multitable-onprem-apply-package.sh /opt/releases/metasheet-multitable-onprem-<version>.zip
+```
+
+The packaged root now also includes Windows-native wrappers:
+
+- `deploy.bat <package.zip|package.tgz>`: synchronous apply + upgrade
+- `deploy-runXX.bat <package.zip|package.tgz>`: same helper with the packaged run label baked in
+- `deploy-remote.bat <package.zip|package.tgz>`: detached background run that writes `output/logs/deploy-remote.log`
+- `bootstrap-admin.bat <admin-email> <admin-password> [admin-name]`: create or repair the initial admin user on a pure Windows host
+- `bootstrap-admin-runXX.bat <admin-email> <admin-password> [admin-name]`: same helper with the packaged run label baked in
+
+These wrappers now call `scripts/ops/multitable-onprem-apply-package.ps1`, so a plain Windows Server 2022 host does not need bash or WSL just to apply a corrective package reroll.
+
+The PowerShell helper extracts the incoming archive into a short-lived system temp directory instead of a deep deploy-root subdirectory, which avoids common Windows long-path failures during `Expand-Archive`.
+
+The packaged Windows admin bootstrap helper also avoids `node -e` and writes a short-lived `.cjs` file into the package-local `.tmp/node-bootstrap` directory before invoking Node. This sidesteps the Node v24 + Windows PowerShell type-stripping issue and keeps bundled dependencies such as `bcryptjs` resolvable from the packaged app root.
+
+After `deploy.bat` completes on a fresh Windows-only install, create the first admin with:
+
+```bat
+bootstrap-admin.bat admin@your-company.local <StrongPasswordAtLeast12Chars> Administrator
+```
+
+If PostgreSQL is installed on Windows but `psql.exe` is not on `PATH`, the PowerShell helper now auto-probes common install roots such as `C:\Program Files\PostgreSQL\<version>\bin`. You can also override it explicitly:
+
+```bat
+set PSQL_PATH=C:\Program Files\PostgreSQL\17\bin\psql.exe
+bootstrap-admin.bat admin@your-company.local <StrongPasswordAtLeast12Chars> Administrator
+```
+
 ## 11) Delivery checklist
 
 Before handing this package to a customer or field team, also review:

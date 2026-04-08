@@ -36,6 +36,7 @@ export function resolveMultitableRouteProps(route: MultitableRouteSource) {
     viewId: typeof route.params.viewId === 'string' ? route.params.viewId : undefined,
     recordId: firstQueryValue(route.query.recordId),
     commentId: firstQueryValue(route.query.commentId),
+    fieldId: firstQueryValue(route.query.fieldId),
     openComments: parseQueryBoolean(route.query.openComments),
     mode: firstQueryValue(route.query.mode),
     embedded: parseQueryBoolean(route.query.embedded),

@@ -50,10 +50,12 @@ bash scripts/start-yuantus-plm.sh
 If you run Yuantus on a different port, update both `PLM_BASE_URL` and `PLM_URL`.
 For local verification, see `docs/PLM_LOCAL_ENV.md`.
 
-## Verification Scripts
+## Verification Commands
 Read-only (preferred for shared envs):
-- `scripts/verify-yuantus-plm.sh`
-  - Requires: `PLM_ITEM_ID`, `PLM_BOM_ITEM_ID`
+- `pnpm verify:yuantus`
+  - Alias of: `pnpm test:plm`
+  - Uses: `packages/core-backend/scripts/test-plm-connection.ts`
+  - Probes: `PLM_BASE_URL` / `PLM_URL` with `PLM_HEALTH_URLS` overrides when needed
 
 Write-enabled (creates sample parts/BOM/substitutes):
 - `scripts/verify-plm-bom-tools.sh`
@@ -69,7 +71,8 @@ UI regression (requires seeded data from BOM tools or manual IDs):
 - `scripts/verify-plm-ui-substitutes-mutation.sh`
 
 Unified regression:
-- `scripts/verify-plm-regression.sh`
+- `pnpm verify:plm-regression`
+  - Alias of `pnpm verify:plm-ui-regression`
 
 ## CI Notes
 - GitHub Actions `smoke-verify` can run PLM regression without external secrets.

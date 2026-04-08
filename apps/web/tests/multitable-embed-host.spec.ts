@@ -48,6 +48,9 @@ vi.mock('../src/multitable/views/MultitableWorkbench.vue', () => ({
       sheetId: { type: String, default: undefined },
       viewId: { type: String, default: undefined },
       recordId: { type: String, default: undefined },
+      commentId: { type: String, default: undefined },
+      fieldId: { type: String, default: undefined },
+      openComments: { type: Boolean, default: undefined },
       mode: { type: String, default: undefined },
       role: { type: String, default: undefined },
     },
@@ -75,6 +78,10 @@ vi.mock('../src/multitable/views/MultitableWorkbench.vue', () => ({
         'data-workbench-base-id': props.baseId ?? '',
         'data-workbench-sheet-id': props.sheetId ?? '',
         'data-workbench-view-id': props.viewId ?? '',
+        'data-workbench-record-id': props.recordId ?? '',
+        'data-workbench-comment-id': props.commentId ?? '',
+        'data-workbench-field-id': props.fieldId ?? '',
+        'data-workbench-open-comments': String(props.openComments ?? false),
       })
     },
   }),
@@ -147,6 +154,9 @@ describe('multitable embed host guards', () => {
         sheetId: { type: String, default: undefined },
         viewId: { type: String, default: undefined },
         recordId: { type: String, default: undefined },
+        commentId: { type: String, default: undefined },
+        fieldId: { type: String, default: undefined },
+        openComments: { type: Boolean, default: undefined },
         mode: { type: String, default: undefined },
         embedded: { type: Boolean, default: undefined },
           role: { type: String, default: undefined },
@@ -163,6 +173,9 @@ describe('multitable embed host guards', () => {
           :sheet-id="sheetId"
           :view-id="viewId"
           :record-id="recordId"
+          :comment-id="commentId"
+          :field-id="fieldId"
+          :open-comments="openComments"
           :mode="mode"
           :embedded="embedded"
           :role="role"
@@ -219,6 +232,16 @@ describe('multitable embed host guards', () => {
     expect(confirmPageLeaveSpy).toHaveBeenCalledTimes(1)
     expect(router.currentRoute.value.name).toBe(AppRouteNames.MULTITABLE)
     expect(container?.querySelector('[data-workbench-sheet-id]')?.getAttribute('data-workbench-sheet-id')).toBe('sheet_orders')
+  })
+
+  it('forwards comment jump query props into the workbench', async () => {
+    await mountRouteHost('/multitable/sheet_orders/view_grid?baseId=base_ops&recordId=rec_7&commentId=cmt_9&fieldId=fld_notes&openComments=true')
+
+    const workbench = container?.querySelector('[data-workbench-sheet-id]')
+    expect(workbench?.getAttribute('data-workbench-record-id')).toBe('rec_7')
+    expect(workbench?.getAttribute('data-workbench-comment-id')).toBe('cmt_9')
+    expect(workbench?.getAttribute('data-workbench-field-id')).toBe('fld_notes')
+    expect(workbench?.getAttribute('data-workbench-open-comments')).toBe('true')
   })
 
   it('responds to mt:get-navigation-state with the current embed snapshot and echoed requestId', async () => {

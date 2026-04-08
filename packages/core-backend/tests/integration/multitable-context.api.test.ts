@@ -10,7 +10,12 @@ type QueryResult = {
 type QueryHandler = (sql: string, params?: unknown[]) => QueryResult | Promise<QueryResult>
 
 function createMockPool(queryHandler: QueryHandler) {
-  const query = vi.fn(async (sql: string, params?: unknown[]) => queryHandler(sql, params))
+  const query = vi.fn(async (sql: string, params?: unknown[]) => {
+    if (sql.includes('FROM spreadsheet_permissions')) {
+      return { rows: [], rowCount: 0 }
+    }
+    return queryHandler(sql, params)
+  })
   const transaction = vi.fn(async (fn: (client: { query: typeof query }) => Promise<unknown>) => fn({ query }))
   return { query, transaction }
 }
@@ -28,7 +33,7 @@ async function createApp(args: {
   vi.doMock('../../src/rbac/service', () => ({
     isAdmin: vi.fn().mockResolvedValue(false),
     userHasPermission: vi.fn().mockImplementation(async (_userId: string, code: string) => {
-      if (code === 'multitable:read' || code === 'multitable:write') {
+      if (code === 'multitable:read' || code === 'multitable:write' || code === 'multitable:share') {
         return args.fallbackHasPermission === true
       }
       return false
@@ -141,9 +146,14 @@ describe('Multitable context API', () => {
       canEditRecord: false,
       canDeleteRecord: false,
       canManageFields: false,
+      canManageSheetAccess: false,
       canManageViews: false,
       canComment: true,
       canManageAutomation: true,
+    })
+    expect(response.body.data.capabilityOrigin).toEqual({
+      source: 'global-rbac',
+      hasSheetAssignments: false,
     })
     expect(response.body.data.viewPermissions).toEqual({
       view_grid: {
@@ -156,6 +166,96 @@ describe('Multitable context API', () => {
         canConfigure: false,
         canDelete: false,
       },
+    })
+  })
+
+  test('marks computed and explicitly readonly fields as readOnly in scoped field permissions', async () => {
+    const { app } = await createApp({
+      tokenPerms: ['multitable:read', 'multitable:write'],
+      queryHandler: async (sql, params) => {
+        if (sql.includes('SELECT id, sheet_id, name, type, filter_info, sort_info, group_info, hidden_field_ids, config FROM meta_views WHERE id = $1')) {
+          expect(params).toEqual(['view_grid'])
+          return {
+            rows: [{
+              id: 'view_grid',
+              sheet_id: 'sheet_ops',
+              name: 'Grid',
+              type: 'grid',
+              filter_info: {},
+              sort_info: {},
+              group_info: {},
+              hidden_field_ids: ['fld_lookup'],
+              config: {},
+            }],
+          }
+        }
+        if (sql.includes('FROM meta_sheets s') && sql.includes('LEFT JOIN meta_bases')) {
+          expect(params).toEqual(['sheet_ops'])
+          return {
+            rows: [{
+              id: 'sheet_ops',
+              base_id: 'base_ops',
+              name: 'Orders',
+              description: 'Ops records',
+            }],
+          }
+        }
+        if (sql.includes('FROM meta_bases') && sql.includes('WHERE id = $1')) {
+          expect(params).toEqual(['base_ops'])
+          return {
+            rows: [{
+              id: 'base_ops',
+              name: 'Ops Base',
+              icon: 'table',
+              color: '#1677ff',
+              owner_id: 'owner_1',
+              workspace_id: 'workspace_1',
+            }],
+          }
+        }
+        if (sql.includes('FROM meta_sheets') && sql.includes('WHERE base_id = $1')) {
+          expect(params).toEqual(['base_ops'])
+          return {
+            rows: [
+              { id: 'sheet_ops', base_id: 'base_ops', name: 'Orders', description: 'Ops records' },
+            ],
+          }
+        }
+        if (sql.includes('FROM meta_views') && sql.includes('WHERE sheet_id = $1')) {
+          expect(params).toEqual(['sheet_ops'])
+          return {
+            rows: [
+              { id: 'view_grid', sheet_id: 'sheet_ops', name: 'Grid', type: 'grid', filter_info: {}, sort_info: {}, group_info: {}, hidden_field_ids: ['fld_lookup'], config: {} },
+            ],
+          }
+        }
+        if (sql.includes('SELECT id, name, type, property, "order" FROM meta_fields WHERE sheet_id = $1 ORDER BY "order" ASC, id ASC')) {
+          expect(params).toEqual(['sheet_ops'])
+          return {
+            rows: [
+              { id: 'fld_title', name: 'Title', type: 'string', property: {}, order: 1 },
+              { id: 'fld_formula', name: 'Total', type: 'formula', property: { expression: '{fld_amount} * 2' }, order: 2 },
+              { id: 'fld_lookup', name: 'Vendor Name', type: 'lookup', property: { linkFieldId: 'fld_vendor', targetFieldId: 'fld_name' }, order: 3 },
+              { id: 'fld_locked', name: 'Locked', type: 'string', property: { readonly: true }, order: 4 },
+              { id: 'fld_secret', name: 'Secret', type: 'string', property: { hidden: true }, order: 5 },
+            ],
+          }
+        }
+        throw new Error(`Unhandled SQL in test: ${sql}`)
+      },
+    })
+
+    const response = await request(app)
+      .get('/api/multitable/context')
+      .query({ sheetId: 'sheet_ops', viewId: 'view_grid' })
+      .expect(200)
+
+    expect(response.body.data.fieldPermissions).toEqual({
+      fld_title: { visible: true, readOnly: false },
+      fld_formula: { visible: true, readOnly: true },
+      fld_lookup: { visible: false, readOnly: true },
+      fld_locked: { visible: true, readOnly: true },
+      fld_secret: { visible: false, readOnly: false },
     })
   })
 
@@ -227,6 +327,7 @@ describe('Multitable context API', () => {
       canEditRecord: true,
       canDeleteRecord: true,
       canManageFields: true,
+      canManageSheetAccess: true,
       canManageViews: true,
       canComment: true,
       canManageAutomation: true,
@@ -416,17 +517,6 @@ describe('Multitable context API', () => {
           ])
           return { rows: [], rowCount: 1 }
         }
-        if (sql.includes('FROM meta_sheets') && sql.includes('WHERE id = $1')) {
-          return {
-            rows: [{
-              id: params?.[0],
-              base_id: 'base_legacy',
-              name: 'Vendor Intake',
-              description: 'Main vendor list',
-            }],
-            rowCount: 1,
-          }
-        }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -442,16 +532,26 @@ describe('Multitable context API', () => {
     expect(mockPool.transaction).toHaveBeenCalledTimes(1)
   })
 
-  test('returns 409 when creating a sheet that already exists', async () => {
-    const { app } = await createApp({
-      tokenPerms: ['multitable:write'],
+  test('allows create sheet under an owned base without global multitable write', async () => {
+    const { app, mockPool } = await createApp({
+      tokenPerms: [],
+      fallbackPermissions: [],
+      fallbackHasPermission: false,
       queryHandler: async (sql, params) => {
-        if (sql.includes('INSERT INTO meta_bases')) {
-          expect(params?.[0]).toBe('base_legacy')
-          return { rows: [], rowCount: 1 }
+        if (sql.includes('SELECT id, owner_id FROM meta_bases WHERE id = $1 AND deleted_at IS NULL')) {
+          expect(params).toEqual(['base_ops'])
+          return {
+            rows: [{ id: 'base_ops', owner_id: 'user_multitable_1' }],
+          }
         }
         if (sql.includes('INSERT INTO meta_sheets')) {
-          return { rows: [], rowCount: 0 }
+          expect(params).toEqual([
+            expect.any(String),
+            'base_ops',
+            'Owned Sheet',
+            'Created by base owner',
+          ])
+          return { rows: [], rowCount: 1 }
         }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
@@ -459,21 +559,30 @@ describe('Multitable context API', () => {
 
     const response = await request(app)
       .post('/api/multitable/sheets')
-      .send({ id: 'sheet_vendor_intake', name: 'Vendor Intake' })
-      .expect(409)
+      .send({ baseId: 'base_ops', name: 'Owned Sheet', description: 'Created by base owner' })
+      .expect(200)
 
-    expect(response.body.ok).toBe(false)
-    expect(response.body.error.code).toBe('CONFLICT')
-    expect(response.body.error.message).toBe('Sheet already exists: sheet_vendor_intake')
+    expect(response.body.ok).toBe(true)
+    expect(response.body.data.sheet).toMatchObject({
+      baseId: 'base_ops',
+      name: 'Owned Sheet',
+      description: 'Created by base owner',
+      seeded: false,
+    })
+    expect(mockPool.transaction).toHaveBeenCalledTimes(1)
   })
 
-  test('returns 404 when the requested base does not exist', async () => {
+  test('rejects create sheet under an unowned base without global multitable write', async () => {
     const { app } = await createApp({
-      tokenPerms: ['multitable:write'],
+      tokenPerms: [],
+      fallbackPermissions: [],
+      fallbackHasPermission: false,
       queryHandler: async (sql, params) => {
-        if (sql.includes('SELECT id FROM meta_bases WHERE id = $1 AND deleted_at IS NULL')) {
-          expect(params).toEqual(['base_missing'])
-          return { rows: [], rowCount: 0 }
+        if (sql.includes('SELECT id, owner_id FROM meta_bases WHERE id = $1 AND deleted_at IS NULL')) {
+          expect(params).toEqual(['base_ops'])
+          return {
+            rows: [{ id: 'base_ops', owner_id: 'someone_else' }],
+          }
         }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
@@ -481,18 +590,23 @@ describe('Multitable context API', () => {
 
     const response = await request(app)
       .post('/api/multitable/sheets')
-      .send({ baseId: 'base_missing', name: 'Vendor Intake' })
-      .expect(404)
+      .send({ baseId: 'base_ops', name: 'Blocked Sheet' })
+      .expect(403)
 
-    expect(response.body.ok).toBe(false)
-    expect(response.body.error.code).toBe('NOT_FOUND')
-    expect(response.body.error.message).toBe('Base not found: base_missing')
+    expect(response.body).toEqual({
+      ok: false,
+      error: { code: 'FORBIDDEN', message: 'Insufficient permissions' },
+    })
   })
 
   test('deletes a multitable sheet by id', async () => {
     const { app } = await createApp({
       tokenPerms: ['multitable:write'],
       queryHandler: async (sql, params) => {
+        if (sql.includes('SELECT id FROM meta_sheets WHERE id = $1')) {
+          expect(params).toEqual(['sheet_ops'])
+          return { rows: [{ id: 'sheet_ops' }], rowCount: 1 }
+        }
         if (sql.includes('DELETE FROM meta_sheets WHERE id = $1')) {
           expect(params).toEqual(['sheet_ops'])
           return { rows: [], rowCount: 1 }
@@ -513,6 +627,10 @@ describe('Multitable context API', () => {
     const { app } = await createApp({
       tokenPerms: ['multitable:write'],
       queryHandler: async (sql, params) => {
+        if (sql.includes('SELECT id FROM meta_sheets WHERE id = $1')) {
+          expect(params).toEqual(['sheet_missing'])
+          return { rows: [], rowCount: 0 }
+        }
         if (sql.includes('DELETE FROM meta_sheets WHERE id = $1')) {
           expect(params).toEqual(['sheet_missing'])
           return { rows: [], rowCount: 0 }
@@ -543,8 +661,11 @@ describe('Multitable context API', () => {
       .query({ baseId: 'base_ops' })
       .expect(403)
 
-    expect(response.body).toEqual({ error: 'Insufficient permissions' })
-    expect(mockPool.query).not.toHaveBeenCalled()
+    expect(response.body).toEqual({
+      ok: false,
+      error: { code: 'FORBIDDEN', message: 'Insufficient permissions' },
+    })
+    expect(mockPool.query).toHaveBeenCalledTimes(2)
   })
 
   test('hides the system people sheet from multitable context selection', async () => {
@@ -738,6 +859,14 @@ describe('Multitable context API', () => {
                 property: {},
                 order: 3,
               }],
+            }
+          }
+          throw new Error(`Unexpected field lookup params: ${JSON.stringify(params)}`)
+        }
+        if (sql.includes('SELECT id, sheet_id FROM meta_fields WHERE id = $1')) {
+          if (params?.[0] === 'fld_due_date') {
+            return {
+              rows: [{ id: 'fld_due_date', sheet_id: 'sheet_ops' }],
             }
           }
           throw new Error(`Unexpected field lookup params: ${JSON.stringify(params)}`)

@@ -61,7 +61,7 @@ jobs:
 
           exit 0
 
-      - name: Build step summary and markdown artifact
+      - name: Build step summary and summary artifacts
         if: always()
         env:
           STABILITY_RC: ${{ steps.stability.outputs.stability_rc }}

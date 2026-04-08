@@ -158,6 +158,8 @@ components:
           properties:
             unread:
               type: boolean
+            mentioned:
+              type: boolean
             baseId:
               type: string
               nullable: true
@@ -170,7 +172,7 @@ components:
             recordId:
               type: string
               nullable: true
-          required: [unread]
+          required: [unread, mentioned]
     CommentInboxResponse:
       type: object
       properties:
@@ -193,6 +195,35 @@ components:
             offset:
               type: integer
               example: 0
+    CommentMentionCandidate:
+      type: object
+      properties:
+        id:
+          type: string
+        label:
+          type: string
+        subtitle:
+          type: string
+      required: [id, label]
+    CommentMentionCandidatesResponse:
+      type: object
+      properties:
+        ok:
+          type: boolean
+          example: true
+        data:
+          type: object
+          properties:
+            items:
+              type: array
+              items:
+                $ref: '#/components/schemas/CommentMentionCandidate'
+            total:
+              type: integer
+              example: 1
+            limit:
+              type: integer
+              example: 50
     CommentUnreadCountResponse:
       type: object
       properties:
@@ -1723,6 +1754,62 @@ components:
         - canManageViews
         - canComment
         - canManageAutomation
+    MultitableSheetPermissionAccessLevel:
+      type: string
+      enum: [read, write, write-own, admin]
+    MultitableSheetPermissionSubjectType:
+      type: string
+      enum: [user, role]
+    MultitableSheetPermissionEntry:
+      type: object
+      properties:
+        subjectType:
+          $ref: '#/components/schemas/MultitableSheetPermissionSubjectType'
+        subjectId:
+          type: string
+        accessLevel:
+          $ref: '#/components/schemas/MultitableSheetPermissionAccessLevel'
+        permissions:
+          type: array
+          items:
+            type: string
+        label:
+          type: string
+        subtitle:
+          type: string
+          nullable: true
+        isActive:
+          type: boolean
+      required:
+        - subjectType
+        - subjectId
+        - accessLevel
+        - permissions
+        - label
+        - isActive
+    MultitableSheetPermissionCandidate:
+      type: object
+      properties:
+        subjectType:
+          $ref: '#/components/schemas/MultitableSheetPermissionSubjectType'
+        subjectId:
+          type: string
+        label:
+          type: string
+        subtitle:
+          type: string
+          nullable: true
+        isActive:
+          type: boolean
+        accessLevel:
+          allOf:
+            - $ref: '#/components/schemas/MultitableSheetPermissionAccessLevel'
+          nullable: true
+      required:
+        - subjectType
+        - subjectId
+        - label
+        - isActive
     MultitableFieldCapability:
       type: object
       properties:

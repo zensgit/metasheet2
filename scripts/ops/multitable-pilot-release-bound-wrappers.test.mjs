@@ -63,6 +63,7 @@ test('multitable pilot handoff release-bound forwards PILOT_RUN_MODE=staging to 
   const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'multitable-handoff-release-bound-staging-'))
   const binDir = path.join(tmpRoot, 'bin')
   const envLogPath = path.join(tmpRoot, 'handoff-wrapper.log')
+  const readinessRoot = path.join(tmpRoot, 'readiness-root')
   fs.mkdirSync(binDir, { recursive: true })
 
   writeExecutable(
@@ -74,6 +75,7 @@ test('multitable pilot handoff release-bound forwards PILOT_RUN_MODE=staging to 
       '  {',
       '    printf "PILOT_RUN_MODE=%s\\n" "${PILOT_RUN_MODE:-}"',
       '    printf "ONPREM_GATE_REPORT_JSON=%s\\n" "${ONPREM_GATE_REPORT_JSON:-}"',
+      '    printf "READINESS_ROOT=%s\\n" "${READINESS_ROOT:-}"',
       '  } > "${FAKE_ENV_LOG}"',
       '  exit 0',
       'fi',
@@ -94,6 +96,7 @@ test('multitable pilot handoff release-bound forwards PILOT_RUN_MODE=staging to 
       FAKE_ENV_LOG: envLogPath,
       RUN_MODE: 'staging',
       ONPREM_GATE_REPORT_JSON: gateReportPath,
+      READINESS_ROOT: readinessRoot,
     },
     stdio: 'pipe',
   })
@@ -101,4 +104,5 @@ test('multitable pilot handoff release-bound forwards PILOT_RUN_MODE=staging to 
   const log = fs.readFileSync(envLogPath, 'utf8')
   assert.match(log, /PILOT_RUN_MODE=staging/)
   assert.match(log, /ONPREM_GATE_REPORT_JSON=/)
+  assert.match(log, new RegExp(`READINESS_ROOT=${readinessRoot.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`))
 })

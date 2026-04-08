@@ -88,7 +88,7 @@
               </template>
             </p>
             <p v-else-if="hasSkippedImports">
-              Rows with duplicate values in the current primary import field were skipped.
+              Some rows were skipped as duplicates.
             </p>
             <p v-else>The selected records were imported successfully.</p>
           </div>
@@ -236,7 +236,16 @@ const pickerVisible = ref(false)
 const restoredDraft = ref(false)
 
 const hasMappedFields = computed(() => Object.values(fieldMapping.value).some((value) => value))
-const importableFields = computed(() => props.fields.filter((field) => !['formula', 'lookup', 'rollup'].includes(field.type)))
+function isImportReadOnlyField(field: MetaField): boolean {
+  const property = field.property ?? {}
+  return property.readonly === true || property.readOnly === true
+}
+
+const importableFields = computed(() =>
+  props.fields.filter((field) =>
+    !['formula', 'lookup', 'rollup'].includes(field.type) && !isImportReadOnlyField(field),
+  ),
+)
 const importableFieldIds = computed(() => new Set(importableFields.value.map((field) => field.id)))
 const fieldsById = computed(() => new Map(props.fields.map((field) => [field.id, field])))
 const hasFailedImports = computed(() => (props.result?.failed ?? 0) > 0)

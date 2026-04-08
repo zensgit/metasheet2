@@ -5,7 +5,12 @@ import type { Injector } from '@wendellhu/redi'
 import { ICommentService, type CommentQueryOptions } from '../di/identifiers'
 import { Logger } from '../core/logger'
 import { rbacGuard } from '../rbac/rbac'
-import { CommentValidationError } from '../services/CommentService'
+import {
+  CommentAccessError,
+  CommentConflictError,
+  CommentNotFoundError,
+  CommentValidationError,
+} from '../services/CommentService'
 
 const logger = new Logger('CommentsRoutes')
 const DEFAULT_LIMIT = 50
@@ -65,6 +70,22 @@ function getUserId(req: Request): string {
   return 'anonymous'
 }
 
+function respondCommentError(res: Response, error: unknown, fallbackMessage: string) {
+  if (error instanceof CommentValidationError) {
+    return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: error.message } })
+  }
+  if (error instanceof CommentAccessError) {
+    return res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: error.message } })
+  }
+  if (error instanceof CommentNotFoundError) {
+    return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: error.message } })
+  }
+  if (error instanceof CommentConflictError) {
+    return res.status(409).json({ ok: false, error: { code: 'CONFLICT', message: error.message } })
+  }
+  return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: fallbackMessage } })
+}
+
 export function commentsRouter(injector?: Injector): Router {
   const router = Router()
   const commentService = injector?.get(ICommentService)
@@ -83,6 +104,7 @@ export function commentsRouter(injector?: Injector): Router {
     const schema = z.object({
       spreadsheetId: z.string().min(1),
       rowId: z.string().min(1).optional(),
+      fieldId: z.string().min(1).optional(),
       resolved: z.boolean().optional(),
       limit: z.number().int().nonnegative().optional(),
       offset: z.number().int().nonnegative().optional(),
@@ -90,6 +112,7 @@ export function commentsRouter(injector?: Injector): Router {
     const parsed = schema.safeParse({
       spreadsheetId: readQueryValue(req.query.spreadsheetId),
       rowId: readQueryValue(req.query.rowId),
+      fieldId: readQueryValue(req.query.fieldId),
       resolved: parseBoolean(readQueryValue(req.query.resolved)),
       limit: parseNumberParam(readQueryValue(req.query.limit)),
       offset: parseNumberParam(readQueryValue(req.query.offset)),
@@ -103,6 +126,7 @@ export function commentsRouter(injector?: Injector): Router {
       const offset = clampOffset(parsed.data.offset)
       const options: CommentQueryOptions = {
         rowId: parsed.data.rowId,
+        fieldId: parsed.data.fieldId,
         resolved: parsed.data.resolved,
         limit,
         offset,
@@ -112,6 +136,34 @@ export function commentsRouter(injector?: Injector): Router {
     } catch (error) {
       logger.error('Failed to list comments', error as Error)
       return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to list comments' } })
+    }
+  })
+
+  router.get('/api/comments/mention-candidates', rbacGuard('comments', 'read'), async (req: Request, res: Response) => {
+    const schema = z.object({
+      spreadsheetId: z.string().min(1),
+      q: z.string().optional(),
+      limit: z.number().int().nonnegative().optional(),
+    })
+    const parsed = schema.safeParse({
+      spreadsheetId: readQueryValue(req.query.spreadsheetId),
+      q: readQueryValue(req.query.q),
+      limit: parseNumberParam(readQueryValue(req.query.limit)),
+    })
+    if (!parsed.success) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+    }
+
+    try {
+      const limit = clampLimit(parsed.data.limit)
+      const result = await commentService.listMentionCandidates(parsed.data.spreadsheetId, {
+        q: parsed.data.q,
+        limit,
+      })
+      return res.json({ ok: true, data: { items: result.items, total: result.total, limit } })
+    } catch (error) {
+      logger.error('Failed to load comment mention candidates', error as Error)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load comment mention candidates' } })
     }
   })
 
@@ -221,11 +273,47 @@ export function commentsRouter(injector?: Injector): Router {
       })
       return res.status(201).json({ ok: true, data: { comment } })
     } catch (error) {
-      if (error instanceof CommentValidationError) {
-        return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: error.message } })
-      }
       logger.error('Failed to create comment', error as Error)
-      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to create comment' } })
+      return respondCommentError(res, error, 'Failed to create comment')
+    }
+  })
+
+  router.patch('/api/comments/:commentId', rbacGuard('comments', 'write'), async (req: Request, res: Response) => {
+    const commentId = req.params.commentId
+    if (!commentId || commentId.trim().length === 0) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'commentId required' } })
+    }
+
+    const schema = z.object({
+      content: z.string().min(1),
+      mentions: z.array(z.string().min(1)).optional(),
+    })
+    const parsed = schema.safeParse(req.body)
+    if (!parsed.success) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+    }
+
+    try {
+      const comment = await commentService.updateComment(commentId, getUserId(req), parsed.data)
+      return res.json({ ok: true, data: { comment } })
+    } catch (error) {
+      logger.error('Failed to update comment', error as Error)
+      return respondCommentError(res, error, 'Failed to update comment')
+    }
+  })
+
+  router.delete('/api/comments/:commentId', rbacGuard('comments', 'write'), async (req: Request, res: Response) => {
+    const commentId = req.params.commentId
+    if (!commentId || commentId.trim().length === 0) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'commentId required' } })
+    }
+
+    try {
+      await commentService.deleteComment(commentId, getUserId(req))
+      return res.status(204).end()
+    } catch (error) {
+      logger.error('Failed to delete comment', error as Error)
+      return respondCommentError(res, error, 'Failed to delete comment')
     }
   })
 
@@ -273,7 +361,7 @@ export function commentsRouter(injector?: Injector): Router {
       return res.status(204).end()
     } catch (error) {
       logger.error('Failed to resolve comment', error as Error)
-      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to resolve comment' } })
+      return respondCommentError(res, error, 'Failed to resolve comment')
     }
   })
 

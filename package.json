@@ -22,7 +22,7 @@
     "verify:smoke:all": "bash scripts/verify-smoke.sh",
     "verify:plm-ui-regression": "bash scripts/verify-plm-ui-regression.sh",
     "verify:plm-ui-full": "bash scripts/verify-plm-ui-full.sh",
-    "verify:plm-regression": "bash scripts/verify-plm-regression.sh",
+    "verify:plm-regression": "pnpm run verify:plm-ui-regression",
     "verify:attendance-ui": "node scripts/verify-attendance-ui.mjs",
     "verify:attendance-import-ui": "node scripts/verify-attendance-import-ui.mjs",
     "verify:attendance-ui-regression": "node scripts/verify-attendance-ui-regression.mjs",
@@ -92,7 +92,7 @@
     "metrics:health": "bash scripts/metrics-cli.sh health",
     "metrics:alert": "node examples/metrics-alerting.js",
     "test:adapters": "bash scripts/test-plm-complete.sh && bash scripts/test-athena-complete.sh",
-    "verify:yuantus": "bash scripts/verify-yuantus-plm.sh",
+    "verify:yuantus": "pnpm run test:plm",
     "test:formdata": "bash scripts/test-formdata-upload.sh",
     "docker:dev": "docker-compose -f docker-compose.dev.yml up -d",
     "docker:dev:down": "docker-compose -f docker-compose.dev.yml down",
@@ -119,6 +119,7 @@
     }
   },
   "dependencies": {
+    "bcryptjs": "^3.0.3",
     "jsonwebtoken": "^9.0.2"
   },
   "devDependencies": {

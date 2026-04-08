@@ -41,6 +41,7 @@ vi.mock('../src/multitable/composables/useMultitableCapabilities', () => ({
     canEditRecord: ref(true),
     canDeleteRecord: ref(true),
     canManageFields: ref(true),
+    canManageSheetAccess: ref(true),
     canManageViews: ref(true),
     canComment: ref(true),
     canManageAutomation: ref(false),
@@ -53,9 +54,13 @@ vi.mock('../src/multitable/composables/useMultitableComments', () => ({
     loading: ref(false),
     submitting: ref(false),
     resolvingIds: ref<string[]>([]),
+    updatingIds: ref<string[]>([]),
+    deletingIds: ref<string[]>([]),
     error: ref<string | null>(null),
     loadComments: vi.fn(),
     addComment: vi.fn(),
+    updateComment: vi.fn(),
+    deleteComment: vi.fn(),
     resolveComment: vi.fn(),
   }),
 }))
@@ -69,6 +74,10 @@ vi.mock('../src/multitable/composables/useMultitableCommentInbox', () => ({
 
 vi.mock('../src/multitable/composables/useMultitableCommentRealtime', () => ({
   useMultitableCommentRealtime: vi.fn(),
+}))
+
+vi.mock('../src/multitable/composables/useMultitableSheetRealtime', () => ({
+  useMultitableSheetRealtime: vi.fn(),
 }))
 
 vi.mock('../src/multitable/import/bulk-import', () => ({
@@ -156,6 +165,7 @@ function createWorkbenchMock() {
       canEditRecord: true,
       canDeleteRecord: true,
       canManageFields: true,
+      canManageSheetAccess: true,
       canManageViews: true,
       canComment: true,
       canManageAutomation: false,
@@ -199,6 +209,7 @@ function createGridMock() {
     fieldPermissions: ref({}),
     viewPermission: ref(null),
     rowActions: ref(null),
+    rowActionOverrides: ref<Record<string, { canEdit: boolean; canDelete: boolean; canComment: boolean }>>({}),
     conflict: ref(null),
     error: ref<string | null>(null),
     sortFilterDirty: ref(false),
@@ -217,6 +228,7 @@ function createGridMock() {
     patchCell: vi.fn(),
     createRecord: vi.fn(),
     deleteRecord: vi.fn(),
+    resolveRowActions: vi.fn(() => null),
     loadViewData: vi.fn().mockResolvedValue(true),
     reloadCurrentPage: vi.fn(),
     dismissConflict: vi.fn(),

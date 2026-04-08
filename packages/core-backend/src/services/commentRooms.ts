@@ -14,3 +14,7 @@ export type CommentSheetRoomScope = {
 export function buildCommentSheetRoom(scope: CommentSheetRoomScope): string {
   return `comments-sheet:${scope.spreadsheetId}`
 }
+
+export function buildCommentInboxRoom(): string {
+  return 'comments-inbox'
+}

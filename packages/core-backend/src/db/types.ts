@@ -19,6 +19,7 @@ export interface Database {
   formulas: FormulasTable
   spreadsheets: SpreadsheetsTable
   sheets: SheetsTable
+  spreadsheet_permissions: SpreadsheetPermissionsTable
   cell_versions: CellVersionsTable
   named_ranges: NamedRangesTable
   tables: TablesTable
@@ -625,6 +626,7 @@ export interface MetaRecordsTable {
   sheet_id: string
   data: JSONColumnType<Record<string, unknown>>
   version: number
+  created_by: string | null
   created_at: CreatedAt
   updated_at: UpdatedAt
 }
@@ -746,6 +748,15 @@ export interface SheetsTable {
   config?: JSONColumnType<Record<string, unknown> | null>
   created_at: CreatedAt
   updated_at: UpdatedAt
+}
+
+export interface SpreadsheetPermissionsTable {
+  sheet_id: string
+  user_id: string | null
+  subject_type: string
+  subject_id: string
+  perm_code: string
+  created_at: CreatedAt
 }
 
 export interface CellsTable {

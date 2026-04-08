@@ -33,6 +33,7 @@ describe('multitable app shell route wiring', () => {
       viewId: 'view_grid',
       recordId: undefined,
       commentId: undefined,
+      fieldId: undefined,
       openComments: undefined,
       mode: undefined,
       embedded: undefined,
@@ -49,6 +50,7 @@ describe('multitable app shell route wiring', () => {
       viewId: 'view_form',
       recordId: 'rec_123',
       commentId: undefined,
+      fieldId: undefined,
       openComments: undefined,
       mode: 'form',
       embedded: true,
@@ -57,7 +59,7 @@ describe('multitable app shell route wiring', () => {
   })
 
   it('maps comment jump query state into workbench props', async () => {
-    const props = await resolveMultitableProps('/multitable/sheet_orders/view_grid?baseId=base_ops&recordId=rec_123&commentId=cmt_42&openComments=true')
+    const props = await resolveMultitableProps('/multitable/sheet_orders/view_grid?baseId=base_ops&recordId=rec_123&commentId=cmt_42&fieldId=fld_notes&openComments=true')
 
     expect(props).toEqual({
       baseId: 'base_ops',
@@ -65,6 +67,7 @@ describe('multitable app shell route wiring', () => {
       viewId: 'view_grid',
       recordId: 'rec_123',
       commentId: 'cmt_42',
+      fieldId: 'fld_notes',
       openComments: true,
       mode: undefined,
       embedded: undefined,

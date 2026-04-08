@@ -33,6 +33,18 @@
               @click="emit('reply', thread.id)"
             >Reply</button>
             <button
+              v-if="canEditComment(thread)"
+              class="meta-comments-drawer__reply"
+              :disabled="updatingIds.includes(thread.id) || deletingIds.includes(thread.id)"
+              @click="emit('edit', thread.id)"
+            >{{ editingCommentId === thread.id ? 'Editing...' : 'Edit' }}</button>
+            <button
+              v-if="canDeleteComment(thread)"
+              class="meta-comments-drawer__reply"
+              :disabled="deletingIds.includes(thread.id) || updatingIds.includes(thread.id)"
+              @click="emit('delete', thread.id)"
+            >{{ deletingIds.includes(thread.id) ? 'Deleting...' : 'Delete' }}</button>
+            <button
               v-if="canResolve && !thread.resolved"
               class="meta-comments-drawer__resolve"
               :disabled="resolvingIds.includes(thread.id)"
@@ -55,10 +67,17 @@
             <span class="meta-comments-drawer__author">{{ reply.authorName ?? reply.authorId }}</span>
             <span class="meta-comments-drawer__time">{{ formatTime(reply.createdAt) }}</span>
             <button
-              v-if="canComment && !reply.resolved"
+              v-if="canEditComment(reply)"
               class="meta-comments-drawer__reply"
-              @click="emit('reply', reply.id)"
-            >Reply</button>
+              :disabled="updatingIds.includes(reply.id) || deletingIds.includes(reply.id)"
+              @click="emit('edit', reply.id)"
+            >{{ editingCommentId === reply.id ? 'Editing...' : 'Edit' }}</button>
+            <button
+              v-if="canDeleteComment(reply)"
+              class="meta-comments-drawer__reply"
+              :disabled="deletingIds.includes(reply.id) || updatingIds.includes(reply.id)"
+              @click="emit('delete', reply.id)"
+            >{{ deletingIds.includes(reply.id) ? 'Deleting...' : 'Delete' }}</button>
           </div>
           <p class="meta-comments-drawer__content">{{ formatContent(reply.content) }}</p>
         </div>
@@ -69,16 +88,22 @@
         {{ error }}
         <button class="meta-comments-drawer__retry" @click="emit('retry')">Retry</button>
       </div>
-      <div v-if="activeReplyComment" class="meta-comments-drawer__reply-banner">
+      <div v-if="activeEditingComment" class="meta-comments-drawer__reply-banner">
+        <span>Editing {{ activeEditingComment.authorName ?? activeEditingComment.authorId }}</span>
+        <button class="meta-comments-drawer__reply-cancel" @click="emit('cancel-edit')">Cancel</button>
+      </div>
+      <div v-else-if="activeReplyComment" class="meta-comments-drawer__reply-banner">
         <span>Replying to {{ activeReplyComment.authorName ?? activeReplyComment.authorId }}</span>
         <button class="meta-comments-drawer__reply-cancel" @click="emit('cancel-reply')">Cancel</button>
       </div>
       <MetaCommentComposer
         v-model="draftModel"
         :suggestions="mentionSuggestions"
+        :initial-mentions="composerInitialMentions"
         :disabled="!canComment"
         :submitting="submitting"
-        :placeholder="activeReplyComment ? 'Reply to thread…' : 'Add a comment...'"
+        :placeholder="activeEditingComment ? 'Edit comment…' : activeReplyComment ? 'Reply to thread…' : 'Add a comment...'"
+        :submit-label="activeEditingComment ? 'Save' : 'Send'"
         @submit="submitComment"
       />
     </div>
@@ -108,11 +133,16 @@ const props = withDefaults(defineProps<{
   targetFieldId?: string | null
   scopeLabel?: string | null
   replyToCommentId?: string | null
+  editingCommentId?: string | null
   unreadCount?: number
   submitting?: boolean
   error?: string | null
   resolvingIds?: string[]
+  updatingIds?: string[]
+  deletingIds?: string[]
+  currentUserId?: string | null
   mentionSuggestions?: MetaCommentMentionSuggestion[]
+  composerInitialMentions?: MetaCommentMentionSuggestion[]
   mentionCandidates?: MentionCandidateInput[]
 }>(), {
   draft: '',
@@ -120,11 +150,16 @@ const props = withDefaults(defineProps<{
   targetFieldId: null,
   scopeLabel: null,
   replyToCommentId: null,
+  editingCommentId: null,
   unreadCount: 0,
   submitting: false,
   error: null,
   resolvingIds: () => [],
+  updatingIds: () => [],
+  deletingIds: () => [],
+  currentUserId: null,
   mentionSuggestions: () => [],
+  composerInitialMentions: () => [],
   mentionCandidates: () => [],
 })
 
@@ -133,7 +168,10 @@ const emit = defineEmits<{
   (e: 'submit', payload: { content: string; mentions: string[] }): void
   (e: 'resolve', commentId: string): void
   (e: 'reply', commentId: string): void
+  (e: 'edit', commentId: string): void
+  (e: 'delete', commentId: string): void
   (e: 'cancel-reply'): void
+  (e: 'cancel-edit'): void
   (e: 'update:draft', value: string): void
   (e: 'retry'): void
 }>()
@@ -145,9 +183,44 @@ const draftModel = computed({
 
 const visibleComments = computed(() => {
   if (!props.targetFieldId) return props.comments
-  return props.comments.filter((comment) => {
+
+  const commentsById = new Map(props.comments.map((comment) => [comment.id, comment]))
+  const childIdsByParent = new Map<string, string[]>()
+  for (const comment of props.comments) {
+    if (!comment.parentId) continue
+    const siblings = childIdsByParent.get(comment.parentId) ?? []
+    siblings.push(comment.id)
+    childIdsByParent.set(comment.parentId, siblings)
+  }
+
+  const visibleIds = new Set<string>()
+  const queue: string[] = []
+  for (const comment of props.comments) {
     const fieldId = comment.fieldId ?? comment.targetFieldId ?? null
-    return fieldId === props.targetFieldId
+    if (fieldId !== props.targetFieldId || visibleIds.has(comment.id)) continue
+    visibleIds.add(comment.id)
+    queue.push(comment.id)
+  }
+
+  while (queue.length) {
+    const commentId = queue.shift()!
+    const comment = commentsById.get(commentId)
+    if (!comment) continue
+
+    if (comment.parentId && commentsById.has(comment.parentId) && !visibleIds.has(comment.parentId)) {
+      visibleIds.add(comment.parentId)
+      queue.push(comment.parentId)
+    }
+
+    for (const childId of childIdsByParent.get(commentId) ?? []) {
+      if (visibleIds.has(childId)) continue
+      visibleIds.add(childId)
+      queue.push(childId)
+    }
+  }
+
+  return props.comments.filter((comment) => {
+    return visibleIds.has(comment.id)
   })
 })
 
@@ -173,6 +246,12 @@ const activeReplyComment = computed(() => {
   const replyId = props.replyToCommentId
   if (!replyId) return null
   return visibleComments.value.find((comment) => comment.id === replyId) ?? null
+})
+
+const activeEditingComment = computed(() => {
+  const editId = props.editingCommentId
+  if (!editId) return null
+  return visibleComments.value.find((comment) => comment.id === editId) ?? null
 })
 
 const emptyMessage = computed(() => {
@@ -207,11 +286,33 @@ const defaultMentionSuggestions = computed<MetaCommentMentionSuggestion[]>(() =>
     .slice(0, 8)
 })
 
-const mentionSuggestions = computed(() => props.mentionSuggestions.length ? props.mentionSuggestions : defaultMentionSuggestions.value)
+const mentionSuggestions = computed(() => {
+  const seen = new Set<string>()
+  return [...props.mentionSuggestions, ...defaultMentionSuggestions.value]
+    .filter((item) => {
+      if (!item.id || seen.has(item.id)) return false
+      seen.add(item.id)
+      return true
+    })
+    .slice(0, 12)
+})
 
 function submitComment(payload: { content: string; mentions: string[] }) {
   if (!payload.content.trim() || props.submitting) return
   emit('submit', payload)
+}
+
+function isOwnComment(comment: MultitableComment): boolean {
+  return Boolean(props.currentUserId && comment.authorId === props.currentUserId)
+}
+
+function canEditComment(comment: MultitableComment): boolean {
+  return props.canComment && isOwnComment(comment) && !comment.resolved
+}
+
+function canDeleteComment(comment: MultitableComment): boolean {
+  if (!props.canComment || !isOwnComment(comment)) return false
+  return !(repliesByParentId.value[comment.id]?.length)
 }
 
 function formatTime(iso: string): string {

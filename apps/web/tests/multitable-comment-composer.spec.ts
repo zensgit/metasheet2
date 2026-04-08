@@ -56,7 +56,7 @@ describe('MetaCommentComposer', () => {
     await nextTick()
 
     expect(submitSpy).toEqual([{
-      content: '@Jamie',
+      content: '@[Jamie](user_jamie)',
       mentions: ['user_jamie'],
     }])
 

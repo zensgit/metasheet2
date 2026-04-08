@@ -14,6 +14,25 @@ Entry points:
   - Verification: `docs/development/github-stability-recording-lite-verification-20260403.md`
   - Notes: records on-prem stability snapshots into GitHub Actions artifacts without triggering the Slack drill; becomes live once merged to the default branch.
 
+## 2026-04-06 GitHub Stability Summary Polish
+
+- GitHub stability summary polish:
+  - Workflow: `.github/workflows/dingtalk-oauth-stability-recording-lite.yml`
+  - Script: `scripts/ops/github-dingtalk-oauth-stability-summary.py`
+  - Design: `docs/development/github-stability-summary-polish-design-20260406.md`
+  - Verification: `docs/development/github-stability-summary-polish-verification-20260406.md`
+  - Notes: adds machine-readable `summary.json`, failure reasons, and next actions while keeping GitHub in passive recording mode.
+
+## 2026-04-07 Multitable Staging Profile Baseline
+
+- Multitable staging profile threshold follow-up:
+  - Script: `scripts/ops/multitable-pilot-ready-staging.sh`
+  - Tests: `scripts/ops/multitable-pilot-ready-staging.test.mjs`, `scripts/ops/multitable-pilot-ready-local.test.mjs`
+  - Design: `docs/development/multitable-staging-profile-baseline-20260407.md`
+  - Verification: `docs/development/multitable-staging-profile-baseline-verification-20260407.md`
+  - Deployment notes: `docs/deployment/multitable-internal-pilot-runbook-20260319.md`
+  - Notes: retunes the public staging grid-profile defaults so the release-bound wrapper reflects observed remote latency while preserving env overrides for stricter same-host rehearsals.
+
 ## 2026-04-03 On-Prem Docker GC
 
 - Remote Docker garbage collection:
@@ -67,8 +86,8 @@ Entry points:
   - Report: `docs/verification-plm-2025-12-28.md`
 
 - Yuantus PLM verification:
-  - Script: `scripts/verify-yuantus-plm.sh`
   - Run: `pnpm verify:yuantus`
+  - Alias of: `pnpm test:plm`
   - Report: `docs/verification-yuantus-plm-20251231_1507.md`
   - Connection notes: `docs/yuantus-plm-connection.md`
   - External env checklist: `docs/PLM_EXTERNAL_ENV_CHECKLIST.md`
@@ -536,7 +555,8 @@ Entry points:
   - Report: `docs/verification-plm-ui-substitutes-mutation-20260108_152816.md`
   - Artifact: `artifacts/plm-ui-substitutes-mutation-20260108_152816.png`
 - PLM regression:
-  - Script: `scripts/verify-plm-regression.sh`
+  - Run: `pnpm verify:plm-regression`
+  - Alias of: `pnpm verify:plm-ui-regression`
   - Report: `docs/verification-plm-regression-20260108_150410.md`
   - Report: `docs/verification-plm-regression-20260108_151809.md`
   - Report: `docs/verification-plm-regression-20260108_152816.md`
@@ -765,15 +785,15 @@ Entry points:
 
 - Univer full suite:
   - Run: `bash scripts/verify-univer-all.sh`
-  - Outputs under `artifacts/univer-poc/` (see `verification-*.md/json` files)
+  - Current behavior: compatibility wrapper around `scripts/verify-univer-ui-smoke.mjs`
+  - Output: `artifacts/univer-poc/verify-univer-all.json`
   - Latest report: `docs/verification-univer-all-20260101_0103.md`
   - Report: `docs/verification-univer-all-2025-12-27.md`
   - Core mode attempt (blocked in automation): `docs/verification-univer-all-core-2025-12-27.md`
   - Core mode + windowing: `docs/verification-univer-all-core-windowing-2025-12-27.md`
   - Optional flags:
     - `BACKEND_MODE=core` (use Meta(DB))
-    - `RUN_WINDOWING=true`
-    - `RUN_EDITABLE_DEMO=false` (skip editable demo)
+  - Legacy flags `RUN_WINDOWING` and `RUN_EDITABLE_DEMO` are ignored by the compatibility wrapper.
 
 ## CI / Nightly
 

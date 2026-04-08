@@ -69,10 +69,18 @@ pnpm verify:multitable-onprem:release-gate
 
 ```text
 metasheet/
+  bootstrap-admin.bat
+  bootstrap-admin-runXX.bat
+  deploy.bat
+  deploy-runXX.bat
+  deploy-remote.bat
   apps/web/dist/
   packages/core-backend/dist/
   plugins/plugin-attendance/
   scripts/ops/
+    multitable-onprem-bootstrap-admin.ps1
+    multitable-onprem-apply-package.sh
+    multitable-onprem-apply-package.ps1
     multitable-onprem-package-install.sh
     multitable-onprem-package-upgrade.sh
     multitable-onprem-deploy-easy.sh
@@ -100,3 +108,22 @@ Current plugin policy:
 Before sending a package to a customer or field team, use:
 
 - `/Users/huazhou/Downloads/Github/metasheet2-multitable/docs/deployment/multitable-onprem-customer-delivery-checklist-20260319.md`
+
+## Server-side apply helpers
+
+The packaged root now includes a fixed deploy entrypoint for corrective rerolls:
+
+- `bootstrap-admin.bat <admin-email> <admin-password> [admin-name]`
+- `bootstrap-admin-runXX.bat <admin-email> <admin-password> [admin-name]`
+- `deploy.bat <package.zip|package.tgz>`
+- `deploy-runXX.bat <package.zip|package.tgz>`
+- `deploy-remote.bat <package.zip|package.tgz>`
+
+For Windows Server, these wrappers delegate to `scripts/ops/multitable-onprem-apply-package.ps1`; the `.sh` helper remains available for Linux/WSL flows. The apply helper:
+
+1. extracts the archive into a temporary directory,
+2. copies the package contents into the current deploy root,
+3. installs dependencies if needed, runs migrations, and restarts PM2,
+4. preserves the existing `docker/app.env`.
+
+For a fresh Windows-only install, use `bootstrap-admin.bat` after `deploy.bat` so the customer can create the first admin account without needing bash or WSL.

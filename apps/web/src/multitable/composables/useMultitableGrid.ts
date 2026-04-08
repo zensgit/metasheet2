@@ -1,5 +1,6 @@
 import { ref, computed, watch, type Ref, type ComputedRef, type WatchStopHandle } from 'vue'
 import type {
+  MetaCapabilityOrigin,
   LinkedRecordSummary,
   MetaAttachment,
   MetaField,
@@ -11,6 +12,7 @@ import type {
   PatchResult,
 } from '../types'
 import { MultitableApiClient, multitableClient } from '../api/client'
+import { isPropertyHiddenField } from '../utils/field-permissions'
 
 // --- Sort / Filter types ---
 
@@ -51,6 +53,16 @@ export interface GridConflictState {
   serverVersion?: number
   previousLinkSummaries?: LinkedRecordSummary[]
   nextLinkSummaries?: LinkedRecordSummary[]
+}
+
+type RemoteRecordMergeOptions = {
+  linkSummaries?: Record<string, LinkedRecordSummary[]>
+  attachmentSummaries?: Record<string, MetaAttachment[]>
+}
+
+type RemoteRecordPatchOptions = {
+  version?: number
+  patch: Record<string, unknown>
 }
 
 // --- Serialisation helpers ---
@@ -154,7 +166,9 @@ export function useMultitableGrid(opts: {
   const attachmentSummaries = ref<Record<string, Record<string, MetaAttachment[]>>>({})
   const fieldPermissions = ref<Record<string, MetaFieldPermission>>({})
   const viewPermission = ref<MetaViewPermission | null>(null)
+  const capabilityOrigin = ref<MetaCapabilityOrigin | null>(null)
   const rowActions = ref<MetaRowActions | null>(null)
+  const rowActionOverrides = ref<Record<string, MetaRowActions>>({})
   const loading = ref(false)
   const error = ref<string | null>(null)
   const conflict = ref<GridConflictState | null>(null)
@@ -168,7 +182,11 @@ export function useMultitableGrid(opts: {
   // Field visibility
   const hiddenFieldIds = ref<string[]>([])
   const visibleFields = computed(() =>
-    fields.value.filter((f) => !hiddenFieldIds.value.includes(f.id) && fieldPermissions.value[f.id]?.visible !== false),
+    fields.value.filter((f) =>
+      !hiddenFieldIds.value.includes(f.id)
+      && !isPropertyHiddenField(f)
+      && fieldPermissions.value[f.id]?.visible !== false,
+    ),
   )
   const readOnlyFieldIds = computed(() =>
     fields.value
@@ -261,7 +279,9 @@ export function useMultitableGrid(opts: {
         ? (data.meta?.permissions?.viewPermissions?.[data.view.id] ?? null)
         : null
       viewPermission.value = nextViewPermission
+      capabilityOrigin.value = data.meta?.capabilityOrigin ?? null
       rowActions.value = data.meta?.permissions?.rowActions ?? null
+      rowActionOverrides.value = data.meta?.permissions?.rowActionOverrides ?? {}
       if (serverPage) page.value = serverPage
       if (data.view) syncFromView(data.view)
     } catch (e: any) {
@@ -389,6 +409,23 @@ export function useMultitableGrid(opts: {
 
   // --- Record CRUD ---
 
+  function rejectRowEdit(): false {
+    error.value = 'Record editing is not allowed for this row.'
+    return false
+  }
+
+  function rejectRowDelete(): false {
+    error.value = 'Record deletion is not allowed for this row.'
+    return false
+  }
+
+  function resolveRowActions(recordId?: string | null): MetaRowActions | null {
+    if (recordId && rowActionOverrides.value[recordId]) {
+      return rowActionOverrides.value[recordId]
+    }
+    return rowActions.value
+  }
+
   async function createRecord(data?: Record<string, unknown>) {
     error.value = null
     try {
@@ -405,6 +442,7 @@ export function useMultitableGrid(opts: {
 
   async function deleteRecord(recordId: string): Promise<boolean> {
     error.value = null
+    if (resolveRowActions(recordId)?.canDelete === false) return rejectRowDelete()
     try {
       const row = rows.value.find((r) => r.id === recordId)
       await client.deleteRecord(recordId, row?.version)
@@ -432,6 +470,7 @@ export function useMultitableGrid(opts: {
   ) {
     error.value = null
     conflict.value = null
+    if (resolveRowActions(recordId)?.canEdit === false) return rejectRowEdit()
     const row = rows.value.find((r) => r.id === recordId)
     const oldValue = row?.data[fieldId]
     const oldLinkSummaries = options?.previousLinkSummaries ?? linkSummaries.value[recordId]?.[fieldId]
@@ -479,6 +518,7 @@ export function useMultitableGrid(opts: {
   async function undo() {
     if (!canUndo.value) return
     const edit = editHistory.value[historyIndex.value]
+    if (resolveRowActions(edit.recordId)?.canEdit === false) return void rejectRowEdit()
     historyIndex.value--
     const row = rows.value.find((r) => r.id === edit.recordId)
     if (row) row.data[edit.fieldId] = edit.oldValue
@@ -496,8 +536,10 @@ export function useMultitableGrid(opts: {
 
   async function redo() {
     if (!canRedo.value) return
-    historyIndex.value++
-    const edit = editHistory.value[historyIndex.value]
+    const nextHistoryIndex = historyIndex.value + 1
+    const edit = editHistory.value[nextHistoryIndex]
+    if (resolveRowActions(edit.recordId)?.canEdit === false) return void rejectRowEdit()
+    historyIndex.value = nextHistoryIndex
     const row = rows.value.find((r) => r.id === edit.recordId)
     if (row) row.data[edit.fieldId] = edit.newValue
     setLinkSummaries(edit.recordId, edit.fieldId, edit.newLinkSummaries)
@@ -609,6 +651,88 @@ export function useMultitableGrid(opts: {
     }
   }
 
+  function replaceRecordLinkSummaries(recordId: string, summaries?: Record<string, LinkedRecordSummary[]>) {
+    const normalized = summaries && Object.keys(summaries).length > 0 ? summaries : null
+    if (!normalized) {
+      const next = { ...linkSummaries.value }
+      delete next[recordId]
+      linkSummaries.value = next
+      return
+    }
+    linkSummaries.value = {
+      ...linkSummaries.value,
+      [recordId]: normalized,
+    }
+  }
+
+  function replaceRecordAttachmentSummaries(recordId: string, summaries?: Record<string, MetaAttachment[]>) {
+    const normalized = summaries && Object.keys(summaries).length > 0 ? summaries : null
+    if (!normalized) {
+      const next = { ...attachmentSummaries.value }
+      delete next[recordId]
+      attachmentSummaries.value = next
+      return
+    }
+    attachmentSummaries.value = {
+      ...attachmentSummaries.value,
+      [recordId]: normalized,
+    }
+  }
+
+  function mergeRemoteRecord(record: MetaRecord, options?: RemoteRecordMergeOptions): boolean {
+    const index = rows.value.findIndex((row) => row.id === record.id)
+    if (index < 0) return false
+    const nextRows = [...rows.value]
+    nextRows[index] = {
+      ...nextRows[index],
+      version: record.version,
+      data: { ...record.data },
+    }
+    rows.value = nextRows
+    replaceRecordLinkSummaries(record.id, options?.linkSummaries)
+    replaceRecordAttachmentSummaries(record.id, options?.attachmentSummaries)
+    return true
+  }
+
+  function applyRemoteRecordPatch(recordId: string, options: RemoteRecordPatchOptions): boolean {
+    const index = rows.value.findIndex((row) => row.id === recordId)
+    if (index < 0) return false
+    const nextRows = [...rows.value]
+    const current = nextRows[index]
+    nextRows[index] = {
+      ...current,
+      version: typeof options.version === 'number' ? options.version : current.version,
+      data: {
+        ...current.data,
+        ...options.patch,
+      },
+    }
+    rows.value = nextRows
+    return true
+  }
+
+  function removeRemoteRecord(recordId: string): boolean {
+    const nextRows = rows.value.filter((row) => row.id !== recordId)
+    if (nextRows.length === rows.value.length) return false
+    rows.value = nextRows
+
+    const nextLinkSummaries = { ...linkSummaries.value }
+    delete nextLinkSummaries[recordId]
+    linkSummaries.value = nextLinkSummaries
+
+    const nextAttachmentSummaries = { ...attachmentSummaries.value }
+    delete nextAttachmentSummaries[recordId]
+    attachmentSummaries.value = nextAttachmentSummaries
+
+    const nextTotal = Math.max(0, Number(page.value.total ?? nextRows.length) - 1)
+    page.value = {
+      ...page.value,
+      total: nextTotal,
+      hasMore: page.value.offset + nextRows.length < nextTotal,
+    }
+    return true
+  }
+
   // --- Column width ---
 
   function setColumnWidth(fieldId: string, width: number) {
@@ -631,7 +755,7 @@ export function useMultitableGrid(opts: {
 
   return {
     // State
-    fields, rows, linkSummaries, attachmentSummaries, fieldPermissions, viewPermission, rowActions, loading, error, conflict, page, hiddenFieldIds, visibleFields, readOnlyFieldIds,
+    fields, rows, linkSummaries, attachmentSummaries, fieldPermissions, viewPermission, capabilityOrigin, rowActions, rowActionOverrides, loading, error, conflict, page, hiddenFieldIds, visibleFields, readOnlyFieldIds,
     sortRules, filterRules, filterConjunction, sortFilterDirty,
     columnWidths, groupFieldId, groupField,
     editHistory, historyIndex, canUndo, canRedo,
@@ -645,8 +769,9 @@ export function useMultitableGrid(opts: {
     addFilterRule, updateFilterRule, removeFilterRule, clearFilters,
     applySortFilter,
     createRecord, deleteRecord, patchCell,
+    mergeRemoteRecord, applyRemoteRecordPatch, removeRemoteRecord,
     undo, redo, clearEditHistory, dismissConflict, retryConflict,
     setColumnWidth, setGroupField,
-    setSearchQuery,
+    setSearchQuery, resolveRowActions,
   }
 }

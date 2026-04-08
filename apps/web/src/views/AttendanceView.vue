@@ -9990,7 +9990,9 @@ function classifyStatusError(
     meta.hint = tr('Retry the action. If this repeats, check network/server health.', '请重试当前操作；若持续出现，请检查网络与服务健康状态。')
     meta.action = defaultAction
   } else if (code === 'PUNCH_TOO_SOON') {
-    message = rawMessage
+    message = normalizeErrorCode(rawMessage) === 'PUNCH_TOO_SOON'
+      ? tr('Punch interval is too short. Try again shortly.', '打卡间隔过短，请稍后再试。')
+      : rawMessage
     meta.hint = tr('Minimum punch interval is enforced by policy. Retry after the interval.', '系统已启用最小打卡间隔，请稍后重试。')
     meta.action = 'refresh-overview'
   } else if (status === 401 || code === 'UNAUTHORIZED' || code === 'INVALID_TOKEN' || code === 'TOKEN_EXPIRED') {
@@ -10863,12 +10865,12 @@ async function punch(eventType: 'check_in' | 'check_out') {
     })
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(readErrorMessage(data, tr('Punch failed', '打卡失败')))
+      throw createApiError(response, data, tr('Punch failed', '打卡失败'))
     }
     setStatus(tr(`${eventType === 'check_in' ? 'Check in' : 'Check out'} recorded.`, `${eventType === 'check_in' ? '上班打卡' : '下班打卡'}已记录。`))
     await refreshAll()
   } catch (error: any) {
-    setStatus(readErrorMessage(error, tr('Punch failed', '打卡失败')), 'error')
+    setStatusFromError(error, tr('Punch failed', '打卡失败'), 'refresh')
   } finally {
     punching.value = false
   }

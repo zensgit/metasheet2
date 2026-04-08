@@ -10,7 +10,12 @@ type QueryResult = {
 type QueryHandler = (sql: string, params?: unknown[]) => QueryResult | Promise<QueryResult>
 
 function createMockPool(queryHandler: QueryHandler) {
-  const query = vi.fn(async (sql: string, params?: unknown[]) => queryHandler(sql, params))
+  const query = vi.fn(async (sql: string, params?: unknown[]) => {
+    if (sql.includes('FROM spreadsheet_permissions')) {
+      return { rows: [], rowCount: 0 }
+    }
+    return queryHandler(sql, params)
+  })
   const transaction = vi.fn(async (fn: (client: { query: typeof query }) => Promise<unknown>) => fn({ query }))
   return { query, transaction }
 }
@@ -60,7 +65,7 @@ describe('Multitable record and form context API', () => {
     const { app } = await createApp({
       tokenPerms: ['multitable:read', 'comments:write'],
       queryHandler: async (sql, params) => {
-        if (sql.includes('SELECT id, sheet_id, version, data FROM meta_records WHERE id = $1')) {
+        if (sql.includes('SELECT id, sheet_id, version, data, created_by FROM meta_records WHERE id = $1')) {
           expect(params).toEqual(['rec_1'])
           return {
             rows: [{
@@ -200,7 +205,10 @@ describe('Multitable record and form context API', () => {
             ],
           }
         }
-        if (sql.includes('SELECT id, version, data FROM meta_records WHERE id = $1 AND sheet_id = $2')) {
+        if (
+          sql.includes('SELECT id, version, data FROM meta_records WHERE id = $1 AND sheet_id = $2')
+          || sql.includes('SELECT id, version, data, created_by FROM meta_records WHERE id = $1 AND sheet_id = $2')
+        ) {
           expect(params).toEqual(['rec_existing', 'sheet_ops'])
           return {
             rows: [{ id: 'rec_existing', version: 5, data: { fld_title: 'Existing record', fld_internal: 'secret', fld_files: ['att_form_1'] } }],
@@ -240,6 +248,10 @@ describe('Multitable record and form context API', () => {
       expect.objectContaining({ id: 'fld_title', name: 'Title' }),
       expect.objectContaining({ id: 'fld_files', name: 'Files' }),
     ])
+    expect(response.body.data.capabilityOrigin).toEqual({
+      source: 'global-rbac',
+      hasSheetAssignments: false,
+    })
     expect(response.body.data.record).toMatchObject({ id: 'rec_existing', version: 5 })
     expect(response.body.data.commentsScope).toMatchObject({
       targetType: 'meta_record',
@@ -261,6 +273,159 @@ describe('Multitable record and form context API', () => {
         thumbnailUrl: null,
         uploadedAt: '2026-03-19T11:00:00.000Z',
       })],
+    })
+  })
+
+  test('marks computed and explicitly readonly fields as readOnly across form and record contexts', async () => {
+    const { app } = await createApp({
+      tokenPerms: ['multitable:read', 'multitable:write', 'comments:write'],
+      queryHandler: async (sql, params) => {
+        if (sql.includes('SELECT id, sheet_id, name, type, filter_info, sort_info, group_info, hidden_field_ids, config FROM meta_views WHERE id = $1')) {
+          expect(params).toEqual(['view_ops_permissions'])
+          return {
+            rows: [{
+              id: 'view_ops_permissions',
+              sheet_id: 'sheet_ops',
+              name: 'Ops Grid',
+              type: 'grid',
+              filter_info: {},
+              sort_info: {},
+              group_info: {},
+              hidden_field_ids: ['fld_hidden_lookup'],
+              config: {},
+            }],
+          }
+        }
+        if (sql.includes('SELECT id, sheet_id, version, data, created_by FROM meta_records WHERE id = $1 AND sheet_id = $2')) {
+          expect(params).toEqual(['rec_perm_1', 'sheet_ops'])
+          return {
+            rows: [{
+              id: 'rec_perm_1',
+              sheet_id: 'sheet_ops',
+              version: 7,
+              data: {
+                fld_title: 'Editable title',
+                fld_formula_total: '42',
+                fld_hidden_lookup: 'Derived',
+                fld_locked: 'Locked value',
+                fld_secret: 'Restricted value',
+              },
+            }],
+          }
+        }
+        if (
+          sql.includes('SELECT id, version, data FROM meta_records WHERE id = $1 AND sheet_id = $2')
+          || sql.includes('SELECT id, version, data, created_by FROM meta_records WHERE id = $1 AND sheet_id = $2')
+        ) {
+          expect(params).toEqual(['rec_perm_1', 'sheet_ops'])
+          return {
+            rows: [{
+              id: 'rec_perm_1',
+              version: 7,
+              data: {
+                fld_title: 'Editable title',
+                fld_formula_total: '42',
+                fld_hidden_lookup: 'Derived',
+                fld_locked: 'Locked value',
+                fld_secret: 'Restricted value',
+              },
+            }],
+          }
+        }
+        if (sql.includes('SELECT id, sheet_id, version, data, created_by FROM meta_records WHERE id = $1')) {
+          expect(params).toEqual(['rec_perm_1'])
+          return {
+            rows: [{
+              id: 'rec_perm_1',
+              sheet_id: 'sheet_ops',
+              version: 7,
+              data: {
+                fld_title: 'Editable title',
+                fld_formula_total: '42',
+                fld_hidden_lookup: 'Derived',
+                fld_locked: 'Locked value',
+                fld_secret: 'Restricted value',
+              },
+            }],
+          }
+        }
+        if (sql.includes('SELECT id, base_id, name, description FROM meta_sheets WHERE id = $1')) {
+          expect(params).toEqual(['sheet_ops'])
+          return { rows: [{ id: 'sheet_ops', base_id: 'base_ops', name: 'Ops', description: 'Ops intake' }] }
+        }
+        if (sql.includes('SELECT id, name, type, property, "order" FROM meta_fields WHERE sheet_id = $1')) {
+          expect(params).toEqual(['sheet_ops'])
+          return {
+            rows: [
+              { id: 'fld_title', name: 'Title', type: 'string', property: {}, order: 1 },
+              { id: 'fld_formula_total', name: 'Total', type: 'formula', property: { expression: '{fld_amount} * 2' }, order: 2 },
+              { id: 'fld_hidden_lookup', name: 'Lookup', type: 'lookup', property: { linkFieldId: 'fld_vendor', targetFieldId: 'fld_name' }, order: 3 },
+              { id: 'fld_locked', name: 'Locked', type: 'string', property: { readOnly: true }, order: 4 },
+              { id: 'fld_secret', name: 'Secret', type: 'string', property: { hidden: true }, order: 5 },
+            ],
+          }
+        }
+        throw new Error(`Unhandled SQL in test: ${sql}`)
+      },
+    })
+
+    const formResponse = await request(app)
+      .get('/api/multitable/form-context')
+      .query({ viewId: 'view_ops_permissions', recordId: 'rec_perm_1' })
+      .expect(200)
+
+    expect(formResponse.body.data.readOnly).toBe(false)
+    expect(formResponse.body.data.fields.map((field: { id: string }) => field.id)).toEqual([
+      'fld_title',
+      'fld_formula_total',
+      'fld_locked',
+    ])
+    expect(formResponse.body.data.fieldPermissions).toEqual({
+      fld_title: { visible: true, readOnly: false },
+      fld_formula_total: { visible: true, readOnly: true },
+      fld_hidden_lookup: { visible: false, readOnly: true },
+      fld_locked: { visible: true, readOnly: true },
+      fld_secret: { visible: false, readOnly: false },
+    })
+    expect(formResponse.body.data.record.data).toEqual({
+      fld_title: 'Editable title',
+      fld_formula_total: '42',
+      fld_locked: 'Locked value',
+    })
+
+    const recordResponse = await request(app)
+      .get('/api/multitable/records/rec_perm_1')
+      .query({ viewId: 'view_ops_permissions' })
+      .expect(200)
+
+    expect(recordResponse.body.data.fields.map((field: { id: string }) => field.id)).toEqual([
+      'fld_title',
+      'fld_formula_total',
+      'fld_hidden_lookup',
+      'fld_locked',
+    ])
+    expect(recordResponse.body.data.fieldPermissions).toEqual({
+      fld_title: { visible: true, readOnly: false },
+      fld_formula_total: { visible: true, readOnly: true },
+      fld_hidden_lookup: { visible: false, readOnly: true },
+      fld_locked: { visible: true, readOnly: true },
+      fld_secret: { visible: false, readOnly: false },
+    })
+    expect(recordResponse.body.data.record.data).toMatchObject({
+      fld_title: 'Editable title',
+      fld_formula_total: '42',
+      fld_locked: 'Locked value',
+    })
+    expect(recordResponse.body.data.record.data).toHaveProperty('fld_hidden_lookup')
+    expect(recordResponse.body.data.record.data).not.toHaveProperty('fld_secret')
+    expect(recordResponse.body.data.rowActions).toEqual({
+      canEdit: true,
+      canDelete: true,
+      canComment: true,
+    })
+    expect(recordResponse.body.data.capabilityOrigin).toEqual({
+      source: 'global-rbac',
+      hasSheetAssignments: false,
     })
   })
 
@@ -295,6 +460,7 @@ describe('Multitable record and form context API', () => {
                 { id: 'fld_name', name: 'Name', type: 'string', property: {}, order: 1 },
                 { id: 'fld_vendor_link', name: 'Vendor', type: 'link', property: { foreignSheetId: 'sheet_vendors' }, order: 2 },
                 { id: 'fld_files', name: 'Files', type: 'attachment', property: {}, order: 3 },
+                { id: 'fld_secret', name: 'Secret', type: 'string', property: { hidden: true }, order: 4 },
               ],
             }
           }
@@ -311,7 +477,7 @@ describe('Multitable record and form context API', () => {
               {
                 id: 'rec_1',
                 version: 2,
-                data: { fld_name: 'Order A', fld_vendor_link: ['vendor_1'], fld_files: ['att_view_1'] },
+                data: { fld_name: 'Order A', fld_vendor_link: ['vendor_1'], fld_files: ['att_view_1'], fld_secret: 'Internal note' },
               },
             ],
           }
@@ -351,6 +517,11 @@ describe('Multitable record and form context API', () => {
 
     expect(response.body.ok).toBe(true)
     expect(response.body.data.id).toBe('sheet_orders')
+    expect(response.body.data.fields.map((field: { id: string }) => field.id)).toEqual([
+      'fld_name',
+      'fld_vendor_link',
+      'fld_files',
+    ])
     expect(response.body.data.rows).toEqual([
       {
         id: 'rec_1',
@@ -587,7 +758,7 @@ describe('Multitable record and form context API', () => {
           expect(params).toEqual(['sheet_vendors', ['vendor_1']])
           return { rows: [{ id: 'vendor_1' }] }
         }
-        if (sql.includes('SELECT id, version FROM meta_records WHERE id = $1 AND sheet_id = $2 FOR UPDATE')) {
+        if (sql.includes('SELECT id, version, created_by FROM meta_records WHERE id = $1 AND sheet_id = $2 FOR UPDATE')) {
           expect(params).toEqual(['rec_existing', 'sheet_ops'])
           return { rows: [{ id: 'rec_existing', version: 5 }] }
         }
@@ -605,7 +776,10 @@ describe('Multitable record and form context API', () => {
           expect(params?.[3]).toBe('vendor_1')
           return { rows: [] }
         }
-        if (sql.includes('SELECT id, version, data FROM meta_records WHERE id = $1 AND sheet_id = $2')) {
+        if (
+          sql.includes('SELECT id, version, data FROM meta_records WHERE id = $1 AND sheet_id = $2')
+          || sql.includes('SELECT id, version, data, created_by FROM meta_records WHERE id = $1 AND sheet_id = $2')
+        ) {
           expect(params).toEqual(['rec_existing', 'sheet_ops'])
           return {
             rows: [{
@@ -689,7 +863,10 @@ describe('Multitable record and form context API', () => {
     const { app } = await createApp({
       tokenPerms: ['multitable:write', 'comments:write'],
       queryHandler: async (sql, params) => {
-        if (sql.includes('SELECT id, sheet_id FROM meta_records WHERE id = $1')) {
+        if (
+          sql.includes('SELECT id, sheet_id FROM meta_records WHERE id = $1')
+          || sql.includes('SELECT id, sheet_id, created_by FROM meta_records WHERE id = $1')
+        ) {
           expect(params).toEqual(['rec_existing'])
           return { rows: [{ id: 'rec_existing', sheet_id: 'sheet_ops' }] }
         }
@@ -717,7 +894,7 @@ describe('Multitable record and form context API', () => {
           expect(params).toEqual(['sheet_vendors', ['vendor_1']])
           return { rows: [{ id: 'vendor_1' }] }
         }
-        if (sql.includes('SELECT id, version FROM meta_records WHERE id = $1 AND sheet_id = $2 FOR UPDATE')) {
+        if (sql.includes('SELECT id, version, created_by FROM meta_records WHERE id = $1 AND sheet_id = $2 FOR UPDATE')) {
           expect(params).toEqual(['rec_existing', 'sheet_ops'])
           return { rows: [{ id: 'rec_existing', version: 3 }] }
         }
@@ -735,7 +912,10 @@ describe('Multitable record and form context API', () => {
           expect(params?.[3]).toBe('vendor_1')
           return { rows: [] }
         }
-        if (sql.includes('SELECT id, version, data FROM meta_records WHERE id = $1 AND sheet_id = $2')) {
+        if (
+          sql.includes('SELECT id, version, data FROM meta_records WHERE id = $1 AND sheet_id = $2')
+          || sql.includes('SELECT id, version, data, created_by FROM meta_records WHERE id = $1 AND sheet_id = $2')
+        ) {
           expect(params).toEqual(['rec_existing', 'sheet_ops'])
           return {
             rows: [{
@@ -817,7 +997,10 @@ describe('Multitable record and form context API', () => {
     const { app } = await createApp({
       tokenPerms: ['multitable:write'],
       queryHandler: async (sql, params) => {
-        if (sql.includes('SELECT id, sheet_id FROM meta_records WHERE id = $1 AND sheet_id = $2')) {
+        if (
+          sql.includes('SELECT id, sheet_id FROM meta_records WHERE id = $1 AND sheet_id = $2')
+          || sql.includes('SELECT id, sheet_id, created_by FROM meta_records WHERE id = $1 AND sheet_id = $2')
+        ) {
           expect(params).toEqual(['rec_missing', 'sheet_ops'])
           return { rows: [] }
         }
@@ -853,7 +1036,7 @@ describe('Multitable record and form context API', () => {
             ],
           }
         }
-        if (sql.includes('SELECT id, version FROM meta_records WHERE sheet_id = $1 AND id = $2 FOR UPDATE')) {
+        if (sql.includes('SELECT id, version, created_by FROM meta_records WHERE sheet_id = $1 AND id = $2 FOR UPDATE')) {
           expect(params).toEqual(['sheet_orders', 'rec_1'])
           return { rows: [{ id: 'rec_1', version: 2 }] }
         }
@@ -944,7 +1127,7 @@ describe('Multitable record and form context API', () => {
             ],
           }
         }
-        if (sql.includes('SELECT id, version FROM meta_records WHERE sheet_id = $1 AND id = $2 FOR UPDATE')) {
+        if (sql.includes('SELECT id, version, created_by FROM meta_records WHERE sheet_id = $1 AND id = $2 FOR UPDATE')) {
           expect(params).toEqual(['sheet_orders', 'rec_1'])
           return { rows: [{ id: 'rec_1', version: 7 }] }
         }
@@ -1092,6 +1275,95 @@ describe('Multitable record and form context API', () => {
     expect(response.body.error.code).toBe('VALIDATION_ERROR')
     expect(response.body.error.fieldErrors).toEqual({
       fld_internal: 'Field is not available in this form',
+    })
+  })
+
+  test('returns 403 when property-hidden fields are submitted through form views', async () => {
+    const { app } = await createApp({
+      tokenPerms: ['multitable:write'],
+      queryHandler: async (sql, params) => {
+        if (sql.includes('SELECT id, sheet_id, name, type, filter_info, sort_info, group_info, hidden_field_ids, config FROM meta_views WHERE id = $1')) {
+          expect(params).toEqual(['view_form_ops'])
+          return {
+            rows: [{
+              id: 'view_form_ops',
+              sheet_id: 'sheet_ops',
+              name: 'Ops Form',
+              type: 'form',
+              filter_info: {},
+              sort_info: {},
+              group_info: {},
+              hidden_field_ids: [],
+              config: {},
+            }],
+          }
+        }
+        if (sql.includes('SELECT id, base_id, name, description FROM meta_sheets WHERE id = $1')) {
+          expect(params).toEqual(['sheet_ops'])
+          return { rows: [{ id: 'sheet_ops', base_id: 'base_ops', name: 'Ops', description: null }] }
+        }
+        if (sql.includes('SELECT id, name, type, property, "order" FROM meta_fields WHERE sheet_id = $1 ORDER BY "order" ASC, id ASC')) {
+          expect(params).toEqual(['sheet_ops'])
+          return {
+            rows: [
+              { id: 'fld_title', name: 'Title', type: 'string', property: {}, order: 1 },
+              { id: 'fld_secret', name: 'Secret', type: 'string', property: { hidden: true }, order: 2 },
+            ],
+          }
+        }
+        throw new Error(`Unhandled SQL in test: ${sql}`)
+      },
+    })
+
+    const response = await request(app)
+      .post('/api/multitable/views/view_form_ops/submit')
+      .send({
+        data: {
+          fld_secret: 'restricted',
+        },
+      })
+      .expect(403)
+
+    expect(response.body.ok).toBe(false)
+    expect(response.body.error.code).toBe('FIELD_HIDDEN')
+    expect(response.body.error.fieldErrors).toEqual({
+      fld_secret: 'Field is hidden',
+    })
+  })
+
+  test('returns 403 when property-hidden fields are patched through bulk multitable patch', async () => {
+    const { app } = await createApp({
+      tokenPerms: ['multitable:write'],
+      queryHandler: async (sql, params) => {
+        if (sql.includes('SELECT id, name, type, property FROM meta_fields WHERE sheet_id = $1')) {
+          expect(params).toEqual(['sheet_orders'])
+          return {
+            rows: [
+              { id: 'fld_secret', name: 'Secret', type: 'string', property: { hidden: true } },
+            ],
+          }
+        }
+        throw new Error(`Unhandled SQL in test: ${sql}`)
+      },
+    })
+
+    const response = await request(app)
+      .post('/api/multitable/patch')
+      .send({
+        sheetId: 'sheet_orders',
+        changes: [{
+          recordId: 'rec_1',
+          fieldId: 'fld_secret',
+          value: 'restricted',
+          expectedVersion: 1,
+        }],
+      })
+      .expect(403)
+
+    expect(response.body.ok).toBe(false)
+    expect(response.body.error).toEqual({
+      code: 'FIELD_HIDDEN',
+      message: 'Field is hidden: fld_secret',
     })
   })
 })

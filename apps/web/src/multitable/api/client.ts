@@ -29,10 +29,15 @@ import type {
   MultitableComment,
   MultitableCommentPresenceSummary,
   CommentMentionSummary,
+  CommentMentionSummaryItem,
   MultitableCommentInboxItem,
   MultitableCommentInboxPage,
   MetaCommentsScope,
   MetaAttachment,
+  MetaCommentMentionSuggestion,
+  MetaSheetPermissionAccessLevel,
+  MetaSheetPermissionCandidate,
+  MetaSheetPermissionEntry,
 } from '../types'
 import { apiFetch } from '../../utils/api'
 
@@ -112,6 +117,7 @@ type RawComment = Partial<MultitableComment> & {
 
 type RawInboxItem = RawComment & {
   unread?: boolean
+  mentioned?: boolean
   baseId?: string | null
   sheetId?: string | null
   viewId?: string | null
@@ -197,6 +203,7 @@ function normalizeCommentInbox(payload: { items?: RawInboxItem[]; total?: number
       ? payload.items.map((item) => ({
           ...normalizeMultitableComment(item),
           unread: item.unread !== false,
+          mentioned: item.mentioned === true,
           baseId: typeof item.baseId === 'string' || item.baseId === null ? item.baseId : null,
           sheetId: typeof item.sheetId === 'string'
             ? item.sheetId
@@ -214,6 +221,120 @@ function normalizeCommentInbox(payload: { items?: RawInboxItem[]; total?: number
     total: typeof payload.total === 'number' ? payload.total : 0,
     limit: typeof payload.limit === 'number' ? payload.limit : 0,
     offset: typeof payload.offset === 'number' ? payload.offset : 0,
+  }
+}
+
+function normalizeCommentMentionSummaryItem(
+  item: Partial<CommentMentionSummaryItem> | null | undefined,
+): CommentMentionSummaryItem {
+  return {
+    rowId: typeof item?.rowId === 'string' ? item.rowId : '',
+    mentionedCount: typeof item?.mentionedCount === 'number' ? item.mentionedCount : 0,
+    unreadCount: typeof item?.unreadCount === 'number' ? item.unreadCount : 0,
+    mentionedFieldIds: Array.isArray(item?.mentionedFieldIds)
+      ? item.mentionedFieldIds.filter((value): value is string => typeof value === 'string')
+      : [],
+  }
+}
+
+function normalizeCommentMentionSummary(
+  payload: Partial<CommentMentionSummary> | null | undefined,
+): CommentMentionSummary {
+  const items = Array.isArray(payload?.items)
+    ? payload.items
+      .map((item) => normalizeCommentMentionSummaryItem(item))
+      .filter((item) => item.rowId.length > 0)
+    : []
+
+  return {
+    spreadsheetId: typeof payload?.spreadsheetId === 'string' ? payload.spreadsheetId : '',
+    unresolvedMentionCount: typeof payload?.unresolvedMentionCount === 'number' ? payload.unresolvedMentionCount : 0,
+    unreadMentionCount: typeof payload?.unreadMentionCount === 'number' ? payload.unreadMentionCount : 0,
+    mentionedRecordCount: typeof payload?.mentionedRecordCount === 'number' ? payload.mentionedRecordCount : 0,
+    unreadRecordCount: typeof payload?.unreadRecordCount === 'number' ? payload.unreadRecordCount : 0,
+    items,
+  }
+}
+
+function normalizeCommentMentionSuggestions(
+  payload: { items?: Array<Partial<MetaCommentMentionSuggestion>>; total?: number; limit?: number } | null | undefined,
+): { items: MetaCommentMentionSuggestion[]; total: number; limit: number } {
+  return {
+    items: Array.isArray(payload?.items)
+      ? payload.items
+        .map((item) => ({
+          id: typeof item?.id === 'string' ? item.id : '',
+          label: typeof item?.label === 'string' ? item.label : '',
+          subtitle: typeof item?.subtitle === 'string' ? item.subtitle : undefined,
+        }))
+        .filter((item) => item.id.length > 0 && item.label.length > 0)
+      : [],
+    total: typeof payload?.total === 'number' ? payload.total : 0,
+    limit: typeof payload?.limit === 'number' ? payload.limit : 0,
+  }
+}
+
+function normalizeSheetPermissionEntry(
+  payload: Partial<MetaSheetPermissionEntry> | null | undefined,
+): MetaSheetPermissionEntry | null {
+  const subjectType = payload?.subjectType === 'user' || payload?.subjectType === 'role' ? payload.subjectType : null
+  const subjectId = typeof payload?.subjectId === 'string' ? payload.subjectId : ''
+  const accessLevel = payload?.accessLevel
+  if (!subjectType || !subjectId || (accessLevel !== 'read' && accessLevel !== 'write' && accessLevel !== 'write-own' && accessLevel !== 'admin')) {
+    return null
+  }
+  return {
+    subjectType,
+    subjectId,
+    accessLevel,
+    permissions: Array.isArray(payload?.permissions)
+      ? payload.permissions.filter((value): value is string => typeof value === 'string')
+      : [],
+    label: typeof payload?.label === 'string' ? payload.label : subjectId,
+    subtitle: typeof payload?.subtitle === 'string' || payload?.subtitle === null ? payload.subtitle ?? null : null,
+    isActive: payload?.isActive !== false,
+  }
+}
+
+function normalizeSheetPermissionEntries(
+  payload: { items?: Array<Partial<MetaSheetPermissionEntry>> } | null | undefined,
+): { items: MetaSheetPermissionEntry[] } {
+  return {
+    items: Array.isArray(payload?.items)
+      ? payload.items
+        .map((item) => normalizeSheetPermissionEntry(item))
+        .filter((item): item is MetaSheetPermissionEntry => !!item)
+      : [],
+  }
+}
+
+function normalizeSheetPermissionCandidates(
+  payload: { items?: Array<Partial<MetaSheetPermissionCandidate>>; total?: number; limit?: number; query?: string } | null | undefined,
+): { items: MetaSheetPermissionCandidate[]; total: number; limit: number; query: string } {
+  const items: MetaSheetPermissionCandidate[] = []
+  if (Array.isArray(payload?.items)) {
+    for (const item of payload.items) {
+      const subjectType = item?.subjectType === 'user' || item?.subjectType === 'role' ? item.subjectType : null
+      const subjectId = typeof item?.subjectId === 'string' ? item.subjectId : ''
+      const label = typeof item?.label === 'string' ? item.label : ''
+      if (!subjectType || !subjectId || !label) continue
+      items.push({
+        subjectType,
+        subjectId,
+        label,
+        subtitle: typeof item?.subtitle === 'string' || item?.subtitle === null ? item.subtitle ?? null : null,
+        isActive: item?.isActive !== false,
+        accessLevel: item?.accessLevel === 'read' || item?.accessLevel === 'write' || item?.accessLevel === 'write-own' || item?.accessLevel === 'admin'
+          ? item.accessLevel
+          : null,
+      })
+    }
+  }
+  return {
+    items,
+    total: typeof payload?.total === 'number' ? payload.total : 0,
+    limit: typeof payload?.limit === 'number' ? payload.limit : 0,
+    query: typeof payload?.query === 'string' ? payload.query : '',
   }
 }
 
@@ -273,6 +394,48 @@ export class MultitableApiClient {
       body: JSON.stringify(input),
     })
     return parseJson(res)
+  }
+
+  async listSheetPermissions(sheetId: string): Promise<{ items: MetaSheetPermissionEntry[] }> {
+    const res = await this.fetch(`/api/multitable/sheets/${encodeURIComponent(sheetId)}/permissions`)
+    const data = await parseJson<{ items?: Array<Partial<MetaSheetPermissionEntry>> }>(res)
+    return normalizeSheetPermissionEntries(data)
+  }
+
+  async listSheetPermissionCandidates(
+    sheetId: string,
+    params?: { q?: string; limit?: number },
+  ): Promise<{ items: MetaSheetPermissionCandidate[]; total: number; limit: number; query: string }> {
+    const res = await this.fetch(`/api/multitable/sheets/${encodeURIComponent(sheetId)}/permission-candidates${qs(params ?? {})}`)
+    const data = await parseJson<{ items?: Array<Partial<MetaSheetPermissionCandidate>>; total?: number; limit?: number; query?: string }>(res)
+    return normalizeSheetPermissionCandidates(data)
+  }
+
+  async updateSheetPermission(
+    sheetId: string,
+    subjectType: 'user' | 'role',
+    subjectId: string,
+    accessLevel: MetaSheetPermissionAccessLevel | 'none',
+  ): Promise<{ subjectType: 'user' | 'role'; subjectId: string; accessLevel: MetaSheetPermissionAccessLevel | 'none'; entry: MetaSheetPermissionEntry | null }> {
+    const res = await this.fetch(`/api/multitable/sheets/${encodeURIComponent(sheetId)}/permissions/${encodeURIComponent(subjectType)}/${encodeURIComponent(subjectId)}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ accessLevel }),
+    })
+    const data = await parseJson<{
+      subjectType?: 'user' | 'role'
+      subjectId?: string
+      accessLevel?: MetaSheetPermissionAccessLevel | 'none'
+      entry?: Partial<MetaSheetPermissionEntry> | null
+    }>(res)
+    return {
+      subjectType: data?.subjectType === 'user' || data?.subjectType === 'role' ? data.subjectType : subjectType,
+      subjectId: typeof data?.subjectId === 'string' ? data.subjectId : subjectId,
+      accessLevel: data?.accessLevel === 'read' || data?.accessLevel === 'write' || data?.accessLevel === 'write-own' || data?.accessLevel === 'admin' || data?.accessLevel === 'none'
+        ? data.accessLevel
+        : accessLevel,
+      entry: normalizeSheetPermissionEntry(data?.entry ?? null),
+    }
   }
 
   // --- Fields ---
@@ -444,6 +607,7 @@ export class MultitableApiClient {
     const res = await this.fetch(`/api/comments${qs({
       spreadsheetId: normalized.containerId,
       rowId: normalized.targetId,
+      fieldId: normalized.targetFieldId ?? undefined,
     })}`)
     const data = await parseJson<{ comments?: RawComment[]; items?: RawComment[] }>(res)
     return normalizeCommentsList(data)
@@ -480,8 +644,41 @@ export class MultitableApiClient {
     }
   }
 
+  async listCommentMentionSuggestions(params: {
+    spreadsheetId: string
+    q?: string
+    limit?: number
+  }): Promise<{ items: MetaCommentMentionSuggestion[]; total: number; limit: number }> {
+    const res = await this.fetch(`/api/comments/mention-candidates${qs(params)}`)
+    const data = await parseJson<{ items?: Array<Partial<MetaCommentMentionSuggestion>>; total?: number; limit?: number }>(res)
+    return normalizeCommentMentionSuggestions(data)
+  }
+
   async resolveComment(commentId: string): Promise<void> {
     const res = await this.fetch(`/api/comments/${commentId}/resolve`, { method: 'POST' })
+    return parseJson(res)
+  }
+
+  async updateComment(commentId: string, input: {
+    content: string
+    mentions?: string[]
+  }): Promise<{ comment: MultitableComment }> {
+    const res = await this.fetch(`/api/comments/${commentId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        content: input.content,
+        mentions: input.mentions,
+      }),
+    })
+    const data = await parseJson<{ comment?: RawComment }>(res)
+    return {
+      comment: normalizeMultitableComment(data.comment),
+    }
+  }
+
+  async deleteComment(commentId: string): Promise<void> {
+    const res = await this.fetch(`/api/comments/${commentId}`, { method: 'DELETE' })
     return parseJson(res)
   }
 
@@ -497,7 +694,8 @@ export class MultitableApiClient {
 
   async loadMentionSummary(params: { spreadsheetId: string }): Promise<CommentMentionSummary> {
     const res = await this.fetch(`/api/comments/mention-summary${qs(params)}`)
-    return parseJson(res)
+    const data = await parseJson<Partial<CommentMentionSummary> | null>(res)
+    return normalizeCommentMentionSummary(data)
   }
 
   async markMentionsRead(params: { spreadsheetId: string }): Promise<void> {

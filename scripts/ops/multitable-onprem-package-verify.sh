@@ -22,6 +22,56 @@ function info() {
   echo "[multitable-onprem-package-verify] $*" >&2
 }
 
+function search_fixed_string() {
+  local needle="$1"
+  shift
+
+  if command -v rg >/dev/null 2>&1; then
+    rg --fixed-strings -- "$needle" "$@" >/dev/null 2>&1
+    return
+  fi
+
+  grep -rIF -- "$needle" "$@" >/dev/null 2>&1
+}
+
+function verify_windows_entrypoints() {
+  local root="$1"
+  local start_script="${root}/deploy.bat"
+  local remote_script="${root}/deploy-remote.bat"
+  local bootstrap_script="${root}/bootstrap-admin.bat"
+
+  if ! search_fixed_string 'multitable-onprem-apply-package.ps1' "$start_script"; then
+    die "deploy.bat must call the PowerShell-native multitable apply helper"
+  fi
+
+  if search_fixed_string 'multitable-onprem-apply-package.sh' "$start_script"; then
+    die "deploy.bat must not require bash or the .sh apply helper"
+  fi
+
+  if ! search_fixed_string 'deploy-remote.log' "$remote_script"; then
+    die "deploy-remote.bat must continue writing output\\logs\\deploy-remote.log"
+  fi
+
+  if [[ -n "$deploy_run_wrapper" ]] && ! search_fixed_string 'call "%~dp0deploy.bat" "%~1"' "$deploy_run_wrapper"; then
+    die "$(basename "$deploy_run_wrapper") must delegate to deploy.bat"
+  fi
+
+  if ! search_fixed_string 'multitable-onprem-bootstrap-admin.ps1' "$bootstrap_script"; then
+    die "bootstrap-admin.bat must call the PowerShell-native multitable bootstrap helper"
+  fi
+
+  if [[ -n "$bootstrap_run_wrapper" ]] && ! search_fixed_string 'call "%~dp0bootstrap-admin.bat" "%~1" "%~2" "%~3"' "$bootstrap_run_wrapper"; then
+    die "$(basename "$bootstrap_run_wrapper") must delegate to bootstrap-admin.bat"
+  fi
+}
+
+function verify_root_runtime_dependencies() {
+  local root="$1"
+  local package_json="${root}/package.json"
+
+  search_fixed_string '"bcryptjs"' "$package_json" || die "root package.json must include bcryptjs for Windows bootstrap compatibility"
+}
+
 function write_optional_report() {
   local checksum_status="SKIPPED"
   local link_status="SKIPPED"
@@ -206,8 +256,14 @@ required=(
   "packages/core-backend/dist/src/index.js"
   "packages/core-backend/dist/src/db/migrate.js"
   "packages/core-backend/package.json"
+  "bootstrap-admin.bat"
+  "deploy.bat"
+  "deploy-remote.bat"
   "plugins/plugin-attendance/plugin.json"
   "plugins/plugin-attendance/index.cjs"
+  "scripts/ops/multitable-onprem-bootstrap-admin.ps1"
+  "scripts/ops/multitable-onprem-apply-package.sh"
+  "scripts/ops/multitable-onprem-apply-package.ps1"
   "scripts/ops/multitable-onprem-package-install.sh"
   "scripts/ops/multitable-onprem-package-upgrade.sh"
   "scripts/ops/multitable-onprem-deploy-easy.sh"
@@ -217,6 +273,7 @@ required=(
   "docker/app.env.example"
   "docker/app.env.multitable-onprem.template"
   "ops/nginx/multitable-onprem.conf.example"
+  "docs/deployment/multitable-platform-rc-notes-20260404.md"
   "docs/deployment/multitable-windows-onprem-easy-start-20260319.md"
   "docs/deployment/multitable-onprem-package-layout-20260319.md"
 )
@@ -224,6 +281,13 @@ required=(
 for rel in "${required[@]}"; do
   [[ -e "${pkg_root}/${rel}" ]] || die "Required package content missing: ${rel}"
 done
+
+deploy_run_wrapper="$(find "$pkg_root" -maxdepth 1 -type f -name 'deploy-*.bat' ! -name 'deploy.bat' ! -name 'deploy-remote.bat' | head -n 1)"
+[[ -n "$deploy_run_wrapper" ]] || die "Required package content missing: deploy-<run>.bat"
+bootstrap_run_wrapper="$(find "$pkg_root" -maxdepth 1 -type f -name 'bootstrap-admin-*.bat' | head -n 1)"
+[[ -n "$bootstrap_run_wrapper" ]] || die "Required package content missing: bootstrap-admin-<run>.bat"
+verify_windows_entrypoints "$pkg_root"
+verify_root_runtime_dependencies "$pkg_root"
 
 if [[ "$VERIFY_NO_GITHUB_LINKS" == "1" ]]; then
   verify_no_github_links "$pkg_root"

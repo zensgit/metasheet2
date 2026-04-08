@@ -127,4 +127,147 @@ describe('WebSocket Rooms - basic flow', () => {
     a.close()
     b.close()
   })
+
+  it('join-sheet publishes deduplicated sheet presence for active users', async () => {
+    if (!baseUrl || !server) return
+
+    const a1 = ioClient(`${baseUrl}?userId=user_a`, { transports: ['websocket'] })
+    const a2 = ioClient(`${baseUrl}?userId=user_a`, { transports: ['websocket'] })
+    const b = ioClient(`${baseUrl}?userId=user_b`, { transports: ['websocket'] })
+
+    const waitForConnect = (client: ReturnType<typeof ioClient>, label: string) => new Promise<void>((resolve, reject) => {
+      const t = setTimeout(() => reject(new Error(`${label} connect timeout`)), 3000)
+      client.on('connect', () => { clearTimeout(t); resolve() })
+    })
+
+    const waitForPresence = (
+      client: ReturnType<typeof ioClient>,
+      expected: { sheetId: string; activeCount: number; users: Array<{ id: string }> },
+      label: string,
+    ) => new Promise<void>((resolve, reject) => {
+      let lastPayload: unknown = null
+      const t = setTimeout(() => reject(new Error(`${label} presence timeout: ${JSON.stringify(lastPayload)}`)), 3000)
+      const handler = (payload: any) => {
+        lastPayload = payload
+        try {
+          expect(payload).toEqual(expected)
+          clearTimeout(t)
+          client.off('sheet:presence', handler)
+          resolve()
+        } catch (error) {
+          // Presence broadcasts can race with earlier room transitions.
+          // Keep waiting until the expected stabilized payload arrives.
+        }
+      }
+      client.on('sheet:presence', handler)
+    })
+
+    await Promise.all([
+      waitForConnect(a1, 'A1'),
+      waitForConnect(a2, 'A2'),
+      waitForConnect(b, 'B'),
+    ])
+
+    let presence = waitForPresence(a1, {
+      sheetId: 'sheet_ops',
+      activeCount: 1,
+      users: [{ id: 'user_a' }],
+    }, 'A1 first join')
+    a1.emit('join-sheet', 'sheet_ops')
+    await presence
+
+    presence = waitForPresence(a1, {
+      sheetId: 'sheet_ops',
+      activeCount: 1,
+      users: [{ id: 'user_a' }],
+    }, 'A2 duplicate user join')
+    a2.emit('join-sheet', 'sheet_ops')
+    await presence
+
+    presence = waitForPresence(a1, {
+      sheetId: 'sheet_ops',
+      activeCount: 2,
+      users: [{ id: 'user_a' }, { id: 'user_b' }],
+    }, 'B join')
+    b.emit('join-sheet', 'sheet_ops')
+    await presence
+
+    presence = waitForPresence(a1, {
+      sheetId: 'sheet_ops',
+      activeCount: 2,
+      users: [{ id: 'user_a' }, { id: 'user_b' }],
+    }, 'A2 leave')
+    a2.emit('leave-sheet', 'sheet_ops')
+    await presence
+
+    presence = waitForPresence(b, {
+      sheetId: 'sheet_ops',
+      activeCount: 1,
+      users: [{ id: 'user_b' }],
+    }, 'A1 leave')
+    a1.emit('leave-sheet', 'sheet_ops')
+    await presence
+
+    a1.close()
+    a2.close()
+    b.close()
+  })
+
+  it('join-comment-inbox scopes activity delivery to inbox subscribers', async () => {
+    if (!baseUrl || !server) return
+
+    const a = ioClient(baseUrl, { transports: ['websocket'] })
+    const b = ioClient(baseUrl, { transports: ['websocket'] })
+
+    await Promise.all([
+      new Promise<void>((resolve, reject) => {
+        const t = setTimeout(() => reject(new Error('A connect timeout')), 3000)
+        a.on('connect', () => { clearTimeout(t); resolve() })
+      }),
+      new Promise<void>((resolve, reject) => {
+        const t = setTimeout(() => reject(new Error('B connect timeout')), 3000)
+        b.on('connect', () => { clearTimeout(t); resolve() })
+      }),
+    ])
+
+    await new Promise<void>((resolve, reject) => {
+      const t = setTimeout(() => reject(new Error('A inbox join timeout')), 3000)
+      a.on('joined-comment-inbox', () => {
+        clearTimeout(t)
+        resolve()
+      })
+      a.emit('join-comment-inbox')
+    })
+
+    const gotA = new Promise<any>((resolve, reject) => {
+      const t = setTimeout(() => reject(new Error('A did not receive inbox activity')), 3000)
+      a.on('comment:activity', (payload: any) => { clearTimeout(t); resolve(payload) })
+    })
+
+    let gotB = false
+    b.on('comment:activity', () => { gotB = true })
+
+    // @ts-ignore
+    server['createCoreAPI']().websocket.broadcastTo('comments-inbox', 'comment:activity', {
+      kind: 'created',
+      spreadsheetId: 'sheet_orders',
+      rowId: 'rec_1',
+      commentId: 'c1',
+      authorId: 'user_other',
+    })
+
+    const payload = await gotA
+    expect(payload).toEqual({
+      kind: 'created',
+      spreadsheetId: 'sheet_orders',
+      rowId: 'rec_1',
+      commentId: 'c1',
+      authorId: 'user_other',
+    })
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    expect(gotB).toBe(false)
+
+    a.close()
+    b.close()
+  })
 })

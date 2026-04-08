@@ -232,6 +232,9 @@
               "unread": {
                 "type": "boolean"
               },
+              "mentioned": {
+                "type": "boolean"
+              },
               "baseId": {
                 "type": "string",
                 "nullable": true
@@ -250,7 +253,8 @@
               }
             },
             "required": [
-              "unread"
+              "unread",
+              "mentioned"
             ]
           }
         ]
@@ -282,6 +286,52 @@
               "offset": {
                 "type": "integer",
                 "example": 0
+              }
+            }
+          }
+        }
+      },
+      "CommentMentionCandidate": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "label": {
+            "type": "string"
+          },
+          "subtitle": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "label"
+        ]
+      },
+      "CommentMentionCandidatesResponse": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "example": true
+          },
+          "data": {
+            "type": "object",
+            "properties": {
+              "items": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/CommentMentionCandidate"
+                }
+              },
+              "total": {
+                "type": "integer",
+                "example": 1
+              },
+              "limit": {
+                "type": "integer",
+                "example": 50
               }
             }
           }
@@ -2556,6 +2606,95 @@
           "canManageViews",
           "canComment",
           "canManageAutomation"
+        ]
+      },
+      "MultitableSheetPermissionAccessLevel": {
+        "type": "string",
+        "enum": [
+          "read",
+          "write",
+          "write-own",
+          "admin"
+        ]
+      },
+      "MultitableSheetPermissionSubjectType": {
+        "type": "string",
+        "enum": [
+          "user",
+          "role"
+        ]
+      },
+      "MultitableSheetPermissionEntry": {
+        "type": "object",
+        "properties": {
+          "subjectType": {
+            "$ref": "#/components/schemas/MultitableSheetPermissionSubjectType"
+          },
+          "subjectId": {
+            "type": "string"
+          },
+          "accessLevel": {
+            "$ref": "#/components/schemas/MultitableSheetPermissionAccessLevel"
+          },
+          "permissions": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "label": {
+            "type": "string"
+          },
+          "subtitle": {
+            "type": "string",
+            "nullable": true
+          },
+          "isActive": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "subjectType",
+          "subjectId",
+          "accessLevel",
+          "permissions",
+          "label",
+          "isActive"
+        ]
+      },
+      "MultitableSheetPermissionCandidate": {
+        "type": "object",
+        "properties": {
+          "subjectType": {
+            "$ref": "#/components/schemas/MultitableSheetPermissionSubjectType"
+          },
+          "subjectId": {
+            "type": "string"
+          },
+          "label": {
+            "type": "string"
+          },
+          "subtitle": {
+            "type": "string",
+            "nullable": true
+          },
+          "isActive": {
+            "type": "boolean"
+          },
+          "accessLevel": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/MultitableSheetPermissionAccessLevel"
+              }
+            ],
+            "nullable": true
+          }
+        },
+        "required": [
+          "subjectType",
+          "subjectId",
+          "label",
+          "isActive"
         ]
       },
       "MultitableFieldCapability": {
@@ -13416,7 +13555,7 @@
     "/api/comments/inbox": {
       "get": {
         "summary": "List comment inbox items",
-        "description": "Returns comments that mention the current authenticated user, including unread state and navigation context.",
+        "description": "Returns comments from other collaborators that either mention the current authenticated user or remain unread, including unread state, mention state, and navigation context.",
         "security": [
           {
             "bearerAuth": []
@@ -13463,10 +13602,67 @@
         }
       }
     },
+    "/api/comments/mention-candidates": {
+      "get": {
+        "summary": "List comment mention candidates",
+        "description": "Returns active user suggestions for multitable comment authoring. The frontend may locally filter the returned candidates while the backend supports optional query narrowing.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "query",
+            "name": "spreadsheetId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "q",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "schema": {
+              "type": "integer",
+              "default": 50
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CommentMentionCandidatesResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
     "/api/comments/unread-count": {
       "get": {
         "summary": "Get unread comment count",
-        "description": "Returns the count of unread comments mentioning the current authenticated user.",
+        "description": "Returns the count of unread comments from other collaborators that currently appear in the comment inbox.",
         "security": [
           {
             "bearerAuth": []
@@ -13657,6 +13853,130 @@
           },
           "403": {
             "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/api/comments/{commentId}": {
+      "patch": {
+        "summary": "Update a comment",
+        "description": "Updates the content and explicit mentions of an existing unresolved comment authored by the current user.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "commentId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "content": {
+                    "type": "string"
+                  },
+                  "mentions": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "required": [
+                  "content"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    },
+                    "data": {
+                      "type": "object",
+                      "properties": {
+                        "comment": {
+                          "$ref": "#/components/schemas/Comment"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        }
+      },
+      "delete": {
+        "summary": "Delete a comment",
+        "description": "Hard-deletes an authored comment when it has no reply comments.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "commentId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
           }
         }
       }
@@ -14460,6 +14780,284 @@
                       },
                       "required": [
                         "deleted"
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/api/multitable/sheets/{sheetId}/permissions": {
+      "get": {
+        "summary": "List sheet permission assignments",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "sheetId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    },
+                    "data": {
+                      "type": "object",
+                      "properties": {
+                        "items": {
+                          "type": "array",
+                          "items": {
+                            "$ref": "#/components/schemas/MultitableSheetPermissionEntry"
+                          }
+                        }
+                      },
+                      "required": [
+                        "items"
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/api/multitable/sheets/{sheetId}/permission-candidates": {
+      "get": {
+        "summary": "List candidate people and roles for sheet permission authoring",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "sheetId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "q",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "schema": {
+              "type": "integer",
+              "default": 20
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    },
+                    "data": {
+                      "type": "object",
+                      "properties": {
+                        "items": {
+                          "type": "array",
+                          "items": {
+                            "$ref": "#/components/schemas/MultitableSheetPermissionCandidate"
+                          }
+                        },
+                        "total": {
+                          "type": "integer"
+                        },
+                        "limit": {
+                          "type": "integer"
+                        },
+                        "query": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "items",
+                        "total",
+                        "limit",
+                        "query"
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/api/multitable/sheets/{sheetId}/permissions/{subjectType}/{subjectId}": {
+      "put": {
+        "summary": "Set a sheet access level for a person or role",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "sheetId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "subjectType",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/MultitableSheetPermissionSubjectType"
+            }
+          },
+          {
+            "in": "path",
+            "name": "subjectId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "accessLevel": {
+                    "type": "string",
+                    "enum": [
+                      "read",
+                      "write",
+                      "write-own",
+                      "admin",
+                      "none"
+                    ]
+                  }
+                },
+                "required": [
+                  "accessLevel"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    },
+                    "data": {
+                      "type": "object",
+                      "properties": {
+                        "subjectType": {
+                          "$ref": "#/components/schemas/MultitableSheetPermissionSubjectType"
+                        },
+                        "subjectId": {
+                          "type": "string"
+                        },
+                        "accessLevel": {
+                          "type": "string",
+                          "enum": [
+                            "read",
+                            "write",
+                            "write-own",
+                            "admin",
+                            "none"
+                          ]
+                        },
+                        "entry": {
+                          "allOf": [
+                            {
+                              "$ref": "#/components/schemas/MultitableSheetPermissionEntry"
+                            }
+                          ],
+                          "nullable": true
+                        }
+                      },
+                      "required": [
+                        "subjectType",
+                        "subjectId",
+                        "accessLevel",
+                        "entry"
                       ]
                     }
                   }

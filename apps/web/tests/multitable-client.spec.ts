@@ -19,6 +19,65 @@ describe('MultitableApiClient', () => {
     await expect(client.resolveComment('c1')).resolves.toBeUndefined()
   })
 
+  it('updates and deletes comments through dedicated endpoints', async () => {
+    const fetchFn = vi.fn(async (input: string, init?: RequestInit) => {
+      if (input === '/api/comments/c1' && init?.method === 'PATCH') {
+        return new Response(JSON.stringify({
+          ok: true,
+          data: {
+            comment: {
+              id: 'c1',
+              spreadsheetId: 'sheet_1',
+              rowId: 'row_1',
+              authorId: 'user_1',
+              content: 'Edited @[Amy](user_2)',
+              mentions: ['user_2'],
+              resolved: false,
+              createdAt: '2026-04-05T08:00:00.000Z',
+              updatedAt: '2026-04-05T08:01:00.000Z',
+            },
+          },
+        }), { status: 200 })
+      }
+      if (input === '/api/comments/c1' && init?.method === 'DELETE') {
+        return new Response(null, { status: 204 })
+      }
+      throw new Error(`Unexpected request: ${input}`)
+    })
+
+    const client = new MultitableApiClient({ fetchFn })
+
+    await expect(client.updateComment('c1', {
+      content: 'Edited @[Amy](user_2)',
+      mentions: ['user_2'],
+    })).resolves.toEqual({
+      comment: {
+        id: 'c1',
+        containerId: 'sheet_1',
+        targetId: 'row_1',
+        spreadsheetId: 'sheet_1',
+        rowId: 'row_1',
+        fieldId: null,
+        targetFieldId: null,
+        parentId: undefined,
+        mentions: ['user_2'],
+        authorId: 'user_1',
+        authorName: undefined,
+        content: 'Edited @[Amy](user_2)',
+        resolved: false,
+        createdAt: '2026-04-05T08:00:00.000Z',
+        updatedAt: '2026-04-05T08:01:00.000Z',
+      },
+    })
+    await expect(client.deleteComment('c1')).resolves.toBeUndefined()
+
+    expect(fetchFn).toHaveBeenCalledWith('/api/comments/c1', expect.objectContaining({
+      method: 'PATCH',
+      body: JSON.stringify({ content: 'Edited @[Amy](user_2)', mentions: ['user_2'] }),
+    }))
+    expect(fetchFn).toHaveBeenCalledWith('/api/comments/c1', expect.objectContaining({ method: 'DELETE' }))
+  })
+
   it('loads inbox and unread counters from comment endpoints', async () => {
     const fetchFn = vi.fn(async (input: string) => {
       if (input.startsWith('/api/comments/inbox')) {
@@ -41,6 +100,7 @@ describe('MultitableApiClient', () => {
               resolved: false,
               createdAt: '2026-03-25T12:00:00.000Z',
               unread: true,
+              mentioned: true,
             }],
             total: 1,
             limit: 50,
@@ -65,17 +125,23 @@ describe('MultitableApiClient', () => {
         containerId: 'sheet_1',
         targetId: 'row_1',
         fieldId: 'field_1',
+        targetFieldId: null,
         baseId: 'base_1',
         sheetId: 'sheet_1',
         viewId: 'view_1',
         recordId: 'row_1',
+        spreadsheetId: undefined,
+        rowId: undefined,
+        parentId: undefined,
         mentions: ['user_2'],
         authorId: 'user_1',
         authorName: 'Amy',
         content: 'Hello',
         resolved: false,
         createdAt: '2026-03-25T12:00:00.000Z',
+        updatedAt: undefined,
         unread: true,
+        mentioned: true,
       }],
       total: 1,
       limit: 50,
@@ -221,6 +287,7 @@ describe('MultitableApiClient', () => {
           mentions: ['user_1'],
           createdAt: '2026-03-25T12:00:00.000Z',
           unread: true,
+          mentioned: false,
         }],
         total: 1,
         limit: 50,
@@ -235,10 +302,13 @@ describe('MultitableApiClient', () => {
         containerId: 'sheet_comments',
         targetId: 'rec_1',
         fieldId: null,
+        targetFieldId: null,
         baseId: 'base_comments',
         sheetId: 'sheet_comments',
         viewId: 'view_comments',
         recordId: 'rec_1',
+        spreadsheetId: 'sheet_comments',
+        rowId: 'rec_1',
         parentId: undefined,
         mentions: ['user_1'],
         authorId: 'user_2',
@@ -248,6 +318,7 @@ describe('MultitableApiClient', () => {
         createdAt: '2026-03-25T12:00:00.000Z',
         updatedAt: undefined,
         unread: true,
+        mentioned: false,
       }],
       total: 1,
       limit: 50,

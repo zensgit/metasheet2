@@ -45,9 +45,14 @@ describe('useMultitableWorkbench', () => {
               canEditRecord: true,
               canDeleteRecord: false,
               canManageFields: false,
+              canManageSheetAccess: false,
               canManageViews: false,
               canComment: true,
               canManageAutomation: false,
+            },
+            capabilityOrigin: {
+              source: 'sheet-grant',
+              hasSheetAssignments: true,
             },
           },
         }), { status: 200 })
@@ -63,6 +68,10 @@ describe('useMultitableWorkbench', () => {
     expect(wb.fields.value).toEqual([{ id: 'f1', name: 'Title', type: 'string' }])
     expect(wb.views.value).toEqual([{ id: 'v1', sheetId: 's2', name: 'Grid', type: 'grid' }])
     expect(wb.capabilities.value.canRead).toBe(true)
+    expect(wb.capabilityOrigin.value).toEqual({
+      source: 'sheet-grant',
+      hasSheetAssignments: true,
+    })
   })
 
   it('loads base-scoped sheet metadata when initialBaseId is preselected', async () => {
@@ -84,6 +93,7 @@ describe('useMultitableWorkbench', () => {
               canEditRecord: true,
               canDeleteRecord: false,
               canManageFields: true,
+              canManageSheetAccess: true,
               canManageViews: true,
               canComment: true,
               canManageAutomation: false,
@@ -135,6 +145,7 @@ describe('useMultitableWorkbench', () => {
               canEditRecord: true,
               canDeleteRecord: false,
               canManageFields: false,
+              canManageSheetAccess: false,
               canManageViews: false,
               canComment: true,
               canManageAutomation: false,
@@ -170,6 +181,7 @@ describe('useMultitableWorkbench', () => {
               canEditRecord: true,
               canDeleteRecord: false,
               canManageFields: true,
+              canManageSheetAccess: true,
               canManageViews: true,
               canComment: true,
               canManageAutomation: false,
@@ -225,6 +237,7 @@ describe('useMultitableWorkbench', () => {
               canEditRecord: true,
               canDeleteRecord: false,
               canManageFields: true,
+              canManageSheetAccess: true,
               canManageViews: true,
               canComment: true,
               canManageAutomation: false,
@@ -246,6 +259,7 @@ describe('useMultitableWorkbench', () => {
               canEditRecord: true,
               canDeleteRecord: false,
               canManageFields: true,
+              canManageSheetAccess: true,
               canManageViews: true,
               canComment: true,
               canManageAutomation: false,

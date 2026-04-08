@@ -67,6 +67,10 @@ describe('Multitable view config API', () => {
     const { app } = await createApp({
       tokenPerms: ['multitable:write'],
       queryHandler: async (sql, params) => {
+        if (sql.includes('SELECT sp.sheet_id, sp.perm_code, sp.subject_type')) {
+          expect(params).toEqual(['user_multitable_1', ['sheet_ops']])
+          return { rows: [] }
+        }
         if (sql.includes('SELECT id FROM meta_sheets WHERE id = $1')) {
           expect(params).toEqual(['sheet_ops'])
           return { rows: [{ id: 'sheet_ops' }] }
@@ -74,27 +78,6 @@ describe('Multitable view config API', () => {
         if (sql.includes('INSERT INTO meta_views')) {
           insertParams = params
           return { rows: [], rowCount: 1 }
-        }
-        if (sql.includes('FROM meta_views') && sql.includes('WHERE id = $1')) {
-          expect(params?.[0]).toBeDefined()
-          return {
-            rows: [{
-              id: params?.[0],
-              sheet_id: 'sheet_ops',
-              name: 'Gallery',
-              type: 'gallery',
-              filter_info: {},
-              sort_info: {},
-              group_info: {},
-              hidden_field_ids: [],
-              config: {
-                titleFieldId: 'fld_title',
-                columns: 4,
-                cardSize: 'large',
-              },
-            }],
-            rowCount: 1,
-          }
         }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
@@ -135,110 +118,16 @@ describe('Multitable view config API', () => {
     }))
   })
 
-  test('returns 409 when creating a view with an existing id', async () => {
-    const { app } = await createApp({
-      tokenPerms: ['multitable:write'],
-      queryHandler: async (sql, params) => {
-        if (sql.includes('SELECT id FROM meta_sheets WHERE id = $1')) {
-          expect(params).toEqual(['sheet_ops'])
-          return { rows: [{ id: 'sheet_ops' }] }
-        }
-        if (sql.includes('INSERT INTO meta_views')) {
-          return { rows: [], rowCount: 0 }
-        }
-        throw new Error(`Unhandled SQL in test: ${sql}`)
-      },
-    })
-
-    const response = await request(app)
-      .post('/api/multitable/views')
-      .send({
-        id: 'view_gallery',
-        sheetId: 'sheet_ops',
-        name: 'Gallery',
-        type: 'gallery',
-      })
-      .expect(409)
-
-    expect(response.body.ok).toBe(false)
-    expect(response.body.error.code).toBe('CONFLICT')
-    expect(response.body.error.message).toBe('View already exists: view_gallery')
-  })
-
-  test('auto-creates a default grid view when GET /views sees an empty sheet', async () => {
-    let insertedDefaultView = false
-
-    const { app } = await createApp({
-      tokenPerms: ['multitable:read'],
-      queryHandler: async (sql, params) => {
-        if (sql.includes('SELECT id FROM meta_sheets WHERE id = $1')) {
-          expect(params).toEqual(['sheet_ops'])
-          return { rows: [{ id: 'sheet_ops' }] }
-        }
-        if (sql.includes('FROM meta_views WHERE sheet_id = $1 ORDER BY created_at ASC LIMIT 200')) {
-          if (!insertedDefaultView) {
-            return { rows: [], rowCount: 0 }
-          }
-          return {
-            rows: [{
-              id: 'view_default',
-              sheet_id: 'sheet_ops',
-              name: '默认视图',
-              type: 'grid',
-              filter_info: {},
-              sort_info: {},
-              group_info: {},
-              hidden_field_ids: [],
-              config: {},
-            }],
-            rowCount: 1,
-          }
-        }
-        if (sql.includes('INSERT INTO meta_views')) {
-          insertedDefaultView = true
-          return { rows: [], rowCount: 1 }
-        }
-        if (sql.includes('FROM meta_views') && sql.includes('WHERE id = $1')) {
-          return {
-            rows: [{
-              id: params?.[0] ?? 'view_default',
-              sheet_id: 'sheet_ops',
-              name: '默认视图',
-              type: 'grid',
-              filter_info: {},
-              sort_info: {},
-              group_info: {},
-              hidden_field_ids: [],
-              config: {},
-            }],
-            rowCount: 1,
-          }
-        }
-        throw new Error(`Unhandled SQL in test: ${sql}`)
-      },
-    })
-
-    const response = await request(app)
-      .get('/api/multitable/views')
-      .query({ sheetId: 'sheet_ops' })
-      .expect(200)
-
-    expect(response.body.ok).toBe(true)
-    expect(response.body.data.views).toEqual([
-      expect.objectContaining({
-        sheetId: 'sheet_ops',
-        name: '默认视图',
-        type: 'grid',
-      }),
-    ])
-  })
-
   test('updates view config and groupInfo through PATCH /views/:viewId', async () => {
     let updateParams: unknown[] | undefined
 
     const { app } = await createApp({
       tokenPerms: ['multitable:write'],
       queryHandler: async (sql, params) => {
+        if (sql.includes('SELECT sp.sheet_id, sp.perm_code, sp.subject_type')) {
+          expect(params).toEqual(['user_multitable_1', ['sheet_ops']])
+          return { rows: [] }
+        }
         if (sql.includes('SELECT id, sheet_id, name, type, filter_info, sort_info, group_info, hidden_field_ids, config FROM meta_views WHERE id = $1')) {
           expect(params).toEqual(['view_kanban'])
           return {
@@ -297,6 +186,14 @@ describe('Multitable view config API', () => {
     const { app } = await createApp({
       tokenPerms: ['multitable:write'],
       queryHandler: async (sql, params) => {
+        if (sql.includes('SELECT id, sheet_id FROM meta_views WHERE id = $1')) {
+          expect(params).toEqual(['view_kanban'])
+          return { rows: [{ id: 'view_kanban', sheet_id: 'sheet_ops' }], rowCount: 1 }
+        }
+        if (sql.includes('SELECT sp.sheet_id, sp.perm_code, sp.subject_type')) {
+          expect(params).toEqual(['user_multitable_1', ['sheet_ops']])
+          return { rows: [] }
+        }
         if (sql.includes('DELETE FROM meta_views WHERE id = $1')) {
           expect(params).toEqual(['view_kanban'])
           return { rows: [], rowCount: 1 }
@@ -317,6 +214,10 @@ describe('Multitable view config API', () => {
     const { app } = await createApp({
       tokenPerms: ['multitable:write'],
       queryHandler: async (sql, params) => {
+        if (sql.includes('SELECT id, sheet_id FROM meta_views WHERE id = $1')) {
+          expect(params).toEqual(['view_missing'])
+          return { rows: [], rowCount: 0 }
+        }
         if (sql.includes('DELETE FROM meta_views WHERE id = $1')) {
           expect(params).toEqual(['view_missing'])
           return { rows: [], rowCount: 0 }

@@ -126,6 +126,7 @@ export const ICommentService = createIdentifier<ICommentService>('comment-servic
 
 export interface CommentQueryOptions {
     rowId?: string;
+    fieldId?: string;
     resolved?: boolean;
     limit?: number;
     offset?: number;
@@ -138,6 +139,11 @@ export interface CommentCreateInput {
     content: string;
     authorId: string;
     parentId?: string;
+    mentions?: string[];
+}
+
+export interface CommentUpdateInput {
+    content: string;
     mentions?: string[];
 }
 
@@ -157,6 +163,7 @@ export interface CommentRecord {
 
 export interface CommentInboxItem extends CommentRecord {
     unread: boolean;
+    mentioned: boolean;
     baseId?: string | null;
     sheetId?: string | null;
     viewId?: string | null;
@@ -188,9 +195,21 @@ export interface CommentMentionSummary {
     items: CommentMentionSummaryItem[];
 }
 
+export interface CommentMentionCandidate {
+    id: string;
+    label: string;
+    subtitle?: string;
+}
+
 export interface ICommentService {
     createComment(data: CommentCreateInput): Promise<CommentRecord>;
+    updateComment(commentId: string, userId: string, data: CommentUpdateInput): Promise<CommentRecord>;
+    deleteComment(commentId: string, userId: string): Promise<void>;
     getComments(spreadsheetId: string, options?: CommentQueryOptions): Promise<{ items: CommentRecord[]; total: number }>;
+    listMentionCandidates(
+      spreadsheetId: string,
+      options?: { q?: string; limit?: number },
+    ): Promise<{ items: CommentMentionCandidate[]; total: number }>;
     getInbox(userId: string, options?: Pick<CommentQueryOptions, 'limit' | 'offset'>): Promise<{ items: CommentInboxItem[]; total: number }>;
     getUnreadCount(userId: string): Promise<number>;
     markCommentRead(commentId: string, userId: string): Promise<void>;

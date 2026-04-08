@@ -13,10 +13,18 @@
       </div>
     </div>
     <div v-if="bases.length" class="mt-workbench__base-bar">
-      <MetaBasePicker :bases="bases" :active-base-id="activeBaseId" :can-create="caps.canManageFields.value" @select="onSelectBase" @create="onCreateBase" />
+      <MetaBasePicker :bases="bases" :active-base-id="activeBaseId" :can-create="canCreateBasesAndSheets" @select="onSelectBase" @create="onCreateBase" />
     </div>
-    <MetaViewTabBar :sheets="workbench.sheets.value" :views="visibleWorkbenchViews" :active-sheet-id="workbench.activeSheetId.value" :active-view-id="workbench.activeViewId.value" :can-create-sheet="caps.canManageFields.value" @select-sheet="onSelectSheet" @select-view="onSelectView" @create-sheet="onCreateSheet" />
+    <MetaViewTabBar :sheets="workbench.sheets.value" :views="visibleWorkbenchViews" :active-sheet-id="workbench.activeSheetId.value" :active-view-id="workbench.activeViewId.value" :can-create-sheet="canCreateBasesAndSheets" @select-sheet="onSelectSheet" @select-view="onSelectView" @create-sheet="onCreateSheet" />
     <div class="mt-workbench__actions">
+      <div
+        v-if="sheetPresenceState.activeCollaboratorCount.value > 0"
+        class="mt-workbench__presence-chip"
+        :title="sheetPresenceTitle"
+      >
+        &#x1F465; <strong>{{ sheetPresenceState.activeCollaboratorCount.value }}</strong>
+        <span>{{ sheetPresenceLabel }}</span>
+      </div>
       <button
         v-if="mentionInboxState.summary.value && mentionInboxState.summary.value.unresolvedMentionCount > 0"
         class="mt-workbench__mention-chip"
@@ -28,20 +36,31 @@
         <span class="mt-workbench__mention-chip-records">{{ mentionInboxState.summary.value.mentionedRecordCount }} records</span>
       </button>
       <button v-if="caps.canManageFields.value" class="mt-workbench__mgr-btn" @click="showFieldManager = true">&#x2699; Fields</button>
+      <button v-if="caps.canManageSheetAccess.value" class="mt-workbench__mgr-btn" @click="showPermissionManager = true">&#x1F512; Access</button>
       <button v-if="caps.canManageViews.value && canConfigureCurrentView" class="mt-workbench__mgr-btn" @click="showViewManager = true">&#x2630; Views</button>
       <button v-if="caps.canManageAutomation.value" class="mt-workbench__mgr-btn" @click="openWorkflowDesigner()">&#x2699; Workflow</button>
+    </div>
+    <div
+      v-if="capabilityOriginNotice"
+      class="mt-workbench__capability-banner"
+      :class="`mt-workbench__capability-banner--${capabilityOriginNotice.source}`"
+      :data-capability-origin-source="capabilityOriginNotice.source"
+      data-capability-origin-banner="true"
+    >
+      <strong>{{ capabilityOriginNotice.title }}</strong>
+      <span>{{ capabilityOriginNotice.message }}</span>
     </div>
     <MetaMentionPopover
       :visible="showMentionPopover"
       :items="mentionInboxState.summary.value?.items ?? []"
       :rows="grid.rows.value"
-      :fields="grid.fields.value"
+      :fields="propertyVisibleGridFields"
       :display-field-id="mentionDisplayFieldId"
       @close="showMentionPopover = false"
       @select-record="onMentionPopoverSelect"
     />
     <MetaToolbar
-      :fields="grid.fields.value" :hidden-field-ids="grid.hiddenFieldIds.value"
+      :fields="propertyVisibleGridFields" :hidden-field-ids="grid.hiddenFieldIds.value"
       :sort-rules="grid.sortRules.value" :filter-rules="grid.filterRules.value"
       :filter-conjunction="grid.filterConjunction.value"
       :can-create-record="caps.canCreateRecord.value" :can-undo="grid.canUndo.value" :can-redo="grid.canRedo.value"
@@ -82,7 +101,7 @@
           :group-info="workbench.activeView.value?.groupInfo"
           :view-config="workbench.activeView.value?.config"
           :link-summaries="grid.linkSummaries.value" :attachment-summaries="grid.attachmentSummaries.value"
-          :can-create="caps.canCreateRecord.value" :can-edit="caps.canEditRecord.value"
+          :can-create="caps.canCreateRecord.value" :can-edit="effectiveRowActions.canEdit"
           :can-comment="effectiveRowActions.canComment"
           :comment-presence="commentPresenceState.presenceByRecordId.value"
           @select-record="onSelectRecord" @patch-cell="onPatchCell" @create-record="onKanbanCreateRecord"
@@ -122,7 +141,7 @@
           :rows="grid.rows.value" :fields="scopedAllFields" :loading="grid.loading.value"
           :view-config="workbench.activeView.value?.config"
           :link-summaries="grid.linkSummaries.value" :attachment-summaries="grid.attachmentSummaries.value"
-          :can-create="caps.canCreateRecord.value" :can-edit="caps.canEditRecord.value"
+          :can-create="caps.canCreateRecord.value" :can-edit="effectiveRowActions.canEdit"
           :can-comment="effectiveRowActions.canComment"
           :comment-presence="commentPresenceState.presenceByRecordId.value"
           @select-record="onSelectRecord" @create-record="onKanbanCreateRecord"
@@ -136,9 +155,10 @@
           :rows="grid.rows.value" :visible-fields="scopedGridFields" :sort-rules="grid.sortRules.value"
           :loading="grid.loading.value" :current-page="grid.currentPage.value" :total-pages="grid.totalPages.value"
           :start-index="pageStartIndex" :selected-record-id="selectedRecordId" :can-edit="effectiveRowActions.canEdit"
-          :can-delete="effectiveRowActions.canDelete" :field-read-only-ids="readOnlyFieldIds" :column-widths="grid.columnWidths.value"
+          :can-delete="gridAllowsAnyDelete" :field-read-only-ids="readOnlyFieldIds" :column-widths="grid.columnWidths.value"
+          :row-action-overrides="grid.rowActionOverrides.value"
           :link-summaries="grid.linkSummaries.value" :attachment-summaries="grid.attachmentSummaries.value"
-          :enable-multi-select="effectiveRowActions.canDelete"
+          :enable-multi-select="gridAllowsAnyDelete"
           :group-field="grid.groupField.value"
           :search-text="searchText" :row-density="rowDensity"
           :upload-fn="uploadAttachmentFn"
@@ -173,12 +193,18 @@
         :loading="commentsState.loading.value" :can-comment="effectiveRowActions.canComment" :can-resolve="effectiveRowActions.canComment"
         :highlighted-comment-id="highlightedCommentId"
         :unread-count="commentInboxState.unreadCount.value"
-        :target-field-id="selectedCommentFieldId"
+        :target-field-id="activeCommentFieldId"
         :scope-label="commentsScopeLabel"
         :reply-to-comment-id="selectedReplyCommentId"
+        :editing-comment-id="selectedEditingCommentId"
         :draft="commentDraft" :submitting="commentsState.submitting.value" :error="commentsState.error.value"
         :resolving-ids="commentsState.resolvingIds.value"
-        @close="onCloseComments" @submit="onSubmitComment" @resolve="onResolveComment" @reply="onReplyToComment" @cancel-reply="onCancelCommentReply" @update:draft="commentDraft = $event"
+        :updating-ids="commentsState.updatingIds.value"
+        :deleting-ids="commentsState.deletingIds.value"
+        :current-user-id="currentUserId"
+        :mention-suggestions="commentMentionSuggestions"
+        :composer-initial-mentions="commentComposerInitialMentions"
+        @close="onCloseComments" @submit="onSubmitComment" @resolve="onResolveComment" @reply="onReplyToComment" @edit="onEditComment" @delete="onDeleteComment" @cancel-reply="onCancelCommentReply" @cancel-edit="onCancelCommentEdit" @update:draft="commentDraft = $event"
       />
     </div>
     <div v-if="showShortcuts" class="mt-workbench__shortcuts-overlay" @click.self="showShortcuts = false">
@@ -203,7 +229,7 @@
     <MetaImportModal
       :visible="showImportModal"
       :sheet-id="workbench.activeSheetId.value"
-      :fields="grid.fields.value"
+      :fields="importSurfaceFields"
       :field-resolvers="importFieldResolvers"
       :importing="importSubmitting"
       :result="importResult"
@@ -216,15 +242,22 @@
       @close="linkPickerVisible = false" @confirm="onLinkPickerConfirm"
     />
     <MetaFieldManager
-      :visible="showFieldManager" :fields="workbench.fields.value" :sheets="workbench.sheets.value" :sheet-id="workbench.activeSheetId.value"
+      :visible="showFieldManager" :fields="propertyVisibleWorkbenchFields" :sheets="workbench.sheets.value" :sheet-id="workbench.activeSheetId.value"
       @update:dirty="fieldManagerDirty = $event"
       @close="showFieldManager = false" @create-field="onCreateField" @update-field="onUpdateField" @delete-field="onDeleteField"
     />
     <MetaViewManager
-      :visible="showViewManager" :views="workbench.views.value" :fields="workbench.fields.value" :sheet-id="workbench.activeSheetId.value"
+      :visible="showViewManager" :views="workbench.views.value" :fields="propertyVisibleWorkbenchFields" :sheet-id="workbench.activeSheetId.value"
       :active-view-id="workbench.activeViewId.value"
       @update:dirty="viewManagerDirty = $event"
       @close="showViewManager = false" @create-view="onCreateView" @update-view="onUpdateView" @delete-view="onDeleteView"
+    />
+    <MetaSheetPermissionManager
+      :visible="showPermissionManager"
+      :sheet-id="workbench.activeSheetId.value"
+      :client="workbench.client"
+      @close="showPermissionManager = false"
+      @updated="onSheetPermissionsUpdated"
     />
   </div>
 </template>
@@ -232,12 +265,14 @@
 <script setup lang="ts">
 import { ref, computed, nextTick, onMounted, onBeforeUnmount, watch } from 'vue'
 import { useRouter } from 'vue-router'
+import { useAuth } from '../../composables/useAuth'
 import type {
   LinkedRecordSummary,
   MetaAttachment,
   MetaAttachmentDeleteFn,
   MetaAttachmentUploadContext,
   MetaAttachmentUploadFn,
+  MetaCommentMentionSuggestion,
   MetaCommentsScope,
   MetaFieldPermission,
   MetaField,
@@ -258,6 +293,8 @@ import { useMultitableCommentPresence } from '../composables/useMultitableCommen
 import { useMultitableCommentInbox } from '../composables/useMultitableCommentInbox'
 import { useMultitableCommentInboxSummary } from '../composables/useMultitableCommentInboxSummary'
 import { useMultitableCommentRealtime } from '../composables/useMultitableCommentRealtime'
+import { useMultitableSheetPresence } from '../composables/useMultitableSheetPresence'
+import { useMultitableSheetRealtime } from '../composables/useMultitableSheetRealtime'
 import { subscribeToMultitableCommentSheetRealtime } from '../realtime/comments-realtime'
 import MetaViewTabBar from '../components/MetaViewTabBar.vue'
 import MetaToolbar from '../components/MetaToolbar.vue'
@@ -268,6 +305,7 @@ import MetaCommentsDrawer from '../components/MetaCommentsDrawer.vue'
 import MetaLinkPicker from '../components/MetaLinkPicker.vue'
 import MetaFieldManager from '../components/MetaFieldManager.vue'
 import MetaViewManager from '../components/MetaViewManager.vue'
+import MetaSheetPermissionManager from '../components/MetaSheetPermissionManager.vue'
 import MetaBasePicker from '../components/MetaBasePicker.vue'
 import MetaKanbanView from '../components/MetaKanbanView.vue'
 import MetaGalleryView from '../components/MetaGalleryView.vue'
@@ -277,12 +315,13 @@ import MetaToast from '../components/MetaToast.vue'
 import MetaImportModal from '../components/MetaImportModal.vue'
 import MetaMentionPopover from '../components/MetaMentionPopover.vue'
 import type { MetaBase } from '../types'
-import { bulkImportRecords, skipDuplicateImportRows } from '../import/bulk-import'
+import { bulkImportRecords } from '../import/bulk-import'
 import { extractImportTokens, type ImportBuildFailure, type ImportBuildResult, type ImportValueResolver } from '../import/delimited'
+import { filterPropertyVisibleFields } from '../utils/field-permissions'
 import { isLinkField, isPersonField } from '../utils/link-fields'
 import { addPeopleLookupToken, inferPeopleLookupKind, resolvePeopleImportValue } from '../utils/people-import'
 
-const props = defineProps<{ sheetId?: string; viewId?: string; baseId?: string; recordId?: string; commentId?: string; openComments?: boolean; mode?: string; role?: MultitableRole }>()
+const props = defineProps<{ sheetId?: string; viewId?: string; baseId?: string; recordId?: string; commentId?: string; fieldId?: string; openComments?: boolean; mode?: string; role?: MultitableRole }>()
 const emit = defineEmits<{
   (e: 'ready', payload: { baseId: string; sheetId: string; viewId: string }): void
   (e: 'external-context-result', payload: {
@@ -295,6 +334,7 @@ const emit = defineEmits<{
 
 const role = ref<MultitableRole>(props.role ?? 'editor')
 const router = useRouter()
+const auth = useAuth()
 const workbench = useMultitableWorkbench({ initialBaseId: props.baseId, initialSheetId: props.sheetId, initialViewId: props.viewId })
 const capabilitySource = computed(() => workbench.capabilities.value ?? role.value)
 const caps = useMultitableCapabilities(capabilitySource)
@@ -303,22 +343,30 @@ const commentsState = useMultitableComments()
 const commentPresenceState = useMultitableCommentPresence()
 const commentInboxState = useMultitableCommentInbox()
 const mentionInboxState = useMultitableCommentInboxSummary()
+const sheetPresenceState = useMultitableSheetPresence({
+  sheetId: computed(() => workbench.activeSheetId.value || undefined),
+})
 
 const selectedRecordId = ref<string | null>(null)
 const showComments = ref(false)
 const selectedCommentFieldId = ref<string | null>(null)
 const selectedReplyCommentId = ref<string | null>(null)
+const selectedEditingCommentId = ref<string | null>(null)
 const showMentionPopover = ref(false)
 const linkPickerVisible = ref(false)
 const linkPickerField = ref<MetaField | null>(null)
 const linkPickerRecordId = ref<string | null>(null)
 const linkPickerCurrentValue = ref<unknown>(null)
 const showFieldManager = ref(false)
+const showPermissionManager = ref(false)
 const showViewManager = ref(false)
 const bases = ref<MetaBase[]>([])
 const activeBaseId = computed(() => workbench.activeBaseId.value)
 const toastRef = ref<InstanceType<typeof MetaToast> | null>(null)
 const commentDraft = ref('')
+const currentUserId = ref<string | null>(null)
+const commentMentionSuggestions = ref<MetaCommentMentionSuggestion[]>([])
+const commentMentionSuggestionsLoadedForSheetId = ref<string | null>(null)
 const searchText = ref('')
 const showShortcuts = ref(false)
 const showImportModal = ref(false)
@@ -373,6 +421,12 @@ let dialogMetaRefreshQueued = false
 let standaloneFormLoadVersion = 0
 let unsubscribeMentionRealtime: (() => void) | null = null
 
+function hasGrantedPermission(permissions: string[], code: string): boolean {
+  if (permissions.includes(code)) return true
+  const [resource] = code.split(':')
+  return permissions.includes(`${resource}:*`) || permissions.includes('*:*')
+}
+
 function showError(msg: string) {
   workbench.error.value = null
   toastRef.value?.showError(msg)
@@ -382,11 +436,36 @@ function showSuccess(msg: string) {
   toastRef.value?.showSuccess(msg)
 }
 
+function ensureCanCreateRecord(): boolean {
+  if (caps.canCreateRecord.value) return true
+  showError('Record creation is not allowed in this view.')
+  return false
+}
+
+function ensureCanEditRecord(recordId?: string | null): boolean {
+  const allowed = recordId ? (grid.resolveRowActions(recordId)?.canEdit ?? effectiveRowActions.value.canEdit) : effectiveRowActions.value.canEdit
+  if (allowed) return true
+  showError('Record editing is not allowed for this row.')
+  return false
+}
+
+function ensureCanDeleteRecord(recordId?: string | null): boolean {
+  const allowed = recordId ? (grid.resolveRowActions(recordId)?.canDelete ?? effectiveRowActions.value.canDelete) : effectiveRowActions.value.canDelete
+  if (allowed) return true
+  showError('Record deletion is not allowed for this row.')
+  return false
+}
+
 const activeViewType = computed(() => {
   if (props.mode === 'form') return 'form'
   if (props.mode === 'grid') return 'grid'
   return workbench.activeView.value?.type ?? 'grid'
 })
+const canCreateBasesAndSheets = computed(() => {
+  const access = auth.getAccessSnapshot()
+  return access.isAdmin || hasGrantedPermission(access.permissions, 'multitable:write')
+})
+const activeCapabilityOrigin = computed(() => grid.capabilityOrigin.value ?? workbench.capabilityOrigin.value ?? null)
 const effectiveViewPermissions = computed<Record<string, MetaViewPermission>>(() => {
   const merged: Record<string, MetaViewPermission> = { ...workbench.viewPermissions.value }
   if (workbench.activeViewId.value && grid.viewPermission.value) {
@@ -406,6 +485,54 @@ const mentionDisplayFieldId = computed(() =>
   ?? null,
 )
 const canConfigureCurrentView = computed(() => currentViewPermission.value?.canConfigure ?? true)
+const limitedCapabilityLabels = computed(() => {
+  const labels: string[] = []
+  if (!caps.canCreateRecord.value) labels.push('record creation')
+  if (!caps.canEditRecord.value) labels.push('editing')
+  if (!caps.canDeleteRecord.value) labels.push('deletion')
+  if (!caps.canManageFields.value) labels.push('field changes')
+  if (!caps.canManageSheetAccess.value) labels.push('sheet access changes')
+  if (!caps.canManageViews.value) labels.push('view configuration')
+  return labels
+})
+const capabilityOriginNotice = computed(() => {
+  const origin = activeCapabilityOrigin.value
+  if (!origin) return null
+
+  if (origin.source === 'admin') {
+    return {
+      source: origin.source,
+      title: 'Admin access',
+      message: 'This sheet is available through your administrator role.',
+    }
+  }
+
+  if (origin.source === 'global-rbac') {
+    return {
+      source: origin.source,
+      title: 'Workspace role access',
+      message: 'This sheet follows your workspace multitable permissions.',
+    }
+  }
+
+  if (origin.source === 'sheet-grant') {
+    return {
+      source: origin.source,
+      title: 'Shared sheet access',
+      message: 'This sheet is available through a direct sheet share, not just your workspace role.',
+    }
+  }
+
+  const limitedActions = limitedCapabilityLabels.value
+  const scopeMessage = limitedActions.length > 0
+    ? `${formatListWithAnd(limitedActions)} ${limitedActions.length === 1 ? 'is' : 'are'} limited on this sheet.`
+    : 'Some actions are intentionally limited on this sheet.'
+  return {
+    source: origin.source,
+    title: 'Restricted sheet access',
+    message: `This sheet narrows your workspace permissions. ${scopeMessage}`,
+  }
+})
 const visibleWorkbenchViews = computed(() =>
   workbench.views.value.filter((view) => effectiveViewPermissions.value[view.id]?.canAccess !== false),
 )
@@ -428,6 +555,10 @@ const effectiveRowActions = computed<MetaRowActions>(() => {
   if (activeViewType.value === 'form' && standaloneFormRowActions.value) {
     return standaloneFormRowActions.value
   }
+  if (selectedRecordId.value) {
+    const selectedRowActions = grid.resolveRowActions(selectedRecordId.value)
+    if (selectedRowActions) return selectedRowActions
+  }
   return grid.rowActions.value ?? {
     canEdit: caps.canEditRecord.value,
     canDelete: caps.canDeleteRecord.value,
@@ -445,6 +576,29 @@ const readOnlyFieldIds = computed(() =>
     .filter(([, permission]) => permission.readOnly)
     .map(([fieldId]) => fieldId),
 )
+const gridAllowsAnyDelete = computed(() =>
+  effectiveRowActions.value.canDelete || Object.values(grid.rowActionOverrides.value).some((actions) => actions.canDelete),
+)
+const importSurfaceFields = computed(() =>
+  propertyVisibleGridFields.value.filter((field) => {
+    const permission = effectiveFieldPermissions.value[field.id]
+    return permission?.visible !== false && permission?.readOnly !== true
+  }),
+)
+const importFieldResolvers = computed<Record<string, ImportValueResolver>>(() => {
+  const resolvers: Record<string, ImportValueResolver> = {}
+  for (const field of importSurfaceFields.value) {
+    if (!isLinkField(field)) continue
+    resolvers[field.id] = async (rawValue, currentField) => {
+      if (isPersonField(currentField)) {
+        const resolver = await getPeopleResolver(currentField)
+        return resolver ? resolver(rawValue, currentField) : null
+      }
+      return resolveLinkedImportValue(rawValue, currentField)
+    }
+  }
+  return resolvers
+})
 const formReadOnly = computed(() => {
   return selectedRecordResolved.value ? !effectiveRowActions.value.canEdit : !caps.canCreateRecord.value
 })
@@ -473,6 +627,37 @@ const visibleCommentPresenceRecordIds = computed(() => {
   }
   return nextIds
 })
+const structuralRealtimeFieldIds = computed(() => {
+  const next = new Set<string>()
+  for (const rule of grid.sortRules.value) {
+    if (rule.fieldId) next.add(rule.fieldId)
+  }
+  for (const rule of grid.filterRules.value) {
+    if (rule.fieldId) next.add(rule.fieldId)
+  }
+  if (grid.groupFieldId.value) next.add(grid.groupFieldId.value)
+  return [...next]
+})
+
+function isCellRealtimeLocallyPatchable(fieldId: string): boolean {
+  const field = grid.fields.value.find((candidate) => candidate.id === fieldId)
+  if (!field) return false
+  return !['link', 'attachment', 'lookup', 'rollup', 'formula'].includes(field.type)
+}
+
+function patchDeepLinkedRealtimeRecord(recordId: string, version: number | undefined, patch: Record<string, unknown>): boolean {
+  if (deepLinkedRecord.value?.id !== recordId) return false
+  deepLinkedRecord.value = {
+    ...deepLinkedRecord.value,
+    version: typeof version === 'number' ? version : deepLinkedRecord.value.version,
+    data: {
+      ...deepLinkedRecord.value.data,
+      ...patch,
+    },
+  }
+  return true
+}
+
 const selectedRecordCommentPresence = computed(() => (
   selectedRecordId.value ? commentPresenceState.presenceByRecordId.value[selectedRecordId.value] ?? null : null
 ))
@@ -492,12 +677,28 @@ const selectedRecordCommentsScope = computed<MetaCommentsScope | null>(() => {
     containerId: workbench.activeSheetId.value,
   }
 })
+const activeCommentFieldId = computed(() => selectedCommentFieldId.value ?? selectedRecordCommentsScope.value?.targetFieldId ?? null)
 const selectedCommentField = computed<MetaField | null>(() => {
-  const fieldId = selectedCommentFieldId.value ?? selectedRecordCommentsScope.value?.targetFieldId ?? null
+  const fieldId = activeCommentFieldId.value
   if (!fieldId) return null
   return grid.fields.value.find((field) => field.id === fieldId) ?? null
 })
 const commentsScopeLabel = computed(() => selectedCommentField.value?.name ?? null)
+const activeEditingComment = computed(() => (
+  selectedEditingCommentId.value
+    ? commentsState.comments.value.find((comment) => comment.id === selectedEditingCommentId.value) ?? null
+    : null
+))
+const commentComposerInitialMentions = computed(() => (
+  activeEditingComment.value ? buildEditingMentionSuggestions(activeEditingComment.value) : []
+))
+const sheetPresenceLabel = computed(() => (
+  sheetPresenceState.activeCollaboratorCount.value === 1 ? 'active collaborator' : 'active collaborators'
+))
+const sheetPresenceTitle = computed(() => {
+  const ids = sheetPresenceState.activeCollaborators.value.map((user) => user.id)
+  return ids.length > 0 ? ids.join(', ') : 'No active collaborators'
+})
 const conflictFieldName = computed(() => {
   const fieldId = grid.conflict.value?.fieldId
   if (!fieldId) return 'cell'
@@ -551,17 +752,58 @@ function pushUniqueIds(target: string[], ids: string[]) {
   }
 }
 
-function normalizeImportLookupKey(value: string): string {
-  return value.trim().toLowerCase()
+function formatListWithAnd(items: string[]): string {
+  if (items.length === 0) return ''
+  if (items.length === 1) return items[0]
+  if (items.length === 2) return `${items[0]} and ${items[1]}`
+  return `${items.slice(0, -1).join(', ')}, and ${items[items.length - 1]}`
 }
 
-function getImportPrimaryField(records: Array<Record<string, unknown>>) {
-  const importedFieldIds = new Set(records.flatMap((record) => Object.keys(record)))
-  // The current multitable model does not expose an explicit primary-key field yet,
-  // so import dedupe follows the first mapped field in sheet order.
-  return [...grid.fields.value]
-    .sort((left, right) => Number(left.order ?? 0) - Number(right.order ?? 0))
-    .find((field) => importedFieldIds.has(field.id)) ?? null
+function resetCommentInteractionState() {
+  selectedCommentFieldId.value = null
+  selectedReplyCommentId.value = null
+  selectedEditingCommentId.value = null
+  commentDraft.value = ''
+  highlightedCommentId.value = null
+}
+
+function parseCommentMentionTokens(content: string): MetaCommentMentionSuggestion[] {
+  const seen = new Set<string>()
+  const mentions: MetaCommentMentionSuggestion[] = []
+  for (const match of content.matchAll(/@\[([^\]]+)\]\(([^)]+)\)/g)) {
+    const label = match[1]?.trim()
+    const id = match[2]?.trim()
+    if (!label || !id || seen.has(id)) continue
+    seen.add(id)
+    mentions.push({ id, label })
+  }
+  return mentions
+}
+
+function formatCommentDraftContent(content: string): string {
+  return content.replace(/@\[([^\]]+)\]\(([^)]+)\)/g, (_match, label) => `@${label}`)
+}
+
+function buildEditingMentionSuggestions(comment: { content: string; mentions: string[] }): MetaCommentMentionSuggestion[] {
+  const byId = new Map<string, MetaCommentMentionSuggestion>()
+  for (const token of parseCommentMentionTokens(comment.content)) {
+    byId.set(token.id, token)
+  }
+  for (const suggestion of commentMentionSuggestions.value) {
+    if (byId.has(suggestion.id)) {
+      byId.set(suggestion.id, { ...suggestion })
+    }
+  }
+  for (const mentionId of comment.mentions) {
+    if (byId.has(mentionId)) continue
+    const suggestion = commentMentionSuggestions.value.find((item) => item.id === mentionId)
+    byId.set(mentionId, suggestion ? { ...suggestion } : { id: mentionId, label: mentionId })
+  }
+  return [...byId.values()]
+}
+
+function normalizeImportLookupKey(value: string): string {
+  return value.trim().toLowerCase()
 }
 
 async function loadAllRecordSummaries(sheetId: string, displayFieldId: string) {
@@ -706,20 +948,8 @@ async function resolveLinkedImportValue(rawValue: string, field: MetaField): Pro
   return resolvedIds
 }
 
-const importFieldResolvers = computed<Record<string, ImportValueResolver>>(() => {
-  const resolvers: Record<string, ImportValueResolver> = {}
-  for (const field of workbench.fields.value) {
-    if (!isLinkField(field)) continue
-    resolvers[field.id] = async (rawValue, currentField) => {
-      if (isPersonField(currentField)) {
-        const resolver = await getPeopleResolver(currentField)
-        return resolver ? resolver(rawValue, currentField) : null
-      }
-      return resolveLinkedImportValue(rawValue, currentField)
-    }
-  }
-  return resolvers
-})
+const propertyVisibleWorkbenchFields = computed(() => filterPropertyVisibleFields(workbench.fields.value))
+const propertyVisibleGridFields = computed(() => filterPropertyVisibleFields(grid.fields.value))
 
 const uploadAttachmentFn: MetaAttachmentUploadFn = async (file: File, context?: MetaAttachmentUploadContext) =>
   workbench.client.uploadAttachment(file, {
@@ -766,7 +996,10 @@ async function loadCommentsForRecord(recordId: string, options?: { highlightComm
       containerType: 'meta_sheet',
       containerId: workbench.activeSheetId.value,
     }
-  await commentsState.loadComments(scope)
+  await Promise.all([
+    commentsState.loadComments(scope),
+    ensureCommentMentionSuggestions(),
+  ])
   highlightedCommentId.value = options?.highlightCommentId ?? null
   if (options?.markReadCommentId) {
     await workbench.client.markCommentRead(options.markReadCommentId).catch(() => undefined)
@@ -774,13 +1007,42 @@ async function loadCommentsForRecord(recordId: string, options?: { highlightComm
   }
 }
 
-async function selectRecord(recordId: string, opts?: { openComments?: boolean; highlightCommentId?: string | null; markReadCommentId?: string | null }) {
+async function ensureCommentMentionSuggestions(force = false) {
+  const sheetId = workbench.activeSheetId.value
+  if (!sheetId) {
+    commentMentionSuggestions.value = []
+    commentMentionSuggestionsLoadedForSheetId.value = null
+    return
+  }
+  if (!force && commentMentionSuggestionsLoadedForSheetId.value === sheetId) return
+
+  try {
+    const result = await workbench.client.listCommentMentionSuggestions({
+      spreadsheetId: sheetId,
+      limit: 100,
+    })
+    if (workbench.activeSheetId.value !== sheetId) return
+    commentMentionSuggestions.value = result.items
+    commentMentionSuggestionsLoadedForSheetId.value = sheetId
+  } catch {
+    if (workbench.activeSheetId.value !== sheetId) return
+    commentMentionSuggestions.value = []
+    commentMentionSuggestionsLoadedForSheetId.value = null
+  }
+}
+
+async function selectRecord(recordId: string, opts?: { openComments?: boolean; highlightCommentId?: string | null; markReadCommentId?: string | null; targetFieldId?: string | null }) {
   if (recordId !== selectedRecordId.value && !confirmDiscardRecordChanges()) return
   selectedRecordId.value = recordId
   commentDraft.value = ''
   if (!opts?.openComments) {
     selectedCommentFieldId.value = null
     selectedReplyCommentId.value = null
+    selectedEditingCommentId.value = null
+  } else {
+    selectedCommentFieldId.value = opts.targetFieldId ?? null
+    selectedReplyCommentId.value = null
+    selectedEditingCommentId.value = null
   }
   showComments.value = opts?.openComments === true
   await loadCommentsForRecord(recordId, {
@@ -829,7 +1091,10 @@ function onSearchTextUpdate(text: string) {
 function onClearFilters() { grid.clearFilters(); grid.applySortFilter() }
 function onSetConjunction(c: FilterConjunction) { grid.filterConjunction.value = c; grid.sortFilterDirty.value = true }
 
-async function onPatchCell(recordId: string, fieldId: string, value: unknown, version: number) { await grid.patchCell(recordId, fieldId, value, version) }
+async function onPatchCell(recordId: string, fieldId: string, value: unknown, version: number) {
+  if (!ensureCanEditRecord(recordId)) return
+  await grid.patchCell(recordId, fieldId, value, version)
+}
 async function onTimelinePatchDates(payload: {
   recordId: string
   version: number
@@ -838,6 +1103,7 @@ async function onTimelinePatchDates(payload: {
   startValue: string
   endValue: string
 }) {
+  if (!ensureCanEditRecord(payload.recordId)) return
   try {
     await workbench.client.patchRecords({
       sheetId: workbench.activeSheetId.value || undefined,
@@ -856,10 +1122,17 @@ async function onTimelinePatchDates(payload: {
     showError(error?.message ?? 'Failed to update timeline dates')
   }
 }
-async function onAddRecord() { await grid.createRecord() }
-async function onKanbanCreateRecord(data: Record<string, unknown>) { await grid.createRecord(data) }
+async function onAddRecord() {
+  if (!ensureCanCreateRecord()) return
+  await grid.createRecord()
+}
+async function onKanbanCreateRecord(data: Record<string, unknown>) {
+  if (!ensureCanCreateRecord()) return
+  await grid.createRecord(data)
+}
 async function onDeleteRecord() {
   if (!selectedRecordId.value) return
+  if (!ensureCanDeleteRecord(selectedRecordId.value)) return
   const deleted = await grid.deleteRecord(selectedRecordId.value)
   if (deleted) {
     selectedRecordId.value = null
@@ -894,6 +1167,7 @@ async function onRetryConflict() {
 async function onDrawerPatch(fieldId: string, value: unknown) {
   if (!selectedRecordResolved.value) return
   const record = selectedRecordResolved.value
+  if (!ensureCanEditRecord(record.id)) return
   await grid.patchCell(record.id, fieldId, value, record.version)
   if (grid.error.value) {
     showError(grid.error.value)
@@ -912,6 +1186,7 @@ async function onDrawerPatch(fieldId: string, value: unknown) {
 async function onFormSubmit(data: Record<string, unknown>) {
   const viewId = workbench.activeViewId.value
   if (viewId && activeViewType.value === 'form') {
+    if (!(selectedRecordResolved.value ? ensureCanEditRecord(selectedRecordResolved.value.id) : ensureCanCreateRecord())) return
     try {
       formSubmitting.value = true
       formSuccessMessage.value = null
@@ -942,30 +1217,43 @@ async function onFormSubmit(data: Record<string, unknown>) {
       await replayPendingExternalContextIfReady()
     }
   } else if (selectedRecordResolved.value) {
+    if (!ensureCanEditRecord(selectedRecordResolved.value.id)) return
     const changes = Object.entries(data).filter(([k, v]) => v !== selectedRecordResolved.value!.data[k]).map(([fieldId, value]) => ({ recordId: selectedRecordResolved.value!.id, fieldId, value, expectedVersion: selectedRecordResolved.value!.version }))
     if (changes.length) {
       await workbench.client.patchRecords({ sheetId: workbench.activeSheetId.value || undefined, viewId: viewId || undefined, changes })
       await grid.loadViewData(grid.page.value.offset)
       showSuccess('Record updated')
     }
-  } else await grid.createRecord(data)
+  } else {
+    if (!ensureCanCreateRecord()) return
+    await grid.createRecord(data)
+  }
 }
 
 async function onSubmitComment(payload: { content: string; mentions: string[] }) {
   if (!selectedRecordCommentsScope.value) return
   try {
-    await commentsState.addComment({
-      ...selectedRecordCommentsScope.value,
-      content: payload.content,
-      mentions: payload.mentions,
-      targetFieldId: selectedCommentFieldId.value ?? selectedRecordCommentsScope.value.targetFieldId ?? undefined,
-      parentId: selectedReplyCommentId.value ?? undefined,
-    })
+    if (selectedEditingCommentId.value) {
+      await commentsState.updateComment(selectedEditingCommentId.value, {
+        content: payload.content,
+        mentions: payload.mentions,
+      })
+      showSuccess('Comment updated')
+    } else {
+      await commentsState.addComment({
+        ...selectedRecordCommentsScope.value,
+        content: payload.content,
+        mentions: payload.mentions,
+        targetFieldId: activeCommentFieldId.value ?? undefined,
+        parentId: selectedReplyCommentId.value ?? undefined,
+      })
+      showSuccess('Comment added')
+    }
     commentDraft.value = ''
     selectedReplyCommentId.value = null
-    showSuccess('Comment added')
+    selectedEditingCommentId.value = null
   } catch (e: any) {
-    showError(commentsState.error.value ?? e.message ?? 'Failed to add comment')
+    showError(commentsState.error.value ?? e.message ?? (selectedEditingCommentId.value ? 'Failed to update comment' : 'Failed to add comment'))
   }
 }
 
@@ -978,12 +1266,42 @@ async function onResolveComment(commentId: string) {
   }
 }
 
+function onEditComment(commentId: string) {
+  const comment = commentsState.comments.value.find((item) => item.id === commentId)
+  if (!comment) return
+  selectedEditingCommentId.value = comment.id
+  selectedReplyCommentId.value = null
+  selectedCommentFieldId.value = comment.targetFieldId ?? comment.fieldId ?? null
+  commentDraft.value = formatCommentDraftContent(comment.content)
+  showComments.value = true
+}
+
+async function onDeleteComment(commentId: string) {
+  try {
+    await commentsState.deleteComment(commentId)
+    if (selectedEditingCommentId.value === commentId) {
+      selectedEditingCommentId.value = null
+      commentDraft.value = ''
+    }
+    if (selectedReplyCommentId.value === commentId) {
+      selectedReplyCommentId.value = null
+    }
+    if (highlightedCommentId.value === commentId) {
+      highlightedCommentId.value = null
+    }
+    showSuccess('Comment deleted')
+  } catch (e: any) {
+    showError(commentsState.error.value ?? e.message ?? 'Failed to delete comment')
+  }
+}
+
 function openLinkPicker(field: MetaField) { linkPickerField.value = field; linkPickerRecordId.value = selectedRecordId.value; linkPickerCurrentValue.value = selectedRecordResolved.value?.data[field.id] ?? null; linkPickerVisible.value = true }
 function onGridLinkPicker(ctx: { recordId: string; field: MetaField }) { const row = grid.rows.value.find((r) => r.id === ctx.recordId); linkPickerField.value = ctx.field; linkPickerRecordId.value = ctx.recordId; linkPickerCurrentValue.value = row?.data[ctx.field.id] ?? null; linkPickerVisible.value = true }
 async function onLinkPickerConfirm(payload: { recordIds: string[]; summaries: LinkedRecordSummary[] }) {
   linkPickerVisible.value = false
   if (!linkPickerRecordId.value || !linkPickerField.value) return
   const recordId = linkPickerRecordId.value
+  if (!ensureCanEditRecord(recordId)) return
   const fieldId = linkPickerField.value.id
   const previousSummaries = selectedRecordLinkSummaries.value[fieldId] ?? grid.linkSummaries.value[recordId]?.[fieldId]
   const row = grid.rows.value.find((r) => r.id === recordId)
@@ -1113,8 +1431,24 @@ async function onDeleteView(viewId: string) {
   } catch (e: any) { showError(e.message ?? 'Failed to delete view') }
 }
 
+async function onSheetPermissionsUpdated() {
+  try {
+    await workbench.loadSheetMeta(workbench.activeSheetId.value)
+    await grid.loadViewData(grid.page.value.offset)
+    if (selectedRecordId.value) {
+      await refreshSelectedRecordContext(selectedRecordId.value)
+    }
+  } catch (e: any) {
+    showError(e.message ?? 'Failed to refresh sheet access')
+  }
+}
+
 // --- Sheet management ---
 async function onCreateSheet(name: string) {
+  if (!canCreateBasesAndSheets.value) {
+    showError('Sheet creation requires multitable write access.')
+    return
+  }
   if (!confirmDiscardContextChanges()) return
   try {
     const res = await workbench.client.createSheet({ name, baseId: workbench.activeBaseId.value || undefined, seed: true })
@@ -1165,25 +1499,20 @@ function onCloseDrawer() {
   if (!confirmDiscardRecordChanges()) return
   selectedRecordId.value = null
   showComments.value = false
-  selectedCommentFieldId.value = null
-  selectedReplyCommentId.value = null
-  commentDraft.value = ''
-  highlightedCommentId.value = null
+  resetCommentInteractionState()
 }
 
 function onToggleComments() {
   if (showComments.value) {
     if (!confirmDiscardCommentDraft()) return
     showComments.value = false
-    selectedCommentFieldId.value = null
-    selectedReplyCommentId.value = null
-    commentDraft.value = ''
-    highlightedCommentId.value = null
+    resetCommentInteractionState()
     return
   }
   showComments.value = true
   selectedCommentFieldId.value = null
   selectedReplyCommentId.value = null
+  selectedEditingCommentId.value = null
   void commentInboxState.refreshUnreadCount().catch(() => undefined)
 }
 
@@ -1191,6 +1520,7 @@ function onToggleFieldComments(field: MetaField) {
   if (!selectedRecordId.value) return
   selectedCommentFieldId.value = field.id
   selectedReplyCommentId.value = null
+  selectedEditingCommentId.value = null
   showComments.value = true
   commentDraft.value = ''
   void loadCommentsForRecord(selectedRecordId.value, {
@@ -1202,6 +1532,7 @@ function onOpenRecordComments(recordId: string) {
   void selectRecord(recordId, { openComments: true }).then(() => {
     selectedCommentFieldId.value = null
     selectedReplyCommentId.value = null
+    selectedEditingCommentId.value = null
   })
 }
 
@@ -1209,11 +1540,13 @@ function onOpenGridFieldComments(payload: { recordId: string; fieldId: string })
   void selectRecord(payload.recordId, { openComments: true }).then(() => {
     selectedCommentFieldId.value = payload.fieldId
     selectedReplyCommentId.value = null
+    selectedEditingCommentId.value = null
   })
 }
 
 function onReplyToComment(commentId: string) {
   selectedReplyCommentId.value = commentId
+  selectedEditingCommentId.value = null
   showComments.value = true
 }
 
@@ -1221,13 +1554,15 @@ function onCancelCommentReply() {
   selectedReplyCommentId.value = null
 }
 
+function onCancelCommentEdit() {
+  selectedEditingCommentId.value = null
+  commentDraft.value = ''
+}
+
 function onCloseComments() {
   if (!confirmDiscardCommentDraft()) return
   showComments.value = false
-  selectedCommentFieldId.value = null
-  selectedReplyCommentId.value = null
-  commentDraft.value = ''
-  highlightedCommentId.value = null
+  resetCommentInteractionState()
 }
 
 function confirmDiscardContextChanges() {
@@ -1255,9 +1590,7 @@ function discardWorkbenchDraftsForExternalContextChange() {
   formErrorMessage.value = null
   formFieldErrors.value = {}
   showComments.value = false
-  selectedCommentFieldId.value = null
-  selectedReplyCommentId.value = null
-  highlightedCommentId.value = null
+  resetCommentInteractionState()
   selectedRecordId.value = null
   deepLinkedRecord.value = null
   deepLinkedRecordLinkSummaries.value = {}
@@ -1429,6 +1762,10 @@ async function requestExternalContextSync(
 }
 
 async function onCreateBase(name: string) {
+  if (!canCreateBasesAndSheets.value) {
+    showError('Base creation requires multitable write access.')
+    return
+  }
   try {
     const res = await workbench.client.createBase({ name })
     bases.value.push(res.base)
@@ -1474,34 +1811,9 @@ async function onBulkImport(payload: ImportBuildResult) {
   importSubmitting.value = true
   importResult.value = null
   try {
-    const primaryField = getImportPrimaryField(payload.records)
-    let recordsToImport = payload.records
-    let rowIndexesToImport = payload.rowIndexes
-    let skippedRows: ImportFailure[] = []
-
-    if (primaryField && workbench.activeSheetId.value && payload.records.length > 0) {
-      try {
-        const existingSummary = await loadAllRecordSummaries(workbench.activeSheetId.value, primaryField.id)
-        const existingKeys = existingSummary.records
-          .map((record) => normalizeImportLookupKey(record.display))
-          .filter((key) => key.length > 0)
-        const deduped = skipDuplicateImportRows({
-          records: payload.records,
-          rowIndexes: payload.rowIndexes,
-          primaryFieldId: primaryField.id,
-          primaryFieldName: primaryField.name,
-          existingKeys,
-        })
-        recordsToImport = deduped.records
-        rowIndexesToImport = deduped.rowIndexes
-        skippedRows = deduped.skippedRows.map((row) => ({
-          ...row,
-          retryable: false,
-        }))
-      } catch {
-        // Duplicate detection should not block imports when summary prefetch fails.
-      }
-    }
+    const recordsToImport = payload.records
+    const rowIndexesToImport = payload.rowIndexes
+    const skippedRows: ImportFailure[] = []
 
     const importRowsResult = recordsToImport.length > 0
       ? await bulkImportRecords({
@@ -1606,7 +1918,7 @@ function closeImportModal() {
 
 // --- CSV export ---
 function onExportCsv() {
-  const visibleFields = grid.visibleFields.value
+  const visibleFields = scopedGridFields.value
   if (!visibleFields.length) return
   const header = visibleFields.map((f) => csvEscape(f.name)).join(',')
   const rows = grid.rows.value.map((row) =>
@@ -1688,13 +2000,13 @@ async function refreshDialogMeta() {
     dialogMetaRefreshQueued = false
     const refreshed = await workbench.loadSheetMeta(activeSheetId)
     if (refreshed && workbench.activeSheetId.value === activeSheetId) {
-      grid.fields.value = [...workbench.fields.value]
+      grid.fields.value = [...propertyVisibleWorkbenchFields.value]
     }
   } catch {
     // Keep dialog refresh silent; explicit save paths still surface errors.
   } finally {
     dialogMetaRefreshInFlight = false
-    const shouldRefresh = Boolean((showFieldManager.value || showViewManager.value || showImportModal.value) && workbench.activeSheetId.value)
+    const shouldRefresh = Boolean((showFieldManager.value || showPermissionManager.value || showViewManager.value || showImportModal.value) && workbench.activeSheetId.value)
     if (shouldRefresh && (dialogMetaRefreshQueued || workbench.activeSheetId.value !== activeSheetId)) {
       dialogMetaRefreshQueued = false
       void refreshDialogMeta()
@@ -1720,6 +2032,7 @@ function startDialogMetaRefresh() {
 
 // --- Bulk delete ---
 async function onBulkDelete(recordIds: string[]) {
+  if (recordIds.some((recordId) => !ensureCanDeleteRecord(recordId))) return
   try {
     await Promise.all(recordIds.map((rid) => grid.deleteRecord(rid)))
     if (selectedRecordId.value && recordIds.includes(selectedRecordId.value)) selectedRecordId.value = null
@@ -1730,7 +2043,7 @@ async function onBulkDelete(recordIds: string[]) {
 // --- Deep-link record fetch (when record not in current page) ---
 const deepLinkedRecord = ref<MetaRecord | null>(null)
 
-async function resolveDeepLink(recordId: string, options?: { openComments?: boolean; highlightCommentId?: string | null; markReadCommentId?: string | null }) {
+async function resolveDeepLink(recordId: string, options?: { openComments?: boolean; highlightCommentId?: string | null; markReadCommentId?: string | null; targetFieldId?: string | null }) {
   // First check if it's in the current rows
   const inPage = grid.rows.value.find((r) => r.id === recordId)
   if (inPage) {
@@ -1753,6 +2066,114 @@ async function resolveDeepLink(recordId: string, options?: { openComments?: bool
     await selectRecord(recordId, options)
   } catch (e: any) {
     showError(`Record not found: ${recordId}`)
+  }
+}
+
+function clearDeepLinkedRecordState() {
+  deepLinkedRecord.value = null
+  deepLinkedRecordLinkSummaries.value = {}
+  deepLinkedRecordAttachmentSummaries.value = {}
+  deepLinkedRecordCommentsScope.value = null
+  deepLinkedRecordFieldPermissions.value = {}
+  deepLinkedRecordViewPermissions.value = {}
+  deepLinkedRecordRowActions.value = null
+}
+
+async function mergeRemoteRecordContext(recordId: string): Promise<boolean> {
+  if (!recordId) return false
+  const inPage = grid.rows.value.some((row) => row.id === recordId)
+  const isSelected = selectedRecordId.value === recordId
+  if (!inPage && !isSelected) return false
+  if (activeViewType.value === 'form' && isSelected) {
+    await loadStandaloneForm()
+    return true
+  }
+
+  try {
+    const ctx = await workbench.client.getRecord(recordId, {
+      sheetId: workbench.activeSheetId.value || undefined,
+      viewId: workbench.activeViewId.value || undefined,
+    })
+    const mergedInPage = grid.mergeRemoteRecord(ctx.record, {
+      linkSummaries: ctx.linkSummaries,
+      attachmentSummaries: ctx.attachmentSummaries,
+    })
+    if (selectedRecordId.value === recordId) {
+      deepLinkedRecord.value = ctx.record
+      deepLinkedRecordLinkSummaries.value = ctx.linkSummaries ?? {}
+      deepLinkedRecordAttachmentSummaries.value = ctx.attachmentSummaries ?? {}
+      deepLinkedRecordCommentsScope.value = ctx.commentsScope
+      deepLinkedRecordFieldPermissions.value = ctx.fieldPermissions ?? {}
+      deepLinkedRecordViewPermissions.value = ctx.viewPermissions ?? {}
+      deepLinkedRecordRowActions.value = ctx.rowActions ?? null
+    }
+    return mergedInPage || selectedRecordId.value === recordId
+  } catch {
+    return false
+  }
+}
+
+async function applyRemoteRecordPatchContext(payload: {
+  recordId: string
+  version?: number
+  fieldIds: string[]
+  patch: Record<string, unknown>
+}): Promise<boolean> {
+  const fieldIds = payload.fieldIds.length > 0 ? payload.fieldIds : Object.keys(payload.patch)
+  if (!payload.recordId || fieldIds.length === 0) return false
+  if (fieldIds.some((fieldId) => !isCellRealtimeLocallyPatchable(fieldId))) return false
+
+  let handled = grid.applyRemoteRecordPatch(payload.recordId, {
+    version: payload.version,
+    patch: payload.patch,
+  })
+
+  if (patchDeepLinkedRealtimeRecord(payload.recordId, payload.version, payload.patch)) {
+    handled = true
+  }
+
+  return handled
+}
+
+function removeLocalRealtimeRecord(recordId: string): boolean {
+  let handled = grid.removeRemoteRecord(recordId)
+  if (selectedRecordId.value === recordId) {
+    selectedRecordId.value = null
+    showComments.value = false
+    resetCommentInteractionState()
+    clearDeepLinkedRecordState()
+    handled = true
+  } else if (deepLinkedRecord.value?.id === recordId) {
+    clearDeepLinkedRecordState()
+    handled = true
+  }
+  return handled
+}
+
+async function refreshSelectedRecordContext(recordId: string) {
+  if (!recordId || selectedRecordId.value !== recordId) return
+  if (activeViewType.value === 'form') {
+    await loadStandaloneForm()
+    return
+  }
+  const inPage = grid.rows.value.some((row) => row.id === recordId)
+  if (inPage) return
+
+  try {
+    const ctx = await workbench.client.getRecord(recordId, {
+      sheetId: workbench.activeSheetId.value || undefined,
+      viewId: workbench.activeViewId.value || undefined,
+    })
+    if (selectedRecordId.value !== recordId) return
+    deepLinkedRecord.value = ctx.record
+    deepLinkedRecordLinkSummaries.value = ctx.linkSummaries ?? {}
+    deepLinkedRecordAttachmentSummaries.value = ctx.attachmentSummaries ?? {}
+    deepLinkedRecordCommentsScope.value = ctx.commentsScope
+    deepLinkedRecordFieldPermissions.value = ctx.fieldPermissions ?? {}
+    deepLinkedRecordViewPermissions.value = ctx.viewPermissions ?? {}
+    deepLinkedRecordRowActions.value = ctx.rowActions ?? null
+  } catch {
+    // Silent best-effort refresh; explicit fetch paths surface errors.
   }
 }
 
@@ -1833,6 +2254,8 @@ watch(
     showMentionPopover.value = false
     unsubscribeMentionRealtime?.()
     unsubscribeMentionRealtime = null
+    commentMentionSuggestions.value = []
+    commentMentionSuggestionsLoadedForSheetId.value = null
 
     if (!sheetId) {
       mentionInboxState.clearSummary()
@@ -1840,9 +2263,12 @@ watch(
     }
 
     void mentionInboxState.loadSummary({ spreadsheetId: sheetId })
+    void ensureCommentMentionSuggestions(true)
     unsubscribeMentionRealtime = subscribeToMultitableCommentSheetRealtime(sheetId, {
       onCommentCreated: mentionInboxState.onRealtimeCommentCreated,
+      onCommentUpdated: mentionInboxState.onRealtimeCommentUpdated,
       onCommentResolved: mentionInboxState.onRealtimeCommentResolved,
+      onCommentDeleted: mentionInboxState.onRealtimeCommentDeleted,
     })
   },
   { immediate: true },
@@ -1863,9 +2289,9 @@ watch(
 )
 
 watch(
-  [showFieldManager, showViewManager, showImportModal, () => workbench.activeSheetId.value],
-  ([fieldManagerVisible, viewManagerVisible, importVisible, activeSheetId], [_prevFieldVisible, _prevViewVisible, _prevImportVisible, prevSheetId]) => {
-    const shouldRefresh = Boolean((fieldManagerVisible || viewManagerVisible || importVisible) && activeSheetId)
+  [showFieldManager, showPermissionManager, showViewManager, showImportModal, () => workbench.activeSheetId.value],
+  ([fieldManagerVisible, permissionManagerVisible, viewManagerVisible, importVisible, activeSheetId], [_prevFieldVisible, _prevPermissionVisible, _prevViewVisible, _prevImportVisible, prevSheetId]) => {
+    const shouldRefresh = Boolean((fieldManagerVisible || permissionManagerVisible || viewManagerVisible || importVisible) && activeSheetId)
     if (!shouldRefresh) {
       stopDialogMetaRefresh()
       return
@@ -1895,6 +2321,9 @@ watch(
 
 onMounted(async () => {
   window.addEventListener('beforeunload', onBeforeUnload)
+  void auth.getCurrentUserId().then((userId) => {
+    currentUserId.value = userId
+  }).catch(() => undefined)
   try {
     await loadBases()
     if (workbench.activeBaseId.value) {
@@ -1912,6 +2341,7 @@ onMounted(async () => {
         openComments: props.openComments === true || Boolean(props.commentId),
         highlightCommentId: props.commentId ?? null,
         markReadCommentId: props.commentId ?? null,
+        targetFieldId: props.fieldId ?? null,
       })
     }
     if (activeViewType.value === 'form') {
@@ -1950,6 +2380,20 @@ useMultitableCommentRealtime({
   },
 })
 
+useMultitableSheetRealtime({
+  sheetId: computed(() => workbench.activeSheetId.value || undefined),
+  selectedRecordId,
+  visibleRecordIds: visibleCommentPresenceRecordIds,
+  structuralFieldIds: structuralRealtimeFieldIds,
+  reloadCurrentSheetPage: async () => {
+    await grid.reloadCurrentPage()
+  },
+  reloadSelectedRecordContext: refreshSelectedRecordContext,
+  applyRemoteRecordPatch: applyRemoteRecordPatchContext,
+  mergeRemoteRecord: mergeRemoteRecordContext,
+  removeLocalRecord: removeLocalRealtimeRecord,
+})
+
 defineExpose({
   confirmPageLeave,
   getEmbedHostState,
@@ -1986,6 +2430,41 @@ defineExpose({
 }
 .mt-workbench__conflict-btn--primary { background: #f59e0b; border-color: #f59e0b; color: #fff; }
 .mt-workbench__actions { display: flex; gap: 6px; padding: 4px 16px 0; }
+.mt-workbench__capability-banner {
+  margin: 8px 16px 0;
+  padding: 8px 12px;
+  border: 1px solid #d9d9d9;
+  border-radius: 10px;
+  background: #fafafa;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: #595959;
+}
+.mt-workbench__capability-banner strong { font-weight: 600; color: inherit; }
+.mt-workbench__capability-banner--admin {
+  border-color: #87e8de;
+  background: #f6ffed;
+  color: #135200;
+}
+.mt-workbench__capability-banner--global-rbac {
+  border-color: #b7eb8f;
+  background: #f6ffed;
+  color: #237804;
+}
+.mt-workbench__capability-banner--sheet-grant {
+  border-color: #91d5ff;
+  background: #e6f4ff;
+  color: #0958d9;
+}
+.mt-workbench__capability-banner--sheet-scope {
+  border-color: #ffd591;
+  background: #fff7e6;
+  color: #ad6800;
+}
+.mt-workbench__presence-chip { display: inline-flex; align-items: center; gap: 4px; padding: 3px 10px; border: 1px solid #91caff; border-radius: 12px; background: #e6f4ff; color: #0958d9; font-size: 12px; }
+.mt-workbench__presence-chip strong { font-weight: 600; color: #003eb3; }
 .mt-workbench__mention-chip { display: inline-flex; align-items: center; gap: 4px; padding: 3px 10px; border: 1px solid #e6a23c; border-radius: 12px; background: #fdf6ec; font-size: 12px; cursor: pointer; color: #e6a23c; }
 .mt-workbench__mention-chip:hover { background: #faecd8; border-color: #d48806; }
 .mt-workbench__mention-chip strong { font-weight: 600; color: #d48806; }

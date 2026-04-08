@@ -4,6 +4,17 @@ import { computed, createApp, defineComponent, h, nextTick, reactive, ref, type 
 const showErrorSpy = vi.fn()
 const showSuccessSpy = vi.fn()
 const pushSpy = vi.fn().mockResolvedValue(undefined)
+const useMultitableSheetRealtimeMock = vi.fn()
+let sheetPresenceStateMock: any
+const { authAccessSnapshot, bulkImportRecordsMock } = vi.hoisted(() => ({
+  authAccessSnapshot: {
+    email: 'dev@example.com',
+    roles: [] as string[],
+    permissions: ['multitable:write'] as string[],
+    isAdmin: false,
+  },
+  bulkImportRecordsMock: vi.fn(),
+}))
 
 vi.mock('vue-router', async () => {
   const actual = await vi.importActual<typeof import('vue-router')>('vue-router')
@@ -57,9 +68,17 @@ vi.mock('../src/multitable/composables/useMultitableCapabilities', () => ({
     canEditRecord: computed(() => source?.value?.canEditRecord ?? true),
     canDeleteRecord: computed(() => source?.value?.canDeleteRecord ?? true),
     canManageFields: computed(() => source?.value?.canManageFields ?? true),
+    canManageSheetAccess: computed(() => source?.value?.canManageSheetAccess ?? true),
     canManageViews: computed(() => source?.value?.canManageViews ?? true),
     canComment: computed(() => source?.value?.canComment ?? true),
     canManageAutomation: computed(() => source?.value?.canManageAutomation ?? false),
+  }),
+}))
+
+vi.mock('../src/composables/useAuth', () => ({
+  useAuth: () => ({
+    getAccessSnapshot: () => authAccessSnapshot,
+    getCurrentUserId: vi.fn().mockResolvedValue('user_1'),
   }),
 }))
 
@@ -69,9 +88,13 @@ vi.mock('../src/multitable/composables/useMultitableComments', () => ({
     loading: ref(false),
     submitting: ref(false),
     resolvingIds: ref<string[]>([]),
+    updatingIds: ref<string[]>([]),
+    deletingIds: ref<string[]>([]),
     error: ref<string | null>(null),
     loadComments: loadCommentsSpy,
     addComment: addCommentSpy,
+    updateComment: vi.fn(),
+    deleteComment: vi.fn(),
     resolveComment: resolveCommentSpy,
   }),
 }))
@@ -101,12 +124,29 @@ vi.mock('../src/multitable/composables/useMultitableCommentInboxSummary', () => 
     markRead: vi.fn().mockResolvedValue(undefined),
     clearSummary: vi.fn(),
     onRealtimeCommentCreated: vi.fn(),
+    onRealtimeCommentUpdated: vi.fn(),
     onRealtimeCommentResolved: vi.fn(),
+    onRealtimeCommentDeleted: vi.fn(),
   }),
 }))
 
 vi.mock('../src/multitable/composables/useMultitableCommentRealtime', () => ({
   useMultitableCommentRealtime: vi.fn(),
+}))
+
+vi.mock('../src/multitable/composables/useMultitableSheetRealtime', () => ({
+  useMultitableSheetRealtime: (...args: unknown[]) => useMultitableSheetRealtimeMock(...args),
+}))
+
+vi.mock('../src/multitable/composables/useMultitableSheetPresence', () => ({
+  useMultitableSheetPresence: () => (sheetPresenceStateMock = {
+    presence: ref(null),
+    activeUsers: ref([] as Array<{ id: string }>),
+    activeCollaborators: ref([] as Array<{ id: string }>),
+    activeCollaboratorCount: computed(() => sheetPresenceStateMock?.activeCollaborators.value.length ?? 0),
+    reconnect: vi.fn(),
+    disconnect: vi.fn(),
+  }),
 }))
 
 vi.mock('../src/multitable/composables/useMultitableCommentPresence', () => ({
@@ -125,23 +165,28 @@ vi.mock('../src/multitable/realtime/comments-realtime', () => ({
 }))
 
 vi.mock('../src/multitable/import/bulk-import', () => ({
-  bulkImportRecords: vi.fn(),
+  bulkImportRecords: bulkImportRecordsMock,
 }))
 
 vi.mock('../src/multitable/components/MetaViewTabBar.vue', () => ({
   default: defineComponent({
     name: 'MetaViewTabBar',
+    props: {
+      canCreateSheet: { type: Boolean, default: false },
+    },
     emits: ['create-sheet', 'select-sheet', 'select-view'],
     render() {
       return h('div', [
-        h(
-          'button',
-          {
-            'data-create-sheet': 'true',
-            onClick: () => this.$emit('create-sheet', 'Sheet 2'),
-          },
-          'create-sheet',
-        ),
+        this.$props.canCreateSheet
+          ? h(
+              'button',
+              {
+                'data-create-sheet': 'true',
+                onClick: () => this.$emit('create-sheet', 'Sheet 2'),
+              },
+              'create-sheet',
+            )
+          : null,
         h(
           'button',
           {
@@ -165,15 +210,36 @@ vi.mock('../src/multitable/components/MetaViewTabBar.vue', () => ({
 vi.mock('../src/multitable/components/MetaToolbar.vue', () => ({
   default: defineComponent({
     name: 'MetaToolbar',
-    emits: ['import'],
+    props: {
+      fields: { type: Array, default: () => [] },
+    },
+    emits: ['import', 'export-csv'],
     render() {
+      const fieldIds = (this.$props.fields as Array<{ id?: string }>)
+        .map((field) => field.id ?? '')
+        .filter((fieldId) => fieldId.length > 0)
+        .join(',')
       return h(
-        'button',
-        {
-          'data-open-import': 'true',
-          onClick: () => this.$emit('import'),
-        },
-        'open-import',
+        'div',
+        { 'data-toolbar-field-ids': fieldIds },
+        [
+          h(
+            'button',
+            {
+              'data-open-import': 'true',
+              onClick: () => this.$emit('import'),
+            },
+            'open-import',
+          ),
+          h(
+            'button',
+            {
+              'data-export-csv': 'true',
+              onClick: () => this.$emit('export-csv'),
+            },
+            'export-csv',
+          ),
+        ],
       )
     },
   }),
@@ -253,7 +319,7 @@ vi.mock('../src/multitable/components/MetaRecordDrawer.vue', () => ({
       visible: { type: Boolean, default: false },
       record: { type: Object, default: null },
     },
-    emits: ['close', 'toggle-comments', 'comment-field', 'navigate'],
+    emits: ['close', 'toggle-comments', 'comment-field', 'navigate', 'delete', 'patch'],
     render() {
       if (!this.$props.visible) return null
       const recordId = (this.$props.record as { id?: string } | null)?.id ?? ''
@@ -290,6 +356,22 @@ vi.mock('../src/multitable/components/MetaRecordDrawer.vue', () => ({
           },
           'navigate-record',
         ),
+        h(
+          'button',
+          {
+            'data-delete-record': 'true',
+            onClick: () => this.$emit('delete'),
+          },
+          'delete-record',
+        ),
+        h(
+          'button',
+          {
+            'data-patch-record': 'fld_title',
+            onClick: () => this.$emit('patch', 'fld_title', 'Patched title'),
+          },
+          'patch-record',
+        ),
       ])
     },
   }),
@@ -299,11 +381,16 @@ vi.mock('../src/multitable/components/MetaCommentsDrawer.vue', () => ({
     name: 'MetaCommentsDrawer',
     props: {
       visible: { type: Boolean, default: false },
+      targetFieldId: { type: String, default: null },
+      mentionSuggestions: { type: Array, default: () => [] },
     },
     emits: ['close', 'submit', 'reply', 'cancel-reply', 'update:draft'],
     render() {
       if (!this.$props.visible) return null
-      return h('div', [
+      return h('div', {
+        'data-current-comment-field': this.$props.targetFieldId ?? '',
+        'data-mention-suggestions-count': String((this.$props.mentionSuggestions as unknown[]).length),
+      }, [
         h(
           'button',
           {
@@ -388,10 +475,19 @@ vi.mock('../src/multitable/components/MetaLinkPicker.vue', () => ({ default: stu
 vi.mock('../src/multitable/components/MetaFieldManager.vue', () => ({
   default: defineComponent({
     name: 'MetaFieldManager',
+    props: {
+      visible: { type: Boolean, default: false },
+      fields: { type: Array, default: () => [] },
+    },
     emits: ['create-field', 'update:dirty'],
     render() {
+      const fieldIds = (this.$props.fields as Array<{ id?: string }>)
+        .map((field) => field.id ?? '')
+        .filter((fieldId) => fieldId.length > 0)
+        .join(',')
       return h(
         'div',
+        { 'data-field-manager-field-ids': fieldIds },
         [
           h(
             'button',
@@ -440,11 +536,19 @@ vi.mock('../src/multitable/components/MetaViewManager.vue', () => ({
     name: 'MetaViewManager',
     props: {
       visible: { type: Boolean, default: false },
+      fields: { type: Array, default: () => [] },
     },
     emits: ['close', 'update:dirty'],
     render() {
       if (!this.$props.visible) return null
-      return h('div', { 'data-view-manager': 'true' }, [
+      const fieldIds = (this.$props.fields as Array<{ id?: string }>)
+        .map((field) => field.id ?? '')
+        .filter((fieldId) => fieldId.length > 0)
+        .join(',')
+      return h('div', {
+        'data-view-manager': 'true',
+        'data-view-manager-field-ids': fieldIds,
+      }, [
         h(
           'button',
           {
@@ -465,7 +569,53 @@ vi.mock('../src/multitable/components/MetaViewManager.vue', () => ({
     },
   }),
 }))
-vi.mock('../src/multitable/components/MetaKanbanView.vue', () => ({ default: stubComponent('MetaKanbanView') }))
+vi.mock('../src/multitable/components/MetaSheetPermissionManager.vue', () => ({
+  default: defineComponent({
+    name: 'MetaSheetPermissionManager',
+    props: {
+      visible: { type: Boolean, default: false },
+      sheetId: { type: String, default: '' },
+    },
+    emits: ['close', 'updated'],
+    render() {
+      if (!this.$props.visible) return null
+      return h('div', {
+        'data-sheet-permission-manager': 'true',
+        'data-sheet-permission-manager-sheet-id': this.$props.sheetId,
+      }, [
+        h(
+          'button',
+          {
+            'data-sheet-permission-updated': 'true',
+            onClick: () => this.$emit('updated'),
+          },
+          'permission-updated',
+        ),
+        h(
+          'button',
+          {
+            'data-close-sheet-permission-manager': 'true',
+            onClick: () => this.$emit('close'),
+          },
+          'close-permission-manager',
+        ),
+      ])
+    },
+  }),
+}))
+vi.mock('../src/multitable/components/MetaKanbanView.vue', () => ({
+  default: defineComponent({
+    name: 'MetaKanbanView',
+    props: {
+      canEdit: { type: Boolean, default: false },
+    },
+    render() {
+      return h('div', {
+        'data-kanban-can-edit': String(this.$props.canEdit),
+      })
+    },
+  }),
+}))
 vi.mock('../src/multitable/components/MetaGalleryView.vue', () => ({
   default: defineComponent({
     name: 'MetaGalleryView',
@@ -499,10 +649,13 @@ vi.mock('../src/multitable/components/MetaTimelineView.vue', () => ({
     name: 'MetaTimelineView',
     props: {
       viewConfig: { type: Object, default: null },
+      canEdit: { type: Boolean, default: false },
     },
     emits: ['update-view-config', 'patch-dates'],
     render() {
-      return h('div', [
+      return h('div', {
+        'data-timeline-can-edit': String(this.$props.canEdit),
+      }, [
         h(
           'button',
           {
@@ -542,11 +695,17 @@ vi.mock('../src/multitable/components/MetaImportModal.vue', () => ({
     name: 'MetaImportModal',
     props: {
       visible: { type: Boolean, default: false },
+      fields: { type: Array, default: () => [] },
     },
     emits: ['update:dirty', 'close', 'cancel-import', 'import'],
     render() {
       if (!this.$props.visible) return null
+      const fieldIds = (this.$props.fields as Array<{ id?: string }>)
+        .map((field) => field.id ?? '')
+        .filter((fieldId) => fieldId.length > 0)
+        .join(',')
       return h('div', [
+        h('div', { 'data-import-field-ids': fieldIds }),
         h(
           'button',
           {
@@ -554,6 +713,21 @@ vi.mock('../src/multitable/components/MetaImportModal.vue', () => ({
             onClick: () => this.$emit('update:dirty', true),
           },
           'import-dirty',
+        ),
+        h(
+          'button',
+          {
+            'data-import-submit': 'true',
+            onClick: () => this.$emit('import', {
+              records: [
+                { fld_title: 'Alpha', fld_status: 'Open' },
+                { fld_title: 'alpha', fld_status: 'Closed' },
+              ],
+              rowIndexes: [0, 1],
+              failures: [],
+            }),
+          },
+          'import-submit',
         ),
       ])
     },
@@ -565,18 +739,31 @@ vi.mock('../src/multitable/components/MetaBasePicker.vue', () => ({
     name: 'MetaBasePicker',
     props: {
       activeBaseId: { type: String, default: '' },
+      canCreate: { type: Boolean, default: false },
     },
-    emits: ['select'],
+    emits: ['select', 'create'],
     render() {
-      return h(
-        'button',
-        {
-          'data-select-base': 'base_sales',
-          'data-active-base-id': this.$props.activeBaseId,
-          onClick: () => this.$emit('select', 'base_sales'),
-        },
-        this.$props.activeBaseId || 'no-base',
-      )
+      return h('div', [
+        h(
+          'button',
+          {
+            'data-select-base': 'base_sales',
+            'data-active-base-id': this.$props.activeBaseId,
+            onClick: () => this.$emit('select', 'base_sales'),
+          },
+          this.$props.activeBaseId || 'no-base',
+        ),
+        this.$props.canCreate
+          ? h(
+              'button',
+              {
+                'data-create-base': 'true',
+                onClick: () => this.$emit('create', 'Base 2'),
+              },
+              'create-base',
+            )
+          : null,
+      ])
     },
   }),
 }))
@@ -622,6 +809,15 @@ function createWorkbenchMock() {
       }),
       loadFormContext: vi.fn(),
       getRecord: vi.fn(),
+      listRecordSummaries: vi.fn().mockResolvedValue({
+        records: [{ id: 'rec_existing', display: 'Alpha' }],
+        displayMap: { rec_existing: 'Alpha' },
+      }),
+      listCommentMentionSuggestions: vi.fn().mockResolvedValue({
+        items: [{ id: 'user_jamie', label: 'Jamie', subtitle: 'jamie@example.com' }],
+        total: 1,
+        limit: 100,
+      }),
       createSheet: vi.fn(),
       createBase: vi.fn(),
       createField: vi.fn(),
@@ -631,6 +827,9 @@ function createWorkbenchMock() {
       createView: vi.fn(),
       updateView: vi.fn(),
       deleteView: vi.fn(),
+      listSheetPermissions: vi.fn().mockResolvedValue({ items: [] }),
+      listSheetPermissionCandidates: vi.fn().mockResolvedValue({ items: [] }),
+      updateSheetPermission: vi.fn().mockResolvedValue({}),
       patchRecords: vi.fn(),
       submitForm: vi.fn(),
     },
@@ -646,9 +845,14 @@ function createWorkbenchMock() {
       canEditRecord: true,
       canDeleteRecord: true,
       canManageFields: true,
+      canManageSheetAccess: true,
       canManageViews: true,
       canComment: true,
       canManageAutomation: false,
+    }),
+    capabilityOrigin: ref({
+      source: 'global-rbac',
+      hasSheetAssignments: false,
     }),
     fieldPermissions: ref({}),
     viewPermissions: ref({}),
@@ -667,8 +871,12 @@ function createWorkbenchMock() {
 }
 
 function createGridMock() {
-  return {
-    fields: ref([]),
+  const fields = ref([
+    { id: 'fld_title', name: 'Title', type: 'string', order: 1 },
+    { id: 'fld_status', name: 'Status', type: 'select', order: 2, options: [{ value: 'todo' }] },
+  ])
+  const mock = {
+    fields,
     rows: ref([
       { id: 'rec_1', version: 1, data: { fld_title: 'Alpha' } },
       { id: 'rec_2', version: 1, data: { fld_title: 'Beta' } },
@@ -677,7 +885,7 @@ function createGridMock() {
     currentPage: ref(1),
     totalPages: ref(1),
     page: ref({ offset: 0, limit: 50, total: 0, hasMore: false }),
-    visibleFields: ref([]),
+    visibleFields: fields,
     sortRules: ref([]),
     filterRules: ref([]),
     filterConjunction: ref('and'),
@@ -691,7 +899,9 @@ function createGridMock() {
     attachmentSummaries: ref<Record<string, Record<string, unknown[]>>>({}),
     fieldPermissions: ref({}),
     viewPermission: ref(null),
+    capabilityOrigin: ref(null),
     rowActions: ref(null),
+    rowActionOverrides: ref<Record<string, { canEdit: boolean; canDelete: boolean; canComment: boolean }>>({}),
     conflict: ref(null),
     error: ref<string | null>(null),
     sortFilterDirty: ref(false),
@@ -710,6 +920,9 @@ function createGridMock() {
     patchCell: vi.fn(),
     createRecord: vi.fn(),
     deleteRecord: vi.fn(),
+    mergeRemoteRecord: vi.fn().mockReturnValue(true),
+    applyRemoteRecordPatch: vi.fn().mockReturnValue(true),
+    removeRemoteRecord: vi.fn().mockReturnValue(true),
     loadViewData: vi.fn(),
     reloadCurrentPage: vi.fn(),
     dismissConflict: vi.fn(),
@@ -717,6 +930,13 @@ function createGridMock() {
     setColumnWidth: vi.fn(),
     setSearchQuery: vi.fn(),
   }
+  mock.resolveRowActions = vi.fn((recordId?: string | null) => {
+    if (recordId && mock.rowActionOverrides.value[recordId]) {
+      return mock.rowActionOverrides.value[recordId]
+    }
+    return mock.rowActions.value
+  })
+  return mock
 }
 
 describe('MultitableWorkbench view wiring', () => {
@@ -728,7 +948,14 @@ describe('MultitableWorkbench view wiring', () => {
     addCommentSpy = vi.fn()
     resolveCommentSpy = vi.fn()
     mentionInboxSummaryMock = null
+    sheetPresenceStateMock = null
+    useMultitableSheetRealtimeMock.mockReset()
     subscribeToMultitableCommentSheetRealtimeMock.mockReset()
+    bulkImportRecordsMock.mockReset()
+    authAccessSnapshot.email = 'dev@example.com'
+    authAccessSnapshot.roles = []
+    authAccessSnapshot.permissions = ['multitable:write']
+    authAccessSnapshot.isAdmin = false
     workbenchMock = createWorkbenchMock()
     gridMock = createGridMock()
     container = document.createElement('div')
@@ -747,8 +974,8 @@ describe('MultitableWorkbench view wiring', () => {
     vi.clearAllMocks()
   })
 
-  function mountWorkbench(initialProps?: { baseId?: string; sheetId?: string; viewId?: string; recordId?: string }) {
-    let hostState!: { baseId?: string; sheetId?: string; viewId?: string; recordId?: string }
+  function mountWorkbench(initialProps?: { baseId?: string; sheetId?: string; viewId?: string; recordId?: string; commentId?: string; fieldId?: string; openComments?: boolean }) {
+    let hostState!: { baseId?: string; sheetId?: string; viewId?: string; recordId?: string; commentId?: string; fieldId?: string; openComments?: boolean }
     const externalContextResults: Array<{
       status: 'applied' | 'failed' | 'superseded'
       context: { baseId: string; sheetId: string; viewId: string }
@@ -766,6 +993,9 @@ describe('MultitableWorkbench view wiring', () => {
           sheetId: initialProps?.sheetId ?? 'sheet_orders',
           viewId: initialProps?.viewId ?? 'view_grid',
           recordId: initialProps?.recordId,
+          commentId: initialProps?.commentId,
+          fieldId: initialProps?.fieldId,
+          openComments: initialProps?.openComments,
         })
         return () => h(MultitableWorkbench as Component, {
           ...hostState,
@@ -780,9 +1010,288 @@ describe('MultitableWorkbench view wiring', () => {
     return Object.assign(hostState, { externalContextResults, workbenchRef })
   }
 
+  it('filters property-hidden fields from manager surfaces while keeping view-hidden fields configurable', async () => {
+    workbenchMock.fields.value = [
+      { id: 'fld_title', name: 'Title', type: 'string' },
+      { id: 'fld_view_hidden', name: 'View Hidden', type: 'string' },
+      { id: 'fld_secret', name: 'Secret', type: 'string', property: { hidden: true } },
+    ]
+    gridMock.fields.value = [
+      { id: 'fld_title', name: 'Title', type: 'string' },
+      { id: 'fld_view_hidden', name: 'View Hidden', type: 'string' },
+      { id: 'fld_secret', name: 'Secret', type: 'string', property: { hidden: true } },
+    ]
+    gridMock.hiddenFieldIds.value = ['fld_view_hidden']
+    workbenchMock.fieldPermissions.value = {
+      fld_title: { visible: true, readOnly: false },
+      fld_view_hidden: { visible: false, readOnly: false },
+      fld_secret: { visible: false, readOnly: false },
+    }
+
+    mountWorkbench()
+    await flushUi()
+
+    expect(container!.querySelector('[data-toolbar-field-ids]')?.getAttribute('data-toolbar-field-ids'))
+      .toBe('fld_title,fld_view_hidden')
+
+    const managerButtons = Array.from(container!.querySelectorAll('.mt-workbench__mgr-btn')) as HTMLButtonElement[]
+    managerButtons.find((button) => button.textContent?.includes('Fields'))?.click()
+    await flushUi()
+
+    expect(container!.querySelector('[data-field-manager-field-ids]')?.getAttribute('data-field-manager-field-ids'))
+      .toBe('fld_title,fld_view_hidden')
+
+    container!.querySelector<HTMLButtonElement>('[data-open-import="true"]')!.click()
+    await flushUi()
+
+    expect(container!.querySelector('[data-import-field-ids]')?.getAttribute('data-import-field-ids'))
+      .toBe('fld_title')
+
+    managerButtons.find((button) => button.textContent?.includes('Views'))?.click()
+    await flushUi()
+
+    expect(container!.querySelector('[data-view-manager-field-ids]')?.getAttribute('data-view-manager-field-ids'))
+      .toBe('fld_title,fld_view_hidden')
+  })
+
+  it('opens sheet access manager and refreshes sheet state after updates', async () => {
+    mountWorkbench()
+    await flushUi()
+
+    const managerButtons = Array.from(container!.querySelectorAll('.mt-workbench__mgr-btn')) as HTMLButtonElement[]
+    managerButtons.find((button) => button.textContent?.includes('Access'))?.click()
+    await flushUi()
+
+    expect(container!.querySelector('[data-sheet-permission-manager]')).not.toBeNull()
+    expect(container!.querySelector('[data-sheet-permission-manager-sheet-id]')?.getAttribute('data-sheet-permission-manager-sheet-id'))
+      .toBe('sheet_orders')
+
+    workbenchMock.loadSheetMeta.mockClear()
+    gridMock.loadViewData.mockClear()
+
+    container!.querySelector<HTMLButtonElement>('[data-sheet-permission-updated="true"]')!.click()
+    await flushUi()
+
+    expect(workbenchMock.loadSheetMeta).toHaveBeenCalledWith('sheet_orders')
+    expect(gridMock.loadViewData).toHaveBeenCalledWith(0)
+  })
+
+  it('shows access manager independently from field manager capability', async () => {
+    workbenchMock.capabilities.value = {
+      canRead: true,
+      canCreateRecord: false,
+      canEditRecord: false,
+      canDeleteRecord: false,
+      canManageFields: false,
+      canManageSheetAccess: true,
+      canManageViews: false,
+      canComment: true,
+      canManageAutomation: false,
+    }
+
+    mountWorkbench()
+    await flushUi()
+
+    const managerButtons = Array.from(container!.querySelectorAll('.mt-workbench__mgr-btn')) as HTMLButtonElement[]
+    expect(managerButtons.some((button) => button.textContent?.includes('Fields'))).toBe(false)
+    expect(managerButtons.some((button) => button.textContent?.includes('Access'))).toBe(true)
+  })
+
+  it('shows a workspace role access banner by default', async () => {
+    mountWorkbench()
+    await flushUi()
+
+    const banner = container!.querySelector('[data-capability-origin-banner="true"]')
+    expect(banner).not.toBeNull()
+    expect(banner?.getAttribute('data-capability-origin-source')).toBe('global-rbac')
+    expect(banner?.textContent).toContain('Workspace role access')
+    expect(banner?.textContent).toContain('follows your workspace multitable permissions')
+  })
+
+  it('prefers grid capability origin when a sheet grant expands access', async () => {
+    workbenchMock.capabilityOrigin.value = {
+      source: 'global-rbac',
+      hasSheetAssignments: false,
+    }
+    gridMock.capabilityOrigin.value = {
+      source: 'sheet-grant',
+      hasSheetAssignments: true,
+    }
+
+    mountWorkbench()
+    await flushUi()
+
+    const banner = container!.querySelector('[data-capability-origin-banner="true"]')
+    expect(banner?.getAttribute('data-capability-origin-source')).toBe('sheet-grant')
+    expect(banner?.textContent).toContain('Shared sheet access')
+    expect(banner?.textContent).toContain('direct sheet share')
+  })
+
+  it('explains which actions are limited when sheet scope narrows access', async () => {
+    workbenchMock.capabilityOrigin.value = {
+      source: 'sheet-scope',
+      hasSheetAssignments: true,
+    }
+    workbenchMock.capabilities.value = {
+      canRead: true,
+      canCreateRecord: false,
+      canEditRecord: false,
+      canDeleteRecord: false,
+      canManageFields: false,
+      canManageSheetAccess: false,
+      canManageViews: true,
+      canComment: true,
+      canManageAutomation: false,
+    }
+
+    mountWorkbench()
+    await flushUi()
+
+    const banner = container!.querySelector('[data-capability-origin-banner="true"]')
+    expect(banner?.getAttribute('data-capability-origin-source')).toBe('sheet-scope')
+    expect(banner?.textContent).toContain('Restricted sheet access')
+    expect(banner?.textContent).toContain('record creation, editing, deletion, field changes, and sheet access changes are limited on this sheet')
+  })
+
+  it('shows an explicit admin access banner for administrator contexts', async () => {
+    workbenchMock.capabilityOrigin.value = {
+      source: 'admin',
+      hasSheetAssignments: false,
+    }
+
+    mountWorkbench()
+    await flushUi()
+
+    const banner = container!.querySelector('[data-capability-origin-banner="true"]')
+    expect(banner?.getAttribute('data-capability-origin-source')).toBe('admin')
+    expect(banner?.textContent).toContain('Admin access')
+    expect(banner?.textContent).toContain('administrator role')
+  })
+
+  it('filters readonly fields from import surfaces', async () => {
+    workbenchMock.fields.value = [
+      { id: 'fld_title', name: 'Title', type: 'string' },
+      { id: 'fld_locked', name: 'Locked', type: 'string', property: { readonly: true } },
+    ]
+    gridMock.fields.value = [...workbenchMock.fields.value]
+    workbenchMock.fieldPermissions.value = {
+      fld_title: { visible: true, readOnly: false },
+      fld_locked: { visible: true, readOnly: true },
+    }
+
+    mountWorkbench()
+    await flushUi()
+
+    container!.querySelector<HTMLButtonElement>('[data-open-import="true"]')!.click()
+    await flushUi()
+
+    expect(container!.querySelector('[data-import-field-ids]')?.getAttribute('data-import-field-ids'))
+      .toBe('fld_title')
+  })
+
+  it('imports duplicate first-field values without implicit dedupe', async () => {
+    bulkImportRecordsMock.mockResolvedValue({
+      attempted: 2,
+      succeeded: 2,
+      failed: 0,
+      firstError: null,
+      failures: [],
+    })
+    workbenchMock.fields.value = [
+      { id: 'fld_title', name: 'Title', type: 'string', order: 1 },
+      { id: 'fld_status', name: 'Status', type: 'string', order: 2 },
+    ]
+    gridMock.fields.value = [...workbenchMock.fields.value]
+
+    mountWorkbench()
+    await flushUi()
+
+    container!.querySelector<HTMLButtonElement>('[data-open-import="true"]')!.click()
+    await flushUi()
+
+    container!.querySelector<HTMLButtonElement>('[data-import-submit="true"]')!.click()
+    await flushUi()
+
+    expect(workbenchMock.client.listRecordSummaries).not.toHaveBeenCalled()
+    expect(bulkImportRecordsMock).toHaveBeenCalledTimes(1)
+    expect(bulkImportRecordsMock).toHaveBeenCalledWith(expect.objectContaining({
+      sheetId: 'sheet_orders',
+      viewId: 'view_grid',
+      records: [
+        { fld_title: 'Alpha', fld_status: 'Open' },
+        { fld_title: 'alpha', fld_status: 'Closed' },
+      ],
+    }))
+    expect(showSuccessSpy).toHaveBeenCalledWith('2 record(s) imported')
+  })
+
+  it('exports only scoped visible grid fields', async () => {
+    gridMock.fields.value = [
+      { id: 'fld_title', name: 'Title', type: 'string' },
+      { id: 'fld_view_hidden', name: 'View Hidden', type: 'string' },
+    ]
+    gridMock.visibleFields.value = [...gridMock.fields.value]
+    gridMock.rows.value = [
+      { id: 'rec_1', version: 1, data: { fld_title: 'Alpha', fld_view_hidden: 'Hidden value' } },
+    ]
+    gridMock.fieldPermissions.value = {
+      fld_title: { visible: true, readOnly: false },
+      fld_view_hidden: { visible: false, readOnly: false },
+    }
+
+    let exportedBlob: Blob | null = null
+    const originalCreateObjectURL = URL.createObjectURL
+    const originalRevokeObjectURL = URL.revokeObjectURL
+    const createObjectURLMock = vi.fn((blob: Blob | MediaSource) => {
+      exportedBlob = blob as Blob
+      return 'blob:multitable-export'
+    })
+    const revokeObjectURLMock = vi.fn()
+    Object.defineProperty(URL, 'createObjectURL', { configurable: true, value: createObjectURLMock })
+    Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: revokeObjectURLMock })
+    const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+    try {
+      mountWorkbench()
+      await flushUi()
+
+      container!.querySelector<HTMLButtonElement>('[data-export-csv="true"]')!.click()
+      await flushUi()
+
+      expect(createObjectURLMock).toHaveBeenCalledTimes(1)
+      const csv = exportedBlob
+        ? await new Promise<string>((resolve, reject) => {
+          const reader = new FileReader()
+          reader.onload = () => resolve(String(reader.result ?? ''))
+          reader.onerror = () => reject(reader.error)
+          reader.readAsText(exportedBlob as Blob)
+        })
+        : ''
+      expect(csv).toContain('Title')
+      expect(csv).not.toContain('View Hidden')
+      expect(csv).not.toContain('Hidden value')
+      expect(revokeObjectURLMock).toHaveBeenCalledWith('blob:multitable-export')
+    } finally {
+      clickSpy.mockRestore()
+      Object.defineProperty(URL, 'createObjectURL', { configurable: true, value: originalCreateObjectURL })
+      Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: originalRevokeObjectURL })
+    }
+  })
+
   it('syncs external base/sheet/view props after mount', async () => {
     const hostState = mountWorkbench()
     await flushUi()
+
+    expect(useMultitableSheetRealtimeMock).toHaveBeenCalledTimes(1)
+    expect(useMultitableSheetRealtimeMock.mock.calls[0]?.[0]).toEqual(expect.objectContaining({
+      selectedRecordId: expect.any(Object),
+      visibleRecordIds: expect.any(Object),
+      structuralFieldIds: expect.any(Object),
+      reloadCurrentSheetPage: expect.any(Function),
+      reloadSelectedRecordContext: expect.any(Function),
+      applyRemoteRecordPatch: expect.any(Function),
+      mergeRemoteRecord: expect.any(Function),
+      removeLocalRecord: expect.any(Function),
+    }))
 
     workbenchMock.syncExternalContext.mockClear()
 
@@ -796,6 +1305,60 @@ describe('MultitableWorkbench view wiring', () => {
       sheetId: 'sheet_deals',
       viewId: 'view_board',
     })
+  })
+
+  it('hydrates local realtime merge handlers with record context', async () => {
+    mountWorkbench()
+    await flushUi()
+
+    workbenchMock.client.getRecord.mockResolvedValue({
+      record: { id: 'rec_1', version: 7, data: { fld_title: 'Remote Alpha' } },
+      linkSummaries: { fld_link: [{ id: 'rec_link', label: 'Linked row' }] },
+      attachmentSummaries: { fld_files: [{ id: 'att_1', filename: 'brief.txt', mimeType: 'text/plain', size: 10, url: '/x', thumbnailUrl: null, uploadedAt: null }] },
+      commentsScope: { targetType: 'meta_record', targetId: 'rec_1', containerType: 'meta_sheet', containerId: 'sheet_orders' },
+      fieldPermissions: {},
+      viewPermissions: {},
+      rowActions: null,
+    })
+
+    const realtimeOptions = useMultitableSheetRealtimeMock.mock.calls[0]?.[0] as {
+      applyRemoteRecordPatch: (payload: {
+        recordId: string
+        version?: number
+        fieldIds: string[]
+        patch: Record<string, unknown>
+      }) => Promise<boolean>
+      mergeRemoteRecord: (recordId: string) => Promise<boolean>
+      removeLocalRecord: (recordId: string) => boolean
+    }
+
+    await expect(realtimeOptions.applyRemoteRecordPatch({
+      recordId: 'rec_1',
+      version: 8,
+      fieldIds: ['fld_title'],
+      patch: { fld_title: 'Remote cell' },
+    })).resolves.toBe(true)
+    expect(gridMock.applyRemoteRecordPatch).toHaveBeenCalledWith('rec_1', {
+      version: 8,
+      patch: { fld_title: 'Remote cell' },
+    })
+    expect(workbenchMock.client.getRecord).not.toHaveBeenCalled()
+
+    await expect(realtimeOptions.mergeRemoteRecord('rec_1')).resolves.toBe(true)
+    expect(workbenchMock.client.getRecord).toHaveBeenCalledWith('rec_1', {
+      sheetId: 'sheet_orders',
+      viewId: 'view_grid',
+    })
+    expect(gridMock.mergeRemoteRecord).toHaveBeenCalledWith(
+      { id: 'rec_1', version: 7, data: { fld_title: 'Remote Alpha' } },
+      expect.objectContaining({
+        linkSummaries: { fld_link: [{ id: 'rec_link', label: 'Linked row' }] },
+        attachmentSummaries: { fld_files: [expect.objectContaining({ id: 'att_1' })] },
+      }),
+    )
+
+    expect(realtimeOptions.removeLocalRecord('rec_2')).toBe(true)
+    expect(gridMock.removeRemoteRecord).toHaveBeenCalledWith('rec_2')
   })
 
   it('opens workflow designer with multitable context when automation is enabled', async () => {
@@ -1001,6 +1564,48 @@ describe('MultitableWorkbench view wiring', () => {
     })
   })
 
+  it('keeps base and sheet creation available when the current sheet is read-only but the user still has global multitable write', async () => {
+    workbenchMock.capabilities.value = {
+      canRead: true,
+      canCreateRecord: false,
+      canEditRecord: false,
+      canDeleteRecord: false,
+      canManageFields: false,
+      canManageSheetAccess: false,
+      canManageViews: false,
+      canComment: true,
+      canManageAutomation: false,
+    }
+    authAccessSnapshot.permissions = ['multitable:write']
+
+    mountWorkbench()
+    await flushUi()
+
+    expect(container!.querySelector('[data-create-base="true"]')).not.toBeNull()
+    expect(container!.querySelector('[data-create-sheet="true"]')).not.toBeNull()
+  })
+
+  it('hides base and sheet creation when global multitable write is absent', async () => {
+    workbenchMock.capabilities.value = {
+      canRead: true,
+      canCreateRecord: false,
+      canEditRecord: false,
+      canDeleteRecord: false,
+      canManageFields: false,
+      canManageSheetAccess: false,
+      canManageViews: false,
+      canComment: true,
+      canManageAutomation: false,
+    }
+    authAccessSnapshot.permissions = ['multitable:read']
+
+    mountWorkbench()
+    await flushUi()
+
+    expect(container!.querySelector('[data-create-base="true"]')).toBeNull()
+    expect(container!.querySelector('[data-create-sheet="true"]')).toBeNull()
+  })
+
   it('maps person field creation through the prepared link preset', async () => {
     mountWorkbench()
     await flushUi()
@@ -1078,6 +1683,28 @@ describe('MultitableWorkbench view wiring', () => {
     expect(gridMock.loadViewData).toHaveBeenCalled()
   })
 
+  it('passes scoped row edit gating into kanban and timeline views', async () => {
+    workbenchMock.views.value = [
+      { id: 'view_kanban', sheetId: 'sheet_orders', name: 'Kanban', type: 'kanban' },
+      { id: 'view_timeline', sheetId: 'sheet_orders', name: 'Timeline', type: 'timeline', config: { zoom: 'week' } },
+    ]
+    gridMock.rowActions.value = {
+      canEdit: false,
+      canDelete: true,
+      canComment: true,
+    }
+
+    mountWorkbench({ viewId: 'view_kanban' })
+    await flushUi()
+
+    expect(container!.querySelector('[data-kanban-can-edit]')?.getAttribute('data-kanban-can-edit')).toBe('false')
+
+    workbenchMock.activeViewId.value = 'view_timeline'
+    await flushUi()
+
+    expect(container!.querySelector('[data-timeline-can-edit]')?.getAttribute('data-timeline-can-edit')).toBe('false')
+  })
+
   it('patches timeline date updates through patchRecords and refreshes the active page', async () => {
     mountWorkbench({ viewId: 'view_timeline' })
     await flushUi()
@@ -1095,6 +1722,45 @@ describe('MultitableWorkbench view wiring', () => {
     })
     expect(gridMock.loadViewData).toHaveBeenCalled()
     expect(showSuccessSpy).toHaveBeenCalledWith('Timeline updated')
+  })
+
+  it('blocks timeline patch updates when scoped rowActions disallow edits', async () => {
+    gridMock.rowActions.value = {
+      canEdit: false,
+      canDelete: true,
+      canComment: true,
+    }
+
+    mountWorkbench({ viewId: 'view_timeline' })
+    await flushUi()
+
+    container!.querySelector<HTMLButtonElement>('[data-timeline-patch="true"]')!.click()
+    await flushUi()
+
+    expect(workbenchMock.client.patchRecords).not.toHaveBeenCalled()
+    expect(gridMock.loadViewData).not.toHaveBeenCalled()
+    expect(showErrorSpy).toHaveBeenCalledWith('Record editing is not allowed for this row.')
+  })
+
+  it('blocks form submit updates when scoped rowActions disallow edits', async () => {
+    workbenchMock.views.value = [
+      { id: 'view_form', sheetId: 'sheet_orders', name: 'Form', type: 'form' },
+    ]
+    workbenchMock.activeViewId.value = 'view_form'
+    gridMock.rowActions.value = {
+      canEdit: false,
+      canDelete: false,
+      canComment: true,
+    }
+
+    mountWorkbench({ viewId: 'view_form', recordId: 'rec_1' })
+    await flushUi()
+
+    container!.querySelector<HTMLButtonElement>('[data-form-submit="true"]')!.click()
+    await flushUi()
+
+    expect(workbenchMock.client.submitForm).not.toHaveBeenCalled()
+    expect(showErrorSpy).toHaveBeenCalledWith('Record editing is not allowed for this row.')
   })
 
   it('prompts before switching records when record-scoped drafts are present', async () => {
@@ -1128,6 +1794,7 @@ describe('MultitableWorkbench view wiring', () => {
         canEditRecord: true,
         canDeleteRecord: true,
         canManageFields: true,
+        canManageSheetAccess: true,
         canManageViews: true,
         canComment: true,
         canManageAutomation: false,
@@ -1155,6 +1822,7 @@ describe('MultitableWorkbench view wiring', () => {
 
     container!.querySelector<HTMLButtonElement>('[data-toggle-comments="true"]')!.click()
     await flushUi()
+    expect(container!.querySelector('[data-current-comment-field="fld_notes"]')).toBeTruthy()
     container!.querySelector<HTMLButtonElement>('[data-submit-comment="true"]')!.click()
     await flushUi()
 
@@ -1167,6 +1835,50 @@ describe('MultitableWorkbench view wiring', () => {
       content: 'Need review',
       mentions: [],
     })
+  })
+
+  it('loads comment mention suggestions for the active sheet when opening comments', async () => {
+    mountWorkbench()
+    await flushUi()
+
+    container!.querySelector<HTMLButtonElement>('[data-open-comments="rec_1"]')!.click()
+    await flushUi()
+
+    expect(workbenchMock.client.listCommentMentionSuggestions).toHaveBeenCalledWith({
+      spreadsheetId: 'sheet_orders',
+      limit: 100,
+    })
+    expect(container!.querySelector('[data-mention-suggestions-count="1"]')).not.toBeNull()
+  })
+
+  it('applies route-provided fieldId when opening a deep-linked comment thread', async () => {
+    gridMock.fields.value = [{ id: 'fld_notes', name: 'Notes', type: 'text' }]
+    workbenchMock.client.getRecord.mockResolvedValueOnce({
+      record: { id: 'rec_remote', version: 3, data: { fld_notes: 'Existing note' } },
+      commentsScope: {
+        containerType: 'meta_sheet',
+        containerId: 'sheet_orders',
+        targetType: 'meta_record',
+        targetId: 'rec_remote',
+      },
+      linkSummaries: {},
+      attachmentSummaries: {},
+    })
+
+    mountWorkbench({ recordId: 'rec_remote', commentId: 'c_route', fieldId: 'fld_notes', openComments: true })
+    await flushUi(8)
+
+    expect(container!.querySelector('[data-current-comment-field="fld_notes"]')).not.toBeNull()
+
+    container!.querySelector<HTMLButtonElement>('[data-submit-comment="true"]')!.click()
+    await flushUi()
+
+    expect(addCommentSpy).toHaveBeenCalledWith(expect.objectContaining({
+      targetId: 'rec_remote',
+      targetFieldId: 'fld_notes',
+      content: 'Need review',
+      mentions: [],
+    }))
   })
 
   it('submits field-scoped replies with targetFieldId and parentId', async () => {
@@ -1358,6 +2070,22 @@ describe('MultitableWorkbench view wiring', () => {
     expect(chip).not.toBeNull()
     expect(chip!.textContent).toContain('Mentions')
     expect(chip!.textContent).toContain('2')
+  })
+
+  it('shows an active collaborator chip when other users are viewing the same sheet', async () => {
+    mountWorkbench()
+    await flushUi()
+
+    expect(container!.querySelector('.mt-workbench__presence-chip')).toBeNull()
+
+    sheetPresenceStateMock.activeCollaborators.value = [{ id: 'user_a' }, { id: 'user_b' }]
+    await flushUi()
+
+    const chip = container!.querySelector<HTMLDivElement>('.mt-workbench__presence-chip')
+    expect(chip).not.toBeNull()
+    expect(chip?.textContent).toContain('2')
+    expect(chip?.textContent).toContain('active collaborators')
+    expect(chip?.getAttribute('title')).toBe('user_a, user_b')
   })
 
   it('opens the mention popover and selects a mentioned record', async () => {

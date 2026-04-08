@@ -10,6 +10,9 @@
       :sheet-id="effectiveSheetId"
       :view-id="effectiveViewId"
       :record-id="recordId"
+      :comment-id="commentId"
+      :field-id="fieldId"
+      :open-comments="openComments"
       :mode="mode"
       :role="role"
       @ready="onWorkbenchReady"
@@ -30,6 +33,9 @@ const props = defineProps<{
   sheetId?: string
   viewId?: string
   recordId?: string
+  commentId?: string
+  fieldId?: string
+  openComments?: boolean
   mode?: string // force view type: grid | form | kanban | gallery | calendar
   embedded?: boolean
   role?: MultitableRole

@@ -65,6 +65,7 @@ test('multitable pilot handoff release-bound forwards staging run mode to handof
   fs.mkdirSync(binDir, { recursive: true })
   const envLogPath = path.join(tmpRoot, 'handoff-env.log')
   const gateReportPath = path.join(tmpRoot, 'gate', 'report.json')
+  const readinessRoot = path.join(tmpRoot, 'readiness-root')
   fs.mkdirSync(path.dirname(gateReportPath), { recursive: true })
   fs.writeFileSync(gateReportPath, JSON.stringify({ ok: true }, null, 2))
 
@@ -79,6 +80,7 @@ test('multitable pilot handoff release-bound forwards staging run mode to handof
       '    printf "REQUIRE_ONPREM_GATE=%s\\n" "${REQUIRE_ONPREM_GATE:-}"',
       '    printf "REQUIRE_EXPLICIT_ONPREM_GATE=%s\\n" "${REQUIRE_EXPLICIT_ONPREM_GATE:-}"',
       '    printf "ONPREM_GATE_REPORT_JSON=%s\\n" "${ONPREM_GATE_REPORT_JSON:-}"',
+      '    printf "READINESS_ROOT=%s\\n" "${READINESS_ROOT:-}"',
       '  } > "${FAKE_HANDOFF_ENV_LOG}"',
       '  exit 0',
       'fi',
@@ -95,6 +97,7 @@ test('multitable pilot handoff release-bound forwards staging run mode to handof
       FAKE_HANDOFF_ENV_LOG: envLogPath,
       RUN_MODE: 'staging',
       ONPREM_GATE_REPORT_JSON: gateReportPath,
+      READINESS_ROOT: readinessRoot,
     },
     stdio: 'pipe',
   })
@@ -104,4 +107,5 @@ test('multitable pilot handoff release-bound forwards staging run mode to handof
   assert.match(log, /REQUIRE_ONPREM_GATE=true/)
   assert.match(log, /REQUIRE_EXPLICIT_ONPREM_GATE=true/)
   assert.match(log, new RegExp(`ONPREM_GATE_REPORT_JSON=${gateReportPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`))
+  assert.match(log, new RegExp(`READINESS_ROOT=${readinessRoot.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`))
 })

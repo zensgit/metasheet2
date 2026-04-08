@@ -90,6 +90,7 @@ export interface MetaViewMeta {
   computedFilterSort?: boolean
   ignoredSortFieldIds?: string[]
   ignoredFilterFieldIds?: string[]
+  capabilityOrigin?: MetaCapabilityOrigin
   permissions?: MetaScopedPermissions
 }
 
@@ -114,6 +115,7 @@ export interface MetaScopedPermissions {
   fieldPermissions?: Record<string, MetaFieldPermission>
   viewPermissions?: Record<string, MetaViewPermission>
   rowActions?: MetaRowActions
+  rowActionOverrides?: Record<string, MetaRowActions>
 }
 
 // --- Context (GET /api/multitable/context) ---
@@ -123,6 +125,7 @@ export interface MetaContext {
   sheets: MetaSheet[]
   views: MetaView[]
   capabilities: MetaCapabilities
+  capabilityOrigin?: MetaCapabilityOrigin
   fieldPermissions?: Record<string, MetaFieldPermission>
   viewPermissions?: Record<string, MetaViewPermission>
 }
@@ -134,6 +137,7 @@ export interface MetaRecordContext {
   fields: MetaField[]
   record: MetaRecord
   capabilities: MetaCapabilities
+  capabilityOrigin?: MetaCapabilityOrigin
   fieldPermissions?: Record<string, MetaFieldPermission>
   viewPermissions?: Record<string, MetaViewPermission>
   rowActions?: MetaRowActions
@@ -151,6 +155,7 @@ export interface MetaFormContext {
   view?: MetaView | null
   fields: MetaField[]
   capabilities: MetaCapabilities
+  capabilityOrigin?: MetaCapabilityOrigin
   fieldPermissions?: Record<string, MetaFieldPermission>
   viewPermissions?: Record<string, MetaViewPermission>
   rowActions?: MetaRowActions
@@ -166,9 +171,37 @@ export interface MetaCapabilities {
   canEditRecord: boolean
   canDeleteRecord: boolean
   canManageFields: boolean
+  canManageSheetAccess: boolean
   canManageViews: boolean
   canComment: boolean
   canManageAutomation: boolean
+}
+
+export interface MetaCapabilityOrigin {
+  source: 'admin' | 'global-rbac' | 'sheet-grant' | 'sheet-scope'
+  hasSheetAssignments: boolean
+}
+
+export type MetaSheetPermissionAccessLevel = 'read' | 'write' | 'write-own' | 'admin'
+export type MetaSheetPermissionSubjectType = 'user' | 'role'
+
+export interface MetaSheetPermissionEntry {
+  subjectType: MetaSheetPermissionSubjectType
+  subjectId: string
+  accessLevel: MetaSheetPermissionAccessLevel
+  permissions: string[]
+  label: string
+  subtitle?: string | null
+  isActive: boolean
+}
+
+export interface MetaSheetPermissionCandidate {
+  subjectType: MetaSheetPermissionSubjectType
+  subjectId: string
+  label: string
+  subtitle?: string | null
+  isActive: boolean
+  accessLevel?: MetaSheetPermissionAccessLevel | null
 }
 
 // --- Comments ---
@@ -237,6 +270,7 @@ export interface CommentMentionSummary {
 
 export interface MultitableCommentInboxItem extends MultitableComment {
   unread: boolean
+  mentioned: boolean
   baseId?: string | null
   sheetId?: string | null
   viewId?: string | null
@@ -250,6 +284,16 @@ export interface MultitableCommentInboxPage {
   total: number
   limit: number
   offset: number
+}
+
+export interface MultitableSheetPresenceUser {
+  id: string
+}
+
+export interface MultitableSheetPresence {
+  sheetId: string
+  activeCount: number
+  users: MultitableSheetPresenceUser[]
 }
 
 // --- Link records ---

@@ -4,28 +4,12 @@ import * as path from 'path'
 import { Router } from 'express'
 import { z } from 'zod'
 import { poolManager } from '../integration/db/connection-pool'
-import { rbacGuard } from '../rbac/rbac'
+import { eventBus } from '../integration/events/event-bus'
+import { rbacGuard, rbacGuardAny } from '../rbac/rbac'
+import { isAdmin, listUserPermissions } from '../rbac/service'
 import { StorageServiceImpl } from '../services/StorageService'
 import { createUploadMiddleware, loadMulter } from '../types/multer'
 import type { RequestWithFile } from '../types/multer'
-import { createSheet, createView, ensureLegacyBase } from '../multitable/provisioning'
-import {
-  deriveCapabilities,
-  deriveFieldPermissions,
-  deriveRowActions,
-  deriveViewPermissions,
-  resolveRequestAccess,
-} from '../multitable/access'
-import {
-  extractSelectOptions,
-  isPlainObject,
-  mapFieldType,
-  normalizeJson,
-  normalizeJsonArray,
-  sanitizeFieldProperty,
-  serializeFieldRow,
-} from '../multitable/field-codecs'
-import { loadFieldsForSheet, loadSheetRow, tryResolveView } from '../multitable/loaders'
 
 type UniverMetaField = {
   id: string
@@ -40,6 +24,7 @@ type UniverMetaRecord = {
   id: string
   version: number
   data: Record<string, unknown>
+  createdBy?: string | null
 }
 
 type UniverMetaView = {
@@ -54,6 +39,7 @@ type UniverMetaView = {
     computedFilterSort?: boolean
     ignoredSortFieldIds?: string[]
     ignoredFilterFieldIds?: string[]
+    capabilityOrigin?: MultitableCapabilityOrigin
     permissions?: MultitableScopedPermissions
   }
   page?: {
@@ -78,6 +64,8 @@ type UniverMetaViewConfig = {
 
 type QueryFn = (sql: string, params?: unknown[]) => Promise<{ rows: unknown[]; rowCount?: number | null }>
 
+const DEFAULT_BASE_ID = 'base_legacy'
+const DEFAULT_BASE_NAME = 'Migrated Base'
 const SYSTEM_PEOPLE_SHEET_NAME = 'People'
 const SYSTEM_PEOPLE_SHEET_DESCRIPTION = '__metasheet_system:people__'
 const ATTACHMENT_PATH = process.env.ATTACHMENT_PATH || path.join(process.cwd(), 'data', 'attachments')
@@ -105,9 +93,15 @@ type MultitableCapabilities = {
   canEditRecord: boolean
   canDeleteRecord: boolean
   canManageFields: boolean
+  canManageSheetAccess: boolean
   canManageViews: boolean
   canComment: boolean
   canManageAutomation: boolean
+}
+
+type MultitableCapabilityOrigin = {
+  source: 'admin' | 'global-rbac' | 'sheet-grant' | 'sheet-scope'
+  hasSheetAssignments: boolean
 }
 
 type MultitableFieldPermission = {
@@ -131,6 +125,7 @@ type MultitableScopedPermissions = {
   fieldPermissions?: Record<string, MultitableFieldPermission>
   viewPermissions?: Record<string, MultitableViewPermission>
   rowActions?: MultitableRowActions
+  rowActionOverrides?: Record<string, MultitableRowActions>
 }
 
 type LinkedRecordSummary = {
@@ -146,6 +141,21 @@ type MultitableAttachment = {
   url: string
   thumbnailUrl: string | null
   uploadedAt: string | null
+}
+
+type MultitableSheetRealtimePayload = {
+  spreadsheetId: string
+  actorId?: string | null
+  source: 'multitable'
+  kind: 'record-created' | 'record-updated' | 'record-deleted' | 'attachment-updated'
+  recordId?: string
+  recordIds?: string[]
+  fieldIds?: string[]
+  recordPatches?: Array<{
+    recordId: string
+    version?: number
+    patch: Record<string, unknown>
+  }>
 }
 
 type RecordSummaryPage = {
@@ -172,6 +182,46 @@ type PeopleSheetPreset = {
 
 function buildId(prefix: string): string {
   return `${prefix}_${randomUUID()}`
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === 'object' && !Array.isArray(value)
+}
+
+function normalizeJson(value: unknown): Record<string, unknown> {
+  if (!value) return {}
+  if (isPlainObject(value)) return value
+  if (typeof value === 'string') {
+    try {
+      const parsed = JSON.parse(value) as unknown
+      if (isPlainObject(parsed)) return parsed
+    } catch {
+      return {}
+    }
+  }
+  return {}
+}
+
+function normalizeJsonArray(value: unknown): string[] {
+  if (!value) return []
+  if (Array.isArray(value)) {
+    return value
+      .map((v) => {
+        if (typeof v === 'string') return v.trim()
+        if (typeof v === 'number' && Number.isFinite(v)) return String(v)
+        return ''
+      })
+      .filter((v) => v.length > 0)
+  }
+  if (typeof value === 'string') {
+    try {
+      const parsed = JSON.parse(value) as unknown
+      return normalizeJsonArray(parsed)
+    } catch {
+      return []
+    }
+  }
+  return []
 }
 
 function isSystemPeopleSheetDescription(value: unknown): boolean {
@@ -262,6 +312,7 @@ function parseRollupFieldConfig(property: unknown): RollupFieldConfig | null {
 }
 
 async function validateLookupRollupConfig(
+  req: Request,
   query: QueryFn,
   sheetId: string,
   type: UniverMetaField['type'],
@@ -304,6 +355,11 @@ async function validateLookupRollupConfig(
   )
   if ((targetRes as any).rows.length === 0) {
     return `外表字段不存在：${config.targetFieldId}（sheetId=${linkCfg.foreignSheetId}）`
+  }
+
+  const { capabilities } = await resolveSheetCapabilities(req, query, linkCfg.foreignSheetId)
+  if (!capabilities.canRead) {
+    throw new PermissionError(`Insufficient permissions to read linked sheet: ${linkCfg.foreignSheetId}`)
   }
 
   return null
@@ -389,6 +445,136 @@ function isUndefinedTableError(err: unknown, tableName: string): boolean {
   const msg = typeof (err as any)?.message === 'string' ? (err as any).message : ''
   if (code === '42P01') return msg.includes(tableName)
   return msg.includes(`relation \"${tableName}\" does not exist`)
+}
+
+function mapFieldType(type: string): UniverMetaField['type'] {
+  const normalized = type.trim().toLowerCase()
+  if (normalized === 'number') return 'number'
+  if (normalized === 'boolean' || normalized === 'checkbox') return 'boolean'
+  if (normalized === 'date' || normalized === 'datetime') return 'date'
+  if (normalized === 'formula') return 'formula'
+  if (normalized === 'select' || normalized === 'multiselect') return 'select'
+  if (normalized === 'link') return 'link'
+  if (normalized === 'lookup') return 'lookup'
+  if (normalized === 'rollup') return 'rollup'
+  if (normalized === 'attachment') return 'attachment'
+  return 'string'
+}
+
+function extractSelectOptions(property: unknown): Array<{ value: string; color?: string }> | undefined {
+  const obj = normalizeJson(property)
+  const raw = obj.options
+  if (!Array.isArray(raw)) return undefined
+
+  const options: Array<{ value: string; color?: string }> = []
+  for (const item of raw) {
+    if (!isPlainObject(item)) continue
+    const value = item.value
+    if (typeof value !== 'string' && typeof value !== 'number') continue
+    const color = typeof item.color === 'string' ? item.color : undefined
+    options.push({ value: String(value), ...(color ? { color } : {}) })
+  }
+
+  return options.length > 0 ? options : undefined
+}
+
+function sanitizeStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) return []
+  return value
+    .filter((item): item is string => typeof item === 'string')
+    .map((item) => item.trim())
+    .filter((item) => item.length > 0)
+}
+
+function sanitizeFieldProperty(type: UniverMetaField['type'], property: unknown): Record<string, unknown> {
+  const obj = normalizeJson(property)
+  if (type === 'select') {
+    const options = extractSelectOptions(obj) ?? []
+    return { ...obj, options }
+  }
+
+  if (type === 'link') {
+    const foreignSheetId = typeof (obj.foreignSheetId ?? obj.foreignDatasheetId ?? obj.datasheetId) === 'string'
+      ? String(obj.foreignSheetId ?? obj.foreignDatasheetId ?? obj.datasheetId).trim()
+      : ''
+    return {
+      ...obj,
+      ...(foreignSheetId ? { foreignSheetId, foreignDatasheetId: foreignSheetId } : {}),
+      limitSingleRecord: obj.limitSingleRecord === true,
+      ...(typeof obj.refKind === 'string' && obj.refKind.trim().length > 0 ? { refKind: obj.refKind.trim() } : {}),
+    }
+  }
+
+  if (type === 'lookup') {
+    const linkFieldId = typeof (obj.linkFieldId ?? obj.relatedLinkFieldId ?? obj.linkedFieldId ?? obj.sourceFieldId) === 'string'
+      ? String(obj.linkFieldId ?? obj.relatedLinkFieldId ?? obj.linkedFieldId ?? obj.sourceFieldId).trim()
+      : ''
+    const targetFieldId = typeof (obj.targetFieldId ?? obj.lookUpTargetFieldId ?? obj.lookupTargetFieldId ?? obj.lookupFieldId) === 'string'
+      ? String(obj.targetFieldId ?? obj.lookUpTargetFieldId ?? obj.lookupTargetFieldId ?? obj.lookupFieldId).trim()
+      : ''
+    const foreignSheetId = typeof (obj.foreignSheetId ?? obj.foreignDatasheetId ?? obj.datasheetId) === 'string'
+      ? String(obj.foreignSheetId ?? obj.foreignDatasheetId ?? obj.datasheetId).trim()
+      : ''
+    return {
+      ...obj,
+      ...(linkFieldId ? { linkFieldId, relatedLinkFieldId: linkFieldId } : {}),
+      ...(targetFieldId ? { targetFieldId, lookUpTargetFieldId: targetFieldId } : {}),
+      ...(foreignSheetId ? { foreignSheetId, foreignDatasheetId: foreignSheetId, datasheetId: foreignSheetId } : {}),
+    }
+  }
+
+  if (type === 'rollup') {
+    const linkFieldId = typeof (obj.linkFieldId ?? obj.linkedFieldId ?? obj.relatedLinkFieldId ?? obj.sourceFieldId) === 'string'
+      ? String(obj.linkFieldId ?? obj.linkedFieldId ?? obj.relatedLinkFieldId ?? obj.sourceFieldId).trim()
+      : ''
+    const targetFieldId = typeof (obj.targetFieldId ?? obj.lookUpTargetFieldId ?? obj.lookupTargetFieldId ?? obj.lookupFieldId) === 'string'
+      ? String(obj.targetFieldId ?? obj.lookUpTargetFieldId ?? obj.lookupTargetFieldId ?? obj.lookupFieldId).trim()
+      : ''
+    const foreignSheetId = typeof (obj.foreignSheetId ?? obj.foreignDatasheetId ?? obj.datasheetId) === 'string'
+      ? String(obj.foreignSheetId ?? obj.foreignDatasheetId ?? obj.datasheetId).trim()
+      : ''
+    const aggregation = parseRollupAggregation(obj.aggregation ?? obj.agg ?? obj.function ?? obj.rollupFunction) ?? 'count'
+    return {
+      ...obj,
+      ...(linkFieldId ? { linkFieldId, linkedFieldId: linkFieldId } : {}),
+      ...(targetFieldId ? { targetFieldId } : {}),
+      aggregation,
+      ...(foreignSheetId ? { foreignSheetId, foreignDatasheetId: foreignSheetId, datasheetId: foreignSheetId } : {}),
+    }
+  }
+
+  if (type === 'formula') {
+    return {
+      ...obj,
+      expression: typeof obj.expression === 'string' ? obj.expression.trim() : '',
+    }
+  }
+
+  if (type === 'attachment') {
+    const maxFiles = typeof obj.maxFiles === 'number' ? obj.maxFiles : Number(obj.maxFiles)
+    return {
+      ...obj,
+      ...(Number.isFinite(maxFiles) && maxFiles > 0 ? { maxFiles: Math.round(maxFiles) } : {}),
+      acceptedMimeTypes: sanitizeStringArray(obj.acceptedMimeTypes),
+    }
+  }
+
+  return obj
+}
+
+function serializeFieldRow(row: any): UniverMetaField {
+  const rawType = String(row.type ?? 'string')
+  const mappedType = mapFieldType(rawType)
+  const property = sanitizeFieldProperty(mappedType, row.property)
+  const order = Number(row.order ?? 0)
+  return {
+    id: String(row.id),
+    name: String(row.name),
+    type: mappedType,
+    ...(mappedType === 'select' ? { options: extractSelectOptions(property) } : {}),
+    order: Number.isFinite(order) ? order : 0,
+    property,
+  }
 }
 
 type MetaSortRule = { fieldId: string; desc: boolean }
@@ -563,6 +749,7 @@ async function loadLinkValuesByRecord(
 }
 
 async function applyLookupRollup(
+  req: Request,
   query: QueryFn,
   fields: UniverMetaField[],
   rows: UniverMetaRecord[],
@@ -625,8 +812,11 @@ async function applyLookupRollup(
     }
   }
 
+  const readableForeignSheetIds = await resolveReadableSheetIds(req, query, foreignIdsBySheet.keys())
+
   const foreignRecordsBySheet = new Map<string, Map<string, Record<string, unknown>>>()
   for (const [foreignSheetId, ids] of foreignIdsBySheet.entries()) {
+    if (!readableForeignSheetIds.has(foreignSheetId)) continue
     if (ids.size === 0) continue
     const idList = Array.from(ids)
     const foreignRes = await query(
@@ -643,6 +833,7 @@ async function applyLookupRollup(
   const resolveLookupValues = (record: UniverMetaRecord, cfg: LookupFieldConfig): unknown[] => {
     const foreignSheetId = cfg.foreignSheetId ?? linkConfigById.get(cfg.linkFieldId)?.foreignSheetId
     if (!foreignSheetId) return []
+    if (!readableForeignSheetIds.has(foreignSheetId)) return []
     const linkIds = getLinkIds(record, cfg.linkFieldId)
     if (linkIds.length === 0) return []
     const foreignMap = foreignRecordsBySheet.get(foreignSheetId)
@@ -732,6 +923,7 @@ function mergeComputedRecords(
 }
 
 async function computeDependentLookupRollupRecords(
+  req: Request,
   query: QueryFn,
   updatedRecordIds: string[],
 ): Promise<RelatedComputedRecord[]> {
@@ -785,7 +977,9 @@ async function computeDependentLookupRollupRecords(
   }
 
   const results: RelatedComputedRecord[] = []
+  const readableSheetIds = await resolveReadableSheetIds(req, query, rowsBySheet.keys())
   for (const [sheetId, rows] of rowsBySheet.entries()) {
+    if (!readableSheetIds.has(sheetId)) continue
     const fields = fieldsBySheet.get(sheetId) ?? []
     if (fields.length === 0) continue
     const hasComputed = fields.some((f) => f.type === 'lookup' || f.type === 'rollup')
@@ -801,7 +995,7 @@ async function computeDependentLookupRollupRecords(
       relationalLinkFields,
     )
 
-    await applyLookupRollup(query, fields, rows, relationalLinkFields, linkValuesByRecord)
+    await applyLookupRollup(req, query, fields, rows, relationalLinkFields, linkValuesByRecord)
 
     for (const row of rows) {
       results.push({
@@ -931,6 +1125,880 @@ async function loadSheetSummary(
   return sheet
 }
 
+async function loadSheetFields(
+  pool: { query: QueryFn },
+  sheetId: string,
+): Promise<UniverMetaField[]> {
+  const cached = metaFieldCache.get(sheetId)
+  if (cached) return cached
+
+  const fieldRes = await pool.query(
+    'SELECT id, name, type, property, "order" FROM meta_fields WHERE sheet_id = $1 ORDER BY "order" ASC',
+    [sheetId],
+  )
+  const fields = fieldRes.rows.map((f: any) => serializeFieldRow(f))
+  metaFieldCache.set(sheetId, fields)
+  return fields
+}
+
+async function tryResolveView(pool: { query: QueryFn }, viewId: string): Promise<UniverMetaViewConfig | null> {
+  const cached = metaViewConfigCache.get(viewId)
+  if (cached) return cached
+
+  const result = await pool.query(
+    'SELECT id, sheet_id, name, type, filter_info, sort_info, group_info, hidden_field_ids, config FROM meta_views WHERE id = $1',
+    [viewId],
+  )
+  if (result.rows.length === 0) return null
+
+  const row: any = result.rows[0]
+  const view = {
+    id: String(row.id),
+    sheetId: String(row.sheet_id),
+    name: String(row.name),
+    type: String(row.type ?? 'grid'),
+    filterInfo: normalizeJson(row.filter_info),
+    sortInfo: normalizeJson(row.sort_info),
+    groupInfo: normalizeJson(row.group_info),
+    hiddenFieldIds: normalizeJsonArray(row.hidden_field_ids),
+    config: normalizeJson(row.config),
+  }
+  metaViewConfigCache.set(viewId, view)
+  return view
+}
+
+function normalizePermissionCodes(value: unknown): string[] {
+  if (!Array.isArray(value)) return []
+  return value
+    .map((item) => (typeof item === 'string' ? item.trim() : ''))
+    .filter((item) => item.length > 0)
+}
+
+type ResolvedRequestAccess = {
+  userId: string
+  permissions: string[]
+  isAdminRole: boolean
+}
+
+type SheetPermissionScope = {
+  hasAssignments: boolean
+  canRead: boolean
+  canWrite: boolean
+  canWriteOwn: boolean
+  canAdmin: boolean
+}
+
+type MultitableSheetPermissionSubjectType = 'user' | 'role'
+type MultitableSheetAccessLevel = 'read' | 'write' | 'write-own' | 'admin'
+
+type MultitableSheetPermissionEntry = {
+  subjectType: MultitableSheetPermissionSubjectType
+  subjectId: string
+  accessLevel: MultitableSheetAccessLevel
+  permissions: string[]
+  label: string
+  subtitle: string | null
+  isActive: boolean
+}
+
+type MultitableSheetPermissionCandidate = {
+  subjectType: MultitableSheetPermissionSubjectType
+  subjectId: string
+  label: string
+  subtitle: string | null
+  isActive: boolean
+  accessLevel: MultitableSheetAccessLevel | null
+}
+
+const SHEET_READ_PERMISSION_CODES = new Set([
+  'spreadsheet:read',
+  'spreadsheet:write',
+  'spreadsheet:write-own',
+  'spreadsheet:admin',
+  'spreadsheets:read',
+  'spreadsheets:write',
+  'spreadsheets:write-own',
+  'spreadsheets:admin',
+  'multitable:read',
+  'multitable:write',
+  'multitable:write-own',
+  'multitable:admin',
+])
+
+const SHEET_WRITE_PERMISSION_CODES = new Set([
+  'spreadsheet:write',
+  'spreadsheet:admin',
+  'spreadsheets:write',
+  'spreadsheets:admin',
+  'multitable:write',
+  'multitable:admin',
+])
+
+const SHEET_OWN_WRITE_PERMISSION_CODES = new Set([
+  'spreadsheet:write-own',
+  'spreadsheets:write-own',
+  'multitable:write-own',
+])
+
+const SHEET_ADMIN_PERMISSION_CODES = new Set([
+  'spreadsheet:admin',
+  'spreadsheets:admin',
+  'multitable:admin',
+])
+
+const MANAGED_SHEET_PERMISSION_CODES = [
+  'spreadsheet:read',
+  'spreadsheet:write',
+  'spreadsheet:write-own',
+  'spreadsheet:admin',
+  'spreadsheets:read',
+  'spreadsheets:write',
+  'spreadsheets:write-own',
+  'spreadsheets:admin',
+  'multitable:read',
+  'multitable:write',
+  'multitable:write-own',
+  'multitable:admin',
+]
+
+const CANONICAL_SHEET_PERMISSION_CODE_BY_ACCESS_LEVEL: Record<MultitableSheetAccessLevel, string> = {
+  read: 'spreadsheet:read',
+  write: 'spreadsheet:write',
+  'write-own': 'spreadsheet:write-own',
+  admin: 'spreadsheet:admin',
+}
+
+function isSheetPermissionSubjectType(value: unknown): value is MultitableSheetPermissionSubjectType {
+  return value === 'user' || value === 'role'
+}
+
+async function resolveRequestAccess(req: Request): Promise<ResolvedRequestAccess> {
+  const userId = req.user?.id?.toString() ?? req.user?.sub?.toString() ?? req.user?.userId?.toString() ?? ''
+  const tokenRoles = normalizePermissionCodes(req.user?.roles)
+  const tokenPerms = normalizePermissionCodes(req.user?.perms)
+  const resolvedPermissions = normalizePermissionCodes((req.user as { permissions?: unknown } | undefined)?.permissions)
+  const role = typeof req.user?.role === 'string' ? req.user.role.trim() : ''
+  const isAdminRole = role === 'admin' || tokenRoles.includes('admin')
+  const directPermissions = tokenPerms.length > 0 ? tokenPerms : resolvedPermissions
+  if (!userId) {
+    return { userId, permissions: directPermissions, isAdminRole }
+  }
+
+  if (isAdminRole) {
+    return { userId, permissions: directPermissions, isAdminRole: true }
+  }
+
+  if (directPermissions.length > 0) {
+    return { userId, permissions: directPermissions, isAdminRole: false }
+  }
+
+  return {
+    userId,
+    permissions: await listUserPermissions(userId),
+    isAdminRole: await isAdmin(userId),
+  }
+}
+
+function hasPermission(permissions: string[], code: string): boolean {
+  if (permissions.includes(code)) return true
+  const [resource] = code.split(':')
+  return permissions.includes(`${resource}:*`) || permissions.includes('*:*')
+}
+
+function deriveCapabilities(permissions: string[], isAdminRole: boolean): MultitableCapabilities {
+  const canRead = isAdminRole || hasPermission(permissions, 'multitable:read') || hasPermission(permissions, 'multitable:write')
+  const canWrite = isAdminRole || hasPermission(permissions, 'multitable:write')
+  const canManageSheetAccess = isAdminRole || hasPermission(permissions, 'multitable:share')
+  const canComment = isAdminRole || hasPermission(permissions, 'comments:write') || hasPermission(permissions, 'comments:read')
+  const canManageAutomation =
+    isAdminRole ||
+    hasPermission(permissions, 'workflow:all') ||
+    hasPermission(permissions, 'workflow:write') ||
+    hasPermission(permissions, 'workflow:create') ||
+    hasPermission(permissions, 'workflow:execute')
+
+  return {
+    canRead,
+    canCreateRecord: canWrite,
+    canEditRecord: canWrite,
+    canDeleteRecord: canWrite,
+    canManageFields: canWrite,
+    canManageSheetAccess,
+    canManageViews: canWrite,
+    canComment,
+    canManageAutomation,
+  }
+}
+
+function summarizeSheetPermissionCodes(codes: string[]): SheetPermissionScope {
+  return {
+    hasAssignments: codes.length > 0,
+    canRead: codes.some((code) => SHEET_READ_PERMISSION_CODES.has(code)),
+    canWrite: codes.some((code) => SHEET_WRITE_PERMISSION_CODES.has(code)),
+    canWriteOwn: codes.some((code) => SHEET_OWN_WRITE_PERMISSION_CODES.has(code)),
+    canAdmin: codes.some((code) => SHEET_ADMIN_PERMISSION_CODES.has(code)),
+  }
+}
+
+function deriveSheetAccessLevel(codes: string[]): MultitableSheetAccessLevel | null {
+  const normalized = normalizePermissionCodes(codes)
+  if (normalized.some((code) => SHEET_ADMIN_PERMISSION_CODES.has(code))) return 'admin'
+  if (normalized.some((code) => SHEET_WRITE_PERMISSION_CODES.has(code))) return 'write'
+  if (normalized.some((code) => SHEET_OWN_WRITE_PERMISSION_CODES.has(code))) return 'write-own'
+  if (normalized.some((code) => SHEET_READ_PERMISSION_CODES.has(code))) return 'read'
+  return null
+}
+
+async function listSheetPermissionEntries(
+  query: QueryFn,
+  sheetId: string,
+): Promise<MultitableSheetPermissionEntry[]> {
+  const result = await query(
+    `SELECT
+        sp.subject_type,
+        sp.subject_id,
+        ARRAY_AGG(sp.perm_code ORDER BY sp.perm_code) AS permission_codes,
+        u.name AS user_name,
+        u.email AS user_email,
+        u.is_active AS user_is_active,
+        r.name AS role_name
+     FROM spreadsheet_permissions sp
+     LEFT JOIN users u
+       ON sp.subject_type = 'user'
+      AND u.id = sp.subject_id
+     LEFT JOIN roles r
+       ON sp.subject_type = 'role'
+      AND r.id = sp.subject_id
+     WHERE sp.sheet_id = $1
+     GROUP BY sp.subject_type, sp.subject_id, u.name, u.email, u.is_active, r.name
+     ORDER BY
+       CASE WHEN sp.subject_type = 'user' THEN 0 ELSE 1 END,
+       CASE WHEN sp.subject_type = 'user' AND COALESCE(u.is_active, true) THEN 0 WHEN sp.subject_type = 'user' THEN 1 ELSE 0 END,
+       COALESCE(NULLIF(u.name, ''), NULLIF(u.email, ''), NULLIF(r.name, ''), sp.subject_id) ASC`,
+    [sheetId],
+  )
+
+  return (result.rows as Array<{
+    subject_type: string
+    subject_id: string
+    permission_codes?: string[]
+    user_name?: string | null
+    user_email?: string | null
+    user_is_active?: boolean | null
+    role_name?: string | null
+  }>)
+    .map((row) => {
+      const subjectType = isSheetPermissionSubjectType(row.subject_type) ? row.subject_type : 'user'
+      const subjectId = String(row.subject_id)
+      const permissions = normalizePermissionCodes(row.permission_codes)
+      const accessLevel = deriveSheetAccessLevel(permissions)
+      if (!accessLevel) return null
+      const userName = typeof row.user_name === 'string' ? row.user_name.trim() : ''
+      const userEmail = typeof row.user_email === 'string' ? row.user_email.trim() : ''
+      const roleName = typeof row.role_name === 'string' ? row.role_name.trim() : ''
+      return {
+        subjectType,
+        subjectId,
+        accessLevel,
+        permissions,
+        label: subjectType === 'user'
+          ? userName || userEmail || subjectId
+          : roleName || subjectId,
+        subtitle: subjectType === 'user'
+          ? (userEmail || (userName && userName !== subjectId ? subjectId : null))
+          : (roleName && roleName !== subjectId ? subjectId : 'Role'),
+        isActive: subjectType === 'user' ? row.user_is_active !== false : true,
+      } satisfies MultitableSheetPermissionEntry
+    })
+    .filter((entry): entry is MultitableSheetPermissionEntry => !!entry)
+}
+
+async function listSheetPermissionCandidates(
+  query: QueryFn,
+  sheetId: string,
+  params: { q?: string; limit: number },
+): Promise<MultitableSheetPermissionCandidate[]> {
+  const q = params.q?.trim() ?? ''
+  const term = q ? `%${q}%` : '%'
+  const result = await query(
+    `WITH user_candidates AS (
+        SELECT
+          'user'::text AS subject_type,
+          u.id AS subject_id,
+          u.name AS user_name,
+          u.email AS user_email,
+          u.is_active AS user_is_active,
+          NULL::text AS role_name,
+          COALESCE(
+            ARRAY_AGG(sp.perm_code ORDER BY sp.perm_code) FILTER (WHERE sp.perm_code IS NOT NULL),
+            ARRAY[]::text[]
+          ) AS permission_codes
+        FROM users u
+        LEFT JOIN spreadsheet_permissions sp
+          ON sp.sheet_id = $1
+         AND sp.subject_type = 'user'
+         AND sp.subject_id = u.id
+        WHERE ($2 = '' OR u.id ILIKE $3 OR u.email ILIKE $3 OR COALESCE(u.name, '') ILIKE $3)
+        GROUP BY u.id, u.name, u.email, u.is_active
+      ),
+      role_candidates AS (
+        SELECT
+          'role'::text AS subject_type,
+          r.id AS subject_id,
+          NULL::text AS user_name,
+          NULL::text AS user_email,
+          true AS user_is_active,
+          r.name AS role_name,
+          COALESCE(
+            ARRAY_AGG(sp.perm_code ORDER BY sp.perm_code) FILTER (WHERE sp.perm_code IS NOT NULL),
+            ARRAY[]::text[]
+          ) AS permission_codes
+        FROM roles r
+        LEFT JOIN spreadsheet_permissions sp
+          ON sp.sheet_id = $1
+         AND sp.subject_type = 'role'
+         AND sp.subject_id = r.id
+        WHERE ($2 = '' OR r.id ILIKE $3 OR COALESCE(r.name, '') ILIKE $3)
+        GROUP BY r.id, r.name
+      )
+      SELECT *
+      FROM (
+        SELECT * FROM user_candidates
+        UNION ALL
+        SELECT * FROM role_candidates
+      ) candidates
+      ORDER BY
+        CASE WHEN subject_type = 'user' THEN 0 ELSE 1 END,
+        CASE WHEN user_is_active THEN 0 ELSE 1 END,
+        COALESCE(NULLIF(user_name, ''), NULLIF(user_email, ''), NULLIF(role_name, ''), subject_id) ASC
+      LIMIT $4`,
+    [sheetId, q, term, params.limit],
+  )
+
+  const candidates = (result.rows as Array<{
+    subject_type: string
+    subject_id: string
+    user_name?: string | null
+    user_email?: string | null
+    user_is_active?: boolean | null
+    role_name?: string | null
+    permission_codes?: string[]
+  }>)
+    .map((row) => {
+      const subjectType = isSheetPermissionSubjectType(row.subject_type) ? row.subject_type : 'user'
+      const subjectId = String(row.subject_id)
+      const name = typeof row.user_name === 'string' ? row.user_name.trim() : ''
+      const email = typeof row.user_email === 'string' ? row.user_email.trim() : ''
+      const roleName = typeof row.role_name === 'string' ? row.role_name.trim() : ''
+      return {
+        subjectType,
+        subjectId,
+        label: subjectType === 'user'
+          ? (name || email || subjectId)
+          : (roleName || subjectId),
+        subtitle: subjectType === 'user'
+          ? (email || (name && name !== subjectId ? subjectId : null))
+          : (roleName && roleName !== subjectId ? subjectId : 'Role'),
+        isActive: subjectType === 'user' ? row.user_is_active !== false : true,
+        accessLevel: deriveSheetAccessLevel(normalizePermissionCodes(row.permission_codes)),
+      } satisfies MultitableSheetPermissionCandidate
+    })
+
+  const eligibility = await Promise.all(
+    candidates.map(async (candidate) => {
+      if (candidate.subjectType === 'role') {
+        if (candidate.subjectId === 'admin') return true
+        const result = await query(
+          'SELECT permission_code FROM role_permissions WHERE role_id = $1',
+          [candidate.subjectId],
+        )
+        const permissions = normalizePermissionCodes(
+          (result.rows as Array<{ permission_code?: string | null }>).map((row) => row.permission_code ?? ''),
+        )
+        return hasPermission(permissions, 'multitable:read') || hasPermission(permissions, 'multitable:write')
+      }
+
+      const [permissions, admin] = await Promise.all([
+        listUserPermissions(candidate.subjectId),
+        isAdmin(candidate.subjectId),
+      ])
+      return admin || hasPermission(permissions, 'multitable:read') || hasPermission(permissions, 'multitable:write')
+    }),
+  )
+
+  return candidates.filter((_candidate, index) => eligibility[index])
+}
+
+async function loadSheetPermissionScopeMap(
+  query: QueryFn,
+  sheetIds: string[],
+  userId: string,
+): Promise<Map<string, SheetPermissionScope>> {
+  if (!userId || sheetIds.length === 0) return new Map()
+  try {
+    const result = await query(
+      `SELECT sp.sheet_id, sp.perm_code, sp.subject_type
+       FROM spreadsheet_permissions sp
+       WHERE sp.sheet_id = ANY($2::text[])
+         AND (
+           (sp.subject_type = 'user' AND sp.subject_id = $1)
+           OR (
+             sp.subject_type = 'role'
+             AND EXISTS (
+               SELECT 1
+               FROM user_roles ur
+               WHERE ur.user_id = $1
+                 AND ur.role_id = sp.subject_id
+             )
+           )
+         )`,
+      [userId, sheetIds],
+    )
+    const grouped = new Map<string, { direct: string[]; role: string[] }>()
+    for (const row of result.rows as Array<{ sheet_id: string; perm_code: string; subject_type?: string }>) {
+      const sheetId = typeof row.sheet_id === 'string' ? row.sheet_id : ''
+      const code = typeof row.perm_code === 'string' ? row.perm_code.trim() : ''
+      if (!sheetId || !code) continue
+      const current = grouped.get(sheetId) ?? { direct: [], role: [] }
+      if (row.subject_type === 'user') current.direct.push(code)
+      else current.role.push(code)
+      grouped.set(sheetId, current)
+    }
+    return new Map(
+      Array.from(grouped.entries()).map(([sheetId, codes]) => [
+        sheetId,
+        summarizeSheetPermissionCodes(codes.direct.length > 0 ? codes.direct : codes.role),
+      ]),
+    )
+  } catch (err) {
+    if (isUndefinedTableError(err, 'spreadsheet_permissions') || isUndefinedTableError(err, 'user_roles')) return new Map()
+    throw err
+  }
+}
+
+function applySheetPermissionScope(
+  capabilities: MultitableCapabilities,
+  scope: SheetPermissionScope | undefined,
+  isAdminRole: boolean,
+): MultitableCapabilities {
+  if (isAdminRole) return capabilities
+  if (!scope?.hasAssignments) {
+    return {
+      ...capabilities,
+      canManageSheetAccess: capabilities.canManageSheetAccess && capabilities.canRead,
+    }
+  }
+  const canWriteAnyRecord = scope.canWrite || scope.canWriteOwn
+  return {
+    canRead: capabilities.canRead && scope.canRead,
+    canCreateRecord: capabilities.canCreateRecord && canWriteAnyRecord,
+    canEditRecord: capabilities.canEditRecord && canWriteAnyRecord,
+    canDeleteRecord: capabilities.canDeleteRecord && canWriteAnyRecord,
+    canManageFields: capabilities.canManageFields && scope.canWrite,
+    canManageSheetAccess: scope.canAdmin,
+    canManageViews: capabilities.canManageViews && scope.canWrite,
+    canComment: capabilities.canComment && scope.canRead,
+    canManageAutomation: capabilities.canManageAutomation && scope.canWrite,
+  }
+}
+
+function canReadWithSheetGrant(
+  capabilities: MultitableCapabilities,
+  scope: SheetPermissionScope | undefined,
+  isAdminRole: boolean,
+): boolean {
+  if (applySheetPermissionScope(capabilities, scope, isAdminRole).canRead) return true
+  return !isAdminRole && !capabilities.canRead && scope?.canRead === true
+}
+
+function applyContextSheetReadGrant(
+  capabilities: MultitableCapabilities,
+  scope: SheetPermissionScope | undefined,
+  isAdminRole: boolean,
+): MultitableCapabilities {
+  const scoped = applySheetPermissionScope(capabilities, scope, isAdminRole)
+  if (scoped.canRead || !scope?.canRead || isAdminRole || capabilities.canRead) return scoped
+  return {
+    ...scoped,
+    canRead: true,
+  }
+}
+
+function applyContextSheetRecordWriteGrant(
+  capabilities: MultitableCapabilities,
+  scope: SheetPermissionScope | undefined,
+  isAdminRole: boolean,
+): MultitableCapabilities {
+  const scoped = applyContextSheetReadGrant(capabilities, scope, isAdminRole)
+  if (isAdminRole || !scope?.hasAssignments) return scoped
+  const canWriteAnyRecord = scope.canRead && (scope.canWrite || scope.canWriteOwn)
+  if (!canWriteAnyRecord) return scoped
+  return {
+    ...scoped,
+    canCreateRecord: true,
+    canEditRecord: true,
+    canDeleteRecord: true,
+  }
+}
+
+function applyContextSheetSchemaWriteGrant(
+  capabilities: MultitableCapabilities,
+  scope: SheetPermissionScope | undefined,
+  isAdminRole: boolean,
+): MultitableCapabilities {
+  const scoped = applyContextSheetRecordWriteGrant(capabilities, scope, isAdminRole)
+  if (isAdminRole || !scope?.hasAssignments) return scoped
+  const canManageSchema = scope.canRead && scope.canWrite
+  if (!canManageSchema) return scoped
+  return {
+    ...scoped,
+    canManageFields: true,
+    canManageViews: true,
+    ...(scope.canAdmin ? { canManageSheetAccess: true } : {}),
+  }
+}
+
+const MULTITABLE_CAPABILITY_KEYS: Array<keyof MultitableCapabilities> = [
+  'canRead',
+  'canCreateRecord',
+  'canEditRecord',
+  'canDeleteRecord',
+  'canManageFields',
+  'canManageSheetAccess',
+  'canManageViews',
+  'canComment',
+  'canManageAutomation',
+]
+
+function deriveCapabilityOrigin(
+  baseCapabilities: MultitableCapabilities,
+  effectiveCapabilities: MultitableCapabilities,
+  scope: SheetPermissionScope | undefined,
+  isAdminRole: boolean,
+): MultitableCapabilityOrigin {
+  const hasSheetAssignments = !!scope?.hasAssignments
+  if (isAdminRole) {
+    return { source: 'admin', hasSheetAssignments }
+  }
+  if (!hasSheetAssignments) {
+    return { source: 'global-rbac', hasSheetAssignments: false }
+  }
+  const expandsBaseCapabilities = MULTITABLE_CAPABILITY_KEYS.some(
+    (key) => !baseCapabilities[key] && effectiveCapabilities[key],
+  )
+  return {
+    source: expandsBaseCapabilities ? 'sheet-grant' : 'sheet-scope',
+    hasSheetAssignments: true,
+  }
+}
+
+async function filterReadableSheetRowsForAccess<T extends { id: string }>(
+  query: QueryFn,
+  sheetRows: T[],
+  access: ResolvedRequestAccess,
+  baseCapabilities?: MultitableCapabilities,
+): Promise<T[]> {
+  if (sheetRows.length === 0 || access.isAdminRole) return sheetRows
+  const effectiveCapabilities = baseCapabilities ?? deriveCapabilities(access.permissions, access.isAdminRole)
+  const scopeMap = await loadSheetPermissionScopeMap(
+    query,
+    sheetRows.map((row) => String(row.id)),
+    access.userId,
+  )
+  return sheetRows.filter((row) =>
+    canReadWithSheetGrant(
+      effectiveCapabilities,
+      scopeMap.get(String(row.id)),
+      access.isAdminRole,
+    ),
+  )
+}
+
+async function resolveSheetCapabilities(
+  req: Request,
+  query: QueryFn,
+  sheetId: string,
+): Promise<{
+  access: ResolvedRequestAccess
+  capabilities: MultitableCapabilities
+  capabilityOrigin: MultitableCapabilityOrigin
+  sheetScope?: SheetPermissionScope
+}> {
+  const access = await resolveRequestAccess(req)
+  const baseCapabilities = deriveCapabilities(access.permissions, access.isAdminRole)
+  const scopeMap = await loadSheetPermissionScopeMap(query, [sheetId], access.userId)
+  const sheetScope = scopeMap.get(sheetId)
+  const capabilities = applyContextSheetSchemaWriteGrant(baseCapabilities, sheetScope, access.isAdminRole)
+  return {
+    access,
+    capabilities,
+    capabilityOrigin: deriveCapabilityOrigin(baseCapabilities, capabilities, sheetScope, access.isAdminRole),
+    ...(sheetScope ? { sheetScope } : {}),
+  }
+}
+
+async function resolveSheetReadableCapabilities(
+  req: Request,
+  query: QueryFn,
+  sheetId: string,
+): Promise<{
+  access: ResolvedRequestAccess
+  capabilities: MultitableCapabilities
+  capabilityOrigin: MultitableCapabilityOrigin
+  sheetScope?: SheetPermissionScope
+}> {
+  const access = await resolveRequestAccess(req)
+  const baseCapabilities = deriveCapabilities(access.permissions, access.isAdminRole)
+  const scopeMap = await loadSheetPermissionScopeMap(query, [sheetId], access.userId)
+  const sheetScope = scopeMap.get(sheetId)
+  const capabilities = applyContextSheetSchemaWriteGrant(baseCapabilities, sheetScope, access.isAdminRole)
+  return {
+    access,
+    capabilities,
+    capabilityOrigin: deriveCapabilityOrigin(baseCapabilities, capabilities, sheetScope, access.isAdminRole),
+    ...(sheetScope ? { sheetScope } : {}),
+  }
+}
+
+async function resolveReadableSheetIds(
+  req: Request,
+  query: QueryFn,
+  sheetIds: Iterable<string>,
+): Promise<Set<string>> {
+  const uniqueSheetIds = Array.from(new Set(Array.from(sheetIds).filter((sheetId) => sheetId.trim().length > 0)))
+  if (uniqueSheetIds.length === 0) return new Set()
+
+  const access = await resolveRequestAccess(req)
+  if (access.isAdminRole) {
+    return new Set(uniqueSheetIds)
+  }
+
+  const baseCapabilities = deriveCapabilities(access.permissions, access.isAdminRole)
+  const scopeMap = await loadSheetPermissionScopeMap(query, uniqueSheetIds, access.userId)
+  const readableSheetIds = new Set<string>()
+  for (const sheetId of uniqueSheetIds) {
+    if (canReadWithSheetGrant(baseCapabilities, scopeMap.get(sheetId), access.isAdminRole)) {
+      readableSheetIds.add(sheetId)
+    }
+  }
+  return readableSheetIds
+}
+
+function sendForbidden(res: Response, message = 'Insufficient permissions') {
+  return res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message } })
+}
+
+function deriveFieldPermissions(
+  fields: UniverMetaField[],
+  capabilities: MultitableCapabilities,
+  opts?: { hiddenFieldIds?: string[]; allowCreateOnly?: boolean },
+): Record<string, MultitableFieldPermission> {
+  const hiddenFieldIds = new Set(opts?.hiddenFieldIds ?? [])
+  const readOnly = opts?.allowCreateOnly ? !capabilities.canCreateRecord : !capabilities.canEditRecord
+  return Object.fromEntries(
+    fields.map((field) => [
+      field.id,
+      {
+        visible: !hiddenFieldIds.has(field.id) && !isFieldPermissionHidden(field),
+        readOnly: readOnly || isFieldAlwaysReadOnly(field),
+      },
+    ]),
+  )
+}
+
+function isFieldAlwaysReadOnly(field: Pick<UniverMetaField, 'type' | 'property'>): boolean {
+  if (field.type === 'formula' || field.type === 'lookup' || field.type === 'rollup') return true
+  const property = field.property ?? {}
+  return property.readonly === true || property.readOnly === true
+}
+
+function isFieldPermissionHidden(field: Pick<UniverMetaField, 'property'>): boolean {
+  const property = normalizeJson(field.property)
+  return property.hidden === true || property.visible === false
+}
+
+function deriveViewPermissions(
+  views: Array<Pick<UniverMetaViewConfig, 'id'>>,
+  capabilities: MultitableCapabilities,
+): Record<string, MultitableViewPermission> {
+  return Object.fromEntries(
+    views.map((view) => [
+      view.id,
+      {
+        canAccess: capabilities.canRead,
+        canConfigure: capabilities.canManageViews,
+        canDelete: capabilities.canManageViews,
+      },
+    ]),
+  )
+}
+
+function deriveRowActions(capabilities: MultitableCapabilities): MultitableRowActions {
+  return {
+    canEdit: capabilities.canEditRecord,
+    canDelete: capabilities.canDeleteRecord,
+    canComment: capabilities.canComment,
+  }
+}
+
+function requiresOwnWriteRowPolicy(
+  scope: SheetPermissionScope | undefined,
+  isAdminRole: boolean,
+): boolean {
+  return !isAdminRole && !!scope?.hasAssignments && scope.canWriteOwn && !scope.canWrite
+}
+
+function deriveDefaultRowActions(
+  capabilities: MultitableCapabilities,
+  scope: SheetPermissionScope | undefined,
+  isAdminRole: boolean,
+): MultitableRowActions {
+  if (!requiresOwnWriteRowPolicy(scope, isAdminRole)) {
+    return deriveRowActions(capabilities)
+  }
+  return {
+    canEdit: false,
+    canDelete: false,
+    canComment: capabilities.canComment,
+  }
+}
+
+function deriveRecordRowActions(
+  capabilities: MultitableCapabilities,
+  scope: SheetPermissionScope | undefined,
+  access: ResolvedRequestAccess,
+  createdBy: string | null | undefined,
+): MultitableRowActions {
+  if (!requiresOwnWriteRowPolicy(scope, access.isAdminRole)) {
+    return deriveRowActions(capabilities)
+  }
+
+  const isCreator = !!createdBy && !!access.userId && createdBy === access.userId
+  return {
+    canEdit: capabilities.canEditRecord && isCreator,
+    canDelete: capabilities.canDeleteRecord && isCreator,
+    canComment: capabilities.canComment,
+  }
+}
+
+async function loadRecordCreatorMap(
+  query: QueryFn,
+  sheetId: string,
+  recordIds: string[],
+): Promise<Map<string, string | null>> {
+  if (recordIds.length === 0) return new Map()
+  try {
+    const result = await query(
+      'SELECT id, created_by FROM meta_records WHERE sheet_id = $1 AND id = ANY($2::text[])',
+      [sheetId, recordIds],
+    )
+    return new Map(
+      (result.rows as Array<{ id: string; created_by: string | null }>).map((row) => [
+        String(row.id),
+        typeof row.created_by === 'string' ? row.created_by : null,
+      ]),
+    )
+  } catch (err) {
+    if (err instanceof Error && err.message.includes('column') && err.message.includes('created_by')) {
+      return new Map()
+    }
+    throw err
+  }
+}
+
+function buildRowActionOverrides(
+  records: Array<Pick<UniverMetaRecord, 'id'>>,
+  creatorMap: Map<string, string | null>,
+  capabilities: MultitableCapabilities,
+  scope: SheetPermissionScope | undefined,
+  access: ResolvedRequestAccess,
+): Record<string, MultitableRowActions> | undefined {
+  if (!requiresOwnWriteRowPolicy(scope, access.isAdminRole)) return undefined
+  const overrides: Record<string, MultitableRowActions> = {}
+  for (const record of records) {
+    const rowActions = deriveRecordRowActions(capabilities, scope, access, creatorMap.get(record.id))
+    if (rowActions.canEdit || rowActions.canDelete || rowActions.canComment !== capabilities.canComment) {
+      overrides[record.id] = rowActions
+    }
+  }
+  return Object.keys(overrides).length > 0 ? overrides : undefined
+}
+
+function ensureRecordWriteAllowed(
+  capabilities: MultitableCapabilities,
+  scope: SheetPermissionScope | undefined,
+  access: ResolvedRequestAccess,
+  createdBy: string | null | undefined,
+  action: 'edit' | 'delete',
+): boolean {
+  const rowActions = deriveRecordRowActions(capabilities, scope, access, createdBy)
+  return action === 'edit' ? rowActions.canEdit : rowActions.canDelete
+}
+
+type FieldMutationGuard = {
+  type: UniverMetaField['type']
+  options?: string[]
+  readOnly: boolean
+  hidden: boolean
+  link?: LinkFieldConfig | null
+}
+
+function buildFieldMutationGuardMap(fields: UniverMetaField[]): Map<string, FieldMutationGuard> {
+  return new Map(
+    fields.map((field) => {
+      const property = normalizeJson(field.property)
+      const base: FieldMutationGuard = {
+        type: field.type,
+        readOnly: isFieldAlwaysReadOnly(field),
+        hidden: isFieldPermissionHidden(field),
+      }
+      if (field.type === 'select') {
+        return [field.id, { ...base, options: field.options?.map((option) => option.value) ?? [] }] as const
+      }
+      if (field.type === 'link') {
+        return [field.id, { ...base, link: parseLinkFieldConfig(property) }] as const
+      }
+      return [field.id, base] as const
+    }),
+  )
+}
+
+function filterVisiblePropertyFields(fields: UniverMetaField[]): UniverMetaField[] {
+  return fields.filter((field) => !isFieldPermissionHidden(field))
+}
+
+function filterRecordDataByFieldIds(data: unknown, allowedFieldIds: Set<string>): Record<string, unknown> {
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return {}
+  return Object.fromEntries(
+    Object.entries(data as Record<string, unknown>).filter(([fieldId]) => allowedFieldIds.has(fieldId)),
+  )
+}
+
+function filterRecordFieldSummaryMap<T>(
+  summaryMap: Record<string, Record<string, T>> | undefined,
+  allowedFieldIds: Set<string>,
+): Record<string, Record<string, T>> | undefined {
+  if (!summaryMap) return undefined
+  return Object.fromEntries(
+    Object.entries(summaryMap).map(([recordId, fieldSummaries]) => [
+      recordId,
+      Object.fromEntries(
+        Object.entries(fieldSummaries).filter(([fieldId]) => allowedFieldIds.has(fieldId)),
+      ),
+    ]),
+  )
+}
+
+function filterSingleRecordFieldSummaryMap<T>(
+  summaryMap: Record<string, T> | undefined,
+  allowedFieldIds: Set<string>,
+): Record<string, T> | undefined {
+  if (!summaryMap) return undefined
+  return Object.fromEntries(
+    Object.entries(summaryMap).filter(([fieldId]) => allowedFieldIds.has(fieldId)),
+  )
+}
+
 function toSummaryDisplay(value: unknown): string {
   if (typeof value === 'string') return value
   if (typeof value === 'number' || typeof value === 'boolean') return String(value)
@@ -951,6 +2019,20 @@ function buildAttachmentUrl(req: Request, attachmentId: string, thumbnail: boole
   const host = req.get('host') || 'localhost:8900'
   const query = thumbnail ? '?thumbnail=true' : ''
   return `${protocol}://${host}/api/multitable/attachments/${encodeURIComponent(attachmentId)}${query}`
+}
+
+function getRequestActorId(req: Request): string | null {
+  const actorId = req.user?.id
+  return typeof actorId === 'string' && actorId.trim().length > 0 ? actorId.trim() : null
+}
+
+function publishMultitableSheetRealtime(payload: MultitableSheetRealtimePayload): void {
+  if (!payload.spreadsheetId) return
+  try {
+    eventBus.publish('spreadsheet.cell.updated', payload)
+  } catch (err) {
+    console.warn('[univer-meta] failed to publish multitable sheet realtime update', err)
+  }
 }
 
 function isImageMimeType(mimeType: string | null | undefined): boolean {
@@ -984,6 +2066,16 @@ function serializeBaseRow(row: any): UniverMetaBase {
     ownerId: typeof row.owner_id === 'string' ? row.owner_id : null,
     workspaceId: typeof row.workspace_id === 'string' ? row.workspace_id : null,
   }
+}
+
+async function ensureLegacyBase(query: QueryFn): Promise<string> {
+  await query(
+    `INSERT INTO meta_bases (id, name, icon, color, owner_id, workspace_id)
+     VALUES ($1, $2, $3, $4, $5, $6)
+     ON CONFLICT (id) DO NOTHING`,
+    [DEFAULT_BASE_ID, DEFAULT_BASE_NAME, 'table', '#1677ff', null, null],
+  )
+  return DEFAULT_BASE_ID
 }
 
 async function ensurePeopleSheetPreset(query: QueryFn, baseId: string): Promise<PeopleSheetPreset> {
@@ -1124,6 +2216,32 @@ async function ensurePeopleSheetPreset(query: QueryFn, baseId: string): Promise<
   }
 }
 
+async function loadSheetRow(
+  query: QueryFn,
+  sheetId: string,
+): Promise<{ id: string; baseId: string | null; name: string; description: string | null } | null> {
+  const result = await query(
+    'SELECT id, base_id, name, description FROM meta_sheets WHERE id = $1 AND deleted_at IS NULL',
+    [sheetId],
+  )
+  const row: any = result.rows[0]
+  if (!row) return null
+  return {
+    id: String(row.id),
+    baseId: typeof row.base_id === 'string' ? row.base_id : null,
+    name: String(row.name),
+    description: typeof row.description === 'string' ? row.description : null,
+  }
+}
+
+async function loadFieldsForSheet(query: QueryFn, sheetId: string): Promise<UniverMetaField[]> {
+  const result = await query(
+    'SELECT id, name, type, property, "order" FROM meta_fields WHERE sheet_id = $1 ORDER BY "order" ASC, id ASC',
+    [sheetId],
+  )
+  return result.rows.map((row: any) => serializeFieldRow(row))
+}
+
 async function ensureAttachmentIdsExist(
   query: QueryFn,
   sheetId: string,
@@ -1154,6 +2272,7 @@ async function ensureAttachmentIdsExist(
 }
 
 async function buildLinkSummaries(
+  req: Request,
   query: QueryFn,
   rows: UniverMetaRecord[],
   relationalLinkFields: RelationalLinkField[],
@@ -1178,15 +2297,19 @@ async function buildLinkSummaries(
     }
   }
 
+  const readableSheetIds = await resolveReadableSheetIds(req, query, idsBySheet.keys())
+
   const displayFieldBySheet = new Map<string, string | null>()
   for (const [sheetId] of idsBySheet.entries()) {
-    const fields = await loadFieldsForSheet({ query }, sheetId, metaFieldCache)
+    if (!readableSheetIds.has(sheetId)) continue
+    const fields = await loadFieldsForSheet(query, sheetId)
     const stringField = fields.find((field) => field.type === 'string')
     displayFieldBySheet.set(sheetId, stringField?.id ?? fields[0]?.id ?? null)
   }
 
   const foreignRecordsBySheet = new Map<string, Map<string, Record<string, unknown>>>()
   for (const [sheetId, ids] of idsBySheet.entries()) {
+    if (!readableSheetIds.has(sheetId)) continue
     const idList = Array.from(ids)
     if (idList.length === 0) continue
     const recordRes = await query(
@@ -1205,6 +2328,10 @@ async function buildLinkSummaries(
     const recordLinks = linkValuesByRecord.get(row.id) ?? new Map<string, string[]>()
     for (const { fieldId, cfg } of relationalLinkFields) {
       const ids = recordLinks.get(fieldId) ?? []
+      if (!readableSheetIds.has(cfg.foreignSheetId)) {
+        byField.set(fieldId, [])
+        continue
+      }
       const foreignMap = foreignRecordsBySheet.get(cfg.foreignSheetId)
       const displayFieldId = displayFieldBySheet.get(cfg.foreignSheetId) ?? null
       const summaries: LinkedRecordSummary[] = ids.map((id) => {
@@ -1377,7 +2504,7 @@ async function resolveMetaSheetId(
 
   if (sheetId) {
     if (!viewId) return { sheetId, view: null }
-    const view = await tryResolveView(pool, viewId, metaViewConfigCache)
+    const view = await tryResolveView(pool, viewId)
     if (!view) return { sheetId, view: null }
     if (view.sheetId !== sheetId) {
       throw new ConflictError(`View ${viewId} does not belong to sheet ${sheetId}`)
@@ -1389,7 +2516,7 @@ async function resolveMetaSheetId(
     throw new ValidationError('sheetId or viewId is required')
   }
 
-  const view = await tryResolveView(pool, viewId, metaViewConfigCache)
+  const view = await tryResolveView(pool, viewId)
   if (view) return { sheetId: view.sheetId, view }
 
   // Backward-compatible fallback: treat viewId as a sheetId when no view exists.
@@ -1561,12 +2688,23 @@ class ValidationError extends Error {
   }
 }
 
+class PermissionError extends Error {
+  constructor(public message: string) {
+    super(message)
+    this.name = 'PermissionError'
+  }
+}
+
 export function univerMetaRouter(): Router {
   const router = Router()
 
-  router.get('/bases', rbacGuard('multitable', 'read'), async (_req: Request, res: Response) => {
+  router.get('/bases', async (req: Request, res: Response) => {
     try {
       const pool = poolManager.get()
+      const access = await resolveRequestAccess(req)
+      if (!access.userId) {
+        return res.status(401).json({ error: 'Authentication required' })
+      }
       const result = await pool.query(
         `SELECT id, name, icon, color, owner_id, workspace_id
          FROM meta_bases
@@ -1574,7 +2712,27 @@ export function univerMetaRouter(): Router {
          ORDER BY created_at ASC
          LIMIT 200`,
       )
-      const bases = result.rows.map((row: any) => serializeBaseRow(row))
+      const visibleSheetRows = filterVisibleSheetRows((
+        await pool.query(
+          'SELECT id, base_id, name, description FROM meta_sheets WHERE deleted_at IS NULL ORDER BY created_at ASC LIMIT 200',
+        )
+      ).rows as any[])
+      const readableSheetRows = await filterReadableSheetRowsForAccess(
+        pool.query.bind(pool),
+        visibleSheetRows.map((row: any) => ({
+          id: String(row.id),
+          base_id: typeof row.base_id === 'string' ? row.base_id : null,
+        })),
+        access,
+      )
+      const readableBaseIds = new Set(
+        readableSheetRows
+          .map((row) => row.base_id)
+          .filter((baseId): baseId is string => typeof baseId === 'string' && baseId.length > 0),
+      )
+      const bases = result.rows
+        .filter((row: any) => readableBaseIds.has(String(row.id)))
+        .map((row: any) => serializeBaseRow(row))
       return res.json({ ok: true, data: { bases } })
     } catch (err) {
       const hint = getDbNotReadyMessage(err)
@@ -1629,7 +2787,7 @@ export function univerMetaRouter(): Router {
     }
   })
 
-  router.get('/context', rbacGuard('multitable', 'read'), async (req: Request, res: Response) => {
+  router.get('/context', async (req: Request, res: Response) => {
     const baseId = typeof req.query.baseId === 'string' ? req.query.baseId.trim() : ''
     const sheetId = typeof req.query.sheetId === 'string' ? req.query.sheetId.trim() : ''
     const viewId = typeof req.query.viewId === 'string' ? req.query.viewId.trim() : ''
@@ -1643,7 +2801,10 @@ export function univerMetaRouter(): Router {
     try {
       const pool = poolManager.get()
       const access = await resolveRequestAccess(req)
-      const capabilities = deriveCapabilities(access.permissions, access.isAdminRole)
+      if (!access.userId) {
+        return res.status(401).json({ error: 'Authentication required' })
+      }
+      const baseCapabilities = deriveCapabilities(access.permissions, access.isAdminRole)
 
       let resolvedBaseId = baseId || null
       let resolvedSheetId = sheetId || null
@@ -1695,13 +2856,47 @@ export function univerMetaRouter(): Router {
         )
         : { rows: [] }
       const visibleSheetRows = filterVisibleSheetRows(((sheetListResult as any).rows ?? []) as any[])
+      const sheetPermissionScopeMap = await loadSheetPermissionScopeMap(
+        pool.query.bind(pool),
+        visibleSheetRows.map((row) => String(row.id)),
+        access.userId,
+      )
+      const readableSheetRows = visibleSheetRows.filter((row) =>
+        canReadWithSheetGrant(
+          baseCapabilities,
+          sheetPermissionScopeMap.get(String(row.id)),
+          access.isAdminRole,
+        ),
+      )
 
       const effectiveSheetId =
         resolvedSheetId ??
-        (typeof visibleSheetRows[0]?.id === 'string' ? String(visibleSheetRows[0].id) : null)
+        (typeof readableSheetRows[0]?.id === 'string' ? String(readableSheetRows[0].id) : null)
+      if (resolvedSheetId && !readableSheetRows.some((row) => String(row.id) === resolvedSheetId)) {
+        return sendForbidden(res)
+      }
+      if (!baseCapabilities.canRead && !effectiveSheetId) {
+        return sendForbidden(res)
+      }
+      const selectedSheetScope = effectiveSheetId
+        ? sheetPermissionScopeMap.get(effectiveSheetId)
+        : undefined
+      const capabilities = effectiveSheetId
+        ? applyContextSheetSchemaWriteGrant(
+            baseCapabilities,
+            selectedSheetScope,
+            access.isAdminRole,
+          )
+        : baseCapabilities
+      const capabilityOrigin = deriveCapabilityOrigin(
+        baseCapabilities,
+        capabilities,
+        selectedSheetScope,
+        access.isAdminRole,
+      )
       const selectedSheet =
         (!isSystemPeopleSheetDescription(sheetRow?.description) ? sheetRow : null) ??
-        visibleSheetRows.find((row) => String(row.id) === effectiveSheetId) ??
+        readableSheetRows.find((row) => String(row.id) === effectiveSheetId) ??
         null
 
       const viewsResult = effectiveSheetId
@@ -1715,7 +2910,7 @@ export function univerMetaRouter(): Router {
         : { rows: [] }
 
       const activeFields = effectiveSheetId
-        ? await loadFieldsForSheet({ query: pool.query.bind(pool) }, effectiveSheetId, metaFieldCache)
+        ? await loadFieldsForSheet(pool.query.bind(pool), effectiveSheetId)
         : []
       const serializedViews = (viewsResult as any).rows.map((row: any) => ({
         id: String(row.id),
@@ -1753,9 +2948,13 @@ export function univerMetaRouter(): Router {
             baseId: typeof row.base_id === 'string' ? row.base_id : null,
             name: String(row.name),
             description: typeof row.description === 'string' ? row.description : null,
-          })).filter((row: any) => !isSystemPeopleSheetDescription(row.description)),
+          })).filter((row: any) =>
+            !isSystemPeopleSheetDescription(row.description)
+            && readableSheetRows.some((visibleRow) => String(visibleRow.id) === String(row.id)),
+          ),
           views: serializedViews,
           capabilities,
+          capabilityOrigin,
           fieldPermissions,
           viewPermissions,
         },
@@ -1771,13 +2970,22 @@ export function univerMetaRouter(): Router {
     }
   })
 
-  router.get('/sheets', rbacGuard('multitable', 'read'), async (_req: Request, res: Response) => {
+  router.get('/sheets', async (req: Request, res: Response) => {
     try {
       const pool = poolManager.get()
+      const access = await resolveRequestAccess(req)
+      if (!access.userId) {
+        return res.status(401).json({ error: 'Authentication required' })
+      }
       const result = await pool.query(
         'SELECT id, base_id, name, description FROM meta_sheets WHERE deleted_at IS NULL ORDER BY created_at ASC LIMIT 200',
       )
-      const sheets = filterVisibleSheetRows((result.rows ?? []) as any[]).map((r: any) => ({
+      const readableSheetRows = await filterReadableSheetRowsForAccess(
+        pool.query.bind(pool),
+        filterVisibleSheetRows((result.rows ?? []) as any[]),
+        access,
+      )
+      const sheets = readableSheetRows.map((r: any) => ({
         id: String(r.id),
         baseId: typeof r.base_id === 'string' ? r.base_id : null,
         name: String(r.name),
@@ -1792,7 +3000,151 @@ export function univerMetaRouter(): Router {
     }
   })
 
-  router.get('/fields', rbacGuard('multitable', 'read'), async (req: Request, res: Response) => {
+  router.get('/sheets/:sheetId/permissions', async (req: Request, res: Response) => {
+    const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
+    if (!sheetId) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId is required' } })
+    }
+
+    try {
+      const pool = poolManager.get()
+      const sheet = await loadSheetRow(pool.query.bind(pool), sheetId)
+      if (!sheet) {
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
+      }
+      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      if (!capabilities.canManageSheetAccess) return sendForbidden(res)
+
+      const items = await listSheetPermissionEntries(pool.query.bind(pool), sheetId)
+      return res.json({ ok: true, data: { items } })
+    } catch (err) {
+      const hint = getDbNotReadyMessage(err)
+      if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
+      console.error('[univer-meta] list sheet permissions failed:', err)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to list sheet permissions' } })
+    }
+  })
+
+  router.get('/sheets/:sheetId/permission-candidates', async (req: Request, res: Response) => {
+    const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
+    if (!sheetId) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId is required' } })
+    }
+
+    const q = typeof req.query.q === 'string' ? req.query.q.trim() : ''
+    const rawLimit = typeof req.query.limit === 'string' ? Number(req.query.limit) : undefined
+    const limit = Number.isFinite(rawLimit) ? Math.min(50, Math.max(1, Math.floor(rawLimit as number))) : 20
+
+    try {
+      const pool = poolManager.get()
+      const sheet = await loadSheetRow(pool.query.bind(pool), sheetId)
+      if (!sheet) {
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
+      }
+      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      if (!capabilities.canManageSheetAccess) return sendForbidden(res)
+
+      const items = await listSheetPermissionCandidates(pool.query.bind(pool), sheetId, { q, limit })
+      return res.json({ ok: true, data: { items, total: items.length, limit, query: q } })
+    } catch (err) {
+      const hint = getDbNotReadyMessage(err)
+      if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
+      console.error('[univer-meta] list sheet permission candidates failed:', err)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to list sheet permission candidates' } })
+    }
+  })
+
+  router.put('/sheets/:sheetId/permissions/:subjectType/:subjectId', async (req: Request, res: Response) => {
+    const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
+    const subjectType = typeof req.params.subjectType === 'string' ? req.params.subjectType.trim() : ''
+    const subjectId = typeof req.params.subjectId === 'string' ? req.params.subjectId.trim() : ''
+    if (!sheetId || !subjectId || !isSheetPermissionSubjectType(subjectType)) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId, subjectType, and subjectId are required' } })
+    }
+
+    const schema = z.object({
+      accessLevel: z.enum(['read', 'write', 'write-own', 'admin', 'none']),
+    })
+    const parsed = schema.safeParse(req.body)
+    if (!parsed.success) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+    }
+
+    try {
+      const pool = poolManager.get()
+      const sheet = await loadSheetRow(pool.query.bind(pool), sheetId)
+      if (!sheet) {
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
+      }
+      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      if (!capabilities.canManageSheetAccess) return sendForbidden(res)
+
+      if (subjectType === 'role' && parsed.data.accessLevel === 'write-own') {
+        return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'write-own is only supported for direct user grants' } })
+      }
+
+      if (subjectType === 'user') {
+        const userResult = await pool.query(
+          'SELECT id FROM users WHERE id = $1',
+          [subjectId],
+        )
+        if (userResult.rows.length === 0) {
+          return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `User not found: ${subjectId}` } })
+        }
+      } else {
+        const roleResult = await pool.query(
+          'SELECT id FROM roles WHERE id = $1',
+          [subjectId],
+        )
+        if (roleResult.rows.length === 0) {
+          return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Role not found: ${subjectId}` } })
+        }
+      }
+
+      await pool.transaction(async ({ query }) => {
+        await query(
+          `DELETE FROM spreadsheet_permissions
+           WHERE sheet_id = $1
+             AND subject_type = $2
+             AND subject_id = $3
+             AND perm_code = ANY($4::text[])`,
+          [sheetId, subjectType, subjectId, MANAGED_SHEET_PERMISSION_CODES],
+        )
+        if (parsed.data.accessLevel !== 'none') {
+          await query(
+            `INSERT INTO spreadsheet_permissions(sheet_id, user_id, subject_type, subject_id, perm_code)
+             VALUES ($1, $2, $3, $4, $5)`,
+            [
+              sheetId,
+              subjectType === 'user' ? subjectId : null,
+              subjectType,
+              subjectId,
+              CANONICAL_SHEET_PERMISSION_CODE_BY_ACCESS_LEVEL[parsed.data.accessLevel],
+            ],
+          )
+        }
+      })
+
+      const items = await listSheetPermissionEntries(pool.query.bind(pool), sheetId)
+      const entry = items.find((item) => item.subjectType === subjectType && item.subjectId === subjectId) ?? null
+      return res.json({
+        ok: true,
+        data: {
+          subjectType,
+          subjectId,
+          accessLevel: parsed.data.accessLevel,
+          entry,
+        },
+      })
+    } catch (err) {
+      const hint = getDbNotReadyMessage(err)
+      if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
+      console.error('[univer-meta] update sheet permission failed:', err)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to update sheet permission' } })
+    }
+  })
+
+  router.get('/fields', async (req: Request, res: Response) => {
     const sheetId = typeof req.query.sheetId === 'string' ? req.query.sheetId.trim() : ''
     if (!sheetId) {
       return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId is required' } })
@@ -1804,6 +3156,8 @@ export function univerMetaRouter(): Router {
       if (sheetRes.rows.length === 0) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
       }
+      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      if (!capabilities.canRead) return sendForbidden(res)
 
       const result = await pool.query(
         'SELECT id, name, type, property, "order" FROM meta_fields WHERE sheet_id = $1 ORDER BY "order" ASC, id ASC LIMIT 500',
@@ -1819,7 +3173,7 @@ export function univerMetaRouter(): Router {
     }
   })
 
-  router.post('/fields', rbacGuard('multitable', 'write'), async (req: Request, res: Response) => {
+  router.post('/fields', async (req: Request, res: Response) => {
     const schema = z.object({
       id: z.string().min(1).max(50).optional(),
       sheetId: z.string().min(1).max(50),
@@ -1843,13 +3197,14 @@ export function univerMetaRouter(): Router {
 
     try {
       const pool = poolManager.get()
+      const sheetRes = await pool.query('SELECT id FROM meta_sheets WHERE id = $1 AND deleted_at IS NULL', [sheetId])
+      if (sheetRes.rows.length === 0) {
+        throw new NotFoundError(`Sheet not found: ${sheetId}`)
+      }
+      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      if (!capabilities.canManageFields) return sendForbidden(res)
       await pool.transaction(async ({ query }) => {
-        const sheetRes = await query('SELECT id FROM meta_sheets WHERE id = $1 AND deleted_at IS NULL', [sheetId])
-        if ((sheetRes as any).rows.length === 0) {
-          throw new NotFoundError(`Sheet not found: ${sheetId}`)
-        }
-
-        const configError = await validateLookupRollupConfig(query, sheetId, type, property)
+        const configError = await validateLookupRollupConfig(req, query, sheetId, type, property)
         if (configError) {
           throw new ValidationError(configError)
         }
@@ -1883,6 +3238,9 @@ export function univerMetaRouter(): Router {
       if (err instanceof NotFoundError) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: err.message } })
       }
+      if (err instanceof PermissionError) {
+        return sendForbidden(res, err.message)
+      }
       if (err instanceof ValidationError) {
         return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: err.message } })
       }
@@ -1896,7 +3254,7 @@ export function univerMetaRouter(): Router {
     }
   })
 
-  router.post('/person-fields/prepare', rbacGuard('multitable', 'write'), async (req: Request, res: Response) => {
+  router.post('/person-fields/prepare', async (req: Request, res: Response) => {
     const schema = z.object({
       sheetId: z.string().min(1).max(50),
     })
@@ -1908,9 +3266,11 @@ export function univerMetaRouter(): Router {
 
     try {
       const pool = poolManager.get()
+      const sourceSheet = await loadSheetRow(pool.query.bind(pool), parsed.data.sheetId)
+      if (!sourceSheet) throw new NotFoundError(`Sheet not found: ${parsed.data.sheetId}`)
+      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), parsed.data.sheetId)
+      if (!capabilities.canManageFields) return sendForbidden(res)
       const preset = await pool.transaction(async ({ query }) => {
-        const sourceSheet = await loadSheetRow(query as unknown as QueryFn, parsed.data.sheetId)
-        if (!sourceSheet) throw new NotFoundError(`Sheet not found: ${parsed.data.sheetId}`)
         const baseId = sourceSheet.baseId ?? await ensureLegacyBase(query as unknown as QueryFn)
         return ensurePeopleSheetPreset(query as unknown as QueryFn, baseId)
       })
@@ -1927,7 +3287,7 @@ export function univerMetaRouter(): Router {
     }
   })
 
-  router.patch('/fields/:fieldId', rbacGuard('multitable', 'write'), async (req: Request, res: Response) => {
+  router.patch('/fields/:fieldId', async (req: Request, res: Response) => {
     const fieldId = typeof req.params.fieldId === 'string' ? req.params.fieldId : ''
     if (!fieldId) {
       return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'fieldId is required' } })
@@ -1947,6 +3307,14 @@ export function univerMetaRouter(): Router {
 
     try {
       const pool = poolManager.get()
+      const existing = await pool.query(
+        'SELECT id, sheet_id FROM meta_fields WHERE id = $1',
+        [fieldId],
+      )
+      if (existing.rows.length === 0) throw new NotFoundError(`Field not found: ${fieldId}`)
+      const preflightSheetId = String((existing.rows[0] as any).sheet_id ?? '')
+      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), preflightSheetId)
+      if (!capabilities.canManageFields) return sendForbidden(res)
       let sheetId = ''
       const updated = await pool.transaction(async ({ query }) => {
         const existing = await query(
@@ -1967,7 +3335,7 @@ export function univerMetaRouter(): Router {
         )
         const desiredOrder = parsed.data.order
 
-        const configError = await validateLookupRollupConfig(query, sheetId, nextType, nextProperty)
+        const configError = await validateLookupRollupConfig(req, query, sheetId, nextType, nextProperty)
         if (configError) {
           throw new ValidationError(configError)
         }
@@ -2006,6 +3374,9 @@ export function univerMetaRouter(): Router {
       if (err instanceof NotFoundError) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: err.message } })
       }
+      if (err instanceof PermissionError) {
+        return sendForbidden(res, err.message)
+      }
       if (err instanceof ValidationError) {
         return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: err.message } })
       }
@@ -2019,7 +3390,7 @@ export function univerMetaRouter(): Router {
     }
   })
 
-  router.delete('/fields/:fieldId', rbacGuard('multitable', 'write'), async (req: Request, res: Response) => {
+  router.delete('/fields/:fieldId', async (req: Request, res: Response) => {
     const fieldId = typeof req.params.fieldId === 'string' ? req.params.fieldId : ''
     if (!fieldId) {
       return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'fieldId is required' } })
@@ -2048,6 +3419,11 @@ export function univerMetaRouter(): Router {
 
     try {
       const pool = poolManager.get()
+      const existing = await pool.query('SELECT id, sheet_id FROM meta_fields WHERE id = $1', [fieldId])
+      if (existing.rows.length === 0) throw new NotFoundError(`Field not found: ${fieldId}`)
+      const sheetId = String((existing.rows[0] as any).sheet_id ?? '')
+      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      if (!capabilities.canManageFields) return sendForbidden(res)
       const result = await pool.transaction(async ({ query }) => {
         const existing = await query('SELECT id, sheet_id, "order" FROM meta_fields WHERE id = $1', [fieldId])
         if ((existing as any).rows.length === 0) throw new NotFoundError(`Field not found: ${fieldId}`)
@@ -2113,7 +3489,7 @@ export function univerMetaRouter(): Router {
     }
   })
 
-  router.get('/views', rbacGuard('multitable', 'read'), async (req: Request, res: Response) => {
+  router.get('/views', async (req: Request, res: Response) => {
     const sheetId = typeof req.query.sheetId === 'string' ? req.query.sheetId.trim() : ''
     if (!sheetId) {
       return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId is required' } })
@@ -2125,21 +3501,22 @@ export function univerMetaRouter(): Router {
       if (sheetRes.rows.length === 0) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
       }
+      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      if (!capabilities.canRead) return sendForbidden(res)
 
       let result = await pool.query(
         'SELECT id, sheet_id, name, type, filter_info, sort_info, group_info, hidden_field_ids, config FROM meta_views WHERE sheet_id = $1 ORDER BY created_at ASC LIMIT 200',
         [sheetId],
       )
 
-      if (result.rows.length === 0) {
+      if (result.rows.length === 0 && capabilities.canManageViews) {
         const defaultId = buildId('view')
-        await createView({
-          query: pool.query.bind(pool),
-          viewId: defaultId,
-          sheetId,
-          name: '默认视图',
-          type: 'grid',
-        })
+        await pool.query(
+          `INSERT INTO meta_views (id, sheet_id, name, type, filter_info, sort_info, group_info, hidden_field_ids, config)
+           VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7::jsonb, $8::jsonb, $9::jsonb)
+           ON CONFLICT (id) DO NOTHING`,
+          [defaultId, sheetId, '默认视图', 'grid', '{}', '{}', '{}', '[]', '{}'],
+        )
         result = await pool.query(
           'SELECT id, sheet_id, name, type, filter_info, sort_info, group_info, hidden_field_ids, config FROM meta_views WHERE sheet_id = $1 ORDER BY created_at ASC LIMIT 200',
           [sheetId],
@@ -2167,7 +3544,7 @@ export function univerMetaRouter(): Router {
     }
   })
 
-  router.post('/views', rbacGuard('multitable', 'write'), async (req: Request, res: Response) => {
+  router.post('/views', async (req: Request, res: Response) => {
     const schema = z.object({
       id: z.string().min(1).max(50).optional(),
       sheetId: z.string().min(1).max(50),
@@ -2196,33 +3573,35 @@ export function univerMetaRouter(): Router {
       if (sheetRes.rows.length === 0) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
       }
+      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      if (!capabilities.canManageViews) return sendForbidden(res)
 
-      const created = await createView({
-        query: pool.query.bind(pool),
-        viewId,
+      await pool.query(
+        `INSERT INTO meta_views (id, sheet_id, name, type, filter_info, sort_info, group_info, hidden_field_ids, config)
+         VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7::jsonb, $8::jsonb, $9::jsonb)`,
+        [
+          viewId,
+          sheetId,
+          name,
+          type,
+          JSON.stringify(parsed.data.filterInfo ?? {}),
+          JSON.stringify(parsed.data.sortInfo ?? {}),
+          JSON.stringify(parsed.data.groupInfo ?? {}),
+          JSON.stringify(parsed.data.hiddenFieldIds ?? []),
+          JSON.stringify(parsed.data.config ?? {}),
+        ],
+      )
+
+      const view: UniverMetaViewConfig = {
+        id: viewId,
         sheetId,
         name,
         type,
-        filterInfo: parsed.data.filterInfo,
-        sortInfo: parsed.data.sortInfo,
-        groupInfo: parsed.data.groupInfo,
-        hiddenFieldIds: parsed.data.hiddenFieldIds,
-        config: parsed.data.config,
-      })
-      if (!created.created || !created.view) {
-        return res.status(409).json({ ok: false, error: { code: 'CONFLICT', message: `View already exists: ${viewId}` } })
-      }
-
-      const view: UniverMetaViewConfig = {
-        id: created.view.id,
-        sheetId: created.view.sheetId,
-        name: created.view.name,
-        type: created.view.type,
-        filterInfo: created.view.filterInfo,
-        sortInfo: created.view.sortInfo,
-        groupInfo: created.view.groupInfo,
-        hiddenFieldIds: created.view.hiddenFieldIds,
-        config: created.view.config,
+        filterInfo: parsed.data.filterInfo ?? {},
+        sortInfo: parsed.data.sortInfo ?? {},
+        groupInfo: parsed.data.groupInfo ?? {},
+        hiddenFieldIds: parsed.data.hiddenFieldIds ?? [],
+        config: parsed.data.config ?? {},
       }
 
       metaViewConfigCache.set(viewId, view)
@@ -2235,7 +3614,7 @@ export function univerMetaRouter(): Router {
     }
   })
 
-  router.patch('/views/:viewId', rbacGuard('multitable', 'write'), async (req: Request, res: Response) => {
+  router.patch('/views/:viewId', async (req: Request, res: Response) => {
     const viewId = req.params.viewId
     if (!viewId || typeof viewId !== 'string') {
       return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'viewId is required' } })
@@ -2267,6 +3646,8 @@ export function univerMetaRouter(): Router {
       }
 
       const row: any = current.rows[0]
+      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), String(row.sheet_id))
+      if (!capabilities.canManageViews) return sendForbidden(res)
       const nextName = parsed.data.name ?? String(row.name)
       const nextType = parsed.data.type ?? String(row.type ?? 'grid')
       const nextFilter = parsed.data.filterInfo ?? normalizeJson(row.filter_info)
@@ -2313,7 +3694,7 @@ export function univerMetaRouter(): Router {
     }
   })
 
-  router.delete('/views/:viewId', rbacGuard('multitable', 'write'), async (req: Request, res: Response) => {
+  router.delete('/views/:viewId', async (req: Request, res: Response) => {
     const viewId = req.params.viewId
     if (!viewId || typeof viewId !== 'string') {
       return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'viewId is required' } })
@@ -2321,10 +3702,13 @@ export function univerMetaRouter(): Router {
 
     try {
       const pool = poolManager.get()
-      const del = await pool.query('DELETE FROM meta_views WHERE id = $1', [viewId])
-      if ((del as any).rowCount === 0) {
+      const current = await pool.query('SELECT id, sheet_id FROM meta_views WHERE id = $1', [viewId])
+      if (current.rows.length === 0) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `View not found: ${viewId}` } })
       }
+      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), String((current.rows[0] as any).sheet_id ?? ''))
+      if (!capabilities.canManageViews) return sendForbidden(res)
+      await pool.query('DELETE FROM meta_views WHERE id = $1', [viewId])
       invalidateViewConfigCache(viewId)
       return res.json({ ok: true, data: { deleted: viewId } })
     } catch (err) {
@@ -2335,7 +3719,7 @@ export function univerMetaRouter(): Router {
     }
   })
 
-  router.delete('/sheets/:sheetId', rbacGuard('multitable', 'write'), async (req: Request, res: Response) => {
+  router.delete('/sheets/:sheetId', async (req: Request, res: Response) => {
     const sheetId = req.params.sheetId
     if (!sheetId || typeof sheetId !== 'string') {
       return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId is required' } })
@@ -2343,10 +3727,17 @@ export function univerMetaRouter(): Router {
 
     try {
       const pool = poolManager.get()
-      const del = await pool.query('DELETE FROM meta_sheets WHERE id = $1', [sheetId])
-      if ((del as any).rowCount === 0) {
+      const sheetRes = await pool.query('SELECT id FROM meta_sheets WHERE id = $1', [sheetId])
+      if (sheetRes.rows.length === 0) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
       }
+      const { capabilities, sheetScope } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      if (sheetScope?.hasAssignments) {
+        if (!capabilities.canManageSheetAccess) return sendForbidden(res)
+      } else if (!capabilities.canManageViews) {
+        return sendForbidden(res)
+      }
+      const del = await pool.query('DELETE FROM meta_sheets WHERE id = $1', [sheetId])
       invalidateSheetSummaryCache(sheetId)
       invalidateFieldCache(sheetId)
       invalidateViewConfigCache()
@@ -2359,7 +3750,7 @@ export function univerMetaRouter(): Router {
     }
   })
 
-  router.post('/sheets', rbacGuard('multitable', 'write'), async (req: Request, res: Response) => {
+  router.post('/sheets', async (req: Request, res: Response) => {
     const schema = z.object({
       id: z.string().min(1).max(50).optional(),
       baseId: z.string().min(1).max(50).optional(),
@@ -2381,25 +3772,38 @@ export function univerMetaRouter(): Router {
 
     try {
       const pool = poolManager.get()
+      const access = await resolveRequestAccess(req)
+      const baseCapabilities = deriveCapabilities(access.permissions, access.isAdminRole)
       let baseId = requestedBaseId ?? null
       await pool.transaction(async ({ query }) => {
         if (!baseId) {
+          if (!baseCapabilities.canManageViews) {
+            throw new ValidationError('Insufficient permissions')
+          }
           baseId = await ensureLegacyBase(query as unknown as QueryFn)
         } else {
-          const baseRes = await query('SELECT id FROM meta_bases WHERE id = $1 AND deleted_at IS NULL', [baseId])
+          const baseRes = await query(
+            'SELECT id, owner_id FROM meta_bases WHERE id = $1 AND deleted_at IS NULL',
+            [baseId],
+          )
           if ((baseRes as any).rows.length === 0) {
             throw new NotFoundError(`Base not found: ${baseId}`)
           }
+          const baseRow = (baseRes as any).rows[0] as { owner_id?: unknown }
+          const baseOwnerId = typeof baseRow.owner_id === 'string' ? baseRow.owner_id : null
+          const canCreateInBase = baseCapabilities.canManageViews || (baseOwnerId !== null && baseOwnerId === access.userId)
+          if (!canCreateInBase) {
+            throw new ValidationError('Insufficient permissions')
+          }
         }
 
-        const created = await createSheet({
-          query: query as unknown as QueryFn,
-          sheetId,
-          baseId,
-          name,
-          description,
-        })
-        if (!created.created) {
+        const insert = await query(
+          `INSERT INTO meta_sheets (id, base_id, name, description)
+           VALUES ($1, $2, $3, $4)
+           ON CONFLICT (id) DO NOTHING`,
+          [sheetId, baseId, name, description],
+        )
+        if ((insert as any).rowCount === 0) {
           throw new ConflictError(`Sheet already exists: ${sheetId}`)
         }
 
@@ -2410,6 +3814,9 @@ export function univerMetaRouter(): Router {
 
       return res.json({ ok: true, data: { sheet: { id: sheetId, baseId, name, description, seeded: seed } } })
     } catch (err) {
+      if (err instanceof ValidationError) {
+        return res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: err.message } })
+      }
       if (err instanceof NotFoundError) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: err.message } })
       }
@@ -2423,7 +3830,7 @@ export function univerMetaRouter(): Router {
     }
   })
 
-  router.get('/view', rbacGuard('multitable', 'read'), async (req: Request, res: Response) => {
+  router.get('/view', async (req: Request, res: Response) => {
     const sheetIdParam = typeof req.query.sheetId === 'string' ? req.query.sheetId.trim() : undefined
     const viewIdParam = typeof req.query.viewId === 'string' ? req.query.viewId.trim() : undefined
     const seed = req.query.seed === 'true'
@@ -2442,6 +3849,11 @@ export function univerMetaRouter(): Router {
       })
       const sheetId = resolved.sheetId
       const viewConfig = resolved.view
+      const { access, capabilities, capabilityOrigin, sheetScope } = await resolveSheetReadableCapabilities(req, pool.query.bind(pool), sheetId)
+      if (!access.userId) {
+        return res.status(401).json({ error: 'Authentication required' })
+      }
+      if (!capabilities.canRead) return sendForbidden(res)
       const rawSortRules = viewConfig ? parseMetaSortRules(viewConfig.sortInfo) : []
       const rawFilterInfo = viewConfig ? parseMetaFilterInfo(viewConfig.filterInfo) : null
       if (seed) {
@@ -2450,15 +3862,19 @@ export function univerMetaRouter(): Router {
 
       const [sheet, fields] = await Promise.all([
         loadSheetSummary(pool as unknown as { query: QueryFn }, sheetId),
-        loadFieldsForSheet(pool as unknown as { query: QueryFn }, sheetId, metaFieldCache),
+        loadSheetFields(pool as unknown as { query: QueryFn }, sheetId),
       ])
 
       if (!sheet) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
       }
 
-      const fieldTypeById = new Map(fields.map((f) => [f.id, f.type] as const))
-      const searchableFieldIds = fields.filter((field) => isSearchableFieldType(field.type)).map((field) => field.id)
+      const visiblePropertyFields = filterVisiblePropertyFields(fields)
+      const visiblePropertyFieldIds = new Set(visiblePropertyFields.map((field) => field.id))
+      const fieldTypeById = new Map(visiblePropertyFields.map((f) => [f.id, f.type] as const))
+      const searchableFieldIds = visiblePropertyFields
+        .filter((field) => isSearchableFieldType(field.type))
+        .map((field) => field.id)
       const warnings: string[] = []
 
       const ignoredSortFieldIds = rawSortRules
@@ -2486,9 +3902,9 @@ export function univerMetaRouter(): Router {
       const relationalLinkFields = fields
         .map((f) => (f.type === 'link' ? { fieldId: f.id, cfg: parseLinkFieldConfig(f.property) } : null))
         .filter((v): v is { fieldId: string; cfg: LinkFieldConfig } => !!v && !!v.cfg)
-      const attachmentFields = fields.filter((field) => field.type === 'attachment')
+      const attachmentFields = visiblePropertyFields.filter((field) => field.type === 'attachment')
       const computedFieldIdSet = new Set(
-        fields.filter((f) => f.type === 'lookup' || f.type === 'rollup').map((f) => f.id),
+        visiblePropertyFields.filter((f) => f.type === 'lookup' || f.type === 'rollup').map((f) => f.id),
       )
 
       let rows: UniverMetaRecord[] = []
@@ -2585,6 +4001,7 @@ export function univerMetaRouter(): Router {
             relationalLinkFields,
           )
           await applyLookupRollup(
+            req,
             pool.query.bind(pool),
             fields,
             all,
@@ -2594,7 +4011,7 @@ export function univerMetaRouter(): Router {
         }
 
         if (hasSearch) {
-          all = all.filter((record) => recordMatchesSearch(record, fields, search))
+          all = all.filter((record) => recordMatchesSearch(record, visiblePropertyFields, search))
         }
 
         if (filterInfo) {
@@ -2693,40 +4110,59 @@ export function univerMetaRouter(): Router {
       }
 
       await applyLookupRollup(
+        req,
         pool.query.bind(pool),
         fields,
         rows,
         relationalLinkFields,
         linkValuesByRecord,
       )
+      for (const row of rows) {
+        row.data = filterRecordDataByFieldIds(row.data, visiblePropertyFieldIds)
+      }
       const linkSummaries = includeLinkSummaries
-        ? serializeLinkSummaryMap(
-            await buildLinkSummaries(
-              pool.query.bind(pool),
-              rows,
-              relationalLinkFields,
-              linkValuesByRecord,
+        ? filterRecordFieldSummaryMap(
+            serializeLinkSummaryMap(
+              await buildLinkSummaries(
+                req,
+                pool.query.bind(pool),
+                rows,
+                relationalLinkFields,
+                linkValuesByRecord,
+              ),
             ),
+            visiblePropertyFieldIds,
           )
         : undefined
       const attachmentSummaries = attachmentFields.length > 0
-        ? serializeAttachmentSummaryMap(
-            await buildAttachmentSummaries(
-              pool.query.bind(pool),
-              req,
-              sheetId,
-              rows,
-              attachmentFields,
+        ? filterRecordFieldSummaryMap(
+            serializeAttachmentSummaryMap(
+              await buildAttachmentSummaries(
+                pool.query.bind(pool),
+                req,
+                sheetId,
+                rows,
+                attachmentFields,
+              ),
             ),
+            visiblePropertyFieldIds,
           )
         : undefined
-      const access = await resolveRequestAccess(req)
-      const capabilities = deriveCapabilities(access.permissions, access.isAdminRole)
+      const rowActionOverrides = buildRowActionOverrides(
+        rows,
+        requiresOwnWriteRowPolicy(sheetScope, access.isAdminRole)
+          ? await loadRecordCreatorMap(pool.query.bind(pool), sheetId, rows.map((row) => row.id))
+          : new Map(),
+        capabilities,
+        sheetScope,
+        access,
+      )
       const permissions: MultitableScopedPermissions = {
         fieldPermissions: deriveFieldPermissions(fields, capabilities, {
           hiddenFieldIds: viewConfig?.hiddenFieldIds ?? [],
         }),
-        rowActions: deriveRowActions(capabilities),
+        rowActions: deriveDefaultRowActions(capabilities, sheetScope, access.isAdminRole),
+        ...(rowActionOverrides ? { rowActionOverrides } : {}),
         ...(viewConfig ? { viewPermissions: deriveViewPermissions([viewConfig], capabilities) } : {}),
       }
 
@@ -2736,13 +4172,14 @@ export function univerMetaRouter(): Router {
             ...(hasFilterOrSort ? { computedFilterSort } : {}),
             ...(ignoredSortFieldIds.length > 0 ? { ignoredSortFieldIds } : {}),
             ...(ignoredFilterFieldIds.length > 0 ? { ignoredFilterFieldIds } : {}),
+            capabilityOrigin,
             permissions,
           }
-        : { permissions }
+        : { capabilityOrigin, permissions }
 
       const view: UniverMetaView = {
         id: sheetId,
-        fields,
+        fields: visiblePropertyFields,
         rows,
         ...(linkSummaries ? { linkSummaries } : {}),
         ...(attachmentSummaries ? { attachmentSummaries } : {}),
@@ -2765,7 +4202,7 @@ export function univerMetaRouter(): Router {
     }
   })
 
-  router.get('/form-context', rbacGuard('multitable', 'read'), async (req: Request, res: Response) => {
+  router.get('/form-context', async (req: Request, res: Response) => {
     const sheetIdParam = typeof req.query.sheetId === 'string' ? req.query.sheetId.trim() : undefined
     const viewIdParam = typeof req.query.viewId === 'string' ? req.query.viewId.trim() : undefined
     const recordIdParam = typeof req.query.recordId === 'string' ? req.query.recordId.trim() : undefined
@@ -2777,19 +4214,22 @@ export function univerMetaRouter(): Router {
         viewId: viewIdParam,
       })
       const sheetId = resolved.sheetId
+      const { access, capabilities, capabilityOrigin, sheetScope } = await resolveSheetReadableCapabilities(req, pool.query.bind(pool), sheetId)
+      if (!access.userId) {
+        return res.status(401).json({ error: 'Authentication required' })
+      }
+      if (!capabilities.canRead) return sendForbidden(res)
       const sheet = await loadSheetRow(pool.query.bind(pool), sheetId)
       if (!sheet) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
       }
 
-      const fields = await loadFieldsForSheet({ query: pool.query.bind(pool) }, sheetId, metaFieldCache)
-      const access = await resolveRequestAccess(req)
-      const capabilities = deriveCapabilities(access.permissions, access.isAdminRole)
+      const fields = await loadFieldsForSheet(pool.query.bind(pool), sheetId)
 
       let record: UniverMetaRecord | undefined
       if (recordIdParam) {
         const recordRes = await pool.query(
-          'SELECT id, version, data FROM meta_records WHERE id = $1 AND sheet_id = $2',
+          'SELECT id, version, data, created_by FROM meta_records WHERE id = $1 AND sheet_id = $2',
           [recordIdParam, sheetId],
         )
         const row: any = recordRes.rows[0]
@@ -2800,33 +4240,43 @@ export function univerMetaRouter(): Router {
           id: String(row.id),
           version: Number(row.version ?? 1),
           data: normalizeJson(row.data),
+          createdBy: typeof row.created_by === 'string' ? row.created_by : null,
         }
       }
 
       const hiddenFieldIds = new Set(resolved.view?.hiddenFieldIds ?? [])
-      const visibleFields = fields.filter((field) => !hiddenFieldIds.has(field.id))
+      const visibleFields = fields.filter((field) => !hiddenFieldIds.has(field.id) && !isFieldPermissionHidden(field))
+      const visibleFieldIds = new Set(visibleFields.map((field) => field.id))
       const fieldPermissions = deriveFieldPermissions(fields, capabilities, {
         hiddenFieldIds: resolved.view?.hiddenFieldIds ?? [],
         allowCreateOnly: !record,
       })
       const viewPermissions = resolved.view ? deriveViewPermissions([resolved.view], capabilities) : {}
-      const rowActions = deriveRowActions(record ? capabilities : {
-        ...capabilities,
-        canEditRecord: capabilities.canCreateRecord,
-        canDeleteRecord: false,
-      })
+      const rowActions = record
+        ? deriveRecordRowActions(capabilities, sheetScope, access, record.createdBy)
+        : deriveRecordRowActions({
+            ...capabilities,
+            canEditRecord: capabilities.canCreateRecord,
+            canDeleteRecord: false,
+          }, sheetScope, access, null)
       const attachmentFields = visibleFields.filter((field) => field.type === 'attachment')
       const attachmentSummaries = record && attachmentFields.length > 0
-        ? serializeAttachmentSummaryMap(
-            await buildAttachmentSummaries(
-              pool.query.bind(pool),
-              req,
-              sheetId,
-              [record],
-              attachmentFields,
-            ),
-          )[record.id] ?? {}
+        ? filterSingleRecordFieldSummaryMap(
+            serializeAttachmentSummaryMap(
+              await buildAttachmentSummaries(
+                pool.query.bind(pool),
+                req,
+                sheetId,
+                [record],
+                attachmentFields,
+              ),
+            )[record.id] ?? {},
+            visibleFieldIds,
+          )
         : undefined
+      if (record) {
+        record.data = filterRecordDataByFieldIds(record.data, visibleFieldIds)
+      }
 
       return res.json({
         ok: true,
@@ -2838,6 +4288,7 @@ export function univerMetaRouter(): Router {
           ...(resolved.view ? { view: resolved.view } : {}),
           fields: visibleFields,
           capabilities,
+          capabilityOrigin,
           fieldPermissions,
           ...(resolved.view ? { viewPermissions } : {}),
           ...(record ? { rowActions } : {}),
@@ -2870,7 +4321,7 @@ export function univerMetaRouter(): Router {
     }
   })
 
-  router.post('/views/:viewId/submit', rbacGuard('multitable', 'write'), async (req: Request, res: Response) => {
+  router.post('/views/:viewId/submit', async (req: Request, res: Response) => {
     const viewId = typeof req.params.viewId === 'string' ? req.params.viewId.trim() : ''
     if (!viewId) {
       return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'viewId is required' } })
@@ -2888,7 +4339,7 @@ export function univerMetaRouter(): Router {
 
     try {
       const pool = poolManager.get()
-      const view = await tryResolveView(pool as unknown as { query: QueryFn }, viewId, metaViewConfigCache)
+      const view = await tryResolveView(pool as unknown as { query: QueryFn }, viewId)
       if (!view) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `View not found: ${viewId}` } })
       }
@@ -2897,30 +4348,15 @@ export function univerMetaRouter(): Router {
       if (!sheet) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${view.sheetId}` } })
       }
-
-      const fields = await loadFieldsForSheet({ query: pool.query.bind(pool) }, view.sheetId, metaFieldCache)
-      const fieldById = new Map<string, { type: UniverMetaField['type']; options?: string[]; readonly?: boolean; link?: LinkFieldConfig | null }>()
-      for (const field of fields) {
-        const property = normalizeJson(field.property)
-        const readonly = property.readonly === true
-        if (field.type === 'select') {
-          fieldById.set(field.id, {
-            type: field.type,
-            readonly,
-            options: field.options?.map((option) => option.value) ?? [],
-          })
-          continue
-        }
-        if (field.type === 'link') {
-          fieldById.set(field.id, {
-            type: field.type,
-            readonly,
-            link: parseLinkFieldConfig(field.property),
-          })
-          continue
-        }
-        fieldById.set(field.id, { type: field.type, readonly })
+      const { access, capabilities, sheetScope } = await resolveSheetCapabilities(req, pool.query.bind(pool), view.sheetId)
+      if (!access.userId) {
+        return res.status(401).json({ error: 'Authentication required' })
       }
+      const canWriteFormRecord = parsed.data.recordId ? capabilities.canEditRecord : capabilities.canCreateRecord
+      if (!canWriteFormRecord) return sendForbidden(res)
+
+      const fields = await loadFieldsForSheet(pool.query.bind(pool), view.sheetId)
+      const fieldById = buildFieldMutationGuardMap(fields)
 
       const hiddenFieldIds = new Set(view.hiddenFieldIds ?? [])
       const data = parsed.data.data ?? {}
@@ -2934,11 +4370,15 @@ export function univerMetaRouter(): Router {
           fieldErrors[fieldId] = 'Unknown field'
           continue
         }
+        if (field.hidden) {
+          fieldErrors[fieldId] = 'Field is hidden'
+          continue
+        }
         if (hiddenFieldIds.has(fieldId)) {
           fieldErrors[fieldId] = 'Field is not available in this form'
           continue
         }
-        if (field.readonly === true || field.type === 'lookup' || field.type === 'rollup') {
+        if (field.readOnly === true || field.type === 'lookup' || field.type === 'rollup') {
           fieldErrors[fieldId] = 'Field is readonly'
           continue
         }
@@ -3018,12 +4458,13 @@ export function univerMetaRouter(): Router {
       }
 
       if (Object.keys(fieldErrors).length > 0) {
+        const hiddenOnly = Object.values(fieldErrors).every((message) => message === 'Field is hidden')
         const readonlyOnly = Object.values(fieldErrors).every((message) => message === 'Field is readonly')
-        return res.status(readonlyOnly ? 403 : 400).json({
+        return res.status(hiddenOnly || readonlyOnly ? 403 : 400).json({
           ok: false,
           error: {
-            code: readonlyOnly ? 'FIELD_READONLY' : 'VALIDATION_ERROR',
-            message: readonlyOnly ? 'Readonly field update rejected' : 'Validation failed',
+            code: hiddenOnly ? 'FIELD_HIDDEN' : readonlyOnly ? 'FIELD_READONLY' : 'VALIDATION_ERROR',
+            message: hiddenOnly ? 'Hidden field update rejected' : readonlyOnly ? 'Readonly field update rejected' : 'Validation failed',
             fieldErrors,
           },
         })
@@ -3036,13 +4477,17 @@ export function univerMetaRouter(): Router {
       await pool.transaction(async ({ query }) => {
         if (recordId) {
           const currentRes = await query(
-            'SELECT id, version FROM meta_records WHERE id = $1 AND sheet_id = $2 FOR UPDATE',
+            'SELECT id, version, created_by FROM meta_records WHERE id = $1 AND sheet_id = $2 FOR UPDATE',
             [recordId, view.sheetId],
           )
           if ((currentRes as any).rows.length === 0) {
             throw new NotFoundError(`Record not found: ${recordId}`)
           }
-          const serverVersion = Number((currentRes as any).rows[0]?.version ?? 1)
+          const currentRow: any = (currentRes as any).rows[0]
+          if (!ensureRecordWriteAllowed(capabilities, sheetScope, access, typeof currentRow?.created_by === 'string' ? currentRow.created_by : null, 'edit')) {
+            throw new ValidationError('Record editing is not allowed for this row')
+          }
+          const serverVersion = Number(currentRow?.version ?? 1)
           if (typeof parsed.data.expectedVersion === 'number' && parsed.data.expectedVersion !== serverVersion) {
             throw new VersionConflictError(recordId, serverVersion)
           }
@@ -3093,10 +4538,10 @@ export function univerMetaRouter(): Router {
         }
 
         const insertRes = await query(
-          `INSERT INTO meta_records (id, sheet_id, data, version)
-           VALUES ($1, $2, $3::jsonb, 1)
+          `INSERT INTO meta_records (id, sheet_id, data, version, created_by)
+           VALUES ($1, $2, $3::jsonb, 1, $4)
            RETURNING id, version`,
-          [resultRecordId, view.sheetId, JSON.stringify(patch)],
+          [resultRecordId, view.sheetId, JSON.stringify(patch), getRequestActorId(req)],
         )
         resultRecordId = String((insertRes as any).rows[0]?.id ?? resultRecordId)
         nextVersion = Number((insertRes as any).rows[0]?.version ?? 1)
@@ -3127,26 +4572,47 @@ export function univerMetaRouter(): Router {
         version: Number(row.version ?? nextVersion),
         data: normalizeJson(row.data),
       }
+      const visibleFormFields = fields.filter((field) => !hiddenFieldIds.has(field.id) && !isFieldPermissionHidden(field))
+      const visibleFormFieldIds = new Set(visibleFormFields.map((field) => field.id))
 
       const relationalLinkFields = fields
         .map((field) => (field.type === 'link' ? { fieldId: field.id, cfg: parseLinkFieldConfig(field.property) } : null))
         .filter((value): value is RelationalLinkField => !!value && !!value.cfg)
-      const attachmentFields = fields.filter((field) => field.type === 'attachment')
+      const attachmentFields = visibleFormFields.filter((field) => field.type === 'attachment')
       const linkValuesByRecord = await loadLinkValuesByRecord(pool.query.bind(pool), [record.id], relationalLinkFields)
       for (const { fieldId } of relationalLinkFields) {
         record.data[fieldId] = linkValuesByRecord.get(record.id)?.get(fieldId) ?? []
       }
+      record.data = filterRecordDataByFieldIds(record.data, visibleFormFieldIds)
       const attachmentSummaries = attachmentFields.length > 0
-        ? serializeAttachmentSummaryMap(
-            await buildAttachmentSummaries(
-              pool.query.bind(pool),
-              req,
-              view.sheetId,
-              [record],
-              attachmentFields,
-            ),
-          )[record.id] ?? {}
+        ? filterSingleRecordFieldSummaryMap(
+            serializeAttachmentSummaryMap(
+              await buildAttachmentSummaries(
+                pool.query.bind(pool),
+                req,
+                view.sheetId,
+                [record],
+                attachmentFields,
+              ),
+            )[record.id] ?? {},
+            visibleFormFieldIds,
+          )
         : undefined
+
+      publishMultitableSheetRealtime({
+        spreadsheetId: view.sheetId,
+        actorId: getRequestActorId(req),
+        source: 'multitable',
+        kind: 'record-updated',
+        recordId: record.id,
+        recordIds: [record.id],
+        fieldIds: Object.keys(patch),
+        recordPatches: [{
+          recordId: record.id,
+          version: record.version,
+          patch,
+        }],
+      })
 
       return res.json({
         ok: true,
@@ -3190,7 +4656,7 @@ export function univerMetaRouter(): Router {
     }
   })
 
-  router.patch('/records/:recordId', rbacGuard('multitable', 'write'), async (req: Request, res: Response) => {
+  router.patch('/records/:recordId', async (req: Request, res: Response) => {
     const recordId = typeof req.params.recordId === 'string' ? req.params.recordId.trim() : ''
     if (!recordId) {
       return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'recordId is required' } })
@@ -3231,30 +4697,14 @@ export function univerMetaRouter(): Router {
       if (!sheet) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
       }
-
-      const fields = await loadFieldsForSheet({ query: pool.query.bind(pool) }, sheetId, metaFieldCache)
-      const fieldById = new Map<string, { type: UniverMetaField['type']; options?: string[]; readonly?: boolean; link?: LinkFieldConfig | null }>()
-      for (const field of fields) {
-        const property = normalizeJson(field.property)
-        const readonly = property.readonly === true
-        if (field.type === 'select') {
-          fieldById.set(field.id, {
-            type: field.type,
-            readonly,
-            options: field.options?.map((option) => option.value) ?? [],
-          })
-          continue
-        }
-        if (field.type === 'link') {
-          fieldById.set(field.id, {
-            type: field.type,
-            readonly,
-            link: parseLinkFieldConfig(field.property),
-          })
-          continue
-        }
-        fieldById.set(field.id, { type: field.type, readonly })
+      const { access, capabilities, sheetScope } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      if (!access.userId) {
+        return res.status(401).json({ error: 'Authentication required' })
       }
+      if (!capabilities.canEditRecord) return sendForbidden(res)
+
+      const fields = await loadFieldsForSheet(pool.query.bind(pool), sheetId)
+      const fieldById = buildFieldMutationGuardMap(fields)
 
       const data = parsed.data.data ?? {}
       const fieldErrors: Record<string, string> = {}
@@ -3267,7 +4717,11 @@ export function univerMetaRouter(): Router {
           fieldErrors[fieldId] = 'Unknown field'
           continue
         }
-        if (field.readonly === true || field.type === 'lookup' || field.type === 'rollup') {
+        if (field.hidden) {
+          fieldErrors[fieldId] = 'Field is hidden'
+          continue
+        }
+        if (field.readOnly === true || field.type === 'lookup' || field.type === 'rollup') {
           fieldErrors[fieldId] = 'Field is readonly'
           continue
         }
@@ -3342,12 +4796,13 @@ export function univerMetaRouter(): Router {
       }
 
       if (Object.keys(fieldErrors).length > 0) {
+        const hiddenOnly = Object.values(fieldErrors).every((message) => message === 'Field is hidden')
         const readonlyOnly = Object.values(fieldErrors).every((message) => message === 'Field is readonly')
-        return res.status(readonlyOnly ? 403 : 400).json({
+        return res.status(hiddenOnly || readonlyOnly ? 403 : 400).json({
           ok: false,
           error: {
-            code: readonlyOnly ? 'FIELD_READONLY' : 'VALIDATION_ERROR',
-            message: readonlyOnly ? 'Readonly field update rejected' : 'Validation failed',
+            code: hiddenOnly ? 'FIELD_HIDDEN' : readonlyOnly ? 'FIELD_READONLY' : 'VALIDATION_ERROR',
+            message: hiddenOnly ? 'Hidden field update rejected' : readonlyOnly ? 'Readonly field update rejected' : 'Validation failed',
             fieldErrors,
           },
         })
@@ -3356,13 +4811,17 @@ export function univerMetaRouter(): Router {
       let nextVersion = 1
       await pool.transaction(async ({ query }) => {
         const currentRes = await query(
-          'SELECT id, version FROM meta_records WHERE id = $1 AND sheet_id = $2 FOR UPDATE',
+          'SELECT id, version, created_by FROM meta_records WHERE id = $1 AND sheet_id = $2 FOR UPDATE',
           [recordId, sheetId],
         )
         if ((currentRes as any).rows.length === 0) {
           throw new NotFoundError(`Record not found: ${recordId}`)
         }
-        const serverVersion = Number((currentRes as any).rows[0]?.version ?? 1)
+        const currentRow: any = (currentRes as any).rows[0]
+        if (!ensureRecordWriteAllowed(capabilities, sheetScope, access, typeof currentRow?.created_by === 'string' ? currentRow.created_by : null, 'edit')) {
+          throw new PermissionError('Record editing is not allowed for this row')
+        }
+        const serverVersion = Number(currentRow?.version ?? 1)
         if (typeof parsed.data.expectedVersion === 'number' && parsed.data.expectedVersion !== serverVersion) {
           throw new VersionConflictError(recordId, serverVersion)
         }
@@ -3425,25 +4884,31 @@ export function univerMetaRouter(): Router {
         version: Number(row.version ?? nextVersion),
         data: normalizeJson(row.data),
       }
+      const visiblePropertyFields = filterVisiblePropertyFields(fields)
+      const visiblePropertyFieldIds = new Set(visiblePropertyFields.map((field) => field.id))
 
       const relationalLinkFields = fields
         .map((field) => (field.type === 'link' ? { fieldId: field.id, cfg: parseLinkFieldConfig(field.property) } : null))
         .filter((value): value is RelationalLinkField => !!value && !!value.cfg)
-      const attachmentFields = fields.filter((field) => field.type === 'attachment')
+      const attachmentFields = visiblePropertyFields.filter((field) => field.type === 'attachment')
       const linkValuesByRecord = await loadLinkValuesByRecord(pool.query.bind(pool), [record.id], relationalLinkFields)
       for (const { fieldId } of relationalLinkFields) {
         record.data[fieldId] = linkValuesByRecord.get(record.id)?.get(fieldId) ?? []
       }
+      record.data = filterRecordDataByFieldIds(record.data, visiblePropertyFieldIds)
       const attachmentSummaries = attachmentFields.length > 0
-        ? serializeAttachmentSummaryMap(
-            await buildAttachmentSummaries(
-              pool.query.bind(pool),
-              req,
-              sheetId,
-              [record],
-              attachmentFields,
-            ),
-          )[record.id] ?? {}
+        ? filterSingleRecordFieldSummaryMap(
+            serializeAttachmentSummaryMap(
+              await buildAttachmentSummaries(
+                pool.query.bind(pool),
+                req,
+                sheetId,
+                [record],
+                attachmentFields,
+              ),
+            )[record.id] ?? {},
+            visiblePropertyFieldIds,
+          )
         : undefined
 
       return res.json({
@@ -3477,6 +4942,9 @@ export function univerMetaRouter(): Router {
       if (err instanceof NotFoundError) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: err.message } })
       }
+      if (err instanceof PermissionError) {
+        return sendForbidden(res, err.message)
+      }
       if (err instanceof ValidationError) {
         return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: err.message } })
       }
@@ -3487,7 +4955,7 @@ export function univerMetaRouter(): Router {
     }
   })
 
-  router.get('/records/:recordId', rbacGuard('multitable', 'read'), async (req: Request, res: Response) => {
+  router.get('/records/:recordId', async (req: Request, res: Response) => {
     const recordId = typeof req.params.recordId === 'string' ? req.params.recordId.trim() : ''
     const sheetIdParam = typeof req.query.sheetId === 'string' ? req.query.sheetId.trim() : undefined
     const viewIdParam = typeof req.query.viewId === 'string' ? req.query.viewId.trim() : undefined
@@ -3510,11 +4978,11 @@ export function univerMetaRouter(): Router {
 
       const recordRes = sheetId
         ? await pool.query(
-          'SELECT id, sheet_id, version, data FROM meta_records WHERE id = $1 AND sheet_id = $2',
+          'SELECT id, sheet_id, version, data, created_by FROM meta_records WHERE id = $1 AND sheet_id = $2',
           [recordId, sheetId],
         )
         : await pool.query(
-          'SELECT id, sheet_id, version, data FROM meta_records WHERE id = $1',
+          'SELECT id, sheet_id, version, data, created_by FROM meta_records WHERE id = $1',
           [recordId],
         )
       const row: any = recordRes.rows[0]
@@ -3523,17 +4991,22 @@ export function univerMetaRouter(): Router {
       }
 
       sheetId = String(row.sheet_id)
+      const { access, capabilities, capabilityOrigin, sheetScope } = await resolveSheetReadableCapabilities(req, pool.query.bind(pool), sheetId)
+      if (!access.userId) {
+        return res.status(401).json({ error: 'Authentication required' })
+      }
+      if (!capabilities.canRead) return sendForbidden(res)
       const sheet = await loadSheetRow(pool.query.bind(pool), sheetId)
       if (!sheet) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
       }
 
-      const fields = await loadFieldsForSheet({ query: pool.query.bind(pool) }, sheetId, metaFieldCache)
-      const attachmentFields = fields.filter((field) => field.type === 'attachment')
+      const fields = await loadFieldsForSheet(pool.query.bind(pool), sheetId)
       const record: UniverMetaRecord = {
         id: String(row.id),
         version: Number(row.version ?? 1),
         data: normalizeJson(row.data),
+        createdBy: typeof row.created_by === 'string' ? row.created_by : null,
       }
 
       const relationalLinkFields = fields
@@ -3543,36 +5016,46 @@ export function univerMetaRouter(): Router {
       for (const { fieldId } of relationalLinkFields) {
         record.data[fieldId] = linkValuesByRecord.get(record.id)?.get(fieldId) ?? []
       }
-      await applyLookupRollup(pool.query.bind(pool), fields, [record], relationalLinkFields, linkValuesByRecord)
-      const linkSummaries = await buildLinkSummaries(pool.query.bind(pool), [record], relationalLinkFields, linkValuesByRecord)
-      const attachmentSummaries = attachmentFields.length > 0
-        ? serializeAttachmentSummaryMap(
-            await buildAttachmentSummaries(
-              pool.query.bind(pool),
-              req,
-              sheetId,
-              [record],
-              attachmentFields,
-            ),
-          )[record.id] ?? {}
+      await applyLookupRollup(req, pool.query.bind(pool), fields, [record], relationalLinkFields, linkValuesByRecord)
+      const visiblePropertyFields = filterVisiblePropertyFields(fields)
+      const visiblePropertyFieldIds = new Set(visiblePropertyFields.map((field) => field.id))
+      record.data = filterRecordDataByFieldIds(record.data, visiblePropertyFieldIds)
+      const linkSummaries = filterSingleRecordFieldSummaryMap(
+        Object.fromEntries(
+          Array.from((await buildLinkSummaries(req, pool.query.bind(pool), [record], relationalLinkFields, linkValuesByRecord)).get(record.id)?.entries() ?? []),
+        ),
+        visiblePropertyFieldIds,
+      )
+      const attachmentSummaries = visiblePropertyFields.some((field) => field.type === 'attachment')
+        ? filterSingleRecordFieldSummaryMap(
+            serializeAttachmentSummaryMap(
+              await buildAttachmentSummaries(
+                pool.query.bind(pool),
+                req,
+                sheetId,
+                [record],
+                visiblePropertyFields.filter((field) => field.type === 'attachment'),
+              ),
+            )[record.id] ?? {},
+            visiblePropertyFieldIds,
+          )
         : undefined
 
-      const access = await resolveRequestAccess(req)
-      const capabilities = deriveCapabilities(access.permissions, access.isAdminRole)
       const fieldPermissions = deriveFieldPermissions(fields, capabilities, {
         hiddenFieldIds: viewConfig?.hiddenFieldIds ?? [],
       })
       const viewPermissions = viewConfig ? deriveViewPermissions([viewConfig], capabilities) : {}
-      const rowActions = deriveRowActions(capabilities)
+      const rowActions = deriveRecordRowActions(capabilities, sheetScope, access, record.createdBy)
 
       return res.json({
         ok: true,
         data: {
           sheet,
           ...(viewConfig ? { view: viewConfig } : {}),
-          fields,
+          fields: visiblePropertyFields,
           record,
           capabilities,
+          capabilityOrigin,
           fieldPermissions,
           ...(viewConfig ? { viewPermissions } : {}),
           rowActions,
@@ -3586,9 +5069,7 @@ export function univerMetaRouter(): Router {
             containerType: 'meta_sheet',
             containerId: sheet.id,
           },
-          linkSummaries: Object.fromEntries(
-            Array.from(linkSummaries.get(record.id)?.entries() ?? []).map(([fieldId, summaries]) => [fieldId, summaries]),
-          ),
+          linkSummaries,
           ...(attachmentSummaries ? { attachmentSummaries } : {}),
         },
       })
@@ -3618,7 +5099,7 @@ export function univerMetaRouter(): Router {
    *
    * Returns: { ok: true, data: { records: [{id, display}], page: {offset, limit, total, hasMore} } }
    */
-  router.get('/records-summary', rbacGuard('multitable', 'read'), async (req: Request, res: Response) => {
+  router.get('/records-summary', async (req: Request, res: Response) => {
     const sheetId = typeof req.query.sheetId === 'string' ? req.query.sheetId.trim() : ''
     const displayFieldId = typeof req.query.displayFieldId === 'string' ? req.query.displayFieldId.trim() : null
     const search = typeof req.query.search === 'string' ? req.query.search.trim().toLowerCase() : ''
@@ -3639,6 +5120,11 @@ export function univerMetaRouter(): Router {
       if (sheetRes.rows.length === 0) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
       }
+      const { access, capabilities } = await resolveSheetReadableCapabilities(req, pool.query.bind(pool), sheetId)
+      if (!access.userId) {
+        return res.status(401).json({ error: 'Authentication required' })
+      }
+      if (!capabilities.canRead) return sendForbidden(res)
 
       const summary = await loadRecordSummaries(pool.query.bind(pool), sheetId, {
         displayFieldId,
@@ -3663,7 +5149,7 @@ export function univerMetaRouter(): Router {
     }
   })
 
-  router.get('/fields/:fieldId/link-options', rbacGuard('multitable', 'read'), async (req: Request, res: Response) => {
+  router.get('/fields/:fieldId/link-options', async (req: Request, res: Response) => {
     const fieldId = typeof req.params.fieldId === 'string' ? req.params.fieldId.trim() : ''
     const recordId = typeof req.query.recordId === 'string' ? req.query.recordId.trim() : undefined
     const search = typeof req.query.search === 'string' ? req.query.search.trim().toLowerCase() : ''
@@ -3690,6 +5176,15 @@ export function univerMetaRouter(): Router {
       if (field.type !== 'link') {
         return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: `Field is not a link field: ${fieldId}` } })
       }
+      const { access: sourceAccess, capabilities: sourceCapabilities } = await resolveSheetReadableCapabilities(
+        req,
+        pool.query.bind(pool),
+        String(fieldRow.sheet_id),
+      )
+      if (!sourceAccess.userId) {
+        return res.status(401).json({ error: 'Authentication required' })
+      }
+      if (!sourceCapabilities.canRead) return sendForbidden(res)
 
       const linkConfig = parseLinkFieldConfig(field.property)
       if (!linkConfig) {
@@ -3700,6 +5195,8 @@ export function univerMetaRouter(): Router {
       if (!targetSheet) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Target sheet not found: ${linkConfig.foreignSheetId}` } })
       }
+      const { capabilities } = await resolveSheetReadableCapabilities(req, pool.query.bind(pool), linkConfig.foreignSheetId)
+      if (!capabilities.canRead) return sendForbidden(res)
 
       let selected: LinkedRecordSummary[] = []
       if (recordId) {
@@ -3717,6 +5214,7 @@ export function univerMetaRouter(): Router {
           [{ fieldId, cfg: linkConfig }],
         )
         const linkSummaries = await buildLinkSummaries(
+          req,
           pool.query.bind(pool),
           [{ id: recordId, version: 0, data: {} }],
           [{ fieldId, cfg: linkConfig }],
@@ -3753,7 +5251,7 @@ export function univerMetaRouter(): Router {
     }
   })
 
-  router.post('/attachments', rbacGuard('multitable', 'write'), async (req: Request, res: Response) => {
+  router.post('/attachments', async (req: Request, res: Response) => {
     try {
       if (!multitableUpload) {
         return res.status(500).json({ ok: false, error: { code: 'UPLOAD_UNAVAILABLE', message: 'Attachment upload not available - multer not installed' } })
@@ -3786,6 +5284,8 @@ export function univerMetaRouter(): Router {
           if (sheetRes.rows.length === 0) {
             return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
           }
+          const { access, capabilities, sheetScope } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+          if (!capabilities.canEditRecord) return sendForbidden(res)
 
           if (fieldId) {
             const fieldRes = await pool.query(
@@ -3803,11 +5303,15 @@ export function univerMetaRouter(): Router {
 
           if (recordId) {
             const recordRes = await pool.query(
-              'SELECT id FROM meta_records WHERE id = $1 AND sheet_id = $2',
+              'SELECT id, created_by FROM meta_records WHERE id = $1 AND sheet_id = $2',
               [recordId, sheetId],
             )
-            if (recordRes.rows.length === 0) {
+            const recordRow: any = recordRes.rows[0]
+            if (!recordRow) {
               return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Record not found: ${recordId}` } })
+            }
+            if (!ensureRecordWriteAllowed(capabilities, sheetScope, access, typeof recordRow?.created_by === 'string' ? recordRow.created_by : null, 'edit')) {
+              return sendForbidden(res, 'Record editing is not allowed for this row')
             }
           }
 
@@ -3890,7 +5394,7 @@ export function univerMetaRouter(): Router {
     }
   })
 
-  router.get('/attachments/:attachmentId', rbacGuard('multitable', 'read'), async (req: Request, res: Response) => {
+  router.get('/attachments/:attachmentId', async (req: Request, res: Response) => {
     const attachmentId = typeof req.params.attachmentId === 'string' ? req.params.attachmentId.trim() : ''
     if (!attachmentId) {
       return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'attachmentId is required' } })
@@ -3899,7 +5403,7 @@ export function univerMetaRouter(): Router {
     try {
       const pool = poolManager.get()
       const attachmentRes = await pool.query(
-        `SELECT id, storage_file_id, filename, original_name, mime_type, size
+        `SELECT id, sheet_id, storage_file_id, filename, original_name, mime_type, size
          FROM multitable_attachments
          WHERE id = $1 AND deleted_at IS NULL`,
         [attachmentId],
@@ -3907,6 +5411,14 @@ export function univerMetaRouter(): Router {
       const row: any = attachmentRes.rows[0]
       if (!row) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Attachment not found: ${attachmentId}` } })
+      }
+      const sheetId = typeof row.sheet_id === 'string' ? row.sheet_id : ''
+      if (sheetId) {
+        const { access, capabilities } = await resolveSheetReadableCapabilities(req, pool.query.bind(pool), sheetId)
+        if (!access.userId) {
+          return res.status(401).json({ error: 'Authentication required' })
+        }
+        if (!capabilities.canRead) return sendForbidden(res)
       }
 
       const storage = getAttachmentStorageService()
@@ -3927,7 +5439,7 @@ export function univerMetaRouter(): Router {
     }
   })
 
-  router.delete('/attachments/:attachmentId', rbacGuard('multitable', 'write'), async (req: Request, res: Response) => {
+  router.delete('/attachments/:attachmentId', async (req: Request, res: Response) => {
     const attachmentId = typeof req.params.attachmentId === 'string' ? req.params.attachmentId.trim() : ''
     if (!attachmentId) {
       return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'attachmentId is required' } })
@@ -3935,8 +5447,15 @@ export function univerMetaRouter(): Router {
 
     try {
       const pool = poolManager.get()
+      let updatedRecordRealtimeScope: {
+        sheetId: string
+        recordId: string
+        fieldId: string
+        version: number
+        patch: Record<string, unknown>
+      } | null = null
       const attachmentRes = await pool.query(
-        `SELECT id, sheet_id, record_id, field_id, storage_file_id
+        `SELECT id, sheet_id, record_id, field_id, storage_file_id, created_by
          FROM multitable_attachments
          WHERE id = $1 AND deleted_at IS NULL`,
         [attachmentId],
@@ -3944,6 +5463,31 @@ export function univerMetaRouter(): Router {
       const attachmentRow: any = attachmentRes.rows[0]
       if (!attachmentRow) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Attachment not found: ${attachmentId}` } })
+      }
+      const access = await resolveRequestAccess(req)
+      const sheetCapabilities = await resolveSheetCapabilities(req, pool.query.bind(pool), String(attachmentRow.sheet_id))
+      if (!sheetCapabilities.capabilities.canEditRecord) return sendForbidden(res)
+      if (typeof attachmentRow.record_id === 'string' && attachmentRow.record_id) {
+        const creatorMap = await loadRecordCreatorMap(
+          pool.query.bind(pool),
+          String(attachmentRow.sheet_id),
+          [String(attachmentRow.record_id)],
+        )
+        if (!ensureRecordWriteAllowed(
+          sheetCapabilities.capabilities,
+          sheetCapabilities.sheetScope,
+          access,
+          creatorMap.get(String(attachmentRow.record_id)),
+          'edit',
+        )) return sendForbidden(res, 'Record editing is not allowed for this row')
+      } else if (!ensureRecordWriteAllowed(
+        sheetCapabilities.capabilities,
+        sheetCapabilities.sheetScope,
+        access,
+        typeof attachmentRow.created_by === 'string' ? attachmentRow.created_by : null,
+        'edit',
+      )) {
+        return sendForbidden(res, 'Attachment deletion is not allowed for this draft attachment')
       }
 
       await pool.transaction(async ({ query }) => {
@@ -3962,12 +5506,20 @@ export function univerMetaRouter(): Router {
             const currentIds = normalizeAttachmentIds(data[fieldId])
             const nextIds = currentIds.filter((id) => id !== attachmentId)
             if (nextIds.length !== currentIds.length) {
-              await query(
+              const updateRes = await query(
                 `UPDATE meta_records
                  SET data = data || $1::jsonb, updated_at = now(), version = version + 1
-                 WHERE id = $2 AND sheet_id = $3`,
+                 WHERE id = $2 AND sheet_id = $3
+                 RETURNING version`,
                 [JSON.stringify({ [fieldId]: nextIds }), recordId, sheetId],
               )
+              updatedRecordRealtimeScope = {
+                sheetId,
+                recordId,
+                fieldId,
+                version: Number((updateRes.rows[0] as any)?.version ?? Number(recordRow?.version ?? 0) + 1),
+                patch: { [fieldId]: nextIds },
+              }
             }
           }
         }
@@ -3985,6 +5537,23 @@ export function univerMetaRouter(): Router {
         // best-effort storage cleanup
       }
 
+      if (updatedRecordRealtimeScope) {
+        publishMultitableSheetRealtime({
+          spreadsheetId: updatedRecordRealtimeScope.sheetId,
+          actorId: getRequestActorId(req),
+          source: 'multitable',
+          kind: 'attachment-updated',
+          recordId: updatedRecordRealtimeScope.recordId,
+          recordIds: [updatedRecordRealtimeScope.recordId],
+          fieldIds: [updatedRecordRealtimeScope.fieldId],
+          recordPatches: [{
+            recordId: updatedRecordRealtimeScope.recordId,
+            version: updatedRecordRealtimeScope.version,
+            patch: updatedRecordRealtimeScope.patch,
+          }],
+        })
+      }
+
       return res.json({ ok: true, data: { deleted: attachmentId } })
     } catch (err) {
       const hint = getDbNotReadyMessage(err)
@@ -3994,7 +5563,7 @@ export function univerMetaRouter(): Router {
     }
   })
 
-  router.post('/records', rbacGuard('multitable', 'write'), async (req: Request, res: Response) => {
+  router.post('/records', async (req: Request, res: Response) => {
     const schema = z.object({
       viewId: z.string().min(1).optional(),
       sheetId: z.string().min(1).optional(),
@@ -4023,6 +5592,11 @@ export function univerMetaRouter(): Router {
       if (sheetRes.rows.length === 0) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
       }
+      const { access, capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      if (!access.userId) {
+        return res.status(401).json({ error: 'Authentication required' })
+      }
+      if (!capabilities.canCreateRecord) return sendForbidden(res)
 
       const fieldRes = await pool.query(
         'SELECT id, type, property FROM meta_fields WHERE sheet_id = $1',
@@ -4160,10 +5734,10 @@ export function univerMetaRouter(): Router {
       const recordId = `rec_${randomUUID()}`
       const recordRes = await pool.transaction(async ({ query }) => {
         const inserted = await query(
-          `INSERT INTO meta_records (id, sheet_id, data, version)
-           VALUES ($1, $2, $3::jsonb, 1)
+          `INSERT INTO meta_records (id, sheet_id, data, version, created_by)
+           VALUES ($1, $2, $3::jsonb, 1, $4)
            RETURNING version`,
-          [recordId, sheetId, JSON.stringify(patch)],
+          [recordId, sheetId, JSON.stringify(patch), getRequestActorId(req)],
         )
 
         if (linkUpdates.size > 0) {
@@ -4183,6 +5757,20 @@ export function univerMetaRouter(): Router {
       })
 
       const version = Number((recordRes.rows[0] as any)?.version ?? 1)
+      publishMultitableSheetRealtime({
+        spreadsheetId: sheetId,
+        actorId: getRequestActorId(req),
+        source: 'multitable',
+        kind: 'record-created',
+        recordId,
+        recordIds: [recordId],
+        fieldIds: Object.keys(patch),
+        recordPatches: [{
+          recordId,
+          version,
+          patch,
+        }],
+      })
       return res.json({ ok: true, data: { record: { id: recordId, version, data: patch } } })
     } catch (err) {
       if (err instanceof ValidationError) {
@@ -4198,7 +5786,7 @@ export function univerMetaRouter(): Router {
     }
   })
 
-  router.delete('/records/:recordId', rbacGuard('multitable', 'write'), async (req: Request, res: Response) => {
+  router.delete('/records/:recordId', async (req: Request, res: Response) => {
     const recordId = typeof req.params.recordId === 'string' ? req.params.recordId : ''
     if (!recordId) {
       return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'recordId is required' } })
@@ -4209,13 +5797,36 @@ export function univerMetaRouter(): Router {
 
     try {
       const pool = poolManager.get()
+      const access = await resolveRequestAccess(req)
+      if (!access.userId) {
+        return res.status(401).json({ error: 'Authentication required' })
+      }
+      let deletedSheetId: string | null = null
+      const recordRes = await pool.query('SELECT id, sheet_id, created_by FROM meta_records WHERE id = $1', [recordId])
+      if (recordRes.rows.length === 0) {
+        throw new NotFoundError(`Record not found: ${recordId}`)
+      }
+      deletedSheetId = typeof (recordRes.rows[0] as any)?.sheet_id === 'string' ? String((recordRes.rows[0] as any).sheet_id) : null
+      if (deletedSheetId) {
+        const { capabilities, sheetScope } = await resolveSheetCapabilities(req, pool.query.bind(pool), deletedSheetId)
+        if (!capabilities.canDeleteRecord) return sendForbidden(res)
+        if (!ensureRecordWriteAllowed(
+          capabilities,
+          sheetScope,
+          access,
+          typeof (recordRes.rows[0] as any)?.created_by === 'string' ? String((recordRes.rows[0] as any).created_by) : null,
+          'delete',
+        )) return sendForbidden(res, 'Record deletion is not allowed for this row')
+      }
       await pool.transaction(async ({ query }) => {
-        const recordRes = await query('SELECT id, version FROM meta_records WHERE id = $1 FOR UPDATE', [recordId])
+        const recordRes = await query('SELECT id, sheet_id, version FROM meta_records WHERE id = $1 FOR UPDATE', [recordId])
         if ((recordRes as any).rows.length === 0) {
           throw new NotFoundError(`Record not found: ${recordId}`)
         }
 
-        const serverVersion = Number((recordRes as any).rows[0]?.version ?? 1)
+        const currentRow: any = (recordRes as any).rows[0]
+        deletedSheetId = typeof currentRow?.sheet_id === 'string' ? currentRow.sheet_id : null
+        const serverVersion = Number(currentRow?.version ?? 1)
         if (typeof expectedVersion === 'number' && expectedVersion !== serverVersion) {
           throw new VersionConflictError(recordId, serverVersion)
         }
@@ -4228,6 +5839,17 @@ export function univerMetaRouter(): Router {
 
         await query('DELETE FROM meta_records WHERE id = $1', [recordId])
       })
+
+      if (deletedSheetId) {
+        publishMultitableSheetRealtime({
+          spreadsheetId: deletedSheetId,
+          actorId: getRequestActorId(req),
+          source: 'multitable',
+          kind: 'record-deleted',
+          recordId,
+          recordIds: [recordId],
+        })
+      }
 
       return res.json({ ok: true, data: { deleted: recordId } })
     } catch (err) {
@@ -4251,7 +5873,7 @@ export function univerMetaRouter(): Router {
     }
   })
 
-  router.post('/patch', rbacGuard('multitable', 'write'), async (req: Request, res: Response) => {
+  router.post('/patch', async (req: Request, res: Response) => {
     const schema = z.object({
       viewId: z.string().min(1).optional(),
       sheetId: z.string().min(1).optional(),
@@ -4275,6 +5897,11 @@ export function univerMetaRouter(): Router {
         viewId: parsed.data.viewId,
       })
       const sheetId = resolved.sheetId
+      const { access, capabilities, sheetScope } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      if (!access.userId) {
+        return res.status(401).json({ error: 'Authentication required' })
+      }
+      if (!capabilities.canEditRecord) return sendForbidden(res)
 
       const fieldRes = await pool.query(
         'SELECT id, name, type, property FROM meta_fields WHERE sheet_id = $1',
@@ -4285,22 +5912,10 @@ export function univerMetaRouter(): Router {
       }
 
       const fields = (fieldRes.rows as any[]).map(serializeFieldRow)
-      const attachmentFields = fields.filter((field) => field.type === 'attachment')
-      const fieldById = new Map<string, { type: UniverMetaField['type']; options?: string[]; readonly?: boolean; link?: LinkFieldConfig | null }>()
-      for (const f of fields) {
-        const prop = normalizeJson(f.property)
-        const isReadonly = prop.readonly === true
-        if (f.type === 'select') {
-          const options = f.options?.map((o) => o.value) ?? []
-          fieldById.set(String(f.id), { type: f.type, options, readonly: isReadonly })
-          continue
-        }
-        if (f.type === 'link') {
-          fieldById.set(String(f.id), { type: f.type, readonly: isReadonly, link: parseLinkFieldConfig(f.property) })
-          continue
-        }
-        fieldById.set(String(f.id), { type: f.type, readonly: isReadonly })
-      }
+      const visiblePropertyFields = filterVisiblePropertyFields(fields)
+      const visiblePropertyFieldIds = new Set(visiblePropertyFields.map((field) => field.id))
+      const attachmentFields = visiblePropertyFields.filter((field) => field.type === 'attachment')
+      const fieldById = buildFieldMutationGuardMap(fields)
 
       const changesByRecord = new Map<string, typeof parsed.data.changes>()
       for (const change of parsed.data.changes) {
@@ -4327,8 +5942,15 @@ export function univerMetaRouter(): Router {
             })
           }
 
+          if (field.hidden) {
+            return res.status(403).json({
+              ok: false,
+              error: { code: 'FIELD_HIDDEN', message: `Field is hidden: ${change.fieldId}` },
+            })
+          }
+
           // P0.3: Field-level readonly permission check
-          if (field.readonly === true) {
+          if (field.readOnly === true) {
             return res.status(403).json({
               ok: false,
               error: { code: 'FIELD_READONLY', message: `Field is readonly: ${change.fieldId}` },
@@ -4408,14 +6030,17 @@ export function univerMetaRouter(): Router {
         for (const [recordId, changes] of changesByRecord.entries()) {
           const expectedVersion = Array.from(new Set(changes.map(c => c.expectedVersion).filter((v): v is number => typeof v === 'number')))[0]
           const recordRes = await query(
-            'SELECT id, version FROM meta_records WHERE sheet_id = $1 AND id = $2 FOR UPDATE',
+            'SELECT id, version, created_by FROM meta_records WHERE sheet_id = $1 AND id = $2 FOR UPDATE',
             [sheetId, recordId],
           )
           if (recordRes.rows.length === 0) {
             throw new NotFoundError(`Record not found: ${recordId}`)
           }
-
-          const serverVersion = Number((recordRes.rows[0] as any).version ?? 1)
+          const recordRow: any = recordRes.rows[0]
+          if (!ensureRecordWriteAllowed(capabilities, sheetScope, access, typeof recordRow?.created_by === 'string' ? recordRow.created_by : null, 'edit')) {
+            throw new ValidationError(`Record editing is not allowed for ${recordId}`)
+          }
+          const serverVersion = Number(recordRow?.version ?? 1)
           if (typeof expectedVersion === 'number' && expectedVersion !== serverVersion) {
             throw new VersionConflictError(recordId, serverVersion)
           }
@@ -4537,7 +6162,7 @@ export function univerMetaRouter(): Router {
 
       let computedRecords: Array<{ recordId: string; data: Record<string, unknown> }> | undefined
       let updatedRowsForSummaries: UniverMetaRecord[] = []
-      const computedFieldIds = fields.filter((f) => f.type === 'lookup' || f.type === 'rollup')
+      const computedFieldIds = visiblePropertyFields.filter((f) => f.type === 'lookup' || f.type === 'rollup')
       if (updates.length > 0 && (computedFieldIds.length > 0 || attachmentFields.length > 0)) {
         const recordIds = updates.map((u) => u.recordId)
         const recordRes = await pool.query(
@@ -4562,60 +6187,90 @@ export function univerMetaRouter(): Router {
         )
 
         await applyLookupRollup(
+          req,
           pool.query.bind(pool),
           fields,
           rows,
           relationalLinkFields,
           linkValuesByRecord,
         )
+        for (const row of rows) {
+          row.data = filterRecordDataByFieldIds(row.data, visiblePropertyFieldIds)
+        }
 
         if (computedFieldIds.length > 0) {
           computedRecords = rows.map((row) => ({
             recordId: row.id,
-            data: extractLookupRollupData(fields, row.data),
+            data: extractLookupRollupData(visiblePropertyFields, row.data),
           }))
         }
       }
 
       const relatedRecords = updates.length > 0
         ? await computeDependentLookupRollupRecords(
+            req,
             pool.query.bind(pool),
             updates.map((u) => u.recordId),
           )
         : []
       const sameSheetRelated = relatedRecords
         .filter((record) => record.sheetId === sheetId)
-        .map((record) => ({ recordId: record.recordId, data: record.data }))
+        .map((record) => ({ recordId: record.recordId, data: filterRecordDataByFieldIds(record.data, visiblePropertyFieldIds) }))
       const crossSheetRelated = relatedRecords.filter((record) => record.sheetId !== sheetId)
       const mergedRecords = mergeComputedRecords(computedRecords, sameSheetRelated)
       const relationalLinkFields = fields
         .map((field) => (field.type === 'link' ? { fieldId: field.id, cfg: parseLinkFieldConfig(field.property) } : null))
         .filter((value): value is RelationalLinkField => !!value && !!value.cfg)
       const patchLinkSummaries = relationalLinkFields.length > 0 && updates.length > 0
-        ? serializeLinkSummaryMap(
-            await buildLinkSummaries(
-              pool.query.bind(pool),
-              updates.map((update) => ({ id: update.recordId, version: 0, data: {} })),
-              relationalLinkFields,
-              await loadLinkValuesByRecord(
+        ? filterRecordFieldSummaryMap(
+            serializeLinkSummaryMap(
+              await buildLinkSummaries(
+                req,
                 pool.query.bind(pool),
-                updates.map((update) => update.recordId),
+                updates.map((update) => ({ id: update.recordId, version: 0, data: {} })),
                 relationalLinkFields,
+                await loadLinkValuesByRecord(
+                  pool.query.bind(pool),
+                  updates.map((update) => update.recordId),
+                  relationalLinkFields,
+                ),
               ),
             ),
+            visiblePropertyFieldIds,
           )
         : undefined
       const patchAttachmentSummaries = attachmentFields.length > 0 && updatedRowsForSummaries.length > 0
-        ? serializeAttachmentSummaryMap(
-            await buildAttachmentSummaries(
-              pool.query.bind(pool),
-              req,
-              sheetId,
-              updatedRowsForSummaries,
-              attachmentFields,
+        ? filterRecordFieldSummaryMap(
+            serializeAttachmentSummaryMap(
+              await buildAttachmentSummaries(
+                pool.query.bind(pool),
+                req,
+                sheetId,
+                updatedRowsForSummaries,
+                attachmentFields,
+              ),
             ),
+            visiblePropertyFieldIds,
           )
         : undefined
+
+      if (updates.length > 0) {
+        publishMultitableSheetRealtime({
+          spreadsheetId: sheetId,
+          actorId: getRequestActorId(req),
+          source: 'multitable',
+          kind: 'record-updated',
+          recordIds: updates.map((update) => update.recordId),
+          fieldIds: [...new Set(Array.from(changesByRecord.values()).flatMap((changes) => changes.map((change) => change.fieldId)))],
+          recordPatches: updates.map((update) => ({
+            recordId: update.recordId,
+            version: update.version,
+            patch: Object.fromEntries(
+              (changesByRecord.get(update.recordId) ?? []).map((change) => [change.fieldId, change.value]),
+            ),
+          })),
+        })
+      }
 
       return res.json({
         ok: true,
