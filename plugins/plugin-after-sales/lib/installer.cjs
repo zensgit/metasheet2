@@ -50,6 +50,7 @@ const ERROR_CODES = Object.freeze({
   ALREADY_INSTALLED: 'already-installed',
   NO_INSTALL_TO_REBUILD: 'no-install-to-rebuild',
   CORE_OBJECT_FAILED: 'core-object-failed',
+  LEDGER_READ_FAILED: 'ledger-read-failed',
   LEDGER_WRITE_FAILED: 'ledger-write-failed',
   INVALID_TEMPLATE_ID: 'invalid-template-id',
 })
@@ -148,7 +149,15 @@ async function loadInstallLedger(database, tenantId, appId) {
     WHERE tenant_id = $1 AND app_id = $2
     LIMIT 1
   `
-  const rows = await database.query(sqlText, [tenantId, appId])
+  let rows
+  try {
+    rows = await database.query(sqlText, [tenantId, appId])
+  } catch (err) {
+    throw new InstallerError(
+      ERROR_CODES.LEDGER_READ_FAILED,
+      `failed to read install ledger: ${err && err.message ? err.message : err}`,
+    )
+  }
   const list = Array.isArray(rows) ? rows : rows && rows.rows
   if (!list || list.length === 0) {
     return null

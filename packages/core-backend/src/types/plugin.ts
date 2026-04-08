@@ -405,6 +405,32 @@ export interface MultitableProvisioningAPI {
 }
 
 export interface MultitableRecordsAPI {
+  listRecords(input: {
+    sheetId: string
+    limit?: number
+    offset?: number
+  }): Promise<Array<{
+    id: string
+    sheetId: string
+    version: number
+    data: Record<string, unknown>
+  }>>
+  queryRecords(input: {
+    sheetId: string
+    filters?: Record<string, string | number | boolean | null>
+    search?: string
+    orderBy?: {
+      fieldId?: string
+      direction?: 'asc' | 'desc'
+    }
+    limit?: number
+    offset?: number
+  }): Promise<Array<{
+    id: string
+    sheetId: string
+    version: number
+    data: Record<string, unknown>
+  }>>
   createRecord(input: {
     sheetId: string
     data: Record<string, unknown>
@@ -432,6 +458,14 @@ export interface MultitableRecordsAPI {
     sheetId: string
     version: number
     data: Record<string, unknown>
+  }>
+  deleteRecord(input: {
+    sheetId: string
+    recordId: string
+  }): Promise<{
+    id: string
+    sheetId: string
+    version: number
   }>
 }
 

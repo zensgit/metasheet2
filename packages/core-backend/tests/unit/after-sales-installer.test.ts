@@ -31,6 +31,7 @@ const installer = require('../../../../plugins/plugin-after-sales/lib/installer.
     ALREADY_INSTALLED: string
     NO_INSTALL_TO_REBUILD: string
     CORE_OBJECT_FAILED: string
+    LEDGER_READ_FAILED: string
     LEDGER_WRITE_FAILED: string
     INVALID_TEMPLATE_ID: string
   }
@@ -267,12 +268,13 @@ function buildRunInput(
 // --------------------------------------------------------------------------
 
 describe('plugin-after-sales installer: ERROR_CODES', () => {
-  it('exposes all 6 canonical codes', () => {
+  it('exposes all 7 canonical codes', () => {
     expect(installer.ERROR_CODES).toMatchObject({
       VALIDATION_FAILED: 'validation-failed',
       ALREADY_INSTALLED: 'already-installed',
       NO_INSTALL_TO_REBUILD: 'no-install-to-rebuild',
       CORE_OBJECT_FAILED: 'core-object-failed',
+      LEDGER_READ_FAILED: 'ledger-read-failed',
       LEDGER_WRITE_FAILED: 'ledger-write-failed',
       INVALID_TEMPLATE_ID: 'invalid-template-id',
     })
@@ -525,6 +527,15 @@ describe('plugin-after-sales installer: runInstall enable mode', () => {
     // Confirming the invariant: LEDGER_WRITE_FAILED means no row persisted
     expect(db.rows).toHaveLength(0)
   })
+
+  it('throws LEDGER_READ_FAILED when ledger SELECT throws before branching', async () => {
+    db.failNextQuery = 'simulated ledger read failure'
+
+    await expect(installer.runInstall(buildRunInput({ mode: 'enable' }, db))).rejects.toMatchObject({
+      code: installer.ERROR_CODES.LEDGER_READ_FAILED,
+    })
+    expect(db.rows).toHaveLength(0)
+  })
 })
 
 describe('plugin-after-sales installer: runInstall reinstall mode', () => {
@@ -584,6 +595,15 @@ describe('plugin-after-sales installer: loadCurrent', () => {
     const context: FakeContext = { api: { database: db } }
     const current = await installer.loadCurrent(context, 'tenant_42', 'after-sales')
     expect(current).toEqual({ status: 'not-installed' })
+  })
+
+  it('throws LEDGER_READ_FAILED when loadCurrent cannot read the ledger', async () => {
+    db.failNextQuery = 'simulated ledger read failure'
+    const context: FakeContext = { api: { database: db } }
+
+    await expect(installer.loadCurrent(context, 'tenant_42', 'after-sales')).rejects.toMatchObject({
+      code: installer.ERROR_CODES.LEDGER_READ_FAILED,
+    })
   })
 
   it('returns full ProjectCurrentResponse shape when a row exists', async () => {

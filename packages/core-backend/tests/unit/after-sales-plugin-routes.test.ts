@@ -27,6 +27,7 @@ interface FakeRowRaw {
 
 interface FakeDatabase {
   rows: FakeRowRaw[]
+  failNextQuery?: string
   query: (sql: string, params?: unknown[]) => Promise<FakeRowRaw[]>
 }
 
@@ -51,6 +52,18 @@ interface FakeContext {
         }) => Promise<unknown>
       }
       records?: {
+        listRecords?: (input: {
+          sheetId: string
+          limit?: number
+          offset?: number
+        }) => Promise<unknown>
+        queryRecords?: (input: {
+          sheetId: string
+          filters?: Record<string, string | number | boolean | null>
+          search?: string
+          limit?: number
+          offset?: number
+        }) => Promise<unknown>
         createRecord: (input: {
           sheetId: string
           data: Record<string, unknown>
@@ -64,6 +77,10 @@ interface FakeContext {
           recordId: string
           changes: Record<string, unknown>
         }) => Promise<unknown>
+        deleteRecord?: (input: {
+          sheetId: string
+          recordId: string
+        }) => Promise<unknown>
       }
     }
     events: {
@@ -74,6 +91,7 @@ interface FakeContext {
   }
   communication: {
     register: ReturnType<typeof vi.fn>
+    call: ReturnType<typeof vi.fn>
   }
   logger: {
     info: ReturnType<typeof vi.fn>
@@ -100,6 +118,11 @@ function createFakeDatabase(): FakeDatabase {
   const db: FakeDatabase = {
     rows: [],
     async query(sql: string, params: unknown[] = []) {
+      if (db.failNextQuery) {
+        const errorMessage = db.failNextQuery
+        db.failNextQuery = undefined
+        throw new Error(errorMessage)
+      }
       const normalized = sql.replace(/\s+/g, ' ').trim()
       if (normalized.startsWith('SELECT')) {
         const [tenantId, appId] = params as [string, string]
@@ -159,9 +182,13 @@ function createContext(): {
   routes: Map<string, RegisteredHandler>
   ensureObject: ReturnType<typeof vi.fn>
   ensureView: ReturnType<typeof vi.fn>
+  listRecords: ReturnType<typeof vi.fn>
+  queryRecords: ReturnType<typeof vi.fn>
   createRecord: ReturnType<typeof vi.fn>
   getRecord: ReturnType<typeof vi.fn>
   patchRecord: ReturnType<typeof vi.fn>
+  deleteRecord: ReturnType<typeof vi.fn>
+  communicationCall: ReturnType<typeof vi.fn>
   db: FakeDatabase
 } {
   const routes = new Map<string, RegisteredHandler>()
@@ -201,6 +228,36 @@ function createContext(): {
     version: 1,
     data: input.data,
   }))
+  const listRecords = vi.fn(async (input: { sheetId: string }) => ([
+    {
+      id: 'rec_ticket_001',
+      sheetId: input.sheetId,
+      version: 3,
+      data: {
+        [pk('ticketNo')]: 'TK-2001',
+        [pk('title')]: 'No cooling output',
+        [pk('source')]: 'phone',
+        [pk('priority')]: 'high',
+        [pk('status')]: 'new',
+      },
+    },
+  ]))
+  const queryRecords = vi.fn(async (input: { sheetId: string }) => ([
+    {
+      id: 'rec_ticket_001',
+      sheetId: input.sheetId,
+      version: 3,
+      data: {
+        [pk('ticketNo')]: 'TK-2001',
+        [pk('title')]: 'No cooling output',
+        [pk('source')]: 'phone',
+        [pk('priority')]: 'high',
+        [pk('status')]: 'new',
+      },
+      filters: input.filters,
+      search: input.search,
+    },
+  ]))
   const getRecord = vi.fn(async (input: { sheetId: string; recordId: string }) => ({
     id: input.recordId,
     sheetId: input.sheetId,
@@ -226,6 +283,23 @@ function createContext(): {
       ...input.changes,
     },
   }))
+  const deleteRecord = vi.fn(async (input: { sheetId: string; recordId: string }) => ({
+    id: input.recordId,
+    sheetId: input.sheetId,
+    version: 4,
+  }))
+  const communicationCall = vi.fn(async (pluginName: string, method: string, payload: Record<string, unknown>) => {
+    if (pluginName === 'after-sales-approval-bridge' && method === 'getRefundApproval') {
+      return {
+        id: 'approval_001',
+        sourceSystem: 'after-sales',
+        workflowKey: 'after-sales-refund',
+        businessKey: `after-sales:${payload.projectId}:ticket:${payload.ticketId}:refund`,
+        status: 'pending',
+      }
+    }
+    return { ok: true, pluginName, method, payload }
+  })
 
   const context: FakeContext = {
     api: {
@@ -243,9 +317,12 @@ function createContext(): {
           ensureView,
         },
         records: {
+          listRecords,
+          queryRecords,
           createRecord,
           getRecord,
           patchRecord,
+          deleteRecord,
         },
       },
       events: {
@@ -256,6 +333,7 @@ function createContext(): {
     },
     communication: {
       register: vi.fn(),
+      call: communicationCall,
     },
     logger: {
       info: vi.fn(),
@@ -263,7 +341,20 @@ function createContext(): {
     },
   }
 
-  return { context, routes, ensureObject, ensureView, createRecord, getRecord, patchRecord, db }
+  return {
+    context,
+    routes,
+    ensureObject,
+    ensureView,
+    listRecords,
+    queryRecords,
+    createRecord,
+    getRecord,
+    patchRecord,
+    deleteRecord,
+    communicationCall,
+    db,
+  }
 }
 
 function buildReq(overrides: Record<string, unknown> = {}) {
@@ -288,11 +379,15 @@ describe('plugin-after-sales routes', () => {
   let routes: Map<string, RegisteredHandler>
   let ensureObject: ReturnType<typeof vi.fn>
   let ensureView: ReturnType<typeof vi.fn>
+  let listRecords: ReturnType<typeof vi.fn>
+  let queryRecords: ReturnType<typeof vi.fn>
   let createRecord: ReturnType<typeof vi.fn>
   let getRecord: ReturnType<typeof vi.fn>
   let patchRecord: ReturnType<typeof vi.fn>
+  let deleteRecord: ReturnType<typeof vi.fn>
   let db: FakeDatabase
   let communicationRegister: ReturnType<typeof vi.fn>
+  let communicationCall: ReturnType<typeof vi.fn>
   let eventsOn: ReturnType<typeof vi.fn>
   let eventsEmit: ReturnType<typeof vi.fn>
 
@@ -301,11 +396,15 @@ describe('plugin-after-sales routes', () => {
     routes = setup.routes
     ensureObject = setup.ensureObject
     ensureView = setup.ensureView
+    listRecords = setup.listRecords
+    queryRecords = setup.queryRecords
     createRecord = setup.createRecord
     getRecord = setup.getRecord
     patchRecord = setup.patchRecord
+    deleteRecord = setup.deleteRecord
     db = setup.db
     communicationRegister = setup.context.communication.register
+    communicationCall = setup.context.communication.call
     eventsOn = setup.context.api.events.on
     eventsEmit = setup.context.api.events.emit
     await plugin.activate(setup.context)
@@ -332,6 +431,23 @@ describe('plugin-after-sales routes', () => {
       ok: true,
       data: {
         status: 'not-installed',
+      },
+    })
+  })
+
+  it('surfaces ledger-read-failed for current when the ledger read throws', async () => {
+    const handler = routes.get('GET /api/after-sales/projects/current')
+    const res = new FakeResponse()
+    db.failNextQuery = 'simulated ledger read failure'
+
+    await handler?.(buildReq(), res)
+
+    expect(res.statusCode).toBe(500)
+    expect(res.body).toEqual({
+      ok: false,
+      error: {
+        code: 'ledger-read-failed',
+        message: 'failed to read install ledger: simulated ledger read failure',
       },
     })
   })
@@ -549,6 +665,70 @@ describe('plugin-after-sales routes', () => {
     expect(createRecord).not.toHaveBeenCalled()
   })
 
+  it('lists tickets through the multitable read seam', async () => {
+    const handler = routes.get('GET /api/after-sales/tickets')
+    const res = new FakeResponse()
+
+    db.rows.push({
+      id: 'fake-uuid-1',
+      tenant_id: 'tenant_42',
+      app_id: 'after-sales',
+      project_id: 'tenant_42:after-sales',
+      template_id: 'after-sales-default',
+      template_version: '0.1.0',
+      mode: 'enable',
+      status: 'installed',
+      created_objects_json: JSON.stringify(['serviceTicket']),
+      created_views_json: JSON.stringify(['ticket-board']),
+      warnings_json: JSON.stringify([]),
+      display_name: 'After-sales',
+      config_json: JSON.stringify({}),
+      last_install_at: new Date(),
+      created_at: new Date(),
+    })
+
+    await handler?.(buildReq({
+      user: {
+        id: 'reader_42',
+        tenantId: 'tenant_42',
+        role: 'user',
+        roles: ['user'],
+        perms: ['after_sales:read'],
+      },
+      query: {
+        status: 'new',
+      },
+    }), res)
+
+    expect(res.statusCode).toBe(200)
+    expect(queryRecords).toHaveBeenCalledWith({
+      sheetId: 'tenant_42:after-sales:serviceTicket:sheet',
+      filters: {
+        [stPk('status')]: 'new',
+      },
+      search: null,
+      limit: undefined,
+      offset: undefined,
+    })
+    expect(res.body.data).toEqual({
+      projectId: 'tenant_42:after-sales',
+      tickets: [
+        {
+          id: 'rec_ticket_001',
+          version: 3,
+          data: {
+            ticketNo: 'TK-2001',
+            title: 'No cooling output',
+            source: 'phone',
+            priority: 'high',
+            status: 'new',
+          },
+        },
+      ],
+      count: 1,
+    })
+  })
+
   it('requests a ticket refund by patching the record and emitting ticket.refundRequested', async () => {
     const handler = routes.get('POST /api/after-sales/tickets/:ticketId/refund-request')
     const res = new FakeResponse()
@@ -599,22 +779,25 @@ describe('plugin-after-sales routes', () => {
       recordId: 'rec_ticket_001',
       changes: {
         [stPk('refundAmount')]: 88.5,
+        [stPk('refundStatus')]: 'pending',
       },
     })
-    expect(eventsEmit).toHaveBeenCalledWith(
-      'ticket.refundRequested',
-      expect.objectContaining({
-        projectId: 'tenant_42:after-sales',
-        ticket: expect.objectContaining({
-          id: 'rec_ticket_001',
-          ticketNo: 'TK-2001',
-          refundAmount: 88.5,
-          requestedBy: 'writer_42',
-          requestedByName: 'Alice',
-          reason: 'Damaged fan motor',
-        }),
+    const refundRequestedCall = eventsEmit.mock.calls.find(([eventName]) => eventName === 'ticket.refundRequested')
+    expect(refundRequestedCall).toBeTruthy()
+    expect(refundRequestedCall?.[1]).toEqual(expect.objectContaining({
+      projectId: 'tenant_42:after-sales',
+      ticketNo: 'TK-2001',
+      title: 'No cooling output',
+      ticket: expect.objectContaining({
+        id: 'rec_ticket_001',
+        ticketNo: 'TK-2001',
+        title: 'No cooling output',
+        refundAmount: 88.5,
+        requestedBy: 'writer_42',
+        requestedByName: 'Alice',
+        reason: 'Damaged fan motor',
       }),
-    )
+    }))
     expect(res.body.data.event).toEqual({
       accepted: true,
       event: 'ticket.refundRequested',
@@ -665,6 +848,108 @@ describe('plugin-after-sales routes', () => {
     expect(res.statusCode).toBe(404)
     expect(res.body.error.code).toBe('NOT_FOUND')
     expect(patchRecord).not.toHaveBeenCalled()
+  })
+
+  it('loads refund approval status for a ticket through the bridge seam', async () => {
+    const handler = routes.get('GET /api/after-sales/tickets/:ticketId/refund-approval')
+    const res = new FakeResponse()
+
+    db.rows.push({
+      id: 'fake-uuid-1',
+      tenant_id: 'tenant_42',
+      app_id: 'after-sales',
+      project_id: 'tenant_42:after-sales',
+      template_id: 'after-sales-default',
+      template_version: '0.1.0',
+      mode: 'enable',
+      status: 'installed',
+      created_objects_json: JSON.stringify(['serviceTicket']),
+      created_views_json: JSON.stringify(['ticket-board']),
+      warnings_json: JSON.stringify([]),
+      display_name: 'After-sales',
+      config_json: JSON.stringify({}),
+      last_install_at: new Date(),
+      created_at: new Date(),
+    })
+
+    await handler?.(buildReq({
+      user: {
+        id: 'reader_42',
+        tenantId: 'tenant_42',
+        role: 'user',
+        roles: ['user'],
+        perms: ['after_sales:read'],
+      },
+      params: {
+        ticketId: 'rec_ticket_001',
+      },
+    }), res)
+
+    expect(res.statusCode).toBe(200)
+    expect(communicationCall).toHaveBeenCalledWith(
+      'after-sales-approval-bridge',
+      'getRefundApproval',
+      {
+        projectId: 'tenant_42:after-sales',
+        ticketId: 'rec_ticket_001',
+        businessKey: undefined,
+      },
+    )
+    expect(res.body.data).toEqual({
+      projectId: 'tenant_42:after-sales',
+      approval: expect.objectContaining({
+        id: 'approval_001',
+        status: 'pending',
+      }),
+    })
+  })
+
+  it('deletes a ticket through the multitable delete seam', async () => {
+    const handler = routes.get('DELETE /api/after-sales/tickets/:ticketId')
+    const res = new FakeResponse()
+
+    db.rows.push({
+      id: 'fake-uuid-1',
+      tenant_id: 'tenant_42',
+      app_id: 'after-sales',
+      project_id: 'tenant_42:after-sales',
+      template_id: 'after-sales-default',
+      template_version: '0.1.0',
+      mode: 'enable',
+      status: 'installed',
+      created_objects_json: JSON.stringify(['serviceTicket']),
+      created_views_json: JSON.stringify(['ticket-board']),
+      warnings_json: JSON.stringify([]),
+      display_name: 'After-sales',
+      config_json: JSON.stringify({}),
+      last_install_at: new Date(),
+      created_at: new Date(),
+    })
+
+    await handler?.(buildReq({
+      user: {
+        id: 'writer_42',
+        tenantId: 'tenant_42',
+        role: 'user',
+        roles: ['user'],
+        perms: ['after_sales:write'],
+      },
+      params: {
+        ticketId: 'rec_ticket_001',
+      },
+    }), res)
+
+    expect(res.statusCode).toBe(200)
+    expect(deleteRecord).toHaveBeenCalledWith({
+      sheetId: 'tenant_42:after-sales:serviceTicket:sheet',
+      recordId: 'rec_ticket_001',
+    })
+    expect(res.body.data).toEqual({
+      projectId: 'tenant_42:after-sales',
+      ticketId: 'rec_ticket_001',
+      version: 4,
+      deleted: true,
+    })
   })
 
   it('emits ticket.created and returns accepted event metadata', async () => {
@@ -1017,14 +1302,19 @@ describe('plugin-after-sales routes', () => {
         getManifest: expect.any(Function),
         getNotificationTopics: expect.any(Function),
         buildRefundApprovalCommand: expect.any(Function),
+        getRefundApproval: expect.any(Function),
         submitRefundApproval: expect.any(Function),
+        submitRefundApprovalDecision: expect.any(Function),
         sendNotificationTopic: expect.any(Function),
+        handleRefundApprovalDecisionCallback: expect.any(Function),
         emitTicketCreated: expect.any(Function),
         emitTicketRefundRequested: expect.any(Function),
         emitTicketOverdue: expect.any(Function),
         emitFollowUpDue: expect.any(Function),
         createTicket: expect.any(Function),
         requestTicketRefund: expect.any(Function),
+        listTickets: expect.any(Function),
+        deleteTicket: expect.any(Function),
       }),
     )
   })
@@ -1032,7 +1322,9 @@ describe('plugin-after-sales routes', () => {
   it('registers workflow event listeners on activate', async () => {
     expect(eventsOn).toHaveBeenCalledWith('ticket.created', expect.any(Function))
     expect(eventsOn).toHaveBeenCalledWith('ticket.assigned', expect.any(Function))
+    expect(eventsOn).toHaveBeenCalledWith('ticket.overdue', expect.any(Function))
     expect(eventsOn).toHaveBeenCalledWith('ticket.refundRequested', expect.any(Function))
     expect(eventsOn).toHaveBeenCalledWith('approval.pending', expect.any(Function))
+    expect(eventsOn).toHaveBeenCalledWith('followup.due', expect.any(Function))
   })
 })

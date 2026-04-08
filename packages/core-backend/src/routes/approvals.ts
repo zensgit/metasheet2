@@ -12,6 +12,7 @@ import { Logger } from '../core/logger'
 import { IPLMAdapter } from '../di/identifiers'
 import { pool } from '../db/pg'
 import { authenticate } from '../middleware/auth'
+import { REFUND_WORKFLOW_KEY, type AfterSalesApprovalBridgeService } from '../services/AfterSalesApprovalBridgeService'
 import { ApprovalBridgeService, ServiceError } from '../services/ApprovalBridgeService'
 import {
   APPROVAL_ERROR_CODES,
@@ -37,6 +38,7 @@ interface ApprovalInstance {
 interface ApprovalRouterOptions {
   injector?: Injector
   plmAdapter?: ApprovalBridgePlmAdapter | null
+  afterSalesApprovalBridgeService?: AfterSalesApprovalBridgeService
 }
 
 function isPlmApprovalId(id: string): boolean {
@@ -337,19 +339,48 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
         })
       }
 
-      const approval = await bridgeService.dispatchAction(
-        req.params.id,
-        {
-          action,
-          comment: typeof req.body?.comment === 'string' ? req.body.comment : undefined,
-        },
-        {
-          userId,
-          userName: resolveApprovalActorName(req, userId),
-          ip: req.ip || null,
-          userAgent: req.get('user-agent') || null,
-        },
-      )
+      const comment = typeof req.body?.comment === 'string' ? req.body.comment : undefined
+      const actor = {
+        userId,
+        userName: resolveApprovalActorName(req, userId),
+        ip: req.ip || null,
+        userAgent: req.get('user-agent') || null,
+      }
+
+      let approval = null
+      const afterSalesBridge = options?.afterSalesApprovalBridgeService
+      if (afterSalesBridge) {
+        const existingAfterSales = await afterSalesBridge.getRefundApproval({
+          approvalId: req.params.id,
+        })
+        if (
+          existingAfterSales &&
+          existingAfterSales.sourceSystem === 'after-sales' &&
+          existingAfterSales.workflowKey === REFUND_WORKFLOW_KEY
+        ) {
+          const result = await afterSalesBridge.submitRefundApprovalDecision({
+            approvalId: req.params.id,
+            action,
+            actorId: actor.userId,
+            actorName: actor.userName,
+            comment,
+            ip: actor.ip,
+            userAgent: actor.userAgent,
+          })
+          approval = result.approval
+        }
+      }
+
+      if (!approval) {
+        approval = await bridgeService.dispatchAction(
+          req.params.id,
+          {
+            action,
+            comment,
+          },
+          actor,
+        )
+      }
 
       res.json(approval)
     } catch (error) {

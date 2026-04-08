@@ -2,9 +2,12 @@ import { describe, expect, it } from 'vitest'
 
 import {
   createRecord,
+  deleteRecord,
   getRecord,
+  listRecords,
   MultitableRecordNotFoundError,
   MultitableRecordValidationError,
+  queryRecords,
   patchRecord,
   type MultitableRecordsQueryFn,
 } from '../../src/multitable/records'
@@ -112,10 +115,69 @@ function createQuery(): {
       return { rows: [{ version: 1 }], rowCount: 1 }
     }
 
-    if (normalized.includes('FROM meta_records WHERE id = $1 AND sheet_id = $2')) {
+    if (normalized.startsWith('SELECT id, sheet_id, version, data FROM meta_records WHERE id = $1 AND sheet_id = $2')) {
       const [recordId, sheetId] = params as [string, string]
       return {
         rows: records.filter((record) => record.id === recordId && record.sheet_id === sheetId),
+      }
+    }
+
+    if (normalized.startsWith('SELECT id, sheet_id, version, data FROM meta_records WHERE sheet_id = $1')) {
+      let filtered = records.filter((record) => record.sheet_id === String(params[0]))
+
+      const whereFilters = normalized.match(/data ->(?:>|) \$(\d+)(?: = \$(\d+)| IS NULL)/g) ?? []
+      for (const clause of whereFilters) {
+        const keyMatch = clause.match(/\$(\d+)/g) ?? []
+        if (clause.includes('IS NULL')) {
+          const fieldParamIndex = Number(keyMatch[0]?.slice(1))
+          const fieldId = String(params[fieldParamIndex - 1])
+          filtered = filtered.filter((record) => record.data[fieldId] == null)
+          continue
+        }
+        const fieldParamIndex = Number(keyMatch[0]?.slice(1))
+        const valueParamIndex = Number(keyMatch[1]?.slice(1))
+        const fieldId = String(params[fieldParamIndex - 1])
+        const value = String(params[valueParamIndex - 1])
+        filtered = filtered.filter((record) => String(record.data[fieldId]) === value)
+      }
+
+      const searchMatch = normalized.match(/data::text ILIKE \$(\d+)/)
+      if (searchMatch) {
+        const searchIndex = Number(searchMatch[1])
+        const pattern = String(params[searchIndex - 1]).replace(/%/g, '')
+        filtered = filtered.filter((record) =>
+          JSON.stringify(record.data).includes(pattern),
+        )
+      }
+
+      const orderMatch = normalized.match(/ORDER BY data ->> \$(\d+) (ASC|DESC) NULLS LAST, id ASC/)
+      if (orderMatch) {
+        const fieldParamIndex = Number(orderMatch[1])
+        const fieldId = String(params[fieldParamIndex - 1])
+        const direction = orderMatch[2]
+        filtered = [...filtered].sort((left, right) => {
+          const leftValue = String(left.data[fieldId] ?? '')
+          const rightValue = String(right.data[fieldId] ?? '')
+          const comparison = leftValue.localeCompare(rightValue)
+          return direction === 'DESC' ? -comparison : comparison
+        })
+      } else if (normalized.includes('ORDER BY id ASC')) {
+        filtered = [...filtered].sort((left, right) => left.id.localeCompare(right.id))
+      }
+
+      const limitMatch = normalized.match(/LIMIT \$(\d+)/)
+      const offsetMatch = normalized.match(/OFFSET \$(\d+)/)
+      if (offsetMatch) {
+        const offset = Number(params[Number(offsetMatch[1]) - 1])
+        filtered = filtered.slice(offset)
+      }
+      if (limitMatch) {
+        const limit = Number(params[Number(limitMatch[1]) - 1])
+        filtered = filtered.slice(0, limit)
+      }
+
+      return {
+        rows: filtered,
       }
     }
 
@@ -127,6 +189,19 @@ function createQuery(): {
       existing.version += 1
       return {
         rows: [{ version: existing.version }],
+        rowCount: 1,
+      }
+    }
+
+    if (normalized.startsWith('DELETE FROM meta_records')) {
+      const [recordId, sheetId] = params as [string, string]
+      const index = records.findIndex((record) => record.id === recordId && record.sheet_id === sheetId)
+      if (index === -1) {
+        return { rows: [], rowCount: 0 }
+      }
+      const [deleted] = records.splice(index, 1)
+      return {
+        rows: [{ version: deleted.version }],
         rowCount: 1,
       }
     }
@@ -259,5 +334,152 @@ describe('multitable records helper', () => {
         refundAmount: 88.5,
       },
     })
+  })
+
+  it('lists records in id order when no query filters are supplied', async () => {
+    const { query, records } = createQuery()
+    records.push({
+      id: 'rec_b',
+      sheet_id: 'sheet_service_ticket',
+      data: {
+        ticketNo: 'TK-1002',
+        title: 'B compressor',
+        priority: 'normal',
+      },
+      version: 1,
+    })
+    records.push({
+      id: 'rec_a',
+      sheet_id: 'sheet_service_ticket',
+      data: {
+        ticketNo: 'TK-1001',
+        title: 'A compressor',
+        priority: 'urgent',
+      },
+      version: 2,
+    })
+
+    await expect(listRecords({
+      query,
+      sheetId: 'sheet_service_ticket',
+    })).resolves.toEqual([
+      {
+        id: 'rec_a',
+        sheetId: 'sheet_service_ticket',
+        version: 2,
+        data: {
+          ticketNo: 'TK-1001',
+          title: 'A compressor',
+          priority: 'urgent',
+        },
+      },
+      {
+        id: 'rec_b',
+        sheetId: 'sheet_service_ticket',
+        version: 1,
+        data: {
+          ticketNo: 'TK-1002',
+          title: 'B compressor',
+          priority: 'normal',
+        },
+      },
+    ])
+  })
+
+  it('queries records with filters, search, and pagination', async () => {
+    const { query, records } = createQuery()
+    records.push(
+      {
+        id: 'rec_a',
+        sheet_id: 'sheet_service_ticket',
+        data: {
+          ticketNo: 'TK-1001',
+          title: 'Broken compressor',
+          priority: 'urgent',
+        },
+        version: 1,
+      },
+      {
+        id: 'rec_b',
+        sheet_id: 'sheet_service_ticket',
+        data: {
+          ticketNo: 'TK-1002',
+          title: 'Broken valve',
+          priority: 'urgent',
+        },
+        version: 1,
+      },
+      {
+        id: 'rec_c',
+        sheet_id: 'sheet_service_ticket',
+        data: {
+          ticketNo: 'TK-1003',
+          title: 'Routine maintenance',
+          priority: 'normal',
+        },
+        version: 1,
+      },
+    )
+
+    await expect(queryRecords({
+      query,
+      sheetId: 'sheet_service_ticket',
+      filters: {
+        priority: 'urgent',
+      },
+      search: 'compressor',
+      orderBy: {
+        fieldId: 'ticketNo',
+        direction: 'desc',
+      },
+      limit: 1,
+      offset: 0,
+    })).resolves.toEqual([
+      {
+        id: 'rec_a',
+        sheetId: 'sheet_service_ticket',
+        version: 1,
+        data: {
+          ticketNo: 'TK-1001',
+          title: 'Broken compressor',
+          priority: 'urgent',
+        },
+      },
+    ])
+  })
+
+  it('deletes an existing record', async () => {
+    const { query, records } = createQuery()
+    records.push({
+      id: 'rec_existing',
+      sheet_id: 'sheet_service_ticket',
+      data: {
+        ticketNo: 'TK-1001',
+        title: 'Broken compressor',
+        priority: 'urgent',
+      },
+      version: 2,
+    })
+
+    await expect(deleteRecord({
+      query,
+      sheetId: 'sheet_service_ticket',
+      recordId: 'rec_existing',
+    })).resolves.toEqual({
+      id: 'rec_existing',
+      sheetId: 'sheet_service_ticket',
+      version: 2,
+    })
+    expect(records).toHaveLength(0)
+  })
+
+  it('throws when deleting a missing record', async () => {
+    const { query } = createQuery()
+
+    await expect(deleteRecord({
+      query,
+      sheetId: 'sheet_service_ticket',
+      recordId: 'rec_missing',
+    })).rejects.toBeInstanceOf(MultitableRecordNotFoundError)
   })
 })

@@ -27,6 +27,36 @@ export type GetMultitableRecordInput = {
   recordId: string
 }
 
+export type MultitableRecordFilterValue = string | number | boolean | null
+
+export type MultitableRecordQueryOrder = {
+  fieldId?: string
+  direction?: 'asc' | 'desc'
+}
+
+export type ListMultitableRecordsInput = {
+  query: MultitableRecordsQueryFn
+  sheetId: string
+  limit?: number
+  offset?: number
+}
+
+export type QueryMultitableRecordsInput = {
+  query: MultitableRecordsQueryFn
+  sheetId: string
+  filters?: Record<string, MultitableRecordFilterValue>
+  search?: string
+  orderBy?: MultitableRecordQueryOrder
+  limit?: number
+  offset?: number
+}
+
+export type DeleteMultitableRecordInput = {
+  query: MultitableRecordsQueryFn
+  sheetId: string
+  recordId: string
+}
+
 export type PatchMultitableRecordInput = {
   query: MultitableRecordsQueryFn
   sheetId: string
@@ -46,6 +76,12 @@ export type LoadedMultitableRecord = {
   sheetId: string
   version: number
   data: Record<string, unknown>
+}
+
+export type DeletedMultitableRecord = {
+  id: string
+  sheetId: string
+  version: number
 }
 
 function isFiniteNumber(value: unknown): value is number {
@@ -158,6 +194,73 @@ function buildNormalizedPatch(
   return patch
 }
 
+function normalizePagingValue(value: unknown, field: string): number | undefined {
+  if (value == null || value === '') return undefined
+  const parsed = typeof value === 'number' ? value : Number(value)
+  if (!Number.isFinite(parsed) || parsed < 0 || !Number.isInteger(parsed)) {
+    throw new MultitableRecordValidationError(`${field} must be a non-negative integer`)
+  }
+  return parsed
+}
+
+function normalizeQueryFilters(
+  fields: Array<{ id: string; type: string; options?: Array<{ value: string }> }>,
+  filters: Record<string, MultitableRecordFilterValue> | undefined,
+): Array<{ fieldId: string; value: MultitableRecordFilterValue }> {
+  const fieldIds = new Set(fields.map((field) => field.id))
+  return Object.entries(filters ?? {}).map(([fieldId, value]) => {
+    if (!fieldIds.has(fieldId)) {
+      throw new MultitableRecordValidationError(`Unknown fieldId: ${fieldId}`)
+    }
+    if (value == null) {
+      return { fieldId, value: null }
+    }
+    if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+      return { fieldId, value }
+    }
+    throw new MultitableRecordValidationError(`Unsupported filter value for ${fieldId}`)
+  })
+}
+
+function normalizeQueryOrder(
+  fields: Array<{ id: string; type: string; options?: Array<{ value: string }> }>,
+  orderBy: MultitableRecordQueryOrder | undefined,
+): { fieldId: string | null; direction: 'asc' | 'desc' } {
+  const direction = orderBy?.direction === 'desc' ? 'desc' : 'asc'
+  if (!orderBy?.fieldId) {
+    return { fieldId: null, direction }
+  }
+  const exists = fields.some((field) => field.id === orderBy.fieldId)
+  if (!exists) {
+    throw new MultitableRecordValidationError(`Unknown fieldId: ${orderBy.fieldId}`)
+  }
+  return { fieldId: orderBy.fieldId, direction }
+}
+
+function normalizeQuerySearch(search: unknown): string | null {
+  if (typeof search !== 'string') return null
+  const trimmed = search.trim()
+  return trimmed ? trimmed : null
+}
+
+async function loadSheetAndFields(
+  query: MultitableRecordsQueryFn,
+  sheetId: string,
+): Promise<{
+  sheet: Awaited<ReturnType<typeof loadSheetRow>>
+  fields: Array<{ id: string; type: string; options?: Array<{ value: string }> }>
+}> {
+  const sheet = await loadSheetRow(query, sheetId)
+  if (!sheet) {
+    throw new MultitableRecordNotFoundError(`Sheet not found: ${sheetId}`)
+  }
+  const fields = await loadFieldsForSheet({ query }, sheetId)
+  if (fields.length === 0) {
+    throw new MultitableRecordNotFoundError(`Sheet not found: ${sheetId}`)
+  }
+  return { sheet, fields }
+}
+
 export async function getRecord(
   input: GetMultitableRecordInput,
 ): Promise<LoadedMultitableRecord> {
@@ -177,19 +280,88 @@ export async function getRecord(
   }
 }
 
+export async function listRecords(
+  input: ListMultitableRecordsInput,
+): Promise<LoadedMultitableRecord[]> {
+  return queryRecords({
+    query: input.query,
+    sheetId: input.sheetId,
+    limit: input.limit,
+    offset: input.offset,
+  })
+}
+
+export async function queryRecords(
+  input: QueryMultitableRecordsInput,
+): Promise<LoadedMultitableRecord[]> {
+  const query = input.query
+  const { fields } = await loadSheetAndFields(query, input.sheetId)
+  const filters = normalizeQueryFilters(fields, input.filters)
+  const search = normalizeQuerySearch(input.search)
+  const orderBy = normalizeQueryOrder(fields, input.orderBy)
+  const limit = normalizePagingValue(input.limit, 'limit')
+  const offset = normalizePagingValue(input.offset, 'offset')
+
+  const params: unknown[] = [input.sheetId]
+  const where: string[] = ['sheet_id = $1']
+
+  for (const filter of filters) {
+    if (filter.value === null) {
+      params.push(filter.fieldId)
+      where.push(`data -> $${params.length} IS NULL`)
+      continue
+    }
+    params.push(filter.fieldId, String(filter.value))
+    where.push(`data ->> $${params.length - 1} = $${params.length}`)
+  }
+
+  if (search) {
+    params.push(`%${search}%`)
+    where.push(`data::text ILIKE $${params.length}`)
+  }
+
+  let orderSql = 'ORDER BY id ASC'
+  if (orderBy.fieldId) {
+    params.push(orderBy.fieldId)
+    const fieldParamIndex = params.length
+    orderSql = `ORDER BY data ->> $${fieldParamIndex} ${orderBy.direction.toUpperCase()} NULLS LAST, id ASC`
+  }
+
+  if (limit !== undefined) {
+    params.push(limit)
+  }
+  const limitParamIndex = limit !== undefined ? params.length : null
+  if (offset !== undefined) {
+    params.push(offset)
+  }
+  const offsetParamIndex = offset !== undefined ? params.length : null
+
+  const sqlParts = [
+    'SELECT id, sheet_id, version, data FROM meta_records',
+    `WHERE ${where.join(' AND ')}`,
+    orderSql,
+  ]
+  if (limitParamIndex !== null) {
+    sqlParts.push(`LIMIT $${limitParamIndex}`)
+  }
+  if (offsetParamIndex !== null) {
+    sqlParts.push(`OFFSET $${offsetParamIndex}`)
+  }
+
+  const recordRes = await query(sqlParts.join(' '), params)
+  return (recordRes.rows as any[]).map((row) => ({
+    id: String(row.id),
+    sheetId: String(row.sheet_id),
+    version: Number(row.version ?? 1),
+    data: normalizeRecordData(row.data),
+  }))
+}
+
 export async function patchRecord(
   input: PatchMultitableRecordInput,
 ): Promise<LoadedMultitableRecord> {
   const query = input.query
-  const sheet = await loadSheetRow(query, input.sheetId)
-  if (!sheet) {
-    throw new MultitableRecordNotFoundError(`Sheet not found: ${input.sheetId}`)
-  }
-
-  const fields = await loadFieldsForSheet({ query }, input.sheetId)
-  if (fields.length === 0) {
-    throw new MultitableRecordNotFoundError(`Sheet not found: ${input.sheetId}`)
-  }
+  const { fields } = await loadSheetAndFields(query, input.sheetId)
 
   const existing = await getRecord({
     query,
@@ -223,15 +395,7 @@ export async function createRecord(
   input: CreateMultitableRecordInput,
 ): Promise<CreatedMultitableRecord> {
   const query = input.query
-  const sheet = await loadSheetRow(query, input.sheetId)
-  if (!sheet) {
-    throw new MultitableRecordNotFoundError(`Sheet not found: ${input.sheetId}`)
-  }
-
-  const fields = await loadFieldsForSheet({ query }, input.sheetId)
-  if (fields.length === 0) {
-    throw new MultitableRecordNotFoundError(`Sheet not found: ${input.sheetId}`)
-  }
+  const { fields } = await loadSheetAndFields(query, input.sheetId)
 
   const patch = buildNormalizedPatch(fields, input.data)
 
@@ -249,5 +413,28 @@ export async function createRecord(
     sheetId: input.sheetId,
     version: Number.isFinite(version) ? version : 1,
     data: patch,
+  }
+}
+
+export async function deleteRecord(
+  input: DeleteMultitableRecordInput,
+): Promise<DeletedMultitableRecord> {
+  const query = input.query
+  await loadSheetAndFields(query, input.sheetId)
+
+  const deleted = await query(
+    `DELETE FROM meta_records
+     WHERE id = $1 AND sheet_id = $2
+     RETURNING version`,
+    [input.recordId, input.sheetId],
+  )
+  const row = (deleted.rows as any[])[0]
+  if (!row) {
+    throw new MultitableRecordNotFoundError(`Record not found: ${input.recordId}`)
+  }
+  return {
+    id: input.recordId,
+    sheetId: input.sheetId,
+    version: Number(row.version ?? 1),
   }
 }

@@ -78,6 +78,12 @@ describe('plugin-after-sales default blueprint', () => {
       }),
       expect.objectContaining({ id: 'slaDueAt', type: 'date', required: false }),
       expect.objectContaining({ id: 'refundAmount', type: 'number', required: false }),
+      expect.objectContaining({
+        id: 'refundStatus',
+        type: 'select',
+        required: false,
+        options: ['pending', 'approved', 'rejected'],
+      }),
     ])
     expect(result.views).toContainEqual({
       id: 'ticket-board',

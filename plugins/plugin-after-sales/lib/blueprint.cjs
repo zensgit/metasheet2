@@ -110,6 +110,13 @@ function enrichObjectDescriptor(objectDescriptor) {
           type: 'number',
           required: false,
         },
+        {
+          id: 'refundStatus',
+          name: 'Refund Status',
+          type: 'select',
+          required: false,
+          options: ['pending', 'approved', 'rejected'],
+        },
       ],
     }
   }

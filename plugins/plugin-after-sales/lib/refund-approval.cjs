@@ -95,8 +95,56 @@ async function submitRefundApproval(context, input) {
   )
 }
 
+async function getRefundApproval(context, input) {
+  const projectId = requiredString(input?.projectId, 'projectId')
+  const communication = context?.communication
+  if (!communication || typeof communication.call !== 'function') {
+    throw createAdapterError(
+      'AFTER_SALES_APPROVAL_BRIDGE_UNAVAILABLE',
+      'After-sales approval bridge query seam is not available on plugin context',
+      { bridge: REFUND_APPROVAL_BRIDGE_ID },
+    )
+  }
+
+  return communication.call(
+    'after-sales-approval-bridge',
+    'getRefundApproval',
+    {
+      projectId,
+      ticketId: typeof input?.ticketId === 'string' && input.ticketId.trim() ? input.ticketId.trim() : undefined,
+      businessKey: typeof input?.businessKey === 'string' && input.businessKey.trim() ? input.businessKey.trim() : undefined,
+    },
+  )
+}
+
+async function submitRefundApprovalDecision(context, input) {
+  const communication = context?.communication
+  if (!communication || typeof communication.call !== 'function') {
+    throw createAdapterError(
+      'AFTER_SALES_APPROVAL_BRIDGE_UNAVAILABLE',
+      'After-sales approval bridge decision seam is not available on plugin context',
+      { bridge: REFUND_APPROVAL_BRIDGE_ID },
+    )
+  }
+
+  return communication.call(
+    'after-sales-approval-bridge',
+    'submitRefundApprovalDecision',
+    {
+      ticketId: typeof input?.ticketId === 'string' && input.ticketId.trim() ? input.ticketId.trim() : undefined,
+      businessKey: typeof input?.businessKey === 'string' && input.businessKey.trim() ? input.businessKey.trim() : undefined,
+      action: requiredString(input?.action, 'action'),
+      actorId: requiredString(input?.actorId, 'actorId'),
+      actorName: typeof input?.actorName === 'string' && input.actorName.trim() ? input.actorName.trim() : undefined,
+      comment: typeof input?.comment === 'string' && input.comment.trim() ? input.comment.trim() : undefined,
+    },
+  )
+}
+
 module.exports = {
   REFUND_APPROVAL_BRIDGE_ID,
   buildRefundApprovalCommand,
+  getRefundApproval,
   submitRefundApproval,
+  submitRefundApprovalDecision,
 }
