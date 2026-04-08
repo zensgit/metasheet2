@@ -6,6 +6,7 @@ import * as path from 'path'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { Pool } from 'pg'
 
+import { ICoreAPI } from '../../src/di/identifiers'
 import type { MetaSheetServer } from '../../src/index'
 
 type HttpResponse = { status: number; body?: unknown; raw: string }
@@ -94,6 +95,10 @@ const META_VIEW_IDS = VIEW_IDS.map(({ objectId, viewId }) =>
 )
 const stFieldId = (objectId: string, fieldId: string) =>
   stableMetaId('fld', PROJECT_ID, objectId, fieldId)
+
+function getServerCoreApi(server: MetaSheetServer): any {
+  return (server as unknown as { injector: { get: (token: unknown) => unknown } }).injector.get(ICoreAPI)
+}
 
 describe('after-sales plugin install integration', () => {
   let server: MetaSheetServer | undefined
@@ -352,6 +357,146 @@ describe('after-sales plugin install integration', () => {
         message: 'Admin access required',
       },
     })
+  })
+
+  it('persists failed install state and recovers via reinstall after a transient provisioning failure', async () => {
+    if (!baseUrl || !pool || !server) return
+
+    const tokenRes = await requestJson(
+      `${baseUrl}/api/auth/dev-token?userId=after-sales-reinstall-it&roles=admin&perms=*:*`,
+    )
+    const token = (tokenRes.body as { token?: string } | undefined)?.token
+    expect(token).toBeTruthy()
+
+    const coreApi = getServerCoreApi(server)
+    const originalEnsureObject = coreApi.multitable.provisioning.ensureObject
+    let failOnce = true
+    coreApi.multitable.provisioning.ensureObject = async (input: unknown) => {
+      if (failOnce) {
+        failOnce = false
+        throw new Error('simulated provisioning failure')
+      }
+      return originalEnsureObject(input)
+    }
+
+    try {
+      const failedInstallRes = await requestJson(`${baseUrl}/api/after-sales/projects/install`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          templateId: 'after-sales-default',
+          displayName: 'After Sales Retry Failure',
+        }),
+      })
+
+      expect(failedInstallRes.status).toBe(500)
+      expect(failedInstallRes.body).toMatchObject({
+        ok: false,
+        error: {
+          code: 'core-object-failed',
+        },
+      })
+
+      const failedCurrentRes = await requestJson(`${baseUrl}/api/after-sales/projects/current`, {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      })
+      expect(failedCurrentRes.status).toBe(200)
+      expect((failedCurrentRes.body as any).data).toMatchObject({
+        status: 'failed',
+        projectId: PROJECT_ID,
+        displayName: 'After Sales Retry Failure',
+      })
+
+      const failedLedgerRes = await pool.query<{
+        tenant_id: string
+        app_id: string
+        project_id: string
+        mode: string
+        status: string
+        warnings_json: unknown
+      }>(
+        `SELECT tenant_id, app_id, project_id, mode, status, warnings_json
+         FROM plugin_after_sales_template_installs
+         WHERE tenant_id = $1 AND app_id = $2`,
+        [TENANT_ID, APP_ID],
+      )
+      expect(failedLedgerRes.rows).toHaveLength(1)
+      expect(failedLedgerRes.rows[0]).toMatchObject({
+        tenant_id: TENANT_ID,
+        app_id: APP_ID,
+        project_id: PROJECT_ID,
+        mode: 'enable',
+        status: 'failed',
+      })
+      expect(Array.isArray(failedLedgerRes.rows[0].warnings_json)).toBe(true)
+      expect((failedLedgerRes.rows[0].warnings_json as unknown[]).length).toBeGreaterThan(0)
+    } finally {
+      coreApi.multitable.provisioning.ensureObject = originalEnsureObject
+    }
+
+    const reinstallRes = await requestJson(`${baseUrl}/api/after-sales/projects/install`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        templateId: 'after-sales-default',
+        mode: 'reinstall',
+        displayName: 'After Sales Retry Success',
+      }),
+    })
+
+    expect(reinstallRes.status).toBe(200)
+    expect((reinstallRes.body as any).data).toMatchObject({
+      projectId: PROJECT_ID,
+      installResult: {
+        status: 'installed',
+        createdObjects: OBJECT_IDS,
+        createdViews: VIEW_IDS.map((item) => item.viewId),
+      },
+    })
+
+    const currentRes = await requestJson(`${baseUrl}/api/after-sales/projects/current`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    })
+    expect(currentRes.status).toBe(200)
+    expect((currentRes.body as any).data).toMatchObject({
+      status: 'installed',
+      projectId: PROJECT_ID,
+      displayName: 'After Sales Retry Success',
+    })
+
+    const repairedLedgerRes = await pool.query<{
+      tenant_id: string
+      app_id: string
+      project_id: string
+      mode: string
+      status: string
+      display_name: string
+    }>(
+      `SELECT tenant_id, app_id, project_id, mode, status, display_name
+       FROM plugin_after_sales_template_installs
+       WHERE tenant_id = $1 AND app_id = $2`,
+      [TENANT_ID, APP_ID],
+    )
+    expect(repairedLedgerRes.rows).toEqual([
+      {
+        tenant_id: TENANT_ID,
+        app_id: APP_ID,
+        project_id: PROJECT_ID,
+        mode: 'reinstall',
+        status: 'installed',
+        display_name: 'After Sales Retry Success',
+      },
+    ])
   })
 
   it('creates a ticket and requests refund through the real after-sales routes', async () => {
