@@ -35,18 +35,33 @@ type FakeRecord = {
   version: number
 }
 
+type FakeLink = {
+  field_id: string
+  record_id: string
+  foreign_record_id: string
+}
+
 function createQuery(): {
   query: MultitableRecordsQueryFn
   sheets: FakeSheet[]
   fields: FakeField[]
   records: FakeRecord[]
+  links: FakeLink[]
 } {
-  const sheets: FakeSheet[] = [{
-    id: 'sheet_service_ticket',
-    base_id: 'base_legacy',
-    name: 'Service Tickets',
-    description: null,
-  }]
+  const sheets: FakeSheet[] = [
+    {
+      id: 'sheet_service_ticket',
+      base_id: 'base_legacy',
+      name: 'Service Tickets',
+      description: null,
+    },
+    {
+      id: 'sheet_customer',
+      base_id: 'base_legacy',
+      name: 'Customers',
+      description: null,
+    },
+  ]
   const fields: FakeField[] = [
     {
       id: 'ticketNo',
@@ -87,8 +102,20 @@ function createQuery(): {
       property: {},
       order: 3,
     },
+    {
+      id: 'customerId',
+      sheet_id: 'sheet_service_ticket',
+      name: 'Customer',
+      type: 'link',
+      property: {
+        foreignSheetId: 'sheet_customer',
+        limitSingleRecord: true,
+      },
+      order: 4,
+    },
   ]
   const records: FakeRecord[] = []
+  const links: FakeLink[] = []
 
   const query: MultitableRecordsQueryFn = async (sql, params = []) => {
     const normalized = sql.replace(/\s+/g, ' ').trim()
@@ -113,6 +140,16 @@ function createQuery(): {
       }
       records.push(record)
       return { rows: [{ version: 1 }], rowCount: 1 }
+    }
+
+    if (normalized.startsWith('SELECT id FROM meta_records WHERE sheet_id = $1 AND id = ANY($2::text[])')) {
+      const [sheetId, ids] = params as [string, string[]]
+      const idSet = new Set(ids)
+      return {
+        rows: records
+          .filter((record) => record.sheet_id === sheetId && idSet.has(record.id))
+          .map((record) => ({ id: record.id })),
+      }
     }
 
     if (normalized.startsWith('SELECT id, sheet_id, version, data FROM meta_records WHERE id = $1 AND sheet_id = $2')) {
@@ -193,6 +230,69 @@ function createQuery(): {
       }
     }
 
+    if (normalized.startsWith('SELECT foreign_record_id FROM meta_links WHERE field_id = $1 AND record_id = $2')) {
+      const [fieldId, recordId] = params as [string, string]
+      return {
+        rows: links
+          .filter((link) => link.field_id === fieldId && link.record_id === recordId)
+          .map((link) => ({ foreign_record_id: link.foreign_record_id })),
+      }
+    }
+
+    if (normalized.startsWith('DELETE FROM meta_links WHERE field_id = $1 AND record_id = $2 AND foreign_record_id = ANY($3::text[])')) {
+      const [fieldId, recordId, foreignIds] = params as [string, string, string[]]
+      const foreignSet = new Set(foreignIds)
+      for (let index = links.length - 1; index >= 0; index -= 1) {
+        const link = links[index]
+        if (
+          link.field_id === fieldId &&
+          link.record_id === recordId &&
+          foreignSet.has(link.foreign_record_id)
+        ) {
+          links.splice(index, 1)
+        }
+      }
+      return { rows: [], rowCount: 1 }
+    }
+
+    if (normalized.startsWith('INSERT INTO meta_links')) {
+      const [, fieldId, recordId, foreignRecordId] = params as [string, string, string, string]
+      if (!links.find((link) =>
+        link.field_id === fieldId &&
+        link.record_id === recordId &&
+        link.foreign_record_id === foreignRecordId
+      )) {
+        links.push({
+          field_id: fieldId,
+          record_id: recordId,
+          foreign_record_id: foreignRecordId,
+        })
+      }
+      return { rows: [], rowCount: 1 }
+    }
+
+    if (normalized.startsWith('DELETE FROM meta_links WHERE field_id = $1 AND record_id = $2')) {
+      const [fieldId, recordId] = params as [string, string]
+      for (let index = links.length - 1; index >= 0; index -= 1) {
+        const link = links[index]
+        if (link.field_id === fieldId && link.record_id === recordId) {
+          links.splice(index, 1)
+        }
+      }
+      return { rows: [], rowCount: 1 }
+    }
+
+    if (normalized.startsWith('DELETE FROM meta_links WHERE record_id = $1 OR foreign_record_id = $1')) {
+      const [recordId] = params as [string]
+      for (let index = links.length - 1; index >= 0; index -= 1) {
+        const link = links[index]
+        if (link.record_id === recordId || link.foreign_record_id === recordId) {
+          links.splice(index, 1)
+        }
+      }
+      return { rows: [], rowCount: 1 }
+    }
+
     if (normalized.startsWith('DELETE FROM meta_records')) {
       const [recordId, sheetId] = params as [string, string]
       const index = records.findIndex((record) => record.id === recordId && record.sheet_id === sheetId)
@@ -209,7 +309,7 @@ function createQuery(): {
     return { rows: [] }
   }
 
-  return { query, sheets, fields, records }
+  return { query, sheets, fields, records, links }
 }
 
 describe('multitable records helper', () => {
@@ -274,6 +374,34 @@ describe('multitable records helper', () => {
     })).rejects.toBeInstanceOf(MultitableRecordValidationError)
   })
 
+  it('creates link field values and syncs meta_links', async () => {
+    const { query, records, links } = createQuery()
+    records.push({
+      id: 'cust_1',
+      sheet_id: 'sheet_customer',
+      data: { name: 'Acme' },
+      version: 1,
+    })
+
+    const created = await createRecord({
+      query,
+      sheetId: 'sheet_service_ticket',
+      data: {
+        ticketNo: 'TK-1001',
+        customerId: 'cust_1',
+      },
+    })
+
+    expect(created.data.customerId).toEqual(['cust_1'])
+    expect(links).toEqual([
+      {
+        field_id: 'customerId',
+        record_id: created.id,
+        foreign_record_id: 'cust_1',
+      },
+    ])
+  })
+
   it('loads an existing record by sheet and id', async () => {
     const { query, records } = createQuery()
     records.push({
@@ -334,6 +462,54 @@ describe('multitable records helper', () => {
         refundAmount: 88.5,
       },
     })
+  })
+
+  it('patches link field values and replaces meta_links', async () => {
+    const { query, records, links } = createQuery()
+    records.push({
+      id: 'cust_1',
+      sheet_id: 'sheet_customer',
+      data: { name: 'Acme' },
+      version: 1,
+    })
+    records.push({
+      id: 'cust_2',
+      sheet_id: 'sheet_customer',
+      data: { name: 'Beta' },
+      version: 1,
+    })
+    records.push({
+      id: 'rec_existing',
+      sheet_id: 'sheet_service_ticket',
+      data: {
+        ticketNo: 'TK-1001',
+        customerId: ['cust_1'],
+      },
+      version: 2,
+    })
+    links.push({
+      field_id: 'customerId',
+      record_id: 'rec_existing',
+      foreign_record_id: 'cust_1',
+    })
+
+    const patched = await patchRecord({
+      query,
+      sheetId: 'sheet_service_ticket',
+      recordId: 'rec_existing',
+      changes: {
+        customerId: 'cust_2',
+      },
+    })
+
+    expect(patched.data.customerId).toEqual(['cust_2'])
+    expect(links).toEqual([
+      {
+        field_id: 'customerId',
+        record_id: 'rec_existing',
+        foreign_record_id: 'cust_2',
+      },
+    ])
   })
 
   it('lists records in id order when no query filters are supplied', async () => {
@@ -449,7 +625,7 @@ describe('multitable records helper', () => {
   })
 
   it('deletes an existing record', async () => {
-    const { query, records } = createQuery()
+    const { query, records, links } = createQuery()
     records.push({
       id: 'rec_existing',
       sheet_id: 'sheet_service_ticket',
@@ -459,6 +635,11 @@ describe('multitable records helper', () => {
         priority: 'urgent',
       },
       version: 2,
+    })
+    links.push({
+      field_id: 'customerId',
+      record_id: 'rec_existing',
+      foreign_record_id: 'cust_1',
     })
 
     await expect(deleteRecord({
@@ -471,6 +652,7 @@ describe('multitable records helper', () => {
       version: 2,
     })
     expect(records).toHaveLength(0)
+    expect(links).toHaveLength(0)
   })
 
   it('throws when deleting a missing record', async () => {
