@@ -4,10 +4,11 @@ import { createRequire } from 'module'
 import net from 'net'
 import * as path from 'path'
 
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { Pool } from 'pg'
 
 import type { MetaSheetServer } from '../../src/index'
+import { notificationService } from '../../src/services/NotificationService'
 
 type HttpResponse = { status: number; body?: unknown; raw: string }
 type ExpectedField = { name: string; type: string }
@@ -81,6 +82,8 @@ function stableMetaId(prefix: string, ...parts: string[]): string {
 const TENANT_ID = 'default'
 const APP_ID = 'after-sales'
 const PROJECT_ID = `${TENANT_ID}:${APP_ID}`
+const SUPERVISOR_USER_ID = 'after-sales-service-record-supervisor-it'
+const SUPERVISOR_EMAIL = 'after-sales-supervisor-it@example.com'
 const OBJECT_IDS = ['serviceTicket', 'installedAsset', 'customer', 'serviceRecord', 'partItem', 'followUp']
 const VIEW_IDS = [
   { objectId: 'serviceTicket', viewId: 'ticket-board' },
@@ -251,6 +254,8 @@ describe('after-sales plugin install integration', () => {
       'DELETE FROM plugin_after_sales_template_installs WHERE tenant_id = $1 AND app_id = $2',
       [TENANT_ID, APP_ID],
     )
+    await pool.query('DELETE FROM user_roles WHERE user_id = $1', [SUPERVISOR_USER_ID])
+    await pool.query('DELETE FROM users WHERE id = $1', [SUPERVISOR_USER_ID])
   }
 
   beforeAll(async () => {
@@ -316,6 +321,28 @@ describe('after-sales plugin install integration', () => {
     // and the `mode='enable'` install path would hit `already-installed`.
     await cleanupAfterSalesInstallArtifacts()
   })
+
+  async function seedSupervisorRecipient() {
+    if (!pool) return
+    await pool.query(
+      `INSERT INTO users (id, email, name, password_hash, role, permissions, is_active, is_admin)
+       VALUES ($1, $2, $3, $4, $5, '[]'::jsonb, TRUE, FALSE)
+       ON CONFLICT (id) DO UPDATE
+       SET email = EXCLUDED.email,
+           name = EXCLUDED.name,
+           password_hash = EXCLUDED.password_hash,
+           role = EXCLUDED.role,
+           is_active = TRUE,
+           is_admin = FALSE`,
+      [SUPERVISOR_USER_ID, SUPERVISOR_EMAIL, 'Service Record Supervisor', 'integration-test', 'supervisor'],
+    )
+    await pool.query(
+      `INSERT INTO user_roles (user_id, role_id)
+       VALUES ($1, $2)
+       ON CONFLICT (user_id, role_id) DO NOTHING`,
+      [SUPERVISOR_USER_ID, 'supervisor'],
+    )
+  }
 
   it('installs the after-sales template into real multitable tables and exposes current state', async () => {
     if (!baseUrl || !pool) return
@@ -939,6 +966,10 @@ describe('after-sales plugin install integration', () => {
     })
     expect(createTicketRes.status).toBe(201)
 
+    await seedSupervisorRecipient()
+
+    const sendSpy = vi.spyOn(notificationService, 'send')
+
     const createRes = await requestJson(`${baseUrl}/api/after-sales/service-records`, {
       method: 'POST',
       headers: {
@@ -1036,5 +1067,35 @@ describe('after-sales plugin install integration', () => {
         result: 'resolved',
       }),
     })
+
+    const sentNotifications = await waitFor(
+      async () => sendSpy.mock.calls.map(([notification]) => notification),
+      (notifications) => notifications.length === 2,
+      { timeoutMs: 5000, intervalMs: 100 },
+    )
+    expect(sentNotifications).toHaveLength(2)
+    expect(sentNotifications).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: 'service.recorded',
+          channel: 'feishu',
+          metadata: expect.objectContaining({
+            topic: 'after-sales.service.recorded',
+            event: 'service.recorded',
+          }),
+          recipients: [{ id: SUPERVISOR_USER_ID, type: 'user' }],
+        }),
+        expect.objectContaining({
+          type: 'service.recorded',
+          channel: 'email',
+          metadata: expect.objectContaining({
+            topic: 'after-sales.service.recorded',
+            event: 'service.recorded',
+          }),
+          recipients: [{ id: SUPERVISOR_EMAIL, type: 'email' }],
+        }),
+      ]),
+    )
+    sendSpy.mockRestore()
   })
 })
