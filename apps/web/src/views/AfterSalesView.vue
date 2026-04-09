@@ -206,6 +206,37 @@
           </p>
           <p v-else-if="ticketSubmitSuccess" class="after-sales-view__inline-success">{{ ticketSubmitSuccess }}</p>
 
+          <form class="after-sales-view__ticket-filters" @submit.prevent="applyTicketFilters">
+            <label class="after-sales-view__field">
+              <span>Filter status</span>
+              <input
+                id="after-sales-ticket-filter-status"
+                v-model="ticketFilters.status"
+                class="after-sales-view__field-input"
+                placeholder="open, pending..."
+                type="text"
+              />
+            </label>
+            <label class="after-sales-view__field after-sales-view__field--wide">
+              <span>Search ticket</span>
+              <input
+                id="after-sales-ticket-filter-search"
+                v-model="ticketFilters.search"
+                class="after-sales-view__field-input"
+                placeholder="ticket no, title, refund status..."
+                type="text"
+              />
+            </label>
+          </form>
+
+          <div class="after-sales-view__action-row after-sales-view__action-row--compact">
+            <button class="after-sales-view__ghost-btn" :disabled="ticketsLoading" @click="applyTicketFilters">
+              {{ ticketsLoading ? 'Applying...' : 'Apply ticket filters' }}
+            </button>
+            <button class="after-sales-view__ghost-btn" :disabled="ticketsLoading" @click="resetTicketFilters">
+              Clear ticket filters
+            </button>
+          </div>
           <p v-if="ticketsLoading" class="after-sales-view__muted-state">Loading recent tickets...</p>
           <p v-else-if="ticketsError" class="after-sales-view__inline-error">{{ ticketsError }}</p>
           <div v-else-if="tickets.length" class="after-sales-view__ticket-list">
@@ -617,6 +648,11 @@ interface ServiceRecordFilterDraft {
   search: string
 }
 
+interface TicketFilterDraft {
+  status: string
+  search: string
+}
+
 interface CreateServiceRecordResponse {
   projectId: string
   serviceRecord: ServiceRecordRow
@@ -671,6 +707,10 @@ const serviceRecords = ref<ServiceRecordViewModel[]>([])
 const configDraft = ref({ ...DEFAULT_CONFIG })
 const baselineConfigDraft = ref({ ...DEFAULT_CONFIG })
 const ticketDraft = ref<TicketDraft>(createTicketDraft())
+const ticketFilters = ref<TicketFilterDraft>({
+  status: '',
+  search: '',
+})
 const serviceRecordDraft = ref<ServiceRecordDraft>(createServiceRecordDraft())
 const serviceRecordFilters = ref<ServiceRecordFilterDraft>({
   ticketNo: '',
@@ -916,6 +956,16 @@ function buildServiceRecordListPath() {
   return query ? `/api/after-sales/service-records?${query}` : '/api/after-sales/service-records'
 }
 
+function buildTicketListPath() {
+  const params = new URLSearchParams()
+  const status = toText(ticketFilters.value.status)
+  const search = toText(ticketFilters.value.search)
+  if (status) params.set('status', status)
+  if (search) params.set('search', search)
+  const query = params.toString()
+  return query ? `/api/after-sales/tickets?${query}` : '/api/after-sales/tickets'
+}
+
 function matchesServiceRecordFilters(record: ServiceRecordViewModel) {
   const ticketNo = toText(serviceRecordFilters.value.ticketNo)
   const result = toText(serviceRecordFilters.value.result)
@@ -1004,7 +1054,7 @@ async function loadTicketsForCurrentState(state: CurrentResponse): Promise<void>
       return
     }
 
-    const payload = await readEnvelope<TicketsResponse>('/api/after-sales/tickets')
+    const payload = await readEnvelope<TicketsResponse>(buildTicketListPath())
     const rows = Array.isArray(payload?.tickets) ? payload.tickets : []
     tickets.value = await Promise.all(
       rows.map(async (ticket) => {
@@ -1023,6 +1073,18 @@ async function loadTicketsForCurrentState(state: CurrentResponse): Promise<void>
   } finally {
     ticketsLoading.value = false
   }
+}
+
+async function applyTicketFilters() {
+  await loadTicketsForCurrentState(current.value)
+}
+
+async function resetTicketFilters() {
+  ticketFilters.value = {
+    status: '',
+    search: '',
+  }
+  await loadTicketsForCurrentState(current.value)
 }
 
 async function loadServiceRecordsForCurrentState(state: CurrentResponse): Promise<void> {
@@ -1573,7 +1635,9 @@ onMounted(() => {
 }
 
 .after-sales-view__ticket-form,
-.after-sales-view__service-record-form {
+.after-sales-view__service-record-form,
+.after-sales-view__ticket-filters,
+.after-sales-view__service-record-filters {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 14px;
@@ -1729,7 +1793,9 @@ code {
   .after-sales-view__section-header,
   .after-sales-view__config-form,
   .after-sales-view__ticket-form,
-  .after-sales-view__service-record-form {
+  .after-sales-view__service-record-form,
+  .after-sales-view__ticket-filters,
+  .after-sales-view__service-record-filters {
     grid-template-columns: 1fr;
     display: grid;
   }
