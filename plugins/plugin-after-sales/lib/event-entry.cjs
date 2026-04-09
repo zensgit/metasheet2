@@ -191,6 +191,44 @@ function buildInstalledAssetCommand(input) {
   }
 }
 
+function buildUpdateInstalledAssetCommand(input, existingInstalledAsset) {
+  const command = input && typeof input === 'object' && !Array.isArray(input) ? input : {}
+  const installedAsset =
+    command.installedAsset && typeof command.installedAsset === 'object' && !Array.isArray(command.installedAsset)
+      ? command.installedAsset
+      : command
+  const currentInstalledAsset =
+    existingInstalledAsset && typeof existingInstalledAsset === 'object' ? existingInstalledAsset : {}
+
+  const assetCode = requiredString(
+    installedAsset.assetCode ?? currentInstalledAsset.assetCode,
+    'installedAsset.assetCode',
+  )
+  const status = normalizeEnumValue(
+    installedAsset.status ?? currentInstalledAsset.status,
+    'installedAsset.status',
+    ['active', 'expired', 'decommissioned'],
+    optionalString(currentInstalledAsset.status) || 'active',
+  )
+  const serialNo = optionalString(installedAsset.serialNo ?? currentInstalledAsset.serialNo)
+  const model = optionalString(installedAsset.model ?? currentInstalledAsset.model)
+  const location = optionalString(installedAsset.location ?? currentInstalledAsset.location)
+  const installedAt = optionalString(installedAsset.installedAt ?? currentInstalledAsset.installedAt)
+  const warrantyUntil = optionalString(installedAsset.warrantyUntil ?? currentInstalledAsset.warrantyUntil)
+
+  return {
+    changes: {
+      assetCode,
+      status,
+      serialNo: serialNo || null,
+      model: model || null,
+      location: location || null,
+      installedAt: installedAt || null,
+      warrantyUntil: warrantyUntil || null,
+    },
+  }
+}
+
 function normalizeTicketStatus(value) {
   if (optionalString(value) === 'open') {
     return 'new'
@@ -501,6 +539,7 @@ function buildServiceRecordedEventPayload(input, meta) {
 module.exports = {
   buildCreateTicketCommand,
   buildInstalledAssetCommand,
+  buildUpdateInstalledAssetCommand,
   buildUpdateTicketCommand,
   buildRequestRefundCommand,
   buildRefundDecisionEventPayload,
