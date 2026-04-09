@@ -5,6 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 COMPOSE_FILE="${COMPOSE_FILE:-${ROOT_DIR}/docker-compose.app.staging.yml}"
 ENV_FILE="${ENV_FILE:-${ROOT_DIR}/docker/app.staging.env}"
 SKIP_PULL="${SKIP_PULL:-0}"
+ENV_VALIDATOR="${ROOT_DIR}/scripts/ops/validate-env-file.sh"
 
 function info() {
   echo "[deploy-dingtalk-staging] $*" >&2
@@ -33,6 +34,7 @@ COMPOSE_CMD="$(resolve_compose_cmd || true)"
 [[ -n "${COMPOSE_CMD}" ]] || die "docker compose v2 is required"
 [[ -f "${COMPOSE_FILE}" ]] || die "missing compose file: ${COMPOSE_FILE}"
 [[ -f "${ENV_FILE}" ]] || die "missing env file: ${ENV_FILE}"
+[[ -x "${ENV_VALIDATOR}" ]] || die "missing env validator: ${ENV_VALIDATOR}"
 
 ENV_IMAGE_OWNER="$(read_env_value IMAGE_OWNER "${ENV_FILE}" || true)"
 ENV_IMAGE_TAG="$(read_env_value IMAGE_TAG "${ENV_FILE}" || true)"
@@ -44,6 +46,8 @@ info "Env:     ${ENV_FILE}"
 info "Image owner: ${DEPLOY_IMAGE_OWNER}"
 info "Image tag:   ${DEPLOY_IMAGE_TAG}"
 info "Skip pull:   ${SKIP_PULL}"
+
+"${ENV_VALIDATOR}" "${ENV_FILE}"
 
 eval "APP_ENV_FILE=\"${ENV_FILE}\" IMAGE_OWNER=\"${DEPLOY_IMAGE_OWNER}\" IMAGE_TAG=\"${DEPLOY_IMAGE_TAG}\" ${COMPOSE_CMD} --env-file \"${ENV_FILE}\" -f \"${COMPOSE_FILE}\" config >/dev/null"
 eval "APP_ENV_FILE=\"${ENV_FILE}\" IMAGE_OWNER=\"${DEPLOY_IMAGE_OWNER}\" IMAGE_TAG=\"${DEPLOY_IMAGE_TAG}\" ${COMPOSE_CMD} --env-file \"${ENV_FILE}\" -f \"${COMPOSE_FILE}\" up -d postgres redis"

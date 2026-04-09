@@ -75,6 +75,8 @@ bash scripts/ops/deploy-dingtalk-staging.sh
 
 If `DEPLOY_IMAGE_OWNER` and `DEPLOY_IMAGE_TAG` are omitted, the script now falls back to `IMAGE_OWNER` and `IMAGE_TAG` from `docker/app.staging.env`. This keeps ad-hoc `docker compose --env-file docker/app.staging.env ...` and the deploy script aligned instead of silently pulling `latest`.
 
+The staging deploy script now also validates the env file format before Compose runs. A corrupted single-line file with literal `\n` sequences will fail fast instead of tearing down containers and then discovering the env file is unreadable.
+
 ## Building a PR stack before merge
 
 GitHub Actions in this repository only build Docker images on `main` and `master`, so stacked DingTalk PR branches do not automatically publish a GHCR tag.
