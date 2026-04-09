@@ -77,6 +77,18 @@ If `DEPLOY_IMAGE_OWNER` and `DEPLOY_IMAGE_TAG` are omitted, the script now falls
 
 The staging deploy script now also validates the env file format before Compose runs. A corrupted single-line file with literal `\n` sequences will fail fast instead of tearing down containers and then discovering the env file is unreadable.
 
+If an operator needs to recover a corrupted env file on-host, use:
+
+```bash
+bash scripts/ops/repair-env-file.sh docker/app.env
+```
+
+or for staging:
+
+```bash
+bash scripts/ops/repair-env-file.sh docker/app.staging.env
+```
+
 ## Building a PR stack before merge
 
 GitHub Actions in this repository only build Docker images on `main` and `master`, so stacked DingTalk PR branches do not automatically publish a GHCR tag.
