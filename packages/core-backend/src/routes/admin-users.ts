@@ -83,6 +83,20 @@ type AdminInviteLedgerRow = {
   invited_by_name: string | null
 }
 
+type AdminDingTalkGrantRow = {
+  enabled: boolean
+  granted_by: string | null
+  created_at: string
+  updated_at: string
+}
+
+type AdminDingTalkIdentityRow = {
+  corp_id: string | null
+  last_login_at: string | null
+  created_at: string
+  updated_at: string
+}
+
 type AuditRangeBoundaryMode = 'start' | 'end'
 
 type CreateUserRequestBody = {
@@ -95,7 +109,8 @@ type CreateUserRequestBody = {
   isActive?: boolean
 }
 
-const ADMIN_AUDIT_RESOURCE_TYPES = ['user', 'user-role', 'user-password', 'user-session', 'user-invite', 'role', 'permission', 'permission-template'] as const
+const ADMIN_AUDIT_RESOURCE_TYPES = ['user', 'user-role', 'user-auth-grant', 'user-password', 'user-session', 'user-invite', 'role', 'permission', 'permission-template'] as const
+const DINGTALK_PROVIDER = 'dingtalk'
 
 function getRequestUserId(req: Request): string {
   const raw = req.user as Record<string, unknown> | undefined
@@ -223,6 +238,58 @@ function normalizeInviteLedgerRow(row: AdminInviteLedgerRow): AdminInviteLedgerR
     }
   }
   return row
+}
+
+function readBooleanEnv(name: string, fallback: boolean): boolean {
+  const raw = String(process.env[name] ?? '').trim().toLowerCase()
+  if (!raw) return fallback
+  if (['1', 'true', 'yes', 'on', 'enabled'].includes(raw)) return true
+  if (['0', 'false', 'no', 'off', 'disabled'].includes(raw)) return false
+  return fallback
+}
+
+async function fetchDingTalkAccessSnapshot(userId: string) {
+  const [grantResult, identityResult] = await Promise.all([
+    query<AdminDingTalkGrantRow>(
+      `SELECT enabled, granted_by, created_at, updated_at
+       FROM user_external_auth_grants
+       WHERE provider = $1 AND local_user_id = $2
+       LIMIT 1`,
+      [DINGTALK_PROVIDER, userId],
+    ),
+    query<AdminDingTalkIdentityRow>(
+      `SELECT corp_id, last_login_at, created_at, updated_at
+       FROM user_external_identities
+       WHERE provider = $1 AND local_user_id = $2
+       ORDER BY updated_at DESC
+       LIMIT 1`,
+      [DINGTALK_PROVIDER, userId],
+    ),
+  ])
+
+  const grant = grantResult.rows[0] ?? null
+  const identity = identityResult.rows[0] ?? null
+
+  return {
+    provider: DINGTALK_PROVIDER,
+    requireGrant: readBooleanEnv('DINGTALK_AUTH_REQUIRE_GRANT', false),
+    autoLinkEmail: readBooleanEnv('DINGTALK_AUTH_AUTO_LINK_EMAIL', true),
+    autoProvision: readBooleanEnv('DINGTALK_AUTH_AUTO_PROVISION', false),
+    grant: {
+      exists: grant !== null,
+      enabled: grant?.enabled === true,
+      grantedBy: grant?.granted_by ?? null,
+      createdAt: grant?.created_at ?? null,
+      updatedAt: grant?.updated_at ?? null,
+    },
+    identity: {
+      exists: identity !== null,
+      corpId: identity?.corp_id ?? null,
+      lastLoginAt: identity?.last_login_at ?? null,
+      createdAt: identity?.created_at ?? null,
+      updatedAt: identity?.updated_at ?? null,
+    },
+  }
 }
 
 export function adminUsersRouter(): Router {
@@ -697,6 +764,72 @@ export function adminUsersRouter(): Router {
       return jsonOk(res, { ...snapshot, actorId: adminUserId })
     } catch (error) {
       return jsonError(res, 500, 'USER_ACCESS_FAILED', (error as Error)?.message || 'Failed to load user access')
+    }
+  })
+
+  r.get('/api/admin/users/:userId/dingtalk-access', authenticate, async (req: Request, res: Response) => {
+    const adminUserId = await ensurePlatformAdmin(req, res)
+    if (!adminUserId) return
+
+    try {
+      const userId = String(req.params.userId || '').trim()
+      if (!userId) return jsonError(res, 400, 'USER_ID_REQUIRED', 'userId is required')
+
+      const profile = await fetchUserProfile(userId)
+      if (!profile) return jsonError(res, 404, 'NOT_FOUND', 'User not found')
+
+      return jsonOk(res, {
+        userId,
+        actorId: adminUserId,
+        ...(await fetchDingTalkAccessSnapshot(userId)),
+      })
+    } catch (error) {
+      return jsonError(res, 500, 'DINGTALK_ACCESS_FAILED', (error as Error)?.message || 'Failed to load DingTalk access')
+    }
+  })
+
+  r.patch('/api/admin/users/:userId/dingtalk-grant', authenticate, async (req: Request, res: Response) => {
+    const adminUserId = await ensurePlatformAdmin(req, res)
+    if (!adminUserId) return
+
+    try {
+      const userId = String(req.params.userId || '').trim()
+      const enabled = req.body?.enabled
+      if (!userId) return jsonError(res, 400, 'USER_ID_REQUIRED', 'userId is required')
+      if (typeof enabled !== 'boolean') return jsonError(res, 400, 'ENABLED_REQUIRED', 'enabled boolean is required')
+
+      const profile = await fetchUserProfile(userId)
+      if (!profile) return jsonError(res, 404, 'NOT_FOUND', 'User not found')
+
+      await query(
+        `INSERT INTO user_external_auth_grants (provider, local_user_id, enabled, granted_by, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, NOW(), NOW())
+         ON CONFLICT (provider, local_user_id)
+         DO UPDATE SET enabled = EXCLUDED.enabled, granted_by = EXCLUDED.granted_by, updated_at = NOW()`,
+        [DINGTALK_PROVIDER, userId, enabled, adminUserId],
+      )
+
+      await auditLog({
+        actorId: adminUserId,
+        actorType: 'user',
+        action: enabled ? 'grant' : 'revoke',
+        resourceType: 'user-auth-grant',
+        resourceId: `${userId}:${DINGTALK_PROVIDER}`,
+        meta: {
+          adminUserId,
+          userId,
+          provider: DINGTALK_PROVIDER,
+          enabled,
+        },
+      })
+
+      return jsonOk(res, {
+        userId,
+        actorId: adminUserId,
+        ...(await fetchDingTalkAccessSnapshot(userId)),
+      })
+    } catch (error) {
+      return jsonError(res, 500, 'DINGTALK_GRANT_UPDATE_FAILED', (error as Error)?.message || 'Failed to update DingTalk access')
     }
   })
 

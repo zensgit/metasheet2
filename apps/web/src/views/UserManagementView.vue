@@ -187,6 +187,43 @@
           </div>
 
           <div class="user-admin__section">
+            <div class="user-admin__section-head">
+              <div>
+                <h3>钉钉扫码登录</h3>
+                <p class="user-admin__hint">生产建议开启严格白名单，只允许已存在且已开通的用户扫码登录。</p>
+              </div>
+              <button class="user-admin__button user-admin__button--secondary" type="button" :disabled="loadingDingTalk || !access" @click="void loadDingTalkAccess(access.user.id)">
+                {{ loadingDingTalk ? '刷新中...' : '刷新钉钉状态' }}
+              </button>
+            </div>
+            <div v-if="dingtalkAccess" class="user-admin__chips">
+              <span class="user-admin__chip" :class="{ 'user-admin__chip--permission': dingtalkAccess.requireGrant }">
+                {{ dingtalkAccess.requireGrant ? '严格白名单模式' : '宽松模式' }}
+              </span>
+              <span class="user-admin__chip" :class="{ 'user-admin__chip--success': dingtalkAccess.grant.enabled, 'user-admin__chip--danger': !dingtalkAccess.grant.enabled }">
+                {{ dingtalkAccess.grant.enabled ? '已开通钉钉扫码' : '未开通钉钉扫码' }}
+              </span>
+              <span class="user-admin__chip" :class="{ 'user-admin__chip--success': dingtalkAccess.identity.exists }">
+                {{ dingtalkAccess.identity.exists ? '已绑定钉钉身份' : '未绑定钉钉身份' }}
+              </span>
+            </div>
+            <p v-if="dingtalkAccess?.identity.lastLoginAt" class="user-admin__hint">
+              最近钉钉登录：{{ formatDate(dingtalkAccess.identity.lastLoginAt) }}
+            </p>
+            <p v-if="dingtalkAccess?.grant.updatedAt" class="user-admin__hint">
+              开通状态更新时间：{{ formatDate(dingtalkAccess.grant.updatedAt) }}
+            </p>
+            <div class="user-admin__role-actions">
+              <button class="user-admin__button" type="button" :disabled="busy || loadingDingTalk || dingtalkAccess?.grant.enabled === true" @click="void updateDingTalkGrant(true)">
+                开通钉钉扫码
+              </button>
+              <button class="user-admin__button user-admin__button--secondary" type="button" :disabled="busy || loadingDingTalk || dingtalkAccess?.grant.enabled !== true" @click="void updateDingTalkGrant(false)">
+                关闭钉钉扫码
+              </button>
+            </div>
+          </div>
+
+          <div class="user-admin__section">
             <h3>账号操作</h3>
             <div class="user-admin__role-actions">
               <button class="user-admin__button" type="button" :disabled="busy" @click="void toggleUserStatus()">
@@ -313,6 +350,27 @@ type UserAccess = {
   isAdmin: boolean
 }
 
+type DingTalkAccess = {
+  provider: 'dingtalk'
+  requireGrant: boolean
+  autoLinkEmail: boolean
+  autoProvision: boolean
+  grant: {
+    exists: boolean
+    enabled: boolean
+    grantedBy: string | null
+    createdAt: string | null
+    updatedAt: string | null
+  }
+  identity: {
+    exists: boolean
+    corpId: string | null
+    lastLoginAt: string | null
+    createdAt: string | null
+    updatedAt: string | null
+  }
+}
+
 type CreateUserForm = {
   name: string
   email: string
@@ -385,6 +443,7 @@ const adminAllowed = hasAdminAccess()
 const loading = ref(false)
 const loadingInvites = ref(false)
 const loadingSessions = ref(false)
+const loadingDingTalk = ref(false)
 const busy = ref(false)
 const status = ref('')
 const statusTone = ref<'info' | 'error'>('info')
@@ -403,6 +462,7 @@ const createdOnboarding = ref<OnboardingPacket | null>(null)
 const inviteRecords = ref<InviteLedgerRecord[]>([])
 const userSessions = ref<UserSessionRecord[]>([])
 const access = ref<UserAccess | null>(null)
+const dingtalkAccess = ref<DingTalkAccess | null>(null)
 const createForm = ref<CreateUserForm>({
   name: '',
   email: '',
@@ -589,6 +649,7 @@ async function selectUser(userId: string): Promise<void> {
   manualPassword.value = ''
   temporaryPassword.value = ''
   createdTemporaryPassword.value = ''
+  dingtalkAccess.value = null
   try {
     const response = await apiFetch(`/api/admin/users/${encodeURIComponent(userId)}/access`)
     const payload = await readJson(response)
@@ -597,9 +658,54 @@ async function selectUser(userId: string): Promise<void> {
     }
 
     access.value = payload.data as UserAccess
-    await Promise.all([loadInviteRecords(userId), loadUserSessions(userId)])
+    await Promise.all([loadInviteRecords(userId), loadUserSessions(userId), loadDingTalkAccess(userId)])
   } catch (error) {
     setStatus(error instanceof Error ? error.message : '加载用户权限失败', 'error')
+  }
+}
+
+async function loadDingTalkAccess(userId?: string): Promise<void> {
+  if (!userId) {
+    dingtalkAccess.value = null
+    return
+  }
+
+  loadingDingTalk.value = true
+  try {
+    const response = await apiFetch(`/api/admin/users/${encodeURIComponent(userId)}/dingtalk-access`)
+    const payload = await readJson(response)
+    if (!response.ok || payload.ok !== true) {
+      throw new Error(String((payload.error as Record<string, unknown> | undefined)?.message || '加载钉钉登录状态失败'))
+    }
+
+    dingtalkAccess.value = payload.data as DingTalkAccess
+  } catch (error) {
+    dingtalkAccess.value = null
+    setStatus(error instanceof Error ? error.message : '加载钉钉登录状态失败', 'error')
+  } finally {
+    loadingDingTalk.value = false
+  }
+}
+
+async function updateDingTalkGrant(enabled: boolean): Promise<void> {
+  if (!access.value) return
+  busy.value = true
+  try {
+    const response = await apiFetch(`/api/admin/users/${encodeURIComponent(access.value.user.id)}/dingtalk-grant`, {
+      method: 'PATCH',
+      body: JSON.stringify({ enabled }),
+    })
+    const payload = await readJson(response)
+    if (!response.ok || payload.ok !== true) {
+      throw new Error(String((payload.error as Record<string, unknown> | undefined)?.message || '更新钉钉登录状态失败'))
+    }
+
+    dingtalkAccess.value = payload.data as DingTalkAccess
+    setStatus(enabled ? '已开通该用户的钉钉扫码登录' : '已关闭该用户的钉钉扫码登录')
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : '更新钉钉登录状态失败', 'error')
+  } finally {
+    busy.value = false
   }
 }
 
@@ -1074,6 +1180,16 @@ onMounted(async () => {
 .user-admin__chip--permission {
   background: #ecfeff;
   color: #155e75;
+}
+
+.user-admin__chip--success {
+  background: #dcfce7;
+  color: #166534;
+}
+
+.user-admin__chip--danger {
+  background: #fef2f2;
+  color: #b91c1c;
 }
 
 .user-admin__role-card {

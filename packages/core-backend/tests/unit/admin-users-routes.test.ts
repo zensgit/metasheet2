@@ -147,6 +147,7 @@ async function invokeRoute(
 
 describe('admin-users routes', () => {
   beforeEach(() => {
+    vi.unstubAllEnvs()
     state.authUser = {
       id: 'admin-1',
       role: 'user',
@@ -247,6 +248,101 @@ describe('admin-users routes', () => {
     expect((response.body as Record<string, any>).data.roles).toEqual(['attendance_employee', 'workflow_operator'])
     expect((response.body as Record<string, any>).data.permissions).toEqual(['attendance:read', 'workflow:read'])
     expect((response.body as Record<string, any>).data.isAdmin).toBe(false)
+  })
+
+  it('returns dingtalk access details for a user', async () => {
+    vi.stubEnv('DINGTALK_AUTH_REQUIRE_GRANT', '1')
+    vi.stubEnv('DINGTALK_AUTH_AUTO_LINK_EMAIL', '0')
+    vi.stubEnv('DINGTALK_AUTH_AUTO_PROVISION', '0')
+    rbacMocks.isAdmin.mockResolvedValue(true)
+    pgMocks.query
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'user-1',
+          email: 'alpha@example.com',
+          name: 'Alpha',
+          role: 'user',
+          is_active: true,
+          is_admin: false,
+          last_login_at: null,
+          created_at: '2026-03-12T00:00:00.000Z',
+          updated_at: '2026-03-12T00:00:00.000Z',
+        }],
+      })
+      .mockResolvedValueOnce({
+        rows: [{
+          enabled: true,
+          granted_by: 'admin-1',
+          created_at: '2026-03-12T00:00:00.000Z',
+          updated_at: '2026-03-12T00:00:00.000Z',
+        }],
+      })
+      .mockResolvedValueOnce({
+        rows: [{
+          corp_id: 'ding-corp',
+          last_login_at: '2026-03-13T00:00:00.000Z',
+          created_at: '2026-03-12T00:00:00.000Z',
+          updated_at: '2026-03-13T00:00:00.000Z',
+        }],
+      })
+
+    const response = await invokeRoute('get', '/api/admin/users/:userId/dingtalk-access', {
+      params: { userId: 'user-1' },
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect((response.body as Record<string, any>).data).toMatchObject({
+      userId: 'user-1',
+      requireGrant: true,
+      autoLinkEmail: false,
+      autoProvision: false,
+      grant: { exists: true, enabled: true },
+      identity: { exists: true, corpId: 'ding-corp' },
+    })
+  })
+
+  it('updates dingtalk grant and records an audit entry', async () => {
+    rbacMocks.isAdmin.mockResolvedValue(true)
+    pgMocks.query
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'user-1',
+          email: 'alpha@example.com',
+          name: 'Alpha',
+          role: 'user',
+          is_active: true,
+          is_admin: false,
+          last_login_at: null,
+          created_at: '2026-03-12T00:00:00.000Z',
+          updated_at: '2026-03-12T00:00:00.000Z',
+        }],
+      })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({
+        rows: [{
+          enabled: true,
+          granted_by: 'admin-1',
+          created_at: '2026-03-12T00:00:00.000Z',
+          updated_at: '2026-03-12T00:05:00.000Z',
+        }],
+      })
+      .mockResolvedValueOnce({ rows: [] })
+
+    const response = await invokeRoute('patch', '/api/admin/users/:userId/dingtalk-grant', {
+      params: { userId: 'user-1' },
+      body: { enabled: true },
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect((response.body as Record<string, any>).data.grant).toMatchObject({
+      exists: true,
+      enabled: true,
+    })
+    expect(auditMocks.auditLog).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'grant',
+      resourceType: 'user-auth-grant',
+      resourceId: 'user-1:dingtalk',
+    }))
   })
 
   it('assigns a role and invalidates cached permissions', async () => {
@@ -972,7 +1068,7 @@ describe('admin-users routes', () => {
     expect(String(pgMocks.query.mock.calls[0]?.[0] || '')).toContain('created_at >=')
     expect(String(pgMocks.query.mock.calls[0]?.[0] || '')).toContain('created_at <=')
     expect(pgMocks.query.mock.calls[0]?.[1]?.slice(0, 3)).toEqual([
-      ['user', 'user-role', 'user-password', 'user-session', 'user-invite', 'role', 'permission', 'permission-template'],
+      ['user', 'user-role', 'user-auth-grant', 'user-password', 'user-session', 'user-invite', 'role', 'permission', 'permission-template'],
       '2026-03-10T00:00:00.000Z',
       '2026-03-12T23:59:59.999Z',
     ])

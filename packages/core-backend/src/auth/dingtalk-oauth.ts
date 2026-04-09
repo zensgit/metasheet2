@@ -98,6 +98,10 @@ function shouldAutoProvision(): boolean {
   return parseBooleanEnv('DINGTALK_AUTH_AUTO_PROVISION', false)
 }
 
+function shouldRequireGrant(): boolean {
+  return parseBooleanEnv('DINGTALK_AUTH_REQUIRE_GRANT', false)
+}
+
 function buildRedisUrl(): string | null {
   const explicitUrl = process.env.REDIS_URL?.trim()
   if (explicitUrl) return explicitUrl
@@ -534,10 +538,14 @@ async function createProvisionedUser(dtUser: DingTalkUserInfo): Promise<LocalUse
 }
 
 async function resolveLocalUser(dtUser: DingTalkUserInfo): Promise<{ localUser: LocalUserRow; isNewUser: boolean }> {
+  const requireGrant = shouldRequireGrant()
   const identityUser = await findIdentityUser(dtUser)
   if (identityUser) {
     assertLocalUserLoginAllowed(identityUser)
     const grantEnabled = await readGrantEnabled(identityUser.id)
+    if (requireGrant && grantEnabled !== true) {
+      throw new Error('DingTalk login is not enabled for this user')
+    }
     if (grantEnabled === false) {
       throw createPolicyError(DINGTALK_LOGIN_DISABLED_ERROR, {
         statusCode: 403,
@@ -553,16 +561,29 @@ async function resolveLocalUser(dtUser: DingTalkUserInfo): Promise<{ localUser: 
     if (emailUser) {
       assertLocalUserLoginAllowed(emailUser)
       const grantEnabled = await readGrantEnabled(emailUser.id)
+      if (requireGrant && grantEnabled !== true) {
+        throw new Error('DingTalk login is not enabled for this user')
+      }
       if (grantEnabled === false) {
         throw createPolicyError(DINGTALK_LOGIN_DISABLED_ERROR, {
           statusCode: 403,
           code: 'grant_disabled',
         })
       }
-      await ensureGrant(emailUser.id)
+      if (!requireGrant) {
+        await ensureGrant(emailUser.id)
+      }
       await upsertExternalIdentity(emailUser.id, dtUser)
       return { localUser: emailUser, isNewUser: false }
     }
+  }
+
+  if (requireGrant) {
+    throw new Error(
+      dtUser.email
+        ? `DingTalk account ${dtUser.email} is not linked to an enabled local user`
+        : 'DingTalk account is not linked to an enabled local user',
+    )
   }
 
   if (!shouldAutoProvision()) {
