@@ -234,7 +234,7 @@ jobs:
             'for key in order:'
             '    if key not in seen:'
             '        updated.append(f"{key}={entries[key]}")'
-            'path.write_text("\\n".join(updated) + "\\n")'
+            'path.write_text("\n".join(updated) + "\n")'
             'PY'
             '  if [[ "${database_url}" == *"@postgres:"* || "${database_url}" == *"@127.0.0.1:"* || "${database_url}" == *"@localhost:"* ]]; then'
             '    echo "[deploy] local-postgres detected; forcing DB_SSL=false in ${ENV_FILE_PATH}"'

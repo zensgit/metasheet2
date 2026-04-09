@@ -177,7 +177,7 @@ jobs:
               'for key in order:'
               '    if key not in seen:'
               '        updated.append(f"{key}={entries[key]}")'
-              'path.write_text("\\n".join(updated) + "\\n")'
+              'path.write_text("\n".join(updated) + "\n")'
               'PY'
               '    echo "[attendance-env-reconcile] ensured ${key}=${value}"'
               '    if grep -qE "^JWT_SECRET=" "$env_file"; then'
