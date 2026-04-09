@@ -685,12 +685,16 @@
           <div class="after-sales-view__action-row after-sales-view__action-row--compact">
             <button
               class="after-sales-view__primary-btn"
-              :disabled="serviceRecordCreating || serviceRecordsLoading || !canSubmitServiceRecord"
+              :disabled="serviceRecordCreating || serviceRecordsLoading || Boolean(serviceRecordUpdatingId) || !canSubmitServiceRecord"
               @click="submitServiceRecord"
             >
               {{ serviceRecordCreating ? 'Creating...' : 'Create service record' }}
             </button>
-            <button class="after-sales-view__ghost-btn" :disabled="serviceRecordCreating" @click="resetServiceRecordDraft">
+            <button
+              class="after-sales-view__ghost-btn"
+              :disabled="serviceRecordCreating || Boolean(serviceRecordUpdatingId)"
+              @click="resetServiceRecordDraft"
+            >
               Reset service record draft
             </button>
           </div>
@@ -737,15 +741,23 @@
           <div class="after-sales-view__action-row after-sales-view__action-row--compact">
             <button
               class="after-sales-view__ghost-btn"
-              :disabled="serviceRecordsLoading || serviceRecordCreating || Boolean(serviceRecordDeletingId)"
+              :disabled="serviceRecordsLoading || serviceRecordCreating || Boolean(serviceRecordDeletingId) || Boolean(serviceRecordUpdatingId) || Boolean(serviceRecordEditingId)"
               @click="refreshServiceRecords"
             >
               {{ serviceRecordsLoading ? 'Refreshing...' : 'Refresh list' }}
             </button>
-            <button class="after-sales-view__ghost-btn" :disabled="serviceRecordsLoading || serviceRecordCreating" @click="applyServiceRecordFilters">
+            <button
+              class="after-sales-view__ghost-btn"
+              :disabled="serviceRecordsLoading || serviceRecordCreating || Boolean(serviceRecordUpdatingId) || Boolean(serviceRecordEditingId)"
+              @click="applyServiceRecordFilters"
+            >
               {{ serviceRecordsLoading ? 'Applying...' : 'Apply filters' }}
             </button>
-            <button class="after-sales-view__ghost-btn" :disabled="serviceRecordsLoading || serviceRecordCreating" @click="resetServiceRecordFilters">
+            <button
+              class="after-sales-view__ghost-btn"
+              :disabled="serviceRecordsLoading || serviceRecordCreating || Boolean(serviceRecordUpdatingId) || Boolean(serviceRecordEditingId)"
+              @click="resetServiceRecordFilters"
+            >
               Clear filters
             </button>
           </div>
@@ -755,14 +767,87 @@
           <div v-else-if="serviceRecords.length" class="after-sales-view__service-record-list">
             <article v-for="record in serviceRecords" :key="record.id" class="after-sales-view__service-record-row">
               <div class="after-sales-view__service-record-main">
-                <div class="after-sales-view__service-record-headline">
-                  <strong>{{ record.data.ticketNo }}</strong>
-                  <span class="after-sales-view__tag">{{ record.data.visitType }}</span>
-                  <span v-if="record.data.result" class="after-sales-view__tag after-sales-view__tag--subtle">
-                    {{ record.data.result }}
-                  </span>
-                </div>
-                <p>{{ record.data.workSummary || 'No work summary yet.' }}</p>
+                <template v-if="serviceRecordEditingId === record.id">
+                  <div class="after-sales-view__service-record-headline">
+                    <strong>{{ record.data.ticketNo }}</strong>
+                    <span class="after-sales-view__tag">{{ serviceRecordEditDraft.visitType }}</span>
+                    <span v-if="serviceRecordEditDraft.result" class="after-sales-view__tag after-sales-view__tag--subtle">
+                      {{ serviceRecordEditDraft.result }}
+                    </span>
+                  </div>
+                  <form class="after-sales-view__service-record-form after-sales-view__ticket-form--inline" @submit.prevent="submitServiceRecordEdit(record)">
+                    <label class="after-sales-view__field">
+                      <span>Visit type</span>
+                      <select
+                        :id="`after-sales-service-record-edit-visit-type-${record.id}`"
+                        v-model="serviceRecordEditDraft.visitType"
+                        class="after-sales-view__field-input"
+                      >
+                        <option value="onsite">Onsite</option>
+                        <option value="remote">Remote</option>
+                        <option value="pickup">Pickup</option>
+                      </select>
+                    </label>
+                    <label class="after-sales-view__field">
+                      <span>Scheduled at</span>
+                      <input
+                        :id="`after-sales-service-record-edit-scheduled-at-${record.id}`"
+                        v-model="serviceRecordEditDraft.scheduledAt"
+                        class="after-sales-view__field-input"
+                        type="datetime-local"
+                      />
+                    </label>
+                    <label class="after-sales-view__field">
+                      <span>Completed at</span>
+                      <input
+                        :id="`after-sales-service-record-edit-completed-at-${record.id}`"
+                        v-model="serviceRecordEditDraft.completedAt"
+                        class="after-sales-view__field-input"
+                        type="datetime-local"
+                      />
+                    </label>
+                    <label class="after-sales-view__field">
+                      <span>Technician</span>
+                      <input
+                        :id="`after-sales-service-record-edit-technician-${record.id}`"
+                        v-model="serviceRecordEditDraft.technicianName"
+                        class="after-sales-view__field-input"
+                        type="text"
+                      />
+                    </label>
+                    <label class="after-sales-view__field">
+                      <span>Result</span>
+                      <select
+                        :id="`after-sales-service-record-edit-result-${record.id}`"
+                        v-model="serviceRecordEditDraft.result"
+                        class="after-sales-view__field-input"
+                      >
+                        <option value="">Pending</option>
+                        <option value="resolved">Resolved</option>
+                        <option value="partial">Partial</option>
+                        <option value="escalated">Escalated</option>
+                      </select>
+                    </label>
+                    <label class="after-sales-view__field after-sales-view__field--wide">
+                      <span>Work summary</span>
+                      <textarea
+                        :id="`after-sales-service-record-edit-summary-${record.id}`"
+                        v-model="serviceRecordEditDraft.workSummary"
+                        class="after-sales-view__field-input after-sales-view__field-textarea"
+                      />
+                    </label>
+                  </form>
+                </template>
+                <template v-else>
+                  <div class="after-sales-view__service-record-headline">
+                    <strong>{{ record.data.ticketNo }}</strong>
+                    <span class="after-sales-view__tag">{{ record.data.visitType }}</span>
+                    <span v-if="record.data.result" class="after-sales-view__tag after-sales-view__tag--subtle">
+                      {{ record.data.result }}
+                    </span>
+                  </div>
+                  <p>{{ record.data.workSummary || 'No work summary yet.' }}</p>
+                </template>
               </div>
 
               <div class="after-sales-view__service-record-side">
@@ -780,10 +865,35 @@
                     <dd>{{ record.data.technicianName || 'Unassigned' }}</dd>
                   </div>
                 </dl>
+                <div v-if="serviceRecordEditingId === record.id" class="after-sales-view__ticket-actions">
+                  <button
+                    class="after-sales-view__primary-btn after-sales-view__ticket-action-btn"
+                    :disabled="serviceRecordUpdatingId === record.id || serviceRecordsLoading || !canSubmitServiceRecordEdit"
+                    @click="submitServiceRecordEdit(record)"
+                  >
+                    {{ serviceRecordUpdatingId === record.id ? 'Saving...' : 'Save changes' }}
+                  </button>
+                  <button
+                    class="after-sales-view__ghost-btn after-sales-view__ticket-action-btn"
+                    :disabled="serviceRecordUpdatingId === record.id"
+                    @click="cancelServiceRecordEdit"
+                  >
+                    Cancel edit
+                  </button>
+                </div>
+                <button
+                  v-if="serviceRecordEditingId !== record.id"
+                  class="after-sales-view__ghost-btn after-sales-view__service-record-delete"
+                  :aria-label="`Edit service record ${record.data.ticketNo}`"
+                  :disabled="Boolean(serviceRecordDeletingId) || Boolean(serviceRecordUpdatingId) || Boolean(serviceRecordEditingId)"
+                  @click="startServiceRecordEdit(record)"
+                >
+                  Edit
+                </button>
                 <button
                   class="after-sales-view__ghost-btn after-sales-view__service-record-delete"
                   :aria-label="`Delete service record ${record.data.ticketNo}`"
-                  :disabled="serviceRecordDeletingId === record.id"
+                  :disabled="serviceRecordDeletingId === record.id || Boolean(serviceRecordUpdatingId) || serviceRecordEditingId === record.id"
                   @click="deleteServiceRecord(record)"
                 >
                   {{ serviceRecordDeletingId === record.id ? 'Deleting...' : 'Delete' }}
@@ -1001,6 +1111,15 @@ interface ServiceRecordDraft {
   result: '' | 'resolved' | 'partial' | 'escalated'
 }
 
+interface ServiceRecordEditDraft {
+  visitType: 'onsite' | 'remote' | 'pickup'
+  scheduledAt: string
+  completedAt: string
+  technicianName: string
+  workSummary: string
+  result: '' | 'resolved' | 'partial' | 'escalated'
+}
+
 interface TicketDraft {
   ticketNo: string
   title: string
@@ -1080,6 +1199,7 @@ const installedAssetsLoading = ref(false)
 const installedAssetCreating = ref(false)
 const serviceRecordsLoading = ref(false)
 const serviceRecordCreating = ref(false)
+const serviceRecordUpdatingId = ref('')
 const serviceRecordDeletingId = ref('')
 const error = ref('')
 const ticketsError = ref('')
@@ -1114,6 +1234,8 @@ const installedAssetFilters = ref<InstalledAssetFilterDraft>({
 })
 const installedAssetDraft = ref<InstalledAssetDraft>(createInstalledAssetDraft())
 const serviceRecordDraft = ref<ServiceRecordDraft>(createServiceRecordDraft())
+const serviceRecordEditingId = ref('')
+const serviceRecordEditDraft = ref<ServiceRecordEditDraft>(createServiceRecordEditDraft())
 const serviceRecordFilters = ref<ServiceRecordFilterDraft>({
   ticketNo: '',
   result: '',
@@ -1132,6 +1254,11 @@ const canSubmitServiceRecord = computed(
     toText(serviceRecordDraft.value.scheduledAt).length > 0,
 )
 const canSubmitInstalledAsset = computed(() => toText(installedAssetDraft.value.assetCode).length > 0)
+const canSubmitServiceRecordEdit = computed(
+  () =>
+    Boolean(serviceRecordEditingId.value) &&
+    toText(serviceRecordEditDraft.value.scheduledAt).length > 0,
+)
 const ticketDraftError = computed(() => {
   const parsedRefundAmount = parseOptionalRefundAmount(ticketDraft.value.refundAmount)
   return parsedRefundAmount.valid ? '' : 'Refund amount must be a valid number'
@@ -1276,6 +1403,25 @@ function createInstalledAssetDraft(): InstalledAssetDraft {
   }
 }
 
+function createServiceRecordEditDraft(
+  record?: Partial<ServiceRecordViewModel['data']> | null,
+): ServiceRecordEditDraft {
+  return {
+    visitType:
+      record?.visitType === 'remote' || record?.visitType === 'pickup'
+        ? record.visitType
+        : 'onsite',
+    scheduledAt: toText(record?.scheduledAt),
+    completedAt: toText(record?.completedAt),
+    technicianName: toText(record?.technicianName),
+    workSummary: toText(record?.workSummary),
+    result:
+      record?.result === 'resolved' || record?.result === 'partial' || record?.result === 'escalated'
+        ? record.result
+        : '',
+  }
+}
+
 function createTicketDraft(): TicketDraft {
   return {
     ticketNo: '',
@@ -1327,6 +1473,12 @@ function resetServiceRecordDraft() {
   serviceRecordDraft.value = createServiceRecordDraft()
   serviceRecordSubmitError.value = ''
   serviceRecordSubmitSuccess.value = ''
+}
+
+function cancelServiceRecordEdit() {
+  serviceRecordEditingId.value = ''
+  serviceRecordEditDraft.value = createServiceRecordEditDraft()
+  serviceRecordSubmitError.value = ''
 }
 
 function resetTicketDraft() {
@@ -1392,6 +1544,25 @@ function buildInstalledAssetPayload() {
       ...(location ? { location } : {}),
       ...(installedAt ? { installedAt } : {}),
       ...(warrantyUntil ? { warrantyUntil } : {}),
+    },
+  }
+}
+
+function buildServiceRecordUpdatePayload() {
+  const scheduledAt = toText(serviceRecordEditDraft.value.scheduledAt)
+  const completedAt = toText(serviceRecordEditDraft.value.completedAt)
+  const technicianName = toText(serviceRecordEditDraft.value.technicianName)
+  const workSummary = toText(serviceRecordEditDraft.value.workSummary)
+  const result = toText(serviceRecordEditDraft.value.result)
+
+  return {
+    serviceRecord: {
+      visitType: serviceRecordEditDraft.value.visitType,
+      scheduledAt,
+      completedAt,
+      technicianName,
+      workSummary,
+      result,
     },
   }
 }
@@ -1581,7 +1752,7 @@ function normalizeServiceRecordRow(record: ServiceRecordRow): ServiceRecordViewM
       ticketNo: toText(rawData.ticketNo, record.id),
       visitType: toText(rawData.visitType, 'unspecified'),
       scheduledAt: toText(rawData.scheduledAt, 'n/a'),
-      completedAt: toText(rawData.completedAt, 'n/a'),
+      completedAt: toText(rawData.completedAt),
       technicianName: toText(rawData.technicianName),
       workSummary: toText(rawData.workSummary),
       result: toText(rawData.result),
@@ -1604,6 +1775,16 @@ function normalizeInstalledAssetRow(record: InstalledAssetRow): InstalledAssetVi
       status: toText(rawData.status, 'unknown'),
     },
   }
+}
+
+function startServiceRecordEdit(record: ServiceRecordViewModel) {
+  if (!record.id || serviceRecordUpdatingId.value || serviceRecordDeletingId.value || serviceRecordCreating.value || serviceRecordsLoading.value) {
+    return
+  }
+  serviceRecordEditingId.value = record.id
+  serviceRecordEditDraft.value = createServiceRecordEditDraft(record.data)
+  serviceRecordSubmitError.value = ''
+  serviceRecordSubmitSuccess.value = ''
 }
 
 async function loadManifest() {
@@ -1798,6 +1979,47 @@ async function submitServiceRecord() {
   }
 }
 
+async function submitServiceRecordEdit(record: ServiceRecordViewModel) {
+  if (
+    !record.id ||
+    serviceRecordEditingId.value !== record.id ||
+    serviceRecordUpdatingId.value ||
+    !canSubmitServiceRecordEdit.value
+  ) {
+    return
+  }
+
+  serviceRecordUpdatingId.value = record.id
+  serviceRecordSubmitError.value = ''
+  serviceRecordSubmitSuccess.value = ''
+
+  try {
+    const payload = await readEnvelope<CreateServiceRecordResponse>(
+      `/api/after-sales/service-records/${encodeURIComponent(record.id)}`,
+      {
+        method: 'PATCH',
+        body: JSON.stringify(buildServiceRecordUpdatePayload()),
+      },
+    )
+    const nextRecord = payload?.serviceRecord ? normalizeServiceRecordRow(payload.serviceRecord) : null
+
+    if (nextRecord) {
+      serviceRecords.value = matchesServiceRecordFilters(nextRecord)
+        ? serviceRecords.value.map((item) => (item.id === nextRecord.id ? nextRecord : item))
+        : serviceRecords.value.filter((item) => item.id !== nextRecord.id)
+      serviceRecordsError.value = ''
+      serviceRecordSubmitSuccess.value = `Updated service record for ${nextRecord.data.ticketNo}`
+    }
+
+    serviceRecordEditingId.value = ''
+    serviceRecordEditDraft.value = createServiceRecordEditDraft()
+  } catch (err: unknown) {
+    serviceRecordSubmitError.value = err instanceof Error ? err.message : 'Failed to update service record'
+  } finally {
+    serviceRecordUpdatingId.value = ''
+  }
+}
+
 async function submitTicket() {
   if (!canSubmitTicket.value || ticketCreating.value || ticketsLoading.value) {
     return
@@ -1951,14 +2173,14 @@ async function deleteTicket(ticket: TicketViewModel) {
 }
 
 async function applyServiceRecordFilters() {
-  if (serviceRecordCreating.value) {
+  if (serviceRecordCreating.value || serviceRecordUpdatingId.value || serviceRecordEditingId.value) {
     return
   }
   await loadServiceRecordsForCurrentState(current.value)
 }
 
 async function resetServiceRecordFilters() {
-  if (serviceRecordCreating.value) {
+  if (serviceRecordCreating.value || serviceRecordUpdatingId.value || serviceRecordEditingId.value) {
     return
   }
   serviceRecordFilters.value = {
@@ -1970,14 +2192,14 @@ async function resetServiceRecordFilters() {
 }
 
 async function refreshServiceRecords() {
-  if (serviceRecordCreating.value || serviceRecordDeletingId.value) {
+  if (serviceRecordCreating.value || serviceRecordDeletingId.value || serviceRecordUpdatingId.value || serviceRecordEditingId.value) {
     return
   }
   await loadServiceRecordsForCurrentState(current.value)
 }
 
 async function deleteServiceRecord(record: ServiceRecordViewModel) {
-  if (!record.id || serviceRecordDeletingId.value === record.id) {
+  if (!record.id || serviceRecordDeletingId.value === record.id || serviceRecordUpdatingId.value || serviceRecordEditingId.value === record.id) {
     return
   }
 
