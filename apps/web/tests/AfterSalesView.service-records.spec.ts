@@ -320,4 +320,54 @@ describe('AfterSalesView service records panel', () => {
     expect(container.textContent).toContain('Remote triage')
     expect(apiFetchMock).toHaveBeenCalledWith('/api/after-sales/service-records', undefined)
   })
+
+  it('skips service-record loading when install state is failed', async () => {
+    apiFetchMock.mockImplementation(async (path: string) => {
+      if (path === '/api/after-sales/app-manifest') {
+        return createResponse({
+          id: 'after-sales-default',
+          displayName: 'After Sales',
+          platformDependencies: ['core-backend'],
+          objects: [],
+          workflows: [],
+        })
+      }
+
+      if (path === '/api/after-sales/projects/current') {
+        return createResponse({
+          status: 'failed',
+          projectId: 'tenant:after-sales',
+          displayName: 'After Sales',
+          config: {
+            defaultSlaHours: 24,
+            urgentSlaHours: 4,
+            followUpAfterDays: 7,
+          },
+          installResult: {
+            status: 'failed',
+            createdObjects: [],
+            createdViews: [],
+            warnings: ['service record provisioning failed'],
+            reportRef: 'install-003',
+          },
+          reportRef: 'install-003',
+        })
+      }
+
+      if (path === '/api/after-sales/service-records') {
+        throw new Error('service-records should not load for failed install state')
+      }
+
+      throw new Error(`Unexpected request: ${path}`)
+    })
+
+    const mounted = mountAfterSalesView()
+    app = mounted.app
+    container = mounted.container
+
+    await flushUi(4)
+
+    expect(container.textContent).not.toContain('Recent visits')
+    expect(apiFetchMock).not.toHaveBeenCalledWith('/api/after-sales/service-records', undefined)
+  })
 })
