@@ -1033,6 +1033,98 @@
         </article>
       </section>
 
+      <section v-if="isInstalled && hasCustomerProjection" class="after-sales-view__customers-shell">
+        <article class="after-sales-view__card after-sales-view__card--wide">
+          <div class="after-sales-view__section-header">
+            <div>
+              <p class="after-sales-view__pill">Customers</p>
+              <h2>Customer registry</h2>
+              <p>
+                这里展示售后项目里的客户主数据，便于在工单、装机资产和服务记录之间核对客户状态。
+              </p>
+            </div>
+          </div>
+
+          <form class="after-sales-view__customer-filters" @submit.prevent="applyCustomerFilters">
+            <label class="after-sales-view__field">
+              <span>Filter status</span>
+              <select
+                id="after-sales-customer-filter-status"
+                v-model="customerFilters.status"
+                class="after-sales-view__field-input"
+              >
+                <option value="">All statuses</option>
+                <option value="active">Active</option>
+                <option value="inactive">Inactive</option>
+              </select>
+            </label>
+            <label class="after-sales-view__field after-sales-view__field--wide">
+              <span>Search customer</span>
+              <input
+                id="after-sales-customer-filter-search"
+                v-model="customerFilters.search"
+                class="after-sales-view__field-input"
+                placeholder="customer code, name, phone, email..."
+                type="text"
+              />
+            </label>
+          </form>
+
+          <div class="after-sales-view__action-row after-sales-view__action-row--compact">
+            <button
+              class="after-sales-view__ghost-btn"
+              :disabled="customersLoading"
+              @click="refreshCustomers"
+            >
+              {{ customersLoading ? 'Refreshing...' : 'Refresh list' }}
+            </button>
+            <button
+              class="after-sales-view__ghost-btn"
+              :disabled="customersLoading"
+              @click="applyCustomerFilters"
+            >
+              {{ customersLoading ? 'Applying...' : 'Apply filters' }}
+            </button>
+            <button
+              class="after-sales-view__ghost-btn"
+              :disabled="customersLoading"
+              @click="resetCustomerFilters"
+            >
+              Clear filters
+            </button>
+          </div>
+
+          <p v-if="customersLoading" class="after-sales-view__muted-state">Loading customers...</p>
+          <p v-else-if="customersError" class="after-sales-view__inline-error">{{ customersError }}</p>
+          <div v-else-if="customers.length" class="after-sales-view__customer-list">
+            <article v-for="customer in customers" :key="customer.id" class="after-sales-view__customer-row">
+              <div class="after-sales-view__customer-main">
+                <div class="after-sales-view__customer-headline">
+                  <strong>{{ customer.data.name }}</strong>
+                  <span class="after-sales-view__tag">{{ customer.data.status }}</span>
+                  <span class="after-sales-view__tag after-sales-view__tag--subtle">{{ customer.data.customerCode }}</span>
+                </div>
+                <p>{{ customer.data.email || customer.data.phone || 'No contact details yet.' }}</p>
+              </div>
+
+              <div class="after-sales-view__customer-side">
+                <dl class="after-sales-view__customer-meta">
+                  <div>
+                    <dt>Phone</dt>
+                    <dd>{{ customer.data.phone || '—' }}</dd>
+                  </div>
+                  <div>
+                    <dt>Email</dt>
+                    <dd>{{ customer.data.email || '—' }}</dd>
+                  </div>
+                </dl>
+              </div>
+            </article>
+          </div>
+          <p v-else class="after-sales-view__muted-state">No customers found yet.</p>
+        </article>
+      </section>
+
       <section class="after-sales-view__grid">
         <article class="after-sales-view__card">
           <h2>Install state</h2>
@@ -1199,9 +1291,21 @@ interface InstalledAssetRow {
   data: Record<string, unknown>
 }
 
+interface CustomerRow {
+  id: string
+  version: number
+  data: Record<string, unknown>
+}
+
 interface InstalledAssetsResponse {
   projectId: string
   installedAssets: InstalledAssetRow[]
+  count: number
+}
+
+interface CustomersResponse {
+  projectId: string
+  customers: CustomerRow[]
   count: number
 }
 
@@ -1215,6 +1319,18 @@ interface InstalledAssetViewModel {
     location: string
     installedAt: string
     warrantyUntil: string
+    status: string
+  }
+}
+
+interface CustomerViewModel {
+  id: string
+  version: number
+  data: {
+    customerCode: string
+    name: string
+    phone: string
+    email: string
     status: string
   }
 }
@@ -1284,6 +1400,11 @@ interface InstalledAssetFilterDraft {
   search: string
 }
 
+interface CustomerFilterDraft {
+  status: '' | 'active' | 'inactive'
+  search: string
+}
+
 interface TicketFilterDraft {
   status: string
   search: string
@@ -1334,6 +1455,7 @@ const ticketRefundSubmittingId = ref('')
 const ticketUpdatingId = ref('')
 const ticketDeletingId = ref('')
 const installedAssetsLoading = ref(false)
+const customersLoading = ref(false)
 const installedAssetCreating = ref(false)
 const installedAssetUpdatingId = ref('')
 const installedAssetDeletingId = ref('')
@@ -1344,6 +1466,7 @@ const serviceRecordDeletingId = ref('')
 const error = ref('')
 const ticketsError = ref('')
 const installedAssetsError = ref('')
+const customersError = ref('')
 const installedAssetSubmitError = ref('')
 const installedAssetSubmitSuccess = ref('')
 const ticketSubmitError = ref('')
@@ -1357,6 +1480,7 @@ const manifest = ref<AfterSalesManifest | null>(null)
 const current = ref<CurrentResponse>({ status: 'not-installed' })
 const tickets = ref<TicketViewModel[]>([])
 const installedAssets = ref<InstalledAssetViewModel[]>([])
+const customers = ref<CustomerViewModel[]>([])
 const serviceRecords = ref<ServiceRecordViewModel[]>([])
 const configDraft = ref({ ...DEFAULT_CONFIG })
 const baselineConfigDraft = ref({ ...DEFAULT_CONFIG })
@@ -1369,6 +1493,10 @@ const ticketFilters = ref<TicketFilterDraft>({
   search: '',
 })
 const installedAssetFilters = ref<InstalledAssetFilterDraft>({
+  status: '',
+  search: '',
+})
+const customerFilters = ref<CustomerFilterDraft>({
   status: '',
   search: '',
 })
@@ -1390,6 +1518,10 @@ const createdObjectLabels = computed(() => current.value.installResult?.createdO
 const createdViewLabels = computed(() => current.value.installResult?.createdViews ?? [])
 const isInstalled = computed(() => current.value.status === 'installed' || current.value.status === 'partial')
 const isDegraded = computed(() => current.value.status === 'partial' || current.value.status === 'failed')
+const hasCustomerProjection = computed(() =>
+  Array.isArray(manifest.value?.objects) &&
+  manifest.value.objects.some((object) => object && object.id === 'customer'),
+)
 const canSubmitServiceRecord = computed(
   () =>
     toText(serviceRecordDraft.value.ticketNo).length > 0 &&
@@ -1830,6 +1962,16 @@ function buildInstalledAssetListPath() {
   return query ? `/api/after-sales/installed-assets?${query}` : '/api/after-sales/installed-assets'
 }
 
+function buildCustomerListPath() {
+  const params = new URLSearchParams()
+  const status = toText(customerFilters.value.status)
+  const search = toText(customerFilters.value.search)
+  if (status) params.set('status', status)
+  if (search) params.set('search', search)
+  const query = params.toString()
+  return query ? `/api/after-sales/customers?${query}` : '/api/after-sales/customers'
+}
+
 function buildTicketListPath() {
   const params = new URLSearchParams()
   const status = toText(ticketFilters.value.status)
@@ -1961,6 +2103,34 @@ function normalizeInstalledAssetRow(record: InstalledAssetRow): InstalledAssetVi
   }
 }
 
+function normalizeCustomerRow(record: CustomerRow): CustomerViewModel {
+  const rawData = record.data && typeof record.data === 'object' ? record.data : {}
+  return {
+    id: record.id,
+    version: record.version,
+    data: {
+      customerCode: toText(rawData.customerCode, record.id),
+      name: toText(rawData.name, 'Unnamed customer'),
+      phone: toText(rawData.phone),
+      email: toText(rawData.email),
+      status: toText(rawData.status, 'unknown'),
+    },
+  }
+}
+
+function matchesCustomerFilters(customer: CustomerViewModel) {
+  const status = toText(customerFilters.value.status)
+  const search = toText(customerFilters.value.search).toLowerCase()
+
+  if (status && customer.data.status !== status) return false
+  if (search) {
+    const haystack = JSON.stringify(customer.data).toLowerCase()
+    if (!haystack.includes(search)) return false
+  }
+
+  return true
+}
+
 function startInstalledAssetEdit(asset: InstalledAssetViewModel) {
   if (!asset.id || installedAssetUpdatingId.value || installedAssetDeletingId.value || installedAssetCreating.value || installedAssetsLoading.value) {
     return
@@ -2071,6 +2241,57 @@ async function loadInstalledAssetsForCurrentState(state: CurrentResponse): Promi
   } finally {
     installedAssetsLoading.value = false
   }
+}
+
+async function loadCustomersForCurrentState(state: CurrentResponse): Promise<void> {
+  customersLoading.value = true
+  customersError.value = ''
+  try {
+    if (!hasCustomerProjection.value) {
+      customers.value = []
+      return
+    }
+    if (state.status === 'not-installed' || state.status === 'failed') {
+      customers.value = []
+      return
+    }
+
+    const payload = await readEnvelope<CustomersResponse>(buildCustomerListPath())
+    const rows = Array.isArray(payload?.customers) ? payload.customers : []
+    customers.value = rows.map((row) => normalizeCustomerRow(row))
+  } catch (err: unknown) {
+    customers.value = []
+    if (state.status === 'installed' || state.status === 'partial') {
+      customersError.value = err instanceof Error ? err.message : 'Failed to load after-sales customers'
+    }
+  } finally {
+    customersLoading.value = false
+  }
+}
+
+async function applyCustomerFilters() {
+  if (customersLoading.value) {
+    return
+  }
+  await loadCustomersForCurrentState(current.value)
+}
+
+async function resetCustomerFilters() {
+  if (customersLoading.value) {
+    return
+  }
+  customerFilters.value = {
+    status: '',
+    search: '',
+  }
+  await loadCustomersForCurrentState(current.value)
+}
+
+async function refreshCustomers() {
+  if (customersLoading.value) {
+    return
+  }
+  await loadCustomersForCurrentState(current.value)
 }
 
 async function applyInstalledAssetFilters() {
@@ -2503,6 +2724,7 @@ async function refreshCurrentState() {
     await Promise.all([
       loadTicketsForCurrentState(current.value),
       loadInstalledAssetsForCurrentState(current.value),
+      loadCustomersForCurrentState(current.value),
       loadServiceRecordsForCurrentState(current.value),
     ])
   } finally {
@@ -2515,6 +2737,7 @@ async function loadView() {
   error.value = ''
   ticketsError.value = ''
   installedAssetsError.value = ''
+  customersError.value = ''
   installedAssetSubmitError.value = ''
   installedAssetSubmitSuccess.value = ''
   ticketSubmitError.value = ''
@@ -2534,6 +2757,7 @@ async function loadView() {
     await Promise.all([
       loadTicketsForCurrentState(nextCurrent),
       loadInstalledAssetsForCurrentState(nextCurrent),
+      loadCustomersForCurrentState(nextCurrent),
       loadServiceRecordsForCurrentState(nextCurrent),
     ])
   } catch (err: unknown) {
@@ -2687,6 +2911,7 @@ onMounted(() => {
 .after-sales-view__onboarding,
 .after-sales-view__tickets-shell,
 .after-sales-view__installed-assets-shell,
+.after-sales-view__customers-shell,
 .after-sales-view__service-records-shell {
   display: grid;
   gap: 16px;
@@ -2755,6 +2980,7 @@ onMounted(() => {
 .after-sales-view__grid,
 .after-sales-view__ticket-list,
 .after-sales-view__installed-asset-list,
+.after-sales-view__customer-list,
 .after-sales-view__service-record-list {
   display: grid;
   gap: 16px;
@@ -2793,6 +3019,7 @@ onMounted(() => {
 .after-sales-view__meta,
 .after-sales-view__ticket-meta,
 .after-sales-view__installed-asset-meta,
+.after-sales-view__customer-meta,
 .after-sales-view__service-record-meta {
   display: grid;
   gap: 12px;
@@ -2802,6 +3029,7 @@ onMounted(() => {
 .after-sales-view__meta div,
 .after-sales-view__ticket-meta div,
 .after-sales-view__installed-asset-meta div,
+.after-sales-view__customer-meta div,
 .after-sales-view__service-record-meta div {
   display: grid;
   gap: 4px;
@@ -2810,6 +3038,7 @@ onMounted(() => {
 .after-sales-view__meta dt,
 .after-sales-view__ticket-meta dt,
 .after-sales-view__installed-asset-meta dt,
+.after-sales-view__customer-meta dt,
 .after-sales-view__service-record-meta dt {
   font-size: 12px;
   letter-spacing: 0.08em;
@@ -2820,6 +3049,7 @@ onMounted(() => {
 .after-sales-view__meta dd,
 .after-sales-view__ticket-meta dd,
 .after-sales-view__installed-asset-meta dd,
+.after-sales-view__customer-meta dd,
 .after-sales-view__service-record-meta dd {
   margin: 0;
   color: #0f172a;
@@ -2865,7 +3095,12 @@ onMounted(() => {
   gap: 12px;
 }
 
+.after-sales-view__customer-list {
+  gap: 12px;
+}
+
 .after-sales-view__installed-asset-row,
+.after-sales-view__customer-row,
 .after-sales-view__service-record-row {
   display: flex;
   justify-content: space-between;
@@ -2877,6 +3112,7 @@ onMounted(() => {
 }
 
 .after-sales-view__installed-asset-main,
+.after-sales-view__customer-main,
 .after-sales-view__service-record-main {
   display: grid;
   gap: 8px;
@@ -2884,12 +3120,14 @@ onMounted(() => {
 }
 
 .after-sales-view__installed-asset-main p,
+.after-sales-view__customer-main p,
 .after-sales-view__service-record-main p {
   margin: 0;
   color: #475569;
 }
 
 .after-sales-view__installed-asset-headline,
+.after-sales-view__customer-headline,
 .after-sales-view__service-record-headline {
   display: flex;
   flex-wrap: wrap;
@@ -2898,11 +3136,13 @@ onMounted(() => {
 }
 
 .after-sales-view__installed-asset-headline strong,
+.after-sales-view__customer-headline strong,
 .after-sales-view__service-record-headline strong {
   color: #0f172a;
 }
 
 .after-sales-view__installed-asset-side,
+.after-sales-view__customer-side,
 .after-sales-view__service-record-side {
   display: grid;
   gap: 12px;
@@ -2963,6 +3203,7 @@ onMounted(() => {
 .after-sales-view__installed-asset-form,
 .after-sales-view__ticket-form,
 .after-sales-view__installed-asset-filters,
+.after-sales-view__customer-filters,
 .after-sales-view__service-record-form,
 .after-sales-view__ticket-filters,
 .after-sales-view__service-record-filters {
@@ -3114,6 +3355,7 @@ code {
   .after-sales-view__warning-banner,
   .after-sales-view__ticket-row,
   .after-sales-view__installed-asset-row,
+  .after-sales-view__customer-row,
   .after-sales-view__service-record-row {
     grid-template-columns: 1fr;
     display: grid;
@@ -3128,6 +3370,7 @@ code {
   .after-sales-view__installed-asset-form,
   .after-sales-view__ticket-form,
   .after-sales-view__installed-asset-filters,
+  .after-sales-view__customer-filters,
   .after-sales-view__service-record-form,
   .after-sales-view__ticket-filters,
   .after-sales-view__service-record-filters {
@@ -3136,6 +3379,7 @@ code {
   }
 
   .after-sales-view__installed-asset-side,
+  .after-sales-view__customer-side,
   .after-sales-view__service-record-side {
     justify-items: stretch;
   }

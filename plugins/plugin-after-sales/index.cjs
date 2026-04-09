@@ -41,6 +41,7 @@ const {
 const SERVICE_TICKET_FIELDS = ['ticketNo', 'title', 'source', 'priority', 'status', 'slaDueAt', 'refundAmount', 'refundStatus']
 const SERVICE_RECORD_FIELDS = ['ticketNo', 'visitType', 'scheduledAt', 'completedAt', 'technicianName', 'workSummary', 'result']
 const INSTALLED_ASSET_FIELDS = ['assetCode', 'serialNo', 'model', 'location', 'installedAt', 'warrantyUntil', 'status']
+const CUSTOMER_FIELDS = ['customerCode', 'name', 'phone', 'email', 'status']
 
 async function toPhysicalTicketData(provisioning, projectId, logicalData) {
   return toPhysicalRecord(provisioning, projectId, 'serviceTicket', logicalData)
@@ -64,6 +65,10 @@ async function fromPhysicalServiceRecordData(provisioning, projectId, physicalDa
 
 async function fromPhysicalInstalledAssetData(provisioning, projectId, physicalData) {
   return fromPhysicalRecord(provisioning, projectId, 'installedAsset', INSTALLED_ASSET_FIELDS, physicalData)
+}
+
+async function fromPhysicalCustomerData(provisioning, projectId, physicalData) {
+  return fromPhysicalRecord(provisioning, projectId, 'customer', CUSTOMER_FIELDS, physicalData)
 }
 
 let activeContext = null
@@ -1646,6 +1651,148 @@ module.exports = {
           res.status(500).json({
             ok: false,
             error: { code: 'INTERNAL_ERROR', message: 'Failed to list after-sales service records' },
+          })
+        }
+      },
+    )
+
+    context.api.http.addRoute(
+      'GET',
+      '/api/after-sales/customers',
+      async (req, res) => {
+        try {
+          const userId = getUserId(req)
+          if (!userId) {
+            sendUnauthorized(res)
+            return
+          }
+          if (!hasAfterSalesReadAccess(req)) {
+            res.status(403).json({
+              ok: false,
+              error: { code: 'FORBIDDEN', message: 'After-sales read access required' },
+            })
+            return
+          }
+
+          const multitableApi = getMultitableReadApi(context)
+          if (!multitableApi || (typeof multitableApi.records.listRecords !== 'function' && typeof multitableApi.records.queryRecords !== 'function')) {
+            res.status(503).json({
+              ok: false,
+              error: {
+                code: 'MULTITABLE_UNAVAILABLE',
+                message: 'Multitable record reader is not available on plugin context',
+              },
+            })
+            return
+          }
+
+          const tenantId = getTenantId(req, context.logger)
+          const current = await installer.loadCurrent(context, tenantId, appManifest.id)
+          if (!current || !isOperationalAfterSalesStatus(current.status)) {
+            res.status(409).json({
+              ok: false,
+              error: {
+                code: 'AFTER_SALES_NOT_INSTALLED',
+                message: 'After-sales must be installed before listing customers',
+              },
+            })
+            return
+          }
+
+          const projectId = current.projectId || installer.getProjectId(tenantId, appManifest.id)
+          const sheetId = await findObjectSheetId(multitableApi.provisioning, projectId, 'customer')
+          const status = typeof req?.query?.status === 'string' && req.query.status.trim()
+            ? req.query.status.trim()
+            : null
+          const search = typeof req?.query?.search === 'string' && req.query.search.trim()
+            ? req.query.search.trim()
+            : null
+          const limit = typeof req?.query?.limit === 'string' && req.query.limit.trim()
+            ? Number(req.query.limit)
+            : undefined
+          const offset = typeof req?.query?.offset === 'string' && req.query.offset.trim()
+            ? Number(req.query.offset)
+            : undefined
+
+          const recordsApi = multitableApi.records
+          let customers
+          if (typeof recordsApi.queryRecords === 'function') {
+            const physicalFieldIds = status
+              ? await resolvePhysicalFieldIds(
+                  multitableApi.provisioning,
+                  projectId,
+                  'customer',
+                  ['status'],
+                )
+              : {}
+            const filters = status
+              ? {
+                  [physicalFieldIds.status || 'status']: status,
+                }
+              : undefined
+            customers = await recordsApi.queryRecords({
+              sheetId,
+              filters,
+              search,
+              limit,
+              offset,
+            })
+          } else {
+            customers = await recordsApi.listRecords({
+              sheetId,
+              limit,
+              offset,
+            })
+          }
+
+          const logicalCustomers = Array.isArray(customers)
+            ? (
+                await Promise.all(
+                  customers.map(async (customer) => ({
+                    id: customer.id,
+                    version: customer.version,
+                    data: await fromPhysicalCustomerData(
+                      multitableApi.provisioning,
+                      projectId,
+                      customer.data,
+                    ),
+                  })),
+                )
+              ).filter((record) => {
+                if (status && record.data.status !== status) return false
+                if (!search) return true
+                const haystack = JSON.stringify(record.data).toLowerCase()
+                return haystack.includes(search.toLowerCase())
+              })
+            : []
+
+          res.json({
+            ok: true,
+            data: {
+              projectId,
+              customers: logicalCustomers,
+              count: logicalCustomers.length,
+            },
+          })
+        } catch (err) {
+          if (err && err.code === 'VALIDATION_ERROR') {
+            res.status(400).json({
+              ok: false,
+              error: { code: err.code, message: err.message },
+            })
+            return
+          }
+          if (err && err.code === 'NOT_FOUND') {
+            res.status(404).json({
+              ok: false,
+              error: { code: err.code, message: err.message },
+            })
+            return
+          }
+          logger.error && logger.error('after-sales list customers failed', err)
+          res.status(500).json({
+            ok: false,
+            error: { code: 'INTERNAL_ERROR', message: 'Failed to list after-sales customers' },
           })
         }
       },
