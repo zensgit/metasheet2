@@ -182,6 +182,87 @@
               </div>
             </template>
           </div>
+
+          <div v-if="summary?.isPlatformAdmin" class="delegation-page__section">
+            <h3>组织范围模板</h3>
+            <p class="delegation-page__hint">模板用于复用一组部门范围，再一键覆盖到某个插件管理员命名空间。</p>
+            <div class="delegation-page__role-actions">
+              <input
+                v-model.trim="templateName"
+                class="delegation-page__input"
+                type="text"
+                placeholder="模板名称，例如 华东销售"
+              />
+              <input
+                v-model.trim="templateDescription"
+                class="delegation-page__input"
+                type="text"
+                placeholder="模板说明，可选"
+              />
+              <button class="delegation-page__button" type="button" :disabled="scopeBusy || !templateName" @click="void createTemplate()">
+                创建模板
+              </button>
+            </div>
+            <div class="delegation-page__role-actions">
+              <input
+                v-model.trim="templateSearch"
+                class="delegation-page__input"
+                type="search"
+                placeholder="搜索模板"
+                @keyup.enter="void loadTemplates()"
+              />
+              <button class="delegation-page__button delegation-page__button--secondary" type="button" :disabled="scopeBusy" @click="void loadTemplates()">
+                查询模板
+              </button>
+              <select v-model="selectedTemplateId" class="delegation-page__input" @change="void selectTemplate(selectedTemplateId)">
+                <option value="">请选择模板</option>
+                <option v-for="template in templates" :key="template.id" :value="template.id">
+                  {{ template.name }} ({{ template.departmentCount }})
+                </option>
+              </select>
+              <button
+                class="delegation-page__button"
+                type="button"
+                :disabled="scopeBusy || !selectedTemplateId || !selectedScopeNamespace || !selectedScopeConfig?.adminNamespaces.length"
+                @click="void applyTemplate()"
+              >
+                覆盖应用到当前命名空间
+              </button>
+            </div>
+
+            <template v-if="selectedTemplate">
+              <div class="delegation-page__role-actions">
+                <select v-model="selectedTemplateDepartmentId" class="delegation-page__input">
+                  <option value="">选择部门加入模板</option>
+                  <option v-for="department in departments" :key="department.directoryDepartmentId" :value="department.directoryDepartmentId">
+                    {{ department.integrationName }} / {{ department.departmentFullPath || department.departmentName }}
+                  </option>
+                </select>
+                <button class="delegation-page__button" type="button" :disabled="scopeBusy || !selectedTemplateDepartmentId" @click="void updateTemplateDepartment('assign')">
+                  添加模板部门
+                </button>
+              </div>
+
+              <div v-if="selectedTemplate.departments.length > 0" class="delegation-page__scope-list">
+                <article v-for="department in selectedTemplate.departments" :key="department.directoryDepartmentId" class="delegation-page__scope-card">
+                  <strong>{{ selectedTemplate.name }}</strong>
+                  <span>{{ department.integrationName }}</span>
+                  <p>{{ department.departmentFullPath || department.departmentName }}</p>
+                  <button
+                    class="delegation-page__button delegation-page__button--danger"
+                    type="button"
+                    :disabled="scopeBusy"
+                    @click="void updateTemplateDepartment('unassign', department.directoryDepartmentId)"
+                  >
+                    移除模板部门
+                  </button>
+                </article>
+              </div>
+              <div v-else class="delegation-page__empty">
+                当前模板还没有部门范围。
+              </div>
+            </template>
+          </div>
         </template>
 
         <div v-else class="delegation-page__empty">
@@ -262,6 +343,21 @@ type DelegatedAdminScopeConfig = {
   scopeAssignments: ScopeAssignment[]
 }
 
+type ScopeTemplateSummary = {
+  id: string
+  name: string
+  description: string | null
+  createdBy: string | null
+  updatedBy: string | null
+  createdAt: string
+  updatedAt: string
+  departmentCount: number
+}
+
+type ScopeTemplateDetail = ScopeTemplateSummary & {
+  departments: DepartmentCatalogItem[]
+}
+
 const loading = ref(false)
 const busy = ref(false)
 const scopeBusy = ref(false)
@@ -269,15 +365,22 @@ const status = ref('')
 const statusTone = ref<'info' | 'error'>('info')
 const search = ref('')
 const departmentSearch = ref('')
+const templateSearch = ref('')
+const templateName = ref('')
+const templateDescription = ref('')
 const users = ref<ManagedUser[]>([])
 const departments = ref<DepartmentCatalogItem[]>([])
+const templates = ref<ScopeTemplateSummary[]>([])
 const selectedUserId = ref('')
 const selectedRoleId = ref('')
 const selectedScopeNamespace = ref('')
 const selectedDepartmentId = ref('')
+const selectedTemplateDepartmentId = ref('')
+const selectedTemplateId = ref('')
 const summary = ref<DelegationSummary | null>(null)
 const selectedAccess = ref<DelegatedUserAccess | null>(null)
 const selectedScopeConfig = ref<DelegatedAdminScopeConfig | null>(null)
+const selectedTemplate = ref<ScopeTemplateDetail | null>(null)
 
 function setStatus(message: string, tone: 'info' | 'error' = 'info') {
   status.value = message
@@ -316,6 +419,102 @@ async function loadDepartments(): Promise<void> {
     departments.value = Array.isArray(data?.items) ? data.items : []
   } catch (error) {
     setStatus(error instanceof Error ? error.message : '加载部门目录失败', 'error')
+  } finally {
+    scopeBusy.value = false
+  }
+}
+
+async function loadTemplates(): Promise<void> {
+  if (!summary.value?.isPlatformAdmin) return
+  scopeBusy.value = true
+  try {
+    const params = new URLSearchParams()
+    if (templateSearch.value) params.set('q', templateSearch.value)
+    const response = await apiFetch(`/api/admin/role-delegation/scope-templates${params.size ? `?${params.toString()}` : ''}`)
+    const payload = await readJson(response)
+    if (!response.ok || payload.ok !== true) {
+      throw new Error(String((payload.error as Record<string, unknown> | undefined)?.message || '加载范围模板失败'))
+    }
+    const data = payload.data as { items?: ScopeTemplateSummary[] } | undefined
+    templates.value = Array.isArray(data?.items) ? data.items : []
+    if (!selectedTemplateId.value && templates.value.length > 0) {
+      await selectTemplate(templates.value[0].id)
+    }
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : '加载范围模板失败', 'error')
+  } finally {
+    scopeBusy.value = false
+  }
+}
+
+async function selectTemplate(templateId: string): Promise<void> {
+  if (!summary.value?.isPlatformAdmin) return
+  selectedTemplateId.value = templateId
+  selectedTemplateDepartmentId.value = ''
+  if (!templateId) {
+    selectedTemplate.value = null
+    return
+  }
+  const response = await apiFetch(`/api/admin/role-delegation/scope-templates/${encodeURIComponent(templateId)}`)
+  const payload = await readJson(response)
+  if (!response.ok || payload.ok !== true) {
+    throw new Error(String((payload.error as Record<string, unknown> | undefined)?.message || '加载范围模板详情失败'))
+  }
+  selectedTemplate.value = (payload.data as { item: ScopeTemplateDetail }).item
+}
+
+async function createTemplate(): Promise<void> {
+  if (!summary.value?.isPlatformAdmin || !templateName.value.trim()) return
+  scopeBusy.value = true
+  try {
+    const response = await apiFetch('/api/admin/role-delegation/scope-templates', {
+      method: 'POST',
+      body: JSON.stringify({
+        name: templateName.value,
+        description: templateDescription.value,
+      }),
+    })
+    const payload = await readJson(response)
+    if (!response.ok || payload.ok !== true) {
+      throw new Error(String((payload.error as Record<string, unknown> | undefined)?.message || '创建范围模板失败'))
+    }
+    const item = (payload.data as { item: ScopeTemplateDetail }).item
+    templateName.value = ''
+    templateDescription.value = ''
+    await loadTemplates()
+    await selectTemplate(item.id)
+    setStatus('组织范围模板已创建')
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : '创建范围模板失败', 'error')
+  } finally {
+    scopeBusy.value = false
+  }
+}
+
+async function updateTemplateDepartment(action: 'assign' | 'unassign', directoryDepartmentId?: string): Promise<void> {
+  if (!summary.value?.isPlatformAdmin || !selectedTemplateId.value) return
+  const departmentId = directoryDepartmentId || selectedTemplateDepartmentId.value
+  if (!departmentId) return
+  scopeBusy.value = true
+  try {
+    const response = await apiFetch(`/api/admin/role-delegation/scope-templates/${encodeURIComponent(selectedTemplateId.value)}/departments/${action}`, {
+      method: 'POST',
+      body: JSON.stringify({ directoryDepartmentId: departmentId }),
+    })
+    const payload = await readJson(response)
+    if (!response.ok || payload.ok !== true) {
+      throw new Error(String((payload.error as Record<string, unknown> | undefined)?.message || '更新模板部门失败'))
+    }
+    selectedTemplate.value = (payload.data as { item: ScopeTemplateDetail }).item
+    if (action === 'assign') {
+      selectedTemplateDepartmentId.value = ''
+      setStatus('模板部门已添加')
+    } else {
+      setStatus('模板部门已移除')
+    }
+    await loadTemplates()
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : '更新模板部门失败', 'error')
   } finally {
     scopeBusy.value = false
   }
@@ -440,11 +639,39 @@ async function updateScope(action: 'assign' | 'unassign', scope?: ScopeAssignmen
   }
 }
 
+async function applyTemplate(): Promise<void> {
+  if (!summary.value?.isPlatformAdmin || !selectedUserId.value || !selectedScopeNamespace.value || !selectedTemplateId.value) return
+  scopeBusy.value = true
+  try {
+    const response = await apiFetch(`/api/admin/role-delegation/users/${encodeURIComponent(selectedUserId.value)}/scope-templates/apply`, {
+      method: 'POST',
+      body: JSON.stringify({
+        namespace: selectedScopeNamespace.value,
+        templateId: selectedTemplateId.value,
+        mode: 'replace',
+      }),
+    })
+    const payload = await readJson(response)
+    if (!response.ok || payload.ok !== true) {
+      throw new Error(String((payload.error as Record<string, unknown> | undefined)?.message || '应用范围模板失败'))
+    }
+
+    selectedScopeConfig.value = payload.data as DelegatedAdminScopeConfig
+    setStatus('范围模板已覆盖应用到该插件管理员')
+    await loadSummary()
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : '应用范围模板失败', 'error')
+  } finally {
+    scopeBusy.value = false
+  }
+}
+
 onMounted(async () => {
   try {
     await loadSummary()
     if (summary.value?.isPlatformAdmin) {
       await loadDepartments()
+      await loadTemplates()
     }
     await loadUsers()
   } catch (error) {

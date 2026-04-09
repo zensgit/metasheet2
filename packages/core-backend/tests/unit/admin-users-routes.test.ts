@@ -776,6 +776,182 @@ describe('admin-users routes', () => {
     }))
   })
 
+  it('creates an organization scope template', async () => {
+    rbacMocks.isAdmin.mockResolvedValue(true)
+    pgMocks.query
+      .mockResolvedValueOnce({ rows: [{ id: 'template-1' }] })
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'template-1',
+          name: '华东销售',
+          description: '华东销售线模板',
+          created_by: 'admin-1',
+          updated_by: 'admin-1',
+          created_at: '2026-03-12T00:00:00.000Z',
+          updated_at: '2026-03-12T00:00:00.000Z',
+          department_count: 0,
+        }],
+      })
+      .mockResolvedValueOnce({ rows: [] })
+
+    const response = await invokeRoute('post', '/api/admin/role-delegation/scope-templates', {
+      body: { name: '华东销售', description: '华东销售线模板' },
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect((response.body as Record<string, any>).data.item).toMatchObject({
+      id: 'template-1',
+      name: '华东销售',
+      departmentCount: 0,
+    })
+    expect(auditMocks.auditLog).toHaveBeenCalledWith(expect.objectContaining({
+      resourceId: 'template:template-1',
+    }))
+  })
+
+  it('adds a department to a scope template', async () => {
+    rbacMocks.isAdmin.mockResolvedValue(true)
+    pgMocks.query
+      .mockResolvedValueOnce({ rows: [{ id: 'template-1' }] })
+      .mockResolvedValueOnce({ rows: [{ id: 'dept-1' }] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'template-1',
+          name: '华东销售',
+          description: '华东销售线模板',
+          created_by: 'admin-1',
+          updated_by: 'admin-1',
+          created_at: '2026-03-12T00:00:00.000Z',
+          updated_at: '2026-03-12T00:05:00.000Z',
+          department_count: 1,
+        }],
+      })
+      .mockResolvedValueOnce({
+        rows: [{
+          template_id: 'template-1',
+          directory_department_id: 'dept-1',
+          integration_id: 'integration-1',
+          integration_name: 'DingTalk CN',
+          provider: 'dingtalk',
+          corp_id: 'ding-corp',
+          external_department_id: '1001',
+          department_name: '销售部',
+          department_full_path: '总部 / 销售部',
+          department_is_active: true,
+        }],
+      })
+
+    const response = await invokeRoute('post', '/api/admin/role-delegation/scope-templates/:templateId/departments/:action(assign|unassign)', {
+      params: { templateId: 'template-1', action: 'assign' },
+      body: { directoryDepartmentId: 'dept-1' },
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect((response.body as Record<string, any>).data.item).toMatchObject({
+      id: 'template-1',
+      departmentCount: 1,
+      departments: [
+        expect.objectContaining({
+          directoryDepartmentId: 'dept-1',
+          departmentFullPath: '总部 / 销售部',
+        }),
+      ],
+    })
+  })
+
+  it('applies a scope template to a delegated admin namespace', async () => {
+    rbacMocks.isAdmin.mockResolvedValue(true)
+    pgMocks.query
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'user-2',
+          email: 'plugin-admin@example.com',
+          name: 'Plugin Admin',
+          role: 'user',
+          is_active: true,
+          is_admin: false,
+          last_login_at: null,
+          created_at: '2026-03-12T00:00:00.000Z',
+          updated_at: '2026-03-12T00:00:00.000Z',
+        }],
+      })
+      .mockResolvedValueOnce({
+        rows: [{ role_id: 'crm_admin' }],
+      })
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'template-1',
+          name: '华东销售',
+          description: '华东销售线模板',
+          created_by: 'admin-1',
+          updated_by: 'admin-1',
+          created_at: '2026-03-12T00:00:00.000Z',
+          updated_at: '2026-03-12T00:05:00.000Z',
+          department_count: 1,
+        }],
+      })
+      .mockResolvedValueOnce({
+        rows: [{
+          template_id: 'template-1',
+          directory_department_id: 'dept-1',
+          integration_id: 'integration-1',
+          integration_name: 'DingTalk CN',
+          provider: 'dingtalk',
+          corp_id: 'ding-corp',
+          external_department_id: '1001',
+          department_name: '销售部',
+          department_full_path: '总部 / 销售部',
+          department_is_active: true,
+        }],
+      })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'scope-1',
+          admin_user_id: 'user-2',
+          namespace: 'crm',
+          directory_department_id: 'dept-1',
+          created_by: 'admin-1',
+          created_at: '2026-03-12T00:00:00.000Z',
+          updated_at: '2026-03-12T00:10:00.000Z',
+          integration_id: 'integration-1',
+          integration_name: 'DingTalk CN',
+          provider: 'dingtalk',
+          corp_id: 'ding-corp',
+          external_department_id: '1001',
+          department_name: '销售部',
+          department_full_path: '总部 / 销售部',
+          department_is_active: true,
+        }],
+      })
+
+    const response = await invokeRoute('post', '/api/admin/role-delegation/users/:userId/scope-templates/apply', {
+      params: { userId: 'user-2' },
+      body: { namespace: 'crm', templateId: 'template-1', mode: 'replace' },
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect((response.body as Record<string, any>).data).toMatchObject({
+      adminNamespaces: ['crm'],
+      scopeAssignments: [
+        expect.objectContaining({
+          namespace: 'crm',
+          directoryDepartmentId: 'dept-1',
+        }),
+      ],
+    })
+    expect(auditMocks.auditLog).toHaveBeenCalledWith(expect.objectContaining({
+      resourceId: 'user-2:crm:template:template-1',
+      meta: expect.objectContaining({
+        templateId: 'template-1',
+        mode: 'replace',
+      }),
+    }))
+  })
+
   it('updates dingtalk grant and records an audit entry', async () => {
     rbacMocks.isAdmin.mockResolvedValue(true)
     pgMocks.query
@@ -1652,7 +1828,7 @@ describe('admin-users routes', () => {
     expect(String(pgMocks.query.mock.calls[0]?.[0] || '')).toContain('created_at >=')
     expect(String(pgMocks.query.mock.calls[0]?.[0] || '')).toContain('created_at <=')
     expect(pgMocks.query.mock.calls[0]?.[1]?.slice(0, 3)).toEqual([
-      ['user', 'user-role', 'user-auth-grant', 'user-password', 'user-session', 'user-invite', 'role', 'permission', 'permission-template', 'delegated-admin-scope'],
+      ['user', 'user-role', 'user-auth-grant', 'user-password', 'user-session', 'user-invite', 'role', 'permission', 'permission-template', 'delegated-admin-scope', 'delegated-admin-scope-template'],
       '2026-03-10T00:00:00.000Z',
       '2026-03-12T23:59:59.999Z',
     ])

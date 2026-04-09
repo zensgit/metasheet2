@@ -153,6 +153,30 @@ type DelegatedDepartmentCatalogRow = {
   department_is_active: boolean
 }
 
+type DelegatedScopeTemplateRow = {
+  id: string
+  name: string
+  description: string | null
+  created_by: string | null
+  updated_by: string | null
+  created_at: string
+  updated_at: string
+  department_count: number | string
+}
+
+type DelegatedScopeTemplateDepartmentRow = {
+  template_id: string
+  directory_department_id: string
+  integration_id: string
+  integration_name: string
+  provider: string
+  corp_id: string | null
+  external_department_id: string
+  department_name: string
+  department_full_path: string | null
+  department_is_active: boolean
+}
+
 type AuditRangeBoundaryMode = 'start' | 'end'
 
 type CreateUserRequestBody = {
@@ -165,7 +189,7 @@ type CreateUserRequestBody = {
   isActive?: boolean
 }
 
-const ADMIN_AUDIT_RESOURCE_TYPES = ['user', 'user-role', 'user-auth-grant', 'user-password', 'user-session', 'user-invite', 'role', 'permission', 'permission-template', 'delegated-admin-scope'] as const
+const ADMIN_AUDIT_RESOURCE_TYPES = ['user', 'user-role', 'user-auth-grant', 'user-password', 'user-session', 'user-invite', 'role', 'permission', 'permission-template', 'delegated-admin-scope', 'delegated-admin-scope-template'] as const
 const DINGTALK_PROVIDER = 'dingtalk'
 const PLATFORM_ADMIN_ROLE_ID = 'admin'
 const ATTENDANCE_ROLE_IDS = new Set(['attendance_employee', 'attendance_approver', 'attendance_admin'])
@@ -517,6 +541,119 @@ async function fetchDelegatedDepartmentCatalog(search: string, limit = 50) {
   }))
 }
 
+function sanitizeScopeTemplateText(value: unknown, maxLength: number): string {
+  return String(value ?? '').trim().replace(/[<>'"&;]/g, '').slice(0, maxLength)
+}
+
+async function fetchDelegatedScopeTemplates(search = '') {
+  const trimmed = search.trim()
+  const term = trimmed ? `%${trimmed}%` : '%'
+  const result = await query<DelegatedScopeTemplateRow>(
+    `SELECT
+        t.id,
+        t.name,
+        t.description,
+        t.created_by,
+        t.updated_by,
+        t.created_at,
+        t.updated_at,
+        COUNT(td.directory_department_id)::int AS department_count
+     FROM delegated_role_scope_templates t
+     LEFT JOIN delegated_role_scope_template_departments td ON td.template_id = t.id
+     WHERE (
+       $1 = '%'
+       OR t.name ILIKE $1
+       OR COALESCE(t.description, '') ILIKE $1
+     )
+     GROUP BY t.id, t.name, t.description, t.created_by, t.updated_by, t.created_at, t.updated_at
+     ORDER BY t.updated_at DESC, t.name ASC`,
+    [term],
+  )
+
+  return result.rows.map((row) => ({
+    id: row.id,
+    name: row.name,
+    description: row.description,
+    createdBy: row.created_by,
+    updatedBy: row.updated_by,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    departmentCount: Number(row.department_count || 0),
+  }))
+}
+
+async function fetchDelegatedScopeTemplateDepartments(templateId: string) {
+  const result = await query<DelegatedScopeTemplateDepartmentRow>(
+    `SELECT
+        td.template_id,
+        d.id AS directory_department_id,
+        d.integration_id,
+        i.name AS integration_name,
+        i.provider,
+        i.corp_id,
+        d.external_department_id,
+        d.name AS department_name,
+        d.full_path AS department_full_path,
+        d.is_active AS department_is_active
+     FROM delegated_role_scope_template_departments td
+     JOIN directory_departments d ON d.id = td.directory_department_id
+     JOIN directory_integrations i ON i.id = d.integration_id
+     WHERE td.template_id = $1
+     ORDER BY i.name ASC, COALESCE(d.full_path, d.name) ASC`,
+    [templateId],
+  )
+
+  return result.rows.map((row) => ({
+    directoryDepartmentId: row.directory_department_id,
+    integrationId: row.integration_id,
+    integrationName: row.integration_name,
+    provider: row.provider,
+    corpId: row.corp_id,
+    externalDepartmentId: row.external_department_id,
+    departmentName: row.department_name,
+    departmentFullPath: row.department_full_path,
+    departmentActive: row.department_is_active,
+  }))
+}
+
+async function fetchDelegatedScopeTemplateDetail(templateId: string) {
+  const [templateResult, departments] = await Promise.all([
+    query<DelegatedScopeTemplateRow>(
+      `SELECT
+          t.id,
+          t.name,
+          t.description,
+          t.created_by,
+          t.updated_by,
+          t.created_at,
+          t.updated_at,
+          COUNT(td.directory_department_id)::int AS department_count
+       FROM delegated_role_scope_templates t
+       LEFT JOIN delegated_role_scope_template_departments td ON td.template_id = t.id
+       WHERE t.id = $1
+       GROUP BY t.id, t.name, t.description, t.created_by, t.updated_by, t.created_at, t.updated_at
+       LIMIT 1`,
+      [templateId],
+    ),
+    fetchDelegatedScopeTemplateDepartments(templateId),
+  ])
+
+  const template = templateResult.rows[0]
+  if (!template) return null
+
+  return {
+    id: template.id,
+    name: template.name,
+    description: template.description,
+    createdBy: template.created_by,
+    updatedBy: template.updated_by,
+    createdAt: template.created_at,
+    updatedAt: template.updated_at,
+    departmentCount: Number(template.department_count || 0),
+    departments,
+  }
+}
+
 async function fetchScopedDelegationUsers(adminUserId: string, namespaces: string[], search: string, pageSize: number, offset: number) {
   if (namespaces.length === 0) {
     return { total: 0, items: [] as AdminUserProfile[] }
@@ -842,6 +979,160 @@ export function adminUsersRouter(): Router {
     }
   })
 
+  r.get('/api/admin/role-delegation/scope-templates', authenticate, async (req: Request, res: Response) => {
+    const adminUserId = await ensurePlatformAdmin(req, res)
+    if (!adminUserId) return
+
+    try {
+      const q = String(req.query.q || '').trim()
+      const items = await fetchDelegatedScopeTemplates(q)
+      return jsonOk(res, {
+        actorId: adminUserId,
+        items,
+        query: q,
+      })
+    } catch (error) {
+      return jsonError(res, 500, 'ROLE_DELEGATION_SCOPE_TEMPLATE_LIST_FAILED', (error as Error)?.message || 'Failed to list scope templates')
+    }
+  })
+
+  r.post('/api/admin/role-delegation/scope-templates', authenticate, async (req: Request, res: Response) => {
+    const adminUserId = await ensurePlatformAdmin(req, res)
+    if (!adminUserId) return
+
+    try {
+      const name = sanitizeScopeTemplateText(req.body?.name, 100)
+      const description = sanitizeScopeTemplateText(req.body?.description, 255)
+      if (!name) return jsonError(res, 400, 'TEMPLATE_NAME_REQUIRED', 'name is required')
+
+      const created = await query<{ id: string }>(
+        `INSERT INTO delegated_role_scope_templates (
+           name, description, created_by, updated_by, created_at, updated_at
+         )
+         VALUES ($1, NULLIF($2, ''), $3, $3, NOW(), NOW())
+         RETURNING id`,
+        [name, description, adminUserId],
+      )
+
+      const template = await fetchDelegatedScopeTemplateDetail(created.rows[0].id)
+      await auditLog({
+        actorId: adminUserId,
+        actorType: 'user',
+        action: 'create',
+        resourceType: 'delegated-admin-scope-template',
+        resourceId: `template:${created.rows[0].id}`,
+        meta: {
+          name,
+        },
+      })
+
+      return jsonOk(res, {
+        actorId: adminUserId,
+        item: template,
+      })
+    } catch (error) {
+      return jsonError(res, 500, 'ROLE_DELEGATION_SCOPE_TEMPLATE_CREATE_FAILED', (error as Error)?.message || 'Failed to create scope template')
+    }
+  })
+
+  r.get('/api/admin/role-delegation/scope-templates/:templateId', authenticate, async (req: Request, res: Response) => {
+    const adminUserId = await ensurePlatformAdmin(req, res)
+    if (!adminUserId) return
+
+    try {
+      const templateId = String(req.params.templateId || '').trim()
+      if (!templateId) return jsonError(res, 400, 'TEMPLATE_ID_REQUIRED', 'templateId is required')
+
+      const item = await fetchDelegatedScopeTemplateDetail(templateId)
+      if (!item) return jsonError(res, 404, 'ROLE_DELEGATION_SCOPE_TEMPLATE_NOT_FOUND', 'Scope template not found')
+
+      return jsonOk(res, {
+        actorId: adminUserId,
+        item,
+      })
+    } catch (error) {
+      return jsonError(res, 500, 'ROLE_DELEGATION_SCOPE_TEMPLATE_READ_FAILED', (error as Error)?.message || 'Failed to load scope template')
+    }
+  })
+
+  r.post('/api/admin/role-delegation/scope-templates/:templateId/departments/:action(assign|unassign)', authenticate, async (req: Request, res: Response) => {
+    const adminUserId = await ensurePlatformAdmin(req, res)
+    if (!adminUserId) return
+
+    try {
+      const templateId = String(req.params.templateId || '').trim()
+      const action = String(req.params.action || '').trim()
+      const directoryDepartmentId = String(req.body?.directoryDepartmentId || '').trim()
+      if (!templateId) return jsonError(res, 400, 'TEMPLATE_ID_REQUIRED', 'templateId is required')
+      if (!directoryDepartmentId) return jsonError(res, 400, 'DIRECTORY_DEPARTMENT_REQUIRED', 'directoryDepartmentId is required')
+
+      const templateExists = await query<{ id: string }>(
+        'SELECT id FROM delegated_role_scope_templates WHERE id = $1 LIMIT 1',
+        [templateId],
+      )
+      if (!templateExists.rows.length) {
+        return jsonError(res, 404, 'ROLE_DELEGATION_SCOPE_TEMPLATE_NOT_FOUND', 'Scope template not found')
+      }
+
+      if (action === 'assign') {
+        const department = await query<{ id: string }>(
+          `SELECT id
+           FROM directory_departments
+           WHERE id = $1
+             AND is_active = true
+           LIMIT 1`,
+          [directoryDepartmentId],
+        )
+        if (!department.rows.length) {
+          return jsonError(res, 404, 'DIRECTORY_DEPARTMENT_NOT_FOUND', 'Directory department not found')
+        }
+        await query(
+          `INSERT INTO delegated_role_scope_template_departments (
+             template_id, directory_department_id, created_at
+           )
+           VALUES ($1, $2, NOW())
+           ON CONFLICT DO NOTHING`,
+          [templateId, directoryDepartmentId],
+        )
+      } else {
+        await query(
+          `DELETE FROM delegated_role_scope_template_departments
+           WHERE template_id = $1
+             AND directory_department_id = $2`,
+          [templateId, directoryDepartmentId],
+        )
+      }
+
+      await query(
+        `UPDATE delegated_role_scope_templates
+         SET updated_by = $2,
+             updated_at = NOW()
+         WHERE id = $1`,
+        [templateId, adminUserId],
+      )
+
+      const item = await fetchDelegatedScopeTemplateDetail(templateId)
+      await auditLog({
+        actorId: adminUserId,
+        actorType: 'user',
+        action: action === 'assign' ? 'grant' : 'revoke',
+        resourceType: 'delegated-admin-scope-template',
+        resourceId: `template:${templateId}:${directoryDepartmentId}`,
+        meta: {
+          templateId,
+          directoryDepartmentId,
+        },
+      })
+
+      return jsonOk(res, {
+        actorId: adminUserId,
+        item,
+      })
+    } catch (error) {
+      return jsonError(res, 500, 'ROLE_DELEGATION_SCOPE_TEMPLATE_UPDATE_FAILED', (error as Error)?.message || 'Failed to update scope template departments')
+    }
+  })
+
   r.get('/api/admin/role-delegation/users/:userId/scopes', authenticate, async (req: Request, res: Response) => {
     const adminUserId = await ensurePlatformAdmin(req, res)
     if (!adminUserId) return
@@ -949,6 +1240,86 @@ export function adminUsersRouter(): Router {
       })
     } catch (error) {
       return jsonError(res, 500, 'ROLE_DELEGATION_SCOPE_UPDATE_FAILED', (error as Error)?.message || 'Failed to update delegated admin scope')
+    }
+  })
+
+  r.post('/api/admin/role-delegation/users/:userId/scope-templates/apply', authenticate, async (req: Request, res: Response) => {
+    const adminUserId = await ensurePlatformAdmin(req, res)
+    if (!adminUserId) return
+
+    try {
+      const userId = String(req.params.userId || '').trim()
+      const namespace = String(req.body?.namespace || '').trim()
+      const templateId = String(req.body?.templateId || '').trim()
+      const mode = String(req.body?.mode || 'replace').trim().toLowerCase()
+      if (!userId) return jsonError(res, 400, 'USER_ID_REQUIRED', 'userId is required')
+      if (!namespace) return jsonError(res, 400, 'NAMESPACE_REQUIRED', 'namespace is required')
+      if (!templateId) return jsonError(res, 400, 'TEMPLATE_ID_REQUIRED', 'templateId is required')
+      if (!['replace', 'merge'].includes(mode)) return jsonError(res, 400, 'ROLE_DELEGATION_SCOPE_TEMPLATE_MODE_INVALID', 'mode must be replace or merge')
+
+      const [profile, roleIds, template] = await Promise.all([
+        fetchUserProfile(userId),
+        fetchUserRoleIds(userId),
+        fetchDelegatedScopeTemplateDetail(templateId),
+      ])
+      if (!profile) return jsonError(res, 404, 'NOT_FOUND', 'User not found')
+      if (!template) return jsonError(res, 404, 'ROLE_DELEGATION_SCOPE_TEMPLATE_NOT_FOUND', 'Scope template not found')
+
+      const adminNamespaces = deriveDelegableNamespaces(roleIds)
+      if (!adminNamespaces.includes(namespace)) {
+        return jsonError(res, 409, 'ROLE_DELEGATION_NAMESPACE_NOT_HELD', 'Selected user does not hold that delegated admin namespace')
+      }
+      if (template.departments.length === 0) {
+        return jsonError(res, 409, 'ROLE_DELEGATION_SCOPE_TEMPLATE_EMPTY', 'Scope template has no departments to apply')
+      }
+
+      if (mode === 'replace') {
+        await query(
+          `DELETE FROM delegated_role_admin_scopes
+           WHERE admin_user_id = $1
+             AND namespace = $2`,
+          [userId, namespace],
+        )
+      }
+
+      for (const department of template.departments) {
+        await query(
+          `INSERT INTO delegated_role_admin_scopes (
+             admin_user_id, namespace, directory_department_id, created_by, created_at, updated_at
+           )
+           VALUES ($1, $2, $3, $4, NOW(), NOW())
+           ON CONFLICT (admin_user_id, namespace, directory_department_id)
+           DO UPDATE SET
+             created_by = EXCLUDED.created_by,
+             updated_at = NOW()`,
+          [userId, namespace, department.directoryDepartmentId, adminUserId],
+        )
+      }
+
+      const scopeAssignments = await fetchDelegatedScopeAssignments(userId)
+      await auditLog({
+        actorId: adminUserId,
+        actorType: 'user',
+        action: 'grant',
+        resourceType: 'delegated-admin-scope-template',
+        resourceId: `${userId}:${namespace}:template:${templateId}`,
+        meta: {
+          userId,
+          namespace,
+          templateId,
+          mode,
+          departmentCount: template.departments.length,
+        },
+      })
+
+      return jsonOk(res, {
+        actorId: adminUserId,
+        user: profile,
+        adminNamespaces,
+        scopeAssignments: scopeAssignments.filter((scope) => adminNamespaces.includes(scope.namespace)),
+      })
+    } catch (error) {
+      return jsonError(res, 500, 'ROLE_DELEGATION_SCOPE_TEMPLATE_APPLY_FAILED', (error as Error)?.message || 'Failed to apply scope template')
     }
   })
 
