@@ -219,6 +219,47 @@ function buildCustomerCommand(input) {
   }
 }
 
+function buildUpdateCustomerCommand(input, existingCustomer) {
+  const command = input && typeof input === 'object' && !Array.isArray(input) ? input : {}
+  const customerInput =
+    command.customer && typeof command.customer === 'object' && !Array.isArray(command.customer)
+      ? command.customer
+      : command
+  const currentCustomer =
+    existingCustomer && typeof existingCustomer === 'object' ? existingCustomer : {}
+
+  const customerCode = requiredString(
+    customerInput.customerCode ?? currentCustomer.customerCode,
+    'customer.customerCode',
+  )
+  const name = requiredString(
+    customerInput.name ?? currentCustomer.name,
+    'customer.name',
+  )
+  const status = normalizeEnumValue(
+    customerInput.status ?? currentCustomer.status,
+    'customer.status',
+    ['active', 'inactive'],
+    optionalString(currentCustomer.status) || 'active',
+  )
+  const phone = hasOwnField(customerInput, 'phone') || hasOwnField(command, 'phone')
+    ? optionalString(customerInput.phone ?? command.phone) || null
+    : optionalString(currentCustomer.phone) || null
+  const email = hasOwnField(customerInput, 'email') || hasOwnField(command, 'email')
+    ? optionalString(customerInput.email ?? command.email) || null
+    : optionalString(currentCustomer.email) || null
+
+  return {
+    changes: {
+      customerCode,
+      name,
+      status,
+      phone,
+      email,
+    },
+  }
+}
+
 function buildUpdateInstalledAssetCommand(input, existingInstalledAsset) {
   const command = input && typeof input === 'object' && !Array.isArray(input) ? input : {}
   const installedAsset =
@@ -567,6 +608,7 @@ function buildServiceRecordedEventPayload(input, meta) {
 module.exports = {
   buildCreateTicketCommand,
   buildCustomerCommand,
+  buildUpdateCustomerCommand,
   buildInstalledAssetCommand,
   buildUpdateInstalledAssetCommand,
   buildUpdateTicketCommand,

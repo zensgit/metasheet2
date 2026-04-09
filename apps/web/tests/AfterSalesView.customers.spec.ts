@@ -771,6 +771,280 @@ describe('AfterSalesView customers panel', () => {
     expect(customerSection.textContent).toContain('Alice Plant')
   })
 
+  it('updates a customer inline without reloading the page', async () => {
+    apiFetchMock.mockImplementation(async (path: string, options?: RequestInit) => {
+      if (path === '/api/after-sales/app-manifest') {
+        return createResponse({
+          id: 'after-sales-default',
+          displayName: 'After Sales',
+          platformDependencies: ['core-backend'],
+          objects: [{ id: 'customer' }],
+          workflows: [],
+        })
+      }
+
+      if (path === '/api/after-sales/projects/current') {
+        return createResponse({
+          status: 'installed',
+          projectId: 'tenant:after-sales',
+          displayName: 'After Sales',
+          config: {
+            defaultSlaHours: 24,
+            urgentSlaHours: 4,
+            followUpAfterDays: 7,
+          },
+          installResult: {
+            status: 'installed',
+            createdObjects: [],
+            createdViews: [],
+            warnings: [],
+            reportRef: 'install-customers-008',
+          },
+          reportRef: 'install-customers-008',
+        })
+      }
+
+      if (path === '/api/after-sales/tickets') {
+        return createResponse({ projectId: 'tenant:after-sales', count: 0, tickets: [] })
+      }
+
+      if (path === '/api/after-sales/installed-assets') {
+        return createResponse({ projectId: 'tenant:after-sales', count: 0, installedAssets: [] })
+      }
+
+      if (path === '/api/after-sales/service-records') {
+        return createResponse({ projectId: 'tenant:after-sales', count: 0, serviceRecords: [] })
+      }
+
+      if (path === '/api/after-sales/customers') {
+        return createResponse({
+          projectId: 'tenant:after-sales',
+          count: 2,
+          customers: [
+            {
+              id: 'customer-edit',
+              version: 1,
+              data: {
+                customerCode: 'CUS-EDIT',
+                name: 'Customer Before Edit',
+                phone: '13800138000',
+                email: 'before@example.com',
+                status: 'active',
+              },
+            },
+            {
+              id: 'customer-keep',
+              version: 1,
+              data: {
+                customerCode: 'CUS-KEEP',
+                name: 'Keep Me Customer',
+                phone: '13900139000',
+                email: 'keep@example.com',
+                status: 'inactive',
+              },
+            },
+          ],
+        })
+      }
+
+      if (path === '/api/after-sales/customers/customer-edit' && options?.method === 'PATCH') {
+        expect(JSON.parse(String(options.body))).toEqual({
+          customer: {
+            customerCode: 'CUS-EDIT-UPDATED',
+            name: 'Customer After Edit',
+            phone: '',
+            email: 'after@example.com',
+            status: 'inactive',
+          },
+        })
+        return createResponse({
+          projectId: 'tenant:after-sales',
+          customer: {
+            id: 'customer-edit',
+            version: 4,
+            data: {
+              customerCode: 'CUS-EDIT-UPDATED',
+              name: 'Customer After Edit',
+              phone: null,
+              email: 'after@example.com',
+              status: 'inactive',
+            },
+          },
+        })
+      }
+
+      throw new Error(`Unexpected request: ${path}`)
+    })
+
+    const mounted = mountAfterSalesView()
+    app = mounted.app
+    container = mounted.container
+
+    await waitForText(container, 'Customer Before Edit')
+
+    const customerSection = findSection(container, 'Customer registry')
+    const editButton = customerSection.querySelector<HTMLButtonElement>('button[aria-label="Edit customer CUS-EDIT"]')
+    expect(editButton).toBeTruthy()
+    if (!editButton) return
+
+    editButton.click()
+    await flushUi()
+
+    const customerCodeInput = customerSection.querySelector<HTMLInputElement>('#after-sales-customer-edit-code-customer-edit')
+    const nameInput = customerSection.querySelector<HTMLInputElement>('#after-sales-customer-edit-name-customer-edit')
+    const phoneInput = customerSection.querySelector<HTMLInputElement>('#after-sales-customer-edit-phone-customer-edit')
+    const emailInput = customerSection.querySelector<HTMLInputElement>('#after-sales-customer-edit-email-customer-edit')
+    const statusSelect = customerSection.querySelector<HTMLSelectElement>('#after-sales-customer-edit-status-customer-edit')
+
+    expect(customerCodeInput).toBeTruthy()
+    expect(nameInput).toBeTruthy()
+    expect(phoneInput).toBeTruthy()
+    expect(emailInput).toBeTruthy()
+    expect(statusSelect).toBeTruthy()
+    if (!customerCodeInput || !nameInput || !phoneInput || !emailInput || !statusSelect) return
+
+    await setInputValue(customerCodeInput, 'CUS-EDIT-UPDATED')
+    await setInputValue(nameInput, 'Customer After Edit')
+    await setInputValue(phoneInput, '')
+    await setInputValue(emailInput, 'after@example.com')
+    await setSelectValue(statusSelect, 'inactive')
+
+    findButtonWithin(customerSection, 'Save changes').click()
+
+    await waitForText(customerSection, 'Updated customer CUS-EDIT-UPDATED')
+
+    expect(customerSection.textContent).toContain('Customer After Edit')
+    expect(customerSection.textContent).toContain('after@example.com')
+    expect(customerSection.textContent).toContain('CUS-KEEP')
+    expect(customerSection.textContent).not.toContain('Customer Before Edit')
+    expect(customerSection.querySelector('#after-sales-customer-edit-name-customer-edit')).toBeNull()
+    expect(apiFetchMock).toHaveBeenCalledWith('/api/after-sales/customers/customer-edit', {
+      method: 'PATCH',
+      body: JSON.stringify({
+        customer: {
+          customerCode: 'CUS-EDIT-UPDATED',
+          name: 'Customer After Edit',
+          status: 'inactive',
+          phone: '',
+          email: 'after@example.com',
+        },
+      }),
+    })
+  })
+
+  it('keeps the customer edit draft open when update fails', async () => {
+    apiFetchMock.mockImplementation(async (path: string, options?: RequestInit) => {
+      if (path === '/api/after-sales/app-manifest') {
+        return createResponse({
+          id: 'after-sales-default',
+          displayName: 'After Sales',
+          platformDependencies: ['core-backend'],
+          objects: [{ id: 'customer' }],
+          workflows: [],
+        })
+      }
+
+      if (path === '/api/after-sales/projects/current') {
+        return createResponse({
+          status: 'installed',
+          projectId: 'tenant:after-sales',
+          displayName: 'After Sales',
+          config: {
+            defaultSlaHours: 24,
+            urgentSlaHours: 4,
+            followUpAfterDays: 7,
+          },
+          installResult: {
+            status: 'installed',
+            createdObjects: [],
+            createdViews: [],
+            warnings: [],
+            reportRef: 'install-customers-009',
+          },
+          reportRef: 'install-customers-009',
+        })
+      }
+
+      if (path === '/api/after-sales/tickets') {
+        return createResponse({ projectId: 'tenant:after-sales', count: 0, tickets: [] })
+      }
+
+      if (path === '/api/after-sales/installed-assets') {
+        return createResponse({ projectId: 'tenant:after-sales', count: 0, installedAssets: [] })
+      }
+
+      if (path === '/api/after-sales/service-records') {
+        return createResponse({ projectId: 'tenant:after-sales', count: 0, serviceRecords: [] })
+      }
+
+      if (path === '/api/after-sales/customers') {
+        return createResponse({
+          projectId: 'tenant:after-sales',
+          count: 1,
+          customers: [
+            {
+              id: 'customer-edit-error',
+              version: 1,
+              data: {
+                customerCode: 'CUS-ERR',
+                name: 'Customer Still Visible',
+                phone: '13800138000',
+                email: 'before@example.com',
+                status: 'active',
+              },
+            },
+          ],
+        })
+      }
+
+      if (path === '/api/after-sales/customers/customer-edit-error' && options?.method === 'PATCH') {
+        return createResponse({
+          error: {
+            code: 'INTERNAL_ERROR',
+            message: 'Customer update failed',
+          },
+        }, {
+          ok: false,
+          status: 500,
+          statusText: 'Internal Server Error',
+        })
+      }
+
+      throw new Error(`Unexpected request: ${path}`)
+    })
+
+    const mounted = mountAfterSalesView()
+    app = mounted.app
+    container = mounted.container
+
+    await waitForText(container, 'Customer Still Visible')
+
+    const customerSection = findSection(container, 'Customer registry')
+    const editButton = customerSection.querySelector<HTMLButtonElement>('button[aria-label="Edit customer CUS-ERR"]')
+    expect(editButton).toBeTruthy()
+    if (!editButton) return
+
+    editButton.click()
+    await flushUi()
+
+    const nameInput = customerSection.querySelector<HTMLInputElement>('#after-sales-customer-edit-name-customer-edit-error')
+    const emailInput = customerSection.querySelector<HTMLInputElement>('#after-sales-customer-edit-email-customer-edit-error')
+    expect(nameInput).toBeTruthy()
+    expect(emailInput).toBeTruthy()
+    if (!nameInput || !emailInput) return
+
+    await setInputValue(nameInput, 'Customer Failed Edit')
+    await setInputValue(emailInput, 'failed@example.com')
+
+    findButtonWithin(customerSection, 'Save changes').click()
+
+    await waitForText(customerSection, 'Customer update failed')
+    expect(customerSection.textContent).toContain('CUS-ERR')
+    expect(customerSection.querySelector('#after-sales-customer-edit-name-customer-edit-error')).not.toBeNull()
+    expect(nameInput.value).toBe('Customer Failed Edit')
+    expect(emailInput.value).toBe('failed@example.com')
+  })
+
   it('deletes a customer from the visible list without reloading the page', async () => {
     apiFetchMock.mockImplementation(async (path: string, options?: RequestInit) => {
       if (path === '/api/after-sales/app-manifest') {

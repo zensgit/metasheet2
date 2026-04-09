@@ -2267,6 +2267,104 @@ describe('after-sales plugin install integration', () => {
     })
   })
 
+  it('updates customers through the real after-sales routes', async () => {
+    if (!baseUrl || !pool) return
+
+    const tokenRes = await requestJson(
+      `${baseUrl}/api/auth/dev-token?userId=after-sales-customer-update-it&roles=admin&perms=*:*`,
+    )
+    const token = (tokenRes.body as { token?: string } | undefined)?.token
+    expect(token).toBeTruthy()
+
+    const installRes = await requestJson(`${baseUrl}/api/after-sales/projects/install`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        templateId: 'after-sales-default',
+        displayName: 'After Sales Customer Update Flow',
+      }),
+    })
+    expect(installRes.status).toBe(200)
+
+    const createRes = await requestJson(`${baseUrl}/api/after-sales/customers`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        customer: {
+          customerCode: 'CUS-5005',
+          name: 'Customer Baseline',
+          phone: '13500135000',
+          email: 'baseline@example.com',
+          status: 'active',
+        },
+      }),
+    })
+    expect(createRes.status).toBe(201)
+
+    const createdCustomerId = ((createRes.body as {
+      data?: { customer?: { id?: string } }
+    })?.data?.customer?.id)
+    expect(createdCustomerId).toBeTruthy()
+
+    const updateRes = await requestJson(
+      `${baseUrl}/api/after-sales/customers/${encodeURIComponent(String(createdCustomerId))}`,
+      {
+        method: 'PATCH',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          customer: {
+            customerCode: 'CUS-5005-UPDATED',
+            name: 'Customer Updated',
+            phone: '',
+            email: 'updated@example.com',
+            status: 'inactive',
+          },
+        }),
+      },
+    )
+
+    expect(updateRes.status).toBe(200)
+    const updateBody = updateRes.body as {
+      ok?: boolean
+      data?: {
+        customer?: {
+          id?: string
+          data?: Record<string, unknown>
+        }
+      }
+    }
+    expect(updateBody.ok).toBe(true)
+    expect(updateBody.data?.customer?.data).toMatchObject({
+      customerCode: 'CUS-5005-UPDATED',
+      name: 'Customer Updated',
+      email: 'updated@example.com',
+      status: 'inactive',
+    })
+
+    const customerSheetId = stableMetaId('sheet', PROJECT_ID, 'customer')
+    const updatedRecordRes = await pool.query<{ data: Record<string, unknown> }>(
+      'SELECT data FROM meta_records WHERE id = $1 AND sheet_id = $2',
+      [createdCustomerId, customerSheetId],
+    )
+    expect(updatedRecordRes.rows).toHaveLength(1)
+    expect(updatedRecordRes.rows[0]?.data).toMatchObject({
+      [stFieldId('customer', 'customerCode')]: 'CUS-5005-UPDATED',
+      [stFieldId('customer', 'name')]: 'Customer Updated',
+      [stFieldId('customer', 'phone')]: null,
+      [stFieldId('customer', 'email')]: 'updated@example.com',
+      [stFieldId('customer', 'status')]: 'inactive',
+    })
+  })
+
   it('deletes customers through the real after-sales routes', async () => {
     if (!baseUrl || !pool) return
 
