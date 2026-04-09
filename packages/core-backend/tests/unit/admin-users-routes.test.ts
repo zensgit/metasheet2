@@ -398,6 +398,61 @@ describe('admin-users routes', () => {
     }))
   })
 
+  it('assigns platform admin and syncs legacy admin columns', async () => {
+    rbacMocks.isAdmin
+      .mockResolvedValueOnce(true)
+      .mockResolvedValueOnce(true)
+    rbacMocks.listUserPermissions.mockResolvedValue(['admin:all'])
+    pgMocks.query
+      .mockResolvedValueOnce({ rows: [{ id: 'admin' }] })
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'user-1',
+          email: 'alpha@example.com',
+          name: 'Alpha',
+          role: 'user',
+          is_active: true,
+          is_admin: false,
+          last_login_at: null,
+          created_at: '2026-03-12T00:00:00.000Z',
+          updated_at: '2026-03-12T00:00:00.000Z',
+        }],
+      })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'user-1',
+          email: 'alpha@example.com',
+          name: 'Alpha',
+          role: 'admin',
+          is_active: true,
+          is_admin: true,
+          last_login_at: null,
+          created_at: '2026-03-12T00:00:00.000Z',
+          updated_at: '2026-03-12T00:05:00.000Z',
+        }],
+      })
+      .mockResolvedValueOnce({
+        rows: [{ role_id: 'admin' }, { role_id: 'attendance_employee' }],
+      })
+
+    const response = await invokeRoute('post', '/api/admin/users/:userId/roles/assign', {
+      params: { userId: 'user-1' },
+      body: { roleId: 'admin' },
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect((response.body as Record<string, any>).data.user).toMatchObject({
+      role: 'admin',
+      is_admin: true,
+    })
+    expect(pgMocks.query).toHaveBeenCalledWith(
+      expect.stringContaining('SET role = CASE'),
+      ['user-1', true],
+    )
+  })
+
   it('unassigns a role and writes an audit entry', async () => {
     rbacMocks.isAdmin
       .mockResolvedValueOnce(true)
@@ -445,6 +500,60 @@ describe('admin-users routes', () => {
       resourceType: 'user-role',
       resourceId: 'user-1:attendance_admin',
     }))
+  })
+
+  it('unassigns platform admin and clears legacy admin columns', async () => {
+    rbacMocks.isAdmin
+      .mockResolvedValueOnce(true)
+      .mockResolvedValueOnce(false)
+    rbacMocks.listUserPermissions.mockResolvedValue(['attendance:read'])
+    pgMocks.query
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'user-1',
+          email: 'alpha@example.com',
+          name: 'Alpha',
+          role: 'admin',
+          is_active: true,
+          is_admin: true,
+          last_login_at: null,
+          created_at: '2026-03-12T00:00:00.000Z',
+          updated_at: '2026-03-12T00:00:00.000Z',
+        }],
+      })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'user-1',
+          email: 'alpha@example.com',
+          name: 'Alpha',
+          role: 'user',
+          is_active: true,
+          is_admin: false,
+          last_login_at: null,
+          created_at: '2026-03-12T00:00:00.000Z',
+          updated_at: '2026-03-12T00:05:00.000Z',
+        }],
+      })
+      .mockResolvedValueOnce({
+        rows: [{ role_id: 'attendance_employee' }],
+      })
+
+    const response = await invokeRoute('post', '/api/admin/users/:userId/roles/unassign', {
+      params: { userId: 'user-1' },
+      body: { roleId: 'admin' },
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect((response.body as Record<string, any>).data.user).toMatchObject({
+      role: 'user',
+      is_admin: false,
+    })
+    expect(pgMocks.query).toHaveBeenCalledWith(
+      expect.stringContaining('SET role = CASE'),
+      ['user-1', false],
+    )
   })
 
   it('lists role catalog with permissions and member counts', async () => {

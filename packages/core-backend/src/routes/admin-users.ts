@@ -111,6 +111,7 @@ type CreateUserRequestBody = {
 
 const ADMIN_AUDIT_RESOURCE_TYPES = ['user', 'user-role', 'user-auth-grant', 'user-password', 'user-session', 'user-invite', 'role', 'permission', 'permission-template'] as const
 const DINGTALK_PROVIDER = 'dingtalk'
+const PLATFORM_ADMIN_ROLE_ID = 'admin'
 
 function getRequestUserId(req: Request): string {
   const raw = req.user as Record<string, unknown> | undefined
@@ -290,6 +291,21 @@ async function fetchDingTalkAccessSnapshot(userId: string) {
       updatedAt: identity?.updated_at ?? null,
     },
   }
+}
+
+async function syncLegacyAdminProfile(userId: string, enabled: boolean): Promise<void> {
+  await query(
+    `UPDATE users
+     SET role = CASE
+       WHEN $2::boolean THEN 'admin'
+       WHEN role = 'admin' THEN 'user'
+       ELSE role
+     END,
+     is_admin = $2,
+     updated_at = NOW()
+     WHERE id = $1`,
+    [userId, enabled],
+  )
 }
 
 export function adminUsersRouter(): Router {
@@ -627,6 +643,7 @@ export function adminUsersRouter(): Router {
       const roleId = typeof body.roleId === 'string' && body.roleId.trim()
         ? body.roleId.trim()
         : preset?.roleId || ''
+      const effectiveRole = roleId === PLATFORM_ADMIN_ROLE_ID || cleanRole === 'admin' ? 'admin' : cleanRole
       const isActive = typeof body.isActive === 'boolean' ? body.isActive : true
       const requestedPassword = typeof body.password === 'string' ? body.password.trim() : ''
       const directPermissions = Array.from(new Set(preset?.permissions || []))
@@ -670,7 +687,7 @@ export function adminUsersRouter(): Router {
       await query(
         `INSERT INTO users (id, email, name, password_hash, role, permissions, is_active, is_admin, created_at, updated_at)
          VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, NOW(), NOW())`,
-        [userId, cleanEmail, cleanName, passwordHash, cleanRole, JSON.stringify(directPermissions), isActive, cleanRole === 'admin'],
+        [userId, cleanEmail, cleanName, passwordHash, effectiveRole, JSON.stringify(directPermissions), isActive, effectiveRole === 'admin'],
       )
 
       if (roleId) {
@@ -704,7 +721,7 @@ export function adminUsersRouter(): Router {
           email: cleanEmail,
           name: cleanName,
           adminUserId,
-          role: cleanRole,
+          role: effectiveRole,
           presetId: preset?.id || null,
           roleId: roleId || null,
           is_active: isActive,
@@ -856,6 +873,9 @@ export function adminUsersRouter(): Router {
          ON CONFLICT DO NOTHING`,
         [userId, roleId],
       )
+      if (roleId === PLATFORM_ADMIN_ROLE_ID) {
+        await syncLegacyAdminProfile(userId, true)
+      }
       invalidateUserPerms(userId)
 
       await auditLog({
@@ -900,6 +920,9 @@ export function adminUsersRouter(): Router {
          WHERE user_id = $1 AND role_id = $2`,
         [userId, roleId],
       )
+      if (roleId === PLATFORM_ADMIN_ROLE_ID) {
+        await syncLegacyAdminProfile(userId, false)
+      }
       invalidateUserPerms(userId)
 
       await auditLog({

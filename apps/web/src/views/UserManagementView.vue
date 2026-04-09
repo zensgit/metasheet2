@@ -189,6 +189,37 @@
           <div class="user-admin__section">
             <div class="user-admin__section-head">
               <div>
+                <h3>管理员能力</h3>
+                <p class="user-admin__hint">考勤管理员和平台管理员分开控制，互不隐含。平台管理员变更后建议重新登录一次。</p>
+              </div>
+            </div>
+            <div class="user-admin__chips">
+              <span class="user-admin__chip" :class="{ 'user-admin__chip--success': hasPlatformAdminAccess, 'user-admin__chip--danger': !hasPlatformAdminAccess }">
+                {{ hasPlatformAdminAccess ? '已开通平台管理员' : '未开通平台管理员' }}
+              </span>
+              <span class="user-admin__chip" :class="{ 'user-admin__chip--success': hasAttendanceAdminAccess, 'user-admin__chip--danger': !hasAttendanceAdminAccess }">
+                {{ hasAttendanceAdminAccess ? '已开通考勤管理员' : '未开通考勤管理员' }}
+              </span>
+            </div>
+            <div class="user-admin__role-actions">
+              <button class="user-admin__button" type="button" :disabled="busy || hasPlatformAdminAccess" @click="void updateNamedRole('admin', true)">
+                提升为平台管理员
+              </button>
+              <button class="user-admin__button user-admin__button--secondary" type="button" :disabled="busy || !hasPlatformAdminAccess" @click="void updateNamedRole('admin', false)">
+                取消平台管理员
+              </button>
+              <button class="user-admin__button" type="button" :disabled="busy || hasAttendanceAdminAccess" @click="void updateNamedRole('attendance_admin', true)">
+                开通考勤管理员
+              </button>
+              <button class="user-admin__button user-admin__button--secondary" type="button" :disabled="busy || !hasAttendanceAdminAccess" @click="void updateNamedRole('attendance_admin', false)">
+                关闭考勤管理员
+              </button>
+            </div>
+          </div>
+
+          <div class="user-admin__section">
+            <div class="user-admin__section-head">
+              <div>
                 <h3>钉钉扫码登录</h3>
                 <p class="user-admin__hint">生产建议开启严格白名单，只允许已存在且已开通的用户扫码登录。</p>
               </div>
@@ -473,6 +504,14 @@ const createForm = ref<CreateUserForm>({
   isActive: true,
 })
 const selectedPreset = computed(() => accessPresets.value.find((preset) => preset.id === createForm.value.presetId) || null)
+const hasPlatformAdminAccess = computed(() => {
+  if (!access.value) return false
+  return access.value.roles.includes('admin') || access.value.user.role === 'admin' || access.value.user.is_admin
+})
+const hasAttendanceAdminAccess = computed(() => {
+  if (!access.value) return false
+  return access.value.roles.includes('attendance_admin') || access.value.permissions.includes('attendance:admin')
+})
 const filteredAccessPresets = computed(() => {
   return accessPresets.value.filter((preset) => !presetModeFilter.value || preset.productMode === presetModeFilter.value)
 })
@@ -933,6 +972,30 @@ async function updateRole(action: 'assign' | 'unassign'): Promise<void> {
     setStatus(action === 'assign' ? '角色已分配' : '角色已撤销')
   } catch (error) {
     setStatus(error instanceof Error ? error.message : '保存角色失败', 'error')
+  } finally {
+    busy.value = false
+  }
+}
+
+async function updateNamedRole(roleId: string, enabled: boolean): Promise<void> {
+  if (!selectedUserId.value) return
+  busy.value = true
+  try {
+    const response = await apiFetch(`/api/admin/users/${encodeURIComponent(selectedUserId.value)}/roles/${enabled ? 'assign' : 'unassign'}`, {
+      method: 'POST',
+      body: JSON.stringify({ roleId }),
+    })
+    const payload = await readJson(response)
+    if (!response.ok || payload.ok !== true) {
+      throw new Error(String((payload.error as Record<string, unknown> | undefined)?.message || '保存管理员角色失败'))
+    }
+
+    access.value = payload.data as UserAccess
+    await loadUsers()
+    const label = roleId === 'admin' ? '平台管理员' : roleId === 'attendance_admin' ? '考勤管理员' : roleId
+    setStatus(enabled ? `已开通${label}` : `已关闭${label}`)
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : '保存管理员角色失败', 'error')
   } finally {
     busy.value = false
   }
