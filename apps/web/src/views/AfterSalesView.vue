@@ -295,6 +295,7 @@ interface ServiceRecordViewModel {
     ticketNo: string
     visitType: string
     scheduledAt: string
+    completedAt: string
     technicianName: string
     workSummary: string
     result: string
@@ -339,7 +340,7 @@ const placeholderProjectId = 'tenant:after-sales'
 const warnings = computed(() => current.value.installResult?.warnings ?? [])
 const createdObjectLabels = computed(() => current.value.installResult?.createdObjects ?? [])
 const createdViewLabels = computed(() => current.value.installResult?.createdViews ?? [])
-const isInstalled = computed(() => current.value.status !== 'not-installed')
+const isInstalled = computed(() => current.value.status === 'installed')
 const isDegraded = computed(() => current.value.status === 'partial' || current.value.status === 'failed')
 const statusTone = computed(() => {
   switch (current.value.status) {
@@ -409,6 +410,22 @@ function toText(value: unknown, fallback = ''): string {
   return fallback
 }
 
+function formatRecordDate(value: unknown): string {
+  const text = toText(value)
+  if (!text) {
+    return '—'
+  }
+  const parsed = new Date(text)
+  if (Number.isNaN(parsed.getTime())) {
+    return text
+  }
+  return new Intl.DateTimeFormat('zh-CN', {
+    dateStyle: 'medium',
+    timeStyle: 'short',
+    hour12: false,
+  }).format(parsed)
+}
+
 function resetConfigDraft() {
   configDraft.value = { ...baselineConfigDraft.value }
 }
@@ -435,6 +452,7 @@ function normalizeServiceRecordRow(record: ServiceRecordRow): ServiceRecordViewM
       ticketNo: toText(rawData.ticketNo, record.id),
       visitType: toText(rawData.visitType, 'unspecified'),
       scheduledAt: toText(rawData.scheduledAt, 'n/a'),
+      completedAt: toText(rawData.completedAt, 'n/a'),
       technicianName: toText(rawData.technicianName),
       workSummary: toText(rawData.workSummary),
       result: toText(rawData.result),
@@ -451,7 +469,7 @@ async function loadServiceRecordsForCurrentState(state: CurrentResponse) {
   serviceRecordsError.value = ''
 
   try {
-    if (state.status === 'not-installed') {
+    if (state.status !== 'installed') {
       serviceRecords.value = []
       return
     }
