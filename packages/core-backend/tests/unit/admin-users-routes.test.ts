@@ -409,6 +409,25 @@ describe('admin-users routes', () => {
           permissions: ['crm:read', 'crm:write'],
         }],
       })
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'scope-1',
+          admin_user_id: 'crm-admin-1',
+          namespace: 'crm',
+          directory_department_id: 'dept-1',
+          created_by: 'admin-1',
+          created_at: '2026-03-12T00:00:00.000Z',
+          updated_at: '2026-03-12T00:00:00.000Z',
+          integration_id: 'integration-1',
+          integration_name: 'DingTalk CN',
+          provider: 'dingtalk',
+          corp_id: 'ding-corp',
+          external_department_id: '1001',
+          department_name: '研发部',
+          department_full_path: '总部 / 研发部',
+          department_is_active: true,
+        }],
+      })
 
     const response = await invokeRoute('get', '/api/admin/role-delegation/summary')
 
@@ -419,6 +438,12 @@ describe('admin-users routes', () => {
       roleCatalog: [
         { id: 'crm_admin' },
         { id: 'crm_operator' },
+      ],
+      scopeAssignments: [
+        expect.objectContaining({
+          namespace: 'crm',
+          departmentFullPath: '总部 / 研发部',
+        }),
       ],
     })
   })
@@ -457,6 +482,60 @@ describe('admin-users routes', () => {
     expect((response.body as Record<string, any>).error.code).toBe('ROLE_DELEGATION_FORBIDDEN')
   })
 
+  it('rejects delegated role assignment when the user is outside the namespace-specific department scope', async () => {
+    state.authUser = {
+      id: 'plugin-admin-1',
+      role: 'user',
+    }
+    rbacMocks.isAdmin.mockResolvedValue(false)
+    pgMocks.query
+      .mockResolvedValueOnce({
+        rows: [{ role_id: 'crm_admin' }, { role_id: 'qa_admin' }],
+      })
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'user-1',
+          email: 'alpha@example.com',
+          name: 'Alpha',
+          role: 'user',
+          is_active: true,
+          is_admin: false,
+          last_login_at: null,
+          created_at: '2026-03-12T00:00:00.000Z',
+          updated_at: '2026-03-12T00:00:00.000Z',
+        }],
+      })
+      .mockResolvedValueOnce({ rows: [{ id: 'crm_operator' }] })
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'scope-qa-1',
+          admin_user_id: 'plugin-admin-1',
+          namespace: 'qa',
+          directory_department_id: 'dept-9',
+          created_by: 'admin-1',
+          created_at: '2026-03-12T00:00:00.000Z',
+          updated_at: '2026-03-12T00:00:00.000Z',
+          integration_id: 'integration-1',
+          integration_name: 'DingTalk CN',
+          provider: 'dingtalk',
+          corp_id: 'ding-corp',
+          external_department_id: '1099',
+          department_name: '质控部',
+          department_full_path: '总部 / 质控部',
+          department_is_active: true,
+        }],
+      })
+      .mockResolvedValueOnce({ rows: [{ allowed: false }] })
+
+    const response = await invokeRoute('post', '/api/admin/role-delegation/users/:userId/roles/:action(assign|unassign)', {
+      params: { userId: 'user-1', action: 'assign' },
+      body: { roleId: 'crm_operator' },
+    })
+
+    expect(response.statusCode).toBe(403)
+    expect((response.body as Record<string, any>).error.code).toBe('ROLE_DELEGATION_USER_OUT_OF_SCOPE')
+  })
+
   it('assigns delegated role within allowed namespaces', async () => {
     state.authUser = {
       id: 'crm-admin-1',
@@ -484,6 +563,26 @@ describe('admin-users routes', () => {
         }],
       })
       .mockResolvedValueOnce({ rows: [{ id: 'crm_operator' }] })
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'scope-1',
+          admin_user_id: 'crm-admin-1',
+          namespace: 'crm',
+          directory_department_id: 'dept-1',
+          created_by: 'admin-1',
+          created_at: '2026-03-12T00:00:00.000Z',
+          updated_at: '2026-03-12T00:00:00.000Z',
+          integration_id: 'integration-1',
+          integration_name: 'DingTalk CN',
+          provider: 'dingtalk',
+          corp_id: 'ding-corp',
+          external_department_id: '1001',
+          department_name: '研发部',
+          department_full_path: '总部 / 研发部',
+          department_is_active: true,
+        }],
+      })
+      .mockResolvedValueOnce({ rows: [{ allowed: true }] })
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({
         rows: [{
@@ -524,6 +623,12 @@ describe('admin-users routes', () => {
       delegableNamespaces: ['crm'],
       roles: ['crm_operator'],
       delegableRoles: ['crm_operator'],
+      scopeAssignments: [
+        expect.objectContaining({
+          namespace: 'crm',
+          departmentFullPath: '总部 / 研发部',
+        }),
+      ],
     })
     expect(auditMocks.auditLog).toHaveBeenCalledWith(expect.objectContaining({
       resourceId: 'user-1:crm_operator',
@@ -531,6 +636,143 @@ describe('admin-users routes', () => {
         delegated: true,
         delegableNamespaces: ['crm'],
       }),
+    }))
+  })
+
+  it('blocks delegated role access when no department scope is configured', async () => {
+    state.authUser = {
+      id: 'crm-admin-1',
+      role: 'user',
+    }
+    rbacMocks.isAdmin.mockResolvedValue(false)
+    pgMocks.query
+      .mockResolvedValueOnce({
+        rows: [{ role_id: 'crm_admin' }],
+      })
+      .mockResolvedValueOnce({ rows: [] })
+
+    const response = await invokeRoute('get', '/api/admin/role-delegation/users/:userId/access', {
+      params: { userId: 'user-1' },
+    })
+
+    expect(response.statusCode).toBe(403)
+    expect((response.body as Record<string, any>).error.code).toBe('ROLE_DELEGATION_SCOPE_REQUIRED')
+  })
+
+  it('lists delegated admin scopes for a selected user', async () => {
+    rbacMocks.isAdmin.mockResolvedValue(true)
+    pgMocks.query
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'user-2',
+          email: 'plugin-admin@example.com',
+          name: 'Plugin Admin',
+          role: 'user',
+          is_active: true,
+          is_admin: false,
+          last_login_at: null,
+          created_at: '2026-03-12T00:00:00.000Z',
+          updated_at: '2026-03-12T00:00:00.000Z',
+        }],
+      })
+      .mockResolvedValueOnce({
+        rows: [{ role_id: 'crm_admin' }, { role_id: 'crm_operator' }],
+      })
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'scope-1',
+          admin_user_id: 'user-2',
+          namespace: 'crm',
+          directory_department_id: 'dept-1',
+          created_by: 'admin-1',
+          created_at: '2026-03-12T00:00:00.000Z',
+          updated_at: '2026-03-12T00:00:00.000Z',
+          integration_id: 'integration-1',
+          integration_name: 'DingTalk CN',
+          provider: 'dingtalk',
+          corp_id: 'ding-corp',
+          external_department_id: '1001',
+          department_name: '研发部',
+          department_full_path: '总部 / 研发部',
+          department_is_active: true,
+        }],
+      })
+
+    const response = await invokeRoute('get', '/api/admin/role-delegation/users/:userId/scopes', {
+      params: { userId: 'user-2' },
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect((response.body as Record<string, any>).data).toMatchObject({
+      adminNamespaces: ['crm'],
+      scopeAssignments: [
+        expect.objectContaining({
+          namespace: 'crm',
+          directoryDepartmentId: 'dept-1',
+        }),
+      ],
+    })
+  })
+
+  it('assigns a delegated admin department scope', async () => {
+    rbacMocks.isAdmin.mockResolvedValue(true)
+    pgMocks.query
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'user-2',
+          email: 'plugin-admin@example.com',
+          name: 'Plugin Admin',
+          role: 'user',
+          is_active: true,
+          is_admin: false,
+          last_login_at: null,
+          created_at: '2026-03-12T00:00:00.000Z',
+          updated_at: '2026-03-12T00:00:00.000Z',
+        }],
+      })
+      .mockResolvedValueOnce({
+        rows: [{ role_id: 'crm_admin' }],
+      })
+      .mockResolvedValueOnce({ rows: [{ id: 'dept-1' }] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'scope-1',
+          admin_user_id: 'user-2',
+          namespace: 'crm',
+          directory_department_id: 'dept-1',
+          created_by: 'admin-1',
+          created_at: '2026-03-12T00:00:00.000Z',
+          updated_at: '2026-03-12T00:00:00.000Z',
+          integration_id: 'integration-1',
+          integration_name: 'DingTalk CN',
+          provider: 'dingtalk',
+          corp_id: 'ding-corp',
+          external_department_id: '1001',
+          department_name: '研发部',
+          department_full_path: '总部 / 研发部',
+          department_is_active: true,
+        }],
+      })
+
+    const response = await invokeRoute('post', '/api/admin/role-delegation/users/:userId/scopes/:action(assign|unassign)', {
+      params: { userId: 'user-2', action: 'assign' },
+      body: { namespace: 'crm', directoryDepartmentId: 'dept-1' },
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect((response.body as Record<string, any>).data).toMatchObject({
+      adminNamespaces: ['crm'],
+      scopeAssignments: [
+        expect.objectContaining({
+          namespace: 'crm',
+          directoryDepartmentId: 'dept-1',
+        }),
+      ],
+    })
+    expect(auditMocks.auditLog).toHaveBeenCalledWith(expect.objectContaining({
+      resourceType: 'delegated-admin-scope',
+      resourceId: 'user-2:crm:dept-1',
     }))
   })
 
@@ -1410,7 +1652,7 @@ describe('admin-users routes', () => {
     expect(String(pgMocks.query.mock.calls[0]?.[0] || '')).toContain('created_at >=')
     expect(String(pgMocks.query.mock.calls[0]?.[0] || '')).toContain('created_at <=')
     expect(pgMocks.query.mock.calls[0]?.[1]?.slice(0, 3)).toEqual([
-      ['user', 'user-role', 'user-auth-grant', 'user-password', 'user-session', 'user-invite', 'role', 'permission', 'permission-template'],
+      ['user', 'user-role', 'user-auth-grant', 'user-password', 'user-session', 'user-invite', 'role', 'permission', 'permission-template', 'delegated-admin-scope'],
       '2026-03-10T00:00:00.000Z',
       '2026-03-12T23:59:59.999Z',
     ])

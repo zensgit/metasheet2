@@ -123,6 +123,36 @@ type DelegatedRoleCatalogRow = {
   permissions: string[] | null
 }
 
+type DelegatedScopeAssignmentRow = {
+  id: string
+  admin_user_id: string
+  namespace: string
+  directory_department_id: string
+  created_by: string | null
+  created_at: string
+  updated_at: string
+  integration_id: string
+  integration_name: string
+  provider: string
+  corp_id: string | null
+  external_department_id: string
+  department_name: string
+  department_full_path: string | null
+  department_is_active: boolean
+}
+
+type DelegatedDepartmentCatalogRow = {
+  directory_department_id: string
+  integration_id: string
+  integration_name: string
+  provider: string
+  corp_id: string | null
+  external_department_id: string
+  department_name: string
+  department_full_path: string | null
+  department_is_active: boolean
+}
+
 type AuditRangeBoundaryMode = 'start' | 'end'
 
 type CreateUserRequestBody = {
@@ -135,7 +165,7 @@ type CreateUserRequestBody = {
   isActive?: boolean
 }
 
-const ADMIN_AUDIT_RESOURCE_TYPES = ['user', 'user-role', 'user-auth-grant', 'user-password', 'user-session', 'user-invite', 'role', 'permission', 'permission-template'] as const
+const ADMIN_AUDIT_RESOURCE_TYPES = ['user', 'user-role', 'user-auth-grant', 'user-password', 'user-session', 'user-invite', 'role', 'permission', 'permission-template', 'delegated-admin-scope'] as const
 const DINGTALK_PROVIDER = 'dingtalk'
 const PLATFORM_ADMIN_ROLE_ID = 'admin'
 const ATTENDANCE_ROLE_IDS = new Set(['attendance_employee', 'attendance_approver', 'attendance_admin'])
@@ -372,6 +402,278 @@ async function fetchDelegatedRoleCatalog(namespaces?: string[]) {
   }))
 }
 
+async function fetchDelegatedScopeAssignments(adminUserId: string, namespaces?: string[]) {
+  if (Array.isArray(namespaces) && namespaces.length === 0) return []
+
+  const result = Array.isArray(namespaces)
+    ? await query<DelegatedScopeAssignmentRow>(
+      `SELECT
+          s.id,
+          s.admin_user_id,
+          s.namespace,
+          s.directory_department_id,
+          s.created_by,
+          s.created_at,
+          s.updated_at,
+          d.integration_id,
+          i.name AS integration_name,
+          i.provider,
+          i.corp_id,
+          d.external_department_id,
+          d.name AS department_name,
+          d.full_path AS department_full_path,
+          d.is_active AS department_is_active
+       FROM delegated_role_admin_scopes s
+       JOIN directory_departments d ON d.id = s.directory_department_id
+       JOIN directory_integrations i ON i.id = d.integration_id
+       WHERE s.admin_user_id = $1
+         AND s.namespace = ANY($2::text[])
+       ORDER BY s.namespace ASC, i.name ASC, COALESCE(d.full_path, d.name) ASC`,
+      [adminUserId, namespaces],
+    )
+    : await query<DelegatedScopeAssignmentRow>(
+      `SELECT
+          s.id,
+          s.admin_user_id,
+          s.namespace,
+          s.directory_department_id,
+          s.created_by,
+          s.created_at,
+          s.updated_at,
+          d.integration_id,
+          i.name AS integration_name,
+          i.provider,
+          i.corp_id,
+          d.external_department_id,
+          d.name AS department_name,
+          d.full_path AS department_full_path,
+          d.is_active AS department_is_active
+       FROM delegated_role_admin_scopes s
+       JOIN directory_departments d ON d.id = s.directory_department_id
+       JOIN directory_integrations i ON i.id = d.integration_id
+       WHERE s.admin_user_id = $1
+       ORDER BY s.namespace ASC, i.name ASC, COALESCE(d.full_path, d.name) ASC`,
+      [adminUserId],
+    )
+
+  return result.rows.map((row) => ({
+    id: row.id,
+    adminUserId: row.admin_user_id,
+    namespace: row.namespace,
+    directoryDepartmentId: row.directory_department_id,
+    createdBy: row.created_by,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    integrationId: row.integration_id,
+    integrationName: row.integration_name,
+    provider: row.provider,
+    corpId: row.corp_id,
+    externalDepartmentId: row.external_department_id,
+    departmentName: row.department_name,
+    departmentFullPath: row.department_full_path,
+    departmentActive: row.department_is_active,
+  }))
+}
+
+async function fetchDelegatedDepartmentCatalog(search: string, limit = 50) {
+  const trimmed = search.trim()
+  const term = trimmed ? `%${trimmed}%` : '%'
+  const result = await query<DelegatedDepartmentCatalogRow>(
+    `SELECT
+        d.id AS directory_department_id,
+        d.integration_id,
+        i.name AS integration_name,
+        i.provider,
+        i.corp_id,
+        d.external_department_id,
+        d.name AS department_name,
+        d.full_path AS department_full_path,
+        d.is_active AS department_is_active
+     FROM directory_departments d
+     JOIN directory_integrations i ON i.id = d.integration_id
+     WHERE d.is_active = true
+       AND (
+         $1 = '%'
+         OR d.name ILIKE $1
+         OR COALESCE(d.full_path, '') ILIKE $1
+         OR i.name ILIKE $1
+         OR d.external_department_id ILIKE $1
+       )
+     ORDER BY i.name ASC, COALESCE(d.full_path, d.name) ASC
+     LIMIT $2`,
+    [term, limit],
+  )
+
+  return result.rows.map((row) => ({
+    directoryDepartmentId: row.directory_department_id,
+    integrationId: row.integration_id,
+    integrationName: row.integration_name,
+    provider: row.provider,
+    corpId: row.corp_id,
+    externalDepartmentId: row.external_department_id,
+    departmentName: row.department_name,
+    departmentFullPath: row.department_full_path,
+    departmentActive: row.department_is_active,
+  }))
+}
+
+async function fetchScopedDelegationUsers(adminUserId: string, namespaces: string[], search: string, pageSize: number, offset: number) {
+  if (namespaces.length === 0) {
+    return { total: 0, items: [] as AdminUserProfile[] }
+  }
+
+  const term = search.trim() ? `%${search.trim()}%` : ''
+  const filterSql = term
+    ? `AND (u.email ILIKE $3 OR COALESCE(u.name, '') ILIKE $3 OR u.id ILIKE $3)`
+    : ''
+  const paginationParams = term ? [adminUserId, namespaces, term, pageSize, offset] : [adminUserId, namespaces, pageSize, offset]
+
+  const countSql = `
+    WITH RECURSIVE seed_departments AS (
+      SELECT DISTINCT d.id, d.integration_id, d.external_department_id
+      FROM delegated_role_admin_scopes s
+      JOIN directory_departments d ON d.id = s.directory_department_id
+      WHERE s.admin_user_id = $1
+        AND s.namespace = ANY($2::text[])
+        AND d.is_active = true
+    ),
+    allowed_departments AS (
+      SELECT id, integration_id, external_department_id
+      FROM seed_departments
+      UNION
+      SELECT child.id, child.integration_id, child.external_department_id
+      FROM directory_departments child
+      JOIN allowed_departments parent
+        ON child.integration_id = parent.integration_id
+       AND child.external_parent_department_id = parent.external_department_id
+      WHERE child.is_active = true
+    ),
+    scoped_users AS (
+      SELECT DISTINCT u.id
+      FROM users u
+      JOIN directory_account_links l
+        ON l.local_user_id = u.id
+       AND l.link_status = 'linked'
+      JOIN directory_accounts a
+        ON a.id = l.directory_account_id
+       AND a.is_active = true
+      JOIN directory_account_departments ad
+        ON ad.directory_account_id = a.id
+      JOIN allowed_departments scoped
+        ON scoped.id = ad.directory_department_id
+      WHERE 1 = 1
+      ${filterSql}
+    )
+    SELECT COUNT(*)::int AS c
+    FROM scoped_users
+  `
+
+  const listSql = `
+    WITH RECURSIVE seed_departments AS (
+      SELECT DISTINCT d.id, d.integration_id, d.external_department_id
+      FROM delegated_role_admin_scopes s
+      JOIN directory_departments d ON d.id = s.directory_department_id
+      WHERE s.admin_user_id = $1
+        AND s.namespace = ANY($2::text[])
+        AND d.is_active = true
+    ),
+    allowed_departments AS (
+      SELECT id, integration_id, external_department_id
+      FROM seed_departments
+      UNION
+      SELECT child.id, child.integration_id, child.external_department_id
+      FROM directory_departments child
+      JOIN allowed_departments parent
+        ON child.integration_id = parent.integration_id
+       AND child.external_parent_department_id = parent.external_department_id
+      WHERE child.is_active = true
+    ),
+    scoped_users AS (
+      SELECT DISTINCT
+        u.id,
+        u.email,
+        u.name,
+        u.role,
+        u.is_active,
+        u.is_admin,
+        u.last_login_at,
+        u.created_at,
+        u.updated_at
+      FROM users u
+      JOIN directory_account_links l
+        ON l.local_user_id = u.id
+       AND l.link_status = 'linked'
+      JOIN directory_accounts a
+        ON a.id = l.directory_account_id
+       AND a.is_active = true
+      JOIN directory_account_departments ad
+        ON ad.directory_account_id = a.id
+      JOIN allowed_departments scoped
+        ON scoped.id = ad.directory_department_id
+      WHERE 1 = 1
+      ${filterSql}
+    )
+    SELECT id, email, name, role, is_active, is_admin, last_login_at, created_at, updated_at
+    FROM scoped_users
+    ORDER BY created_at DESC
+    LIMIT $${term ? 4 : 3} OFFSET $${term ? 5 : 4}
+  `
+
+  const count = await query<{ c: number }>(countSql, term ? [adminUserId, namespaces, term] : [adminUserId, namespaces])
+  const list = await query<AdminUserProfile>(listSql, paginationParams)
+
+  return {
+    total: count.rows[0]?.c ?? 0,
+    items: list.rows,
+  }
+}
+
+async function isUserWithinDelegatedScope(adminUserId: string, namespaces: string[], userId: string): Promise<boolean> {
+  if (namespaces.length === 0) return false
+
+  const result = await query<{ allowed: boolean }>(
+    `WITH RECURSIVE seed_departments AS (
+        SELECT DISTINCT d.id, d.integration_id, d.external_department_id
+        FROM delegated_role_admin_scopes s
+        JOIN directory_departments d ON d.id = s.directory_department_id
+        WHERE s.admin_user_id = $1
+          AND s.namespace = ANY($2::text[])
+          AND d.is_active = true
+      ),
+      allowed_departments AS (
+        SELECT id, integration_id, external_department_id
+        FROM seed_departments
+        UNION
+        SELECT child.id, child.integration_id, child.external_department_id
+        FROM directory_departments child
+        JOIN allowed_departments parent
+          ON child.integration_id = parent.integration_id
+         AND child.external_parent_department_id = parent.external_department_id
+        WHERE child.is_active = true
+      )
+      SELECT EXISTS (
+        SELECT 1
+        FROM directory_account_links l
+        JOIN directory_accounts a
+          ON a.id = l.directory_account_id
+         AND a.is_active = true
+        JOIN directory_account_departments ad
+          ON ad.directory_account_id = a.id
+        JOIN allowed_departments scoped
+          ON scoped.id = ad.directory_department_id
+        WHERE l.local_user_id = $3
+          AND l.link_status = 'linked'
+      ) AS allowed`,
+    [adminUserId, namespaces, userId],
+  )
+
+  return result.rows[0]?.allowed === true
+}
+
+function deriveMatchingNamespacesForRole(roleId: string, namespaces: string[]): string[] {
+  return namespaces.filter((namespace) => roleIdMatchesNamespaces(roleId, [namespace]))
+}
+
 async function ensureRoleDelegationAdmin(req: Request, res: Response): Promise<{
   actorId: string
   isPlatformAdmin: boolean
@@ -503,17 +805,150 @@ export function adminUsersRouter(): Router {
     if (!delegation) return
 
     try {
-      const roleCatalog = await fetchDelegatedRoleCatalog(
-        delegation.isPlatformAdmin ? undefined : delegation.delegableNamespaces,
-      )
+      const [roleCatalog, scopeAssignments] = await Promise.all([
+        fetchDelegatedRoleCatalog(
+          delegation.isPlatformAdmin ? undefined : delegation.delegableNamespaces,
+        ),
+        delegation.isPlatformAdmin
+          ? Promise.resolve([])
+          : fetchDelegatedScopeAssignments(delegation.actorId, delegation.delegableNamespaces),
+      ])
       return jsonOk(res, {
         actorId: delegation.actorId,
         isPlatformAdmin: delegation.isPlatformAdmin,
         delegableNamespaces: delegation.delegableNamespaces,
         roleCatalog,
+        scopeAssignments,
       })
     } catch (error) {
       return jsonError(res, 500, 'ROLE_DELEGATION_SUMMARY_FAILED', (error as Error)?.message || 'Failed to load delegated role summary')
+    }
+  })
+
+  r.get('/api/admin/role-delegation/departments', authenticate, async (req: Request, res: Response) => {
+    const adminUserId = await ensurePlatformAdmin(req, res)
+    if (!adminUserId) return
+
+    try {
+      const q = String(req.query.q || '').trim()
+      const items = await fetchDelegatedDepartmentCatalog(q)
+      return jsonOk(res, {
+        actorId: adminUserId,
+        items,
+        query: q,
+      })
+    } catch (error) {
+      return jsonError(res, 500, 'ROLE_DELEGATION_DEPARTMENT_LIST_FAILED', (error as Error)?.message || 'Failed to list delegation departments')
+    }
+  })
+
+  r.get('/api/admin/role-delegation/users/:userId/scopes', authenticate, async (req: Request, res: Response) => {
+    const adminUserId = await ensurePlatformAdmin(req, res)
+    if (!adminUserId) return
+
+    try {
+      const userId = String(req.params.userId || '').trim()
+      if (!userId) return jsonError(res, 400, 'USER_ID_REQUIRED', 'userId is required')
+
+      const [profile, roleIds, scopeAssignments] = await Promise.all([
+        fetchUserProfile(userId),
+        fetchUserRoleIds(userId),
+        fetchDelegatedScopeAssignments(userId),
+      ])
+      if (!profile) return jsonError(res, 404, 'NOT_FOUND', 'User not found')
+
+      const adminNamespaces = deriveDelegableNamespaces(roleIds)
+
+      return jsonOk(res, {
+        actorId: adminUserId,
+        user: profile,
+        adminNamespaces,
+        scopeAssignments: scopeAssignments.filter((scope) => adminNamespaces.includes(scope.namespace)),
+      })
+    } catch (error) {
+      return jsonError(res, 500, 'ROLE_DELEGATION_SCOPE_READ_FAILED', (error as Error)?.message || 'Failed to load delegated admin scopes')
+    }
+  })
+
+  r.post('/api/admin/role-delegation/users/:userId/scopes/:action(assign|unassign)', authenticate, async (req: Request, res: Response) => {
+    const adminUserId = await ensurePlatformAdmin(req, res)
+    if (!adminUserId) return
+
+    try {
+      const userId = String(req.params.userId || '').trim()
+      const action = String(req.params.action || '').trim()
+      const namespace = String(req.body?.namespace || '').trim()
+      const directoryDepartmentId = String(req.body?.directoryDepartmentId || '').trim()
+      if (!userId) return jsonError(res, 400, 'USER_ID_REQUIRED', 'userId is required')
+      if (!namespace) return jsonError(res, 400, 'NAMESPACE_REQUIRED', 'namespace is required')
+      if (!directoryDepartmentId) return jsonError(res, 400, 'DIRECTORY_DEPARTMENT_REQUIRED', 'directoryDepartmentId is required')
+
+      const [profile, roleIds] = await Promise.all([
+        fetchUserProfile(userId),
+        fetchUserRoleIds(userId),
+      ])
+      if (!profile) return jsonError(res, 404, 'NOT_FOUND', 'User not found')
+
+      const adminNamespaces = deriveDelegableNamespaces(roleIds)
+      if (action === 'assign' && !adminNamespaces.includes(namespace)) {
+        return jsonError(res, 409, 'ROLE_DELEGATION_NAMESPACE_NOT_HELD', 'Selected user does not hold that delegated admin namespace')
+      }
+
+      if (action === 'assign') {
+        const department = await query<{ id: string }>(
+          `SELECT id
+           FROM directory_departments
+           WHERE id = $1
+             AND is_active = true
+           LIMIT 1`,
+          [directoryDepartmentId],
+        )
+        if (!department.rows.length) {
+          return jsonError(res, 404, 'DIRECTORY_DEPARTMENT_NOT_FOUND', 'Directory department not found')
+        }
+        await query(
+          `INSERT INTO delegated_role_admin_scopes (
+             admin_user_id, namespace, directory_department_id, created_by, created_at, updated_at
+           )
+           VALUES ($1, $2, $3, $4, NOW(), NOW())
+           ON CONFLICT (admin_user_id, namespace, directory_department_id)
+           DO UPDATE SET
+             created_by = EXCLUDED.created_by,
+             updated_at = NOW()`,
+          [userId, namespace, directoryDepartmentId, adminUserId],
+        )
+      } else {
+        await query(
+          `DELETE FROM delegated_role_admin_scopes
+           WHERE admin_user_id = $1
+             AND namespace = $2
+             AND directory_department_id = $3`,
+          [userId, namespace, directoryDepartmentId],
+        )
+      }
+
+      await auditLog({
+        actorId: adminUserId,
+        actorType: 'user',
+        action: action === 'assign' ? 'grant' : 'revoke',
+        resourceType: 'delegated-admin-scope',
+        resourceId: `${userId}:${namespace}:${directoryDepartmentId}`,
+        meta: {
+          userId,
+          namespace,
+          directoryDepartmentId,
+        },
+      })
+
+      const scopeAssignments = await fetchDelegatedScopeAssignments(userId)
+      return jsonOk(res, {
+        actorId: adminUserId,
+        user: profile,
+        adminNamespaces,
+        scopeAssignments,
+      })
+    } catch (error) {
+      return jsonError(res, 500, 'ROLE_DELEGATION_SCOPE_UPDATE_FAILED', (error as Error)?.message || 'Failed to update delegated admin scope')
     }
   })
 
@@ -529,29 +964,43 @@ export function adminUsersRouter(): Router {
         maxPageSize: 100,
       })
 
-      const term = q ? `%${q}%` : '%'
-      const where = q ? 'WHERE email ILIKE $1 OR name ILIKE $1 OR id ILIKE $1' : ''
-      const countSql = `SELECT COUNT(*)::int AS c FROM users ${where}`
-      const listSql = `
-        SELECT id, email, name, role, is_active, is_admin, last_login_at, created_at, updated_at
-        FROM users
-        ${where}
-        ORDER BY created_at DESC
-        LIMIT $${q ? 2 : 1} OFFSET $${q ? 3 : 2}
-      `
+      const [scopeAssignments, scopedList] = delegation.isPlatformAdmin
+        ? await Promise.all([
+          Promise.resolve([]),
+          (async () => {
+            const term = q ? `%${q}%` : '%'
+            const where = q ? 'WHERE email ILIKE $1 OR name ILIKE $1 OR id ILIKE $1' : ''
+            const countSql = `SELECT COUNT(*)::int AS c FROM users ${where}`
+            const listSql = `
+              SELECT id, email, name, role, is_active, is_admin, last_login_at, created_at, updated_at
+              FROM users
+              ${where}
+              ORDER BY created_at DESC
+              LIMIT $${q ? 2 : 1} OFFSET $${q ? 3 : 2}
+            `
 
-      const count = await query<{ c: number }>(countSql, q ? [term] : undefined)
-      const total = count.rows[0]?.c ?? 0
-      const list = await query<AdminUserProfile>(listSql, q ? [term, pageSize, offset] : [pageSize, offset])
+            const count = await query<{ c: number }>(countSql, q ? [term] : undefined)
+            const list = await query<AdminUserProfile>(listSql, q ? [term, pageSize, offset] : [pageSize, offset])
+            return {
+              total: count.rows[0]?.c ?? 0,
+              items: list.rows,
+            }
+          })(),
+        ])
+        : await Promise.all([
+          fetchDelegatedScopeAssignments(delegation.actorId, delegation.delegableNamespaces),
+          fetchScopedDelegationUsers(delegation.actorId, delegation.delegableNamespaces, q, pageSize, offset),
+        ])
 
       return jsonOk(res, {
-        items: list.rows,
+        items: scopedList.items,
         page,
         pageSize,
-        total,
+        total: scopedList.total,
         actorId: delegation.actorId,
         isPlatformAdmin: delegation.isPlatformAdmin,
         delegableNamespaces: delegation.delegableNamespaces,
+        scopeAssignments,
       })
     } catch (error) {
       return jsonError(res, 500, 'ROLE_DELEGATION_USER_LIST_FAILED', (error as Error)?.message || 'Failed to list delegation users')
@@ -566,6 +1015,19 @@ export function adminUsersRouter(): Router {
       const userId = String(req.params.userId || '').trim()
       if (!userId) return jsonError(res, 400, 'USER_ID_REQUIRED', 'userId is required')
 
+      const scopeAssignments = delegation.isPlatformAdmin
+        ? []
+        : await fetchDelegatedScopeAssignments(delegation.actorId, delegation.delegableNamespaces)
+      if (!delegation.isPlatformAdmin && scopeAssignments.length === 0) {
+        return jsonError(res, 403, 'ROLE_DELEGATION_SCOPE_REQUIRED', 'No delegated department scope is configured for your plugin admin role')
+      }
+      if (!delegation.isPlatformAdmin) {
+        const allowed = await isUserWithinDelegatedScope(delegation.actorId, delegation.delegableNamespaces, userId)
+        if (!allowed) {
+          return jsonError(res, 403, 'ROLE_DELEGATION_USER_OUT_OF_SCOPE', 'User is outside your delegated department scope')
+        }
+      }
+
       const snapshot = await fetchUserAccessSnapshot(userId)
       if (!snapshot) return jsonError(res, 404, 'NOT_FOUND', 'User not found')
 
@@ -577,6 +1039,7 @@ export function adminUsersRouter(): Router {
         actorId: delegation.actorId,
         isPlatformAdmin: delegation.isPlatformAdmin,
         delegableNamespaces: delegation.delegableNamespaces,
+        scopeAssignments,
         roleCatalog,
         user: snapshot.user,
         roles: snapshot.roles,
@@ -608,6 +1071,20 @@ export function adminUsersRouter(): Router {
       if (!roleRow.rows.length) return jsonError(res, 404, 'ROLE_NOT_FOUND', 'Role not found')
       if (!delegation.isPlatformAdmin && !roleIdMatchesNamespaces(roleId, delegation.delegableNamespaces)) {
         return jsonError(res, 403, 'ROLE_DELEGATION_FORBIDDEN', 'Role is outside your delegated namespaces')
+      }
+
+      const scopeAssignments = delegation.isPlatformAdmin
+        ? []
+        : await fetchDelegatedScopeAssignments(delegation.actorId, delegation.delegableNamespaces)
+      if (!delegation.isPlatformAdmin && scopeAssignments.length === 0) {
+        return jsonError(res, 403, 'ROLE_DELEGATION_SCOPE_REQUIRED', 'No delegated department scope is configured for your plugin admin role')
+      }
+      if (!delegation.isPlatformAdmin) {
+        const scopedNamespaces = deriveMatchingNamespacesForRole(roleId, delegation.delegableNamespaces)
+        const allowed = await isUserWithinDelegatedScope(delegation.actorId, scopedNamespaces, userId)
+        if (!allowed) {
+          return jsonError(res, 403, 'ROLE_DELEGATION_USER_OUT_OF_SCOPE', 'User is outside your delegated department scope')
+        }
       }
 
       if (action === 'assign') {
@@ -653,6 +1130,7 @@ export function adminUsersRouter(): Router {
         actorId: delegation.actorId,
         isPlatformAdmin: delegation.isPlatformAdmin,
         delegableNamespaces: delegation.delegableNamespaces,
+        scopeAssignments,
         roleCatalog,
         user: snapshot?.user ?? profile,
         roles: snapshot?.roles ?? [],

@@ -3,7 +3,7 @@
     <header class="delegation-page__header">
       <div>
         <h1>角色委派</h1>
-        <p>插件管理员只能分配自己负责命名空间下的角色；平台管理员可作为兜底入口使用。</p>
+        <p>插件管理员只能分配自己负责命名空间下、且位于授权部门范围内的成员；平台管理员可作为兜底入口使用。</p>
       </div>
       <div class="delegation-page__actions">
         <router-link class="delegation-page__link" to="/admin/users">用户管理</router-link>
@@ -35,6 +35,17 @@
         <span v-if="summary && summary.delegableNamespaces.length === 0 && !summary.isPlatformAdmin" class="delegation-page__chip delegation-page__chip--danger">
           无可委派命名空间
         </span>
+      </div>
+      <div v-if="summary && !summary.isPlatformAdmin" class="delegation-page__section">
+        <h3>当前管理范围</h3>
+        <div v-if="summary.scopeAssignments.length > 0" class="delegation-page__scope-list">
+          <article v-for="scope in summary.scopeAssignments" :key="scope.id" class="delegation-page__scope-card">
+            <strong>{{ scope.namespace }}</strong>
+            <span>{{ scope.integrationName }}</span>
+            <p>{{ scope.departmentFullPath || scope.departmentName }}</p>
+          </article>
+        </div>
+        <div v-else class="delegation-page__empty">当前插件管理员尚未配置任何部门范围，因此不能委派成员。</div>
       </div>
     </section>
 
@@ -75,6 +86,17 @@
             </div>
           </div>
 
+          <div v-if="selectedAccess.scopeAssignments.length > 0" class="delegation-page__section">
+            <h3>当前委派范围</h3>
+            <div class="delegation-page__scope-list">
+              <article v-for="scope in selectedAccess.scopeAssignments" :key="scope.id" class="delegation-page__scope-card">
+                <strong>{{ scope.namespace }}</strong>
+                <span>{{ scope.integrationName }}</span>
+                <p>{{ scope.departmentFullPath || scope.departmentName }}</p>
+              </article>
+            </div>
+          </div>
+
           <div class="delegation-page__section">
             <h3>委派操作</h3>
             <div class="delegation-page__role-actions">
@@ -102,6 +124,63 @@
                 <p>{{ role.permissions.join(', ') || '无权限映射' }}</p>
               </article>
             </div>
+          </div>
+
+          <div v-if="summary?.isPlatformAdmin && selectedScopeConfig" class="delegation-page__section">
+            <h3>插件管理员范围配置</h3>
+            <p class="delegation-page__hint">平台管理员可为持有 `xxx_admin` 角色的成员分配可管理的钉钉部门范围。</p>
+            <div v-if="selectedScopeConfig.adminNamespaces.length === 0" class="delegation-page__empty">
+              该成员尚未持有任何插件管理员角色。
+            </div>
+            <template v-else>
+              <div class="delegation-page__role-actions">
+                <select v-model="selectedScopeNamespace" class="delegation-page__input">
+                  <option value="">请选择管理员命名空间</option>
+                  <option v-for="namespace in selectedScopeConfig.adminNamespaces" :key="namespace" :value="namespace">
+                    {{ namespace }}
+                  </option>
+                </select>
+                <input
+                  v-model.trim="departmentSearch"
+                  class="delegation-page__input"
+                  type="search"
+                  placeholder="搜索部门路径、部门名或集成名"
+                  @keyup.enter="void loadDepartments()"
+                />
+                <button class="delegation-page__button delegation-page__button--secondary" type="button" :disabled="scopeBusy" @click="void loadDepartments()">
+                  查询部门
+                </button>
+              </div>
+              <div class="delegation-page__role-actions">
+                <select v-model="selectedDepartmentId" class="delegation-page__input">
+                  <option value="">请选择部门</option>
+                  <option v-for="department in departments" :key="department.directoryDepartmentId" :value="department.directoryDepartmentId">
+                    {{ department.integrationName }} / {{ department.departmentFullPath || department.departmentName }}
+                  </option>
+                </select>
+                <button class="delegation-page__button" type="button" :disabled="scopeBusy || !selectedScopeNamespace || !selectedDepartmentId" @click="void updateScope('assign')">
+                  添加范围
+                </button>
+              </div>
+              <div v-if="selectedScopeConfig.scopeAssignments.length > 0" class="delegation-page__scope-list">
+                <article v-for="scope in selectedScopeConfig.scopeAssignments" :key="scope.id" class="delegation-page__scope-card">
+                  <strong>{{ scope.namespace }}</strong>
+                  <span>{{ scope.integrationName }}</span>
+                  <p>{{ scope.departmentFullPath || scope.departmentName }}</p>
+                  <button
+                    class="delegation-page__button delegation-page__button--danger"
+                    type="button"
+                    :disabled="scopeBusy"
+                    @click="void updateScope('unassign', scope)"
+                  >
+                    移除范围
+                  </button>
+                </article>
+              </div>
+              <div v-else class="delegation-page__empty">
+                该成员尚未配置任何插件管理员范围。
+              </div>
+            </template>
           </div>
         </template>
 
@@ -131,11 +210,38 @@ type RoleCatalogItem = {
   permissions: string[]
 }
 
+type ScopeAssignment = {
+  id: string
+  namespace: string
+  directoryDepartmentId: string
+  integrationId: string
+  integrationName: string
+  provider: string
+  corpId: string | null
+  externalDepartmentId: string
+  departmentName: string
+  departmentFullPath: string | null
+  departmentActive: boolean
+}
+
+type DepartmentCatalogItem = {
+  directoryDepartmentId: string
+  integrationId: string
+  integrationName: string
+  provider: string
+  corpId: string | null
+  externalDepartmentId: string
+  departmentName: string
+  departmentFullPath: string | null
+  departmentActive: boolean
+}
+
 type DelegationSummary = {
   actorId: string
   isPlatformAdmin: boolean
   delegableNamespaces: string[]
   roleCatalog: RoleCatalogItem[]
+  scopeAssignments: ScopeAssignment[]
 }
 
 type DelegatedUserAccess = {
@@ -143,21 +249,35 @@ type DelegatedUserAccess = {
   isPlatformAdmin: boolean
   delegableNamespaces: string[]
   roleCatalog: RoleCatalogItem[]
+  scopeAssignments: ScopeAssignment[]
   user: ManagedUser
   roles: string[]
   delegableRoles: string[]
 }
 
+type DelegatedAdminScopeConfig = {
+  actorId: string
+  user: ManagedUser
+  adminNamespaces: string[]
+  scopeAssignments: ScopeAssignment[]
+}
+
 const loading = ref(false)
 const busy = ref(false)
+const scopeBusy = ref(false)
 const status = ref('')
 const statusTone = ref<'info' | 'error'>('info')
 const search = ref('')
+const departmentSearch = ref('')
 const users = ref<ManagedUser[]>([])
+const departments = ref<DepartmentCatalogItem[]>([])
 const selectedUserId = ref('')
 const selectedRoleId = ref('')
+const selectedScopeNamespace = ref('')
+const selectedDepartmentId = ref('')
 const summary = ref<DelegationSummary | null>(null)
 const selectedAccess = ref<DelegatedUserAccess | null>(null)
+const selectedScopeConfig = ref<DelegatedAdminScopeConfig | null>(null)
 
 function setStatus(message: string, tone: 'info' | 'error' = 'info') {
   status.value = message
@@ -179,6 +299,26 @@ async function loadSummary(): Promise<void> {
     throw new Error(String((payload.error as Record<string, unknown> | undefined)?.message || '加载角色委派摘要失败'))
   }
   summary.value = payload.data as DelegationSummary
+}
+
+async function loadDepartments(): Promise<void> {
+  if (!summary.value?.isPlatformAdmin) return
+  scopeBusy.value = true
+  try {
+    const params = new URLSearchParams()
+    if (departmentSearch.value) params.set('q', departmentSearch.value)
+    const response = await apiFetch(`/api/admin/role-delegation/departments${params.size ? `?${params.toString()}` : ''}`)
+    const payload = await readJson(response)
+    if (!response.ok || payload.ok !== true) {
+      throw new Error(String((payload.error as Record<string, unknown> | undefined)?.message || '加载部门目录失败'))
+    }
+    const data = payload.data as { items?: DepartmentCatalogItem[] } | undefined
+    departments.value = Array.isArray(data?.items) ? data.items : []
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : '加载部门目录失败', 'error')
+  } finally {
+    scopeBusy.value = false
+  }
 }
 
 async function loadUsers(): Promise<void> {
@@ -207,6 +347,7 @@ async function loadUsers(): Promise<void> {
 async function selectUser(userId: string): Promise<void> {
   selectedUserId.value = userId
   selectedRoleId.value = ''
+  selectedDepartmentId.value = ''
   try {
     const response = await apiFetch(`/api/admin/role-delegation/users/${encodeURIComponent(userId)}/access`)
     const payload = await readJson(response)
@@ -215,9 +356,30 @@ async function selectUser(userId: string): Promise<void> {
     }
 
     selectedAccess.value = payload.data as DelegatedUserAccess
+    if (summary.value?.isPlatformAdmin) {
+      await loadScopeConfig(userId)
+    } else {
+      selectedScopeConfig.value = null
+    }
   } catch (error) {
     selectedAccess.value = null
+    selectedScopeConfig.value = null
     setStatus(error instanceof Error ? error.message : '加载成员委派权限失败', 'error')
+  }
+}
+
+async function loadScopeConfig(userId: string): Promise<void> {
+  if (!summary.value?.isPlatformAdmin) return
+
+  const response = await apiFetch(`/api/admin/role-delegation/users/${encodeURIComponent(userId)}/scopes`)
+  const payload = await readJson(response)
+  if (!response.ok || payload.ok !== true) {
+    throw new Error(String((payload.error as Record<string, unknown> | undefined)?.message || '加载管理员范围失败'))
+  }
+
+  selectedScopeConfig.value = payload.data as DelegatedAdminScopeConfig
+  if (!selectedScopeConfig.value.adminNamespaces.includes(selectedScopeNamespace.value)) {
+    selectedScopeNamespace.value = selectedScopeConfig.value.adminNamespaces[0] || ''
   }
 }
 
@@ -235,6 +397,9 @@ async function updateRole(action: 'assign' | 'unassign'): Promise<void> {
     }
 
     selectedAccess.value = payload.data as DelegatedUserAccess
+    if (summary.value?.isPlatformAdmin) {
+      await loadScopeConfig(selectedUserId.value)
+    }
     setStatus(action === 'assign' ? '角色已分配' : '角色已撤销')
   } catch (error) {
     setStatus(error instanceof Error ? error.message : '保存委派角色失败', 'error')
@@ -243,9 +408,44 @@ async function updateRole(action: 'assign' | 'unassign'): Promise<void> {
   }
 }
 
+async function updateScope(action: 'assign' | 'unassign', scope?: ScopeAssignment): Promise<void> {
+  if (!summary.value?.isPlatformAdmin || !selectedUserId.value) return
+  const namespace = action === 'assign' ? selectedScopeNamespace.value : scope?.namespace || ''
+  const directoryDepartmentId = action === 'assign' ? selectedDepartmentId.value : scope?.directoryDepartmentId || ''
+  if (!namespace || !directoryDepartmentId) return
+
+  scopeBusy.value = true
+  try {
+    const response = await apiFetch(`/api/admin/role-delegation/users/${encodeURIComponent(selectedUserId.value)}/scopes/${action}`, {
+      method: 'POST',
+      body: JSON.stringify({ namespace, directoryDepartmentId }),
+    })
+    const payload = await readJson(response)
+    if (!response.ok || payload.ok !== true) {
+      throw new Error(String((payload.error as Record<string, unknown> | undefined)?.message || '保存管理员范围失败'))
+    }
+
+    selectedScopeConfig.value = payload.data as DelegatedAdminScopeConfig
+    if (action === 'assign') {
+      selectedDepartmentId.value = ''
+      setStatus('插件管理员范围已添加')
+    } else {
+      setStatus('插件管理员范围已移除')
+    }
+    await loadSummary()
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : '保存管理员范围失败', 'error')
+  } finally {
+    scopeBusy.value = false
+  }
+}
+
 onMounted(async () => {
   try {
     await loadSummary()
+    if (summary.value?.isPlatformAdmin) {
+      await loadDepartments()
+    }
     await loadUsers()
   } catch (error) {
     setStatus(error instanceof Error ? error.message : '加载角色委派页面失败', 'error')
@@ -287,6 +487,9 @@ onMounted(async () => {
 .delegation-page__detail-head p,
 .delegation-page__role-card span,
 .delegation-page__role-card p,
+.delegation-page__scope-card span,
+.delegation-page__scope-card p,
+.delegation-page__hint,
 .delegation-page__empty {
   margin: 4px 0 0;
   color: #6b7280;
@@ -354,6 +557,10 @@ onMounted(async () => {
   background: #475569;
 }
 
+.delegation-page__button--danger {
+  background: #b91c1c;
+}
+
 .delegation-page__button:disabled {
   opacity: 0.7;
   cursor: not-allowed;
@@ -408,6 +615,22 @@ onMounted(async () => {
   padding: 12px;
   border: 1px solid #e5e7eb;
   border-radius: 10px;
+}
+
+.delegation-page__scope-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.delegation-page__scope-card {
+  width: min(320px, 100%);
+  display: grid;
+  gap: 4px;
+  padding: 12px;
+  border: 1px solid #dbeafe;
+  border-radius: 10px;
+  background: #f8fbff;
 }
 
 @media (max-width: 960px) {
