@@ -49,6 +49,15 @@ const DEFAULT_AUTOMATIONS = Object.freeze([
     ],
     enabled: true,
   },
+  {
+    id: 'service-record-notify',
+    trigger: { event: 'service.recorded' },
+    conditions: [],
+    actions: [
+      { type: 'sendNotification', topic: 'after-sales.service.recorded' },
+    ],
+    enabled: true,
+  },
 ])
 
 function clone(value) {
