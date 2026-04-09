@@ -63,6 +63,18 @@ async function setInputValue(input: HTMLInputElement, value: string): Promise<vo
   await flushUi()
 }
 
+async function setSelectValue(select: HTMLSelectElement, value: string): Promise<void> {
+  select.value = value
+  select.dispatchEvent(new Event('change', { bubbles: true }))
+  await flushUi()
+}
+
+async function setTextareaValue(textarea: HTMLTextAreaElement, value: string): Promise<void> {
+  textarea.value = value
+  textarea.dispatchEvent(new Event('input', { bubbles: true }))
+  await flushUi()
+}
+
 describe('AfterSalesView service records panel', () => {
   let app: VueApp<Element> | null = null
   let container: HTMLDivElement | null = null
@@ -217,6 +229,259 @@ describe('AfterSalesView service records panel', () => {
     expect(container.textContent).toContain('Statusinstalled')
   })
 
+  it('creates a service record inline and prepends it without refreshing the page', async () => {
+    apiFetchMock.mockImplementation(async (path: string, init?: RequestInit) => {
+      if (path === '/api/after-sales/app-manifest') {
+        return createResponse({
+          id: 'after-sales-default',
+          displayName: 'After Sales',
+          platformDependencies: ['core-backend'],
+          objects: [],
+          workflows: [],
+        })
+      }
+
+      if (path === '/api/after-sales/projects/current') {
+        return createResponse({
+          status: 'installed',
+          projectId: 'tenant:after-sales',
+          displayName: 'After Sales',
+          config: {
+            defaultSlaHours: 24,
+            urgentSlaHours: 4,
+            followUpAfterDays: 7,
+          },
+          installResult: {
+            status: 'installed',
+            createdObjects: [],
+            createdViews: [],
+            warnings: [],
+            reportRef: 'install-101',
+          },
+          reportRef: 'install-101',
+        })
+      }
+
+      if (path === '/api/after-sales/tickets') {
+        return createResponse({
+          projectId: 'tenant:after-sales',
+          count: 1,
+          tickets: [
+            {
+              id: 'ticket-100',
+              version: 1,
+              data: {
+                ticketNo: 'AF-100',
+                title: 'Compressor inspection',
+                status: 'open',
+                refundStatus: 'approved',
+                refundAmount: 0,
+              },
+            },
+          ],
+        })
+      }
+
+      if (path === '/api/after-sales/service-records' && (!init || !init.method)) {
+        return createResponse({
+          projectId: 'tenant:after-sales',
+          count: 1,
+          serviceRecords: [
+            {
+              id: 'sr-existing',
+              version: 1,
+              data: {
+                ticketNo: 'AF-001',
+                visitType: 'onsite',
+                scheduledAt: '2026-04-09T08:00:00.000Z',
+                technicianName: '张三',
+                workSummary: 'Old visit still visible',
+                result: 'resolved',
+              },
+            },
+          ],
+        })
+      }
+
+      if (path === '/api/after-sales/service-records' && init?.method === 'POST') {
+        expect(JSON.parse(String(init.body ?? '{}'))).toEqual({
+          serviceRecord: {
+            ticketNo: 'AF-100',
+            visitType: 'remote',
+            scheduledAt: '2026-04-10T09:15',
+            technicianName: 'Alex',
+            workSummary: 'Replaced control board',
+            result: 'resolved',
+          },
+        })
+
+        return createResponse(
+          {
+            projectId: 'tenant:after-sales',
+            serviceRecord: {
+              id: 'sr-new',
+              version: 1,
+              data: {
+                ticketNo: 'AF-100',
+                visitType: 'remote',
+                scheduledAt: '2026-04-10T09:15',
+                technicianName: 'Alex',
+                workSummary: 'Replaced control board',
+                result: 'resolved',
+              },
+            },
+            event: { accepted: true, event: 'service.recorded' },
+          },
+          { status: 201 },
+        )
+      }
+
+      throw new Error(`Unexpected request: ${path}`)
+    })
+
+    const mounted = mountAfterSalesView()
+    app = mounted.app
+    container = mounted.container
+
+    await waitForText(container, 'Old visit still visible')
+
+    const ticketInput = container.querySelector<HTMLInputElement>('#after-sales-service-record-ticket-no')
+    const visitTypeSelect = container.querySelector<HTMLSelectElement>('#after-sales-service-record-visit-type')
+    const scheduledAtInput = container.querySelector<HTMLInputElement>('#after-sales-service-record-scheduled-at')
+    const technicianInput = container.querySelector<HTMLInputElement>('#after-sales-service-record-technician')
+    const resultSelect = container.querySelector<HTMLSelectElement>('#after-sales-service-record-result')
+    const summaryTextarea = container.querySelector<HTMLTextAreaElement>('#after-sales-service-record-summary')
+
+    expect(ticketInput).toBeTruthy()
+    expect(visitTypeSelect).toBeTruthy()
+    expect(scheduledAtInput).toBeTruthy()
+    expect(technicianInput).toBeTruthy()
+    expect(resultSelect).toBeTruthy()
+    expect(summaryTextarea).toBeTruthy()
+    if (!ticketInput || !visitTypeSelect || !scheduledAtInput || !technicianInput || !resultSelect || !summaryTextarea) return
+
+    await setInputValue(ticketInput, 'AF-100')
+    await setSelectValue(visitTypeSelect, 'remote')
+    await setInputValue(scheduledAtInput, '2026-04-10T09:15')
+    await setInputValue(technicianInput, 'Alex')
+    await setSelectValue(resultSelect, 'resolved')
+    await setTextareaValue(summaryTextarea, 'Replaced control board')
+
+    findButton(container, 'Create service record').click()
+
+    await waitForText(container, 'Created service record for AF-100')
+
+    expect(container.textContent).toContain('Replaced control board')
+    expect(container.textContent).toContain('Old visit still visible')
+    expect(ticketInput.value).toBe('')
+    expect(summaryTextarea.value).toBe('')
+
+    const serviceRecordCalls = apiFetchMock.mock.calls.filter((call) => call[0] === '/api/after-sales/service-records')
+    expect(serviceRecordCalls).toHaveLength(2)
+    expect(serviceRecordCalls[1]?.[1]).toMatchObject({ method: 'POST' })
+  })
+
+  it('surfaces create errors inline without clearing existing service records', async () => {
+    apiFetchMock.mockImplementation(async (path: string, init?: RequestInit) => {
+      if (path === '/api/after-sales/app-manifest') {
+        return createResponse({
+          id: 'after-sales-default',
+          displayName: 'After Sales',
+          platformDependencies: ['core-backend'],
+          objects: [],
+          workflows: [],
+        })
+      }
+
+      if (path === '/api/after-sales/projects/current') {
+        return createResponse({
+          status: 'installed',
+          projectId: 'tenant:after-sales',
+          displayName: 'After Sales',
+          config: {
+            defaultSlaHours: 24,
+            urgentSlaHours: 4,
+            followUpAfterDays: 7,
+          },
+          installResult: {
+            status: 'installed',
+            createdObjects: [],
+            createdViews: [],
+            warnings: [],
+            reportRef: 'install-102',
+          },
+          reportRef: 'install-102',
+        })
+      }
+
+      if (path === '/api/after-sales/tickets') {
+        return createResponse({
+          projectId: 'tenant:after-sales',
+          count: 0,
+          tickets: [],
+        })
+      }
+
+      if (path === '/api/after-sales/service-records' && (!init || !init.method)) {
+        return createResponse({
+          projectId: 'tenant:after-sales',
+          count: 1,
+          serviceRecords: [
+            {
+              id: 'sr-existing',
+              version: 1,
+              data: {
+                ticketNo: 'AF-002',
+                visitType: 'onsite',
+                scheduledAt: '2026-04-09T08:00:00.000Z',
+                technicianName: '李四',
+                workSummary: 'Existing service record',
+                result: 'partial',
+              },
+            },
+          ],
+        })
+      }
+
+      if (path === '/api/after-sales/service-records' && init?.method === 'POST') {
+        return createResponse(
+          {
+            error: {
+              code: 'NOT_FOUND',
+              message: 'After-sales ticket AF-404 not found',
+            },
+          },
+          { ok: false, status: 404, statusText: 'Not Found' },
+        )
+      }
+
+      throw new Error(`Unexpected request: ${path}`)
+    })
+
+    const mounted = mountAfterSalesView()
+    app = mounted.app
+    container = mounted.container
+
+    await waitForText(container, 'Existing service record')
+
+    const ticketInput = container.querySelector<HTMLInputElement>('#after-sales-service-record-ticket-no')
+    const scheduledAtInput = container.querySelector<HTMLInputElement>('#after-sales-service-record-scheduled-at')
+
+    expect(ticketInput).toBeTruthy()
+    expect(scheduledAtInput).toBeTruthy()
+    if (!ticketInput || !scheduledAtInput) return
+
+    await setInputValue(ticketInput, 'AF-404')
+    await setInputValue(scheduledAtInput, '2026-04-10T09:15')
+
+    findButton(container, 'Create service record').click()
+
+    await waitForText(container, 'After-sales ticket AF-404 not found')
+
+    expect(container.textContent).toContain('Existing service record')
+    expect(container.textContent).toContain('After-sales ticket AF-404 not found')
+  })
+
   it('skips service-records loading before install and keeps the install CTA visible', async () => {
     apiFetchMock.mockImplementation(async (path: string) => {
       if (path === '/api/after-sales/app-manifest') {
@@ -250,6 +515,7 @@ describe('AfterSalesView service records panel', () => {
 
     expect(container.textContent).toContain('Enable After Sales')
     expect(container.textContent).not.toContain('Service records')
+    expect(container.textContent).not.toContain('Create service record')
     expect(apiFetchMock).not.toHaveBeenCalledWith('/api/after-sales/service-records', undefined)
   })
 
@@ -317,6 +583,7 @@ describe('AfterSalesView service records panel', () => {
     await waitForText(container, 'AF-SR-Partial')
 
     expect(container.textContent).toContain('Recent visits')
+    expect(container.textContent).toContain('Create service record')
     expect(container.textContent).toContain('Remote triage')
     expect(apiFetchMock).toHaveBeenCalledWith('/api/after-sales/service-records', undefined)
   })
@@ -368,6 +635,7 @@ describe('AfterSalesView service records panel', () => {
     await flushUi(4)
 
     expect(container.textContent).not.toContain('Recent visits')
+    expect(container.textContent).not.toContain('Create service record')
     expect(apiFetchMock).not.toHaveBeenCalledWith('/api/after-sales/service-records', undefined)
   })
 })
