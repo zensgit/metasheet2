@@ -6,7 +6,7 @@ Branch: `codex/dingtalk-pr1-foundation-login-20260408`
 
 ## Review Outcome
 
-This review sequence now covers seven blocking issues inside the PR1 login foundation.
+This review sequence now covers nine blocking issues inside the PR1 login foundation.
 
 The earlier pass fixed:
 
@@ -20,6 +20,8 @@ This follow-up pass fixed:
 5. DingTalk login could still admit disabled or inactive local users
 6. auto-provision did not write `users.password_hash` even though the current schema requires it
 7. corp-scoped external identities could still fall back to a bare `openId` / `unionId` lookup and hit the wrong local user
+8. callback status codes hid local policy denials behind `502`
+9. corp-scoped rollout had no explicit backfill gate for legacy bindings
 
 ## Execution Context
 
@@ -47,6 +49,8 @@ This follow-up was implemented from a new detached worktree rooted at remote PR1
   - add `probe=1` handling to `GET /dingtalk/launch`
   - keep the launch path unchanged for real OAuth starts
   - preserve disabled-user callback failures as explicit API errors
+  - map local DingTalk login policy errors to `403` / `409`
+  - keep upstream DingTalk transport or token-exchange failures mapped to `502`
 
 ### Frontend
 
@@ -79,6 +83,11 @@ This follow-up was implemented from a new detached worktree rooted at remote PR1
 - [dingtalk-auth-callback.spec.ts](/Users/huazhou/Downloads/Github/metasheet2/.worktrees/dingtalk-phase1-20260408/apps/web/tests/dingtalk-auth-callback.spec.ts)
   - authenticated session is preserved instead of being overwritten
 
+- [auth-login-routes.test.ts](/Users/huazhou/Downloads/Github/metasheet2/.worktrees/dingtalk-phase1-20260408/packages/core-backend/tests/unit/auth-login-routes.test.ts)
+  - disabled or inactive local-user rejections return `403`
+  - upstream DingTalk request failures remain `502`
+  - auto-provision email conflicts return `409`
+
 ## PR Handling
 
 After these fixes:
@@ -86,3 +95,13 @@ After these fixes:
 - PR1 remains `Ready for review`
 - downstream stack order remains unchanged
 - no PR2 or PR3 code was touched
+
+## Rollout Note
+
+Before enabling `DINGTALK_CORP_ID` in production, legacy `user_external_identities` rows should be backfilled so existing DingTalk bindings remain corp-scoped.
+
+The minimum backfill expectation is:
+
+1. set `corp_id` on existing DingTalk identity rows that belong to the target tenant
+2. rewrite `external_key` to the corp-scoped form `corpId:provider_open_id`
+3. verify that no ambiguous bare `provider_open_id` / `provider_union_id` rows remain for active production identities

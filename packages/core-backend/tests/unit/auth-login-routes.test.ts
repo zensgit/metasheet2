@@ -41,6 +41,31 @@ const dingtalkOauthMocks = vi.hoisted(() => ({
   buildAuthUrl: vi.fn(),
   validateState: vi.fn(),
   exchangeCodeForUser: vi.fn(),
+  DingTalkLoginPolicyError: class DingTalkLoginPolicyError extends Error {
+    statusCode: number
+    code: string
+
+    constructor(message: string, options: { statusCode?: number; code?: string } = {}) {
+      super(message)
+      this.name = 'DingTalkLoginPolicyError'
+      this.statusCode = options.statusCode ?? 403
+      this.code = options.code ?? 'policy_denied'
+    }
+  },
+}))
+
+const dingtalkClientMocks = vi.hoisted(() => ({
+  DingTalkRequestError: class DingTalkRequestError extends Error {
+    statusCode: number
+    responseBody: Record<string, unknown> | null
+
+    constructor(message: string, statusCode = 502, responseBody: Record<string, unknown> | null = null) {
+      super(message)
+      this.name = 'DingTalkRequestError'
+      this.statusCode = statusCode
+      this.responseBody = responseBody
+    }
+  },
 }))
 
 const rbacMocks = vi.hoisted(() => ({
@@ -79,10 +104,15 @@ vi.mock('../../src/auth/dingtalk-oauth', () => ({
   buildAuthUrl: dingtalkOauthMocks.buildAuthUrl,
   validateState: dingtalkOauthMocks.validateState,
   exchangeCodeForUser: dingtalkOauthMocks.exchangeCodeForUser,
+  DingTalkLoginPolicyError: dingtalkOauthMocks.DingTalkLoginPolicyError,
 }))
 
 vi.mock('../../src/rbac/service', () => ({
   listUserPermissions: rbacMocks.listUserPermissions,
+}))
+
+vi.mock('../../src/integrations/dingtalk/client', () => ({
+  DingTalkRequestError: dingtalkClientMocks.DingTalkRequestError,
 }))
 
 import { authRouter } from '../../src/routes/auth'
@@ -576,7 +606,34 @@ describe('auth login routes', () => {
     })
     dingtalkOauthMocks.isDingTalkConfigured.mockReturnValue(true)
     dingtalkOauthMocks.exchangeCodeForUser.mockRejectedValue(
-      new Error('DingTalk login is disabled for this user'),
+      new dingtalkOauthMocks.DingTalkLoginPolicyError('DingTalk login is disabled for this user', {
+        statusCode: 403,
+        code: 'local_user_disabled',
+      }),
+    )
+
+    const response = await invokeRoute('post', '/dingtalk/callback', {
+      body: {
+        code: 'auth-code',
+        state: 'state-1',
+      },
+    })
+
+    expect(response.statusCode).toBe(403)
+    expect((response.body as Record<string, any>).error).toBe('DingTalk login is disabled for this user')
+    expect(rbacMocks.listUserPermissions).not.toHaveBeenCalled()
+  })
+
+  it('keeps upstream DingTalk request failures mapped to 502', async () => {
+    dingtalkOauthMocks.validateState.mockResolvedValue({
+      valid: true,
+      redirectPath: '/attendance',
+    })
+    dingtalkOauthMocks.isDingTalkConfigured.mockReturnValue(true)
+    dingtalkOauthMocks.exchangeCodeForUser.mockRejectedValue(
+      new dingtalkClientMocks.DingTalkRequestError('Failed to obtain access token from DingTalk', 401, {
+        error: 'invalid_client',
+      }),
     )
 
     const response = await invokeRoute('post', '/dingtalk/callback', {
@@ -587,7 +644,33 @@ describe('auth login routes', () => {
     })
 
     expect(response.statusCode).toBe(502)
-    expect((response.body as Record<string, any>).error).toBe('DingTalk login is disabled for this user')
-    expect(rbacMocks.listUserPermissions).not.toHaveBeenCalled()
+    expect((response.body as Record<string, any>).error).toBe('Failed to obtain access token from DingTalk')
+  })
+
+  it('returns 409 for local auto-provision email conflicts', async () => {
+    dingtalkOauthMocks.validateState.mockResolvedValue({
+      valid: true,
+      redirectPath: '/attendance',
+    })
+    dingtalkOauthMocks.isDingTalkConfigured.mockReturnValue(true)
+    dingtalkOauthMocks.exchangeCodeForUser.mockRejectedValue(
+      new dingtalkOauthMocks.DingTalkLoginPolicyError(
+        'Refusing to auto-provision DingTalk user because a local account already exists with the same email',
+        {
+          statusCode: 409,
+          code: 'auto_provision_email_conflict',
+        },
+      ),
+    )
+
+    const response = await invokeRoute('post', '/dingtalk/callback', {
+      body: {
+        code: 'auth-code',
+        state: 'state-1',
+      },
+    })
+
+    expect(response.statusCode).toBe(409)
+    expect((response.body as Record<string, any>).error).toContain('same email')
   })
 })

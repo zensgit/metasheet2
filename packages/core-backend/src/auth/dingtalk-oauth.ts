@@ -58,10 +58,29 @@ export interface StateValidationResult {
   redirectPath?: string
 }
 
+export class DingTalkLoginPolicyError extends Error {
+  readonly statusCode: number
+  readonly code: string
+
+  constructor(message: string, options: { statusCode?: number; code?: string } = {}) {
+    super(message)
+    this.name = 'DingTalkLoginPolicyError'
+    this.statusCode = options.statusCode ?? 403
+    this.code = options.code ?? 'policy_denied'
+  }
+}
+
 const pendingStates = new Map<string, StateRecord>()
 let redisStateClient: Redis | null = null
 let redisStateClientPromise: Promise<Redis | null> | null = null
 let redisFallbackLogged = false
+
+function createPolicyError(
+  message: string,
+  options: { statusCode?: number; code?: string } = {},
+): DingTalkLoginPolicyError {
+  return new DingTalkLoginPolicyError(message, options)
+}
 
 function parseBooleanEnv(name: string, fallback: boolean): boolean {
   const raw = String(process.env[name] ?? '').trim().toLowerCase()
@@ -448,7 +467,10 @@ async function findIdentityUser(dtUser: DingTalkUserInfo): Promise<LocalUserRow 
 
 function assertLocalUserLoginAllowed(localUser: LocalUserRow): void {
   if (localUser.role === 'disabled' || localUser.is_active === false) {
-    throw new Error(DINGTALK_LOGIN_DISABLED_ERROR)
+    throw createPolicyError(DINGTALK_LOGIN_DISABLED_ERROR, {
+      statusCode: 403,
+      code: 'local_user_disabled',
+    })
   }
 }
 
@@ -464,7 +486,13 @@ async function createProvisionedUser(dtUser: DingTalkUserInfo): Promise<LocalUse
   if (dtUser.email) {
     const existingUser = await findUserByEmail(dtUser.email)
     if (existingUser) {
-      throw new Error('Refusing to auto-provision DingTalk user because a local account already exists with the same email')
+      throw createPolicyError(
+        'Refusing to auto-provision DingTalk user because a local account already exists with the same email',
+        {
+          statusCode: 409,
+          code: 'auto_provision_email_conflict',
+        },
+      )
     }
   }
 
@@ -493,7 +521,13 @@ async function createProvisionedUser(dtUser: DingTalkUserInfo): Promise<LocalUse
       'code' in error &&
       error.code === '23505'
     ) {
-      throw new Error('Refusing to auto-provision DingTalk user because a local account already exists with the same email')
+      throw createPolicyError(
+        'Refusing to auto-provision DingTalk user because a local account already exists with the same email',
+        {
+          statusCode: 409,
+          code: 'auto_provision_email_conflict',
+        },
+      )
     }
     throw error
   }
@@ -505,7 +539,10 @@ async function resolveLocalUser(dtUser: DingTalkUserInfo): Promise<{ localUser: 
     assertLocalUserLoginAllowed(identityUser)
     const grantEnabled = await readGrantEnabled(identityUser.id)
     if (grantEnabled === false) {
-      throw new Error(DINGTALK_LOGIN_DISABLED_ERROR)
+      throw createPolicyError(DINGTALK_LOGIN_DISABLED_ERROR, {
+        statusCode: 403,
+        code: 'grant_disabled',
+      })
     }
     await upsertExternalIdentity(identityUser.id, dtUser)
     return { localUser: identityUser, isNewUser: false }
@@ -517,7 +554,10 @@ async function resolveLocalUser(dtUser: DingTalkUserInfo): Promise<{ localUser: 
       assertLocalUserLoginAllowed(emailUser)
       const grantEnabled = await readGrantEnabled(emailUser.id)
       if (grantEnabled === false) {
-        throw new Error(DINGTALK_LOGIN_DISABLED_ERROR)
+        throw createPolicyError(DINGTALK_LOGIN_DISABLED_ERROR, {
+          statusCode: 403,
+          code: 'grant_disabled',
+        })
       }
       await ensureGrant(emailUser.id)
       await upsertExternalIdentity(emailUser.id, dtUser)
@@ -526,10 +566,14 @@ async function resolveLocalUser(dtUser: DingTalkUserInfo): Promise<{ localUser: 
   }
 
   if (!shouldAutoProvision()) {
-    throw new Error(
+    throw createPolicyError(
       dtUser.email
         ? `DingTalk account ${dtUser.email} is not linked to a local user`
         : 'DingTalk account is not linked to a local user',
+      {
+        statusCode: 403,
+        code: 'unlinked_local_user',
+      },
     )
   }
 

@@ -108,6 +108,34 @@ Design response:
 - when `corpId` is configured, require `identity.corp_id = configuredCorpId` on the fallback path
 - do not change the callback contract; only tighten internal user-resolution semantics
 
+### 8. Callback status codes conflated local policy rejection with DingTalk upstream failure
+
+The callback route previously mapped every `exchangeCodeForUser()` failure to `502`. That hid local admission denials behind an upstream-failure status and made it impossible for clients or operators to distinguish:
+
+- DingTalk transport or token-exchange failures
+- local user disabled / inactive rejections
+- explicit grant-denied rejections
+- auto-provision email conflicts
+
+Design response:
+
+- introduce a dedicated local policy error type inside the DingTalk OAuth module
+- keep DingTalk upstream request errors mapped to `502`
+- map local admission denials to `403`
+- map auto-provision email conflicts to `409`
+- preserve the existing public route path and response body shape
+
+### 9. Enabling `DINGTALK_CORP_ID` requires a rollout gate for legacy bindings
+
+The corp-scoped fallback fix is intentionally strict. Once `DINGTALK_CORP_ID` is enabled, legacy `user_external_identities` rows written before corp scoping may stop matching if they only contain bare `provider_open_id` / `provider_union_id` values and `corp_id IS NULL`.
+
+Design response:
+
+- treat corp-scoped lookup hardening as correct-by-default behavior
+- do not weaken the runtime lookup to auto-accept ambiguous legacy rows
+- require a one-time rollout backfill before enabling `DINGTALK_CORP_ID` in production
+- document the backfill requirement and verification gate in the PR1 review docs
+
 ## Non-Blocking Notes
 
 - Duplicate auth payload helpers between `LoginView.vue` and `DingTalkAuthCallbackView.vue` remain a refactor candidate, but they are not blocking for PR1 merge.

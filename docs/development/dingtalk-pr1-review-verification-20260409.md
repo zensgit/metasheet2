@@ -14,7 +14,7 @@ pnpm --filter @metasheet/core-backend build
 
 ## Results
 
-- backend unit tests: passed (`21/21`)
+- backend unit tests: passed (`23/23`)
 - `@metasheet/core-backend` build: passed
 
 The frontend callback and login-page validations from the earlier PR1 review pass remain unchanged; this follow-up only touched backend helper and route behavior.
@@ -29,3 +29,15 @@ The frontend callback and login-page validations from the earlier PR1 review pas
 - corp-scoped identity fallbacks are now pinned to the configured `corpId`
 - email auto-link is rejected when the matched local user is disabled
 - auto-provision writes a bcrypt `password_hash`, so the current `users` schema no longer rejects the insert
+- local policy rejections now return `403` instead of masquerading as DingTalk upstream `502`
+- auto-provision email conflicts now return `409`
+- DingTalk upstream request failures remain mapped to `502`
+
+## Rollout Gate
+
+The corp-scoped identity hardening is intentionally strict. Before enabling `DINGTALK_CORP_ID` in production, rollout must include a one-time backfill of legacy DingTalk identity rows so existing bindings are rewritten to:
+
+- `corp_id = <target corp id>`
+- `external_key = <corpId>:<provider_open_id>`
+
+Without that backfill, older bindings that only relied on bare `provider_open_id` / `provider_union_id` may stop matching once corp-scoped lookup is enabled.

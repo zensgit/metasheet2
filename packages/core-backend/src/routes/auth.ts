@@ -12,6 +12,7 @@ import { authService, type User } from '../auth/AuthService'
 import { buildOnboardingPacket, getAccessPreset } from '../auth/access-presets'
 import {
   buildAuthUrl,
+  DingTalkLoginPolicyError,
   exchangeCodeForUser,
   generateState,
   isDingTalkConfigured,
@@ -29,6 +30,7 @@ import { listUserPermissions } from '../rbac/service'
 import { secretManager } from '../security/SecretManager'
 import { isPlmEnabled, resolveEffectiveProductMode } from '../config/product-mode'
 import { getBcryptSaltRounds, resolveRuntimeJwtSecret } from '../security/auth-runtime-config'
+import { DingTalkRequestError } from '../integrations/dingtalk/client'
 
 const logger = new Logger('AuthRouter')
 
@@ -944,7 +946,13 @@ authRouter.post('/dingtalk/callback', async (req: Request, res: Response) => {
     })
   } catch (error) {
     logger.error('DingTalk callback error', error instanceof Error ? error : undefined)
-    return res.status(502).json({
+    const statusCode = error instanceof DingTalkLoginPolicyError
+      ? error.statusCode
+      : error instanceof DingTalkRequestError
+        ? 502
+        : 502
+
+    return res.status(statusCode).json({
       success: false,
       error: error instanceof Error ? error.message : 'DingTalk authentication failed',
     })
