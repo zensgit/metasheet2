@@ -270,7 +270,7 @@ function createContext(): {
           sheetId: input.sheetId,
           version: 2,
           data: {
-            [srPk('ticketNo')]: 'TK-SR-001',
+            [srPk('ticketNo')]: 'TK-2001',
             [srPk('visitType')]: 'onsite',
             [srPk('scheduledAt')]: '2026-04-09T09:00:00Z',
             [srPk('technicianName')]: 'Tech One',
@@ -298,7 +298,7 @@ function createContext(): {
           sheetId: input.sheetId,
           version: 2,
           data: {
-            [srPk('ticketNo')]: 'TK-SR-001',
+            [srPk('ticketNo')]: 'TK-2001',
             [srPk('visitType')]: 'onsite',
             [srPk('scheduledAt')]: '2026-04-09T09:00:00Z',
             [srPk('technicianName')]: 'Tech One',
@@ -329,7 +329,7 @@ function createContext(): {
     version: 3,
     data: input.sheetId.includes('serviceRecord')
       ? {
-          [srPk('ticketNo')]: 'TK-SR-001',
+          [srPk('ticketNo')]: 'TK-2001',
           [srPk('visitType')]: 'onsite',
           [srPk('scheduledAt')]: '2026-04-09T09:00:00Z',
           [srPk('technicianName')]: 'Tech One',
@@ -350,7 +350,7 @@ function createContext(): {
     version: 4,
     data: input.sheetId.includes('serviceRecord')
       ? {
-          [srPk('ticketNo')]: 'TK-SR-001',
+          [srPk('ticketNo')]: 'TK-2001',
           [srPk('visitType')]: 'onsite',
           [srPk('scheduledAt')]: '2026-04-09T09:00:00Z',
           [srPk('technicianName')]: 'Tech One',
@@ -934,6 +934,32 @@ describe('plugin-after-sales routes', () => {
     expect(listRecords).not.toHaveBeenCalled()
   })
 
+  it('returns 403 for service-records list when caller lacks after-sales read access', async () => {
+    const handler = routes.get('GET /api/after-sales/service-records')
+    const res = new FakeResponse()
+
+    await handler?.(buildReq({
+      user: {
+        id: 'user_42',
+        tenantId: 'tenant_42',
+        role: 'user',
+        roles: ['user'],
+        perms: [],
+      },
+    }), res)
+
+    expect(res.statusCode).toBe(403)
+    expect(res.body).toEqual({
+      ok: false,
+      error: {
+        code: 'FORBIDDEN',
+        message: 'After-sales read access required',
+      },
+    })
+    expect(queryRecords).not.toHaveBeenCalled()
+    expect(listRecords).not.toHaveBeenCalled()
+  })
+
   it('returns 409 when service-records are created before install', async () => {
     const handler = routes.get('POST /api/after-sales/service-records')
     const res = new FakeResponse()
@@ -957,6 +983,42 @@ describe('plugin-after-sales routes', () => {
       },
     })
     expect(createRecord).not.toHaveBeenCalled()
+  })
+
+  it('returns 409 when service-records are listed from a failed install state', async () => {
+    const handler = routes.get('GET /api/after-sales/service-records')
+    const res = new FakeResponse()
+
+    db.rows.push({
+      id: 'fake-uuid-1',
+      tenant_id: 'tenant_42',
+      app_id: 'after-sales',
+      project_id: 'tenant_42:after-sales',
+      template_id: 'after-sales-default',
+      template_version: '0.1.0',
+      mode: 'reinstall',
+      status: 'failed',
+      created_objects_json: JSON.stringify(['serviceTicket', 'serviceRecord']),
+      created_views_json: JSON.stringify(['ticket-board', 'serviceRecord-calendar']),
+      warnings_json: JSON.stringify(['service record create failed']),
+      display_name: 'After-sales',
+      config_json: JSON.stringify({}),
+      last_install_at: new Date(),
+      created_at: new Date(),
+    })
+
+    await handler?.(buildReq(), res)
+
+    expect(res.statusCode).toBe(409)
+    expect(res.body).toEqual({
+      ok: false,
+      error: {
+        code: 'AFTER_SALES_NOT_INSTALLED',
+        message: 'After-sales must be installed before listing service records',
+      },
+    })
+    expect(queryRecords).not.toHaveBeenCalled()
+    expect(listRecords).not.toHaveBeenCalled()
   })
 
   it('returns empty service-record results when no records match', async () => {
@@ -1036,6 +1098,50 @@ describe('plugin-after-sales routes', () => {
     expect(createRecord).not.toHaveBeenCalled()
   })
 
+  it('returns 404 when service-record ticketNo does not match an existing ticket', async () => {
+    const handler = routes.get('POST /api/after-sales/service-records')
+    const res = new FakeResponse()
+
+    db.rows.push({
+      id: 'fake-uuid-1',
+      tenant_id: 'tenant_42',
+      app_id: 'after-sales',
+      project_id: 'tenant_42:after-sales',
+      template_id: 'after-sales-default',
+      template_version: '0.1.0',
+      mode: 'enable',
+      status: 'installed',
+      created_objects_json: JSON.stringify(['serviceTicket', 'serviceRecord']),
+      created_views_json: JSON.stringify(['ticket-board', 'serviceRecord-calendar']),
+      warnings_json: JSON.stringify([]),
+      display_name: 'After-sales',
+      config_json: JSON.stringify({}),
+      last_install_at: new Date(),
+      created_at: new Date(),
+    })
+    queryRecords.mockResolvedValueOnce([])
+
+    await handler?.(buildReq({
+      body: {
+        serviceRecord: {
+          ticketNo: 'TK-SR-404',
+          visitType: 'onsite',
+          scheduledAt: '2026-04-09T09:00:00Z',
+        },
+      },
+    }), res)
+
+    expect(res.statusCode).toBe(404)
+    expect(res.body).toEqual({
+      ok: false,
+      error: {
+        code: 'NOT_FOUND',
+        message: 'After-sales ticket TK-SR-404 not found',
+      },
+    })
+    expect(createRecord).not.toHaveBeenCalled()
+  })
+
   it('returns 400 when service-record scheduledAt is missing', async () => {
     const handler = routes.get('POST /api/after-sales/service-records')
     const res = new FakeResponse()
@@ -1099,7 +1205,7 @@ describe('plugin-after-sales routes', () => {
     await createHandler?.(buildReq({
       body: {
         serviceRecord: {
-          ticketNo: 'TK-SR-001',
+          ticketNo: 'TK-2001',
           visitType: 'onsite',
           scheduledAt: '2026-04-09T09:00:00Z',
           completedAt: '2026-04-09T10:30:00Z',
@@ -1116,10 +1222,10 @@ describe('plugin-after-sales routes', () => {
       data: {
         projectId: 'tenant_42:after-sales',
         serviceRecord: {
-          id: 'rec_service_001',
-          version: 1,
-          data: {
-            ticketNo: 'TK-SR-001',
+            id: 'rec_service_001',
+            version: 1,
+            data: {
+            ticketNo: 'TK-2001',
             visitType: 'onsite',
             scheduledAt: '2026-04-09T09:00:00Z',
             completedAt: '2026-04-09T10:30:00Z',
@@ -1137,7 +1243,7 @@ describe('plugin-after-sales routes', () => {
     expect(createRecord).toHaveBeenCalledWith({
       sheetId: 'tenant_42:after-sales:serviceRecord:sheet',
       data: {
-        [srPk('ticketNo')]: 'TK-SR-001',
+        [srPk('ticketNo')]: 'TK-2001',
         [srPk('visitType')]: 'onsite',
         [srPk('scheduledAt')]: '2026-04-09T09:00:00Z',
         [srPk('completedAt')]: '2026-04-09T10:30:00Z',
@@ -1151,10 +1257,10 @@ describe('plugin-after-sales routes', () => {
       expect.objectContaining({
         tenantId: 'tenant_42',
         projectId: 'tenant_42:after-sales',
-        ticketNo: 'TK-SR-001',
+        ticketNo: 'TK-2001',
         serviceRecord: expect.objectContaining({
           id: 'rec_service_001',
-          ticketNo: 'TK-SR-001',
+          ticketNo: 'TK-2001',
           visitType: 'onsite',
           scheduledAt: '2026-04-09T09:00:00Z',
           completedAt: '2026-04-09T10:30:00Z',
@@ -1167,7 +1273,7 @@ describe('plugin-after-sales routes', () => {
 
     await listHandler?.(buildReq({
       query: {
-        ticketNo: 'TK-SR-001',
+        ticketNo: 'TK-2001',
         result: 'resolved',
         search: 'motor',
         limit: '5',
@@ -1179,7 +1285,7 @@ describe('plugin-after-sales routes', () => {
     expect(queryRecords).toHaveBeenCalledWith({
       sheetId: 'tenant_42:after-sales:serviceRecord:sheet',
       filters: {
-        [srPk('ticketNo')]: 'TK-SR-001',
+        [srPk('ticketNo')]: 'TK-2001',
         [srPk('result')]: 'resolved',
       },
       search: 'motor',
@@ -1195,7 +1301,7 @@ describe('plugin-after-sales routes', () => {
             id: 'rec_service_001',
             version: 2,
             data: {
-              ticketNo: 'TK-SR-001',
+              ticketNo: 'TK-2001',
               visitType: 'onsite',
               scheduledAt: '2026-04-09T09:00:00Z',
               technicianName: 'Tech One',

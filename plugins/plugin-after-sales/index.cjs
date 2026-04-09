@@ -250,6 +250,10 @@ function sendBadRequest(res, err) {
   })
 }
 
+function isOperationalAfterSalesStatus(status) {
+  return status === 'installed' || status === 'partial'
+}
+
 function getMultitableWriteApi(context) {
   const multitable = context && context.api && context.api.multitable
   const provisioning = multitable && multitable.provisioning
@@ -286,6 +290,51 @@ function getMultitableReadApi(context) {
     return null
   }
   return { provisioning, records }
+}
+
+async function findTicketByTicketNo(multitableApi, projectId, ticketNo) {
+  const sheetId = await findObjectSheetId(multitableApi.provisioning, projectId, 'serviceTicket')
+  const recordsApi = multitableApi.records
+  let records = []
+
+  if (typeof recordsApi.queryRecords === 'function') {
+    const physicalFieldIds = await resolvePhysicalFieldIds(
+      multitableApi.provisioning,
+      projectId,
+      'serviceTicket',
+      ['ticketNo'],
+    )
+    records = await recordsApi.queryRecords({
+      sheetId,
+      filters: {
+        [physicalFieldIds.ticketNo || 'ticketNo']: ticketNo,
+      },
+      limit: 1,
+    })
+  } else if (typeof recordsApi.listRecords === 'function') {
+    records = await recordsApi.listRecords({ sheetId })
+  } else {
+    const error = new Error('Multitable ticket reader is not available on plugin context')
+    error.code = 'MULTITABLE_UNAVAILABLE'
+    throw error
+  }
+
+  for (const ticket of Array.isArray(records) ? records : []) {
+    const logicalTicket = await fromPhysicalTicketData(
+      multitableApi.provisioning,
+      projectId,
+      ticket.data,
+    )
+    if (logicalTicket.ticketNo === ticketNo) {
+      return {
+        id: ticket.id,
+        version: ticket.version,
+        data: logicalTicket,
+      }
+    }
+  }
+
+  return null
 }
 
 function resolveTenantIdFromProject(projectId) {
@@ -556,7 +605,7 @@ module.exports = {
 
           const tenantId = getTenantId(req, context.logger)
           const current = await installer.loadCurrent(context, tenantId, appManifest.id)
-          if (!current || current.status === 'not-installed') {
+          if (!current || !isOperationalAfterSalesStatus(current.status)) {
             res.status(409).json({
               ok: false,
               error: {
@@ -700,7 +749,7 @@ module.exports = {
 
           const tenantId = getTenantId(req, context.logger)
           const current = await installer.loadCurrent(context, tenantId, appManifest.id)
-          if (!current || current.status === 'not-installed') {
+          if (!current || !isOperationalAfterSalesStatus(current.status)) {
             res.status(409).json({
               ok: false,
               error: {
@@ -816,7 +865,7 @@ module.exports = {
 
           const tenantId = getTenantId(req, context.logger)
           const current = await installer.loadCurrent(context, tenantId, appManifest.id)
-          if (!current || current.status === 'not-installed') {
+          if (!current || !isOperationalAfterSalesStatus(current.status)) {
             res.status(409).json({
               ok: false,
               error: {
@@ -899,7 +948,7 @@ module.exports = {
 
           const tenantId = getTenantId(req, context.logger)
           const current = await installer.loadCurrent(context, tenantId, appManifest.id)
-          if (!current || current.status === 'not-installed') {
+          if (!current || !isOperationalAfterSalesStatus(current.status)) {
             res.status(409).json({
               ok: false,
               error: {
@@ -1054,7 +1103,35 @@ module.exports = {
           }
 
           const projectId = current.projectId || installer.getProjectId(tenantId, appManifest.id)
+          const multitableReadApi = getMultitableReadApi(context)
+          if (
+            !multitableReadApi ||
+            (typeof multitableReadApi.records.listRecords !== 'function' &&
+              typeof multitableReadApi.records.queryRecords !== 'function')
+          ) {
+            res.status(503).json({
+              ok: false,
+              error: {
+                code: 'MULTITABLE_UNAVAILABLE',
+                message: 'Multitable ticket reader is not available on plugin context',
+              },
+            })
+            return
+          }
+
           const command = buildServiceRecordCommand((req && req.body) || {})
+          const ticket = await findTicketByTicketNo(multitableReadApi, projectId, command.recordData.ticketNo)
+          if (!ticket) {
+            res.status(404).json({
+              ok: false,
+              error: {
+                code: 'NOT_FOUND',
+                message: `After-sales ticket ${command.recordData.ticketNo} not found`,
+              },
+            })
+            return
+          }
+
           const sheetId = await findObjectSheetId(multitableApi.provisioning, projectId, 'serviceRecord')
           const record = await multitableApi.records.createRecord({
             sheetId,
