@@ -301,4 +301,121 @@ describe('AfterSalesView', () => {
     expect(container?.textContent).not.toContain('Recent tickets')
     expect(apiFetchMock).not.toHaveBeenCalledWith('/api/after-sales/tickets', undefined)
   })
+
+  it('keeps the tickets panel active in partial state', async () => {
+    apiFetchMock.mockImplementation(async (path: string) => {
+      if (path === '/api/after-sales/app-manifest') {
+        return createResponse({
+          id: 'after-sales-default',
+          displayName: 'After Sales',
+          platformDependencies: ['core-backend'],
+          objects: [],
+          workflows: [],
+        })
+      }
+
+      if (path === '/api/after-sales/projects/current') {
+        return createResponse({
+          status: 'partial',
+          projectId: 'tenant:after-sales',
+          displayName: 'After Sales',
+          config: {
+            defaultSlaHours: 24,
+            urgentSlaHours: 4,
+            followUpAfterDays: 7,
+          },
+          installResult: {
+            status: 'partial',
+            createdObjects: [],
+            createdViews: [],
+            warnings: ['ticket board missing'],
+            reportRef: 'install-002',
+          },
+          reportRef: 'install-002',
+        })
+      }
+
+      if (path === '/api/after-sales/tickets') {
+        return createResponse({
+          projectId: 'tenant:after-sales',
+          count: 1,
+          tickets: [
+            {
+              id: 'ticket-partial',
+              version: 1,
+              data: {
+                ticketNo: 'AF-Partial',
+                title: 'Handle degraded project',
+                status: 'open',
+                refundStatus: '',
+                refundAmount: 0,
+              },
+            },
+          ],
+        })
+      }
+
+      throw new Error(`Unexpected request: ${path}`)
+    })
+
+    const mounted = mountAfterSalesView()
+    app = mounted.app
+    container = mounted.container
+
+    await waitForText(container, 'AF-Partial')
+
+    expect(container?.textContent).toContain('Recent tickets')
+    expect(container?.textContent).toContain('Handle degraded project')
+    expect(apiFetchMock).toHaveBeenCalledWith('/api/after-sales/tickets', undefined)
+  })
+
+  it('skips ticket loading when install state is failed', async () => {
+    apiFetchMock.mockImplementation(async (path: string) => {
+      if (path === '/api/after-sales/app-manifest') {
+        return createResponse({
+          id: 'after-sales-default',
+          displayName: 'After Sales',
+          platformDependencies: ['core-backend'],
+          objects: [],
+          workflows: [],
+        })
+      }
+
+      if (path === '/api/after-sales/projects/current') {
+        return createResponse({
+          status: 'failed',
+          projectId: 'tenant:after-sales',
+          displayName: 'After Sales',
+          config: {
+            defaultSlaHours: 24,
+            urgentSlaHours: 4,
+            followUpAfterDays: 7,
+          },
+          installResult: {
+            status: 'failed',
+            createdObjects: [],
+            createdViews: [],
+            warnings: ['service ticket provisioning failed'],
+            reportRef: 'install-003',
+          },
+          reportRef: 'install-003',
+        })
+      }
+
+      if (path === '/api/after-sales/tickets') {
+        throw new Error('tickets should not load for failed install state')
+      }
+
+      throw new Error(`Unexpected request: ${path}`)
+    })
+
+    const mounted = mountAfterSalesView()
+    app = mounted.app
+    container = mounted.container
+
+    await flushUi(4)
+
+    expect(container?.textContent).not.toContain('Recent tickets')
+    expect(apiFetchMock).not.toHaveBeenCalledWith('/api/after-sales/tickets', undefined)
+  })
 })

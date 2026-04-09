@@ -343,7 +343,7 @@ const placeholderProjectId = 'tenant:after-sales'
 const warnings = computed(() => current.value.installResult?.warnings ?? [])
 const createdObjectLabels = computed(() => current.value.installResult?.createdObjects ?? [])
 const createdViewLabels = computed(() => current.value.installResult?.createdViews ?? [])
-const isInstalled = computed(() => current.value.status !== 'not-installed')
+const isInstalled = computed(() => current.value.status === 'installed' || current.value.status === 'partial')
 const isDegraded = computed(() => current.value.status === 'partial' || current.value.status === 'failed')
 const statusTone = computed(() => {
   switch (current.value.status) {
@@ -497,7 +497,7 @@ async function loadTicketsForCurrentState(state: CurrentResponse): Promise<void>
   ticketsLoading.value = true
   ticketsError.value = ''
   try {
-    if (state.status === 'not-installed') {
+    if (state.status === 'not-installed' || state.status === 'failed') {
       tickets.value = []
       return
     }
@@ -515,7 +515,7 @@ async function loadTicketsForCurrentState(state: CurrentResponse): Promise<void>
     )
   } catch (err: unknown) {
     tickets.value = []
-    if (state.status !== 'not-installed') {
+    if (state.status === 'installed' || state.status === 'partial') {
       ticketsError.value = err instanceof Error ? err.message : 'Failed to load after-sales tickets'
     }
   } finally {
