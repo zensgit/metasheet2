@@ -10,6 +10,7 @@ Move the DingTalk PR stack to the shortest safe merge path without adding new pr
 This pass is limited to:
 
 - keeping `#725` current with `main`
+- closing PR1 review blockers so `#725` only waits on human approval
 - preparing `#723` and `#724` for clean retarget after upstream merges
 - keeping review gates explicit and decision-complete
 
@@ -27,6 +28,18 @@ The chosen update strategy is:
 - force-push the refreshed head back to the PR branch
 
 This keeps the stack narrow and avoids compounding outdated-base noise into `#723` and `#724`.
+
+### 1a. Keep fixing PR1 only for real review blockers
+
+While `#725` is under review, only blocking correctness or security findings are allowed into the branch.
+
+This pass explicitly accepted three review-driven follow-up fixes:
+
+- disabled or inactive local users must be blocked from DingTalk login
+- auto-provision must satisfy the current `users.password_hash NOT NULL` schema
+- corp-scoped identity fallback must stay pinned to the configured `corpId`
+
+No route contract changes or cross-PR refactors are allowed while PR1 is in this gate.
 
 ### 2. Keep `#723` and `#724` stacked until upstream merge
 
@@ -50,6 +63,25 @@ This pass still prepares the next two steps so implementation can continue immed
   - diff contains only PR3 attendance/notification/admin-control changes
   - full GitHub checks run
   - review focuses on attendance hardening, DingTalk robot behavior, grant gating, and delegated-admin controls
+
+## Current Gate Snapshot
+
+- `#725`
+  - head: `584fac083`
+  - checks: full GitHub checks green
+  - merge gate: blocked only by human review / approval
+- `#723`
+  - state: draft
+  - base: `codex/dingtalk-pr1-foundation-login-20260408`
+  - merge state: `DIRTY`
+  - checks: `pr-validate` only
+- `#724`
+  - state: draft
+  - base: `codex/dingtalk-pr2-directory-sync-20260408`
+  - merge state: `CLEAN` relative to the old stack base
+  - checks: `pr-validate` only
+
+This means the stack is now bottlenecked entirely on PR1 approval, not on CI.
 
 ## Public Interface Constraints
 
