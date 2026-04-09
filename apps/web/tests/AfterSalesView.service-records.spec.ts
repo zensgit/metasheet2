@@ -252,4 +252,72 @@ describe('AfterSalesView service records panel', () => {
     expect(container.textContent).not.toContain('Service records')
     expect(apiFetchMock).not.toHaveBeenCalledWith('/api/after-sales/service-records', undefined)
   })
+
+  it('keeps the service-records panel active in partial state', async () => {
+    apiFetchMock.mockImplementation(async (path: string) => {
+      if (path === '/api/after-sales/app-manifest') {
+        return createResponse({
+          id: 'after-sales-default',
+          displayName: 'After Sales',
+          platformDependencies: ['core-backend'],
+          objects: [],
+          workflows: [],
+        })
+      }
+
+      if (path === '/api/after-sales/projects/current') {
+        return createResponse({
+          status: 'partial',
+          projectId: 'tenant:after-sales',
+          displayName: 'After Sales',
+          config: {
+            defaultSlaHours: 24,
+            urgentSlaHours: 4,
+            followUpAfterDays: 7,
+          },
+          installResult: {
+            status: 'partial',
+            createdObjects: [],
+            createdViews: [],
+            warnings: ['serviceRecord view missing'],
+            reportRef: 'install-002',
+          },
+          reportRef: 'install-002',
+        })
+      }
+
+      if (path === '/api/after-sales/service-records') {
+        return createResponse({
+          projectId: 'tenant:after-sales',
+          count: 1,
+          serviceRecords: [
+            {
+              id: 'sr-partial',
+              version: 1,
+              data: {
+                ticketNo: 'AF-SR-Partial',
+                visitType: 'remote',
+                scheduledAt: '2026-04-09T08:00:00.000Z',
+                technicianName: 'Alex',
+                workSummary: 'Remote triage',
+                result: 'partial',
+              },
+            },
+          ],
+        })
+      }
+
+      throw new Error(`Unexpected request: ${path}`)
+    })
+
+    const mounted = mountAfterSalesView()
+    app = mounted.app
+    container = mounted.container
+
+    await waitForText(container, 'AF-SR-Partial')
+
+    expect(container.textContent).toContain('Recent visits')
+    expect(container.textContent).toContain('Remote triage')
+    expect(apiFetchMock).toHaveBeenCalledWith('/api/after-sales/service-records', undefined)
+  })
 })

@@ -340,7 +340,7 @@ const placeholderProjectId = 'tenant:after-sales'
 const warnings = computed(() => current.value.installResult?.warnings ?? [])
 const createdObjectLabels = computed(() => current.value.installResult?.createdObjects ?? [])
 const createdViewLabels = computed(() => current.value.installResult?.createdViews ?? [])
-const isInstalled = computed(() => current.value.status === 'installed')
+const isInstalled = computed(() => current.value.status !== 'not-installed')
 const isDegraded = computed(() => current.value.status === 'partial' || current.value.status === 'failed')
 const statusTone = computed(() => {
   switch (current.value.status) {
@@ -469,7 +469,7 @@ async function loadServiceRecordsForCurrentState(state: CurrentResponse) {
   serviceRecordsError.value = ''
 
   try {
-    if (state.status !== 'installed') {
+    if (state.status === 'not-installed') {
       serviceRecords.value = []
       return
     }
