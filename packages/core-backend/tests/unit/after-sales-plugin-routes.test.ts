@@ -1425,6 +1425,93 @@ describe('plugin-after-sales routes', () => {
     })
   })
 
+  it('deletes a service record through the multitable delete seam', async () => {
+    const handler = routes.get('DELETE /api/after-sales/service-records/:serviceRecordId')
+    const res = new FakeResponse()
+
+    db.rows.push({
+      id: 'fake-uuid-1',
+      tenant_id: 'tenant_42',
+      app_id: 'after-sales',
+      project_id: 'tenant_42:after-sales',
+      template_id: 'after-sales-default',
+      template_version: '0.1.0',
+      mode: 'enable',
+      status: 'installed',
+      created_objects_json: JSON.stringify(['serviceTicket', 'serviceRecord']),
+      created_views_json: JSON.stringify(['ticket-board', 'serviceRecord-calendar']),
+      warnings_json: JSON.stringify([]),
+      display_name: 'After-sales',
+      config_json: JSON.stringify({}),
+      last_install_at: new Date(),
+      created_at: new Date(),
+    })
+
+    await handler?.(buildReq({
+      user: {
+        id: 'writer_42',
+        tenantId: 'tenant_42',
+        role: 'user',
+        roles: ['user'],
+        perms: ['after_sales:write'],
+      },
+      params: {
+        serviceRecordId: 'rec_service_001',
+      },
+    }), res)
+
+    expect(res.statusCode).toBe(200)
+    expect(deleteRecord).toHaveBeenCalledWith({
+      sheetId: 'tenant_42:after-sales:serviceRecord:sheet',
+      recordId: 'rec_service_001',
+    })
+    expect(res.body.data).toEqual({
+      projectId: 'tenant_42:after-sales',
+      serviceRecordId: 'rec_service_001',
+      version: 4,
+      deleted: true,
+    })
+  })
+
+  it('returns 409 when deleting service records from a failed install state', async () => {
+    const handler = routes.get('DELETE /api/after-sales/service-records/:serviceRecordId')
+    const res = new FakeResponse()
+
+    db.rows.push({
+      id: 'fake-uuid-1',
+      tenant_id: 'tenant_42',
+      app_id: 'after-sales',
+      project_id: 'tenant_42:after-sales',
+      template_id: 'after-sales-default',
+      template_version: '0.1.0',
+      mode: 'reinstall',
+      status: 'failed',
+      created_objects_json: JSON.stringify(['serviceTicket', 'serviceRecord']),
+      created_views_json: JSON.stringify(['ticket-board', 'serviceRecord-calendar']),
+      warnings_json: JSON.stringify(['service record create failed']),
+      display_name: 'After-sales',
+      config_json: JSON.stringify({}),
+      last_install_at: new Date(),
+      created_at: new Date(),
+    })
+
+    await handler?.(buildReq({
+      params: {
+        serviceRecordId: 'rec_service_001',
+      },
+    }), res)
+
+    expect(res.statusCode).toBe(409)
+    expect(res.body).toEqual({
+      ok: false,
+      error: {
+        code: 'AFTER_SALES_NOT_INSTALLED',
+        message: 'After-sales must be installed before deleting service records',
+      },
+    })
+    expect(deleteRecord).not.toHaveBeenCalled()
+  })
+
   it('requests a ticket refund by patching the record and emitting ticket.refundRequested', async () => {
     const handler = routes.get('POST /api/after-sales/tickets/:ticketId/refund-request')
     const res = new FakeResponse()
