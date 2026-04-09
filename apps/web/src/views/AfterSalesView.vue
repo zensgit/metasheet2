@@ -278,7 +278,7 @@
                   </label>
                   <button
                     class="after-sales-view__ghost-btn after-sales-view__ticket-action-btn"
-                    :disabled="ticketCreating || ticketsLoading || ticketRefundSubmittingId === ticket.id"
+                    :disabled="ticketCreating || ticketsLoading || ticketDeletingId === ticket.id || ticketRefundSubmittingId === ticket.id"
                     @click="requestTicketRefund(ticket)"
                   >
                     {{ ticketRefundSubmittingId === ticket.id ? 'Requesting...' : 'Request refund' }}
