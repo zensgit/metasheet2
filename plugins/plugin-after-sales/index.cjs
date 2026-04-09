@@ -18,6 +18,7 @@ const {
 } = require('./lib/workflow-adapter.cjs')
 const {
   buildCreateTicketCommand,
+  buildInstalledAssetCommand,
   buildUpdateTicketCommand,
   buildRefundDecisionEventPayload,
   buildServiceRecordCommand,
@@ -50,6 +51,10 @@ async function fromPhysicalTicketData(provisioning, projectId, physicalData) {
 
 async function toPhysicalServiceRecordData(provisioning, projectId, logicalData) {
   return toPhysicalRecord(provisioning, projectId, 'serviceRecord', logicalData)
+}
+
+async function toPhysicalInstalledAssetData(provisioning, projectId, logicalData) {
+  return toPhysicalRecord(provisioning, projectId, 'installedAsset', logicalData)
 }
 
 async function fromPhysicalServiceRecordData(provisioning, projectId, physicalData) {
@@ -1051,6 +1056,98 @@ module.exports = {
           res.status(500).json({
             ok: false,
             error: { code: 'INTERNAL_ERROR', message: 'Failed to delete after-sales ticket' },
+          })
+        }
+      },
+    )
+
+    context.api.http.addRoute(
+      'POST',
+      '/api/after-sales/installed-assets',
+      async (req, res) => {
+        try {
+          const userId = getUserId(req)
+          if (!userId) {
+            sendUnauthorized(res)
+            return
+          }
+          if (!hasAfterSalesWriteAccess(req)) {
+            sendWriteForbidden(res)
+            return
+          }
+
+          const multitableApi = getMultitableWriteApi(context)
+          if (!multitableApi) {
+            res.status(503).json({
+              ok: false,
+              error: {
+                code: 'MULTITABLE_UNAVAILABLE',
+                message: 'Multitable record writer is not available on plugin context',
+              },
+            })
+            return
+          }
+
+          const tenantId = getTenantId(req, context.logger)
+          const current = await installer.loadCurrent(context, tenantId, appManifest.id)
+          if (!current || !isOperationalAfterSalesStatus(current.status)) {
+            res.status(409).json({
+              ok: false,
+              error: {
+                code: 'AFTER_SALES_NOT_INSTALLED',
+                message: 'After-sales must be installed before creating installed assets',
+              },
+            })
+            return
+          }
+
+          const projectId = current.projectId || installer.getProjectId(tenantId, appManifest.id)
+          const command = buildInstalledAssetCommand((req && req.body) || {})
+          const sheetId = await findObjectSheetId(multitableApi.provisioning, projectId, 'installedAsset')
+          const record = await multitableApi.records.createRecord({
+            sheetId,
+            data: await toPhysicalInstalledAssetData(multitableApi.provisioning, projectId, command.recordData),
+          })
+          const logicalRecordData = await fromPhysicalInstalledAssetData(
+            multitableApi.provisioning,
+            projectId,
+            record.data,
+          )
+
+          res.status(201).json({
+            ok: true,
+            data: {
+              projectId,
+              installedAsset: {
+                id: record.id,
+                version: record.version,
+                data: logicalRecordData,
+              },
+            },
+          })
+        } catch (err) {
+          if (err && err.code === 'AFTER_SALES_EVENT_VALIDATION_FAILED') {
+            sendBadRequest(res, err)
+            return
+          }
+          if (err && err.code === 'VALIDATION_ERROR') {
+            res.status(400).json({
+              ok: false,
+              error: { code: err.code, message: err.message },
+            })
+            return
+          }
+          if (err && err.code === 'NOT_FOUND') {
+            res.status(404).json({
+              ok: false,
+              error: { code: err.code, message: err.message },
+            })
+            return
+          }
+          logger.error && logger.error('after-sales create installed asset failed', err)
+          res.status(500).json({
+            ok: false,
+            error: { code: 'INTERNAL_ERROR', message: 'Failed to create after-sales installed asset' },
           })
         }
       },

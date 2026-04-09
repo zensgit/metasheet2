@@ -159,6 +159,38 @@ function buildCreateTicketCommand(input) {
   }
 }
 
+function buildInstalledAssetCommand(input) {
+  const installedAsset =
+    input && typeof input.installedAsset === 'object' && !Array.isArray(input.installedAsset)
+      ? input.installedAsset
+      : input || {}
+
+  const assetCode = requiredString(installedAsset.assetCode ?? input.assetCode, 'installedAsset.assetCode')
+  const status = normalizeEnumValue(
+    installedAsset.status,
+    'installedAsset.status',
+    ['active', 'expired', 'decommissioned'],
+    'active',
+  )
+  const serialNo = optionalString(installedAsset.serialNo ?? input.serialNo)
+  const model = optionalString(installedAsset.model ?? input.model)
+  const location = optionalString(installedAsset.location ?? input.location)
+  const installedAt = optionalString(installedAsset.installedAt ?? input.installedAt)
+  const warrantyUntil = optionalString(installedAsset.warrantyUntil ?? input.warrantyUntil)
+
+  return {
+    recordData: {
+      assetCode,
+      status,
+      ...(serialNo ? { serialNo } : {}),
+      ...(model ? { model } : {}),
+      ...(location ? { location } : {}),
+      ...(installedAt ? { installedAt } : {}),
+      ...(warrantyUntil ? { warrantyUntil } : {}),
+    },
+  }
+}
+
 function normalizeTicketStatus(value) {
   if (optionalString(value) === 'open') {
     return 'new'
@@ -468,6 +500,7 @@ function buildServiceRecordedEventPayload(input, meta) {
 
 module.exports = {
   buildCreateTicketCommand,
+  buildInstalledAssetCommand,
   buildUpdateTicketCommand,
   buildRequestRefundCommand,
   buildRefundDecisionEventPayload,

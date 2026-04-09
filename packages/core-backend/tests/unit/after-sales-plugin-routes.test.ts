@@ -278,7 +278,11 @@ function createContext(): {
     input.fieldIds.map((fieldId) => [fieldId, `${input.projectId}:${input.objectId}:${fieldId}`]),
   ))
   const createRecord = vi.fn(async (input: { sheetId: string; data: Record<string, unknown> }) => ({
-    id: input.sheetId.includes('serviceRecord') ? 'rec_service_001' : 'rec_ticket_001',
+    id: input.sheetId.includes('installedAsset')
+      ? 'rec_asset_001'
+      : input.sheetId.includes('serviceRecord')
+      ? 'rec_service_001'
+      : 'rec_ticket_001',
     sheetId: input.sheetId,
     version: 1,
     data: input.data,
@@ -1213,6 +1217,103 @@ describe('plugin-after-sales routes', () => {
       projectId: 'tenant_42:after-sales',
       objectId: 'installedAsset',
       fieldIds: ['status'],
+    })
+  })
+
+  it('returns 403 for installed-assets create when caller lacks after-sales write access', async () => {
+    const handler = routes.get('POST /api/after-sales/installed-assets')
+    const res = new FakeResponse()
+
+    await handler?.(buildReq({
+      user: {
+        id: 'user_42',
+        tenantId: 'tenant_42',
+        role: 'user',
+        roles: ['user'],
+        perms: ['after_sales:read'],
+      },
+      body: {
+        installedAsset: {
+          assetCode: 'AST-1001',
+        },
+      },
+    }), res)
+
+    expect(res.statusCode).toBe(403)
+    expect(res.body).toEqual({
+      ok: false,
+      error: {
+        code: 'FORBIDDEN',
+        message: 'After-sales write access required',
+      },
+    })
+    expect(createRecord).not.toHaveBeenCalled()
+  })
+
+  it('creates installed assets through the multitable write seam', async () => {
+    const handler = routes.get('POST /api/after-sales/installed-assets')
+    const res = new FakeResponse()
+
+    db.rows.push({
+      id: 'fake-uuid-1',
+      tenant_id: 'tenant_42',
+      app_id: 'after-sales',
+      project_id: 'tenant_42:after-sales',
+      template_id: 'after-sales-default',
+      template_version: '0.1.0',
+      mode: 'enable',
+      status: 'installed',
+      created_objects_json: JSON.stringify(['serviceTicket', 'serviceRecord', 'installedAsset']),
+      created_views_json: JSON.stringify(['ticket-board', 'serviceRecord-calendar', 'installedAsset-grid']),
+      warnings_json: JSON.stringify([]),
+      display_name: 'After-sales',
+      config_json: JSON.stringify({}),
+      last_install_at: new Date(),
+      created_at: new Date(),
+    })
+
+    await handler?.(buildReq({
+      body: {
+        installedAsset: {
+          assetCode: 'AST-1001',
+          serialNo: 'SN-1001',
+          model: 'Compressor X',
+          location: 'Plant 1',
+          installedAt: '2026-04-09T08:00:00Z',
+          warrantyUntil: '2027-04-09',
+          status: 'active',
+        },
+      },
+    }), res)
+
+    expect(res.statusCode).toBe(201)
+    expect(createRecord).toHaveBeenCalledWith({
+      sheetId: 'tenant_42:after-sales:installedAsset:sheet',
+      data: {
+        [iaPk('assetCode')]: 'AST-1001',
+        [iaPk('serialNo')]: 'SN-1001',
+        [iaPk('model')]: 'Compressor X',
+        [iaPk('location')]: 'Plant 1',
+        [iaPk('installedAt')]: '2026-04-09T08:00:00Z',
+        [iaPk('warrantyUntil')]: '2027-04-09',
+        [iaPk('status')]: 'active',
+      },
+    })
+    expect(res.body.data).toEqual({
+      projectId: 'tenant_42:after-sales',
+      installedAsset: {
+        id: 'rec_asset_001',
+        version: 1,
+        data: {
+          assetCode: 'AST-1001',
+          serialNo: 'SN-1001',
+          model: 'Compressor X',
+          location: 'Plant 1',
+          installedAt: '2026-04-09T08:00:00Z',
+          warrantyUntil: '2027-04-09',
+          status: 'active',
+        },
+      },
     })
   })
 
