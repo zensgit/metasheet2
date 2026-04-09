@@ -927,6 +927,166 @@ describe('after-sales plugin install integration', () => {
     })
   })
 
+  it('marks refund status as rejected when the approval action rejects the request', async () => {
+    if (!baseUrl || !pool) return
+
+    const tokenRes = await requestJson(
+      `${baseUrl}/api/auth/dev-token?userId=after-sales-refund-reject-it&roles=admin&perms=*:*`,
+    )
+    const token = (tokenRes.body as { token?: string } | undefined)?.token
+    expect(token).toBeTruthy()
+
+    const installRes = await requestJson(`${baseUrl}/api/after-sales/projects/install`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        templateId: 'after-sales-default',
+        mode: 'enable',
+        displayName: 'After Sales IT',
+        config: {
+          defaultSlaHours: 24,
+          urgentSlaHours: 4,
+          followUpAfterDays: 7,
+        },
+      }),
+    })
+    expect(installRes.status).toBe(200)
+
+    const createRes = await requestJson(`${baseUrl}/api/after-sales/tickets`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        ticket: {
+          ticketNo: 'TK-3002',
+          title: 'Refund should be rejected',
+          priority: 'normal',
+          source: 'phone',
+        },
+      }),
+    })
+    expect(createRes.status).toBe(201)
+
+    const createBody = createRes.body as {
+      ok?: boolean
+      data?: {
+        ticket?: {
+          id?: string
+        }
+      }
+    }
+    const createdTicketId = createBody.data?.ticket?.id
+    expect(createdTicketId).toBeTruthy()
+
+    const serviceTicketSheetId = stableMetaId('sheet', PROJECT_ID, 'serviceTicket')
+
+    const refundRes = await requestJson(
+      `${baseUrl}/api/after-sales/tickets/${createdTicketId}/refund-request`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          refundAmount: 66.6,
+          requesterName: 'After Sales Admin',
+          reason: 'Rejected refund request',
+        }),
+      },
+    )
+    expect(refundRes.status).toBe(202)
+
+    const refundStatusRes = await waitFor(
+      () =>
+        requestJson(`${baseUrl}/api/after-sales/tickets/${createdTicketId}/refund-approval`, {
+          headers: {
+            Authorization: `Bearer ${token}`,
+          },
+        }),
+      (result) => {
+        if (result.status !== 200) return false
+        const body = result.body as {
+          ok?: boolean
+          data?: {
+            approval?: {
+              id?: string
+              status?: string
+            }
+          }
+        }
+        return body.ok === true && body.data?.approval?.status === 'pending'
+      },
+      { timeoutMs: 5000, intervalMs: 100 },
+    )
+    expect(refundStatusRes.status).toBe(200)
+
+    const approvalId = ((refundStatusRes.body as any).data?.approval?.id ?? '') as string
+    expect(approvalId).toBeTruthy()
+
+    const rejectRes = await requestJson(
+      `${baseUrl}/api/approvals/${approvalId}/actions`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          action: 'reject',
+          comment: 'finance rejected',
+        }),
+      },
+    )
+    expect(rejectRes.status).toBe(200)
+    expect((rejectRes.body as any).status).toBe('rejected')
+
+    const rejectedRecordRes = await waitFor(
+      () => pool!.query<{ id: string; version: number; data: Record<string, unknown> }>(
+        'SELECT id, version, data FROM meta_records WHERE id = $1 AND sheet_id = $2',
+        [createdTicketId, serviceTicketSheetId],
+      ),
+      (result) =>
+        result.rows.length === 1 &&
+        result.rows[0].data?.[stFieldId('serviceTicket', 'refundStatus')] === 'rejected',
+      { timeoutMs: 5000, intervalMs: 100 },
+    )
+    expect(rejectedRecordRes.rows[0].data[stFieldId('serviceTicket', 'refundStatus')]).toBe('rejected')
+
+    const rejectedStatusRes = await waitFor(
+      () =>
+        requestJson(`${baseUrl}/api/after-sales/tickets/${createdTicketId}/refund-approval`, {
+          headers: {
+            Authorization: `Bearer ${token}`,
+          },
+        }),
+      (result) => {
+        if (result.status !== 200) return false
+        const body = result.body as {
+          ok?: boolean
+          data?: {
+            approval?: {
+              id?: string
+              status?: string
+            }
+          }
+        }
+        return body.ok === true && body.data?.approval?.status === 'rejected'
+      },
+      { timeoutMs: 5000, intervalMs: 100 },
+    )
+    expect(rejectedStatusRes.status).toBe(200)
+    expect((rejectedStatusRes.body as any).data?.approval).toMatchObject({
+      id: approvalId,
+      status: 'rejected',
+    })
+  })
+
   it('creates and lists service records through the real after-sales routes', async () => {
     if (!baseUrl || !pool) return
 
