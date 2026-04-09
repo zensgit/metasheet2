@@ -191,6 +191,82 @@ describe('AfterSalesView customers panel', () => {
     expect(apiFetchMock).toHaveBeenCalledWith('/api/after-sales/customers', undefined)
   })
 
+  it('skips customer loading when after-sales is not installed or failed', async () => {
+    for (const status of ['not-installed', 'failed'] as const) {
+      apiFetchMock.mockReset()
+      apiFetchMock.mockImplementation(async (path: string) => {
+        if (path === '/api/after-sales/app-manifest') {
+          return createResponse({
+            id: 'after-sales-default',
+            displayName: 'After Sales',
+            platformDependencies: ['core-backend'],
+            objects: [{ id: 'customer' }],
+            workflows: [],
+          })
+        }
+
+        if (path === '/api/after-sales/projects/current') {
+          return createResponse({
+            status,
+            projectId: 'tenant:after-sales',
+            displayName: 'After Sales',
+            config: {
+              defaultSlaHours: 24,
+              urgentSlaHours: 4,
+              followUpAfterDays: 7,
+            },
+            installResult: status === 'failed'
+              ? {
+                  status: 'failed',
+                  createdObjects: [],
+                  createdViews: [],
+                  warnings: ['customer projection failed'],
+                  reportRef: 'install-customers-failed',
+                }
+              : undefined,
+            reportRef: status === 'failed' ? 'install-customers-failed' : undefined,
+          })
+        }
+
+        if (path === '/api/after-sales/tickets') {
+          return createResponse({ projectId: 'tenant:after-sales', count: 0, tickets: [] })
+        }
+
+        if (path === '/api/after-sales/installed-assets') {
+          return createResponse({ projectId: 'tenant:after-sales', count: 0, installedAssets: [] })
+        }
+
+        if (path === '/api/after-sales/service-records') {
+          return createResponse({ projectId: 'tenant:after-sales', count: 0, serviceRecords: [] })
+        }
+
+        if (path === '/api/after-sales/customers') {
+          throw new Error('customers should not load for non-operational after-sales state')
+        }
+
+        throw new Error(`Unexpected request: ${path}`)
+      })
+
+      const mounted = mountAfterSalesView()
+      app = mounted.app
+      container = mounted.container
+
+      await waitForText(
+        container,
+        status === 'failed' ? 'Initialization failed' : 'Enable the after-sales project shell',
+      )
+
+      expect(container.textContent).not.toContain('Customer registry')
+      expect(apiFetchMock).not.toHaveBeenCalledWith('/api/after-sales/customers', undefined)
+
+      app.unmount()
+      container.remove()
+      app = null
+      container = null
+      vi.clearAllMocks()
+    }
+  })
+
   it('supports partial-state filters and refreshes only the customer list', async () => {
     let currentCalls = 0
     let ticketCalls = 0
