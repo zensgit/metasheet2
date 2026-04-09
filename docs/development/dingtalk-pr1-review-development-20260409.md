@@ -36,6 +36,8 @@ The existing PR1 worktrees were not safe to reuse:
 
 This follow-up was implemented from a new detached worktree rooted at remote PR1 head `20cdabd19`, then pushed directly back to `origin/codex/dingtalk-pr1-foundation-login-20260408`.
 
+A final minimal refresh was then rebased onto the latest `origin/main`, producing refreshed PR1 head `a4751ee22` with no code-scope expansion.
+
 ## Code Changes
 
 ### Backend
