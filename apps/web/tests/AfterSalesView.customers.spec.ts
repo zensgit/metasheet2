@@ -191,6 +191,60 @@ describe('AfterSalesView customers panel', () => {
     expect(apiFetchMock).toHaveBeenCalledWith('/api/after-sales/customers', undefined)
   })
 
+  it('skips customer loading when after-sales is not installed or failed', async () => {
+    for (const status of ['not-installed', 'failed'] as const) {
+      apiFetchMock.mockReset()
+      apiFetchMock.mockImplementation(async (path: string) => {
+        if (path === '/api/after-sales/app-manifest') {
+          return createResponse({
+            id: 'after-sales-default',
+            displayName: 'After Sales',
+            platformDependencies: ['core-backend'],
+            objects: [{ id: 'customer' }],
+            workflows: [],
+          })
+        }
+
+        if (path === '/api/after-sales/projects/current') {
+          return createResponse({
+            status,
+            projectId: 'tenant:after-sales',
+            displayName: 'After Sales',
+            config: {
+              defaultSlaHours: 24,
+              urgentSlaHours: 4,
+              followUpAfterDays: 7,
+            },
+            installResult: {
+              status,
+              createdObjects: [],
+              createdViews: [],
+              warnings: status === 'failed' ? ['customer projection failed'] : [],
+              reportRef: `install-customers-skip-${status}`,
+            },
+            reportRef: `install-customers-skip-${status}`,
+          })
+        }
+
+        throw new Error(`Unexpected request: ${path}`)
+      })
+
+      const mounted = mountAfterSalesView()
+      app = mounted.app
+      container = mounted.container
+
+      await waitForText(container, status === 'failed' ? 'Initialization failed' : 'Enable the after-sales project shell')
+
+      expect(container.textContent).not.toContain('Customer registry')
+      expect(apiFetchMock).not.toHaveBeenCalledWith('/api/after-sales/customers', undefined)
+
+      app?.unmount()
+      container?.remove()
+      app = null
+      container = null
+    }
+  })
+
   it('supports partial-state filters and refreshes only the customer list', async () => {
     let currentCalls = 0
     let ticketCalls = 0
@@ -471,6 +525,145 @@ describe('AfterSalesView customers panel', () => {
     expect(customerRows[0]?.textContent).toContain('Charlie Logistics')
     expect(customerRows[1]?.textContent).toContain('Alice Plant')
     expect(customerSection.textContent).toContain('Created customer CUS-3001')
+  })
+
+  it('keeps the visible customer list unchanged when a created customer does not match active filters', async () => {
+    apiFetchMock.mockImplementation(async (path: string, options?: RequestInit) => {
+      if (path === '/api/after-sales/app-manifest') {
+        return createResponse({
+          id: 'after-sales-default',
+          displayName: 'After Sales',
+          platformDependencies: ['core-backend'],
+          objects: [{ id: 'customer' }],
+          workflows: [],
+        })
+      }
+
+      if (path === '/api/after-sales/projects/current') {
+        return createResponse({
+          status: 'partial',
+          projectId: 'tenant:after-sales',
+          displayName: 'After Sales',
+          config: {
+            defaultSlaHours: 24,
+            urgentSlaHours: 4,
+            followUpAfterDays: 7,
+          },
+          installResult: {
+            status: 'partial',
+            createdObjects: [],
+            createdViews: [],
+            warnings: [],
+            reportRef: 'install-customers-005',
+          },
+          reportRef: 'install-customers-005',
+        })
+      }
+
+      if (path === '/api/after-sales/tickets') {
+        return createResponse({ projectId: 'tenant:after-sales', count: 0, tickets: [] })
+      }
+
+      if (path === '/api/after-sales/installed-assets') {
+        return createResponse({ projectId: 'tenant:after-sales', count: 0, installedAssets: [] })
+      }
+
+      if (path === '/api/after-sales/service-records') {
+        return createResponse({ projectId: 'tenant:after-sales', count: 0, serviceRecords: [] })
+      }
+
+      if (path === '/api/after-sales/customers?status=active&search=Alice') {
+        return createResponse({
+          projectId: 'tenant:after-sales',
+          count: 1,
+          customers: [
+            {
+              id: 'customer-001',
+              version: 1,
+              data: {
+                customerCode: 'CUS-1001',
+                name: 'Alice Plant',
+                phone: '13800138000',
+                email: 'alice@example.com',
+                status: 'active',
+              },
+            },
+          ],
+        })
+      }
+
+      if (path === '/api/after-sales/customers') {
+        if (options?.method === 'POST') {
+          return createResponse({
+            projectId: 'tenant:after-sales',
+            customer: {
+              id: 'customer-004',
+              version: 1,
+              data: {
+                customerCode: 'CUS-3002',
+                name: 'Delta Warehouse',
+                phone: '13600136000',
+                email: 'delta@example.com',
+                status: 'inactive',
+              },
+            },
+          }, { status: 201 })
+        }
+
+        return createResponse({
+          projectId: 'tenant:after-sales',
+          count: 1,
+          customers: [
+            {
+              id: 'customer-001',
+              version: 1,
+              data: {
+                customerCode: 'CUS-1001',
+                name: 'Alice Plant',
+                phone: '13800138000',
+                email: 'alice@example.com',
+                status: 'active',
+              },
+            },
+          ],
+        })
+      }
+
+      throw new Error(`Unexpected request: ${path}`)
+    })
+
+    const mounted = mountAfterSalesView()
+    app = mounted.app
+    container = mounted.container
+
+    await waitForText(container, 'Alice Plant')
+
+    const customerSection = findSection(container, 'Customer registry')
+    const statusFilter = customerSection.querySelector<HTMLSelectElement>('#after-sales-customer-filter-status')
+    const searchFilter = customerSection.querySelector<HTMLInputElement>('#after-sales-customer-filter-search')
+    const customerCodeInput = customerSection.querySelector<HTMLInputElement>('#after-sales-customer-code')
+    const nameInput = customerSection.querySelector<HTMLInputElement>('#after-sales-customer-name')
+    expect(statusFilter).toBeTruthy()
+    expect(searchFilter).toBeTruthy()
+    expect(customerCodeInput).toBeTruthy()
+    expect(nameInput).toBeTruthy()
+    if (!statusFilter || !searchFilter || !customerCodeInput || !nameInput) return
+
+    await setSelectValue(statusFilter, 'active')
+    await setInputValue(searchFilter, 'Alice')
+    findButtonWithin(customerSection, 'Apply filters').click()
+    await waitForText(customerSection, 'Alice Plant')
+
+    await setInputValue(customerCodeInput, 'CUS-3002')
+    await setInputValue(nameInput, 'Delta Warehouse')
+
+    findButtonWithin(customerSection, 'Create customer').click()
+    await waitForText(customerSection, 'Created customer CUS-3002')
+
+    expect(customerSection.textContent).toContain('Alice Plant')
+    expect(customerSection.textContent).not.toContain('Delta Warehouse')
+    expect(customerCodeInput.value).toBe('')
+    expect(nameInput.value).toBe('')
   })
 
   it('keeps the customer draft open when create fails', async () => {

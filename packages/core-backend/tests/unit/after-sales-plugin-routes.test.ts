@@ -1508,6 +1508,51 @@ describe('plugin-after-sales routes', () => {
     })
   })
 
+  it('returns 400 when customer create payload is invalid', async () => {
+    const handler = routes.get('POST /api/after-sales/customers')
+    const res = new FakeResponse()
+
+    db.rows.push({
+      id: 'fake-uuid-1',
+      tenant_id: 'tenant_42',
+      app_id: 'after-sales',
+      project_id: 'tenant_42:after-sales',
+      template_id: 'after-sales-default',
+      template_version: '0.1.0',
+      mode: 'enable',
+      status: 'installed',
+      created_objects_json: JSON.stringify(['serviceTicket', 'customer']),
+      created_views_json: JSON.stringify(['ticket-board', 'customer-grid']),
+      warnings_json: JSON.stringify([]),
+      display_name: 'After-sales',
+      config_json: JSON.stringify({}),
+      last_install_at: new Date(),
+      created_at: new Date(),
+    })
+
+    await handler?.(buildReq({
+      body: {
+        customer: {
+          customerCode: 'CUS-1001',
+          name: '',
+        },
+      },
+    }), res)
+
+    expect(res.statusCode).toBe(400)
+    expect(res.body).toEqual({
+      ok: false,
+      error: {
+        code: 'AFTER_SALES_EVENT_VALIDATION_FAILED',
+        message: 'customer.name is required',
+        details: {
+          field: 'customer.name',
+        },
+      },
+    })
+    expect(createRecord).not.toHaveBeenCalled()
+  })
+
   it('returns 409 when customers are created from a failed install state', async () => {
     const handler = routes.get('POST /api/after-sales/customers')
     const res = new FakeResponse()
