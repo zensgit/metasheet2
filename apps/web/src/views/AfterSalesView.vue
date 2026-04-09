@@ -281,6 +281,51 @@
           <p v-if="serviceRecordSubmitError" class="after-sales-view__inline-error">{{ serviceRecordSubmitError }}</p>
           <p v-else-if="serviceRecordSubmitSuccess" class="after-sales-view__inline-success">{{ serviceRecordSubmitSuccess }}</p>
 
+          <form class="after-sales-view__service-record-filters" @submit.prevent="applyServiceRecordFilters">
+            <label class="after-sales-view__field">
+              <span>Filter ticket</span>
+              <input
+                id="after-sales-service-record-filter-ticket-no"
+                v-model="serviceRecordFilters.ticketNo"
+                class="after-sales-view__field-input"
+                placeholder="AF-001"
+                type="text"
+              />
+            </label>
+            <label class="after-sales-view__field">
+              <span>Filter result</span>
+              <select
+                id="after-sales-service-record-filter-result"
+                v-model="serviceRecordFilters.result"
+                class="after-sales-view__field-input"
+              >
+                <option value="">All results</option>
+                <option value="resolved">Resolved</option>
+                <option value="partial">Partial</option>
+                <option value="escalated">Escalated</option>
+              </select>
+            </label>
+            <label class="after-sales-view__field after-sales-view__field--wide">
+              <span>Search summary</span>
+              <input
+                id="after-sales-service-record-filter-search"
+                v-model="serviceRecordFilters.search"
+                class="after-sales-view__field-input"
+                placeholder="capacitor, onsite, Alex..."
+                type="text"
+              />
+            </label>
+          </form>
+
+          <div class="after-sales-view__action-row after-sales-view__action-row--compact">
+            <button class="after-sales-view__ghost-btn" :disabled="serviceRecordsLoading" @click="applyServiceRecordFilters">
+              {{ serviceRecordsLoading ? 'Applying...' : 'Apply filters' }}
+            </button>
+            <button class="after-sales-view__ghost-btn" :disabled="serviceRecordsLoading" @click="resetServiceRecordFilters">
+              Clear filters
+            </button>
+          </div>
+
           <p v-if="serviceRecordsLoading" class="after-sales-view__muted-state">Loading recent service records...</p>
           <p v-else-if="serviceRecordsError" class="after-sales-view__inline-error">{{ serviceRecordsError }}</p>
           <div v-else-if="serviceRecords.length" class="after-sales-view__service-record-list">
@@ -494,6 +539,12 @@ interface ServiceRecordDraft {
   result: '' | 'resolved' | 'partial' | 'escalated'
 }
 
+interface ServiceRecordFilterDraft {
+  ticketNo: string
+  result: '' | 'resolved' | 'partial' | 'escalated'
+  search: string
+}
+
 interface CreateServiceRecordResponse {
   projectId: string
   serviceRecord: ServiceRecordRow
@@ -540,6 +591,11 @@ const serviceRecords = ref<ServiceRecordViewModel[]>([])
 const configDraft = ref({ ...DEFAULT_CONFIG })
 const baselineConfigDraft = ref({ ...DEFAULT_CONFIG })
 const serviceRecordDraft = ref<ServiceRecordDraft>(createServiceRecordDraft())
+const serviceRecordFilters = ref<ServiceRecordFilterDraft>({
+  ticketNo: '',
+  result: '',
+  search: '',
+})
 
 const placeholderProjectId = 'tenant:after-sales'
 const warnings = computed(() => current.value.installResult?.warnings ?? [])
@@ -708,6 +764,33 @@ function buildServiceRecordPayload() {
   }
 }
 
+function buildServiceRecordListPath() {
+  const params = new URLSearchParams()
+  const ticketNo = toText(serviceRecordFilters.value.ticketNo)
+  const result = toText(serviceRecordFilters.value.result)
+  const search = toText(serviceRecordFilters.value.search)
+  if (ticketNo) params.set('ticketNo', ticketNo)
+  if (result) params.set('result', result)
+  if (search) params.set('search', search)
+  const query = params.toString()
+  return query ? `/api/after-sales/service-records?${query}` : '/api/after-sales/service-records'
+}
+
+function matchesServiceRecordFilters(record: ServiceRecordViewModel) {
+  const ticketNo = toText(serviceRecordFilters.value.ticketNo).toLowerCase()
+  const result = toText(serviceRecordFilters.value.result).toLowerCase()
+  const search = toText(serviceRecordFilters.value.search).toLowerCase()
+
+  if (ticketNo && record.data.ticketNo.toLowerCase() !== ticketNo) return false
+  if (result && record.data.result.toLowerCase() !== result) return false
+  if (search) {
+    const haystack = JSON.stringify(record.data).toLowerCase()
+    if (!haystack.includes(search)) return false
+  }
+
+  return true
+}
+
 function formatApprovalLabel(ticket: TicketViewModel['data'], approval: ApprovalSnapshot | null): string {
   if (ticket.refundStatus !== 'pending') {
     return ticket.refundStatus || 'not requested'
@@ -811,7 +894,7 @@ async function loadServiceRecordsForCurrentState(state: CurrentResponse): Promis
       return
     }
 
-    const payload = await readEnvelope<ServiceRecordsResponse>('/api/after-sales/service-records')
+    const payload = await readEnvelope<ServiceRecordsResponse>(buildServiceRecordListPath())
     const rows = Array.isArray(payload?.serviceRecords) ? payload.serviceRecords : []
     serviceRecords.value = rows.map((row) => normalizeServiceRecordRow(row))
   } catch (err: unknown) {
@@ -840,7 +923,7 @@ async function submitServiceRecord() {
     })
     const nextRecord = payload?.serviceRecord ? normalizeServiceRecordRow(payload.serviceRecord) : null
 
-    if (nextRecord) {
+    if (nextRecord && matchesServiceRecordFilters(nextRecord)) {
       serviceRecords.value = [nextRecord, ...serviceRecords.value.filter((item) => item.id !== nextRecord.id)]
       serviceRecordsError.value = ''
     }
@@ -852,6 +935,19 @@ async function submitServiceRecord() {
   } finally {
     serviceRecordCreating.value = false
   }
+}
+
+async function applyServiceRecordFilters() {
+  await loadServiceRecordsForCurrentState(current.value)
+}
+
+async function resetServiceRecordFilters() {
+  serviceRecordFilters.value = {
+    ticketNo: '',
+    result: '',
+    search: '',
+  }
+  await loadServiceRecordsForCurrentState(current.value)
 }
 
 async function deleteServiceRecord(record: ServiceRecordViewModel) {
