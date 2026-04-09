@@ -173,6 +173,53 @@
         </article>
       </section>
 
+      <section v-if="isInstalled" class="after-sales-view__service-records-shell">
+        <article class="after-sales-view__card after-sales-view__card--wide">
+          <div class="after-sales-view__section-header">
+            <div>
+              <p class="after-sales-view__pill">Service records</p>
+              <h2>Recent visits</h2>
+              <p>
+                这里显示最近的上门/远程服务记录，便于确认工单已经进入现场执行阶段。
+              </p>
+            </div>
+          </div>
+
+          <p v-if="serviceRecordsLoading" class="after-sales-view__muted-state">Loading recent service records...</p>
+          <p v-else-if="serviceRecordsError" class="after-sales-view__inline-error">{{ serviceRecordsError }}</p>
+          <div v-else-if="serviceRecords.length" class="after-sales-view__service-record-list">
+            <article v-for="record in serviceRecords" :key="record.id" class="after-sales-view__service-record-row">
+              <div class="after-sales-view__service-record-main">
+                <div class="after-sales-view__service-record-headline">
+                  <strong>{{ record.data.ticketNo }}</strong>
+                  <span class="after-sales-view__tag">{{ record.data.visitType }}</span>
+                  <span v-if="record.data.result" class="after-sales-view__tag after-sales-view__tag--subtle">
+                    {{ record.data.result }}
+                  </span>
+                </div>
+                <p>{{ record.data.workSummary || 'No work summary yet.' }}</p>
+              </div>
+
+              <dl class="after-sales-view__service-record-meta">
+                <div>
+                  <dt>Scheduled</dt>
+                  <dd>{{ formatRecordDate(record.data.scheduledAt) }}</dd>
+                </div>
+                <div>
+                  <dt>Completed</dt>
+                  <dd>{{ formatRecordDate(record.data.completedAt) }}</dd>
+                </div>
+                <div>
+                  <dt>Technician</dt>
+                  <dd>{{ record.data.technicianName || 'Unassigned' }}</dd>
+                </div>
+              </dl>
+            </article>
+          </div>
+          <p v-else class="after-sales-view__muted-state">No service records found yet.</p>
+        </article>
+      </section>
+
       <section class="after-sales-view__grid">
         <article class="after-sales-view__card">
           <h2>Install state</h2>
@@ -305,6 +352,32 @@ interface TicketViewModel {
   approvalLabel: string
 }
 
+interface ServiceRecordRow {
+  id: string
+  version: number
+  data: Record<string, unknown>
+}
+
+interface ServiceRecordsResponse {
+  projectId: string
+  serviceRecords: ServiceRecordRow[]
+  count: number
+}
+
+interface ServiceRecordViewModel {
+  id: string
+  version: number
+  data: {
+    ticketNo: string
+    visitType: string
+    scheduledAt: string
+    completedAt: string
+    technicianName: string
+    workSummary: string
+    result: string
+  }
+}
+
 interface ApiEnvelope<T> {
   ok: boolean
   data: T
@@ -330,12 +403,15 @@ const loading = ref(true)
 const installing = ref(false)
 const refreshing = ref(false)
 const ticketsLoading = ref(false)
+const serviceRecordsLoading = ref(false)
 const error = ref('')
 const ticketsError = ref('')
+const serviceRecordsError = ref('')
 const showWarnings = ref(false)
 const manifest = ref<AfterSalesManifest | null>(null)
 const current = ref<CurrentResponse>({ status: 'not-installed' })
 const tickets = ref<TicketViewModel[]>([])
+const serviceRecords = ref<ServiceRecordViewModel[]>([])
 const configDraft = ref({ ...DEFAULT_CONFIG })
 const baselineConfigDraft = ref({ ...DEFAULT_CONFIG })
 
@@ -415,6 +491,22 @@ function formatRefundAmount(value: unknown): string {
   }).format(amount)
 }
 
+function formatRecordDate(value: unknown): string {
+  const text = toText(value)
+  if (!text) {
+    return '—'
+  }
+  const parsed = new Date(text)
+  if (Number.isNaN(parsed.getTime())) {
+    return text
+  }
+  return new Intl.DateTimeFormat('zh-CN', {
+    dateStyle: 'medium',
+    timeStyle: 'short',
+    hour12: false,
+  }).format(parsed)
+}
+
 function normalizeConfigDraft(config?: Record<string, unknown> | null) {
   return {
     ...DEFAULT_CONFIG,
@@ -478,6 +570,23 @@ function normalizeTicket(ticket: TicketRecord, approval: ApprovalSnapshot | null
   }
 }
 
+function normalizeServiceRecordRow(record: ServiceRecordRow): ServiceRecordViewModel {
+  const rawData = record.data && typeof record.data === 'object' ? record.data : {}
+  return {
+    id: record.id,
+    version: record.version,
+    data: {
+      ticketNo: toText(rawData.ticketNo, record.id),
+      visitType: toText(rawData.visitType, 'unspecified'),
+      scheduledAt: toText(rawData.scheduledAt, 'n/a'),
+      completedAt: toText(rawData.completedAt, 'n/a'),
+      technicianName: toText(rawData.technicianName),
+      workSummary: toText(rawData.workSummary),
+      result: toText(rawData.result),
+    },
+  }
+}
+
 async function loadManifest() {
   manifest.value = await readEnvelope<AfterSalesManifest>('/api/after-sales/app-manifest')
 }
@@ -523,12 +632,34 @@ async function loadTicketsForCurrentState(state: CurrentResponse): Promise<void>
   }
 }
 
+async function loadServiceRecordsForCurrentState(state: CurrentResponse): Promise<void> {
+  serviceRecordsLoading.value = true
+  serviceRecordsError.value = ''
+  try {
+    if (state.status === 'not-installed' || state.status === 'failed') {
+      serviceRecords.value = []
+      return
+    }
+
+    const payload = await readEnvelope<ServiceRecordsResponse>('/api/after-sales/service-records')
+    const rows = Array.isArray(payload?.serviceRecords) ? payload.serviceRecords : []
+    serviceRecords.value = rows.map((row) => normalizeServiceRecordRow(row))
+  } catch (err: unknown) {
+    serviceRecords.value = []
+    if (state.status === 'installed' || state.status === 'partial') {
+      serviceRecordsError.value = err instanceof Error ? err.message : 'Failed to load service records'
+    }
+  } finally {
+    serviceRecordsLoading.value = false
+  }
+}
+
 async function refreshCurrentState() {
   refreshing.value = true
   try {
     current.value = await readEnvelope<CurrentResponse>('/api/after-sales/projects/current')
     baselineConfigDraft.value = normalizeConfigDraft(current.value.config)
-    await loadTicketsForCurrentState(current.value)
+    await Promise.all([loadTicketsForCurrentState(current.value), loadServiceRecordsForCurrentState(current.value)])
   } finally {
     refreshing.value = false
   }
@@ -538,6 +669,7 @@ async function loadView() {
   loading.value = true
   error.value = ''
   ticketsError.value = ''
+  serviceRecordsError.value = ''
   try {
     const [nextManifest, nextCurrent] = await Promise.all([
       readEnvelope<AfterSalesManifest>('/api/after-sales/app-manifest'),
@@ -547,7 +679,7 @@ async function loadView() {
     current.value = nextCurrent
     baselineConfigDraft.value = normalizeConfigDraft(nextCurrent.config)
     configDraft.value = { ...baselineConfigDraft.value }
-    await loadTicketsForCurrentState(nextCurrent)
+    await Promise.all([loadTicketsForCurrentState(nextCurrent), loadServiceRecordsForCurrentState(nextCurrent)])
   } catch (err: unknown) {
     error.value = err instanceof Error ? err.message : 'Failed to load after-sales state'
   } finally {
@@ -697,7 +829,8 @@ onMounted(() => {
 .after-sales-view__warning-banner,
 .after-sales-view__config-shell,
 .after-sales-view__onboarding,
-.after-sales-view__tickets-shell {
+.after-sales-view__tickets-shell,
+.after-sales-view__service-records-shell {
   display: grid;
   gap: 16px;
 }
@@ -758,7 +891,8 @@ onMounted(() => {
 
 .after-sales-view__content,
 .after-sales-view__grid,
-.after-sales-view__ticket-list {
+.after-sales-view__ticket-list,
+.after-sales-view__service-record-list {
   display: grid;
   gap: 16px;
 }
@@ -794,20 +928,23 @@ onMounted(() => {
 }
 
 .after-sales-view__meta,
-.after-sales-view__ticket-meta {
+.after-sales-view__ticket-meta,
+.after-sales-view__service-record-meta {
   display: grid;
   gap: 12px;
   margin: 0;
 }
 
 .after-sales-view__meta div,
-.after-sales-view__ticket-meta div {
+.after-sales-view__ticket-meta div,
+.after-sales-view__service-record-meta div {
   display: grid;
   gap: 4px;
 }
 
 .after-sales-view__meta dt,
-.after-sales-view__ticket-meta dt {
+.after-sales-view__ticket-meta dt,
+.after-sales-view__service-record-meta dt {
   font-size: 12px;
   letter-spacing: 0.08em;
   text-transform: uppercase;
@@ -815,7 +952,8 @@ onMounted(() => {
 }
 
 .after-sales-view__meta dd,
-.after-sales-view__ticket-meta dd {
+.after-sales-view__ticket-meta dd,
+.after-sales-view__service-record-meta dd {
   margin: 0;
   color: #0f172a;
 }
@@ -853,6 +991,42 @@ onMounted(() => {
 }
 
 .after-sales-view__ticket-headline strong {
+  color: #0f172a;
+}
+
+.after-sales-view__service-record-list {
+  gap: 12px;
+}
+
+.after-sales-view__service-record-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 16px;
+  border-radius: 16px;
+  border: 1px solid #e2e8f0;
+  background: #f8fafc;
+}
+
+.after-sales-view__service-record-main {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.after-sales-view__service-record-main p {
+  margin: 0;
+  color: #475569;
+}
+
+.after-sales-view__service-record-headline {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.after-sales-view__service-record-headline strong {
   color: #0f172a;
 }
 
@@ -1003,7 +1177,8 @@ code {
   .after-sales-view__hero,
   .after-sales-view__error-banner,
   .after-sales-view__warning-banner,
-  .after-sales-view__ticket-row {
+  .after-sales-view__ticket-row,
+  .after-sales-view__service-record-row {
     grid-template-columns: 1fr;
     display: grid;
   }
