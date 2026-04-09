@@ -1206,4 +1206,126 @@ describe('after-sales plugin install integration', () => {
     expect(listBody.data?.count).toBe(0)
     expect(listBody.data?.tickets ?? []).toEqual([])
   })
+
+  it('creates and deletes service records through the real after-sales routes', async () => {
+    if (!baseUrl || !pool) return
+
+    const tokenRes = await requestJson(
+      `${baseUrl}/api/auth/dev-token?userId=after-sales-service-record-delete-it&roles=admin&perms=*:*`,
+    )
+    const token = (tokenRes.body as { token?: string } | undefined)?.token
+    expect(token).toBeTruthy()
+
+    const installRes = await requestJson(`${baseUrl}/api/after-sales/projects/install`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        templateId: 'after-sales-default',
+        displayName: 'After Sales Service Record Delete Flow',
+      }),
+    })
+    expect(installRes.status).toBe(200)
+
+    const createTicketRes = await requestJson(`${baseUrl}/api/after-sales/tickets`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        ticket: {
+          ticketNo: 'TK-3004',
+          title: 'Delete service record after visit',
+          source: 'phone',
+          priority: 'normal',
+        },
+      }),
+    })
+    expect(createTicketRes.status).toBe(201)
+
+    const createRes = await requestJson(`${baseUrl}/api/after-sales/service-records`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        serviceRecord: {
+          ticketNo: 'TK-3004',
+          visitType: 'remote',
+          scheduledAt: '2026-04-09T12:00:00Z',
+          completedAt: '2026-04-09T12:30:00Z',
+          technicianName: 'Tech Delete',
+          workSummary: 'Temporary cleanup visit',
+          result: 'partial',
+        },
+      }),
+    })
+
+    expect(createRes.status).toBe(201)
+    const createBody = createRes.body as {
+      ok?: boolean
+      data?: {
+        serviceRecord?: {
+          id?: string
+          version?: number
+          data?: Record<string, unknown>
+        }
+      }
+    }
+    expect(createBody.ok).toBe(true)
+    const createdServiceRecordId = createBody.data?.serviceRecord?.id
+    expect(createdServiceRecordId).toBeTruthy()
+
+    const deleteRes = await requestJson(`${baseUrl}/api/after-sales/service-records/${createdServiceRecordId}`, {
+      method: 'DELETE',
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    })
+
+    expect(deleteRes.status).toBe(200)
+    expect(deleteRes.body).toMatchObject({
+      ok: true,
+      data: {
+        projectId: PROJECT_ID,
+        serviceRecordId: createdServiceRecordId,
+        deleted: true,
+      },
+    })
+
+    const serviceRecordSheetId = stableMetaId('sheet', PROJECT_ID, 'serviceRecord')
+    const deletedRecordRes = await waitFor(
+      () => pool.query<{ id: string }>(
+        'SELECT id FROM meta_records WHERE id = $1 AND sheet_id = $2',
+        [createdServiceRecordId, serviceRecordSheetId],
+      ),
+      (result) => result.rows.length === 0,
+      { timeoutMs: 5000, intervalMs: 100 },
+    )
+    expect(deletedRecordRes.rows).toHaveLength(0)
+
+    const listRes = await requestJson(`${baseUrl}/api/after-sales/service-records?ticketNo=TK-3004`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    })
+    expect(listRes.status).toBe(200)
+    const listBody = listRes.body as {
+      ok?: boolean
+      data?: {
+        count?: number
+        serviceRecords?: Array<{
+          id?: string
+          data?: Record<string, unknown>
+        }>
+      }
+    }
+    expect(listBody.ok).toBe(true)
+    expect(listBody.data?.count).toBe(0)
+    expect(listBody.data?.serviceRecords ?? []).toEqual([])
+  })
 })
