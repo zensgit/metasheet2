@@ -284,6 +284,14 @@
                     {{ ticketRefundSubmittingId === ticket.id ? 'Requesting...' : 'Request refund' }}
                   </button>
                 </div>
+                <button
+                  class="after-sales-view__ghost-btn after-sales-view__ticket-delete"
+                  :aria-label="`Delete ticket ${ticket.data.ticketNo}`"
+                  :disabled="Boolean(ticketDeletingId) || ticketRefundSubmittingId === ticket.id"
+                  @click="deleteTicket(ticket)"
+                >
+                  {{ ticketDeletingId === ticket.id ? 'Deleting...' : 'Delete' }}
+                </button>
                 <p
                   v-if="ticketRefundErrorById[ticket.id]"
                   class="after-sales-view__inline-error after-sales-view__inline-error--compact"
@@ -719,6 +727,7 @@ const refreshing = ref(false)
 const ticketsLoading = ref(false)
 const ticketCreating = ref(false)
 const ticketRefundSubmittingId = ref('')
+const ticketDeletingId = ref('')
 const serviceRecordsLoading = ref(false)
 const serviceRecordCreating = ref(false)
 const serviceRecordDeletingId = ref('')
@@ -1282,6 +1291,29 @@ async function requestTicketRefund(ticket: TicketViewModel) {
   }
 }
 
+async function deleteTicket(ticket: TicketViewModel) {
+  if (!ticket.id || ticketDeletingId.value) {
+    return
+  }
+
+  ticketDeletingId.value = ticket.id
+  ticketSubmitError.value = ''
+  ticketSubmitSuccess.value = ''
+
+  try {
+    await readEnvelope(`/api/after-sales/tickets/${encodeURIComponent(ticket.id)}`, {
+      method: 'DELETE',
+    })
+    tickets.value = tickets.value.filter((item) => item.id !== ticket.id)
+    ticketsError.value = ''
+    ticketSubmitSuccess.value = `Deleted ticket ${ticket.data.ticketNo}`
+  } catch (err: unknown) {
+    ticketSubmitError.value = err instanceof Error ? err.message : 'Failed to delete after-sales ticket'
+  } finally {
+    ticketDeletingId.value = ''
+  }
+}
+
 async function applyServiceRecordFilters() {
   if (serviceRecordCreating.value) {
     return
@@ -1740,6 +1772,7 @@ onMounted(() => {
   margin: 0;
 }
 
+.after-sales-view__ticket-delete,
 .after-sales-view__service-record-delete {
   min-width: 120px;
 }

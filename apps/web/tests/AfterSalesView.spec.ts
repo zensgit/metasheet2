@@ -841,6 +841,192 @@ describe('AfterSalesView', () => {
     expect(resetButton.disabled).toBe(false)
   })
 
+  it('deletes a ticket from the visible list without reloading the page', async () => {
+    apiFetchMock.mockImplementation(async (path: string, options?: RequestInit) => {
+      if (path === '/api/after-sales/app-manifest') {
+        return createResponse({
+          id: 'after-sales-default',
+          displayName: 'After Sales',
+          platformDependencies: ['core-backend'],
+          objects: [],
+          workflows: [],
+        })
+      }
+
+      if (path === '/api/after-sales/projects/current') {
+        return createResponse({
+          status: 'installed',
+          projectId: 'tenant:after-sales',
+          displayName: 'After Sales',
+          config: {
+            defaultSlaHours: 24,
+            urgentSlaHours: 4,
+            followUpAfterDays: 7,
+          },
+          installResult: {
+            status: 'installed',
+            createdObjects: [],
+            createdViews: [],
+            warnings: [],
+            reportRef: 'install-008',
+          },
+          reportRef: 'install-008',
+        })
+      }
+
+      if (path === '/api/after-sales/tickets') {
+        return createResponse({
+          projectId: 'tenant:after-sales',
+          count: 2,
+          tickets: [
+            {
+              id: 'ticket-1',
+              version: 1,
+              data: {
+                ticketNo: 'AF-001',
+                title: 'Delete me',
+                status: 'open',
+                refundStatus: '',
+                refundAmount: 0,
+              },
+            },
+            {
+              id: 'ticket-2',
+              version: 1,
+              data: {
+                ticketNo: 'AF-002',
+                title: 'Keep me',
+                status: 'closed',
+                refundStatus: '',
+                refundAmount: 0,
+              },
+            },
+          ],
+        })
+      }
+
+      if (path === '/api/after-sales/tickets/ticket-1' && options?.method === 'DELETE') {
+        return createResponse({
+          projectId: 'tenant:after-sales',
+          ticketId: 'ticket-1',
+          deleted: true,
+        })
+      }
+
+      throw new Error(`Unexpected request: ${path}`)
+    })
+
+    const mounted = mountAfterSalesView()
+    app = mounted.app
+    container = mounted.container
+
+    await waitForText(container, 'AF-001')
+    const deleteButton = container?.querySelector<HTMLButtonElement>('button[aria-label="Delete ticket AF-001"]')
+    expect(deleteButton).toBeTruthy()
+    if (!deleteButton) return
+
+    deleteButton.click()
+    await waitForText(container, 'Deleted ticket AF-001')
+
+    expect(container?.textContent).not.toContain('Delete me')
+    expect(container?.textContent).toContain('Keep me')
+    expect(apiFetchMock).toHaveBeenCalledWith(
+      '/api/after-sales/tickets/ticket-1',
+      expect.objectContaining({ method: 'DELETE' }),
+    )
+  })
+
+  it('keeps the ticket list intact when delete fails', async () => {
+    apiFetchMock.mockImplementation(async (path: string, options?: RequestInit) => {
+      if (path === '/api/after-sales/app-manifest') {
+        return createResponse({
+          id: 'after-sales-default',
+          displayName: 'After Sales',
+          platformDependencies: ['core-backend'],
+          objects: [],
+          workflows: [],
+        })
+      }
+
+      if (path === '/api/after-sales/projects/current') {
+        return createResponse({
+          status: 'installed',
+          projectId: 'tenant:after-sales',
+          displayName: 'After Sales',
+          config: {
+            defaultSlaHours: 24,
+            urgentSlaHours: 4,
+            followUpAfterDays: 7,
+          },
+          installResult: {
+            status: 'installed',
+            createdObjects: [],
+            createdViews: [],
+            warnings: [],
+            reportRef: 'install-009',
+          },
+          reportRef: 'install-009',
+        })
+      }
+
+      if (path === '/api/after-sales/tickets') {
+        return createResponse({
+          projectId: 'tenant:after-sales',
+          count: 2,
+          tickets: [
+            {
+              id: 'ticket-1',
+              version: 1,
+              data: {
+                ticketNo: 'AF-001',
+                title: 'Delete me',
+                status: 'open',
+                refundStatus: '',
+                refundAmount: 0,
+              },
+            },
+            {
+              id: 'ticket-2',
+              version: 1,
+              data: {
+                ticketNo: 'AF-002',
+                title: 'Keep me',
+                status: 'closed',
+                refundStatus: '',
+                refundAmount: 0,
+              },
+            },
+          ],
+        })
+      }
+
+      if (path === '/api/after-sales/tickets/ticket-1' && options?.method === 'DELETE') {
+        throw new Error('Delete failed')
+      }
+
+      throw new Error(`Unexpected request: ${path}`)
+    })
+
+    const mounted = mountAfterSalesView()
+    app = mounted.app
+    container = mounted.container
+
+    await waitForText(container, 'AF-001')
+    const deleteButton = container?.querySelector<HTMLButtonElement>('button[aria-label="Delete ticket AF-001"]')
+    expect(deleteButton).toBeTruthy()
+    if (!deleteButton) return
+
+    deleteButton.click()
+    await waitForText(container, 'Delete failed')
+
+    expect(container?.textContent).toContain('Delete me')
+    expect(container?.textContent).toContain('Keep me')
+    expect(apiFetchMock).toHaveBeenCalledWith(
+      '/api/after-sales/tickets/ticket-1',
+      expect.objectContaining({ method: 'DELETE' }),
+    )
+  })
+
   it('keeps the install CTA visible and skips ticket loading when not installed', async () => {
     apiFetchMock.mockImplementation(async (path: string) => {
       if (path === '/api/after-sales/app-manifest') {
