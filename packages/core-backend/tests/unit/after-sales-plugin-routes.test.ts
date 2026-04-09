@@ -914,6 +914,26 @@ describe('plugin-after-sales routes', () => {
     expect(createRecord).not.toHaveBeenCalled()
   })
 
+  it('returns 401 for service-records list when user is missing', async () => {
+    const handler = routes.get('GET /api/after-sales/service-records')
+    const res = new FakeResponse()
+
+    await handler?.(buildReq({
+      user: null,
+    }), res)
+
+    expect(res.statusCode).toBe(401)
+    expect(res.body).toEqual({
+      ok: false,
+      error: {
+        code: 'UNAUTHORIZED',
+        message: 'User ID not found',
+      },
+    })
+    expect(queryRecords).not.toHaveBeenCalled()
+    expect(listRecords).not.toHaveBeenCalled()
+  })
+
   it('returns 409 when service-records are created before install', async () => {
     const handler = routes.get('POST /api/after-sales/service-records')
     const res = new FakeResponse()
@@ -936,6 +956,119 @@ describe('plugin-after-sales routes', () => {
         message: 'After-sales must be installed before creating service records',
       },
     })
+    expect(createRecord).not.toHaveBeenCalled()
+  })
+
+  it('returns empty service-record results when no records match', async () => {
+    const handler = routes.get('GET /api/after-sales/service-records')
+    const res = new FakeResponse()
+
+    db.rows.push({
+      id: 'fake-uuid-1',
+      tenant_id: 'tenant_42',
+      app_id: 'after-sales',
+      project_id: 'tenant_42:after-sales',
+      template_id: 'after-sales-default',
+      template_version: '0.1.0',
+      mode: 'enable',
+      status: 'installed',
+      created_objects_json: JSON.stringify(['serviceTicket', 'serviceRecord']),
+      created_views_json: JSON.stringify(['ticket-board', 'serviceRecord-calendar']),
+      warnings_json: JSON.stringify([]),
+      display_name: 'After-sales',
+      config_json: JSON.stringify({}),
+      last_install_at: new Date(),
+      created_at: new Date(),
+    })
+    queryRecords.mockResolvedValueOnce([])
+
+    await handler?.(buildReq({
+      query: {
+        ticketNo: 'TK-SR-404',
+      },
+    }), res)
+
+    expect(res.statusCode).toBe(200)
+    expect(res.body).toEqual({
+      ok: true,
+      data: {
+        projectId: 'tenant_42:after-sales',
+        serviceRecords: [],
+        count: 0,
+      },
+    })
+  })
+
+  it('returns 400 when service-record visitType is invalid', async () => {
+    const handler = routes.get('POST /api/after-sales/service-records')
+    const res = new FakeResponse()
+
+    db.rows.push({
+      id: 'fake-uuid-1',
+      tenant_id: 'tenant_42',
+      app_id: 'after-sales',
+      project_id: 'tenant_42:after-sales',
+      template_id: 'after-sales-default',
+      template_version: '0.1.0',
+      mode: 'enable',
+      status: 'installed',
+      created_objects_json: JSON.stringify(['serviceTicket', 'serviceRecord']),
+      created_views_json: JSON.stringify(['ticket-board', 'serviceRecord-calendar']),
+      warnings_json: JSON.stringify([]),
+      display_name: 'After-sales',
+      config_json: JSON.stringify({}),
+      last_install_at: new Date(),
+      created_at: new Date(),
+    })
+
+    await handler?.(buildReq({
+      body: {
+        serviceRecord: {
+          ticketNo: 'TK-SR-001',
+          visitType: 'driveby',
+          scheduledAt: '2026-04-09T09:00:00Z',
+        },
+      },
+    }), res)
+
+    expect(res.statusCode).toBe(400)
+    expect(res.body.error.code).toBe('AFTER_SALES_EVENT_VALIDATION_FAILED')
+    expect(createRecord).not.toHaveBeenCalled()
+  })
+
+  it('returns 400 when service-record scheduledAt is missing', async () => {
+    const handler = routes.get('POST /api/after-sales/service-records')
+    const res = new FakeResponse()
+
+    db.rows.push({
+      id: 'fake-uuid-1',
+      tenant_id: 'tenant_42',
+      app_id: 'after-sales',
+      project_id: 'tenant_42:after-sales',
+      template_id: 'after-sales-default',
+      template_version: '0.1.0',
+      mode: 'enable',
+      status: 'installed',
+      created_objects_json: JSON.stringify(['serviceTicket', 'serviceRecord']),
+      created_views_json: JSON.stringify(['ticket-board', 'serviceRecord-calendar']),
+      warnings_json: JSON.stringify([]),
+      display_name: 'After-sales',
+      config_json: JSON.stringify({}),
+      last_install_at: new Date(),
+      created_at: new Date(),
+    })
+
+    await handler?.(buildReq({
+      body: {
+        serviceRecord: {
+          ticketNo: 'TK-SR-001',
+          visitType: 'onsite',
+        },
+      },
+    }), res)
+
+    expect(res.statusCode).toBe(400)
+    expect(res.body.error.code).toBe('AFTER_SALES_EVENT_VALIDATION_FAILED')
     expect(createRecord).not.toHaveBeenCalled()
   })
 
@@ -1037,6 +1170,8 @@ describe('plugin-after-sales routes', () => {
         ticketNo: 'TK-SR-001',
         result: 'resolved',
         search: 'motor',
+        limit: '5',
+        offset: '2',
       },
     }), listRes)
 
@@ -1048,8 +1183,8 @@ describe('plugin-after-sales routes', () => {
         [srPk('result')]: 'resolved',
       },
       search: 'motor',
-      limit: undefined,
-      offset: undefined,
+      limit: 5,
+      offset: 2,
     })
     expect(listRes.body).toEqual({
       ok: true,
