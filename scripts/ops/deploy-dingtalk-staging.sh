@@ -4,8 +4,6 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 COMPOSE_FILE="${COMPOSE_FILE:-${ROOT_DIR}/docker-compose.app.staging.yml}"
 ENV_FILE="${ENV_FILE:-${ROOT_DIR}/docker/app.staging.env}"
-DEPLOY_IMAGE_OWNER="${DEPLOY_IMAGE_OWNER:-zensgit}"
-DEPLOY_IMAGE_TAG="${DEPLOY_IMAGE_TAG:-latest}"
 
 function info() {
   echo "[deploy-dingtalk-staging] $*" >&2
@@ -24,10 +22,21 @@ function resolve_compose_cmd() {
   return 1
 }
 
+function read_env_value() {
+  local key="$1"
+  local file="$2"
+  awk -F= -v key="${key}" '$1 == key { sub(/^[^=]*=/, ""); gsub(/\r$/, ""); print; exit }' "${file}"
+}
+
 COMPOSE_CMD="$(resolve_compose_cmd || true)"
 [[ -n "${COMPOSE_CMD}" ]] || die "docker compose v2 is required"
 [[ -f "${COMPOSE_FILE}" ]] || die "missing compose file: ${COMPOSE_FILE}"
 [[ -f "${ENV_FILE}" ]] || die "missing env file: ${ENV_FILE}"
+
+ENV_IMAGE_OWNER="$(read_env_value IMAGE_OWNER "${ENV_FILE}" || true)"
+ENV_IMAGE_TAG="$(read_env_value IMAGE_TAG "${ENV_FILE}" || true)"
+DEPLOY_IMAGE_OWNER="${DEPLOY_IMAGE_OWNER:-${ENV_IMAGE_OWNER:-zensgit}}"
+DEPLOY_IMAGE_TAG="${DEPLOY_IMAGE_TAG:-${ENV_IMAGE_TAG:-latest}}"
 
 info "Compose: ${COMPOSE_FILE}"
 info "Env:     ${ENV_FILE}"

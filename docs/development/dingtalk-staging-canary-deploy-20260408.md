@@ -63,7 +63,7 @@ Do not reuse the old production callback path:
 cp docker/app.staging.env.example docker/app.staging.env
 ```
 
-2. Fill the real DingTalk credentials and a fresh secret set in `docker/app.staging.env`.
+2. Fill the real DingTalk credentials, fresh secret set, and target image tag in `docker/app.staging.env`.
 
 3. Deploy a specific image tag:
 
@@ -72,6 +72,8 @@ DEPLOY_IMAGE_OWNER=zensgit \
 DEPLOY_IMAGE_TAG=<git-sha-or-release-tag> \
 bash scripts/ops/deploy-dingtalk-staging.sh
 ```
+
+If `DEPLOY_IMAGE_OWNER` and `DEPLOY_IMAGE_TAG` are omitted, the script now falls back to `IMAGE_OWNER` and `IMAGE_TAG` from `docker/app.staging.env`. This keeps ad-hoc `docker compose --env-file docker/app.staging.env ...` and the deploy script aligned instead of silently pulling `latest`.
 
 ## Verification
 
