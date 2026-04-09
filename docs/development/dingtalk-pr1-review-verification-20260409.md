@@ -33,15 +33,15 @@ bash -n scripts/ops/backfill-dingtalk-corp-identities.sh
 - local policy rejections return `403`
 - auto-provision email conflicts return `409`
 - DingTalk upstream request failures remain mapped to `502`
-- unexpected local callback failures now return `500`
+- unexpected local callback failures now return `500` with a generic client-facing error message
 
 ## Rollout Gate
 
 The corp-scoped identity hardening is intentionally strict. Before enabling `DINGTALK_CORP_ID` in production, rollout must include a one-time backfill of legacy DingTalk identity rows. Use:
 
 ```bash
-scripts/ops/backfill-dingtalk-corp-identities.sh --corp-id <corpId>
-scripts/ops/backfill-dingtalk-corp-identities.sh --corp-id <corpId> --apply
+scripts/ops/backfill-dingtalk-corp-identities.sh --corp-id <corpId> --export-file /tmp/dingtalk-corpid-candidates.csv
+scripts/ops/backfill-dingtalk-corp-identities.sh --corp-id <corpId> --allowlist-file /tmp/dingtalk-corpid-allowlist.txt --apply
 ```
 
 The rollout note is documented in `docs/development/dingtalk-pr1-corpid-rollout-20260410.md`.

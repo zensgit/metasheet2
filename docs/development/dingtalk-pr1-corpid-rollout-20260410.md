@@ -14,12 +14,13 @@ That is the correct runtime behavior, but it introduces a rollout requirement fo
 
 Before enabling `DINGTALK_CORP_ID` in any shared environment:
 
-1. run the one-time backfill script
-2. confirm there are no legacy rows with:
+1. run the one-time backfill dry-run and export candidate rows
+2. review the exported candidates and create a manual allowlist
+3. confirm there are no legacy rows with:
    - `provider = 'dingtalk'`
    - `corp_id IS NULL`
    - `provider_open_id IS NULL`
-3. confirm there are no conflicts for the target corp-scoped key:
+4. confirm there are no conflicts for the target corp-scoped key:
    - `external_key = <corpId>:<provider_open_id>`
 
 ## Script
@@ -27,7 +28,7 @@ Before enabling `DINGTALK_CORP_ID` in any shared environment:
 Use:
 
 ```bash
-scripts/ops/backfill-dingtalk-corp-identities.sh --corp-id <corpId>
+scripts/ops/backfill-dingtalk-corp-identities.sh --corp-id <corpId> --export-file /tmp/dingtalk-corpid-candidates.csv
 ```
 
 Dry-run output reports:
@@ -37,20 +38,27 @@ Dry-run output reports:
 - `conflict_rows`
 - `apply_rows`
 
-The script refuses to proceed if:
+Apply only after manual review and allowlist creation:
+
+```bash
+scripts/ops/backfill-dingtalk-corp-identities.sh \
+  --corp-id <corpId> \
+  --allowlist-file /tmp/dingtalk-corpid-allowlist.txt \
+  --apply
+```
+
+The allowlist file contains one `user_external_identities.id` per line. Empty lines and `#` comments are ignored.
+
+The script refuses to apply if:
 
 - any legacy row is missing `provider_open_id`
 - any target corp-scoped `external_key` would collide
-
-Apply only after dry-run is clean:
-
-```bash
-scripts/ops/backfill-dingtalk-corp-identities.sh --corp-id <corpId> --apply
-```
+- the allowlist contains unknown ids
+- the allowlist contains ids that are not eligible legacy DingTalk candidates
 
 ## Expected Data Rewrite
 
-For each eligible legacy DingTalk binding:
+For each allowlisted eligible legacy DingTalk binding:
 
 - `corp_id = <target corp id>`
 - `external_key = <corpId>:<provider_open_id>`
@@ -58,9 +66,9 @@ For each eligible legacy DingTalk binding:
 
 ## Verification
 
-After `--apply`, rerun dry-run and expect:
+After `--apply`, rerun dry-run and expect the reviewed subset to be cleared:
 
-- `candidate_rows=0`
+- no remaining reviewed ids in the exported candidate set
 - `missing_open_id_rows=0`
 - `conflict_rows=0`
 

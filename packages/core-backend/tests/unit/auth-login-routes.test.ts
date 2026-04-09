@@ -663,7 +663,7 @@ describe('auth login routes', () => {
     })
 
     expect(response.statusCode).toBe(500)
-    expect((response.body as Record<string, any>).error).toBe('session registry unavailable')
+    expect((response.body as Record<string, any>).error).toBe('DingTalk authentication failed')
   })
 
   it('returns 409 for local auto-provision email conflicts', async () => {

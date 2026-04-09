@@ -6,7 +6,7 @@ Branch: `codex/dingtalk-pr1-foundation-login-20260408`
 
 ## Review Outcome
 
-This review sequence now covers eleven blocking issues inside the PR1 login foundation.
+This review sequence now covers thirteen blocking issues inside the PR1 login foundation.
 
 The earlier pass fixed:
 
@@ -24,6 +24,8 @@ This follow-up pass fixed:
 
 10. email auto-link stayed enabled by default when the env var was unset
 11. unexpected local callback failures were still being reported as `502`
+12. unknown local `500` callback failures still leaked internal error strings back to clients
+13. the corpId backfill script still assumed whole-database single-corp apply instead of a manual allowlist gate
 
 ## Execution Context
 
@@ -32,7 +34,7 @@ The existing PR1 worktrees were not safe to reuse:
 - the original PR1 worktree already contained unrelated `jwt-middleware` changes
 - the refresh worktrees were detached and already used for prior fix rounds
 
-This follow-up was implemented from a new detached worktree rooted at remote PR1 head `5a97e80c9`, then pushed directly back to `origin/codex/dingtalk-pr1-foundation-login-20260408`.
+This follow-up was implemented from a new detached worktree rooted at remote PR1 head `20cdabd19`, then pushed directly back to `origin/codex/dingtalk-pr1-foundation-login-20260408`.
 
 ## Code Changes
 
@@ -46,6 +48,7 @@ This follow-up was implemented from a new detached worktree rooted at remote PR1
   - keep local DingTalk policy errors on `403` / `409`
   - keep upstream DingTalk request failures on `502`
   - map unexpected local callback failures to `500`
+  - keep the `500` response body generic instead of exposing the raw internal error string
 
 ### Configuration
 
@@ -65,7 +68,9 @@ This follow-up was implemented from a new detached worktree rooted at remote PR1
 
 - `scripts/ops/backfill-dingtalk-corp-identities.sh`
   - add a dry-run-by-default corpId backfill helper for legacy DingTalk identities
-  - refuse to apply when `provider_open_id` is missing or corp-scoped `external_key` conflicts exist
+  - export candidate rows for manual review
+  - require a manual allowlist for `--apply`
+  - refuse to apply when `provider_open_id` is missing, corp-scoped `external_key` conflicts exist, or the allowlist includes ineligible ids
 
 - `docs/development/dingtalk-pr1-corpid-rollout-20260410.md`
   - document the rollout gate and execution order for enabling `DINGTALK_CORP_ID`
@@ -82,8 +87,9 @@ After these fixes:
 
 Before enabling `DINGTALK_CORP_ID` in production:
 
-1. dry-run `scripts/ops/backfill-dingtalk-corp-identities.sh --corp-id <corpId>`
-2. resolve any reported `missing_open_id_rows` or `conflict_rows`
-3. run `--apply`
-4. rerun dry-run and confirm the candidate count is zero
-5. only then enable `DINGTALK_CORP_ID`
+1. export candidates with `scripts/ops/backfill-dingtalk-corp-identities.sh --corp-id <corpId> --export-file <path>`
+2. manually review the candidate export and prepare an allowlist file of approved `user_external_identities.id` values
+3. resolve any reported `missing_open_id_rows` or `conflict_rows`
+4. run `--apply` with `--allowlist-file`
+5. rerun dry-run/export and confirm the reviewed rows are no longer candidates
+6. only then enable `DINGTALK_CORP_ID`

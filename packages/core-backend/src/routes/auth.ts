@@ -951,10 +951,15 @@ authRouter.post('/dingtalk/callback', async (req: Request, res: Response) => {
       : error instanceof DingTalkRequestError
         ? 502
         : 500
+    const message = error instanceof DingTalkLoginPolicyError
+      ? error.message
+      : error instanceof DingTalkRequestError
+        ? error.message
+        : 'DingTalk authentication failed'
 
     return res.status(statusCode).json({
       success: false,
-      error: error instanceof Error ? error.message : 'DingTalk authentication failed',
+      error: message,
     })
   }
 })

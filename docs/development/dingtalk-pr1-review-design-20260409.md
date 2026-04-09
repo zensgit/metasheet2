@@ -134,6 +134,7 @@ Design response:
 - treat corp-scoped lookup hardening as correct-by-default behavior
 - do not weaken the runtime lookup to auto-accept ambiguous legacy rows
 - require a one-time rollout backfill before enabling `DINGTALK_CORP_ID` in production
+- export candidate rows first and require a manual allowlist for apply
 - document the backfill requirement and verification gate in the PR1 review docs
 
 ### 10. Email auto-link remained enabled by default
@@ -155,6 +156,7 @@ Design response:
 - keep `DingTalkRequestError` mapped to `502`
 - keep local policy errors on their explicit `403` / `409` codes
 - map all other unexpected callback failures to `500`
+- return a generic client-facing error string for the `500` path and keep the detailed error only in server logs
 - preserve the existing route path and response body shape
 
 ## Non-Blocking Notes
