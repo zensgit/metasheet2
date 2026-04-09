@@ -1,6 +1,6 @@
 # DingTalk PR1 Review Design
 
-Date: 2026-04-09
+Date: 2026-04-10
 PR: `#725`
 Branch: `codex/dingtalk-pr1-foundation-login-20260408`
 
@@ -18,7 +18,7 @@ Out of scope:
 
 - PR2 directory sync behavior
 - PR3 attendance, robot notifications, delegated admin controls
-- production rollout and tenant-side configuration changes
+- production feature expansion beyond PR1 login
 
 ## Review Gates
 
@@ -136,7 +136,28 @@ Design response:
 - require a one-time rollout backfill before enabling `DINGTALK_CORP_ID` in production
 - document the backfill requirement and verification gate in the PR1 review docs
 
+### 10. Email auto-link remained enabled by default
+
+The runtime still treated `DINGTALK_AUTH_AUTO_LINK_EMAIL` as enabled when the environment variable was unset. That would let PR1 on its own auto-link DingTalk identities to existing local accounts by email before the later explicit-grant controls from PR3 are merged.
+
+Design response:
+
+- change the runtime fallback for `DINGTALK_AUTH_AUTO_LINK_EMAIL` from enabled to disabled
+- keep explicit opt-in behavior unchanged when the environment variable is set to a truthy value
+- update `.env.example` so the documented default matches the safer runtime behavior
+
+### 11. Unknown local callback failures still looked like DingTalk upstream outages
+
+The callback route already split local policy denials from DingTalk transport failures, but every other unexpected local failure still returned `502`. That would misclassify local database, session, or permission-loading faults as DingTalk upstream issues.
+
+Design response:
+
+- keep `DingTalkRequestError` mapped to `502`
+- keep local policy errors on their explicit `403` / `409` codes
+- map all other unexpected callback failures to `500`
+- preserve the existing route path and response body shape
+
 ## Non-Blocking Notes
 
 - Duplicate auth payload helpers between `LoginView.vue` and `DingTalkAuthCallbackView.vue` remain a refactor candidate, but they are not blocking for PR1 merge.
-- `DINGTALK_AUTH_AUTO_LINK_EMAIL` remains a configuration choice. The stricter production policy is handled later in the stack by explicit-grant controls.
+- `DINGTALK_AUTH_AUTO_LINK_EMAIL` remains a configuration choice, but it is now safe-by-default and must be explicitly enabled.

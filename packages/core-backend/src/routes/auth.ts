@@ -950,7 +950,7 @@ authRouter.post('/dingtalk/callback', async (req: Request, res: Response) => {
       ? error.statusCode
       : error instanceof DingTalkRequestError
         ? 502
-        : 502
+        : 500
 
     return res.status(statusCode).json({
       success: false,

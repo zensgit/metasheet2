@@ -362,7 +362,27 @@ describe('DingTalk OAuth state store', () => {
     expect(vi.mocked(query).mock.calls[0]?.[1]?.[4]).toBe('ding-corp-1')
   })
 
+  it('does not auto-link by email when the flag is unset', async () => {
+    vi.mocked(exchangeCodeForUserAccessToken).mockResolvedValue({
+      accessToken: 'access-token',
+    })
+    vi.mocked(fetchDingTalkCurrentUser).mockResolvedValue({
+      openId: 'open-id-1',
+      unionId: 'union-id-1',
+      nick: 'Ding User',
+      email: 'manager@example.com',
+    })
+    vi.mocked(query).mockResolvedValueOnce({ rows: [] } as any)
+
+    await expect(exchangeCodeForUser('auth-code')).rejects.toThrow(
+      'DingTalk account manager@example.com is not linked to a local user',
+    )
+
+    expect(vi.mocked(query)).toHaveBeenCalledTimes(1)
+  })
+
   it('rejects email auto-link when the matched local user is disabled', async () => {
+    vi.stubEnv('DINGTALK_AUTH_AUTO_LINK_EMAIL', '1')
     vi.mocked(exchangeCodeForUserAccessToken).mockResolvedValue({
       accessToken: 'access-token',
     })

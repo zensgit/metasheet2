@@ -91,7 +91,7 @@ function parseBooleanEnv(name: string, fallback: boolean): boolean {
 }
 
 function shouldAutoLinkEmail(): boolean {
-  return parseBooleanEnv('DINGTALK_AUTH_AUTO_LINK_EMAIL', true)
+  return parseBooleanEnv('DINGTALK_AUTH_AUTO_LINK_EMAIL', false)
 }
 
 function shouldAutoProvision(): boolean {

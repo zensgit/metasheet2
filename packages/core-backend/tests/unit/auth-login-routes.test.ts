@@ -647,6 +647,25 @@ describe('auth login routes', () => {
     expect((response.body as Record<string, any>).error).toBe('Failed to obtain access token from DingTalk')
   })
 
+  it('maps unexpected local callback failures to 500', async () => {
+    dingtalkOauthMocks.validateState.mockResolvedValue({
+      valid: true,
+      redirectPath: '/attendance',
+    })
+    dingtalkOauthMocks.isDingTalkConfigured.mockReturnValue(true)
+    dingtalkOauthMocks.exchangeCodeForUser.mockRejectedValue(new Error('session registry unavailable'))
+
+    const response = await invokeRoute('post', '/dingtalk/callback', {
+      body: {
+        code: 'auth-code',
+        state: 'state-1',
+      },
+    })
+
+    expect(response.statusCode).toBe(500)
+    expect((response.body as Record<string, any>).error).toBe('session registry unavailable')
+  })
+
   it('returns 409 for local auto-provision email conflicts', async () => {
     dingtalkOauthMocks.validateState.mockResolvedValue({
       valid: true,
