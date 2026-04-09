@@ -586,7 +586,6 @@ async function getFollowUpById(multitableApi, projectId, followUpId) {
     logicalData: await fromPhysicalFollowUpData(multitableApi.provisioning, projectId, record.data),
   }
 }
-
 async function getTicketRecordById(multitableApi, projectId, ticketId) {
   const sheetId = await findObjectSheetId(multitableApi.provisioning, projectId, 'serviceTicket')
   const record = await multitableApi.records.getRecord({

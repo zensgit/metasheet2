@@ -456,6 +456,7 @@
                         v-model="ticketEditDraft.priority"
                         class="after-sales-view__field-input"
                       >
+                        <option value="low">Low</option>
                         <option value="normal">Normal</option>
                         <option value="high">High</option>
                         <option value="urgent">Urgent</option>
@@ -2395,7 +2396,7 @@ interface TicketDraft {
 
 interface TicketEditDraft {
   title: string
-  priority: 'normal' | 'high' | 'urgent'
+  priority: 'low' | 'normal' | 'high' | 'urgent'
   source: 'web' | 'phone' | 'wechat' | 'email'
   status: 'new' | 'assigned' | 'inProgress' | 'done' | 'closed'
 }
@@ -3149,7 +3150,7 @@ function createTicketDraft(): TicketDraft {
 }
 
 function normalizeTicketPriority(value: unknown): TicketEditDraft['priority'] {
-  return value === 'high' || value === 'urgent' ? value : 'normal'
+  return value === 'low' || value === 'high' || value === 'urgent' ? value : 'normal'
 }
 
 function normalizeTicketSource(value: unknown): TicketEditDraft['source'] {
@@ -3558,6 +3559,17 @@ function matchesPartItemFilters(partItem: PartItemViewModel) {
   }
 
   return true
+}
+
+function buildTicketUpdatePayload() {
+  return {
+    ticket: {
+      title: toText(ticketEditDraft.value.title),
+      priority: ticketEditDraft.value.priority,
+      source: ticketEditDraft.value.source,
+      status: ticketEditDraft.value.status,
+    },
+  }
 }
 
 function buildTicketUpdatePayload() {
