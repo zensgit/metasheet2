@@ -426,6 +426,95 @@
             </div>
           </div>
 
+          <form class="after-sales-view__installed-asset-form" @submit.prevent="submitInstalledAsset">
+            <label class="after-sales-view__field">
+              <span>Asset code</span>
+              <input
+                id="after-sales-installed-asset-code"
+                v-model="installedAssetDraft.assetCode"
+                class="after-sales-view__field-input"
+                placeholder="AST-3001"
+                type="text"
+              />
+            </label>
+            <label class="after-sales-view__field">
+              <span>Status</span>
+              <select
+                id="after-sales-installed-asset-status"
+                v-model="installedAssetDraft.status"
+                class="after-sales-view__field-input"
+              >
+                <option value="active">Active</option>
+                <option value="expired">Expired</option>
+                <option value="decommissioned">Decommissioned</option>
+              </select>
+            </label>
+            <label class="after-sales-view__field">
+              <span>Serial no</span>
+              <input
+                id="after-sales-installed-asset-serial-no"
+                v-model="installedAssetDraft.serialNo"
+                class="after-sales-view__field-input"
+                placeholder="SN-3001"
+                type="text"
+              />
+            </label>
+            <label class="after-sales-view__field">
+              <span>Model</span>
+              <input
+                id="after-sales-installed-asset-model"
+                v-model="installedAssetDraft.model"
+                class="after-sales-view__field-input"
+                placeholder="Compressor X"
+                type="text"
+              />
+            </label>
+            <label class="after-sales-view__field">
+              <span>Location</span>
+              <input
+                id="after-sales-installed-asset-location"
+                v-model="installedAssetDraft.location"
+                class="after-sales-view__field-input"
+                placeholder="Plant 1"
+                type="text"
+              />
+            </label>
+            <label class="after-sales-view__field">
+              <span>Installed at</span>
+              <input
+                id="after-sales-installed-asset-installed-at"
+                v-model="installedAssetDraft.installedAt"
+                class="after-sales-view__field-input"
+                type="datetime-local"
+              />
+            </label>
+            <label class="after-sales-view__field">
+              <span>Warranty until</span>
+              <input
+                id="after-sales-installed-asset-warranty-until"
+                v-model="installedAssetDraft.warrantyUntil"
+                class="after-sales-view__field-input"
+                type="date"
+              />
+            </label>
+          </form>
+
+          <div class="after-sales-view__action-row after-sales-view__action-row--compact">
+            <button
+              class="after-sales-view__primary-btn"
+              :disabled="installedAssetCreating || installedAssetsLoading || !canSubmitInstalledAsset"
+              @click="submitInstalledAsset"
+            >
+              {{ installedAssetCreating ? 'Creating...' : 'Create asset' }}
+            </button>
+            <button class="after-sales-view__ghost-btn" :disabled="installedAssetCreating || installedAssetsLoading" @click="resetInstalledAssetDraft">
+              Reset asset draft
+            </button>
+          </div>
+
+          <p v-if="installedAssetSubmitError" class="after-sales-view__inline-error">{{ installedAssetSubmitError }}</p>
+          <p v-else-if="installedAssetSubmitSuccess" class="after-sales-view__inline-success">{{ installedAssetSubmitSuccess }}</p>
+
           <form class="after-sales-view__installed-asset-filters" @submit.prevent="applyInstalledAssetFilters">
             <label class="after-sales-view__field">
               <span>Filter status</span>
@@ -453,13 +542,13 @@
           </form>
 
           <div class="after-sales-view__action-row after-sales-view__action-row--compact">
-            <button class="after-sales-view__ghost-btn" :disabled="installedAssetsLoading" @click="refreshInstalledAssets">
+            <button class="after-sales-view__ghost-btn" :disabled="installedAssetsLoading || installedAssetCreating" @click="refreshInstalledAssets">
               {{ installedAssetsLoading ? 'Refreshing...' : 'Refresh list' }}
             </button>
-            <button class="after-sales-view__ghost-btn" :disabled="installedAssetsLoading" @click="applyInstalledAssetFilters">
+            <button class="after-sales-view__ghost-btn" :disabled="installedAssetsLoading || installedAssetCreating" @click="applyInstalledAssetFilters">
               {{ installedAssetsLoading ? 'Applying...' : 'Apply filters' }}
             </button>
-            <button class="after-sales-view__ghost-btn" :disabled="installedAssetsLoading" @click="resetInstalledAssetFilters">
+            <button class="after-sales-view__ghost-btn" :disabled="installedAssetsLoading || installedAssetCreating" @click="resetInstalledAssetFilters">
               Clear filters
             </button>
           </div>
@@ -892,6 +981,16 @@ interface InstalledAssetViewModel {
   }
 }
 
+interface InstalledAssetDraft {
+  assetCode: string
+  serialNo: string
+  model: string
+  location: string
+  installedAt: string
+  warrantyUntil: string
+  status: 'active' | 'expired' | 'decommissioned'
+}
+
 interface ServiceRecordDraft {
   ticketNo: string
   visitType: 'onsite' | 'remote' | 'pickup'
@@ -938,6 +1037,11 @@ interface CreateServiceRecordResponse {
   serviceRecord: ServiceRecordRow
 }
 
+interface CreateInstalledAssetResponse {
+  projectId: string
+  installedAsset: InstalledAssetRow
+}
+
 interface CreateTicketResponse {
   projectId: string
   ticket: TicketRecord
@@ -973,12 +1077,15 @@ const ticketRefundSubmittingId = ref('')
 const ticketUpdatingId = ref('')
 const ticketDeletingId = ref('')
 const installedAssetsLoading = ref(false)
+const installedAssetCreating = ref(false)
 const serviceRecordsLoading = ref(false)
 const serviceRecordCreating = ref(false)
 const serviceRecordDeletingId = ref('')
 const error = ref('')
 const ticketsError = ref('')
 const installedAssetsError = ref('')
+const installedAssetSubmitError = ref('')
+const installedAssetSubmitSuccess = ref('')
 const ticketSubmitError = ref('')
 const ticketSubmitSuccess = ref('')
 const ticketRefundErrorById = ref<Record<string, string>>({})
@@ -1005,6 +1112,7 @@ const installedAssetFilters = ref<InstalledAssetFilterDraft>({
   status: '',
   search: '',
 })
+const installedAssetDraft = ref<InstalledAssetDraft>(createInstalledAssetDraft())
 const serviceRecordDraft = ref<ServiceRecordDraft>(createServiceRecordDraft())
 const serviceRecordFilters = ref<ServiceRecordFilterDraft>({
   ticketNo: '',
@@ -1023,6 +1131,7 @@ const canSubmitServiceRecord = computed(
     toText(serviceRecordDraft.value.ticketNo).length > 0 &&
     toText(serviceRecordDraft.value.scheduledAt).length > 0,
 )
+const canSubmitInstalledAsset = computed(() => toText(installedAssetDraft.value.assetCode).length > 0)
 const ticketDraftError = computed(() => {
   const parsedRefundAmount = parseOptionalRefundAmount(ticketDraft.value.refundAmount)
   return parsedRefundAmount.valid ? '' : 'Refund amount must be a valid number'
@@ -1155,6 +1264,18 @@ function createServiceRecordDraft(): ServiceRecordDraft {
   }
 }
 
+function createInstalledAssetDraft(): InstalledAssetDraft {
+  return {
+    assetCode: '',
+    serialNo: '',
+    model: '',
+    location: '',
+    installedAt: '',
+    warrantyUntil: '',
+    status: 'active',
+  }
+}
+
 function createTicketDraft(): TicketDraft {
   return {
     ticketNo: '',
@@ -1194,6 +1315,12 @@ function createTicketEditDraft(ticket?: Partial<TicketViewModel['data']> | null)
 
 function resetConfigDraft() {
   configDraft.value = { ...baselineConfigDraft.value }
+}
+
+function resetInstalledAssetDraft() {
+  installedAssetDraft.value = createInstalledAssetDraft()
+  installedAssetSubmitError.value = ''
+  installedAssetSubmitSuccess.value = ''
 }
 
 function resetServiceRecordDraft() {
@@ -1248,6 +1375,27 @@ function buildServiceRecordPayload() {
   }
 }
 
+function buildInstalledAssetPayload() {
+  const assetCode = toText(installedAssetDraft.value.assetCode)
+  const serialNo = toText(installedAssetDraft.value.serialNo)
+  const model = toText(installedAssetDraft.value.model)
+  const location = toText(installedAssetDraft.value.location)
+  const installedAt = toText(installedAssetDraft.value.installedAt)
+  const warrantyUntil = toText(installedAssetDraft.value.warrantyUntil)
+
+  return {
+    installedAsset: {
+      assetCode,
+      status: installedAssetDraft.value.status,
+      ...(serialNo ? { serialNo } : {}),
+      ...(model ? { model } : {}),
+      ...(location ? { location } : {}),
+      ...(installedAt ? { installedAt } : {}),
+      ...(warrantyUntil ? { warrantyUntil } : {}),
+    },
+  }
+}
+
 function parseOptionalRefundAmount(value: unknown): { valid: boolean; value?: number } {
   const text = toText(value)
   if (!text) {
@@ -1279,6 +1427,19 @@ function buildTicketPayload() {
       ...(refundAmount.valid && typeof refundAmount.value === 'number' ? { refundAmount: refundAmount.value } : {}),
     },
   }
+}
+
+function matchesInstalledAssetFilters(asset: InstalledAssetViewModel) {
+  const status = toText(installedAssetFilters.value.status)
+  const search = toText(installedAssetFilters.value.search).toLowerCase()
+
+  if (status && asset.data.status !== status) return false
+  if (search) {
+    const haystack = JSON.stringify(asset.data).toLowerCase()
+    if (!haystack.includes(search)) return false
+  }
+
+  return true
 }
 
 function buildTicketUpdatePayload() {
@@ -1551,6 +1712,38 @@ async function resetInstalledAssetFilters() {
 
 async function refreshInstalledAssets() {
   await loadInstalledAssetsForCurrentState(current.value)
+}
+
+async function submitInstalledAsset() {
+  if (!canSubmitInstalledAsset.value || installedAssetCreating.value || installedAssetsLoading.value) {
+    return
+  }
+
+  installedAssetCreating.value = true
+  installedAssetSubmitError.value = ''
+  installedAssetSubmitSuccess.value = ''
+
+  try {
+    const payload = await readEnvelope<CreateInstalledAssetResponse>('/api/after-sales/installed-assets', {
+      method: 'POST',
+      body: JSON.stringify(buildInstalledAssetPayload()),
+    })
+    const nextAsset = payload?.installedAsset ? normalizeInstalledAssetRow(payload.installedAsset) : null
+
+    if (nextAsset && matchesInstalledAssetFilters(nextAsset)) {
+      installedAssets.value = [nextAsset, ...installedAssets.value.filter((item) => item.id !== nextAsset.id)]
+      installedAssetsError.value = ''
+    }
+
+    resetInstalledAssetDraft()
+    installedAssetSubmitSuccess.value = nextAsset
+      ? `Created installed asset ${nextAsset.data.assetCode}`
+      : 'Created installed asset'
+  } catch (err: unknown) {
+    installedAssetSubmitError.value = err instanceof Error ? err.message : 'Failed to create installed asset'
+  } finally {
+    installedAssetCreating.value = false
+  }
 }
 
 async function loadServiceRecordsForCurrentState(state: CurrentResponse): Promise<void> {
@@ -1826,6 +2019,8 @@ async function loadView() {
   error.value = ''
   ticketsError.value = ''
   installedAssetsError.value = ''
+  installedAssetSubmitError.value = ''
+  installedAssetSubmitSuccess.value = ''
   ticketSubmitError.value = ''
   ticketSubmitSuccess.value = ''
   serviceRecordsError.value = ''
@@ -2269,6 +2464,7 @@ onMounted(() => {
   gap: 14px;
 }
 
+.after-sales-view__installed-asset-form,
 .after-sales-view__ticket-form,
 .after-sales-view__installed-asset-filters,
 .after-sales-view__service-record-form,
@@ -2433,6 +2629,7 @@ code {
 
   .after-sales-view__section-header,
   .after-sales-view__config-form,
+  .after-sales-view__installed-asset-form,
   .after-sales-view__ticket-form,
   .after-sales-view__installed-asset-filters,
   .after-sales-view__service-record-form,

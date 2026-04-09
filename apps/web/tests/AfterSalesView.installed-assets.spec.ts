@@ -333,4 +333,242 @@ describe('AfterSalesView installed assets panel', () => {
       '/api/after-sales/installed-assets?status=active&search=compressor',
     ])
   })
+
+  it('creates installed assets inline and prepends them without reloading the page', async () => {
+    let assetListCalls = 0
+
+    apiFetchMock.mockImplementation(async (path: string, init?: RequestInit) => {
+      if (path === '/api/after-sales/app-manifest') {
+        return createResponse({
+          id: 'after-sales-default',
+          displayName: 'After Sales',
+          platformDependencies: ['core-backend'],
+          objects: [],
+          workflows: [],
+        })
+      }
+
+      if (path === '/api/after-sales/projects/current') {
+        return createResponse({
+          status: 'installed',
+          projectId: 'tenant:after-sales',
+          displayName: 'After Sales',
+          config: {
+            defaultSlaHours: 24,
+            urgentSlaHours: 4,
+            followUpAfterDays: 7,
+          },
+          installResult: {
+            status: 'installed',
+            createdObjects: [],
+            createdViews: [],
+            warnings: [],
+            reportRef: 'install-assets-003',
+          },
+          reportRef: 'install-assets-003',
+        })
+      }
+
+      if (path === '/api/after-sales/tickets') {
+        return createResponse({
+          projectId: 'tenant:after-sales',
+          count: 0,
+          tickets: [],
+        })
+      }
+
+      if (path === '/api/after-sales/service-records') {
+        return createResponse({
+          projectId: 'tenant:after-sales',
+          count: 0,
+          serviceRecords: [],
+        })
+      }
+
+      if (path === '/api/after-sales/installed-assets' && (!init || !init.method)) {
+        assetListCalls += 1
+        return createResponse({
+          projectId: 'tenant:after-sales',
+          count: 1,
+          installedAssets: [
+            {
+              id: 'asset-001',
+              version: 1,
+              data: {
+                assetCode: 'AST-BASE',
+                serialNo: 'SN-BASE',
+                model: 'Base unit',
+                location: 'Dock',
+                installedAt: '2026-04-09T08:00:00Z',
+                warrantyUntil: '',
+                status: 'active',
+              },
+            },
+          ],
+        })
+      }
+
+      if (path === '/api/after-sales/installed-assets' && init?.method === 'POST') {
+        return createResponse({
+          projectId: 'tenant:after-sales',
+          installedAsset: {
+            id: 'asset-002',
+            version: 1,
+            data: {
+              assetCode: 'AST-3001',
+              serialNo: 'SN-3001',
+              model: 'Compressor Z',
+              location: 'Plant 3',
+              installedAt: '2026-04-11T08:00:00Z',
+              warrantyUntil: '2027-04-11',
+              status: 'active',
+            },
+          },
+        }, { status: 201 })
+      }
+
+      throw new Error(`Unexpected request: ${path}`)
+    })
+
+    const mounted = mountAfterSalesView()
+    app = mounted.app
+    container = mounted.container
+
+    await waitForText(container, 'AST-BASE')
+
+    const section = findSection(container, 'Installed asset registry')
+    const assetCodeInput = section.querySelector<HTMLInputElement>('#after-sales-installed-asset-code')
+    const serialNoInput = section.querySelector<HTMLInputElement>('#after-sales-installed-asset-serial-no')
+    const modelInput = section.querySelector<HTMLInputElement>('#after-sales-installed-asset-model')
+    const locationInput = section.querySelector<HTMLInputElement>('#after-sales-installed-asset-location')
+    expect(assetCodeInput).toBeTruthy()
+    expect(serialNoInput).toBeTruthy()
+    expect(modelInput).toBeTruthy()
+    expect(locationInput).toBeTruthy()
+    if (!assetCodeInput || !serialNoInput || !modelInput || !locationInput) return
+
+    await setInputValue(assetCodeInput, 'AST-3001')
+    await setInputValue(serialNoInput, 'SN-3001')
+    await setInputValue(modelInput, 'Compressor Z')
+    await setInputValue(locationInput, 'Plant 3')
+
+    findButtonWithin(section, 'Create asset').click()
+
+    await waitForText(section, 'Created installed asset AST-3001')
+    expect(section.textContent).toContain('AST-3001')
+    expect(section.textContent).toContain('SN-3001')
+    expect(section.textContent).toContain('Compressor Z')
+    expect(assetListCalls).toBe(1)
+  })
+
+  it('keeps the installed-asset draft when create fails', async () => {
+    apiFetchMock.mockImplementation(async (path: string, init?: RequestInit) => {
+      if (path === '/api/after-sales/app-manifest') {
+        return createResponse({
+          id: 'after-sales-default',
+          displayName: 'After Sales',
+          platformDependencies: ['core-backend'],
+          objects: [],
+          workflows: [],
+        })
+      }
+
+      if (path === '/api/after-sales/projects/current') {
+        return createResponse({
+          status: 'installed',
+          projectId: 'tenant:after-sales',
+          displayName: 'After Sales',
+          config: {
+            defaultSlaHours: 24,
+            urgentSlaHours: 4,
+            followUpAfterDays: 7,
+          },
+          installResult: {
+            status: 'installed',
+            createdObjects: [],
+            createdViews: [],
+            warnings: [],
+            reportRef: 'install-assets-004',
+          },
+          reportRef: 'install-assets-004',
+        })
+      }
+
+      if (path === '/api/after-sales/tickets') {
+        return createResponse({
+          projectId: 'tenant:after-sales',
+          count: 0,
+          tickets: [],
+        })
+      }
+
+      if (path === '/api/after-sales/service-records') {
+        return createResponse({
+          projectId: 'tenant:after-sales',
+          count: 0,
+          serviceRecords: [],
+        })
+      }
+
+      if (path === '/api/after-sales/installed-assets' && (!init || !init.method)) {
+        return createResponse({
+          projectId: 'tenant:after-sales',
+          count: 1,
+          installedAssets: [
+            {
+              id: 'asset-001',
+              version: 1,
+              data: {
+                assetCode: 'AST-BASE',
+                serialNo: 'SN-BASE',
+                model: 'Base unit',
+                location: 'Dock',
+                installedAt: '2026-04-09T08:00:00Z',
+                warrantyUntil: '',
+                status: 'active',
+              },
+            },
+          ],
+        })
+      }
+
+      if (path === '/api/after-sales/installed-assets' && init?.method === 'POST') {
+        return createResponse({
+          error: {
+            code: 'VALIDATION_ERROR',
+            message: 'assetCode already exists',
+          },
+        }, {
+          ok: false,
+          status: 400,
+          statusText: 'Bad Request',
+        })
+      }
+
+      throw new Error(`Unexpected request: ${path}`)
+    })
+
+    const mounted = mountAfterSalesView()
+    app = mounted.app
+    container = mounted.container
+
+    await waitForText(container, 'AST-BASE')
+
+    const section = findSection(container, 'Installed asset registry')
+    const assetCodeInput = section.querySelector<HTMLInputElement>('#after-sales-installed-asset-code')
+    const modelInput = section.querySelector<HTMLInputElement>('#after-sales-installed-asset-model')
+    expect(assetCodeInput).toBeTruthy()
+    expect(modelInput).toBeTruthy()
+    if (!assetCodeInput || !modelInput) return
+
+    await setInputValue(assetCodeInput, 'AST-DUPLICATE')
+    await setInputValue(modelInput, 'Compressor X')
+
+    findButtonWithin(section, 'Create asset').click()
+
+    await waitForText(section, 'assetCode already exists')
+    expect(assetCodeInput.value).toBe('AST-DUPLICATE')
+    expect(modelInput.value).toBe('Compressor X')
+    expect(section.textContent).toContain('AST-BASE')
+  })
 })
