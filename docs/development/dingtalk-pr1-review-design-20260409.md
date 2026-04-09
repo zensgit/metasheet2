@@ -72,6 +72,31 @@ Design response:
 - mark the callback route as guest-only in route metadata
 - add a defensive callback-view guard that keeps the current authenticated session and redirects home instead of exchanging the DingTalk callback
 
+### 5. DingTalk login could bypass disabled or inactive local-user gates
+
+The PR1 user-resolution path only selected `id`, `email`, `name`, and `role` from `users`. It did not read or enforce `is_active`, so a DingTalk-linked account that had been disabled in the local system could still receive a fresh session from `/api/auth/dingtalk/callback`.
+
+Design response:
+
+- extend resolved local-user rows to include `is_active`
+- enforce the same deny rule already used by password login and token verification:
+  - `role === 'disabled'`
+  - `is_active === false`
+- apply the check to both external-identity matches and email auto-link matches before grant evaluation or identity upsert
+- keep the existing public error string: `DingTalk login is disabled for this user`
+
+### 6. Auto-provision did not satisfy the current `users` schema
+
+PR1 kept `DINGTALK_AUTH_AUTO_PROVISION` as a supported code path, but the implementation inserted into `users` without `password_hash`. The current schema requires `password_hash TEXT NOT NULL`, so the first real auto-provision attempt would fail at the database layer.
+
+Design response:
+
+- keep auto-provision support in PR1
+- do not change the schema in this fix
+- generate a random one-time secret server-side and hash it with the existing bcrypt runtime configuration
+- write that hash into `users.password_hash` during auto-provision
+- do not expose any generated password to the caller; the hash only satisfies the current local-auth schema
+
 ## Non-Blocking Notes
 
 - Duplicate auth payload helpers between `LoginView.vue` and `DingTalkAuthCallbackView.vue` remain a refactor candidate, but they are not blocking for PR1 merge.

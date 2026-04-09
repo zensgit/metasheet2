@@ -306,4 +306,93 @@ describe('DingTalk OAuth state store', () => {
       'Refusing to auto-provision DingTalk user because a local account already exists with the same email',
     )
   })
+
+  it('rejects external identities linked to inactive local users', async () => {
+    vi.mocked(exchangeCodeForUserAccessToken).mockResolvedValue({
+      accessToken: 'access-token',
+    })
+    vi.mocked(fetchDingTalkCurrentUser).mockResolvedValue({
+      openId: 'open-id-1',
+      unionId: 'union-id-1',
+      nick: 'Ding User',
+      email: 'manager@example.com',
+    })
+    vi.mocked(query).mockResolvedValueOnce({
+      rows: [{
+        id: 'user-1',
+        email: 'manager@example.com',
+        name: 'Manager',
+        role: 'user',
+        is_active: false,
+      }],
+    } as any)
+
+    await expect(exchangeCodeForUser('auth-code')).rejects.toThrow(
+      'DingTalk login is disabled for this user',
+    )
+  })
+
+  it('rejects email auto-link when the matched local user is disabled', async () => {
+    vi.mocked(exchangeCodeForUserAccessToken).mockResolvedValue({
+      accessToken: 'access-token',
+    })
+    vi.mocked(fetchDingTalkCurrentUser).mockResolvedValue({
+      openId: 'open-id-1',
+      unionId: 'union-id-1',
+      nick: 'Ding User',
+      email: 'manager@example.com',
+    })
+    vi.mocked(query)
+      .mockResolvedValueOnce({ rows: [] } as any)
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'user-1',
+          email: 'manager@example.com',
+          name: 'Manager',
+          role: 'disabled',
+          is_active: true,
+        }],
+      } as any)
+
+    await expect(exchangeCodeForUser('auth-code')).rejects.toThrow(
+      'DingTalk login is disabled for this user',
+    )
+  })
+
+  it('writes a password hash when auto-provisioning a new DingTalk user', async () => {
+    vi.stubEnv('DINGTALK_AUTH_AUTO_PROVISION', '1')
+    vi.mocked(exchangeCodeForUserAccessToken).mockResolvedValue({
+      accessToken: 'access-token',
+    })
+    vi.mocked(fetchDingTalkCurrentUser).mockResolvedValue({
+      openId: 'open-id-1',
+      unionId: 'union-id-1',
+      nick: 'Ding User',
+    })
+    vi.mocked(query)
+      .mockResolvedValueOnce({ rows: [] } as any)
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'user-new',
+          email: 'dingtalk_open-id-1@placeholder.local',
+          name: 'Ding User',
+          role: 'user',
+          is_active: true,
+        }],
+      } as any)
+      .mockResolvedValueOnce({ rows: [] } as any)
+
+    vi.mocked(transaction).mockImplementation(async (callback: (client: { query: typeof query }) => Promise<unknown>) => {
+      const clientQuery = vi.fn()
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [] })
+      return callback({ query: clientQuery as unknown as typeof query })
+    })
+
+    const result = await exchangeCodeForUser('auth-code')
+
+    expect(result.localUserId).toBe('user-new')
+    expect(vi.mocked(query).mock.calls[1]?.[0]).toContain('password_hash')
+    expect(vi.mocked(query).mock.calls[1]?.[1]?.[3]).toMatch(/^\$2[aby]\$/)
+  })
 })

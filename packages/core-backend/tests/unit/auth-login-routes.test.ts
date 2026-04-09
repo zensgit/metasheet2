@@ -568,4 +568,26 @@ describe('auth login routes', () => {
     expect((response.body as Record<string, any>).error).toBe('State parameter has expired')
     expect(dingtalkOauthMocks.exchangeCodeForUser).not.toHaveBeenCalled()
   })
+
+  it('surfaces disabled-local-user errors from the DingTalk callback exchange', async () => {
+    dingtalkOauthMocks.validateState.mockResolvedValue({
+      valid: true,
+      redirectPath: '/attendance',
+    })
+    dingtalkOauthMocks.isDingTalkConfigured.mockReturnValue(true)
+    dingtalkOauthMocks.exchangeCodeForUser.mockRejectedValue(
+      new Error('DingTalk login is disabled for this user'),
+    )
+
+    const response = await invokeRoute('post', '/dingtalk/callback', {
+      body: {
+        code: 'auth-code',
+        state: 'state-1',
+      },
+    })
+
+    expect(response.statusCode).toBe(502)
+    expect((response.body as Record<string, any>).error).toBe('DingTalk login is disabled for this user')
+    expect(rbacMocks.listUserPermissions).not.toHaveBeenCalled()
+  })
 })

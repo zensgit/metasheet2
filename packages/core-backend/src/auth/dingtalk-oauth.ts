@@ -1,4 +1,5 @@
 import crypto from 'node:crypto'
+import * as bcrypt from 'bcryptjs'
 import Redis from 'ioredis'
 import { Logger } from '../core/logger'
 import { query, transaction } from '../db/pg'
@@ -8,6 +9,7 @@ import {
   isDingTalkConfigured as isClientConfigured,
   readDingTalkOauthConfig,
 } from '../integrations/dingtalk/client'
+import { getBcryptSaltRounds } from '../security/auth-runtime-config'
 
 const logger = new Logger('DingTalkOAuth')
 
@@ -17,6 +19,7 @@ const MAX_PENDING_STATES = 10_000
 const STATE_REDIS_RETENTION_MS = 60 * 1000
 const STATE_REDIS_KEY_PREFIX = 'metasheet:auth:dingtalk:state:'
 const STATE_REDIS_INDEX_KEY = 'metasheet:auth:dingtalk:state:index'
+const DINGTALK_LOGIN_DISABLED_ERROR = 'DingTalk login is disabled for this user'
 
 export interface DingTalkUserInfo {
   openId: string
@@ -41,6 +44,7 @@ interface LocalUserRow {
   email: string
   name: string
   role: string
+  is_active: boolean
 }
 
 interface StateRecord {
@@ -388,7 +392,11 @@ async function upsertExternalIdentity(localUserId: string, dtUser: DingTalkUserI
 
 async function findUserByEmail(email: string): Promise<LocalUserRow | null> {
   const result = await query<LocalUserRow>(
-    `SELECT id, email, COALESCE(name, '') AS name, COALESCE(role, 'user') AS role
+    `SELECT id,
+            email,
+            COALESCE(name, '') AS name,
+            COALESCE(role, 'user') AS role,
+            COALESCE(is_active, TRUE) AS is_active
      FROM users
      WHERE LOWER(email) = LOWER($1)
      LIMIT 1`,
@@ -400,7 +408,11 @@ async function findUserByEmail(email: string): Promise<LocalUserRow | null> {
 async function findIdentityUser(dtUser: DingTalkUserInfo): Promise<LocalUserRow | null> {
   try {
     const result = await query<LocalUserRow>(
-      `SELECT u.id, u.email, COALESCE(u.name, '') AS name, COALESCE(u.role, 'user') AS role
+      `SELECT u.id,
+              u.email,
+              COALESCE(u.name, '') AS name,
+              COALESCE(u.role, 'user') AS role,
+              COALESCE(u.is_active, TRUE) AS is_active
        FROM user_external_identities identity
        JOIN users u ON u.id = identity.local_user_id
        WHERE identity.provider = $1
@@ -420,10 +432,20 @@ async function findIdentityUser(dtUser: DingTalkUserInfo): Promise<LocalUserRow 
   }
 }
 
+function assertLocalUserLoginAllowed(localUser: LocalUserRow): void {
+  if (localUser.role === 'disabled' || localUser.is_active === false) {
+    throw new Error(DINGTALK_LOGIN_DISABLED_ERROR)
+  }
+}
+
 async function createProvisionedUser(dtUser: DingTalkUserInfo): Promise<LocalUserRow> {
   const userId = crypto.randomUUID()
   const email = dtUser.email || `dingtalk_${dtUser.openId}@placeholder.local`
   const name = dtUser.nick || 'DingTalk User'
+  const passwordHash = await bcrypt.hash(
+    crypto.randomBytes(32).toString('base64url'),
+    getBcryptSaltRounds(),
+  )
 
   if (dtUser.email) {
     const existingUser = await findUserByEmail(dtUser.email)
@@ -434,10 +456,14 @@ async function createProvisionedUser(dtUser: DingTalkUserInfo): Promise<LocalUse
 
   try {
     const result = await query<LocalUserRow>(
-      `INSERT INTO users (id, email, name, role, created_at, updated_at)
-       VALUES ($1, $2, $3, 'user', NOW(), NOW())
-       RETURNING id, email, COALESCE(name, '') AS name, COALESCE(role, 'user') AS role`,
-      [userId, email, name],
+      `INSERT INTO users (id, email, name, password_hash, role, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, 'user', NOW(), NOW())
+       RETURNING id,
+                 email,
+                 COALESCE(name, '') AS name,
+                 COALESCE(role, 'user') AS role,
+                 COALESCE(is_active, TRUE) AS is_active`,
+      [userId, email, name, passwordHash],
     )
 
     const row = result.rows[0]
@@ -462,9 +488,10 @@ async function createProvisionedUser(dtUser: DingTalkUserInfo): Promise<LocalUse
 async function resolveLocalUser(dtUser: DingTalkUserInfo): Promise<{ localUser: LocalUserRow; isNewUser: boolean }> {
   const identityUser = await findIdentityUser(dtUser)
   if (identityUser) {
+    assertLocalUserLoginAllowed(identityUser)
     const grantEnabled = await readGrantEnabled(identityUser.id)
     if (grantEnabled === false) {
-      throw new Error('DingTalk login is disabled for this user')
+      throw new Error(DINGTALK_LOGIN_DISABLED_ERROR)
     }
     await upsertExternalIdentity(identityUser.id, dtUser)
     return { localUser: identityUser, isNewUser: false }
@@ -473,9 +500,10 @@ async function resolveLocalUser(dtUser: DingTalkUserInfo): Promise<{ localUser: 
   if (dtUser.email && shouldAutoLinkEmail()) {
     const emailUser = await findUserByEmail(dtUser.email)
     if (emailUser) {
+      assertLocalUserLoginAllowed(emailUser)
       const grantEnabled = await readGrantEnabled(emailUser.id)
       if (grantEnabled === false) {
-        throw new Error('DingTalk login is disabled for this user')
+        throw new Error(DINGTALK_LOGIN_DISABLED_ERROR)
       }
       await ensureGrant(emailUser.id)
       await upsertExternalIdentity(emailUser.id, dtUser)
