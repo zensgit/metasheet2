@@ -2012,6 +2012,96 @@ module.exports = {
     )
 
     context.api.http.addRoute(
+      'DELETE',
+      '/api/after-sales/follow-ups/:followUpId',
+      async (req, res) => {
+        try {
+          const userId = getUserId(req)
+          if (!userId) {
+            sendUnauthorized(res)
+            return
+          }
+          if (!hasAfterSalesWriteAccess(req)) {
+            sendWriteForbidden(res)
+            return
+          }
+
+          const followUpId =
+            typeof req?.params?.followUpId === 'string' ? req.params.followUpId.trim() : ''
+          if (!followUpId) {
+            res.status(400).json({
+              ok: false,
+              error: { code: 'VALIDATION_ERROR', message: 'followUpId is required' },
+            })
+            return
+          }
+
+          const multitableApi = getMultitableWriteApi(context)
+          if (!multitableApi || typeof multitableApi.records.deleteRecord !== 'function') {
+            res.status(503).json({
+              ok: false,
+              error: {
+                code: 'MULTITABLE_UNAVAILABLE',
+                message: 'Multitable record delete seam is not available on plugin context',
+              },
+            })
+            return
+          }
+
+          const tenantId = getTenantId(req, context.logger)
+          const current = await installer.loadCurrent(context, tenantId, appManifest.id)
+          if (!current || !isOperationalAfterSalesStatus(current.status)) {
+            res.status(409).json({
+              ok: false,
+              error: {
+                code: 'AFTER_SALES_NOT_INSTALLED',
+                message: 'After-sales must be installed before deleting follow-ups',
+              },
+            })
+            return
+          }
+
+          const projectId = current.projectId || installer.getProjectId(tenantId, appManifest.id)
+          const sheetId = await findObjectSheetId(multitableApi.provisioning, projectId, 'followUp')
+          const deleted = await multitableApi.records.deleteRecord({
+            sheetId,
+            recordId: followUpId,
+          })
+
+          res.json({
+            ok: true,
+            data: {
+              projectId,
+              followUpId: deleted.id,
+              version: deleted.version,
+              deleted: true,
+            },
+          })
+        } catch (err) {
+          if (err && err.code === 'VALIDATION_ERROR') {
+            res.status(400).json({
+              ok: false,
+              error: { code: err.code, message: err.message },
+            })
+            return
+          }
+          if (err && err.code === 'NOT_FOUND') {
+            res.status(404).json({
+              ok: false,
+              error: { code: err.code, message: err.message },
+            })
+            return
+          }
+          logger.error && logger.error('after-sales delete follow-up failed', err)
+          res.status(500).json({
+            ok: false,
+            error: { code: 'INTERNAL_ERROR', message: 'Failed to delete after-sales follow-up' },
+          })
+        }
+      },
+    )
+
+    context.api.http.addRoute(
       'GET',
       '/api/after-sales/follow-ups',
       async (req, res) => {
