@@ -252,16 +252,45 @@
                 <p>{{ ticket.data.title }}</p>
               </div>
 
-              <dl class="after-sales-view__ticket-meta">
-                <div>
-                  <dt>Refund amount</dt>
-                  <dd>{{ formatRefundAmount(ticket.data.refundAmount) }}</dd>
+              <div class="after-sales-view__ticket-side">
+                <dl class="after-sales-view__ticket-meta">
+                  <div>
+                    <dt>Refund amount</dt>
+                    <dd>{{ formatRefundAmount(ticket.data.refundAmount) }}</dd>
+                  </div>
+                  <div>
+                    <dt>Approval</dt>
+                    <dd>{{ ticket.approvalLabel }}</dd>
+                  </div>
+                </dl>
+                <div class="after-sales-view__ticket-actions">
+                  <label class="after-sales-view__field after-sales-view__field--compact">
+                    <span>Refund request</span>
+                    <input
+                      :id="`after-sales-ticket-refund-request-${ticket.id}`"
+                      :value="ticketRefundDrafts[ticket.id] ?? formatRefundDraft(ticket.data.refundAmount)"
+                      class="after-sales-view__field-input"
+                      inputmode="decimal"
+                      placeholder="88.5"
+                      type="text"
+                      @input="updateTicketRefundDraft(ticket.id, $event)"
+                    />
+                  </label>
+                  <button
+                    class="after-sales-view__ghost-btn after-sales-view__ticket-action-btn"
+                    :disabled="ticketCreating || ticketsLoading || ticketRefundSubmittingId === ticket.id"
+                    @click="requestTicketRefund(ticket)"
+                  >
+                    {{ ticketRefundSubmittingId === ticket.id ? 'Requesting...' : 'Request refund' }}
+                  </button>
                 </div>
-                <div>
-                  <dt>Approval</dt>
-                  <dd>{{ ticket.approvalLabel }}</dd>
-                </div>
-              </dl>
+                <p
+                  v-if="ticketRefundErrorById[ticket.id]"
+                  class="after-sales-view__inline-error after-sales-view__inline-error--compact"
+                >
+                  {{ ticketRefundErrorById[ticket.id] }}
+                </p>
+              </div>
             </article>
           </div>
           <p v-else class="after-sales-view__muted-state">No tickets found yet.</p>
@@ -689,6 +718,7 @@ const installing = ref(false)
 const refreshing = ref(false)
 const ticketsLoading = ref(false)
 const ticketCreating = ref(false)
+const ticketRefundSubmittingId = ref('')
 const serviceRecordsLoading = ref(false)
 const serviceRecordCreating = ref(false)
 const serviceRecordDeletingId = ref('')
@@ -696,6 +726,7 @@ const error = ref('')
 const ticketsError = ref('')
 const ticketSubmitError = ref('')
 const ticketSubmitSuccess = ref('')
+const ticketRefundErrorById = ref<Record<string, string>>({})
 const serviceRecordsError = ref('')
 const serviceRecordSubmitError = ref('')
 const serviceRecordSubmitSuccess = ref('')
@@ -707,6 +738,7 @@ const serviceRecords = ref<ServiceRecordViewModel[]>([])
 const configDraft = ref({ ...DEFAULT_CONFIG })
 const baselineConfigDraft = ref({ ...DEFAULT_CONFIG })
 const ticketDraft = ref<TicketDraft>(createTicketDraft())
+const ticketRefundDrafts = ref<Record<string, string>>({})
 const ticketFilters = ref<TicketFilterDraft>({
   status: '',
   search: '',
@@ -807,6 +839,12 @@ function formatRefundAmount(value: unknown): string {
     minimumFractionDigits: 2,
     maximumFractionDigits: 2,
   }).format(amount)
+}
+
+function formatRefundDraft(value: unknown): string {
+  const amount = toRefundAmount(value)
+  if (amount == null) return ''
+  return `${amount}`
 }
 
 function formatRecordDate(value: unknown): string {
@@ -1013,6 +1051,21 @@ function normalizeTicket(ticket: TicketRecord, approval: ApprovalSnapshot | null
   }
 }
 
+function updateTicketRefundDraft(ticketId: string, event: Event) {
+  const value = event.target instanceof HTMLInputElement ? event.target.value : ''
+  ticketRefundDrafts.value = {
+    ...ticketRefundDrafts.value,
+    [ticketId]: value,
+  }
+
+  if (ticketRefundErrorById.value[ticketId]) {
+    ticketRefundErrorById.value = {
+      ...ticketRefundErrorById.value,
+      [ticketId]: '',
+    }
+  }
+}
+
 function normalizeServiceRecordRow(record: ServiceRecordRow): ServiceRecordViewModel {
   const rawData = record.data && typeof record.data === 'object' ? record.data : {}
   return {
@@ -1173,6 +1226,59 @@ async function submitTicket() {
     ticketSubmitError.value = err instanceof Error ? err.message : 'Failed to create after-sales ticket'
   } finally {
     ticketCreating.value = false
+  }
+}
+
+async function requestTicketRefund(ticket: TicketViewModel) {
+  if (!ticket.id || ticketRefundSubmittingId.value) {
+    return
+  }
+
+  const rawRefundAmount = ticketRefundDrafts.value[ticket.id] ?? formatRefundDraft(ticket.data.refundAmount)
+  const parsedRefundAmount = parseOptionalRefundAmount(rawRefundAmount)
+  if (!parsedRefundAmount.valid || typeof parsedRefundAmount.value !== 'number') {
+    ticketRefundErrorById.value = {
+      ...ticketRefundErrorById.value,
+      [ticket.id]: 'Refund amount must be a valid number',
+    }
+    return
+  }
+
+  ticketRefundSubmittingId.value = ticket.id
+  ticketSubmitError.value = ''
+  ticketSubmitSuccess.value = ''
+  ticketRefundErrorById.value = {
+    ...ticketRefundErrorById.value,
+    [ticket.id]: '',
+  }
+
+  try {
+    const payload = await readEnvelope<CreateTicketResponse>(
+      `/api/after-sales/tickets/${encodeURIComponent(ticket.id)}/refund-request`,
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          refundAmount: parsedRefundAmount.value,
+        }),
+      },
+    )
+    const nextTicket = payload?.ticket ? normalizeTicket(payload.ticket, null) : null
+
+    if (nextTicket) {
+      tickets.value = tickets.value.map((item) => (item.id === nextTicket.id ? nextTicket : item))
+      ticketRefundDrafts.value = {
+        ...ticketRefundDrafts.value,
+        [ticket.id]: formatRefundDraft(nextTicket.data.refundAmount),
+      }
+      ticketSubmitSuccess.value = `Requested refund for ${nextTicket.data.ticketNo}`
+    }
+  } catch (err: unknown) {
+    ticketRefundErrorById.value = {
+      ...ticketRefundErrorById.value,
+      [ticket.id]: err instanceof Error ? err.message : 'Failed to request refund',
+    }
+  } finally {
+    ticketRefundSubmittingId.value = ''
   }
 }
 
@@ -1609,6 +1715,31 @@ onMounted(() => {
   justify-items: end;
 }
 
+.after-sales-view__ticket-side {
+  display: grid;
+  gap: 12px;
+  justify-items: end;
+}
+
+.after-sales-view__ticket-actions {
+  display: grid;
+  gap: 8px;
+  justify-items: end;
+}
+
+.after-sales-view__ticket-action-btn {
+  min-width: 132px;
+}
+
+.after-sales-view__field--compact {
+  width: min(220px, 100%);
+}
+
+.after-sales-view__inline-error--compact {
+  max-width: 220px;
+  margin: 0;
+}
+
 .after-sales-view__service-record-delete {
   min-width: 120px;
 }
@@ -1801,6 +1932,11 @@ code {
   }
 
   .after-sales-view__service-record-side {
+    justify-items: stretch;
+  }
+
+  .after-sales-view__ticket-side,
+  .after-sales-view__ticket-actions {
     justify-items: stretch;
   }
 }
