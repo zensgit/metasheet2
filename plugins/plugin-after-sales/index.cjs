@@ -21,6 +21,7 @@ const {
   buildUpdateTicketCommand,
   buildRefundDecisionEventPayload,
   buildServiceRecordCommand,
+  buildUpdateServiceRecordCommand,
   buildServiceRecordedEventPayload,
   buildRequestRefundCommand,
   buildTicketCreatedEventPayload,
@@ -347,6 +348,19 @@ async function findTicketByTicketNo(multitableApi, projectId, ticketNo) {
   }
 
   return null
+}
+
+async function getServiceRecordById(multitableApi, projectId, serviceRecordId) {
+  const sheetId = await findObjectSheetId(multitableApi.provisioning, projectId, 'serviceRecord')
+  const record = await multitableApi.records.getRecord({
+    sheetId,
+    recordId: serviceRecordId,
+  })
+  return {
+    sheetId,
+    record,
+    logicalData: await fromPhysicalServiceRecordData(multitableApi.provisioning, projectId, record.data),
+  }
 }
 
 async function getTicketRecordById(multitableApi, projectId, ticketId) {
@@ -1359,7 +1373,7 @@ module.exports = {
 
           const tenantId = getTenantId(req, context.logger)
           const current = await installer.loadCurrent(context, tenantId, appManifest.id)
-          if (!current || current.status === 'not-installed') {
+          if (!current || !isOperationalAfterSalesStatus(current.status)) {
             res.status(409).json({
               ok: false,
               error: {
@@ -1464,6 +1478,112 @@ module.exports = {
           res.status(500).json({
             ok: false,
             error: { code: 'INTERNAL_ERROR', message: 'Failed to create after-sales service record' },
+          })
+        }
+      },
+    )
+
+    context.api.http.addRoute(
+      'PATCH',
+      '/api/after-sales/service-records/:serviceRecordId',
+      async (req, res) => {
+        try {
+          const userId = getUserId(req)
+          if (!userId) {
+            sendUnauthorized(res)
+            return
+          }
+          if (!hasAfterSalesWriteAccess(req)) {
+            sendWriteForbidden(res)
+            return
+          }
+
+          const serviceRecordId =
+            typeof req?.params?.serviceRecordId === 'string' ? req.params.serviceRecordId.trim() : ''
+          if (!serviceRecordId) {
+            res.status(400).json({
+              ok: false,
+              error: { code: 'VALIDATION_ERROR', message: 'serviceRecordId is required' },
+            })
+            return
+          }
+
+          const multitableApi = getMultitableWriteApi(context)
+          if (!multitableApi) {
+            res.status(503).json({
+              ok: false,
+              error: {
+                code: 'MULTITABLE_UNAVAILABLE',
+                message: 'Multitable record writer is not available on plugin context',
+              },
+            })
+            return
+          }
+
+          const tenantId = getTenantId(req, context.logger)
+          const current = await installer.loadCurrent(context, tenantId, appManifest.id)
+          if (!current || !isOperationalAfterSalesStatus(current.status)) {
+            res.status(409).json({
+              ok: false,
+              error: {
+                code: 'AFTER_SALES_NOT_INSTALLED',
+                message: 'After-sales must be installed before updating service records',
+              },
+            })
+            return
+          }
+
+          const projectId = current.projectId || installer.getProjectId(tenantId, appManifest.id)
+          const { sheetId, record, logicalData } = await getServiceRecordById(multitableApi, projectId, serviceRecordId)
+          const command = buildUpdateServiceRecordCommand((req && req.body) || {}, {
+            id: record.id,
+            ...logicalData,
+          })
+          const updatedRecord = await multitableApi.records.patchRecord({
+            sheetId,
+            recordId: serviceRecordId,
+            changes: await toPhysicalServiceRecordData(multitableApi.provisioning, projectId, command.changes),
+          })
+          const logicalRecordData = await fromPhysicalServiceRecordData(
+            multitableApi.provisioning,
+            projectId,
+            updatedRecord.data,
+          )
+
+          res.json({
+            ok: true,
+            data: {
+              projectId,
+              serviceRecord: {
+                id: updatedRecord.id,
+                version: updatedRecord.version,
+                data: logicalRecordData,
+              },
+            },
+          })
+        } catch (err) {
+          if (err && err.code === 'AFTER_SALES_EVENT_VALIDATION_FAILED') {
+            sendBadRequest(res, err)
+            return
+          }
+          if (err && err.code === 'VALIDATION_ERROR') {
+            res.status(400).json({
+              ok: false,
+              error: { code: err.code, message: err.message },
+            })
+            return
+          }
+          if (err && err.code === 'NOT_FOUND') {
+            res.status(404).json({
+              ok: false,
+              error: { code: err.code, message: err.message },
+            })
+            return
+          }
+          logger.error && logger.error('after-sales update service record failed', err)
+          res.status(500).json({
+            ok: false,
+            error: { code: 'INTERNAL_ERROR', message: 'Failed to update after-sales service record' },
           })
         }
       },
