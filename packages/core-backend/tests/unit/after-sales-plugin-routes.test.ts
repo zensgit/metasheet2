@@ -263,6 +263,7 @@ function createContext(): {
   const pk = (field: string) => `${MOCK_PROJECT_ID}:serviceTicket:${field}`
   const iaPk = (field: string) => `${MOCK_PROJECT_ID}:installedAsset:${field}`
   const cuPk = (field: string) => `${MOCK_PROJECT_ID}:customer:${field}`
+  const fuPk = (field: string) => `${MOCK_PROJECT_ID}:followUp:${field}`
   const getObjectSheetId = vi.fn((projectId: string, objectId: string) => `${projectId}:${objectId}:sheet`)
   const getFieldId = vi.fn((projectId: string, objectId: string, fieldId: string) => `${projectId}:${objectId}:${fieldId}`)
   const findObjectSheet = vi.fn(async (input: { projectId: string; objectId: string }) => ({
@@ -317,6 +318,21 @@ function createContext(): {
             [cuPk('phone')]: '13800138000',
             [cuPk('email')]: 'alice@example.com',
             [cuPk('status')]: 'active',
+          },
+        }
+      : input.sheetId.includes('followUp')
+      ? {
+          id: 'rec_follow_up_001',
+          sheetId: input.sheetId,
+          version: 2,
+          data: {
+            [fuPk('ticketNo')]: 'TK-2001',
+            [fuPk('customerName')]: 'Alice Plant',
+            [fuPk('dueAt')]: '2026-04-10T09:00:00Z',
+            [fuPk('followUpType')]: 'visit',
+            [fuPk('ownerName')]: 'CSR Chen',
+            [fuPk('status')]: 'pending',
+            [fuPk('summary')]: 'Call back after onsite service',
           },
         }
       : input.sheetId.includes('serviceRecord')
@@ -375,6 +391,23 @@ function createContext(): {
             [cuPk('phone')]: '13800138000',
             [cuPk('email')]: 'alice@example.com',
             [cuPk('status')]: 'active',
+          },
+          filters: input.filters,
+          search: input.search,
+        }
+      : input.sheetId.includes('followUp')
+      ? {
+          id: 'rec_follow_up_001',
+          sheetId: input.sheetId,
+          version: 2,
+          data: {
+            [fuPk('ticketNo')]: 'TK-2001',
+            [fuPk('customerName')]: 'Alice Plant',
+            [fuPk('dueAt')]: '2026-04-10T09:00:00Z',
+            [fuPk('followUpType')]: 'visit',
+            [fuPk('ownerName')]: 'CSR Chen',
+            [fuPk('status')]: 'pending',
+            [fuPk('summary')]: 'Call back after onsite service',
           },
           filters: input.filters,
           search: input.search,
@@ -595,6 +628,7 @@ const stPk = (field: string) => `${MOCK_PROJECT_ID}:serviceTicket:${field}`
 const srPk = (field: string) => `${MOCK_PROJECT_ID}:serviceRecord:${field}`
 const iaPk = (field: string) => `${MOCK_PROJECT_ID}:installedAsset:${field}`
 const cuPk = (field: string) => `${MOCK_PROJECT_ID}:customer:${field}`
+const fuPk = (field: string) => `${MOCK_PROJECT_ID}:followUp:${field}`
 
 describe('plugin-after-sales routes', () => {
   let routes: Map<string, RegisteredHandler>
@@ -1472,6 +1506,205 @@ describe('plugin-after-sales routes', () => {
       projectId: 'tenant_42:after-sales',
       objectId: 'customer',
       fieldIds: ['status'],
+    })
+  })
+
+  it('returns 403 for follow-ups list when caller lacks after-sales read access', async () => {
+    const handler = routes.get('GET /api/after-sales/follow-ups')
+    const res = new FakeResponse()
+
+    await handler?.(buildReq({
+      user: {
+        id: 'user_42',
+        tenantId: 'tenant_42',
+        role: 'user',
+        roles: ['user'],
+        perms: [],
+      },
+    }), res)
+
+    expect(res.statusCode).toBe(403)
+    expect(res.body).toEqual({
+      ok: false,
+      error: {
+        code: 'FORBIDDEN',
+        message: 'After-sales read access required',
+      },
+    })
+    expect(queryRecords).not.toHaveBeenCalled()
+    expect(listRecords).not.toHaveBeenCalled()
+  })
+
+  it('returns 401 for follow-ups list when user is missing', async () => {
+    const handler = routes.get('GET /api/after-sales/follow-ups')
+    const res = new FakeResponse()
+
+    await handler?.(buildReq({
+      user: null,
+    }), res)
+
+    expect(res.statusCode).toBe(401)
+    expect(res.body).toEqual({
+      ok: false,
+      error: {
+        code: 'UNAUTHORIZED',
+        message: 'User ID not found',
+      },
+    })
+    expect(queryRecords).not.toHaveBeenCalled()
+    expect(listRecords).not.toHaveBeenCalled()
+  })
+
+  it('returns 503 when follow-up multitable reader is unavailable', async () => {
+    const handler = routes.get('GET /api/after-sales/follow-ups')
+    const res = new FakeResponse()
+
+    const originalQueryRecords = currentContext.api.multitable?.records.queryRecords
+    const originalListRecords = currentContext.api.multitable?.records.listRecords
+    if (currentContext.api.multitable?.records) {
+      currentContext.api.multitable.records.queryRecords = undefined as unknown as typeof queryRecords
+      currentContext.api.multitable.records.listRecords = undefined as unknown as typeof listRecords
+    }
+
+    try {
+      await handler?.(buildReq(), res)
+    } finally {
+      if (currentContext.api.multitable?.records) {
+        currentContext.api.multitable.records.queryRecords = originalQueryRecords
+        currentContext.api.multitable.records.listRecords = originalListRecords
+      }
+    }
+
+    expect(res.statusCode).toBe(503)
+    expect(res.body).toEqual({
+      ok: false,
+      error: {
+        code: 'MULTITABLE_UNAVAILABLE',
+        message: 'Multitable record reader is not available on plugin context',
+      },
+    })
+  })
+
+  it('returns 409 when follow-ups are listed from a failed install state', async () => {
+    const handler = routes.get('GET /api/after-sales/follow-ups')
+    const res = new FakeResponse()
+
+    db.rows.push({
+      id: 'fake-uuid-1',
+      tenant_id: 'tenant_42',
+      app_id: 'after-sales',
+      project_id: 'tenant_42:after-sales',
+      template_id: 'after-sales-default',
+      template_version: '0.1.0',
+      mode: 'reinstall',
+      status: 'failed',
+      created_objects_json: JSON.stringify(['serviceTicket', 'followUp']),
+      created_views_json: JSON.stringify(['ticket-board', 'followUp-grid']),
+      warnings_json: JSON.stringify(['follow-up projection failed']),
+      display_name: 'After-sales',
+      config_json: JSON.stringify({}),
+      last_install_at: new Date(),
+      created_at: new Date(),
+    })
+
+    await handler?.(buildReq(), res)
+
+    expect(res.statusCode).toBe(409)
+    expect(res.body).toEqual({
+      ok: false,
+      error: {
+        code: 'AFTER_SALES_NOT_INSTALLED',
+        message: 'After-sales must be installed before listing follow-ups',
+      },
+    })
+    expect(queryRecords).not.toHaveBeenCalled()
+    expect(listRecords).not.toHaveBeenCalled()
+  })
+
+  it('lists follow-ups through the multitable read seam', async () => {
+    const handler = routes.get('GET /api/after-sales/follow-ups')
+    const res = new FakeResponse()
+
+    db.rows.push({
+      id: 'fake-uuid-1',
+      tenant_id: 'tenant_42',
+      app_id: 'after-sales',
+      project_id: 'tenant_42:after-sales',
+      template_id: 'after-sales-default',
+      template_version: '0.1.0',
+      mode: 'enable',
+      status: 'installed',
+      created_objects_json: JSON.stringify(['serviceTicket', 'followUp']),
+      created_views_json: JSON.stringify(['ticket-board', 'followUp-grid']),
+      warnings_json: JSON.stringify([]),
+      display_name: 'After-sales',
+      config_json: JSON.stringify({}),
+      last_install_at: new Date(),
+      created_at: new Date(),
+    })
+
+    queryRecords.mockResolvedValueOnce([
+      {
+        id: 'rec_follow_up_001',
+        version: 2,
+        data: {
+          [fuPk('ticketNo')]: 'TK-2001',
+          [fuPk('customerName')]: 'Alice Plant',
+          [fuPk('dueAt')]: '2026-04-10T09:00:00Z',
+          [fuPk('followUpType')]: 'visit',
+          [fuPk('ownerName')]: 'CSR Chen',
+          [fuPk('status')]: 'pending',
+          [fuPk('summary')]: 'Call back after onsite service',
+        },
+      },
+    ])
+
+    await handler?.(buildReq({
+      query: {
+        status: 'pending',
+        ticketNo: 'TK-2001',
+        search: 'onsite',
+      },
+    }), res)
+
+    expect(res.statusCode).toBe(200)
+    expect(queryRecords).toHaveBeenCalledWith({
+      sheetId: 'tenant_42:after-sales:followUp:sheet',
+      filters: {
+        [fuPk('status')]: 'pending',
+        [fuPk('ticketNo')]: 'TK-2001',
+      },
+      search: 'onsite',
+      limit: undefined,
+      offset: undefined,
+    })
+    expect(res.body.data).toEqual({
+      projectId: 'tenant_42:after-sales',
+      followUps: [
+        {
+          id: 'rec_follow_up_001',
+          version: 2,
+          data: {
+            ticketNo: 'TK-2001',
+            customerName: 'Alice Plant',
+            dueAt: '2026-04-10T09:00:00Z',
+            followUpType: 'visit',
+            ownerName: 'CSR Chen',
+            status: 'pending',
+            summary: 'Call back after onsite service',
+          },
+        },
+      ],
+      count: 1,
+    })
+    expect(findObjectSheet).toHaveBeenCalledWith({
+      projectId: 'tenant_42:after-sales',
+      objectId: 'followUp',
+    })
+    expect(resolveFieldIds).toHaveBeenCalledWith({
+      projectId: 'tenant_42:after-sales',
+      objectId: 'followUp',
+      fieldIds: ['status', 'ticketNo'],
     })
   })
 
