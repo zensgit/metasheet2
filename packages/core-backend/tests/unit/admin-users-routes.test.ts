@@ -451,6 +451,87 @@ describe('admin-users routes', () => {
     })
   })
 
+  it('filters delegated access member groups to the actor-visible delegated groups', async () => {
+    state.authUser = {
+      id: 'crm-admin-1',
+      role: 'user',
+    }
+    rbacMocks.isAdmin
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(false)
+    pgMocks.query
+      .mockResolvedValueOnce({
+        rows: [{ role_id: 'crm_admin' }],
+      })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'group-scope-1',
+          admin_user_id: 'crm-admin-1',
+          namespace: 'crm',
+          group_id: 'group-1',
+          created_by: 'admin-1',
+          created_at: '2026-03-12T00:00:00.000Z',
+          updated_at: '2026-03-12T00:05:00.000Z',
+          group_name: 'CRM 经理层',
+          group_description: 'CRM 可见组',
+          member_count: 2,
+        }],
+      })
+      .mockResolvedValueOnce({ rows: [{ allowed: true }] })
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'user-1',
+          email: 'alpha@example.com',
+          name: 'Alpha',
+          role: 'user',
+          is_active: true,
+          is_admin: false,
+          last_login_at: null,
+          created_at: '2026-03-12T00:00:00.000Z',
+          updated_at: '2026-03-12T00:00:00.000Z',
+        }],
+      })
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'group-1',
+          name: 'CRM 经理层',
+          description: 'CRM 可见组',
+          created_by: 'admin-1',
+          updated_by: 'admin-1',
+          created_at: '2026-03-12T00:00:00.000Z',
+          updated_at: '2026-03-12T00:00:00.000Z',
+          member_count: 2,
+        }],
+      })
+      .mockResolvedValueOnce({
+        rows: [{ role_id: 'crm_operator' }],
+      })
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'crm_admin',
+          name: 'CRM Admin',
+          permissions: ['crm:read', 'crm:write', 'crm:admin'],
+        }, {
+          id: 'crm_operator',
+          name: 'CRM Operator',
+          permissions: ['crm:read', 'crm:write'],
+        }],
+      })
+
+    const response = await invokeRoute('get', '/api/admin/role-delegation/users/:userId/access', {
+      params: { userId: 'user-1' },
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect((response.body as Record<string, any>).data.memberGroups).toEqual([
+      expect.objectContaining({
+        id: 'group-1',
+        name: 'CRM 经理层',
+      }),
+    ])
+  })
+
   it('rejects delegated role assignment outside allowed namespaces', async () => {
     state.authUser = {
       id: 'crm-admin-1',
@@ -903,6 +984,21 @@ describe('admin-users routes', () => {
     }))
   })
 
+  it('returns 409 when creating a duplicate scope template name', async () => {
+    rbacMocks.isAdmin.mockResolvedValue(true)
+    pgMocks.query.mockRejectedValueOnce({
+      code: '23505',
+      message: 'duplicate key value violates unique constraint "idx_delegated_role_scope_templates_name"',
+    })
+
+    const response = await invokeRoute('post', '/api/admin/role-delegation/scope-templates', {
+      body: { name: '华东销售', description: '华东销售线模板' },
+    })
+
+    expect(response.statusCode).toBe(409)
+    expect((response.body as Record<string, any>).error.code).toBe('ROLE_DELEGATION_SCOPE_TEMPLATE_NAME_CONFLICT')
+  })
+
   it('creates a platform member group', async () => {
     rbacMocks.isAdmin.mockResolvedValue(true)
     pgMocks.query
@@ -937,6 +1033,21 @@ describe('admin-users routes', () => {
     }))
   })
 
+  it('returns 409 when creating a duplicate platform member group name', async () => {
+    rbacMocks.isAdmin.mockResolvedValue(true)
+    pgMocks.query.mockRejectedValueOnce({
+      code: '23505',
+      message: 'duplicate key value violates unique constraint "idx_platform_member_groups_name"',
+    })
+
+    const response = await invokeRoute('post', '/api/admin/role-delegation/member-groups', {
+      body: { name: '制造中心', description: '制造中心成员集' },
+    })
+
+    expect(response.statusCode).toBe(409)
+    expect((response.body as Record<string, any>).error.code).toBe('PLATFORM_MEMBER_GROUP_NAME_CONFLICT')
+  })
+
   it('assigns a user to a platform member group', async () => {
     rbacMocks.isAdmin.mockResolvedValue(true)
     pgMocks.query
@@ -955,6 +1066,19 @@ describe('admin-users routes', () => {
       })
       .mockResolvedValueOnce({ rows: [{ id: 'group-1' }] })
       .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'user-1',
+          email: 'alpha@example.com',
+          name: 'Alpha',
+          role: 'user',
+          is_active: true,
+          is_admin: false,
+          last_login_at: null,
+          created_at: '2026-03-12T00:00:00.000Z',
+          updated_at: '2026-03-12T00:00:00.000Z',
+        }],
+      })
 
     const response = await invokeRoute('post', '/api/admin/role-delegation/users/:userId/member-groups/:action(assign|unassign)', {
       params: { userId: 'user-1', action: 'assign' },

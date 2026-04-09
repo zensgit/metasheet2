@@ -374,6 +374,16 @@ function readBooleanEnv(name: string, fallback: boolean): boolean {
   return fallback
 }
 
+function isDatabaseUniqueConstraintError(error: unknown): boolean {
+  const dbError = error as { code?: string, message?: string }
+  if (dbError?.code === '23505') return true
+  if (typeof dbError?.message === 'string') {
+    const message = dbError.message.toLowerCase()
+    return message.includes('duplicate key') || message.includes('unique constraint')
+  }
+  return false
+}
+
 async function fetchDingTalkAccessSnapshot(userId: string) {
   const [grantResult, identityResult] = await Promise.all([
     query<AdminDingTalkGrantRow>(
@@ -699,25 +709,49 @@ async function fetchPlatformMemberGroupMembers(groupId: string) {
   })
 }
 
-async function fetchPlatformMemberGroupMembershipsForUser(userId: string) {
-  const result = await query<PlatformMemberGroupRow>(
-    `SELECT
-        g.id,
-        g.name,
-        g.description,
-        g.created_by,
-        g.updated_by,
-        g.created_at,
-        g.updated_at,
-        COUNT(gm2.user_id)::int AS member_count
-     FROM platform_member_groups g
-     JOIN platform_member_group_members gm ON gm.group_id = g.id
-     LEFT JOIN platform_member_group_members gm2 ON gm2.group_id = g.id
-     WHERE gm.user_id = $1
-     GROUP BY g.id, g.name, g.description, g.created_by, g.updated_by, g.created_at, g.updated_at
-     ORDER BY g.name ASC`,
-    [userId],
-  )
+async function fetchPlatformMemberGroupMembershipsForUser(userId: string, allowedGroupIds?: string[]) {
+  if (Array.isArray(allowedGroupIds) && allowedGroupIds.length === 0) {
+    return []
+  }
+
+  const result = Array.isArray(allowedGroupIds)
+    ? await query<PlatformMemberGroupRow>(
+      `SELECT
+          g.id,
+          g.name,
+          g.description,
+          g.created_by,
+          g.updated_by,
+          g.created_at,
+          g.updated_at,
+          COUNT(gm2.user_id)::int AS member_count
+       FROM platform_member_groups g
+       JOIN platform_member_group_members gm ON gm.group_id = g.id
+       LEFT JOIN platform_member_group_members gm2 ON gm2.group_id = g.id
+       WHERE gm.user_id = $1
+         AND g.id = ANY($2::uuid[])
+       GROUP BY g.id, g.name, g.description, g.created_by, g.updated_by, g.created_at, g.updated_at
+       ORDER BY g.name ASC`,
+      [userId, allowedGroupIds],
+    )
+    : await query<PlatformMemberGroupRow>(
+      `SELECT
+          g.id,
+          g.name,
+          g.description,
+          g.created_by,
+          g.updated_by,
+          g.created_at,
+          g.updated_at,
+          COUNT(gm2.user_id)::int AS member_count
+       FROM platform_member_groups g
+       JOIN platform_member_group_members gm ON gm.group_id = g.id
+       LEFT JOIN platform_member_group_members gm2 ON gm2.group_id = g.id
+       WHERE gm.user_id = $1
+       GROUP BY g.id, g.name, g.description, g.created_by, g.updated_by, g.created_at, g.updated_at
+       ORDER BY g.name ASC`,
+      [userId],
+    )
 
   return result.rows.map((row) => ({
     id: row.id,
@@ -1182,6 +1216,10 @@ async function isUserWithinDelegatedScope(adminUserId: string, namespaces: strin
   return result.rows[0]?.allowed === true
 }
 
+function deriveVisibleDelegatedMemberGroupIds(groupAssignments: Array<{ groupId: string }>): string[] {
+  return Array.from(new Set(groupAssignments.map((assignment) => assignment.groupId).filter(Boolean))).sort()
+}
+
 function deriveMatchingNamespacesForRole(roleId: string, namespaces: string[]): string[] {
   return namespaces.filter((namespace) => roleIdMatchesNamespaces(roleId, [namespace]))
 }
@@ -1412,6 +1450,9 @@ export function adminUsersRouter(): Router {
         item,
       })
     } catch (error) {
+      if (isDatabaseUniqueConstraintError(error)) {
+        return jsonError(res, 409, 'PLATFORM_MEMBER_GROUP_NAME_CONFLICT', 'Platform member group name already exists')
+      }
       return jsonError(res, 500, 'PLATFORM_MEMBER_GROUP_CREATE_FAILED', (error as Error)?.message || 'Failed to create platform member group')
     }
   })
@@ -1488,6 +1529,9 @@ export function adminUsersRouter(): Router {
         item: template,
       })
     } catch (error) {
+      if (isDatabaseUniqueConstraintError(error)) {
+        return jsonError(res, 409, 'ROLE_DELEGATION_SCOPE_TEMPLATE_NAME_CONFLICT', 'Scope template name already exists')
+      }
       return jsonError(res, 500, 'ROLE_DELEGATION_SCOPE_TEMPLATE_CREATE_FAILED', (error as Error)?.message || 'Failed to create scope template')
     }
   })
@@ -2113,9 +2157,12 @@ export function adminUsersRouter(): Router {
         }
       }
 
+      const visibleMemberGroupIds = delegation.isPlatformAdmin
+        ? undefined
+        : deriveVisibleDelegatedMemberGroupIds(groupAssignments)
       const [snapshot, memberGroups] = await Promise.all([
         fetchUserAccessSnapshot(userId),
-        fetchPlatformMemberGroupMembershipsForUser(userId),
+        fetchPlatformMemberGroupMembershipsForUser(userId, visibleMemberGroupIds),
       ])
       if (!snapshot) return jsonError(res, 404, 'NOT_FOUND', 'User not found')
 

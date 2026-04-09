@@ -20,6 +20,8 @@
 
 1. 扩展角色委派页：
    - [RoleDelegationView.vue](/Users/huazhou/Downloads/Github/metasheet2/.worktrees/dingtalk-phase3-20260408/apps/web/src/views/RoleDelegationView.vue)
+2. 新增前端视图测试：
+   - [roleDelegationView.spec.ts](/Users/huazhou/Downloads/Github/metasheet2/.worktrees/dingtalk-phase3-20260408/apps/web/tests/roleDelegationView.spec.ts)
 
 ## 新增接口
 
@@ -91,3 +93,6 @@
 2. 模板仍是 copy-on-apply，避免 live-linked 影响已发放管理员。
 3. 没有用户组范围时，原有部门树逻辑继续生效。
 4. 没有部门范围但有用户组范围时，也允许插件管理员在该固定人群内委派。
+5. 平台成员组和范围模板创建时，唯一约束冲突会显式映射为 `409`，避免前端把重名误判成系统故障。
+6. 角色委派页在搜索成员组后若当前选中项已不在结果集中，会清空失效选择并禁用“将当前成员加入成员集”按钮，避免提交隐藏的旧 `groupId`。
+7. 非平台管理员查看成员委派详情时，只返回自己已被授权的成员组范围，不暴露目标成员的全部平台用户组归属。

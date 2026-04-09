@@ -18,6 +18,7 @@
 2. 用户组是平台治理实体，由平台管理员维护，不下放给插件管理员创建。
 3. 运行时仍然按“copy-on-apply”工作，不做 live-linked 模板，降低联动复杂度。
 4. 插件管理员越权边界不变：只能分配自己命名空间下的角色，且目标成员必须命中已授权部门或用户组。
+5. 非平台管理员只暴露命中自己委派范围的成员组信息，不返回目标成员的全量平台用户组归属。
 
 ## 数据模型
 
@@ -57,6 +58,11 @@
 3. `POST /api/admin/role-delegation/users/:userId/roles/:action`
    - 真正分配或撤销插件角色时的越权校验
 
+补充约束：
+
+1. 非平台管理员访问 `GET /api/admin/role-delegation/users/:userId/access` 时，`memberGroups` 只返回当前管理员可见的委派成员组。
+2. 平台管理员仍可看到目标成员的完整平台用户组归属。
+
 ## 管理面
 
 平台管理员新增 3 组动作：
@@ -94,6 +100,11 @@
 2. 基于用户组的数据权限过滤
 3. 用户组模板再嵌套用户组
 4. live-linked 模板变更自动刷新到所有已应用管理员
+
+## 错误语义
+
+1. 平台成员组名称唯一冲突返回 `409 PLATFORM_MEMBER_GROUP_NAME_CONFLICT`。
+2. 组织范围模板名称唯一冲突返回 `409 ROLE_DELEGATION_SCOPE_TEMPLATE_NAME_CONFLICT`。
 
 ## 后续建议
 

@@ -177,7 +177,7 @@
               <button
                 class="delegation-page__button"
                 type="button"
-                :disabled="groupBusy || !selectedMemberGroupId || !selectedUserId"
+                :disabled="groupBusy || !hasSelectedMemberGroup || !selectedUserId"
                 @click="void updateUserMemberGroup('assign')"
               >
                 将当前成员加入成员集
@@ -431,7 +431,7 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { apiFetch } from '../utils/api'
 
 type ManagedUser = {
@@ -592,6 +592,11 @@ const selectedScopeConfig = ref<DelegatedAdminScopeConfig | null>(null)
 const selectedTemplate = ref<ScopeTemplateDetail | null>(null)
 const selectedMemberGroup = ref<MemberGroupDetail | null>(null)
 
+const hasSelectedMemberGroup = computed(() => (
+  !!selectedMemberGroupId.value
+  && memberGroups.value.some((group) => group.id === selectedMemberGroupId.value)
+))
+
 function setStatus(message: string, tone: 'info' | 'error' = 'info') {
   status.value = message
   statusTone.value = tone
@@ -647,7 +652,14 @@ async function loadMemberGroups(): Promise<void> {
     }
     const data = payload.data as { items?: MemberGroupSummary[] } | undefined
     memberGroups.value = Array.isArray(data?.items) ? data.items : []
-    if (!selectedMemberGroupId.value && memberGroups.value.length > 0) {
+    const selectedStillExists = memberGroups.value.some((group) => group.id === selectedMemberGroupId.value)
+    if (selectedMemberGroupId.value && !selectedStillExists) {
+      selectedMemberGroupId.value = ''
+      selectedMemberGroup.value = null
+    }
+    if (selectedMemberGroupId.value && selectedStillExists) {
+      await selectMemberGroup(selectedMemberGroupId.value)
+    } else if (memberGroups.value.length > 0) {
       await selectMemberGroup(memberGroups.value[0].id)
     }
   } catch (error) {
@@ -978,7 +990,7 @@ async function updateScopeGroup(action: 'assign' | 'unassign', assignment?: Grou
 
 async function updateUserMemberGroup(action: 'assign' | 'unassign', userIdOverride?: string): Promise<void> {
   const targetUserId = userIdOverride || selectedUserId.value
-  if (!summary.value?.isPlatformAdmin || !targetUserId || !selectedMemberGroupId.value) return
+  if (!summary.value?.isPlatformAdmin || !targetUserId || !selectedMemberGroupId.value || !hasSelectedMemberGroup.value) return
   groupBusy.value = true
   try {
     const response = await apiFetch(`/api/admin/role-delegation/users/${encodeURIComponent(targetUserId)}/member-groups/${action}`, {

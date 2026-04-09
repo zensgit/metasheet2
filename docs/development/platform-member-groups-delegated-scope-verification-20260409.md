@@ -7,6 +7,7 @@
 
 ```bash
 pnpm --filter @metasheet/core-backend exec vitest run tests/unit/admin-users-routes.test.ts
+pnpm --filter @metasheet/web exec vitest run tests/roleDelegationView.spec.ts --watch=false
 pnpm --filter @metasheet/core-backend build
 pnpm --filter @metasheet/web type-check
 ```
@@ -23,7 +24,7 @@ pnpm --filter @metasheet/core-backend exec vitest run tests/unit/admin-users-rou
 
 结果：
 
-- `44/44` 通过
+- `47/47` 通过
 
 覆盖到的新场景：
 
@@ -32,6 +33,26 @@ pnpm --filter @metasheet/core-backend exec vitest run tests/unit/admin-users-rou
 3. 给插件管理员分配成员组范围
 4. 模板复制成员组范围
 5. 插件管理员仅凭成员组范围也可对命中成员委派角色
+6. 非平台管理员查看成员访问详情时，只返回自己可见的成员组范围
+7. 平台成员组重名创建返回 `409`
+8. 组织范围模板重名创建返回 `409`
+
+### 前端视图测试
+
+命令：
+
+```bash
+pnpm --filter @metasheet/web exec vitest run tests/roleDelegationView.spec.ts --watch=false
+```
+
+结果：
+
+- `1/1` 通过
+
+覆盖到的新场景：
+
+1. 搜索成员组后如果当前选中项不再出现在结果集中，会清空失效选择
+2. “将当前成员加入成员集”按钮在失效选择场景下保持禁用
 
 ### 后端构建
 
