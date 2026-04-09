@@ -1841,4 +1841,105 @@ describe('after-sales plugin install integration', () => {
       },
     })
   })
+
+  it('creates and deletes installed assets through the real after-sales routes', async () => {
+    if (!baseUrl || !pool) return
+
+    const tokenRes = await requestJson(
+      `${baseUrl}/api/auth/dev-token?userId=after-sales-installed-asset-delete-it&roles=admin&perms=*:*`,
+    )
+    const token = (tokenRes.body as { token?: string } | undefined)?.token
+    expect(token).toBeTruthy()
+
+    const installRes = await requestJson(`${baseUrl}/api/after-sales/projects/install`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        templateId: 'after-sales-default',
+        displayName: 'After Sales Installed Asset Delete Flow',
+      }),
+    })
+    expect(installRes.status).toBe(200)
+
+    const createRes = await requestJson(`${baseUrl}/api/after-sales/installed-assets`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        installedAsset: {
+          assetCode: 'AST-5002',
+          serialNo: 'SN-5002',
+          model: 'Compressor Delete',
+          location: 'Plant 6',
+          installedAt: '2026-04-13T08:00:00Z',
+          warrantyUntil: '2027-04-13',
+          status: 'active',
+        },
+      }),
+    })
+    expect(createRes.status).toBe(201)
+
+    const createBody = createRes.body as {
+      ok?: boolean
+      data?: {
+        installedAsset?: {
+          id?: string
+        }
+      }
+    }
+    const createdInstalledAssetId = createBody.data?.installedAsset?.id
+    expect(createdInstalledAssetId).toBeTruthy()
+
+    const deleteRes = await requestJson(`${baseUrl}/api/after-sales/installed-assets/${createdInstalledAssetId}`, {
+      method: 'DELETE',
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    })
+    expect(deleteRes.status).toBe(200)
+    expect(deleteRes.body).toMatchObject({
+      ok: true,
+      data: {
+        projectId: PROJECT_ID,
+        installedAssetId: createdInstalledAssetId,
+        deleted: true,
+      },
+    })
+
+    const installedAssetSheetId = stableMetaId('sheet', PROJECT_ID, 'installedAsset')
+    const deletedRecordRes = await waitFor(
+      () => pool.query<{ id: string }>(
+        'SELECT id FROM meta_records WHERE id = $1 AND sheet_id = $2',
+        [createdInstalledAssetId, installedAssetSheetId],
+      ),
+      (result) => result.rows.length === 0,
+      { timeoutMs: 5000, intervalMs: 100 },
+    )
+    expect(deletedRecordRes.rows).toHaveLength(0)
+
+    const listRes = await requestJson(`${baseUrl}/api/after-sales/installed-assets?status=active&search=AST-5002`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    })
+    expect(listRes.status).toBe(200)
+    const listBody = listRes.body as {
+      ok?: boolean
+      data?: {
+        count?: number
+        installedAssets?: Array<{
+          id?: string
+          data?: Record<string, unknown>
+        }>
+      }
+    }
+    expect(listBody.ok).toBe(true)
+    expect(listBody.data?.count).toBe(0)
+    expect(listBody.data?.installedAssets ?? []).toEqual([])
+  })
 })

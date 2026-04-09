@@ -1317,6 +1317,121 @@ describe('plugin-after-sales routes', () => {
     })
   })
 
+  it('returns 403 for installed-assets delete when caller lacks after-sales write access', async () => {
+    const handler = routes.get('DELETE /api/after-sales/installed-assets/:installedAssetId')
+    const res = new FakeResponse()
+
+    await handler?.(buildReq({
+      user: {
+        id: 'user_42',
+        tenantId: 'tenant_42',
+        role: 'user',
+        roles: ['user'],
+        perms: ['after_sales:read'],
+      },
+      params: {
+        installedAssetId: 'rec_asset_001',
+      },
+    }), res)
+
+    expect(res.statusCode).toBe(403)
+    expect(res.body).toEqual({
+      ok: false,
+      error: {
+        code: 'FORBIDDEN',
+        message: 'After-sales write access required',
+      },
+    })
+    expect(deleteRecord).not.toHaveBeenCalled()
+  })
+
+  it('deletes an installed asset through the multitable delete seam', async () => {
+    const handler = routes.get('DELETE /api/after-sales/installed-assets/:installedAssetId')
+    const res = new FakeResponse()
+
+    db.rows.push({
+      id: 'fake-uuid-1',
+      tenant_id: 'tenant_42',
+      app_id: 'after-sales',
+      project_id: 'tenant_42:after-sales',
+      template_id: 'after-sales-default',
+      template_version: '0.1.0',
+      mode: 'enable',
+      status: 'installed',
+      created_objects_json: JSON.stringify(['serviceTicket', 'serviceRecord', 'installedAsset']),
+      created_views_json: JSON.stringify(['ticket-board', 'serviceRecord-calendar', 'installedAsset-grid']),
+      warnings_json: JSON.stringify([]),
+      display_name: 'After-sales',
+      config_json: JSON.stringify({}),
+      last_install_at: new Date(),
+      created_at: new Date(),
+    })
+
+    await handler?.(buildReq({
+      user: {
+        id: 'writer_42',
+        tenantId: 'tenant_42',
+        role: 'user',
+        roles: ['user'],
+        perms: ['after_sales:write'],
+      },
+      params: {
+        installedAssetId: 'rec_asset_001',
+      },
+    }), res)
+
+    expect(res.statusCode).toBe(200)
+    expect(deleteRecord).toHaveBeenCalledWith({
+      sheetId: 'tenant_42:after-sales:installedAsset:sheet',
+      recordId: 'rec_asset_001',
+    })
+    expect(res.body.data).toEqual({
+      projectId: 'tenant_42:after-sales',
+      installedAssetId: 'rec_asset_001',
+      version: 4,
+      deleted: true,
+    })
+  })
+
+  it('returns 409 when deleting installed assets from a failed install state', async () => {
+    const handler = routes.get('DELETE /api/after-sales/installed-assets/:installedAssetId')
+    const res = new FakeResponse()
+
+    db.rows.push({
+      id: 'fake-uuid-1',
+      tenant_id: 'tenant_42',
+      app_id: 'after-sales',
+      project_id: 'tenant_42:after-sales',
+      template_id: 'after-sales-default',
+      template_version: '0.1.0',
+      mode: 'reinstall',
+      status: 'failed',
+      created_objects_json: JSON.stringify(['serviceTicket', 'serviceRecord', 'installedAsset']),
+      created_views_json: JSON.stringify(['ticket-board', 'serviceRecord-calendar', 'installedAsset-grid']),
+      warnings_json: JSON.stringify(['installed asset delete failed']),
+      display_name: 'After-sales',
+      config_json: JSON.stringify({}),
+      last_install_at: new Date(),
+      created_at: new Date(),
+    })
+
+    await handler?.(buildReq({
+      params: {
+        installedAssetId: 'rec_asset_001',
+      },
+    }), res)
+
+    expect(res.statusCode).toBe(409)
+    expect(res.body).toEqual({
+      ok: false,
+      error: {
+        code: 'AFTER_SALES_NOT_INSTALLED',
+        message: 'After-sales must be installed before deleting installed assets',
+      },
+    })
+    expect(deleteRecord).not.toHaveBeenCalled()
+  })
+
   it('returns 403 for service-records when caller lacks after-sales write access', async () => {
     const handler = routes.get('POST /api/after-sales/service-records')
     const res = new FakeResponse()
