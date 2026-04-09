@@ -37,6 +37,7 @@ const {
 
 const SERVICE_TICKET_FIELDS = ['ticketNo', 'title', 'source', 'priority', 'status', 'slaDueAt', 'refundAmount', 'refundStatus']
 const SERVICE_RECORD_FIELDS = ['ticketNo', 'visitType', 'scheduledAt', 'completedAt', 'technicianName', 'workSummary', 'result']
+const INSTALLED_ASSET_FIELDS = ['assetCode', 'serialNo', 'model', 'location', 'installedAt', 'warrantyUntil', 'status']
 
 async function toPhysicalTicketData(provisioning, projectId, logicalData) {
   return toPhysicalRecord(provisioning, projectId, 'serviceTicket', logicalData)
@@ -52,6 +53,10 @@ async function toPhysicalServiceRecordData(provisioning, projectId, logicalData)
 
 async function fromPhysicalServiceRecordData(provisioning, projectId, physicalData) {
   return fromPhysicalRecord(provisioning, projectId, 'serviceRecord', SERVICE_RECORD_FIELDS, physicalData)
+}
+
+async function fromPhysicalInstalledAssetData(provisioning, projectId, physicalData) {
+  return fromPhysicalRecord(provisioning, projectId, 'installedAsset', INSTALLED_ASSET_FIELDS, physicalData)
 }
 
 let activeContext = null
@@ -1032,6 +1037,148 @@ module.exports = {
           res.status(500).json({
             ok: false,
             error: { code: 'INTERNAL_ERROR', message: 'Failed to delete after-sales ticket' },
+          })
+        }
+      },
+    )
+
+    context.api.http.addRoute(
+      'GET',
+      '/api/after-sales/installed-assets',
+      async (req, res) => {
+        try {
+          const userId = getUserId(req)
+          if (!userId) {
+            sendUnauthorized(res)
+            return
+          }
+          if (!hasAfterSalesReadAccess(req)) {
+            res.status(403).json({
+              ok: false,
+              error: { code: 'FORBIDDEN', message: 'After-sales read access required' },
+            })
+            return
+          }
+
+          const multitableApi = getMultitableReadApi(context)
+          if (!multitableApi || (typeof multitableApi.records.listRecords !== 'function' && typeof multitableApi.records.queryRecords !== 'function')) {
+            res.status(503).json({
+              ok: false,
+              error: {
+                code: 'MULTITABLE_UNAVAILABLE',
+                message: 'Multitable record reader is not available on plugin context',
+              },
+            })
+            return
+          }
+
+          const tenantId = getTenantId(req, context.logger)
+          const current = await installer.loadCurrent(context, tenantId, appManifest.id)
+          if (!current || !isOperationalAfterSalesStatus(current.status)) {
+            res.status(409).json({
+              ok: false,
+              error: {
+                code: 'AFTER_SALES_NOT_INSTALLED',
+                message: 'After-sales must be installed before listing installed assets',
+              },
+            })
+            return
+          }
+
+          const projectId = current.projectId || installer.getProjectId(tenantId, appManifest.id)
+          const sheetId = await findObjectSheetId(multitableApi.provisioning, projectId, 'installedAsset')
+          const status = typeof req?.query?.status === 'string' && req.query.status.trim()
+            ? req.query.status.trim()
+            : null
+          const search = typeof req?.query?.search === 'string' && req.query.search.trim()
+            ? req.query.search.trim()
+            : null
+          const limit = typeof req?.query?.limit === 'string' && req.query.limit.trim()
+            ? Number(req.query.limit)
+            : undefined
+          const offset = typeof req?.query?.offset === 'string' && req.query.offset.trim()
+            ? Number(req.query.offset)
+            : undefined
+
+          const recordsApi = multitableApi.records
+          let installedAssets
+          if (typeof recordsApi.queryRecords === 'function') {
+            const physicalFieldIds = status
+              ? await resolvePhysicalFieldIds(
+                  multitableApi.provisioning,
+                  projectId,
+                  'installedAsset',
+                  ['status'],
+                )
+              : {}
+            const filters = status
+              ? {
+                  [physicalFieldIds.status || 'status']: status,
+                }
+              : undefined
+            installedAssets = await recordsApi.queryRecords({
+              sheetId,
+              filters,
+              search,
+              limit,
+              offset,
+            })
+          } else {
+            installedAssets = await recordsApi.listRecords({
+              sheetId,
+              limit,
+              offset,
+            })
+          }
+
+          const logicalInstalledAssets = Array.isArray(installedAssets)
+            ? (
+                await Promise.all(
+                  installedAssets.map(async (installedAsset) => ({
+                    id: installedAsset.id,
+                    version: installedAsset.version,
+                    data: await fromPhysicalInstalledAssetData(
+                      multitableApi.provisioning,
+                      projectId,
+                      installedAsset.data,
+                    ),
+                  })),
+                )
+              ).filter((record) => {
+                if (status && record.data.status !== status) return false
+                if (!search) return true
+                const haystack = JSON.stringify(record.data).toLowerCase()
+                return haystack.includes(search.toLowerCase())
+              })
+            : []
+
+          res.json({
+            ok: true,
+            data: {
+              projectId,
+              installedAssets: logicalInstalledAssets,
+              count: logicalInstalledAssets.length,
+            },
+          })
+        } catch (err) {
+          if (err && err.code === 'VALIDATION_ERROR') {
+            res.status(400).json({
+              ok: false,
+              error: { code: err.code, message: err.message },
+            })
+            return
+          }
+          if (err && err.code === 'NOT_FOUND') {
+            res.status(404).json({
+              ok: false,
+              error: { code: err.code, message: err.message },
+            })
+            return
+          }
+          logger.error && logger.error('after-sales list installed assets failed', err)
+          res.status(500).json({
+            ok: false,
+            error: { code: 'INTERNAL_ERROR', message: 'Failed to list after-sales installed assets' },
           })
         }
       },
