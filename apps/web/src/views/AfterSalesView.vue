@@ -185,6 +185,102 @@
             </div>
           </div>
 
+          <form class="after-sales-view__service-record-form" @submit.prevent="submitServiceRecord">
+            <label class="after-sales-view__field">
+              <span>Ticket no</span>
+              <input
+                id="after-sales-service-record-ticket-no"
+                v-model="serviceRecordDraft.ticketNo"
+                class="after-sales-view__field-input"
+                list="after-sales-service-record-ticket-options"
+                placeholder="AF-001"
+                type="text"
+              />
+            </label>
+            <label class="after-sales-view__field">
+              <span>Visit type</span>
+              <select
+                id="after-sales-service-record-visit-type"
+                v-model="serviceRecordDraft.visitType"
+                class="after-sales-view__field-input"
+              >
+                <option value="onsite">Onsite</option>
+                <option value="remote">Remote</option>
+                <option value="pickup">Pickup</option>
+              </select>
+            </label>
+            <label class="after-sales-view__field">
+              <span>Scheduled at</span>
+              <input
+                id="after-sales-service-record-scheduled-at"
+                v-model="serviceRecordDraft.scheduledAt"
+                class="after-sales-view__field-input"
+                type="datetime-local"
+              />
+            </label>
+            <label class="after-sales-view__field">
+              <span>Completed at</span>
+              <input
+                id="after-sales-service-record-completed-at"
+                v-model="serviceRecordDraft.completedAt"
+                class="after-sales-view__field-input"
+                type="datetime-local"
+              />
+            </label>
+            <label class="after-sales-view__field">
+              <span>Technician</span>
+              <input
+                id="after-sales-service-record-technician"
+                v-model="serviceRecordDraft.technicianName"
+                class="after-sales-view__field-input"
+                placeholder="Technician name"
+                type="text"
+              />
+            </label>
+            <label class="after-sales-view__field">
+              <span>Result</span>
+              <select
+                id="after-sales-service-record-result"
+                v-model="serviceRecordDraft.result"
+                class="after-sales-view__field-input"
+              >
+                <option value="">Pending</option>
+                <option value="resolved">Resolved</option>
+                <option value="partial">Partial</option>
+                <option value="escalated">Escalated</option>
+              </select>
+            </label>
+            <label class="after-sales-view__field after-sales-view__field--wide">
+              <span>Work summary</span>
+              <textarea
+                id="after-sales-service-record-summary"
+                v-model="serviceRecordDraft.workSummary"
+                class="after-sales-view__field-input after-sales-view__field-textarea"
+                placeholder="What happened during this visit?"
+              />
+            </label>
+          </form>
+
+          <datalist id="after-sales-service-record-ticket-options">
+            <option v-for="ticket in tickets" :key="ticket.id" :value="ticket.data.ticketNo" />
+          </datalist>
+
+          <div class="after-sales-view__action-row after-sales-view__action-row--compact">
+            <button
+              class="after-sales-view__primary-btn"
+              :disabled="serviceRecordCreating || !canSubmitServiceRecord"
+              @click="submitServiceRecord"
+            >
+              {{ serviceRecordCreating ? 'Creating...' : 'Create service record' }}
+            </button>
+            <button class="after-sales-view__ghost-btn" :disabled="serviceRecordCreating" @click="resetServiceRecordDraft">
+              Reset service record draft
+            </button>
+          </div>
+
+          <p v-if="serviceRecordSubmitError" class="after-sales-view__inline-error">{{ serviceRecordSubmitError }}</p>
+          <p v-else-if="serviceRecordSubmitSuccess" class="after-sales-view__inline-success">{{ serviceRecordSubmitSuccess }}</p>
+
           <p v-if="serviceRecordsLoading" class="after-sales-view__muted-state">Loading recent service records...</p>
           <p v-else-if="serviceRecordsError" class="after-sales-view__inline-error">{{ serviceRecordsError }}</p>
           <div v-else-if="serviceRecords.length" class="after-sales-view__service-record-list">
@@ -378,6 +474,21 @@ interface ServiceRecordViewModel {
   }
 }
 
+interface ServiceRecordDraft {
+  ticketNo: string
+  visitType: 'onsite' | 'remote' | 'pickup'
+  scheduledAt: string
+  completedAt: string
+  technicianName: string
+  workSummary: string
+  result: '' | 'resolved' | 'partial' | 'escalated'
+}
+
+interface CreateServiceRecordResponse {
+  projectId: string
+  serviceRecord: ServiceRecordRow
+}
+
 interface ApiEnvelope<T> {
   ok: boolean
   data: T
@@ -404,9 +515,12 @@ const installing = ref(false)
 const refreshing = ref(false)
 const ticketsLoading = ref(false)
 const serviceRecordsLoading = ref(false)
+const serviceRecordCreating = ref(false)
 const error = ref('')
 const ticketsError = ref('')
 const serviceRecordsError = ref('')
+const serviceRecordSubmitError = ref('')
+const serviceRecordSubmitSuccess = ref('')
 const showWarnings = ref(false)
 const manifest = ref<AfterSalesManifest | null>(null)
 const current = ref<CurrentResponse>({ status: 'not-installed' })
@@ -414,6 +528,7 @@ const tickets = ref<TicketViewModel[]>([])
 const serviceRecords = ref<ServiceRecordViewModel[]>([])
 const configDraft = ref({ ...DEFAULT_CONFIG })
 const baselineConfigDraft = ref({ ...DEFAULT_CONFIG })
+const serviceRecordDraft = ref<ServiceRecordDraft>(createServiceRecordDraft())
 
 const placeholderProjectId = 'tenant:after-sales'
 const warnings = computed(() => current.value.installResult?.warnings ?? [])
@@ -421,6 +536,11 @@ const createdObjectLabels = computed(() => current.value.installResult?.createdO
 const createdViewLabels = computed(() => current.value.installResult?.createdViews ?? [])
 const isInstalled = computed(() => current.value.status === 'installed' || current.value.status === 'partial')
 const isDegraded = computed(() => current.value.status === 'partial' || current.value.status === 'failed')
+const canSubmitServiceRecord = computed(
+  () =>
+    toText(serviceRecordDraft.value.ticketNo).length > 0 &&
+    toText(serviceRecordDraft.value.scheduledAt).length > 0,
+)
 const statusTone = computed(() => {
   switch (current.value.status) {
     case 'installed':
@@ -521,8 +641,26 @@ function normalizeConfigDraft(config?: Record<string, unknown> | null) {
   }
 }
 
+function createServiceRecordDraft(): ServiceRecordDraft {
+  return {
+    ticketNo: '',
+    visitType: 'onsite',
+    scheduledAt: '',
+    completedAt: '',
+    technicianName: '',
+    workSummary: '',
+    result: '',
+  }
+}
+
 function resetConfigDraft() {
   configDraft.value = { ...baselineConfigDraft.value }
+}
+
+function resetServiceRecordDraft() {
+  serviceRecordDraft.value = createServiceRecordDraft()
+  serviceRecordSubmitError.value = ''
+  serviceRecordSubmitSuccess.value = ''
 }
 
 function buildInstallConfig() {
@@ -535,6 +673,27 @@ function buildInstallConfig() {
     urgentSlaHours: toPositiveNumber(configDraft.value.urgentSlaHours, DEFAULT_CONFIG.urgentSlaHours),
     followUpAfterDays: toPositiveNumber(configDraft.value.followUpAfterDays, DEFAULT_CONFIG.followUpAfterDays),
     ...(toText(configDraft.value.overdueWebhook) ? { overdueWebhook: toText(configDraft.value.overdueWebhook) } : {}),
+  }
+}
+
+function buildServiceRecordPayload() {
+  const ticketNo = toText(serviceRecordDraft.value.ticketNo)
+  const scheduledAt = toText(serviceRecordDraft.value.scheduledAt)
+  const completedAt = toText(serviceRecordDraft.value.completedAt)
+  const technicianName = toText(serviceRecordDraft.value.technicianName)
+  const workSummary = toText(serviceRecordDraft.value.workSummary)
+  const result = toText(serviceRecordDraft.value.result)
+
+  return {
+    serviceRecord: {
+      ticketNo,
+      visitType: serviceRecordDraft.value.visitType,
+      scheduledAt,
+      ...(completedAt ? { completedAt } : {}),
+      ...(technicianName ? { technicianName } : {}),
+      ...(workSummary ? { workSummary } : {}),
+      ...(result ? { result } : {}),
+    },
   }
 }
 
@@ -654,6 +813,36 @@ async function loadServiceRecordsForCurrentState(state: CurrentResponse): Promis
   }
 }
 
+async function submitServiceRecord() {
+  if (!canSubmitServiceRecord.value || serviceRecordCreating.value) {
+    return
+  }
+
+  serviceRecordCreating.value = true
+  serviceRecordSubmitError.value = ''
+  serviceRecordSubmitSuccess.value = ''
+
+  try {
+    const payload = await readEnvelope<CreateServiceRecordResponse>('/api/after-sales/service-records', {
+      method: 'POST',
+      body: JSON.stringify(buildServiceRecordPayload()),
+    })
+    const nextRecord = payload?.serviceRecord ? normalizeServiceRecordRow(payload.serviceRecord) : null
+
+    if (nextRecord) {
+      serviceRecords.value = [nextRecord, ...serviceRecords.value.filter((item) => item.id !== nextRecord.id)]
+      serviceRecordsError.value = ''
+    }
+
+    resetServiceRecordDraft()
+    serviceRecordSubmitSuccess.value = nextRecord ? `Created service record for ${nextRecord.data.ticketNo}` : 'Created service record'
+  } catch (err: unknown) {
+    serviceRecordSubmitError.value = err instanceof Error ? err.message : 'Failed to create service record'
+  } finally {
+    serviceRecordCreating.value = false
+  }
+}
+
 async function refreshCurrentState() {
   refreshing.value = true
   try {
@@ -670,6 +859,8 @@ async function loadView() {
   error.value = ''
   ticketsError.value = ''
   serviceRecordsError.value = ''
+  serviceRecordSubmitError.value = ''
+  serviceRecordSubmitSuccess.value = ''
   try {
     const [nextManifest, nextCurrent] = await Promise.all([
       readEnvelope<AfterSalesManifest>('/api/after-sales/app-manifest'),
@@ -860,7 +1051,8 @@ onMounted(() => {
 .after-sales-view__onboarding-card p,
 .after-sales-view__card p,
 .after-sales-view__muted-state,
-.after-sales-view__inline-error {
+.after-sales-view__inline-error,
+.after-sales-view__inline-success {
   margin: 6px 0 0;
   color: #475569;
   line-height: 1.6;
@@ -868,6 +1060,10 @@ onMounted(() => {
 
 .after-sales-view__inline-error {
   color: #b91c1c;
+}
+
+.after-sales-view__inline-success {
+  color: #166534;
 }
 
 .after-sales-view__onboarding-card,
@@ -1051,6 +1247,13 @@ onMounted(() => {
   gap: 14px;
 }
 
+.after-sales-view__service-record-form {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  margin-bottom: 12px;
+}
+
 .after-sales-view__field {
   display: grid;
   gap: 6px;
@@ -1082,6 +1285,11 @@ onMounted(() => {
   border-color: #0f766e;
 }
 
+.after-sales-view__field-textarea {
+  min-height: 96px;
+  resize: vertical;
+}
+
 .after-sales-view__config-hint {
   margin: 14px 0 0;
   color: #475569;
@@ -1104,6 +1312,11 @@ onMounted(() => {
   flex-wrap: wrap;
   gap: 10px;
   margin-top: 16px;
+}
+
+.after-sales-view__action-row--compact {
+  margin-top: 0;
+  margin-bottom: 8px;
 }
 
 .after-sales-view__primary-btn,
@@ -1188,7 +1401,8 @@ code {
   }
 
   .after-sales-view__section-header,
-  .after-sales-view__config-form {
+  .after-sales-view__config-form,
+  .after-sales-view__service-record-form {
     grid-template-columns: 1fr;
     display: grid;
   }
