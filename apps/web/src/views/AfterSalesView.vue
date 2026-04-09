@@ -130,6 +130,49 @@
         </div>
       </section>
 
+      <section v-if="isInstalled" class="after-sales-view__tickets-shell">
+        <article class="after-sales-view__card after-sales-view__card--wide">
+          <div class="after-sales-view__section-header">
+            <div>
+              <p class="after-sales-view__pill">Tickets</p>
+              <h2>Recent tickets</h2>
+              <p>
+                这里显示最近的售后工单，并在退款申请处于 pending 时尽量补充审批状态。
+              </p>
+            </div>
+          </div>
+
+          <p v-if="ticketsLoading" class="after-sales-view__muted-state">Loading recent tickets...</p>
+          <p v-else-if="ticketsError" class="after-sales-view__inline-error">{{ ticketsError }}</p>
+          <div v-else-if="tickets.length" class="after-sales-view__ticket-list">
+            <article v-for="ticket in tickets" :key="ticket.id" class="after-sales-view__ticket-row">
+              <div class="after-sales-view__ticket-main">
+                <div class="after-sales-view__ticket-headline">
+                  <strong>{{ ticket.data.ticketNo }}</strong>
+                  <span class="after-sales-view__tag">{{ ticket.data.status }}</span>
+                  <span class="after-sales-view__tag after-sales-view__tag--subtle">
+                    {{ ticket.data.refundStatus || 'n/a' }}
+                  </span>
+                </div>
+                <p>{{ ticket.data.title }}</p>
+              </div>
+
+              <dl class="after-sales-view__ticket-meta">
+                <div>
+                  <dt>Refund amount</dt>
+                  <dd>{{ formatRefundAmount(ticket.data.refundAmount) }}</dd>
+                </div>
+                <div>
+                  <dt>Approval</dt>
+                  <dd>{{ ticket.approvalLabel }}</dd>
+                </div>
+              </dl>
+            </article>
+          </div>
+          <p v-else class="after-sales-view__muted-state">No tickets found yet.</p>
+        </article>
+      </section>
+
       <section v-if="isInstalled" class="after-sales-view__service-records-shell">
         <article class="after-sales-view__card after-sales-view__card--wide">
           <div class="after-sales-view__section-header">
@@ -276,6 +319,39 @@ interface CurrentResponse {
   reportRef?: string
 }
 
+interface TicketRecord {
+  id: string
+  version: number
+  data: Record<string, unknown>
+}
+
+interface TicketsResponse {
+  projectId: string
+  tickets: TicketRecord[]
+  count: number
+}
+
+interface ApprovalSnapshot {
+  id: string
+  status: string
+  currentStep?: number
+  totalSteps?: number
+  updatedAt?: string
+}
+
+interface TicketViewModel {
+  id: string
+  version: number
+  data: {
+    ticketNo: string
+    title: string
+    status: string
+    refundStatus: string
+    refundAmount: number | null
+  }
+  approvalLabel: string
+}
+
 interface ServiceRecordRow {
   id: string
   version: number
@@ -326,12 +402,15 @@ const DEFAULT_CONFIG = {
 const loading = ref(true)
 const installing = ref(false)
 const refreshing = ref(false)
+const ticketsLoading = ref(false)
 const serviceRecordsLoading = ref(false)
 const error = ref('')
+const ticketsError = ref('')
 const serviceRecordsError = ref('')
 const showWarnings = ref(false)
 const manifest = ref<AfterSalesManifest | null>(null)
 const current = ref<CurrentResponse>({ status: 'not-installed' })
+const tickets = ref<TicketViewModel[]>([])
 const serviceRecords = ref<ServiceRecordViewModel[]>([])
 const configDraft = ref({ ...DEFAULT_CONFIG })
 const baselineConfigDraft = ref({ ...DEFAULT_CONFIG })
@@ -384,20 +463,6 @@ async function readEnvelope<T>(path: string, options?: RequestInit): Promise<T> 
   return ((payload as ApiEnvelope<T> | null)?.data ?? null) as T
 }
 
-function normalizeConfigDraft(config?: Record<string, unknown> | null) {
-  return {
-    ...DEFAULT_CONFIG,
-    enableWarranty: typeof config?.enableWarranty === 'boolean' ? config.enableWarranty : DEFAULT_CONFIG.enableWarranty,
-    enableRefundApproval: typeof config?.enableRefundApproval === 'boolean' ? config.enableRefundApproval : DEFAULT_CONFIG.enableRefundApproval,
-    enableVisitScheduling: typeof config?.enableVisitScheduling === 'boolean' ? config.enableVisitScheduling : DEFAULT_CONFIG.enableVisitScheduling,
-    enableFollowUp: typeof config?.enableFollowUp === 'boolean' ? config.enableFollowUp : DEFAULT_CONFIG.enableFollowUp,
-    defaultSlaHours: toPositiveNumber(config?.defaultSlaHours, DEFAULT_CONFIG.defaultSlaHours),
-    urgentSlaHours: toPositiveNumber(config?.urgentSlaHours, DEFAULT_CONFIG.urgentSlaHours),
-    followUpAfterDays: toPositiveNumber(config?.followUpAfterDays ?? config?.followUpDays, DEFAULT_CONFIG.followUpAfterDays),
-    overdueWebhook: toText(config?.overdueWebhook, DEFAULT_CONFIG.overdueWebhook),
-  }
-}
-
 function toPositiveNumber(value: unknown, fallback: number): number {
   const next = typeof value === 'number' ? value : typeof value === 'string' ? Number(value) : Number.NaN
   return Number.isFinite(next) && next > 0 ? next : fallback
@@ -408,6 +473,22 @@ function toText(value: unknown, fallback = ''): string {
     return value.trim()
   }
   return fallback
+}
+
+function toRefundAmount(value: unknown): number | null {
+  const next = typeof value === 'number' ? value : typeof value === 'string' ? Number(value) : Number.NaN
+  return Number.isFinite(next) ? next : null
+}
+
+function formatRefundAmount(value: unknown): string {
+  const amount = toRefundAmount(value)
+  if (amount == null) return '—'
+  return new Intl.NumberFormat('zh-CN', {
+    style: 'currency',
+    currency: 'CNY',
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  }).format(amount)
 }
 
 function formatRecordDate(value: unknown): string {
@@ -426,6 +507,20 @@ function formatRecordDate(value: unknown): string {
   }).format(parsed)
 }
 
+function normalizeConfigDraft(config?: Record<string, unknown> | null) {
+  return {
+    ...DEFAULT_CONFIG,
+    enableWarranty: typeof config?.enableWarranty === 'boolean' ? config.enableWarranty : DEFAULT_CONFIG.enableWarranty,
+    enableRefundApproval: typeof config?.enableRefundApproval === 'boolean' ? config.enableRefundApproval : DEFAULT_CONFIG.enableRefundApproval,
+    enableVisitScheduling: typeof config?.enableVisitScheduling === 'boolean' ? config.enableVisitScheduling : DEFAULT_CONFIG.enableVisitScheduling,
+    enableFollowUp: typeof config?.enableFollowUp === 'boolean' ? config.enableFollowUp : DEFAULT_CONFIG.enableFollowUp,
+    defaultSlaHours: toPositiveNumber(config?.defaultSlaHours, DEFAULT_CONFIG.defaultSlaHours),
+    urgentSlaHours: toPositiveNumber(config?.urgentSlaHours, DEFAULT_CONFIG.urgentSlaHours),
+    followUpAfterDays: toPositiveNumber(config?.followUpAfterDays ?? config?.followUpDays, DEFAULT_CONFIG.followUpAfterDays),
+    overdueWebhook: toText(config?.overdueWebhook, DEFAULT_CONFIG.overdueWebhook),
+  }
+}
+
 function resetConfigDraft() {
   configDraft.value = { ...baselineConfigDraft.value }
 }
@@ -440,6 +535,38 @@ function buildInstallConfig() {
     urgentSlaHours: toPositiveNumber(configDraft.value.urgentSlaHours, DEFAULT_CONFIG.urgentSlaHours),
     followUpAfterDays: toPositiveNumber(configDraft.value.followUpAfterDays, DEFAULT_CONFIG.followUpAfterDays),
     ...(toText(configDraft.value.overdueWebhook) ? { overdueWebhook: toText(configDraft.value.overdueWebhook) } : {}),
+  }
+}
+
+function formatApprovalLabel(ticket: TicketViewModel['data'], approval: ApprovalSnapshot | null): string {
+  if (ticket.refundStatus !== 'pending') {
+    return ticket.refundStatus || 'not requested'
+  }
+  if (!approval) {
+    return 'Approval unavailable'
+  }
+  const stepInfo =
+    typeof approval.currentStep === 'number' && typeof approval.totalSteps === 'number' && approval.totalSteps > 0
+      ? ` step ${approval.currentStep}/${approval.totalSteps}`
+      : ''
+  return `${approval.status}${stepInfo}`
+}
+
+function normalizeTicket(ticket: TicketRecord, approval: ApprovalSnapshot | null): TicketViewModel {
+  const rawData = ticket.data && typeof ticket.data === 'object' ? ticket.data : {}
+  const normalized: TicketViewModel['data'] = {
+    ticketNo: toText(rawData.ticketNo, ticket.id),
+    title: toText(rawData.title, 'Untitled ticket'),
+    status: toText(rawData.status, 'new'),
+    refundStatus: toText(rawData.refundStatus),
+    refundAmount: toRefundAmount(rawData.refundAmount),
+  }
+
+  return {
+    id: ticket.id,
+    version: ticket.version,
+    data: normalized,
+    approvalLabel: formatApprovalLabel(normalized, approval),
   }
 }
 
@@ -464,10 +591,50 @@ async function loadManifest() {
   manifest.value = await readEnvelope<AfterSalesManifest>('/api/after-sales/app-manifest')
 }
 
-async function loadServiceRecordsForCurrentState(state: CurrentResponse) {
+async function loadRefundApproval(projectId: string, ticketId: string): Promise<ApprovalSnapshot | null> {
+  try {
+    const payload = await readEnvelope<{ approval: ApprovalSnapshot | null }>(
+      `/api/after-sales/tickets/${encodeURIComponent(ticketId)}/refund-approval`,
+    )
+    return payload?.approval ?? null
+  } catch {
+    return null
+  }
+}
+
+async function loadTicketsForCurrentState(state: CurrentResponse): Promise<void> {
+  ticketsLoading.value = true
+  ticketsError.value = ''
+  try {
+    if (state.status === 'not-installed' || state.status === 'failed') {
+      tickets.value = []
+      return
+    }
+
+    const payload = await readEnvelope<TicketsResponse>('/api/after-sales/tickets')
+    const rows = Array.isArray(payload?.tickets) ? payload.tickets : []
+    tickets.value = await Promise.all(
+      rows.map(async (ticket) => {
+        const approval =
+          toText(ticket?.data?.refundStatus) === 'pending'
+            ? await loadRefundApproval(state.projectId || placeholderProjectId, ticket.id)
+            : null
+        return normalizeTicket(ticket, approval)
+      }),
+    )
+  } catch (err: unknown) {
+    tickets.value = []
+    if (state.status === 'installed' || state.status === 'partial') {
+      ticketsError.value = err instanceof Error ? err.message : 'Failed to load after-sales tickets'
+    }
+  } finally {
+    ticketsLoading.value = false
+  }
+}
+
+async function loadServiceRecordsForCurrentState(state: CurrentResponse): Promise<void> {
   serviceRecordsLoading.value = true
   serviceRecordsError.value = ''
-
   try {
     if (state.status === 'not-installed' || state.status === 'failed') {
       serviceRecords.value = []
@@ -492,7 +659,7 @@ async function refreshCurrentState() {
   try {
     current.value = await readEnvelope<CurrentResponse>('/api/after-sales/projects/current')
     baselineConfigDraft.value = normalizeConfigDraft(current.value.config)
-    await loadServiceRecordsForCurrentState(current.value)
+    await Promise.all([loadTicketsForCurrentState(current.value), loadServiceRecordsForCurrentState(current.value)])
   } finally {
     refreshing.value = false
   }
@@ -501,6 +668,7 @@ async function refreshCurrentState() {
 async function loadView() {
   loading.value = true
   error.value = ''
+  ticketsError.value = ''
   serviceRecordsError.value = ''
   try {
     const [nextManifest, nextCurrent] = await Promise.all([
@@ -511,7 +679,7 @@ async function loadView() {
     current.value = nextCurrent
     baselineConfigDraft.value = normalizeConfigDraft(nextCurrent.config)
     configDraft.value = { ...baselineConfigDraft.value }
-    await loadServiceRecordsForCurrentState(nextCurrent)
+    await Promise.all([loadTicketsForCurrentState(nextCurrent), loadServiceRecordsForCurrentState(nextCurrent)])
   } catch (err: unknown) {
     error.value = err instanceof Error ? err.message : 'Failed to load after-sales state'
   } finally {
@@ -661,6 +829,7 @@ onMounted(() => {
 .after-sales-view__warning-banner,
 .after-sales-view__config-shell,
 .after-sales-view__onboarding,
+.after-sales-view__tickets-shell,
 .after-sales-view__service-records-shell {
   display: grid;
   gap: 16px;
@@ -722,6 +891,7 @@ onMounted(() => {
 
 .after-sales-view__content,
 .after-sales-view__grid,
+.after-sales-view__ticket-list,
 .after-sales-view__service-record-list {
   display: grid;
   gap: 16px;
@@ -758,6 +928,7 @@ onMounted(() => {
 }
 
 .after-sales-view__meta,
+.after-sales-view__ticket-meta,
 .after-sales-view__service-record-meta {
   display: grid;
   gap: 12px;
@@ -765,12 +936,14 @@ onMounted(() => {
 }
 
 .after-sales-view__meta div,
+.after-sales-view__ticket-meta div,
 .after-sales-view__service-record-meta div {
   display: grid;
   gap: 4px;
 }
 
 .after-sales-view__meta dt,
+.after-sales-view__ticket-meta dt,
 .after-sales-view__service-record-meta dt {
   font-size: 12px;
   letter-spacing: 0.08em;
@@ -779,8 +952,45 @@ onMounted(() => {
 }
 
 .after-sales-view__meta dd,
+.after-sales-view__ticket-meta dd,
 .after-sales-view__service-record-meta dd {
   margin: 0;
+  color: #0f172a;
+}
+
+.after-sales-view__ticket-list {
+  gap: 12px;
+}
+
+.after-sales-view__ticket-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 16px;
+  border-radius: 16px;
+  border: 1px solid #e2e8f0;
+  background: #f8fafc;
+}
+
+.after-sales-view__ticket-main {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.after-sales-view__ticket-main p {
+  margin: 0;
+  color: #475569;
+}
+
+.after-sales-view__ticket-headline {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.after-sales-view__ticket-headline strong {
   color: #0f172a;
 }
 
@@ -967,6 +1177,7 @@ code {
   .after-sales-view__hero,
   .after-sales-view__error-banner,
   .after-sales-view__warning-banner,
+  .after-sales-view__ticket-row,
   .after-sales-view__service-record-row {
     grid-template-columns: 1fr;
     display: grid;
