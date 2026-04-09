@@ -1195,7 +1195,7 @@
                 <button
                   class="after-sales-view__ghost-btn after-sales-view__customer-delete"
                   :aria-label="`Delete customer ${customer.data.customerCode}`"
-                  :disabled="customerDeletingId === customer.id || customerCreating || customersLoading"
+                  :disabled="Boolean(customerDeletingId) || customerCreating || customersLoading"
                   @click="deleteCustomer(customer)"
                 >
                   {{ customerDeletingId === customer.id ? 'Deleting...' : 'Delete' }}
@@ -2465,7 +2465,7 @@ async function submitCustomer() {
 }
 
 async function deleteCustomer(customer: CustomerViewModel) {
-  if (!customer.id || customerDeletingId.value === customer.id || customerCreating.value || customersLoading.value) {
+  if (!customer.id || customerDeletingId.value || customerCreating.value || customersLoading.value) {
     return
   }
 
