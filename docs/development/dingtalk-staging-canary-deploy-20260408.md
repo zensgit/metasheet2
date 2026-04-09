@@ -75,6 +75,32 @@ bash scripts/ops/deploy-dingtalk-staging.sh
 
 If `DEPLOY_IMAGE_OWNER` and `DEPLOY_IMAGE_TAG` are omitted, the script now falls back to `IMAGE_OWNER` and `IMAGE_TAG` from `docker/app.staging.env`. This keeps ad-hoc `docker compose --env-file docker/app.staging.env ...` and the deploy script aligned instead of silently pulling `latest`.
 
+## Building a PR stack before merge
+
+GitHub Actions in this repository only build Docker images on `main` and `master`, so stacked DingTalk PR branches do not automatically publish a GHCR tag.
+
+To test `#725/#723/#724` before merge:
+
+1. Build local images from the PR source tree:
+
+```bash
+IMAGE_OWNER=zensgit \
+IMAGE_TAG=<pr-commit-sha> \
+SOURCE_DIR=/path/to/pr3-export \
+bash scripts/ops/build-dingtalk-staging-images.sh
+```
+
+2. Set the same `IMAGE_OWNER` and `IMAGE_TAG` in `docker/app.staging.env`.
+
+3. Deploy without pulling from GHCR:
+
+```bash
+SKIP_PULL=1 \
+bash scripts/ops/deploy-dingtalk-staging.sh
+```
+
+This uses the locally built images already present on the staging host.
+
 ## Verification
 
 After deploy:

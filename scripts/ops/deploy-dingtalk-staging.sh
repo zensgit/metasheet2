@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 COMPOSE_FILE="${COMPOSE_FILE:-${ROOT_DIR}/docker-compose.app.staging.yml}"
 ENV_FILE="${ENV_FILE:-${ROOT_DIR}/docker/app.staging.env}"
+SKIP_PULL="${SKIP_PULL:-0}"
 
 function info() {
   echo "[deploy-dingtalk-staging] $*" >&2
@@ -42,10 +43,13 @@ info "Compose: ${COMPOSE_FILE}"
 info "Env:     ${ENV_FILE}"
 info "Image owner: ${DEPLOY_IMAGE_OWNER}"
 info "Image tag:   ${DEPLOY_IMAGE_TAG}"
+info "Skip pull:   ${SKIP_PULL}"
 
 eval "APP_ENV_FILE=\"${ENV_FILE}\" IMAGE_OWNER=\"${DEPLOY_IMAGE_OWNER}\" IMAGE_TAG=\"${DEPLOY_IMAGE_TAG}\" ${COMPOSE_CMD} --env-file \"${ENV_FILE}\" -f \"${COMPOSE_FILE}\" config >/dev/null"
 eval "APP_ENV_FILE=\"${ENV_FILE}\" IMAGE_OWNER=\"${DEPLOY_IMAGE_OWNER}\" IMAGE_TAG=\"${DEPLOY_IMAGE_TAG}\" ${COMPOSE_CMD} --env-file \"${ENV_FILE}\" -f \"${COMPOSE_FILE}\" up -d postgres redis"
-eval "APP_ENV_FILE=\"${ENV_FILE}\" IMAGE_OWNER=\"${DEPLOY_IMAGE_OWNER}\" IMAGE_TAG=\"${DEPLOY_IMAGE_TAG}\" ${COMPOSE_CMD} --env-file \"${ENV_FILE}\" -f \"${COMPOSE_FILE}\" pull backend web"
+if [[ "${SKIP_PULL}" != "1" ]]; then
+  eval "APP_ENV_FILE=\"${ENV_FILE}\" IMAGE_OWNER=\"${DEPLOY_IMAGE_OWNER}\" IMAGE_TAG=\"${DEPLOY_IMAGE_TAG}\" ${COMPOSE_CMD} --env-file \"${ENV_FILE}\" -f \"${COMPOSE_FILE}\" pull backend web"
+fi
 eval "APP_ENV_FILE=\"${ENV_FILE}\" IMAGE_OWNER=\"${DEPLOY_IMAGE_OWNER}\" IMAGE_TAG=\"${DEPLOY_IMAGE_TAG}\" ${COMPOSE_CMD} --env-file \"${ENV_FILE}\" -f \"${COMPOSE_FILE}\" up -d backend web"
 
 info "Waiting for backend health endpoint"
