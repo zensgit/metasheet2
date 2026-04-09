@@ -20,6 +20,7 @@ describe('DingTalk notification channel', () => {
       ok: true,
       status: 200,
       statusText: 'OK',
+      json: async () => ({ errcode: 0, errmsg: 'ok' }),
     })
     global.fetch = fetchMock as typeof fetch
 
@@ -58,6 +59,7 @@ describe('DingTalk notification channel', () => {
       ok: true,
       status: 200,
       statusText: 'OK',
+      json: async () => ({ errcode: 0, errmsg: 'ok' }),
     })
     global.fetch = fetchMock as typeof fetch
     vi.spyOn(Date, 'now').mockReturnValue(1_760_000_000_000)
@@ -110,6 +112,35 @@ describe('DingTalk notification channel', () => {
 
     expect(result.status).toBe('failed')
     expect(result.failedReason).toContain('HTTP 400')
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('treats business-level dingtalk robot errors as failed delivery', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      statusText: 'OK',
+      json: async () => ({ errcode: 310000, errmsg: 'keywords not in content' }),
+    })
+    global.fetch = fetchMock as typeof fetch
+
+    const service = new NotificationServiceImpl()
+    service.registerChannel(new DingTalkNotificationChannel({ maxAttempts: 3, retryDelayMs: 10 }))
+
+    const result = await service.send({
+      channel: 'dingtalk',
+      subject: 'Ops Alert',
+      content: 'Payload rejected by DingTalk keyword policy.',
+      recipients: [
+        {
+          id: 'https://oapi.dingtalk.com/robot/send?access_token=robot-token',
+          type: 'group',
+        },
+      ],
+    })
+
+    expect(result.status).toBe('failed')
+    expect(result.failedReason).toContain('DingTalk errcode 310000')
     expect(fetchMock).toHaveBeenCalledTimes(1)
   })
 })

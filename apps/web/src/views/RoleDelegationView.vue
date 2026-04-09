@@ -724,6 +724,13 @@ async function loadTemplates(): Promise<void> {
     }
     const data = payload.data as { items?: ScopeTemplateSummary[] } | undefined
     templates.value = Array.isArray(data?.items) ? data.items : []
+    const selectedStillExists = templates.value.some((template) => template.id === selectedTemplateId.value)
+    if (selectedTemplateId.value && !selectedStillExists) {
+      selectedTemplateId.value = ''
+      selectedTemplate.value = null
+      selectedTemplateDepartmentId.value = ''
+      selectedTemplateMemberGroupId.value = ''
+    }
     if (!selectedTemplateId.value && templates.value.length > 0) {
       await selectTemplate(templates.value[0].id)
     }
@@ -850,6 +857,15 @@ async function loadUsers(): Promise<void> {
 
     const data = payload.data as { items?: ManagedUser[] } | undefined
     users.value = Array.isArray(data?.items) ? data.items : []
+    const selectedStillExists = users.value.some((user) => user.id === selectedUserId.value)
+    if (selectedUserId.value && !selectedStillExists) {
+      selectedUserId.value = ''
+      selectedAccess.value = null
+      selectedScopeConfig.value = null
+      selectedRoleId.value = ''
+      selectedDepartmentId.value = ''
+      selectedAudienceGroupId.value = ''
+    }
     if (!selectedUserId.value && users.value.length > 0) {
       await selectUser(users.value[0].id)
     }

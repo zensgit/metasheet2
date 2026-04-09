@@ -58,6 +58,11 @@ interface DingTalkRobotPayload {
   }
 }
 
+interface DingTalkRobotResponse {
+  errcode?: number
+  errmsg?: string
+}
+
 function resolvePositiveInt(value: unknown, fallback: number, min = 1, max = Number.MAX_SAFE_INTEGER): number {
   const numeric = typeof value === 'number' ? value : Number(value)
   if (!Number.isFinite(numeric)) return fallback
@@ -74,6 +79,25 @@ async function sleep(ms: number): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, ms))
 }
 
+async function readJsonSafely(response: Response): Promise<unknown> {
+  try {
+    return await response.json()
+  } catch {
+    return null
+  }
+}
+
+function validateDingTalkRobotResponse(payload: unknown): void {
+  const data = payload as DingTalkRobotResponse | null
+  if (!data || typeof data !== 'object') return
+  const errcode = typeof data.errcode === 'number' ? data.errcode : 0
+  if (errcode === 0) return
+  const errmsg = typeof data.errmsg === 'string' && data.errmsg.trim().length > 0
+    ? data.errmsg.trim()
+    : 'DingTalk robot request failed'
+  throw new NonRetryableNotificationError(`DingTalk errcode ${errcode}: ${errmsg}`)
+}
+
 async function postJsonWithRetry(options: {
   url: string
   headers?: Record<string, string>
@@ -83,6 +107,7 @@ async function postJsonWithRetry(options: {
   retryDelayMs: number
   logger: Logger
   context: string
+  responseValidator?: (payload: unknown) => void
 }): Promise<void> {
   let lastError: Error | null = null
 
@@ -113,6 +138,11 @@ async function postJsonWithRetry(options: {
           continue
         }
         throw new NonRetryableNotificationError(message)
+      }
+
+      if (options.responseValidator) {
+        const payload = await readJsonSafely(response)
+        options.responseValidator(payload)
       }
 
       return
@@ -357,6 +387,7 @@ export class DingTalkNotificationChannel implements NotificationChannel {
       retryDelayMs: resolvePositiveInt(this.config.retryDelayMs, 750, 50, 10_000),
       logger: this.logger,
       context: `DingTalk delivery failed for ${url}`,
+      responseValidator: validateDingTalkRobotResponse,
     })
   }
 }
