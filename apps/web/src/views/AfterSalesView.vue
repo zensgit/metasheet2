@@ -193,10 +193,18 @@
           </form>
 
           <div class="after-sales-view__action-row after-sales-view__action-row--compact">
-            <button class="after-sales-view__primary-btn" :disabled="ticketCreating || ticketsLoading || !canSubmitTicket" @click="submitTicket">
+            <button
+              class="after-sales-view__primary-btn"
+              :disabled="ticketCreating || ticketsLoading || Boolean(ticketUpdatingId) || !canSubmitTicket"
+              @click="submitTicket"
+            >
               {{ ticketCreating ? 'Creating...' : 'Create ticket' }}
             </button>
-            <button class="after-sales-view__ghost-btn" :disabled="ticketCreating || ticketsLoading" @click="resetTicketDraft">
+            <button
+              class="after-sales-view__ghost-btn"
+              :disabled="ticketCreating || ticketsLoading || Boolean(ticketUpdatingId)"
+              @click="resetTicketDraft"
+            >
               Reset ticket draft
             </button>
           </div>
@@ -232,15 +240,23 @@
           <div class="after-sales-view__action-row after-sales-view__action-row--compact">
             <button
               class="after-sales-view__ghost-btn"
-              :disabled="ticketsLoading || ticketCreating || Boolean(ticketDeletingId)"
+              :disabled="ticketsLoading || ticketCreating || Boolean(ticketDeletingId) || Boolean(ticketUpdatingId) || Boolean(ticketEditingId)"
               @click="refreshTickets"
             >
               {{ ticketsLoading ? 'Refreshing...' : 'Refresh list' }}
             </button>
-            <button class="after-sales-view__ghost-btn" :disabled="ticketsLoading" @click="applyTicketFilters">
+            <button
+              class="after-sales-view__ghost-btn"
+              :disabled="ticketsLoading || Boolean(ticketUpdatingId) || Boolean(ticketEditingId)"
+              @click="applyTicketFilters"
+            >
               {{ ticketsLoading ? 'Applying...' : 'Apply ticket filters' }}
             </button>
-            <button class="after-sales-view__ghost-btn" :disabled="ticketsLoading" @click="resetTicketFilters">
+            <button
+              class="after-sales-view__ghost-btn"
+              :disabled="ticketsLoading || Boolean(ticketUpdatingId) || Boolean(ticketEditingId)"
+              @click="resetTicketFilters"
+            >
               Clear ticket filters
             </button>
           </div>
@@ -249,14 +265,75 @@
           <div v-else-if="tickets.length" class="after-sales-view__ticket-list">
             <article v-for="ticket in tickets" :key="ticket.id" class="after-sales-view__ticket-row">
               <div class="after-sales-view__ticket-main">
-                <div class="after-sales-view__ticket-headline">
-                  <strong>{{ ticket.data.ticketNo }}</strong>
-                  <span class="after-sales-view__tag">{{ ticket.data.status }}</span>
-                  <span class="after-sales-view__tag after-sales-view__tag--subtle">
-                    {{ ticket.data.refundStatus || 'n/a' }}
-                  </span>
-                </div>
-                <p>{{ ticket.data.title }}</p>
+                <template v-if="ticketEditingId === ticket.id">
+                  <div class="after-sales-view__ticket-headline">
+                    <strong>{{ ticket.data.ticketNo }}</strong>
+                    <span class="after-sales-view__tag">{{ ticketEditDraft.status }}</span>
+                    <span class="after-sales-view__tag after-sales-view__tag--subtle">
+                      {{ ticket.data.refundStatus || 'n/a' }}
+                    </span>
+                  </div>
+                  <form class="after-sales-view__ticket-form after-sales-view__ticket-form--inline" @submit.prevent="submitTicketEdit(ticket)">
+                    <label class="after-sales-view__field after-sales-view__field--wide">
+                      <span>Title</span>
+                      <input
+                        :id="`after-sales-ticket-edit-title-${ticket.id}`"
+                        v-model="ticketEditDraft.title"
+                        class="after-sales-view__field-input"
+                        type="text"
+                      />
+                    </label>
+                    <label class="after-sales-view__field">
+                      <span>Priority</span>
+                      <select
+                        :id="`after-sales-ticket-edit-priority-${ticket.id}`"
+                        v-model="ticketEditDraft.priority"
+                        class="after-sales-view__field-input"
+                      >
+                        <option value="normal">Normal</option>
+                        <option value="high">High</option>
+                        <option value="urgent">Urgent</option>
+                      </select>
+                    </label>
+                    <label class="after-sales-view__field">
+                      <span>Source</span>
+                      <select
+                        :id="`after-sales-ticket-edit-source-${ticket.id}`"
+                        v-model="ticketEditDraft.source"
+                        class="after-sales-view__field-input"
+                      >
+                        <option value="web">Web</option>
+                        <option value="phone">Phone</option>
+                        <option value="wechat">WeChat</option>
+                        <option value="email">Email</option>
+                      </select>
+                    </label>
+                    <label class="after-sales-view__field">
+                      <span>Status</span>
+                      <select
+                        :id="`after-sales-ticket-edit-status-${ticket.id}`"
+                        v-model="ticketEditDraft.status"
+                        class="after-sales-view__field-input"
+                      >
+                        <option value="new">New</option>
+                        <option value="assigned">Assigned</option>
+                        <option value="inProgress">In progress</option>
+                        <option value="done">Done</option>
+                        <option value="closed">Closed</option>
+                      </select>
+                    </label>
+                  </form>
+                </template>
+                <template v-else>
+                  <div class="after-sales-view__ticket-headline">
+                    <strong>{{ ticket.data.ticketNo }}</strong>
+                    <span class="after-sales-view__tag">{{ ticket.data.status }}</span>
+                    <span class="after-sales-view__tag after-sales-view__tag--subtle">
+                      {{ ticket.data.refundStatus || 'n/a' }}
+                    </span>
+                  </div>
+                  <p>{{ ticket.data.title }}</p>
+                </template>
               </div>
 
               <div class="after-sales-view__ticket-side">
@@ -270,7 +347,23 @@
                     <dd>{{ ticket.approvalLabel }}</dd>
                   </div>
                 </dl>
-                <div class="after-sales-view__ticket-actions">
+                <div v-if="ticketEditingId === ticket.id" class="after-sales-view__ticket-actions">
+                  <button
+                    class="after-sales-view__primary-btn after-sales-view__ticket-action-btn"
+                    :disabled="ticketUpdatingId === ticket.id || ticketsLoading || !canSubmitTicketEdit"
+                    @click="submitTicketEdit(ticket)"
+                  >
+                    {{ ticketUpdatingId === ticket.id ? 'Saving...' : 'Save changes' }}
+                  </button>
+                  <button
+                    class="after-sales-view__ghost-btn after-sales-view__ticket-action-btn"
+                    :disabled="ticketUpdatingId === ticket.id"
+                    @click="cancelTicketEdit"
+                  >
+                    Cancel edit
+                  </button>
+                </div>
+                <div v-else class="after-sales-view__ticket-actions">
                   <label class="after-sales-view__field after-sales-view__field--compact">
                     <span>Refund request</span>
                     <input
@@ -285,16 +378,25 @@
                   </label>
                   <button
                     class="after-sales-view__ghost-btn after-sales-view__ticket-action-btn"
-                    :disabled="ticketCreating || ticketsLoading || ticketDeletingId === ticket.id || ticketRefundSubmittingId === ticket.id"
+                    :disabled="ticketCreating || ticketsLoading || ticketDeletingId === ticket.id || ticketRefundSubmittingId === ticket.id || ticketUpdatingId === ticket.id"
                     @click="requestTicketRefund(ticket)"
                   >
                     {{ ticketRefundSubmittingId === ticket.id ? 'Requesting...' : 'Request refund' }}
                   </button>
                 </div>
                 <button
+                  v-if="ticketEditingId !== ticket.id"
+                  class="after-sales-view__ghost-btn after-sales-view__ticket-delete"
+                  :aria-label="`Edit ticket ${ticket.data.ticketNo}`"
+                  :disabled="Boolean(ticketDeletingId) || Boolean(ticketUpdatingId) || Boolean(ticketEditingId) || ticketRefundSubmittingId === ticket.id"
+                  @click="startTicketEdit(ticket)"
+                >
+                  Edit
+                </button>
+                <button
                   class="after-sales-view__ghost-btn after-sales-view__ticket-delete"
                   :aria-label="`Delete ticket ${ticket.data.ticketNo}`"
-                  :disabled="Boolean(ticketDeletingId) || ticketRefundSubmittingId === ticket.id"
+                  :disabled="Boolean(ticketDeletingId) || Boolean(ticketUpdatingId) || ticketRefundSubmittingId === ticket.id || ticketEditingId === ticket.id"
                   @click="deleteTicket(ticket)"
                 >
                   {{ ticketDeletingId === ticket.id ? 'Deleting...' : 'Delete' }}
@@ -642,6 +744,8 @@ interface TicketViewModel {
   data: {
     ticketNo: string
     title: string
+    priority: string
+    source: string
     status: string
     refundStatus: string
     refundAmount: number | null
@@ -693,6 +797,13 @@ interface TicketDraft {
   refundAmount: string
 }
 
+interface TicketEditDraft {
+  title: string
+  priority: 'normal' | 'high' | 'urgent'
+  source: 'web' | 'phone' | 'wechat' | 'email'
+  status: 'new' | 'assigned' | 'inProgress' | 'done' | 'closed'
+}
+
 interface ServiceRecordFilterDraft {
   ticketNo: string
   result: '' | 'resolved' | 'partial' | 'escalated'
@@ -741,6 +852,7 @@ const refreshing = ref(false)
 const ticketsLoading = ref(false)
 const ticketCreating = ref(false)
 const ticketRefundSubmittingId = ref('')
+const ticketUpdatingId = ref('')
 const ticketDeletingId = ref('')
 const serviceRecordsLoading = ref(false)
 const serviceRecordCreating = ref(false)
@@ -761,6 +873,8 @@ const serviceRecords = ref<ServiceRecordViewModel[]>([])
 const configDraft = ref({ ...DEFAULT_CONFIG })
 const baselineConfigDraft = ref({ ...DEFAULT_CONFIG })
 const ticketDraft = ref<TicketDraft>(createTicketDraft())
+const ticketEditingId = ref('')
+const ticketEditDraft = ref<TicketEditDraft>(createTicketEditDraft())
 const ticketRefundDrafts = ref<Record<string, string>>({})
 const ticketFilters = ref<TicketFilterDraft>({
   status: '',
@@ -794,6 +908,10 @@ const canSubmitTicket = computed(
     toText(ticketDraft.value.title).length > 0 &&
     ticketDraftError.value.length === 0,
 )
+const canSubmitTicketEdit = computed(() => {
+  if (!ticketEditingId.value) return false
+  return toText(ticketEditDraft.value.title).length > 0
+})
 const statusTone = computed(() => {
   switch (current.value.status) {
     case 'installed':
@@ -922,6 +1040,33 @@ function createTicketDraft(): TicketDraft {
   }
 }
 
+function normalizeTicketPriority(value: unknown): TicketEditDraft['priority'] {
+  return value === 'high' || value === 'urgent' ? value : 'normal'
+}
+
+function normalizeTicketSource(value: unknown): TicketEditDraft['source'] {
+  return value === 'phone' || value === 'wechat' || value === 'email' ? value : 'web'
+}
+
+function normalizeTicketStatus(value: unknown): TicketEditDraft['status'] {
+  if (value === 'assigned' || value === 'inProgress' || value === 'done' || value === 'closed') {
+    return value
+  }
+  if (value === 'open') {
+    return 'new'
+  }
+  return 'new'
+}
+
+function createTicketEditDraft(ticket?: Partial<TicketViewModel['data']> | null): TicketEditDraft {
+  return {
+    title: toText(ticket?.title),
+    priority: normalizeTicketPriority(ticket?.priority),
+    source: normalizeTicketSource(ticket?.source),
+    status: normalizeTicketStatus(ticket?.status),
+  }
+}
+
 function resetConfigDraft() {
   configDraft.value = { ...baselineConfigDraft.value }
 }
@@ -936,6 +1081,12 @@ function resetTicketDraft() {
   ticketDraft.value = createTicketDraft()
   ticketSubmitError.value = ''
   ticketSubmitSuccess.value = ''
+}
+
+function cancelTicketEdit() {
+  ticketEditingId.value = ''
+  ticketEditDraft.value = createTicketEditDraft()
+  ticketSubmitError.value = ''
 }
 
 function buildInstallConfig() {
@@ -1005,6 +1156,17 @@ function buildTicketPayload() {
   }
 }
 
+function buildTicketUpdatePayload() {
+  return {
+    ticket: {
+      title: toText(ticketEditDraft.value.title),
+      priority: ticketEditDraft.value.priority,
+      source: ticketEditDraft.value.source,
+      status: ticketEditDraft.value.status,
+    },
+  }
+}
+
 function buildServiceRecordListPath() {
   const params = new URLSearchParams()
   const ticketNo = toText(serviceRecordFilters.value.ticketNo)
@@ -1056,11 +1218,26 @@ function formatApprovalLabel(ticket: TicketViewModel['data'], approval: Approval
   return `${approval.status}${stepInfo}`
 }
 
+function matchesTicketFilters(ticket: TicketViewModel) {
+  const status = toText(ticketFilters.value.status)
+  const search = toText(ticketFilters.value.search).toLowerCase()
+
+  if (status && ticket.data.status !== status) return false
+  if (search) {
+    const haystack = JSON.stringify(ticket.data).toLowerCase()
+    if (!haystack.includes(search)) return false
+  }
+
+  return true
+}
+
 function normalizeTicket(ticket: TicketRecord, approval: ApprovalSnapshot | null): TicketViewModel {
   const rawData = ticket.data && typeof ticket.data === 'object' ? ticket.data : {}
   const normalized: TicketViewModel['data'] = {
     ticketNo: toText(rawData.ticketNo, ticket.id),
     title: toText(rawData.title, 'Untitled ticket'),
+    priority: toText(rawData.priority, 'normal'),
+    source: toText(rawData.source, 'web'),
     status: toText(rawData.status, 'new'),
     refundStatus: toText(rawData.refundStatus),
     refundAmount: toRefundAmount(rawData.refundAmount),
@@ -1087,6 +1264,16 @@ function updateTicketRefundDraft(ticketId: string, event: Event) {
       [ticketId]: '',
     }
   }
+}
+
+function startTicketEdit(ticket: TicketViewModel) {
+  if (!ticket.id || ticketUpdatingId.value || ticketDeletingId.value || ticketCreating.value || ticketsLoading.value) {
+    return
+  }
+  ticketEditingId.value = ticket.id
+  ticketEditDraft.value = createTicketEditDraft(ticket.data)
+  ticketSubmitError.value = ''
+  ticketSubmitSuccess.value = ''
 }
 
 function normalizeServiceRecordRow(record: ServiceRecordRow): ServiceRecordViewModel {
@@ -1152,10 +1339,16 @@ async function loadTicketsForCurrentState(state: CurrentResponse): Promise<void>
 }
 
 async function applyTicketFilters() {
+  if (ticketUpdatingId.value || ticketEditingId.value) {
+    return
+  }
   await loadTicketsForCurrentState(current.value)
 }
 
 async function resetTicketFilters() {
+  if (ticketUpdatingId.value || ticketEditingId.value) {
+    return
+  }
   ticketFilters.value = {
     status: '',
     search: '',
@@ -1164,7 +1357,7 @@ async function resetTicketFilters() {
 }
 
 async function refreshTickets() {
-  if (ticketCreating.value || ticketDeletingId.value) {
+  if (ticketCreating.value || ticketDeletingId.value || ticketUpdatingId.value || ticketEditingId.value) {
     return
   }
   await loadTicketsForCurrentState(current.value)
@@ -1259,8 +1452,47 @@ async function submitTicket() {
   }
 }
 
+async function submitTicketEdit(ticket: TicketViewModel) {
+  if (!ticket.id || ticketEditingId.value !== ticket.id || ticketUpdatingId.value || !canSubmitTicketEdit.value) {
+    return
+  }
+
+  ticketUpdatingId.value = ticket.id
+  ticketSubmitError.value = ''
+  ticketSubmitSuccess.value = ''
+
+  try {
+    const payload = await readEnvelope<CreateTicketResponse>(
+      `/api/after-sales/tickets/${encodeURIComponent(ticket.id)}`,
+      {
+        method: 'PATCH',
+        body: JSON.stringify(buildTicketUpdatePayload()),
+      },
+    )
+    const nextTicket = payload?.ticket ? normalizeTicket(payload.ticket, null) : null
+
+    if (nextTicket) {
+      if (ticket.data.refundStatus === 'pending' && nextTicket.data.refundStatus === 'pending') {
+        nextTicket.approvalLabel = ticket.approvalLabel
+      }
+      tickets.value = matchesTicketFilters(nextTicket)
+        ? tickets.value.map((item) => (item.id === nextTicket.id ? nextTicket : item))
+        : tickets.value.filter((item) => item.id !== nextTicket.id)
+      ticketsError.value = ''
+      ticketSubmitSuccess.value = `Updated ticket ${nextTicket.data.ticketNo}`
+    }
+
+    ticketEditingId.value = ''
+    ticketEditDraft.value = createTicketEditDraft()
+  } catch (err: unknown) {
+    ticketSubmitError.value = err instanceof Error ? err.message : 'Failed to update after-sales ticket'
+  } finally {
+    ticketUpdatingId.value = ''
+  }
+}
+
 async function requestTicketRefund(ticket: TicketViewModel) {
-  if (!ticket.id || ticketRefundSubmittingId.value) {
+  if (!ticket.id || ticketRefundSubmittingId.value || ticketUpdatingId.value || ticketEditingId.value === ticket.id) {
     return
   }
 
@@ -1834,6 +2066,10 @@ onMounted(() => {
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 14px;
   margin-bottom: 12px;
+}
+
+.after-sales-view__ticket-form--inline {
+  margin-bottom: 0;
 }
 
 .after-sales-view__field {

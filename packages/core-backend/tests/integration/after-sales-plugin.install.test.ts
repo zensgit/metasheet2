@@ -927,6 +927,109 @@ describe('after-sales plugin install integration', () => {
     })
   })
 
+  it('updates a ticket through the real after-sales routes', async () => {
+    if (!baseUrl || !pool) return
+
+    const tokenRes = await requestJson(
+      `${baseUrl}/api/auth/dev-token?userId=after-sales-ticket-update-it&roles=admin&perms=*:*`,
+    )
+    const token = (tokenRes.body as { token?: string } | undefined)?.token
+    expect(token).toBeTruthy()
+
+    const installRes = await requestJson(`${baseUrl}/api/after-sales/projects/install`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        templateId: 'after-sales-default',
+        displayName: 'After Sales Ticket Update Flow',
+      }),
+    })
+    expect(installRes.status).toBe(200)
+
+    const createRes = await requestJson(`${baseUrl}/api/after-sales/tickets`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        ticket: {
+          ticketNo: 'TK-3001-U',
+          title: 'Needs update',
+          source: 'web',
+          priority: 'normal',
+        },
+      }),
+    })
+    expect(createRes.status).toBe(201)
+
+    const createdTicketId = ((createRes.body as any).data?.ticket?.id ?? '') as string
+    expect(createdTicketId).toBeTruthy()
+
+    const updateRes = await requestJson(`${baseUrl}/api/after-sales/tickets/${createdTicketId}`, {
+      method: 'PATCH',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        ticket: {
+          title: 'Updated after diagnostic visit',
+          source: 'wechat',
+          priority: 'urgent',
+          status: 'assigned',
+        },
+      }),
+    })
+    expect(updateRes.status).toBe(200)
+    expect((updateRes.body as any).data?.ticket?.data).toMatchObject({
+      ticketNo: 'TK-3001-U',
+      title: 'Updated after diagnostic visit',
+      source: 'wechat',
+      priority: 'urgent',
+      status: 'assigned',
+    })
+
+    const serviceTicketSheetId = stableMetaId('sheet', PROJECT_ID, 'serviceTicket')
+    const updatedRecordRes = await waitFor(
+      () => pool!.query<{ id: string; version: number; data: Record<string, unknown> }>(
+        'SELECT id, version, data FROM meta_records WHERE id = $1 AND sheet_id = $2',
+        [createdTicketId, serviceTicketSheetId],
+      ),
+      (result) =>
+        result.rows.length === 1 &&
+        result.rows[0].data?.[stFieldId('serviceTicket', 'status')] === 'assigned' &&
+        result.rows[0].data?.[stFieldId('serviceTicket', 'title')] === 'Updated after diagnostic visit',
+    )
+    expect(updatedRecordRes.rows[0].data).toMatchObject({
+      [stFieldId('serviceTicket', 'ticketNo')]: 'TK-3001-U',
+      [stFieldId('serviceTicket', 'title')]: 'Updated after diagnostic visit',
+      [stFieldId('serviceTicket', 'source')]: 'wechat',
+      [stFieldId('serviceTicket', 'priority')]: 'urgent',
+      [stFieldId('serviceTicket', 'status')]: 'assigned',
+    })
+
+    const listRes = await requestJson(
+      `${baseUrl}/api/after-sales/tickets?status=assigned&search=${encodeURIComponent('Updated after diagnostic visit')}`,
+      {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      },
+    )
+    expect(listRes.status).toBe(200)
+    expect((listRes.body as any).data?.tickets?.[0]).toMatchObject({
+      id: createdTicketId,
+      data: expect.objectContaining({
+        ticketNo: 'TK-3001-U',
+        status: 'assigned',
+      }),
+    })
+  })
+
   it('marks refund status as rejected when the approval action rejects the request', async () => {
     if (!baseUrl || !pool) return
 

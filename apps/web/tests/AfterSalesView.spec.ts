@@ -699,6 +699,228 @@ describe('AfterSalesView', () => {
     )
   })
 
+  it('updates a ticket in place and exits edit mode', async () => {
+    apiFetchMock.mockImplementation(async (path: string, options?: RequestInit) => {
+      if (path === '/api/after-sales/app-manifest') {
+        return createResponse({
+          id: 'after-sales-default',
+          displayName: 'After Sales',
+          platformDependencies: ['core-backend'],
+          objects: [],
+          workflows: [],
+        })
+      }
+
+      if (path === '/api/after-sales/projects/current') {
+        return createResponse({
+          status: 'installed',
+          projectId: 'tenant:after-sales',
+          displayName: 'After Sales',
+          config: {
+            defaultSlaHours: 24,
+            urgentSlaHours: 4,
+            followUpAfterDays: 7,
+          },
+          installResult: {
+            status: 'installed',
+            createdObjects: [],
+            createdViews: [],
+            warnings: [],
+            reportRef: 'install-006d',
+          },
+          reportRef: 'install-006d',
+        })
+      }
+
+      if (path === '/api/after-sales/tickets' && !options?.method) {
+        return createResponse({
+          projectId: 'tenant:after-sales',
+          count: 1,
+          tickets: [
+            {
+              id: 'ticket-1',
+              version: 1,
+              data: {
+                ticketNo: 'AF-001',
+                title: 'Install compressor',
+                status: 'new',
+                priority: 'high',
+                source: 'phone',
+                refundStatus: '',
+                refundAmount: 0,
+              },
+            },
+          ],
+        })
+      }
+
+      if (path === '/api/after-sales/tickets/ticket-1' && options?.method === 'PATCH') {
+        return createResponse({
+          projectId: 'tenant:after-sales',
+          ticket: {
+            id: 'ticket-1',
+            version: 2,
+            data: {
+              ticketNo: 'AF-001',
+              title: 'Updated compressor diagnosis',
+              status: 'assigned',
+              priority: 'urgent',
+              source: 'wechat',
+              refundStatus: '',
+              refundAmount: 0,
+            },
+          },
+        })
+      }
+
+      throw new Error(`Unexpected request: ${path}`)
+    })
+
+    const mounted = mountAfterSalesView()
+    app = mounted.app
+    container = mounted.container
+
+    await waitForText(container, 'AF-001')
+
+    const editButton = container?.querySelector<HTMLButtonElement>('button[aria-label="Edit ticket AF-001"]')
+    expect(editButton).toBeTruthy()
+    if (!editButton) return
+
+    editButton.click()
+    await flushUi()
+
+    const titleInput = container?.querySelector<HTMLInputElement>('#after-sales-ticket-edit-title-ticket-1')
+    const prioritySelect = container?.querySelector<HTMLSelectElement>('#after-sales-ticket-edit-priority-ticket-1')
+    const sourceSelect = container?.querySelector<HTMLSelectElement>('#after-sales-ticket-edit-source-ticket-1')
+    const statusSelect = container?.querySelector<HTMLSelectElement>('#after-sales-ticket-edit-status-ticket-1')
+    expect(titleInput).toBeTruthy()
+    expect(prioritySelect).toBeTruthy()
+    expect(sourceSelect).toBeTruthy()
+    expect(statusSelect).toBeTruthy()
+    if (!titleInput || !prioritySelect || !sourceSelect || !statusSelect) return
+
+    await setInputValue(titleInput, 'Updated compressor diagnosis')
+    await setSelectValue(prioritySelect, 'urgent')
+    await setSelectValue(sourceSelect, 'wechat')
+    await setSelectValue(statusSelect, 'assigned')
+
+    findButton(container, 'Save changes').click()
+    await waitForText(container, 'Updated ticket AF-001')
+
+    expect(container?.textContent).toContain('Updated compressor diagnosis')
+    expect(container?.textContent).toContain('assigned')
+    expect(container?.querySelector('#after-sales-ticket-edit-title-ticket-1')).toBeNull()
+    expect(apiFetchMock).toHaveBeenCalledWith(
+      '/api/after-sales/tickets/ticket-1',
+      expect.objectContaining({
+        method: 'PATCH',
+        body: JSON.stringify({
+          ticket: {
+            title: 'Updated compressor diagnosis',
+            priority: 'urgent',
+            source: 'wechat',
+            status: 'assigned',
+          },
+        }),
+      }),
+    )
+  })
+
+  it('keeps the edit draft open when ticket update fails', async () => {
+    apiFetchMock.mockImplementation(async (path: string, options?: RequestInit) => {
+      if (path === '/api/after-sales/app-manifest') {
+        return createResponse({
+          id: 'after-sales-default',
+          displayName: 'After Sales',
+          platformDependencies: ['core-backend'],
+          objects: [],
+          workflows: [],
+        })
+      }
+
+      if (path === '/api/after-sales/projects/current') {
+        return createResponse({
+          status: 'installed',
+          projectId: 'tenant:after-sales',
+          displayName: 'After Sales',
+          config: {
+            defaultSlaHours: 24,
+            urgentSlaHours: 4,
+            followUpAfterDays: 7,
+          },
+          installResult: {
+            status: 'installed',
+            createdObjects: [],
+            createdViews: [],
+            warnings: [],
+            reportRef: 'install-006e',
+          },
+          reportRef: 'install-006e',
+        })
+      }
+
+      if (path === '/api/after-sales/tickets' && !options?.method) {
+        return createResponse({
+          projectId: 'tenant:after-sales',
+          count: 1,
+          tickets: [
+            {
+              id: 'ticket-1',
+              version: 1,
+              data: {
+                ticketNo: 'AF-001',
+                title: 'Install compressor',
+                status: 'new',
+                priority: 'normal',
+                source: 'web',
+                refundStatus: '',
+                refundAmount: 0,
+              },
+            },
+          ],
+        })
+      }
+
+      if (path === '/api/after-sales/tickets/ticket-1' && options?.method === 'PATCH') {
+        return createResponse(
+          { message: 'Ticket update rejected' },
+          {
+            ok: false,
+            status: 409,
+            statusText: 'Conflict',
+          },
+        )
+      }
+
+      throw new Error(`Unexpected request: ${path}`)
+    })
+
+    const mounted = mountAfterSalesView()
+    app = mounted.app
+    container = mounted.container
+
+    await waitForText(container, 'AF-001')
+
+    const editButton = container?.querySelector<HTMLButtonElement>('button[aria-label="Edit ticket AF-001"]')
+    expect(editButton).toBeTruthy()
+    if (!editButton) return
+
+    editButton.click()
+    await flushUi()
+
+    const titleInput = container?.querySelector<HTMLInputElement>('#after-sales-ticket-edit-title-ticket-1')
+    expect(titleInput).toBeTruthy()
+    if (!titleInput) return
+
+    await setInputValue(titleInput, 'Still editing')
+    findButton(container, 'Save changes').click()
+    await waitForText(container, '409 Conflict')
+
+    expect(titleInput.value).toBe('Still editing')
+    expect(container?.textContent).toContain('Save changes')
+    expect(container?.textContent).toContain('AF-001')
+  })
+
   it('requests a refund for a ticket and updates the row in place', async () => {
     apiFetchMock.mockImplementation(async (path: string, options?: RequestInit) => {
       if (path === '/api/after-sales/app-manifest') {

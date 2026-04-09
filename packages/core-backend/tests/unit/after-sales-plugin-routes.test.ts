@@ -813,6 +813,128 @@ describe('plugin-after-sales routes', () => {
     })
   })
 
+  it('updates a ticket through the multitable patch seam', async () => {
+    const handler = routes.get('PATCH /api/after-sales/tickets/:ticketId')
+    const res = new FakeResponse()
+
+    db.rows.push({
+      id: 'fake-uuid-1',
+      tenant_id: 'tenant_42',
+      app_id: 'after-sales',
+      project_id: 'tenant_42:after-sales',
+      template_id: 'after-sales-default',
+      template_version: '0.1.0',
+      mode: 'enable',
+      status: 'installed',
+      created_objects_json: JSON.stringify(['serviceTicket']),
+      created_views_json: JSON.stringify(['ticket-board']),
+      warnings_json: JSON.stringify([]),
+      display_name: 'After-sales',
+      config_json: JSON.stringify({}),
+      last_install_at: new Date(),
+      created_at: new Date(),
+    })
+
+    await handler?.(buildReq({
+      user: {
+        id: 'writer_42',
+        tenantId: 'tenant_42',
+        role: 'user',
+        roles: ['user'],
+        perms: ['after_sales:write'],
+      },
+      params: {
+        ticketId: 'rec_ticket_001',
+      },
+      body: {
+        ticket: {
+          title: 'Updated compressor diagnosis',
+          priority: 'urgent',
+          source: 'wechat',
+          status: 'assigned',
+        },
+      },
+    }), res)
+
+    expect(res.statusCode).toBe(200)
+    expect(getRecord).toHaveBeenCalledWith({
+      sheetId: 'tenant_42:after-sales:serviceTicket:sheet',
+      recordId: 'rec_ticket_001',
+    })
+    expect(patchRecord).toHaveBeenCalledWith({
+      sheetId: 'tenant_42:after-sales:serviceTicket:sheet',
+      recordId: 'rec_ticket_001',
+      changes: {
+        [stPk('title')]: 'Updated compressor diagnosis',
+        [stPk('priority')]: 'urgent',
+        [stPk('source')]: 'wechat',
+        [stPk('status')]: 'assigned',
+      },
+    })
+    expect(res.body.data.ticket).toEqual({
+      id: 'rec_ticket_001',
+      version: 4,
+      data: {
+        ticketNo: 'TK-2001',
+        title: 'Updated compressor diagnosis',
+        source: 'wechat',
+        priority: 'urgent',
+        status: 'assigned',
+      },
+    })
+  })
+
+  it('returns 404 when updating a missing ticket', async () => {
+    const handler = routes.get('PATCH /api/after-sales/tickets/:ticketId')
+    const res = new FakeResponse()
+    getRecord.mockRejectedValueOnce(Object.assign(new Error('Record not found: rec_missing'), {
+      code: 'NOT_FOUND',
+    }))
+
+    db.rows.push({
+      id: 'fake-uuid-1',
+      tenant_id: 'tenant_42',
+      app_id: 'after-sales',
+      project_id: 'tenant_42:after-sales',
+      template_id: 'after-sales-default',
+      template_version: '0.1.0',
+      mode: 'enable',
+      status: 'installed',
+      created_objects_json: JSON.stringify(['serviceTicket']),
+      created_views_json: JSON.stringify(['ticket-board']),
+      warnings_json: JSON.stringify([]),
+      display_name: 'After-sales',
+      config_json: JSON.stringify({}),
+      last_install_at: new Date(),
+      created_at: new Date(),
+    })
+
+    await handler?.(buildReq({
+      user: {
+        id: 'writer_42',
+        tenantId: 'tenant_42',
+        role: 'user',
+        roles: ['user'],
+        perms: ['after_sales:write'],
+      },
+      params: {
+        ticketId: 'rec_missing',
+      },
+      body: {
+        ticket: {
+          title: 'Missing',
+          priority: 'normal',
+          source: 'web',
+          status: 'new',
+        },
+      },
+    }), res)
+
+    expect(res.statusCode).toBe(404)
+    expect(res.body.error.code).toBe('NOT_FOUND')
+    expect(patchRecord).not.toHaveBeenCalled()
+  })
+
   it('returns 409 when creating a ticket before install', async () => {
     const handler = routes.get('POST /api/after-sales/tickets')
     const res = new FakeResponse()
