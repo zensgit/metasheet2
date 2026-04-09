@@ -1299,6 +1299,56 @@ describe('plugin-after-sales routes', () => {
     expect(listRecords).not.toHaveBeenCalled()
   })
 
+  it('returns 401 for customers list when user is missing', async () => {
+    const handler = routes.get('GET /api/after-sales/customers')
+    const res = new FakeResponse()
+
+    await handler?.(buildReq({
+      user: null,
+    }), res)
+
+    expect(res.statusCode).toBe(401)
+    expect(res.body).toEqual({
+      ok: false,
+      error: {
+        code: 'UNAUTHORIZED',
+        message: 'User ID not found',
+      },
+    })
+    expect(queryRecords).not.toHaveBeenCalled()
+    expect(listRecords).not.toHaveBeenCalled()
+  })
+
+  it('returns 503 when customer multitable reader is unavailable', async () => {
+    const handler = routes.get('GET /api/after-sales/customers')
+    const res = new FakeResponse()
+
+    const originalQueryRecords = currentContext.api.multitable?.records.queryRecords
+    const originalListRecords = currentContext.api.multitable?.records.listRecords
+    if (currentContext.api.multitable?.records) {
+      currentContext.api.multitable.records.queryRecords = undefined as unknown as typeof queryRecords
+      currentContext.api.multitable.records.listRecords = undefined as unknown as typeof listRecords
+    }
+
+    try {
+      await handler?.(buildReq(), res)
+    } finally {
+      if (currentContext.api.multitable?.records) {
+        currentContext.api.multitable.records.queryRecords = originalQueryRecords
+        currentContext.api.multitable.records.listRecords = originalListRecords
+      }
+    }
+
+    expect(res.statusCode).toBe(503)
+    expect(res.body).toEqual({
+      ok: false,
+      error: {
+        code: 'MULTITABLE_UNAVAILABLE',
+        message: 'Multitable record reader is not available on plugin context',
+      },
+    })
+  })
+
   it('returns 409 when customers are listed from a failed install state', async () => {
     const handler = routes.get('GET /api/after-sales/customers')
     const res = new FakeResponse()

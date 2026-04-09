@@ -215,17 +215,34 @@ describe('AfterSalesView customers panel', () => {
               urgentSlaHours: 4,
               followUpAfterDays: 7,
             },
-            installResult: {
-              status,
-              createdObjects: [],
-              createdViews: [],
-              warnings: status === 'failed' ? ['customer projection failed'] : [],
-              reportRef: `install-customers-skip-${status}`,
-            },
-            reportRef: `install-customers-skip-${status}`,
+            installResult: status === 'failed'
+              ? {
+                  status: 'failed',
+                  createdObjects: [],
+                  createdViews: [],
+                  warnings: ['customer projection failed'],
+                  reportRef: 'install-customers-failed',
+                }
+              : undefined,
+            reportRef: status === 'failed' ? 'install-customers-failed' : undefined,
           })
         }
 
+        if (path === '/api/after-sales/tickets') {
+          return createResponse({ projectId: 'tenant:after-sales', count: 0, tickets: [] })
+        }
+
+        if (path === '/api/after-sales/installed-assets') {
+          return createResponse({ projectId: 'tenant:after-sales', count: 0, installedAssets: [] })
+        }
+
+        if (path === '/api/after-sales/service-records') {
+          return createResponse({ projectId: 'tenant:after-sales', count: 0, serviceRecords: [] })
+        }
+
+        if (path === '/api/after-sales/customers') {
+          throw new Error('customers should not load for non-operational after-sales state')
+        }
         throw new Error(`Unexpected request: ${path}`)
       })
 
@@ -233,15 +250,19 @@ describe('AfterSalesView customers panel', () => {
       app = mounted.app
       container = mounted.container
 
-      await waitForText(container, status === 'failed' ? 'Initialization failed' : 'Enable the after-sales project shell')
+      await waitForText(
+        container,
+        status === 'failed' ? 'Initialization failed' : 'Enable the after-sales project shell',
+      )
 
       expect(container.textContent).not.toContain('Customer registry')
       expect(apiFetchMock).not.toHaveBeenCalledWith('/api/after-sales/customers', undefined)
 
-      app?.unmount()
-      container?.remove()
+      app.unmount()
+      container.remove()
       app = null
       container = null
+      vi.clearAllMocks()
     }
   })
 
