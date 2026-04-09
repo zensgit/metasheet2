@@ -2078,4 +2078,86 @@ describe('after-sales plugin install integration', () => {
     expect(listBody.data?.count).toBe(0)
     expect(listBody.data?.installedAssets ?? []).toEqual([])
   })
+
+  it('lists customers through the real after-sales routes', async () => {
+    if (!baseUrl || !pool) return
+
+    const tokenRes = await requestJson(
+      `${baseUrl}/api/auth/dev-token?userId=after-sales-customer-list-it&roles=admin&perms=*:*`,
+    )
+    const token = (tokenRes.body as { token?: string } | undefined)?.token
+    expect(token).toBeTruthy()
+
+    const installRes = await requestJson(`${baseUrl}/api/after-sales/projects/install`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        templateId: 'after-sales-default',
+        displayName: 'After Sales Customer List Flow',
+      }),
+    })
+    expect(installRes.status).toBe(200)
+
+    const customerSheetId = stableMetaId('sheet', PROJECT_ID, 'customer')
+    const aliceId = 'rec_customer_alice'
+    const bobId = 'rec_customer_bob'
+
+    await pool.query(
+      `INSERT INTO meta_records (id, sheet_id, data, version)
+       VALUES ($1, $2, $3::jsonb, 1), ($4, $2, $5::jsonb, 1)`,
+      [
+        aliceId,
+        customerSheetId,
+        JSON.stringify({
+          [stFieldId('customer', 'customerCode')]: 'CUS-5001',
+          [stFieldId('customer', 'name')]: 'Alice Plant',
+          [stFieldId('customer', 'phone')]: '13800138000',
+          [stFieldId('customer', 'email')]: 'alice@example.com',
+          [stFieldId('customer', 'status')]: 'active',
+        }),
+        bobId,
+        JSON.stringify({
+          [stFieldId('customer', 'customerCode')]: 'CUS-5002',
+          [stFieldId('customer', 'name')]: 'Bob Warehouse',
+          [stFieldId('customer', 'phone')]: '13900139000',
+          [stFieldId('customer', 'email')]: 'bob@example.com',
+          [stFieldId('customer', 'status')]: 'inactive',
+        }),
+      ],
+    )
+
+    const listRes = await requestJson(`${baseUrl}/api/after-sales/customers?status=active&search=Alice`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    })
+    expect(listRes.status).toBe(200)
+
+    const listBody = listRes.body as {
+      ok?: boolean
+      data?: {
+        count?: number
+        customers?: Array<{
+          id?: string
+          data?: Record<string, unknown>
+        }>
+      }
+    }
+    expect(listBody.ok).toBe(true)
+    expect(listBody.data?.count).toBe(1)
+    expect(listBody.data?.customers ?? []).toHaveLength(1)
+    expect(listBody.data?.customers?.[0]).toMatchObject({
+      id: aliceId,
+      data: {
+        customerCode: 'CUS-5001',
+        name: 'Alice Plant',
+        phone: '13800138000',
+        email: 'alice@example.com',
+        status: 'active',
+      },
+    })
+  })
 })
