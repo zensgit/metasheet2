@@ -136,7 +136,7 @@ jobs:
               'deploy_jwt_secret = sys.argv[3].strip()'
               'deploy_bcrypt_rounds = sys.argv[4].strip() or "12"'
               'text = path.read_text()'
-              'if "\\n" not in text and "\\\\n" in text:'
+              'if "\\\\n" in text:'
               '    text = text.replace("\\\\n", "\\n")'
               'lines = text.splitlines()'
               'entries = {}'
