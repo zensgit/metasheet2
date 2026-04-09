@@ -193,15 +193,17 @@
           </form>
 
           <div class="after-sales-view__action-row after-sales-view__action-row--compact">
-            <button class="after-sales-view__primary-btn" :disabled="ticketCreating || !canSubmitTicket" @click="submitTicket">
+            <button class="after-sales-view__primary-btn" :disabled="ticketCreating || ticketsLoading || !canSubmitTicket" @click="submitTicket">
               {{ ticketCreating ? 'Creating...' : 'Create ticket' }}
             </button>
-            <button class="after-sales-view__ghost-btn" :disabled="ticketCreating" @click="resetTicketDraft">
+            <button class="after-sales-view__ghost-btn" :disabled="ticketCreating || ticketsLoading" @click="resetTicketDraft">
               Reset ticket draft
             </button>
           </div>
 
-          <p v-if="ticketSubmitError" class="after-sales-view__inline-error">{{ ticketSubmitError }}</p>
+          <p v-if="ticketDraftError || ticketSubmitError" class="after-sales-view__inline-error">
+            {{ ticketDraftError || ticketSubmitError }}
+          </p>
           <p v-else-if="ticketSubmitSuccess" class="after-sales-view__inline-success">{{ ticketSubmitSuccess }}</p>
 
           <p v-if="ticketsLoading" class="after-sales-view__muted-state">Loading recent tickets...</p>
@@ -687,10 +689,15 @@ const canSubmitServiceRecord = computed(
     toText(serviceRecordDraft.value.ticketNo).length > 0 &&
     toText(serviceRecordDraft.value.scheduledAt).length > 0,
 )
+const ticketDraftError = computed(() => {
+  const parsedRefundAmount = parseOptionalRefundAmount(ticketDraft.value.refundAmount)
+  return parsedRefundAmount.valid ? '' : 'Refund amount must be a valid number'
+})
 const canSubmitTicket = computed(
   () =>
     toText(ticketDraft.value.ticketNo).length > 0 &&
-    toText(ticketDraft.value.title).length > 0,
+    toText(ticketDraft.value.title).length > 0 &&
+    ticketDraftError.value.length === 0,
 )
 const statusTone = computed(() => {
   switch (current.value.status) {
@@ -864,10 +871,27 @@ function buildServiceRecordPayload() {
   }
 }
 
+function parseOptionalRefundAmount(value: unknown): { valid: boolean; value?: number } {
+  const text = toText(value)
+  if (!text) {
+    return { valid: true }
+  }
+
+  const amount = Number(text)
+  if (!Number.isFinite(amount)) {
+    return { valid: false }
+  }
+
+  return {
+    valid: true,
+    value: amount,
+  }
+}
+
 function buildTicketPayload() {
   const ticketNo = toText(ticketDraft.value.ticketNo)
   const title = toText(ticketDraft.value.title)
-  const refundAmount = toText(ticketDraft.value.refundAmount)
+  const refundAmount = parseOptionalRefundAmount(ticketDraft.value.refundAmount)
 
   return {
     ticket: {
@@ -875,7 +899,7 @@ function buildTicketPayload() {
       title,
       priority: ticketDraft.value.priority,
       source: ticketDraft.value.source,
-      ...(refundAmount ? { refundAmount: Number(refundAmount) } : {}),
+      ...(refundAmount.valid && typeof refundAmount.value === 'number' ? { refundAmount: refundAmount.value } : {}),
     },
   }
 }
@@ -1054,13 +1078,20 @@ async function submitServiceRecord() {
 }
 
 async function submitTicket() {
-  if (!canSubmitTicket.value || ticketCreating.value) {
+  if (!canSubmitTicket.value || ticketCreating.value || ticketsLoading.value) {
     return
   }
 
   ticketCreating.value = true
   ticketSubmitError.value = ''
   ticketSubmitSuccess.value = ''
+
+  const parsedRefundAmount = parseOptionalRefundAmount(ticketDraft.value.refundAmount)
+  if (!parsedRefundAmount.valid) {
+    ticketSubmitError.value = 'Refund amount must be a valid number'
+    ticketCreating.value = false
+    return
+  }
 
   try {
     const payload = await readEnvelope<CreateTicketResponse>('/api/after-sales/tickets', {
