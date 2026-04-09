@@ -1673,11 +1673,9 @@ describe('plugin-after-sales routes', () => {
       },
       body: {
         customer: {
-          customerCode: 'CUS-1001-UPDATED',
           name: 'Alice Plant Updated',
           phone: '',
           email: 'alice-updated@example.com',
-          status: 'inactive',
         },
       },
     }), res)
@@ -1691,9 +1689,7 @@ describe('plugin-after-sales routes', () => {
       sheetId: 'tenant_42:after-sales:customer:sheet',
       recordId: 'rec_customer_001',
       changes: {
-        [cuPk('customerCode')]: 'CUS-1001-UPDATED',
         [cuPk('name')]: 'Alice Plant Updated',
-        [cuPk('status')]: 'inactive',
         [cuPk('phone')]: null,
         [cuPk('email')]: 'alice-updated@example.com',
       },
@@ -1704,11 +1700,11 @@ describe('plugin-after-sales routes', () => {
         id: 'rec_customer_001',
         version: 4,
         data: {
-          customerCode: 'CUS-1001-UPDATED',
+          customerCode: 'CUS-1001',
           name: 'Alice Plant Updated',
           phone: null,
           email: 'alice-updated@example.com',
-          status: 'inactive',
+          status: 'active',
         },
       },
     })

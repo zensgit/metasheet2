@@ -2322,11 +2322,9 @@ describe('after-sales plugin install integration', () => {
         },
         body: JSON.stringify({
           customer: {
-            customerCode: 'CUS-5005-UPDATED',
             name: 'Customer Updated',
             phone: '',
             email: 'updated@example.com',
-            status: 'inactive',
           },
         }),
       },
@@ -2344,10 +2342,10 @@ describe('after-sales plugin install integration', () => {
     }
     expect(updateBody.ok).toBe(true)
     expect(updateBody.data?.customer?.data).toMatchObject({
-      customerCode: 'CUS-5005-UPDATED',
+      customerCode: 'CUS-5005',
       name: 'Customer Updated',
       email: 'updated@example.com',
-      status: 'inactive',
+      status: 'active',
     })
 
     const customerSheetId = stableMetaId('sheet', PROJECT_ID, 'customer')
@@ -2357,11 +2355,11 @@ describe('after-sales plugin install integration', () => {
     )
     expect(updatedRecordRes.rows).toHaveLength(1)
     expect(updatedRecordRes.rows[0]?.data).toMatchObject({
-      [stFieldId('customer', 'customerCode')]: 'CUS-5005-UPDATED',
+      [stFieldId('customer', 'customerCode')]: 'CUS-5005',
       [stFieldId('customer', 'name')]: 'Customer Updated',
       [stFieldId('customer', 'phone')]: null,
       [stFieldId('customer', 'email')]: 'updated@example.com',
-      [stFieldId('customer', 'status')]: 'inactive',
+      [stFieldId('customer', 'status')]: 'active',
     })
   })
 

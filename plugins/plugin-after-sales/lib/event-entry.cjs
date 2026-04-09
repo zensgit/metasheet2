@@ -228,35 +228,42 @@ function buildUpdateCustomerCommand(input, existingCustomer) {
   const currentCustomer =
     existingCustomer && typeof existingCustomer === 'object' ? existingCustomer : {}
 
-  const customerCode = requiredString(
-    customerInput.customerCode ?? currentCustomer.customerCode,
-    'customer.customerCode',
-  )
-  const name = requiredString(
-    customerInput.name ?? currentCustomer.name,
-    'customer.name',
-  )
-  const status = normalizeEnumValue(
-    customerInput.status ?? currentCustomer.status,
-    'customer.status',
-    ['active', 'inactive'],
-    optionalString(currentCustomer.status) || 'active',
-  )
-  const phone = hasOwnField(customerInput, 'phone') || hasOwnField(command, 'phone')
-    ? optionalString(customerInput.phone ?? command.phone) || null
-    : optionalString(currentCustomer.phone) || null
-  const email = hasOwnField(customerInput, 'email') || hasOwnField(command, 'email')
-    ? optionalString(customerInput.email ?? command.email) || null
-    : optionalString(currentCustomer.email) || null
+  const changes = {}
+  const hasCustomerCode = hasOwnField(customerInput, 'customerCode') || hasOwnField(command, 'customerCode')
+  const hasName = hasOwnField(customerInput, 'name') || hasOwnField(command, 'name')
+  const hasStatus = hasOwnField(customerInput, 'status') || hasOwnField(command, 'status')
+  const hasPhone = hasOwnField(customerInput, 'phone') || hasOwnField(command, 'phone')
+  const hasEmail = hasOwnField(customerInput, 'email') || hasOwnField(command, 'email')
+
+  if (hasCustomerCode) {
+    changes.customerCode = requiredString(
+      customerInput.customerCode ?? command.customerCode,
+      'customer.customerCode',
+    )
+  }
+  if (hasName) {
+    changes.name = requiredString(
+      customerInput.name ?? command.name,
+      'customer.name',
+    )
+  }
+  if (hasStatus) {
+    changes.status = normalizeEnumValue(
+      customerInput.status ?? command.status,
+      'customer.status',
+      ['active', 'inactive'],
+      optionalString(currentCustomer.status) || 'active',
+    )
+  }
+  if (hasPhone) {
+    changes.phone = optionalString(customerInput.phone ?? command.phone) || null
+  }
+  if (hasEmail) {
+    changes.email = optionalString(customerInput.email ?? command.email) || null
+  }
 
   return {
-    changes: {
-      customerCode,
-      name,
-      status,
-      phone,
-      email,
-    },
+    changes,
   }
 }
 

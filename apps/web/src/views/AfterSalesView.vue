@@ -1280,7 +1280,7 @@
                 <button
                   class="after-sales-view__ghost-btn after-sales-view__customer-delete"
                   :aria-label="`Delete customer ${customer.data.customerCode}`"
-                  :disabled="customerDeletingId === customer.id || customerCreating || customersLoading || Boolean(customerUpdatingId) || customerEditingId === customer.id"
+                  :disabled="Boolean(customerDeletingId) || customerCreating || customersLoading || Boolean(customerUpdatingId) || Boolean(customerEditingId)"
                   @click="deleteCustomer(customer)"
                 >
                   {{ customerDeletingId === customer.id ? 'Deleting...' : 'Delete' }}
@@ -2109,15 +2109,36 @@ function buildCustomerPayload() {
   }
 }
 
-function buildCustomerUpdatePayload() {
+function buildCustomerUpdatePayload(customer: CustomerViewModel) {
+  const changes: Record<string, string> = {}
+  const customerCode = toText(customerEditDraft.value.customerCode)
+  const name = toText(customerEditDraft.value.name)
+  const phone = toText(customerEditDraft.value.phone)
+  const email = toText(customerEditDraft.value.email)
+  const status = customerEditDraft.value.status
+
+  if (customerCode !== toText(customer.data.customerCode)) {
+    changes.customerCode = customerCode
+  }
+  if (name !== toText(customer.data.name)) {
+    changes.name = name
+  }
+  if (status !== normalizeCustomerStatus(customer.data.status)) {
+    changes.status = status
+  }
+  if (phone !== toText(customer.data.phone)) {
+    changes.phone = phone
+  }
+  if (email !== toText(customer.data.email)) {
+    changes.email = email
+  }
+
+  if (!Object.keys(changes).length) {
+    return null
+  }
+
   return {
-    customer: {
-      customerCode: toText(customerEditDraft.value.customerCode),
-      name: toText(customerEditDraft.value.name),
-      status: customerEditDraft.value.status,
-      phone: toText(customerEditDraft.value.phone),
-      email: toText(customerEditDraft.value.email),
-    },
+    customer: changes,
   }
 }
 
@@ -2622,11 +2643,18 @@ async function submitCustomerEdit(customer: CustomerViewModel) {
   customerSubmitSuccess.value = ''
 
   try {
+    const updatePayload = buildCustomerUpdatePayload(customer)
+    if (!updatePayload) {
+      customerEditingId.value = ''
+      customerEditDraft.value = createCustomerEditDraft()
+      return
+    }
+
     const payload = await readEnvelope<CreateCustomerResponse>(
       `/api/after-sales/customers/${encodeURIComponent(customer.id)}`,
       {
         method: 'PATCH',
-        body: JSON.stringify(buildCustomerUpdatePayload()),
+        body: JSON.stringify(updatePayload),
       },
     )
     const nextCustomer = payload?.customer ? normalizeCustomerRow(payload.customer) : null
@@ -2649,7 +2677,7 @@ async function submitCustomerEdit(customer: CustomerViewModel) {
 }
 
 async function deleteCustomer(customer: CustomerViewModel) {
-  if (!customer.id || customerDeletingId.value === customer.id || customerCreating.value || customersLoading.value || customerUpdatingId.value || customerEditingId.value === customer.id) {
+  if (!customer.id || customerDeletingId.value || customerCreating.value || customersLoading.value || customerUpdatingId.value || customerEditingId.value) {
     return
   }
 

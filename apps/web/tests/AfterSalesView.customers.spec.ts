@@ -771,7 +771,7 @@ describe('AfterSalesView customers panel', () => {
     expect(customerSection.textContent).toContain('Alice Plant')
   })
 
-  it('updates a customer inline without reloading the page', async () => {
+  it('updates a customer inline with a partial patch and keeps omitted fields intact', async () => {
     apiFetchMock.mockImplementation(async (path: string, options?: RequestInit) => {
       if (path === '/api/after-sales/app-manifest') {
         return createResponse({
@@ -850,11 +850,9 @@ describe('AfterSalesView customers panel', () => {
       if (path === '/api/after-sales/customers/customer-edit' && options?.method === 'PATCH') {
         expect(JSON.parse(String(options.body))).toEqual({
           customer: {
-            customerCode: 'CUS-EDIT-UPDATED',
             name: 'Customer After Edit',
             phone: '',
             email: 'after@example.com',
-            status: 'inactive',
           },
         })
         return createResponse({
@@ -863,11 +861,11 @@ describe('AfterSalesView customers panel', () => {
             id: 'customer-edit',
             version: 4,
             data: {
-              customerCode: 'CUS-EDIT-UPDATED',
+              customerCode: 'CUS-EDIT',
               name: 'Customer After Edit',
               phone: null,
               email: 'after@example.com',
-              status: 'inactive',
+              status: 'active',
             },
           },
         })
@@ -903,15 +901,13 @@ describe('AfterSalesView customers panel', () => {
     expect(statusSelect).toBeTruthy()
     if (!customerCodeInput || !nameInput || !phoneInput || !emailInput || !statusSelect) return
 
-    await setInputValue(customerCodeInput, 'CUS-EDIT-UPDATED')
     await setInputValue(nameInput, 'Customer After Edit')
     await setInputValue(phoneInput, '')
     await setInputValue(emailInput, 'after@example.com')
-    await setSelectValue(statusSelect, 'inactive')
 
     findButtonWithin(customerSection, 'Save changes').click()
 
-    await waitForText(customerSection, 'Updated customer CUS-EDIT-UPDATED')
+    await waitForText(customerSection, 'Updated customer CUS-EDIT')
 
     expect(customerSection.textContent).toContain('Customer After Edit')
     expect(customerSection.textContent).toContain('after@example.com')
@@ -922,9 +918,7 @@ describe('AfterSalesView customers panel', () => {
       method: 'PATCH',
       body: JSON.stringify({
         customer: {
-          customerCode: 'CUS-EDIT-UPDATED',
           name: 'Customer After Edit',
-          status: 'inactive',
           phone: '',
           email: 'after@example.com',
         },
@@ -1249,6 +1243,149 @@ describe('AfterSalesView customers panel', () => {
     await waitForText(customerSection, 'After-sales write access required')
 
     expect(customerSection.textContent).toContain('Delete Me Customer')
+    expect(apiFetchMock).toHaveBeenCalledWith('/api/after-sales/customers/customer-delete', { method: 'DELETE' })
+  })
+
+  it('blocks concurrent customer deletes while one delete is in flight', async () => {
+    let resolveDelete: ((response: Response) => void) | null = null
+    let deleteCalls = 0
+
+    apiFetchMock.mockImplementation(async (path: string, options?: RequestInit) => {
+      if (path === '/api/after-sales/app-manifest') {
+        return createResponse({
+          id: 'after-sales-default',
+          displayName: 'After Sales',
+          platformDependencies: ['core-backend'],
+          objects: [{ id: 'customer' }],
+          workflows: [],
+        })
+      }
+
+      if (path === '/api/after-sales/projects/current') {
+        return createResponse({
+          status: 'installed',
+          projectId: 'tenant:after-sales',
+          displayName: 'After Sales',
+          config: {
+            defaultSlaHours: 24,
+            urgentSlaHours: 4,
+            followUpAfterDays: 7,
+          },
+          installResult: {
+            status: 'installed',
+            createdObjects: [],
+            createdViews: [],
+            warnings: [],
+            reportRef: 'install-customers-008',
+          },
+          reportRef: 'install-customers-008',
+        })
+      }
+
+      if (path === '/api/after-sales/tickets') {
+        return createResponse({ projectId: 'tenant:after-sales', count: 0, tickets: [] })
+      }
+
+      if (path === '/api/after-sales/installed-assets') {
+        return createResponse({ projectId: 'tenant:after-sales', count: 0, installedAssets: [] })
+      }
+
+      if (path === '/api/after-sales/service-records') {
+        return createResponse({ projectId: 'tenant:after-sales', count: 0, serviceRecords: [] })
+      }
+
+      if (path === '/api/after-sales/customers') {
+        return createResponse({
+          projectId: 'tenant:after-sales',
+          count: 2,
+          customers: [
+            {
+              id: 'customer-delete',
+              version: 1,
+              data: {
+                customerCode: 'CUS-DELETE',
+                name: 'Delete Me Customer',
+                phone: '13800138000',
+                email: 'delete-me@example.com',
+                status: 'active',
+              },
+            },
+            {
+              id: 'customer-keep',
+              version: 1,
+              data: {
+                customerCode: 'CUS-KEEP',
+                name: 'Keep Me Customer',
+                phone: '13900139000',
+                email: 'keep@example.com',
+                status: 'inactive',
+              },
+            },
+          ],
+        })
+      }
+
+      if (path === '/api/after-sales/customers/customer-delete' && options?.method === 'DELETE') {
+        deleteCalls += 1
+        return await new Promise<Response>((resolve) => {
+          resolveDelete = resolve
+        })
+      }
+
+      if (path === '/api/after-sales/customers/customer-keep' && options?.method === 'DELETE') {
+        deleteCalls += 1
+        return createResponse({
+          projectId: 'tenant:after-sales',
+          customerId: 'customer-keep',
+          version: 7,
+          deleted: true,
+        })
+      }
+
+      throw new Error(`Unexpected request: ${path}`)
+    })
+
+    const mounted = mountAfterSalesView()
+    app = mounted.app
+    container = mounted.container
+
+    await waitForText(container, 'Delete Me Customer')
+
+    const customerSection = findSection(container, 'Customer registry')
+    const deleteFirstButton = customerSection.querySelector<HTMLButtonElement>('button[aria-label="Delete customer CUS-DELETE"]')
+    const deleteSecondButton = customerSection.querySelector<HTMLButtonElement>('button[aria-label="Delete customer CUS-KEEP"]')
+    const createButton = findButtonWithin(customerSection, 'Create customer')
+    expect(deleteFirstButton).toBeTruthy()
+    expect(deleteSecondButton).toBeTruthy()
+    if (!deleteFirstButton || !deleteSecondButton) return
+
+    deleteFirstButton.click()
+    await flushUi()
+
+    expect(deleteFirstButton.disabled).toBe(true)
+    expect(deleteSecondButton.disabled).toBe(true)
+    expect(createButton.disabled).toBe(true)
+
+    deleteSecondButton.click()
+    await flushUi()
+
+    expect(deleteCalls).toBe(1)
+    expect(resolveDelete).toBeTruthy()
+    if (!resolveDelete) return
+
+    resolveDelete(
+      createResponse({
+        projectId: 'tenant:after-sales',
+        customerId: 'customer-delete',
+        version: 4,
+        deleted: true,
+      }),
+    )
+    await waitForText(customerSection, 'Deleted customer CUS-DELETE')
+
+    expect(customerSection.textContent).not.toContain('Delete Me Customer')
+    expect(customerSection.textContent).toContain('Keep Me Customer')
+    expect(deleteCalls).toBe(1)
     expect(apiFetchMock).toHaveBeenCalledWith('/api/after-sales/customers/customer-delete', { method: 'DELETE' })
   })
 })
