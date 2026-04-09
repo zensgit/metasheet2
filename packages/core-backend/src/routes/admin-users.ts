@@ -162,6 +162,7 @@ type DelegatedScopeTemplateRow = {
   created_at: string
   updated_at: string
   department_count: number | string
+  member_group_count: number | string
 }
 
 type DelegatedScopeTemplateDepartmentRow = {
@@ -177,6 +178,48 @@ type DelegatedScopeTemplateDepartmentRow = {
   department_is_active: boolean
 }
 
+type PlatformMemberGroupRow = {
+  id: string
+  name: string
+  description: string | null
+  created_by: string | null
+  updated_by: string | null
+  created_at: string
+  updated_at: string
+  member_count: number | string
+}
+
+type PlatformMemberGroupMemberRow = {
+  group_id: string
+  user_id: string
+  email: string
+  name: string | null
+  role: string
+  is_active: boolean
+  is_admin: boolean
+}
+
+type DelegatedGroupAssignmentRow = {
+  id: string
+  admin_user_id: string
+  namespace: string
+  group_id: string
+  created_by: string | null
+  created_at: string
+  updated_at: string
+  group_name: string
+  group_description: string | null
+  member_count: number | string
+}
+
+type DelegatedScopeTemplateMemberGroupRow = {
+  template_id: string
+  group_id: string
+  group_name: string
+  group_description: string | null
+  member_count: number | string
+}
+
 type AuditRangeBoundaryMode = 'start' | 'end'
 
 type CreateUserRequestBody = {
@@ -189,7 +232,7 @@ type CreateUserRequestBody = {
   isActive?: boolean
 }
 
-const ADMIN_AUDIT_RESOURCE_TYPES = ['user', 'user-role', 'user-auth-grant', 'user-password', 'user-session', 'user-invite', 'role', 'permission', 'permission-template', 'delegated-admin-scope', 'delegated-admin-scope-template'] as const
+const ADMIN_AUDIT_RESOURCE_TYPES = ['user', 'user-role', 'user-auth-grant', 'user-password', 'user-session', 'user-invite', 'role', 'permission', 'permission-template', 'delegated-admin-scope', 'delegated-admin-scope-template', 'platform-member-group', 'delegated-admin-group-scope'] as const
 const DINGTALK_PROVIDER = 'dingtalk'
 const PLATFORM_ADMIN_ROLE_ID = 'admin'
 const ATTENDANCE_ROLE_IDS = new Set(['attendance_employee', 'attendance_approver', 'attendance_admin'])
@@ -545,6 +588,187 @@ function sanitizeScopeTemplateText(value: unknown, maxLength: number): string {
   return String(value ?? '').trim().replace(/[<>'"&;]/g, '').slice(0, maxLength)
 }
 
+async function fetchPlatformMemberGroups(search = '') {
+  const trimmed = search.trim()
+  const term = trimmed ? `%${trimmed}%` : '%'
+  const result = await query<PlatformMemberGroupRow>(
+    `SELECT
+        g.id,
+        g.name,
+        g.description,
+        g.created_by,
+        g.updated_by,
+        g.created_at,
+        g.updated_at,
+        COUNT(gm.user_id)::int AS member_count
+     FROM platform_member_groups g
+     LEFT JOIN platform_member_group_members gm ON gm.group_id = g.id
+     WHERE (
+       $1 = '%'
+       OR g.name ILIKE $1
+       OR COALESCE(g.description, '') ILIKE $1
+     )
+     GROUP BY g.id, g.name, g.description, g.created_by, g.updated_by, g.created_at, g.updated_at
+     ORDER BY g.updated_at DESC, g.name ASC`,
+    [term],
+  )
+
+  return result.rows.map((row) => ({
+    id: row.id,
+    name: row.name,
+    description: row.description,
+    createdBy: row.created_by,
+    updatedBy: row.updated_by,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    memberCount: Number(row.member_count || 0),
+  }))
+}
+
+async function fetchPlatformMemberGroupMembers(groupId: string) {
+  const result = await query<PlatformMemberGroupMemberRow>(
+    `SELECT
+        gm.group_id,
+        u.id AS user_id,
+        u.email,
+        u.name,
+        u.role,
+        u.is_active,
+        u.is_admin
+     FROM platform_member_group_members gm
+     JOIN users u ON u.id = gm.user_id
+     WHERE gm.group_id = $1
+     ORDER BY COALESCE(u.name, u.email) ASC, u.email ASC`,
+    [groupId],
+  )
+
+  const userIds = result.rows.map((row) => row.user_id).filter(Boolean)
+  if (userIds.length === 0) return []
+
+  const [roleRows, grantRows, directoryRows] = await Promise.all([
+    query<{ user_id: string, role_id: string }>(
+      `SELECT user_id, role_id
+       FROM user_roles
+       WHERE user_id = ANY($1::text[])
+       ORDER BY role_id ASC`,
+      [userIds],
+    ),
+    query<{ user_id: string }>(
+      `SELECT local_user_id AS user_id
+       FROM user_external_auth_grants
+       WHERE provider = $1
+         AND enabled = true
+         AND local_user_id = ANY($2::text[])`,
+      [DINGTALK_PROVIDER, userIds],
+    ),
+    query<{ user_id: string }>(
+      `SELECT DISTINCT local_user_id AS user_id
+       FROM directory_account_links
+       WHERE link_status = 'linked'
+         AND local_user_id = ANY($1::text[])`,
+      [userIds],
+    ),
+  ])
+
+  const roleMap = new Map<string, string[]>()
+  for (const row of roleRows.rows) {
+    const current = roleMap.get(row.user_id) || []
+    current.push(row.role_id)
+    roleMap.set(row.user_id, current)
+  }
+
+  const dingtalkGrantSet = new Set(grantRows.rows.map((row) => row.user_id))
+  const directoryLinkedSet = new Set(directoryRows.rows.map((row) => row.user_id))
+
+  return result.rows.map((row) => {
+    const roles = roleMap.get(row.user_id) || []
+    return {
+      id: row.user_id,
+      email: row.email,
+      name: row.name,
+      role: row.role,
+      isActive: row.is_active,
+      isAdmin: row.is_admin,
+      roles,
+      platformAdminEnabled: row.role === 'admin' || row.is_admin || roles.includes(PLATFORM_ADMIN_ROLE_ID),
+      attendanceAdminEnabled: roles.includes('attendance_admin'),
+      businessRoleIds: roles.filter((roleId) => roleId !== PLATFORM_ADMIN_ROLE_ID && !ATTENDANCE_ROLE_IDS.has(roleId)),
+      dingtalkLoginEnabled: dingtalkGrantSet.has(row.user_id),
+      directoryLinked: directoryLinkedSet.has(row.user_id),
+    }
+  })
+}
+
+async function fetchPlatformMemberGroupMembershipsForUser(userId: string) {
+  const result = await query<PlatformMemberGroupRow>(
+    `SELECT
+        g.id,
+        g.name,
+        g.description,
+        g.created_by,
+        g.updated_by,
+        g.created_at,
+        g.updated_at,
+        COUNT(gm2.user_id)::int AS member_count
+     FROM platform_member_groups g
+     JOIN platform_member_group_members gm ON gm.group_id = g.id
+     LEFT JOIN platform_member_group_members gm2 ON gm2.group_id = g.id
+     WHERE gm.user_id = $1
+     GROUP BY g.id, g.name, g.description, g.created_by, g.updated_by, g.created_at, g.updated_at
+     ORDER BY g.name ASC`,
+    [userId],
+  )
+
+  return result.rows.map((row) => ({
+    id: row.id,
+    name: row.name,
+    description: row.description,
+    createdBy: row.created_by,
+    updatedBy: row.updated_by,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    memberCount: Number(row.member_count || 0),
+  }))
+}
+
+async function fetchPlatformMemberGroupDetail(groupId: string) {
+  const [groupResult, members] = await Promise.all([
+    query<PlatformMemberGroupRow>(
+      `SELECT
+          g.id,
+          g.name,
+          g.description,
+          g.created_by,
+          g.updated_by,
+          g.created_at,
+          g.updated_at,
+          COUNT(gm.user_id)::int AS member_count
+       FROM platform_member_groups g
+       LEFT JOIN platform_member_group_members gm ON gm.group_id = g.id
+       WHERE g.id = $1
+       GROUP BY g.id, g.name, g.description, g.created_by, g.updated_by, g.created_at, g.updated_at
+       LIMIT 1`,
+      [groupId],
+    ),
+    fetchPlatformMemberGroupMembers(groupId),
+  ])
+
+  const group = groupResult.rows[0]
+  if (!group) return null
+
+  return {
+    id: group.id,
+    name: group.name,
+    description: group.description,
+    createdBy: group.created_by,
+    updatedBy: group.updated_by,
+    createdAt: group.created_at,
+    updatedAt: group.updated_at,
+    memberCount: Number(group.member_count || 0),
+    members,
+  }
+}
+
 async function fetchDelegatedScopeTemplates(search = '') {
   const trimmed = search.trim()
   const term = trimmed ? `%${trimmed}%` : '%'
@@ -557,9 +781,11 @@ async function fetchDelegatedScopeTemplates(search = '') {
         t.updated_by,
         t.created_at,
         t.updated_at,
-        COUNT(td.directory_department_id)::int AS department_count
+        COUNT(DISTINCT td.directory_department_id)::int AS department_count,
+        COUNT(DISTINCT tg.group_id)::int AS member_group_count
      FROM delegated_role_scope_templates t
      LEFT JOIN delegated_role_scope_template_departments td ON td.template_id = t.id
+     LEFT JOIN delegated_role_scope_template_member_groups tg ON tg.template_id = t.id
      WHERE (
        $1 = '%'
        OR t.name ILIKE $1
@@ -579,6 +805,7 @@ async function fetchDelegatedScopeTemplates(search = '') {
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     departmentCount: Number(row.department_count || 0),
+    memberGroupCount: Number(row.member_group_count || 0),
   }))
 }
 
@@ -616,8 +843,33 @@ async function fetchDelegatedScopeTemplateDepartments(templateId: string) {
   }))
 }
 
+async function fetchDelegatedScopeTemplateMemberGroups(templateId: string) {
+  const result = await query<DelegatedScopeTemplateMemberGroupRow>(
+    `SELECT
+        tg.template_id,
+        g.id AS group_id,
+        g.name AS group_name,
+        g.description AS group_description,
+        COUNT(gm.user_id)::int AS member_count
+     FROM delegated_role_scope_template_member_groups tg
+     JOIN platform_member_groups g ON g.id = tg.group_id
+     LEFT JOIN platform_member_group_members gm ON gm.group_id = g.id
+     WHERE tg.template_id = $1
+     GROUP BY tg.template_id, g.id, g.name, g.description
+     ORDER BY g.name ASC`,
+    [templateId],
+  )
+
+  return result.rows.map((row) => ({
+    id: row.group_id,
+    name: row.group_name,
+    description: row.group_description,
+    memberCount: Number(row.member_count || 0),
+  }))
+}
+
 async function fetchDelegatedScopeTemplateDetail(templateId: string) {
-  const [templateResult, departments] = await Promise.all([
+  const [templateResult, departments, memberGroups] = await Promise.all([
     query<DelegatedScopeTemplateRow>(
       `SELECT
           t.id,
@@ -627,15 +879,18 @@ async function fetchDelegatedScopeTemplateDetail(templateId: string) {
           t.updated_by,
           t.created_at,
           t.updated_at,
-          COUNT(td.directory_department_id)::int AS department_count
+          COUNT(DISTINCT td.directory_department_id)::int AS department_count,
+          COUNT(DISTINCT tg.group_id)::int AS member_group_count
        FROM delegated_role_scope_templates t
        LEFT JOIN delegated_role_scope_template_departments td ON td.template_id = t.id
+       LEFT JOIN delegated_role_scope_template_member_groups tg ON tg.template_id = t.id
        WHERE t.id = $1
        GROUP BY t.id, t.name, t.description, t.created_by, t.updated_by, t.created_at, t.updated_at
        LIMIT 1`,
       [templateId],
     ),
     fetchDelegatedScopeTemplateDepartments(templateId),
+    fetchDelegatedScopeTemplateMemberGroups(templateId),
   ])
 
   const template = templateResult.rows[0]
@@ -650,8 +905,77 @@ async function fetchDelegatedScopeTemplateDetail(templateId: string) {
     createdAt: template.created_at,
     updatedAt: template.updated_at,
     departmentCount: Number(template.department_count || 0),
+    memberGroupCount: Number(template.member_group_count || 0),
     departments,
+    memberGroups,
   }
+}
+
+async function fetchDelegatedGroupAssignments(adminUserId: string, namespaces?: string[]) {
+  if (Array.isArray(namespaces) && namespaces.length === 0) return []
+
+  const result = Array.isArray(namespaces)
+    ? await query<DelegatedGroupAssignmentRow>(
+      `SELECT
+          gscope.id,
+          gscope.admin_user_id,
+          gscope.namespace,
+          gscope.group_id,
+          gscope.created_by,
+          gscope.created_at,
+          gscope.updated_at,
+          g.name AS group_name,
+          g.description AS group_description,
+          COUNT(gm.user_id)::int AS member_count
+       FROM delegated_role_admin_member_groups gscope
+       JOIN platform_member_groups g ON g.id = gscope.group_id
+       LEFT JOIN platform_member_group_members gm ON gm.group_id = g.id
+       WHERE gscope.admin_user_id = $1
+         AND gscope.namespace = ANY($2::text[])
+       GROUP BY gscope.id, gscope.admin_user_id, gscope.namespace, gscope.group_id, gscope.created_by, gscope.created_at, gscope.updated_at, g.name, g.description
+       ORDER BY gscope.namespace ASC, g.name ASC`,
+      [adminUserId, namespaces],
+    )
+    : await query<DelegatedGroupAssignmentRow>(
+      `SELECT
+          gscope.id,
+          gscope.admin_user_id,
+          gscope.namespace,
+          gscope.group_id,
+          gscope.created_by,
+          gscope.created_at,
+          gscope.updated_at,
+          g.name AS group_name,
+          g.description AS group_description,
+          COUNT(gm.user_id)::int AS member_count
+       FROM delegated_role_admin_member_groups gscope
+       JOIN platform_member_groups g ON g.id = gscope.group_id
+       LEFT JOIN platform_member_group_members gm ON gm.group_id = g.id
+       WHERE gscope.admin_user_id = $1
+       GROUP BY gscope.id, gscope.admin_user_id, gscope.namespace, gscope.group_id, gscope.created_by, gscope.created_at, gscope.updated_at, g.name, g.description
+       ORDER BY gscope.namespace ASC, g.name ASC`,
+      [adminUserId],
+    )
+
+  return result.rows.map((row) => ({
+    id: row.id,
+    adminUserId: row.admin_user_id,
+    namespace: row.namespace,
+    groupId: row.group_id,
+    createdBy: row.created_by,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    name: row.group_name,
+    description: row.group_description,
+    memberCount: Number(row.member_count || 0),
+  }))
+}
+
+function hasDelegatedAudienceAssignments(
+  scopeAssignments: Array<{ id: string }>,
+  groupAssignments: Array<{ id: string }>,
+): boolean {
+  return scopeAssignments.length > 0 || groupAssignments.length > 0
 }
 
 async function fetchScopedDelegationUsers(adminUserId: string, namespaces: string[], search: string, pageSize: number, offset: number) {
@@ -685,6 +1009,12 @@ async function fetchScopedDelegationUsers(adminUserId: string, namespaces: strin
        AND child.external_parent_department_id = parent.external_department_id
       WHERE child.is_active = true
     ),
+    allowed_groups AS (
+      SELECT DISTINCT gscope.group_id
+      FROM delegated_role_admin_member_groups gscope
+      WHERE gscope.admin_user_id = $1
+        AND gscope.namespace = ANY($2::text[])
+    ),
     scoped_users AS (
       SELECT DISTINCT u.id
       FROM users u
@@ -698,6 +1028,15 @@ async function fetchScopedDelegationUsers(adminUserId: string, namespaces: strin
         ON ad.directory_account_id = a.id
       JOIN allowed_departments scoped
         ON scoped.id = ad.directory_department_id
+      WHERE 1 = 1
+      ${filterSql}
+      UNION
+      SELECT DISTINCT u.id
+      FROM users u
+      JOIN platform_member_group_members gm
+        ON gm.user_id = u.id
+      JOIN allowed_groups scoped_groups
+        ON scoped_groups.group_id = gm.group_id
       WHERE 1 = 1
       ${filterSql}
     )
@@ -725,6 +1064,12 @@ async function fetchScopedDelegationUsers(adminUserId: string, namespaces: strin
        AND child.external_parent_department_id = parent.external_department_id
       WHERE child.is_active = true
     ),
+    allowed_groups AS (
+      SELECT DISTINCT gscope.group_id
+      FROM delegated_role_admin_member_groups gscope
+      WHERE gscope.admin_user_id = $1
+        AND gscope.namespace = ANY($2::text[])
+    ),
     scoped_users AS (
       SELECT DISTINCT
         u.id,
@@ -747,6 +1092,24 @@ async function fetchScopedDelegationUsers(adminUserId: string, namespaces: strin
         ON ad.directory_account_id = a.id
       JOIN allowed_departments scoped
         ON scoped.id = ad.directory_department_id
+      WHERE 1 = 1
+      ${filterSql}
+      UNION
+      SELECT DISTINCT
+        u.id,
+        u.email,
+        u.name,
+        u.role,
+        u.is_active,
+        u.is_admin,
+        u.last_login_at,
+        u.created_at,
+        u.updated_at
+      FROM users u
+      JOIN platform_member_group_members gm
+        ON gm.user_id = u.id
+      JOIN allowed_groups scoped_groups
+        ON scoped_groups.group_id = gm.group_id
       WHERE 1 = 1
       ${filterSql}
     )
@@ -784,9 +1147,15 @@ async function isUserWithinDelegatedScope(adminUserId: string, namespaces: strin
         SELECT child.id, child.integration_id, child.external_department_id
         FROM directory_departments child
         JOIN allowed_departments parent
-          ON child.integration_id = parent.integration_id
+         ON child.integration_id = parent.integration_id
          AND child.external_parent_department_id = parent.external_department_id
         WHERE child.is_active = true
+      ),
+      allowed_groups AS (
+        SELECT DISTINCT gscope.group_id
+        FROM delegated_role_admin_member_groups gscope
+        WHERE gscope.admin_user_id = $1
+          AND gscope.namespace = ANY($2::text[])
       )
       SELECT EXISTS (
         SELECT 1
@@ -800,6 +1169,12 @@ async function isUserWithinDelegatedScope(adminUserId: string, namespaces: strin
           ON scoped.id = ad.directory_department_id
         WHERE l.local_user_id = $3
           AND l.link_status = 'linked'
+        UNION
+        SELECT 1
+        FROM platform_member_group_members gm
+        JOIN allowed_groups scoped_groups
+          ON scoped_groups.group_id = gm.group_id
+        WHERE gm.user_id = $3
       ) AS allowed`,
     [adminUserId, namespaces, userId],
   )
@@ -900,11 +1275,12 @@ async function fetchDirectoryMemberships(userId: string) {
 }
 
 async function fetchMemberAdmissionSnapshot(userId: string) {
-  const [profile, roles, directoryMemberships, dingtalkAccess] = await Promise.all([
+  const [profile, roles, directoryMemberships, dingtalkAccess, memberGroups] = await Promise.all([
     fetchUserProfile(userId),
     fetchUserRoleIds(userId),
     fetchDirectoryMemberships(userId),
     fetchDingTalkAccessSnapshot(userId),
+    fetchPlatformMemberGroupMembershipsForUser(userId),
   ])
   if (!profile) return null
 
@@ -914,6 +1290,7 @@ async function fetchMemberAdmissionSnapshot(userId: string) {
     platformAdminEnabled: profile.role === 'admin' || profile.is_admin || roles.includes(PLATFORM_ADMIN_ROLE_ID),
     attendanceAdminEnabled: roles.includes('attendance_admin'),
     businessRoleIds: roles.filter((roleId) => roleId !== PLATFORM_ADMIN_ROLE_ID && !ATTENDANCE_ROLE_IDS.has(roleId)),
+    memberGroups,
     directoryMemberships,
     dingtalk: dingtalkAccess,
   }
@@ -942,13 +1319,16 @@ export function adminUsersRouter(): Router {
     if (!delegation) return
 
     try {
-      const [roleCatalog, scopeAssignments] = await Promise.all([
+      const [roleCatalog, scopeAssignments, groupAssignments] = await Promise.all([
         fetchDelegatedRoleCatalog(
           delegation.isPlatformAdmin ? undefined : delegation.delegableNamespaces,
         ),
         delegation.isPlatformAdmin
           ? Promise.resolve([])
           : fetchDelegatedScopeAssignments(delegation.actorId, delegation.delegableNamespaces),
+        delegation.isPlatformAdmin
+          ? Promise.resolve([])
+          : fetchDelegatedGroupAssignments(delegation.actorId, delegation.delegableNamespaces),
       ])
       return jsonOk(res, {
         actorId: delegation.actorId,
@@ -956,6 +1336,7 @@ export function adminUsersRouter(): Router {
         delegableNamespaces: delegation.delegableNamespaces,
         roleCatalog,
         scopeAssignments,
+        groupAssignments,
       })
     } catch (error) {
       return jsonError(res, 500, 'ROLE_DELEGATION_SUMMARY_FAILED', (error as Error)?.message || 'Failed to load delegated role summary')
@@ -976,6 +1357,82 @@ export function adminUsersRouter(): Router {
       })
     } catch (error) {
       return jsonError(res, 500, 'ROLE_DELEGATION_DEPARTMENT_LIST_FAILED', (error as Error)?.message || 'Failed to list delegation departments')
+    }
+  })
+
+  r.get('/api/admin/role-delegation/member-groups', authenticate, async (req: Request, res: Response) => {
+    const adminUserId = await ensurePlatformAdmin(req, res)
+    if (!adminUserId) return
+
+    try {
+      const q = String(req.query.q || '').trim()
+      const items = await fetchPlatformMemberGroups(q)
+      return jsonOk(res, {
+        actorId: adminUserId,
+        items,
+        query: q,
+      })
+    } catch (error) {
+      return jsonError(res, 500, 'PLATFORM_MEMBER_GROUP_LIST_FAILED', (error as Error)?.message || 'Failed to list platform member groups')
+    }
+  })
+
+  r.post('/api/admin/role-delegation/member-groups', authenticate, async (req: Request, res: Response) => {
+    const adminUserId = await ensurePlatformAdmin(req, res)
+    if (!adminUserId) return
+
+    try {
+      const name = sanitizeScopeTemplateText(req.body?.name, 100)
+      const description = sanitizeScopeTemplateText(req.body?.description, 255)
+      if (!name) return jsonError(res, 400, 'GROUP_NAME_REQUIRED', 'name is required')
+
+      const created = await query<{ id: string }>(
+        `INSERT INTO platform_member_groups (
+           name, description, created_by, updated_by, created_at, updated_at
+         )
+         VALUES ($1, NULLIF($2, ''), $3, $3, NOW(), NOW())
+         RETURNING id`,
+        [name, description, adminUserId],
+      )
+
+      const item = await fetchPlatformMemberGroupDetail(created.rows[0].id)
+      await auditLog({
+        actorId: adminUserId,
+        actorType: 'user',
+        action: 'create',
+        resourceType: 'platform-member-group',
+        resourceId: `group:${created.rows[0].id}`,
+        meta: {
+          name,
+        },
+      })
+
+      return jsonOk(res, {
+        actorId: adminUserId,
+        item,
+      })
+    } catch (error) {
+      return jsonError(res, 500, 'PLATFORM_MEMBER_GROUP_CREATE_FAILED', (error as Error)?.message || 'Failed to create platform member group')
+    }
+  })
+
+  r.get('/api/admin/role-delegation/member-groups/:groupId', authenticate, async (req: Request, res: Response) => {
+    const adminUserId = await ensurePlatformAdmin(req, res)
+    if (!adminUserId) return
+
+    try {
+      const groupId = String(req.params.groupId || '').trim()
+      if (!groupId) return jsonError(res, 400, 'GROUP_ID_REQUIRED', 'groupId is required')
+
+      const item = await fetchPlatformMemberGroupDetail(groupId)
+      if (!item) return jsonError(res, 404, 'PLATFORM_MEMBER_GROUP_NOT_FOUND', 'Platform member group not found')
+
+      return jsonOk(res, {
+        actorId: adminUserId,
+        item,
+      })
+    } catch (error) {
+      return jsonError(res, 500, 'PLATFORM_MEMBER_GROUP_READ_FAILED', (error as Error)?.message || 'Failed to load platform member group')
     }
   })
 
@@ -1133,6 +1590,82 @@ export function adminUsersRouter(): Router {
     }
   })
 
+  r.post('/api/admin/role-delegation/scope-templates/:templateId/member-groups/:action(assign|unassign)', authenticate, async (req: Request, res: Response) => {
+    const adminUserId = await ensurePlatformAdmin(req, res)
+    if (!adminUserId) return
+
+    try {
+      const templateId = String(req.params.templateId || '').trim()
+      const action = String(req.params.action || '').trim()
+      const groupId = String(req.body?.groupId || '').trim()
+      if (!templateId) return jsonError(res, 400, 'TEMPLATE_ID_REQUIRED', 'templateId is required')
+      if (!groupId) return jsonError(res, 400, 'GROUP_ID_REQUIRED', 'groupId is required')
+
+      const [templateExists, groupExists] = await Promise.all([
+        query<{ id: string }>(
+          'SELECT id FROM delegated_role_scope_templates WHERE id = $1 LIMIT 1',
+          [templateId],
+        ),
+        query<{ id: string }>(
+          'SELECT id FROM platform_member_groups WHERE id = $1 LIMIT 1',
+          [groupId],
+        ),
+      ])
+      if (!templateExists.rows.length) {
+        return jsonError(res, 404, 'ROLE_DELEGATION_SCOPE_TEMPLATE_NOT_FOUND', 'Scope template not found')
+      }
+      if (!groupExists.rows.length) {
+        return jsonError(res, 404, 'PLATFORM_MEMBER_GROUP_NOT_FOUND', 'Platform member group not found')
+      }
+
+      if (action === 'assign') {
+        await query(
+          `INSERT INTO delegated_role_scope_template_member_groups (
+             template_id, group_id, created_at
+           )
+           VALUES ($1, $2, NOW())
+           ON CONFLICT DO NOTHING`,
+          [templateId, groupId],
+        )
+      } else {
+        await query(
+          `DELETE FROM delegated_role_scope_template_member_groups
+           WHERE template_id = $1
+             AND group_id = $2`,
+          [templateId, groupId],
+        )
+      }
+
+      await query(
+        `UPDATE delegated_role_scope_templates
+         SET updated_by = $2,
+             updated_at = NOW()
+         WHERE id = $1`,
+        [templateId, adminUserId],
+      )
+
+      const item = await fetchDelegatedScopeTemplateDetail(templateId)
+      await auditLog({
+        actorId: adminUserId,
+        actorType: 'user',
+        action: action === 'assign' ? 'grant' : 'revoke',
+        resourceType: 'delegated-admin-scope-template',
+        resourceId: `template:${templateId}:group:${groupId}`,
+        meta: {
+          templateId,
+          groupId,
+        },
+      })
+
+      return jsonOk(res, {
+        actorId: adminUserId,
+        item,
+      })
+    } catch (error) {
+      return jsonError(res, 500, 'ROLE_DELEGATION_SCOPE_TEMPLATE_GROUP_UPDATE_FAILED', (error as Error)?.message || 'Failed to update scope template member groups')
+    }
+  })
+
   r.get('/api/admin/role-delegation/users/:userId/scopes', authenticate, async (req: Request, res: Response) => {
     const adminUserId = await ensurePlatformAdmin(req, res)
     if (!adminUserId) return
@@ -1141,10 +1674,11 @@ export function adminUsersRouter(): Router {
       const userId = String(req.params.userId || '').trim()
       if (!userId) return jsonError(res, 400, 'USER_ID_REQUIRED', 'userId is required')
 
-      const [profile, roleIds, scopeAssignments] = await Promise.all([
+      const [profile, roleIds, scopeAssignments, groupAssignments] = await Promise.all([
         fetchUserProfile(userId),
         fetchUserRoleIds(userId),
         fetchDelegatedScopeAssignments(userId),
+        fetchDelegatedGroupAssignments(userId),
       ])
       if (!profile) return jsonError(res, 404, 'NOT_FOUND', 'User not found')
 
@@ -1155,6 +1689,7 @@ export function adminUsersRouter(): Router {
         user: profile,
         adminNamespaces,
         scopeAssignments: scopeAssignments.filter((scope) => adminNamespaces.includes(scope.namespace)),
+        groupAssignments: groupAssignments.filter((assignment) => adminNamespaces.includes(assignment.namespace)),
       })
     } catch (error) {
       return jsonError(res, 500, 'ROLE_DELEGATION_SCOPE_READ_FAILED', (error as Error)?.message || 'Failed to load delegated admin scopes')
@@ -1231,15 +1766,161 @@ export function adminUsersRouter(): Router {
         },
       })
 
-      const scopeAssignments = await fetchDelegatedScopeAssignments(userId)
+      const [scopeAssignments, groupAssignments] = await Promise.all([
+        fetchDelegatedScopeAssignments(userId),
+        fetchDelegatedGroupAssignments(userId),
+      ])
       return jsonOk(res, {
         actorId: adminUserId,
         user: profile,
         adminNamespaces,
         scopeAssignments,
+        groupAssignments,
       })
     } catch (error) {
       return jsonError(res, 500, 'ROLE_DELEGATION_SCOPE_UPDATE_FAILED', (error as Error)?.message || 'Failed to update delegated admin scope')
+    }
+  })
+
+  r.post('/api/admin/role-delegation/users/:userId/scope-groups/:action(assign|unassign)', authenticate, async (req: Request, res: Response) => {
+    const adminUserId = await ensurePlatformAdmin(req, res)
+    if (!adminUserId) return
+
+    try {
+      const userId = String(req.params.userId || '').trim()
+      const action = String(req.params.action || '').trim()
+      const namespace = String(req.body?.namespace || '').trim()
+      const groupId = String(req.body?.groupId || '').trim()
+      if (!userId) return jsonError(res, 400, 'USER_ID_REQUIRED', 'userId is required')
+      if (!namespace) return jsonError(res, 400, 'NAMESPACE_REQUIRED', 'namespace is required')
+      if (!groupId) return jsonError(res, 400, 'GROUP_ID_REQUIRED', 'groupId is required')
+
+      const [profile, roleIds, groupRow] = await Promise.all([
+        fetchUserProfile(userId),
+        fetchUserRoleIds(userId),
+        query<{ id: string }>('SELECT id FROM platform_member_groups WHERE id = $1 LIMIT 1', [groupId]),
+      ])
+      if (!profile) return jsonError(res, 404, 'NOT_FOUND', 'User not found')
+      if (!groupRow.rows.length) return jsonError(res, 404, 'PLATFORM_MEMBER_GROUP_NOT_FOUND', 'Platform member group not found')
+
+      const adminNamespaces = deriveDelegableNamespaces(roleIds)
+      if (action === 'assign' && !adminNamespaces.includes(namespace)) {
+        return jsonError(res, 409, 'ROLE_DELEGATION_NAMESPACE_NOT_HELD', 'Selected user does not hold that delegated admin namespace')
+      }
+
+      if (action === 'assign') {
+        await query(
+          `INSERT INTO delegated_role_admin_member_groups (
+             admin_user_id, namespace, group_id, created_by, created_at, updated_at
+           )
+           VALUES ($1, $2, $3, $4, NOW(), NOW())
+           ON CONFLICT (admin_user_id, namespace, group_id)
+           DO UPDATE SET
+             created_by = EXCLUDED.created_by,
+             updated_at = NOW()`,
+          [userId, namespace, groupId, adminUserId],
+        )
+      } else {
+        await query(
+          `DELETE FROM delegated_role_admin_member_groups
+           WHERE admin_user_id = $1
+             AND namespace = $2
+             AND group_id = $3`,
+          [userId, namespace, groupId],
+        )
+      }
+
+      await auditLog({
+        actorId: adminUserId,
+        actorType: 'user',
+        action: action === 'assign' ? 'grant' : 'revoke',
+        resourceType: 'delegated-admin-group-scope',
+        resourceId: `${userId}:${namespace}:group:${groupId}`,
+        meta: {
+          userId,
+          namespace,
+          groupId,
+        },
+      })
+
+      const [scopeAssignments, groupAssignments] = await Promise.all([
+        fetchDelegatedScopeAssignments(userId),
+        fetchDelegatedGroupAssignments(userId),
+      ])
+
+      return jsonOk(res, {
+        actorId: adminUserId,
+        user: profile,
+        adminNamespaces,
+        scopeAssignments,
+        groupAssignments,
+      })
+    } catch (error) {
+      return jsonError(res, 500, 'ROLE_DELEGATION_GROUP_SCOPE_UPDATE_FAILED', (error as Error)?.message || 'Failed to update delegated admin member-group scope')
+    }
+  })
+
+  r.post('/api/admin/role-delegation/users/:userId/member-groups/:action(assign|unassign)', authenticate, async (req: Request, res: Response) => {
+    const adminUserId = await ensurePlatformAdmin(req, res)
+    if (!adminUserId) return
+
+    try {
+      const userId = String(req.params.userId || '').trim()
+      const action = String(req.params.action || '').trim()
+      const groupId = String(req.body?.groupId || '').trim()
+      if (!userId) return jsonError(res, 400, 'USER_ID_REQUIRED', 'userId is required')
+      if (!groupId) return jsonError(res, 400, 'GROUP_ID_REQUIRED', 'groupId is required')
+
+      const [profile, groupRow] = await Promise.all([
+        fetchUserProfile(userId),
+        query<{ id: string }>('SELECT id FROM platform_member_groups WHERE id = $1 LIMIT 1', [groupId]),
+      ])
+      if (!profile) return jsonError(res, 404, 'NOT_FOUND', 'User not found')
+      if (!groupRow.rows.length) return jsonError(res, 404, 'PLATFORM_MEMBER_GROUP_NOT_FOUND', 'Platform member group not found')
+
+      if (action === 'assign') {
+        await query(
+          `INSERT INTO platform_member_group_members (group_id, user_id, created_at)
+           VALUES ($1, $2, NOW())
+           ON CONFLICT DO NOTHING`,
+          [groupId, userId],
+        )
+      } else {
+        await query(
+          `DELETE FROM platform_member_group_members
+           WHERE group_id = $1
+             AND user_id = $2`,
+          [groupId, userId],
+        )
+      }
+
+      const [snapshot, memberGroups] = await Promise.all([
+        fetchUserAccessSnapshot(userId),
+        fetchPlatformMemberGroupMembershipsForUser(userId),
+      ])
+
+      await auditLog({
+        actorId: adminUserId,
+        actorType: 'user',
+        action: action === 'assign' ? 'grant' : 'revoke',
+        resourceType: 'platform-member-group',
+        resourceId: `${groupId}:${userId}`,
+        meta: {
+          groupId,
+          userId,
+        },
+      })
+
+      return jsonOk(res, {
+        actorId: adminUserId,
+        user: snapshot?.user ?? profile,
+        roles: snapshot?.roles ?? [],
+        permissions: snapshot?.permissions ?? [],
+        isAdmin: snapshot?.isAdmin ?? false,
+        memberGroups,
+      })
+    } catch (error) {
+      return jsonError(res, 500, 'PLATFORM_MEMBER_GROUP_MEMBER_UPDATE_FAILED', (error as Error)?.message || 'Failed to update platform member group membership')
     }
   })
 
@@ -1269,17 +1950,25 @@ export function adminUsersRouter(): Router {
       if (!adminNamespaces.includes(namespace)) {
         return jsonError(res, 409, 'ROLE_DELEGATION_NAMESPACE_NOT_HELD', 'Selected user does not hold that delegated admin namespace')
       }
-      if (template.departments.length === 0) {
-        return jsonError(res, 409, 'ROLE_DELEGATION_SCOPE_TEMPLATE_EMPTY', 'Scope template has no departments to apply')
+      if (template.departments.length === 0 && template.memberGroups.length === 0) {
+        return jsonError(res, 409, 'ROLE_DELEGATION_SCOPE_TEMPLATE_EMPTY', 'Scope template has no departments or member groups to apply')
       }
 
       if (mode === 'replace') {
-        await query(
-          `DELETE FROM delegated_role_admin_scopes
-           WHERE admin_user_id = $1
-             AND namespace = $2`,
-          [userId, namespace],
-        )
+        await Promise.all([
+          query(
+            `DELETE FROM delegated_role_admin_scopes
+             WHERE admin_user_id = $1
+               AND namespace = $2`,
+            [userId, namespace],
+          ),
+          query(
+            `DELETE FROM delegated_role_admin_member_groups
+             WHERE admin_user_id = $1
+               AND namespace = $2`,
+            [userId, namespace],
+          ),
+        ])
       }
 
       for (const department of template.departments) {
@@ -1296,7 +1985,24 @@ export function adminUsersRouter(): Router {
         )
       }
 
-      const scopeAssignments = await fetchDelegatedScopeAssignments(userId)
+      for (const group of template.memberGroups) {
+        await query(
+          `INSERT INTO delegated_role_admin_member_groups (
+             admin_user_id, namespace, group_id, created_by, created_at, updated_at
+           )
+           VALUES ($1, $2, $3, $4, NOW(), NOW())
+           ON CONFLICT (admin_user_id, namespace, group_id)
+           DO UPDATE SET
+             created_by = EXCLUDED.created_by,
+             updated_at = NOW()`,
+          [userId, namespace, group.id, adminUserId],
+        )
+      }
+
+      const [scopeAssignments, groupAssignments] = await Promise.all([
+        fetchDelegatedScopeAssignments(userId),
+        fetchDelegatedGroupAssignments(userId),
+      ])
       await auditLog({
         actorId: adminUserId,
         actorType: 'user',
@@ -1309,6 +2015,7 @@ export function adminUsersRouter(): Router {
           templateId,
           mode,
           departmentCount: template.departments.length,
+          memberGroupCount: template.memberGroups.length,
         },
       })
 
@@ -1317,6 +2024,7 @@ export function adminUsersRouter(): Router {
         user: profile,
         adminNamespaces,
         scopeAssignments: scopeAssignments.filter((scope) => adminNamespaces.includes(scope.namespace)),
+        groupAssignments: groupAssignments.filter((assignment) => adminNamespaces.includes(assignment.namespace)),
       })
     } catch (error) {
       return jsonError(res, 500, 'ROLE_DELEGATION_SCOPE_TEMPLATE_APPLY_FAILED', (error as Error)?.message || 'Failed to apply scope template')
@@ -1335,8 +2043,9 @@ export function adminUsersRouter(): Router {
         maxPageSize: 100,
       })
 
-      const [scopeAssignments, scopedList] = delegation.isPlatformAdmin
+      const [scopeAssignments, groupAssignments, scopedList] = delegation.isPlatformAdmin
         ? await Promise.all([
+          Promise.resolve([]),
           Promise.resolve([]),
           (async () => {
             const term = q ? `%${q}%` : '%'
@@ -1360,6 +2069,7 @@ export function adminUsersRouter(): Router {
         ])
         : await Promise.all([
           fetchDelegatedScopeAssignments(delegation.actorId, delegation.delegableNamespaces),
+          fetchDelegatedGroupAssignments(delegation.actorId, delegation.delegableNamespaces),
           fetchScopedDelegationUsers(delegation.actorId, delegation.delegableNamespaces, q, pageSize, offset),
         ])
 
@@ -1372,6 +2082,7 @@ export function adminUsersRouter(): Router {
         isPlatformAdmin: delegation.isPlatformAdmin,
         delegableNamespaces: delegation.delegableNamespaces,
         scopeAssignments,
+        groupAssignments,
       })
     } catch (error) {
       return jsonError(res, 500, 'ROLE_DELEGATION_USER_LIST_FAILED', (error as Error)?.message || 'Failed to list delegation users')
@@ -1386,20 +2097,26 @@ export function adminUsersRouter(): Router {
       const userId = String(req.params.userId || '').trim()
       if (!userId) return jsonError(res, 400, 'USER_ID_REQUIRED', 'userId is required')
 
-      const scopeAssignments = delegation.isPlatformAdmin
-        ? []
-        : await fetchDelegatedScopeAssignments(delegation.actorId, delegation.delegableNamespaces)
-      if (!delegation.isPlatformAdmin && scopeAssignments.length === 0) {
-        return jsonError(res, 403, 'ROLE_DELEGATION_SCOPE_REQUIRED', 'No delegated department scope is configured for your plugin admin role')
+      const [scopeAssignments, groupAssignments] = delegation.isPlatformAdmin
+        ? await Promise.all([Promise.resolve([]), Promise.resolve([])])
+        : await Promise.all([
+          fetchDelegatedScopeAssignments(delegation.actorId, delegation.delegableNamespaces),
+          fetchDelegatedGroupAssignments(delegation.actorId, delegation.delegableNamespaces),
+        ])
+      if (!delegation.isPlatformAdmin && !hasDelegatedAudienceAssignments(scopeAssignments, groupAssignments)) {
+        return jsonError(res, 403, 'ROLE_DELEGATION_SCOPE_REQUIRED', 'No delegated department or member-group scope is configured for your plugin admin role')
       }
       if (!delegation.isPlatformAdmin) {
         const allowed = await isUserWithinDelegatedScope(delegation.actorId, delegation.delegableNamespaces, userId)
         if (!allowed) {
-          return jsonError(res, 403, 'ROLE_DELEGATION_USER_OUT_OF_SCOPE', 'User is outside your delegated department scope')
+          return jsonError(res, 403, 'ROLE_DELEGATION_USER_OUT_OF_SCOPE', 'User is outside your delegated department or member-group scope')
         }
       }
 
-      const snapshot = await fetchUserAccessSnapshot(userId)
+      const [snapshot, memberGroups] = await Promise.all([
+        fetchUserAccessSnapshot(userId),
+        fetchPlatformMemberGroupMembershipsForUser(userId),
+      ])
       if (!snapshot) return jsonError(res, 404, 'NOT_FOUND', 'User not found')
 
       const roleCatalog = await fetchDelegatedRoleCatalog(
@@ -1411,9 +2128,11 @@ export function adminUsersRouter(): Router {
         isPlatformAdmin: delegation.isPlatformAdmin,
         delegableNamespaces: delegation.delegableNamespaces,
         scopeAssignments,
+        groupAssignments,
         roleCatalog,
         user: snapshot.user,
         roles: snapshot.roles,
+        memberGroups,
         delegableRoles: delegation.isPlatformAdmin
           ? snapshot.roles
           : snapshot.roles.filter((roleId) => roleIdMatchesNamespaces(roleId, delegation.delegableNamespaces)),
@@ -1444,17 +2163,20 @@ export function adminUsersRouter(): Router {
         return jsonError(res, 403, 'ROLE_DELEGATION_FORBIDDEN', 'Role is outside your delegated namespaces')
       }
 
-      const scopeAssignments = delegation.isPlatformAdmin
-        ? []
-        : await fetchDelegatedScopeAssignments(delegation.actorId, delegation.delegableNamespaces)
-      if (!delegation.isPlatformAdmin && scopeAssignments.length === 0) {
-        return jsonError(res, 403, 'ROLE_DELEGATION_SCOPE_REQUIRED', 'No delegated department scope is configured for your plugin admin role')
+      const [scopeAssignments, groupAssignments] = delegation.isPlatformAdmin
+        ? await Promise.all([Promise.resolve([]), Promise.resolve([])])
+        : await Promise.all([
+          fetchDelegatedScopeAssignments(delegation.actorId, delegation.delegableNamespaces),
+          fetchDelegatedGroupAssignments(delegation.actorId, delegation.delegableNamespaces),
+        ])
+      if (!delegation.isPlatformAdmin && !hasDelegatedAudienceAssignments(scopeAssignments, groupAssignments)) {
+        return jsonError(res, 403, 'ROLE_DELEGATION_SCOPE_REQUIRED', 'No delegated department or member-group scope is configured for your plugin admin role')
       }
       if (!delegation.isPlatformAdmin) {
         const scopedNamespaces = deriveMatchingNamespacesForRole(roleId, delegation.delegableNamespaces)
         const allowed = await isUserWithinDelegatedScope(delegation.actorId, scopedNamespaces, userId)
         if (!allowed) {
-          return jsonError(res, 403, 'ROLE_DELEGATION_USER_OUT_OF_SCOPE', 'User is outside your delegated department scope')
+          return jsonError(res, 403, 'ROLE_DELEGATION_USER_OUT_OF_SCOPE', 'User is outside your delegated department or member-group scope')
         }
       }
 
@@ -1492,7 +2214,10 @@ export function adminUsersRouter(): Router {
         },
       })
 
-      const snapshot = await fetchUserAccessSnapshot(userId)
+      const [snapshot, memberGroups] = await Promise.all([
+        fetchUserAccessSnapshot(userId),
+        fetchPlatformMemberGroupMembershipsForUser(userId),
+      ])
       const roleCatalog = await fetchDelegatedRoleCatalog(
         delegation.isPlatformAdmin ? undefined : delegation.delegableNamespaces,
       )
@@ -1502,9 +2227,11 @@ export function adminUsersRouter(): Router {
         isPlatformAdmin: delegation.isPlatformAdmin,
         delegableNamespaces: delegation.delegableNamespaces,
         scopeAssignments,
+        groupAssignments,
         roleCatalog,
         user: snapshot?.user ?? profile,
         roles: snapshot?.roles ?? [],
+        memberGroups,
         delegableRoles: delegation.isPlatformAdmin
           ? snapshot?.roles ?? []
           : (snapshot?.roles ?? []).filter((candidateRoleId) => roleIdMatchesNamespaces(candidateRoleId, delegation.delegableNamespaces)),
