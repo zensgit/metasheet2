@@ -1098,4 +1098,112 @@ describe('after-sales plugin install integration', () => {
     )
     sendSpy.mockRestore()
   })
+
+  it('creates and deletes tickets through the real after-sales routes', async () => {
+    if (!baseUrl || !pool) return
+
+    const tokenRes = await requestJson(
+      `${baseUrl}/api/auth/dev-token?userId=after-sales-ticket-delete-it&roles=admin&perms=*:*`,
+    )
+    const token = (tokenRes.body as { token?: string } | undefined)?.token
+    expect(token).toBeTruthy()
+
+    const installRes = await requestJson(`${baseUrl}/api/after-sales/projects/install`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        templateId: 'after-sales-default',
+        displayName: 'After Sales Ticket Delete Flow',
+      }),
+    })
+    expect(installRes.status).toBe(200)
+
+    const createRes = await requestJson(`${baseUrl}/api/after-sales/tickets`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        ticket: {
+          ticketNo: 'TK-3003',
+          title: 'Delete me after validation',
+          source: 'web',
+          priority: 'normal',
+        },
+      }),
+    })
+
+    expect(createRes.status).toBe(201)
+    const createBody = createRes.body as {
+      ok?: boolean
+      data?: {
+        ticket?: {
+          id?: string
+          version?: number
+          data?: Record<string, unknown>
+        }
+      }
+    }
+    expect(createBody.ok).toBe(true)
+    expect(createBody.data?.ticket?.data).toMatchObject({
+      ticketNo: 'TK-3003',
+      title: 'Delete me after validation',
+      status: 'new',
+    })
+
+    const createdTicketId = createBody.data?.ticket?.id
+    expect(createdTicketId).toBeTruthy()
+
+    const deleteRes = await requestJson(`${baseUrl}/api/after-sales/tickets/${createdTicketId}`, {
+      method: 'DELETE',
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    })
+
+    expect(deleteRes.status).toBe(200)
+    expect(deleteRes.body).toMatchObject({
+      ok: true,
+      data: {
+        projectId: PROJECT_ID,
+        ticketId: createdTicketId,
+        deleted: true,
+      },
+    })
+
+    const serviceTicketSheetId = stableMetaId('sheet', PROJECT_ID, 'serviceTicket')
+    const deletedRecordRes = await waitFor(
+      () => pool!.query<{ id: string }>(
+        'SELECT id FROM meta_records WHERE id = $1 AND sheet_id = $2',
+        [createdTicketId, serviceTicketSheetId],
+      ),
+      (result) => result.rows.length === 0,
+      { timeoutMs: 5000, intervalMs: 100 },
+    )
+    expect(deletedRecordRes.rows).toHaveLength(0)
+
+    const listRes = await requestJson(`${baseUrl}/api/after-sales/tickets?status=new`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    })
+    expect(listRes.status).toBe(200)
+    const listBody = listRes.body as {
+      ok?: boolean
+      data?: {
+        count?: number
+        tickets?: Array<{
+          id?: string
+          data?: Record<string, unknown>
+        }>
+      }
+    }
+    expect(listBody.ok).toBe(true)
+    expect(listBody.data?.count).toBe(0)
+    expect(listBody.data?.tickets ?? []).toEqual([])
+  })
 })
