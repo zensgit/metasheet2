@@ -268,7 +268,7 @@
           <div class="after-sales-view__action-row after-sales-view__action-row--compact">
             <button
               class="after-sales-view__primary-btn"
-              :disabled="serviceRecordCreating || !canSubmitServiceRecord"
+              :disabled="serviceRecordCreating || serviceRecordsLoading || !canSubmitServiceRecord"
               @click="submitServiceRecord"
             >
               {{ serviceRecordCreating ? 'Creating...' : 'Create service record' }}
@@ -318,10 +318,10 @@
           </form>
 
           <div class="after-sales-view__action-row after-sales-view__action-row--compact">
-            <button class="after-sales-view__ghost-btn" :disabled="serviceRecordsLoading" @click="applyServiceRecordFilters">
+            <button class="after-sales-view__ghost-btn" :disabled="serviceRecordsLoading || serviceRecordCreating" @click="applyServiceRecordFilters">
               {{ serviceRecordsLoading ? 'Applying...' : 'Apply filters' }}
             </button>
-            <button class="after-sales-view__ghost-btn" :disabled="serviceRecordsLoading" @click="resetServiceRecordFilters">
+            <button class="after-sales-view__ghost-btn" :disabled="serviceRecordsLoading || serviceRecordCreating" @click="resetServiceRecordFilters">
               Clear filters
             </button>
           </div>
@@ -777,12 +777,12 @@ function buildServiceRecordListPath() {
 }
 
 function matchesServiceRecordFilters(record: ServiceRecordViewModel) {
-  const ticketNo = toText(serviceRecordFilters.value.ticketNo).toLowerCase()
-  const result = toText(serviceRecordFilters.value.result).toLowerCase()
+  const ticketNo = toText(serviceRecordFilters.value.ticketNo)
+  const result = toText(serviceRecordFilters.value.result)
   const search = toText(serviceRecordFilters.value.search).toLowerCase()
 
-  if (ticketNo && record.data.ticketNo.toLowerCase() !== ticketNo) return false
-  if (result && record.data.result.toLowerCase() !== result) return false
+  if (ticketNo && record.data.ticketNo !== ticketNo) return false
+  if (result && record.data.result !== result) return false
   if (search) {
     const haystack = JSON.stringify(record.data).toLowerCase()
     if (!haystack.includes(search)) return false
@@ -938,10 +938,16 @@ async function submitServiceRecord() {
 }
 
 async function applyServiceRecordFilters() {
+  if (serviceRecordCreating.value) {
+    return
+  }
   await loadServiceRecordsForCurrentState(current.value)
 }
 
 async function resetServiceRecordFilters() {
+  if (serviceRecordCreating.value) {
+    return
+  }
   serviceRecordFilters.value = {
     ticketNo: '',
     result: '',

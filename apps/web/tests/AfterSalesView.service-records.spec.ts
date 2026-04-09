@@ -1214,6 +1214,279 @@ describe('AfterSalesView service records panel', () => {
     expect(container.textContent).not.toContain('Escalated follow-up')
   })
 
+  it('does not prepend a created record when the active ticket filter differs by case', async () => {
+    apiFetchMock.mockImplementation(async (path: string, init?: RequestInit) => {
+      if (path === '/api/after-sales/app-manifest') {
+        return createResponse({
+          id: 'after-sales-default',
+          displayName: 'After Sales',
+          platformDependencies: ['core-backend'],
+          objects: [],
+          workflows: [],
+        })
+      }
+
+      if (path === '/api/after-sales/projects/current') {
+        return createResponse({
+          status: 'installed',
+          projectId: 'tenant:after-sales',
+          displayName: 'After Sales',
+          config: {
+            defaultSlaHours: 24,
+            urgentSlaHours: 4,
+            followUpAfterDays: 7,
+          },
+          installResult: {
+            status: 'installed',
+            createdObjects: [],
+            createdViews: [],
+            warnings: [],
+            reportRef: 'install-203',
+          },
+          reportRef: 'install-203',
+        })
+      }
+
+      if (path === '/api/after-sales/tickets') {
+        return createResponse({
+          projectId: 'tenant:after-sales',
+          count: 1,
+          tickets: [
+            {
+              id: 'ticket-100',
+              version: 1,
+              data: {
+                ticketNo: 'AF-100',
+                title: 'Compressor inspection',
+                status: 'open',
+                refundStatus: 'approved',
+                refundAmount: 0,
+              },
+            },
+          ],
+        })
+      }
+
+      if (path === '/api/after-sales/service-records' && (!init || !init.method)) {
+        return createResponse({
+          projectId: 'tenant:after-sales',
+          count: 1,
+          serviceRecords: [
+            {
+              id: 'sr-existing',
+              version: 1,
+              data: {
+                ticketNo: 'AF-001',
+                visitType: 'onsite',
+                scheduledAt: '2026-04-09T08:00:00.000Z',
+                technicianName: '张三',
+                workSummary: 'Case-sensitive baseline',
+                result: 'resolved',
+              },
+            },
+          ],
+        })
+      }
+
+      if (path === '/api/after-sales/service-records?ticketNo=af-100') {
+        return createResponse({
+          projectId: 'tenant:after-sales',
+          count: 0,
+          serviceRecords: [],
+        })
+      }
+
+      if (path === '/api/after-sales/service-records' && init?.method === 'POST') {
+        return createResponse(
+          {
+            projectId: 'tenant:after-sales',
+            serviceRecord: {
+              id: 'sr-new',
+              version: 1,
+              data: {
+                ticketNo: 'AF-100',
+                visitType: 'remote',
+                scheduledAt: '2026-04-10T09:15',
+                technicianName: 'Alex',
+                workSummary: 'Uppercase ticket no',
+                result: 'resolved',
+              },
+            },
+            event: { accepted: true, event: 'service.recorded' },
+          },
+          { status: 201 },
+        )
+      }
+
+      throw new Error(`Unexpected request: ${path}`)
+    })
+
+    const mounted = mountAfterSalesView()
+    app = mounted.app
+    container = mounted.container
+
+    await waitForText(container, 'Case-sensitive baseline')
+
+    const ticketFilter = container.querySelector<HTMLInputElement>('#after-sales-service-record-filter-ticket-no')
+    const ticketInput = container.querySelector<HTMLInputElement>('#after-sales-service-record-ticket-no')
+    const scheduledAtInput = container.querySelector<HTMLInputElement>('#after-sales-service-record-scheduled-at')
+    if (!ticketFilter || !ticketInput || !scheduledAtInput) return
+
+    await setInputValue(ticketFilter, 'af-100')
+    findButton(container, 'Apply filters').click()
+    await waitForText(container, 'No service records found yet.')
+
+    await setInputValue(ticketInput, 'AF-100')
+    await setInputValue(scheduledAtInput, '2026-04-10T09:15')
+
+    findButton(container, 'Create service record').click()
+    await waitForText(container, 'Created service record for AF-100')
+
+    expect(container.textContent).not.toContain('Uppercase ticket no')
+  })
+
+  it('disables create while a filter refresh is in flight', async () => {
+    let resolveFilteredRequest: ((value: Response) => void) | null = null
+
+    apiFetchMock.mockImplementation((path: string, init?: RequestInit) => {
+      if (path === '/api/after-sales/app-manifest') {
+        return Promise.resolve(createResponse({
+          id: 'after-sales-default',
+          displayName: 'After Sales',
+          platformDependencies: ['core-backend'],
+          objects: [],
+          workflows: [],
+        }))
+      }
+
+      if (path === '/api/after-sales/projects/current') {
+        return Promise.resolve(createResponse({
+          status: 'installed',
+          projectId: 'tenant:after-sales',
+          displayName: 'After Sales',
+          config: {
+            defaultSlaHours: 24,
+            urgentSlaHours: 4,
+            followUpAfterDays: 7,
+          },
+          installResult: {
+            status: 'installed',
+            createdObjects: [],
+            createdViews: [],
+            warnings: [],
+            reportRef: 'install-204',
+          },
+          reportRef: 'install-204',
+        }))
+      }
+
+      if (path === '/api/after-sales/tickets') {
+        return Promise.resolve(createResponse({
+          projectId: 'tenant:after-sales',
+          count: 0,
+          tickets: [],
+        }))
+      }
+
+      if (path === '/api/after-sales/service-records' && (!init || !init.method)) {
+        return Promise.resolve(createResponse({
+          projectId: 'tenant:after-sales',
+          count: 1,
+          serviceRecords: [
+            {
+              id: 'sr-existing',
+              version: 1,
+              data: {
+                ticketNo: 'AF-001',
+                visitType: 'onsite',
+                scheduledAt: '2026-04-09T08:00:00.000Z',
+                technicianName: '张三',
+                workSummary: 'Loading baseline',
+                result: 'resolved',
+              },
+            },
+          ],
+        }))
+      }
+
+      if (path === '/api/after-sales/service-records?result=resolved') {
+        return new Promise<Response>((resolve) => {
+          resolveFilteredRequest = resolve
+        })
+      }
+
+      if (path === '/api/after-sales/service-records' && init?.method === 'POST') {
+        return Promise.resolve(createResponse(
+          {
+            projectId: 'tenant:after-sales',
+            serviceRecord: {
+              id: 'sr-new',
+              version: 1,
+              data: {
+                ticketNo: 'AF-100',
+                visitType: 'onsite',
+                scheduledAt: '2026-04-10T09:15',
+                result: 'resolved',
+              },
+            },
+          },
+          { status: 201 },
+        ))
+      }
+
+      throw new Error(`Unexpected request: ${path}`)
+    })
+
+    const mounted = mountAfterSalesView()
+    app = mounted.app
+    container = mounted.container
+
+    await waitForText(container, 'Loading baseline')
+
+    const resultFilter = container.querySelector<HTMLSelectElement>('#after-sales-service-record-filter-result')
+    const ticketInput = container.querySelector<HTMLInputElement>('#after-sales-service-record-ticket-no')
+    const scheduledAtInput = container.querySelector<HTMLInputElement>('#after-sales-service-record-scheduled-at')
+    const createButton = findButton(container, 'Create service record')
+    expect(resultFilter).toBeTruthy()
+    expect(ticketInput).toBeTruthy()
+    expect(scheduledAtInput).toBeTruthy()
+    if (!resultFilter || !ticketInput || !scheduledAtInput) return
+
+    await setInputValue(ticketInput, 'AF-100')
+    await setInputValue(scheduledAtInput, '2026-04-10T09:15')
+    expect(createButton.disabled).toBe(false)
+
+    await setSelectValue(resultFilter, 'resolved')
+    findButton(container, 'Apply filters').click()
+    await flushUi(2)
+
+    expect(createButton.disabled).toBe(true)
+    createButton.click()
+
+    expect(apiFetchMock.mock.calls.some((call) => call[0] === '/api/after-sales/service-records' && call[1]?.method === 'POST')).toBe(false)
+
+    resolveFilteredRequest?.(createResponse({
+      projectId: 'tenant:after-sales',
+      count: 1,
+      serviceRecords: [
+        {
+          id: 'sr-existing',
+          version: 1,
+          data: {
+            ticketNo: 'AF-001',
+            visitType: 'onsite',
+            scheduledAt: '2026-04-09T08:00:00.000Z',
+            technicianName: '张三',
+            workSummary: 'Loading baseline',
+            result: 'resolved',
+          },
+        },
+      ],
+    }))
+    await waitForText(container, 'Loading baseline')
+    expect(createButton.disabled).toBe(false)
+  })
+
   it('skips service-record loading when install state is failed', async () => {
     apiFetchMock.mockImplementation(async (path: string) => {
       if (path === '/api/after-sales/app-manifest') {
