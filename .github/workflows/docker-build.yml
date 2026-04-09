@@ -190,6 +190,8 @@ jobs:
             'deploy_bcrypt_rounds = sys.argv[3].strip() or "12"'
             'database_url = sys.argv[4]'
             'text = path.read_text()'
+            'if "\\n" not in text and "\\\\n" in text:'
+            '    text = text.replace("\\\\n", "\\n")'
             'lines = text.splitlines()'
             'entries = {}'
             'order = []'
@@ -209,19 +211,28 @@ jobs:
             '    entries["JWT_SECRET"] = deploy_jwt_secret'
             '    if "JWT_SECRET" not in order:'
             '        order.append("JWT_SECRET")'
+            'if not entries.get("JWT_SECRET"):'
+            '    import secrets'
+            '    entries["JWT_SECRET"] = secrets.token_hex(32)'
+            '    generated_jwt_secret = True'
+            '    if "JWT_SECRET" not in order:'
+            '        order.append("JWT_SECRET")'
             'if not entries.get("BCRYPT_SALT_ROUNDS"):'
             '    entries["BCRYPT_SALT_ROUNDS"] = deploy_bcrypt_rounds'
             '    if "BCRYPT_SALT_ROUNDS" not in order:'
             '        order.append("BCRYPT_SALT_ROUNDS")'
+            'seen = set()'
             'for line in lines:'
             '    if "=" in line and not line.lstrip().startswith("#"):'
             '        key = line.split("=", 1)[0]'
+            '        if key in seen:'
+            '            continue'
+            '        seen.add(key)'
             '        updated.append(f"{key}={entries[key]}")'
             '    else:'
             '        updated.append(line)'
-            'existing_keys = {line.split("=", 1)[0] for line in lines if "=" in line and not line.lstrip().startswith("#")}'
             'for key in order:'
-            '    if key not in existing_keys:'
+            '    if key not in seen:'
             '        updated.append(f"{key}={entries[key]}")'
             'path.write_text("\\n".join(updated) + "\\n")'
             'PY'
@@ -233,12 +244,21 @@ jobs:
             '  elif [[ -n "${DEPLOY_JWT_SECRET:-}" ]]; then'
             '    echo "[deploy] JWT_SECRET injected into ${ENV_FILE_PATH}"'
             '  else'
-            '    echo "[deploy][warn] JWT_SECRET still missing in ${ENV_FILE_PATH} and DEPLOY_JWT_SECRET was not provided"'
+            '    echo "[deploy] JWT_SECRET generated and persisted in ${ENV_FILE_PATH}"'
             '  fi'
             '  if grep -qE "^BCRYPT_SALT_ROUNDS=" "${ENV_FILE_PATH}"; then'
             '    echo "[deploy] BCRYPT_SALT_ROUNDS present in ${ENV_FILE_PATH}"'
             '  fi'
             'fi'
+            "# Preflight: validate production env/compose/nginx before (re)deploying containers."
+            "echo \"=== ATTENDANCE PREFLIGHT START ===\""
+            "preflight_rc=0"
+            "set +e"
+            "COMPOSE_FILE=\"${DEPLOY_COMPOSE_FILE}\" ENV_FILE=\"docker/app.env\" NGINX_CONF=\"docker/nginx.conf\" scripts/ops/attendance-preflight.sh"
+            'preflight_rc=$?'
+            "set -e"
+            "echo \"=== ATTENDANCE PREFLIGHT END ===\""
+            'if [[ "$preflight_rc" != "0" ]]; then exit "$preflight_rc"; fi'
             'for CONTAINER_NAME in metasheet-postgres metasheet-redis metasheet-backend metasheet-web; do'
             '  if docker ps -a --format "{{.Names}}" | grep -Fxq "${CONTAINER_NAME}"; then'
             '    echo "[deploy][warn] removing existing container ${CONTAINER_NAME} before recreate"'
@@ -254,15 +274,6 @@ jobs:
             '    docker rm -f "${orphan_name}"'
             '  done <<< "${orphan_names}"'
             'fi'
-            "# Preflight: validate production env/compose/nginx before (re)deploying containers."
-            "echo \"=== ATTENDANCE PREFLIGHT START ===\""
-            "preflight_rc=0"
-            "set +e"
-            "COMPOSE_FILE=\"${DEPLOY_COMPOSE_FILE}\" ENV_FILE=\"docker/app.env\" NGINX_CONF=\"docker/nginx.conf\" scripts/ops/attendance-preflight.sh"
-            'preflight_rc=$?'
-            "set -e"
-            "echo \"=== ATTENDANCE PREFLIGHT END ===\""
-            'if [[ "$preflight_rc" != "0" ]]; then exit "$preflight_rc"; fi'
             "echo \"=== DEPLOY START ===\""
             'if [[ "${DRILL_FAIL_STAGE:-none}" == "deploy" ]]; then echo "[deploy][drill] intentional failure at deploy stage"; exit 91; fi'
             'eval "IMAGE_OWNER=\"${DEPLOY_IMAGE_OWNER}\" IMAGE_TAG=\"${DEPLOY_IMAGE_TAG}\" ${COMPOSE_CMD} -f \"${DEPLOY_COMPOSE_FILE}\" up -d postgres redis"'
