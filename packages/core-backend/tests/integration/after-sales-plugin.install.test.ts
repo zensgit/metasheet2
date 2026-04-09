@@ -922,6 +922,23 @@ describe('after-sales plugin install integration', () => {
     })
     expect(installRes.status).toBe(200)
 
+    const createTicketRes = await requestJson(`${baseUrl}/api/after-sales/tickets`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        ticket: {
+          ticketNo: 'TK-3002',
+          title: 'Indoor unit vibration during service visit',
+          source: 'phone',
+          priority: 'medium',
+        },
+      }),
+    })
+    expect(createTicketRes.status).toBe(201)
+
     const createRes = await requestJson(`${baseUrl}/api/after-sales/service-records`, {
       method: 'POST',
       headers: {
@@ -930,7 +947,7 @@ describe('after-sales plugin install integration', () => {
       },
       body: JSON.stringify({
         serviceRecord: {
-          ticketNo: 'TK-SR-3001',
+          ticketNo: 'TK-3002',
           visitType: 'onsite',
           scheduledAt: '2026-04-09T10:00:00Z',
           completedAt: '2026-04-09T11:15:00Z',
@@ -963,7 +980,7 @@ describe('after-sales plugin install integration', () => {
       event: 'service.recorded',
     })
     expect(createBody.data?.serviceRecord?.data).toMatchObject({
-      ticketNo: 'TK-SR-3001',
+      ticketNo: 'TK-3002',
       visitType: 'onsite',
       scheduledAt: '2026-04-09T10:00:00Z',
       completedAt: '2026-04-09T11:15:00Z',
@@ -982,7 +999,7 @@ describe('after-sales plugin install integration', () => {
     )
     expect(recordRes.rows).toHaveLength(1)
     expect(recordRes.rows[0].data).toMatchObject({
-      [stFieldId('serviceRecord', 'ticketNo')]: 'TK-SR-3001',
+      [stFieldId('serviceRecord', 'ticketNo')]: 'TK-3002',
       [stFieldId('serviceRecord', 'visitType')]: 'onsite',
       [stFieldId('serviceRecord', 'scheduledAt')]: '2026-04-09T10:00:00Z',
       [stFieldId('serviceRecord', 'completedAt')]: '2026-04-09T11:15:00Z',
@@ -991,7 +1008,7 @@ describe('after-sales plugin install integration', () => {
       [stFieldId('serviceRecord', 'result')]: 'resolved',
     })
 
-    const listRes = await requestJson(`${baseUrl}/api/after-sales/service-records?ticketNo=TK-SR-3001&result=resolved&search=capacitor`, {
+    const listRes = await requestJson(`${baseUrl}/api/after-sales/service-records?ticketNo=TK-3002&result=resolved&search=capacitor`, {
       headers: {
         Authorization: `Bearer ${token}`,
       },
@@ -1014,7 +1031,7 @@ describe('after-sales plugin install integration', () => {
     expect(listBody.data?.serviceRecords?.[0]).toMatchObject({
       id: createBody.data?.serviceRecord?.id,
       data: expect.objectContaining({
-        ticketNo: 'TK-SR-3001',
+        ticketNo: 'TK-3002',
         visitType: 'onsite',
         result: 'resolved',
       }),
