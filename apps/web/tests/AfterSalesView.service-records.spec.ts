@@ -300,7 +300,11 @@ describe('AfterSalesView service records panel', () => {
     await setInputValue(ticketInput, 'AF-001')
     await setInputValue(scheduledAtInput, '2026-04-10T10:30')
 
-    findButton(container, 'Refresh list').click()
+    const serviceRecordsSection = container.querySelector<HTMLElement>('.after-sales-view__service-records-shell')
+    expect(serviceRecordsSection).toBeTruthy()
+    if (!serviceRecordsSection) return
+
+    findButton(serviceRecordsSection, 'Refresh list').click()
     await waitForText(container, 'Refreshed visit')
 
     expect(ticketFilter.value).toBe('AF-001')
@@ -633,6 +637,407 @@ describe('AfterSalesView service records panel', () => {
     const serviceRecordCalls = apiFetchMock.mock.calls.filter((call) => call[0] === '/api/after-sales/service-records')
     expect(serviceRecordCalls).toHaveLength(2)
     expect(serviceRecordCalls[1]?.[1]).toMatchObject({ method: 'POST' })
+  })
+
+  it('updates a service record inline and keeps it in place when the edited row still matches filters', async () => {
+    apiFetchMock.mockImplementation(async (path: string, init?: RequestInit) => {
+      if (path === '/api/after-sales/app-manifest') {
+        return createResponse({
+          id: 'after-sales-default',
+          displayName: 'After Sales',
+          platformDependencies: ['core-backend'],
+          objects: [],
+          workflows: [],
+        })
+      }
+
+      if (path === '/api/after-sales/projects/current') {
+        return createResponse({
+          status: 'installed',
+          projectId: 'tenant:after-sales',
+          displayName: 'After Sales',
+          config: {
+            defaultSlaHours: 24,
+            urgentSlaHours: 4,
+            followUpAfterDays: 7,
+          },
+          installResult: {
+            status: 'installed',
+            createdObjects: [],
+            createdViews: [],
+            warnings: [],
+            reportRef: 'install-105',
+          },
+          reportRef: 'install-105',
+        })
+      }
+
+      if (path === '/api/after-sales/tickets') {
+        return createResponse({
+          projectId: 'tenant:after-sales',
+          count: 0,
+          tickets: [],
+        })
+      }
+
+      if (path === '/api/after-sales/service-records' && (!init || !init.method)) {
+        return createResponse({
+          projectId: 'tenant:after-sales',
+          count: 2,
+          serviceRecords: [
+            {
+              id: 'sr-edit',
+              version: 1,
+              data: {
+                ticketNo: 'AF-EDIT',
+                visitType: 'onsite',
+                scheduledAt: '2026-04-09T08:00:00.000Z',
+                completedAt: '2026-04-09T09:00:00.000Z',
+                technicianName: 'Alex',
+                workSummary: 'Original onsite visit',
+                result: 'resolved',
+              },
+            },
+            {
+              id: 'sr-keep',
+              version: 1,
+              data: {
+                ticketNo: 'AF-KEEP',
+                visitType: 'remote',
+                scheduledAt: '2026-04-09T10:00:00.000Z',
+                technicianName: 'Jamie',
+                workSummary: 'Keep me visible',
+                result: 'partial',
+              },
+            },
+          ],
+        })
+      }
+
+      if (path === '/api/after-sales/service-records/sr-edit' && init?.method === 'PATCH') {
+        expect(JSON.parse(String(init.body ?? '{}'))).toEqual({
+          serviceRecord: {
+            visitType: 'remote',
+            scheduledAt: '2026-04-10T11:45',
+            completedAt: '',
+            technicianName: 'Taylor',
+            workSummary: 'Remote follow-up completed',
+            result: 'partial',
+          },
+        })
+
+        return createResponse({
+          projectId: 'tenant:after-sales',
+          serviceRecord: {
+            id: 'sr-edit',
+            version: 2,
+            data: {
+              ticketNo: 'AF-EDIT',
+              visitType: 'remote',
+              scheduledAt: '2026-04-10T11:45',
+              completedAt: '',
+              technicianName: 'Taylor',
+              workSummary: 'Remote follow-up completed',
+              result: 'partial',
+            },
+          },
+        })
+      }
+
+      throw new Error(`Unexpected request: ${path}`)
+    })
+
+    const mounted = mountAfterSalesView()
+    app = mounted.app
+    container = mounted.container
+
+    await waitForText(container, 'Original onsite visit')
+
+    const editButton = container.querySelector<HTMLButtonElement>('button[aria-label="Edit service record AF-EDIT"]')
+    expect(editButton).toBeTruthy()
+    if (!editButton) return
+
+    editButton.click()
+    await flushUi()
+
+    const visitTypeSelect = container.querySelector<HTMLSelectElement>('#after-sales-service-record-edit-visit-type-sr-edit')
+    const scheduledAtInput = container.querySelector<HTMLInputElement>('#after-sales-service-record-edit-scheduled-at-sr-edit')
+    const completedAtInput = container.querySelector<HTMLInputElement>('#after-sales-service-record-edit-completed-at-sr-edit')
+    const technicianInput = container.querySelector<HTMLInputElement>('#after-sales-service-record-edit-technician-sr-edit')
+    const resultSelect = container.querySelector<HTMLSelectElement>('#after-sales-service-record-edit-result-sr-edit')
+    const summaryTextarea = container.querySelector<HTMLTextAreaElement>('#after-sales-service-record-edit-summary-sr-edit')
+
+    expect(visitTypeSelect).toBeTruthy()
+    expect(scheduledAtInput).toBeTruthy()
+    expect(completedAtInput).toBeTruthy()
+    expect(technicianInput).toBeTruthy()
+    expect(resultSelect).toBeTruthy()
+    expect(summaryTextarea).toBeTruthy()
+    if (!visitTypeSelect || !scheduledAtInput || !completedAtInput || !technicianInput || !resultSelect || !summaryTextarea) return
+
+    await setSelectValue(visitTypeSelect, 'remote')
+    await setInputValue(scheduledAtInput, '2026-04-10T11:45')
+    await setInputValue(completedAtInput, '')
+    await setInputValue(technicianInput, 'Taylor')
+    await setSelectValue(resultSelect, 'partial')
+    await setTextareaValue(summaryTextarea, 'Remote follow-up completed')
+
+    findButton(container, 'Save changes').click()
+
+    await waitForText(container, 'Updated service record for AF-EDIT')
+
+    expect(container.textContent).toContain('Remote follow-up completed')
+    expect(container.textContent).toContain('Taylor')
+    expect(container.textContent).toContain('Keep me visible')
+    expect(container.textContent).not.toContain('Original onsite visit')
+    expect(container.querySelector('#after-sales-service-record-edit-summary-sr-edit')).toBeNull()
+    expect(apiFetchMock).toHaveBeenCalledWith('/api/after-sales/service-records/sr-edit', {
+      method: 'PATCH',
+      body: JSON.stringify({
+        serviceRecord: {
+          visitType: 'remote',
+          scheduledAt: '2026-04-10T11:45',
+          completedAt: '',
+          technicianName: 'Taylor',
+          workSummary: 'Remote follow-up completed',
+          result: 'partial',
+        },
+      }),
+    })
+  })
+
+  it('does not leak n/a into service-record updates when completedAt is initially missing', async () => {
+    apiFetchMock.mockImplementation(async (path: string, init?: RequestInit) => {
+      if (path === '/api/after-sales/app-manifest') {
+        return createResponse({
+          id: 'after-sales-default',
+          displayName: 'After Sales',
+          platformDependencies: ['core-backend'],
+          objects: [],
+          workflows: [],
+        })
+      }
+
+      if (path === '/api/after-sales/projects/current') {
+        return createResponse({
+          status: 'installed',
+          projectId: 'tenant:after-sales',
+          displayName: 'After Sales',
+          config: {
+            defaultSlaHours: 24,
+            urgentSlaHours: 4,
+            followUpAfterDays: 7,
+          },
+          installResult: {
+            status: 'installed',
+            createdObjects: [],
+            createdViews: [],
+            warnings: [],
+            reportRef: 'install-105b',
+          },
+          reportRef: 'install-105b',
+        })
+      }
+
+      if (path === '/api/after-sales/tickets') {
+        return createResponse({
+          projectId: 'tenant:after-sales',
+          count: 0,
+          tickets: [],
+        })
+      }
+
+      if (path === '/api/after-sales/service-records' && (!init || !init.method)) {
+        return createResponse({
+          projectId: 'tenant:after-sales',
+          count: 1,
+          serviceRecords: [
+            {
+              id: 'sr-edit-empty-completed-at',
+              version: 1,
+              data: {
+                ticketNo: 'AF-NO-COMPLETE',
+                visitType: 'onsite',
+                scheduledAt: '2026-04-09T08:00:00.000Z',
+                technicianName: 'Alex',
+                workSummary: 'Initial visit without completion time',
+                result: 'resolved',
+              },
+            },
+          ],
+        })
+      }
+
+      if (path === '/api/after-sales/service-records/sr-edit-empty-completed-at' && init?.method === 'PATCH') {
+        expect(JSON.parse(String(init.body ?? '{}'))).toEqual({
+          serviceRecord: {
+            visitType: 'onsite',
+            scheduledAt: '2026-04-09T08:00:00.000Z',
+            completedAt: '',
+            technicianName: 'Alex',
+            workSummary: 'Updated without completion time',
+            result: 'resolved',
+          },
+        })
+
+        return createResponse({
+          projectId: 'tenant:after-sales',
+          serviceRecord: {
+            id: 'sr-edit-empty-completed-at',
+            version: 2,
+            data: {
+              ticketNo: 'AF-NO-COMPLETE',
+              visitType: 'onsite',
+              scheduledAt: '2026-04-09T08:00:00.000Z',
+              completedAt: '',
+              technicianName: 'Alex',
+              workSummary: 'Updated without completion time',
+              result: 'resolved',
+            },
+          },
+        })
+      }
+
+      throw new Error(`Unexpected request: ${path}`)
+    })
+
+    const mounted = mountAfterSalesView()
+    app = mounted.app
+    container = mounted.container
+
+    await waitForText(container, 'Initial visit without completion time')
+
+    const editButton = container.querySelector<HTMLButtonElement>('button[aria-label="Edit service record AF-NO-COMPLETE"]')
+    expect(editButton).toBeTruthy()
+    if (!editButton) return
+
+    editButton.click()
+    await flushUi()
+
+    const summaryTextarea = container.querySelector<HTMLTextAreaElement>('#after-sales-service-record-edit-summary-sr-edit-empty-completed-at')
+    const completedAtInput = container.querySelector<HTMLInputElement>('#after-sales-service-record-edit-completed-at-sr-edit-empty-completed-at')
+
+    expect(summaryTextarea).toBeTruthy()
+    expect(completedAtInput).toBeTruthy()
+    if (!summaryTextarea || !completedAtInput) return
+
+    expect(completedAtInput.value).toBe('')
+    await setTextareaValue(summaryTextarea, 'Updated without completion time')
+
+    findButton(container, 'Save changes').click()
+
+    await waitForText(container, 'Updated service record for AF-NO-COMPLETE')
+    expect(container.textContent).toContain('Updated without completion time')
+  })
+
+  it('keeps the service-record edit draft open when update fails', async () => {
+    apiFetchMock.mockImplementation(async (path: string, init?: RequestInit) => {
+      if (path === '/api/after-sales/app-manifest') {
+        return createResponse({
+          id: 'after-sales-default',
+          displayName: 'After Sales',
+          platformDependencies: ['core-backend'],
+          objects: [],
+          workflows: [],
+        })
+      }
+
+      if (path === '/api/after-sales/projects/current') {
+        return createResponse({
+          status: 'installed',
+          projectId: 'tenant:after-sales',
+          displayName: 'After Sales',
+          config: {
+            defaultSlaHours: 24,
+            urgentSlaHours: 4,
+            followUpAfterDays: 7,
+          },
+          installResult: {
+            status: 'installed',
+            createdObjects: [],
+            createdViews: [],
+            warnings: [],
+            reportRef: 'install-106',
+          },
+          reportRef: 'install-106',
+        })
+      }
+
+      if (path === '/api/after-sales/tickets') {
+        return createResponse({
+          projectId: 'tenant:after-sales',
+          count: 0,
+          tickets: [],
+        })
+      }
+
+      if (path === '/api/after-sales/service-records' && (!init || !init.method)) {
+        return createResponse({
+          projectId: 'tenant:after-sales',
+          count: 1,
+          serviceRecords: [
+            {
+              id: 'sr-edit-error',
+              version: 1,
+              data: {
+                ticketNo: 'AF-EDIT-ERR',
+                visitType: 'onsite',
+                scheduledAt: '2026-04-09T08:00:00.000Z',
+                technicianName: 'Alex',
+                workSummary: 'Still visible after update failure',
+                result: 'resolved',
+              },
+            },
+          ],
+        })
+      }
+
+      if (path === '/api/after-sales/service-records/sr-edit-error' && init?.method === 'PATCH') {
+        return createResponse(
+          {
+            error: {
+              code: 'INTERNAL_ERROR',
+              message: 'Service record update failed',
+            },
+          },
+          { ok: false, status: 500, statusText: 'Internal Server Error' },
+        )
+      }
+
+      throw new Error(`Unexpected request: ${path}`)
+    })
+
+    const mounted = mountAfterSalesView()
+    app = mounted.app
+    container = mounted.container
+
+    await waitForText(container, 'Still visible after update failure')
+
+    const editButton = container.querySelector<HTMLButtonElement>('button[aria-label="Edit service record AF-EDIT-ERR"]')
+    expect(editButton).toBeTruthy()
+    if (!editButton) return
+
+    editButton.click()
+    await flushUi()
+
+    const technicianInput = container.querySelector<HTMLInputElement>('#after-sales-service-record-edit-technician-sr-edit-error')
+    const summaryTextarea = container.querySelector<HTMLTextAreaElement>('#after-sales-service-record-edit-summary-sr-edit-error')
+
+    expect(technicianInput).toBeTruthy()
+    expect(summaryTextarea).toBeTruthy()
+    if (!technicianInput || !summaryTextarea) return
+
+    await setInputValue(technicianInput, 'Morgan')
+    await setTextareaValue(summaryTextarea, 'Still waiting for parts')
+
+    findButton(container, 'Save changes').click()
+
+    await waitForText(container, 'Service record update failed')
+
+    expect(container.textContent).toContain('AF-EDIT-ERR')
+    expect(container.querySelector('#after-sales-service-record-edit-technician-sr-edit-error')).not.toBeNull()
+    expect(technicianInput.value).toBe('Morgan')
+    expect(summaryTextarea.value).toBe('Still waiting for parts')
   })
 
   it('deletes a service record inline and removes it from the current list', async () => {
