@@ -103,6 +103,14 @@ function createQuery(): {
       order: 3,
     },
     {
+      id: 'scheduledAt',
+      sheet_id: 'sheet_service_ticket',
+      name: 'Scheduled At',
+      type: 'date',
+      property: {},
+      order: 4,
+    },
+    {
       id: 'customerId',
       sheet_id: 'sheet_service_ticket',
       name: 'Customer',
@@ -111,7 +119,7 @@ function createQuery(): {
         foreignSheetId: 'sheet_customer',
         limitSingleRecord: true,
       },
-      order: 4,
+      order: 5,
     },
   ]
   const records: FakeRecord[] = []
@@ -460,6 +468,40 @@ describe('multitable records helper', () => {
         title: 'Broken compressor',
         priority: 'urgent',
         refundAmount: 88.5,
+      },
+    })
+  })
+
+  it('allows clearing a date field with null during patch', async () => {
+    const { query, records } = createQuery()
+    records.push({
+      id: 'rec_existing',
+      sheet_id: 'sheet_service_ticket',
+      data: {
+        ticketNo: 'TK-1001',
+        title: 'Broken compressor',
+        priority: 'urgent',
+        scheduledAt: '2026-04-09T11:00:00Z',
+      },
+      version: 2,
+    })
+
+    await expect(patchRecord({
+      query,
+      sheetId: 'sheet_service_ticket',
+      recordId: 'rec_existing',
+      changes: {
+        scheduledAt: null,
+      },
+    })).resolves.toEqual({
+      id: 'rec_existing',
+      sheetId: 'sheet_service_ticket',
+      version: 3,
+      data: {
+        ticketNo: 'TK-1001',
+        title: 'Broken compressor',
+        priority: 'urgent',
+        scheduledAt: null,
       },
     })
   })

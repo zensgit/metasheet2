@@ -177,6 +177,10 @@ function normalizeFieldValue(
   field: LoadedMultitableField,
   value: unknown,
 ): unknown {
+  if (value === null) {
+    return null
+  }
+
   switch (field.type) {
     case 'select':
       return normalizeSelectValue(

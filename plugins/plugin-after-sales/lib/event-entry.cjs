@@ -410,6 +410,68 @@ function buildServiceRecordCommand(input) {
   }
 }
 
+function hasOwnField(obj, field) {
+  return Boolean(obj) && Object.prototype.hasOwnProperty.call(obj, field)
+}
+
+function buildUpdateServiceRecordCommand(input, existingServiceRecord) {
+  const command = input && typeof input === 'object' && !Array.isArray(input) ? input : {}
+  const serviceRecordInput =
+    command.serviceRecord && typeof command.serviceRecord === 'object' && !Array.isArray(command.serviceRecord)
+      ? command.serviceRecord
+      : command
+  const currentRecord =
+    existingServiceRecord && typeof existingServiceRecord === 'object' ? existingServiceRecord : {}
+  const visitType = normalizeEnumValue(
+    serviceRecordInput.visitType ?? currentRecord.visitType,
+    'serviceRecord.visitType',
+    ['onsite', 'remote', 'pickup'],
+    optionalString(currentRecord.visitType) || 'onsite',
+  )
+  const scheduledAt = requiredString(
+    serviceRecordInput.scheduledAt ?? currentRecord.scheduledAt,
+    'serviceRecord.scheduledAt',
+  )
+
+  const completedAtInput = serviceRecordInput.completedAt ?? command.completedAt
+  const technicianNameInput = serviceRecordInput.technicianName ?? command.technicianName
+  const workSummaryInput = serviceRecordInput.workSummary ?? command.workSummary
+  const resultInput = serviceRecordInput.result ?? command.result
+
+  const completedAt = hasOwnField(serviceRecordInput, 'completedAt') || hasOwnField(command, 'completedAt')
+    ? optionalString(completedAtInput) || null
+    : optionalString(currentRecord.completedAt) || null
+  const technicianName = hasOwnField(serviceRecordInput, 'technicianName') || hasOwnField(command, 'technicianName')
+    ? optionalString(technicianNameInput) || null
+    : optionalString(currentRecord.technicianName) || null
+  const workSummary = hasOwnField(serviceRecordInput, 'workSummary') || hasOwnField(command, 'workSummary')
+    ? optionalString(workSummaryInput) || null
+    : optionalString(currentRecord.workSummary) || null
+
+  let result = optionalString(currentRecord.result) || null
+  if (hasOwnField(serviceRecordInput, 'result') || hasOwnField(command, 'result')) {
+    result = isMissingInputValue(resultInput)
+      ? null
+      : normalizeEnumValue(
+          resultInput,
+          'serviceRecord.result',
+          ['resolved', 'partial', 'escalated'],
+          'resolved',
+        )
+  }
+
+  return {
+    changes: {
+      visitType,
+      scheduledAt,
+      completedAt,
+      technicianName,
+      workSummary,
+      result,
+    },
+  }
+}
+
 function buildServiceRecordedEventPayload(input, meta) {
   const serviceRecord =
     input && typeof input.serviceRecord === 'object' && !Array.isArray(input.serviceRecord)
@@ -447,6 +509,7 @@ module.exports = {
   buildTicketOverdueEventPayload,
   buildFollowUpDueEventPayload,
   buildServiceRecordCommand,
+  buildUpdateServiceRecordCommand,
   buildServiceRecordedEventPayload,
   createEventEntryError,
 }
