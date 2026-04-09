@@ -301,6 +301,93 @@ describe('admin-users routes', () => {
     })
   })
 
+  it('returns member admission snapshot for a user', async () => {
+    vi.stubEnv('DINGTALK_AUTH_REQUIRE_GRANT', '1')
+    vi.stubEnv('DINGTALK_AUTH_AUTO_LINK_EMAIL', '1')
+    vi.stubEnv('DINGTALK_AUTH_AUTO_PROVISION', '0')
+    rbacMocks.isAdmin.mockResolvedValue(true)
+    pgMocks.query
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'user-1',
+          email: 'alpha@example.com',
+          name: 'Alpha',
+          role: 'user',
+          is_active: true,
+          is_admin: false,
+          last_login_at: null,
+          created_at: '2026-03-12T00:00:00.000Z',
+          updated_at: '2026-03-12T00:00:00.000Z',
+        }],
+      })
+      .mockResolvedValueOnce({
+        rows: [{ role_id: 'attendance_employee' }, { role_id: 'crm_admin' }],
+      })
+      .mockResolvedValueOnce({
+        rows: [{
+          integration_id: 'integration-1',
+          integration_name: 'DingTalk CN',
+          provider: 'dingtalk',
+          corp_id: 'ding-corp',
+          directory_account_id: 'account-1',
+          external_user_id: 'ding-user-1',
+          account_name: 'Alpha',
+          account_email: 'alpha@example.com',
+          account_mobile: '13800000000',
+          account_is_active: true,
+          account_updated_at: '2026-03-13T00:00:00.000Z',
+          link_status: 'linked',
+          match_strategy: 'external_identity',
+          reviewed_by: null,
+          review_note: null,
+          link_updated_at: '2026-03-13T00:00:00.000Z',
+          department_paths: ['总部 / 研发部'],
+        }],
+      })
+      .mockResolvedValueOnce({
+        rows: [{
+          enabled: true,
+          granted_by: 'admin-1',
+          created_at: '2026-03-12T00:00:00.000Z',
+          updated_at: '2026-03-12T00:00:00.000Z',
+        }],
+      })
+      .mockResolvedValueOnce({
+        rows: [{
+          corp_id: 'ding-corp',
+          last_login_at: '2026-03-13T00:00:00.000Z',
+          created_at: '2026-03-12T00:00:00.000Z',
+          updated_at: '2026-03-13T00:00:00.000Z',
+        }],
+      })
+
+    const response = await invokeRoute('get', '/api/admin/users/:userId/member-admission', {
+      params: { userId: 'user-1' },
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect((response.body as Record<string, any>).data).toMatchObject({
+      userId: 'user-1',
+      accountEnabled: true,
+      platformAdminEnabled: false,
+      attendanceAdminEnabled: false,
+      businessRoleIds: ['crm_admin'],
+      directoryMemberships: [
+        expect.objectContaining({
+          integrationId: 'integration-1',
+          integrationName: 'DingTalk CN',
+          linkStatus: 'linked',
+          matchStrategy: 'external_identity',
+          departmentPaths: ['总部 / 研发部'],
+        }),
+      ],
+      dingtalk: {
+        grant: { exists: true, enabled: true },
+        identity: { exists: true, corpId: 'ding-corp' },
+      },
+    })
+  })
+
   it('updates dingtalk grant and records an audit entry', async () => {
     rbacMocks.isAdmin.mockResolvedValue(true)
     pgMocks.query

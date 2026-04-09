@@ -97,6 +97,26 @@ type AdminDingTalkIdentityRow = {
   updated_at: string
 }
 
+type DirectoryMembershipRow = {
+  integration_id: string
+  integration_name: string
+  provider: string
+  corp_id: string | null
+  directory_account_id: string
+  external_user_id: string
+  account_name: string
+  account_email: string | null
+  account_mobile: string | null
+  account_is_active: boolean
+  account_updated_at: string
+  link_status: string
+  match_strategy: string | null
+  reviewed_by: string | null
+  review_note: string | null
+  link_updated_at: string
+  department_paths: string[] | null
+}
+
 type AuditRangeBoundaryMode = 'start' | 'end'
 
 type CreateUserRequestBody = {
@@ -112,6 +132,7 @@ type CreateUserRequestBody = {
 const ADMIN_AUDIT_RESOURCE_TYPES = ['user', 'user-role', 'user-auth-grant', 'user-password', 'user-session', 'user-invite', 'role', 'permission', 'permission-template'] as const
 const DINGTALK_PROVIDER = 'dingtalk'
 const PLATFORM_ADMIN_ROLE_ID = 'admin'
+const ATTENDANCE_ROLE_IDS = new Set(['attendance_employee', 'attendance_approver', 'attendance_admin'])
 
 function getRequestUserId(req: Request): string {
   const raw = req.user as Record<string, unknown> | undefined
@@ -290,6 +311,81 @@ async function fetchDingTalkAccessSnapshot(userId: string) {
       createdAt: identity?.created_at ?? null,
       updatedAt: identity?.updated_at ?? null,
     },
+  }
+}
+
+async function fetchDirectoryMemberships(userId: string) {
+  const result = await query<DirectoryMembershipRow>(
+    `SELECT
+        i.id AS integration_id,
+        i.name AS integration_name,
+        i.provider,
+        i.corp_id,
+        a.id AS directory_account_id,
+        a.external_user_id,
+        a.name AS account_name,
+        a.email AS account_email,
+        a.mobile AS account_mobile,
+        a.is_active AS account_is_active,
+        a.updated_at AS account_updated_at,
+        l.link_status,
+        l.match_strategy,
+        l.reviewed_by,
+        l.review_note,
+        l.updated_at AS link_updated_at,
+        COALESCE(array_remove(array_agg(DISTINCT d.full_path), NULL), ARRAY[]::text[]) AS department_paths
+     FROM directory_account_links l
+     JOIN directory_accounts a ON a.id = l.directory_account_id
+     JOIN directory_integrations i ON i.id = a.integration_id
+     LEFT JOIN directory_account_departments ad ON ad.directory_account_id = a.id
+     LEFT JOIN directory_departments d ON d.id = ad.directory_department_id
+     WHERE l.local_user_id = $1
+     GROUP BY
+       i.id, i.name, i.provider, i.corp_id,
+       a.id, a.external_user_id, a.name, a.email, a.mobile, a.is_active, a.updated_at,
+       l.link_status, l.match_strategy, l.reviewed_by, l.review_note, l.updated_at
+     ORDER BY i.name ASC, a.name ASC`,
+    [userId],
+  )
+
+  return result.rows.map((row) => ({
+    integrationId: row.integration_id,
+    integrationName: row.integration_name,
+    provider: row.provider,
+    corpId: row.corp_id,
+    directoryAccountId: row.directory_account_id,
+    externalUserId: row.external_user_id,
+    name: row.account_name,
+    email: row.account_email,
+    mobile: row.account_mobile,
+    accountEnabled: row.account_is_active,
+    accountUpdatedAt: row.account_updated_at,
+    linkStatus: row.link_status,
+    matchStrategy: row.match_strategy,
+    reviewedBy: row.reviewed_by,
+    reviewNote: row.review_note,
+    linkUpdatedAt: row.link_updated_at,
+    departmentPaths: Array.isArray(row.department_paths) ? row.department_paths.filter(Boolean) : [],
+  }))
+}
+
+async function fetchMemberAdmissionSnapshot(userId: string) {
+  const [profile, roles, directoryMemberships, dingtalkAccess] = await Promise.all([
+    fetchUserProfile(userId),
+    fetchUserRoleIds(userId),
+    fetchDirectoryMemberships(userId),
+    fetchDingTalkAccessSnapshot(userId),
+  ])
+  if (!profile) return null
+
+  return {
+    userId,
+    accountEnabled: profile.is_active,
+    platformAdminEnabled: profile.role === 'admin' || profile.is_admin || roles.includes(PLATFORM_ADMIN_ROLE_ID),
+    attendanceAdminEnabled: roles.includes('attendance_admin'),
+    businessRoleIds: roles.filter((roleId) => roleId !== PLATFORM_ADMIN_ROLE_ID && !ATTENDANCE_ROLE_IDS.has(roleId)),
+    directoryMemberships,
+    dingtalk: dingtalkAccess,
   }
 }
 
@@ -802,6 +898,26 @@ export function adminUsersRouter(): Router {
       })
     } catch (error) {
       return jsonError(res, 500, 'DINGTALK_ACCESS_FAILED', (error as Error)?.message || 'Failed to load DingTalk access')
+    }
+  })
+
+  r.get('/api/admin/users/:userId/member-admission', authenticate, async (req: Request, res: Response) => {
+    const adminUserId = await ensurePlatformAdmin(req, res)
+    if (!adminUserId) return
+
+    try {
+      const userId = String(req.params.userId || '').trim()
+      if (!userId) return jsonError(res, 400, 'USER_ID_REQUIRED', 'userId is required')
+
+      const snapshot = await fetchMemberAdmissionSnapshot(userId)
+      if (!snapshot) return jsonError(res, 404, 'NOT_FOUND', 'User not found')
+
+      return jsonOk(res, {
+        actorId: adminUserId,
+        ...snapshot,
+      })
+    } catch (error) {
+      return jsonError(res, 500, 'MEMBER_ADMISSION_FAILED', (error as Error)?.message || 'Failed to load member admission snapshot')
     }
   })
 
