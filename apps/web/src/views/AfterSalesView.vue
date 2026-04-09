@@ -130,6 +130,53 @@
         </div>
       </section>
 
+      <section v-if="isInstalled" class="after-sales-view__service-records-shell">
+        <article class="after-sales-view__card after-sales-view__card--wide">
+          <div class="after-sales-view__section-header">
+            <div>
+              <p class="after-sales-view__pill">Service records</p>
+              <h2>Recent visits</h2>
+              <p>
+                这里显示最近的上门/远程服务记录，便于确认工单已经进入现场执行阶段。
+              </p>
+            </div>
+          </div>
+
+          <p v-if="serviceRecordsLoading" class="after-sales-view__muted-state">Loading recent service records...</p>
+          <p v-else-if="serviceRecordsError" class="after-sales-view__inline-error">{{ serviceRecordsError }}</p>
+          <div v-else-if="serviceRecords.length" class="after-sales-view__service-record-list">
+            <article v-for="record in serviceRecords" :key="record.id" class="after-sales-view__service-record-row">
+              <div class="after-sales-view__service-record-main">
+                <div class="after-sales-view__service-record-headline">
+                  <strong>{{ record.data.ticketNo }}</strong>
+                  <span class="after-sales-view__tag">{{ record.data.visitType }}</span>
+                  <span v-if="record.data.result" class="after-sales-view__tag after-sales-view__tag--subtle">
+                    {{ record.data.result }}
+                  </span>
+                </div>
+                <p>{{ record.data.workSummary || 'No work summary yet.' }}</p>
+              </div>
+
+              <dl class="after-sales-view__service-record-meta">
+                <div>
+                  <dt>Scheduled</dt>
+                  <dd>{{ formatRecordDate(record.data.scheduledAt) }}</dd>
+                </div>
+                <div>
+                  <dt>Completed</dt>
+                  <dd>{{ formatRecordDate(record.data.completedAt) }}</dd>
+                </div>
+                <div>
+                  <dt>Technician</dt>
+                  <dd>{{ record.data.technicianName || 'Unassigned' }}</dd>
+                </div>
+              </dl>
+            </article>
+          </div>
+          <p v-else class="after-sales-view__muted-state">No service records found yet.</p>
+        </article>
+      </section>
+
       <section class="after-sales-view__grid">
         <article class="after-sales-view__card">
           <h2>Install state</h2>
@@ -229,6 +276,31 @@ interface CurrentResponse {
   reportRef?: string
 }
 
+interface ServiceRecordRow {
+  id: string
+  version: number
+  data: Record<string, unknown>
+}
+
+interface ServiceRecordsResponse {
+  projectId: string
+  serviceRecords: ServiceRecordRow[]
+  count: number
+}
+
+interface ServiceRecordViewModel {
+  id: string
+  version: number
+  data: {
+    ticketNo: string
+    visitType: string
+    scheduledAt: string
+    technicianName: string
+    workSummary: string
+    result: string
+  }
+}
+
 interface ApiEnvelope<T> {
   ok: boolean
   data: T
@@ -253,10 +325,13 @@ const DEFAULT_CONFIG = {
 const loading = ref(true)
 const installing = ref(false)
 const refreshing = ref(false)
+const serviceRecordsLoading = ref(false)
 const error = ref('')
+const serviceRecordsError = ref('')
 const showWarnings = ref(false)
 const manifest = ref<AfterSalesManifest | null>(null)
 const current = ref<CurrentResponse>({ status: 'not-installed' })
+const serviceRecords = ref<ServiceRecordViewModel[]>([])
 const configDraft = ref({ ...DEFAULT_CONFIG })
 const baselineConfigDraft = ref({ ...DEFAULT_CONFIG })
 
@@ -264,6 +339,7 @@ const placeholderProjectId = 'tenant:after-sales'
 const warnings = computed(() => current.value.installResult?.warnings ?? [])
 const createdObjectLabels = computed(() => current.value.installResult?.createdObjects ?? [])
 const createdViewLabels = computed(() => current.value.installResult?.createdViews ?? [])
+const isInstalled = computed(() => current.value.status !== 'not-installed')
 const isDegraded = computed(() => current.value.status === 'partial' || current.value.status === 'failed')
 const statusTone = computed(() => {
   switch (current.value.status) {
@@ -350,8 +426,47 @@ function buildInstallConfig() {
   }
 }
 
+function normalizeServiceRecordRow(record: ServiceRecordRow): ServiceRecordViewModel {
+  const rawData = record.data && typeof record.data === 'object' ? record.data : {}
+  return {
+    id: record.id,
+    version: record.version,
+    data: {
+      ticketNo: toText(rawData.ticketNo, record.id),
+      visitType: toText(rawData.visitType, 'unspecified'),
+      scheduledAt: toText(rawData.scheduledAt, 'n/a'),
+      technicianName: toText(rawData.technicianName),
+      workSummary: toText(rawData.workSummary),
+      result: toText(rawData.result),
+    },
+  }
+}
+
 async function loadManifest() {
   manifest.value = await readEnvelope<AfterSalesManifest>('/api/after-sales/app-manifest')
+}
+
+async function loadServiceRecordsForCurrentState(state: CurrentResponse) {
+  serviceRecordsLoading.value = true
+  serviceRecordsError.value = ''
+
+  try {
+    if (state.status === 'not-installed') {
+      serviceRecords.value = []
+      return
+    }
+
+    const payload = await readEnvelope<ServiceRecordsResponse>('/api/after-sales/service-records')
+    const rows = Array.isArray(payload?.serviceRecords) ? payload.serviceRecords : []
+    serviceRecords.value = rows.map((row) => normalizeServiceRecordRow(row))
+  } catch (err: unknown) {
+    serviceRecords.value = []
+    if (state.status !== 'not-installed') {
+      serviceRecordsError.value = err instanceof Error ? err.message : 'Failed to load service records'
+    }
+  } finally {
+    serviceRecordsLoading.value = false
+  }
 }
 
 async function refreshCurrentState() {
@@ -359,6 +474,7 @@ async function refreshCurrentState() {
   try {
     current.value = await readEnvelope<CurrentResponse>('/api/after-sales/projects/current')
     baselineConfigDraft.value = normalizeConfigDraft(current.value.config)
+    await loadServiceRecordsForCurrentState(current.value)
   } finally {
     refreshing.value = false
   }
@@ -367,6 +483,7 @@ async function refreshCurrentState() {
 async function loadView() {
   loading.value = true
   error.value = ''
+  serviceRecordsError.value = ''
   try {
     const [nextManifest, nextCurrent] = await Promise.all([
       readEnvelope<AfterSalesManifest>('/api/after-sales/app-manifest'),
@@ -376,8 +493,9 @@ async function loadView() {
     current.value = nextCurrent
     baselineConfigDraft.value = normalizeConfigDraft(nextCurrent.config)
     configDraft.value = { ...baselineConfigDraft.value }
-  } catch (err: any) {
-    error.value = err?.message || 'Failed to load after-sales state'
+    await loadServiceRecordsForCurrentState(nextCurrent)
+  } catch (err: unknown) {
+    error.value = err instanceof Error ? err.message : 'Failed to load after-sales state'
   } finally {
     loading.value = false
   }
@@ -398,8 +516,8 @@ async function triggerInstall(mode: 'enable' | 'reinstall') {
     })
     await refreshCurrentState()
     configDraft.value = { ...baselineConfigDraft.value }
-  } catch (err: any) {
-    error.value = err?.message || 'Failed to install after-sales template'
+  } catch (err: unknown) {
+    error.value = err instanceof Error ? err.message : 'Failed to install after-sales template'
   } finally {
     installing.value = false
   }
@@ -524,7 +642,8 @@ onMounted(() => {
 .after-sales-view__error-banner,
 .after-sales-view__warning-banner,
 .after-sales-view__config-shell,
-.after-sales-view__onboarding {
+.after-sales-view__onboarding,
+.after-sales-view__service-records-shell {
   display: grid;
   gap: 16px;
 }
@@ -551,10 +670,17 @@ onMounted(() => {
 
 .after-sales-view__error-banner p,
 .after-sales-view__warning-banner p,
-.after-sales-view__onboarding-card p {
+.after-sales-view__onboarding-card p,
+.after-sales-view__card p,
+.after-sales-view__muted-state,
+.after-sales-view__inline-error {
   margin: 6px 0 0;
   color: #475569;
   line-height: 1.6;
+}
+
+.after-sales-view__inline-error {
+  color: #b91c1c;
 }
 
 .after-sales-view__onboarding-card,
@@ -566,6 +692,10 @@ onMounted(() => {
   box-shadow: 0 10px 30px rgba(15, 23, 42, 0.05);
 }
 
+.after-sales-view__card--wide {
+  grid-column: 1 / -1;
+}
+
 .after-sales-view__onboarding-card {
   background:
     linear-gradient(160deg, rgba(255, 247, 237, 0.9), rgba(236, 253, 245, 0.9)),
@@ -573,7 +703,8 @@ onMounted(() => {
 }
 
 .after-sales-view__content,
-.after-sales-view__grid {
+.after-sales-view__grid,
+.after-sales-view__service-record-list {
   display: grid;
   gap: 16px;
 }
@@ -598,11 +729,6 @@ onMounted(() => {
   color: #0f172a;
 }
 
-.after-sales-view__card p {
-  margin: 0;
-  color: #475569;
-}
-
 .after-sales-view__list {
   margin: 0;
   padding-left: 18px;
@@ -613,27 +739,82 @@ onMounted(() => {
   margin-top: 8px;
 }
 
-.after-sales-view__meta {
+.after-sales-view__meta,
+.after-sales-view__service-record-meta {
   display: grid;
   gap: 12px;
   margin: 0;
 }
 
-.after-sales-view__meta div {
+.after-sales-view__meta div,
+.after-sales-view__service-record-meta div {
   display: grid;
   gap: 4px;
 }
 
-.after-sales-view__meta dt {
+.after-sales-view__meta dt,
+.after-sales-view__service-record-meta dt {
   font-size: 12px;
   letter-spacing: 0.08em;
   text-transform: uppercase;
   color: #64748b;
 }
 
-.after-sales-view__meta dd {
+.after-sales-view__meta dd,
+.after-sales-view__service-record-meta dd {
   margin: 0;
   color: #0f172a;
+}
+
+.after-sales-view__service-record-list {
+  gap: 12px;
+}
+
+.after-sales-view__service-record-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 16px;
+  border-radius: 16px;
+  border: 1px solid #e2e8f0;
+  background: #f8fafc;
+}
+
+.after-sales-view__service-record-main {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.after-sales-view__service-record-main p {
+  margin: 0;
+  color: #475569;
+}
+
+.after-sales-view__service-record-headline {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.after-sales-view__service-record-headline strong {
+  color: #0f172a;
+}
+
+.after-sales-view__tag {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  background: rgba(14, 116, 144, 0.12);
+  color: #0f766e;
+}
+
+.after-sales-view__tag--subtle {
+  background: rgba(148, 163, 184, 0.14);
+  color: #475569;
 }
 
 .after-sales-view__config-form {
@@ -767,7 +948,8 @@ code {
 @media (max-width: 840px) {
   .after-sales-view__hero,
   .after-sales-view__error-banner,
-  .after-sales-view__warning-banner {
+  .after-sales-view__warning-banner,
+  .after-sales-view__service-record-row {
     grid-template-columns: 1fr;
     display: grid;
   }
