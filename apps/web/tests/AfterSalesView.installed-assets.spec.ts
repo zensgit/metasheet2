@@ -461,6 +461,122 @@ describe('AfterSalesView installed assets panel', () => {
     expect(assetListCalls).toBe(1)
   })
 
+  it('deletes installed assets inline and removes only the targeted row', async () => {
+    apiFetchMock.mockImplementation(async (path: string, init?: RequestInit) => {
+      if (path === '/api/after-sales/app-manifest') {
+        return createResponse({
+          id: 'after-sales-default',
+          displayName: 'After Sales',
+          platformDependencies: ['core-backend'],
+          objects: [],
+          workflows: [],
+        })
+      }
+
+      if (path === '/api/after-sales/projects/current') {
+        return createResponse({
+          status: 'installed',
+          projectId: 'tenant:after-sales',
+          displayName: 'After Sales',
+          config: {
+            defaultSlaHours: 24,
+            urgentSlaHours: 4,
+            followUpAfterDays: 7,
+          },
+          installResult: {
+            status: 'installed',
+            createdObjects: [],
+            createdViews: [],
+            warnings: [],
+            reportRef: 'install-assets-003b',
+          },
+          reportRef: 'install-assets-003b',
+        })
+      }
+
+      if (path === '/api/after-sales/tickets') {
+        return createResponse({
+          projectId: 'tenant:after-sales',
+          count: 0,
+          tickets: [],
+        })
+      }
+
+      if (path === '/api/after-sales/service-records') {
+        return createResponse({
+          projectId: 'tenant:after-sales',
+          count: 0,
+          serviceRecords: [],
+        })
+      }
+
+      if (path === '/api/after-sales/installed-assets' && (!init || !init.method)) {
+        return createResponse({
+          projectId: 'tenant:after-sales',
+          count: 2,
+          installedAssets: [
+            {
+              id: 'asset-delete',
+              version: 1,
+              data: {
+                assetCode: 'AST-DELETE',
+                serialNo: 'SN-DELETE',
+                model: 'Temporary unit',
+                location: 'Plant 9',
+                installedAt: '2026-04-09T08:00:00Z',
+                warrantyUntil: '',
+                status: 'active',
+              },
+            },
+            {
+              id: 'asset-keep',
+              version: 1,
+              data: {
+                assetCode: 'AST-KEEP',
+                serialNo: 'SN-KEEP',
+                model: 'Primary unit',
+                location: 'Plant 1',
+                installedAt: '2026-04-08T08:00:00Z',
+                warrantyUntil: '',
+                status: 'active',
+              },
+            },
+          ],
+        })
+      }
+
+      if (path === '/api/after-sales/installed-assets/asset-delete' && init?.method === 'DELETE') {
+        return createResponse({
+          projectId: 'tenant:after-sales',
+          installedAssetId: 'asset-delete',
+          version: 4,
+          deleted: true,
+        })
+      }
+
+      throw new Error(`Unexpected request: ${path}`)
+    })
+
+    const mounted = mountAfterSalesView()
+    app = mounted.app
+    container = mounted.container
+
+    await waitForText(container, 'AST-DELETE')
+
+    const deleteButton = container.querySelector<HTMLButtonElement>('button[aria-label="Delete installed asset AST-DELETE"]')
+    expect(deleteButton).toBeTruthy()
+    if (!deleteButton) return
+
+    deleteButton.click()
+
+    await waitForText(container, 'Deleted installed asset AST-DELETE')
+
+    expect(container.textContent).not.toContain('Temporary unit')
+    expect(container.textContent).toContain('AST-KEEP')
+    expect(container.querySelector('button[aria-label="Delete installed asset AST-DELETE"]')).toBeNull()
+    expect(apiFetchMock).toHaveBeenCalledWith('/api/after-sales/installed-assets/asset-delete', { method: 'DELETE' })
+  })
+
   it('keeps the installed-asset draft when create fails', async () => {
     apiFetchMock.mockImplementation(async (path: string, init?: RequestInit) => {
       if (path === '/api/after-sales/app-manifest') {
@@ -570,5 +686,109 @@ describe('AfterSalesView installed assets panel', () => {
     expect(assetCodeInput.value).toBe('AST-DUPLICATE')
     expect(modelInput.value).toBe('Compressor X')
     expect(section.textContent).toContain('AST-BASE')
+  })
+
+  it('surfaces delete errors inline without clearing existing installed assets', async () => {
+    apiFetchMock.mockImplementation(async (path: string, init?: RequestInit) => {
+      if (path === '/api/after-sales/app-manifest') {
+        return createResponse({
+          id: 'after-sales-default',
+          displayName: 'After Sales',
+          platformDependencies: ['core-backend'],
+          objects: [],
+          workflows: [],
+        })
+      }
+
+      if (path === '/api/after-sales/projects/current') {
+        return createResponse({
+          status: 'installed',
+          projectId: 'tenant:after-sales',
+          displayName: 'After Sales',
+          config: {
+            defaultSlaHours: 24,
+            urgentSlaHours: 4,
+            followUpAfterDays: 7,
+          },
+          installResult: {
+            status: 'installed',
+            createdObjects: [],
+            createdViews: [],
+            warnings: [],
+            reportRef: 'install-assets-005',
+          },
+          reportRef: 'install-assets-005',
+        })
+      }
+
+      if (path === '/api/after-sales/tickets') {
+        return createResponse({
+          projectId: 'tenant:after-sales',
+          count: 0,
+          tickets: [],
+        })
+      }
+
+      if (path === '/api/after-sales/service-records') {
+        return createResponse({
+          projectId: 'tenant:after-sales',
+          count: 0,
+          serviceRecords: [],
+        })
+      }
+
+      if (path === '/api/after-sales/installed-assets' && (!init || !init.method)) {
+        return createResponse({
+          projectId: 'tenant:after-sales',
+          count: 1,
+          installedAssets: [
+            {
+              id: 'asset-delete-error',
+              version: 1,
+              data: {
+                assetCode: 'AST-DELETE-ERR',
+                serialNo: 'SN-BASE',
+                model: 'Still visible after delete failure',
+                location: 'Dock',
+                installedAt: '2026-04-09T08:00:00Z',
+                warrantyUntil: '',
+                status: 'active',
+              },
+            },
+          ],
+        })
+      }
+
+      if (path === '/api/after-sales/installed-assets/asset-delete-error' && init?.method === 'DELETE') {
+        return createResponse(
+          {
+            error: {
+              code: 'NOT_FOUND',
+              message: 'Installed asset already deleted',
+            },
+          },
+          { ok: false, status: 404, statusText: 'Not Found' },
+        )
+      }
+
+      throw new Error(`Unexpected request: ${path}`)
+    })
+
+    const mounted = mountAfterSalesView()
+    app = mounted.app
+    container = mounted.container
+
+    await waitForText(container, 'Still visible after delete failure')
+
+    const deleteButton = container.querySelector<HTMLButtonElement>('button[aria-label="Delete installed asset AST-DELETE-ERR"]')
+    expect(deleteButton).toBeTruthy()
+    if (!deleteButton) return
+
+    deleteButton.click()
+
+    await waitForText(container, 'Installed asset already deleted')
+
+    expect(container.textContent).toContain('Still visible after delete failure')
+    expect(container.textContent).toContain('Installed asset already deleted')
   })
 })

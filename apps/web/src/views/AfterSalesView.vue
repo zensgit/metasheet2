@@ -502,12 +502,16 @@
           <div class="after-sales-view__action-row after-sales-view__action-row--compact">
             <button
               class="after-sales-view__primary-btn"
-              :disabled="installedAssetCreating || installedAssetsLoading || !canSubmitInstalledAsset"
+              :disabled="installedAssetCreating || installedAssetsLoading || Boolean(installedAssetDeletingId) || !canSubmitInstalledAsset"
               @click="submitInstalledAsset"
             >
               {{ installedAssetCreating ? 'Creating...' : 'Create asset' }}
             </button>
-            <button class="after-sales-view__ghost-btn" :disabled="installedAssetCreating || installedAssetsLoading" @click="resetInstalledAssetDraft">
+            <button
+              class="after-sales-view__ghost-btn"
+              :disabled="installedAssetCreating || installedAssetsLoading || Boolean(installedAssetDeletingId)"
+              @click="resetInstalledAssetDraft"
+            >
               Reset asset draft
             </button>
           </div>
@@ -542,13 +546,25 @@
           </form>
 
           <div class="after-sales-view__action-row after-sales-view__action-row--compact">
-            <button class="after-sales-view__ghost-btn" :disabled="installedAssetsLoading || installedAssetCreating" @click="refreshInstalledAssets">
+            <button
+              class="after-sales-view__ghost-btn"
+              :disabled="installedAssetsLoading || installedAssetCreating || Boolean(installedAssetDeletingId)"
+              @click="refreshInstalledAssets"
+            >
               {{ installedAssetsLoading ? 'Refreshing...' : 'Refresh list' }}
             </button>
-            <button class="after-sales-view__ghost-btn" :disabled="installedAssetsLoading || installedAssetCreating" @click="applyInstalledAssetFilters">
+            <button
+              class="after-sales-view__ghost-btn"
+              :disabled="installedAssetsLoading || installedAssetCreating || Boolean(installedAssetDeletingId)"
+              @click="applyInstalledAssetFilters"
+            >
               {{ installedAssetsLoading ? 'Applying...' : 'Apply filters' }}
             </button>
-            <button class="after-sales-view__ghost-btn" :disabled="installedAssetsLoading || installedAssetCreating" @click="resetInstalledAssetFilters">
+            <button
+              class="after-sales-view__ghost-btn"
+              :disabled="installedAssetsLoading || installedAssetCreating || Boolean(installedAssetDeletingId)"
+              @click="resetInstalledAssetFilters"
+            >
               Clear filters
             </button>
           </div>
@@ -583,6 +599,14 @@
                     <dd>{{ formatRecordDate(asset.data.warrantyUntil) }}</dd>
                   </div>
                 </dl>
+                <button
+                  class="after-sales-view__ghost-btn after-sales-view__installed-asset-delete"
+                  :aria-label="`Delete installed asset ${asset.data.assetCode}`"
+                  :disabled="installedAssetDeletingId === asset.id || installedAssetCreating || installedAssetsLoading"
+                  @click="deleteInstalledAsset(asset)"
+                >
+                  {{ installedAssetDeletingId === asset.id ? 'Deleting...' : 'Delete' }}
+                </button>
               </div>
             </article>
           </div>
@@ -1078,6 +1102,7 @@ const ticketUpdatingId = ref('')
 const ticketDeletingId = ref('')
 const installedAssetsLoading = ref(false)
 const installedAssetCreating = ref(false)
+const installedAssetDeletingId = ref('')
 const serviceRecordsLoading = ref(false)
 const serviceRecordCreating = ref(false)
 const serviceRecordDeletingId = ref('')
@@ -1699,10 +1724,16 @@ async function loadInstalledAssetsForCurrentState(state: CurrentResponse): Promi
 }
 
 async function applyInstalledAssetFilters() {
+  if (installedAssetCreating.value || installedAssetDeletingId.value) {
+    return
+  }
   await loadInstalledAssetsForCurrentState(current.value)
 }
 
 async function resetInstalledAssetFilters() {
+  if (installedAssetCreating.value || installedAssetDeletingId.value) {
+    return
+  }
   installedAssetFilters.value = {
     status: '',
     search: '',
@@ -1711,11 +1742,19 @@ async function resetInstalledAssetFilters() {
 }
 
 async function refreshInstalledAssets() {
+  if (installedAssetCreating.value || installedAssetDeletingId.value) {
+    return
+  }
   await loadInstalledAssetsForCurrentState(current.value)
 }
 
 async function submitInstalledAsset() {
-  if (!canSubmitInstalledAsset.value || installedAssetCreating.value || installedAssetsLoading.value) {
+  if (
+    !canSubmitInstalledAsset.value ||
+    installedAssetCreating.value ||
+    installedAssetsLoading.value ||
+    Boolean(installedAssetDeletingId.value)
+  ) {
     return
   }
 
@@ -1743,6 +1782,29 @@ async function submitInstalledAsset() {
     installedAssetSubmitError.value = err instanceof Error ? err.message : 'Failed to create installed asset'
   } finally {
     installedAssetCreating.value = false
+  }
+}
+
+async function deleteInstalledAsset(asset: InstalledAssetViewModel) {
+  if (!asset.id || installedAssetDeletingId.value) {
+    return
+  }
+
+  installedAssetDeletingId.value = asset.id
+  installedAssetSubmitError.value = ''
+  installedAssetSubmitSuccess.value = ''
+
+  try {
+    await readEnvelope(`/api/after-sales/installed-assets/${encodeURIComponent(asset.id)}`, {
+      method: 'DELETE',
+    })
+    installedAssets.value = installedAssets.value.filter((item) => item.id !== asset.id)
+    installedAssetsError.value = ''
+    installedAssetSubmitSuccess.value = `Deleted installed asset ${asset.data.assetCode}`
+  } catch (err: unknown) {
+    installedAssetSubmitError.value = err instanceof Error ? err.message : 'Failed to delete installed asset'
+  } finally {
+    installedAssetDeletingId.value = ''
   }
 }
 
