@@ -17,11 +17,30 @@ Refresh sequence:
 4. rerun the narrow PR1 validation set
 5. force-push refreshed head back to `codex/dingtalk-pr1-foundation-login-20260408`
 
-Result:
+Initial result:
 
 - pre-refresh head: `f31d89eaf`
 - refreshed head: `75be0891a`
 - new base head during refresh: `origin/main @ 5e4b8ee48`
+
+### PR1 review-fix follow-up
+
+After the initial refresh, PR1 needed three additional review-fix passes:
+
+1. `68d5d6d85`
+   - block DingTalk login for disabled or inactive local users
+   - write bcrypt `password_hash` for auto-provisioned users
+2. `cc97a9913`
+   - refresh the same fixes onto the newer `origin/main`
+3. `584fac083`
+   - scope fallback external-identity lookups to the configured `corpId`
+
+Current PR1 head after the final follow-up:
+
+- `#725` head: `584fac083`
+- merge state: `BLOCKED`
+- review state: `REVIEW_REQUIRED`
+- GitHub checks: full required set green
 
 ### Validation completed after rebase
 
@@ -42,13 +61,42 @@ Results:
 - backend build passed
 - web type-check passed
 
+### Validation completed after review-fix follow-up
+
+Commands rerun on the latest PR1 head:
+
+```bash
+pnpm install --offline --frozen-lockfile
+pnpm --filter @metasheet/core-backend exec vitest run tests/unit/auth-login-routes.test.ts tests/unit/dingtalk-oauth-state-store.test.ts
+pnpm --filter @metasheet/core-backend build
+```
+
+Results:
+
+- backend review-fix unit tests passed (`21/21`)
+- backend build passed
+- GitHub full checks on `#725` are green
+
 ### PR metadata preparation
 
 Current stack handling after this pass:
 
-- `#725`: remains `Ready for review`, now rebased to latest `main`, checks rerunning on refreshed head
-- `#723`: stays draft, waiting for `#725` merge before retarget to `main`
-- `#724`: stays draft, waiting for `#723` merge before retarget to `main`
+- `#725`: remains `Ready for review`, fully green, blocked only on human review / approval
+- `#723`: stays draft on `codex/dingtalk-pr1-foundation-login-20260408`, waiting for `#725` merge before retarget to `main`
+- `#724`: stays draft on `codex/dingtalk-pr2-directory-sync-20260408`, waiting for `#723` merge before retarget to `main`
+
+### Retarget readiness snapshot
+
+- `#723`
+  - base: `codex/dingtalk-pr1-foundation-login-20260408`
+  - current GitHub merge state: `DIRTY`
+  - current checks: `pr-validate` only
+  - planned action: retarget only after `#725` merges
+- `#724`
+  - base: `codex/dingtalk-pr2-directory-sync-20260408`
+  - current GitHub merge state: `CLEAN`
+  - current checks: `pr-validate` only
+  - planned action: retarget only after `#723` merges
 
 ## Next Execution Steps
 
