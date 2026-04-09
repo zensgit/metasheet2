@@ -388,6 +388,152 @@ describe('admin-users routes', () => {
     })
   })
 
+  it('returns delegated role summary for a plugin admin', async () => {
+    state.authUser = {
+      id: 'crm-admin-1',
+      role: 'user',
+    }
+    rbacMocks.isAdmin.mockResolvedValue(false)
+    pgMocks.query
+      .mockResolvedValueOnce({
+        rows: [{ role_id: 'crm_admin' }, { role_id: 'attendance_employee' }],
+      })
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'crm_admin',
+          name: 'CRM Admin',
+          permissions: ['crm:read', 'crm:write', 'crm:admin'],
+        }, {
+          id: 'crm_operator',
+          name: 'CRM Operator',
+          permissions: ['crm:read', 'crm:write'],
+        }],
+      })
+
+    const response = await invokeRoute('get', '/api/admin/role-delegation/summary')
+
+    expect(response.statusCode).toBe(200)
+    expect((response.body as Record<string, any>).data).toMatchObject({
+      isPlatformAdmin: false,
+      delegableNamespaces: ['crm'],
+      roleCatalog: [
+        { id: 'crm_admin' },
+        { id: 'crm_operator' },
+      ],
+    })
+  })
+
+  it('rejects delegated role assignment outside allowed namespaces', async () => {
+    state.authUser = {
+      id: 'crm-admin-1',
+      role: 'user',
+    }
+    rbacMocks.isAdmin.mockResolvedValue(false)
+    pgMocks.query
+      .mockResolvedValueOnce({
+        rows: [{ role_id: 'crm_admin' }],
+      })
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'user-1',
+          email: 'alpha@example.com',
+          name: 'Alpha',
+          role: 'user',
+          is_active: true,
+          is_admin: false,
+          last_login_at: null,
+          created_at: '2026-03-12T00:00:00.000Z',
+          updated_at: '2026-03-12T00:00:00.000Z',
+        }],
+      })
+      .mockResolvedValueOnce({ rows: [{ id: 'qa_admin' }] })
+
+    const response = await invokeRoute('post', '/api/admin/role-delegation/users/:userId/roles/:action(assign|unassign)', {
+      params: { userId: 'user-1', action: 'assign' },
+      body: { roleId: 'qa_admin' },
+    })
+
+    expect(response.statusCode).toBe(403)
+    expect((response.body as Record<string, any>).error.code).toBe('ROLE_DELEGATION_FORBIDDEN')
+  })
+
+  it('assigns delegated role within allowed namespaces', async () => {
+    state.authUser = {
+      id: 'crm-admin-1',
+      role: 'user',
+    }
+    rbacMocks.isAdmin
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(false)
+    rbacMocks.listUserPermissions.mockResolvedValue(['crm:read', 'crm:write'])
+    pgMocks.query
+      .mockResolvedValueOnce({
+        rows: [{ role_id: 'crm_admin' }],
+      })
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'user-1',
+          email: 'alpha@example.com',
+          name: 'Alpha',
+          role: 'user',
+          is_active: true,
+          is_admin: false,
+          last_login_at: null,
+          created_at: '2026-03-12T00:00:00.000Z',
+          updated_at: '2026-03-12T00:00:00.000Z',
+        }],
+      })
+      .mockResolvedValueOnce({ rows: [{ id: 'crm_operator' }] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'user-1',
+          email: 'alpha@example.com',
+          name: 'Alpha',
+          role: 'user',
+          is_active: true,
+          is_admin: false,
+          last_login_at: null,
+          created_at: '2026-03-12T00:00:00.000Z',
+          updated_at: '2026-03-12T00:00:00.000Z',
+        }],
+      })
+      .mockResolvedValueOnce({
+        rows: [{ role_id: 'crm_operator' }],
+      })
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'crm_admin',
+          name: 'CRM Admin',
+          permissions: ['crm:read', 'crm:write', 'crm:admin'],
+        }, {
+          id: 'crm_operator',
+          name: 'CRM Operator',
+          permissions: ['crm:read', 'crm:write'],
+        }],
+      })
+
+    const response = await invokeRoute('post', '/api/admin/role-delegation/users/:userId/roles/:action(assign|unassign)', {
+      params: { userId: 'user-1', action: 'assign' },
+      body: { roleId: 'crm_operator' },
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect((response.body as Record<string, any>).data).toMatchObject({
+      isPlatformAdmin: false,
+      delegableNamespaces: ['crm'],
+      roles: ['crm_operator'],
+      delegableRoles: ['crm_operator'],
+    })
+    expect(auditMocks.auditLog).toHaveBeenCalledWith(expect.objectContaining({
+      resourceId: 'user-1:crm_operator',
+      meta: expect.objectContaining({
+        delegated: true,
+        delegableNamespaces: ['crm'],
+      }),
+    }))
+  })
+
   it('updates dingtalk grant and records an audit entry', async () => {
     rbacMocks.isAdmin.mockResolvedValue(true)
     pgMocks.query

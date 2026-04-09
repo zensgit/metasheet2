@@ -134,6 +134,12 @@ export const appRoutes: RouteRecordRaw[] = [
     meta: { title: 'User Management', requiresAuth: true }
   },
   {
+    path: '/admin/role-delegation',
+    name: 'role-delegation',
+    component: () => import('../views/RoleDelegationView.vue'),
+    meta: { title: 'Role Delegation', titleZh: '角色委派', requiresAuth: true }
+  },
+  {
     path: '/admin/directory',
     name: AppRouteNames.DIRECTORY_MANAGEMENT,
     component: () => import('../views/DirectoryManagementView.vue'),

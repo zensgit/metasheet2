@@ -117,6 +117,12 @@ type DirectoryMembershipRow = {
   department_paths: string[] | null
 }
 
+type DelegatedRoleCatalogRow = {
+  id: string
+  name: string
+  permissions: string[] | null
+}
+
 type AuditRangeBoundaryMode = 'start' | 'end'
 
 type CreateUserRequestBody = {
@@ -133,6 +139,7 @@ const ADMIN_AUDIT_RESOURCE_TYPES = ['user', 'user-role', 'user-auth-grant', 'use
 const DINGTALK_PROVIDER = 'dingtalk'
 const PLATFORM_ADMIN_ROLE_ID = 'admin'
 const ATTENDANCE_ROLE_IDS = new Set(['attendance_employee', 'attendance_approver', 'attendance_admin'])
+const DELEGATED_ADMIN_ROLE_SUFFIX = '_admin'
 
 function getRequestUserId(req: Request): string {
   const raw = req.user as Record<string, unknown> | undefined
@@ -314,6 +321,90 @@ async function fetchDingTalkAccessSnapshot(userId: string) {
   }
 }
 
+function deriveDelegableNamespaces(roleIds: string[]): string[] {
+  return Array.from(new Set(
+    roleIds
+      .filter((roleId) => roleId.endsWith(DELEGATED_ADMIN_ROLE_SUFFIX) && roleId !== PLATFORM_ADMIN_ROLE_ID)
+      .map((roleId) => roleId.slice(0, -DELEGATED_ADMIN_ROLE_SUFFIX.length))
+      .filter(Boolean),
+  )).sort()
+}
+
+function roleIdMatchesNamespaces(roleId: string, namespaces: string[]): boolean {
+  return namespaces.some((namespace) => roleId === namespace || roleId.startsWith(`${namespace}_`))
+}
+
+async function fetchDelegatedRoleCatalog(namespaces?: string[]) {
+  if (Array.isArray(namespaces) && namespaces.length === 0) return []
+
+  const result = Array.isArray(namespaces)
+    ? await query<DelegatedRoleCatalogRow>(
+      `SELECT
+          r.id,
+          r.name,
+          COALESCE(array_remove(array_agg(DISTINCT rp.permission_code), NULL), ARRAY[]::text[]) AS permissions
+       FROM roles r
+       LEFT JOIN role_permissions rp ON rp.role_id = r.id
+       WHERE EXISTS (
+         SELECT 1
+         FROM unnest($1::text[]) AS namespace
+         WHERE r.id = namespace OR r.id LIKE namespace || '\_%' ESCAPE '\'
+       )
+       GROUP BY r.id, r.name
+       ORDER BY r.id ASC`,
+      [namespaces],
+    )
+    : await query<DelegatedRoleCatalogRow>(
+      `SELECT
+          r.id,
+          r.name,
+          COALESCE(array_remove(array_agg(DISTINCT rp.permission_code), NULL), ARRAY[]::text[]) AS permissions
+       FROM roles r
+       LEFT JOIN role_permissions rp ON rp.role_id = r.id
+       GROUP BY r.id, r.name
+       ORDER BY r.id ASC`,
+    )
+
+  return result.rows.map((row) => ({
+    id: row.id,
+    name: row.name,
+    permissions: Array.isArray(row.permissions) ? row.permissions.filter(Boolean) : [],
+  }))
+}
+
+async function ensureRoleDelegationAdmin(req: Request, res: Response): Promise<{
+  actorId: string
+  isPlatformAdmin: boolean
+  delegableNamespaces: string[]
+}> {
+  const actorId = getRequestUserId(req)
+  if (!actorId) {
+    jsonError(res, 401, 'UNAUTHENTICATED', 'Authentication required')
+    return null as never
+  }
+
+  if (hasLegacyAdminClaim(req) || await isRbacAdmin(actorId)) {
+    return {
+      actorId,
+      isPlatformAdmin: true,
+      delegableNamespaces: [],
+    }
+  }
+
+  const roleIds = await fetchUserRoleIds(actorId)
+  const delegableNamespaces = deriveDelegableNamespaces(roleIds)
+  if (delegableNamespaces.length === 0) {
+    jsonError(res, 403, 'FORBIDDEN', 'Delegated role-admin access required')
+    return null as never
+  }
+
+  return {
+    actorId,
+    isPlatformAdmin: false,
+    delegableNamespaces,
+  }
+}
+
 async function fetchDirectoryMemberships(userId: string) {
   const result = await query<DirectoryMembershipRow>(
     `SELECT
@@ -406,6 +497,173 @@ async function syncLegacyAdminProfile(userId: string, enabled: boolean): Promise
 
 export function adminUsersRouter(): Router {
   const r = Router()
+
+  r.get('/api/admin/role-delegation/summary', authenticate, async (req: Request, res: Response) => {
+    const delegation = await ensureRoleDelegationAdmin(req, res)
+    if (!delegation) return
+
+    try {
+      const roleCatalog = await fetchDelegatedRoleCatalog(
+        delegation.isPlatformAdmin ? undefined : delegation.delegableNamespaces,
+      )
+      return jsonOk(res, {
+        actorId: delegation.actorId,
+        isPlatformAdmin: delegation.isPlatformAdmin,
+        delegableNamespaces: delegation.delegableNamespaces,
+        roleCatalog,
+      })
+    } catch (error) {
+      return jsonError(res, 500, 'ROLE_DELEGATION_SUMMARY_FAILED', (error as Error)?.message || 'Failed to load delegated role summary')
+    }
+  })
+
+  r.get('/api/admin/role-delegation/users', authenticate, async (req: Request, res: Response) => {
+    const delegation = await ensureRoleDelegationAdmin(req, res)
+    if (!delegation) return
+
+    try {
+      const q = String(req.query.q || '').trim()
+      const { page, pageSize, offset } = parsePagination(req.query as Record<string, unknown>, {
+        defaultPage: 1,
+        defaultPageSize: 20,
+        maxPageSize: 100,
+      })
+
+      const term = q ? `%${q}%` : '%'
+      const where = q ? 'WHERE email ILIKE $1 OR name ILIKE $1 OR id ILIKE $1' : ''
+      const countSql = `SELECT COUNT(*)::int AS c FROM users ${where}`
+      const listSql = `
+        SELECT id, email, name, role, is_active, is_admin, last_login_at, created_at, updated_at
+        FROM users
+        ${where}
+        ORDER BY created_at DESC
+        LIMIT $${q ? 2 : 1} OFFSET $${q ? 3 : 2}
+      `
+
+      const count = await query<{ c: number }>(countSql, q ? [term] : undefined)
+      const total = count.rows[0]?.c ?? 0
+      const list = await query<AdminUserProfile>(listSql, q ? [term, pageSize, offset] : [pageSize, offset])
+
+      return jsonOk(res, {
+        items: list.rows,
+        page,
+        pageSize,
+        total,
+        actorId: delegation.actorId,
+        isPlatformAdmin: delegation.isPlatformAdmin,
+        delegableNamespaces: delegation.delegableNamespaces,
+      })
+    } catch (error) {
+      return jsonError(res, 500, 'ROLE_DELEGATION_USER_LIST_FAILED', (error as Error)?.message || 'Failed to list delegation users')
+    }
+  })
+
+  r.get('/api/admin/role-delegation/users/:userId/access', authenticate, async (req: Request, res: Response) => {
+    const delegation = await ensureRoleDelegationAdmin(req, res)
+    if (!delegation) return
+
+    try {
+      const userId = String(req.params.userId || '').trim()
+      if (!userId) return jsonError(res, 400, 'USER_ID_REQUIRED', 'userId is required')
+
+      const snapshot = await fetchUserAccessSnapshot(userId)
+      if (!snapshot) return jsonError(res, 404, 'NOT_FOUND', 'User not found')
+
+      const roleCatalog = await fetchDelegatedRoleCatalog(
+        delegation.isPlatformAdmin ? undefined : delegation.delegableNamespaces,
+      )
+
+      return jsonOk(res, {
+        actorId: delegation.actorId,
+        isPlatformAdmin: delegation.isPlatformAdmin,
+        delegableNamespaces: delegation.delegableNamespaces,
+        roleCatalog,
+        user: snapshot.user,
+        roles: snapshot.roles,
+        delegableRoles: delegation.isPlatformAdmin
+          ? snapshot.roles
+          : snapshot.roles.filter((roleId) => roleIdMatchesNamespaces(roleId, delegation.delegableNamespaces)),
+      })
+    } catch (error) {
+      return jsonError(res, 500, 'ROLE_DELEGATION_ACCESS_FAILED', (error as Error)?.message || 'Failed to load delegated user access')
+    }
+  })
+
+  r.post('/api/admin/role-delegation/users/:userId/roles/:action(assign|unassign)', authenticate, async (req: Request, res: Response) => {
+    const delegation = await ensureRoleDelegationAdmin(req, res)
+    if (!delegation) return
+
+    try {
+      const userId = String(req.params.userId || '').trim()
+      const action = String(req.params.action || '').trim()
+      const roleId = String(req.body?.roleId || '').trim()
+      if (!userId) return jsonError(res, 400, 'USER_ID_REQUIRED', 'userId is required')
+      if (!roleId) return jsonError(res, 400, 'ROLE_REQUIRED', 'roleId is required')
+
+      const [profile, roleRow] = await Promise.all([
+        fetchUserProfile(userId),
+        query<{ id: string }>('SELECT id FROM roles WHERE id = $1', [roleId]),
+      ])
+      if (!profile) return jsonError(res, 404, 'NOT_FOUND', 'User not found')
+      if (!roleRow.rows.length) return jsonError(res, 404, 'ROLE_NOT_FOUND', 'Role not found')
+      if (!delegation.isPlatformAdmin && !roleIdMatchesNamespaces(roleId, delegation.delegableNamespaces)) {
+        return jsonError(res, 403, 'ROLE_DELEGATION_FORBIDDEN', 'Role is outside your delegated namespaces')
+      }
+
+      if (action === 'assign') {
+        await query(
+          `INSERT INTO user_roles (user_id, role_id)
+           VALUES ($1, $2)
+           ON CONFLICT DO NOTHING`,
+          [userId, roleId],
+        )
+      } else {
+        await query(
+          `DELETE FROM user_roles
+           WHERE user_id = $1 AND role_id = $2`,
+          [userId, roleId],
+        )
+      }
+      if (roleId === PLATFORM_ADMIN_ROLE_ID) {
+        await syncLegacyAdminProfile(userId, action === 'assign')
+      }
+      invalidateUserPerms(userId)
+
+      await auditLog({
+        actorId: delegation.actorId,
+        actorType: 'user',
+        action: action === 'assign' ? 'grant' : 'revoke',
+        resourceType: 'user-role',
+        resourceId: `${userId}:${roleId}`,
+        meta: {
+          adminUserId: delegation.actorId,
+          userId,
+          roleId,
+          delegated: !delegation.isPlatformAdmin,
+          delegableNamespaces: delegation.delegableNamespaces,
+        },
+      })
+
+      const snapshot = await fetchUserAccessSnapshot(userId)
+      const roleCatalog = await fetchDelegatedRoleCatalog(
+        delegation.isPlatformAdmin ? undefined : delegation.delegableNamespaces,
+      )
+
+      return jsonOk(res, {
+        actorId: delegation.actorId,
+        isPlatformAdmin: delegation.isPlatformAdmin,
+        delegableNamespaces: delegation.delegableNamespaces,
+        roleCatalog,
+        user: snapshot?.user ?? profile,
+        roles: snapshot?.roles ?? [],
+        delegableRoles: delegation.isPlatformAdmin
+          ? snapshot?.roles ?? []
+          : (snapshot?.roles ?? []).filter((candidateRoleId) => roleIdMatchesNamespaces(candidateRoleId, delegation.delegableNamespaces)),
+      })
+    } catch (error) {
+      return jsonError(res, 500, 'ROLE_DELEGATION_UPDATE_FAILED', (error as Error)?.message || 'Failed to update delegated role')
+    }
+  })
 
   r.get('/api/admin/users', authenticate, async (req: Request, res: Response) => {
     const adminUserId = await ensurePlatformAdmin(req, res)
