@@ -49,12 +49,25 @@ function mountAfterSalesView() {
   return { app, container }
 }
 
+function findSection(container: HTMLElement, headingText: string): HTMLElement {
+  const heading = Array.from(container.querySelectorAll('h2')).find((item) => item.textContent?.includes(headingText))
+  const section = heading?.closest('section')
+  if (!section) {
+    throw new Error(`Section with heading ${headingText} not found`)
+  }
+  return section as HTMLElement
+}
+
 function findButton(container: HTMLElement, label: string): HTMLButtonElement {
   const button = Array.from(container.querySelectorAll('button')).find((item) => item.textContent?.includes(label))
   if (!button) {
     throw new Error(`Button with label ${label} not found`)
   }
   return button as HTMLButtonElement
+}
+
+function findButtonWithin(container: HTMLElement, label: string): HTMLButtonElement {
+  return findButton(container, label)
 }
 
 async function setInputValue(input: HTMLInputElement, value: string): Promise<void> {
@@ -286,6 +299,7 @@ describe('AfterSalesView service records panel', () => {
     container = mounted.container
 
     await waitForText(container, 'Initial visit')
+    const section = findSection(container, 'Recent visits')
 
     const ticketFilter = container.querySelector<HTMLInputElement>('#after-sales-service-record-filter-ticket-no')
     const ticketInput = container.querySelector<HTMLInputElement>('#after-sales-service-record-ticket-no')
@@ -300,8 +314,8 @@ describe('AfterSalesView service records panel', () => {
     await setInputValue(ticketInput, 'AF-001')
     await setInputValue(scheduledAtInput, '2026-04-10T10:30')
 
-    findButton(container, 'Refresh list').click()
-    await waitForText(container, 'Refreshed visit')
+    findButtonWithin(section, 'Refresh list').click()
+    await waitForText(section, 'Refreshed visit')
 
     expect(ticketFilter.value).toBe('AF-001')
     expect(ticketInput.value).toBe('AF-001')
@@ -409,6 +423,7 @@ describe('AfterSalesView service records panel', () => {
     container = mounted.container
 
     await waitForText(container, 'Unfiltered baseline')
+    const section = findSection(container, 'Recent visits')
 
     const ticketFilter = container.querySelector<HTMLInputElement>('#after-sales-service-record-filter-ticket-no')
     const resultFilter = container.querySelector<HTMLSelectElement>('#after-sales-service-record-filter-result')
@@ -423,11 +438,11 @@ describe('AfterSalesView service records panel', () => {
     await setSelectValue(resultFilter, 'resolved')
     await setInputValue(searchFilter, 'capacitor')
 
-    findButton(container, 'Apply filters').click()
+    findButtonWithin(section, 'Apply filters').click()
 
-    await waitForText(container, 'Capacitor replaced onsite')
+    await waitForText(section, 'Capacitor replaced onsite')
 
-    expect(container.textContent).not.toContain('Unfiltered baseline')
+    expect(section.textContent).not.toContain('Unfiltered baseline')
     expect(apiFetchMock).toHaveBeenCalledWith('/api/after-sales/service-records?ticketNo=AF-002&result=resolved&search=capacitor', undefined)
   })
 
@@ -1463,6 +1478,7 @@ describe('AfterSalesView service records panel', () => {
     container = mounted.container
 
     await waitForText(container, 'Case-sensitive baseline')
+    const section = findSection(container, 'Recent visits')
 
     const ticketFilter = container.querySelector<HTMLInputElement>('#after-sales-service-record-filter-ticket-no')
     const ticketInput = container.querySelector<HTMLInputElement>('#after-sales-service-record-ticket-no')
@@ -1470,8 +1486,8 @@ describe('AfterSalesView service records panel', () => {
     if (!ticketFilter || !ticketInput || !scheduledAtInput) return
 
     await setInputValue(ticketFilter, 'af-100')
-    findButton(container, 'Apply filters').click()
-    await waitForText(container, 'No service records found yet.')
+    findButtonWithin(section, 'Apply filters').click()
+    await waitForText(section, 'No service records found yet.')
 
     await setInputValue(ticketInput, 'AF-100')
     await setInputValue(scheduledAtInput, '2026-04-10T09:15')
@@ -1579,11 +1595,12 @@ describe('AfterSalesView service records panel', () => {
     container = mounted.container
 
     await waitForText(container, 'Loading baseline')
+    const section = findSection(container, 'Recent visits')
 
     const resultFilter = container.querySelector<HTMLSelectElement>('#after-sales-service-record-filter-result')
     const ticketInput = container.querySelector<HTMLInputElement>('#after-sales-service-record-ticket-no')
     const scheduledAtInput = container.querySelector<HTMLInputElement>('#after-sales-service-record-scheduled-at')
-    const createButton = findButton(container, 'Create service record')
+    const createButton = findButtonWithin(section, 'Create service record')
     expect(resultFilter).toBeTruthy()
     expect(ticketInput).toBeTruthy()
     expect(scheduledAtInput).toBeTruthy()
@@ -1594,7 +1611,7 @@ describe('AfterSalesView service records panel', () => {
     expect(createButton.disabled).toBe(false)
 
     await setSelectValue(resultFilter, 'resolved')
-    findButton(container, 'Apply filters').click()
+    findButtonWithin(section, 'Apply filters').click()
     await flushUi(2)
 
     expect(createButton.disabled).toBe(true)

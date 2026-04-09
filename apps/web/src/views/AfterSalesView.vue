@@ -414,6 +414,93 @@
         </article>
       </section>
 
+      <section v-if="isInstalled" class="after-sales-view__installed-assets-shell">
+        <article class="after-sales-view__card after-sales-view__card--wide">
+          <div class="after-sales-view__section-header">
+            <div>
+              <p class="after-sales-view__pill">Installed assets</p>
+              <h2>Installed asset registry</h2>
+              <p>
+                这里显示已登记的设备资产，便于在工单和上门记录之前先确认设备主数据是否已经建档。
+              </p>
+            </div>
+          </div>
+
+          <form class="after-sales-view__installed-asset-filters" @submit.prevent="applyInstalledAssetFilters">
+            <label class="after-sales-view__field">
+              <span>Filter status</span>
+              <select
+                id="after-sales-installed-asset-filter-status"
+                v-model="installedAssetFilters.status"
+                class="after-sales-view__field-input"
+              >
+                <option value="">All statuses</option>
+                <option value="active">Active</option>
+                <option value="expired">Expired</option>
+                <option value="decommissioned">Decommissioned</option>
+              </select>
+            </label>
+            <label class="after-sales-view__field after-sales-view__field--wide">
+              <span>Search asset</span>
+              <input
+                id="after-sales-installed-asset-filter-search"
+                v-model="installedAssetFilters.search"
+                class="after-sales-view__field-input"
+                placeholder="asset code, serial no, model, location..."
+                type="text"
+              />
+            </label>
+          </form>
+
+          <div class="after-sales-view__action-row after-sales-view__action-row--compact">
+            <button class="after-sales-view__ghost-btn" :disabled="installedAssetsLoading" @click="refreshInstalledAssets">
+              {{ installedAssetsLoading ? 'Refreshing...' : 'Refresh list' }}
+            </button>
+            <button class="after-sales-view__ghost-btn" :disabled="installedAssetsLoading" @click="applyInstalledAssetFilters">
+              {{ installedAssetsLoading ? 'Applying...' : 'Apply filters' }}
+            </button>
+            <button class="after-sales-view__ghost-btn" :disabled="installedAssetsLoading" @click="resetInstalledAssetFilters">
+              Clear filters
+            </button>
+          </div>
+
+          <p v-if="installedAssetsLoading" class="after-sales-view__muted-state">Loading installed assets...</p>
+          <p v-else-if="installedAssetsError" class="after-sales-view__inline-error">{{ installedAssetsError }}</p>
+          <div v-else-if="installedAssets.length" class="after-sales-view__installed-asset-list">
+            <article v-for="asset in installedAssets" :key="asset.id" class="after-sales-view__installed-asset-row">
+              <div class="after-sales-view__installed-asset-main">
+                <div class="after-sales-view__installed-asset-headline">
+                  <strong>{{ asset.data.assetCode }}</strong>
+                  <span class="after-sales-view__tag">{{ asset.data.status }}</span>
+                  <span v-if="asset.data.serialNo" class="after-sales-view__tag after-sales-view__tag--subtle">
+                    {{ asset.data.serialNo }}
+                  </span>
+                </div>
+                <p>{{ asset.data.model || 'Model not set yet.' }}</p>
+              </div>
+
+              <div class="after-sales-view__installed-asset-side">
+                <dl class="after-sales-view__installed-asset-meta">
+                  <div>
+                    <dt>Location</dt>
+                    <dd>{{ asset.data.location || 'Unknown' }}</dd>
+                  </div>
+                  <div>
+                    <dt>Installed</dt>
+                    <dd>{{ formatRecordDate(asset.data.installedAt) }}</dd>
+                  </div>
+                  <div>
+                    <dt>Warranty</dt>
+                    <dd>{{ formatRecordDate(asset.data.warrantyUntil) }}</dd>
+                  </div>
+                </dl>
+              </div>
+            </article>
+          </div>
+          <p v-else class="after-sales-view__muted-state">No installed assets found yet.</p>
+        </article>
+      </section>
+
       <section v-if="isInstalled" class="after-sales-view__service-records-shell">
         <article class="after-sales-view__card after-sales-view__card--wide">
           <div class="after-sales-view__section-header">
@@ -779,6 +866,32 @@ interface ServiceRecordViewModel {
   }
 }
 
+interface InstalledAssetRow {
+  id: string
+  version: number
+  data: Record<string, unknown>
+}
+
+interface InstalledAssetsResponse {
+  projectId: string
+  installedAssets: InstalledAssetRow[]
+  count: number
+}
+
+interface InstalledAssetViewModel {
+  id: string
+  version: number
+  data: {
+    assetCode: string
+    serialNo: string
+    model: string
+    location: string
+    installedAt: string
+    warrantyUntil: string
+    status: string
+  }
+}
+
 interface ServiceRecordDraft {
   ticketNo: string
   visitType: 'onsite' | 'remote' | 'pickup'
@@ -807,6 +920,11 @@ interface TicketEditDraft {
 interface ServiceRecordFilterDraft {
   ticketNo: string
   result: '' | 'resolved' | 'partial' | 'escalated'
+  search: string
+}
+
+interface InstalledAssetFilterDraft {
+  status: '' | 'active' | 'expired' | 'decommissioned'
   search: string
 }
 
@@ -854,11 +972,13 @@ const ticketCreating = ref(false)
 const ticketRefundSubmittingId = ref('')
 const ticketUpdatingId = ref('')
 const ticketDeletingId = ref('')
+const installedAssetsLoading = ref(false)
 const serviceRecordsLoading = ref(false)
 const serviceRecordCreating = ref(false)
 const serviceRecordDeletingId = ref('')
 const error = ref('')
 const ticketsError = ref('')
+const installedAssetsError = ref('')
 const ticketSubmitError = ref('')
 const ticketSubmitSuccess = ref('')
 const ticketRefundErrorById = ref<Record<string, string>>({})
@@ -869,6 +989,7 @@ const showWarnings = ref(false)
 const manifest = ref<AfterSalesManifest | null>(null)
 const current = ref<CurrentResponse>({ status: 'not-installed' })
 const tickets = ref<TicketViewModel[]>([])
+const installedAssets = ref<InstalledAssetViewModel[]>([])
 const serviceRecords = ref<ServiceRecordViewModel[]>([])
 const configDraft = ref({ ...DEFAULT_CONFIG })
 const baselineConfigDraft = ref({ ...DEFAULT_CONFIG })
@@ -877,6 +998,10 @@ const ticketEditingId = ref('')
 const ticketEditDraft = ref<TicketEditDraft>(createTicketEditDraft())
 const ticketRefundDrafts = ref<Record<string, string>>({})
 const ticketFilters = ref<TicketFilterDraft>({
+  status: '',
+  search: '',
+})
+const installedAssetFilters = ref<InstalledAssetFilterDraft>({
   status: '',
   search: '',
 })
@@ -1179,6 +1304,16 @@ function buildServiceRecordListPath() {
   return query ? `/api/after-sales/service-records?${query}` : '/api/after-sales/service-records'
 }
 
+function buildInstalledAssetListPath() {
+  const params = new URLSearchParams()
+  const status = toText(installedAssetFilters.value.status)
+  const search = toText(installedAssetFilters.value.search)
+  if (status) params.set('status', status)
+  if (search) params.set('search', search)
+  const query = params.toString()
+  return query ? `/api/after-sales/installed-assets?${query}` : '/api/after-sales/installed-assets'
+}
+
 function buildTicketListPath() {
   const params = new URLSearchParams()
   const status = toText(ticketFilters.value.status)
@@ -1293,6 +1428,23 @@ function normalizeServiceRecordRow(record: ServiceRecordRow): ServiceRecordViewM
   }
 }
 
+function normalizeInstalledAssetRow(record: InstalledAssetRow): InstalledAssetViewModel {
+  const rawData = record.data && typeof record.data === 'object' ? record.data : {}
+  return {
+    id: record.id,
+    version: record.version,
+    data: {
+      assetCode: toText(rawData.assetCode, record.id),
+      serialNo: toText(rawData.serialNo),
+      model: toText(rawData.model),
+      location: toText(rawData.location),
+      installedAt: toText(rawData.installedAt),
+      warrantyUntil: toText(rawData.warrantyUntil),
+      status: toText(rawData.status, 'unknown'),
+    },
+  }
+}
+
 async function loadManifest() {
   manifest.value = await readEnvelope<AfterSalesManifest>('/api/after-sales/app-manifest')
 }
@@ -1361,6 +1513,44 @@ async function refreshTickets() {
     return
   }
   await loadTicketsForCurrentState(current.value)
+}
+
+async function loadInstalledAssetsForCurrentState(state: CurrentResponse): Promise<void> {
+  installedAssetsLoading.value = true
+  installedAssetsError.value = ''
+  try {
+    if (state.status === 'not-installed' || state.status === 'failed') {
+      installedAssets.value = []
+      return
+    }
+
+    const payload = await readEnvelope<InstalledAssetsResponse>(buildInstalledAssetListPath())
+    const rows = Array.isArray(payload?.installedAssets) ? payload.installedAssets : []
+    installedAssets.value = rows.map((row) => normalizeInstalledAssetRow(row))
+  } catch (err: unknown) {
+    installedAssets.value = []
+    if (state.status === 'installed' || state.status === 'partial') {
+      installedAssetsError.value = err instanceof Error ? err.message : 'Failed to load installed assets'
+    }
+  } finally {
+    installedAssetsLoading.value = false
+  }
+}
+
+async function applyInstalledAssetFilters() {
+  await loadInstalledAssetsForCurrentState(current.value)
+}
+
+async function resetInstalledAssetFilters() {
+  installedAssetFilters.value = {
+    status: '',
+    search: '',
+  }
+  await loadInstalledAssetsForCurrentState(current.value)
+}
+
+async function refreshInstalledAssets() {
+  await loadInstalledAssetsForCurrentState(current.value)
 }
 
 async function loadServiceRecordsForCurrentState(state: CurrentResponse): Promise<void> {
@@ -1621,7 +1811,11 @@ async function refreshCurrentState() {
   try {
     current.value = await readEnvelope<CurrentResponse>('/api/after-sales/projects/current')
     baselineConfigDraft.value = normalizeConfigDraft(current.value.config)
-    await Promise.all([loadTicketsForCurrentState(current.value), loadServiceRecordsForCurrentState(current.value)])
+    await Promise.all([
+      loadTicketsForCurrentState(current.value),
+      loadInstalledAssetsForCurrentState(current.value),
+      loadServiceRecordsForCurrentState(current.value),
+    ])
   } finally {
     refreshing.value = false
   }
@@ -1631,6 +1825,7 @@ async function loadView() {
   loading.value = true
   error.value = ''
   ticketsError.value = ''
+  installedAssetsError.value = ''
   ticketSubmitError.value = ''
   ticketSubmitSuccess.value = ''
   serviceRecordsError.value = ''
@@ -1645,7 +1840,11 @@ async function loadView() {
     current.value = nextCurrent
     baselineConfigDraft.value = normalizeConfigDraft(nextCurrent.config)
     configDraft.value = { ...baselineConfigDraft.value }
-    await Promise.all([loadTicketsForCurrentState(nextCurrent), loadServiceRecordsForCurrentState(nextCurrent)])
+    await Promise.all([
+      loadTicketsForCurrentState(nextCurrent),
+      loadInstalledAssetsForCurrentState(nextCurrent),
+      loadServiceRecordsForCurrentState(nextCurrent),
+    ])
   } catch (err: unknown) {
     error.value = err instanceof Error ? err.message : 'Failed to load after-sales state'
   } finally {
@@ -1796,6 +1995,7 @@ onMounted(() => {
 .after-sales-view__config-shell,
 .after-sales-view__onboarding,
 .after-sales-view__tickets-shell,
+.after-sales-view__installed-assets-shell,
 .after-sales-view__service-records-shell {
   display: grid;
   gap: 16px;
@@ -1863,6 +2063,7 @@ onMounted(() => {
 .after-sales-view__content,
 .after-sales-view__grid,
 .after-sales-view__ticket-list,
+.after-sales-view__installed-asset-list,
 .after-sales-view__service-record-list {
   display: grid;
   gap: 16px;
@@ -1900,6 +2101,7 @@ onMounted(() => {
 
 .after-sales-view__meta,
 .after-sales-view__ticket-meta,
+.after-sales-view__installed-asset-meta,
 .after-sales-view__service-record-meta {
   display: grid;
   gap: 12px;
@@ -1908,6 +2110,7 @@ onMounted(() => {
 
 .after-sales-view__meta div,
 .after-sales-view__ticket-meta div,
+.after-sales-view__installed-asset-meta div,
 .after-sales-view__service-record-meta div {
   display: grid;
   gap: 4px;
@@ -1915,6 +2118,7 @@ onMounted(() => {
 
 .after-sales-view__meta dt,
 .after-sales-view__ticket-meta dt,
+.after-sales-view__installed-asset-meta dt,
 .after-sales-view__service-record-meta dt {
   font-size: 12px;
   letter-spacing: 0.08em;
@@ -1924,6 +2128,7 @@ onMounted(() => {
 
 .after-sales-view__meta dd,
 .after-sales-view__ticket-meta dd,
+.after-sales-view__installed-asset-meta dd,
 .after-sales-view__service-record-meta dd {
   margin: 0;
   color: #0f172a;
@@ -1969,6 +2174,7 @@ onMounted(() => {
   gap: 12px;
 }
 
+.after-sales-view__installed-asset-row,
 .after-sales-view__service-record-row {
   display: flex;
   justify-content: space-between;
@@ -1979,17 +2185,20 @@ onMounted(() => {
   background: #f8fafc;
 }
 
+.after-sales-view__installed-asset-main,
 .after-sales-view__service-record-main {
   display: grid;
   gap: 8px;
   min-width: 0;
 }
 
+.after-sales-view__installed-asset-main p,
 .after-sales-view__service-record-main p {
   margin: 0;
   color: #475569;
 }
 
+.after-sales-view__installed-asset-headline,
 .after-sales-view__service-record-headline {
   display: flex;
   flex-wrap: wrap;
@@ -1997,10 +2206,12 @@ onMounted(() => {
   align-items: center;
 }
 
+.after-sales-view__installed-asset-headline strong,
 .after-sales-view__service-record-headline strong {
   color: #0f172a;
 }
 
+.after-sales-view__installed-asset-side,
 .after-sales-view__service-record-side {
   display: grid;
   gap: 12px;
@@ -2059,6 +2270,7 @@ onMounted(() => {
 }
 
 .after-sales-view__ticket-form,
+.after-sales-view__installed-asset-filters,
 .after-sales-view__service-record-form,
 .after-sales-view__ticket-filters,
 .after-sales-view__service-record-filters {
@@ -2209,6 +2421,7 @@ code {
   .after-sales-view__error-banner,
   .after-sales-view__warning-banner,
   .after-sales-view__ticket-row,
+  .after-sales-view__installed-asset-row,
   .after-sales-view__service-record-row {
     grid-template-columns: 1fr;
     display: grid;
@@ -2221,6 +2434,7 @@ code {
   .after-sales-view__section-header,
   .after-sales-view__config-form,
   .after-sales-view__ticket-form,
+  .after-sales-view__installed-asset-filters,
   .after-sales-view__service-record-form,
   .after-sales-view__ticket-filters,
   .after-sales-view__service-record-filters {
@@ -2228,6 +2442,7 @@ code {
     display: grid;
   }
 
+  .after-sales-view__installed-asset-side,
   .after-sales-view__service-record-side {
     justify-items: stretch;
   }

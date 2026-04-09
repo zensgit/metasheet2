@@ -261,6 +261,7 @@ function createContext(): {
   // the same physical-id shape the real multitable seam would use.
   const MOCK_PROJECT_ID = 'tenant_42:after-sales'
   const pk = (field: string) => `${MOCK_PROJECT_ID}:serviceTicket:${field}`
+  const iaPk = (field: string) => `${MOCK_PROJECT_ID}:installedAsset:${field}`
   const getObjectSheetId = vi.fn((projectId: string, objectId: string) => `${projectId}:${objectId}:sheet`)
   const getFieldId = vi.fn((projectId: string, objectId: string, fieldId: string) => `${projectId}:${objectId}:${fieldId}`)
   const findObjectSheet = vi.fn(async (input: { projectId: string; objectId: string }) => ({
@@ -283,7 +284,22 @@ function createContext(): {
     data: input.data,
   }))
   const listRecords = vi.fn(async (input: { sheetId: string }) => ([
-    input.sheetId.includes('serviceRecord')
+    input.sheetId.includes('installedAsset')
+      ? {
+          id: 'rec_asset_001',
+          sheetId: input.sheetId,
+          version: 2,
+          data: {
+            [iaPk('assetCode')]: 'AST-1001',
+            [iaPk('serialNo')]: 'SN-1001',
+            [iaPk('model')]: 'Compressor X',
+            [iaPk('location')]: 'Plant 1',
+            [iaPk('installedAt')]: '2026-04-09T08:00:00Z',
+            [iaPk('warrantyUntil')]: '2027-04-09T00:00:00Z',
+            [iaPk('status')]: 'active',
+          },
+        }
+      : input.sheetId.includes('serviceRecord')
       ? {
           id: 'rec_service_001',
           sheetId: input.sheetId,
@@ -311,7 +327,24 @@ function createContext(): {
         },
   ]))
   const queryRecords = vi.fn(async (input: { sheetId: string }) => ([
-    input.sheetId.includes('serviceRecord')
+    input.sheetId.includes('installedAsset')
+      ? {
+          id: 'rec_asset_001',
+          sheetId: input.sheetId,
+          version: 2,
+          data: {
+            [iaPk('assetCode')]: 'AST-1001',
+            [iaPk('serialNo')]: 'SN-1001',
+            [iaPk('model')]: 'Compressor X',
+            [iaPk('location')]: 'Plant 1',
+            [iaPk('installedAt')]: '2026-04-09T08:00:00Z',
+            [iaPk('warrantyUntil')]: '2027-04-09T00:00:00Z',
+            [iaPk('status')]: 'active',
+          },
+          filters: input.filters,
+          search: input.search,
+        }
+      : input.sheetId.includes('serviceRecord')
       ? {
           id: 'rec_service_001',
           sheetId: input.sheetId,
@@ -495,6 +528,7 @@ function buildReq(overrides: Record<string, unknown> = {}) {
 const MOCK_PROJECT_ID = 'tenant_42:after-sales'
 const stPk = (field: string) => `${MOCK_PROJECT_ID}:serviceTicket:${field}`
 const srPk = (field: string) => `${MOCK_PROJECT_ID}:serviceRecord:${field}`
+const iaPk = (field: string) => `${MOCK_PROJECT_ID}:installedAsset:${field}`
 
 describe('plugin-after-sales routes', () => {
   let routes: Map<string, RegisteredHandler>
@@ -1033,6 +1067,153 @@ describe('plugin-after-sales routes', () => {
     })
     expect(getObjectSheetId).not.toHaveBeenCalled()
     expect(getFieldId).not.toHaveBeenCalled()
+  })
+
+  it('returns 403 for installed-assets list when caller lacks after-sales read access', async () => {
+    const handler = routes.get('GET /api/after-sales/installed-assets')
+    const res = new FakeResponse()
+
+    await handler?.(buildReq({
+      user: {
+        id: 'user_42',
+        tenantId: 'tenant_42',
+        role: 'user',
+        roles: ['user'],
+        perms: [],
+      },
+    }), res)
+
+    expect(res.statusCode).toBe(403)
+    expect(res.body).toEqual({
+      ok: false,
+      error: {
+        code: 'FORBIDDEN',
+        message: 'After-sales read access required',
+      },
+    })
+    expect(queryRecords).not.toHaveBeenCalled()
+    expect(listRecords).not.toHaveBeenCalled()
+  })
+
+  it('returns 409 when installed-assets are listed from a failed install state', async () => {
+    const handler = routes.get('GET /api/after-sales/installed-assets')
+    const res = new FakeResponse()
+
+    db.rows.push({
+      id: 'fake-uuid-1',
+      tenant_id: 'tenant_42',
+      app_id: 'after-sales',
+      project_id: 'tenant_42:after-sales',
+      template_id: 'after-sales-default',
+      template_version: '0.1.0',
+      mode: 'reinstall',
+      status: 'failed',
+      created_objects_json: JSON.stringify(['serviceTicket', 'serviceRecord', 'installedAsset']),
+      created_views_json: JSON.stringify(['ticket-board', 'serviceRecord-calendar', 'installedAsset-grid']),
+      warnings_json: JSON.stringify(['installed asset projection failed']),
+      display_name: 'After-sales',
+      config_json: JSON.stringify({}),
+      last_install_at: new Date(),
+      created_at: new Date(),
+    })
+
+    await handler?.(buildReq(), res)
+
+    expect(res.statusCode).toBe(409)
+    expect(res.body).toEqual({
+      ok: false,
+      error: {
+        code: 'AFTER_SALES_NOT_INSTALLED',
+        message: 'After-sales must be installed before listing installed assets',
+      },
+    })
+    expect(queryRecords).not.toHaveBeenCalled()
+    expect(listRecords).not.toHaveBeenCalled()
+  })
+
+  it('lists installed assets through the multitable read seam', async () => {
+    const handler = routes.get('GET /api/after-sales/installed-assets')
+    const res = new FakeResponse()
+
+    db.rows.push({
+      id: 'fake-uuid-1',
+      tenant_id: 'tenant_42',
+      app_id: 'after-sales',
+      project_id: 'tenant_42:after-sales',
+      template_id: 'after-sales-default',
+      template_version: '0.1.0',
+      mode: 'enable',
+      status: 'installed',
+      created_objects_json: JSON.stringify(['serviceTicket', 'serviceRecord', 'installedAsset']),
+      created_views_json: JSON.stringify(['ticket-board', 'serviceRecord-calendar', 'installedAsset-grid']),
+      warnings_json: JSON.stringify([]),
+      display_name: 'After-sales',
+      config_json: JSON.stringify({}),
+      last_install_at: new Date(),
+      created_at: new Date(),
+    })
+
+    queryRecords.mockResolvedValueOnce([
+      {
+        id: 'rec_asset_001',
+        version: 2,
+        data: {
+          [iaPk('assetCode')]: 'AST-1001',
+          [iaPk('serialNo')]: 'SN-1001',
+          [iaPk('model')]: 'Compressor X',
+          [iaPk('location')]: 'Plant 1',
+          [iaPk('installedAt')]: '2026-04-09T08:00:00Z',
+          [iaPk('warrantyUntil')]: '2027-04-09T00:00:00Z',
+          [iaPk('status')]: 'active',
+        },
+      },
+    ])
+
+    await handler?.(buildReq({
+      query: {
+        status: 'active',
+        search: 'compressor',
+      },
+    }), res)
+
+    expect(res.statusCode).toBe(200)
+    expect(queryRecords).toHaveBeenCalledWith({
+      sheetId: 'tenant_42:after-sales:installedAsset:sheet',
+      filters: {
+        [iaPk('status')]: 'active',
+      },
+      search: 'compressor',
+      limit: undefined,
+      offset: undefined,
+    })
+    expect(res.body.data).toEqual({
+      projectId: 'tenant_42:after-sales',
+      installedAssets: [
+        {
+          id: 'rec_asset_001',
+          version: 2,
+          data: {
+            assetCode: 'AST-1001',
+            serialNo: 'SN-1001',
+            model: 'Compressor X',
+            location: 'Plant 1',
+            installedAt: '2026-04-09T08:00:00Z',
+            warrantyUntil: '2027-04-09T00:00:00Z',
+            status: 'active',
+          },
+        },
+      ],
+      count: 1,
+    })
+    expect(findObjectSheet).toHaveBeenCalledWith({
+      projectId: 'tenant_42:after-sales',
+      objectId: 'installedAsset',
+    })
+    expect(resolveFieldIds).toHaveBeenCalledWith({
+      projectId: 'tenant_42:after-sales',
+      objectId: 'installedAsset',
+      fieldIds: ['status'],
+    })
   })
 
   it('returns 403 for service-records when caller lacks after-sales write access', async () => {
