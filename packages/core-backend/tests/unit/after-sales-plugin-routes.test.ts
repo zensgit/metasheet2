@@ -104,6 +104,11 @@ interface FakeContext {
       emit: ReturnType<typeof vi.fn>
     }
   }
+  services: {
+    notification: {
+      send: ReturnType<typeof vi.fn>
+    }
+  }
   communication: {
     register: ReturnType<typeof vi.fn>
     call: ReturnType<typeof vi.fn>
@@ -140,6 +145,19 @@ function createFakeDatabase(): FakeDatabase {
         throw new Error(errorMessage)
       }
       const normalized = sql.replace(/\s+/g, ' ').trim()
+      if (normalized.startsWith('SELECT role_id, user_id, email')) {
+        const [roleIds] = params as [string[]]
+        const roles = Array.isArray(roleIds) ? roleIds : []
+        return roles.includes('supervisor')
+          ? [
+              {
+                role_id: 'supervisor',
+                user_id: 'lead_001',
+                email: 'lead@example.com',
+              } as unknown as FakeRowRaw,
+            ]
+          : []
+      }
       if (normalized.startsWith('SELECT')) {
         const [tenantId, appId] = params as [string, string]
         return db.rows.filter((row) => row.tenant_id === tenantId && row.app_id === appId)
@@ -209,6 +227,7 @@ function createContext(): {
   patchRecord: ReturnType<typeof vi.fn>
   deleteRecord: ReturnType<typeof vi.fn>
   communicationCall: ReturnType<typeof vi.fn>
+  notificationSend: ReturnType<typeof vi.fn>
   db: FakeDatabase
 } {
   const routes = new Map<string, RegisteredHandler>()
@@ -372,6 +391,10 @@ function createContext(): {
     sheetId: input.sheetId,
     version: 4,
   }))
+  const notificationSend = vi.fn(async (notification: Record<string, unknown>) => ({
+    id: `sent:${String(notification.channel || 'unknown')}`,
+    status: 'sent',
+  }))
   const communicationCall = vi.fn(async (pluginName: string, method: string, payload: Record<string, unknown>) => {
     if (pluginName === 'after-sales-approval-bridge' && method === 'getRefundApproval') {
       return {
@@ -417,6 +440,11 @@ function createContext(): {
         emit: vi.fn(),
       },
     },
+    services: {
+      notification: {
+        send: notificationSend,
+      },
+    },
     communication: {
       register: vi.fn(),
       call: communicationCall,
@@ -444,6 +472,7 @@ function createContext(): {
     patchRecord,
     deleteRecord,
     communicationCall,
+    notificationSend,
     db,
   }
 }
@@ -484,6 +513,7 @@ describe('plugin-after-sales routes', () => {
   let db: FakeDatabase
   let communicationRegister: ReturnType<typeof vi.fn>
   let communicationCall: ReturnType<typeof vi.fn>
+  let notificationSend: ReturnType<typeof vi.fn>
   let eventsOn: ReturnType<typeof vi.fn>
   let eventsOff: ReturnType<typeof vi.fn>
   let eventsEmit: ReturnType<typeof vi.fn>
@@ -508,6 +538,7 @@ describe('plugin-after-sales routes', () => {
     db = setup.db
     communicationRegister = setup.context.communication.register
     communicationCall = setup.context.communication.call
+    notificationSend = setup.notificationSend
     eventsOn = setup.context.api.events.on
     eventsOff = setup.context.api.events.off
     eventsEmit = setup.context.api.events.emit
@@ -1309,6 +1340,44 @@ describe('plugin-after-sales routes', () => {
           workSummary: 'Replaced motor',
           result: 'resolved',
         }),
+      }),
+    )
+
+    const serviceRecordedHandler = eventsOn.mock.calls.find(([eventName]) => eventName === 'service.recorded')?.[1]
+    const serviceRecordedPayload = eventsEmit.mock.calls.find(([eventName]) => eventName === 'service.recorded')?.[1]
+    expect(serviceRecordedHandler).toBeTypeOf('function')
+    if (typeof serviceRecordedHandler === 'function') {
+      await serviceRecordedHandler(serviceRecordedPayload)
+    }
+    expect(notificationSend).toHaveBeenCalledTimes(2)
+    expect(notificationSend).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({
+        type: 'service.recorded',
+        channel: 'feishu',
+        metadata: {
+          event: 'service.recorded',
+          topic: 'after-sales.service.recorded',
+        },
+        data: expect.objectContaining({
+          ticketNo: 'TK-2001',
+        }),
+        recipients: [expect.objectContaining({ id: 'lead_001', type: 'user' })],
+      }),
+    )
+    expect(notificationSend).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({
+        type: 'service.recorded',
+        channel: 'email',
+        metadata: {
+          event: 'service.recorded',
+          topic: 'after-sales.service.recorded',
+        },
+        data: expect.objectContaining({
+          ticketNo: 'TK-2001',
+        }),
+        recipients: [expect.objectContaining({ id: 'lead@example.com', type: 'email' })],
       }),
     )
 
