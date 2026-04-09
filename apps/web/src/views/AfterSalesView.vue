@@ -1102,14 +1102,14 @@
           <div class="after-sales-view__action-row after-sales-view__action-row--compact">
             <button
               class="after-sales-view__primary-btn"
-              :disabled="customerCreating || customersLoading || !canSubmitCustomer"
+              :disabled="customerCreating || customersLoading || Boolean(customerDeletingId) || !canSubmitCustomer"
               @click="submitCustomer"
             >
               {{ customerCreating ? 'Creating...' : 'Create customer' }}
             </button>
             <button
               class="after-sales-view__ghost-btn"
-              :disabled="customerCreating || customersLoading"
+              :disabled="customerCreating || customersLoading || Boolean(customerDeletingId)"
               @click="resetCustomerDraft"
             >
               Reset customer draft
@@ -1147,21 +1147,21 @@
           <div class="after-sales-view__action-row after-sales-view__action-row--compact">
             <button
               class="after-sales-view__ghost-btn"
-              :disabled="customersLoading || customerCreating"
+              :disabled="customersLoading || customerCreating || Boolean(customerDeletingId)"
               @click="refreshCustomers"
             >
               {{ customersLoading ? 'Refreshing...' : 'Refresh list' }}
             </button>
             <button
               class="after-sales-view__ghost-btn"
-              :disabled="customersLoading || customerCreating"
+              :disabled="customersLoading || customerCreating || Boolean(customerDeletingId)"
               @click="applyCustomerFilters"
             >
               {{ customersLoading ? 'Applying...' : 'Apply filters' }}
             </button>
             <button
               class="after-sales-view__ghost-btn"
-              :disabled="customersLoading || customerCreating"
+              :disabled="customersLoading || customerCreating || Boolean(customerDeletingId)"
               @click="resetCustomerFilters"
             >
               Clear filters
@@ -1192,6 +1192,14 @@
                     <dd>{{ customer.data.email || '—' }}</dd>
                   </div>
                 </dl>
+                <button
+                  class="after-sales-view__ghost-btn after-sales-view__customer-delete"
+                  :aria-label="`Delete customer ${customer.data.customerCode}`"
+                  :disabled="Boolean(customerDeletingId) || customerCreating || customersLoading"
+                  @click="deleteCustomer(customer)"
+                >
+                  {{ customerDeletingId === customer.id ? 'Deleting...' : 'Delete' }}
+                </button>
               </div>
             </article>
           </div>
@@ -1545,6 +1553,7 @@ const installedAssetsLoading = ref(false)
 const customersLoading = ref(false)
 const installedAssetCreating = ref(false)
 const customerCreating = ref(false)
+const customerDeletingId = ref('')
 const installedAssetUpdatingId = ref('')
 const installedAssetDeletingId = ref('')
 const serviceRecordsLoading = ref(false)
@@ -2399,14 +2408,14 @@ async function loadCustomersForCurrentState(state: CurrentResponse): Promise<voi
 }
 
 async function applyCustomerFilters() {
-  if (customersLoading.value || customerCreating.value) {
+  if (customersLoading.value || customerCreating.value || customerDeletingId.value) {
     return
   }
   await loadCustomersForCurrentState(current.value)
 }
 
 async function resetCustomerFilters() {
-  if (customersLoading.value || customerCreating.value) {
+  if (customersLoading.value || customerCreating.value || customerDeletingId.value) {
     return
   }
   customerFilters.value = {
@@ -2417,14 +2426,14 @@ async function resetCustomerFilters() {
 }
 
 async function refreshCustomers() {
-  if (customersLoading.value || customerCreating.value) {
+  if (customersLoading.value || customerCreating.value || customerDeletingId.value) {
     return
   }
   await loadCustomersForCurrentState(current.value)
 }
 
 async function submitCustomer() {
-  if (!canSubmitCustomer.value || customersLoading.value || customerCreating.value) {
+  if (!canSubmitCustomer.value || customersLoading.value || customerCreating.value || customerDeletingId.value) {
     return
   }
 
@@ -2452,6 +2461,29 @@ async function submitCustomer() {
     customerSubmitError.value = err instanceof Error ? err.message : 'Failed to create customer'
   } finally {
     customerCreating.value = false
+  }
+}
+
+async function deleteCustomer(customer: CustomerViewModel) {
+  if (!customer.id || customerDeletingId.value || customerCreating.value || customersLoading.value) {
+    return
+  }
+
+  customerDeletingId.value = customer.id
+  customerSubmitError.value = ''
+  customerSubmitSuccess.value = ''
+
+  try {
+    await readEnvelope(`/api/after-sales/customers/${encodeURIComponent(customer.id)}`, {
+      method: 'DELETE',
+    })
+    customers.value = customers.value.filter((item) => item.id !== customer.id)
+    customersError.value = ''
+    customerSubmitSuccess.value = `Deleted customer ${customer.data.customerCode}`
+  } catch (err: unknown) {
+    customerSubmitError.value = err instanceof Error ? err.message : 'Failed to delete customer'
+  } finally {
+    customerDeletingId.value = ''
   }
 }
 
