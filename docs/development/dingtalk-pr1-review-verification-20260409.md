@@ -14,7 +14,7 @@ pnpm --filter @metasheet/core-backend build
 
 ## Results
 
-- backend unit tests: passed (`20/20`)
+- backend unit tests: passed (`21/21`)
 - `@metasheet/core-backend` build: passed
 
 The frontend callback and login-page validations from the earlier PR1 review pass remain unchanged; this follow-up only touched backend helper and route behavior.
@@ -26,5 +26,6 @@ The frontend callback and login-page validations from the earlier PR1 review pas
 - provisioning refuses to reuse an existing local email when auto-link is disabled
 - callback view preserves an already authenticated browser session
 - external-identity logins are rejected when the linked local user is inactive
+- corp-scoped identity fallbacks are now pinned to the configured `corpId`
 - email auto-link is rejected when the matched local user is disabled
 - auto-provision writes a bcrypt `password_hash`, so the current `users` schema no longer rejects the insert

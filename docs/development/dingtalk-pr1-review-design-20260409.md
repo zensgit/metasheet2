@@ -97,6 +97,17 @@ Design response:
 - write that hash into `users.password_hash` during auto-provision
 - do not expose any generated password to the caller; the hash only satisfies the current local-auth schema
 
+### 7. Corp-scoped identity lookups could fall back to a bare open id
+
+When `DINGTALK_CORP_ID` is configured, PR1 writes external identities using a corp-scoped key (`corpId:openId`). However, the fallback lookup still accepted bare `provider_open_id` / `provider_union_id` matches with no corp guard. That could let a stale row from another corp or a legacy binding without the current corp key resolve the wrong local user.
+
+Design response:
+
+- keep `external_key` as the primary lookup key
+- when `corpId` is not configured, preserve the legacy bare `openId` / `unionId` fallback
+- when `corpId` is configured, require `identity.corp_id = configuredCorpId` on the fallback path
+- do not change the callback contract; only tighten internal user-resolution semantics
+
 ## Non-Blocking Notes
 
 - Duplicate auth payload helpers between `LoginView.vue` and `DingTalkAuthCallbackView.vue` remain a refactor candidate, but they are not blocking for PR1 merge.

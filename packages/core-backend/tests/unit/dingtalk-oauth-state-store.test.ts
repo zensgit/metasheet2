@@ -197,7 +197,11 @@ import {
   validateState,
 } from '../../src/auth/dingtalk-oauth'
 import { query, transaction } from '../../src/db/pg'
-import { exchangeCodeForUserAccessToken, fetchDingTalkCurrentUser } from '../../src/integrations/dingtalk/client'
+import {
+  exchangeCodeForUserAccessToken,
+  fetchDingTalkCurrentUser,
+  readDingTalkOauthConfig,
+} from '../../src/integrations/dingtalk/client'
 
 describe('DingTalk OAuth state store', () => {
   beforeEach(async () => {
@@ -330,6 +334,32 @@ describe('DingTalk OAuth state store', () => {
     await expect(exchangeCodeForUser('auth-code')).rejects.toThrow(
       'DingTalk login is disabled for this user',
     )
+  })
+
+  it('scopes identity fallback lookups to the configured corp id', async () => {
+    vi.mocked(readDingTalkOauthConfig).mockReturnValue({
+      clientId: 'client-id',
+      clientSecret: 'client-secret',
+      redirectUri: 'https://example.com/login/dingtalk/callback',
+      corpId: 'ding-corp-1',
+    })
+    vi.mocked(exchangeCodeForUserAccessToken).mockResolvedValue({
+      accessToken: 'access-token',
+    })
+    vi.mocked(fetchDingTalkCurrentUser).mockResolvedValue({
+      openId: 'open-id-1',
+      unionId: 'union-id-1',
+      nick: 'Ding User',
+      email: 'manager@example.com',
+    })
+    vi.mocked(query)
+      .mockResolvedValueOnce({ rows: [] } as any)
+      .mockResolvedValueOnce({ rows: [] } as any)
+
+    await expect(exchangeCodeForUser('auth-code')).rejects.toThrow('is not linked to a local user')
+
+    expect(vi.mocked(query).mock.calls[0]?.[0]).toContain('identity.corp_id = $5')
+    expect(vi.mocked(query).mock.calls[0]?.[1]?.[4]).toBe('ding-corp-1')
   })
 
   it('rejects email auto-link when the matched local user is disabled', async () => {

@@ -6,7 +6,7 @@ Branch: `codex/dingtalk-pr1-foundation-login-20260408`
 
 ## Review Outcome
 
-This review sequence now covers six blocking issues inside the PR1 login foundation.
+This review sequence now covers seven blocking issues inside the PR1 login foundation.
 
 The earlier pass fixed:
 
@@ -19,6 +19,7 @@ This follow-up pass fixed:
 
 5. DingTalk login could still admit disabled or inactive local users
 6. auto-provision did not write `users.password_hash` even though the current schema requires it
+7. corp-scoped external identities could still fall back to a bare `openId` / `unionId` lookup and hit the wrong local user
 
 ## Execution Context
 
@@ -40,6 +41,7 @@ This follow-up was implemented from a new detached worktree rooted at remote PR1
   - include `is_active` in resolved local-user rows
   - reject external-identity and email-link logins when the local user is disabled or inactive
   - generate a bcrypt `password_hash` for auto-provisioned users and persist it with the new local account
+  - when `corpId` is configured, require `identity.corp_id` to match on any fallback `provider_open_id` / `provider_union_id` lookup
 
 - [auth.ts](/Users/huazhou/Downloads/Github/metasheet2/.worktrees/dingtalk-phase1-20260408/packages/core-backend/src/routes/auth.ts)
   - add `probe=1` handling to `GET /dingtalk/launch`
@@ -67,6 +69,7 @@ This follow-up was implemented from a new detached worktree rooted at remote PR1
   - Redis tuple-error fallback
   - provisioning rejection on existing-email conflict
   - external-identity login rejection for inactive local users
+  - corp-scoped identity fallback stays bound to the configured `corpId`
   - email-link rejection for disabled local users
   - auto-provision writes a bcrypt `password_hash`
 

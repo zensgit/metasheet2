@@ -407,6 +407,7 @@ async function findUserByEmail(email: string): Promise<LocalUserRow | null> {
 
 async function findIdentityUser(dtUser: DingTalkUserInfo): Promise<LocalUserRow | null> {
   try {
+    const config = readDingTalkOauthConfig()
     const result = await query<LocalUserRow>(
       `SELECT u.id,
               u.email,
@@ -418,12 +419,25 @@ async function findIdentityUser(dtUser: DingTalkUserInfo): Promise<LocalUserRow 
        WHERE identity.provider = $1
          AND (
            identity.external_key = $2
-           OR identity.provider_open_id = $3
-           OR ($4 <> '' AND identity.provider_union_id = $4)
+           OR (
+             $5 = ''
+             AND (
+               identity.provider_open_id = $3
+               OR ($4 <> '' AND identity.provider_union_id = $4)
+             )
+           )
+           OR (
+             $5 <> ''
+             AND identity.corp_id = $5
+             AND (
+               identity.provider_open_id = $3
+               OR ($4 <> '' AND identity.provider_union_id = $4)
+             )
+           )
          )
        ORDER BY identity.updated_at DESC
        LIMIT 1`,
-      [PROVIDER, buildExternalKey(dtUser), dtUser.openId, dtUser.unionId || ''],
+      [PROVIDER, buildExternalKey(dtUser), dtUser.openId, dtUser.unionId || '', config.corpId || ''],
     )
     return result.rows[0] ?? null
   } catch (error) {
