@@ -699,6 +699,283 @@ describe('AfterSalesView', () => {
     )
   })
 
+  it('requests a refund for a ticket and updates the row in place', async () => {
+    apiFetchMock.mockImplementation(async (path: string, options?: RequestInit) => {
+      if (path === '/api/after-sales/app-manifest') {
+        return createResponse({
+          id: 'after-sales-default',
+          displayName: 'After Sales',
+          platformDependencies: ['core-backend'],
+          objects: [],
+          workflows: [],
+        })
+      }
+
+      if (path === '/api/after-sales/projects/current') {
+        return createResponse({
+          status: 'installed',
+          projectId: 'tenant:after-sales',
+          displayName: 'After Sales',
+          config: {
+            defaultSlaHours: 24,
+            urgentSlaHours: 4,
+            followUpAfterDays: 7,
+          },
+          installResult: {
+            status: 'installed',
+            createdObjects: [],
+            createdViews: [],
+            warnings: [],
+            reportRef: 'install-006a',
+          },
+          reportRef: 'install-006a',
+        })
+      }
+
+      if (path === '/api/after-sales/tickets' && !options?.method) {
+        return createResponse({
+          projectId: 'tenant:after-sales',
+          count: 1,
+          tickets: [
+            {
+              id: 'ticket-1',
+              version: 1,
+              data: {
+                ticketNo: 'AF-001',
+                title: 'Install compressor',
+                status: 'open',
+                refundStatus: '',
+                refundAmount: 0,
+              },
+            },
+          ],
+        })
+      }
+
+      if (path === '/api/after-sales/tickets/ticket-1/refund-request' && options?.method === 'POST') {
+        return createResponse({
+          projectId: 'tenant:after-sales',
+          ticket: {
+            id: 'ticket-1',
+            version: 2,
+            data: {
+              ticketNo: 'AF-001',
+              title: 'Install compressor',
+              status: 'open',
+              refundStatus: 'pending',
+              refundAmount: 120.5,
+            },
+          },
+        })
+      }
+
+      throw new Error(`Unexpected request: ${path}`)
+    })
+
+    const mounted = mountAfterSalesView()
+    app = mounted.app
+    container = mounted.container
+
+    await waitForText(container, 'AF-001')
+
+    const refundInput = container?.querySelector<HTMLInputElement>('#after-sales-ticket-refund-request-ticket-1')
+    expect(refundInput).toBeTruthy()
+    if (!refundInput) return
+
+    await setInputValue(refundInput, '120.5')
+    findButton(container, 'Request refund').click()
+    await waitForText(container, 'Requested refund for AF-001')
+
+    expect(container?.textContent).toContain('pending')
+    expect(container?.textContent).toContain('¥120.50')
+    expect(apiFetchMock).toHaveBeenCalledWith(
+      '/api/after-sales/tickets/ticket-1/refund-request',
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({
+          refundAmount: 120.5,
+        }),
+      }),
+    )
+  })
+
+  it('blocks refund requests when the inline refund amount is invalid', async () => {
+    apiFetchMock.mockImplementation(async (path: string, options?: RequestInit) => {
+      if (path === '/api/after-sales/app-manifest') {
+        return createResponse({
+          id: 'after-sales-default',
+          displayName: 'After Sales',
+          platformDependencies: ['core-backend'],
+          objects: [],
+          workflows: [],
+        })
+      }
+
+      if (path === '/api/after-sales/projects/current') {
+        return createResponse({
+          status: 'installed',
+          projectId: 'tenant:after-sales',
+          displayName: 'After Sales',
+          config: {
+            defaultSlaHours: 24,
+            urgentSlaHours: 4,
+            followUpAfterDays: 7,
+          },
+          installResult: {
+            status: 'installed',
+            createdObjects: [],
+            createdViews: [],
+            warnings: [],
+            reportRef: 'install-006b',
+          },
+          reportRef: 'install-006b',
+        })
+      }
+
+      if (path === '/api/after-sales/tickets' && !options?.method) {
+        return createResponse({
+          projectId: 'tenant:after-sales',
+          count: 1,
+          tickets: [
+            {
+              id: 'ticket-1',
+              version: 1,
+              data: {
+                ticketNo: 'AF-001',
+                title: 'Install compressor',
+                status: 'open',
+                refundStatus: '',
+                refundAmount: 0,
+              },
+            },
+          ],
+        })
+      }
+
+      if (path === '/api/after-sales/tickets/ticket-1/refund-request' && options?.method === 'POST') {
+        throw new Error('refund request should not submit with invalid amount')
+      }
+
+      throw new Error(`Unexpected request: ${path}`)
+    })
+
+    const mounted = mountAfterSalesView()
+    app = mounted.app
+    container = mounted.container
+
+    await waitForText(container, 'AF-001')
+
+    const refundInput = container?.querySelector<HTMLInputElement>('#after-sales-ticket-refund-request-ticket-1')
+    expect(refundInput).toBeTruthy()
+    if (!refundInput) return
+
+    await setInputValue(refundInput, 'abc')
+    findButton(container, 'Request refund').click()
+    await waitForText(container, 'Refund amount must be a valid number')
+
+    expect(apiFetchMock).not.toHaveBeenCalledWith(
+      '/api/after-sales/tickets/ticket-1/refund-request',
+      expect.objectContaining({ method: 'POST' }),
+    )
+  })
+
+  it('disables refund requests while ticket delete is in flight', async () => {
+    let resolveDelete: ((value: Response) => void) | null = null
+
+    apiFetchMock.mockImplementation(async (path: string, options?: RequestInit) => {
+      if (path === '/api/after-sales/app-manifest') {
+        return createResponse({
+          id: 'after-sales-default',
+          displayName: 'After Sales',
+          platformDependencies: ['core-backend'],
+          objects: [],
+          workflows: [],
+        })
+      }
+
+      if (path === '/api/after-sales/projects/current') {
+        return createResponse({
+          status: 'installed',
+          projectId: 'tenant:after-sales',
+          displayName: 'After Sales',
+          config: {
+            defaultSlaHours: 24,
+            urgentSlaHours: 4,
+            followUpAfterDays: 7,
+          },
+          installResult: {
+            status: 'installed',
+            createdObjects: [],
+            createdViews: [],
+            warnings: [],
+            reportRef: 'install-006c',
+          },
+          reportRef: 'install-006c',
+        })
+      }
+
+      if (path === '/api/after-sales/tickets' && !options?.method) {
+        return createResponse({
+          projectId: 'tenant:after-sales',
+          count: 1,
+          tickets: [
+            {
+              id: 'ticket-1',
+              version: 1,
+              data: {
+                ticketNo: 'AF-001',
+                title: 'Install compressor',
+                status: 'open',
+                refundStatus: '',
+                refundAmount: 0,
+              },
+            },
+          ],
+        })
+      }
+
+      if (path === '/api/after-sales/tickets/ticket-1' && options?.method === 'DELETE') {
+        return await new Promise<Response>((resolve) => {
+          resolveDelete = resolve
+        })
+      }
+
+      if (path === '/api/after-sales/tickets/ticket-1/refund-request' && options?.method === 'POST') {
+        throw new Error('refund request should stay disabled while delete is in flight')
+      }
+
+      throw new Error(`Unexpected request: ${path}`)
+    })
+
+    const mounted = mountAfterSalesView()
+    app = mounted.app
+    container = mounted.container
+
+    await waitForText(container, 'AF-001')
+
+    const deleteButton = container?.querySelector<HTMLButtonElement>('button[aria-label="Delete ticket AF-001"]')
+    const refundButton = findButton(container!, 'Request refund')
+    expect(deleteButton).toBeTruthy()
+    expect(refundButton).toBeTruthy()
+    if (!deleteButton) return
+
+    deleteButton.click()
+    await flushUi(2)
+
+    expect(deleteButton.disabled).toBe(true)
+    expect(refundButton.disabled).toBe(true)
+
+    resolveDelete?.(
+      createResponse({
+        projectId: 'tenant:after-sales',
+        ticketId: 'ticket-1',
+        deleted: true,
+      }),
+    )
+
+    await waitForText(container!, 'Deleted ticket AF-001')
+  })
+
   it('disables ticket create controls while tickets are still loading', async () => {
     let resolveTickets: ((value: Response) => void) | null = null
 
