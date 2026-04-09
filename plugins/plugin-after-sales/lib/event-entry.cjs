@@ -281,6 +281,85 @@ function buildFollowUpDueEventPayload(input, meta) {
   }
 }
 
+function buildServiceRecordCommand(input) {
+  const serviceRecord =
+    input && typeof input.serviceRecord === 'object' && !Array.isArray(input.serviceRecord)
+      ? input.serviceRecord
+      : input || {}
+
+  const ticketNo = requiredString(serviceRecord.ticketNo ?? input.ticketNo, 'serviceRecord.ticketNo')
+  const visitType = normalizeEnumValue(
+    serviceRecord.visitType,
+    'serviceRecord.visitType',
+    ['onsite', 'remote', 'pickup'],
+    'onsite',
+  )
+  const scheduledAt = requiredString(
+    serviceRecord.scheduledAt ?? input.scheduledAt,
+    'serviceRecord.scheduledAt',
+  )
+  const completedAt = optionalString(serviceRecord.completedAt ?? input.completedAt)
+  const technicianName = optionalString(serviceRecord.technicianName ?? input.technicianName)
+  const workSummary = optionalString(serviceRecord.workSummary ?? input.workSummary)
+  const result = isMissingInputValue(serviceRecord.result ?? input.result)
+    ? undefined
+    : normalizeEnumValue(
+        serviceRecord.result ?? input.result,
+        'serviceRecord.result',
+        ['resolved', 'partial', 'escalated'],
+        'resolved',
+      )
+
+  const recordData = {
+    ticketNo,
+    visitType,
+    scheduledAt,
+    ...(completedAt ? { completedAt } : {}),
+    ...(technicianName ? { technicianName } : {}),
+    ...(workSummary ? { workSummary } : {}),
+    ...(typeof result === 'string' ? { result } : {}),
+  }
+
+  return {
+    recordData,
+    eventServiceRecord: {
+      ticketNo,
+      visitType,
+      scheduledAt,
+      ...(completedAt ? { completedAt } : {}),
+      ...(technicianName ? { technicianName } : {}),
+      ...(workSummary ? { workSummary } : {}),
+      ...(typeof result === 'string' ? { result } : {}),
+    },
+  }
+}
+
+function buildServiceRecordedEventPayload(input, meta) {
+  const serviceRecord =
+    input && typeof input.serviceRecord === 'object' && !Array.isArray(input.serviceRecord)
+      ? input.serviceRecord
+      : input || {}
+
+  return {
+    tenantId: requiredString(meta.tenantId, 'tenantId'),
+    projectId: requiredString(meta.projectId, 'projectId'),
+    ticketNo: requiredString(serviceRecord.ticketNo ?? input.ticketNo, 'serviceRecord.ticketNo'),
+    serviceRecord: {
+      id: requiredString(serviceRecord.id, 'serviceRecord.id'),
+      ticketNo: requiredString(serviceRecord.ticketNo ?? input.ticketNo, 'serviceRecord.ticketNo'),
+      visitType: requiredString(serviceRecord.visitType, 'serviceRecord.visitType'),
+      scheduledAt: requiredString(
+        serviceRecord.scheduledAt ?? input.scheduledAt,
+        'serviceRecord.scheduledAt',
+      ),
+      completedAt: optionalString(serviceRecord.completedAt ?? input.completedAt),
+      technicianName: optionalString(serviceRecord.technicianName ?? input.technicianName),
+      workSummary: optionalString(serviceRecord.workSummary ?? input.workSummary),
+      result: optionalString(serviceRecord.result ?? input.result),
+    },
+  }
+}
+
 module.exports = {
   buildCreateTicketCommand,
   buildRequestRefundCommand,
@@ -289,5 +368,7 @@ module.exports = {
   buildRefundRequestedEventPayload,
   buildTicketOverdueEventPayload,
   buildFollowUpDueEventPayload,
+  buildServiceRecordCommand,
+  buildServiceRecordedEventPayload,
   createEventEntryError,
 }

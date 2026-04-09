@@ -19,6 +19,8 @@ const {
 const {
   buildCreateTicketCommand,
   buildRefundDecisionEventPayload,
+  buildServiceRecordCommand,
+  buildServiceRecordedEventPayload,
   buildRequestRefundCommand,
   buildTicketCreatedEventPayload,
   buildRefundRequestedEventPayload,
@@ -33,6 +35,7 @@ const {
 } = require('./lib/multitable-helpers.cjs')
 
 const SERVICE_TICKET_FIELDS = ['ticketNo', 'title', 'source', 'priority', 'status', 'slaDueAt', 'refundAmount', 'refundStatus']
+const SERVICE_RECORD_FIELDS = ['ticketNo', 'visitType', 'scheduledAt', 'completedAt', 'technicianName', 'workSummary', 'result']
 
 async function toPhysicalTicketData(provisioning, projectId, logicalData) {
   return toPhysicalRecord(provisioning, projectId, 'serviceTicket', logicalData)
@@ -40,6 +43,14 @@ async function toPhysicalTicketData(provisioning, projectId, logicalData) {
 
 async function fromPhysicalTicketData(provisioning, projectId, physicalData) {
   return fromPhysicalRecord(provisioning, projectId, 'serviceTicket', SERVICE_TICKET_FIELDS, physicalData)
+}
+
+async function toPhysicalServiceRecordData(provisioning, projectId, logicalData) {
+  return toPhysicalRecord(provisioning, projectId, 'serviceRecord', logicalData)
+}
+
+async function fromPhysicalServiceRecordData(provisioning, projectId, physicalData) {
+  return fromPhysicalRecord(provisioning, projectId, 'serviceRecord', SERVICE_RECORD_FIELDS, physicalData)
 }
 
 let activeContext = null
@@ -851,6 +862,263 @@ module.exports = {
           res.status(500).json({
             ok: false,
             error: { code: 'INTERNAL_ERROR', message: 'Failed to delete after-sales ticket' },
+          })
+        }
+      },
+    )
+
+    context.api.http.addRoute(
+      'GET',
+      '/api/after-sales/service-records',
+      async (req, res) => {
+        try {
+          const userId = getUserId(req)
+          if (!userId) {
+            sendUnauthorized(res)
+            return
+          }
+          if (!hasAfterSalesReadAccess(req)) {
+            res.status(403).json({
+              ok: false,
+              error: { code: 'FORBIDDEN', message: 'After-sales read access required' },
+            })
+            return
+          }
+
+          const multitableApi = getMultitableReadApi(context)
+          if (!multitableApi || (typeof multitableApi.records.listRecords !== 'function' && typeof multitableApi.records.queryRecords !== 'function')) {
+            res.status(503).json({
+              ok: false,
+              error: {
+                code: 'MULTITABLE_UNAVAILABLE',
+                message: 'Multitable record reader is not available on plugin context',
+              },
+            })
+            return
+          }
+
+          const tenantId = getTenantId(req, context.logger)
+          const current = await installer.loadCurrent(context, tenantId, appManifest.id)
+          if (!current || current.status === 'not-installed') {
+            res.status(409).json({
+              ok: false,
+              error: {
+                code: 'AFTER_SALES_NOT_INSTALLED',
+                message: 'After-sales must be installed before listing service records',
+              },
+            })
+            return
+          }
+
+          const projectId = current.projectId || installer.getProjectId(tenantId, appManifest.id)
+          const sheetId = await findObjectSheetId(multitableApi.provisioning, projectId, 'serviceRecord')
+          const ticketNo = typeof req?.query?.ticketNo === 'string' && req.query.ticketNo.trim()
+            ? req.query.ticketNo.trim()
+            : null
+          const resultFilter = typeof req?.query?.result === 'string' && req.query.result.trim()
+            ? req.query.result.trim()
+            : null
+          const search = typeof req?.query?.search === 'string' && req.query.search.trim()
+            ? req.query.search.trim()
+            : null
+          const limit = typeof req?.query?.limit === 'string' && req.query.limit.trim()
+            ? Number(req.query.limit)
+            : undefined
+          const offset = typeof req?.query?.offset === 'string' && req.query.offset.trim()
+            ? Number(req.query.offset)
+            : undefined
+
+          const recordsApi = multitableApi.records
+          let serviceRecords
+          if (typeof recordsApi.queryRecords === 'function') {
+            const fieldIds = []
+            if (ticketNo) fieldIds.push('ticketNo')
+            if (resultFilter) fieldIds.push('result')
+            const physicalFieldIds = fieldIds.length
+              ? await resolvePhysicalFieldIds(multitableApi.provisioning, projectId, 'serviceRecord', fieldIds)
+              : {}
+            const filters = {}
+            if (ticketNo) {
+              filters[physicalFieldIds.ticketNo || 'ticketNo'] = ticketNo
+            }
+            if (resultFilter) {
+              filters[physicalFieldIds.result || 'result'] = resultFilter
+            }
+            serviceRecords = await recordsApi.queryRecords({
+              sheetId,
+              filters: Object.keys(filters).length ? filters : undefined,
+              search,
+              limit,
+              offset,
+            })
+          } else {
+            serviceRecords = await recordsApi.listRecords({
+              sheetId,
+              limit,
+              offset,
+            })
+          }
+
+          const logicalServiceRecords = Array.isArray(serviceRecords)
+            ? (
+                await Promise.all(
+                  serviceRecords.map(async (serviceRecord) => ({
+                    id: serviceRecord.id,
+                    version: serviceRecord.version,
+                    data: await fromPhysicalServiceRecordData(
+                      multitableApi.provisioning,
+                      projectId,
+                      serviceRecord.data,
+                    ),
+                  })),
+                )
+              ).filter((record) => {
+                if (ticketNo && record.data.ticketNo !== ticketNo) return false
+                if (resultFilter && record.data.result !== resultFilter) return false
+                if (!search) return true
+                const haystack = JSON.stringify(record.data).toLowerCase()
+                return haystack.includes(search.toLowerCase())
+              })
+            : []
+
+          res.json({
+            ok: true,
+            data: {
+              projectId,
+              serviceRecords: logicalServiceRecords,
+              count: logicalServiceRecords.length,
+            },
+          })
+        } catch (err) {
+          if (err && err.code === 'VALIDATION_ERROR') {
+            res.status(400).json({
+              ok: false,
+              error: { code: err.code, message: err.message },
+            })
+            return
+          }
+          if (err && err.code === 'NOT_FOUND') {
+            res.status(404).json({
+              ok: false,
+              error: { code: err.code, message: err.message },
+            })
+            return
+          }
+          logger.error && logger.error('after-sales list service records failed', err)
+          res.status(500).json({
+            ok: false,
+            error: { code: 'INTERNAL_ERROR', message: 'Failed to list after-sales service records' },
+          })
+        }
+      },
+    )
+
+    context.api.http.addRoute(
+      'POST',
+      '/api/after-sales/service-records',
+      async (req, res) => {
+        try {
+          const userId = getUserId(req)
+          if (!userId) {
+            sendUnauthorized(res)
+            return
+          }
+          if (!hasAfterSalesWriteAccess(req)) {
+            sendWriteForbidden(res)
+            return
+          }
+
+          const multitableApi = getMultitableWriteApi(context)
+          if (!multitableApi) {
+            res.status(503).json({
+              ok: false,
+              error: {
+                code: 'MULTITABLE_UNAVAILABLE',
+                message: 'Multitable record writer is not available on plugin context',
+              },
+            })
+            return
+          }
+
+          const tenantId = getTenantId(req, context.logger)
+          const current = await installer.loadCurrent(context, tenantId, appManifest.id)
+          if (!current || current.status === 'not-installed') {
+            res.status(409).json({
+              ok: false,
+              error: {
+                code: 'AFTER_SALES_NOT_INSTALLED',
+                message: 'After-sales must be installed before creating service records',
+              },
+            })
+            return
+          }
+
+          const projectId = current.projectId || installer.getProjectId(tenantId, appManifest.id)
+          const command = buildServiceRecordCommand((req && req.body) || {})
+          const sheetId = await findObjectSheetId(multitableApi.provisioning, projectId, 'serviceRecord')
+          const record = await multitableApi.records.createRecord({
+            sheetId,
+            data: await toPhysicalServiceRecordData(multitableApi.provisioning, projectId, command.recordData),
+          })
+          const logicalRecordData = await fromPhysicalServiceRecordData(
+            multitableApi.provisioning,
+            projectId,
+            record.data,
+          )
+
+          let event = { accepted: false, event: 'service.recorded' }
+          try {
+            const payload = buildServiceRecordedEventPayload({
+              serviceRecord: {
+                id: record.id,
+                ...command.eventServiceRecord,
+              },
+            }, {
+              tenantId,
+              projectId,
+              requesterId: userId,
+            })
+            context.api.events.emit('service.recorded', payload)
+            event = { accepted: true, event: 'service.recorded' }
+          } catch (err) {
+            logger.error && logger.error('after-sales service.recorded emit after record create failed', err)
+          }
+
+          res.status(201).json({
+            ok: true,
+            data: {
+              projectId,
+              serviceRecord: {
+                id: record.id,
+                version: record.version,
+                data: logicalRecordData,
+              },
+              event,
+            },
+          })
+        } catch (err) {
+          if (err && err.code === 'AFTER_SALES_EVENT_VALIDATION_FAILED') {
+            sendBadRequest(res, err)
+            return
+          }
+          if (err && err.code === 'VALIDATION_ERROR') {
+            res.status(400).json({
+              ok: false,
+              error: { code: err.code, message: err.message },
+            })
+            return
+          }
+          if (err && err.code === 'NOT_FOUND') {
+            res.status(404).json({
+              ok: false,
+              error: { code: err.code, message: err.message },
+            })
+            return
+          }
+          logger.error && logger.error('after-sales create service record failed', err)
+          res.status(500).json({
+            ok: false,
+            error: { code: 'INTERNAL_ERROR', message: 'Failed to create after-sales service record' },
           })
         }
       },

@@ -258,65 +258,114 @@ function createContext(): {
     input.fieldIds.map((fieldId) => [fieldId, `${input.projectId}:${input.objectId}:${fieldId}`]),
   ))
   const createRecord = vi.fn(async (input: { sheetId: string; data: Record<string, unknown> }) => ({
-    id: 'rec_ticket_001',
+    id: input.sheetId.includes('serviceRecord') ? 'rec_service_001' : 'rec_ticket_001',
     sheetId: input.sheetId,
     version: 1,
     data: input.data,
   }))
   const listRecords = vi.fn(async (input: { sheetId: string }) => ([
-    {
-      id: 'rec_ticket_001',
-      sheetId: input.sheetId,
-      version: 3,
-      data: {
-        [pk('ticketNo')]: 'TK-2001',
-        [pk('title')]: 'No cooling output',
-        [pk('source')]: 'phone',
-        [pk('priority')]: 'high',
-        [pk('status')]: 'new',
-      },
-    },
+    input.sheetId.includes('serviceRecord')
+      ? {
+          id: 'rec_service_001',
+          sheetId: input.sheetId,
+          version: 2,
+          data: {
+            [srPk('ticketNo')]: 'TK-SR-001',
+            [srPk('visitType')]: 'onsite',
+            [srPk('scheduledAt')]: '2026-04-09T09:00:00Z',
+            [srPk('technicianName')]: 'Tech One',
+            [srPk('workSummary')]: 'Replaced motor',
+            [srPk('result')]: 'resolved',
+          },
+        }
+      : {
+          id: 'rec_ticket_001',
+          sheetId: input.sheetId,
+          version: 3,
+          data: {
+            [pk('ticketNo')]: 'TK-2001',
+            [pk('title')]: 'No cooling output',
+            [pk('source')]: 'phone',
+            [pk('priority')]: 'high',
+            [pk('status')]: 'new',
+          },
+        },
   ]))
   const queryRecords = vi.fn(async (input: { sheetId: string }) => ([
-    {
-      id: 'rec_ticket_001',
-      sheetId: input.sheetId,
-      version: 3,
-      data: {
-        [pk('ticketNo')]: 'TK-2001',
-        [pk('title')]: 'No cooling output',
-        [pk('source')]: 'phone',
-        [pk('priority')]: 'high',
-        [pk('status')]: 'new',
-      },
-      filters: input.filters,
-      search: input.search,
-    },
+    input.sheetId.includes('serviceRecord')
+      ? {
+          id: 'rec_service_001',
+          sheetId: input.sheetId,
+          version: 2,
+          data: {
+            [srPk('ticketNo')]: 'TK-SR-001',
+            [srPk('visitType')]: 'onsite',
+            [srPk('scheduledAt')]: '2026-04-09T09:00:00Z',
+            [srPk('technicianName')]: 'Tech One',
+            [srPk('workSummary')]: 'Replaced motor',
+            [srPk('result')]: 'resolved',
+          },
+          filters: input.filters,
+          search: input.search,
+        }
+      : {
+          id: 'rec_ticket_001',
+          sheetId: input.sheetId,
+          version: 3,
+          data: {
+            [pk('ticketNo')]: 'TK-2001',
+            [pk('title')]: 'No cooling output',
+            [pk('source')]: 'phone',
+            [pk('priority')]: 'high',
+            [pk('status')]: 'new',
+          },
+          filters: input.filters,
+          search: input.search,
+        },
   ]))
   const getRecord = vi.fn(async (input: { sheetId: string; recordId: string }) => ({
     id: input.recordId,
     sheetId: input.sheetId,
     version: 3,
-    data: {
-      [pk('ticketNo')]: 'TK-2001',
-      [pk('title')]: 'No cooling output',
-      [pk('source')]: 'phone',
-      [pk('priority')]: 'high',
-      [pk('status')]: 'new',
-    },
+    data: input.sheetId.includes('serviceRecord')
+      ? {
+          [srPk('ticketNo')]: 'TK-SR-001',
+          [srPk('visitType')]: 'onsite',
+          [srPk('scheduledAt')]: '2026-04-09T09:00:00Z',
+          [srPk('technicianName')]: 'Tech One',
+          [srPk('workSummary')]: 'Replaced motor',
+          [srPk('result')]: 'resolved',
+        }
+      : {
+          [pk('ticketNo')]: 'TK-2001',
+          [pk('title')]: 'No cooling output',
+          [pk('source')]: 'phone',
+          [pk('priority')]: 'high',
+          [pk('status')]: 'new',
+        },
   }))
   const patchRecord = vi.fn(async (input: { sheetId: string; recordId: string; changes: Record<string, unknown> }) => ({
     id: input.recordId,
     sheetId: input.sheetId,
     version: 4,
-    data: {
-      [pk('ticketNo')]: 'TK-2001',
-      [pk('title')]: 'No cooling output',
-      [pk('source')]: 'phone',
-      [pk('priority')]: 'high',
-      [pk('status')]: 'new',
-      ...input.changes,
-    },
+    data: input.sheetId.includes('serviceRecord')
+      ? {
+          [srPk('ticketNo')]: 'TK-SR-001',
+          [srPk('visitType')]: 'onsite',
+          [srPk('scheduledAt')]: '2026-04-09T09:00:00Z',
+          [srPk('technicianName')]: 'Tech One',
+          [srPk('workSummary')]: 'Replaced motor',
+          [srPk('result')]: 'resolved',
+          ...input.changes,
+        }
+      : {
+          [pk('ticketNo')]: 'TK-2001',
+          [pk('title')]: 'No cooling output',
+          [pk('source')]: 'phone',
+          [pk('priority')]: 'high',
+          [pk('status')]: 'new',
+          ...input.changes,
+        },
   }))
   const deleteRecord = vi.fn(async (input: { sheetId: string; recordId: string }) => ({
     id: input.recordId,
@@ -416,6 +465,7 @@ function buildReq(overrides: Record<string, unknown> = {}) {
 // Physical field id helper matching the mock getFieldId: `${projectId}:${objectId}:${fieldId}`
 const MOCK_PROJECT_ID = 'tenant_42:after-sales'
 const stPk = (field: string) => `${MOCK_PROJECT_ID}:serviceTicket:${field}`
+const srPk = (field: string) => `${MOCK_PROJECT_ID}:serviceRecord:${field}`
 
 describe('plugin-after-sales routes', () => {
   let routes: Map<string, RegisteredHandler>
@@ -830,6 +880,198 @@ describe('plugin-after-sales routes', () => {
     })
     expect(getObjectSheetId).not.toHaveBeenCalled()
     expect(getFieldId).not.toHaveBeenCalled()
+  })
+
+  it('returns 403 for service-records when caller lacks after-sales write access', async () => {
+    const handler = routes.get('POST /api/after-sales/service-records')
+    const res = new FakeResponse()
+
+    await handler?.(buildReq({
+      user: {
+        id: 'user_42',
+        tenantId: 'tenant_42',
+        role: 'user',
+        roles: ['user'],
+        perms: ['after_sales:read'],
+      },
+      body: {
+        serviceRecord: {
+          ticketNo: 'TK-SR-001',
+          visitType: 'onsite',
+          scheduledAt: '2026-04-09T09:00:00Z',
+        },
+      },
+    }), res)
+
+    expect(res.statusCode).toBe(403)
+    expect(res.body).toEqual({
+      ok: false,
+      error: {
+        code: 'FORBIDDEN',
+        message: 'After-sales write access required',
+      },
+    })
+    expect(createRecord).not.toHaveBeenCalled()
+  })
+
+  it('returns 409 when service-records are created before install', async () => {
+    const handler = routes.get('POST /api/after-sales/service-records')
+    const res = new FakeResponse()
+
+    await handler?.(buildReq({
+      body: {
+        serviceRecord: {
+          ticketNo: 'TK-SR-001',
+          visitType: 'onsite',
+          scheduledAt: '2026-04-09T09:00:00Z',
+        },
+      },
+    }), res)
+
+    expect(res.statusCode).toBe(409)
+    expect(res.body).toEqual({
+      ok: false,
+      error: {
+        code: 'AFTER_SALES_NOT_INSTALLED',
+        message: 'After-sales must be installed before creating service records',
+      },
+    })
+    expect(createRecord).not.toHaveBeenCalled()
+  })
+
+  it('creates and lists service records through the multitable seam', async () => {
+    const createHandler = routes.get('POST /api/after-sales/service-records')
+    const listHandler = routes.get('GET /api/after-sales/service-records')
+    const createRes = new FakeResponse()
+    const listRes = new FakeResponse()
+
+    db.rows.push({
+      id: 'fake-uuid-1',
+      tenant_id: 'tenant_42',
+      app_id: 'after-sales',
+      project_id: 'tenant_42:after-sales',
+      template_id: 'after-sales-default',
+      template_version: '0.1.0',
+      mode: 'enable',
+      status: 'installed',
+      created_objects_json: JSON.stringify(['serviceTicket', 'serviceRecord']),
+      created_views_json: JSON.stringify(['ticket-board', 'serviceRecord-calendar']),
+      warnings_json: JSON.stringify([]),
+      display_name: 'After-sales',
+      config_json: JSON.stringify({}),
+      last_install_at: new Date(),
+      created_at: new Date(),
+    })
+
+    await createHandler?.(buildReq({
+      body: {
+        serviceRecord: {
+          ticketNo: 'TK-SR-001',
+          visitType: 'onsite',
+          scheduledAt: '2026-04-09T09:00:00Z',
+          completedAt: '2026-04-09T10:30:00Z',
+          technicianName: 'Tech One',
+          workSummary: 'Replaced motor',
+          result: 'resolved',
+        },
+      },
+    }), createRes)
+
+    expect(createRes.statusCode).toBe(201)
+    expect(createRes.body).toEqual({
+      ok: true,
+      data: {
+        projectId: 'tenant_42:after-sales',
+        serviceRecord: {
+          id: 'rec_service_001',
+          version: 1,
+          data: {
+            ticketNo: 'TK-SR-001',
+            visitType: 'onsite',
+            scheduledAt: '2026-04-09T09:00:00Z',
+            completedAt: '2026-04-09T10:30:00Z',
+            technicianName: 'Tech One',
+            workSummary: 'Replaced motor',
+            result: 'resolved',
+          },
+        },
+        event: {
+          accepted: true,
+          event: 'service.recorded',
+        },
+      },
+    })
+    expect(createRecord).toHaveBeenCalledWith({
+      sheetId: 'tenant_42:after-sales:serviceRecord:sheet',
+      data: {
+        [srPk('ticketNo')]: 'TK-SR-001',
+        [srPk('visitType')]: 'onsite',
+        [srPk('scheduledAt')]: '2026-04-09T09:00:00Z',
+        [srPk('completedAt')]: '2026-04-09T10:30:00Z',
+        [srPk('technicianName')]: 'Tech One',
+        [srPk('workSummary')]: 'Replaced motor',
+        [srPk('result')]: 'resolved',
+      },
+    })
+    expect(eventsEmit).toHaveBeenCalledWith(
+      'service.recorded',
+      expect.objectContaining({
+        tenantId: 'tenant_42',
+        projectId: 'tenant_42:after-sales',
+        ticketNo: 'TK-SR-001',
+        serviceRecord: expect.objectContaining({
+          id: 'rec_service_001',
+          ticketNo: 'TK-SR-001',
+          visitType: 'onsite',
+          scheduledAt: '2026-04-09T09:00:00Z',
+          completedAt: '2026-04-09T10:30:00Z',
+          technicianName: 'Tech One',
+          workSummary: 'Replaced motor',
+          result: 'resolved',
+        }),
+      }),
+    )
+
+    await listHandler?.(buildReq({
+      query: {
+        ticketNo: 'TK-SR-001',
+        result: 'resolved',
+        search: 'motor',
+      },
+    }), listRes)
+
+    expect(listRes.statusCode).toBe(200)
+    expect(queryRecords).toHaveBeenCalledWith({
+      sheetId: 'tenant_42:after-sales:serviceRecord:sheet',
+      filters: {
+        [srPk('ticketNo')]: 'TK-SR-001',
+        [srPk('result')]: 'resolved',
+      },
+      search: 'motor',
+      limit: undefined,
+      offset: undefined,
+    })
+    expect(listRes.body).toEqual({
+      ok: true,
+      data: {
+        projectId: 'tenant_42:after-sales',
+        serviceRecords: [
+          {
+            id: 'rec_service_001',
+            version: 2,
+            data: {
+              ticketNo: 'TK-SR-001',
+              visitType: 'onsite',
+              scheduledAt: '2026-04-09T09:00:00Z',
+              technicianName: 'Tech One',
+              workSummary: 'Replaced motor',
+              result: 'resolved',
+            },
+          },
+        ],
+        count: 1,
+      },
+    })
   })
 
   it('requests a ticket refund by patching the record and emitting ticket.refundRequested', async () => {

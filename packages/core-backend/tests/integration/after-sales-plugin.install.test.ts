@@ -899,4 +899,125 @@ describe('after-sales plugin install integration', () => {
       status: 'approved',
     })
   })
+
+  it('creates and lists service records through the real after-sales routes', async () => {
+    if (!baseUrl || !pool) return
+
+    const tokenRes = await requestJson(
+      `${baseUrl}/api/auth/dev-token?userId=after-sales-service-record-it&roles=admin&perms=*:*`,
+    )
+    const token = (tokenRes.body as { token?: string } | undefined)?.token
+    expect(token).toBeTruthy()
+
+    const installRes = await requestJson(`${baseUrl}/api/after-sales/projects/install`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        templateId: 'after-sales-default',
+        displayName: 'After Sales Service Record Flow',
+      }),
+    })
+    expect(installRes.status).toBe(200)
+
+    const createRes = await requestJson(`${baseUrl}/api/after-sales/service-records`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        serviceRecord: {
+          ticketNo: 'TK-SR-3001',
+          visitType: 'onsite',
+          scheduledAt: '2026-04-09T10:00:00Z',
+          completedAt: '2026-04-09T11:15:00Z',
+          technicianName: 'Tech One',
+          workSummary: 'Replaced compressor capacitor',
+          result: 'resolved',
+        },
+      }),
+    })
+
+    expect(createRes.status).toBe(201)
+    const createBody = createRes.body as {
+      ok?: boolean
+      data?: {
+        projectId?: string
+        serviceRecord?: {
+          id?: string
+          version?: number
+          data?: Record<string, unknown>
+        }
+        event?: {
+          accepted?: boolean
+          event?: string
+        }
+      }
+    }
+    expect(createBody.ok).toBe(true)
+    expect(createBody.data?.event).toEqual({
+      accepted: true,
+      event: 'service.recorded',
+    })
+    expect(createBody.data?.serviceRecord?.data).toMatchObject({
+      ticketNo: 'TK-SR-3001',
+      visitType: 'onsite',
+      scheduledAt: '2026-04-09T10:00:00Z',
+      completedAt: '2026-04-09T11:15:00Z',
+      technicianName: 'Tech One',
+      workSummary: 'Replaced compressor capacitor',
+      result: 'resolved',
+    })
+
+    const serviceRecordSheetId = stableMetaId('sheet', PROJECT_ID, 'serviceRecord')
+    const recordRes = await waitFor(
+      () => pool.query<{ id: string; version: number; data: Record<string, unknown> }>(
+        'SELECT id, version, data FROM meta_records WHERE sheet_id = $1 ORDER BY created_at DESC LIMIT 1',
+        [serviceRecordSheetId],
+      ),
+      (result) => result.rows.length === 1,
+    )
+    expect(recordRes.rows).toHaveLength(1)
+    expect(recordRes.rows[0].data).toMatchObject({
+      [stFieldId('serviceRecord', 'ticketNo')]: 'TK-SR-3001',
+      [stFieldId('serviceRecord', 'visitType')]: 'onsite',
+      [stFieldId('serviceRecord', 'scheduledAt')]: '2026-04-09T10:00:00Z',
+      [stFieldId('serviceRecord', 'completedAt')]: '2026-04-09T11:15:00Z',
+      [stFieldId('serviceRecord', 'technicianName')]: 'Tech One',
+      [stFieldId('serviceRecord', 'workSummary')]: 'Replaced compressor capacitor',
+      [stFieldId('serviceRecord', 'result')]: 'resolved',
+    })
+
+    const listRes = await requestJson(`${baseUrl}/api/after-sales/service-records?ticketNo=TK-SR-3001&result=resolved&search=capacitor`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    })
+    expect(listRes.status).toBe(200)
+    const listBody = listRes.body as {
+      ok?: boolean
+      data?: {
+        projectId?: string
+        count?: number
+        serviceRecords?: Array<{
+          id?: string
+          data?: Record<string, unknown>
+        }>
+      }
+    }
+    expect(listBody.ok).toBe(true)
+    expect(listBody.data?.projectId).toBe(PROJECT_ID)
+    expect(listBody.data?.count).toBe(1)
+    expect(listBody.data?.serviceRecords?.[0]).toMatchObject({
+      id: createBody.data?.serviceRecord?.id,
+      data: expect.objectContaining({
+        ticketNo: 'TK-SR-3001',
+        visitType: 'onsite',
+        result: 'resolved',
+      }),
+    })
+  })
 })
