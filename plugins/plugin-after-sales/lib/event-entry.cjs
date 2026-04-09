@@ -159,6 +159,50 @@ function buildCreateTicketCommand(input) {
   }
 }
 
+function normalizeTicketStatus(value) {
+  if (optionalString(value) === 'open') {
+    return 'new'
+  }
+  return value
+}
+
+function buildUpdateTicketCommand(input, existingTicket) {
+  const command = input && typeof input === 'object' && !Array.isArray(input) ? input : {}
+  const ticketInput =
+    command.ticket && typeof command.ticket === 'object' && !Array.isArray(command.ticket)
+      ? command.ticket
+      : command
+  const currentTicket = existingTicket && typeof existingTicket === 'object' ? existingTicket : {}
+  const source = normalizeEnumValue(
+    ticketInput.source ?? currentTicket.source,
+    'ticket.source',
+    ['phone', 'email', 'web', 'wechat'],
+    optionalString(currentTicket.source) || 'web',
+  )
+  const priority = normalizeEnumValue(
+    ticketInput.priority ?? currentTicket.priority,
+    'ticket.priority',
+    ['low', 'normal', 'high', 'urgent'],
+    optionalString(currentTicket.priority) || 'normal',
+  )
+  const status = normalizeEnumValue(
+    normalizeTicketStatus(ticketInput.status ?? currentTicket.status),
+    'ticket.status',
+    ['new', 'assigned', 'inProgress', 'done', 'closed'],
+    normalizeTicketStatus(optionalString(currentTicket.status)) || 'new',
+  )
+  const title = requiredString(ticketInput.title ?? currentTicket.title, 'ticket.title')
+
+  return {
+    changes: {
+      title,
+      source,
+      priority,
+      status,
+    },
+  }
+}
+
 function buildRequestRefundCommand(input, existingTicket) {
   const ticket = existingTicket && typeof existingTicket === 'object' ? existingTicket : {}
   const command = input && typeof input === 'object' && !Array.isArray(input) ? input : {}
@@ -424,6 +468,7 @@ function buildServiceRecordedEventPayload(input, meta) {
 
 module.exports = {
   buildCreateTicketCommand,
+  buildUpdateTicketCommand,
   buildRequestRefundCommand,
   buildRefundDecisionEventPayload,
   buildTicketCreatedEventPayload,

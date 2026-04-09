@@ -18,6 +18,7 @@ const {
 } = require('./lib/workflow-adapter.cjs')
 const {
   buildCreateTicketCommand,
+  buildUpdateTicketCommand,
   buildRefundDecisionEventPayload,
   buildServiceRecordCommand,
   buildUpdateServiceRecordCommand,
@@ -354,6 +355,19 @@ async function getServiceRecordById(multitableApi, projectId, serviceRecordId) {
     sheetId,
     record,
     logicalData: await fromPhysicalServiceRecordData(multitableApi.provisioning, projectId, record.data),
+  }
+}
+
+async function getTicketRecordById(multitableApi, projectId, ticketId) {
+  const sheetId = await findObjectSheetId(multitableApi.provisioning, projectId, 'serviceTicket')
+  const record = await multitableApi.records.getRecord({
+    sheetId,
+    recordId: ticketId,
+  })
+  return {
+    sheetId,
+    record,
+    logicalData: await fromPhysicalTicketData(multitableApi.provisioning, projectId, record.data),
   }
 }
 
@@ -842,6 +856,107 @@ module.exports = {
           res.status(500).json({
             ok: false,
             error: { code: 'INTERNAL_ERROR', message: 'Failed to create after-sales ticket' },
+          })
+        }
+      },
+    )
+
+    context.api.http.addRoute(
+      'PATCH',
+      '/api/after-sales/tickets/:ticketId',
+      async (req, res) => {
+        try {
+          const userId = getUserId(req)
+          if (!userId) {
+            sendUnauthorized(res)
+            return
+          }
+          if (!hasAfterSalesWriteAccess(req)) {
+            sendWriteForbidden(res)
+            return
+          }
+
+          const ticketId = typeof req?.params?.ticketId === 'string' ? req.params.ticketId.trim() : ''
+          if (!ticketId) {
+            res.status(400).json({
+              ok: false,
+              error: { code: 'VALIDATION_ERROR', message: 'ticketId is required' },
+            })
+            return
+          }
+
+          const multitableApi = getMultitableWriteApi(context)
+          if (!multitableApi) {
+            res.status(503).json({
+              ok: false,
+              error: {
+                code: 'MULTITABLE_UNAVAILABLE',
+                message: 'Multitable record writer is not available on plugin context',
+              },
+            })
+            return
+          }
+
+          const tenantId = getTenantId(req, context.logger)
+          const current = await installer.loadCurrent(context, tenantId, appManifest.id)
+          if (!current || !isOperationalAfterSalesStatus(current.status)) {
+            res.status(409).json({
+              ok: false,
+              error: {
+                code: 'AFTER_SALES_NOT_INSTALLED',
+                message: 'After-sales must be installed before updating tickets',
+              },
+            })
+            return
+          }
+
+          const projectId = current.projectId || installer.getProjectId(tenantId, appManifest.id)
+          const { sheetId, record, logicalData } = await getTicketRecordById(multitableApi, projectId, ticketId)
+          const command = buildUpdateTicketCommand((req && req.body) || {}, {
+            id: record.id,
+            ...logicalData,
+          })
+          const updatedRecord = await multitableApi.records.patchRecord({
+            sheetId,
+            recordId: ticketId,
+            changes: await toPhysicalTicketData(multitableApi.provisioning, projectId, command.changes),
+          })
+          const logicalUpdated = await fromPhysicalTicketData(multitableApi.provisioning, projectId, updatedRecord.data)
+
+          res.json({
+            ok: true,
+            data: {
+              projectId,
+              ticket: {
+                id: updatedRecord.id,
+                version: updatedRecord.version,
+                data: logicalUpdated,
+              },
+            },
+          })
+        } catch (err) {
+          if (err && err.code === 'AFTER_SALES_EVENT_VALIDATION_FAILED') {
+            sendBadRequest(res, err)
+            return
+          }
+          if (err && err.code === 'VALIDATION_ERROR') {
+            res.status(400).json({
+              ok: false,
+              error: { code: err.code, message: err.message },
+            })
+            return
+          }
+          if (err && err.code === 'NOT_FOUND') {
+            res.status(404).json({
+              ok: false,
+              error: { code: err.code, message: err.message },
+            })
+            return
+          }
+          logger.error && logger.error('after-sales update ticket failed', err)
+          res.status(500).json({
+            ok: false,
+            error: { code: 'INTERNAL_ERROR', message: 'Failed to update after-sales ticket' },
           })
         }
       },
@@ -1903,6 +2018,38 @@ module.exports = {
           event: {
             accepted: true,
             event: 'ticket.created',
+          },
+        }
+      },
+      async updateTicket(args) {
+        const tenantId = (args && typeof args === 'object' && typeof args.tenantId === 'string' && args.tenantId.trim())
+          ? args.tenantId.trim()
+          : 'default'
+        const projectId = installer.getProjectId(tenantId, appManifest.id)
+        const ticketId = typeof args?.ticketId === 'string' ? args.ticketId.trim() : ''
+        if (!ticketId) {
+          throw new Error('ticketId is required')
+        }
+        const multitableApi = getMultitableWriteApi(context)
+        if (!multitableApi) {
+          throw new Error('Multitable record writer is not available on plugin context')
+        }
+        const { sheetId, record, logicalData } = await getTicketRecordById(multitableApi, projectId, ticketId)
+        const command = buildUpdateTicketCommand(args || {}, {
+          id: record.id,
+          ...logicalData,
+        })
+        const updatedRecord = await multitableApi.records.patchRecord({
+          sheetId,
+          recordId: ticketId,
+          changes: await toPhysicalTicketData(multitableApi.provisioning, projectId, command.changes),
+        })
+        return {
+          projectId,
+          ticket: {
+            id: updatedRecord.id,
+            version: updatedRecord.version,
+            data: await fromPhysicalTicketData(multitableApi.provisioning, projectId, updatedRecord.data),
           },
         }
       },
