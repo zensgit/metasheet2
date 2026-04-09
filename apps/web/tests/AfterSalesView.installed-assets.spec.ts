@@ -461,6 +461,304 @@ describe('AfterSalesView installed assets panel', () => {
     expect(assetListCalls).toBe(1)
   })
 
+  it('updates installed assets inline and keeps the rest of the list intact', async () => {
+    apiFetchMock.mockImplementation(async (path: string, init?: RequestInit) => {
+      if (path === '/api/after-sales/app-manifest') {
+        return createResponse({
+          id: 'after-sales-default',
+          displayName: 'After Sales',
+          platformDependencies: ['core-backend'],
+          objects: [],
+          workflows: [],
+        })
+      }
+
+      if (path === '/api/after-sales/projects/current') {
+        return createResponse({
+          status: 'installed',
+          projectId: 'tenant:after-sales',
+          displayName: 'After Sales',
+          config: {
+            defaultSlaHours: 24,
+            urgentSlaHours: 4,
+            followUpAfterDays: 7,
+          },
+          installResult: {
+            status: 'installed',
+            createdObjects: [],
+            createdViews: [],
+            warnings: [],
+            reportRef: 'install-assets-003c',
+          },
+          reportRef: 'install-assets-003c',
+        })
+      }
+
+      if (path === '/api/after-sales/tickets') {
+        return createResponse({
+          projectId: 'tenant:after-sales',
+          count: 0,
+          tickets: [],
+        })
+      }
+
+      if (path === '/api/after-sales/service-records') {
+        return createResponse({
+          projectId: 'tenant:after-sales',
+          count: 0,
+          serviceRecords: [],
+        })
+      }
+
+      if (path === '/api/after-sales/installed-assets' && (!init || !init.method)) {
+        return createResponse({
+          projectId: 'tenant:after-sales',
+          count: 2,
+          installedAssets: [
+            {
+              id: 'asset-edit',
+              version: 1,
+              data: {
+                assetCode: 'AST-EDIT',
+                serialNo: 'SN-EDIT',
+                model: 'Legacy compressor',
+                location: 'Plant 4',
+                installedAt: '2026-04-12T08:00:00Z',
+                warrantyUntil: '2027-04-12',
+                status: 'active',
+              },
+            },
+            {
+              id: 'asset-keep',
+              version: 1,
+              data: {
+                assetCode: 'AST-KEEP',
+                serialNo: 'SN-KEEP',
+                model: 'Keep me visible',
+                location: 'Plant 1',
+                installedAt: '2026-04-08T08:00:00Z',
+                warrantyUntil: '',
+                status: 'active',
+              },
+            },
+          ],
+        })
+      }
+
+      if (path === '/api/after-sales/installed-assets/asset-edit' && init?.method === 'PATCH') {
+        expect(JSON.parse(String(init.body ?? '{}'))).toEqual({
+          installedAsset: {
+            assetCode: 'AST-EDIT-UPDATED',
+            status: 'expired',
+            serialNo: '',
+            model: 'Updated compressor',
+            location: 'Plant 6',
+            installedAt: '2026-04-12T11:45',
+            warrantyUntil: '',
+          },
+        })
+
+        return createResponse({
+          projectId: 'tenant:after-sales',
+          installedAsset: {
+            id: 'asset-edit',
+            version: 2,
+            data: {
+              assetCode: 'AST-EDIT-UPDATED',
+              serialNo: '',
+              model: 'Updated compressor',
+              location: 'Plant 6',
+              installedAt: '2026-04-12T11:45',
+              warrantyUntil: '',
+              status: 'expired',
+            },
+          },
+        })
+      }
+
+      throw new Error(`Unexpected request: ${path}`)
+    })
+
+    const mounted = mountAfterSalesView()
+    app = mounted.app
+    container = mounted.container
+
+    await waitForText(container, 'Legacy compressor')
+
+    const editButton = container.querySelector<HTMLButtonElement>('button[aria-label="Edit installed asset AST-EDIT"]')
+    expect(editButton).toBeTruthy()
+    if (!editButton) return
+
+    editButton.click()
+    await flushUi()
+
+    const assetCodeInput = container.querySelector<HTMLInputElement>('#after-sales-installed-asset-edit-asset-code-asset-edit')
+    const statusSelect = container.querySelector<HTMLSelectElement>('#after-sales-installed-asset-edit-status-asset-edit')
+    const serialNoInput = container.querySelector<HTMLInputElement>('#after-sales-installed-asset-edit-serial-no-asset-edit')
+    const modelInput = container.querySelector<HTMLInputElement>('#after-sales-installed-asset-edit-model-asset-edit')
+    const locationInput = container.querySelector<HTMLInputElement>('#after-sales-installed-asset-edit-location-asset-edit')
+    const installedAtInput = container.querySelector<HTMLInputElement>('#after-sales-installed-asset-edit-installed-at-asset-edit')
+    const warrantyUntilInput = container.querySelector<HTMLInputElement>('#after-sales-installed-asset-edit-warranty-until-asset-edit')
+
+    expect(assetCodeInput).toBeTruthy()
+    expect(statusSelect).toBeTruthy()
+    expect(serialNoInput).toBeTruthy()
+    expect(modelInput).toBeTruthy()
+    expect(locationInput).toBeTruthy()
+    expect(installedAtInput).toBeTruthy()
+    expect(warrantyUntilInput).toBeTruthy()
+    if (!assetCodeInput || !statusSelect || !serialNoInput || !modelInput || !locationInput || !installedAtInput || !warrantyUntilInput) return
+
+    await setInputValue(assetCodeInput, 'AST-EDIT-UPDATED')
+    await setSelectValue(statusSelect, 'expired')
+    await setInputValue(serialNoInput, '')
+    await setInputValue(modelInput, 'Updated compressor')
+    await setInputValue(locationInput, 'Plant 6')
+    await setInputValue(installedAtInput, '2026-04-12T11:45')
+    await setInputValue(warrantyUntilInput, '')
+
+    findButtonWithin(container, 'Save changes').click()
+
+    await waitForText(container, 'Updated installed asset AST-EDIT-UPDATED')
+    expect(container.textContent).toContain('Updated compressor')
+    expect(container.textContent).toContain('Plant 6')
+    expect(container.textContent).toContain('AST-KEEP')
+    expect(container.textContent).not.toContain('Legacy compressor')
+    expect(container.querySelector('#after-sales-installed-asset-edit-asset-code-asset-edit')).toBeNull()
+    expect(apiFetchMock).toHaveBeenCalledWith('/api/after-sales/installed-assets/asset-edit', {
+      method: 'PATCH',
+      body: JSON.stringify({
+        installedAsset: {
+          assetCode: 'AST-EDIT-UPDATED',
+          status: 'expired',
+          serialNo: '',
+          model: 'Updated compressor',
+          location: 'Plant 6',
+          installedAt: '2026-04-12T11:45',
+          warrantyUntil: '',
+        },
+      }),
+    })
+  })
+
+  it('keeps the installed-asset edit draft open when update fails', async () => {
+    apiFetchMock.mockImplementation(async (path: string, init?: RequestInit) => {
+      if (path === '/api/after-sales/app-manifest') {
+        return createResponse({
+          id: 'after-sales-default',
+          displayName: 'After Sales',
+          platformDependencies: ['core-backend'],
+          objects: [],
+          workflows: [],
+        })
+      }
+
+      if (path === '/api/after-sales/projects/current') {
+        return createResponse({
+          status: 'installed',
+          projectId: 'tenant:after-sales',
+          displayName: 'After Sales',
+          config: {
+            defaultSlaHours: 24,
+            urgentSlaHours: 4,
+            followUpAfterDays: 7,
+          },
+          installResult: {
+            status: 'installed',
+            createdObjects: [],
+            createdViews: [],
+            warnings: [],
+            reportRef: 'install-assets-003d',
+          },
+          reportRef: 'install-assets-003d',
+        })
+      }
+
+      if (path === '/api/after-sales/tickets') {
+        return createResponse({
+          projectId: 'tenant:after-sales',
+          count: 0,
+          tickets: [],
+        })
+      }
+
+      if (path === '/api/after-sales/service-records') {
+        return createResponse({
+          projectId: 'tenant:after-sales',
+          count: 0,
+          serviceRecords: [],
+        })
+      }
+
+      if (path === '/api/after-sales/installed-assets' && (!init || !init.method)) {
+        return createResponse({
+          projectId: 'tenant:after-sales',
+          count: 1,
+          installedAssets: [
+            {
+              id: 'asset-edit-error',
+              version: 1,
+              data: {
+                assetCode: 'AST-EDIT-ERR',
+                serialNo: 'SN-ERR',
+                model: 'Still visible after update failure',
+                location: 'Dock',
+                installedAt: '2026-04-09T08:00:00Z',
+                warrantyUntil: '',
+                status: 'active',
+              },
+            },
+          ],
+        })
+      }
+
+      if (path === '/api/after-sales/installed-assets/asset-edit-error' && init?.method === 'PATCH') {
+        return createResponse(
+          {
+            error: {
+              code: 'INTERNAL_ERROR',
+              message: 'Installed asset update failed',
+            },
+          },
+          { ok: false, status: 500, statusText: 'Internal Server Error' },
+        )
+      }
+
+      throw new Error(`Unexpected request: ${path}`)
+    })
+
+    const mounted = mountAfterSalesView()
+    app = mounted.app
+    container = mounted.container
+
+    await waitForText(container, 'Still visible after update failure')
+
+    const editButton = container.querySelector<HTMLButtonElement>('button[aria-label="Edit installed asset AST-EDIT-ERR"]')
+    expect(editButton).toBeTruthy()
+    if (!editButton) return
+
+    editButton.click()
+    await flushUi()
+
+    const modelInput = container.querySelector<HTMLInputElement>('#after-sales-installed-asset-edit-model-asset-edit-error')
+    const locationInput = container.querySelector<HTMLInputElement>('#after-sales-installed-asset-edit-location-asset-edit-error')
+
+    expect(modelInput).toBeTruthy()
+    expect(locationInput).toBeTruthy()
+    if (!modelInput || !locationInput) return
+
+    await setInputValue(modelInput, 'Updated but failed')
+    await setInputValue(locationInput, 'Plant 9')
+
+    findButtonWithin(container, 'Save changes').click()
+
+    await waitForText(container, 'Installed asset update failed')
+    expect(container.textContent).toContain('AST-EDIT-ERR')
+    expect(container.querySelector('#after-sales-installed-asset-edit-model-asset-edit-error')).not.toBeNull()
+    expect(modelInput.value).toBe('Updated but failed')
+    expect(locationInput.value).toBe('Plant 9')
+  })
+
   it('deletes installed assets inline and removes only the targeted row', async () => {
     apiFetchMock.mockImplementation(async (path: string, init?: RequestInit) => {
       if (path === '/api/after-sales/app-manifest') {

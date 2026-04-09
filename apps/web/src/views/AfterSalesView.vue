@@ -502,14 +502,14 @@
           <div class="after-sales-view__action-row after-sales-view__action-row--compact">
             <button
               class="after-sales-view__primary-btn"
-              :disabled="installedAssetCreating || installedAssetsLoading || Boolean(installedAssetDeletingId) || !canSubmitInstalledAsset"
+              :disabled="installedAssetCreating || installedAssetsLoading || Boolean(installedAssetDeletingId) || Boolean(installedAssetUpdatingId) || Boolean(installedAssetEditingId) || !canSubmitInstalledAsset"
               @click="submitInstalledAsset"
             >
               {{ installedAssetCreating ? 'Creating...' : 'Create asset' }}
             </button>
             <button
               class="after-sales-view__ghost-btn"
-              :disabled="installedAssetCreating || installedAssetsLoading || Boolean(installedAssetDeletingId)"
+              :disabled="installedAssetCreating || installedAssetsLoading || Boolean(installedAssetDeletingId) || Boolean(installedAssetUpdatingId) || Boolean(installedAssetEditingId)"
               @click="resetInstalledAssetDraft"
             >
               Reset asset draft
@@ -548,21 +548,21 @@
           <div class="after-sales-view__action-row after-sales-view__action-row--compact">
             <button
               class="after-sales-view__ghost-btn"
-              :disabled="installedAssetsLoading || installedAssetCreating || Boolean(installedAssetDeletingId)"
+              :disabled="installedAssetsLoading || installedAssetCreating || Boolean(installedAssetDeletingId) || Boolean(installedAssetUpdatingId) || Boolean(installedAssetEditingId)"
               @click="refreshInstalledAssets"
             >
               {{ installedAssetsLoading ? 'Refreshing...' : 'Refresh list' }}
             </button>
             <button
               class="after-sales-view__ghost-btn"
-              :disabled="installedAssetsLoading || installedAssetCreating || Boolean(installedAssetDeletingId)"
+              :disabled="installedAssetsLoading || installedAssetCreating || Boolean(installedAssetDeletingId) || Boolean(installedAssetUpdatingId) || Boolean(installedAssetEditingId)"
               @click="applyInstalledAssetFilters"
             >
               {{ installedAssetsLoading ? 'Applying...' : 'Apply filters' }}
             </button>
             <button
               class="after-sales-view__ghost-btn"
-              :disabled="installedAssetsLoading || installedAssetCreating || Boolean(installedAssetDeletingId)"
+              :disabled="installedAssetsLoading || installedAssetCreating || Boolean(installedAssetDeletingId) || Boolean(installedAssetUpdatingId) || Boolean(installedAssetEditingId)"
               @click="resetInstalledAssetFilters"
             >
               Clear filters
@@ -574,14 +574,93 @@
           <div v-else-if="installedAssets.length" class="after-sales-view__installed-asset-list">
             <article v-for="asset in installedAssets" :key="asset.id" class="after-sales-view__installed-asset-row">
               <div class="after-sales-view__installed-asset-main">
-                <div class="after-sales-view__installed-asset-headline">
-                  <strong>{{ asset.data.assetCode }}</strong>
-                  <span class="after-sales-view__tag">{{ asset.data.status }}</span>
-                  <span v-if="asset.data.serialNo" class="after-sales-view__tag after-sales-view__tag--subtle">
-                    {{ asset.data.serialNo }}
-                  </span>
-                </div>
-                <p>{{ asset.data.model || 'Model not set yet.' }}</p>
+                <template v-if="installedAssetEditingId === asset.id">
+                  <div class="after-sales-view__installed-asset-headline">
+                    <strong>{{ installedAssetEditDraft.assetCode || asset.data.assetCode }}</strong>
+                    <span class="after-sales-view__tag">{{ installedAssetEditDraft.status }}</span>
+                    <span v-if="installedAssetEditDraft.serialNo" class="after-sales-view__tag after-sales-view__tag--subtle">
+                      {{ installedAssetEditDraft.serialNo }}
+                    </span>
+                  </div>
+                  <form class="after-sales-view__installed-asset-form after-sales-view__ticket-form--inline" @submit.prevent="submitInstalledAssetEdit(asset)">
+                    <label class="after-sales-view__field">
+                      <span>Asset code</span>
+                      <input
+                        :id="`after-sales-installed-asset-edit-asset-code-${asset.id}`"
+                        v-model="installedAssetEditDraft.assetCode"
+                        class="after-sales-view__field-input"
+                        type="text"
+                      />
+                    </label>
+                    <label class="after-sales-view__field">
+                      <span>Status</span>
+                      <select
+                        :id="`after-sales-installed-asset-edit-status-${asset.id}`"
+                        v-model="installedAssetEditDraft.status"
+                        class="after-sales-view__field-input"
+                      >
+                        <option value="active">Active</option>
+                        <option value="expired">Expired</option>
+                        <option value="decommissioned">Decommissioned</option>
+                      </select>
+                    </label>
+                    <label class="after-sales-view__field">
+                      <span>Serial no</span>
+                      <input
+                        :id="`after-sales-installed-asset-edit-serial-no-${asset.id}`"
+                        v-model="installedAssetEditDraft.serialNo"
+                        class="after-sales-view__field-input"
+                        type="text"
+                      />
+                    </label>
+                    <label class="after-sales-view__field">
+                      <span>Model</span>
+                      <input
+                        :id="`after-sales-installed-asset-edit-model-${asset.id}`"
+                        v-model="installedAssetEditDraft.model"
+                        class="after-sales-view__field-input"
+                        type="text"
+                      />
+                    </label>
+                    <label class="after-sales-view__field">
+                      <span>Location</span>
+                      <input
+                        :id="`after-sales-installed-asset-edit-location-${asset.id}`"
+                        v-model="installedAssetEditDraft.location"
+                        class="after-sales-view__field-input"
+                        type="text"
+                      />
+                    </label>
+                    <label class="after-sales-view__field">
+                      <span>Installed at</span>
+                      <input
+                        :id="`after-sales-installed-asset-edit-installed-at-${asset.id}`"
+                        v-model="installedAssetEditDraft.installedAt"
+                        class="after-sales-view__field-input"
+                        type="datetime-local"
+                      />
+                    </label>
+                    <label class="after-sales-view__field">
+                      <span>Warranty until</span>
+                      <input
+                        :id="`after-sales-installed-asset-edit-warranty-until-${asset.id}`"
+                        v-model="installedAssetEditDraft.warrantyUntil"
+                        class="after-sales-view__field-input"
+                        type="date"
+                      />
+                    </label>
+                  </form>
+                </template>
+                <template v-else>
+                  <div class="after-sales-view__installed-asset-headline">
+                    <strong>{{ asset.data.assetCode }}</strong>
+                    <span class="after-sales-view__tag">{{ asset.data.status }}</span>
+                    <span v-if="asset.data.serialNo" class="after-sales-view__tag after-sales-view__tag--subtle">
+                      {{ asset.data.serialNo }}
+                    </span>
+                  </div>
+                  <p>{{ asset.data.model || 'Model not set yet.' }}</p>
+                </template>
               </div>
 
               <div class="after-sales-view__installed-asset-side">
@@ -599,10 +678,35 @@
                     <dd>{{ formatRecordDate(asset.data.warrantyUntil) }}</dd>
                   </div>
                 </dl>
+                <div v-if="installedAssetEditingId === asset.id" class="after-sales-view__ticket-actions">
+                  <button
+                    class="after-sales-view__primary-btn after-sales-view__ticket-action-btn"
+                    :disabled="installedAssetUpdatingId === asset.id || installedAssetsLoading || !canSubmitInstalledAssetEdit"
+                    @click="submitInstalledAssetEdit(asset)"
+                  >
+                    {{ installedAssetUpdatingId === asset.id ? 'Saving...' : 'Save changes' }}
+                  </button>
+                  <button
+                    class="after-sales-view__ghost-btn after-sales-view__ticket-action-btn"
+                    :disabled="installedAssetUpdatingId === asset.id"
+                    @click="cancelInstalledAssetEdit"
+                  >
+                    Cancel edit
+                  </button>
+                </div>
+                <button
+                  v-if="installedAssetEditingId !== asset.id"
+                  class="after-sales-view__ghost-btn after-sales-view__installed-asset-delete"
+                  :aria-label="`Edit installed asset ${asset.data.assetCode}`"
+                  :disabled="Boolean(installedAssetDeletingId) || Boolean(installedAssetUpdatingId) || Boolean(installedAssetEditingId)"
+                  @click="startInstalledAssetEdit(asset)"
+                >
+                  Edit
+                </button>
                 <button
                   class="after-sales-view__ghost-btn after-sales-view__installed-asset-delete"
                   :aria-label="`Delete installed asset ${asset.data.assetCode}`"
-                  :disabled="installedAssetDeletingId === asset.id || installedAssetCreating || installedAssetsLoading"
+                  :disabled="installedAssetDeletingId === asset.id || installedAssetCreating || installedAssetsLoading || Boolean(installedAssetUpdatingId) || installedAssetEditingId === asset.id"
                   @click="deleteInstalledAsset(asset)"
                 >
                   {{ installedAssetDeletingId === asset.id ? 'Deleting...' : 'Delete' }}
@@ -1125,6 +1229,16 @@ interface InstalledAssetDraft {
   status: 'active' | 'expired' | 'decommissioned'
 }
 
+interface InstalledAssetEditDraft {
+  assetCode: string
+  serialNo: string
+  model: string
+  location: string
+  installedAt: string
+  warrantyUntil: string
+  status: 'active' | 'expired' | 'decommissioned'
+}
+
 interface ServiceRecordDraft {
   ticketNo: string
   visitType: 'onsite' | 'remote' | 'pickup'
@@ -1221,6 +1335,7 @@ const ticketUpdatingId = ref('')
 const ticketDeletingId = ref('')
 const installedAssetsLoading = ref(false)
 const installedAssetCreating = ref(false)
+const installedAssetUpdatingId = ref('')
 const installedAssetDeletingId = ref('')
 const serviceRecordsLoading = ref(false)
 const serviceRecordCreating = ref(false)
@@ -1258,6 +1373,8 @@ const installedAssetFilters = ref<InstalledAssetFilterDraft>({
   search: '',
 })
 const installedAssetDraft = ref<InstalledAssetDraft>(createInstalledAssetDraft())
+const installedAssetEditingId = ref('')
+const installedAssetEditDraft = ref<InstalledAssetEditDraft>(createInstalledAssetEditDraft())
 const serviceRecordDraft = ref<ServiceRecordDraft>(createServiceRecordDraft())
 const serviceRecordEditingId = ref('')
 const serviceRecordEditDraft = ref<ServiceRecordEditDraft>(createServiceRecordEditDraft())
@@ -1279,6 +1396,11 @@ const canSubmitServiceRecord = computed(
     toText(serviceRecordDraft.value.scheduledAt).length > 0,
 )
 const canSubmitInstalledAsset = computed(() => toText(installedAssetDraft.value.assetCode).length > 0)
+const canSubmitInstalledAssetEdit = computed(
+  () =>
+    Boolean(installedAssetEditingId.value) &&
+    toText(installedAssetEditDraft.value.assetCode).length > 0,
+)
 const canSubmitServiceRecordEdit = computed(
   () =>
     Boolean(serviceRecordEditingId.value) &&
@@ -1428,6 +1550,23 @@ function createInstalledAssetDraft(): InstalledAssetDraft {
   }
 }
 
+function createInstalledAssetEditDraft(
+  asset?: Partial<InstalledAssetViewModel['data']> | null,
+): InstalledAssetEditDraft {
+  return {
+    assetCode: toText(asset?.assetCode),
+    serialNo: toText(asset?.serialNo),
+    model: toText(asset?.model),
+    location: toText(asset?.location),
+    installedAt: toText(asset?.installedAt),
+    warrantyUntil: toText(asset?.warrantyUntil),
+    status:
+      asset?.status === 'expired' || asset?.status === 'decommissioned'
+        ? asset.status
+        : 'active',
+  }
+}
+
 function createServiceRecordEditDraft(
   record?: Partial<ServiceRecordViewModel['data']> | null,
 ): ServiceRecordEditDraft {
@@ -1492,6 +1631,12 @@ function resetInstalledAssetDraft() {
   installedAssetDraft.value = createInstalledAssetDraft()
   installedAssetSubmitError.value = ''
   installedAssetSubmitSuccess.value = ''
+}
+
+function cancelInstalledAssetEdit() {
+  installedAssetEditingId.value = ''
+  installedAssetEditDraft.value = createInstalledAssetEditDraft()
+  installedAssetSubmitError.value = ''
 }
 
 function resetServiceRecordDraft() {
@@ -1569,6 +1714,20 @@ function buildInstalledAssetPayload() {
       ...(location ? { location } : {}),
       ...(installedAt ? { installedAt } : {}),
       ...(warrantyUntil ? { warrantyUntil } : {}),
+    },
+  }
+}
+
+function buildInstalledAssetUpdatePayload() {
+  return {
+    installedAsset: {
+      assetCode: toText(installedAssetEditDraft.value.assetCode),
+      status: installedAssetEditDraft.value.status,
+      serialNo: toText(installedAssetEditDraft.value.serialNo),
+      model: toText(installedAssetEditDraft.value.model),
+      location: toText(installedAssetEditDraft.value.location),
+      installedAt: toText(installedAssetEditDraft.value.installedAt),
+      warrantyUntil: toText(installedAssetEditDraft.value.warrantyUntil),
     },
   }
 }
@@ -1802,6 +1961,16 @@ function normalizeInstalledAssetRow(record: InstalledAssetRow): InstalledAssetVi
   }
 }
 
+function startInstalledAssetEdit(asset: InstalledAssetViewModel) {
+  if (!asset.id || installedAssetUpdatingId.value || installedAssetDeletingId.value || installedAssetCreating.value || installedAssetsLoading.value) {
+    return
+  }
+  installedAssetEditingId.value = asset.id
+  installedAssetEditDraft.value = createInstalledAssetEditDraft(asset.data)
+  installedAssetSubmitError.value = ''
+  installedAssetSubmitSuccess.value = ''
+}
+
 function startServiceRecordEdit(record: ServiceRecordViewModel) {
   if (!record.id || serviceRecordUpdatingId.value || serviceRecordDeletingId.value || serviceRecordCreating.value || serviceRecordsLoading.value) {
     return
@@ -1905,14 +2074,14 @@ async function loadInstalledAssetsForCurrentState(state: CurrentResponse): Promi
 }
 
 async function applyInstalledAssetFilters() {
-  if (installedAssetCreating.value || installedAssetDeletingId.value) {
+  if (installedAssetCreating.value || installedAssetDeletingId.value || installedAssetUpdatingId.value || installedAssetEditingId.value) {
     return
   }
   await loadInstalledAssetsForCurrentState(current.value)
 }
 
 async function resetInstalledAssetFilters() {
-  if (installedAssetCreating.value || installedAssetDeletingId.value) {
+  if (installedAssetCreating.value || installedAssetDeletingId.value || installedAssetUpdatingId.value || installedAssetEditingId.value) {
     return
   }
   installedAssetFilters.value = {
@@ -1923,7 +2092,7 @@ async function resetInstalledAssetFilters() {
 }
 
 async function refreshInstalledAssets() {
-  if (installedAssetCreating.value || installedAssetDeletingId.value) {
+  if (installedAssetCreating.value || installedAssetDeletingId.value || installedAssetUpdatingId.value || installedAssetEditingId.value) {
     return
   }
   await loadInstalledAssetsForCurrentState(current.value)
@@ -1934,7 +2103,9 @@ async function submitInstalledAsset() {
     !canSubmitInstalledAsset.value ||
     installedAssetCreating.value ||
     installedAssetsLoading.value ||
-    Boolean(installedAssetDeletingId.value)
+    Boolean(installedAssetDeletingId.value) ||
+    Boolean(installedAssetUpdatingId.value) ||
+    Boolean(installedAssetEditingId.value)
   ) {
     return
   }
@@ -1967,7 +2138,7 @@ async function submitInstalledAsset() {
 }
 
 async function deleteInstalledAsset(asset: InstalledAssetViewModel) {
-  if (!asset.id || installedAssetDeletingId.value) {
+  if (!asset.id || installedAssetDeletingId.value || installedAssetUpdatingId.value || installedAssetEditingId.value === asset.id) {
     return
   }
 
@@ -1986,6 +2157,47 @@ async function deleteInstalledAsset(asset: InstalledAssetViewModel) {
     installedAssetSubmitError.value = err instanceof Error ? err.message : 'Failed to delete installed asset'
   } finally {
     installedAssetDeletingId.value = ''
+  }
+}
+
+async function submitInstalledAssetEdit(asset: InstalledAssetViewModel) {
+  if (
+    !asset.id ||
+    installedAssetEditingId.value !== asset.id ||
+    installedAssetUpdatingId.value ||
+    !canSubmitInstalledAssetEdit.value
+  ) {
+    return
+  }
+
+  installedAssetUpdatingId.value = asset.id
+  installedAssetSubmitError.value = ''
+  installedAssetSubmitSuccess.value = ''
+
+  try {
+    const payload = await readEnvelope<CreateInstalledAssetResponse>(
+      `/api/after-sales/installed-assets/${encodeURIComponent(asset.id)}`,
+      {
+        method: 'PATCH',
+        body: JSON.stringify(buildInstalledAssetUpdatePayload()),
+      },
+    )
+    const nextAsset = payload?.installedAsset ? normalizeInstalledAssetRow(payload.installedAsset) : null
+
+    if (nextAsset) {
+      installedAssets.value = matchesInstalledAssetFilters(nextAsset)
+        ? installedAssets.value.map((item) => (item.id === nextAsset.id ? nextAsset : item))
+        : installedAssets.value.filter((item) => item.id !== nextAsset.id)
+      installedAssetsError.value = ''
+      installedAssetSubmitSuccess.value = `Updated installed asset ${nextAsset.data.assetCode}`
+    }
+
+    installedAssetEditingId.value = ''
+    installedAssetEditDraft.value = createInstalledAssetEditDraft()
+  } catch (err: unknown) {
+    installedAssetSubmitError.value = err instanceof Error ? err.message : 'Failed to update installed asset'
+  } finally {
+    installedAssetUpdatingId.value = ''
   }
 }
 

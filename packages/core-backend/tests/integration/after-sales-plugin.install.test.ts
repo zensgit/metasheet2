@@ -1842,6 +1842,142 @@ describe('after-sales plugin install integration', () => {
     })
   })
 
+  it('updates installed assets through the real after-sales routes', async () => {
+    if (!baseUrl || !pool) return
+
+    const tokenRes = await requestJson(
+      `${baseUrl}/api/auth/dev-token?userId=after-sales-installed-asset-update-it&roles=admin&perms=*:*`,
+    )
+    const token = (tokenRes.body as { token?: string } | undefined)?.token
+    expect(token).toBeTruthy()
+
+    const installRes = await requestJson(`${baseUrl}/api/after-sales/projects/install`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        templateId: 'after-sales-default',
+        displayName: 'After Sales Installed Asset Update Flow',
+      }),
+    })
+    expect(installRes.status).toBe(200)
+
+    const createRes = await requestJson(`${baseUrl}/api/after-sales/installed-assets`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        installedAsset: {
+          assetCode: 'AST-5003',
+          serialNo: 'SN-5003',
+          model: 'Compressor Baseline',
+          location: 'Plant 7',
+          installedAt: '2026-04-13T08:00:00Z',
+          warrantyUntil: '2027-04-13',
+          status: 'active',
+        },
+      }),
+    })
+    expect(createRes.status).toBe(201)
+
+    const createdInstalledAssetId = ((createRes.body as {
+      data?: { installedAsset?: { id?: string } }
+    })?.data?.installedAsset?.id)
+    expect(createdInstalledAssetId).toBeTruthy()
+
+    const updateRes = await requestJson(
+      `${baseUrl}/api/after-sales/installed-assets/${encodeURIComponent(String(createdInstalledAssetId))}`,
+      {
+        method: 'PATCH',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          installedAsset: {
+            assetCode: 'AST-5003-UPDATED',
+            serialNo: '',
+            model: 'Compressor Updated',
+            location: 'Plant 8',
+            installedAt: '2026-04-13T10:15:00Z',
+            warrantyUntil: '',
+            status: 'expired',
+          },
+        }),
+      },
+    )
+
+    expect(updateRes.status).toBe(200)
+    const updateBody = updateRes.body as {
+      ok?: boolean
+      data?: {
+        installedAsset?: {
+          id?: string
+          data?: Record<string, unknown>
+        }
+      }
+    }
+    expect(updateBody.ok).toBe(true)
+    expect(updateBody.data?.installedAsset?.data).toMatchObject({
+      assetCode: 'AST-5003-UPDATED',
+      model: 'Compressor Updated',
+      location: 'Plant 8',
+      installedAt: '2026-04-13T10:15:00Z',
+      status: 'expired',
+    })
+
+    const installedAssetSheetId = stableMetaId('sheet', PROJECT_ID, 'installedAsset')
+    const updatedRecordRes = await pool.query<{ data: Record<string, unknown> }>(
+      'SELECT data FROM meta_records WHERE id = $1 AND sheet_id = $2',
+      [createdInstalledAssetId, installedAssetSheetId],
+    )
+    expect(updatedRecordRes.rows).toHaveLength(1)
+    expect(updatedRecordRes.rows[0]?.data).toMatchObject({
+      [stFieldId('installedAsset', 'assetCode')]: 'AST-5003-UPDATED',
+      [stFieldId('installedAsset', 'model')]: 'Compressor Updated',
+      [stFieldId('installedAsset', 'location')]: 'Plant 8',
+      [stFieldId('installedAsset', 'installedAt')]: '2026-04-13T10:15:00Z',
+      [stFieldId('installedAsset', 'status')]: 'expired',
+    })
+    expect(updatedRecordRes.rows[0]?.data?.[stFieldId('installedAsset', 'serialNo')] ?? null).toBeNull()
+    expect(updatedRecordRes.rows[0]?.data?.[stFieldId('installedAsset', 'warrantyUntil')] ?? null).toBeNull()
+
+    const listRes = await requestJson(
+      `${baseUrl}/api/after-sales/installed-assets?status=expired&search=AST-5003-UPDATED`,
+      {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      },
+    )
+    expect(listRes.status).toBe(200)
+
+    const listBody = listRes.body as {
+      ok?: boolean
+      data?: {
+        count?: number
+        installedAssets?: Array<{
+          id?: string
+          data?: Record<string, unknown>
+        }>
+      }
+    }
+    expect(listBody.ok).toBe(true)
+    expect(listBody.data?.count).toBe(1)
+    expect(listBody.data?.installedAssets ?? []).toHaveLength(1)
+    expect(listBody.data?.installedAssets?.[0]).toMatchObject({
+      id: createdInstalledAssetId,
+      data: {
+        assetCode: 'AST-5003-UPDATED',
+        status: 'expired',
+      },
+    })
+  })
+
   it('creates and deletes installed assets through the real after-sales routes', async () => {
     if (!baseUrl || !pool) return
 
