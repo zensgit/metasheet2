@@ -369,6 +369,205 @@ describe('AfterSalesView', () => {
     expect(apiFetchMock).toHaveBeenCalledWith('/api/after-sales/tickets', undefined)
   })
 
+  it('applies ticket filters through the tickets query contract', async () => {
+    apiFetchMock.mockImplementation(async (path: string) => {
+      if (path === '/api/after-sales/app-manifest') {
+        return createResponse({
+          id: 'after-sales-default',
+          displayName: 'After Sales',
+          platformDependencies: ['core-backend'],
+          objects: [],
+          workflows: [],
+        })
+      }
+
+      if (path === '/api/after-sales/projects/current') {
+        return createResponse({
+          status: 'installed',
+          projectId: 'tenant:after-sales',
+          displayName: 'After Sales',
+          config: {
+            defaultSlaHours: 24,
+            urgentSlaHours: 4,
+            followUpAfterDays: 7,
+          },
+          installResult: {
+            status: 'installed',
+            createdObjects: [],
+            createdViews: [],
+            warnings: [],
+            reportRef: 'install-004',
+          },
+          reportRef: 'install-004',
+        })
+      }
+
+      if (path === '/api/after-sales/tickets') {
+        return createResponse({
+          projectId: 'tenant:after-sales',
+          count: 1,
+          tickets: [
+            {
+              id: 'ticket-base',
+              version: 1,
+              data: {
+                ticketNo: 'AF-001',
+                title: 'Baseline ticket',
+                status: 'closed',
+                refundStatus: '',
+                refundAmount: 0,
+              },
+            },
+          ],
+        })
+      }
+
+      if (path === '/api/after-sales/tickets?status=open&search=compressor') {
+        return createResponse({
+          projectId: 'tenant:after-sales',
+          count: 1,
+          tickets: [
+            {
+              id: 'ticket-filtered',
+              version: 1,
+              data: {
+                ticketNo: 'AF-009',
+                title: 'Compressor restart on site',
+                status: 'open',
+                refundStatus: '',
+                refundAmount: 0,
+              },
+            },
+          ],
+        })
+      }
+
+      throw new Error(`Unexpected request: ${path}`)
+    })
+
+    const mounted = mountAfterSalesView()
+    app = mounted.app
+    container = mounted.container
+
+    await waitForText(container, 'AF-001')
+
+    const statusInput = container?.querySelector<HTMLInputElement>('#after-sales-ticket-filter-status')
+    const searchInput = container?.querySelector<HTMLInputElement>('#after-sales-ticket-filter-search')
+    expect(statusInput).toBeTruthy()
+    expect(searchInput).toBeTruthy()
+    if (!statusInput || !searchInput) return
+
+    await setInputValue(statusInput, 'open')
+    await setInputValue(searchInput, 'compressor')
+    findButton(container, 'Apply ticket filters').click()
+
+    await waitForText(container, 'AF-009')
+
+    expect(container?.textContent).toContain('Compressor restart on site')
+    expect(apiFetchMock).toHaveBeenCalledWith('/api/after-sales/tickets?status=open&search=compressor', undefined)
+  })
+
+  it('clears ticket filters and reloads the default list', async () => {
+    apiFetchMock.mockImplementation(async (path: string) => {
+      if (path === '/api/after-sales/app-manifest') {
+        return createResponse({
+          id: 'after-sales-default',
+          displayName: 'After Sales',
+          platformDependencies: ['core-backend'],
+          objects: [],
+          workflows: [],
+        })
+      }
+
+      if (path === '/api/after-sales/projects/current') {
+        return createResponse({
+          status: 'installed',
+          projectId: 'tenant:after-sales',
+          displayName: 'After Sales',
+          config: {
+            defaultSlaHours: 24,
+            urgentSlaHours: 4,
+            followUpAfterDays: 7,
+          },
+          installResult: {
+            status: 'installed',
+            createdObjects: [],
+            createdViews: [],
+            warnings: [],
+            reportRef: 'install-005',
+          },
+          reportRef: 'install-005',
+        })
+      }
+
+      if (path === '/api/after-sales/tickets') {
+        return createResponse({
+          projectId: 'tenant:after-sales',
+          count: 1,
+          tickets: [
+            {
+              id: 'ticket-base',
+              version: 1,
+              data: {
+                ticketNo: 'AF-001',
+                title: 'Baseline ticket',
+                status: 'closed',
+                refundStatus: '',
+                refundAmount: 0,
+              },
+            },
+          ],
+        })
+      }
+
+      if (path === '/api/after-sales/tickets?status=open&search=compressor') {
+        return createResponse({
+          projectId: 'tenant:after-sales',
+          count: 1,
+          tickets: [
+            {
+              id: 'ticket-filtered',
+              version: 1,
+              data: {
+                ticketNo: 'AF-009',
+                title: 'Compressor restart on site',
+                status: 'open',
+                refundStatus: '',
+                refundAmount: 0,
+              },
+            },
+          ],
+        })
+      }
+
+      throw new Error(`Unexpected request: ${path}`)
+    })
+
+    const mounted = mountAfterSalesView()
+    app = mounted.app
+    container = mounted.container
+
+    await waitForText(container, 'AF-001')
+
+    const statusInput = container?.querySelector<HTMLInputElement>('#after-sales-ticket-filter-status')
+    const searchInput = container?.querySelector<HTMLInputElement>('#after-sales-ticket-filter-search')
+    expect(statusInput).toBeTruthy()
+    expect(searchInput).toBeTruthy()
+    if (!statusInput || !searchInput) return
+
+    await setInputValue(statusInput, 'open')
+    await setInputValue(searchInput, 'compressor')
+    findButton(container, 'Apply ticket filters').click()
+    await waitForText(container, 'AF-009')
+
+    findButton(container, 'Clear ticket filters').click()
+    await waitForText(container, 'AF-001')
+
+    expect(statusInput.value).toBe('')
+    expect(searchInput.value).toBe('')
+    expect(apiFetchMock).toHaveBeenCalledWith('/api/after-sales/tickets', undefined)
+  })
+
   it('skips ticket loading when install state is failed', async () => {
     apiFetchMock.mockImplementation(async (path: string) => {
       if (path === '/api/after-sales/app-manifest') {
