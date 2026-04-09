@@ -466,13 +466,16 @@ describe('AfterSalesView service records panel', () => {
 
     const ticketInput = container.querySelector<HTMLInputElement>('#after-sales-service-record-ticket-no')
     const scheduledAtInput = container.querySelector<HTMLInputElement>('#after-sales-service-record-scheduled-at')
+    const technicianInput = container.querySelector<HTMLInputElement>('#after-sales-service-record-technician')
 
     expect(ticketInput).toBeTruthy()
     expect(scheduledAtInput).toBeTruthy()
-    if (!ticketInput || !scheduledAtInput) return
+    expect(technicianInput).toBeTruthy()
+    if (!ticketInput || !scheduledAtInput || !technicianInput) return
 
     await setInputValue(ticketInput, 'AF-404')
     await setInputValue(scheduledAtInput, '2026-04-10T09:15')
+    await setInputValue(technicianInput, 'Alex')
 
     findButton(container, 'Create service record').click()
 
@@ -480,6 +483,9 @@ describe('AfterSalesView service records panel', () => {
 
     expect(container.textContent).toContain('Existing service record')
     expect(container.textContent).toContain('After-sales ticket AF-404 not found')
+    expect(ticketInput.value).toBe('AF-404')
+    expect(scheduledAtInput.value).toBe('2026-04-10T09:15')
+    expect(technicianInput.value).toBe('Alex')
   })
 
   it('skips service-records loading before install and keeps the install CTA visible', async () => {
@@ -586,6 +592,147 @@ describe('AfterSalesView service records panel', () => {
     expect(container.textContent).toContain('Create service record')
     expect(container.textContent).toContain('Remote triage')
     expect(apiFetchMock).toHaveBeenCalledWith('/api/after-sales/service-records', undefined)
+  })
+
+  it('allows creating a service record while install state is partial', async () => {
+    apiFetchMock.mockImplementation(async (path: string, init?: RequestInit) => {
+      if (path === '/api/after-sales/app-manifest') {
+        return createResponse({
+          id: 'after-sales-default',
+          displayName: 'After Sales',
+          platformDependencies: ['core-backend'],
+          objects: [],
+          workflows: [],
+        })
+      }
+
+      if (path === '/api/after-sales/projects/current') {
+        return createResponse({
+          status: 'partial',
+          projectId: 'tenant:after-sales',
+          displayName: 'After Sales',
+          config: {
+            defaultSlaHours: 24,
+            urgentSlaHours: 4,
+            followUpAfterDays: 7,
+          },
+          installResult: {
+            status: 'partial',
+            createdObjects: [],
+            createdViews: [],
+            warnings: ['serviceRecord view missing'],
+            reportRef: 'install-004',
+          },
+          reportRef: 'install-004',
+        })
+      }
+
+      if (path === '/api/after-sales/tickets') {
+        return createResponse({
+          projectId: 'tenant:after-sales',
+          count: 1,
+          tickets: [
+            {
+              id: 'ticket-partial-1',
+              version: 1,
+              data: {
+                ticketNo: 'AF-PARTIAL-1',
+                title: 'Partial-state visit',
+                status: 'open',
+                refundStatus: 'approved',
+                refundAmount: 0,
+              },
+            },
+          ],
+        })
+      }
+
+      if (path === '/api/after-sales/service-records' && (!init || !init.method)) {
+        return createResponse({
+          projectId: 'tenant:after-sales',
+          count: 1,
+          serviceRecords: [
+            {
+              id: 'sr-partial-existing',
+              version: 1,
+              data: {
+                ticketNo: 'AF-OLD',
+                visitType: 'onsite',
+                scheduledAt: '2026-04-09T08:00:00.000Z',
+                technicianName: 'Alex',
+                workSummary: 'Partial-state baseline',
+                result: 'partial',
+              },
+            },
+          ],
+        })
+      }
+
+      if (path === '/api/after-sales/service-records' && init?.method === 'POST') {
+        expect(JSON.parse(String(init.body ?? '{}'))).toEqual({
+          serviceRecord: {
+            ticketNo: 'AF-PARTIAL-1',
+            visitType: 'pickup',
+            scheduledAt: '2026-04-11T10:00',
+            workSummary: 'Pickup arranged in partial state',
+            result: 'partial',
+          },
+        })
+
+        return createResponse(
+          {
+            projectId: 'tenant:after-sales',
+            serviceRecord: {
+              id: 'sr-partial-new',
+              version: 1,
+              data: {
+                ticketNo: 'AF-PARTIAL-1',
+                visitType: 'pickup',
+                scheduledAt: '2026-04-11T10:00',
+                workSummary: 'Pickup arranged in partial state',
+                result: 'partial',
+              },
+            },
+          },
+          { status: 201 },
+        )
+      }
+
+      throw new Error(`Unexpected request: ${path}`)
+    })
+
+    const mounted = mountAfterSalesView()
+    app = mounted.app
+    container = mounted.container
+
+    await waitForText(container, 'Partial-state baseline')
+
+    const ticketInput = container.querySelector<HTMLInputElement>('#after-sales-service-record-ticket-no')
+    const visitTypeSelect = container.querySelector<HTMLSelectElement>('#after-sales-service-record-visit-type')
+    const scheduledAtInput = container.querySelector<HTMLInputElement>('#after-sales-service-record-scheduled-at')
+    const resultSelect = container.querySelector<HTMLSelectElement>('#after-sales-service-record-result')
+    const summaryTextarea = container.querySelector<HTMLTextAreaElement>('#after-sales-service-record-summary')
+
+    expect(ticketInput).toBeTruthy()
+    expect(visitTypeSelect).toBeTruthy()
+    expect(scheduledAtInput).toBeTruthy()
+    expect(resultSelect).toBeTruthy()
+    expect(summaryTextarea).toBeTruthy()
+    if (!ticketInput || !visitTypeSelect || !scheduledAtInput || !resultSelect || !summaryTextarea) return
+
+    await setInputValue(ticketInput, 'AF-PARTIAL-1')
+    await setSelectValue(visitTypeSelect, 'pickup')
+    await setInputValue(scheduledAtInput, '2026-04-11T10:00')
+    await setSelectValue(resultSelect, 'partial')
+    await setTextareaValue(summaryTextarea, 'Pickup arranged in partial state')
+
+    findButton(container, 'Create service record').click()
+
+    await waitForText(container, 'Created service record for AF-PARTIAL-1')
+
+    expect(container.textContent).toContain('Pickup arranged in partial state')
+    expect(container.textContent).toContain('Partial-state baseline')
+    expect(container.textContent).toContain('Initialization completed with warnings')
   })
 
   it('skips service-record loading when install state is failed', async () => {
