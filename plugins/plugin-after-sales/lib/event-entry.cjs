@@ -219,6 +219,49 @@ function buildCustomerCommand(input) {
   }
 }
 
+function buildFollowUpCommand(input) {
+  const followUp =
+    input && typeof input.followUp === 'object' && !Array.isArray(input.followUp)
+      ? input.followUp
+      : input || {}
+
+  const ticketNo = requiredString(followUp.ticketNo ?? input.ticketNo, 'followUp.ticketNo')
+  const customerName = requiredString(
+    followUp.customerName ?? input.customerName,
+    'followUp.customerName',
+  )
+  const dueAt = requiredString(
+    followUp.dueAt ?? input.dueAt,
+    'followUp.dueAt',
+  )
+  const followUpType = normalizeEnumValue(
+    followUp.followUpType ?? input.followUpType,
+    'followUp.followUpType',
+    ['phone', 'message', 'onsite'],
+    'phone',
+  )
+  const ownerName = optionalString(followUp.ownerName ?? input.ownerName)
+  const summary = optionalString(followUp.summary ?? input.summary)
+  const status = normalizeEnumValue(
+    followUp.status ?? input.status,
+    'followUp.status',
+    ['pending', 'done', 'skipped'],
+    'pending',
+  )
+
+  return {
+    recordData: {
+      ticketNo,
+      customerName,
+      dueAt,
+      followUpType,
+      status,
+      ...(ownerName ? { ownerName } : {}),
+      ...(summary ? { summary } : {}),
+    },
+  }
+}
+
 function buildUpdateCustomerCommand(input, existingCustomer) {
   const command = input && typeof input === 'object' && !Array.isArray(input) ? input : {}
   const customerInput =
@@ -615,6 +658,7 @@ function buildServiceRecordedEventPayload(input, meta) {
 module.exports = {
   buildCreateTicketCommand,
   buildCustomerCommand,
+  buildFollowUpCommand,
   buildUpdateCustomerCommand,
   buildInstalledAssetCommand,
   buildUpdateInstalledAssetCommand,

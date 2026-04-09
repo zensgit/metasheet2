@@ -2252,6 +2252,123 @@ describe('after-sales plugin install integration', () => {
     })
   })
 
+  it('creates follow-ups through the real after-sales routes', async () => {
+    if (!baseUrl || !pool) return
+
+    const tokenRes = await requestJson(
+      `${baseUrl}/api/auth/dev-token?userId=after-sales-follow-up-create-it&roles=admin&perms=*:*`,
+    )
+    const token = (tokenRes.body as { token?: string } | undefined)?.token
+    expect(token).toBeTruthy()
+
+    const installRes = await requestJson(`${baseUrl}/api/after-sales/projects/install`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        templateId: 'after-sales-default',
+        displayName: 'After Sales Follow-up Create Flow',
+      }),
+    })
+    expect(installRes.status).toBe(200)
+
+    const createRes = await requestJson(`${baseUrl}/api/after-sales/follow-ups`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        followUp: {
+          ticketNo: 'TK-5003',
+          customerName: 'Charlie Logistics',
+          dueAt: '2026-04-12T09:30:00Z',
+          followUpType: 'message',
+          ownerName: 'CSR Wang',
+          summary: 'Send follow-up message after delivery confirmation',
+        },
+      }),
+    })
+
+    expect(createRes.status).toBe(201)
+    const createBody = createRes.body as {
+      ok?: boolean
+      data?: {
+        projectId?: string
+        followUp?: {
+          id?: string
+          version?: number
+          data?: Record<string, unknown>
+        }
+      }
+    }
+    expect(createBody.ok).toBe(true)
+    expect(createBody.data?.followUp?.data).toMatchObject({
+      ticketNo: 'TK-5003',
+      customerName: 'Charlie Logistics',
+      dueAt: '2026-04-12T09:30:00Z',
+      followUpType: 'message',
+      ownerName: 'CSR Wang',
+      status: 'pending',
+      summary: 'Send follow-up message after delivery confirmation',
+    })
+
+    const followUpSheetId = stableMetaId('sheet', PROJECT_ID, 'followUp')
+    const createdFollowUpId = createBody.data?.followUp?.id
+    expect(createdFollowUpId).toBeTruthy()
+
+    const recordRes = await waitFor(
+      () => pool.query<{ id: string; version: number; data: Record<string, unknown> }>(
+        'SELECT id, version, data FROM meta_records WHERE id = $1 AND sheet_id = $2',
+        [createdFollowUpId, followUpSheetId],
+      ),
+      (result) => result.rows.length === 1,
+    )
+    expect(recordRes.rows).toHaveLength(1)
+    expect(recordRes.rows[0].data).toMatchObject({
+      [stFieldId('followUp', 'ticketNo')]: 'TK-5003',
+      [stFieldId('followUp', 'customerName')]: 'Charlie Logistics',
+      [stFieldId('followUp', 'dueAt')]: '2026-04-12T09:30:00Z',
+      [stFieldId('followUp', 'followUpType')]: 'message',
+      [stFieldId('followUp', 'ownerName')]: 'CSR Wang',
+      [stFieldId('followUp', 'status')]: 'pending',
+      [stFieldId('followUp', 'summary')]: 'Send follow-up message after delivery confirmation',
+    })
+
+    const listRes = await requestJson(
+      `${baseUrl}/api/after-sales/follow-ups?status=pending&ticketNo=TK-5003&search=delivery`,
+      {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      },
+    )
+    expect(listRes.status).toBe(200)
+    const listBody = listRes.body as {
+      ok?: boolean
+      data?: {
+        count?: number
+        followUps?: Array<{
+          id?: string
+          data?: Record<string, unknown>
+        }>
+      }
+    }
+    expect(listBody.ok).toBe(true)
+    expect(listBody.data?.count).toBe(1)
+    expect(listBody.data?.followUps?.[0]).toMatchObject({
+      id: createdFollowUpId,
+      data: {
+        ticketNo: 'TK-5003',
+        customerName: 'Charlie Logistics',
+        followUpType: 'message',
+        status: 'pending',
+      },
+    })
+  })
+
   it('creates customers through the real after-sales routes', async () => {
     if (!baseUrl || !pool) return
 
