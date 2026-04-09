@@ -466,6 +466,15 @@ function createContext(): {
           [srPk('result')]: 'resolved',
           ...input.changes,
         }
+      : input.sheetId.includes('customer')
+      ? {
+          [cuPk('customerCode')]: 'CUS-1001',
+          [cuPk('name')]: 'Alice Plant',
+          [cuPk('phone')]: '13800138000',
+          [cuPk('email')]: 'alice@example.com',
+          [cuPk('status')]: 'active',
+          ...input.changes,
+        }
       : {
           [pk('ticketNo')]: 'TK-2001',
           [pk('title')]: 'No cooling output',
@@ -1643,6 +1652,212 @@ describe('plugin-after-sales routes', () => {
       },
     })
     expect(createRecord).not.toHaveBeenCalled()
+  })
+
+  it('returns 403 for customers update when caller lacks after-sales write access', async () => {
+    const handler = routes.get('PATCH /api/after-sales/customers/:customerId')
+    const res = new FakeResponse()
+
+    await handler?.(buildReq({
+      user: {
+        id: 'user_42',
+        tenantId: 'tenant_42',
+        role: 'user',
+        roles: ['user'],
+        perms: ['after_sales:read'],
+      },
+      params: {
+        customerId: 'rec_customer_001',
+      },
+      body: {
+        customer: {
+          customerCode: 'CUS-1001',
+          name: 'Alice Plant',
+        },
+      },
+    }), res)
+
+    expect(res.statusCode).toBe(403)
+    expect(res.body).toEqual({
+      ok: false,
+      error: {
+        code: 'FORBIDDEN',
+        message: 'After-sales write access required',
+      },
+    })
+    expect(patchRecord).not.toHaveBeenCalled()
+  })
+
+  it('updates a customer through the multitable patch seam', async () => {
+    const handler = routes.get('PATCH /api/after-sales/customers/:customerId')
+    const res = new FakeResponse()
+
+    db.rows.push({
+      id: 'fake-uuid-1',
+      tenant_id: 'tenant_42',
+      app_id: 'after-sales',
+      project_id: 'tenant_42:after-sales',
+      template_id: 'after-sales-default',
+      template_version: '0.1.0',
+      mode: 'enable',
+      status: 'installed',
+      created_objects_json: JSON.stringify(['serviceTicket', 'customer']),
+      created_views_json: JSON.stringify(['ticket-board', 'customer-grid']),
+      warnings_json: JSON.stringify([]),
+      display_name: 'After-sales',
+      config_json: JSON.stringify({}),
+      last_install_at: new Date(),
+      created_at: new Date(),
+    })
+
+    await handler?.(buildReq({
+      user: {
+        id: 'writer_42',
+        tenantId: 'tenant_42',
+        role: 'user',
+        roles: ['user'],
+        perms: ['after_sales:write'],
+      },
+      params: {
+        customerId: 'rec_customer_001',
+      },
+      body: {
+        customer: {
+          name: 'Alice Plant Updated',
+          phone: '',
+          email: 'alice-updated@example.com',
+        },
+      },
+    }), res)
+
+    expect(res.statusCode).toBe(200)
+    expect(getRecord).toHaveBeenCalledWith({
+      sheetId: 'tenant_42:after-sales:customer:sheet',
+      recordId: 'rec_customer_001',
+    })
+    expect(patchRecord).toHaveBeenCalledWith({
+      sheetId: 'tenant_42:after-sales:customer:sheet',
+      recordId: 'rec_customer_001',
+      changes: {
+        [cuPk('name')]: 'Alice Plant Updated',
+        [cuPk('phone')]: null,
+        [cuPk('email')]: 'alice-updated@example.com',
+      },
+    })
+    expect(res.body.data).toEqual({
+      projectId: 'tenant_42:after-sales',
+      customer: {
+        id: 'rec_customer_001',
+        version: 4,
+        data: {
+          customerCode: 'CUS-1001',
+          name: 'Alice Plant Updated',
+          phone: null,
+          email: 'alice-updated@example.com',
+          status: 'active',
+        },
+      },
+    })
+  })
+
+  it('returns 404 when updating a missing customer', async () => {
+    const handler = routes.get('PATCH /api/after-sales/customers/:customerId')
+    const res = new FakeResponse()
+    getRecord.mockRejectedValueOnce(Object.assign(new Error('Record not found: rec_customer_missing'), {
+      code: 'NOT_FOUND',
+    }))
+
+    db.rows.push({
+      id: 'fake-uuid-1',
+      tenant_id: 'tenant_42',
+      app_id: 'after-sales',
+      project_id: 'tenant_42:after-sales',
+      template_id: 'after-sales-default',
+      template_version: '0.1.0',
+      mode: 'enable',
+      status: 'installed',
+      created_objects_json: JSON.stringify(['serviceTicket', 'customer']),
+      created_views_json: JSON.stringify(['ticket-board', 'customer-grid']),
+      warnings_json: JSON.stringify([]),
+      display_name: 'After-sales',
+      config_json: JSON.stringify({}),
+      last_install_at: new Date(),
+      created_at: new Date(),
+    })
+
+    await handler?.(buildReq({
+      user: {
+        id: 'writer_42',
+        tenantId: 'tenant_42',
+        role: 'user',
+        roles: ['user'],
+        perms: ['after_sales:write'],
+      },
+      params: {
+        customerId: 'rec_customer_missing',
+      },
+      body: {
+        customer: {
+          customerCode: 'CUS-MISSING',
+          name: 'Missing Customer',
+        },
+      },
+    }), res)
+
+    expect(res.statusCode).toBe(404)
+    expect(res.body).toEqual({
+      ok: false,
+      error: {
+        code: 'NOT_FOUND',
+        message: 'Record not found: rec_customer_missing',
+      },
+    })
+    expect(patchRecord).not.toHaveBeenCalled()
+  })
+
+  it('returns 409 when customers are updated from a failed install state', async () => {
+    const handler = routes.get('PATCH /api/after-sales/customers/:customerId')
+    const res = new FakeResponse()
+
+    db.rows.push({
+      id: 'fake-uuid-1',
+      tenant_id: 'tenant_42',
+      app_id: 'after-sales',
+      project_id: 'tenant_42:after-sales',
+      template_id: 'after-sales-default',
+      template_version: '0.1.0',
+      mode: 'reinstall',
+      status: 'failed',
+      created_objects_json: JSON.stringify(['serviceTicket', 'customer']),
+      created_views_json: JSON.stringify(['ticket-board', 'customer-grid']),
+      warnings_json: JSON.stringify(['customer projection failed']),
+      display_name: 'After-sales',
+      config_json: JSON.stringify({}),
+      last_install_at: new Date(),
+      created_at: new Date(),
+    })
+
+    await handler?.(buildReq({
+      params: {
+        customerId: 'rec_customer_001',
+      },
+      body: {
+        customer: {
+          customerCode: 'CUS-1001',
+          name: 'Alice Plant',
+        },
+      },
+    }), res)
+
+    expect(res.statusCode).toBe(409)
+    expect(res.body).toEqual({
+      ok: false,
+      error: {
+        code: 'AFTER_SALES_NOT_INSTALLED',
+        message: 'After-sales must be installed before updating customers',
+      },
+    })
+    expect(patchRecord).not.toHaveBeenCalled()
   })
 
   it('returns 403 for customers delete when caller lacks after-sales write access', async () => {

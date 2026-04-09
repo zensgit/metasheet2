@@ -1102,14 +1102,14 @@
           <div class="after-sales-view__action-row after-sales-view__action-row--compact">
             <button
               class="after-sales-view__primary-btn"
-              :disabled="customerCreating || customersLoading || Boolean(customerDeletingId) || !canSubmitCustomer"
+              :disabled="customerCreating || customersLoading || Boolean(customerDeletingId) || Boolean(customerUpdatingId) || Boolean(customerEditingId) || !canSubmitCustomer"
               @click="submitCustomer"
             >
               {{ customerCreating ? 'Creating...' : 'Create customer' }}
             </button>
             <button
               class="after-sales-view__ghost-btn"
-              :disabled="customerCreating || customersLoading || Boolean(customerDeletingId)"
+              :disabled="customerCreating || customersLoading || Boolean(customerDeletingId) || Boolean(customerUpdatingId) || Boolean(customerEditingId)"
               @click="resetCustomerDraft"
             >
               Reset customer draft
@@ -1147,21 +1147,21 @@
           <div class="after-sales-view__action-row after-sales-view__action-row--compact">
             <button
               class="after-sales-view__ghost-btn"
-              :disabled="customersLoading || customerCreating || Boolean(customerDeletingId)"
+              :disabled="customersLoading || customerCreating || Boolean(customerDeletingId) || Boolean(customerUpdatingId) || Boolean(customerEditingId)"
               @click="refreshCustomers"
             >
               {{ customersLoading ? 'Refreshing...' : 'Refresh list' }}
             </button>
             <button
               class="after-sales-view__ghost-btn"
-              :disabled="customersLoading || customerCreating || Boolean(customerDeletingId)"
+              :disabled="customersLoading || customerCreating || Boolean(customerDeletingId) || Boolean(customerUpdatingId) || Boolean(customerEditingId)"
               @click="applyCustomerFilters"
             >
               {{ customersLoading ? 'Applying...' : 'Apply filters' }}
             </button>
             <button
               class="after-sales-view__ghost-btn"
-              :disabled="customersLoading || customerCreating || Boolean(customerDeletingId)"
+              :disabled="customersLoading || customerCreating || Boolean(customerDeletingId) || Boolean(customerUpdatingId) || Boolean(customerEditingId)"
               @click="resetCustomerFilters"
             >
               Clear filters
@@ -1173,12 +1173,72 @@
           <div v-else-if="customers.length" class="after-sales-view__customer-list">
             <article v-for="customer in customers" :key="customer.id" class="after-sales-view__customer-row">
               <div class="after-sales-view__customer-main">
-                <div class="after-sales-view__customer-headline">
-                  <strong>{{ customer.data.name }}</strong>
-                  <span class="after-sales-view__tag">{{ customer.data.status }}</span>
-                  <span class="after-sales-view__tag after-sales-view__tag--subtle">{{ customer.data.customerCode }}</span>
-                </div>
-                <p>{{ customer.data.email || customer.data.phone || 'No contact details yet.' }}</p>
+                <template v-if="customerEditingId === customer.id">
+                  <div class="after-sales-view__customer-headline">
+                    <strong>{{ customerEditDraft.name || customer.data.name }}</strong>
+                    <span class="after-sales-view__tag">{{ customerEditDraft.status }}</span>
+                    <span class="after-sales-view__tag after-sales-view__tag--subtle">
+                      {{ customerEditDraft.customerCode || customer.data.customerCode }}
+                    </span>
+                  </div>
+                  <form class="after-sales-view__customer-form after-sales-view__ticket-form--inline" @submit.prevent="submitCustomerEdit(customer)">
+                    <label class="after-sales-view__field">
+                      <span>Customer code</span>
+                      <input
+                        :id="`after-sales-customer-edit-code-${customer.id}`"
+                        v-model="customerEditDraft.customerCode"
+                        class="after-sales-view__field-input"
+                        type="text"
+                      />
+                    </label>
+                    <label class="after-sales-view__field">
+                      <span>Status</span>
+                      <select
+                        :id="`after-sales-customer-edit-status-${customer.id}`"
+                        v-model="customerEditDraft.status"
+                        class="after-sales-view__field-input"
+                      >
+                        <option value="active">Active</option>
+                        <option value="inactive">Inactive</option>
+                      </select>
+                    </label>
+                    <label class="after-sales-view__field">
+                      <span>Name</span>
+                      <input
+                        :id="`after-sales-customer-edit-name-${customer.id}`"
+                        v-model="customerEditDraft.name"
+                        class="after-sales-view__field-input"
+                        type="text"
+                      />
+                    </label>
+                    <label class="after-sales-view__field">
+                      <span>Phone</span>
+                      <input
+                        :id="`after-sales-customer-edit-phone-${customer.id}`"
+                        v-model="customerEditDraft.phone"
+                        class="after-sales-view__field-input"
+                        type="text"
+                      />
+                    </label>
+                    <label class="after-sales-view__field after-sales-view__field--wide">
+                      <span>Email</span>
+                      <input
+                        :id="`after-sales-customer-edit-email-${customer.id}`"
+                        v-model="customerEditDraft.email"
+                        class="after-sales-view__field-input"
+                        type="email"
+                      />
+                    </label>
+                  </form>
+                </template>
+                <template v-else>
+                  <div class="after-sales-view__customer-headline">
+                    <strong>{{ customer.data.name }}</strong>
+                    <span class="after-sales-view__tag">{{ customer.data.status }}</span>
+                    <span class="after-sales-view__tag after-sales-view__tag--subtle">{{ customer.data.customerCode }}</span>
+                  </div>
+                  <p>{{ customer.data.email || customer.data.phone || 'No contact details yet.' }}</p>
+                </template>
               </div>
 
               <div class="after-sales-view__customer-side">
@@ -1192,10 +1252,35 @@
                     <dd>{{ customer.data.email || '—' }}</dd>
                   </div>
                 </dl>
+                <div v-if="customerEditingId === customer.id" class="after-sales-view__ticket-actions">
+                  <button
+                    class="after-sales-view__primary-btn after-sales-view__ticket-action-btn"
+                    :disabled="customerUpdatingId === customer.id || customersLoading || !canSubmitCustomerEdit"
+                    @click="submitCustomerEdit(customer)"
+                  >
+                    {{ customerUpdatingId === customer.id ? 'Saving...' : 'Save changes' }}
+                  </button>
+                  <button
+                    class="after-sales-view__ghost-btn after-sales-view__ticket-action-btn"
+                    :disabled="customerUpdatingId === customer.id"
+                    @click="cancelCustomerEdit"
+                  >
+                    Cancel edit
+                  </button>
+                </div>
+                <button
+                  v-if="customerEditingId !== customer.id"
+                  class="after-sales-view__ghost-btn after-sales-view__customer-delete"
+                  :aria-label="`Edit customer ${customer.data.customerCode}`"
+                  :disabled="Boolean(customerDeletingId) || Boolean(customerUpdatingId) || Boolean(customerEditingId)"
+                  @click="startCustomerEdit(customer)"
+                >
+                  Edit
+                </button>
                 <button
                   class="after-sales-view__ghost-btn after-sales-view__customer-delete"
                   :aria-label="`Delete customer ${customer.data.customerCode}`"
-                  :disabled="Boolean(customerDeletingId) || customerCreating || customersLoading"
+                  :disabled="Boolean(customerDeletingId) || customerCreating || customersLoading || Boolean(customerUpdatingId) || Boolean(customerEditingId)"
                   @click="deleteCustomer(customer)"
                 >
                   {{ customerDeletingId === customer.id ? 'Deleting...' : 'Delete' }}
@@ -1425,6 +1510,14 @@ interface CustomerDraft {
   status: 'active' | 'inactive'
 }
 
+interface CustomerEditDraft {
+  customerCode: string
+  name: string
+  phone: string
+  email: string
+  status: 'active' | 'inactive'
+}
+
 interface InstalledAssetDraft {
   assetCode: string
   serialNo: string
@@ -1554,6 +1647,7 @@ const customersLoading = ref(false)
 const installedAssetCreating = ref(false)
 const customerCreating = ref(false)
 const customerDeletingId = ref('')
+const customerUpdatingId = ref('')
 const installedAssetUpdatingId = ref('')
 const installedAssetDeletingId = ref('')
 const serviceRecordsLoading = ref(false)
@@ -1596,6 +1690,8 @@ const installedAssetFilters = ref<InstalledAssetFilterDraft>({
   search: '',
 })
 const customerDraft = ref<CustomerDraft>(createCustomerDraft())
+const customerEditingId = ref('')
+const customerEditDraft = ref<CustomerEditDraft>(createCustomerEditDraft())
 const customerFilters = ref<CustomerFilterDraft>({
   status: '',
   search: '',
@@ -1626,6 +1722,11 @@ const canSubmitCustomer = computed(
   () =>
     toText(customerDraft.value.customerCode).length > 0 &&
     toText(customerDraft.value.name).length > 0,
+)
+const canSubmitCustomerEdit = computed(
+  () =>
+    toText(customerEditDraft.value.customerCode).length > 0 &&
+    toText(customerEditDraft.value.name).length > 0,
 )
 const canSubmitServiceRecord = computed(
   () =>
@@ -1797,6 +1898,20 @@ function createCustomerDraft(): CustomerDraft {
   }
 }
 
+function createCustomerEditDraft(customer?: Partial<CustomerViewModel['data']> | null): CustomerEditDraft {
+  return {
+    customerCode: toText(customer?.customerCode),
+    name: toText(customer?.name),
+    phone: toText(customer?.phone),
+    email: toText(customer?.email),
+    status: normalizeCustomerStatus(customer?.status),
+  }
+}
+
+function normalizeCustomerStatus(value: unknown): CustomerEditDraft['status'] {
+  return value === 'inactive' ? 'inactive' : 'active'
+}
+
 function createInstalledAssetEditDraft(
   asset?: Partial<InstalledAssetViewModel['data']> | null,
 ): InstalledAssetEditDraft {
@@ -1884,6 +1999,12 @@ function resetCustomerDraft() {
   customerDraft.value = createCustomerDraft()
   customerSubmitError.value = ''
   customerSubmitSuccess.value = ''
+}
+
+function cancelCustomerEdit() {
+  customerEditingId.value = ''
+  customerEditDraft.value = createCustomerEditDraft()
+  customerSubmitError.value = ''
 }
 
 function cancelInstalledAssetEdit() {
@@ -1985,6 +2106,39 @@ function buildCustomerPayload() {
       ...(phone ? { phone } : {}),
       ...(email ? { email } : {}),
     },
+  }
+}
+
+function buildCustomerUpdatePayload(customer: CustomerViewModel) {
+  const changes: Record<string, string> = {}
+  const customerCode = toText(customerEditDraft.value.customerCode)
+  const name = toText(customerEditDraft.value.name)
+  const phone = toText(customerEditDraft.value.phone)
+  const email = toText(customerEditDraft.value.email)
+  const status = customerEditDraft.value.status
+
+  if (customerCode !== toText(customer.data.customerCode)) {
+    changes.customerCode = customerCode
+  }
+  if (name !== toText(customer.data.name)) {
+    changes.name = name
+  }
+  if (status !== normalizeCustomerStatus(customer.data.status)) {
+    changes.status = status
+  }
+  if (phone !== toText(customer.data.phone)) {
+    changes.phone = phone
+  }
+  if (email !== toText(customer.data.email)) {
+    changes.email = email
+  }
+
+  if (!Object.keys(changes).length) {
+    return null
+  }
+
+  return {
+    customer: changes,
   }
 }
 
@@ -2269,6 +2423,16 @@ function matchesCustomerFilters(customer: CustomerViewModel) {
   return true
 }
 
+function startCustomerEdit(customer: CustomerViewModel) {
+  if (!customer.id || customerUpdatingId.value || customerDeletingId.value || customerCreating.value || customersLoading.value) {
+    return
+  }
+  customerEditingId.value = customer.id
+  customerEditDraft.value = createCustomerEditDraft(customer.data)
+  customerSubmitError.value = ''
+  customerSubmitSuccess.value = ''
+}
+
 function startInstalledAssetEdit(asset: InstalledAssetViewModel) {
   if (!asset.id || installedAssetUpdatingId.value || installedAssetDeletingId.value || installedAssetCreating.value || installedAssetsLoading.value) {
     return
@@ -2408,14 +2572,14 @@ async function loadCustomersForCurrentState(state: CurrentResponse): Promise<voi
 }
 
 async function applyCustomerFilters() {
-  if (customersLoading.value || customerCreating.value || customerDeletingId.value) {
+  if (customersLoading.value || customerCreating.value || customerDeletingId.value || customerUpdatingId.value || customerEditingId.value) {
     return
   }
   await loadCustomersForCurrentState(current.value)
 }
 
 async function resetCustomerFilters() {
-  if (customersLoading.value || customerCreating.value || customerDeletingId.value) {
+  if (customersLoading.value || customerCreating.value || customerDeletingId.value || customerUpdatingId.value || customerEditingId.value) {
     return
   }
   customerFilters.value = {
@@ -2426,14 +2590,14 @@ async function resetCustomerFilters() {
 }
 
 async function refreshCustomers() {
-  if (customersLoading.value || customerCreating.value || customerDeletingId.value) {
+  if (customersLoading.value || customerCreating.value || customerDeletingId.value || customerUpdatingId.value || customerEditingId.value) {
     return
   }
   await loadCustomersForCurrentState(current.value)
 }
 
 async function submitCustomer() {
-  if (!canSubmitCustomer.value || customersLoading.value || customerCreating.value || customerDeletingId.value) {
+  if (!canSubmitCustomer.value || customersLoading.value || customerCreating.value || customerDeletingId.value || customerUpdatingId.value || customerEditingId.value) {
     return
   }
 
@@ -2464,8 +2628,56 @@ async function submitCustomer() {
   }
 }
 
+async function submitCustomerEdit(customer: CustomerViewModel) {
+  if (
+    !customer.id ||
+    customerEditingId.value !== customer.id ||
+    customerUpdatingId.value ||
+    !canSubmitCustomerEdit.value
+  ) {
+    return
+  }
+
+  customerUpdatingId.value = customer.id
+  customerSubmitError.value = ''
+  customerSubmitSuccess.value = ''
+
+  try {
+    const updatePayload = buildCustomerUpdatePayload(customer)
+    if (!updatePayload) {
+      customerEditingId.value = ''
+      customerEditDraft.value = createCustomerEditDraft()
+      return
+    }
+
+    const payload = await readEnvelope<CreateCustomerResponse>(
+      `/api/after-sales/customers/${encodeURIComponent(customer.id)}`,
+      {
+        method: 'PATCH',
+        body: JSON.stringify(updatePayload),
+      },
+    )
+    const nextCustomer = payload?.customer ? normalizeCustomerRow(payload.customer) : null
+
+    if (nextCustomer) {
+      customers.value = matchesCustomerFilters(nextCustomer)
+        ? customers.value.map((item) => (item.id === nextCustomer.id ? nextCustomer : item))
+        : customers.value.filter((item) => item.id !== nextCustomer.id)
+      customersError.value = ''
+      customerSubmitSuccess.value = `Updated customer ${nextCustomer.data.customerCode}`
+    }
+
+    customerEditingId.value = ''
+    customerEditDraft.value = createCustomerEditDraft()
+  } catch (err: unknown) {
+    customerSubmitError.value = err instanceof Error ? err.message : 'Failed to update customer'
+  } finally {
+    customerUpdatingId.value = ''
+  }
+}
+
 async function deleteCustomer(customer: CustomerViewModel) {
-  if (!customer.id || customerDeletingId.value || customerCreating.value || customersLoading.value) {
+  if (!customer.id || customerDeletingId.value || customerCreating.value || customersLoading.value || customerUpdatingId.value || customerEditingId.value) {
     return
   }
 

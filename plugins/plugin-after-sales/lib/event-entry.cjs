@@ -219,6 +219,54 @@ function buildCustomerCommand(input) {
   }
 }
 
+function buildUpdateCustomerCommand(input, existingCustomer) {
+  const command = input && typeof input === 'object' && !Array.isArray(input) ? input : {}
+  const customerInput =
+    command.customer && typeof command.customer === 'object' && !Array.isArray(command.customer)
+      ? command.customer
+      : command
+  const currentCustomer =
+    existingCustomer && typeof existingCustomer === 'object' ? existingCustomer : {}
+
+  const changes = {}
+  const hasCustomerCode = hasOwnField(customerInput, 'customerCode') || hasOwnField(command, 'customerCode')
+  const hasName = hasOwnField(customerInput, 'name') || hasOwnField(command, 'name')
+  const hasStatus = hasOwnField(customerInput, 'status') || hasOwnField(command, 'status')
+  const hasPhone = hasOwnField(customerInput, 'phone') || hasOwnField(command, 'phone')
+  const hasEmail = hasOwnField(customerInput, 'email') || hasOwnField(command, 'email')
+
+  if (hasCustomerCode) {
+    changes.customerCode = requiredString(
+      customerInput.customerCode ?? command.customerCode,
+      'customer.customerCode',
+    )
+  }
+  if (hasName) {
+    changes.name = requiredString(
+      customerInput.name ?? command.name,
+      'customer.name',
+    )
+  }
+  if (hasStatus) {
+    changes.status = normalizeEnumValue(
+      customerInput.status ?? command.status,
+      'customer.status',
+      ['active', 'inactive'],
+      optionalString(currentCustomer.status) || 'active',
+    )
+  }
+  if (hasPhone) {
+    changes.phone = optionalString(customerInput.phone ?? command.phone) || null
+  }
+  if (hasEmail) {
+    changes.email = optionalString(customerInput.email ?? command.email) || null
+  }
+
+  return {
+    changes,
+  }
+}
+
 function buildUpdateInstalledAssetCommand(input, existingInstalledAsset) {
   const command = input && typeof input === 'object' && !Array.isArray(input) ? input : {}
   const installedAsset =
@@ -567,6 +615,7 @@ function buildServiceRecordedEventPayload(input, meta) {
 module.exports = {
   buildCreateTicketCommand,
   buildCustomerCommand,
+  buildUpdateCustomerCommand,
   buildInstalledAssetCommand,
   buildUpdateInstalledAssetCommand,
   buildUpdateTicketCommand,

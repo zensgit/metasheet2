@@ -20,6 +20,7 @@ const {
   buildCreateTicketCommand,
   buildCustomerCommand,
   buildInstalledAssetCommand,
+  buildUpdateCustomerCommand,
   buildUpdateInstalledAssetCommand,
   buildUpdateTicketCommand,
   buildRefundDecisionEventPayload,
@@ -389,6 +390,19 @@ async function getInstalledAssetById(multitableApi, projectId, installedAssetId)
     sheetId,
     record,
     logicalData: await fromPhysicalInstalledAssetData(multitableApi.provisioning, projectId, record.data),
+  }
+}
+
+async function getCustomerById(multitableApi, projectId, customerId) {
+  const sheetId = await findObjectSheetId(multitableApi.provisioning, projectId, 'customer')
+  const record = await multitableApi.records.getRecord({
+    sheetId,
+    recordId: customerId,
+  })
+  return {
+    sheetId,
+    record,
+    logicalData: await fromPhysicalCustomerData(multitableApi.provisioning, projectId, record.data),
   }
 }
 
@@ -1980,6 +1994,112 @@ module.exports = {
           res.status(500).json({
             ok: false,
             error: { code: 'INTERNAL_ERROR', message: 'Failed to delete after-sales customer' },
+          })
+        }
+      },
+    )
+
+    context.api.http.addRoute(
+      'PATCH',
+      '/api/after-sales/customers/:customerId',
+      async (req, res) => {
+        try {
+          const userId = getUserId(req)
+          if (!userId) {
+            sendUnauthorized(res)
+            return
+          }
+          if (!hasAfterSalesWriteAccess(req)) {
+            sendWriteForbidden(res)
+            return
+          }
+
+          const customerId =
+            typeof req?.params?.customerId === 'string' ? req.params.customerId.trim() : ''
+          if (!customerId) {
+            res.status(400).json({
+              ok: false,
+              error: { code: 'VALIDATION_ERROR', message: 'customerId is required' },
+            })
+            return
+          }
+
+          const multitableApi = getMultitableWriteApi(context)
+          if (!multitableApi) {
+            res.status(503).json({
+              ok: false,
+              error: {
+                code: 'MULTITABLE_UNAVAILABLE',
+                message: 'Multitable record writer is not available on plugin context',
+              },
+            })
+            return
+          }
+
+          const tenantId = getTenantId(req, context.logger)
+          const current = await installer.loadCurrent(context, tenantId, appManifest.id)
+          if (!current || !isOperationalAfterSalesStatus(current.status)) {
+            res.status(409).json({
+              ok: false,
+              error: {
+                code: 'AFTER_SALES_NOT_INSTALLED',
+                message: 'After-sales must be installed before updating customers',
+              },
+            })
+            return
+          }
+
+          const projectId = current.projectId || installer.getProjectId(tenantId, appManifest.id)
+          const { sheetId, record, logicalData } = await getCustomerById(multitableApi, projectId, customerId)
+          const command = buildUpdateCustomerCommand((req && req.body) || {}, {
+            id: record.id,
+            ...logicalData,
+          })
+          const updatedRecord = await multitableApi.records.patchRecord({
+            sheetId,
+            recordId: customerId,
+            changes: await toPhysicalCustomerData(multitableApi.provisioning, projectId, command.changes),
+          })
+          const logicalRecordData = await fromPhysicalCustomerData(
+            multitableApi.provisioning,
+            projectId,
+            updatedRecord.data,
+          )
+
+          res.json({
+            ok: true,
+            data: {
+              projectId,
+              customer: {
+                id: updatedRecord.id,
+                version: updatedRecord.version,
+                data: logicalRecordData,
+              },
+            },
+          })
+        } catch (err) {
+          if (err && err.code === 'AFTER_SALES_EVENT_VALIDATION_FAILED') {
+            sendBadRequest(res, err)
+            return
+          }
+          if (err && err.code === 'VALIDATION_ERROR') {
+            res.status(400).json({
+              ok: false,
+              error: { code: err.code, message: err.message },
+            })
+            return
+          }
+          if (err && err.code === 'NOT_FOUND') {
+            res.status(404).json({
+              ok: false,
+              error: { code: err.code, message: err.message },
+            })
+            return
+          }
+          logger.error && logger.error('after-sales update customer failed', err)
+          res.status(500).json({
+            ok: false,
+            error: { code: 'INTERNAL_ERROR', message: 'Failed to update after-sales customer' },
           })
         }
       },
