@@ -770,4 +770,211 @@ describe('AfterSalesView customers panel', () => {
     expect(nameInput.value).toBe('Draft Customer')
     expect(customerSection.textContent).toContain('Alice Plant')
   })
+
+  it('deletes a customer from the visible list without reloading the page', async () => {
+    apiFetchMock.mockImplementation(async (path: string, options?: RequestInit) => {
+      if (path === '/api/after-sales/app-manifest') {
+        return createResponse({
+          id: 'after-sales-default',
+          displayName: 'After Sales',
+          platformDependencies: ['core-backend'],
+          objects: [{ id: 'customer' }],
+          workflows: [],
+        })
+      }
+
+      if (path === '/api/after-sales/projects/current') {
+        return createResponse({
+          status: 'installed',
+          projectId: 'tenant:after-sales',
+          displayName: 'After Sales',
+          config: {
+            defaultSlaHours: 24,
+            urgentSlaHours: 4,
+            followUpAfterDays: 7,
+          },
+          installResult: {
+            status: 'installed',
+            createdObjects: [],
+            createdViews: [],
+            warnings: [],
+            reportRef: 'install-customers-006',
+          },
+          reportRef: 'install-customers-006',
+        })
+      }
+
+      if (path === '/api/after-sales/tickets') {
+        return createResponse({ projectId: 'tenant:after-sales', count: 0, tickets: [] })
+      }
+
+      if (path === '/api/after-sales/installed-assets') {
+        return createResponse({ projectId: 'tenant:after-sales', count: 0, installedAssets: [] })
+      }
+
+      if (path === '/api/after-sales/service-records') {
+        return createResponse({ projectId: 'tenant:after-sales', count: 0, serviceRecords: [] })
+      }
+
+      if (path === '/api/after-sales/customers') {
+        return createResponse({
+          projectId: 'tenant:after-sales',
+          count: 2,
+          customers: [
+            {
+              id: 'customer-delete',
+              version: 1,
+              data: {
+                customerCode: 'CUS-DELETE',
+                name: 'Delete Me Customer',
+                phone: '13800138000',
+                email: 'delete-me@example.com',
+                status: 'active',
+              },
+            },
+            {
+              id: 'customer-keep',
+              version: 1,
+              data: {
+                customerCode: 'CUS-KEEP',
+                name: 'Keep Me Customer',
+                phone: '13900139000',
+                email: 'keep@example.com',
+                status: 'inactive',
+              },
+            },
+          ],
+        })
+      }
+
+      if (path === '/api/after-sales/customers/customer-delete' && options?.method === 'DELETE') {
+        return createResponse({
+          projectId: 'tenant:after-sales',
+          customerId: 'customer-delete',
+          version: 4,
+          deleted: true,
+        })
+      }
+
+      throw new Error(`Unexpected request: ${path}`)
+    })
+
+    const mounted = mountAfterSalesView()
+    app = mounted.app
+    container = mounted.container
+
+    await waitForText(container, 'Delete Me Customer')
+
+    const customerSection = findSection(container, 'Customer registry')
+    const deleteButton = customerSection.querySelector<HTMLButtonElement>('button[aria-label="Delete customer CUS-DELETE"]')
+    expect(deleteButton).toBeTruthy()
+    if (!deleteButton) return
+
+    deleteButton.click()
+
+    await waitForText(customerSection, 'Deleted customer CUS-DELETE')
+
+    expect(customerSection.textContent).not.toContain('Delete Me Customer')
+    expect(customerSection.textContent).toContain('Keep Me Customer')
+    expect(apiFetchMock).toHaveBeenCalledWith('/api/after-sales/customers/customer-delete', { method: 'DELETE' })
+  })
+
+  it('keeps the customer list intact when delete fails', async () => {
+    apiFetchMock.mockImplementation(async (path: string, options?: RequestInit) => {
+      if (path === '/api/after-sales/app-manifest') {
+        return createResponse({
+          id: 'after-sales-default',
+          displayName: 'After Sales',
+          platformDependencies: ['core-backend'],
+          objects: [{ id: 'customer' }],
+          workflows: [],
+        })
+      }
+
+      if (path === '/api/after-sales/projects/current') {
+        return createResponse({
+          status: 'installed',
+          projectId: 'tenant:after-sales',
+          displayName: 'After Sales',
+          config: {
+            defaultSlaHours: 24,
+            urgentSlaHours: 4,
+            followUpAfterDays: 7,
+          },
+          installResult: {
+            status: 'installed',
+            createdObjects: [],
+            createdViews: [],
+            warnings: [],
+            reportRef: 'install-customers-007',
+          },
+          reportRef: 'install-customers-007',
+        })
+      }
+
+      if (path === '/api/after-sales/tickets') {
+        return createResponse({ projectId: 'tenant:after-sales', count: 0, tickets: [] })
+      }
+
+      if (path === '/api/after-sales/installed-assets') {
+        return createResponse({ projectId: 'tenant:after-sales', count: 0, installedAssets: [] })
+      }
+
+      if (path === '/api/after-sales/service-records') {
+        return createResponse({ projectId: 'tenant:after-sales', count: 0, serviceRecords: [] })
+      }
+
+      if (path === '/api/after-sales/customers') {
+        return createResponse({
+          projectId: 'tenant:after-sales',
+          count: 1,
+          customers: [
+            {
+              id: 'customer-delete',
+              version: 1,
+              data: {
+                customerCode: 'CUS-DELETE',
+                name: 'Delete Me Customer',
+                phone: '13800138000',
+                email: 'delete-me@example.com',
+                status: 'active',
+              },
+            },
+          ],
+        })
+      }
+
+      if (path === '/api/after-sales/customers/customer-delete' && options?.method === 'DELETE') {
+        return createResponse({
+          error: {
+            code: 'FORBIDDEN',
+            message: 'After-sales write access required',
+          },
+        }, {
+          ok: false,
+          status: 403,
+          statusText: 'Forbidden',
+        })
+      }
+
+      throw new Error(`Unexpected request: ${path}`)
+    })
+
+    const mounted = mountAfterSalesView()
+    app = mounted.app
+    container = mounted.container
+
+    await waitForText(container, 'Delete Me Customer')
+
+    const customerSection = findSection(container, 'Customer registry')
+    const deleteButton = customerSection.querySelector<HTMLButtonElement>('button[aria-label="Delete customer CUS-DELETE"]')
+    expect(deleteButton).toBeTruthy()
+    if (!deleteButton) return
+
+    deleteButton.click()
+    await waitForText(customerSection, 'After-sales write access required')
+
+    expect(customerSection.textContent).toContain('Delete Me Customer')
+    expect(apiFetchMock).toHaveBeenCalledWith('/api/after-sales/customers/customer-delete', { method: 'DELETE' })
+  })
 })

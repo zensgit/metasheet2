@@ -1595,6 +1595,121 @@ describe('plugin-after-sales routes', () => {
     expect(createRecord).not.toHaveBeenCalled()
   })
 
+  it('returns 403 for customers delete when caller lacks after-sales write access', async () => {
+    const handler = routes.get('DELETE /api/after-sales/customers/:customerId')
+    const res = new FakeResponse()
+
+    await handler?.(buildReq({
+      user: {
+        id: 'user_42',
+        tenantId: 'tenant_42',
+        role: 'user',
+        roles: ['user'],
+        perms: ['after_sales:read'],
+      },
+      params: {
+        customerId: 'rec_customer_001',
+      },
+    }), res)
+
+    expect(res.statusCode).toBe(403)
+    expect(res.body).toEqual({
+      ok: false,
+      error: {
+        code: 'FORBIDDEN',
+        message: 'After-sales write access required',
+      },
+    })
+    expect(deleteRecord).not.toHaveBeenCalled()
+  })
+
+  it('deletes a customer through the multitable delete seam', async () => {
+    const handler = routes.get('DELETE /api/after-sales/customers/:customerId')
+    const res = new FakeResponse()
+
+    db.rows.push({
+      id: 'fake-uuid-1',
+      tenant_id: 'tenant_42',
+      app_id: 'after-sales',
+      project_id: 'tenant_42:after-sales',
+      template_id: 'after-sales-default',
+      template_version: '0.1.0',
+      mode: 'enable',
+      status: 'installed',
+      created_objects_json: JSON.stringify(['serviceTicket', 'customer']),
+      created_views_json: JSON.stringify(['ticket-board', 'customer-grid']),
+      warnings_json: JSON.stringify([]),
+      display_name: 'After-sales',
+      config_json: JSON.stringify({}),
+      last_install_at: new Date(),
+      created_at: new Date(),
+    })
+
+    await handler?.(buildReq({
+      user: {
+        id: 'writer_42',
+        tenantId: 'tenant_42',
+        role: 'user',
+        roles: ['user'],
+        perms: ['after_sales:write'],
+      },
+      params: {
+        customerId: 'rec_customer_001',
+      },
+    }), res)
+
+    expect(res.statusCode).toBe(200)
+    expect(deleteRecord).toHaveBeenCalledWith({
+      sheetId: 'tenant_42:after-sales:customer:sheet',
+      recordId: 'rec_customer_001',
+    })
+    expect(res.body.data).toEqual({
+      projectId: 'tenant_42:after-sales',
+      customerId: 'rec_customer_001',
+      version: 4,
+      deleted: true,
+    })
+  })
+
+  it('returns 409 when customers are deleted from a failed install state', async () => {
+    const handler = routes.get('DELETE /api/after-sales/customers/:customerId')
+    const res = new FakeResponse()
+
+    db.rows.push({
+      id: 'fake-uuid-1',
+      tenant_id: 'tenant_42',
+      app_id: 'after-sales',
+      project_id: 'tenant_42:after-sales',
+      template_id: 'after-sales-default',
+      template_version: '0.1.0',
+      mode: 'reinstall',
+      status: 'failed',
+      created_objects_json: JSON.stringify(['serviceTicket', 'customer']),
+      created_views_json: JSON.stringify(['ticket-board', 'customer-grid']),
+      warnings_json: JSON.stringify(['customer projection failed']),
+      display_name: 'After-sales',
+      config_json: JSON.stringify({}),
+      last_install_at: new Date(),
+      created_at: new Date(),
+    })
+
+    await handler?.(buildReq({
+      params: {
+        customerId: 'rec_customer_001',
+      },
+    }), res)
+
+    expect(res.statusCode).toBe(409)
+    expect(res.body).toEqual({
+      ok: false,
+      error: {
+        code: 'AFTER_SALES_NOT_INSTALLED',
+        message: 'After-sales must be installed before deleting customers',
+      },
+    })
+    expect(deleteRecord).not.toHaveBeenCalled()
+  })
+
   it('returns 403 for installed-assets create when caller lacks after-sales write access', async () => {
     const handler = routes.get('POST /api/after-sales/installed-assets')
     const res = new FakeResponse()

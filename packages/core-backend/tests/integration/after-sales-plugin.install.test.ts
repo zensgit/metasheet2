@@ -2266,4 +2266,107 @@ describe('after-sales plugin install integration', () => {
       },
     })
   })
+
+  it('deletes customers through the real after-sales routes', async () => {
+    if (!baseUrl || !pool) return
+
+    const tokenRes = await requestJson(
+      `${baseUrl}/api/auth/dev-token?userId=after-sales-customer-delete-it&roles=admin&perms=*:*`,
+    )
+    const token = (tokenRes.body as { token?: string } | undefined)?.token
+    expect(token).toBeTruthy()
+
+    const installRes = await requestJson(`${baseUrl}/api/after-sales/projects/install`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        templateId: 'after-sales-default',
+        displayName: 'After Sales Customer Delete Flow',
+      }),
+    })
+    expect(installRes.status).toBe(200)
+
+    const createRes = await requestJson(`${baseUrl}/api/after-sales/customers`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        customer: {
+          customerCode: 'CUS-5004',
+          name: 'Delete Me Customer',
+          phone: '13600136000',
+          email: 'delete-me@example.com',
+          status: 'active',
+        },
+      }),
+    })
+    expect(createRes.status).toBe(201)
+
+    const createdCustomerId = (
+      createRes.body as {
+        data?: {
+          customer?: {
+            id?: string
+          }
+        }
+      }
+    ).data?.customer?.id
+    expect(createdCustomerId).toBeTruthy()
+
+    const deleteRes = await requestJson(
+      `${baseUrl}/api/after-sales/customers/${encodeURIComponent(String(createdCustomerId))}`,
+      {
+        method: 'DELETE',
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      },
+    )
+    expect(deleteRes.status).toBe(200)
+
+    const deleteBody = deleteRes.body as {
+      ok?: boolean
+      data?: {
+        customerId?: string
+        deleted?: boolean
+      }
+    }
+    expect(deleteBody.ok).toBe(true)
+    expect(deleteBody.data).toMatchObject({
+      customerId: createdCustomerId,
+      deleted: true,
+    })
+
+    const customerSheetId = stableMetaId('sheet', PROJECT_ID, 'customer')
+    const deletedRecordRes = await pool.query<{ id: string }>(
+      'SELECT id FROM meta_records WHERE id = $1 AND sheet_id = $2',
+      [createdCustomerId, customerSheetId],
+    )
+    expect(deletedRecordRes.rows).toHaveLength(0)
+
+    const listRes = await requestJson(`${baseUrl}/api/after-sales/customers?status=active&search=Delete%20Me`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    })
+    expect(listRes.status).toBe(200)
+
+    const listBody = listRes.body as {
+      ok?: boolean
+      data?: {
+        count?: number
+        customers?: Array<{
+          id?: string
+        }>
+      }
+    }
+    expect(listBody.ok).toBe(true)
+    expect(listBody.data?.count).toBe(0)
+    expect(listBody.data?.customers ?? []).toEqual([])
+  })
 })
