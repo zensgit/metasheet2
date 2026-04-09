@@ -543,7 +543,9 @@ function buildTicketOverdueEventPayload(input, meta) {
 function buildFollowUpDueEventPayload(input, meta) {
   const followUp = input && typeof input.followUp === 'object' && !Array.isArray(input.followUp) ? input.followUp : {}
   const ticket = input && typeof input.ticket === 'object' && !Array.isArray(input.ticket) ? input.ticket : {}
-  const followUpOwner = optionalRecipient(followUp.owner ?? input.followUpOwner)
+  const followUpOwner = optionalRecipient(
+    followUp.owner ?? input.followUpOwner ?? followUp.ownerName ?? input.ownerName,
+  )
 
   if (!followUpOwner) {
     throw createEventEntryError('AFTER_SALES_EVENT_VALIDATION_FAILED', 'followUpOwner is required', {

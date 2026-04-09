@@ -4254,6 +4254,59 @@ describe('plugin-after-sales routes', () => {
     )
   })
 
+  it('emits followup.due from logical follow-up data with ownerName fallback', async () => {
+    const handler = routes.get('POST /api/after-sales/events/followup-due')
+    const res = new FakeResponse()
+
+    await handler?.(buildReq({
+      user: {
+        id: 'writer_42',
+        tenantId: 'tenant_42',
+        role: 'user',
+        roles: ['user'],
+        perms: ['after_sales:write'],
+      },
+      body: {
+        ticket: {
+          id: 'ticket_002',
+          ticketNo: 'TK-1002',
+          title: 'Follow-up confirmation',
+        },
+        followUp: {
+          id: 'followup_002',
+          ownerName: 'csr_002',
+          dueAt: '2026-04-12T09:30:00Z',
+          followUpType: 'message',
+        },
+      },
+    }), res)
+
+    expect(res.statusCode).toBe(202)
+    expect(res.body).toEqual({
+      ok: true,
+      data: {
+        accepted: true,
+        event: 'followup.due',
+        projectId: 'tenant_42:after-sales',
+        ticketId: 'ticket_002',
+        followUpId: 'followup_002',
+      },
+    })
+    expect(eventsEmit).toHaveBeenCalledWith(
+      'followup.due',
+      expect.objectContaining({
+        tenantId: 'tenant_42',
+        projectId: 'tenant_42:after-sales',
+        followUpOwner: expect.objectContaining({ id: 'csr_002', type: 'user' }),
+        followUp: expect.objectContaining({
+          id: 'followup_002',
+          dueAt: '2026-04-12T09:30:00Z',
+          followUpType: 'message',
+        }),
+      }),
+    )
+  })
+
   it('installs the default blueprint and returns project routes', async () => {
     const handler = routes.get('POST /api/after-sales/projects/install')
     const res = new FakeResponse()
