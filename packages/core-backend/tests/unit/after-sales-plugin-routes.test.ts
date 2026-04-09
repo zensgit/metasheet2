@@ -468,6 +468,16 @@ function createContext(): {
           [srPk('workSummary')]: 'Replaced motor',
           [srPk('result')]: 'resolved',
         }
+      : input.sheetId.includes('followUp')
+      ? {
+          [fuPk('ticketNo')]: 'TK-2001',
+          [fuPk('customerName')]: 'Alice Plant',
+          [fuPk('dueAt')]: '2026-04-10T09:00:00Z',
+          [fuPk('followUpType')]: 'phone',
+          [fuPk('ownerName')]: 'CSR Chen',
+          [fuPk('status')]: 'pending',
+          [fuPk('summary')]: 'Call customer after part arrival',
+        }
       : {
           [pk('ticketNo')]: 'TK-2001',
           [pk('title')]: 'No cooling output',
@@ -508,6 +518,17 @@ function createContext(): {
           [cuPk('phone')]: '13800138000',
           [cuPk('email')]: 'alice@example.com',
           [cuPk('status')]: 'active',
+          ...input.changes,
+        }
+      : input.sheetId.includes('followUp')
+      ? {
+          [fuPk('ticketNo')]: 'TK-2001',
+          [fuPk('customerName')]: 'Alice Plant',
+          [fuPk('dueAt')]: '2026-04-10T09:00:00Z',
+          [fuPk('followUpType')]: 'phone',
+          [fuPk('ownerName')]: 'CSR Chen',
+          [fuPk('status')]: 'pending',
+          [fuPk('summary')]: 'Call customer after part arrival',
           ...input.changes,
         }
       : {
@@ -2009,6 +2030,122 @@ describe('plugin-after-sales routes', () => {
       },
     })
     expect(deleteRecord).not.toHaveBeenCalled()
+  })
+
+  it('updates follow-ups through the multitable patch seam', async () => {
+    const handler = routes.get('PATCH /api/after-sales/follow-ups/:followUpId')
+    const res = new FakeResponse()
+
+    db.rows.push({
+      id: 'fake-uuid-1',
+      tenant_id: 'tenant_42',
+      app_id: 'after-sales',
+      project_id: 'tenant_42:after-sales',
+      template_id: 'after-sales-default',
+      template_version: '0.1.0',
+      mode: 'enable',
+      status: 'installed',
+      created_objects_json: JSON.stringify(['serviceTicket', 'followUp']),
+      created_views_json: JSON.stringify(['ticket-board', 'followUp-grid']),
+      warnings_json: JSON.stringify([]),
+      display_name: 'After-sales',
+      config_json: JSON.stringify({}),
+      last_install_at: new Date(),
+      created_at: new Date(),
+    })
+
+    await handler?.(buildReq({
+      params: {
+        followUpId: 'rec_follow_up_001',
+      },
+      body: {
+        followUp: {
+          customerName: 'Charlie Logistics',
+          dueAt: '2026-04-12T09:30:00Z',
+          followUpType: 'message',
+          ownerName: '',
+          status: 'done',
+          summary: '',
+        },
+      },
+    }), res)
+
+    expect(res.statusCode).toBe(200)
+    expect(patchRecord).toHaveBeenCalledWith({
+      sheetId: 'tenant_42:after-sales:followUp:sheet',
+      recordId: 'rec_follow_up_001',
+      changes: {
+        [fuPk('customerName')]: 'Charlie Logistics',
+        [fuPk('dueAt')]: '2026-04-12T09:30:00Z',
+        [fuPk('followUpType')]: 'message',
+        [fuPk('ownerName')]: null,
+        [fuPk('status')]: 'done',
+        [fuPk('summary')]: null,
+      },
+    })
+    expect(res.body).toEqual({
+      ok: true,
+      data: {
+        projectId: 'tenant_42:after-sales',
+        followUp: {
+          id: 'rec_follow_up_001',
+          version: 4,
+          data: {
+            ticketNo: 'TK-2001',
+            customerName: 'Charlie Logistics',
+            dueAt: '2026-04-12T09:30:00Z',
+            followUpType: 'message',
+            ownerName: null,
+            status: 'done',
+            summary: null,
+          },
+        },
+      },
+    })
+  })
+
+  it('returns 409 when follow-ups are updated from a failed install state', async () => {
+    const handler = routes.get('PATCH /api/after-sales/follow-ups/:followUpId')
+    const res = new FakeResponse()
+
+    db.rows.push({
+      id: 'fake-uuid-1',
+      tenant_id: 'tenant_42',
+      app_id: 'after-sales',
+      project_id: 'tenant_42:after-sales',
+      template_id: 'after-sales-default',
+      template_version: '0.1.0',
+      mode: 'reinstall',
+      status: 'failed',
+      created_objects_json: JSON.stringify(['serviceTicket', 'followUp']),
+      created_views_json: JSON.stringify(['ticket-board', 'followUp-grid']),
+      warnings_json: JSON.stringify(['follow-up edit failed']),
+      display_name: 'After-sales',
+      config_json: JSON.stringify({}),
+      last_install_at: new Date(),
+      created_at: new Date(),
+    })
+
+    await handler?.(buildReq({
+      params: {
+        followUpId: 'rec_follow_up_001',
+      },
+      body: {
+        followUp: {
+          status: 'done',
+        },
+      },
+    }), res)
+
+    expect(res.statusCode).toBe(409)
+    expect(res.body).toEqual({
+      ok: false,
+      error: {
+        code: 'AFTER_SALES_NOT_INSTALLED',
+        message: 'After-sales must be installed before updating follow-ups',
+      },
+    })
+    expect(patchRecord).not.toHaveBeenCalled()
   })
 
   it('returns 403 for customers create when caller lacks after-sales write access', async () => {
