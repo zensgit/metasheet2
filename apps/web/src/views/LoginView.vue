@@ -243,7 +243,7 @@ async function onSubmit(): Promise<void> {
 
 async function probeDingTalkLogin(): Promise<void> {
   try {
-    const response = await apiFetch('/api/auth/dingtalk/launch', {
+    const response = await apiFetch('/api/auth/dingtalk/launch?probe=1', {
       method: 'GET',
       suppressUnauthorizedRedirect: true,
     })

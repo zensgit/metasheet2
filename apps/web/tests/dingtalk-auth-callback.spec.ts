@@ -5,6 +5,8 @@ import DingTalkAuthCallbackView from '../src/views/DingTalkAuthCallbackView.vue'
 const apiFetchMock = vi.fn()
 const setTokenMock = vi.fn()
 const primeSessionMock = vi.fn()
+const getTokenMock = vi.fn()
+const bootstrapSessionMock = vi.fn()
 const loadProductFeaturesMock = vi.fn()
 const resolveHomePathMock = vi.fn(() => '/attendance')
 const replaceMock = vi.fn(() => Promise.resolve())
@@ -24,6 +26,8 @@ vi.mock('../src/composables/useLocale', () => ({
 
 vi.mock('../src/composables/useAuth', () => ({
   useAuth: () => ({
+    getToken: getTokenMock,
+    bootstrapSession: bootstrapSessionMock,
     setToken: setTokenMock,
     primeSession: primeSessionMock,
   }),
@@ -60,6 +64,8 @@ describe('DingTalkAuthCallbackView', () => {
 
   beforeEach(() => {
     apiFetchMock.mockReset()
+    getTokenMock.mockReset()
+    bootstrapSessionMock.mockReset()
     setTokenMock.mockReset()
     primeSessionMock.mockReset()
     loadProductFeaturesMock.mockReset()
@@ -67,6 +73,8 @@ describe('DingTalkAuthCallbackView', () => {
     resolveHomePathMock.mockReturnValue('/attendance')
     replaceMock.mockReset()
     replaceMock.mockResolvedValue(undefined)
+    getTokenMock.mockReturnValue(null)
+    bootstrapSessionMock.mockResolvedValue({ ok: false, status: 401, payload: null })
     routeState.query.code = 'auth-code'
     routeState.query.state = 'state-1'
 
@@ -135,5 +143,29 @@ describe('DingTalkAuthCallbackView', () => {
 
     expect(apiFetchMock).not.toHaveBeenCalled()
     expect(container?.textContent).toContain('缺少授权码参数')
+  })
+
+  it('keeps an existing authenticated session instead of overwriting it via callback', async () => {
+    getTokenMock.mockReturnValue('existing-token')
+    bootstrapSessionMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      payload: {
+        data: {
+          user: {
+            id: 'user-1',
+          },
+        },
+      },
+    })
+    loadProductFeaturesMock.mockResolvedValue(undefined)
+
+    app = createApp(DingTalkAuthCallbackView)
+    app.mount(container!)
+    await flushUi(6)
+
+    expect(apiFetchMock).not.toHaveBeenCalled()
+    expect(setTokenMock).not.toHaveBeenCalled()
+    expect(replaceMock).toHaveBeenCalledWith('/attendance')
   })
 })

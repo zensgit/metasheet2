@@ -205,10 +205,16 @@ async function writeStateToRedis(state: string, record: StateRecord): Promise<bo
     await trimRedisStateIndex(client)
 
     const ttlMs = Math.max(record.expiresAt - Date.now() + STATE_REDIS_RETENTION_MS, STATE_REDIS_RETENTION_MS)
-    await client.multi()
+    const results = await client.multi()
       .set(stateRedisKey(state), JSON.stringify(record), 'PX', ttlMs)
       .zadd(STATE_REDIS_INDEX_KEY, record.expiresAt, state)
       .exec()
+
+    if (!results || results.some(([error]) => error)) {
+      logRedisFallback('Redis state write failed', results)
+      await invalidateRedisStateClient(client)
+      return false
+    }
     return true
   } catch (error) {
     logRedisFallback('Redis state write failed', error)
@@ -227,6 +233,12 @@ async function validateStateFromRedis(state: string): Promise<StateValidationRes
       .del(stateRedisKey(state))
       .zrem(STATE_REDIS_INDEX_KEY, state)
       .exec()
+
+    if (!results || results.some(([error]) => error)) {
+      logRedisFallback('Redis state validation failed', results)
+      await invalidateRedisStateClient(client)
+      return null
+    }
 
     const statePayload = results?.[0]?.[1]
     if (typeof statePayload !== 'string') {
@@ -413,20 +425,38 @@ async function createProvisionedUser(dtUser: DingTalkUserInfo): Promise<LocalUse
   const email = dtUser.email || `dingtalk_${dtUser.openId}@placeholder.local`
   const name = dtUser.nick || 'DingTalk User'
 
-  const result = await query<LocalUserRow>(
-    `INSERT INTO users (id, email, name, role, created_at, updated_at)
-     VALUES ($1, $2, $3, 'user', NOW(), NOW())
-     ON CONFLICT (email)
-     DO UPDATE SET name = COALESCE(NULLIF(EXCLUDED.name, ''), users.name), updated_at = NOW()
-     RETURNING id, email, COALESCE(name, '') AS name, COALESCE(role, 'user') AS role`,
-    [userId, email, name],
-  )
-
-  const row = result.rows[0]
-  if (!row) {
-    throw new Error('Failed to create local user for DingTalk login')
+  if (dtUser.email) {
+    const existingUser = await findUserByEmail(dtUser.email)
+    if (existingUser) {
+      throw new Error('Refusing to auto-provision DingTalk user because a local account already exists with the same email')
+    }
   }
-  return row
+
+  try {
+    const result = await query<LocalUserRow>(
+      `INSERT INTO users (id, email, name, role, created_at, updated_at)
+       VALUES ($1, $2, $3, 'user', NOW(), NOW())
+       RETURNING id, email, COALESCE(name, '') AS name, COALESCE(role, 'user') AS role`,
+      [userId, email, name],
+    )
+
+    const row = result.rows[0]
+    if (!row) {
+      throw new Error('Failed to create local user for DingTalk login')
+    }
+    return row
+  } catch (error) {
+    if (
+      dtUser.email &&
+      typeof error === 'object' &&
+      error !== null &&
+      'code' in error &&
+      error.code === '23505'
+    ) {
+      throw new Error('Refusing to auto-provision DingTalk user because a local account already exists with the same email')
+    }
+    throw error
+  }
 }
 
 async function resolveLocalUser(dtUser: DingTalkUserInfo): Promise<{ localUser: LocalUserRow; isNewUser: boolean }> {

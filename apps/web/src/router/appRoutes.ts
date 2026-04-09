@@ -34,7 +34,7 @@ export const appRoutes: RouteRecordRaw[] = [
     path: ROUTE_PATHS.DINGTALK_AUTH_CALLBACK,
     name: AppRouteNames.DINGTALK_AUTH_CALLBACK,
     component: DingTalkAuthCallbackView,
-    meta: { title: 'DingTalk Sign In', titleZh: '钉钉登录', hideNavbar: true, requiresAuth: false }
+    meta: { title: 'DingTalk Sign In', titleZh: '钉钉登录', hideNavbar: true, requiresAuth: false, requiresGuest: true }
   },
   {
     path: '/accept-invite',

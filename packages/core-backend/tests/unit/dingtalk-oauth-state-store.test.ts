@@ -6,6 +6,7 @@ const redisMockState = vi.hoisted(() => {
   const behavior = {
     connectFail: false,
     opsFail: false,
+    execTupleError: false,
   }
 
   function readZset(key: string): Map<string, number> {
@@ -30,6 +31,7 @@ const redisMockState = vi.hoisted(() => {
       zsets.clear()
       behavior.connectFail = false
       behavior.opsFail = false
+      behavior.execTupleError = false
     },
     readZset,
     isExpired,
@@ -150,6 +152,9 @@ vi.mock('ioredis', () => {
           return chain
         },
         exec: async () => {
+          if (redisMockState.behavior.execTupleError) {
+            return ops.map(() => [new Error('redis exec tuple error'), null] as [Error, null])
+          }
           const results: Array<[Error | null, unknown]> = []
           for (const op of ops) {
             try {
@@ -173,17 +178,36 @@ vi.mock('../../src/db/pg', () => ({
   transaction: vi.fn(),
 }))
 
+vi.mock('../../src/integrations/dingtalk/client', () => ({
+  exchangeCodeForUserAccessToken: vi.fn(),
+  fetchDingTalkCurrentUser: vi.fn(),
+  isDingTalkConfigured: vi.fn(() => true),
+  readDingTalkOauthConfig: vi.fn(() => ({
+    clientId: 'client-id',
+    clientSecret: 'client-secret',
+    redirectUri: 'https://example.com/login/dingtalk/callback',
+    corpId: null,
+  })),
+}))
+
 import {
   __resetDingTalkOAuthStateStoreForTests,
+  exchangeCodeForUser,
   generateState,
   validateState,
 } from '../../src/auth/dingtalk-oauth'
+import { query, transaction } from '../../src/db/pg'
+import { exchangeCodeForUserAccessToken, fetchDingTalkCurrentUser } from '../../src/integrations/dingtalk/client'
 
 describe('DingTalk OAuth state store', () => {
   beforeEach(async () => {
     vi.useRealTimers()
     vi.unstubAllEnvs()
     redisMockState.reset()
+    vi.mocked(query).mockReset()
+    vi.mocked(transaction).mockReset()
+    vi.mocked(exchangeCodeForUserAccessToken).mockReset()
+    vi.mocked(fetchDingTalkCurrentUser).mockReset()
     await __resetDingTalkOAuthStateStoreForTests()
   })
 
@@ -239,5 +263,47 @@ describe('DingTalk OAuth state store', () => {
       valid: true,
       redirectPath: '/workflows',
     })
+  })
+
+  it('falls back to in-memory storage when Redis multi exec returns tuple errors', async () => {
+    vi.stubEnv('REDIS_URL', 'redis://localhost:6379')
+    redisMockState.behavior.execTupleError = true
+
+    const state = await generateState({ redirectPath: '/attendance' })
+    redisMockState.behavior.execTupleError = false
+
+    const validation = await validateState(state)
+    expect(validation).toEqual({
+      valid: true,
+      redirectPath: '/attendance',
+    })
+  })
+
+  it('refuses auto-provision when a local account already exists with the same email', async () => {
+    vi.stubEnv('DINGTALK_AUTH_AUTO_LINK_EMAIL', '0')
+    vi.stubEnv('DINGTALK_AUTH_AUTO_PROVISION', '1')
+    vi.mocked(exchangeCodeForUserAccessToken).mockResolvedValue({
+      accessToken: 'access-token',
+    })
+    vi.mocked(fetchDingTalkCurrentUser).mockResolvedValue({
+      openId: 'open-id-1',
+      unionId: 'union-id-1',
+      nick: 'Ding User',
+      email: 'manager@example.com',
+    })
+    vi.mocked(query)
+      .mockResolvedValueOnce({ rows: [] } as any)
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'user-1',
+          email: 'manager@example.com',
+          name: 'Manager',
+          role: 'user',
+        }],
+      } as any)
+
+    await expect(exchangeCodeForUser('auth-code')).rejects.toThrow(
+      'Refusing to auto-provision DingTalk user because a local account already exists with the same email',
+    )
   })
 })

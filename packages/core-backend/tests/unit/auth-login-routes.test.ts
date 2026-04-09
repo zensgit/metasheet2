@@ -464,6 +464,23 @@ describe('auth login routes', () => {
     expect((response.body as Record<string, any>).data.url).toBe('https://login.dingtalk.test/oauth')
   })
 
+  it('supports probing DingTalk availability without generating OAuth state', async () => {
+    dingtalkOauthMocks.isDingTalkConfigured.mockReturnValue(true)
+
+    const response = await invokeRoute('get', '/dingtalk/launch', {
+      query: {
+        probe: '1',
+      },
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect(dingtalkOauthMocks.generateState).not.toHaveBeenCalled()
+    expect(dingtalkOauthMocks.buildAuthUrl).not.toHaveBeenCalled()
+    expect((response.body as Record<string, any>).data).toEqual({
+      available: true,
+    })
+  })
+
   it('exchanges a DingTalk callback into a local session token', async () => {
     const expSeconds = Math.floor(new Date('2026-04-08T10:00:00.000Z').getTime() / 1000)
 

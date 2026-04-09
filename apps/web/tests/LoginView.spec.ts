@@ -6,6 +6,19 @@ const mocks = vi.hoisted(() => ({
   resolveHomePath: vi.fn(() => '/attendance'),
   routerReplace: vi.fn().mockResolvedValue(undefined),
   apiFetch: vi.fn(async (path: string) => {
+    if (path === '/api/auth/dingtalk/launch?probe=1') {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          success: true,
+          data: {
+            available: true,
+          },
+        }),
+      }
+    }
+
     if (path === '/api/auth/login') {
       return {
         ok: true,
@@ -130,7 +143,12 @@ describe('LoginView', () => {
     submitButton?.click()
     await flushUi(8)
 
-    expect(mocks.apiFetch).toHaveBeenCalledTimes(1)
+    expect(mocks.apiFetch).toHaveBeenCalledTimes(2)
+    expect(mocks.apiFetch).toHaveBeenNthCalledWith(
+      1,
+      '/api/auth/dingtalk/launch?probe=1',
+      expect.objectContaining({ method: 'GET', suppressUnauthorizedRedirect: true }),
+    )
     expect(mocks.apiFetch).toHaveBeenCalledWith('/api/auth/login', expect.objectContaining({ method: 'POST' }))
     expect(window.localStorage.getItem('auth_token')).toBe('login-token')
     expect(window.localStorage.getItem('user_roles')).toBe(JSON.stringify(['admin']))
@@ -139,5 +157,21 @@ describe('LoginView', () => {
     expect(mocks.loadProductFeatures).toHaveBeenCalledWith(true, { skipSessionProbe: true })
     expect(mocks.resolveHomePath).toHaveBeenCalled()
     expect(mocks.routerReplace).toHaveBeenCalledWith('/attendance')
+  })
+
+  it('uses the probe flag when checking DingTalk availability on mount', async () => {
+    container = document.createElement('div')
+    document.body.appendChild(container)
+
+    app = createApp(LoginViewComponent)
+    app.mount(container)
+    await flushUi()
+
+    expect(mocks.apiFetch).toHaveBeenCalledWith(
+      '/api/auth/dingtalk/launch?probe=1',
+      expect.objectContaining({ method: 'GET', suppressUnauthorizedRedirect: true }),
+    )
+    const dingtalkButton = container?.querySelector('.login-dingtalk')
+    expect(dingtalkButton).not.toBeNull()
   })
 })

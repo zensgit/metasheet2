@@ -111,6 +111,24 @@ function persistAuthContext(user: AuthUserPayload | null, features: AuthFeatureP
 }
 
 async function handleCallback(): Promise<void> {
+  const existingToken = auth.getToken()
+  if (existingToken) {
+    const currentSession = await auth.bootstrapSession()
+    if (currentSession.ok) {
+      let fallbackPath = resolveHomePath()
+      try {
+        await loadProductFeatures()
+        fallbackPath = resolveHomePath()
+      } catch {
+        // Keep authenticated users on their current session even if feature probing fails.
+      }
+
+      const redirectPath = normalizePostLoginRedirect(route.query.redirect)
+      await router.replace(redirectPath || fallbackPath)
+      return
+    }
+  }
+
   const code = typeof route.query.code === 'string' ? route.query.code : ''
   const state = typeof route.query.state === 'string' ? route.query.state : ''
 

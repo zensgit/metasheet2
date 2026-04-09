@@ -1,0 +1,78 @@
+# DingTalk PR1 Review Design
+
+Date: 2026-04-09
+PR: `#725`
+Branch: `codex/dingtalk-pr1-foundation-login-20260408`
+
+## Scope
+
+This review pass covers only the PR1 DingTalk login foundation:
+
+- backend launch/callback routing
+- DingTalk OAuth state storage
+- local-user resolution and auto-provision behavior
+- login page launch flow
+- callback page session handoff
+
+Out of scope:
+
+- PR2 directory sync behavior
+- PR3 attendance, robot notifications, delegated admin controls
+- production rollout and tenant-side configuration changes
+
+## Review Gates
+
+PR1 stays on the existing public contract:
+
+- `GET /api/auth/dingtalk/launch`
+- `POST /api/auth/dingtalk/callback`
+- `/login/dingtalk/callback`
+
+This review only fixes blocking correctness or security issues found inside those flows.
+
+## Review Findings
+
+### 1. Launch probing consumed real OAuth state
+
+The login page mounted by probing `GET /api/auth/dingtalk/launch`, which created and stored a real one-time state on every page visit. Under repeated login page traffic this could churn Redis or in-memory state capacity and evict legitimate pending logins.
+
+Design response:
+
+- keep the route path unchanged
+- add a lightweight `probe=1` mode on `/api/auth/dingtalk/launch`
+- update the login page probe to use that mode
+
+### 2. Redis `multi().exec()` tuple errors were treated as success
+
+The state store only handled thrown Redis errors. It did not inspect per-command `[error, result]` tuples returned by `exec()`, so partial command failures could be treated as successful persistence or successful validation.
+
+Design response:
+
+- inspect `exec()` results in both write and validation paths
+- invalidate the Redis client on tuple errors
+- fall back to in-memory storage on write failures
+- fail closed on validation failures
+
+### 3. Auto-provision could reuse an existing email when auto-link was disabled
+
+`createProvisionedUser()` used `INSERT ... ON CONFLICT (email) DO UPDATE`, which let the provisioning path silently reuse an existing local account by email. That bypassed the intended distinction between explicit email linking and account provisioning.
+
+Design response:
+
+- remove the email upsert behavior from provisioning
+- reject provisioning when a local account already exists with the same email
+- preserve the existing explicit email-link path as the only place where email reuse can happen
+
+### 4. Logged-in sessions could be overwritten from the callback page
+
+The callback view accepted a DingTalk callback even when a valid local session already existed in the browser, which allowed token replacement in the current tab.
+
+Design response:
+
+- mark the callback route as guest-only in route metadata
+- add a defensive callback-view guard that keeps the current authenticated session and redirects home instead of exchanging the DingTalk callback
+
+## Non-Blocking Notes
+
+- Duplicate auth payload helpers between `LoginView.vue` and `DingTalkAuthCallbackView.vue` remain a refactor candidate, but they are not blocking for PR1 merge.
+- `DINGTALK_AUTH_AUTO_LINK_EMAIL` remains a configuration choice. The stricter production policy is handled later in the stack by explicit-grant controls.

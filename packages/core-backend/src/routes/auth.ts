@@ -217,6 +217,12 @@ function normalizeDingTalkRedirectPath(value: unknown): string | null {
   return normalized
 }
 
+function isTruthyQueryFlag(value: unknown): boolean {
+  if (typeof value === 'boolean') return value
+  if (typeof value !== 'string') return false
+  return ['1', 'true', 'yes', 'on'].includes(value.trim().toLowerCase())
+}
+
 async function loadAuthPermissions(userId: string): Promise<string[]> {
   try {
     return await listUserPermissions(userId)
@@ -850,6 +856,15 @@ authRouter.get('/dingtalk/launch', async (req: Request, res: Response) => {
   }
 
   try {
+    if (isTruthyQueryFlag(req.query.probe)) {
+      return res.json({
+        success: true,
+        data: {
+          available: true,
+        },
+      })
+    }
+
     const redirectPath = normalizeDingTalkRedirectPath(req.query.redirect)
     const state = await generateState({ redirectPath })
     const url = buildAuthUrl(state)
