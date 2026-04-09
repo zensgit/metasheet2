@@ -296,20 +296,30 @@
                 <p>{{ record.data.workSummary || 'No work summary yet.' }}</p>
               </div>
 
-              <dl class="after-sales-view__service-record-meta">
-                <div>
-                  <dt>Scheduled</dt>
-                  <dd>{{ formatRecordDate(record.data.scheduledAt) }}</dd>
-                </div>
-                <div>
-                  <dt>Completed</dt>
-                  <dd>{{ formatRecordDate(record.data.completedAt) }}</dd>
-                </div>
-                <div>
-                  <dt>Technician</dt>
-                  <dd>{{ record.data.technicianName || 'Unassigned' }}</dd>
-                </div>
-              </dl>
+              <div class="after-sales-view__service-record-side">
+                <dl class="after-sales-view__service-record-meta">
+                  <div>
+                    <dt>Scheduled</dt>
+                    <dd>{{ formatRecordDate(record.data.scheduledAt) }}</dd>
+                  </div>
+                  <div>
+                    <dt>Completed</dt>
+                    <dd>{{ formatRecordDate(record.data.completedAt) }}</dd>
+                  </div>
+                  <div>
+                    <dt>Technician</dt>
+                    <dd>{{ record.data.technicianName || 'Unassigned' }}</dd>
+                  </div>
+                </dl>
+                <button
+                  class="after-sales-view__ghost-btn after-sales-view__service-record-delete"
+                  :aria-label="`Delete service record ${record.data.ticketNo}`"
+                  :disabled="serviceRecordDeletingId === record.id"
+                  @click="deleteServiceRecord(record)"
+                >
+                  {{ serviceRecordDeletingId === record.id ? 'Deleting...' : 'Delete' }}
+                </button>
+              </div>
             </article>
           </div>
           <p v-else class="after-sales-view__muted-state">No service records found yet.</p>
@@ -516,6 +526,7 @@ const refreshing = ref(false)
 const ticketsLoading = ref(false)
 const serviceRecordsLoading = ref(false)
 const serviceRecordCreating = ref(false)
+const serviceRecordDeletingId = ref('')
 const error = ref('')
 const ticketsError = ref('')
 const serviceRecordsError = ref('')
@@ -840,6 +851,29 @@ async function submitServiceRecord() {
     serviceRecordSubmitError.value = err instanceof Error ? err.message : 'Failed to create service record'
   } finally {
     serviceRecordCreating.value = false
+  }
+}
+
+async function deleteServiceRecord(record: ServiceRecordViewModel) {
+  if (!record.id || serviceRecordDeletingId.value === record.id) {
+    return
+  }
+
+  serviceRecordDeletingId.value = record.id
+  serviceRecordSubmitError.value = ''
+  serviceRecordSubmitSuccess.value = ''
+
+  try {
+    await readEnvelope(`/api/after-sales/service-records/${encodeURIComponent(record.id)}`, {
+      method: 'DELETE',
+    })
+    serviceRecords.value = serviceRecords.value.filter((item) => item.id !== record.id)
+    serviceRecordsError.value = ''
+    serviceRecordSubmitSuccess.value = `Deleted service record for ${record.data.ticketNo}`
+  } catch (err: unknown) {
+    serviceRecordSubmitError.value = err instanceof Error ? err.message : 'Failed to delete service record'
+  } finally {
+    serviceRecordDeletingId.value = ''
   }
 }
 
@@ -1226,6 +1260,16 @@ onMounted(() => {
   color: #0f172a;
 }
 
+.after-sales-view__service-record-side {
+  display: grid;
+  gap: 12px;
+  justify-items: end;
+}
+
+.after-sales-view__service-record-delete {
+  min-width: 120px;
+}
+
 .after-sales-view__tag {
   display: inline-flex;
   align-items: center;
@@ -1405,6 +1449,10 @@ code {
   .after-sales-view__service-record-form {
     grid-template-columns: 1fr;
     display: grid;
+  }
+
+  .after-sales-view__service-record-side {
+    justify-items: stretch;
   }
 }
 </style>

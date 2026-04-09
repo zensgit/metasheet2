@@ -381,6 +381,111 @@ describe('AfterSalesView service records panel', () => {
     expect(serviceRecordCalls[1]?.[1]).toMatchObject({ method: 'POST' })
   })
 
+  it('deletes a service record inline and removes it from the current list', async () => {
+    apiFetchMock.mockImplementation(async (path: string, init?: RequestInit) => {
+      if (path === '/api/after-sales/app-manifest') {
+        return createResponse({
+          id: 'after-sales-default',
+          displayName: 'After Sales',
+          platformDependencies: ['core-backend'],
+          objects: [],
+          workflows: [],
+        })
+      }
+
+      if (path === '/api/after-sales/projects/current') {
+        return createResponse({
+          status: 'installed',
+          projectId: 'tenant:after-sales',
+          displayName: 'After Sales',
+          config: {
+            defaultSlaHours: 24,
+            urgentSlaHours: 4,
+            followUpAfterDays: 7,
+          },
+          installResult: {
+            status: 'installed',
+            createdObjects: [],
+            createdViews: [],
+            warnings: [],
+            reportRef: 'install-103',
+          },
+          reportRef: 'install-103',
+        })
+      }
+
+      if (path === '/api/after-sales/tickets') {
+        return createResponse({
+          projectId: 'tenant:after-sales',
+          count: 0,
+          tickets: [],
+        })
+      }
+
+      if (path === '/api/after-sales/service-records' && (!init || !init.method)) {
+        return createResponse({
+          projectId: 'tenant:after-sales',
+          count: 2,
+          serviceRecords: [
+            {
+              id: 'sr-delete',
+              version: 1,
+              data: {
+                ticketNo: 'AF-DELETE',
+                visitType: 'onsite',
+                scheduledAt: '2026-04-09T08:00:00.000Z',
+                technicianName: 'Alex',
+                workSummary: 'Delete me',
+                result: 'resolved',
+              },
+            },
+            {
+              id: 'sr-keep',
+              version: 1,
+              data: {
+                ticketNo: 'AF-KEEP',
+                visitType: 'remote',
+                scheduledAt: '2026-04-09T09:00:00.000Z',
+                technicianName: 'Jamie',
+                workSummary: 'Keep me',
+                result: 'partial',
+              },
+            },
+          ],
+        })
+      }
+
+      if (path === '/api/after-sales/service-records/sr-delete' && init?.method === 'DELETE') {
+        return createResponse({
+          projectId: 'tenant:after-sales',
+          serviceRecordId: 'sr-delete',
+          version: 4,
+          deleted: true,
+        })
+      }
+
+      throw new Error(`Unexpected request: ${path}`)
+    })
+
+    const mounted = mountAfterSalesView()
+    app = mounted.app
+    container = mounted.container
+
+    await waitForText(container, 'Delete me')
+
+    const deleteButton = container.querySelector<HTMLButtonElement>('button[aria-label="Delete service record AF-DELETE"]')
+    expect(deleteButton).toBeTruthy()
+    if (!deleteButton) return
+
+    deleteButton.click()
+
+    await waitForText(container, 'Deleted service record for AF-DELETE')
+
+    expect(container.textContent).not.toContain('Delete me')
+    expect(container.textContent).toContain('Keep me')
+    expect(apiFetchMock).toHaveBeenCalledWith('/api/after-sales/service-records/sr-delete', { method: 'DELETE' })
+  })
+
   it('surfaces create errors inline without clearing existing service records', async () => {
     apiFetchMock.mockImplementation(async (path: string, init?: RequestInit) => {
       if (path === '/api/after-sales/app-manifest') {
@@ -486,6 +591,101 @@ describe('AfterSalesView service records panel', () => {
     expect(ticketInput.value).toBe('AF-404')
     expect(scheduledAtInput.value).toBe('2026-04-10T09:15')
     expect(technicianInput.value).toBe('Alex')
+  })
+
+  it('surfaces delete errors inline without clearing existing service records', async () => {
+    apiFetchMock.mockImplementation(async (path: string, init?: RequestInit) => {
+      if (path === '/api/after-sales/app-manifest') {
+        return createResponse({
+          id: 'after-sales-default',
+          displayName: 'After Sales',
+          platformDependencies: ['core-backend'],
+          objects: [],
+          workflows: [],
+        })
+      }
+
+      if (path === '/api/after-sales/projects/current') {
+        return createResponse({
+          status: 'installed',
+          projectId: 'tenant:after-sales',
+          displayName: 'After Sales',
+          config: {
+            defaultSlaHours: 24,
+            urgentSlaHours: 4,
+            followUpAfterDays: 7,
+          },
+          installResult: {
+            status: 'installed',
+            createdObjects: [],
+            createdViews: [],
+            warnings: [],
+            reportRef: 'install-104',
+          },
+          reportRef: 'install-104',
+        })
+      }
+
+      if (path === '/api/after-sales/tickets') {
+        return createResponse({
+          projectId: 'tenant:after-sales',
+          count: 0,
+          tickets: [],
+        })
+      }
+
+      if (path === '/api/after-sales/service-records' && (!init || !init.method)) {
+        return createResponse({
+          projectId: 'tenant:after-sales',
+          count: 1,
+          serviceRecords: [
+            {
+              id: 'sr-delete-error',
+              version: 1,
+              data: {
+                ticketNo: 'AF-DELETE-ERR',
+                visitType: 'onsite',
+                scheduledAt: '2026-04-09T08:00:00.000Z',
+                technicianName: 'Alex',
+                workSummary: 'Still visible after delete failure',
+                result: 'resolved',
+              },
+            },
+          ],
+        })
+      }
+
+      if (path === '/api/after-sales/service-records/sr-delete-error' && init?.method === 'DELETE') {
+        return createResponse(
+          {
+            error: {
+              code: 'NOT_FOUND',
+              message: 'Service record already deleted',
+            },
+          },
+          { ok: false, status: 404, statusText: 'Not Found' },
+        )
+      }
+
+      throw new Error(`Unexpected request: ${path}`)
+    })
+
+    const mounted = mountAfterSalesView()
+    app = mounted.app
+    container = mounted.container
+
+    await waitForText(container, 'Still visible after delete failure')
+
+    const deleteButton = container.querySelector<HTMLButtonElement>('button[aria-label="Delete service record AF-DELETE-ERR"]')
+    expect(deleteButton).toBeTruthy()
+    if (!deleteButton) return
+
+    deleteButton.click()
+
+    await waitForText(container, 'Service record already deleted')
+
+    expect(container.textContent).toContain('Still visible after delete failure')
+    expect(container.textContent).toContain('Service record already deleted')
   })
 
   it('skips service-records loading before install and keeps the install CTA visible', async () => {

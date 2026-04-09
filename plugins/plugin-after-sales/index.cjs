@@ -1208,6 +1208,96 @@ module.exports = {
     )
 
     context.api.http.addRoute(
+      'DELETE',
+      '/api/after-sales/service-records/:serviceRecordId',
+      async (req, res) => {
+        try {
+          const userId = getUserId(req)
+          if (!userId) {
+            sendUnauthorized(res)
+            return
+          }
+          if (!hasAfterSalesWriteAccess(req)) {
+            sendWriteForbidden(res)
+            return
+          }
+
+          const serviceRecordId =
+            typeof req?.params?.serviceRecordId === 'string' ? req.params.serviceRecordId.trim() : ''
+          if (!serviceRecordId) {
+            res.status(400).json({
+              ok: false,
+              error: { code: 'VALIDATION_ERROR', message: 'serviceRecordId is required' },
+            })
+            return
+          }
+
+          const multitableApi = getMultitableWriteApi(context)
+          if (!multitableApi || typeof multitableApi.records.deleteRecord !== 'function') {
+            res.status(503).json({
+              ok: false,
+              error: {
+                code: 'MULTITABLE_UNAVAILABLE',
+                message: 'Multitable record delete seam is not available on plugin context',
+              },
+            })
+            return
+          }
+
+          const tenantId = getTenantId(req, context.logger)
+          const current = await installer.loadCurrent(context, tenantId, appManifest.id)
+          if (!current || !isOperationalAfterSalesStatus(current.status)) {
+            res.status(409).json({
+              ok: false,
+              error: {
+                code: 'AFTER_SALES_NOT_INSTALLED',
+                message: 'After-sales must be installed before deleting service records',
+              },
+            })
+            return
+          }
+
+          const projectId = current.projectId || installer.getProjectId(tenantId, appManifest.id)
+          const sheetId = await findObjectSheetId(multitableApi.provisioning, projectId, 'serviceRecord')
+          const deleted = await multitableApi.records.deleteRecord({
+            sheetId,
+            recordId: serviceRecordId,
+          })
+
+          res.json({
+            ok: true,
+            data: {
+              projectId,
+              serviceRecordId: deleted.id,
+              version: deleted.version,
+              deleted: true,
+            },
+          })
+        } catch (err) {
+          if (err && err.code === 'VALIDATION_ERROR') {
+            res.status(400).json({
+              ok: false,
+              error: { code: err.code, message: err.message },
+            })
+            return
+          }
+          if (err && err.code === 'NOT_FOUND') {
+            res.status(404).json({
+              ok: false,
+              error: { code: err.code, message: err.message },
+            })
+            return
+          }
+          logger.error && logger.error('after-sales delete service record failed', err)
+          res.status(500).json({
+            ok: false,
+            error: { code: 'INTERNAL_ERROR', message: 'Failed to delete after-sales service record' },
+          })
+        }
+      },
+    )
+
+    context.api.http.addRoute(
       'POST',
       '/api/after-sales/tickets/:ticketId/refund-request',
       async (req, res) => {
