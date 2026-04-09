@@ -423,6 +423,13 @@
           </form>
 
           <div class="after-sales-view__action-row after-sales-view__action-row--compact">
+            <button
+              class="after-sales-view__ghost-btn"
+              :disabled="serviceRecordsLoading || serviceRecordCreating || Boolean(serviceRecordDeletingId)"
+              @click="refreshServiceRecords"
+            >
+              {{ serviceRecordsLoading ? 'Refreshing...' : 'Refresh list' }}
+            </button>
             <button class="after-sales-view__ghost-btn" :disabled="serviceRecordsLoading || serviceRecordCreating" @click="applyServiceRecordFilters">
               {{ serviceRecordsLoading ? 'Applying...' : 'Apply filters' }}
             </button>
@@ -1225,6 +1232,13 @@ async function resetServiceRecordFilters() {
     ticketNo: '',
     result: '',
     search: '',
+  }
+  await loadServiceRecordsForCurrentState(current.value)
+}
+
+async function refreshServiceRecords() {
+  if (serviceRecordCreating.value || serviceRecordDeletingId.value) {
+    return
   }
   await loadServiceRecordsForCurrentState(current.value)
 }

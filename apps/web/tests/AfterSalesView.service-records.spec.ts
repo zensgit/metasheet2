@@ -177,6 +177,143 @@ describe('AfterSalesView service records panel', () => {
     expect(configInput.value).toBe('99')
   })
 
+  it('refreshes only service records and preserves local draft and filter inputs', async () => {
+    let currentCalls = 0
+    let ticketCalls = 0
+    const serviceRecordPaths: string[] = []
+
+    apiFetchMock.mockImplementation(async (path: string) => {
+      if (path === '/api/after-sales/app-manifest') {
+        return createResponse({
+          id: 'after-sales-default',
+          displayName: 'After Sales',
+          platformDependencies: ['core-backend'],
+          objects: [],
+          workflows: [],
+        })
+      }
+
+      if (path === '/api/after-sales/projects/current') {
+        currentCalls += 1
+        return createResponse({
+          status: 'installed',
+          projectId: 'tenant:after-sales',
+          displayName: 'After Sales',
+          config: {
+            defaultSlaHours: 24,
+            urgentSlaHours: 4,
+            followUpAfterDays: 7,
+          },
+          installResult: {
+            status: 'installed',
+            createdObjects: [],
+            createdViews: [],
+            warnings: [],
+            reportRef: 'install-refresh-only',
+          },
+          reportRef: 'install-refresh-only',
+        })
+      }
+
+      if (path === '/api/after-sales/tickets') {
+        ticketCalls += 1
+        return createResponse({
+          projectId: 'tenant:after-sales',
+          count: 1,
+          tickets: [
+            {
+              id: 'ticket-001',
+              version: 1,
+              data: {
+                ticketNo: 'AF-001',
+                title: 'Compressor maintenance',
+                status: 'open',
+              },
+            },
+          ],
+        })
+      }
+
+      if (path === '/api/after-sales/service-records') {
+        serviceRecordPaths.push(path)
+        return createResponse({
+          projectId: 'tenant:after-sales',
+          count: 1,
+          serviceRecords: [
+            {
+              id: 'sr-initial',
+              version: 1,
+              data: {
+                ticketNo: 'AF-000',
+                visitType: 'onsite',
+                scheduledAt: '2026-04-09T08:00:00.000Z',
+                technicianName: 'Alex',
+                workSummary: 'Initial visit',
+                result: 'resolved',
+              },
+            },
+          ],
+        })
+      }
+
+      if (path === '/api/after-sales/service-records?ticketNo=AF-001') {
+        serviceRecordPaths.push(path)
+        return createResponse({
+          projectId: 'tenant:after-sales',
+          count: 1,
+          serviceRecords: [
+            {
+              id: 'sr-refreshed',
+              version: 2,
+              data: {
+                ticketNo: 'AF-001',
+                visitType: 'remote',
+                scheduledAt: '2026-04-10T10:30:00.000Z',
+                technicianName: 'Jamie',
+                workSummary: 'Refreshed visit',
+                result: 'partial',
+              },
+            },
+          ],
+        })
+      }
+
+      throw new Error(`Unexpected request: ${path}`)
+    })
+
+    const mounted = mountAfterSalesView()
+    app = mounted.app
+    container = mounted.container
+
+    await waitForText(container, 'Initial visit')
+
+    const ticketFilter = container.querySelector<HTMLInputElement>('#after-sales-service-record-filter-ticket-no')
+    const ticketInput = container.querySelector<HTMLInputElement>('#after-sales-service-record-ticket-no')
+    const scheduledAtInput = container.querySelector<HTMLInputElement>('#after-sales-service-record-scheduled-at')
+
+    expect(ticketFilter).toBeTruthy()
+    expect(ticketInput).toBeTruthy()
+    expect(scheduledAtInput).toBeTruthy()
+    if (!ticketFilter || !ticketInput || !scheduledAtInput) return
+
+    await setInputValue(ticketFilter, 'AF-001')
+    await setInputValue(ticketInput, 'AF-001')
+    await setInputValue(scheduledAtInput, '2026-04-10T10:30')
+
+    findButton(container, 'Refresh list').click()
+    await waitForText(container, 'Refreshed visit')
+
+    expect(ticketFilter.value).toBe('AF-001')
+    expect(ticketInput.value).toBe('AF-001')
+    expect(scheduledAtInput.value).toBe('2026-04-10T10:30')
+    expect(currentCalls).toBe(1)
+    expect(ticketCalls).toBe(1)
+    expect(serviceRecordPaths).toEqual([
+      '/api/after-sales/service-records',
+      '/api/after-sales/service-records?ticketNo=AF-001',
+    ])
+  })
+
   it('applies service-record filters through the existing query api', async () => {
     apiFetchMock.mockImplementation(async (path: string) => {
       if (path === '/api/after-sales/app-manifest') {
