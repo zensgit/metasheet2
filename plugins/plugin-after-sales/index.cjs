@@ -296,6 +296,7 @@ async function findTicketByTicketNo(multitableApi, projectId, ticketNo) {
   const sheetId = await findObjectSheetId(multitableApi.provisioning, projectId, 'serviceTicket')
   const recordsApi = multitableApi.records
   let records = []
+  let foundByQuery = false
 
   if (typeof recordsApi.queryRecords === 'function') {
     const physicalFieldIds = await resolvePhysicalFieldIds(
@@ -311,12 +312,17 @@ async function findTicketByTicketNo(multitableApi, projectId, ticketNo) {
       },
       limit: 1,
     })
-  } else if (typeof recordsApi.listRecords === 'function') {
+    foundByQuery = Array.isArray(records) && records.length > 0
+  }
+
+  if (!foundByQuery && typeof recordsApi.listRecords === 'function') {
     records = await recordsApi.listRecords({ sheetId })
   } else {
-    const error = new Error('Multitable ticket reader is not available on plugin context')
-    error.code = 'MULTITABLE_UNAVAILABLE'
-    throw error
+    if (!foundByQuery) {
+      const error = new Error('Multitable ticket reader is not available on plugin context')
+      error.code = 'MULTITABLE_UNAVAILABLE'
+      throw error
+    }
   }
 
   for (const ticket of Array.isArray(records) ? records : []) {

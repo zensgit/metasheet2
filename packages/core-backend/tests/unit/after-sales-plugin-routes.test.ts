@@ -1142,6 +1142,47 @@ describe('plugin-after-sales routes', () => {
     expect(createRecord).not.toHaveBeenCalled()
   })
 
+  it('falls back to ticket listRecords when ticket queryRecords misses', async () => {
+    const handler = routes.get('POST /api/after-sales/service-records')
+    const res = new FakeResponse()
+
+    db.rows.push({
+      id: 'fake-uuid-1',
+      tenant_id: 'tenant_42',
+      app_id: 'after-sales',
+      project_id: 'tenant_42:after-sales',
+      template_id: 'after-sales-default',
+      template_version: '0.1.0',
+      mode: 'enable',
+      status: 'installed',
+      created_objects_json: JSON.stringify(['serviceTicket', 'serviceRecord']),
+      created_views_json: JSON.stringify(['ticket-board', 'serviceRecord-calendar']),
+      warnings_json: JSON.stringify([]),
+      display_name: 'After-sales',
+      config_json: JSON.stringify({}),
+      last_install_at: new Date(),
+      created_at: new Date(),
+    })
+
+    queryRecords.mockResolvedValueOnce([])
+
+    await handler?.(buildReq({
+      body: {
+        serviceRecord: {
+          ticketNo: 'TK-2001',
+          visitType: 'onsite',
+          scheduledAt: '2026-04-09T09:00:00Z',
+        },
+      },
+    }), res)
+
+    expect(res.statusCode).toBe(201)
+    expect(listRecords).toHaveBeenCalledWith({
+      sheetId: 'tenant_42:after-sales:serviceTicket:sheet',
+    })
+    expect(createRecord).toHaveBeenCalled()
+  })
+
   it('returns 400 when service-record scheduledAt is missing', async () => {
     const handler = routes.get('POST /api/after-sales/service-records')
     const res = new FakeResponse()
