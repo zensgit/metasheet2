@@ -1205,8 +1205,14 @@ export function federationRouter(injector?: Injector): Router {
               role,
               includeMetadata,
             })
-            if (sendAdapterError(res, result.error, 'Failed to query documents', metrics, 'POST', `/plm/${operation}`, startTime)) {
-              return
+            // When sources metadata is present, always return it so the UI
+            // can tell the user exactly which document sources failed — even
+            // when both sources are down. Without this, sendAdapterError
+            // would short-circuit and the sources detail would be lost.
+            if (result.error && !result.metadata?.sources) {
+              if (sendAdapterError(res, result.error, 'Failed to query documents', metrics, 'POST', `/plm/${operation}`, startTime)) {
+                return
+              }
             }
 
             metrics.recordRequest(
@@ -1222,6 +1228,7 @@ export function federationRouter(injector?: Injector): Router {
                 total: result.metadata?.totalCount ?? result.data.length,
                 limit: pagination?.limit ?? 100,
                 offset: pagination?.offset ?? 0,
+                ...(result.metadata?.sources ? { sources: result.metadata.sources } : {}),
               },
             })
           }

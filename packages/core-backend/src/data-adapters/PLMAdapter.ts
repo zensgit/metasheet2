@@ -250,6 +250,9 @@ export interface PLMDocument {
   document_type: string
   description?: string
   engineering_state: string
+  item_number?: string
+  config_id?: string
+  current_version_id?: string
   file_size?: number
   mime_type?: string
   is_production_doc?: boolean
@@ -438,6 +441,20 @@ interface YuantusFileMetadata {
   author?: string
   source_system?: string
   source_version?: string
+}
+
+interface YuantusRelatedDocument extends Record<string, unknown> {
+  id?: string
+  name?: string
+  state?: string
+  current_version_id?: string
+  config_id?: string
+  item_number?: string
+  document_type?: string
+  engineering_state?: string
+  properties?: Record<string, unknown>
+  created_at?: string
+  updated_at?: string
 }
 
 interface YuantusEco {
@@ -1116,6 +1133,87 @@ export class PLMAdapter extends HTTPAdapter {
     }
   }
 
+  private mapYuantusRelatedDocumentFields(entry: YuantusRelatedDocument): PLMDocument {
+    const properties = entry.properties || {}
+    const docId = String(entry.id || properties.id || '')
+    const itemNumber = String(
+      entry.item_number ||
+      (properties.item_number as string | number | undefined) ||
+      (properties.doc_number as string | number | undefined) ||
+      (properties.number as string | number | undefined) ||
+      ''
+    )
+    const configId = String(entry.config_id || (properties.config_id as string | number | undefined) || '')
+    const currentVersionId = String(
+      entry.current_version_id ||
+      (properties.current_version_id as string | number | undefined) ||
+      ''
+    )
+    const name = String(
+      entry.name ||
+      (properties.name as string | number | undefined) ||
+      (properties.title as string | number | undefined) ||
+      itemNumber ||
+      configId ||
+      docId
+    )
+    const documentType = String(
+      entry.document_type ||
+      (properties.document_type as string | number | undefined) ||
+      (properties.type as string | number | undefined) ||
+      'document'
+    )
+    const engineeringState = String(
+      entry.engineering_state ||
+      entry.state ||
+      (properties.state as string | number | undefined) ||
+      (properties.status as string | number | undefined) ||
+      ''
+    ) || 'unknown'
+    const createdAt = this.toIsoString(entry.created_at || (properties.created_at as string | undefined)) || new Date().toISOString()
+    const updatedAt = this.toIsoString(entry.updated_at || (properties.updated_at as string | undefined) || entry.created_at) || createdAt
+    const previewUrl = this.resolveUrl(
+      String(entry.preview_url || (properties.preview_url as string | undefined) || '')
+    )
+    const downloadUrl = this.resolveUrl(
+      String(entry.download_url || (properties.download_url as string | undefined) || '')
+    )
+
+    return {
+      id: docId || itemNumber || configId,
+      name,
+      engineering_code: itemNumber || configId || docId || undefined,
+      engineering_revision: currentVersionId || undefined,
+      document_type: documentType,
+      description: String(
+        entry.description ||
+        (properties.description as string | number | undefined) ||
+        ''
+      ) || undefined,
+      engineering_state: engineeringState,
+      item_number: itemNumber || undefined,
+      config_id: configId || undefined,
+      current_version_id: currentVersionId || undefined,
+      file_size: this.toNumber(entry.file_size ?? properties.file_size, 0),
+      mime_type: String(entry.mime_type || (properties.mime_type as string | undefined) || '') || undefined,
+      is_production_doc: ['released', 'approved', 'done', 'production', 'primary'].includes(engineeringState.toLowerCase()),
+      preview_url: previewUrl,
+      download_url: downloadUrl,
+      metadata: {
+        id: docId || undefined,
+        item_number: itemNumber || undefined,
+        config_id: configId || undefined,
+        current_version_id: currentVersionId || undefined,
+        document_type: documentType || undefined,
+        engineering_state: engineeringState || undefined,
+        preview_url: previewUrl,
+        download_url: downloadUrl,
+      },
+      created_at: createdAt,
+      updated_at: updatedAt,
+    }
+  }
+
   private mapYuantusApprovalStatus(state?: string): ApprovalRequest['status'] {
     const normalized = (state || '').toLowerCase()
     if (['approved', 'done'].includes(normalized)) {
@@ -1174,6 +1272,49 @@ export class PLMAdapter extends HTTPAdapter {
     } catch (_err) {
       return null
     }
+  }
+
+  private extractYuantusRelatedDocuments(rows: Array<Record<string, unknown>>): YuantusRelatedDocument[] {
+    const documents: YuantusRelatedDocument[] = []
+    for (const row of rows) {
+      if (!row || typeof row !== 'object') continue
+      const related = row['Document Part']
+      if (Array.isArray(related)) {
+        documents.push(...related.filter((doc): doc is YuantusRelatedDocument => !!doc && typeof doc === 'object'))
+      }
+    }
+    return documents
+  }
+
+  private getYuantusDocumentKey(document: PLMDocument): string {
+    return String(
+      document.id ||
+      document.metadata?.file_id ||
+      document.item_number ||
+      document.config_id ||
+      document.engineering_code ||
+      ''
+    )
+  }
+
+  private mergeYuantusDocuments(...groups: PLMDocument[][]): PLMDocument[] {
+    const seen = new Set<string>()
+    const merged: PLMDocument[] = []
+
+    for (const group of groups) {
+      for (const document of group) {
+        const key = this.getYuantusDocumentKey(document)
+        if (key && seen.has(key)) {
+          continue
+        }
+        if (key) {
+          seen.add(key)
+        }
+        merged.push(document)
+      }
+    }
+
+    return merged
   }
 
   async getProductById(id: string, options?: { itemType?: string }): Promise<PLMProduct | null> {
@@ -1259,23 +1400,61 @@ export class PLMAdapter extends HTTPAdapter {
       const params: Record<string, unknown> = {}
       if (options?.role) params.role = options.role
 
-      const result = await this.query<YuantusItemFile>(`/api/v1/file/item/${productId}`, [params])
+      const [attachmentsResult, relatedResult] = await Promise.all([
+        this.query<YuantusItemFile>(`/api/v1/file/item/${productId}`, [params]),
+        this.select<Record<string, unknown>>('/api/v1/aml/query', {
+          method: 'POST',
+          data: {
+            type: this.yuantusItemType,
+            where: { id: productId },
+            select: ['id', 'name', 'state', 'properties', 'current_version_id', 'config_id'],
+            expand: ['Document Part'],
+            depth: 1,
+            page: 1,
+            page_size: 1,
+          },
+        }),
+      ])
       const includeMetadata = options?.includeMetadata !== false
-      const mapped = await Promise.all(
-        result.data.map(async (entry) => {
+      const mappedAttachments = await Promise.all(
+        attachmentsResult.data.map(async (entry) => {
           const fileId = String(entry.file_id || entry.id || '')
           const metadata = includeMetadata ? await this.fetchYuantusFileMetadata(fileId) : null
           return this.mapYuantusDocumentFields(entry, metadata)
         })
       )
+      const mappedRelated = this.extractYuantusRelatedDocuments(relatedResult.data)
+        .map(entry => this.mapYuantusRelatedDocumentFields(entry))
+      const merged = this.mergeYuantusDocuments(mappedAttachments, mappedRelated)
       const offset = options?.offset ?? 0
       const limit = options?.limit
-      const sliced = typeof limit === 'number' ? mapped.slice(offset, offset + limit) : mapped.slice(offset)
+      const sliced = typeof limit === 'number' ? merged.slice(offset, offset + limit) : merged.slice(offset)
+      const error = attachmentsResult.error && relatedResult.error
+        ? attachmentsResult.error
+        : undefined
+
+      // Partial-degradation visibility: let the caller know which sources
+      // contributed to the result and which failed, so the UI can show a
+      // warning instead of silently returning fewer documents.
+      const sources = [
+        {
+          name: 'attachments' as const,
+          ok: !attachmentsResult.error,
+          count: mappedAttachments.length,
+          ...(attachmentsResult.error ? { error: String(attachmentsResult.error) } : {}),
+        },
+        {
+          name: 'related_documents' as const,
+          ok: !relatedResult.error,
+          count: mappedRelated.length,
+          ...(relatedResult.error ? { error: String(relatedResult.error) } : {}),
+        },
+      ]
 
       return {
         data: sliced,
-        metadata: { totalCount: mapped.length },
-        error: result.error,
+        metadata: { totalCount: merged.length, sources },
+        error,
       }
     }
 
@@ -1382,6 +1561,44 @@ export class PLMAdapter extends HTTPAdapter {
     if (options?.offset) params.skip = options.offset
 
     return this.select<ApprovalRequest>(this.approvalRequestsPath(), { params })
+  }
+
+  async getApprovalById(approvalId: string): Promise<QueryResult<ApprovalRequest>> {
+    if (this.mockMode) {
+      return {
+        data: [],
+        metadata: { totalCount: 0 },
+      }
+    }
+
+    if (this.apiMode === 'yuantus') {
+      const result = await this.query<YuantusEco>(`/api/v1/eco/${approvalId}`)
+      if (result.error) {
+        return { data: [], error: result.error }
+      }
+
+      const eco = result.data[0]
+      if (!eco) {
+        return { data: [], metadata: { totalCount: 0 } }
+      }
+
+      let product: PLMProduct | null = null
+      if (eco.product_id) {
+        try {
+          product = await this.getProductById(String(eco.product_id))
+        } catch (_err) {
+          product = null
+        }
+      }
+
+      const mapped = this.mapYuantusEcoApproval(eco, product || undefined)
+      return {
+        data: [mapped],
+        metadata: { totalCount: 1 },
+      }
+    }
+
+    return this.select<ApprovalRequest>(`${this.approvalsBasePath()}${approvalId}`)
   }
 
   async getApprovalHistory(approvalId: string): Promise<QueryResult<ApprovalHistoryEntry>> {

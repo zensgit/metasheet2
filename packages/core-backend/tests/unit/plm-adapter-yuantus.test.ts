@@ -109,7 +109,7 @@ describe('PLMAdapter Yuantus product detail mapping', () => {
 })
 
 describe('PLMAdapter Yuantus documents mapping', () => {
-  it('maps document metadata and resolves URLs', async () => {
+  it('merges file attachments with AML related documents and resolves URLs', async () => {
     const adapter = createAdapter()
     ;(adapter as any).config.connection.url = 'http://plm.local'
 
@@ -142,16 +142,50 @@ describe('PLMAdapter Yuantus documents mapping', () => {
       }
       return { data: [] }
     })
+    const selectMock = vi.fn(async (path: string) => {
+      if (path === '/api/v1/aml/query') {
+        return {
+          data: [{
+            id: 'item-1',
+            name: 'Root Part',
+            state: 'Released',
+            config_id: 'cfg-root',
+            'Document Part': [{
+              id: 'doc-2',
+              name: 'Spec Document',
+              state: 'Draft',
+              item_number: 'DOC-002',
+              config_id: 'cfg-doc-2',
+              current_version_id: 'ver-2',
+              properties: {
+                document_type: 'specification',
+                engineering_state: 'draft',
+              },
+            }],
+          }],
+        }
+      }
+      return { data: [] }
+    })
 
     ;(adapter as any).query = queryMock
+    ;(adapter as any).select = selectMock
 
     const result = await adapter.getProductDocuments('item-1')
 
     expect(queryMock).toHaveBeenCalledWith('/api/v1/file/item/item-1', [expect.any(Object)])
+    expect(selectMock).toHaveBeenCalledWith('/api/v1/aml/query', expect.objectContaining({
+      method: 'POST',
+      data: expect.objectContaining({
+        type: 'Part',
+        where: { id: 'item-1' },
+        expand: ['Document Part'],
+      }),
+    }))
     expect(queryMock).toHaveBeenCalledWith('/api/v1/file/file-1')
-    expect(result.data).toHaveLength(1)
+    expect(result.data).toHaveLength(2)
 
-    const doc = result.data[0]
+    const [doc, relatedDoc] = result.data
     expect(doc.id).toBe('file-1')
     expect(doc.name).toBe('meta-name.dwg')
     expect(doc.document_type).toBe('drawing')
@@ -162,6 +196,57 @@ describe('PLMAdapter Yuantus documents mapping', () => {
     expect(doc.download_url).toBe('http://cdn.local/download/file-1')
     expect(doc.is_production_doc).toBe(true)
     expect(doc.metadata?.file_role).toBe('primary')
+
+    expect(relatedDoc.id).toBe('doc-2')
+    expect(relatedDoc.name).toBe('Spec Document')
+    expect(relatedDoc.document_type).toBe('specification')
+    expect(relatedDoc.engineering_state).toBe('Draft')
+    expect(relatedDoc.item_number).toBe('DOC-002')
+    expect(relatedDoc.config_id).toBe('cfg-doc-2')
+    expect(relatedDoc.current_version_id).toBe('ver-2')
+    expect(relatedDoc.metadata?.config_id).toBe('cfg-doc-2')
+  })
+
+  it('deduplicates merged documents by id and file id', async () => {
+    const adapter = createAdapter()
+
+    const queryMock = vi.fn(async (path: string) => {
+      if (path.startsWith('/api/v1/file/item/')) {
+        return {
+          data: [{
+            file_id: 'shared-1',
+            filename: 'shared.dwg',
+            file_role: 'primary',
+            document_type: 'drawing',
+          }],
+        }
+      }
+      return { data: [] }
+    })
+    const selectMock = vi.fn(async (path: string) => {
+      if (path === '/api/v1/aml/query') {
+        return {
+          data: [{
+            id: 'item-1',
+            'Document Part': [{
+              id: 'shared-1',
+              name: 'Shared Document',
+              state: 'Released',
+              item_number: 'DOC-SHARED',
+            }],
+          }],
+        }
+      }
+      return { data: [] }
+    })
+
+    ;(adapter as any).query = queryMock
+    ;(adapter as any).select = selectMock
+
+    const result = await adapter.getProductDocuments('item-1')
+
+    expect(result.data).toHaveLength(1)
+    expect(result.data[0].id).toBe('shared-1')
   })
 })
 
@@ -186,5 +271,159 @@ describe('PLMAdapter Yuantus approvals mapping', () => {
     const all = await adapter.getApprovals()
     expect(all.data).toHaveLength(3)
     expect(all.data.map((entry) => entry.status)).toEqual(['approved', 'rejected', 'pending'])
+  })
+})
+
+describe('PLMAdapter Yuantus documents single-side failure + sources metadata', () => {
+  it('returns AML related documents when file/item endpoint errors, with sources showing degradation', async () => {
+    const adapter = createAdapter()
+
+    const queryMock = vi.fn(async (path: string) => {
+      if (path.startsWith('/api/v1/file/item/')) {
+        return { data: [], error: new Error('file endpoint down') }
+      }
+      return { data: [] }
+    })
+    const selectMock = vi.fn(async (path: string) => {
+      if (path === '/api/v1/aml/query') {
+        return {
+          data: [{
+            id: 'item-1',
+            'Document Part': [{
+              id: 'doc-aml-1',
+              name: 'Surviving AML Doc',
+              state: 'Released',
+              item_number: 'DOC-AML-1',
+            }],
+          }],
+        }
+      }
+      return { data: [] }
+    })
+
+    ;(adapter as any).query = queryMock
+    ;(adapter as any).select = selectMock
+
+    const result = await adapter.getProductDocuments('item-1')
+    expect(result.data).toHaveLength(1)
+    expect(result.data[0].name).toBe('Surviving AML Doc')
+    expect(result.error).toBeUndefined()
+
+    // sources metadata: attachments failed, related_documents succeeded
+    const sources = (result.metadata as any)?.sources
+    expect(sources).toBeDefined()
+    expect(sources).toHaveLength(2)
+    expect(sources[0]).toMatchObject({ name: 'attachments', ok: false })
+    expect(sources[0].error).toBeDefined()
+    expect(sources[1]).toMatchObject({ name: 'related_documents', ok: true, count: 1 })
+  })
+
+  it('returns file attachments when AML query endpoint errors, with sources showing degradation', async () => {
+    const adapter = createAdapter()
+
+    const queryMock = vi.fn(async (path: string) => {
+      if (path.startsWith('/api/v1/file/item/')) {
+        return {
+          data: [{
+            file_id: 'file-survive-1',
+            filename: 'surviving-file.pdf',
+            file_role: 'primary',
+            document_type: 'drawing',
+          }],
+        }
+      }
+      if (path.startsWith('/api/v1/file/')) {
+        return { data: [] }
+      }
+      return { data: [] }
+    })
+    const selectMock = vi.fn(async () => {
+      return { data: [], error: new Error('aml query down') }
+    })
+
+    ;(adapter as any).query = queryMock
+    ;(adapter as any).select = selectMock
+
+    const result = await adapter.getProductDocuments('item-1')
+    expect(result.data).toHaveLength(1)
+    expect(result.data[0].name).toBe('surviving-file.pdf')
+    expect(result.error).toBeUndefined()
+
+    // sources metadata: attachments succeeded, related_documents failed
+    const sources = (result.metadata as any)?.sources
+    expect(sources).toBeDefined()
+    expect(sources[0]).toMatchObject({ name: 'attachments', ok: true, count: 1 })
+    expect(sources[1]).toMatchObject({ name: 'related_documents', ok: false })
+    expect(sources[1].error).toBeDefined()
+  })
+
+  it('propagates error and marks both sources failed when both sides fail', async () => {
+    const adapter = createAdapter()
+
+    const fileError = new Error('file side down')
+    const queryMock = vi.fn(async () => {
+      return { data: [], error: fileError }
+    })
+    const selectMock = vi.fn(async () => {
+      return { data: [], error: new Error('aml side down') }
+    })
+
+    ;(adapter as any).query = queryMock
+    ;(adapter as any).select = selectMock
+
+    const result = await adapter.getProductDocuments('item-1')
+    expect(result.data).toHaveLength(0)
+    expect(result.error).toBeDefined()
+
+    // sources metadata: both failed
+    const sources = (result.metadata as any)?.sources
+    expect(sources).toBeDefined()
+    expect(sources[0]).toMatchObject({ name: 'attachments', ok: false })
+    expect(sources[1]).toMatchObject({ name: 'related_documents', ok: false })
+  })
+
+  it('reports both sources ok when neither fails', async () => {
+    const adapter = createAdapter()
+
+    const queryMock = vi.fn(async (path: string) => {
+      if (path.startsWith('/api/v1/file/item/')) {
+        return {
+          data: [{
+            file_id: 'f1',
+            filename: 'spec.pdf',
+            file_role: 'primary',
+            document_type: 'drawing',
+          }],
+        }
+      }
+      return { data: [] }
+    })
+    const selectMock = vi.fn(async (path: string) => {
+      if (path === '/api/v1/aml/query') {
+        return {
+          data: [{
+            id: 'item-1',
+            'Document Part': [{
+              id: 'doc-1',
+              name: 'Related Doc',
+              state: 'Draft',
+            }],
+          }],
+        }
+      }
+      return { data: [] }
+    })
+
+    ;(adapter as any).query = queryMock
+    ;(adapter as any).select = selectMock
+
+    const result = await adapter.getProductDocuments('item-1')
+    expect(result.data).toHaveLength(2)
+    expect(result.error).toBeUndefined()
+
+    const sources = (result.metadata as any)?.sources
+    expect(sources).toBeDefined()
+    expect(sources[0]).toMatchObject({ name: 'attachments', ok: true, count: 1 })
+    expect(sources[1]).toMatchObject({ name: 'related_documents', ok: true, count: 1 })
   })
 })

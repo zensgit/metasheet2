@@ -509,6 +509,11 @@
         </label>
       </div>
       <p v-if="documentsError" class="status error">{{ documentsError }}</p>
+      <p v-if="documentsWarning && !documentsError" class="status warning">⚠ {{ documentsWarning }}</p>
+      <p v-if="documentSourceProductId" class="status return-source">
+        <button class="btn ghost mini" @click="returnToDocumentSource">← 返回源产品</button>
+        <span class="return-hint">当前正在查看关联文档对象</span>
+      </p>
       <div v-if="!documents.length" class="empty">
         暂无文档
         <span class="empty-hint">（可先在 PLM 关联文件或设置文档角色过滤）</span>
@@ -581,6 +586,11 @@
             </td>
             <td v-if="documentColumns.actions">
               <div class="inline-actions">
+                <button
+                  v-if="isAmlRelatedDocument(doc)"
+                  class="btn ghost mini"
+                  @click="applyProductFromDocument(doc)"
+                >打开</button>
                 <button class="btn ghost mini" @click="copyDocumentId(doc)">复制 ID</button>
                 <button
                   class="btn ghost mini"
@@ -2217,6 +2227,7 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { type LocationQueryValue, useRoute, useRouter } from 'vue-router'
 import { apiGet, apiPost } from '../utils/api'
+import { buildPlmDocumentDegradationMessage, type PlmDocumentSourceStatus } from './plm/plmDocumentDegradation'
 import PlmBomHeader from '../components/plm/PlmBomHeader.vue'
 import PlmBomFilterShell from '../components/plm/PlmBomFilterShell.vue'
 import PlmSearchShell from '../components/plm/PlmSearchShell.vue'
@@ -2507,6 +2518,9 @@ const documentColumnOptions = [
 const documents = ref<any[]>([])
 const documentsLoading = ref(false)
 const documentsError = ref('')
+const documentsWarning = ref('')
+const documentSourceProductId = ref('')
+const documentSourceItemType = ref('')
 
 const cadFileId = ref('')
 const cadOtherFileId = ref('')
@@ -5041,10 +5055,18 @@ async function loadDocuments() {
   if (!productId.value) return
   documentsLoading.value = true
   documentsError.value = ''
+  documentsWarning.value = ''
   try {
     const filters: Record<string, unknown> = {}
     if (documentRole.value) filters.role = documentRole.value
-    const result = await apiPost<{ ok: boolean; data: { items: any[] }; error?: { message?: string } }>(
+    const result = await apiPost<{
+      ok: boolean
+      data: {
+        items: any[]
+        sources?: PlmDocumentSourceStatus[]
+      }
+      error?: { message?: string }
+    }>(
       '/api/federation/plm/query',
       {
         operation: 'documents',
@@ -5057,6 +5079,15 @@ async function loadDocuments() {
       throw new Error(result.error?.message || '加载文档失败')
     }
     documents.value = result.data?.items || []
+
+    // Partial-degradation visibility: make the unavailable side explicit so
+    // users can tell whether attachments or AML related docs were lost.
+    const degradation = buildPlmDocumentDegradationMessage(result.data?.sources ?? [])
+    if (degradation.error) {
+      documentsError.value = degradation.error
+    } else if (degradation.warning) {
+      documentsWarning.value = degradation.warning
+    }
   } catch (error: any) {
     handleAuthError(error)
     documentsError.value = error?.message || '加载文档失败'
@@ -5726,6 +5757,48 @@ async function copyDocumentUrl(doc: Record<string, any>, kind: 'preview' | 'down
     return
   }
   setDeepLinkMessage(`已复制${kind === 'preview' ? '预览' : '下载'}链接。`)
+}
+
+function isAmlRelatedDocument(doc: Record<string, any>): boolean {
+  // AML related documents have no download_url and document_type is
+  // typically 'document', not a file type like 'drawing' or 'pdf'.
+  const dt = String(doc.document_type || '').toLowerCase()
+  return !doc.download_url && (dt === 'document' || dt === 'related_document')
+}
+
+function resolveDocumentItemId(doc: Record<string, any>): string {
+  return String(doc.id || doc.config_id || '')
+}
+
+function applyProductFromDocument(doc: Record<string, any>) {
+  const docId = resolveDocumentItemId(doc)
+  if (!docId) {
+    setDeepLinkMessage('文档缺少对象 ID', true)
+    return
+  }
+  // Save current product as return source
+  documentSourceProductId.value = productId.value
+  documentSourceItemType.value = itemType.value
+  // Switch to the document item
+  productId.value = docId
+  productItemNumber.value = ''
+  itemType.value = 'Document'
+  productError.value = ''
+  setDeepLinkMessage(`已切换到关联文档：${doc.name || docId}`)
+  void loadProduct()
+}
+
+function returnToDocumentSource() {
+  if (!documentSourceProductId.value) return
+  productId.value = documentSourceProductId.value
+  productItemNumber.value = ''
+  itemType.value = documentSourceItemType.value || DEFAULT_ITEM_TYPE
+  productError.value = ''
+  setDeepLinkMessage(`已返回源产品：${documentSourceProductId.value}`)
+  // Clear source so the button hides
+  documentSourceProductId.value = ''
+  documentSourceItemType.value = ''
+  void loadProduct()
 }
 
 function getApprovalTitle(entry: Record<string, any>): string {
@@ -9126,6 +9199,28 @@ input:focus, select:focus, textarea:focus {
 
 .status.error {
   color: #b91c1c;
+}
+
+.status.warning {
+  color: #92400e;
+  background: #fef3c7;
+  border-radius: 6px;
+  padding: 6px 10px;
+}
+
+.status.return-source {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #1e40af;
+  background: #dbeafe;
+  border-radius: 6px;
+  padding: 6px 10px;
+}
+
+.return-hint {
+  font-size: 12px;
+  color: #6b7280;
 }
 
 .empty {
