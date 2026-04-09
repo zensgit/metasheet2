@@ -1900,6 +1900,117 @@ describe('plugin-after-sales routes', () => {
     expect(createRecord).not.toHaveBeenCalled()
   })
 
+  it('returns 403 for follow-up delete when caller lacks after-sales write access', async () => {
+    const handler = routes.get('DELETE /api/after-sales/follow-ups/:followUpId')
+    const res = new FakeResponse()
+
+    await handler?.(buildReq({
+      user: {
+        id: 'user_42',
+        tenantId: 'tenant_42',
+        role: 'user',
+        roles: ['user'],
+        perms: ['after_sales:read'],
+      },
+      params: {
+        followUpId: 'rec_follow_up_001',
+      },
+    }), res)
+
+    expect(res.statusCode).toBe(403)
+    expect(res.body).toEqual({
+      ok: false,
+      error: {
+        code: 'FORBIDDEN',
+        message: 'After-sales write access required',
+      },
+    })
+    expect(deleteRecord).not.toHaveBeenCalled()
+  })
+
+  it('deletes follow-ups through the multitable delete seam', async () => {
+    const handler = routes.get('DELETE /api/after-sales/follow-ups/:followUpId')
+    const res = new FakeResponse()
+
+    db.rows.push({
+      id: 'fake-uuid-1',
+      tenant_id: 'tenant_42',
+      app_id: 'after-sales',
+      project_id: 'tenant_42:after-sales',
+      template_id: 'after-sales-default',
+      template_version: '0.1.0',
+      mode: 'enable',
+      status: 'installed',
+      created_objects_json: JSON.stringify(['serviceTicket', 'followUp']),
+      created_views_json: JSON.stringify(['ticket-board', 'followUp-grid']),
+      warnings_json: JSON.stringify([]),
+      display_name: 'After-sales',
+      config_json: JSON.stringify({}),
+      last_install_at: new Date(),
+      created_at: new Date(),
+    })
+
+    await handler?.(buildReq({
+      params: {
+        followUpId: 'rec_follow_up_001',
+      },
+    }), res)
+
+    expect(res.statusCode).toBe(200)
+    expect(deleteRecord).toHaveBeenCalledWith({
+      sheetId: 'tenant_42:after-sales:followUp:sheet',
+      recordId: 'rec_follow_up_001',
+    })
+    expect(res.body).toEqual({
+      ok: true,
+      data: {
+        projectId: 'tenant_42:after-sales',
+        followUpId: 'rec_follow_up_001',
+        version: 4,
+        deleted: true,
+      },
+    })
+  })
+
+  it('returns 409 when follow-ups are deleted from a failed install state', async () => {
+    const handler = routes.get('DELETE /api/after-sales/follow-ups/:followUpId')
+    const res = new FakeResponse()
+
+    db.rows.push({
+      id: 'fake-uuid-1',
+      tenant_id: 'tenant_42',
+      app_id: 'after-sales',
+      project_id: 'tenant_42:after-sales',
+      template_id: 'after-sales-default',
+      template_version: '0.1.0',
+      mode: 'reinstall',
+      status: 'failed',
+      created_objects_json: JSON.stringify(['serviceTicket', 'followUp']),
+      created_views_json: JSON.stringify(['ticket-board', 'followUp-grid']),
+      warnings_json: JSON.stringify(['follow-up delete failed']),
+      display_name: 'After-sales',
+      config_json: JSON.stringify({}),
+      last_install_at: new Date(),
+      created_at: new Date(),
+    })
+
+    await handler?.(buildReq({
+      params: {
+        followUpId: 'rec_follow_up_001',
+      },
+    }), res)
+
+    expect(res.statusCode).toBe(409)
+    expect(res.body).toEqual({
+      ok: false,
+      error: {
+        code: 'AFTER_SALES_NOT_INSTALLED',
+        message: 'After-sales must be installed before deleting follow-ups',
+      },
+    })
+    expect(deleteRecord).not.toHaveBeenCalled()
+  })
+
   it('returns 403 for customers create when caller lacks after-sales write access', async () => {
     const handler = routes.get('POST /api/after-sales/customers')
     const res = new FakeResponse()

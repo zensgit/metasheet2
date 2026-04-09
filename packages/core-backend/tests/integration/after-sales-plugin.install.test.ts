@@ -2369,6 +2369,85 @@ describe('after-sales plugin install integration', () => {
     })
   })
 
+  it('creates and deletes follow-ups through the real after-sales routes', async () => {
+    if (!baseUrl || !pool) return
+
+    const tokenRes = await requestJson(
+      `${baseUrl}/api/auth/dev-token?userId=after-sales-follow-up-delete-it&roles=admin&perms=*:*`,
+    )
+    const token = (tokenRes.body as { token?: string } | undefined)?.token
+    expect(token).toBeTruthy()
+
+    const installRes = await requestJson(`${baseUrl}/api/after-sales/projects/install`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        templateId: 'after-sales-default',
+        displayName: 'After Sales Follow-up Delete Flow',
+      }),
+    })
+    expect(installRes.status).toBe(200)
+
+    const createRes = await requestJson(`${baseUrl}/api/after-sales/follow-ups`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        followUp: {
+          ticketNo: 'TK-5004',
+          customerName: 'Delete Me Follow-up',
+          dueAt: '2026-04-18T08:00:00Z',
+          followUpType: 'phone',
+          ownerName: 'CSR Chen',
+          summary: 'Delete this follow-up after verification',
+        },
+      }),
+    })
+    expect(createRes.status).toBe(201)
+
+    const createdFollowUpId = (
+      createRes.body as {
+        data?: {
+          followUp?: {
+            id?: string
+          }
+        }
+      }
+    ).data?.followUp?.id
+    expect(createdFollowUpId).toBeTruthy()
+
+    const deleteRes = await requestJson(
+      `${baseUrl}/api/after-sales/follow-ups/${encodeURIComponent(String(createdFollowUpId))}`,
+      {
+        method: 'DELETE',
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      },
+    )
+    expect(deleteRes.status).toBe(200)
+    expect((deleteRes.body as any).data).toMatchObject({
+      projectId: PROJECT_ID,
+      followUpId: createdFollowUpId,
+      deleted: true,
+    })
+
+    const followUpSheetId = stableMetaId('sheet', PROJECT_ID, 'followUp')
+    const recordRes = await waitFor(
+      () => pool.query<{ id: string }>(
+        'SELECT id FROM meta_records WHERE id = $1 AND sheet_id = $2',
+        [createdFollowUpId, followUpSheetId],
+      ),
+      (result) => result.rows.length === 0,
+    )
+    expect(recordRes.rows).toHaveLength(0)
+  })
+
   it('creates customers through the real after-sales routes', async () => {
     if (!baseUrl || !pool) return
 

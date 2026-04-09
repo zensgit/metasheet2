@@ -703,4 +703,363 @@ describe('AfterSalesView follow-ups panel', () => {
     expect(dueAtInput.value).toBe('2026-04-14T09:00')
     expect(section.textContent).toContain('Alice Plant')
   })
+
+  it('deletes a follow-up from the visible list without reloading the page', async () => {
+    apiFetchMock.mockImplementation(async (path: string, options?: RequestInit) => {
+      if (path === '/api/after-sales/app-manifest') {
+        return createResponse({
+          id: 'after-sales-default',
+          displayName: 'After Sales',
+          platformDependencies: ['core-backend'],
+          objects: [{ id: 'followUp' }],
+          workflows: [],
+        })
+      }
+
+      if (path === '/api/after-sales/projects/current') {
+        return createResponse({
+          status: 'installed',
+          projectId: 'tenant:after-sales',
+          displayName: 'After Sales',
+          config: {
+            defaultSlaHours: 24,
+            urgentSlaHours: 4,
+            followUpAfterDays: 7,
+          },
+          installResult: {
+            status: 'installed',
+            createdObjects: [],
+            createdViews: [],
+            warnings: [],
+            reportRef: 'install-follow-ups-delete',
+          },
+          reportRef: 'install-follow-ups-delete',
+        })
+      }
+
+      if (path === '/api/after-sales/tickets') {
+        return createResponse({ projectId: 'tenant:after-sales', count: 0, tickets: [] })
+      }
+
+      if (path === '/api/after-sales/installed-assets') {
+        return createResponse({ projectId: 'tenant:after-sales', count: 0, installedAssets: [] })
+      }
+
+      if (path === '/api/after-sales/service-records') {
+        return createResponse({ projectId: 'tenant:after-sales', count: 0, serviceRecords: [] })
+      }
+
+      if (path === '/api/after-sales/follow-ups') {
+        return createResponse({
+          projectId: 'tenant:after-sales',
+          count: 2,
+          followUps: [
+            {
+              id: 'follow-up-delete',
+              version: 1,
+              data: {
+                ticketNo: 'TK-DELETE',
+                customerName: 'Delete Me Follow-up',
+                dueAt: '2026-04-15T08:00:00Z',
+                followUpType: 'phone',
+                ownerName: 'CSR Chen',
+                status: 'pending',
+                summary: 'Delete this follow-up',
+              },
+            },
+            {
+              id: 'follow-up-keep',
+              version: 1,
+              data: {
+                ticketNo: 'TK-KEEP',
+                customerName: 'Keep Me Follow-up',
+                dueAt: '2026-04-16T08:00:00Z',
+                followUpType: 'message',
+                ownerName: 'CSR Sun',
+                status: 'pending',
+                summary: 'Keep this follow-up',
+              },
+            },
+          ],
+        })
+      }
+
+      if (path === '/api/after-sales/follow-ups/follow-up-delete' && options?.method === 'DELETE') {
+        return createResponse({
+          projectId: 'tenant:after-sales',
+          followUpId: 'follow-up-delete',
+          version: 4,
+          deleted: true,
+        })
+      }
+
+      throw new Error(`Unexpected request: ${path}`)
+    })
+
+    const mounted = mountAfterSalesView()
+    app = mounted.app
+    container = mounted.container
+
+    await waitForText(container, 'Delete Me Follow-up')
+
+    const section = findSection(container, 'Follow-up queue')
+    const deleteButton = section.querySelector<HTMLButtonElement>('button[aria-label="Delete follow-up TK-DELETE"]')
+    expect(deleteButton).toBeTruthy()
+    if (!deleteButton) return
+
+    deleteButton.click()
+    await waitForText(section, 'Deleted follow-up for TK-DELETE')
+
+    expect(section.textContent).not.toContain('Delete Me Follow-up')
+    expect(section.textContent).toContain('Keep Me Follow-up')
+    expect(apiFetchMock).toHaveBeenCalledWith('/api/after-sales/follow-ups/follow-up-delete', { method: 'DELETE' })
+  })
+
+  it('keeps the follow-up list intact when delete fails', async () => {
+    apiFetchMock.mockImplementation(async (path: string, options?: RequestInit) => {
+      if (path === '/api/after-sales/app-manifest') {
+        return createResponse({
+          id: 'after-sales-default',
+          displayName: 'After Sales',
+          platformDependencies: ['core-backend'],
+          objects: [{ id: 'followUp' }],
+          workflows: [],
+        })
+      }
+
+      if (path === '/api/after-sales/projects/current') {
+        return createResponse({
+          status: 'installed',
+          projectId: 'tenant:after-sales',
+          displayName: 'After Sales',
+          config: {
+            defaultSlaHours: 24,
+            urgentSlaHours: 4,
+            followUpAfterDays: 7,
+          },
+          installResult: {
+            status: 'installed',
+            createdObjects: [],
+            createdViews: [],
+            warnings: [],
+            reportRef: 'install-follow-ups-delete-error',
+          },
+          reportRef: 'install-follow-ups-delete-error',
+        })
+      }
+
+      if (path === '/api/after-sales/tickets') {
+        return createResponse({ projectId: 'tenant:after-sales', count: 0, tickets: [] })
+      }
+
+      if (path === '/api/after-sales/installed-assets') {
+        return createResponse({ projectId: 'tenant:after-sales', count: 0, installedAssets: [] })
+      }
+
+      if (path === '/api/after-sales/service-records') {
+        return createResponse({ projectId: 'tenant:after-sales', count: 0, serviceRecords: [] })
+      }
+
+      if (path === '/api/after-sales/follow-ups') {
+        return createResponse({
+          projectId: 'tenant:after-sales',
+          count: 1,
+          followUps: [
+            {
+              id: 'follow-up-delete',
+              version: 1,
+              data: {
+                ticketNo: 'TK-DELETE',
+                customerName: 'Delete Me Follow-up',
+                dueAt: '2026-04-15T08:00:00Z',
+                followUpType: 'phone',
+                ownerName: 'CSR Chen',
+                status: 'pending',
+                summary: 'Delete this follow-up',
+              },
+            },
+          ],
+        })
+      }
+
+      if (path === '/api/after-sales/follow-ups/follow-up-delete' && options?.method === 'DELETE') {
+        return createResponse({
+          error: {
+            code: 'FORBIDDEN',
+            message: 'After-sales write access required',
+          },
+        }, {
+          ok: false,
+          status: 403,
+          statusText: 'Forbidden',
+        })
+      }
+
+      throw new Error(`Unexpected request: ${path}`)
+    })
+
+    const mounted = mountAfterSalesView()
+    app = mounted.app
+    container = mounted.container
+
+    await waitForText(container, 'Delete Me Follow-up')
+
+    const section = findSection(container, 'Follow-up queue')
+    const deleteButton = section.querySelector<HTMLButtonElement>('button[aria-label="Delete follow-up TK-DELETE"]')
+    expect(deleteButton).toBeTruthy()
+    if (!deleteButton) return
+
+    deleteButton.click()
+    await waitForText(section, 'After-sales write access required')
+
+    expect(section.textContent).toContain('Delete Me Follow-up')
+    expect(apiFetchMock).toHaveBeenCalledWith('/api/after-sales/follow-ups/follow-up-delete', { method: 'DELETE' })
+  })
+
+  it('blocks concurrent follow-up deletes while one delete is in flight', async () => {
+    let resolveDelete: ((response: Response) => void) | null = null
+    let deleteCalls = 0
+
+    apiFetchMock.mockImplementation(async (path: string, options?: RequestInit) => {
+      if (path === '/api/after-sales/app-manifest') {
+        return createResponse({
+          id: 'after-sales-default',
+          displayName: 'After Sales',
+          platformDependencies: ['core-backend'],
+          objects: [{ id: 'followUp' }],
+          workflows: [],
+        })
+      }
+
+      if (path === '/api/after-sales/projects/current') {
+        return createResponse({
+          status: 'installed',
+          projectId: 'tenant:after-sales',
+          displayName: 'After Sales',
+          config: {
+            defaultSlaHours: 24,
+            urgentSlaHours: 4,
+            followUpAfterDays: 7,
+          },
+          installResult: {
+            status: 'installed',
+            createdObjects: [],
+            createdViews: [],
+            warnings: [],
+            reportRef: 'install-follow-ups-delete-race',
+          },
+          reportRef: 'install-follow-ups-delete-race',
+        })
+      }
+
+      if (path === '/api/after-sales/tickets') {
+        return createResponse({ projectId: 'tenant:after-sales', count: 0, tickets: [] })
+      }
+
+      if (path === '/api/after-sales/installed-assets') {
+        return createResponse({ projectId: 'tenant:after-sales', count: 0, installedAssets: [] })
+      }
+
+      if (path === '/api/after-sales/service-records') {
+        return createResponse({ projectId: 'tenant:after-sales', count: 0, serviceRecords: [] })
+      }
+
+      if (path === '/api/after-sales/follow-ups') {
+        return createResponse({
+          projectId: 'tenant:after-sales',
+          count: 2,
+          followUps: [
+            {
+              id: 'follow-up-delete',
+              version: 1,
+              data: {
+                ticketNo: 'TK-DELETE',
+                customerName: 'Delete Me Follow-up',
+                dueAt: '2026-04-15T08:00:00Z',
+                followUpType: 'phone',
+                ownerName: 'CSR Chen',
+                status: 'pending',
+                summary: 'Delete this follow-up',
+              },
+            },
+            {
+              id: 'follow-up-keep',
+              version: 1,
+              data: {
+                ticketNo: 'TK-KEEP',
+                customerName: 'Keep Me Follow-up',
+                dueAt: '2026-04-16T08:00:00Z',
+                followUpType: 'message',
+                ownerName: 'CSR Sun',
+                status: 'pending',
+                summary: 'Keep this follow-up',
+              },
+            },
+          ],
+        })
+      }
+
+      if (path === '/api/after-sales/follow-ups/follow-up-delete' && options?.method === 'DELETE') {
+        deleteCalls += 1
+        return await new Promise<Response>((resolve) => {
+          resolveDelete = resolve
+        })
+      }
+
+      if (path === '/api/after-sales/follow-ups/follow-up-keep' && options?.method === 'DELETE') {
+        deleteCalls += 1
+        return createResponse({
+          projectId: 'tenant:after-sales',
+          followUpId: 'follow-up-keep',
+          version: 3,
+          deleted: true,
+        })
+      }
+
+      throw new Error(`Unexpected request: ${path}`)
+    })
+
+    const mounted = mountAfterSalesView()
+    app = mounted.app
+    container = mounted.container
+
+    await waitForText(container, 'Delete Me Follow-up')
+
+    const section = findSection(container, 'Follow-up queue')
+    const deleteFirstButton = section.querySelector<HTMLButtonElement>('button[aria-label="Delete follow-up TK-DELETE"]')
+    const deleteSecondButton = section.querySelector<HTMLButtonElement>('button[aria-label="Delete follow-up TK-KEEP"]')
+    const createButton = findButtonWithin(section, 'Create follow-up')
+    expect(deleteFirstButton).toBeTruthy()
+    expect(deleteSecondButton).toBeTruthy()
+    if (!deleteFirstButton || !deleteSecondButton) return
+
+    deleteFirstButton.click()
+    await flushUi()
+
+    expect(deleteFirstButton.disabled).toBe(true)
+    expect(deleteSecondButton.disabled).toBe(true)
+    expect(createButton.disabled).toBe(true)
+
+    deleteSecondButton.click()
+    await flushUi()
+
+    expect(deleteCalls).toBe(1)
+    expect(resolveDelete).toBeTruthy()
+    if (!resolveDelete) return
+
+    resolveDelete(
+      createResponse({
+        projectId: 'tenant:after-sales',
+        followUpId: 'follow-up-delete',
+        version: 4,
+        deleted: true,
+      }),
+    )
+    await waitForText(section, 'Deleted follow-up for TK-DELETE')
+
+    expect(section.textContent).not.toContain('Delete Me Follow-up')
+    expect(section.textContent).toContain('Keep Me Follow-up')
+    expect(deleteCalls).toBe(1)
+    expect(apiFetchMock).toHaveBeenCalledWith('/api/after-sales/follow-ups/follow-up-delete', { method: 'DELETE' })
+  })
 })

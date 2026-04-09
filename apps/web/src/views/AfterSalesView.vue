@@ -1370,14 +1370,14 @@
           <div class="after-sales-view__action-row after-sales-view__action-row--compact">
             <button
               class="after-sales-view__primary-btn"
-              :disabled="followUpCreating || followUpsLoading || !canSubmitFollowUp"
+              :disabled="followUpCreating || followUpsLoading || Boolean(followUpDeletingId) || !canSubmitFollowUp"
               @click="submitFollowUp"
             >
               {{ followUpCreating ? 'Creating...' : 'Create follow-up' }}
             </button>
             <button
               class="after-sales-view__ghost-btn"
-              :disabled="followUpCreating || followUpsLoading"
+              :disabled="followUpCreating || followUpsLoading || Boolean(followUpDeletingId)"
               @click="resetFollowUpDraft"
             >
               Reset follow-up draft
@@ -1426,21 +1426,21 @@
           <div class="after-sales-view__action-row after-sales-view__action-row--compact">
             <button
               class="after-sales-view__ghost-btn"
-              :disabled="followUpsLoading || followUpCreating"
+              :disabled="followUpsLoading || followUpCreating || Boolean(followUpDeletingId)"
               @click="refreshFollowUps"
             >
               {{ followUpsLoading ? 'Refreshing...' : 'Refresh list' }}
             </button>
             <button
               class="after-sales-view__ghost-btn"
-              :disabled="followUpsLoading || followUpCreating"
+              :disabled="followUpsLoading || followUpCreating || Boolean(followUpDeletingId)"
               @click="applyFollowUpFilters"
             >
               {{ followUpsLoading ? 'Applying...' : 'Apply filters' }}
             </button>
             <button
               class="after-sales-view__ghost-btn"
-              :disabled="followUpsLoading || followUpCreating"
+              :disabled="followUpsLoading || followUpCreating || Boolean(followUpDeletingId)"
               @click="resetFollowUpFilters"
             >
               Clear filters
@@ -1475,6 +1475,14 @@
                     <dd>{{ followUp.data.customerName || 'Unknown customer' }}</dd>
                   </div>
                 </dl>
+                <button
+                  class="after-sales-view__ghost-btn after-sales-view__ticket-action-btn"
+                  :aria-label="`Delete follow-up ${followUp.data.ticketNo}`"
+                  :disabled="Boolean(followUpDeletingId) || followUpCreating || followUpsLoading"
+                  @click="deleteFollowUp(followUp)"
+                >
+                  {{ followUpDeletingId === followUp.id ? 'Deleting...' : 'Delete' }}
+                </button>
               </div>
             </article>
           </div>
@@ -1884,6 +1892,7 @@ const followUpsLoading = ref(false)
 const installedAssetCreating = ref(false)
 const customerCreating = ref(false)
 const followUpCreating = ref(false)
+const followUpDeletingId = ref('')
 const customerDeletingId = ref('')
 const customerUpdatingId = ref('')
 const installedAssetUpdatingId = ref('')
@@ -2961,14 +2970,14 @@ async function loadFollowUpsForCurrentState(state: CurrentResponse): Promise<voi
 }
 
 async function applyFollowUpFilters() {
-  if (followUpsLoading.value || followUpCreating.value) {
+  if (followUpsLoading.value || followUpCreating.value || followUpDeletingId.value) {
     return
   }
   await loadFollowUpsForCurrentState(current.value)
 }
 
 async function resetFollowUpFilters() {
-  if (followUpsLoading.value || followUpCreating.value) {
+  if (followUpsLoading.value || followUpCreating.value || followUpDeletingId.value) {
     return
   }
   followUpFilters.value = {
@@ -2980,14 +2989,14 @@ async function resetFollowUpFilters() {
 }
 
 async function refreshFollowUps() {
-  if (followUpsLoading.value || followUpCreating.value) {
+  if (followUpsLoading.value || followUpCreating.value || followUpDeletingId.value) {
     return
   }
   await loadFollowUpsForCurrentState(current.value)
 }
 
 async function submitFollowUp() {
-  if (!canSubmitFollowUp.value || followUpCreating.value || followUpsLoading.value) {
+  if (!canSubmitFollowUp.value || followUpCreating.value || followUpsLoading.value || followUpDeletingId.value) {
     return
   }
 
@@ -3015,6 +3024,29 @@ async function submitFollowUp() {
     followUpSubmitError.value = err instanceof Error ? err.message : 'Failed to create follow-up'
   } finally {
     followUpCreating.value = false
+  }
+}
+
+async function deleteFollowUp(followUp: FollowUpViewModel) {
+  if (!followUp.id || followUpDeletingId.value || followUpCreating.value || followUpsLoading.value) {
+    return
+  }
+
+  followUpDeletingId.value = followUp.id
+  followUpSubmitError.value = ''
+  followUpSubmitSuccess.value = ''
+
+  try {
+    await readEnvelope(`/api/after-sales/follow-ups/${encodeURIComponent(followUp.id)}`, {
+      method: 'DELETE',
+    })
+    followUps.value = followUps.value.filter((item) => item.id !== followUp.id)
+    followUpsError.value = ''
+    followUpSubmitSuccess.value = `Deleted follow-up for ${followUp.data.ticketNo}`
+  } catch (err: unknown) {
+    followUpSubmitError.value = err instanceof Error ? err.message : 'Failed to delete follow-up'
+  } finally {
+    followUpDeletingId.value = ''
   }
 }
 
