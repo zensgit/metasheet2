@@ -252,16 +252,26 @@
                 <p>{{ ticket.data.title }}</p>
               </div>
 
-              <dl class="after-sales-view__ticket-meta">
-                <div>
-                  <dt>Refund amount</dt>
-                  <dd>{{ formatRefundAmount(ticket.data.refundAmount) }}</dd>
-                </div>
-                <div>
-                  <dt>Approval</dt>
-                  <dd>{{ ticket.approvalLabel }}</dd>
-                </div>
-              </dl>
+              <div class="after-sales-view__ticket-side">
+                <dl class="after-sales-view__ticket-meta">
+                  <div>
+                    <dt>Refund amount</dt>
+                    <dd>{{ formatRefundAmount(ticket.data.refundAmount) }}</dd>
+                  </div>
+                  <div>
+                    <dt>Approval</dt>
+                    <dd>{{ ticket.approvalLabel }}</dd>
+                  </div>
+                </dl>
+                <button
+                  class="after-sales-view__ghost-btn after-sales-view__ticket-delete"
+                  :aria-label="`Delete ticket ${ticket.data.ticketNo}`"
+                  :disabled="Boolean(ticketDeletingId)"
+                  @click="deleteTicket(ticket)"
+                >
+                  {{ ticketDeletingId === ticket.id ? 'Deleting...' : 'Delete' }}
+                </button>
+              </div>
             </article>
           </div>
           <p v-else class="after-sales-view__muted-state">No tickets found yet.</p>
@@ -689,6 +699,7 @@ const installing = ref(false)
 const refreshing = ref(false)
 const ticketsLoading = ref(false)
 const ticketCreating = ref(false)
+const ticketDeletingId = ref('')
 const serviceRecordsLoading = ref(false)
 const serviceRecordCreating = ref(false)
 const serviceRecordDeletingId = ref('')
@@ -1176,6 +1187,29 @@ async function submitTicket() {
   }
 }
 
+async function deleteTicket(ticket: TicketViewModel) {
+  if (!ticket.id || ticketDeletingId.value) {
+    return
+  }
+
+  ticketDeletingId.value = ticket.id
+  ticketSubmitError.value = ''
+  ticketSubmitSuccess.value = ''
+
+  try {
+    await readEnvelope(`/api/after-sales/tickets/${encodeURIComponent(ticket.id)}`, {
+      method: 'DELETE',
+    })
+    tickets.value = tickets.value.filter((item) => item.id !== ticket.id)
+    ticketsError.value = ''
+    ticketSubmitSuccess.value = `Deleted ticket ${ticket.data.ticketNo}`
+  } catch (err: unknown) {
+    ticketSubmitError.value = err instanceof Error ? err.message : 'Failed to delete after-sales ticket'
+  } finally {
+    ticketDeletingId.value = ''
+  }
+}
+
 async function applyServiceRecordFilters() {
   if (serviceRecordCreating.value) {
     return
@@ -1609,6 +1643,13 @@ onMounted(() => {
   justify-items: end;
 }
 
+.after-sales-view__ticket-side {
+  display: grid;
+  gap: 12px;
+  justify-items: end;
+}
+
+.after-sales-view__ticket-delete,
 .after-sales-view__service-record-delete {
   min-width: 120px;
 }
@@ -1801,6 +1842,10 @@ code {
   }
 
   .after-sales-view__service-record-side {
+    justify-items: stretch;
+  }
+
+  .after-sales-view__ticket-side {
     justify-items: stretch;
   }
 }
