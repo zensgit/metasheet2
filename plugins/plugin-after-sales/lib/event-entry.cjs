@@ -191,6 +191,34 @@ function buildInstalledAssetCommand(input) {
   }
 }
 
+function buildCustomerCommand(input) {
+  const customer =
+    input && typeof input.customer === 'object' && !Array.isArray(input.customer)
+      ? input.customer
+      : input || {}
+
+  const customerCode = requiredString(customer.customerCode ?? input.customerCode, 'customer.customerCode')
+  const name = requiredString(customer.name ?? input.name, 'customer.name')
+  const status = normalizeEnumValue(
+    customer.status,
+    'customer.status',
+    ['active', 'inactive'],
+    'active',
+  )
+  const phone = optionalString(customer.phone ?? input.phone)
+  const email = optionalString(customer.email ?? input.email)
+
+  return {
+    recordData: {
+      customerCode,
+      name,
+      status,
+      ...(phone ? { phone } : {}),
+      ...(email ? { email } : {}),
+    },
+  }
+}
+
 function buildUpdateInstalledAssetCommand(input, existingInstalledAsset) {
   const command = input && typeof input === 'object' && !Array.isArray(input) ? input : {}
   const installedAsset =
@@ -538,6 +566,7 @@ function buildServiceRecordedEventPayload(input, meta) {
 
 module.exports = {
   buildCreateTicketCommand,
+  buildCustomerCommand,
   buildInstalledAssetCommand,
   buildUpdateInstalledAssetCommand,
   buildUpdateTicketCommand,

@@ -344,4 +344,237 @@ describe('AfterSalesView customers panel', () => {
     expect(installedAssetCalls).toBe(1)
     expect(serviceRecordCalls).toBe(1)
   })
+
+  it('creates customers from the panel and prepends matching rows', async () => {
+    apiFetchMock.mockImplementation(async (path: string, options?: RequestInit) => {
+      if (path === '/api/after-sales/app-manifest') {
+        return createResponse({
+          id: 'after-sales-default',
+          displayName: 'After Sales',
+          platformDependencies: ['core-backend'],
+          objects: [{ id: 'customer' }],
+          workflows: [],
+        })
+      }
+
+      if (path === '/api/after-sales/projects/current') {
+        return createResponse({
+          status: 'partial',
+          projectId: 'tenant:after-sales',
+          displayName: 'After Sales',
+          config: {
+            defaultSlaHours: 24,
+            urgentSlaHours: 4,
+            followUpAfterDays: 7,
+          },
+          installResult: {
+            status: 'partial',
+            createdObjects: [],
+            createdViews: [],
+            warnings: [],
+            reportRef: 'install-customers-003',
+          },
+          reportRef: 'install-customers-003',
+        })
+      }
+
+      if (path === '/api/after-sales/tickets') {
+        return createResponse({ projectId: 'tenant:after-sales', count: 0, tickets: [] })
+      }
+
+      if (path === '/api/after-sales/installed-assets') {
+        return createResponse({ projectId: 'tenant:after-sales', count: 0, installedAssets: [] })
+      }
+
+      if (path === '/api/after-sales/service-records') {
+        return createResponse({ projectId: 'tenant:after-sales', count: 0, serviceRecords: [] })
+      }
+
+      if (path === '/api/after-sales/customers') {
+        if (options?.method === 'POST') {
+          expect(JSON.parse(String(options.body))).toEqual({
+            customer: {
+              customerCode: 'CUS-3001',
+              name: 'Charlie Logistics',
+              status: 'active',
+              phone: '13700137000',
+              email: 'charlie@example.com',
+            },
+          })
+          return createResponse({
+            projectId: 'tenant:after-sales',
+            customer: {
+              id: 'customer-003',
+              version: 1,
+              data: {
+                customerCode: 'CUS-3001',
+                name: 'Charlie Logistics',
+                phone: '13700137000',
+                email: 'charlie@example.com',
+                status: 'active',
+              },
+            },
+          }, { status: 201 })
+        }
+
+        return createResponse({
+          projectId: 'tenant:after-sales',
+          count: 1,
+          customers: [
+            {
+              id: 'customer-001',
+              version: 1,
+              data: {
+                customerCode: 'CUS-1001',
+                name: 'Alice Plant',
+                phone: '13800138000',
+                email: 'alice@example.com',
+                status: 'active',
+              },
+            },
+          ],
+        })
+      }
+
+      throw new Error(`Unexpected request: ${path}`)
+    })
+
+    const mounted = mountAfterSalesView()
+    app = mounted.app
+    container = mounted.container
+
+    await waitForText(container, 'Alice Plant')
+
+    const customerSection = findSection(container, 'Customer registry')
+    const customerCodeInput = customerSection.querySelector<HTMLInputElement>('#after-sales-customer-code')
+    const nameInput = customerSection.querySelector<HTMLInputElement>('#after-sales-customer-name')
+    const phoneInput = customerSection.querySelector<HTMLInputElement>('#after-sales-customer-phone')
+    const emailInput = customerSection.querySelector<HTMLInputElement>('#after-sales-customer-email')
+    const statusSelect = customerSection.querySelector<HTMLSelectElement>('#after-sales-customer-status')
+    expect(customerCodeInput).toBeTruthy()
+    expect(nameInput).toBeTruthy()
+    expect(phoneInput).toBeTruthy()
+    expect(emailInput).toBeTruthy()
+    expect(statusSelect).toBeTruthy()
+    if (!customerCodeInput || !nameInput || !phoneInput || !emailInput || !statusSelect) return
+
+    await setInputValue(customerCodeInput, 'CUS-3001')
+    await setInputValue(nameInput, 'Charlie Logistics')
+    await setInputValue(phoneInput, '13700137000')
+    await setInputValue(emailInput, 'charlie@example.com')
+    await setSelectValue(statusSelect, 'active')
+
+    findButtonWithin(customerSection, 'Create customer').click()
+    await waitForText(customerSection, 'Charlie Logistics')
+
+    const customerRows = Array.from(customerSection.querySelectorAll('.after-sales-view__customer-row'))
+    expect(customerRows[0]?.textContent).toContain('Charlie Logistics')
+    expect(customerRows[1]?.textContent).toContain('Alice Plant')
+    expect(customerSection.textContent).toContain('Created customer CUS-3001')
+  })
+
+  it('keeps the customer draft open when create fails', async () => {
+    apiFetchMock.mockImplementation(async (path: string, options?: RequestInit) => {
+      if (path === '/api/after-sales/app-manifest') {
+        return createResponse({
+          id: 'after-sales-default',
+          displayName: 'After Sales',
+          platformDependencies: ['core-backend'],
+          objects: [{ id: 'customer' }],
+          workflows: [],
+        })
+      }
+
+      if (path === '/api/after-sales/projects/current') {
+        return createResponse({
+          status: 'installed',
+          projectId: 'tenant:after-sales',
+          displayName: 'After Sales',
+          config: {
+            defaultSlaHours: 24,
+            urgentSlaHours: 4,
+            followUpAfterDays: 7,
+          },
+          installResult: {
+            status: 'installed',
+            createdObjects: [],
+            createdViews: [],
+            warnings: [],
+            reportRef: 'install-customers-004',
+          },
+          reportRef: 'install-customers-004',
+        })
+      }
+
+      if (path === '/api/after-sales/tickets') {
+        return createResponse({ projectId: 'tenant:after-sales', count: 0, tickets: [] })
+      }
+
+      if (path === '/api/after-sales/installed-assets') {
+        return createResponse({ projectId: 'tenant:after-sales', count: 0, installedAssets: [] })
+      }
+
+      if (path === '/api/after-sales/service-records') {
+        return createResponse({ projectId: 'tenant:after-sales', count: 0, serviceRecords: [] })
+      }
+
+      if (path === '/api/after-sales/customers') {
+        if (options?.method === 'POST') {
+          return createResponse({
+            error: {
+              code: 'VALIDATION_ERROR',
+              message: 'customer.customerCode is required',
+            },
+          }, {
+            ok: false,
+            status: 400,
+            statusText: 'Bad Request',
+          })
+        }
+
+        return createResponse({
+          projectId: 'tenant:after-sales',
+          count: 1,
+          customers: [
+            {
+              id: 'customer-001',
+              version: 1,
+              data: {
+                customerCode: 'CUS-1001',
+                name: 'Alice Plant',
+                phone: '13800138000',
+                email: 'alice@example.com',
+                status: 'active',
+              },
+            },
+          ],
+        })
+      }
+
+      throw new Error(`Unexpected request: ${path}`)
+    })
+
+    const mounted = mountAfterSalesView()
+    app = mounted.app
+    container = mounted.container
+
+    await waitForText(container, 'Alice Plant')
+
+    const customerSection = findSection(container, 'Customer registry')
+    const customerCodeInput = customerSection.querySelector<HTMLInputElement>('#after-sales-customer-code')
+    const nameInput = customerSection.querySelector<HTMLInputElement>('#after-sales-customer-name')
+    expect(customerCodeInput).toBeTruthy()
+    expect(nameInput).toBeTruthy()
+    if (!customerCodeInput || !nameInput) return
+
+    await setInputValue(customerCodeInput, 'CUS-DRAFT')
+    await setInputValue(nameInput, 'Draft Customer')
+
+    findButtonWithin(customerSection, 'Create customer').click()
+    await waitForText(customerSection, 'customer.customerCode is required')
+
+    expect(customerCodeInput.value).toBe('CUS-DRAFT')
+    expect(nameInput.value).toBe('Draft Customer')
+    expect(customerSection.textContent).toContain('Alice Plant')
+  })
 })

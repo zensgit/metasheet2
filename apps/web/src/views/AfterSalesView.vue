@@ -1045,6 +1045,80 @@
             </div>
           </div>
 
+          <form class="after-sales-view__customer-form" @submit.prevent="submitCustomer">
+            <label class="after-sales-view__field">
+              <span>Customer code</span>
+              <input
+                id="after-sales-customer-code"
+                v-model="customerDraft.customerCode"
+                class="after-sales-view__field-input"
+                placeholder="CUS-3001"
+                type="text"
+              />
+            </label>
+            <label class="after-sales-view__field">
+              <span>Status</span>
+              <select
+                id="after-sales-customer-status"
+                v-model="customerDraft.status"
+                class="after-sales-view__field-input"
+              >
+                <option value="active">Active</option>
+                <option value="inactive">Inactive</option>
+              </select>
+            </label>
+            <label class="after-sales-view__field">
+              <span>Name</span>
+              <input
+                id="after-sales-customer-name"
+                v-model="customerDraft.name"
+                class="after-sales-view__field-input"
+                placeholder="Alice Plant"
+                type="text"
+              />
+            </label>
+            <label class="after-sales-view__field">
+              <span>Phone</span>
+              <input
+                id="after-sales-customer-phone"
+                v-model="customerDraft.phone"
+                class="after-sales-view__field-input"
+                placeholder="13800138000"
+                type="text"
+              />
+            </label>
+            <label class="after-sales-view__field after-sales-view__field--wide">
+              <span>Email</span>
+              <input
+                id="after-sales-customer-email"
+                v-model="customerDraft.email"
+                class="after-sales-view__field-input"
+                placeholder="alice@example.com"
+                type="email"
+              />
+            </label>
+          </form>
+
+          <div class="after-sales-view__action-row after-sales-view__action-row--compact">
+            <button
+              class="after-sales-view__primary-btn"
+              :disabled="customerCreating || customersLoading || !canSubmitCustomer"
+              @click="submitCustomer"
+            >
+              {{ customerCreating ? 'Creating...' : 'Create customer' }}
+            </button>
+            <button
+              class="after-sales-view__ghost-btn"
+              :disabled="customerCreating || customersLoading"
+              @click="resetCustomerDraft"
+            >
+              Reset customer draft
+            </button>
+          </div>
+
+          <p v-if="customerSubmitError" class="after-sales-view__inline-error">{{ customerSubmitError }}</p>
+          <p v-else-if="customerSubmitSuccess" class="after-sales-view__inline-success">{{ customerSubmitSuccess }}</p>
+
           <form class="after-sales-view__customer-filters" @submit.prevent="applyCustomerFilters">
             <label class="after-sales-view__field">
               <span>Filter status</span>
@@ -1073,21 +1147,21 @@
           <div class="after-sales-view__action-row after-sales-view__action-row--compact">
             <button
               class="after-sales-view__ghost-btn"
-              :disabled="customersLoading"
+              :disabled="customersLoading || customerCreating"
               @click="refreshCustomers"
             >
               {{ customersLoading ? 'Refreshing...' : 'Refresh list' }}
             </button>
             <button
               class="after-sales-view__ghost-btn"
-              :disabled="customersLoading"
+              :disabled="customersLoading || customerCreating"
               @click="applyCustomerFilters"
             >
               {{ customersLoading ? 'Applying...' : 'Apply filters' }}
             </button>
             <button
               class="after-sales-view__ghost-btn"
-              :disabled="customersLoading"
+              :disabled="customersLoading || customerCreating"
               @click="resetCustomerFilters"
             >
               Clear filters
@@ -1335,6 +1409,14 @@ interface CustomerViewModel {
   }
 }
 
+interface CustomerDraft {
+  customerCode: string
+  name: string
+  phone: string
+  email: string
+  status: 'active' | 'inactive'
+}
+
 interface InstalledAssetDraft {
   assetCode: string
   serialNo: string
@@ -1420,6 +1502,11 @@ interface CreateInstalledAssetResponse {
   installedAsset: InstalledAssetRow
 }
 
+interface CreateCustomerResponse {
+  projectId: string
+  customer: CustomerRow
+}
+
 interface CreateTicketResponse {
   projectId: string
   ticket: TicketRecord
@@ -1457,6 +1544,7 @@ const ticketDeletingId = ref('')
 const installedAssetsLoading = ref(false)
 const customersLoading = ref(false)
 const installedAssetCreating = ref(false)
+const customerCreating = ref(false)
 const installedAssetUpdatingId = ref('')
 const installedAssetDeletingId = ref('')
 const serviceRecordsLoading = ref(false)
@@ -1467,6 +1555,8 @@ const error = ref('')
 const ticketsError = ref('')
 const installedAssetsError = ref('')
 const customersError = ref('')
+const customerSubmitError = ref('')
+const customerSubmitSuccess = ref('')
 const installedAssetSubmitError = ref('')
 const installedAssetSubmitSuccess = ref('')
 const ticketSubmitError = ref('')
@@ -1496,6 +1586,7 @@ const installedAssetFilters = ref<InstalledAssetFilterDraft>({
   status: '',
   search: '',
 })
+const customerDraft = ref<CustomerDraft>(createCustomerDraft())
 const customerFilters = ref<CustomerFilterDraft>({
   status: '',
   search: '',
@@ -1521,6 +1612,11 @@ const isDegraded = computed(() => current.value.status === 'partial' || current.
 const hasCustomerProjection = computed(() =>
   Array.isArray(manifest.value?.objects) &&
   manifest.value.objects.some((object) => object && object.id === 'customer'),
+)
+const canSubmitCustomer = computed(
+  () =>
+    toText(customerDraft.value.customerCode).length > 0 &&
+    toText(customerDraft.value.name).length > 0,
 )
 const canSubmitServiceRecord = computed(
   () =>
@@ -1682,6 +1778,16 @@ function createInstalledAssetDraft(): InstalledAssetDraft {
   }
 }
 
+function createCustomerDraft(): CustomerDraft {
+  return {
+    customerCode: '',
+    name: '',
+    phone: '',
+    email: '',
+    status: 'active',
+  }
+}
+
 function createInstalledAssetEditDraft(
   asset?: Partial<InstalledAssetViewModel['data']> | null,
 ): InstalledAssetEditDraft {
@@ -1765,6 +1871,12 @@ function resetInstalledAssetDraft() {
   installedAssetSubmitSuccess.value = ''
 }
 
+function resetCustomerDraft() {
+  customerDraft.value = createCustomerDraft()
+  customerSubmitError.value = ''
+  customerSubmitSuccess.value = ''
+}
+
 function cancelInstalledAssetEdit() {
   installedAssetEditingId.value = ''
   installedAssetEditDraft.value = createInstalledAssetEditDraft()
@@ -1846,6 +1958,23 @@ function buildInstalledAssetPayload() {
       ...(location ? { location } : {}),
       ...(installedAt ? { installedAt } : {}),
       ...(warrantyUntil ? { warrantyUntil } : {}),
+    },
+  }
+}
+
+function buildCustomerPayload() {
+  const customerCode = toText(customerDraft.value.customerCode)
+  const name = toText(customerDraft.value.name)
+  const phone = toText(customerDraft.value.phone)
+  const email = toText(customerDraft.value.email)
+
+  return {
+    customer: {
+      customerCode,
+      name,
+      status: customerDraft.value.status,
+      ...(phone ? { phone } : {}),
+      ...(email ? { email } : {}),
     },
   }
 }
@@ -2270,14 +2399,14 @@ async function loadCustomersForCurrentState(state: CurrentResponse): Promise<voi
 }
 
 async function applyCustomerFilters() {
-  if (customersLoading.value) {
+  if (customersLoading.value || customerCreating.value) {
     return
   }
   await loadCustomersForCurrentState(current.value)
 }
 
 async function resetCustomerFilters() {
-  if (customersLoading.value) {
+  if (customersLoading.value || customerCreating.value) {
     return
   }
   customerFilters.value = {
@@ -2288,10 +2417,42 @@ async function resetCustomerFilters() {
 }
 
 async function refreshCustomers() {
-  if (customersLoading.value) {
+  if (customersLoading.value || customerCreating.value) {
     return
   }
   await loadCustomersForCurrentState(current.value)
+}
+
+async function submitCustomer() {
+  if (!canSubmitCustomer.value || customersLoading.value || customerCreating.value) {
+    return
+  }
+
+  customerCreating.value = true
+  customerSubmitError.value = ''
+  customerSubmitSuccess.value = ''
+
+  try {
+    const payload = await readEnvelope<CreateCustomerResponse>('/api/after-sales/customers', {
+      method: 'POST',
+      body: JSON.stringify(buildCustomerPayload()),
+    })
+    const nextCustomer = payload?.customer ? normalizeCustomerRow(payload.customer) : null
+
+    if (nextCustomer && matchesCustomerFilters(nextCustomer)) {
+      customers.value = [nextCustomer, ...customers.value.filter((item) => item.id !== nextCustomer.id)]
+      customersError.value = ''
+    }
+
+    resetCustomerDraft()
+    customerSubmitSuccess.value = nextCustomer
+      ? `Created customer ${nextCustomer.data.customerCode}`
+      : 'Created customer'
+  } catch (err: unknown) {
+    customerSubmitError.value = err instanceof Error ? err.message : 'Failed to create customer'
+  } finally {
+    customerCreating.value = false
+  }
 }
 
 async function applyInstalledAssetFilters() {
@@ -2738,6 +2899,8 @@ async function loadView() {
   ticketsError.value = ''
   installedAssetsError.value = ''
   customersError.value = ''
+  customerSubmitError.value = ''
+  customerSubmitSuccess.value = ''
   installedAssetSubmitError.value = ''
   installedAssetSubmitSuccess.value = ''
   ticketSubmitError.value = ''
@@ -3201,6 +3364,7 @@ onMounted(() => {
 }
 
 .after-sales-view__installed-asset-form,
+.after-sales-view__customer-form,
 .after-sales-view__ticket-form,
 .after-sales-view__installed-asset-filters,
 .after-sales-view__customer-filters,
@@ -3368,6 +3532,7 @@ code {
   .after-sales-view__section-header,
   .after-sales-view__config-form,
   .after-sales-view__installed-asset-form,
+  .after-sales-view__customer-form,
   .after-sales-view__ticket-form,
   .after-sales-view__installed-asset-filters,
   .after-sales-view__customer-filters,

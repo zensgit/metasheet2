@@ -18,6 +18,7 @@ const {
 } = require('./lib/workflow-adapter.cjs')
 const {
   buildCreateTicketCommand,
+  buildCustomerCommand,
   buildInstalledAssetCommand,
   buildUpdateInstalledAssetCommand,
   buildUpdateTicketCommand,
@@ -69,6 +70,10 @@ async function fromPhysicalInstalledAssetData(provisioning, projectId, physicalD
 
 async function fromPhysicalCustomerData(provisioning, projectId, physicalData) {
   return fromPhysicalRecord(provisioning, projectId, 'customer', CUSTOMER_FIELDS, physicalData)
+}
+
+async function toPhysicalCustomerData(provisioning, projectId, logicalData) {
+  return toPhysicalRecord(provisioning, projectId, 'customer', logicalData)
 }
 
 let activeContext = null
@@ -1651,6 +1656,98 @@ module.exports = {
           res.status(500).json({
             ok: false,
             error: { code: 'INTERNAL_ERROR', message: 'Failed to list after-sales service records' },
+          })
+        }
+      },
+    )
+
+    context.api.http.addRoute(
+      'POST',
+      '/api/after-sales/customers',
+      async (req, res) => {
+        try {
+          const userId = getUserId(req)
+          if (!userId) {
+            sendUnauthorized(res)
+            return
+          }
+          if (!hasAfterSalesWriteAccess(req)) {
+            sendWriteForbidden(res)
+            return
+          }
+
+          const multitableApi = getMultitableWriteApi(context)
+          if (!multitableApi) {
+            res.status(503).json({
+              ok: false,
+              error: {
+                code: 'MULTITABLE_UNAVAILABLE',
+                message: 'Multitable record writer is not available on plugin context',
+              },
+            })
+            return
+          }
+
+          const tenantId = getTenantId(req, context.logger)
+          const current = await installer.loadCurrent(context, tenantId, appManifest.id)
+          if (!current || !isOperationalAfterSalesStatus(current.status)) {
+            res.status(409).json({
+              ok: false,
+              error: {
+                code: 'AFTER_SALES_NOT_INSTALLED',
+                message: 'After-sales must be installed before creating customers',
+              },
+            })
+            return
+          }
+
+          const projectId = current.projectId || installer.getProjectId(tenantId, appManifest.id)
+          const command = buildCustomerCommand((req && req.body) || {})
+          const sheetId = await findObjectSheetId(multitableApi.provisioning, projectId, 'customer')
+          const record = await multitableApi.records.createRecord({
+            sheetId,
+            data: await toPhysicalCustomerData(multitableApi.provisioning, projectId, command.recordData),
+          })
+          const logicalRecordData = await fromPhysicalCustomerData(
+            multitableApi.provisioning,
+            projectId,
+            record.data,
+          )
+
+          res.status(201).json({
+            ok: true,
+            data: {
+              projectId,
+              customer: {
+                id: record.id,
+                version: record.version,
+                data: logicalRecordData,
+              },
+            },
+          })
+        } catch (err) {
+          if (err && err.code === 'AFTER_SALES_EVENT_VALIDATION_FAILED') {
+            sendBadRequest(res, err)
+            return
+          }
+          if (err && err.code === 'VALIDATION_ERROR') {
+            res.status(400).json({
+              ok: false,
+              error: { code: err.code, message: err.message },
+            })
+            return
+          }
+          if (err && err.code === 'NOT_FOUND') {
+            res.status(404).json({
+              ok: false,
+              error: { code: err.code, message: err.message },
+            })
+            return
+          }
+          logger.error && logger.error('after-sales create customer failed', err)
+          res.status(500).json({
+            ok: false,
+            error: { code: 'INTERNAL_ERROR', message: 'Failed to create after-sales customer' },
           })
         }
       },
