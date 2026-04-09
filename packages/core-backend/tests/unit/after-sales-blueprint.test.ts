@@ -280,6 +280,11 @@ describe('plugin-after-sales default blueprint', () => {
         channels: ['feishu', 'email'],
       }),
       expect.objectContaining({
+        topic: 'after-sales.service.recorded',
+        event: 'service.recorded',
+        channels: ['feishu', 'email'],
+      }),
+      expect.objectContaining({
         topic: 'after-sales.followup.due',
         event: 'followup.due',
         channels: ['feishu', 'email'],
@@ -304,6 +309,11 @@ describe('plugin-after-sales default blueprint', () => {
       expect.objectContaining({
         id: 'refund-approval',
         trigger: { event: 'ticket.refundRequested' },
+        enabled: true,
+      }),
+      expect.objectContaining({
+        id: 'service-record-notify',
+        trigger: { event: 'service.recorded' },
         enabled: true,
       }),
     ])

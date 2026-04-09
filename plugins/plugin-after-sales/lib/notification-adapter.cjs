@@ -33,6 +33,13 @@ const TOPIC_SPECS = Object.freeze([
     subject: 'After-sales approval pending',
   },
   {
+    topic: 'after-sales.service.recorded',
+    event: 'service.recorded',
+    channels: ['feishu', 'email'],
+    defaultRecipients: ['role:supervisor'],
+    subject: 'After-sales service recorded',
+  },
+  {
     topic: 'after-sales.followup.due',
     event: 'followup.due',
     channels: ['feishu', 'email'],

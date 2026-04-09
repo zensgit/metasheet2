@@ -239,6 +239,18 @@ function createWorkflowRuntime(context, options = {}) {
       })
     },
 
+    async onServiceRecorded(payload = {}) {
+      const roleRecipients = await resolveRoleRecipients(context, ['supervisor'])
+      return sendNotification(context, {
+        topic: 'after-sales.service.recorded',
+        payload: {
+          ...payload,
+          ticketNo: payload.ticketNo ?? getNamespacedObject(payload, 'serviceRecord').ticketNo,
+        },
+        roleRecipients,
+      })
+    },
+
     async onTicketRefundRequested(payload = {}) {
       const runtimeContext = await resolveRuntimeInstallContext(context, payload, options)
       if (!runtimeContext.config.enableRefundApproval) {
@@ -319,6 +331,7 @@ function registerAfterSalesWorkflowHandlers(context, options = {}) {
 
   subscriptions.push(events.on('ticket.created', runtime.onTicketCreated))
   subscriptions.push(events.on('ticket.assigned', runtime.onTicketAssigned))
+  subscriptions.push(events.on('service.recorded', runtime.onServiceRecorded))
   subscriptions.push(events.on('ticket.overdue', runtime.onTicketOverdue))
   subscriptions.push(events.on('ticket.refundRequested', runtime.onTicketRefundRequested))
   subscriptions.push(events.on('approval.pending', runtime.onApprovalPending))

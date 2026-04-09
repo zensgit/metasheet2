@@ -1949,6 +1949,7 @@ describe('plugin-after-sales routes', () => {
   it('registers workflow event listeners on activate', async () => {
     expect(eventsOn).toHaveBeenCalledWith('ticket.created', expect.any(Function))
     expect(eventsOn).toHaveBeenCalledWith('ticket.assigned', expect.any(Function))
+    expect(eventsOn).toHaveBeenCalledWith('service.recorded', expect.any(Function))
     expect(eventsOn).toHaveBeenCalledWith('ticket.overdue', expect.any(Function))
     expect(eventsOn).toHaveBeenCalledWith('ticket.refundRequested', expect.any(Function))
     expect(eventsOn).toHaveBeenCalledWith('approval.pending', expect.any(Function))
@@ -1958,13 +1959,14 @@ describe('plugin-after-sales routes', () => {
   it('unsubscribes workflow event listeners on deactivate', async () => {
     await plugin.deactivate()
 
-    expect(eventsOff).toHaveBeenCalledTimes(6)
+    expect(eventsOff).toHaveBeenCalledTimes(7)
     expect(eventsOff).toHaveBeenNthCalledWith(1, 'sub:ticket.created')
     expect(eventsOff).toHaveBeenNthCalledWith(2, 'sub:ticket.assigned')
-    expect(eventsOff).toHaveBeenNthCalledWith(3, 'sub:ticket.overdue')
-    expect(eventsOff).toHaveBeenNthCalledWith(4, 'sub:ticket.refundRequested')
-    expect(eventsOff).toHaveBeenNthCalledWith(5, 'sub:approval.pending')
-    expect(eventsOff).toHaveBeenNthCalledWith(6, 'sub:followup.due')
+    expect(eventsOff).toHaveBeenNthCalledWith(3, 'sub:service.recorded')
+    expect(eventsOff).toHaveBeenNthCalledWith(4, 'sub:ticket.overdue')
+    expect(eventsOff).toHaveBeenNthCalledWith(5, 'sub:ticket.refundRequested')
+    expect(eventsOff).toHaveBeenNthCalledWith(6, 'sub:approval.pending')
+    expect(eventsOff).toHaveBeenNthCalledWith(7, 'sub:followup.due')
   })
 
   it('cleans up prior workflow subscriptions before re-activating', async () => {
@@ -1972,15 +1974,17 @@ describe('plugin-after-sales routes', () => {
 
     await plugin.activate(nextSetup.context)
 
-    expect(currentContext.api.events.off).toHaveBeenCalledTimes(6)
+    expect(currentContext.api.events.off).toHaveBeenCalledTimes(7)
     expect(currentContext.api.events.off).toHaveBeenNthCalledWith(1, 'sub:ticket.created')
     expect(currentContext.api.events.off).toHaveBeenNthCalledWith(2, 'sub:ticket.assigned')
-    expect(currentContext.api.events.off).toHaveBeenNthCalledWith(3, 'sub:ticket.overdue')
-    expect(currentContext.api.events.off).toHaveBeenNthCalledWith(4, 'sub:ticket.refundRequested')
-    expect(currentContext.api.events.off).toHaveBeenNthCalledWith(5, 'sub:approval.pending')
-    expect(currentContext.api.events.off).toHaveBeenNthCalledWith(6, 'sub:followup.due')
+    expect(currentContext.api.events.off).toHaveBeenNthCalledWith(3, 'sub:service.recorded')
+    expect(currentContext.api.events.off).toHaveBeenNthCalledWith(4, 'sub:ticket.overdue')
+    expect(currentContext.api.events.off).toHaveBeenNthCalledWith(5, 'sub:ticket.refundRequested')
+    expect(currentContext.api.events.off).toHaveBeenNthCalledWith(6, 'sub:approval.pending')
+    expect(currentContext.api.events.off).toHaveBeenNthCalledWith(7, 'sub:followup.due')
     expect(nextSetup.context.api.events.on).toHaveBeenCalledWith('ticket.created', expect.any(Function))
     expect(nextSetup.context.api.events.on).toHaveBeenCalledWith('ticket.assigned', expect.any(Function))
+    expect(nextSetup.context.api.events.on).toHaveBeenCalledWith('service.recorded', expect.any(Function))
     expect(nextSetup.context.api.events.on).toHaveBeenCalledWith('ticket.overdue', expect.any(Function))
     expect(nextSetup.context.api.events.on).toHaveBeenCalledWith('ticket.refundRequested', expect.any(Function))
     expect(nextSetup.context.api.events.on).toHaveBeenCalledWith('approval.pending', expect.any(Function))

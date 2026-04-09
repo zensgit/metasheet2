@@ -85,6 +85,11 @@
       "id": "refund-approval",
       "name": "Refund Approval",
       "trigger": "ticket.refundRequested"
+    },
+    {
+      "id": "service-record-notify",
+      "name": "Service Record Notification",
+      "trigger": "service.recorded"
     }
   ],
   "integrations": [

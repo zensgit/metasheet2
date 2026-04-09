@@ -17,12 +17,19 @@ describe('after-sales notification adapter', () => {
     })
   })
 
-  it('publishes the four v1 notification topic specs', () => {
-    expect(adapter.getNotificationTopicSpecs()).toHaveLength(4)
+  it('publishes the five v1 notification topic specs', () => {
+    expect(adapter.getNotificationTopicSpecs()).toHaveLength(5)
     expect(adapter.getNotificationTopicSpecs()).toContainEqual(
       expect.objectContaining({
         topic: 'after-sales.approval.pending',
         event: 'approval.pending',
+        channels: ['feishu', 'email'],
+      }),
+    )
+    expect(adapter.getNotificationTopicSpecs()).toContainEqual(
+      expect.objectContaining({
+        topic: 'after-sales.service.recorded',
+        event: 'service.recorded',
         channels: ['feishu', 'email'],
       }),
     )
@@ -96,6 +103,33 @@ describe('after-sales notification adapter', () => {
         channel: 'email',
         result: expect.objectContaining({ status: 'sent' }),
       }),
+    ])
+  })
+
+  it('builds service-recorded notifications for supervisor role recipients', () => {
+    const requests = adapter.buildNotificationsForTopic({
+      topic: 'after-sales.service.recorded',
+      payload: {
+        ticketNo: 'TK-3002',
+        serviceRecord: {
+          id: 'sr-001',
+          ticketNo: 'TK-3002',
+        },
+      },
+      roleRecipients: {
+        supervisor: [
+          { id: 'lead_1', type: 'user' },
+          { id: 'lead@example.com', type: 'email' },
+        ],
+      },
+    })
+
+    expect(requests).toHaveLength(2)
+    expect(requests.find((entry) => entry.channel === 'feishu')?.notification.recipients).toEqual([
+      { id: 'lead_1', type: 'user' },
+    ])
+    expect(requests.find((entry) => entry.channel === 'email')?.notification.recipients).toEqual([
+      { id: 'lead@example.com', type: 'email' },
     ])
   })
 })
