@@ -272,6 +272,134 @@ describe('AfterSalesView', () => {
     expect(apiFetchMock).toHaveBeenCalledWith('/api/after-sales/tickets', undefined)
   })
 
+  it('refreshes only tickets and preserves the local ticket draft and filters', async () => {
+    let currentCalls = 0
+    let serviceRecordCalls = 0
+    const ticketPaths: string[] = []
+
+    apiFetchMock.mockImplementation(async (path: string) => {
+      if (path === '/api/after-sales/app-manifest') {
+        return createResponse({
+          id: 'after-sales-default',
+          displayName: 'After Sales',
+          platformDependencies: ['core-backend'],
+          objects: [],
+          workflows: [],
+        })
+      }
+
+      if (path === '/api/after-sales/projects/current') {
+        currentCalls += 1
+        return createResponse({
+          status: 'installed',
+          projectId: 'tenant:after-sales',
+          displayName: 'After Sales',
+          config: {
+            defaultSlaHours: 24,
+            urgentSlaHours: 4,
+            followUpAfterDays: 7,
+          },
+          installResult: {
+            status: 'installed',
+            createdObjects: [],
+            createdViews: [],
+            warnings: [],
+            reportRef: 'install-ticket-refresh',
+          },
+          reportRef: 'install-ticket-refresh',
+        })
+      }
+
+      if (path === '/api/after-sales/tickets') {
+        ticketPaths.push(path)
+        return createResponse({
+          projectId: 'tenant:after-sales',
+          count: 1,
+          tickets: [
+            {
+              id: 'ticket-001',
+              version: 1,
+              data: {
+                ticketNo: 'AF-001',
+                title: 'Initial ticket',
+                status: 'open',
+                refundStatus: '',
+                refundAmount: 0,
+              },
+            },
+          ],
+        })
+      }
+
+      if (path === '/api/after-sales/tickets?status=open&search=compressor') {
+        ticketPaths.push(path)
+        return createResponse({
+          projectId: 'tenant:after-sales',
+          count: 1,
+          tickets: [
+            {
+              id: 'ticket-002',
+              version: 2,
+              data: {
+                ticketNo: 'AF-002',
+                title: 'Compressor refresh result',
+                status: 'open',
+                refundStatus: '',
+                refundAmount: 0,
+              },
+            },
+          ],
+        })
+      }
+
+      if (path === '/api/after-sales/service-records') {
+        serviceRecordCalls += 1
+        return createResponse({
+          projectId: 'tenant:after-sales',
+          count: 0,
+          serviceRecords: [],
+        })
+      }
+
+      throw new Error(`Unexpected request: ${path}`)
+    })
+
+    const mounted = mountAfterSalesView()
+    app = mounted.app
+    container = mounted.container
+
+    await waitForText(container, 'Initial ticket')
+
+    const statusInput = container?.querySelector<HTMLInputElement>('#after-sales-ticket-filter-status')
+    const searchInput = container?.querySelector<HTMLInputElement>('#after-sales-ticket-filter-search')
+    const ticketNoInput = container?.querySelector<HTMLInputElement>('#after-sales-ticket-no')
+    const titleInput = container?.querySelector<HTMLInputElement>('#after-sales-ticket-title')
+    expect(statusInput).toBeTruthy()
+    expect(searchInput).toBeTruthy()
+    expect(ticketNoInput).toBeTruthy()
+    expect(titleInput).toBeTruthy()
+    if (!statusInput || !searchInput || !ticketNoInput || !titleInput) return
+
+    await setInputValue(statusInput, 'open')
+    await setInputValue(searchInput, 'compressor')
+    await setInputValue(ticketNoInput, 'AF-NEW')
+    await setInputValue(titleInput, 'Draft title')
+
+    findButton(container, 'Refresh list').click()
+    await waitForText(container, 'Compressor refresh result')
+
+    expect(statusInput.value).toBe('open')
+    expect(searchInput.value).toBe('compressor')
+    expect(ticketNoInput.value).toBe('AF-NEW')
+    expect(titleInput.value).toBe('Draft title')
+    expect(currentCalls).toBe(1)
+    expect(serviceRecordCalls).toBe(1)
+    expect(ticketPaths).toEqual([
+      '/api/after-sales/tickets',
+      '/api/after-sales/tickets?status=open&search=compressor',
+    ])
+  })
+
   it('creates a ticket, prepends it to the list, and resets the draft', async () => {
     apiFetchMock.mockImplementation(async (path: string, options?: RequestInit) => {
       if (path === '/api/after-sales/app-manifest') {

@@ -230,6 +230,13 @@
           </form>
 
           <div class="after-sales-view__action-row after-sales-view__action-row--compact">
+            <button
+              class="after-sales-view__ghost-btn"
+              :disabled="ticketsLoading || ticketCreating || Boolean(ticketDeletingId)"
+              @click="refreshTickets"
+            >
+              {{ ticketsLoading ? 'Refreshing...' : 'Refresh list' }}
+            </button>
             <button class="after-sales-view__ghost-btn" :disabled="ticketsLoading" @click="applyTicketFilters">
               {{ ticketsLoading ? 'Applying...' : 'Apply ticket filters' }}
             </button>
@@ -1094,6 +1101,13 @@ async function resetTicketFilters() {
   ticketFilters.value = {
     status: '',
     search: '',
+  }
+  await loadTicketsForCurrentState(current.value)
+}
+
+async function refreshTickets() {
+  if (ticketCreating.value || ticketDeletingId.value) {
+    return
   }
   await loadTicketsForCurrentState(current.value)
 }
