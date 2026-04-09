@@ -57,6 +57,11 @@ Validation result:
 Push:
 
 - force-pushed refreshed PR2 head to `origin/codex/dingtalk-pr2-directory-sync-20260408`
+- GitHub PR state after push:
+  - `#723`
+  - `mergeStateStatus=CLEAN`
+  - draft remains `true`
+  - current remote head: `c683b7f79`
 
 ## PR3 Refresh
 
@@ -95,6 +100,16 @@ Result:
 - backend build passed
 - web type-check passed
 - attendance integration tests passed (`66/66`)
+
+Push:
+
+- force-pushed refreshed PR3 head to `origin/codex/dingtalk-pr3-attendance-notify-20260408`
+- GitHub PR state immediately after push:
+  - `#724`
+  - `mergeStateStatus=UNSTABLE`
+  - draft remains `true`
+  - `pr-validate` already passed
+  - current remote head: `b579dd8a8`
 
 ## Next Actions
 
