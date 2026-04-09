@@ -933,7 +933,7 @@ describe('after-sales plugin install integration', () => {
           ticketNo: 'TK-3002',
           title: 'Indoor unit vibration during service visit',
           source: 'phone',
-          priority: 'medium',
+          priority: 'normal',
         },
       }),
     })
