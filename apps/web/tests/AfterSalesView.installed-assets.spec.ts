@@ -535,13 +535,13 @@ describe('AfterSalesView installed assets panel', () => {
       if (path === '/api/after-sales/installed-assets' && init?.method === 'POST') {
         return createResponse({
           error: {
-            code: 'VALIDATION_ERROR',
-            message: 'assetCode already exists',
+            code: 'INTERNAL_ERROR',
+            message: 'Failed to create after-sales installed asset',
           },
         }, {
           ok: false,
-          status: 400,
-          statusText: 'Bad Request',
+          status: 500,
+          statusText: 'Internal Server Error',
         })
       }
 
@@ -566,7 +566,7 @@ describe('AfterSalesView installed assets panel', () => {
 
     findButtonWithin(section, 'Create asset').click()
 
-    await waitForText(section, 'assetCode already exists')
+    await waitForText(section, 'Failed to create after-sales installed asset')
     expect(assetCodeInput.value).toBe('AST-DUPLICATE')
     expect(modelInput.value).toBe('Compressor X')
     expect(section.textContent).toContain('AST-BASE')

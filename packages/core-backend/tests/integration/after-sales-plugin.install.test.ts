@@ -1591,4 +1591,120 @@ describe('after-sales plugin install integration', () => {
     expect(listBody.data?.count).toBe(0)
     expect(listBody.data?.serviceRecords ?? []).toEqual([])
   })
+
+  it('creates installed assets through the real after-sales routes', async () => {
+    if (!baseUrl || !pool) return
+
+    const tokenRes = await requestJson(
+      `${baseUrl}/api/auth/dev-token?userId=after-sales-installed-asset-create-it&roles=admin&perms=*:*`,
+    )
+    const token = (tokenRes.body as { token?: string } | undefined)?.token
+    expect(token).toBeTruthy()
+
+    const installRes = await requestJson(`${baseUrl}/api/after-sales/projects/install`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        templateId: 'after-sales-default',
+        displayName: 'After Sales Installed Asset Create Flow',
+      }),
+    })
+    expect(installRes.status).toBe(200)
+
+    const createRes = await requestJson(`${baseUrl}/api/after-sales/installed-assets`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        installedAsset: {
+          assetCode: 'AST-5001',
+          serialNo: 'SN-5001',
+          model: 'Compressor Z',
+          location: 'Plant 5',
+          installedAt: '2026-04-12T08:00:00Z',
+          warrantyUntil: '2027-04-12',
+          status: 'active',
+        },
+      }),
+    })
+
+    expect(createRes.status).toBe(201)
+    const createBody = createRes.body as {
+      ok?: boolean
+      data?: {
+        installedAsset?: {
+          id?: string
+          version?: number
+          data?: Record<string, unknown>
+        }
+      }
+    }
+    expect(createBody.ok).toBe(true)
+    expect(createBody.data?.installedAsset?.data).toMatchObject({
+      assetCode: 'AST-5001',
+      serialNo: 'SN-5001',
+      model: 'Compressor Z',
+      location: 'Plant 5',
+      installedAt: '2026-04-12T08:00:00Z',
+      warrantyUntil: '2027-04-12',
+      status: 'active',
+    })
+
+    const createdInstalledAssetId = createBody.data?.installedAsset?.id
+    expect(createdInstalledAssetId).toBeTruthy()
+
+    const installedAssetSheetId = stableMetaId('sheet', PROJECT_ID, 'installedAsset')
+    const createdRecordRes = await pool.query<{ id: string; version: number; data: Record<string, unknown> }>(
+      'SELECT id, version, data FROM meta_records WHERE id = $1 AND sheet_id = $2',
+      [createdInstalledAssetId, installedAssetSheetId],
+    )
+    expect(createdRecordRes.rows).toHaveLength(1)
+    expect(createdRecordRes.rows[0]?.data).toMatchObject({
+      [stFieldId('installedAsset', 'assetCode')]: 'AST-5001',
+      [stFieldId('installedAsset', 'serialNo')]: 'SN-5001',
+      [stFieldId('installedAsset', 'model')]: 'Compressor Z',
+      [stFieldId('installedAsset', 'location')]: 'Plant 5',
+      [stFieldId('installedAsset', 'installedAt')]: '2026-04-12T08:00:00Z',
+      [stFieldId('installedAsset', 'warrantyUntil')]: '2027-04-12',
+      [stFieldId('installedAsset', 'status')]: 'active',
+    })
+
+    const listRes = await requestJson(`${baseUrl}/api/after-sales/installed-assets?status=active&search=AST-5001`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    })
+    expect(listRes.status).toBe(200)
+
+    const listBody = listRes.body as {
+      ok?: boolean
+      data?: {
+        count?: number
+        installedAssets?: Array<{
+          id?: string
+          data?: Record<string, unknown>
+        }>
+      }
+    }
+    expect(listBody.ok).toBe(true)
+    expect(listBody.data?.count).toBe(1)
+    expect(listBody.data?.installedAssets ?? []).toHaveLength(1)
+    expect(listBody.data?.installedAssets?.[0]).toMatchObject({
+      id: createdInstalledAssetId,
+      data: {
+        assetCode: 'AST-5001',
+        serialNo: 'SN-5001',
+        model: 'Compressor Z',
+        location: 'Plant 5',
+        installedAt: '2026-04-12T08:00:00Z',
+        warrantyUntil: '2027-04-12',
+        status: 'active',
+      },
+    })
+  })
 })
