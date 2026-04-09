@@ -177,6 +177,13 @@ describe('after-sales workflow adapter', () => {
       },
     })
 
+    await runtime.onServiceRecorded({
+      serviceRecord: {
+        id: 'sr_001',
+        ticketNo: 'TK-1001',
+      },
+    })
+
     await runtime.onApprovalPending({
       approval: {
         id: 'afs:1',
@@ -224,6 +231,22 @@ describe('after-sales workflow adapter', () => {
       2,
       context,
       expect.objectContaining({
+        topic: 'after-sales.service.recorded',
+        payload: expect.objectContaining({
+          ticketNo: 'TK-1001',
+        }),
+        roleRecipients: {
+          supervisor: [
+            { id: 'lead_001', type: 'user' },
+            { id: 'lead@example.com', type: 'email' },
+          ],
+        },
+      }),
+    )
+    expect(sendTopicNotification).toHaveBeenNthCalledWith(
+      3,
+      context,
+      expect.objectContaining({
         topic: 'after-sales.approval.pending',
         roleRecipients: {
           finance: [
@@ -238,7 +261,7 @@ describe('after-sales workflow adapter', () => {
       }),
     )
     expect(sendTopicNotification).toHaveBeenNthCalledWith(
-      3,
+      4,
       context,
       expect.objectContaining({
         topic: 'after-sales.ticket.overdue',
@@ -251,7 +274,7 @@ describe('after-sales workflow adapter', () => {
       }),
     )
     expect(sendTopicNotification).toHaveBeenNthCalledWith(
-      4,
+      5,
       context,
       expect.objectContaining({
         topic: 'after-sales.followup.due',
@@ -260,13 +283,14 @@ describe('after-sales workflow adapter', () => {
     )
   })
 
-  it('registers the six v1 workflow event handlers', () => {
+  it('registers the seven v1 workflow event handlers', () => {
     const context = createContext()
 
     const result = adapter.registerAfterSalesWorkflowHandlers(context)
 
     expect(context.api.events.on).toHaveBeenCalledWith('ticket.created', expect.any(Function))
     expect(context.api.events.on).toHaveBeenCalledWith('ticket.assigned', expect.any(Function))
+    expect(context.api.events.on).toHaveBeenCalledWith('service.recorded', expect.any(Function))
     expect(context.api.events.on).toHaveBeenCalledWith('ticket.overdue', expect.any(Function))
     expect(context.api.events.on).toHaveBeenCalledWith('ticket.refundRequested', expect.any(Function))
     expect(context.api.events.on).toHaveBeenCalledWith('approval.pending', expect.any(Function))
@@ -274,6 +298,7 @@ describe('after-sales workflow adapter', () => {
     expect(result.subscriptions).toEqual([
       'sub:ticket.created',
       'sub:ticket.assigned',
+      'sub:service.recorded',
       'sub:ticket.overdue',
       'sub:ticket.refundRequested',
       'sub:approval.pending',
