@@ -2161,6 +2161,97 @@ describe('after-sales plugin install integration', () => {
     })
   })
 
+  it('lists follow-ups through the real after-sales routes', async () => {
+    if (!baseUrl || !pool) return
+
+    const tokenRes = await requestJson(
+      `${baseUrl}/api/auth/dev-token?userId=after-sales-follow-up-list-it&roles=admin&perms=*:*`,
+    )
+    const token = (tokenRes.body as { token?: string } | undefined)?.token
+    expect(token).toBeTruthy()
+
+    const installRes = await requestJson(`${baseUrl}/api/after-sales/projects/install`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        templateId: 'after-sales-default',
+        displayName: 'After Sales Follow-up List Flow',
+      }),
+    })
+    expect(installRes.status).toBe(200)
+
+    const followUpSheetId = stableMetaId('sheet', PROJECT_ID, 'followUp')
+    const followUpAliceId = 'rec_follow_up_alice'
+    const followUpBobId = 'rec_follow_up_bob'
+
+    await pool.query(
+      `INSERT INTO meta_records (id, sheet_id, data, version)
+       VALUES ($1, $2, $3::jsonb, 1), ($4, $2, $5::jsonb, 1)`,
+      [
+        followUpAliceId,
+        followUpSheetId,
+        JSON.stringify({
+          [stFieldId('followUp', 'ticketNo')]: 'TK-5001',
+          [stFieldId('followUp', 'customerName')]: 'Alice Plant',
+          [stFieldId('followUp', 'dueAt')]: '2026-04-10T09:00:00Z',
+          [stFieldId('followUp', 'followUpType')]: 'visit',
+          [stFieldId('followUp', 'ownerName')]: 'CSR Chen',
+          [stFieldId('followUp', 'status')]: 'pending',
+          [stFieldId('followUp', 'summary')]: 'Call Alice after onsite capacitor replacement',
+        }),
+        followUpBobId,
+        JSON.stringify({
+          [stFieldId('followUp', 'ticketNo')]: 'TK-5002',
+          [stFieldId('followUp', 'customerName')]: 'Bob Warehouse',
+          [stFieldId('followUp', 'dueAt')]: '2026-04-11T09:00:00Z',
+          [stFieldId('followUp', 'followUpType')]: 'phone',
+          [stFieldId('followUp', 'ownerName')]: 'CSR Li',
+          [stFieldId('followUp', 'status')]: 'done',
+          [stFieldId('followUp', 'summary')]: 'Completed warehouse status check',
+        }),
+      ],
+    )
+
+    const listRes = await requestJson(
+      `${baseUrl}/api/after-sales/follow-ups?status=pending&ticketNo=TK-5001&search=capacitor`,
+      {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      },
+    )
+    expect(listRes.status).toBe(200)
+
+    const listBody = listRes.body as {
+      ok?: boolean
+      data?: {
+        count?: number
+        followUps?: Array<{
+          id?: string
+          data?: Record<string, unknown>
+        }>
+      }
+    }
+    expect(listBody.ok).toBe(true)
+    expect(listBody.data?.count).toBe(1)
+    expect(listBody.data?.followUps ?? []).toHaveLength(1)
+    expect(listBody.data?.followUps?.[0]).toMatchObject({
+      id: followUpAliceId,
+      data: {
+        ticketNo: 'TK-5001',
+        customerName: 'Alice Plant',
+        dueAt: '2026-04-10T09:00:00Z',
+        followUpType: 'visit',
+        ownerName: 'CSR Chen',
+        status: 'pending',
+        summary: 'Call Alice after onsite capacitor replacement',
+      },
+    })
+  })
+
   it('creates customers through the real after-sales routes', async () => {
     if (!baseUrl || !pool) return
 

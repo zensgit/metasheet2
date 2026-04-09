@@ -1292,6 +1292,113 @@
         </article>
       </section>
 
+      <section v-if="isInstalled && hasFollowUpProjection" class="after-sales-view__follow-ups-shell">
+        <article class="after-sales-view__card after-sales-view__card--wide">
+          <div class="after-sales-view__section-header">
+            <div>
+              <p class="after-sales-view__pill">Follow-ups</p>
+              <h2>Follow-up queue</h2>
+              <p>
+                这里展示待回访队列，便于按 ticket、状态和摘要快速检索后续联系事项。
+              </p>
+            </div>
+          </div>
+
+          <form class="after-sales-view__follow-up-filters" @submit.prevent="applyFollowUpFilters">
+            <label class="after-sales-view__field">
+              <span>Filter status</span>
+              <select
+                id="after-sales-follow-up-filter-status"
+                v-model="followUpFilters.status"
+                class="after-sales-view__field-input"
+              >
+                <option value="">All statuses</option>
+                <option value="pending">Pending</option>
+                <option value="done">Done</option>
+                <option value="skipped">Skipped</option>
+              </select>
+            </label>
+            <label class="after-sales-view__field">
+              <span>Filter ticket</span>
+              <input
+                id="after-sales-follow-up-filter-ticket-no"
+                v-model="followUpFilters.ticketNo"
+                class="after-sales-view__field-input"
+                placeholder="TK-3001"
+                type="text"
+              />
+            </label>
+            <label class="after-sales-view__field after-sales-view__field--wide">
+              <span>Search follow-up</span>
+              <input
+                id="after-sales-follow-up-filter-search"
+                v-model="followUpFilters.search"
+                class="after-sales-view__field-input"
+                placeholder="customer, owner, summary..."
+                type="text"
+              />
+            </label>
+          </form>
+
+          <div class="after-sales-view__action-row after-sales-view__action-row--compact">
+            <button
+              class="after-sales-view__ghost-btn"
+              :disabled="followUpsLoading"
+              @click="refreshFollowUps"
+            >
+              {{ followUpsLoading ? 'Refreshing...' : 'Refresh list' }}
+            </button>
+            <button
+              class="after-sales-view__ghost-btn"
+              :disabled="followUpsLoading"
+              @click="applyFollowUpFilters"
+            >
+              {{ followUpsLoading ? 'Applying...' : 'Apply filters' }}
+            </button>
+            <button
+              class="after-sales-view__ghost-btn"
+              :disabled="followUpsLoading"
+              @click="resetFollowUpFilters"
+            >
+              Clear filters
+            </button>
+          </div>
+
+          <p v-if="followUpsLoading" class="after-sales-view__muted-state">Loading follow-ups...</p>
+          <p v-else-if="followUpsError" class="after-sales-view__inline-error">{{ followUpsError }}</p>
+          <div v-else-if="followUps.length" class="after-sales-view__follow-up-list">
+            <article v-for="followUp in followUps" :key="followUp.id" class="after-sales-view__follow-up-row">
+              <div class="after-sales-view__follow-up-main">
+                <div class="after-sales-view__follow-up-headline">
+                  <strong>{{ followUp.data.ticketNo }}</strong>
+                  <span class="after-sales-view__tag">{{ followUp.data.status }}</span>
+                  <span class="after-sales-view__tag after-sales-view__tag--subtle">{{ followUp.data.followUpType }}</span>
+                </div>
+                <p>{{ followUp.data.summary || 'No follow-up summary yet.' }}</p>
+              </div>
+
+              <div class="after-sales-view__follow-up-side">
+                <dl class="after-sales-view__follow-up-meta">
+                  <div>
+                    <dt>Due at</dt>
+                    <dd>{{ formatRecordDate(followUp.data.dueAt) }}</dd>
+                  </div>
+                  <div>
+                    <dt>Owner</dt>
+                    <dd>{{ followUp.data.ownerName || 'Unassigned' }}</dd>
+                  </div>
+                  <div>
+                    <dt>Customer</dt>
+                    <dd>{{ followUp.data.customerName || 'Unknown customer' }}</dd>
+                  </div>
+                </dl>
+              </div>
+            </article>
+          </div>
+          <p v-else class="after-sales-view__muted-state">No follow-ups found yet.</p>
+        </article>
+      </section>
+
       <section class="after-sales-view__grid">
         <article class="after-sales-view__card">
           <h2>Install state</h2>
@@ -1476,6 +1583,18 @@ interface CustomersResponse {
   count: number
 }
 
+interface FollowUpRow {
+  id: string
+  version: number
+  data: Record<string, unknown>
+}
+
+interface FollowUpsResponse {
+  projectId: string
+  followUps: FollowUpRow[]
+  count: number
+}
+
 interface InstalledAssetViewModel {
   id: string
   version: number
@@ -1499,6 +1618,20 @@ interface CustomerViewModel {
     phone: string
     email: string
     status: string
+  }
+}
+
+interface FollowUpViewModel {
+  id: string
+  version: number
+  data: {
+    ticketNo: string
+    customerName: string
+    dueAt: string
+    followUpType: string
+    ownerName: string
+    status: string
+    summary: string
   }
 }
 
@@ -1588,6 +1721,12 @@ interface CustomerFilterDraft {
   search: string
 }
 
+interface FollowUpFilterDraft {
+  status: '' | 'pending' | 'done' | 'skipped'
+  ticketNo: string
+  search: string
+}
+
 interface TicketFilterDraft {
   status: string
   search: string
@@ -1644,6 +1783,7 @@ const ticketUpdatingId = ref('')
 const ticketDeletingId = ref('')
 const installedAssetsLoading = ref(false)
 const customersLoading = ref(false)
+const followUpsLoading = ref(false)
 const installedAssetCreating = ref(false)
 const customerCreating = ref(false)
 const customerDeletingId = ref('')
@@ -1658,6 +1798,7 @@ const error = ref('')
 const ticketsError = ref('')
 const installedAssetsError = ref('')
 const customersError = ref('')
+const followUpsError = ref('')
 const customerSubmitError = ref('')
 const customerSubmitSuccess = ref('')
 const installedAssetSubmitError = ref('')
@@ -1674,6 +1815,7 @@ const current = ref<CurrentResponse>({ status: 'not-installed' })
 const tickets = ref<TicketViewModel[]>([])
 const installedAssets = ref<InstalledAssetViewModel[]>([])
 const customers = ref<CustomerViewModel[]>([])
+const followUps = ref<FollowUpViewModel[]>([])
 const serviceRecords = ref<ServiceRecordViewModel[]>([])
 const configDraft = ref({ ...DEFAULT_CONFIG })
 const baselineConfigDraft = ref({ ...DEFAULT_CONFIG })
@@ -1694,6 +1836,11 @@ const customerEditingId = ref('')
 const customerEditDraft = ref<CustomerEditDraft>(createCustomerEditDraft())
 const customerFilters = ref<CustomerFilterDraft>({
   status: '',
+  search: '',
+})
+const followUpFilters = ref<FollowUpFilterDraft>({
+  status: '',
+  ticketNo: '',
   search: '',
 })
 const installedAssetDraft = ref<InstalledAssetDraft>(createInstalledAssetDraft())
@@ -1717,6 +1864,10 @@ const isDegraded = computed(() => current.value.status === 'partial' || current.
 const hasCustomerProjection = computed(() =>
   Array.isArray(manifest.value?.objects) &&
   manifest.value.objects.some((object) => object && object.id === 'customer'),
+)
+const hasFollowUpProjection = computed(() =>
+  Array.isArray(manifest.value?.objects) &&
+  manifest.value.objects.some((object) => object && object.id === 'followUp'),
 )
 const canSubmitCustomer = computed(
   () =>
@@ -2264,6 +2415,18 @@ function buildCustomerListPath() {
   return query ? `/api/after-sales/customers?${query}` : '/api/after-sales/customers'
 }
 
+function buildFollowUpListPath() {
+  const params = new URLSearchParams()
+  const status = toText(followUpFilters.value.status)
+  const ticketNo = toText(followUpFilters.value.ticketNo)
+  const search = toText(followUpFilters.value.search)
+  if (status) params.set('status', status)
+  if (ticketNo) params.set('ticketNo', ticketNo)
+  if (search) params.set('search', search)
+  const query = params.toString()
+  return query ? `/api/after-sales/follow-ups?${query}` : '/api/after-sales/follow-ups'
+}
+
 function buildTicketListPath() {
   const params = new URLSearchParams()
   const status = toText(ticketFilters.value.status)
@@ -2410,6 +2573,23 @@ function normalizeCustomerRow(record: CustomerRow): CustomerViewModel {
   }
 }
 
+function normalizeFollowUpRow(record: FollowUpRow): FollowUpViewModel {
+  const rawData = record.data && typeof record.data === 'object' ? record.data : {}
+  return {
+    id: record.id,
+    version: record.version,
+    data: {
+      ticketNo: toText(rawData.ticketNo, record.id),
+      customerName: toText(rawData.customerName),
+      dueAt: toText(rawData.dueAt),
+      followUpType: toText(rawData.followUpType, 'manual'),
+      ownerName: toText(rawData.ownerName),
+      status: toText(rawData.status, 'pending'),
+      summary: toText(rawData.summary),
+    },
+  }
+}
+
 function matchesCustomerFilters(customer: CustomerViewModel) {
   const status = toText(customerFilters.value.status)
   const search = toText(customerFilters.value.search).toLowerCase()
@@ -2417,6 +2597,21 @@ function matchesCustomerFilters(customer: CustomerViewModel) {
   if (status && customer.data.status !== status) return false
   if (search) {
     const haystack = JSON.stringify(customer.data).toLowerCase()
+    if (!haystack.includes(search)) return false
+  }
+
+  return true
+}
+
+function matchesFollowUpFilters(followUp: FollowUpViewModel) {
+  const status = toText(followUpFilters.value.status)
+  const ticketNo = toText(followUpFilters.value.ticketNo)
+  const search = toText(followUpFilters.value.search).toLowerCase()
+
+  if (status && followUp.data.status !== status) return false
+  if (ticketNo && followUp.data.ticketNo !== ticketNo) return false
+  if (search) {
+    const haystack = JSON.stringify(followUp.data).toLowerCase()
     if (!haystack.includes(search)) return false
   }
 
@@ -2594,6 +2789,58 @@ async function refreshCustomers() {
     return
   }
   await loadCustomersForCurrentState(current.value)
+}
+
+async function loadFollowUpsForCurrentState(state: CurrentResponse): Promise<void> {
+  followUpsLoading.value = true
+  followUpsError.value = ''
+  try {
+    if (!hasFollowUpProjection.value) {
+      followUps.value = []
+      return
+    }
+    if (state.status === 'not-installed' || state.status === 'failed') {
+      followUps.value = []
+      return
+    }
+
+    const payload = await readEnvelope<FollowUpsResponse>(buildFollowUpListPath())
+    const rows = Array.isArray(payload?.followUps) ? payload.followUps : []
+    followUps.value = rows.map((row) => normalizeFollowUpRow(row))
+  } catch (err: unknown) {
+    followUps.value = []
+    if (state.status === 'installed' || state.status === 'partial') {
+      followUpsError.value = err instanceof Error ? err.message : 'Failed to load follow-ups'
+    }
+  } finally {
+    followUpsLoading.value = false
+  }
+}
+
+async function applyFollowUpFilters() {
+  if (followUpsLoading.value) {
+    return
+  }
+  await loadFollowUpsForCurrentState(current.value)
+}
+
+async function resetFollowUpFilters() {
+  if (followUpsLoading.value) {
+    return
+  }
+  followUpFilters.value = {
+    status: '',
+    ticketNo: '',
+    search: '',
+  }
+  await loadFollowUpsForCurrentState(current.value)
+}
+
+async function refreshFollowUps() {
+  if (followUpsLoading.value) {
+    return
+  }
+  await loadFollowUpsForCurrentState(current.value)
 }
 
 async function submitCustomer() {
@@ -3130,6 +3377,7 @@ async function refreshCurrentState() {
       loadTicketsForCurrentState(current.value),
       loadInstalledAssetsForCurrentState(current.value),
       loadCustomersForCurrentState(current.value),
+      loadFollowUpsForCurrentState(current.value),
       loadServiceRecordsForCurrentState(current.value),
     ])
   } finally {
@@ -3143,6 +3391,7 @@ async function loadView() {
   ticketsError.value = ''
   installedAssetsError.value = ''
   customersError.value = ''
+  followUpsError.value = ''
   customerSubmitError.value = ''
   customerSubmitSuccess.value = ''
   installedAssetSubmitError.value = ''
@@ -3165,6 +3414,7 @@ async function loadView() {
       loadTicketsForCurrentState(nextCurrent),
       loadInstalledAssetsForCurrentState(nextCurrent),
       loadCustomersForCurrentState(nextCurrent),
+      loadFollowUpsForCurrentState(nextCurrent),
       loadServiceRecordsForCurrentState(nextCurrent),
     ])
   } catch (err: unknown) {
@@ -3319,6 +3569,7 @@ onMounted(() => {
 .after-sales-view__tickets-shell,
 .after-sales-view__installed-assets-shell,
 .after-sales-view__customers-shell,
+.after-sales-view__follow-ups-shell,
 .after-sales-view__service-records-shell {
   display: grid;
   gap: 16px;
@@ -3388,6 +3639,7 @@ onMounted(() => {
 .after-sales-view__ticket-list,
 .after-sales-view__installed-asset-list,
 .after-sales-view__customer-list,
+.after-sales-view__follow-up-list,
 .after-sales-view__service-record-list {
   display: grid;
   gap: 16px;
@@ -3427,6 +3679,7 @@ onMounted(() => {
 .after-sales-view__ticket-meta,
 .after-sales-view__installed-asset-meta,
 .after-sales-view__customer-meta,
+.after-sales-view__follow-up-meta,
 .after-sales-view__service-record-meta {
   display: grid;
   gap: 12px;
@@ -3437,6 +3690,7 @@ onMounted(() => {
 .after-sales-view__ticket-meta div,
 .after-sales-view__installed-asset-meta div,
 .after-sales-view__customer-meta div,
+.after-sales-view__follow-up-meta div,
 .after-sales-view__service-record-meta div {
   display: grid;
   gap: 4px;
@@ -3446,6 +3700,7 @@ onMounted(() => {
 .after-sales-view__ticket-meta dt,
 .after-sales-view__installed-asset-meta dt,
 .after-sales-view__customer-meta dt,
+.after-sales-view__follow-up-meta dt,
 .after-sales-view__service-record-meta dt {
   font-size: 12px;
   letter-spacing: 0.08em;
@@ -3457,6 +3712,7 @@ onMounted(() => {
 .after-sales-view__ticket-meta dd,
 .after-sales-view__installed-asset-meta dd,
 .after-sales-view__customer-meta dd,
+.after-sales-view__follow-up-meta dd,
 .after-sales-view__service-record-meta dd {
   margin: 0;
   color: #0f172a;
@@ -3506,8 +3762,13 @@ onMounted(() => {
   gap: 12px;
 }
 
+.after-sales-view__follow-up-list {
+  gap: 12px;
+}
+
 .after-sales-view__installed-asset-row,
 .after-sales-view__customer-row,
+.after-sales-view__follow-up-row,
 .after-sales-view__service-record-row {
   display: flex;
   justify-content: space-between;
@@ -3520,6 +3781,7 @@ onMounted(() => {
 
 .after-sales-view__installed-asset-main,
 .after-sales-view__customer-main,
+.after-sales-view__follow-up-main,
 .after-sales-view__service-record-main {
   display: grid;
   gap: 8px;
@@ -3528,6 +3790,7 @@ onMounted(() => {
 
 .after-sales-view__installed-asset-main p,
 .after-sales-view__customer-main p,
+.after-sales-view__follow-up-main p,
 .after-sales-view__service-record-main p {
   margin: 0;
   color: #475569;
@@ -3535,6 +3798,7 @@ onMounted(() => {
 
 .after-sales-view__installed-asset-headline,
 .after-sales-view__customer-headline,
+.after-sales-view__follow-up-headline,
 .after-sales-view__service-record-headline {
   display: flex;
   flex-wrap: wrap;
@@ -3544,12 +3808,14 @@ onMounted(() => {
 
 .after-sales-view__installed-asset-headline strong,
 .after-sales-view__customer-headline strong,
+.after-sales-view__follow-up-headline strong,
 .after-sales-view__service-record-headline strong {
   color: #0f172a;
 }
 
 .after-sales-view__installed-asset-side,
 .after-sales-view__customer-side,
+.after-sales-view__follow-up-side,
 .after-sales-view__service-record-side {
   display: grid;
   gap: 12px;
@@ -3612,6 +3878,7 @@ onMounted(() => {
 .after-sales-view__ticket-form,
 .after-sales-view__installed-asset-filters,
 .after-sales-view__customer-filters,
+.after-sales-view__follow-up-filters,
 .after-sales-view__service-record-form,
 .after-sales-view__ticket-filters,
 .after-sales-view__service-record-filters {
@@ -3764,6 +4031,7 @@ code {
   .after-sales-view__ticket-row,
   .after-sales-view__installed-asset-row,
   .after-sales-view__customer-row,
+  .after-sales-view__follow-up-row,
   .after-sales-view__service-record-row {
     grid-template-columns: 1fr;
     display: grid;
@@ -3780,6 +4048,7 @@ code {
   .after-sales-view__ticket-form,
   .after-sales-view__installed-asset-filters,
   .after-sales-view__customer-filters,
+  .after-sales-view__follow-up-filters,
   .after-sales-view__service-record-form,
   .after-sales-view__ticket-filters,
   .after-sales-view__service-record-filters {
@@ -3789,6 +4058,7 @@ code {
 
   .after-sales-view__installed-asset-side,
   .after-sales-view__customer-side,
+  .after-sales-view__follow-up-side,
   .after-sales-view__service-record-side {
     justify-items: stretch;
   }

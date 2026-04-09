@@ -44,6 +44,7 @@ const SERVICE_TICKET_FIELDS = ['ticketNo', 'title', 'source', 'priority', 'statu
 const SERVICE_RECORD_FIELDS = ['ticketNo', 'visitType', 'scheduledAt', 'completedAt', 'technicianName', 'workSummary', 'result']
 const INSTALLED_ASSET_FIELDS = ['assetCode', 'serialNo', 'model', 'location', 'installedAt', 'warrantyUntil', 'status']
 const CUSTOMER_FIELDS = ['customerCode', 'name', 'phone', 'email', 'status']
+const FOLLOW_UP_FIELDS = ['ticketNo', 'customerName', 'dueAt', 'followUpType', 'ownerName', 'status', 'summary']
 
 async function toPhysicalTicketData(provisioning, projectId, logicalData) {
   return toPhysicalRecord(provisioning, projectId, 'serviceTicket', logicalData)
@@ -71,6 +72,10 @@ async function fromPhysicalInstalledAssetData(provisioning, projectId, physicalD
 
 async function fromPhysicalCustomerData(provisioning, projectId, physicalData) {
   return fromPhysicalRecord(provisioning, projectId, 'customer', CUSTOMER_FIELDS, physicalData)
+}
+
+async function fromPhysicalFollowUpData(provisioning, projectId, physicalData) {
+  return fromPhysicalRecord(provisioning, projectId, 'followUp', FOLLOW_UP_FIELDS, physicalData)
 }
 
 async function toPhysicalCustomerData(provisioning, projectId, logicalData) {
@@ -1904,6 +1909,152 @@ module.exports = {
           res.status(500).json({
             ok: false,
             error: { code: 'INTERNAL_ERROR', message: 'Failed to list after-sales customers' },
+          })
+        }
+      },
+    )
+
+    context.api.http.addRoute(
+      'GET',
+      '/api/after-sales/follow-ups',
+      async (req, res) => {
+        try {
+          const userId = getUserId(req)
+          if (!userId) {
+            sendUnauthorized(res)
+            return
+          }
+          if (!hasAfterSalesReadAccess(req)) {
+            res.status(403).json({
+              ok: false,
+              error: { code: 'FORBIDDEN', message: 'After-sales read access required' },
+            })
+            return
+          }
+
+          const multitableApi = getMultitableReadApi(context)
+          if (!multitableApi || (typeof multitableApi.records.listRecords !== 'function' && typeof multitableApi.records.queryRecords !== 'function')) {
+            res.status(503).json({
+              ok: false,
+              error: {
+                code: 'MULTITABLE_UNAVAILABLE',
+                message: 'Multitable record reader is not available on plugin context',
+              },
+            })
+            return
+          }
+
+          const tenantId = getTenantId(req, context.logger)
+          const current = await installer.loadCurrent(context, tenantId, appManifest.id)
+          if (!current || !isOperationalAfterSalesStatus(current.status)) {
+            res.status(409).json({
+              ok: false,
+              error: {
+                code: 'AFTER_SALES_NOT_INSTALLED',
+                message: 'After-sales must be installed before listing follow-ups',
+              },
+            })
+            return
+          }
+
+          const projectId = current.projectId || installer.getProjectId(tenantId, appManifest.id)
+          const sheetId = await findObjectSheetId(multitableApi.provisioning, projectId, 'followUp')
+          const status = typeof req?.query?.status === 'string' && req.query.status.trim()
+            ? req.query.status.trim()
+            : null
+          const ticketNo = typeof req?.query?.ticketNo === 'string' && req.query.ticketNo.trim()
+            ? req.query.ticketNo.trim()
+            : null
+          const search = typeof req?.query?.search === 'string' && req.query.search.trim()
+            ? req.query.search.trim()
+            : null
+          const limit = typeof req?.query?.limit === 'string' && req.query.limit.trim()
+            ? Number(req.query.limit)
+            : undefined
+          const offset = typeof req?.query?.offset === 'string' && req.query.offset.trim()
+            ? Number(req.query.offset)
+            : undefined
+
+          const recordsApi = multitableApi.records
+          let followUps
+          if (typeof recordsApi.queryRecords === 'function') {
+            const fieldIds = []
+            if (status) fieldIds.push('status')
+            if (ticketNo) fieldIds.push('ticketNo')
+            const physicalFieldIds = fieldIds.length
+              ? await resolvePhysicalFieldIds(multitableApi.provisioning, projectId, 'followUp', fieldIds)
+              : {}
+            const filters = {}
+            if (status) {
+              filters[physicalFieldIds.status || 'status'] = status
+            }
+            if (ticketNo) {
+              filters[physicalFieldIds.ticketNo || 'ticketNo'] = ticketNo
+            }
+            followUps = await recordsApi.queryRecords({
+              sheetId,
+              filters: Object.keys(filters).length ? filters : undefined,
+              search,
+              limit,
+              offset,
+            })
+          } else {
+            followUps = await recordsApi.listRecords({
+              sheetId,
+              limit,
+              offset,
+            })
+          }
+
+          const logicalFollowUps = Array.isArray(followUps)
+            ? (
+                await Promise.all(
+                  followUps.map(async (followUp) => ({
+                    id: followUp.id,
+                    version: followUp.version,
+                    data: await fromPhysicalFollowUpData(
+                      multitableApi.provisioning,
+                      projectId,
+                      followUp.data,
+                    ),
+                  })),
+                )
+              ).filter((record) => {
+                if (status && record.data.status !== status) return false
+                if (ticketNo && record.data.ticketNo !== ticketNo) return false
+                if (!search) return true
+                const haystack = JSON.stringify(record.data).toLowerCase()
+                return haystack.includes(search.toLowerCase())
+              })
+            : []
+
+          res.json({
+            ok: true,
+            data: {
+              projectId,
+              followUps: logicalFollowUps,
+              count: logicalFollowUps.length,
+            },
+          })
+        } catch (err) {
+          if (err && err.code === 'VALIDATION_ERROR') {
+            res.status(400).json({
+              ok: false,
+              error: { code: err.code, message: err.message },
+            })
+            return
+          }
+          if (err && err.code === 'NOT_FOUND') {
+            res.status(404).json({
+              ok: false,
+              error: { code: err.code, message: err.message },
+            })
+            return
+          }
+          logger.error && logger.error('after-sales list follow-ups failed', err)
+          res.status(500).json({
+            ok: false,
+            error: { code: 'INTERNAL_ERROR', message: 'Failed to list after-sales follow-ups' },
           })
         }
       },
