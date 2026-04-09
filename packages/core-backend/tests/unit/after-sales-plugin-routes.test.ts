@@ -284,6 +284,8 @@ function createContext(): {
       ? 'rec_asset_001'
       : input.sheetId.includes('customer')
       ? 'rec_customer_001'
+      : input.sheetId.includes('followUp')
+      ? 'rec_follow_up_001'
       : input.sheetId.includes('serviceRecord')
       ? 'rec_service_001'
       : 'rec_ticket_001',
@@ -1706,6 +1708,196 @@ describe('plugin-after-sales routes', () => {
       objectId: 'followUp',
       fieldIds: ['status', 'ticketNo'],
     })
+  })
+
+  it('returns 403 for follow-up create when caller lacks after-sales write access', async () => {
+    const handler = routes.get('POST /api/after-sales/follow-ups')
+    const res = new FakeResponse()
+
+    await handler?.(buildReq({
+      user: {
+        id: 'user_42',
+        tenantId: 'tenant_42',
+        role: 'user',
+        roles: ['user'],
+        perms: ['after_sales:read'],
+      },
+      body: {
+        followUp: {
+          ticketNo: 'TK-2001',
+          customerName: 'Alice Plant',
+          dueAt: '2026-04-10T09:00:00Z',
+          followUpType: 'phone',
+        },
+      },
+    }), res)
+
+    expect(res.statusCode).toBe(403)
+    expect(res.body).toEqual({
+      ok: false,
+      error: {
+        code: 'FORBIDDEN',
+        message: 'After-sales write access required',
+      },
+    })
+    expect(createRecord).not.toHaveBeenCalled()
+  })
+
+  it('creates follow-ups through the multitable write seam', async () => {
+    const handler = routes.get('POST /api/after-sales/follow-ups')
+    const res = new FakeResponse()
+
+    db.rows.push({
+      id: 'fake-uuid-1',
+      tenant_id: 'tenant_42',
+      app_id: 'after-sales',
+      project_id: 'tenant_42:after-sales',
+      template_id: 'after-sales-default',
+      template_version: '0.1.0',
+      mode: 'enable',
+      status: 'installed',
+      created_objects_json: JSON.stringify(['serviceTicket', 'followUp']),
+      created_views_json: JSON.stringify(['ticket-board', 'followUp-grid']),
+      warnings_json: JSON.stringify([]),
+      display_name: 'After-sales',
+      config_json: JSON.stringify({}),
+      last_install_at: new Date(),
+      created_at: new Date(),
+    })
+
+    await handler?.(buildReq({
+      body: {
+        followUp: {
+          ticketNo: 'TK-2001',
+          customerName: 'Alice Plant',
+          dueAt: '2026-04-10T09:00:00Z',
+          followUpType: 'phone',
+          ownerName: 'CSR Chen',
+          summary: 'Call customer after part arrival',
+        },
+      },
+    }), res)
+
+    expect(res.statusCode).toBe(201)
+    expect(createRecord).toHaveBeenCalledWith({
+      sheetId: 'tenant_42:after-sales:followUp:sheet',
+      data: {
+        [fuPk('ticketNo')]: 'TK-2001',
+        [fuPk('customerName')]: 'Alice Plant',
+        [fuPk('dueAt')]: '2026-04-10T09:00:00Z',
+        [fuPk('followUpType')]: 'phone',
+        [fuPk('status')]: 'pending',
+        [fuPk('ownerName')]: 'CSR Chen',
+        [fuPk('summary')]: 'Call customer after part arrival',
+      },
+    })
+    expect(res.body.data).toEqual({
+      projectId: 'tenant_42:after-sales',
+      followUp: {
+        id: 'rec_follow_up_001',
+        version: 1,
+        data: {
+          ticketNo: 'TK-2001',
+          customerName: 'Alice Plant',
+          dueAt: '2026-04-10T09:00:00Z',
+          followUpType: 'phone',
+          status: 'pending',
+          ownerName: 'CSR Chen',
+          summary: 'Call customer after part arrival',
+        },
+      },
+    })
+  })
+
+  it('returns 400 when follow-up create payload is invalid', async () => {
+    const handler = routes.get('POST /api/after-sales/follow-ups')
+    const res = new FakeResponse()
+
+    db.rows.push({
+      id: 'fake-uuid-1',
+      tenant_id: 'tenant_42',
+      app_id: 'after-sales',
+      project_id: 'tenant_42:after-sales',
+      template_id: 'after-sales-default',
+      template_version: '0.1.0',
+      mode: 'enable',
+      status: 'installed',
+      created_objects_json: JSON.stringify(['serviceTicket', 'followUp']),
+      created_views_json: JSON.stringify(['ticket-board', 'followUp-grid']),
+      warnings_json: JSON.stringify([]),
+      display_name: 'After-sales',
+      config_json: JSON.stringify({}),
+      last_install_at: new Date(),
+      created_at: new Date(),
+    })
+
+    await handler?.(buildReq({
+      body: {
+        followUp: {
+          ticketNo: 'TK-2001',
+          customerName: 'Alice Plant',
+          dueAt: '',
+          followUpType: 'phone',
+        },
+      },
+    }), res)
+
+    expect(res.statusCode).toBe(400)
+    expect(res.body).toEqual({
+      ok: false,
+      error: {
+        code: 'AFTER_SALES_EVENT_VALIDATION_FAILED',
+        message: 'followUp.dueAt is required',
+        details: {
+          field: 'followUp.dueAt',
+        },
+      },
+    })
+    expect(createRecord).not.toHaveBeenCalled()
+  })
+
+  it('returns 409 when follow-ups are created from a failed install state', async () => {
+    const handler = routes.get('POST /api/after-sales/follow-ups')
+    const res = new FakeResponse()
+
+    db.rows.push({
+      id: 'fake-uuid-1',
+      tenant_id: 'tenant_42',
+      app_id: 'after-sales',
+      project_id: 'tenant_42:after-sales',
+      template_id: 'after-sales-default',
+      template_version: '0.1.0',
+      mode: 'reinstall',
+      status: 'failed',
+      created_objects_json: JSON.stringify(['serviceTicket', 'followUp']),
+      created_views_json: JSON.stringify(['ticket-board', 'followUp-grid']),
+      warnings_json: JSON.stringify(['follow-up create failed']),
+      display_name: 'After-sales',
+      config_json: JSON.stringify({}),
+      last_install_at: new Date(),
+      created_at: new Date(),
+    })
+
+    await handler?.(buildReq({
+      body: {
+        followUp: {
+          ticketNo: 'TK-2001',
+          customerName: 'Alice Plant',
+          dueAt: '2026-04-10T09:00:00Z',
+          followUpType: 'phone',
+        },
+      },
+    }), res)
+
+    expect(res.statusCode).toBe(409)
+    expect(res.body).toEqual({
+      ok: false,
+      error: {
+        code: 'AFTER_SALES_NOT_INSTALLED',
+        message: 'After-sales must be installed before creating follow-ups',
+      },
+    })
+    expect(createRecord).not.toHaveBeenCalled()
   })
 
   it('returns 403 for customers create when caller lacks after-sales write access', async () => {

@@ -313,4 +313,394 @@ describe('AfterSalesView follow-ups panel', () => {
       container = null
     }
   })
+
+  it('creates a follow-up and prepends it to the current list', async () => {
+    apiFetchMock.mockImplementation(async (path: string, options?: RequestInit) => {
+      if (path === '/api/after-sales/app-manifest') {
+        return createResponse({
+          id: 'after-sales-default',
+          displayName: 'After Sales',
+          platformDependencies: ['core-backend'],
+          objects: [{ id: 'followUp' }],
+          workflows: [],
+        })
+      }
+
+      if (path === '/api/after-sales/projects/current') {
+        return createResponse({
+          status: 'installed',
+          projectId: 'tenant:after-sales',
+          displayName: 'After Sales',
+          config: {
+            defaultSlaHours: 24,
+            urgentSlaHours: 4,
+            followUpAfterDays: 7,
+          },
+          installResult: {
+            status: 'installed',
+            createdObjects: [],
+            createdViews: [],
+            warnings: [],
+            reportRef: 'install-follow-ups-create',
+          },
+          reportRef: 'install-follow-ups-create',
+        })
+      }
+
+      if (path === '/api/after-sales/tickets') {
+        return createResponse({ projectId: 'tenant:after-sales', count: 0, tickets: [] })
+      }
+
+      if (path === '/api/after-sales/installed-assets') {
+        return createResponse({ projectId: 'tenant:after-sales', count: 0, installedAssets: [] })
+      }
+
+      if (path === '/api/after-sales/service-records') {
+        return createResponse({ projectId: 'tenant:after-sales', count: 0, serviceRecords: [] })
+      }
+
+      if (path === '/api/after-sales/follow-ups') {
+        if (options?.method === 'POST') {
+          return createResponse({
+            projectId: 'tenant:after-sales',
+            followUp: {
+              id: 'follow-up-002',
+              version: 1,
+              data: {
+                ticketNo: 'TK-5002',
+                customerName: 'Charlie Logistics',
+                dueAt: '2026-04-12T09:30:00Z',
+                followUpType: 'message',
+                ownerName: 'CSR Wang',
+                status: 'pending',
+                summary: 'Send delivery confirmation follow-up',
+              },
+            },
+          }, { status: 201 })
+        }
+
+        return createResponse({
+          projectId: 'tenant:after-sales',
+          count: 1,
+          followUps: [
+            {
+              id: 'follow-up-001',
+              version: 1,
+              data: {
+                ticketNo: 'TK-5001',
+                customerName: 'Alice Plant',
+                dueAt: '2026-04-10T09:00:00Z',
+                followUpType: 'visit',
+                ownerName: 'CSR Chen',
+                status: 'pending',
+                summary: 'Call Alice after onsite service',
+              },
+            },
+          ],
+        })
+      }
+
+      throw new Error(`Unexpected request: ${path}`)
+    })
+
+    const mounted = mountAfterSalesView()
+    app = mounted.app
+    container = mounted.container
+
+    await waitForText(container, 'Call Alice after onsite service')
+
+    const section = findSection(container, 'Follow-up queue')
+    const ticketInput = section.querySelector<HTMLInputElement>('#after-sales-follow-up-ticket-no')
+    const customerInput = section.querySelector<HTMLInputElement>('#after-sales-follow-up-customer-name')
+    const dueAtInput = section.querySelector<HTMLInputElement>('#after-sales-follow-up-due-at')
+    const typeSelect = section.querySelector<HTMLSelectElement>('#after-sales-follow-up-type')
+    const ownerInput = section.querySelector<HTMLInputElement>('#after-sales-follow-up-owner-name')
+    const summaryInput = section.querySelector<HTMLTextAreaElement>('#after-sales-follow-up-summary')
+    expect(ticketInput).toBeTruthy()
+    expect(customerInput).toBeTruthy()
+    expect(dueAtInput).toBeTruthy()
+    expect(typeSelect).toBeTruthy()
+    expect(ownerInput).toBeTruthy()
+    expect(summaryInput).toBeTruthy()
+    if (!ticketInput || !customerInput || !dueAtInput || !typeSelect || !ownerInput || !summaryInput) return
+
+    await setInputValue(ticketInput, 'TK-5002')
+    await setInputValue(customerInput, 'Charlie Logistics')
+    await setInputValue(dueAtInput, '2026-04-12T09:30')
+    await setSelectValue(typeSelect, 'message')
+    await setInputValue(ownerInput, 'CSR Wang')
+    summaryInput.value = 'Send delivery confirmation follow-up'
+    summaryInput.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+
+    findButtonWithin(section, 'Create follow-up').click()
+    await waitForText(section, 'Charlie Logistics')
+
+    const followUpRows = Array.from(section.querySelectorAll('.after-sales-view__follow-up-row'))
+    expect(followUpRows[0]?.textContent).toContain('Charlie Logistics')
+    expect(followUpRows[1]?.textContent).toContain('Alice Plant')
+    expect(section.textContent).toContain('Created follow-up for TK-5002')
+  })
+
+  it('keeps the visible follow-up list unchanged when a created follow-up does not match active filters', async () => {
+    apiFetchMock.mockImplementation(async (path: string, options?: RequestInit) => {
+      if (path === '/api/after-sales/app-manifest') {
+        return createResponse({
+          id: 'after-sales-default',
+          displayName: 'After Sales',
+          platformDependencies: ['core-backend'],
+          objects: [{ id: 'followUp' }],
+          workflows: [],
+        })
+      }
+
+      if (path === '/api/after-sales/projects/current') {
+        return createResponse({
+          status: 'partial',
+          projectId: 'tenant:after-sales',
+          displayName: 'After Sales',
+          config: {
+            defaultSlaHours: 24,
+            urgentSlaHours: 4,
+            followUpAfterDays: 7,
+          },
+          installResult: {
+            status: 'partial',
+            createdObjects: [],
+            createdViews: [],
+            warnings: [],
+            reportRef: 'install-follow-ups-filtered-create',
+          },
+          reportRef: 'install-follow-ups-filtered-create',
+        })
+      }
+
+      if (path === '/api/after-sales/tickets') {
+        return createResponse({ projectId: 'tenant:after-sales', count: 0, tickets: [] })
+      }
+
+      if (path === '/api/after-sales/installed-assets') {
+        return createResponse({ projectId: 'tenant:after-sales', count: 0, installedAssets: [] })
+      }
+
+      if (path === '/api/after-sales/service-records') {
+        return createResponse({ projectId: 'tenant:after-sales', count: 0, serviceRecords: [] })
+      }
+
+      if (path === '/api/after-sales/follow-ups?status=pending&ticketNo=TK-5001&search=Alice') {
+        return createResponse({
+          projectId: 'tenant:after-sales',
+          count: 1,
+          followUps: [
+            {
+              id: 'follow-up-001',
+              version: 1,
+              data: {
+                ticketNo: 'TK-5001',
+                customerName: 'Alice Plant',
+                dueAt: '2026-04-10T09:00:00Z',
+                followUpType: 'visit',
+                ownerName: 'CSR Chen',
+                status: 'pending',
+                summary: 'Call Alice after onsite service',
+              },
+            },
+          ],
+        })
+      }
+
+      if (path === '/api/after-sales/follow-ups') {
+        if (options?.method === 'POST') {
+          return createResponse({
+            projectId: 'tenant:after-sales',
+            followUp: {
+              id: 'follow-up-003',
+              version: 1,
+              data: {
+                ticketNo: 'TK-5009',
+                customerName: 'Delta Warehouse',
+                dueAt: '2026-04-13T10:00:00Z',
+                followUpType: 'phone',
+                ownerName: 'CSR Sun',
+                status: 'done',
+                summary: 'Completed warehouse confirmation call',
+              },
+            },
+          }, { status: 201 })
+        }
+
+        return createResponse({
+          projectId: 'tenant:after-sales',
+          count: 1,
+          followUps: [
+            {
+              id: 'follow-up-001',
+              version: 1,
+              data: {
+                ticketNo: 'TK-5001',
+                customerName: 'Alice Plant',
+                dueAt: '2026-04-10T09:00:00Z',
+                followUpType: 'visit',
+                ownerName: 'CSR Chen',
+                status: 'pending',
+                summary: 'Call Alice after onsite service',
+              },
+            },
+          ],
+        })
+      }
+
+      throw new Error(`Unexpected request: ${path}`)
+    })
+
+    const mounted = mountAfterSalesView()
+    app = mounted.app
+    container = mounted.container
+
+    await waitForText(container, 'Call Alice after onsite service')
+
+    const section = findSection(container, 'Follow-up queue')
+    const statusFilter = section.querySelector<HTMLSelectElement>('#after-sales-follow-up-filter-status')
+    const ticketFilter = section.querySelector<HTMLInputElement>('#after-sales-follow-up-filter-ticket-no')
+    const searchFilter = section.querySelector<HTMLInputElement>('#after-sales-follow-up-filter-search')
+    const ticketInput = section.querySelector<HTMLInputElement>('#after-sales-follow-up-ticket-no')
+    const customerInput = section.querySelector<HTMLInputElement>('#after-sales-follow-up-customer-name')
+    const dueAtInput = section.querySelector<HTMLInputElement>('#after-sales-follow-up-due-at')
+    expect(statusFilter).toBeTruthy()
+    expect(ticketFilter).toBeTruthy()
+    expect(searchFilter).toBeTruthy()
+    expect(ticketInput).toBeTruthy()
+    expect(customerInput).toBeTruthy()
+    expect(dueAtInput).toBeTruthy()
+    if (!statusFilter || !ticketFilter || !searchFilter || !ticketInput || !customerInput || !dueAtInput) return
+
+    await setSelectValue(statusFilter, 'pending')
+    await setInputValue(ticketFilter, 'TK-5001')
+    await setInputValue(searchFilter, 'Alice')
+    findButtonWithin(section, 'Apply filters').click()
+    await waitForText(section, 'Alice Plant')
+
+    await setInputValue(ticketInput, 'TK-5009')
+    await setInputValue(customerInput, 'Delta Warehouse')
+    await setInputValue(dueAtInput, '2026-04-13T10:00')
+
+    findButtonWithin(section, 'Create follow-up').click()
+    await waitForText(section, 'Created follow-up for TK-5009')
+
+    expect(section.textContent).toContain('Alice Plant')
+    expect(section.textContent).not.toContain('Delta Warehouse')
+    expect(ticketInput.value).toBe('')
+    expect(customerInput.value).toBe('')
+  })
+
+  it('keeps the follow-up draft open when create fails', async () => {
+    apiFetchMock.mockImplementation(async (path: string, options?: RequestInit) => {
+      if (path === '/api/after-sales/app-manifest') {
+        return createResponse({
+          id: 'after-sales-default',
+          displayName: 'After Sales',
+          platformDependencies: ['core-backend'],
+          objects: [{ id: 'followUp' }],
+          workflows: [],
+        })
+      }
+
+      if (path === '/api/after-sales/projects/current') {
+        return createResponse({
+          status: 'installed',
+          projectId: 'tenant:after-sales',
+          displayName: 'After Sales',
+          config: {
+            defaultSlaHours: 24,
+            urgentSlaHours: 4,
+            followUpAfterDays: 7,
+          },
+          installResult: {
+            status: 'installed',
+            createdObjects: [],
+            createdViews: [],
+            warnings: [],
+            reportRef: 'install-follow-ups-create-error',
+          },
+          reportRef: 'install-follow-ups-create-error',
+        })
+      }
+
+      if (path === '/api/after-sales/tickets') {
+        return createResponse({ projectId: 'tenant:after-sales', count: 0, tickets: [] })
+      }
+
+      if (path === '/api/after-sales/installed-assets') {
+        return createResponse({ projectId: 'tenant:after-sales', count: 0, installedAssets: [] })
+      }
+
+      if (path === '/api/after-sales/service-records') {
+        return createResponse({ projectId: 'tenant:after-sales', count: 0, serviceRecords: [] })
+      }
+
+      if (path === '/api/after-sales/follow-ups') {
+        if (options?.method === 'POST') {
+          return createResponse({
+            error: {
+              code: 'VALIDATION_ERROR',
+              message: 'followUp.customerName is required',
+            },
+          }, {
+            ok: false,
+            status: 400,
+            statusText: 'Bad Request',
+          })
+        }
+
+        return createResponse({
+          projectId: 'tenant:after-sales',
+          count: 1,
+          followUps: [
+            {
+              id: 'follow-up-001',
+              version: 1,
+              data: {
+                ticketNo: 'TK-5001',
+                customerName: 'Alice Plant',
+                dueAt: '2026-04-10T09:00:00Z',
+                followUpType: 'visit',
+                ownerName: 'CSR Chen',
+                status: 'pending',
+                summary: 'Call Alice after onsite service',
+              },
+            },
+          ],
+        })
+      }
+
+      throw new Error(`Unexpected request: ${path}`)
+    })
+
+    const mounted = mountAfterSalesView()
+    app = mounted.app
+    container = mounted.container
+
+    await waitForText(container, 'Call Alice after onsite service')
+
+    const section = findSection(container, 'Follow-up queue')
+    const ticketInput = section.querySelector<HTMLInputElement>('#after-sales-follow-up-ticket-no')
+    const customerInput = section.querySelector<HTMLInputElement>('#after-sales-follow-up-customer-name')
+    const dueAtInput = section.querySelector<HTMLInputElement>('#after-sales-follow-up-due-at')
+    expect(ticketInput).toBeTruthy()
+    expect(customerInput).toBeTruthy()
+    expect(dueAtInput).toBeTruthy()
+    if (!ticketInput || !customerInput || !dueAtInput) return
+
+    await setInputValue(ticketInput, 'TK-DRAFT')
+    await setInputValue(customerInput, 'Draft Customer')
+    await setInputValue(dueAtInput, '2026-04-14T09:00')
+
+    findButtonWithin(section, 'Create follow-up').click()
+    await waitForText(section, 'followUp.customerName is required')
+
+    expect(ticketInput.value).toBe('TK-DRAFT')
+    expect(customerInput.value).toBe('Draft Customer')
+    expect(dueAtInput.value).toBe('2026-04-14T09:00')
+    expect(section.textContent).toContain('Alice Plant')
+  })
 })
