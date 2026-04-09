@@ -142,6 +142,70 @@
             </div>
           </div>
 
+          <form class="after-sales-view__ticket-form" @submit.prevent="submitTicket">
+            <label class="after-sales-view__field">
+              <span>Ticket no</span>
+              <input
+                id="after-sales-ticket-no"
+                v-model="ticketDraft.ticketNo"
+                class="after-sales-view__field-input"
+                placeholder="TK-3001"
+                type="text"
+              />
+            </label>
+            <label class="after-sales-view__field">
+              <span>Priority</span>
+              <select id="after-sales-ticket-priority" v-model="ticketDraft.priority" class="after-sales-view__field-input">
+                <option value="normal">Normal</option>
+                <option value="high">High</option>
+                <option value="urgent">Urgent</option>
+              </select>
+            </label>
+            <label class="after-sales-view__field after-sales-view__field--wide">
+              <span>Title</span>
+              <input
+                id="after-sales-ticket-title"
+                v-model="ticketDraft.title"
+                class="after-sales-view__field-input"
+                placeholder="Broken compressor"
+                type="text"
+              />
+            </label>
+            <label class="after-sales-view__field">
+              <span>Source</span>
+              <select id="after-sales-ticket-source" v-model="ticketDraft.source" class="after-sales-view__field-input">
+                <option value="web">Web</option>
+                <option value="phone">Phone</option>
+                <option value="wechat">WeChat</option>
+              </select>
+            </label>
+            <label class="after-sales-view__field">
+              <span>Refund amount</span>
+              <input
+                id="after-sales-ticket-refund-amount"
+                v-model="ticketDraft.refundAmount"
+                class="after-sales-view__field-input"
+                inputmode="decimal"
+                placeholder="optional"
+                type="text"
+              />
+            </label>
+          </form>
+
+          <div class="after-sales-view__action-row after-sales-view__action-row--compact">
+            <button class="after-sales-view__primary-btn" :disabled="ticketCreating || ticketsLoading || !canSubmitTicket" @click="submitTicket">
+              {{ ticketCreating ? 'Creating...' : 'Create ticket' }}
+            </button>
+            <button class="after-sales-view__ghost-btn" :disabled="ticketCreating || ticketsLoading" @click="resetTicketDraft">
+              Reset ticket draft
+            </button>
+          </div>
+
+          <p v-if="ticketDraftError || ticketSubmitError" class="after-sales-view__inline-error">
+            {{ ticketDraftError || ticketSubmitError }}
+          </p>
+          <p v-else-if="ticketSubmitSuccess" class="after-sales-view__inline-success">{{ ticketSubmitSuccess }}</p>
+
           <form class="after-sales-view__ticket-filters" @submit.prevent="applyTicketFilters">
             <label class="after-sales-view__field">
               <span>Filter status</span>
@@ -173,7 +237,6 @@
               Clear ticket filters
             </button>
           </div>
-
           <p v-if="ticketsLoading" class="after-sales-view__muted-state">Loading recent tickets...</p>
           <p v-else-if="ticketsError" class="after-sales-view__inline-error">{{ ticketsError }}</p>
           <div v-else-if="tickets.length" class="after-sales-view__ticket-list">
@@ -571,6 +634,14 @@ interface ServiceRecordDraft {
   result: '' | 'resolved' | 'partial' | 'escalated'
 }
 
+interface TicketDraft {
+  ticketNo: string
+  title: string
+  priority: 'normal' | 'high' | 'urgent'
+  source: 'web' | 'phone' | 'wechat'
+  refundAmount: string
+}
+
 interface ServiceRecordFilterDraft {
   ticketNo: string
   result: '' | 'resolved' | 'partial' | 'escalated'
@@ -585,6 +656,11 @@ interface TicketFilterDraft {
 interface CreateServiceRecordResponse {
   projectId: string
   serviceRecord: ServiceRecordRow
+}
+
+interface CreateTicketResponse {
+  projectId: string
+  ticket: TicketRecord
 }
 
 interface ApiEnvelope<T> {
@@ -612,11 +688,14 @@ const loading = ref(true)
 const installing = ref(false)
 const refreshing = ref(false)
 const ticketsLoading = ref(false)
+const ticketCreating = ref(false)
 const serviceRecordsLoading = ref(false)
 const serviceRecordCreating = ref(false)
 const serviceRecordDeletingId = ref('')
 const error = ref('')
 const ticketsError = ref('')
+const ticketSubmitError = ref('')
+const ticketSubmitSuccess = ref('')
 const serviceRecordsError = ref('')
 const serviceRecordSubmitError = ref('')
 const serviceRecordSubmitSuccess = ref('')
@@ -627,6 +706,7 @@ const tickets = ref<TicketViewModel[]>([])
 const serviceRecords = ref<ServiceRecordViewModel[]>([])
 const configDraft = ref({ ...DEFAULT_CONFIG })
 const baselineConfigDraft = ref({ ...DEFAULT_CONFIG })
+const ticketDraft = ref<TicketDraft>(createTicketDraft())
 const ticketFilters = ref<TicketFilterDraft>({
   status: '',
   search: '',
@@ -648,6 +728,16 @@ const canSubmitServiceRecord = computed(
   () =>
     toText(serviceRecordDraft.value.ticketNo).length > 0 &&
     toText(serviceRecordDraft.value.scheduledAt).length > 0,
+)
+const ticketDraftError = computed(() => {
+  const parsedRefundAmount = parseOptionalRefundAmount(ticketDraft.value.refundAmount)
+  return parsedRefundAmount.valid ? '' : 'Refund amount must be a valid number'
+})
+const canSubmitTicket = computed(
+  () =>
+    toText(ticketDraft.value.ticketNo).length > 0 &&
+    toText(ticketDraft.value.title).length > 0 &&
+    ticketDraftError.value.length === 0,
 )
 const statusTone = computed(() => {
   switch (current.value.status) {
@@ -761,6 +851,16 @@ function createServiceRecordDraft(): ServiceRecordDraft {
   }
 }
 
+function createTicketDraft(): TicketDraft {
+  return {
+    ticketNo: '',
+    title: '',
+    priority: 'normal',
+    source: 'web',
+    refundAmount: '',
+  }
+}
+
 function resetConfigDraft() {
   configDraft.value = { ...baselineConfigDraft.value }
 }
@@ -769,6 +869,12 @@ function resetServiceRecordDraft() {
   serviceRecordDraft.value = createServiceRecordDraft()
   serviceRecordSubmitError.value = ''
   serviceRecordSubmitSuccess.value = ''
+}
+
+function resetTicketDraft() {
+  ticketDraft.value = createTicketDraft()
+  ticketSubmitError.value = ''
+  ticketSubmitSuccess.value = ''
 }
 
 function buildInstallConfig() {
@@ -801,6 +907,39 @@ function buildServiceRecordPayload() {
       ...(technicianName ? { technicianName } : {}),
       ...(workSummary ? { workSummary } : {}),
       ...(result ? { result } : {}),
+    },
+  }
+}
+
+function parseOptionalRefundAmount(value: unknown): { valid: boolean; value?: number } {
+  const text = toText(value)
+  if (!text) {
+    return { valid: true }
+  }
+
+  const amount = Number(text)
+  if (!Number.isFinite(amount)) {
+    return { valid: false }
+  }
+
+  return {
+    valid: true,
+    value: amount,
+  }
+}
+
+function buildTicketPayload() {
+  const ticketNo = toText(ticketDraft.value.ticketNo)
+  const title = toText(ticketDraft.value.title)
+  const refundAmount = parseOptionalRefundAmount(ticketDraft.value.refundAmount)
+
+  return {
+    ticket: {
+      ticketNo,
+      title,
+      priority: ticketDraft.value.priority,
+      source: ticketDraft.value.source,
+      ...(refundAmount.valid && typeof refundAmount.value === 'number' ? { refundAmount: refundAmount.value } : {}),
     },
   }
 }
@@ -1000,6 +1139,43 @@ async function submitServiceRecord() {
   }
 }
 
+async function submitTicket() {
+  if (!canSubmitTicket.value || ticketCreating.value || ticketsLoading.value) {
+    return
+  }
+
+  ticketCreating.value = true
+  ticketSubmitError.value = ''
+  ticketSubmitSuccess.value = ''
+
+  const parsedRefundAmount = parseOptionalRefundAmount(ticketDraft.value.refundAmount)
+  if (!parsedRefundAmount.valid) {
+    ticketSubmitError.value = 'Refund amount must be a valid number'
+    ticketCreating.value = false
+    return
+  }
+
+  try {
+    const payload = await readEnvelope<CreateTicketResponse>('/api/after-sales/tickets', {
+      method: 'POST',
+      body: JSON.stringify(buildTicketPayload()),
+    })
+    const nextTicket = payload?.ticket ? normalizeTicket(payload.ticket, null) : null
+
+    if (nextTicket) {
+      tickets.value = [nextTicket, ...tickets.value.filter((item) => item.id !== nextTicket.id)]
+      ticketsError.value = ''
+    }
+
+    resetTicketDraft()
+    ticketSubmitSuccess.value = nextTicket ? `Created ticket ${nextTicket.data.ticketNo}` : 'Created ticket'
+  } catch (err: unknown) {
+    ticketSubmitError.value = err instanceof Error ? err.message : 'Failed to create after-sales ticket'
+  } finally {
+    ticketCreating.value = false
+  }
+}
+
 async function applyServiceRecordFilters() {
   if (serviceRecordCreating.value) {
     return
@@ -1057,6 +1233,8 @@ async function loadView() {
   loading.value = true
   error.value = ''
   ticketsError.value = ''
+  ticketSubmitError.value = ''
+  ticketSubmitSuccess.value = ''
   serviceRecordsError.value = ''
   serviceRecordSubmitError.value = ''
   serviceRecordSubmitSuccess.value = ''
@@ -1456,6 +1634,7 @@ onMounted(() => {
   gap: 14px;
 }
 
+.after-sales-view__ticket-form,
 .after-sales-view__service-record-form,
 .after-sales-view__ticket-filters,
 .after-sales-view__service-record-filters {
@@ -1613,6 +1792,7 @@ code {
 
   .after-sales-view__section-header,
   .after-sales-view__config-form,
+  .after-sales-view__ticket-form,
   .after-sales-view__service-record-form,
   .after-sales-view__ticket-filters,
   .after-sales-view__service-record-filters {
