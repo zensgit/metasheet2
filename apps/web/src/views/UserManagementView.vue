@@ -9,6 +9,7 @@
       <div class="user-admin__actions">
         <router-link class="user-admin__link" to="/admin/roles">角色管理</router-link>
         <router-link class="user-admin__link" to="/admin/permissions">权限管理</router-link>
+        <router-link class="user-admin__link" to="/admin/directory">目录同步</router-link>
         <router-link class="user-admin__link" to="/admin/audit">管理审计</router-link>
         <input
           v-model.trim="search"

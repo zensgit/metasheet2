@@ -134,6 +134,12 @@ export const appRoutes: RouteRecordRaw[] = [
     meta: { title: 'User Management', requiresAuth: true }
   },
   {
+    path: '/admin/directory',
+    name: AppRouteNames.DIRECTORY_MANAGEMENT,
+    component: () => import('../views/DirectoryManagementView.vue'),
+    meta: { title: 'Directory Management', titleZh: '目录同步', requiresAuth: true }
+  },
+  {
     path: '/admin/roles',
     name: 'role-management',
     component: () => import('../views/RoleManagementView.vue'),
