@@ -5,6 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 COMPOSE_FILE="${COMPOSE_FILE:-${ROOT_DIR}/docker-compose.app.yml}"
 ENV_FILE="${ENV_FILE:-${ROOT_DIR}/docker/app.env}"
 NGINX_CONF="${NGINX_CONF:-${ROOT_DIR}/docker/nginx.conf}"
+ENV_VALIDATOR="${ROOT_DIR}/scripts/ops/validate-env-file.sh"
 
 function die() {
   echo "[attendance-preflight] ERROR: $*" >&2
@@ -67,6 +68,9 @@ info "Nginx:     ${NGINX_CONF}"
 [[ -f "$COMPOSE_FILE" ]] || die "Compose file not found: ${COMPOSE_FILE}"
 [[ -f "$ENV_FILE" ]] || die "Missing env file: ${ENV_FILE} (copy docker/app.env.example -> docker/app.env and fill secrets)"
 [[ -f "$NGINX_CONF" ]] || die "Missing nginx config: ${NGINX_CONF} (docker-compose.app.yml mounts it into the web container)"
+[[ -x "$ENV_VALIDATOR" ]] || die "Missing env validator: ${ENV_VALIDATOR}"
+
+"$ENV_VALIDATOR" "$ENV_FILE"
 
 # Prevent accidental DB exposure in production compose.
 if grep -qE '"5432:5432"|5432:5432' "$COMPOSE_FILE"; then
