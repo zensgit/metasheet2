@@ -473,6 +473,66 @@ export interface MultitableAPI {
   records: MultitableRecordsAPI
 }
 
+export interface AutomationRuleDraft {
+  id: string
+  trigger: {
+    event: string
+    filter?: Array<Record<string, unknown>>
+  }
+  conditions?: Array<Record<string, unknown>>
+  actions: Array<Record<string, unknown>>
+  enabled: boolean
+}
+
+export interface RolePermissionMatrixRole {
+  slug: string
+  label: string
+  permissions: string[]
+}
+
+export interface RoleFieldPolicy {
+  objectId: string
+  field: string
+  roleSlug: string
+  visibility: 'visible' | 'hidden'
+  editability: 'editable' | 'readonly'
+}
+
+export interface RolePermissionMatrix {
+  roles: RolePermissionMatrixRole[]
+  fieldPolicies?: RoleFieldPolicy[]
+}
+
+export interface PluginAutomationRegistryService {
+  upsertRules(input: {
+    pluginId: string
+    appId: string
+    tenantId: string
+    projectId: string
+    templateId: string
+    rules: AutomationRuleDraft[]
+  }): Promise<AutomationRuleDraft[]>
+  listRules(input: {
+    pluginId: string
+    appId: string
+    tenantId: string
+    projectId: string
+  }): Promise<AutomationRuleDraft[]>
+}
+
+export interface PluginRbacProvisioningService {
+  applyRoleMatrix(input: {
+    pluginId: string
+    appId: string
+    tenantId: string
+    projectId: string
+    matrix: RolePermissionMatrix
+  }): Promise<{
+    rolesApplied: string[]
+    fieldPoliciesApplied: number
+  }>
+}
+
 export interface FormulaAPI {
   calculate(functionName: string, ...args: unknown[]): unknown
   calculateFormula(expression: string, contextResolver?: (key: string) => unknown): unknown
@@ -792,6 +852,8 @@ export interface PluginServices {
   storage: StorageService      // Storage service instance
   scheduler: SchedulerService    // Scheduler service instance
   notification: NotificationService // Notification service instance
+  automationRegistry: PluginAutomationRegistryService
+  rbacProvisioning: PluginRbacProvisioningService
   websocket: WebSocketService    // WebSocket service instance
   security: SecurityService     // Security service instance
   validation: ValidationService   // Validation service instance

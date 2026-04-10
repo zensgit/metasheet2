@@ -200,6 +200,19 @@ export class PluginServiceFactory {
         storage: await this.createStorageService(),
         scheduler: await this.createSchedulerService(),
         notification: await this.createNotificationService(),
+        automationRegistry: {
+          async upsertRules() {
+            throw new Error('automationRegistry is only available in runtime plugin contexts')
+          },
+          async listRules() {
+            return []
+          },
+        },
+        rbacProvisioning: {
+          async applyRoleMatrix() {
+            throw new Error('rbacProvisioning is only available in runtime plugin contexts')
+          },
+        },
         websocket: await this.createWebSocketService(),
         security: await this.createSecurityService(),
         validation: await this.createValidationService()
