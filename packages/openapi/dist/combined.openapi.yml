@@ -7598,6 +7598,15 @@ paths:
                         type: array
                         items:
                           type: object
+                      partialErrors:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            userId:
+                              type: string
+                            message:
+                              type: string
                       batchId:
                         type: string
                         nullable: true

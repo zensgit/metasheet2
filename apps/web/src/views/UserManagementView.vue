@@ -187,6 +187,114 @@
           </div>
 
           <div class="user-admin__section">
+            <div class="user-admin__section-head">
+              <div>
+                <h3>成员准入</h3>
+                <p class="user-admin__hint">平台管理员负责账号启用和钉钉登录开通，业务系统角色决定成员能使用哪些插件系统。</p>
+              </div>
+              <button class="user-admin__button user-admin__button--secondary" type="button" :disabled="loadingAdmission || !access" @click="void loadMemberAdmission(access.user.id)">
+                {{ loadingAdmission ? '刷新中...' : '刷新准入状态' }}
+              </button>
+            </div>
+            <div v-if="memberAdmission" class="user-admin__chips">
+              <span class="user-admin__chip" :class="{ 'user-admin__chip--success': memberAdmission.accountEnabled, 'user-admin__chip--danger': !memberAdmission.accountEnabled }">
+                {{ memberAdmission.accountEnabled ? '平台账号已启用' : '平台账号未启用' }}
+              </span>
+              <span class="user-admin__chip" :class="{ 'user-admin__chip--success': memberAdmission.dingtalk.grant.enabled, 'user-admin__chip--danger': !memberAdmission.dingtalk.grant.enabled }">
+                {{ memberAdmission.dingtalk.grant.enabled ? '已开通钉钉登录' : '未开通钉钉登录' }}
+              </span>
+              <span class="user-admin__chip" :class="{ 'user-admin__chip--success': memberAdmission.directoryMemberships.length > 0 }">
+                {{ memberAdmission.directoryMemberships.length > 0 ? `目录已链接 ${memberAdmission.directoryMemberships.length}` : '未关联目录成员' }}
+              </span>
+              <span class="user-admin__chip" :class="{ 'user-admin__chip--success': memberAdmission.businessRoleIds.length > 0 }">
+                {{ memberAdmission.businessRoleIds.length > 0 ? `业务系统角色 ${memberAdmission.businessRoleIds.length}` : '未分配业务系统角色' }}
+              </span>
+            </div>
+            <div v-if="memberAdmission?.directoryMemberships.length" class="user-admin__role-list">
+              <article v-for="membership in memberAdmission.directoryMemberships" :key="membership.directoryAccountId" class="user-admin__role-card">
+                <strong>{{ membership.integrationName }} · {{ membership.name }}</strong>
+                <span>{{ membership.provider }} · {{ membership.linkStatus }} · {{ membership.matchStrategy || 'manual' }}</span>
+                <small>{{ membership.email || membership.mobile || membership.externalUserId }}</small>
+                <p v-if="membership.departmentPaths.length">部门：{{ membership.departmentPaths.join(' / ') }}</p>
+                <p>目录账号：{{ membership.accountEnabled ? '启用' : '停用' }} · 同步于 {{ formatDate(membership.accountUpdatedAt) }}</p>
+              </article>
+            </div>
+            <div v-if="memberAdmission?.businessRoleIds.length" class="user-admin__chips">
+              <span v-for="roleId in memberAdmission.businessRoleIds" :key="roleId" class="user-admin__chip">
+                {{ roleId }}
+              </span>
+            </div>
+          </div>
+
+          <div class="user-admin__section">
+            <div class="user-admin__section-head">
+              <div>
+                <h3>管理员能力</h3>
+                <p class="user-admin__hint">考勤管理员和平台管理员分开控制，互不隐含。平台管理员变更后建议重新登录一次。</p>
+              </div>
+            </div>
+            <div class="user-admin__chips">
+              <span class="user-admin__chip" :class="{ 'user-admin__chip--success': hasPlatformAdminAccess, 'user-admin__chip--danger': !hasPlatformAdminAccess }">
+                {{ hasPlatformAdminAccess ? '已开通平台管理员' : '未开通平台管理员' }}
+              </span>
+              <span class="user-admin__chip" :class="{ 'user-admin__chip--success': hasAttendanceAdminAccess, 'user-admin__chip--danger': !hasAttendanceAdminAccess }">
+                {{ hasAttendanceAdminAccess ? '已开通考勤管理员' : '未开通考勤管理员' }}
+              </span>
+            </div>
+            <div class="user-admin__role-actions">
+              <button class="user-admin__button" type="button" :disabled="busy || hasPlatformAdminAccess" @click="void updateNamedRole('admin', true)">
+                提升为平台管理员
+              </button>
+              <button class="user-admin__button user-admin__button--secondary" type="button" :disabled="busy || !hasPlatformAdminAccess" @click="void updateNamedRole('admin', false)">
+                取消平台管理员
+              </button>
+              <button class="user-admin__button" type="button" :disabled="busy || hasAttendanceAdminAccess" @click="void updateNamedRole('attendance_admin', true)">
+                开通考勤管理员
+              </button>
+              <button class="user-admin__button user-admin__button--secondary" type="button" :disabled="busy || !hasAttendanceAdminAccess" @click="void updateNamedRole('attendance_admin', false)">
+                关闭考勤管理员
+              </button>
+            </div>
+          </div>
+
+          <div class="user-admin__section">
+            <div class="user-admin__section-head">
+              <div>
+                <h3>钉钉扫码登录</h3>
+                <p class="user-admin__hint">生产建议开启严格白名单，只允许已存在且已开通的用户扫码登录。</p>
+              </div>
+              <button class="user-admin__button user-admin__button--secondary" type="button" :disabled="loadingDingTalk || !access" @click="void loadDingTalkAccess(access.user.id)">
+                {{ loadingDingTalk ? '刷新中...' : '刷新钉钉状态' }}
+              </button>
+            </div>
+            <div v-if="dingtalkAccess" class="user-admin__chips">
+              <span class="user-admin__chip" :class="{ 'user-admin__chip--permission': dingtalkAccess.requireGrant }">
+                {{ dingtalkAccess.requireGrant ? '严格白名单模式' : '宽松模式' }}
+              </span>
+              <span class="user-admin__chip" :class="{ 'user-admin__chip--success': dingtalkAccess.grant.enabled, 'user-admin__chip--danger': !dingtalkAccess.grant.enabled }">
+                {{ dingtalkAccess.grant.enabled ? '已开通钉钉扫码' : '未开通钉钉扫码' }}
+              </span>
+              <span class="user-admin__chip" :class="{ 'user-admin__chip--success': dingtalkAccess.identity.exists }">
+                {{ dingtalkAccess.identity.exists ? '已绑定钉钉身份' : '未绑定钉钉身份' }}
+              </span>
+            </div>
+            <p v-if="dingtalkAccess?.identity.lastLoginAt" class="user-admin__hint">
+              最近钉钉登录：{{ formatDate(dingtalkAccess.identity.lastLoginAt) }}
+            </p>
+            <p v-if="dingtalkAccess?.grant.updatedAt" class="user-admin__hint">
+              开通状态更新时间：{{ formatDate(dingtalkAccess.grant.updatedAt) }}
+            </p>
+            <div class="user-admin__role-actions">
+              <button class="user-admin__button" type="button" :disabled="busy || loadingDingTalk || dingtalkAccess?.grant.enabled === true" @click="void updateDingTalkGrant(true)">
+                开通钉钉扫码
+              </button>
+              <button class="user-admin__button user-admin__button--secondary" type="button" :disabled="busy || loadingDingTalk || dingtalkAccess?.grant.enabled !== true" @click="void updateDingTalkGrant(false)">
+                关闭钉钉扫码
+              </button>
+            </div>
+          </div>
+
+          <div class="user-admin__section">
             <h3>账号操作</h3>
             <div class="user-admin__role-actions">
               <button class="user-admin__button" type="button" :disabled="busy" @click="void toggleUserStatus()">
@@ -313,6 +421,57 @@ type UserAccess = {
   isAdmin: boolean
 }
 
+type DingTalkAccess = {
+  provider: 'dingtalk'
+  requireGrant: boolean
+  autoLinkEmail: boolean
+  autoProvision: boolean
+  grant: {
+    exists: boolean
+    enabled: boolean
+    grantedBy: string | null
+    createdAt: string | null
+    updatedAt: string | null
+  }
+  identity: {
+    exists: boolean
+    corpId: string | null
+    lastLoginAt: string | null
+    createdAt: string | null
+    updatedAt: string | null
+  }
+}
+
+type MemberDirectoryMembership = {
+  integrationId: string
+  integrationName: string
+  provider: string
+  corpId: string | null
+  directoryAccountId: string
+  externalUserId: string
+  name: string
+  email: string | null
+  mobile: string | null
+  accountEnabled: boolean
+  accountUpdatedAt: string
+  linkStatus: string
+  matchStrategy: string | null
+  reviewedBy: string | null
+  reviewNote: string | null
+  linkUpdatedAt: string
+  departmentPaths: string[]
+}
+
+type MemberAdmission = {
+  userId: string
+  accountEnabled: boolean
+  platformAdminEnabled: boolean
+  attendanceAdminEnabled: boolean
+  businessRoleIds: string[]
+  directoryMemberships: MemberDirectoryMembership[]
+  dingtalk: DingTalkAccess
+}
+
 type CreateUserForm = {
   name: string
   email: string
@@ -385,6 +544,8 @@ const adminAllowed = hasAdminAccess()
 const loading = ref(false)
 const loadingInvites = ref(false)
 const loadingSessions = ref(false)
+const loadingDingTalk = ref(false)
+const loadingAdmission = ref(false)
 const busy = ref(false)
 const status = ref('')
 const statusTone = ref<'info' | 'error'>('info')
@@ -403,6 +564,8 @@ const createdOnboarding = ref<OnboardingPacket | null>(null)
 const inviteRecords = ref<InviteLedgerRecord[]>([])
 const userSessions = ref<UserSessionRecord[]>([])
 const access = ref<UserAccess | null>(null)
+const dingtalkAccess = ref<DingTalkAccess | null>(null)
+const memberAdmission = ref<MemberAdmission | null>(null)
 const createForm = ref<CreateUserForm>({
   name: '',
   email: '',
@@ -413,6 +576,14 @@ const createForm = ref<CreateUserForm>({
   isActive: true,
 })
 const selectedPreset = computed(() => accessPresets.value.find((preset) => preset.id === createForm.value.presetId) || null)
+const hasPlatformAdminAccess = computed(() => {
+  if (!access.value) return false
+  return access.value.roles.includes('admin') || access.value.user.role === 'admin' || access.value.user.is_admin
+})
+const hasAttendanceAdminAccess = computed(() => {
+  if (!access.value) return false
+  return access.value.roles.includes('attendance_admin') || access.value.permissions.includes('attendance:admin')
+})
 const filteredAccessPresets = computed(() => {
   return accessPresets.value.filter((preset) => !presetModeFilter.value || preset.productMode === presetModeFilter.value)
 })
@@ -589,6 +760,8 @@ async function selectUser(userId: string): Promise<void> {
   manualPassword.value = ''
   temporaryPassword.value = ''
   createdTemporaryPassword.value = ''
+  dingtalkAccess.value = null
+  memberAdmission.value = null
   try {
     const response = await apiFetch(`/api/admin/users/${encodeURIComponent(userId)}/access`)
     const payload = await readJson(response)
@@ -597,9 +770,83 @@ async function selectUser(userId: string): Promise<void> {
     }
 
     access.value = payload.data as UserAccess
-    await Promise.all([loadInviteRecords(userId), loadUserSessions(userId)])
+    await Promise.all([loadInviteRecords(userId), loadUserSessions(userId), loadDingTalkAccess(userId), loadMemberAdmission(userId)])
   } catch (error) {
     setStatus(error instanceof Error ? error.message : '加载用户权限失败', 'error')
+  }
+}
+
+async function loadDingTalkAccess(userId?: string): Promise<void> {
+  if (!userId) {
+    dingtalkAccess.value = null
+    return
+  }
+
+  loadingDingTalk.value = true
+  try {
+    const response = await apiFetch(`/api/admin/users/${encodeURIComponent(userId)}/dingtalk-access`)
+    const payload = await readJson(response)
+    if (!response.ok || payload.ok !== true) {
+      throw new Error(String((payload.error as Record<string, unknown> | undefined)?.message || '加载钉钉登录状态失败'))
+    }
+
+    dingtalkAccess.value = payload.data as DingTalkAccess
+  } catch (error) {
+    dingtalkAccess.value = null
+    setStatus(error instanceof Error ? error.message : '加载钉钉登录状态失败', 'error')
+  } finally {
+    loadingDingTalk.value = false
+  }
+}
+
+async function loadMemberAdmission(userId?: string): Promise<void> {
+  if (!userId) {
+    memberAdmission.value = null
+    return
+  }
+
+  loadingAdmission.value = true
+  try {
+    const response = await apiFetch(`/api/admin/users/${encodeURIComponent(userId)}/member-admission`)
+    const payload = await readJson(response)
+    if (!response.ok || payload.ok !== true) {
+      throw new Error(String((payload.error as Record<string, unknown> | undefined)?.message || '加载成员准入失败'))
+    }
+
+    memberAdmission.value = payload.data as MemberAdmission
+  } catch (error) {
+    memberAdmission.value = null
+    setStatus(error instanceof Error ? error.message : '加载成员准入失败', 'error')
+  } finally {
+    loadingAdmission.value = false
+  }
+}
+
+async function updateDingTalkGrant(enabled: boolean): Promise<void> {
+  if (!access.value) return
+  busy.value = true
+  try {
+    const response = await apiFetch(`/api/admin/users/${encodeURIComponent(access.value.user.id)}/dingtalk-grant`, {
+      method: 'PATCH',
+      body: JSON.stringify({ enabled }),
+    })
+    const payload = await readJson(response)
+    if (!response.ok || payload.ok !== true) {
+      throw new Error(String((payload.error as Record<string, unknown> | undefined)?.message || '更新钉钉登录状态失败'))
+    }
+
+    dingtalkAccess.value = payload.data as DingTalkAccess
+    if (memberAdmission.value) {
+      memberAdmission.value = {
+        ...memberAdmission.value,
+        dingtalk: dingtalkAccess.value,
+      }
+    }
+    setStatus(enabled ? '已开通该用户的钉钉扫码登录' : '已关闭该用户的钉钉扫码登录')
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : '更新钉钉登录状态失败', 'error')
+  } finally {
+    busy.value = false
   }
 }
 
@@ -643,7 +890,7 @@ async function createUser(): Promise<void> {
       isActive: true,
     }
     presetModeFilter.value = ''
-    await Promise.all([loadUsers(), loadInviteRecords(access.value?.user.id)])
+    await Promise.all([loadUsers(), loadInviteRecords(access.value?.user.id), loadMemberAdmission(access.value?.user.id)])
     setStatus('用户已创建')
   } catch (error) {
     setStatus(error instanceof Error ? error.message : '创建用户失败', 'error')
@@ -733,6 +980,7 @@ async function toggleUserStatus(): Promise<void> {
 
     access.value = payload.data as UserAccess
     await loadUsers()
+    await loadMemberAdmission(access.value.user.id)
     setStatus(access.value.user.is_active ? '账号已启用' : '账号已停用')
   } catch (error) {
     setStatus(error instanceof Error ? error.message : '更新用户状态失败', 'error')
@@ -824,9 +1072,35 @@ async function updateRole(action: 'assign' | 'unassign'): Promise<void> {
 
     access.value = payload.data as UserAccess
     await loadUsers()
+    await loadMemberAdmission(selectedUserId.value)
     setStatus(action === 'assign' ? '角色已分配' : '角色已撤销')
   } catch (error) {
     setStatus(error instanceof Error ? error.message : '保存角色失败', 'error')
+  } finally {
+    busy.value = false
+  }
+}
+
+async function updateNamedRole(roleId: string, enabled: boolean): Promise<void> {
+  if (!selectedUserId.value) return
+  busy.value = true
+  try {
+    const response = await apiFetch(`/api/admin/users/${encodeURIComponent(selectedUserId.value)}/roles/${enabled ? 'assign' : 'unassign'}`, {
+      method: 'POST',
+      body: JSON.stringify({ roleId }),
+    })
+    const payload = await readJson(response)
+    if (!response.ok || payload.ok !== true) {
+      throw new Error(String((payload.error as Record<string, unknown> | undefined)?.message || '保存管理员角色失败'))
+    }
+
+    access.value = payload.data as UserAccess
+    await loadUsers()
+    await loadMemberAdmission(selectedUserId.value)
+    const label = roleId === 'admin' ? '平台管理员' : roleId === 'attendance_admin' ? '考勤管理员' : roleId
+    setStatus(enabled ? `已开通${label}` : `已关闭${label}`)
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : '保存管理员角色失败', 'error')
   } finally {
     busy.value = false
   }
@@ -1074,6 +1348,16 @@ onMounted(async () => {
 .user-admin__chip--permission {
   background: #ecfeff;
   color: #155e75;
+}
+
+.user-admin__chip--success {
+  background: #dcfce7;
+  color: #166534;
+}
+
+.user-admin__chip--danger {
+  background: #fef2f2;
+  color: #b91c1c;
 }
 
 .user-admin__role-card {
