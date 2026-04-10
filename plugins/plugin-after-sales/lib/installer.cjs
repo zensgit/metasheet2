@@ -255,6 +255,12 @@ function normalizeRoleMatrix(blueprint) {
   }
 }
 
+function resolvePluginId(context) {
+  return context && context.metadata && typeof context.metadata.name === 'string' && context.metadata.name.trim()
+    ? context.metadata.name.trim()
+    : 'plugin-after-sales'
+}
+
 function shouldProvisionObjectInMultitable(obj) {
   if (!obj || typeof obj !== 'object') return false
   if (obj.backing === 'multitable') return true
@@ -487,7 +493,7 @@ async function runInstall(input) {
         throw new Error('automationRegistry service unavailable on plugin context')
       }
       await automationRegistry.upsertRules({
-        pluginId: context.metadata && context.metadata.name ? context.metadata.name : blueprint.appId,
+        pluginId: resolvePluginId(context),
         appId: blueprint.appId,
         tenantId,
         projectId,
@@ -506,7 +512,7 @@ async function runInstall(input) {
         throw new Error('rbacProvisioning service unavailable on plugin context')
       }
       await rbacProvisioning.applyRoleMatrix({
-        pluginId: context.metadata && context.metadata.name ? context.metadata.name : blueprint.appId,
+        pluginId: resolvePluginId(context),
         appId: blueprint.appId,
         tenantId,
         projectId,

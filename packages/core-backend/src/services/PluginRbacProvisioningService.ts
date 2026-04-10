@@ -65,6 +65,15 @@ function buildPermissionDescription(permissionCode: string, pluginId: string): s
   return `Provisioned by ${pluginId}: ${permissionCode}`
 }
 
+function buildPermissionName(permissionCode: string): string {
+  return permissionCode
+    .split(':')
+    .flatMap((part) => part.split(/[_-]+/))
+    .filter((part) => part.length > 0)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(' ')
+}
+
 export async function applyRoleMatrix(
   query: RbacProvisioningQueryFn,
   input: ApplyRoleMatrixInput,
@@ -82,10 +91,14 @@ export async function applyRoleMatrix(
   const permissionCodes = Array.from(new Set(roles.flatMap((role) => role.permissions)))
   for (const permissionCode of permissionCodes) {
     await query(
-      `INSERT INTO permissions (code, description)
-       VALUES ($1, $2)
+      `INSERT INTO permissions (code, name, description)
+       VALUES ($1, $2, $3)
        ON CONFLICT (code) DO NOTHING`,
-      [permissionCode, buildPermissionDescription(permissionCode, pluginId)],
+      [
+        permissionCode,
+        buildPermissionName(permissionCode),
+        buildPermissionDescription(permissionCode, pluginId),
+      ],
     )
   }
 

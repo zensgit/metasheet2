@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest'
 import { applyRoleMatrix, type RbacProvisioningQueryFn } from '../../src/services/PluginRbacProvisioningService'
 
 function createQuery(): RbacProvisioningQueryFn {
-  const permissions = new Map<string, string>()
+  const permissions = new Map<string, { name: string; description: string }>()
   const roles = new Map<string, string>()
   const rolePermissions = new Set<string>()
   const fieldPolicies = new Map<string, { visibility: string; editability: string }>()
@@ -12,9 +12,9 @@ function createQuery(): RbacProvisioningQueryFn {
     const normalized = sql.replace(/\s+/g, ' ').trim()
 
     if (normalized.startsWith('INSERT INTO permissions')) {
-      const [code, description] = params as [string, string]
+      const [code, name, description] = params as [string, string, string]
       if (!permissions.has(code)) {
-        permissions.set(code, description)
+        permissions.set(code, { name, description })
       }
       return { rows: [] }
     }
@@ -105,5 +105,58 @@ describe('PluginRbacProvisioningService', () => {
       rolesApplied: ['finance', 'supervisor'],
       fieldPoliciesApplied: 1,
     })
+  })
+
+  it('writes permission names compatible with the real permissions table schema', async () => {
+    const recordedPermissions = new Map<string, { name: string; description: string }>()
+    const query: RbacProvisioningQueryFn = async (sql, params = []) => {
+      const normalized = sql.replace(/\s+/g, ' ').trim()
+
+      if (normalized.startsWith('INSERT INTO permissions')) {
+        const [code, name, description] = params as [string, string, string]
+        recordedPermissions.set(code, { name, description })
+        return { rows: [] }
+      }
+      if (normalized.startsWith('INSERT INTO roles')) return { rows: [] }
+      if (normalized.startsWith('INSERT INTO role_permissions')) return { rows: [] }
+      if (normalized.startsWith('INSERT INTO plugin_field_policy_registry')) return { rows: [] }
+      throw new Error(`Unexpected SQL in RBAC provisioning test: ${normalized}`)
+    }
+
+    await applyRoleMatrix(query, {
+      tenantId: 'tenant_42',
+      pluginId: 'plugin-after-sales',
+      appId: 'after-sales',
+      projectId: 'tenant_42:after-sales',
+      matrix: {
+        roles: [
+          {
+            slug: 'finance',
+            label: 'Finance',
+            permissions: ['after_sales:approve', 'after_sales:admin'],
+          },
+        ],
+        fieldPolicies: [],
+      },
+    })
+
+    expect(recordedPermissions).toEqual(
+      new Map([
+        [
+          'after_sales:approve',
+          {
+            name: 'After Sales Approve',
+            description: 'Provisioned by plugin-after-sales: after_sales:approve',
+          },
+        ],
+        [
+          'after_sales:admin',
+          {
+            name: 'After Sales Admin',
+            description: 'Provisioned by plugin-after-sales: after_sales:admin',
+          },
+        ],
+      ]),
+    )
   })
 })

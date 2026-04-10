@@ -574,6 +574,42 @@ describe('plugin-after-sales installer: runInstall enable mode', () => {
     )
   })
 
+  it('falls back to plugin-after-sales when metadata.name is missing', async () => {
+    const upsertRules = vi.fn(async () => [{ id: 'ticket-triage', enabled: true }])
+    const applyRoleMatrix = vi.fn(async () => ({
+      rolesApplied: ['finance'],
+      fieldPoliciesApplied: 1,
+    }))
+
+    await installer.runInstall(
+      buildRunInput(
+        {
+          mode: 'enable',
+          blueprint: buildAdapterBackedBlueprint(),
+          context: {
+            api: { database: db },
+            services: {
+              automationRegistry: { upsertRules },
+              rbacProvisioning: { applyRoleMatrix },
+            },
+          },
+        },
+        db,
+      ),
+    )
+
+    expect(upsertRules).toHaveBeenCalledWith(
+      expect.objectContaining({
+        pluginId: 'plugin-after-sales',
+      }),
+    )
+    expect(applyRoleMatrix).toHaveBeenCalledWith(
+      expect.objectContaining({
+        pluginId: 'plugin-after-sales',
+      }),
+    )
+  })
+
   it('persists displayName and config to the ledger row', async () => {
     await installer.runInstall(
       buildRunInput(
