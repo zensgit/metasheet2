@@ -2087,21 +2087,21 @@ describe('plugin-after-sales routes', () => {
       ok: true,
       data: {
         projectId: 'tenant_42:after-sales',
-        followUp: {
-          id: 'rec_follow_up_001',
-          version: 4,
-          data: {
-            ticketNo: 'TK-2001',
-            customerName: 'Charlie Logistics',
-            dueAt: '2026-04-12T09:30:00Z',
-            followUpType: 'message',
-            ownerName: null,
-            status: 'done',
-            summary: null,
+          followUp: {
+            id: 'rec_follow_up_001',
+            version: 4,
+            data: {
+              ticketNo: 'TK-2001',
+              customerName: 'Charlie Logistics',
+              dueAt: '2026-04-12T09:30:00Z',
+              followUpType: 'message',
+              ownerName: null,
+              status: 'done',
+              summary: null,
+            },
           },
         },
-      },
-    })
+      })
   })
 
   it('returns 409 when follow-ups are updated from a failed install state', async () => {
