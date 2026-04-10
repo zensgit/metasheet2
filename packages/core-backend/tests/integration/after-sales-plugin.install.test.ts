@@ -81,6 +81,7 @@ function stableMetaId(prefix: string, ...parts: string[]): string {
 
 const TENANT_ID = 'default'
 const APP_ID = 'after-sales'
+const PLUGIN_ID = 'plugin-after-sales'
 const PROJECT_ID = `${TENANT_ID}:${APP_ID}`
 const SUPERVISOR_USER_ID = 'after-sales-service-record-supervisor-it'
 const SUPERVISOR_EMAIL = 'after-sales-supervisor-it@example.com'
@@ -93,6 +94,17 @@ const VIEW_IDS = [
   { objectId: 'partItem', viewId: 'partItem-grid' },
   { objectId: 'followUp', viewId: 'followUp-grid' },
 ]
+const RAW_AFTER_SALES_ROLE_IDS = [
+  'admin',
+  'customer_service',
+  'finance',
+  'supervisor',
+  'technician',
+  'viewer',
+]
+const PROVISIONED_AFTER_SALES_ROLE_IDS = RAW_AFTER_SALES_ROLE_IDS.map((roleId) =>
+  `${PLUGIN_ID}:${APP_ID}:${roleId}`,
+)
 
 const SHEET_IDS = OBJECT_IDS.map((objectId) => stableMetaId('sheet', PROJECT_ID, objectId))
 const META_VIEW_IDS = VIEW_IDS.map(({ objectId, viewId }) =>
@@ -251,9 +263,27 @@ describe('after-sales plugin install integration', () => {
     await pool.query('DELETE FROM meta_fields WHERE sheet_id = ANY($1::text[])', [SHEET_IDS])
     await pool.query('DELETE FROM meta_sheets WHERE id = ANY($1::text[])', [SHEET_IDS])
     await pool.query(
+      `DELETE FROM plugin_field_policy_registry
+       WHERE tenant_id = $1 AND plugin_id = $2 AND app_id = $3 AND project_id = $4`,
+      [TENANT_ID, PLUGIN_ID, APP_ID, PROJECT_ID],
+    )
+    await pool.query(
+      `DELETE FROM plugin_automation_rule_registry
+       WHERE tenant_id = $1 AND plugin_id = $2 AND app_id = $3 AND project_id = $4`,
+      [TENANT_ID, PLUGIN_ID, APP_ID, PROJECT_ID],
+    )
+    await pool.query(
       'DELETE FROM plugin_after_sales_template_installs WHERE tenant_id = $1 AND app_id = $2',
       [TENANT_ID, APP_ID],
     )
+    await pool.query(
+      `DELETE FROM role_permissions
+       WHERE permission_code LIKE 'after_sales:%'
+         AND role_id = ANY($1::text[])`,
+      [[...RAW_AFTER_SALES_ROLE_IDS, ...PROVISIONED_AFTER_SALES_ROLE_IDS]],
+    )
+    await pool.query('DELETE FROM user_roles WHERE role_id = ANY($1::text[])', [PROVISIONED_AFTER_SALES_ROLE_IDS])
+    await pool.query('DELETE FROM roles WHERE id = ANY($1::text[])', [PROVISIONED_AFTER_SALES_ROLE_IDS])
     await pool.query('DELETE FROM user_roles WHERE user_id = $1', [SUPERVISOR_USER_ID])
     await pool.query('DELETE FROM users WHERE id = $1', [SUPERVISOR_USER_ID])
   }
@@ -280,7 +310,9 @@ describe('after-sales plugin install integration', () => {
          UNION ALL SELECT to_regclass('public.meta_records') AS name
          UNION ALL SELECT to_regclass('public.approval_instances') AS name
          UNION ALL SELECT to_regclass('public.approval_records') AS name
-         UNION ALL SELECT to_regclass('public.approval_assignments') AS name`,
+         UNION ALL SELECT to_regclass('public.approval_assignments') AS name
+         UNION ALL SELECT to_regclass('public.plugin_automation_rule_registry') AS name
+         UNION ALL SELECT to_regclass('public.plugin_field_policy_registry') AS name`,
       )
       if (tables.rows.some((row) => !row.name)) return
       schemaReady = true
@@ -347,6 +379,10 @@ describe('after-sales plugin install integration', () => {
   it('installs the after-sales template into real multitable tables and exposes current state', async () => {
     if (!baseUrl || !pool) return
 
+    const adminRoleBeforeRes = await pool.query<{ name: string }>(
+      `SELECT name FROM roles WHERE id = 'admin'`,
+    )
+
     const tokenRes = await requestJson(
       `${baseUrl}/api/auth/dev-token?userId=after-sales-install-it&roles=admin&perms=*:*`,
     )
@@ -409,6 +445,27 @@ describe('after-sales plugin install integration', () => {
       displayName: 'After Sales Integration',
     })
 
+    const fieldPoliciesRes = await requestJson(`${baseUrl}/api/after-sales/field-policies`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    })
+    expect(fieldPoliciesRes.status).toBe(200)
+    expect(fieldPoliciesRes.body).toEqual({
+      ok: true,
+      data: {
+        projectId: PROJECT_ID,
+        fields: {
+          serviceTicket: {
+            refundAmount: {
+              visibility: 'visible',
+              editability: 'editable',
+            },
+          },
+        },
+      },
+    })
+
     const ledgerRes = await pool.query<{
       tenant_id: string
       app_id: string
@@ -429,6 +486,142 @@ describe('after-sales plugin install integration', () => {
         status: 'installed',
         display_name: 'After Sales Integration',
       },
+    ])
+
+    const automationRegistryRes = await pool.query<{
+      rule_id: string
+      enabled: boolean
+    }>(
+      `SELECT rule_id, enabled
+       FROM plugin_automation_rule_registry
+       WHERE tenant_id = $1
+         AND plugin_id = $2
+         AND app_id = $3
+         AND project_id = $4
+       ORDER BY rule_id ASC`,
+      [TENANT_ID, PLUGIN_ID, APP_ID, PROJECT_ID],
+    )
+    expect(automationRegistryRes.rows).toEqual([
+      { rule_id: 'refund-approval', enabled: true },
+      { rule_id: 'service-record-notify', enabled: true },
+      { rule_id: 'sla-watcher', enabled: true },
+      { rule_id: 'ticket-triage', enabled: true },
+    ])
+
+    const fieldPolicyRes = await pool.query<{
+      object_id: string
+      field_name: string
+      role_slug: string
+      visibility: string
+      editability: string
+    }>(
+      `SELECT object_id, field_name, role_slug, visibility, editability
+       FROM plugin_field_policy_registry
+       WHERE tenant_id = $1
+         AND plugin_id = $2
+         AND app_id = $3
+         AND project_id = $4
+       ORDER BY role_slug ASC`,
+      [TENANT_ID, PLUGIN_ID, APP_ID, PROJECT_ID],
+    )
+    expect(fieldPolicyRes.rows).toEqual([
+      {
+        object_id: 'serviceTicket',
+        field_name: 'refundAmount',
+        role_slug: 'admin',
+        visibility: 'visible',
+        editability: 'editable',
+      },
+      {
+        object_id: 'serviceTicket',
+        field_name: 'refundAmount',
+        role_slug: 'customer_service',
+        visibility: 'hidden',
+        editability: 'readonly',
+      },
+      {
+        object_id: 'serviceTicket',
+        field_name: 'refundAmount',
+        role_slug: 'finance',
+        visibility: 'visible',
+        editability: 'editable',
+      },
+      {
+        object_id: 'serviceTicket',
+        field_name: 'refundAmount',
+        role_slug: 'supervisor',
+        visibility: 'visible',
+        editability: 'readonly',
+      },
+      {
+        object_id: 'serviceTicket',
+        field_name: 'refundAmount',
+        role_slug: 'technician',
+        visibility: 'hidden',
+        editability: 'readonly',
+      },
+      {
+        object_id: 'serviceTicket',
+        field_name: 'refundAmount',
+        role_slug: 'viewer',
+        visibility: 'hidden',
+        editability: 'readonly',
+      },
+    ])
+
+    const adminRoleAfterRes = await pool.query<{ name: string }>(
+      `SELECT name FROM roles WHERE id = 'admin'`,
+    )
+    expect(adminRoleAfterRes.rows).toEqual(adminRoleBeforeRes.rows)
+
+    const rawRolePermissionRes = await pool.query<{ role_id: string; permission_code: string }>(
+      `SELECT role_id, permission_code
+       FROM role_permissions
+       WHERE permission_code LIKE 'after_sales:%'
+         AND role_id = ANY($1::text[])
+       ORDER BY role_id ASC, permission_code ASC`,
+      [RAW_AFTER_SALES_ROLE_IDS],
+    )
+    expect(rawRolePermissionRes.rows).toEqual([])
+
+    const provisionedRoleRes = await pool.query<{ id: string; name: string }>(
+      `SELECT id, name
+       FROM roles
+       WHERE id = ANY($1::text[])
+       ORDER BY id ASC`,
+      [PROVISIONED_AFTER_SALES_ROLE_IDS],
+    )
+    expect(provisionedRoleRes.rows).toEqual([
+      { id: 'plugin-after-sales:after-sales:admin', name: '管理员' },
+      { id: 'plugin-after-sales:after-sales:customer_service', name: '客服' },
+      { id: 'plugin-after-sales:after-sales:finance', name: '财务' },
+      { id: 'plugin-after-sales:after-sales:supervisor', name: '主管' },
+      { id: 'plugin-after-sales:after-sales:technician', name: '技师' },
+      { id: 'plugin-after-sales:after-sales:viewer', name: '只读' },
+    ])
+
+    const provisionedRolePermissionRes = await pool.query<{ role_id: string; permission_code: string }>(
+      `SELECT role_id, permission_code
+       FROM role_permissions
+       WHERE role_id = ANY($1::text[])
+       ORDER BY role_id ASC, permission_code ASC`,
+      [PROVISIONED_AFTER_SALES_ROLE_IDS],
+    )
+    expect(provisionedRolePermissionRes.rows).toEqual([
+      { role_id: 'plugin-after-sales:after-sales:admin', permission_code: 'after_sales:admin' },
+      { role_id: 'plugin-after-sales:after-sales:admin', permission_code: 'after_sales:approve' },
+      { role_id: 'plugin-after-sales:after-sales:admin', permission_code: 'after_sales:read' },
+      { role_id: 'plugin-after-sales:after-sales:admin', permission_code: 'after_sales:write' },
+      { role_id: 'plugin-after-sales:after-sales:customer_service', permission_code: 'after_sales:read' },
+      { role_id: 'plugin-after-sales:after-sales:customer_service', permission_code: 'after_sales:write' },
+      { role_id: 'plugin-after-sales:after-sales:finance', permission_code: 'after_sales:approve' },
+      { role_id: 'plugin-after-sales:after-sales:finance', permission_code: 'after_sales:read' },
+      { role_id: 'plugin-after-sales:after-sales:supervisor', permission_code: 'after_sales:approve' },
+      { role_id: 'plugin-after-sales:after-sales:supervisor', permission_code: 'after_sales:read' },
+      { role_id: 'plugin-after-sales:after-sales:supervisor', permission_code: 'after_sales:write' },
+      { role_id: 'plugin-after-sales:after-sales:technician', permission_code: 'after_sales:read' },
+      { role_id: 'plugin-after-sales:after-sales:technician', permission_code: 'after_sales:write' },
+      { role_id: 'plugin-after-sales:after-sales:viewer', permission_code: 'after_sales:read' },
     ])
 
     for (const objectDef of EXPECTED_OBJECTS) {

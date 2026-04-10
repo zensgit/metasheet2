@@ -17,6 +17,10 @@ const {
   registerAfterSalesWorkflowHandlers,
 } = require('./lib/workflow-adapter.cjs')
 const {
+  resolveFieldPoliciesForUser,
+  resolveFieldPolicyRoleSlugs,
+} = require('./lib/field-policies.cjs')
+const {
   buildCreateTicketCommand,
   buildCustomerCommand,
   buildFollowUpCommand,
@@ -42,6 +46,7 @@ const {
   fromPhysicalRecord,
 } = require('./lib/multitable-helpers.cjs')
 
+const AFTER_SALES_PLUGIN_ID = 'plugin-after-sales'
 const SERVICE_TICKET_FIELDS = ['ticketNo', 'title', 'source', 'priority', 'status', 'slaDueAt', 'refundAmount', 'refundStatus']
 const SERVICE_RECORD_FIELDS = ['ticketNo', 'visitType', 'scheduledAt', 'completedAt', 'technicianName', 'workSummary', 'result']
 const INSTALLED_ASSET_FIELDS = ['assetCode', 'serialNo', 'model', 'location', 'installedAt', 'warrantyUntil', 'status']
@@ -679,6 +684,60 @@ module.exports = {
           res.status(500).json({
             ok: false,
             error: { code: 'INTERNAL_ERROR', message: 'Install failed' },
+          })
+        }
+      },
+    )
+
+    context.api.http.addRoute(
+      'GET',
+      '/api/after-sales/field-policies',
+      async (req, res) => {
+        try {
+          const userId = getUserId(req)
+          if (!userId) {
+            sendUnauthorized(res)
+            return
+          }
+          if (!hasAfterSalesReadAccess(req)) {
+            res.status(403).json({
+              ok: false,
+              error: { code: 'FORBIDDEN', message: 'After-sales read access required' },
+            })
+            return
+          }
+
+          const tenantId = getTenantId(req, context.logger)
+          const current = await installer.loadCurrent(context, tenantId, appManifest.id)
+          if (!current || !isOperationalAfterSalesStatus(current.status)) {
+            res.status(409).json({
+              ok: false,
+              error: {
+                code: 'AFTER_SALES_NOT_INSTALLED',
+                message: 'After-sales must be installed before reading field policies',
+              },
+            })
+            return
+          }
+
+          const projectId = current.projectId || installer.getProjectId(tenantId, appManifest.id)
+          const policies = await resolveFieldPoliciesForUser(context.api.database, {
+            tenantId,
+            pluginId: context.metadata && context.metadata.name ? context.metadata.name : 'plugin-after-sales',
+            appId: appManifest.id,
+            projectId,
+            roleSlugs: resolveFieldPolicyRoleSlugs(req && req.user),
+          })
+
+          res.json({
+            ok: true,
+            data: policies,
+          })
+        } catch (err) {
+          logger.error && logger.error('after-sales field policy lookup failed', err)
+          res.status(500).json({
+            ok: false,
+            error: { code: 'INTERNAL_ERROR', message: 'Failed to load after-sales field policies' },
           })
         }
       },

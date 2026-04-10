@@ -12,6 +12,13 @@ const {
 
 const DEFAULT_APP_ID = 'after-sales'
 
+const AUTOMATION_RULE_IDS = Object.freeze({
+  ticketTriage: 'ticket-triage',
+  slaWatcher: 'sla-watcher',
+  refundApproval: 'refund-approval',
+  serviceRecordNotify: 'service-record-notify',
+})
+
 function clone(value) {
   return JSON.parse(JSON.stringify(value))
 }
@@ -159,6 +166,38 @@ async function resolveRuntimeInstallContext(context, payload, options = {}) {
   }
 }
 
+function resolvePluginId(context) {
+  return context && context.metadata && typeof context.metadata.name === 'string' && context.metadata.name.trim()
+    ? context.metadata.name.trim()
+    : 'plugin-after-sales'
+}
+
+async function isAutomationEnabled(context, runtimeContext, ruleId, options = {}) {
+  const automationRegistry = options.automationRegistry || context?.services?.automationRegistry
+  if (!automationRegistry || typeof automationRegistry.listRules !== 'function') {
+    return true
+  }
+
+  try {
+    const rules = await automationRegistry.listRules({
+      pluginId: resolvePluginId(context),
+      appId: options.appId || DEFAULT_APP_ID,
+      tenantId: runtimeContext.tenantId,
+      projectId: runtimeContext.projectId,
+    })
+    const match = Array.isArray(rules)
+      ? rules.find((rule) => rule && typeof rule.id === 'string' && rule.id === ruleId)
+      : null
+    return match ? match.enabled !== false : true
+  } catch (error) {
+    context.logger?.warn?.('after-sales automation registry lookup failed; falling back to default rule state', {
+      ruleId,
+      error: error instanceof Error ? error.message : String(error),
+    })
+    return true
+  }
+}
+
 function buildApprovalPendingPayload(payload, submitResult, runtimeContext) {
   const ticket = getNamespacedObject(payload, 'ticket')
   const approval = submitResult && submitResult.approval ? submitResult.approval : null
@@ -188,6 +227,13 @@ function createWorkflowRuntime(context, options = {}) {
   return {
     async onTicketCreated(payload = {}) {
       const runtimeContext = await resolveRuntimeInstallContext(context, payload, options)
+      if (!(await isAutomationEnabled(context, runtimeContext, AUTOMATION_RULE_IDS.ticketTriage, options))) {
+        return {
+          workflowId: AUTOMATION_RULE_IDS.ticketTriage,
+          skipped: true,
+          reason: 'automation-disabled',
+        }
+      }
       const ticket = getNamespacedObject(payload, 'ticket')
       const selection = resolveRequestedAssignee(ticket)
       const assignedToValue = serializeRecipientValue(selection.assignedTo)
@@ -240,6 +286,14 @@ function createWorkflowRuntime(context, options = {}) {
     },
 
     async onServiceRecorded(payload = {}) {
+      const runtimeContext = await resolveRuntimeInstallContext(context, payload, options)
+      if (!(await isAutomationEnabled(context, runtimeContext, AUTOMATION_RULE_IDS.serviceRecordNotify, options))) {
+        return {
+          workflowId: AUTOMATION_RULE_IDS.serviceRecordNotify,
+          skipped: true,
+          reason: 'automation-disabled',
+        }
+      }
       const roleRecipients = await resolveRoleRecipients(context, ['supervisor'])
       return sendNotification(context, {
         topic: 'after-sales.service.recorded',
@@ -253,9 +307,16 @@ function createWorkflowRuntime(context, options = {}) {
 
     async onTicketRefundRequested(payload = {}) {
       const runtimeContext = await resolveRuntimeInstallContext(context, payload, options)
+      if (!(await isAutomationEnabled(context, runtimeContext, AUTOMATION_RULE_IDS.refundApproval, options))) {
+        return {
+          workflowId: AUTOMATION_RULE_IDS.refundApproval,
+          skipped: true,
+          reason: 'automation-disabled',
+        }
+      }
       if (!runtimeContext.config.enableRefundApproval) {
         return {
-          workflowId: 'refund-approval',
+          workflowId: AUTOMATION_RULE_IDS.refundApproval,
           skipped: true,
           reason: 'refund-approval-disabled',
         }
@@ -280,7 +341,7 @@ function createWorkflowRuntime(context, options = {}) {
       }
 
       return {
-        workflowId: 'refund-approval',
+        workflowId: AUTOMATION_RULE_IDS.refundApproval,
         approvalResult,
       }
     },
@@ -295,6 +356,14 @@ function createWorkflowRuntime(context, options = {}) {
     },
 
     async onTicketOverdue(payload = {}) {
+      const runtimeContext = await resolveRuntimeInstallContext(context, payload, options)
+      if (!(await isAutomationEnabled(context, runtimeContext, AUTOMATION_RULE_IDS.slaWatcher, options))) {
+        return {
+          workflowId: AUTOMATION_RULE_IDS.slaWatcher,
+          skipped: true,
+          reason: 'automation-disabled',
+        }
+      }
       const roleRecipients = await resolveRoleRecipients(context, ['supervisor'])
       return sendNotification(context, {
         topic: 'after-sales.ticket.overdue',

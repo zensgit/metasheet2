@@ -99,6 +99,15 @@ import { univerMetaRouter } from './routes/univer-meta'
 import { SnapshotService } from './services/SnapshotService'
 import { notificationService } from './services/NotificationService'
 import { AfterSalesApprovalBridgeService } from './services/AfterSalesApprovalBridgeService'
+import {
+  listAutomationRules,
+  upsertAutomationRules,
+  type AutomationRegistryQueryFn,
+} from './services/PluginAutomationRegistryService'
+import {
+  applyRoleMatrix,
+  type RbacProvisioningQueryFn,
+} from './services/PluginRbacProvisioningService'
 import type { UnifiedApprovalDTO } from './services/approval-bridge-types'
 import { cacheRegistry } from '../core/cache/CacheRegistry'
 import { loadObservabilityConfig } from './config/observability'
@@ -1121,6 +1130,56 @@ export class MetaSheetServer {
     }
     const pluginApis = this.pluginApis
     const eventBus = this.eventBus
+    const automationRegistry = {
+      upsertRules: async (input: import('./types/plugin').PluginAutomationRegistryService extends { upsertRules: infer T } ? T extends (input: infer I) => Promise<unknown> ? I : never : never) => {
+        return poolManager.get().transaction(async ({ query }) => {
+          const txQuery: AutomationRegistryQueryFn = async (sql, params) => {
+            const result = await query(sql, params)
+            return {
+              rows: Array.isArray((result as { rows?: unknown[] }).rows)
+                ? (result as { rows: unknown[] }).rows
+                : [],
+              rowCount: typeof (result as { rowCount?: number }).rowCount === 'number'
+                ? (result as { rowCount: number }).rowCount
+                : undefined,
+            }
+          }
+          return upsertAutomationRules(txQuery, input)
+        })
+      },
+      listRules: async (input: import('./types/plugin').PluginAutomationRegistryService extends { listRules: infer T } ? T extends (input: infer I) => Promise<unknown> ? I : never : never) => {
+        const txQuery: AutomationRegistryQueryFn = async (sql, params) => {
+          const result = await poolManager.get().query(sql, params)
+          return {
+            rows: Array.isArray((result as { rows?: unknown[] }).rows)
+              ? (result as { rows: unknown[] }).rows
+              : [],
+            rowCount: typeof (result as { rowCount?: number }).rowCount === 'number'
+              ? (result as { rowCount: number }).rowCount
+              : undefined,
+          }
+        }
+        return listAutomationRules(txQuery, input)
+      },
+    }
+    const rbacProvisioning = {
+      applyRoleMatrix: async (input: import('./types/plugin').PluginRbacProvisioningService extends { applyRoleMatrix: infer T } ? T extends (input: infer I) => Promise<unknown> ? I : never : never) => {
+        return poolManager.get().transaction(async ({ query }) => {
+          const txQuery: RbacProvisioningQueryFn = async (sql, params) => {
+            const result = await query(sql, params)
+            return {
+              rows: Array.isArray((result as { rows?: unknown[] }).rows)
+                ? (result as { rows: unknown[] }).rows
+                : [],
+              rowCount: typeof (result as { rowCount?: number }).rowCount === 'number'
+                ? (result as { rowCount: number }).rowCount
+                : undefined,
+            }
+          }
+          return applyRoleMatrix(txQuery, input)
+        })
+      },
+    }
     const communication: PluginCommunication = {
       call: async <R = unknown>(plugin: string, method: string, ...args: unknown[]): Promise<R> => {
         const api = pluginApis.get(plugin)
@@ -1154,6 +1213,8 @@ export class MetaSheetServer {
       core: pluginCoreApi,
       services: {
         notification: notificationService,
+        automationRegistry,
+        rbacProvisioning,
       } as unknown as import('./types/plugin').PluginServices,
       storage,
       config: {},

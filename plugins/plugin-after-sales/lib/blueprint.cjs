@@ -60,6 +60,84 @@ const DEFAULT_AUTOMATIONS = Object.freeze([
   },
 ])
 
+const DEFAULT_ROLES = Object.freeze([
+  {
+    slug: 'customer_service',
+    label: '客服',
+    permissions: ['after_sales:read', 'after_sales:write'],
+  },
+  {
+    slug: 'technician',
+    label: '技师',
+    permissions: ['after_sales:read', 'after_sales:write'],
+  },
+  {
+    slug: 'supervisor',
+    label: '主管',
+    permissions: ['after_sales:read', 'after_sales:write', 'after_sales:approve'],
+  },
+  {
+    slug: 'finance',
+    label: '财务',
+    permissions: ['after_sales:read', 'after_sales:approve'],
+  },
+  {
+    slug: 'admin',
+    label: '管理员',
+    permissions: ['after_sales:read', 'after_sales:write', 'after_sales:approve', 'after_sales:admin'],
+  },
+  {
+    slug: 'viewer',
+    label: '只读',
+    permissions: ['after_sales:read'],
+  },
+])
+
+const DEFAULT_FIELD_POLICIES = Object.freeze([
+  {
+    objectId: 'serviceTicket',
+    field: 'refundAmount',
+    roleSlug: 'finance',
+    visibility: 'visible',
+    editability: 'editable',
+  },
+  {
+    objectId: 'serviceTicket',
+    field: 'refundAmount',
+    roleSlug: 'admin',
+    visibility: 'visible',
+    editability: 'editable',
+  },
+  {
+    objectId: 'serviceTicket',
+    field: 'refundAmount',
+    roleSlug: 'supervisor',
+    visibility: 'visible',
+    editability: 'readonly',
+  },
+  {
+    objectId: 'serviceTicket',
+    field: 'refundAmount',
+    roleSlug: 'customer_service',
+    visibility: 'hidden',
+    editability: 'readonly',
+  },
+  {
+    objectId: 'serviceTicket',
+    field: 'refundAmount',
+    roleSlug: 'technician',
+    visibility: 'hidden',
+    editability: 'readonly',
+  },
+  {
+    objectId: 'serviceTicket',
+    field: 'refundAmount',
+    roleSlug: 'viewer',
+    visibility: 'hidden',
+    editability: 'readonly',
+  },
+])
+
 function clone(value) {
   return JSON.parse(JSON.stringify(value))
 }
@@ -431,7 +509,8 @@ function buildDefaultBlueprint(manifest) {
       },
     ],
     automations: clone(DEFAULT_AUTOMATIONS),
-    roles: [],
+    roles: clone(DEFAULT_ROLES),
+    fieldPolicies: clone(DEFAULT_FIELD_POLICIES),
     notifications: getNotificationTopicSpecs(),
     configDefaults: clone(DEFAULT_TEMPLATE_CONFIG),
   }
@@ -439,6 +518,8 @@ function buildDefaultBlueprint(manifest) {
 
 module.exports = {
   DEFAULT_AUTOMATIONS,
+  DEFAULT_FIELD_POLICIES,
+  DEFAULT_ROLES,
   DEFAULT_TEMPLATE_CONFIG,
   buildDefaultBlueprint,
 }
