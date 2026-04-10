@@ -674,6 +674,7 @@ components:
           type: array
           items:
             type: string
+            format: uuid
         isActive:
           type: boolean
     AttendanceRotationAssignment:
@@ -6284,12 +6285,15 @@ paths:
                   type: string
                 shiftSequence:
                   type: array
+                  description: Ordered shift IDs.
                   items:
                     type: string
+                    format: uuid
                 shiftIds:
                   type: array
                   items:
                     type: string
+                    format: uuid
                   description: Compatibility alias for shiftSequence.
                 isActive:
                   type: boolean
@@ -6299,11 +6303,13 @@ paths:
                   type: array
                   items:
                     type: string
+                    format: uuid
                   description: Legacy snake_case alias for shiftSequence.
                 shift_ids:
                   type: array
                   items:
                     type: string
+                    format: uuid
                   description: Compatibility alias for shiftSequence.
                 is_active:
                   type: boolean
@@ -6428,8 +6434,16 @@ paths:
                   type: string
                 shiftSequence:
                   type: array
+                  description: Ordered shift IDs.
                   items:
                     type: string
+                    format: uuid
+                shift_sequence:
+                  type: array
+                  items:
+                    type: string
+                    format: uuid
+                  description: Legacy snake_case alias for shiftSequence.
                 isActive:
                   type: boolean
                 orgId:
@@ -7598,6 +7612,15 @@ paths:
                         type: array
                         items:
                           type: object
+                      partialErrors:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            userId:
+                              type: string
+                            message:
+                              type: string
                       batchId:
                         type: string
                         nullable: true

@@ -1,0 +1,69 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+COMPOSE_FILE="${COMPOSE_FILE:-${ROOT_DIR}/docker-compose.app.staging.yml}"
+ENV_FILE="${ENV_FILE:-${ROOT_DIR}/docker/app.staging.env}"
+SKIP_PULL="${SKIP_PULL:-0}"
+ENV_VALIDATOR="${ROOT_DIR}/scripts/ops/validate-env-file.sh"
+
+function info() {
+  echo "[deploy-dingtalk-staging] $*" >&2
+}
+
+function die() {
+  echo "[deploy-dingtalk-staging] ERROR: $*" >&2
+  exit 1
+}
+
+function resolve_compose_cmd() {
+  if docker compose version >/dev/null 2>&1; then
+    echo "docker compose"
+    return 0
+  fi
+  return 1
+}
+
+function read_env_value() {
+  local key="$1"
+  local file="$2"
+  awk -F= -v key="${key}" '$1 == key { sub(/^[^=]*=/, ""); gsub(/\r$/, ""); print; exit }' "${file}"
+}
+
+COMPOSE_CMD="$(resolve_compose_cmd || true)"
+[[ -n "${COMPOSE_CMD}" ]] || die "docker compose v2 is required"
+[[ -f "${COMPOSE_FILE}" ]] || die "missing compose file: ${COMPOSE_FILE}"
+[[ -f "${ENV_FILE}" ]] || die "missing env file: ${ENV_FILE}"
+[[ -x "${ENV_VALIDATOR}" ]] || die "missing env validator: ${ENV_VALIDATOR}"
+
+ENV_IMAGE_OWNER="$(read_env_value IMAGE_OWNER "${ENV_FILE}" || true)"
+ENV_IMAGE_TAG="$(read_env_value IMAGE_TAG "${ENV_FILE}" || true)"
+DEPLOY_IMAGE_OWNER="${DEPLOY_IMAGE_OWNER:-${ENV_IMAGE_OWNER:-zensgit}}"
+DEPLOY_IMAGE_TAG="${DEPLOY_IMAGE_TAG:-${ENV_IMAGE_TAG:-latest}}"
+
+info "Compose: ${COMPOSE_FILE}"
+info "Env:     ${ENV_FILE}"
+info "Image owner: ${DEPLOY_IMAGE_OWNER}"
+info "Image tag:   ${DEPLOY_IMAGE_TAG}"
+info "Skip pull:   ${SKIP_PULL}"
+
+"${ENV_VALIDATOR}" "${ENV_FILE}"
+
+eval "APP_ENV_FILE=\"${ENV_FILE}\" IMAGE_OWNER=\"${DEPLOY_IMAGE_OWNER}\" IMAGE_TAG=\"${DEPLOY_IMAGE_TAG}\" ${COMPOSE_CMD} --env-file \"${ENV_FILE}\" -f \"${COMPOSE_FILE}\" config >/dev/null"
+eval "APP_ENV_FILE=\"${ENV_FILE}\" IMAGE_OWNER=\"${DEPLOY_IMAGE_OWNER}\" IMAGE_TAG=\"${DEPLOY_IMAGE_TAG}\" ${COMPOSE_CMD} --env-file \"${ENV_FILE}\" -f \"${COMPOSE_FILE}\" up -d postgres redis"
+if [[ "${SKIP_PULL}" != "1" ]]; then
+  eval "APP_ENV_FILE=\"${ENV_FILE}\" IMAGE_OWNER=\"${DEPLOY_IMAGE_OWNER}\" IMAGE_TAG=\"${DEPLOY_IMAGE_TAG}\" ${COMPOSE_CMD} --env-file \"${ENV_FILE}\" -f \"${COMPOSE_FILE}\" pull backend web"
+fi
+eval "APP_ENV_FILE=\"${ENV_FILE}\" IMAGE_OWNER=\"${DEPLOY_IMAGE_OWNER}\" IMAGE_TAG=\"${DEPLOY_IMAGE_TAG}\" ${COMPOSE_CMD} --env-file \"${ENV_FILE}\" -f \"${COMPOSE_FILE}\" up -d backend web"
+
+info "Waiting for backend health endpoint"
+for _ in $(seq 1 30); do
+  if curl -fsS http://127.0.0.1:18900/health >/dev/null 2>&1; then
+    eval "APP_ENV_FILE=\"${ENV_FILE}\" ${COMPOSE_CMD} --env-file \"${ENV_FILE}\" -f \"${COMPOSE_FILE}\" ps"
+    info "Staging deploy complete"
+    exit 0
+  fi
+  sleep 2
+done
+
+die "backend health endpoint did not become ready on 127.0.0.1:18900"
