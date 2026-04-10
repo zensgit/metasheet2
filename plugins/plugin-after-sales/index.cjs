@@ -77,7 +77,12 @@ async function fromPhysicalCustomerData(provisioning, projectId, physicalData) {
 }
 
 async function fromPhysicalFollowUpData(provisioning, projectId, physicalData) {
-  return fromPhysicalRecord(provisioning, projectId, 'followUp', FOLLOW_UP_FIELDS, physicalData)
+  const logicalData = await fromPhysicalRecord(provisioning, projectId, 'followUp', FOLLOW_UP_FIELDS, physicalData)
+  return {
+    ...logicalData,
+    ownerName: logicalData.ownerName ?? null,
+    summary: logicalData.summary ?? null,
+  }
 }
 
 async function toPhysicalFollowUpData(provisioning, projectId, logicalData) {

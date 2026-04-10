@@ -811,9 +811,9 @@ describe('AfterSalesView follow-ups panel', () => {
               customerName: 'After Edit Follow-up',
               dueAt: '2026-04-20T10:30',
               followUpType: 'message',
-              ownerName: '',
+              ownerName: null,
               status: 'done',
-              summary: '',
+              summary: null,
             },
           },
         })
