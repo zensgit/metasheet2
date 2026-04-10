@@ -880,6 +880,39 @@ function normalizeUuidString(value) {
     : null
 }
 
+async function validateRotationShiftSequenceIds(db, orgId, shiftSequence) {
+  const targetOrg = orgId || DEFAULT_ORG_ID
+  const normalizedSequence = normalizeStringArray(shiftSequence)
+  if (normalizedSequence.length === 0) {
+    return { shiftSequence: [], invalidReferences: [] }
+  }
+
+  const normalizedIds = normalizedSequence.map((shiftRef) => normalizeUuidString(shiftRef))
+  const malformedReferences = normalizedSequence.filter((_, index) => !normalizedIds[index])
+  if (malformedReferences.length > 0) {
+    return { shiftSequence: normalizedSequence, invalidReferences: malformedReferences }
+  }
+
+  const rows = await db.query(
+    'SELECT id FROM attendance_shifts WHERE org_id = $1 AND id = ANY($2::uuid[])',
+    [targetOrg, normalizedIds]
+  )
+  const existingIds = new Set(
+    rows
+      .map((row) => normalizeUuidString(row?.id))
+      .filter(Boolean)
+  )
+  const missingReferences = normalizedSequence.filter((shiftId) => !existingIds.has(shiftId))
+  if (missingReferences.length > 0) {
+    return { shiftSequence: normalizedSequence, invalidReferences: missingReferences }
+  }
+
+  return {
+    shiftSequence: normalizedIds,
+    invalidReferences: [],
+  }
+}
+
 function respondInvalidUuid(res, fieldName = 'id') {
   res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: `${fieldName} must be a UUID` } })
 }
@@ -5016,39 +5049,6 @@ async function loadShiftReferenceLookup(db, orgId, options = {}) {
     )
   }
   return buildShiftReferenceLookup(rows)
-}
-
-async function normalizeRotationShiftSequence(db, orgId, shiftSequence, options = {}) {
-  const lookup = options.lookup ?? await loadShiftReferenceLookup(db, orgId)
-  const preserveUnknown = options.preserveUnknown === true
-  const nextSequence = []
-  const missingReferences = []
-  const ambiguousReferences = []
-  let changed = false
-
-  for (const shiftRef of normalizeStringArray(shiftSequence)) {
-    const resolution = resolveShiftReference(shiftRef, lookup)
-    if (resolution.status === 'resolved' && resolution.shift?.id) {
-      nextSequence.push(resolution.shift.id)
-      if (resolution.shift.id !== resolution.normalizedRef) changed = true
-      continue
-    }
-    if (resolution.status === 'ambiguous') {
-      ambiguousReferences.push(resolution.normalizedRef)
-    } else {
-      missingReferences.push(resolution.normalizedRef)
-    }
-    if (preserveUnknown && resolution.normalizedRef) {
-      nextSequence.push(resolution.normalizedRef)
-    }
-  }
-
-  return {
-    shiftSequence: nextSequence,
-    missingReferences,
-    ambiguousReferences,
-    changed,
-  }
 }
 
 async function loadShiftByReference(db, orgId, shiftRef) {
@@ -11961,28 +11961,15 @@ module.exports = {
         const orgId = getOrgId(req)
 
         try {
-          const normalizedSequence = await normalizeRotationShiftSequence(db, orgId, parsed.data.shiftSequence)
+          const normalizedSequence = await validateRotationShiftSequenceIds(db, orgId, parsed.data.shiftSequence)
           if (normalizedSequence.shiftSequence.length === 0) {
             res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Shift sequence required' } })
             return
           }
-          if (normalizedSequence.ambiguousReferences.length > 0) {
+          if (normalizedSequence.invalidReferences.length > 0) {
             res.status(400).json({
               ok: false,
-              error: {
-                code: 'VALIDATION_ERROR',
-                message: `Shift sequence contains ambiguous shift names: ${normalizedSequence.ambiguousReferences.join(', ')}`,
-              },
-            })
-            return
-          }
-          if (normalizedSequence.missingReferences.length > 0) {
-            res.status(400).json({
-              ok: false,
-              error: {
-                code: 'VALIDATION_ERROR',
-                message: `Shift sequence contains unknown shift references: ${normalizedSequence.missingReferences.join(', ')}`,
-              },
+              error: { code: 'VALIDATION_ERROR', message: 'shiftSequence must contain shift IDs' },
             })
             return
           }
@@ -12050,7 +12037,7 @@ module.exports = {
           }
 
           const existing = existingRows[0]
-          const normalizedSequence = await normalizeRotationShiftSequence(
+          const normalizedSequence = await validateRotationShiftSequenceIds(
             db,
             orgId,
             parsed.data.shiftSequence ?? existing.shift_sequence
@@ -12059,23 +12046,10 @@ module.exports = {
             res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Shift sequence required' } })
             return
           }
-          if (normalizedSequence.ambiguousReferences.length > 0) {
+          if (normalizedSequence.invalidReferences.length > 0) {
             res.status(400).json({
               ok: false,
-              error: {
-                code: 'VALIDATION_ERROR',
-                message: `Shift sequence contains ambiguous shift names: ${normalizedSequence.ambiguousReferences.join(', ')}`,
-              },
-            })
-            return
-          }
-          if (normalizedSequence.missingReferences.length > 0) {
-            res.status(400).json({
-              ok: false,
-              error: {
-                code: 'VALIDATION_ERROR',
-                message: `Shift sequence contains unknown shift references: ${normalizedSequence.missingReferences.join(', ')}`,
-              },
+              error: { code: 'VALIDATION_ERROR', message: 'shiftSequence must contain shift IDs' },
             })
             return
           }

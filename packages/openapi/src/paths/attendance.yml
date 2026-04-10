@@ -2387,20 +2387,21 @@ paths:
                 timezone: { type: string }
                 shiftSequence:
                   type: array
-                  items: { type: string }
+                  description: Ordered shift IDs.
+                  items: { type: string, format: uuid }
                 shiftIds:
                   type: array
-                  items: { type: string }
+                  items: { type: string, format: uuid }
                   description: Compatibility alias for shiftSequence.
                 isActive: { type: boolean }
                 orgId: { type: string }
                 shift_sequence:
                   type: array
-                  items: { type: string }
+                  items: { type: string, format: uuid }
                   description: Legacy snake_case alias for shiftSequence.
                 shift_ids:
                   type: array
-                  items: { type: string }
+                  items: { type: string, format: uuid }
                   description: Compatibility alias for shiftSequence.
                 is_active:
                   type: boolean
@@ -2503,7 +2504,12 @@ paths:
                 timezone: { type: string }
                 shiftSequence:
                   type: array
-                  items: { type: string }
+                  description: Ordered shift IDs.
+                  items: { type: string, format: uuid }
+                shift_sequence:
+                  type: array
+                  items: { type: string, format: uuid }
+                  description: Legacy snake_case alias for shiftSequence.
                 isActive: { type: boolean }
                 orgId: { type: string }
       responses:
