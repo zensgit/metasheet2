@@ -174,6 +174,10 @@ import {
   buildWorkbenchAuditQuery,
 } from './plm/plmWorkbenchSceneAudit'
 import {
+  buildPlmDocumentDegradationMessage,
+  type PlmDocumentSourceStatus,
+} from './plm/plmDocumentDegradation'
+import {
   readWorkbenchSceneFocus,
 } from './plm/plmWorkbenchSceneFocus'
 import {
@@ -394,6 +398,9 @@ const documentColumnOptions = [
 const documents = ref<DocumentEntry[]>([])
 const documentsLoading = ref(false)
 const documentsError = ref('')
+const documentsWarning = ref('')
+const documentSourceProductId = ref('')
+const documentSourceItemType = ref('')
 
 const cadFileId = ref('')
 const cadOtherFileId = ref('')
@@ -1415,6 +1422,9 @@ function resetAll() {
   documentSortDir.value = 'desc'
   documents.value = []
   documentsError.value = ''
+  documentsWarning.value = ''
+  documentSourceProductId.value = ''
+  documentSourceItemType.value = ''
   documentFilter.value = ''
   documentColumns.value = { ...defaultDocumentColumns }
   documentTeamViewQuery.value = ''
@@ -1924,12 +1934,21 @@ async function loadDocuments() {
   if (!productId.value) return
   documentsLoading.value = true
   documentsError.value = ''
+  documentsWarning.value = ''
   try {
     const result = await plmService.listDocuments<DocumentEntry>({
       productId: productId.value,
       role: documentRole.value || undefined,
     })
     documents.value = result.items || []
+    const degradation = buildPlmDocumentDegradationMessage(
+      (result.sources ?? []) as PlmDocumentSourceStatus[],
+    )
+    if (degradation.error) {
+      documentsError.value = degradation.error
+    } else if (degradation.warning) {
+      documentsWarning.value = degradation.warning
+    }
   } catch (error: any) {
     handleAuthError(error)
     documentsError.value = error?.message || '加载文档失败'
@@ -2509,6 +2528,43 @@ async function copyDocumentUrl(doc: DocumentEntry, kind: 'preview' | 'download')
     return
   }
   setDeepLinkMessage(`已复制${kind === 'preview' ? '预览' : '下载'}链接。`)
+}
+
+function isAmlRelatedDocument(doc: DocumentEntry): boolean {
+  const documentType = String(doc.document_type || doc.metadata?.document_type || '').toLowerCase()
+  return !getDocumentDownloadUrl(doc) && (documentType === 'document' || documentType === 'related_document')
+}
+
+function resolveDocumentItemId(doc: DocumentEntry): string {
+  return String(doc.id || doc.config_id || doc.metadata?.config_id || '')
+}
+
+function applyProductFromDocument(doc: DocumentEntry) {
+  const documentId = resolveDocumentItemId(doc)
+  if (!documentId) {
+    setDeepLinkMessage('文档缺少对象 ID', true)
+    return
+  }
+  documentSourceProductId.value = productId.value
+  documentSourceItemType.value = itemType.value
+  productId.value = documentId
+  productItemNumber.value = ''
+  itemType.value = 'Document'
+  productError.value = ''
+  setDeepLinkMessage(`已切换到关联文档：${getDocumentName(doc) || documentId}`)
+  void loadProduct()
+}
+
+function returnToDocumentSource() {
+  if (!documentSourceProductId.value) return
+  productId.value = documentSourceProductId.value
+  productItemNumber.value = ''
+  itemType.value = documentSourceItemType.value || DEFAULT_ITEM_TYPE
+  productError.value = ''
+  setDeepLinkMessage(`已返回源产品：${documentSourceProductId.value}`)
+  documentSourceProductId.value = ''
+  documentSourceItemType.value = ''
+  void loadProduct()
 }
 
 function getApprovalTitle(entry: ApprovalEntry): string {
@@ -5746,6 +5802,7 @@ function applyHydratedPanelDataReset(options: {
     documents.value = []
     documentsLoading.value = false
     documentsError.value = ''
+    documentsWarning.value = ''
   }
   if (reset.clearCad) {
     cadProperties.value = null
@@ -7085,6 +7142,9 @@ const documentsPanel = {
   setDocumentTeamViewDefault,
   clearDocumentTeamViewDefault,
   selectCadFile,
+  applyProductFromDocument,
+  returnToDocumentSource,
+  isAmlRelatedDocument,
   copyDocumentId,
   copyDocumentUrl,
   getDocumentName,
@@ -7145,6 +7205,8 @@ const documentsPanel = {
   documents,
   documentsLoading,
   documentsError,
+  documentsWarning,
+  documentSourceProductId,
   documentsFiltered,
   documentsSorted,
   documentFieldCatalog,

@@ -18,6 +18,8 @@ export default defineConfig({
       // Integration tests require pluginDirs option in PluginLoader constructor (not implemented)
       // and require running database/external services
       'tests/integration/**',
+      // Playwright E2E suites run through their own harness, not Vitest.
+      'tests/e2e/**',
     ],
     coverage: {
       provider: 'v8',
