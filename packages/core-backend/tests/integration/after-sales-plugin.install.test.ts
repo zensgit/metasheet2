@@ -2745,6 +2745,137 @@ describe('after-sales plugin install integration', () => {
     })
   })
 
+  it('emits followup.due notifications from real follow-up records', async () => {
+    if (!baseUrl || !pool) return
+
+    const tokenRes = await requestJson(
+      `${baseUrl}/api/auth/dev-token?userId=after-sales-follow-up-due-it&roles=admin&perms=*:*`,
+    )
+    const token = (tokenRes.body as { token?: string } | undefined)?.token
+    expect(token).toBeTruthy()
+
+    const installRes = await requestJson(`${baseUrl}/api/after-sales/projects/install`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        templateId: 'after-sales-default',
+        displayName: 'After Sales Follow-up Due Proof',
+      }),
+    })
+    expect(installRes.status).toBe(200)
+
+    const createTicketRes = await requestJson(`${baseUrl}/api/after-sales/tickets`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        ticket: {
+          ticketNo: 'TK-5006',
+          title: 'Reminder follow-up due',
+          source: 'web',
+          priority: 'normal',
+        },
+      }),
+    })
+    expect(createTicketRes.status).toBe(201)
+
+    const ticketBody = createTicketRes.body as {
+      data?: {
+        ticket?: {
+          id?: string
+          data?: Record<string, unknown>
+        }
+      }
+    }
+    const createdTicketId = ticketBody.data?.ticket?.id
+    expect(createdTicketId).toBeTruthy()
+
+    const createFollowUpRes = await requestJson(`${baseUrl}/api/after-sales/follow-ups`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        followUp: {
+          ticketNo: 'TK-5006',
+          customerName: 'Reminder Customer',
+          dueAt: '2026-04-21T08:30:00Z',
+          followUpType: 'phone',
+          ownerName: 'csr_followup_001',
+          summary: 'Call customer for post-install reminder',
+        },
+      }),
+    })
+    expect(createFollowUpRes.status).toBe(201)
+
+    const followUpBody = createFollowUpRes.body as {
+      data?: {
+        followUp?: {
+          id?: string
+          data?: Record<string, unknown>
+        }
+      }
+    }
+    const createdFollowUpId = followUpBody.data?.followUp?.id
+    expect(createdFollowUpId).toBeTruthy()
+
+    const sendSpy = vi.spyOn(notificationService, 'send')
+
+    const dueRes = await requestJson(`${baseUrl}/api/after-sales/events/followup-due`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        ticket: {
+          id: createdTicketId,
+          ticketNo: 'TK-5006',
+          title: 'Reminder follow-up due',
+        },
+        followUp: {
+          id: createdFollowUpId,
+          ownerName: followUpBody.data?.followUp?.data?.ownerName,
+          dueAt: followUpBody.data?.followUp?.data?.dueAt,
+          followUpType: followUpBody.data?.followUp?.data?.followUpType,
+        },
+      }),
+    })
+
+    expect(dueRes.status).toBe(202)
+    expect((dueRes.body as any).data).toMatchObject({
+      accepted: true,
+      event: 'followup.due',
+      projectId: PROJECT_ID,
+      ticketId: createdTicketId,
+      followUpId: createdFollowUpId,
+    })
+
+    const sentNotifications = await waitFor(
+      async () => sendSpy.mock.calls.map(([notification]) => notification),
+      (notifications) => notifications.length === 1,
+      { timeoutMs: 5000, intervalMs: 100 },
+    )
+    expect(sentNotifications).toEqual([
+      expect.objectContaining({
+        type: 'followup.due',
+        channel: 'feishu',
+        metadata: expect.objectContaining({
+          topic: 'after-sales.followup.due',
+          event: 'followup.due',
+        }),
+        recipients: [{ id: 'csr_followup_001', type: 'user' }],
+      }),
+    ])
+    sendSpy.mockRestore()
+  })
+
   it('creates customers through the real after-sales routes', async () => {
     if (!baseUrl || !pool) return
 
