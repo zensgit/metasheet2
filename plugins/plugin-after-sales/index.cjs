@@ -80,8 +80,8 @@ async function fromPhysicalFollowUpData(provisioning, projectId, physicalData) {
   const logicalData = await fromPhysicalRecord(provisioning, projectId, 'followUp', FOLLOW_UP_FIELDS, physicalData)
   return {
     ...logicalData,
-    ownerName: typeof logicalData.ownerName === 'string' ? logicalData.ownerName : '',
-    summary: typeof logicalData.summary === 'string' ? logicalData.summary : '',
+    ownerName: logicalData.ownerName ?? null,
+    summary: logicalData.summary ?? null,
   }
 }
 

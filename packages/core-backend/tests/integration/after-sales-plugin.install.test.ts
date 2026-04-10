@@ -2526,9 +2526,9 @@ describe('after-sales plugin install integration', () => {
       customerName: 'After Edit Follow-up',
       dueAt: '2026-04-20T10:30:00Z',
       followUpType: 'message',
-      ownerName: '',
+      ownerName: null,
       status: 'done',
-      summary: '',
+      summary: null,
     })
 
     const followUpSheetId = stableMetaId('sheet', PROJECT_ID, 'followUp')
