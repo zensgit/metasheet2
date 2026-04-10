@@ -179,12 +179,13 @@
                 <option value="wechat">WeChat</option>
               </select>
             </label>
-            <label class="after-sales-view__field">
+            <label v-if="!isRefundAmountHidden" class="after-sales-view__field">
               <span>Refund amount</span>
               <input
                 id="after-sales-ticket-refund-amount"
                 v-model="ticketDraft.refundAmount"
                 class="after-sales-view__field-input"
+                :disabled="!isRefundAmountEditable"
                 inputmode="decimal"
                 placeholder="optional"
                 type="text"
@@ -338,7 +339,7 @@
 
               <div class="after-sales-view__ticket-side">
                 <dl class="after-sales-view__ticket-meta">
-                  <div>
+                  <div v-if="!isRefundAmountHidden">
                     <dt>Refund amount</dt>
                     <dd>{{ formatRefundAmount(ticket.data.refundAmount) }}</dd>
                   </div>
@@ -364,12 +365,13 @@
                   </button>
                 </div>
                 <div v-else class="after-sales-view__ticket-actions">
-                  <label class="after-sales-view__field after-sales-view__field--compact">
+                  <label v-if="!isRefundAmountHidden" class="after-sales-view__field after-sales-view__field--compact">
                     <span>Refund request</span>
                     <input
                       :id="`after-sales-ticket-refund-request-${ticket.id}`"
                       :value="ticketRefundDrafts[ticket.id] ?? formatRefundDraft(ticket.data.refundAmount)"
                       class="after-sales-view__field-input"
+                      :disabled="!isRefundAmountEditable"
                       inputmode="decimal"
                       placeholder="88.5"
                       type="text"
@@ -377,8 +379,9 @@
                     />
                   </label>
                   <button
+                    v-if="!isRefundAmountHidden"
                     class="after-sales-view__ghost-btn after-sales-view__ticket-action-btn"
-                    :disabled="ticketCreating || ticketsLoading || ticketDeletingId === ticket.id || ticketRefundSubmittingId === ticket.id || ticketUpdatingId === ticket.id"
+                    :disabled="ticketCreating || ticketsLoading || ticketDeletingId === ticket.id || ticketRefundSubmittingId === ticket.id || ticketUpdatingId === ticket.id || !isRefundAmountEditable"
                     @click="requestTicketRefund(ticket)"
                   >
                     {{ ticketRefundSubmittingId === ticket.id ? 'Requesting...' : 'Request refund' }}
@@ -1866,6 +1869,23 @@ interface ApiEnvelope<T> {
   }
 }
 
+type FieldVisibility = 'hidden' | 'visible'
+type FieldEditability = 'readonly' | 'editable'
+
+interface TicketFieldPolicy {
+  visibility: FieldVisibility
+  editability: FieldEditability
+}
+
+interface TicketFieldPolicyResponse {
+  projectId: string
+  fields: {
+    serviceTicket: {
+      refundAmount: TicketFieldPolicy
+    }
+  }
+}
+
 const TEMPLATE_ID = 'after-sales-default'
 const DEFAULT_CONFIG = {
   enableWarranty: true,
@@ -1876,6 +1896,11 @@ const DEFAULT_CONFIG = {
   urgentSlaHours: 4,
   followUpAfterDays: 7,
   overdueWebhook: '',
+}
+
+const DEFAULT_TICKET_FIELD_POLICY: TicketFieldPolicy = {
+  visibility: 'visible',
+  editability: 'editable',
 }
 
 const loading = ref(true)
@@ -1928,6 +1953,7 @@ const followUps = ref<FollowUpViewModel[]>([])
 const serviceRecords = ref<ServiceRecordViewModel[]>([])
 const configDraft = ref({ ...DEFAULT_CONFIG })
 const baselineConfigDraft = ref({ ...DEFAULT_CONFIG })
+const ticketFieldPolicies = ref<TicketFieldPolicyResponse | null>(null)
 const ticketDraft = ref<TicketDraft>(createTicketDraft())
 const ticketEditingId = ref('')
 const ticketEditDraft = ref<TicketEditDraft>(createTicketEditDraft())
@@ -1971,6 +1997,13 @@ const createdObjectLabels = computed(() => current.value.installResult?.createdO
 const createdViewLabels = computed(() => current.value.installResult?.createdViews ?? [])
 const isInstalled = computed(() => current.value.status === 'installed' || current.value.status === 'partial')
 const isDegraded = computed(() => current.value.status === 'partial' || current.value.status === 'failed')
+const refundAmountPolicy = computed<TicketFieldPolicy>(
+  () => ticketFieldPolicies.value?.fields?.serviceTicket?.refundAmount ?? DEFAULT_TICKET_FIELD_POLICY,
+)
+const isRefundAmountHidden = computed(() => refundAmountPolicy.value.visibility === 'hidden')
+const isRefundAmountEditable = computed(
+  () => refundAmountPolicy.value.visibility === 'visible' && refundAmountPolicy.value.editability === 'editable',
+)
 const hasCustomerProjection = computed(() =>
   Array.isArray(manifest.value?.objects) &&
   manifest.value.objects.some((object) => object && object.id === 'customer'),
@@ -2012,6 +2045,9 @@ const canSubmitServiceRecordEdit = computed(
     toText(serviceRecordEditDraft.value.scheduledAt).length > 0,
 )
 const ticketDraftError = computed(() => {
+  if (!isRefundAmountEditable.value) {
+    return ''
+  }
   const parsedRefundAmount = parseOptionalRefundAmount(ticketDraft.value.refundAmount)
   return parsedRefundAmount.valid ? '' : 'Refund amount must be a valid number'
 })
@@ -2506,7 +2542,11 @@ function buildTicketPayload() {
       title,
       priority: ticketDraft.value.priority,
       source: ticketDraft.value.source,
-      ...(refundAmount.valid && typeof refundAmount.value === 'number' ? { refundAmount: refundAmount.value } : {}),
+      ...(
+        isRefundAmountEditable.value && refundAmount.valid && typeof refundAmount.value === 'number'
+          ? { refundAmount: refundAmount.value }
+          : {}
+      ),
     },
   }
 }
@@ -3384,7 +3424,7 @@ async function submitTicket() {
   ticketSubmitSuccess.value = ''
 
   const parsedRefundAmount = parseOptionalRefundAmount(ticketDraft.value.refundAmount)
-  if (!parsedRefundAmount.valid) {
+  if (isRefundAmountEditable.value && !parsedRefundAmount.valid) {
     ticketSubmitError.value = 'Refund amount must be a valid number'
     ticketCreating.value = false
     return
@@ -3454,6 +3494,9 @@ async function requestTicketRefund(ticket: TicketViewModel) {
   if (!ticket.id || ticketRefundSubmittingId.value || ticketUpdatingId.value || ticketEditingId.value === ticket.id) {
     return
   }
+  if (!isRefundAmountEditable.value || isRefundAmountHidden.value) {
+    return
+  }
 
   const rawRefundAmount = ticketRefundDrafts.value[ticket.id] ?? formatRefundDraft(ticket.data.refundAmount)
   const parsedRefundAmount = parseOptionalRefundAmount(rawRefundAmount)
@@ -3500,6 +3543,19 @@ async function requestTicketRefund(ticket: TicketViewModel) {
     }
   } finally {
     ticketRefundSubmittingId.value = ''
+  }
+}
+
+async function loadFieldPoliciesForCurrentState(state: CurrentResponse): Promise<void> {
+  if (state.status !== 'installed' && state.status !== 'partial') {
+    ticketFieldPolicies.value = null
+    return
+  }
+
+  try {
+    ticketFieldPolicies.value = await readEnvelope<TicketFieldPolicyResponse>('/api/after-sales/field-policies')
+  } catch {
+    ticketFieldPolicies.value = null
   }
 }
 
@@ -3581,6 +3637,7 @@ async function refreshCurrentState() {
     current.value = await readEnvelope<CurrentResponse>('/api/after-sales/projects/current')
     baselineConfigDraft.value = normalizeConfigDraft(current.value.config)
     await Promise.all([
+      loadFieldPoliciesForCurrentState(current.value),
       loadTicketsForCurrentState(current.value),
       loadInstalledAssetsForCurrentState(current.value),
       loadCustomersForCurrentState(current.value),
@@ -3620,6 +3677,7 @@ async function loadView() {
     baselineConfigDraft.value = normalizeConfigDraft(nextCurrent.config)
     configDraft.value = { ...baselineConfigDraft.value }
     await Promise.all([
+      loadFieldPoliciesForCurrentState(nextCurrent),
       loadTicketsForCurrentState(nextCurrent),
       loadInstalledAssetsForCurrentState(nextCurrent),
       loadCustomersForCurrentState(nextCurrent),

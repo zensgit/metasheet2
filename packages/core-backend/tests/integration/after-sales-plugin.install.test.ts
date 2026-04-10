@@ -422,6 +422,27 @@ describe('after-sales plugin install integration', () => {
       displayName: 'After Sales Integration',
     })
 
+    const fieldPoliciesRes = await requestJson(`${baseUrl}/api/after-sales/field-policies`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    })
+    expect(fieldPoliciesRes.status).toBe(200)
+    expect(fieldPoliciesRes.body).toEqual({
+      ok: true,
+      data: {
+        projectId: PROJECT_ID,
+        fields: {
+          serviceTicket: {
+            refundAmount: {
+              visibility: 'visible',
+              editability: 'editable',
+            },
+          },
+        },
+      },
+    })
+
     const ledgerRes = await pool.query<{
       tenant_id: string
       app_id: string

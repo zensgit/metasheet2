@@ -28,6 +28,17 @@ interface FakeRowRaw {
 
 interface FakeDatabase {
   rows: FakeRowRaw[]
+  fieldPolicyRows: Array<{
+    tenant_id: string
+    plugin_id: string
+    app_id: string
+    project_id: string
+    object_id: string
+    field_name: string
+    role_slug: string
+    visibility: string
+    editability: string
+  }>
   failNextQuery?: string
   query: (sql: string, params?: unknown[]) => Promise<FakeRowRaw[]>
 }
@@ -148,6 +159,7 @@ class FakeResponse {
 function createFakeDatabase(): FakeDatabase {
   const db: FakeDatabase = {
     rows: [],
+    fieldPolicyRows: [],
     async query(sql: string, params: unknown[] = []) {
       if (db.failNextQuery) {
         const errorMessage = db.failNextQuery
@@ -167,6 +179,17 @@ function createFakeDatabase(): FakeDatabase {
               } as unknown as FakeRowRaw,
             ]
           : []
+      }
+      if (normalized.startsWith('SELECT role_slug, visibility, editability FROM plugin_field_policy_registry')) {
+        const [tenantId, pluginId, appId, projectId, objectId, fieldName] = params as [string, string, string, string, string, string]
+        return db.fieldPolicyRows.filter((row) =>
+          row.tenant_id === tenantId &&
+          row.plugin_id === pluginId &&
+          row.app_id === appId &&
+          row.project_id === projectId &&
+          row.object_id === objectId &&
+          row.field_name === fieldName,
+        ) as unknown as FakeRowRaw[]
       }
       if (normalized.startsWith('SELECT')) {
         const [tenantId, appId] = params as [string, string]
@@ -792,6 +815,171 @@ describe('plugin-after-sales routes', () => {
       error: {
         code: 'ledger-read-failed',
         message: 'failed to read install ledger: simulated ledger read failure',
+      },
+    })
+  })
+
+  it('returns effective field policies using the most permissive matching role', async () => {
+    const handler = routes.get('GET /api/after-sales/field-policies')
+    const res = new FakeResponse()
+
+    db.rows.push({
+      id: 'fake-uuid-1',
+      tenant_id: 'tenant_42',
+      app_id: 'after-sales',
+      project_id: 'tenant_42:after-sales',
+      template_id: 'after-sales-default',
+      template_version: '0.1.0',
+      mode: 'enable',
+      status: 'installed',
+      created_objects_json: JSON.stringify(['serviceTicket']),
+      created_views_json: JSON.stringify(['ticket-board']),
+      warnings_json: JSON.stringify([]),
+      display_name: 'After-sales',
+      config_json: JSON.stringify({}),
+      last_install_at: new Date(),
+      created_at: new Date(),
+    })
+    db.fieldPolicyRows.push(
+      {
+        tenant_id: 'tenant_42',
+        plugin_id: 'plugin-after-sales',
+        app_id: 'after-sales',
+        project_id: 'tenant_42:after-sales',
+        object_id: 'serviceTicket',
+        field_name: 'refundAmount',
+        role_slug: 'viewer',
+        visibility: 'hidden',
+        editability: 'readonly',
+      },
+      {
+        tenant_id: 'tenant_42',
+        plugin_id: 'plugin-after-sales',
+        app_id: 'after-sales',
+        project_id: 'tenant_42:after-sales',
+        object_id: 'serviceTicket',
+        field_name: 'refundAmount',
+        role_slug: 'supervisor',
+        visibility: 'visible',
+        editability: 'readonly',
+      },
+      {
+        tenant_id: 'tenant_42',
+        plugin_id: 'plugin-after-sales',
+        app_id: 'after-sales',
+        project_id: 'tenant_42:after-sales',
+        object_id: 'serviceTicket',
+        field_name: 'refundAmount',
+        role_slug: 'finance',
+        visibility: 'visible',
+        editability: 'editable',
+      },
+    )
+
+    await handler?.(buildReq({
+      user: {
+        id: 'reader_42',
+        tenantId: 'tenant_42',
+        role: 'viewer',
+        roles: ['viewer', 'finance'],
+        perms: ['after_sales:read'],
+      },
+    }), res)
+
+    expect(res.statusCode).toBe(200)
+    expect(res.body).toEqual({
+      ok: true,
+      data: {
+        projectId: 'tenant_42:after-sales',
+        fields: {
+          serviceTicket: {
+            refundAmount: {
+              visibility: 'visible',
+              editability: 'editable',
+            },
+          },
+        },
+      },
+    })
+  })
+
+  it('falls back to blueprint defaults when no registry rows exist for the project', async () => {
+    const handler = routes.get('GET /api/after-sales/field-policies')
+    const res = new FakeResponse()
+
+    db.rows.push({
+      id: 'fake-uuid-1',
+      tenant_id: 'tenant_42',
+      app_id: 'after-sales',
+      project_id: 'tenant_42:after-sales',
+      template_id: 'after-sales-default',
+      template_version: '0.1.0',
+      mode: 'enable',
+      status: 'installed',
+      created_objects_json: JSON.stringify(['serviceTicket']),
+      created_views_json: JSON.stringify(['ticket-board']),
+      warnings_json: JSON.stringify([]),
+      display_name: 'After-sales',
+      config_json: JSON.stringify({}),
+      last_install_at: new Date(),
+      created_at: new Date(),
+    })
+
+    await handler?.(buildReq({
+      user: {
+        id: 'reader_42',
+        tenantId: 'tenant_42',
+        role: 'supervisor',
+        roles: ['supervisor'],
+        perms: ['after_sales:read'],
+      },
+    }), res)
+
+    expect(res.statusCode).toBe(200)
+    expect(res.body.data.fields.serviceTicket.refundAmount).toEqual({
+      visibility: 'visible',
+      editability: 'readonly',
+    })
+  })
+
+  it('returns 409 for field policies when after-sales is not operational', async () => {
+    const handler = routes.get('GET /api/after-sales/field-policies')
+    const res = new FakeResponse()
+
+    db.rows.push({
+      id: 'fake-uuid-1',
+      tenant_id: 'tenant_42',
+      app_id: 'after-sales',
+      project_id: 'tenant_42:after-sales',
+      template_id: 'after-sales-default',
+      template_version: '0.1.0',
+      mode: 'reinstall',
+      status: 'failed',
+      created_objects_json: JSON.stringify(['serviceTicket']),
+      created_views_json: JSON.stringify(['ticket-board']),
+      warnings_json: JSON.stringify(['adapter failed']),
+      display_name: 'After-sales',
+      config_json: JSON.stringify({}),
+      last_install_at: new Date(),
+      created_at: new Date(),
+    })
+
+    await handler?.(buildReq({
+      user: {
+        id: 'reader_42',
+        tenantId: 'tenant_42',
+        role: 'viewer',
+        roles: ['viewer'],
+        perms: ['after_sales:read'],
+      },
+    }), res)
+
+    expect(res.statusCode).toBe(409)
+    expect(res.body).toEqual({
+      ok: false,
+      error: {
+        code: 'AFTER_SALES_NOT_INSTALLED',
+        message: 'After-sales must be installed before reading field policies',
       },
     })
   })
