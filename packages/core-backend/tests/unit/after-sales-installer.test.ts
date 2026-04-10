@@ -804,6 +804,62 @@ describe('plugin-after-sales installer: runInstall reinstall mode', () => {
     expect(db.rows[0].mode).toBe('reinstall')
     expect(db.rows[0].last_install_at.getTime()).toBeGreaterThan(firstInstallAt)
   })
+
+  it('still syncs automation registry on reinstall when the next blueprint removes all automations', async () => {
+    const upsertRules = vi.fn(async () => [])
+
+    await installer.runInstall(
+      buildRunInput(
+        {
+          mode: 'enable',
+          blueprint: buildAdapterBackedBlueprint(),
+          context: {
+            api: { database: db },
+            metadata: { name: 'plugin-after-sales' },
+            services: {
+              automationRegistry: { upsertRules },
+            },
+          },
+        },
+        db,
+      ),
+    )
+
+    upsertRules.mockClear()
+
+    const blueprintWithoutAutomations = {
+      ...buildAdapterBackedBlueprint(),
+      automations: [],
+    }
+
+    await installer.runInstall(
+      buildRunInput(
+        {
+          mode: 'reinstall',
+          blueprint: blueprintWithoutAutomations,
+          context: {
+            api: { database: db },
+            metadata: { name: 'plugin-after-sales' },
+            services: {
+              automationRegistry: { upsertRules },
+            },
+          },
+        },
+        db,
+      ),
+    )
+
+    expect(upsertRules).toHaveBeenCalledWith(
+      expect.objectContaining({
+        pluginId: 'plugin-after-sales',
+        appId: 'after-sales',
+        tenantId: 'tenant_42',
+        projectId: 'tenant_42:after-sales',
+        templateId: 'after-sales-default',
+        rules: [],
+      }),
+    )
+  })
 })
 
 describe('plugin-after-sales installer: loadCurrent', () => {

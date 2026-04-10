@@ -106,6 +106,31 @@ export async function upsertAutomationRules(
   const templateId = requiredString(input?.templateId, 'templateId')
   const rules = Array.isArray(input?.rules) ? input.rules.map(normalizeRule) : []
 
+  if (rules.length > 0) {
+    await query(
+      `UPDATE plugin_automation_rule_registry
+       SET enabled = FALSE,
+           updated_at = now()
+       WHERE tenant_id = $1
+         AND plugin_id = $2
+         AND app_id = $3
+         AND project_id = $4
+         AND rule_id <> ALL($5::text[])`,
+      [tenantId, pluginId, appId, projectId, rules.map((rule) => rule.id)],
+    )
+  } else {
+    await query(
+      `UPDATE plugin_automation_rule_registry
+       SET enabled = FALSE,
+           updated_at = now()
+       WHERE tenant_id = $1
+         AND plugin_id = $2
+         AND app_id = $3
+         AND project_id = $4`,
+      [tenantId, pluginId, appId, projectId],
+    )
+  }
+
   for (const rule of rules) {
     await query(
       `INSERT INTO plugin_automation_rule_registry (

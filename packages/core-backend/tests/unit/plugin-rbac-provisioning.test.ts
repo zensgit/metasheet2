@@ -2,13 +2,18 @@ import { describe, expect, it } from 'vitest'
 
 import { applyRoleMatrix, type RbacProvisioningQueryFn } from '../../src/services/PluginRbacProvisioningService'
 
-function createQuery(): RbacProvisioningQueryFn {
+function createQuery(): RbacProvisioningQueryFn & {
+  permissions: Map<string, { name: string; description: string }>
+  roles: Map<string, string>
+  rolePermissions: Set<string>
+  fieldPolicies: Map<string, { visibility: string; editability: string }>
+} {
   const permissions = new Map<string, { name: string; description: string }>()
   const roles = new Map<string, string>()
   const rolePermissions = new Set<string>()
   const fieldPolicies = new Map<string, { visibility: string; editability: string }>()
 
-  return async (sql, params = []) => {
+  const query = (async (sql, params = []) => {
     const normalized = sql.replace(/\s+/g, ' ').trim()
 
     if (normalized.startsWith('INSERT INTO permissions')) {
@@ -51,7 +56,19 @@ function createQuery(): RbacProvisioningQueryFn {
     }
 
     throw new Error(`Unexpected SQL in RBAC provisioning test: ${normalized}`)
+  }) as RbacProvisioningQueryFn & {
+    permissions: Map<string, { name: string; description: string }>
+    roles: Map<string, string>
+    rolePermissions: Set<string>
+    fieldPolicies: Map<string, { visibility: string; editability: string }>
   }
+
+  query.permissions = permissions
+  query.roles = roles
+  query.rolePermissions = rolePermissions
+  query.fieldPolicies = fieldPolicies
+
+  return query
 }
 
 describe('PluginRbacProvisioningService', () => {
@@ -105,6 +122,22 @@ describe('PluginRbacProvisioningService', () => {
       rolesApplied: ['finance', 'supervisor'],
       fieldPoliciesApplied: 1,
     })
+
+    expect(query.roles).toEqual(
+      new Map([
+        ['plugin-after-sales:after-sales:finance', '财务'],
+        ['plugin-after-sales:after-sales:supervisor', '主管'],
+      ]),
+    )
+    expect(query.rolePermissions).toEqual(
+      new Set([
+        'plugin-after-sales:after-sales:finance:after_sales:approve',
+        'plugin-after-sales:after-sales:finance:after_sales:read',
+        'plugin-after-sales:after-sales:supervisor:after_sales:approve',
+        'plugin-after-sales:after-sales:supervisor:after_sales:read',
+        'plugin-after-sales:after-sales:supervisor:after_sales:write',
+      ]),
+    )
   })
 
   it('writes permission names compatible with the real permissions table schema', async () => {
@@ -158,5 +191,49 @@ describe('PluginRbacProvisioningService', () => {
         ],
       ]),
     )
+  })
+
+  it('never mutates the global admin role when provisioning plugin-local roles', async () => {
+    const touchedRoleIds: string[] = []
+    const touchedRolePermissionIds: string[] = []
+    const query: RbacProvisioningQueryFn = async (sql, params = []) => {
+      const normalized = sql.replace(/\s+/g, ' ').trim()
+
+      if (normalized.startsWith('INSERT INTO permissions')) return { rows: [] }
+      if (normalized.startsWith('INSERT INTO roles')) {
+        const [roleId] = params as [string, string]
+        touchedRoleIds.push(roleId)
+        return { rows: [] }
+      }
+      if (normalized.startsWith('INSERT INTO role_permissions')) {
+        const [roleId] = params as [string, string]
+        touchedRolePermissionIds.push(roleId)
+        return { rows: [] }
+      }
+      if (normalized.startsWith('INSERT INTO plugin_field_policy_registry')) return { rows: [] }
+      throw new Error(`Unexpected SQL in RBAC provisioning test: ${normalized}`)
+    }
+
+    await applyRoleMatrix(query, {
+      tenantId: 'tenant_42',
+      pluginId: 'plugin-after-sales',
+      appId: 'after-sales',
+      projectId: 'tenant_42:after-sales',
+      matrix: {
+        roles: [
+          {
+            slug: 'admin',
+            label: '管理员',
+            permissions: ['after_sales:admin'],
+          },
+        ],
+        fieldPolicies: [],
+      },
+    })
+
+    expect(touchedRoleIds).toEqual(['plugin-after-sales:after-sales:admin'])
+    expect(touchedRolePermissionIds).toEqual(['plugin-after-sales:after-sales:admin'])
+    expect(touchedRoleIds).not.toContain('admin')
+    expect(touchedRolePermissionIds).not.toContain('admin')
   })
 })

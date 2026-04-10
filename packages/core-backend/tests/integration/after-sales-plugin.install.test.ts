@@ -94,6 +94,17 @@ const VIEW_IDS = [
   { objectId: 'partItem', viewId: 'partItem-grid' },
   { objectId: 'followUp', viewId: 'followUp-grid' },
 ]
+const RAW_AFTER_SALES_ROLE_IDS = [
+  'admin',
+  'customer_service',
+  'finance',
+  'supervisor',
+  'technician',
+  'viewer',
+]
+const PROVISIONED_AFTER_SALES_ROLE_IDS = RAW_AFTER_SALES_ROLE_IDS.map((roleId) =>
+  `${PLUGIN_ID}:${APP_ID}:${roleId}`,
+)
 
 const SHEET_IDS = OBJECT_IDS.map((objectId) => stableMetaId('sheet', PROJECT_ID, objectId))
 const META_VIEW_IDS = VIEW_IDS.map(({ objectId, viewId }) =>
@@ -265,6 +276,14 @@ describe('after-sales plugin install integration', () => {
       'DELETE FROM plugin_after_sales_template_installs WHERE tenant_id = $1 AND app_id = $2',
       [TENANT_ID, APP_ID],
     )
+    await pool.query(
+      `DELETE FROM role_permissions
+       WHERE permission_code LIKE 'after_sales:%'
+         AND role_id = ANY($1::text[])`,
+      [[...RAW_AFTER_SALES_ROLE_IDS, ...PROVISIONED_AFTER_SALES_ROLE_IDS]],
+    )
+    await pool.query('DELETE FROM user_roles WHERE role_id = ANY($1::text[])', [PROVISIONED_AFTER_SALES_ROLE_IDS])
+    await pool.query('DELETE FROM roles WHERE id = ANY($1::text[])', [PROVISIONED_AFTER_SALES_ROLE_IDS])
     await pool.query('DELETE FROM user_roles WHERE user_id = $1', [SUPERVISOR_USER_ID])
     await pool.query('DELETE FROM users WHERE id = $1', [SUPERVISOR_USER_ID])
   }
@@ -359,6 +378,10 @@ describe('after-sales plugin install integration', () => {
 
   it('installs the after-sales template into real multitable tables and exposes current state', async () => {
     if (!baseUrl || !pool) return
+
+    const adminRoleBeforeRes = await pool.query<{ name: string }>(
+      `SELECT name FROM roles WHERE id = 'admin'`,
+    )
 
     const tokenRes = await requestJson(
       `${baseUrl}/api/auth/dev-token?userId=after-sales-install-it&roles=admin&perms=*:*`,
@@ -544,6 +567,61 @@ describe('after-sales plugin install integration', () => {
         visibility: 'hidden',
         editability: 'readonly',
       },
+    ])
+
+    const adminRoleAfterRes = await pool.query<{ name: string }>(
+      `SELECT name FROM roles WHERE id = 'admin'`,
+    )
+    expect(adminRoleAfterRes.rows).toEqual(adminRoleBeforeRes.rows)
+
+    const rawRolePermissionRes = await pool.query<{ role_id: string; permission_code: string }>(
+      `SELECT role_id, permission_code
+       FROM role_permissions
+       WHERE permission_code LIKE 'after_sales:%'
+         AND role_id = ANY($1::text[])
+       ORDER BY role_id ASC, permission_code ASC`,
+      [RAW_AFTER_SALES_ROLE_IDS],
+    )
+    expect(rawRolePermissionRes.rows).toEqual([])
+
+    const provisionedRoleRes = await pool.query<{ id: string; name: string }>(
+      `SELECT id, name
+       FROM roles
+       WHERE id = ANY($1::text[])
+       ORDER BY id ASC`,
+      [PROVISIONED_AFTER_SALES_ROLE_IDS],
+    )
+    expect(provisionedRoleRes.rows).toEqual([
+      { id: 'plugin-after-sales:after-sales:admin', name: '管理员' },
+      { id: 'plugin-after-sales:after-sales:customer_service', name: '客服' },
+      { id: 'plugin-after-sales:after-sales:finance', name: '财务' },
+      { id: 'plugin-after-sales:after-sales:supervisor', name: '主管' },
+      { id: 'plugin-after-sales:after-sales:technician', name: '技师' },
+      { id: 'plugin-after-sales:after-sales:viewer', name: '只读' },
+    ])
+
+    const provisionedRolePermissionRes = await pool.query<{ role_id: string; permission_code: string }>(
+      `SELECT role_id, permission_code
+       FROM role_permissions
+       WHERE role_id = ANY($1::text[])
+       ORDER BY role_id ASC, permission_code ASC`,
+      [PROVISIONED_AFTER_SALES_ROLE_IDS],
+    )
+    expect(provisionedRolePermissionRes.rows).toEqual([
+      { role_id: 'plugin-after-sales:after-sales:admin', permission_code: 'after_sales:admin' },
+      { role_id: 'plugin-after-sales:after-sales:admin', permission_code: 'after_sales:approve' },
+      { role_id: 'plugin-after-sales:after-sales:admin', permission_code: 'after_sales:read' },
+      { role_id: 'plugin-after-sales:after-sales:admin', permission_code: 'after_sales:write' },
+      { role_id: 'plugin-after-sales:after-sales:customer_service', permission_code: 'after_sales:read' },
+      { role_id: 'plugin-after-sales:after-sales:customer_service', permission_code: 'after_sales:write' },
+      { role_id: 'plugin-after-sales:after-sales:finance', permission_code: 'after_sales:approve' },
+      { role_id: 'plugin-after-sales:after-sales:finance', permission_code: 'after_sales:read' },
+      { role_id: 'plugin-after-sales:after-sales:supervisor', permission_code: 'after_sales:approve' },
+      { role_id: 'plugin-after-sales:after-sales:supervisor', permission_code: 'after_sales:read' },
+      { role_id: 'plugin-after-sales:after-sales:supervisor', permission_code: 'after_sales:write' },
+      { role_id: 'plugin-after-sales:after-sales:technician', permission_code: 'after_sales:read' },
+      { role_id: 'plugin-after-sales:after-sales:technician', permission_code: 'after_sales:write' },
+      { role_id: 'plugin-after-sales:after-sales:viewer', permission_code: 'after_sales:read' },
     ])
 
     for (const objectDef of EXPECTED_OBJECTS) {
