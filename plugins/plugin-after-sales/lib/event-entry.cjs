@@ -310,6 +310,63 @@ function buildUpdateCustomerCommand(input, existingCustomer) {
   }
 }
 
+function buildUpdateFollowUpCommand(input, existingFollowUp) {
+  const command = input && typeof input === 'object' && !Array.isArray(input) ? input : {}
+  const followUpInput =
+    command.followUp && typeof command.followUp === 'object' && !Array.isArray(command.followUp)
+      ? command.followUp
+      : command
+  const currentFollowUp =
+    existingFollowUp && typeof existingFollowUp === 'object' ? existingFollowUp : {}
+
+  const changes = {}
+  const hasCustomerName = hasOwnField(followUpInput, 'customerName') || hasOwnField(command, 'customerName')
+  const hasDueAt = hasOwnField(followUpInput, 'dueAt') || hasOwnField(command, 'dueAt')
+  const hasFollowUpType = hasOwnField(followUpInput, 'followUpType') || hasOwnField(command, 'followUpType')
+  const hasOwnerName = hasOwnField(followUpInput, 'ownerName') || hasOwnField(command, 'ownerName')
+  const hasStatus = hasOwnField(followUpInput, 'status') || hasOwnField(command, 'status')
+  const hasSummary = hasOwnField(followUpInput, 'summary') || hasOwnField(command, 'summary')
+
+  if (hasCustomerName) {
+    changes.customerName = requiredString(
+      followUpInput.customerName ?? command.customerName,
+      'followUp.customerName',
+    )
+  }
+  if (hasDueAt) {
+    changes.dueAt = requiredString(
+      followUpInput.dueAt ?? command.dueAt,
+      'followUp.dueAt',
+    )
+  }
+  if (hasFollowUpType) {
+    changes.followUpType = normalizeEnumValue(
+      followUpInput.followUpType ?? command.followUpType,
+      'followUp.followUpType',
+      ['phone', 'message', 'onsite'],
+      optionalString(currentFollowUp.followUpType) || 'phone',
+    )
+  }
+  if (hasOwnerName) {
+    changes.ownerName = optionalString(followUpInput.ownerName ?? command.ownerName) || null
+  }
+  if (hasStatus) {
+    changes.status = normalizeEnumValue(
+      followUpInput.status ?? command.status,
+      'followUp.status',
+      ['pending', 'done', 'skipped'],
+      optionalString(currentFollowUp.status) || 'pending',
+    )
+  }
+  if (hasSummary) {
+    changes.summary = optionalString(followUpInput.summary ?? command.summary) || null
+  }
+
+  return {
+    changes,
+  }
+}
+
 function buildUpdateInstalledAssetCommand(input, existingInstalledAsset) {
   const command = input && typeof input === 'object' && !Array.isArray(input) ? input : {}
   const installedAsset =
@@ -659,6 +716,7 @@ module.exports = {
   buildCreateTicketCommand,
   buildCustomerCommand,
   buildFollowUpCommand,
+  buildUpdateFollowUpCommand,
   buildUpdateCustomerCommand,
   buildInstalledAssetCommand,
   buildUpdateInstalledAssetCommand,

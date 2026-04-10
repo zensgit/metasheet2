@@ -1455,12 +1455,92 @@
           <div v-else-if="followUps.length" class="after-sales-view__follow-up-list">
             <article v-for="followUp in followUps" :key="followUp.id" class="after-sales-view__follow-up-row">
               <div class="after-sales-view__follow-up-main">
-                <div class="after-sales-view__follow-up-headline">
-                  <strong>{{ followUp.data.ticketNo }}</strong>
-                  <span class="after-sales-view__tag">{{ followUp.data.status }}</span>
-                  <span class="after-sales-view__tag after-sales-view__tag--subtle">{{ followUp.data.followUpType }}</span>
-                </div>
-                <p>{{ followUp.data.summary || 'No follow-up summary yet.' }}</p>
+                <template v-if="followUpEditingId === followUp.id">
+                  <div class="after-sales-view__follow-up-headline">
+                    <strong>{{ followUp.data.ticketNo }}</strong>
+                    <span class="after-sales-view__tag">{{ followUpEditDraft.status }}</span>
+                    <span class="after-sales-view__tag after-sales-view__tag--subtle">{{ followUpEditDraft.followUpType }}</span>
+                  </div>
+                  <form class="after-sales-view__follow-up-form after-sales-view__ticket-form--inline" @submit.prevent="submitFollowUpEdit(followUp)">
+                    <label class="after-sales-view__field">
+                      <span>Ticket no</span>
+                      <input
+                        :id="`after-sales-follow-up-edit-ticket-no-${followUp.id}`"
+                        :value="followUp.data.ticketNo"
+                        class="after-sales-view__field-input"
+                        readonly
+                        type="text"
+                      />
+                    </label>
+                    <label class="after-sales-view__field">
+                      <span>Customer name</span>
+                      <input
+                        :id="`after-sales-follow-up-edit-customer-name-${followUp.id}`"
+                        v-model="followUpEditDraft.customerName"
+                        class="after-sales-view__field-input"
+                        type="text"
+                      />
+                    </label>
+                    <label class="after-sales-view__field">
+                      <span>Due at</span>
+                      <input
+                        :id="`after-sales-follow-up-edit-due-at-${followUp.id}`"
+                        v-model="followUpEditDraft.dueAt"
+                        class="after-sales-view__field-input"
+                        type="datetime-local"
+                      />
+                    </label>
+                    <label class="after-sales-view__field">
+                      <span>Follow-up type</span>
+                      <select
+                        :id="`after-sales-follow-up-edit-type-${followUp.id}`"
+                        v-model="followUpEditDraft.followUpType"
+                        class="after-sales-view__field-input"
+                      >
+                        <option value="phone">Phone</option>
+                        <option value="message">Message</option>
+                        <option value="onsite">Onsite</option>
+                      </select>
+                    </label>
+                    <label class="after-sales-view__field">
+                      <span>Status</span>
+                      <select
+                        :id="`after-sales-follow-up-edit-status-${followUp.id}`"
+                        v-model="followUpEditDraft.status"
+                        class="after-sales-view__field-input"
+                      >
+                        <option value="pending">Pending</option>
+                        <option value="done">Done</option>
+                        <option value="skipped">Skipped</option>
+                      </select>
+                    </label>
+                    <label class="after-sales-view__field">
+                      <span>Owner</span>
+                      <input
+                        :id="`after-sales-follow-up-edit-owner-name-${followUp.id}`"
+                        v-model="followUpEditDraft.ownerName"
+                        class="after-sales-view__field-input"
+                        type="text"
+                      />
+                    </label>
+                    <label class="after-sales-view__field after-sales-view__field--wide">
+                      <span>Summary</span>
+                      <textarea
+                        :id="`after-sales-follow-up-edit-summary-${followUp.id}`"
+                        v-model="followUpEditDraft.summary"
+                        class="after-sales-view__field-input after-sales-view__field-textarea"
+                      />
+                    </label>
+                  </form>
+                </template>
+                <template v-else>
+                  <div class="after-sales-view__follow-up-headline">
+                    <strong>{{ followUp.data.ticketNo }}</strong>
+                    <span class="after-sales-view__tag">{{ followUp.data.status }}</span>
+                    <span class="after-sales-view__tag after-sales-view__tag--subtle">{{ followUp.data.followUpType }}</span>
+                  </div>
+                  <p>{{ followUp.data.summary || 'No follow-up summary yet.' }}</p>
+                </template>
               </div>
 
               <div class="after-sales-view__follow-up-side">
@@ -1478,10 +1558,35 @@
                     <dd>{{ followUp.data.customerName || 'Unknown customer' }}</dd>
                   </div>
                 </dl>
+                <div v-if="followUpEditingId === followUp.id" class="after-sales-view__ticket-actions">
+                  <button
+                    class="after-sales-view__primary-btn after-sales-view__ticket-action-btn"
+                    :disabled="followUpUpdatingId === followUp.id || followUpsLoading || !canSubmitFollowUpEdit"
+                    @click="submitFollowUpEdit(followUp)"
+                  >
+                    {{ followUpUpdatingId === followUp.id ? 'Saving...' : 'Save changes' }}
+                  </button>
+                  <button
+                    class="after-sales-view__ghost-btn after-sales-view__ticket-action-btn"
+                    :disabled="followUpUpdatingId === followUp.id"
+                    @click="cancelFollowUpEdit"
+                  >
+                    Cancel edit
+                  </button>
+                </div>
+                <button
+                  v-if="followUpEditingId !== followUp.id"
+                  class="after-sales-view__ghost-btn after-sales-view__ticket-action-btn"
+                  :aria-label="`Edit follow-up ${followUp.data.ticketNo}`"
+                  :disabled="Boolean(followUpDeletingId) || Boolean(followUpUpdatingId) || Boolean(followUpEditingId) || followUpCreating || followUpsLoading"
+                  @click="startFollowUpEdit(followUp)"
+                >
+                  Edit
+                </button>
                 <button
                   class="after-sales-view__ghost-btn after-sales-view__ticket-action-btn"
                   :aria-label="`Delete follow-up ${followUp.data.ticketNo}`"
-                  :disabled="Boolean(followUpDeletingId) || followUpCreating || followUpsLoading"
+                  :disabled="Boolean(followUpDeletingId) || followUpCreating || followUpsLoading || Boolean(followUpUpdatingId) || Boolean(followUpEditingId)"
                   @click="deleteFollowUp(followUp)"
                 >
                   {{ followUpDeletingId === followUp.id ? 'Deleting...' : 'Delete' }}
@@ -1738,6 +1843,15 @@ interface FollowUpDraft {
   summary: string
 }
 
+interface FollowUpEditDraft {
+  customerName: string
+  dueAt: string
+  followUpType: 'phone' | 'message' | 'onsite'
+  ownerName: string
+  status: 'pending' | 'done' | 'skipped'
+  summary: string
+}
+
 interface CustomerDraft {
   customerCode: string
   name: string
@@ -1918,6 +2032,7 @@ const installedAssetCreating = ref(false)
 const customerCreating = ref(false)
 const followUpCreating = ref(false)
 const followUpDeletingId = ref('')
+const followUpUpdatingId = ref('')
 const customerDeletingId = ref('')
 const customerUpdatingId = ref('')
 const installedAssetUpdatingId = ref('')
@@ -1968,6 +2083,8 @@ const installedAssetFilters = ref<InstalledAssetFilterDraft>({
 })
 const customerDraft = ref<CustomerDraft>(createCustomerDraft())
 const followUpDraft = ref<FollowUpDraft>(createFollowUpDraft())
+const followUpEditingId = ref('')
+const followUpEditDraft = ref<FollowUpEditDraft>(createFollowUpEditDraft())
 const customerEditingId = ref('')
 const customerEditDraft = ref<CustomerEditDraft>(createCustomerEditDraft())
 const customerFilters = ref<CustomerFilterDraft>({
@@ -2022,6 +2139,12 @@ const canSubmitFollowUp = computed(
     toText(followUpDraft.value.ticketNo).length > 0 &&
     toText(followUpDraft.value.customerName).length > 0 &&
     toText(followUpDraft.value.dueAt).length > 0,
+)
+const canSubmitFollowUpEdit = computed(
+  () =>
+    Boolean(followUpEditingId.value) &&
+    toText(followUpEditDraft.value.customerName).length > 0 &&
+    toText(followUpEditDraft.value.dueAt).length > 0,
 )
 const canSubmitCustomerEdit = computed(
   () =>
@@ -2212,6 +2335,27 @@ function createFollowUpDraft(): FollowUpDraft {
   }
 }
 
+function normalizeFollowUpType(value: unknown): FollowUpEditDraft['followUpType'] {
+  return value === 'message' || value === 'onsite' ? value : 'phone'
+}
+
+function normalizeFollowUpStatus(value: unknown): FollowUpEditDraft['status'] {
+  return value === 'done' || value === 'skipped' ? value : 'pending'
+}
+
+function createFollowUpEditDraft(
+  followUp?: Partial<FollowUpViewModel['data']> | null,
+): FollowUpEditDraft {
+  return {
+    customerName: toText(followUp?.customerName),
+    dueAt: toText(followUp?.dueAt),
+    followUpType: normalizeFollowUpType(followUp?.followUpType),
+    ownerName: toText(followUp?.ownerName),
+    status: normalizeFollowUpStatus(followUp?.status),
+    summary: toText(followUp?.summary),
+  }
+}
+
 function createCustomerEditDraft(customer?: Partial<CustomerViewModel['data']> | null): CustomerEditDraft {
   return {
     customerCode: toText(customer?.customerCode),
@@ -2319,6 +2463,12 @@ function resetFollowUpDraft() {
   followUpDraft.value = createFollowUpDraft()
   followUpSubmitError.value = ''
   followUpSubmitSuccess.value = ''
+}
+
+function cancelFollowUpEdit() {
+  followUpEditingId.value = ''
+  followUpEditDraft.value = createFollowUpEditDraft()
+  followUpSubmitError.value = ''
 }
 
 function cancelCustomerEdit() {
@@ -2445,6 +2595,43 @@ function buildFollowUpPayload() {
       ...(ownerName ? { ownerName } : {}),
       ...(summary ? { summary } : {}),
     },
+  }
+}
+
+function buildFollowUpUpdatePayload(followUp: FollowUpViewModel) {
+  const changes: Record<string, string> = {}
+  const customerName = toText(followUpEditDraft.value.customerName)
+  const dueAt = toText(followUpEditDraft.value.dueAt)
+  const ownerName = toText(followUpEditDraft.value.ownerName)
+  const summary = toText(followUpEditDraft.value.summary)
+  const followUpType = followUpEditDraft.value.followUpType
+  const status = followUpEditDraft.value.status
+
+  if (customerName !== toText(followUp.data.customerName)) {
+    changes.customerName = customerName
+  }
+  if (dueAt !== toText(followUp.data.dueAt)) {
+    changes.dueAt = dueAt
+  }
+  if (followUpType !== normalizeFollowUpType(followUp.data.followUpType)) {
+    changes.followUpType = followUpType
+  }
+  if (ownerName !== toText(followUp.data.ownerName)) {
+    changes.ownerName = ownerName
+  }
+  if (status !== normalizeFollowUpStatus(followUp.data.status)) {
+    changes.status = status
+  }
+  if (summary !== toText(followUp.data.summary)) {
+    changes.summary = summary
+  }
+
+  if (!Object.keys(changes).length) {
+    return null
+  }
+
+  return {
+    followUp: changes,
   }
 }
 
@@ -2820,6 +3007,22 @@ function startCustomerEdit(customer: CustomerViewModel) {
   customerSubmitSuccess.value = ''
 }
 
+function startFollowUpEdit(followUp: FollowUpViewModel) {
+  if (
+    !followUp.id ||
+    followUpUpdatingId.value ||
+    followUpDeletingId.value ||
+    followUpCreating.value ||
+    followUpsLoading.value
+  ) {
+    return
+  }
+  followUpEditingId.value = followUp.id
+  followUpEditDraft.value = createFollowUpEditDraft(followUp.data)
+  followUpSubmitError.value = ''
+  followUpSubmitSuccess.value = ''
+}
+
 function startInstalledAssetEdit(asset: InstalledAssetViewModel) {
   if (!asset.id || installedAssetUpdatingId.value || installedAssetDeletingId.value || installedAssetCreating.value || installedAssetsLoading.value) {
     return
@@ -3010,14 +3213,26 @@ async function loadFollowUpsForCurrentState(state: CurrentResponse): Promise<voi
 }
 
 async function applyFollowUpFilters() {
-  if (followUpsLoading.value || followUpCreating.value || followUpDeletingId.value) {
+  if (
+    followUpsLoading.value ||
+    followUpCreating.value ||
+    followUpDeletingId.value ||
+    followUpUpdatingId.value ||
+    followUpEditingId.value
+  ) {
     return
   }
   await loadFollowUpsForCurrentState(current.value)
 }
 
 async function resetFollowUpFilters() {
-  if (followUpsLoading.value || followUpCreating.value || followUpDeletingId.value) {
+  if (
+    followUpsLoading.value ||
+    followUpCreating.value ||
+    followUpDeletingId.value ||
+    followUpUpdatingId.value ||
+    followUpEditingId.value
+  ) {
     return
   }
   followUpFilters.value = {
@@ -3029,14 +3244,27 @@ async function resetFollowUpFilters() {
 }
 
 async function refreshFollowUps() {
-  if (followUpsLoading.value || followUpCreating.value || followUpDeletingId.value) {
+  if (
+    followUpsLoading.value ||
+    followUpCreating.value ||
+    followUpDeletingId.value ||
+    followUpUpdatingId.value ||
+    followUpEditingId.value
+  ) {
     return
   }
   await loadFollowUpsForCurrentState(current.value)
 }
 
 async function submitFollowUp() {
-  if (!canSubmitFollowUp.value || followUpCreating.value || followUpsLoading.value || followUpDeletingId.value) {
+  if (
+    !canSubmitFollowUp.value ||
+    followUpCreating.value ||
+    followUpsLoading.value ||
+    followUpDeletingId.value ||
+    followUpUpdatingId.value ||
+    followUpEditingId.value
+  ) {
     return
   }
 
@@ -3067,8 +3295,63 @@ async function submitFollowUp() {
   }
 }
 
+async function submitFollowUpEdit(followUp: FollowUpViewModel) {
+  if (
+    !followUp.id ||
+    followUpEditingId.value !== followUp.id ||
+    followUpUpdatingId.value ||
+    !canSubmitFollowUpEdit.value
+  ) {
+    return
+  }
+
+  followUpUpdatingId.value = followUp.id
+  followUpSubmitError.value = ''
+  followUpSubmitSuccess.value = ''
+
+  try {
+    const updatePayload = buildFollowUpUpdatePayload(followUp)
+    if (!updatePayload) {
+      followUpEditingId.value = ''
+      followUpEditDraft.value = createFollowUpEditDraft()
+      return
+    }
+
+    const payload = await readEnvelope<CreateFollowUpResponse>(
+      `/api/after-sales/follow-ups/${encodeURIComponent(followUp.id)}`,
+      {
+        method: 'PATCH',
+        body: JSON.stringify(updatePayload),
+      },
+    )
+    const nextFollowUp = payload?.followUp ? normalizeFollowUpRow(payload.followUp) : null
+
+    if (nextFollowUp) {
+      followUps.value = matchesFollowUpFilters(nextFollowUp)
+        ? followUps.value.map((item) => (item.id === nextFollowUp.id ? nextFollowUp : item))
+        : followUps.value.filter((item) => item.id !== nextFollowUp.id)
+      followUpsError.value = ''
+      followUpSubmitSuccess.value = `Updated follow-up for ${nextFollowUp.data.ticketNo}`
+    }
+
+    followUpEditingId.value = ''
+    followUpEditDraft.value = createFollowUpEditDraft()
+  } catch (err: unknown) {
+    followUpSubmitError.value = err instanceof Error ? err.message : 'Failed to update follow-up'
+  } finally {
+    followUpUpdatingId.value = ''
+  }
+}
+
 async function deleteFollowUp(followUp: FollowUpViewModel) {
-  if (!followUp.id || followUpDeletingId.value || followUpCreating.value || followUpsLoading.value) {
+  if (
+    !followUp.id ||
+    followUpDeletingId.value ||
+    followUpCreating.value ||
+    followUpsLoading.value ||
+    followUpUpdatingId.value ||
+    followUpEditingId.value
+  ) {
     return
   }
 

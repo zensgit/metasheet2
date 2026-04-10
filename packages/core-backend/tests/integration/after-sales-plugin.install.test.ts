@@ -2641,6 +2641,110 @@ describe('after-sales plugin install integration', () => {
     expect(recordRes.rows).toHaveLength(0)
   })
 
+  it('updates follow-ups through the real after-sales routes', async () => {
+    if (!baseUrl || !pool) return
+
+    const tokenRes = await requestJson(
+      `${baseUrl}/api/auth/dev-token?userId=after-sales-follow-up-edit-it&roles=admin&perms=*:*`,
+    )
+    const token = (tokenRes.body as { token?: string } | undefined)?.token
+    expect(token).toBeTruthy()
+
+    const installRes = await requestJson(`${baseUrl}/api/after-sales/projects/install`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        templateId: 'after-sales-default',
+        displayName: 'After Sales Follow-up Edit Flow',
+      }),
+    })
+    expect(installRes.status).toBe(200)
+
+    const createRes = await requestJson(`${baseUrl}/api/after-sales/follow-ups`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        followUp: {
+          ticketNo: 'TK-5005',
+          customerName: 'Before Edit Follow-up',
+          dueAt: '2026-04-19T08:00:00Z',
+          followUpType: 'phone',
+          ownerName: 'CSR Chen',
+          summary: 'Original follow-up summary',
+        },
+      }),
+    })
+    expect(createRes.status).toBe(201)
+
+    const createdFollowUpId = (
+      createRes.body as {
+        data?: {
+          followUp?: {
+            id?: string
+          }
+        }
+      }
+    ).data?.followUp?.id
+    expect(createdFollowUpId).toBeTruthy()
+
+    const updateRes = await requestJson(
+      `${baseUrl}/api/after-sales/follow-ups/${encodeURIComponent(String(createdFollowUpId))}`,
+      {
+        method: 'PATCH',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          followUp: {
+            customerName: 'After Edit Follow-up',
+            dueAt: '2026-04-20T10:30:00Z',
+            followUpType: 'message',
+            ownerName: '',
+            status: 'done',
+            summary: '',
+          },
+        }),
+      },
+    )
+    expect(updateRes.status).toBe(200)
+    expect((updateRes.body as any).data?.followUp?.data).toMatchObject({
+      ticketNo: 'TK-5005',
+      customerName: 'After Edit Follow-up',
+      dueAt: '2026-04-20T10:30:00Z',
+      followUpType: 'message',
+      ownerName: null,
+      status: 'done',
+      summary: null,
+    })
+
+    const followUpSheetId = stableMetaId('sheet', PROJECT_ID, 'followUp')
+    const recordRes = await waitFor(
+      () => pool.query<{ data: Record<string, unknown> }>(
+        'SELECT data FROM meta_records WHERE id = $1 AND sheet_id = $2',
+        [createdFollowUpId, followUpSheetId],
+      ),
+      (result) =>
+        result.rows.length === 1 &&
+        result.rows[0].data?.[stFieldId('followUp', 'status')] === 'done',
+    )
+    expect(recordRes.rows[0]?.data).toMatchObject({
+      [stFieldId('followUp', 'ticketNo')]: 'TK-5005',
+      [stFieldId('followUp', 'customerName')]: 'After Edit Follow-up',
+      [stFieldId('followUp', 'dueAt')]: '2026-04-20T10:30:00Z',
+      [stFieldId('followUp', 'followUpType')]: 'message',
+      [stFieldId('followUp', 'ownerName')]: null,
+      [stFieldId('followUp', 'status')]: 'done',
+      [stFieldId('followUp', 'summary')]: null,
+    })
+  })
+
   it('creates customers through the real after-sales routes', async () => {
     if (!baseUrl || !pool) return
 

@@ -25,6 +25,7 @@ const {
   buildCustomerCommand,
   buildFollowUpCommand,
   buildInstalledAssetCommand,
+  buildUpdateFollowUpCommand,
   buildUpdateCustomerCommand,
   buildUpdateInstalledAssetCommand,
   buildUpdateTicketCommand,
@@ -81,7 +82,12 @@ async function fromPhysicalCustomerData(provisioning, projectId, physicalData) {
 }
 
 async function fromPhysicalFollowUpData(provisioning, projectId, physicalData) {
-  return fromPhysicalRecord(provisioning, projectId, 'followUp', FOLLOW_UP_FIELDS, physicalData)
+  const logicalData = await fromPhysicalRecord(provisioning, projectId, 'followUp', FOLLOW_UP_FIELDS, physicalData)
+  return {
+    ...logicalData,
+    ownerName: logicalData.ownerName ?? null,
+    summary: logicalData.summary ?? null,
+  }
 }
 
 async function toPhysicalFollowUpData(provisioning, projectId, logicalData) {
@@ -418,6 +424,19 @@ async function getCustomerById(multitableApi, projectId, customerId) {
     sheetId,
     record,
     logicalData: await fromPhysicalCustomerData(multitableApi.provisioning, projectId, record.data),
+  }
+}
+
+async function getFollowUpById(multitableApi, projectId, followUpId) {
+  const sheetId = await findObjectSheetId(multitableApi.provisioning, projectId, 'followUp')
+  const record = await multitableApi.records.getRecord({
+    sheetId,
+    recordId: followUpId,
+  })
+  return {
+    sheetId,
+    record,
+    logicalData: await fromPhysicalFollowUpData(multitableApi.provisioning, projectId, record.data),
   }
 }
 
@@ -2155,6 +2174,112 @@ module.exports = {
           res.status(500).json({
             ok: false,
             error: { code: 'INTERNAL_ERROR', message: 'Failed to delete after-sales follow-up' },
+          })
+        }
+      },
+    )
+
+    context.api.http.addRoute(
+      'PATCH',
+      '/api/after-sales/follow-ups/:followUpId',
+      async (req, res) => {
+        try {
+          const userId = getUserId(req)
+          if (!userId) {
+            sendUnauthorized(res)
+            return
+          }
+          if (!hasAfterSalesWriteAccess(req)) {
+            sendWriteForbidden(res)
+            return
+          }
+
+          const followUpId =
+            typeof req?.params?.followUpId === 'string' ? req.params.followUpId.trim() : ''
+          if (!followUpId) {
+            res.status(400).json({
+              ok: false,
+              error: { code: 'VALIDATION_ERROR', message: 'followUpId is required' },
+            })
+            return
+          }
+
+          const multitableApi = getMultitableWriteApi(context)
+          if (!multitableApi) {
+            res.status(503).json({
+              ok: false,
+              error: {
+                code: 'MULTITABLE_UNAVAILABLE',
+                message: 'Multitable record writer is not available on plugin context',
+              },
+            })
+            return
+          }
+
+          const tenantId = getTenantId(req, context.logger)
+          const current = await installer.loadCurrent(context, tenantId, appManifest.id)
+          if (!current || !isOperationalAfterSalesStatus(current.status)) {
+            res.status(409).json({
+              ok: false,
+              error: {
+                code: 'AFTER_SALES_NOT_INSTALLED',
+                message: 'After-sales must be installed before updating follow-ups',
+              },
+            })
+            return
+          }
+
+          const projectId = current.projectId || installer.getProjectId(tenantId, appManifest.id)
+          const { sheetId, record, logicalData } = await getFollowUpById(multitableApi, projectId, followUpId)
+          const command = buildUpdateFollowUpCommand((req && req.body) || {}, {
+            id: record.id,
+            ...logicalData,
+          })
+          const updatedRecord = await multitableApi.records.patchRecord({
+            sheetId,
+            recordId: followUpId,
+            changes: await toPhysicalFollowUpData(multitableApi.provisioning, projectId, command.changes),
+          })
+          const logicalRecordData = await fromPhysicalFollowUpData(
+            multitableApi.provisioning,
+            projectId,
+            updatedRecord.data,
+          )
+
+          res.json({
+            ok: true,
+            data: {
+              projectId,
+              followUp: {
+                id: updatedRecord.id,
+                version: updatedRecord.version,
+                data: logicalRecordData,
+              },
+            },
+          })
+        } catch (err) {
+          if (err && err.code === 'AFTER_SALES_EVENT_VALIDATION_FAILED') {
+            sendBadRequest(res, err)
+            return
+          }
+          if (err && err.code === 'VALIDATION_ERROR') {
+            res.status(400).json({
+              ok: false,
+              error: { code: err.code, message: err.message },
+            })
+            return
+          }
+          if (err && err.code === 'NOT_FOUND') {
+            res.status(404).json({
+              ok: false,
+              error: { code: err.code, message: err.message },
+            })
+            return
+          }
+          logger.error && logger.error('after-sales update follow-up failed', err)
+          res.status(500).json({
+            ok: false,
+            error: { code: 'INTERNAL_ERROR', message: 'Failed to update after-sales follow-up' },
           })
         }
       },
