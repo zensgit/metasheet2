@@ -37,6 +37,7 @@ import type { RouteLocationNormalized, RouteRecordRaw } from 'vue-router'
 export const AppRouteNames = {
   // Auth routes
   LOGIN: 'login',
+  DINGTALK_AUTH_CALLBACK: 'dingtalk-auth-callback',
   REGISTER: 'register',
   FORGOT_PASSWORD: 'forgot-password',
   RESET_PASSWORD: 'reset-password',
@@ -121,6 +122,7 @@ export interface AppRouteParams {
 
   // Routes without params
   'login': Record<string, never>
+  'dingtalk-auth-callback': Record<string, never>
   'register': Record<string, never>
   'forgot-password': Record<string, never>
   'dashboard': Record<string, never>
@@ -190,6 +192,12 @@ export interface AppRouteQuery {
 
   // Login redirect
   'login': {
+    redirect?: string
+  }
+
+  'dingtalk-auth-callback': {
+    code?: string
+    state?: string
     redirect?: string
   }
 
@@ -358,6 +366,7 @@ export function createTypedNavigation<Name extends AppRouteNamesType>(
 export const ROUTE_PATHS = {
   // Auth
   LOGIN: '/login',
+  DINGTALK_AUTH_CALLBACK: '/login/dingtalk/callback',
   REGISTER: '/register',
   FORGOT_PASSWORD: '/forgot-password',
   RESET_PASSWORD: '/reset-password/:token',

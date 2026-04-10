@@ -13,6 +13,7 @@ import MultitableCommentInboxView from '../views/MultitableCommentInboxView.vue'
 import PluginManagerView from '../views/PluginManagerView.vue'
 import PluginViewHost from '../views/PluginViewHost.vue'
 import AttendanceExperienceView from '../views/attendance/AttendanceExperienceView.vue'
+import DingTalkAuthCallbackView from '../views/DingTalkAuthCallbackView.vue'
 import HomeRedirect from '../views/HomeRedirect.vue'
 import LoginView from '../views/LoginView.vue'
 
@@ -28,6 +29,12 @@ export const appRoutes: RouteRecordRaw[] = [
     name: 'login',
     component: LoginView,
     meta: { title: 'Sign In', hideNavbar: true, requiresGuest: true }
+  },
+  {
+    path: ROUTE_PATHS.DINGTALK_AUTH_CALLBACK,
+    name: AppRouteNames.DINGTALK_AUTH_CALLBACK,
+    component: DingTalkAuthCallbackView,
+    meta: { title: 'DingTalk Sign In', titleZh: '钉钉登录', hideNavbar: true, requiresAuth: false, requiresGuest: true }
   },
   {
     path: '/accept-invite',
