@@ -33,3 +33,4 @@ Add these scripts to your `package.json` for convenient test execution:
 - `npm run test:unit` - Run all unit tests
 - `npm run test:perf` - Run only performance tests
 - `npm run test:ui` - Open Vitest UI for interactive testing
+- `npm run test:contract` - Run Pact consumer contract tests
