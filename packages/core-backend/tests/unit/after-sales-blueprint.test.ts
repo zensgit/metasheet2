@@ -327,4 +327,85 @@ describe('plugin-after-sales default blueprint', () => {
       followUpAfterDays: 7,
     })
   })
+
+  it('declares the v1 role matrix and refundAmount field policies', () => {
+    const result = blueprint.buildDefaultBlueprint(manifest)
+
+    expect(result.roles).toEqual([
+      {
+        slug: 'customer_service',
+        label: '客服',
+        permissions: ['after_sales:read', 'after_sales:write'],
+      },
+      {
+        slug: 'technician',
+        label: '技师',
+        permissions: ['after_sales:read', 'after_sales:write'],
+      },
+      {
+        slug: 'supervisor',
+        label: '主管',
+        permissions: ['after_sales:read', 'after_sales:write', 'after_sales:approve'],
+      },
+      {
+        slug: 'finance',
+        label: '财务',
+        permissions: ['after_sales:read', 'after_sales:approve'],
+      },
+      {
+        slug: 'admin',
+        label: '管理员',
+        permissions: ['after_sales:read', 'after_sales:write', 'after_sales:approve', 'after_sales:admin'],
+      },
+      {
+        slug: 'viewer',
+        label: '只读',
+        permissions: ['after_sales:read'],
+      },
+    ])
+    expect(result.fieldPolicies).toEqual([
+      {
+        objectId: 'serviceTicket',
+        field: 'refundAmount',
+        roleSlug: 'finance',
+        visibility: 'visible',
+        editability: 'editable',
+      },
+      {
+        objectId: 'serviceTicket',
+        field: 'refundAmount',
+        roleSlug: 'admin',
+        visibility: 'visible',
+        editability: 'editable',
+      },
+      {
+        objectId: 'serviceTicket',
+        field: 'refundAmount',
+        roleSlug: 'supervisor',
+        visibility: 'visible',
+        editability: 'readonly',
+      },
+      {
+        objectId: 'serviceTicket',
+        field: 'refundAmount',
+        roleSlug: 'customer_service',
+        visibility: 'hidden',
+        editability: 'readonly',
+      },
+      {
+        objectId: 'serviceTicket',
+        field: 'refundAmount',
+        roleSlug: 'technician',
+        visibility: 'hidden',
+        editability: 'readonly',
+      },
+      {
+        objectId: 'serviceTicket',
+        field: 'refundAmount',
+        roleSlug: 'viewer',
+        visibility: 'hidden',
+        editability: 'readonly',
+      },
+    ])
+  })
 })

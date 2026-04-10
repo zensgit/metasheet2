@@ -1,10 +1,17 @@
 import { localizedPlmFederationClient as plmClient } from './plm/plmFederationClient'
 
 export type PlmListResponse<T = Record<string, unknown>> = {
+  productId?: string
   items: T[]
   total?: number
   limit?: number
   offset?: number
+  sources?: Array<{
+    name: string
+    ok: boolean
+    count: number
+    error?: string
+  }>
 }
 
 export type PlmApprovalHistoryResponse<T = Record<string, unknown>> = {

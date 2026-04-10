@@ -20,7 +20,7 @@
  *  - platform-project-creation-flow-design-20260407.md §4.3
  */
 
-import { describe, it, expect, beforeEach } from 'vitest'
+import { describe, it, expect, beforeEach, vi } from 'vitest'
 
 // CJS interop: the installer module lives under plugins/ and is authored as CJS
 // to match the plugin-after-sales skeleton convention.
@@ -150,6 +150,17 @@ interface FakeContext {
       }
     }
   }
+  metadata?: {
+    name?: string
+  }
+  services?: {
+    automationRegistry?: {
+      upsertRules: (input: Record<string, unknown>) => Promise<unknown>
+    }
+    rbacProvisioning?: {
+      applyRoleMatrix: (input: Record<string, unknown>) => Promise<unknown>
+    }
+  }
 }
 
 function createFakeDatabase(): FakeDatabase {
@@ -243,8 +254,39 @@ function buildValidBlueprint() {
     views: [{ id: 'ticket-board', objectId: 'serviceTicket', type: 'kanban', name: 'Board' }],
     automations: [],
     roles: [],
+    fieldPolicies: [],
     notifications: [],
     configDefaults: {},
+  }
+}
+
+function buildAdapterBackedBlueprint() {
+  return {
+    ...buildValidBlueprint(),
+    automations: [
+      {
+        id: 'ticket-triage',
+        trigger: { event: 'ticket.created' },
+        actions: [{ type: 'sendNotification', topic: 'after-sales.ticket.assigned' }],
+        enabled: true,
+      },
+    ],
+    roles: [
+      {
+        slug: 'finance',
+        label: 'Finance',
+        permissions: ['after_sales:read', 'after_sales:approve'],
+      },
+    ],
+    fieldPolicies: [
+      {
+        objectId: 'serviceTicket',
+        field: 'refundAmount',
+        roleSlug: 'finance',
+        visibility: 'visible',
+        editability: 'editable',
+      },
+    ],
   }
 }
 
@@ -371,6 +413,24 @@ describe('plugin-after-sales installer: validateBlueprint', () => {
     ]
     expect(() => installer.validateBlueprint(bp)).not.toThrow()
   })
+
+  it('rejects blueprint with non-array automations', () => {
+    const bp = buildValidBlueprint() as Record<string, unknown>
+    bp.automations = 'ticket-triage'
+    expect(() => installer.validateBlueprint(bp)).toThrowError(/blueprint\.automations must be an array/)
+  })
+
+  it('rejects blueprint with non-array roles', () => {
+    const bp = buildValidBlueprint() as Record<string, unknown>
+    bp.roles = { slug: 'finance' }
+    expect(() => installer.validateBlueprint(bp)).toThrowError(/blueprint\.roles must be an array/)
+  })
+
+  it('rejects blueprint with non-array fieldPolicies', () => {
+    const bp = buildValidBlueprint() as Record<string, unknown>
+    bp.fieldPolicies = { field: 'refundAmount' }
+    expect(() => installer.validateBlueprint(bp)).toThrowError(/blueprint\.fieldPolicies must be an array/)
+  })
 })
 
 describe('plugin-after-sales installer: runInstall enable mode', () => {
@@ -449,6 +509,105 @@ describe('plugin-after-sales installer: runInstall enable mode', () => {
   it('records createdViews from blueprint.views', async () => {
     const result = await installer.runInstall(buildRunInput({ mode: 'enable' }, db))
     expect(result.createdViews).toEqual(['ticket-board'])
+  })
+
+  it('registers automations and applies role matrix when services are present', async () => {
+    const upsertRules = vi.fn(async () => [{ id: 'ticket-triage', enabled: true }])
+    const applyRoleMatrix = vi.fn(async () => ({
+      rolesApplied: ['finance'],
+      fieldPoliciesApplied: 1,
+    }))
+
+    const result = await installer.runInstall(
+      buildRunInput(
+        {
+          mode: 'enable',
+          blueprint: buildAdapterBackedBlueprint(),
+          context: {
+            api: { database: db },
+            metadata: { name: 'plugin-after-sales' },
+            services: {
+              automationRegistry: { upsertRules },
+              rbacProvisioning: { applyRoleMatrix },
+            },
+          },
+        },
+        db,
+      ),
+    )
+
+    expect(result.status).toBe('installed')
+    expect(upsertRules).toHaveBeenCalledWith(
+      expect.objectContaining({
+        pluginId: 'plugin-after-sales',
+        appId: 'after-sales',
+        tenantId: 'tenant_42',
+        projectId: 'tenant_42:after-sales',
+        templateId: 'after-sales-default',
+      }),
+    )
+    expect(applyRoleMatrix).toHaveBeenCalledWith(
+      expect.objectContaining({
+        pluginId: 'plugin-after-sales',
+        appId: 'after-sales',
+        tenantId: 'tenant_42',
+        projectId: 'tenant_42:after-sales',
+        matrix: {
+          roles: [
+            {
+              slug: 'finance',
+              label: 'Finance',
+              permissions: ['after_sales:read', 'after_sales:approve'],
+            },
+          ],
+          fieldPolicies: [
+            {
+              objectId: 'serviceTicket',
+              field: 'refundAmount',
+              roleSlug: 'finance',
+              visibility: 'visible',
+              editability: 'editable',
+            },
+          ],
+        },
+      }),
+    )
+  })
+
+  it('falls back to plugin-after-sales when metadata.name is missing', async () => {
+    const upsertRules = vi.fn(async () => [{ id: 'ticket-triage', enabled: true }])
+    const applyRoleMatrix = vi.fn(async () => ({
+      rolesApplied: ['finance'],
+      fieldPoliciesApplied: 1,
+    }))
+
+    await installer.runInstall(
+      buildRunInput(
+        {
+          mode: 'enable',
+          blueprint: buildAdapterBackedBlueprint(),
+          context: {
+            api: { database: db },
+            services: {
+              automationRegistry: { upsertRules },
+              rbacProvisioning: { applyRoleMatrix },
+            },
+          },
+        },
+        db,
+      ),
+    )
+
+    expect(upsertRules).toHaveBeenCalledWith(
+      expect.objectContaining({
+        pluginId: 'plugin-after-sales',
+      }),
+    )
+    expect(applyRoleMatrix).toHaveBeenCalledWith(
+      expect.objectContaining({
+        pluginId: 'plugin-after-sales',
+      }),
+    )
   })
 
   it('persists displayName and config to the ledger row', async () => {
@@ -536,6 +695,69 @@ describe('plugin-after-sales installer: runInstall enable mode', () => {
     })
     expect(db.rows).toHaveLength(0)
   })
+
+  it('returns partial when automation registry registration fails', async () => {
+    const upsertRules = vi.fn(async () => {
+      throw new Error('automation registry down')
+    })
+
+    const result = await installer.runInstall(
+      buildRunInput(
+        {
+          mode: 'enable',
+          blueprint: buildAdapterBackedBlueprint(),
+          context: {
+            api: { database: db },
+            metadata: { name: 'plugin-after-sales' },
+            services: {
+              automationRegistry: { upsertRules },
+              rbacProvisioning: {
+                applyRoleMatrix: vi.fn(async () => ({
+                  rolesApplied: ['finance'],
+                  fieldPoliciesApplied: 1,
+                })),
+              },
+            },
+          },
+        },
+        db,
+      ),
+    )
+
+    expect(result.status).toBe('partial')
+    expect(result.warnings).toContain('automation registration failed: automation registry down')
+    expect(db.rows[0].status).toBe('partial')
+  })
+
+  it('returns partial when role matrix provisioning fails', async () => {
+    const applyRoleMatrix = vi.fn(async () => {
+      throw new Error('rbac registry down')
+    })
+
+    const result = await installer.runInstall(
+      buildRunInput(
+        {
+          mode: 'enable',
+          blueprint: buildAdapterBackedBlueprint(),
+          context: {
+            api: { database: db },
+            metadata: { name: 'plugin-after-sales' },
+            services: {
+              automationRegistry: {
+                upsertRules: vi.fn(async () => [{ id: 'ticket-triage', enabled: true }]),
+              },
+              rbacProvisioning: { applyRoleMatrix },
+            },
+          },
+        },
+        db,
+      ),
+    )
+
+    expect(result.status).toBe('partial')
+    expect(result.warnings).toContain('rbac provisioning failed: rbac registry down')
+    expect(db.rows[0].status).toBe('partial')
+  })
 })
 
 describe('plugin-after-sales installer: runInstall reinstall mode', () => {
@@ -581,6 +803,62 @@ describe('plugin-after-sales installer: runInstall reinstall mode', () => {
     expect(db.rows[0].display_name).toBe('Acme Support Updated')
     expect(db.rows[0].mode).toBe('reinstall')
     expect(db.rows[0].last_install_at.getTime()).toBeGreaterThan(firstInstallAt)
+  })
+
+  it('still syncs automation registry on reinstall when the next blueprint removes all automations', async () => {
+    const upsertRules = vi.fn(async () => [])
+
+    await installer.runInstall(
+      buildRunInput(
+        {
+          mode: 'enable',
+          blueprint: buildAdapterBackedBlueprint(),
+          context: {
+            api: { database: db },
+            metadata: { name: 'plugin-after-sales' },
+            services: {
+              automationRegistry: { upsertRules },
+            },
+          },
+        },
+        db,
+      ),
+    )
+
+    upsertRules.mockClear()
+
+    const blueprintWithoutAutomations = {
+      ...buildAdapterBackedBlueprint(),
+      automations: [],
+    }
+
+    await installer.runInstall(
+      buildRunInput(
+        {
+          mode: 'reinstall',
+          blueprint: blueprintWithoutAutomations,
+          context: {
+            api: { database: db },
+            metadata: { name: 'plugin-after-sales' },
+            services: {
+              automationRegistry: { upsertRules },
+            },
+          },
+        },
+        db,
+      ),
+    )
+
+    expect(upsertRules).toHaveBeenCalledWith(
+      expect.objectContaining({
+        pluginId: 'plugin-after-sales',
+        appId: 'after-sales',
+        tenantId: 'tenant_42',
+        projectId: 'tenant_42:after-sales',
+        templateId: 'after-sales-default',
+        rules: [],
+      }),
+    )
   })
 })
 

@@ -33,6 +33,9 @@ interface FakeDatabase {
 }
 
 interface FakeContext {
+  metadata?: {
+    name?: string
+  }
   api: {
     database: FakeDatabase
     http: {
@@ -107,6 +110,13 @@ interface FakeContext {
   services: {
     notification: {
       send: ReturnType<typeof vi.fn>
+    }
+    automationRegistry: {
+      upsertRules: ReturnType<typeof vi.fn>
+      listRules: ReturnType<typeof vi.fn>
+    }
+    rbacProvisioning: {
+      applyRoleMatrix: ReturnType<typeof vi.fn>
     }
   }
   communication: {
@@ -228,6 +238,9 @@ function createContext(): {
   deleteRecord: ReturnType<typeof vi.fn>
   communicationCall: ReturnType<typeof vi.fn>
   notificationSend: ReturnType<typeof vi.fn>
+  automationUpsertRules: ReturnType<typeof vi.fn>
+  automationListRules: ReturnType<typeof vi.fn>
+  applyRoleMatrix: ReturnType<typeof vi.fn>
   db: FakeDatabase
 } {
   const routes = new Map<string, RegisteredHandler>()
@@ -549,6 +562,16 @@ function createContext(): {
     id: `sent:${String(notification.channel || 'unknown')}`,
     status: 'sent',
   }))
+  const automationUpsertRules = vi.fn(async (input: Record<string, unknown>) => input.rules || [])
+  const automationListRules = vi.fn(async () => [])
+  const applyRoleMatrix = vi.fn(async (input: Record<string, unknown>) => ({
+    rolesApplied: Array.isArray(input?.matrix?.roles)
+      ? input.matrix.roles.map((role: { slug: string }) => role.slug)
+      : [],
+    fieldPoliciesApplied: Array.isArray(input?.matrix?.fieldPolicies)
+      ? input.matrix.fieldPolicies.length
+      : 0,
+  }))
   const communicationCall = vi.fn(async (pluginName: string, method: string, payload: Record<string, unknown>) => {
     if (pluginName === 'after-sales-approval-bridge' && method === 'getRefundApproval') {
       return {
@@ -563,6 +586,9 @@ function createContext(): {
   })
 
   const context: FakeContext = {
+    metadata: {
+      name: 'plugin-after-sales',
+    },
     api: {
       database: db,
       http: {
@@ -598,6 +624,13 @@ function createContext(): {
       notification: {
         send: notificationSend,
       },
+      automationRegistry: {
+        upsertRules: automationUpsertRules,
+        listRules: automationListRules,
+      },
+      rbacProvisioning: {
+        applyRoleMatrix,
+      },
     },
     communication: {
       register: vi.fn(),
@@ -627,6 +660,9 @@ function createContext(): {
     deleteRecord,
     communicationCall,
     notificationSend,
+    automationUpsertRules,
+    automationListRules,
+    applyRoleMatrix,
     db,
   }
 }
@@ -671,6 +707,9 @@ describe('plugin-after-sales routes', () => {
   let communicationRegister: ReturnType<typeof vi.fn>
   let communicationCall: ReturnType<typeof vi.fn>
   let notificationSend: ReturnType<typeof vi.fn>
+  let automationUpsertRules: ReturnType<typeof vi.fn>
+  let automationListRules: ReturnType<typeof vi.fn>
+  let applyRoleMatrix: ReturnType<typeof vi.fn>
   let eventsOn: ReturnType<typeof vi.fn>
   let eventsOff: ReturnType<typeof vi.fn>
   let eventsEmit: ReturnType<typeof vi.fn>
@@ -696,6 +735,9 @@ describe('plugin-after-sales routes', () => {
     communicationRegister = setup.context.communication.register
     communicationCall = setup.context.communication.call
     notificationSend = setup.notificationSend
+    automationUpsertRules = setup.automationUpsertRules
+    automationListRules = setup.automationListRules
+    applyRoleMatrix = setup.applyRoleMatrix
     eventsOn = setup.context.api.events.on
     eventsOff = setup.context.api.events.off
     eventsEmit = setup.context.api.events.emit
@@ -4349,6 +4391,26 @@ describe('plugin-after-sales routes', () => {
         type: 'grid',
       }),
     })
+    expect(automationUpsertRules).toHaveBeenCalledTimes(1)
+    expect(automationUpsertRules).toHaveBeenCalledWith(
+      expect.objectContaining({
+        pluginId: 'plugin-after-sales',
+        appId: 'after-sales',
+        tenantId: 'tenant_42',
+        projectId: 'tenant_42:after-sales',
+        templateId: 'after-sales-default',
+      }),
+    )
+    expect(automationListRules).not.toHaveBeenCalled()
+    expect(applyRoleMatrix).toHaveBeenCalledTimes(1)
+    expect(applyRoleMatrix).toHaveBeenCalledWith(
+      expect.objectContaining({
+        pluginId: 'plugin-after-sales',
+        appId: 'after-sales',
+        tenantId: 'tenant_42',
+        projectId: 'tenant_42:after-sales',
+      }),
+    )
     expect(db.rows).toHaveLength(1)
   })
 

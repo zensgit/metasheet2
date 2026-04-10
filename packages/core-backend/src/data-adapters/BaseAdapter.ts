@@ -73,6 +73,12 @@ export interface QueryResult<T = Record<string, DbValue>> {
     totalCount?: number
     pageCount?: number
     currentPage?: number
+    sources?: Array<{
+      name: string
+      ok: boolean
+      count: number
+      error?: string
+    }>
     columns?: Array<{
       name: string
       type: string
