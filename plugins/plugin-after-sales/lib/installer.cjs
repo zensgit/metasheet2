@@ -110,6 +110,24 @@ function validateBlueprint(blueprint) {
       'blueprint.objects must be a non-empty array',
     )
   }
+  if (blueprint.automations != null && !Array.isArray(blueprint.automations)) {
+    throw new InstallerError(
+      ERROR_CODES.VALIDATION_FAILED,
+      'blueprint.automations must be an array when provided',
+    )
+  }
+  if (blueprint.roles != null && !Array.isArray(blueprint.roles)) {
+    throw new InstallerError(
+      ERROR_CODES.VALIDATION_FAILED,
+      'blueprint.roles must be an array when provided',
+    )
+  }
+  if (blueprint.fieldPolicies != null && !Array.isArray(blueprint.fieldPolicies)) {
+    throw new InstallerError(
+      ERROR_CODES.VALIDATION_FAILED,
+      'blueprint.fieldPolicies must be an array when provided',
+    )
+  }
   for (const obj of blueprint.objects) {
     if (!obj || typeof obj !== 'object') {
       throw new InstallerError(ERROR_CODES.VALIDATION_FAILED, 'object descriptor not an object')
@@ -210,6 +228,31 @@ function getProvisioningApi(context) {
     typeof context.api.multitable.provisioning.ensureObject === 'function'
     ? context.api.multitable.provisioning
     : null
+}
+
+function getAutomationRegistryService(context) {
+  return context &&
+    context.services &&
+    context.services.automationRegistry &&
+    typeof context.services.automationRegistry.upsertRules === 'function'
+    ? context.services.automationRegistry
+    : null
+}
+
+function getRbacProvisioningService(context) {
+  return context &&
+    context.services &&
+    context.services.rbacProvisioning &&
+    typeof context.services.rbacProvisioning.applyRoleMatrix === 'function'
+    ? context.services.rbacProvisioning
+    : null
+}
+
+function normalizeRoleMatrix(blueprint) {
+  return {
+    roles: Array.isArray(blueprint && blueprint.roles) ? blueprint.roles : [],
+    fieldPolicies: Array.isArray(blueprint && blueprint.fieldPolicies) ? blueprint.fieldPolicies : [],
+  }
 }
 
 function shouldProvisionObjectInMultitable(obj) {
@@ -359,6 +402,8 @@ async function runInstall(input) {
   // Step 4: generate projectId (v1 pseudo value)
   const projectId = getProjectId(tenantId, blueprint.appId)
   const provisioning = getProvisioningApi(context)
+  const automationRegistry = getAutomationRegistryService(context)
+  const rbacProvisioning = getRbacProvisioningService(context)
   const objectSheetIds = new Map()
 
   // Step 5-10: execute installation
@@ -403,8 +448,6 @@ async function runInstall(input) {
       createdViews.push(view.id)
     }
 
-    // TODO(phase-1b): register AutomationRuleDraft via workflow service adapter
-    // TODO(phase-1b): apply RolePermissionMatrix via RBAC adapter
   } catch (err) {
     // Core-object failure: still write ledger row with status='failed' so the
     // current endpoint can return `failed` and the frontend can retry with
@@ -436,6 +479,42 @@ async function runInstall(input) {
       ERROR_CODES.CORE_OBJECT_FAILED,
       `core object creation failed: ${err && err.message ? err.message : err}`,
     )
+  }
+
+  if (Array.isArray(blueprint.automations) && blueprint.automations.length > 0) {
+    try {
+      if (!automationRegistry) {
+        throw new Error('automationRegistry service unavailable on plugin context')
+      }
+      await automationRegistry.upsertRules({
+        pluginId: context.metadata && context.metadata.name ? context.metadata.name : blueprint.appId,
+        appId: blueprint.appId,
+        tenantId,
+        projectId,
+        templateId: blueprint.id,
+        rules: blueprint.automations,
+      })
+    } catch (err) {
+      warnings.push(`automation registration failed: ${err && err.message ? err.message : err}`)
+    }
+  }
+
+  const roleMatrix = normalizeRoleMatrix(blueprint)
+  if (roleMatrix.roles.length > 0 || roleMatrix.fieldPolicies.length > 0) {
+    try {
+      if (!rbacProvisioning) {
+        throw new Error('rbacProvisioning service unavailable on plugin context')
+      }
+      await rbacProvisioning.applyRoleMatrix({
+        pluginId: context.metadata && context.metadata.name ? context.metadata.name : blueprint.appId,
+        appId: blueprint.appId,
+        tenantId,
+        projectId,
+        matrix: roleMatrix,
+      })
+    } catch (err) {
+      warnings.push(`rbac provisioning failed: ${err && err.message ? err.message : err}`)
+    }
   }
 
   // Step 11: determine terminal status and write ledger

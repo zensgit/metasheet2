@@ -81,6 +81,7 @@ function stableMetaId(prefix: string, ...parts: string[]): string {
 
 const TENANT_ID = 'default'
 const APP_ID = 'after-sales'
+const PLUGIN_ID = 'plugin-after-sales'
 const PROJECT_ID = `${TENANT_ID}:${APP_ID}`
 const SUPERVISOR_USER_ID = 'after-sales-service-record-supervisor-it'
 const SUPERVISOR_EMAIL = 'after-sales-supervisor-it@example.com'
@@ -251,6 +252,16 @@ describe('after-sales plugin install integration', () => {
     await pool.query('DELETE FROM meta_fields WHERE sheet_id = ANY($1::text[])', [SHEET_IDS])
     await pool.query('DELETE FROM meta_sheets WHERE id = ANY($1::text[])', [SHEET_IDS])
     await pool.query(
+      `DELETE FROM plugin_field_policy_registry
+       WHERE tenant_id = $1 AND plugin_id = $2 AND app_id = $3 AND project_id = $4`,
+      [TENANT_ID, PLUGIN_ID, APP_ID, PROJECT_ID],
+    )
+    await pool.query(
+      `DELETE FROM plugin_automation_rule_registry
+       WHERE tenant_id = $1 AND plugin_id = $2 AND app_id = $3 AND project_id = $4`,
+      [TENANT_ID, PLUGIN_ID, APP_ID, PROJECT_ID],
+    )
+    await pool.query(
       'DELETE FROM plugin_after_sales_template_installs WHERE tenant_id = $1 AND app_id = $2',
       [TENANT_ID, APP_ID],
     )
@@ -280,7 +291,9 @@ describe('after-sales plugin install integration', () => {
          UNION ALL SELECT to_regclass('public.meta_records') AS name
          UNION ALL SELECT to_regclass('public.approval_instances') AS name
          UNION ALL SELECT to_regclass('public.approval_records') AS name
-         UNION ALL SELECT to_regclass('public.approval_assignments') AS name`,
+         UNION ALL SELECT to_regclass('public.approval_assignments') AS name
+         UNION ALL SELECT to_regclass('public.plugin_automation_rule_registry') AS name
+         UNION ALL SELECT to_regclass('public.plugin_field_policy_registry') AS name`,
       )
       if (tables.rows.some((row) => !row.name)) return
       schemaReady = true
@@ -428,6 +441,87 @@ describe('after-sales plugin install integration', () => {
         project_id: PROJECT_ID,
         status: 'installed',
         display_name: 'After Sales Integration',
+      },
+    ])
+
+    const automationRegistryRes = await pool.query<{
+      rule_id: string
+      enabled: boolean
+    }>(
+      `SELECT rule_id, enabled
+       FROM plugin_automation_rule_registry
+       WHERE tenant_id = $1
+         AND plugin_id = $2
+         AND app_id = $3
+         AND project_id = $4
+       ORDER BY rule_id ASC`,
+      [TENANT_ID, PLUGIN_ID, APP_ID, PROJECT_ID],
+    )
+    expect(automationRegistryRes.rows).toEqual([
+      { rule_id: 'refund-approval', enabled: true },
+      { rule_id: 'service-record-notify', enabled: true },
+      { rule_id: 'sla-watcher', enabled: true },
+      { rule_id: 'ticket-triage', enabled: true },
+    ])
+
+    const fieldPolicyRes = await pool.query<{
+      object_id: string
+      field_name: string
+      role_slug: string
+      visibility: string
+      editability: string
+    }>(
+      `SELECT object_id, field_name, role_slug, visibility, editability
+       FROM plugin_field_policy_registry
+       WHERE tenant_id = $1
+         AND plugin_id = $2
+         AND app_id = $3
+         AND project_id = $4
+       ORDER BY role_slug ASC`,
+      [TENANT_ID, PLUGIN_ID, APP_ID, PROJECT_ID],
+    )
+    expect(fieldPolicyRes.rows).toEqual([
+      {
+        object_id: 'serviceTicket',
+        field_name: 'refundAmount',
+        role_slug: 'admin',
+        visibility: 'visible',
+        editability: 'editable',
+      },
+      {
+        object_id: 'serviceTicket',
+        field_name: 'refundAmount',
+        role_slug: 'customer_service',
+        visibility: 'hidden',
+        editability: 'readonly',
+      },
+      {
+        object_id: 'serviceTicket',
+        field_name: 'refundAmount',
+        role_slug: 'finance',
+        visibility: 'visible',
+        editability: 'editable',
+      },
+      {
+        object_id: 'serviceTicket',
+        field_name: 'refundAmount',
+        role_slug: 'supervisor',
+        visibility: 'visible',
+        editability: 'readonly',
+      },
+      {
+        object_id: 'serviceTicket',
+        field_name: 'refundAmount',
+        role_slug: 'technician',
+        visibility: 'hidden',
+        editability: 'readonly',
+      },
+      {
+        object_id: 'serviceTicket',
+        field_name: 'refundAmount',
+        role_slug: 'viewer',
+        visibility: 'hidden',
+        editability: 'readonly',
       },
     ])
 
