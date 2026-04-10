@@ -26,6 +26,19 @@ function createResponse(payload: unknown, options: MockResponseOptions = {}) {
   } as Response
 }
 
+function createFieldPoliciesResponse(
+  policy: { visibility: 'hidden' | 'visible'; editability: 'readonly' | 'editable' },
+) {
+  return createResponse({
+    projectId: 'tenant:after-sales',
+    fields: {
+      serviceTicket: {
+        refundAmount: policy,
+      },
+    },
+  })
+}
+
 async function flushUi(cycles = 4): Promise<void> {
   for (let i = 0; i < cycles; i += 1) {
     await Promise.resolve()
@@ -1019,6 +1032,266 @@ describe('AfterSalesView', () => {
         }),
       }),
     )
+  })
+
+  it('hides refund controls when the field policy is hidden', async () => {
+    apiFetchMock.mockImplementation(async (path: string, options?: RequestInit) => {
+      if (path === '/api/after-sales/app-manifest') {
+        return createResponse({
+          id: 'after-sales-default',
+          displayName: 'After Sales',
+          platformDependencies: ['core-backend'],
+          objects: [],
+          workflows: [],
+        })
+      }
+
+      if (path === '/api/after-sales/projects/current') {
+        return createResponse({
+          status: 'installed',
+          projectId: 'tenant:after-sales',
+          displayName: 'After Sales',
+          config: {
+            defaultSlaHours: 24,
+            urgentSlaHours: 4,
+            followUpAfterDays: 7,
+          },
+          installResult: {
+            status: 'installed',
+            createdObjects: [],
+            createdViews: [],
+            warnings: [],
+            reportRef: 'install-006-hidden',
+          },
+          reportRef: 'install-006-hidden',
+        })
+      }
+
+      if (path === '/api/after-sales/field-policies') {
+        return createFieldPoliciesResponse({
+          visibility: 'hidden',
+          editability: 'readonly',
+        })
+      }
+
+      if (path === '/api/after-sales/tickets' && !options?.method) {
+        return createResponse({
+          projectId: 'tenant:after-sales',
+          count: 1,
+          tickets: [
+            {
+              id: 'ticket-1',
+              version: 1,
+              data: {
+                ticketNo: 'AF-001',
+                title: 'Install compressor',
+                status: 'open',
+                refundStatus: '',
+                refundAmount: 88.5,
+              },
+            },
+          ],
+        })
+      }
+
+      throw new Error(`Unexpected request: ${path}`)
+    })
+
+    const mounted = mountAfterSalesView()
+    app = mounted.app
+    container = mounted.container
+
+    await waitForText(container, 'AF-001')
+
+    expect(container?.querySelector('#after-sales-ticket-refund-amount')).toBeNull()
+    expect(container?.querySelector('#after-sales-ticket-refund-request-ticket-1')).toBeNull()
+    const refundButton = Array.from(container?.querySelectorAll('button') ?? []).find((item) =>
+      item.textContent?.includes('Request refund'),
+    )
+    expect(refundButton).toBeUndefined()
+    expect(container?.textContent).not.toContain('¥88.50')
+  })
+
+  it('renders refund controls as readonly when the field policy is readonly', async () => {
+    apiFetchMock.mockImplementation(async (path: string, options?: RequestInit) => {
+      if (path === '/api/after-sales/app-manifest') {
+        return createResponse({
+          id: 'after-sales-default',
+          displayName: 'After Sales',
+          platformDependencies: ['core-backend'],
+          objects: [],
+          workflows: [],
+        })
+      }
+
+      if (path === '/api/after-sales/projects/current') {
+        return createResponse({
+          status: 'installed',
+          projectId: 'tenant:after-sales',
+          displayName: 'After Sales',
+          config: {
+            defaultSlaHours: 24,
+            urgentSlaHours: 4,
+            followUpAfterDays: 7,
+          },
+          installResult: {
+            status: 'installed',
+            createdObjects: [],
+            createdViews: [],
+            warnings: [],
+            reportRef: 'install-006-readonly',
+          },
+          reportRef: 'install-006-readonly',
+        })
+      }
+
+      if (path === '/api/after-sales/field-policies') {
+        return createFieldPoliciesResponse({
+          visibility: 'visible',
+          editability: 'readonly',
+        })
+      }
+
+      if (path === '/api/after-sales/tickets' && !options?.method) {
+        return createResponse({
+          projectId: 'tenant:after-sales',
+          count: 1,
+          tickets: [
+            {
+              id: 'ticket-1',
+              version: 1,
+              data: {
+                ticketNo: 'AF-001',
+                title: 'Install compressor',
+                status: 'open',
+                refundStatus: '',
+                refundAmount: 88.5,
+              },
+            },
+          ],
+        })
+      }
+
+      throw new Error(`Unexpected request: ${path}`)
+    })
+
+    const mounted = mountAfterSalesView()
+    app = mounted.app
+    container = mounted.container
+
+    await waitForText(container, 'AF-001')
+
+    const createRefundInput = container?.querySelector<HTMLInputElement>('#after-sales-ticket-refund-amount')
+    const inlineRefundInput = container?.querySelector<HTMLInputElement>('#after-sales-ticket-refund-request-ticket-1')
+    const refundButton = findButton(container!, 'Request refund')
+
+    expect(createRefundInput).toBeTruthy()
+    expect(inlineRefundInput).toBeTruthy()
+    expect(createRefundInput?.disabled).toBe(true)
+    expect(inlineRefundInput?.disabled).toBe(true)
+    expect(refundButton.disabled).toBe(true)
+    expect(container?.textContent).toContain('¥88.50')
+  })
+
+  it('keeps refund controls editable when the field policy is editable', async () => {
+    apiFetchMock.mockImplementation(async (path: string, options?: RequestInit) => {
+      if (path === '/api/after-sales/app-manifest') {
+        return createResponse({
+          id: 'after-sales-default',
+          displayName: 'After Sales',
+          platformDependencies: ['core-backend'],
+          objects: [],
+          workflows: [],
+        })
+      }
+
+      if (path === '/api/after-sales/projects/current') {
+        return createResponse({
+          status: 'installed',
+          projectId: 'tenant:after-sales',
+          displayName: 'After Sales',
+          config: {
+            defaultSlaHours: 24,
+            urgentSlaHours: 4,
+            followUpAfterDays: 7,
+          },
+          installResult: {
+            status: 'installed',
+            createdObjects: [],
+            createdViews: [],
+            warnings: [],
+            reportRef: 'install-006-editable',
+          },
+          reportRef: 'install-006-editable',
+        })
+      }
+
+      if (path === '/api/after-sales/field-policies') {
+        return createFieldPoliciesResponse({
+          visibility: 'visible',
+          editability: 'editable',
+        })
+      }
+
+      if (path === '/api/after-sales/tickets' && !options?.method) {
+        return createResponse({
+          projectId: 'tenant:after-sales',
+          count: 1,
+          tickets: [
+            {
+              id: 'ticket-1',
+              version: 1,
+              data: {
+                ticketNo: 'AF-001',
+                title: 'Install compressor',
+                status: 'open',
+                refundStatus: '',
+                refundAmount: 0,
+              },
+            },
+          ],
+        })
+      }
+
+      if (path === '/api/after-sales/tickets/ticket-1/refund-request' && options?.method === 'POST') {
+        return createResponse({
+          projectId: 'tenant:after-sales',
+          ticket: {
+            id: 'ticket-1',
+            version: 2,
+            data: {
+              ticketNo: 'AF-001',
+              title: 'Install compressor',
+              status: 'open',
+              refundStatus: 'pending',
+              refundAmount: 120.5,
+            },
+          },
+        })
+      }
+
+      throw new Error(`Unexpected request: ${path}`)
+    })
+
+    const mounted = mountAfterSalesView()
+    app = mounted.app
+    container = mounted.container
+
+    await waitForText(container, 'AF-001')
+
+    const createRefundInput = container?.querySelector<HTMLInputElement>('#after-sales-ticket-refund-amount')
+    const inlineRefundInput = container?.querySelector<HTMLInputElement>('#after-sales-ticket-refund-request-ticket-1')
+    const refundButton = findButton(container!, 'Request refund')
+
+    expect(createRefundInput).toBeTruthy()
+    expect(inlineRefundInput).toBeTruthy()
+    expect(createRefundInput?.disabled).toBe(false)
+    expect(inlineRefundInput?.disabled).toBe(false)
+    expect(refundButton.disabled).toBe(false)
+
+    await setInputValue(inlineRefundInput!, '120.5')
+    refundButton.click()
+    await waitForText(container!, 'Requested refund for AF-001')
   })
 
   it('blocks refund requests when the inline refund amount is invalid', async () => {
