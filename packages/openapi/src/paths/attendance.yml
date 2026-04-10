@@ -3396,6 +3396,13 @@ paths:
                       integrationId: { type: string }
                       imported: { type: integer }
                       skipped: { type: array, items: { type: object } }
+                      partialErrors:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            userId: { type: string }
+                            message: { type: string }
                       batchId: { type: string, nullable: true }
                       run: { $ref: '#/components/schemas/AttendanceIntegrationRun' }
         '400': { $ref: '#/components/responses/ValidationError' }

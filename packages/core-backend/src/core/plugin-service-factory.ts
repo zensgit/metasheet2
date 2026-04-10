@@ -11,7 +11,7 @@ import { CacheServiceImpl } from '../services/CacheService'
 import { QueueServiceImpl } from '../services/QueueService'
 import { StorageServiceImpl } from '../services/StorageService'
 import { SchedulerServiceImpl } from '../services/SchedulerService'
-import { NotificationServiceImpl } from '../services/NotificationService'
+import { DingTalkNotificationChannel, NotificationServiceImpl } from '../services/NotificationService'
 import { WebSocketServiceImpl } from '../services/WebSocketService'
 import { SecurityServiceImpl } from '../services/SecurityService'
 import { ValidationServiceImpl } from '../services/ValidationService'
@@ -83,8 +83,16 @@ export interface ServiceFactoryOptions {
       provider?: 'smtp' | 'sendgrid' | 'ses'
       config?: EmailConfig
     }
+    dingtalk?: {
+      secret?: string
+      timeout?: number
+      maxAttempts?: number
+      retryDelayMs?: number
+    }
     webhook?: {
       timeout?: number
+      maxAttempts?: number
+      retryDelayMs?: number
     }
   }
 
@@ -340,7 +348,7 @@ export class PluginServiceFactory {
         try {
           switch (channel) {
             case 'dingtalk':
-              // 注册钉钉渠道
+              service.registerChannel(new DingTalkNotificationChannel(config.dingtalk || {}))
               break
             case 'teams':
               // 注册Teams渠道
