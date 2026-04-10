@@ -1829,7 +1829,7 @@ describe('Attendance Plugin Integration', () => {
     expect(lookupRes.status).toBe(200)
   })
 
-  it('normalizes name-based rotation rules to shift UUIDs and blocks deleting a shift with an active rotation assignment', async () => {
+  it('blocks deleting a shift that is referenced by a rotation rule created with shift IDs', async () => {
     if (!baseUrl) return
 
     const runSuffix = Date.now().toString(36)
@@ -1857,10 +1857,8 @@ describe('Attendance Plugin Integration', () => {
     })
     expect(shiftRes.status).toBe(201)
     const shiftId = (shiftRes.body as { data?: { id?: string } } | undefined)?.data?.id
-    const shiftName = (shiftRes.body as { data?: { name?: string } } | undefined)?.data?.name
     expect(shiftId).toBeTruthy()
-    expect(shiftName).toBeTruthy()
-    if (!shiftId || !shiftName) return
+    if (!shiftId) return
 
     const rotationRuleRes = await requestJson(`${baseUrl}/api/attendance/rotation-rules`, {
       method: 'POST',
@@ -1871,15 +1869,13 @@ describe('Attendance Plugin Integration', () => {
       body: JSON.stringify({
         name: `Delete Guard Rotation ${runSuffix}`,
         timezone: 'Asia/Shanghai',
-        shiftSequence: [shiftName],
+        shiftSequence: [shiftId],
         isActive: true,
       }),
     })
     expect(rotationRuleRes.status).toBe(201)
     const rotationRuleId = (rotationRuleRes.body as { data?: { id?: string } } | undefined)?.data?.id
-    const createdRotationRule = (rotationRuleRes.body as { data?: { shiftSequence?: string[] } } | undefined)?.data
     expect(rotationRuleId).toBeTruthy()
-    expect(createdRotationRule?.shiftSequence).toEqual([shiftId])
     if (!rotationRuleId) return
 
     const rotationAssignmentRes = await requestJson(`${baseUrl}/api/attendance/rotation-assignments`, {
@@ -1916,7 +1912,7 @@ describe('Attendance Plugin Integration', () => {
     expect(lookupRes.status).toBe(200)
   })
 
-  it('accepts UUID-like shift names for rotation rules and runtime rotation resolution', async () => {
+  it('rejects non-UUID shift references for rotation rules, including UUID-like shift names', async () => {
     if (!baseUrl) return
 
     const runSuffix = Date.now().toString(36)
@@ -1928,9 +1924,28 @@ describe('Attendance Plugin Integration', () => {
     expect(token).toBeTruthy()
     if (!token) return
 
+    const shiftName = `Rotation Name Shift ${runSuffix}`
     const shiftUuidLikeName = randomUuidV4()
-    const workDate = '2026-03-30'
     const shiftRes = await requestJson(`${baseUrl}/api/attendance/shifts`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        name: shiftName,
+        timezone: 'Asia/Tokyo',
+        workStartTime: '09:00',
+        workEndTime: '18:00',
+        workingDays: [1, 2, 3, 4, 5],
+      }),
+    })
+    expect(shiftRes.status).toBe(201)
+    const shiftId = (shiftRes.body as { data?: { id?: string } } | undefined)?.data?.id
+    expect(shiftId).toBeTruthy()
+    if (!shiftId) return
+
+    const uuidLikeShiftRes = await requestJson(`${baseUrl}/api/attendance/shifts`, {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${token}`,
@@ -1944,65 +1959,91 @@ describe('Attendance Plugin Integration', () => {
         workingDays: [1, 2, 3, 4, 5],
       }),
     })
-    expect(shiftRes.status).toBe(201)
-    const shiftId = (shiftRes.body as { data?: { id?: string } } | undefined)?.data?.id
-    expect(shiftId).toBeTruthy()
-    if (!shiftId) return
+    expect(uuidLikeShiftRes.status).toBe(201)
 
-    const rotationRuleRes = await requestJson(`${baseUrl}/api/attendance/rotation-rules`, {
+    const invalidCreateByNameRes = await requestJson(`${baseUrl}/api/attendance/rotation-rules`, {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${token}`,
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        name: `UUID Like Rotation ${runSuffix}`,
+        name: `Invalid Name Rotation ${runSuffix}`,
         timezone: 'Asia/Tokyo',
-        shiftSequence: [shiftUuidLikeName],
+        shiftSequence: [shiftName],
         isActive: true,
       }),
     })
-    expect(rotationRuleRes.status).toBe(201)
-    const rotationRule = (rotationRuleRes.body as { data?: { id?: string; shiftSequence?: string[] } } | undefined)?.data
-    expect(rotationRule?.shiftSequence).toEqual([shiftId])
-    expect(rotationRule?.id).toBeTruthy()
-    if (!rotationRule?.id) return
+    expect(invalidCreateByNameRes.status).toBe(400)
+    const invalidCreateByNameBody = invalidCreateByNameRes.body as { error?: { code?: string; message?: string } } | undefined
+    expect(invalidCreateByNameBody?.error?.code).toBe('VALIDATION_ERROR')
+    expect(String(invalidCreateByNameBody?.error?.message ?? '')).toContain('shiftSequence must contain shift IDs')
 
-    const rotationAssignmentRes = await requestJson(`${baseUrl}/api/attendance/rotation-assignments`, {
+    const invalidCreateByUuidLikeNameRes = await requestJson(`${baseUrl}/api/attendance/rotation-rules`, {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${token}`,
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        userId: testUserId,
-        rotationRuleId: rotationRule.id,
-        startDate: workDate,
-        isActive: true,
+        name: `Invalid UUID Like Rotation ${runSuffix}`,
+        timezone: 'Asia/Tokyo',
+        shift_sequence: [shiftUuidLikeName],
+        is_active: true,
       }),
     })
-    expect(rotationAssignmentRes.status).toBe(201)
+    expect(invalidCreateByUuidLikeNameRes.status).toBe(400)
+    const invalidCreateByUuidLikeNameBody = invalidCreateByUuidLikeNameRes.body as { error?: { code?: string; message?: string } } | undefined
+    expect(invalidCreateByUuidLikeNameBody?.error?.code).toBe('VALIDATION_ERROR')
+    expect(String(invalidCreateByUuidLikeNameBody?.error?.message ?? '')).toContain('shiftSequence must contain shift IDs')
 
-    const punchRes = await requestJson(`${baseUrl}/api/attendance/punch`, {
+    const validRotationRuleRes = await requestJson(`${baseUrl}/api/attendance/rotation-rules`, {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${token}`,
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        eventType: 'check_in',
-        occurredAt: `${workDate}T09:00:00+09:00`,
+        name: `Valid Rotation ${runSuffix}`,
+        timezone: 'Asia/Tokyo',
+        shiftSequence: [shiftId],
+        isActive: true,
       }),
     })
-    expect(punchRes.status).toBe(200)
-    const punchBody = punchRes.body as {
-      data?: {
-        event?: { timezone?: string; workDate?: string; work_date?: string }
-        record?: { timezone?: string; workDate?: string; work_date?: string }
-      }
-    } | undefined
-    expect(punchBody?.data?.event?.timezone).toBe('Asia/Tokyo')
-    expect(punchBody?.data?.record?.timezone).toBe('Asia/Tokyo')
+    expect(validRotationRuleRes.status).toBe(201)
+    const rotationRuleId = (validRotationRuleRes.body as { data?: { id?: string } } | undefined)?.data?.id
+    expect(rotationRuleId).toBeTruthy()
+    if (!rotationRuleId) return
+
+    const invalidUpdateByNameRes = await requestJson(`${baseUrl}/api/attendance/rotation-rules/${rotationRuleId}`, {
+      method: 'PUT',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        shiftSequence: [shiftName],
+      }),
+    })
+    expect(invalidUpdateByNameRes.status).toBe(400)
+    const invalidUpdateByNameBody = invalidUpdateByNameRes.body as { error?: { code?: string; message?: string } } | undefined
+    expect(invalidUpdateByNameBody?.error?.code).toBe('VALIDATION_ERROR')
+    expect(String(invalidUpdateByNameBody?.error?.message ?? '')).toContain('shiftSequence must contain shift IDs')
+
+    const invalidUpdateByUuidLikeNameRes = await requestJson(`${baseUrl}/api/attendance/rotation-rules/${rotationRuleId}`, {
+      method: 'PUT',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        shift_sequence: [shiftUuidLikeName],
+      }),
+    })
+    expect(invalidUpdateByUuidLikeNameRes.status).toBe(400)
+    const invalidUpdateByUuidLikeNameBody = invalidUpdateByUuidLikeNameRes.body as { error?: { code?: string; message?: string } } | undefined
+    expect(invalidUpdateByUuidLikeNameBody?.error?.code).toBe('VALIDATION_ERROR')
+    expect(String(invalidUpdateByUuidLikeNameBody?.error?.message ?? '')).toContain('shiftSequence must contain shift IDs')
   })
 
   it('returns 409 when deleting a shift that is still referenced by a rotation rule without assignments', async () => {

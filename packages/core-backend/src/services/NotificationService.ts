@@ -3,6 +3,7 @@
  * 支持多渠道通知发送，模板管理，订阅管理
  */
 
+import { createHmac } from 'node:crypto'
 import { EventEmitter } from 'eventemitter3'
 import type {
   NotificationService,
@@ -18,6 +19,7 @@ import type {
   NotificationPreferences
 } from '../types/plugin'
 import { Logger } from '../core/logger'
+import { BackoffStrategy } from '../utils/BackoffStrategy'
 
 /**
  * Email notification payload
@@ -46,6 +48,147 @@ interface FeishuMessagePayload {
   title: string
   content: string
   data?: unknown
+}
+
+interface DingTalkRobotPayload {
+  msgtype: 'markdown'
+  markdown: {
+    title: string
+    text: string
+  }
+}
+
+interface DingTalkRobotResponse {
+  errcode?: number
+  errmsg?: string
+}
+
+function resolvePositiveInt(value: unknown, fallback: number, min = 1, max = Number.MAX_SAFE_INTEGER): number {
+  const numeric = typeof value === 'number' ? value : Number(value)
+  if (!Number.isFinite(numeric)) return fallback
+  return Math.min(Math.max(Math.trunc(numeric), min), max)
+}
+
+function isRetryableStatus(status: number): boolean {
+  return status === 408 || status === 429 || status >= 500
+}
+
+class NonRetryableNotificationError extends Error {}
+
+async function sleep(ms: number): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+async function readJsonSafely(response: Response): Promise<unknown> {
+  try {
+    return await response.json()
+  } catch {
+    return null
+  }
+}
+
+function validateDingTalkRobotResponse(payload: unknown): void {
+  const data = payload as DingTalkRobotResponse | null
+  if (!data || typeof data !== 'object') return
+  const errcode = typeof data.errcode === 'number' ? data.errcode : 0
+  if (errcode === 0) return
+  const errmsg = typeof data.errmsg === 'string' && data.errmsg.trim().length > 0
+    ? data.errmsg.trim()
+    : 'DingTalk robot request failed'
+  throw new NonRetryableNotificationError(`DingTalk errcode ${errcode}: ${errmsg}`)
+}
+
+async function postJsonWithRetry(options: {
+  url: string
+  headers?: Record<string, string>
+  payload: unknown
+  timeoutMs: number
+  maxAttempts: number
+  retryDelayMs: number
+  logger: Logger
+  context: string
+  responseValidator?: (payload: unknown) => void
+}): Promise<void> {
+  let lastError: Error | null = null
+
+  for (let attempt = 1; attempt <= options.maxAttempts; attempt += 1) {
+    try {
+      const response = await fetch(options.url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'User-Agent': 'MetaSheet-Notification-Service/1.0',
+          ...(options.headers ?? {}),
+        },
+        body: JSON.stringify(options.payload),
+        signal: AbortSignal.timeout(options.timeoutMs),
+      })
+
+      if (!response.ok) {
+        const message = `HTTP ${response.status}: ${response.statusText}`
+        if (attempt < options.maxAttempts && isRetryableStatus(response.status)) {
+          const delay = BackoffStrategy.calculate(attempt, {
+            type: 'exponential',
+            initialDelay: options.retryDelayMs,
+            maxDelay: Math.max(options.retryDelayMs, 5_000),
+            jitter: true,
+          })
+          options.logger.warn(`${options.context} failed on attempt ${attempt}, retrying in ${delay}ms: ${message}`)
+          await sleep(delay)
+          continue
+        }
+        throw new NonRetryableNotificationError(message)
+      }
+
+      if (options.responseValidator) {
+        const payload = await readJsonSafely(response)
+        options.responseValidator(payload)
+      }
+
+      return
+    } catch (error) {
+      lastError = error as Error
+      if (error instanceof NonRetryableNotificationError) {
+        throw error
+      }
+      if (attempt >= options.maxAttempts) break
+      const delay = BackoffStrategy.calculate(attempt, {
+        type: 'exponential',
+        initialDelay: options.retryDelayMs,
+        maxDelay: Math.max(options.retryDelayMs, 5_000),
+        jitter: true,
+      })
+      options.logger.warn(`${options.context} attempt ${attempt} failed, retrying in ${delay}ms`, {
+        error: lastError,
+      })
+      await sleep(delay)
+    }
+  }
+
+  throw lastError ?? new Error(`${options.context} failed`)
+}
+
+function buildDingTalkMarkdown(subject: string, content: string): DingTalkRobotPayload {
+  const title = subject.trim() || 'MetaSheet Notification'
+  const body = content.trim() || title
+  return {
+    msgtype: 'markdown',
+    markdown: {
+      title,
+      text: `### ${title}\n\n${body}`,
+    },
+  }
+}
+
+function buildSignedDingTalkWebhookUrl(baseUrl: string, secret?: string): string {
+  const normalizedSecret = typeof secret === 'string' ? secret.trim() : ''
+  if (!normalizedSecret) return baseUrl
+
+  const timestamp = Date.now()
+  const stringToSign = `${timestamp}\n${normalizedSecret}`
+  const sign = encodeURIComponent(createHmac('sha256', normalizedSecret).update(stringToSign).digest('base64'))
+  const separator = baseUrl.includes('?') ? '&' : '?'
+  return `${baseUrl}${separator}timestamp=${timestamp}&sign=${sign}`
 }
 
 /**
@@ -161,27 +304,91 @@ export class WebhookNotificationChannel implements NotificationChannel {
   }
 
   private async sendWebhook(url: string, payload: WebhookPayload): Promise<void> {
-    // 实际 HTTP 请求实现
     this.logger.info(`Sending webhook to ${url}`)
+    await postJsonWithRetry({
+      url,
+      payload,
+      timeoutMs: resolvePositiveInt(this.config.timeout, 10_000, 500, 60_000),
+      maxAttempts: resolvePositiveInt(this.config.maxAttempts, 3, 1, 6),
+      retryDelayMs: resolvePositiveInt(this.config.retryDelayMs, 750, 50, 10_000),
+      logger: this.logger,
+      context: `Webhook delivery failed for ${url}`,
+    })
+  }
+}
+
+/**
+ * 钉钉机器人通知渠道
+ */
+export class DingTalkNotificationChannel implements NotificationChannel {
+  name = 'dingtalk'
+  type = 'dingtalk' as const
+  config: NotificationChannelConfig
+  private logger: Logger
+
+  constructor(config: NotificationChannelConfig) {
+    this.config = config
+    this.logger = new Logger('DingTalkChannel')
+  }
+
+  async sender(notification: Notification, recipients: NotificationRecipient[]): Promise<NotificationResult> {
+    const id = `dingtalk_${Date.now()}_${Math.random().toString(36).substring(2, 11)}`
 
     try {
-      const response = await fetch(url, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'User-Agent': 'MetaSheet-Notification-Service/1.0'
-        },
-        body: JSON.stringify(payload),
-        signal: AbortSignal.timeout(10000) // 10秒超时
-      })
+      const robotRecipients = recipients.filter((recipient) => recipient.type === 'webhook' || recipient.type === 'group')
+      if (robotRecipients.length === 0) {
+        throw new Error('DingTalk notification requires webhook/group recipients')
+      }
 
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}: ${response.statusText}`)
+      for (const recipient of robotRecipients) {
+        const metadata = recipient.metadata as Record<string, unknown> | undefined
+        const url = typeof metadata?.webhookUrl === 'string' && metadata.webhookUrl.trim().length > 0
+          ? metadata.webhookUrl.trim()
+          : recipient.id
+        const secret = typeof metadata?.secret === 'string' && metadata.secret.trim().length > 0
+          ? metadata.secret.trim()
+          : typeof this.config.secret === 'string' && this.config.secret.trim().length > 0
+            ? this.config.secret.trim()
+            : undefined
+
+        await this.sendRobotMessage(url, secret, buildDingTalkMarkdown(notification.subject, notification.content))
+      }
+
+      return {
+        id,
+        status: 'sent',
+        sentAt: new Date(),
+        metadata: {
+          channel: 'dingtalk',
+          recipientCount: robotRecipients.length,
+        },
       }
     } catch (error) {
-      this.logger.error(`Webhook delivery failed for ${url}`, error as Error)
-      throw error
+      this.logger.error('Failed to send dingtalk notification', error as Error)
+      return {
+        id,
+        status: 'failed',
+        failedReason: (error as Error).message,
+        metadata: {
+          channel: 'dingtalk',
+        },
+      }
     }
+  }
+
+  private async sendRobotMessage(url: string, secret: string | undefined, payload: DingTalkRobotPayload): Promise<void> {
+    const signedUrl = buildSignedDingTalkWebhookUrl(url, secret)
+    this.logger.info(`Sending dingtalk robot message to ${url}`)
+    await postJsonWithRetry({
+      url: signedUrl,
+      payload,
+      timeoutMs: resolvePositiveInt(this.config.timeout, 10_000, 500, 60_000),
+      maxAttempts: resolvePositiveInt(this.config.maxAttempts, 3, 1, 6),
+      retryDelayMs: resolvePositiveInt(this.config.retryDelayMs, 750, 50, 10_000),
+      logger: this.logger,
+      context: `DingTalk delivery failed for ${url}`,
+      responseValidator: validateDingTalkRobotResponse,
+    })
   }
 }
 
@@ -262,6 +469,7 @@ export class NotificationServiceImpl extends EventEmitter implements Notificatio
     // 注册默认通知渠道
     this.registerChannel(new EmailNotificationChannel({}))
     this.registerChannel(new WebhookNotificationChannel({}))
+    this.registerChannel(new DingTalkNotificationChannel({}))
     this.registerChannel(new FeishuNotificationChannel({}))
   }
 

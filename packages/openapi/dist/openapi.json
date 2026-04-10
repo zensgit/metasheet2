@@ -954,7 +954,8 @@
           "shiftSequence": {
             "type": "array",
             "items": {
-              "type": "string"
+              "type": "string",
+              "format": "uuid"
             }
           },
           "isActive": {
@@ -9680,14 +9681,17 @@
                   },
                   "shiftSequence": {
                     "type": "array",
+                    "description": "Ordered shift IDs.",
                     "items": {
-                      "type": "string"
+                      "type": "string",
+                      "format": "uuid"
                     }
                   },
                   "shiftIds": {
                     "type": "array",
                     "items": {
-                      "type": "string"
+                      "type": "string",
+                      "format": "uuid"
                     },
                     "description": "Compatibility alias for shiftSequence."
                   },
@@ -9700,14 +9704,16 @@
                   "shift_sequence": {
                     "type": "array",
                     "items": {
-                      "type": "string"
+                      "type": "string",
+                      "format": "uuid"
                     },
                     "description": "Legacy snake_case alias for shiftSequence."
                   },
                   "shift_ids": {
                     "type": "array",
                     "items": {
-                      "type": "string"
+                      "type": "string",
+                      "format": "uuid"
                     },
                     "description": "Compatibility alias for shiftSequence."
                   },
@@ -9899,9 +9905,19 @@
                   },
                   "shiftSequence": {
                     "type": "array",
+                    "description": "Ordered shift IDs.",
                     "items": {
-                      "type": "string"
+                      "type": "string",
+                      "format": "uuid"
                     }
+                  },
+                  "shift_sequence": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "format": "uuid"
+                    },
+                    "description": "Legacy snake_case alias for shiftSequence."
                   },
                   "isActive": {
                     "type": "boolean"
@@ -11785,6 +11801,20 @@
                           "type": "array",
                           "items": {
                             "type": "object"
+                          }
+                        },
+                        "partialErrors": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "userId": {
+                                "type": "string"
+                              },
+                              "message": {
+                                "type": "string"
+                              }
+                            }
                           }
                         },
                         "batchId": {

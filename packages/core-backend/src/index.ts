@@ -90,6 +90,7 @@ import { kanbanRouter } from './routes/kanban'
 import { viewsRouter } from './routes/views'
 import { initAdminRoutes } from './routes/admin-routes'
 import { adminUsersRouter } from './routes/admin-users'
+import { adminDirectoryRouter } from './routes/admin-directory'
 import workflowRouter from './routes/workflow'
 import workflowDesignerRouter from './routes/workflow-designer'
 import plmWorkbenchRouter from './routes/plm-workbench'
@@ -864,6 +865,7 @@ export class MetaSheetServer {
       snapshotService: this.snapshotService,
     }))
     this.app.use(adminUsersRouter())
+    this.app.use('/api/admin/directory', adminDirectoryRouter())
 
     // V2 测试端点
     this.app.get('/api/v2/hello', (req, res) => {
