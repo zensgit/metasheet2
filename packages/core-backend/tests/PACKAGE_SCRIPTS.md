@@ -31,6 +31,7 @@ Add these scripts to your `package.json` for convenient test execution:
 - `npm run test:db` - Run only database operation tests
 - `npm run test:integration` - Run only integration tests
 - `npm run test:unit` - Run all unit tests
+- `npm run test:e2e:handoff` - Run federated document handoff Playwright E2E (requires 3 external servers; auto-skips if not reachable)
 - `npm run test:perf` - Run only performance tests
 - `npm run test:ui` - Open Vitest UI for interactive testing
 - `npm run test:contract` - Run Pact consumer contract tests

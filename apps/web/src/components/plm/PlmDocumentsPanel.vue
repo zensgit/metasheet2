@@ -118,6 +118,11 @@
       :delete-team-view-selection="panel.deleteDocumentTeamViewSelection"
     />
     <p v-if="panel.documentsError.value" class="status error">{{ panel.documentsError.value }}</p>
+    <p v-if="panel.documentsWarning.value && !panel.documentsError.value" class="status warning">⚠ {{ panel.documentsWarning.value }}</p>
+    <p v-if="panel.documentSourceProductId.value" class="status return-source">
+      <button class="btn ghost mini" @click="panel.returnToDocumentSource">← 返回源产品</button>
+      <span class="return-hint">当前正在查看关联文档对象</span>
+    </p>
     <div v-if="!panel.documents.value.length" class="empty">
       暂无文档
       <span class="empty-hint">（可先在 PLM 关联文件或设置文档角色过滤）</span>
@@ -190,6 +195,13 @@
           </td>
           <td v-if="panel.documentColumns.value.actions">
             <div class="inline-actions">
+              <button
+                v-if="panel.isAmlRelatedDocument(doc)"
+                class="btn ghost mini"
+                @click="panel.applyProductFromDocument(doc)"
+              >
+                打开
+              </button>
               <button class="btn ghost mini" @click="panel.copyDocumentId(doc)">复制 ID</button>
               <button
                 class="btn ghost mini"

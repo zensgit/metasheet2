@@ -466,3 +466,139 @@ describe('Federation contract routes', () => {
     })
   })
 })
+
+
+// ---------------------------------------------------------------------------
+// PLM documents partial-degradation (route-level regression)
+// ---------------------------------------------------------------------------
+
+describe('Federation PLM documents degradation visibility', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    rbacMocks.isAdmin.mockResolvedValue(true)
+    rbacMocks.userHasPermission.mockResolvedValue(true)
+    rbacMocks.listUserPermissions.mockResolvedValue(['federation:read', 'federation:write'])
+    auditMocks.auditLog.mockResolvedValue(undefined)
+  })
+
+  function createDocPlmAdapter(overrides: {
+    getProductDocuments: (...args: any[]) => Promise<any>
+  }) {
+    const base = createPlmAdapterMock()
+    return { ...base, getProductDocuments: vi.fn(overrides.getProductDocuments) }
+  }
+
+  it('returns sources metadata when attachments fail but AML succeeds', async () => {
+    const plmAdapter = createDocPlmAdapter({
+      getProductDocuments: async () => ({
+        data: [{ id: 'doc-aml-1', name: 'AML Doc', document_type: 'document' }],
+        metadata: {
+          totalCount: 1,
+          sources: [
+            { name: 'attachments', ok: false, count: 0, error: 'file endpoint down' },
+            { name: 'related_documents', ok: true, count: 1 },
+          ],
+        },
+      }),
+    })
+    const app = createFederationApp({ plmAdapter })
+
+    const res = await request(app)
+      .post('/api/federation/plm/query')
+      .send({ operation: 'documents', productId: 'prod-1' })
+
+    expect(res.status).toBe(200)
+    expect(res.body.ok).toBe(true)
+    expect(res.body.data.items).toHaveLength(1)
+    expect(res.body.data.sources).toBeDefined()
+    expect(res.body.data.sources[0]).toMatchObject({ name: 'attachments', ok: false })
+    expect(res.body.data.sources[0].error).toBe('file endpoint down')
+    expect(res.body.data.sources[1]).toMatchObject({ name: 'related_documents', ok: true, count: 1 })
+  })
+
+  it('returns sources metadata when AML fails but attachments succeed', async () => {
+    const plmAdapter = createDocPlmAdapter({
+      getProductDocuments: async () => ({
+        data: [{ id: 'file-1', name: 'drawing.pdf', document_type: 'drawing' }],
+        metadata: {
+          totalCount: 1,
+          sources: [
+            { name: 'attachments', ok: true, count: 1 },
+            { name: 'related_documents', ok: false, count: 0, error: 'aml query down' },
+          ],
+        },
+      }),
+    })
+    const app = createFederationApp({ plmAdapter })
+
+    const res = await request(app)
+      .post('/api/federation/plm/query')
+      .send({ operation: 'documents', productId: 'prod-1' })
+
+    expect(res.status).toBe(200)
+    expect(res.body.ok).toBe(true)
+    expect(res.body.data.items).toHaveLength(1)
+    expect(res.body.data.sources[0]).toMatchObject({ name: 'attachments', ok: true })
+    expect(res.body.data.sources[1]).toMatchObject({ name: 'related_documents', ok: false })
+  })
+
+  it('returns sources metadata even when both sides fail (no sendAdapterError short-circuit)', async () => {
+    const plmAdapter = createDocPlmAdapter({
+      getProductDocuments: async () => ({
+        data: [],
+        metadata: {
+          totalCount: 0,
+          sources: [
+            { name: 'attachments', ok: false, count: 0, error: 'file side down' },
+            { name: 'related_documents', ok: false, count: 0, error: 'aml side down' },
+          ],
+        },
+        error: new Error('file side down'),
+      }),
+    })
+    const app = createFederationApp({ plmAdapter })
+
+    const res = await request(app)
+      .post('/api/federation/plm/query')
+      .send({ operation: 'documents', productId: 'prod-1' })
+
+    // Key assertion: even with result.error set, the route should still
+    // return ok:true + sources because sources metadata is present. The
+    // sendAdapterError path is bypassed for documents when sources exist.
+    expect(res.status).toBe(200)
+    expect(res.body.ok).toBe(true)
+    expect(res.body.data.items).toHaveLength(0)
+    expect(res.body.data.sources).toBeDefined()
+    expect(res.body.data.sources[0]).toMatchObject({ name: 'attachments', ok: false })
+    expect(res.body.data.sources[1]).toMatchObject({ name: 'related_documents', ok: false })
+  })
+
+  it('returns no sources field when both sides succeed (clean response)', async () => {
+    const plmAdapter = createDocPlmAdapter({
+      getProductDocuments: async () => ({
+        data: [
+          { id: 'f1', name: 'spec.pdf', document_type: 'drawing' },
+          { id: 'd1', name: 'Related Doc', document_type: 'document' },
+        ],
+        metadata: {
+          totalCount: 2,
+          sources: [
+            { name: 'attachments', ok: true, count: 1 },
+            { name: 'related_documents', ok: true, count: 1 },
+          ],
+        },
+      }),
+    })
+    const app = createFederationApp({ plmAdapter })
+
+    const res = await request(app)
+      .post('/api/federation/plm/query')
+      .send({ operation: 'documents', productId: 'prod-1' })
+
+    expect(res.status).toBe(200)
+    expect(res.body.ok).toBe(true)
+    expect(res.body.data.items).toHaveLength(2)
+    expect(res.body.data.sources).toBeDefined()
+    expect(res.body.data.sources.every((s: any) => s.ok)).toBe(true)
+  })
+})
