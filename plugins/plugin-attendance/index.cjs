@@ -612,17 +612,100 @@ function normalizeIntegrationConfig(config) {
   }
 }
 
+const ATTENDANCE_DINGTALK_HTTP_TIMEOUT_MS = (() => {
+  const raw = Number(process.env.ATTENDANCE_DINGTALK_HTTP_TIMEOUT_MS ?? 10000)
+  return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 10000
+})()
+
+const ATTENDANCE_DINGTALK_HTTP_MAX_ATTEMPTS = (() => {
+  const raw = Number(process.env.ATTENDANCE_DINGTALK_HTTP_MAX_ATTEMPTS ?? 3)
+  return Number.isFinite(raw) && raw >= 1 ? Math.min(Math.floor(raw), 6) : 3
+})()
+
+const ATTENDANCE_DINGTALK_HTTP_RETRY_DELAY_MS = (() => {
+  const raw = Number(process.env.ATTENDANCE_DINGTALK_HTTP_RETRY_DELAY_MS ?? 750)
+  return Number.isFinite(raw) && raw >= 50 ? Math.floor(raw) : 750
+})()
+
+const dingTalkTokenCache = new Map()
+
+function sleepMs(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+function shouldRetryDingTalkRequest({ status, errcode }) {
+  if (status === 408 || status === 429 || status >= 500) return true
+  return errcode === 88 || errcode === 60020
+}
+
+function calculateDingTalkRetryDelay(attempt) {
+  const exponential = ATTENDANCE_DINGTALK_HTTP_RETRY_DELAY_MS * Math.pow(2, Math.max(0, attempt - 1))
+  const jitter = Math.floor(Math.random() * Math.max(50, exponential * 0.2))
+  return Math.min(5000, exponential + jitter)
+}
+
+async function readDingTalkJsonSafely(response) {
+  try {
+    return await response.json()
+  } catch {
+    return null
+  }
+}
+
+async function requestDingTalkJsonWithRetry({ url, method = 'GET', headers, body, timeoutMs = ATTENDANCE_DINGTALK_HTTP_TIMEOUT_MS }) {
+  let lastError = null
+  for (let attempt = 1; attempt <= ATTENDANCE_DINGTALK_HTTP_MAX_ATTEMPTS; attempt += 1) {
+    try {
+      const response = await fetch(url, {
+        method,
+        headers,
+        body,
+        signal: AbortSignal.timeout(timeoutMs),
+      })
+      const data = await readDingTalkJsonSafely(response)
+      if (!response.ok || data?.errcode) {
+        const message = data?.errmsg || `HTTP ${response.status}`
+        if (attempt < ATTENDANCE_DINGTALK_HTTP_MAX_ATTEMPTS && shouldRetryDingTalkRequest({ status: response.status, errcode: data?.errcode })) {
+          const delay = calculateDingTalkRetryDelay(attempt)
+          logger.warn('Retrying DingTalk request', { url, attempt, delay, status: response.status, errcode: data?.errcode, message })
+          await sleepMs(delay)
+          continue
+        }
+        throw new Error(message || 'DingTalk request failed')
+      }
+      return data ?? {}
+    } catch (error) {
+      lastError = error
+      if (attempt >= ATTENDANCE_DINGTALK_HTTP_MAX_ATTEMPTS) break
+      const delay = calculateDingTalkRetryDelay(attempt)
+      logger.warn('DingTalk request attempt failed', { url, attempt, delay, error: error?.message || String(error) })
+      await sleepMs(delay)
+    }
+  }
+  throw lastError || new Error('DingTalk request failed')
+}
+
 async function fetchDingTalkAccessToken({ appKey, appSecret, baseUrl }) {
   if (!appKey || !appSecret) {
     throw new Error('DingTalk appKey/appSecret required')
   }
-  const tokenUrl = `${baseUrl}/gettoken?appkey=${encodeURIComponent(appKey)}&appsecret=${encodeURIComponent(appSecret)}`
-  const res = await fetch(tokenUrl)
-  const data = await res.json()
-  if (!res.ok || data?.errcode) {
-    throw new Error(data?.errmsg || 'Failed to obtain DingTalk token')
+  const cacheKey = `${baseUrl}|${appKey}|${appSecret}`
+  const cached = dingTalkTokenCache.get(cacheKey)
+  if (cached?.token && Number.isFinite(cached.expiresAt) && cached.expiresAt > Date.now()) {
+    return cached.token
   }
-  return data?.access_token
+  const tokenUrl = `${baseUrl}/gettoken?appkey=${encodeURIComponent(appKey)}&appsecret=${encodeURIComponent(appSecret)}`
+  const data = await requestDingTalkJsonWithRetry({ url: tokenUrl })
+  const accessToken = data?.access_token
+  const expiresInSeconds = Number(data?.expires_in ?? 7200)
+  const safeTtlMs = Number.isFinite(expiresInSeconds) && expiresInSeconds > 300
+    ? (expiresInSeconds - 300) * 1000
+    : 60 * 60 * 1000
+  dingTalkTokenCache.set(cacheKey, {
+    token: accessToken,
+    expiresAt: Date.now() + safeTtlMs,
+  })
+  return accessToken
 }
 
 function normalizeDingTalkDateRange(value, fallback) {
@@ -641,15 +724,12 @@ async function fetchDingTalkColumnValues({ baseUrl, accessToken, userId, columnI
     from_date: fromDate,
     to_date: toDate,
   }
-  const res = await fetch(url, {
+  const data = await requestDingTalkJsonWithRetry({
+    url,
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   })
-  const data = await res.json()
-  if (!res.ok || data?.errcode) {
-    throw new Error(data?.errmsg || 'Failed to fetch DingTalk attendance')
-  }
   return data?.result ?? {}
 }
 
@@ -878,6 +958,39 @@ function normalizeUuidString(value) {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(normalized)
     ? normalized
     : null
+}
+
+async function validateRotationShiftSequenceIds(db, orgId, shiftSequence) {
+  const targetOrg = orgId || DEFAULT_ORG_ID
+  const normalizedSequence = normalizeStringArray(shiftSequence)
+  if (normalizedSequence.length === 0) {
+    return { shiftSequence: [], invalidReferences: [] }
+  }
+
+  const normalizedIds = normalizedSequence.map((shiftRef) => normalizeUuidString(shiftRef))
+  const malformedReferences = normalizedSequence.filter((_, index) => !normalizedIds[index])
+  if (malformedReferences.length > 0) {
+    return { shiftSequence: normalizedSequence, invalidReferences: malformedReferences }
+  }
+
+  const rows = await db.query(
+    'SELECT id FROM attendance_shifts WHERE org_id = $1 AND id = ANY($2::uuid[])',
+    [targetOrg, normalizedIds]
+  )
+  const existingIds = new Set(
+    rows
+      .map((row) => normalizeUuidString(row?.id))
+      .filter(Boolean)
+  )
+  const missingReferences = normalizedSequence.filter((shiftId) => !existingIds.has(shiftId))
+  if (missingReferences.length > 0) {
+    return { shiftSequence: normalizedSequence, invalidReferences: missingReferences }
+  }
+
+  return {
+    shiftSequence: normalizedIds,
+    invalidReferences: [],
+  }
 }
 
 function respondInvalidUuid(res, fieldName = 'id') {
@@ -5016,39 +5129,6 @@ async function loadShiftReferenceLookup(db, orgId, options = {}) {
     )
   }
   return buildShiftReferenceLookup(rows)
-}
-
-async function normalizeRotationShiftSequence(db, orgId, shiftSequence, options = {}) {
-  const lookup = options.lookup ?? await loadShiftReferenceLookup(db, orgId)
-  const preserveUnknown = options.preserveUnknown === true
-  const nextSequence = []
-  const missingReferences = []
-  const ambiguousReferences = []
-  let changed = false
-
-  for (const shiftRef of normalizeStringArray(shiftSequence)) {
-    const resolution = resolveShiftReference(shiftRef, lookup)
-    if (resolution.status === 'resolved' && resolution.shift?.id) {
-      nextSequence.push(resolution.shift.id)
-      if (resolution.shift.id !== resolution.normalizedRef) changed = true
-      continue
-    }
-    if (resolution.status === 'ambiguous') {
-      ambiguousReferences.push(resolution.normalizedRef)
-    } else {
-      missingReferences.push(resolution.normalizedRef)
-    }
-    if (preserveUnknown && resolution.normalizedRef) {
-      nextSequence.push(resolution.normalizedRef)
-    }
-  }
-
-  return {
-    shiftSequence: nextSequence,
-    missingReferences,
-    ambiguousReferences,
-    changed,
-  }
 }
 
 async function loadShiftByReference(db, orgId, shiftRef) {
@@ -11961,28 +12041,15 @@ module.exports = {
         const orgId = getOrgId(req)
 
         try {
-          const normalizedSequence = await normalizeRotationShiftSequence(db, orgId, parsed.data.shiftSequence)
+          const normalizedSequence = await validateRotationShiftSequenceIds(db, orgId, parsed.data.shiftSequence)
           if (normalizedSequence.shiftSequence.length === 0) {
             res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Shift sequence required' } })
             return
           }
-          if (normalizedSequence.ambiguousReferences.length > 0) {
+          if (normalizedSequence.invalidReferences.length > 0) {
             res.status(400).json({
               ok: false,
-              error: {
-                code: 'VALIDATION_ERROR',
-                message: `Shift sequence contains ambiguous shift names: ${normalizedSequence.ambiguousReferences.join(', ')}`,
-              },
-            })
-            return
-          }
-          if (normalizedSequence.missingReferences.length > 0) {
-            res.status(400).json({
-              ok: false,
-              error: {
-                code: 'VALIDATION_ERROR',
-                message: `Shift sequence contains unknown shift references: ${normalizedSequence.missingReferences.join(', ')}`,
-              },
+              error: { code: 'VALIDATION_ERROR', message: 'shiftSequence must contain shift IDs' },
             })
             return
           }
@@ -12050,7 +12117,7 @@ module.exports = {
           }
 
           const existing = existingRows[0]
-          const normalizedSequence = await normalizeRotationShiftSequence(
+          const normalizedSequence = await validateRotationShiftSequenceIds(
             db,
             orgId,
             parsed.data.shiftSequence ?? existing.shift_sequence
@@ -12059,23 +12126,10 @@ module.exports = {
             res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Shift sequence required' } })
             return
           }
-          if (normalizedSequence.ambiguousReferences.length > 0) {
+          if (normalizedSequence.invalidReferences.length > 0) {
             res.status(400).json({
               ok: false,
-              error: {
-                code: 'VALIDATION_ERROR',
-                message: `Shift sequence contains ambiguous shift names: ${normalizedSequence.ambiguousReferences.join(', ')}`,
-              },
-            })
-            return
-          }
-          if (normalizedSequence.missingReferences.length > 0) {
-            res.status(400).json({
-              ok: false,
-              error: {
-                code: 'VALIDATION_ERROR',
-                message: `Shift sequence contains unknown shift references: ${normalizedSequence.missingReferences.join(', ')}`,
-              },
+              error: { code: 'VALIDATION_ERROR', message: 'shiftSequence must contain shift IDs' },
             })
             return
           }
@@ -15930,6 +15984,11 @@ module.exports = {
           return
         }
         const integrationId = req.params.id
+        let run = null
+        let imported = 0
+        let skipped = []
+        let batchId = null
+        let partialErrors = []
 
         try {
           const rows = await db.query(
@@ -15945,14 +16004,10 @@ module.exports = {
             res.status(400).json({ ok: false, error: { code: 'INACTIVE', message: 'Integration is disabled' } })
             return
           }
-          const run = await createIntegrationRun(db, { orgId, integrationId })
+          run = await createIntegrationRun(db, { orgId, integrationId })
           const config = normalizeIntegrationConfig(integration.config)
           const fromDate = normalizeDingTalkDateRange(parsed.data.from, new Date(Date.now() - 7 * 86400000).toISOString().slice(0, 10))
           const toDate = normalizeDingTalkDateRange(parsed.data.to, new Date().toISOString().slice(0, 10))
-
-          let imported = 0
-          let skipped = []
-          let batchId = null
 
           if (integration.type === 'dingtalk') {
             const accessToken = await fetchDingTalkAccessToken({
@@ -15972,20 +16027,26 @@ module.exports = {
             }
             const allRows = []
             for (const userId of userIds) {
-              const result = await fetchDingTalkColumnValues({
-                baseUrl: config.baseUrl,
-                accessToken,
-                userId,
-                columnIds: config.columnIds,
-                fromDate,
-                toDate,
-              })
-              const payload = {
-                column_vals: result.column_vals ?? [],
-                userId,
+              try {
+                const result = await fetchDingTalkColumnValues({
+                  baseUrl: config.baseUrl,
+                  accessToken,
+                  userId,
+                  columnIds: config.columnIds,
+                  fromDate,
+                  toDate,
+                })
+                const payload = {
+                  column_vals: result.column_vals ?? [],
+                  userId,
+                }
+                const rowsForUser = buildRowsFromDingTalk({ columns, data: payload, userId })
+                allRows.push(...rowsForUser)
+              } catch (userError) {
+                const message = userError?.message || 'Failed to fetch DingTalk attendance'
+                partialErrors.push({ userId, message })
+                skipped.push({ userId, workDate: null, warnings: [message] })
               }
-              const rowsForUser = buildRowsFromDingTalk({ columns, data: payload, userId })
-              allRows.push(...rowsForUser)
             }
             const payload = {
               source: config.source ?? 'dingtalk_api',
@@ -16360,9 +16421,16 @@ module.exports = {
             [integrationId, orgId]
           )
           const runResult = await updateIntegrationRun(db, run.id, {
-            status: 'success',
-            message: parsed.data.dryRun ? 'Dry run completed' : 'Sync completed',
-            meta: { imported, skipped: skipped.length, batchId },
+            status: partialErrors.length ? 'partial' : 'success',
+            message: partialErrors.length
+              ? `Sync completed with ${partialErrors.length} partial errors`
+              : (parsed.data.dryRun ? 'Dry run completed' : 'Sync completed'),
+            meta: {
+              imported,
+              skipped: skipped.length,
+              batchId,
+              partialErrors,
+            },
             finishedAt: new Date().toISOString(),
           })
 
@@ -16373,6 +16441,7 @@ module.exports = {
               imported,
               skipped,
               batchId,
+              partialErrors,
               run: runResult,
             },
           })
@@ -16380,6 +16449,30 @@ module.exports = {
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
             return
+          }
+          if (run?.id) {
+            try {
+              await db.query(
+                'UPDATE attendance_integrations SET last_sync_at = now(), updated_at = now() WHERE id = $1 AND org_id = $2',
+                [integrationId, orgId]
+              )
+              await updateIntegrationRun(db, run.id, {
+                status: 'failed',
+                message: error?.message || 'Integration sync failed',
+                meta: {
+                  imported,
+                  skipped: skipped.length,
+                  batchId,
+                  partialErrors,
+                  dryRun: Boolean(parsed.data.dryRun),
+                  from: parsed.data.from ?? null,
+                  to: parsed.data.to ?? null,
+                },
+                finishedAt: new Date().toISOString(),
+              })
+            } catch (runError) {
+              logger.warn('Attendance integration failure recording failed', runError)
+            }
           }
           logger.error('Attendance integration sync failed', error)
           res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: (error?.message || 'Integration sync failed') } })

@@ -28,10 +28,48 @@ const sessionMocks = vi.hoisted(() => ({
 }))
 
 const sessionRegistryMocks = vi.hoisted(() => ({
+  createUserSession: vi.fn(),
   listUserSessions: vi.fn(),
   getUserSession: vi.fn(),
   revokeUserSession: vi.fn(),
   touchUserSession: vi.fn(),
+}))
+
+const dingtalkOauthMocks = vi.hoisted(() => ({
+  isDingTalkConfigured: vi.fn(),
+  generateState: vi.fn(),
+  buildAuthUrl: vi.fn(),
+  validateState: vi.fn(),
+  exchangeCodeForUser: vi.fn(),
+  DingTalkLoginPolicyError: class DingTalkLoginPolicyError extends Error {
+    statusCode: number
+    code: string
+
+    constructor(message: string, options: { statusCode?: number; code?: string } = {}) {
+      super(message)
+      this.name = 'DingTalkLoginPolicyError'
+      this.statusCode = options.statusCode ?? 403
+      this.code = options.code ?? 'policy_denied'
+    }
+  },
+}))
+
+const dingtalkClientMocks = vi.hoisted(() => ({
+  DingTalkRequestError: class DingTalkRequestError extends Error {
+    statusCode: number
+    responseBody: Record<string, unknown> | null
+
+    constructor(message: string, statusCode = 502, responseBody: Record<string, unknown> | null = null) {
+      super(message)
+      this.name = 'DingTalkRequestError'
+      this.statusCode = statusCode
+      this.responseBody = responseBody
+    }
+  },
+}))
+
+const rbacMocks = vi.hoisted(() => ({
+  listUserPermissions: vi.fn(),
 }))
 
 vi.mock('../../src/auth/AuthService', () => ({
@@ -53,10 +91,28 @@ vi.mock('../../src/auth/session-revocation', () => ({
 }))
 
 vi.mock('../../src/auth/session-registry', () => ({
+  createUserSession: sessionRegistryMocks.createUserSession,
   listUserSessions: sessionRegistryMocks.listUserSessions,
   getUserSession: sessionRegistryMocks.getUserSession,
   revokeUserSession: sessionRegistryMocks.revokeUserSession,
   touchUserSession: sessionRegistryMocks.touchUserSession,
+}))
+
+vi.mock('../../src/auth/dingtalk-oauth', () => ({
+  isDingTalkConfigured: dingtalkOauthMocks.isDingTalkConfigured,
+  generateState: dingtalkOauthMocks.generateState,
+  buildAuthUrl: dingtalkOauthMocks.buildAuthUrl,
+  validateState: dingtalkOauthMocks.validateState,
+  exchangeCodeForUser: dingtalkOauthMocks.exchangeCodeForUser,
+  DingTalkLoginPolicyError: dingtalkOauthMocks.DingTalkLoginPolicyError,
+}))
+
+vi.mock('../../src/rbac/service', () => ({
+  listUserPermissions: rbacMocks.listUserPermissions,
+}))
+
+vi.mock('../../src/integrations/dingtalk/client', () => ({
+  DingTalkRequestError: dingtalkClientMocks.DingTalkRequestError,
 }))
 
 import { authRouter } from '../../src/routes/auth'
@@ -144,10 +200,17 @@ describe('auth login routes', () => {
     bcryptMocks.hash.mockReset()
     bcryptMocks.compare.mockReset()
     sessionMocks.revokeUserSessions.mockReset()
+    sessionRegistryMocks.createUserSession.mockReset()
     sessionRegistryMocks.listUserSessions.mockReset()
     sessionRegistryMocks.getUserSession.mockReset()
     sessionRegistryMocks.revokeUserSession.mockReset()
     sessionRegistryMocks.touchUserSession.mockReset()
+    dingtalkOauthMocks.isDingTalkConfigured.mockReset()
+    dingtalkOauthMocks.generateState.mockReset()
+    dingtalkOauthMocks.buildAuthUrl.mockReset()
+    dingtalkOauthMocks.validateState.mockReset()
+    dingtalkOauthMocks.exchangeCodeForUser.mockReset()
+    rbacMocks.listUserPermissions.mockReset()
   })
 
   it('returns feature payload on successful login', async () => {
@@ -410,5 +473,223 @@ describe('auth login routes', () => {
     })
     expect(sessionMocks.revokeUserSessions).not.toHaveBeenCalled()
     expect((response.body as Record<string, any>).data.scope).toBe('current-session')
+  })
+
+  it('builds a DingTalk auth URL and preserves a safe redirect path in state', async () => {
+    dingtalkOauthMocks.isDingTalkConfigured.mockReturnValue(true)
+    dingtalkOauthMocks.generateState.mockResolvedValue('state-1')
+    dingtalkOauthMocks.buildAuthUrl.mockReturnValue('https://login.dingtalk.test/oauth')
+
+    const response = await invokeRoute('get', '/dingtalk/launch', {
+      query: {
+        redirect: '/workflows?tab=mine',
+      },
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect(dingtalkOauthMocks.generateState).toHaveBeenCalledWith({
+      redirectPath: '/workflows?tab=mine',
+    })
+    expect(dingtalkOauthMocks.buildAuthUrl).toHaveBeenCalledWith('state-1')
+    expect((response.body as Record<string, any>).data.url).toBe('https://login.dingtalk.test/oauth')
+  })
+
+  it('supports probing DingTalk availability without generating OAuth state', async () => {
+    dingtalkOauthMocks.isDingTalkConfigured.mockReturnValue(true)
+
+    const response = await invokeRoute('get', '/dingtalk/launch', {
+      query: {
+        probe: '1',
+      },
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect(dingtalkOauthMocks.generateState).not.toHaveBeenCalled()
+    expect(dingtalkOauthMocks.buildAuthUrl).not.toHaveBeenCalled()
+    expect((response.body as Record<string, any>).data).toEqual({
+      available: true,
+    })
+  })
+
+  it('exchanges a DingTalk callback into a local session token', async () => {
+    const expSeconds = Math.floor(new Date('2026-04-08T10:00:00.000Z').getTime() / 1000)
+
+    dingtalkOauthMocks.validateState.mockResolvedValue({
+      valid: true,
+      redirectPath: '/attendance',
+    })
+    dingtalkOauthMocks.isDingTalkConfigured.mockReturnValue(true)
+    dingtalkOauthMocks.exchangeCodeForUser.mockResolvedValue({
+      dingtalkUser: {
+        openId: 'open-id-1',
+        unionId: 'union-id-1',
+        nick: 'Ding User',
+        email: 'manager@example.com',
+      },
+      localUserId: 'user-1',
+      localUserEmail: 'manager@example.com',
+      localUserName: 'Manager',
+      localUserRole: 'admin',
+      isNewUser: false,
+    })
+    rbacMocks.listUserPermissions.mockResolvedValue(['attendance:admin', 'workflow:read'])
+    authServiceMocks.createToken.mockReturnValue('jwt-dingtalk-token')
+    authServiceMocks.readTokenPayload.mockReturnValue({
+      exp: expSeconds,
+    })
+    sessionRegistryMocks.createUserSession.mockResolvedValue(undefined)
+    pgMocks.query.mockResolvedValue({ rows: [] })
+
+    const response = await invokeRoute('post', '/dingtalk/callback', {
+      headers: {
+        'user-agent': 'Vitest Browser',
+      },
+      body: {
+        code: 'auth-code',
+        state: 'state-1',
+      },
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect(dingtalkOauthMocks.validateState).toHaveBeenCalledWith('state-1')
+    expect(dingtalkOauthMocks.exchangeCodeForUser).toHaveBeenCalledWith('auth-code')
+    expect(rbacMocks.listUserPermissions).toHaveBeenCalledWith('user-1')
+    expect(authServiceMocks.createToken).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: 'user-1',
+        email: 'manager@example.com',
+        role: 'admin',
+        permissions: ['attendance:admin', 'workflow:read'],
+      }),
+      expect.objectContaining({ sid: expect.any(String) }),
+    )
+    expect(sessionRegistryMocks.createUserSession).toHaveBeenCalledWith(
+      'user-1',
+      expect.objectContaining({
+        ipAddress: '127.0.0.1',
+        userAgent: 'Vitest Browser',
+      }),
+    )
+    expect((response.body as Record<string, any>).data).toMatchObject({
+      token: 'jwt-dingtalk-token',
+      redirectPath: '/attendance',
+      user: {
+        id: 'user-1',
+        email: 'manager@example.com',
+        role: 'admin',
+      },
+    })
+  })
+
+  it('rejects DingTalk callback when state validation fails', async () => {
+    dingtalkOauthMocks.validateState.mockResolvedValue({
+      valid: false,
+      error: 'State parameter has expired',
+    })
+
+    const response = await invokeRoute('post', '/dingtalk/callback', {
+      body: {
+        code: 'auth-code',
+        state: 'expired-state',
+      },
+    })
+
+    expect(response.statusCode).toBe(400)
+    expect((response.body as Record<string, any>).error).toBe('State parameter has expired')
+    expect(dingtalkOauthMocks.exchangeCodeForUser).not.toHaveBeenCalled()
+  })
+
+  it('surfaces disabled-local-user errors from the DingTalk callback exchange', async () => {
+    dingtalkOauthMocks.validateState.mockResolvedValue({
+      valid: true,
+      redirectPath: '/attendance',
+    })
+    dingtalkOauthMocks.isDingTalkConfigured.mockReturnValue(true)
+    dingtalkOauthMocks.exchangeCodeForUser.mockRejectedValue(
+      new dingtalkOauthMocks.DingTalkLoginPolicyError('DingTalk login is disabled for this user', {
+        statusCode: 403,
+        code: 'local_user_disabled',
+      }),
+    )
+
+    const response = await invokeRoute('post', '/dingtalk/callback', {
+      body: {
+        code: 'auth-code',
+        state: 'state-1',
+      },
+    })
+
+    expect(response.statusCode).toBe(403)
+    expect((response.body as Record<string, any>).error).toBe('DingTalk login is disabled for this user')
+    expect(rbacMocks.listUserPermissions).not.toHaveBeenCalled()
+  })
+
+  it('keeps upstream DingTalk request failures mapped to 502', async () => {
+    dingtalkOauthMocks.validateState.mockResolvedValue({
+      valid: true,
+      redirectPath: '/attendance',
+    })
+    dingtalkOauthMocks.isDingTalkConfigured.mockReturnValue(true)
+    dingtalkOauthMocks.exchangeCodeForUser.mockRejectedValue(
+      new dingtalkClientMocks.DingTalkRequestError('Failed to obtain access token from DingTalk', 401, {
+        error: 'invalid_client',
+      }),
+    )
+
+    const response = await invokeRoute('post', '/dingtalk/callback', {
+      body: {
+        code: 'auth-code',
+        state: 'state-1',
+      },
+    })
+
+    expect(response.statusCode).toBe(502)
+    expect((response.body as Record<string, any>).error).toBe('Failed to obtain access token from DingTalk')
+  })
+
+  it('maps unexpected local callback failures to 500', async () => {
+    dingtalkOauthMocks.validateState.mockResolvedValue({
+      valid: true,
+      redirectPath: '/attendance',
+    })
+    dingtalkOauthMocks.isDingTalkConfigured.mockReturnValue(true)
+    dingtalkOauthMocks.exchangeCodeForUser.mockRejectedValue(new Error('session registry unavailable'))
+
+    const response = await invokeRoute('post', '/dingtalk/callback', {
+      body: {
+        code: 'auth-code',
+        state: 'state-1',
+      },
+    })
+
+    expect(response.statusCode).toBe(500)
+    expect((response.body as Record<string, any>).error).toBe('DingTalk authentication failed')
+  })
+
+  it('returns 409 for local auto-provision email conflicts', async () => {
+    dingtalkOauthMocks.validateState.mockResolvedValue({
+      valid: true,
+      redirectPath: '/attendance',
+    })
+    dingtalkOauthMocks.isDingTalkConfigured.mockReturnValue(true)
+    dingtalkOauthMocks.exchangeCodeForUser.mockRejectedValue(
+      new dingtalkOauthMocks.DingTalkLoginPolicyError(
+        'Refusing to auto-provision DingTalk user because a local account already exists with the same email',
+        {
+          statusCode: 409,
+          code: 'auto_provision_email_conflict',
+        },
+      ),
+    )
+
+    const response = await invokeRoute('post', '/dingtalk/callback', {
+      body: {
+        code: 'auth-code',
+        state: 'state-1',
+      },
+    })
+
+    expect(response.statusCode).toBe(409)
+    expect((response.body as Record<string, any>).error).toContain('same email')
   })
 })

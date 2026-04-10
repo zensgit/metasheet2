@@ -13,6 +13,7 @@ import MultitableCommentInboxView from '../views/MultitableCommentInboxView.vue'
 import PluginManagerView from '../views/PluginManagerView.vue'
 import PluginViewHost from '../views/PluginViewHost.vue'
 import AttendanceExperienceView from '../views/attendance/AttendanceExperienceView.vue'
+import DingTalkAuthCallbackView from '../views/DingTalkAuthCallbackView.vue'
 import HomeRedirect from '../views/HomeRedirect.vue'
 import LoginView from '../views/LoginView.vue'
 
@@ -28,6 +29,12 @@ export const appRoutes: RouteRecordRaw[] = [
     name: 'login',
     component: LoginView,
     meta: { title: 'Sign In', hideNavbar: true, requiresGuest: true }
+  },
+  {
+    path: ROUTE_PATHS.DINGTALK_AUTH_CALLBACK,
+    name: AppRouteNames.DINGTALK_AUTH_CALLBACK,
+    component: DingTalkAuthCallbackView,
+    meta: { title: 'DingTalk Sign In', titleZh: '钉钉登录', hideNavbar: true, requiresAuth: false, requiresGuest: true }
   },
   {
     path: '/accept-invite',
@@ -125,6 +132,18 @@ export const appRoutes: RouteRecordRaw[] = [
     name: 'user-management',
     component: () => import('../views/UserManagementView.vue'),
     meta: { title: 'User Management', requiresAuth: true }
+  },
+  {
+    path: '/admin/role-delegation',
+    name: 'role-delegation',
+    component: () => import('../views/RoleDelegationView.vue'),
+    meta: { title: 'Role Delegation', titleZh: '角色委派', requiresAuth: true }
+  },
+  {
+    path: '/admin/directory',
+    name: AppRouteNames.DIRECTORY_MANAGEMENT,
+    component: () => import('../views/DirectoryManagementView.vue'),
+    meta: { title: 'Directory Management', titleZh: '目录同步', requiresAuth: true }
   },
   {
     path: '/admin/roles',

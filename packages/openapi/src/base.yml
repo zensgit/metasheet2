@@ -629,6 +629,7 @@ components:
           type: array
           items:
             type: string
+            format: uuid
         isActive:
           type: boolean
     AttendanceRotationAssignment:
