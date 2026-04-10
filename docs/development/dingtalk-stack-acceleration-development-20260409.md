@@ -35,12 +35,13 @@ After the initial refresh, PR1 needed three additional review-fix passes:
 3. `584fac083`
    - scope fallback external-identity lookups to the configured `corpId`
 
-Current PR1 head after the final follow-up:
+Current PR1 head after the final follow-up and final minimal refresh:
 
-- `#725` head: `584fac083`
+- `#725` head: `1f615a653`
 - merge state: `BLOCKED`
 - review state: `REVIEW_REQUIRED`
 - GitHub checks: full required set green
+- auto-merge: enabled with merge-commit strategy, still waiting on a non-author approval
 
 ### Validation completed after rebase
 
@@ -82,20 +83,30 @@ Results:
 Current stack handling after this pass:
 
 - `#725`: remains `Ready for review`, fully green, blocked only on human review / approval
-- `#723`: stays draft on `codex/dingtalk-pr1-foundation-login-20260408`, waiting for `#725` merge before retarget to `main`
-- `#724`: stays draft on `codex/dingtalk-pr2-directory-sync-20260408`, waiting for `#723` merge before retarget to `main`
+- `#723`: refreshed onto the latest `#725` branch head and now shows `mergeStateStatus=CLEAN` while still stacked on `codex/dingtalk-pr1-foundation-login-20260408`
+- `#724`: refreshed onto the latest `#723` branch head and now shows `mergeStateStatus=CLEAN` while still stacked on `codex/dingtalk-pr2-directory-sync-20260408`
 
 ### Retarget readiness snapshot
 
 - `#723`
   - base: `codex/dingtalk-pr1-foundation-login-20260408`
-  - current GitHub merge state: `DIRTY`
-  - current checks: `pr-validate` only
+  - current head after upstream refresh: `0959febdb`
+  - current GitHub merge state: `CLEAN`
+  - local refresh verification:
+    - `pnpm --filter @metasheet/core-backend exec vitest run tests/unit/admin-directory-routes.test.ts`
+    - `pnpm --filter @metasheet/web exec vitest run tests/directoryManagementView.spec.ts --watch=false`
+    - `pnpm --filter @metasheet/core-backend build`
+    - `pnpm --filter @metasheet/web type-check`
   - planned action: retarget only after `#725` merges
 - `#724`
   - base: `codex/dingtalk-pr2-directory-sync-20260408`
+  - current head after upstream refresh: `2f87e8cfd`
   - current GitHub merge state: `CLEAN`
-  - current checks: `pr-validate` only
+  - local refresh verification:
+    - `pnpm --filter @metasheet/core-backend exec vitest run tests/unit/notification-service-dingtalk.test.ts tests/unit/admin-users-routes.test.ts tests/unit/plugin-role-template.test.ts`
+    - `pnpm --filter @metasheet/web exec vitest run tests/roleDelegationView.spec.ts --watch=false`
+    - `pnpm --filter @metasheet/core-backend build`
+    - `pnpm --filter @metasheet/web type-check`
   - planned action: retarget only after `#723` merges
 
 ## Next Execution Steps
