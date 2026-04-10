@@ -271,6 +271,62 @@ describe('after-sales workflow adapter', () => {
     )
   })
 
+  it('falls back to default-enabled runtime behavior when no registry rows exist yet', async () => {
+    const listRules = vi.fn(async () => [])
+    const context = {
+      ...createContext(),
+      services: {
+        automationRegistry: {
+          listRules,
+        },
+      },
+    }
+    const emitEvent = vi.fn()
+    const runtime = adapter.createWorkflowRuntime(context, {
+      loadCurrent: vi.fn(async () => ({
+        status: 'installed',
+        projectId: 'tenant_42:after-sales',
+        config: {
+          defaultSlaHours: 24,
+          urgentSlaHours: 4,
+        },
+      })),
+      now: () => new Date('2026-04-07T00:00:00.000Z'),
+      emitEvent,
+    })
+
+    const result = await runtime.onTicketCreated({
+      tenantId: 'tenant_42',
+      ticketNo: 'TK-1001',
+      ticket: {
+        id: 'ticket_001',
+        ticketNo: 'TK-1001',
+        title: 'Broken compressor',
+        priority: 'normal',
+        assigneeCandidates: [{ id: 'tech_001', type: 'user' }],
+      },
+    })
+
+    expect(listRules).toHaveBeenCalledWith({
+      pluginId: 'plugin-after-sales',
+      appId: 'after-sales',
+      tenantId: 'tenant_42',
+      projectId: 'tenant_42:after-sales',
+    })
+    expect(emitEvent).toHaveBeenCalledWith(
+      'ticket.assigned',
+      expect.objectContaining({
+        ticketNo: 'TK-1001',
+      }),
+    )
+    expect(result).toEqual(
+      expect.objectContaining({
+        workflowId: 'ticket-triage',
+        emittedEvent: 'ticket.assigned',
+      }),
+    )
+  })
+
   it('resolves supervisor and finance role recipients before sending notifications', async () => {
     const context = createContext(async () => [
       { role_id: 'supervisor', user_id: 'lead_001', email: 'lead@example.com' },

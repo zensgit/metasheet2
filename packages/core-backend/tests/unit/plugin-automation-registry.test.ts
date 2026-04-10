@@ -65,6 +65,42 @@ function createQuery(): AutomationRegistryQueryFn {
       return { rows: [] }
     }
 
+    if (normalized.startsWith('UPDATE plugin_automation_rule_registry')) {
+      if (normalized.includes('rule_id <> ALL')) {
+        const [tenantId, pluginId, appId, projectId, keepRuleIds] = params as [
+          string,
+          string,
+          string,
+          string,
+          string[],
+        ]
+        for (const row of rows) {
+          if (
+            row.tenant_id === tenantId &&
+            row.plugin_id === pluginId &&
+            row.app_id === appId &&
+            row.project_id === projectId &&
+            !keepRuleIds.includes(row.rule_id)
+          ) {
+            row.enabled = false
+          }
+        }
+      } else {
+        const [tenantId, pluginId, appId, projectId] = params as [string, string, string, string]
+        for (const row of rows) {
+          if (
+            row.tenant_id === tenantId &&
+            row.plugin_id === pluginId &&
+            row.app_id === appId &&
+            row.project_id === projectId
+          ) {
+            row.enabled = false
+          }
+        }
+      }
+      return { rows: [] }
+    }
+
     if (normalized.startsWith('SELECT rule_id, trigger_json, conditions_json, actions_json, enabled')) {
       const [tenantId, pluginId, appId, projectId] = params as [string, string, string, string]
       return {
@@ -143,6 +179,108 @@ describe('PluginAutomationRegistryService', () => {
         trigger: { event: 'ticket.created' },
         conditions: [],
         actions: [{ type: 'assign' }, { type: 'sendNotification', topic: 'after-sales.ticket.assigned' }],
+        enabled: false,
+      },
+    ])
+  })
+
+  it('retires omitted rules instead of leaving them enabled', async () => {
+    const query = createQuery()
+
+    await upsertAutomationRules(query, {
+      tenantId: 'tenant_42',
+      pluginId: 'plugin-after-sales',
+      appId: 'after-sales',
+      projectId: 'tenant_42:after-sales',
+      templateId: 'after-sales-default',
+      rules: [
+        {
+          id: 'ticket-triage',
+          trigger: { event: 'ticket.created' },
+          conditions: [],
+          actions: [{ type: 'assign' }],
+          enabled: true,
+        },
+        {
+          id: 'refund-approval',
+          trigger: { event: 'ticket.refundRequested' },
+          conditions: [],
+          actions: [{ type: 'submitApproval' }],
+          enabled: true,
+        },
+      ],
+    })
+
+    const listed = await upsertAutomationRules(query, {
+      tenantId: 'tenant_42',
+      pluginId: 'plugin-after-sales',
+      appId: 'after-sales',
+      projectId: 'tenant_42:after-sales',
+      templateId: 'after-sales-default',
+      rules: [
+        {
+          id: 'ticket-triage',
+          trigger: { event: 'ticket.created' },
+          conditions: [],
+          actions: [{ type: 'assign' }],
+          enabled: true,
+        },
+      ],
+    })
+
+    expect(listed).toEqual([
+      {
+        id: 'refund-approval',
+        trigger: { event: 'ticket.refundRequested' },
+        conditions: [],
+        actions: [{ type: 'submitApproval' }],
+        enabled: false,
+      },
+      {
+        id: 'ticket-triage',
+        trigger: { event: 'ticket.created' },
+        conditions: [],
+        actions: [{ type: 'assign' }],
+        enabled: true,
+      },
+    ])
+  })
+
+  it('retires all scoped rules when reinstall sync provides an empty rule set', async () => {
+    const query = createQuery()
+
+    await upsertAutomationRules(query, {
+      tenantId: 'tenant_42',
+      pluginId: 'plugin-after-sales',
+      appId: 'after-sales',
+      projectId: 'tenant_42:after-sales',
+      templateId: 'after-sales-default',
+      rules: [
+        {
+          id: 'ticket-triage',
+          trigger: { event: 'ticket.created' },
+          conditions: [],
+          actions: [{ type: 'assign' }],
+          enabled: true,
+        },
+      ],
+    })
+
+    const listed = await upsertAutomationRules(query, {
+      tenantId: 'tenant_42',
+      pluginId: 'plugin-after-sales',
+      appId: 'after-sales',
+      projectId: 'tenant_42:after-sales',
+      templateId: 'after-sales-default',
+      rules: [],
+    })
+
+    expect(listed).toEqual([
+      {
+        id: 'ticket-triage',
+        trigger: { event: 'ticket.created' },
+        conditions: [],
+        actions: [{ type: 'assign' }],
         enabled: false,
       },
     ])

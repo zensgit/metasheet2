@@ -74,6 +74,10 @@ function buildPermissionName(permissionCode: string): string {
     .join(' ')
 }
 
+function buildProvisionedRoleId(pluginId: string, appId: string, roleSlug: string): string {
+  return `${pluginId}:${appId}:${roleSlug}`
+}
+
 export async function applyRoleMatrix(
   query: RbacProvisioningQueryFn,
   input: ApplyRoleMatrixInput,
@@ -103,13 +107,14 @@ export async function applyRoleMatrix(
   }
 
   for (const role of roles) {
+    const provisionedRoleId = buildProvisionedRoleId(pluginId, appId, role.slug)
     await query(
       `INSERT INTO roles (id, name)
        VALUES ($1, $2)
        ON CONFLICT (id) DO UPDATE SET
          name = EXCLUDED.name,
          updated_at = now()`,
-      [role.slug, role.label],
+      [provisionedRoleId, role.label],
     )
 
     for (const permissionCode of role.permissions) {
@@ -117,7 +122,7 @@ export async function applyRoleMatrix(
         `INSERT INTO role_permissions (role_id, permission_code)
          VALUES ($1, $2)
          ON CONFLICT (role_id, permission_code) DO NOTHING`,
-        [role.slug, permissionCode],
+        [provisionedRoleId, permissionCode],
       )
     }
   }

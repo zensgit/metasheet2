@@ -487,7 +487,13 @@ async function runInstall(input) {
     )
   }
 
-  if (Array.isArray(blueprint.automations) && blueprint.automations.length > 0) {
+  if (
+    Array.isArray(blueprint.automations)
+    && (
+      blueprint.automations.length > 0
+      || (mode === 'reinstall' && automationRegistry)
+    )
+  ) {
     try {
       if (!automationRegistry) {
         throw new Error('automationRegistry service unavailable on plugin context')
