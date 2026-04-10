@@ -1,0 +1,173 @@
+/**
+ * Wave 1 Pact contract sanity test for the Metasheet -> Yuantus PLM federation.
+ *
+ * This test currently performs a STATIC sanity check against a hand-authored
+ * Pact v3 artifact at `pacts/metasheet2-yuantus-plm.json`. It does not yet
+ * regenerate the artifact from real consumer interactions because that would
+ * require adding `@pact-foundation/pact` as a dependency, which has not been
+ * approved as of 2026-04-07.
+ *
+ * What this test guarantees today:
+ *
+ *   1. The pact JSON exists and parses as Pact v3.
+ *   2. The 6 Wave 1 P0 interactions that PLMAdapter currently calls are
+ *      present, in the order documented in
+ *      `docs/PACT_FIRST_INTEGRATION_PLAN_20260407.md`.
+ *      (codex's plan also lists `aml/metadata`, but PLMAdapter does not yet
+ *      call it; deferred to Wave 1.5.)
+ *   3. The PLMAdapter actually calls every endpoint declared in the pact, so
+ *      the contract cannot drift away from the live consumer code without
+ *      this test failing.
+ *
+ * What this test does NOT yet do:
+ *
+ *   - Spin up a Pact mock server and replay PLMAdapter against it. That is the
+ *     "real" consumer pact behaviour and will land once `@pact-foundation/pact`
+ *     is approved as a devDependency. When that happens, this file should be
+ *     replaced (or extended) so the JSON is generated from `Pact.write()`
+ *     rather than committed by hand.
+ *
+ * The provider verification side already exists at:
+ *   /Users/huazhou/Downloads/Github/Yuantus/src/yuantus/api/tests/test_pact_provider_yuantus_plm.py
+ *
+ * See also:
+ *   - docs/PACT_FIRST_INTEGRATION_PLAN_20260407.md
+ *   - docs/PLM_STANDALONE_METASHEET_BOUNDARY_STRATEGY_20260407.md
+ *   - docs/METASHEET_REPO_SOURCE_OF_TRUTH_INVESTIGATION_20260407.md
+ */
+import { describe, expect, it } from 'vitest'
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
+
+const PACT_PATH = resolve(__dirname, 'pacts', 'metasheet2-yuantus-plm.json')
+const ADAPTER_PATH = resolve(
+  __dirname,
+  '..',
+  '..',
+  'src',
+  'data-adapters',
+  'PLMAdapter.ts',
+)
+
+interface PactInteraction {
+  description: string
+  providerStates?: Array<{ name: string }>
+  request: {
+    method: string
+    path: string
+    body?: unknown
+    headers?: Record<string, string>
+    query?: Record<string, string[]>
+  }
+  response: {
+    status: number
+    body?: unknown
+  }
+}
+
+interface PactDocument {
+  consumer: { name: string }
+  provider: { name: string }
+  interactions: PactInteraction[]
+  metadata: { pactSpecification: { version: string } }
+}
+
+// Wave 1 P0 = endpoints PLMAdapter.ts CURRENTLY calls. Anything that is only
+// "planned" or "anticipated" must NOT live in this list — the contract-first
+// principle requires that pact freezes what is actually used, never aspiration.
+//
+// Notable omission from codex's PACT_FIRST plan: GET /api/v1/aml/metadata/{type}
+// is listed as Wave 1 P0 in docs/PACT_FIRST_INTEGRATION_PLAN_20260407.md, but
+// PLMAdapter.ts does not currently invoke it. It is parked for Wave 1.5 / Wave
+// 2 and will be added to this list as soon as the adapter starts calling it.
+const WAVE_1_P0_PATHS = [
+  { method: 'POST', path: '/api/v1/auth/login' },
+  { method: 'GET', path: '/api/v1/health' },
+  { method: 'GET', path: '/api/v1/search/' },
+  { method: 'POST', path: '/api/v1/aml/apply' },
+  { method: 'GET', path: '/api/v1/bom/01H000000000000000000000P1/tree' },
+  { method: 'GET', path: '/api/v1/bom/compare' },
+] as const
+
+function loadPact(): PactDocument {
+  const raw = readFileSync(PACT_PATH, 'utf8')
+  return JSON.parse(raw) as PactDocument
+}
+
+function loadAdapter(): string {
+  return readFileSync(ADAPTER_PATH, 'utf8')
+}
+
+describe('Pact: Metasheet2 consumer -> YuantusPLM provider (Wave 1)', () => {
+  it('pact JSON exists, parses as Pact v3, and names the right consumer/provider', () => {
+    const pact = loadPact()
+    expect(pact.consumer.name).toBe('Metasheet2')
+    expect(pact.provider.name).toBe('YuantusPLM')
+    expect(pact.metadata.pactSpecification.version).toBe('3.0.0')
+  })
+
+  it('contains exactly the 6 Wave 1 P0 interactions PLMAdapter currently calls, in documented order', () => {
+    const pact = loadPact()
+    expect(pact.interactions).toHaveLength(WAVE_1_P0_PATHS.length)
+    pact.interactions.forEach((interaction, index) => {
+      const expected = WAVE_1_P0_PATHS[index]
+      expect(interaction.request.method).toBe(expected.method)
+      expect(interaction.request.path).toBe(expected.path)
+    })
+  })
+
+  it('every interaction declares at least one provider state', () => {
+    const pact = loadPact()
+    for (const interaction of pact.interactions) {
+      expect(interaction.providerStates).toBeDefined()
+      expect(interaction.providerStates!.length).toBeGreaterThan(0)
+      expect(interaction.providerStates![0].name).toBeTruthy()
+    }
+  })
+
+  it('every protected endpoint is also called by the live PLMAdapter source', () => {
+    const adapterSrc = loadAdapter()
+    // The 6 endpoints declared in the pact should appear verbatim in PLMAdapter.ts
+    // (as path segments). The auth/login endpoint is invoked via raw fetch and
+    // also appears as a string literal.
+    const endpointsToFind = [
+      '/api/v1/auth/login',
+      '/api/v1/health',
+      '/api/v1/search/',
+      '/api/v1/aml/apply',
+      '/api/v1/bom/',
+      '/api/v1/bom/compare',
+    ]
+    for (const ep of endpointsToFind) {
+      expect(
+        adapterSrc.includes(ep),
+        `PLMAdapter.ts no longer references ${ep}; pact has drifted from the consumer.`,
+      ).toBe(true)
+    }
+  })
+
+  it('aml/apply request body documents the RPC envelope shape used by PLMAdapter', () => {
+    const pact = loadPact()
+    const applyInteraction = pact.interactions.find(
+      i => i.request.path === '/api/v1/aml/apply',
+    )
+    expect(applyInteraction).toBeDefined()
+    const body = applyInteraction!.request.body as Record<string, string>
+    expect(body).toHaveProperty('type')
+    expect(body).toHaveProperty('action')
+    expect(body).toHaveProperty('id')
+    expect(body.action).toBe('get')
+  })
+
+  it('aml/apply response declares the count + items envelope returned by GetOperation', () => {
+    const pact = loadPact()
+    const applyInteraction = pact.interactions.find(
+      i => i.request.path === '/api/v1/aml/apply',
+    )
+    expect(applyInteraction).toBeDefined()
+    const body = applyInteraction!.response.body as Record<string, unknown>
+    expect(body).toHaveProperty('count')
+    expect(body).toHaveProperty('items')
+    expect(Array.isArray(body.items)).toBe(true)
+  })
+})

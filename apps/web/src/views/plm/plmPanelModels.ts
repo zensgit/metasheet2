@@ -328,6 +328,9 @@ export type DocumentMetadata = UnknownRecord & {
   file_id?: string | number
   filename?: string
   file_name?: string
+  item_number?: string | number
+  config_id?: string | number
+  current_version_id?: string | number
   document_type?: string
   file_type?: string
   document_version?: string
@@ -350,6 +353,9 @@ export type DocumentEntry = UnknownRecord & {
   name?: string
   filename?: string
   file_name?: string
+  item_number?: string | number
+  config_id?: string | number
+  current_version_id?: string | number
   document_type?: string
   engineering_revision?: string
   revision?: string
@@ -832,6 +838,9 @@ export type PlmDocumentsPanelModel = {
   exportDocumentsCsv: PanelAction
   loadDocuments: PanelAction
   selectCadFile: (doc: DocumentEntry, target?: 'primary' | 'other') => void
+  applyProductFromDocument: (doc: DocumentEntry) => void
+  returnToDocumentSource: PanelAction
+  isAmlRelatedDocument: (doc: DocumentEntry) => boolean
   copyDocumentId: (doc: DocumentEntry) => Promise<void>
   copyDocumentUrl: (doc: DocumentEntry, kind: 'preview' | 'download') => Promise<void>
   getDocumentName: (doc: DocumentEntry) => string
@@ -904,6 +913,8 @@ export type PlmDocumentsPanelModel = {
   documents: Ref<DocumentEntry[]>
   documentsLoading: Ref<boolean>
   documentsError: Ref<string>
+  documentsWarning: Ref<string>
+  documentSourceProductId: Ref<string>
   documentsFiltered: ComputedRef<DocumentEntry[]>
   documentsSorted: ComputedRef<DocumentEntry[]>
   documentFieldCatalog: Array<{ key: string; label: string; source: string; fallback: string }>
