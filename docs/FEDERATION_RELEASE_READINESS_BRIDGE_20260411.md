@@ -113,6 +113,49 @@ Observed results:
 - targeted unit tests: `30 passed`
 - contract tests: `16 passed`
 
+Live provider validation:
+
+```bash
+# 1. Start Yuantus locally
+./.venv/bin/uvicorn yuantus.api.app:create_app --factory --host 127.0.0.1 --port 7910
+
+# 2. Verify provider endpoint directly
+curl -s -X POST http://127.0.0.1:7910/api/v1/auth/login \
+  -H "Content-Type: application/json" \
+  -H "x-tenant-id: tenant-1" \
+  -H "x-org-id: org-1" \
+  -d '{"tenant_id":"tenant-1","username":"phase0-test","password":"phase0pass","org_id":"org-1"}'
+
+curl -s \
+  -H "Authorization: Bearer <token>" \
+  -H "x-tenant-id: tenant-1" \
+  -H "x-org-id: org-1" \
+  "http://127.0.0.1:7910/api/v1/release-readiness/items/b5ecee24-5ce8-4b59-9551-446e1c50b608?ruleset_id=readiness"
+
+# 3. Verify the new Metasheet adapter path against the same provider
+PLM_BASE_URL=http://127.0.0.1:7910 \
+PLM_API_MODE=yuantus \
+PLM_TENANT_ID=tenant-1 \
+PLM_ORG_ID=org-1 \
+PLM_USERNAME=phase0-test \
+PLM_PASSWORD=phase0pass \
+PLM_ITEM_TYPE=Part \
+pnpm exec tsx --eval "import { PLMAdapter } from './src/data-adapters/PLMAdapter.ts'; void (async () => { const configService={get: async ()=>undefined}; const logger={info:()=>{},warn:()=>{},error:console.error}; const adapter=new PLMAdapter(configService as any, logger as any); await adapter.connect(); const result=await adapter.getReleaseReadiness('b5ecee24-5ce8-4b59-9551-446e1c50b608',{rulesetId:'readiness'}); console.log(JSON.stringify(result.data[0], null, 2)); await adapter.disconnect(); })().catch((error) => { console.error(error); process.exit(1); });"
+```
+
+Observed live result:
+
+- provider health responded `ok=true`
+- login returned a valid JWT
+- direct provider readiness call returned `ok=true`
+- adapter live call returned `count=1`, `error=null`
+- the adapter emitted canonical `summary` / `export` links that point back to
+  the provider surface
+
+The concrete sample object currently returns an empty readiness summary
+(`resources=0`), which is acceptable for bridge verification. A richer demo
+fixture is a separate data task, not a bridge correctness issue.
+
 ## Deferred
 
 This bridge is intentionally **not** added to Pact yet.
