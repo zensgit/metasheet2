@@ -42,7 +42,7 @@ jobs:
       - name: Use empty npmrc for pnpm
         run: |
           echo "" > /tmp/empty-npmrc
-          echo "NPM_CONFIG_USERCONFIG=/tmp/empty-npmrc" >> $GITHUB_ENV
+          echo "NPM_CONFIG_USERCONFIG=/tmp/empty-npmrc" >> "$GITHUB_ENV"
 
       - name: Get pnpm store directory
         id: pnpm-cache
@@ -159,6 +159,87 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: test-results-${{ matrix.node-version }}
+          path: |
+            packages/core-backend/coverage/
+            packages/core-backend/test-results/
+
+  after-sales-integration:
+    name: after-sales integration
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20.x
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.16.1
+          run_install: false
+      - name: Show pnpm version
+        run: pnpm -v
+      - name: Use empty npmrc for pnpm
+        run: |
+          echo "" > /tmp/empty-npmrc
+          echo "NPM_CONFIG_USERCONFIG=/tmp/empty-npmrc" >> $GITHUB_ENV
+
+      - name: Get pnpm store directory
+        id: pnpm-cache-after-sales
+        shell: bash
+        run: |
+          echo "STORE_PATH=$(pnpm store path)" >> "$GITHUB_OUTPUT"
+
+      - name: Setup pnpm cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.pnpm-cache-after-sales.outputs.STORE_PATH }}
+          key: ${{ runner.os }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pnpm-store-
+
+      - name: Install dependencies (with log)
+        run: |
+          set -o pipefail
+          pnpm install --frozen-lockfile 2>&1 | tee install.log
+      - name: Upload install log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: install-log-after-sales-integration
+          path: install.log
+
+      - name: Start Postgres
+        uses: ankane/setup-postgres@v1
+        with:
+          postgres-version: 14
+          user: postgres
+
+      - name: Create test database
+        run: |
+          createdb -U postgres metasheet_test || true
+
+      - name: Run DB migrations
+        env:
+          DATABASE_URL: postgresql://postgres@localhost:5432/metasheet_test
+        run: |
+          pnpm --filter @metasheet/core-backend db:migrate
+
+      - name: Run after-sales integration test
+        env:
+          DATABASE_URL: postgresql://postgres@localhost:5432/metasheet_test
+        run: |
+          pnpm --filter @metasheet/core-backend test:integration:after-sales
+
+      - name: Upload after-sales integration artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: after-sales-integration-artifacts
           path: |
             packages/core-backend/coverage/
             packages/core-backend/test-results/
