@@ -1,9 +1,11 @@
 /**
  * Approval RBAC boundary verification tests
  *
- * Resolves 6 BLOCKED verification items (BL1, BL2, BL3, BL5, BL7, BL8)
- * by testing real RBAC enforcement on approval routes with a realistic
- * rbacGuard mock that checks req.user.permissions.
+ * Adds automated RBAC boundary coverage for approval routes using the real
+ * rbacGuard middleware with mocked RBAC service dependencies.
+ *
+ * This reduces uncertainty around BL1-BL4 permission boundaries, but does not
+ * replace the real-environment validation tracked in issue #830.
  */
 import express, { type Express } from 'express'
 import request from 'supertest'
@@ -43,47 +45,6 @@ vi.mock('../../src/middleware/auth', () => ({
     }
     req.user = authState.user as never
     next()
-  },
-}))
-
-/**
- * Realistic rbacGuard mock that checks req.user.permissions instead of
- * unconditionally calling next(). This is the core of the RBAC boundary tests.
- */
-vi.mock('../../src/rbac/rbac', () => ({
-  rbacGuard: (resourceOrPermission: string, action?: string) => {
-    const permissionCode = action
-      ? `${resourceOrPermission}:${action}`
-      : resourceOrPermission
-    return (req: any, res: any, next: any) => {
-      const user = req.user
-      if (!user?.id) {
-        res.status(401).json({ error: 'Authentication required' })
-        return
-      }
-      // Admin bypass
-      if (user.role === 'admin') {
-        next()
-        return
-      }
-      const roles: string[] = Array.isArray(user.roles) ? user.roles : []
-      if (roles.includes('admin')) {
-        next()
-        return
-      }
-      // Permission check
-      const perms: string[] = Array.isArray(user.permissions) ? user.permissions : []
-      if (perms.includes('*:*') || perms.includes(permissionCode)) {
-        next()
-        return
-      }
-      const resource = permissionCode.split(':')[0]
-      if (resource && perms.includes(`${resource}:*`)) {
-        next()
-        return
-      }
-      res.status(403).json({ error: 'Insufficient permissions' })
-    }
   },
 }))
 
@@ -177,6 +138,11 @@ describe('Approval RBAC boundary verification', () => {
       expect(res.status).toBe(401)
     })
 
+    it('GET /api/approvals/:id without auth → 401', async () => {
+      const res = await request(app).get('/api/approvals/apr-1')
+      expect(res.status).toBe(401)
+    })
+
     it('POST /api/approvals without auth → 401', async () => {
       const res = await request(app)
         .post('/api/approvals')
@@ -247,10 +213,15 @@ describe('Approval RBAC boundary verification', () => {
       const res = await request(app).get('/api/approvals')
       expect(res.status).toBe(200)
     })
+
+    it('GET /api/approvals/:id with approvals:read reaches the handler', async () => {
+      const res = await request(app).get('/api/approvals/apr-1')
+      expect(res.status).toBe(404)
+    })
   })
 
   // =========================================================================
-  // BL5: No act permission → 403 on actions
+  // Action boundary: No act permission → 403 on actions
   // =========================================================================
   describe('BL5: No act permission → 403 on actions', () => {
     beforeEach(() => {
@@ -266,9 +237,9 @@ describe('Approval RBAC boundary verification', () => {
   })
 
   // =========================================================================
-  // BL7 + BL8: Permission matrix integration
+  // Permission matrix integration
   // =========================================================================
-  describe('BL7+BL8: Permission matrix integration', () => {
+  describe('Permission matrix integration', () => {
     it('user with no approval permissions gets 403 on all endpoints', async () => {
       authState.user = noPermsUser()
 
@@ -276,6 +247,7 @@ describe('Approval RBAC boundary verification', () => {
         request(app).get('/api/approval-templates'),
         request(app).post('/api/approval-templates').send({ name: 'x', key: 'x' }),
         request(app).get('/api/approvals'),
+        request(app).get('/api/approvals/a'),
         request(app).post('/api/approvals').send({ templateId: 't', formData: {} }),
         request(app).post('/api/approvals/a/actions').send({ action: 'approve', version: 0 }),
       ])
@@ -290,6 +262,9 @@ describe('Approval RBAC boundary verification', () => {
 
       const getRes = await request(app).get('/api/approvals')
       expect(getRes.status).toBe(200)
+
+      const detailRes = await request(app).get('/api/approvals/apr-1')
+      expect(detailRes.status).toBe(404)
 
       const postRes = await request(app)
         .post('/api/approvals')
