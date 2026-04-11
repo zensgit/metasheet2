@@ -11,6 +11,32 @@ const createAdapter = () => {
   return adapter
 }
 
+describe('PLMAdapter runtime status', () => {
+  it('advertises release readiness in yuantus mode', () => {
+    const adapter = createAdapter()
+
+    expect(adapter.getRuntimeStatus()).toMatchObject({
+      implementation: 'real',
+      healthSupported: true,
+    })
+    expect(adapter.getRuntimeStatus().supportedOperations).toContain('release_readiness')
+    expect(adapter.getRuntimeStatus().supportedOperations).toContain('approval_history')
+  })
+
+  it('hides yuantus-only capabilities in legacy mode', () => {
+    const adapter = createAdapter()
+    ;(adapter as any).apiMode = 'legacy'
+
+    expect(adapter.getRuntimeStatus().supportedOperations).toEqual(
+      expect.arrayContaining(['products', 'bom', 'documents', 'approvals'])
+    )
+    expect(adapter.getRuntimeStatus().supportedOperations).not.toContain('release_readiness')
+    expect(adapter.getRuntimeStatus().supportedOperations).not.toContain('approval_history')
+    expect(adapter.getRuntimeStatus().supportedOperations).not.toContain('where_used')
+    expect(adapter.getRuntimeStatus().supportedOperations).not.toContain('cad_properties')
+  })
+})
+
 describe('PLMAdapter Yuantus product detail mapping', () => {
   it('merges search hit timestamps when AML detail lacks them', async () => {
     const adapter = createAdapter()
@@ -918,6 +944,7 @@ describe('PLMAdapter Yuantus release readiness mapping', () => {
       esign_manifest: { pending: 1 },
     })
   })
+
 })
 
 describe('PLMAdapter Yuantus documents single-side failure + sources metadata', () => {

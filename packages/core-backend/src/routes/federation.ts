@@ -1289,6 +1289,11 @@ export function federationRouter(injector?: Injector): Router {
                     by_kind: {},
                   },
                   resources: [],
+                  esign_manifest: null,
+                  links: {
+                    summary: `/api/v1/release-readiness/items/${encodeURIComponent(resolvedProductId)}?ruleset_id=${encodeURIComponent(rulesetId || 'readiness')}`,
+                    export: `/api/v1/release-readiness/items/${encodeURIComponent(resolvedProductId)}/export?export_format=zip&ruleset_id=${encodeURIComponent(rulesetId || 'readiness')}`,
+                  },
                 }),
               },
             })

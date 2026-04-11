@@ -330,6 +330,47 @@ describe('Federation contract routes', () => {
     expect(bomCompareResponse.body.data).toEqual(plmContractFixtures.bomCompare)
   })
 
+  it('normalizes empty release readiness results into the canonical federation shape', async () => {
+    const plmAdapter = createPlmAdapterMock()
+    plmAdapter.getReleaseReadiness.mockResolvedValueOnce({
+      data: [],
+      metadata: { totalCount: 0 },
+    })
+    const app = createFederationApp({ plmAdapter })
+
+    const response = await request(app)
+      .post('/api/federation/plm/query')
+      .send({
+        operation: 'release_readiness',
+        productId: 'prod-empty',
+        filters: {
+          rulesetId: 'gate-empty',
+        },
+      })
+      .expect(200)
+
+    expect(response.body.data).toEqual({
+      productId: 'prod-empty',
+      item_id: 'prod-empty',
+      generated_at: expect.any(String),
+      ruleset_id: 'gate-empty',
+      summary: {
+        ok: false,
+        resources: 0,
+        ok_resources: 0,
+        error_count: 0,
+        warning_count: 0,
+        by_kind: {},
+      },
+      resources: [],
+      esign_manifest: null,
+      links: {
+        summary: '/api/v1/release-readiness/items/prod-empty?ruleset_id=gate-empty',
+        export: '/api/v1/release-readiness/items/prod-empty/export?export_format=zip&ruleset_id=gate-empty',
+      },
+    })
+  })
+
   it('supports PLM mutation contracts for substitute add and versioned approval actions', async () => {
     const plmAdapter = createPlmAdapterMock()
     const app = createFederationApp({ plmAdapter })

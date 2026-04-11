@@ -579,6 +579,42 @@ interface YuantusReleaseReadinessResponse {
   esign_manifest?: Record<string, unknown> | null
 }
 
+const LEGACY_SUPPORTED_OPERATIONS = [
+  'products',
+  'bom',
+  'documents',
+  'approvals',
+  'details',
+]
+
+const YUANTUS_SUPPORTED_OPERATIONS = [
+  'products',
+  'bom',
+  'documents',
+  'details',
+  'release_readiness',
+  'approvals',
+  'approval_history',
+  'drawings',
+  'where_used',
+  'bom_compare',
+  'bom_compare_schema',
+  'substitutes',
+  'substitutes_add',
+  'substitutes_remove',
+  'approval_approve',
+  'approval_reject',
+  'cad_properties',
+  'cad_view_state',
+  'cad_review',
+  'cad_history',
+  'cad_diff',
+  'cad_mesh_stats',
+  'cad_properties_update',
+  'cad_view_state_update',
+  'cad_review_update',
+]
+
 export class PLMAdapter extends HTTPAdapter {
   private mockMode = false;
   private apiMode: PLMApiMode = 'legacy';
@@ -854,6 +890,33 @@ export class PLMAdapter extends HTTPAdapter {
   private documentsPath(): string { return this.withTrailingSlash('/api/documents') }
   private drawingsPath(): string { return this.withTrailingSlash('/api/drawings') }
   private approvalsBasePath(): string { return this.withTrailingSlash('/api/approvals') }
+
+  getRuntimeStatus() {
+    const configuredBaseUrl = String(
+      this.config.connection.baseURL ||
+      this.config.connection.url ||
+      process.env.PLM_BASE_URL ||
+      process.env.PLM_URL ||
+      ''
+    )
+    const runtimeApiMode = this.resolveApiMode(
+      this.apiMode,
+      this.config.connection.headers as Record<string, string> | undefined,
+      process.env.PLM_TENANT_ID,
+      process.env.PLM_ORG_ID
+    )
+
+    return {
+      id: 'plm',
+      implementation: 'real' as const,
+      configured: this.mockMode || configuredBaseUrl.length > 0,
+      connected: this.isConnected(),
+      healthSupported: true,
+      supportedOperations: this.mockMode || runtimeApiMode === 'yuantus'
+        ? [...YUANTUS_SUPPORTED_OPERATIONS]
+        : [...LEGACY_SUPPORTED_OPERATIONS],
+    }
+  }
 
   async healthCheck(): Promise<boolean> {
     if (this.mockMode) return true;
