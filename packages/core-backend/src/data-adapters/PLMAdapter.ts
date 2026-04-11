@@ -264,6 +264,57 @@ export interface PLMDocument {
   updated_at: string
 }
 
+export interface ReleaseReadinessKindSummary {
+  resources: number
+  ok_resources: number
+  error_count: number
+  warning_count: number
+}
+
+export interface ReleaseReadinessSummary {
+  ok: boolean
+  resources: number
+  ok_resources: number
+  error_count: number
+  warning_count: number
+  by_kind: Record<string, ReleaseReadinessKindSummary>
+}
+
+export interface ReleaseReadinessIssue {
+  code?: string
+  message?: string
+  severity?: string
+}
+
+export interface ReleaseReadinessDiagnostics {
+  ok: boolean
+  resource_type: string
+  resource_id: string
+  ruleset_id: string
+  errors: ReleaseReadinessIssue[]
+  warnings: ReleaseReadinessIssue[]
+}
+
+export interface ReleaseReadinessResource {
+  kind: string
+  name?: string | null
+  state?: string | null
+  diagnostics: ReleaseReadinessDiagnostics
+}
+
+export interface ReleaseReadinessResponse {
+  item_id: string
+  generated_at: string
+  ruleset_id: string
+  summary: ReleaseReadinessSummary
+  resources: ReleaseReadinessResource[]
+  esign_manifest?: Record<string, unknown> | null
+  links?: {
+    summary: string
+    export: string
+  }
+}
+
 export interface CadPropertiesResponse {
   file_id: string
   properties: Record<string, unknown>
@@ -342,6 +393,13 @@ export interface DocumentQueryOptions {
   offset?: number
   role?: string
   includeMetadata?: boolean
+}
+
+export interface ReleaseReadinessQueryOptions {
+  rulesetId?: string
+  mbomLimit?: number
+  routingLimit?: number
+  baselineLimit?: number
 }
 
 type PLMApiMode = 'legacy' | 'yuantus'
@@ -486,6 +544,39 @@ interface YuantusEcoApprovalRecord {
   comment?: string | null
   approved_at?: string | null
   created_at?: string | null
+}
+
+interface YuantusReleaseReadinessResponse {
+  item_id?: string
+  generated_at?: string
+  ruleset_id?: string
+  summary?: {
+    ok?: boolean
+    resources?: number
+    ok_resources?: number
+    error_count?: number
+    warning_count?: number
+    by_kind?: Record<string, {
+      resources?: number
+      ok_resources?: number
+      error_count?: number
+      warning_count?: number
+    }>
+  }
+  resources?: Array<{
+    kind?: string
+    name?: string | null
+    state?: string | null
+    diagnostics?: {
+      ok?: boolean
+      resource_type?: string
+      resource_id?: string
+      ruleset_id?: string
+      errors?: ReleaseReadinessIssue[]
+      warnings?: ReleaseReadinessIssue[]
+    }
+  }>
+  esign_manifest?: Record<string, unknown> | null
 }
 
 export class PLMAdapter extends HTTPAdapter {
@@ -1271,6 +1362,61 @@ export class PLMAdapter extends HTTPAdapter {
     }
   }
 
+  private mapYuantusReleaseReadiness(
+    itemId: string,
+    entry: YuantusReleaseReadinessResponse,
+    options?: ReleaseReadinessQueryOptions
+  ): ReleaseReadinessResponse {
+    const rulesetId = String(entry.ruleset_id || options?.rulesetId || 'readiness')
+    const byKind = Object.fromEntries(
+      Object.entries(entry.summary?.by_kind || {}).map(([kind, value]) => [
+        kind,
+        {
+          resources: this.toNumber(value?.resources, 0),
+          ok_resources: this.toNumber(value?.ok_resources, 0),
+          error_count: this.toNumber(value?.error_count, 0),
+          warning_count: this.toNumber(value?.warning_count, 0),
+        },
+      ]),
+    )
+    const summary: ReleaseReadinessSummary = {
+      ok: Boolean(entry.summary?.ok),
+      resources: this.toNumber(entry.summary?.resources, 0),
+      ok_resources: this.toNumber(entry.summary?.ok_resources, 0),
+      error_count: this.toNumber(entry.summary?.error_count, 0),
+      warning_count: this.toNumber(entry.summary?.warning_count, 0),
+      by_kind: byKind,
+    }
+    const resources = Array.isArray(entry.resources)
+      ? entry.resources.map((resource) => ({
+          kind: String(resource.kind || 'unknown'),
+          name: resource.name ?? null,
+          state: resource.state ?? null,
+          diagnostics: {
+            ok: Boolean(resource.diagnostics?.ok),
+            resource_type: String(resource.diagnostics?.resource_type || 'unknown'),
+            resource_id: String(resource.diagnostics?.resource_id || ''),
+            ruleset_id: String(resource.diagnostics?.ruleset_id || rulesetId),
+            errors: Array.isArray(resource.diagnostics?.errors) ? resource.diagnostics!.errors : [],
+            warnings: Array.isArray(resource.diagnostics?.warnings) ? resource.diagnostics!.warnings : [],
+          },
+        }))
+      : []
+
+    return {
+      item_id: String(entry.item_id || itemId),
+      generated_at: this.toIsoString(entry.generated_at) || new Date().toISOString(),
+      ruleset_id: rulesetId,
+      summary,
+      resources,
+      esign_manifest: entry.esign_manifest ?? null,
+      links: {
+        summary: `/api/v1/release-readiness/items/${encodeURIComponent(String(entry.item_id || itemId))}?ruleset_id=${encodeURIComponent(rulesetId)}`,
+        export: `/api/v1/release-readiness/items/${encodeURIComponent(String(entry.item_id || itemId))}/export?export_format=zip&ruleset_id=${encodeURIComponent(rulesetId)}`,
+      },
+    }
+  }
+
   private async fetchYuantusFileMetadata(fileId: string): Promise<YuantusFileMetadata | null> {
     if (!fileId) return null
     try {
@@ -1474,6 +1620,63 @@ export class PLMAdapter extends HTTPAdapter {
     return {
       data: mapped,
       metadata: result.metadata,
+      error: result.error,
+    }
+  }
+
+  async getReleaseReadiness(
+    itemId: string,
+    options?: ReleaseReadinessQueryOptions
+  ): Promise<QueryResult<ReleaseReadinessResponse>> {
+    if (this.mockMode) {
+      const rulesetId = options?.rulesetId || 'readiness'
+      return {
+        data: [{
+          item_id: itemId,
+          generated_at: new Date().toISOString(),
+          ruleset_id: rulesetId,
+          summary: {
+            ok: true,
+            resources: 0,
+            ok_resources: 0,
+            error_count: 0,
+            warning_count: 0,
+            by_kind: {},
+          },
+          resources: [],
+          esign_manifest: null,
+          links: {
+            summary: `/api/v1/release-readiness/items/${encodeURIComponent(itemId)}?ruleset_id=${encodeURIComponent(rulesetId)}`,
+            export: `/api/v1/release-readiness/items/${encodeURIComponent(itemId)}/export?export_format=zip&ruleset_id=${encodeURIComponent(rulesetId)}`,
+          },
+        }],
+        metadata: { totalCount: 1 },
+      }
+    }
+
+    if (this.apiMode !== 'yuantus') {
+      return { data: [], error: new Error('Release readiness is not supported for this PLM API mode') }
+    }
+
+    const params: Record<string, unknown> = {}
+    if (options?.rulesetId) params.ruleset_id = options.rulesetId
+    if (typeof options?.mbomLimit === 'number') params.mbom_limit = options.mbomLimit
+    if (typeof options?.routingLimit === 'number') params.routing_limit = options.routingLimit
+    if (typeof options?.baselineLimit === 'number') params.baseline_limit = options.baselineLimit
+
+    const result = await this.query<YuantusReleaseReadinessResponse>(`/api/v1/release-readiness/items/${itemId}`, [params])
+    const entry = result.data[0]
+    if (!entry) {
+      return {
+        data: [],
+        metadata: { totalCount: 0 },
+        error: result.error,
+      }
+    }
+
+    return {
+      data: [this.mapYuantusReleaseReadiness(itemId, entry, options)],
+      metadata: { totalCount: 1 },
       error: result.error,
     }
   }
