@@ -144,6 +144,157 @@
           </p>
         </section>
 
+        <section v-if="selectedIntegration" class="directory-admin__section">
+          <div class="directory-admin__section-head">
+            <div>
+              <h3>成员账号</h3>
+              <p class="directory-admin__hint">展示同步后的钉钉成员、钉钉 ID 与本地绑定状态；支持按本地用户 ID 或邮箱手工绑定，并按页管理大规模组织。</p>
+            </div>
+            <div class="directory-admin__actions">
+              <input
+                v-model.trim="accountQuery"
+                class="directory-admin__input directory-admin__input--search"
+                type="text"
+                placeholder="搜索姓名 / 邮箱 / 手机 / 钉钉 ID / 本地用户"
+                @keyup.enter="void searchAccounts()"
+              />
+              <label class="directory-admin__field directory-admin__field--inline">
+                <span>每页</span>
+                <select class="directory-admin__input directory-admin__input--compact" :value="String(accountPageSize)" @change="void updateAccountPageSize($event)">
+                  <option v-for="size in accountPageSizeOptions" :key="size" :value="String(size)">{{ size }}</option>
+                </select>
+              </label>
+              <button class="directory-admin__button directory-admin__button--secondary" type="button" :disabled="loadingAccounts" @click="void searchAccounts()">
+                {{ loadingAccounts ? '刷新中...' : accountQuery.trim().length > 0 ? '应用筛选' : '刷新成员' }}
+              </button>
+            </div>
+          </div>
+
+          <div v-if="loadingAccounts" class="directory-admin__empty">成员加载中...</div>
+          <div v-else-if="accounts.length === 0" class="directory-admin__empty">暂无同步成员</div>
+          <article v-for="account in accounts" :key="account.id" class="directory-admin__account">
+            <div class="directory-admin__account-head">
+              <div>
+                <strong>{{ account.name }}</strong>
+                <p class="directory-admin__hint">
+                  {{ account.localUser ? `本地用户：${account.localUser.email || account.localUser.id}` : '未绑定本地用户' }}
+                </p>
+              </div>
+              <div class="directory-admin__chips">
+                <span class="directory-admin__chip">{{ account.linkStatus }}</span>
+                <span v-if="account.matchStrategy" class="directory-admin__chip">策略 {{ account.matchStrategy }}</span>
+                <span class="directory-admin__chip" :class="{ 'directory-admin__badge--inactive': !account.isActive }">
+                  {{ account.isActive ? '目录启用' : '目录停用' }}
+                </span>
+              </div>
+            </div>
+
+            <div class="directory-admin__account-grid">
+              <p class="directory-admin__hint"><strong>用户 ID：</strong>{{ account.externalUserId }}</p>
+              <p class="directory-admin__hint"><strong>Union ID：</strong>{{ account.unionId || '未返回' }}</p>
+              <p class="directory-admin__hint"><strong>Open ID：</strong>{{ account.openId || '未返回' }}</p>
+              <p class="directory-admin__hint"><strong>邮箱：</strong>{{ account.email || '无' }}</p>
+              <p class="directory-admin__hint"><strong>手机：</strong>{{ account.mobile || '无' }}</p>
+              <p class="directory-admin__hint"><strong>Corp：</strong>{{ account.corpId || '未记录' }}</p>
+            </div>
+
+            <p class="directory-admin__hint">
+              部门：{{ account.departmentPaths.join('，') || '未分配部门' }}
+            </p>
+
+            <div class="directory-admin__form-grid directory-admin__form-grid--account">
+              <label class="directory-admin__field">
+                <span>绑定到本地用户 ID / 邮箱</span>
+                <input
+                  :value="readBindingDraft(account)"
+                  class="directory-admin__input"
+                  type="text"
+                  placeholder="例如 user-123 或 alpha@example.com"
+                  @input="onBindingDraftInput(account.id, $event)"
+                  @focus="clearBindingSearch(account.id)"
+                />
+              </label>
+              <label class="directory-admin__toggle directory-admin__toggle--compact">
+                <input
+                  :checked="readGrantToggle(account.id)"
+                  type="checkbox"
+                  @change="onGrantToggleChange(account.id, $event)"
+                />
+                <span>绑定后同时开通钉钉登录</span>
+              </label>
+            </div>
+
+            <div class="directory-admin__actions">
+              <button
+                class="directory-admin__button directory-admin__button--secondary"
+                type="button"
+                :disabled="readBindingDraft(account).trim().length === 0 || readBindingSearchLoading(account.id)"
+                @click="void searchLocalUsers(account.id)"
+              >
+                {{ readBindingSearchLoading(account.id) ? '搜索中...' : '搜索本地用户' }}
+              </button>
+              <button
+                class="directory-admin__button"
+                type="button"
+                :disabled="bindingAccountId === account.id || readBindingDraft(account).trim().length === 0"
+                @click="void bindAccount(account)"
+              >
+                {{ bindingAccountId === account.id ? '绑定中...' : account.localUser ? '更新绑定' : '绑定用户' }}
+              </button>
+              <button
+                v-if="account.localUser"
+                class="directory-admin__button directory-admin__button--secondary"
+                type="button"
+                :disabled="unbindingAccountId === account.id"
+                @click="void unbindAccount(account)"
+              >
+                {{ unbindingAccountId === account.id ? '解绑中...' : '解除绑定' }}
+              </button>
+            </div>
+
+            <p v-if="readBindingSearchError(account.id)" class="directory-admin__status directory-admin__status--error">
+              {{ readBindingSearchError(account.id) }}
+            </p>
+            <div v-if="readBindingSearchResults(account.id).length > 0" class="directory-admin__search-results">
+              <button
+                v-for="user in readBindingSearchResults(account.id)"
+                :key="user.id"
+                class="directory-admin__search-result"
+                type="button"
+                @click="chooseLocalUser(account.id, user)"
+              >
+                <strong>{{ user.name || user.email }}</strong>
+                <span>{{ user.email }}</span>
+                <small>{{ user.id }} · {{ user.role }} · {{ user.is_active ? 'active' : 'inactive' }}</small>
+              </button>
+            </div>
+          </article>
+
+          <footer v-if="accountTotal > 0" class="directory-admin__pagination">
+            <p class="directory-admin__hint">
+              第 {{ accountPage }} / {{ accountPageCount }} 页 · 显示 {{ accountRangeStart }}-{{ accountRangeEnd }} / {{ accountTotal }}
+            </p>
+            <div class="directory-admin__actions">
+              <button
+                class="directory-admin__button directory-admin__button--secondary"
+                type="button"
+                :disabled="loadingAccounts || accountPage <= 1"
+                @click="void changeAccountPage(accountPage - 1)"
+              >
+                上一页
+              </button>
+              <button
+                class="directory-admin__button directory-admin__button--secondary"
+                type="button"
+                :disabled="loadingAccounts || accountPage >= accountPageCount"
+                @click="void changeAccountPage(accountPage + 1)"
+              >
+                下一页
+              </button>
+            </div>
+          </footer>
+        </section>
+
         <section v-if="testResult" class="directory-admin__section">
           <h3>连通性测试</h3>
           <div class="directory-admin__chips">
@@ -227,6 +378,41 @@ type DirectoryRun = {
   errorMessage: string | null
 }
 
+type DirectoryAccount = {
+  id: string
+  integrationId: string
+  provider: string
+  corpId: string | null
+  externalUserId: string
+  unionId: string | null
+  openId: string | null
+  externalKey: string
+  name: string
+  email: string | null
+  mobile: string | null
+  isActive: boolean
+  updatedAt: string
+  linkStatus: string
+  matchStrategy: string | null
+  reviewedBy: string | null
+  reviewNote: string | null
+  linkUpdatedAt: string | null
+  localUser: {
+    id: string
+    email: string | null
+    name: string | null
+  } | null
+  departmentPaths: string[]
+}
+
+type LocalUserOption = {
+  id: string
+  email: string
+  name: string | null
+  role: string
+  is_active: boolean
+}
+
 type TestResult = {
   rootDepartmentId: string
   departmentSampleCount: number
@@ -251,13 +437,27 @@ type DirectoryDraft = {
 
 const integrations = ref<DirectoryIntegration[]>([])
 const runs = ref<DirectoryRun[]>([])
+const accounts = ref<DirectoryAccount[]>([])
+const accountPageSizeOptions = [25, 50, 100]
+const accountPage = ref(1)
+const accountPageSize = ref(25)
+const accountTotal = ref(0)
 const selectedIntegrationId = ref('')
 const loading = ref(false)
 const loadingRuns = ref(false)
+const loadingAccounts = ref(false)
 const busy = ref(false)
+const bindingAccountId = ref('')
+const unbindingAccountId = ref('')
 const status = ref('')
 const statusTone = ref<'info' | 'error'>('info')
 const testResult = ref<TestResult | null>(null)
+const accountQuery = ref('')
+const bindingDrafts = reactive<Record<string, string>>({})
+const userSearchResults = reactive<Record<string, LocalUserOption[]>>({})
+const userSearchLoading = reactive<Record<string, boolean>>({})
+const userSearchError = reactive<Record<string, string>>({})
+const grantToggles = reactive<Record<string, boolean>>({})
 
 const draft = reactive<DirectoryDraft>({
   name: '',
@@ -276,6 +476,17 @@ const draft = reactive<DirectoryDraft>({
 const selectedIntegration = computed(() =>
   integrations.value.find((integration) => integration.id === selectedIntegrationId.value) ?? null,
 )
+const accountPageCount = computed(() => Math.max(1, Math.ceil(accountTotal.value / accountPageSize.value)))
+const accountRangeStart = computed(() => (
+  accountTotal.value === 0
+    ? 0
+    : ((accountPage.value - 1) * accountPageSize.value) + 1
+))
+const accountRangeEnd = computed(() => (
+  accountTotal.value === 0
+    ? 0
+    : Math.min(accountPage.value * accountPageSize.value, accountTotal.value)
+))
 
 const canSave = computed(() =>
   draft.name.trim().length > 0 &&
@@ -293,6 +504,16 @@ function resetDraft() {
   selectedIntegrationId.value = ''
   testResult.value = null
   runs.value = []
+  accounts.value = []
+  accountPage.value = 1
+  accountPageSize.value = accountPageSizeOptions[0]
+  accountTotal.value = 0
+  accountQuery.value = ''
+  for (const key of Object.keys(bindingDrafts)) delete bindingDrafts[key]
+  for (const key of Object.keys(userSearchResults)) delete userSearchResults[key]
+  for (const key of Object.keys(userSearchLoading)) delete userSearchLoading[key]
+  for (const key of Object.keys(userSearchError)) delete userSearchError[key]
+  for (const key of Object.keys(grantToggles)) delete grantToggles[key]
   draft.name = ''
   draft.corpId = ''
   draft.appKey = ''
@@ -323,10 +544,15 @@ function applyIntegrationToDraft(integration: DirectoryIntegration) {
 function selectIntegration(integrationId: string) {
   selectedIntegrationId.value = integrationId
   testResult.value = null
+  accountPage.value = 1
+  accountTotal.value = 0
   const integration = integrations.value.find((item) => item.id === integrationId)
   if (!integration) return
   applyIntegrationToDraft(integration)
-  void loadRuns(integrationId)
+  void Promise.all([
+    loadRuns(integrationId),
+    loadAccounts(integrationId),
+  ])
 }
 
 function readApiError(payload: unknown, fallback: string): string {
@@ -361,6 +587,95 @@ async function loadIntegrations() {
   } finally {
     loading.value = false
   }
+}
+
+function readBindingDraft(account: DirectoryAccount): string {
+  return bindingDrafts[account.id] ?? account.localUser?.email ?? account.localUser?.id ?? ''
+}
+
+function readBindingDraftByAccountId(accountId: string): string {
+  const account = accounts.value.find((item) => item.id === accountId)
+  if (!account) return bindingDrafts[accountId] ?? ''
+  return readBindingDraft(account)
+}
+
+function updateBindingDraft(accountId: string, value: string) {
+  bindingDrafts[accountId] = value
+}
+
+function onBindingDraftInput(accountId: string, event: Event) {
+  const target = event.target
+  updateBindingDraft(accountId, target instanceof HTMLInputElement ? target.value : '')
+  clearBindingSearch(accountId)
+}
+
+function readBindingSearchResults(accountId: string): LocalUserOption[] {
+  return userSearchResults[accountId] ?? []
+}
+
+function readBindingSearchLoading(accountId: string): boolean {
+  return userSearchLoading[accountId] ?? false
+}
+
+function readBindingSearchError(accountId: string): string {
+  return userSearchError[accountId] ?? ''
+}
+
+function setBindingSearchState(accountId: string, state: {
+  loading?: boolean
+  error?: string
+  results?: LocalUserOption[]
+}) {
+  if (typeof state.loading === 'boolean') userSearchLoading[accountId] = state.loading
+  if (typeof state.error === 'string') userSearchError[accountId] = state.error
+  else delete userSearchError[accountId]
+  if (Array.isArray(state.results)) userSearchResults[accountId] = state.results
+}
+
+async function searchLocalUsers(accountId: string) {
+  const term = readBindingDraftByAccountId(accountId).trim()
+  if (!term) {
+    setBindingSearchState(accountId, { results: [], error: '', loading: false })
+    return
+  }
+
+  setBindingSearchState(accountId, { loading: true, error: '' })
+  try {
+    const params = new URLSearchParams({ page: '1', pageSize: '8', q: term })
+    const response = await apiFetch(`/api/admin/users?${params.toString()}`)
+    const body = await readJson(response)
+    if (!response.ok) throw new Error(readApiError(body, '搜索本地用户失败'))
+    const items = Array.isArray(body?.data?.items) ? body.data.items : []
+    setBindingSearchState(accountId, { results: items, loading: false })
+  } catch (error) {
+    setBindingSearchState(accountId, {
+      results: [],
+      loading: false,
+      error: error instanceof Error ? error.message : '搜索本地用户失败',
+    })
+  }
+}
+
+function chooseLocalUser(accountId: string, user: LocalUserOption) {
+  updateBindingDraft(accountId, user.email || user.id)
+  setBindingSearchState(accountId, { results: [] })
+}
+
+function readGrantToggle(accountId: string): boolean {
+  return grantToggles[accountId] ?? true
+}
+
+function updateGrantToggle(accountId: string, value: boolean) {
+  grantToggles[accountId] = value
+}
+
+function onGrantToggleChange(accountId: string, event: Event) {
+  const target = event.target
+  updateGrantToggle(accountId, target instanceof HTMLInputElement ? target.checked : true)
+}
+
+function clearBindingSearch(accountId: string) {
+  setBindingSearchState(accountId, { results: [], error: '' })
 }
 
 function buildPayload() {
@@ -437,11 +752,71 @@ async function syncIntegration() {
     await Promise.all([
       loadIntegrations(),
       loadRuns(selectedIntegration.value.id),
+      loadAccounts(selectedIntegration.value.id),
     ])
   } catch (error) {
     setStatus(error instanceof Error ? error.message : '目录同步失败', 'error')
   } finally {
     busy.value = false
+  }
+}
+
+async function searchAccounts() {
+  if (!selectedIntegration.value) return
+  accountPage.value = 1
+  await loadAccounts(selectedIntegration.value.id)
+}
+
+async function changeAccountPage(nextPage: number) {
+  if (!selectedIntegration.value) return
+  const normalizedPage = Math.max(1, Math.min(nextPage, accountPageCount.value))
+  if (normalizedPage === accountPage.value) return
+  accountPage.value = normalizedPage
+  await loadAccounts(selectedIntegration.value.id)
+}
+
+async function updateAccountPageSize(event: Event) {
+  if (!selectedIntegration.value) return
+  const target = event.target
+  const nextPageSize = Number(target instanceof HTMLSelectElement ? target.value : accountPageSize.value)
+  if (!Number.isFinite(nextPageSize) || nextPageSize <= 0 || nextPageSize === accountPageSize.value) return
+  accountPageSize.value = nextPageSize
+  accountPage.value = 1
+  await loadAccounts(selectedIntegration.value.id)
+}
+
+async function loadAccounts(integrationId: string) {
+  loadingAccounts.value = true
+  try {
+    const params = new URLSearchParams({
+      page: String(accountPage.value),
+      pageSize: String(accountPageSize.value),
+    })
+    if (accountQuery.value.trim().length > 0) {
+      params.set('q', accountQuery.value.trim())
+    }
+    const response = await apiFetch(`/api/admin/directory/integrations/${integrationId}/accounts?${params.toString()}`)
+    const body = await readJson(response)
+    if (!response.ok) throw new Error(readApiError(body, '加载目录成员失败'))
+    const items = Array.isArray(body?.data?.items) ? body.data.items : []
+    const total = typeof body?.data?.total === 'number'
+      ? body.data.total
+      : Number(body?.data?.total ?? items.length)
+    const normalizedTotal = Number.isFinite(total) && total >= 0 ? total : items.length
+    const maxPage = Math.max(1, Math.ceil(normalizedTotal / accountPageSize.value))
+    if (normalizedTotal > 0 && accountPage.value > maxPage) {
+      accountPage.value = maxPage
+      await loadAccounts(integrationId)
+      return
+    }
+    accountTotal.value = normalizedTotal
+    accounts.value = items
+  } catch (error) {
+    accounts.value = []
+    accountTotal.value = 0
+    setStatus(error instanceof Error ? error.message : '加载目录成员失败', 'error')
+  } finally {
+    loadingAccounts.value = false
   }
 }
 
@@ -457,6 +832,71 @@ async function loadRuns(integrationId: string) {
     setStatus(error instanceof Error ? error.message : '加载同步记录失败', 'error')
   } finally {
     loadingRuns.value = false
+  }
+}
+
+async function bindAccount(account: DirectoryAccount) {
+  bindingAccountId.value = account.id
+  try {
+    const response = await apiFetch(`/api/admin/directory/accounts/${account.id}/bind`, {
+      method: 'POST',
+      body: JSON.stringify({
+        localUserRef: readBindingDraft(account).trim(),
+        enableDingTalkGrant: readGrantToggle(account.id),
+      }),
+    })
+    const body = await readJson(response)
+    if (!response.ok) throw new Error(readApiError(body, '绑定目录成员失败'))
+
+    const boundAccount = body?.data?.account as DirectoryAccount | undefined
+    if (boundAccount) {
+      accounts.value = accounts.value.map((item) => (item.id === boundAccount.id ? boundAccount : item))
+      bindingDrafts[account.id] = boundAccount.localUser?.email || boundAccount.localUser?.id || readBindingDraft(account)
+    }
+
+    setStatus(`目录成员 ${account.name} 已绑定到本地用户`)
+    if (selectedIntegration.value) {
+      await loadIntegrations()
+      await loadAccounts(selectedIntegration.value.id)
+    }
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : '绑定目录成员失败', 'error')
+  } finally {
+    bindingAccountId.value = ''
+  }
+}
+
+async function unbindAccount(account: DirectoryAccount) {
+  unbindingAccountId.value = account.id
+  try {
+    const response = await apiFetch(`/api/admin/directory/accounts/${account.id}/unbind`, {
+      method: 'POST',
+    })
+    const body = await readJson(response)
+    if (!response.ok) throw new Error(readApiError(body, '解除绑定失败'))
+
+    const unboundAccount = body?.data?.account as DirectoryAccount | undefined
+    accounts.value = accounts.value.map((item) => {
+      if (item.id !== account.id) return item
+      if (unboundAccount) return unboundAccount
+      return {
+        ...item,
+        linkStatus: 'unmatched',
+        matchStrategy: 'manual_unbound',
+        localUser: null,
+      }
+    })
+    delete bindingDrafts[account.id]
+    clearBindingSearch(account.id)
+    setStatus(`目录成员 ${account.name} 已解除绑定`)
+    if (selectedIntegration.value) {
+      await loadIntegrations()
+      await loadAccounts(selectedIntegration.value.id)
+    }
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : '解除绑定失败', 'error')
+  } finally {
+    unbindingAccountId.value = ''
   }
 }
 
@@ -554,11 +994,20 @@ onMounted(() => {
   gap: 14px;
 }
 
+.directory-admin__form-grid--account {
+  grid-template-columns: minmax(0, 1.8fr) minmax(220px, 1fr);
+}
+
 .directory-admin__field,
 .directory-admin__toggle {
   display: flex;
   flex-direction: column;
   gap: 8px;
+}
+
+.directory-admin__field--inline {
+  flex-direction: row;
+  align-items: center;
 }
 
 .directory-admin__toggle {
@@ -570,6 +1019,14 @@ onMounted(() => {
   border-radius: 12px;
   padding: 10px 12px;
   font: inherit;
+}
+
+.directory-admin__input--search {
+  min-width: min(320px, 100%);
+}
+
+.directory-admin__input--compact {
+  min-width: 88px;
 }
 
 .directory-admin__button,
@@ -650,9 +1107,71 @@ onMounted(() => {
   background: #f8fafc;
 }
 
+.directory-admin__account {
+  border: 1px solid #e2e8f0;
+  border-radius: 16px;
+  padding: 16px;
+  background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.directory-admin__account-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.directory-admin__account-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px 16px;
+}
+
+.directory-admin__search-results {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.directory-admin__search-result {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 12px;
+  border: 1px solid #cbd5e1;
+  border-radius: 12px;
+  background: #fff;
+  text-align: left;
+  cursor: pointer;
+}
+
+.directory-admin__search-result span,
+.directory-admin__search-result small {
+  color: #475569;
+}
+
+.directory-admin__pagination {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.directory-admin__toggle--compact {
+  justify-content: center;
+}
+
 @media (max-width: 960px) {
   .directory-admin__layout,
   .directory-admin__form-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .directory-admin__account-grid {
     grid-template-columns: 1fr;
   }
 }

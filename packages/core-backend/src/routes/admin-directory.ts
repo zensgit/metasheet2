@@ -1,13 +1,17 @@
 import type { Request, Response } from 'express'
 import { Router } from 'express'
+import { auditLog } from '../audit/audit'
 import { isAdmin as isRbacAdmin } from '../rbac/service'
 import { jsonError, jsonOk, parsePagination } from '../util/response'
 import {
+  bindDirectoryAccount,
   createDirectoryIntegration,
+  listDirectoryIntegrationAccounts,
   listDirectoryIntegrations,
   listDirectorySyncRuns,
   syncDirectoryIntegration,
   testDirectoryIntegration,
+  unbindDirectoryAccount,
   updateDirectoryIntegration,
 } from '../directory/directory-sync'
 
@@ -134,6 +138,115 @@ export function adminDirectoryRouter(): Router {
       })
     } catch (error) {
       jsonError(res, 500, 'DIRECTORY_RUNS_FAILED', readErrorMessage(error, 'Failed to load sync runs'))
+    }
+  })
+
+  router.get('/integrations/:integrationId/accounts', async (req: Request, res: Response) => {
+    const adminUserId = await ensurePlatformAdmin(req, res)
+    if (!adminUserId) return
+
+    try {
+      const { page, pageSize, offset } = parsePagination(req.query as Record<string, unknown>, {
+        defaultPage: 1,
+        defaultPageSize: 50,
+        maxPageSize: 100,
+      })
+      const search = typeof req.query.q === 'string' ? req.query.q : undefined
+      const result = await listDirectoryIntegrationAccounts(req.params.integrationId, { limit: pageSize, offset }, search)
+      jsonOk(res, {
+        items: result.items,
+        total: result.total,
+        page,
+        pageSize,
+        query: search?.trim() || '',
+      })
+    } catch (error) {
+      const message = readErrorMessage(error, 'Failed to load directory accounts')
+      jsonError(res, /required|invalid/i.test(message) ? 400 : 500, 'DIRECTORY_ACCOUNTS_FAILED', message)
+    }
+  })
+
+  router.post('/accounts/:accountId/bind', async (req: Request, res: Response) => {
+    const adminUserId = await ensurePlatformAdmin(req, res)
+    if (!adminUserId) return
+
+    try {
+      const localUserRef = typeof req.body?.localUserRef === 'string' ? req.body.localUserRef : ''
+      const enableDingTalkGrant = typeof req.body?.enableDingTalkGrant === 'boolean'
+        ? req.body.enableDingTalkGrant
+        : true
+
+      const result = await bindDirectoryAccount(req.params.accountId, {
+        localUserRef,
+        adminUserId,
+        enableDingTalkGrant,
+      })
+      await auditLog({
+        actorId: adminUserId,
+        actorType: 'user',
+        action: 'bind',
+        resourceType: 'directory-account-link',
+        resourceId: result.account.id,
+        meta: {
+          adminUserId,
+          directoryAccountId: result.account.id,
+          integrationId: result.account.integrationId,
+          previousLocalUserId: result.previousLocalUser?.id ?? null,
+          previousLocalUserEmail: result.previousLocalUser?.email ?? null,
+          localUserId: result.account.localUser?.id ?? null,
+          localUserEmail: result.account.localUser?.email ?? null,
+          externalUserId: result.account.externalUserId,
+          corpId: result.account.corpId,
+          enableDingTalkGrant,
+        },
+      })
+      jsonOk(res, { account: result.account })
+    } catch (error) {
+      const message = readErrorMessage(error, 'Failed to bind directory account')
+      const statusCode = /not found/i.test(message)
+        ? 404
+        : /already bound|already linked/i.test(message)
+          ? 409
+          : /required|cannot be pre-bound/i.test(message)
+            ? 400
+            : 500
+      jsonError(res, statusCode, 'DIRECTORY_BIND_FAILED', message)
+    }
+  })
+
+  router.post('/accounts/:accountId/unbind', async (req: Request, res: Response) => {
+    const adminUserId = await ensurePlatformAdmin(req, res)
+    if (!adminUserId) return
+
+    try {
+      const result = await unbindDirectoryAccount(req.params.accountId, {
+        adminUserId,
+      })
+      await auditLog({
+        actorId: adminUserId,
+        actorType: 'user',
+        action: 'unbind',
+        resourceType: 'directory-account-link',
+        resourceId: result.account.id,
+        meta: {
+          adminUserId,
+          directoryAccountId: result.account.id,
+          integrationId: result.account.integrationId,
+          externalUserId: result.account.externalUserId,
+          corpId: result.account.corpId,
+          previousLocalUserId: result.previousLocalUser?.id ?? null,
+          previousLocalUserEmail: result.previousLocalUser?.email ?? null,
+        },
+      })
+      jsonOk(res, { account: result.account })
+    } catch (error) {
+      const message = readErrorMessage(error, 'Failed to unbind directory account')
+      const statusCode = /not found/i.test(message)
+        ? 404
+        : /required/i.test(message)
+          ? 400
+          : 500
+      jsonError(res, statusCode, 'DIRECTORY_UNBIND_FAILED', message)
     }
   })
 
