@@ -12,6 +12,7 @@ import { Logger } from '../core/logger'
 import { IPLMAdapter } from '../di/identifiers'
 import { pool } from '../db/pg'
 import { authenticate } from '../middleware/auth'
+import { rbacGuard } from '../rbac/rbac'
 import { REFUND_WORKFLOW_KEY, type AfterSalesApprovalBridgeService } from '../services/AfterSalesApprovalBridgeService'
 import { ApprovalBridgeService, ServiceError } from '../services/ApprovalBridgeService'
 import { ApprovalProductService, resolveApprovalListPaging } from '../services/ApprovalProductService'
@@ -172,7 +173,7 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
   const r = Router()
   const productService = getProductService()
 
-  r.get('/api/approval-templates', authenticate, async (req: Request, res: Response) => {
+  r.get('/api/approval-templates', authenticate, rbacGuard('approval-templates:manage'), async (req: Request, res: Response) => {
     try {
       const page = parsePaging(req.query.page, 1, Number.MAX_SAFE_INTEGER)
       const pageSize = parsePaging(req.query.pageSize, 20)
@@ -184,7 +185,12 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
         offset,
       })
 
-      res.json(result)
+      res.json({
+        data: result.data,
+        total: result.total,
+        limit,
+        offset,
+      })
     } catch (error) {
       handleApprovalsError(
         res,
@@ -195,7 +201,27 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
     }
   })
 
-  r.get('/api/approval-templates/:id', authenticate, async (req: Request, res: Response) => {
+  r.post('/api/approval-templates', authenticate, rbacGuard('approval-templates:manage'), async (req: Request, res: Response) => {
+    try {
+      const template = await productService.createTemplate({
+        key: req.body?.key,
+        name: req.body?.name,
+        description: req.body?.description,
+        formSchema: req.body?.formSchema,
+        approvalGraph: req.body?.approvalGraph,
+      })
+      res.status(201).json(template)
+    } catch (error) {
+      handleApprovalsError(
+        res,
+        error,
+        'APPROVAL_TEMPLATE_CREATE_FAILED',
+        'Failed to create approval template',
+      )
+    }
+  })
+
+  r.get('/api/approval-templates/:id', authenticate, rbacGuard('approval-templates:manage'), async (req: Request, res: Response) => {
     try {
       const template = await productService.getTemplate(req.params.id)
       if (!template) {
@@ -214,7 +240,43 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
     }
   })
 
-  r.get('/api/approval-templates/:id/versions/:versionId', authenticate, async (req: Request, res: Response) => {
+  r.patch('/api/approval-templates/:id', authenticate, rbacGuard('approval-templates:manage'), async (req: Request, res: Response) => {
+    try {
+      const template = await productService.updateTemplate(req.params.id, {
+        key: req.body?.key,
+        name: req.body?.name,
+        description: req.body?.description,
+        formSchema: req.body?.formSchema,
+        approvalGraph: req.body?.approvalGraph,
+      })
+      res.json(template)
+    } catch (error) {
+      handleApprovalsError(
+        res,
+        error,
+        'APPROVAL_TEMPLATE_UPDATE_FAILED',
+        'Failed to update approval template',
+      )
+    }
+  })
+
+  r.post('/api/approval-templates/:id/publish', authenticate, rbacGuard('approval-templates:manage'), async (req: Request, res: Response) => {
+    try {
+      const version = await productService.publishTemplate(req.params.id, {
+        policy: req.body?.policy,
+      })
+      res.json(version)
+    } catch (error) {
+      handleApprovalsError(
+        res,
+        error,
+        'APPROVAL_TEMPLATE_PUBLISH_FAILED',
+        'Failed to publish approval template',
+      )
+    }
+  })
+
+  r.get('/api/approval-templates/:id/versions/:versionId', authenticate, rbacGuard('approval-templates:manage'), async (req: Request, res: Response) => {
     try {
       const version = await productService.getTemplateVersion(req.params.id, req.params.versionId)
       if (!version) {
@@ -233,7 +295,7 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
     }
   })
 
-  r.get('/api/approvals', authenticate, async (req: Request, res: Response) => {
+  r.get('/api/approvals', authenticate, rbacGuard('approvals', 'read'), async (req: Request, res: Response) => {
     try {
       if (!pool) {
         return res.status(503).json(
@@ -314,7 +376,7 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
     }
   })
 
-  r.post('/api/approvals/sync/plm', authenticate, async (req: Request, res: Response) => {
+  r.post('/api/approvals/sync/plm', authenticate, rbacGuard('approvals', 'read'), async (req: Request, res: Response) => {
     try {
       const bridgeService = getBridgeService(options)
       if (!bridgeService.hasPlmAdapter()) {
@@ -346,7 +408,7 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
     }
   })
 
-  r.post('/api/approvals', authenticate, async (req: Request, res: Response) => {
+  r.post('/api/approvals', authenticate, rbacGuard('approvals', 'write'), async (req: Request, res: Response) => {
     try {
       const userId = resolveApprovalActorId(req)
       if (!userId) {
@@ -396,7 +458,7 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
   })
 
   // Legacy endpoint: keep scoped to platform-owned approvals only.
-  r.get('/api/approvals/pending', authenticate, async (req: Request, res: Response) => {
+  r.get('/api/approvals/pending', authenticate, rbacGuard('approvals', 'read'), async (req: Request, res: Response) => {
     try {
       if (!pool) {
         return res.status(503).json(
@@ -454,7 +516,7 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
     }
   })
 
-  r.post('/api/approvals/:id/actions', authenticate, async (req: Request, res: Response) => {
+  r.post('/api/approvals/:id/actions', authenticate, rbacGuard('approvals', 'act'), async (req: Request, res: Response) => {
     try {
       const bridgeService = getBridgeService(options)
 
@@ -564,7 +626,7 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
   })
 
   // Legacy endpoint: local platform approvals only.
-  r.post('/api/approvals/:id/approve', authenticate, async (req: Request, res: Response) => {
+  r.post('/api/approvals/:id/approve', authenticate, rbacGuard('approvals', 'act'), async (req: Request, res: Response) => {
     try {
       if (!pool) {
         return res.status(503).json(
@@ -691,7 +753,7 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
   })
 
   // Legacy endpoint: local platform approvals only.
-  r.post('/api/approvals/:id/reject', authenticate, async (req: Request, res: Response) => {
+  r.post('/api/approvals/:id/reject', authenticate, rbacGuard('approvals', 'act'), async (req: Request, res: Response) => {
     try {
       if (!pool) {
         return res.status(503).json(
@@ -825,7 +887,7 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
     }
   })
 
-  r.get('/api/approvals/:id', authenticate, async (req: Request, res: Response) => {
+  r.get('/api/approvals/:id', authenticate, rbacGuard('approvals', 'read'), async (req: Request, res: Response) => {
     try {
       const bridgeService = getBridgeService(options)
       const approval = await bridgeService.getApproval(req.params.id)

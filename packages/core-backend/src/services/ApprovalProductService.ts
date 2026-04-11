@@ -4,9 +4,14 @@ import type {
   ApprovalTemplateDetailDTO,
   ApprovalTemplateListItemDTO,
   ApprovalTemplateVersionDetailDTO,
+  ApprovalGraph,
   CreateApprovalRequest,
+  CreateApprovalTemplateRequest,
   FormSchema,
+  PublishApprovalTemplateRequest,
   RuntimeGraph,
+  RuntimePolicy,
+  UpdateApprovalTemplateRequest,
 } from '../types/approval-product'
 import { ApprovalGraphExecutor, validateApprovalFormData } from './ApprovalGraphExecutor'
 import type {
@@ -25,6 +30,8 @@ interface ApprovalTemplateListQuery {
   limit: number
   offset: number
 }
+
+type TemplateVersionPreference = 'active' | 'latest'
 
 interface CreateApprovalActor {
   userId: string
@@ -71,6 +78,12 @@ type TemplateBundle = {
   template: TemplateRow
   version: TemplateVersionRow
   publishedDefinition: PublishedDefinitionRow | null
+}
+
+type TemplateMetadataPatch = {
+  key?: string
+  name?: string
+  description?: string | null
 }
 
 type ApprovalRecordInsert = {
@@ -186,6 +199,77 @@ function normalizePage(value: unknown, fallback: number): number {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback
 }
 
+function normalizeRequiredString(value: unknown, fieldName: string): string {
+  if (typeof value !== 'string' || value.trim().length === 0) {
+    throw new ServiceError(`${fieldName} is required`, 400, 'VALIDATION_ERROR')
+  }
+  return value.trim()
+}
+
+function normalizeOptionalString(value: unknown): string | null | undefined {
+  if (value === undefined) return undefined
+  if (value === null) return null
+  if (typeof value !== 'string') {
+    throw new ServiceError('String value expected', 400, 'VALIDATION_ERROR')
+  }
+  return value.trim()
+}
+
+function assertFormSchema(value: unknown): FormSchema {
+  if (
+    typeof value !== 'object' ||
+    value === null ||
+    !Array.isArray((value as { fields?: unknown }).fields)
+  ) {
+    throw new ServiceError('formSchema must contain fields', 400, 'VALIDATION_ERROR')
+  }
+  return value as FormSchema
+}
+
+function assertApprovalGraph(value: unknown): ApprovalGraph {
+  const graph = value as { nodes?: unknown; edges?: unknown } | null
+  if (
+    typeof value !== 'object' ||
+    value === null ||
+    !Array.isArray(graph?.nodes) ||
+    !Array.isArray(graph?.edges)
+  ) {
+    throw new ServiceError('approvalGraph must contain nodes and edges', 400, 'VALIDATION_ERROR')
+  }
+  return value as ApprovalGraph
+}
+
+function assertRuntimePolicy(value: unknown): RuntimePolicy {
+  const policy = value as { allowRevoke?: unknown; revokeBeforeNodeKeys?: unknown } | null
+  if (typeof value !== 'object' || value === null || typeof policy?.allowRevoke !== 'boolean') {
+    throw new ServiceError('policy.allowRevoke is required', 400, 'VALIDATION_ERROR')
+  }
+  if (
+    policy.revokeBeforeNodeKeys !== undefined &&
+    (!Array.isArray(policy.revokeBeforeNodeKeys) ||
+      !policy.revokeBeforeNodeKeys.every((item) => typeof item === 'string' && item.trim().length > 0))
+  ) {
+    throw new ServiceError('policy.revokeBeforeNodeKeys must be a string array', 400, 'VALIDATION_ERROR')
+  }
+  return {
+    allowRevoke: policy.allowRevoke,
+    revokeBeforeNodeKeys: Array.isArray(policy.revokeBeforeNodeKeys)
+      ? policy.revokeBeforeNodeKeys.map((item) => item.trim())
+      : undefined,
+  }
+}
+
+function buildRuntimeGraph(approvalGraph: ApprovalGraph, policy: RuntimePolicy): RuntimeGraph {
+  const copied = JSON.parse(JSON.stringify(approvalGraph)) as ApprovalGraph
+  return {
+    ...copied,
+    policy: {
+      allowRevoke: policy.allowRevoke,
+      ...(policy.revokeBeforeNodeKeys ? { revokeBeforeNodeKeys: [...policy.revokeBeforeNodeKeys] } : {}),
+    },
+  }
+}
+
 export class ApprovalProductService {
   async listTemplates(query: ApprovalTemplateListQuery): Promise<{ data: ApprovalTemplateListItemDTO[]; total: number }> {
     if (!pool) throw new Error('Database not available')
@@ -226,7 +310,7 @@ export class ApprovalProductService {
   }
 
   async getTemplate(id: string): Promise<ApprovalTemplateDetailDTO | null> {
-    const bundle = await this.loadTemplateBundle(id)
+    const bundle = await this.loadTemplateBundle(id, undefined, 'latest')
     return bundle ? toApprovalTemplateDetailDTO(bundle) : null
   }
 
@@ -235,10 +319,265 @@ export class ApprovalProductService {
     return bundle ? toApprovalTemplateVersionDetailDTO(bundle) : null
   }
 
+  async createTemplate(request: CreateApprovalTemplateRequest): Promise<ApprovalTemplateDetailDTO> {
+    if (!pool) throw new Error('Database not available')
+
+    const key = normalizeRequiredString(request.key, 'key')
+    const name = normalizeRequiredString(request.name, 'name')
+    const description = normalizeOptionalString(request.description)
+    const formSchema = assertFormSchema(request.formSchema)
+    const approvalGraph = assertApprovalGraph(request.approvalGraph)
+
+    const client = await pool.connect()
+    try {
+      await client.query('BEGIN')
+
+      const templateResult = await client.query<TemplateRow>(
+        `INSERT INTO approval_templates (key, name, description, status)
+         VALUES ($1, $2, $3, 'draft')
+         RETURNING *`,
+        [key, name, description ?? null],
+      )
+      let template = templateResult.rows[0]
+
+      const versionResult = await client.query<TemplateVersionRow>(
+        `INSERT INTO approval_template_versions (template_id, version, status, form_schema, approval_graph)
+         VALUES ($1, 1, 'draft', $2, $3)
+         RETURNING *`,
+        [template.id, JSON.stringify(formSchema), JSON.stringify(approvalGraph)],
+      )
+      const version = versionResult.rows[0]
+
+      const updatedTemplateResult = await client.query<TemplateRow>(
+        `UPDATE approval_templates
+         SET latest_version_id = $1, updated_at = now()
+         WHERE id = $2
+         RETURNING *`,
+        [version.id, template.id],
+      )
+      template = updatedTemplateResult.rows[0]
+
+      await client.query('COMMIT')
+
+      return toApprovalTemplateDetailDTO({
+        template,
+        version,
+        publishedDefinition: null,
+      })
+    } catch (error) {
+      await client.query('ROLLBACK')
+      throw error
+    } finally {
+      client.release()
+    }
+  }
+
+  async updateTemplate(id: string, request: UpdateApprovalTemplateRequest): Promise<ApprovalTemplateDetailDTO> {
+    if (!pool) throw new Error('Database not available')
+
+    const metadataPatch: TemplateMetadataPatch = {}
+    if (request.key !== undefined) metadataPatch.key = normalizeRequiredString(request.key, 'key')
+    if (request.name !== undefined) metadataPatch.name = normalizeRequiredString(request.name, 'name')
+    if (request.description !== undefined) metadataPatch.description = normalizeOptionalString(request.description) ?? null
+
+    const formSchema = request.formSchema !== undefined ? assertFormSchema(request.formSchema) : undefined
+    const approvalGraph = request.approvalGraph !== undefined ? assertApprovalGraph(request.approvalGraph) : undefined
+
+    const client = await pool.connect()
+    try {
+      await client.query('BEGIN')
+
+      const templateResult = await client.query<TemplateRow>(
+        `SELECT * FROM approval_templates WHERE id = $1 FOR UPDATE`,
+        [id],
+      )
+      let template = templateResult.rows[0]
+      if (!template) {
+        throw new ServiceError('Approval template not found', 404, 'APPROVAL_TEMPLATE_NOT_FOUND')
+      }
+
+      if (Object.keys(metadataPatch).length > 0) {
+        const setClauses: string[] = []
+        const params: unknown[] = []
+        let index = 1
+
+        if (metadataPatch.key !== undefined) {
+          setClauses.push(`key = $${index++}`)
+          params.push(metadataPatch.key)
+        }
+        if (metadataPatch.name !== undefined) {
+          setClauses.push(`name = $${index++}`)
+          params.push(metadataPatch.name)
+        }
+        if (metadataPatch.description !== undefined) {
+          setClauses.push(`description = $${index++}`)
+          params.push(metadataPatch.description)
+        }
+        setClauses.push('updated_at = now()')
+        params.push(id)
+
+        const updatedTemplateResult = await client.query<TemplateRow>(
+          `UPDATE approval_templates
+           SET ${setClauses.join(', ')}
+           WHERE id = $${index}
+           RETURNING *`,
+          params,
+        )
+        template = updatedTemplateResult.rows[0]
+      }
+
+      let version: TemplateVersionRow | null = null
+      const shouldCreateVersion = formSchema !== undefined || approvalGraph !== undefined
+      if (shouldCreateVersion) {
+        const latestVersionResult = await client.query<TemplateVersionRow>(
+          `SELECT *
+           FROM approval_template_versions
+           WHERE template_id = $1
+           ORDER BY version DESC
+           LIMIT 1`,
+          [id],
+        )
+        const latestVersion = latestVersionResult.rows[0]
+        if (!latestVersion) {
+          throw new ServiceError('Approval template version not found', 404, 'APPROVAL_TEMPLATE_VERSION_NOT_FOUND')
+        }
+
+        const maxVersionResult = await client.query<{ max_version: string }>(
+          `SELECT COALESCE(MAX(version), 0)::text AS max_version
+           FROM approval_template_versions
+           WHERE template_id = $1`,
+          [id],
+        )
+        const nextVersion = Number.parseInt(maxVersionResult.rows[0]?.max_version || '0', 10) + 1
+
+        const versionResult = await client.query<TemplateVersionRow>(
+          `INSERT INTO approval_template_versions (template_id, version, status, form_schema, approval_graph)
+           VALUES ($1, $2, 'draft', $3, $4)
+           RETURNING *`,
+          [
+            id,
+            nextVersion,
+            JSON.stringify(formSchema ?? latestVersion.form_schema),
+            JSON.stringify(approvalGraph ?? latestVersion.approval_graph),
+          ],
+        )
+        version = versionResult.rows[0]
+
+        const updatedTemplateResult = await client.query<TemplateRow>(
+          `UPDATE approval_templates
+           SET latest_version_id = $1, updated_at = now()
+           WHERE id = $2
+           RETURNING *`,
+          [version.id, id],
+        )
+        template = updatedTemplateResult.rows[0]
+      } else {
+        const bundle = await this.loadTemplateBundleWithClient(client, id, undefined, 'latest')
+        version = bundle?.version ?? null
+      }
+
+      await client.query('COMMIT')
+
+      if (!version) {
+        throw new ServiceError('Approval template version not found', 404, 'APPROVAL_TEMPLATE_VERSION_NOT_FOUND')
+      }
+
+      return toApprovalTemplateDetailDTO({
+        template,
+        version,
+        publishedDefinition: null,
+      })
+    } catch (error) {
+      await client.query('ROLLBACK')
+      throw error
+    } finally {
+      client.release()
+    }
+  }
+
+  async publishTemplate(id: string, request: PublishApprovalTemplateRequest): Promise<ApprovalTemplateVersionDetailDTO> {
+    if (!pool) throw new Error('Database not available')
+
+    const policy = assertRuntimePolicy(request.policy)
+    const client = await pool.connect()
+    try {
+      await client.query('BEGIN')
+
+      const templateResult = await client.query<TemplateRow>(
+        `SELECT * FROM approval_templates WHERE id = $1 FOR UPDATE`,
+        [id],
+      )
+      const template = templateResult.rows[0]
+      if (!template) {
+        throw new ServiceError('Approval template not found', 404, 'APPROVAL_TEMPLATE_NOT_FOUND')
+      }
+      if (!template.latest_version_id) {
+        throw new ServiceError('Approval template has no version to publish', 400, 'APPROVAL_TEMPLATE_VERSION_NOT_FOUND')
+      }
+
+      const versionResult = await client.query<TemplateVersionRow>(
+        `SELECT * FROM approval_template_versions WHERE id = $1 AND template_id = $2`,
+        [template.latest_version_id, id],
+      )
+      const version = versionResult.rows[0]
+      if (!version) {
+        throw new ServiceError('Approval template version not found', 404, 'APPROVAL_TEMPLATE_VERSION_NOT_FOUND')
+      }
+
+      await client.query(
+        `UPDATE approval_published_definitions
+         SET is_active = FALSE
+         WHERE template_id = $1 AND is_active = TRUE`,
+        [id],
+      )
+
+      const runtimeGraph = buildRuntimeGraph(assertApprovalGraph(version.approval_graph), policy)
+
+      const publishedDefinitionResult = await client.query<PublishedDefinitionRow>(
+        `INSERT INTO approval_published_definitions (template_id, template_version_id, runtime_graph, is_active, published_at)
+         VALUES ($1, $2, $3, TRUE, now())
+         RETURNING *`,
+        [id, version.id, JSON.stringify(runtimeGraph)],
+      )
+      const publishedDefinition = publishedDefinitionResult.rows[0]
+
+      const updatedVersionResult = await client.query<TemplateVersionRow>(
+        `UPDATE approval_template_versions
+         SET status = 'published', updated_at = now()
+         WHERE id = $1
+         RETURNING *`,
+        [version.id],
+      )
+      const updatedVersion = updatedVersionResult.rows[0]
+
+      await client.query(
+        `UPDATE approval_templates
+         SET status = 'published',
+             active_version_id = $1,
+             updated_at = now()
+         WHERE id = $2`,
+        [version.id, id],
+      )
+
+      await client.query('COMMIT')
+
+      return toApprovalTemplateVersionDetailDTO({
+        template,
+        version: updatedVersion,
+        publishedDefinition,
+      })
+    } catch (error) {
+      await client.query('ROLLBACK')
+      throw error
+    } finally {
+      client.release()
+    }
+  }
+
   async createApproval(request: CreateApprovalRequest, actor: CreateApprovalActor): Promise<UnifiedApprovalDTO> {
     if (!pool) throw new Error('Database not available')
 
-    const bundle = await this.loadTemplateBundle(request.templateId)
+    const bundle = await this.loadTemplateBundle(request.templateId, undefined, 'active')
     if (!bundle) {
       throw new ServiceError('Approval template not found', 404, 'APPROVAL_TEMPLATE_NOT_FOUND')
     }
@@ -631,27 +970,41 @@ export class ApprovalProductService {
     return result.rows[0]?.request_no || `AP-${normalizePage(Date.now(), 100001)}`
   }
 
-  private async loadTemplateBundle(templateId: string, explicitVersionId?: string): Promise<TemplateBundle | null> {
+  private async loadTemplateBundle(
+    templateId: string,
+    explicitVersionId?: string,
+    preferredVersion: TemplateVersionPreference = 'active',
+  ): Promise<TemplateBundle | null> {
     if (!pool) throw new Error('Database not available')
 
-    const templateResult = await pool.query<TemplateRow>(
+    return this.loadTemplateBundleWithClient(pool, templateId, explicitVersionId, preferredVersion)
+  }
+
+  private async loadTemplateBundleWithClient(
+    client: { query: typeof pool.query },
+    templateId: string,
+    explicitVersionId?: string,
+    preferredVersion: TemplateVersionPreference = 'active',
+  ): Promise<TemplateBundle | null> {
+    const templateResult = await client.query<TemplateRow>(
       `SELECT * FROM approval_templates WHERE id = $1`,
       [templateId],
     )
     const template = templateResult.rows[0]
     if (!template) return null
 
-    const versionId = explicitVersionId || template.active_version_id || template.latest_version_id
+    const versionId = explicitVersionId
+      || (preferredVersion === 'latest' ? template.latest_version_id || template.active_version_id : template.active_version_id || template.latest_version_id)
     if (!versionId) return null
 
-    const versionResult = await pool.query<TemplateVersionRow>(
+    const versionResult = await client.query<TemplateVersionRow>(
       `SELECT * FROM approval_template_versions WHERE id = $1 AND template_id = $2`,
       [versionId, template.id],
     )
     const version = versionResult.rows[0]
     if (!version) return null
 
-    const publishedResult = await pool.query<PublishedDefinitionRow>(
+    const publishedResult = await client.query<PublishedDefinitionRow>(
       `SELECT *
        FROM approval_published_definitions
        WHERE template_version_id = $1
