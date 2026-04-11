@@ -12,7 +12,7 @@
  * Uses the same component-level E2E pattern as approval-center.spec.ts.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { createApp, defineComponent, h, nextTick, ref, type App as VueApp } from 'vue'
+import { computed, createApp, defineComponent, h, nextTick, ref, type App as VueApp } from 'vue'
 import {
   mockPendingApproval,
   mockApprovedApproval,
@@ -126,6 +126,44 @@ vi.mock('../src/approvals/templateStore', () => ({
 }))
 
 // ---------------------------------------------------------------------------
+// Approval permissions mock
+// ---------------------------------------------------------------------------
+const mockPermissionState = ref({
+  canRead: true,
+  canWrite: true,
+  canAct: true,
+  canManageTemplates: true,
+})
+
+function setMockPermissions(perms: string[]) {
+  mockPermissionState.value = {
+    canRead: perms.includes('approvals:read'),
+    canWrite: perms.includes('approvals:write'),
+    canAct: perms.includes('approvals:act'),
+    canManageTemplates: perms.includes('approval-templates:manage'),
+  }
+}
+
+vi.mock('../src/approvals/permissions', () => ({
+  useApprovalPermissions: () => ({
+    permissions: computed(() => mockPermissionState.value),
+    hasPermission: (perm: string) => {
+      const map = {
+        'approvals:read': mockPermissionState.value.canRead,
+        'approvals:write': mockPermissionState.value.canWrite,
+        'approvals:act': mockPermissionState.value.canAct,
+        'approval-templates:manage': mockPermissionState.value.canManageTemplates,
+      } as const
+      return map[perm as keyof typeof map] ?? false
+    },
+    canRead: computed(() => mockPermissionState.value.canRead),
+    canWrite: computed(() => mockPermissionState.value.canWrite),
+    canAct: computed(() => mockPermissionState.value.canAct),
+    canManageTemplates: computed(() => mockPermissionState.value.canManageTemplates),
+  }),
+}))
+
+// ---------------------------------------------------------------------------
 // Element Plus stubs
 // ---------------------------------------------------------------------------
 const ElTabs = defineComponent({
@@ -204,6 +242,7 @@ const ElButton = defineComponent({
   render() {
     return h('button', {
       'data-el-button': this.type || 'default',
+      type: 'button',
       disabled: this.disabled || false,
       onClick: (e: Event) => { e.stopPropagation(); this.$emit('click', e) },
     }, this.$slots.default?.())
@@ -288,6 +327,18 @@ async function flushUi(cycles = 6): Promise<void> {
   }
 }
 
+function queryHistoryItems(container: HTMLDivElement | null) {
+  const timelineItems = container?.querySelectorAll('.el-timeline-item') ?? []
+  if (timelineItems.length > 0) return Array.from(timelineItems)
+  return Array.from(container?.querySelectorAll('.approval-detail__history-item') ?? [])
+}
+
+function queryTemplateGraphNodes(container: HTMLDivElement | null) {
+  const timelineItems = container?.querySelectorAll('.el-timeline-item') ?? []
+  if (timelineItems.length > 0) return Array.from(timelineItems)
+  return Array.from(container?.querySelectorAll('.template-detail__node') ?? [])
+}
+
 function registerAllStubs(app: VueApp<Element>) {
   app.component('ElTabs', ElTabs)
   app.component('ElTabPane', ElTabPane)
@@ -332,6 +383,12 @@ describe('Approval E2E Permissions', () => {
     mockTemplateLoading.value = false
     mockTemplateError.value = null
     mockTemplateTotal.value = 0
+    setMockPermissions([
+      'approvals:read',
+      'approvals:write',
+      'approvals:act',
+      'approval-templates:manage',
+    ])
 
     routeParams = {}
     routeQuery = {}
@@ -417,6 +474,7 @@ describe('Approval E2E Permissions', () => {
   describe('Read-only user (approvals:read)', () => {
     it('can see the approval list (center view renders)', async () => {
       const perms = mockPermissions(['approvals:read'])
+      setMockPermissions(perms.permissions)
       mockPendingApprovals.value = [mockPendingApproval()]
       await mountCenterView()
 
@@ -426,12 +484,14 @@ describe('Approval E2E Permissions', () => {
     })
 
     it('can see approval list tabs', async () => {
+      setMockPermissions(['approvals:read'])
       await mountCenterView()
       const panes = container!.querySelectorAll('[data-tab-pane]')
       expect(panes.length).toBe(4)
     })
 
     it('detail page with non-pending status shows NO action buttons', async () => {
+      setMockPermissions(['approvals:read'])
       // Read-only: viewing an approved approval -> no buttons
       routeParams = { id: 'apv_approved_1' }
       mockActiveApproval.value = mockApprovedApproval()
@@ -442,6 +502,7 @@ describe('Approval E2E Permissions', () => {
     })
 
     it('detail page still renders form snapshot and history', async () => {
+      setMockPermissions(['approvals:read'])
       routeParams = { id: 'apv_approved_1' }
       mockActiveApproval.value = mockApprovedApproval({
         formSnapshot: { fld_reason: '出差报销', fld_amount: 5000 },
@@ -452,11 +513,12 @@ describe('Approval E2E Permissions', () => {
       const snapshot = container!.querySelector('.approval-detail__snapshot')
       expect(snapshot).toBeTruthy()
 
-      const historyItems = container!.querySelectorAll('.el-timeline-item')
+      const historyItems = queryHistoryItems(container)
       expect(historyItems.length).toBe(2)
     })
 
     it('template center renders without "发起审批" button for draft templates', async () => {
+      setMockPermissions(['approvals:read'])
       // Template center shows a table. Only published templates have a "发起审批" link button.
       // Draft templates should not show it. We verify by providing only draft templates.
       mockTemplates.value = [
@@ -478,6 +540,7 @@ describe('Approval E2E Permissions', () => {
   describe('Writer (approvals:read + approvals:write)', () => {
     it('can load the new-approval form (ApprovalNewView)', async () => {
       const perms = mockPermissions(['approvals:read', 'approvals:write'])
+      setMockPermissions(perms.permissions)
       routeParams = { templateId: 'tpl_1' }
       routePath = '/approvals/new/tpl_1'
       mockActiveTemplate.value = mockPublishedTemplate()
@@ -490,6 +553,7 @@ describe('Approval E2E Permissions', () => {
     })
 
     it('can fill and submit the approval form', async () => {
+      setMockPermissions(['approvals:read', 'approvals:write'])
       routeParams = { templateId: 'tpl_1' }
       mockActiveTemplate.value = mockPublishedTemplate()
       submitApprovalSpy.mockResolvedValue(mockPendingApproval({ id: 'apv_new_writer' }))
@@ -509,6 +573,7 @@ describe('Approval E2E Permissions', () => {
     })
 
     it('after submitting, navigates to the new approval detail', async () => {
+      setMockPermissions(['approvals:read', 'approvals:write'])
       routeParams = { templateId: 'tpl_1' }
       mockActiveTemplate.value = mockPublishedTemplate()
       submitApprovalSpy.mockResolvedValue(mockPendingApproval({ id: 'apv_new_writer' }))
@@ -527,6 +592,7 @@ describe('Approval E2E Permissions', () => {
     })
 
     it('writer viewing a pending approval with no assignment sees action buttons (view-level)', async () => {
+      setMockPermissions(['approvals:read', 'approvals:write'])
       // The current detail view shows action buttons purely based on status === 'pending'.
       // A writer without approvals:act should NOT be able to act, but the current view
       // shows buttons for any pending approval. This test documents the current behavior.
@@ -547,6 +613,7 @@ describe('Approval E2E Permissions', () => {
   // =========================================================================
   describe('Actor (approvals:read + approvals:act)', () => {
     it('sees approve/reject/transfer buttons when viewing a pending assigned approval', async () => {
+      setMockPermissions(['approvals:read', 'approvals:act'])
       routeParams = { id: 'apv_pending_1' }
       mockActiveApproval.value = mockPendingApproval() // Has active assignment for current user
       await mountDetailView()
@@ -559,6 +626,7 @@ describe('Approval E2E Permissions', () => {
     })
 
     it('does not see action buttons for a non-pending approval', async () => {
+      setMockPermissions(['approvals:read', 'approvals:act'])
       routeParams = { id: 'apv_approved_1' }
       mockActiveApproval.value = mockApprovedApproval()
       await mountDetailView()
@@ -568,6 +636,7 @@ describe('Approval E2E Permissions', () => {
     })
 
     it('can execute approve action on an assigned approval', async () => {
+      setMockPermissions(['approvals:read', 'approvals:act'])
       routeParams = { id: 'apv_pending_1' }
       mockActiveApproval.value = mockPendingApproval()
       executeActionSpy.mockResolvedValue(mockApprovedApproval())
@@ -592,6 +661,7 @@ describe('Approval E2E Permissions', () => {
     })
 
     it('can execute reject action on an assigned approval', async () => {
+      setMockPermissions(['approvals:read', 'approvals:act'])
       routeParams = { id: 'apv_pending_1' }
       mockActiveApproval.value = mockPendingApproval()
       executeActionSpy.mockResolvedValue(mockApprovedApproval())
@@ -616,6 +686,7 @@ describe('Approval E2E Permissions', () => {
     })
 
     it('can transfer an assigned approval to another user', async () => {
+      setMockPermissions(['approvals:read', 'approvals:act'])
       routeParams = { id: 'apv_pending_1' }
       mockActiveApproval.value = mockPendingApproval()
       executeActionSpy.mockResolvedValue(mockPendingApproval())
@@ -645,6 +716,7 @@ describe('Approval E2E Permissions', () => {
     })
 
     it('history timeline is always visible for any approval', async () => {
+      setMockPermissions(['approvals:read', 'approvals:act'])
       routeParams = { id: 'apv_approved_1' }
       mockActiveApproval.value = mockApprovedApproval()
       mockHistoryRef.value = mockHistoryItems()
@@ -653,7 +725,7 @@ describe('Approval E2E Permissions', () => {
       const timeline = container!.querySelector('.approval-detail__timeline h2')
       expect(timeline?.textContent).toBe('审批流程')
 
-      const items = container!.querySelectorAll('.el-timeline-item')
+      const items = queryHistoryItems(container)
       expect(items.length).toBe(2)
     })
   })
@@ -663,6 +735,7 @@ describe('Approval E2E Permissions', () => {
   // =========================================================================
   describe('Template manager (approval-templates:manage)', () => {
     it('template center renders and loads templates', async () => {
+      setMockPermissions(['approval-templates:manage'])
       mockTemplates.value = [
         mockPublishedTemplate(),
         mockDraftTemplate(),
@@ -676,12 +749,14 @@ describe('Approval E2E Permissions', () => {
     })
 
     it('template center has search input', async () => {
+      setMockPermissions(['approval-templates:manage'])
       await mountTemplateCenterView()
       const searchInput = container!.querySelector('.template-center__toolbar [data-el-input]')
       expect(searchInput).toBeTruthy()
     })
 
     it('template detail view renders all info for a published template', async () => {
+      setMockPermissions(['approval-templates:manage', 'approvals:write'])
       routeParams = { id: 'tpl_1' }
       mockActiveTemplate.value = mockPublishedTemplate()
       await mountTemplateDetailView()
@@ -701,6 +776,7 @@ describe('Approval E2E Permissions', () => {
     })
 
     it('template detail view for a draft template shows no "发起审批" button', async () => {
+      setMockPermissions(['approval-templates:manage'])
       routeParams = { id: 'tpl_draft_1' }
       mockActiveTemplate.value = mockDraftTemplate()
       await mountTemplateDetailView()
@@ -714,15 +790,17 @@ describe('Approval E2E Permissions', () => {
     })
 
     it('template detail view renders graph nodes', async () => {
+      setMockPermissions(['approval-templates:manage'])
       routeParams = { id: 'tpl_1' }
       mockActiveTemplate.value = mockPublishedTemplate()
       await mountTemplateDetailView()
 
-      const nodes = container!.querySelectorAll('.el-timeline-item')
+      const nodes = queryTemplateGraphNodes(container)
       expect(nodes.length).toBe(4) // start + 2 approval + end
     })
 
     it('template detail view renders form fields info section', async () => {
+      setMockPermissions(['approval-templates:manage'])
       routeParams = { id: 'tpl_1' }
       mockActiveTemplate.value = mockPublishedTemplate()
       await mountTemplateDetailView()
@@ -733,6 +811,7 @@ describe('Approval E2E Permissions', () => {
     })
 
     it('template detail shows meta info (key, version, dates)', async () => {
+      setMockPermissions(['approval-templates:manage'])
       routeParams = { id: 'tpl_1' }
       mockActiveTemplate.value = mockPublishedTemplate()
       await mountTemplateDetailView()
@@ -743,6 +822,7 @@ describe('Approval E2E Permissions', () => {
     })
 
     it('back button navigates to /approval-templates', async () => {
+      setMockPermissions(['approval-templates:manage'])
       routeParams = { id: 'tpl_1' }
       mockActiveTemplate.value = mockPublishedTemplate()
       await mountTemplateDetailView()

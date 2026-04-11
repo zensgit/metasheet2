@@ -5,7 +5,7 @@
  * Uses the same component-level E2E pattern as approval-center.spec.ts.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { createApp, defineComponent, h, nextTick, ref, type App as VueApp } from 'vue'
+import { computed, createApp, defineComponent, h, nextTick, ref, type App as VueApp } from 'vue'
 import {
   mockPendingApproval,
   mockApprovedApproval,
@@ -121,6 +121,35 @@ vi.mock('../src/approvals/templateStore', () => ({
 }))
 
 // ---------------------------------------------------------------------------
+// Approval permissions mock
+// ---------------------------------------------------------------------------
+const mockPermissionState = ref({
+  canRead: true,
+  canWrite: true,
+  canAct: true,
+  canManageTemplates: true,
+})
+
+vi.mock('../src/approvals/permissions', () => ({
+  useApprovalPermissions: () => ({
+    permissions: computed(() => mockPermissionState.value),
+    hasPermission: (perm: string) => {
+      const map = {
+        'approvals:read': mockPermissionState.value.canRead,
+        'approvals:write': mockPermissionState.value.canWrite,
+        'approvals:act': mockPermissionState.value.canAct,
+        'approval-templates:manage': mockPermissionState.value.canManageTemplates,
+      } as const
+      return map[perm as keyof typeof map] ?? false
+    },
+    canRead: computed(() => mockPermissionState.value.canRead),
+    canWrite: computed(() => mockPermissionState.value.canWrite),
+    canAct: computed(() => mockPermissionState.value.canAct),
+    canManageTemplates: computed(() => mockPermissionState.value.canManageTemplates),
+  }),
+}))
+
+// ---------------------------------------------------------------------------
 // Element Plus stubs (same pattern as approval-center.spec.ts)
 // ---------------------------------------------------------------------------
 const ElTabs = defineComponent({
@@ -212,6 +241,7 @@ const ElButton = defineComponent({
   render() {
     return h('button', {
       'data-el-button': this.type || 'default',
+      type: 'button',
       disabled: this.disabled || false,
       onClick: (e: Event) => { e.stopPropagation(); this.$emit('click', e) },
     }, this.$slots.default?.())
@@ -309,6 +339,18 @@ async function flushUi(cycles = 6): Promise<void> {
   }
 }
 
+function queryHistoryItems(container: HTMLDivElement | null) {
+  const timelineItems = container?.querySelectorAll('.el-timeline-item') ?? []
+  if (timelineItems.length > 0) return Array.from(timelineItems)
+  return Array.from(container?.querySelectorAll('.approval-detail__history-item') ?? [])
+}
+
+function queryTemplateGraphNodes(container: HTMLDivElement | null) {
+  const timelineItems = container?.querySelectorAll('.el-timeline-item') ?? []
+  if (timelineItems.length > 0) return Array.from(timelineItems)
+  return Array.from(container?.querySelectorAll('.template-detail__node') ?? [])
+}
+
 function registerAllStubs(app: VueApp<Element>) {
   app.component('ElTabs', ElTabs)
   app.component('ElTabPane', ElTabPane)
@@ -354,6 +396,12 @@ describe('Approval E2E Lifecycle', () => {
     mockTemplateLoading.value = false
     mockTemplateError.value = null
     mockTemplateTotal.value = 0
+    mockPermissionState.value = {
+      canRead: true,
+      canWrite: true,
+      canAct: true,
+      canManageTemplates: true,
+    }
 
     // Reset route state
     routeParams = {}
@@ -512,7 +560,7 @@ describe('Approval E2E Lifecycle', () => {
       const graphHeading = headings.find((h) => h.textContent === '审批流程')
       expect(graphHeading).toBeTruthy()
 
-      const nodes = container!.querySelectorAll('.el-timeline-item')
+      const nodes = queryTemplateGraphNodes(container)
       expect(nodes.length).toBe(4) // start, approval_1, approval_2, end
     })
   })
@@ -934,11 +982,11 @@ describe('Approval E2E Lifecycle', () => {
       mockHistory.value = mockHistoryItems()
       await mountDetailView()
 
-      const historyItems = container!.querySelectorAll('.el-timeline-item')
+      const historyItems = queryHistoryItems(container)
       expect(historyItems.length).toBe(2)
 
       // The second history item should have a comment
-      const commentEl = historyItems[1].querySelector('.approval-detail__timeline-comment')
+      const commentEl = historyItems[1].querySelector('.approval-detail__timeline-comment, .approval-detail__history-comment')
       expect(commentEl?.textContent).toBe('同意报销')
     })
 
@@ -948,7 +996,7 @@ describe('Approval E2E Lifecycle', () => {
       mockHistory.value = mockHistoryItems()
       await mountDetailView()
 
-      const historyItems = container!.querySelectorAll('.el-timeline-item')
+      const historyItems = queryHistoryItems(container)
       const firstActor = historyItems[0].querySelector('strong')
       expect(firstActor?.textContent).toBe('张三')
     })
