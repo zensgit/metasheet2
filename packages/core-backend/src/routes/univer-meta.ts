@@ -3587,6 +3587,42 @@ export function univerMetaRouter(): Router {
     }
   })
 
+  router.get('/people-search', async (req: Request, res: Response) => {
+    const q = typeof req.query.q === 'string' ? req.query.q.trim() : ''
+    const limit = Math.min(20, Math.max(1, Number(req.query.limit ?? 10)))
+    const baseId = typeof req.query.baseId === 'string' ? req.query.baseId.trim() : ''
+
+    if (!baseId) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'baseId is required' } })
+    }
+
+    try {
+      const pool = poolManager.get()
+      const query = pool.query.bind(pool)
+
+      const sheetsRes = await query(
+        `SELECT id FROM meta_sheets WHERE base_id = $1 AND description = $2 AND deleted_at IS NULL LIMIT 1`,
+        [baseId, SYSTEM_PEOPLE_SHEET_DESCRIPTION],
+      )
+      const peopleSheetId = (sheetsRes.rows[0] as any)?.id
+
+      if (!peopleSheetId) {
+        return res.json({ ok: true, data: { items: [] } })
+      }
+
+      const { capabilities } = await resolveSheetReadableCapabilities(req, query, peopleSheetId)
+      if (!capabilities.canRead) return sendForbidden(res)
+
+      const summary = await loadRecordSummaries(query, peopleSheetId, { search: q, limit, offset: 0 })
+      return res.json({ ok: true, data: { items: summary.records } })
+    } catch (err) {
+      const hint = getDbNotReadyMessage(err)
+      if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
+      console.error('[univer-meta] people-search failed:', err)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'People search failed' } })
+    }
+  })
+
   router.patch('/fields/:fieldId', async (req: Request, res: Response) => {
     const fieldId = typeof req.params.fieldId === 'string' ? req.params.fieldId : ''
     if (!fieldId) {
