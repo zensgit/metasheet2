@@ -262,6 +262,41 @@ function buildFollowUpCommand(input) {
   }
 }
 
+function buildPartItemCommand(input) {
+  const partItem =
+    input && typeof input.partItem === 'object' && !Array.isArray(input.partItem)
+      ? input.partItem
+      : input || {}
+
+  const partNo = requiredString(partItem.partNo ?? input.partNo, 'partItem.partNo')
+  const name = requiredString(partItem.name ?? input.name, 'partItem.name')
+  const category = normalizeEnumValue(
+    partItem.category,
+    'partItem.category',
+    ['spare', 'consumable'],
+    'spare',
+  )
+  const status = normalizeEnumValue(
+    partItem.status,
+    'partItem.status',
+    ['available', 'reserved', 'consumed'],
+    'available',
+  )
+  const stockQty = isMissingInputValue(partItem.stockQty ?? input.stockQty)
+    ? undefined
+    : requiredNumber(partItem.stockQty ?? input.stockQty, 'partItem.stockQty')
+
+  return {
+    recordData: {
+      partNo,
+      name,
+      category,
+      status,
+      ...(typeof stockQty === 'number' ? { stockQty } : {}),
+    },
+  }
+}
+
 function buildUpdateCustomerCommand(input, existingCustomer) {
   const command = input && typeof input === 'object' && !Array.isArray(input) ? input : {}
   const customerInput =
@@ -303,6 +338,61 @@ function buildUpdateCustomerCommand(input, existingCustomer) {
   }
   if (hasEmail) {
     changes.email = optionalString(customerInput.email ?? command.email) || null
+  }
+
+  return {
+    changes,
+  }
+}
+
+function buildUpdatePartItemCommand(input, existingPartItem) {
+  const command = input && typeof input === 'object' && !Array.isArray(input) ? input : {}
+  const partItemInput =
+    command.partItem && typeof command.partItem === 'object' && !Array.isArray(command.partItem)
+      ? command.partItem
+      : command
+  const currentPartItem =
+    existingPartItem && typeof existingPartItem === 'object' ? existingPartItem : {}
+
+  const changes = {}
+  const hasPartNo = hasOwnField(partItemInput, 'partNo') || hasOwnField(command, 'partNo')
+  const hasName = hasOwnField(partItemInput, 'name') || hasOwnField(command, 'name')
+  const hasCategory = hasOwnField(partItemInput, 'category') || hasOwnField(command, 'category')
+  const hasStatus = hasOwnField(partItemInput, 'status') || hasOwnField(command, 'status')
+  const hasStockQty = hasOwnField(partItemInput, 'stockQty') || hasOwnField(command, 'stockQty')
+
+  if (hasPartNo) {
+    changes.partNo = requiredString(
+      partItemInput.partNo ?? command.partNo,
+      'partItem.partNo',
+    )
+  }
+  if (hasName) {
+    changes.name = requiredString(
+      partItemInput.name ?? command.name,
+      'partItem.name',
+    )
+  }
+  if (hasCategory) {
+    changes.category = normalizeEnumValue(
+      partItemInput.category ?? command.category,
+      'partItem.category',
+      ['spare', 'consumable'],
+      optionalString(currentPartItem.category) || 'spare',
+    )
+  }
+  if (hasStatus) {
+    changes.status = normalizeEnumValue(
+      partItemInput.status ?? command.status,
+      'partItem.status',
+      ['available', 'reserved', 'consumed'],
+      optionalString(currentPartItem.status) || 'available',
+    )
+  }
+  if (hasStockQty) {
+    changes.stockQty = isMissingInputValue(partItemInput.stockQty ?? command.stockQty)
+      ? null
+      : requiredNumber(partItemInput.stockQty ?? command.stockQty, 'partItem.stockQty')
   }
 
   return {
@@ -718,8 +808,10 @@ module.exports = {
   buildCreateTicketCommand,
   buildCustomerCommand,
   buildFollowUpCommand,
+  buildPartItemCommand,
   buildUpdateFollowUpCommand,
   buildUpdateCustomerCommand,
+  buildUpdatePartItemCommand,
   buildInstalledAssetCommand,
   buildUpdateInstalledAssetCommand,
   buildUpdateTicketCommand,

@@ -299,6 +299,7 @@ function createContext(): {
   const pk = (field: string) => `${MOCK_PROJECT_ID}:serviceTicket:${field}`
   const iaPk = (field: string) => `${MOCK_PROJECT_ID}:installedAsset:${field}`
   const cuPk = (field: string) => `${MOCK_PROJECT_ID}:customer:${field}`
+  const paPk = (field: string) => `${MOCK_PROJECT_ID}:partItem:${field}`
   const fuPk = (field: string) => `${MOCK_PROJECT_ID}:followUp:${field}`
   const getObjectSheetId = vi.fn((projectId: string, objectId: string) => `${projectId}:${objectId}:sheet`)
   const getFieldId = vi.fn((projectId: string, objectId: string, fieldId: string) => `${projectId}:${objectId}:${fieldId}`)
@@ -320,6 +321,8 @@ function createContext(): {
       ? 'rec_asset_001'
       : input.sheetId.includes('customer')
       ? 'rec_customer_001'
+      : input.sheetId.includes('partItem')
+      ? 'rec_part_001'
       : input.sheetId.includes('followUp')
       ? 'rec_follow_up_001'
       : input.sheetId.includes('serviceRecord')
@@ -356,6 +359,19 @@ function createContext(): {
             [cuPk('phone')]: '13800138000',
             [cuPk('email')]: 'alice@example.com',
             [cuPk('status')]: 'active',
+          },
+        }
+      : input.sheetId.includes('partItem')
+      ? {
+          id: 'rec_part_001',
+          sheetId: input.sheetId,
+          version: 2,
+          data: {
+            [paPk('partNo')]: 'PRT-1001',
+            [paPk('name')]: 'Starter Capacitor',
+            [paPk('category')]: 'spare',
+            [paPk('stockQty')]: 8,
+            [paPk('status')]: 'available',
           },
         }
       : input.sheetId.includes('followUp')
@@ -433,6 +449,21 @@ function createContext(): {
           filters: input.filters,
           search: input.search,
         }
+      : input.sheetId.includes('partItem')
+      ? {
+          id: 'rec_part_001',
+          sheetId: input.sheetId,
+          version: 2,
+          data: {
+            [paPk('partNo')]: 'PRT-1001',
+            [paPk('name')]: 'Starter Capacitor',
+            [paPk('category')]: 'spare',
+            [paPk('stockQty')]: 8,
+            [paPk('status')]: 'available',
+          },
+          filters: input.filters,
+          search: input.search,
+        }
       : input.sheetId.includes('followUp')
       ? {
           id: 'rec_follow_up_001',
@@ -504,6 +535,14 @@ function createContext(): {
           [srPk('workSummary')]: 'Replaced motor',
           [srPk('result')]: 'resolved',
         }
+      : input.sheetId.includes('partItem')
+      ? {
+          [paPk('partNo')]: 'PRT-1001',
+          [paPk('name')]: 'Starter Capacitor',
+          [paPk('category')]: 'spare',
+          [paPk('stockQty')]: 8,
+          [paPk('status')]: 'available',
+        }
       : input.sheetId.includes('followUp')
       ? {
           [fuPk('ticketNo')]: 'TK-2001',
@@ -554,6 +593,15 @@ function createContext(): {
           [cuPk('phone')]: '13800138000',
           [cuPk('email')]: 'alice@example.com',
           [cuPk('status')]: 'active',
+          ...input.changes,
+        }
+      : input.sheetId.includes('partItem')
+      ? {
+          [paPk('partNo')]: 'PRT-1001',
+          [paPk('name')]: 'Starter Capacitor',
+          [paPk('category')]: 'spare',
+          [paPk('stockQty')]: 8,
+          [paPk('status')]: 'available',
           ...input.changes,
         }
       : input.sheetId.includes('followUp')
@@ -710,6 +758,7 @@ const stPk = (field: string) => `${MOCK_PROJECT_ID}:serviceTicket:${field}`
 const srPk = (field: string) => `${MOCK_PROJECT_ID}:serviceRecord:${field}`
 const iaPk = (field: string) => `${MOCK_PROJECT_ID}:installedAsset:${field}`
 const cuPk = (field: string) => `${MOCK_PROJECT_ID}:customer:${field}`
+const paPk = (field: string) => `${MOCK_PROJECT_ID}:partItem:${field}`
 const fuPk = (field: string) => `${MOCK_PROJECT_ID}:followUp:${field}`
 
 function seedAfterSalesInstallRow(
@@ -3274,6 +3323,453 @@ describe('plugin-after-sales routes', () => {
       error: {
         code: 'AFTER_SALES_NOT_INSTALLED',
         message: 'After-sales must be installed before deleting customers',
+      },
+    })
+    expect(deleteRecord).not.toHaveBeenCalled()
+  })
+
+  it('returns 403 for parts create when caller lacks after-sales write access', async () => {
+    const handler = routes.get('POST /api/after-sales/parts')
+    const res = new FakeResponse()
+
+    await handler?.(buildReq({
+      user: {
+        id: 'user_42',
+        tenantId: 'tenant_42',
+        role: 'user',
+        roles: ['user'],
+        perms: ['after_sales:read'],
+      },
+      body: {
+        partItem: {
+          partNo: 'PRT-1001',
+          name: 'Starter Capacitor',
+        },
+      },
+    }), res)
+
+    expect(res.statusCode).toBe(403)
+    expect(res.body).toEqual({
+      ok: false,
+      error: {
+        code: 'FORBIDDEN',
+        message: 'After-sales write access required',
+      },
+    })
+    expect(createRecord).not.toHaveBeenCalled()
+  })
+
+  it('creates part items through the multitable write seam', async () => {
+    const handler = routes.get('POST /api/after-sales/parts')
+    const res = new FakeResponse()
+
+    seedAfterSalesInstallRow(db, {
+      created_objects_json: JSON.stringify(['serviceTicket', 'partItem']),
+      created_views_json: JSON.stringify(['ticket-board', 'partItem-grid']),
+    })
+
+    await handler?.(buildReq({
+      body: {
+        partItem: {
+          partNo: 'PRT-1001',
+          name: 'Starter Capacitor',
+          category: 'spare',
+          stockQty: 12,
+          status: 'available',
+        },
+      },
+    }), res)
+
+    expect(res.statusCode).toBe(201)
+    expect(createRecord).toHaveBeenCalledWith({
+      sheetId: 'tenant_42:after-sales:partItem:sheet',
+      data: {
+        [paPk('partNo')]: 'PRT-1001',
+        [paPk('name')]: 'Starter Capacitor',
+        [paPk('category')]: 'spare',
+        [paPk('stockQty')]: 12,
+        [paPk('status')]: 'available',
+      },
+    })
+    expect(res.body.data).toEqual({
+      projectId: 'tenant_42:after-sales',
+      partItem: {
+        id: 'rec_part_001',
+        version: 1,
+        data: {
+          partNo: 'PRT-1001',
+          name: 'Starter Capacitor',
+          category: 'spare',
+          stockQty: 12,
+          status: 'available',
+        },
+      },
+    })
+  })
+
+  it('returns 400 when part create payload is invalid', async () => {
+    const handler = routes.get('POST /api/after-sales/parts')
+    const res = new FakeResponse()
+
+    seedAfterSalesInstallRow(db, {
+      created_objects_json: JSON.stringify(['serviceTicket', 'partItem']),
+      created_views_json: JSON.stringify(['ticket-board', 'partItem-grid']),
+    })
+
+    await handler?.(buildReq({
+      body: {
+        partItem: {
+          partNo: 'PRT-1001',
+          name: '',
+        },
+      },
+    }), res)
+
+    expect(res.statusCode).toBe(400)
+    expect(res.body).toEqual({
+      ok: false,
+      error: {
+        code: 'AFTER_SALES_EVENT_VALIDATION_FAILED',
+        message: 'partItem.name is required',
+        details: {
+          field: 'partItem.name',
+        },
+      },
+    })
+    expect(createRecord).not.toHaveBeenCalled()
+  })
+
+  it('returns 409 when parts are created from a failed install state', async () => {
+    const handler = routes.get('POST /api/after-sales/parts')
+    const res = new FakeResponse()
+
+    seedAfterSalesInstallRow(db, {
+      mode: 'reinstall',
+      status: 'failed',
+      created_objects_json: JSON.stringify(['serviceTicket', 'partItem']),
+      created_views_json: JSON.stringify(['ticket-board', 'partItem-grid']),
+      warnings_json: JSON.stringify(['part projection failed']),
+    })
+
+    await handler?.(buildReq({
+      body: {
+        partItem: {
+          partNo: 'PRT-1001',
+          name: 'Starter Capacitor',
+        },
+      },
+    }), res)
+
+    expect(res.statusCode).toBe(409)
+    expect(res.body).toEqual({
+      ok: false,
+      error: {
+        code: 'AFTER_SALES_NOT_INSTALLED',
+        message: 'After-sales must be installed before creating parts',
+      },
+    })
+    expect(createRecord).not.toHaveBeenCalled()
+  })
+
+  it('lists parts through the multitable query seam', async () => {
+    const handler = routes.get('GET /api/after-sales/parts')
+    const res = new FakeResponse()
+
+    seedAfterSalesInstallRow(db, {
+      created_objects_json: JSON.stringify(['serviceTicket', 'partItem']),
+      created_views_json: JSON.stringify(['ticket-board', 'partItem-grid']),
+    })
+
+    await handler?.(buildReq({
+      query: {
+        status: 'available',
+        search: 'capacitor',
+      },
+    }), res)
+
+    expect(res.statusCode).toBe(200)
+    expect(queryRecords).toHaveBeenCalledWith({
+      sheetId: 'tenant_42:after-sales:partItem:sheet',
+      filters: {
+        [paPk('status')]: 'available',
+      },
+      search: 'capacitor',
+      limit: undefined,
+      offset: undefined,
+    })
+    expect(res.body.data).toEqual({
+      projectId: 'tenant_42:after-sales',
+      partItems: [
+        {
+          id: 'rec_part_001',
+          version: 2,
+          data: {
+            partNo: 'PRT-1001',
+            name: 'Starter Capacitor',
+            category: 'spare',
+            stockQty: 8,
+            status: 'available',
+          },
+        },
+      ],
+      count: 1,
+    })
+  })
+
+  it('returns 403 for parts update when caller lacks after-sales write access', async () => {
+    const handler = routes.get('PATCH /api/after-sales/parts/:partItemId')
+    const res = new FakeResponse()
+
+    await handler?.(buildReq({
+      user: {
+        id: 'user_42',
+        tenantId: 'tenant_42',
+        role: 'user',
+        roles: ['user'],
+        perms: ['after_sales:read'],
+      },
+      params: {
+        partItemId: 'rec_part_001',
+      },
+      body: {
+        partItem: {
+          name: 'Starter Capacitor Updated',
+        },
+      },
+    }), res)
+
+    expect(res.statusCode).toBe(403)
+    expect(res.body).toEqual({
+      ok: false,
+      error: {
+        code: 'FORBIDDEN',
+        message: 'After-sales write access required',
+      },
+    })
+    expect(patchRecord).not.toHaveBeenCalled()
+  })
+
+  it('updates a part item through the multitable patch seam', async () => {
+    const handler = routes.get('PATCH /api/after-sales/parts/:partItemId')
+    const res = new FakeResponse()
+
+    seedAfterSalesInstallRow(db, {
+      created_objects_json: JSON.stringify(['serviceTicket', 'partItem']),
+      created_views_json: JSON.stringify(['ticket-board', 'partItem-grid']),
+    })
+
+    await handler?.(buildReq({
+      user: {
+        id: 'writer_42',
+        tenantId: 'tenant_42',
+        role: 'user',
+        roles: ['user'],
+        perms: ['after_sales:write'],
+      },
+      params: {
+        partItemId: 'rec_part_001',
+      },
+      body: {
+        partItem: {
+          name: 'Starter Capacitor Updated',
+          stockQty: '',
+          status: 'reserved',
+        },
+      },
+    }), res)
+
+    expect(res.statusCode).toBe(200)
+    expect(getRecord).toHaveBeenCalledWith({
+      sheetId: 'tenant_42:after-sales:partItem:sheet',
+      recordId: 'rec_part_001',
+    })
+    expect(patchRecord).toHaveBeenCalledWith({
+      sheetId: 'tenant_42:after-sales:partItem:sheet',
+      recordId: 'rec_part_001',
+      changes: {
+        [paPk('name')]: 'Starter Capacitor Updated',
+        [paPk('stockQty')]: null,
+        [paPk('status')]: 'reserved',
+      },
+    })
+    expect(res.body.data).toEqual({
+      projectId: 'tenant_42:after-sales',
+      partItem: {
+        id: 'rec_part_001',
+        version: 4,
+        data: {
+          partNo: 'PRT-1001',
+          name: 'Starter Capacitor Updated',
+          category: 'spare',
+          stockQty: null,
+          status: 'reserved',
+        },
+      },
+    })
+  })
+
+  it('returns 404 when updating a missing part item', async () => {
+    const handler = routes.get('PATCH /api/after-sales/parts/:partItemId')
+    const res = new FakeResponse()
+    getRecord.mockRejectedValueOnce(Object.assign(new Error('Record not found: rec_part_missing'), {
+      code: 'NOT_FOUND',
+    }))
+
+    seedAfterSalesInstallRow(db, {
+      created_objects_json: JSON.stringify(['serviceTicket', 'partItem']),
+      created_views_json: JSON.stringify(['ticket-board', 'partItem-grid']),
+    })
+
+    await handler?.(buildReq({
+      user: {
+        id: 'writer_42',
+        tenantId: 'tenant_42',
+        role: 'user',
+        roles: ['user'],
+        perms: ['after_sales:write'],
+      },
+      params: {
+        partItemId: 'rec_part_missing',
+      },
+      body: {
+        partItem: {
+          name: 'Missing Part',
+        },
+      },
+    }), res)
+
+    expect(res.statusCode).toBe(404)
+    expect(res.body).toEqual({
+      ok: false,
+      error: {
+        code: 'NOT_FOUND',
+        message: 'Record not found: rec_part_missing',
+      },
+    })
+    expect(patchRecord).not.toHaveBeenCalled()
+  })
+
+  it('returns 409 when parts are updated from a failed install state', async () => {
+    const handler = routes.get('PATCH /api/after-sales/parts/:partItemId')
+    const res = new FakeResponse()
+
+    seedAfterSalesInstallRow(db, {
+      mode: 'reinstall',
+      status: 'failed',
+      created_objects_json: JSON.stringify(['serviceTicket', 'partItem']),
+      created_views_json: JSON.stringify(['ticket-board', 'partItem-grid']),
+      warnings_json: JSON.stringify(['part projection failed']),
+    })
+
+    await handler?.(buildReq({
+      params: {
+        partItemId: 'rec_part_001',
+      },
+      body: {
+        partItem: {
+          name: 'Starter Capacitor Updated',
+        },
+      },
+    }), res)
+
+    expect(res.statusCode).toBe(409)
+    expect(res.body).toEqual({
+      ok: false,
+      error: {
+        code: 'AFTER_SALES_NOT_INSTALLED',
+        message: 'After-sales must be installed before updating parts',
+      },
+    })
+    expect(patchRecord).not.toHaveBeenCalled()
+  })
+
+  it('returns 403 for parts delete when caller lacks after-sales write access', async () => {
+    const handler = routes.get('DELETE /api/after-sales/parts/:partItemId')
+    const res = new FakeResponse()
+
+    await handler?.(buildReq({
+      user: {
+        id: 'user_42',
+        tenantId: 'tenant_42',
+        role: 'user',
+        roles: ['user'],
+        perms: ['after_sales:read'],
+      },
+      params: {
+        partItemId: 'rec_part_001',
+      },
+    }), res)
+
+    expect(res.statusCode).toBe(403)
+    expect(res.body).toEqual({
+      ok: false,
+      error: {
+        code: 'FORBIDDEN',
+        message: 'After-sales write access required',
+      },
+    })
+    expect(deleteRecord).not.toHaveBeenCalled()
+  })
+
+  it('deletes a part item through the multitable delete seam', async () => {
+    const handler = routes.get('DELETE /api/after-sales/parts/:partItemId')
+    const res = new FakeResponse()
+
+    seedAfterSalesInstallRow(db, {
+      created_objects_json: JSON.stringify(['serviceTicket', 'partItem']),
+      created_views_json: JSON.stringify(['ticket-board', 'partItem-grid']),
+    })
+
+    await handler?.(buildReq({
+      user: {
+        id: 'writer_42',
+        tenantId: 'tenant_42',
+        role: 'user',
+        roles: ['user'],
+        perms: ['after_sales:write'],
+      },
+      params: {
+        partItemId: 'rec_part_001',
+      },
+    }), res)
+
+    expect(res.statusCode).toBe(200)
+    expect(deleteRecord).toHaveBeenCalledWith({
+      sheetId: 'tenant_42:after-sales:partItem:sheet',
+      recordId: 'rec_part_001',
+    })
+    expect(res.body.data).toEqual({
+      projectId: 'tenant_42:after-sales',
+      partItemId: 'rec_part_001',
+      version: 4,
+      deleted: true,
+    })
+  })
+
+  it('returns 409 when parts are deleted from a failed install state', async () => {
+    const handler = routes.get('DELETE /api/after-sales/parts/:partItemId')
+    const res = new FakeResponse()
+
+    seedAfterSalesInstallRow(db, {
+      mode: 'reinstall',
+      status: 'failed',
+      created_objects_json: JSON.stringify(['serviceTicket', 'partItem']),
+      created_views_json: JSON.stringify(['ticket-board', 'partItem-grid']),
+      warnings_json: JSON.stringify(['part projection failed']),
+    })
+
+    await handler?.(buildReq({
+      params: {
+        partItemId: 'rec_part_001',
+      },
+    }), res)
+
+    expect(res.statusCode).toBe(409)
+    expect(res.body).toEqual({
+      ok: false,
+      error: {
+        code: 'AFTER_SALES_NOT_INSTALLED',
+        message: 'After-sales must be installed before deleting parts',
       },
     })
     expect(deleteRecord).not.toHaveBeenCalled()
