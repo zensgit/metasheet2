@@ -452,7 +452,7 @@ describe('Approval E2E Permissions', () => {
       const snapshot = container!.querySelector('.approval-detail__snapshot')
       expect(snapshot).toBeTruthy()
 
-      const historyItems = container!.querySelectorAll('.approval-detail__history-item')
+      const historyItems = container!.querySelectorAll('.el-timeline-item')
       expect(historyItems.length).toBe(2)
     })
 
@@ -653,7 +653,7 @@ describe('Approval E2E Permissions', () => {
       const timeline = container!.querySelector('.approval-detail__timeline h2')
       expect(timeline?.textContent).toBe('审批流程')
 
-      const items = container!.querySelectorAll('.approval-detail__history-item')
+      const items = container!.querySelectorAll('.el-timeline-item')
       expect(items.length).toBe(2)
     })
   })
@@ -718,7 +718,7 @@ describe('Approval E2E Permissions', () => {
       mockActiveTemplate.value = mockPublishedTemplate()
       await mountTemplateDetailView()
 
-      const nodes = container!.querySelectorAll('.template-detail__node')
+      const nodes = container!.querySelectorAll('.el-timeline-item')
       expect(nodes.length).toBe(4) // start + 2 approval + end
     })
 

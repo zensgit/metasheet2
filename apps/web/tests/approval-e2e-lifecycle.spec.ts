@@ -512,7 +512,7 @@ describe('Approval E2E Lifecycle', () => {
       const graphHeading = headings.find((h) => h.textContent === '审批流程')
       expect(graphHeading).toBeTruthy()
 
-      const nodes = container!.querySelectorAll('.template-detail__node')
+      const nodes = container!.querySelectorAll('.el-timeline-item')
       expect(nodes.length).toBe(4) // start, approval_1, approval_2, end
     })
   })
@@ -934,11 +934,11 @@ describe('Approval E2E Lifecycle', () => {
       mockHistory.value = mockHistoryItems()
       await mountDetailView()
 
-      const historyItems = container!.querySelectorAll('.approval-detail__history-item')
+      const historyItems = container!.querySelectorAll('.el-timeline-item')
       expect(historyItems.length).toBe(2)
 
       // The second history item should have a comment
-      const commentEl = historyItems[1].querySelector('.approval-detail__history-comment')
+      const commentEl = historyItems[1].querySelector('.approval-detail__timeline-comment')
       expect(commentEl?.textContent).toBe('同意报销')
     })
 
@@ -948,7 +948,7 @@ describe('Approval E2E Lifecycle', () => {
       mockHistory.value = mockHistoryItems()
       await mountDetailView()
 
-      const historyItems = container!.querySelectorAll('.approval-detail__history-item')
+      const historyItems = container!.querySelectorAll('.el-timeline-item')
       const firstActor = historyItems[0].querySelector('strong')
       expect(firstActor?.textContent).toBe('张三')
     })
