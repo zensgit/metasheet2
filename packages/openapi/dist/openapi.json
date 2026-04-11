@@ -4639,7 +4639,12 @@
     },
     "/api/approvals": {
       "get": {
+        "operationId": "listApprovals",
+        "tags": [
+          "Approvals"
+        ],
         "summary": "List platform approval instances",
+        "description": "Returns a paginated list of approval instances. Use query parameters to\nfilter by tab: pending (assignee), mine (requesterId), cc (ccRecipientId),\nor completed (status=approved,rejected,revoked).\n",
         "security": [
           {
             "bearerAuth": []
@@ -4758,7 +4763,12 @@
         }
       },
       "post": {
+        "operationId": "createApproval",
+        "tags": [
+          "Approvals"
+        ],
         "summary": "Create approval request from a published template",
+        "description": "Initiates a new approval instance from a published template. The formData\nis validated against the template's formSchema (required fields, type\nchecks, enum legality). Returns 400 if the template is not published or\nform validation fails. On success, generates request number (AP-XXXXXX).\n",
         "security": [
           {
             "bearerAuth": []
@@ -4815,8 +4825,13 @@
     },
     "/api/approvals/pending": {
       "get": {
+        "operationId": "listPendingApprovalsLegacy",
+        "tags": [
+          "Approvals (Legacy)"
+        ],
         "deprecated": true,
         "summary": "Get pending approvals for current actor",
+        "description": "Deprecated. Use GET /api/approvals?assignee={userId}&status=pending instead.\n",
         "security": [
           {
             "bearerAuth": []
@@ -4840,7 +4855,12 @@
     },
     "/api/approvals/{id}": {
       "get": {
+        "operationId": "getApproval",
+        "tags": [
+          "Approvals"
+        ],
         "summary": "Get approval instance",
+        "description": "Returns the full approval instance including formSnapshot, assignments,\nand current status. PLM-backed approvals (id starting with 'plm:') are\nresolved via the PLM adapter.\n",
         "security": [
           {
             "bearerAuth": []
@@ -4897,7 +4917,12 @@
     },
     "/api/approvals/{id}/actions": {
       "post": {
+        "operationId": "dispatchApprovalAction",
+        "tags": [
+          "Approvals"
+        ],
         "summary": "Execute an approval action with optimistic locking",
+        "description": "Unified action dispatch endpoint. Supported actions: approve, reject,\ntransfer (requires targetUserId), revoke (subject to RuntimePolicy), and\ncomment (does not change status). Returns 409 on version conflict.\n",
         "security": [
           {
             "bearerAuth": []
@@ -4977,8 +5002,13 @@
     },
     "/api/approvals/{id}/approve": {
       "post": {
+        "operationId": "approveApprovalLegacy",
+        "tags": [
+          "Approvals (Legacy)"
+        ],
         "deprecated": true,
         "summary": "Approve instance with optimistic locking",
+        "description": "Deprecated. Use POST /api/approvals/{id}/actions with {\"action\":\"approve\"} instead.\n",
         "security": [
           {
             "bearerAuth": []
@@ -5053,8 +5083,13 @@
     },
     "/api/approvals/{id}/reject": {
       "post": {
+        "operationId": "rejectApprovalLegacy",
+        "tags": [
+          "Approvals (Legacy)"
+        ],
         "deprecated": true,
         "summary": "Reject instance with optimistic locking",
+        "description": "Deprecated. Use POST /api/approvals/{id}/actions with {\"action\":\"reject\"} instead.\n",
         "security": [
           {
             "bearerAuth": []
@@ -5132,8 +5167,13 @@
     },
     "/api/approvals/{id}/return": {
       "post": {
+        "operationId": "returnApprovalLegacy",
+        "tags": [
+          "Approvals (Legacy)"
+        ],
         "deprecated": true,
         "summary": "Return instance with optimistic locking",
+        "description": "Deprecated. Use POST /api/approvals/{id}/actions with {\"action\":\"reject\"} instead.\n",
         "security": [
           {
             "bearerAuth": []
@@ -5195,8 +5235,13 @@
     },
     "/api/approvals/{id}/revoke": {
       "post": {
+        "operationId": "revokeApprovalLegacy",
+        "tags": [
+          "Approvals (Legacy)"
+        ],
         "deprecated": true,
         "summary": "Revoke instance with optimistic locking",
+        "description": "Deprecated. Use POST /api/approvals/{id}/actions with {\"action\":\"revoke\"} instead.\n",
         "security": [
           {
             "bearerAuth": []
@@ -5258,7 +5303,12 @@
     },
     "/api/approvals/{id}/history": {
       "get": {
+        "operationId": "getApprovalHistory",
+        "tags": [
+          "Approvals"
+        ],
         "summary": "Get approval history",
+        "description": "Returns the paginated action history for an approval instance, including\ncreate, approve, reject, transfer, revoke, and comment events with\nactor details and timestamps.\n",
         "security": [
           {
             "bearerAuth": []
@@ -5351,7 +5401,12 @@
     },
     "/api/approval-templates": {
       "get": {
+        "operationId": "listApprovalTemplates",
+        "tags": [
+          "Approval Templates"
+        ],
         "summary": "List approval templates",
+        "description": "Returns a paginated list of approval templates. Supports search by name\nand filtering by status (draft, published, archived).\n",
         "security": [
           {
             "bearerAuth": []
@@ -5451,7 +5506,12 @@
         }
       },
       "post": {
+        "operationId": "createApprovalTemplate",
+        "tags": [
+          "Approval Templates"
+        ],
         "summary": "Create approval template",
+        "description": "Creates a new approval template in draft status. Requires key (unique),\nname, formSchema (with fields), and approvalGraph (nodes + edges).\nThe template must be published before it can be used to initiate approvals.\n",
         "security": [
           {
             "bearerAuth": []
@@ -5505,7 +5565,12 @@
     },
     "/api/approval-templates/{id}": {
       "get": {
+        "operationId": "getApprovalTemplate",
+        "tags": [
+          "Approval Templates"
+        ],
         "summary": "Get approval template detail",
+        "description": "Returns the full template including formSchema and approvalGraph.\n",
         "security": [
           {
             "bearerAuth": []
@@ -5557,7 +5622,12 @@
         }
       },
       "patch": {
+        "operationId": "updateApprovalTemplate",
+        "tags": [
+          "Approval Templates"
+        ],
         "summary": "Update approval template draft",
+        "description": "Updates an existing template. Each update automatically creates a new\nversion. All fields are optional; only provided fields are updated.\n",
         "security": [
           {
             "bearerAuth": []
@@ -5624,7 +5694,12 @@
     },
     "/api/approval-templates/{id}/publish": {
       "post": {
+        "operationId": "publishApprovalTemplate",
+        "tags": [
+          "Approval Templates"
+        ],
         "summary": "Publish approval template",
+        "description": "Publishes the latest draft version of a template. Requires a RuntimePolicy\n(allowRevoke, optional revokeBeforeNodeKeys). Generates a\npublishedDefinition and runtimeGraph. After publishing, the template can\nbe used to initiate new approval instances.\n",
         "security": [
           {
             "bearerAuth": []
@@ -5691,7 +5766,12 @@
     },
     "/api/approval-templates/{id}/versions/{versionId}": {
       "get": {
+        "operationId": "getApprovalTemplateVersion",
+        "tags": [
+          "Approval Templates"
+        ],
         "summary": "Get approval template version detail",
+        "description": "Returns a specific version of a template. Published versions include the\nruntimeGraph with policy; draft versions have runtimeGraph set to null.\n",
         "security": [
           {
             "bearerAuth": []
