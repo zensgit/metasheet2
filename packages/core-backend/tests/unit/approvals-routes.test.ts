@@ -7,6 +7,7 @@ const authState = vi.hoisted(() => ({
     id: 'user-1',
     tenantId: 'tenant-a',
     name: 'Owner One',
+    permissions: ['*:*'],
   } as Record<string, unknown> | null,
 }))
 
@@ -48,6 +49,7 @@ describe('approvals routes', () => {
       id: 'user-1',
       tenantId: 'tenant-a',
       name: 'Owner One',
+      permissions: ['*:*'],
     }
     pgState.pool.query.mockReset()
     pgState.pool.connect.mockReset()
@@ -76,6 +78,7 @@ describe('approvals routes', () => {
     authState.user = {
       tenantId: 'tenant-a',
       name: 'Owner One',
+      permissions: ['*:*'],
     }
 
     const response = await request(app)
@@ -83,31 +86,20 @@ describe('approvals routes', () => {
       .send({ version: 0 })
 
     expect(response.status).toBe(401)
-    expect(response.body).toEqual({
-      ok: false,
-      error: {
-        code: 'APPROVAL_USER_REQUIRED',
-        message: 'User ID not found in token',
-      },
-    })
+    expect(response.body).toEqual({ error: 'Authentication required' })
   })
 
   it('returns a structured 401 when pending approvals cannot resolve the actor id', async () => {
     authState.user = {
       tenantId: 'tenant-a',
       name: 'Owner One',
+      permissions: ['*:*'],
     }
 
     const response = await request(app).get('/api/approvals/pending')
 
     expect(response.status).toBe(401)
-    expect(response.body).toEqual({
-      ok: false,
-      error: {
-        code: 'APPROVAL_USER_REQUIRED',
-        message: 'User ID not found in token',
-      },
-    })
+    expect(response.body).toEqual({ error: 'Authentication required' })
   })
 
   it('accepts req.user.id when loading pending approvals', async () => {
@@ -115,6 +107,7 @@ describe('approvals routes', () => {
       id: 'user-1',
       tenantId: 'tenant-a',
       name: 'Owner One',
+      permissions: ['*:*'],
     }
     pgState.pool.query
       .mockResolvedValueOnce({

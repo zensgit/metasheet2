@@ -706,10 +706,15 @@ export class ApprovalBridgeService {
 
       await client.query(
         `INSERT INTO approval_assignments
-         (instance_id, assignment_type, assignee_id, source_step, is_active, metadata)
-         VALUES ($1, 'source_queue', 'plm:source-owned', 0, $2, $3)
-         ON CONFLICT (instance_id, assignment_type, assignee_id, source_step)
-         DO UPDATE SET is_active = EXCLUDED.is_active, metadata = EXCLUDED.metadata, updated_at = now()`,
+         (instance_id, assignment_type, assignee_id, source_step, node_key, is_active, metadata)
+         VALUES ($1, 'source_queue', 'plm:source-owned', 0, 'plm:source-owned', $2, $3)
+         ON CONFLICT (instance_id, assignment_type, assignee_id) WHERE is_active = TRUE
+         DO UPDATE SET
+           source_step = EXCLUDED.source_step,
+           node_key = EXCLUDED.node_key,
+           is_active = EXCLUDED.is_active,
+           metadata = EXCLUDED.metadata,
+           updated_at = now()`,
         [
           instanceId,
           bridge.status === 'pending',
