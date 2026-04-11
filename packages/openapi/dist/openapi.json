@@ -3233,6 +3233,758 @@
         "required": [
           "updated"
         ]
+      },
+      "ApprovalNodeConfig": {
+        "type": "object",
+        "properties": {
+          "assigneeType": {
+            "type": "string",
+            "enum": [
+              "user",
+              "role"
+            ]
+          },
+          "assigneeIds": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "assigneeType",
+          "assigneeIds"
+        ]
+      },
+      "ApprovalConditionRule": {
+        "type": "object",
+        "properties": {
+          "fieldId": {
+            "type": "string"
+          },
+          "operator": {
+            "type": "string",
+            "enum": [
+              "eq",
+              "neq",
+              "gt",
+              "gte",
+              "lt",
+              "lte",
+              "in",
+              "isEmpty"
+            ]
+          },
+          "value": {
+            "nullable": true
+          }
+        },
+        "required": [
+          "fieldId",
+          "operator"
+        ]
+      },
+      "ApprovalConditionBranch": {
+        "type": "object",
+        "properties": {
+          "edgeKey": {
+            "type": "string"
+          },
+          "rules": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ApprovalConditionRule"
+            }
+          },
+          "conjunction": {
+            "type": "string",
+            "enum": [
+              "and",
+              "or"
+            ]
+          }
+        },
+        "required": [
+          "edgeKey",
+          "rules"
+        ]
+      },
+      "ApprovalConditionNodeConfig": {
+        "type": "object",
+        "properties": {
+          "branches": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ApprovalConditionBranch"
+            }
+          },
+          "defaultEdgeKey": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "branches"
+        ]
+      },
+      "ApprovalCcNodeConfig": {
+        "type": "object",
+        "properties": {
+          "targetType": {
+            "type": "string",
+            "enum": [
+              "user",
+              "role"
+            ]
+          },
+          "targetIds": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "targetType",
+          "targetIds"
+        ]
+      },
+      "ApprovalNode": {
+        "type": "object",
+        "properties": {
+          "key": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "start",
+              "approval",
+              "cc",
+              "condition",
+              "end"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "config": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        },
+        "required": [
+          "key",
+          "type",
+          "config"
+        ]
+      },
+      "ApprovalEdge": {
+        "type": "object",
+        "properties": {
+          "key": {
+            "type": "string"
+          },
+          "source": {
+            "type": "string"
+          },
+          "target": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "key",
+          "source",
+          "target"
+        ]
+      },
+      "ApprovalGraph": {
+        "type": "object",
+        "properties": {
+          "nodes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ApprovalNode"
+            }
+          },
+          "edges": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ApprovalEdge"
+            }
+          }
+        },
+        "required": [
+          "nodes",
+          "edges"
+        ]
+      },
+      "RuntimePolicy": {
+        "type": "object",
+        "properties": {
+          "allowRevoke": {
+            "type": "boolean"
+          },
+          "revokeBeforeNodeKeys": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "allowRevoke"
+        ]
+      },
+      "RuntimeGraph": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/ApprovalGraph"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "policy": {
+                "$ref": "#/components/schemas/RuntimePolicy"
+              }
+            },
+            "required": [
+              "policy"
+            ]
+          }
+        ]
+      },
+      "FormOption": {
+        "type": "object",
+        "properties": {
+          "label": {
+            "type": "string"
+          },
+          "value": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "label",
+          "value"
+        ]
+      },
+      "FormField": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "text",
+              "textarea",
+              "number",
+              "date",
+              "datetime",
+              "select",
+              "multi-select",
+              "user",
+              "attachment"
+            ]
+          },
+          "label": {
+            "type": "string"
+          },
+          "required": {
+            "type": "boolean"
+          },
+          "placeholder": {
+            "type": "string"
+          },
+          "defaultValue": {
+            "nullable": true
+          },
+          "options": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FormOption"
+            }
+          },
+          "props": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        },
+        "required": [
+          "id",
+          "type",
+          "label"
+        ]
+      },
+      "FormSchema": {
+        "type": "object",
+        "properties": {
+          "fields": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FormField"
+            }
+          }
+        },
+        "required": [
+          "fields"
+        ]
+      },
+      "ApprovalRequesterSnapshot": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "department": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true
+      },
+      "ApprovalSubjectSnapshot": {
+        "type": "object",
+        "additionalProperties": true
+      },
+      "ApprovalPolicySnapshot": {
+        "type": "object",
+        "properties": {
+          "rejectCommentRequired": {
+            "type": "boolean"
+          },
+          "sourceOfTruth": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true
+      },
+      "ApprovalAssignmentDTO": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string"
+          },
+          "assigneeId": {
+            "type": "string"
+          },
+          "sourceStep": {
+            "type": "integer"
+          },
+          "nodeKey": {
+            "type": "string",
+            "nullable": true
+          },
+          "isActive": {
+            "type": "boolean"
+          },
+          "metadata": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        },
+        "required": [
+          "id",
+          "type",
+          "assigneeId",
+          "sourceStep",
+          "isActive",
+          "metadata"
+        ]
+      },
+      "UnifiedApprovalDTO": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "sourceSystem": {
+            "type": "string"
+          },
+          "externalApprovalId": {
+            "type": "string",
+            "nullable": true
+          },
+          "workflowKey": {
+            "type": "string",
+            "nullable": true
+          },
+          "businessKey": {
+            "type": "string",
+            "nullable": true
+          },
+          "title": {
+            "type": "string",
+            "nullable": true
+          },
+          "status": {
+            "type": "string"
+          },
+          "requester": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ApprovalRequesterSnapshot"
+              }
+            ],
+            "nullable": true
+          },
+          "subject": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ApprovalSubjectSnapshot"
+              }
+            ],
+            "nullable": true
+          },
+          "policy": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ApprovalPolicySnapshot"
+              }
+            ],
+            "nullable": true
+          },
+          "currentStep": {
+            "type": "integer",
+            "nullable": true
+          },
+          "totalSteps": {
+            "type": "integer",
+            "nullable": true
+          },
+          "templateId": {
+            "type": "string",
+            "nullable": true
+          },
+          "templateVersionId": {
+            "type": "string",
+            "nullable": true
+          },
+          "publishedDefinitionId": {
+            "type": "string",
+            "nullable": true
+          },
+          "requestNo": {
+            "type": "string",
+            "nullable": true
+          },
+          "formSnapshot": {
+            "type": "object",
+            "nullable": true,
+            "additionalProperties": true
+          },
+          "currentNodeKey": {
+            "type": "string",
+            "nullable": true
+          },
+          "assignments": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ApprovalAssignmentDTO"
+            }
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "id",
+          "sourceSystem",
+          "status",
+          "assignments",
+          "createdAt",
+          "updatedAt"
+        ]
+      },
+      "UnifiedApprovalHistoryDTO": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "action": {
+            "type": "string"
+          },
+          "actorId": {
+            "type": "string",
+            "nullable": true
+          },
+          "actorName": {
+            "type": "string",
+            "nullable": true
+          },
+          "comment": {
+            "type": "string",
+            "nullable": true
+          },
+          "fromStatus": {
+            "type": "string",
+            "nullable": true
+          },
+          "toStatus": {
+            "type": "string"
+          },
+          "occurredAt": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "metadata": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        },
+        "required": [
+          "id",
+          "action",
+          "toStatus",
+          "metadata"
+        ]
+      },
+      "CreateApprovalRequest": {
+        "type": "object",
+        "properties": {
+          "templateId": {
+            "type": "string"
+          },
+          "formData": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        },
+        "required": [
+          "templateId",
+          "formData"
+        ]
+      },
+      "ApprovalActionRequest": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "approve",
+              "reject",
+              "transfer",
+              "revoke",
+              "comment"
+            ]
+          },
+          "comment": {
+            "type": "string"
+          },
+          "targetUserId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "action"
+        ]
+      },
+      "ApprovalTemplateListItem": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "key": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string",
+            "nullable": true
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "draft",
+              "published",
+              "archived"
+            ]
+          },
+          "activeVersionId": {
+            "type": "string",
+            "nullable": true
+          },
+          "latestVersionId": {
+            "type": "string",
+            "nullable": true
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "id",
+          "key",
+          "name",
+          "status",
+          "activeVersionId",
+          "latestVersionId",
+          "createdAt",
+          "updatedAt"
+        ]
+      },
+      "ApprovalTemplateDetail": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/ApprovalTemplateListItem"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "formSchema": {
+                "$ref": "#/components/schemas/FormSchema"
+              },
+              "approvalGraph": {
+                "$ref": "#/components/schemas/ApprovalGraph"
+              }
+            },
+            "required": [
+              "formSchema",
+              "approvalGraph"
+            ]
+          }
+        ]
+      },
+      "CreateApprovalTemplateRequest": {
+        "type": "object",
+        "properties": {
+          "key": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string",
+            "nullable": true
+          },
+          "formSchema": {
+            "$ref": "#/components/schemas/FormSchema"
+          },
+          "approvalGraph": {
+            "$ref": "#/components/schemas/ApprovalGraph"
+          }
+        },
+        "required": [
+          "key",
+          "name",
+          "formSchema",
+          "approvalGraph"
+        ]
+      },
+      "UpdateApprovalTemplateRequest": {
+        "type": "object",
+        "properties": {
+          "key": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string",
+            "nullable": true
+          },
+          "formSchema": {
+            "$ref": "#/components/schemas/FormSchema"
+          },
+          "approvalGraph": {
+            "$ref": "#/components/schemas/ApprovalGraph"
+          }
+        }
+      },
+      "PublishApprovalTemplateRequest": {
+        "type": "object",
+        "properties": {
+          "policy": {
+            "$ref": "#/components/schemas/RuntimePolicy"
+          }
+        },
+        "required": [
+          "policy"
+        ]
+      },
+      "ApprovalTemplateVersionDetail": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "templateId": {
+            "type": "string"
+          },
+          "version": {
+            "type": "integer"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "draft",
+              "published",
+              "archived"
+            ]
+          },
+          "formSchema": {
+            "$ref": "#/components/schemas/FormSchema"
+          },
+          "approvalGraph": {
+            "$ref": "#/components/schemas/ApprovalGraph"
+          },
+          "runtimeGraph": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/RuntimeGraph"
+              }
+            ],
+            "nullable": true
+          },
+          "publishedDefinitionId": {
+            "type": "string",
+            "nullable": true
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "id",
+          "templateId",
+          "version",
+          "status",
+          "formSchema",
+          "approvalGraph",
+          "createdAt",
+          "updatedAt"
+        ]
       }
     },
     "responses": {
@@ -3885,8 +4637,185 @@
         }
       }
     },
+    "/api/approvals": {
+      "get": {
+        "summary": "List platform approval instances",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "query",
+            "name": "status",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "requesterId",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "assignee",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "ccRecipientId",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "templateId",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "example": true
+                    },
+                    "data": {
+                      "type": "object",
+                      "properties": {
+                        "items": {
+                          "type": "array",
+                          "items": {
+                            "$ref": "#/components/schemas/UnifiedApprovalDTO"
+                          }
+                        },
+                        "total": {
+                          "type": "integer"
+                        },
+                        "limit": {
+                          "type": "integer"
+                        },
+                        "offset": {
+                          "type": "integer"
+                        }
+                      },
+                      "required": [
+                        "items",
+                        "total",
+                        "limit",
+                        "offset"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "ok",
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        }
+      },
+      "post": {
+        "summary": "Create approval request from a published template",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateApprovalRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "example": true
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/UnifiedApprovalDTO"
+                    }
+                  },
+                  "required": [
+                    "ok",
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        }
+      }
+    },
     "/api/approvals/pending": {
       "get": {
+        "deprecated": true,
         "summary": "Get pending approvals for current actor",
         "security": [
           {
@@ -3929,7 +4858,27 @@
         ],
         "responses": {
           "200": {
-            "description": "OK"
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "example": true
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/UnifiedApprovalDTO"
+                    }
+                  },
+                  "required": [
+                    "ok",
+                    "data"
+                  ]
+                }
+              }
+            }
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
@@ -3946,8 +4895,89 @@
         }
       }
     },
+    "/api/approvals/{id}/actions": {
+      "post": {
+        "summary": "Execute an approval action with optimistic locking",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ApprovalActionRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "example": true
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/UnifiedApprovalDTO"
+                    }
+                  },
+                  "required": [
+                    "ok",
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "description": "Version conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        }
+      }
+    },
     "/api/approvals/{id}/approve": {
       "post": {
+        "deprecated": true,
         "summary": "Approve instance with optimistic locking",
         "security": [
           {
@@ -3978,61 +5008,20 @@
                     "type": "string"
                   },
                   "metadata": {
-                    "type": "object"
+                    "type": "object",
+                    "additionalProperties": true
                   }
                 },
                 "required": [
                   "version"
                 ]
-              },
-              "examples": {
-                "approve": {
-                  "value": {
-                    "version": 0,
-                    "comment": "LGTM"
-                  }
-                }
               }
             }
           }
         },
         "responses": {
           "200": {
-            "description": "OK",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "properties": {
-                    "ok": {
-                      "type": "boolean",
-                      "example": true
-                    },
-                    "data": {
-                      "type": "object",
-                      "properties": {
-                        "id": {
-                          "type": "string",
-                          "example": "demo-1"
-                        },
-                        "status": {
-                          "type": "string",
-                          "example": "approved"
-                        },
-                        "version": {
-                          "type": "integer",
-                          "example": 1
-                        },
-                        "prevVersion": {
-                          "type": "integer",
-                          "example": 0
-                        }
-                      }
-                    }
-                  }
-                }
-              }
-            }
+            "description": "OK"
           },
           "400": {
             "$ref": "#/components/responses/ValidationError"
@@ -4052,18 +5041,6 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ErrorResponse"
-                },
-                "examples": {
-                  "conflict": {
-                    "value": {
-                      "ok": false,
-                      "error": {
-                        "code": "APPROVAL_VERSION_CONFLICT",
-                        "message": "Approval instance version mismatch",
-                        "currentVersion": 1
-                      }
-                    }
-                  }
                 }
               }
             }
@@ -4076,6 +5053,7 @@
     },
     "/api/approvals/{id}/reject": {
       "post": {
+        "deprecated": true,
         "summary": "Reject instance with optimistic locking",
         "security": [
           {
@@ -4098,7 +5076,6 @@
             "application/json": {
               "schema": {
                 "type": "object",
-                "description": "Either `reason` or `comment` must be supplied.",
                 "properties": {
                   "version": {
                     "type": "integer"
@@ -4110,61 +5087,20 @@
                     "type": "string"
                   },
                   "metadata": {
-                    "type": "object"
+                    "type": "object",
+                    "additionalProperties": true
                   }
                 },
                 "required": [
                   "version"
                 ]
-              },
-              "examples": {
-                "reject": {
-                  "value": {
-                    "version": 1,
-                    "comment": "Needs revision"
-                  }
-                }
               }
             }
           }
         },
         "responses": {
           "200": {
-            "description": "OK",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "properties": {
-                    "ok": {
-                      "type": "boolean",
-                      "example": true
-                    },
-                    "data": {
-                      "type": "object",
-                      "properties": {
-                        "id": {
-                          "type": "string",
-                          "example": "demo-1"
-                        },
-                        "status": {
-                          "type": "string",
-                          "example": "rejected"
-                        },
-                        "version": {
-                          "type": "integer",
-                          "example": 2
-                        },
-                        "prevVersion": {
-                          "type": "integer",
-                          "example": 1
-                        }
-                      }
-                    }
-                  }
-                }
-              }
-            }
+            "description": "OK"
           },
           "400": {
             "$ref": "#/components/responses/ValidationError"
@@ -4184,18 +5120,6 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ErrorResponse"
-                },
-                "examples": {
-                  "conflict": {
-                    "value": {
-                      "ok": false,
-                      "error": {
-                        "code": "APPROVAL_VERSION_CONFLICT",
-                        "message": "Approval instance version mismatch",
-                        "currentVersion": 2
-                      }
-                    }
-                  }
                 }
               }
             }
@@ -4208,6 +5132,7 @@
     },
     "/api/approvals/{id}/return": {
       "post": {
+        "deprecated": true,
         "summary": "Return instance with optimistic locking",
         "security": [
           {
@@ -4244,41 +5169,10 @@
         },
         "responses": {
           "200": {
-            "description": "OK",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "properties": {
-                    "ok": {
-                      "type": "boolean",
-                      "example": true
-                    },
-                    "data": {
-                      "type": "object",
-                      "properties": {
-                        "id": {
-                          "type": "string",
-                          "example": "demo-1"
-                        },
-                        "status": {
-                          "type": "string",
-                          "example": "RETURNED"
-                        },
-                        "version": {
-                          "type": "integer",
-                          "example": 3
-                        },
-                        "prevVersion": {
-                          "type": "integer",
-                          "example": 2
-                        }
-                      }
-                    }
-                  }
-                }
-              }
-            }
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
@@ -4287,13 +5181,21 @@
             "$ref": "#/components/responses/Forbidden"
           },
           "409": {
-            "$ref": "#/components/responses/ValidationError"
+            "description": "Version conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
           }
         }
       }
     },
     "/api/approvals/{id}/revoke": {
       "post": {
+        "deprecated": true,
         "summary": "Revoke instance with optimistic locking",
         "security": [
           {
@@ -4330,41 +5232,10 @@
         },
         "responses": {
           "200": {
-            "description": "OK",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "properties": {
-                    "ok": {
-                      "type": "boolean",
-                      "example": true
-                    },
-                    "data": {
-                      "type": "object",
-                      "properties": {
-                        "id": {
-                          "type": "string",
-                          "example": "demo-1"
-                        },
-                        "status": {
-                          "type": "string",
-                          "example": "REVOKED"
-                        },
-                        "version": {
-                          "type": "integer",
-                          "example": 4
-                        },
-                        "prevVersion": {
-                          "type": "integer",
-                          "example": 3
-                        }
-                      }
-                    }
-                  }
-                }
-              }
-            }
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
@@ -4373,14 +5244,21 @@
             "$ref": "#/components/responses/Forbidden"
           },
           "409": {
-            "$ref": "#/components/responses/ValidationError"
+            "description": "Version conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
           }
         }
       }
     },
     "/api/approvals/{id}/history": {
       "get": {
-        "summary": "Get approval history (from approval_records)",
+        "summary": "Get approval history",
         "security": [
           {
             "bearerAuth": []
@@ -4430,99 +5308,28 @@
                         "items": {
                           "type": "array",
                           "items": {
-                            "type": "object",
-                            "properties": {
-                              "id": {
-                                "type": "string",
-                                "example": "rec-1"
-                              },
-                              "occurred_at": {
-                                "type": "string",
-                                "format": "date-time",
-                                "example": "2025-09-19T09:12:00Z"
-                              },
-                              "actor_id": {
-                                "type": "string",
-                                "example": "u1"
-                              },
-                              "actor_name": {
-                                "type": "string",
-                                "example": "Reviewer One"
-                              },
-                              "action": {
-                                "type": "string",
-                                "example": "approve"
-                              },
-                              "comment": {
-                                "type": "string",
-                                "example": "LGTM"
-                              },
-                              "from_status": {
-                                "type": "string",
-                                "example": "PENDING"
-                              },
-                              "to_status": {
-                                "type": "string",
-                                "example": "APPROVED"
-                              },
-                              "version": {
-                                "type": "integer",
-                                "example": 1
-                              },
-                              "from_version": {
-                                "type": "integer",
-                                "nullable": true,
-                                "example": 0
-                              },
-                              "to_version": {
-                                "type": "integer",
-                                "example": 1
-                              }
-                            }
+                            "$ref": "#/components/schemas/UnifiedApprovalHistoryDTO"
                           }
-                        },
-                        "page": {
-                          "type": "integer",
-                          "example": 1
-                        },
-                        "pageSize": {
-                          "type": "integer",
-                          "example": 50
                         },
                         "total": {
-                          "type": "integer",
-                          "example": 4
+                          "type": "integer"
+                        },
+                        "page": {
+                          "type": "integer"
+                        },
+                        "pageSize": {
+                          "type": "integer"
                         }
-                      }
+                      },
+                      "required": [
+                        "items"
+                      ]
                     }
-                  }
-                },
-                "examples": {
-                  "sample": {
-                    "value": {
-                      "ok": true,
-                      "data": {
-                        "items": [
-                          {
-                            "id": "rec-1",
-                            "occurred_at": "2025-09-19T09:12:00Z",
-                            "actor_id": "u1",
-                            "actor_name": "Reviewer One",
-                            "action": "approve",
-                            "comment": "LGTM",
-                            "from_status": "PENDING",
-                            "to_status": "APPROVED",
-                            "version": 1,
-                            "from_version": 0,
-                            "to_version": 1
-                          }
-                        ],
-                        "page": 1,
-                        "pageSize": 50,
-                        "total": 4
-                      }
-                    }
-                  }
+                  },
+                  "required": [
+                    "ok",
+                    "data"
+                  ]
                 }
               }
             }
@@ -4533,8 +5340,413 @@
           "403": {
             "$ref": "#/components/responses/Forbidden"
           },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
           "503": {
             "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        }
+      }
+    },
+    "/api/approval-templates": {
+      "get": {
+        "summary": "List approval templates",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "query",
+            "name": "search",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "status",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "draft",
+                "published",
+                "archived"
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "example": true
+                    },
+                    "data": {
+                      "type": "object",
+                      "properties": {
+                        "items": {
+                          "type": "array",
+                          "items": {
+                            "$ref": "#/components/schemas/ApprovalTemplateListItem"
+                          }
+                        },
+                        "total": {
+                          "type": "integer"
+                        },
+                        "limit": {
+                          "type": "integer"
+                        },
+                        "offset": {
+                          "type": "integer"
+                        }
+                      },
+                      "required": [
+                        "items",
+                        "total",
+                        "limit",
+                        "offset"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "ok",
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      },
+      "post": {
+        "summary": "Create approval template",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateApprovalTemplateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "example": true
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/ApprovalTemplateDetail"
+                    }
+                  },
+                  "required": [
+                    "ok",
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/api/approval-templates/{id}": {
+      "get": {
+        "summary": "Get approval template detail",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "example": true
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/ApprovalTemplateDetail"
+                    }
+                  },
+                  "required": [
+                    "ok",
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      },
+      "patch": {
+        "summary": "Update approval template draft",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateApprovalTemplateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "example": true
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/ApprovalTemplateDetail"
+                    }
+                  },
+                  "required": [
+                    "ok",
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/api/approval-templates/{id}/publish": {
+      "post": {
+        "summary": "Publish approval template",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PublishApprovalTemplateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "example": true
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/ApprovalTemplateVersionDetail"
+                    }
+                  },
+                  "required": [
+                    "ok",
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/api/approval-templates/{id}/versions/{versionId}": {
+      "get": {
+        "summary": "Get approval template version detail",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "versionId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "example": true
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/ApprovalTemplateVersionDetail"
+                    }
+                  },
+                  "required": [
+                    "ok",
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
           }
         }
       }

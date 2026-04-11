@@ -1,6 +1,101 @@
 paths:
+  /api/approvals:
+    get:
+      summary: List platform approval instances
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: query
+          name: status
+          schema:
+            type: string
+        - in: query
+          name: requesterId
+          schema:
+            type: string
+        - in: query
+          name: assignee
+          schema:
+            type: string
+        - in: query
+          name: ccRecipientId
+          schema:
+            type: string
+        - in: query
+          name: templateId
+          schema:
+            type: string
+        - in: query
+          name: limit
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+        - in: query
+          name: offset
+          schema:
+            type: integer
+            minimum: 0
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                    example: true
+                  data:
+                    type: object
+                    properties:
+                      items:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/UnifiedApprovalDTO'
+                      total:
+                        type: integer
+                      limit:
+                        type: integer
+                      offset:
+                        type: integer
+                    required: [items, total, limit, offset]
+                required: [ok, data]
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+    post:
+      summary: Create approval request from a published template
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateApprovalRequest'
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                    example: true
+                  data:
+                    $ref: '#/components/schemas/UnifiedApprovalDTO'
+                required: [ok, data]
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
   /api/approvals/pending:
     get:
+      deprecated: true
       summary: Get pending approvals for current actor
       security:
         - bearerAuth: []
@@ -18,22 +113,80 @@ paths:
         - in: path
           name: id
           required: true
-          schema: { type: string }
+          schema:
+            type: string
       responses:
-        '200': { description: OK }
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                    example: true
+                  data:
+                    $ref: '#/components/schemas/UnifiedApprovalDTO'
+                required: [ok, data]
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/approvals/{id}/actions:
+    post:
+      summary: Execute an approval action with optimistic locking
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ApprovalActionRequest'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                    example: true
+                  data:
+                    $ref: '#/components/schemas/UnifiedApprovalDTO'
+                required: [ok, data]
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: Version conflict
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
         '503': { $ref: '#/components/responses/ServiceUnavailable' }
   /api/approvals/{id}/approve:
     post:
+      deprecated: true
       summary: Approve instance with optimistic locking
-      security: [ { bearerAuth: [] } ]
+      security:
+        - bearerAuth: []
       parameters:
         - in: path
           name: id
           required: true
-          schema: { type: string }
+          schema:
+            type: string
       requestBody:
         required: true
         content:
@@ -41,197 +194,156 @@ paths:
             schema:
               type: object
               properties:
-                version: { type: integer }
-                comment: { type: string }
-                metadata: { type: object }
+                version:
+                  type: integer
+                comment:
+                  type: string
+                metadata:
+                  type: object
+                  additionalProperties: true
               required: [version]
-            examples:
-              approve:
-                value:
-                  version: 0
-                  comment: 'LGTM'
       responses:
-        '200':
-          description: OK
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  ok: { type: boolean, example: true }
-                  data:
-                    type: object
-                    properties:
-                      id: { type: string, example: demo-1 }
-                      status: { type: string, example: approved }
-                      version: { type: integer, example: 1 }
-                      prevVersion: { type: integer, example: 0 }
+        '200': { description: OK }
         '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
         '409':
           description: Version conflict
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/ErrorResponse' }
-              examples:
-                conflict:
-                  value:
-                    ok: false
-                    error:
-                      code: APPROVAL_VERSION_CONFLICT
-                      message: Approval instance version mismatch
-                      currentVersion: 1
-        '401': { $ref: '#/components/responses/Unauthorized' }
-        '403': { $ref: '#/components/responses/Forbidden' }
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
         '503': { $ref: '#/components/responses/ServiceUnavailable' }
   /api/approvals/{id}/reject:
     post:
+      deprecated: true
       summary: Reject instance with optimistic locking
-      security: [ { bearerAuth: [] } ]
+      security:
+        - bearerAuth: []
       parameters:
         - in: path
           name: id
           required: true
-          schema: { type: string }
+          schema:
+            type: string
       requestBody:
         required: true
         content:
           application/json:
             schema:
               type: object
-              description: Either `reason` or `comment` must be supplied.
               properties:
-                version: { type: integer }
-                reason: { type: string }
-                comment: { type: string }
-                metadata: { type: object }
+                version:
+                  type: integer
+                reason:
+                  type: string
+                comment:
+                  type: string
+                metadata:
+                  type: object
+                  additionalProperties: true
               required: [version]
-            examples:
-              reject:
-                value:
-                  version: 1
-                  comment: 'Needs revision'
       responses:
-        '200':
-          description: OK
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  ok: { type: boolean, example: true }
-                  data:
-                    type: object
-                    properties:
-                      id: { type: string, example: demo-1 }
-                      status: { type: string, example: rejected }
-                      version: { type: integer, example: 2 }
-                      prevVersion: { type: integer, example: 1 }
+        '200': { description: OK }
         '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
         '409':
           description: Version conflict
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/ErrorResponse' }
-              examples:
-                conflict:
-                  value:
-                    ok: false
-                    error:
-                      code: APPROVAL_VERSION_CONFLICT
-                      message: Approval instance version mismatch
-                      currentVersion: 2
-        '401': { $ref: '#/components/responses/Unauthorized' }
-        '403': { $ref: '#/components/responses/Forbidden' }
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
         '503': { $ref: '#/components/responses/ServiceUnavailable' }
   /api/approvals/{id}/return:
     post:
+      deprecated: true
       summary: Return instance with optimistic locking
-      security: [ { bearerAuth: [] } ]
+      security:
+        - bearerAuth: []
       parameters:
         - in: path
           name: id
           required: true
-          schema: { type: string }
+          schema:
+            type: string
       requestBody:
         required: true
         content:
           application/json:
             schema:
               type: object
-              properties: { version: { type: integer } }
+              properties:
+                version:
+                  type: integer
               required: [version]
       responses:
-        '200':
-          description: OK
+        '200': { description: OK }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409':
+          description: Version conflict
           content:
             application/json:
               schema:
-                type: object
-                properties:
-                  ok: { type: boolean, example: true }
-                  data:
-                    type: object
-                    properties:
-                      id: { type: string, example: demo-1 }
-                      status: { type: string, example: RETURNED }
-                      version: { type: integer, example: 3 }
-                      prevVersion: { type: integer, example: 2 }
-        '409': { $ref: '#/components/responses/ValidationError' }
-        '401': { $ref: '#/components/responses/Unauthorized' }
-        '403': { $ref: '#/components/responses/Forbidden' }
+                $ref: '#/components/schemas/ErrorResponse'
   /api/approvals/{id}/revoke:
     post:
+      deprecated: true
       summary: Revoke instance with optimistic locking
-      security: [ { bearerAuth: [] } ]
+      security:
+        - bearerAuth: []
       parameters:
         - in: path
           name: id
           required: true
-          schema: { type: string }
+          schema:
+            type: string
       requestBody:
         required: true
         content:
           application/json:
             schema:
               type: object
-              properties: { version: { type: integer } }
+              properties:
+                version:
+                  type: integer
               required: [version]
       responses:
-        '200':
-          description: OK
+        '200': { description: OK }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409':
+          description: Version conflict
           content:
             application/json:
               schema:
-                type: object
-                properties:
-                  ok: { type: boolean, example: true }
-                  data:
-                    type: object
-                    properties:
-                      id: { type: string, example: demo-1 }
-                      status: { type: string, example: REVOKED }
-                      version: { type: integer, example: 4 }
-                      prevVersion: { type: integer, example: 3 }
-        '409': { $ref: '#/components/responses/ValidationError' }
-        '401': { $ref: '#/components/responses/Unauthorized' }
-        '403': { $ref: '#/components/responses/Forbidden' }
+                $ref: '#/components/schemas/ErrorResponse'
   /api/approvals/{id}/history:
     get:
-      summary: Get approval history (from approval_records)
-      security: [ { bearerAuth: [] } ]
+      summary: Get approval history
+      security:
+        - bearerAuth: []
       parameters:
         - in: path
           name: id
           required: true
-          schema: { type: string }
+          schema:
+            type: string
         - in: query
           name: page
-          schema: { type: integer, default: 1 }
+          schema:
+            type: integer
+            default: 1
         - in: query
           name: pageSize
-          schema: { type: integer, default: 50 }
+          schema:
+            type: integer
+            default: 50
       responses:
         '200':
           description: OK
@@ -240,49 +352,236 @@ paths:
               schema:
                 type: object
                 properties:
-                  ok: { type: boolean, example: true }
+                  ok:
+                    type: boolean
+                    example: true
                   data:
                     type: object
                     properties:
                       items:
                         type: array
                         items:
-                          type: object
-                          properties:
-                            id: { type: string, example: rec-1 }
-                            occurred_at: { type: string, format: date-time, example: '2025-09-19T09:12:00Z' }
-                            actor_id: { type: string, example: u1 }
-                            actor_name: { type: string, example: Reviewer One }
-                            action: { type: string, example: approve }
-                            comment: { type: string, example: LGTM }
-                            from_status: { type: string, example: PENDING }
-                            to_status: { type: string, example: APPROVED }
-                            version: { type: integer, example: 1 }
-                            from_version: { type: integer, nullable: true, example: 0 }
-                            to_version: { type: integer, example: 1 }
-                      page: { type: integer, example: 1 }
-                      pageSize: { type: integer, example: 50 }
-                      total: { type: integer, example: 4 }
-              examples:
-                sample:
-                  value:
-                    ok: true
-                    data:
-                      items:
-                        - id: 'rec-1'
-                          occurred_at: '2025-09-19T09:12:00Z'
-                          actor_id: 'u1'
-                          actor_name: 'Reviewer One'
-                          action: 'approve'
-                          comment: 'LGTM'
-                          from_status: 'PENDING'
-                          to_status: 'APPROVED'
-                          version: 1
-                          from_version: 0
-                          to_version: 1
-                      page: 1
-                      pageSize: 50
-                      total: 4
-        '403': { $ref: '#/components/responses/Forbidden' }
+                          $ref: '#/components/schemas/UnifiedApprovalHistoryDTO'
+                      total:
+                        type: integer
+                      page:
+                        type: integer
+                      pageSize:
+                        type: integer
+                    required: [items]
+                required: [ok, data]
         '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
         '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/approval-templates:
+    get:
+      summary: List approval templates
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: query
+          name: search
+          schema:
+            type: string
+        - in: query
+          name: status
+          schema:
+            type: string
+            enum: [draft, published, archived]
+        - in: query
+          name: limit
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+        - in: query
+          name: offset
+          schema:
+            type: integer
+            minimum: 0
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                    example: true
+                  data:
+                    type: object
+                    properties:
+                      items:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/ApprovalTemplateListItem'
+                      total:
+                        type: integer
+                      limit:
+                        type: integer
+                      offset:
+                        type: integer
+                    required: [items, total, limit, offset]
+                required: [ok, data]
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      summary: Create approval template
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateApprovalTemplateRequest'
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                    example: true
+                  data:
+                    $ref: '#/components/schemas/ApprovalTemplateDetail'
+                required: [ok, data]
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /api/approval-templates/{id}:
+    get:
+      summary: Get approval template detail
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                    example: true
+                  data:
+                    $ref: '#/components/schemas/ApprovalTemplateDetail'
+                required: [ok, data]
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      summary: Update approval template draft
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateApprovalTemplateRequest'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                    example: true
+                  data:
+                    $ref: '#/components/schemas/ApprovalTemplateDetail'
+                required: [ok, data]
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /api/approval-templates/{id}/publish:
+    post:
+      summary: Publish approval template
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PublishApprovalTemplateRequest'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                    example: true
+                  data:
+                    $ref: '#/components/schemas/ApprovalTemplateVersionDetail'
+                required: [ok, data]
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /api/approval-templates/{id}/versions/{versionId}:
+    get:
+      summary: Get approval template version detail
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+        - in: path
+          name: versionId
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                    example: true
+                  data:
+                    $ref: '#/components/schemas/ApprovalTemplateVersionDetail'
+                required: [ok, data]
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
