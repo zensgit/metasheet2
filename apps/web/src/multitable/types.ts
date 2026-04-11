@@ -175,6 +175,7 @@ export interface MetaCapabilities {
   canManageViews: boolean
   canComment: boolean
   canManageAutomation: boolean
+  canExport: boolean
 }
 
 export interface MetaCapabilityOrigin {

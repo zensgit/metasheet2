@@ -13,24 +13,25 @@ export interface MultitableCapabilities {
   canManageViews: Ref<boolean>
   canComment: Ref<boolean>
   canManageAutomation: Ref<boolean>
+  canExport: Ref<boolean>
 }
 
 const ROLE_CAPS: Record<MultitableRole, Record<string, boolean>> = {
   owner: {
     canRead: true, canCreateRecord: true, canEditRecord: true, canDeleteRecord: true,
-    canManageFields: true, canManageSheetAccess: true, canManageViews: true, canComment: true, canManageAutomation: true,
+    canManageFields: true, canManageSheetAccess: true, canManageViews: true, canComment: true, canManageAutomation: true, canExport: true,
   },
   editor: {
     canRead: true, canCreateRecord: true, canEditRecord: true, canDeleteRecord: true,
-    canManageFields: false, canManageSheetAccess: false, canManageViews: false, canComment: true, canManageAutomation: false,
+    canManageFields: false, canManageSheetAccess: false, canManageViews: false, canComment: true, canManageAutomation: false, canExport: true,
   },
   commenter: {
     canRead: true, canCreateRecord: false, canEditRecord: false, canDeleteRecord: false,
-    canManageFields: false, canManageSheetAccess: false, canManageViews: false, canComment: true, canManageAutomation: false,
+    canManageFields: false, canManageSheetAccess: false, canManageViews: false, canComment: true, canManageAutomation: false, canExport: true,
   },
   viewer: {
     canRead: true, canCreateRecord: false, canEditRecord: false, canDeleteRecord: false,
-    canManageFields: false, canManageSheetAccess: false, canManageViews: false, canComment: false, canManageAutomation: false,
+    canManageFields: false, canManageSheetAccess: false, canManageViews: false, canComment: false, canManageAutomation: false, canExport: true,
   },
 }
 
@@ -58,5 +59,6 @@ export function useMultitableCapabilities(
     canManageViews: caps('canManageViews'),
     canComment: caps('canComment'),
     canManageAutomation: caps('canManageAutomation'),
+    canExport: caps('canExport'),
   }
 }

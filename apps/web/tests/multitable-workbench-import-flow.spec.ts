@@ -53,7 +53,7 @@ vi.mock('../src/multitable/composables/useMultitableCapabilities', () => ({
     canManageSheetAccess: ref(true),
     canManageViews: ref(true),
     canComment: ref(true),
-    canManageAutomation: ref(false),
+    canManageAutomation: ref(false), canExport: ref(true),
   }),
 }))
 
@@ -190,7 +190,7 @@ function createWorkbenchMock(fields: Array<Record<string, unknown>>) {
       canManageSheetAccess: true,
       canManageViews: true,
       canComment: true,
-      canManageAutomation: false,
+      canManageAutomation: false, canExport: true,
     }),
     fieldPermissions: ref({}),
     viewPermissions: ref({}),

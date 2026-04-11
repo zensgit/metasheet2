@@ -61,7 +61,7 @@ describe('useMultitableCapabilities', () => {
       canManageSheetAccess: false,
       canManageViews: false,
       canComment: true,
-      canManageAutomation: false,
+      canManageAutomation: false, canExport: true,
     }))
 
     await nextTick()

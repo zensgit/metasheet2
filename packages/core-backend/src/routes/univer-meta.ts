@@ -97,6 +97,7 @@ type MultitableCapabilities = {
   canManageViews: boolean
   canComment: boolean
   canManageAutomation: boolean
+  canExport: boolean
 }
 
 type MultitableCapabilityOrigin = {
@@ -1327,6 +1328,7 @@ function deriveCapabilities(permissions: string[], isAdminRole: boolean): Multit
     canManageViews: canWrite,
     canComment,
     canManageAutomation,
+    canExport: canRead,
   }
 }
 
@@ -1576,6 +1578,113 @@ async function loadSheetPermissionScopeMap(
   }
 }
 
+type ViewPermissionScope = {
+  hasAssignments: boolean
+  canRead: boolean
+  canWrite: boolean
+  canAdmin: boolean
+}
+
+async function loadViewPermissionScopeMap(
+  query: QueryFn,
+  viewIds: string[],
+  userId: string,
+): Promise<Map<string, ViewPermissionScope>> {
+  if (!userId || viewIds.length === 0) return new Map()
+  try {
+    const result = await query(
+      `SELECT vp.view_id, vp.permission, vp.subject_type
+       FROM meta_view_permissions vp
+       WHERE vp.view_id = ANY($2::text[])
+         AND (
+           (vp.subject_type = 'user' AND vp.subject_id = $1)
+           OR (
+             vp.subject_type = 'role'
+             AND EXISTS (
+               SELECT 1 FROM user_roles ur
+               WHERE ur.user_id = $1 AND ur.role_id = vp.subject_id
+             )
+           )
+         )`,
+      [userId, viewIds],
+    )
+    const grouped = new Map<string, string[]>()
+    for (const row of result.rows as Array<{ view_id: string; permission: string }>) {
+      const viewId = typeof row.view_id === 'string' ? row.view_id : ''
+      const perm = typeof row.permission === 'string' ? row.permission.trim() : ''
+      if (!viewId || !perm) continue
+      const current = grouped.get(viewId) ?? []
+      current.push(perm)
+      grouped.set(viewId, current)
+    }
+    return new Map(
+      Array.from(grouped.entries()).map(([viewId, perms]) => [
+        viewId,
+        {
+          hasAssignments: true,
+          canRead: perms.includes('read') || perms.includes('write') || perms.includes('admin'),
+          canWrite: perms.includes('write') || perms.includes('admin'),
+          canAdmin: perms.includes('admin'),
+        },
+      ]),
+    )
+  } catch (err) {
+    if (isUndefinedTableError(err, 'meta_view_permissions') || isUndefinedTableError(err, 'user_roles')) return new Map()
+    throw err
+  }
+}
+
+type FieldPermissionScope = {
+  visible: boolean
+  readOnly: boolean
+}
+
+async function loadFieldPermissionScopeMap(
+  query: QueryFn,
+  sheetId: string,
+  userId: string,
+): Promise<Map<string, FieldPermissionScope>> {
+  if (!userId || !sheetId) return new Map()
+  try {
+    const result = await query(
+      `SELECT fp.field_id, fp.visible, fp.read_only
+       FROM field_permissions fp
+       WHERE fp.sheet_id = $2
+         AND (
+           (fp.subject_type = 'user' AND fp.subject_id = $1)
+           OR (
+             fp.subject_type = 'role'
+             AND EXISTS (
+               SELECT 1 FROM user_roles ur
+               WHERE ur.user_id = $1 AND ur.role_id = fp.subject_id
+             )
+           )
+         )`,
+      [userId, sheetId],
+    )
+    const scopes = new Map<string, FieldPermissionScope>()
+    for (const row of result.rows as Array<{ field_id: string; visible: boolean; read_only: boolean }>) {
+      const fieldId = typeof row.field_id === 'string' ? row.field_id : ''
+      if (!fieldId) continue
+      const existing = scopes.get(fieldId)
+      if (existing) {
+        // Most restrictive wins: AND for visible, OR for readOnly
+        existing.visible = existing.visible && row.visible !== false
+        existing.readOnly = existing.readOnly || row.read_only === true
+      } else {
+        scopes.set(fieldId, {
+          visible: row.visible !== false,
+          readOnly: row.read_only === true,
+        })
+      }
+    }
+    return scopes
+  } catch (err) {
+    if (isUndefinedTableError(err, 'field_permissions') || isUndefinedTableError(err, 'user_roles')) return new Map()
+    throw err
+  }
+}
+
 function applySheetPermissionScope(
   capabilities: MultitableCapabilities,
   scope: SheetPermissionScope | undefined,
@@ -1586,11 +1695,13 @@ function applySheetPermissionScope(
     return {
       ...capabilities,
       canManageSheetAccess: capabilities.canManageSheetAccess && capabilities.canRead,
+      canExport: capabilities.canExport ?? capabilities.canRead,
     }
   }
   const canWriteAnyRecord = scope.canWrite || scope.canWriteOwn
+  const scopedCanRead = capabilities.canRead && scope.canRead
   return {
-    canRead: capabilities.canRead && scope.canRead,
+    canRead: scopedCanRead,
     canCreateRecord: capabilities.canCreateRecord && canWriteAnyRecord,
     canEditRecord: capabilities.canEditRecord && canWriteAnyRecord,
     canDeleteRecord: capabilities.canDeleteRecord && canWriteAnyRecord,
@@ -1599,6 +1710,7 @@ function applySheetPermissionScope(
     canManageViews: capabilities.canManageViews && scope.canWrite,
     canComment: capabilities.canComment && scope.canRead,
     canManageAutomation: capabilities.canManageAutomation && scope.canWrite,
+    canExport: scopedCanRead,
   }
 }
 
@@ -1791,18 +1903,24 @@ function sendForbidden(res: Response, message = 'Insufficient permissions') {
 function deriveFieldPermissions(
   fields: UniverMetaField[],
   capabilities: MultitableCapabilities,
-  opts?: { hiddenFieldIds?: string[]; allowCreateOnly?: boolean },
+  opts?: { hiddenFieldIds?: string[]; allowCreateOnly?: boolean; fieldScopeMap?: Map<string, FieldPermissionScope> },
 ): Record<string, MultitableFieldPermission> {
   const hiddenFieldIds = new Set(opts?.hiddenFieldIds ?? [])
   const readOnly = opts?.allowCreateOnly ? !capabilities.canCreateRecord : !capabilities.canEditRecord
+  const fieldScopeMap = opts?.fieldScopeMap
   return Object.fromEntries(
-    fields.map((field) => [
-      field.id,
-      {
-        visible: !hiddenFieldIds.has(field.id) && !isFieldPermissionHidden(field),
-        readOnly: readOnly || isFieldAlwaysReadOnly(field),
-      },
-    ]),
+    fields.map((field) => {
+      const baseVisible = !hiddenFieldIds.has(field.id) && !isFieldPermissionHidden(field)
+      const baseReadOnly = readOnly || isFieldAlwaysReadOnly(field)
+      const scope = fieldScopeMap?.get(field.id)
+      return [
+        field.id,
+        {
+          visible: baseVisible && (scope?.visible ?? true),
+          readOnly: baseReadOnly || (scope?.readOnly ?? false),
+        },
+      ]
+    }),
   )
 }
 
@@ -1820,16 +1938,30 @@ function isFieldPermissionHidden(field: Pick<UniverMetaField, 'property'>): bool
 function deriveViewPermissions(
   views: Array<Pick<UniverMetaViewConfig, 'id'>>,
   capabilities: MultitableCapabilities,
+  viewScopeMap?: Map<string, ViewPermissionScope>,
 ): Record<string, MultitableViewPermission> {
   return Object.fromEntries(
-    views.map((view) => [
-      view.id,
-      {
-        canAccess: capabilities.canRead,
-        canConfigure: capabilities.canManageViews,
-        canDelete: capabilities.canManageViews,
-      },
-    ]),
+    views.map((view) => {
+      const scope = viewScopeMap?.get(view.id)
+      if (scope?.hasAssignments) {
+        return [
+          view.id,
+          {
+            canAccess: capabilities.canRead && scope.canRead,
+            canConfigure: capabilities.canManageViews && scope.canWrite,
+            canDelete: capabilities.canManageViews && scope.canAdmin,
+          },
+        ]
+      }
+      return [
+        view.id,
+        {
+          canAccess: capabilities.canRead,
+          canConfigure: capabilities.canManageViews,
+          canDelete: capabilities.canManageViews,
+        },
+      ]
+    }),
   )
 }
 

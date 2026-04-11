@@ -63,7 +63,7 @@
       :fields="propertyVisibleGridFields" :hidden-field-ids="grid.hiddenFieldIds.value"
       :sort-rules="grid.sortRules.value" :filter-rules="grid.filterRules.value"
       :filter-conjunction="grid.filterConjunction.value"
-      :can-create-record="caps.canCreateRecord.value" :can-undo="grid.canUndo.value" :can-redo="grid.canRedo.value"
+      :can-create-record="caps.canCreateRecord.value" :can-export="caps.canExport.value" :can-undo="grid.canUndo.value" :can-redo="grid.canRedo.value"
       @toggle-field="grid.toggleFieldVisibility" @add-sort="grid.addSortRule" @remove-sort="grid.removeSortRule"
       @update-sort="onUpdateSort" @add-filter="grid.addFilterRule" @update-filter="grid.updateFilterRule"
       @remove-filter="grid.removeFilterRule" @clear-filters="onClearFilters" @set-conjunction="onSetConjunction"
