@@ -12,7 +12,8 @@
  *   1. The pact JSON exists and parses as Pact v3.
  *   2. The 6 Wave 1 P0 interactions plus the document-semantics Wave 2
  *      interactions plus the BOM-analysis / ECO-approval Wave 3 interactions
- *      that PLMAdapter currently calls are present, in the documented order.
+ *      plus the approval list/detail / BOM-substitute Wave 4 interactions that
+ *      PLMAdapter currently calls are present, in the documented order.
  *      (codex's plan also lists `aml/metadata`, but PLMAdapter does not yet
  *      call it; deferred until there is a real consumer call site.)
  *   3. The PLMAdapter actually calls every endpoint declared in the pact, so
@@ -95,6 +96,11 @@ const PACT_PATHS = [
   { method: 'GET', path: '/api/v1/eco/01H000000000000000000000E1/approvals' },
   { method: 'POST', path: '/api/v1/eco/01H000000000000000000000E2/approve' },
   { method: 'POST', path: '/api/v1/eco/01H000000000000000000000E3/reject' },
+  { method: 'GET', path: '/api/v1/eco' },
+  { method: 'GET', path: '/api/v1/eco/01H000000000000000000000E2' },
+  { method: 'GET', path: '/api/v1/bom/01H000000000000000000000R1/substitutes' },
+  { method: 'POST', path: '/api/v1/bom/01H000000000000000000000R3/substitutes' },
+  { method: 'DELETE', path: '/api/v1/bom/01H000000000000000000000R4/substitutes/01H000000000000000000000R6' },
 ] as const
 
 function loadPact(): PactDocument {
@@ -106,7 +112,7 @@ function loadAdapter(): string {
   return readFileSync(ADAPTER_PATH, 'utf8')
 }
 
-describe('Pact: Metasheet2 consumer -> YuantusPLM provider (Wave 1 + Wave 2 document semantics + Wave 3 BOM/approval)', () => {
+describe('Pact: Metasheet2 consumer -> YuantusPLM provider (Wave 1 + Wave 2 document semantics + Wave 3 BOM/approval + Wave 4 approval list/detail/substitutes)', () => {
   it('pact JSON exists, parses as Pact v3, and names the right consumer/provider', () => {
     const pact = loadPact()
     expect(pact.consumer.name).toBe('Metasheet2')
@@ -149,9 +155,13 @@ describe('Pact: Metasheet2 consumer -> YuantusPLM provider (Wave 1 + Wave 2 docu
       '/api/v1/bom/compare/schema',
       '/api/v1/file/item/',
       '/api/v1/aml/query',
+      '/api/v1/eco',
+      '/api/v1/eco/${approvalId}',
       '/api/v1/eco/${approvalId}/approvals',
       '/api/v1/eco/${approvalId}/approve',
       '/api/v1/eco/${approvalId}/reject',
+      '/api/v1/bom/${bomLineId}/substitutes',
+      '/api/v1/bom/${bomLineId}/substitutes/${substituteId}',
       'fetchYuantusFileMetadata',
     ]
     for (const ep of endpointsToFind) {
@@ -267,6 +277,65 @@ describe('Pact: Metasheet2 consumer -> YuantusPLM provider (Wave 1 + Wave 2 docu
     expect(reject!.request.body).toEqual({
       version: 8,
       comment: 'Missing test evidence',
+    })
+  })
+
+  it('approval list/detail and BOM substitute interactions lock the extra mainline surfaces used by bridge + federation', () => {
+    const pact = loadPact()
+    const approvalsList = pact.interactions.find(
+      i => i.request.path === '/api/v1/eco',
+    )
+    const approvalDetail = pact.interactions.find(
+      i => i.request.path === '/api/v1/eco/01H000000000000000000000E2',
+    )
+    const substitutesList = pact.interactions.find(
+      i => i.request.path === '/api/v1/bom/01H000000000000000000000R1/substitutes'
+        && i.request.method === 'GET',
+    )
+    const substitutesAdd = pact.interactions.find(
+      i => i.request.path === '/api/v1/bom/01H000000000000000000000R3/substitutes'
+        && i.request.method === 'POST',
+    )
+    const substitutesRemove = pact.interactions.find(
+      i => i.request.path === '/api/v1/bom/01H000000000000000000000R4/substitutes/01H000000000000000000000R6',
+    )
+
+    expect(approvalsList).toBeDefined()
+    expect(approvalDetail).toBeDefined()
+    expect(substitutesList).toBeDefined()
+    expect(substitutesAdd).toBeDefined()
+    expect(substitutesRemove).toBeDefined()
+
+    expect(approvalsList!.request.query).toEqual({
+      product_id: ['01H000000000000000000000P1'],
+      created_by_id: ['1'],
+      limit: ['25'],
+      offset: ['0'],
+    })
+    expect((approvalsList!.response.body as Array<Record<string, unknown>>)[0]).toMatchObject({
+      id: '01H000000000000000000000E1',
+      eco_type: 'bom',
+      product_id: '01H000000000000000000000P1',
+    })
+    expect(approvalDetail!.response.body).toMatchObject({
+      id: '01H000000000000000000000E2',
+      name: 'Approve ECO',
+    })
+    expect(substitutesList!.response.body).toMatchObject({
+      bom_line_id: '01H000000000000000000000R1',
+      count: 1,
+      substitutes: [expect.objectContaining({ id: '01H000000000000000000000R5' })],
+    })
+    expect(substitutesAdd!.request.body).toEqual({
+      substitute_item_id: '01H000000000000000000000P3',
+      properties: {
+        rank: 1,
+        note: 'new alternate',
+      },
+    })
+    expect(substitutesRemove!.response.body).toEqual({
+      ok: true,
+      substitute_id: '01H000000000000000000000R6',
     })
   })
 })

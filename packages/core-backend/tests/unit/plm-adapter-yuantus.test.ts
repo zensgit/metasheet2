@@ -251,7 +251,7 @@ describe('PLMAdapter Yuantus documents mapping', () => {
 })
 
 describe('PLMAdapter Yuantus approvals mapping', () => {
-  it('maps ECO approvals and filters by status', async () => {
+  it('maps ECO approvals, forwards collection filters, and filters by status', async () => {
     const adapter = createAdapter()
     const queryMock = vi.fn().mockResolvedValue({
       data: [
@@ -260,19 +260,98 @@ describe('PLMAdapter Yuantus approvals mapping', () => {
         { id: 'eco-3', name: 'ECO Three', state: 'in_review', version: '3', created_by_id: '9', created_at: '2026-01-03T00:00:00.000Z' },
       ],
     })
+    const getProductByIdSpy = vi.spyOn(adapter, 'getProductById').mockResolvedValue({
+      id: 'prod-1',
+      name: 'Mapped Product',
+      code: 'P-0001',
+      partNumber: 'P-0001',
+      version: 'A',
+      status: 'Released',
+      created_at: '2026-01-01T00:00:00.000Z',
+      updated_at: '2026-01-02T00:00:00.000Z',
+    })
 
     ;(adapter as any).query = queryMock
 
-    const approved = await adapter.getApprovals({ status: 'approved' })
+    const approved = await adapter.getApprovals({
+      status: 'approved',
+      productId: 'prod-1',
+      requesterId: '7',
+      limit: 25,
+      offset: 25,
+    })
+
+    expect(queryMock).toHaveBeenNthCalledWith(1, '/api/v1/eco', [
+      {
+        product_id: 'prod-1',
+        created_by_id: '7',
+        limit: 25,
+        offset: 25,
+      },
+    ])
+    expect(getProductByIdSpy).toHaveBeenCalledWith('prod-1')
     expect(approved.data).toHaveLength(1)
     expect(approved.data[0].status).toBe('approved')
     expect(approved.data[0].requester_id).toBe('7')
     expect(approved.data[0].version).toBe(12)
+    expect(approved.data[0].product_number).toBe('P-0001')
 
     const all = await adapter.getApprovals()
+    expect(queryMock).toHaveBeenNthCalledWith(2, '/api/v1/eco', [{}])
     expect(all.data).toHaveLength(3)
     expect(all.data.map((entry) => entry.status)).toEqual(['approved', 'rejected', 'pending'])
     expect(all.data.map((entry) => entry.version)).toEqual([12, undefined, 3])
+  })
+
+  it('loads one ECO approval request by id from the ECO detail endpoint', async () => {
+    const adapter = createAdapter()
+    const queryMock = vi.fn().mockResolvedValue({
+      data: [
+        {
+          id: 'eco-2',
+          name: 'Approve ECO',
+          eco_type: 'bom',
+          state: 'progress',
+          version: 7,
+          created_by_id: 8,
+          created_by_name: 'Requester Eight',
+          created_at: '2026-04-11T00:00:00.000Z',
+          product_id: 'prod-1',
+        },
+      ],
+    })
+
+    const getProductByIdSpy = vi.spyOn(adapter, 'getProductById').mockResolvedValue({
+      id: 'prod-1',
+      name: 'Mounting Bracket',
+      code: 'P-0001',
+      partNumber: 'P-0001',
+      version: 'A',
+      status: 'Released',
+      created_at: '2026-01-01T00:00:00.000Z',
+      updated_at: '2026-01-02T00:00:00.000Z',
+    })
+
+    ;(adapter as any).query = queryMock
+
+    const result = await adapter.getApprovalById('eco-2')
+
+    expect(queryMock).toHaveBeenCalledWith('/api/v1/eco/eco-2')
+    expect(getProductByIdSpy).toHaveBeenCalledWith('prod-1')
+    expect(result.data).toEqual([
+      expect.objectContaining({
+        id: 'eco-2',
+        request_type: 'bom',
+        title: 'Approve ECO',
+        requester_id: '8',
+        requester_name: 'Requester Eight',
+        status: 'pending',
+        version: 7,
+        product_id: 'prod-1',
+        product_number: 'P-0001',
+        product_name: 'Mounting Bracket',
+      }),
+    ])
   })
 })
 
@@ -437,6 +516,95 @@ describe('PLMAdapter Yuantus BOM analysis and approval actions', () => {
       compare_modes: [expect.objectContaining({ mode: 'summarized' })],
       line_key_options: ['child_config', 'child_id'],
       defaults: expect.objectContaining({ max_levels: 10 }),
+    })
+  })
+
+  it('lists BOM substitutes from the dedicated BOM substitutes endpoint', async () => {
+    const adapter = createAdapter()
+    const queryMock = vi.fn().mockResolvedValue({
+      data: [{
+        bom_line_id: 'bom-line-1',
+        count: 1,
+        substitutes: [{
+          id: 'sub-rel-1',
+          relationship: {
+            id: 'sub-rel-1',
+            source_id: 'bom-line-1',
+            related_id: 'part-sub-1',
+            properties: { rank: 1, note: 'Preferred alternate' },
+          },
+          part: {
+            id: 'part-sub-1',
+            item_number: 'P-0003',
+            name: 'Nut M6',
+          },
+          substitute_part: {
+            id: 'part-sub-1',
+            item_number: 'P-0003',
+            name: 'Nut M6',
+          },
+          rank: 1,
+          substitute_number: 'P-0003',
+          substitute_name: 'Nut M6',
+        }],
+      }],
+    })
+
+    ;(adapter as any).query = queryMock
+
+    const result = await adapter.getBomSubstitutes('bom-line-1')
+
+    expect(queryMock).toHaveBeenCalledWith('/api/v1/bom/bom-line-1/substitutes')
+    expect(result.data[0]).toMatchObject({
+      bom_line_id: 'bom-line-1',
+      count: 1,
+      substitutes: [expect.objectContaining({ id: 'sub-rel-1', rank: 1 })],
+    })
+  })
+
+  it('posts add/remove substitute mutations to the BOM substitutes endpoints', async () => {
+    const adapter = createAdapter()
+    const insertMock = vi.fn().mockResolvedValue({
+      data: [{
+        ok: true,
+        substitute_id: 'sub-rel-new',
+        bom_line_id: 'bom-line-1',
+        substitute_item_id: 'part-sub-2',
+      }],
+    })
+    const deleteMock = vi.fn().mockResolvedValue({
+      data: [{
+        ok: true,
+        substitute_id: 'sub-rel-remove',
+      }],
+    })
+
+    ;(adapter as any).insert = insertMock
+    ;(adapter as any).delete = deleteMock
+
+    const added = await adapter.addBomSubstitute('bom-line-1', 'part-sub-2', {
+      rank: 2,
+      note: 'Field alternate',
+    })
+    const removed = await adapter.removeBomSubstitute('bom-line-1', 'sub-rel-remove')
+
+    expect(insertMock).toHaveBeenCalledWith('/api/v1/bom/bom-line-1/substitutes', {
+      substitute_item_id: 'part-sub-2',
+      properties: {
+        rank: 2,
+        note: 'Field alternate',
+      },
+    })
+    expect(deleteMock).toHaveBeenCalledWith('/api/v1/bom/bom-line-1/substitutes/sub-rel-remove', {})
+    expect(added.data[0]).toMatchObject({
+      ok: true,
+      substitute_id: 'sub-rel-new',
+      bom_line_id: 'bom-line-1',
+      substitute_item_id: 'part-sub-2',
+    })
+    expect(removed.data[0]).toEqual({
+      ok: true,
+      substitute_id: 'sub-rel-remove',
     })
   })
 })

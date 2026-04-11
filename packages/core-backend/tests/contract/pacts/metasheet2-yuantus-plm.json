@@ -9,7 +9,7 @@
     "pactSpecification": {
       "version": "3.0.0"
     },
-    "claudeNote": "Hand-authored Wave 1 plus document-semantics Wave 2 contract per docs/PACT_FIRST_INTEGRATION_PLAN_20260407.md. Match-by-type, not match-by-value. Replace with @pact-foundation/pact generated artifact when that dep is approved. NOTE: codex's plan also listed GET /api/v1/aml/metadata/{type} in Wave 1, but PLMAdapter.ts does not currently call it; contract-first principle says we lock what is actually called. Wave 2 now adds the real document semantics calls already used by PLMAdapter.getProductDocuments in yuantus mode: GET /api/v1/file/item/{item_id}, GET /api/v1/file/{file_id}, and POST /api/v1/aml/query with expand ['Document Part']."
+    "claudeNote": "Hand-authored Wave 1 plus document-semantics Wave 2 contract per docs/PACT_FIRST_INTEGRATION_PLAN_20260407.md. Match-by-type, not match-by-value. Replace with @pact-foundation/pact generated artifact when that dep is approved. NOTE: codex's plan also listed GET /api/v1/aml/metadata/{type} in Wave 1, but PLMAdapter.ts does not currently call it; contract-first principle says we lock what is actually called. Wave 2 adds the real document semantics calls already used by PLMAdapter.getProductDocuments in yuantus mode: GET /api/v1/file/item/{item_id}, GET /api/v1/file/{file_id}, and POST /api/v1/aml/query with expand ['Document Part']. Wave 3 adds where-used, BOM compare schema, and ECO approval-history/action interactions. Wave 4 adds the real approval list/detail and BOM substitute calls already used by mainline getApprovals/getApprovalById/getBomSubstitutes/addBomSubstitute/removeBomSubstitute."
   },
   "interactions": [
     {
@@ -1000,6 +1000,305 @@
             "$.comment": { "matchers": [{ "match": "type" }] },
             "$.approved_at": { "matchers": [{ "match": "type" }] },
             "$.created_at": { "matchers": [{ "match": "type" }] }
+          }
+        }
+      }
+    },
+    {
+      "description": "list ECO approval requests through the ECO collection endpoint",
+      "providerStates": [
+        {
+          "name": "at least one ECO approval request exists for product 01H000000000000000000000P1"
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "path": "/api/v1/eco",
+        "query": {
+          "product_id": ["01H000000000000000000000P1"],
+          "created_by_id": ["1"],
+          "limit": ["25"],
+          "offset": ["0"]
+        },
+        "headers": {
+          "Authorization": "Bearer eyJhbGciOiJIUzI1NiJ9.example"
+        },
+        "matchingRules": {
+          "header": {
+            "$.Authorization": {
+              "matchers": [
+                {
+                  "match": "regex",
+                  "regex": "^Bearer .+"
+                }
+              ]
+            }
+          }
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": [
+          {
+            "id": "01H000000000000000000000E1",
+            "name": "History ECO",
+            "eco_type": "bom",
+            "product_id": "01H000000000000000000000P1",
+            "state": "progress",
+            "created_by_id": 1,
+            "created_at": "2026-04-11T00:00:00.000Z",
+            "updated_at": "2026-04-11T00:00:00.000Z"
+          }
+        ],
+        "matchingRules": {
+          "body": {
+            "$": { "matchers": [{ "match": "type", "min": 1 }] },
+            "$[*].id": { "matchers": [{ "match": "type" }] },
+            "$[*].name": { "matchers": [{ "match": "type" }] },
+            "$[*].eco_type": { "matchers": [{ "match": "type" }] },
+            "$[*].product_id": { "matchers": [{ "match": "type" }] },
+            "$[*].state": { "matchers": [{ "match": "type" }] },
+            "$[*].created_by_id": { "matchers": [{ "match": "integer" }] },
+            "$[*].created_at": { "matchers": [{ "match": "type" }] },
+            "$[*].updated_at": { "matchers": [{ "match": "type" }] }
+          }
+        }
+      }
+    },
+    {
+      "description": "fetch one ECO approval request by id through the ECO detail endpoint",
+      "providerStates": [
+        {
+          "name": "ECO 01H000000000000000000000E2 exists for approval detail lookup"
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "path": "/api/v1/eco/01H000000000000000000000E2",
+        "headers": {
+          "Authorization": "Bearer eyJhbGciOiJIUzI1NiJ9.example"
+        },
+        "matchingRules": {
+          "header": {
+            "$.Authorization": {
+              "matchers": [
+                {
+                  "match": "regex",
+                  "regex": "^Bearer .+"
+                }
+              ]
+            }
+          }
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": {
+          "id": "01H000000000000000000000E2",
+          "name": "Approve ECO",
+          "eco_type": "bom",
+          "product_id": "01H000000000000000000000P1",
+          "state": "progress",
+          "created_by_id": 1,
+          "created_at": "2026-04-11T00:00:00.000Z",
+          "updated_at": "2026-04-11T00:00:00.000Z"
+        },
+        "matchingRules": {
+          "body": {
+            "$.id": { "matchers": [{ "match": "type" }] },
+            "$.name": { "matchers": [{ "match": "type" }] },
+            "$.eco_type": { "matchers": [{ "match": "type" }] },
+            "$.product_id": { "matchers": [{ "match": "type" }] },
+            "$.state": { "matchers": [{ "match": "type" }] },
+            "$.created_by_id": { "matchers": [{ "match": "integer" }] },
+            "$.created_at": { "matchers": [{ "match": "type" }] },
+            "$.updated_at": { "matchers": [{ "match": "type" }] }
+          }
+        }
+      }
+    },
+    {
+      "description": "list BOM substitutes for one BOM line",
+      "providerStates": [
+        {
+          "name": "BOM line 01H000000000000000000000R1 has at least one substitute entry"
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "path": "/api/v1/bom/01H000000000000000000000R1/substitutes",
+        "headers": {
+          "Authorization": "Bearer eyJhbGciOiJIUzI1NiJ9.example"
+        },
+        "matchingRules": {
+          "header": {
+            "$.Authorization": {
+              "matchers": [
+                {
+                  "match": "regex",
+                  "regex": "^Bearer .+"
+                }
+              ]
+            }
+          }
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": {
+          "bom_line_id": "01H000000000000000000000R1",
+          "count": 1,
+          "substitutes": [
+            {
+              "id": "01H000000000000000000000R5",
+              "relationship": {
+                "id": "01H000000000000000000000R5",
+                "source_id": "01H000000000000000000000R1",
+                "related_id": "01H000000000000000000000P3",
+                "properties": {
+                  "rank": 1,
+                  "note": "preferred alternate"
+                }
+              },
+              "part": {
+                "id": "01H000000000000000000000P3",
+                "item_number": "P-0003",
+                "name": "Alt Bracket Assembly"
+              },
+              "substitute_part": {
+                "id": "01H000000000000000000000P3",
+                "item_number": "P-0003",
+                "name": "Alt Bracket Assembly"
+              },
+              "rank": 1,
+              "substitute_number": "P-0003",
+              "substitute_name": "Alt Bracket Assembly"
+            }
+          ]
+        },
+        "matchingRules": {
+          "body": {
+            "$.bom_line_id": { "matchers": [{ "match": "type" }] },
+            "$.count": { "matchers": [{ "match": "integer", "min": 0 }] },
+            "$.substitutes": { "matchers": [{ "match": "type", "min": 0 }] },
+            "$.substitutes[*].id": { "matchers": [{ "match": "type" }] },
+            "$.substitutes[*].relationship": { "matchers": [{ "match": "type" }] },
+            "$.substitutes[*].part": { "matchers": [{ "match": "type" }] },
+            "$.substitutes[*].substitute_part": { "matchers": [{ "match": "type" }] },
+            "$.substitutes[*].rank": { "matchers": [{ "match": "integer" }] },
+            "$.substitutes[*].substitute_number": { "matchers": [{ "match": "type" }] },
+            "$.substitutes[*].substitute_name": { "matchers": [{ "match": "type" }] }
+          }
+        }
+      }
+    },
+    {
+      "description": "add a BOM substitute with optional relationship properties",
+      "providerStates": [
+        {
+          "name": "BOM line 01H000000000000000000000R3 can accept substitute item 01H000000000000000000000P3"
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "path": "/api/v1/bom/01H000000000000000000000R3/substitutes",
+        "headers": {
+          "Content-Type": "application/json",
+          "Authorization": "Bearer eyJhbGciOiJIUzI1NiJ9.example"
+        },
+        "body": {
+          "substitute_item_id": "01H000000000000000000000P3",
+          "properties": {
+            "rank": 1,
+            "note": "new alternate"
+          }
+        },
+        "matchingRules": {
+          "header": {
+            "$.Authorization": {
+              "matchers": [
+                {
+                  "match": "regex",
+                  "regex": "^Bearer .+"
+                }
+              ]
+            }
+          },
+          "body": {
+            "$.substitute_item_id": { "matchers": [{ "match": "type" }] },
+            "$.properties": { "matchers": [{ "match": "type" }] }
+          }
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": {
+          "ok": true,
+          "substitute_id": "01H000000000000000000000R7",
+          "bom_line_id": "01H000000000000000000000R3",
+          "substitute_item_id": "01H000000000000000000000P3"
+        },
+        "matchingRules": {
+          "body": {
+            "$.ok": { "matchers": [{ "match": "type" }] },
+            "$.substitute_id": { "matchers": [{ "match": "type" }] },
+            "$.bom_line_id": { "matchers": [{ "match": "type" }] },
+            "$.substitute_item_id": { "matchers": [{ "match": "type" }] }
+          }
+        }
+      }
+    },
+    {
+      "description": "remove an existing BOM substitute by substitute relationship id",
+      "providerStates": [
+        {
+          "name": "BOM line 01H000000000000000000000R4 has removable substitute 01H000000000000000000000R6"
+        }
+      ],
+      "request": {
+        "method": "DELETE",
+        "path": "/api/v1/bom/01H000000000000000000000R4/substitutes/01H000000000000000000000R6",
+        "headers": {
+          "Authorization": "Bearer eyJhbGciOiJIUzI1NiJ9.example"
+        },
+        "matchingRules": {
+          "header": {
+            "$.Authorization": {
+              "matchers": [
+                {
+                  "match": "regex",
+                  "regex": "^Bearer .+"
+                }
+              ]
+            }
+          }
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": {
+          "ok": true,
+          "substitute_id": "01H000000000000000000000R6"
+        },
+        "matchingRules": {
+          "body": {
+            "$.ok": { "matchers": [{ "match": "type" }] },
+            "$.substitute_id": { "matchers": [{ "match": "type" }] }
           }
         }
       }

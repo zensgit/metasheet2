@@ -20,16 +20,16 @@ when running in `apiMode='yuantus'`. Without a contract test, any field
 rename on the Yuantus side would silently break Metasheet at runtime.
 
 This Pact set freezes the **shape** (not the values) of the 6 Wave 1 P0
-endpoints plus the 3 document-semantics endpoints and the 5 BOM-analysis /
-ECO-approval endpoints that `PLMAdapter.ts` currently calls for
-`apiMode='yuantus'`.
+endpoints plus the 3 document-semantics endpoints, the 5 BOM-analysis /
+ECO-approval endpoints, and the 5 approval-detail / BOM-substitute endpoints
+that `PLMAdapter.ts` currently calls for `apiMode='yuantus'`.
 (Codex's PACT_FIRST plan lists 7 endpoints in Wave 1 — see "Discrepancy
 with codex plan" below.)
 
 The companion provider verifier lives in the Yuantus repo at
 `src/yuantus/api/tests/test_pact_provider_yuantus_plm.py`.
 
-## Current implementation note (2026-04-07)
+## Current implementation note (2026-04-11)
 
 The pact JSON in `pacts/metasheet2-yuantus-plm.json` is **hand-authored** in
 Pact v3 format. It is **not** yet generated from `@pact-foundation/pact`,
@@ -38,12 +38,14 @@ because adding that npm dependency requires explicit approval.
 The `plm-adapter-yuantus.pact.test.ts` vitest test guards four things:
 
 1. The pact JSON exists and parses as Pact v3.
-2. It contains the 14 currently used interactions in the documented order.
+2. It contains the 19 currently used interactions in the documented order.
 3. Every endpoint named in the pact is also referenced by the live
    `packages/core-backend/src/data-adapters/PLMAdapter.ts` source — so the
    pact cannot drift away from what the adapter actually calls.
 4. The Wave 3 additions lock the exact envelope for `where-used`,
    `bom compare schema`, `approval history`, `approve`, and `reject`.
+5. The Wave 4 additions lock the exact envelope for approval list/detail and
+   BOM substitute list/add/remove.
 
 ## Discrepancy with codex's PACT_FIRST plan
 
@@ -96,12 +98,14 @@ cd /Users/huazhou/Downloads/Github/Yuantus
    src/yuantus/api/tests/test_pact_provider_yuantus_plm.py
 ```
 
-### Current verifier state (2026-04-11)
+### Current verifier handoff state (2026-04-11)
 
-Wired end-to-end with `pact-python 3.2.1`. The provider verifier now starts
-the FastAPI app, seeds an isolated test DB, and replays all 14 interactions.
+The consumer artifact now contains all 19 Wave 1-4 interactions. To verify
+Yuantus against the current artifact, copy this JSON into the Yuantus repo and
+rerun the provider verifier there.
 
-**Current result: 14 passing, 0 failing.**
+This worktree did **not** rerun provider verification, so do not treat the old
+Wave 3 verifier count as evidence for the new Wave 4 interactions.
 
 Wave 3 adds coverage for:
 
@@ -114,6 +118,16 @@ Wave 3 adds coverage for:
 The provider keeps its state handler as a no-op by using distinct seeded ECO
 fixtures for `history`, `approve`, and `reject`, so mutating approval actions
 cannot contaminate later interactions in the same verifier run.
+
+Wave 4 extends that pattern:
+
+- list/detail approvals use separate ECO fixtures from history/action checks
+- substitute list uses a pre-seeded substitute relation
+- substitute add targets a fresh substitute item
+- substitute remove targets a different pre-seeded substitute relation
+
+That keeps the verifier deterministic without introducing per-state mutation
+logic.
 
 To install `pact-python` and run locally:
 
@@ -143,13 +157,25 @@ specification of what the generated pact must contain.
 
 ## Still intentionally outside the pact
 
-The following surfaces remain outside the pact because `PLMAdapter.ts` does
-not currently call them on `main`:
+The following surfaces remain outside the pact:
 
 - `GET /api/v1/aml/metadata/{item_type_name}`
-- `GET /api/v1/bom/{line_id}/substitutes`
-- `POST /api/v1/bom/{line_id}/substitutes`
-- `DELETE /api/v1/bom/substitutes/{substitute_id}`
+- `GET /api/v1/cad/files/{file_id}/properties`
+- `PATCH /api/v1/cad/files/{file_id}/properties`
+- `GET /api/v1/cad/files/{file_id}/view-state`
+- `PATCH /api/v1/cad/files/{file_id}/view-state`
+- `GET /api/v1/cad/files/{file_id}/review`
+- `POST /api/v1/cad/files/{file_id}/review`
+- `GET /api/v1/cad/files/{file_id}/history`
+- `GET /api/v1/cad/files/{file_id}/diff`
+- `GET /api/v1/cad/files/{file_id}/mesh-stats`
+
+`aml/metadata` remains outside because `PLMAdapter.ts` still does not call it on
+`main`.
+
+The CAD routes are real mainline calls, but they are intentionally deferred to
+Wave 5 because they require a larger provider fixture surface than the
+approval/substitute expansion in Wave 4.
 
 ## Forward compatibility note
 
