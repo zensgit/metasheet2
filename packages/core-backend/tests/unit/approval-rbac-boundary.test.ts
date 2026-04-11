@@ -218,6 +218,80 @@ describe('Approval RBAC boundary verification', () => {
       const res = await request(app).get('/api/approvals/apr-1')
       expect(res.status).toBe(404)
     })
+
+    it('GET /api/approvals/:id with approvals:read returns approval detail when present', async () => {
+      const now = new Date('2026-04-11T00:00:00.000Z')
+
+      pgState.pool.query.mockImplementation(async (sql: string) => {
+        if (sql.includes('SELECT * FROM approval_instances WHERE id = $1')) {
+          return {
+            rows: [{
+              id: 'apr-1',
+              status: 'pending',
+              version: 0,
+              source_system: 'platform',
+              external_approval_id: null,
+              workflow_key: 'expense-approval',
+              business_key: 'expense:apr-1',
+              title: 'Travel reimbursement',
+              requester_snapshot: { id: 'u-requester', name: 'Requester' },
+              subject_snapshot: { expenseId: 'exp-1' },
+              policy_snapshot: {},
+              metadata: {},
+              current_step: 1,
+              total_steps: 2,
+              source_updated_at: null,
+              last_synced_at: null,
+              sync_status: 'ok',
+              sync_error: null,
+              template_id: 'tpl-1',
+              template_version_id: 'tplv-1',
+              published_definition_id: 'pub-1',
+              request_no: 'REQ-1',
+              form_snapshot: { amount: 128 },
+              current_node_key: 'manager-review',
+              created_at: now,
+              updated_at: now,
+            }],
+            rowCount: 1,
+          }
+        }
+
+        if (sql.includes('SELECT * FROM approval_assignments')) {
+          return {
+            rows: [{
+              id: 'asg-1',
+              instance_id: 'apr-1',
+              assignment_type: 'user',
+              assignee_id: 'u-readonly',
+              source_step: 1,
+              node_key: 'manager-review',
+              is_active: true,
+              metadata: {},
+              created_at: now,
+              updated_at: now,
+            }],
+            rowCount: 1,
+          }
+        }
+
+        return { rows: [], rowCount: 0 }
+      })
+
+      const res = await request(app).get('/api/approvals/apr-1')
+
+      expect(res.status).toBe(200)
+      expect(res.body).toMatchObject({
+        id: 'apr-1',
+        status: 'pending',
+        workflowKey: 'expense-approval',
+        assignments: [{
+          id: 'asg-1',
+          assigneeId: 'u-readonly',
+          type: 'user',
+        }],
+      })
+    })
   })
 
   // =========================================================================
