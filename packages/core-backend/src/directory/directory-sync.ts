@@ -199,6 +199,10 @@ export type DirectoryIntegrationInput = {
   status?: string
 }
 
+export type DirectoryIntegrationTestInput = DirectoryIntegrationInput & {
+  integrationId?: string
+}
+
 export type DirectoryIntegrationTestResult = {
   corpId: string
   rootDepartmentId: string
@@ -207,6 +211,16 @@ export type DirectoryIntegrationTestResult = {
   sampledDepartments: Array<{ id: string; name: string }>
   userSampleCount: number
   sampledUsers: Array<{ userId: string; name: string }>
+  diagnostics: {
+    rootDepartmentChildCount: number
+    rootDepartmentDirectUserCount: number
+    rootDepartmentDirectUserHasMore: boolean
+    rootDepartmentDirectUserCountWithAccessLimit: number
+    rootDepartmentDirectUserHasMoreWithAccessLimit: boolean
+    sampledRootDepartmentUsers: Array<{ userId: string; name: string }>
+    sampledRootDepartmentUsersWithAccessLimit: Array<{ userId: string; name: string }>
+  }
+  warnings: string[]
 }
 
 export type DirectorySyncRunSummary = {
@@ -567,8 +581,53 @@ export async function updateDirectoryIntegration(
   return summarizeIntegration(result.rows[0])
 }
 
-export async function testDirectoryIntegration(input: DirectoryIntegrationInput): Promise<DirectoryIntegrationTestResult> {
-  const normalized = normalizeIntegrationInput(input)
+async function resolveDirectoryTestCurrentConfig(input: DirectoryIntegrationTestInput): Promise<DirectoryIntegrationConfig | undefined> {
+  const integrationId = normalizeText(input.integrationId)
+  if (!integrationId) return undefined
+
+  const current = await getIntegrationRow(integrationId)
+  if (!current) {
+    throw new Error('Directory integration not found')
+  }
+
+  return parseIntegrationConfig(current)
+}
+
+function buildDirectoryIntegrationTestWarnings(result: {
+  rootDepartmentId: string
+  departmentSampleCount: number
+  rootDepartmentDirectUserCount: number
+  rootDepartmentDirectUserHasMore: boolean
+  rootDepartmentDirectUserCountWithAccessLimit: number
+  rootDepartmentDirectUserHasMoreWithAccessLimit: boolean
+}): string[] {
+  const warnings: string[] = []
+
+  if (result.departmentSampleCount === 0) {
+    warnings.push(`根部门 ${result.rootDepartmentId} 未返回任何子部门。`)
+  }
+
+  if (result.rootDepartmentDirectUserCount <= 1 && !result.rootDepartmentDirectUserHasMore) {
+    warnings.push(
+      `根部门 ${result.rootDepartmentId} 当前仅返回 ${result.rootDepartmentDirectUserCount} 个直属成员；如果钉钉企业通讯录里实际成员更多，通常是应用通讯录接口范围未覆盖，或根部门 ID 配置不正确。`,
+    )
+  }
+
+  if (
+    result.rootDepartmentDirectUserCount <= 1
+    && !result.rootDepartmentDirectUserHasMore
+    && result.rootDepartmentDirectUserCountWithAccessLimit === result.rootDepartmentDirectUserCount
+    && result.rootDepartmentDirectUserHasMoreWithAccessLimit === result.rootDepartmentDirectUserHasMore
+  ) {
+    warnings.push('开启“包含访问受限成员”后返回结果没有变化，说明当前问题不是受限成员过滤导致的。')
+  }
+
+  return warnings
+}
+
+export async function testDirectoryIntegration(input: DirectoryIntegrationTestInput): Promise<DirectoryIntegrationTestResult> {
+  const current = await resolveDirectoryTestCurrentConfig(input)
+  const normalized = normalizeIntegrationInput(input, current)
   const accessToken = await fetchDingTalkAppAccessToken({
     appKey: normalized.appKey,
     appSecret: normalized.appSecret,
@@ -588,6 +647,33 @@ export async function testDirectoryIntegration(input: DirectoryIntegrationInput)
     Math.min(normalized.pageSize ?? DEFAULT_PAGE_SIZE, 5),
     { baseUrl: normalized.baseUrl ?? undefined },
   )
+  const rootUsers = await listDingTalkDepartmentUsers(
+    accessToken,
+    normalized.rootDepartmentId,
+    0,
+    Math.min(normalized.pageSize ?? DEFAULT_PAGE_SIZE, 100),
+    { baseUrl: normalized.baseUrl ?? undefined },
+  )
+  const rootUsersWithAccessLimit = await listDingTalkDepartmentUsers(
+    accessToken,
+    normalized.rootDepartmentId,
+    0,
+    Math.min(normalized.pageSize ?? DEFAULT_PAGE_SIZE, 100),
+    {
+      baseUrl: normalized.baseUrl ?? undefined,
+      containAccessLimit: true,
+    },
+  )
+
+  const diagnostics = {
+    rootDepartmentChildCount: departments.length,
+    rootDepartmentDirectUserCount: rootUsers.users.length,
+    rootDepartmentDirectUserHasMore: rootUsers.hasMore,
+    rootDepartmentDirectUserCountWithAccessLimit: rootUsersWithAccessLimit.users.length,
+    rootDepartmentDirectUserHasMoreWithAccessLimit: rootUsersWithAccessLimit.hasMore,
+    sampledRootDepartmentUsers: rootUsers.users.slice(0, 10).map((user) => ({ userId: user.userId, name: user.name })),
+    sampledRootDepartmentUsersWithAccessLimit: rootUsersWithAccessLimit.users.slice(0, 10).map((user) => ({ userId: user.userId, name: user.name })),
+  }
 
   return {
     corpId: normalized.corpId,
@@ -597,6 +683,15 @@ export async function testDirectoryIntegration(input: DirectoryIntegrationInput)
     sampledDepartments: departments.slice(0, 5).map((department) => ({ id: department.id, name: department.name })),
     userSampleCount: users.length,
     sampledUsers: users.slice(0, 5).map((user) => ({ userId: user.userId, name: user.name })),
+    diagnostics,
+    warnings: buildDirectoryIntegrationTestWarnings({
+      rootDepartmentId: normalized.rootDepartmentId,
+      departmentSampleCount: departments.length,
+      rootDepartmentDirectUserCount: diagnostics.rootDepartmentDirectUserCount,
+      rootDepartmentDirectUserHasMore: diagnostics.rootDepartmentDirectUserHasMore,
+      rootDepartmentDirectUserCountWithAccessLimit: diagnostics.rootDepartmentDirectUserCountWithAccessLimit,
+      rootDepartmentDirectUserHasMoreWithAccessLimit: diagnostics.rootDepartmentDirectUserHasMoreWithAccessLimit,
+    }),
   }
 }
 

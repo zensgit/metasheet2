@@ -301,12 +301,28 @@
             <span class="directory-admin__chip">部门样本 {{ testResult.departmentSampleCount }}</span>
             <span class="directory-admin__chip">用户样本 {{ testResult.userSampleCount }}</span>
             <span class="directory-admin__chip">Root {{ testResult.rootDepartmentId }}</span>
+            <span class="directory-admin__chip">根部门子部门 {{ testResult.diagnostics.rootDepartmentChildCount }}</span>
+            <span class="directory-admin__chip">根部门直属成员 {{ testResult.diagnostics.rootDepartmentDirectUserCount }}</span>
+            <span class="directory-admin__chip">含受限成员 {{ testResult.diagnostics.rootDepartmentDirectUserCountWithAccessLimit }}</span>
           </div>
           <p class="directory-admin__hint">
             部门：{{ testResult.sampledDepartments.map((item) => item.name).join('，') || '无' }}
           </p>
           <p class="directory-admin__hint">
             用户：{{ testResult.sampledUsers.map((item) => item.name).join('，') || '无' }}
+          </p>
+          <p class="directory-admin__hint">
+            根部门直属用户：{{ formatSampleUsers(testResult.diagnostics.sampledRootDepartmentUsers, testResult.diagnostics.rootDepartmentDirectUserHasMore) }}
+          </p>
+          <p class="directory-admin__hint">
+            根部门直属用户（含受限）：{{ formatSampleUsers(testResult.diagnostics.sampledRootDepartmentUsersWithAccessLimit, testResult.diagnostics.rootDepartmentDirectUserHasMoreWithAccessLimit) }}
+          </p>
+          <p
+            v-for="warning in testResult.warnings"
+            :key="warning"
+            class="directory-admin__status directory-admin__status--error"
+          >
+            {{ warning }}
           </p>
         </section>
 
@@ -419,6 +435,16 @@ type TestResult = {
   sampledDepartments: Array<{ id: string; name: string }>
   userSampleCount: number
   sampledUsers: Array<{ userId: string; name: string }>
+  diagnostics: {
+    rootDepartmentChildCount: number
+    rootDepartmentDirectUserCount: number
+    rootDepartmentDirectUserHasMore: boolean
+    rootDepartmentDirectUserCountWithAccessLimit: number
+    rootDepartmentDirectUserHasMoreWithAccessLimit: boolean
+    sampledRootDepartmentUsers: Array<{ userId: string; name: string }>
+    sampledRootDepartmentUsersWithAccessLimit: Array<{ userId: string; name: string }>
+  }
+  warnings: string[]
 }
 
 type DirectoryDraft = {
@@ -680,6 +706,7 @@ function clearBindingSearch(accountId: string) {
 
 function buildPayload() {
   return {
+    integrationId: selectedIntegration.value?.id,
     name: draft.name.trim(),
     corpId: draft.corpId.trim(),
     appKey: draft.appKey.trim(),
@@ -918,6 +945,12 @@ function readNumericStat(stats: Record<string, unknown>, key: string): number {
   if (typeof value === 'number') return value
   if (typeof value === 'string' && value.trim().length > 0 && !Number.isNaN(Number(value))) return Number(value)
   return 0
+}
+
+function formatSampleUsers(users: Array<{ userId: string; name: string }>, hasMore: boolean): string {
+  const summary = users.map((user) => `${user.name} (${user.userId})`).join('，')
+  if (!summary) return '无'
+  return hasMore ? `${summary} 等` : summary
 }
 
 onMounted(() => {
