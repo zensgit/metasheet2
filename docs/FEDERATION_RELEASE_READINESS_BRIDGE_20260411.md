@@ -152,9 +152,39 @@ Observed live result:
 - the adapter emitted canonical `summary` / `export` links that point back to
   the provider surface
 
-The concrete sample object currently returns an empty readiness summary
-(`resources=0`), which is acceptable for bridge verification. A richer demo
-fixture is a separate data task, not a bridge correctness issue.
+Second live validation was then run against a non-empty demo fixture:
+
+- parent part: `39a39aca-c743-403d-ba3f-058b55ccc7e9`
+- parent number: `RR-P-1775885685036`
+- baseline resource: `d627a794-45b0-413a-8f77-fbf6165c0b14`
+- MBOM resource: `8e93a516-b14d-4c29-b020-3979a0e5e5aa`
+- routing resource: `897b05eb-270a-4afb-ba28-c4f25f819cb2`
+
+Observed non-empty readiness summary:
+
+- `resources=3`
+- `ok_resources=2`
+- `error_count=1`
+- `warning_count=0`
+- `by_kind.baseline_release.ok_resources=1`
+- `by_kind.routing_release.ok_resources=1`
+- `by_kind.mbom_release.error_count=1`
+
+Observed non-empty resource names:
+
+- `MBOM-RR-1775885685036`
+- `Routing RR 1775885685036`
+- `BL-RR-1775885685036`
+
+The provider and adapter both returned the same canonical links for that object:
+
+- summary:
+  `/api/v1/release-readiness/items/39a39aca-c743-403d-ba3f-058b55ccc7e9?ruleset_id=readiness`
+- export:
+  `/api/v1/release-readiness/items/39a39aca-c743-403d-ba3f-058b55ccc7e9/export?export_format=zip&ruleset_id=readiness`
+
+This richer fixture matters because it proves the bridge preserves a real mixed
+governance result, not just the empty-summary case.
 
 ## Deferred
 
