@@ -52,6 +52,10 @@ interface FakeContext {
     http: {
       addRoute: (method: string, path: string, handler: RegisteredHandler) => void
     }
+    tenant?: {
+      getTenantId: () => string | undefined
+      requireTenantId: () => string
+    }
     multitable?: {
       provisioning?: {
         getObjectSheetId: (projectId: string, objectId: string) => string
@@ -667,6 +671,12 @@ function createContext(): {
           routes.set(`${method} ${path}`, handler)
         },
       },
+      tenant: {
+        getTenantId: vi.fn(() => undefined),
+        requireTenantId: vi.fn(() => {
+          throw new Error('tenant context not set')
+        }),
+      },
       multitable: {
         provisioning: {
           getObjectSheetId,
@@ -865,10 +875,9 @@ describe('plugin-after-sales routes', () => {
     })
   })
 
-  it('warns once per request when tenantId is missing and falls back to default', async () => {
+  it('returns 401 when tenantId is missing from both request and tenant context', async () => {
     const handler = routes.get('GET /api/after-sales/projects/current')
-    const firstRes = new FakeResponse()
-    const secondRes = new FakeResponse()
+    const res = new FakeResponse()
     const req = buildReq({
       method: 'GET',
       path: '/api/after-sales/projects/current',
@@ -880,20 +889,45 @@ describe('plugin-after-sales routes', () => {
       },
     })
 
-    await handler?.(req, firstRes)
-    await handler?.(req, secondRes)
+    await handler?.(req, res)
 
-    expect(firstRes.statusCode).toBe(200)
-    expect(secondRes.statusCode).toBe(200)
-    expect(currentContext.logger.warn).toHaveBeenCalledTimes(1)
-    expect(currentContext.logger.warn).toHaveBeenCalledWith(
-      'After-sales request missing tenantId; falling back to default',
-      expect.objectContaining({
-        method: 'GET',
-        path: '/api/after-sales/projects/current',
-        userId: 'user_42',
+    expect(res.statusCode).toBe(401)
+    expect(res.body).toEqual({
+      ok: false,
+      error: {
+        code: 'UNAUTHORIZED',
+        message: 'tenantId not found',
+      },
+    })
+  })
+
+  it('uses tenant context when req.user.tenantId is missing', async () => {
+    const handler = routes.get('GET /api/after-sales/projects/current')
+    const res = new FakeResponse()
+    currentContext.api.tenant = {
+      getTenantId: () => 'tenant_ctx',
+      requireTenantId: () => 'tenant_ctx',
+    }
+
+    await handler?.(
+      buildReq({
+        user: {
+          id: 'user_42',
+          role: 'admin',
+          roles: ['admin'],
+          perms: ['*:*', 'after_sales:admin'],
+        },
       }),
+      res,
     )
+
+    expect(res.statusCode).toBe(200)
+    expect(res.body).toEqual({
+      ok: true,
+      data: {
+        status: 'not-installed',
+      },
+    })
   })
 
   it('surfaces ledger-read-failed for current when the ledger read throws', async () => {

@@ -49,13 +49,38 @@ function getScalarString(payload, field) {
   return typeof payload?.[field] === 'string' && payload[field].trim() ? payload[field].trim() : ''
 }
 
-function resolveTenantId(payload) {
+function createValidationError(message) {
+  const error = new Error(message)
+  error.code = 'VALIDATION_ERROR'
+  return error
+}
+
+function parseTenantIdFromProjectId(projectId) {
+  const value = typeof projectId === 'string' ? projectId.trim() : ''
+  if (!value) return ''
+  const separatorIndex = value.indexOf(':')
+  if (separatorIndex <= 0) {
+    throw createValidationError('projectId must include a tenant prefix')
+  }
+  return value.slice(0, separatorIndex).trim()
+}
+
+function resolveTenantIdFromPayload(payload) {
   return (
     getScalarString(payload, 'tenantId') ||
     getScalarString(getNamespacedObject(payload, 'ticket'), 'tenantId') ||
     getScalarString(getNamespacedObject(payload, 'approval'), 'tenantId') ||
-    'default'
+    parseTenantIdFromProjectId(getScalarString(payload, 'projectId'))
   )
+}
+
+function resolveTenantIdFromContext(context) {
+  const tenantApi = context?.api?.tenant
+  if (!tenantApi || typeof tenantApi.getTenantId !== 'function') {
+    return ''
+  }
+  const tenantId = tenantApi.getTenantId()
+  return typeof tenantId === 'string' && tenantId.trim() ? tenantId.trim() : ''
 }
 
 function resolveRequestedAssignee(ticket) {
@@ -139,14 +164,29 @@ async function resolveRoleRecipients(context, roleSlugs) {
 
 async function resolveRuntimeInstallContext(context, payload, options = {}) {
   const appId = options.appId || DEFAULT_APP_ID
-  const tenantId = resolveTenantId(payload)
+  const payloadTenantId = resolveTenantIdFromPayload(payload)
+  const contextTenantId = resolveTenantIdFromContext(context)
+  const tenantLookupId = payloadTenantId || contextTenantId
+
+  if (!tenantLookupId) {
+    throw createValidationError('tenantId not found')
+  }
 
   try {
-    const current = await (options.loadCurrent || installer.loadCurrent)(context, tenantId, appId)
+    const current = await (options.loadCurrent || installer.loadCurrent)(context, tenantLookupId, appId)
+    const currentProjectId =
+      current && current.status !== 'not-installed'
+        ? getScalarString(current, 'projectId')
+        : ''
+    const currentTenantId = parseTenantIdFromProjectId(currentProjectId)
+    const tenantId = payloadTenantId || currentTenantId || contextTenantId
+    if (!tenantId) {
+      throw createValidationError('tenantId not found')
+    }
     const config = normalizeTemplateConfig(current && current.status !== 'not-installed' ? current.config : null)
     const projectId =
       getScalarString(payload, 'projectId') ||
-      (current && current.status !== 'not-installed' ? current.projectId : '') ||
+      currentProjectId ||
       installer.getProjectId(tenantId, appId)
 
     return {
@@ -156,10 +196,13 @@ async function resolveRuntimeInstallContext(context, payload, options = {}) {
       current,
     }
   } catch (error) {
+    if (error && error.code === 'VALIDATION_ERROR') {
+      throw error
+    }
     context.logger?.warn?.('after-sales workflow adapter falling back to default config', error)
     return {
-      tenantId,
-      projectId: installer.getProjectId(tenantId, appId),
+      tenantId: tenantLookupId,
+      projectId: installer.getProjectId(tenantLookupId, appId),
       config: normalizeTemplateConfig(null),
       current: null,
     }

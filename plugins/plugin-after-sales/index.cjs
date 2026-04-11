@@ -126,37 +126,29 @@ async function toPhysicalCustomerData(provisioning, projectId, logicalData) {
 
 let activeContext = null
 let workflowSubscriptionIds = []
-const TENANT_FALLBACK_WARNED = Symbol('after-sales-tenant-fallback-warned')
 
 // --------------------------------------------------------------------------
 // Local helpers
 // --------------------------------------------------------------------------
 
-/**
- * v1 tenantId extraction. Matches the existing convention used by
- * packages/core-backend/src/routes/plm-workbench.ts and workflow.ts.
- *
- * TODO(phase-1b): replace with AsyncLocalStorage tenantContext.getTenantId()
- * once the plugin-context injection is available for plugins.
- */
-function getTenantId(req, logger) {
-  const tenantId = req && req.user && req.user.tenantId != null
+function getTenantId(context, req, res) {
+  const contextTenantId = context
+    && context.api
+    && context.api.tenant
+    && typeof context.api.tenant.getTenantId === 'function'
+    ? context.api.tenant.getTenantId()
+    : ''
+  if (typeof contextTenantId === 'string' && contextTenantId.trim()) {
+    return contextTenantId.trim()
+  }
+
+  const requestTenantId = req && req.user && req.user.tenantId != null
     ? String(req.user.tenantId).trim()
     : ''
-  if (tenantId) return tenantId
+  if (requestTenantId) return requestTenantId
 
-  if (req && !req[TENANT_FALLBACK_WARNED]) {
-    req[TENANT_FALLBACK_WARNED] = true
-    logger && typeof logger.warn === 'function' && logger.warn(
-      'After-sales request missing tenantId; falling back to default',
-      {
-        method: req.method || null,
-        path: req.path || null,
-        userId: getUserId(req),
-      },
-    )
-  }
-  return 'default'
+  sendTenantUnauthorized(res)
+  return null
 }
 
 function getUserId(req) {
@@ -337,6 +329,13 @@ function sendUnauthorized(res) {
   res.status(401).json({
     ok: false,
     error: { code: 'UNAUTHORIZED', message: 'User ID not found' },
+  })
+}
+
+function sendTenantUnauthorized(res) {
+  res.status(401).json({
+    ok: false,
+    error: { code: 'UNAUTHORIZED', message: 'tenantId not found' },
   })
 }
 
@@ -601,9 +600,18 @@ async function getTicketRecordById(multitableApi, projectId, ticketId) {
 }
 
 function resolveTenantIdFromProject(projectId) {
-  if (typeof projectId !== 'string') return 'default'
+  if (typeof projectId !== 'string') {
+    const error = new Error('projectId must be a non-empty tenant-scoped identifier')
+    error.code = 'VALIDATION_ERROR'
+    throw error
+  }
   const [tenantId] = projectId.split(':')
-  return tenantId || 'default'
+  if (!tenantId || !tenantId.trim()) {
+    const error = new Error('projectId must include a tenant prefix')
+    error.code = 'VALIDATION_ERROR'
+    throw error
+  }
+  return tenantId.trim()
 }
 
 async function handleRefundApprovalDecisionCallback(context, input) {
@@ -738,7 +746,8 @@ module.exports = {
             sendUnauthorized(res)
             return
           }
-          const tenantId = getTenantId(req, context.logger)
+          const tenantId = getTenantId(context, req, res)
+          if (!tenantId) return
           const current = await installer.loadCurrent(context, tenantId, appManifest.id)
           res.json({ ok: true, data: current })
         } catch (err) {
@@ -798,7 +807,9 @@ module.exports = {
               ? body.config
               : {}
 
-          const tenantId = getTenantId(req, context.logger)
+          const tenantId = getTenantId(context, req, res)
+
+          if (!tenantId) return
           const blueprint = getDefaultBlueprint()
 
           const result = await installer.runInstall({
@@ -854,7 +865,9 @@ module.exports = {
             return
           }
 
-          const tenantId = getTenantId(req, context.logger)
+          const tenantId = getTenantId(context, req, res)
+
+          if (!tenantId) return
           const current = await installer.loadCurrent(context, tenantId, appManifest.id)
           if (!current || !isOperationalAfterSalesStatus(current.status)) {
             res.status(409).json({
@@ -910,7 +923,9 @@ module.exports = {
             throw new Error('automationRegistry service unavailable on plugin context')
           }
 
-          const tenantId = getTenantId(req, context.logger)
+          const tenantId = getTenantId(context, req, res)
+
+          if (!tenantId) return
           const current = await installer.loadCurrent(context, tenantId, appManifest.id)
           if (!current || !isOperationalAfterSalesStatus(current.status)) {
             res.status(409).json({
@@ -969,7 +984,9 @@ module.exports = {
             throw new Error('automationRegistry service unavailable on plugin context')
           }
 
-          const tenantId = getTenantId(req, context.logger)
+          const tenantId = getTenantId(context, req, res)
+
+          if (!tenantId) return
           const current = await installer.loadCurrent(context, tenantId, appManifest.id)
           if (!current || !isOperationalAfterSalesStatus(current.status)) {
             res.status(409).json({
@@ -1049,7 +1066,9 @@ module.exports = {
             throw new Error('automationRegistry service unavailable on plugin context')
           }
 
-          const tenantId = getTenantId(req, context.logger)
+          const tenantId = getTenantId(context, req, res)
+
+          if (!tenantId) return
           const current = await installer.loadCurrent(context, tenantId, appManifest.id)
           if (!current || !isOperationalAfterSalesStatus(current.status)) {
             res.status(409).json({
@@ -1134,7 +1153,9 @@ module.exports = {
             return
           }
 
-          const tenantId = getTenantId(req, context.logger)
+          const tenantId = getTenantId(context, req, res)
+
+          if (!tenantId) return
           const current = await installer.loadCurrent(context, tenantId, appManifest.id)
           if (!current || !isOperationalAfterSalesStatus(current.status)) {
             res.status(409).json({
@@ -1274,7 +1295,9 @@ module.exports = {
             return
           }
 
-          const tenantId = getTenantId(req, context.logger)
+          const tenantId = getTenantId(context, req, res)
+
+          if (!tenantId) return
           const current = await installer.loadCurrent(context, tenantId, appManifest.id)
           if (!current || !isOperationalAfterSalesStatus(current.status)) {
             res.status(409).json({
@@ -1394,7 +1417,9 @@ module.exports = {
             return
           }
 
-          const tenantId = getTenantId(req, context.logger)
+          const tenantId = getTenantId(context, req, res)
+
+          if (!tenantId) return
           const current = await installer.loadCurrent(context, tenantId, appManifest.id)
           if (!current || !isOperationalAfterSalesStatus(current.status)) {
             res.status(409).json({
@@ -1499,7 +1524,9 @@ module.exports = {
             return
           }
 
-          const tenantId = getTenantId(req, context.logger)
+          const tenantId = getTenantId(context, req, res)
+
+          if (!tenantId) return
           const current = await installer.loadCurrent(context, tenantId, appManifest.id)
           if (!current || !isOperationalAfterSalesStatus(current.status)) {
             res.status(409).json({
@@ -1579,7 +1606,9 @@ module.exports = {
             return
           }
 
-          const tenantId = getTenantId(req, context.logger)
+          const tenantId = getTenantId(context, req, res)
+
+          if (!tenantId) return
           const current = await installer.loadCurrent(context, tenantId, appManifest.id)
           if (!current || !isOperationalAfterSalesStatus(current.status)) {
             res.status(409).json({
@@ -1685,7 +1714,9 @@ module.exports = {
             return
           }
 
-          const tenantId = getTenantId(req, context.logger)
+          const tenantId = getTenantId(context, req, res)
+
+          if (!tenantId) return
           const current = await installer.loadCurrent(context, tenantId, appManifest.id)
           if (!current || !isOperationalAfterSalesStatus(current.status)) {
             res.status(409).json({
@@ -1791,7 +1822,9 @@ module.exports = {
             return
           }
 
-          const tenantId = getTenantId(req, context.logger)
+          const tenantId = getTenantId(context, req, res)
+
+          if (!tenantId) return
           const current = await installer.loadCurrent(context, tenantId, appManifest.id)
           if (!current || !isOperationalAfterSalesStatus(current.status)) {
             res.status(409).json({
@@ -1874,7 +1907,9 @@ module.exports = {
             return
           }
 
-          const tenantId = getTenantId(req, context.logger)
+          const tenantId = getTenantId(context, req, res)
+
+          if (!tenantId) return
           const current = await installer.loadCurrent(context, tenantId, appManifest.id)
           if (!current || !isOperationalAfterSalesStatus(current.status)) {
             res.status(409).json({
@@ -2012,7 +2047,9 @@ module.exports = {
             return
           }
 
-          const tenantId = getTenantId(req, context.logger)
+          const tenantId = getTenantId(context, req, res)
+
+          if (!tenantId) return
           const current = await installer.loadCurrent(context, tenantId, appManifest.id)
           if (!current || !isOperationalAfterSalesStatus(current.status)) {
             res.status(409).json({
@@ -2155,7 +2192,9 @@ module.exports = {
             return
           }
 
-          const tenantId = getTenantId(req, context.logger)
+          const tenantId = getTenantId(context, req, res)
+
+          if (!tenantId) return
           const current = await installer.loadCurrent(context, tenantId, appManifest.id)
           if (!current || !isOperationalAfterSalesStatus(current.status)) {
             res.status(409).json({
@@ -2250,7 +2289,9 @@ module.exports = {
             return
           }
 
-          const tenantId = getTenantId(req, context.logger)
+          const tenantId = getTenantId(context, req, res)
+
+          if (!tenantId) return
           const current = await installer.loadCurrent(context, tenantId, appManifest.id)
           if (!current || !isOperationalAfterSalesStatus(current.status)) {
             res.status(409).json({
@@ -2389,7 +2430,9 @@ module.exports = {
             return
           }
 
-          const tenantId = getTenantId(req, context.logger)
+          const tenantId = getTenantId(context, req, res)
+
+          if (!tenantId) return
           const current = await installer.loadCurrent(context, tenantId, appManifest.id)
           if (!current || !isOperationalAfterSalesStatus(current.status)) {
             res.status(409).json({
@@ -2492,7 +2535,9 @@ module.exports = {
             return
           }
 
-          const tenantId = getTenantId(req, context.logger)
+          const tenantId = getTenantId(context, req, res)
+
+          if (!tenantId) return
           const current = await installer.loadCurrent(context, tenantId, appManifest.id)
           if (!current || !isOperationalAfterSalesStatus(current.status)) {
             res.status(409).json({
@@ -2645,7 +2690,9 @@ module.exports = {
             return
           }
 
-          const tenantId = getTenantId(req, context.logger)
+          const tenantId = getTenantId(context, req, res)
+
+          if (!tenantId) return
           const current = await installer.loadCurrent(context, tenantId, appManifest.id)
           if (!current || !isOperationalAfterSalesStatus(current.status)) {
             res.status(409).json({
@@ -2755,7 +2802,9 @@ module.exports = {
             return
           }
 
-          const tenantId = getTenantId(req, context.logger)
+          const tenantId = getTenantId(context, req, res)
+
+          if (!tenantId) return
           const current = await installer.loadCurrent(context, tenantId, appManifest.id)
           if (!current || !isOperationalAfterSalesStatus(current.status)) {
             res.status(409).json({
@@ -2843,7 +2892,9 @@ module.exports = {
             return
           }
 
-          const tenantId = getTenantId(req, context.logger)
+          const tenantId = getTenantId(context, req, res)
+
+          if (!tenantId) return
           const current = await installer.loadCurrent(context, tenantId, appManifest.id)
           if (!current || !isOperationalAfterSalesStatus(current.status)) {
             res.status(409).json({
@@ -2945,7 +2996,9 @@ module.exports = {
             return
           }
 
-          const tenantId = getTenantId(req, context.logger)
+          const tenantId = getTenantId(context, req, res)
+
+          if (!tenantId) return
           const current = await installer.loadCurrent(context, tenantId, appManifest.id)
           if (!current || !isOperationalAfterSalesStatus(current.status)) {
             res.status(409).json({
@@ -3035,7 +3088,9 @@ module.exports = {
             return
           }
 
-          const tenantId = getTenantId(req, context.logger)
+          const tenantId = getTenantId(context, req, res)
+
+          if (!tenantId) return
           const current = await installer.loadCurrent(context, tenantId, appManifest.id)
           if (!current || !isOperationalAfterSalesStatus(current.status)) {
             res.status(409).json({
@@ -3134,7 +3189,9 @@ module.exports = {
             return
           }
 
-          const tenantId = getTenantId(req, context.logger)
+          const tenantId = getTenantId(context, req, res)
+
+          if (!tenantId) return
           const current = await installer.loadCurrent(context, tenantId, appManifest.id)
           if (!current || !isOperationalAfterSalesStatus(current.status)) {
             res.status(409).json({
@@ -3287,7 +3344,9 @@ module.exports = {
             return
           }
 
-          const tenantId = getTenantId(req, context.logger)
+          const tenantId = getTenantId(context, req, res)
+
+          if (!tenantId) return
           const current = await installer.loadCurrent(context, tenantId, appManifest.id)
           if (!current || !isOperationalAfterSalesStatus(current.status)) {
             res.status(409).json({
@@ -3377,7 +3436,9 @@ module.exports = {
             return
           }
 
-          const tenantId = getTenantId(req, context.logger)
+          const tenantId = getTenantId(context, req, res)
+
+          if (!tenantId) return
           const current = await installer.loadCurrent(context, tenantId, appManifest.id)
           if (!current || !isOperationalAfterSalesStatus(current.status)) {
             res.status(409).json({
@@ -3473,7 +3534,9 @@ module.exports = {
             return
           }
 
-          const tenantId = getTenantId(req, context.logger)
+          const tenantId = getTenantId(context, req, res)
+
+          if (!tenantId) return
           const current = await installer.loadCurrent(context, tenantId, appManifest.id)
           if (!current || !isOperationalAfterSalesStatus(current.status)) {
             res.status(409).json({
@@ -3622,7 +3685,9 @@ module.exports = {
             return
           }
 
-          const tenantId = getTenantId(req, context.logger)
+          const tenantId = getTenantId(context, req, res)
+
+          if (!tenantId) return
           const current = await installer.loadCurrent(context, tenantId, appManifest.id)
           if (!current || !isOperationalAfterSalesStatus(current.status)) {
             res.status(409).json({
@@ -3728,7 +3793,9 @@ module.exports = {
             return
           }
 
-          const tenantId = getTenantId(req, context.logger)
+          const tenantId = getTenantId(context, req, res)
+
+          if (!tenantId) return
           const current = await installer.loadCurrent(context, tenantId, appManifest.id)
           if (!current || !isOperationalAfterSalesStatus(current.status)) {
             res.status(409).json({
@@ -3817,7 +3884,9 @@ module.exports = {
             return
           }
 
-          const tenantId = getTenantId(req, context.logger)
+          const tenantId = getTenantId(context, req, res)
+
+          if (!tenantId) return
           const current = await installer.loadCurrent(context, tenantId, appManifest.id)
           if (!current || current.status === 'not-installed') {
             res.status(409).json({
@@ -3931,7 +4000,9 @@ module.exports = {
             return
           }
 
-          const tenantId = getTenantId(req, context.logger)
+          const tenantId = getTenantId(context, req, res)
+
+          if (!tenantId) return
           const current = await installer.loadCurrent(context, tenantId, appManifest.id)
           if (!current || current.status === 'not-installed') {
             res.status(409).json({
@@ -3986,7 +4057,9 @@ module.exports = {
             return
           }
 
-          const tenantId = getTenantId(req, context.logger)
+          const tenantId = getTenantId(context, req, res)
+
+          if (!tenantId) return
           const payload = buildTicketCreatedEventPayload((req && req.body) || {}, {
             tenantId,
             projectId: installer.getProjectId(tenantId, appManifest.id),
@@ -4032,7 +4105,9 @@ module.exports = {
             return
           }
 
-          const tenantId = getTenantId(req, context.logger)
+          const tenantId = getTenantId(context, req, res)
+
+          if (!tenantId) return
           const payload = buildRefundRequestedEventPayload((req && req.body) || {}, {
             tenantId,
             projectId: installer.getProjectId(tenantId, appManifest.id),
@@ -4078,7 +4153,9 @@ module.exports = {
             return
           }
 
-          const tenantId = getTenantId(req, context.logger)
+          const tenantId = getTenantId(context, req, res)
+
+          if (!tenantId) return
           const payload = buildTicketOverdueEventPayload((req && req.body) || {}, {
             tenantId,
             projectId: installer.getProjectId(tenantId, appManifest.id),
@@ -4124,7 +4201,9 @@ module.exports = {
             return
           }
 
-          const tenantId = getTenantId(req, context.logger)
+          const tenantId = getTenantId(context, req, res)
+
+          if (!tenantId) return
           const payload = buildFollowUpDueEventPayload((req && req.body) || {}, {
             tenantId,
             projectId: installer.getProjectId(tenantId, appManifest.id),

@@ -189,6 +189,7 @@ describe('AuthService.verifyToken', () => {
       id: 'dev-admin',
       roles: ['admin'],
       perms: ['multitable:read', 'multitable:write'],
+      tenantId: 'tenant_42',
       sid: 'dev-session',
       iat: 0,
       exp: 0,
@@ -199,6 +200,7 @@ describe('AuthService.verifyToken', () => {
 
     expect(user).toBeTruthy()
     expect(user?.id).toBe('dev-admin')
+    expect(user?.tenantId).toBe('tenant_42')
     expect(user?.role).toBe('admin')
     expect(user?.permissions).toEqual(['multitable:read', 'multitable:write'])
     expect(poolMocks.query).not.toHaveBeenCalled()

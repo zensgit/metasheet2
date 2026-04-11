@@ -3897,7 +3897,7 @@ async function loadManifest() {
   manifest.value = await readEnvelope<AfterSalesManifest>('/api/after-sales/app-manifest')
 }
 
-async function loadRefundApproval(projectId: string, ticketId: string): Promise<ApprovalSnapshot | null> {
+async function loadRefundApproval(ticketId: string): Promise<ApprovalSnapshot | null> {
   try {
     const payload = await readEnvelope<{ approval: ApprovalSnapshot | null }>(
       `/api/after-sales/tickets/${encodeURIComponent(ticketId)}/refund-approval`,
@@ -3923,7 +3923,7 @@ async function loadTicketsForCurrentState(state: CurrentResponse): Promise<void>
       rows.map(async (ticket) => {
         const approval =
           toText(ticket?.data?.refundStatus) === 'pending'
-            ? await loadRefundApproval(state.projectId || placeholderProjectId, ticket.id)
+            ? await loadRefundApproval(ticket.id)
             : null
         return normalizeTicket(ticket, approval)
       }),

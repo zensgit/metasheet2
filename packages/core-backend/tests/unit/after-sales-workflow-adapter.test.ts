@@ -15,6 +15,9 @@ function createContext(queryImpl?: (sql: string, params?: unknown[]) => Promise<
       database: {
         query: vi.fn(queryImpl || (async () => [])),
       },
+      tenant: {
+        getTenantId: vi.fn(() => undefined),
+      },
       events: {
         emit: vi.fn(),
         on: vi.fn((eventName: string) => `sub:${eventName}`),
@@ -157,6 +160,123 @@ describe('after-sales workflow adapter', () => {
         workflowId: 'refund-approval',
       }),
     )
+  })
+
+  it('resolves tenantId from projectId when the payload omits an explicit tenant claim', async () => {
+    const context = createContext()
+    const loadCurrent = vi.fn(async () => ({
+      status: 'installed',
+      projectId: 'tenant_42:after-sales',
+      config: {
+        defaultSlaHours: 24,
+        urgentSlaHours: 4,
+      },
+    }))
+    const runtime = adapter.createWorkflowRuntime(context, { loadCurrent })
+
+    await runtime.onTicketCreated({
+      projectId: 'tenant_42:after-sales',
+      ticketNo: 'TK-1002',
+      ticket: {
+        id: 'ticket_002',
+        ticketNo: 'TK-1002',
+        title: 'Broken valve',
+        priority: 'normal',
+        assigneeCandidates: [{ id: 'tech_002', type: 'user' }],
+      },
+    })
+
+    expect(loadCurrent).toHaveBeenCalledWith(context, 'tenant_42', 'after-sales')
+    expect(context.api.events.emit).toHaveBeenCalledWith(
+      'ticket.assigned',
+      expect.objectContaining({
+        tenantId: 'tenant_42',
+        projectId: 'tenant_42:after-sales',
+      }),
+    )
+  })
+
+  it('falls back to tenant context when payload carries no tenant information', async () => {
+    const context = createContext()
+    context.api.tenant.getTenantId = vi.fn(() => 'tenant_ctx')
+    const loadCurrent = vi.fn(async () => ({
+      status: 'not-installed',
+      config: null,
+    }))
+    const runtime = adapter.createWorkflowRuntime(context, { loadCurrent })
+
+    await runtime.onTicketCreated({
+      ticketNo: 'TK-1003',
+      ticket: {
+        id: 'ticket_003',
+        ticketNo: 'TK-1003',
+        title: 'Loose wiring',
+        priority: 'normal',
+        assigneeCandidates: [{ id: 'tech_003', type: 'user' }],
+      },
+    })
+
+    expect(loadCurrent).toHaveBeenCalledWith(context, 'tenant_ctx', 'after-sales')
+    expect(context.api.events.emit).toHaveBeenCalledWith(
+      'ticket.assigned',
+      expect.objectContaining({
+        tenantId: 'tenant_ctx',
+        projectId: 'tenant_ctx:after-sales',
+      }),
+    )
+  })
+
+  it('throws VALIDATION_ERROR when tenantId cannot be resolved', async () => {
+    const context = createContext()
+    const runtime = adapter.createWorkflowRuntime(context, {
+      loadCurrent: vi.fn(async () => ({
+        status: 'not-installed',
+        config: null,
+      })),
+    })
+
+    await expect(
+      runtime.onTicketCreated({
+        ticketNo: 'TK-1004',
+        ticket: {
+          id: 'ticket_004',
+          ticketNo: 'TK-1004',
+          title: 'Sensor alarm',
+          priority: 'normal',
+          assigneeCandidates: [{ id: 'tech_004', type: 'user' }],
+        },
+      }),
+    ).rejects.toMatchObject({
+      code: 'VALIDATION_ERROR',
+      message: 'tenantId not found',
+    })
+  })
+
+  it('throws VALIDATION_ERROR when projectId is not tenant scoped', async () => {
+    const context = createContext()
+    const runtime = adapter.createWorkflowRuntime(context, {
+      loadCurrent: vi.fn(async () => ({
+        status: 'not-installed',
+        config: null,
+      })),
+    })
+
+    await expect(
+      runtime.onTicketCreated({
+        projectId: 'after-sales',
+        ticketNo: 'TK-1005',
+        ticket: {
+          id: 'ticket_005',
+          ticketNo: 'TK-1005',
+          title: 'Compressor noise',
+          priority: 'normal',
+          assigneeCandidates: [{ id: 'tech_005', type: 'user' }],
+        },
+      }),
+    ).rejects.toMatchObject({
+      code: 'VALIDATION_ERROR',
+      message: 'projectId must include a tenant prefix',
+    })
   })
 
   it('skips an automation handler when the install-time rule is disabled', async () => {
@@ -338,6 +458,8 @@ describe('after-sales workflow adapter', () => {
     })
 
     await runtime.onTicketAssigned({
+      tenantId: 'tenant_42',
+      projectId: 'tenant_42:after-sales',
       ticketNo: 'TK-1001',
       ticket: {
         assignedTo: 'tech_001',
@@ -346,6 +468,8 @@ describe('after-sales workflow adapter', () => {
     })
 
     await runtime.onServiceRecorded({
+      tenantId: 'tenant_42',
+      projectId: 'tenant_42:after-sales',
       serviceRecord: {
         id: 'sr_001',
         ticketNo: 'TK-1001',
@@ -353,6 +477,8 @@ describe('after-sales workflow adapter', () => {
     })
 
     await runtime.onApprovalPending({
+      tenantId: 'tenant_42',
+      projectId: 'tenant_42:after-sales',
       approval: {
         id: 'afs:1',
       },
@@ -362,6 +488,8 @@ describe('after-sales workflow adapter', () => {
     })
 
     await runtime.onTicketOverdue({
+      tenantId: 'tenant_42',
+      projectId: 'tenant_42:after-sales',
       ticketNo: 'TK-1001',
       ticket: {
         id: 'ticket_001',
@@ -375,6 +503,8 @@ describe('after-sales workflow adapter', () => {
     })
 
     await runtime.onFollowUpDue({
+      tenantId: 'tenant_42',
+      projectId: 'tenant_42:after-sales',
       ticketNo: 'TK-1001',
       followUpOwner: {
         id: 'owner_001',

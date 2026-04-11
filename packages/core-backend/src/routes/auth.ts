@@ -46,6 +46,7 @@ authRouter.get('/dev-token', async (req: Request, res: Response) => {
   }
 
   const userId = typeof req.query.userId === 'string' && req.query.userId.trim() ? req.query.userId.trim() : 'dev-user'
+  const tenantId = typeof req.query.tenantId === 'string' && req.query.tenantId.trim() ? req.query.tenantId.trim() : undefined
   const rolesParam = typeof req.query.roles === 'string' ? req.query.roles : 'admin'
   const permsParam = typeof req.query.perms === 'string'
     ? req.query.perms
@@ -63,6 +64,7 @@ authRouter.get('/dev-token', async (req: Request, res: Response) => {
     id: userId,
     roles: roles.length > 0 ? roles : ['admin'],
     perms,
+    ...(tenantId ? { tenantId } : {}),
     sid: randomUUID(),
   }
 

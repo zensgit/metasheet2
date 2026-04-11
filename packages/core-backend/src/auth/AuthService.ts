@@ -21,6 +21,7 @@ export interface User {
   name: string
   role: string
   permissions: string[]
+  tenantId?: string
   is_active?: boolean
   created_at: Date
   updated_at: Date
@@ -37,6 +38,7 @@ export interface TokenPayload {
   userId: string
   email: string
   role: string
+  tenantId?: string
   sid?: string
   iat: number
   exp: number
@@ -107,6 +109,12 @@ export class AuthService {
       .filter(Boolean)
   }
 
+  private normalizeClaimString(value: unknown): string | undefined {
+    if (typeof value !== 'string') return undefined
+    const trimmed = value.trim()
+    return trimmed.length > 0 ? trimmed : undefined
+  }
+
   private buildTrustedTokenUser(
     payload: TokenPayload & { id?: string; sub?: string; roles?: unknown; perms?: unknown; name?: unknown; email?: unknown; role?: unknown },
   ): User | null {
@@ -131,6 +139,7 @@ export class AuthService {
       typeof payload.name === 'string' && payload.name.trim().length > 0
         ? payload.name.trim()
         : 'Trusted Token User'
+    const tenantId = this.normalizeClaimString(payload.tenantId)
 
     return {
       id: userId,
@@ -138,6 +147,7 @@ export class AuthService {
       name,
       role,
       permissions,
+      ...(tenantId ? { tenantId } : {}),
       is_active: true,
       created_at: new Date(0),
       updated_at: new Date(0),
@@ -205,6 +215,7 @@ export class AuthService {
       userId: user.id,
       email: user.email,
       role: user.role,
+      ...(typeof user.tenantId === 'string' && user.tenantId.trim().length > 0 ? { tenantId: user.tenantId.trim() } : {}),
       ...(typeof options.sid === 'string' && options.sid.trim().length > 0 ? { sid: options.sid.trim() } : {}),
     }
 
@@ -578,7 +589,10 @@ export class AuthService {
         }
       }
 
-      const refreshedToken = this.createToken(user, { sid: sessionId })
+      const refreshedUser = this.normalizeClaimString(payload.tenantId)
+        ? { ...user, tenantId: this.normalizeClaimString(payload.tenantId) }
+        : user
+      const refreshedToken = this.createToken(refreshedUser, { sid: sessionId })
       const refreshedPayload = this.readTokenPayload(refreshedToken)
       if (refreshedPayload?.exp) {
         await createUserSession(user.id, {

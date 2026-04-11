@@ -20,6 +20,7 @@ declare global {
         id?: string | number
         sub?: string // JWT subject claim (user ID)
         userId?: string // Alternative user ID field
+        tenantId?: string
         email?: string
         name?: string
         role?: string

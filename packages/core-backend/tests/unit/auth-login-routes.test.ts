@@ -243,6 +243,32 @@ describe('auth login routes', () => {
     })
   })
 
+  it('issues a dev token with an optional tenant claim', async () => {
+    const response = await invokeRoute('get', '/dev-token', {
+      query: {
+        userId: 'dev-user',
+        tenantId: 'tenant_42',
+        roles: 'admin',
+        perms: '*:*',
+      },
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect((response.body as Record<string, any>).payload).toMatchObject({
+      id: 'dev-user',
+      tenantId: 'tenant_42',
+      roles: ['admin'],
+      perms: ['*:*'],
+    })
+    expect(sessionRegistryMocks.createUserSession).toHaveBeenCalledWith(
+      'dev-user',
+      expect.objectContaining({
+        sessionId: expect.any(String),
+        ipAddress: '127.0.0.1',
+      }),
+    )
+  })
+
   it('returns feature payload on me for a valid token', async () => {
     authServiceMocks.verifyToken.mockResolvedValue({
       id: 'user-1',

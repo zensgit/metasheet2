@@ -331,6 +331,10 @@ export interface CoreAPI {
   http: HttpAPI
   database: DatabaseAPI
   multitable?: MultitableAPI
+  tenant?: {
+    getTenantId(): string | undefined
+    requireTenantId(): string
+  }
   auth: AuthAPI
   events: EventAPI
   storage: StorageAPI
