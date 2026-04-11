@@ -48,7 +48,7 @@ describe('useMultitableWorkbench', () => {
               canManageSheetAccess: false,
               canManageViews: false,
               canComment: true,
-              canManageAutomation: false,
+              canManageAutomation: false, canExport: true,
             },
             capabilityOrigin: {
               source: 'sheet-grant',
@@ -96,7 +96,7 @@ describe('useMultitableWorkbench', () => {
               canManageSheetAccess: true,
               canManageViews: true,
               canComment: true,
-              canManageAutomation: false,
+              canManageAutomation: false, canExport: true,
             },
           },
         }), { status: 200 })
@@ -148,7 +148,7 @@ describe('useMultitableWorkbench', () => {
               canManageSheetAccess: false,
               canManageViews: false,
               canComment: true,
-              canManageAutomation: false,
+              canManageAutomation: false, canExport: true,
             },
           },
         }), { status: 200 })
@@ -184,7 +184,7 @@ describe('useMultitableWorkbench', () => {
               canManageSheetAccess: true,
               canManageViews: true,
               canComment: true,
-              canManageAutomation: false,
+              canManageAutomation: false, canExport: true,
             },
           },
         }), { status: 200 })
@@ -240,7 +240,7 @@ describe('useMultitableWorkbench', () => {
               canManageSheetAccess: true,
               canManageViews: true,
               canComment: true,
-              canManageAutomation: false,
+              canManageAutomation: false, canExport: true,
             },
           },
         }), { status: 200 })
@@ -262,7 +262,7 @@ describe('useMultitableWorkbench', () => {
               canManageSheetAccess: true,
               canManageViews: true,
               canComment: true,
-              canManageAutomation: false,
+              canManageAutomation: false, canExport: true,
             },
           },
         }), { status: 200 })

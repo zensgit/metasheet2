@@ -44,7 +44,7 @@ vi.mock('../src/multitable/composables/useMultitableCapabilities', () => ({
     canManageSheetAccess: ref(true),
     canManageViews: ref(true),
     canComment: ref(true),
-    canManageAutomation: ref(false),
+    canManageAutomation: ref(false), canExport: ref(true),
   }),
 }))
 
@@ -168,8 +168,9 @@ function createWorkbenchMock() {
       canManageSheetAccess: true,
       canManageViews: true,
       canComment: true,
-      canManageAutomation: false,
+      canManageAutomation: false, canExport: true,
     }),
+    capabilityOrigin: ref(null),
     fieldPermissions: ref({}),
     viewPermissions: ref({}),
     activeView: computed(() => views.value.find((view) => view.id === activeViewId.value) ?? null),
@@ -210,6 +211,7 @@ function createGridMock() {
     viewPermission: ref(null),
     rowActions: ref(null),
     rowActionOverrides: ref<Record<string, { canEdit: boolean; canDelete: boolean; canComment: boolean }>>({}),
+    capabilityOrigin: ref(null),
     conflict: ref(null),
     error: ref<string | null>(null),
     sortFilterDirty: ref(false),

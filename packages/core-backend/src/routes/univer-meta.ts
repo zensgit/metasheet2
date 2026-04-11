@@ -97,6 +97,7 @@ type MultitableCapabilities = {
   canManageViews: boolean
   canComment: boolean
   canManageAutomation: boolean
+  canExport: boolean
 }
 
 type MultitableCapabilityOrigin = {
@@ -1327,6 +1328,7 @@ function deriveCapabilities(permissions: string[], isAdminRole: boolean): Multit
     canManageViews: canWrite,
     canComment,
     canManageAutomation,
+    canExport: canRead,
   }
 }
 
@@ -1576,6 +1578,126 @@ async function loadSheetPermissionScopeMap(
   }
 }
 
+type ViewPermissionScope = {
+  hasAssignments: boolean
+  canRead: boolean
+  canWrite: boolean
+  canAdmin: boolean
+}
+
+async function loadViewPermissionScopeMap(
+  query: QueryFn,
+  viewIds: string[],
+  userId: string,
+): Promise<Map<string, ViewPermissionScope>> {
+  if (!userId || viewIds.length === 0) return new Map()
+  try {
+    const result = await query(
+      `WITH assigned_views AS (
+         SELECT DISTINCT vp.view_id
+         FROM meta_view_permissions vp
+         WHERE vp.view_id = ANY($2::text[])
+       ),
+       effective_permissions AS (
+         SELECT vp.view_id, vp.permission
+         FROM meta_view_permissions vp
+         WHERE vp.view_id = ANY($2::text[])
+           AND (
+             (vp.subject_type = 'user' AND vp.subject_id = $1)
+             OR (
+               vp.subject_type = 'role'
+               AND EXISTS (
+                 SELECT 1 FROM user_roles ur
+                 WHERE ur.user_id = $1 AND ur.role_id = vp.subject_id
+               )
+             )
+           )
+       )
+       SELECT av.view_id,
+              COALESCE(
+                array_agg(DISTINCT ep.permission) FILTER (WHERE ep.permission IS NOT NULL),
+                ARRAY[]::text[]
+              ) AS permissions
+       FROM assigned_views av
+       LEFT JOIN effective_permissions ep ON ep.view_id = av.view_id
+       GROUP BY av.view_id`,
+      [userId, viewIds],
+    )
+    return new Map(
+      (result.rows as Array<{ view_id: string; permissions: string[] | null }>).flatMap((row) => {
+        const viewId = typeof row.view_id === 'string' ? row.view_id : ''
+        if (!viewId) return []
+        const perms = Array.isArray(row.permissions)
+          ? row.permissions.filter((p): p is string => typeof p === 'string').map((p) => p.trim()).filter(Boolean)
+          : []
+        return [[
+          viewId,
+          {
+            hasAssignments: true,
+            canRead: perms.includes('read') || perms.includes('write') || perms.includes('admin'),
+            canWrite: perms.includes('write') || perms.includes('admin'),
+            canAdmin: perms.includes('admin'),
+          },
+        ] as const]
+      }),
+    )
+  } catch (err) {
+    if (isUndefinedTableError(err, 'meta_view_permissions') || isUndefinedTableError(err, 'user_roles')) return new Map()
+    throw err
+  }
+}
+
+type FieldPermissionScope = {
+  visible: boolean
+  readOnly: boolean
+}
+
+async function loadFieldPermissionScopeMap(
+  query: QueryFn,
+  sheetId: string,
+  userId: string,
+): Promise<Map<string, FieldPermissionScope>> {
+  if (!userId || !sheetId) return new Map()
+  try {
+    const result = await query(
+      `SELECT fp.field_id, fp.visible, fp.read_only
+       FROM field_permissions fp
+       WHERE fp.sheet_id = $2
+         AND (
+           (fp.subject_type = 'user' AND fp.subject_id = $1)
+           OR (
+             fp.subject_type = 'role'
+             AND EXISTS (
+               SELECT 1 FROM user_roles ur
+               WHERE ur.user_id = $1 AND ur.role_id = fp.subject_id
+             )
+           )
+         )`,
+      [userId, sheetId],
+    )
+    const scopes = new Map<string, FieldPermissionScope>()
+    for (const row of result.rows as Array<{ field_id: string; visible: boolean; read_only: boolean }>) {
+      const fieldId = typeof row.field_id === 'string' ? row.field_id : ''
+      if (!fieldId) continue
+      const existing = scopes.get(fieldId)
+      if (existing) {
+        // Most restrictive wins: AND for visible, OR for readOnly
+        existing.visible = existing.visible && row.visible !== false
+        existing.readOnly = existing.readOnly || row.read_only === true
+      } else {
+        scopes.set(fieldId, {
+          visible: row.visible !== false,
+          readOnly: row.read_only === true,
+        })
+      }
+    }
+    return scopes
+  } catch (err) {
+    if (isUndefinedTableError(err, 'field_permissions') || isUndefinedTableError(err, 'user_roles')) return new Map()
+    throw err
+  }
+}
+
 function applySheetPermissionScope(
   capabilities: MultitableCapabilities,
   scope: SheetPermissionScope | undefined,
@@ -1586,11 +1708,13 @@ function applySheetPermissionScope(
     return {
       ...capabilities,
       canManageSheetAccess: capabilities.canManageSheetAccess && capabilities.canRead,
+      canExport: capabilities.canExport ?? capabilities.canRead,
     }
   }
   const canWriteAnyRecord = scope.canWrite || scope.canWriteOwn
+  const scopedCanRead = capabilities.canRead && scope.canRead
   return {
-    canRead: capabilities.canRead && scope.canRead,
+    canRead: scopedCanRead,
     canCreateRecord: capabilities.canCreateRecord && canWriteAnyRecord,
     canEditRecord: capabilities.canEditRecord && canWriteAnyRecord,
     canDeleteRecord: capabilities.canDeleteRecord && canWriteAnyRecord,
@@ -1599,6 +1723,7 @@ function applySheetPermissionScope(
     canManageViews: capabilities.canManageViews && scope.canWrite,
     canComment: capabilities.canComment && scope.canRead,
     canManageAutomation: capabilities.canManageAutomation && scope.canWrite,
+    canExport: scopedCanRead,
   }
 }
 
@@ -1791,18 +1916,24 @@ function sendForbidden(res: Response, message = 'Insufficient permissions') {
 function deriveFieldPermissions(
   fields: UniverMetaField[],
   capabilities: MultitableCapabilities,
-  opts?: { hiddenFieldIds?: string[]; allowCreateOnly?: boolean },
+  opts?: { hiddenFieldIds?: string[]; allowCreateOnly?: boolean; fieldScopeMap?: Map<string, FieldPermissionScope> },
 ): Record<string, MultitableFieldPermission> {
   const hiddenFieldIds = new Set(opts?.hiddenFieldIds ?? [])
   const readOnly = opts?.allowCreateOnly ? !capabilities.canCreateRecord : !capabilities.canEditRecord
+  const fieldScopeMap = opts?.fieldScopeMap
   return Object.fromEntries(
-    fields.map((field) => [
-      field.id,
-      {
-        visible: !hiddenFieldIds.has(field.id) && !isFieldPermissionHidden(field),
-        readOnly: readOnly || isFieldAlwaysReadOnly(field),
-      },
-    ]),
+    fields.map((field) => {
+      const baseVisible = !hiddenFieldIds.has(field.id) && !isFieldPermissionHidden(field)
+      const baseReadOnly = readOnly || isFieldAlwaysReadOnly(field)
+      const scope = fieldScopeMap?.get(field.id)
+      return [
+        field.id,
+        {
+          visible: baseVisible && (scope?.visible ?? true),
+          readOnly: baseReadOnly || (scope?.readOnly ?? false),
+        },
+      ]
+    }),
   )
 }
 
@@ -1820,16 +1951,30 @@ function isFieldPermissionHidden(field: Pick<UniverMetaField, 'property'>): bool
 function deriveViewPermissions(
   views: Array<Pick<UniverMetaViewConfig, 'id'>>,
   capabilities: MultitableCapabilities,
+  viewScopeMap?: Map<string, ViewPermissionScope>,
 ): Record<string, MultitableViewPermission> {
   return Object.fromEntries(
-    views.map((view) => [
-      view.id,
-      {
-        canAccess: capabilities.canRead,
-        canConfigure: capabilities.canManageViews,
-        canDelete: capabilities.canManageViews,
-      },
-    ]),
+    views.map((view) => {
+      const scope = viewScopeMap?.get(view.id)
+      if (scope?.hasAssignments) {
+        return [
+          view.id,
+          {
+            canAccess: capabilities.canRead && scope.canRead,
+            canConfigure: capabilities.canManageViews && scope.canWrite,
+            canDelete: capabilities.canManageViews && scope.canAdmin,
+          },
+        ]
+      }
+      return [
+        view.id,
+        {
+          canAccess: capabilities.canRead,
+          canConfigure: capabilities.canManageViews,
+          canDelete: capabilities.canManageViews,
+        },
+      ]
+    }),
   )
 }
 
@@ -2926,10 +3071,14 @@ export function univerMetaRouter(): Router {
       const selectedView = viewId
         ? serializedViews.find((view: UniverMetaViewConfig) => view.id === viewId) ?? null
         : serializedViews[0] ?? null
+      const viewIds = serializedViews.map((v: UniverMetaViewConfig) => v.id)
+      const viewScopeMap = access.userId ? await loadViewPermissionScopeMap(pool.query.bind(pool), viewIds, access.userId) : new Map()
+      const fieldScopeMap = (access.userId && resolvedSheetId) ? await loadFieldPermissionScopeMap(pool.query.bind(pool), resolvedSheetId, access.userId) : new Map()
       const fieldPermissions = deriveFieldPermissions(activeFields, capabilities, {
         hiddenFieldIds: selectedView?.hiddenFieldIds ?? [],
+        fieldScopeMap,
       })
-      const viewPermissions = deriveViewPermissions(serializedViews, capabilities)
+      const viewPermissions = deriveViewPermissions(serializedViews, capabilities, viewScopeMap)
 
       return res.json({
         ok: true,
@@ -3141,6 +3290,226 @@ export function univerMetaRouter(): Router {
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
       console.error('[univer-meta] update sheet permission failed:', err)
       return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to update sheet permission' } })
+    }
+  })
+
+  // ── View permission authoring ──
+
+  router.get('/views/:viewId/permissions', async (req: Request, res: Response) => {
+    const viewId = typeof req.params.viewId === 'string' ? req.params.viewId.trim() : ''
+    if (!viewId) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'viewId is required' } })
+    }
+
+    try {
+      const pool = poolManager.get()
+      const viewRow = await pool.query('SELECT id, sheet_id FROM meta_views WHERE id = $1', [viewId])
+      if (viewRow.rows.length === 0) {
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `View not found: ${viewId}` } })
+      }
+      const sheetId = String((viewRow.rows[0] as any).sheet_id)
+      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      if (!capabilities.canManageViews) return sendForbidden(res)
+
+      const result = await pool.query(
+        `SELECT id, view_id, subject_type, subject_id, permission, created_at, created_by
+         FROM meta_view_permissions WHERE view_id = $1 ORDER BY created_at ASC`,
+        [viewId],
+      )
+      const items = (result.rows as any[]).map((row) => ({
+        id: String(row.id),
+        viewId: String(row.view_id),
+        subjectType: String(row.subject_type),
+        subjectId: String(row.subject_id),
+        permission: String(row.permission),
+        createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : String(row.created_at ?? ''),
+      }))
+      return res.json({ ok: true, data: { items } })
+    } catch (err) {
+      if (isUndefinedTableError(err, 'meta_view_permissions')) {
+        return res.json({ ok: true, data: { items: [] } })
+      }
+      const hint = getDbNotReadyMessage(err)
+      if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
+      console.error('[univer-meta] list view permissions failed:', err)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to list view permissions' } })
+    }
+  })
+
+  router.put('/views/:viewId/permissions/:subjectType/:subjectId', async (req: Request, res: Response) => {
+    const viewId = typeof req.params.viewId === 'string' ? req.params.viewId.trim() : ''
+    const subjectType = typeof req.params.subjectType === 'string' ? req.params.subjectType.trim() : ''
+    const subjectId = typeof req.params.subjectId === 'string' ? req.params.subjectId.trim() : ''
+    if (!viewId || !subjectId || (subjectType !== 'user' && subjectType !== 'role')) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'viewId, subjectType (user|role), and subjectId are required' } })
+    }
+
+    const schema = z.object({
+      permission: z.enum(['read', 'write', 'admin', 'none']),
+    })
+    const parsed = schema.safeParse(req.body)
+    if (!parsed.success) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+    }
+
+    try {
+      const pool = poolManager.get()
+      const viewRow = await pool.query('SELECT id, sheet_id FROM meta_views WHERE id = $1', [viewId])
+      if (viewRow.rows.length === 0) {
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `View not found: ${viewId}` } })
+      }
+      const sheetId = String((viewRow.rows[0] as any).sheet_id)
+      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      if (!capabilities.canManageViews) return sendForbidden(res)
+
+      if (subjectType === 'user') {
+        const userCheck = await pool.query('SELECT id FROM users WHERE id = $1', [subjectId])
+        if (userCheck.rows.length === 0) {
+          return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `User not found: ${subjectId}` } })
+        }
+      } else {
+        const roleCheck = await pool.query('SELECT id FROM roles WHERE id = $1', [subjectId])
+        if (roleCheck.rows.length === 0) {
+          return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Role not found: ${subjectId}` } })
+        }
+      }
+
+      await pool.transaction(async ({ query }) => {
+        await query(
+          `DELETE FROM meta_view_permissions WHERE view_id = $1 AND subject_type = $2 AND subject_id = $3`,
+          [viewId, subjectType, subjectId],
+        )
+        if (parsed.data.permission !== 'none') {
+          await query(
+            `INSERT INTO meta_view_permissions(view_id, subject_type, subject_id, permission)
+             VALUES ($1, $2, $3, $4)`,
+            [viewId, subjectType, subjectId, parsed.data.permission],
+          )
+        }
+      })
+
+      return res.json({ ok: true, data: { viewId, subjectType, subjectId, permission: parsed.data.permission } })
+    } catch (err) {
+      const hint = getDbNotReadyMessage(err)
+      if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
+      console.error('[univer-meta] update view permission failed:', err)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to update view permission' } })
+    }
+  })
+
+  // ── Field permission authoring ──
+
+  router.get('/sheets/:sheetId/field-permissions', async (req: Request, res: Response) => {
+    const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
+    if (!sheetId) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId is required' } })
+    }
+
+    try {
+      const pool = poolManager.get()
+      const sheet = await loadSheetRow(pool.query.bind(pool), sheetId)
+      if (!sheet) {
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
+      }
+      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      if (!capabilities.canManageFields) return sendForbidden(res)
+
+      const result = await pool.query(
+        `SELECT id, sheet_id, field_id, subject_type, subject_id, visible, read_only, created_at
+         FROM field_permissions WHERE sheet_id = $1 ORDER BY field_id ASC, created_at ASC`,
+        [sheetId],
+      )
+      const items = (result.rows as any[]).map((row) => ({
+        id: String(row.id),
+        sheetId: String(row.sheet_id),
+        fieldId: String(row.field_id),
+        subjectType: String(row.subject_type),
+        subjectId: String(row.subject_id),
+        visible: row.visible !== false,
+        readOnly: row.read_only === true,
+      }))
+      return res.json({ ok: true, data: { items } })
+    } catch (err) {
+      if (isUndefinedTableError(err, 'field_permissions')) {
+        return res.json({ ok: true, data: { items: [] } })
+      }
+      const hint = getDbNotReadyMessage(err)
+      if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
+      console.error('[univer-meta] list field permissions failed:', err)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to list field permissions' } })
+    }
+  })
+
+  router.put('/sheets/:sheetId/field-permissions/:fieldId/:subjectType/:subjectId', async (req: Request, res: Response) => {
+    const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
+    const fieldId = typeof req.params.fieldId === 'string' ? req.params.fieldId.trim() : ''
+    const subjectType = typeof req.params.subjectType === 'string' ? req.params.subjectType.trim() : ''
+    const subjectId = typeof req.params.subjectId === 'string' ? req.params.subjectId.trim() : ''
+    if (!sheetId || !fieldId || !subjectId || (subjectType !== 'user' && subjectType !== 'role')) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId, fieldId, subjectType (user|role), and subjectId are required' } })
+    }
+
+    const schema = z.object({
+      visible: z.boolean().optional(),
+      readOnly: z.boolean().optional(),
+      remove: z.boolean().optional(),
+    }).refine((v) => v.remove || v.visible !== undefined || v.readOnly !== undefined, { message: 'visible, readOnly, or remove required' })
+    const parsed = schema.safeParse(req.body)
+    if (!parsed.success) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+    }
+
+    try {
+      const pool = poolManager.get()
+      const sheet = await loadSheetRow(pool.query.bind(pool), sheetId)
+      if (!sheet) {
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
+      }
+      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      if (!capabilities.canManageFields) return sendForbidden(res)
+
+      const fieldCheck = await pool.query('SELECT id FROM meta_fields WHERE id = $1 AND sheet_id = $2', [fieldId, sheetId])
+      if (fieldCheck.rows.length === 0) {
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Field ${fieldId} not found in sheet ${sheetId}` } })
+      }
+
+      if (subjectType === 'user') {
+        const userCheck = await pool.query('SELECT id FROM users WHERE id = $1', [subjectId])
+        if (userCheck.rows.length === 0) {
+          return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `User not found: ${subjectId}` } })
+        }
+      } else {
+        const roleCheck = await pool.query('SELECT id FROM roles WHERE id = $1', [subjectId])
+        if (roleCheck.rows.length === 0) {
+          return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Role not found: ${subjectId}` } })
+        }
+      }
+
+      if (parsed.data.remove) {
+        await pool.query(
+          `DELETE FROM field_permissions WHERE sheet_id = $1 AND field_id = $2 AND subject_type = $3 AND subject_id = $4`,
+          [sheetId, fieldId, subjectType, subjectId],
+        )
+        return res.json({ ok: true, data: { sheetId, fieldId, subjectType, subjectId, removed: true } })
+      }
+
+      await pool.query(
+        `INSERT INTO field_permissions(sheet_id, field_id, subject_type, subject_id, visible, read_only)
+         VALUES ($1, $2, $3, $4, $5, $6)
+         ON CONFLICT (sheet_id, field_id, subject_type, subject_id)
+         DO UPDATE SET visible = EXCLUDED.visible, read_only = EXCLUDED.read_only`,
+        [sheetId, fieldId, subjectType, subjectId, parsed.data.visible ?? true, parsed.data.readOnly ?? false],
+      )
+
+      return res.json({
+        ok: true,
+        data: { sheetId, fieldId, subjectType, subjectId, visible: parsed.data.visible ?? true, readOnly: parsed.data.readOnly ?? false },
+      })
+    } catch (err) {
+      const hint = getDbNotReadyMessage(err)
+      if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
+      console.error('[univer-meta] update field permission failed:', err)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to update field permission' } })
     }
   })
 
@@ -4157,13 +4526,16 @@ export function univerMetaRouter(): Router {
         sheetScope,
         access,
       )
+      const fieldScopeMap = access.userId ? await loadFieldPermissionScopeMap(pool.query.bind(pool), sheetId, access.userId) : new Map()
+      const viewScopeMap = (access.userId && viewConfig) ? await loadViewPermissionScopeMap(pool.query.bind(pool), [viewConfig.id], access.userId) : new Map()
       const permissions: MultitableScopedPermissions = {
         fieldPermissions: deriveFieldPermissions(fields, capabilities, {
           hiddenFieldIds: viewConfig?.hiddenFieldIds ?? [],
+          fieldScopeMap,
         }),
         rowActions: deriveDefaultRowActions(capabilities, sheetScope, access.isAdminRole),
         ...(rowActionOverrides ? { rowActionOverrides } : {}),
-        ...(viewConfig ? { viewPermissions: deriveViewPermissions([viewConfig], capabilities) } : {}),
+        ...(viewConfig ? { viewPermissions: deriveViewPermissions([viewConfig], capabilities, viewScopeMap) } : {}),
       }
 
       const meta = warnings.length > 0 || hasFilterOrSort
@@ -4247,11 +4619,14 @@ export function univerMetaRouter(): Router {
       const hiddenFieldIds = new Set(resolved.view?.hiddenFieldIds ?? [])
       const visibleFields = fields.filter((field) => !hiddenFieldIds.has(field.id) && !isFieldPermissionHidden(field))
       const visibleFieldIds = new Set(visibleFields.map((field) => field.id))
+      const fieldScopeMap = access.userId ? await loadFieldPermissionScopeMap(pool.query.bind(pool), sheetId, access.userId) : new Map()
+      const viewScopeMap = (access.userId && resolved.view) ? await loadViewPermissionScopeMap(pool.query.bind(pool), [resolved.view.id], access.userId) : new Map()
       const fieldPermissions = deriveFieldPermissions(fields, capabilities, {
         hiddenFieldIds: resolved.view?.hiddenFieldIds ?? [],
         allowCreateOnly: !record,
+        fieldScopeMap,
       })
-      const viewPermissions = resolved.view ? deriveViewPermissions([resolved.view], capabilities) : {}
+      const viewPermissions = resolved.view ? deriveViewPermissions([resolved.view], capabilities, viewScopeMap) : {}
       const rowActions = record
         ? deriveRecordRowActions(capabilities, sheetScope, access, record.createdBy)
         : deriveRecordRowActions({
@@ -5041,10 +5416,13 @@ export function univerMetaRouter(): Router {
           )
         : undefined
 
+      const fieldScopeMap = access.userId ? await loadFieldPermissionScopeMap(pool.query.bind(pool), sheetId, access.userId) : new Map()
+      const viewScopeMap = (access.userId && viewConfig) ? await loadViewPermissionScopeMap(pool.query.bind(pool), [viewConfig.id], access.userId) : new Map()
       const fieldPermissions = deriveFieldPermissions(fields, capabilities, {
         hiddenFieldIds: viewConfig?.hiddenFieldIds ?? [],
+        fieldScopeMap,
       })
-      const viewPermissions = viewConfig ? deriveViewPermissions([viewConfig], capabilities) : {}
+      const viewPermissions = viewConfig ? deriveViewPermissions([viewConfig], capabilities, viewScopeMap) : {}
       const rowActions = deriveRecordRowActions(capabilities, sheetScope, access, record.createdBy)
 
       return res.json({
