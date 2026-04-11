@@ -119,6 +119,16 @@ export type PlmProductFieldCatalogEntry = {
   fallback: string
 }
 
+export type PlmProductMetadataRow = {
+  name: string
+  label: string
+  type: string
+  required: boolean
+  length: string
+  defaultValue: string
+  currentValue: string
+}
+
 export type CompareChangeEntry = UnknownRecord & {
   field?: string
   left?: unknown
@@ -830,6 +840,9 @@ export type PlmProductPanelModel = {
   hasProductCopyValue: (kind: ProductCopyKind) => boolean
   copyProductField: (kind: ProductCopyKind) => Promise<void>
   productFieldCatalog: PlmProductFieldCatalogEntry[]
+  productMetadataLoading: Ref<boolean>
+  productMetadataError: Ref<string>
+  productMetadataRows: ComputedRef<PlmProductMetadataRow[]>
   formatJson: (payload: unknown) => string
 }
 
