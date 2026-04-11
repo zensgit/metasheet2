@@ -6,6 +6,7 @@
 import type { Request, Response, NextFunction, RequestHandler } from 'express'
 import { userHasPermission, isAdmin, listUserPermissions } from './service'
 import { Logger } from '../core/logger'
+import { isPermissionAllowedByNamespaceAdmission } from './namespace-admission'
 
 const logger = new Logger('RBACGuard')
 const trustTokenClaims = process.env.RBAC_TOKEN_TRUST === 'true' || process.env.RBAC_TOKEN_TRUST === '1'
@@ -66,12 +67,18 @@ export function rbacGuard(resourceOrPermission: string, action?: string): Reques
       // Trust the authenticated request user first. jwtAuthMiddleware refreshes
       // role/permission data on each request, and development fallback users only
       // exist on req.user (not in RBAC tables).
-      if (requestUserHasResolvedPermission(req.user, permissionCode)) {
+      if (
+        requestUserHasResolvedPermission(req.user, permissionCode)
+        && await isPermissionAllowedByNamespaceAdmission(userId, permissionCode)
+      ) {
         next()
         return
       }
 
-      if (trustedTokenClaimsAllowPermission(req.user, permissionCode)) {
+      if (
+        trustedTokenClaimsAllowPermission(req.user, permissionCode)
+        && await isPermissionAllowedByNamespaceAdmission(userId, permissionCode)
+      ) {
         next()
         return
       }
@@ -113,9 +120,18 @@ export function rbacGuardAny(permissionCodes: string[]): RequestHandler {
       }
 
       const requestUser = req.user
-      if (requestUserIsAdmin(requestUser) || permissionCodes.some((code) => requestUserHasResolvedPermission(requestUser, code))) {
+      if (requestUserIsAdmin(requestUser)) {
         next()
         return
+      }
+      for (const code of permissionCodes) {
+        if (
+          requestUserHasResolvedPermission(requestUser, code)
+          && await isPermissionAllowedByNamespaceAdmission(userId, code)
+        ) {
+          next()
+          return
+        }
       }
 
       if (trustTokenClaims) {
@@ -125,9 +141,11 @@ export function rbacGuardAny(permissionCodes: string[]): RequestHandler {
         }
 
         const tokenPerms = normalizeStringArray((requestUser as { perms?: unknown } | undefined)?.perms)
-        if (permissionCodes.some((code) => hasPermissionCode(tokenPerms, code))) {
-          next()
-          return
+        for (const code of permissionCodes) {
+          if (hasPermissionCode(tokenPerms, code) && await isPermissionAllowedByNamespaceAdmission(userId, code)) {
+            next()
+            return
+          }
         }
       }
 
@@ -170,7 +188,21 @@ export function rbacGuardAll(permissionCodes: string[]): RequestHandler {
       }
 
       const requestUser = req.user
-      if (requestUserIsAdmin(requestUser) || permissionCodes.every((code) => requestUserHasResolvedPermission(requestUser, code))) {
+      if (requestUserIsAdmin(requestUser)) {
+        next()
+        return
+      }
+      let requestUserHasAll = true
+      for (const code of permissionCodes) {
+        if (
+          !requestUserHasResolvedPermission(requestUser, code)
+          || !await isPermissionAllowedByNamespaceAdmission(userId, code)
+        ) {
+          requestUserHasAll = false
+          break
+        }
+      }
+      if (requestUserHasAll) {
         next()
         return
       }
@@ -182,7 +214,14 @@ export function rbacGuardAll(permissionCodes: string[]): RequestHandler {
         }
 
         const tokenPerms = normalizeStringArray((requestUser as { perms?: unknown } | undefined)?.perms)
-        if (permissionCodes.every((code) => hasPermissionCode(tokenPerms, code))) {
+        let tokenHasAll = true
+        for (const code of permissionCodes) {
+          if (!hasPermissionCode(tokenPerms, code) || !await isPermissionAllowedByNamespaceAdmission(userId, code)) {
+            tokenHasAll = false
+            break
+          }
+        }
+        if (tokenHasAll) {
           next()
           return
         }

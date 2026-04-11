@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { Logger } from '../../src/core/logger'
 import {
   DingTalkNotificationChannel,
   NotificationServiceImpl,
@@ -85,6 +86,37 @@ describe('DingTalk notification channel', () => {
     expect(parsed.searchParams.get('access_token')).toBe('robot-token')
     expect(parsed.searchParams.get('timestamp')).toBe('1760000000000')
     expect(parsed.searchParams.get('sign')).toBeTruthy()
+  })
+
+  it('masks dingtalk webhook secrets in logs', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      statusText: 'OK',
+      json: async () => ({ errcode: 0, errmsg: 'ok' }),
+    })
+    global.fetch = fetchMock as typeof fetch
+    const infoSpy = vi.spyOn(Logger.prototype, 'info').mockImplementation(() => undefined)
+    vi.spyOn(Date, 'now').mockReturnValue(1_760_000_000_000)
+
+    const service = new NotificationServiceImpl()
+    service.registerChannel(new DingTalkNotificationChannel({ secret: 'secret-123' }))
+
+    await service.send({
+      channel: 'dingtalk',
+      subject: 'Ops Alert',
+      content: 'Latency exceeds threshold.',
+      recipients: [
+        {
+          id: 'https://oapi.dingtalk.com/robot/send?access_token=robot-token',
+          type: 'group',
+        },
+      ],
+    })
+
+    const messages = infoSpy.mock.calls.map((call) => String(call[0] ?? ''))
+    expect(messages.some((message) => message.includes('access_token=***'))).toBe(true)
+    expect(messages.some((message) => message.includes('robot-token'))).toBe(false)
   })
 
   it('does not retry non-retryable dingtalk webhook failures', async () => {

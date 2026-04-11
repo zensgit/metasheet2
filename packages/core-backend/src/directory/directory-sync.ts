@@ -8,6 +8,8 @@ import {
   type DingTalkDepartment,
   type DingTalkDirectoryUser,
 } from '../integrations/dingtalk/client'
+import { assertDingTalkCorpAllowed } from '../integrations/dingtalk/runtime-policy'
+import { decryptStoredSecretValue, normalizeStoredSecretValue } from '../security/encrypted-secrets'
 
 const logger = new Logger('DirectorySync')
 const DEFAULT_ORG_ID = 'default'
@@ -298,7 +300,8 @@ function normalizePageSize(value: unknown): number {
 function parseIntegrationConfig(row: Pick<DirectoryIntegrationRow, 'config'>): DirectoryIntegrationConfig {
   const config = parseJsonRecord(row.config)
   const appKey = normalizeText(config.appKey)
-  const appSecret = normalizeText(config.appSecret)
+  const rawAppSecret = normalizeText(config.appSecret)
+  const appSecret = rawAppSecret ? decryptStoredSecretValue(rawAppSecret) : ''
   const rootDepartmentId = normalizeText(config.rootDepartmentId) || DEFAULT_ROOT_DEPARTMENT_ID
   const baseUrl = normalizeOptionalText(config.baseUrl) ?? undefined
   const pageSize = normalizePageSize(config.pageSize)
@@ -426,6 +429,7 @@ function normalizeIntegrationInput(
   if (!corpId) throw new Error('corpId is required')
   if (!appKey) throw new Error('appKey is required')
   if (!appSecret) throw new Error('appSecret is required')
+  assertDingTalkCorpAllowed(corpId, { context: 'Directory integration corpId' })
 
   return {
     ...input,
@@ -506,7 +510,7 @@ export async function createDirectoryIntegration(input: DirectoryIntegrationInpu
       normalized.corpId,
       JSON.stringify({
         appKey: normalized.appKey,
-        appSecret: normalized.appSecret,
+        appSecret: normalizeStoredSecretValue(normalized.appSecret),
         rootDepartmentId: normalized.rootDepartmentId,
         baseUrl: normalized.baseUrl ?? null,
         pageSize: normalized.pageSize,
@@ -549,7 +553,7 @@ export async function updateDirectoryIntegration(
       normalized.corpId,
       JSON.stringify({
         appKey: normalized.appKey,
-        appSecret: normalized.appSecret,
+        appSecret: normalizeStoredSecretValue(normalized.appSecret),
         rootDepartmentId: normalized.rootDepartmentId,
         baseUrl: normalized.baseUrl ?? null,
         pageSize: normalized.pageSize,
