@@ -1,50 +1,80 @@
-# MetaSheet Platform RC Notes
+# Multitable Platform RC Notes
 
 Date: 2026-04-04
-Recommended deployment profile: `PRODUCT_MODE=platform` + `ENABLE_PLM=0`
+Scope: customer-facing release notes for the `multitable/platform` on-prem line
 
-## Current milestone
+## Current RC Candidate
 
-- Functional milestone candidate: `multitable-onprem-run10-20260404`
-- RC polish follow-up: server-side package apply helper + delivery summary hardening
+`multitable-onprem-run10-20260404` is the current RC milestone candidate.
 
-## What stabilized across run2 -> run10
+Recommended deployment mode:
 
-### Platform shell
+```env
+PRODUCT_MODE=platform
+ENABLE_PLM=0
+```
 
-- Platform mode now grants attendance self-service access to ordinary employees.
-- `ENABLE_PLM=0` hides PLM entry points and returns `FEATURE_DISABLED` for PLM APIs.
-- The shell shows a single `考勤` entry and routes legacy plugin attendance paths back to `/attendance`.
+This keeps the platform shell enabled while allowing PLM to remain disabled.
 
-### Attendance experience
+## What Changed From Run2 To Run10
 
-- Employee mode is now split cleanly into `总览` and `报表`.
-- Reports gained summary cards, local filters, time-range quick switches, trend cards, and management metrics.
-- The employee overview now acts like a workbench with status focus, request follow-up, quick actions, and human-readable status explanations.
+The `run2 -> run10` progression focused on making the platform package usable for both administrators and employees:
 
-### Attendance operations
+1. `run2`
+   - Fixed platform-mode employee attendance permissions.
+   - Enabled `attendance:read` and `attendance:write` for normal employees.
+   - Kept PLM disabled when `ENABLE_PLM=0`.
 
-- Import and preview flows now show an operator-facing `Current import plan`.
-- Preview mode shows a `Preview outcome` summary and clears stale rows or warnings before retry.
-- Empty preview failures now keep the page in a readable zero-state instead of reusing the previous preview data.
+2. `run3`
+   - Localized attendance entry titles for Chinese UI.
+   - Reduced approval-center session dropouts.
+   - Hid PLM audit links when PLM is disabled.
 
-### Approval and permissions
+3. `run4`
+   - Removed duplicate `Attendance` navigation entries.
+   - Kept the platform shell aligned with `ENABLE_PLM=0`.
 
-- Approval inbox no longer drops the whole session because of `APPROVAL_USER_REQUIRED`.
-- Request approval flows, settlement checks, and ordinary employee attendance visibility are stable on the current platform profile.
-- Ordinary employees are blocked from `/api/events`.
+4. `run5`
+   - Fixed approval-center access so normal users no longer get kicked back to login.
+   - Removed the duplicate plugin attendance navigation path.
 
-## Coverage confirmed during RC
+5. `run6`
+   - Split the employee experience into clearer `Overview` and `Reports` tabs.
+   - Kept the two surfaces separate instead of repeating the same content.
 
-- Authentication and permissions
-- Platform navigation and PLM isolation
-- Attendance request -> approve -> settlement record loop
-- Attendance reports, filters, and time slices
-- Attendance import template, preview, commit, export, and idempotency smoke
-- On-prem package build, verify, upgrade, and healthcheck gates
+6. `run7`
+   - Added reporting summary cards and local filters.
+   - Made the reports page more analytical without changing backend behavior.
 
-## Recommended post-RC follow-up
+7. `run8`
+   - Added report time-range switching: `This week`, `This month`, `Last month`, `This quarter`.
+   - Added trend and management metric cards that refresh with the selected range.
 
-1. Run one real CSV import end-to-end on the target environment.
-2. Confirm rejected requests can be resubmitted cleanly by employees.
-3. Keep new work in product slices, not hotfix rerolls, unless a real P0/P1 appears.
+8. `run9`
+   - Expanded the employee self-service dashboard.
+   - Added task focus, request-status guidance, and clearer next-step actions.
+
+9. `run10`
+   - Added import operation summaries in the admin import flow.
+   - Added preview outcome summaries and better stale-preview cleanup.
+
+## What The RC Is Good For
+
+- Employee attendance self-service
+- Platform shell with PLM disabled
+- Attendance reporting and range-based analysis
+- Admin import workflow visibility
+- Approval-center access without session loss
+
+## Known Follow-Ups
+
+These are not blockers for the RC candidate, but they remain worth tracking:
+
+- Deployment automation could be simplified further for field rollout.
+- Full CSV import end-to-end verification still deserves a dedicated pass.
+- Additional edge cases around import rejection and re-submission can be polished later.
+- Non-critical logout-time 403 noise is still low priority.
+
+## Verification Position
+
+The current recommendation is to use `multitable-onprem-run10-20260404` as the RC baseline and continue only with polish or real blocker fixes.
