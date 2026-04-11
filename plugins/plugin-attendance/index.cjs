@@ -1,4 +1,5 @@
-const { randomUUID } = require('crypto')
+const crypto = require('crypto')
+const { randomUUID } = crypto
 const fs = require('fs')
 const fsp = require('fs/promises')
 const path = require('path')
@@ -593,12 +594,97 @@ function ensureNumberArray(value) {
   return []
 }
 
+const SECRET_PREFIX = 'enc:'
+const SECRET_ENCRYPTION_ALGORITHM = 'aes-256-gcm'
+const SECRET_KEY_ITERATIONS = 100000
+const SECRET_KEY_LENGTH = 32
+const SECRET_IV_LENGTH = 16
+const SECRET_AUTH_TAG_LENGTH = 16
+const DINGTALK_LOG_MASK_QUERY_KEYS = new Set(['access_token', 'appsecret', 'sign', 'timestamp'])
+
+function normalizeTextValue(value) {
+  return typeof value === 'string' ? value.trim() : String(value ?? '').trim()
+}
+
+function isEncryptedSecretValue(value) {
+  return typeof value === 'string' && value.startsWith(SECRET_PREFIX)
+}
+
+function getIntegrationSecretKey() {
+  const masterKey = process.env.ENCRYPTION_KEY || 'default-key-change-in-production'
+  const salt = Buffer.from(process.env.ENCRYPTION_SALT || 'default-salt-change-in-production')
+  return crypto.pbkdf2Sync(masterKey, salt, SECRET_KEY_ITERATIONS, SECRET_KEY_LENGTH, 'sha256')
+}
+
+function encryptIntegrationSecretValue(plaintext) {
+  const iv = crypto.randomBytes(SECRET_IV_LENGTH)
+  const cipher = crypto.createCipheriv(SECRET_ENCRYPTION_ALGORITHM, getIntegrationSecretKey(), iv)
+  const encrypted = Buffer.concat([cipher.update(String(plaintext ?? ''), 'utf8'), cipher.final()])
+  const authTag = cipher.getAuthTag()
+  return `${SECRET_PREFIX}${Buffer.concat([iv, authTag, encrypted]).toString('base64')}`
+}
+
+function decryptIntegrationSecretValue(value) {
+  if (!isEncryptedSecretValue(value)) return String(value ?? '')
+  const payload = Buffer.from(value.slice(SECRET_PREFIX.length), 'base64')
+  const iv = payload.subarray(0, SECRET_IV_LENGTH)
+  const authTag = payload.subarray(SECRET_IV_LENGTH, SECRET_IV_LENGTH + SECRET_AUTH_TAG_LENGTH)
+  const encrypted = payload.subarray(SECRET_IV_LENGTH + SECRET_AUTH_TAG_LENGTH)
+  const decipher = crypto.createDecipheriv(SECRET_ENCRYPTION_ALGORITHM, getIntegrationSecretKey(), iv)
+  decipher.setAuthTag(authTag)
+  return Buffer.concat([decipher.update(encrypted), decipher.final()]).toString('utf8')
+}
+
+function normalizeStoredIntegrationSecretValue(value) {
+  const normalized = normalizeTextValue(value)
+  if (!normalized) return ''
+  return isEncryptedSecretValue(normalized) ? normalized : encryptIntegrationSecretValue(normalized)
+}
+
+function readDingTalkAllowedCorpIds() {
+  return Array.from(new Set(
+    normalizeTextValue(process.env.DINGTALK_ALLOWED_CORP_IDS)
+      .split(/[\s,]+/)
+      .map((item) => item.trim())
+      .filter(Boolean)
+  ))
+}
+
+function assertDingTalkCorpAllowed(corpId, { allowEmpty = false, context = 'DingTalk corpId' } = {}) {
+  const allowedCorpIds = readDingTalkAllowedCorpIds()
+  if (!allowedCorpIds.length) return
+
+  const normalizedCorpId = normalizeTextValue(corpId)
+  if (!normalizedCorpId) {
+    if (allowEmpty) return
+    throw new Error(`${context} is required when DINGTALK_ALLOWED_CORP_IDS is configured`)
+  }
+  if (allowedCorpIds.includes(normalizedCorpId)) return
+  throw new Error(`${context} ${normalizedCorpId} is not allowed by DINGTALK_ALLOWED_CORP_IDS`)
+}
+
+function maskDingTalkUrlForLog(url) {
+  try {
+    const parsed = new URL(url)
+    for (const key of DINGTALK_LOG_MASK_QUERY_KEYS) {
+      if (parsed.searchParams.has(key)) {
+        parsed.searchParams.set(key, '***')
+      }
+    }
+    return parsed.toString()
+  } catch {
+    return String(url ?? '').replace(/([?&](?:access_token|appsecret|sign|timestamp)=)[^&]+/gi, '$1***')
+  }
+}
+
 function normalizeIntegrationConfig(config) {
   if (!config || typeof config !== 'object') return {}
+  const appSecret = config.appSecret ?? config.appsecret ?? config.app_secret
   return {
     ...config,
     appKey: config.appKey ?? config.appkey ?? config.app_key,
-    appSecret: config.appSecret ?? config.appsecret ?? config.app_secret,
+    appSecret: normalizeTextValue(appSecret) ? decryptIntegrationSecretValue(String(appSecret)) : '',
+    corpId: config.corpId ?? config.corp_id ?? null,
     baseUrl: config.baseUrl ?? config.base_url ?? 'https://oapi.dingtalk.com',
     userIds: ensureStringArray(config.userIds ?? config.user_ids ?? config.users),
     columnIds: ensureStringArray(config.columnIds ?? config.column_id_list ?? config.columns).map((id) => String(id)),
@@ -609,6 +695,15 @@ function normalizeIntegrationConfig(config) {
     userMap: config.userMap ?? config.user_map ?? undefined,
     timezone: config.timezone ?? 'Asia/Shanghai',
     source: config.source ?? 'dingtalk_api',
+  }
+}
+
+function normalizeIntegrationConfigForStorage(config) {
+  const normalized = normalizeIntegrationConfig(config)
+  return {
+    ...normalized,
+    corpId: normalizeTextValue(normalized.corpId) || null,
+    appSecret: normalized.appSecret ? normalizeStoredIntegrationSecretValue(normalized.appSecret) : '',
   }
 }
 
@@ -654,6 +749,7 @@ async function readDingTalkJsonSafely(response) {
 
 async function requestDingTalkJsonWithRetry({ url, method = 'GET', headers, body, timeoutMs = ATTENDANCE_DINGTALK_HTTP_TIMEOUT_MS }) {
   let lastError = null
+  const maskedUrl = maskDingTalkUrlForLog(url)
   for (let attempt = 1; attempt <= ATTENDANCE_DINGTALK_HTTP_MAX_ATTEMPTS; attempt += 1) {
     try {
       const response = await fetch(url, {
@@ -667,7 +763,7 @@ async function requestDingTalkJsonWithRetry({ url, method = 'GET', headers, body
         const message = data?.errmsg || `HTTP ${response.status}`
         if (attempt < ATTENDANCE_DINGTALK_HTTP_MAX_ATTEMPTS && shouldRetryDingTalkRequest({ status: response.status, errcode: data?.errcode })) {
           const delay = calculateDingTalkRetryDelay(attempt)
-          logger.warn('Retrying DingTalk request', { url, attempt, delay, status: response.status, errcode: data?.errcode, message })
+          logger.warn('Retrying DingTalk request', { url: maskedUrl, attempt, delay, status: response.status, errcode: data?.errcode, message })
           await sleepMs(delay)
           continue
         }
@@ -678,7 +774,7 @@ async function requestDingTalkJsonWithRetry({ url, method = 'GET', headers, body
       lastError = error
       if (attempt >= ATTENDANCE_DINGTALK_HTTP_MAX_ATTEMPTS) break
       const delay = calculateDingTalkRetryDelay(attempt)
-      logger.warn('DingTalk request attempt failed', { url, attempt, delay, error: error?.message || String(error) })
+      logger.warn('DingTalk request attempt failed', { url: maskedUrl, attempt, delay, error: error?.message || String(error) })
       await sleepMs(delay)
     }
   }
@@ -3067,14 +3163,19 @@ function mapImportBatchRow(row) {
 		  return rows[0] ?? null
 		}
 
-	function mapIntegrationRow(row) {
+function mapIntegrationRow(row) {
+  const config = normalizeIntegrationConfig(row.config)
   return {
     id: row.id,
     orgId: row.org_id ?? DEFAULT_ORG_ID,
     name: row.name,
     type: row.type,
     status: row.status,
-    config: normalizeMetadata(row.config),
+    config: {
+      ...config,
+      appSecret: undefined,
+      appSecretConfigured: Boolean(config.appSecret),
+    },
     lastSyncAt: row.last_sync_at,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -15830,15 +15931,18 @@ module.exports = {
         const orgId = getOrgId(req)
         const payload = parsed.data
         const status = payload.status ?? 'active'
-        const config = payload.config ?? {}
+        const config = normalizeIntegrationConfig(payload.config ?? {})
 
         try {
+          if (payload.type === 'dingtalk') {
+            assertDingTalkCorpAllowed(config.corpId, { context: 'Attendance integration corpId' })
+          }
           const rows = await db.query(
             `INSERT INTO attendance_integrations
              (org_id, name, type, status, config, created_at, updated_at)
              VALUES ($1, $2, $3, $4, $5::jsonb, now(), now())
              RETURNING *`,
-            [orgId, payload.name, payload.type, status, JSON.stringify(config)]
+            [orgId, payload.name, payload.type, status, JSON.stringify(normalizeIntegrationConfigForStorage(config))]
           )
           const mapped = rows.length ? mapIntegrationRow(rows[0]) : null
           res.json({ ok: true, data: mapped })
@@ -15874,19 +15978,30 @@ module.exports = {
             res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Integration not found' } })
             return
           }
-          const current = mapIntegrationRow(existing[0])
+          const currentConfig = normalizeIntegrationConfig(existing[0].config)
+          const requestedConfig = parsed.data.config ? normalizeIntegrationConfig(parsed.data.config) : null
           const next = {
-            name: parsed.data.name ?? current.name,
-            type: parsed.data.type ?? current.type,
-            status: parsed.data.status ?? current.status,
-            config: parsed.data.config ?? current.config,
+            name: parsed.data.name ?? existing[0].name,
+            type: parsed.data.type ?? existing[0].type,
+            status: parsed.data.status ?? existing[0].status,
+            config: requestedConfig
+              ? {
+                ...currentConfig,
+                ...requestedConfig,
+                appSecret: requestedConfig.appSecret || currentConfig.appSecret,
+                corpId: requestedConfig.corpId ?? currentConfig.corpId ?? null,
+              }
+              : currentConfig,
+          }
+          if (next.type === 'dingtalk') {
+            assertDingTalkCorpAllowed(next.config.corpId, { context: 'Attendance integration corpId' })
           }
           const rows = await db.query(
             `UPDATE attendance_integrations
              SET name = $3, type = $4, status = $5, config = $6::jsonb, updated_at = now()
              WHERE id = $1 AND org_id = $2
              RETURNING *`,
-            [integrationId, orgId, next.name, next.type, next.status, JSON.stringify(next.config)]
+            [integrationId, orgId, next.name, next.type, next.status, JSON.stringify(normalizeIntegrationConfigForStorage(next.config))]
           )
           res.json({ ok: true, data: mapIntegrationRow(rows[0]) })
         } catch (error) {
@@ -16005,11 +16120,12 @@ module.exports = {
             return
           }
           run = await createIntegrationRun(db, { orgId, integrationId })
-          const config = normalizeIntegrationConfig(integration.config)
+          const config = normalizeIntegrationConfig(rows[0].config)
           const fromDate = normalizeDingTalkDateRange(parsed.data.from, new Date(Date.now() - 7 * 86400000).toISOString().slice(0, 10))
           const toDate = normalizeDingTalkDateRange(parsed.data.to, new Date().toISOString().slice(0, 10))
 
           if (integration.type === 'dingtalk') {
+            assertDingTalkCorpAllowed(config.corpId, { context: 'Attendance integration corpId' })
             const accessToken = await fetchDingTalkAccessToken({
               appKey: config.appKey,
               appSecret: config.appSecret,

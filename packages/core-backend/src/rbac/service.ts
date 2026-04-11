@@ -2,6 +2,10 @@ import { pool } from '../db/pg'
 import { metrics } from '../metrics/metrics'
 import { Logger } from '../core/logger'
 import { isDatabaseSchemaError } from '../utils/database-errors'
+import {
+  filterPermissionCodesByNamespaceAdmission,
+  isPermissionAllowedByNamespaceAdmission,
+} from './namespace-admission'
 
 const logger = new Logger('RBACService')
 
@@ -32,6 +36,10 @@ export async function isAdmin(userId: string): Promise<boolean> {
 export async function userHasPermission(userId: string, code: string): Promise<boolean> {
   if (!pool) return false
   try {
+    if (!await isPermissionAllowedByNamespaceAdmission(userId, code)) {
+      return false
+    }
+
     // direct user permission
     const direct = await pool.query('SELECT 1 FROM user_permissions WHERE user_id = $1 AND permission_code = $2 LIMIT 1', [userId, code])
     if (direct.rows.length > 0) return true
@@ -86,8 +94,9 @@ export async function listUserPermissions(userId: string): Promise<string[]> {
     const legacy = await pool.query('SELECT permissions FROM users WHERE id = $1', [userId])
     const legacyPerms = Array.isArray(legacy.rows[0]?.permissions) ? legacy.rows[0].permissions : []
     const merged = Array.from(new Set([...codes, ...legacyPerms]))
-    cache.set(key, { codes: merged, exp: now + TTL_MS })
-    return merged
+    const filtered = await filterPermissionCodesByNamespaceAdmission(userId, merged)
+    cache.set(key, { codes: filtered, exp: now + TTL_MS })
+    return filtered
   } catch (error) {
     if (isDatabaseSchemaError(error) && allowDegradation) {
       if (!rbacDegraded) {

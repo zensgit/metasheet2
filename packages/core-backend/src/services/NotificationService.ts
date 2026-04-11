@@ -20,6 +20,7 @@ import type {
 } from '../types/plugin'
 import { Logger } from '../core/logger'
 import { BackoffStrategy } from '../utils/BackoffStrategy'
+import { maskDingTalkWebhookUrl } from '../integrations/dingtalk/runtime-policy'
 
 /**
  * Email notification payload
@@ -378,7 +379,8 @@ export class DingTalkNotificationChannel implements NotificationChannel {
 
   private async sendRobotMessage(url: string, secret: string | undefined, payload: DingTalkRobotPayload): Promise<void> {
     const signedUrl = buildSignedDingTalkWebhookUrl(url, secret)
-    this.logger.info(`Sending dingtalk robot message to ${url}`)
+    const maskedUrl = maskDingTalkWebhookUrl(url)
+    this.logger.info(`Sending dingtalk robot message to ${maskedUrl}`)
     await postJsonWithRetry({
       url: signedUrl,
       payload,
@@ -386,7 +388,7 @@ export class DingTalkNotificationChannel implements NotificationChannel {
       maxAttempts: resolvePositiveInt(this.config.maxAttempts, 3, 1, 6),
       retryDelayMs: resolvePositiveInt(this.config.retryDelayMs, 750, 50, 10_000),
       logger: this.logger,
-      context: `DingTalk delivery failed for ${url}`,
+      context: `DingTalk delivery failed for ${maskedUrl}`,
       responseValidator: validateDingTalkRobotResponse,
     })
   }
