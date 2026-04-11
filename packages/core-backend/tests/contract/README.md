@@ -20,8 +20,10 @@ when running in `apiMode='yuantus'`. Without a contract test, any field
 rename on the Yuantus side would silently break Metasheet at runtime.
 
 This Pact set freezes the **shape** (not the values) of the 6 Wave 1 P0
-endpoints that `PLMAdapter.ts` currently calls. (Codex's PACT_FIRST plan
-lists 7 endpoints in Wave 1 — see "Discrepancy with codex plan" below.)
+endpoints plus the 3 document-semantics endpoints that `PLMAdapter.ts`
+currently calls in `getProductDocuments()` for `apiMode='yuantus'`.
+(Codex's PACT_FIRST plan lists 7 endpoints in Wave 1 — see "Discrepancy
+with codex plan" below.)
 
 The companion provider verifier lives in the Yuantus repo at
 `src/yuantus/api/tests/test_pact_provider_yuantus_plm.py`.
@@ -35,7 +37,7 @@ because adding that npm dependency requires explicit approval.
 The `plm-adapter-yuantus.pact.test.ts` vitest test guards three things:
 
 1. The pact JSON exists and parses as Pact v3.
-2. It contains the 6 Wave 1 P0 interactions in the documented order.
+2. It contains the 9 currently used interactions in the documented order.
 3. Every endpoint named in the pact is also referenced by the live
    `packages/core-backend/src/data-adapters/PLMAdapter.ts` source — so the
    pact cannot drift away from what the adapter actually calls.
@@ -143,11 +145,11 @@ specification of what the generated pact must contain.
 
 ## Wave 2 endpoints
 
-These are intentionally NOT in the Wave 1 pact:
+The following endpoints were intentionally out of scope for the first pact.
+Document semantics is now covered, so these still remain outside the pact:
 
 - `GET /api/v1/bom/{id}/where-used`
 - `GET /api/v1/bom/compare/schema`
-- `GET /api/v1/file/item/{item_id}`
 - `GET /api/v1/eco/{id}/approvals`
 - `POST /api/v1/eco/{id}/approve`
 - `POST /api/v1/eco/{id}/reject`
