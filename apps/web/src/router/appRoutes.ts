@@ -178,8 +178,32 @@ export const appRoutes: RouteRecordRaw[] = [
   {
     path: '/approvals',
     name: 'approval-list',
-    component: () => import('../views/ApprovalInboxView.vue'),
+    component: () => import('../views/approval/ApprovalCenterView.vue'),
     meta: { title: 'Approvals', titleZh: '审批中心', requiresAuth: true }
+  },
+  {
+    path: '/approvals/new/:templateId',
+    name: 'approval-create',
+    component: () => import('../views/approval/ApprovalNewView.vue'),
+    meta: { title: 'New Approval', titleZh: '发起审批', requiresAuth: true }
+  },
+  {
+    path: '/approvals/:id',
+    name: 'approval-detail',
+    component: () => import('../views/approval/ApprovalDetailView.vue'),
+    meta: { title: 'Approval Detail', titleZh: '审批详情', requiresAuth: true }
+  },
+  {
+    path: '/approval-templates',
+    name: 'approval-template-list',
+    component: () => import('../views/approval/TemplateCenterView.vue'),
+    meta: { title: 'Approval Templates', titleZh: '审批模板', requiresAuth: true }
+  },
+  {
+    path: '/approval-templates/:id',
+    name: 'approval-template-detail',
+    component: () => import('../views/approval/TemplateDetailView.vue'),
+    meta: { title: 'Template Detail', titleZh: '模板详情', requiresAuth: true }
   },
   {
     path: '/admin/plugins',
