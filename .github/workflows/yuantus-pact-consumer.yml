@@ -1,0 +1,81 @@
+name: Yuantus Pact Consumer
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'packages/core-backend/src/data-adapters/PLMAdapter.ts'
+      - 'packages/core-backend/tests/contract/**'
+      - 'packages/core-backend/tests/unit/plm-adapter-yuantus.test.ts'
+      - 'packages/core-backend/package.json'
+      - 'pnpm-lock.yaml'
+      - '.github/workflows/yuantus-pact-consumer.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'packages/core-backend/src/data-adapters/PLMAdapter.ts'
+      - 'packages/core-backend/tests/contract/**'
+      - 'packages/core-backend/tests/unit/plm-adapter-yuantus.test.ts'
+      - 'packages/core-backend/package.json'
+      - 'pnpm-lock.yaml'
+      - '.github/workflows/yuantus-pact-consumer.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: yuantus-pact-consumer-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  yuantus-pact-consumer:
+    name: yuantus-pact-consumer
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20.x
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.16.1
+          run_install: false
+
+      - name: Show pnpm version
+        run: pnpm -v
+
+      - name: Use empty npmrc for pnpm
+        run: |
+          echo "" > /tmp/empty-npmrc
+          echo "NPM_CONFIG_USERCONFIG=/tmp/empty-npmrc" >> "$GITHUB_ENV"
+
+      - name: Get pnpm store directory
+        id: pnpm-cache
+        shell: bash
+        run: |
+          echo "STORE_PATH=$(pnpm store path)" >> "$GITHUB_OUTPUT"
+
+      - name: Setup pnpm cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.pnpm-cache.outputs.STORE_PATH }}
+          key: ${{ runner.os }}-pnpm-store-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pnpm-store-
+
+      - name: Install dependencies
+        run: |
+          set -o pipefail
+          pnpm install --frozen-lockfile 2>&1 | tee install.log
+
+      - name: Run Yuantus pact consumer checks
+        run: |
+          pnpm --filter @metasheet/core-backend test:contract
+          pnpm --filter @metasheet/core-backend exec vitest run tests/unit/plm-adapter-yuantus.test.ts --reporter=dot
