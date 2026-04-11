@@ -40,8 +40,8 @@ Federation now returns:
 {
   "ok": true,
   "data": {
-    "productId": "prod-1001",
-    "item_id": "prod-1001",
+    "productId": "39a39aca-c743-403d-ba3f-058b55ccc7e9",
+    "item_id": "39a39aca-c743-403d-ba3f-058b55ccc7e9",
     "generated_at": "2026-04-11T00:00:00.000Z",
     "ruleset_id": "readiness",
     "summary": {
@@ -49,20 +49,48 @@ Federation now returns:
       "resources": 3,
       "ok_resources": 2,
       "error_count": 1,
-      "warning_count": 1,
+      "warning_count": 0,
       "by_kind": {
-        "mbom": {
+        "mbom_release": {
           "resources": 1,
           "ok_resources": 0,
           "error_count": 1,
           "warning_count": 0
+        },
+        "routing_release": {
+          "resources": 1,
+          "ok_resources": 1,
+          "error_count": 0,
+          "warning_count": 0
+        },
+        "baseline_release": {
+          "resources": 1,
+          "ok_resources": 1,
+          "error_count": 0,
+          "warning_count": 0
         }
       }
     },
-    "resources": [],
+    "resources": [
+      {
+        "kind": "mbom_release",
+        "name": "MBOM-RR-1775885685036",
+        "state": "draft"
+      },
+      {
+        "kind": "routing_release",
+        "name": "Routing RR 1775885685036",
+        "state": "draft"
+      },
+      {
+        "kind": "baseline_release",
+        "name": "BL-RR-1775885685036",
+        "state": "draft"
+      }
+    ],
     "links": {
-      "summary": "/api/v1/release-readiness/items/prod-1001?ruleset_id=readiness",
-      "export": "/api/v1/release-readiness/items/prod-1001/export?export_format=zip&ruleset_id=readiness"
+      "summary": "/api/v1/release-readiness/items/39a39aca-c743-403d-ba3f-058b55ccc7e9?ruleset_id=readiness",
+      "export": "/api/v1/release-readiness/items/39a39aca-c743-403d-ba3f-058b55ccc7e9/export?export_format=zip&ruleset_id=readiness"
     }
   }
 }
@@ -91,6 +119,8 @@ This was the next highest-leverage slice because:
 
 - `packages/core-backend/src/data-adapters/PLMAdapter.ts`
 - `packages/core-backend/src/routes/federation.ts`
+- `packages/core-backend/tests/contract/pacts/metasheet2-yuantus-plm.json`
+- `packages/core-backend/tests/contract/plm-adapter-yuantus.pact.test.ts`
 - `packages/core-backend/tests/fixtures/federation/contracts.ts`
 - `packages/core-backend/tests/unit/plm-adapter-yuantus.test.ts`
 - `packages/core-backend/tests/unit/federation.contract.test.ts`
@@ -111,7 +141,7 @@ pnpm --dir packages/core-backend test:contract
 Observed results:
 
 - targeted unit tests: `30 passed`
-- contract tests: `16 passed`
+- contract tests: `17 passed`
 
 Live provider validation:
 
@@ -124,30 +154,31 @@ curl -s -X POST http://127.0.0.1:7910/api/v1/auth/login \
   -H "Content-Type: application/json" \
   -H "x-tenant-id: tenant-1" \
   -H "x-org-id: org-1" \
-  -d '{"tenant_id":"tenant-1","username":"phase0-test","password":"phase0pass","org_id":"org-1"}'
+  -d '{"tenant_id":"tenant-1","username":"admin","password":"admin","org_id":"org-1"}'
 
 curl -s \
   -H "Authorization: Bearer <token>" \
   -H "x-tenant-id: tenant-1" \
   -H "x-org-id: org-1" \
-  "http://127.0.0.1:7910/api/v1/release-readiness/items/b5ecee24-5ce8-4b59-9551-446e1c50b608?ruleset_id=readiness"
+  "http://127.0.0.1:7910/api/v1/release-readiness/items/39a39aca-c743-403d-ba3f-058b55ccc7e9?ruleset_id=readiness"
 
 # 3. Verify the new Metasheet adapter path against the same provider
 PLM_BASE_URL=http://127.0.0.1:7910 \
 PLM_API_MODE=yuantus \
 PLM_TENANT_ID=tenant-1 \
 PLM_ORG_ID=org-1 \
-PLM_USERNAME=phase0-test \
-PLM_PASSWORD=phase0pass \
+PLM_USERNAME=admin \
+PLM_PASSWORD=admin \
 PLM_ITEM_TYPE=Part \
-pnpm exec tsx --eval "import { PLMAdapter } from './src/data-adapters/PLMAdapter.ts'; void (async () => { const configService={get: async ()=>undefined}; const logger={info:()=>{},warn:()=>{},error:console.error}; const adapter=new PLMAdapter(configService as any, logger as any); await adapter.connect(); const result=await adapter.getReleaseReadiness('b5ecee24-5ce8-4b59-9551-446e1c50b608',{rulesetId:'readiness'}); console.log(JSON.stringify(result.data[0], null, 2)); await adapter.disconnect(); })().catch((error) => { console.error(error); process.exit(1); });"
+pnpm exec tsx --eval "import { PLMAdapter } from './src/data-adapters/PLMAdapter.ts'; void (async () => { const configService={get: async ()=>undefined}; const logger={info:()=>{},warn:()=>{},error:console.error}; const adapter=new PLMAdapter(configService as any, logger as any); await adapter.connect(); const result=await adapter.getReleaseReadiness('39a39aca-c743-403d-ba3f-058b55ccc7e9',{rulesetId:'readiness'}); console.log(JSON.stringify(result.data[0], null, 2)); await adapter.disconnect(); })().catch((error) => { console.error(error); process.exit(1); });"
 ```
 
 Observed live result:
 
 - provider health responded `ok=true`
 - login returned a valid JWT
-- direct provider readiness call returned `ok=true`
+- direct provider readiness call returned `resources=3`, `ok_resources=2`,
+  `error_count=1`
 - adapter live call returned `count=1`, `error=null`
 - the adapter emitted canonical `summary` / `export` links that point back to
   the provider surface
@@ -186,20 +217,22 @@ The provider and adapter both returned the same canonical links for that object:
 This richer fixture matters because it proves the bridge preserves a real mixed
 governance result, not just the empty-summary case.
 
-## Deferred
+## Contract Status
 
-This bridge is intentionally **not** added to Pact yet.
+This bridge is already added to Pact in this PR.
 
-Reason:
-
-- current Pact scope protects the established mainline surfaces up through the
-  existing Wave 5 set
-- `release_readiness` is now a real federation surface, but the right next step
-  is to let the consumer call pattern settle and then add a targeted Pact
-  interaction, not to expand Pact speculatively
-
-The likely next contract step is a small follow-up Wave that locks:
+Current contract scope now includes:
 
 - `GET /api/v1/release-readiness/items/{item_id}`
+- the existing mainline Yuantus PLM federation surfaces already tracked by the
+  Wave 1-5 contract set
 
-once the federation/UI caller becomes part of the stable mainline workflow.
+Why this is the right boundary:
+
+- the provider endpoint already exists and is exercised in live verification
+- the consumer federation surface now exists and is exercised in unit plus
+  contract tests
+- this adds one targeted interaction instead of speculative breadth
+
+The next follow-up is not more Pact breadth. It is UI adoption and stable
+mainline caller usage on the Metasheet side.
