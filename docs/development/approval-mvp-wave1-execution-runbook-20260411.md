@@ -196,6 +196,7 @@ pnpm --filter @metasheet/web exec vitest run \
 
 - 统一 Inbox 只展示 `platform` 原生审批
 - 条件分支为 JSON 图解释执行，不是 BPMN 主路径
+- 统一 `POST /api/approvals/{id}/actions` 采用数据库行锁串行化并发写入，不暴露客户端 `version` 参数，也不承诺返回 `APPROVAL_VERSION_CONFLICT`
 - 模板权限仍是全局 `approval-templates:manage`，没有模板级 ACL
 - 审批详情暂无流程图高亮
 - 暂无催办、通知、已读未读、统计分析
@@ -204,6 +205,6 @@ pnpm --filter @metasheet/web exec vitest run \
 
 ## 7. 关联文档
 
-- [approval-mvp-wave1-acceptance-checklist-20260411.md](/Users/huazhou/Downloads/Github/metasheet2/.worktrees/approval-wave2-acceptance-20260411/docs/development/approval-mvp-wave1-acceptance-checklist-20260411.md)
-- [approval-mvp-feishu-gap-matrix-20260411.md](/Users/huazhou/Downloads/Github/metasheet2/.worktrees/approval-wave2-acceptance-20260411/docs/development/approval-mvp-feishu-gap-matrix-20260411.md)
-- [approval-api-usage-guide-20260411.md](/Users/huazhou/Downloads/Github/metasheet2/.worktrees/approval-wave2-acceptance-20260411/docs/development/approval-api-usage-guide-20260411.md)
+- [approval-mvp-wave1-acceptance-checklist-20260411.md](./approval-mvp-wave1-acceptance-checklist-20260411.md)
+- [approval-mvp-feishu-gap-matrix-20260411.md](./approval-mvp-feishu-gap-matrix-20260411.md)
+- [approval-api-usage-guide-20260411.md](./approval-api-usage-guide-20260411.md)

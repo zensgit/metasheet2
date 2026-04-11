@@ -41,7 +41,7 @@
 - [ ] 返回数据包含 `templateId`、`templateVersionId`、`publishedDefinitionId`
 - [ ] 返回数据包含 `formSnapshot`（提交时的表单数据快照）
 - [ ] 提交成功后前端跳转到审批详情页 `/approvals/:id`
-- [ ] 向未发布模板发起审批返回 400
+- [ ] 向未发布模板发起审批返回 409
 - [ ] 模板 ID 不存在返回 404
 - [ ] 无 `approvals:write` 权限的用户发起审批返回 403
 
@@ -78,19 +78,19 @@
 - [ ] **转交** 必须提供 `targetUserId`，缺失返回 400
 - [ ] **撤回** POST `{ "action": "revoke" }` → 状态变为 revoked
 - [ ] **撤回** 仅发起人可操作，非发起人返回 403
-- [ ] **撤回** 当 `policy.allowRevoke = false` 时返回 400
-- [ ] **撤回** 当配置了 `revokeBeforeNodeKeys` 且当前节点不在范围内时返回 400
+- [ ] **撤回** 当 `policy.allowRevoke = false` 时返回 409
+- [ ] **撤回** 当配置了 `revokeBeforeNodeKeys` 且当前节点不在范围内时返回 409
 - [ ] **评论** POST `{ "action": "comment", "comment": "..." }` → 添加评论历史记录
 - [ ] **评论** 不改变审批状态
 - [ ] 无效 action 类型返回 400
 - [ ] 非当前审批人执行 approve/reject 返回 403
 - [ ] 无 `approvals:act` 权限执行操作返回 403
 
-## 乐观锁（Optimistic Locking）
+## 并发串行化（Row Lock Serialization）
 
-- [ ] 并发操作同一审批实例时，后执行的请求返回 409 `APPROVAL_VERSION_CONFLICT`
-- [ ] 409 响应体包含 `currentVersion` 字段
-- [ ] 客户端收到 409 后可刷新详情页获取最新版本重试
+- [ ] 并发操作同一审批实例时，统一 action 端点通过数据库行锁串行化写入，不发生双写覆盖
+- [ ] `POST /api/approvals/{id}/actions` 不要求客户端提交 `version`
+- [ ] 后续请求若在前序动作提交后已不满足当前状态约束，应返回 409 类冲突（如状态跃迁非法、撤回窗口关闭），而不是写入脏状态
 
 ## 权限模型
 

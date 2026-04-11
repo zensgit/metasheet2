@@ -684,13 +684,13 @@ curl -s -X POST http://localhost:8900/api/approvals/appr_001/actions \
 }
 ```
 
-**错误 — 撤回策略不允许** (400):
+**错误 — 撤回策略不允许** (409):
 ```json
 {
   "ok": false,
   "error": {
-    "code": "VALIDATION_ERROR",
-    "message": "Revoke is not allowed by the approval policy"
+    "code": "APPROVAL_REVOKE_DISABLED",
+    "message": "Approval cannot be revoked for this template"
   }
 }
 ```
@@ -712,22 +712,25 @@ curl -s -X POST http://localhost:8900/api/approvals/appr_001/actions \
 
 ---
 
-### 版本冲突 (409)
+### 并发操作与串行化
 
-当两个用户同时操作同一审批实例时，后执行的请求会收到 409:
+统一 `POST /api/approvals/{id}/actions` 端点采用数据库行锁串行化并发写入。
+它不要求客户端提供 `version`，也不承诺返回 `APPROVAL_VERSION_CONFLICT`。
+在前序动作已经提交、当前状态不再满足后续动作要求时，后续请求可能收到 409:
 
 ```json
 {
   "ok": false,
   "error": {
-    "code": "APPROVAL_VERSION_CONFLICT",
-    "message": "Approval instance version mismatch",
-    "currentVersion": 3
+    "code": "INVALID_STATUS_TRANSITION",
+    "message": "Cannot approve: current status is approved"
   }
 }
 ```
 
-**处理方式**: 客户端收到 409 后应重新 GET 审批详情，获取最新状态后重试。
+**处理方式**: 客户端收到 409 后应重新 GET 审批详情，按最新状态决定是否继续操作。
+
+旧版 per-action 接口仍保留基于 `version` 的 409 冲突语义，但已标记为 `deprecated`。
 
 ---
 
