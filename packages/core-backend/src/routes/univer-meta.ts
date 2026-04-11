@@ -3276,6 +3276,197 @@ export function univerMetaRouter(): Router {
     }
   })
 
+  // ── View permission authoring ──
+
+  router.get('/views/:viewId/permissions', async (req: Request, res: Response) => {
+    const viewId = typeof req.params.viewId === 'string' ? req.params.viewId.trim() : ''
+    if (!viewId) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'viewId is required' } })
+    }
+
+    try {
+      const pool = poolManager.get()
+      const viewRow = await pool.query('SELECT id, sheet_id FROM meta_views WHERE id = $1', [viewId])
+      if (viewRow.rows.length === 0) {
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `View not found: ${viewId}` } })
+      }
+      const sheetId = String((viewRow.rows[0] as any).sheet_id)
+      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      if (!capabilities.canManageViews) return sendForbidden(res)
+
+      const result = await pool.query(
+        `SELECT id, view_id, subject_type, subject_id, permission, created_at, created_by
+         FROM meta_view_permissions WHERE view_id = $1 ORDER BY created_at ASC`,
+        [viewId],
+      )
+      const items = (result.rows as any[]).map((row) => ({
+        id: String(row.id),
+        viewId: String(row.view_id),
+        subjectType: String(row.subject_type),
+        subjectId: String(row.subject_id),
+        permission: String(row.permission),
+        createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : String(row.created_at ?? ''),
+      }))
+      return res.json({ ok: true, data: { items } })
+    } catch (err) {
+      if (isUndefinedTableError(err, 'meta_view_permissions')) {
+        return res.json({ ok: true, data: { items: [] } })
+      }
+      const hint = getDbNotReadyMessage(err)
+      if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
+      console.error('[univer-meta] list view permissions failed:', err)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to list view permissions' } })
+    }
+  })
+
+  router.put('/views/:viewId/permissions/:subjectType/:subjectId', async (req: Request, res: Response) => {
+    const viewId = typeof req.params.viewId === 'string' ? req.params.viewId.trim() : ''
+    const subjectType = typeof req.params.subjectType === 'string' ? req.params.subjectType.trim() : ''
+    const subjectId = typeof req.params.subjectId === 'string' ? req.params.subjectId.trim() : ''
+    if (!viewId || !subjectId || (subjectType !== 'user' && subjectType !== 'role')) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'viewId, subjectType (user|role), and subjectId are required' } })
+    }
+
+    const schema = z.object({
+      permission: z.enum(['read', 'write', 'admin', 'none']),
+    })
+    const parsed = schema.safeParse(req.body)
+    if (!parsed.success) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+    }
+
+    try {
+      const pool = poolManager.get()
+      const viewRow = await pool.query('SELECT id, sheet_id FROM meta_views WHERE id = $1', [viewId])
+      if (viewRow.rows.length === 0) {
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `View not found: ${viewId}` } })
+      }
+      const sheetId = String((viewRow.rows[0] as any).sheet_id)
+      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      if (!capabilities.canManageViews) return sendForbidden(res)
+
+      await pool.transaction(async ({ query }) => {
+        await query(
+          `DELETE FROM meta_view_permissions WHERE view_id = $1 AND subject_type = $2 AND subject_id = $3`,
+          [viewId, subjectType, subjectId],
+        )
+        if (parsed.data.permission !== 'none') {
+          await query(
+            `INSERT INTO meta_view_permissions(view_id, subject_type, subject_id, permission)
+             VALUES ($1, $2, $3, $4)`,
+            [viewId, subjectType, subjectId, parsed.data.permission],
+          )
+        }
+      })
+
+      return res.json({ ok: true, data: { viewId, subjectType, subjectId, permission: parsed.data.permission } })
+    } catch (err) {
+      const hint = getDbNotReadyMessage(err)
+      if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
+      console.error('[univer-meta] update view permission failed:', err)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to update view permission' } })
+    }
+  })
+
+  // ── Field permission authoring ──
+
+  router.get('/sheets/:sheetId/field-permissions', async (req: Request, res: Response) => {
+    const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
+    if (!sheetId) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId is required' } })
+    }
+
+    try {
+      const pool = poolManager.get()
+      const sheet = await loadSheetRow(pool.query.bind(pool), sheetId)
+      if (!sheet) {
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
+      }
+      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      if (!capabilities.canManageFields) return sendForbidden(res)
+
+      const result = await pool.query(
+        `SELECT id, sheet_id, field_id, subject_type, subject_id, visible, read_only, created_at
+         FROM field_permissions WHERE sheet_id = $1 ORDER BY field_id ASC, created_at ASC`,
+        [sheetId],
+      )
+      const items = (result.rows as any[]).map((row) => ({
+        id: String(row.id),
+        sheetId: String(row.sheet_id),
+        fieldId: String(row.field_id),
+        subjectType: String(row.subject_type),
+        subjectId: String(row.subject_id),
+        visible: row.visible !== false,
+        readOnly: row.read_only === true,
+      }))
+      return res.json({ ok: true, data: { items } })
+    } catch (err) {
+      if (isUndefinedTableError(err, 'field_permissions')) {
+        return res.json({ ok: true, data: { items: [] } })
+      }
+      const hint = getDbNotReadyMessage(err)
+      if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
+      console.error('[univer-meta] list field permissions failed:', err)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to list field permissions' } })
+    }
+  })
+
+  router.put('/sheets/:sheetId/field-permissions/:fieldId/:subjectType/:subjectId', async (req: Request, res: Response) => {
+    const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
+    const fieldId = typeof req.params.fieldId === 'string' ? req.params.fieldId.trim() : ''
+    const subjectType = typeof req.params.subjectType === 'string' ? req.params.subjectType.trim() : ''
+    const subjectId = typeof req.params.subjectId === 'string' ? req.params.subjectId.trim() : ''
+    if (!sheetId || !fieldId || !subjectId || (subjectType !== 'user' && subjectType !== 'role')) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId, fieldId, subjectType (user|role), and subjectId are required' } })
+    }
+
+    const schema = z.object({
+      visible: z.boolean().optional(),
+      readOnly: z.boolean().optional(),
+      remove: z.boolean().optional(),
+    }).refine((v) => v.remove || v.visible !== undefined || v.readOnly !== undefined, { message: 'visible, readOnly, or remove required' })
+    const parsed = schema.safeParse(req.body)
+    if (!parsed.success) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+    }
+
+    try {
+      const pool = poolManager.get()
+      const sheet = await loadSheetRow(pool.query.bind(pool), sheetId)
+      if (!sheet) {
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
+      }
+      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      if (!capabilities.canManageFields) return sendForbidden(res)
+
+      if (parsed.data.remove) {
+        await pool.query(
+          `DELETE FROM field_permissions WHERE sheet_id = $1 AND field_id = $2 AND subject_type = $3 AND subject_id = $4`,
+          [sheetId, fieldId, subjectType, subjectId],
+        )
+        return res.json({ ok: true, data: { sheetId, fieldId, subjectType, subjectId, removed: true } })
+      }
+
+      await pool.query(
+        `INSERT INTO field_permissions(sheet_id, field_id, subject_type, subject_id, visible, read_only)
+         VALUES ($1, $2, $3, $4, $5, $6)
+         ON CONFLICT (sheet_id, field_id, subject_type, subject_id)
+         DO UPDATE SET visible = EXCLUDED.visible, read_only = EXCLUDED.read_only`,
+        [sheetId, fieldId, subjectType, subjectId, parsed.data.visible ?? true, parsed.data.readOnly ?? false],
+      )
+
+      return res.json({
+        ok: true,
+        data: { sheetId, fieldId, subjectType, subjectId, visible: parsed.data.visible ?? true, readOnly: parsed.data.readOnly ?? false },
+      })
+    } catch (err) {
+      const hint = getDbNotReadyMessage(err)
+      if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
+      console.error('[univer-meta] update field permission failed:', err)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to update field permission' } })
+    }
+  })
+
   router.get('/fields', async (req: Request, res: Response) => {
     const sheetId = typeof req.query.sheetId === 'string' ? req.query.sheetId.trim() : ''
     if (!sheetId) {
