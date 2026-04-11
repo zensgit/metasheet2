@@ -1537,7 +1537,7 @@ export async function unbindDirectoryAccount(
       `INSERT INTO directory_account_links (
          directory_account_id, local_user_id, link_status, match_strategy, reviewed_by, review_note, created_at, updated_at
        )
-       VALUES ($1, NULL, 'unmatched', 'manual_unbind', $2, 'unbound by admin', NOW(), NOW())
+       VALUES ($1, NULL, 'unmatched', 'manual_unbound', $2, 'unbound by admin', NOW(), NOW())
        ON CONFLICT (directory_account_id)
        DO UPDATE SET
          local_user_id = NULL,
