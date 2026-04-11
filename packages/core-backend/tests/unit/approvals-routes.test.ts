@@ -7,6 +7,7 @@ const authState = vi.hoisted(() => ({
     id: 'user-1',
     tenantId: 'tenant-a',
     name: 'Owner One',
+    permissions: ['*:*'],
   } as Record<string, unknown> | null,
 }))
 
@@ -49,6 +50,7 @@ describe('approvals routes', () => {
       id: 'user-1',
       tenantId: 'tenant-a',
       name: 'Owner One',
+      permissions: ['*:*'],
     }
     pgState.pool.query.mockReset()
     pgState.pool.connect.mockReset()
@@ -82,6 +84,7 @@ describe('approvals routes', () => {
     authState.user = {
       tenantId: 'tenant-a',
       name: 'Owner One',
+      permissions: ['*:*'],
     }
 
     const response = await request(app)
@@ -102,6 +105,7 @@ describe('approvals routes', () => {
     authState.user = {
       tenantId: 'tenant-a',
       name: 'Owner One',
+      permissions: ['*:*'],
     }
 
     const response = await request(app).get('/api/approvals/pending')
@@ -121,6 +125,7 @@ describe('approvals routes', () => {
       id: 'user-1',
       tenantId: 'tenant-a',
       name: 'Owner One',
+      permissions: ['*:*'],
     }
     pgState.pool.query
       .mockResolvedValueOnce({

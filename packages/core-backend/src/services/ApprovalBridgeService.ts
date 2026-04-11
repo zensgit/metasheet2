@@ -709,6 +709,7 @@ export class ApprovalBridgeService {
       const activeAssignmentUpdated = await client.query(
         `UPDATE approval_assignments
          SET source_step = 0,
+             node_key = 'plm:source-owned',
              is_active = $2,
              metadata = $3::jsonb,
              updated_at = now()
@@ -726,8 +727,8 @@ export class ApprovalBridgeService {
       if ((activeAssignmentUpdated.rowCount ?? 0) === 0) {
         await client.query(
           `INSERT INTO approval_assignments
-           (instance_id, assignment_type, assignee_id, source_step, is_active, metadata)
-           VALUES ($1, 'source_queue', 'plm:source-owned', 0, $2, $3::jsonb)`,
+           (instance_id, assignment_type, assignee_id, source_step, node_key, is_active, metadata)
+           VALUES ($1, 'source_queue', 'plm:source-owned', 0, 'plm:source-owned', $2, $3::jsonb)`,
           [
             instanceId,
             bridge.status === 'pending',
