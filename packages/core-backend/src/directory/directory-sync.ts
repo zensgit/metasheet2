@@ -593,7 +593,7 @@ async function resolveDirectoryTestCurrentConfig(input: DirectoryIntegrationTest
   return parseIntegrationConfig(current)
 }
 
-function buildDirectoryIntegrationTestWarnings(result: {
+export function buildDirectoryIntegrationTestWarnings(result: {
   rootDepartmentId: string
   departmentSampleCount: number
   rootDepartmentDirectUserCount: number
@@ -602,20 +602,23 @@ function buildDirectoryIntegrationTestWarnings(result: {
   rootDepartmentDirectUserHasMoreWithAccessLimit: boolean
 }): string[] {
   const warnings: string[] = []
+  const hasNoChildDepartments = result.departmentSampleCount === 0
+  const hasSuspiciouslySparseRootMembers =
+    result.rootDepartmentDirectUserCount <= 1 && !result.rootDepartmentDirectUserHasMore
 
-  if (result.departmentSampleCount === 0) {
+  if (hasNoChildDepartments) {
     warnings.push(`根部门 ${result.rootDepartmentId} 未返回任何子部门。`)
   }
 
-  if (result.rootDepartmentDirectUserCount <= 1 && !result.rootDepartmentDirectUserHasMore) {
+  if (hasNoChildDepartments && hasSuspiciouslySparseRootMembers) {
     warnings.push(
       `根部门 ${result.rootDepartmentId} 当前仅返回 ${result.rootDepartmentDirectUserCount} 个直属成员；如果钉钉企业通讯录里实际成员更多，通常是应用通讯录接口范围未覆盖，或根部门 ID 配置不正确。`,
     )
   }
 
   if (
-    result.rootDepartmentDirectUserCount <= 1
-    && !result.rootDepartmentDirectUserHasMore
+    hasNoChildDepartments
+    && hasSuspiciouslySparseRootMembers
     && result.rootDepartmentDirectUserCountWithAccessLimit === result.rootDepartmentDirectUserCount
     && result.rootDepartmentDirectUserHasMoreWithAccessLimit === result.rootDepartmentDirectUserHasMore
   ) {
