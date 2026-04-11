@@ -92,6 +92,41 @@ function createAccountListPayload(items: Record<string, unknown>[], overrides: R
   }
 }
 
+function createTestResultPayload(overrides: Record<string, unknown> = {}) {
+  return {
+    ok: true,
+    data: {
+      corpId: 'dingcorp',
+      rootDepartmentId: '1',
+      appKey: 'ding-app-key',
+      departmentSampleCount: 0,
+      sampledDepartments: [],
+      userSampleCount: 1,
+      sampledUsers: [
+        { userId: '0447654442691174', name: '周华' },
+      ],
+      diagnostics: {
+        rootDepartmentChildCount: 0,
+        rootDepartmentDirectUserCount: 1,
+        rootDepartmentDirectUserHasMore: false,
+        rootDepartmentDirectUserCountWithAccessLimit: 1,
+        rootDepartmentDirectUserHasMoreWithAccessLimit: false,
+        sampledRootDepartmentUsers: [
+          { userId: '0447654442691174', name: '周华' },
+        ],
+        sampledRootDepartmentUsersWithAccessLimit: [
+          { userId: '0447654442691174', name: '周华' },
+        ],
+      },
+      warnings: [
+        '根部门 1 未返回任何子部门。',
+        '根部门 1 当前仅返回 1 个直属成员；如果钉钉企业通讯录里实际成员更多，通常是应用通讯录接口范围未覆盖，或根部门 ID 配置不正确。',
+      ],
+      ...overrides,
+    },
+  }
+}
+
 describe('DirectoryManagementView', () => {
   let app: App<Element> | null = null
   let container: HTMLDivElement | null = null
@@ -411,6 +446,63 @@ describe('DirectoryManagementView', () => {
     )
     expect(container?.textContent).toContain('已绑定到本地用户')
     expect(container?.textContent).toContain('alpha@example.com')
+  })
+
+  it('tests a saved integration with diagnostics and reuses the saved secret on the backend', async () => {
+    apiFetchMock
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: {
+          items: [createIntegration()],
+        },
+      }))
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: { items: [] },
+      }))
+      .mockResolvedValueOnce(createJsonResponse(
+        createAccountListPayload([createAccount()]),
+      ))
+      .mockResolvedValueOnce(createJsonResponse(
+        createTestResultPayload(),
+      ))
+
+    app = createApp(DirectoryManagementView)
+    app.component('RouterLink', {
+      props: ['to'],
+      template: '<a><slot /></a>',
+    })
+    app.mount(container!)
+    await flushUi()
+
+    const testButton = Array.from(container!.querySelectorAll('button')).find((button) => button.textContent?.includes('测试连通性'))
+    expect(testButton).toBeTruthy()
+    testButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi(6)
+
+    expect(apiFetchMock).toHaveBeenCalledWith(
+      '/api/admin/directory/integrations/test',
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({
+          integrationId: 'dir-1',
+          name: 'DingTalk CN',
+          corpId: 'dingcorp',
+          appKey: 'ding-app-key',
+          appSecret: '',
+          rootDepartmentId: '1',
+          baseUrl: '',
+          pageSize: 50,
+          status: 'active',
+          scheduleCron: '',
+          defaultDeprovisionPolicy: 'mark_inactive',
+          syncEnabled: true,
+        }),
+      }),
+    )
+    expect(container?.textContent).toContain('根部门子部门 0')
+    expect(container?.textContent).toContain('根部门直属成员 1')
+    expect(container?.textContent).toContain('根部门 1 当前仅返回 1 个直属成员')
   })
 
   it('unbinds a linked directory account', async () => {

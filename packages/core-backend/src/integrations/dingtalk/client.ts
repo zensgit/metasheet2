@@ -373,7 +373,7 @@ export async function listDingTalkDepartmentUsers(
   departmentId: string,
   cursor: number,
   size: number,
-  config?: { baseUrl?: string },
+  config?: { baseUrl?: string; containAccessLimit?: boolean },
 ): Promise<{ users: DingTalkDepartmentUserSummary[]; nextCursor: number | null; hasMore: boolean }> {
   const payload = await requestDingTalkDirectoryJson(
     `/topapi/v2/user/list?access_token=${encodeURIComponent(accessToken)}`,
@@ -384,7 +384,7 @@ export async function listDingTalkDepartmentUsers(
         dept_id: Number.isNaN(Number(departmentId)) ? departmentId : Number(departmentId),
         cursor,
         size,
-        contain_access_limit: false,
+        contain_access_limit: config?.containAccessLimit === true,
         language: 'zh_CN',
       }),
     },

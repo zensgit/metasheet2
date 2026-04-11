@@ -183,6 +183,61 @@ describe('adminDirectoryRouter', () => {
     })
   })
 
+  it('tests a saved integration by forwarding the integrationId and payload to the directory service', async () => {
+    directoryMocks.testDirectoryIntegration.mockResolvedValue({
+      corpId: 'dingcorp',
+      rootDepartmentId: '1',
+      appKey: 'ding-app-key',
+      departmentSampleCount: 0,
+      sampledDepartments: [],
+      userSampleCount: 1,
+      sampledUsers: [{ userId: '0447654442691174', name: '周华' }],
+      diagnostics: {
+        rootDepartmentChildCount: 0,
+        rootDepartmentDirectUserCount: 1,
+        rootDepartmentDirectUserHasMore: false,
+        rootDepartmentDirectUserCountWithAccessLimit: 1,
+        rootDepartmentDirectUserHasMoreWithAccessLimit: false,
+        sampledRootDepartmentUsers: [{ userId: '0447654442691174', name: '周华' }],
+        sampledRootDepartmentUsersWithAccessLimit: [{ userId: '0447654442691174', name: '周华' }],
+      },
+      warnings: ['根部门 1 未返回任何子部门。'],
+    })
+
+    const payload = {
+      integrationId: 'dir-1',
+      name: 'DingTalk CN',
+      corpId: 'dingcorp',
+      appKey: 'ding-app-key',
+      appSecret: '',
+      rootDepartmentId: '1',
+      pageSize: 50,
+      status: 'active',
+      defaultDeprovisionPolicy: 'mark_inactive',
+      syncEnabled: true,
+    }
+
+    const response = await invokeRoute('post', '/integrations/test', {
+      body: payload,
+      user: {
+        id: 'admin-1',
+        role: 'admin',
+      },
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect(directoryMocks.testDirectoryIntegration).toHaveBeenCalledWith(payload)
+    expect(response.body).toMatchObject({
+      ok: true,
+      data: {
+        diagnostics: {
+          rootDepartmentDirectUserCount: 1,
+        },
+        warnings: ['根部门 1 未返回任何子部门。'],
+      },
+    })
+  })
+
   it('supports admin checks via RBAC fallback', async () => {
     rbacMocks.isRbacAdmin.mockResolvedValue(true)
     directoryMocks.listDirectorySyncRuns.mockResolvedValue({
