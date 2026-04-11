@@ -350,8 +350,12 @@ export async function listDingTalkDepartments(
     config?.baseUrl,
   )
 
-  const result = readNestedPayload(payload)
-  const rawList = Array.isArray(result.list) ? result.list : []
+  const nestedResult = payload.result
+  const rawList = Array.isArray(nestedResult)
+    ? nestedResult
+    : nestedResult && typeof nestedResult === 'object' && Array.isArray((nestedResult as Record<string, unknown>).list)
+      ? (nestedResult as Record<string, unknown>).list as unknown[]
+      : []
   return rawList
     .map((entry) => (entry && typeof entry === 'object' ? entry as Record<string, unknown> : null))
     .filter((entry): entry is Record<string, unknown> => Boolean(entry))
