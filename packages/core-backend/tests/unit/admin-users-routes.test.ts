@@ -26,6 +26,17 @@ const auditMocks = vi.hoisted(() => ({
   auditLog: vi.fn(),
 }))
 
+const namespaceAdmissionMocks = vi.hoisted(() => ({
+  deriveDelegatedAdminNamespace: vi.fn(),
+  disableNamespaceAdmissionsWithoutRoles: vi.fn(),
+  isNamespaceAdmissionControlledResource: vi.fn(),
+  listRoleNamespaces: vi.fn(),
+  listUserNamespaceAdmissionSnapshots: vi.fn(),
+  normalizeNamespace: vi.fn(),
+  roleIdMatchesNamespaces: vi.fn(),
+  setUserNamespaceAdmission: vi.fn(),
+}))
+
 const inviteMocks = vi.hoisted(() => ({
   issueInviteToken: vi.fn(() => 'invite-token-fixed'),
   isInviteTokenExpired: vi.fn((token: string) => token === 'eyJhbGciOiJIUzI1NiJ9.eyJ0eXBlIjoiaW52aXRlIiwiZXhwIjoxfQ.sig'),
@@ -52,6 +63,17 @@ vi.mock('bcryptjs', () => bcryptMocks)
 
 vi.mock('../../src/audit/audit', () => ({
   auditLog: auditMocks.auditLog,
+}))
+
+vi.mock('../../src/rbac/namespace-admission', () => ({
+  deriveDelegatedAdminNamespace: namespaceAdmissionMocks.deriveDelegatedAdminNamespace,
+  disableNamespaceAdmissionsWithoutRoles: namespaceAdmissionMocks.disableNamespaceAdmissionsWithoutRoles,
+  isNamespaceAdmissionControlledResource: namespaceAdmissionMocks.isNamespaceAdmissionControlledResource,
+  listRoleNamespaces: namespaceAdmissionMocks.listRoleNamespaces,
+  listUserNamespaceAdmissionSnapshots: namespaceAdmissionMocks.listUserNamespaceAdmissionSnapshots,
+  normalizeNamespace: namespaceAdmissionMocks.normalizeNamespace,
+  roleIdMatchesNamespaces: namespaceAdmissionMocks.roleIdMatchesNamespaces,
+  setUserNamespaceAdmission: namespaceAdmissionMocks.setUserNamespaceAdmission,
 }))
 
 vi.mock('../../src/auth/invite-tokens', () => ({
@@ -161,6 +183,28 @@ describe('admin-users routes', () => {
     rbacMocks.invalidateUserPerms.mockReset()
     bcryptMocks.hash.mockReset()
     auditMocks.auditLog.mockReset()
+    namespaceAdmissionMocks.deriveDelegatedAdminNamespace.mockReset()
+    namespaceAdmissionMocks.deriveDelegatedAdminNamespace.mockImplementation((roleId: string) => (
+      typeof roleId === 'string' && roleId.endsWith('_admin') && roleId !== 'admin'
+        ? roleId.slice(0, -'_admin'.length)
+        : null
+    ))
+    namespaceAdmissionMocks.disableNamespaceAdmissionsWithoutRoles.mockReset()
+    namespaceAdmissionMocks.disableNamespaceAdmissionsWithoutRoles.mockResolvedValue([])
+    namespaceAdmissionMocks.isNamespaceAdmissionControlledResource.mockReset()
+    namespaceAdmissionMocks.isNamespaceAdmissionControlledResource.mockImplementation((namespace: string) => Boolean(namespace))
+    namespaceAdmissionMocks.listRoleNamespaces.mockReset()
+    namespaceAdmissionMocks.listRoleNamespaces.mockResolvedValue([])
+    namespaceAdmissionMocks.listUserNamespaceAdmissionSnapshots.mockReset()
+    namespaceAdmissionMocks.listUserNamespaceAdmissionSnapshots.mockResolvedValue([])
+    namespaceAdmissionMocks.normalizeNamespace.mockReset()
+    namespaceAdmissionMocks.normalizeNamespace.mockImplementation((value: unknown) => String(value ?? '').trim())
+    namespaceAdmissionMocks.roleIdMatchesNamespaces.mockReset()
+    namespaceAdmissionMocks.roleIdMatchesNamespaces.mockImplementation((roleId: string, namespaces: string[]) => (
+      Array.isArray(namespaces) && namespaces.some((namespace) => roleId === namespace || roleId.startsWith(`${namespace}_`))
+    ))
+    namespaceAdmissionMocks.setUserNamespaceAdmission.mockReset()
+    namespaceAdmissionMocks.setUserNamespaceAdmission.mockResolvedValue([])
     inviteMocks.issueInviteToken.mockClear()
     inviteMocks.isInviteTokenExpired.mockClear()
     inviteMocks.isInviteTokenExpired.mockImplementation((token: string) => token === 'eyJhbGciOiJIUzI1NiJ9.eyJ0eXBlIjoiaW52aXRlIiwiZXhwIjoxfQ.sig')
@@ -309,6 +353,19 @@ describe('admin-users routes', () => {
     vi.stubEnv('DINGTALK_AUTH_AUTO_LINK_EMAIL', '1')
     vi.stubEnv('DINGTALK_AUTH_AUTO_PROVISION', '0')
     rbacMocks.isAdmin.mockResolvedValue(true)
+    namespaceAdmissionMocks.listUserNamespaceAdmissionSnapshots.mockResolvedValue([
+      {
+        namespace: 'crm',
+        enabled: true,
+        effective: true,
+        hasRole: true,
+        source: 'seed_backfill',
+        grantedBy: null,
+        updatedBy: null,
+        createdAt: '2026-03-12T00:00:00.000Z',
+        updatedAt: '2026-03-12T00:00:00.000Z',
+      },
+    ])
     pgMocks.query
       .mockResolvedValueOnce({
         rows: [{
@@ -388,6 +445,14 @@ describe('admin-users routes', () => {
         grant: { exists: true, enabled: true },
         identity: { exists: true, corpId: 'ding-corp' },
       },
+      namespaceAdmissions: [
+        expect.objectContaining({
+          namespace: 'crm',
+          enabled: true,
+          effective: true,
+          hasRole: true,
+        }),
+      ],
     })
   })
 
@@ -459,6 +524,19 @@ describe('admin-users routes', () => {
     rbacMocks.isAdmin
       .mockResolvedValueOnce(false)
       .mockResolvedValueOnce(false)
+    namespaceAdmissionMocks.listUserNamespaceAdmissionSnapshots.mockResolvedValue([
+      {
+        namespace: 'crm',
+        enabled: true,
+        effective: true,
+        hasRole: true,
+        source: 'platform_admin',
+        grantedBy: 'admin-1',
+        updatedBy: 'admin-1',
+        createdAt: '2026-03-12T00:00:00.000Z',
+        updatedAt: '2026-03-12T00:00:00.000Z',
+      },
+    ])
     pgMocks.query
       .mockResolvedValueOnce({
         rows: [{ role_id: 'crm_admin' }],
@@ -530,6 +608,134 @@ describe('admin-users routes', () => {
         name: 'CRM 经理层',
       }),
     ])
+    expect((response.body as Record<string, any>).data.namespaceAdmissions).toEqual([
+      expect.objectContaining({
+        namespace: 'crm',
+        enabled: true,
+      }),
+    ])
+  })
+
+  it('updates platform namespace admission and writes audit log', async () => {
+    rbacMocks.isAdmin.mockResolvedValue(true)
+    namespaceAdmissionMocks.setUserNamespaceAdmission.mockResolvedValue([
+      {
+        namespace: 'crm',
+        enabled: true,
+        effective: true,
+        hasRole: true,
+        source: 'platform_admin',
+        grantedBy: 'admin-1',
+        updatedBy: 'admin-1',
+        createdAt: '2026-03-12T00:00:00.000Z',
+        updatedAt: '2026-03-12T00:05:00.000Z',
+      },
+    ])
+    pgMocks.query.mockResolvedValueOnce({
+      rows: [{
+        id: 'user-1',
+        email: 'alpha@example.com',
+        name: 'Alpha',
+        role: 'user',
+        is_active: true,
+        is_admin: false,
+        last_login_at: null,
+        created_at: '2026-03-12T00:00:00.000Z',
+        updated_at: '2026-03-12T00:00:00.000Z',
+      }],
+    })
+
+    const response = await invokeRoute('patch', '/api/admin/users/:userId/namespaces/:namespace/admission', {
+      params: { userId: 'user-1', namespace: 'crm' },
+      body: { enabled: true },
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect(namespaceAdmissionMocks.setUserNamespaceAdmission).toHaveBeenCalledWith(expect.objectContaining({
+      userId: 'user-1',
+      namespace: 'crm',
+      enabled: true,
+      actorId: 'admin-1',
+      source: 'platform_admin',
+    }))
+    expect(auditMocks.auditLog).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'grant',
+      resourceType: 'user-namespace-admission',
+      resourceId: 'user-1:crm',
+    }))
+  })
+
+  it('updates delegated namespace admission within visible scope', async () => {
+    state.authUser = {
+      id: 'crm-admin-1',
+      role: 'user',
+    }
+    rbacMocks.isAdmin.mockResolvedValue(false)
+    namespaceAdmissionMocks.setUserNamespaceAdmission.mockResolvedValue([
+      {
+        namespace: 'crm',
+        enabled: true,
+        effective: true,
+        hasRole: true,
+        source: 'delegated_admin',
+        grantedBy: 'crm-admin-1',
+        updatedBy: 'crm-admin-1',
+        createdAt: '2026-03-12T00:00:00.000Z',
+        updatedAt: '2026-03-12T00:05:00.000Z',
+      },
+    ])
+    pgMocks.query
+      .mockResolvedValueOnce({
+        rows: [{ role_id: 'crm_admin' }],
+      })
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'user-1',
+          email: 'alpha@example.com',
+          name: 'Alpha',
+          role: 'user',
+          is_active: true,
+          is_admin: false,
+          last_login_at: null,
+          created_at: '2026-03-12T00:00:00.000Z',
+          updated_at: '2026-03-12T00:00:00.000Z',
+        }],
+      })
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'scope-1',
+          admin_user_id: 'crm-admin-1',
+          namespace: 'crm',
+          directory_department_id: 'dept-1',
+          created_by: 'admin-1',
+          created_at: '2026-03-12T00:00:00.000Z',
+          updated_at: '2026-03-12T00:00:00.000Z',
+          integration_id: 'integration-1',
+          integration_name: 'DingTalk CN',
+          provider: 'dingtalk',
+          corp_id: 'ding-corp',
+          external_department_id: '1001',
+          department_name: '研发部',
+          department_full_path: '总部 / 研发部',
+          department_is_active: true,
+        }],
+      })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [{ allowed: true }] })
+
+    const response = await invokeRoute('patch', '/api/admin/role-delegation/users/:userId/namespaces/:namespace/admission', {
+      params: { userId: 'user-1', namespace: 'crm' },
+      body: { enabled: true },
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect(namespaceAdmissionMocks.setUserNamespaceAdmission).toHaveBeenCalledWith(expect.objectContaining({
+      userId: 'user-1',
+      namespace: 'crm',
+      enabled: true,
+      actorId: 'crm-admin-1',
+      source: 'delegated_admin',
+    }))
   })
 
   it('rejects delegated role assignment outside allowed namespaces', async () => {
@@ -1515,6 +1721,8 @@ describe('admin-users routes', () => {
       .mockResolvedValueOnce(true)
       .mockResolvedValueOnce(false)
     rbacMocks.listUserPermissions.mockResolvedValue(['attendance:read'])
+    namespaceAdmissionMocks.listRoleNamespaces.mockResolvedValue(['attendance'])
+    namespaceAdmissionMocks.disableNamespaceAdmissionsWithoutRoles.mockResolvedValue(['attendance'])
     pgMocks.query
       .mockResolvedValueOnce({
         rows: [{
@@ -1556,6 +1764,9 @@ describe('admin-users routes', () => {
       action: 'revoke',
       resourceType: 'user-role',
       resourceId: 'user-1:attendance_admin',
+      meta: expect.objectContaining({
+        disabledNamespaces: ['attendance'],
+      }),
     }))
   })
 
@@ -2234,7 +2445,7 @@ describe('admin-users routes', () => {
     expect(String(pgMocks.query.mock.calls[0]?.[0] || '')).toContain('created_at >=')
     expect(String(pgMocks.query.mock.calls[0]?.[0] || '')).toContain('created_at <=')
     expect(pgMocks.query.mock.calls[0]?.[1]?.slice(0, 3)).toEqual([
-      ['user', 'user-role', 'user-auth-grant', 'user-password', 'user-session', 'user-invite', 'role', 'permission', 'permission-template', 'delegated-admin-scope', 'delegated-admin-scope-template', 'platform-member-group', 'delegated-admin-group-scope'],
+      ['user', 'user-role', 'user-auth-grant', 'user-namespace-admission', 'user-password', 'user-session', 'user-invite', 'role', 'permission', 'permission-template', 'delegated-admin-scope', 'delegated-admin-scope-template', 'platform-member-group', 'delegated-admin-group-scope'],
       '2026-03-10T00:00:00.000Z',
       '2026-03-12T23:59:59.999Z',
     ])

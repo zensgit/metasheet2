@@ -229,6 +229,47 @@
           <div class="user-admin__section">
             <div class="user-admin__section-head">
               <div>
+                <h3>插件使用</h3>
+                <p class="user-admin__hint">这里控制成员是否可进入具体插件命名空间。钉钉登录只决定能否扫码进入平台，不等于插件权限。</p>
+              </div>
+              <button class="user-admin__button user-admin__button--secondary" type="button" :disabled="loadingAdmission || !access" @click="void loadMemberAdmission(access.user.id)">
+                {{ loadingAdmission ? '刷新中...' : '刷新插件准入' }}
+              </button>
+            </div>
+            <div v-if="memberAdmission?.namespaceAdmissions?.length" class="user-admin__role-list">
+              <article v-for="admission in memberAdmission.namespaceAdmissions || []" :key="admission.namespace" class="user-admin__role-card user-admin__role-card--namespace">
+                <strong>{{ admission.namespace }}</strong>
+                <span v-if="admission.updatedAt">更新时间：{{ formatDate(admission.updatedAt) }}</span>
+                <div class="user-admin__chips">
+                  <span class="user-admin__chip" :class="{ 'user-admin__chip--success': admission.hasRole, 'user-admin__chip--danger': !admission.hasRole }">
+                    {{ admission.hasRole ? '已分配角色' : '未分配角色' }}
+                  </span>
+                  <span class="user-admin__chip" :class="{ 'user-admin__chip--success': admission.enabled, 'user-admin__chip--danger': !admission.enabled }">
+                    {{ admission.enabled ? '插件使用已开通' : '插件使用未开通' }}
+                  </span>
+                  <span class="user-admin__chip" :class="{ 'user-admin__chip--success': admission.effective, 'user-admin__chip--danger': !admission.effective }">
+                    {{ admission.effective ? '当前实际可用' : '当前不可用' }}
+                  </span>
+                </div>
+                <p>只有角色和开通状态同时满足时，成员才能使用对应插件。</p>
+                <div class="user-admin__role-actions">
+                  <button class="user-admin__button" type="button" :disabled="busy || admission.enabled" @click="void updateNamespaceAdmission(admission, true)">
+                    开通插件使用
+                  </button>
+                  <button class="user-admin__button user-admin__button--secondary" type="button" :disabled="busy || !admission.enabled" @click="void updateNamespaceAdmission(admission, false)">
+                    关闭插件使用
+                  </button>
+                </div>
+              </article>
+            </div>
+            <div v-else class="user-admin__empty">
+              暂无插件使用准入信息
+            </div>
+          </div>
+
+          <div class="user-admin__section">
+            <div class="user-admin__section-head">
+              <div>
                 <h3>管理员能力</h3>
                 <p class="user-admin__hint">考勤管理员和平台管理员分开控制，互不隐含。平台管理员变更后建议重新登录一次。</p>
               </div>
@@ -470,6 +511,15 @@ type MemberAdmission = {
   businessRoleIds: string[]
   directoryMemberships: MemberDirectoryMembership[]
   dingtalk: DingTalkAccess
+  namespaceAdmissions: NamespaceAdmission[]
+}
+
+type NamespaceAdmission = {
+  namespace: string
+  enabled: boolean
+  effective: boolean
+  hasRole: boolean
+  updatedAt: string | null
 }
 
 type CreateUserForm = {
@@ -598,6 +648,34 @@ function formatDate(value: string | null | undefined): string {
   const date = new Date(value)
   if (Number.isNaN(date.getTime())) return value
   return `${date.toLocaleDateString('zh-CN')} ${date.toLocaleTimeString('zh-CN', { hour12: false })}`
+}
+
+function normalizeNamespaceAdmissions(value: unknown): NamespaceAdmission[] {
+  if (!Array.isArray(value)) return []
+  return value
+    .map((item) => {
+      const record = item as Record<string, unknown>
+      const namespace = String(record.namespace || '').trim()
+      if (!namespace) return null
+
+      const hasRole = record.hasRole === true || record.has_role === true
+      const enabled = record.enabled === true
+      const effective = typeof record.effective === 'boolean' ? record.effective : enabled && hasRole
+      const updatedAt = typeof record.updatedAt === 'string'
+        ? record.updatedAt
+        : typeof record.updated_at === 'string'
+          ? record.updated_at
+          : null
+
+      return {
+        namespace,
+        enabled,
+        effective,
+        hasRole,
+        updatedAt,
+      }
+    })
+    .filter((item): item is NamespaceAdmission => item !== null)
 }
 
 function buildInviteUrl(token: string): string {
@@ -813,12 +891,47 @@ async function loadMemberAdmission(userId?: string): Promise<void> {
       throw new Error(String((payload.error as Record<string, unknown> | undefined)?.message || '加载成员准入失败'))
     }
 
-    memberAdmission.value = payload.data as MemberAdmission
+    const data = payload.data as Record<string, unknown> | undefined
+    memberAdmission.value = {
+      ...(data as MemberAdmission),
+      namespaceAdmissions: normalizeNamespaceAdmissions(data?.namespaceAdmissions),
+    }
   } catch (error) {
     memberAdmission.value = null
     setStatus(error instanceof Error ? error.message : '加载成员准入失败', 'error')
   } finally {
     loadingAdmission.value = false
+  }
+}
+
+async function updateNamespaceAdmission(admission: NamespaceAdmission, enabled: boolean): Promise<void> {
+  if (!access.value) return
+  busy.value = true
+  try {
+    const response = await apiFetch(`/api/admin/users/${encodeURIComponent(access.value.user.id)}/namespaces/${encodeURIComponent(admission.namespace)}/admission`, {
+      method: 'PATCH',
+      body: JSON.stringify({ enabled }),
+    })
+    const payload = await readJson(response)
+    if (!response.ok || payload.ok !== true) {
+      throw new Error(String((payload.error as Record<string, unknown> | undefined)?.message || '更新插件使用准入失败'))
+    }
+
+    const data = payload.data as Record<string, unknown> | undefined
+    if (data?.namespaceAdmissions !== undefined) {
+      memberAdmission.value = {
+        ...(memberAdmission.value as MemberAdmission),
+        ...(data as MemberAdmission),
+        namespaceAdmissions: normalizeNamespaceAdmissions(data.namespaceAdmissions),
+      }
+    } else {
+      await loadMemberAdmission(access.value.user.id)
+    }
+    setStatus(enabled ? `已开通 ${admission.namespace} 插件使用` : `已关闭 ${admission.namespace} 插件使用`)
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : '更新插件使用准入失败', 'error')
+  } finally {
+    busy.value = false
   }
 }
 

@@ -1593,40 +1593,53 @@ async function loadViewPermissionScopeMap(
   if (!userId || viewIds.length === 0) return new Map()
   try {
     const result = await query(
-      `SELECT vp.view_id, vp.permission, vp.subject_type
-       FROM meta_view_permissions vp
-       WHERE vp.view_id = ANY($2::text[])
-         AND (
-           (vp.subject_type = 'user' AND vp.subject_id = $1)
-           OR (
-             vp.subject_type = 'role'
-             AND EXISTS (
-               SELECT 1 FROM user_roles ur
-               WHERE ur.user_id = $1 AND ur.role_id = vp.subject_id
+      `WITH assigned_views AS (
+         SELECT DISTINCT vp.view_id
+         FROM meta_view_permissions vp
+         WHERE vp.view_id = ANY($2::text[])
+       ),
+       effective_permissions AS (
+         SELECT vp.view_id, vp.permission
+         FROM meta_view_permissions vp
+         WHERE vp.view_id = ANY($2::text[])
+           AND (
+             (vp.subject_type = 'user' AND vp.subject_id = $1)
+             OR (
+               vp.subject_type = 'role'
+               AND EXISTS (
+                 SELECT 1 FROM user_roles ur
+                 WHERE ur.user_id = $1 AND ur.role_id = vp.subject_id
+               )
              )
            )
-         )`,
+       )
+       SELECT av.view_id,
+              COALESCE(
+                array_agg(DISTINCT ep.permission) FILTER (WHERE ep.permission IS NOT NULL),
+                ARRAY[]::text[]
+              ) AS permissions
+       FROM assigned_views av
+       LEFT JOIN effective_permissions ep ON ep.view_id = av.view_id
+       GROUP BY av.view_id`,
       [userId, viewIds],
     )
-    const grouped = new Map<string, string[]>()
-    for (const row of result.rows as Array<{ view_id: string; permission: string }>) {
-      const viewId = typeof row.view_id === 'string' ? row.view_id : ''
-      const perm = typeof row.permission === 'string' ? row.permission.trim() : ''
-      if (!viewId || !perm) continue
-      const current = grouped.get(viewId) ?? []
-      current.push(perm)
-      grouped.set(viewId, current)
-    }
     return new Map(
-      Array.from(grouped.entries()).map(([viewId, perms]) => [
-        viewId,
-        {
-          hasAssignments: true,
-          canRead: perms.includes('read') || perms.includes('write') || perms.includes('admin'),
-          canWrite: perms.includes('write') || perms.includes('admin'),
-          canAdmin: perms.includes('admin'),
-        },
-      ]),
+      (result.rows as Array<{ view_id: string; permissions: string[] | null }>).flatMap((row) => {
+        const viewId = typeof row.view_id === 'string' ? row.view_id : ''
+        if (!viewId) return []
+        const perms = Array.isArray(row.permissions)
+          ? row.permissions.filter((p): p is string => typeof p === 'string').map((p) => p.trim()).filter(Boolean)
+          : []
+        return [[
+          viewId,
+          {
+            hasAssignments: true,
+            canRead: perms.includes('read') || perms.includes('write') || perms.includes('admin'),
+            canWrite: perms.includes('write') || perms.includes('admin'),
+            canAdmin: perms.includes('admin'),
+          },
+        ] as const]
+      }),
     )
   } catch (err) {
     if (isUndefinedTableError(err, 'meta_view_permissions') || isUndefinedTableError(err, 'user_roles')) return new Map()
@@ -3058,10 +3071,14 @@ export function univerMetaRouter(): Router {
       const selectedView = viewId
         ? serializedViews.find((view: UniverMetaViewConfig) => view.id === viewId) ?? null
         : serializedViews[0] ?? null
+      const viewIds = serializedViews.map((v: UniverMetaViewConfig) => v.id)
+      const viewScopeMap = access.userId ? await loadViewPermissionScopeMap(pool.query.bind(pool), viewIds, access.userId) : new Map()
+      const fieldScopeMap = (access.userId && resolvedSheetId) ? await loadFieldPermissionScopeMap(pool.query.bind(pool), resolvedSheetId, access.userId) : new Map()
       const fieldPermissions = deriveFieldPermissions(activeFields, capabilities, {
         hiddenFieldIds: selectedView?.hiddenFieldIds ?? [],
+        fieldScopeMap,
       })
-      const viewPermissions = deriveViewPermissions(serializedViews, capabilities)
+      const viewPermissions = deriveViewPermissions(serializedViews, capabilities, viewScopeMap)
 
       return res.json({
         ok: true,
@@ -4480,13 +4497,16 @@ export function univerMetaRouter(): Router {
         sheetScope,
         access,
       )
+      const fieldScopeMap = access.userId ? await loadFieldPermissionScopeMap(pool.query.bind(pool), sheetId, access.userId) : new Map()
+      const viewScopeMap = (access.userId && viewConfig) ? await loadViewPermissionScopeMap(pool.query.bind(pool), [viewConfig.id], access.userId) : new Map()
       const permissions: MultitableScopedPermissions = {
         fieldPermissions: deriveFieldPermissions(fields, capabilities, {
           hiddenFieldIds: viewConfig?.hiddenFieldIds ?? [],
+          fieldScopeMap,
         }),
         rowActions: deriveDefaultRowActions(capabilities, sheetScope, access.isAdminRole),
         ...(rowActionOverrides ? { rowActionOverrides } : {}),
-        ...(viewConfig ? { viewPermissions: deriveViewPermissions([viewConfig], capabilities) } : {}),
+        ...(viewConfig ? { viewPermissions: deriveViewPermissions([viewConfig], capabilities, viewScopeMap) } : {}),
       }
 
       const meta = warnings.length > 0 || hasFilterOrSort
@@ -4570,11 +4590,14 @@ export function univerMetaRouter(): Router {
       const hiddenFieldIds = new Set(resolved.view?.hiddenFieldIds ?? [])
       const visibleFields = fields.filter((field) => !hiddenFieldIds.has(field.id) && !isFieldPermissionHidden(field))
       const visibleFieldIds = new Set(visibleFields.map((field) => field.id))
+      const fieldScopeMap = access.userId ? await loadFieldPermissionScopeMap(pool.query.bind(pool), sheetId, access.userId) : new Map()
+      const viewScopeMap = (access.userId && resolved.view) ? await loadViewPermissionScopeMap(pool.query.bind(pool), [resolved.view.id], access.userId) : new Map()
       const fieldPermissions = deriveFieldPermissions(fields, capabilities, {
         hiddenFieldIds: resolved.view?.hiddenFieldIds ?? [],
         allowCreateOnly: !record,
+        fieldScopeMap,
       })
-      const viewPermissions = resolved.view ? deriveViewPermissions([resolved.view], capabilities) : {}
+      const viewPermissions = resolved.view ? deriveViewPermissions([resolved.view], capabilities, viewScopeMap) : {}
       const rowActions = record
         ? deriveRecordRowActions(capabilities, sheetScope, access, record.createdBy)
         : deriveRecordRowActions({
@@ -5364,10 +5387,13 @@ export function univerMetaRouter(): Router {
           )
         : undefined
 
+      const fieldScopeMap = access.userId ? await loadFieldPermissionScopeMap(pool.query.bind(pool), sheetId, access.userId) : new Map()
+      const viewScopeMap = (access.userId && viewConfig) ? await loadViewPermissionScopeMap(pool.query.bind(pool), [viewConfig.id], access.userId) : new Map()
       const fieldPermissions = deriveFieldPermissions(fields, capabilities, {
         hiddenFieldIds: viewConfig?.hiddenFieldIds ?? [],
+        fieldScopeMap,
       })
-      const viewPermissions = viewConfig ? deriveViewPermissions([viewConfig], capabilities) : {}
+      const viewPermissions = viewConfig ? deriveViewPermissions([viewConfig], capabilities, viewScopeMap) : {}
       const rowActions = deriveRecordRowActions(capabilities, sheetScope, access, record.createdBy)
 
       return res.json({

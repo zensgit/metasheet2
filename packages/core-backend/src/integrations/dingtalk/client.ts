@@ -1,4 +1,5 @@
 import { Logger } from '../../core/logger'
+import { assertDingTalkCorpAllowed } from './runtime-policy'
 
 const logger = new Logger('DingTalkClient')
 
@@ -184,6 +185,7 @@ export function readDingTalkOauthConfig(): DingTalkOauthConfig {
   if (!clientId) throw new Error('DINGTALK_CLIENT_ID or DINGTALK_APP_KEY is not configured')
   if (!clientSecret) throw new Error('DINGTALK_CLIENT_SECRET or DINGTALK_APP_SECRET is not configured')
   if (!redirectUri) throw new Error('DINGTALK_REDIRECT_URI is not configured')
+  assertDingTalkCorpAllowed(corpId, { allowEmpty: true, context: 'DINGTALK_CORP_ID' })
 
   return {
     clientId,
@@ -194,11 +196,20 @@ export function readDingTalkOauthConfig(): DingTalkOauthConfig {
 }
 
 export function isDingTalkConfigured(): boolean {
-  return Boolean(
-    readStringEnv('DINGTALK_CLIENT_ID', 'DINGTALK_APP_KEY') &&
-    readStringEnv('DINGTALK_CLIENT_SECRET', 'DINGTALK_APP_SECRET') &&
-    readStringEnv('DINGTALK_REDIRECT_URI'),
-  )
+  const clientId = readStringEnv('DINGTALK_CLIENT_ID', 'DINGTALK_APP_KEY')
+  const clientSecret = readStringEnv('DINGTALK_CLIENT_SECRET', 'DINGTALK_APP_SECRET')
+  const redirectUri = readStringEnv('DINGTALK_REDIRECT_URI')
+  if (!clientId || !clientSecret || !redirectUri) return false
+
+  try {
+    assertDingTalkCorpAllowed(readStringEnv('DINGTALK_CORP_ID') || null, {
+      allowEmpty: true,
+      context: 'DINGTALK_CORP_ID',
+    })
+    return true
+  } catch {
+    return false
+  }
 }
 
 export async function exchangeCodeForUserAccessToken(

@@ -8,6 +8,8 @@ import type { Kysely } from 'kysely'
 import { sql } from 'kysely'
 
 export async function up(db: Kysely<unknown>): Promise<void> {
+  await sql`CREATE EXTENSION IF NOT EXISTS pgcrypto`.execute(db)
+
   await sql`
     CREATE TABLE IF NOT EXISTS field_permissions (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(),

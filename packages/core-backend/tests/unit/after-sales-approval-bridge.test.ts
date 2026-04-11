@@ -28,6 +28,7 @@ type ApprovalAssignmentRow = {
   assignment_type: string
   assignee_id: string
   source_step: number
+  node_key: string | null
   is_active: boolean
   metadata: Record<string, unknown>
 }
@@ -151,16 +152,35 @@ function createDbFixture(existingPendingId?: string) {
       return { rows: [], rowCount: 1 }
     }
     if (normalized.startsWith('INSERT INTO approval_assignments')) {
-      const [instanceId, assigneeId, sourceStep, metadata] = params as [string, string, number, string]
+      const [instanceId, assigneeId, sourceStep, nodeKey, metadata] = params as [string, string, number, string, string]
       assignments.push({
         instance_id: instanceId,
         assignment_type: 'role',
         assignee_id: assigneeId,
         source_step: sourceStep,
+        node_key: nodeKey,
         is_active: true,
         metadata: JSON.parse(metadata),
       })
       return { rows: [], rowCount: 1 }
+    }
+    if (normalized.startsWith('UPDATE approval_assignments')) {
+      const [instanceId, assigneeId, sourceStep, metadata] = params as [string, string, number, string]
+      let updated = 0
+      for (const assignment of assignments) {
+        if (
+          assignment.instance_id === instanceId
+          && assignment.assignment_type === 'role'
+          && assignment.assignee_id === assigneeId
+          && assignment.is_active
+        ) {
+          assignment.source_step = sourceStep
+          assignment.is_active = true
+          assignment.metadata = JSON.parse(metadata)
+          updated += 1
+        }
+      }
+      return { rows: [], rowCount: updated }
     }
     throw new Error(`Unhandled transaction query: ${normalized}`)
   })

@@ -1,4 +1,4 @@
-import express from 'express'
+import express, { type Express } from 'express'
 import request from 'supertest'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -7,6 +7,7 @@ const authState = vi.hoisted(() => ({
     id: 'user-1',
     tenantId: 'tenant-a',
     name: 'Owner One',
+    permissions: ['*:*'],
   } as Record<string, unknown> | null,
 }))
 
@@ -36,24 +37,31 @@ vi.mock('../../src/middleware/auth', () => ({
   },
 }))
 
-import { approvalsRouter } from '../../src/routes/approvals'
+vi.mock('../../src/rbac/rbac', () => ({
+  rbacGuard: () => (_req: express.Request, _res: express.Response, next: express.NextFunction) => next(),
+}))
 
 describe('approvals routes', () => {
-  const app = express()
-  app.use(express.json())
-  app.use(approvalsRouter())
+  let app: Express
 
-  beforeEach(() => {
+  beforeEach(async () => {
+    vi.resetModules()
     authState.user = {
       id: 'user-1',
       tenantId: 'tenant-a',
       name: 'Owner One',
+      permissions: ['*:*'],
     }
     pgState.pool.query.mockReset()
     pgState.pool.connect.mockReset()
     pgState.client.query.mockReset()
     pgState.client.release.mockReset()
     pgState.pool.connect.mockResolvedValue(pgState.client)
+
+    const { approvalsRouter } = await import('../../src/routes/approvals')
+    app = express()
+    app.use(express.json())
+    app.use(approvalsRouter())
   })
 
   it('requires version for approval actions', async () => {
@@ -76,6 +84,7 @@ describe('approvals routes', () => {
     authState.user = {
       tenantId: 'tenant-a',
       name: 'Owner One',
+      permissions: ['*:*'],
     }
 
     const response = await request(app)
@@ -96,6 +105,7 @@ describe('approvals routes', () => {
     authState.user = {
       tenantId: 'tenant-a',
       name: 'Owner One',
+      permissions: ['*:*'],
     }
 
     const response = await request(app).get('/api/approvals/pending')
@@ -115,6 +125,7 @@ describe('approvals routes', () => {
       id: 'user-1',
       tenantId: 'tenant-a',
       name: 'Owner One',
+      permissions: ['*:*'],
     }
     pgState.pool.query
       .mockResolvedValueOnce({

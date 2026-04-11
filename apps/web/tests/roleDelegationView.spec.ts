@@ -187,6 +187,32 @@ function createApiImplementation(callLog: string[]) {
           roles: [],
           memberGroups: [],
           delegableRoles: [],
+          namespaceAdmissions: [
+            {
+              namespace: 'crm',
+              enabled: false,
+              effective: false,
+              hasRole: true,
+              updatedAt: '2026-04-09T00:00:00.000Z',
+            },
+          ],
+        },
+      })
+    }
+
+    if (pathname === '/api/admin/role-delegation/users/user-1/namespaces/crm/admission') {
+      return createJsonResponse({
+        ok: true,
+        data: {
+          namespaceAdmissions: [
+            {
+              namespace: 'crm',
+              enabled: true,
+              effective: true,
+              hasRole: true,
+              updatedAt: '2026-04-10T00:00:00.000Z',
+            },
+          ],
         },
       })
     }
@@ -292,5 +318,19 @@ describe('RoleDelegationView', () => {
 
     expect(container?.textContent).toContain('请选择一个成员')
     expect(container?.textContent).not.toContain('alpha@example.com')
+  })
+
+  it('shows namespace admission controls for delegated members and can toggle plugin usage', async () => {
+    await mountView()
+
+    expect(container?.textContent).toContain('插件使用准入')
+    expect(container?.textContent).toContain('插件使用未开通')
+    expect(container?.textContent).toContain('当前不可用')
+
+    findButtonByText(container!, '开通插件使用').click()
+    await waitForCondition(() => callLog.some((url) => url.includes('/api/admin/role-delegation/users/user-1/namespaces/crm/admission')))
+
+    expect(container?.textContent).toContain('已开通 crm 插件使用')
+    expect(container?.textContent).toContain('当前实际可用')
   })
 })

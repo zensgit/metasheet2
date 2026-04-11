@@ -42,10 +42,14 @@ function isMetaCapabilities(value: unknown): value is MetaCapabilities {
 export function useMultitableCapabilities(
   source: Ref<MultitableRole | MetaCapabilities | null | undefined>,
 ): MultitableCapabilities {
-  const caps = (key: keyof MetaCapabilities) =>
+  const caps = (key: keyof MetaCapabilities, fallbackKey?: keyof MetaCapabilities) =>
     computed(() => {
       const current = source.value
-      if (isMetaCapabilities(current)) return current[key]
+      if (isMetaCapabilities(current)) {
+        const value = current[key]
+        if (value !== undefined && value !== null) return value
+        return fallbackKey ? (current[fallbackKey] ?? false) : false
+      }
       return ROLE_CAPS[current ?? 'viewer']?.[key] ?? false
     })
 
@@ -59,6 +63,6 @@ export function useMultitableCapabilities(
     canManageViews: caps('canManageViews'),
     canComment: caps('canComment'),
     canManageAutomation: caps('canManageAutomation'),
-    canExport: caps('canExport'),
+    canExport: caps('canExport', 'canRead'),
   }
 }

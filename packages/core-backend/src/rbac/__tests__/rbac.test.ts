@@ -1,12 +1,17 @@
 import type { NextFunction, Request, Response } from 'express'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { rbacGuard, rbacGuardAll, rbacGuardAny } from '../rbac'
+import * as namespaceAdmission from '../namespace-admission'
 import * as rbacService from '../service'
 
 vi.mock('../service', () => ({
   isAdmin: vi.fn().mockResolvedValue(false),
   userHasPermission: vi.fn().mockResolvedValue(false),
   listUserPermissions: vi.fn().mockResolvedValue([]),
+}))
+
+vi.mock('../namespace-admission', () => ({
+  isPermissionAllowedByNamespaceAdmission: vi.fn().mockResolvedValue(true),
 }))
 
 function createResponse(): Response {
@@ -24,6 +29,7 @@ function createRequest(user?: Express.Request['user']): Request {
 describe('rbacGuard', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    vi.mocked(namespaceAdmission.isPermissionAllowedByNamespaceAdmission).mockResolvedValue(true)
   })
 
   it('allows admin role from the authenticated request user without extra RBAC queries', async () => {
@@ -52,6 +58,20 @@ describe('rbacGuard', () => {
     expect(rbacService.userHasPermission).not.toHaveBeenCalled()
   })
 
+  it('keeps namespace admission enforced for namespaced request-user permissions', async () => {
+    vi.mocked(namespaceAdmission.isPermissionAllowedByNamespaceAdmission).mockResolvedValueOnce(false)
+
+    const guard = rbacGuard('attendance', 'write')
+    const req = createRequest({ id: 'attendance-admin', role: 'user', permissions: ['attendance:*'] })
+    const res = createResponse()
+    const next = vi.fn() as unknown as NextFunction
+
+    await guard(req, res, next)
+
+    expect(next).not.toHaveBeenCalled()
+    expect(res.status).toHaveBeenCalledWith(403)
+  })
+
   it('falls back to RBAC tables when the authenticated request user lacks resolved permissions', async () => {
     vi.mocked(rbacService.userHasPermission).mockResolvedValueOnce(true)
 
@@ -71,6 +91,7 @@ describe('rbacGuard', () => {
 describe('rbacGuardAny', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    vi.mocked(namespaceAdmission.isPermissionAllowedByNamespaceAdmission).mockResolvedValue(true)
   })
 
   it('allows when any requested permission is already present on req.user', async () => {
@@ -90,6 +111,7 @@ describe('rbacGuardAny', () => {
 describe('rbacGuardAll', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    vi.mocked(namespaceAdmission.isPermissionAllowedByNamespaceAdmission).mockResolvedValue(true)
   })
 
   it('allows when req.user already has a global wildcard permission', async () => {
