@@ -189,6 +189,7 @@ describe('AuthService.verifyToken', () => {
       id: 'dev-admin',
       roles: ['admin'],
       perms: ['multitable:read', 'multitable:write'],
+      tenantId: 'tenant_42',
       sid: 'dev-session',
       iat: 0,
       exp: 0,
@@ -199,6 +200,7 @@ describe('AuthService.verifyToken', () => {
 
     expect(user).toBeTruthy()
     expect(user?.id).toBe('dev-admin')
+    expect(user?.tenantId).toBe('tenant_42')
     expect(user?.role).toBe('admin')
     expect(user?.permissions).toEqual(['multitable:read', 'multitable:write'])
     expect(poolMocks.query).not.toHaveBeenCalled()
@@ -388,6 +390,41 @@ describe('AuthService.register', () => {
       4,
       expect.stringContaining('INSERT INTO user_roles'),
       [expect.any(String), 'attendance_employee'],
+    )
+  })
+})
+
+describe('AuthService.createToken', () => {
+  beforeEach(() => {
+    process.env.NODE_ENV = 'test'
+    jwtMocks.sign.mockReset()
+    jwtMocks.sign.mockReturnValue('signed-token')
+    secretManagerMocks.get.mockReset()
+    secretManagerMocks.get.mockReturnValue('unit-test-secret-abcdefghijklmnopqrstuvwxyz123456')
+  })
+
+  it('includes tenantId when present on the authenticated user', () => {
+    const auth = new AuthService()
+
+    const token = auth.createToken({
+      id: 'user-1',
+      email: 'user@example.com',
+      name: 'User',
+      role: 'admin',
+      permissions: ['*:*'],
+      tenantId: 'tenant_42',
+      created_at: new Date('2026-04-11T00:00:00.000Z'),
+      updated_at: new Date('2026-04-11T00:00:00.000Z'),
+    })
+
+    expect(token).toBe('signed-token')
+    expect(jwtMocks.sign).toHaveBeenCalledWith(
+      expect.objectContaining({
+        userId: 'user-1',
+        tenantId: 'tenant_42',
+      }),
+      expect.any(String),
+      expect.any(Object),
     )
   })
 })

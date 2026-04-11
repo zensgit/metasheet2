@@ -72,7 +72,10 @@ function requestJson(
 }
 
 async function issueDevToken(baseUrl: string, query: string): Promise<string> {
-  const tokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?${query}`)
+  const tenantScopedQuery = query.includes('tenantId=')
+    ? query
+    : `${query}&tenantId=${encodeURIComponent(TENANT_ID)}`
+  const tokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?${tenantScopedQuery}`)
   const token = (tokenRes.body as { token?: string } | undefined)?.token
   expect(token).toBeTruthy()
   return String(token)
@@ -86,7 +89,7 @@ function stableMetaId(prefix: string, ...parts: string[]): string {
   return `${prefix}_${digest}`.slice(0, 50)
 }
 
-const TENANT_ID = 'default'
+const TENANT_ID = 'tenant_42'
 const APP_ID = 'after-sales'
 const PLUGIN_ID = 'plugin-after-sales'
 const PROJECT_ID = `${TENANT_ID}:${APP_ID}`
@@ -391,7 +394,7 @@ describe('after-sales plugin install integration', () => {
     )
 
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=after-sales-install-it&roles=admin&perms=*:*`,
+      `${baseUrl}/api/auth/dev-token?userId=after-sales-install-it&roles=admin&perms=*:*&tenantId=${TENANT_ID}`,
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     expect(token).toBeTruthy()
@@ -854,7 +857,7 @@ describe('after-sales plugin install integration', () => {
     if (!baseUrl || !pool) return
 
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=after-sales-non-admin&roles=user&perms=after_sales:read`,
+      `${baseUrl}/api/auth/dev-token?userId=after-sales-non-admin&roles=user&perms=after_sales:read&tenantId=${TENANT_ID}`,
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     expect(token).toBeTruthy()
@@ -885,7 +888,7 @@ describe('after-sales plugin install integration', () => {
     if (!baseUrl || !pool || !server) return
 
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=after-sales-reinstall-it&roles=admin&perms=*:*`,
+      `${baseUrl}/api/auth/dev-token?userId=after-sales-reinstall-it&roles=admin&perms=*:*&tenantId=${TENANT_ID}`,
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     expect(token).toBeTruthy()
@@ -1040,7 +1043,7 @@ describe('after-sales plugin install integration', () => {
     if (!baseUrl || !pool) return
 
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=after-sales-part-item-it&roles=admin&perms=*:*`,
+      `${baseUrl}/api/auth/dev-token?userId=after-sales-part-item-it&roles=admin&perms=*:*&tenantId=${TENANT_ID}`,
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     expect(token).toBeTruthy()
@@ -1191,7 +1194,7 @@ describe('after-sales plugin install integration', () => {
     if (!baseUrl || !pool) return
 
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=after-sales-ticket-it&roles=admin&perms=*:*`,
+      `${baseUrl}/api/auth/dev-token?userId=after-sales-ticket-it&roles=admin&perms=*:*&tenantId=${TENANT_ID}`,
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     expect(token).toBeTruthy()
@@ -1495,7 +1498,7 @@ describe('after-sales plugin install integration', () => {
     if (!baseUrl || !pool) return
 
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=after-sales-ticket-update-it&roles=admin&perms=*:*`,
+      `${baseUrl}/api/auth/dev-token?userId=after-sales-ticket-update-it&roles=admin&perms=*:*&tenantId=${TENANT_ID}`,
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     expect(token).toBeTruthy()
@@ -1598,7 +1601,7 @@ describe('after-sales plugin install integration', () => {
     if (!baseUrl || !pool) return
 
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=after-sales-refund-reject-it&roles=admin&perms=*:*`,
+      `${baseUrl}/api/auth/dev-token?userId=after-sales-refund-reject-it&roles=admin&perms=*:*&tenantId=${TENANT_ID}`,
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     expect(token).toBeTruthy()
@@ -1758,7 +1761,7 @@ describe('after-sales plugin install integration', () => {
     if (!baseUrl || !pool) return
 
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=after-sales-service-record-it&roles=admin&perms=*:*`,
+      `${baseUrl}/api/auth/dev-token?userId=after-sales-service-record-it&roles=admin&perms=*:*&tenantId=${TENANT_ID}`,
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     expect(token).toBeTruthy()
@@ -1930,7 +1933,7 @@ describe('after-sales plugin install integration', () => {
     if (!baseUrl || !pool) return
 
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=after-sales-ticket-delete-it&roles=admin&perms=*:*`,
+      `${baseUrl}/api/auth/dev-token?userId=after-sales-ticket-delete-it&roles=admin&perms=*:*&tenantId=${TENANT_ID}`,
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     expect(token).toBeTruthy()
@@ -2038,7 +2041,7 @@ describe('after-sales plugin install integration', () => {
     if (!baseUrl || !pool) return
 
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=after-sales-service-record-delete-it&roles=admin&perms=*:*`,
+      `${baseUrl}/api/auth/dev-token?userId=after-sales-service-record-delete-it&roles=admin&perms=*:*&tenantId=${TENANT_ID}`,
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     expect(token).toBeTruthy()
@@ -2160,7 +2163,7 @@ describe('after-sales plugin install integration', () => {
     if (!baseUrl || !pool) return
 
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=after-sales-service-record-update-it&roles=admin&perms=*:*`,
+      `${baseUrl}/api/auth/dev-token?userId=after-sales-service-record-update-it&roles=admin&perms=*:*&tenantId=${TENANT_ID}`,
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     expect(token).toBeTruthy()
@@ -2294,7 +2297,7 @@ describe('after-sales plugin install integration', () => {
     if (!baseUrl || !pool) return
 
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=after-sales-installed-asset-create-it&roles=admin&perms=*:*`,
+      `${baseUrl}/api/auth/dev-token?userId=after-sales-installed-asset-create-it&roles=admin&perms=*:*&tenantId=${TENANT_ID}`,
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     expect(token).toBeTruthy()
@@ -2410,7 +2413,7 @@ describe('after-sales plugin install integration', () => {
     if (!baseUrl || !pool) return
 
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=after-sales-installed-asset-update-it&roles=admin&perms=*:*`,
+      `${baseUrl}/api/auth/dev-token?userId=after-sales-installed-asset-update-it&roles=admin&perms=*:*&tenantId=${TENANT_ID}`,
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     expect(token).toBeTruthy()
@@ -2546,7 +2549,7 @@ describe('after-sales plugin install integration', () => {
     if (!baseUrl || !pool) return
 
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=after-sales-installed-asset-delete-it&roles=admin&perms=*:*`,
+      `${baseUrl}/api/auth/dev-token?userId=after-sales-installed-asset-delete-it&roles=admin&perms=*:*&tenantId=${TENANT_ID}`,
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     expect(token).toBeTruthy()
@@ -2647,7 +2650,7 @@ describe('after-sales plugin install integration', () => {
     if (!baseUrl || !pool) return
 
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=after-sales-customer-list-it&roles=admin&perms=*:*`,
+      `${baseUrl}/api/auth/dev-token?userId=after-sales-customer-list-it&roles=admin&perms=*:*&tenantId=${TENANT_ID}`,
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     expect(token).toBeTruthy()
@@ -2729,7 +2732,7 @@ describe('after-sales plugin install integration', () => {
     if (!baseUrl || !pool) return
 
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=after-sales-follow-up-list-it&roles=admin&perms=*:*`,
+      `${baseUrl}/api/auth/dev-token?userId=after-sales-follow-up-list-it&roles=admin&perms=*:*&tenantId=${TENANT_ID}`,
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     expect(token).toBeTruthy()
@@ -2820,7 +2823,7 @@ describe('after-sales plugin install integration', () => {
     if (!baseUrl || !pool) return
 
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=after-sales-follow-up-create-it&roles=admin&perms=*:*`,
+      `${baseUrl}/api/auth/dev-token?userId=after-sales-follow-up-create-it&roles=admin&perms=*:*&tenantId=${TENANT_ID}`,
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     expect(token).toBeTruthy()
@@ -2937,7 +2940,7 @@ describe('after-sales plugin install integration', () => {
     if (!baseUrl || !pool) return
 
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=after-sales-follow-up-delete-it&roles=admin&perms=*:*`,
+      `${baseUrl}/api/auth/dev-token?userId=after-sales-follow-up-delete-it&roles=admin&perms=*:*&tenantId=${TENANT_ID}`,
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     expect(token).toBeTruthy()
@@ -3016,7 +3019,7 @@ describe('after-sales plugin install integration', () => {
     if (!baseUrl || !pool) return
 
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=after-sales-follow-up-edit-it&roles=admin&perms=*:*`,
+      `${baseUrl}/api/auth/dev-token?userId=after-sales-follow-up-edit-it&roles=admin&perms=*:*&tenantId=${TENANT_ID}`,
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     expect(token).toBeTruthy()
@@ -3120,7 +3123,7 @@ describe('after-sales plugin install integration', () => {
     if (!baseUrl || !pool) return
 
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=after-sales-follow-up-due-it&roles=admin&perms=*:*`,
+      `${baseUrl}/api/auth/dev-token?userId=after-sales-follow-up-due-it&roles=admin&perms=*:*&tenantId=${TENANT_ID}`,
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     expect(token).toBeTruthy()
@@ -3251,7 +3254,7 @@ describe('after-sales plugin install integration', () => {
     if (!baseUrl || !pool) return
 
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=after-sales-customer-create-it&roles=admin&perms=*:*`,
+      `${baseUrl}/api/auth/dev-token?userId=after-sales-customer-create-it&roles=admin&perms=*:*&tenantId=${TENANT_ID}`,
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     expect(token).toBeTruthy()
@@ -3357,7 +3360,7 @@ describe('after-sales plugin install integration', () => {
     if (!baseUrl || !pool) return
 
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=after-sales-customer-update-it&roles=admin&perms=*:*`,
+      `${baseUrl}/api/auth/dev-token?userId=after-sales-customer-update-it&roles=admin&perms=*:*&tenantId=${TENANT_ID}`,
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     expect(token).toBeTruthy()
@@ -3453,7 +3456,7 @@ describe('after-sales plugin install integration', () => {
     if (!baseUrl || !pool) return
 
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=after-sales-customer-delete-it&roles=admin&perms=*:*`,
+      `${baseUrl}/api/auth/dev-token?userId=after-sales-customer-delete-it&roles=admin&perms=*:*&tenantId=${TENANT_ID}`,
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     expect(token).toBeTruthy()

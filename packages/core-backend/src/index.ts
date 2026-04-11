@@ -67,6 +67,7 @@ import { getPoolStats } from './db/pg'
 import { isDatabaseSchemaError } from './utils/database-errors'
 import { startOperationAuditRetention } from './audit/operation-audit-retention'
 import { startMultitableAttachmentCleanup } from './multitable/attachment-orphan-retention'
+import { tenantContext } from './db/sharding/tenant-context'
 import { attendanceAuditMiddleware, attendanceSecurityMiddleware } from './middleware/attendance-production'
 import { approvalsRouter } from './routes/approvals'
 import { authRouter } from './routes/auth'
@@ -209,6 +210,10 @@ export class MetaSheetServer {
 
     return {
       injector: this.injector,
+      tenant: {
+        getTenantId: () => tenantContext.getTenantId(),
+        requireTenantId: () => tenantContext.requireTenantId(),
+      },
       formula: {
         calculate: (name, ...args) => this.injector.get(IFormulaService).calculate(name, ...args),
         calculateFormula: (exp, resolver) => this.injector.get(IFormulaService).calculateFormula(exp, resolver),
@@ -722,6 +727,18 @@ export class MetaSheetServer {
       if (isWhitelisted(req.path)) return next()
       if (req.path.startsWith('/api/')) return jwtAuthMiddleware(req, res, next)
       return next()
+    })
+
+    this.app.use((req: Request, _res: Response, next: NextFunction) => {
+      const tenantId = typeof req.user?.tenantId === 'string' && req.user.tenantId.trim().length > 0
+        ? req.user.tenantId.trim()
+        : undefined
+      if (!tenantId) {
+        return next()
+      }
+      tenantContext.runAsync(tenantId, async () => {
+        next()
+      }).catch(next)
     })
 
     // Attendance production guards (audit + security). Must run after auth so req.user is available.
