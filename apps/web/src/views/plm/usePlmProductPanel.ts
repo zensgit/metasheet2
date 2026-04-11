@@ -5,6 +5,7 @@ import type {
   PlmDeepLinkPanelOption,
   FilterFieldOption,
   PlmProductFieldCatalogEntry,
+  PlmProductMetadataRow,
   PlmProductPanelModel,
   PlmRecommendedWorkbenchScene,
   PlmWorkbenchSceneSummaryChip,
@@ -121,6 +122,9 @@ type UsePlmProductPanelOptions = {
   hasProductCopyValue: (kind: ProductCopyKind) => boolean
   copyProductField: (kind: ProductCopyKind) => Promise<void>
   productFieldCatalog: PlmProductFieldCatalogEntry[]
+  productMetadataLoading: Ref<boolean>
+  productMetadataError: Ref<string>
+  productMetadataRows: ComputedRef<PlmProductMetadataRow[]>
   formatJson: (payload: unknown) => string
 }
 
@@ -300,6 +304,9 @@ export function usePlmProductPanel(options: UsePlmProductPanelOptions) {
     hasProductCopyValue: options.hasProductCopyValue,
     copyProductField: options.copyProductField,
     productFieldCatalog: options.productFieldCatalog,
+    productMetadataLoading: options.productMetadataLoading,
+    productMetadataError: options.productMetadataError,
+    productMetadataRows: options.productMetadataRows,
     formatJson: options.formatJson,
   }
 
