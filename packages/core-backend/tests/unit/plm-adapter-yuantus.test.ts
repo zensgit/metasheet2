@@ -276,6 +276,171 @@ describe('PLMAdapter Yuantus approvals mapping', () => {
   })
 })
 
+describe('PLMAdapter Yuantus BOM analysis and approval actions', () => {
+  it('maps approval history from ECO approvals endpoint', async () => {
+    const adapter = createAdapter()
+    const queryMock = vi.fn().mockResolvedValue({
+      data: [
+        {
+          id: 'approval-1',
+          eco_id: 'eco-1',
+          stage_id: 'stage-1',
+          approval_type: 'mandatory',
+          required_role: 'engineer',
+          user_id: 7,
+          status: 'pending',
+          comment: null,
+          approved_at: null,
+          created_at: '2026-01-04T00:00:00.000Z',
+        },
+      ],
+    })
+
+    ;(adapter as any).query = queryMock
+
+    const result = await adapter.getApprovalHistory('eco-1')
+
+    expect(queryMock).toHaveBeenCalledWith('/api/v1/eco/eco-1/approvals')
+    expect(result.data).toEqual([
+      {
+        id: 'approval-1',
+        eco_id: 'eco-1',
+        stage_id: 'stage-1',
+        approval_type: 'mandatory',
+        required_role: 'engineer',
+        user_id: 7,
+        status: 'pending',
+        comment: null,
+        approved_at: null,
+        created_at: '2026-01-04T00:00:00.000Z',
+      },
+    ])
+  })
+
+  it('posts approve and reject actions to ECO endpoints with optimistic-lock version payloads', async () => {
+    const adapter = createAdapter()
+    const selectMock = vi.fn()
+      .mockResolvedValueOnce({
+        data: [{
+          id: 'eco-approve-1',
+          status: 'approved',
+          comment: 'Ship it',
+          approved_at: '2026-04-11T00:00:00.000Z',
+          created_at: '2026-04-11T00:00:00.000Z',
+        }],
+      })
+      .mockResolvedValueOnce({
+        data: [{
+          id: 'eco-reject-1',
+          status: 'rejected',
+          comment: 'Missing test evidence',
+          approved_at: '2026-04-11T00:00:00.000Z',
+          created_at: '2026-04-11T00:00:00.000Z',
+        }],
+      })
+
+    ;(adapter as any).select = selectMock
+
+    const approved = await adapter.approveApproval('eco-approve-1', 7, 'Ship it')
+    const rejected = await adapter.rejectApproval('eco-reject-1', 8, 'Missing test evidence')
+
+    expect(selectMock).toHaveBeenNthCalledWith(1, '/api/v1/eco/eco-approve-1/approve', {
+      method: 'POST',
+      data: { version: 7, comment: 'Ship it' },
+    })
+    expect(selectMock).toHaveBeenNthCalledWith(2, '/api/v1/eco/eco-reject-1/reject', {
+      method: 'POST',
+      data: { version: 8, comment: 'Missing test evidence' },
+    })
+    expect(approved.data[0]).toMatchObject({
+      id: 'eco-approve-1',
+      status: 'approved',
+      approved_at: '2026-04-11T00:00:00.000Z',
+      created_at: '2026-04-11T00:00:00.000Z',
+    })
+    expect(rejected.data[0]).toMatchObject({
+      id: 'eco-reject-1',
+      status: 'rejected',
+      approved_at: '2026-04-11T00:00:00.000Z',
+      created_at: '2026-04-11T00:00:00.000Z',
+    })
+  })
+
+  it('queries where-used with recursive and max-level parameters', async () => {
+    const adapter = createAdapter()
+    const queryMock = vi.fn().mockResolvedValue({
+      data: [{
+        item_id: 'item-child-1',
+        count: 1,
+        parents: [{
+          relationship: { id: 'rel-1', quantity: 4 },
+          parent: { id: 'item-parent-1', properties: { item_number: 'ASM-001' } },
+          level: 1,
+        }],
+      }],
+    })
+
+    ;(adapter as any).query = queryMock
+
+    const result = await adapter.getWhereUsed('item-child-1', {
+      recursive: true,
+      maxLevels: 4,
+    })
+
+    expect(queryMock).toHaveBeenCalledWith('/api/v1/bom/item-child-1/where-used', [
+      { recursive: true, max_levels: 4 },
+    ])
+    expect(result.data[0]).toMatchObject({
+      item_id: 'item-child-1',
+      count: 1,
+      parents: [expect.objectContaining({ level: 1 })],
+    })
+  })
+
+  it('loads BOM compare schema from the dedicated schema endpoint', async () => {
+    const adapter = createAdapter()
+    const queryMock = vi.fn().mockResolvedValue({
+      data: [{
+        line_fields: [
+          {
+            field: 'quantity',
+            severity: 'major',
+            normalized: 'float',
+            description: 'BOM quantity on the relationship line.',
+          },
+        ],
+        compare_modes: [
+          {
+            mode: 'summarized',
+            line_key: 'child_config',
+            include_relationship_props: ['quantity', 'uom'],
+            aggregate_quantities: true,
+            aliases: ['summary'],
+            description: 'Aggregate quantities for identical children.',
+          },
+        ],
+        line_key_options: ['child_config', 'child_id'],
+        defaults: {
+          max_levels: 10,
+          line_key: 'child_config',
+        },
+      }],
+    })
+
+    ;(adapter as any).query = queryMock
+
+    const result = await adapter.getBomCompareSchema()
+
+    expect(queryMock).toHaveBeenCalledWith('/api/v1/bom/compare/schema')
+    expect(result.data[0]).toMatchObject({
+      line_fields: [expect.objectContaining({ field: 'quantity', severity: 'major' })],
+      compare_modes: [expect.objectContaining({ mode: 'summarized' })],
+      line_key_options: ['child_config', 'child_id'],
+      defaults: expect.objectContaining({ max_levels: 10 }),
+    })
+  })
+})
+
 describe('PLMAdapter Yuantus documents single-side failure + sources metadata', () => {
   it('returns AML related documents when file/item endpoint errors, with sources showing degradation', async () => {
     const adapter = createAdapter()

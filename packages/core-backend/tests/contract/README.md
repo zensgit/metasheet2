@@ -20,8 +20,9 @@ when running in `apiMode='yuantus'`. Without a contract test, any field
 rename on the Yuantus side would silently break Metasheet at runtime.
 
 This Pact set freezes the **shape** (not the values) of the 6 Wave 1 P0
-endpoints plus the 3 document-semantics endpoints that `PLMAdapter.ts`
-currently calls in `getProductDocuments()` for `apiMode='yuantus'`.
+endpoints plus the 3 document-semantics endpoints and the 5 BOM-analysis /
+ECO-approval endpoints that `PLMAdapter.ts` currently calls for
+`apiMode='yuantus'`.
 (Codex's PACT_FIRST plan lists 7 endpoints in Wave 1 — see "Discrepancy
 with codex plan" below.)
 
@@ -34,13 +35,15 @@ The pact JSON in `pacts/metasheet2-yuantus-plm.json` is **hand-authored** in
 Pact v3 format. It is **not** yet generated from `@pact-foundation/pact`,
 because adding that npm dependency requires explicit approval.
 
-The `plm-adapter-yuantus.pact.test.ts` vitest test guards three things:
+The `plm-adapter-yuantus.pact.test.ts` vitest test guards four things:
 
 1. The pact JSON exists and parses as Pact v3.
-2. It contains the 9 currently used interactions in the documented order.
+2. It contains the 14 currently used interactions in the documented order.
 3. Every endpoint named in the pact is also referenced by the live
    `packages/core-backend/src/data-adapters/PLMAdapter.ts` source — so the
    pact cannot drift away from what the adapter actually calls.
+4. The Wave 3 additions lock the exact envelope for `where-used`,
+   `bom compare schema`, `approval history`, `approve`, and `reject`.
 
 ## Discrepancy with codex's PACT_FIRST plan
 
@@ -93,29 +96,24 @@ cd /Users/huazhou/Downloads/Github/Yuantus
    src/yuantus/api/tests/test_pact_provider_yuantus_plm.py
 ```
 
-### Current verifier state (2026-04-08)
+### Current verifier state (2026-04-11)
 
-Wired end-to-end with `pact-python 3.2.1`. Verifier no longer skips —
-it actually starts the FastAPI app, replays each interaction, and reports
-real verification results.
+Wired end-to-end with `pact-python 3.2.1`. The provider verifier now starts
+the FastAPI app, seeds an isolated test DB, and replays all 14 interactions.
 
-**Wave 1 baseline result: 1 passing, 5 failing.**
+**Current result: 14 passing, 0 failing.**
 
-| Interaction | State | Why |
-|---|---|---|
-| `GET /api/v1/health` | ✅ PASS | no auth / no provider state needed |
-| `POST /api/v1/auth/login` | ❌ FAIL | needs seeded test user (Wave 1.5) |
-| `GET /api/v1/search/` | ❌ FAIL | needs seeded item + auth token (Wave 1.5) |
-| `POST /api/v1/aml/apply` | ❌ FAIL | needs seeded test Part with id 01H...P1 (Wave 1.5) |
-| `GET /api/v1/bom/{id}/tree` | ❌ FAIL | needs seeded BOM relationship (Wave 1.5) |
-| `GET /api/v1/bom/compare` | ❌ FAIL | needs two seeded comparable items (Wave 1.5) |
+Wave 3 adds coverage for:
 
-The 5 failing interactions are NOT shape drift — they fail because the
-provider state handler is currently a no-op and the requests hit a clean
-test database. Implementing real state seeding is tracked as Wave 1.5
-work; the deliberate break experiment in
-`Yuantus/docs/PACT_DELIBERATE_BREAK_EXPERIMENT_20260408.md` confirmed the
-gate correctly distinguishes "missing state" from "real shape drift".
+- `GET /api/v1/bom/{id}/where-used`
+- `GET /api/v1/bom/compare/schema`
+- `GET /api/v1/eco/{id}/approvals`
+- `POST /api/v1/eco/{id}/approve`
+- `POST /api/v1/eco/{id}/reject`
+
+The provider keeps its state handler as a no-op by using distinct seeded ECO
+fixtures for `history`, `approve`, and `reject`, so mutating approval actions
+cannot contaminate later interactions in the same verifier run.
 
 To install `pact-python` and run locally:
 
@@ -143,29 +141,24 @@ The artifact path stays the same, so the Yuantus provider verifier does not
 need to be reconfigured. The current sanity test serves as an executable
 specification of what the generated pact must contain.
 
-## Wave 2 endpoints
+## Still intentionally outside the pact
 
-The following endpoints were intentionally out of scope for the first pact.
-Document semantics is now covered, so these still remain outside the pact:
+The following surfaces remain outside the pact because `PLMAdapter.ts` does
+not currently call them on `main`:
 
-- `GET /api/v1/bom/{id}/where-used`
-- `GET /api/v1/bom/compare/schema`
-- `GET /api/v1/eco/{id}/approvals`
-- `POST /api/v1/eco/{id}/approve`
-- `POST /api/v1/eco/{id}/reject`
-
-They will be added in a Wave 2 pact once Wave 1 is verified green in CI on
-both repos. See `docs/PACT_FIRST_INTEGRATION_PLAN_20260407.md` §"Two-Week
-Execution Sequence" -> Week 2 in the Yuantus repo.
+- `GET /api/v1/aml/metadata/{item_type_name}`
+- `GET /api/v1/bom/{line_id}/substitutes`
+- `POST /api/v1/bom/{line_id}/substitutes`
+- `DELETE /api/v1/bom/substitutes/{substitute_id}`
 
 ## Forward compatibility note
 
 The `metasheet2-plm-workbench` long-running spike branch has version-aware
 `approveApproval(id, **version**, comment)` and `rejectApproval(id, **version**,
-comment)` for optimistic locking. When that improvement merges back into this
-mainline branch, the Wave 2 pact for `/api/v1/eco/{id}/approve` should
-declare the `version` field as **optional** so the contract does not
-retroactively break this branch's existing approve/reject signature.
+comment)` for optimistic locking. Mainline already requires `version` on both
+approval action call sites, so the Wave 3 pact keeps `version` required. Only
+relax this field if a real mainline consumer change lands that removes or makes
+`version` optional at the adapter boundary.
 
 The full repo source-of-truth analysis lives at
 `/Users/huazhou/Downloads/Github/Yuantus/docs/METASHEET_REPO_SOURCE_OF_TRUTH_INVESTIGATION_20260407.md`.
