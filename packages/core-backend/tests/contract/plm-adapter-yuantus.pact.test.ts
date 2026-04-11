@@ -11,8 +11,8 @@
  *
  *   1. The pact JSON exists and parses as Pact v3.
  *   2. The 6 Wave 1 P0 interactions plus the document-semantics Wave 2
- *      interactions that PLMAdapter currently calls are present, in the
- *      documented order.
+ *      interactions plus the BOM-analysis / ECO-approval Wave 3 interactions
+ *      that PLMAdapter currently calls are present, in the documented order.
  *      (codex's plan also lists `aml/metadata`, but PLMAdapter does not yet
  *      call it; deferred until there is a real consumer call site.)
  *   3. The PLMAdapter actually calls every endpoint declared in the pact, so
@@ -90,6 +90,11 @@ const PACT_PATHS = [
   { method: 'GET', path: '/api/v1/file/item/01H000000000000000000000P1' },
   { method: 'GET', path: '/api/v1/file/01H000000000000000000000F1' },
   { method: 'POST', path: '/api/v1/aml/query' },
+  { method: 'GET', path: '/api/v1/bom/01H000000000000000000000P2/where-used' },
+  { method: 'GET', path: '/api/v1/bom/compare/schema' },
+  { method: 'GET', path: '/api/v1/eco/01H000000000000000000000E1/approvals' },
+  { method: 'POST', path: '/api/v1/eco/01H000000000000000000000E2/approve' },
+  { method: 'POST', path: '/api/v1/eco/01H000000000000000000000E3/reject' },
 ] as const
 
 function loadPact(): PactDocument {
@@ -101,7 +106,7 @@ function loadAdapter(): string {
   return readFileSync(ADAPTER_PATH, 'utf8')
 }
 
-describe('Pact: Metasheet2 consumer -> YuantusPLM provider (Wave 1 + document semantics Wave 2)', () => {
+describe('Pact: Metasheet2 consumer -> YuantusPLM provider (Wave 1 + Wave 2 document semantics + Wave 3 BOM/approval)', () => {
   it('pact JSON exists, parses as Pact v3, and names the right consumer/provider', () => {
     const pact = loadPact()
     expect(pact.consumer.name).toBe('Metasheet2')
@@ -138,10 +143,15 @@ describe('Pact: Metasheet2 consumer -> YuantusPLM provider (Wave 1 + document se
       '/api/v1/health',
       '/api/v1/search/',
       '/api/v1/aml/apply',
-      '/api/v1/bom/',
+      '/api/v1/bom/${productId}/tree',
       '/api/v1/bom/compare',
+      '/api/v1/bom/${itemId}/where-used',
+      '/api/v1/bom/compare/schema',
       '/api/v1/file/item/',
       '/api/v1/aml/query',
+      '/api/v1/eco/${approvalId}/approvals',
+      '/api/v1/eco/${approvalId}/approve',
+      '/api/v1/eco/${approvalId}/reject',
       'fetchYuantusFileMetadata',
     ]
     for (const ep of endpointsToFind) {
@@ -205,5 +215,58 @@ describe('Pact: Metasheet2 consumer -> YuantusPLM provider (Wave 1 + document se
     expect(body.where).toEqual({ id: '01H000000000000000000000P1' })
     expect(body.expand).toEqual(['Document Part'])
     expect(body.page_size).toBe(1)
+  })
+
+  it('where-used and compare-schema interactions lock the BOM analysis surfaces consumed on mainline', () => {
+    const pact = loadPact()
+    const whereUsed = pact.interactions.find(
+      i => i.request.path === '/api/v1/bom/01H000000000000000000000P2/where-used',
+    )
+    const compareSchema = pact.interactions.find(
+      i => i.request.path === '/api/v1/bom/compare/schema',
+    )
+
+    expect(whereUsed).toBeDefined()
+    expect(compareSchema).toBeDefined()
+    expect(whereUsed!.request.query).toEqual({
+      recursive: ['true'],
+      max_levels: ['4'],
+    })
+    expect(compareSchema!.response.body).toMatchObject({
+      line_fields: expect.any(Array),
+      compare_modes: expect.any(Array),
+      line_key_options: expect.any(Array),
+    })
+  })
+
+  it('approval-history and approval-action interactions lock the ECO approval envelope used by federation', () => {
+    const pact = loadPact()
+    const history = pact.interactions.find(
+      i => i.request.path === '/api/v1/eco/01H000000000000000000000E1/approvals',
+    )
+    const approve = pact.interactions.find(
+      i => i.request.path === '/api/v1/eco/01H000000000000000000000E2/approve',
+    )
+    const reject = pact.interactions.find(
+      i => i.request.path === '/api/v1/eco/01H000000000000000000000E3/reject',
+    )
+
+    expect(history).toBeDefined()
+    expect(approve).toBeDefined()
+    expect(reject).toBeDefined()
+    expect(history!.response.body).toEqual([
+      expect.objectContaining({
+        eco_id: '01H000000000000000000000E1',
+        status: expect.any(String),
+      }),
+    ])
+    expect(approve!.request.body).toEqual({
+      version: 7,
+      comment: 'Ship it',
+    })
+    expect(reject!.request.body).toEqual({
+      version: 8,
+      comment: 'Missing test evidence',
+    })
   })
 })
