@@ -571,4 +571,60 @@ describe('DirectoryManagementView', () => {
     )
     expect(container?.textContent).toContain('已解除绑定')
   })
+
+  it('does not show the sparse root-member warning when child departments are present', async () => {
+    apiFetchMock
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: {
+          items: [createIntegration()],
+        },
+      }))
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: { items: [] },
+      }))
+      .mockResolvedValueOnce(createJsonResponse(
+        createAccountListPayload([createAccount()]),
+      ))
+      .mockResolvedValueOnce(createJsonResponse(createTestResultPayload({
+        departmentSampleCount: 4,
+        sampledDepartments: [
+          { id: '1068569133', name: '产品部' },
+          { id: '1068569134', name: '技术部' },
+        ],
+        diagnostics: {
+          rootDepartmentChildCount: 4,
+          rootDepartmentDirectUserCount: 1,
+          rootDepartmentDirectUserHasMore: false,
+          rootDepartmentDirectUserCountWithAccessLimit: 1,
+          rootDepartmentDirectUserHasMoreWithAccessLimit: false,
+          sampledRootDepartmentUsers: [
+            { userId: '0447654442691174', name: '周华' },
+          ],
+          sampledRootDepartmentUsersWithAccessLimit: [
+            { userId: '0447654442691174', name: '周华' },
+          ],
+        },
+        warnings: [],
+      })))
+
+    app = createApp(DirectoryManagementView)
+    app.component('RouterLink', {
+      props: ['to'],
+      template: '<a><slot /></a>',
+    })
+    app.mount(container!)
+    await flushUi()
+
+    const testButton = Array.from(container?.querySelectorAll('button') ?? []).find((button) => button.textContent?.includes('测试连通性'))
+    expect(testButton).toBeTruthy()
+    testButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+
+    await flushUi(6)
+
+    expect(container?.textContent).toContain('根部门子部门 4')
+    expect(container?.textContent).toContain('根部门直属成员 1')
+    expect(container?.textContent).not.toContain('根部门 1 当前仅返回 1 个直属成员')
+  })
 })
