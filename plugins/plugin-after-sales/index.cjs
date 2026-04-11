@@ -165,6 +165,21 @@ function getUserId(req) {
   return u.id || u.sub || u.userId || null
 }
 
+function parseOptionalNonNegativeInteger(value, fieldName) {
+  if (typeof value !== 'string') return undefined
+  const trimmed = value.trim()
+  if (!trimmed) return undefined
+
+  const parsed = Number(trimmed)
+  if (!Number.isInteger(parsed) || parsed < 0) {
+    const error = new Error(`${fieldName} must be a non-negative integer`)
+    error.code = 'VALIDATION_ERROR'
+    throw error
+  }
+
+  return parsed
+}
+
 function normalizeClaimValues(input) {
   if (Array.isArray(input)) {
     return input
@@ -493,6 +508,36 @@ async function getPartItemById(multitableApi, projectId, partItemId) {
     record,
     logicalData: await fromPhysicalPartItemData(multitableApi.provisioning, projectId, record.data),
   }
+}
+
+function buildPartItemSearchHaystack(data) {
+  if (!data || typeof data !== 'object') return ''
+  return [
+    data.partNo,
+    data.name,
+    data.category,
+    data.status,
+    data.stockQty == null ? null : String(data.stockQty),
+  ]
+    .filter((value) => typeof value === 'string' && value.trim())
+    .join(' ')
+    .toLowerCase()
+}
+
+function buildInstalledAssetSearchHaystack(data) {
+  if (!data || typeof data !== 'object') return ''
+  return [
+    data.assetCode,
+    data.serialNo,
+    data.model,
+    data.location,
+    data.installedAt,
+    data.warrantyUntil,
+    data.status,
+  ]
+    .filter((value) => typeof value === 'string' && value.trim())
+    .join(' ')
+    .toLowerCase()
 }
 
 async function getFollowUpById(multitableApi, projectId, followUpId) {
@@ -1076,12 +1121,8 @@ module.exports = {
           const search = typeof req?.query?.search === 'string' && req.query.search.trim()
             ? req.query.search.trim()
             : null
-          const limit = typeof req?.query?.limit === 'string' && req.query.limit.trim()
-            ? Number(req.query.limit)
-            : undefined
-          const offset = typeof req?.query?.offset === 'string' && req.query.offset.trim()
-            ? Number(req.query.offset)
-            : undefined
+          const limit = parseOptionalNonNegativeInteger(req?.query?.limit, 'limit')
+          const offset = parseOptionalNonNegativeInteger(req?.query?.offset, 'offset')
 
           const recordsApi = multitableApi.records
           let tickets
@@ -1808,12 +1849,8 @@ module.exports = {
           const search = typeof req?.query?.search === 'string' && req.query.search.trim()
             ? req.query.search.trim()
             : null
-          const limit = typeof req?.query?.limit === 'string' && req.query.limit.trim()
-            ? Number(req.query.limit)
-            : undefined
-          const offset = typeof req?.query?.offset === 'string' && req.query.offset.trim()
-            ? Number(req.query.offset)
-            : undefined
+          const limit = parseOptionalNonNegativeInteger(req?.query?.limit, 'limit')
+          const offset = parseOptionalNonNegativeInteger(req?.query?.offset, 'offset')
 
           const recordsApi = multitableApi.records
           let installedAssets
@@ -1862,7 +1899,7 @@ module.exports = {
               ).filter((record) => {
                 if (status && record.data.status !== status) return false
                 if (!search) return true
-                const haystack = JSON.stringify(record.data).toLowerCase()
+                const haystack = buildInstalledAssetSearchHaystack(record.data)
                 return haystack.includes(search.toLowerCase())
               })
             : []
@@ -2422,12 +2459,8 @@ module.exports = {
           const search = typeof req?.query?.search === 'string' && req.query.search.trim()
             ? req.query.search.trim()
             : null
-          const limit = typeof req?.query?.limit === 'string' && req.query.limit.trim()
-            ? Number(req.query.limit)
-            : undefined
-          const offset = typeof req?.query?.offset === 'string' && req.query.offset.trim()
-            ? Number(req.query.offset)
-            : undefined
+          const limit = parseOptionalNonNegativeInteger(req?.query?.limit, 'limit')
+          const offset = parseOptionalNonNegativeInteger(req?.query?.offset, 'offset')
 
           const recordsApi = multitableApi.records
           let partItems

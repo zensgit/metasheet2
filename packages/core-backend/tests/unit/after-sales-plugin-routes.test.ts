@@ -3516,6 +3516,32 @@ describe('plugin-after-sales routes', () => {
     })
   })
 
+  it('returns 400 when parts list pagination params are invalid', async () => {
+    const handler = routes.get('GET /api/after-sales/parts')
+    const res = new FakeResponse()
+
+    seedAfterSalesInstallRow(db, {
+      created_objects_json: JSON.stringify(['serviceTicket', 'partItem']),
+      created_views_json: JSON.stringify(['ticket-board', 'partItem-grid']),
+    })
+
+    await handler?.(buildReq({
+      query: {
+        limit: 'abc',
+      },
+    }), res)
+
+    expect(res.statusCode).toBe(400)
+    expect(res.body).toEqual({
+      ok: false,
+      error: {
+        code: 'VALIDATION_ERROR',
+        message: 'limit must be a non-negative integer',
+      },
+    })
+    expect(queryRecords).not.toHaveBeenCalled()
+  })
+
   it('returns 403 for parts update when caller lacks after-sales write access', async () => {
     const handler = routes.get('PATCH /api/after-sales/parts/:partItemId')
     const res = new FakeResponse()

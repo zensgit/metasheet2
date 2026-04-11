@@ -3522,13 +3522,26 @@ function matchesInstalledAssetFilters(asset: InstalledAssetViewModel) {
   return true
 }
 
+function buildPartItemSearchHaystack(data: PartItemViewModel['data']): string {
+  return [
+    toText(data.partNo),
+    toText(data.name),
+    toText(data.category),
+    toText(data.status),
+    data.stockQty == null ? '' : String(data.stockQty),
+  ]
+    .filter((value) => value.trim().length > 0)
+    .join(' ')
+    .toLowerCase()
+}
+
 function matchesPartItemFilters(partItem: PartItemViewModel) {
   const status = toText(partItemFilters.value.status)
   const search = toText(partItemFilters.value.search).toLowerCase()
 
   if (status && partItem.data.status !== status) return false
   if (search) {
-    const haystack = JSON.stringify(partItem.data).toLowerCase()
+    const haystack = buildPartItemSearchHaystack(partItem.data)
     if (!haystack.includes(search)) return false
   }
 

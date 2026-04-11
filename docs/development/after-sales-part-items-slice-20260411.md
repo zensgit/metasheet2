@@ -73,7 +73,7 @@ Capabilities:
 Command:
 
 ```bash
-/Users/huazhou/Downloads/Github/metasheet2/node_modules/.bin/vitest run packages/core-backend/tests/unit/after-sales-plugin-routes.test.ts
+./node_modules/.bin/vitest run packages/core-backend/tests/unit/after-sales-plugin-routes.test.ts
 ```
 
 Result:
