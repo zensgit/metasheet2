@@ -243,9 +243,19 @@ const ElButton = defineComponent({
       'data-el-button': this.type || 'default',
       type: 'button',
       disabled: this.disabled || false,
-      onClick: (e: Event) => { e.stopPropagation(); this.$emit('click', e) },
+      onClick: (e: Event) => this.$emit('click', e),
     }, this.$slots.default?.())
   },
+})
+
+const ElIcon = defineComponent({
+  name: 'ElIcon',
+  render() { return h('span', { class: 'el-icon' }, this.$slots.default?.()) },
+})
+
+const ElTooltip = defineComponent({
+  name: 'ElTooltip',
+  render() { return h('span', { 'data-el-tooltip': 'true' }, this.$slots.default?.()) },
 })
 
 const ElAlert = defineComponent({
@@ -283,6 +293,19 @@ const ElDialog = defineComponent({
       this.$slots.default?.(),
       this.$slots.footer?.(),
     ])
+  },
+})
+
+const ElTimeline = defineComponent({
+  name: 'ElTimeline',
+  render() { return h('div', { class: 'el-timeline' }, this.$slots.default?.()) },
+})
+
+const ElTimelineItem = defineComponent({
+  name: 'ElTimelineItem',
+  props: { type: String, icon: null, hollow: Boolean, size: String, timestamp: String, placement: String },
+  render() {
+    return h('div', { class: 'el-timeline-item', 'data-timestamp': this.timestamp ?? '' }, this.$slots.default?.())
   },
 })
 
@@ -327,6 +350,31 @@ const ElUpload = defineComponent({
   render() { return h('div', { 'data-el-upload': 'true' }, this.$slots.default?.()) },
 })
 
+const ElPopconfirm = defineComponent({
+  name: 'ElPopconfirm',
+  props: { title: String, confirmButtonText: String, cancelButtonText: String },
+  emits: ['confirm'],
+  render() {
+    return h('div', { 'data-el-popconfirm': this.title ?? '' }, [
+      h('div', {
+        class: 'el-popconfirm__reference',
+        onClick: () => this.$emit('confirm'),
+      }, this.$slots.reference?.()),
+    ])
+  },
+})
+
+const ElCard = defineComponent({
+  name: 'ElCard',
+  props: { shadow: String },
+  render() {
+    return h('div', { class: 'el-card' }, [
+      this.$slots.header ? h('div', { class: 'el-card__header' }, this.$slots.header()) : null,
+      h('div', { class: 'el-card__body' }, this.$slots.default?.()),
+    ])
+  },
+})
+
 const stubDirective = { mounted() {}, updated() {} }
 
 // ---------------------------------------------------------------------------
@@ -362,15 +410,21 @@ function registerAllStubs(app: VueApp<Element>) {
   app.component('ElSelect', ElSelect)
   app.component('ElOption', ElOption)
   app.component('ElButton', ElButton)
+  app.component('ElIcon', ElIcon)
+  app.component('ElTooltip', ElTooltip)
   app.component('ElAlert', ElAlert)
   app.component('ElEmpty', ElEmpty)
   app.component('ElPagination', ElPagination)
   app.component('ElDivider', ElDivider)
   app.component('ElDialog', ElDialog)
+  app.component('ElTimeline', ElTimeline)
+  app.component('ElTimelineItem', ElTimelineItem)
   app.component('ElForm', ElForm)
   app.component('ElFormItem', ElFormItem)
   app.component('ElDatePicker', ElDatePicker)
   app.component('ElUpload', ElUpload)
+  app.component('ElPopconfirm', ElPopconfirm)
+  app.component('ElCard', ElCard)
   app.directive('loading', stubDirective)
 }
 
@@ -601,10 +655,10 @@ describe('Approval E2E Lifecycle', () => {
       mockActiveTemplate.value = mockPublishedTemplate()
       await mountNewView()
 
-      const infoH2 = container!.querySelector('.approval-new__info h2')
+      const infoH2 = container!.querySelector('.approval-new__info-card h2')
       expect(infoH2?.textContent).toBe('通用审批模板')
 
-      const descP = container!.querySelector('.approval-new__info p')
+      const descP = container!.querySelector('.approval-new__info-desc')
       expect(descP?.textContent).toBe('适用于日常审批流程')
     })
 
@@ -708,7 +762,9 @@ describe('Approval E2E Lifecycle', () => {
       await mountDetailView()
 
       const actions = container!.querySelector('.approval-detail__actions')
-      expect(actions).toBeFalsy()
+      expect(actions).toBeTruthy()
+      expect(actions?.querySelectorAll('button').length).toBe(0)
+      expect(actions?.querySelector('[data-el-alert="info"]')?.textContent).toContain('该审批已结束')
     })
 
     it('clicking "通过" opens the approve dialog', async () => {
@@ -1053,7 +1109,9 @@ describe('Approval E2E Lifecycle', () => {
       await mountDetailView()
 
       const actions = container!.querySelector('.approval-detail__actions')
-      expect(actions).toBeFalsy()
+      expect(actions).toBeTruthy()
+      expect(actions?.querySelectorAll('button').length).toBe(0)
+      expect(actions?.querySelector('[data-el-alert="info"]')?.textContent).toContain('该审批已结束')
     })
 
     it('rejected approval does not show action buttons', async () => {
@@ -1062,7 +1120,9 @@ describe('Approval E2E Lifecycle', () => {
       await mountDetailView()
 
       const actions = container!.querySelector('.approval-detail__actions')
-      expect(actions).toBeFalsy()
+      expect(actions).toBeTruthy()
+      expect(actions?.querySelectorAll('button').length).toBe(0)
+      expect(actions?.querySelector('[data-el-alert="info"]')?.textContent).toContain('该审批已结束')
     })
   })
 

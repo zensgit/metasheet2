@@ -244,9 +244,19 @@ const ElButton = defineComponent({
       'data-el-button': this.type || 'default',
       type: 'button',
       disabled: this.disabled || false,
-      onClick: (e: Event) => { e.stopPropagation(); this.$emit('click', e) },
+      onClick: (e: Event) => this.$emit('click', e),
     }, this.$slots.default?.())
   },
+})
+
+const ElIcon = defineComponent({
+  name: 'ElIcon',
+  render() { return h('span', { class: 'el-icon' }, this.$slots.default?.()) },
+})
+
+const ElTooltip = defineComponent({
+  name: 'ElTooltip',
+  render() { return h('span', { 'data-el-tooltip': 'true' }, this.$slots.default?.()) },
 })
 
 const ElAlert = defineComponent({
@@ -286,6 +296,19 @@ const ElDialog = defineComponent({
   },
 })
 
+const ElTimeline = defineComponent({
+  name: 'ElTimeline',
+  render() { return h('div', { class: 'el-timeline' }, this.$slots.default?.()) },
+})
+
+const ElTimelineItem = defineComponent({
+  name: 'ElTimelineItem',
+  props: { type: String, icon: null, hollow: Boolean, size: String, timestamp: String, placement: String },
+  render() {
+    return h('div', { class: 'el-timeline-item', 'data-timestamp': this.timestamp ?? '' }, this.$slots.default?.())
+  },
+})
+
 const ElForm = defineComponent({
   name: 'ElForm',
   props: { model: Object, rules: Object, labelPosition: String },
@@ -313,6 +336,31 @@ const ElUpload = defineComponent({
   name: 'ElUpload',
   props: { action: String, autoUpload: Boolean },
   render() { return h('div', { 'data-el-upload': 'true' }, this.$slots.default?.()) },
+})
+
+const ElPopconfirm = defineComponent({
+  name: 'ElPopconfirm',
+  props: { title: String, confirmButtonText: String, cancelButtonText: String },
+  emits: ['confirm'],
+  render() {
+    return h('div', { 'data-el-popconfirm': this.title ?? '' }, [
+      h('div', {
+        class: 'el-popconfirm__reference',
+        onClick: () => this.$emit('confirm'),
+      }, this.$slots.reference?.()),
+    ])
+  },
+})
+
+const ElCard = defineComponent({
+  name: 'ElCard',
+  props: { shadow: String },
+  render() {
+    return h('div', { class: 'el-card' }, [
+      this.$slots.header ? h('div', { class: 'el-card__header' }, this.$slots.header()) : null,
+      h('div', { class: 'el-card__body' }, this.$slots.default?.()),
+    ])
+  },
 })
 
 const stubDirective = { mounted() {}, updated() {} }
@@ -350,15 +398,21 @@ function registerAllStubs(app: VueApp<Element>) {
   app.component('ElSelect', ElSelect)
   app.component('ElOption', ElOption)
   app.component('ElButton', ElButton)
+  app.component('ElIcon', ElIcon)
+  app.component('ElTooltip', ElTooltip)
   app.component('ElAlert', ElAlert)
   app.component('ElEmpty', ElEmpty)
   app.component('ElPagination', ElPagination)
   app.component('ElDivider', ElDivider)
   app.component('ElDialog', ElDialog)
+  app.component('ElTimeline', ElTimeline)
+  app.component('ElTimelineItem', ElTimelineItem)
   app.component('ElForm', ElForm)
   app.component('ElFormItem', ElFormItem)
   app.component('ElDatePicker', ElDatePicker)
   app.component('ElUpload', ElUpload)
+  app.component('ElPopconfirm', ElPopconfirm)
+  app.component('ElCard', ElCard)
   app.directive('loading', stubDirective)
 }
 
@@ -498,7 +552,9 @@ describe('Approval E2E Permissions', () => {
       await mountDetailView()
 
       const actions = container!.querySelector('.approval-detail__actions')
-      expect(actions).toBeFalsy()
+      expect(actions).toBeTruthy()
+      expect(actions?.querySelectorAll('button').length).toBe(0)
+      expect(actions?.querySelector('[data-el-alert="info"]')?.textContent).toContain('该审批已结束')
     })
 
     it('detail page still renders form snapshot and history', async () => {
@@ -632,7 +688,9 @@ describe('Approval E2E Permissions', () => {
       await mountDetailView()
 
       const actions = container!.querySelector('.approval-detail__actions')
-      expect(actions).toBeFalsy()
+      expect(actions).toBeTruthy()
+      expect(actions?.querySelectorAll('button').length).toBe(0)
+      expect(actions?.querySelector('[data-el-alert="info"]')?.textContent).toContain('该审批已结束')
     })
 
     it('can execute approve action on an assigned approval', async () => {
@@ -846,7 +904,9 @@ describe('Approval E2E Permissions', () => {
       await mountDetailView()
 
       const actions = container!.querySelector('.approval-detail__actions')
-      expect(actions).toBeFalsy()
+      expect(actions).toBeTruthy()
+      expect(actions?.querySelectorAll('button').length).toBe(0)
+      expect(actions?.querySelector('[data-el-alert="info"]')?.textContent).toContain('该审批已结束')
     })
 
     it('rejected approval is always read-only', async () => {
@@ -859,7 +919,9 @@ describe('Approval E2E Permissions', () => {
       await mountDetailView()
 
       const actions = container!.querySelector('.approval-detail__actions')
-      expect(actions).toBeFalsy()
+      expect(actions).toBeTruthy()
+      expect(actions?.querySelectorAll('button').length).toBe(0)
+      expect(actions?.querySelector('[data-el-alert="info"]')?.textContent).toContain('该审批已结束')
     })
 
     it('revoked approval is always read-only', async () => {
@@ -872,7 +934,9 @@ describe('Approval E2E Permissions', () => {
       await mountDetailView()
 
       const actions = container!.querySelector('.approval-detail__actions')
-      expect(actions).toBeFalsy()
+      expect(actions).toBeTruthy()
+      expect(actions?.querySelectorAll('button').length).toBe(0)
+      expect(actions?.querySelector('[data-el-alert="info"]')?.textContent).toContain('该审批已结束')
     })
 
     it('permission helper creates correct user context', () => {
