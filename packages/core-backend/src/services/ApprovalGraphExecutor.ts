@@ -51,6 +51,10 @@ function isNonEmptyStringArray(value: unknown): value is string[] {
   return Array.isArray(value) && value.every((entry) => typeof entry === 'string' && entry.trim().length > 0)
 }
 
+function looksLikeComparableDateString(value: string): boolean {
+  return /^\d{4}-\d{2}-\d{2}(?:$|[T\s].*)/.test(value)
+}
+
 function normalizeComparableValue(value: unknown): number | string | null {
   if (typeof value === 'number' && Number.isFinite(value)) {
     return value
@@ -66,7 +70,7 @@ function normalizeComparableValue(value: unknown): number | string | null {
       return numeric
     }
     const epoch = Date.parse(trimmed)
-    if (!Number.isNaN(epoch) && /[-:TZ]/.test(trimmed)) {
+    if (!Number.isNaN(epoch) && looksLikeComparableDateString(trimmed)) {
       return epoch
     }
     return trimmed
@@ -135,7 +139,12 @@ function validateFieldType(field: FormField, value: unknown): string | null {
       return typeof value === 'number' && Number.isFinite(value) ? null : `${field.id} must be a number`
     case 'date':
     case 'datetime':
-      return typeof value === 'string' || value instanceof Date ? null : `${field.id} must be a date value`
+      if (typeof value === 'string') {
+        return Number.isNaN(Date.parse(value.trim())) ? `${field.id} must be a date value` : null
+      }
+      return value instanceof Date && !Number.isNaN(value.getTime())
+        ? null
+        : `${field.id} must be a date value`
     case 'select':
       if (typeof value !== 'string') return `${field.id} must be a string`
       if (field.options?.length && !field.options.some((option) => option.value === value)) {
@@ -155,6 +164,90 @@ function validateFieldType(field: FormField, value: unknown): string | null {
   }
 }
 
+function getFieldPropNumber(field: FormField, key: string): number | null {
+  const raw = field.props?.[key]
+  if (typeof raw === 'number' && Number.isFinite(raw)) return raw
+  if (typeof raw === 'string' && raw.trim().length > 0) {
+    const parsed = Number(raw)
+    return Number.isFinite(parsed) ? parsed : null
+  }
+  return null
+}
+
+function getFieldPropString(field: FormField, key: string): string | null {
+  const raw = field.props?.[key]
+  return typeof raw === 'string' && raw.trim().length > 0 ? raw.trim() : null
+}
+
+function validateFieldConstraints(field: FormField, value: unknown): string[] {
+  if (value === undefined || value === null) {
+    return []
+  }
+
+  switch (field.type) {
+    case 'text':
+    case 'textarea': {
+      if (typeof value !== 'string') return []
+      const errors: string[] = []
+      const minLength = getFieldPropNumber(field, 'minLength')
+      const maxLength = getFieldPropNumber(field, 'maxLength')
+      const pattern = getFieldPropString(field, 'pattern')
+
+      if (minLength !== null && value.length < minLength) {
+        errors.push(`${field.id} must be at least ${minLength} characters`)
+      }
+      if (maxLength !== null && value.length > maxLength) {
+        errors.push(`${field.id} must be at most ${maxLength} characters`)
+      }
+      if (pattern) {
+        try {
+          if (!new RegExp(pattern).test(value)) {
+            errors.push(`${field.id} does not match the required pattern`)
+          }
+        } catch {
+          // Ignore invalid admin-configured regex patterns here and treat them as non-enforced.
+        }
+      }
+      return errors
+    }
+    case 'number': {
+      if (typeof value !== 'number' || !Number.isFinite(value)) return []
+      const errors: string[] = []
+      const min = getFieldPropNumber(field, 'min')
+      const max = getFieldPropNumber(field, 'max')
+
+      if (min !== null && value < min) {
+        errors.push(`${field.id} must be at least ${min}`)
+      }
+      if (max !== null && value > max) {
+        errors.push(`${field.id} must be at most ${max}`)
+      }
+      return errors
+    }
+    case 'date':
+    case 'datetime': {
+      const valueComparable = normalizeComparableValue(value)
+      if (valueComparable === null) return []
+
+      const errors: string[] = []
+      const min = getFieldPropString(field, 'min')
+      const max = getFieldPropString(field, 'max')
+      const minComparable = min ? normalizeComparableValue(min) : null
+      const maxComparable = max ? normalizeComparableValue(max) : null
+
+      if (typeof valueComparable === 'number' && typeof minComparable === 'number' && valueComparable < minComparable) {
+        errors.push(`${field.id} must be on or after ${min}`)
+      }
+      if (typeof valueComparable === 'number' && typeof maxComparable === 'number' && valueComparable > maxComparable) {
+        errors.push(`${field.id} must be on or before ${max}`)
+      }
+      return errors
+    }
+    default:
+      return []
+  }
+}
+
 export function validateApprovalFormData(formSchema: FormSchema, formData: Record<string, unknown>): string[] {
   const errors: string[] = []
 
@@ -167,7 +260,9 @@ export function validateApprovalFormData(formSchema: FormSchema, formData: Recor
     const typeError = validateFieldType(field, value)
     if (typeError) {
       errors.push(typeError)
+      continue
     }
+    errors.push(...validateFieldConstraints(field, value))
   }
 
   return errors

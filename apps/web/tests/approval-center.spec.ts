@@ -248,7 +248,7 @@ describe('ApprovalCenterView', () => {
     mockPendingApprovals.value = [
       {
         id: 'apv_1',
-        requestNo: 'APV-2026-0001',
+        requestNo: 'AP-100001',
         title: '出差报销',
         status: 'pending',
         requester: { name: '张三' },
@@ -257,7 +257,7 @@ describe('ApprovalCenterView', () => {
       },
       {
         id: 'apv_2',
-        requestNo: 'APV-2026-0002',
+        requestNo: 'AP-100002',
         title: '采购申请',
         status: 'approved',
         requester: { name: '李四' },

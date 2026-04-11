@@ -104,7 +104,7 @@ function mockVersionDetail(templateId: string, versionId: string): ApprovalTempl
 }
 
 function mockApproval(index: number): UnifiedApprovalDTO {
-  const statuses: ApprovalStatus[] = ['pending', 'approved', 'rejected', 'revoked', 'draft']
+  const statuses: ApprovalStatus[] = ['pending', 'approved', 'rejected', 'revoked', 'cancelled']
   const status = statuses[index % statuses.length]
   return {
     id: `apv_${index}`,
@@ -122,7 +122,7 @@ function mockApproval(index: number): UnifiedApprovalDTO {
     templateId: 'tpl_1',
     templateVersionId: 'ver_1_1',
     publishedDefinitionId: 'def_1',
-    requestNo: `APV-2026-${String(index).padStart(4, '0')}`,
+    requestNo: `AP-${String(100000 + index)}`,
     formSnapshot: { fld_reason: '出差报销', fld_amount: 5000, fld_type: 'reimbursement' },
     currentNodeKey: status === 'pending' ? 'approval_1' : null,
     assignments: status === 'pending' ? [{

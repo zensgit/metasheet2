@@ -86,6 +86,53 @@ describe('ApprovalGraphExecutor', () => {
     expect(next.currentStep).toBe(1)
     expect(next.assignments).toEqual([])
   })
+
+  it('evaluates date-only condition rules as comparable dates', () => {
+    const runtimeGraph: RuntimeGraph = {
+      nodes: [
+        { key: 'start', type: 'start', config: {} },
+        {
+          key: 'route',
+          type: 'condition',
+          config: {
+            branches: [
+              {
+                edgeKey: 'edge-sla',
+                rules: [{ fieldId: 'requestedAt', operator: 'gte', value: '2026-04-11' }],
+              },
+            ],
+            defaultEdgeKey: 'edge-standard',
+          },
+        },
+        { key: 'sla-review', type: 'approval', config: { assigneeType: 'role', assigneeIds: ['sla-reviewers'] } },
+        { key: 'standard-review', type: 'approval', config: { assigneeType: 'role', assigneeIds: ['standard-reviewers'] } },
+        { key: 'end', type: 'end', config: {} },
+      ],
+      edges: [
+        { key: 'edge-start-route', source: 'start', target: 'route' },
+        { key: 'edge-sla', source: 'route', target: 'sla-review' },
+        { key: 'edge-standard', source: 'route', target: 'standard-review' },
+        { key: 'edge-sla-end', source: 'sla-review', target: 'end' },
+        { key: 'edge-standard-end', source: 'standard-review', target: 'end' },
+      ],
+      policy: {
+        allowRevoke: true,
+      },
+    }
+
+    const executor = new ApprovalGraphExecutor(runtimeGraph, { requestedAt: '2026-04-11' })
+    const initial = executor.resolveInitialState()
+
+    expect(initial.currentNodeKey).toBe('sla-review')
+    expect(initial.assignments).toEqual([
+      {
+        assignmentType: 'role',
+        assigneeId: 'sla-reviewers',
+        nodeKey: 'sla-review',
+        sourceStep: 1,
+      },
+    ])
+  })
 })
 
 describe('validateApprovalFormData', () => {
@@ -115,6 +162,55 @@ describe('validateApprovalFormData', () => {
       'reason is required',
       'amount must be a number',
       'type must be one of the configured options',
+    ])
+  })
+
+  it('enforces pattern, length, numeric, and date window constraints from field props', () => {
+    const formSchema: FormSchema = {
+      fields: [
+        {
+          id: 'ticketCode',
+          type: 'text',
+          label: 'Ticket Code',
+          required: true,
+          props: {
+            minLength: 6,
+            maxLength: 12,
+            pattern: '^REQ-[0-9]+$',
+          },
+        },
+        {
+          id: 'amount',
+          type: 'number',
+          label: 'Amount',
+          props: {
+            min: 100,
+            max: 500,
+          },
+        },
+        {
+          id: 'requestedAt',
+          type: 'date',
+          label: 'Requested At',
+          props: {
+            min: '2026-04-10',
+            max: '2026-04-12',
+          },
+        },
+      ],
+    }
+
+    const errors = validateApprovalFormData(formSchema, {
+      ticketCode: 'REQ',
+      amount: 50,
+      requestedAt: '2026-04-09',
+    })
+
+    expect(errors).toEqual([
+      'ticketCode must be at least 6 characters',
+      'ticketCode does not match the required pattern',
+      'amount must be at least 100',
+      'requestedAt must be on or after 2026-04-10',
     ])
   })
 })
