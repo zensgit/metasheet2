@@ -431,6 +431,49 @@ async function deleteAttachment(token, attachmentId) {
   await ensureOk('api.multitable.delete-attachment', result, { attachmentId })
 }
 
+async function uploadAttachmentApi(token, { sheetId, recordId, fieldId }) {
+  const filename = `smoke-test-${Date.now()}.txt`
+  const content = `smoke test attachment ${new Date().toISOString()}\n`
+  const form = new FormData()
+  form.set('sheetId', sheetId)
+  form.set('recordId', recordId)
+  form.set('fieldId', fieldId)
+  form.set('file', new File([content], filename, { type: 'text/plain' }))
+  return fetchJson(`${apiBase}/api/multitable/attachments`, {
+    method: 'POST',
+    headers: headers(token),
+    body: form,
+  })
+}
+
+async function createCommentApi(token, { spreadsheetId, rowId, content, mentions }) {
+  return fetchJson(`${apiBase}/api/comments`, {
+    method: 'POST',
+    headers: headers(token, { 'Content-Type': 'application/json' }),
+    body: JSON.stringify({ spreadsheetId, rowId, content, mentions: mentions ?? [] }),
+  })
+}
+
+async function listCommentsApi(token, spreadsheetId, rowId) {
+  return fetchJson(`${apiBase}/api/comments?spreadsheetId=${encodeURIComponent(spreadsheetId)}&rowId=${encodeURIComponent(rowId)}`, {
+    headers: headers(token),
+  })
+}
+
+async function resolveCommentApi(token, commentId) {
+  return fetchJson(`${apiBase}/api/comments/${encodeURIComponent(commentId)}/resolve`, {
+    method: 'POST',
+    headers: headers(token),
+  })
+}
+
+async function deleteCommentApi(token, commentId) {
+  return fetchJson(`${apiBase}/api/comments/${encodeURIComponent(commentId)}`, {
+    method: 'DELETE',
+    headers: headers(token),
+  })
+}
+
 async function deleteRecord(token, recordId, expectedVersion) {
   const query = typeof expectedVersion === 'number'
     ? `?expectedVersion=${encodeURIComponent(String(expectedVersion))}`
@@ -3448,6 +3491,85 @@ async function run() {
         viewId: formView.id,
         recordId: viewSubmit.record.id,
       })
+
+      // ── Smoke: Attachment upload via API ──
+      {
+        let attachmentApiOk = false
+        try {
+          const uploadResult = await uploadAttachmentApi(token, {
+            sheetId: sheet.id,
+            recordId,
+            fieldId: attachmentField.id,
+          })
+          attachmentApiOk = uploadResult.res?.ok && !!uploadResult.json?.data?.attachment?.id
+          if (attachmentApiOk) {
+            const uploadedId = uploadResult.json.data.attachment.id
+            attachmentIds.add(uploadedId)
+            record('smoke.attachment.upload-api', true, {
+              recordId,
+              attachmentId: uploadedId,
+              filename: uploadResult.json.data.attachment.filename,
+            })
+          } else {
+            record('smoke.attachment.upload-api', false, {
+              recordId,
+              status: uploadResult.res?.status,
+              body: uploadResult.json,
+            })
+          }
+        } catch (err) {
+          record('smoke.attachment.upload-api', false, {
+            recordId,
+            error: err?.message || String(err),
+          })
+        }
+      }
+
+      // ── Smoke: Comment lifecycle ──
+      {
+        const commentContent = `smoke-comment-${Date.now()}`
+        let commentCreated = false
+        let commentId = null
+        try {
+          const createResult = await createCommentApi(token, {
+            spreadsheetId: sheet.id,
+            rowId: recordId,
+            content: commentContent,
+          })
+          commentCreated = createResult.res?.ok && !!createResult.json?.data?.comment?.id
+          record('smoke.comment.create', commentCreated, {
+            recordId,
+            content: commentContent,
+            status: createResult.res?.status,
+          })
+
+          if (commentCreated) {
+            commentId = createResult.json.data.comment.id
+
+            const listResult = await listCommentsApi(token, sheet.id, recordId)
+            const listed = listResult.json?.data?.items ?? []
+            const found = listed.some((c) => c.id === commentId)
+            record('smoke.comment.list', found, { commentId, total: listed.length })
+
+            const resolveResult = await resolveCommentApi(token, commentId)
+            const resolveOk = resolveResult.res?.status === 204 || resolveResult.res?.ok
+            record('smoke.comment.resolve', !!resolveOk, { commentId, status: resolveResult.res?.status })
+          }
+        } catch (err) {
+          record('smoke.comment.lifecycle', false, {
+            recordId,
+            error: err?.message || String(err),
+          })
+        } finally {
+          if (commentId) {
+            try {
+              await deleteCommentApi(token, commentId)
+            } catch (_) {
+              // best-effort cleanup
+            }
+          }
+        }
+      }
 
       report.metadata = {
         baseId: base.id,
