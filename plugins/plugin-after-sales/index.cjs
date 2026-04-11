@@ -30,9 +30,11 @@ const {
   buildCustomerCommand,
   buildFollowUpCommand,
   buildInstalledAssetCommand,
+  buildPartItemCommand,
   buildUpdateFollowUpCommand,
   buildUpdateCustomerCommand,
   buildUpdateInstalledAssetCommand,
+  buildUpdatePartItemCommand,
   buildUpdateTicketCommand,
   buildRefundDecisionEventPayload,
   buildServiceRecordCommand,
@@ -56,6 +58,7 @@ const SERVICE_TICKET_FIELDS = ['ticketNo', 'title', 'source', 'priority', 'statu
 const SERVICE_RECORD_FIELDS = ['ticketNo', 'visitType', 'scheduledAt', 'completedAt', 'technicianName', 'workSummary', 'result']
 const INSTALLED_ASSET_FIELDS = ['assetCode', 'serialNo', 'model', 'location', 'installedAt', 'warrantyUntil', 'status']
 const CUSTOMER_FIELDS = ['customerCode', 'name', 'phone', 'email', 'status']
+const PART_ITEM_FIELDS = ['partNo', 'name', 'category', 'stockQty', 'status']
 const FOLLOW_UP_FIELDS = ['ticketNo', 'customerName', 'dueAt', 'followUpType', 'ownerName', 'status', 'summary']
 
 async function toPhysicalTicketData(provisioning, projectId, logicalData) {
@@ -84,6 +87,24 @@ async function fromPhysicalInstalledAssetData(provisioning, projectId, physicalD
 
 async function fromPhysicalCustomerData(provisioning, projectId, physicalData) {
   return fromPhysicalRecord(provisioning, projectId, 'customer', CUSTOMER_FIELDS, physicalData)
+}
+
+async function toPhysicalPartItemData(provisioning, projectId, logicalData) {
+  return toPhysicalRecord(provisioning, projectId, 'partItem', logicalData)
+}
+
+async function fromPhysicalPartItemData(provisioning, projectId, physicalData) {
+  const logicalData = await fromPhysicalRecord(provisioning, projectId, 'partItem', PART_ITEM_FIELDS, physicalData)
+  return {
+    ...logicalData,
+    stockQty: typeof logicalData.stockQty === 'number'
+      ? logicalData.stockQty
+      : logicalData.stockQty == null || logicalData.stockQty === ''
+        ? null
+        : Number.isFinite(Number(logicalData.stockQty))
+          ? Number(logicalData.stockQty)
+          : null,
+  }
 }
 
 async function fromPhysicalFollowUpData(provisioning, projectId, physicalData) {
@@ -142,6 +163,21 @@ function getUserId(req) {
   const u = req.user
   if (!u) return null
   return u.id || u.sub || u.userId || null
+}
+
+function parseOptionalNonNegativeInteger(value, fieldName) {
+  if (typeof value !== 'string') return undefined
+  const trimmed = value.trim()
+  if (!trimmed) return undefined
+
+  const parsed = Number(trimmed)
+  if (!Number.isInteger(parsed) || parsed < 0) {
+    const error = new Error(`${fieldName} must be a non-negative integer`)
+    error.code = 'VALIDATION_ERROR'
+    throw error
+  }
+
+  return parsed
 }
 
 function normalizeClaimValues(input) {
@@ -333,6 +369,40 @@ function isOperationalAfterSalesStatus(status) {
   return status === 'installed' || status === 'partial'
 }
 
+function buildObjectUnavailableError(objectId) {
+  const label = objectId === 'partItem' ? 'part inventory' : `object ${objectId}`
+  const error = new Error(`After-sales ${label} is unavailable for the current install state`)
+  error.code = 'AFTER_SALES_OBJECT_UNAVAILABLE'
+  error.meta = { objectId }
+  return error
+}
+
+function sendObjectUnavailable(res, err) {
+  res.status(409).json({
+    ok: false,
+    error: {
+      code: err && err.code ? err.code : 'AFTER_SALES_OBJECT_UNAVAILABLE',
+      message:
+        err && err.message
+          ? err.message
+          : 'After-sales object is unavailable for the current install state',
+      ...(err && err.meta && typeof err.meta === 'object' ? { details: err.meta } : {}),
+    },
+  })
+}
+
+async function requireProvisionedObjectSheetId(provisioning, projectId, objectId) {
+  if (provisioning && typeof provisioning.findObjectSheet === 'function') {
+    const sheet = await provisioning.findObjectSheet({ projectId, objectId })
+    if (sheet && typeof sheet.id === 'string' && sheet.id) {
+      return sheet.id
+    }
+    throw buildObjectUnavailableError(objectId)
+  }
+
+  return findObjectSheetId(provisioning, projectId, objectId)
+}
+
 function getMultitableWriteApi(context) {
   const multitable = context && context.api && context.api.multitable
   const provisioning = multitable && multitable.provisioning
@@ -459,6 +529,49 @@ async function getCustomerById(multitableApi, projectId, customerId) {
     record,
     logicalData: await fromPhysicalCustomerData(multitableApi.provisioning, projectId, record.data),
   }
+}
+
+async function getPartItemById(multitableApi, projectId, partItemId) {
+  const sheetId = await requireProvisionedObjectSheetId(multitableApi.provisioning, projectId, 'partItem')
+  const record = await multitableApi.records.getRecord({
+    sheetId,
+    recordId: partItemId,
+  })
+  return {
+    sheetId,
+    record,
+    logicalData: await fromPhysicalPartItemData(multitableApi.provisioning, projectId, record.data),
+  }
+}
+
+function buildPartItemSearchHaystack(data) {
+  if (!data || typeof data !== 'object') return ''
+  return [
+    data.partNo,
+    data.name,
+    data.category,
+    data.status,
+    data.stockQty == null ? null : String(data.stockQty),
+  ]
+    .filter((value) => typeof value === 'string' && value.trim())
+    .join(' ')
+    .toLowerCase()
+}
+
+function buildInstalledAssetSearchHaystack(data) {
+  if (!data || typeof data !== 'object') return ''
+  return [
+    data.assetCode,
+    data.serialNo,
+    data.model,
+    data.location,
+    data.installedAt,
+    data.warrantyUntil,
+    data.status,
+  ]
+    .filter((value) => typeof value === 'string' && value.trim())
+    .join(' ')
+    .toLowerCase()
 }
 
 async function getFollowUpById(multitableApi, projectId, followUpId) {
@@ -1042,12 +1155,8 @@ module.exports = {
           const search = typeof req?.query?.search === 'string' && req.query.search.trim()
             ? req.query.search.trim()
             : null
-          const limit = typeof req?.query?.limit === 'string' && req.query.limit.trim()
-            ? Number(req.query.limit)
-            : undefined
-          const offset = typeof req?.query?.offset === 'string' && req.query.offset.trim()
-            ? Number(req.query.offset)
-            : undefined
+          const limit = parseOptionalNonNegativeInteger(req?.query?.limit, 'limit')
+          const offset = parseOptionalNonNegativeInteger(req?.query?.offset, 'offset')
 
           const recordsApi = multitableApi.records
           let tickets
@@ -1222,6 +1331,10 @@ module.exports = {
             sendBadRequest(res, err)
             return
           }
+          if (err && err.code === 'AFTER_SALES_OBJECT_UNAVAILABLE') {
+            sendObjectUnavailable(res, err)
+            return
+          }
           if (err && err.code === 'VALIDATION_ERROR') {
             res.status(400).json({
               ok: false,
@@ -1321,6 +1434,10 @@ module.exports = {
         } catch (err) {
           if (err && err.code === 'AFTER_SALES_EVENT_VALIDATION_FAILED') {
             sendBadRequest(res, err)
+            return
+          }
+          if (err && err.code === 'AFTER_SALES_OBJECT_UNAVAILABLE') {
+            sendObjectUnavailable(res, err)
             return
           }
           if (err && err.code === 'VALIDATION_ERROR') {
@@ -1502,6 +1619,10 @@ module.exports = {
         } catch (err) {
           if (err && err.code === 'AFTER_SALES_EVENT_VALIDATION_FAILED') {
             sendBadRequest(res, err)
+            return
+          }
+          if (err && err.code === 'AFTER_SALES_OBJECT_UNAVAILABLE') {
+            sendObjectUnavailable(res, err)
             return
           }
           if (err && err.code === 'VALIDATION_ERROR') {
@@ -1774,12 +1895,8 @@ module.exports = {
           const search = typeof req?.query?.search === 'string' && req.query.search.trim()
             ? req.query.search.trim()
             : null
-          const limit = typeof req?.query?.limit === 'string' && req.query.limit.trim()
-            ? Number(req.query.limit)
-            : undefined
-          const offset = typeof req?.query?.offset === 'string' && req.query.offset.trim()
-            ? Number(req.query.offset)
-            : undefined
+          const limit = parseOptionalNonNegativeInteger(req?.query?.limit, 'limit')
+          const offset = parseOptionalNonNegativeInteger(req?.query?.offset, 'offset')
 
           const recordsApi = multitableApi.records
           let installedAssets
@@ -1828,7 +1945,7 @@ module.exports = {
               ).filter((record) => {
                 if (status && record.data.status !== status) return false
                 if (!search) return true
-                const haystack = JSON.stringify(record.data).toLowerCase()
+                const haystack = buildInstalledAssetSearchHaystack(record.data)
                 return haystack.includes(search.toLowerCase())
               })
             : []
@@ -2240,6 +2357,460 @@ module.exports = {
           res.status(500).json({
             ok: false,
             error: { code: 'INTERNAL_ERROR', message: 'Failed to list after-sales customers' },
+          })
+        }
+      },
+    )
+
+    context.api.http.addRoute(
+      'POST',
+      '/api/after-sales/parts',
+      async (req, res) => {
+        try {
+          const userId = getUserId(req)
+          if (!userId) {
+            sendUnauthorized(res)
+            return
+          }
+          if (!hasAfterSalesWriteAccess(req)) {
+            sendWriteForbidden(res)
+            return
+          }
+
+          const multitableApi = getMultitableWriteApi(context)
+          if (!multitableApi) {
+            res.status(503).json({
+              ok: false,
+              error: {
+                code: 'MULTITABLE_UNAVAILABLE',
+                message: 'Multitable record writer is not available on plugin context',
+              },
+            })
+            return
+          }
+
+          const tenantId = getTenantId(req, context.logger)
+          const current = await installer.loadCurrent(context, tenantId, appManifest.id)
+          if (!current || !isOperationalAfterSalesStatus(current.status)) {
+            res.status(409).json({
+              ok: false,
+              error: {
+                code: 'AFTER_SALES_NOT_INSTALLED',
+                message: 'After-sales must be installed before creating parts',
+              },
+            })
+            return
+          }
+
+          const projectId = current.projectId || installer.getProjectId(tenantId, appManifest.id)
+          const command = buildPartItemCommand((req && req.body) || {})
+          const sheetId = await requireProvisionedObjectSheetId(
+            multitableApi.provisioning,
+            projectId,
+            'partItem',
+          )
+          const record = await multitableApi.records.createRecord({
+            sheetId,
+            data: await toPhysicalPartItemData(multitableApi.provisioning, projectId, command.recordData),
+          })
+          const logicalRecordData = await fromPhysicalPartItemData(
+            multitableApi.provisioning,
+            projectId,
+            record.data,
+          )
+
+          res.status(201).json({
+            ok: true,
+            data: {
+              projectId,
+              partItem: {
+                id: record.id,
+                version: record.version,
+                data: logicalRecordData,
+              },
+            },
+          })
+        } catch (err) {
+          if (err && err.code === 'AFTER_SALES_EVENT_VALIDATION_FAILED') {
+            sendBadRequest(res, err)
+            return
+          }
+          if (err && err.code === 'AFTER_SALES_OBJECT_UNAVAILABLE') {
+            sendObjectUnavailable(res, err)
+            return
+          }
+          if (err && err.code === 'VALIDATION_ERROR') {
+            res.status(400).json({
+              ok: false,
+              error: { code: err.code, message: err.message },
+            })
+            return
+          }
+          if (err && err.code === 'NOT_FOUND') {
+            res.status(404).json({
+              ok: false,
+              error: { code: err.code, message: err.message },
+            })
+            return
+          }
+          logger.error && logger.error('after-sales create part item failed', err)
+          res.status(500).json({
+            ok: false,
+            error: { code: 'INTERNAL_ERROR', message: 'Failed to create after-sales part item' },
+          })
+        }
+      },
+    )
+
+    context.api.http.addRoute(
+      'GET',
+      '/api/after-sales/parts',
+      async (req, res) => {
+        try {
+          const userId = getUserId(req)
+          if (!userId) {
+            sendUnauthorized(res)
+            return
+          }
+          if (!hasAfterSalesReadAccess(req)) {
+            res.status(403).json({
+              ok: false,
+              error: { code: 'FORBIDDEN', message: 'After-sales read access required' },
+            })
+            return
+          }
+
+          const multitableApi = getMultitableReadApi(context)
+          if (!multitableApi || (typeof multitableApi.records.listRecords !== 'function' && typeof multitableApi.records.queryRecords !== 'function')) {
+            res.status(503).json({
+              ok: false,
+              error: {
+                code: 'MULTITABLE_UNAVAILABLE',
+                message: 'Multitable record reader is not available on plugin context',
+              },
+            })
+            return
+          }
+
+          const tenantId = getTenantId(req, context.logger)
+          const current = await installer.loadCurrent(context, tenantId, appManifest.id)
+          if (!current || !isOperationalAfterSalesStatus(current.status)) {
+            res.status(409).json({
+              ok: false,
+              error: {
+                code: 'AFTER_SALES_NOT_INSTALLED',
+                message: 'After-sales must be installed before listing parts',
+              },
+            })
+            return
+          }
+
+          const projectId = current.projectId || installer.getProjectId(tenantId, appManifest.id)
+          const sheetId = await requireProvisionedObjectSheetId(
+            multitableApi.provisioning,
+            projectId,
+            'partItem',
+          )
+          const status = typeof req?.query?.status === 'string' && req.query.status.trim()
+            ? req.query.status.trim()
+            : null
+          const search = typeof req?.query?.search === 'string' && req.query.search.trim()
+            ? req.query.search.trim()
+            : null
+          const limit = parseOptionalNonNegativeInteger(req?.query?.limit, 'limit')
+          const offset = parseOptionalNonNegativeInteger(req?.query?.offset, 'offset')
+
+          const recordsApi = multitableApi.records
+          let partItems
+          if (typeof recordsApi.queryRecords === 'function') {
+            const physicalFieldIds = status
+              ? await resolvePhysicalFieldIds(
+                  multitableApi.provisioning,
+                  projectId,
+                  'partItem',
+                  ['status'],
+                )
+              : {}
+            const filters = status
+              ? {
+                  [physicalFieldIds.status || 'status']: status,
+                }
+              : undefined
+            partItems = await recordsApi.queryRecords({
+              sheetId,
+              filters,
+              search,
+              limit,
+              offset,
+            })
+          } else {
+            partItems = await recordsApi.listRecords({
+              sheetId,
+              limit,
+              offset,
+            })
+          }
+
+          const logicalPartItems = Array.isArray(partItems)
+            ? (
+                await Promise.all(
+                  partItems.map(async (partItem) => ({
+                    id: partItem.id,
+                    version: partItem.version,
+                    data: await fromPhysicalPartItemData(
+                      multitableApi.provisioning,
+                      projectId,
+                      partItem.data,
+                    ),
+                  })),
+                )
+              ).filter((record) => {
+                if (status && record.data.status !== status) return false
+                if (!search) return true
+                const haystack = buildPartItemSearchHaystack(record.data)
+                return haystack.includes(search.toLowerCase())
+              })
+            : []
+
+          res.json({
+            ok: true,
+            data: {
+              projectId,
+              partItems: logicalPartItems,
+              count: logicalPartItems.length,
+            },
+          })
+        } catch (err) {
+          if (err && err.code === 'AFTER_SALES_OBJECT_UNAVAILABLE') {
+            sendObjectUnavailable(res, err)
+            return
+          }
+          if (err && err.code === 'VALIDATION_ERROR') {
+            res.status(400).json({
+              ok: false,
+              error: { code: err.code, message: err.message },
+            })
+            return
+          }
+          if (err && err.code === 'NOT_FOUND') {
+            res.status(404).json({
+              ok: false,
+              error: { code: err.code, message: err.message },
+            })
+            return
+          }
+          logger.error && logger.error('after-sales list parts failed', err)
+          res.status(500).json({
+            ok: false,
+            error: { code: 'INTERNAL_ERROR', message: 'Failed to list after-sales parts' },
+          })
+        }
+      },
+    )
+
+    context.api.http.addRoute(
+      'PATCH',
+      '/api/after-sales/parts/:partItemId',
+      async (req, res) => {
+        try {
+          const userId = getUserId(req)
+          if (!userId) {
+            sendUnauthorized(res)
+            return
+          }
+          if (!hasAfterSalesWriteAccess(req)) {
+            sendWriteForbidden(res)
+            return
+          }
+
+          const partItemId =
+            typeof req?.params?.partItemId === 'string' ? req.params.partItemId.trim() : ''
+          if (!partItemId) {
+            res.status(400).json({
+              ok: false,
+              error: { code: 'VALIDATION_ERROR', message: 'partItemId is required' },
+            })
+            return
+          }
+
+          const multitableApi = getMultitableWriteApi(context)
+          if (!multitableApi) {
+            res.status(503).json({
+              ok: false,
+              error: {
+                code: 'MULTITABLE_UNAVAILABLE',
+                message: 'Multitable record writer is not available on plugin context',
+              },
+            })
+            return
+          }
+
+          const tenantId = getTenantId(req, context.logger)
+          const current = await installer.loadCurrent(context, tenantId, appManifest.id)
+          if (!current || !isOperationalAfterSalesStatus(current.status)) {
+            res.status(409).json({
+              ok: false,
+              error: {
+                code: 'AFTER_SALES_NOT_INSTALLED',
+                message: 'After-sales must be installed before updating parts',
+              },
+            })
+            return
+          }
+
+          const projectId = current.projectId || installer.getProjectId(tenantId, appManifest.id)
+          const { sheetId, record, logicalData } = await getPartItemById(multitableApi, projectId, partItemId)
+          const command = buildUpdatePartItemCommand((req && req.body) || {}, {
+            id: record.id,
+            ...logicalData,
+          })
+          const updatedRecord = await multitableApi.records.patchRecord({
+            sheetId,
+            recordId: partItemId,
+            changes: await toPhysicalPartItemData(multitableApi.provisioning, projectId, command.changes),
+          })
+          const logicalRecordData = await fromPhysicalPartItemData(
+            multitableApi.provisioning,
+            projectId,
+            updatedRecord.data,
+          )
+
+          res.json({
+            ok: true,
+            data: {
+              projectId,
+              partItem: {
+                id: updatedRecord.id,
+                version: updatedRecord.version,
+                data: logicalRecordData,
+              },
+            },
+          })
+        } catch (err) {
+          if (err && err.code === 'AFTER_SALES_EVENT_VALIDATION_FAILED') {
+            sendBadRequest(res, err)
+            return
+          }
+          if (err && err.code === 'AFTER_SALES_OBJECT_UNAVAILABLE') {
+            sendObjectUnavailable(res, err)
+            return
+          }
+          if (err && err.code === 'VALIDATION_ERROR') {
+            res.status(400).json({
+              ok: false,
+              error: { code: err.code, message: err.message },
+            })
+            return
+          }
+          if (err && err.code === 'NOT_FOUND') {
+            res.status(404).json({
+              ok: false,
+              error: { code: err.code, message: err.message },
+            })
+            return
+          }
+          logger.error && logger.error('after-sales update part item failed', err)
+          res.status(500).json({
+            ok: false,
+            error: { code: 'INTERNAL_ERROR', message: 'Failed to update after-sales part item' },
+          })
+        }
+      },
+    )
+
+    context.api.http.addRoute(
+      'DELETE',
+      '/api/after-sales/parts/:partItemId',
+      async (req, res) => {
+        try {
+          const userId = getUserId(req)
+          if (!userId) {
+            sendUnauthorized(res)
+            return
+          }
+          if (!hasAfterSalesWriteAccess(req)) {
+            sendWriteForbidden(res)
+            return
+          }
+
+          const partItemId =
+            typeof req?.params?.partItemId === 'string' ? req.params.partItemId.trim() : ''
+          if (!partItemId) {
+            res.status(400).json({
+              ok: false,
+              error: { code: 'VALIDATION_ERROR', message: 'partItemId is required' },
+            })
+            return
+          }
+
+          const multitableApi = getMultitableWriteApi(context)
+          if (!multitableApi || typeof multitableApi.records.deleteRecord !== 'function') {
+            res.status(503).json({
+              ok: false,
+              error: {
+                code: 'MULTITABLE_UNAVAILABLE',
+                message: 'Multitable record delete seam is not available on plugin context',
+              },
+            })
+            return
+          }
+
+          const tenantId = getTenantId(req, context.logger)
+          const current = await installer.loadCurrent(context, tenantId, appManifest.id)
+          if (!current || !isOperationalAfterSalesStatus(current.status)) {
+            res.status(409).json({
+              ok: false,
+              error: {
+                code: 'AFTER_SALES_NOT_INSTALLED',
+                message: 'After-sales must be installed before deleting parts',
+              },
+            })
+            return
+          }
+
+          const projectId = current.projectId || installer.getProjectId(tenantId, appManifest.id)
+          const sheetId = await requireProvisionedObjectSheetId(
+            multitableApi.provisioning,
+            projectId,
+            'partItem',
+          )
+          const deleted = await multitableApi.records.deleteRecord({
+            sheetId,
+            recordId: partItemId,
+          })
+
+          res.json({
+            ok: true,
+            data: {
+              projectId,
+              partItemId: deleted.id,
+              version: deleted.version,
+              deleted: true,
+            },
+          })
+        } catch (err) {
+          if (err && err.code === 'AFTER_SALES_OBJECT_UNAVAILABLE') {
+            sendObjectUnavailable(res, err)
+            return
+          }
+          if (err && err.code === 'VALIDATION_ERROR') {
+            res.status(400).json({
+              ok: false,
+              error: { code: err.code, message: err.message },
+            })
+            return
+          }
+          if (err && err.code === 'NOT_FOUND') {
+            res.status(404).json({
+              ok: false,
+              error: { code: err.code, message: err.message },
+            })
+            return
+          }
+          logger.error && logger.error('after-sales delete part item failed', err)
+          res.status(500).json({
+            ok: false,
+            error: { code: 'INTERNAL_ERROR', message: 'Failed to delete after-sales part item' },
           })
         }
       },

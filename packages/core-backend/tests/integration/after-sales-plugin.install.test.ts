@@ -1036,6 +1036,157 @@ describe('after-sales plugin install integration', () => {
     ])
   })
 
+  it('creates, lists, updates, and deletes part items through the real after-sales routes', async () => {
+    if (!baseUrl || !pool) return
+
+    const tokenRes = await requestJson(
+      `${baseUrl}/api/auth/dev-token?userId=after-sales-part-item-it&roles=admin&perms=*:*`,
+    )
+    const token = (tokenRes.body as { token?: string } | undefined)?.token
+    expect(token).toBeTruthy()
+
+    const installRes = await requestJson(`${baseUrl}/api/after-sales/projects/install`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        templateId: 'after-sales-default',
+        displayName: 'After Sales Parts Flow',
+      }),
+    })
+    expect(installRes.status).toBe(200)
+
+    const createRes = await requestJson(`${baseUrl}/api/after-sales/parts`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        partItem: {
+          partNo: 'PRT-3001',
+          name: 'Outdoor Fan Motor',
+          category: 'spare',
+          stockQty: 6,
+          status: 'available',
+        },
+      }),
+    })
+    expect(createRes.status).toBe(201)
+    const createBody = createRes.body as {
+      ok?: boolean
+      data?: {
+        partItem?: {
+          id?: string
+          version?: number
+          data?: Record<string, unknown>
+        }
+      }
+    }
+    expect(createBody.ok).toBe(true)
+    expect(createBody.data?.partItem?.data).toMatchObject({
+      partNo: 'PRT-3001',
+      name: 'Outdoor Fan Motor',
+      category: 'spare',
+      stockQty: 6,
+      status: 'available',
+    })
+    const partItemId = createBody.data?.partItem?.id
+    expect(typeof partItemId).toBe('string')
+
+    const listRes = await requestJson(`${baseUrl}/api/after-sales/parts`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    })
+    expect(listRes.status).toBe(200)
+    const listBody = listRes.body as {
+      ok?: boolean
+      data?: {
+        count?: number
+        partItems?: Array<{
+          id?: string
+          data?: Record<string, unknown>
+        }>
+      }
+    }
+    expect(listBody.ok).toBe(true)
+    expect(listBody.data?.count).toBe(1)
+    expect(listBody.data?.partItems).toEqual([
+      expect.objectContaining({
+        id: partItemId,
+        data: expect.objectContaining({
+          partNo: 'PRT-3001',
+          name: 'Outdoor Fan Motor',
+          category: 'spare',
+          stockQty: 6,
+          status: 'available',
+        }),
+      }),
+    ])
+
+    const updateRes = await requestJson(
+      `${baseUrl}/api/after-sales/parts/${encodeURIComponent(String(partItemId))}`,
+      {
+        method: 'PATCH',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          partItem: {
+            stockQty: 4,
+            status: 'reserved',
+          },
+        }),
+      },
+    )
+    expect(updateRes.status).toBe(200)
+    expect((updateRes.body as {
+      data?: {
+        partItem?: {
+          data?: Record<string, unknown>
+        }
+      }
+    }).data?.partItem?.data).toMatchObject({
+      partNo: 'PRT-3001',
+      name: 'Outdoor Fan Motor',
+      category: 'spare',
+      stockQty: 4,
+      status: 'reserved',
+    })
+
+    const deleteRes = await requestJson(
+      `${baseUrl}/api/after-sales/parts/${encodeURIComponent(String(partItemId))}`,
+      {
+        method: 'DELETE',
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      },
+    )
+    expect(deleteRes.status).toBe(200)
+    expect((deleteRes.body as { data?: { deleted?: boolean } }).data?.deleted).toBe(true)
+
+    const listAfterDeleteRes = await requestJson(`${baseUrl}/api/after-sales/parts`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    })
+    expect(listAfterDeleteRes.status).toBe(200)
+    expect((listAfterDeleteRes.body as {
+      data?: {
+        count?: number
+        partItems?: Array<unknown>
+      }
+    }).data).toMatchObject({
+      count: 0,
+      partItems: [],
+    })
+  })
+
   it('creates a ticket and requests refund through the real after-sales routes', async () => {
     if (!baseUrl || !pool) return
 

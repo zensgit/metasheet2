@@ -1201,6 +1201,279 @@
         </article>
       </section>
 
+      <section v-if="showPartItemPanel" class="after-sales-view__part-items-shell">
+        <article class="after-sales-view__card after-sales-view__card--wide">
+          <div class="after-sales-view__section-header">
+            <div>
+              <p class="after-sales-view__pill">Parts</p>
+              <h2>Part inventory</h2>
+              <p>
+                这里展示售后项目里的配件主数据，便于在工单和装机资产之间核对库存与可用状态。
+              </p>
+            </div>
+          </div>
+
+          <form class="after-sales-view__part-item-form" @submit.prevent="submitPartItem">
+            <label class="after-sales-view__field">
+              <span>Part no</span>
+              <input
+                id="after-sales-part-item-part-no"
+                v-model="partItemDraft.partNo"
+                class="after-sales-view__field-input"
+                placeholder="PRT-1001"
+                type="text"
+              />
+            </label>
+            <label class="after-sales-view__field">
+              <span>Category</span>
+              <select
+                id="after-sales-part-item-category"
+                v-model="partItemDraft.category"
+                class="after-sales-view__field-input"
+              >
+                <option value="spare">Spare</option>
+                <option value="consumable">Consumable</option>
+              </select>
+            </label>
+            <label class="after-sales-view__field">
+              <span>Status</span>
+              <select
+                id="after-sales-part-item-status"
+                v-model="partItemDraft.status"
+                class="after-sales-view__field-input"
+              >
+                <option value="available">Available</option>
+                <option value="reserved">Reserved</option>
+                <option value="consumed">Consumed</option>
+              </select>
+            </label>
+            <label class="after-sales-view__field">
+              <span>Name</span>
+              <input
+                id="after-sales-part-item-name"
+                v-model="partItemDraft.name"
+                class="after-sales-view__field-input"
+                placeholder="Compressor filter"
+                type="text"
+              />
+            </label>
+            <label class="after-sales-view__field">
+              <span>Stock qty</span>
+              <input
+                id="after-sales-part-item-stock-qty"
+                v-model="partItemDraft.stockQty"
+                class="after-sales-view__field-input"
+                min="0"
+                step="1"
+                type="number"
+              />
+            </label>
+          </form>
+
+          <div class="after-sales-view__action-row after-sales-view__action-row--compact">
+            <button
+              class="after-sales-view__primary-btn"
+              :disabled="partItemCreating || partItemsLoading || Boolean(partItemDeletingId) || Boolean(partItemUpdatingId) || Boolean(partItemEditingId) || !canSubmitPartItem"
+              @click="submitPartItem"
+            >
+              {{ partItemCreating ? 'Creating...' : 'Create part' }}
+            </button>
+            <button
+              class="after-sales-view__ghost-btn"
+              :disabled="partItemCreating || partItemsLoading || Boolean(partItemDeletingId) || Boolean(partItemUpdatingId) || Boolean(partItemEditingId)"
+              @click="resetPartItemDraft"
+            >
+              Reset part draft
+            </button>
+          </div>
+
+          <p v-if="partItemDraftError" class="after-sales-view__inline-error">{{ partItemDraftError }}</p>
+
+          <p v-if="partItemSubmitError" class="after-sales-view__inline-error">{{ partItemSubmitError }}</p>
+          <p v-else-if="partItemSubmitSuccess" class="after-sales-view__inline-success">{{ partItemSubmitSuccess }}</p>
+
+          <form class="after-sales-view__part-item-filters" @submit.prevent="applyPartItemFilters">
+            <label class="after-sales-view__field">
+              <span>Filter status</span>
+              <select
+                id="after-sales-part-item-filter-status"
+                v-model="partItemFilters.status"
+                class="after-sales-view__field-input"
+              >
+                <option value="">All statuses</option>
+                <option value="available">Available</option>
+                <option value="reserved">Reserved</option>
+                <option value="consumed">Consumed</option>
+              </select>
+            </label>
+            <label class="after-sales-view__field after-sales-view__field--wide">
+              <span>Search part</span>
+              <input
+                id="after-sales-part-item-filter-search"
+                v-model="partItemFilters.search"
+                class="after-sales-view__field-input"
+                placeholder="part no, name, category..."
+                type="text"
+              />
+            </label>
+          </form>
+
+          <div class="after-sales-view__action-row after-sales-view__action-row--compact">
+            <button
+              class="after-sales-view__ghost-btn"
+              :disabled="partItemsLoading || partItemCreating || Boolean(partItemDeletingId) || Boolean(partItemUpdatingId) || Boolean(partItemEditingId)"
+              @click="refreshPartItems"
+            >
+              {{ partItemsLoading ? 'Refreshing...' : 'Refresh list' }}
+            </button>
+            <button
+              class="after-sales-view__ghost-btn"
+              :disabled="partItemsLoading || partItemCreating || Boolean(partItemDeletingId) || Boolean(partItemUpdatingId) || Boolean(partItemEditingId)"
+              @click="applyPartItemFilters"
+            >
+              {{ partItemsLoading ? 'Applying...' : 'Apply filters' }}
+            </button>
+            <button
+              class="after-sales-view__ghost-btn"
+              :disabled="partItemsLoading || partItemCreating || Boolean(partItemDeletingId) || Boolean(partItemUpdatingId) || Boolean(partItemEditingId)"
+              @click="resetPartItemFilters"
+            >
+              Clear filters
+            </button>
+          </div>
+
+          <p v-if="partItemsLoading" class="after-sales-view__muted-state">Loading parts...</p>
+          <p v-else-if="partItemsError" class="after-sales-view__inline-error">{{ partItemsError }}</p>
+          <div v-else-if="partItems.length" class="after-sales-view__part-item-list">
+            <article v-for="partItem in partItems" :key="partItem.id" class="after-sales-view__part-item-row">
+              <div class="after-sales-view__part-item-main">
+                <template v-if="partItemEditingId === partItem.id">
+                  <div class="after-sales-view__part-item-headline">
+                    <strong>{{ partItemEditDraft.partNo || partItem.data.partNo }}</strong>
+                    <span class="after-sales-view__tag">{{ partItemEditDraft.status }}</span>
+                    <span class="after-sales-view__tag after-sales-view__tag--subtle">{{ partItemEditDraft.category }}</span>
+                  </div>
+                  <form class="after-sales-view__part-item-form after-sales-view__ticket-form--inline" @submit.prevent="submitPartItemEdit(partItem)">
+                    <label class="after-sales-view__field">
+                      <span>Part no</span>
+                      <input
+                        :id="`after-sales-part-item-edit-part-no-${partItem.id}`"
+                        v-model="partItemEditDraft.partNo"
+                        class="after-sales-view__field-input"
+                        type="text"
+                      />
+                    </label>
+                    <label class="after-sales-view__field">
+                      <span>Category</span>
+                      <select
+                        :id="`after-sales-part-item-edit-category-${partItem.id}`"
+                        v-model="partItemEditDraft.category"
+                        class="after-sales-view__field-input"
+                      >
+                        <option value="spare">Spare</option>
+                        <option value="consumable">Consumable</option>
+                      </select>
+                    </label>
+                    <label class="after-sales-view__field">
+                      <span>Status</span>
+                      <select
+                        :id="`after-sales-part-item-edit-status-${partItem.id}`"
+                        v-model="partItemEditDraft.status"
+                        class="after-sales-view__field-input"
+                      >
+                        <option value="available">Available</option>
+                        <option value="reserved">Reserved</option>
+                        <option value="consumed">Consumed</option>
+                      </select>
+                    </label>
+                    <label class="after-sales-view__field">
+                      <span>Name</span>
+                      <input
+                        :id="`after-sales-part-item-edit-name-${partItem.id}`"
+                        v-model="partItemEditDraft.name"
+                        class="after-sales-view__field-input"
+                        type="text"
+                      />
+                    </label>
+                    <label class="after-sales-view__field">
+                      <span>Stock qty</span>
+                      <input
+                        :id="`after-sales-part-item-edit-stock-qty-${partItem.id}`"
+                        v-model="partItemEditDraft.stockQty"
+                        class="after-sales-view__field-input"
+                        min="0"
+                        step="1"
+                        type="number"
+                      />
+                    </label>
+                  </form>
+                  <p v-if="partItemEditDraftError" class="after-sales-view__inline-error">{{ partItemEditDraftError }}</p>
+                </template>
+                <template v-else>
+                  <div class="after-sales-view__part-item-headline">
+                    <strong>{{ partItem.data.partNo }}</strong>
+                    <span class="after-sales-view__tag">{{ partItem.data.status }}</span>
+                    <span class="after-sales-view__tag after-sales-view__tag--subtle">{{ partItem.data.category }}</span>
+                  </div>
+                  <p>{{ partItem.data.name || 'No part name yet.' }}</p>
+                </template>
+              </div>
+
+              <div class="after-sales-view__part-item-side">
+                <dl class="after-sales-view__part-item-meta">
+                  <div>
+                    <dt>Stock qty</dt>
+                    <dd>{{ formatOptionalNumber(partItem.data.stockQty) }}</dd>
+                  </div>
+                  <div>
+                    <dt>Category</dt>
+                    <dd>{{ partItem.data.category }}</dd>
+                  </div>
+                  <div>
+                    <dt>Name</dt>
+                    <dd>{{ partItem.data.name || 'Unnamed part' }}</dd>
+                  </div>
+                </dl>
+                <div v-if="partItemEditingId === partItem.id" class="after-sales-view__ticket-actions">
+                  <button
+                    class="after-sales-view__primary-btn after-sales-view__ticket-action-btn"
+                    :disabled="partItemUpdatingId === partItem.id || partItemsLoading || !canSubmitPartItemEdit"
+                    @click="submitPartItemEdit(partItem)"
+                  >
+                    {{ partItemUpdatingId === partItem.id ? 'Saving...' : 'Save changes' }}
+                  </button>
+                  <button
+                    class="after-sales-view__ghost-btn after-sales-view__ticket-action-btn"
+                    :disabled="partItemUpdatingId === partItem.id"
+                    @click="cancelPartItemEdit"
+                  >
+                    Cancel edit
+                  </button>
+                </div>
+                <button
+                  v-if="partItemEditingId !== partItem.id"
+                  class="after-sales-view__ghost-btn after-sales-view__part-item-delete"
+                  :aria-label="`Edit part ${partItem.data.partNo}`"
+                  :disabled="Boolean(partItemDeletingId) || Boolean(partItemUpdatingId) || Boolean(partItemEditingId)"
+                  @click="startPartItemEdit(partItem)"
+                >
+                  Edit
+                </button>
+                <button
+                  class="after-sales-view__ghost-btn after-sales-view__part-item-delete"
+                  :aria-label="`Delete part ${partItem.data.partNo}`"
+                  :disabled="partItemDeletingId === partItem.id || partItemCreating || partItemsLoading || Boolean(partItemUpdatingId) || partItemEditingId === partItem.id"
+                  @click="deletePartItem(partItem)"
+                >
+                  {{ partItemDeletingId === partItem.id ? 'Deleting...' : 'Delete' }}
+                </button>
+              </div>
+            </article>
+          </div>
+          <p v-else class="after-sales-view__muted-state">No parts found yet.</p>
+        </article>
+      </section>
+
       <section v-if="isInstalled && hasCustomerProjection" class="after-sales-view__customers-shell">
         <article class="after-sales-view__card after-sales-view__card--wide">
           <div class="after-sales-view__section-header">
@@ -1929,6 +2202,12 @@ interface InstalledAssetRow {
   data: Record<string, unknown>
 }
 
+interface PartItemRow {
+  id: string
+  version: number
+  data: Record<string, unknown>
+}
+
 interface CustomerRow {
   id: string
   version: number
@@ -1938,6 +2217,12 @@ interface CustomerRow {
 interface InstalledAssetsResponse {
   projectId: string
   installedAssets: InstalledAssetRow[]
+  count: number
+}
+
+interface PartItemsResponse {
+  projectId: string
+  partItems: PartItemRow[]
   count: number
 }
 
@@ -1969,6 +2254,18 @@ interface InstalledAssetViewModel {
     location: string
     installedAt: string
     warrantyUntil: string
+    status: string
+  }
+}
+
+interface PartItemViewModel {
+  id: string
+  version: number
+  data: {
+    partNo: string
+    name: string
+    category: string
+    stockQty: number | null
     status: string
   }
 }
@@ -2043,6 +2340,22 @@ interface InstalledAssetDraft {
   status: 'active' | 'expired' | 'decommissioned'
 }
 
+interface PartItemDraft {
+  partNo: string
+  name: string
+  category: 'spare' | 'consumable'
+  stockQty: string
+  status: 'available' | 'reserved' | 'consumed'
+}
+
+interface PartItemEditDraft {
+  partNo: string
+  name: string
+  category: 'spare' | 'consumable'
+  stockQty: string
+  status: 'available' | 'reserved' | 'consumed'
+}
+
 interface InstalledAssetEditDraft {
   assetCode: string
   serialNo: string
@@ -2098,6 +2411,11 @@ interface InstalledAssetFilterDraft {
   search: string
 }
 
+interface PartItemFilterDraft {
+  status: '' | 'available' | 'reserved' | 'consumed'
+  search: string
+}
+
 interface CustomerFilterDraft {
   status: '' | 'active' | 'inactive'
   search: string
@@ -2122,6 +2440,11 @@ interface CreateServiceRecordResponse {
 interface CreateInstalledAssetResponse {
   projectId: string
   installedAsset: InstalledAssetRow
+}
+
+interface CreatePartItemResponse {
+  projectId: string
+  partItem: PartItemRow
 }
 
 interface CreateCustomerResponse {
@@ -2217,9 +2540,11 @@ const ticketRefundSubmittingId = ref('')
 const ticketUpdatingId = ref('')
 const ticketDeletingId = ref('')
 const installedAssetsLoading = ref(false)
+const partItemsLoading = ref(false)
 const customersLoading = ref(false)
 const followUpsLoading = ref(false)
 const installedAssetCreating = ref(false)
+const partItemCreating = ref(false)
 const customerCreating = ref(false)
 const followUpCreating = ref(false)
 const followUpDeletingId = ref('')
@@ -2228,6 +2553,8 @@ const customerDeletingId = ref('')
 const customerUpdatingId = ref('')
 const installedAssetUpdatingId = ref('')
 const installedAssetDeletingId = ref('')
+const partItemUpdatingId = ref('')
+const partItemDeletingId = ref('')
 const serviceRecordsLoading = ref(false)
 const serviceRecordCreating = ref(false)
 const serviceRecordUpdatingId = ref('')
@@ -2235,6 +2562,7 @@ const serviceRecordDeletingId = ref('')
 const error = ref('')
 const ticketsError = ref('')
 const installedAssetsError = ref('')
+const partItemsError = ref('')
 const customersError = ref('')
 const followUpsError = ref('')
 const customerSubmitError = ref('')
@@ -2243,6 +2571,8 @@ const followUpSubmitError = ref('')
 const followUpSubmitSuccess = ref('')
 const installedAssetSubmitError = ref('')
 const installedAssetSubmitSuccess = ref('')
+const partItemSubmitError = ref('')
+const partItemSubmitSuccess = ref('')
 const ticketSubmitError = ref('')
 const ticketSubmitSuccess = ref('')
 const ticketRefundErrorById = ref<Record<string, string>>({})
@@ -2254,6 +2584,8 @@ const manifest = ref<AfterSalesManifest | null>(null)
 const current = ref<CurrentResponse>({ status: 'not-installed' })
 const tickets = ref<TicketViewModel[]>([])
 const installedAssets = ref<InstalledAssetViewModel[]>([])
+const partItems = ref<PartItemViewModel[]>([])
+const partItemProjectionAvailable = ref<boolean | null>(null)
 const customers = ref<CustomerViewModel[]>([])
 const followUps = ref<FollowUpViewModel[]>([])
 const serviceRecords = ref<ServiceRecordViewModel[]>([])
@@ -2284,7 +2616,12 @@ const installedAssetFilters = ref<InstalledAssetFilterDraft>({
   status: '',
   search: '',
 })
+const partItemFilters = ref<PartItemFilterDraft>({
+  status: '',
+  search: '',
+})
 const customerDraft = ref<CustomerDraft>(createCustomerDraft())
+const partItemDraft = ref<PartItemDraft>(createPartItemDraft())
 const followUpDraft = ref<FollowUpDraft>(createFollowUpDraft())
 const followUpEditingId = ref('')
 const followUpEditDraft = ref<FollowUpEditDraft>(createFollowUpEditDraft())
@@ -2302,6 +2639,8 @@ const followUpFilters = ref<FollowUpFilterDraft>({
 const installedAssetDraft = ref<InstalledAssetDraft>(createInstalledAssetDraft())
 const installedAssetEditingId = ref('')
 const installedAssetEditDraft = ref<InstalledAssetEditDraft>(createInstalledAssetEditDraft())
+const partItemEditingId = ref('')
+const partItemEditDraft = ref<PartItemEditDraft>(createPartItemEditDraft())
 const serviceRecordDraft = ref<ServiceRecordDraft>(createServiceRecordDraft())
 const serviceRecordEditingId = ref('')
 const serviceRecordEditDraft = ref<ServiceRecordEditDraft>(createServiceRecordEditDraft())
@@ -2337,6 +2676,13 @@ const runtimeAdminFieldPolicyRoles = computed(() => runtimeAdminFieldPolicyDraft
 const hasCustomerProjection = computed(() =>
   Array.isArray(manifest.value?.objects) &&
   manifest.value.objects.some((object) => object && object.id === 'customer'),
+)
+const hasPartItemProjection = computed(() =>
+  Array.isArray(manifest.value?.objects) &&
+  manifest.value.objects.some((object) => object && object.id === 'partItem'),
+)
+const showPartItemPanel = computed(
+  () => isInstalled.value && hasPartItemProjection.value && partItemProjectionAvailable.value !== false,
 )
 const hasFollowUpProjection = computed(() =>
   Array.isArray(manifest.value?.objects) &&
@@ -2374,6 +2720,27 @@ const canSubmitInstalledAssetEdit = computed(
   () =>
     Boolean(installedAssetEditingId.value) &&
     toText(installedAssetEditDraft.value.assetCode).length > 0,
+)
+const partItemDraftError = computed(() => {
+  const parsedStockQty = parseOptionalNumber(partItemDraft.value.stockQty)
+  return parsedStockQty.valid ? '' : 'Stock quantity must be a valid number'
+})
+const canSubmitPartItem = computed(
+  () =>
+    toText(partItemDraft.value.partNo).length > 0 &&
+    toText(partItemDraft.value.name).length > 0 &&
+    partItemDraftError.value.length === 0,
+)
+const partItemEditDraftError = computed(() => {
+  const parsedStockQty = parseOptionalNumber(partItemEditDraft.value.stockQty)
+  return parsedStockQty.valid ? '' : 'Stock quantity must be a valid number'
+})
+const canSubmitPartItemEdit = computed(
+  () =>
+    Boolean(partItemEditingId.value) &&
+    toText(partItemEditDraft.value.partNo).length > 0 &&
+    toText(partItemEditDraft.value.name).length > 0 &&
+    partItemEditDraftError.value.length === 0,
 )
 const canSubmitServiceRecordEdit = computed(
   () =>
@@ -2430,6 +2797,14 @@ function extractMessage(payload: unknown, fallback: string): string {
   return typeof errorMessage === 'string' && errorMessage.trim().length > 0 ? errorMessage : fallback
 }
 
+function extractErrorCode(payload: unknown): string {
+  const errorCode =
+    payload && typeof payload === 'object' && 'error' in payload
+      ? (payload as { error?: { code?: string } }).error?.code
+      : ''
+  return typeof errorCode === 'string' ? errorCode : ''
+}
+
 async function readEnvelope<T>(path: string, options?: RequestInit): Promise<T> {
   const { response, payload } = await readEnvelopeResponse<T>(path, options)
   if (!response.ok) {
@@ -2467,6 +2842,23 @@ function toRefundAmount(value: unknown): number | null {
   return Number.isFinite(next) ? next : null
 }
 
+function parseOptionalNumber(value: unknown): { valid: boolean; value?: number } {
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? { valid: true, value } : { valid: false }
+  }
+  const text = toText(value)
+  if (!text) {
+    return { valid: true }
+  }
+
+  const next = Number(text)
+  if (!Number.isFinite(next)) {
+    return { valid: false }
+  }
+
+  return { valid: true, value: next }
+}
+
 function formatRefundAmount(value: unknown): string {
   const amount = toRefundAmount(value)
   if (amount == null) return '—'
@@ -2498,6 +2890,12 @@ function formatRecordDate(value: unknown): string {
     timeStyle: 'short',
     hour12: false,
   }).format(parsed)
+}
+
+function formatOptionalNumber(value: unknown): string {
+  const amount = toRefundAmount(value)
+  if (amount == null) return '—'
+  return Number.isInteger(amount) ? `${amount}` : `${amount}`
 }
 
 function cloneRuntimeAdminResponse(response: RuntimeAdminResponse): RuntimeAdminResponse {
@@ -2617,6 +3015,16 @@ function createInstalledAssetDraft(): InstalledAssetDraft {
   }
 }
 
+function createPartItemDraft(): PartItemDraft {
+  return {
+    partNo: '',
+    name: '',
+    category: 'spare',
+    stockQty: '',
+    status: 'available',
+  }
+}
+
 function createCustomerDraft(): CustomerDraft {
   return {
     customerCode: '',
@@ -2624,6 +3032,27 @@ function createCustomerDraft(): CustomerDraft {
     phone: '',
     email: '',
     status: 'active',
+  }
+}
+
+function normalizePartItemCategory(value: unknown): PartItemEditDraft['category'] {
+  return value === 'consumable' ? 'consumable' : 'spare'
+}
+
+function normalizePartItemStatus(value: unknown): PartItemEditDraft['status'] {
+  if (value === 'reserved' || value === 'consumed') {
+    return value
+  }
+  return 'available'
+}
+
+function createPartItemEditDraft(partItem?: Partial<PartItemViewModel['data']> | null): PartItemEditDraft {
+  return {
+    partNo: toText(partItem?.partNo),
+    name: toText(partItem?.name),
+    category: normalizePartItemCategory(partItem?.category),
+    stockQty: partItem?.stockQty == null ? '' : `${partItem.stockQty}`,
+    status: normalizePartItemStatus(partItem?.status),
   }
 }
 
@@ -2865,6 +3294,22 @@ function buildInstalledAssetPayload() {
   }
 }
 
+function buildPartItemPayload() {
+  const partNo = toText(partItemDraft.value.partNo)
+  const name = toText(partItemDraft.value.name)
+  const stockQty = parseOptionalNumber(partItemDraft.value.stockQty)
+
+  return {
+    partItem: {
+      partNo,
+      name,
+      category: partItemDraft.value.category,
+      status: partItemDraft.value.status,
+      ...(stockQty.valid && typeof stockQty.value === 'number' ? { stockQty: stockQty.value } : {}),
+    },
+  }
+}
+
 function buildCustomerPayload() {
   const customerCode = toText(customerDraft.value.customerCode)
   const name = toText(customerDraft.value.name)
@@ -2878,6 +3323,41 @@ function buildCustomerPayload() {
       status: customerDraft.value.status,
       ...(phone ? { phone } : {}),
       ...(email ? { email } : {}),
+    },
+  }
+}
+
+function buildPartItemUpdatePayload(partItem: PartItemViewModel) {
+  const partNo = toText(partItemEditDraft.value.partNo)
+  const name = toText(partItemEditDraft.value.name)
+  const category = partItemEditDraft.value.category
+  const status = partItemEditDraft.value.status
+  const stockQtyValue = partItemEditDraft.value.stockQty
+  const stockQtyInput = typeof stockQtyValue === 'number' ? `${stockQtyValue}` : toText(stockQtyValue)
+  const parsedStockQty = parseOptionalNumber(stockQtyValue)
+  const currentStockQty = toRefundAmount(partItem.data.stockQty)
+  const nextStockQty = stockQtyInput.length === 0 ? null : parsedStockQty.value ?? null
+
+  if (!parsedStockQty.valid) {
+    return null
+  }
+  if (
+    partNo === toText(partItem.data.partNo) &&
+    name === toText(partItem.data.name) &&
+    category === normalizePartItemCategory(partItem.data.category) &&
+    status === normalizePartItemStatus(partItem.data.status) &&
+    nextStockQty === currentStockQty
+  ) {
+    return null
+  }
+
+  return {
+    partItem: {
+      partNo,
+      name,
+      category,
+      status,
+      stockQty: nextStockQty,
     },
   }
 }
@@ -3054,6 +3534,32 @@ function matchesInstalledAssetFilters(asset: InstalledAssetViewModel) {
   return true
 }
 
+function buildPartItemSearchHaystack(data: PartItemViewModel['data']): string {
+  return [
+    toText(data.partNo),
+    toText(data.name),
+    toText(data.category),
+    toText(data.status),
+    data.stockQty == null ? '' : String(data.stockQty),
+  ]
+    .filter((value) => value.trim().length > 0)
+    .join(' ')
+    .toLowerCase()
+}
+
+function matchesPartItemFilters(partItem: PartItemViewModel) {
+  const status = toText(partItemFilters.value.status)
+  const search = toText(partItemFilters.value.search).toLowerCase()
+
+  if (status && partItem.data.status !== status) return false
+  if (search) {
+    const haystack = buildPartItemSearchHaystack(partItem.data)
+    if (!haystack.includes(search)) return false
+  }
+
+  return true
+}
+
 function buildTicketUpdatePayload() {
   return {
     ticket: {
@@ -3085,6 +3591,16 @@ function buildInstalledAssetListPath() {
   if (search) params.set('search', search)
   const query = params.toString()
   return query ? `/api/after-sales/installed-assets?${query}` : '/api/after-sales/installed-assets'
+}
+
+function buildPartItemListPath() {
+  const params = new URLSearchParams()
+  const status = toText(partItemFilters.value.status)
+  const search = toText(partItemFilters.value.search)
+  if (status) params.set('status', status)
+  if (search) params.set('search', search)
+  const query = params.toString()
+  return query ? `/api/after-sales/parts?${query}` : '/api/after-sales/parts'
 }
 
 function buildCustomerListPath() {
@@ -3240,6 +3756,21 @@ function normalizeInstalledAssetRow(record: InstalledAssetRow): InstalledAssetVi
   }
 }
 
+function normalizePartItemRow(record: PartItemRow): PartItemViewModel {
+  const rawData = record.data && typeof record.data === 'object' ? record.data : {}
+  return {
+    id: record.id,
+    version: record.version,
+    data: {
+      partNo: toText(rawData.partNo, record.id),
+      name: toText(rawData.name, 'Unnamed part'),
+      category: toText(rawData.category, 'spare'),
+      stockQty: toRefundAmount(rawData.stockQty),
+      status: toText(rawData.status, 'available'),
+    },
+  }
+}
+
 function normalizeCustomerRow(record: CustomerRow): CustomerViewModel {
   const rawData = record.data && typeof record.data === 'object' ? record.data : {}
   return {
@@ -3334,6 +3865,22 @@ function startInstalledAssetEdit(asset: InstalledAssetViewModel) {
   installedAssetEditDraft.value = createInstalledAssetEditDraft(asset.data)
   installedAssetSubmitError.value = ''
   installedAssetSubmitSuccess.value = ''
+}
+
+function startPartItemEdit(partItem: PartItemViewModel) {
+  if (
+    !partItem.id ||
+    partItemUpdatingId.value ||
+    partItemDeletingId.value ||
+    partItemCreating.value ||
+    partItemsLoading.value
+  ) {
+    return
+  }
+  partItemEditingId.value = partItem.id
+  partItemEditDraft.value = createPartItemEditDraft(partItem.data)
+  partItemSubmitError.value = ''
+  partItemSubmitSuccess.value = ''
 }
 
 function startServiceRecordEdit(record: ServiceRecordViewModel) {
@@ -3438,6 +3985,49 @@ async function loadInstalledAssetsForCurrentState(state: CurrentResponse): Promi
   }
 }
 
+async function loadPartItemsForCurrentState(state: CurrentResponse): Promise<void> {
+  partItemsLoading.value = true
+  partItemsError.value = ''
+  try {
+    if (!hasPartItemProjection.value) {
+      partItemProjectionAvailable.value = null
+      partItems.value = []
+      return
+    }
+    if (state.status === 'not-installed' || state.status === 'failed') {
+      partItemProjectionAvailable.value = null
+      partItems.value = []
+      return
+    }
+
+    const { response, payload } = await readEnvelopeResponse<PartItemsResponse>(buildPartItemListPath())
+    if (!response.ok) {
+      const errorCode = extractErrorCode(payload)
+      if (errorCode === 'AFTER_SALES_OBJECT_UNAVAILABLE') {
+        partItemProjectionAvailable.value = false
+        partItems.value = []
+        return
+      }
+      throw new Error(extractMessage(payload, `${response.status} ${response.statusText}`))
+    }
+
+    const nextPayload = ((payload as ApiEnvelope<PartItemsResponse> | null)?.data ?? null) as PartItemsResponse | null
+    const rows = Array.isArray(nextPayload?.partItems) ? nextPayload.partItems : []
+    partItemProjectionAvailable.value = true
+    partItems.value = rows.map((row) => normalizePartItemRow(row))
+  } catch (err: unknown) {
+    partItems.value = []
+    if (
+      partItemProjectionAvailable.value !== false &&
+      (state.status === 'installed' || state.status === 'partial')
+    ) {
+      partItemsError.value = err instanceof Error ? err.message : 'Failed to load parts'
+    }
+  } finally {
+    partItemsLoading.value = false
+  }
+}
+
 async function loadCustomersForCurrentState(state: CurrentResponse): Promise<void> {
   customersLoading.value = true
   customersError.value = ''
@@ -3462,6 +4052,49 @@ async function loadCustomersForCurrentState(state: CurrentResponse): Promise<voi
   } finally {
     customersLoading.value = false
   }
+}
+
+async function applyPartItemFilters() {
+  if (
+    partItemsLoading.value ||
+    partItemCreating.value ||
+    partItemDeletingId.value ||
+    partItemUpdatingId.value ||
+    partItemEditingId.value
+  ) {
+    return
+  }
+  await loadPartItemsForCurrentState(current.value)
+}
+
+async function resetPartItemFilters() {
+  if (
+    partItemsLoading.value ||
+    partItemCreating.value ||
+    partItemDeletingId.value ||
+    partItemUpdatingId.value ||
+    partItemEditingId.value
+  ) {
+    return
+  }
+  partItemFilters.value = {
+    status: '',
+    search: '',
+  }
+  await loadPartItemsForCurrentState(current.value)
+}
+
+async function refreshPartItems() {
+  if (
+    partItemsLoading.value ||
+    partItemCreating.value ||
+    partItemDeletingId.value ||
+    partItemUpdatingId.value ||
+    partItemEditingId.value
+  ) {
+    return
+  }
+  await loadPartItemsForCurrentState(current.value)
 }
 
 async function applyCustomerFilters() {
@@ -3676,6 +4309,18 @@ async function deleteFollowUp(followUp: FollowUpViewModel) {
   }
 }
 
+function resetPartItemDraft() {
+  partItemDraft.value = createPartItemDraft()
+  partItemSubmitError.value = ''
+  partItemSubmitSuccess.value = ''
+}
+
+function cancelPartItemEdit() {
+  partItemEditingId.value = ''
+  partItemEditDraft.value = createPartItemEditDraft()
+  partItemSubmitError.value = ''
+}
+
 async function submitCustomer() {
   if (!canSubmitCustomer.value || customersLoading.value || customerCreating.value || customerDeletingId.value || customerUpdatingId.value || customerEditingId.value) {
     return
@@ -3776,6 +4421,123 @@ async function deleteCustomer(customer: CustomerViewModel) {
     customerSubmitError.value = err instanceof Error ? err.message : 'Failed to delete customer'
   } finally {
     customerDeletingId.value = ''
+  }
+}
+
+async function submitPartItem() {
+  if (
+    !canSubmitPartItem.value ||
+    partItemCreating.value ||
+    partItemsLoading.value ||
+    Boolean(partItemDeletingId.value) ||
+    Boolean(partItemUpdatingId.value) ||
+    Boolean(partItemEditingId.value)
+  ) {
+    return
+  }
+
+  partItemCreating.value = true
+  partItemSubmitError.value = ''
+  partItemSubmitSuccess.value = ''
+
+  try {
+    const payload = await readEnvelope<CreatePartItemResponse>('/api/after-sales/parts', {
+      method: 'POST',
+      body: JSON.stringify(buildPartItemPayload()),
+    })
+    const nextPartItem = payload?.partItem ? normalizePartItemRow(payload.partItem) : null
+
+    if (nextPartItem && matchesPartItemFilters(nextPartItem)) {
+      partItems.value = [nextPartItem, ...partItems.value.filter((item) => item.id !== nextPartItem.id)]
+      partItemsError.value = ''
+    }
+
+    resetPartItemDraft()
+    partItemSubmitSuccess.value = nextPartItem
+      ? `Created part ${nextPartItem.data.partNo}`
+      : 'Created part'
+  } catch (err: unknown) {
+    partItemSubmitError.value = err instanceof Error ? err.message : 'Failed to create part'
+  } finally {
+    partItemCreating.value = false
+  }
+}
+
+async function submitPartItemEdit(partItem: PartItemViewModel) {
+  if (
+    !partItem.id ||
+    partItemEditingId.value !== partItem.id ||
+    partItemUpdatingId.value ||
+    !canSubmitPartItemEdit.value
+  ) {
+    return
+  }
+
+  partItemUpdatingId.value = partItem.id
+  partItemSubmitError.value = ''
+  partItemSubmitSuccess.value = ''
+
+  try {
+    const updatePayload = buildPartItemUpdatePayload(partItem)
+    if (!updatePayload) {
+      partItemEditingId.value = ''
+      partItemEditDraft.value = createPartItemEditDraft()
+      return
+    }
+
+    const payload = await readEnvelope<CreatePartItemResponse>(
+      `/api/after-sales/parts/${encodeURIComponent(partItem.id)}`,
+      {
+        method: 'PATCH',
+        body: JSON.stringify(updatePayload),
+      },
+    )
+    const nextPartItem = payload?.partItem ? normalizePartItemRow(payload.partItem) : null
+
+    if (nextPartItem) {
+      partItems.value = matchesPartItemFilters(nextPartItem)
+        ? partItems.value.map((item) => (item.id === nextPartItem.id ? nextPartItem : item))
+        : partItems.value.filter((item) => item.id !== nextPartItem.id)
+      partItemsError.value = ''
+      partItemSubmitSuccess.value = `Updated part ${nextPartItem.data.partNo}`
+    }
+
+    partItemEditingId.value = ''
+    partItemEditDraft.value = createPartItemEditDraft()
+  } catch (err: unknown) {
+    partItemSubmitError.value = err instanceof Error ? err.message : 'Failed to update part'
+  } finally {
+    partItemUpdatingId.value = ''
+  }
+}
+
+async function deletePartItem(partItem: PartItemViewModel) {
+  if (
+    !partItem.id ||
+    partItemDeletingId.value ||
+    partItemCreating.value ||
+    partItemsLoading.value ||
+    partItemUpdatingId.value ||
+    partItemEditingId.value
+  ) {
+    return
+  }
+
+  partItemDeletingId.value = partItem.id
+  partItemSubmitError.value = ''
+  partItemSubmitSuccess.value = ''
+
+  try {
+    await readEnvelope(`/api/after-sales/parts/${encodeURIComponent(partItem.id)}`, {
+      method: 'DELETE',
+    })
+    partItems.value = partItems.value.filter((item) => item.id !== partItem.id)
+    partItemsError.value = ''
+    partItemSubmitSuccess.value = `Deleted part ${partItem.data.partNo}`
+  } catch (err: unknown) {
+    partItemSubmitError.value = err instanceof Error ? err.message : 'Failed to delete part'
+  } finally {
+    partItemDeletingId.value = ''
   }
 }
 
@@ -4394,6 +5156,7 @@ async function refreshCurrentState() {
       loadFieldPoliciesForCurrentState(current.value),
       loadTicketsForCurrentState(current.value),
       loadInstalledAssetsForCurrentState(current.value),
+      loadPartItemsForCurrentState(current.value),
       loadCustomersForCurrentState(current.value),
       loadFollowUpsForCurrentState(current.value),
       loadServiceRecordsForCurrentState(current.value),
@@ -4408,6 +5171,7 @@ async function loadView() {
   error.value = ''
   ticketsError.value = ''
   installedAssetsError.value = ''
+  partItemsError.value = ''
   customersError.value = ''
   followUpsError.value = ''
   customerSubmitError.value = ''
@@ -4416,6 +5180,8 @@ async function loadView() {
   followUpSubmitSuccess.value = ''
   installedAssetSubmitError.value = ''
   installedAssetSubmitSuccess.value = ''
+  partItemSubmitError.value = ''
+  partItemSubmitSuccess.value = ''
   ticketSubmitError.value = ''
   ticketSubmitSuccess.value = ''
   serviceRecordsError.value = ''
@@ -4440,6 +5206,7 @@ async function loadView() {
       loadFieldPoliciesForCurrentState(nextCurrent),
       loadTicketsForCurrentState(nextCurrent),
       loadInstalledAssetsForCurrentState(nextCurrent),
+      loadPartItemsForCurrentState(nextCurrent),
       loadCustomersForCurrentState(nextCurrent),
       loadFollowUpsForCurrentState(nextCurrent),
       loadServiceRecordsForCurrentState(nextCurrent),
@@ -4596,6 +5363,7 @@ onMounted(() => {
 .after-sales-view__onboarding,
 .after-sales-view__tickets-shell,
 .after-sales-view__installed-assets-shell,
+.after-sales-view__part-items-shell,
 .after-sales-view__customers-shell,
 .after-sales-view__follow-ups-shell,
 .after-sales-view__service-records-shell {
@@ -4739,6 +5507,7 @@ onMounted(() => {
 .after-sales-view__grid,
 .after-sales-view__ticket-list,
 .after-sales-view__installed-asset-list,
+.after-sales-view__part-item-list,
 .after-sales-view__customer-list,
 .after-sales-view__follow-up-list,
 .after-sales-view__service-record-list {
@@ -4779,6 +5548,7 @@ onMounted(() => {
 .after-sales-view__meta,
 .after-sales-view__ticket-meta,
 .after-sales-view__installed-asset-meta,
+.after-sales-view__part-item-meta,
 .after-sales-view__customer-meta,
 .after-sales-view__follow-up-meta,
 .after-sales-view__service-record-meta {
@@ -4790,6 +5560,7 @@ onMounted(() => {
 .after-sales-view__meta div,
 .after-sales-view__ticket-meta div,
 .after-sales-view__installed-asset-meta div,
+.after-sales-view__part-item-meta div,
 .after-sales-view__customer-meta div,
 .after-sales-view__follow-up-meta div,
 .after-sales-view__service-record-meta div {
@@ -4800,6 +5571,7 @@ onMounted(() => {
 .after-sales-view__meta dt,
 .after-sales-view__ticket-meta dt,
 .after-sales-view__installed-asset-meta dt,
+.after-sales-view__part-item-meta dt,
 .after-sales-view__customer-meta dt,
 .after-sales-view__follow-up-meta dt,
 .after-sales-view__service-record-meta dt {
@@ -4812,6 +5584,7 @@ onMounted(() => {
 .after-sales-view__meta dd,
 .after-sales-view__ticket-meta dd,
 .after-sales-view__installed-asset-meta dd,
+.after-sales-view__part-item-meta dd,
 .after-sales-view__customer-meta dd,
 .after-sales-view__follow-up-meta dd,
 .after-sales-view__service-record-meta dd {
@@ -4868,6 +5641,7 @@ onMounted(() => {
 }
 
 .after-sales-view__installed-asset-row,
+.after-sales-view__part-item-row,
 .after-sales-view__customer-row,
 .after-sales-view__follow-up-row,
 .after-sales-view__service-record-row {
@@ -4881,6 +5655,7 @@ onMounted(() => {
 }
 
 .after-sales-view__installed-asset-main,
+.after-sales-view__part-item-main,
 .after-sales-view__customer-main,
 .after-sales-view__follow-up-main,
 .after-sales-view__service-record-main {
@@ -4890,6 +5665,7 @@ onMounted(() => {
 }
 
 .after-sales-view__installed-asset-main p,
+.after-sales-view__part-item-main p,
 .after-sales-view__customer-main p,
 .after-sales-view__follow-up-main p,
 .after-sales-view__service-record-main p {
@@ -4898,6 +5674,7 @@ onMounted(() => {
 }
 
 .after-sales-view__installed-asset-headline,
+.after-sales-view__part-item-headline,
 .after-sales-view__customer-headline,
 .after-sales-view__follow-up-headline,
 .after-sales-view__service-record-headline {
@@ -4908,6 +5685,7 @@ onMounted(() => {
 }
 
 .after-sales-view__installed-asset-headline strong,
+.after-sales-view__part-item-headline strong,
 .after-sales-view__customer-headline strong,
 .after-sales-view__follow-up-headline strong,
 .after-sales-view__service-record-headline strong {
@@ -4915,6 +5693,7 @@ onMounted(() => {
 }
 
 .after-sales-view__installed-asset-side,
+.after-sales-view__part-item-side,
 .after-sales-view__customer-side,
 .after-sales-view__follow-up-side,
 .after-sales-view__service-record-side {
@@ -4949,7 +5728,8 @@ onMounted(() => {
 }
 
 .after-sales-view__ticket-delete,
-.after-sales-view__service-record-delete {
+.after-sales-view__service-record-delete,
+.after-sales-view__part-item-delete {
   min-width: 120px;
 }
 
@@ -4975,10 +5755,12 @@ onMounted(() => {
 }
 
 .after-sales-view__installed-asset-form,
+.after-sales-view__part-item-form,
 .after-sales-view__customer-form,
 .after-sales-view__follow-up-form,
 .after-sales-view__ticket-form,
 .after-sales-view__installed-asset-filters,
+.after-sales-view__part-item-filters,
 .after-sales-view__customer-filters,
 .after-sales-view__follow-up-filters,
 .after-sales-view__service-record-form,
@@ -5132,6 +5914,7 @@ code {
   .after-sales-view__warning-banner,
   .after-sales-view__ticket-row,
   .after-sales-view__installed-asset-row,
+  .after-sales-view__part-item-row,
   .after-sales-view__customer-row,
   .after-sales-view__follow-up-row,
   .after-sales-view__service-record-row {
@@ -5146,10 +5929,12 @@ code {
   .after-sales-view__section-header,
   .after-sales-view__config-form,
   .after-sales-view__installed-asset-form,
+  .after-sales-view__part-item-form,
   .after-sales-view__customer-form,
   .after-sales-view__follow-up-form,
   .after-sales-view__ticket-form,
   .after-sales-view__installed-asset-filters,
+  .after-sales-view__part-item-filters,
   .after-sales-view__customer-filters,
   .after-sales-view__follow-up-filters,
   .after-sales-view__service-record-form,
@@ -5168,6 +5953,10 @@ code {
 
   .after-sales-view__ticket-side,
   .after-sales-view__ticket-actions {
+    justify-items: stretch;
+  }
+
+  .after-sales-view__part-item-side {
     justify-items: stretch;
   }
 }
