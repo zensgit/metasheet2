@@ -244,7 +244,7 @@ export class AuthService {
   async login(
     email: string,
     password: string,
-    options: { ipAddress?: string | null; userAgent?: string | null } = {},
+    options: { ipAddress?: string | null; userAgent?: string | null; tenantId?: string | null } = {},
   ): Promise<{ user: User; token: string } | null> {
     try {
       const user = await this.getUserByEmail(email)
@@ -264,7 +264,10 @@ export class AuthService {
       }
 
       const sessionId = crypto.randomUUID()
-      const token = this.createToken(user, { sid: sessionId })
+      const tenantId = typeof options.tenantId === 'string' && options.tenantId.trim().length > 0
+        ? options.tenantId.trim()
+        : undefined
+      const token = this.createToken(tenantId ? { ...user, tenantId } : user, { sid: sessionId })
       const payload = this.readTokenPayload(token)
       if (payload?.exp) {
         await createUserSession(user.id, {
@@ -279,7 +282,7 @@ export class AuthService {
       await this.updateLastLogin(user.id)
 
       // 返回用户信息（不包含密码hash）
-      const safeUser = this.sanitizeUser(user)
+      const safeUser = this.sanitizeUser(tenantId ? { ...user, tenantId } : user)
       return { user: safeUser, token }
     } catch (error) {
       this.logger.error('Login error', error instanceof Error ? error : undefined)

@@ -1,4 +1,5 @@
 import type { Request, Response, NextFunction } from 'express'
+import { extractTenantFromHeaders } from '../db/sharding/tenant-context'
 import { metrics } from '../metrics/metrics'
 import { authService } from './AuthService'
 
@@ -48,6 +49,11 @@ export async function jwtAuthMiddleware(req: Request, res: Response, next: NextF
       metrics.jwtAuthFail.inc({ reason: 'invalid_token' })
       metrics.authFailures.inc()
       return res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'Invalid token' } })
+    }
+
+    const headerTenantId = extractTenantFromHeaders(req.headers as Record<string, unknown> | undefined)
+    if (!user.tenantId && headerTenantId) {
+      user.tenantId = headerTenantId
     }
 
     req.user = user as Express.Request['user']

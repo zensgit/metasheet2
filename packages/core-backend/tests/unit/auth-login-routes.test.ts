@@ -243,6 +243,41 @@ describe('auth login routes', () => {
     })
   })
 
+  it('forwards x-tenant-id into the normal login flow', async () => {
+    authServiceMocks.login.mockResolvedValue({
+      user: {
+        id: 'user-1',
+        email: 'admin@example.com',
+        name: 'Admin',
+        role: 'admin',
+        permissions: ['attendance:admin'],
+        tenantId: 'tenant_42',
+        created_at: new Date('2026-03-13T00:00:00.000Z'),
+        updated_at: new Date('2026-03-13T00:00:00.000Z'),
+      },
+      token: 'jwt-login-token',
+    })
+
+    const response = await invokeRoute('post', '/login', {
+      headers: {
+        'x-tenant-id': 'tenant_42',
+      },
+      body: {
+        email: 'admin@example.com',
+        password: 'WelcomePass9A',
+      },
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect(authServiceMocks.login).toHaveBeenCalledWith(
+      'admin@example.com',
+      'WelcomePass9A',
+      expect.objectContaining({
+        tenantId: 'tenant_42',
+      }),
+    )
+  })
+
   it('issues a dev token with an optional tenant claim', async () => {
     const response = await invokeRoute('get', '/dev-token', {
       query: {
@@ -568,6 +603,7 @@ describe('auth login routes', () => {
 
     const response = await invokeRoute('post', '/dingtalk/callback', {
       headers: {
+        'x-tenant-id': 'tenant_42',
         'user-agent': 'Vitest Browser',
       },
       body: {
@@ -586,6 +622,7 @@ describe('auth login routes', () => {
         email: 'manager@example.com',
         role: 'admin',
         permissions: ['attendance:admin', 'workflow:read'],
+        tenantId: 'tenant_42',
       }),
       expect.objectContaining({ sid: expect.any(String) }),
     )

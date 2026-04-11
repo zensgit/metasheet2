@@ -20,6 +20,22 @@ It does not introduce schema migrations.
 
 `jwtAuthMiddleware` continues to assign the authenticated user object to `req.user`, so the tenant claim is available to downstream routes.
 
+### 1.1 Auth session tenant bridge
+
+Normal auth flows now also read `x-tenant-id` from the request and carry it into session token issuance.
+
+That bridge now covers:
+
+- `/api/auth/login`
+- `/api/auth/register`
+- `/api/auth/invite/accept`
+- `/api/auth/dingtalk/callback`
+- `/api/auth/dev-token` as a header fallback when the query parameter is absent
+
+`jwtAuthMiddleware` also backfills `req.user.tenantId` from `x-tenant-id` when a trusted legacy token is valid but lacks a tenant claim.
+
+This keeps the after-sales routes strict while preserving compatibility for existing tenant-less auth sessions that still send an explicit tenant header.
+
 ### 2. CoreAPI tenant seam
 
 `CoreAPI` now exposes:
@@ -78,6 +94,7 @@ The refund-approval read path is now keyed only by `ticketId`, which matches the
 
 - `apps/web/src/views/AfterSalesView.vue`
 - `packages/core-backend/src/auth/AuthService.ts`
+- `packages/core-backend/src/auth/jwt-middleware.ts`
 - `packages/core-backend/src/index.ts`
 - `packages/core-backend/src/routes/auth.ts`
 - `packages/core-backend/src/types/express.d.ts`
@@ -111,7 +128,7 @@ pnpm --filter @metasheet/core-backend exec vitest run \
 Result:
 
 - `5` test files passed
-- `155` tests passed
+- `158` tests passed
 
 2. Real-DB after-sales integration verification
 

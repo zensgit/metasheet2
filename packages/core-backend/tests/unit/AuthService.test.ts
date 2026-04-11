@@ -393,3 +393,38 @@ describe('AuthService.register', () => {
     )
   })
 })
+
+describe('AuthService.createToken', () => {
+  beforeEach(() => {
+    process.env.NODE_ENV = 'test'
+    jwtMocks.sign.mockReset()
+    jwtMocks.sign.mockReturnValue('signed-token')
+    secretManagerMocks.get.mockReset()
+    secretManagerMocks.get.mockReturnValue('unit-test-secret-abcdefghijklmnopqrstuvwxyz123456')
+  })
+
+  it('includes tenantId when present on the authenticated user', () => {
+    const auth = new AuthService()
+
+    const token = auth.createToken({
+      id: 'user-1',
+      email: 'user@example.com',
+      name: 'User',
+      role: 'admin',
+      permissions: ['*:*'],
+      tenantId: 'tenant_42',
+      created_at: new Date('2026-04-11T00:00:00.000Z'),
+      updated_at: new Date('2026-04-11T00:00:00.000Z'),
+    })
+
+    expect(token).toBe('signed-token')
+    expect(jwtMocks.sign).toHaveBeenCalledWith(
+      expect.objectContaining({
+        userId: 'user-1',
+        tenantId: 'tenant_42',
+      }),
+      expect.any(String),
+      expect.any(Object),
+    )
+  })
+})

@@ -25,6 +25,7 @@ import { createUserSession, getUserSession, listUserSessions, revokeUserSession,
 import { revokeUserSessions } from '../auth/session-revocation'
 import { FEATURE_FLAGS } from '../config/flags'
 import { Logger } from '../core/logger'
+import { extractTenantFromHeaders } from '../db/sharding/tenant-context'
 import { query } from '../db/pg'
 import { listUserPermissions } from '../rbac/service'
 import { secretManager } from '../security/SecretManager'
@@ -46,7 +47,9 @@ authRouter.get('/dev-token', async (req: Request, res: Response) => {
   }
 
   const userId = typeof req.query.userId === 'string' && req.query.userId.trim() ? req.query.userId.trim() : 'dev-user'
-  const tenantId = typeof req.query.tenantId === 'string' && req.query.tenantId.trim() ? req.query.tenantId.trim() : undefined
+  const tenantId =
+    (typeof req.query.tenantId === 'string' && req.query.tenantId.trim() ? req.query.tenantId.trim() : undefined)
+    || resolveRequestTenantId(req)
   const rolesParam = typeof req.query.roles === 'string' ? req.query.roles : 'admin'
   const permsParam = typeof req.query.perms === 'string'
     ? req.query.perms
@@ -110,6 +113,10 @@ function getClientIP(req: Request): string {
     return forwarded.split(',')[0].trim()
   }
   return req.ip || req.socket.remoteAddress || 'unknown'
+}
+
+function resolveRequestTenantId(req: Request): string | undefined {
+  return extractTenantFromHeaders(req.headers as Record<string, unknown> | undefined)
 }
 
 function checkRateLimit(key: string, maxAttempts: number): { allowed: boolean; retryAfter?: number } {
@@ -249,7 +256,9 @@ async function loadAuthPermissions(userId: string): Promise<string[]> {
 
 async function issueAuthSessionToken(user: User, req: Request): Promise<string> {
   const sessionId = randomUUID()
-  const token = authService.createToken(user, { sid: sessionId })
+  const tenantId = resolveRequestTenantId(req)
+  const tokenUser = tenantId ? { ...user, tenantId } : user
+  const token = authService.createToken(tokenUser, { sid: sessionId })
   const payload = authService.readTokenPayload(token)
 
   if (payload?.exp) {
@@ -312,6 +321,7 @@ authRouter.post('/login', loginRateLimiter, async (req: Request, res: Response) 
     const result = await authService.login(cleanEmail, password, {
       ipAddress: ip,
       userAgent: req.headers['user-agent'] || null,
+      tenantId: resolveRequestTenantId(req),
     })
 
     if (!result) {
@@ -405,7 +415,8 @@ authRouter.post('/register', registerRateLimiter, async (req: Request, res: Resp
     }
 
     // 注册成功，自动生成token
-    const token = authService.createToken(user)
+    const tenantId = resolveRequestTenantId(req)
+    const token = authService.createToken(tenantId ? { ...user, tenantId } : user)
     logger.info(`Successful registration for ${cleanEmail} from ${ip}`)
 
     res.status(201).json({
@@ -558,6 +569,7 @@ authRouter.post('/invite/accept', async (req: Request, res: Response) => {
     const result = await authService.login(payload.email, password, {
       ipAddress: ip,
       userAgent: req.headers['user-agent'] || null,
+      tenantId: resolveRequestTenantId(req),
     })
     if (!result) {
       return res.status(500).json({
