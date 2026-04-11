@@ -3362,6 +3362,18 @@ export function univerMetaRouter(): Router {
       const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canManageViews) return sendForbidden(res)
 
+      if (subjectType === 'user') {
+        const userCheck = await pool.query('SELECT id FROM users WHERE id = $1', [subjectId])
+        if (userCheck.rows.length === 0) {
+          return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `User not found: ${subjectId}` } })
+        }
+      } else {
+        const roleCheck = await pool.query('SELECT id FROM roles WHERE id = $1', [subjectId])
+        if (roleCheck.rows.length === 0) {
+          return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Role not found: ${subjectId}` } })
+        }
+      }
+
       await pool.transaction(async ({ query }) => {
         await query(
           `DELETE FROM meta_view_permissions WHERE view_id = $1 AND subject_type = $2 AND subject_id = $3`,
@@ -3455,6 +3467,23 @@ export function univerMetaRouter(): Router {
       }
       const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canManageFields) return sendForbidden(res)
+
+      const fieldCheck = await pool.query('SELECT id FROM meta_fields WHERE id = $1 AND sheet_id = $2', [fieldId, sheetId])
+      if (fieldCheck.rows.length === 0) {
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Field ${fieldId} not found in sheet ${sheetId}` } })
+      }
+
+      if (subjectType === 'user') {
+        const userCheck = await pool.query('SELECT id FROM users WHERE id = $1', [subjectId])
+        if (userCheck.rows.length === 0) {
+          return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `User not found: ${subjectId}` } })
+        }
+      } else {
+        const roleCheck = await pool.query('SELECT id FROM roles WHERE id = $1', [subjectId])
+        if (roleCheck.rows.length === 0) {
+          return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Role not found: ${subjectId}` } })
+        }
+      }
 
       if (parsed.data.remove) {
         await pool.query(
