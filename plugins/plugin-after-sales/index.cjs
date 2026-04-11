@@ -369,6 +369,40 @@ function isOperationalAfterSalesStatus(status) {
   return status === 'installed' || status === 'partial'
 }
 
+function buildObjectUnavailableError(objectId) {
+  const label = objectId === 'partItem' ? 'part inventory' : `object ${objectId}`
+  const error = new Error(`After-sales ${label} is unavailable for the current install state`)
+  error.code = 'AFTER_SALES_OBJECT_UNAVAILABLE'
+  error.meta = { objectId }
+  return error
+}
+
+function sendObjectUnavailable(res, err) {
+  res.status(409).json({
+    ok: false,
+    error: {
+      code: err && err.code ? err.code : 'AFTER_SALES_OBJECT_UNAVAILABLE',
+      message:
+        err && err.message
+          ? err.message
+          : 'After-sales object is unavailable for the current install state',
+      ...(err && err.meta && typeof err.meta === 'object' ? { details: err.meta } : {}),
+    },
+  })
+}
+
+async function requireProvisionedObjectSheetId(provisioning, projectId, objectId) {
+  if (provisioning && typeof provisioning.findObjectSheet === 'function') {
+    const sheet = await provisioning.findObjectSheet({ projectId, objectId })
+    if (sheet && typeof sheet.id === 'string' && sheet.id) {
+      return sheet.id
+    }
+    throw buildObjectUnavailableError(objectId)
+  }
+
+  return findObjectSheetId(provisioning, projectId, objectId)
+}
+
 function getMultitableWriteApi(context) {
   const multitable = context && context.api && context.api.multitable
   const provisioning = multitable && multitable.provisioning
@@ -498,7 +532,7 @@ async function getCustomerById(multitableApi, projectId, customerId) {
 }
 
 async function getPartItemById(multitableApi, projectId, partItemId) {
-  const sheetId = await findObjectSheetId(multitableApi.provisioning, projectId, 'partItem')
+  const sheetId = await requireProvisionedObjectSheetId(multitableApi.provisioning, projectId, 'partItem')
   const record = await multitableApi.records.getRecord({
     sheetId,
     recordId: partItemId,
@@ -1297,6 +1331,10 @@ module.exports = {
             sendBadRequest(res, err)
             return
           }
+          if (err && err.code === 'AFTER_SALES_OBJECT_UNAVAILABLE') {
+            sendObjectUnavailable(res, err)
+            return
+          }
           if (err && err.code === 'VALIDATION_ERROR') {
             res.status(400).json({
               ok: false,
@@ -1396,6 +1434,10 @@ module.exports = {
         } catch (err) {
           if (err && err.code === 'AFTER_SALES_EVENT_VALIDATION_FAILED') {
             sendBadRequest(res, err)
+            return
+          }
+          if (err && err.code === 'AFTER_SALES_OBJECT_UNAVAILABLE') {
+            sendObjectUnavailable(res, err)
             return
           }
           if (err && err.code === 'VALIDATION_ERROR') {
@@ -1577,6 +1619,10 @@ module.exports = {
         } catch (err) {
           if (err && err.code === 'AFTER_SALES_EVENT_VALIDATION_FAILED') {
             sendBadRequest(res, err)
+            return
+          }
+          if (err && err.code === 'AFTER_SALES_OBJECT_UNAVAILABLE') {
+            sendObjectUnavailable(res, err)
             return
           }
           if (err && err.code === 'VALIDATION_ERROR') {
@@ -2358,7 +2404,11 @@ module.exports = {
 
           const projectId = current.projectId || installer.getProjectId(tenantId, appManifest.id)
           const command = buildPartItemCommand((req && req.body) || {})
-          const sheetId = await findObjectSheetId(multitableApi.provisioning, projectId, 'partItem')
+          const sheetId = await requireProvisionedObjectSheetId(
+            multitableApi.provisioning,
+            projectId,
+            'partItem',
+          )
           const record = await multitableApi.records.createRecord({
             sheetId,
             data: await toPhysicalPartItemData(multitableApi.provisioning, projectId, command.recordData),
@@ -2383,6 +2433,10 @@ module.exports = {
         } catch (err) {
           if (err && err.code === 'AFTER_SALES_EVENT_VALIDATION_FAILED') {
             sendBadRequest(res, err)
+            return
+          }
+          if (err && err.code === 'AFTER_SALES_OBJECT_UNAVAILABLE') {
+            sendObjectUnavailable(res, err)
             return
           }
           if (err && err.code === 'VALIDATION_ERROR') {
@@ -2452,7 +2506,11 @@ module.exports = {
           }
 
           const projectId = current.projectId || installer.getProjectId(tenantId, appManifest.id)
-          const sheetId = await findObjectSheetId(multitableApi.provisioning, projectId, 'partItem')
+          const sheetId = await requireProvisionedObjectSheetId(
+            multitableApi.provisioning,
+            projectId,
+            'partItem',
+          )
           const status = typeof req?.query?.status === 'string' && req.query.status.trim()
             ? req.query.status.trim()
             : null
@@ -2509,7 +2567,7 @@ module.exports = {
               ).filter((record) => {
                 if (status && record.data.status !== status) return false
                 if (!search) return true
-                const haystack = JSON.stringify(record.data).toLowerCase()
+                const haystack = buildPartItemSearchHaystack(record.data)
                 return haystack.includes(search.toLowerCase())
               })
             : []
@@ -2523,6 +2581,10 @@ module.exports = {
             },
           })
         } catch (err) {
+          if (err && err.code === 'AFTER_SALES_OBJECT_UNAVAILABLE') {
+            sendObjectUnavailable(res, err)
+            return
+          }
           if (err && err.code === 'VALIDATION_ERROR') {
             res.status(400).json({
               ok: false,
@@ -2629,6 +2691,10 @@ module.exports = {
             sendBadRequest(res, err)
             return
           }
+          if (err && err.code === 'AFTER_SALES_OBJECT_UNAVAILABLE') {
+            sendObjectUnavailable(res, err)
+            return
+          }
           if (err && err.code === 'VALIDATION_ERROR') {
             res.status(400).json({
               ok: false,
@@ -2703,7 +2769,11 @@ module.exports = {
           }
 
           const projectId = current.projectId || installer.getProjectId(tenantId, appManifest.id)
-          const sheetId = await findObjectSheetId(multitableApi.provisioning, projectId, 'partItem')
+          const sheetId = await requireProvisionedObjectSheetId(
+            multitableApi.provisioning,
+            projectId,
+            'partItem',
+          )
           const deleted = await multitableApi.records.deleteRecord({
             sheetId,
             recordId: partItemId,
@@ -2719,6 +2789,10 @@ module.exports = {
             },
           })
         } catch (err) {
+          if (err && err.code === 'AFTER_SALES_OBJECT_UNAVAILABLE') {
+            sendObjectUnavailable(res, err)
+            return
+          }
           if (err && err.code === 'VALIDATION_ERROR') {
             res.status(400).json({
               ok: false,

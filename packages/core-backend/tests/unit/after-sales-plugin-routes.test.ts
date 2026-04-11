@@ -3471,6 +3471,42 @@ describe('plugin-after-sales routes', () => {
     expect(createRecord).not.toHaveBeenCalled()
   })
 
+  it('returns 409 when parts create is requested but the part projection is unavailable', async () => {
+    const handler = routes.get('POST /api/after-sales/parts')
+    const res = new FakeResponse()
+    findObjectSheet.mockResolvedValueOnce(null)
+
+    seedAfterSalesInstallRow(db, {
+      mode: 'reinstall',
+      status: 'partial',
+      created_objects_json: JSON.stringify(['serviceTicket', 'installedAsset', 'customer', 'serviceRecord']),
+      created_views_json: JSON.stringify(['ticket-board']),
+      warnings_json: JSON.stringify(['partItem provisioning failed']),
+    })
+
+    await handler?.(buildReq({
+      body: {
+        partItem: {
+          partNo: 'PRT-1001',
+          name: 'Starter Capacitor',
+        },
+      },
+    }), res)
+
+    expect(res.statusCode).toBe(409)
+    expect(res.body).toEqual({
+      ok: false,
+      error: {
+        code: 'AFTER_SALES_OBJECT_UNAVAILABLE',
+        message: 'After-sales part inventory is unavailable for the current install state',
+        details: {
+          objectId: 'partItem',
+        },
+      },
+    })
+    expect(createRecord).not.toHaveBeenCalled()
+  })
+
   it('lists parts through the multitable query seam', async () => {
     const handler = routes.get('GET /api/after-sales/parts')
     const res = new FakeResponse()
@@ -3540,6 +3576,36 @@ describe('plugin-after-sales routes', () => {
       },
     })
     expect(queryRecords).not.toHaveBeenCalled()
+  })
+
+  it('returns 409 when parts list is requested but the part projection is unavailable', async () => {
+    const handler = routes.get('GET /api/after-sales/parts')
+    const res = new FakeResponse()
+    findObjectSheet.mockResolvedValueOnce(null)
+
+    seedAfterSalesInstallRow(db, {
+      mode: 'reinstall',
+      status: 'partial',
+      created_objects_json: JSON.stringify(['serviceTicket', 'installedAsset', 'customer', 'serviceRecord']),
+      created_views_json: JSON.stringify(['ticket-board']),
+      warnings_json: JSON.stringify(['partItem provisioning failed']),
+    })
+
+    await handler?.(buildReq(), res)
+
+    expect(res.statusCode).toBe(409)
+    expect(res.body).toEqual({
+      ok: false,
+      error: {
+        code: 'AFTER_SALES_OBJECT_UNAVAILABLE',
+        message: 'After-sales part inventory is unavailable for the current install state',
+        details: {
+          objectId: 'partItem',
+        },
+      },
+    })
+    expect(queryRecords).not.toHaveBeenCalled()
+    expect(listRecords).not.toHaveBeenCalled()
   })
 
   it('returns 403 for parts update when caller lacks after-sales write access', async () => {
@@ -3709,6 +3775,45 @@ describe('plugin-after-sales routes', () => {
     expect(patchRecord).not.toHaveBeenCalled()
   })
 
+  it('returns 409 when part update is requested but the part projection is unavailable', async () => {
+    const handler = routes.get('PATCH /api/after-sales/parts/:partItemId')
+    const res = new FakeResponse()
+    findObjectSheet.mockResolvedValueOnce(null)
+
+    seedAfterSalesInstallRow(db, {
+      mode: 'reinstall',
+      status: 'partial',
+      created_objects_json: JSON.stringify(['serviceTicket', 'installedAsset', 'customer', 'serviceRecord']),
+      created_views_json: JSON.stringify(['ticket-board']),
+      warnings_json: JSON.stringify(['partItem provisioning failed']),
+    })
+
+    await handler?.(buildReq({
+      params: {
+        partItemId: 'rec_part_001',
+      },
+      body: {
+        partItem: {
+          name: 'Starter Capacitor Updated',
+        },
+      },
+    }), res)
+
+    expect(res.statusCode).toBe(409)
+    expect(res.body).toEqual({
+      ok: false,
+      error: {
+        code: 'AFTER_SALES_OBJECT_UNAVAILABLE',
+        message: 'After-sales part inventory is unavailable for the current install state',
+        details: {
+          objectId: 'partItem',
+        },
+      },
+    })
+    expect(getRecord).not.toHaveBeenCalled()
+    expect(patchRecord).not.toHaveBeenCalled()
+  })
+
   it('returns 403 for parts delete when caller lacks after-sales write access', async () => {
     const handler = routes.get('DELETE /api/after-sales/parts/:partItemId')
     const res = new FakeResponse()
@@ -3796,6 +3901,39 @@ describe('plugin-after-sales routes', () => {
       error: {
         code: 'AFTER_SALES_NOT_INSTALLED',
         message: 'After-sales must be installed before deleting parts',
+      },
+    })
+    expect(deleteRecord).not.toHaveBeenCalled()
+  })
+
+  it('returns 409 when part delete is requested but the part projection is unavailable', async () => {
+    const handler = routes.get('DELETE /api/after-sales/parts/:partItemId')
+    const res = new FakeResponse()
+    findObjectSheet.mockResolvedValueOnce(null)
+
+    seedAfterSalesInstallRow(db, {
+      mode: 'reinstall',
+      status: 'partial',
+      created_objects_json: JSON.stringify(['serviceTicket', 'installedAsset', 'customer', 'serviceRecord']),
+      created_views_json: JSON.stringify(['ticket-board']),
+      warnings_json: JSON.stringify(['partItem provisioning failed']),
+    })
+
+    await handler?.(buildReq({
+      params: {
+        partItemId: 'rec_part_001',
+      },
+    }), res)
+
+    expect(res.statusCode).toBe(409)
+    expect(res.body).toEqual({
+      ok: false,
+      error: {
+        code: 'AFTER_SALES_OBJECT_UNAVAILABLE',
+        message: 'After-sales part inventory is unavailable for the current install state',
+        details: {
+          objectId: 'partItem',
+        },
       },
     })
     expect(deleteRecord).not.toHaveBeenCalled()

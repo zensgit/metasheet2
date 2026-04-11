@@ -26,6 +26,25 @@ function createResponse(payload: unknown, options: MockResponseOptions = {}) {
   } as Response
 }
 
+function createErrorResponse(
+  code: string,
+  message: string,
+  options: MockResponseOptions = {},
+) {
+  return {
+    ok: false,
+    status: options.status ?? 409,
+    statusText: options.statusText ?? 'Conflict',
+    json: async () => ({
+      ok: false,
+      error: {
+        code,
+        message,
+      },
+    }),
+  } as Response
+}
+
 async function flushUi(cycles = 4): Promise<void> {
   for (let i = 0; i < cycles; i += 1) {
     await Promise.resolve()
@@ -42,6 +61,17 @@ async function waitForText(container: HTMLElement, text: string, cycles = 24): P
   }
 
   throw new Error(`Timed out waiting for text: ${text}`)
+}
+
+async function waitForElementMissing(container: HTMLElement, selector: string, cycles = 24): Promise<void> {
+  for (let i = 0; i < cycles; i += 1) {
+    if (!container.querySelector(selector)) {
+      return
+    }
+    await flushUi(1)
+  }
+
+  throw new Error(`Timed out waiting for element to disappear: ${selector}`)
 }
 
 function mountAfterSalesView() {
@@ -432,5 +462,82 @@ describe('AfterSalesView part items panel', () => {
     )
     expect(deleteInitialCall).toBeTruthy()
     await waitForText(section, 'No parts found yet.')
+  })
+
+  it('hides the parts panel when partial install leaves the part projection unavailable', async () => {
+    apiFetchMock.mockImplementation(async (path: string) => {
+      if (path === '/api/after-sales/app-manifest') {
+        return createResponse({
+          id: 'after-sales-default',
+          displayName: 'After Sales',
+          platformDependencies: ['core-backend'],
+          objects: [{ id: 'partItem', name: 'Parts', backing: 'multitable' }],
+          workflows: [],
+        })
+      }
+
+      if (path === '/api/after-sales/projects/current') {
+        return createResponse({
+          status: 'partial',
+          projectId: 'tenant:after-sales',
+          displayName: 'After Sales',
+          config: {
+            defaultSlaHours: 24,
+            urgentSlaHours: 4,
+            followUpAfterDays: 7,
+          },
+          installResult: {
+            status: 'partial',
+            createdObjects: ['serviceTicket', 'installedAsset', 'customer', 'serviceRecord'],
+            createdViews: ['ticket-board'],
+            warnings: ['partItem provisioning failed'],
+            reportRef: 'install-parts-003',
+          },
+          reportRef: 'install-parts-003',
+        })
+      }
+
+      if (path === '/api/after-sales/tickets') {
+        return createResponse({ projectId: 'tenant:after-sales', count: 0, tickets: [] })
+      }
+
+      if (path === '/api/after-sales/installed-assets') {
+        return createResponse({ projectId: 'tenant:after-sales', count: 0, installedAssets: [] })
+      }
+
+      if (path === '/api/after-sales/service-records') {
+        return createResponse({ projectId: 'tenant:after-sales', count: 0, serviceRecords: [] })
+      }
+
+      if (path === '/api/after-sales/field-policies') {
+        return createResponse({
+          projectId: 'tenant:after-sales',
+          fields: {
+            serviceTicket: {
+              refundAmount: { visibility: 'visible', editability: 'editable' },
+            },
+          },
+        })
+      }
+
+      if (path === '/api/after-sales/parts') {
+        return createErrorResponse(
+          'AFTER_SALES_OBJECT_UNAVAILABLE',
+          'After-sales part inventory is unavailable for the current install state',
+        )
+      }
+
+      throw new Error(`Unexpected request: ${path}`)
+    })
+
+    const mounted = mountAfterSalesView()
+    app = mounted.app
+    container = mounted.container
+
+    await waitForText(container, 'Install state')
+    await waitForElementMissing(container, '.after-sales-view__part-items-shell')
+
+    expect(container.textContent).not.toContain('Part inventory')
+    expect(container.textContent).not.toContain('Failed to load parts')
   })
 })

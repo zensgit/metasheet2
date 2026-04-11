@@ -1201,7 +1201,7 @@
         </article>
       </section>
 
-      <section v-if="isInstalled && hasPartItemProjection" class="after-sales-view__part-items-shell">
+      <section v-if="showPartItemPanel" class="after-sales-view__part-items-shell">
         <article class="after-sales-view__card after-sales-view__card--wide">
           <div class="after-sales-view__section-header">
             <div>
@@ -2585,6 +2585,7 @@ const current = ref<CurrentResponse>({ status: 'not-installed' })
 const tickets = ref<TicketViewModel[]>([])
 const installedAssets = ref<InstalledAssetViewModel[]>([])
 const partItems = ref<PartItemViewModel[]>([])
+const partItemProjectionAvailable = ref<boolean | null>(null)
 const customers = ref<CustomerViewModel[]>([])
 const followUps = ref<FollowUpViewModel[]>([])
 const serviceRecords = ref<ServiceRecordViewModel[]>([])
@@ -2679,6 +2680,9 @@ const hasCustomerProjection = computed(() =>
 const hasPartItemProjection = computed(() =>
   Array.isArray(manifest.value?.objects) &&
   manifest.value.objects.some((object) => object && object.id === 'partItem'),
+)
+const showPartItemPanel = computed(
+  () => isInstalled.value && hasPartItemProjection.value && partItemProjectionAvailable.value !== false,
 )
 const hasFollowUpProjection = computed(() =>
   Array.isArray(manifest.value?.objects) &&
@@ -2791,6 +2795,14 @@ function extractMessage(payload: unknown, fallback: string): string {
       ? (payload as { error?: { message?: string } }).error?.message
       : ''
   return typeof errorMessage === 'string' && errorMessage.trim().length > 0 ? errorMessage : fallback
+}
+
+function extractErrorCode(payload: unknown): string {
+  const errorCode =
+    payload && typeof payload === 'object' && 'error' in payload
+      ? (payload as { error?: { code?: string } }).error?.code
+      : ''
+  return typeof errorCode === 'string' ? errorCode : ''
 }
 
 async function readEnvelope<T>(path: string, options?: RequestInit): Promise<T> {
@@ -3978,20 +3990,37 @@ async function loadPartItemsForCurrentState(state: CurrentResponse): Promise<voi
   partItemsError.value = ''
   try {
     if (!hasPartItemProjection.value) {
+      partItemProjectionAvailable.value = null
       partItems.value = []
       return
     }
     if (state.status === 'not-installed' || state.status === 'failed') {
+      partItemProjectionAvailable.value = null
       partItems.value = []
       return
     }
 
-    const payload = await readEnvelope<PartItemsResponse>(buildPartItemListPath())
-    const rows = Array.isArray(payload?.partItems) ? payload.partItems : []
+    const { response, payload } = await readEnvelopeResponse<PartItemsResponse>(buildPartItemListPath())
+    if (!response.ok) {
+      const errorCode = extractErrorCode(payload)
+      if (errorCode === 'AFTER_SALES_OBJECT_UNAVAILABLE') {
+        partItemProjectionAvailable.value = false
+        partItems.value = []
+        return
+      }
+      throw new Error(extractMessage(payload, `${response.status} ${response.statusText}`))
+    }
+
+    const nextPayload = ((payload as ApiEnvelope<PartItemsResponse> | null)?.data ?? null) as PartItemsResponse | null
+    const rows = Array.isArray(nextPayload?.partItems) ? nextPayload.partItems : []
+    partItemProjectionAvailable.value = true
     partItems.value = rows.map((row) => normalizePartItemRow(row))
   } catch (err: unknown) {
     partItems.value = []
-    if (state.status === 'installed' || state.status === 'partial') {
+    if (
+      partItemProjectionAvailable.value !== false &&
+      (state.status === 'installed' || state.status === 'partial')
+    ) {
       partItemsError.value = err instanceof Error ? err.message : 'Failed to load parts'
     }
   } finally {
