@@ -148,7 +148,7 @@
           <div class="directory-admin__section-head">
             <div>
               <h3>成员账号</h3>
-              <p class="directory-admin__hint">展示同步后的钉钉成员、钉钉 ID 与本地绑定状态；支持按本地用户 ID 或邮箱手工绑定。</p>
+              <p class="directory-admin__hint">展示同步后的钉钉成员、钉钉 ID 与本地绑定状态；支持按本地用户 ID 或邮箱手工绑定，并按页管理大规模组织。</p>
             </div>
             <div class="directory-admin__actions">
               <input
@@ -156,10 +156,16 @@
                 class="directory-admin__input directory-admin__input--search"
                 type="text"
                 placeholder="搜索姓名 / 邮箱 / 手机 / 钉钉 ID / 本地用户"
-                @keyup.enter="void loadAccounts(selectedIntegration.id)"
+                @keyup.enter="void searchAccounts()"
               />
-              <button class="directory-admin__button directory-admin__button--secondary" type="button" :disabled="loadingAccounts" @click="void loadAccounts(selectedIntegration.id)">
-                {{ loadingAccounts ? '刷新中...' : '刷新成员' }}
+              <label class="directory-admin__field directory-admin__field--inline">
+                <span>每页</span>
+                <select class="directory-admin__input directory-admin__input--compact" :value="String(accountPageSize)" @change="void updateAccountPageSize($event)">
+                  <option v-for="size in accountPageSizeOptions" :key="size" :value="String(size)">{{ size }}</option>
+                </select>
+              </label>
+              <button class="directory-admin__button directory-admin__button--secondary" type="button" :disabled="loadingAccounts" @click="void searchAccounts()">
+                {{ loadingAccounts ? '刷新中...' : accountQuery.trim().length > 0 ? '应用筛选' : '刷新成员' }}
               </button>
             </div>
           </div>
@@ -263,6 +269,30 @@
               </button>
             </div>
           </article>
+
+          <footer v-if="accountTotal > 0" class="directory-admin__pagination">
+            <p class="directory-admin__hint">
+              第 {{ accountPage }} / {{ accountPageCount }} 页 · 显示 {{ accountRangeStart }}-{{ accountRangeEnd }} / {{ accountTotal }}
+            </p>
+            <div class="directory-admin__actions">
+              <button
+                class="directory-admin__button directory-admin__button--secondary"
+                type="button"
+                :disabled="loadingAccounts || accountPage <= 1"
+                @click="void changeAccountPage(accountPage - 1)"
+              >
+                上一页
+              </button>
+              <button
+                class="directory-admin__button directory-admin__button--secondary"
+                type="button"
+                :disabled="loadingAccounts || accountPage >= accountPageCount"
+                @click="void changeAccountPage(accountPage + 1)"
+              >
+                下一页
+              </button>
+            </div>
+          </footer>
         </section>
 
         <section v-if="testResult" class="directory-admin__section">
@@ -408,6 +438,10 @@ type DirectoryDraft = {
 const integrations = ref<DirectoryIntegration[]>([])
 const runs = ref<DirectoryRun[]>([])
 const accounts = ref<DirectoryAccount[]>([])
+const accountPageSizeOptions = [25, 50, 100]
+const accountPage = ref(1)
+const accountPageSize = ref(25)
+const accountTotal = ref(0)
 const selectedIntegrationId = ref('')
 const loading = ref(false)
 const loadingRuns = ref(false)
@@ -442,6 +476,17 @@ const draft = reactive<DirectoryDraft>({
 const selectedIntegration = computed(() =>
   integrations.value.find((integration) => integration.id === selectedIntegrationId.value) ?? null,
 )
+const accountPageCount = computed(() => Math.max(1, Math.ceil(accountTotal.value / accountPageSize.value)))
+const accountRangeStart = computed(() => (
+  accountTotal.value === 0
+    ? 0
+    : ((accountPage.value - 1) * accountPageSize.value) + 1
+))
+const accountRangeEnd = computed(() => (
+  accountTotal.value === 0
+    ? 0
+    : Math.min(accountPage.value * accountPageSize.value, accountTotal.value)
+))
 
 const canSave = computed(() =>
   draft.name.trim().length > 0 &&
@@ -460,10 +505,15 @@ function resetDraft() {
   testResult.value = null
   runs.value = []
   accounts.value = []
+  accountPage.value = 1
+  accountPageSize.value = accountPageSizeOptions[0]
+  accountTotal.value = 0
   accountQuery.value = ''
+  for (const key of Object.keys(bindingDrafts)) delete bindingDrafts[key]
   for (const key of Object.keys(userSearchResults)) delete userSearchResults[key]
   for (const key of Object.keys(userSearchLoading)) delete userSearchLoading[key]
   for (const key of Object.keys(userSearchError)) delete userSearchError[key]
+  for (const key of Object.keys(grantToggles)) delete grantToggles[key]
   draft.name = ''
   draft.corpId = ''
   draft.appKey = ''
@@ -494,6 +544,8 @@ function applyIntegrationToDraft(integration: DirectoryIntegration) {
 function selectIntegration(integrationId: string) {
   selectedIntegrationId.value = integrationId
   testResult.value = null
+  accountPage.value = 1
+  accountTotal.value = 0
   const integration = integrations.value.find((item) => item.id === integrationId)
   if (!integration) return
   applyIntegrationToDraft(integration)
@@ -709,12 +761,36 @@ async function syncIntegration() {
   }
 }
 
+async function searchAccounts() {
+  if (!selectedIntegration.value) return
+  accountPage.value = 1
+  await loadAccounts(selectedIntegration.value.id)
+}
+
+async function changeAccountPage(nextPage: number) {
+  if (!selectedIntegration.value) return
+  const normalizedPage = Math.max(1, Math.min(nextPage, accountPageCount.value))
+  if (normalizedPage === accountPage.value) return
+  accountPage.value = normalizedPage
+  await loadAccounts(selectedIntegration.value.id)
+}
+
+async function updateAccountPageSize(event: Event) {
+  if (!selectedIntegration.value) return
+  const target = event.target
+  const nextPageSize = Number(target instanceof HTMLSelectElement ? target.value : accountPageSize.value)
+  if (!Number.isFinite(nextPageSize) || nextPageSize <= 0 || nextPageSize === accountPageSize.value) return
+  accountPageSize.value = nextPageSize
+  accountPage.value = 1
+  await loadAccounts(selectedIntegration.value.id)
+}
+
 async function loadAccounts(integrationId: string) {
   loadingAccounts.value = true
   try {
     const params = new URLSearchParams({
-      page: '1',
-      pageSize: '100',
+      page: String(accountPage.value),
+      pageSize: String(accountPageSize.value),
     })
     if (accountQuery.value.trim().length > 0) {
       params.set('q', accountQuery.value.trim())
@@ -722,9 +798,22 @@ async function loadAccounts(integrationId: string) {
     const response = await apiFetch(`/api/admin/directory/integrations/${integrationId}/accounts?${params.toString()}`)
     const body = await readJson(response)
     if (!response.ok) throw new Error(readApiError(body, '加载目录成员失败'))
-    accounts.value = Array.isArray(body?.data?.items) ? body.data.items : []
+    const items = Array.isArray(body?.data?.items) ? body.data.items : []
+    const total = typeof body?.data?.total === 'number'
+      ? body.data.total
+      : Number(body?.data?.total ?? items.length)
+    const normalizedTotal = Number.isFinite(total) && total >= 0 ? total : items.length
+    const maxPage = Math.max(1, Math.ceil(normalizedTotal / accountPageSize.value))
+    if (normalizedTotal > 0 && accountPage.value > maxPage) {
+      accountPage.value = maxPage
+      await loadAccounts(integrationId)
+      return
+    }
+    accountTotal.value = normalizedTotal
+    accounts.value = items
   } catch (error) {
     accounts.value = []
+    accountTotal.value = 0
     setStatus(error instanceof Error ? error.message : '加载目录成员失败', 'error')
   } finally {
     loadingAccounts.value = false
@@ -786,16 +875,17 @@ async function unbindAccount(account: DirectoryAccount) {
     const body = await readJson(response)
     if (!response.ok) throw new Error(readApiError(body, '解除绑定失败'))
 
-    accounts.value = accounts.value.map((item) => (
-      item.id === account.id
-        ? {
-          ...item,
-          linkStatus: 'pending',
-          matchStrategy: 'manual_admin',
-          localUser: null,
-        }
-        : item
-    ))
+    const unboundAccount = body?.data?.account as DirectoryAccount | undefined
+    accounts.value = accounts.value.map((item) => {
+      if (item.id !== account.id) return item
+      if (unboundAccount) return unboundAccount
+      return {
+        ...item,
+        linkStatus: 'unmatched',
+        matchStrategy: 'manual_unbound',
+        localUser: null,
+      }
+    })
     delete bindingDrafts[account.id]
     clearBindingSearch(account.id)
     setStatus(`目录成员 ${account.name} 已解除绑定`)
@@ -915,6 +1005,11 @@ onMounted(() => {
   gap: 8px;
 }
 
+.directory-admin__field--inline {
+  flex-direction: row;
+  align-items: center;
+}
+
 .directory-admin__toggle {
   justify-content: flex-end;
 }
@@ -928,6 +1023,10 @@ onMounted(() => {
 
 .directory-admin__input--search {
   min-width: min(320px, 100%);
+}
+
+.directory-admin__input--compact {
+  min-width: 88px;
 }
 
 .directory-admin__button,
@@ -1052,6 +1151,14 @@ onMounted(() => {
 .directory-admin__search-result span,
 .directory-admin__search-result small {
   color: #475569;
+}
+
+.directory-admin__pagination {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
 }
 
 .directory-admin__toggle--compact {

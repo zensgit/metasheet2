@@ -79,6 +79,19 @@ function createAccount(overrides: Record<string, unknown> = {}) {
   }
 }
 
+function createAccountListPayload(items: Record<string, unknown>[], overrides: Record<string, unknown> = {}) {
+  return {
+    ok: true,
+    data: {
+      items,
+      total: items.length,
+      page: 1,
+      pageSize: 25,
+      ...overrides,
+    },
+  }
+}
+
 describe('DirectoryManagementView', () => {
   let app: App<Element> | null = null
   let container: HTMLDivElement | null = null
@@ -124,12 +137,9 @@ describe('DirectoryManagementView', () => {
           ],
         },
       }))
-      .mockResolvedValueOnce(createJsonResponse({
-        ok: true,
-        data: {
-          items: [createAccount()],
-        },
-      }))
+      .mockResolvedValueOnce(createJsonResponse(
+        createAccountListPayload([createAccount()], { total: 60 }),
+      ))
 
     app = createApp(DirectoryManagementView)
     app.component('RouterLink', {
@@ -141,12 +151,13 @@ describe('DirectoryManagementView', () => {
 
     expect(apiFetchMock).toHaveBeenNthCalledWith(1, '/api/admin/directory/integrations')
     expect(apiFetchMock).toHaveBeenNthCalledWith(2, '/api/admin/directory/integrations/dir-1/runs?page=1&pageSize=10')
-    expect(apiFetchMock).toHaveBeenNthCalledWith(3, '/api/admin/directory/integrations/dir-1/accounts?page=1&pageSize=100')
+    expect(apiFetchMock).toHaveBeenNthCalledWith(3, '/api/admin/directory/integrations/dir-1/accounts?page=1&pageSize=25')
     expect(container?.textContent).toContain('DingTalk CN')
     expect(container?.textContent).toContain('账号 98')
     expect(container?.textContent).toContain('completed')
     expect(container?.textContent).toContain('Union ID')
     expect(container?.textContent).toContain('0447654442691174')
+    expect(container?.textContent).toContain('第 1 / 3 页')
   })
 
   it('posts manual sync and refreshes the selected integration', async () => {
@@ -161,12 +172,9 @@ describe('DirectoryManagementView', () => {
         ok: true,
         data: { items: [] },
       }))
-      .mockResolvedValueOnce(createJsonResponse({
-        ok: true,
-        data: {
-          items: [createAccount()],
-        },
-      }))
+      .mockResolvedValueOnce(createJsonResponse(
+        createAccountListPayload([createAccount()], { total: 98 }),
+      ))
       .mockResolvedValueOnce(createJsonResponse({
         ok: true,
         data: {
@@ -210,17 +218,14 @@ describe('DirectoryManagementView', () => {
           ],
         },
       }))
-      .mockResolvedValueOnce(createJsonResponse({
-        ok: true,
-        data: {
-          items: [
-            createAccount({
-              matchStrategy: 'external_identity',
-              linkStatus: 'linked',
-            }),
-          ],
-        },
-      }))
+      .mockResolvedValueOnce(createJsonResponse(
+        createAccountListPayload([
+          createAccount({
+            matchStrategy: 'external_identity',
+            linkStatus: 'linked',
+          }),
+        ], { total: 99 }),
+      ))
 
     app = createApp(DirectoryManagementView)
     app.component('RouterLink', {
@@ -241,9 +246,53 @@ describe('DirectoryManagementView', () => {
       '/api/admin/directory/integrations/dir-1/sync',
       expect.objectContaining({ method: 'POST' }),
     )
-    expect(apiFetchMock).toHaveBeenCalledWith('/api/admin/directory/integrations/dir-1/accounts?page=1&pageSize=100')
+    expect(apiFetchMock).toHaveBeenCalledWith('/api/admin/directory/integrations/dir-1/accounts?page=1&pageSize=25')
     expect(container?.textContent).toContain('目录同步已完成')
     expect(container?.textContent).toContain('账号 99')
+  })
+
+  it('paginates directory accounts', async () => {
+    apiFetchMock
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: {
+          items: [createIntegration()],
+        },
+      }))
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: { items: [] },
+      }))
+      .mockResolvedValueOnce(createJsonResponse(
+        createAccountListPayload([createAccount()], { total: 60 }),
+      ))
+      .mockResolvedValueOnce(createJsonResponse(
+        createAccountListPayload([
+          createAccount({
+            id: 'account-2',
+            externalUserId: '0447654442691175',
+            unionId: 'union-2',
+            name: '次页成员',
+          }),
+        ], { total: 60, page: 2 }),
+      ))
+
+    app = createApp(DirectoryManagementView)
+    app.component('RouterLink', {
+      props: ['to'],
+      template: '<a><slot /></a>',
+    })
+    app.mount(container!)
+    await flushUi()
+
+    const nextPageButton = Array.from(container!.querySelectorAll('button')).find((button) => button.textContent?.includes('下一页'))
+    expect(nextPageButton).toBeTruthy()
+    nextPageButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi(6)
+
+    expect(apiFetchMock).toHaveBeenLastCalledWith('/api/admin/directory/integrations/dir-1/accounts?page=2&pageSize=25')
+    expect(container?.textContent).toContain('第 2 / 3 页')
+    expect(container?.textContent).toContain('次页成员')
   })
 
   it('binds a directory account to a local user reference', async () => {
@@ -258,12 +307,9 @@ describe('DirectoryManagementView', () => {
         ok: true,
         data: { items: [] },
       }))
-      .mockResolvedValueOnce(createJsonResponse({
-        ok: true,
-        data: {
-          items: [createAccount()],
-        },
-      }))
+      .mockResolvedValueOnce(createJsonResponse(
+        createAccountListPayload([createAccount()]),
+      ))
       .mockResolvedValueOnce(createJsonResponse({
         ok: true,
         data: {
@@ -306,22 +352,19 @@ describe('DirectoryManagementView', () => {
           })],
         },
       }))
-      .mockResolvedValueOnce(createJsonResponse({
-        ok: true,
-        data: {
-          items: [
-            createAccount({
-              linkStatus: 'linked',
-              matchStrategy: 'manual_admin',
-              localUser: {
-                id: 'user-1',
-                email: 'alpha@example.com',
-                name: 'Alpha',
-              },
-            }),
-          ],
-        },
-      }))
+      .mockResolvedValueOnce(createJsonResponse(
+        createAccountListPayload([
+          createAccount({
+            linkStatus: 'linked',
+            matchStrategy: 'manual_admin',
+            localUser: {
+              id: 'user-1',
+              email: 'alpha@example.com',
+              name: 'Alpha',
+            },
+          }),
+        ]),
+      ))
 
     app = createApp(DirectoryManagementView)
     app.component('RouterLink', {
@@ -382,23 +425,26 @@ describe('DirectoryManagementView', () => {
         ok: true,
         data: { items: [] },
       }))
+      .mockResolvedValueOnce(createJsonResponse(
+        createAccountListPayload([createAccount({
+          linkStatus: 'linked',
+          matchStrategy: 'manual_admin',
+          localUser: {
+            id: 'user-1',
+            email: 'alpha@example.com',
+            name: 'Alpha',
+          },
+        })]),
+      ))
       .mockResolvedValueOnce(createJsonResponse({
         ok: true,
         data: {
-          items: [createAccount({
-            linkStatus: 'linked',
-            matchStrategy: 'manual_admin',
-            localUser: {
-              id: 'user-1',
-              email: 'alpha@example.com',
-              name: 'Alpha',
-            },
-          })],
+          account: createAccount({
+            linkStatus: 'unmatched',
+            matchStrategy: 'manual_unbound',
+            localUser: null,
+          }),
         },
-      }))
-      .mockResolvedValueOnce(createJsonResponse({
-        ok: true,
-        data: { ok: true },
       }))
       .mockResolvedValueOnce(createJsonResponse({
         ok: true,
@@ -406,16 +452,13 @@ describe('DirectoryManagementView', () => {
           items: [createIntegration()],
         },
       }))
-      .mockResolvedValueOnce(createJsonResponse({
-        ok: true,
-        data: {
-          items: [createAccount({
-            linkStatus: 'pending',
-            matchStrategy: 'manual_admin',
-            localUser: null,
-          })],
-        },
-      }))
+      .mockResolvedValueOnce(createJsonResponse(
+        createAccountListPayload([createAccount({
+          linkStatus: 'unmatched',
+          matchStrategy: 'manual_unbound',
+          localUser: null,
+        })]),
+      ))
 
     app = createApp(DirectoryManagementView)
     app.component('RouterLink', {

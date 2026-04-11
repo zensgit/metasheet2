@@ -9,7 +9,7 @@ Date: 2026-04-11
 1. 目录成员列表接口可返回钉钉 ID 与本地绑定信息。
 2. 管理员可将目录成员按本地用户 ID / 邮箱绑定到本地用户。
 3. 预绑定写入的 DingTalk identity key 符合扫码登录规则。
-4. 目录页前端可展示成员账号并发起绑定请求。
+4. 目录页前端可展示成员账号、分页浏览并发起绑定请求。
 5. 目录页前端可搜索本地用户候选并执行解绑。
 
 ## Commands
@@ -23,7 +23,7 @@ pnpm --filter @metasheet/core-backend exec vitest run tests/unit/admin-directory
 Result:
 
 - 2 test files passed
-- 8 tests passed
+- 10 tests passed
 
 ### Frontend unit tests
 
@@ -34,7 +34,7 @@ pnpm --filter @metasheet/web exec vitest run tests/directoryManagementView.spec.
 Result:
 
 - 1 test file passed
-- 3 tests passed
+- 5 tests passed
 
 ### Type checks
 
@@ -76,6 +76,8 @@ Result:
   - 绑定状态
   - 本地用户
   - 部门路径
+- 页面会按后端分页结果展示成员总数，并支持切换每页 25 / 50 / 100 条。
+- 页面支持上一页 / 下一页翻页，不再固定只拉首批 100 条成员。
 - 管理员输入本地用户邮箱后，可直接发起绑定请求。
 - 管理员可先搜索本地用户候选，再一键填充绑定目标。
 - 已绑定成员卡片上可直接执行“解除绑定”。

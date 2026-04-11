@@ -129,15 +129,30 @@ Date: 2026-04-11
 - 可以直接按姓名、邮箱、用户 ID 搜索
 - 复用已有管理员权限边界，减少一套重复接口
 
+### 8. 成员账号列表按页管理
+
+目录成员接口已经返回 `page / pageSize / total`，前端页不能再固定只拉首批结果。
+
+这次调整采用：
+
+- 默认每页 25 条
+- 支持 `25 / 50 / 100` 切换
+- 支持上一页 / 下一页
+- 搜索时自动回到第 1 页
+
+这样可以让大组织目录继续在同一管理页内完成绑定和解绑，不会因为成员数超过 100 而失去可操作性。
+
 ## UI Changes
 
-页面：[DirectoryManagementView.vue](/Users/huazhou/Downloads/Github/metasheet2/.worktrees/staging-deploy-unblock-20260408/apps/web/src/views/DirectoryManagementView.vue)
+页面：[DirectoryManagementView.vue](../../apps/web/src/views/DirectoryManagementView.vue)
 
 新增“成员账号”区块，支持：
 
 - 展示同步后的钉钉成员
 - 展示 `externalUserId / unionId / openId / corpId`
 - 展示本地绑定状态与匹配策略
+- 基于后端 `total/page/pageSize` 做服务端分页
+- 切换每页条数，并支持上一页 / 下一页翻页
 - 搜索本地用户候选并点选
 - 通过“本地用户 ID / 邮箱”手工绑定
 - 绑定时一并开通钉钉登录 grant
@@ -145,15 +160,15 @@ Date: 2026-04-11
 
 ## Backend Files
 
-- [directory-sync.ts](/Users/huazhou/Downloads/Github/metasheet2/.worktrees/staging-deploy-unblock-20260408/packages/core-backend/src/directory/directory-sync.ts)
-- [admin-directory.ts](/Users/huazhou/Downloads/Github/metasheet2/.worktrees/staging-deploy-unblock-20260408/packages/core-backend/src/routes/admin-directory.ts)
+- [directory-sync.ts](../../packages/core-backend/src/directory/directory-sync.ts)
+- [admin-directory.ts](../../packages/core-backend/src/routes/admin-directory.ts)
 
 ## Frontend Files
 
-- [DirectoryManagementView.vue](/Users/huazhou/Downloads/Github/metasheet2/.worktrees/staging-deploy-unblock-20260408/apps/web/src/views/DirectoryManagementView.vue)
+- [DirectoryManagementView.vue](../../apps/web/src/views/DirectoryManagementView.vue)
 
 ## Test Files
 
-- [admin-directory-routes.test.ts](/Users/huazhou/Downloads/Github/metasheet2/.worktrees/staging-deploy-unblock-20260408/packages/core-backend/tests/unit/admin-directory-routes.test.ts)
-- [directory-sync-bind-account.test.ts](/Users/huazhou/Downloads/Github/metasheet2/.worktrees/staging-deploy-unblock-20260408/packages/core-backend/tests/unit/directory-sync-bind-account.test.ts)
-- [directoryManagementView.spec.ts](/Users/huazhou/Downloads/Github/metasheet2/.worktrees/staging-deploy-unblock-20260408/apps/web/tests/directoryManagementView.spec.ts)
+- [admin-directory-routes.test.ts](../../packages/core-backend/tests/unit/admin-directory-routes.test.ts)
+- [directory-sync-bind-account.test.ts](../../packages/core-backend/tests/unit/directory-sync-bind-account.test.ts)
+- [directoryManagementView.spec.ts](../../apps/web/tests/directoryManagementView.spec.ts)
