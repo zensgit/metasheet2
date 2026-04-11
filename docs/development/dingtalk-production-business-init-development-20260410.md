@@ -10,6 +10,7 @@ Result:
 
 - first real production DingTalk admin remained healthy and usable
 - one disabled attendance integration placeholder was created
+- one production DingTalk directory integration was created and synced once
 - one platform member group was created
 - one delegated scope template was created and linked to that member group
 
@@ -73,6 +74,37 @@ Linked the template to the member group above.
 
 No delegated user assignment was created in this wave.
 
+### 5. Directory sync bootstrap
+
+Created one production directory integration by calling the existing backend directory-sync service inside the live backend container:
+
+- id: `8b68baf4-526b-477a-8343-c38d9614e2ec`
+- name: `Production DingTalk Directory`
+- corpId: `dingd1f07b3ff4c8042cbc961a6cb783455b`
+- rootDepartmentId: `1`
+- status: `active`
+- syncEnabled: `false`
+
+Connectivity test succeeded before the first sync:
+
+- `departmentSampleCount = 0`
+- `userSampleCount = 1`
+- sampled user:
+  - `0447654442691174 / 周华`
+
+Executed one manual sync immediately after creation. The first run completed successfully:
+
+- run id: `349685f2-fbae-4026-a640-18227564c998`
+- status: `completed`
+- stats:
+  - `departmentsSynced = 1`
+  - `accountsSynced = 1`
+  - `unmatchedCount = 1`
+  - `pendingCount = 0`
+  - `linkedCount = 0`
+
+The sync stored one directory account for `周华` and currently shows it as `unmatched` because there is no email on the DingTalk account and no pre-bound `user_external_identities` row for that external user.
+
 ## Execution Notes
 
 - Production `docker/app.env` is still present on disk in literal `\\n` format even though the currently running containers are healthy. This did not block this initialization because the execution path parsed only the required DingTalk keys, but it remains an operational drift to fix before the next deploy operation.
@@ -81,6 +113,7 @@ No delegated user assignment was created in this wave.
 ## Explicitly Deferred
 
 - live attendance sync execution
+- directory-based local-user linking for users without DingTalk email
 - robot notification smoke
 - second real user bootstrap
 - delegated plugin-admin assignment
