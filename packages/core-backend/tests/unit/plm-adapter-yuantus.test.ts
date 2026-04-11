@@ -321,10 +321,22 @@ describe('PLMAdapter Yuantus BOM analysis and approval actions', () => {
     const adapter = createAdapter()
     const selectMock = vi.fn()
       .mockResolvedValueOnce({
-        data: [{ id: 'eco-approve-1', status: 'approved', comment: 'Ship it' }],
+        data: [{
+          id: 'eco-approve-1',
+          status: 'approved',
+          comment: 'Ship it',
+          approved_at: '2026-04-11T00:00:00.000Z',
+          created_at: '2026-04-11T00:00:00.000Z',
+        }],
       })
       .mockResolvedValueOnce({
-        data: [{ id: 'eco-reject-1', status: 'rejected', comment: 'Missing test evidence' }],
+        data: [{
+          id: 'eco-reject-1',
+          status: 'rejected',
+          comment: 'Missing test evidence',
+          approved_at: '2026-04-11T00:00:00.000Z',
+          created_at: '2026-04-11T00:00:00.000Z',
+        }],
       })
 
     ;(adapter as any).select = selectMock
@@ -340,8 +352,18 @@ describe('PLMAdapter Yuantus BOM analysis and approval actions', () => {
       method: 'POST',
       data: { version: 8, comment: 'Missing test evidence' },
     })
-    expect(approved.data[0]).toMatchObject({ id: 'eco-approve-1', status: 'approved' })
-    expect(rejected.data[0]).toMatchObject({ id: 'eco-reject-1', status: 'rejected' })
+    expect(approved.data[0]).toMatchObject({
+      id: 'eco-approve-1',
+      status: 'approved',
+      approved_at: '2026-04-11T00:00:00.000Z',
+      created_at: '2026-04-11T00:00:00.000Z',
+    })
+    expect(rejected.data[0]).toMatchObject({
+      id: 'eco-reject-1',
+      status: 'rejected',
+      approved_at: '2026-04-11T00:00:00.000Z',
+      created_at: '2026-04-11T00:00:00.000Z',
+    })
   })
 
   it('queries where-used with recursive and max-level parameters', async () => {
