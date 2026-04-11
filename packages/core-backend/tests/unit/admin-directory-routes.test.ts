@@ -5,6 +5,10 @@ const rbacMocks = vi.hoisted(() => ({
   isRbacAdmin: vi.fn(),
 }))
 
+const auditMocks = vi.hoisted(() => ({
+  auditLog: vi.fn(),
+}))
+
 const directoryMocks = vi.hoisted(() => ({
   listDirectoryIntegrations: vi.fn(),
   createDirectoryIntegration: vi.fn(),
@@ -12,10 +16,17 @@ const directoryMocks = vi.hoisted(() => ({
   testDirectoryIntegration: vi.fn(),
   syncDirectoryIntegration: vi.fn(),
   listDirectorySyncRuns: vi.fn(),
+  listDirectoryIntegrationAccounts: vi.fn(),
+  bindDirectoryAccount: vi.fn(),
+  unbindDirectoryAccount: vi.fn(),
 }))
 
 vi.mock('../../src/rbac/service', () => ({
   isAdmin: rbacMocks.isRbacAdmin,
+}))
+
+vi.mock('../../src/audit/audit', () => ({
+  auditLog: auditMocks.auditLog,
 }))
 
 vi.mock('../../src/directory/directory-sync', () => ({
@@ -25,6 +36,9 @@ vi.mock('../../src/directory/directory-sync', () => ({
   testDirectoryIntegration: directoryMocks.testDirectoryIntegration,
   syncDirectoryIntegration: directoryMocks.syncDirectoryIntegration,
   listDirectorySyncRuns: directoryMocks.listDirectorySyncRuns,
+  listDirectoryIntegrationAccounts: directoryMocks.listDirectoryIntegrationAccounts,
+  bindDirectoryAccount: directoryMocks.bindDirectoryAccount,
+  unbindDirectoryAccount: directoryMocks.unbindDirectoryAccount,
 }))
 
 import { adminDirectoryRouter } from '../../src/routes/admin-directory'
@@ -99,12 +113,16 @@ async function invokeRoute(
 describe('adminDirectoryRouter', () => {
   beforeEach(() => {
     rbacMocks.isRbacAdmin.mockReset()
+    auditMocks.auditLog.mockReset()
     directoryMocks.listDirectoryIntegrations.mockReset()
     directoryMocks.createDirectoryIntegration.mockReset()
     directoryMocks.updateDirectoryIntegration.mockReset()
     directoryMocks.testDirectoryIntegration.mockReset()
     directoryMocks.syncDirectoryIntegration.mockReset()
     directoryMocks.listDirectorySyncRuns.mockReset()
+    directoryMocks.listDirectoryIntegrationAccounts.mockReset()
+    directoryMocks.bindDirectoryAccount.mockReset()
+    directoryMocks.unbindDirectoryAccount.mockReset()
   })
 
   it('rejects unauthenticated requests', async () => {
@@ -184,5 +202,124 @@ describe('adminDirectoryRouter', () => {
     expect(response.statusCode).toBe(200)
     expect(rbacMocks.isRbacAdmin).toHaveBeenCalledWith('user-2')
     expect(directoryMocks.listDirectorySyncRuns).toHaveBeenCalledWith('dir-1', { limit: 10, offset: 0 })
+  })
+
+  it('lists directory accounts for an integration', async () => {
+    directoryMocks.listDirectoryIntegrationAccounts.mockResolvedValue({
+      items: [{ id: 'account-1', externalUserId: '0447654442691174' }],
+      total: 1,
+    })
+
+    const response = await invokeRoute('get', '/integrations/:integrationId/accounts', {
+      params: { integrationId: 'dir-1' },
+      query: { page: '1', pageSize: '50', q: '0447' },
+      user: {
+        id: 'admin-1',
+        role: 'admin',
+      },
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect(directoryMocks.listDirectoryIntegrationAccounts).toHaveBeenCalledWith('dir-1', { limit: 50, offset: 0 }, '0447')
+    expect(response.body).toMatchObject({
+      ok: true,
+      data: {
+        total: 1,
+        query: '0447',
+      },
+    })
+  })
+
+  it('binds a directory account to a local user reference', async () => {
+    directoryMocks.bindDirectoryAccount.mockResolvedValue({
+      account: {
+        id: 'account-1',
+        integrationId: 'dir-1',
+        corpId: 'dingcorp',
+        externalUserId: '0447654442691174',
+        localUser: {
+          id: 'user-1',
+          email: 'alpha@example.com',
+        },
+      },
+      previousLocalUser: null,
+    })
+
+    const response = await invokeRoute('post', '/accounts/:accountId/bind', {
+      params: { accountId: 'account-1' },
+      body: {
+        localUserRef: 'alpha@example.com',
+        enableDingTalkGrant: true,
+      },
+      user: {
+        id: 'admin-1',
+        role: 'admin',
+      },
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect(directoryMocks.bindDirectoryAccount).toHaveBeenCalledWith('account-1', {
+      localUserRef: 'alpha@example.com',
+      adminUserId: 'admin-1',
+      enableDingTalkGrant: true,
+    })
+    expect(response.body).toMatchObject({
+      ok: true,
+      data: {
+        account: {
+          id: 'account-1',
+          externalUserId: '0447654442691174',
+        },
+      },
+    })
+    expect(auditMocks.auditLog).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'bind',
+      resourceType: 'directory-account-link',
+      resourceId: 'account-1',
+    }))
+  })
+
+  it('unbinds a directory account', async () => {
+    directoryMocks.unbindDirectoryAccount.mockResolvedValue({
+      account: {
+        id: 'account-1',
+        externalUserId: '0447654442691174',
+        integrationId: 'dir-1',
+        corpId: 'dingcorp',
+        localUser: null,
+      },
+      previousLocalUser: {
+        id: 'user-1',
+        email: 'alpha@example.com',
+        name: 'Alpha',
+      },
+    })
+
+    const response = await invokeRoute('post', '/accounts/:accountId/unbind', {
+      params: { accountId: 'account-1' },
+      user: {
+        id: 'admin-1',
+        role: 'admin',
+      },
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect(directoryMocks.unbindDirectoryAccount).toHaveBeenCalledWith('account-1', {
+      adminUserId: 'admin-1',
+    })
+    expect(auditMocks.auditLog).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'unbind',
+      resourceType: 'directory-account-link',
+      resourceId: 'account-1',
+    }))
+    expect(response.body).toMatchObject({
+      ok: true,
+      data: {
+        account: {
+          id: 'account-1',
+          externalUserId: '0447654442691174',
+        },
+      },
+    })
   })
 })

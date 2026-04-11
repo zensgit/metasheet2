@@ -69,7 +69,10 @@ type DirectoryDepartmentRow = {
 
 type DirectoryAccountRow = {
   id: string
+  corp_id: string | null
   external_user_id: string
+  union_id: string | null
+  open_id: string | null
   external_key: string
   email: string | null
   mobile: string | null
@@ -84,6 +87,9 @@ type DirectoryAccountLinkRow = {
 
 type ExternalIdentityRow = {
   external_key: string
+  provider_union_id: string | null
+  provider_open_id: string | null
+  corp_id: string | null
   local_user_id: string
 }
 
@@ -91,6 +97,59 @@ type LocalUserRow = {
   id: string
   email?: string | null
   mobile?: string | null
+}
+
+type DirectoryIntegrationAccountRow = {
+  integration_id: string
+  provider: string
+  corp_id: string | null
+  directory_account_id: string
+  external_user_id: string
+  union_id: string | null
+  open_id: string | null
+  external_key: string
+  account_name: string
+  account_email: string | null
+  account_mobile: string | null
+  account_is_active: boolean
+  account_updated_at: string
+  link_status: string | null
+  match_strategy: string | null
+  reviewed_by: string | null
+  review_note: string | null
+  link_updated_at: string | null
+  local_user_id: string | null
+  local_user_email: string | null
+  local_user_name: string | null
+  department_paths: string[] | null
+}
+
+type DirectoryBindingUserRow = {
+  id: string
+  email: string
+  name: string | null
+  role: string
+  is_active: boolean
+}
+
+type DirectoryBindingTargetAccountRow = {
+  id: string
+  integration_id: string
+  provider: string
+  corp_id: string | null
+  external_user_id: string
+  union_id: string | null
+  open_id: string | null
+  external_key: string
+  name: string
+  email: string | null
+  mobile: string | null
+}
+
+type DirectoryAccountLinkedUserRow = {
+  local_user_id: string | null
+  local_user_email: string | null
+  local_user_name: string | null
 }
 
 export type DirectoryIntegrationSummary = {
@@ -160,6 +219,52 @@ export type DirectorySyncRunSummary = {
   triggerSource: string
   createdAt: string
   updatedAt: string
+}
+
+export type DirectoryIntegrationAccountSummary = {
+  id: string
+  integrationId: string
+  provider: string
+  corpId: string | null
+  externalUserId: string
+  unionId: string | null
+  openId: string | null
+  externalKey: string
+  name: string
+  email: string | null
+  mobile: string | null
+  isActive: boolean
+  updatedAt: string
+  linkStatus: string
+  matchStrategy: string | null
+  reviewedBy: string | null
+  reviewNote: string | null
+  linkUpdatedAt: string | null
+  localUser: {
+    id: string
+    email: string | null
+    name: string | null
+  } | null
+  departmentPaths: string[]
+}
+
+export type DirectoryAccountBindInput = {
+  localUserRef: string
+  adminUserId: string
+  enableDingTalkGrant?: boolean
+}
+
+export type DirectoryAccountUnbindInput = {
+  adminUserId: string
+}
+
+export type DirectoryAccountMutationResult = {
+  account: DirectoryIntegrationAccountSummary
+  previousLocalUser: {
+    id: string
+    email: string | null
+    name: string | null
+  } | null
 }
 
 function parseJsonRecord(value: JsonRecord | string | null | undefined): JsonRecord {
@@ -250,9 +355,59 @@ function summarizeRun(row: DirectoryRunRow): DirectorySyncRunSummary {
   }
 }
 
+function summarizeDirectoryAccount(row: DirectoryIntegrationAccountRow): DirectoryIntegrationAccountSummary {
+  return {
+    id: row.directory_account_id,
+    integrationId: row.integration_id,
+    provider: row.provider,
+    corpId: row.corp_id,
+    externalUserId: row.external_user_id,
+    unionId: row.union_id,
+    openId: row.open_id,
+    externalKey: row.external_key,
+    name: row.account_name,
+    email: row.account_email,
+    mobile: row.account_mobile,
+    isActive: row.account_is_active,
+    updatedAt: row.account_updated_at,
+    linkStatus: row.link_status ?? 'unmatched',
+    matchStrategy: row.match_strategy,
+    reviewedBy: row.reviewed_by,
+    reviewNote: row.review_note,
+    linkUpdatedAt: row.link_updated_at,
+    localUser: row.local_user_id
+      ? {
+        id: row.local_user_id,
+        email: row.local_user_email,
+        name: row.local_user_name,
+      }
+      : null,
+    departmentPaths: Array.isArray(row.department_paths) ? row.department_paths.filter(Boolean) : [],
+  }
+}
+
 function readErrorMessage(error: unknown, fallback: string): string {
   if (error instanceof Error && error.message.trim().length > 0) return error.message
   return fallback
+}
+
+function buildScopedIdentityKey(corpId: string | null | undefined, providerId: string | null | undefined): string | null {
+  const normalizedProviderId = normalizeText(providerId)
+  if (!normalizedProviderId) return null
+  const normalizedCorpId = normalizeText(corpId)
+  return normalizedCorpId ? `${normalizedCorpId}:${normalizedProviderId}` : `global:${normalizedProviderId}`
+}
+
+function buildDingTalkIdentityExternalKey(corpId: string | null | undefined, openId: string | null | undefined, unionId: string | null | undefined): string {
+  const normalizedCorpId = normalizeText(corpId)
+  const normalizedOpenId = normalizeText(openId)
+  const normalizedUnionId = normalizeText(unionId)
+
+  if (normalizedCorpId && normalizedOpenId) {
+    return `${normalizedCorpId}:${normalizedOpenId}`
+  }
+
+  return normalizedUnionId || normalizedOpenId
 }
 
 function normalizeIntegrationInput(
@@ -577,14 +732,41 @@ async function markSyncFailure(integrationId: string, runId: string, message: st
   }
 }
 
-async function loadMatchMaps(externalKeys: string[], emails: string[], mobiles: string[]) {
+async function loadMatchMaps(accounts: DirectoryAccountRow[]) {
+  const externalKeys = Array.from(new Set(accounts.map((account) => account.external_key).filter(Boolean)))
+  const unionIds = Array.from(new Set(
+    accounts
+      .map((account) => normalizeText(account.union_id))
+      .filter(Boolean),
+  ))
+  const openIds = Array.from(new Set(
+    accounts
+      .map((account) => normalizeText(account.open_id))
+      .filter(Boolean),
+  ))
+  const emails = Array.from(new Set(
+    accounts
+      .map((account) => normalizeText(account.email).toLowerCase())
+      .filter(Boolean),
+  ))
+  const mobiles = Array.from(new Set(
+    accounts
+      .map((account) => normalizeText(account.mobile))
+      .filter(Boolean),
+  ))
+
   const [externalIdentities, emailUsers, mobileUsers] = await Promise.all([
-    externalKeys.length > 0
+    externalKeys.length > 0 || unionIds.length > 0 || openIds.length > 0
       ? query<ExternalIdentityRow>(
-        `SELECT external_key, local_user_id
+        `SELECT external_key, provider_union_id, provider_open_id, corp_id, local_user_id
          FROM user_external_identities
-         WHERE provider = $1 AND external_key = ANY($2::text[])`,
-        [DEFAULT_PROVIDER, externalKeys],
+         WHERE provider = $1
+           AND (
+             external_key = ANY($2::text[])
+             OR provider_union_id = ANY($3::text[])
+             OR provider_open_id = ANY($4::text[])
+           )`,
+        [DEFAULT_PROVIDER, externalKeys, unionIds, openIds],
       )
       : Promise.resolve({ rows: [] } as Awaited<ReturnType<typeof query<ExternalIdentityRow>>>),
     emails.length > 0
@@ -605,8 +787,19 @@ async function loadMatchMaps(externalKeys: string[], emails: string[], mobiles: 
       : Promise.resolve({ rows: [] } as Awaited<ReturnType<typeof query<LocalUserRow>>>),
   ])
 
+  const scopedUnionIdentityMap = new Map<string, string>()
+  const scopedOpenIdentityMap = new Map<string, string>()
+  for (const row of externalIdentities.rows) {
+    const unionKey = buildScopedIdentityKey(row.corp_id, row.provider_union_id)
+    if (unionKey) scopedUnionIdentityMap.set(unionKey, row.local_user_id)
+    const openKey = buildScopedIdentityKey(row.corp_id, row.provider_open_id)
+    if (openKey) scopedOpenIdentityMap.set(openKey, row.local_user_id)
+  }
+
   return {
     externalIdentityMap: new Map(externalIdentities.rows.map((row) => [row.external_key, row.local_user_id])),
+    scopedUnionIdentityMap,
+    scopedOpenIdentityMap,
     emailMap: new Map(
       emailUsers.rows
         .map((row) => [normalizeText(row.email).toLowerCase(), row.id] as const)
@@ -743,7 +936,7 @@ export async function syncDirectoryIntegration(
           [integrationId],
         ),
         client.query(
-          `SELECT id, external_user_id, external_key, email, mobile
+          `SELECT id, corp_id, external_user_id, union_id, open_id, external_key, email, mobile
            FROM directory_accounts
            WHERE integration_id = $1`,
           [integrationId],
@@ -786,18 +979,9 @@ export async function syncDirectoryIntegration(
         }
       }
 
-      const externalKeys = Array.from(new Set(Array.from(accountIdMap.values()).map((account) => account.external_key).filter(Boolean)))
-      const emails = Array.from(new Set(
-        Array.from(accountIdMap.values())
-          .map((account) => normalizeText(account.email).toLowerCase())
-          .filter(Boolean),
-      ))
-      const mobiles = Array.from(new Set(
-        Array.from(accountIdMap.values())
-          .map((account) => normalizeText(account.mobile))
-          .filter(Boolean),
-      ))
-      const { externalIdentityMap, emailMap, mobileMap } = await loadMatchMaps(externalKeys, emails, mobiles)
+      const { externalIdentityMap, scopedUnionIdentityMap, scopedOpenIdentityMap, emailMap, mobileMap } = await loadMatchMaps(
+        Array.from(accountIdMap.values()),
+      )
 
       const existingLinksResult = await client.query(
         `SELECT directory_account_id, local_user_id, link_status, match_strategy
@@ -819,7 +1003,11 @@ export async function syncDirectoryIntegration(
         let matchStrategy = existing?.match_strategy ?? null
 
         if (!(existing && existing.link_status === 'linked' && existing.local_user_id)) {
+          const scopedOpenIdentityKey = buildScopedIdentityKey(account.corp_id, account.open_id)
+          const scopedUnionIdentityKey = buildScopedIdentityKey(account.corp_id, account.union_id)
           const externalIdentityUserId = externalIdentityMap.get(account.external_key)
+            || (scopedOpenIdentityKey ? scopedOpenIdentityMap.get(scopedOpenIdentityKey) : undefined)
+            || (scopedUnionIdentityKey ? scopedUnionIdentityMap.get(scopedUnionIdentityKey) : undefined)
           if (externalIdentityUserId) {
             localUserId = externalIdentityUserId
             linkStatus = 'linked'
@@ -939,5 +1127,442 @@ export async function listDirectorySyncRuns(
   return {
     items: rowsResult.rows.map(summarizeRun),
     total: Number(totalResult.rows[0]?.total ?? 0),
+  }
+}
+
+async function getDirectoryAccountSummary(accountId: string): Promise<DirectoryIntegrationAccountSummary | null> {
+  const result = await query<DirectoryIntegrationAccountRow>(
+    `SELECT
+        a.integration_id,
+        a.provider,
+        a.corp_id,
+        a.id AS directory_account_id,
+        a.external_user_id,
+        a.union_id,
+        a.open_id,
+        a.external_key,
+        a.name AS account_name,
+        a.email AS account_email,
+        a.mobile AS account_mobile,
+        a.is_active AS account_is_active,
+        a.updated_at AS account_updated_at,
+        l.link_status,
+        l.match_strategy,
+        l.reviewed_by,
+        l.review_note,
+        l.updated_at AS link_updated_at,
+        u.id AS local_user_id,
+        u.email AS local_user_email,
+        u.name AS local_user_name,
+        COALESCE(array_remove(array_agg(DISTINCT d.full_path), NULL), ARRAY[]::text[]) AS department_paths
+     FROM directory_accounts a
+     LEFT JOIN directory_account_links l ON l.directory_account_id = a.id
+     LEFT JOIN users u ON u.id = l.local_user_id
+     LEFT JOIN directory_account_departments ad ON ad.directory_account_id = a.id
+     LEFT JOIN directory_departments d ON d.id = ad.directory_department_id
+     WHERE a.id = $1
+     GROUP BY
+       a.integration_id, a.provider, a.corp_id, a.id, a.external_user_id, a.union_id, a.open_id, a.external_key,
+       a.name, a.email, a.mobile, a.is_active, a.updated_at,
+       l.link_status, l.match_strategy, l.reviewed_by, l.review_note, l.updated_at,
+       u.id, u.email, u.name`,
+    [accountId],
+  )
+
+  const row = result.rows[0]
+  return row ? summarizeDirectoryAccount(row) : null
+}
+
+async function resolveDirectoryBindingUser(localUserRef: string): Promise<DirectoryBindingUserRow | null> {
+  const ref = normalizeText(localUserRef)
+  if (!ref) return null
+
+  const result = await query<DirectoryBindingUserRow>(
+    `SELECT id,
+            email,
+            name,
+            COALESCE(role, 'user') AS role,
+            COALESCE(is_active, TRUE) AS is_active
+     FROM users
+     WHERE id = $1 OR LOWER(email) = LOWER($1)
+     ORDER BY CASE WHEN id = $1 THEN 0 ELSE 1 END
+     LIMIT 1`,
+    [ref],
+  )
+
+  return result.rows[0] ?? null
+}
+
+async function loadDirectoryBindingTargetAccount(directoryAccountId: string): Promise<DirectoryBindingTargetAccountRow | null> {
+  const result = await query<DirectoryBindingTargetAccountRow>(
+    `SELECT id, integration_id, provider, corp_id, external_user_id, union_id, open_id, external_key, name, email, mobile
+     FROM directory_accounts
+     WHERE id = $1
+     LIMIT 1`,
+    [directoryAccountId],
+  )
+  return result.rows[0] ?? null
+}
+
+async function loadDirectoryLinkedUser(directoryAccountId: string): Promise<DirectoryAccountLinkedUserRow | null> {
+  const result = await query<DirectoryAccountLinkedUserRow>(
+    `SELECT l.local_user_id,
+            u.email AS local_user_email,
+            u.name AS local_user_name
+     FROM directory_account_links l
+     LEFT JOIN users u ON u.id = l.local_user_id
+     WHERE l.directory_account_id = $1
+     LIMIT 1`,
+    [directoryAccountId],
+  )
+  return result.rows[0] ?? null
+}
+
+export async function listDirectoryIntegrationAccounts(
+  integrationId: string,
+  pagination: { limit: number; offset: number },
+  search?: string,
+): Promise<{ items: DirectoryIntegrationAccountSummary[]; total: number }> {
+  const normalizedIntegrationId = normalizeText(integrationId)
+  if (!normalizedIntegrationId) throw new Error('integrationId is required')
+
+  const normalizedSearch = normalizeText(search)
+  const values: unknown[] = [normalizedIntegrationId]
+  const where: string[] = ['a.integration_id = $1']
+
+  if (normalizedSearch) {
+    values.push(`%${normalizedSearch}%`)
+    where.push(`(
+      a.name ILIKE $${values.length}
+      OR COALESCE(a.email, '') ILIKE $${values.length}
+      OR COALESCE(a.mobile, '') ILIKE $${values.length}
+      OR a.external_user_id ILIKE $${values.length}
+      OR COALESCE(a.union_id, '') ILIKE $${values.length}
+      OR COALESCE(a.open_id, '') ILIKE $${values.length}
+      OR COALESCE(u.email, '') ILIKE $${values.length}
+      OR COALESCE(u.name, '') ILIKE $${values.length}
+      OR COALESCE(u.id, '') ILIKE $${values.length}
+    )`)
+  }
+
+  const whereSql = where.join(' AND ')
+  const countValues = [...values]
+  const listValues = [...values, pagination.limit, pagination.offset]
+
+  const [countResult, rowsResult] = await Promise.all([
+    query<{ total: number }>(
+      `SELECT COUNT(*)::int AS total
+       FROM directory_accounts a
+       LEFT JOIN directory_account_links l ON l.directory_account_id = a.id
+       LEFT JOIN users u ON u.id = l.local_user_id
+       WHERE ${whereSql}`,
+      countValues,
+    ),
+    query<DirectoryIntegrationAccountRow>(
+      `SELECT
+          a.integration_id,
+          a.provider,
+          a.corp_id,
+          a.id AS directory_account_id,
+          a.external_user_id,
+          a.union_id,
+          a.open_id,
+          a.external_key,
+          a.name AS account_name,
+          a.email AS account_email,
+          a.mobile AS account_mobile,
+          a.is_active AS account_is_active,
+          a.updated_at AS account_updated_at,
+          l.link_status,
+          l.match_strategy,
+          l.reviewed_by,
+          l.review_note,
+          l.updated_at AS link_updated_at,
+          u.id AS local_user_id,
+          u.email AS local_user_email,
+          u.name AS local_user_name,
+          COALESCE(array_remove(array_agg(DISTINCT d.full_path), NULL), ARRAY[]::text[]) AS department_paths
+       FROM directory_accounts a
+       LEFT JOIN directory_account_links l ON l.directory_account_id = a.id
+       LEFT JOIN users u ON u.id = l.local_user_id
+       LEFT JOIN directory_account_departments ad ON ad.directory_account_id = a.id
+       LEFT JOIN directory_departments d ON d.id = ad.directory_department_id
+       WHERE ${whereSql}
+       GROUP BY
+         a.integration_id, a.provider, a.corp_id, a.id, a.external_user_id, a.union_id, a.open_id, a.external_key,
+         a.name, a.email, a.mobile, a.is_active, a.updated_at,
+         l.link_status, l.match_strategy, l.reviewed_by, l.review_note, l.updated_at,
+         u.id, u.email, u.name
+       ORDER BY a.is_active DESC, a.name ASC, a.external_user_id ASC
+       LIMIT $${values.length + 1} OFFSET $${values.length + 2}`,
+      listValues,
+    ),
+  ])
+
+  return {
+    items: rowsResult.rows.map(summarizeDirectoryAccount),
+    total: Number(countResult.rows[0]?.total ?? 0),
+  }
+}
+
+export async function bindDirectoryAccount(
+  directoryAccountId: string,
+  input: DirectoryAccountBindInput,
+): Promise<DirectoryAccountMutationResult> {
+  const normalizedAccountId = normalizeText(directoryAccountId)
+  const normalizedLocalUserRef = normalizeText(input.localUserRef)
+  const normalizedAdminUserId = normalizeText(input.adminUserId)
+  const enableDingTalkGrant = input.enableDingTalkGrant !== false
+
+  if (!normalizedAccountId) throw new Error('directoryAccountId is required')
+  if (!normalizedLocalUserRef) throw new Error('localUserRef is required')
+  if (!normalizedAdminUserId) throw new Error('adminUserId is required')
+
+  const [account, previousLinkedUser] = await Promise.all([
+    loadDirectoryBindingTargetAccount(normalizedAccountId),
+    loadDirectoryLinkedUser(normalizedAccountId),
+  ])
+  if (!account) throw new Error('Directory account not found')
+
+  const identityExternalKey = buildDingTalkIdentityExternalKey(account.corp_id, account.open_id, account.union_id)
+  if (!identityExternalKey) {
+    throw new Error('Directory account is missing DingTalk openId/unionId and cannot be pre-bound for DingTalk login')
+  }
+
+  const localUser = await resolveDirectoryBindingUser(normalizedLocalUserRef)
+  if (!localUser) throw new Error('Local user not found')
+
+  const profile = JSON.stringify({
+    source: 'directory_admin_bind',
+    integrationId: account.integration_id,
+    corpId: account.corp_id,
+    externalUserId: account.external_user_id,
+    unionId: account.union_id,
+    openId: account.open_id,
+    externalKey: account.external_key,
+    name: account.name,
+    email: account.email,
+    mobile: account.mobile,
+  })
+
+  await transaction(async (client) => {
+    const conflictingIdentityResult = await client.query(
+      `SELECT local_user_id
+       FROM user_external_identities
+       WHERE provider = $1
+         AND local_user_id <> $5
+         AND (
+           external_key = $2
+           OR ($3 IS NOT NULL AND provider_union_id = $3 AND corp_id IS NOT DISTINCT FROM $4)
+           OR ($6 IS NOT NULL AND provider_open_id = $6 AND corp_id IS NOT DISTINCT FROM $4)
+       )
+       LIMIT 1`,
+      [account.provider, identityExternalKey, account.union_id, account.corp_id, localUser.id, account.open_id],
+    )
+    if (conflictingIdentityResult.rows.length > 0) {
+      throw new Error('DingTalk account is already bound to another local user')
+    }
+
+    const conflictingLinkResult = await client.query(
+      `SELECT l.directory_account_id
+       FROM directory_account_links l
+       JOIN directory_accounts a ON a.id = l.directory_account_id
+       WHERE a.provider = $1
+         AND l.local_user_id = $2
+         AND l.link_status = 'linked'
+         AND l.directory_account_id <> $3
+       LIMIT 1`,
+      [account.provider, localUser.id, normalizedAccountId],
+    )
+    if (conflictingLinkResult.rows.length > 0) {
+      throw new Error('Local user is already linked to another DingTalk directory account')
+    }
+
+    const existingIdentityResult = await client.query(
+      `SELECT id
+       FROM user_external_identities
+       WHERE provider = $1 AND local_user_id = $2
+       LIMIT 1`,
+      [account.provider, localUser.id],
+    )
+
+    if (existingIdentityResult.rows.length > 0) {
+      await client.query(
+        `UPDATE user_external_identities
+         SET external_key = $3,
+             provider_union_id = $4,
+             provider_open_id = $5,
+             corp_id = $6,
+             profile = $7::jsonb,
+             bound_by = COALESCE(bound_by, $8),
+             updated_at = NOW()
+         WHERE provider = $1 AND local_user_id = $2`,
+        [
+          account.provider,
+          localUser.id,
+          identityExternalKey,
+          account.union_id,
+          account.open_id,
+          account.corp_id,
+          profile,
+          normalizedAdminUserId,
+        ],
+      )
+    } else {
+      await client.query(
+        `INSERT INTO user_external_identities (
+           provider,
+           external_key,
+           provider_union_id,
+           provider_open_id,
+           corp_id,
+           local_user_id,
+           profile,
+           bound_by,
+           created_at,
+           updated_at
+         )
+         VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, NOW(), NOW())`,
+        [
+          account.provider,
+          identityExternalKey,
+          account.union_id,
+          account.open_id,
+          account.corp_id,
+          localUser.id,
+          profile,
+          normalizedAdminUserId,
+        ],
+      )
+    }
+
+    if (enableDingTalkGrant) {
+      await client.query(
+        `INSERT INTO user_external_auth_grants (provider, local_user_id, enabled, granted_by, created_at, updated_at)
+         VALUES ($1, $2, TRUE, $3, NOW(), NOW())
+         ON CONFLICT (provider, local_user_id)
+         DO UPDATE SET enabled = TRUE, granted_by = EXCLUDED.granted_by, updated_at = NOW()`,
+        [account.provider, localUser.id, normalizedAdminUserId],
+      )
+    }
+
+    await client.query(
+      `INSERT INTO directory_account_links (
+         directory_account_id, local_user_id, link_status, match_strategy, reviewed_by, review_note, created_at, updated_at
+       )
+       VALUES ($1, $2, 'linked', 'manual_admin', $3, NULL, NOW(), NOW())
+       ON CONFLICT (directory_account_id)
+       DO UPDATE SET
+         local_user_id = EXCLUDED.local_user_id,
+         link_status = EXCLUDED.link_status,
+         match_strategy = EXCLUDED.match_strategy,
+         reviewed_by = EXCLUDED.reviewed_by,
+         review_note = EXCLUDED.review_note,
+         updated_at = NOW()`,
+      [normalizedAccountId, localUser.id, normalizedAdminUserId],
+    )
+  })
+
+  const summary = await getDirectoryAccountSummary(normalizedAccountId)
+  if (!summary) {
+    throw new Error('Directory account bound but summary reload failed')
+  }
+
+  return {
+    account: summary,
+    previousLocalUser: previousLinkedUser?.local_user_id
+      ? {
+        id: previousLinkedUser.local_user_id,
+        email: previousLinkedUser.local_user_email,
+        name: previousLinkedUser.local_user_name,
+      }
+      : null,
+  }
+}
+
+export async function unbindDirectoryAccount(
+  directoryAccountId: string,
+  input: DirectoryAccountUnbindInput,
+): Promise<DirectoryAccountMutationResult> {
+  const normalizedAccountId = normalizeText(directoryAccountId)
+  const normalizedAdminUserId = normalizeText(input.adminUserId)
+
+  if (!normalizedAccountId) throw new Error('directoryAccountId is required')
+  if (!normalizedAdminUserId) throw new Error('adminUserId is required')
+
+  const [account, previousLinkedUser] = await Promise.all([
+    loadDirectoryBindingTargetAccount(normalizedAccountId),
+    loadDirectoryLinkedUser(normalizedAccountId),
+  ])
+  if (!account) throw new Error('Directory account not found')
+
+  const identityExternalKey = buildDingTalkIdentityExternalKey(account.corp_id, account.open_id, account.union_id)
+
+  await transaction(async (client) => {
+    if (previousLinkedUser?.local_user_id) {
+      const deleteIdentityParams: unknown[] = [
+        account.provider,
+        previousLinkedUser.local_user_id,
+      ]
+      const deleteIdentityClauses = [
+        'provider = $1',
+        'local_user_id = $2',
+      ]
+
+      if (identityExternalKey) {
+        deleteIdentityParams.push(identityExternalKey)
+        deleteIdentityClauses.push(`external_key = $${deleteIdentityParams.length}`)
+      } else if (normalizeText(account.open_id)) {
+        deleteIdentityParams.push(account.open_id, account.corp_id)
+        deleteIdentityClauses.push(
+          `(provider_open_id = $${deleteIdentityParams.length - 1} AND corp_id IS NOT DISTINCT FROM $${deleteIdentityParams.length})`,
+        )
+      } else if (normalizeText(account.union_id)) {
+        deleteIdentityParams.push(account.union_id, account.corp_id)
+        deleteIdentityClauses.push(
+          `(provider_union_id = $${deleteIdentityParams.length - 1} AND corp_id IS NOT DISTINCT FROM $${deleteIdentityParams.length})`,
+        )
+      }
+
+      if (deleteIdentityClauses.length > 2) {
+        await client.query(
+          `DELETE FROM user_external_identities
+           WHERE ${deleteIdentityClauses.join(' AND ')}`,
+          deleteIdentityParams,
+        )
+      }
+    }
+
+    await client.query(
+      `INSERT INTO directory_account_links (
+         directory_account_id, local_user_id, link_status, match_strategy, reviewed_by, review_note, created_at, updated_at
+       )
+       VALUES ($1, NULL, 'unmatched', 'manual_unbind', $2, 'unbound by admin', NOW(), NOW())
+       ON CONFLICT (directory_account_id)
+       DO UPDATE SET
+         local_user_id = NULL,
+         link_status = EXCLUDED.link_status,
+         match_strategy = EXCLUDED.match_strategy,
+         reviewed_by = EXCLUDED.reviewed_by,
+         review_note = EXCLUDED.review_note,
+         updated_at = NOW()`,
+      [normalizedAccountId, normalizedAdminUserId],
+    )
+  })
+
+  const summary = await getDirectoryAccountSummary(normalizedAccountId)
+  if (!summary) {
+    throw new Error('Directory account unbound but summary reload failed')
+  }
+
+  return {
+    account: summary,
+    previousLocalUser: previousLinkedUser?.local_user_id
+      ? {
+        id: previousLinkedUser.local_user_id,
+        email: previousLinkedUser.local_user_email,
+        name: previousLinkedUser.local_user_name,
+      }
+      : null,
   }
 }
