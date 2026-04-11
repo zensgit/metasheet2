@@ -9,7 +9,7 @@
     "pactSpecification": {
       "version": "3.0.0"
     },
-    "claudeNote": "Hand-authored Wave 1 plus document-semantics Wave 2 contract per docs/PACT_FIRST_INTEGRATION_PLAN_20260407.md. Match-by-type, not match-by-value. Replace with @pact-foundation/pact generated artifact when that dep is approved. NOTE: codex's plan also listed GET /api/v1/aml/metadata/{type} in Wave 1, but PLMAdapter.ts does not currently call it; contract-first principle says we lock what is actually called. Wave 2 adds the real document semantics calls already used by PLMAdapter.getProductDocuments in yuantus mode: GET /api/v1/file/item/{item_id}, GET /api/v1/file/{file_id}, and POST /api/v1/aml/query with expand ['Document Part']. Wave 3 adds where-used, BOM compare schema, and ECO approval-history/action interactions. Wave 4 adds the real approval list/detail and BOM substitute calls already used by mainline getApprovals/getApprovalById/getBomSubstitutes/addBomSubstitute/removeBomSubstitute."
+    "claudeNote": "Hand-authored Wave 1 plus document-semantics Wave 2 contract per docs/PACT_FIRST_INTEGRATION_PLAN_20260407.md. Match-by-type, not match-by-value. Replace with @pact-foundation/pact generated artifact when that dep is approved. NOTE: codex's plan also listed GET /api/v1/aml/metadata/{type} in Wave 1, but PLMAdapter.ts does not currently call it; contract-first principle says we lock what is actually called. Wave 2 adds the real document semantics calls already used by PLMAdapter.getProductDocuments in yuantus mode: GET /api/v1/file/item/{item_id}, GET /api/v1/file/{file_id}, and POST /api/v1/aml/query with expand ['Document Part']. Wave 3 adds where-used, BOM compare schema, and ECO approval-history/action interactions. Wave 4 adds the real approval list/detail and BOM substitute calls already used by mainline getApprovals/getApprovalById/getBomSubstitutes/addBomSubstitute/removeBomSubstitute. Wave 5 adds the nine CAD endpoints already called on main: CAD properties, CAD view state, CAD review, CAD history, CAD diff, and CAD mesh stats."
   },
   "interactions": [
     {
@@ -32,9 +32,27 @@
         },
         "matchingRules": {
           "body": {
-            "$.tenant_id": { "matchers": [{ "match": "type" }] },
-            "$.username": { "matchers": [{ "match": "type" }] },
-            "$.password": { "matchers": [{ "match": "type" }] }
+            "$.tenant_id": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.username": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.password": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            }
           }
         }
       },
@@ -52,11 +70,41 @@
         },
         "matchingRules": {
           "body": {
-            "$.access_token": { "matchers": [{ "match": "type" }] },
-            "$.token_type": { "matchers": [{ "match": "type" }] },
-            "$.expires_in": { "matchers": [{ "match": "integer" }] },
-            "$.tenant_id": { "matchers": [{ "match": "type" }] },
-            "$.user_id": { "matchers": [{ "match": "integer" }] }
+            "$.access_token": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.token_type": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.expires_in": {
+              "matchers": [
+                {
+                  "match": "integer"
+                }
+              ]
+            },
+            "$.tenant_id": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.user_id": {
+              "matchers": [
+                {
+                  "match": "integer"
+                }
+              ]
+            }
           }
         }
       }
@@ -89,12 +137,48 @@
         },
         "matchingRules": {
           "body": {
-            "$.ok": { "matchers": [{ "match": "type" }] },
-            "$.service": { "matchers": [{ "match": "type" }] },
-            "$.version": { "matchers": [{ "match": "type" }] },
-            "$.tenancy_mode": { "matchers": [{ "match": "type" }] },
-            "$.schema_mode": { "matchers": [{ "match": "type" }] },
-            "$.audit_enabled": { "matchers": [{ "match": "type" }] }
+            "$.ok": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.service": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.version": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.tenancy_mode": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.schema_mode": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.audit_enabled": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            }
           }
         }
       }
@@ -110,9 +194,15 @@
         "method": "GET",
         "path": "/api/v1/search/",
         "query": {
-          "q": ["bracket"],
-          "item_type": ["Part"],
-          "limit": ["20"]
+          "q": [
+            "bracket"
+          ],
+          "item_type": [
+            "Part"
+          ],
+          "limit": [
+            "20"
+          ]
         },
         "headers": {
           "Authorization": "Bearer eyJhbGciOiJIUzI1NiJ9.example"
@@ -120,7 +210,12 @@
         "matchingRules": {
           "header": {
             "$.Authorization": {
-              "matchers": [{ "match": "regex", "regex": "^Bearer .+" }]
+              "matchers": [
+                {
+                  "match": "regex",
+                  "regex": "^Bearer .+"
+                }
+              ]
             }
           }
         }
@@ -150,19 +245,98 @@
         },
         "matchingRules": {
           "body": {
-            "$.total": { "matchers": [{ "match": "integer" }] },
-            "$.hits": { "matchers": [{ "match": "type", "min": 0 }] },
-            "$.hits[*].id": { "matchers": [{ "match": "type" }] },
-            "$.hits[*].item_type_id": { "matchers": [{ "match": "type" }] },
-            "$.hits[*].config_id": { "matchers": [{ "match": "type" }] },
-            "$.hits[*].state": { "matchers": [{ "match": "type" }] },
-            "$.hits[*].item_number": { "matchers": [{ "match": "type" }] },
-            "$.hits[*].name": { "matchers": [{ "match": "type" }] },
-            "$.hits[*].description": { "matchers": [{ "match": "type" }] },
-            "$.hits[*].search_text": { "matchers": [{ "match": "type" }] },
-            "$.hits[*].created_at": { "matchers": [{ "match": "type" }] },
-            "$.hits[*].updated_at": { "matchers": [{ "match": "type" }] },
-            "$.hits[*].properties": { "matchers": [{ "match": "type" }] }
+            "$.total": {
+              "matchers": [
+                {
+                  "match": "integer"
+                }
+              ]
+            },
+            "$.hits": {
+              "matchers": [
+                {
+                  "match": "type",
+                  "min": 0
+                }
+              ]
+            },
+            "$.hits[*].id": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.hits[*].item_type_id": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.hits[*].config_id": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.hits[*].state": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.hits[*].item_number": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.hits[*].name": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.hits[*].description": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.hits[*].search_text": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.hits[*].created_at": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.hits[*].updated_at": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.hits[*].properties": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            }
           }
         }
       }
@@ -189,13 +363,37 @@
         "matchingRules": {
           "header": {
             "$.Authorization": {
-              "matchers": [{ "match": "regex", "regex": "^Bearer .+" }]
+              "matchers": [
+                {
+                  "match": "regex",
+                  "regex": "^Bearer .+"
+                }
+              ]
             }
           },
           "body": {
-            "$.type": { "matchers": [{ "match": "type" }] },
-            "$.action": { "matchers": [{ "match": "regex", "regex": "^(get|add|update|delete)$" }] },
-            "$.id": { "matchers": [{ "match": "type" }] }
+            "$.type": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.action": {
+              "matchers": [
+                {
+                  "match": "regex",
+                  "regex": "^(get|add|update|delete)$"
+                }
+              ]
+            },
+            "$.id": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            }
           }
         }
       },
@@ -220,12 +418,50 @@
         },
         "matchingRules": {
           "body": {
-            "$.count": { "matchers": [{ "match": "integer", "min": 0 }] },
-            "$.items": { "matchers": [{ "match": "type", "min": 0 }] },
-            "$.items[*].id": { "matchers": [{ "match": "type" }] },
-            "$.items[*].type": { "matchers": [{ "match": "type" }] },
-            "$.items[*].state": { "matchers": [{ "match": "type" }] },
-            "$.items[*].properties": { "matchers": [{ "match": "type" }] }
+            "$.count": {
+              "matchers": [
+                {
+                  "match": "integer",
+                  "min": 0
+                }
+              ]
+            },
+            "$.items": {
+              "matchers": [
+                {
+                  "match": "type",
+                  "min": 0
+                }
+              ]
+            },
+            "$.items[*].id": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.items[*].type": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.items[*].state": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.items[*].properties": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            }
           }
         }
       }
@@ -246,7 +482,12 @@
         "matchingRules": {
           "header": {
             "$.Authorization": {
-              "matchers": [{ "match": "regex", "regex": "^Bearer .+" }]
+              "matchers": [
+                {
+                  "match": "regex",
+                  "regex": "^Bearer .+"
+                }
+              ]
             }
           }
         }
@@ -291,29 +532,168 @@
         },
         "matchingRules": {
           "body": {
-            "$.id": { "matchers": [{ "match": "type" }] },
-            "$.item_number": { "matchers": [{ "match": "type" }] },
-            "$.name": { "matchers": [{ "match": "type" }] },
-            "$.state": { "matchers": [{ "match": "type" }] },
-            "$.created_on": { "matchers": [{ "match": "type" }] },
-            "$.modified_on": { "matchers": [{ "match": "type" }] },
-            "$.children": { "matchers": [{ "match": "type", "min": 0 }] },
-            "$.children[*].child.id": { "matchers": [{ "match": "type" }] },
-            "$.children[*].child.item_number": { "matchers": [{ "match": "type" }] },
-            "$.children[*].child.name": { "matchers": [{ "match": "type" }] },
-            "$.children[*].child.state": { "matchers": [{ "match": "type" }] },
-            "$.children[*].child.created_on": { "matchers": [{ "match": "type" }] },
-            "$.children[*].child.modified_on": { "matchers": [{ "match": "type" }] },
-            "$.children[*].relationship.id": { "matchers": [{ "match": "type" }] },
-            "$.children[*].relationship.source_id": { "matchers": [{ "match": "type" }] },
-            "$.children[*].relationship.related_id": { "matchers": [{ "match": "type" }] },
-            "$.children[*].relationship.quantity": { "matchers": [{ "match": "number" }] },
-            "$.children[*].relationship.uom": { "matchers": [{ "match": "type" }] },
-            "$.children[*].relationship.find_num": { "matchers": [{ "match": "type" }] },
-            "$.children[*].relationship.refdes": { "matchers": [{ "match": "type" }] },
-            "$.children[*].relationship.created_on": { "matchers": [{ "match": "type" }] },
-            "$.children[*].relationship.modified_on": { "matchers": [{ "match": "type" }] },
-            "$.children[*].relationship.properties": { "matchers": [{ "match": "type" }] }
+            "$.id": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.item_number": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.name": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.state": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.created_on": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.modified_on": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.children": {
+              "matchers": [
+                {
+                  "match": "type",
+                  "min": 0
+                }
+              ]
+            },
+            "$.children[*].child.id": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.children[*].child.item_number": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.children[*].child.name": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.children[*].child.state": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.children[*].child.created_on": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.children[*].child.modified_on": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.children[*].relationship.id": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.children[*].relationship.source_id": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.children[*].relationship.related_id": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.children[*].relationship.quantity": {
+              "matchers": [
+                {
+                  "match": "number"
+                }
+              ]
+            },
+            "$.children[*].relationship.uom": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.children[*].relationship.find_num": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.children[*].relationship.refdes": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.children[*].relationship.created_on": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.children[*].relationship.modified_on": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.children[*].relationship.properties": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            }
           }
         }
       }
@@ -329,10 +709,18 @@
         "method": "GET",
         "path": "/api/v1/bom/compare",
         "query": {
-          "left_type": ["item"],
-          "left_id": ["01H000000000000000000000P1"],
-          "right_type": ["item"],
-          "right_id": ["01H000000000000000000000P2"]
+          "left_type": [
+            "item"
+          ],
+          "left_id": [
+            "01H000000000000000000000P1"
+          ],
+          "right_type": [
+            "item"
+          ],
+          "right_id": [
+            "01H000000000000000000000P2"
+          ]
         },
         "headers": {
           "Authorization": "Bearer eyJhbGciOiJIUzI1NiJ9.example"
@@ -340,7 +728,12 @@
         "matchingRules": {
           "header": {
             "$.Authorization": {
-              "matchers": [{ "match": "regex", "regex": "^Bearer .+" }]
+              "matchers": [
+                {
+                  "match": "regex",
+                  "regex": "^Bearer .+"
+                }
+              ]
             }
           }
         }
@@ -362,12 +755,54 @@
         },
         "matchingRules": {
           "body": {
-            "$.summary.added": { "matchers": [{ "match": "integer", "min": 0 }] },
-            "$.summary.removed": { "matchers": [{ "match": "integer", "min": 0 }] },
-            "$.summary.changed": { "matchers": [{ "match": "integer", "min": 0 }] },
-            "$.added": { "matchers": [{ "match": "type", "min": 0 }] },
-            "$.removed": { "matchers": [{ "match": "type", "min": 0 }] },
-            "$.changed": { "matchers": [{ "match": "type", "min": 0 }] }
+            "$.summary.added": {
+              "matchers": [
+                {
+                  "match": "integer",
+                  "min": 0
+                }
+              ]
+            },
+            "$.summary.removed": {
+              "matchers": [
+                {
+                  "match": "integer",
+                  "min": 0
+                }
+              ]
+            },
+            "$.summary.changed": {
+              "matchers": [
+                {
+                  "match": "integer",
+                  "min": 0
+                }
+              ]
+            },
+            "$.added": {
+              "matchers": [
+                {
+                  "match": "type",
+                  "min": 0
+                }
+              ]
+            },
+            "$.removed": {
+              "matchers": [
+                {
+                  "match": "type",
+                  "min": 0
+                }
+              ]
+            },
+            "$.changed": {
+              "matchers": [
+                {
+                  "match": "type",
+                  "min": 0
+                }
+              ]
+            }
           }
         }
       }
@@ -388,7 +823,12 @@
         "matchingRules": {
           "header": {
             "$.Authorization": {
-              "matchers": [{ "match": "regex", "regex": "^Bearer .+" }]
+              "matchers": [
+                {
+                  "match": "regex",
+                  "regex": "^Bearer .+"
+                }
+              ]
             }
           }
         }
@@ -418,21 +858,112 @@
         ],
         "matchingRules": {
           "body": {
-            "$": { "matchers": [{ "match": "type", "min": 0 }] },
-            "$[*].id": { "matchers": [{ "match": "type" }] },
-            "$[*].file_id": { "matchers": [{ "match": "type" }] },
-            "$[*].filename": { "matchers": [{ "match": "type" }] },
-            "$[*].file_role": { "matchers": [{ "match": "type" }] },
-            "$[*].description": { "matchers": [{ "match": "type" }] },
-            "$[*].file_type": { "matchers": [{ "match": "type" }] },
-            "$[*].file_size": { "matchers": [{ "match": "integer" }] },
-            "$[*].document_type": { "matchers": [{ "match": "type" }] },
-            "$[*].author": { "matchers": [{ "match": "type" }] },
-            "$[*].source_system": { "matchers": [{ "match": "type" }] },
-            "$[*].source_version": { "matchers": [{ "match": "type" }] },
-            "$[*].document_version": { "matchers": [{ "match": "type" }] },
-            "$[*].preview_url": { "matchers": [{ "match": "type" }] },
-            "$[*].download_url": { "matchers": [{ "match": "type" }] }
+            "$": {
+              "matchers": [
+                {
+                  "match": "type",
+                  "min": 0
+                }
+              ]
+            },
+            "$[*].id": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$[*].file_id": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$[*].filename": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$[*].file_role": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$[*].description": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$[*].file_type": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$[*].file_size": {
+              "matchers": [
+                {
+                  "match": "integer"
+                }
+              ]
+            },
+            "$[*].document_type": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$[*].author": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$[*].source_system": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$[*].source_version": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$[*].document_version": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$[*].preview_url": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$[*].download_url": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            }
           }
         }
       }
@@ -453,7 +984,12 @@
         "matchingRules": {
           "header": {
             "$.Authorization": {
-              "matchers": [{ "match": "regex", "regex": "^Bearer .+" }]
+              "matchers": [
+                {
+                  "match": "regex",
+                  "regex": "^Bearer .+"
+                }
+              ]
             }
           }
         }
@@ -495,22 +1031,118 @@
         },
         "matchingRules": {
           "body": {
-            "$.id": { "matchers": [{ "match": "type" }] },
-            "$.filename": { "matchers": [{ "match": "type" }] },
-            "$.file_type": { "matchers": [{ "match": "type" }] },
-            "$.mime_type": { "matchers": [{ "match": "type" }] },
-            "$.file_size": { "matchers": [{ "match": "integer" }] },
-            "$.checksum": { "matchers": [{ "match": "type" }] },
-            "$.document_type": { "matchers": [{ "match": "type" }] },
-            "$.is_native_cad": { "matchers": [{ "match": "type" }] },
-            "$.author": { "matchers": [{ "match": "type" }] },
-            "$.source_system": { "matchers": [{ "match": "type" }] },
-            "$.source_version": { "matchers": [{ "match": "type" }] },
-            "$.document_version": { "matchers": [{ "match": "type" }] },
-            "$.preview_url": { "matchers": [{ "match": "type" }] },
-            "$.conversion_status": { "matchers": [{ "match": "type" }] },
-            "$.viewer_readiness": { "matchers": [{ "match": "type" }] },
-            "$.created_at": { "matchers": [{ "match": "type" }] }
+            "$.id": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.filename": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.file_type": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.mime_type": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.file_size": {
+              "matchers": [
+                {
+                  "match": "integer"
+                }
+              ]
+            },
+            "$.checksum": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.document_type": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.is_native_cad": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.author": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.source_system": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.source_version": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.document_version": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.preview_url": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.conversion_status": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.viewer_readiness": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.created_at": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            }
           }
         }
       }
@@ -534,8 +1166,17 @@
           "where": {
             "id": "01H000000000000000000000P1"
           },
-          "select": ["id", "name", "state", "properties", "current_version_id", "config_id"],
-          "expand": ["Document Part"],
+          "select": [
+            "id",
+            "name",
+            "state",
+            "properties",
+            "current_version_id",
+            "config_id"
+          ],
+          "expand": [
+            "Document Part"
+          ],
           "depth": 1,
           "page": 1,
           "page_size": 1
@@ -543,17 +1184,66 @@
         "matchingRules": {
           "header": {
             "$.Authorization": {
-              "matchers": [{ "match": "regex", "regex": "^Bearer .+" }]
+              "matchers": [
+                {
+                  "match": "regex",
+                  "regex": "^Bearer .+"
+                }
+              ]
             }
           },
           "body": {
-            "$.type": { "matchers": [{ "match": "type" }] },
-            "$.where.id": { "matchers": [{ "match": "type" }] },
-            "$.select": { "matchers": [{ "match": "type", "min": 1 }] },
-            "$.expand": { "matchers": [{ "match": "type", "min": 1 }] },
-            "$.depth": { "matchers": [{ "match": "integer" }] },
-            "$.page": { "matchers": [{ "match": "integer" }] },
-            "$.page_size": { "matchers": [{ "match": "integer" }] }
+            "$.type": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.where.id": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.select": {
+              "matchers": [
+                {
+                  "match": "type",
+                  "min": 1
+                }
+              ]
+            },
+            "$.expand": {
+              "matchers": [
+                {
+                  "match": "type",
+                  "min": 1
+                }
+              ]
+            },
+            "$.depth": {
+              "matchers": [
+                {
+                  "match": "integer"
+                }
+              ]
+            },
+            "$.page": {
+              "matchers": [
+                {
+                  "match": "integer"
+                }
+              ]
+            },
+            "$.page_size": {
+              "matchers": [
+                {
+                  "match": "integer"
+                }
+              ]
+            }
           }
         }
       },
@@ -606,28 +1296,165 @@
         },
         "matchingRules": {
           "body": {
-            "$.items": { "matchers": [{ "match": "type", "min": 0 }] },
-            "$.items[*].id": { "matchers": [{ "match": "type" }] },
-            "$.items[*].type": { "matchers": [{ "match": "type" }] },
-            "$.items[*].name": { "matchers": [{ "match": "type" }] },
-            "$.items[*].state": { "matchers": [{ "match": "type" }] },
-            "$.items[*].config_id": { "matchers": [{ "match": "type" }] },
-            "$.items[*].properties": { "matchers": [{ "match": "type" }] },
-            "$.items[*]['Document Part']": { "matchers": [{ "match": "type", "min": 0 }] },
-            "$.items[*]['Document Part'][*].id": { "matchers": [{ "match": "type" }] },
-            "$.items[*]['Document Part'][*].type": { "matchers": [{ "match": "type" }] },
-            "$.items[*]['Document Part'][*].number": { "matchers": [{ "match": "type" }] },
-            "$.items[*]['Document Part'][*].name": { "matchers": [{ "match": "type" }] },
-            "$.items[*]['Document Part'][*].generation": { "matchers": [{ "match": "integer" }] },
-            "$.items[*]['Document Part'][*].state": { "matchers": [{ "match": "type" }] },
-            "$.items[*]['Document Part'][*].config_id": { "matchers": [{ "match": "type" }] },
-            "$.items[*]['Document Part'][*].is_current": { "matchers": [{ "match": "type" }] },
-            "$.items[*]['Document Part'][*].properties": { "matchers": [{ "match": "type" }] },
-            "$.items[*]['Document Part'][*]._rel_properties": { "matchers": [{ "match": "type" }] },
-            "$.total": { "matchers": [{ "match": "integer", "min": 0 }] },
-            "$.page": { "matchers": [{ "match": "integer", "min": 1 }] },
-            "$.page_size": { "matchers": [{ "match": "integer", "min": 1 }] },
-            "$.has_more": { "matchers": [{ "match": "type" }] }
+            "$.items": {
+              "matchers": [
+                {
+                  "match": "type",
+                  "min": 0
+                }
+              ]
+            },
+            "$.items[*].id": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.items[*].type": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.items[*].name": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.items[*].state": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.items[*].config_id": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.items[*].properties": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.items[*]['Document Part']": {
+              "matchers": [
+                {
+                  "match": "type",
+                  "min": 0
+                }
+              ]
+            },
+            "$.items[*]['Document Part'][*].id": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.items[*]['Document Part'][*].type": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.items[*]['Document Part'][*].number": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.items[*]['Document Part'][*].name": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.items[*]['Document Part'][*].generation": {
+              "matchers": [
+                {
+                  "match": "integer"
+                }
+              ]
+            },
+            "$.items[*]['Document Part'][*].state": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.items[*]['Document Part'][*].config_id": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.items[*]['Document Part'][*].is_current": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.items[*]['Document Part'][*].properties": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.items[*]['Document Part'][*]._rel_properties": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.total": {
+              "matchers": [
+                {
+                  "match": "integer",
+                  "min": 0
+                }
+              ]
+            },
+            "$.page": {
+              "matchers": [
+                {
+                  "match": "integer",
+                  "min": 1
+                }
+              ]
+            },
+            "$.page_size": {
+              "matchers": [
+                {
+                  "match": "integer",
+                  "min": 1
+                }
+              ]
+            },
+            "$.has_more": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            }
           }
         }
       }
@@ -690,14 +1517,66 @@
         },
         "matchingRules": {
           "body": {
-            "$.item_id": { "matchers": [{ "match": "type" }] },
-            "$.count": { "matchers": [{ "match": "integer", "min": 0 }] },
-            "$.parents": { "matchers": [{ "match": "type", "min": 1 }] },
-            "$.parents[*].relationship": { "matchers": [{ "match": "type" }] },
-            "$.parents[*].parent": { "matchers": [{ "match": "type" }] },
-            "$.parents[*].level": { "matchers": [{ "match": "integer", "min": 1 }] },
-            "$.recursive": { "matchers": [{ "match": "type" }] },
-            "$.max_levels": { "matchers": [{ "match": "integer", "min": 1 }] }
+            "$.item_id": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.count": {
+              "matchers": [
+                {
+                  "match": "integer",
+                  "min": 0
+                }
+              ]
+            },
+            "$.parents": {
+              "matchers": [
+                {
+                  "match": "type",
+                  "min": 1
+                }
+              ]
+            },
+            "$.parents[*].relationship": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.parents[*].parent": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.parents[*].level": {
+              "matchers": [
+                {
+                  "match": "integer",
+                  "min": 1
+                }
+              ]
+            },
+            "$.recursive": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.max_levels": {
+              "matchers": [
+                {
+                  "match": "integer",
+                  "min": 1
+                }
+              ]
+            }
           }
         }
       }
@@ -770,20 +1649,109 @@
         },
         "matchingRules": {
           "body": {
-            "$.line_fields": { "matchers": [{ "match": "type", "min": 1 }] },
-            "$.line_fields[*].field": { "matchers": [{ "match": "type" }] },
-            "$.line_fields[*].severity": { "matchers": [{ "match": "type" }] },
-            "$.line_fields[*].normalized": { "matchers": [{ "match": "type" }] },
-            "$.line_fields[*].description": { "matchers": [{ "match": "type" }] },
-            "$.compare_modes": { "matchers": [{ "match": "type", "min": 1 }] },
-            "$.compare_modes[*].mode": { "matchers": [{ "match": "type" }] },
-            "$.compare_modes[*].line_key": { "matchers": [{ "match": "type" }] },
-            "$.compare_modes[*].include_relationship_props": { "matchers": [{ "match": "type", "min": 0 }] },
-            "$.compare_modes[*].aggregate_quantities": { "matchers": [{ "match": "type" }] },
-            "$.compare_modes[*].aliases": { "matchers": [{ "match": "type", "min": 0 }] },
-            "$.compare_modes[*].description": { "matchers": [{ "match": "type" }] },
-            "$.line_key_options": { "matchers": [{ "match": "type", "min": 1 }] },
-            "$.defaults": { "matchers": [{ "match": "type" }] }
+            "$.line_fields": {
+              "matchers": [
+                {
+                  "match": "type",
+                  "min": 1
+                }
+              ]
+            },
+            "$.line_fields[*].field": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.line_fields[*].severity": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.line_fields[*].normalized": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.line_fields[*].description": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.compare_modes": {
+              "matchers": [
+                {
+                  "match": "type",
+                  "min": 1
+                }
+              ]
+            },
+            "$.compare_modes[*].mode": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.compare_modes[*].line_key": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.compare_modes[*].include_relationship_props": {
+              "matchers": [
+                {
+                  "match": "type",
+                  "min": 0
+                }
+              ]
+            },
+            "$.compare_modes[*].aggregate_quantities": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.compare_modes[*].aliases": {
+              "matchers": [
+                {
+                  "match": "type",
+                  "min": 0
+                }
+              ]
+            },
+            "$.compare_modes[*].description": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.line_key_options": {
+              "matchers": [
+                {
+                  "match": "type",
+                  "min": 1
+                }
+              ]
+            },
+            "$.defaults": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            }
           }
         }
       }
@@ -834,16 +1802,77 @@
         ],
         "matchingRules": {
           "body": {
-            "$": { "matchers": [{ "match": "type", "min": 1 }] },
-            "$[*].id": { "matchers": [{ "match": "type" }] },
-            "$[*].eco_id": { "matchers": [{ "match": "type" }] },
-            "$[*].stage_id": { "matchers": [{ "match": "type" }] },
-            "$[*].approval_type": { "matchers": [{ "match": "type" }] },
-            "$[*].required_role": { "matchers": [{ "match": "type" }] },
-            "$[*].user_id": { "matchers": [{ "match": "integer" }] },
-            "$[*].status": { "matchers": [{ "match": "type" }] },
-            "$[*].comment": { "matchers": [{ "match": "type" }] },
-            "$[*].created_at": { "matchers": [{ "match": "type" }] }
+            "$": {
+              "matchers": [
+                {
+                  "match": "type",
+                  "min": 1
+                }
+              ]
+            },
+            "$[*].id": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$[*].eco_id": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$[*].stage_id": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$[*].approval_type": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$[*].required_role": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$[*].user_id": {
+              "matchers": [
+                {
+                  "match": "integer"
+                }
+              ]
+            },
+            "$[*].status": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$[*].comment": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$[*].created_at": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            }
           }
         }
       }
@@ -913,15 +1942,69 @@
         },
         "matchingRules": {
           "body": {
-            "$.id": { "matchers": [{ "match": "type" }] },
-            "$.eco_id": { "matchers": [{ "match": "type" }] },
-            "$.stage_id": { "matchers": [{ "match": "type" }] },
-            "$.approval_type": { "matchers": [{ "match": "type" }] },
-            "$.user_id": { "matchers": [{ "match": "integer" }] },
-            "$.status": { "matchers": [{ "match": "type" }] },
-            "$.comment": { "matchers": [{ "match": "type" }] },
-            "$.approved_at": { "matchers": [{ "match": "type" }] },
-            "$.created_at": { "matchers": [{ "match": "type" }] }
+            "$.id": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.eco_id": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.stage_id": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.approval_type": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.user_id": {
+              "matchers": [
+                {
+                  "match": "integer"
+                }
+              ]
+            },
+            "$.status": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.comment": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.approved_at": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.created_at": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            }
           }
         }
       }
@@ -991,15 +2074,69 @@
         },
         "matchingRules": {
           "body": {
-            "$.id": { "matchers": [{ "match": "type" }] },
-            "$.eco_id": { "matchers": [{ "match": "type" }] },
-            "$.stage_id": { "matchers": [{ "match": "type" }] },
-            "$.approval_type": { "matchers": [{ "match": "type" }] },
-            "$.user_id": { "matchers": [{ "match": "integer" }] },
-            "$.status": { "matchers": [{ "match": "type" }] },
-            "$.comment": { "matchers": [{ "match": "type" }] },
-            "$.approved_at": { "matchers": [{ "match": "type" }] },
-            "$.created_at": { "matchers": [{ "match": "type" }] }
+            "$.id": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.eco_id": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.stage_id": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.approval_type": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.user_id": {
+              "matchers": [
+                {
+                  "match": "integer"
+                }
+              ]
+            },
+            "$.status": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.comment": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.approved_at": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.created_at": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            }
           }
         }
       }
@@ -1015,10 +2152,18 @@
         "method": "GET",
         "path": "/api/v1/eco",
         "query": {
-          "product_id": ["01H000000000000000000000P1"],
-          "created_by_id": ["1"],
-          "limit": ["25"],
-          "offset": ["0"]
+          "product_id": [
+            "01H000000000000000000000P1"
+          ],
+          "created_by_id": [
+            "1"
+          ],
+          "limit": [
+            "25"
+          ],
+          "offset": [
+            "0"
+          ]
         },
         "headers": {
           "Authorization": "Bearer eyJhbGciOiJIUzI1NiJ9.example"
@@ -1055,15 +2200,70 @@
         ],
         "matchingRules": {
           "body": {
-            "$": { "matchers": [{ "match": "type", "min": 1 }] },
-            "$[*].id": { "matchers": [{ "match": "type" }] },
-            "$[*].name": { "matchers": [{ "match": "type" }] },
-            "$[*].eco_type": { "matchers": [{ "match": "type" }] },
-            "$[*].product_id": { "matchers": [{ "match": "type" }] },
-            "$[*].state": { "matchers": [{ "match": "type" }] },
-            "$[*].created_by_id": { "matchers": [{ "match": "integer" }] },
-            "$[*].created_at": { "matchers": [{ "match": "type" }] },
-            "$[*].updated_at": { "matchers": [{ "match": "type" }] }
+            "$": {
+              "matchers": [
+                {
+                  "match": "type",
+                  "min": 1
+                }
+              ]
+            },
+            "$[*].id": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$[*].name": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$[*].eco_type": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$[*].product_id": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$[*].state": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$[*].created_by_id": {
+              "matchers": [
+                {
+                  "match": "integer"
+                }
+              ]
+            },
+            "$[*].created_at": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$[*].updated_at": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            }
           }
         }
       }
@@ -1111,14 +2311,62 @@
         },
         "matchingRules": {
           "body": {
-            "$.id": { "matchers": [{ "match": "type" }] },
-            "$.name": { "matchers": [{ "match": "type" }] },
-            "$.eco_type": { "matchers": [{ "match": "type" }] },
-            "$.product_id": { "matchers": [{ "match": "type" }] },
-            "$.state": { "matchers": [{ "match": "type" }] },
-            "$.created_by_id": { "matchers": [{ "match": "integer" }] },
-            "$.created_at": { "matchers": [{ "match": "type" }] },
-            "$.updated_at": { "matchers": [{ "match": "type" }] }
+            "$.id": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.name": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.eco_type": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.product_id": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.state": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.created_by_id": {
+              "matchers": [
+                {
+                  "match": "integer"
+                }
+              ]
+            },
+            "$.created_at": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.updated_at": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            }
           }
         }
       }
@@ -1187,16 +2435,78 @@
         },
         "matchingRules": {
           "body": {
-            "$.bom_line_id": { "matchers": [{ "match": "type" }] },
-            "$.count": { "matchers": [{ "match": "integer", "min": 0 }] },
-            "$.substitutes": { "matchers": [{ "match": "type", "min": 0 }] },
-            "$.substitutes[*].id": { "matchers": [{ "match": "type" }] },
-            "$.substitutes[*].relationship": { "matchers": [{ "match": "type" }] },
-            "$.substitutes[*].part": { "matchers": [{ "match": "type" }] },
-            "$.substitutes[*].substitute_part": { "matchers": [{ "match": "type" }] },
-            "$.substitutes[*].rank": { "matchers": [{ "match": "integer" }] },
-            "$.substitutes[*].substitute_number": { "matchers": [{ "match": "type" }] },
-            "$.substitutes[*].substitute_name": { "matchers": [{ "match": "type" }] }
+            "$.bom_line_id": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.count": {
+              "matchers": [
+                {
+                  "match": "integer",
+                  "min": 0
+                }
+              ]
+            },
+            "$.substitutes": {
+              "matchers": [
+                {
+                  "match": "type",
+                  "min": 0
+                }
+              ]
+            },
+            "$.substitutes[*].id": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.substitutes[*].relationship": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.substitutes[*].part": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.substitutes[*].substitute_part": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.substitutes[*].rank": {
+              "matchers": [
+                {
+                  "match": "integer"
+                }
+              ]
+            },
+            "$.substitutes[*].substitute_number": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.substitutes[*].substitute_name": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            }
           }
         }
       }
@@ -1234,8 +2544,20 @@
             }
           },
           "body": {
-            "$.substitute_item_id": { "matchers": [{ "match": "type" }] },
-            "$.properties": { "matchers": [{ "match": "type" }] }
+            "$.substitute_item_id": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.properties": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            }
           }
         }
       },
@@ -1252,10 +2574,34 @@
         },
         "matchingRules": {
           "body": {
-            "$.ok": { "matchers": [{ "match": "type" }] },
-            "$.substitute_id": { "matchers": [{ "match": "type" }] },
-            "$.bom_line_id": { "matchers": [{ "match": "type" }] },
-            "$.substitute_item_id": { "matchers": [{ "match": "type" }] }
+            "$.ok": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.substitute_id": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.bom_line_id": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.substitute_item_id": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            }
           }
         }
       }
@@ -1297,8 +2643,485 @@
         },
         "matchingRules": {
           "body": {
-            "$.ok": { "matchers": [{ "match": "type" }] },
-            "$.substitute_id": { "matchers": [{ "match": "type" }] }
+            "$.ok": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.substitute_id": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "description": "fetch CAD properties for a native CAD file",
+      "providerStates": [
+        {
+          "name": "CAD file 01H000000000000000000000F2 has imported properties at schema version 3"
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "path": "/api/v1/cad/files/01H000000000000000000000F2/properties",
+        "headers": {
+          "Authorization": "Bearer eyJhbGciOiJIUzI1NiJ9.example"
+        },
+        "matchingRules": {
+          "header": {
+            "$.Authorization": {
+              "matchers": [
+                {
+                  "match": "regex",
+                  "regex": "^Bearer .+"
+                }
+              ]
+            }
+          }
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": {
+          "file_id": "01H000000000000000000000F2",
+          "properties": {
+            "material": "AL-6061",
+            "finish": "anodized"
+          },
+          "source": "imported",
+          "cad_document_schema_version": 3
+        }
+      }
+    },
+    {
+      "description": "update CAD properties with a manual fixture payload",
+      "providerStates": [
+        {
+          "name": "CAD file 01H000000000000000000000F3 accepts manual property updates at schema version 4"
+        }
+      ],
+      "request": {
+        "method": "PATCH",
+        "path": "/api/v1/cad/files/01H000000000000000000000F3/properties",
+        "headers": {
+          "Authorization": "Bearer eyJhbGciOiJIUzI1NiJ9.example",
+          "Content-Type": "application/json"
+        },
+        "matchingRules": {
+          "header": {
+            "$.Authorization": {
+              "matchers": [
+                {
+                  "match": "regex",
+                  "regex": "^Bearer .+"
+                }
+              ]
+            }
+          }
+        },
+        "body": {
+          "properties": {
+            "material": "AL-7075",
+            "finish": "hard-anodized"
+          },
+          "source": "manual"
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": {
+          "file_id": "01H000000000000000000000F3",
+          "properties": {
+            "material": "AL-7075",
+            "finish": "hard-anodized"
+          },
+          "source": "manual",
+          "cad_document_schema_version": 4
+        }
+      }
+    },
+    {
+      "description": "fetch CAD view state with hidden entities and notes",
+      "providerStates": [
+        {
+          "name": "CAD file 01H000000000000000000000F4 has client view state fixture at schema version 3"
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "path": "/api/v1/cad/files/01H000000000000000000000F4/view-state",
+        "headers": {
+          "Authorization": "Bearer eyJhbGciOiJIUzI1NiJ9.example"
+        },
+        "matchingRules": {
+          "header": {
+            "$.Authorization": {
+              "matchers": [
+                {
+                  "match": "regex",
+                  "regex": "^Bearer .+"
+                }
+              ]
+            }
+          }
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": {
+          "file_id": "01H000000000000000000000F4",
+          "hidden_entity_ids": [
+            12,
+            19
+          ],
+          "notes": [
+            {
+              "entity_id": 12,
+              "note": "check hole position",
+              "color": "#FFB020"
+            }
+          ],
+          "source": "client",
+          "cad_document_schema_version": 3
+        }
+      }
+    },
+    {
+      "description": "update CAD view state with the current client visibility draft",
+      "providerStates": [
+        {
+          "name": "CAD file 01H000000000000000000000F5 accepts client view-state updates at schema version 3"
+        }
+      ],
+      "request": {
+        "method": "PATCH",
+        "path": "/api/v1/cad/files/01H000000000000000000000F5/view-state",
+        "headers": {
+          "Authorization": "Bearer eyJhbGciOiJIUzI1NiJ9.example",
+          "Content-Type": "application/json"
+        },
+        "matchingRules": {
+          "header": {
+            "$.Authorization": {
+              "matchers": [
+                {
+                  "match": "regex",
+                  "regex": "^Bearer .+"
+                }
+              ]
+            }
+          }
+        },
+        "body": {
+          "hidden_entity_ids": [
+            12,
+            19
+          ],
+          "notes": [
+            {
+              "entity_id": 19,
+              "note": "hide fastener",
+              "color": "#4C9AFF"
+            }
+          ],
+          "source": "client",
+          "refresh_preview": false
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": {
+          "file_id": "01H000000000000000000000F5",
+          "hidden_entity_ids": [
+            12,
+            19
+          ],
+          "notes": [
+            {
+              "entity_id": 19,
+              "note": "hide fastener",
+              "color": "#4C9AFF"
+            }
+          ],
+          "source": "client",
+          "cad_document_schema_version": 3
+        }
+      }
+    },
+    {
+      "description": "fetch CAD review state for a pending review",
+      "providerStates": [
+        {
+          "name": "CAD file 01H000000000000000000000F6 has a pending review state"
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "path": "/api/v1/cad/files/01H000000000000000000000F6/review",
+        "headers": {
+          "Authorization": "Bearer eyJhbGciOiJIUzI1NiJ9.example"
+        },
+        "matchingRules": {
+          "header": {
+            "$.Authorization": {
+              "matchers": [
+                {
+                  "match": "regex",
+                  "regex": "^Bearer .+"
+                }
+              ]
+            }
+          }
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": {
+          "file_id": "01H000000000000000000000F6",
+          "state": "pending",
+          "note": "Awaiting review",
+          "reviewed_by_id": 1
+        }
+      }
+    },
+    {
+      "description": "submit an approved CAD review comment",
+      "providerStates": [
+        {
+          "name": "CAD file 01H000000000000000000000F7 accepts approved review updates"
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "path": "/api/v1/cad/files/01H000000000000000000000F7/review",
+        "headers": {
+          "Authorization": "Bearer eyJhbGciOiJIUzI1NiJ9.example",
+          "Content-Type": "application/json"
+        },
+        "matchingRules": {
+          "header": {
+            "$.Authorization": {
+              "matchers": [
+                {
+                  "match": "regex",
+                  "regex": "^Bearer .+"
+                }
+              ]
+            }
+          }
+        },
+        "body": {
+          "state": "approved",
+          "note": "Looks good"
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": {
+          "file_id": "01H000000000000000000000F7",
+          "state": "approved",
+          "note": "Looks good",
+          "reviewed_by_id": 1
+        }
+      }
+    },
+    {
+      "description": "fetch CAD change history for properties and review updates",
+      "providerStates": [
+        {
+          "name": "CAD file 01H000000000000000000000F8 has seeded properties and review history"
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "path": "/api/v1/cad/files/01H000000000000000000000F8/history",
+        "headers": {
+          "Authorization": "Bearer eyJhbGciOiJIUzI1NiJ9.example"
+        },
+        "matchingRules": {
+          "header": {
+            "$.Authorization": {
+              "matchers": [
+                {
+                  "match": "regex",
+                  "regex": "^Bearer .+"
+                }
+              ]
+            }
+          }
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": {
+          "file_id": "01H000000000000000000000F8",
+          "entries": [
+            {
+              "id": "cad-chg-2",
+              "action": "cad_review_update",
+              "payload": {
+                "state": "pending",
+                "note": "Awaiting review",
+                "reviewed_by_id": 1
+              },
+              "created_at": "2026-04-11T00:05:00",
+              "user_id": 1
+            },
+            {
+              "id": "cad-chg-1",
+              "action": "cad_properties_update",
+              "payload": {
+                "properties": {
+                  "material": "AL-6061",
+                  "finish": "anodized"
+                },
+                "source": "imported",
+                "cad_document_schema_version": 3
+              },
+              "created_at": "2026-04-11T00:00:00",
+              "user_id": 1
+            }
+          ]
+        }
+      }
+    },
+    {
+      "description": "compare two CAD files and report property deltas",
+      "providerStates": [
+        {
+          "name": "CAD file 01H000000000000000000000F9 can be compared against 01H000000000000000000000F10"
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "path": "/api/v1/cad/files/01H000000000000000000000F9/diff",
+        "query": {
+          "other_file_id": [
+            "01H000000000000000000000F10"
+          ]
+        },
+        "headers": {
+          "Authorization": "Bearer eyJhbGciOiJIUzI1NiJ9.example"
+        },
+        "matchingRules": {
+          "header": {
+            "$.Authorization": {
+              "matchers": [
+                {
+                  "match": "regex",
+                  "regex": "^Bearer .+"
+                }
+              ]
+            }
+          }
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": {
+          "file_id": "01H000000000000000000000F9",
+          "other_file_id": "01H000000000000000000000F10",
+          "properties": {
+            "added": {
+              "finish": "anodized"
+            },
+            "removed": {
+              "coating": "none"
+            },
+            "changed": {
+              "weight_kg": {
+                "from": 1.1,
+                "to": 1.2
+              }
+            }
+          },
+          "cad_document_schema_version": {
+            "from": 1,
+            "to": 2
+          }
+        }
+      }
+    },
+    {
+      "description": "fetch CAD mesh stats for the rendered model",
+      "providerStates": [
+        {
+          "name": "CAD file 01H000000000000000000000F11 has precomputed mesh stats"
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "path": "/api/v1/cad/files/01H000000000000000000000F11/mesh-stats",
+        "headers": {
+          "Authorization": "Bearer eyJhbGciOiJIUzI1NiJ9.example"
+        },
+        "matchingRules": {
+          "header": {
+            "$.Authorization": {
+              "matchers": [
+                {
+                  "match": "regex",
+                  "regex": "^Bearer .+"
+                }
+              ]
+            }
+          }
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": {
+          "file_id": "01H000000000000000000000F11",
+          "stats": {
+            "available": true,
+            "entity_count": 2,
+            "triangle_count": 102400,
+            "bounds": {
+              "min": {
+                "x": 0,
+                "y": 0,
+                "z": 0
+              },
+              "max": {
+                "x": 120,
+                "y": 80,
+                "z": 40
+              }
+            }
           }
         }
       }
