@@ -99,18 +99,280 @@ type ApprovalRecordInsert = {
   targetUserId?: string | null
 }
 
+type ApprovalDbClient = {
+  query: typeof pool.query
+  release: () => void
+}
+
+type ValidationContext = {
+  status: number
+  code: string
+}
+
+const REQUEST_VALIDATION_CONTEXT: ValidationContext = {
+  status: 400,
+  code: 'VALIDATION_ERROR',
+}
+
+const STORED_FORM_SCHEMA_CONTEXT: ValidationContext = {
+  status: 500,
+  code: 'APPROVAL_TEMPLATE_SCHEMA_INVALID',
+}
+
+const STORED_GRAPH_CONTEXT: ValidationContext = {
+  status: 500,
+  code: 'APPROVAL_TEMPLATE_GRAPH_INVALID',
+}
+
+const STORED_RUNTIME_CONTEXT: ValidationContext = {
+  status: 500,
+  code: 'APPROVAL_RUNTIME_GRAPH_INVALID',
+}
+
+const FORM_FIELD_TYPES = new Set([
+  'text',
+  'textarea',
+  'number',
+  'date',
+  'datetime',
+  'select',
+  'multi-select',
+  'user',
+  'attachment',
+])
+
+const APPROVAL_NODE_TYPES = new Set(['start', 'approval', 'cc', 'condition', 'end'])
+const CONDITION_OPERATORS = new Set(['eq', 'neq', 'gt', 'gte', 'lt', 'lte', 'in', 'isEmpty'])
+
 function toNullableRecord(value: unknown): Record<string, unknown> | null {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
     ? value as Record<string, unknown>
     : null
 }
 
-function asFormSchema(value: Record<string, unknown>): FormSchema {
-  return value as unknown as FormSchema
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
-function asRuntimeGraph(value: Record<string, unknown>): RuntimeGraph {
-  return value as unknown as RuntimeGraph
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === 'string' && value.trim().length > 0
+}
+
+function failValidation(context: ValidationContext, message: string): never {
+  throw new ServiceError(message, context.status, context.code)
+}
+
+function deepFreeze<T>(value: T): T {
+  if (Array.isArray(value)) {
+    value.forEach((entry) => deepFreeze(entry))
+    return Object.freeze(value)
+  }
+  if (value && typeof value === 'object') {
+    Object.values(value as Record<string, unknown>).forEach((entry) => deepFreeze(entry))
+    return Object.freeze(value)
+  }
+  return value
+}
+
+async function rollbackQuietly(client: ApprovalDbClient | null): Promise<void> {
+  if (!client) return
+  try {
+    await client.query('ROLLBACK')
+  } catch {
+    // Ignore rollback errors so the original failure is preserved.
+  }
+}
+
+function normalizeFormField(
+  value: unknown,
+  index: number,
+  context: ValidationContext,
+): FormSchema['fields'][number] {
+  if (!isRecord(value)) {
+    failValidation(context, `formSchema.fields[${index}] must be an object`)
+  }
+  if (!isNonEmptyString(value.id)) {
+    failValidation(context, `formSchema.fields[${index}].id is required`)
+  }
+  if (!FORM_FIELD_TYPES.has(String(value.type))) {
+    failValidation(context, `formSchema.fields[${index}].type is invalid`)
+  }
+  if (!isNonEmptyString(value.label)) {
+    failValidation(context, `formSchema.fields[${index}].label is required`)
+  }
+  if (value.required !== undefined && typeof value.required !== 'boolean') {
+    failValidation(context, `formSchema.fields[${index}].required must be a boolean`)
+  }
+  if (value.placeholder !== undefined && typeof value.placeholder !== 'string') {
+    failValidation(context, `formSchema.fields[${index}].placeholder must be a string`)
+  }
+  if (
+    value.options !== undefined &&
+    (!Array.isArray(value.options)
+      || value.options.some(
+        (option, optionIndex) =>
+          !isRecord(option)
+          || !isNonEmptyString(option.label)
+          || !isNonEmptyString(option.value)
+          || optionIndex < 0,
+      ))
+  ) {
+    failValidation(context, `formSchema.fields[${index}].options must be an array of label/value pairs`)
+  }
+  if (value.props !== undefined && !isRecord(value.props)) {
+    failValidation(context, `formSchema.fields[${index}].props must be an object`)
+  }
+
+  return {
+    id: value.id.trim(),
+    type: value.type as FormSchema['fields'][number]['type'],
+    label: value.label.trim(),
+    ...(value.required !== undefined ? { required: value.required } : {}),
+    ...(value.placeholder !== undefined ? { placeholder: value.placeholder } : {}),
+    ...(value.defaultValue !== undefined ? { defaultValue: value.defaultValue } : {}),
+    ...(Array.isArray(value.options)
+      ? {
+          options: value.options.map((option) => ({
+            label: (option as { label: string }).label.trim(),
+            value: (option as { value: string }).value.trim(),
+          })),
+        }
+      : {}),
+    ...(isRecord(value.props) ? { props: { ...value.props } } : {}),
+  } as FormSchema['fields'][number]
+}
+
+function assertFormSchema(value: unknown, context: ValidationContext = REQUEST_VALIDATION_CONTEXT): FormSchema {
+  if (!isRecord(value) || !Array.isArray(value.fields)) {
+    failValidation(context, 'formSchema must contain fields')
+  }
+
+  return {
+    fields: value.fields.map((field, index) => normalizeFormField(field, index, context)),
+  }
+}
+
+function normalizeApprovalGraph(value: unknown, context: ValidationContext): ApprovalGraph {
+  if (!isRecord(value) || !Array.isArray(value.nodes) || !Array.isArray(value.edges)) {
+    failValidation(context, 'approvalGraph must contain nodes and edges')
+  }
+
+  const nodes = value.nodes.map((node, index) => {
+    if (!isRecord(node)) {
+      failValidation(context, `approvalGraph.nodes[${index}] must be an object`)
+    }
+    if (!isNonEmptyString(node.key)) {
+      failValidation(context, `approvalGraph.nodes[${index}].key is required`)
+    }
+    if (!APPROVAL_NODE_TYPES.has(String(node.type))) {
+      failValidation(context, `approvalGraph.nodes[${index}].type is invalid`)
+    }
+    if (!isRecord(node.config)) {
+      failValidation(context, `approvalGraph.nodes[${index}].config must be an object`)
+    }
+
+    const normalizedNode = {
+      key: node.key.trim(),
+      type: node.type as ApprovalGraph['nodes'][number]['type'],
+      ...(typeof node.name === 'string' && node.name.trim().length > 0 ? { name: node.name.trim() } : {}),
+      config: {} as Record<string, unknown>,
+    }
+
+    switch (node.type) {
+      case 'approval':
+        if ((node.config.assigneeType !== 'user' && node.config.assigneeType !== 'role')
+          || !Array.isArray(node.config.assigneeIds)
+          || node.config.assigneeIds.some((entry) => !isNonEmptyString(entry))) {
+          failValidation(context, `approvalGraph.nodes[${index}].config must define assigneeType and assigneeIds`)
+        }
+        normalizedNode.config = {
+          assigneeType: node.config.assigneeType,
+          assigneeIds: node.config.assigneeIds.map((entry) => entry.trim()),
+        }
+        break
+      case 'cc':
+        if ((node.config.targetType !== 'user' && node.config.targetType !== 'role')
+          || !Array.isArray(node.config.targetIds)
+          || node.config.targetIds.some((entry) => !isNonEmptyString(entry))) {
+          failValidation(context, `approvalGraph.nodes[${index}].config must define targetType and targetIds`)
+        }
+        normalizedNode.config = {
+          targetType: node.config.targetType,
+          targetIds: node.config.targetIds.map((entry) => entry.trim()),
+        }
+        break
+      case 'condition':
+        if (!Array.isArray(node.config.branches)) {
+          failValidation(context, `approvalGraph.nodes[${index}].config.branches must be an array`)
+        }
+        normalizedNode.config = {
+          branches: node.config.branches.map((branch, branchIndex) => {
+            if (!isRecord(branch) || !isNonEmptyString(branch.edgeKey) || !Array.isArray(branch.rules)) {
+              failValidation(context, `approvalGraph.nodes[${index}].config.branches[${branchIndex}] is invalid`)
+            }
+            if (branch.conjunction !== undefined && branch.conjunction !== 'and' && branch.conjunction !== 'or') {
+              failValidation(context, `approvalGraph.nodes[${index}].config.branches[${branchIndex}].conjunction is invalid`)
+            }
+            return {
+              edgeKey: branch.edgeKey.trim(),
+              ...(branch.conjunction ? { conjunction: branch.conjunction } : {}),
+              rules: branch.rules.map((rule, ruleIndex) => {
+                if (!isRecord(rule) || !isNonEmptyString(rule.fieldId) || !CONDITION_OPERATORS.has(String(rule.operator))) {
+                  failValidation(
+                    context,
+                    `approvalGraph.nodes[${index}].config.branches[${branchIndex}].rules[${ruleIndex}] is invalid`,
+                  )
+                }
+                return {
+                  fieldId: rule.fieldId.trim(),
+                  operator: rule.operator,
+                  ...(rule.value !== undefined ? { value: rule.value } : {}),
+                }
+              }),
+            }
+          }),
+          ...(isNonEmptyString(node.config.defaultEdgeKey)
+            ? { defaultEdgeKey: node.config.defaultEdgeKey.trim() }
+            : {}),
+        }
+        break
+      default:
+        normalizedNode.config = {}
+        break
+    }
+
+    return normalizedNode as ApprovalGraph['nodes'][number]
+  })
+
+  const nodeKeys = new Set(nodes.map((node) => node.key))
+  if (nodeKeys.size !== nodes.length) {
+    failValidation(context, 'approvalGraph node keys must be unique')
+  }
+
+  const edges = value.edges.map((edge, index) => {
+    if (!isRecord(edge) || !isNonEmptyString(edge.key) || !isNonEmptyString(edge.source) || !isNonEmptyString(edge.target)) {
+      failValidation(context, `approvalGraph.edges[${index}] is invalid`)
+    }
+    return {
+      key: edge.key.trim(),
+      source: edge.source.trim(),
+      target: edge.target.trim(),
+    }
+  })
+
+  const edgeKeys = new Set(edges.map((edge) => edge.key))
+  if (edgeKeys.size !== edges.length) {
+    failValidation(context, 'approvalGraph edge keys must be unique')
+  }
+  if (edges.some((edge) => !nodeKeys.has(edge.source) || !nodeKeys.has(edge.target))) {
+    failValidation(context, 'approvalGraph edges must reference known nodes')
+  }
+
+  return { nodes, edges }
+}
+
+function asApprovalGraph(value: Record<string, unknown>): ApprovalGraph {
+  return normalizeApprovalGraph(value, STORED_GRAPH_CONTEXT)
 }
 
 function toApprovalTemplateListItemDTO(row: TemplateRow): ApprovalTemplateListItemDTO {
@@ -131,7 +393,7 @@ function toApprovalTemplateDetailDTO(bundle: TemplateBundle): ApprovalTemplateDe
   return {
     ...toApprovalTemplateListItemDTO(bundle.template),
     formSchema: asFormSchema(bundle.version.form_schema),
-    approvalGraph: bundle.version.approval_graph as unknown as ApprovalTemplateDetailDTO['approvalGraph'],
+    approvalGraph: asApprovalGraph(bundle.version.approval_graph),
   }
 }
 
@@ -142,7 +404,7 @@ function toApprovalTemplateVersionDetailDTO(bundle: TemplateBundle): ApprovalTem
     version: bundle.version.version,
     status: bundle.version.status,
     formSchema: asFormSchema(bundle.version.form_schema),
-    approvalGraph: bundle.version.approval_graph as unknown as ApprovalTemplateVersionDetailDTO['approvalGraph'],
+    approvalGraph: asApprovalGraph(bundle.version.approval_graph),
     runtimeGraph: bundle.publishedDefinition ? asRuntimeGraph(bundle.publishedDefinition.runtime_graph) : null,
     publishedDefinitionId: bundle.publishedDefinition?.id || null,
     createdAt: bundle.version.created_at.toISOString(),
@@ -215,41 +477,28 @@ function normalizeOptionalString(value: unknown): string | null | undefined {
   return value.trim()
 }
 
-function assertFormSchema(value: unknown): FormSchema {
-  if (
-    typeof value !== 'object' ||
-    value === null ||
-    !Array.isArray((value as { fields?: unknown }).fields)
-  ) {
-    throw new ServiceError('formSchema must contain fields', 400, 'VALIDATION_ERROR')
-  }
-  return value as FormSchema
+function assertApprovalGraph(value: unknown, context: ValidationContext = REQUEST_VALIDATION_CONTEXT): ApprovalGraph {
+  return normalizeApprovalGraph(value, context)
 }
 
-function assertApprovalGraph(value: unknown): ApprovalGraph {
-  const graph = value as { nodes?: unknown; edges?: unknown } | null
-  if (
-    typeof value !== 'object' ||
-    value === null ||
-    !Array.isArray(graph?.nodes) ||
-    !Array.isArray(graph?.edges)
-  ) {
-    throw new ServiceError('approvalGraph must contain nodes and edges', 400, 'VALIDATION_ERROR')
-  }
-  return value as ApprovalGraph
+function asFormSchema(value: Record<string, unknown>): FormSchema {
+  return assertFormSchema(value, STORED_FORM_SCHEMA_CONTEXT)
 }
 
-function assertRuntimePolicy(value: unknown): RuntimePolicy {
+function assertRuntimePolicy(
+  value: unknown,
+  context: ValidationContext = REQUEST_VALIDATION_CONTEXT,
+): RuntimePolicy {
   const policy = value as { allowRevoke?: unknown; revokeBeforeNodeKeys?: unknown } | null
   if (typeof value !== 'object' || value === null || typeof policy?.allowRevoke !== 'boolean') {
-    throw new ServiceError('policy.allowRevoke is required', 400, 'VALIDATION_ERROR')
+    failValidation(context, 'policy.allowRevoke is required')
   }
   if (
     policy.revokeBeforeNodeKeys !== undefined &&
     (!Array.isArray(policy.revokeBeforeNodeKeys) ||
       !policy.revokeBeforeNodeKeys.every((item) => typeof item === 'string' && item.trim().length > 0))
   ) {
-    throw new ServiceError('policy.revokeBeforeNodeKeys must be a string array', 400, 'VALIDATION_ERROR')
+    failValidation(context, 'policy.revokeBeforeNodeKeys must be a string array')
   }
   return {
     allowRevoke: policy.allowRevoke,
@@ -259,15 +508,35 @@ function assertRuntimePolicy(value: unknown): RuntimePolicy {
   }
 }
 
+function asRuntimeGraph(value: Record<string, unknown>): RuntimeGraph {
+  if (!isRecord(value)) {
+    failValidation(STORED_RUNTIME_CONTEXT, 'runtimeGraph must be an object')
+  }
+
+  const graph = assertApprovalGraph(
+    {
+      nodes: value.nodes,
+      edges: value.edges,
+    },
+    STORED_RUNTIME_CONTEXT,
+  )
+  const policy = assertRuntimePolicy(value.policy, STORED_RUNTIME_CONTEXT)
+
+  return deepFreeze({
+    ...graph,
+    policy,
+  })
+}
+
 function buildRuntimeGraph(approvalGraph: ApprovalGraph, policy: RuntimePolicy): RuntimeGraph {
   const copied = JSON.parse(JSON.stringify(approvalGraph)) as ApprovalGraph
-  return {
+  return deepFreeze({
     ...copied,
     policy: {
       allowRevoke: policy.allowRevoke,
       ...(policy.revokeBeforeNodeKeys ? { revokeBeforeNodeKeys: [...policy.revokeBeforeNodeKeys] } : {}),
     },
-  }
+  })
 }
 
 export class ApprovalProductService {
@@ -328,8 +597,9 @@ export class ApprovalProductService {
     const formSchema = assertFormSchema(request.formSchema)
     const approvalGraph = assertApprovalGraph(request.approvalGraph)
 
-    const client = await pool.connect()
+    let client: ApprovalDbClient | null = null
     try {
+      client = await pool.connect()
       await client.query('BEGIN')
 
       const templateResult = await client.query<TemplateRow>(
@@ -365,10 +635,10 @@ export class ApprovalProductService {
         publishedDefinition: null,
       })
     } catch (error) {
-      await client.query('ROLLBACK')
+      await rollbackQuietly(client)
       throw error
     } finally {
-      client.release()
+      client?.release()
     }
   }
 
@@ -383,8 +653,9 @@ export class ApprovalProductService {
     const formSchema = request.formSchema !== undefined ? assertFormSchema(request.formSchema) : undefined
     const approvalGraph = request.approvalGraph !== undefined ? assertApprovalGraph(request.approvalGraph) : undefined
 
-    const client = await pool.connect()
+    let client: ApprovalDbClient | null = null
     try {
+      client = await pool.connect()
       await client.query('BEGIN')
 
       const templateResult = await client.query<TemplateRow>(
@@ -488,10 +759,10 @@ export class ApprovalProductService {
         publishedDefinition: null,
       })
     } catch (error) {
-      await client.query('ROLLBACK')
+      await rollbackQuietly(client)
       throw error
     } finally {
-      client.release()
+      client?.release()
     }
   }
 
@@ -499,8 +770,9 @@ export class ApprovalProductService {
     if (!pool) throw new Error('Database not available')
 
     const policy = assertRuntimePolicy(request.policy)
-    const client = await pool.connect()
+    let client: ApprovalDbClient | null = null
     try {
+      client = await pool.connect()
       await client.query('BEGIN')
 
       const templateResult = await client.query<TemplateRow>(
@@ -531,7 +803,7 @@ export class ApprovalProductService {
         [id],
       )
 
-      const runtimeGraph = buildRuntimeGraph(assertApprovalGraph(version.approval_graph), policy)
+      const runtimeGraph = buildRuntimeGraph(asApprovalGraph(version.approval_graph), policy)
 
       const publishedDefinitionResult = await client.query<PublishedDefinitionRow>(
         `INSERT INTO approval_published_definitions (template_id, template_version_id, runtime_graph, is_active, published_at)
@@ -567,10 +839,10 @@ export class ApprovalProductService {
         publishedDefinition,
       })
     } catch (error) {
-      await client.query('ROLLBACK')
+      await rollbackQuietly(client)
       throw error
     } finally {
-      client.release()
+      client?.release()
     }
   }
 
@@ -611,8 +883,9 @@ export class ApprovalProductService {
       permissions: actor.permissions || [],
     }
 
-    const client = await pool.connect()
+    let client: ApprovalDbClient | null = null
     try {
+      client = await pool.connect()
       await client.query('BEGIN')
 
       await client.query(
@@ -667,10 +940,10 @@ export class ApprovalProductService {
 
       await client.query('COMMIT')
     } catch (error) {
-      await client.query('ROLLBACK')
+      await rollbackQuietly(client)
       throw error
     } finally {
-      client.release()
+      client?.release()
     }
 
     const approval = await this.getApproval(instanceId)
@@ -687,8 +960,9 @@ export class ApprovalProductService {
   ): Promise<UnifiedApprovalDTO> {
     if (!pool) throw new Error('Database not available')
 
-    const client = await pool.connect()
+    let client: ApprovalDbClient | null = null
     try {
+      client = await pool.connect()
       await client.query('BEGIN')
 
       const instanceResult = await client.query<ApprovalInstanceRow>(
@@ -775,9 +1049,21 @@ export class ApprovalProductService {
       }
 
       if (request.action === 'revoke') {
+        if (!runtimeGraph.policy.allowRevoke) {
+          throw new ServiceError('Approval cannot be revoked for this template', 409, 'APPROVAL_REVOKE_DISABLED')
+        }
         const requesterId = toNullableRecord(instance.requester_snapshot)?.id
         if (requesterId !== actor.userId) {
           throw new ServiceError('Only the requester can revoke this approval', 403, 'APPROVAL_REVOKE_FORBIDDEN')
+        }
+        if (!currentNodeKey) {
+          throw new ServiceError('Approval does not have an active node', 409, APPROVAL_ERROR_CODES.INVALID_STATUS_TRANSITION)
+        }
+        if (
+          runtimeGraph.policy.revokeBeforeNodeKeys?.length &&
+          !runtimeGraph.policy.revokeBeforeNodeKeys.includes(currentNodeKey)
+        ) {
+          throw new ServiceError('Approval can no longer be revoked', 409, 'APPROVAL_REVOKE_WINDOW_CLOSED')
         }
         const handledResult = await client.query<{ count: string }>(
           `SELECT COUNT(*)::text AS count
@@ -902,10 +1188,10 @@ export class ApprovalProductService {
 
       await client.query('COMMIT')
     } catch (error) {
-      await client.query('ROLLBACK')
+      await rollbackQuietly(client)
       throw error
     } finally {
-      client.release()
+      client?.release()
     }
 
     const approval = await this.getApproval(id)

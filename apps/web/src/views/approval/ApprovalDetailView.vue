@@ -188,7 +188,6 @@ function statusTagType(status: string) {
     approved: 'success',
     rejected: 'danger',
     revoked: 'info',
-    draft: 'info',
     cancelled: 'info',
   }
   return map[status] ?? ''
@@ -200,7 +199,6 @@ function statusLabel(status: string) {
     approved: '已通过',
     rejected: '已驳回',
     revoked: '已撤回',
-    draft: '草稿',
     cancelled: '已取消',
   }
   return map[status] ?? status
