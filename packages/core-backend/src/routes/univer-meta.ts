@@ -5,6 +5,14 @@ import { Router } from 'express'
 import { z } from 'zod'
 import { poolManager } from '../integration/db/connection-pool'
 import { eventBus } from '../integration/events/event-bus'
+import {
+  deriveFieldPermissions,
+  deriveViewPermissions,
+  type FieldPermissionScope,
+  type ViewPermissionScope,
+  isFieldAlwaysReadOnly,
+  isFieldPermissionHidden,
+} from '../multitable/permission-derivation'
 import { rbacGuard, rbacGuardAny } from '../rbac/rbac'
 import { isAdmin, listUserPermissions } from '../rbac/service'
 import { StorageServiceImpl } from '../services/StorageService'
@@ -1578,13 +1586,6 @@ async function loadSheetPermissionScopeMap(
   }
 }
 
-type ViewPermissionScope = {
-  hasAssignments: boolean
-  canRead: boolean
-  canWrite: boolean
-  canAdmin: boolean
-}
-
 async function loadViewPermissionScopeMap(
   query: QueryFn,
   viewIds: string[],
@@ -1645,11 +1646,6 @@ async function loadViewPermissionScopeMap(
     if (isUndefinedTableError(err, 'meta_view_permissions') || isUndefinedTableError(err, 'user_roles')) return new Map()
     throw err
   }
-}
-
-type FieldPermissionScope = {
-  visible: boolean
-  readOnly: boolean
 }
 
 async function loadFieldPermissionScopeMap(
@@ -1911,71 +1907,6 @@ async function resolveReadableSheetIds(
 
 function sendForbidden(res: Response, message = 'Insufficient permissions') {
   return res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message } })
-}
-
-function deriveFieldPermissions(
-  fields: UniverMetaField[],
-  capabilities: MultitableCapabilities,
-  opts?: { hiddenFieldIds?: string[]; allowCreateOnly?: boolean; fieldScopeMap?: Map<string, FieldPermissionScope> },
-): Record<string, MultitableFieldPermission> {
-  const hiddenFieldIds = new Set(opts?.hiddenFieldIds ?? [])
-  const readOnly = opts?.allowCreateOnly ? !capabilities.canCreateRecord : !capabilities.canEditRecord
-  const fieldScopeMap = opts?.fieldScopeMap
-  return Object.fromEntries(
-    fields.map((field) => {
-      const baseVisible = !hiddenFieldIds.has(field.id) && !isFieldPermissionHidden(field)
-      const baseReadOnly = readOnly || isFieldAlwaysReadOnly(field)
-      const scope = fieldScopeMap?.get(field.id)
-      return [
-        field.id,
-        {
-          visible: baseVisible && (scope?.visible ?? true),
-          readOnly: baseReadOnly || (scope?.readOnly ?? false),
-        },
-      ]
-    }),
-  )
-}
-
-function isFieldAlwaysReadOnly(field: Pick<UniverMetaField, 'type' | 'property'>): boolean {
-  if (field.type === 'formula' || field.type === 'lookup' || field.type === 'rollup') return true
-  const property = field.property ?? {}
-  return property.readonly === true || property.readOnly === true
-}
-
-function isFieldPermissionHidden(field: Pick<UniverMetaField, 'property'>): boolean {
-  const property = normalizeJson(field.property)
-  return property.hidden === true || property.visible === false
-}
-
-function deriveViewPermissions(
-  views: Array<Pick<UniverMetaViewConfig, 'id'>>,
-  capabilities: MultitableCapabilities,
-  viewScopeMap?: Map<string, ViewPermissionScope>,
-): Record<string, MultitableViewPermission> {
-  return Object.fromEntries(
-    views.map((view) => {
-      const scope = viewScopeMap?.get(view.id)
-      if (scope?.hasAssignments) {
-        return [
-          view.id,
-          {
-            canAccess: capabilities.canRead && scope.canRead,
-            canConfigure: capabilities.canManageViews && scope.canWrite,
-            canDelete: capabilities.canManageViews && scope.canAdmin,
-          },
-        ]
-      }
-      return [
-        view.id,
-        {
-          canAccess: capabilities.canRead,
-          canConfigure: capabilities.canManageViews,
-          canDelete: capabilities.canManageViews,
-        },
-      ]
-    }),
-  )
 }
 
 function deriveRowActions(capabilities: MultitableCapabilities): MultitableRowActions {

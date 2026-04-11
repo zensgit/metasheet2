@@ -41,13 +41,13 @@ export type FieldLike = {
   property?: Record<string, unknown>
 }
 
-function isFieldAlwaysReadOnly(field: Pick<FieldLike, 'type' | 'property'>): boolean {
+export function isFieldAlwaysReadOnly(field: Pick<FieldLike, 'type' | 'property'>): boolean {
   if (field.type === 'formula' || field.type === 'lookup' || field.type === 'rollup') return true
   const property = field.property ?? {}
   return property.readonly === true || property.readOnly === true
 }
 
-function isFieldPermissionHidden(field: Pick<FieldLike, 'property'>): boolean {
+export function isFieldPermissionHidden(field: Pick<FieldLike, 'property'>): boolean {
   const property = field.property ?? {}
   if (property.hidden === true) return true
   if (typeof property.visible === 'boolean' && !property.visible) return true

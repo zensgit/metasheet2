@@ -85,8 +85,28 @@ const views = [
 ]
 
 function createWorkbenchMock() {
-  const listFieldPermissionsFn = vi.fn().mockResolvedValue({ items: [] })
-  const listViewPermissionsFn = vi.fn().mockResolvedValue({ items: [] })
+  const listFieldPermissionsFn = vi.fn().mockResolvedValue({
+    items: [
+      {
+        fieldId: 'fld_2',
+        subjectType: 'user',
+        subjectId: 'user_2',
+        subjectLabel: 'Bob',
+        visible: false,
+        readOnly: false,
+      },
+    ],
+  })
+  const listViewPermissionsFn = vi.fn().mockResolvedValue({
+    items: [
+      {
+        viewId: 'view_1',
+        subjectType: 'user',
+        subjectId: 'user_2',
+        permission: 'read',
+      },
+    ],
+  })
   return {
     activeBaseId: ref('base_1'),
     activeSheetId: ref('sheet_1'),
@@ -213,5 +233,24 @@ describe('MultitableWorkbench -> MetaSheetPermissionManager wiring', () => {
 
     // Verify client API was called to load permission entries
     expect(workbenchMock.listFieldPermissionsFn).toHaveBeenCalledWith('sheet_1')
+    expect(workbenchMock.listViewPermissionsFn).toHaveBeenCalledWith('view_1')
+
+    const fieldTab = tabs.find((t) => t.textContent?.includes('Field Permissions')) as HTMLElement
+    fieldTab.click()
+    await flushUi()
+
+    const fieldRow = container!.querySelector('[data-field-permission-row="fld_2:user:user_2"]')
+    expect(fieldRow).toBeTruthy()
+    expect(fieldRow?.textContent).toContain('Bob')
+    expect(fieldRow?.textContent).toContain('Hidden')
+
+    const viewTab = tabs.find((t) => t.textContent?.includes('View Permissions')) as HTMLElement
+    viewTab.click()
+    await flushUi()
+
+    const viewRow = container!.querySelector('[data-view-permission-row="view_1:user:user_2"]')
+    expect(viewRow).toBeTruthy()
+    expect(viewRow?.textContent).toContain('Bob')
+    expect(viewRow?.textContent).toContain('Read')
   })
 })
