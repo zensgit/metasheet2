@@ -11,10 +11,11 @@
  *
  *   1. The pact JSON exists and parses as Pact v3.
  *   2. The 6 Wave 1 P0 interactions plus the document-semantics Wave 2
- *      interactions plus the BOM-analysis / ECO-approval Wave 3 interactions
- *      plus the approval list/detail / BOM-substitute Wave 4 interactions
- *      plus the CAD review/workspace Wave 5 interactions that PLMAdapter
- *      currently calls are present, in the documented order.
+ *      interactions plus the release-readiness governance interaction plus
+ *      the BOM-analysis / ECO-approval Wave 3 interactions plus the approval
+ *      list/detail / BOM-substitute Wave 4 interactions plus the CAD
+ *      review/workspace Wave 5 interactions that PLMAdapter currently calls
+ *      are present, in the documented order.
  *      (codex's plan also lists `aml/metadata`, but PLMAdapter does not yet
  *      call it; deferred until there is a real consumer call site.)
  *   3. The PLMAdapter actually calls every endpoint declared in the pact, so
@@ -92,6 +93,7 @@ const PACT_PATHS = [
   { method: 'GET', path: '/api/v1/file/item/01H000000000000000000000P1' },
   { method: 'GET', path: '/api/v1/file/01H000000000000000000000F1' },
   { method: 'POST', path: '/api/v1/aml/query' },
+  { method: 'GET', path: '/api/v1/release-readiness/items/01H000000000000000000000P1' },
   { method: 'GET', path: '/api/v1/bom/01H000000000000000000000P2/where-used' },
   { method: 'GET', path: '/api/v1/bom/compare/schema' },
   { method: 'GET', path: '/api/v1/eco/01H000000000000000000000E1/approvals' },
@@ -122,7 +124,7 @@ function loadAdapter(): string {
   return readFileSync(ADAPTER_PATH, 'utf8')
 }
 
-describe('Pact: Metasheet2 consumer -> YuantusPLM provider (Wave 1 + Wave 2 document semantics + Wave 3 BOM/approval + Wave 4 approval list/detail/substitutes + Wave 5 CAD)', () => {
+describe('Pact: Metasheet2 consumer -> YuantusPLM provider (Wave 1 + Wave 2 document semantics + release readiness + Wave 3 BOM/approval + Wave 4 approval list/detail/substitutes + Wave 5 CAD)', () => {
   it('pact JSON exists, parses as Pact v3, and names the right consumer/provider', () => {
     const pact = loadPact()
     expect(pact.consumer.name).toBe('Metasheet2')
@@ -165,6 +167,7 @@ describe('Pact: Metasheet2 consumer -> YuantusPLM provider (Wave 1 + Wave 2 docu
       '/api/v1/bom/compare/schema',
       '/api/v1/file/item/',
       '/api/v1/aml/query',
+      '/api/v1/release-readiness/items/${itemId}',
       '/api/v1/eco',
       '/api/v1/eco/${approvalId}',
       '/api/v1/eco/${approvalId}/approvals',
@@ -241,6 +244,31 @@ describe('Pact: Metasheet2 consumer -> YuantusPLM provider (Wave 1 + Wave 2 docu
     expect(body.where).toEqual({ id: '01H000000000000000000000P1' })
     expect(body.expand).toEqual(['Document Part'])
     expect(body.page_size).toBe(1)
+  })
+
+  it('release-readiness interaction locks the governance drilldown envelope used by federation', () => {
+    const pact = loadPact()
+    const readiness = pact.interactions.find(
+      i => i.request.path === '/api/v1/release-readiness/items/01H000000000000000000000P1',
+    )
+
+    expect(readiness).toBeDefined()
+    expect(readiness!.request.query).toEqual({
+      ruleset_id: ['gate-a'],
+      mbom_limit: ['10'],
+      routing_limit: ['12'],
+      baseline_limit: ['8'],
+    })
+    expect(readiness!.response.body).toMatchObject({
+      item_id: '01H000000000000000000000P1',
+      ruleset_id: 'gate-a',
+      summary: {
+        ok: expect.any(Boolean),
+        resources: expect.any(Number),
+        error_count: expect.any(Number),
+      },
+      resources: expect.any(Array),
+    })
   })
 
   it('where-used and compare-schema interactions lock the BOM analysis surfaces consumed on mainline', () => {

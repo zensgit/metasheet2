@@ -20,10 +20,11 @@ when running in `apiMode='yuantus'`. Without a contract test, any field
 rename on the Yuantus side would silently break Metasheet at runtime.
 
 This Pact set freezes the **shape** (not the values) of the 6 Wave 1 P0
-endpoints plus the 3 document-semantics endpoints, the 5 BOM-analysis /
-ECO-approval endpoints, and the 5 approval-detail / BOM-substitute endpoints,
-while Wave 5 adds the 9 CAD properties / review / diff endpoints as exact
-fixture examples that `PLMAdapter.ts` currently calls for `apiMode='yuantus'`.
+endpoints plus the 3 document-semantics endpoints, the release-readiness
+governance endpoint, the 5 BOM-analysis / ECO-approval endpoints, and the 5
+approval-detail / BOM-substitute endpoints, while Wave 5 adds the 9 CAD
+properties / review / diff endpoints as exact fixture examples that
+`PLMAdapter.ts` currently calls for `apiMode='yuantus'`.
 (Codex's PACT_FIRST plan lists 7 endpoints in Wave 1 — see "Discrepancy
 with codex plan" below.)
 
@@ -39,7 +40,7 @@ because adding that npm dependency requires explicit approval.
 The `plm-adapter-yuantus.pact.test.ts` vitest test guards six things:
 
 1. The pact JSON exists and parses as Pact v3.
-2. It contains the 28 currently used interactions in the documented order.
+2. It contains the 29 currently used interactions in the documented order.
 3. Every endpoint named in the pact is also referenced by the live
    `packages/core-backend/src/data-adapters/PLMAdapter.ts` source — so the
    pact cannot drift away from what the adapter actually calls.
@@ -47,7 +48,9 @@ The `plm-adapter-yuantus.pact.test.ts` vitest test guards six things:
    `bom compare schema`, `approval history`, `approve`, and `reject`.
 5. The Wave 4 additions lock the exact envelope for approval list/detail and
    BOM substitute list/add/remove.
-6. The Wave 5 additions lock the exact envelope for CAD properties, CAD view
+6. The release-readiness addition locks the exact envelope for
+   `GET /api/v1/release-readiness/items/{id}`.
+7. The Wave 5 additions lock the exact envelope for CAD properties, CAD view
    state, CAD review, CAD history, CAD diff, and CAD mesh stats.
 
 ## Discrepancy with codex's PACT_FIRST plan
@@ -103,7 +106,7 @@ cd /Users/huazhou/Downloads/Github/Yuantus
 
 ### Current verifier handoff state (2026-04-11)
 
-The consumer artifact now contains all 28 Wave 1-5 interactions. To verify
+The consumer artifact now contains all 29 Wave 1-5 interactions. To verify
 Yuantus against the current artifact, copy this JSON into the Yuantus repo and
 rerun the provider verifier there.
 

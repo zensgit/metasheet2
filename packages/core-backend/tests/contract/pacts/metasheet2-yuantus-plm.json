@@ -9,7 +9,7 @@
     "pactSpecification": {
       "version": "3.0.0"
     },
-    "claudeNote": "Hand-authored Wave 1 plus document-semantics Wave 2 contract per docs/PACT_FIRST_INTEGRATION_PLAN_20260407.md. Match-by-type, not match-by-value. Replace with @pact-foundation/pact generated artifact when that dep is approved. NOTE: codex's plan also listed GET /api/v1/aml/metadata/{type} in Wave 1, but PLMAdapter.ts does not currently call it; contract-first principle says we lock what is actually called. Wave 2 adds the real document semantics calls already used by PLMAdapter.getProductDocuments in yuantus mode: GET /api/v1/file/item/{item_id}, GET /api/v1/file/{file_id}, and POST /api/v1/aml/query with expand ['Document Part']. Wave 3 adds where-used, BOM compare schema, and ECO approval-history/action interactions. Wave 4 adds the real approval list/detail and BOM substitute calls already used by mainline getApprovals/getApprovalById/getBomSubstitutes/addBomSubstitute/removeBomSubstitute. Wave 5 adds the nine CAD endpoints already called on main: CAD properties, CAD view state, CAD review, CAD history, CAD diff, and CAD mesh stats."
+    "claudeNote": "Hand-authored Wave 1 plus document-semantics Wave 2 contract per docs/PACT_FIRST_INTEGRATION_PLAN_20260407.md. Match-by-type, not match-by-value. Replace with @pact-foundation/pact generated artifact when that dep is approved. NOTE: codex's plan also listed GET /api/v1/aml/metadata/{type} in Wave 1, but PLMAdapter.ts does not currently call it; contract-first principle says we lock what is actually called. Wave 2 adds the real document semantics calls already used by PLMAdapter.getProductDocuments in yuantus mode: GET /api/v1/file/item/{item_id}, GET /api/v1/file/{file_id}, and POST /api/v1/aml/query with expand ['Document Part']. Wave 3 adds where-used, BOM compare schema, and ECO approval-history/action interactions. Wave 4 adds the real approval list/detail and BOM substitute calls already used by mainline getApprovals/getApprovalById/getBomSubstitutes/addBomSubstitute/removeBomSubstitute. Wave 5 adds the nine CAD endpoints already called on main: CAD properties, CAD view state, CAD review, CAD history, CAD diff, and CAD mesh stats. Release-readiness adds the governance drilldown endpoint already called on main: GET /api/v1/release-readiness/items/{item_id}."
   },
   "interactions": [
     {
@@ -1449,6 +1449,153 @@
               ]
             },
             "$.has_more": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "description": "load release readiness diagnostics for a governed Part",
+      "providerStates": [
+        {
+          "name": "an admin user can load release readiness for item 01H000000000000000000000P1"
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "path": "/api/v1/release-readiness/items/01H000000000000000000000P1",
+        "query": {
+          "ruleset_id": [
+            "gate-a"
+          ],
+          "mbom_limit": [
+            "10"
+          ],
+          "routing_limit": [
+            "12"
+          ],
+          "baseline_limit": [
+            "8"
+          ]
+        },
+        "headers": {
+          "Authorization": "Bearer eyJhbGciOiJIUzI1NiJ9.example"
+        },
+        "matchingRules": {
+          "header": {
+            "$.Authorization": {
+              "matchers": [
+                {
+                  "match": "regex",
+                  "regex": "^Bearer .+"
+                }
+              ]
+            }
+          }
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": {
+          "item_id": "01H000000000000000000000P1",
+          "generated_at": "2026-04-11T00:00:00.000000Z",
+          "ruleset_id": "gate-a",
+          "summary": {
+            "ok": true,
+            "resources": 0,
+            "ok_resources": 0,
+            "error_count": 0,
+            "warning_count": 0,
+            "by_kind": {}
+          },
+          "resources": [],
+          "esign_manifest": null
+        },
+        "matchingRules": {
+          "body": {
+            "$.item_id": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.generated_at": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.ruleset_id": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.summary.ok": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.summary.resources": {
+              "matchers": [
+                {
+                  "match": "integer",
+                  "min": 0
+                }
+              ]
+            },
+            "$.summary.ok_resources": {
+              "matchers": [
+                {
+                  "match": "integer",
+                  "min": 0
+                }
+              ]
+            },
+            "$.summary.error_count": {
+              "matchers": [
+                {
+                  "match": "integer",
+                  "min": 0
+                }
+              ]
+            },
+            "$.summary.warning_count": {
+              "matchers": [
+                {
+                  "match": "integer",
+                  "min": 0
+                }
+              ]
+            },
+            "$.summary.by_kind": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.resources": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.esign_manifest": {
               "matchers": [
                 {
                   "match": "type"

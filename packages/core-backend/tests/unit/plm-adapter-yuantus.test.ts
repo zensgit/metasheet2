@@ -11,6 +11,32 @@ const createAdapter = () => {
   return adapter
 }
 
+describe('PLMAdapter runtime status', () => {
+  it('advertises release readiness in yuantus mode', () => {
+    const adapter = createAdapter()
+
+    expect(adapter.getRuntimeStatus()).toMatchObject({
+      implementation: 'real',
+      healthSupported: true,
+    })
+    expect(adapter.getRuntimeStatus().supportedOperations).toContain('release_readiness')
+    expect(adapter.getRuntimeStatus().supportedOperations).toContain('approval_history')
+  })
+
+  it('hides yuantus-only capabilities in legacy mode', () => {
+    const adapter = createAdapter()
+    ;(adapter as any).apiMode = 'legacy'
+
+    expect(adapter.getRuntimeStatus().supportedOperations).toEqual(
+      expect.arrayContaining(['products', 'bom', 'documents', 'approvals'])
+    )
+    expect(adapter.getRuntimeStatus().supportedOperations).not.toContain('release_readiness')
+    expect(adapter.getRuntimeStatus().supportedOperations).not.toContain('approval_history')
+    expect(adapter.getRuntimeStatus().supportedOperations).not.toContain('where_used')
+    expect(adapter.getRuntimeStatus().supportedOperations).not.toContain('cad_properties')
+  })
+})
+
 describe('PLMAdapter Yuantus product detail mapping', () => {
   it('merges search hit timestamps when AML detail lacks them', async () => {
     const adapter = createAdapter()
@@ -828,6 +854,97 @@ describe('PLMAdapter Yuantus CAD routes', () => {
       reviewed_by_id: 1,
     })
   })
+})
+
+describe('PLMAdapter Yuantus release readiness mapping', () => {
+  it('maps release readiness summary/resources and adds canonical links', async () => {
+    const adapter = createAdapter()
+    const queryMock = vi.fn().mockResolvedValue({
+      data: [{
+        item_id: 'item-rr-1',
+        generated_at: '2026-04-11T00:00:00.000Z',
+        ruleset_id: 'gate-a',
+        summary: {
+          ok: false,
+          resources: 3,
+          ok_resources: 2,
+          error_count: 1,
+          warning_count: 1,
+          by_kind: {
+            mbom: {
+              resources: 1,
+              ok_resources: 0,
+              error_count: 1,
+              warning_count: 0,
+            },
+          },
+        },
+        resources: [{
+          kind: 'mbom',
+          name: 'MBOM Alignment',
+          state: 'warning',
+          diagnostics: {
+            ok: false,
+            resource_type: 'mbom',
+            resource_id: 'mbom-1',
+            ruleset_id: 'gate-a',
+            errors: [{ code: 'MBOM_MISSING', message: 'MBOM baseline missing', severity: 'error' }],
+            warnings: [{ code: 'ALT_ROUTE', message: 'Alternate route incomplete', severity: 'warning' }],
+          },
+        }],
+        esign_manifest: { pending: 1 },
+      }],
+    })
+
+    ;(adapter as any).query = queryMock
+
+    const result = await adapter.getReleaseReadiness('item-rr-1', {
+      rulesetId: 'gate-a',
+      mbomLimit: 10,
+      routingLimit: 12,
+      baselineLimit: 8,
+    })
+
+    expect(queryMock).toHaveBeenCalledWith('/api/v1/release-readiness/items/item-rr-1', [
+      {
+        ruleset_id: 'gate-a',
+        mbom_limit: 10,
+        routing_limit: 12,
+        baseline_limit: 8,
+      },
+    ])
+    expect(result.data).toHaveLength(1)
+    expect(result.data[0]).toMatchObject({
+      item_id: 'item-rr-1',
+      ruleset_id: 'gate-a',
+      summary: {
+        ok: false,
+        error_count: 1,
+        by_kind: {
+          mbom: {
+            resources: 1,
+            error_count: 1,
+          },
+        },
+      },
+      resources: [
+        expect.objectContaining({
+          kind: 'mbom',
+          diagnostics: expect.objectContaining({
+            resource_type: 'mbom',
+            resource_id: 'mbom-1',
+            ruleset_id: 'gate-a',
+          }),
+        }),
+      ],
+      links: {
+        summary: '/api/v1/release-readiness/items/item-rr-1?ruleset_id=gate-a',
+        export: '/api/v1/release-readiness/items/item-rr-1/export?export_format=zip&ruleset_id=gate-a',
+      },
+      esign_manifest: { pending: 1 },
+    })
+  })
+
 })
 
 describe('PLMAdapter Yuantus documents single-side failure + sources metadata', () => {
