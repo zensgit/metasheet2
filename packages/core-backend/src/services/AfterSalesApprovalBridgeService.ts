@@ -410,26 +410,36 @@ export class AfterSalesApprovalBridgeService {
       )
 
       for (const [index, role] of (command.assignmentRoles || DEFAULT_ASSIGNMENT_ROLES).entries()) {
-        await trx.query(
-          `INSERT INTO approval_assignments
-           (instance_id, assignment_type, assignee_id, source_step, is_active, metadata)
-           VALUES ($1, 'role', $2, $3, TRUE, $4::jsonb)
-           ON CONFLICT (instance_id, assignment_type, assignee_id)
-           WHERE is_active = TRUE
-           DO UPDATE SET
-             source_step = EXCLUDED.source_step,
-             is_active = TRUE,
-             metadata = EXCLUDED.metadata,
-             updated_at = now()`,
+        const metadata = JSON.stringify({
+          sourceSystem: command.sourceSystem,
+          workflowKey: REFUND_WORKFLOW_KEY,
+        })
+
+        const updated = await trx.query(
+          `UPDATE approval_assignments
+           SET source_step = $3,
+               is_active = TRUE,
+               metadata = $4::jsonb,
+               updated_at = now()
+           WHERE instance_id = $1
+             AND assignment_type = 'role'
+             AND assignee_id = $2
+             AND is_active = TRUE`,
           [
             approvalId,
             role,
             index + 1,
-            JSON.stringify({
-              sourceSystem: command.sourceSystem,
-              workflowKey: REFUND_WORKFLOW_KEY,
-            }),
+            metadata,
           ],
+        )
+
+        if ((updated.rowCount ?? 0) > 0) continue
+
+        await trx.query(
+          `INSERT INTO approval_assignments
+           (instance_id, assignment_type, assignee_id, source_step, is_active, metadata)
+           VALUES ($1, 'role', $2, $3, TRUE, $4::jsonb)`,
+          [approvalId, role, index + 1, metadata],
         )
       }
     })

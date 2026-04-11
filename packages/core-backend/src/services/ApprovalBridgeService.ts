@@ -704,23 +704,37 @@ export class ApprovalBridgeService {
         ],
       )
 
-      await client.query(
-        `INSERT INTO approval_assignments
-         (instance_id, assignment_type, assignee_id, source_step, is_active, metadata)
-         VALUES ($1, 'source_queue', 'plm:source-owned', 0, $2, $3)
-         ON CONFLICT (instance_id, assignment_type, assignee_id)
-         WHERE is_active = TRUE
-         DO UPDATE SET
-           source_step = EXCLUDED.source_step,
-           is_active = EXCLUDED.is_active,
-           metadata = EXCLUDED.metadata,
-           updated_at = now()`,
+      const assignmentMetadata = JSON.stringify({ sourceSystem: 'plm' })
+
+      const activeAssignmentUpdated = await client.query(
+        `UPDATE approval_assignments
+         SET source_step = 0,
+             is_active = $2,
+             metadata = $3::jsonb,
+             updated_at = now()
+         WHERE instance_id = $1
+           AND assignment_type = 'source_queue'
+           AND assignee_id = 'plm:source-owned'
+           AND is_active = TRUE`,
         [
           instanceId,
           bridge.status === 'pending',
-          JSON.stringify({ sourceSystem: 'plm' }),
+          assignmentMetadata,
         ],
       )
+
+      if ((activeAssignmentUpdated.rowCount ?? 0) === 0) {
+        await client.query(
+          `INSERT INTO approval_assignments
+           (instance_id, assignment_type, assignee_id, source_step, is_active, metadata)
+           VALUES ($1, 'source_queue', 'plm:source-owned', 0, $2, $3::jsonb)`,
+          [
+            instanceId,
+            bridge.status === 'pending',
+            assignmentMetadata,
+          ],
+        )
+      }
 
       await client.query('COMMIT')
     } catch (error) {
