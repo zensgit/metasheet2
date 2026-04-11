@@ -14,6 +14,7 @@ import { pool } from '../db/pg'
 import { authenticate } from '../middleware/auth'
 import { REFUND_WORKFLOW_KEY, type AfterSalesApprovalBridgeService } from '../services/AfterSalesApprovalBridgeService'
 import { ApprovalBridgeService, ServiceError } from '../services/ApprovalBridgeService'
+import { ApprovalProductService, resolveApprovalListPaging } from '../services/ApprovalProductService'
 import {
   APPROVAL_ERROR_CODES,
   type ApprovalBridgePlmAdapter,
@@ -88,6 +89,12 @@ function resolveApprovalActorName(req: Request, fallbackId: string): string {
   return normalized.length > 0 ? normalized : fallbackId
 }
 
+function resolveApprovalActorRoles(req: Request): string[] {
+  return Array.isArray(req.user?.roles)
+    ? req.user!.roles.filter((role): role is string => typeof role === 'string' && role.trim().length > 0)
+    : []
+}
+
 function approvalVersionConflictResponse(currentVersion: number) {
   return {
     ok: false,
@@ -133,6 +140,10 @@ function getBridgeService(options?: ApprovalRouterOptions): ApprovalBridgeServic
   return new ApprovalBridgeService(resolvePlmAdapter(options))
 }
 
+function getProductService(): ApprovalProductService {
+  return new ApprovalProductService()
+}
+
 function handleApprovalsError(
   res: Response,
   error: unknown,
@@ -159,6 +170,68 @@ function handleApprovalsError(
 
 export function approvalsRouter(options?: ApprovalRouterOptions): Router {
   const r = Router()
+  const productService = getProductService()
+
+  r.get('/api/approval-templates', authenticate, async (req: Request, res: Response) => {
+    try {
+      const page = parsePaging(req.query.page, 1, Number.MAX_SAFE_INTEGER)
+      const pageSize = parsePaging(req.query.pageSize, 20)
+      const { limit, offset } = resolveApprovalListPaging(page, pageSize)
+      const result = await productService.listTemplates({
+        status: typeof req.query.status === 'string' ? req.query.status : undefined,
+        search: typeof req.query.search === 'string' ? req.query.search : undefined,
+        limit,
+        offset,
+      })
+
+      res.json(result)
+    } catch (error) {
+      handleApprovalsError(
+        res,
+        error,
+        'APPROVAL_TEMPLATE_LIST_FAILED',
+        'Failed to list approval templates',
+      )
+    }
+  })
+
+  r.get('/api/approval-templates/:id', authenticate, async (req: Request, res: Response) => {
+    try {
+      const template = await productService.getTemplate(req.params.id)
+      if (!template) {
+        return res.status(404).json(
+          approvalErrorResponse('APPROVAL_TEMPLATE_NOT_FOUND', 'Approval template not found'),
+        )
+      }
+      res.json(template)
+    } catch (error) {
+      handleApprovalsError(
+        res,
+        error,
+        'APPROVAL_TEMPLATE_FETCH_FAILED',
+        'Failed to fetch approval template',
+      )
+    }
+  })
+
+  r.get('/api/approval-templates/:id/versions/:versionId', authenticate, async (req: Request, res: Response) => {
+    try {
+      const version = await productService.getTemplateVersion(req.params.id, req.params.versionId)
+      if (!version) {
+        return res.status(404).json(
+          approvalErrorResponse('APPROVAL_TEMPLATE_VERSION_NOT_FOUND', 'Approval template version not found'),
+        )
+      }
+      res.json(version)
+    } catch (error) {
+      handleApprovalsError(
+        res,
+        error,
+        'APPROVAL_TEMPLATE_VERSION_FETCH_FAILED',
+        'Failed to fetch approval template version',
+      )
+    }
+  })
 
   r.get('/api/approvals', authenticate, async (req: Request, res: Response) => {
     try {
@@ -173,8 +246,18 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
       const workflowKey = typeof req.query.workflowKey === 'string' ? req.query.workflowKey : undefined
       const businessKey = typeof req.query.businessKey === 'string' ? req.query.businessKey : undefined
       const assignee = typeof req.query.assignee === 'string' ? req.query.assignee : undefined
-      const limit = parsePaging(req.query.limit, 50)
-      const offset = parsePaging(req.query.offset, 0, Number.MAX_SAFE_INTEGER)
+      const tab = typeof req.query.tab === 'string' ? req.query.tab as 'pending' | 'mine' | 'cc' | 'completed' : undefined
+      const search = typeof req.query.search === 'string' ? req.query.search : undefined
+      const page = parsePaging(req.query.page, 1, Number.MAX_SAFE_INTEGER)
+      const pageSize = parsePaging(req.query.pageSize, 20)
+      const { limit, offset } = req.query.page || req.query.pageSize
+        ? resolveApprovalListPaging(page, pageSize)
+        : {
+            limit: parsePaging(req.query.limit, 50),
+            offset: parsePaging(req.query.offset, 0, Number.MAX_SAFE_INTEGER),
+          }
+      const actorId = resolveApprovalActorId(req)
+      const actorRoles = resolveApprovalActorRoles(req)
 
       if (sourceSystem === 'plm' && assignee) {
         return res.status(400).json({
@@ -201,11 +284,15 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
       }
 
       const result = await bridgeService.listApprovals({
-        sourceSystem,
+        sourceSystem: sourceSystem ?? (tab ? 'platform' : undefined),
         status,
         workflowKey,
         businessKey,
         assignee,
+        search,
+        tab,
+        actorId: actorId || undefined,
+        actorRoles,
         limit,
         offset,
       })
@@ -255,6 +342,55 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
         error,
         'PLM_APPROVAL_SYNC_FAILED',
         'Failed to sync PLM approvals',
+      )
+    }
+  })
+
+  r.post('/api/approvals', authenticate, async (req: Request, res: Response) => {
+    try {
+      const userId = resolveApprovalActorId(req)
+      if (!userId) {
+        return res.status(401).json(
+          approvalErrorResponse('APPROVAL_USER_REQUIRED', 'User ID not found in token'),
+        )
+      }
+
+      const templateId = typeof req.body?.templateId === 'string' ? req.body.templateId.trim() : ''
+      const formData =
+        req.body?.formData && typeof req.body.formData === 'object' && !Array.isArray(req.body.formData)
+          ? req.body.formData as Record<string, unknown>
+          : null
+
+      if (!templateId || !formData) {
+        return res.status(400).json({
+          error: {
+            code: 'VALIDATION_ERROR',
+            message: 'templateId and formData are required',
+          },
+        })
+      }
+
+      const approval = await productService.createApproval(
+        { templateId, formData },
+        {
+          userId,
+          userName: resolveApprovalActorName(req, userId),
+          email: typeof req.user?.email === 'string' ? req.user.email : undefined,
+          department: typeof req.user?.department === 'string' ? req.user.department : undefined,
+          roles: resolveApprovalActorRoles(req),
+          permissions: Array.isArray(req.user?.permissions)
+            ? req.user!.permissions.filter((permission): permission is string => typeof permission === 'string')
+            : undefined,
+        },
+      )
+
+      res.status(201).json(approval)
+    } catch (error) {
+      handleApprovalsError(
+        res,
+        error,
+        'APPROVAL_CREATE_FAILED',
+        'Failed to create approval request',
       )
     }
   })
@@ -330,19 +466,21 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
       }
 
       const action = req.body?.action
-      if (action !== 'approve' && action !== 'reject') {
+      if (!['approve', 'reject', 'transfer', 'revoke', 'comment'].includes(String(action))) {
         return res.status(400).json({
           error: {
             code: 'VALIDATION_ERROR',
-            message: 'action must be approve or reject',
+            message: 'action must be approve, reject, transfer, revoke, or comment',
           },
         })
       }
 
       const comment = typeof req.body?.comment === 'string' ? req.body.comment : undefined
+      const targetUserId = typeof req.body?.targetUserId === 'string' ? req.body.targetUserId.trim() : undefined
       const actor = {
         userId,
         userName: resolveApprovalActorName(req, userId),
+        roles: resolveApprovalActorRoles(req),
         ip: req.ip || null,
         userAgent: req.get('user-agent') || null,
       }
@@ -358,6 +496,14 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
           existingAfterSales.sourceSystem === 'after-sales' &&
           existingAfterSales.workflowKey === REFUND_WORKFLOW_KEY
         ) {
+          if (action !== 'approve' && action !== 'reject') {
+            return res.status(400).json({
+              error: {
+                code: 'VALIDATION_ERROR',
+                message: 'after-sales approvals only support approve or reject',
+              },
+            })
+          }
           const result = await afterSalesBridge.submitRefundApprovalDecision({
             approvalId: req.params.id,
             action,
@@ -372,14 +518,38 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
       }
 
       if (!approval) {
-        approval = await bridgeService.dispatchAction(
-          req.params.id,
-          {
-            action,
-            comment,
-          },
-          actor,
-        )
+        const templateRuntimeInstance = isPlmApprovalId(req.params.id)
+          ? false
+          : await productService.isTemplateRuntimeInstance(req.params.id)
+        if (templateRuntimeInstance) {
+          approval = await productService.dispatchAction(
+            req.params.id,
+            {
+              action,
+              comment,
+              targetUserId,
+            },
+            actor,
+          )
+        } else {
+          if (action !== 'approve' && action !== 'reject') {
+            return res.status(400).json({
+              error: {
+                code: 'VALIDATION_ERROR',
+                message: 'legacy approvals only support approve or reject',
+              },
+            })
+          }
+          approval = await bridgeService.dispatchAction(
+            req.params.id,
+            {
+              action,
+              comment,
+              targetUserId,
+            },
+            actor,
+          )
+        }
       }
 
       res.json(approval)

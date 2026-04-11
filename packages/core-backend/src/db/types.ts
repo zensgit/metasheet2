@@ -940,7 +940,7 @@ export interface ApprovalInstancesTable {
 export interface ApprovalRecordsTable {
   id: Generated<number>
   instance_id: string
-  action: 'approve' | 'reject' | 'return' | 'revoke' | 'transfer' | 'sign' | 'comment' | 'cc'
+  action: 'created' | 'approve' | 'reject' | 'return' | 'revoke' | 'transfer' | 'sign' | 'comment' | 'cc'
   actor_id: string
   actor_name: string | null
   comment: string | null
