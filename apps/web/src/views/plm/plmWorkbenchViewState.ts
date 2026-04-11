@@ -182,6 +182,28 @@ export function shouldAutoloadPlmProductContext(options: {
   return hasProductAdjacentPanelSelected(selectedPanels)
 }
 
+export function buildPlmProductContextRoutePatch(options: {
+  panel?: unknown
+  productId?: unknown
+  itemNumber?: unknown
+  itemType?: unknown
+}): Record<string, string | boolean | undefined> {
+  const productId = normalizeQueryValue(options.productId)
+  const itemNumber = normalizeQueryValue(options.itemNumber)
+  const itemType = normalizeQueryValue(options.itemType)
+
+  return {
+    productId: productId || undefined,
+    itemNumber: itemNumber || undefined,
+    itemType: itemType || undefined,
+    autoload: shouldAutoloadPlmProductContext({
+      panel: options.panel,
+      productId,
+      itemNumber,
+    }) ? true : undefined,
+  }
+}
+
 export function shouldAutoloadPlmWorkbenchSnapshot(snapshot: Record<string, string>): boolean {
   if (normalizeQueryValue(snapshot.searchQuery)) {
     return true

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  buildPlmProductContextRoutePatch,
   buildPlmWorkbenchLegacyLocalDraftQueryPatch,
   buildPlmWorkbenchResetHydratedPanelQueryPatch,
   buildPlmWorkbenchResetOwnerQueryPatch,
@@ -107,6 +108,35 @@ describe('plmWorkbenchViewState', () => {
         },
       ),
     ).toBe(true)
+  })
+
+  it('adds autoload to manual product route patches when product context should hydrate', () => {
+    expect(
+      buildPlmProductContextRoutePatch({
+        productId: 'prod-100',
+        itemNumber: 'P-100',
+        itemType: 'Part',
+      }),
+    ).toEqual({
+      productId: 'prod-100',
+      itemNumber: 'P-100',
+      itemType: 'Part',
+      autoload: true,
+    })
+
+    expect(
+      buildPlmProductContextRoutePatch({
+        panel: 'cad',
+        productId: 'prod-100',
+        itemNumber: 'P-100',
+        itemType: 'Part',
+      }),
+    ).toEqual({
+      productId: 'prod-100',
+      itemNumber: 'P-100',
+      itemType: 'Part',
+      autoload: undefined,
+    })
   })
 
   it('normalizes collaborative workbench snapshots without local preset ownership', () => {

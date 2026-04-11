@@ -109,6 +109,7 @@ import {
   WORKBENCH_SCENE_RECOMMENDATION_OPTIONS,
 } from './plm/plmWorkbenchSceneCatalog'
 import {
+  buildPlmProductContextRoutePatch,
   buildPlmWorkbenchLegacyLocalDraftQueryPatch,
   hasExplicitPlmBomTeamPresetAutoApplyQueryState,
   hasExplicitPlmApprovalsAutoApplyQueryState,
@@ -1672,7 +1673,12 @@ async function copyProductField(kind: ProductCopyKind) {
 async function loadProduct() {
   const resolvedId = productId.value || productItemNumber.value
   if (!resolvedId) return
-  syncQueryParams({ productId: productId.value, itemNumber: productItemNumber.value, itemType: itemType.value })
+  syncQueryParams(buildPlmProductContextRoutePatch({
+    panel: route.query.panel,
+    productId: productId.value,
+    itemNumber: productItemNumber.value,
+    itemType: itemType.value,
+  }))
   productLoading.value = true
   productError.value = ''
   productMetadata.value = null
@@ -1691,7 +1697,12 @@ async function loadProduct() {
     }
     if (result?.id && result.id !== productId.value) {
       productId.value = String(result.id)
-      syncQueryParams({ productId: productId.value })
+      syncQueryParams(buildPlmProductContextRoutePatch({
+        panel: route.query.panel,
+        productId: productId.value,
+        itemNumber: productItemNumber.value,
+        itemType: itemType.value,
+      }))
     }
     const resolvedItemType = (() => {
       const viewItemType = typeof productView.value.itemType === 'string'
