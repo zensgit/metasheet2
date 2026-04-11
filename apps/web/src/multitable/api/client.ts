@@ -38,6 +38,8 @@ import type {
   MetaSheetPermissionAccessLevel,
   MetaSheetPermissionCandidate,
   MetaSheetPermissionEntry,
+  MetaFieldPermissionEntry,
+  MetaViewPermissionEntry,
 } from '../types'
 import { apiFetch } from '../../utils/api'
 
@@ -436,6 +438,87 @@ export class MultitableApiClient {
         : accessLevel,
       entry: normalizeSheetPermissionEntry(data?.entry ?? null),
     }
+  }
+
+  // --- Field permissions ---
+  async listFieldPermissions(sheetId: string): Promise<{ items: MetaFieldPermissionEntry[] }> {
+    const res = await this.fetch(`/api/multitable/sheets/${encodeURIComponent(sheetId)}/field-permissions`)
+    const data = await parseJson<{ items?: Array<Partial<MetaFieldPermissionEntry>> }>(res)
+    return {
+      items: Array.isArray(data?.items)
+        ? data.items
+          .filter((item): item is MetaFieldPermissionEntry =>
+            typeof item?.fieldId === 'string' &&
+            (item?.subjectType === 'user' || item?.subjectType === 'role') &&
+            typeof item?.subjectId === 'string')
+          .map((item) => ({
+            fieldId: item.fieldId,
+            subjectType: item.subjectType,
+            subjectId: item.subjectId,
+            subjectLabel: typeof item.subjectLabel === 'string' ? item.subjectLabel : undefined,
+            visible: item.visible !== false,
+            readOnly: item.readOnly === true,
+          }))
+        : [],
+    }
+  }
+
+  async updateFieldPermission(
+    sheetId: string,
+    fieldId: string,
+    subjectType: 'user' | 'role',
+    subjectId: string,
+    perm: { visible: boolean; readOnly: boolean },
+  ): Promise<{ fieldId: string; subjectType: string; subjectId: string; visible: boolean; readOnly: boolean }> {
+    const res = await this.fetch(
+      `/api/multitable/sheets/${encodeURIComponent(sheetId)}/field-permissions/${encodeURIComponent(fieldId)}/${encodeURIComponent(subjectType)}/${encodeURIComponent(subjectId)}`,
+      {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(perm),
+      },
+    )
+    return parseJson(res)
+  }
+
+  // --- View permissions ---
+  async listViewPermissions(viewId: string): Promise<{ items: MetaViewPermissionEntry[] }> {
+    const res = await this.fetch(`/api/multitable/views/${encodeURIComponent(viewId)}/permissions`)
+    const data = await parseJson<{ items?: Array<Partial<MetaViewPermissionEntry>> }>(res)
+    return {
+      items: Array.isArray(data?.items)
+        ? data.items
+          .filter((item): item is MetaViewPermissionEntry =>
+            typeof item?.viewId === 'string' &&
+            (item?.subjectType === 'user' || item?.subjectType === 'role') &&
+            typeof item?.subjectId === 'string' &&
+            typeof item?.permission === 'string')
+          .map((item) => ({
+            viewId: item.viewId,
+            subjectType: item.subjectType,
+            subjectId: item.subjectId,
+            subjectLabel: typeof item.subjectLabel === 'string' ? item.subjectLabel : undefined,
+            permission: item.permission,
+          }))
+        : [],
+    }
+  }
+
+  async updateViewPermission(
+    viewId: string,
+    subjectType: 'user' | 'role',
+    subjectId: string,
+    permission: string,
+  ): Promise<{ viewId: string; subjectType: string; subjectId: string; permission: string }> {
+    const res = await this.fetch(
+      `/api/multitable/views/${encodeURIComponent(viewId)}/permissions/${encodeURIComponent(subjectType)}/${encodeURIComponent(subjectId)}`,
+      {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ permission }),
+      },
+    )
+    return parseJson(res)
   }
 
   // --- Fields ---

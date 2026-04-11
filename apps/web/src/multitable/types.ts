@@ -205,6 +205,23 @@ export interface MetaSheetPermissionCandidate {
   accessLevel?: MetaSheetPermissionAccessLevel | null
 }
 
+export interface MetaFieldPermissionEntry {
+  fieldId: string
+  subjectType: MetaSheetPermissionSubjectType
+  subjectId: string
+  subjectLabel?: string
+  visible: boolean
+  readOnly: boolean
+}
+
+export interface MetaViewPermissionEntry {
+  viewId: string
+  subjectType: MetaSheetPermissionSubjectType
+  subjectId: string
+  subjectLabel?: string
+  permission: string
+}
+
 // --- Comments ---
 export interface MetaCommentsScope {
   targetType: string
