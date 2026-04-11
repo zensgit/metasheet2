@@ -3310,6 +3310,9 @@ export function univerMetaRouter(): Router {
         return res.json({ ok: true, data: { items: [] } })
       }
 
+      const { capabilities } = await resolveSheetReadableCapabilities(req, query, peopleSheetId)
+      if (!capabilities.canRead) return sendForbidden(res)
+
       const summary = await loadRecordSummaries(query, peopleSheetId, { search: q, limit, offset: 0 })
       return res.json({ ok: true, data: { items: summary.records } })
     } catch (err) {

@@ -4,7 +4,7 @@ Generated: 2026-04-11
 
 ## Data Source
 
-All 7 views fetch data exclusively from `/api/multitable/view` (univer-meta.ts).
+All 6 view types (Grid, Form, Kanban, Gallery, Calendar, Timeline) plus the Record Drawer fetch data exclusively from `/api/multitable/view` and `/api/multitable/records/:recordId` (univer-meta.ts).
 No view uses `/api/views/:viewId/data` for multitable data.
 
 ## View Configuration Storage
@@ -58,4 +58,4 @@ unless the change also modifies the plugin view config providers.
 
 ## Conclusion
 
-Rendering consistency was achieved in Slice 1. No additional view rendering fixes are required for Slice 3.
+Rendering consistency was achieved in Slice 1 across all 6 view types and the Record Drawer. No additional view rendering fixes are required for Slice 3.
