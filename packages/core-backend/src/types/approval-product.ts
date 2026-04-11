@@ -189,6 +189,26 @@ export interface ApprovalTemplateDetailDTO extends ApprovalTemplateListItemDTO {
   approvalGraph: ApprovalGraph
 }
 
+export interface CreateApprovalTemplateRequest {
+  key: string
+  name: string
+  description?: string | null
+  formSchema: FormSchema
+  approvalGraph: ApprovalGraph
+}
+
+export interface UpdateApprovalTemplateRequest {
+  key?: string
+  name?: string
+  description?: string | null
+  formSchema?: FormSchema
+  approvalGraph?: ApprovalGraph
+}
+
+export interface PublishApprovalTemplateRequest {
+  policy: RuntimePolicy
+}
+
 export interface ApprovalTemplateVersionDetailDTO {
   id: string
   templateId: string

@@ -509,9 +509,12 @@ vi.mock('../../src/db/pg', () => ({
 vi.mock('../../src/middleware/auth', () => ({
   authenticate: (req: express.Request, _res: express.Response, next: express.NextFunction) => {
     req.user = {
+      id: 'test-user',
       sub: 'test-user',
       name: 'Test User',
       email: 'test@example.com',
+      permissions: ['*:*'],
+      roles: ['admin'],
     } as never
     next()
   },

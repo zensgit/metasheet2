@@ -125,11 +125,18 @@ function toUnifiedDTO(
     policy: row.policy_snapshot || null,
     currentStep: row.current_step,
     totalSteps: row.total_steps,
+    templateId: row.template_id,
+    templateVersionId: row.template_version_id,
+    publishedDefinitionId: row.published_definition_id,
+    requestNo: row.request_no,
+    formSnapshot: row.form_snapshot || null,
+    currentNodeKey: row.current_node_key,
     assignments: assignments.map((assignment) => ({
       id: assignment.id,
       type: assignment.assignment_type,
       assigneeId: assignment.assignee_id,
       sourceStep: assignment.source_step,
+      nodeKey: assignment.node_key,
       isActive: assignment.is_active,
       metadata: assignment.metadata || {},
     })),
@@ -242,6 +249,73 @@ export class ApprovalBridgeService {
         )`,
       )
       params.push(options.assignee)
+    }
+    if (options?.search) {
+      conditions.push(`(COALESCE(request_no, '') ILIKE $${paramIndex} OR COALESCE(title, '') ILIKE $${paramIndex})`)
+      params.push(`%${options.search}%`)
+      paramIndex += 1
+    }
+    if (options?.tab && options.actorId) {
+      const actorRoles = options.actorRoles && options.actorRoles.length > 0 ? options.actorRoles : ['__none__']
+      const actorIdParam = paramIndex++
+      params.push(options.actorId)
+      const actorRolesParam = paramIndex++
+      params.push(actorRoles)
+      conditions.push(`COALESCE(source_system, 'platform') = 'platform'`)
+
+      if (options.tab === 'pending') {
+        conditions.push(`status = 'pending'`)
+        conditions.push(
+          `id IN (
+            SELECT instance_id
+            FROM approval_assignments
+            WHERE is_active = TRUE
+              AND (
+                (assignment_type = 'user' AND assignee_id = $${actorIdParam})
+                OR (assignment_type = 'role' AND assignee_id = ANY($${actorRolesParam}))
+              )
+          )`,
+        )
+      } else if (options.tab === 'mine') {
+        conditions.push(`requester_snapshot->>'id' = $${actorIdParam}`)
+      } else if (options.tab === 'cc') {
+        conditions.push(
+          `id IN (
+            SELECT instance_id
+            FROM approval_records
+            WHERE action = 'cc'
+              AND (
+                (metadata->>'targetType' = 'user' AND metadata->>'targetId' = $${actorIdParam})
+                OR (metadata->>'targetType' = 'role' AND metadata->>'targetId' = ANY($${actorRolesParam}))
+              )
+          )`,
+        )
+      } else if (options.tab === 'completed') {
+        conditions.push(`status <> 'pending'`)
+        conditions.push(
+          `(
+            requester_snapshot->>'id' = $${actorIdParam}
+            OR id IN (
+              SELECT instance_id FROM approval_records WHERE actor_id = $${actorIdParam}
+            )
+            OR id IN (
+              SELECT instance_id
+              FROM approval_records
+              WHERE action = 'cc'
+                AND (
+                  (metadata->>'targetType' = 'user' AND metadata->>'targetId' = $${actorIdParam})
+                  OR (metadata->>'targetType' = 'role' AND metadata->>'targetId' = ANY($${actorRolesParam}))
+                )
+            )
+            OR id IN (
+              SELECT instance_id
+              FROM approval_assignments
+              WHERE (assignment_type = 'user' AND assignee_id = $${actorIdParam})
+                 OR (assignment_type = 'role' AND assignee_id = ANY($${actorRolesParam}))
+            )
+          )`,
+        )
+      }
     }
 
     const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : ''

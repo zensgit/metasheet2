@@ -21,8 +21,14 @@ export interface UnifiedApprovalDTO {
   requester: ApprovalRequesterSnapshot | null
   subject: ApprovalSubjectSnapshot | null
   policy: ApprovalPolicySnapshot | null
-  currentStep: number
-  totalSteps: number
+  currentStep: number | null
+  totalSteps: number | null
+  templateId?: string | null
+  templateVersionId?: string | null
+  publishedDefinitionId?: string | null
+  requestNo?: string | null
+  formSnapshot?: Record<string, unknown> | null
+  currentNodeKey?: string | null
   assignments: ApprovalAssignmentDTO[]
   createdAt: string
   updatedAt: string
@@ -51,6 +57,7 @@ export interface ApprovalAssignmentDTO {
   type: string
   assigneeId: string
   sourceStep: number
+  nodeKey?: string | null
   isActive: boolean
   metadata: Record<string, unknown>
 }
@@ -77,6 +84,10 @@ export interface ApprovalQueryOptions {
   workflowKey?: string
   businessKey?: string
   assignee?: string
+  search?: string
+  tab?: 'pending' | 'mine' | 'cc' | 'completed'
+  actorId?: string
+  actorRoles?: string[]
   limit?: number
   offset?: number
 }
@@ -94,8 +105,9 @@ export interface PlmSyncOptions {
 // ── Action Request ──
 
 export interface ApprovalActionRequest {
-  action: 'approve' | 'reject'
+  action: 'approve' | 'reject' | 'transfer' | 'revoke' | 'comment'
   comment?: string
+  targetUserId?: string
 }
 
 export interface ApprovalBridgePlmAdapter {
@@ -137,6 +149,12 @@ export interface ApprovalInstanceRow {
   last_synced_at: Date | null
   sync_status: string
   sync_error: string | null
+  template_id: string | null
+  template_version_id: string | null
+  published_definition_id: string | null
+  request_no: string | null
+  form_snapshot: Record<string, unknown> | null
+  current_node_key: string | null
   created_at: Date
   updated_at: Date
 }
@@ -147,6 +165,7 @@ export interface ApprovalAssignmentRow {
   assignment_type: string
   assignee_id: string
   source_step: number
+  node_key: string | null
   is_active: boolean
   metadata: Record<string, unknown>
   created_at: Date
