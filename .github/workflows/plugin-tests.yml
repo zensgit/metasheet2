@@ -103,7 +103,7 @@ jobs:
         env:
           DATABASE_URL: postgresql://postgres@localhost:5432/metasheet_test
         run: |
-          test -n "$DATABASE_URL"
+          : "${DATABASE_URL:?DATABASE_URL is required for after-sales integration}"
           pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run tests/integration/after-sales-plugin.install.test.ts --reporter=dot
 
       - name: Start core backend (background)
@@ -233,6 +233,7 @@ jobs:
         env:
           DATABASE_URL: postgresql://postgres@localhost:5432/metasheet_test
         run: |
+          : "${DATABASE_URL:?DATABASE_URL is required for after-sales integration}"
           pnpm --filter @metasheet/core-backend test:integration:after-sales
 
       - name: Upload after-sales integration artifacts

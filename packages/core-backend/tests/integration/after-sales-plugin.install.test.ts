@@ -95,6 +95,19 @@ const PLUGIN_ID = 'plugin-after-sales'
 const PROJECT_ID = `${TENANT_ID}:${APP_ID}`
 const SUPERVISOR_USER_ID = 'after-sales-service-record-supervisor-it'
 const SUPERVISOR_EMAIL = 'after-sales-supervisor-it@example.com'
+const REQUIRED_SCHEMA_TABLES = [
+  'plugin_after_sales_template_installs',
+  'meta_bases',
+  'meta_sheets',
+  'meta_fields',
+  'meta_views',
+  'meta_records',
+  'approval_instances',
+  'approval_records',
+  'approval_assignments',
+  'plugin_automation_rule_registry',
+  'plugin_field_policy_registry',
+] as const
 const OBJECT_IDS = ['serviceTicket', 'installedAsset', 'customer', 'serviceRecord', 'partItem', 'followUp']
 const VIEW_IDS = [
   { objectId: 'serviceTicket', viewId: 'ticket-board' },
@@ -299,16 +312,23 @@ describe('after-sales plugin install integration', () => {
   }
 
   beforeAll(async () => {
-    if (!process.env.DATABASE_URL) return
+    const databaseUrl = process.env.DATABASE_URL?.trim()
+    if (!databaseUrl) {
+      throw new Error('DATABASE_URL is required for after-sales plugin install integration tests')
+    }
 
     const canListen: boolean = await new Promise((resolve) => {
       const s = net.createServer()
       s.once('error', () => resolve(false))
       s.listen(0, '127.0.0.1', () => s.close(() => resolve(true)))
     })
-    if (!canListen) return
+    if (!canListen) {
+      throw new Error(
+        'after-sales plugin install integration tests require an available 127.0.0.1 loopback port',
+      )
+    }
 
-    pool = new Pool({ connectionString: process.env.DATABASE_URL })
+    pool = new Pool({ connectionString: databaseUrl })
 
     try {
       const tables = await pool.query<{ name: string | null }>(
@@ -324,7 +344,12 @@ describe('after-sales plugin install integration', () => {
          UNION ALL SELECT to_regclass('public.plugin_automation_rule_registry') AS name
          UNION ALL SELECT to_regclass('public.plugin_field_policy_registry') AS name`,
       )
-      if (tables.rows.some((row) => !row.name)) return
+      const missingTables = REQUIRED_SCHEMA_TABLES.filter((_tableName, index) => !tables.rows[index]?.name)
+      if (missingTables.length > 0) {
+        throw new Error(
+          `Missing required tables for after-sales plugin install integration tests: ${missingTables.join(', ')}. Run pnpm --filter @metasheet/core-backend db:migrate`,
+        )
+      }
       schemaReady = true
 
       await cleanupAfterSalesInstallArtifacts()
@@ -339,10 +364,24 @@ describe('after-sales plugin install integration', () => {
       await server.start()
 
       const address = server.getAddress()
-      if (!address || typeof address === 'string') return
+      if (!address || typeof address === 'string') {
+        throw new Error(
+          'after-sales plugin install integration server did not expose a TCP address',
+        )
+      }
       baseUrl = `http://127.0.0.1:${address.port}`
-    } catch {
+    } catch (error) {
       baseUrl = ''
+      schemaReady = false
+      if (server) {
+        await server.stop().catch(() => undefined)
+        server = undefined
+      }
+      if (pool) {
+        await pool.end().catch(() => undefined)
+        pool = undefined
+      }
+      throw error
     }
   })
 
@@ -364,8 +403,15 @@ describe('after-sales plugin install integration', () => {
     await cleanupAfterSalesInstallArtifacts()
   })
 
+  function requireTestInfra(): { baseUrl: string; pool: Pool } {
+    if (!schemaReady || !baseUrl || !pool) {
+      throw new Error('after-sales plugin install integration test infrastructure is not ready')
+    }
+    return { baseUrl, pool }
+  }
+
   async function seedSupervisorRecipient() {
-    if (!pool) return
+    const { pool } = requireTestInfra()
     await pool.query(
       `INSERT INTO users (id, email, name, password_hash, role, permissions, is_active, is_admin)
        VALUES ($1, $2, $3, $4, $5, '[]'::jsonb, TRUE, FALSE)
@@ -387,7 +433,7 @@ describe('after-sales plugin install integration', () => {
   }
 
   it('installs the after-sales template into real multitable tables and exposes current state', async () => {
-    if (!baseUrl || !pool) return
+    const { baseUrl, pool } = requireTestInfra()
 
     const adminRoleBeforeRes = await pool.query<{ name: string }>(
       `SELECT name FROM roles WHERE id = 'admin'`,
@@ -641,7 +687,7 @@ describe('after-sales plugin install integration', () => {
   })
 
   it('reads and updates runtime admin state against the live automation and field-policy registries', async () => {
-    if (!baseUrl || !pool) return
+    const { baseUrl, pool } = requireTestInfra()
 
     const adminToken = await issueDevToken(
       baseUrl,
@@ -814,7 +860,7 @@ describe('after-sales plugin install integration', () => {
   })
 
   it('rejects runtime admin for non-admin callers', async () => {
-    if (!baseUrl || !pool) return
+    const { baseUrl, pool } = requireTestInfra()
 
     const adminToken = await issueDevToken(
       baseUrl,
@@ -854,7 +900,7 @@ describe('after-sales plugin install integration', () => {
   })
 
   it('rejects install for non-admin callers', async () => {
-    if (!baseUrl || !pool) return
+    const { baseUrl, pool } = requireTestInfra()
 
     const tokenRes = await requestJson(
       `${baseUrl}/api/auth/dev-token?userId=after-sales-non-admin&roles=user&perms=after_sales:read&tenantId=${TENANT_ID}`,
@@ -1040,7 +1086,7 @@ describe('after-sales plugin install integration', () => {
   })
 
   it('creates, lists, updates, and deletes part items through the real after-sales routes', async () => {
-    if (!baseUrl || !pool) return
+    const { baseUrl, pool } = requireTestInfra()
 
     const tokenRes = await requestJson(
       `${baseUrl}/api/auth/dev-token?userId=after-sales-part-item-it&roles=admin&perms=*:*&tenantId=${TENANT_ID}`,
@@ -1191,7 +1237,7 @@ describe('after-sales plugin install integration', () => {
   })
 
   it('creates a ticket and requests refund through the real after-sales routes', async () => {
-    if (!baseUrl || !pool) return
+    const { baseUrl, pool } = requireTestInfra()
 
     const tokenRes = await requestJson(
       `${baseUrl}/api/auth/dev-token?userId=after-sales-ticket-it&roles=admin&perms=*:*&tenantId=${TENANT_ID}`,
@@ -1495,7 +1541,7 @@ describe('after-sales plugin install integration', () => {
   })
 
   it('updates a ticket through the real after-sales routes', async () => {
-    if (!baseUrl || !pool) return
+    const { baseUrl, pool } = requireTestInfra()
 
     const tokenRes = await requestJson(
       `${baseUrl}/api/auth/dev-token?userId=after-sales-ticket-update-it&roles=admin&perms=*:*&tenantId=${TENANT_ID}`,
@@ -1598,7 +1644,7 @@ describe('after-sales plugin install integration', () => {
   })
 
   it('marks refund status as rejected when the approval action rejects the request', async () => {
-    if (!baseUrl || !pool) return
+    const { baseUrl, pool } = requireTestInfra()
 
     const tokenRes = await requestJson(
       `${baseUrl}/api/auth/dev-token?userId=after-sales-refund-reject-it&roles=admin&perms=*:*&tenantId=${TENANT_ID}`,
@@ -1758,7 +1804,7 @@ describe('after-sales plugin install integration', () => {
   })
 
   it('creates and lists service records through the real after-sales routes', async () => {
-    if (!baseUrl || !pool) return
+    const { baseUrl, pool } = requireTestInfra()
 
     const tokenRes = await requestJson(
       `${baseUrl}/api/auth/dev-token?userId=after-sales-service-record-it&roles=admin&perms=*:*&tenantId=${TENANT_ID}`,
@@ -1930,7 +1976,7 @@ describe('after-sales plugin install integration', () => {
   })
 
   it('creates and deletes tickets through the real after-sales routes', async () => {
-    if (!baseUrl || !pool) return
+    const { baseUrl, pool } = requireTestInfra()
 
     const tokenRes = await requestJson(
       `${baseUrl}/api/auth/dev-token?userId=after-sales-ticket-delete-it&roles=admin&perms=*:*&tenantId=${TENANT_ID}`,
@@ -2038,7 +2084,7 @@ describe('after-sales plugin install integration', () => {
   })
 
   it('creates and deletes service records through the real after-sales routes', async () => {
-    if (!baseUrl || !pool) return
+    const { baseUrl, pool } = requireTestInfra()
 
     const tokenRes = await requestJson(
       `${baseUrl}/api/auth/dev-token?userId=after-sales-service-record-delete-it&roles=admin&perms=*:*&tenantId=${TENANT_ID}`,
@@ -2160,7 +2206,7 @@ describe('after-sales plugin install integration', () => {
   })
 
   it('updates service records through the real after-sales routes', async () => {
-    if (!baseUrl || !pool) return
+    const { baseUrl, pool } = requireTestInfra()
 
     const tokenRes = await requestJson(
       `${baseUrl}/api/auth/dev-token?userId=after-sales-service-record-update-it&roles=admin&perms=*:*&tenantId=${TENANT_ID}`,
@@ -2294,7 +2340,7 @@ describe('after-sales plugin install integration', () => {
   })
 
   it('creates installed assets through the real after-sales routes', async () => {
-    if (!baseUrl || !pool) return
+    const { baseUrl, pool } = requireTestInfra()
 
     const tokenRes = await requestJson(
       `${baseUrl}/api/auth/dev-token?userId=after-sales-installed-asset-create-it&roles=admin&perms=*:*&tenantId=${TENANT_ID}`,
@@ -2410,7 +2456,7 @@ describe('after-sales plugin install integration', () => {
   })
 
   it('updates installed assets through the real after-sales routes', async () => {
-    if (!baseUrl || !pool) return
+    const { baseUrl, pool } = requireTestInfra()
 
     const tokenRes = await requestJson(
       `${baseUrl}/api/auth/dev-token?userId=after-sales-installed-asset-update-it&roles=admin&perms=*:*&tenantId=${TENANT_ID}`,
@@ -2546,7 +2592,7 @@ describe('after-sales plugin install integration', () => {
   })
 
   it('creates and deletes installed assets through the real after-sales routes', async () => {
-    if (!baseUrl || !pool) return
+    const { baseUrl, pool } = requireTestInfra()
 
     const tokenRes = await requestJson(
       `${baseUrl}/api/auth/dev-token?userId=after-sales-installed-asset-delete-it&roles=admin&perms=*:*&tenantId=${TENANT_ID}`,
@@ -2647,7 +2693,7 @@ describe('after-sales plugin install integration', () => {
   })
 
   it('lists customers through the real after-sales routes', async () => {
-    if (!baseUrl || !pool) return
+    const { baseUrl, pool } = requireTestInfra()
 
     const tokenRes = await requestJson(
       `${baseUrl}/api/auth/dev-token?userId=after-sales-customer-list-it&roles=admin&perms=*:*&tenantId=${TENANT_ID}`,
@@ -2729,7 +2775,7 @@ describe('after-sales plugin install integration', () => {
   })
 
   it('lists follow-ups through the real after-sales routes', async () => {
-    if (!baseUrl || !pool) return
+    const { baseUrl, pool } = requireTestInfra()
 
     const tokenRes = await requestJson(
       `${baseUrl}/api/auth/dev-token?userId=after-sales-follow-up-list-it&roles=admin&perms=*:*&tenantId=${TENANT_ID}`,
@@ -2820,7 +2866,7 @@ describe('after-sales plugin install integration', () => {
   })
 
   it('creates follow-ups through the real after-sales routes', async () => {
-    if (!baseUrl || !pool) return
+    const { baseUrl, pool } = requireTestInfra()
 
     const tokenRes = await requestJson(
       `${baseUrl}/api/auth/dev-token?userId=after-sales-follow-up-create-it&roles=admin&perms=*:*&tenantId=${TENANT_ID}`,
@@ -2937,7 +2983,7 @@ describe('after-sales plugin install integration', () => {
   })
 
   it('creates and deletes follow-ups through the real after-sales routes', async () => {
-    if (!baseUrl || !pool) return
+    const { baseUrl, pool } = requireTestInfra()
 
     const tokenRes = await requestJson(
       `${baseUrl}/api/auth/dev-token?userId=after-sales-follow-up-delete-it&roles=admin&perms=*:*&tenantId=${TENANT_ID}`,
@@ -3016,7 +3062,7 @@ describe('after-sales plugin install integration', () => {
   })
 
   it('updates follow-ups through the real after-sales routes', async () => {
-    if (!baseUrl || !pool) return
+    const { baseUrl, pool } = requireTestInfra()
 
     const tokenRes = await requestJson(
       `${baseUrl}/api/auth/dev-token?userId=after-sales-follow-up-edit-it&roles=admin&perms=*:*&tenantId=${TENANT_ID}`,
@@ -3120,7 +3166,7 @@ describe('after-sales plugin install integration', () => {
   })
 
   it('emits followup.due notifications from real follow-up records', async () => {
-    if (!baseUrl || !pool) return
+    const { baseUrl, pool } = requireTestInfra()
 
     const tokenRes = await requestJson(
       `${baseUrl}/api/auth/dev-token?userId=after-sales-follow-up-due-it&roles=admin&perms=*:*&tenantId=${TENANT_ID}`,
@@ -3251,7 +3297,7 @@ describe('after-sales plugin install integration', () => {
   })
 
   it('creates customers through the real after-sales routes', async () => {
-    if (!baseUrl || !pool) return
+    const { baseUrl, pool } = requireTestInfra()
 
     const tokenRes = await requestJson(
       `${baseUrl}/api/auth/dev-token?userId=after-sales-customer-create-it&roles=admin&perms=*:*&tenantId=${TENANT_ID}`,
@@ -3357,7 +3403,7 @@ describe('after-sales plugin install integration', () => {
   })
 
   it('updates customers through the real after-sales routes', async () => {
-    if (!baseUrl || !pool) return
+    const { baseUrl, pool } = requireTestInfra()
 
     const tokenRes = await requestJson(
       `${baseUrl}/api/auth/dev-token?userId=after-sales-customer-update-it&roles=admin&perms=*:*&tenantId=${TENANT_ID}`,
@@ -3453,7 +3499,7 @@ describe('after-sales plugin install integration', () => {
   })
 
   it('deletes customers through the real after-sales routes', async () => {
-    if (!baseUrl || !pool) return
+    const { baseUrl, pool } = requireTestInfra()
 
     const tokenRes = await requestJson(
       `${baseUrl}/api/auth/dev-token?userId=after-sales-customer-delete-it&roles=admin&perms=*:*&tenantId=${TENANT_ID}`,
