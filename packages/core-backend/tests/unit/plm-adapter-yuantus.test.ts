@@ -609,6 +609,227 @@ describe('PLMAdapter Yuantus BOM analysis and approval actions', () => {
   })
 })
 
+describe('PLMAdapter Yuantus CAD routes', () => {
+  it('queries CAD properties, view state, review, history, diff, and mesh stats from dedicated Yuantus endpoints', async () => {
+    const adapter = createAdapter()
+    const queryMock = vi.fn(async (path: string, params?: Array<Record<string, unknown>>) => {
+      if (path === '/api/v1/cad/files/file-props/properties') {
+        return {
+          data: [{
+            file_id: 'file-props',
+            properties: { material: 'AL-6061', finish: 'anodized' },
+            updated_at: '2026-04-11T00:00:00.000Z',
+            source: 'imported',
+            cad_document_schema_version: 3,
+          }],
+        }
+      }
+      if (path === '/api/v1/cad/files/file-view/view-state') {
+        return {
+          data: [{
+            file_id: 'file-view',
+            hidden_entity_ids: [12, 19],
+            notes: [{ entity_id: 12, note: 'check hole position', color: '#FFB020' }],
+            updated_at: '2026-04-11T00:00:00.000Z',
+            source: 'client',
+            cad_document_schema_version: 3,
+          }],
+        }
+      }
+      if (path === '/api/v1/cad/files/file-review/review') {
+        return {
+          data: [{
+            file_id: 'file-review',
+            state: 'pending',
+            note: 'Awaiting review',
+            reviewed_at: '2026-04-11T00:00:00.000Z',
+            reviewed_by_id: 1,
+          }],
+        }
+      }
+      if (path === '/api/v1/cad/files/file-history/history') {
+        return {
+          data: [{
+            file_id: 'file-history',
+            entries: [
+              { id: 'chg-1', action: 'cad_properties_update', payload: { properties: { material: 'AL-6061' } }, created_at: '2026-04-10T00:00:00.000Z', user_id: 1 },
+              { id: 'chg-2', action: 'cad_review_update', payload: { state: 'approved' }, created_at: '2026-04-11T00:00:00.000Z', user_id: 1 },
+            ],
+          }],
+        }
+      }
+      if (path === '/api/v1/cad/files/file-left/diff') {
+        expect(params).toEqual([{ other_file_id: 'file-right' }])
+        return {
+          data: [{
+            file_id: 'file-left',
+            other_file_id: 'file-right',
+            properties: {
+              added: { finish: 'anodized' },
+              removed: { coating: 'none' },
+              changed: { weight_kg: { from: 1.1, to: 1.2 } },
+            },
+            cad_document_schema_version: { from: 1, to: 2 },
+          }],
+        }
+      }
+      if (path === '/api/v1/cad/files/file-mesh/mesh-stats') {
+        return {
+          data: [{
+            file_id: 'file-mesh',
+            stats: {
+              available: true,
+              raw_keys: ['bounds', 'entities', 'triangle_count'],
+              entity_count: 2,
+              triangle_count: 102400,
+              bounds: { min: [0, 0, 0], max: [10, 20, 5] },
+            },
+          }],
+        }
+      }
+      return { data: [] }
+    })
+
+    ;(adapter as any).query = queryMock
+
+    const properties = await adapter.getCadProperties('file-props')
+    const viewState = await adapter.getCadViewState('file-view')
+    const review = await adapter.getCadReview('file-review')
+    const history = await adapter.getCadHistory('file-history')
+    const diff = await adapter.getCadDiff('file-left', 'file-right')
+    const meshStats = await adapter.getCadMeshStats('file-mesh')
+
+    expect(properties.data[0]).toMatchObject({
+      file_id: 'file-props',
+      properties: { material: 'AL-6061', finish: 'anodized' },
+      source: 'imported',
+      cad_document_schema_version: 3,
+    })
+    expect(viewState.data[0]).toMatchObject({
+      file_id: 'file-view',
+      hidden_entity_ids: [12, 19],
+      notes: [{ entity_id: 12, note: 'check hole position', color: '#FFB020' }],
+    })
+    expect(review.data[0]).toMatchObject({
+      file_id: 'file-review',
+      state: 'pending',
+      reviewed_by_id: 1,
+    })
+    expect(history.data[0].entries).toHaveLength(2)
+    expect(diff.data[0]).toMatchObject({
+      file_id: 'file-left',
+      other_file_id: 'file-right',
+      cad_document_schema_version: { from: 1, to: 2 },
+    })
+    expect(meshStats.data[0].stats).toMatchObject({
+      available: true,
+      entity_count: 2,
+      triangle_count: 102400,
+    })
+  })
+
+  it('patches CAD properties and view state, and posts CAD review updates to dedicated Yuantus endpoints', async () => {
+    const adapter = createAdapter()
+    const selectMock = vi.fn(async (path: string, options: Record<string, unknown>) => {
+      if (path === '/api/v1/cad/files/file-props-write/properties') {
+        expect(options).toEqual({
+          method: 'PATCH',
+          data: {
+            properties: { material: 'AL-7075', finish: 'hard-anodized' },
+            source: 'manual',
+          },
+        })
+        return {
+          data: [{
+            file_id: 'file-props-write',
+            properties: { material: 'AL-7075', finish: 'hard-anodized' },
+            updated_at: '2026-04-11T01:00:00.000Z',
+            source: 'manual',
+            cad_document_schema_version: 4,
+          }],
+        }
+      }
+      if (path === '/api/v1/cad/files/file-view-write/view-state') {
+        expect(options).toEqual({
+          method: 'PATCH',
+          data: {
+            hidden_entity_ids: [12, 19],
+            notes: [{ entity_id: 19, note: 'hide fastener', color: '#4C9AFF' }],
+            source: 'client',
+            refresh_preview: false,
+          },
+        })
+        return {
+          data: [{
+            file_id: 'file-view-write',
+            hidden_entity_ids: [12, 19],
+            notes: [{ entity_id: 19, note: 'hide fastener', color: '#4C9AFF' }],
+            updated_at: '2026-04-11T01:00:00.000Z',
+            source: 'client',
+            cad_document_schema_version: 3,
+          }],
+        }
+      }
+      return { data: [] }
+    })
+    const insertMock = vi.fn(async (path: string, payload: Record<string, unknown>) => {
+      if (path === '/api/v1/cad/files/file-review-write/review') {
+        expect(payload).toEqual({
+          state: 'approved',
+          note: 'Looks good',
+        })
+        return {
+          data: [{
+            file_id: 'file-review-write',
+            state: 'approved',
+            note: 'Looks good',
+            reviewed_at: '2026-04-11T01:00:00.000Z',
+            reviewed_by_id: 1,
+          }],
+        }
+      }
+      return { data: [] }
+    })
+
+    ;(adapter as any).select = selectMock
+    ;(adapter as any).insert = insertMock
+
+    const updatedProperties = await adapter.updateCadProperties('file-props-write', {
+      properties: { material: 'AL-7075', finish: 'hard-anodized' },
+      source: 'manual',
+    })
+    const updatedViewState = await adapter.updateCadViewState('file-view-write', {
+      hidden_entity_ids: [12, 19],
+      notes: [{ entity_id: 19, note: 'hide fastener', color: '#4C9AFF' }],
+      source: 'client',
+      refresh_preview: false,
+    })
+    const updatedReview = await adapter.updateCadReview('file-review-write', {
+      state: 'approved',
+      note: 'Looks good',
+    })
+
+    expect(updatedProperties.data[0]).toMatchObject({
+      file_id: 'file-props-write',
+      properties: { material: 'AL-7075', finish: 'hard-anodized' },
+      source: 'manual',
+      cad_document_schema_version: 4,
+    })
+    expect(updatedViewState.data[0]).toMatchObject({
+      file_id: 'file-view-write',
+      hidden_entity_ids: [12, 19],
+      source: 'client',
+      cad_document_schema_version: 3,
+    })
+    expect(updatedReview.data[0]).toMatchObject({
+      file_id: 'file-review-write',
+      state: 'approved',
+      note: 'Looks good',
+      reviewed_by_id: 1,
+    })
+  })
+})
+
 describe('PLMAdapter Yuantus documents single-side failure + sources metadata', () => {
   it('returns AML related documents when file/item endpoint errors, with sources showing degradation', async () => {
     const adapter = createAdapter()
