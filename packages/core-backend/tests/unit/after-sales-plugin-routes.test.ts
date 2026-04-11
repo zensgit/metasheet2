@@ -712,6 +712,30 @@ const iaPk = (field: string) => `${MOCK_PROJECT_ID}:installedAsset:${field}`
 const cuPk = (field: string) => `${MOCK_PROJECT_ID}:customer:${field}`
 const fuPk = (field: string) => `${MOCK_PROJECT_ID}:followUp:${field}`
 
+function seedAfterSalesInstallRow(
+  db: FakeDatabase,
+  overrides: Partial<FakeRowRaw> = {},
+) {
+  db.rows.push({
+    id: 'fake-uuid-1',
+    tenant_id: 'tenant_42',
+    app_id: 'after-sales',
+    project_id: 'tenant_42:after-sales',
+    template_id: 'after-sales-default',
+    template_version: '0.1.0',
+    mode: 'enable',
+    status: 'installed',
+    created_objects_json: JSON.stringify(['serviceTicket']),
+    created_views_json: JSON.stringify(['ticket-board']),
+    warnings_json: JSON.stringify([]),
+    display_name: 'After-sales',
+    config_json: JSON.stringify({}),
+    last_install_at: new Date(),
+    created_at: new Date(),
+    ...overrides,
+  })
+}
+
 describe('plugin-after-sales routes', () => {
   let routes: Map<string, RegisteredHandler>
   let ensureObject: ReturnType<typeof vi.fn>
@@ -1001,6 +1025,383 @@ describe('plugin-after-sales routes', () => {
       error: {
         code: 'AFTER_SALES_NOT_INSTALLED',
         message: 'After-sales must be installed before reading field policies',
+      },
+    })
+  })
+
+  it('returns runtime admin state for after-sales admins', async () => {
+    const handler = routes.get('GET /api/after-sales/runtime-admin')
+    const res = new FakeResponse()
+
+    seedAfterSalesInstallRow(db)
+    automationListRules.mockResolvedValueOnce([
+      { id: 'ticket-triage', enabled: true },
+      { id: 'sla-watcher', enabled: false },
+      { id: 'refund-approval', enabled: true },
+      { id: 'service-record-notify', enabled: true },
+    ])
+    db.fieldPolicyRows.push({
+      tenant_id: 'tenant_42',
+      plugin_id: 'plugin-after-sales',
+      app_id: 'after-sales',
+      project_id: 'tenant_42:after-sales',
+      object_id: 'serviceTicket',
+      field_name: 'refundAmount',
+      role_slug: 'finance',
+      visibility: 'hidden',
+      editability: 'editable',
+    })
+
+    await handler?.(buildReq(), res)
+
+    expect(res.statusCode).toBe(200)
+    expect(automationListRules).toHaveBeenCalledWith({
+      tenantId: 'tenant_42',
+      pluginId: 'plugin-after-sales',
+      appId: 'after-sales',
+      projectId: 'tenant_42:after-sales',
+    })
+    expect(res.body).toEqual({
+      ok: true,
+      data: {
+        projectId: 'tenant_42:after-sales',
+        automations: [
+          {
+            id: 'ticket-triage',
+            name: 'Ticket Triage',
+            triggerEvent: 'ticket.created',
+            enabled: true,
+          },
+          {
+            id: 'sla-watcher',
+            name: 'SLA Watcher',
+            triggerEvent: 'ticket.overdue',
+            enabled: false,
+          },
+          {
+            id: 'refund-approval',
+            name: 'Refund Approval',
+            triggerEvent: 'ticket.refundRequested',
+            enabled: true,
+          },
+          {
+            id: 'service-record-notify',
+            name: 'Service Record Notification',
+            triggerEvent: 'service.recorded',
+            enabled: true,
+          },
+        ],
+        fieldPolicies: {
+          objectId: 'serviceTicket',
+          field: 'refundAmount',
+          roles: [
+            {
+              roleSlug: 'customer_service',
+              roleLabel: '客服',
+              visibility: 'hidden',
+              editability: 'readonly',
+            },
+            {
+              roleSlug: 'technician',
+              roleLabel: '技师',
+              visibility: 'hidden',
+              editability: 'readonly',
+            },
+            {
+              roleSlug: 'supervisor',
+              roleLabel: '主管',
+              visibility: 'visible',
+              editability: 'readonly',
+            },
+            {
+              roleSlug: 'finance',
+              roleLabel: '财务',
+              visibility: 'hidden',
+              editability: 'readonly',
+            },
+            {
+              roleSlug: 'admin',
+              roleLabel: '管理员',
+              visibility: 'visible',
+              editability: 'editable',
+            },
+            {
+              roleSlug: 'viewer',
+              roleLabel: '只读',
+              visibility: 'hidden',
+              editability: 'readonly',
+            },
+          ],
+        },
+      },
+    })
+  })
+
+  it('returns 403 for runtime admin when caller lacks admin access', async () => {
+    const handler = routes.get('GET /api/after-sales/runtime-admin')
+    const res = new FakeResponse()
+
+    await handler?.(buildReq({
+      user: {
+        id: 'reader_42',
+        tenantId: 'tenant_42',
+        role: 'supervisor',
+        roles: ['supervisor'],
+        perms: ['after_sales:read'],
+      },
+    }), res)
+
+    expect(res.statusCode).toBe(403)
+    expect(res.body).toEqual({
+      ok: false,
+      error: {
+        code: 'FORBIDDEN',
+        message: 'Admin access required',
+      },
+    })
+  })
+
+  it('returns 409 for runtime admin when after-sales is not operational', async () => {
+    const handler = routes.get('GET /api/after-sales/runtime-admin')
+    const res = new FakeResponse()
+
+    seedAfterSalesInstallRow(db, {
+      mode: 'reinstall',
+      status: 'failed',
+      warnings_json: JSON.stringify(['adapter failed']),
+    })
+
+    await handler?.(buildReq(), res)
+
+    expect(res.statusCode).toBe(409)
+    expect(res.body).toEqual({
+      ok: false,
+      error: {
+        code: 'AFTER_SALES_NOT_INSTALLED',
+        message: 'After-sales must be installed before managing runtime admin state',
+      },
+    })
+  })
+
+  it('updates runtime automation toggles using the default rule payloads', async () => {
+    const handler = routes.get('PUT /api/after-sales/runtime-admin/automations')
+    const res = new FakeResponse()
+
+    seedAfterSalesInstallRow(db)
+    automationListRules.mockResolvedValueOnce([
+      { id: 'ticket-triage', enabled: true },
+      { id: 'sla-watcher', enabled: false },
+      { id: 'refund-approval', enabled: true },
+      { id: 'service-record-notify', enabled: true },
+    ])
+
+    await handler?.(buildReq({
+      body: {
+        automations: [
+          { id: 'ticket-triage', enabled: true },
+          { id: 'sla-watcher', enabled: false },
+          { id: 'refund-approval', enabled: true },
+          { id: 'service-record-notify', enabled: true },
+        ],
+      },
+    }), res)
+
+    expect(res.statusCode).toBe(200)
+    expect(automationUpsertRules).toHaveBeenCalledWith(
+      expect.objectContaining({
+        pluginId: 'plugin-after-sales',
+        appId: 'after-sales',
+        tenantId: 'tenant_42',
+        projectId: 'tenant_42:after-sales',
+        templateId: 'after-sales-default',
+        rules: [
+          expect.objectContaining({
+            id: 'ticket-triage',
+            enabled: true,
+          }),
+          expect.objectContaining({
+            id: 'sla-watcher',
+            enabled: false,
+            trigger: { event: 'ticket.overdue', filter: [{ field: 'status', operator: 'in', value: ['new', 'assigned', 'inProgress'] }] },
+          }),
+          expect.objectContaining({
+            id: 'refund-approval',
+            enabled: true,
+          }),
+          expect.objectContaining({
+            id: 'service-record-notify',
+            enabled: true,
+          }),
+        ],
+      }),
+    )
+    expect(res.body.data.automations[1]).toEqual({
+      id: 'sla-watcher',
+      name: 'SLA Watcher',
+      triggerEvent: 'ticket.overdue',
+      enabled: false,
+    })
+  })
+
+  it('rejects automation updates that omit a default rule', async () => {
+    const handler = routes.get('PUT /api/after-sales/runtime-admin/automations')
+    const res = new FakeResponse()
+
+    seedAfterSalesInstallRow(db)
+
+    await handler?.(buildReq({
+      body: {
+        automations: [
+          { id: 'ticket-triage', enabled: true },
+          { id: 'refund-approval', enabled: true },
+          { id: 'service-record-notify', enabled: true },
+        ],
+      },
+    }), res)
+
+    expect(res.statusCode).toBe(400)
+    expect(res.body).toEqual({
+      ok: false,
+      error: {
+        code: 'VALIDATION_FAILED',
+        message: 'automations must include every default rule exactly once',
+        details: {
+          expectedRuleIds: ['refund-approval', 'service-record-notify', 'sla-watcher', 'ticket-triage'],
+        },
+      },
+    })
+  })
+
+  it('updates field policy matrix and coerces hidden rows to readonly', async () => {
+    const handler = routes.get('PUT /api/after-sales/runtime-admin/field-policies')
+    const res = new FakeResponse()
+
+    seedAfterSalesInstallRow(db)
+    applyRoleMatrix.mockImplementationOnce(async (input: Record<string, unknown>) => {
+      const matrix = input.matrix as {
+        fieldPolicies: Array<{
+          objectId: string
+          field: string
+          roleSlug: string
+          visibility: string
+          editability: string
+        }>
+      }
+      db.fieldPolicyRows = matrix.fieldPolicies.map((policy) => ({
+        tenant_id: 'tenant_42',
+        plugin_id: 'plugin-after-sales',
+        app_id: 'after-sales',
+        project_id: 'tenant_42:after-sales',
+        object_id: policy.objectId,
+        field_name: policy.field,
+        role_slug: policy.roleSlug,
+        visibility: policy.visibility,
+        editability: policy.editability,
+      }))
+      return {
+        rolesApplied: ['customer_service', 'technician', 'supervisor', 'finance', 'admin', 'viewer'],
+        fieldPoliciesApplied: matrix.fieldPolicies.length,
+      }
+    })
+
+    await handler?.(buildReq({
+      body: {
+        roles: [
+          { roleSlug: 'customer_service', visibility: 'hidden', editability: 'readonly' },
+          { roleSlug: 'technician', visibility: 'hidden', editability: 'readonly' },
+          { roleSlug: 'supervisor', visibility: 'visible', editability: 'readonly' },
+          { roleSlug: 'finance', visibility: 'hidden', editability: 'editable' },
+          { roleSlug: 'admin', visibility: 'visible', editability: 'editable' },
+          { roleSlug: 'viewer', visibility: 'hidden', editability: 'readonly' },
+        ],
+      },
+    }), res)
+
+    expect(res.statusCode).toBe(200)
+    expect(applyRoleMatrix).toHaveBeenCalledWith(
+      expect.objectContaining({
+        pluginId: 'plugin-after-sales',
+        appId: 'after-sales',
+        tenantId: 'tenant_42',
+        projectId: 'tenant_42:after-sales',
+        matrix: expect.objectContaining({
+          fieldPolicies: expect.arrayContaining([
+            expect.objectContaining({
+              roleSlug: 'finance',
+              visibility: 'hidden',
+              editability: 'readonly',
+            }),
+          ]),
+        }),
+      }),
+    )
+    expect(res.body.data.fieldPolicies.roles).toEqual([
+      {
+        roleSlug: 'customer_service',
+        roleLabel: '客服',
+        visibility: 'hidden',
+        editability: 'readonly',
+      },
+      {
+        roleSlug: 'technician',
+        roleLabel: '技师',
+        visibility: 'hidden',
+        editability: 'readonly',
+      },
+      {
+        roleSlug: 'supervisor',
+        roleLabel: '主管',
+        visibility: 'visible',
+        editability: 'readonly',
+      },
+      {
+        roleSlug: 'finance',
+        roleLabel: '财务',
+        visibility: 'hidden',
+        editability: 'readonly',
+      },
+      {
+        roleSlug: 'admin',
+        roleLabel: '管理员',
+        visibility: 'visible',
+        editability: 'editable',
+      },
+      {
+        roleSlug: 'viewer',
+        roleLabel: '只读',
+        visibility: 'hidden',
+        editability: 'readonly',
+      },
+    ])
+  })
+
+  it('rejects field policy updates that omit a default role', async () => {
+    const handler = routes.get('PUT /api/after-sales/runtime-admin/field-policies')
+    const res = new FakeResponse()
+
+    seedAfterSalesInstallRow(db)
+
+    await handler?.(buildReq({
+      body: {
+        roles: [
+          { roleSlug: 'customer_service', visibility: 'hidden', editability: 'readonly' },
+          { roleSlug: 'technician', visibility: 'hidden', editability: 'readonly' },
+          { roleSlug: 'supervisor', visibility: 'visible', editability: 'readonly' },
+          { roleSlug: 'finance', visibility: 'visible', editability: 'editable' },
+          { roleSlug: 'admin', visibility: 'visible', editability: 'editable' },
+        ],
+      },
+    }), res)
+
+    expect(res.statusCode).toBe(400)
+    expect(res.body).toEqual({
+      ok: false,
+      error: {
+        code: 'VALIDATION_FAILED',
+        message: 'field policies must include every default role exactly once',
+        details: {
+          expectedRoleSlugs: ['admin', 'customer_service', 'finance', 'supervisor', 'technician', 'viewer'],
+        },
       },
     })
   })

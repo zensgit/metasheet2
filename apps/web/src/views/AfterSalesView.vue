@@ -130,6 +130,171 @@
         </div>
       </section>
 
+      <section v-if="showRuntimeAdminSection" class="after-sales-view__runtime-admin-shell" id="after-sales-runtime-admin">
+        <article class="after-sales-view__card after-sales-view__card--wide">
+          <div class="after-sales-view__section-header">
+            <div>
+              <p class="after-sales-view__pill">Runtime admin</p>
+              <h2>Automation and field policy controls</h2>
+              <p>
+                这里仅提供售后插件本地运行时管理：自动化开关和 refundAmount 字段策略。
+              </p>
+            </div>
+            <button
+              class="after-sales-view__ghost-btn"
+              :disabled="runtimeAdminLoading"
+              @click="refreshRuntimeAdmin"
+            >
+              {{ runtimeAdminLoading ? 'Refreshing...' : 'Refresh runtime admin' }}
+            </button>
+          </div>
+
+          <p v-if="runtimeAdminLoading" class="after-sales-view__muted-state">Loading runtime admin controls...</p>
+          <p v-else-if="runtimeAdminError" class="after-sales-view__inline-error">
+            {{ runtimeAdminError }}
+          </p>
+          <template v-else-if="runtimeAdminDraft">
+            <section class="after-sales-view__runtime-admin-grid">
+              <article class="after-sales-view__runtime-admin-card">
+                <div class="after-sales-view__runtime-admin-card-header">
+                  <div>
+                    <p class="after-sales-view__pill">Automations</p>
+                    <h3>Default automation rules</h3>
+                    <p>
+                      Toggle the built-in after-sales workflows without changing their trigger or action shape.
+                    </p>
+                  </div>
+                </div>
+
+                <p class="after-sales-view__runtime-admin-meta">
+                  Project <code>{{ runtimeAdminDraft.projectId }}</code>
+                </p>
+
+                <div class="after-sales-view__runtime-admin-list">
+                  <label
+                    v-for="automation in runtimeAdminAutomationDraft"
+                    :key="automation.id"
+                    class="after-sales-view__runtime-admin-row"
+                    :for="`after-sales-runtime-admin-automation-${automation.id}`"
+                  >
+                    <div class="after-sales-view__runtime-admin-row-copy">
+                      <strong>{{ automation.name }}</strong>
+                      <span>{{ automation.triggerEvent }}</span>
+                    </div>
+                    <input
+                      :id="`after-sales-runtime-admin-automation-${automation.id}`"
+                      v-model="automation.enabled"
+                      class="after-sales-view__runtime-admin-switch"
+                      type="checkbox"
+                    />
+                  </label>
+                </div>
+
+                <div class="after-sales-view__action-row after-sales-view__action-row--compact">
+                  <button
+                    id="after-sales-runtime-admin-save-automations"
+                    class="after-sales-view__primary-btn"
+                    :disabled="runtimeAdminLoading || runtimeAdminAutomationsSaving || runtimeAdminAutomationDraft.length === 0"
+                    @click="saveRuntimeAdminAutomations"
+                  >
+                    {{ runtimeAdminAutomationsSaving ? 'Saving...' : 'Save automations' }}
+                  </button>
+                  <button
+                    id="after-sales-runtime-admin-reset-automations"
+                    class="after-sales-view__ghost-btn"
+                    :disabled="runtimeAdminLoading || runtimeAdminAutomationsSaving || runtimeAdminAutomationDraft.length === 0"
+                    @click="resetRuntimeAdminAutomations"
+                  >
+                    Reset automations
+                  </button>
+                </div>
+
+                <p v-if="runtimeAdminAutomationsError" class="after-sales-view__inline-error">
+                  {{ runtimeAdminAutomationsError }}
+                </p>
+                <p v-else-if="runtimeAdminAutomationsSuccess" class="after-sales-view__inline-success">
+                  {{ runtimeAdminAutomationsSuccess }}
+                </p>
+              </article>
+
+              <article class="after-sales-view__runtime-admin-card">
+                <div class="after-sales-view__runtime-admin-card-header">
+                  <div>
+                    <p class="after-sales-view__pill">Field policies</p>
+                    <h3>refundAmount role matrix</h3>
+                    <p>
+                      Edit the role-specific visibility and editability rows for <code>serviceTicket.refundAmount</code>.
+                    </p>
+                  </div>
+                </div>
+
+                <p class="after-sales-view__runtime-admin-meta" v-if="runtimeAdminFieldPolicyDraft">
+                  <code>{{ runtimeAdminFieldPolicyDraft.objectId }}.{{ runtimeAdminFieldPolicyDraft.field }}</code>
+                </p>
+
+                <div class="after-sales-view__runtime-admin-list">
+                  <label
+                    v-for="role in runtimeAdminFieldPolicyRoles"
+                    :key="role.roleSlug"
+                    class="after-sales-view__runtime-admin-row after-sales-view__runtime-admin-row--policy"
+                  >
+                    <div class="after-sales-view__runtime-admin-row-copy">
+                      <strong>{{ role.roleLabel }}</strong>
+                      <span>{{ role.roleSlug }}</span>
+                    </div>
+                    <select
+                      :id="`after-sales-runtime-admin-field-policy-${role.roleSlug}-visibility`"
+                      v-model="role.visibility"
+                      class="after-sales-view__field-input after-sales-view__runtime-admin-select"
+                      @change="syncRuntimeAdminRolePolicy(role)"
+                    >
+                      <option value="visible">Visible</option>
+                      <option value="hidden">Hidden</option>
+                    </select>
+                    <select
+                      :id="`after-sales-runtime-admin-field-policy-${role.roleSlug}-editability`"
+                      v-model="role.editability"
+                      class="after-sales-view__field-input after-sales-view__runtime-admin-select"
+                      :disabled="role.visibility === 'hidden'"
+                    >
+                      <option value="editable">Editable</option>
+                      <option value="readonly">Readonly</option>
+                    </select>
+                  </label>
+                </div>
+
+                <div class="after-sales-view__action-row after-sales-view__action-row--compact">
+                  <button
+                    id="after-sales-runtime-admin-save-field-policies"
+                    class="after-sales-view__primary-btn"
+                    :disabled="runtimeAdminLoading || runtimeAdminFieldPoliciesSaving || runtimeAdminFieldPolicyRoles.length === 0"
+                    @click="saveRuntimeAdminFieldPolicies"
+                  >
+                    {{ runtimeAdminFieldPoliciesSaving ? 'Saving...' : 'Save field policies' }}
+                  </button>
+                  <button
+                    id="after-sales-runtime-admin-reset-field-policies"
+                    class="after-sales-view__ghost-btn"
+                    :disabled="runtimeAdminLoading || runtimeAdminFieldPoliciesSaving || runtimeAdminFieldPolicyRoles.length === 0"
+                    @click="resetRuntimeAdminFieldPolicies"
+                  >
+                    Reset field policies
+                  </button>
+                </div>
+
+                <p v-if="runtimeAdminFieldPoliciesError" class="after-sales-view__inline-error">
+                  {{ runtimeAdminFieldPoliciesError }}
+                </p>
+                <p v-else-if="runtimeAdminFieldPoliciesSuccess" class="after-sales-view__inline-success">
+                  {{ runtimeAdminFieldPoliciesSuccess }}
+                </p>
+              </article>
+            </section>
+          </template>
+          <p v-else class="after-sales-view__muted-state">Runtime admin controls are not available yet.</p>
+        </article>
+      </section>
+
       <section v-if="isInstalled" class="after-sales-view__tickets-shell">
         <article class="after-sales-view__card after-sales-view__card--wide">
           <div class="after-sales-view__section-header">
@@ -2000,6 +2165,32 @@ interface TicketFieldPolicyResponse {
   }
 }
 
+interface RuntimeAdminAutomationRow {
+  id: string
+  name: string
+  triggerEvent: string
+  enabled: boolean
+}
+
+interface RuntimeAdminFieldPolicyRoleRow {
+  roleSlug: string
+  roleLabel: string
+  visibility: FieldVisibility
+  editability: FieldEditability
+}
+
+interface RuntimeAdminFieldPolicyDraft {
+  objectId: 'serviceTicket'
+  field: 'refundAmount'
+  roles: RuntimeAdminFieldPolicyRoleRow[]
+}
+
+interface RuntimeAdminResponse {
+  projectId: string
+  automations: RuntimeAdminAutomationRow[]
+  fieldPolicies: RuntimeAdminFieldPolicyDraft
+}
+
 const TEMPLATE_ID = 'after-sales-default'
 const DEFAULT_CONFIG = {
   enableWarranty: true,
@@ -2069,6 +2260,18 @@ const serviceRecords = ref<ServiceRecordViewModel[]>([])
 const configDraft = ref({ ...DEFAULT_CONFIG })
 const baselineConfigDraft = ref({ ...DEFAULT_CONFIG })
 const ticketFieldPolicies = ref<TicketFieldPolicyResponse | null>(null)
+const runtimeAdminLoading = ref(false)
+const runtimeAdminAccessDenied = ref(false)
+const runtimeAdminError = ref('')
+const runtimeAdminAutomationsError = ref('')
+const runtimeAdminAutomationsSuccess = ref('')
+const runtimeAdminFieldPoliciesError = ref('')
+const runtimeAdminFieldPoliciesSuccess = ref('')
+const runtimeAdminAutomationsSaving = ref(false)
+const runtimeAdminFieldPoliciesSaving = ref(false)
+const runtimeAdminLoaded = ref<RuntimeAdminResponse | null>(null)
+const runtimeAdminAutomationDraft = ref<RuntimeAdminAutomationRow[]>([])
+const runtimeAdminFieldPolicyDraft = ref<RuntimeAdminFieldPolicyDraft | null>(null)
 const ticketDraft = ref<TicketDraft>(createTicketDraft())
 const ticketEditingId = ref('')
 const ticketEditDraft = ref<TicketEditDraft>(createTicketEditDraft())
@@ -2114,6 +2317,12 @@ const createdObjectLabels = computed(() => current.value.installResult?.createdO
 const createdViewLabels = computed(() => current.value.installResult?.createdViews ?? [])
 const isInstalled = computed(() => current.value.status === 'installed' || current.value.status === 'partial')
 const isDegraded = computed(() => current.value.status === 'partial' || current.value.status === 'failed')
+const hasRuntimeAdminSupport = computed(
+  () => Array.isArray(manifest.value?.workflows) && manifest.value.workflows.some((workflow) => workflow && workflow.id === 'sla-watcher'),
+)
+const showRuntimeAdminSection = computed(
+  () => isInstalled.value && hasRuntimeAdminSupport.value && !runtimeAdminAccessDenied.value,
+)
 const refundAmountPolicy = computed<TicketFieldPolicy>(
   () => ticketFieldPolicies.value?.fields?.serviceTicket?.refundAmount ?? DEFAULT_TICKET_FIELD_POLICY,
 )
@@ -2121,6 +2330,10 @@ const isRefundAmountHidden = computed(() => refundAmountPolicy.value.visibility 
 const isRefundAmountEditable = computed(
   () => refundAmountPolicy.value.visibility === 'visible' && refundAmountPolicy.value.editability === 'editable',
 )
+const runtimeAdminDraft = computed(() =>
+  runtimeAdminLoaded.value ? { projectId: runtimeAdminLoaded.value.projectId } : null,
+)
+const runtimeAdminFieldPolicyRoles = computed(() => runtimeAdminFieldPolicyDraft.value?.roles ?? [])
 const hasCustomerProjection = computed(() =>
   Array.isArray(manifest.value?.objects) &&
   manifest.value.objects.some((object) => object && object.id === 'customer'),
@@ -2218,12 +2431,23 @@ function extractMessage(payload: unknown, fallback: string): string {
 }
 
 async function readEnvelope<T>(path: string, options?: RequestInit): Promise<T> {
-  const response = await apiFetch(path, options)
-  const payload = await response.json().catch(() => null)
+  const { response, payload } = await readEnvelopeResponse<T>(path, options)
   if (!response.ok) {
     throw new Error(extractMessage(payload, `${response.status} ${response.statusText}`))
   }
   return ((payload as ApiEnvelope<T> | null)?.data ?? null) as T
+}
+
+async function readEnvelopeResponse<T>(
+  path: string,
+  options?: RequestInit,
+): Promise<{ response: Response; payload: ApiEnvelope<T> | null }> {
+  const response = await apiFetch(path, options)
+  const payload = await response.json().catch(() => null)
+  return {
+    response,
+    payload: payload as ApiEnvelope<T> | null,
+  }
 }
 
 function toPositiveNumber(value: unknown, fallback: number): number {
@@ -2274,6 +2498,85 @@ function formatRecordDate(value: unknown): string {
     timeStyle: 'short',
     hour12: false,
   }).format(parsed)
+}
+
+function cloneRuntimeAdminResponse(response: RuntimeAdminResponse): RuntimeAdminResponse {
+  return {
+    projectId: response.projectId,
+    automations: Array.isArray(response.automations)
+      ? response.automations.map((automation) => ({ ...automation }))
+      : [],
+    fieldPolicies: {
+      objectId: response.fieldPolicies.objectId,
+      field: response.fieldPolicies.field,
+      roles: Array.isArray(response.fieldPolicies.roles)
+        ? response.fieldPolicies.roles.map((role) => ({ ...role }))
+        : [],
+    },
+  }
+}
+
+function resetRuntimeAdminDrafts() {
+  runtimeAdminLoaded.value = null
+  runtimeAdminAutomationDraft.value = []
+  runtimeAdminFieldPolicyDraft.value = null
+}
+
+function syncRuntimeAdminDraftsFromLoaded() {
+  if (!runtimeAdminLoaded.value) {
+    resetRuntimeAdminDrafts()
+    return
+  }
+
+  const cloned = cloneRuntimeAdminResponse(runtimeAdminLoaded.value)
+  runtimeAdminLoaded.value = cloned
+  runtimeAdminAutomationDraft.value = cloned.automations.map((automation) => ({ ...automation }))
+  runtimeAdminFieldPolicyDraft.value = {
+    objectId: cloned.fieldPolicies.objectId,
+    field: cloned.fieldPolicies.field,
+    roles: cloned.fieldPolicies.roles.map((role) => ({ ...role })),
+  }
+}
+
+function normalizeRuntimeAdminRolePolicy(role: RuntimeAdminFieldPolicyRoleRow): RuntimeAdminFieldPolicyRoleRow {
+  return {
+    roleSlug: toText(role.roleSlug),
+    roleLabel: toText(role.roleLabel, role.roleSlug),
+    visibility: role.visibility === 'hidden' ? 'hidden' : 'visible',
+    editability:
+      role.visibility === 'hidden'
+        ? 'readonly'
+        : role.editability === 'editable'
+          ? 'editable'
+          : 'readonly',
+  }
+}
+
+function normalizeRuntimeAdminResponse(response: RuntimeAdminResponse): RuntimeAdminResponse {
+  return {
+    projectId: toText(response.projectId),
+    automations: Array.isArray(response.automations)
+      ? response.automations.map((automation) => ({
+          id: toText(automation.id),
+          name: toText(automation.name, automation.id),
+          triggerEvent: toText(automation.triggerEvent),
+          enabled: automation.enabled !== false,
+        }))
+      : [],
+    fieldPolicies: {
+      objectId: 'serviceTicket',
+      field: 'refundAmount',
+      roles: Array.isArray(response.fieldPolicies?.roles)
+        ? response.fieldPolicies.roles.map((role) => normalizeRuntimeAdminRolePolicy(role))
+        : [],
+    },
+  }
+}
+
+function syncRuntimeAdminRolePolicy(role: RuntimeAdminFieldPolicyRoleRow) {
+  if (role.visibility === 'hidden') {
+    role.editability = 'readonly'
+  }
 }
 
 function normalizeConfigDraft(config?: Record<string, unknown> | null) {
@@ -3842,6 +4145,157 @@ async function loadFieldPoliciesForCurrentState(state: CurrentResponse): Promise
   }
 }
 
+async function loadRuntimeAdminForCurrentState(state: CurrentResponse): Promise<void> {
+  runtimeAdminError.value = ''
+  runtimeAdminAutomationsError.value = ''
+  runtimeAdminFieldPoliciesError.value = ''
+
+  if (state.status !== 'installed' && state.status !== 'partial') {
+    runtimeAdminAccessDenied.value = false
+    resetRuntimeAdminDrafts()
+    return
+  }
+
+  if (!hasRuntimeAdminSupport.value) {
+    runtimeAdminAccessDenied.value = false
+    resetRuntimeAdminDrafts()
+    return
+  }
+
+  runtimeAdminLoading.value = true
+
+  try {
+    const { response, payload } = await readEnvelopeResponse<RuntimeAdminResponse>('/api/after-sales/runtime-admin')
+
+    if (response.status === 403) {
+      runtimeAdminAccessDenied.value = true
+      resetRuntimeAdminDrafts()
+      return
+    }
+
+    runtimeAdminAccessDenied.value = false
+
+    if (!response.ok) {
+      throw new Error(extractMessage(payload, `${response.status} ${response.statusText}`))
+    }
+
+    const runtimeAdminPayload = (payload as ApiEnvelope<RuntimeAdminResponse> | null)?.data
+    if (!runtimeAdminPayload) {
+      throw new Error('Missing runtime admin payload')
+    }
+
+    runtimeAdminLoaded.value = normalizeRuntimeAdminResponse(runtimeAdminPayload)
+    syncRuntimeAdminDraftsFromLoaded()
+  } catch (err: unknown) {
+    runtimeAdminAccessDenied.value = false
+    runtimeAdminError.value = err instanceof Error ? err.message : 'Failed to load runtime admin controls'
+    resetRuntimeAdminDrafts()
+  } finally {
+    runtimeAdminLoading.value = false
+  }
+}
+
+function resetRuntimeAdminAutomations() {
+  if (!runtimeAdminLoaded.value || runtimeAdminAutomationsSaving.value || runtimeAdminLoading.value) {
+    return
+  }
+
+  runtimeAdminAutomationDraft.value = runtimeAdminLoaded.value.automations.map((automation) => ({ ...automation }))
+  runtimeAdminAutomationsError.value = ''
+  runtimeAdminAutomationsSuccess.value = ''
+}
+
+function resetRuntimeAdminFieldPolicies() {
+  if (!runtimeAdminLoaded.value || runtimeAdminFieldPoliciesSaving.value || runtimeAdminLoading.value) {
+    return
+  }
+
+  runtimeAdminFieldPolicyDraft.value = {
+    objectId: runtimeAdminLoaded.value.fieldPolicies.objectId,
+    field: runtimeAdminLoaded.value.fieldPolicies.field,
+    roles: runtimeAdminLoaded.value.fieldPolicies.roles.map((role) => ({ ...role })),
+  }
+  runtimeAdminFieldPoliciesError.value = ''
+  runtimeAdminFieldPoliciesSuccess.value = ''
+}
+
+async function refreshRuntimeAdmin() {
+  if (runtimeAdminLoading.value) {
+    return
+  }
+  await loadRuntimeAdminForCurrentState(current.value)
+}
+
+async function saveRuntimeAdminAutomations() {
+  if (
+    runtimeAdminLoading.value ||
+    runtimeAdminAutomationsSaving.value ||
+    !runtimeAdminLoaded.value ||
+    runtimeAdminAutomationDraft.value.length === 0
+  ) {
+    return
+  }
+
+  runtimeAdminAutomationsSaving.value = true
+  runtimeAdminAutomationsError.value = ''
+  runtimeAdminAutomationsSuccess.value = ''
+
+  try {
+    await readEnvelope<RuntimeAdminResponse>('/api/after-sales/runtime-admin/automations', {
+      method: 'PUT',
+      body: JSON.stringify({
+        automations: runtimeAdminAutomationDraft.value.map((automation) => ({
+          id: automation.id,
+          enabled: automation.enabled,
+        })),
+      }),
+    })
+    await loadRuntimeAdminForCurrentState(current.value)
+    runtimeAdminAutomationsSuccess.value = 'Saved automation controls'
+  } catch (err: unknown) {
+    runtimeAdminAutomationsError.value = err instanceof Error ? err.message : 'Failed to save automations'
+  } finally {
+    runtimeAdminAutomationsSaving.value = false
+  }
+}
+
+async function saveRuntimeAdminFieldPolicies() {
+  if (
+    runtimeAdminLoading.value ||
+    runtimeAdminFieldPoliciesSaving.value ||
+    !runtimeAdminFieldPolicyDraft.value ||
+    runtimeAdminFieldPolicyRoles.value.length === 0
+  ) {
+    return
+  }
+
+  runtimeAdminFieldPoliciesSaving.value = true
+  runtimeAdminFieldPoliciesError.value = ''
+  runtimeAdminFieldPoliciesSuccess.value = ''
+
+  try {
+    await readEnvelope<RuntimeAdminResponse>('/api/after-sales/runtime-admin/field-policies', {
+      method: 'PUT',
+      body: JSON.stringify({
+        roles: runtimeAdminFieldPolicyDraft.value.roles.map((role) => ({
+          roleSlug: role.roleSlug,
+          visibility: role.visibility,
+          editability: role.editability,
+        })),
+      }),
+    })
+    await Promise.all([
+      loadRuntimeAdminForCurrentState(current.value),
+      loadFieldPoliciesForCurrentState(current.value),
+    ])
+    runtimeAdminFieldPoliciesSuccess.value = 'Saved field policies'
+  } catch (err: unknown) {
+    runtimeAdminFieldPoliciesError.value = err instanceof Error ? err.message : 'Failed to save field policies'
+  } finally {
+    runtimeAdminFieldPoliciesSaving.value = false
+  }
+}
+
 async function deleteTicket(ticket: TicketViewModel) {
   if (!ticket.id || ticketDeletingId.value) {
     return
@@ -3920,6 +4374,7 @@ async function refreshCurrentState() {
     current.value = await readEnvelope<CurrentResponse>('/api/after-sales/projects/current')
     baselineConfigDraft.value = normalizeConfigDraft(current.value.config)
     await Promise.all([
+      loadRuntimeAdminForCurrentState(current.value),
       loadFieldPoliciesForCurrentState(current.value),
       loadTicketsForCurrentState(current.value),
       loadInstalledAssetsForCurrentState(current.value),
@@ -3950,6 +4405,11 @@ async function loadView() {
   serviceRecordsError.value = ''
   serviceRecordSubmitError.value = ''
   serviceRecordSubmitSuccess.value = ''
+  runtimeAdminError.value = ''
+  runtimeAdminAutomationsError.value = ''
+  runtimeAdminAutomationsSuccess.value = ''
+  runtimeAdminFieldPoliciesError.value = ''
+  runtimeAdminFieldPoliciesSuccess.value = ''
   try {
     const [nextManifest, nextCurrent] = await Promise.all([
       readEnvelope<AfterSalesManifest>('/api/after-sales/app-manifest'),
@@ -3960,6 +4420,7 @@ async function loadView() {
     baselineConfigDraft.value = normalizeConfigDraft(nextCurrent.config)
     configDraft.value = { ...baselineConfigDraft.value }
     await Promise.all([
+      loadRuntimeAdminForCurrentState(nextCurrent),
       loadFieldPoliciesForCurrentState(nextCurrent),
       loadTicketsForCurrentState(nextCurrent),
       loadInstalledAssetsForCurrentState(nextCurrent),
@@ -4115,6 +4576,7 @@ onMounted(() => {
 .after-sales-view__error-banner,
 .after-sales-view__warning-banner,
 .after-sales-view__config-shell,
+.after-sales-view__runtime-admin-shell,
 .after-sales-view__onboarding,
 .after-sales-view__tickets-shell,
 .after-sales-view__installed-assets-shell,
@@ -4176,6 +4638,79 @@ onMounted(() => {
 
 .after-sales-view__card--wide {
   grid-column: 1 / -1;
+}
+
+.after-sales-view__runtime-admin-grid {
+  display: grid;
+  gap: 16px;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+}
+
+.after-sales-view__runtime-admin-card {
+  display: grid;
+  gap: 14px;
+  padding: 18px;
+  border-radius: 16px;
+  border: 1px solid #dbeafe;
+  background: linear-gradient(180deg, rgba(239, 246, 255, 0.85), rgba(255, 255, 255, 0.98));
+}
+
+.after-sales-view__runtime-admin-card-header h3 {
+  margin: 0 0 8px;
+  font-size: 16px;
+  color: #0f172a;
+}
+
+.after-sales-view__runtime-admin-card-header p,
+.after-sales-view__runtime-admin-meta {
+  margin: 0;
+  color: #475569;
+  line-height: 1.6;
+}
+
+.after-sales-view__runtime-admin-list {
+  display: grid;
+  gap: 10px;
+}
+
+.after-sales-view__runtime-admin-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+  padding: 12px 14px;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.92);
+  border: 1px solid rgba(148, 163, 184, 0.2);
+}
+
+.after-sales-view__runtime-admin-row--policy {
+  grid-template-columns: minmax(0, 1fr) minmax(140px, 160px) minmax(140px, 160px);
+}
+
+.after-sales-view__runtime-admin-row-copy {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.after-sales-view__runtime-admin-row-copy strong {
+  color: #0f172a;
+}
+
+.after-sales-view__runtime-admin-row-copy span {
+  color: #64748b;
+  font-size: 13px;
+}
+
+.after-sales-view__runtime-admin-switch {
+  width: 18px;
+  height: 18px;
+  justify-self: end;
+}
+
+.after-sales-view__runtime-admin-select {
+  min-width: 0;
 }
 
 .after-sales-view__onboarding-card {

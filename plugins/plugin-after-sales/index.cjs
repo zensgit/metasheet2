@@ -21,6 +21,11 @@ const {
   resolveFieldPolicyRoleSlugs,
 } = require('./lib/field-policies.cjs')
 const {
+  buildAutomationUpdateRules,
+  buildFieldPolicyUpdatePayload,
+  loadRuntimeAdminState,
+} = require('./lib/runtime-admin.cjs')
+const {
   buildCreateTicketCommand,
   buildCustomerCommand,
   buildFollowUpCommand,
@@ -221,6 +226,35 @@ function hasAfterSalesReadAccess(req) {
     permissions.has('after_sales:write') ||
     permissions.has('after_sales:admin')
   )
+}
+
+function resolvePluginId(context) {
+  return context && context.metadata && typeof context.metadata.name === 'string' && context.metadata.name.trim()
+    ? context.metadata.name.trim()
+    : AFTER_SALES_PLUGIN_ID
+}
+
+function getAutomationRegistryService(context) {
+  return context &&
+    context.services &&
+    context.services.automationRegistry &&
+    typeof context.services.automationRegistry.listRules === 'function' &&
+    typeof context.services.automationRegistry.upsertRules === 'function'
+    ? context.services.automationRegistry
+    : null
+}
+
+function getRbacProvisioningService(context) {
+  return context &&
+    context.services &&
+    context.services.rbacProvisioning &&
+    typeof context.services.rbacProvisioning.applyRoleMatrix === 'function'
+    ? context.services.rbacProvisioning
+    : null
+}
+
+function getDefaultBlueprint() {
+  return buildDefaultBlueprint(appManifest)
 }
 
 /**
@@ -652,7 +686,7 @@ module.exports = {
               : {}
 
           const tenantId = getTenantId(req, context.logger)
-          const blueprint = buildDefaultBlueprint(appManifest)
+          const blueprint = getDefaultBlueprint()
 
           const result = await installer.runInstall({
             context,
@@ -738,6 +772,220 @@ module.exports = {
           res.status(500).json({
             ok: false,
             error: { code: 'INTERNAL_ERROR', message: 'Failed to load after-sales field policies' },
+          })
+        }
+      },
+    )
+
+    context.api.http.addRoute(
+      'GET',
+      '/api/after-sales/runtime-admin',
+      async (req, res) => {
+        try {
+          const userId = getUserId(req)
+          if (!userId) {
+            sendUnauthorized(res)
+            return
+          }
+          if (!hasInstallAdminAccess(req)) {
+            sendForbidden(res)
+            return
+          }
+
+          const automationRegistry = getAutomationRegistryService(context)
+          if (!automationRegistry) {
+            throw new Error('automationRegistry service unavailable on plugin context')
+          }
+
+          const tenantId = getTenantId(req, context.logger)
+          const current = await installer.loadCurrent(context, tenantId, appManifest.id)
+          if (!current || !isOperationalAfterSalesStatus(current.status)) {
+            res.status(409).json({
+              ok: false,
+              error: {
+                code: 'AFTER_SALES_NOT_INSTALLED',
+                message: 'After-sales must be installed before managing runtime admin state',
+              },
+            })
+            return
+          }
+
+          const projectId = current.projectId || installer.getProjectId(tenantId, appManifest.id)
+          const data = await loadRuntimeAdminState({
+            database: context.api.database,
+            automationRegistry,
+            blueprint: getDefaultBlueprint(),
+            manifest: appManifest,
+            tenantId,
+            pluginId: resolvePluginId(context),
+            appId: appManifest.id,
+            projectId,
+          })
+
+          res.json({
+            ok: true,
+            data,
+          })
+        } catch (err) {
+          logger.error && logger.error('after-sales runtime admin lookup failed', err)
+          res.status(500).json({
+            ok: false,
+            error: { code: 'INTERNAL_ERROR', message: 'Failed to load after-sales runtime admin state' },
+          })
+        }
+      },
+    )
+
+    context.api.http.addRoute(
+      'PUT',
+      '/api/after-sales/runtime-admin/automations',
+      async (req, res) => {
+        try {
+          const userId = getUserId(req)
+          if (!userId) {
+            sendUnauthorized(res)
+            return
+          }
+          if (!hasInstallAdminAccess(req)) {
+            sendForbidden(res)
+            return
+          }
+
+          const automationRegistry = getAutomationRegistryService(context)
+          if (!automationRegistry) {
+            throw new Error('automationRegistry service unavailable on plugin context')
+          }
+
+          const tenantId = getTenantId(req, context.logger)
+          const current = await installer.loadCurrent(context, tenantId, appManifest.id)
+          if (!current || !isOperationalAfterSalesStatus(current.status)) {
+            res.status(409).json({
+              ok: false,
+              error: {
+                code: 'AFTER_SALES_NOT_INSTALLED',
+                message: 'After-sales must be installed before updating runtime automations',
+              },
+            })
+            return
+          }
+
+          const blueprint = getDefaultBlueprint()
+          const body = req && req.body && typeof req.body === 'object' ? req.body : {}
+          const rules = buildAutomationUpdateRules(blueprint, appManifest, body.automations)
+          const projectId = current.projectId || installer.getProjectId(tenantId, appManifest.id)
+
+          await automationRegistry.upsertRules({
+            pluginId: resolvePluginId(context),
+            appId: appManifest.id,
+            tenantId,
+            projectId,
+            templateId: blueprint.id,
+            rules,
+          })
+
+          const data = await loadRuntimeAdminState({
+            database: context.api.database,
+            automationRegistry,
+            blueprint,
+            manifest: appManifest,
+            tenantId,
+            pluginId: resolvePluginId(context),
+            appId: appManifest.id,
+            projectId,
+          })
+
+          res.json({
+            ok: true,
+            data,
+          })
+        } catch (err) {
+          if (err && err.code === 'VALIDATION_FAILED') {
+            sendBadRequest(res, err)
+            return
+          }
+          logger.error && logger.error('after-sales runtime automation update failed', err)
+          res.status(500).json({
+            ok: false,
+            error: { code: 'INTERNAL_ERROR', message: 'Failed to update after-sales automations' },
+          })
+        }
+      },
+    )
+
+    context.api.http.addRoute(
+      'PUT',
+      '/api/after-sales/runtime-admin/field-policies',
+      async (req, res) => {
+        try {
+          const userId = getUserId(req)
+          if (!userId) {
+            sendUnauthorized(res)
+            return
+          }
+          if (!hasInstallAdminAccess(req)) {
+            sendForbidden(res)
+            return
+          }
+
+          const rbacProvisioning = getRbacProvisioningService(context)
+          const automationRegistry = getAutomationRegistryService(context)
+          if (!rbacProvisioning) {
+            throw new Error('rbacProvisioning service unavailable on plugin context')
+          }
+          if (!automationRegistry) {
+            throw new Error('automationRegistry service unavailable on plugin context')
+          }
+
+          const tenantId = getTenantId(req, context.logger)
+          const current = await installer.loadCurrent(context, tenantId, appManifest.id)
+          if (!current || !isOperationalAfterSalesStatus(current.status)) {
+            res.status(409).json({
+              ok: false,
+              error: {
+                code: 'AFTER_SALES_NOT_INSTALLED',
+                message: 'After-sales must be installed before updating field policies',
+              },
+            })
+            return
+          }
+
+          const blueprint = getDefaultBlueprint()
+          const body = req && req.body && typeof req.body === 'object' ? req.body : {}
+          const roleMatrix = buildFieldPolicyUpdatePayload(blueprint, body.roles)
+          const projectId = current.projectId || installer.getProjectId(tenantId, appManifest.id)
+
+          await rbacProvisioning.applyRoleMatrix({
+            pluginId: resolvePluginId(context),
+            appId: appManifest.id,
+            tenantId,
+            projectId,
+            matrix: roleMatrix,
+          })
+
+          const data = await loadRuntimeAdminState({
+            database: context.api.database,
+            automationRegistry,
+            blueprint,
+            manifest: appManifest,
+            tenantId,
+            pluginId: resolvePluginId(context),
+            appId: appManifest.id,
+            projectId,
+          })
+
+          res.json({
+            ok: true,
+            data,
+          })
+        } catch (err) {
+          if (err && err.code === 'VALIDATION_FAILED') {
+            sendBadRequest(res, err)
+            return
+          }
+          logger.error && logger.error('after-sales runtime field policy update failed', err)
+          res.status(500).json({
+            ok: false,
+            error: { code: 'INTERNAL_ERROR', message: 'Failed to update after-sales field policies' },
           })
         }
       },

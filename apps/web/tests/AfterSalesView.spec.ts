@@ -39,6 +39,39 @@ function createFieldPoliciesResponse(
   })
 }
 
+function createRuntimeAdminResponse(options: {
+  projectId?: string
+  automations?: Array<{ id: string; name: string; triggerEvent: string; enabled: boolean }>
+  fieldPolicies?: Array<{
+    roleSlug: string
+    roleLabel: string
+    visibility: 'hidden' | 'visible'
+    editability: 'readonly' | 'editable'
+  }>
+} = {}) {
+  return createResponse({
+    projectId: options.projectId ?? 'tenant:after-sales',
+    automations:
+      options.automations ?? [
+        { id: 'ticket-triage', name: 'Ticket triage', triggerEvent: 'ticket.created', enabled: true },
+        { id: 'sla-watcher', name: 'SLA watcher', triggerEvent: 'ticket.overdue', enabled: true },
+        { id: 'refund-approval', name: 'Refund approval', triggerEvent: 'ticket.refundRequested', enabled: true },
+        { id: 'service-record-notify', name: 'Service record notify', triggerEvent: 'service.recorded', enabled: true },
+      ],
+    fieldPolicies: {
+      objectId: 'serviceTicket',
+      field: 'refundAmount',
+      roles:
+        options.fieldPolicies ?? [
+          { roleSlug: 'finance', roleLabel: 'Finance', visibility: 'visible', editability: 'editable' },
+          { roleSlug: 'supervisor', roleLabel: 'Supervisor', visibility: 'visible', editability: 'readonly' },
+          { roleSlug: 'customer_service', roleLabel: 'Customer Service', visibility: 'hidden', editability: 'readonly' },
+          { roleSlug: 'technician', roleLabel: 'Technician', visibility: 'hidden', editability: 'readonly' },
+        ],
+    },
+  })
+}
+
 async function flushUi(cycles = 4): Promise<void> {
   for (let i = 0; i < cycles; i += 1) {
     await Promise.resolve()
@@ -55,6 +88,17 @@ async function waitForText(container: HTMLElement, text: string, cycles = 24): P
   }
 
   throw new Error(`Timed out waiting for text: ${text}`)
+}
+
+async function waitForElementMissing(container: HTMLElement, selector: string, cycles = 24): Promise<void> {
+  for (let i = 0; i < cycles; i += 1) {
+    if (!container.querySelector(selector)) {
+      return
+    }
+    await flushUi(1)
+  }
+
+  throw new Error(`Timed out waiting for element to disappear: ${selector}`)
 }
 
 function mountAfterSalesView() {
@@ -84,6 +128,12 @@ async function setInputValue(input: HTMLInputElement, value: string): Promise<vo
 async function setSelectValue(select: HTMLSelectElement, value: string): Promise<void> {
   select.value = value
   select.dispatchEvent(new Event('change', { bubbles: true }))
+  await flushUi()
+}
+
+async function setCheckboxValue(input: HTMLInputElement, value: boolean): Promise<void> {
+  input.checked = value
+  input.dispatchEvent(new Event('change', { bubbles: true }))
   await flushUi()
 }
 
@@ -1292,6 +1342,657 @@ describe('AfterSalesView', () => {
     await setInputValue(inlineRefundInput!, '120.5')
     refundButton.click()
     await waitForText(container!, 'Requested refund for AF-001')
+  })
+
+  it('renders runtime admin controls when the manifest exposes the runtime-admin workflow', async () => {
+    apiFetchMock.mockImplementation(async (path: string) => {
+      if (path === '/api/after-sales/app-manifest') {
+        return createResponse({
+          id: 'after-sales-default',
+          displayName: 'After Sales',
+          platformDependencies: ['core-backend'],
+          objects: [],
+          workflows: [
+            { id: 'ticket-triage', name: 'Ticket Triage' },
+            { id: 'sla-watcher', name: 'SLA Watcher' },
+            { id: 'refund-approval', name: 'Refund Approval' },
+            { id: 'service-record-notify', name: 'Service Record Notification' },
+          ],
+        })
+      }
+
+      if (path === '/api/after-sales/projects/current') {
+        return createResponse({
+          status: 'installed',
+          projectId: 'tenant:after-sales',
+          displayName: 'After Sales',
+          config: {
+            defaultSlaHours: 24,
+            urgentSlaHours: 4,
+            followUpAfterDays: 7,
+          },
+          installResult: {
+            status: 'installed',
+            createdObjects: [],
+            createdViews: [],
+            warnings: [],
+            reportRef: 'install-runtime-admin',
+          },
+          reportRef: 'install-runtime-admin',
+        })
+      }
+
+      if (path === '/api/after-sales/runtime-admin') {
+        return createRuntimeAdminResponse()
+      }
+
+      if (path === '/api/after-sales/field-policies') {
+        return createFieldPoliciesResponse({
+          visibility: 'visible',
+          editability: 'editable',
+        })
+      }
+
+      if (path === '/api/after-sales/tickets') {
+        return createResponse({
+          projectId: 'tenant:after-sales',
+          count: 0,
+          tickets: [],
+        })
+      }
+
+      if (path === '/api/after-sales/installed-assets') {
+        return createResponse({ projectId: 'tenant:after-sales', count: 0, installedAssets: [] })
+      }
+
+      if (path === '/api/after-sales/customers') {
+        return createResponse({ projectId: 'tenant:after-sales', count: 0, customers: [] })
+      }
+
+      if (path === '/api/after-sales/follow-ups') {
+        return createResponse({ projectId: 'tenant:after-sales', count: 0, followUps: [] })
+      }
+
+      if (path === '/api/after-sales/service-records') {
+        return createResponse({ projectId: 'tenant:after-sales', count: 0, serviceRecords: [] })
+      }
+
+      throw new Error(`Unexpected request: ${path}`)
+    })
+
+    const mounted = mountAfterSalesView()
+    app = mounted.app
+    container = mounted.container
+
+    await waitForText(container, 'Default automation rules')
+
+    expect(container?.querySelector('#after-sales-runtime-admin')).not.toBeNull()
+    expect(container?.textContent).toContain('Default automation rules')
+    expect(container?.textContent).toContain('SLA Watcher')
+    expect(container?.textContent).toContain('refundAmount role matrix')
+  })
+
+  it('hides runtime admin controls when the backend denies access', async () => {
+    apiFetchMock.mockImplementation(async (path: string) => {
+      if (path === '/api/after-sales/app-manifest') {
+        return createResponse({
+          id: 'after-sales-default',
+          displayName: 'After Sales',
+          platformDependencies: ['core-backend'],
+          objects: [],
+          workflows: [
+            { id: 'ticket-triage', name: 'Ticket Triage' },
+            { id: 'sla-watcher', name: 'SLA Watcher' },
+            { id: 'refund-approval', name: 'Refund Approval' },
+            { id: 'service-record-notify', name: 'Service Record Notification' },
+          ],
+        })
+      }
+
+      if (path === '/api/after-sales/projects/current') {
+        return createResponse({
+          status: 'installed',
+          projectId: 'tenant:after-sales',
+          displayName: 'After Sales',
+          config: {
+            defaultSlaHours: 24,
+            urgentSlaHours: 4,
+            followUpAfterDays: 7,
+          },
+          installResult: {
+            status: 'installed',
+            createdObjects: [],
+            createdViews: [],
+            warnings: [],
+            reportRef: 'install-runtime-admin-403',
+          },
+          reportRef: 'install-runtime-admin-403',
+        })
+      }
+
+      if (path === '/api/after-sales/runtime-admin') {
+        return createResponse({ message: 'Forbidden' }, { ok: false, status: 403, statusText: 'Forbidden' })
+      }
+
+      if (path === '/api/after-sales/field-policies') {
+        return createFieldPoliciesResponse({
+          visibility: 'visible',
+          editability: 'editable',
+        })
+      }
+
+      if (path === '/api/after-sales/tickets') {
+        return createResponse({ projectId: 'tenant:after-sales', count: 0, tickets: [] })
+      }
+
+      if (path === '/api/after-sales/installed-assets') {
+        return createResponse({ projectId: 'tenant:after-sales', count: 0, installedAssets: [] })
+      }
+
+      if (path === '/api/after-sales/customers') {
+        return createResponse({ projectId: 'tenant:after-sales', count: 0, customers: [] })
+      }
+
+      if (path === '/api/after-sales/follow-ups') {
+        return createResponse({ projectId: 'tenant:after-sales', count: 0, followUps: [] })
+      }
+
+      if (path === '/api/after-sales/service-records') {
+        return createResponse({ projectId: 'tenant:after-sales', count: 0, serviceRecords: [] })
+      }
+
+      throw new Error(`Unexpected request: ${path}`)
+    })
+
+    const mounted = mountAfterSalesView()
+    app = mounted.app
+    container = mounted.container
+
+    await waitForElementMissing(container!, '#after-sales-runtime-admin')
+    expect(container?.textContent).not.toContain('Runtime admin')
+  })
+
+  it('saves runtime admin automation toggles with the selected payload', async () => {
+    let runtimeAdminLoads = 0
+    let savedPayload: unknown = null
+
+    apiFetchMock.mockImplementation(async (path: string, options?: RequestInit) => {
+      if (path === '/api/after-sales/app-manifest') {
+        return createResponse({
+          id: 'after-sales-default',
+          displayName: 'After Sales',
+          platformDependencies: ['core-backend'],
+          objects: [],
+          workflows: [
+            { id: 'ticket-triage', name: 'Ticket Triage' },
+            { id: 'sla-watcher', name: 'SLA Watcher' },
+            { id: 'refund-approval', name: 'Refund Approval' },
+            { id: 'service-record-notify', name: 'Service Record Notification' },
+          ],
+        })
+      }
+
+      if (path === '/api/after-sales/projects/current') {
+        return createResponse({
+          status: 'installed',
+          projectId: 'tenant:after-sales',
+          displayName: 'After Sales',
+          config: {
+            defaultSlaHours: 24,
+            urgentSlaHours: 4,
+            followUpAfterDays: 7,
+          },
+          installResult: {
+            status: 'installed',
+            createdObjects: [],
+            createdViews: [],
+            warnings: [],
+            reportRef: 'install-runtime-admin-save',
+          },
+          reportRef: 'install-runtime-admin-save',
+        })
+      }
+
+      if (path === '/api/after-sales/runtime-admin' && !options?.method) {
+        runtimeAdminLoads += 1
+        return createRuntimeAdminResponse({
+          automations:
+            runtimeAdminLoads === 1
+              ? [
+                  { id: 'ticket-triage', name: 'Ticket triage', triggerEvent: 'ticket.created', enabled: true },
+                  { id: 'sla-watcher', name: 'SLA watcher', triggerEvent: 'ticket.overdue', enabled: true },
+                  { id: 'refund-approval', name: 'Refund approval', triggerEvent: 'ticket.refundRequested', enabled: true },
+                  { id: 'service-record-notify', name: 'Service record notify', triggerEvent: 'service.recorded', enabled: true },
+                ]
+              : [
+                  { id: 'ticket-triage', name: 'Ticket triage', triggerEvent: 'ticket.created', enabled: true },
+                  { id: 'sla-watcher', name: 'SLA watcher', triggerEvent: 'ticket.overdue', enabled: false },
+                  { id: 'refund-approval', name: 'Refund approval', triggerEvent: 'ticket.refundRequested', enabled: true },
+                  { id: 'service-record-notify', name: 'Service record notify', triggerEvent: 'service.recorded', enabled: true },
+                ],
+        })
+      }
+
+      if (path === '/api/after-sales/runtime-admin/automations' && options?.method === 'PUT') {
+        savedPayload = JSON.parse(String(options.body || '{}'))
+        return createRuntimeAdminResponse({
+          automations: [
+            { id: 'ticket-triage', name: 'Ticket triage', triggerEvent: 'ticket.created', enabled: true },
+            { id: 'sla-watcher', name: 'SLA watcher', triggerEvent: 'ticket.overdue', enabled: false },
+            { id: 'refund-approval', name: 'Refund approval', triggerEvent: 'ticket.refundRequested', enabled: true },
+            { id: 'service-record-notify', name: 'Service record notify', triggerEvent: 'service.recorded', enabled: true },
+          ],
+        })
+      }
+
+      if (path === '/api/after-sales/field-policies') {
+        return createFieldPoliciesResponse({
+          visibility: 'visible',
+          editability: 'editable',
+        })
+      }
+
+      if (path === '/api/after-sales/tickets') {
+        return createResponse({ projectId: 'tenant:after-sales', count: 0, tickets: [] })
+      }
+
+      if (path === '/api/after-sales/installed-assets') {
+        return createResponse({ projectId: 'tenant:after-sales', count: 0, installedAssets: [] })
+      }
+
+      if (path === '/api/after-sales/customers') {
+        return createResponse({ projectId: 'tenant:after-sales', count: 0, customers: [] })
+      }
+
+      if (path === '/api/after-sales/follow-ups') {
+        return createResponse({ projectId: 'tenant:after-sales', count: 0, followUps: [] })
+      }
+
+      if (path === '/api/after-sales/service-records') {
+        return createResponse({ projectId: 'tenant:after-sales', count: 0, serviceRecords: [] })
+      }
+
+      throw new Error(`Unexpected request: ${path}`)
+    })
+
+    const mounted = mountAfterSalesView()
+    app = mounted.app
+    container = mounted.container
+
+    await waitForText(container, 'Default automation rules')
+
+    const toggle = container?.querySelector<HTMLInputElement>('#after-sales-runtime-admin-automation-sla-watcher')
+    expect(toggle).toBeTruthy()
+    if (!toggle) return
+
+    await setCheckboxValue(toggle, false)
+    findButton(container, 'Save automations').click()
+    await waitForText(container, 'Saved automation controls')
+
+    expect(savedPayload).toEqual({
+      automations: [
+        { id: 'ticket-triage', enabled: true },
+        { id: 'sla-watcher', enabled: false },
+        { id: 'refund-approval', enabled: true },
+        { id: 'service-record-notify', enabled: true },
+      ],
+    })
+    expect(toggle.checked).toBe(false)
+  })
+
+  it('saves runtime admin field policies and refreshes refund controls', async () => {
+    let fieldPolicyMode: 'hidden' | 'visible' = 'hidden'
+    let fieldPolicyEditability: 'readonly' | 'editable' = 'readonly'
+    let savePayload: unknown = null
+
+    apiFetchMock.mockImplementation(async (path: string, options?: RequestInit) => {
+      if (path === '/api/after-sales/app-manifest') {
+        return createResponse({
+          id: 'after-sales-default',
+          displayName: 'After Sales',
+          platformDependencies: ['core-backend'],
+          objects: [],
+          workflows: [
+            { id: 'ticket-triage', name: 'Ticket Triage' },
+            { id: 'sla-watcher', name: 'SLA Watcher' },
+            { id: 'refund-approval', name: 'Refund Approval' },
+            { id: 'service-record-notify', name: 'Service Record Notification' },
+          ],
+        })
+      }
+
+      if (path === '/api/after-sales/projects/current') {
+        return createResponse({
+          status: 'installed',
+          projectId: 'tenant:after-sales',
+          displayName: 'After Sales',
+          config: {
+            defaultSlaHours: 24,
+            urgentSlaHours: 4,
+            followUpAfterDays: 7,
+          },
+          installResult: {
+            status: 'installed',
+            createdObjects: [],
+            createdViews: [],
+            warnings: [],
+            reportRef: 'install-runtime-admin-field-policies',
+          },
+          reportRef: 'install-runtime-admin-field-policies',
+        })
+      }
+
+      if (path === '/api/after-sales/runtime-admin') {
+        return createRuntimeAdminResponse({
+          fieldPolicies: [
+            {
+              roleSlug: 'finance',
+              roleLabel: 'Finance',
+              visibility: fieldPolicyMode,
+              editability: fieldPolicyEditability,
+            },
+            {
+              roleSlug: 'supervisor',
+              roleLabel: 'Supervisor',
+              visibility: 'visible',
+              editability: 'readonly',
+            },
+            {
+              roleSlug: 'customer_service',
+              roleLabel: 'Customer Service',
+              visibility: 'hidden',
+              editability: 'readonly',
+            },
+            {
+              roleSlug: 'technician',
+              roleLabel: 'Technician',
+              visibility: 'hidden',
+              editability: 'readonly',
+            },
+          ],
+        })
+      }
+
+      if (path === '/api/after-sales/runtime-admin/field-policies' && options?.method === 'PUT') {
+        savePayload = JSON.parse(String(options.body || '{}'))
+        fieldPolicyMode = 'visible'
+        fieldPolicyEditability = 'editable'
+        return createRuntimeAdminResponse({
+          fieldPolicies: [
+            {
+              roleSlug: 'finance',
+              roleLabel: 'Finance',
+              visibility: fieldPolicyMode,
+              editability: fieldPolicyEditability,
+            },
+            {
+              roleSlug: 'supervisor',
+              roleLabel: 'Supervisor',
+              visibility: 'visible',
+              editability: 'readonly',
+            },
+            {
+              roleSlug: 'customer_service',
+              roleLabel: 'Customer Service',
+              visibility: 'hidden',
+              editability: 'readonly',
+            },
+            {
+              roleSlug: 'technician',
+              roleLabel: 'Technician',
+              visibility: 'hidden',
+              editability: 'readonly',
+            },
+          ],
+        })
+      }
+
+      if (path === '/api/after-sales/field-policies') {
+        return createFieldPoliciesResponse({
+          visibility: fieldPolicyMode,
+          editability: fieldPolicyEditability,
+        })
+      }
+
+      if (path === '/api/after-sales/tickets') {
+        return createResponse({
+          projectId: 'tenant:after-sales',
+          count: 1,
+          tickets: [
+            {
+              id: 'ticket-1',
+              version: 1,
+              data: {
+                ticketNo: 'AF-001',
+                title: 'Install compressor',
+                status: 'open',
+                refundStatus: '',
+                refundAmount: 88.5,
+              },
+            },
+          ],
+        })
+      }
+
+      if (path === '/api/after-sales/installed-assets') {
+        return createResponse({ projectId: 'tenant:after-sales', count: 0, installedAssets: [] })
+      }
+
+      if (path === '/api/after-sales/customers') {
+        return createResponse({ projectId: 'tenant:after-sales', count: 0, customers: [] })
+      }
+
+      if (path === '/api/after-sales/follow-ups') {
+        return createResponse({ projectId: 'tenant:after-sales', count: 0, followUps: [] })
+      }
+
+      if (path === '/api/after-sales/service-records') {
+        return createResponse({ projectId: 'tenant:after-sales', count: 0, serviceRecords: [] })
+      }
+
+      throw new Error(`Unexpected request: ${path}`)
+    })
+
+    const mounted = mountAfterSalesView()
+    app = mounted.app
+    container = mounted.container
+
+    await waitForText(container, 'refundAmount role matrix')
+    expect(container?.querySelector('#after-sales-ticket-refund-amount')).toBeNull()
+
+    const visibilitySelect = container?.querySelector<HTMLSelectElement>('#after-sales-runtime-admin-field-policy-finance-visibility')
+    const editabilitySelect = container?.querySelector<HTMLSelectElement>('#after-sales-runtime-admin-field-policy-finance-editability')
+    expect(visibilitySelect).toBeTruthy()
+    expect(editabilitySelect).toBeTruthy()
+    if (!visibilitySelect || !editabilitySelect) return
+
+    await setSelectValue(visibilitySelect, 'visible')
+    await setSelectValue(editabilitySelect, 'editable')
+    findButton(container, 'Save field policies').click()
+    await waitForText(container, 'Saved field policies')
+    await waitForText(container, '¥88.50')
+
+    expect(savePayload).toEqual({
+      roles: [
+        { roleSlug: 'finance', visibility: 'visible', editability: 'editable' },
+        { roleSlug: 'supervisor', visibility: 'visible', editability: 'readonly' },
+        { roleSlug: 'customer_service', visibility: 'hidden', editability: 'readonly' },
+        { roleSlug: 'technician', visibility: 'hidden', editability: 'readonly' },
+      ],
+    })
+    expect(container?.querySelector('#after-sales-ticket-refund-amount')).not.toBeNull()
+    expect(container?.querySelector<HTMLInputElement>('#after-sales-ticket-refund-amount')?.disabled).toBe(false)
+    expect(container?.querySelector<HTMLInputElement>('#after-sales-ticket-refund-request-ticket-1')?.disabled).toBe(false)
+  })
+
+  it('reloads the refund controls after a field-policy save', async () => {
+    let fieldPolicyVisible = false
+
+    apiFetchMock.mockImplementation(async (path: string, options?: RequestInit) => {
+      if (path === '/api/after-sales/app-manifest') {
+        return createResponse({
+          id: 'after-sales-default',
+          displayName: 'After Sales',
+          platformDependencies: ['core-backend'],
+          objects: [],
+          workflows: [
+            { id: 'ticket-triage', name: 'Ticket Triage' },
+            { id: 'sla-watcher', name: 'SLA Watcher' },
+            { id: 'refund-approval', name: 'Refund Approval' },
+            { id: 'service-record-notify', name: 'Service Record Notification' },
+          ],
+        })
+      }
+
+      if (path === '/api/after-sales/projects/current') {
+        return createResponse({
+          status: 'installed',
+          projectId: 'tenant:after-sales',
+          displayName: 'After Sales',
+          config: {
+            defaultSlaHours: 24,
+            urgentSlaHours: 4,
+            followUpAfterDays: 7,
+          },
+          installResult: {
+            status: 'installed',
+            createdObjects: [],
+            createdViews: [],
+            warnings: [],
+            reportRef: 'install-runtime-admin-refresh',
+          },
+          reportRef: 'install-runtime-admin-refresh',
+        })
+      }
+
+      if (path === '/api/after-sales/runtime-admin') {
+        return createRuntimeAdminResponse({
+          fieldPolicies: [
+            {
+              roleSlug: 'finance',
+              roleLabel: 'Finance',
+              visibility: fieldPolicyVisible ? 'visible' : 'hidden',
+              editability: fieldPolicyVisible ? 'editable' : 'readonly',
+            },
+            {
+              roleSlug: 'supervisor',
+              roleLabel: 'Supervisor',
+              visibility: 'visible',
+              editability: 'readonly',
+            },
+            {
+              roleSlug: 'customer_service',
+              roleLabel: 'Customer Service',
+              visibility: 'hidden',
+              editability: 'readonly',
+            },
+            {
+              roleSlug: 'technician',
+              roleLabel: 'Technician',
+              visibility: 'hidden',
+              editability: 'readonly',
+            },
+          ],
+        })
+      }
+
+      if (path === '/api/after-sales/runtime-admin/field-policies' && options?.method === 'PUT') {
+        fieldPolicyVisible = true
+        return createRuntimeAdminResponse({
+          fieldPolicies: [
+            {
+              roleSlug: 'finance',
+              roleLabel: 'Finance',
+              visibility: 'visible',
+              editability: 'editable',
+            },
+            {
+              roleSlug: 'supervisor',
+              roleLabel: 'Supervisor',
+              visibility: 'visible',
+              editability: 'readonly',
+            },
+            {
+              roleSlug: 'customer_service',
+              roleLabel: 'Customer Service',
+              visibility: 'hidden',
+              editability: 'readonly',
+            },
+            {
+              roleSlug: 'technician',
+              roleLabel: 'Technician',
+              visibility: 'hidden',
+              editability: 'readonly',
+            },
+          ],
+        })
+      }
+
+      if (path === '/api/after-sales/field-policies') {
+        return createFieldPoliciesResponse({
+          visibility: fieldPolicyVisible ? 'visible' : 'hidden',
+          editability: fieldPolicyVisible ? 'editable' : 'readonly',
+        })
+      }
+
+      if (path === '/api/after-sales/tickets') {
+        return createResponse({
+          projectId: 'tenant:after-sales',
+          count: 1,
+          tickets: [
+            {
+              id: 'ticket-1',
+              version: 1,
+              data: {
+                ticketNo: 'AF-001',
+                title: 'Install compressor',
+                status: 'open',
+                refundStatus: '',
+                refundAmount: 88.5,
+              },
+            },
+          ],
+        })
+      }
+
+      if (path === '/api/after-sales/installed-assets') {
+        return createResponse({ projectId: 'tenant:after-sales', count: 0, installedAssets: [] })
+      }
+
+      if (path === '/api/after-sales/customers') {
+        return createResponse({ projectId: 'tenant:after-sales', count: 0, customers: [] })
+      }
+
+      if (path === '/api/after-sales/follow-ups') {
+        return createResponse({ projectId: 'tenant:after-sales', count: 0, followUps: [] })
+      }
+
+      if (path === '/api/after-sales/service-records') {
+        return createResponse({ projectId: 'tenant:after-sales', count: 0, serviceRecords: [] })
+      }
+
+      throw new Error(`Unexpected request: ${path}`)
+    })
+
+    const mounted = mountAfterSalesView()
+    app = mounted.app
+    container = mounted.container
+
+    await waitForText(container, 'refundAmount role matrix')
+    expect(container?.querySelector('#after-sales-ticket-refund-amount')).toBeNull()
+
+    const visibilitySelect = container?.querySelector<HTMLSelectElement>('#after-sales-runtime-admin-field-policy-finance-visibility')
+    expect(visibilitySelect).toBeTruthy()
+    if (!visibilitySelect) return
+
+    await setSelectValue(visibilitySelect, 'visible')
+    findButton(container, 'Save field policies').click()
+    await waitForText(container, 'Saved field policies')
+    await waitForText(container, '¥88.50')
+
+    expect(container?.querySelector('#after-sales-ticket-refund-amount')).not.toBeNull()
+    expect(container?.querySelector<HTMLInputElement>('#after-sales-ticket-refund-amount')?.disabled).toBe(false)
+    expect(container?.querySelector<HTMLInputElement>('#after-sales-ticket-refund-request-ticket-1')?.disabled).toBe(false)
   })
 
   it('blocks refund requests when the inline refund amount is invalid', async () => {
