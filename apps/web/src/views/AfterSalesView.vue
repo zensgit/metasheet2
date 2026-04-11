@@ -3572,17 +3572,6 @@ function buildTicketUpdatePayload() {
   }
 }
 
-function buildTicketUpdatePayload() {
-  return {
-    ticket: {
-      title: toText(ticketEditDraft.value.title),
-      priority: ticketEditDraft.value.priority,
-      source: ticketEditDraft.value.source,
-      status: ticketEditDraft.value.status,
-    },
-  }
-}
-
 function buildServiceRecordListPath() {
   const params = new URLSearchParams()
   const ticketNo = toText(serviceRecordFilters.value.ticketNo)
