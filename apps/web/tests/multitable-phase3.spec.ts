@@ -193,7 +193,7 @@ describe('backend capabilities in useMultitableCapabilities', () => {
       canManageSheetAccess: false,
       canManageViews: false,
       canComment: true,
-      canManageAutomation: false,
+      canManageAutomation: false, canExport: true,
     }))
     expect(caps.canRead.value).toBe(true)
     expect(caps.canCreateRecord.value).toBe(false)

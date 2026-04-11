@@ -175,6 +175,7 @@ export interface MetaCapabilities {
   canManageViews: boolean
   canComment: boolean
   canManageAutomation: boolean
+  canExport: boolean
 }
 
 export interface MetaCapabilityOrigin {
@@ -202,6 +203,23 @@ export interface MetaSheetPermissionCandidate {
   subtitle?: string | null
   isActive: boolean
   accessLevel?: MetaSheetPermissionAccessLevel | null
+}
+
+export interface MetaFieldPermissionEntry {
+  fieldId: string
+  subjectType: MetaSheetPermissionSubjectType
+  subjectId: string
+  subjectLabel?: string
+  visible: boolean
+  readOnly: boolean
+}
+
+export interface MetaViewPermissionEntry {
+  viewId: string
+  subjectType: MetaSheetPermissionSubjectType
+  subjectId: string
+  subjectLabel?: string
+  permission: string
 }
 
 // --- Comments ---

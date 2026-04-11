@@ -36,7 +36,7 @@
         <span class="mt-workbench__mention-chip-records">{{ mentionInboxState.summary.value.mentionedRecordCount }} records</span>
       </button>
       <button v-if="caps.canManageFields.value" class="mt-workbench__mgr-btn" @click="showFieldManager = true">&#x2699; Fields</button>
-      <button v-if="caps.canManageSheetAccess.value" class="mt-workbench__mgr-btn" @click="showPermissionManager = true">&#x1F512; Access</button>
+      <button v-if="caps.canManageSheetAccess.value" class="mt-workbench__mgr-btn" @click="showPermissionManager = true; void loadPermissionEntries()">&#x1F512; Access</button>
       <button v-if="caps.canManageViews.value && canConfigureCurrentView" class="mt-workbench__mgr-btn" @click="showViewManager = true">&#x2630; Views</button>
       <button v-if="caps.canManageAutomation.value" class="mt-workbench__mgr-btn" @click="openWorkflowDesigner()">&#x2699; Workflow</button>
     </div>
@@ -63,7 +63,7 @@
       :fields="propertyVisibleGridFields" :hidden-field-ids="grid.hiddenFieldIds.value"
       :sort-rules="grid.sortRules.value" :filter-rules="grid.filterRules.value"
       :filter-conjunction="grid.filterConjunction.value"
-      :can-create-record="caps.canCreateRecord.value" :can-undo="grid.canUndo.value" :can-redo="grid.canRedo.value"
+      :can-create-record="caps.canCreateRecord.value" :can-export="caps.canExport.value" :can-undo="grid.canUndo.value" :can-redo="grid.canRedo.value"
       @toggle-field="grid.toggleFieldVisibility" @add-sort="grid.addSortRule" @remove-sort="grid.removeSortRule"
       @update-sort="onUpdateSort" @add-filter="grid.addFilterRule" @update-filter="grid.updateFilterRule"
       @remove-filter="grid.removeFilterRule" @clear-filters="onClearFilters" @set-conjunction="onSetConjunction"
@@ -256,8 +256,14 @@
       :visible="showPermissionManager"
       :sheet-id="workbench.activeSheetId.value"
       :client="workbench.client"
+      :fields="grid.fields.value"
+      :views="workbench.views.value"
+      :field-permission-entries="fieldPermissionEntries"
+      :view-permission-entries="viewPermissionEntries"
       @close="showPermissionManager = false"
       @updated="onSheetPermissionsUpdated"
+      @update-field-permission="onFieldPermissionUpdated"
+      @update-view-permission="onViewPermissionUpdated"
     />
   </div>
 </template>
@@ -281,6 +287,8 @@ import type {
   MetaRecord,
   MetaRowActions,
   MetaViewPermission,
+  MetaFieldPermissionEntry,
+  MetaViewPermissionEntry,
   RowDensity,
 } from '../types'
 import type { MultitableRole } from '../composables/useMultitableCapabilities'
@@ -359,6 +367,8 @@ const linkPickerRecordId = ref<string | null>(null)
 const linkPickerCurrentValue = ref<unknown>(null)
 const showFieldManager = ref(false)
 const showPermissionManager = ref(false)
+const fieldPermissionEntries = ref<MetaFieldPermissionEntry[]>([])
+const viewPermissionEntries = ref<MetaViewPermissionEntry[]>([])
 const showViewManager = ref(false)
 const bases = ref<MetaBase[]>([])
 const activeBaseId = computed(() => workbench.activeBaseId.value)
@@ -1441,6 +1451,36 @@ async function onSheetPermissionsUpdated() {
   } catch (e: any) {
     showError(e.message ?? 'Failed to refresh sheet access')
   }
+}
+
+async function loadPermissionEntries() {
+  const sheetId = workbench.activeSheetId.value
+  if (!sheetId) return
+  try {
+    const [fpResult, vpResults] = await Promise.all([
+      workbench.client.listFieldPermissions(sheetId).catch(() => ({ items: [] })),
+      Promise.all(
+        workbench.views.value.map((v) =>
+          workbench.client.listViewPermissions(v.id).catch(() => ({ items: [] })),
+        ),
+      ),
+    ])
+    fieldPermissionEntries.value = fpResult.items ?? []
+    viewPermissionEntries.value = vpResults.flatMap((r) => r.items ?? [])
+  } catch {
+    fieldPermissionEntries.value = []
+    viewPermissionEntries.value = []
+  }
+}
+
+async function onFieldPermissionUpdated() {
+  await loadPermissionEntries()
+  await grid.loadViewData(grid.page.value.offset)
+}
+
+async function onViewPermissionUpdated() {
+  await loadPermissionEntries()
+  await workbench.loadSheetMeta(workbench.activeSheetId.value)
 }
 
 // --- Sheet management ---

@@ -72,6 +72,7 @@ vi.mock('../src/multitable/composables/useMultitableCapabilities', () => ({
     canManageViews: computed(() => source?.value?.canManageViews ?? true),
     canComment: computed(() => source?.value?.canComment ?? true),
     canManageAutomation: computed(() => source?.value?.canManageAutomation ?? false),
+    canExport: computed(() => source?.value?.canExport ?? true),
   }),
 }))
 
@@ -848,7 +849,7 @@ function createWorkbenchMock() {
       canManageSheetAccess: true,
       canManageViews: true,
       canComment: true,
-      canManageAutomation: false,
+      canManageAutomation: false, canExport: true,
     }),
     capabilityOrigin: ref({
       source: 'global-rbac',
@@ -1086,7 +1087,7 @@ describe('MultitableWorkbench view wiring', () => {
       canManageSheetAccess: true,
       canManageViews: false,
       canComment: true,
-      canManageAutomation: false,
+      canManageAutomation: false, canExport: true,
     }
 
     mountWorkbench()
@@ -1141,7 +1142,7 @@ describe('MultitableWorkbench view wiring', () => {
       canManageSheetAccess: false,
       canManageViews: true,
       canComment: true,
-      canManageAutomation: false,
+      canManageAutomation: false, canExport: true,
     }
 
     mountWorkbench()
@@ -1596,7 +1597,7 @@ describe('MultitableWorkbench view wiring', () => {
       canManageSheetAccess: false,
       canManageViews: false,
       canComment: true,
-      canManageAutomation: false,
+      canManageAutomation: false, canExport: true,
     }
     authAccessSnapshot.permissions = ['multitable:write']
 
@@ -1617,7 +1618,7 @@ describe('MultitableWorkbench view wiring', () => {
       canManageSheetAccess: false,
       canManageViews: false,
       canComment: true,
-      canManageAutomation: false,
+      canManageAutomation: false, canExport: true,
     }
     authAccessSnapshot.permissions = ['multitable:read']
 
@@ -1819,7 +1820,7 @@ describe('MultitableWorkbench view wiring', () => {
         canManageSheetAccess: true,
         canManageViews: true,
         canComment: true,
-        canManageAutomation: false,
+        canManageAutomation: false, canExport: true,
       },
       commentsScope: {
         containerType: 'meta_sheet',
