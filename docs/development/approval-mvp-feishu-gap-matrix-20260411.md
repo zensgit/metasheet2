@@ -86,7 +86,7 @@
 | 委托 (delegate) | ✅ | ❌ | | ✅ | 优先级低 |
 | 退回到指定节点 | ✅ | ❌ | ✅ | | return 仅退回上一步 |
 | 批量审批 | ✅ | ❌ | ✅ | | 批量 approve/reject |
-| 乐观锁 / 版本冲突检测 | ❌ 隐式处理 | ✅ | | | 409 VERSION_CONFLICT |
+| 并发安全 / 冲突处理 | ❌ 隐式处理 | ✅ | | | 统一 action 使用行锁串行化；legacy per-action 仍保留 409 version conflict |
 
 ## 审批中心 / Inbox
 

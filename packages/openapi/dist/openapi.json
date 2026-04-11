@@ -4921,8 +4921,8 @@
         "tags": [
           "Approvals"
         ],
-        "summary": "Execute an approval action with optimistic locking",
-        "description": "Unified action dispatch endpoint. Supported actions: approve, reject,\ntransfer (requires targetUserId), revoke (subject to RuntimePolicy), and\ncomment (does not change status). Returns 409 on version conflict.\n",
+        "summary": "Execute an approval action",
+        "description": "Unified action dispatch endpoint. Supported actions: approve, reject,\ntransfer (requires targetUserId), revoke (subject to RuntimePolicy), and\ncomment (does not change status). Concurrent writes are serialized with a\ndatabase row lock. This endpoint does not accept a client version field.\n409 responses indicate a conflicting current state after serialization,\nsuch as an invalid status transition or a closed revoke window.\n",
         "security": [
           {
             "bearerAuth": []
@@ -4985,7 +4985,7 @@
             "$ref": "#/components/responses/NotFound"
           },
           "409": {
-            "description": "Version conflict",
+            "description": "Conflict or invalid state transition",
             "content": {
               "application/json": {
                 "schema": {
