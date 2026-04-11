@@ -60,7 +60,7 @@ function createPlmAdapterMock(runtimeStatus: RuntimeStatus = {}) {
     getRuntimeStatus: vi.fn(() => ({
       configured: runtimeStatus.configured ?? true,
       healthSupported: runtimeStatus.healthSupported ?? true,
-      supportedOperations: runtimeStatus.supportedOperations ?? ['products', 'bom', 'approvals', 'approval_history', 'bom_compare', 'substitutes_add', 'details'],
+      supportedOperations: runtimeStatus.supportedOperations ?? ['products', 'bom', 'documents', 'release_readiness', 'approvals', 'approval_history', 'bom_compare', 'substitutes_add', 'details'],
       ...(runtimeStatus.implementation ? { implementation: runtimeStatus.implementation } : {}),
     })),
     getProducts: vi.fn(async () => ({
@@ -72,6 +72,10 @@ function createPlmAdapterMock(runtimeStatus: RuntimeStatus = {}) {
       metadata: { totalCount: plmContractFixtures.bom.length },
     })),
     getProductById: vi.fn(async () => plmContractFixtures.productDetail),
+    getReleaseReadiness: vi.fn(async () => ({
+      data: [plmContractFixtures.releaseReadiness],
+      metadata: { totalCount: 1 },
+    })),
     getApprovalHistory: vi.fn(async () => ({
       data: plmContractFixtures.approvalHistory,
       metadata: { totalCount: plmContractFixtures.approvalHistory.length },
@@ -214,7 +218,7 @@ describe('Federation contract routes', () => {
     })
   })
 
-  it('supports PLM query contracts for products, approval history, and BOM compare', async () => {
+  it('supports PLM query contracts for products, release readiness, approval history, and BOM compare', async () => {
     const plmAdapter = createPlmAdapterMock()
     const app = createFederationApp({ plmAdapter })
 
@@ -246,6 +250,41 @@ describe('Federation contract routes', () => {
       limit: 25,
       offset: 10,
     })
+
+    const releaseReadinessResponse = await request(app)
+      .post('/api/federation/plm/query')
+      .send({
+        operation: 'release_readiness',
+        productId: 'prod-1001',
+        filters: {
+          rulesetId: 'gate-a',
+          mbomLimit: 10,
+          routingLimit: 12,
+          baselineLimit: 8,
+        },
+      })
+      .expect(200)
+
+    expect(plmAdapter.getReleaseReadiness).toHaveBeenCalledWith('prod-1001', {
+      rulesetId: 'gate-a',
+      mbomLimit: 10,
+      routingLimit: 12,
+      baselineLimit: 8,
+    })
+    expect(releaseReadinessResponse.body.data).toEqual(
+      expect.objectContaining({
+        productId: 'prod-1001',
+        item_id: 'prod-1001',
+        ruleset_id: 'readiness',
+        summary: expect.objectContaining({
+          ok: false,
+          error_count: 1,
+        }),
+        links: expect.objectContaining({
+          summary: '/api/v1/release-readiness/items/prod-1001?ruleset_id=readiness',
+        }),
+      }),
+    )
 
     const approvalHistoryResponse = await request(app)
       .post('/api/federation/plm/query')
@@ -289,6 +328,47 @@ describe('Federation contract routes', () => {
       effectiveAt: undefined,
     })
     expect(bomCompareResponse.body.data).toEqual(plmContractFixtures.bomCompare)
+  })
+
+  it('normalizes empty release readiness results into the canonical federation shape', async () => {
+    const plmAdapter = createPlmAdapterMock()
+    plmAdapter.getReleaseReadiness.mockResolvedValueOnce({
+      data: [],
+      metadata: { totalCount: 0 },
+    })
+    const app = createFederationApp({ plmAdapter })
+
+    const response = await request(app)
+      .post('/api/federation/plm/query')
+      .send({
+        operation: 'release_readiness',
+        productId: 'prod-empty',
+        filters: {
+          rulesetId: 'gate-empty',
+        },
+      })
+      .expect(200)
+
+    expect(response.body.data).toEqual({
+      productId: 'prod-empty',
+      item_id: 'prod-empty',
+      generated_at: expect.any(String),
+      ruleset_id: 'gate-empty',
+      summary: {
+        ok: false,
+        resources: 0,
+        ok_resources: 0,
+        error_count: 0,
+        warning_count: 0,
+        by_kind: {},
+      },
+      resources: [],
+      esign_manifest: null,
+      links: {
+        summary: '/api/v1/release-readiness/items/prod-empty?ruleset_id=gate-empty',
+        export: '/api/v1/release-readiness/items/prod-empty/export?export_format=zip&ruleset_id=gate-empty',
+      },
+    })
   })
 
   it('supports PLM mutation contracts for substitute add and versioned approval actions', async () => {

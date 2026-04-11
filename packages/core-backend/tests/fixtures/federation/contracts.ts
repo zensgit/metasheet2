@@ -35,6 +35,45 @@ export const plmContractFixtures = {
     updated_at: '2026-03-02T00:00:00.000Z',
     itemType: 'Part',
   },
+  releaseReadiness: {
+    item_id: 'prod-1001',
+    generated_at: '2026-03-05T00:00:00.000Z',
+    ruleset_id: 'readiness',
+    summary: {
+      ok: false,
+      resources: 3,
+      ok_resources: 2,
+      error_count: 1,
+      warning_count: 1,
+      by_kind: {
+        mbom: {
+          resources: 1,
+          ok_resources: 0,
+          error_count: 1,
+          warning_count: 0,
+        },
+      },
+    },
+    resources: [
+      {
+        kind: 'mbom',
+        name: 'MBOM Alignment',
+        state: 'warning',
+        diagnostics: {
+          ok: false,
+          resource_type: 'mbom',
+          resource_id: 'mbom-1',
+          ruleset_id: 'readiness',
+          errors: [{ code: 'MBOM_MISSING', message: 'MBOM baseline missing', severity: 'error' }],
+          warnings: [{ code: 'ALT_ROUTE', message: 'Alternate route incomplete', severity: 'warning' }],
+        },
+      },
+    ],
+    links: {
+      summary: '/api/v1/release-readiness/items/prod-1001?ruleset_id=readiness',
+      export: '/api/v1/release-readiness/items/prod-1001/export?export_format=zip&ruleset_id=readiness',
+    },
+  },
   approvals: [
     {
       id: 'eco-1',

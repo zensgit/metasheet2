@@ -1,3 +1,10 @@
+import type {
+  CreateApprovalRequest,
+  UnifiedApprovalDTO,
+  UnifiedApprovalHistoryDTO,
+  ApprovalStatus,
+} from '../types/approval'
+
 /**
  * Pinia Store Type Definitions
  *
@@ -121,28 +128,36 @@ export interface WorkflowActions {
  * Approval Store Types
  */
 export interface ApprovalState {
-  approvals: Approval[]
-  pendingApprovals: Approval[]
-  myApprovals: Approval[]
+  approvals: UnifiedApprovalDTO[]
+  pendingApprovals: UnifiedApprovalDTO[]
+  myApprovals: UnifiedApprovalDTO[]
+  ccApprovals: UnifiedApprovalDTO[]
+  completedApprovals: UnifiedApprovalDTO[]
+  activeApproval: UnifiedApprovalDTO | null
+  history: UnifiedApprovalHistoryDTO[]
   loading: boolean
   error: string | null
 }
 
 export interface ApprovalGetters {
   pendingCount: (state: ApprovalState) => number
-  approvalById: (state: ApprovalState) => (id: string) => Approval | undefined
-  approvalsByStatus: (state: ApprovalState) => (status: ApprovalStatus) => Approval[]
-  myPendingApprovals: (state: ApprovalState) => Approval[]
+  approvalById: (state: ApprovalState) => (id: string) => UnifiedApprovalDTO | undefined
+  approvalsByStatus: (state: ApprovalState) => (status: ApprovalStatus) => UnifiedApprovalDTO[]
+  myPendingApprovals: (state: ApprovalState) => UnifiedApprovalDTO[]
 }
 
 export interface ApprovalActions {
   loadApprovals(): Promise<void>
   loadMyApprovals(): Promise<void>
-  createApproval(data: CreateApprovalRequest): Promise<Approval>
+  loadCcApprovals(): Promise<void>
+  loadCompletedApprovals(): Promise<void>
+  createApproval(data: CreateApprovalRequest): Promise<UnifiedApprovalDTO>
   approveRequest(id: string, comment?: string): Promise<void>
   rejectRequest(id: string, reason: string): Promise<void>
-  cancelApproval(id: string): Promise<void>
-  loadApprovalHistory(id: string): Promise<ApprovalHistory[]>
+  transferRequest(id: string, targetUserId: string, comment?: string): Promise<void>
+  revokeRequest(id: string, comment?: string): Promise<void>
+  commentOnApproval(id: string, comment: string): Promise<void>
+  loadApprovalHistory(id: string): Promise<UnifiedApprovalHistoryDTO[]>
 }
 
 /**
@@ -241,29 +256,6 @@ export interface WorkflowExecution {
   completedAt?: Date
 }
 
-export interface Approval {
-  id: string
-  title: string
-  description?: string
-  status: ApprovalStatus
-  requesterId: string
-  approverId?: string
-  createdAt: Date
-  updatedAt: Date
-  decidedAt?: Date
-}
-
-export type ApprovalStatus = 'pending' | 'approved' | 'rejected' | 'cancelled'
-
-export interface ApprovalHistory {
-  id: string
-  approvalId: string
-  action: 'created' | 'approved' | 'rejected' | 'cancelled'
-  userId: string
-  comment?: string
-  timestamp: Date
-}
-
 export interface Notification {
   id: string
   type: 'info' | 'success' | 'warning' | 'error'
@@ -312,13 +304,6 @@ export interface UpdateWorkflowRequest {
   description?: string
   definition?: any
   status?: 'active' | 'inactive'
-}
-
-export interface CreateApprovalRequest {
-  title: string
-  description?: string
-  approverId: string
-  metadata?: any
 }
 
 /**
