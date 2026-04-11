@@ -350,6 +350,23 @@ const routeState = vi.hoisted(() => {
       return { rows: [], rowCount: 1 }
     }
 
+    if (normalized.startsWith('UPDATE approval_assignments')) {
+      const instanceId = String(params[0])
+      const key = `${instanceId}:source_queue:plm:source-owned:0`
+      const existing = state.assignments.get(key)
+      if (!existing || !existing.is_active) {
+        return { rows: [], rowCount: 0 }
+      }
+      state.assignments.set(key, {
+        ...existing,
+        source_step: 0,
+        is_active: Boolean(params[1]),
+        metadata: parseJson(params[2]),
+        updated_at: now(),
+      })
+      return { rows: [], rowCount: 1 }
+    }
+
     if (normalized.startsWith('UPDATE approval_instances SET sync_status = \'error\'')) {
       const row = state.instances.get(String(params[1]))
       if (row) {

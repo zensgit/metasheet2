@@ -109,6 +109,40 @@
           </div>
 
           <div class="delegation-page__section">
+            <h3>插件使用准入</h3>
+            <p class="delegation-page__hint">这里控制成员是否可进入对应插件命名空间。钉钉登录是平台准入，和插件使用是两层不同的开关。</p>
+            <div v-if="selectedAccess.namespaceAdmissions?.length > 0" class="delegation-page__role-list">
+              <article v-for="admission in selectedAccess.namespaceAdmissions || []" :key="admission.namespace" class="delegation-page__role-card delegation-page__role-card--namespace">
+                <strong>{{ admission.namespace }}</strong>
+                <span v-if="admission.updatedAt">更新时间：{{ admission.updatedAt }}</span>
+                <div class="delegation-page__chips">
+                  <span class="delegation-page__chip" :class="{ 'delegation-page__chip--success': admission.hasRole, 'delegation-page__chip--danger': !admission.hasRole }">
+                    {{ admission.hasRole ? '已分配角色' : '未分配角色' }}
+                  </span>
+                  <span class="delegation-page__chip" :class="{ 'delegation-page__chip--success': admission.enabled, 'delegation-page__chip--danger': !admission.enabled }">
+                    {{ admission.enabled ? '插件使用已开通' : '插件使用未开通' }}
+                  </span>
+                  <span class="delegation-page__chip" :class="{ 'delegation-page__chip--success': admission.effective, 'delegation-page__chip--danger': !admission.effective }">
+                    {{ admission.effective ? '当前实际可用' : '当前不可用' }}
+                  </span>
+                </div>
+                <p>只有角色和开通状态同时满足，插件才算真正可用。</p>
+                <div class="delegation-page__role-actions">
+                  <button class="delegation-page__button" type="button" :disabled="busy || admission.enabled" @click="void updateNamespaceAdmission(admission, true)">
+                    开通插件使用
+                  </button>
+                  <button class="delegation-page__button delegation-page__button--secondary" type="button" :disabled="busy || !admission.enabled" @click="void updateNamespaceAdmission(admission, false)">
+                    关闭插件使用
+                  </button>
+                </div>
+              </article>
+            </div>
+            <div v-else class="delegation-page__empty">
+              暂无插件使用准入信息
+            </div>
+          </div>
+
+          <div class="delegation-page__section">
             <h3>委派操作</h3>
             <div class="delegation-page__role-actions">
               <select v-model="selectedRoleId" class="delegation-page__input">
@@ -533,6 +567,15 @@ type DelegatedUserAccess = {
   user: ManagedUser
   roles: string[]
   delegableRoles: string[]
+  namespaceAdmissions: NamespaceAdmission[]
+}
+
+type NamespaceAdmission = {
+  namespace: string
+  enabled: boolean
+  effective: boolean
+  hasRole: boolean
+  updatedAt: string | null
 }
 
 type DelegatedAdminScopeConfig = {
@@ -898,6 +941,48 @@ async function selectUser(userId: string): Promise<void> {
     selectedAccess.value = null
     selectedScopeConfig.value = null
     setStatus(error instanceof Error ? error.message : '加载成员委派权限失败', 'error')
+  }
+}
+
+async function updateNamespaceAdmission(admission: NamespaceAdmission, enabled: boolean): Promise<void> {
+  if (!selectedUserId.value) return
+  busy.value = true
+  try {
+    const response = await apiFetch(`/api/admin/role-delegation/users/${encodeURIComponent(selectedUserId.value)}/namespaces/${encodeURIComponent(admission.namespace)}/admission`, {
+      method: 'PATCH',
+      body: JSON.stringify({ enabled }),
+    })
+    const payload = await readJson(response)
+    if (!response.ok || payload.ok !== true) {
+      throw new Error(String((payload.error as Record<string, unknown> | undefined)?.message || '保存插件使用准入失败'))
+    }
+
+    const data = payload.data as Record<string, unknown> | undefined
+    if (data?.namespaceAdmissions !== undefined && selectedAccess.value) {
+      selectedAccess.value = {
+        ...selectedAccess.value,
+        ...(data as DelegatedUserAccess),
+        namespaceAdmissions: Array.isArray(data.namespaceAdmissions)
+          ? data.namespaceAdmissions.map((item) => {
+              const record = item as Record<string, unknown>
+              return {
+                namespace: String(record.namespace || ''),
+                enabled: record.enabled === true,
+                effective: typeof record.effective === 'boolean' ? record.effective : record.enabled === true && record.hasRole === true,
+                hasRole: record.hasRole === true || record.has_role === true,
+                updatedAt: typeof record.updatedAt === 'string' ? record.updatedAt : typeof record.updated_at === 'string' ? record.updated_at : null,
+              } as NamespaceAdmission
+            }).filter((item) => item.namespace)
+          : selectedAccess.value.namespaceAdmissions,
+      }
+    } else if (selectedUserId.value) {
+      await selectUser(selectedUserId.value)
+    }
+    setStatus(enabled ? `已开通 ${admission.namespace} 插件使用` : `已关闭 ${admission.namespace} 插件使用`)
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : '保存插件使用准入失败', 'error')
+  } finally {
+    busy.value = false
   }
 }
 

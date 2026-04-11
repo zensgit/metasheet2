@@ -12,6 +12,16 @@ import { auditLog } from '../audit/audit'
 import { authenticate } from '../middleware/auth'
 import { query } from '../db/pg'
 import { invalidateUserPerms, isAdmin as isRbacAdmin, listUserPermissions } from '../rbac/service'
+import {
+  deriveDelegatedAdminNamespace,
+  disableNamespaceAdmissionsWithoutRoles,
+  isNamespaceAdmissionControlledResource,
+  listRoleNamespaces,
+  listUserNamespaceAdmissionSnapshots,
+  normalizeNamespace,
+  roleIdMatchesNamespaces as matchRoleIdToNamespaces,
+  setUserNamespaceAdmission,
+} from '../rbac/namespace-admission'
 import { getBcryptSaltRounds } from '../security/auth-runtime-config'
 import { isDatabaseSchemaError } from '../utils/database-errors'
 import { jsonError, jsonOk, parsePagination } from '../util/response'
@@ -232,11 +242,10 @@ type CreateUserRequestBody = {
   isActive?: boolean
 }
 
-const ADMIN_AUDIT_RESOURCE_TYPES = ['user', 'user-role', 'user-auth-grant', 'user-password', 'user-session', 'user-invite', 'role', 'permission', 'permission-template', 'delegated-admin-scope', 'delegated-admin-scope-template', 'platform-member-group', 'delegated-admin-group-scope'] as const
+const ADMIN_AUDIT_RESOURCE_TYPES = ['user', 'user-role', 'user-auth-grant', 'user-namespace-admission', 'user-password', 'user-session', 'user-invite', 'role', 'permission', 'permission-template', 'delegated-admin-scope', 'delegated-admin-scope-template', 'platform-member-group', 'delegated-admin-group-scope'] as const
 const DINGTALK_PROVIDER = 'dingtalk'
 const PLATFORM_ADMIN_ROLE_ID = 'admin'
 const ATTENDANCE_ROLE_IDS = new Set(['attendance_employee', 'attendance_approver', 'attendance_admin'])
-const DELEGATED_ADMIN_ROLE_SUFFIX = '_admin'
 
 function getRequestUserId(req: Request): string {
   const raw = req.user as Record<string, unknown> | undefined
@@ -431,14 +440,13 @@ async function fetchDingTalkAccessSnapshot(userId: string) {
 function deriveDelegableNamespaces(roleIds: string[]): string[] {
   return Array.from(new Set(
     roleIds
-      .filter((roleId) => roleId.endsWith(DELEGATED_ADMIN_ROLE_SUFFIX) && roleId !== PLATFORM_ADMIN_ROLE_ID)
-      .map((roleId) => roleId.slice(0, -DELEGATED_ADMIN_ROLE_SUFFIX.length))
-      .filter(Boolean),
+      .map((roleId) => deriveDelegatedAdminNamespace(roleId))
+      .filter((namespace): namespace is string => Boolean(namespace)),
   )).sort()
 }
 
 function roleIdMatchesNamespaces(roleId: string, namespaces: string[]): boolean {
-  return namespaces.some((namespace) => roleId === namespace || roleId.startsWith(`${namespace}_`))
+  return matchRoleIdToNamespaces(roleId, namespaces)
 }
 
 async function fetchDelegatedRoleCatalog(namespaces?: string[]) {
@@ -1224,6 +1232,12 @@ function deriveMatchingNamespacesForRole(roleId: string, namespaces: string[]): 
   return namespaces.filter((namespace) => roleIdMatchesNamespaces(roleId, [namespace]))
 }
 
+async function fetchVisibleNamespaceAdmissions(userId: string, namespaces?: string[]) {
+  const admissions = await listUserNamespaceAdmissionSnapshots(userId)
+  if (!Array.isArray(namespaces)) return admissions
+  return admissions.filter((admission) => namespaces.includes(admission.namespace))
+}
+
 async function ensureRoleDelegationAdmin(req: Request, res: Response): Promise<{
   actorId: string
   isPlatformAdmin: boolean
@@ -1313,12 +1327,13 @@ async function fetchDirectoryMemberships(userId: string) {
 }
 
 async function fetchMemberAdmissionSnapshot(userId: string) {
-  const [profile, roles, directoryMemberships, dingtalkAccess, memberGroups] = await Promise.all([
+  const [profile, roles, directoryMemberships, dingtalkAccess, memberGroups, namespaceAdmissions] = await Promise.all([
     fetchUserProfile(userId),
     fetchUserRoleIds(userId),
     fetchDirectoryMemberships(userId),
     fetchDingTalkAccessSnapshot(userId),
     fetchPlatformMemberGroupMembershipsForUser(userId),
+    listUserNamespaceAdmissionSnapshots(userId),
   ])
   if (!profile) return null
 
@@ -1331,6 +1346,7 @@ async function fetchMemberAdmissionSnapshot(userId: string) {
     memberGroups,
     directoryMemberships,
     dingtalk: dingtalkAccess,
+    namespaceAdmissions,
   }
 }
 
@@ -2160,9 +2176,13 @@ export function adminUsersRouter(): Router {
       const visibleMemberGroupIds = delegation.isPlatformAdmin
         ? undefined
         : deriveVisibleDelegatedMemberGroupIds(groupAssignments)
-      const [snapshot, memberGroups] = await Promise.all([
+      const [snapshot, memberGroups, namespaceAdmissions] = await Promise.all([
         fetchUserAccessSnapshot(userId),
         fetchPlatformMemberGroupMembershipsForUser(userId, visibleMemberGroupIds),
+        fetchVisibleNamespaceAdmissions(
+          userId,
+          delegation.isPlatformAdmin ? undefined : delegation.delegableNamespaces,
+        ),
       ])
       if (!snapshot) return jsonError(res, 404, 'NOT_FOUND', 'User not found')
 
@@ -2180,12 +2200,91 @@ export function adminUsersRouter(): Router {
         user: snapshot.user,
         roles: snapshot.roles,
         memberGroups,
+        namespaceAdmissions,
         delegableRoles: delegation.isPlatformAdmin
           ? snapshot.roles
           : snapshot.roles.filter((roleId) => roleIdMatchesNamespaces(roleId, delegation.delegableNamespaces)),
       })
     } catch (error) {
       return jsonError(res, 500, 'ROLE_DELEGATION_ACCESS_FAILED', (error as Error)?.message || 'Failed to load delegated user access')
+    }
+  })
+
+  r.patch('/api/admin/role-delegation/users/:userId/namespaces/:namespace/admission', authenticate, async (req: Request, res: Response) => {
+    const delegation = await ensureRoleDelegationAdmin(req, res)
+    if (!delegation) return
+
+    try {
+      const userId = String(req.params.userId || '').trim()
+      const namespace = normalizeNamespace(req.params.namespace)
+      const enabled = req.body?.enabled
+      if (!userId) return jsonError(res, 400, 'USER_ID_REQUIRED', 'userId is required')
+      if (!namespace) return jsonError(res, 400, 'NAMESPACE_REQUIRED', 'namespace is required')
+      if (typeof enabled !== 'boolean') return jsonError(res, 400, 'ENABLED_REQUIRED', 'enabled boolean is required')
+      if (!isNamespaceAdmissionControlledResource(namespace)) {
+        return jsonError(res, 400, 'NAMESPACE_NOT_SUPPORTED', 'namespace is not managed by plugin admission controls')
+      }
+      if (!delegation.isPlatformAdmin && !delegation.delegableNamespaces.includes(namespace)) {
+        return jsonError(res, 403, 'ROLE_DELEGATION_FORBIDDEN', 'Namespace is outside your delegated admin scope')
+      }
+
+      const [profile, scopeAssignments, groupAssignments] = await Promise.all([
+        fetchUserProfile(userId),
+        delegation.isPlatformAdmin
+          ? Promise.resolve([])
+          : fetchDelegatedScopeAssignments(delegation.actorId, delegation.delegableNamespaces),
+        delegation.isPlatformAdmin
+          ? Promise.resolve([])
+          : fetchDelegatedGroupAssignments(delegation.actorId, delegation.delegableNamespaces),
+      ])
+      if (!profile) return jsonError(res, 404, 'NOT_FOUND', 'User not found')
+      if (!delegation.isPlatformAdmin && !hasDelegatedAudienceAssignments(scopeAssignments, groupAssignments)) {
+        return jsonError(res, 403, 'ROLE_DELEGATION_SCOPE_REQUIRED', 'No delegated department or member-group scope is configured for your plugin admin role')
+      }
+      if (!delegation.isPlatformAdmin) {
+        const allowed = await isUserWithinDelegatedScope(delegation.actorId, [namespace], userId)
+        if (!allowed) {
+          return jsonError(res, 403, 'ROLE_DELEGATION_USER_OUT_OF_SCOPE', 'User is outside your delegated department or member-group scope')
+        }
+      }
+
+      const namespaceAdmissions = await setUserNamespaceAdmission({
+        userId,
+        namespace,
+        enabled,
+        actorId: delegation.actorId,
+        source: delegation.isPlatformAdmin ? 'platform_admin' : 'delegated_admin',
+      })
+      invalidateUserPerms(userId)
+
+      await auditLog({
+        actorId: delegation.actorId,
+        actorType: 'user',
+        action: enabled ? 'grant' : 'revoke',
+        resourceType: 'user-namespace-admission',
+        resourceId: `${userId}:${namespace}`,
+        meta: {
+          adminUserId: delegation.actorId,
+          userId,
+          namespace,
+          enabled,
+          delegated: !delegation.isPlatformAdmin,
+          delegableNamespaces: delegation.delegableNamespaces,
+        },
+      })
+
+      return jsonOk(res, {
+        actorId: delegation.actorId,
+        isPlatformAdmin: delegation.isPlatformAdmin,
+        delegableNamespaces: delegation.delegableNamespaces,
+        scopeAssignments,
+        groupAssignments,
+        namespaceAdmissions: delegation.isPlatformAdmin
+          ? namespaceAdmissions
+          : namespaceAdmissions.filter((admission) => delegation.delegableNamespaces.includes(admission.namespace)),
+      })
+    } catch (error) {
+      return jsonError(res, 500, 'ROLE_DELEGATION_ADMISSION_FAILED', (error as Error)?.message || 'Failed to update delegated namespace admission')
     }
   })
 
@@ -2244,6 +2343,14 @@ export function adminUsersRouter(): Router {
       if (roleId === PLATFORM_ADMIN_ROLE_ID) {
         await syncLegacyAdminProfile(userId, action === 'assign')
       }
+      const disabledNamespaces = action === 'assign'
+        ? []
+        : await disableNamespaceAdmissionsWithoutRoles({
+          userId,
+          namespaces: await listRoleNamespaces(roleId),
+          actorId: delegation.actorId,
+          source: 'role_unassigned',
+        })
       invalidateUserPerms(userId)
 
       await auditLog({
@@ -2258,12 +2365,17 @@ export function adminUsersRouter(): Router {
           roleId,
           delegated: !delegation.isPlatformAdmin,
           delegableNamespaces: delegation.delegableNamespaces,
+          disabledNamespaces,
         },
       })
 
-      const [snapshot, memberGroups] = await Promise.all([
+      const [snapshot, memberGroups, namespaceAdmissions] = await Promise.all([
         fetchUserAccessSnapshot(userId),
         fetchPlatformMemberGroupMembershipsForUser(userId),
+        fetchVisibleNamespaceAdmissions(
+          userId,
+          delegation.isPlatformAdmin ? undefined : delegation.delegableNamespaces,
+        ),
       ])
       const roleCatalog = await fetchDelegatedRoleCatalog(
         delegation.isPlatformAdmin ? undefined : delegation.delegableNamespaces,
@@ -2279,6 +2391,7 @@ export function adminUsersRouter(): Router {
         user: snapshot?.user ?? profile,
         roles: snapshot?.roles ?? [],
         memberGroups,
+        namespaceAdmissions,
         delegableRoles: delegation.isPlatformAdmin
           ? snapshot?.roles ?? []
           : (snapshot?.roles ?? []).filter((candidateRoleId) => roleIdMatchesNamespaces(candidateRoleId, delegation.delegableNamespaces)),
@@ -2802,6 +2915,57 @@ export function adminUsersRouter(): Router {
     }
   })
 
+  r.patch('/api/admin/users/:userId/namespaces/:namespace/admission', authenticate, async (req: Request, res: Response) => {
+    const adminUserId = await ensurePlatformAdmin(req, res)
+    if (!adminUserId) return
+
+    try {
+      const userId = String(req.params.userId || '').trim()
+      const namespace = normalizeNamespace(req.params.namespace)
+      const enabled = req.body?.enabled
+      if (!userId) return jsonError(res, 400, 'USER_ID_REQUIRED', 'userId is required')
+      if (!namespace) return jsonError(res, 400, 'NAMESPACE_REQUIRED', 'namespace is required')
+      if (typeof enabled !== 'boolean') return jsonError(res, 400, 'ENABLED_REQUIRED', 'enabled boolean is required')
+      if (!isNamespaceAdmissionControlledResource(namespace)) {
+        return jsonError(res, 400, 'NAMESPACE_NOT_SUPPORTED', 'namespace is not managed by plugin admission controls')
+      }
+
+      const profile = await fetchUserProfile(userId)
+      if (!profile) return jsonError(res, 404, 'NOT_FOUND', 'User not found')
+
+      const namespaceAdmissions = await setUserNamespaceAdmission({
+        userId,
+        namespace,
+        enabled,
+        actorId: adminUserId,
+        source: 'platform_admin',
+      })
+      invalidateUserPerms(userId)
+
+      await auditLog({
+        actorId: adminUserId,
+        actorType: 'user',
+        action: enabled ? 'grant' : 'revoke',
+        resourceType: 'user-namespace-admission',
+        resourceId: `${userId}:${namespace}`,
+        meta: {
+          adminUserId,
+          userId,
+          namespace,
+          enabled,
+        },
+      })
+
+      return jsonOk(res, {
+        actorId: adminUserId,
+        userId,
+        namespaceAdmissions,
+      })
+    } catch (error) {
+      return jsonError(res, 500, 'MEMBER_NAMESPACE_ADMISSION_FAILED', (error as Error)?.message || 'Failed to update namespace admission')
+    }
+  })
+
   r.patch('/api/admin/users/:userId/dingtalk-grant', authenticate, async (req: Request, res: Response) => {
     const adminUserId = await ensurePlatformAdmin(req, res)
     if (!adminUserId) return
@@ -2873,6 +3037,7 @@ export function adminUsersRouter(): Router {
       if (roleId === PLATFORM_ADMIN_ROLE_ID) {
         await syncLegacyAdminProfile(userId, true)
       }
+      const disabledNamespaces: string[] = []
       invalidateUserPerms(userId)
 
       await auditLog({
@@ -2885,6 +3050,7 @@ export function adminUsersRouter(): Router {
           adminUserId,
           userId,
           roleId,
+          disabledNamespaces,
         },
       })
 
@@ -2920,6 +3086,12 @@ export function adminUsersRouter(): Router {
       if (roleId === PLATFORM_ADMIN_ROLE_ID) {
         await syncLegacyAdminProfile(userId, false)
       }
+      const disabledNamespaces = await disableNamespaceAdmissionsWithoutRoles({
+        userId,
+        namespaces: await listRoleNamespaces(roleId),
+        actorId: adminUserId,
+        source: 'role_unassigned',
+      })
       invalidateUserPerms(userId)
 
       await auditLog({
@@ -2932,6 +3104,7 @@ export function adminUsersRouter(): Router {
           adminUserId,
           userId,
           roleId,
+          disabledNamespaces,
         },
       })
 

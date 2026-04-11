@@ -1,4 +1,4 @@
-import express from 'express'
+import express, { type Express } from 'express'
 import request from 'supertest'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -37,14 +37,15 @@ vi.mock('../../src/middleware/auth', () => ({
   },
 }))
 
-import { approvalsRouter } from '../../src/routes/approvals'
+vi.mock('../../src/rbac/rbac', () => ({
+  rbacGuard: () => (_req: express.Request, _res: express.Response, next: express.NextFunction) => next(),
+}))
 
 describe('approvals routes', () => {
-  const app = express()
-  app.use(express.json())
-  app.use(approvalsRouter())
+  let app: Express
 
-  beforeEach(() => {
+  beforeEach(async () => {
+    vi.resetModules()
     authState.user = {
       id: 'user-1',
       tenantId: 'tenant-a',
@@ -56,6 +57,11 @@ describe('approvals routes', () => {
     pgState.client.query.mockReset()
     pgState.client.release.mockReset()
     pgState.pool.connect.mockResolvedValue(pgState.client)
+
+    const { approvalsRouter } = await import('../../src/routes/approvals')
+    app = express()
+    app.use(express.json())
+    app.use(approvalsRouter())
   })
 
   it('requires version for approval actions', async () => {
@@ -86,7 +92,13 @@ describe('approvals routes', () => {
       .send({ version: 0 })
 
     expect(response.status).toBe(401)
-    expect(response.body).toEqual({ error: 'Authentication required' })
+    expect(response.body).toEqual({
+      ok: false,
+      error: {
+        code: 'APPROVAL_USER_REQUIRED',
+        message: 'User ID not found in token',
+      },
+    })
   })
 
   it('returns a structured 401 when pending approvals cannot resolve the actor id', async () => {
@@ -99,7 +111,13 @@ describe('approvals routes', () => {
     const response = await request(app).get('/api/approvals/pending')
 
     expect(response.status).toBe(401)
-    expect(response.body).toEqual({ error: 'Authentication required' })
+    expect(response.body).toEqual({
+      ok: false,
+      error: {
+        code: 'APPROVAL_USER_REQUIRED',
+        message: 'User ID not found in token',
+      },
+    })
   })
 
   it('accepts req.user.id when loading pending approvals', async () => {

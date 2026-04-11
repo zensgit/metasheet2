@@ -164,6 +164,24 @@ function createDbFixture(existingPendingId?: string) {
       })
       return { rows: [], rowCount: 1 }
     }
+    if (normalized.startsWith('UPDATE approval_assignments')) {
+      const [instanceId, assigneeId, sourceStep, metadata] = params as [string, string, number, string]
+      let updated = 0
+      for (const assignment of assignments) {
+        if (
+          assignment.instance_id === instanceId
+          && assignment.assignment_type === 'role'
+          && assignment.assignee_id === assigneeId
+          && assignment.is_active
+        ) {
+          assignment.source_step = sourceStep
+          assignment.is_active = true
+          assignment.metadata = JSON.parse(metadata)
+          updated += 1
+        }
+      }
+      return { rows: [], rowCount: updated }
+    }
     throw new Error(`Unhandled transaction query: ${normalized}`)
   })
 
