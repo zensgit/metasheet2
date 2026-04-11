@@ -32,6 +32,7 @@ import PlmSearchPanel from '../components/plm/PlmSearchPanel.vue'
 import PlmSubstitutesPanel from '../components/plm/PlmSubstitutesPanel.vue'
 import PlmWhereUsedPanel from '../components/plm/PlmWhereUsedPanel.vue'
 import { plmService } from '../services/PlmService'
+import type { PlmItemMetadata } from '../services/PlmService'
 import type { PlmTeamFilterPresetBatchResult } from '../services/plm/plmWorkbenchClient'
 import { copyListToClipboard, copyTextToClipboard } from './plm/plmClipboard'
 import { downloadCsvFile } from './plm/plmCsv'
@@ -97,6 +98,7 @@ import {
   mergePlmDeferredRouteQueryPatch,
   resolvePlmDeferredRouteQueryPatch,
 } from './plm/plmRouteHydrationPatch'
+import { buildProductMetadataRows } from './plm/plmProductMetadata'
 import { usePlmWhereUsedPanel } from './plm/usePlmWhereUsedPanel'
 import { usePlmWhereUsedState } from './plm/usePlmWhereUsedState'
 import {
@@ -273,6 +275,9 @@ const itemType = ref(DEFAULT_ITEM_TYPE)
 const product = ref<ProductRecord | null>(null)
 const productLoading = ref(false)
 const productError = ref('')
+const productMetadata = ref<PlmItemMetadata | null>(null)
+const productMetadataLoading = ref(false)
+const productMetadataError = ref('')
 const productView = computed(() => {
   const data = product.value || {}
   const props = data.properties || {}
@@ -355,6 +360,7 @@ const productView = computed(() => {
     updatedAt,
   }
 })
+const productMetadataRows = computed(() => buildProductMetadataRows(product.value, productMetadata.value))
 
 const documentRole = ref('')
 const documentFilter = ref('')
@@ -1375,11 +1381,35 @@ function formatBytes(value?: number): string {
   return `${gb.toFixed(1)} GB`
 }
 
+async function loadProductMetadataSchema(resolvedItemType: string) {
+  if (!resolvedItemType.trim()) {
+    productMetadata.value = null
+    productMetadataError.value = ''
+    productMetadataLoading.value = false
+    return
+  }
+
+  productMetadataLoading.value = true
+  productMetadataError.value = ''
+  try {
+    productMetadata.value = await plmService.getMetadata<PlmItemMetadata>(resolvedItemType)
+  } catch (error: any) {
+    handleAuthError(error)
+    productMetadata.value = null
+    productMetadataError.value = error?.message ?? '加载模型字段失败'
+  } finally {
+    productMetadataLoading.value = false
+  }
+}
+
 function resetAll() {
   productId.value = ''
   productItemNumber.value = ''
   product.value = null
   productError.value = ''
+  productMetadata.value = null
+  productMetadataLoading.value = false
+  productMetadataError.value = ''
   authError.value = ''
   resetDeepLinkState()
   workbenchTeamViewQuery.value = ''
@@ -1645,6 +1675,8 @@ async function loadProduct() {
   syncQueryParams({ productId: productId.value, itemNumber: productItemNumber.value, itemType: itemType.value })
   productLoading.value = true
   productError.value = ''
+  productMetadata.value = null
+  productMetadataError.value = ''
   try {
     const result = await plmService.getProduct<ProductRecord>(resolvedId, {
       itemType: itemType.value || undefined,
@@ -1661,9 +1693,24 @@ async function loadProduct() {
       productId.value = String(result.id)
       syncQueryParams({ productId: productId.value })
     }
-    await Promise.all([loadBom(), loadDocuments(), loadApprovals()])
+    const resolvedItemType = (() => {
+      const viewItemType = typeof productView.value.itemType === 'string'
+        ? productView.value.itemType.trim()
+        : ''
+      if (viewItemType && viewItemType !== '-') return viewItemType
+      const selectedItemType = itemType.value.trim()
+      return selectedItemType || DEFAULT_ITEM_TYPE
+    })()
+    await Promise.all([
+      loadProductMetadataSchema(resolvedItemType),
+      loadBom(),
+      loadDocuments(),
+      loadApprovals(),
+    ])
   } catch (error: any) {
     handleAuthError(error)
+    productMetadata.value = null
+    productMetadataError.value = ''
     productError.value = error?.message || '加载产品失败'
   } finally {
     productLoading.value = false
@@ -5791,6 +5838,9 @@ function applyHydratedPanelDataReset(options: {
     product.value = null
     productLoading.value = false
     productError.value = ''
+    productMetadata.value = null
+    productMetadataLoading.value = false
+    productMetadataError.value = ''
   }
   if (reset.clearBom) {
     bomItems.value = []
@@ -6987,6 +7037,9 @@ const { productPanel } = usePlmProductPanel({
   hasProductCopyValue,
   copyProductField,
   productFieldCatalog,
+  productMetadataLoading,
+  productMetadataError,
+  productMetadataRows,
   formatJson,
 })
 

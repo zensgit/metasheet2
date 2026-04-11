@@ -100,6 +100,24 @@ describe('plmService', () => {
     )
   })
 
+  it('loads product metadata through encoded federation GET route', async () => {
+    apiFetchMock.mockResolvedValueOnce(mockJsonResponse(200, {
+      ok: true,
+      data: {
+        id: 'Part',
+        properties: [],
+      },
+    }))
+
+    const result = await plmService.getMetadata('Part/Assembly')
+
+    expect(result.id).toBe('Part')
+    expect(apiFetchMock).toHaveBeenCalledWith(
+      '/api/federation/plm/metadata/Part%2FAssembly',
+      expect.objectContaining({ method: 'GET' }),
+    )
+  })
+
   it('omits all-status filter and defaults compare sides to item mode', async () => {
     apiFetchMock
       .mockResolvedValueOnce(mockJsonResponse(200, {

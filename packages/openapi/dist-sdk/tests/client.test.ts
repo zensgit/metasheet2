@@ -75,6 +75,24 @@ describe('createPlmFederationClient', () => {
     )
   })
 
+  it('encodes PLM metadata GET requests', async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
+      jsonResponse({ ok: true, data: { id: 'Part', properties: [] } }),
+    )
+
+    const client = createPlmFederationClient({
+      baseUrl: 'http://localhost:8910',
+      getToken: () => 'token-meta',
+      fetch: fetchMock,
+    })
+
+    await client.getMetadata('Part/Assembly')
+
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(
+      'http://localhost:8910/api/federation/plm/metadata/Part%2FAssembly',
+    )
+  })
+
   it('omits the approvals status filter when set to all', async () => {
     const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
       jsonResponse({

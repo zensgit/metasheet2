@@ -418,7 +418,7 @@
     <p v-else-if="panel.product.value" class="muted">暂无描述</p>
 
     <details v-if="panel.product.value" class="field-map">
-      <summary>字段对照清单</summary>
+      <summary>字段对照清单（静态）</summary>
       <table class="data-table">
         <thead>
           <tr>
@@ -434,6 +434,37 @@
             <td class="mono">{{ field.key }}</td>
             <td>{{ field.source }}</td>
             <td class="muted">{{ field.fallback }}</td>
+          </tr>
+        </tbody>
+      </table>
+    </details>
+
+    <details v-if="panel.product.value" class="field-map">
+      <summary>模型字段（AML Metadata，{{ panel.productMetadataRows.value.length }}）</summary>
+      <p v-if="panel.productMetadataLoading.value" class="status">模型字段加载中...</p>
+      <p v-else-if="panel.productMetadataError.value" class="status error">{{ panel.productMetadataError.value }}</p>
+      <p v-else-if="!panel.productMetadataRows.value.length" class="muted">当前类型暂无模型字段定义</p>
+      <table v-else class="data-table">
+        <thead>
+          <tr>
+            <th>Label</th>
+            <th>Name</th>
+            <th>Type</th>
+            <th>必填</th>
+            <th>长度</th>
+            <th>默认值</th>
+            <th>当前值</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr v-for="field in panel.productMetadataRows.value" :key="field.name">
+            <td>{{ field.label }}</td>
+            <td class="mono">{{ field.name }}</td>
+            <td>{{ field.type }}</td>
+            <td>{{ field.required ? '是' : '否' }}</td>
+            <td>{{ field.length }}</td>
+            <td class="muted">{{ field.defaultValue }}</td>
+            <td>{{ field.currentValue }}</td>
           </tr>
         </tbody>
       </table>

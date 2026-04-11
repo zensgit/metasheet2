@@ -94,6 +94,22 @@ export interface GetPlmBomParams {
   effectiveAt?: string
 }
 
+export interface PlmMetadataField {
+  name: string
+  label?: string
+  type?: string
+  required?: boolean
+  length?: number | null
+  default?: unknown
+}
+
+export interface PlmItemMetadata {
+  id: string
+  label?: string
+  is_relationship?: boolean
+  properties: PlmMetadataField[]
+}
+
 export interface ListPlmDocumentsParams extends PaginationOptions {
   productId: string
   role?: string
@@ -611,6 +627,14 @@ export function createPlmFederationClient(clientOrOptions: ClientOptions | Reque
           effective_at: params.effectiveAt,
         }),
         'Failed to load PLM BOM',
+      )
+    },
+
+    async getMetadata<T = PlmItemMetadata>(itemType: string): Promise<T> {
+      return requestPlmGet<T>(
+        client,
+        `/api/federation/plm/metadata/${encodeURIComponent(itemType)}`,
+        'Failed to load PLM metadata',
       )
     },
 

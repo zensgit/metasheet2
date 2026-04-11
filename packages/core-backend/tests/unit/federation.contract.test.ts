@@ -60,7 +60,7 @@ function createPlmAdapterMock(runtimeStatus: RuntimeStatus = {}) {
     getRuntimeStatus: vi.fn(() => ({
       configured: runtimeStatus.configured ?? true,
       healthSupported: runtimeStatus.healthSupported ?? true,
-      supportedOperations: runtimeStatus.supportedOperations ?? ['products', 'bom', 'documents', 'release_readiness', 'approvals', 'approval_history', 'bom_compare', 'substitutes_add', 'details'],
+      supportedOperations: runtimeStatus.supportedOperations ?? ['products', 'bom', 'documents', 'metadata', 'release_readiness', 'approvals', 'approval_history', 'bom_compare', 'substitutes_add', 'details'],
       ...(runtimeStatus.implementation ? { implementation: runtimeStatus.implementation } : {}),
     })),
     getProducts: vi.fn(async () => ({
@@ -72,6 +72,10 @@ function createPlmAdapterMock(runtimeStatus: RuntimeStatus = {}) {
       metadata: { totalCount: plmContractFixtures.bom.length },
     })),
     getProductById: vi.fn(async () => plmContractFixtures.productDetail),
+    getItemMetadata: vi.fn(async () => ({
+      data: [plmContractFixtures.productMetadata],
+      metadata: { totalCount: 1 },
+    })),
     getReleaseReadiness: vi.fn(async () => ({
       data: [plmContractFixtures.releaseReadiness],
       metadata: { totalCount: 1 },
@@ -328,6 +332,21 @@ describe('Federation contract routes', () => {
       effectiveAt: undefined,
     })
     expect(bomCompareResponse.body.data).toEqual(plmContractFixtures.bomCompare)
+  })
+
+  it('loads PLM item metadata through the dedicated GET route', async () => {
+    const plmAdapter = createPlmAdapterMock()
+    const app = createFederationApp({ plmAdapter })
+
+    const response = await request(app)
+      .get('/api/federation/plm/metadata/Part')
+      .expect(200)
+
+    expect(plmAdapter.getItemMetadata).toHaveBeenCalledWith('Part')
+    expect(response.body).toEqual({
+      ok: true,
+      data: plmContractFixtures.productMetadata,
+    })
   })
 
   it('normalizes empty release readiness results into the canonical federation shape', async () => {

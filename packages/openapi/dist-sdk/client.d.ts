@@ -64,6 +64,20 @@ export interface GetPlmBomParams {
     depth?: number;
     effectiveAt?: string;
 }
+export interface PlmMetadataField {
+    name: string;
+    label?: string;
+    type?: string;
+    required?: boolean;
+    length?: number | null;
+    default?: unknown;
+}
+export interface PlmItemMetadata {
+    id: string;
+    label?: string;
+    is_relationship?: boolean;
+    properties: PlmMetadataField[];
+}
 export interface ListPlmDocumentsParams extends PaginationOptions {
     productId: string;
     role?: string;
@@ -208,6 +222,7 @@ export declare function createPlmFederationClient(clientOrOptions: ClientOptions
     listProducts<T = Record<string, unknown>>(params?: ListPlmProductsParams): Promise<PlmListResponse<T>>;
     getProduct<T = Record<string, unknown>>(productId: string, params?: GetPlmProductParams): Promise<T>;
     getBom<T = Record<string, unknown>>(productId: string, params?: GetPlmBomParams): Promise<PlmListResponse<T>>;
+    getMetadata<T = PlmItemMetadata>(itemType: string): Promise<T>;
     listDocuments<T = Record<string, unknown>>(params: ListPlmDocumentsParams): Promise<PlmListResponse<T>>;
     listApprovals<T = Record<string, unknown>>(params?: ListPlmApprovalsParams): Promise<PlmListResponse<T>>;
     getApprovalHistory<T = Record<string, unknown>>(approvalId: string): Promise<PlmApprovalHistoryResponse<T>>;

@@ -35,6 +35,29 @@ export const plmContractFixtures = {
     updated_at: '2026-03-02T00:00:00.000Z',
     itemType: 'Part',
   },
+  productMetadata: {
+    id: 'Part',
+    label: 'Part',
+    is_relationship: false,
+    properties: [
+      {
+        name: 'item_number',
+        label: '料号',
+        type: 'string',
+        required: true,
+        length: 64,
+        default: null,
+      },
+      {
+        name: 'name',
+        label: '名称',
+        type: 'string',
+        required: false,
+        length: 255,
+        default: null,
+      },
+    ],
+  },
   releaseReadiness: {
     item_id: 'prod-1001',
     generated_at: '2026-03-05T00:00:00.000Z',

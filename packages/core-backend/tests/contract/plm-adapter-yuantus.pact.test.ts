@@ -16,8 +16,8 @@
  *      list/detail / BOM-substitute Wave 4 interactions plus the CAD
  *      review/workspace Wave 5 interactions that PLMAdapter currently calls
  *      are present, in the documented order.
- *      (codex's plan also lists `aml/metadata`, but PLMAdapter does not yet
- *      call it; deferred until there is a real consumer call site.)
+ *      including `aml/metadata`, now that PLMAdapter calls the dedicated
+ *      metadata route for item-type schema discovery.
  *   3. The PLMAdapter actually calls every endpoint declared in the pact, so
  *      the contract cannot drift away from the live consumer code without
  *      this test failing.
@@ -79,10 +79,6 @@ interface PactDocument {
 // "planned" or "anticipated" must NOT live in this list — the contract-first
 // principle requires that pact freezes what is actually used, never aspiration.
 //
-// Notable omission from codex's PACT_FIRST plan: GET /api/v1/aml/metadata/{type}
-// is listed as Wave 1 P0 in docs/PACT_FIRST_INTEGRATION_PLAN_20260407.md, but
-// PLMAdapter.ts does not currently invoke it. It is parked for Wave 1.5 / Wave
-// 2 and will be added to this list as soon as the adapter starts calling it.
 const PACT_PATHS = [
   { method: 'POST', path: '/api/v1/auth/login' },
   { method: 'GET', path: '/api/v1/health' },
@@ -93,6 +89,7 @@ const PACT_PATHS = [
   { method: 'GET', path: '/api/v1/file/item/01H000000000000000000000P1' },
   { method: 'GET', path: '/api/v1/file/01H000000000000000000000F1' },
   { method: 'POST', path: '/api/v1/aml/query' },
+  { method: 'GET', path: '/api/v1/aml/metadata/Part' },
   { method: 'GET', path: '/api/v1/release-readiness/items/01H000000000000000000000P1' },
   { method: 'GET', path: '/api/v1/bom/01H000000000000000000000P2/where-used' },
   { method: 'GET', path: '/api/v1/bom/compare/schema' },
@@ -167,6 +164,7 @@ describe('Pact: Metasheet2 consumer -> YuantusPLM provider (Wave 1 + Wave 2 docu
       '/api/v1/bom/compare/schema',
       '/api/v1/file/item/',
       '/api/v1/aml/query',
+      '/api/v1/aml/metadata/${encodeURIComponent(itemType)}',
       '/api/v1/release-readiness/items/${itemId}',
       '/api/v1/eco',
       '/api/v1/eco/${approvalId}',
@@ -244,6 +242,22 @@ describe('Pact: Metasheet2 consumer -> YuantusPLM provider (Wave 1 + Wave 2 docu
     expect(body.where).toEqual({ id: '01H000000000000000000000P1' })
     expect(body.expand).toEqual(['Document Part'])
     expect(body.page_size).toBe(1)
+  })
+
+  it('aml/metadata interaction locks the schema-discovery envelope used by getItemMetadata', () => {
+    const pact = loadPact()
+    const metadata = pact.interactions.find(
+      i => i.request.path === '/api/v1/aml/metadata/Part',
+    )
+
+    expect(metadata).toBeDefined()
+    expect(metadata!.request.method).toBe('GET')
+    expect(metadata!.response.body).toEqual({
+      id: 'Part',
+      label: 'Part',
+      is_relationship: false,
+      properties: expect.any(Array),
+    })
   })
 
   it('release-readiness interaction locks the governance drilldown envelope used by federation', () => {

@@ -199,6 +199,19 @@ describe('usePlmProductPanel', () => {
           fallback: 'id',
         },
       ],
+      productMetadataLoading: ref(false),
+      productMetadataError: ref(''),
+      productMetadataRows: computed(() => [
+        {
+          name: 'item_number',
+          label: '料号',
+          type: 'string',
+          required: true,
+          length: '64',
+          defaultValue: '-',
+          currentValue: 'PN-1',
+        },
+      ]),
       formatJson: (payload: unknown) => JSON.stringify(payload),
     })
 
@@ -260,6 +273,11 @@ describe('usePlmProductPanel', () => {
     expect(panel.loadProduct).toHaveBeenCalledTimes(1)
     expect(panel.copyProductField).toHaveBeenCalledWith('id')
     expect(panel.resetAll).toHaveBeenCalledTimes(1)
+    expect(panel.productPanel.productMetadataRows.value[0]).toMatchObject({
+      name: 'item_number',
+      label: '料号',
+      currentValue: 'PN-1',
+    })
   })
 
   it('exposes workbench batch actions through the panel contract', async () => {
