@@ -3152,7 +3152,17 @@ paths:
           $ref: '#/components/responses/Forbidden'
   /api/approvals:
     get:
+      operationId: listApprovals
+      tags:
+        - Approvals
       summary: List platform approval instances
+      description: >
+        Returns a paginated list of approval instances. Use query parameters to
+
+        filter by tab: pending (assignee), mine (requesterId), cc
+        (ccRecipientId),
+
+        or completed (status=approved,rejected,revoked).
       security:
         - bearerAuth: []
       parameters:
@@ -3226,7 +3236,19 @@ paths:
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
     post:
+      operationId: createApproval
+      tags:
+        - Approvals
       summary: Create approval request from a published template
+      description: >
+        Initiates a new approval instance from a published template. The
+        formData
+
+        is validated against the template's formSchema (required fields, type
+
+        checks, enum legality). Returns 400 if the template is not published or
+
+        form validation fails. On success, generates request number (AP-XXXXXX).
       security:
         - bearerAuth: []
       requestBody:
@@ -3261,8 +3283,14 @@ paths:
           $ref: '#/components/responses/ServiceUnavailable'
   /api/approvals/pending:
     get:
+      operationId: listPendingApprovalsLegacy
+      tags:
+        - Approvals (Legacy)
       deprecated: true
       summary: Get pending approvals for current actor
+      description: >
+        Deprecated. Use GET /api/approvals?assignee={userId}&status=pending
+        instead.
       security:
         - bearerAuth: []
       responses:
@@ -3276,7 +3304,14 @@ paths:
           $ref: '#/components/responses/ServiceUnavailable'
   /api/approvals/{id}:
     get:
+      operationId: getApproval
+      tags:
+        - Approvals
       summary: Get approval instance
+      description: |
+        Returns the full approval instance including formSnapshot, assignments,
+        and current status. PLM-backed approvals (id starting with 'plm:') are
+        resolved via the PLM adapter.
       security:
         - bearerAuth: []
       parameters:
@@ -3311,7 +3346,14 @@ paths:
           $ref: '#/components/responses/ServiceUnavailable'
   /api/approvals/{id}/actions:
     post:
+      operationId: dispatchApprovalAction
+      tags:
+        - Approvals
       summary: Execute an approval action with optimistic locking
+      description: |
+        Unified action dispatch endpoint. Supported actions: approve, reject,
+        transfer (requires targetUserId), revoke (subject to RuntimePolicy), and
+        comment (does not change status). Returns 409 on version conflict.
       security:
         - bearerAuth: []
       parameters:
@@ -3360,8 +3402,14 @@ paths:
           $ref: '#/components/responses/ServiceUnavailable'
   /api/approvals/{id}/approve:
     post:
+      operationId: approveApprovalLegacy
+      tags:
+        - Approvals (Legacy)
       deprecated: true
       summary: Approve instance with optimistic locking
+      description: >
+        Deprecated. Use POST /api/approvals/{id}/actions with
+        {"action":"approve"} instead.
       security:
         - bearerAuth: []
       parameters:
@@ -3407,8 +3455,14 @@ paths:
           $ref: '#/components/responses/ServiceUnavailable'
   /api/approvals/{id}/reject:
     post:
+      operationId: rejectApprovalLegacy
+      tags:
+        - Approvals (Legacy)
       deprecated: true
       summary: Reject instance with optimistic locking
+      description: >
+        Deprecated. Use POST /api/approvals/{id}/actions with
+        {"action":"reject"} instead.
       security:
         - bearerAuth: []
       parameters:
@@ -3456,8 +3510,14 @@ paths:
           $ref: '#/components/responses/ServiceUnavailable'
   /api/approvals/{id}/return:
     post:
+      operationId: returnApprovalLegacy
+      tags:
+        - Approvals (Legacy)
       deprecated: true
       summary: Return instance with optimistic locking
+      description: >
+        Deprecated. Use POST /api/approvals/{id}/actions with
+        {"action":"reject"} instead.
       security:
         - bearerAuth: []
       parameters:
@@ -3494,8 +3554,14 @@ paths:
                 $ref: '#/components/schemas/ErrorResponse'
   /api/approvals/{id}/revoke:
     post:
+      operationId: revokeApprovalLegacy
+      tags:
+        - Approvals (Legacy)
       deprecated: true
       summary: Revoke instance with optimistic locking
+      description: >
+        Deprecated. Use POST /api/approvals/{id}/actions with
+        {"action":"revoke"} instead.
       security:
         - bearerAuth: []
       parameters:
@@ -3532,7 +3598,14 @@ paths:
                 $ref: '#/components/schemas/ErrorResponse'
   /api/approvals/{id}/history:
     get:
+      operationId: getApprovalHistory
+      tags:
+        - Approvals
       summary: Get approval history
+      description: |
+        Returns the paginated action history for an approval instance, including
+        create, approve, reject, transfer, revoke, and comment events with
+        actor details and timestamps.
       security:
         - bearerAuth: []
       parameters:
@@ -3590,7 +3663,13 @@ paths:
           $ref: '#/components/responses/ServiceUnavailable'
   /api/approval-templates:
     get:
+      operationId: listApprovalTemplates
+      tags:
+        - Approval Templates
       summary: List approval templates
+      description: |
+        Returns a paginated list of approval templates. Supports search by name
+        and filtering by status (draft, published, archived).
       security:
         - bearerAuth: []
       parameters:
@@ -3654,7 +3733,17 @@ paths:
         '403':
           $ref: '#/components/responses/Forbidden'
     post:
+      operationId: createApprovalTemplate
+      tags:
+        - Approval Templates
       summary: Create approval template
+      description: >
+        Creates a new approval template in draft status. Requires key (unique),
+
+        name, formSchema (with fields), and approvalGraph (nodes + edges).
+
+        The template must be published before it can be used to initiate
+        approvals.
       security:
         - bearerAuth: []
       requestBody:
@@ -3687,7 +3776,12 @@ paths:
           $ref: '#/components/responses/Forbidden'
   /api/approval-templates/{id}:
     get:
+      operationId: getApprovalTemplate
+      tags:
+        - Approval Templates
       summary: Get approval template detail
+      description: |
+        Returns the full template including formSchema and approvalGraph.
       security:
         - bearerAuth: []
       parameters:
@@ -3719,7 +3813,13 @@ paths:
         '404':
           $ref: '#/components/responses/NotFound'
     patch:
+      operationId: updateApprovalTemplate
+      tags:
+        - Approval Templates
       summary: Update approval template draft
+      description: |
+        Updates an existing template. Each update automatically creates a new
+        version. All fields are optional; only provided fields are updated.
       security:
         - bearerAuth: []
       parameters:
@@ -3760,7 +3860,19 @@ paths:
           $ref: '#/components/responses/NotFound'
   /api/approval-templates/{id}/publish:
     post:
+      operationId: publishApprovalTemplate
+      tags:
+        - Approval Templates
       summary: Publish approval template
+      description: >
+        Publishes the latest draft version of a template. Requires a
+        RuntimePolicy
+
+        (allowRevoke, optional revokeBeforeNodeKeys). Generates a
+
+        publishedDefinition and runtimeGraph. After publishing, the template can
+
+        be used to initiate new approval instances.
       security:
         - bearerAuth: []
       parameters:
@@ -3801,7 +3913,13 @@ paths:
           $ref: '#/components/responses/NotFound'
   /api/approval-templates/{id}/versions/{versionId}:
     get:
+      operationId: getApprovalTemplateVersion
+      tags:
+        - Approval Templates
       summary: Get approval template version detail
+      description: |
+        Returns a specific version of a template. Published versions include the
+        runtimeGraph with policy; draft versions have runtimeGraph set to null.
       security:
         - bearerAuth: []
       parameters:
