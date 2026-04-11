@@ -10,11 +10,11 @@
  * What this test guarantees today:
  *
  *   1. The pact JSON exists and parses as Pact v3.
- *   2. The 6 Wave 1 P0 interactions that PLMAdapter currently calls are
- *      present, in the order documented in
- *      `docs/PACT_FIRST_INTEGRATION_PLAN_20260407.md`.
+ *   2. The 6 Wave 1 P0 interactions plus the document-semantics Wave 2
+ *      interactions that PLMAdapter currently calls are present, in the
+ *      documented order.
  *      (codex's plan also lists `aml/metadata`, but PLMAdapter does not yet
- *      call it; deferred to Wave 1.5.)
+ *      call it; deferred until there is a real consumer call site.)
  *   3. The PLMAdapter actually calls every endpoint declared in the pact, so
  *      the contract cannot drift away from the live consumer code without
  *      this test failing.
@@ -80,13 +80,16 @@ interface PactDocument {
 // is listed as Wave 1 P0 in docs/PACT_FIRST_INTEGRATION_PLAN_20260407.md, but
 // PLMAdapter.ts does not currently invoke it. It is parked for Wave 1.5 / Wave
 // 2 and will be added to this list as soon as the adapter starts calling it.
-const WAVE_1_P0_PATHS = [
+const PACT_PATHS = [
   { method: 'POST', path: '/api/v1/auth/login' },
   { method: 'GET', path: '/api/v1/health' },
   { method: 'GET', path: '/api/v1/search/' },
   { method: 'POST', path: '/api/v1/aml/apply' },
   { method: 'GET', path: '/api/v1/bom/01H000000000000000000000P1/tree' },
   { method: 'GET', path: '/api/v1/bom/compare' },
+  { method: 'GET', path: '/api/v1/file/item/01H000000000000000000000P1' },
+  { method: 'GET', path: '/api/v1/file/01H000000000000000000000F1' },
+  { method: 'POST', path: '/api/v1/aml/query' },
 ] as const
 
 function loadPact(): PactDocument {
@@ -98,7 +101,7 @@ function loadAdapter(): string {
   return readFileSync(ADAPTER_PATH, 'utf8')
 }
 
-describe('Pact: Metasheet2 consumer -> YuantusPLM provider (Wave 1)', () => {
+describe('Pact: Metasheet2 consumer -> YuantusPLM provider (Wave 1 + document semantics Wave 2)', () => {
   it('pact JSON exists, parses as Pact v3, and names the right consumer/provider', () => {
     const pact = loadPact()
     expect(pact.consumer.name).toBe('Metasheet2')
@@ -106,11 +109,11 @@ describe('Pact: Metasheet2 consumer -> YuantusPLM provider (Wave 1)', () => {
     expect(pact.metadata.pactSpecification.version).toBe('3.0.0')
   })
 
-  it('contains exactly the 6 Wave 1 P0 interactions PLMAdapter currently calls, in documented order', () => {
+  it('contains exactly the currently used interactions PLMAdapter calls, in documented order', () => {
     const pact = loadPact()
-    expect(pact.interactions).toHaveLength(WAVE_1_P0_PATHS.length)
+    expect(pact.interactions).toHaveLength(PACT_PATHS.length)
     pact.interactions.forEach((interaction, index) => {
-      const expected = WAVE_1_P0_PATHS[index]
+      const expected = PACT_PATHS[index]
       expect(interaction.request.method).toBe(expected.method)
       expect(interaction.request.path).toBe(expected.path)
     })
@@ -127,9 +130,9 @@ describe('Pact: Metasheet2 consumer -> YuantusPLM provider (Wave 1)', () => {
 
   it('every protected endpoint is also called by the live PLMAdapter source', () => {
     const adapterSrc = loadAdapter()
-    // The 6 endpoints declared in the pact should appear verbatim in PLMAdapter.ts
-    // (as path segments). The auth/login endpoint is invoked via raw fetch and
-    // also appears as a string literal.
+    // Every endpoint declared in the pact should appear verbatim in
+    // PLMAdapter.ts (as path segments or helper callsites), so the pact
+    // cannot silently drift away from the live consumer implementation.
     const endpointsToFind = [
       '/api/v1/auth/login',
       '/api/v1/health',
@@ -137,6 +140,9 @@ describe('Pact: Metasheet2 consumer -> YuantusPLM provider (Wave 1)', () => {
       '/api/v1/aml/apply',
       '/api/v1/bom/',
       '/api/v1/bom/compare',
+      '/api/v1/file/item/',
+      '/api/v1/aml/query',
+      'fetchYuantusFileMetadata',
     ]
     for (const ep of endpointsToFind) {
       expect(
@@ -169,5 +175,35 @@ describe('Pact: Metasheet2 consumer -> YuantusPLM provider (Wave 1)', () => {
     expect(body).toHaveProperty('count')
     expect(body).toHaveProperty('items')
     expect(Array.isArray(body.items)).toBe(true)
+  })
+
+  it('document semantics interactions lock attachment listing, file metadata enrichment, and AML related-doc expansion', () => {
+    const pact = loadPact()
+    const attachmentList = pact.interactions.find(
+      i => i.request.path === '/api/v1/file/item/01H000000000000000000000P1',
+    )
+    const fileMetadata = pact.interactions.find(
+      i => i.request.path === '/api/v1/file/01H000000000000000000000F1',
+    )
+    const amlQuery = pact.interactions.find(
+      i => i.request.path === '/api/v1/aml/query',
+    )
+
+    expect(attachmentList).toBeDefined()
+    expect(fileMetadata).toBeDefined()
+    expect(amlQuery).toBeDefined()
+  })
+
+  it('aml/query request body documents the expand Document Part envelope used by getProductDocuments', () => {
+    const pact = loadPact()
+    const amlQuery = pact.interactions.find(
+      i => i.request.path === '/api/v1/aml/query',
+    )
+    expect(amlQuery).toBeDefined()
+    const body = amlQuery!.request.body as Record<string, unknown>
+    expect(body.type).toBe('Part')
+    expect(body.where).toEqual({ id: '01H000000000000000000000P1' })
+    expect(body.expand).toEqual(['Document Part'])
+    expect(body.page_size).toBe(1)
   })
 })

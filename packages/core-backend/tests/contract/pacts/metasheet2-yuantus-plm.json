@@ -9,7 +9,7 @@
     "pactSpecification": {
       "version": "3.0.0"
     },
-    "claudeNote": "Hand-authored Wave 1 P0 contract per docs/PACT_FIRST_INTEGRATION_PLAN_20260407.md. Match-by-type, not match-by-value. Replace with @pact-foundation/pact generated artifact when that dep is approved. NOTE: codex's plan also listed GET /api/v1/aml/metadata/{type} in Wave 1, but PLMAdapter.ts does not currently call it; contract-first principle says we lock what is actually called, so metadata is deferred to Wave 2 (or earlier once PLMAdapter starts using it)."
+    "claudeNote": "Hand-authored Wave 1 plus document-semantics Wave 2 contract per docs/PACT_FIRST_INTEGRATION_PLAN_20260407.md. Match-by-type, not match-by-value. Replace with @pact-foundation/pact generated artifact when that dep is approved. NOTE: codex's plan also listed GET /api/v1/aml/metadata/{type} in Wave 1, but PLMAdapter.ts does not currently call it; contract-first principle says we lock what is actually called. Wave 2 now adds the real document semantics calls already used by PLMAdapter.getProductDocuments in yuantus mode: GET /api/v1/file/item/{item_id}, GET /api/v1/file/{file_id}, and POST /api/v1/aml/query with expand ['Document Part']."
   },
   "interactions": [
     {
@@ -368,6 +368,266 @@
             "$.added": { "matchers": [{ "match": "type", "min": 0 }] },
             "$.removed": { "matchers": [{ "match": "type", "min": 0 }] },
             "$.changed": { "matchers": [{ "match": "type", "min": 0 }] }
+          }
+        }
+      }
+    },
+    {
+      "description": "list file attachments for a Part through the item files endpoint",
+      "providerStates": [
+        {
+          "name": "a Part with id 01H000000000000000000000P1 has an attached file 01H000000000000000000000F1"
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "path": "/api/v1/file/item/01H000000000000000000000P1",
+        "headers": {
+          "Authorization": "Bearer eyJhbGciOiJIUzI1NiJ9.example"
+        },
+        "matchingRules": {
+          "header": {
+            "$.Authorization": {
+              "matchers": [{ "match": "regex", "regex": "^Bearer .+" }]
+            }
+          }
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": [
+          {
+            "id": "01H000000000000000000000A1",
+            "file_id": "01H000000000000000000000F1",
+            "filename": "mounting-bracket-drawing.pdf",
+            "file_role": "primary",
+            "description": "Primary manufacturing drawing",
+            "file_type": "pdf",
+            "file_size": 2048,
+            "document_type": "drawing",
+            "author": "metasheet-svc",
+            "source_system": "yuantus",
+            "source_version": "v1",
+            "document_version": "A",
+            "preview_url": "/api/v1/file/01H000000000000000000000F1/preview",
+            "download_url": "/api/v1/file/01H000000000000000000000F1/download"
+          }
+        ],
+        "matchingRules": {
+          "body": {
+            "$": { "matchers": [{ "match": "type", "min": 0 }] },
+            "$[*].id": { "matchers": [{ "match": "type" }] },
+            "$[*].file_id": { "matchers": [{ "match": "type" }] },
+            "$[*].filename": { "matchers": [{ "match": "type" }] },
+            "$[*].file_role": { "matchers": [{ "match": "type" }] },
+            "$[*].description": { "matchers": [{ "match": "type" }] },
+            "$[*].file_type": { "matchers": [{ "match": "type" }] },
+            "$[*].file_size": { "matchers": [{ "match": "integer" }] },
+            "$[*].document_type": { "matchers": [{ "match": "type" }] },
+            "$[*].author": { "matchers": [{ "match": "type" }] },
+            "$[*].source_system": { "matchers": [{ "match": "type" }] },
+            "$[*].source_version": { "matchers": [{ "match": "type" }] },
+            "$[*].document_version": { "matchers": [{ "match": "type" }] },
+            "$[*].preview_url": { "matchers": [{ "match": "type" }] },
+            "$[*].download_url": { "matchers": [{ "match": "type" }] }
+          }
+        }
+      }
+    },
+    {
+      "description": "fetch file metadata for an attached CAD or document file",
+      "providerStates": [
+        {
+          "name": "a Part with id 01H000000000000000000000P1 has an attached file 01H000000000000000000000F1"
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "path": "/api/v1/file/01H000000000000000000000F1",
+        "headers": {
+          "Authorization": "Bearer eyJhbGciOiJIUzI1NiJ9.example"
+        },
+        "matchingRules": {
+          "header": {
+            "$.Authorization": {
+              "matchers": [{ "match": "regex", "regex": "^Bearer .+" }]
+            }
+          }
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": {
+          "id": "01H000000000000000000000F1",
+          "filename": "mounting-bracket-drawing.pdf",
+          "file_type": "pdf",
+          "mime_type": "application/pdf",
+          "file_size": 2048,
+          "checksum": "sha256-demo-file-1",
+          "document_type": "drawing",
+          "is_native_cad": false,
+          "author": "metasheet-svc",
+          "source_system": "yuantus",
+          "source_version": "v1",
+          "document_version": "A",
+          "preview_url": "/api/v1/file/01H000000000000000000000F1/preview",
+          "geometry_url": null,
+          "cad_manifest_url": null,
+          "cad_document_url": null,
+          "cad_metadata_url": null,
+          "cad_bom_url": null,
+          "cad_dedup_url": null,
+          "cad_viewer_url": null,
+          "cad_document_schema_version": null,
+          "cad_review_state": null,
+          "cad_review_note": null,
+          "cad_review_by_id": null,
+          "cad_reviewed_at": null,
+          "conversion_status": "pending",
+          "viewer_readiness": {},
+          "created_at": "2026-01-01T00:00:00Z"
+        },
+        "matchingRules": {
+          "body": {
+            "$.id": { "matchers": [{ "match": "type" }] },
+            "$.filename": { "matchers": [{ "match": "type" }] },
+            "$.file_type": { "matchers": [{ "match": "type" }] },
+            "$.mime_type": { "matchers": [{ "match": "type" }] },
+            "$.file_size": { "matchers": [{ "match": "integer" }] },
+            "$.checksum": { "matchers": [{ "match": "type" }] },
+            "$.document_type": { "matchers": [{ "match": "type" }] },
+            "$.is_native_cad": { "matchers": [{ "match": "type" }] },
+            "$.author": { "matchers": [{ "match": "type" }] },
+            "$.source_system": { "matchers": [{ "match": "type" }] },
+            "$.source_version": { "matchers": [{ "match": "type" }] },
+            "$.document_version": { "matchers": [{ "match": "type" }] },
+            "$.preview_url": { "matchers": [{ "match": "type" }] },
+            "$.conversion_status": { "matchers": [{ "match": "type" }] },
+            "$.viewer_readiness": { "matchers": [{ "match": "type" }] },
+            "$.created_at": { "matchers": [{ "match": "type" }] }
+          }
+        }
+      }
+    },
+    {
+      "description": "expand related Documents for a Part through AML query",
+      "providerStates": [
+        {
+          "name": "a Part with id 01H000000000000000000000P1 has a related Document through Document Part"
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "path": "/api/v1/aml/query",
+        "headers": {
+          "Content-Type": "application/json",
+          "Authorization": "Bearer eyJhbGciOiJIUzI1NiJ9.example"
+        },
+        "body": {
+          "type": "Part",
+          "where": {
+            "id": "01H000000000000000000000P1"
+          },
+          "select": ["id", "name", "state", "properties", "current_version_id", "config_id"],
+          "expand": ["Document Part"],
+          "depth": 1,
+          "page": 1,
+          "page_size": 1
+        },
+        "matchingRules": {
+          "header": {
+            "$.Authorization": {
+              "matchers": [{ "match": "regex", "regex": "^Bearer .+" }]
+            }
+          },
+          "body": {
+            "$.type": { "matchers": [{ "match": "type" }] },
+            "$.where.id": { "matchers": [{ "match": "type" }] },
+            "$.select": { "matchers": [{ "match": "type", "min": 1 }] },
+            "$.expand": { "matchers": [{ "match": "type", "min": 1 }] },
+            "$.depth": { "matchers": [{ "match": "integer" }] },
+            "$.page": { "matchers": [{ "match": "integer" }] },
+            "$.page_size": { "matchers": [{ "match": "integer" }] }
+          }
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": {
+          "items": [
+            {
+              "id": "01H000000000000000000000P1",
+              "type": "Part",
+              "name": "Mounting Bracket",
+              "state": "Released",
+              "config_id": "01H000000000000000000000C1",
+              "properties": {
+                "item_number": "P-0001",
+                "name": "Mounting Bracket"
+              },
+              "Document Part": [
+                {
+                  "id": "01H000000000000000000000D1",
+                  "type": "Document",
+                  "number": "DOC-0001",
+                  "name": "Mounting Bracket Drawing",
+                  "generation": 1,
+                  "state": "Draft",
+                  "config_id": "01H000000000000000000000CD1",
+                  "is_current": true,
+                  "properties": {
+                    "item_number": "DOC-0001",
+                    "doc_number": "DOC-0001",
+                    "number": "DOC-0001",
+                    "name": "Mounting Bracket Drawing",
+                    "current_version_id": "VER-0001",
+                    "document_type": "drawing"
+                  },
+                  "_rel_properties": {
+                    "role": "related_document"
+                  }
+                }
+              ]
+            }
+          ],
+          "total": 1,
+          "page": 1,
+          "page_size": 1,
+          "has_more": false
+        },
+        "matchingRules": {
+          "body": {
+            "$.items": { "matchers": [{ "match": "type", "min": 0 }] },
+            "$.items[*].id": { "matchers": [{ "match": "type" }] },
+            "$.items[*].type": { "matchers": [{ "match": "type" }] },
+            "$.items[*].name": { "matchers": [{ "match": "type" }] },
+            "$.items[*].state": { "matchers": [{ "match": "type" }] },
+            "$.items[*].config_id": { "matchers": [{ "match": "type" }] },
+            "$.items[*].properties": { "matchers": [{ "match": "type" }] },
+            "$.items[*]['Document Part']": { "matchers": [{ "match": "type", "min": 0 }] },
+            "$.items[*]['Document Part'][*].id": { "matchers": [{ "match": "type" }] },
+            "$.items[*]['Document Part'][*].type": { "matchers": [{ "match": "type" }] },
+            "$.items[*]['Document Part'][*].number": { "matchers": [{ "match": "type" }] },
+            "$.items[*]['Document Part'][*].name": { "matchers": [{ "match": "type" }] },
+            "$.items[*]['Document Part'][*].generation": { "matchers": [{ "match": "integer" }] },
+            "$.items[*]['Document Part'][*].state": { "matchers": [{ "match": "type" }] },
+            "$.items[*]['Document Part'][*].config_id": { "matchers": [{ "match": "type" }] },
+            "$.items[*]['Document Part'][*].is_current": { "matchers": [{ "match": "type" }] },
+            "$.items[*]['Document Part'][*].properties": { "matchers": [{ "match": "type" }] },
+            "$.items[*]['Document Part'][*]._rel_properties": { "matchers": [{ "match": "type" }] },
+            "$.total": { "matchers": [{ "match": "integer", "min": 0 }] },
+            "$.page": { "matchers": [{ "match": "integer", "min": 1 }] },
+            "$.page_size": { "matchers": [{ "match": "integer", "min": 1 }] },
+            "$.has_more": { "matchers": [{ "match": "type" }] }
           }
         }
       }
