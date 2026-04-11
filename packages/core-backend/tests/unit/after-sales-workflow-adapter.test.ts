@@ -279,6 +279,62 @@ describe('after-sales workflow adapter', () => {
     })
   })
 
+  it('throws VALIDATION_ERROR when payload.tenantId is present but projectId is not tenant scoped', async () => {
+    const context = createContext()
+    const runtime = adapter.createWorkflowRuntime(context, {
+      loadCurrent: vi.fn(async () => ({
+        status: 'not-installed',
+        config: null,
+      })),
+    })
+
+    await expect(
+      runtime.onTicketCreated({
+        tenantId: 'tenant_42',
+        projectId: 'after-sales',
+        ticketNo: 'TK-1006',
+        ticket: {
+          id: 'ticket_006',
+          ticketNo: 'TK-1006',
+          title: 'Voltage instability',
+          priority: 'normal',
+          assigneeCandidates: [{ id: 'tech_006', type: 'user' }],
+        },
+      }),
+    ).rejects.toMatchObject({
+      code: 'VALIDATION_ERROR',
+      message: 'projectId must include a tenant prefix',
+    })
+  })
+
+  it('throws VALIDATION_ERROR when payload.projectId tenant prefix mismatches tenantId', async () => {
+    const context = createContext()
+    const runtime = adapter.createWorkflowRuntime(context, {
+      loadCurrent: vi.fn(async () => ({
+        status: 'not-installed',
+        config: null,
+      })),
+    })
+
+    await expect(
+      runtime.onTicketCreated({
+        tenantId: 'tenant_42',
+        projectId: 'tenant_other:after-sales',
+        ticketNo: 'TK-1007',
+        ticket: {
+          id: 'ticket_007',
+          ticketNo: 'TK-1007',
+          title: 'Cooling failure',
+          priority: 'normal',
+          assigneeCandidates: [{ id: 'tech_007', type: 'user' }],
+        },
+      }),
+    ).rejects.toMatchObject({
+      code: 'VALIDATION_ERROR',
+      message: 'projectId tenant prefix does not match tenantId',
+    })
+  })
+
   it('skips an automation handler when the install-time rule is disabled', async () => {
     const listRules = vi.fn(async () => [
       {

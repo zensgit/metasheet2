@@ -82,7 +82,7 @@ Runtime tenant resolution now uses:
 
 After `loadCurrent()`, the adapter also reuses `current.projectId` when available to derive the effective runtime `projectId`.
 
-Invalid non-tenant-scoped `projectId` values now fail fast.
+Invalid non-tenant-scoped `projectId` values now fail fast, and an explicit `payload.projectId` must match the resolved `tenantId`.
 
 ### 6. Frontend adjustment
 
@@ -115,7 +115,7 @@ The refund-approval read path is now keyed only by `ticketId`, which matches the
 1. Targeted backend/unit verification
 
 ```bash
-cd /Users/huazhou/Downloads/Github/metasheet2/.worktrees/after-sales-tenant-hardening
+cd <repo-root>
 pnpm --filter @metasheet/core-backend exec vitest run \
   tests/unit/AuthService.test.ts \
   tests/unit/auth-login-routes.test.ts \
@@ -133,7 +133,7 @@ Result:
 2. Real-DB after-sales integration verification
 
 ```bash
-cd /Users/huazhou/Downloads/Github/metasheet2/.worktrees/after-sales-tenant-hardening
+cd <repo-root>
 DATABASE_URL=postgresql:///metasheet_test \
 pnpm --filter @metasheet/core-backend exec vitest \
   --config vitest.integration.config.ts \
@@ -149,7 +149,7 @@ Result:
 3. Core backend TypeScript build
 
 ```bash
-cd /Users/huazhou/Downloads/Github/metasheet2/.worktrees/after-sales-tenant-hardening
+cd <repo-root>
 pnpm --filter @metasheet/core-backend build
 ```
 
@@ -160,7 +160,7 @@ Result:
 4. Patch hygiene
 
 ```bash
-git -C /Users/huazhou/Downloads/Github/metasheet2/.worktrees/after-sales-tenant-hardening diff --check
+git -C <repo-root> diff --check
 ```
 
 Result:
@@ -172,7 +172,7 @@ Result:
 Frontend workspace type-check is not clean, but the failures are pre-existing and unrelated to this slice:
 
 ```bash
-cd /Users/huazhou/Downloads/Github/metasheet2/.worktrees/after-sales-tenant-hardening
+cd <repo-root>
 pnpm --filter @metasheet/web type-check
 ```
 
@@ -188,8 +188,8 @@ No type-check error was reported for `apps/web/src/views/AfterSalesView.vue`.
 
 This worktree required local `node_modules` symlinks to reuse the main workspace dependencies:
 
-- `.worktrees/after-sales-tenant-hardening/node_modules`
-- `.worktrees/after-sales-tenant-hardening/packages/core-backend/node_modules`
-- `.worktrees/after-sales-tenant-hardening/apps/web/node_modules`
+- `<repo-root>/.worktrees/after-sales-tenant-hardening/node_modules`
+- `<repo-root>/.worktrees/after-sales-tenant-hardening/packages/core-backend/node_modules`
+- `<repo-root>/.worktrees/after-sales-tenant-hardening/apps/web/node_modules`
 
 These are local environment conveniences only and are not part of the code change.

@@ -65,12 +65,12 @@ function parseTenantIdFromProjectId(projectId) {
   return value.slice(0, separatorIndex).trim()
 }
 
-function resolveTenantIdFromPayload(payload) {
+function resolveTenantIdFromPayload(payload, requestedProjectTenantId = '') {
   return (
     getScalarString(payload, 'tenantId') ||
     getScalarString(getNamespacedObject(payload, 'ticket'), 'tenantId') ||
     getScalarString(getNamespacedObject(payload, 'approval'), 'tenantId') ||
-    parseTenantIdFromProjectId(getScalarString(payload, 'projectId'))
+    requestedProjectTenantId
   )
 }
 
@@ -164,7 +164,11 @@ async function resolveRoleRecipients(context, roleSlugs) {
 
 async function resolveRuntimeInstallContext(context, payload, options = {}) {
   const appId = options.appId || DEFAULT_APP_ID
-  const payloadTenantId = resolveTenantIdFromPayload(payload)
+  const requestedProjectId = getScalarString(payload, 'projectId')
+  const requestedProjectTenantId = requestedProjectId
+    ? parseTenantIdFromProjectId(requestedProjectId)
+    : ''
+  const payloadTenantId = resolveTenantIdFromPayload(payload, requestedProjectTenantId)
   const contextTenantId = resolveTenantIdFromContext(context)
   const tenantLookupId = payloadTenantId || contextTenantId
 
@@ -184,8 +188,11 @@ async function resolveRuntimeInstallContext(context, payload, options = {}) {
       throw createValidationError('tenantId not found')
     }
     const config = normalizeTemplateConfig(current && current.status !== 'not-installed' ? current.config : null)
+    if (requestedProjectId && requestedProjectTenantId !== tenantId) {
+      throw createValidationError('projectId tenant prefix does not match tenantId')
+    }
     const projectId =
-      getScalarString(payload, 'projectId') ||
+      requestedProjectId ||
       currentProjectId ||
       installer.getProjectId(tenantId, appId)
 
