@@ -414,8 +414,13 @@ export class AfterSalesApprovalBridgeService {
           `INSERT INTO approval_assignments
            (instance_id, assignment_type, assignee_id, source_step, is_active, metadata)
            VALUES ($1, 'role', $2, $3, TRUE, $4::jsonb)
-           ON CONFLICT (instance_id, assignment_type, assignee_id, source_step)
-           DO UPDATE SET is_active = TRUE, metadata = EXCLUDED.metadata, updated_at = now()`,
+           ON CONFLICT (instance_id, assignment_type, assignee_id)
+             WHERE is_active = TRUE
+           DO UPDATE SET
+             source_step = EXCLUDED.source_step,
+             is_active = TRUE,
+             metadata = EXCLUDED.metadata,
+             updated_at = now()`,
           [
             approvalId,
             role,
