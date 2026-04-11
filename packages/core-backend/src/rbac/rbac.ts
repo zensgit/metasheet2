@@ -58,9 +58,16 @@ export function rbacGuard(resourceOrPermission: string, action?: string): Reques
   return async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     try {
       const userId = req.user?.id?.toString()
+      const requestUser = req.user
 
       if (!userId) {
         res.status(401).json({ error: 'Authentication required' })
+        return
+      }
+
+      // Global admins bypass namespace admission and RBAC table lookups.
+      if (requestUserIsAdmin(requestUser)) {
+        next()
         return
       }
 
@@ -68,7 +75,7 @@ export function rbacGuard(resourceOrPermission: string, action?: string): Reques
       // role/permission data on each request, and development fallback users only
       // exist on req.user (not in RBAC tables).
       if (
-        requestUserHasResolvedPermission(req.user, permissionCode)
+        requestUserHasResolvedPermission(requestUser, permissionCode)
         && await isPermissionAllowedByNamespaceAdmission(userId, permissionCode)
       ) {
         next()
@@ -76,7 +83,7 @@ export function rbacGuard(resourceOrPermission: string, action?: string): Reques
       }
 
       if (
-        trustedTokenClaimsAllowPermission(req.user, permissionCode)
+        trustedTokenClaimsAllowPermission(requestUser, permissionCode)
         && await isPermissionAllowedByNamespaceAdmission(userId, permissionCode)
       ) {
         next()
