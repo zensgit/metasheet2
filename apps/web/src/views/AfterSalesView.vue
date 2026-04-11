@@ -4132,7 +4132,10 @@ async function requestTicketRefund(ticket: TicketViewModel) {
   }
 }
 
-async function loadFieldPoliciesForCurrentState(state: CurrentResponse): Promise<void> {
+async function loadFieldPoliciesForCurrentState(
+  state: CurrentResponse,
+  options: { strict?: boolean } = {},
+): Promise<void> {
   if (state.status !== 'installed' && state.status !== 'partial') {
     ticketFieldPolicies.value = null
     return
@@ -4140,12 +4143,18 @@ async function loadFieldPoliciesForCurrentState(state: CurrentResponse): Promise
 
   try {
     ticketFieldPolicies.value = await readEnvelope<TicketFieldPolicyResponse>('/api/after-sales/field-policies')
-  } catch {
+  } catch (err: unknown) {
     ticketFieldPolicies.value = null
+    if (options.strict) {
+      throw err instanceof Error ? err : new Error('Failed to load after-sales field policies')
+    }
   }
 }
 
-async function loadRuntimeAdminForCurrentState(state: CurrentResponse): Promise<void> {
+async function loadRuntimeAdminForCurrentState(
+  state: CurrentResponse,
+  options: { strict?: boolean } = {},
+): Promise<void> {
   runtimeAdminError.value = ''
   runtimeAdminAutomationsError.value = ''
   runtimeAdminFieldPoliciesError.value = ''
@@ -4166,17 +4175,21 @@ async function loadRuntimeAdminForCurrentState(state: CurrentResponse): Promise<
 
   try {
     const { response, payload } = await readEnvelopeResponse<RuntimeAdminResponse>('/api/after-sales/runtime-admin')
+    const responseMessage = extractMessage(payload, `${response.status} ${response.statusText}`)
 
     if (response.status === 403) {
       runtimeAdminAccessDenied.value = true
       resetRuntimeAdminDrafts()
+      if (options.strict) {
+        throw new Error(responseMessage)
+      }
       return
     }
 
     runtimeAdminAccessDenied.value = false
 
     if (!response.ok) {
-      throw new Error(extractMessage(payload, `${response.status} ${response.statusText}`))
+      throw new Error(responseMessage)
     }
 
     const runtimeAdminPayload = (payload as ApiEnvelope<RuntimeAdminResponse> | null)?.data
@@ -4190,6 +4203,9 @@ async function loadRuntimeAdminForCurrentState(state: CurrentResponse): Promise<
     runtimeAdminAccessDenied.value = false
     runtimeAdminError.value = err instanceof Error ? err.message : 'Failed to load runtime admin controls'
     resetRuntimeAdminDrafts()
+    if (options.strict) {
+      throw err instanceof Error ? err : new Error('Failed to load runtime admin controls')
+    }
   } finally {
     runtimeAdminLoading.value = false
   }
@@ -4250,7 +4266,7 @@ async function saveRuntimeAdminAutomations() {
         })),
       }),
     })
-    await loadRuntimeAdminForCurrentState(current.value)
+    await loadRuntimeAdminForCurrentState(current.value, { strict: true })
     runtimeAdminAutomationsSuccess.value = 'Saved automation controls'
   } catch (err: unknown) {
     runtimeAdminAutomationsError.value = err instanceof Error ? err.message : 'Failed to save automations'
@@ -4285,8 +4301,8 @@ async function saveRuntimeAdminFieldPolicies() {
       }),
     })
     await Promise.all([
-      loadRuntimeAdminForCurrentState(current.value),
-      loadFieldPoliciesForCurrentState(current.value),
+      loadRuntimeAdminForCurrentState(current.value, { strict: true }),
+      loadFieldPoliciesForCurrentState(current.value, { strict: true }),
     ])
     runtimeAdminFieldPoliciesSuccess.value = 'Saved field policies'
   } catch (err: unknown) {

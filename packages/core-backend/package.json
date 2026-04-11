@@ -21,6 +21,7 @@
     "test:phase5": "vitest --config vitest.phase5.config.ts run",
     "test:unit": "vitest run tests/unit --reporter=dot",
     "test:integration": "vitest --config vitest.integration.config.ts run tests/integration --reporter=dot",
+    "test:integration:after-sales": "vitest --config vitest.integration.config.ts run tests/integration/after-sales-plugin.install.test.ts --reporter=dot",
     "test:integration:attendance": "vitest --config vitest.integration.config.ts run tests/integration/attendance-plugin.test.ts --reporter=dot",
     "test:contract": "vitest run tests/contract --reporter=dot",
     "test:e2e:handoff": "npx playwright test --config tests/e2e/playwright.config.ts",
