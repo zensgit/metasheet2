@@ -12,7 +12,7 @@
           @keyup.enter="handleSearch"
         >
           <template #prefix>
-            <span>🔍</span>
+            <el-icon><Search /></el-icon>
           </template>
         </el-input>
         <el-select
@@ -27,15 +27,38 @@
           <el-option label="已驳回" value="rejected" />
           <el-option label="已撤回" value="revoked" />
         </el-select>
+        <el-button
+          v-if="canWrite"
+          type="primary"
+          style="margin-left: 12px"
+          @click="router.push({ name: 'approval-template-list' })"
+        >
+          发起审批
+        </el-button>
       </div>
     </header>
+
+    <el-alert
+      v-if="store.error"
+      :title="store.error"
+      type="error"
+      show-icon
+      :closable="true"
+      class="approval-center__error"
+      @close="store.error = null"
+    >
+      <template #default>
+        <el-button type="primary" link @click="loadCurrentTab">重新加载</el-button>
+      </template>
+    </el-alert>
 
     <el-tabs v-model="activeTab" class="approval-center__tabs" @tab-change="handleTabChange">
       <el-tab-pane label="待我处理" name="pending">
         <el-table
+          v-loading="store.loading"
           :data="store.pendingApprovals"
-          :loading="store.loading"
           style="width: 100%"
+          max-height="560"
           stripe
           highlight-current-row
           @row-click="handleRowClick"
@@ -59,6 +82,12 @@
               {{ formatDate(row.createdAt) }}
             </template>
           </el-table-column>
+          <template #empty>
+            <el-empty
+              :description="searchText ? '未找到匹配的审批' : '暂无待处理审批'"
+              :image-size="100"
+            />
+          </template>
         </el-table>
         <el-pagination
           class="approval-center__pagination"
@@ -73,9 +102,10 @@
 
       <el-tab-pane label="我发起的" name="mine">
         <el-table
+          v-loading="store.loading"
           :data="store.myApprovals"
-          :loading="store.loading"
           style="width: 100%"
+          max-height="560"
           stripe
           highlight-current-row
           @row-click="handleRowClick"
@@ -99,6 +129,12 @@
               {{ formatDate(row.createdAt) }}
             </template>
           </el-table-column>
+          <template #empty>
+            <el-empty
+              :description="searchText ? '未找到匹配的审批' : '暂无我发起的审批'"
+              :image-size="100"
+            />
+          </template>
         </el-table>
         <el-pagination
           class="approval-center__pagination"
@@ -113,9 +149,10 @@
 
       <el-tab-pane label="抄送我的" name="cc">
         <el-table
+          v-loading="store.loading"
           :data="store.ccApprovals"
-          :loading="store.loading"
           style="width: 100%"
+          max-height="560"
           stripe
           highlight-current-row
           @row-click="handleRowClick"
@@ -139,6 +176,12 @@
               {{ formatDate(row.createdAt) }}
             </template>
           </el-table-column>
+          <template #empty>
+            <el-empty
+              :description="searchText ? '未找到匹配的审批' : '暂无抄送我的审批'"
+              :image-size="100"
+            />
+          </template>
         </el-table>
         <el-pagination
           class="approval-center__pagination"
@@ -153,9 +196,10 @@
 
       <el-tab-pane label="已完成" name="completed">
         <el-table
+          v-loading="store.loading"
           :data="store.completedApprovals"
-          :loading="store.loading"
           style="width: 100%"
+          max-height="560"
           stripe
           highlight-current-row
           @row-click="handleRowClick"
@@ -179,6 +223,12 @@
               {{ formatDate(row.createdAt) }}
             </template>
           </el-table-column>
+          <template #empty>
+            <el-empty
+              :description="searchText ? '未找到匹配的审批' : '暂无已完成审批'"
+              :image-size="100"
+            />
+          </template>
         </el-table>
         <el-pagination
           class="approval-center__pagination"
@@ -197,11 +247,14 @@
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
+import { Search } from '@element-plus/icons-vue'
 import type { UnifiedApprovalDTO, ApprovalStatus } from '../../types/approval'
 import { useApprovalStore } from '../../approvals/store'
+import { useApprovalPermissions } from '../../approvals/permissions'
 
 const router = useRouter()
 const store = useApprovalStore()
+const { canWrite } = useApprovalPermissions()
 
 const activeTab = ref<'pending' | 'mine' | 'cc' | 'completed'>('pending')
 const searchText = ref('')
@@ -304,6 +357,10 @@ onMounted(() => {
 .approval-center__toolbar {
   display: flex;
   align-items: center;
+}
+
+.approval-center__error {
+  margin-bottom: 16px;
 }
 
 .approval-center__tabs {
