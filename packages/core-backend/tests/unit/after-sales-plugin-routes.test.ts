@@ -1721,6 +1721,73 @@ describe('plugin-after-sales routes', () => {
     })
   })
 
+  it('preserves low priority when updating a ticket through the multitable patch seam', async () => {
+    const handler = routes.get('PATCH /api/after-sales/tickets/:ticketId')
+    const res = new FakeResponse()
+
+    db.rows.push({
+      id: 'fake-uuid-1',
+      tenant_id: 'tenant_42',
+      app_id: 'after-sales',
+      project_id: 'tenant_42:after-sales',
+      template_id: 'after-sales-default',
+      template_version: '0.1.0',
+      mode: 'enable',
+      status: 'installed',
+      created_objects_json: JSON.stringify(['serviceTicket']),
+      created_views_json: JSON.stringify(['ticket-board']),
+      warnings_json: JSON.stringify([]),
+      display_name: 'After-sales',
+      config_json: JSON.stringify({}),
+      last_install_at: new Date(),
+      created_at: new Date(),
+    })
+
+    await handler?.(buildReq({
+      user: {
+        id: 'writer_42',
+        tenantId: 'tenant_42',
+        role: 'user',
+        roles: ['user'],
+        perms: ['after_sales:write'],
+      },
+      params: {
+        ticketId: 'rec_ticket_001',
+      },
+      body: {
+        ticket: {
+          title: 'Updated low priority diagnosis',
+          priority: 'low',
+          source: 'phone',
+          status: 'assigned',
+        },
+      },
+    }), res)
+
+    expect(res.statusCode).toBe(200)
+    expect(patchRecord).toHaveBeenCalledWith({
+      sheetId: 'tenant_42:after-sales:serviceTicket:sheet',
+      recordId: 'rec_ticket_001',
+      changes: {
+        [stPk('title')]: 'Updated low priority diagnosis',
+        [stPk('priority')]: 'low',
+        [stPk('source')]: 'phone',
+        [stPk('status')]: 'assigned',
+      },
+    })
+    expect(res.body.data.ticket).toEqual({
+      id: 'rec_ticket_001',
+      version: 4,
+      data: {
+        ticketNo: 'TK-2001',
+        title: 'Updated low priority diagnosis',
+        source: 'phone',
+        priority: 'low',
+        status: 'assigned',
+      },
+    })
+  })
+
   it('returns 404 when updating a missing ticket', async () => {
     const handler = routes.get('PATCH /api/after-sales/tickets/:ticketId')
     const res = new FakeResponse()
@@ -5755,6 +5822,7 @@ describe('plugin-after-sales routes', () => {
         emitTicketOverdue: expect.any(Function),
         emitFollowUpDue: expect.any(Function),
         createTicket: expect.any(Function),
+        updateTicket: expect.any(Function),
         requestTicketRefund: expect.any(Function),
         listTickets: expect.any(Function),
         deleteTicket: expect.any(Function),

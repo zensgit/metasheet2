@@ -494,7 +494,6 @@ function buildUpdateInstalledAssetCommand(input, existingInstalledAsset) {
     },
   }
 }
-
 function normalizeTicketStatus(value) {
   if (optionalString(value) === 'open') {
     return 'new'
