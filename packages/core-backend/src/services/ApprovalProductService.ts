@@ -1,0 +1,753 @@
+import crypto from 'crypto'
+import { pool } from '../db/pg'
+import type {
+  ApprovalTemplateDetailDTO,
+  ApprovalTemplateListItemDTO,
+  ApprovalTemplateVersionDetailDTO,
+  CreateApprovalRequest,
+  FormSchema,
+  RuntimeGraph,
+} from '../types/approval-product'
+import { ApprovalGraphExecutor, validateApprovalFormData } from './ApprovalGraphExecutor'
+import type {
+  ApprovalActionRequest,
+  ApprovalAssignmentDTO,
+  ApprovalAssignmentRow,
+  ApprovalInstanceRow,
+  UnifiedApprovalDTO,
+} from './approval-bridge-types'
+import { APPROVAL_ERROR_CODES } from './approval-bridge-types'
+import { ServiceError } from './ApprovalBridgeService'
+
+interface ApprovalTemplateListQuery {
+  status?: string
+  search?: string
+  limit: number
+  offset: number
+}
+
+interface CreateApprovalActor {
+  userId: string
+  userName?: string
+  email?: string
+  department?: string
+  roles?: string[]
+  permissions?: string[]
+}
+
+type TemplateRow = {
+  id: string
+  key: string
+  name: string
+  description: string | null
+  status: 'draft' | 'published' | 'archived'
+  active_version_id: string | null
+  latest_version_id: string | null
+  created_at: Date
+  updated_at: Date
+}
+
+type TemplateVersionRow = {
+  id: string
+  template_id: string
+  version: number
+  status: 'draft' | 'published' | 'archived'
+  form_schema: Record<string, unknown>
+  approval_graph: Record<string, unknown>
+  created_at: Date
+  updated_at: Date
+}
+
+type PublishedDefinitionRow = {
+  id: string
+  template_id: string
+  template_version_id: string
+  runtime_graph: Record<string, unknown>
+  is_active: boolean
+  published_at: Date
+}
+
+type TemplateBundle = {
+  template: TemplateRow
+  version: TemplateVersionRow
+  publishedDefinition: PublishedDefinitionRow | null
+}
+
+type ApprovalRecordInsert = {
+  action: string
+  actorId: string | null
+  actorName: string | null
+  comment: string | null
+  fromStatus: string | null
+  toStatus: string
+  fromVersion: number | null
+  toVersion: number
+  metadata: Record<string, unknown>
+  targetUserId?: string | null
+}
+
+function toNullableRecord(value: unknown): Record<string, unknown> | null {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null
+}
+
+function asFormSchema(value: Record<string, unknown>): FormSchema {
+  return value as unknown as FormSchema
+}
+
+function asRuntimeGraph(value: Record<string, unknown>): RuntimeGraph {
+  return value as unknown as RuntimeGraph
+}
+
+function toApprovalTemplateListItemDTO(row: TemplateRow): ApprovalTemplateListItemDTO {
+  return {
+    id: row.id,
+    key: row.key,
+    name: row.name,
+    description: row.description,
+    status: row.status,
+    activeVersionId: row.active_version_id,
+    latestVersionId: row.latest_version_id,
+    createdAt: row.created_at.toISOString(),
+    updatedAt: row.updated_at.toISOString(),
+  }
+}
+
+function toApprovalTemplateDetailDTO(bundle: TemplateBundle): ApprovalTemplateDetailDTO {
+  return {
+    ...toApprovalTemplateListItemDTO(bundle.template),
+    formSchema: asFormSchema(bundle.version.form_schema),
+    approvalGraph: bundle.version.approval_graph as unknown as ApprovalTemplateDetailDTO['approvalGraph'],
+  }
+}
+
+function toApprovalTemplateVersionDetailDTO(bundle: TemplateBundle): ApprovalTemplateVersionDetailDTO {
+  return {
+    id: bundle.version.id,
+    templateId: bundle.version.template_id,
+    version: bundle.version.version,
+    status: bundle.version.status,
+    formSchema: asFormSchema(bundle.version.form_schema),
+    approvalGraph: bundle.version.approval_graph as unknown as ApprovalTemplateVersionDetailDTO['approvalGraph'],
+    runtimeGraph: bundle.publishedDefinition ? asRuntimeGraph(bundle.publishedDefinition.runtime_graph) : null,
+    publishedDefinitionId: bundle.publishedDefinition?.id || null,
+    createdAt: bundle.version.created_at.toISOString(),
+    updatedAt: bundle.version.updated_at.toISOString(),
+  }
+}
+
+function toUnifiedApprovalDTO(
+  row: ApprovalInstanceRow,
+  assignments: ApprovalAssignmentDTO[],
+): UnifiedApprovalDTO {
+  return {
+    id: row.id,
+    sourceSystem: row.source_system,
+    externalApprovalId: row.external_approval_id,
+    workflowKey: row.workflow_key,
+    businessKey: row.business_key,
+    title: row.title,
+    status: row.status,
+    requester: toNullableRecord(row.requester_snapshot),
+    subject: toNullableRecord(row.subject_snapshot),
+    policy: toNullableRecord(row.policy_snapshot),
+    currentStep: row.current_step,
+    totalSteps: row.total_steps,
+    templateId: row.template_id,
+    templateVersionId: row.template_version_id,
+    publishedDefinitionId: row.published_definition_id,
+    requestNo: row.request_no,
+    formSnapshot: toNullableRecord(row.form_snapshot),
+    currentNodeKey: row.current_node_key,
+    assignments,
+    createdAt: row.created_at.toISOString(),
+    updatedAt: row.updated_at.toISOString(),
+  }
+}
+
+function assignmentMatchesActor(
+  assignment: ApprovalAssignmentRow,
+  actorId: string,
+  actorRoles: string[],
+): boolean {
+  if (!assignment.is_active) return false
+  if (assignment.assignment_type === 'user') {
+    return assignment.assignee_id === actorId
+  }
+  if (assignment.assignment_type === 'role') {
+    return actorRoles.includes(assignment.assignee_id)
+  }
+  return false
+}
+
+function normalizePage(value: unknown, fallback: number): number {
+  const parsed = Number.parseInt(String(value || ''), 10)
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback
+}
+
+export class ApprovalProductService {
+  async listTemplates(query: ApprovalTemplateListQuery): Promise<{ data: ApprovalTemplateListItemDTO[]; total: number }> {
+    if (!pool) throw new Error('Database not available')
+
+    const conditions: string[] = []
+    const params: unknown[] = []
+    let index = 1
+
+    if (query.status) {
+      conditions.push(`status = $${index++}`)
+      params.push(query.status)
+    }
+    if (query.search) {
+      conditions.push(`(name ILIKE $${index} OR key ILIKE $${index})`)
+      params.push(`%${query.search}%`)
+      index += 1
+    }
+
+    const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : ''
+
+    const totalResult = await pool.query<{ count: string }>(
+      `SELECT COUNT(*)::text AS count FROM approval_templates ${where}`,
+      params,
+    )
+    const result = await pool.query<TemplateRow>(
+      `SELECT *
+       FROM approval_templates
+       ${where}
+       ORDER BY updated_at DESC, id DESC
+       LIMIT $${index++} OFFSET $${index++}`,
+      [...params, query.limit, query.offset],
+    )
+
+    return {
+      data: result.rows.map(toApprovalTemplateListItemDTO),
+      total: Number.parseInt(totalResult.rows[0]?.count || '0', 10),
+    }
+  }
+
+  async getTemplate(id: string): Promise<ApprovalTemplateDetailDTO | null> {
+    const bundle = await this.loadTemplateBundle(id)
+    return bundle ? toApprovalTemplateDetailDTO(bundle) : null
+  }
+
+  async getTemplateVersion(templateId: string, versionId: string): Promise<ApprovalTemplateVersionDetailDTO | null> {
+    const bundle = await this.loadTemplateBundle(templateId, versionId)
+    return bundle ? toApprovalTemplateVersionDetailDTO(bundle) : null
+  }
+
+  async createApproval(request: CreateApprovalRequest, actor: CreateApprovalActor): Promise<UnifiedApprovalDTO> {
+    if (!pool) throw new Error('Database not available')
+
+    const bundle = await this.loadTemplateBundle(request.templateId)
+    if (!bundle) {
+      throw new ServiceError('Approval template not found', 404, 'APPROVAL_TEMPLATE_NOT_FOUND')
+    }
+    if (bundle.template.status !== 'published' || !bundle.publishedDefinition || !bundle.publishedDefinition.is_active) {
+      throw new ServiceError('Approval template is not published', 409, 'APPROVAL_TEMPLATE_NOT_PUBLISHED')
+    }
+
+    const formSchema = asFormSchema(bundle.version.form_schema)
+    const validationErrors = validateApprovalFormData(formSchema, request.formData)
+    if (validationErrors.length > 0) {
+      throw new ServiceError(
+        'Approval form data is invalid',
+        400,
+        'VALIDATION_ERROR',
+        { errors: validationErrors },
+      )
+    }
+
+    const runtimeGraph = asRuntimeGraph(bundle.publishedDefinition.runtime_graph)
+    const executor = new ApprovalGraphExecutor(runtimeGraph, request.formData)
+    const initial = executor.resolveInitialState()
+    const instanceId = crypto.randomUUID()
+    const requestNo = await this.allocateRequestNo()
+
+    const requesterSnapshot = {
+      id: actor.userId,
+      name: actor.userName || actor.userId,
+      email: actor.email,
+      department: actor.department,
+      roles: actor.roles || [],
+      permissions: actor.permissions || [],
+    }
+
+    const client = await pool.connect()
+    try {
+      await client.query('BEGIN')
+
+      await client.query(
+        `INSERT INTO approval_instances
+         (id, status, version, source_system, external_approval_id, workflow_key, business_key, title,
+          requester_snapshot, subject_snapshot, policy_snapshot, metadata,
+          current_step, total_steps, sync_status, sync_error,
+          template_id, template_version_id, published_definition_id, request_no, form_snapshot, current_node_key,
+          created_at, updated_at)
+         VALUES
+         ($1, $2, 0, 'platform', NULL, 'approval-product-template', $3, $4,
+          $5, $6, $7, $8,
+          $9, $10, 'ok', NULL,
+          $11, $12, $13, $14, $15, $16,
+          now(), now())`,
+        [
+          instanceId,
+          initial.status,
+          bundle.template.key,
+          bundle.template.name,
+          JSON.stringify(requesterSnapshot),
+          JSON.stringify({ templateId: bundle.template.id, templateKey: bundle.template.key }),
+          JSON.stringify({ rejectCommentRequired: true, allowRevoke: runtimeGraph.policy.allowRevoke, sourceOfTruth: 'platform' }),
+          JSON.stringify({ templateKey: bundle.template.key }),
+          initial.currentStep ?? 0,
+          initial.totalSteps,
+          bundle.template.id,
+          bundle.version.id,
+          bundle.publishedDefinition.id,
+          requestNo,
+          JSON.stringify(request.formData),
+          initial.currentNodeKey,
+        ],
+      )
+
+      await this.insertAssignments(client, instanceId, initial.assignments)
+      await this.insertCcEvents(client, instanceId, 0, initial.status, initial.ccEvents)
+      await this.insertApprovalRecord(client, instanceId, {
+        action: 'created',
+        actorId: actor.userId,
+        actorName: actor.userName || actor.userId,
+        comment: null,
+        fromStatus: null,
+        toStatus: initial.status,
+        fromVersion: null,
+        toVersion: 0,
+        metadata: {
+          nodeKey: 'start',
+          requestNo,
+        },
+      })
+
+      await client.query('COMMIT')
+    } catch (error) {
+      await client.query('ROLLBACK')
+      throw error
+    } finally {
+      client.release()
+    }
+
+    const approval = await this.getApproval(instanceId)
+    if (!approval) {
+      throw new ServiceError('Approval not found after creation', 500, 'APPROVAL_CREATE_FAILED')
+    }
+    return approval
+  }
+
+  async dispatchAction(
+    id: string,
+    request: ApprovalActionRequest,
+    actor: CreateApprovalActor & { ip?: string | null; userAgent?: string | null },
+  ): Promise<UnifiedApprovalDTO> {
+    if (!pool) throw new Error('Database not available')
+
+    const client = await pool.connect()
+    try {
+      await client.query('BEGIN')
+
+      const instanceResult = await client.query<ApprovalInstanceRow>(
+        `SELECT * FROM approval_instances WHERE id = $1 AND COALESCE(source_system, 'platform') = 'platform' FOR UPDATE`,
+        [id],
+      )
+      const instance = instanceResult.rows[0]
+      if (!instance) {
+        throw new ServiceError('Approval not found', 404, APPROVAL_ERROR_CODES.APPROVAL_NOT_FOUND)
+      }
+      if (!instance.published_definition_id) {
+        throw new ServiceError('Approval is not managed by the template runtime', 409, 'APPROVAL_RUNTIME_UNSUPPORTED')
+      }
+
+      const runtimeResult = await client.query<PublishedDefinitionRow>(
+        `SELECT * FROM approval_published_definitions WHERE id = $1`,
+        [instance.published_definition_id],
+      )
+      const runtime = runtimeResult.rows[0]
+      if (!runtime) {
+        throw new ServiceError('Published definition not found', 404, 'APPROVAL_PUBLISHED_DEFINITION_NOT_FOUND')
+      }
+
+      const assignments = await client.query<ApprovalAssignmentRow>(
+        `SELECT * FROM approval_assignments WHERE instance_id = $1 AND is_active = TRUE ORDER BY created_at ASC`,
+        [id],
+      )
+
+      const actorRoles = actor.roles || []
+      const actorCanAct = assignments.rows.some((assignment) => assignmentMatchesActor(assignment, actor.userId, actorRoles))
+      const actorName = actor.userName || actor.userId
+
+      if (request.action !== 'revoke' && !actorCanAct) {
+        throw new ServiceError('Approval assignment not found for actor', 403, 'APPROVAL_ASSIGNMENT_REQUIRED')
+      }
+
+      const runtimeGraph = asRuntimeGraph(runtime.runtime_graph)
+      const executor = new ApprovalGraphExecutor(runtimeGraph, toNullableRecord(instance.form_snapshot) || {})
+      const currentNodeKey = instance.current_node_key
+      const nextVersion = instance.version + 1
+
+      if (request.action === 'comment') {
+        await this.insertApprovalRecord(client, id, {
+          action: 'comment',
+          actorId: actor.userId,
+          actorName,
+          comment: request.comment || null,
+          fromStatus: instance.status,
+          toStatus: instance.status,
+          fromVersion: instance.version,
+          toVersion: instance.version,
+          metadata: { nodeKey: currentNodeKey },
+        }, actor)
+        await client.query('COMMIT')
+        return (await this.getApproval(id))!
+      }
+
+      if (request.action === 'transfer') {
+        if (!request.targetUserId) {
+          throw new ServiceError('targetUserId is required for transfer', 400, 'VALIDATION_ERROR')
+        }
+        if (!currentNodeKey) {
+          throw new ServiceError('Approval does not have an active node', 409, APPROVAL_ERROR_CODES.INVALID_STATUS_TRANSITION)
+        }
+        await client.query(
+          `UPDATE approval_assignments SET is_active = FALSE, updated_at = now() WHERE instance_id = $1 AND is_active = TRUE`,
+          [id],
+        )
+        await this.insertAssignments(client, id, executor.buildTransferAssignments(currentNodeKey, request.targetUserId))
+        await this.insertApprovalRecord(client, id, {
+          action: 'transfer',
+          actorId: actor.userId,
+          actorName,
+          comment: request.comment || null,
+          fromStatus: instance.status,
+          toStatus: instance.status,
+          fromVersion: instance.version,
+          toVersion: instance.version,
+          metadata: { nodeKey: currentNodeKey },
+          targetUserId: request.targetUserId,
+        }, actor)
+        await client.query('COMMIT')
+        return (await this.getApproval(id))!
+      }
+
+      if (request.action === 'revoke') {
+        const requesterId = toNullableRecord(instance.requester_snapshot)?.id
+        if (requesterId !== actor.userId) {
+          throw new ServiceError('Only the requester can revoke this approval', 403, 'APPROVAL_REVOKE_FORBIDDEN')
+        }
+        const handledResult = await client.query<{ count: string }>(
+          `SELECT COUNT(*)::text AS count
+           FROM approval_records
+           WHERE instance_id = $1
+             AND action IN ('approve', 'reject', 'transfer')
+             AND metadata->>'nodeKey' = $2`,
+          [id, currentNodeKey],
+        )
+        if (Number.parseInt(handledResult.rows[0]?.count || '0', 10) > 0) {
+          throw new ServiceError('Approval can no longer be revoked', 409, 'APPROVAL_REVOKE_WINDOW_CLOSED')
+        }
+
+        await client.query(
+          `UPDATE approval_assignments SET is_active = FALSE, updated_at = now() WHERE instance_id = $1 AND is_active = TRUE`,
+          [id],
+        )
+        await client.query(
+          `UPDATE approval_instances
+           SET status = 'revoked',
+               version = $2,
+               current_node_key = NULL,
+               current_step = total_steps,
+               updated_at = now()
+           WHERE id = $1`,
+          [id, nextVersion],
+        )
+        await this.insertApprovalRecord(client, id, {
+          action: 'revoke',
+          actorId: actor.userId,
+          actorName,
+          comment: request.comment || null,
+          fromStatus: instance.status,
+          toStatus: 'revoked',
+          fromVersion: instance.version,
+          toVersion: nextVersion,
+          metadata: { nodeKey: currentNodeKey },
+        }, actor)
+        await client.query('COMMIT')
+        return (await this.getApproval(id))!
+      }
+
+      if (instance.status !== 'pending') {
+        throw new ServiceError(
+          `Cannot ${request.action}: current status is ${instance.status}`,
+          409,
+          APPROVAL_ERROR_CODES.INVALID_STATUS_TRANSITION,
+        )
+      }
+
+      if (request.action === 'reject' && !request.comment?.trim()) {
+        throw new ServiceError('Rejection comment is required', 400, APPROVAL_ERROR_CODES.REJECT_COMMENT_REQUIRED)
+      }
+
+      await client.query(
+        `UPDATE approval_assignments SET is_active = FALSE, updated_at = now() WHERE instance_id = $1 AND is_active = TRUE`,
+        [id],
+      )
+
+      if (request.action === 'reject') {
+        await client.query(
+          `UPDATE approval_instances
+           SET status = 'rejected',
+               version = $2,
+               current_node_key = NULL,
+               current_step = total_steps,
+               updated_at = now()
+           WHERE id = $1`,
+          [id, nextVersion],
+        )
+        await this.insertApprovalRecord(client, id, {
+          action: 'reject',
+          actorId: actor.userId,
+          actorName,
+          comment: request.comment || null,
+          fromStatus: instance.status,
+          toStatus: 'rejected',
+          fromVersion: instance.version,
+          toVersion: nextVersion,
+          metadata: { nodeKey: currentNodeKey },
+        }, actor)
+        await client.query('COMMIT')
+        return (await this.getApproval(id))!
+      }
+
+      if (!currentNodeKey) {
+        throw new ServiceError('Approval does not have an active node', 409, APPROVAL_ERROR_CODES.INVALID_STATUS_TRANSITION)
+      }
+
+      const resolution = executor.resolveAfterApprove(currentNodeKey)
+      await client.query(
+        `UPDATE approval_instances
+         SET status = $2,
+             version = $3,
+             current_node_key = $4,
+             current_step = $5,
+             total_steps = $6,
+             updated_at = now()
+         WHERE id = $1`,
+        [
+          id,
+          resolution.status,
+          nextVersion,
+          resolution.currentNodeKey,
+          resolution.currentStep ?? instance.total_steps,
+          resolution.totalSteps,
+        ],
+      )
+      await this.insertAssignments(client, id, resolution.assignments)
+      await this.insertApprovalRecord(client, id, {
+        action: 'approve',
+        actorId: actor.userId,
+        actorName,
+        comment: request.comment || null,
+        fromStatus: instance.status,
+        toStatus: resolution.status,
+        fromVersion: instance.version,
+        toVersion: nextVersion,
+        metadata: { nodeKey: currentNodeKey, nextNodeKey: resolution.currentNodeKey },
+      }, actor)
+      await this.insertCcEvents(client, id, nextVersion, resolution.status, resolution.ccEvents)
+
+      await client.query('COMMIT')
+    } catch (error) {
+      await client.query('ROLLBACK')
+      throw error
+    } finally {
+      client.release()
+    }
+
+    const approval = await this.getApproval(id)
+    if (!approval) {
+      throw new ServiceError('Approval not found after action', 404, APPROVAL_ERROR_CODES.APPROVAL_NOT_FOUND)
+    }
+    return approval
+  }
+
+  async getApproval(id: string): Promise<UnifiedApprovalDTO | null> {
+    if (!pool) throw new Error('Database not available')
+
+    const result = await pool.query<ApprovalInstanceRow>(
+      `SELECT * FROM approval_instances WHERE id = $1`,
+      [id],
+    )
+    const row = result.rows[0]
+    if (!row) return null
+
+    const assignmentsResult = await pool.query<ApprovalAssignmentRow>(
+      `SELECT * FROM approval_assignments WHERE instance_id = $1 ORDER BY created_at ASC`,
+      [id],
+    )
+
+    return toUnifiedApprovalDTO(
+      row,
+      assignmentsResult.rows.map((assignment) => ({
+        id: assignment.id,
+        type: assignment.assignment_type,
+        assigneeId: assignment.assignee_id,
+        sourceStep: assignment.source_step,
+        nodeKey: assignment.node_key,
+        isActive: assignment.is_active,
+        metadata: assignment.metadata || {},
+      })),
+    )
+  }
+
+  async isTemplateRuntimeInstance(id: string): Promise<boolean> {
+    if (!pool) throw new Error('Database not available')
+
+    const result = await pool.query<{ exists: boolean }>(
+      `SELECT EXISTS(
+        SELECT 1
+        FROM approval_instances
+        WHERE id = $1
+          AND COALESCE(source_system, 'platform') = 'platform'
+          AND published_definition_id IS NOT NULL
+      ) AS exists`,
+      [id],
+    )
+
+    return Boolean(result.rows[0]?.exists)
+  }
+
+  private async allocateRequestNo(): Promise<string> {
+    if (!pool) throw new Error('Database not available')
+
+    const result = await pool.query<{ request_no: string }>(
+      `SELECT 'AP-' || nextval('approval_request_no_seq')::text AS request_no`,
+    )
+    return result.rows[0]?.request_no || `AP-${normalizePage(Date.now(), 100001)}`
+  }
+
+  private async loadTemplateBundle(templateId: string, explicitVersionId?: string): Promise<TemplateBundle | null> {
+    if (!pool) throw new Error('Database not available')
+
+    const templateResult = await pool.query<TemplateRow>(
+      `SELECT * FROM approval_templates WHERE id = $1`,
+      [templateId],
+    )
+    const template = templateResult.rows[0]
+    if (!template) return null
+
+    const versionId = explicitVersionId || template.active_version_id || template.latest_version_id
+    if (!versionId) return null
+
+    const versionResult = await pool.query<TemplateVersionRow>(
+      `SELECT * FROM approval_template_versions WHERE id = $1 AND template_id = $2`,
+      [versionId, template.id],
+    )
+    const version = versionResult.rows[0]
+    if (!version) return null
+
+    const publishedResult = await pool.query<PublishedDefinitionRow>(
+      `SELECT *
+       FROM approval_published_definitions
+       WHERE template_version_id = $1
+       ORDER BY is_active DESC, published_at DESC
+       LIMIT 1`,
+      [version.id],
+    )
+
+    return {
+      template,
+      version,
+      publishedDefinition: publishedResult.rows[0] || null,
+    }
+  }
+
+  private async insertAssignments(
+    client: { query: typeof pool.query },
+    instanceId: string,
+    assignments: Array<{ assignmentType: 'user' | 'role'; assigneeId: string; nodeKey: string; sourceStep: number }>,
+  ): Promise<void> {
+    for (const assignment of assignments) {
+      await client.query(
+        `INSERT INTO approval_assignments
+         (instance_id, assignment_type, assignee_id, source_step, node_key, is_active, metadata, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, TRUE, '{}'::jsonb, now(), now())`,
+        [
+          instanceId,
+          assignment.assignmentType,
+          assignment.assigneeId,
+          assignment.sourceStep,
+          assignment.nodeKey,
+        ],
+      )
+    }
+  }
+
+  private async insertCcEvents(
+    client: { query: typeof pool.query },
+    instanceId: string,
+    version: number,
+    status: string,
+    ccEvents: Array<{ nodeKey: string; targetType: 'user' | 'role'; targetId: string }>,
+  ): Promise<void> {
+    for (const event of ccEvents) {
+      await this.insertApprovalRecord(client, instanceId, {
+        action: 'cc',
+        actorId: 'system',
+        actorName: 'System',
+        comment: null,
+        fromStatus: status,
+        toStatus: status,
+        fromVersion: version,
+        toVersion: version,
+        metadata: {
+          nodeKey: event.nodeKey,
+          targetType: event.targetType,
+          targetId: event.targetId,
+        },
+      })
+    }
+  }
+
+  private async insertApprovalRecord(
+    client: { query: typeof pool.query },
+    instanceId: string,
+    record: ApprovalRecordInsert,
+    actor?: { ip?: string | null; userAgent?: string | null },
+  ): Promise<void> {
+    await client.query(
+      `INSERT INTO approval_records
+       (instance_id, action, actor_id, actor_name, comment, from_status, to_status, from_version, to_version, metadata, target_user_id, ip_address, user_agent)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
+      [
+        instanceId,
+        record.action,
+        record.actorId || 'system',
+        record.actorName,
+        record.comment,
+        record.fromStatus,
+        record.toStatus,
+        record.fromVersion,
+        record.toVersion,
+        JSON.stringify(record.metadata),
+        record.targetUserId || null,
+        actor?.ip || null,
+        actor?.userAgent || null,
+      ],
+    )
+  }
+}
+
+export function resolveApprovalListPaging(page: unknown, pageSize: unknown): { limit: number; offset: number } {
+  const normalizedPage = normalizePage(page, 1)
+  const normalizedPageSize = normalizePage(pageSize, 20)
+  return {
+    limit: normalizedPageSize,
+    offset: (normalizedPage - 1) * normalizedPageSize,
+  }
+}
