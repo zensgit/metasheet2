@@ -28,6 +28,7 @@
  */
 
 import type { RouteLocationNormalized, RouteRecordRaw } from 'vue-router'
+import type { ApprovalStatus, ApprovalTemplateStatus } from '../types/approval'
 
 /**
  * Route Names Constants
@@ -63,6 +64,8 @@ export const AppRouteNames = {
   APPROVAL_LIST: 'approval-list',
   APPROVAL_DETAIL: 'approval-detail',
   APPROVAL_CREATE: 'approval-create',
+  APPROVAL_TEMPLATE_LIST: 'approval-template-list',
+  APPROVAL_TEMPLATE_DETAIL: 'approval-template-detail',
   APPROVAL_PENDING: 'approval-pending',
   APPROVAL_HISTORY: 'approval-history',
 
@@ -118,6 +121,8 @@ export interface AppRouteParams {
 
   // Approval routes
   'approval-detail': { id: string }
+  'approval-create': { templateId: string }
+  'approval-template-detail': { id: string }
 
   // User routes
   'user-profile': { id?: string } // optional, defaults to current user
@@ -134,7 +139,7 @@ export interface AppRouteParams {
   'workflow-list': Record<string, never>
   'workflow-create': Record<string, never>
   'approval-list': Record<string, never>
-  'approval-create': Record<string, never>
+  'approval-template-list': Record<string, never>
   'approval-pending': Record<string, never>
   'approval-history': Record<string, never>
   'attendance': Record<string, never>
@@ -188,9 +193,20 @@ export interface AppRouteQuery {
 
   // Approval list filters
   'approval-list': {
-    status?: 'pending' | 'approved' | 'rejected'
+    status?: ApprovalStatus
     search?: string
-    sortBy?: 'createdAt' | 'updatedAt'
+    requesterId?: string
+    assignee?: string
+    ccRecipientId?: string
+    templateId?: string
+    sortBy?: 'createdAt' | 'updatedAt' | 'requestNo'
+    sortOrder?: 'asc' | 'desc'
+  }
+
+  'approval-template-list': {
+    search?: string
+    status?: ApprovalTemplateStatus
+    sortBy?: 'createdAt' | 'updatedAt' | 'name'
     sortOrder?: 'asc' | 'desc'
   }
 
@@ -395,7 +411,9 @@ export const ROUTE_PATHS = {
   // Approval
   APPROVAL_LIST: '/approvals',
   APPROVAL_DETAIL: '/approvals/:id',
-  APPROVAL_CREATE: '/approvals/create',
+  APPROVAL_CREATE: '/approvals/new/:templateId',
+  APPROVAL_TEMPLATE_LIST: '/approval-templates',
+  APPROVAL_TEMPLATE_DETAIL: '/approval-templates/:id',
   APPROVAL_PENDING: '/approvals/pending',
   APPROVAL_HISTORY: '/approvals/history',
 

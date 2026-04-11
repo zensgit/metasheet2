@@ -11,6 +11,32 @@ const createAdapter = () => {
   return adapter
 }
 
+describe('PLMAdapter runtime status', () => {
+  it('advertises release readiness in yuantus mode', () => {
+    const adapter = createAdapter()
+
+    expect(adapter.getRuntimeStatus()).toMatchObject({
+      implementation: 'real',
+      healthSupported: true,
+    })
+    expect(adapter.getRuntimeStatus().supportedOperations).toContain('release_readiness')
+    expect(adapter.getRuntimeStatus().supportedOperations).toContain('approval_history')
+  })
+
+  it('hides yuantus-only capabilities in legacy mode', () => {
+    const adapter = createAdapter()
+    ;(adapter as any).apiMode = 'legacy'
+
+    expect(adapter.getRuntimeStatus().supportedOperations).toEqual(
+      expect.arrayContaining(['products', 'bom', 'documents', 'approvals'])
+    )
+    expect(adapter.getRuntimeStatus().supportedOperations).not.toContain('release_readiness')
+    expect(adapter.getRuntimeStatus().supportedOperations).not.toContain('approval_history')
+    expect(adapter.getRuntimeStatus().supportedOperations).not.toContain('where_used')
+    expect(adapter.getRuntimeStatus().supportedOperations).not.toContain('cad_properties')
+  })
+})
+
 describe('PLMAdapter Yuantus product detail mapping', () => {
   it('merges search hit timestamps when AML detail lacks them', async () => {
     const adapter = createAdapter()
@@ -607,6 +633,318 @@ describe('PLMAdapter Yuantus BOM analysis and approval actions', () => {
       substitute_id: 'sub-rel-remove',
     })
   })
+})
+
+describe('PLMAdapter Yuantus CAD routes', () => {
+  it('queries CAD properties, view state, review, history, diff, and mesh stats from dedicated Yuantus endpoints', async () => {
+    const adapter = createAdapter()
+    const queryMock = vi.fn(async (path: string, params?: Array<Record<string, unknown>>) => {
+      if (path === '/api/v1/cad/files/file-props/properties') {
+        return {
+          data: [{
+            file_id: 'file-props',
+            properties: { material: 'AL-6061', finish: 'anodized' },
+            updated_at: '2026-04-11T00:00:00.000Z',
+            source: 'imported',
+            cad_document_schema_version: 3,
+          }],
+        }
+      }
+      if (path === '/api/v1/cad/files/file-view/view-state') {
+        return {
+          data: [{
+            file_id: 'file-view',
+            hidden_entity_ids: [12, 19],
+            notes: [{ entity_id: 12, note: 'check hole position', color: '#FFB020' }],
+            updated_at: '2026-04-11T00:00:00.000Z',
+            source: 'client',
+            cad_document_schema_version: 3,
+          }],
+        }
+      }
+      if (path === '/api/v1/cad/files/file-review/review') {
+        return {
+          data: [{
+            file_id: 'file-review',
+            state: 'pending',
+            note: 'Awaiting review',
+            reviewed_at: '2026-04-11T00:00:00.000Z',
+            reviewed_by_id: 1,
+          }],
+        }
+      }
+      if (path === '/api/v1/cad/files/file-history/history') {
+        return {
+          data: [{
+            file_id: 'file-history',
+            entries: [
+              { id: 'chg-1', action: 'cad_properties_update', payload: { properties: { material: 'AL-6061' } }, created_at: '2026-04-10T00:00:00.000Z', user_id: 1 },
+              { id: 'chg-2', action: 'cad_review_update', payload: { state: 'approved' }, created_at: '2026-04-11T00:00:00.000Z', user_id: 1 },
+            ],
+          }],
+        }
+      }
+      if (path === '/api/v1/cad/files/file-left/diff') {
+        expect(params).toEqual([{ other_file_id: 'file-right' }])
+        return {
+          data: [{
+            file_id: 'file-left',
+            other_file_id: 'file-right',
+            properties: {
+              added: { finish: 'anodized' },
+              removed: { coating: 'none' },
+              changed: { weight_kg: { from: 1.1, to: 1.2 } },
+            },
+            cad_document_schema_version: { from: 1, to: 2 },
+          }],
+        }
+      }
+      if (path === '/api/v1/cad/files/file-mesh/mesh-stats') {
+        return {
+          data: [{
+            file_id: 'file-mesh',
+            stats: {
+              available: true,
+              raw_keys: ['bounds', 'entities', 'triangle_count'],
+              entity_count: 2,
+              triangle_count: 102400,
+              bounds: { min: [0, 0, 0], max: [10, 20, 5] },
+            },
+          }],
+        }
+      }
+      return { data: [] }
+    })
+
+    ;(adapter as any).query = queryMock
+
+    const properties = await adapter.getCadProperties('file-props')
+    const viewState = await adapter.getCadViewState('file-view')
+    const review = await adapter.getCadReview('file-review')
+    const history = await adapter.getCadHistory('file-history')
+    const diff = await adapter.getCadDiff('file-left', 'file-right')
+    const meshStats = await adapter.getCadMeshStats('file-mesh')
+
+    expect(properties.data[0]).toMatchObject({
+      file_id: 'file-props',
+      properties: { material: 'AL-6061', finish: 'anodized' },
+      source: 'imported',
+      cad_document_schema_version: 3,
+    })
+    expect(viewState.data[0]).toMatchObject({
+      file_id: 'file-view',
+      hidden_entity_ids: [12, 19],
+      notes: [{ entity_id: 12, note: 'check hole position', color: '#FFB020' }],
+    })
+    expect(review.data[0]).toMatchObject({
+      file_id: 'file-review',
+      state: 'pending',
+      reviewed_by_id: 1,
+    })
+    expect(history.data[0].entries).toHaveLength(2)
+    expect(diff.data[0]).toMatchObject({
+      file_id: 'file-left',
+      other_file_id: 'file-right',
+      cad_document_schema_version: { from: 1, to: 2 },
+    })
+    expect(meshStats.data[0].stats).toMatchObject({
+      available: true,
+      entity_count: 2,
+      triangle_count: 102400,
+    })
+  })
+
+  it('patches CAD properties and view state, and posts CAD review updates to dedicated Yuantus endpoints', async () => {
+    const adapter = createAdapter()
+    const selectMock = vi.fn(async (path: string, options: Record<string, unknown>) => {
+      if (path === '/api/v1/cad/files/file-props-write/properties') {
+        expect(options).toEqual({
+          method: 'PATCH',
+          data: {
+            properties: { material: 'AL-7075', finish: 'hard-anodized' },
+            source: 'manual',
+          },
+        })
+        return {
+          data: [{
+            file_id: 'file-props-write',
+            properties: { material: 'AL-7075', finish: 'hard-anodized' },
+            updated_at: '2026-04-11T01:00:00.000Z',
+            source: 'manual',
+            cad_document_schema_version: 4,
+          }],
+        }
+      }
+      if (path === '/api/v1/cad/files/file-view-write/view-state') {
+        expect(options).toEqual({
+          method: 'PATCH',
+          data: {
+            hidden_entity_ids: [12, 19],
+            notes: [{ entity_id: 19, note: 'hide fastener', color: '#4C9AFF' }],
+            source: 'client',
+            refresh_preview: false,
+          },
+        })
+        return {
+          data: [{
+            file_id: 'file-view-write',
+            hidden_entity_ids: [12, 19],
+            notes: [{ entity_id: 19, note: 'hide fastener', color: '#4C9AFF' }],
+            updated_at: '2026-04-11T01:00:00.000Z',
+            source: 'client',
+            cad_document_schema_version: 3,
+          }],
+        }
+      }
+      return { data: [] }
+    })
+    const insertMock = vi.fn(async (path: string, payload: Record<string, unknown>) => {
+      if (path === '/api/v1/cad/files/file-review-write/review') {
+        expect(payload).toEqual({
+          state: 'approved',
+          note: 'Looks good',
+        })
+        return {
+          data: [{
+            file_id: 'file-review-write',
+            state: 'approved',
+            note: 'Looks good',
+            reviewed_at: '2026-04-11T01:00:00.000Z',
+            reviewed_by_id: 1,
+          }],
+        }
+      }
+      return { data: [] }
+    })
+
+    ;(adapter as any).select = selectMock
+    ;(adapter as any).insert = insertMock
+
+    const updatedProperties = await adapter.updateCadProperties('file-props-write', {
+      properties: { material: 'AL-7075', finish: 'hard-anodized' },
+      source: 'manual',
+    })
+    const updatedViewState = await adapter.updateCadViewState('file-view-write', {
+      hidden_entity_ids: [12, 19],
+      notes: [{ entity_id: 19, note: 'hide fastener', color: '#4C9AFF' }],
+      source: 'client',
+      refresh_preview: false,
+    })
+    const updatedReview = await adapter.updateCadReview('file-review-write', {
+      state: 'approved',
+      note: 'Looks good',
+    })
+
+    expect(updatedProperties.data[0]).toMatchObject({
+      file_id: 'file-props-write',
+      properties: { material: 'AL-7075', finish: 'hard-anodized' },
+      source: 'manual',
+      cad_document_schema_version: 4,
+    })
+    expect(updatedViewState.data[0]).toMatchObject({
+      file_id: 'file-view-write',
+      hidden_entity_ids: [12, 19],
+      source: 'client',
+      cad_document_schema_version: 3,
+    })
+    expect(updatedReview.data[0]).toMatchObject({
+      file_id: 'file-review-write',
+      state: 'approved',
+      note: 'Looks good',
+      reviewed_by_id: 1,
+    })
+  })
+})
+
+describe('PLMAdapter Yuantus release readiness mapping', () => {
+  it('maps release readiness summary/resources and adds canonical links', async () => {
+    const adapter = createAdapter()
+    const queryMock = vi.fn().mockResolvedValue({
+      data: [{
+        item_id: 'item-rr-1',
+        generated_at: '2026-04-11T00:00:00.000Z',
+        ruleset_id: 'gate-a',
+        summary: {
+          ok: false,
+          resources: 3,
+          ok_resources: 2,
+          error_count: 1,
+          warning_count: 1,
+          by_kind: {
+            mbom: {
+              resources: 1,
+              ok_resources: 0,
+              error_count: 1,
+              warning_count: 0,
+            },
+          },
+        },
+        resources: [{
+          kind: 'mbom',
+          name: 'MBOM Alignment',
+          state: 'warning',
+          diagnostics: {
+            ok: false,
+            resource_type: 'mbom',
+            resource_id: 'mbom-1',
+            ruleset_id: 'gate-a',
+            errors: [{ code: 'MBOM_MISSING', message: 'MBOM baseline missing', severity: 'error' }],
+            warnings: [{ code: 'ALT_ROUTE', message: 'Alternate route incomplete', severity: 'warning' }],
+          },
+        }],
+        esign_manifest: { pending: 1 },
+      }],
+    })
+
+    ;(adapter as any).query = queryMock
+
+    const result = await adapter.getReleaseReadiness('item-rr-1', {
+      rulesetId: 'gate-a',
+      mbomLimit: 10,
+      routingLimit: 12,
+      baselineLimit: 8,
+    })
+
+    expect(queryMock).toHaveBeenCalledWith('/api/v1/release-readiness/items/item-rr-1', [
+      {
+        ruleset_id: 'gate-a',
+        mbom_limit: 10,
+        routing_limit: 12,
+        baseline_limit: 8,
+      },
+    ])
+    expect(result.data).toHaveLength(1)
+    expect(result.data[0]).toMatchObject({
+      item_id: 'item-rr-1',
+      ruleset_id: 'gate-a',
+      summary: {
+        ok: false,
+        error_count: 1,
+        by_kind: {
+          mbom: {
+            resources: 1,
+            error_count: 1,
+          },
+        },
+      },
+      resources: [
+        expect.objectContaining({
+          kind: 'mbom',
+          diagnostics: expect.objectContaining({
+            resource_type: 'mbom',
+            resource_id: 'mbom-1',
+            ruleset_id: 'gate-a',
+          }),
+        }),
+      ],
+      links: {
+        summary: '/api/v1/release-readiness/items/item-rr-1?ruleset_id=gate-a',
+        export: '/api/v1/release-readiness/items/item-rr-1/export?export_format=zip&ruleset_id=gate-a',
+      },
+      esign_manifest: { pending: 1 },
+    })
+  })
+
 })
 
 describe('PLMAdapter Yuantus documents single-side failure + sources metadata', () => {

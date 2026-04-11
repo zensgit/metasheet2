@@ -20,9 +20,11 @@ when running in `apiMode='yuantus'`. Without a contract test, any field
 rename on the Yuantus side would silently break Metasheet at runtime.
 
 This Pact set freezes the **shape** (not the values) of the 6 Wave 1 P0
-endpoints plus the 3 document-semantics endpoints, the 5 BOM-analysis /
-ECO-approval endpoints, and the 5 approval-detail / BOM-substitute endpoints
-that `PLMAdapter.ts` currently calls for `apiMode='yuantus'`.
+endpoints plus the 3 document-semantics endpoints, the release-readiness
+governance endpoint, the 5 BOM-analysis / ECO-approval endpoints, and the 5
+approval-detail / BOM-substitute endpoints, while Wave 5 adds the 9 CAD
+properties / review / diff endpoints as exact fixture examples that
+`PLMAdapter.ts` currently calls for `apiMode='yuantus'`.
 (Codex's PACT_FIRST plan lists 7 endpoints in Wave 1 — see "Discrepancy
 with codex plan" below.)
 
@@ -35,10 +37,10 @@ The pact JSON in `pacts/metasheet2-yuantus-plm.json` is **hand-authored** in
 Pact v3 format. It is **not** yet generated from `@pact-foundation/pact`,
 because adding that npm dependency requires explicit approval.
 
-The `plm-adapter-yuantus.pact.test.ts` vitest test guards four things:
+The `plm-adapter-yuantus.pact.test.ts` vitest test guards six things:
 
 1. The pact JSON exists and parses as Pact v3.
-2. It contains the 19 currently used interactions in the documented order.
+2. It contains the 29 currently used interactions in the documented order.
 3. Every endpoint named in the pact is also referenced by the live
    `packages/core-backend/src/data-adapters/PLMAdapter.ts` source — so the
    pact cannot drift away from what the adapter actually calls.
@@ -46,6 +48,10 @@ The `plm-adapter-yuantus.pact.test.ts` vitest test guards four things:
    `bom compare schema`, `approval history`, `approve`, and `reject`.
 5. The Wave 4 additions lock the exact envelope for approval list/detail and
    BOM substitute list/add/remove.
+6. The release-readiness addition locks the exact envelope for
+   `GET /api/v1/release-readiness/items/{id}`.
+7. The Wave 5 additions lock the exact envelope for CAD properties, CAD view
+   state, CAD review, CAD history, CAD diff, and CAD mesh stats.
 
 ## Discrepancy with codex's PACT_FIRST plan
 
@@ -100,7 +106,7 @@ cd /Users/huazhou/Downloads/Github/Yuantus
 
 ### Current verifier handoff state (2026-04-11)
 
-The consumer artifact now contains all 19 Wave 1-4 interactions. To verify
+The consumer artifact now contains all 29 Wave 1-5 interactions. To verify
 Yuantus against the current artifact, copy this JSON into the Yuantus repo and
 rerun the provider verifier there.
 
@@ -128,6 +134,19 @@ Wave 4 extends that pattern:
 
 That keeps the verifier deterministic without introducing per-state mutation
 logic.
+
+Wave 5 applies the same rule to CAD:
+
+- read and write CAD properties use separate file fixtures
+- read and write CAD view state use separate file fixtures
+- read and write CAD review use separate file fixtures
+- history uses a dedicated file with pre-seeded `CadChangeLog` rows
+- diff uses a dedicated left/right file pair
+- mesh stats uses a dedicated file plus a mocked metadata payload behind
+  `FileService.download_file`
+
+That keeps the provider-state handler as a no-op even though Wave 5 includes
+three mutating CAD interactions.
 
 To install `pact-python` and run locally:
 
@@ -160,22 +179,9 @@ specification of what the generated pact must contain.
 The following surfaces remain outside the pact:
 
 - `GET /api/v1/aml/metadata/{item_type_name}`
-- `GET /api/v1/cad/files/{file_id}/properties`
-- `PATCH /api/v1/cad/files/{file_id}/properties`
-- `GET /api/v1/cad/files/{file_id}/view-state`
-- `PATCH /api/v1/cad/files/{file_id}/view-state`
-- `GET /api/v1/cad/files/{file_id}/review`
-- `POST /api/v1/cad/files/{file_id}/review`
-- `GET /api/v1/cad/files/{file_id}/history`
-- `GET /api/v1/cad/files/{file_id}/diff`
-- `GET /api/v1/cad/files/{file_id}/mesh-stats`
 
 `aml/metadata` remains outside because `PLMAdapter.ts` still does not call it on
 `main`.
-
-The CAD routes are real mainline calls, but they are intentionally deferred to
-Wave 5 because they require a larger provider fixture surface than the
-approval/substitute expansion in Wave 4.
 
 ## Forward compatibility note
 

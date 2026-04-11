@@ -11,9 +11,11 @@
  *
  *   1. The pact JSON exists and parses as Pact v3.
  *   2. The 6 Wave 1 P0 interactions plus the document-semantics Wave 2
- *      interactions plus the BOM-analysis / ECO-approval Wave 3 interactions
- *      plus the approval list/detail / BOM-substitute Wave 4 interactions that
- *      PLMAdapter currently calls are present, in the documented order.
+ *      interactions plus the release-readiness governance interaction plus
+ *      the BOM-analysis / ECO-approval Wave 3 interactions plus the approval
+ *      list/detail / BOM-substitute Wave 4 interactions plus the CAD
+ *      review/workspace Wave 5 interactions that PLMAdapter currently calls
+ *      are present, in the documented order.
  *      (codex's plan also lists `aml/metadata`, but PLMAdapter does not yet
  *      call it; deferred until there is a real consumer call site.)
  *   3. The PLMAdapter actually calls every endpoint declared in the pact, so
@@ -91,6 +93,7 @@ const PACT_PATHS = [
   { method: 'GET', path: '/api/v1/file/item/01H000000000000000000000P1' },
   { method: 'GET', path: '/api/v1/file/01H000000000000000000000F1' },
   { method: 'POST', path: '/api/v1/aml/query' },
+  { method: 'GET', path: '/api/v1/release-readiness/items/01H000000000000000000000P1' },
   { method: 'GET', path: '/api/v1/bom/01H000000000000000000000P2/where-used' },
   { method: 'GET', path: '/api/v1/bom/compare/schema' },
   { method: 'GET', path: '/api/v1/eco/01H000000000000000000000E1/approvals' },
@@ -101,6 +104,15 @@ const PACT_PATHS = [
   { method: 'GET', path: '/api/v1/bom/01H000000000000000000000R1/substitutes' },
   { method: 'POST', path: '/api/v1/bom/01H000000000000000000000R3/substitutes' },
   { method: 'DELETE', path: '/api/v1/bom/01H000000000000000000000R4/substitutes/01H000000000000000000000R6' },
+  { method: 'GET', path: '/api/v1/cad/files/01H000000000000000000000F2/properties' },
+  { method: 'PATCH', path: '/api/v1/cad/files/01H000000000000000000000F3/properties' },
+  { method: 'GET', path: '/api/v1/cad/files/01H000000000000000000000F4/view-state' },
+  { method: 'PATCH', path: '/api/v1/cad/files/01H000000000000000000000F5/view-state' },
+  { method: 'GET', path: '/api/v1/cad/files/01H000000000000000000000F6/review' },
+  { method: 'POST', path: '/api/v1/cad/files/01H000000000000000000000F7/review' },
+  { method: 'GET', path: '/api/v1/cad/files/01H000000000000000000000F8/history' },
+  { method: 'GET', path: '/api/v1/cad/files/01H000000000000000000000F9/diff' },
+  { method: 'GET', path: '/api/v1/cad/files/01H000000000000000000000F11/mesh-stats' },
 ] as const
 
 function loadPact(): PactDocument {
@@ -112,7 +124,7 @@ function loadAdapter(): string {
   return readFileSync(ADAPTER_PATH, 'utf8')
 }
 
-describe('Pact: Metasheet2 consumer -> YuantusPLM provider (Wave 1 + Wave 2 document semantics + Wave 3 BOM/approval + Wave 4 approval list/detail/substitutes)', () => {
+describe('Pact: Metasheet2 consumer -> YuantusPLM provider (Wave 1 + Wave 2 document semantics + release readiness + Wave 3 BOM/approval + Wave 4 approval list/detail/substitutes + Wave 5 CAD)', () => {
   it('pact JSON exists, parses as Pact v3, and names the right consumer/provider', () => {
     const pact = loadPact()
     expect(pact.consumer.name).toBe('Metasheet2')
@@ -155,6 +167,7 @@ describe('Pact: Metasheet2 consumer -> YuantusPLM provider (Wave 1 + Wave 2 docu
       '/api/v1/bom/compare/schema',
       '/api/v1/file/item/',
       '/api/v1/aml/query',
+      '/api/v1/release-readiness/items/${itemId}',
       '/api/v1/eco',
       '/api/v1/eco/${approvalId}',
       '/api/v1/eco/${approvalId}/approvals',
@@ -162,6 +175,12 @@ describe('Pact: Metasheet2 consumer -> YuantusPLM provider (Wave 1 + Wave 2 docu
       '/api/v1/eco/${approvalId}/reject',
       '/api/v1/bom/${bomLineId}/substitutes',
       '/api/v1/bom/${bomLineId}/substitutes/${substituteId}',
+      '/api/v1/cad/files/${fileId}/properties',
+      '/api/v1/cad/files/${fileId}/view-state',
+      '/api/v1/cad/files/${fileId}/review',
+      '/api/v1/cad/files/${fileId}/history',
+      '/api/v1/cad/files/${fileId}/diff',
+      '/api/v1/cad/files/${fileId}/mesh-stats',
       'fetchYuantusFileMetadata',
     ]
     for (const ep of endpointsToFind) {
@@ -225,6 +244,31 @@ describe('Pact: Metasheet2 consumer -> YuantusPLM provider (Wave 1 + Wave 2 docu
     expect(body.where).toEqual({ id: '01H000000000000000000000P1' })
     expect(body.expand).toEqual(['Document Part'])
     expect(body.page_size).toBe(1)
+  })
+
+  it('release-readiness interaction locks the governance drilldown envelope used by federation', () => {
+    const pact = loadPact()
+    const readiness = pact.interactions.find(
+      i => i.request.path === '/api/v1/release-readiness/items/01H000000000000000000000P1',
+    )
+
+    expect(readiness).toBeDefined()
+    expect(readiness!.request.query).toEqual({
+      ruleset_id: ['gate-a'],
+      mbom_limit: ['10'],
+      routing_limit: ['12'],
+      baseline_limit: ['8'],
+    })
+    expect(readiness!.response.body).toMatchObject({
+      item_id: '01H000000000000000000000P1',
+      ruleset_id: 'gate-a',
+      summary: {
+        ok: expect.any(Boolean),
+        resources: expect.any(Number),
+        error_count: expect.any(Number),
+      },
+      resources: expect.any(Array),
+    })
   })
 
   it('where-used and compare-schema interactions lock the BOM analysis surfaces consumed on mainline', () => {
@@ -336,6 +380,137 @@ describe('Pact: Metasheet2 consumer -> YuantusPLM provider (Wave 1 + Wave 2 docu
     expect(substitutesRemove!.response.body).toEqual({
       ok: true,
       substitute_id: '01H000000000000000000000R6',
+    })
+  })
+
+  it('CAD interactions lock properties, view state, review, history, diff, and mesh stats for the native workspace', () => {
+    const pact = loadPact()
+    const propertiesGet = pact.interactions.find(
+      i => i.request.path === '/api/v1/cad/files/01H000000000000000000000F2/properties'
+        && i.request.method === 'GET',
+    )
+    const propertiesPatch = pact.interactions.find(
+      i => i.request.path === '/api/v1/cad/files/01H000000000000000000000F3/properties'
+        && i.request.method === 'PATCH',
+    )
+    const viewStateGet = pact.interactions.find(
+      i => i.request.path === '/api/v1/cad/files/01H000000000000000000000F4/view-state'
+        && i.request.method === 'GET',
+    )
+    const viewStatePatch = pact.interactions.find(
+      i => i.request.path === '/api/v1/cad/files/01H000000000000000000000F5/view-state'
+        && i.request.method === 'PATCH',
+    )
+    const reviewGet = pact.interactions.find(
+      i => i.request.path === '/api/v1/cad/files/01H000000000000000000000F6/review'
+        && i.request.method === 'GET',
+    )
+    const reviewPost = pact.interactions.find(
+      i => i.request.path === '/api/v1/cad/files/01H000000000000000000000F7/review'
+        && i.request.method === 'POST',
+    )
+    const historyGet = pact.interactions.find(
+      i => i.request.path === '/api/v1/cad/files/01H000000000000000000000F8/history',
+    )
+    const diffGet = pact.interactions.find(
+      i => i.request.path === '/api/v1/cad/files/01H000000000000000000000F9/diff',
+    )
+    const meshStatsGet = pact.interactions.find(
+      i => i.request.path === '/api/v1/cad/files/01H000000000000000000000F11/mesh-stats',
+    )
+
+    expect(propertiesGet).toBeDefined()
+    expect(propertiesPatch).toBeDefined()
+    expect(viewStateGet).toBeDefined()
+    expect(viewStatePatch).toBeDefined()
+    expect(reviewGet).toBeDefined()
+    expect(reviewPost).toBeDefined()
+    expect(historyGet).toBeDefined()
+    expect(diffGet).toBeDefined()
+    expect(meshStatsGet).toBeDefined()
+
+    expect(propertiesGet!.response.body).toMatchObject({
+      file_id: '01H000000000000000000000F2',
+      properties: {
+        material: 'AL-6061',
+        finish: 'anodized',
+      },
+      source: 'imported',
+      cad_document_schema_version: 3,
+    })
+    expect(propertiesPatch!.request.body).toEqual({
+      properties: {
+        material: 'AL-7075',
+        finish: 'hard-anodized',
+      },
+      source: 'manual',
+    })
+    expect(viewStateGet!.response.body).toMatchObject({
+      file_id: '01H000000000000000000000F4',
+      hidden_entity_ids: [12, 19],
+      notes: [
+        {
+          entity_id: 12,
+          note: 'check hole position',
+          color: '#FFB020',
+        },
+      ],
+      source: 'client',
+      cad_document_schema_version: 3,
+    })
+    expect(viewStatePatch!.request.body).toEqual({
+      hidden_entity_ids: [12, 19],
+      notes: [
+        {
+          entity_id: 19,
+          note: 'hide fastener',
+          color: '#4C9AFF',
+        },
+      ],
+      source: 'client',
+      refresh_preview: false,
+    })
+    expect(reviewGet!.response.body).toMatchObject({
+      file_id: '01H000000000000000000000F6',
+      state: 'pending',
+      note: 'Awaiting review',
+      reviewed_by_id: 1,
+    })
+    expect(reviewPost!.request.body).toEqual({
+      state: 'approved',
+      note: 'Looks good',
+    })
+    expect((historyGet!.response.body as Record<string, unknown>).entries).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ action: 'cad_properties_update' }),
+        expect.objectContaining({ action: 'cad_review_update' }),
+      ]),
+    )
+    expect(diffGet!.request.query).toEqual({
+      other_file_id: ['01H000000000000000000000F10'],
+    })
+    expect(diffGet!.response.body).toMatchObject({
+      file_id: '01H000000000000000000000F9',
+      other_file_id: '01H000000000000000000000F10',
+      properties: {
+        added: { finish: 'anodized' },
+        removed: { coating: 'none' },
+        changed: {
+          weight_kg: { from: 1.1, to: 1.2 },
+        },
+      },
+      cad_document_schema_version: {
+        from: 1,
+        to: 2,
+      },
+    })
+    expect(meshStatsGet!.response.body).toMatchObject({
+      file_id: '01H000000000000000000000F11',
+      stats: expect.objectContaining({
+        available: true,
+        entity_count: 2,
+        triangle_count: 102400,
+      }),
     })
   })
 })

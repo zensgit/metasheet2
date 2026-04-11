@@ -2145,6 +2145,434 @@ components:
             $ref: '#/components/schemas/MultitableRelatedRecord'
       required:
         - updated
+    ApprovalNodeConfig:
+      type: object
+      properties:
+        assigneeType:
+          type: string
+          enum: [user, role]
+        assigneeIds:
+          type: array
+          items:
+            type: string
+      required: [assigneeType, assigneeIds]
+    ApprovalConditionRule:
+      type: object
+      properties:
+        fieldId:
+          type: string
+        operator:
+          type: string
+          enum: [eq, neq, gt, gte, lt, lte, in, isEmpty]
+        value:
+          nullable: true
+      required: [fieldId, operator]
+    ApprovalConditionBranch:
+      type: object
+      properties:
+        edgeKey:
+          type: string
+        rules:
+          type: array
+          items:
+            $ref: '#/components/schemas/ApprovalConditionRule'
+        conjunction:
+          type: string
+          enum: [and, or]
+      required: [edgeKey, rules]
+    ApprovalConditionNodeConfig:
+      type: object
+      properties:
+        branches:
+          type: array
+          items:
+            $ref: '#/components/schemas/ApprovalConditionBranch'
+        defaultEdgeKey:
+          type: string
+      required: [branches]
+    ApprovalCcNodeConfig:
+      type: object
+      properties:
+        targetType:
+          type: string
+          enum: [user, role]
+        targetIds:
+          type: array
+          items:
+            type: string
+      required: [targetType, targetIds]
+    ApprovalNode:
+      type: object
+      properties:
+        key:
+          type: string
+        type:
+          type: string
+          enum: [start, approval, cc, condition, end]
+        name:
+          type: string
+        config:
+          type: object
+          additionalProperties: true
+      required: [key, type, config]
+    ApprovalEdge:
+      type: object
+      properties:
+        key:
+          type: string
+        source:
+          type: string
+        target:
+          type: string
+      required: [key, source, target]
+    ApprovalGraph:
+      type: object
+      properties:
+        nodes:
+          type: array
+          items:
+            $ref: '#/components/schemas/ApprovalNode'
+        edges:
+          type: array
+          items:
+            $ref: '#/components/schemas/ApprovalEdge'
+      required: [nodes, edges]
+    RuntimePolicy:
+      type: object
+      properties:
+        allowRevoke:
+          type: boolean
+        revokeBeforeNodeKeys:
+          type: array
+          items:
+            type: string
+      required: [allowRevoke]
+    RuntimeGraph:
+      allOf:
+        - $ref: '#/components/schemas/ApprovalGraph'
+        - type: object
+          properties:
+            policy:
+              $ref: '#/components/schemas/RuntimePolicy'
+          required: [policy]
+    FormOption:
+      type: object
+      properties:
+        label:
+          type: string
+        value:
+          type: string
+      required: [label, value]
+    FormField:
+      type: object
+      properties:
+        id:
+          type: string
+        type:
+          type: string
+          enum: [text, textarea, number, date, datetime, select, multi-select, user, attachment]
+        label:
+          type: string
+        required:
+          type: boolean
+        placeholder:
+          type: string
+        defaultValue:
+          nullable: true
+        options:
+          type: array
+          items:
+            $ref: '#/components/schemas/FormOption'
+        props:
+          type: object
+          additionalProperties: true
+      required: [id, type, label]
+    FormSchema:
+      type: object
+      properties:
+        fields:
+          type: array
+          items:
+            $ref: '#/components/schemas/FormField'
+      required: [fields]
+    ApprovalRequesterSnapshot:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        department:
+          type: string
+        title:
+          type: string
+      additionalProperties: true
+    ApprovalSubjectSnapshot:
+      type: object
+      additionalProperties: true
+    ApprovalPolicySnapshot:
+      type: object
+      properties:
+        rejectCommentRequired:
+          type: boolean
+        sourceOfTruth:
+          type: string
+      additionalProperties: true
+    ApprovalAssignmentDTO:
+      type: object
+      properties:
+        id:
+          type: string
+        type:
+          type: string
+        assigneeId:
+          type: string
+        sourceStep:
+          type: integer
+        nodeKey:
+          type: string
+          nullable: true
+        isActive:
+          type: boolean
+        metadata:
+          type: object
+          additionalProperties: true
+      required: [id, type, assigneeId, sourceStep, isActive, metadata]
+    UnifiedApprovalDTO:
+      type: object
+      properties:
+        id:
+          type: string
+        sourceSystem:
+          type: string
+        externalApprovalId:
+          type: string
+          nullable: true
+        workflowKey:
+          type: string
+          nullable: true
+        businessKey:
+          type: string
+          nullable: true
+        title:
+          type: string
+          nullable: true
+        status:
+          type: string
+        requester:
+          allOf:
+            - $ref: '#/components/schemas/ApprovalRequesterSnapshot'
+          nullable: true
+        subject:
+          allOf:
+            - $ref: '#/components/schemas/ApprovalSubjectSnapshot'
+          nullable: true
+        policy:
+          allOf:
+            - $ref: '#/components/schemas/ApprovalPolicySnapshot'
+          nullable: true
+        currentStep:
+          type: integer
+          nullable: true
+        totalSteps:
+          type: integer
+          nullable: true
+        templateId:
+          type: string
+          nullable: true
+        templateVersionId:
+          type: string
+          nullable: true
+        publishedDefinitionId:
+          type: string
+          nullable: true
+        requestNo:
+          type: string
+          nullable: true
+        formSnapshot:
+          type: object
+          nullable: true
+          additionalProperties: true
+        currentNodeKey:
+          type: string
+          nullable: true
+        assignments:
+          type: array
+          items:
+            $ref: '#/components/schemas/ApprovalAssignmentDTO'
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+      required:
+        - id
+        - sourceSystem
+        - status
+        - assignments
+        - createdAt
+        - updatedAt
+    UnifiedApprovalHistoryDTO:
+      type: object
+      properties:
+        id:
+          type: string
+        action:
+          type: string
+        actorId:
+          type: string
+          nullable: true
+        actorName:
+          type: string
+          nullable: true
+        comment:
+          type: string
+          nullable: true
+        fromStatus:
+          type: string
+          nullable: true
+        toStatus:
+          type: string
+        occurredAt:
+          type: string
+          format: date-time
+          nullable: true
+        metadata:
+          type: object
+          additionalProperties: true
+      required: [id, action, toStatus, metadata]
+    CreateApprovalRequest:
+      type: object
+      properties:
+        templateId:
+          type: string
+        formData:
+          type: object
+          additionalProperties: true
+      required: [templateId, formData]
+    ApprovalActionRequest:
+      type: object
+      properties:
+        action:
+          type: string
+          enum: [approve, reject, transfer, revoke, comment]
+        comment:
+          type: string
+        targetUserId:
+          type: string
+      required: [action]
+    ApprovalTemplateListItem:
+      type: object
+      properties:
+        id:
+          type: string
+        key:
+          type: string
+        name:
+          type: string
+        description:
+          type: string
+          nullable: true
+        status:
+          type: string
+          enum: [draft, published, archived]
+        activeVersionId:
+          type: string
+          nullable: true
+        latestVersionId:
+          type: string
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+      required: [id, key, name, status, activeVersionId, latestVersionId, createdAt, updatedAt]
+    ApprovalTemplateDetail:
+      allOf:
+        - $ref: '#/components/schemas/ApprovalTemplateListItem'
+        - type: object
+          properties:
+            formSchema:
+              $ref: '#/components/schemas/FormSchema'
+            approvalGraph:
+              $ref: '#/components/schemas/ApprovalGraph'
+          required: [formSchema, approvalGraph]
+    CreateApprovalTemplateRequest:
+      type: object
+      properties:
+        key:
+          type: string
+        name:
+          type: string
+        description:
+          type: string
+          nullable: true
+        formSchema:
+          $ref: '#/components/schemas/FormSchema'
+        approvalGraph:
+          $ref: '#/components/schemas/ApprovalGraph'
+      required: [key, name, formSchema, approvalGraph]
+    UpdateApprovalTemplateRequest:
+      type: object
+      properties:
+        key:
+          type: string
+        name:
+          type: string
+        description:
+          type: string
+          nullable: true
+        formSchema:
+          $ref: '#/components/schemas/FormSchema'
+        approvalGraph:
+          $ref: '#/components/schemas/ApprovalGraph'
+    PublishApprovalTemplateRequest:
+      type: object
+      properties:
+        policy:
+          $ref: '#/components/schemas/RuntimePolicy'
+      required: [policy]
+    ApprovalTemplateVersionDetail:
+      type: object
+      properties:
+        id:
+          type: string
+        templateId:
+          type: string
+        version:
+          type: integer
+        status:
+          type: string
+          enum: [draft, published, archived]
+        formSchema:
+          $ref: '#/components/schemas/FormSchema'
+        approvalGraph:
+          $ref: '#/components/schemas/ApprovalGraph'
+        runtimeGraph:
+          allOf:
+            - $ref: '#/components/schemas/RuntimeGraph'
+          nullable: true
+        publishedDefinitionId:
+          type: string
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+      required:
+        - id
+        - templateId
+        - version
+        - status
+        - formSchema
+        - approvalGraph
+        - createdAt
+        - updatedAt
   responses:
     Unauthorized:
       description: Unauthorized - Missing or invalid JWT token

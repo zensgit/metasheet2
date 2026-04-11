@@ -141,6 +141,7 @@ const PLMQuerySchema = z.object({
     'products',
     'bom',
     'documents',
+    'release_readiness',
     'approvals',
     'approval_history',
     'bom_compare',
@@ -1234,6 +1235,66 @@ export function federationRouter(injector?: Injector): Router {
                 limit: pagination?.limit ?? 100,
                 offset: pagination?.offset ?? 0,
                 ...(result.metadata?.sources ? { sources: result.metadata.sources } : {}),
+              },
+            })
+          }
+
+          if (operation === 'release_readiness') {
+            const resolvedProductId = productId
+              || toStringParam(filterParams.product_id ?? filterParams.productId)
+            if (!resolvedProductId) {
+              return res.status(400).json({
+                ok: false,
+                error: {
+                  code: 'VALIDATION_ERROR',
+                  message: 'productId is required for release_readiness',
+                },
+              })
+            }
+
+            const rulesetId = toStringParam(filterParams.ruleset_id ?? filterParams.rulesetId)
+            const mbomLimit = toNumberParam(filterParams.mbom_limit ?? filterParams.mbomLimit)
+            const routingLimit = toNumberParam(filterParams.routing_limit ?? filterParams.routingLimit)
+            const baselineLimit = toNumberParam(filterParams.baseline_limit ?? filterParams.baselineLimit)
+
+            const result = await adapter.getReleaseReadiness(resolvedProductId, {
+              rulesetId,
+              mbomLimit,
+              routingLimit,
+              baselineLimit,
+            })
+            if (sendAdapterError(res, result.error, 'Failed to query release readiness', metrics, 'POST', `/plm/${operation}`, startTime)) {
+              return
+            }
+
+            metrics.recordRequest(
+              { adapter: 'plm', method: 'POST', endpoint: `/plm/${operation}`, status: '200' },
+              Date.now() - startTime
+            )
+
+            return res.json({
+              ok: true,
+              data: {
+                productId: resolvedProductId,
+                ...(result.data[0] ?? {
+                  item_id: resolvedProductId,
+                  generated_at: new Date().toISOString(),
+                  ruleset_id: rulesetId || 'readiness',
+                  summary: {
+                    ok: false,
+                    resources: 0,
+                    ok_resources: 0,
+                    error_count: 0,
+                    warning_count: 0,
+                    by_kind: {},
+                  },
+                  resources: [],
+                  esign_manifest: null,
+                  links: {
+                    summary: `/api/v1/release-readiness/items/${encodeURIComponent(resolvedProductId)}?ruleset_id=${encodeURIComponent(rulesetId || 'readiness')}`,
+                    export: `/api/v1/release-readiness/items/${encodeURIComponent(resolvedProductId)}/export?export_format=zip&ruleset_id=${encodeURIComponent(rulesetId || 'readiness')}`,
+                  },
+                }),
               },
             })
           }
@@ -2664,6 +2725,7 @@ function getDefaultCapabilities(type: 'plm' | 'athena'): string[] {
       'products',
       'bom',
       'documents',
+      'release_readiness',
       'approvals',
       'approval_history',
       'drawings',
@@ -2934,6 +2996,36 @@ function getMockPLMData(
           { id: 'doc-2', name: 'Drawing.dwg', type: 'drawing' },
         ],
         total: 2,
+      }
+    case 'release_readiness':
+      {
+        const resolvedProductId = productId || 'prod-1'
+        return {
+          productId: resolvedProductId,
+          item_id: resolvedProductId,
+          generated_at: new Date().toISOString(),
+          ruleset_id: 'readiness',
+          summary: {
+            ok: true,
+            resources: 1,
+            ok_resources: 1,
+            error_count: 0,
+            warning_count: 0,
+            by_kind: {
+              item: {
+                resources: 1,
+                ok_resources: 1,
+                error_count: 0,
+                warning_count: 0,
+              },
+            },
+          },
+          resources: [],
+          links: {
+            summary: `/api/v1/release-readiness/items/${resolvedProductId}?ruleset_id=readiness`,
+            export: `/api/v1/release-readiness/items/${resolvedProductId}/export?export_format=zip&ruleset_id=readiness`,
+          },
+        }
       }
     case 'approvals':
       return {
