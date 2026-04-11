@@ -67,10 +67,10 @@ export function rbacGuard(resourceOrPermission: string, action?: string): Reques
       // Trust the authenticated request user first. jwtAuthMiddleware refreshes
       // role/permission data on each request, and development fallback users only
       // exist on req.user (not in RBAC tables).
-      if (
-        requestUserHasResolvedPermission(req.user, permissionCode)
-        && await isPermissionAllowedByNamespaceAdmission(userId, permissionCode)
-      ) {
+      // req.user is already hydrated by auth with the effective permission set.
+      // Re-checking namespace admission here double-filters development users
+      // and request-scoped permission snapshots that were already resolved.
+      if (requestUserHasResolvedPermission(req.user, permissionCode)) {
         next()
         return
       }
@@ -125,10 +125,7 @@ export function rbacGuardAny(permissionCodes: string[]): RequestHandler {
         return
       }
       for (const code of permissionCodes) {
-        if (
-          requestUserHasResolvedPermission(requestUser, code)
-          && await isPermissionAllowedByNamespaceAdmission(userId, code)
-        ) {
+        if (requestUserHasResolvedPermission(requestUser, code)) {
           next()
           return
         }
@@ -194,10 +191,7 @@ export function rbacGuardAll(permissionCodes: string[]): RequestHandler {
       }
       let requestUserHasAll = true
       for (const code of permissionCodes) {
-        if (
-          !requestUserHasResolvedPermission(requestUser, code)
-          || !await isPermissionAllowedByNamespaceAdmission(userId, code)
-        ) {
+        if (!requestUserHasResolvedPermission(requestUser, code)) {
           requestUserHasAll = false
           break
         }
