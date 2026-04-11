@@ -21,6 +21,7 @@ describe('PLMAdapter runtime status', () => {
     })
     expect(adapter.getRuntimeStatus().supportedOperations).toContain('release_readiness')
     expect(adapter.getRuntimeStatus().supportedOperations).toContain('approval_history')
+    expect(adapter.getRuntimeStatus().supportedOperations).toContain('metadata')
   })
 
   it('hides yuantus-only capabilities in legacy mode', () => {
@@ -34,6 +35,7 @@ describe('PLMAdapter runtime status', () => {
     expect(adapter.getRuntimeStatus().supportedOperations).not.toContain('approval_history')
     expect(adapter.getRuntimeStatus().supportedOperations).not.toContain('where_used')
     expect(adapter.getRuntimeStatus().supportedOperations).not.toContain('cad_properties')
+    expect(adapter.getRuntimeStatus().supportedOperations).not.toContain('metadata')
   })
 })
 
@@ -273,6 +275,50 @@ describe('PLMAdapter Yuantus documents mapping', () => {
 
     expect(result.data).toHaveLength(1)
     expect(result.data[0].id).toBe('shared-1')
+  })
+})
+
+describe('PLMAdapter Yuantus metadata mapping', () => {
+  it('loads AML item metadata through the dedicated metadata route', async () => {
+    const adapter = createAdapter()
+    const queryMock = vi.fn().mockResolvedValue({
+      data: [{
+        id: 'Part',
+        label: 'Part',
+        is_relationship: false,
+        properties: [
+          {
+            name: 'item_number',
+            label: '料号',
+            type: 'string',
+            required: true,
+            length: 64,
+            default: null,
+          },
+        ],
+      }],
+    })
+
+    ;(adapter as any).query = queryMock
+
+    const result = await adapter.getItemMetadata('Part')
+
+    expect(queryMock).toHaveBeenCalledWith('/api/v1/aml/metadata/Part')
+    expect(result.error).toBeUndefined()
+    expect(result.metadata?.totalCount).toBe(1)
+    expect(result.data).toEqual([{
+      id: 'Part',
+      label: 'Part',
+      is_relationship: false,
+      properties: [{
+        name: 'item_number',
+        label: '料号',
+        type: 'string',
+        required: true,
+        length: 64,
+        default: null,
+      }],
+    }])
   })
 })
 

@@ -19,14 +19,14 @@ Metasheet2 already calls Yuantus PLM in production through `PLMAdapter.ts`
 when running in `apiMode='yuantus'`. Without a contract test, any field
 rename on the Yuantus side would silently break Metasheet at runtime.
 
-This Pact set freezes the **shape** (not the values) of the 6 Wave 1 P0
+This Pact set freezes the **shape** (not the values) of the 7 Wave 1 P0
 endpoints plus the 3 document-semantics endpoints, the release-readiness
 governance endpoint, the 5 BOM-analysis / ECO-approval endpoints, and the 5
 approval-detail / BOM-substitute endpoints, while Wave 5 adds the 9 CAD
 properties / review / diff endpoints as exact fixture examples that
 `PLMAdapter.ts` currently calls for `apiMode='yuantus'`.
-(Codex's PACT_FIRST plan lists 7 endpoints in Wave 1 — see "Discrepancy
-with codex plan" below.)
+(Codex's PACT_FIRST plan lists 7 endpoints in Wave 1, and the consumer now
+calls all 7.)
 
 The companion provider verifier lives in the Yuantus repo at
 `src/yuantus/api/tests/test_pact_provider_yuantus_plm.py`.
@@ -40,7 +40,7 @@ because adding that npm dependency requires explicit approval.
 The `plm-adapter-yuantus.pact.test.ts` vitest test guards six things:
 
 1. The pact JSON exists and parses as Pact v3.
-2. It contains the 29 currently used interactions in the documented order.
+2. It contains the 30 currently used interactions in the documented order.
 3. Every endpoint named in the pact is also referenced by the live
    `packages/core-backend/src/data-adapters/PLMAdapter.ts` source — so the
    pact cannot drift away from what the adapter actually calls.
@@ -53,33 +53,19 @@ The `plm-adapter-yuantus.pact.test.ts` vitest test guards six things:
 7. The Wave 5 additions lock the exact envelope for CAD properties, CAD view
    state, CAD review, CAD history, CAD diff, and CAD mesh stats.
 
-## Discrepancy with codex's PACT_FIRST plan
+## aml/metadata is now live on main
 
-`docs/PACT_FIRST_INTEGRATION_PLAN_20260407.md` lists 7 endpoints in Wave 1
-P0, including `GET /api/v1/aml/metadata/{item_type_name}`. When the
-contract test was first authored that endpoint was included, and the test
-**immediately failed** with:
+`GET /api/v1/aml/metadata/{item_type_name}` was previously parked outside the
+consumer pact because `PLMAdapter.ts` did not call it. This worktree closes
+that gap in the contract-first way:
 
-> PLMAdapter.ts no longer references /api/v1/aml/metadata/; pact has drifted
-> from the consumer.
-
-A grep across `metasheet2/packages/core-backend/src` confirmed no caller.
-The endpoint exists in Yuantus (`router.py:52`) and is intended for
-front-end form rendering, but the metasheet2 adapter does not yet use it.
-
-Per the contract-first principle, the pact must freeze what the consumer
-**actually** calls, not what is planned. The metadata endpoint has been
-moved to Wave 1.5 and will be added to this pact as soon as PLMAdapter
-starts calling it. When that happens:
-
-1. Add the call site in `PLMAdapter.ts`
-2. Add a new interaction back into `pacts/metasheet2-yuantus-plm.json`
-3. Add the path back into `WAVE_1_P0_PATHS` in the test
-4. Re-copy JSON to `Yuantus/contracts/pacts/`
-
-This drift catch is the pact gate working correctly on day one. The cost
-of removing one anticipated endpoint is much smaller than the cost of
-discovering an aspirational pact never matches the consumer.
+1. `PLMAdapter.getItemMetadata(itemType)` now calls the Yuantus metadata route.
+2. Federation exposes `GET /api/federation/plm/metadata/:itemType`.
+3. The SDK and `plmService` now expose `getMetadata(itemType)`.
+4. The pact JSON now includes `GET /api/v1/aml/metadata/Part`.
+5. The provider verifier can seed stable `Property` rows for the `Part`
+   `ItemType`, so the metadata response is meaningful instead of an empty
+   placeholder.
 
 ## Running the test
 
@@ -106,7 +92,7 @@ cd /Users/huazhou/Downloads/Github/Yuantus
 
 ### Current verifier handoff state (2026-04-11)
 
-The consumer artifact now contains all 29 Wave 1-5 interactions. To verify
+The consumer artifact now contains all 30 Wave 1-5 interactions. To verify
 Yuantus against the current artifact, copy this JSON into the Yuantus repo and
 rerun the provider verifier there.
 
@@ -176,12 +162,9 @@ specification of what the generated pact must contain.
 
 ## Still intentionally outside the pact
 
-The following surfaces remain outside the pact:
-
-- `GET /api/v1/aml/metadata/{item_type_name}`
-
-`aml/metadata` remains outside because `PLMAdapter.ts` still does not call it on
-`main`.
+No additional `aml/*` schema-discovery surfaces are parked right now. Future
+schema endpoints should follow the same rule: add the consumer call site first,
+then add the pact interaction in the same change.
 
 ## Forward compatibility note
 

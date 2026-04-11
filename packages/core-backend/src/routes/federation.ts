@@ -634,6 +634,75 @@ export function federationRouter(injector?: Injector): Router {
     }
   }
 
+  const handlePlmProductMetadata = async (req: Request, res: Response) => {
+    const metrics = getAdapterMetrics()
+    const startTime = Date.now()
+
+    try {
+      const itemType = req.params.itemType
+      const adapter = await ensurePlmAdapter()
+
+      if (adapter) {
+        const result = await adapter.getItemMetadata(itemType)
+        if (sendAdapterError(res, result.error, 'Failed to get PLM metadata', metrics, 'GET', '/metadata/:itemType', startTime)) {
+          return
+        }
+
+        const metadata = result.data[0]
+        if (!metadata) {
+          return res.status(404).json({
+            ok: false,
+            error: {
+              code: 'NOT_FOUND',
+              message: `Metadata '${itemType}' not found`,
+            },
+          })
+        }
+
+        metrics.recordRequest(
+          { adapter: 'plm', method: 'GET', endpoint: '/metadata/:itemType', status: '200' },
+          Date.now() - startTime,
+        )
+
+        return res.json({
+          ok: true,
+          data: metadata,
+        })
+      }
+
+      metrics.recordRequest(
+        { adapter: 'plm', method: 'GET', endpoint: '/metadata/:itemType', status: '200' },
+        Date.now() - startTime,
+      )
+
+      return res.json({
+        ok: true,
+        data: {
+          id: itemType,
+          label: itemType,
+          is_relationship: false,
+          properties: [],
+        },
+      })
+    } catch (error) {
+      if (sendAdapterError(res, error, 'Failed to get PLM metadata', metrics, 'GET', '/metadata/:itemType', startTime)) {
+        return
+      }
+      metrics.recordRequest(
+        { adapter: 'plm', method: 'GET', endpoint: '/metadata/:itemType', status: '500' },
+        Date.now() - startTime,
+      )
+
+      return res.status(500).json({
+        ok: false,
+        error: {
+          code: 'PLM_ERROR',
+          message: error instanceof Error ? error.message : 'Failed to get PLM metadata',
+        },
+      })
+    }
+  }
+
   const handlePlmProductBom = async (req: Request, res: Response) => {
     const metrics = getAdapterMetrics()
     const startTime = Date.now()
@@ -1068,6 +1137,16 @@ export function federationRouter(injector?: Injector): Router {
     '/api/plm/products/:id',
     rbacGuard('federation', 'read'),
     handlePlmProductDetail
+  )
+
+  /**
+   * GET /api/plm/metadata/:itemType
+   * Alias for PLM item metadata (legacy frontend compatibility)
+   */
+  router.get(
+    '/api/plm/metadata/:itemType',
+    rbacGuard('federation', 'read'),
+    handlePlmProductMetadata
   )
 
   /**
@@ -2124,6 +2203,16 @@ export function federationRouter(injector?: Injector): Router {
   )
 
   /**
+   * GET /api/federation/plm/metadata/:itemType
+   * Get item metadata / schema for a PLM item type
+   */
+  router.get(
+    '/api/federation/plm/metadata/:itemType',
+    rbacGuard('federation', 'read'),
+    handlePlmProductMetadata
+  )
+
+  /**
    * GET /api/federation/plm/products/:id/bom
    * Get BOM (Bill of Materials) for a product
    */
@@ -2725,6 +2814,7 @@ function getDefaultCapabilities(type: 'plm' | 'athena'): string[] {
       'products',
       'bom',
       'documents',
+      'metadata',
       'release_readiness',
       'approvals',
       'approval_history',
