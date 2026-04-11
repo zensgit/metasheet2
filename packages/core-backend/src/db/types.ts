@@ -10,6 +10,7 @@ export type CreatedAt = ColumnType<Date, string | undefined, never>
 export type UpdatedAt = ColumnType<Date, string | undefined, Date | string>
 export type NullableTimestamp = ColumnType<Date, string | undefined, Date | string | null> | null
 type JsonObjectColumn = JSONColumnType<Record<string, unknown> | null, Record<string, unknown> | null, Record<string, unknown> | null>
+type JsonObjectArrayColumn = JSONColumnType<Record<string, unknown>[] | null, Record<string, unknown>[] | null, Record<string, unknown>[] | null>
 
 export interface Database {
   // Core tables
@@ -67,6 +68,13 @@ export interface Database {
   workflow_instances: WorkflowInstancesTable
   workflow_tokens: WorkflowTokensTable
   workflow_incidents: WorkflowIncidentsTable
+  // Approval tables
+  approval_templates: ApprovalTemplatesTable
+  approval_template_versions: ApprovalTemplateVersionsTable
+  approval_published_definitions: ApprovalPublishedDefinitionsTable
+  approval_instances: ApprovalInstancesTable
+  approval_records: ApprovalRecordsTable
+  approval_assignments: ApprovalAssignmentsTable
   // Attendance tables
   attendance_events: AttendanceEventsTable
   attendance_records: AttendanceRecordsTable
@@ -858,6 +866,110 @@ export interface SystemConfigsTable {
   value: string
   is_encrypted: boolean
   description: string | null
+  created_at: CreatedAt
+  updated_at: UpdatedAt
+}
+
+// ============================================
+// Approval Tables
+// ============================================
+
+export interface ApprovalTemplatesTable {
+  id: Generated<string>
+  key: string
+  name: string
+  description: string | null
+  status: 'draft' | 'published' | 'archived'
+  active_version_id: string | null
+  latest_version_id: string | null
+  created_at: CreatedAt
+  updated_at: UpdatedAt
+}
+
+export interface ApprovalTemplateVersionsTable {
+  id: Generated<string>
+  template_id: string
+  version: number
+  status: 'draft' | 'published' | 'archived'
+  form_schema: JsonObjectColumn
+  approval_graph: JsonObjectColumn
+  created_at: CreatedAt
+  updated_at: UpdatedAt
+}
+
+export interface ApprovalPublishedDefinitionsTable {
+  id: Generated<string>
+  template_id: string
+  template_version_id: string
+  runtime_graph: JsonObjectColumn
+  is_active: boolean
+  published_at: CreatedAt
+  created_at: CreatedAt
+  updated_at: UpdatedAt
+}
+
+export interface ApprovalInstancesTable {
+  id: string
+  status: string
+  version: number
+  source_system: string
+  external_approval_id: string | null
+  workflow_key: string | null
+  business_key: string | null
+  title: string | null
+  requester_snapshot: JsonObjectColumn
+  subject_snapshot: JsonObjectColumn
+  policy_snapshot: JsonObjectColumn
+  metadata: JsonObjectColumn
+  current_step: number
+  total_steps: number
+  source_updated_at: NullableTimestamp
+  last_synced_at: NullableTimestamp
+  sync_status: string
+  sync_error: string | null
+  template_id: string | null
+  template_version_id: string | null
+  published_definition_id: string | null
+  request_no: string | null
+  form_snapshot: JsonObjectColumn
+  current_node_key: string | null
+  created_at: CreatedAt
+  updated_at: UpdatedAt
+}
+
+export interface ApprovalRecordsTable {
+  id: Generated<number>
+  instance_id: string
+  action: 'approve' | 'reject' | 'return' | 'revoke' | 'transfer' | 'sign' | 'comment' | 'cc'
+  actor_id: string
+  actor_name: string | null
+  comment: string | null
+  reason: string | null
+  from_status: string | null
+  to_status: string
+  version: number | null
+  from_version: number | null
+  to_version: number
+  target_user_id: string | null
+  target_step_id: string | null
+  attachments: JsonObjectArrayColumn
+  metadata: JsonObjectColumn
+  ip_address: string | null
+  user_agent: string | null
+  platform: string | null
+  occurred_at: CreatedAt
+  created_at: CreatedAt
+}
+
+export interface ApprovalAssignmentsTable {
+  id: Generated<string>
+  instance_id: string
+  assignment_type: 'user' | 'role' | 'source_queue'
+  assignee_id: string
+  source_step: number
+  node_key: string | null
+  is_active: boolean
+  metadata: JsonObjectColumn
   created_at: CreatedAt
   updated_at: UpdatedAt
 }
