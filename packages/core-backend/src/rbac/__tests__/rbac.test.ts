@@ -58,6 +58,20 @@ describe('rbacGuard', () => {
     expect(rbacService.userHasPermission).not.toHaveBeenCalled()
   })
 
+  it('keeps namespace admission enforced for namespaced request-user permissions', async () => {
+    vi.mocked(namespaceAdmission.isPermissionAllowedByNamespaceAdmission).mockResolvedValueOnce(false)
+
+    const guard = rbacGuard('attendance', 'write')
+    const req = createRequest({ id: 'attendance-admin', role: 'user', permissions: ['attendance:*'] })
+    const res = createResponse()
+    const next = vi.fn() as unknown as NextFunction
+
+    await guard(req, res, next)
+
+    expect(next).not.toHaveBeenCalled()
+    expect(res.status).toHaveBeenCalledWith(403)
+  })
+
   it('falls back to RBAC tables when the authenticated request user lacks resolved permissions', async () => {
     vi.mocked(rbacService.userHasPermission).mockResolvedValueOnce(true)
 
