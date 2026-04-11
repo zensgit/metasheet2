@@ -82,6 +82,11 @@
       "trigger": "ticket.created"
     },
     {
+      "id": "sla-watcher",
+      "name": "SLA Watcher",
+      "trigger": "ticket.overdue"
+    },
+    {
       "id": "refund-approval",
       "name": "Refund Approval",
       "trigger": "ticket.refundRequested"

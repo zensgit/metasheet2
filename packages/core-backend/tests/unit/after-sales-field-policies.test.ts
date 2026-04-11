@@ -6,6 +6,42 @@ const fieldPolicies = require('../../../../plugins/plugin-after-sales/lib/field-
     visibility: string
     editability: string
   }
+  buildFieldPolicyRoleMatrix: (
+    defaultRoles: Array<{ slug: string; label: string; permissions: string[] }>,
+    defaultPolicies: Array<{
+      objectId: string
+      field: string
+      roleSlug: string
+      visibility: string
+      editability: string
+    }>,
+    registryRows: Array<{ roleSlug: string; visibility: string; editability: string }>,
+  ) => Array<{
+    roleSlug: string
+    roleLabel: string
+    visibility: string
+    editability: string
+  }>
+  buildFieldPolicyUpdateMatrix: (
+    defaultRoles: Array<{ slug: string; label: string; permissions: string[] }>,
+    defaultPolicies: Array<{
+      objectId: string
+      field: string
+      roleSlug: string
+      visibility: string
+      editability: string
+    }>,
+    submittedRoles: Array<{ roleSlug: string; visibility: string; editability: string }>,
+  ) => {
+    roles: Array<{ slug: string; label: string; permissions: string[] }>
+    fieldPolicies: Array<{
+      objectId: string
+      field: string
+      roleSlug: string
+      visibility: string
+      editability: string
+    }>
+  }
   resolveFieldPolicyRoleSlugs: (user: Record<string, unknown> | null | undefined) => string[]
   resolveFieldPoliciesForUser: (
     database: { query: (sql: string, params?: unknown[]) => Promise<unknown[] | { rows: unknown[] }> },
@@ -33,6 +69,18 @@ function createDatabase(rows: Array<Record<string, unknown>>) {
   const query = vi.fn(async () => rows)
   return { query }
 }
+
+const DEFAULT_ROLES = [
+  { slug: 'admin', label: '管理员', permissions: ['after_sales:admin'] },
+  { slug: 'finance', label: '财务', permissions: ['after_sales:approve'] },
+  { slug: 'viewer', label: '只读', permissions: ['after_sales:read'] },
+]
+
+const DEFAULT_FIELD_POLICIES = [
+  { objectId: 'serviceTicket', field: 'refundAmount', roleSlug: 'admin', visibility: 'visible', editability: 'editable' },
+  { objectId: 'serviceTicket', field: 'refundAmount', roleSlug: 'finance', visibility: 'visible', editability: 'editable' },
+  { objectId: 'serviceTicket', field: 'refundAmount', roleSlug: 'viewer', visibility: 'hidden', editability: 'readonly' },
+]
 
 describe('after-sales field policy helper', () => {
   it('resolves role slugs from claims and infers admin from permission claims', () => {
@@ -124,5 +172,70 @@ describe('after-sales field policy helper', () => {
     })
 
     expect(result.fields.serviceTicket.refundAmount).toEqual(fieldPolicies.DEFAULT_EFFECTIVE_POLICY)
+  })
+
+  it('builds a role matrix by overlaying registry rows onto blueprint defaults', () => {
+    expect(
+      fieldPolicies.buildFieldPolicyRoleMatrix(
+        DEFAULT_ROLES,
+        DEFAULT_FIELD_POLICIES,
+        [{ roleSlug: 'finance', visibility: 'hidden', editability: 'editable' }],
+      ),
+    ).toEqual([
+      { roleSlug: 'admin', roleLabel: '管理员', visibility: 'visible', editability: 'editable' },
+      { roleSlug: 'finance', roleLabel: '财务', visibility: 'hidden', editability: 'readonly' },
+      { roleSlug: 'viewer', roleLabel: '只读', visibility: 'hidden', editability: 'readonly' },
+    ])
+  })
+
+  it('builds a full replacement update matrix and coerces hidden rows to readonly', () => {
+    expect(
+      fieldPolicies.buildFieldPolicyUpdateMatrix(
+        DEFAULT_ROLES,
+        DEFAULT_FIELD_POLICIES,
+        [
+          { roleSlug: 'admin', visibility: 'visible', editability: 'editable' },
+          { roleSlug: 'finance', visibility: 'hidden', editability: 'editable' },
+          { roleSlug: 'viewer', visibility: 'hidden', editability: 'readonly' },
+        ],
+      ),
+    ).toEqual({
+      roles: DEFAULT_ROLES,
+      fieldPolicies: [
+        {
+          objectId: 'serviceTicket',
+          field: 'refundAmount',
+          roleSlug: 'admin',
+          visibility: 'visible',
+          editability: 'editable',
+        },
+        {
+          objectId: 'serviceTicket',
+          field: 'refundAmount',
+          roleSlug: 'finance',
+          visibility: 'hidden',
+          editability: 'readonly',
+        },
+        {
+          objectId: 'serviceTicket',
+          field: 'refundAmount',
+          roleSlug: 'viewer',
+          visibility: 'hidden',
+          editability: 'readonly',
+        },
+      ],
+    })
+  })
+
+  it('rejects field policy updates that omit a default role', () => {
+    expect(() =>
+      fieldPolicies.buildFieldPolicyUpdateMatrix(
+        DEFAULT_ROLES,
+        DEFAULT_FIELD_POLICIES,
+        [
+          { roleSlug: 'admin', visibility: 'visible', editability: 'editable' },
+          { roleSlug: 'finance', visibility: 'visible', editability: 'editable' },
+        ],
+      )).toThrow('field policies must include every default role exactly once')
   })
 })

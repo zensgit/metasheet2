@@ -62,6 +62,20 @@ describe('after-sales blueprint runtime sync', () => {
     }
   })
 
+  it('keeps manifest workflows aligned with the default automation ids', () => {
+    const result = blueprint.buildDefaultBlueprint(manifest)
+    const automationIds = (Array.isArray(result.automations) ? result.automations : [])
+      .map((rule) => String((rule as Record<string, unknown>).id || ''))
+      .filter(Boolean)
+      .sort()
+    const workflowIds = (Array.isArray(manifest.workflows) ? manifest.workflows : [])
+      .map((workflow) => String((workflow as Record<string, unknown>).id || ''))
+      .filter(Boolean)
+      .sort()
+
+    expect(workflowIds).toEqual(automationIds)
+  })
+
   it('registers workflow listeners for every automation trigger and notification event', () => {
     const result = blueprint.buildDefaultBlueprint(manifest)
     const automations = Array.isArray(result.automations)

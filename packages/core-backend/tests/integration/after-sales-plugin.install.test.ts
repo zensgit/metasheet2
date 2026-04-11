@@ -71,6 +71,13 @@ function requestJson(
   })
 }
 
+async function issueDevToken(baseUrl: string, query: string): Promise<string> {
+  const tokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?${query}`)
+  const token = (tokenRes.body as { token?: string } | undefined)?.token
+  expect(token).toBeTruthy()
+  return String(token)
+}
+
 function stableMetaId(prefix: string, ...parts: string[]): string {
   const digest = createHash('sha1')
     .update(parts.join(':'))
@@ -628,6 +635,219 @@ describe('after-sales plugin install integration', () => {
       await assertSheetFields(pool, objectDef.objectId, objectDef.sheetName, [...objectDef.fields])
       await assertView(pool, objectDef.objectId, objectDef.view.id, objectDef.view.name, objectDef.view.type)
     }
+  })
+
+  it('reads and updates runtime admin state against the live automation and field-policy registries', async () => {
+    if (!baseUrl || !pool) return
+
+    const adminToken = await issueDevToken(
+      baseUrl,
+      'userId=after-sales-runtime-admin-it&roles=admin&perms=*:*',
+    )
+    const financeToken = await issueDevToken(
+      baseUrl,
+      'userId=after-sales-runtime-admin-finance&roles=finance&perms=after_sales:read',
+    )
+
+    const installRes = await requestJson(`${baseUrl}/api/after-sales/projects/install`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${adminToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        templateId: 'after-sales-default',
+        displayName: 'After Sales Runtime Admin',
+      }),
+    })
+    expect(installRes.status).toBe(200)
+
+    const runtimeAdminRes = await requestJson(`${baseUrl}/api/after-sales/runtime-admin`, {
+      headers: {
+        Authorization: `Bearer ${adminToken}`,
+      },
+    })
+    expect(runtimeAdminRes.status).toBe(200)
+    expect(runtimeAdminRes.body).toEqual({
+      ok: true,
+      data: {
+        projectId: PROJECT_ID,
+        automations: [
+          { id: 'ticket-triage', name: 'Ticket Triage', triggerEvent: 'ticket.created', enabled: true },
+          { id: 'sla-watcher', name: 'SLA Watcher', triggerEvent: 'ticket.overdue', enabled: true },
+          { id: 'refund-approval', name: 'Refund Approval', triggerEvent: 'ticket.refundRequested', enabled: true },
+          { id: 'service-record-notify', name: 'Service Record Notification', triggerEvent: 'service.recorded', enabled: true },
+        ],
+        fieldPolicies: {
+          objectId: 'serviceTicket',
+          field: 'refundAmount',
+          roles: [
+            { roleSlug: 'customer_service', roleLabel: '客服', visibility: 'hidden', editability: 'readonly' },
+            { roleSlug: 'technician', roleLabel: '技师', visibility: 'hidden', editability: 'readonly' },
+            { roleSlug: 'supervisor', roleLabel: '主管', visibility: 'visible', editability: 'readonly' },
+            { roleSlug: 'finance', roleLabel: '财务', visibility: 'visible', editability: 'editable' },
+            { roleSlug: 'admin', roleLabel: '管理员', visibility: 'visible', editability: 'editable' },
+            { roleSlug: 'viewer', roleLabel: '只读', visibility: 'hidden', editability: 'readonly' },
+          ],
+        },
+      },
+    })
+
+    const automationUpdateRes = await requestJson(`${baseUrl}/api/after-sales/runtime-admin/automations`, {
+      method: 'PUT',
+      headers: {
+        Authorization: `Bearer ${adminToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        automations: [
+          { id: 'ticket-triage', enabled: true },
+          { id: 'sla-watcher', enabled: false },
+          { id: 'refund-approval', enabled: true },
+          { id: 'service-record-notify', enabled: true },
+        ],
+      }),
+    })
+    expect(automationUpdateRes.status).toBe(200)
+    expect((automationUpdateRes.body as {
+      data?: { automations?: Array<{ id: string; enabled: boolean }> }
+    }).data?.automations).toMatchObject([
+      { id: 'ticket-triage', enabled: true },
+      { id: 'sla-watcher', enabled: false },
+      { id: 'refund-approval', enabled: true },
+      { id: 'service-record-notify', enabled: true },
+    ])
+
+    const automationRegistryRes = await pool.query<{ rule_id: string; enabled: boolean }>(
+      `SELECT rule_id, enabled
+       FROM plugin_automation_rule_registry
+       WHERE tenant_id = $1
+         AND plugin_id = $2
+         AND app_id = $3
+         AND project_id = $4
+       ORDER BY rule_id ASC`,
+      [TENANT_ID, PLUGIN_ID, APP_ID, PROJECT_ID],
+    )
+    expect(automationRegistryRes.rows).toEqual([
+      { rule_id: 'refund-approval', enabled: true },
+      { rule_id: 'service-record-notify', enabled: true },
+      { rule_id: 'sla-watcher', enabled: false },
+      { rule_id: 'ticket-triage', enabled: true },
+    ])
+
+    const fieldPolicyUpdateRes = await requestJson(`${baseUrl}/api/after-sales/runtime-admin/field-policies`, {
+      method: 'PUT',
+      headers: {
+        Authorization: `Bearer ${adminToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        roles: [
+          { roleSlug: 'customer_service', visibility: 'hidden', editability: 'readonly' },
+          { roleSlug: 'technician', visibility: 'hidden', editability: 'readonly' },
+          { roleSlug: 'supervisor', visibility: 'visible', editability: 'readonly' },
+          { roleSlug: 'finance', visibility: 'hidden', editability: 'editable' },
+          { roleSlug: 'admin', visibility: 'visible', editability: 'editable' },
+          { roleSlug: 'viewer', visibility: 'hidden', editability: 'readonly' },
+        ],
+      }),
+    })
+    expect(fieldPolicyUpdateRes.status).toBe(200)
+    expect((fieldPolicyUpdateRes.body as {
+      data?: {
+        fieldPolicies?: {
+          roles?: Array<{ roleSlug: string; visibility: string; editability: string }>
+        }
+      }
+    }).data?.fieldPolicies?.roles).toContainEqual({
+      roleSlug: 'finance',
+      roleLabel: '财务',
+      visibility: 'hidden',
+      editability: 'readonly',
+    })
+
+    const financeFieldPoliciesRes = await requestJson(`${baseUrl}/api/after-sales/field-policies`, {
+      headers: {
+        Authorization: `Bearer ${financeToken}`,
+      },
+    })
+    expect(financeFieldPoliciesRes.status).toBe(200)
+    expect(financeFieldPoliciesRes.body).toEqual({
+      ok: true,
+      data: {
+        projectId: PROJECT_ID,
+        fields: {
+          serviceTicket: {
+            refundAmount: {
+              visibility: 'hidden',
+              editability: 'readonly',
+            },
+          },
+        },
+      },
+    })
+
+    const fieldPolicyRegistryRes = await pool.query<{
+      role_slug: string
+      visibility: string
+      editability: string
+    }>(
+      `SELECT role_slug, visibility, editability
+       FROM plugin_field_policy_registry
+       WHERE tenant_id = $1
+         AND plugin_id = $2
+         AND app_id = $3
+         AND project_id = $4
+         AND object_id = 'serviceTicket'
+         AND field_name = 'refundAmount'
+       ORDER BY role_slug ASC`,
+      [TENANT_ID, PLUGIN_ID, APP_ID, PROJECT_ID],
+    )
+    expect(fieldPolicyRegistryRes.rows).toContainEqual({
+      role_slug: 'finance',
+      visibility: 'hidden',
+      editability: 'readonly',
+    })
+  })
+
+  it('rejects runtime admin for non-admin callers', async () => {
+    if (!baseUrl || !pool) return
+
+    const adminToken = await issueDevToken(
+      baseUrl,
+      'userId=after-sales-runtime-admin-owner&roles=admin&perms=*:*',
+    )
+    const nonAdminToken = await issueDevToken(
+      baseUrl,
+      'userId=after-sales-runtime-admin-reader&roles=supervisor&perms=after_sales:read',
+    )
+
+    const installRes = await requestJson(`${baseUrl}/api/after-sales/projects/install`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${adminToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        templateId: 'after-sales-default',
+        displayName: 'After Sales Runtime Admin Permissions',
+      }),
+    })
+    expect(installRes.status).toBe(200)
+
+    const runtimeAdminRes = await requestJson(`${baseUrl}/api/after-sales/runtime-admin`, {
+      headers: {
+        Authorization: `Bearer ${nonAdminToken}`,
+      },
+    })
+    expect(runtimeAdminRes.status).toBe(403)
+    expect(runtimeAdminRes.body).toEqual({
+      ok: false,
+      error: {
+        code: 'FORBIDDEN',
+        message: 'Admin access required',
+      },
+    })
   })
 
   it('rejects install for non-admin callers', async () => {
