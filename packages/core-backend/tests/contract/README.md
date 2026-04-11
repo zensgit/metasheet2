@@ -155,10 +155,10 @@ not currently call them on `main`:
 
 The `metasheet2-plm-workbench` long-running spike branch has version-aware
 `approveApproval(id, **version**, comment)` and `rejectApproval(id, **version**,
-comment)` for optimistic locking. When that improvement merges back into this
-mainline branch, the Wave 3 pact for `/api/v1/eco/{id}/approve` should
-declare the `version` field as **optional** so the contract does not
-retroactively break this branch's existing approve/reject signature.
+comment)` for optimistic locking. Mainline already requires `version` on both
+approval action call sites, so the Wave 3 pact keeps `version` required. Only
+relax this field if a real mainline consumer change lands that removes or makes
+`version` optional at the adapter boundary.
 
 The full repo source-of-truth analysis lives at
 `/Users/huazhou/Downloads/Github/Yuantus/docs/METASHEET_REPO_SOURCE_OF_TRUTH_INVESTIGATION_20260407.md`.
