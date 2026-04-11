@@ -226,6 +226,9 @@ export function createPlmFederationClient(clientOrOptions) {
                 effective_at: params.effectiveAt,
             }), 'Failed to load PLM BOM');
         },
+        async getMetadata(itemType) {
+            return requestPlmGet(client, `/api/federation/plm/metadata/${encodeURIComponent(itemType)}`, 'Failed to load PLM metadata');
+        },
         async listDocuments(params) {
             const filters = {};
             if (params.role)

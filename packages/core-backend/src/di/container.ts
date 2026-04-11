@@ -46,6 +46,9 @@ class AdapterStub {
   async getProducts() { return { data: [], metadata: { totalCount: 0 } } }
   async getProductBOM() { return { data: [], metadata: { totalCount: 0 } } }
   async getProductById() { return null }
+  async getItemMetadata(itemType = 'Part') {
+    return { data: [{ id: itemType, label: itemType, is_relationship: false, properties: [] }], metadata: { totalCount: 1 } }
+  }
   async getProductDocuments() { return { data: [], metadata: { totalCount: 0 } } }
   async getApprovals() { return { data: [], metadata: { totalCount: 0 } } }
   async getApprovalHistory() { return { data: [], metadata: { totalCount: 0 } } }

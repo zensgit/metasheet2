@@ -37,6 +37,22 @@ export interface GetBomParams {
   effectiveAt?: string
 }
 
+export interface PlmMetadataField {
+  name: string
+  label?: string
+  type?: string
+  required?: boolean
+  length?: number | null
+  default?: unknown
+}
+
+export interface PlmItemMetadata {
+  id: string
+  label?: string
+  is_relationship?: boolean
+  properties: PlmMetadataField[]
+}
+
 export interface ListDocumentsParams {
   productId: string
   role?: string
@@ -118,6 +134,10 @@ class PlmService {
       depth: params.depth,
       effectiveAt: params.effectiveAt,
     })
+  }
+
+  async getMetadata<T = PlmItemMetadata>(itemType: string): Promise<T> {
+    return plmClient.getMetadata<T>(itemType)
   }
 
   async listDocuments<T = Record<string, unknown>>(params: ListDocumentsParams): Promise<PlmListResponse<T>> {

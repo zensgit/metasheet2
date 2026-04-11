@@ -14,6 +14,7 @@ type LocalizedFallbackKey =
   | 'listProducts'
   | 'getProduct'
   | 'getBom'
+  | 'getMetadata'
   | 'listDocuments'
   | 'getCadProperties'
   | 'getCadViewState'
@@ -39,6 +40,7 @@ const LOCALIZED_FALLBACKS: Record<LocalizedFallbackKey, LocalizedFallback> = {
   listProducts: { english: 'Failed to load PLM products', localized: '搜索失败' },
   getProduct: { english: 'Failed to load PLM product', localized: '加载产品失败' },
   getBom: { english: 'Failed to load PLM BOM', localized: '加载 BOM 失败' },
+  getMetadata: { english: 'Failed to load PLM metadata', localized: '加载模型字段失败' },
   listDocuments: { english: 'Failed to load PLM documents', localized: '加载文档失败' },
   getCadProperties: { english: 'Failed to load PLM CAD properties', localized: '加载属性失败' },
   getCadViewState: { english: 'Failed to load PLM CAD view state', localized: '加载视图状态失败' },
@@ -128,6 +130,8 @@ export function createLocalizedPlmFederationClient(client: RequestClient = plmRe
       withLocalizedFallback('getProduct', rawClient.getProduct<T>(productId, params)),
     getBom: <T = Record<string, unknown>>(productId: string, params?: Parameters<typeof rawClient.getBom<T>>[1]) =>
       withLocalizedFallback('getBom', rawClient.getBom<T>(productId, params)),
+    getMetadata: <T = Record<string, unknown>>(itemType: string) =>
+      withLocalizedFallback('getMetadata', rawClient.getMetadata<T>(itemType)),
     listDocuments: <T = Record<string, unknown>>(params: Parameters<typeof rawClient.listDocuments<T>>[0]) =>
       withLocalizedFallback('listDocuments', rawClient.listDocuments<T>(params)),
     getCadProperties: <T = Record<string, unknown>>(fileId: string) =>

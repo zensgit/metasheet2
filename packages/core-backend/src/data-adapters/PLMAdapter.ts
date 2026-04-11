@@ -41,6 +41,22 @@ export interface PLMQueryOptions {
   itemType?: string
 }
 
+export interface PLMItemMetadataProperty {
+  name: string
+  label?: string
+  type?: string
+  required?: boolean
+  length?: number | null
+  default?: unknown
+}
+
+export interface PLMItemMetadata {
+  id: string
+  label?: string
+  is_relationship?: boolean
+  properties: PLMItemMetadataProperty[]
+}
+
 export interface ApprovalRequest {
   id: string
   request_type: string
@@ -591,6 +607,7 @@ const YUANTUS_SUPPORTED_OPERATIONS = [
   'products',
   'bom',
   'documents',
+  'metadata',
   'details',
   'release_readiness',
   'approvals',
@@ -1592,6 +1609,57 @@ export class PLMAdapter extends HTTPAdapter {
     const result = await this.select<PLMProductRaw>(`${this.productsPath()}${id}`)
     if (result.data.length === 0) return null
     return this.mapProductFields(result.data[0])
+  }
+
+  async getItemMetadata(itemType: string): Promise<QueryResult<PLMItemMetadata>> {
+    if (this.mockMode) {
+      return {
+        data: [{
+          id: itemType,
+          label: itemType,
+          is_relationship: false,
+          properties: [],
+        }],
+        metadata: { totalCount: 1 },
+      }
+    }
+
+    if (this.apiMode !== 'yuantus') {
+      return {
+        data: [],
+        metadata: { totalCount: 0 },
+        error: new Error('PLM metadata is not supported for this PLM API mode'),
+      }
+    }
+
+    const result = await this.query<Record<string, unknown>>(`/api/v1/aml/metadata/${encodeURIComponent(itemType)}`)
+
+    return {
+      data: result.data.map((entry) => ({
+        id: String(entry.id || itemType),
+        label: typeof entry.label === 'string' ? entry.label : String(entry.id || itemType),
+        is_relationship: Boolean(entry.is_relationship),
+        properties: Array.isArray(entry.properties)
+          ? entry.properties
+              .map((property) => {
+                const record = property && typeof property === 'object'
+                  ? property as Record<string, unknown>
+                  : {}
+                return {
+                  name: String(record.name || ''),
+                  label: typeof record.label === 'string' ? record.label : undefined,
+                  type: typeof record.type === 'string' ? record.type : undefined,
+                  required: typeof record.required === 'boolean' ? record.required : undefined,
+                  length: typeof record.length === 'number' ? record.length : null,
+                  default: record.default,
+                }
+              })
+              .filter((property) => property.name.length > 0)
+          : [],
+      })),
+      metadata: { totalCount: result.data.length },
+      error: result.error,
+    }
   }
 
   async getProductDocuments(

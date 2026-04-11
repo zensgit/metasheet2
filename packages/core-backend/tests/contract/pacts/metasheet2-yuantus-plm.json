@@ -9,7 +9,7 @@
     "pactSpecification": {
       "version": "3.0.0"
     },
-    "claudeNote": "Hand-authored Wave 1 plus document-semantics Wave 2 contract per docs/PACT_FIRST_INTEGRATION_PLAN_20260407.md. Match-by-type, not match-by-value. Replace with @pact-foundation/pact generated artifact when that dep is approved. NOTE: codex's plan also listed GET /api/v1/aml/metadata/{type} in Wave 1, but PLMAdapter.ts does not currently call it; contract-first principle says we lock what is actually called. Wave 2 adds the real document semantics calls already used by PLMAdapter.getProductDocuments in yuantus mode: GET /api/v1/file/item/{item_id}, GET /api/v1/file/{file_id}, and POST /api/v1/aml/query with expand ['Document Part']. Wave 3 adds where-used, BOM compare schema, and ECO approval-history/action interactions. Wave 4 adds the real approval list/detail and BOM substitute calls already used by mainline getApprovals/getApprovalById/getBomSubstitutes/addBomSubstitute/removeBomSubstitute. Wave 5 adds the nine CAD endpoints already called on main: CAD properties, CAD view state, CAD review, CAD history, CAD diff, and CAD mesh stats. Release-readiness adds the governance drilldown endpoint already called on main: GET /api/v1/release-readiness/items/{item_id}."
+    "claudeNote": "Hand-authored Wave 1 plus document-semantics Wave 2 contract per docs/PACT_FIRST_INTEGRATION_PLAN_20260407.md. Match-by-type, not match-by-value. Replace with @pact-foundation/pact generated artifact when that dep is approved. Wave 1 now includes the real schema-discovery call already used by mainline PLMAdapter.getItemMetadata in yuantus mode: GET /api/v1/aml/metadata/{type}. Wave 2 adds the real document semantics calls already used by PLMAdapter.getProductDocuments in yuantus mode: GET /api/v1/file/item/{item_id}, GET /api/v1/file/{file_id}, and POST /api/v1/aml/query with expand ['Document Part']. Wave 3 adds where-used, BOM compare schema, and ECO approval-history/action interactions. Wave 4 adds the real approval list/detail and BOM substitute calls already used by mainline getApprovals/getApprovalById/getBomSubstitutes/addBomSubstitute/removeBomSubstitute. Wave 5 adds the nine CAD endpoints already called on main: CAD properties, CAD view state, CAD review, CAD history, CAD diff, and CAD mesh stats. Release-readiness adds the governance drilldown endpoint already called on main: GET /api/v1/release-readiness/items/{item_id}."
   },
   "interactions": [
     {
@@ -1449,6 +1449,129 @@
               ]
             },
             "$.has_more": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "description": "discover item-type metadata for a Part through AML metadata",
+      "providerStates": [
+        {
+          "name": "the Part item type exposes stable metadata fields"
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "path": "/api/v1/aml/metadata/Part",
+        "headers": {
+          "Authorization": "Bearer eyJhbGciOiJIUzI1NiJ9.example"
+        },
+        "matchingRules": {
+          "header": {
+            "$.Authorization": {
+              "matchers": [
+                {
+                  "match": "regex",
+                  "regex": "^Bearer .+"
+                }
+              ]
+            }
+          }
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": {
+          "id": "Part",
+          "label": "Part",
+          "is_relationship": false,
+          "properties": [
+            {
+              "name": "item_number",
+              "label": "料号",
+              "type": "string",
+              "required": true,
+              "length": 64,
+              "default": null
+            }
+          ]
+        },
+        "matchingRules": {
+          "body": {
+            "$.id": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.label": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.is_relationship": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.properties": {
+              "matchers": [
+                {
+                  "match": "type",
+                  "min": 1
+                }
+              ]
+            },
+            "$.properties[*].name": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.properties[*].label": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.properties[*].type": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.properties[*].required": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.properties[*].length": {
+              "matchers": [
+                {
+                  "match": "integer"
+                }
+              ]
+            },
+            "$.properties[*].default": {
               "matchers": [
                 {
                   "match": "type"

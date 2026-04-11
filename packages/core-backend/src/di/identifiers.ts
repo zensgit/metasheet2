@@ -3,7 +3,7 @@ import type { Server as HttpServer } from 'http';
 import type { Socket } from 'socket.io';
 import type { AthenaDocument, DocumentVersion } from '../data-adapters/AthenaAdapter';
 import type { QueryResult } from '../data-adapters/BaseAdapter';
-import type { ApprovalHistoryEntry, ApprovalRequest, BOMItem, PLMProduct } from '../data-adapters/PLMAdapter';
+import type { ApprovalHistoryEntry, ApprovalRequest, BOMItem, PLMItemMetadata, PLMProduct } from '../data-adapters/PLMAdapter';
 import type { ConfigValue } from '../services/ConfigService';
 import type { CollectionDefinition } from '../types/collection';
 import type { Repository } from '../core/database/Repository';
@@ -78,6 +78,7 @@ export interface IPLMAdapterService extends IAdapterLifecycle {
   getProducts(options?: Record<string, unknown>): Promise<QueryResult<PLMProduct>>;
   getProductBOM(productId: string, options?: { depth?: number; effectiveAt?: string }): Promise<QueryResult<BOMItem>>;
   getProductById(productId: string, options?: Record<string, unknown>): Promise<PLMProduct | null>;
+  getItemMetadata(itemType: string): Promise<QueryResult<PLMItemMetadata>>;
   getApprovals(options?: Record<string, unknown>): Promise<QueryResult<ApprovalRequest>>;
   getApprovalById(approvalId: string): Promise<QueryResult<ApprovalRequest>>;
   getApprovalHistory(approvalId: string): Promise<QueryResult<ApprovalHistoryEntry>>;
