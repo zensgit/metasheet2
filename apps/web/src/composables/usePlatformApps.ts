@@ -1,6 +1,8 @@
 import { computed, ref } from 'vue'
 import { apiGet } from '../utils/api'
 
+const TENANT_HINT_KEYS = ['tenantId', 'workspaceId'] as const
+
 export interface PlatformAppNavItem {
   id: string
   title: string
@@ -76,12 +78,62 @@ export type PlatformAppRuntimeInstallState = 'not-installed' | 'installed' | 'pa
 
 const runtimeInstallStateByAppId = ref<Record<string, PlatformAppRuntimeInstallState>>({})
 
-export function setPlatformAppRuntimeInstallState(appId: string, state: PlatformAppRuntimeInstallState | null): void {
+function readRuntimeScopeHint(): string {
+  if (typeof localStorage !== 'undefined') {
+    for (const key of TENANT_HINT_KEYS) {
+      const value = localStorage.getItem(key)
+      if (typeof value === 'string' && value.trim().length > 0) {
+        return value.trim()
+      }
+    }
+  }
+
+  if (typeof window !== 'undefined') {
+    try {
+      const params = new URLSearchParams(window.location.search || '')
+      for (const key of TENANT_HINT_KEYS) {
+        const value = params.get(key)
+        if (typeof value === 'string' && value.trim().length > 0) {
+          return value.trim()
+        }
+      }
+    } catch {
+      return ''
+    }
+  }
+
+  return ''
+}
+
+function resolveRuntimeScopeKey(appId: string, scopeId?: string | null): string {
+  const normalizedScopeId = typeof scopeId === 'string' && scopeId.trim().length > 0
+    ? scopeId.trim()
+    : readRuntimeScopeHint()
+  return normalizedScopeId ? `${normalizedScopeId}:${appId}` : appId
+}
+
+function clearRuntimeStateForApp(next: Record<string, PlatformAppRuntimeInstallState>, appId: string): void {
+  for (const key of Object.keys(next)) {
+    if (key === appId || key.endsWith(`:${appId}`)) {
+      delete next[key]
+    }
+  }
+}
+
+export function setPlatformAppRuntimeInstallState(
+  appId: string,
+  state: PlatformAppRuntimeInstallState | null,
+  scopeId?: string | null,
+): void {
   const next = { ...runtimeInstallStateByAppId.value }
   if (!state || state === 'installed') {
-    delete next[appId]
+    if (scopeId) {
+      delete next[resolveRuntimeScopeKey(appId, scopeId)]
+    } else {
+      clearRuntimeStateForApp(next, appId)
+    }
   } else {
-    next[appId] = state
+    next[resolveRuntimeScopeKey(appId, scopeId)] = state
   }
   runtimeInstallStateByAppId.value = next
 }
@@ -98,7 +150,9 @@ function resolveRuntimeInstallState(
     return runtimeInstallState
   }
 
-  const cachedRuntimeState = runtimeInstallStateByAppId.value[app.id]
+  const cachedRuntimeState = runtimeInstallStateByAppId.value[
+    resolveRuntimeScopeKey(app.id, app.instance?.workspaceId || null)
+  ]
   if (cachedRuntimeState) {
     return cachedRuntimeState
   }
@@ -139,9 +193,13 @@ async function syncRuntimeInstallStates(appList: PlatformAppSummary[]): Promise<
     .map(async (app) => {
       try {
         const response = await apiGet<unknown>(app.runtimeBindings!.currentPath!)
-        setPlatformAppRuntimeInstallState(app.id, normalizeRuntimeInstallState(response))
+        setPlatformAppRuntimeInstallState(
+          app.id,
+          normalizeRuntimeInstallState(response),
+          app.instance?.workspaceId || null,
+        )
       } catch {
-        // Keep the last known install state if the runtime snapshot cannot be refreshed.
+        setPlatformAppRuntimeInstallState(app.id, null, app.instance?.workspaceId || null)
       }
     })
 

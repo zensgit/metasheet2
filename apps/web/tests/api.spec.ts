@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { apiFetch } from '../src/utils/api'
+import { apiFetch, authHeaders, clearStoredAuthState } from '../src/utils/api'
 
 describe('apiFetch', () => {
   const store: Record<string, string> = {}
@@ -45,5 +45,18 @@ describe('apiFetch', () => {
 
     const requestHeaders = fetchMock.mock.calls[0]?.[1]?.headers as Headers
     expect(requestHeaders.get('x-tenant-id')).toBe('tenant_42')
+  })
+
+  it('clears tenant hints together with auth state', () => {
+    store.auth_token = 'jwt-token'
+    store.tenantId = 'tenant_42'
+    store.workspaceId = 'tenant_42'
+
+    clearStoredAuthState()
+
+    expect(store.auth_token).toBeUndefined()
+    expect(store.tenantId).toBeUndefined()
+    expect(store.workspaceId).toBeUndefined()
+    expect(authHeaders()['x-tenant-id']).toBeUndefined()
   })
 })

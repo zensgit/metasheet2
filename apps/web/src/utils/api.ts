@@ -133,6 +133,9 @@ export function clearStoredAuthState(): void {
   for (const key of TOKEN_STORAGE_KEYS) {
     localStorage.removeItem(key)
   }
+  for (const key of TENANT_HINT_KEYS) {
+    localStorage.removeItem(key)
+  }
   for (const key of USER_STATE_KEYS) {
     localStorage.removeItem(key)
   }

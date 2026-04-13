@@ -282,7 +282,7 @@ async function loadRuntimeCurrent(targetApp: NonNullable<typeof app.value>): Pro
   if (!targetApp.runtimeBindings?.currentPath) {
     runtimeCurrent.value = null
     runtimeCurrentError.value = null
-    setPlatformAppRuntimeInstallState(targetApp.id, null)
+    setPlatformAppRuntimeInstallState(targetApp.id, null, targetApp.instance?.workspaceId || null)
     return
   }
 
@@ -290,10 +290,15 @@ async function loadRuntimeCurrent(targetApp: NonNullable<typeof app.value>): Pro
     const response = await apiGet<unknown>(targetApp.runtimeBindings.currentPath)
     runtimeCurrent.value = normalizeRuntimeCurrentSnapshot(response)
     runtimeCurrentError.value = null
-    setPlatformAppRuntimeInstallState(targetApp.id, resolveRuntimeInstallState(runtimeCurrent.value))
+    setPlatformAppRuntimeInstallState(
+      targetApp.id,
+      resolveRuntimeInstallState(runtimeCurrent.value),
+      targetApp.instance?.workspaceId || null,
+    )
   } catch (err: any) {
     runtimeCurrent.value = null
     runtimeCurrentError.value = err?.message || 'Failed to load runtime diagnostics'
+    setPlatformAppRuntimeInstallState(targetApp.id, null, targetApp.instance?.workspaceId || null)
   }
 }
 
