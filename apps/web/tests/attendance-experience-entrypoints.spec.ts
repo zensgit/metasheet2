@@ -89,6 +89,7 @@ async function flushUi(cycles = 6): Promise<void> {
 describe('Attendance experience entrypoints', () => {
   let app: App<Element> | null = null
   let container: HTMLDivElement | null = null
+  const originalMatchMedia = window.matchMedia
 
   beforeEach(() => {
     replaceSpy.mockClear()
@@ -102,6 +103,11 @@ describe('Attendance experience entrypoints', () => {
   afterEach(() => {
     if (app) app.unmount()
     if (container) container.remove()
+    Object.defineProperty(window, 'matchMedia', {
+      configurable: true,
+      writable: true,
+      value: originalMatchMedia,
+    })
     app = null
     container = null
   })
@@ -152,5 +158,31 @@ describe('Attendance experience entrypoints', () => {
     await flushUi(2)
 
     expect(replaceSpy).toHaveBeenCalledWith({ query: { tab: 'reports' } })
+  })
+
+  it('does not block admin entrypoints for narrow desktop-like viewports without mobile signals', async () => {
+    routeState.query = { tab: 'admin' }
+
+    Object.defineProperty(window, 'matchMedia', {
+      configurable: true,
+      writable: true,
+      value: vi.fn().mockImplementation((query: string) => ({
+        matches: query.includes('max-width: 899px'),
+        media: query,
+        onchange: null,
+        addListener: vi.fn(),
+        removeListener: vi.fn(),
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+        dispatchEvent: vi.fn(),
+      })),
+    })
+
+    app = createApp(AttendanceExperienceView)
+    app.mount(container!)
+    await flushUi()
+
+    expect(container!.querySelector('[data-view="admin"]')).toBeTruthy()
+    expect(container!.textContent).not.toContain('Desktop recommended')
   })
 })

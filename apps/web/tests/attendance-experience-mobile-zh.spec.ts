@@ -78,7 +78,7 @@ describe('AttendanceExperienceView mobile zh fallback', () => {
       configurable: true,
       writable: true,
       value: vi.fn().mockImplementation((query: string) => ({
-        matches: query.includes('max-width: 899px'),
+        matches: query.includes('max-width: 899px') || query.includes('pointer: coarse'),
         media: query,
         onchange: null,
         addListener: vi.fn(),

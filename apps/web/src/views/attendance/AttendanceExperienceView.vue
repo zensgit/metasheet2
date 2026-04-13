@@ -121,6 +121,28 @@ const desktopOnlyMessage = computed(() => {
   return t.value.adminDesktopHint
 })
 
+function matchesMediaQuery(query: string): boolean {
+  try {
+    return Boolean(window.matchMedia?.(query)?.matches)
+  } catch {
+    return false
+  }
+}
+
+function hasMobileRuntimeSignals(): boolean {
+  if (typeof window === 'undefined' || typeof navigator === 'undefined') return false
+
+  if (matchesMediaQuery('(pointer: coarse)')) return true
+
+  const touchPoints = Number(navigator.maxTouchPoints ?? 0)
+  if (touchPoints > 0) return true
+
+  const userAgent = String(navigator.userAgent || '')
+  if (/(android|iphone|ipad|ipod|mobile)/i.test(userAgent)) return true
+
+  return false
+}
+
 const activeView = computed(() => {
   switch (activeTab.value) {
     case 'overview':
@@ -161,26 +183,18 @@ const activeView = computed(() => {
 
 function updateMobileState(): void {
   if (typeof window === 'undefined') return
-  // Prefer media query (most stable) then fallback to viewport measurements.
-  // Some environments can report a scaled `innerWidth` even when the CSS viewport is narrow.
-  try {
-    if (window.matchMedia?.('(max-width: 899px)')?.matches) {
-      isMobile.value = true
-      return
-    }
-  } catch {
-    // ignore
-  }
+  const mediaQueryMatches = matchesMediaQuery('(max-width: 899px)')
 
   const docWidth = typeof document !== 'undefined'
     ? document.documentElement?.clientWidth
     : 0
   const viewportWidth = window.visualViewport?.width ?? 0
   const width = Math.max(viewportWidth || 0, docWidth || 0) || window.innerWidth
+  const narrowViewport = mediaQueryMatches || width < 900
 
-  // NOTE: `window.innerWidth` can be misleading on mobile due to viewport scaling.
-  // Prefer visualViewport / clientWidth for consistent gating.
-  isMobile.value = width < 900
+  // Narrow desktop/headless windows should still be usable.
+  // Only gate desktop-first tabs when the runtime also looks mobile/touch-first.
+  isMobile.value = narrowViewport && hasMobileRuntimeSignals()
 }
 
 function normalizeTab(value: unknown): AttendanceTab {
