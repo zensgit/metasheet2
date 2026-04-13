@@ -24,6 +24,11 @@ async function canListenOnEphemeralPort(): Promise<boolean> {
 async function ensureApprovalTables() {
   const pool = poolManager.get()
 
+  // Keep this lightweight schema bootstrap aligned with:
+  // - 20250924105000_create_approval_tables.ts
+  // - zzzz20260404100000_extend_approval_tables_for_bridge.ts
+  // - zzzz20260411120100_approval_templates_and_instance_extensions.ts
+  // - zzzz20260411123000_add_created_action_to_approval_records.ts
   await pool.query('CREATE EXTENSION IF NOT EXISTS pgcrypto')
 
   await pool.query(`
@@ -354,7 +359,7 @@ describe('Approval Pack 1A lifecycle API', () => {
 
   beforeAll(async () => {
     const canListen = await canListenOnEphemeralPort()
-    if (!canListen) return
+    expect(canListen).toBe(true)
 
     await ensureApprovalTables()
 
@@ -365,7 +370,7 @@ describe('Approval Pack 1A lifecycle API', () => {
     })
     await server.start()
     const address = server.getAddress()
-    if (!address?.port) return
+    expect(address?.port).toBeTruthy()
     baseUrl = `http://127.0.0.1:${address.port}`
   })
 
@@ -394,8 +399,6 @@ describe('Approval Pack 1A lifecycle API', () => {
   })
 
   it('keeps all-mode approvals pending until the final assignee approves', async () => {
-    if (!baseUrl) return
-
     const adminToken = await authToken(baseUrl, 'approval-admin-all')
     const requesterToken = await authToken(baseUrl, 'requester-all')
     const manager1Token = await authToken(baseUrl, 'manager-1')
@@ -481,11 +484,11 @@ describe('Approval Pack 1A lifecycle API', () => {
     const historyResult = await pool.query<ApprovalRecordRow>(
       `SELECT action, actor_id, to_status, metadata
        FROM approval_records
-       WHERE instance_id = $1
-       ORDER BY occurred_at ASC, created_at ASC`,
+       WHERE instance_id = $1 AND action = 'approve'
+       ORDER BY to_version ASC, id ASC`,
       [createdApproval.id],
     )
-    const approveEvents = historyResult.rows.filter((row) => row.action === 'approve')
+    const approveEvents = historyResult.rows
     expect(approveEvents).toHaveLength(2)
     expect(approveEvents[0]?.metadata).toMatchObject({
       nodeKey: 'approval_all',
@@ -503,8 +506,6 @@ describe('Approval Pack 1A lifecycle API', () => {
   })
 
   it('returns a workflow to a previously visited approval node', async () => {
-    if (!baseUrl) return
-
     const adminToken = await authToken(baseUrl, 'approval-admin-return')
     const requesterToken = await authToken(baseUrl, 'requester-return')
     const manager1Token = await authToken(baseUrl, 'manager-1')
@@ -600,8 +601,6 @@ describe('Approval Pack 1A lifecycle API', () => {
   })
 
   it('auto-approves empty-assignee nodes and records a system approval history entry', async () => {
-    if (!baseUrl) return
-
     const adminToken = await authToken(baseUrl, 'approval-admin-auto')
     const requesterToken = await authToken(baseUrl, 'requester-auto')
     const templateKey = `approval-pack1a-auto-${Date.now()}`

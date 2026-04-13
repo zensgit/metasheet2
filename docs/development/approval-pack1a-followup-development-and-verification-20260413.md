@@ -106,7 +106,7 @@ Local environment note:
 
 - return target labels still render `nodeKey`; they do not yet map back to template node names
 - the frontend return candidate list is history-driven, not graph-aware
-- backend lifecycle verification still needs one real DB-backed run on a machine with PostgreSQL or in CI
+- backend lifecycle verification has passed locally, but it still benefits from one CI run against a fuller migrated schema
 
 ## Recommended Next Verification
 
