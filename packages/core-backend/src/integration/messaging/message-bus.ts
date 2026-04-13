@@ -8,6 +8,7 @@
  */
 
 import { randomUUID } from 'crypto'
+import Redis from 'ioredis'
 import { coreMetrics } from '../metrics/metrics'
 import { delayService } from '../../services/DelayService'
 import { dlqService } from '../../services/DeadLetterQueueService'
@@ -18,6 +19,95 @@ import { PatternManager } from '../../messaging/pattern-manager'
 import type { MessageBusSubscription } from '../../messaging/types'
 
 const logger = new Logger('MessageBus')
+
+// ---------------------------------------------------------------------------
+// Message Deduplicator
+// ---------------------------------------------------------------------------
+
+/**
+ * MessageDeduplicator prevents duplicate processing of messages.
+ *
+ * Uses Redis SET NX EX for distributed dedup when available, with an
+ * in-memory LRU cache (max 10 000 entries) as fallback.
+ *
+ * Feature flag: ENABLE_MESSAGE_DEDUP=true|false (default: false)
+ */
+export class MessageDeduplicator {
+  private redis: Redis | null = null
+  private redisConnected = false
+  private readonly memoryCache = new Map<string, number>() // messageId -> expiresAt epoch
+  private readonly maxMemoryEntries: number
+  private readonly ttlSeconds: number
+  private static readonly REDIS_PREFIX = 'msgdedup:'
+
+  constructor(opts?: { redis?: Redis; maxMemoryEntries?: number; ttlSeconds?: number }) {
+    this.maxMemoryEntries = opts?.maxMemoryEntries ?? 10_000
+    this.ttlSeconds = opts?.ttlSeconds ?? 300 // 5 minutes
+
+    if (opts?.redis) {
+      this.redis = opts.redis
+      this.redis.on('connect', () => { this.redisConnected = true })
+      this.redis.on('ready', () => { this.redisConnected = true })
+      this.redis.on('error', () => { this.redisConnected = false })
+      this.redis.on('end', () => { this.redisConnected = false })
+      this.redis.on('close', () => { this.redisConnected = false })
+      if ((this.redis as unknown as { status: string }).status === 'ready') {
+        this.redisConnected = true
+      }
+    }
+  }
+
+  /**
+   * Check whether a message ID was already processed.
+   * Returns `true` if this is a **duplicate** (already seen).
+   */
+  async isDuplicate(messageId: string): Promise<boolean> {
+    // Try Redis first
+    if (this.redis && this.redisConnected) {
+      try {
+        const key = `${MessageDeduplicator.REDIS_PREFIX}${messageId}`
+        // SET NX returns "OK" if key was set (first time), null if already exists
+        const result = await this.redis.set(key, '1', 'EX', this.ttlSeconds, 'NX')
+        if (result === null) {
+          // Key already existed – duplicate
+          return true
+        }
+        // Also add to memory for local fast-path
+        this.addToMemory(messageId)
+        return false
+      } catch {
+        // Fall through to memory
+      }
+    }
+
+    // Memory fallback
+    const now = Date.now()
+    const expiresAt = this.memoryCache.get(messageId)
+    if (expiresAt !== undefined) {
+      if (now < expiresAt) {
+        return true // duplicate
+      }
+      this.memoryCache.delete(messageId)
+    }
+
+    this.addToMemory(messageId)
+    return false
+  }
+
+  private addToMemory(messageId: string): void {
+    // Evict oldest entries when exceeding capacity (simple FIFO via insertion order)
+    if (this.memoryCache.size >= this.maxMemoryEntries) {
+      const firstKey = this.memoryCache.keys().next().value as string
+      this.memoryCache.delete(firstKey)
+    }
+    this.memoryCache.set(messageId, Date.now() + this.ttlSeconds * 1000)
+  }
+
+  /** Visible for testing */
+  get memoryCacheSize(): number {
+    return this.memoryCache.size
+  }
+}
 
 export type MessagePriority = 'low' | 'normal' | 'high'
 
@@ -97,6 +187,13 @@ interface MessageBusConfig {
     cacheTtlMs?: number
     optimizationMode?: 'memory' | 'speed' | 'balanced'
   }
+  /** Message deduplication options */
+  dedup?: {
+    enabled?: boolean
+    redis?: Redis
+    ttlSeconds?: number
+    maxMemoryEntries?: number
+  }
 }
 
 class MessageBus {
@@ -117,6 +214,8 @@ class MessageBus {
   private pendingRpc: Map<string, PendingRpc> = new Map()
   private defaultRetries: number
   private interceptor?: MessageHandlerInterceptor
+  private deduplicator: MessageDeduplicator | null = null
+  private dedupEnabled: boolean
 
   constructor(config: MessageBusConfig = {}) {
     // Read feature flag from environment or config
@@ -124,6 +223,21 @@ class MessageBus {
       (process.env.ENABLE_PATTERN_TRIE !== 'false') // Default: enabled unless explicitly disabled
 
     this.defaultRetries = config.defaultRetries ?? 2
+
+    // Message deduplication
+    this.dedupEnabled = config.dedup?.enabled ?? (process.env.ENABLE_MESSAGE_DEDUP === 'true')
+    if (this.dedupEnabled) {
+      let dedupRedis: Redis | undefined = config.dedup?.redis
+      if (!dedupRedis && process.env.REDIS_URL) {
+        dedupRedis = new Redis(process.env.REDIS_URL, { lazyConnect: false, maxRetriesPerRequest: 1 })
+      }
+      this.deduplicator = new MessageDeduplicator({
+        redis: dedupRedis,
+        ttlSeconds: config.dedup?.ttlSeconds,
+        maxMemoryEntries: config.dedup?.maxMemoryEntries
+      })
+      logger.info('MessageBus deduplication enabled')
+    }
 
     if (this.usePatternTrie) {
       this.patternManager = new PatternManager(logger, coreMetrics, {
@@ -365,6 +479,15 @@ class MessageBus {
       if (msg.expiresAt && Date.now() >= msg.expiresAt) {
         coreMetrics.inc('messagesExpired')
         continue
+      }
+
+      // Deduplication check
+      if (this.deduplicator) {
+        const isDup = await this.deduplicator.isDuplicate(msg.id)
+        if (isDup) {
+          coreMetrics.increment('messageDedupHits')
+          continue
+        }
       }
 
       // Gather all matching subscribers

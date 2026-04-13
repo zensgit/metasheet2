@@ -3,9 +3,14 @@
  *
  * Prevents duplicate operation executions and provides rate limiting
  * for confirmation endpoints.
+ *
+ * Supports Redis-backed storage for cluster-safe idempotency with
+ * automatic fallback to in-memory when Redis is unavailable.
+ * Feature flag: IDEMPOTENCY_STORE=redis|memory (default: memory)
  */
 
 import type { Request, Response, NextFunction } from 'express';
+import Redis from 'ioredis';
 import { Logger } from '../core/logger';
 import * as metrics from './safety-metrics';
 
@@ -49,8 +54,159 @@ const DEFAULT_RATE_LIMIT_CONFIG: RateLimitConfig = {
   maxRequests: 10 // 10 requests per minute per user
 };
 
-// In-memory stores (in production, use Redis)
-const idempotencyStore = new Map<string, IdempotencyEntry>();
+// ---------------------------------------------------------------------------
+// Idempotency Store abstraction
+// ---------------------------------------------------------------------------
+
+interface IdempotencyStore {
+  get(key: string): Promise<IdempotencyEntry | undefined>;
+  set(key: string, entry: IdempotencyEntry, ttlSeconds: number): Promise<void>;
+  clear(): Promise<void>;
+  size(): Promise<number>;
+}
+
+/**
+ * In-memory idempotency store (original implementation).
+ */
+class MemoryIdempotencyStore implements IdempotencyStore {
+  private store = new Map<string, IdempotencyEntry>();
+
+  async get(key: string): Promise<IdempotencyEntry | undefined> {
+    const entry = this.store.get(key);
+    if (entry && new Date() > entry.expiresAt) {
+      this.store.delete(key);
+      return undefined;
+    }
+    return entry;
+  }
+
+  async set(key: string, entry: IdempotencyEntry, _ttlSeconds: number): Promise<void> {
+    this.store.set(key, entry);
+  }
+
+  async clear(): Promise<void> {
+    this.store.clear();
+  }
+
+  async size(): Promise<number> {
+    return this.store.size;
+  }
+
+  /** Purge expired entries – called periodically */
+  cleanup(): number {
+    const now = new Date();
+    let cleaned = 0;
+    for (const [key, entry] of this.store) {
+      if (now > entry.expiresAt) {
+        this.store.delete(key);
+        cleaned++;
+      }
+    }
+    return cleaned;
+  }
+}
+
+/**
+ * Redis-backed idempotency store.
+ *
+ * Key format: `idem:{userId}:{idempotencyKey}` (managed by caller via
+ * the composite cache key).  Stores serialised response JSON with EX TTL.
+ *
+ * On any Redis error the store silently falls back to the in-memory store
+ * so that requests are never blocked by a Redis outage.
+ */
+export class RedisIdempotencyStore implements IdempotencyStore {
+  private redis: Redis;
+  private connected = false;
+  private fallback: MemoryIdempotencyStore;
+  private static readonly KEY_PREFIX = 'idem:';
+
+  constructor(redis: Redis, fallback: MemoryIdempotencyStore) {
+    this.redis = redis;
+    this.fallback = fallback;
+
+    // Track connection state
+    this.redis.on('connect', () => { this.connected = true; });
+    this.redis.on('ready', () => { this.connected = true; });
+    this.redis.on('error', () => { this.connected = false; });
+    this.redis.on('end', () => { this.connected = false; });
+    this.redis.on('close', () => { this.connected = false; });
+
+    // If client is already ready (e.g. shared connection)
+    if ((this.redis as unknown as { status: string }).status === 'ready') {
+      this.connected = true;
+    }
+  }
+
+  private redisKey(key: string): string {
+    return `${RedisIdempotencyStore.KEY_PREFIX}${key}`;
+  }
+
+  async get(key: string): Promise<IdempotencyEntry | undefined> {
+    if (!this.connected) {
+      return this.fallback.get(key);
+    }
+    try {
+      const raw = await this.redis.get(this.redisKey(key));
+      if (!raw) {
+        // Also check fallback for entries stored during a previous outage
+        return this.fallback.get(key);
+      }
+      const parsed = JSON.parse(raw);
+      return {
+        response: parsed.response,
+        createdAt: new Date(parsed.createdAt),
+        expiresAt: new Date(parsed.expiresAt)
+      };
+    } catch (err) {
+      logger.warn('Redis idempotency GET failed, falling back to memory', {
+        context: 'SafetyGuardIdempotency',
+        error: err instanceof Error ? err.message : String(err)
+      });
+      return this.fallback.get(key);
+    }
+  }
+
+  async set(key: string, entry: IdempotencyEntry, ttlSeconds: number): Promise<void> {
+    // Always write to memory fallback so it's available if Redis drops
+    await this.fallback.set(key, entry, ttlSeconds);
+
+    if (!this.connected) {
+      return;
+    }
+    try {
+      const payload = JSON.stringify({
+        response: entry.response,
+        createdAt: entry.createdAt.toISOString(),
+        expiresAt: entry.expiresAt.toISOString()
+      });
+      await this.redis.set(this.redisKey(key), payload, 'EX', ttlSeconds);
+    } catch (err) {
+      logger.warn('Redis idempotency SET failed, entry stored in memory only', {
+        context: 'SafetyGuardIdempotency',
+        error: err instanceof Error ? err.message : String(err)
+      });
+    }
+  }
+
+  async clear(): Promise<void> {
+    await this.fallback.clear();
+    // We intentionally do NOT flush Redis keys globally – clearing is
+    // only used in tests or local resets.
+  }
+
+  async size(): Promise<number> {
+    // Approximate – return memory fallback size (Redis key count is expensive)
+    return this.fallback.size();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Module-level state
+// ---------------------------------------------------------------------------
+
+const memoryStore = new MemoryIdempotencyStore();
+let activeStore: IdempotencyStore = memoryStore;
 const rateLimitStore = new Map<string, RateLimitEntry>();
 
 let idempotencyConfig = DEFAULT_IDEMPOTENCY_CONFIG;
@@ -60,12 +216,37 @@ let rateLimitConfig = DEFAULT_RATE_LIMIT_CONFIG;
 let cleanupInterval: NodeJS.Timeout | null = null;
 
 /**
- * Initialize idempotency and rate limiting
+ * Initialize idempotency and rate limiting.
+ *
+ * When `IDEMPOTENCY_STORE=redis` and a valid `REDIS_URL` is set, a
+ * {@link RedisIdempotencyStore} is created.  Otherwise the default
+ * in-memory store is used.
  */
 export function initIdempotency(
-  config: Partial<IdempotencyConfig> = {}
+  config: Partial<IdempotencyConfig> = {},
+  redisClient?: Redis
 ): void {
   idempotencyConfig = { ...DEFAULT_IDEMPOTENCY_CONFIG, ...config };
+
+  // Determine store backend
+  const storeType = process.env.IDEMPOTENCY_STORE || 'memory';
+
+  if (storeType === 'redis') {
+    const redis = redisClient ?? (process.env.REDIS_URL ? new Redis(process.env.REDIS_URL, { lazyConnect: false, maxRetriesPerRequest: 1 }) : null);
+    if (redis) {
+      activeStore = new RedisIdempotencyStore(redis, memoryStore);
+      logger.info('Idempotency store: Redis (with memory fallback)', {
+        context: 'SafetyGuardIdempotency'
+      });
+    } else {
+      logger.warn('IDEMPOTENCY_STORE=redis but no REDIS_URL; using memory store', {
+        context: 'SafetyGuardIdempotency'
+      });
+      activeStore = memoryStore;
+    }
+  } else {
+    activeStore = memoryStore;
+  }
 
   // Start cleanup interval
   if (!cleanupInterval) {
@@ -77,7 +258,8 @@ export function initIdempotency(
   logger.info('Idempotency service initialized', {
     context: 'SafetyGuardIdempotency',
     enabled: idempotencyConfig.enabled,
-    ttlSeconds: idempotencyConfig.ttlSeconds
+    ttlSeconds: idempotencyConfig.ttlSeconds,
+    store: storeType
   });
 }
 
@@ -99,19 +281,13 @@ export function initRateLimit(config: Partial<RateLimitConfig> = {}): void {
  * Cleanup expired entries
  */
 function cleanupExpiredEntries(): void {
-  const now = new Date();
-  let idempotencyCleaned = 0;
   let rateLimitCleaned = 0;
 
-  // Cleanup idempotency entries
-  for (const [key, entry] of idempotencyStore) {
-    if (now > entry.expiresAt) {
-      idempotencyStore.delete(key);
-      idempotencyCleaned++;
-    }
-  }
+  // Cleanup in-memory idempotency entries
+  const idempotencyCleaned = memoryStore.cleanup();
 
   // Cleanup rate limit entries
+  const now = new Date();
   for (const [key, entry] of rateLimitStore) {
     if (now > entry.resetAt) {
       rateLimitStore.delete(key);
@@ -124,14 +300,14 @@ function cleanupExpiredEntries(): void {
       context: 'SafetyGuardIdempotency',
       idempotencyCleaned,
       rateLimitCleaned,
-      remainingIdempotency: idempotencyStore.size,
       remainingRateLimit: rateLimitStore.size
     });
   }
 }
 
 /**
- * Generate idempotency cache key
+ * Generate idempotency cache key.
+ * Format: `{userId}:{idempotencyKey}` — the Redis store adds its own prefix.
  */
 function generateCacheKey(userId: string, idempotencyKey: string): string {
   return `${userId}:${idempotencyKey}`;
@@ -180,56 +356,68 @@ export function requireIdempotency() {
     const userId = user?.id || req.ip || 'anonymous';
     const cacheKey = generateCacheKey(userId, idempotencyKey);
 
-    // Check if we have a cached response
-    const cachedEntry = idempotencyStore.get(cacheKey);
+    // Async lookup against the active store (Redis or memory)
+    activeStore.get(cacheKey).then((cachedEntry) => {
+      if (cachedEntry && new Date() <= cachedEntry.expiresAt) {
+        logger.info('Returning cached idempotent response', {
+          context: 'SafetyGuardIdempotency',
+          userId,
+          keyPrefix: idempotencyKey.substring(0, 20),
+          statusCode: cachedEntry.response.statusCode
+        });
 
-    if (cachedEntry && new Date() <= cachedEntry.expiresAt) {
-      logger.info('Returning cached idempotent response', {
-        context: 'SafetyGuardIdempotency',
-        userId,
-        keyPrefix: idempotencyKey.substring(0, 20),
-        statusCode: cachedEntry.response.statusCode
-      });
+        metrics.recordIdempotencyHit();
 
-      metrics.recordIdempotencyHit();
+        // Return cached response with indicator header
+        res.set('X-Idempotency-Replayed', 'true');
+        res.status(cachedEntry.response.statusCode).json(cachedEntry.response.body);
+        return;
+      }
 
-      // Return cached response with indicator header
-      res.set('X-Idempotency-Replayed', 'true');
-      res.status(cachedEntry.response.statusCode).json(cachedEntry.response.body);
-      return;
-    }
+      metrics.recordIdempotencyMiss();
 
-    metrics.recordIdempotencyMiss();
+      // Capture the response for caching
+      const originalJson = res.json.bind(res);
+      res.json = (body: unknown) => {
+        // Store response in cache (fire-and-forget)
+        const expiresAt = new Date(
+          Date.now() + idempotencyConfig.ttlSeconds * 1000
+        );
 
-    // Capture the response for caching
-    const originalJson = res.json.bind(res);
-    res.json = (body: unknown) => {
-      // Store response in cache
-      const expiresAt = new Date(
-        Date.now() + idempotencyConfig.ttlSeconds * 1000
-      );
+        activeStore.set(cacheKey, {
+          response: {
+            statusCode: res.statusCode,
+            body
+          },
+          createdAt: new Date(),
+          expiresAt
+        }, idempotencyConfig.ttlSeconds).catch((err) => {
+          logger.warn('Failed to cache idempotency response', {
+            context: 'SafetyGuardIdempotency',
+            error: err instanceof Error ? err.message : String(err)
+          });
+        });
 
-      idempotencyStore.set(cacheKey, {
-        response: {
+        logger.debug('Cached response for idempotency key', {
+          context: 'SafetyGuardIdempotency',
+          userId,
+          keyPrefix: idempotencyKey.substring(0, 20),
           statusCode: res.statusCode,
-          body
-        },
-        createdAt: new Date(),
-        expiresAt
-      });
+          expiresIn: idempotencyConfig.ttlSeconds
+        });
 
-      logger.debug('Cached response for idempotency key', {
+        return originalJson(body);
+      };
+
+      next();
+    }).catch((err) => {
+      // On store error, proceed without idempotency rather than blocking
+      logger.warn('Idempotency store lookup failed, proceeding without cache', {
         context: 'SafetyGuardIdempotency',
-        userId,
-        keyPrefix: idempotencyKey.substring(0, 20),
-        statusCode: res.statusCode,
-        expiresIn: idempotencyConfig.ttlSeconds
+        error: err instanceof Error ? err.message : String(err)
       });
-
-      return originalJson(body);
-    };
-
-    next();
+      next();
+    });
   };
 }
 
@@ -316,16 +504,16 @@ export function protectConfirmationEndpoint() {
 /**
  * Get current stats
  */
-export function getIdempotencyStats(): {
+export async function getIdempotencyStats(): Promise<{
   idempotencyEntries: number;
   rateLimitEntries: number;
   config: {
     idempotency: IdempotencyConfig;
     rateLimit: RateLimitConfig;
   };
-} {
+}> {
   return {
-    idempotencyEntries: idempotencyStore.size,
+    idempotencyEntries: await activeStore.size(),
     rateLimitEntries: rateLimitStore.size,
     config: {
       idempotency: idempotencyConfig,
@@ -337,8 +525,8 @@ export function getIdempotencyStats(): {
 /**
  * Clear all entries (for testing)
  */
-export function clearIdempotencyStore(): void {
-  idempotencyStore.clear();
+export async function clearIdempotencyStore(): Promise<void> {
+  await activeStore.clear();
   rateLimitStore.clear();
   logger.info('Idempotency and rate limit stores cleared', {
     context: 'SafetyGuardIdempotency'
@@ -348,14 +536,22 @@ export function clearIdempotencyStore(): void {
 /**
  * Destroy the service
  */
-export function destroyIdempotency(): void {
+export async function destroyIdempotency(): Promise<void> {
   if (cleanupInterval) {
     clearInterval(cleanupInterval);
     cleanupInterval = null;
   }
-  idempotencyStore.clear();
+  await activeStore.clear();
   rateLimitStore.clear();
+  activeStore = memoryStore;
   logger.info('Idempotency service destroyed', {
     context: 'SafetyGuardIdempotency'
   });
+}
+
+/**
+ * Get the currently active idempotency store (exposed for testing).
+ */
+export function getActiveStore(): IdempotencyStore {
+  return activeStore;
 }
