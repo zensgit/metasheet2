@@ -537,6 +537,72 @@ export interface PluginRbacProvisioningService {
   }>
 }
 
+export interface PluginPlatformAppInstanceRegistryService {
+  upsertInstance(input: {
+    tenantId: string
+    workspaceId: string
+    appId: string
+    pluginId: string
+    projectId: string
+    displayName?: string
+    status?: 'active' | 'inactive' | 'failed'
+    instanceKey?: string
+    config?: Record<string, unknown>
+    metadata?: Record<string, unknown>
+  }): Promise<{
+    id: string
+    tenantId: string
+    workspaceId: string
+    appId: string
+    pluginId: string
+    instanceKey: string
+    projectId: string
+    displayName: string
+    status: 'active' | 'inactive' | 'failed'
+    config: Record<string, unknown>
+    metadata: Record<string, unknown>
+    createdAt?: string
+    updatedAt?: string
+  }>
+  getInstance(input: {
+    workspaceId: string
+    appId: string
+    instanceKey?: string
+  }): Promise<{
+    id: string
+    tenantId: string
+    workspaceId: string
+    appId: string
+    pluginId: string
+    instanceKey: string
+    projectId: string
+    displayName: string
+    status: 'active' | 'inactive' | 'failed'
+    config: Record<string, unknown>
+    metadata: Record<string, unknown>
+    createdAt?: string
+    updatedAt?: string
+  } | null>
+  listInstances(input: {
+    workspaceId: string
+    appIds?: string[]
+  }): Promise<Array<{
+    id: string
+    tenantId: string
+    workspaceId: string
+    appId: string
+    pluginId: string
+    instanceKey: string
+    projectId: string
+    displayName: string
+    status: 'active' | 'inactive' | 'failed'
+    config: Record<string, unknown>
+    metadata: Record<string, unknown>
+    createdAt?: string
+    updatedAt?: string
+  }>>
+}
+
 export interface FormulaAPI {
   calculate(functionName: string, ...args: unknown[]): unknown
   calculateFormula(expression: string, contextResolver?: (key: string) => unknown): unknown
@@ -868,6 +934,7 @@ export interface PluginServices {
   notification: NotificationService // Notification service instance
   automationRegistry: PluginAutomationRegistryService
   rbacProvisioning: PluginRbacProvisioningService
+  platformAppInstances: PluginPlatformAppInstanceRegistryService
   websocket: WebSocketService    // WebSocket service instance
   security: SecurityService     // Security service instance
   validation: ValidationService   // Validation service instance

@@ -8,6 +8,13 @@
     "owner": "customer-success",
     "description": "Service tickets, warranty handling, dispatch, and closure feedback."
   },
+  "runtimeBindings": {
+    "currentPath": "/api/after-sales/projects/current",
+    "installPath": "/api/after-sales/projects/install",
+    "installPayload": {
+      "templateId": "after-sales-default"
+    }
+  },
   "platformDependencies": [
     "auth",
     "rbac",
@@ -27,6 +34,14 @@
       "icon": "service",
       "order": 60,
       "location": "main-nav"
+    },
+    {
+      "id": "after-sales-runtime-admin",
+      "title": "Runtime Admin",
+      "path": "/p/plugin-after-sales/after-sales#after-sales-runtime-admin",
+      "icon": "settings",
+      "order": 10,
+      "location": "admin"
     }
   ],
   "permissions": [

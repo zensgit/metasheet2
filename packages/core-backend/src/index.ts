@@ -89,6 +89,7 @@ import { federationRouter } from './routes/federation'
 import internalRouter from './routes/internal'
 import cacheTestRouter from './routes/cache-test'
 import { kanbanRouter } from './routes/kanban'
+import { createPlatformAppsRouter } from './routes/platform-apps'
 import { viewsRouter } from './routes/views'
 import { initAdminRoutes } from './routes/admin-routes'
 import { adminUsersRouter } from './routes/admin-users'
@@ -114,6 +115,12 @@ import {
   applyRoleMatrix,
   type RbacProvisioningQueryFn,
 } from './services/PluginRbacProvisioningService'
+import {
+  getPlatformAppInstance,
+  listPlatformAppInstances,
+  upsertPlatformAppInstance,
+  type PlatformAppInstanceRegistryQueryFn,
+} from './services/PlatformAppInstanceRegistryService'
 import type { UnifiedApprovalDTO } from './services/approval-bridge-types'
 import { cacheRegistry } from '../core/cache/CacheRegistry'
 import { loadObservabilityConfig } from './config/observability'
@@ -969,6 +976,11 @@ export class MetaSheetServer {
       }
     })
 
+    this.app.use('/api/platform/apps', createPlatformAppsRouter({
+      pluginLoader: this.pluginLoader,
+      pluginStatus: this.pluginStatus,
+    }))
+
     // Metrics (JSON minimal)
     this.app.get('/internal/metrics', async (_req, res) => {
       const endTimer = (res as unknown as Record<string, unknown>).__metricsTimer as ((opts: { route: string; method: string }) => (statusCode: number) => void) | undefined
@@ -1214,6 +1226,50 @@ export class MetaSheetServer {
         })
       },
     }
+    const platformAppInstances = {
+      upsertInstance: async (input: import('./types/plugin').PluginPlatformAppInstanceRegistryService extends { upsertInstance: infer T } ? T extends (input: infer I) => Promise<unknown> ? I : never : never) => {
+        const txQuery: PlatformAppInstanceRegistryQueryFn = async (sql, params) => {
+          const result = await poolManager.get().query(sql, params)
+          return {
+            rows: Array.isArray((result as { rows?: unknown[] }).rows)
+              ? (result as { rows: unknown[] }).rows
+              : [],
+            rowCount: typeof (result as { rowCount?: number }).rowCount === 'number'
+              ? (result as { rowCount: number }).rowCount
+              : undefined,
+          }
+        }
+        return upsertPlatformAppInstance(txQuery, input)
+      },
+      getInstance: async (input: import('./types/plugin').PluginPlatformAppInstanceRegistryService extends { getInstance: infer T } ? T extends (input: infer I) => Promise<unknown> ? I : never : never) => {
+        const txQuery: PlatformAppInstanceRegistryQueryFn = async (sql, params) => {
+          const result = await poolManager.get().query(sql, params)
+          return {
+            rows: Array.isArray((result as { rows?: unknown[] }).rows)
+              ? (result as { rows: unknown[] }).rows
+              : [],
+            rowCount: typeof (result as { rowCount?: number }).rowCount === 'number'
+              ? (result as { rowCount: number }).rowCount
+              : undefined,
+          }
+        }
+        return getPlatformAppInstance(txQuery, input)
+      },
+      listInstances: async (input: import('./types/plugin').PluginPlatformAppInstanceRegistryService extends { listInstances: infer T } ? T extends (input: infer I) => Promise<unknown> ? I : never : never) => {
+        const txQuery: PlatformAppInstanceRegistryQueryFn = async (sql, params) => {
+          const result = await poolManager.get().query(sql, params)
+          return {
+            rows: Array.isArray((result as { rows?: unknown[] }).rows)
+              ? (result as { rows: unknown[] }).rows
+              : [],
+            rowCount: typeof (result as { rowCount?: number }).rowCount === 'number'
+              ? (result as { rowCount: number }).rowCount
+              : undefined,
+          }
+        }
+        return listPlatformAppInstances(txQuery, input)
+      },
+    }
     const communication: PluginCommunication = {
       call: async <R = unknown>(plugin: string, method: string, ...args: unknown[]): Promise<R> => {
         const api = pluginApis.get(plugin)
@@ -1249,6 +1305,7 @@ export class MetaSheetServer {
         notification: notificationService,
         automationRegistry,
         rbacProvisioning,
+        platformAppInstances,
       } as unknown as import('./types/plugin').PluginServices,
       storage,
       config: {},

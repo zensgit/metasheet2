@@ -12,6 +12,8 @@ import SpreadsheetDetailView from '../views/SpreadsheetDetailView.vue'
 import MultitableCommentInboxView from '../views/MultitableCommentInboxView.vue'
 import PluginManagerView from '../views/PluginManagerView.vue'
 import PluginViewHost from '../views/PluginViewHost.vue'
+import PlatformAppLauncherView from '../views/PlatformAppLauncherView.vue'
+import PlatformAppShellView from '../views/PlatformAppShellView.vue'
 import AttendanceExperienceView from '../views/attendance/AttendanceExperienceView.vue'
 import DingTalkAuthCallbackView from '../views/DingTalkAuthCallbackView.vue'
 import HomeRedirect from '../views/HomeRedirect.vue'
@@ -83,6 +85,18 @@ export const appRoutes: RouteRecordRaw[] = [
     name: AppRouteNames.MULTITABLE_COMMENT_INBOX,
     component: MultitableCommentInboxView,
     meta: { title: 'Comment Inbox', titleZh: '评论收件箱', requiresAuth: true }
+  },
+  {
+    path: '/apps',
+    name: 'platform-app-launcher',
+    component: PlatformAppLauncherView,
+    meta: { title: 'Apps', titleZh: '应用', requiresAuth: true }
+  },
+  {
+    path: '/apps/:appId',
+    name: 'platform-app-shell',
+    component: PlatformAppShellView,
+    meta: { title: 'App Shell', titleZh: '应用壳', requiresAuth: true }
   },
   {
     path: '/p/plugin-attendance/attendance',
