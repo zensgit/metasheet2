@@ -35,8 +35,14 @@
         <span v-if="mentionInboxState.unreadMentionCount.value > 0" class="mt-workbench__mention-chip-unread">{{ mentionInboxState.unreadMentionCount.value }} unread</span>
         <span class="mt-workbench__mention-chip-records">{{ mentionInboxState.summary.value.mentionedRecordCount }} records</span>
       </button>
-      <button class="mt-workbench__mgr-btn" @click="openCommentInbox()">
+      <button
+        class="mt-workbench__mgr-btn"
+        :class="{ 'mt-workbench__mgr-btn--attention': commentInboxBadgeCount > 0 }"
+        :title="commentInboxBadgeCount > 0 ? `${commentInboxBadgeCount} comment updates need attention` : 'Open comment inbox'"
+        @click="openCommentInbox()"
+      >
         &#x1F4AC; Comment Inbox
+        <span v-if="commentInboxBadgeCount > 0" class="mt-workbench__mgr-badge">{{ commentInboxBadgeCount }}</span>
       </button>
       <button v-if="caps.canManageFields.value" class="mt-workbench__mgr-btn" @click="showFieldManager = true">&#x2699; Fields</button>
       <button v-if="caps.canManageSheetAccess.value" class="mt-workbench__mgr-btn" @click="showPermissionManager = true; void loadPermissionEntries()">&#x1F512; Access</button>
@@ -715,6 +721,11 @@ const activeEditingComment = computed(() => (
 ))
 const commentComposerInitialMentions = computed(() => (
   activeEditingComment.value ? buildEditingMentionSuggestions(activeEditingComment.value) : []
+))
+const commentInboxBadgeCount = computed(() => (
+  mentionInboxState.unreadMentionCount.value ||
+  mentionInboxState.summary.value?.unresolvedMentionCount ||
+  0
 ))
 const sheetPresenceLabel = computed(() => (
   `${sheetPresenceState.activeCollaboratorCount.value} ${sheetPresenceState.activeCollaboratorCount.value === 1 ? 'active collaborator' : 'active collaborators'}`
@@ -2533,6 +2544,8 @@ defineExpose({
 .mt-workbench__mention-chip-records { color: #999; font-size: 11px; }
 .mt-workbench__mgr-btn { padding: 3px 10px; border: 1px solid #ddd; border-radius: 4px; background: #fff; font-size: 12px; cursor: pointer; color: #666; }
 .mt-workbench__mgr-btn:hover { background: #f5f7fa; color: #409eff; border-color: #c0d8f0; }
+.mt-workbench__mgr-btn--attention { border-color: #f59e0b; color: #92400e; background: #fffbeb; }
+.mt-workbench__mgr-badge { display: inline-flex; align-items: center; justify-content: center; min-width: 18px; height: 18px; margin-left: 6px; padding: 0 6px; border-radius: 999px; background: #f59e0b; color: #fff; font-size: 11px; font-weight: 600; }
 .mt-workbench__base-bar { padding: 8px 16px 0; border-bottom: 1px solid #f0f0f0; }
 .mt-workbench__shortcuts-overlay { position: fixed; inset: 0; z-index: 100; background: rgba(0,0,0,.3); display: flex; align-items: center; justify-content: center; }
 .mt-workbench__shortcuts { background: #fff; border-radius: 8px; padding: 20px 24px; min-width: 320px; box-shadow: 0 8px 24px rgba(0,0,0,.15); }

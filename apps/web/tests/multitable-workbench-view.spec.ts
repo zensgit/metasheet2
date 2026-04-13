@@ -2119,6 +2119,7 @@ describe('MultitableWorkbench view wiring', () => {
       .find((button) => button.textContent?.includes('Comment Inbox'))
 
     expect(inboxButton).not.toBeNull()
+    expect(inboxButton?.getAttribute('title')).toBe('Open comment inbox')
 
     inboxButton?.click()
     await flushUi()
@@ -2126,6 +2127,29 @@ describe('MultitableWorkbench view wiring', () => {
     expect(pushSpy).toHaveBeenCalledWith({
       name: 'multitable-comment-inbox',
     })
+  })
+
+  it('shows unread attention on the persistent comment inbox entry', async () => {
+    mountWorkbench()
+    await flushUi()
+
+    mentionInboxSummaryMock.summary.value = {
+      spreadsheetId: 'sheet_orders',
+      unresolvedMentionCount: 3,
+      unreadMentionCount: 2,
+      mentionedRecordCount: 2,
+      unreadRecordCount: 1,
+      items: [{ rowId: 'rec_1', mentionedCount: 3, unreadCount: 2, mentionedFieldIds: ['fld_title'] }],
+    }
+    await flushUi()
+
+    const inboxButton = Array.from(container!.querySelectorAll<HTMLButtonElement>('button'))
+      .find((button) => button.textContent?.includes('Comment Inbox'))
+
+    expect(inboxButton).not.toBeNull()
+    expect(inboxButton?.textContent).toContain('2')
+    expect(inboxButton?.className).toContain('mt-workbench__mgr-btn--attention')
+    expect(inboxButton?.getAttribute('title')).toBe('2 comment updates need attention')
   })
 
   it('opens the mention popover and selects a mentioned record', async () => {
