@@ -1,5 +1,6 @@
 import type {
   ApprovalEdge,
+  ApprovalMode,
   ApprovalNode,
   ApprovalNodeConfig,
   ConditionBranch,
@@ -22,6 +23,13 @@ export interface ApprovalCcEvent {
   targetId: string
 }
 
+export interface ApprovalGraphAutoApprovalEvent {
+  nodeKey: string
+  sourceStep: number
+  approvalMode: ApprovalMode
+  reason: 'empty-assignee'
+}
+
 export interface ApprovalGraphResolution {
   status: 'pending' | 'approved'
   currentNodeKey: string | null
@@ -29,6 +37,7 @@ export interface ApprovalGraphResolution {
   totalSteps: number
   assignments: ApprovalGraphAssignment[]
   ccEvents: ApprovalCcEvent[]
+  autoApprovalEvents: ApprovalGraphAutoApprovalEvent[]
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -83,6 +92,10 @@ function isEmptyValue(value: unknown): boolean {
     || value === undefined
     || value === ''
     || (Array.isArray(value) && value.length === 0)
+}
+
+function normalizeApprovalMode(value: unknown): ApprovalMode {
+  return value === 'all' || value === 'any' || value === 'single' ? value : 'single'
 }
 
 function evaluateRule(rule: ConditionRule, formData: Record<string, unknown>): boolean {
@@ -312,9 +325,74 @@ export class ApprovalGraphExecutor {
         totalSteps: this.totalSteps,
         assignments: [],
         ccEvents: [],
+        autoApprovalEvents: [],
       }
     }
     return this.resolveFromNode(next)
+  }
+
+  getApprovalMode(nodeKey: string): ApprovalMode {
+    return normalizeApprovalMode(this.getApprovalNodeConfig(nodeKey).approvalMode)
+  }
+
+  resolveReturnToNode(targetNodeKey: string): ApprovalGraphResolution {
+    this.getApprovalNodeConfig(targetNodeKey)
+    return this.resolveFromNode(targetNodeKey)
+  }
+
+  listVisitedApprovalNodeKeysUntil(currentNodeKey: string): string[] {
+    this.getApprovalNodeConfig(currentNodeKey)
+
+    const start = this.runtimeGraph.nodes.find((node) => node.type === 'start')
+    if (!start) {
+      throw new Error('Runtime graph must contain a start node')
+    }
+
+    const visited = new Set<string>()
+    const approvalTrail: string[] = []
+    let nextNodeKey: string | null = start.key
+
+    while (nextNodeKey) {
+      if (visited.has(nextNodeKey)) {
+        throw new Error(`Runtime graph contains a cycle near ${nextNodeKey}`)
+      }
+      visited.add(nextNodeKey)
+
+      const node = this.nodeMap.get(nextNodeKey)
+      if (!node) {
+        throw new Error(`Runtime graph references unknown node ${nextNodeKey}`)
+      }
+
+      if (node.type === 'start') {
+        nextNodeKey = this.firstTargetForNode(node.key)
+        continue
+      }
+
+      if (node.type === 'condition') {
+        nextNodeKey = this.resolveConditionTarget(node)
+        continue
+      }
+
+      if (node.type === 'cc') {
+        nextNodeKey = this.firstTargetForNode(node.key)
+        continue
+      }
+
+      if (node.type === 'approval') {
+        approvalTrail.push(node.key)
+        if (node.key === currentNodeKey) {
+          return approvalTrail
+        }
+        nextNodeKey = this.firstTargetForNode(node.key)
+        continue
+      }
+
+      if (node.type === 'end') {
+        break
+      }
+    }
+
+    throw new Error(`Approval node ${currentNodeKey} is not reachable from runtime start`)
   }
 
   buildTransferAssignments(currentNodeKey: string, targetUserId: string): ApprovalGraphAssignment[] {
@@ -329,6 +407,7 @@ export class ApprovalGraphExecutor {
 
   private resolveFromNode(nodeKey: string): ApprovalGraphResolution {
     const ccEvents: ApprovalCcEvent[] = []
+    const autoApprovalEvents: ApprovalGraphAutoApprovalEvent[] = []
     let currentKey: string | null = nodeKey
 
     while (currentKey) {
@@ -371,6 +450,20 @@ export class ApprovalGraphExecutor {
           throw new Error(`Approval node ${node.key} has invalid config`)
         }
         const sourceStep = this.stepIndexForNode(node.key)
+        const approvalMode = normalizeApprovalMode(approvalConfig.approvalMode)
+        if (approvalConfig.assigneeIds.length === 0) {
+          if (approvalConfig.emptyAssigneePolicy === 'auto-approve') {
+            autoApprovalEvents.push({
+              nodeKey: node.key,
+              sourceStep,
+              approvalMode,
+              reason: 'empty-assignee',
+            })
+            currentKey = this.firstTargetForNode(node.key)
+            continue
+          }
+          throw new Error(`Approval node ${node.key} has no assignees`)
+        }
         return {
           status: 'pending',
           currentNodeKey: node.key,
@@ -383,6 +476,7 @@ export class ApprovalGraphExecutor {
             sourceStep,
           })),
           ccEvents,
+          autoApprovalEvents,
         }
       }
 
@@ -394,6 +488,7 @@ export class ApprovalGraphExecutor {
           totalSteps: this.totalSteps,
           assignments: [],
           ccEvents,
+          autoApprovalEvents,
         }
       }
 
@@ -407,6 +502,7 @@ export class ApprovalGraphExecutor {
       totalSteps: this.totalSteps,
       assignments: [],
       ccEvents,
+      autoApprovalEvents,
     }
   }
 
@@ -448,5 +544,17 @@ export class ApprovalGraphExecutor {
   private stepIndexForNode(nodeKey: string): number {
     const index = this.approvalNodeOrder.indexOf(nodeKey)
     return index >= 0 ? index + 1 : 0
+  }
+
+  private getApprovalNodeConfig(nodeKey: string): ApprovalNodeConfig {
+    const node = this.nodeMap.get(nodeKey)
+    if (!node || node.type !== 'approval') {
+      throw new Error(`Approval node ${nodeKey} is not registered in the runtime graph`)
+    }
+    const approvalConfig = isApprovalNodeConfig(node.config) ? node.config : null
+    if (!approvalConfig) {
+      throw new Error(`Approval node ${node.key} has invalid config`)
+    }
+    return approvalConfig
   }
 }

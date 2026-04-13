@@ -133,6 +133,99 @@ describe('ApprovalGraphExecutor', () => {
       },
     ])
   })
+
+  it('auto-approves empty approval nodes when the node policy allows it', () => {
+    const runtimeGraph: RuntimeGraph = {
+      nodes: [
+        { key: 'start', type: 'start', config: {} },
+        {
+          key: 'review-gap',
+          type: 'approval',
+          config: {
+            assigneeType: 'user',
+            assigneeIds: [],
+            approvalMode: 'all',
+            emptyAssigneePolicy: 'auto-approve',
+          },
+        },
+        { key: 'final-review', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['user-9'] } },
+        { key: 'end', type: 'end', config: {} },
+      ],
+      edges: [
+        { key: 'edge-start-gap', source: 'start', target: 'review-gap' },
+        { key: 'edge-gap-final', source: 'review-gap', target: 'final-review' },
+        { key: 'edge-final-end', source: 'final-review', target: 'end' },
+      ],
+      policy: {
+        allowRevoke: true,
+      },
+    }
+
+    const executor = new ApprovalGraphExecutor(runtimeGraph, {})
+    const initial = executor.resolveInitialState()
+
+    expect(initial.currentNodeKey).toBe('final-review')
+    expect(initial.currentStep).toBe(2)
+    expect(initial.assignments).toEqual([
+      {
+        assignmentType: 'user',
+        assigneeId: 'user-9',
+        nodeKey: 'final-review',
+        sourceStep: 2,
+      },
+    ])
+    expect(initial.autoApprovalEvents).toEqual([
+      {
+        nodeKey: 'review-gap',
+        sourceStep: 1,
+        approvalMode: 'all',
+        reason: 'empty-assignee',
+      },
+    ])
+  })
+
+  it('lists the visited approval nodes for return validation on the active path', () => {
+    const runtimeGraph: RuntimeGraph = {
+      nodes: [
+        { key: 'start', type: 'start', config: {} },
+        {
+          key: 'route',
+          type: 'condition',
+          config: {
+            branches: [
+              {
+                edgeKey: 'edge-fast',
+                rules: [{ fieldId: 'amount', operator: 'lte', value: 1000 }],
+              },
+            ],
+            defaultEdgeKey: 'edge-slow',
+          },
+        },
+        { key: 'manager-review', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['user-1'] } },
+        { key: 'director-review', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['user-2'] } },
+        { key: 'finance-review', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['user-3'] } },
+        { key: 'end', type: 'end', config: {} },
+      ],
+      edges: [
+        { key: 'edge-start-route', source: 'start', target: 'route' },
+        { key: 'edge-fast', source: 'route', target: 'manager-review' },
+        { key: 'edge-slow', source: 'route', target: 'director-review' },
+        { key: 'edge-manager-finance', source: 'manager-review', target: 'finance-review' },
+        { key: 'edge-director-finance', source: 'director-review', target: 'finance-review' },
+        { key: 'edge-finance-end', source: 'finance-review', target: 'end' },
+      ],
+      policy: {
+        allowRevoke: true,
+      },
+    }
+
+    const executor = new ApprovalGraphExecutor(runtimeGraph, { amount: 2000 })
+
+    expect(executor.listVisitedApprovalNodeKeysUntil('finance-review')).toEqual([
+      'director-review',
+      'finance-review',
+    ])
+  })
 })
 
 describe('validateApprovalFormData', () => {
