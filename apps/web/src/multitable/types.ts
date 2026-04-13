@@ -510,3 +510,21 @@ export interface MetaTimelineViewConfig {
   labelFieldId?: string | null
   zoom?: 'day' | 'week' | 'month'
 }
+
+// --- Automation rules ---
+export type AutomationTriggerType = 'record.created' | 'record.updated' | 'field.changed'
+export type AutomationActionType = 'notify' | 'update_field'
+
+export interface AutomationRule {
+  id: string
+  sheetId: string
+  name: string
+  triggerType: AutomationTriggerType
+  triggerConfig: Record<string, unknown>
+  actionType: AutomationActionType
+  actionConfig: Record<string, unknown>
+  enabled: boolean
+  createdAt?: string
+  updatedAt?: string
+  createdBy?: string
+}

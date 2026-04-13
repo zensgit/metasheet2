@@ -38,6 +38,7 @@
       <button v-if="caps.canManageFields.value" class="mt-workbench__mgr-btn" @click="showFieldManager = true">&#x2699; Fields</button>
       <button v-if="caps.canManageSheetAccess.value" class="mt-workbench__mgr-btn" @click="showPermissionManager = true; void loadPermissionEntries()">&#x1F512; Access</button>
       <button v-if="caps.canManageViews.value && canConfigureCurrentView" class="mt-workbench__mgr-btn" @click="showViewManager = true">&#x2630; Views</button>
+      <button v-if="caps.canManageAutomation.value" class="mt-workbench__mgr-btn" @click="showAutomationManager = true">&#x26A1; Automations</button>
       <button v-if="caps.canManageAutomation.value" class="mt-workbench__mgr-btn" @click="openWorkflowDesigner()">&#x2699; Workflow</button>
     </div>
     <div
@@ -265,6 +266,14 @@
       @update-field-permission="onFieldPermissionUpdated"
       @update-view-permission="onViewPermissionUpdated"
     />
+    <MetaAutomationManager
+      :visible="showAutomationManager"
+      :sheet-id="workbench.activeSheetId.value"
+      :fields="grid.fields.value"
+      :client="workbench.client"
+      @close="showAutomationManager = false"
+      @updated="showAutomationManager = false"
+    />
   </div>
 </template>
 
@@ -322,6 +331,7 @@ import MetaTimelineView from '../components/MetaTimelineView.vue'
 import MetaToast from '../components/MetaToast.vue'
 import MetaImportModal from '../components/MetaImportModal.vue'
 import MetaMentionPopover from '../components/MetaMentionPopover.vue'
+import MetaAutomationManager from '../components/MetaAutomationManager.vue'
 import type { MetaBase } from '../types'
 import { bulkImportRecords } from '../import/bulk-import'
 import { extractImportTokens, type ImportBuildFailure, type ImportBuildResult, type ImportValueResolver } from '../import/delimited'
@@ -370,6 +380,7 @@ const showPermissionManager = ref(false)
 const fieldPermissionEntries = ref<MetaFieldPermissionEntry[]>([])
 const viewPermissionEntries = ref<MetaViewPermissionEntry[]>([])
 const showViewManager = ref(false)
+const showAutomationManager = ref(false)
 const bases = ref<MetaBase[]>([])
 const activeBaseId = computed(() => workbench.activeBaseId.value)
 const toastRef = ref<InstanceType<typeof MetaToast> | null>(null)
