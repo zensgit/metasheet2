@@ -3,6 +3,7 @@
  * 负责创建和管理所有插件相关服务的实例
  */
 
+import { fieldTypeRegistry } from '../multitable/field-type-registry'
 import type { PluginServices } from '../types/plugin'
 import { Logger } from './logger'
 
@@ -215,7 +216,12 @@ export class PluginServiceFactory {
         },
         websocket: await this.createWebSocketService(),
         security: await this.createSecurityService(),
-        validation: await this.createValidationService()
+        validation: await this.createValidationService(),
+        fieldTypes: {
+          register(name, definition) {
+            fieldTypeRegistry.register(name, definition)
+          },
+        },
       }
 
       // 设置服务间的相互引用

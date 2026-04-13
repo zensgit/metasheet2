@@ -1,5 +1,6 @@
 import { randomUUID } from 'crypto'
 
+import { fieldTypeRegistry } from './field-type-registry'
 import { loadFieldsForSheet, loadSheetRow } from './loaders'
 
 export type MultitableRecordsQueryFn = (
@@ -216,8 +217,13 @@ function normalizeFieldValue(
       throw new MultitableRecordValidationError(
         `Field type is not supported by multitable.records.createRecord yet: ${field.id}`,
       )
-    default:
+    default: {
+      const customDef = fieldTypeRegistry.get(field.type)
+      if (customDef) {
+        return customDef.validate(value, field.id)
+      }
       return value
+    }
   }
 }
 

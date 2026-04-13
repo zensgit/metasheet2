@@ -850,6 +850,16 @@ export interface PluginInstance {
  * 插件服务集合
  * 包含所有可用的插件运行时服务
  */
+export interface PluginFieldTypesService {
+  register(name: string, definition: {
+    name: string
+    validate: (value: unknown, fieldId: string) => unknown
+    sanitizeProperty: (property: unknown) => Record<string, unknown>
+    serialize?: (value: unknown) => unknown
+    deserialize?: (value: unknown) => unknown
+  }): void
+}
+
 export interface PluginServices {
   cache: CacheService        // Cache service instance
   queue: QueueService        // Queue service instance
@@ -861,6 +871,7 @@ export interface PluginServices {
   websocket: WebSocketService    // WebSocket service instance
   security: SecurityService     // Security service instance
   validation: ValidationService   // Validation service instance
+  fieldTypes: PluginFieldTypesService // Field type registry for custom fields
 }
 
 /**
