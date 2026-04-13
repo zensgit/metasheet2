@@ -147,15 +147,6 @@ function getTenantId(context, req, res) {
     : ''
   if (requestTenantId) return requestTenantId
 
-  const hasAuthenticatedUser = Boolean(
-    req
-    && req.user
-    && (req.user.id != null || req.user.sub != null || req.user.userId != null),
-  )
-  if (hasAuthenticatedUser) {
-    return 'default'
-  }
-
   sendTenantUnauthorized(res)
   return null
 }
@@ -315,6 +306,7 @@ function installerErrorToHttpStatus(code) {
       return 400
     case installer.ERROR_CODES.LEDGER_READ_FAILED:
     case installer.ERROR_CODES.CORE_OBJECT_FAILED:
+    case installer.ERROR_CODES.PLATFORM_INSTANCE_WRITE_FAILED:
     case installer.ERROR_CODES.LEDGER_WRITE_FAILED:
       return 500
     default:

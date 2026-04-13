@@ -54,6 +54,7 @@ const ERROR_CODES = Object.freeze({
   ALREADY_INSTALLED: 'already-installed',
   NO_INSTALL_TO_REBUILD: 'no-install-to-rebuild',
   CORE_OBJECT_FAILED: 'core-object-failed',
+  PLATFORM_INSTANCE_WRITE_FAILED: 'platform-instance-write-failed',
   LEDGER_READ_FAILED: 'ledger-read-failed',
   LEDGER_WRITE_FAILED: 'ledger-write-failed',
   INVALID_TEMPLATE_ID: 'invalid-template-id',
@@ -586,9 +587,9 @@ async function runInstall(input) {
   }
 
   // Step 11: determine terminal status and write ledger
-  const status = warnings.length === 0 ? 'installed' : 'partial'
+  let status = warnings.length === 0 ? 'installed' : 'partial'
 
-  const ledgerRow = await writeInstallLedger(context.api.database, {
+  let ledgerRow = await writeInstallLedger(context.api.database, {
     tenantId,
     appId: blueprint.appId,
     projectId,
@@ -621,7 +622,40 @@ async function runInstall(input) {
         },
       })
     } catch (err) {
-      warnings.push(`platform app instance registration failed: ${err && err.message ? err.message : err}`)
+      const registryWarning = `platform app instance registration failed: ${err && err.message ? err.message : err}`
+      warnings.push(registryWarning)
+      status = 'failed'
+      try {
+        ledgerRow = await writeInstallLedger(context.api.database, {
+          tenantId,
+          appId: blueprint.appId,
+          projectId,
+          templateId: blueprint.id,
+          templateVersion: blueprint.version,
+          mode,
+          status,
+          createdObjects,
+          createdViews,
+          warnings,
+          displayName: displayName || '',
+          config: config || {},
+        })
+      } catch (writeErr) {
+        throw new InstallerError(
+          ERROR_CODES.LEDGER_WRITE_FAILED,
+          `platform app instance registration failed and ledger write also failed: ${writeErr && writeErr.message ? writeErr.message : writeErr}`,
+        )
+      }
+      throw new InstallerError(
+        ERROR_CODES.PLATFORM_INSTANCE_WRITE_FAILED,
+        registryWarning,
+        {
+          projectId,
+          reportRef: ledgerRow.id,
+          status,
+          warnings,
+        },
+      )
     }
   }
 

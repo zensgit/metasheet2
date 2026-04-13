@@ -243,7 +243,7 @@ describe('platform apps router', () => {
     expect(queryMock).not.toHaveBeenCalled()
   })
 
-  it('falls back to default tenant scope for authenticated users without tenantId', async () => {
+  it('returns null instance for authenticated users without a tenant scope', async () => {
     const loaded = createLoadedPlugin('plugin-after-sales', {
       id: 'after-sales',
       version: '0.1.0',
@@ -259,23 +259,6 @@ describe('platform apps router', () => {
       objects: [],
       workflows: [],
       integrations: [],
-    })
-
-    queryForTenantMock.mockResolvedValue({
-      rows: [{
-        id: 'pai_default',
-        tenant_id: 'default',
-        workspace_id: 'default',
-        app_id: 'after-sales',
-        plugin_id: 'plugin-after-sales',
-        instance_key: 'primary',
-        project_id: 'default:after-sales',
-        display_name: 'Default Support',
-        status: 'active',
-        config_json: '{}',
-        metadata_json: '{}',
-      }],
-      rowCount: 1,
     })
 
     const router = createPlatformAppsRouter({
@@ -295,15 +278,8 @@ describe('platform apps router', () => {
     expect(response.statusCode).toBe(200)
     expect(response.body).toMatchObject({
       id: 'after-sales',
-      instance: {
-        workspaceId: 'default',
-        projectId: 'default:after-sales',
-      },
+      instance: null,
     })
-    expect(queryForTenantMock).toHaveBeenCalledWith(
-      'default',
-      expect.stringContaining('FROM platform_app_instances'),
-      ['default', 'after-sales', 'primary'],
-    )
+    expect(queryForTenantMock).not.toHaveBeenCalled()
   })
 })

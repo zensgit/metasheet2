@@ -962,7 +962,7 @@ describe('plugin-after-sales routes', () => {
     })
   })
 
-  it('falls back to default tenant scope when tenantId is missing but user is authenticated', async () => {
+  it('returns 401 for current when user is authenticated but tenant scope is missing', async () => {
     const handler = routes.get('GET /api/after-sales/projects/current')
     const res = new FakeResponse()
     const req = buildReq({
@@ -978,15 +978,13 @@ describe('plugin-after-sales routes', () => {
 
     await handler?.(req, res)
 
-    expect(platformAppInstanceGet).toHaveBeenCalledWith({
-      workspaceId: 'default',
-      appId: 'after-sales',
-    })
-    expect(res.statusCode).toBe(200)
+    expect(platformAppInstanceGet).not.toHaveBeenCalled()
+    expect(res.statusCode).toBe(401)
     expect(res.body).toEqual({
-      ok: true,
-      data: {
-        status: 'not-installed',
+      ok: false,
+      error: {
+        code: 'UNAUTHORIZED',
+        message: 'tenantId not found',
       },
     })
   })
@@ -5916,6 +5914,70 @@ describe('plugin-after-sales routes', () => {
       }),
     )
     expect(db.rows).toHaveLength(1)
+  })
+
+  it('returns 401 for install when user is authenticated but tenant scope is missing', async () => {
+    const handler = routes.get('POST /api/after-sales/projects/install')
+    const res = new FakeResponse()
+
+    await handler?.(buildReq({
+      user: {
+        id: 'user_42',
+        role: 'admin',
+        roles: ['admin'],
+        perms: ['*:*', 'after_sales:admin'],
+      },
+      body: {
+        templateId: 'after-sales-default',
+      },
+    }), res)
+
+    expect(res.statusCode).toBe(401)
+    expect(res.body).toEqual({
+      ok: false,
+      error: {
+        code: 'UNAUTHORIZED',
+        message: 'tenantId not found',
+      },
+    })
+    expect(platformAppInstanceUpsert).not.toHaveBeenCalled()
+    expect(db.rows).toHaveLength(0)
+  })
+
+  it('returns 500 and persists failed ledger state when platform app instance registration fails', async () => {
+    const handler = routes.get('POST /api/after-sales/projects/install')
+    const res = new FakeResponse()
+    platformAppInstanceUpsert.mockRejectedValueOnce(new Error('registry offline'))
+
+    await handler?.(buildReq({
+      body: {
+        templateId: 'after-sales-default',
+        displayName: 'Acme Support',
+      },
+    }), res)
+
+    expect(res.statusCode).toBe(500)
+    expect(res.body).toEqual({
+      ok: false,
+      error: {
+        code: 'platform-instance-write-failed',
+        message: 'platform app instance registration failed: registry offline',
+        details: {
+          projectId: 'tenant_42:after-sales',
+          reportRef: 'fake-uuid-1',
+          status: 'failed',
+          warnings: [
+            'platform app instance registration failed: registry offline',
+          ],
+        },
+      },
+    })
+    expect(platformAppInstanceUpsert).toHaveBeenCalledTimes(1)
+    expect(db.rows).toHaveLength(1)
+    expect(db.rows[0].status).toBe('failed')
+    expect(JSON.parse(db.rows[0].warnings_json)).toEqual([
+      'platform app instance registration failed: registry offline',
+    ])
   })
 
   it('returns 409 when enable is called twice for the same tenant', async () => {

@@ -30,9 +30,6 @@ function resolveTenantId(req: Request): string {
   if (typeof currentTenantId === 'string' && currentTenantId.trim().length > 0) {
     return currentTenantId.trim()
   }
-  if (req.user?.id != null || req.user?.sub != null || req.user?.userId != null) {
-    return 'default'
-  }
   return ''
 }
 
