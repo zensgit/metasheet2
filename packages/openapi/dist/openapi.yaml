@@ -2236,6 +2236,25 @@ components:
           type: array
           items:
             type: string
+        approvalMode:
+          type: string
+          enum:
+            - single
+            - all
+            - any
+          description: |
+            Approval aggregation mode for a single approval node. `single`
+            preserves the Wave 1 behavior, `all` represents countersign, and
+            `any` represents any-sign.
+        emptyAssigneePolicy:
+          type: string
+          enum:
+            - error
+            - auto-approve
+          description: |
+            Behavior when the approval node resolves to zero assignees. `error`
+            blocks runtime execution, `auto-approve` allows the node to advance
+            automatically.
       required:
         - assigneeType
         - assigneeIds
@@ -2606,9 +2625,12 @@ components:
             - transfer
             - revoke
             - comment
+            - return
         comment:
           type: string
         targetUserId:
+          type: string
+        targetNodeKey:
           type: string
       required:
         - action
@@ -3350,19 +3372,15 @@ paths:
       tags:
         - Approvals
       summary: Execute an approval action
-      description: >
-        Unified action dispatch endpoint. Supported actions: approve, reject,
-
-        transfer (requires targetUserId), revoke (subject to RuntimePolicy), and
-
-        comment (does not change status). Concurrent writes are serialized with
-        a
-
-        database row lock. This endpoint does not accept a client version field.
-
-        409 responses indicate a conflicting current state after serialization,
-
-        such as an invalid status transition or a closed revoke window.
+      description: |
+        Unified action dispatch endpoint. Accepted actions: approve, reject,
+        transfer (requires targetUserId), revoke (subject to RuntimePolicy),
+        comment (does not change status), and return (requires targetNodeKey).
+        Concurrent writes are serialized with a database row lock. This endpoint
+        does not accept a client version field. 409 responses indicate a
+        conflicting current state after serialization, such as an invalid status
+        transition or a closed revoke window. The Wave 2 Pack 1A executor
+        follow-up will activate return semantics for template-runtime approvals.
       security:
         - bearerAuth: []
       parameters:
@@ -3524,9 +3542,9 @@ paths:
         - Approvals (Legacy)
       deprecated: true
       summary: Return instance with optimistic locking
-      description: >
+      description: |
         Deprecated. Use POST /api/approvals/{id}/actions with
-        {"action":"reject"} instead.
+        {"action":"return","targetNodeKey":"..."} instead.
       security:
         - bearerAuth: []
       parameters:

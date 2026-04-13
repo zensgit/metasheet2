@@ -71,8 +71,8 @@ function mockTemplateDetail(id: string): ApprovalTemplateDetailDTO {
     approvalGraph: {
       nodes: [
         { key: 'start', type: 'start', name: '发起', config: {} },
-        { key: 'approval_1', type: 'approval', name: '部门主管审批', config: { assigneeType: 'role', assigneeIds: ['role_manager'] } },
-        { key: 'approval_2', type: 'approval', name: '财务审批', config: { assigneeType: 'user', assigneeIds: ['user_finance'] } },
+        { key: 'approval_1', type: 'approval', name: '部门主管审批', config: { assigneeType: 'role', assigneeIds: ['role_manager'], approvalMode: 'all', emptyAssigneePolicy: 'error' } },
+        { key: 'approval_2', type: 'approval', name: '财务审批', config: { assigneeType: 'user', assigneeIds: ['user_finance'], approvalMode: 'any', emptyAssigneePolicy: 'auto-approve' } },
         { key: 'end', type: 'end', name: '结束', config: {} },
       ],
       edges: [
@@ -149,8 +149,8 @@ function mockHistory(approvalId: string): UnifiedApprovalHistoryDTO[] {
       comment: null,
       fromStatus: null,
       toStatus: 'pending',
-      occurredAt: new Date(Date.now() - 86400000).toISOString(),
-      metadata: {},
+      occurredAt: new Date(Date.now() - 86400000 * 3).toISOString(),
+      metadata: { nodeKey: 'start' },
     },
     {
       id: 'hist_2',
@@ -159,9 +159,42 @@ function mockHistory(approvalId: string): UnifiedApprovalHistoryDTO[] {
       actorName: '李四',
       comment: '同意',
       fromStatus: 'pending',
+      toStatus: 'pending',
+      occurredAt: new Date(Date.now() - 86400000 * 2).toISOString(),
+      metadata: { nodeKey: 'approval_1', approvalMode: 'all', aggregateComplete: true },
+    },
+    {
+      id: 'hist_3',
+      action: 'approve',
+      actorId: null,
+      actorName: '系统',
+      comment: '无审批人，自动通过',
+      fromStatus: 'pending',
+      toStatus: 'pending',
+      occurredAt: new Date(Date.now() - 86400000).toISOString(),
+      metadata: { nodeKey: 'approval_2', autoApproved: true },
+    },
+    {
+      id: 'hist_4',
+      action: 'return',
+      actorId: 'user_3',
+      actorName: '王五',
+      comment: '金额有误，退回修改',
+      fromStatus: 'pending',
+      toStatus: 'pending',
+      occurredAt: new Date(Date.now() - 3600000).toISOString(),
+      metadata: { nodeKey: 'approval_3', targetNodeKey: 'approval_1' },
+    },
+    {
+      id: 'hist_5',
+      action: 'approve',
+      actorId: 'user_2',
+      actorName: '李四',
+      comment: '重新审批通过',
+      fromStatus: 'pending',
       toStatus: 'approved',
       occurredAt: new Date().toISOString(),
-      metadata: {},
+      metadata: { nodeKey: 'approval_1' },
     },
   ]
 }
@@ -288,6 +321,7 @@ export async function dispatchAction(
       reject: 'rejected',
       revoke: 'revoked',
       transfer: 'pending',
+      return: 'pending',
     }
     return { ...base, status: statusMap[req.action] ?? base.status }
   }

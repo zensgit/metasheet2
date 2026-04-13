@@ -80,6 +80,22 @@ export const rateLimitExceededTotal = new client.Counter({
   registers: [registry]
 });
 
+// Counter for message dedup hits
+export const messageDedupHitsTotal = new client.Counter({
+  name: 'metasheet_message_dedup_hits_total',
+  help: 'Total duplicate messages suppressed by deduplication',
+  labelNames: [] as const,
+  registers: [registry]
+});
+
+// Counter for event replay skips
+export const eventReplaySkippedTotal = new client.Counter({
+  name: 'metasheet_event_replay_skipped_total',
+  help: 'Total events skipped during replay due to existing delivery',
+  labelNames: [] as const,
+  registers: [registry]
+});
+
 // Helper functions
 export function recordDangerousOperation(
   operation: string,
@@ -131,4 +147,12 @@ export function recordIdempotencyMiss(): void {
 
 export function recordRateLimitExceeded(): void {
   rateLimitExceededTotal.inc();
+}
+
+export function recordMessageDedupHit(): void {
+  messageDedupHitsTotal.inc();
+}
+
+export function recordEventReplaySkipped(): void {
+  eventReplaySkippedTotal.inc();
 }

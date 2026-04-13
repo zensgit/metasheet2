@@ -2155,6 +2155,20 @@ components:
           type: array
           items:
             type: string
+        approvalMode:
+          type: string
+          enum: [single, all, any]
+          description: |
+            Approval aggregation mode for a single approval node. `single`
+            preserves the Wave 1 behavior, `all` represents countersign, and
+            `any` represents any-sign.
+        emptyAssigneePolicy:
+          type: string
+          enum: [error, auto-approve]
+          description: |
+            Behavior when the approval node resolves to zero assignees. `error`
+            blocks runtime execution, `auto-approve` allows the node to advance
+            automatically.
       required: [assigneeType, assigneeIds]
     ApprovalConditionRule:
       type: object
@@ -2456,10 +2470,12 @@ components:
       properties:
         action:
           type: string
-          enum: [approve, reject, transfer, revoke, comment]
+          enum: [approve, reject, transfer, revoke, comment, return]
         comment:
           type: string
         targetUserId:
+          type: string
+        targetNodeKey:
           type: string
       required: [action]
     ApprovalTemplateListItem:

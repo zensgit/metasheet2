@@ -199,7 +199,7 @@ export function mockHistoryItems(): UnifiedApprovalHistoryDTO[] {
       fromStatus: null,
       toStatus: 'pending',
       occurredAt: YESTERDAY,
-      metadata: {},
+      metadata: { nodeKey: 'start' },
     },
     {
       id: 'hist_2',
@@ -210,9 +210,99 @@ export function mockHistoryItems(): UnifiedApprovalHistoryDTO[] {
       fromStatus: 'pending',
       toStatus: 'approved',
       occurredAt: NOW,
-      metadata: {},
+      metadata: { nodeKey: 'approval_1' },
     },
   ]
+}
+
+/** History with auto-approved event. */
+export function mockAutoApproveHistory(): UnifiedApprovalHistoryDTO[] {
+  return [
+    {
+      id: 'hist_auto_1',
+      action: 'created',
+      actorId: REQUESTER_USER_ID,
+      actorName: '张三',
+      comment: null,
+      fromStatus: null,
+      toStatus: 'pending',
+      occurredAt: YESTERDAY,
+      metadata: { nodeKey: 'start' },
+    },
+    {
+      id: 'hist_auto_2',
+      action: 'approve',
+      actorId: null,
+      actorName: '系统',
+      comment: '无审批人，自动通过',
+      fromStatus: 'pending',
+      toStatus: 'approved',
+      occurredAt: NOW,
+      metadata: { nodeKey: 'approval_1', autoApproved: true },
+    },
+  ]
+}
+
+/** History with return event and rich metadata. */
+export function mockReturnHistory(): UnifiedApprovalHistoryDTO[] {
+  return [
+    {
+      id: 'hist_ret_1',
+      action: 'created',
+      actorId: REQUESTER_USER_ID,
+      actorName: '张三',
+      comment: null,
+      fromStatus: null,
+      toStatus: 'pending',
+      occurredAt: YESTERDAY,
+      metadata: { nodeKey: 'start' },
+    },
+    {
+      id: 'hist_ret_2',
+      action: 'approve',
+      actorId: CURRENT_USER_ID,
+      actorName: '当前用户',
+      comment: '同意',
+      fromStatus: 'pending',
+      toStatus: 'pending',
+      occurredAt: YESTERDAY,
+      metadata: { nodeKey: 'approval_1', approvalMode: 'all', aggregateComplete: true },
+    },
+    {
+      id: 'hist_ret_3',
+      action: 'return',
+      actorId: 'user_3',
+      actorName: '王五',
+      comment: '金额有误，退回修改',
+      fromStatus: 'pending',
+      toStatus: 'pending',
+      occurredAt: NOW,
+      metadata: { nodeKey: 'approval_2', targetNodeKey: 'approval_1' },
+    },
+  ]
+}
+
+/** Template with approvalMode and emptyAssigneePolicy on approval nodes. */
+export function mockTemplateWithModes(overrides?: Partial<ApprovalTemplateDetailDTO>): ApprovalTemplateDetailDTO {
+  return {
+    ...mockPublishedTemplate(),
+    id: 'tpl_modes',
+    name: '含模式策略模板',
+    approvalGraph: {
+      nodes: [
+        { key: 'start', type: 'start', name: '发起', config: {} },
+        { key: 'approval_1', type: 'approval', name: '部门主管审批', config: { assigneeType: 'role', assigneeIds: ['role_manager'], approvalMode: 'all', emptyAssigneePolicy: 'error' } },
+        { key: 'approval_2', type: 'approval', name: '财务审批', config: { assigneeType: 'user', assigneeIds: ['user_finance'], approvalMode: 'any', emptyAssigneePolicy: 'auto-approve' } },
+        { key: 'end', type: 'end', name: '结束', config: {} },
+      ],
+      edges: [
+        { key: 'e1', source: 'start', target: 'approval_1' },
+        { key: 'e2', source: 'approval_1', target: 'approval_2' },
+        { key: 'e3', source: 'approval_2', target: 'end' },
+      ],
+    },
+    ...overrides,
+  }
 }
 
 // ---------------------------------------------------------------------------

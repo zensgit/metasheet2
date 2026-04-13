@@ -2017,7 +2017,7 @@ export function initAdminRoutes(
   logger.info('Admin routes initialized with SafetyGuard', {
     context: 'AdminRoutes',
     safetyGuardEnabled: getSafetyGuard().isEnabled(),
-    idempotencyStats: getIdempotencyStats().config,
+    idempotencyStats: 'async (call getIdempotencyStats() for details)',
     pluginLoaderAvailable: !!services.pluginLoader,
     pluginStatusAvailable: !!services.pluginStatus,
     pluginActivationAvailable: !!services.activatePlugin,
