@@ -80,7 +80,7 @@
               v-for="item in store.history"
               :key="item.id"
               :type="timelineItemType(item.action, item.toStatus)"
-              :icon="timelineIcon(item.action)"
+              :icon="timelineIcon(item.action, item.metadata)"
               :hollow="item.toStatus === 'pending'"
               size="large"
               :timestamp="item.occurredAt ? formatDate(item.occurredAt) : '-'"
@@ -88,14 +88,31 @@
             >
               <div class="approval-detail__timeline-content">
                 <div class="approval-detail__timeline-header">
-                  <strong>{{ item.actorName ?? '系统' }}</strong>
-                  <el-tag :type="statusTagType(item.toStatus)" size="small">
-                    {{ actionLabel(item.action) }}
+                  <strong>{{ item.metadata?.autoApproved ? '系统自动审批' : (item.actorName ?? '系统') }}</strong>
+                  <el-tag :type="timelineActionTagType(item.action, item.metadata)" size="small">
+                    {{ actionLabel(item.action, item.metadata) }}
                   </el-tag>
                 </div>
                 <p v-if="item.comment" class="approval-detail__timeline-comment">
                   {{ item.comment }}
                 </p>
+                <div v-if="hasTimelineMetadata(item.metadata)" class="approval-detail__timeline-meta">
+                  <span v-if="item.metadata?.autoApproved" class="approval-detail__meta-badge approval-detail__meta-badge--auto">
+                    自动审批
+                  </span>
+                  <span v-if="item.metadata?.approvalMode" class="approval-detail__meta-badge">
+                    审批模式: {{ approvalModeLabel(item.metadata.approvalMode as string) }}
+                  </span>
+                  <span v-if="item.metadata?.aggregateComplete" class="approval-detail__meta-badge approval-detail__meta-badge--complete">
+                    会签完成
+                  </span>
+                  <span v-if="item.action === 'return' && item.metadata?.targetNodeKey" class="approval-detail__meta-badge approval-detail__meta-badge--return">
+                    退回至: {{ nodeLabel(item.metadata.targetNodeKey as string) }}
+                  </span>
+                  <span v-if="item.metadata?.nodeKey" class="approval-detail__meta-badge">
+                    节点: {{ item.metadata.nodeKey }}
+                  </span>
+                </div>
               </div>
             </el-timeline-item>
           </el-timeline>
@@ -125,6 +142,14 @@
             </el-button>
           </div>
           <div class="approval-detail__actions-secondary">
+            <el-button
+              v-if="canAct && returnableNodes.length > 0"
+              type="warning"
+              :loading="store.loading"
+              @click="openReturnDialog"
+            >
+              退回
+            </el-button>
             <el-button
               v-if="canAct"
               type="warning"
@@ -243,6 +268,40 @@
         </el-button>
       </template>
     </el-dialog>
+
+    <!-- Return dialog -->
+    <el-dialog
+      v-model="returnDialogVisible"
+      title="退回审批"
+      width="480px"
+    >
+      <el-form>
+        <el-form-item label="退回至节点">
+          <el-select v-model="returnTargetNodeKey" placeholder="选择退回目标节点" style="width: 100%">
+            <el-option
+              v-for="node in returnableNodes"
+              :key="node.key"
+              :label="node.label"
+              :value="node.key"
+            />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="退回说明">
+          <el-input
+            v-model="actionComment"
+            type="textarea"
+            :rows="2"
+            placeholder="请输入退回说明"
+          />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="returnDialogVisible = false">取消</el-button>
+        <el-button type="warning" :loading="store.loading" @click="submitReturn">
+          确认退回
+        </el-button>
+      </template>
+    </el-dialog>
   </section>
 </template>
 
@@ -263,10 +322,12 @@ import {
 import type { ApprovalActionType } from '../../types/approval'
 import { useApprovalStore } from '../../approvals/store'
 import { useApprovalPermissions } from '../../approvals/permissions'
+import { useApprovalTemplateStore } from '../../approvals/templateStore'
 
 const route = useRoute()
 const router = useRouter()
 const store = useApprovalStore()
+const templateStore = useApprovalTemplateStore()
 const { canAct } = useApprovalPermissions()
 
 const approval = computed(() => store.activeApproval)
@@ -278,9 +339,27 @@ const isRequester = computed(() => {
 const actionDialogVisible = ref(false)
 const transferDialogVisible = ref(false)
 const commentDialogVisible = ref(false)
+const returnDialogVisible = ref(false)
 const currentAction = ref<ApprovalActionType>('approve')
 const actionComment = ref('')
 const transferUserId = ref('')
+const returnTargetNodeKey = ref('')
+
+const returnableNodes = computed(() => {
+  if (!approval.value || approval.value.status !== 'pending') return []
+  const currentNodeKey = approval.value.currentNodeKey
+  const visited = new Set<string>()
+  for (const h of store.history) {
+    const nk = h.metadata?.nodeKey as string | undefined
+    if (nk && nk !== currentNodeKey && nk !== 'start' && nk !== 'end') {
+      visited.add(nk)
+    }
+  }
+  return Array.from(visited).map((key) => ({
+    key,
+    label: nodeLabel(key),
+  }))
+})
 
 const actionDialogTitle = computed(() =>
   currentAction.value === 'approve' ? '审批通过' : '审批驳回',
@@ -311,7 +390,8 @@ function statusLabel(status: string) {
   return map[status] ?? status
 }
 
-function actionLabel(action: string) {
+function actionLabel(action: string, metadata?: Record<string, unknown>) {
+  if (action === 'approve' && metadata?.autoApproved) return '自动通过'
   const map: Record<string, string> = {
     created: '发起',
     approve: '通过',
@@ -319,11 +399,13 @@ function actionLabel(action: string) {
     transfer: '转交',
     revoke: '撤回',
     comment: '评论',
+    return: '退回',
   }
   return map[action] ?? action
 }
 
 function timelineItemType(action: string, toStatus: string): string {
+  if (action === 'return') return 'warning'
   if (action === 'approve') return 'success'
   if (action === 'reject') return 'danger'
   if (action === 'transfer') return 'warning'
@@ -332,7 +414,15 @@ function timelineItemType(action: string, toStatus: string): string {
   return 'info'
 }
 
-function timelineIcon(action: string) {
+function timelineActionTagType(action: string, metadata?: Record<string, unknown>): string {
+  if (action === 'approve' && metadata?.autoApproved) return 'info'
+  if (action === 'return') return 'warning'
+  return statusTagType(action === 'approve' ? 'approved' : action === 'reject' ? 'rejected' : 'pending')
+}
+
+function timelineIcon(action: string, metadata?: Record<string, unknown>) {
+  if (action === 'return') return RefreshLeft
+  if (action === 'approve' && metadata?.autoApproved) return Bell
   const map: Record<string, any> = {
     approve: Check,
     reject: Close,
@@ -342,6 +432,22 @@ function timelineIcon(action: string) {
     revoke: RefreshLeft,
   }
   return map[action] ?? undefined
+}
+
+function hasTimelineMetadata(metadata?: Record<string, unknown>): boolean {
+  if (!metadata) return false
+  return !!(metadata.autoApproved || metadata.approvalMode || metadata.aggregateComplete || metadata.nodeKey || metadata.targetNodeKey)
+}
+
+function approvalModeLabel(mode: string): string {
+  const map: Record<string, string> = { single: '单人', all: '会签', any: '或签' }
+  return map[mode] ?? mode
+}
+
+function nodeLabel(nodeKey: string): string {
+  if (!nodeKey) return '-'
+  const node = templateStore.activeTemplate?.approvalGraph.nodes.find((entry) => entry.key === nodeKey)
+  return node?.name?.trim() || nodeKey
 }
 
 function formatDate(dateStr: string) {
@@ -379,6 +485,12 @@ function openTransferDialog() {
   transferUserId.value = ''
   actionComment.value = ''
   transferDialogVisible.value = true
+}
+
+function openReturnDialog() {
+  returnTargetNodeKey.value = ''
+  actionComment.value = ''
+  returnDialogVisible.value = true
 }
 
 function openCommentDialog() {
@@ -434,6 +546,23 @@ async function submitComment() {
   }
 }
 
+async function submitReturn() {
+  if (!returnTargetNodeKey.value) return
+  const id = route.params.id as string
+  try {
+    await store.executeAction(id, {
+      action: 'return',
+      comment: actionComment.value || undefined,
+      targetNodeKey: returnTargetNodeKey.value,
+    })
+    ElMessage.success('已退回审批')
+    returnDialogVisible.value = false
+    await store.loadHistory(id)
+  } catch {
+    ElMessage.error('退回失败，请重试')
+  }
+}
+
 async function handleRevoke() {
   const id = route.params.id as string
   try {
@@ -451,6 +580,9 @@ async function handleRevoke() {
 onMounted(async () => {
   const id = route.params.id as string
   await Promise.all([store.loadDetail(id), store.loadHistory(id)])
+  if (store.activeApproval?.templateId) {
+    await templateStore.loadTemplate(store.activeApproval.templateId).catch(() => undefined)
+  }
 })
 </script>
 
@@ -548,6 +680,37 @@ onMounted(async () => {
   margin: 4px 0 0;
   color: var(--el-text-color-regular, #606266);
   font-size: 13px;
+}
+
+.approval-detail__timeline-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.approval-detail__meta-badge {
+  display: inline-block;
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--el-fill-color-light, #f5f7fa);
+  color: var(--el-text-color-secondary, #909399);
+}
+
+.approval-detail__meta-badge--auto {
+  background: #e6f7ff;
+  color: #1890ff;
+}
+
+.approval-detail__meta-badge--complete {
+  background: #f6ffed;
+  color: #52c41a;
+}
+
+.approval-detail__meta-badge--return {
+  background: #fff7e6;
+  color: #fa8c16;
 }
 
 .approval-detail__actions {

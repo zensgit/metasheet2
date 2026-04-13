@@ -110,6 +110,21 @@
                     {{ (node.config as any).assigneeType === 'role' ? '角色' : '用户' }}:
                     {{ (node.config as any).assigneeIds?.join(', ') ?? '-' }}
                   </span>
+                  <el-tag
+                    v-if="node.type === 'approval' && (node.config as any).approvalMode"
+                    size="small"
+                    class="template-detail__node-mode"
+                  >
+                    {{ approvalModeLabel((node.config as any).approvalMode) }}
+                  </el-tag>
+                  <el-tag
+                    v-if="node.type === 'approval' && (node.config as any).emptyAssigneePolicy"
+                    size="small"
+                    :type="(node.config as any).emptyAssigneePolicy === 'auto-approve' ? 'success' : 'danger'"
+                    class="template-detail__node-policy"
+                  >
+                    {{ emptyAssigneePolicyLabel((node.config as any).emptyAssigneePolicy) }}
+                  </el-tag>
                 </div>
               </el-timeline-item>
             </el-timeline>
@@ -134,7 +149,7 @@ import {
   QuestionFilled,
   CircleCheckFilled,
 } from '@element-plus/icons-vue'
-import type { ApprovalNodeType, FormFieldType } from '../../types/approval'
+import type { ApprovalNodeType, FormFieldType, ApprovalMode, EmptyAssigneePolicy } from '../../types/approval'
 import { useApprovalTemplateStore } from '../../approvals/templateStore'
 import { useApprovalPermissions } from '../../approvals/permissions'
 
@@ -220,6 +235,16 @@ function nodeTagType(type: ApprovalNodeType): string {
     end: 'info',
   }
   return map[type] ?? ''
+}
+
+function approvalModeLabel(mode: ApprovalMode): string {
+  const map: Record<ApprovalMode, string> = { single: '单人审批', all: '会签', any: '或签' }
+  return map[mode] ?? mode
+}
+
+function emptyAssigneePolicyLabel(policy: EmptyAssigneePolicy): string {
+  const map: Record<EmptyAssigneePolicy, string> = { error: '无人时报错', 'auto-approve': '无人时自动通过' }
+  return map[policy] ?? policy
 }
 
 function formatDate(dateStr: string) {
@@ -324,6 +349,11 @@ onMounted(() => {
 .template-detail__node-assignee {
   font-size: 12px;
   color: var(--el-text-color-regular, #606266);
+}
+
+.template-detail__node-mode,
+.template-detail__node-policy {
+  margin-left: 4px;
 }
 
 @media (max-width: 768px) {
