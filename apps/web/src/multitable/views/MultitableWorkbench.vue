@@ -39,6 +39,7 @@
       <button v-if="caps.canManageSheetAccess.value" class="mt-workbench__mgr-btn" @click="showPermissionManager = true; void loadPermissionEntries()">&#x1F512; Access</button>
       <button v-if="caps.canManageViews.value && canConfigureCurrentView" class="mt-workbench__mgr-btn" @click="showViewManager = true">&#x2630; Views</button>
       <button v-if="caps.canManageAutomation.value" class="mt-workbench__mgr-btn" @click="openWorkflowDesigner()">&#x2699; Workflow</button>
+      <button v-if="caps.canManageAutomation.value" class="mt-workbench__mgr-btn" @click="showAutomationManager = true">&#x26A1; Automations</button>
     </div>
     <div
       v-if="capabilityOriginNotice"
@@ -265,6 +266,14 @@
       @update-field-permission="onFieldPermissionUpdated"
       @update-view-permission="onViewPermissionUpdated"
     />
+    <MetaAutomationManager
+      :visible="showAutomationManager"
+      :sheet-id="workbench.activeSheetId.value"
+      :fields="grid.fields.value"
+      :client="workbench.client"
+      @close="showAutomationManager = false"
+      @updated="showAutomationManager = false"
+    />
   </div>
 </template>
 
@@ -314,6 +323,7 @@ import MetaLinkPicker from '../components/MetaLinkPicker.vue'
 import MetaFieldManager from '../components/MetaFieldManager.vue'
 import MetaViewManager from '../components/MetaViewManager.vue'
 import MetaSheetPermissionManager from '../components/MetaSheetPermissionManager.vue'
+import MetaAutomationManager from '../components/MetaAutomationManager.vue'
 import MetaBasePicker from '../components/MetaBasePicker.vue'
 import MetaKanbanView from '../components/MetaKanbanView.vue'
 import MetaGalleryView from '../components/MetaGalleryView.vue'
@@ -367,6 +377,7 @@ const linkPickerRecordId = ref<string | null>(null)
 const linkPickerCurrentValue = ref<unknown>(null)
 const showFieldManager = ref(false)
 const showPermissionManager = ref(false)
+const showAutomationManager = ref(false)
 const fieldPermissionEntries = ref<MetaFieldPermissionEntry[]>([])
 const viewPermissionEntries = ref<MetaViewPermissionEntry[]>([])
 const showViewManager = ref(false)
