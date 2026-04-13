@@ -6116,6 +6116,12 @@ export function univerMetaRouter(): Router {
           patch,
         }],
       })
+      eventBus.emit('multitable.record.created', {
+        sheetId,
+        recordId,
+        data: patch,
+        actorId: getRequestActorId(req),
+      })
       return res.json({ ok: true, data: { record: { id: recordId, version, data: patch } } })
     } catch (err) {
       if (err instanceof ValidationError) {
@@ -6193,6 +6199,11 @@ export function univerMetaRouter(): Router {
           kind: 'record-deleted',
           recordId,
           recordIds: [recordId],
+        })
+        eventBus.emit('multitable.record.deleted', {
+          sheetId: deletedSheetId,
+          recordId,
+          actorId: getRequestActorId(req),
         })
       }
 
@@ -6615,6 +6626,17 @@ export function univerMetaRouter(): Router {
             ),
           })),
         })
+        for (const update of updates) {
+          const changes = Object.fromEntries(
+            (changesByRecord.get(update.recordId) ?? []).map((change) => [change.fieldId, change.value]),
+          )
+          eventBus.emit('multitable.record.updated', {
+            sheetId,
+            recordId: update.recordId,
+            changes,
+            actorId: getRequestActorId(req),
+          })
+        }
       }
 
       return res.json({
@@ -6651,6 +6673,186 @@ export function univerMetaRouter(): Router {
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
       console.error('[univer-meta] patch failed:', err)
       return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to patch meta records' } })
+    }
+  })
+
+  // ── Automation rule CRUD ──────────────────────────────────────────────
+
+  router.get('/sheets/:sheetId/automations', async (req: Request, res: Response) => {
+    const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId : ''
+    if (!sheetId) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId is required' } })
+    }
+    try {
+      const pool = poolManager.get()
+      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      if (!capabilities.canManageAutomation) return sendForbidden(res)
+
+      const result = await pool.query(
+        `SELECT id, sheet_id, name, trigger_type, trigger_config, action_type, action_config, enabled, created_at, updated_at, created_by
+         FROM automation_rules
+         WHERE sheet_id = $1
+         ORDER BY created_at ASC`,
+        [sheetId],
+      )
+      return res.json({ ok: true, data: { rules: result.rows } })
+    } catch (err) {
+      const hint = getDbNotReadyMessage(err)
+      if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
+      console.error('[univer-meta] list automation rules failed:', err)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to list automation rules' } })
+    }
+  })
+
+  router.post('/sheets/:sheetId/automations', async (req: Request, res: Response) => {
+    const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId : ''
+    if (!sheetId) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId is required' } })
+    }
+    try {
+      const pool = poolManager.get()
+      const access = await resolveRequestAccess(req)
+      if (!access.userId) return res.status(401).json({ error: 'Authentication required' })
+      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      if (!capabilities.canManageAutomation) return sendForbidden(res)
+
+      const body = req.body as Record<string, unknown> | undefined
+      const name = typeof body?.name === 'string' ? body.name : null
+      const triggerType = typeof body?.triggerType === 'string' ? body.triggerType : ''
+      const triggerConfig = (body?.triggerConfig && typeof body.triggerConfig === 'object') ? body.triggerConfig : {}
+      const actionType = typeof body?.actionType === 'string' ? body.actionType : ''
+      const actionConfig = (body?.actionConfig && typeof body.actionConfig === 'object') ? body.actionConfig : {}
+      const enabled = typeof body?.enabled === 'boolean' ? body.enabled : true
+
+      const validTriggers = new Set(['record.created', 'record.updated', 'field.changed'])
+      const validActions = new Set(['notify', 'update_field'])
+      if (!validTriggers.has(triggerType)) {
+        return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: `Invalid trigger_type: ${triggerType}` } })
+      }
+      if (!validActions.has(actionType)) {
+        return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: `Invalid action_type: ${actionType}` } })
+      }
+
+      const ruleId = `atr_${randomUUID()}`
+      await pool.query(
+        `INSERT INTO automation_rules (id, sheet_id, name, trigger_type, trigger_config, action_type, action_config, enabled, created_by)
+         VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7::jsonb, $8, $9)`,
+        [ruleId, sheetId, name, triggerType, JSON.stringify(triggerConfig), actionType, JSON.stringify(actionConfig), enabled, access.userId],
+      )
+
+      return res.json({
+        ok: true,
+        data: {
+          rule: { id: ruleId, sheetId, name, triggerType, triggerConfig, actionType, actionConfig, enabled },
+        },
+      })
+    } catch (err) {
+      const hint = getDbNotReadyMessage(err)
+      if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
+      console.error('[univer-meta] create automation rule failed:', err)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to create automation rule' } })
+    }
+  })
+
+  router.patch('/sheets/:sheetId/automations/:ruleId', async (req: Request, res: Response) => {
+    const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId : ''
+    const ruleId = typeof req.params.ruleId === 'string' ? req.params.ruleId : ''
+    if (!sheetId || !ruleId) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId and ruleId are required' } })
+    }
+    try {
+      const pool = poolManager.get()
+      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      if (!capabilities.canManageAutomation) return sendForbidden(res)
+
+      const body = req.body as Record<string, unknown> | undefined
+      const sets: string[] = []
+      const params: unknown[] = []
+      let paramIdx = 1
+
+      if (typeof body?.name === 'string') {
+        sets.push(`name = $${paramIdx++}`)
+        params.push(body.name)
+      }
+      if (typeof body?.triggerType === 'string') {
+        const validTriggers = new Set(['record.created', 'record.updated', 'field.changed'])
+        if (!validTriggers.has(body.triggerType)) {
+          return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: `Invalid trigger_type: ${body.triggerType}` } })
+        }
+        sets.push(`trigger_type = $${paramIdx++}`)
+        params.push(body.triggerType)
+      }
+      if (body?.triggerConfig && typeof body.triggerConfig === 'object') {
+        sets.push(`trigger_config = $${paramIdx++}::jsonb`)
+        params.push(JSON.stringify(body.triggerConfig))
+      }
+      if (typeof body?.actionType === 'string') {
+        const validActions = new Set(['notify', 'update_field'])
+        if (!validActions.has(body.actionType)) {
+          return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: `Invalid action_type: ${body.actionType}` } })
+        }
+        sets.push(`action_type = $${paramIdx++}`)
+        params.push(body.actionType)
+      }
+      if (body?.actionConfig && typeof body.actionConfig === 'object') {
+        sets.push(`action_config = $${paramIdx++}::jsonb`)
+        params.push(JSON.stringify(body.actionConfig))
+      }
+      if (typeof body?.enabled === 'boolean') {
+        sets.push(`enabled = $${paramIdx++}`)
+        params.push(body.enabled)
+      }
+
+      if (sets.length === 0) {
+        return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'No fields to update' } })
+      }
+
+      sets.push(`updated_at = NOW()`)
+      params.push(ruleId, sheetId)
+      const result = await pool.query(
+        `UPDATE automation_rules SET ${sets.join(', ')} WHERE id = $${paramIdx++} AND sheet_id = $${paramIdx++} RETURNING *`,
+        params,
+      )
+
+      if ((result.rowCount ?? 0) === 0) {
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Automation rule not found' } })
+      }
+
+      return res.json({ ok: true, data: { rule: result.rows[0] } })
+    } catch (err) {
+      const hint = getDbNotReadyMessage(err)
+      if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
+      console.error('[univer-meta] update automation rule failed:', err)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to update automation rule' } })
+    }
+  })
+
+  router.delete('/sheets/:sheetId/automations/:ruleId', async (req: Request, res: Response) => {
+    const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId : ''
+    const ruleId = typeof req.params.ruleId === 'string' ? req.params.ruleId : ''
+    if (!sheetId || !ruleId) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId and ruleId are required' } })
+    }
+    try {
+      const pool = poolManager.get()
+      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      if (!capabilities.canManageAutomation) return sendForbidden(res)
+
+      const result = await pool.query(
+        'DELETE FROM automation_rules WHERE id = $1 AND sheet_id = $2',
+        [ruleId, sheetId],
+      )
+
+      if ((result.rowCount ?? 0) === 0) {
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Automation rule not found' } })
+      }
+
+      return res.json({ ok: true, data: { deleted: ruleId } })
+    } catch (err) {
+      const hint = getDbNotReadyMessage(err)
+      if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
+      console.error('[univer-meta] delete automation rule failed:', err)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to delete automation rule' } })
     }
   })
 
