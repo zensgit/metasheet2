@@ -160,3 +160,24 @@ Pack 1A runtime 完成后，后续仍需单独收口以下事项：
 - 空审批人节点不再靠隐式空 assignment 漏过执行
 
 结论：本轮代码已达到可开 stacked PR、可继续前端并行消费、可进入下一轮集成验证的状态。
+
+## 8. 并行审阅结论
+
+本轮同时调用本机 `Claude Code CLI` 对当前 runtime 分支相对
+`origin/codex/approval-pack1a-contracts-20260413` 的改动做了独立审阅。
+
+审阅结论：
+
+- `No blocker`
+- `single / any / all` 语义与 Pack 1A 契约一致
+- `return + targetNodeKey` 的路径校验正确
+- `emptyAssigneePolicy=auto-approve` 的跳过与审计记录正确
+
+Claude 额外建议后续补的测试：
+
+- `any` 模式显式回归
+- `all` 模式最后一位审批人完成后真正推进的场景
+- `emptyAssigneePolicy` 缺失时的负面用例
+- 更高层幂等/重复 approve 行为验证
+
+这些建议已记录为下一轮测试补强项，不构成当前合入 blocker。
