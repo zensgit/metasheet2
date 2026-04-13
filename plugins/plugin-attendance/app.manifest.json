@@ -1,0 +1,94 @@
+{
+  "id": "attendance",
+  "version": "0.1.0",
+  "displayName": "Attendance",
+  "pluginId": "plugin-attendance",
+  "runtimeModel": "direct",
+  "boundedContext": {
+    "code": "attendance",
+    "owner": "people-ops",
+    "description": "Attendance tracking, reports, import operations, and workflow-backed adjustments."
+  },
+  "platformDependencies": [
+    "auth",
+    "rbac",
+    "workflow",
+    "approvals",
+    "notifications",
+    "events",
+    "plugins"
+  ],
+  "navigation": [
+    {
+      "id": "attendance-home",
+      "title": "Attendance",
+      "path": "/attendance",
+      "icon": "clock",
+      "order": 50,
+      "location": "main-nav"
+    },
+    {
+      "id": "attendance-admin",
+      "title": "Admin Center",
+      "path": "/attendance?tab=admin",
+      "icon": "settings",
+      "order": 10,
+      "location": "admin"
+    },
+    {
+      "id": "attendance-import",
+      "title": "Import",
+      "path": "/attendance?tab=import",
+      "icon": "upload",
+      "order": 20,
+      "location": "admin"
+    },
+    {
+      "id": "attendance-workflow",
+      "title": "Workflow Designer",
+      "path": "/attendance?tab=workflow",
+      "icon": "workflow",
+      "order": 30,
+      "location": "admin"
+    }
+  ],
+  "permissions": [
+    "attendance:read",
+    "attendance:write",
+    "attendance:admin",
+    "attendance:import",
+    "workflow:design"
+  ],
+  "featureFlags": [
+    "attendance",
+    "attendanceAdmin",
+    "attendanceImport",
+    "workflow"
+  ],
+  "objects": [
+    {
+      "id": "attendanceRule",
+      "name": "Attendance Rule",
+      "backing": "service"
+    },
+    {
+      "id": "attendanceReport",
+      "name": "Attendance Report",
+      "backing": "service"
+    }
+  ],
+  "workflows": [
+    {
+      "id": "attendance-adjustment-approval",
+      "name": "Attendance Adjustment Approval",
+      "trigger": "attendance.adjustmentRequested"
+    }
+  ],
+  "integrations": [
+    {
+      "id": "attendance-import",
+      "type": "manual",
+      "direction": "inbound"
+    }
+  ]
+}

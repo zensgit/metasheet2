@@ -19,6 +19,7 @@ declare global {
 }
 
 const TOKEN_STORAGE_KEYS = ['auth_token', 'jwt', 'devToken'] as const
+const TENANT_HINT_KEYS = ['tenantId', 'workspaceId'] as const
 const USER_STATE_KEYS = ['metasheet_features', 'metasheet_product_mode', 'user_permissions', 'user_roles'] as const
 let authRedirecting = false
 
@@ -80,9 +81,59 @@ export function getStoredAuthToken(): string {
   return ''
 }
 
+function decodeJwtPayload(token: string): Record<string, unknown> | null {
+  try {
+    const parts = token.split('.')
+    if (parts.length < 2 || typeof atob !== 'function') return null
+    const normalized = parts[1]
+      .replace(/-/g, '+')
+      .replace(/_/g, '/')
+      .padEnd(Math.ceil(parts[1].length / 4) * 4, '=')
+    return JSON.parse(atob(normalized)) as Record<string, unknown>
+  } catch {
+    return null
+  }
+}
+
+function extractTenantHintFromPayload(payload: Record<string, unknown> | null): string {
+  if (!payload) return ''
+  const raw = payload.tenantId ?? payload.workspaceId
+  return typeof raw === 'string' ? raw.trim() : ''
+}
+
+function getStoredTenantHint(): string {
+  if (typeof localStorage === 'undefined') return ''
+  for (const key of TENANT_HINT_KEYS) {
+    const value = localStorage.getItem(key)
+    if (typeof value === 'string' && value.trim().length > 0) {
+      return value.trim()
+    }
+  }
+  return ''
+}
+
+function getLocationTenantHint(): string {
+  if (typeof window === 'undefined') return ''
+  try {
+    const params = new URLSearchParams(window.location.search || '')
+    for (const key of TENANT_HINT_KEYS) {
+      const value = params.get(key)
+      if (typeof value === 'string' && value.trim().length > 0) {
+        return value.trim()
+      }
+    }
+  } catch {
+    return ''
+  }
+  return ''
+}
+
 export function clearStoredAuthState(): void {
   if (typeof localStorage === 'undefined') return
   for (const key of TOKEN_STORAGE_KEYS) {
+    localStorage.removeItem(key)
+  }
+  for (const key of TENANT_HINT_KEYS) {
     localStorage.removeItem(key)
   }
   for (const key of USER_STATE_KEYS) {
@@ -98,6 +149,13 @@ export function authHeaders(token?: string): Record<string, string> {
   const resolvedToken = typeof token === 'string' ? token : getStoredAuthToken()
   if (resolvedToken.trim().length > 0) {
     headers.Authorization = `Bearer ${resolvedToken}`
+  }
+  const tenantHint =
+    getStoredTenantHint() ||
+    getLocationTenantHint() ||
+    extractTenantHintFromPayload(decodeJwtPayload(resolvedToken))
+  if (tenantHint) {
+    headers['x-tenant-id'] = tenantHint
   }
   return headers
 }

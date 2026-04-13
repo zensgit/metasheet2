@@ -72,6 +72,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import { useAuth } from '../composables/useAuth'
 import { useLocale } from '../composables/useLocale'
 import { useFeatureFlags } from '../stores/featureFlags'
 import { normalizePostLoginRedirect } from '../utils/authRedirect'
@@ -95,6 +96,7 @@ interface AuthFeaturePayload {
 
 const router = useRouter()
 const route = useRoute()
+const { setToken } = useAuth()
 const { locale, isZh, setLocale } = useLocale()
 const { loadProductFeatures, resolveHomePath } = useFeatureFlags()
 
@@ -221,9 +223,7 @@ async function onSubmit(): Promise<void> {
       return
     }
 
-    if (typeof localStorage !== 'undefined') {
-      localStorage.setItem('auth_token', token)
-    }
+    setToken(token)
 
     persistAuthContext(
       (payload?.data?.user ?? null) as AuthUserPayload | null,

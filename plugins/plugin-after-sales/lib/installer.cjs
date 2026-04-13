@@ -54,6 +54,7 @@ const ERROR_CODES = Object.freeze({
   ALREADY_INSTALLED: 'already-installed',
   NO_INSTALL_TO_REBUILD: 'no-install-to-rebuild',
   CORE_OBJECT_FAILED: 'core-object-failed',
+  PLATFORM_INSTANCE_WRITE_FAILED: 'platform-instance-write-failed',
   LEDGER_READ_FAILED: 'ledger-read-failed',
   LEDGER_WRITE_FAILED: 'ledger-write-failed',
   INVALID_TEMPLATE_ID: 'invalid-template-id',
@@ -248,6 +249,16 @@ function getRbacProvisioningService(context) {
     : null
 }
 
+function getPlatformAppInstanceRegistryService(context) {
+  return context &&
+    context.services &&
+    context.services.platformAppInstances &&
+    typeof context.services.platformAppInstances.upsertInstance === 'function' &&
+    typeof context.services.platformAppInstances.getInstance === 'function'
+    ? context.services.platformAppInstances
+    : null
+}
+
 function normalizeRoleMatrix(blueprint) {
   return {
     roles: Array.isArray(blueprint && blueprint.roles) ? blueprint.roles : [],
@@ -265,6 +276,35 @@ function shouldProvisionObjectInMultitable(obj) {
   if (!obj || typeof obj !== 'object') return false
   if (obj.backing === 'multitable') return true
   return obj.provisioning && typeof obj.provisioning === 'object' && obj.provisioning.multitable === true
+}
+
+function mapInstanceStatusToCurrentStatus(instance) {
+  const installStatus = instance
+    && instance.metadata
+    && typeof instance.metadata.installStatus === 'string'
+    ? instance.metadata.installStatus
+    : ''
+  if (installStatus === 'failed' || installStatus === 'partial' || installStatus === 'installed') {
+    return installStatus
+  }
+  if (instance && instance.status === 'failed') return 'failed'
+  return 'installed'
+}
+
+async function upsertPlatformInstance(context, input) {
+  const platformAppInstances = getPlatformAppInstanceRegistryService(context)
+  if (!platformAppInstances) return null
+  return platformAppInstances.upsertInstance({
+    tenantId: input.tenantId,
+    workspaceId: input.workspaceId,
+    appId: input.appId,
+    pluginId: input.pluginId,
+    projectId: input.projectId,
+    displayName: input.displayName || '',
+    status: input.status,
+    config: input.config || {},
+    metadata: input.metadata || {},
+  })
 }
 
 /**
@@ -410,6 +450,7 @@ async function runInstall(input) {
   const provisioning = getProvisioningApi(context)
   const automationRegistry = getAutomationRegistryService(context)
   const rbacProvisioning = getRbacProvisioningService(context)
+  const platformAppInstances = getPlatformAppInstanceRegistryService(context)
   const objectSheetIds = new Map()
 
   // Step 5-10: execute installation
@@ -474,6 +515,22 @@ async function runInstall(input) {
         displayName: displayName || '',
         config: config || {},
       })
+      if (platformAppInstances) {
+        await upsertPlatformInstance(context, {
+          tenantId,
+          workspaceId: tenantId,
+          appId: blueprint.appId,
+          pluginId: resolvePluginId(context),
+          projectId,
+          displayName: displayName || '',
+          status: 'failed',
+          config: config || {},
+          metadata: {
+            source: 'after-sales-installer',
+            installStatus: 'failed',
+          },
+        })
+      }
     } catch (writeErr) {
       // Chicken-and-egg: ledger write itself failed. Surface this distinctly.
       throw new InstallerError(
@@ -530,9 +587,9 @@ async function runInstall(input) {
   }
 
   // Step 11: determine terminal status and write ledger
-  const status = warnings.length === 0 ? 'installed' : 'partial'
+  let status = warnings.length === 0 ? 'installed' : 'partial'
 
-  const ledgerRow = await writeInstallLedger(context.api.database, {
+  let ledgerRow = await writeInstallLedger(context.api.database, {
     tenantId,
     appId: blueprint.appId,
     projectId,
@@ -546,6 +603,61 @@ async function runInstall(input) {
     displayName: displayName || '',
     config: config || {},
   })
+
+  if (platformAppInstances) {
+    try {
+      await upsertPlatformInstance(context, {
+        tenantId,
+        workspaceId: tenantId,
+        appId: blueprint.appId,
+        pluginId: resolvePluginId(context),
+        projectId,
+        displayName: displayName || '',
+        status: status === 'installed' ? 'active' : 'inactive',
+        config: config || {},
+        metadata: {
+          source: 'after-sales-installer',
+          installStatus: status,
+          reportRef: ledgerRow.id,
+        },
+      })
+    } catch (err) {
+      const registryWarning = `platform app instance registration failed: ${err && err.message ? err.message : err}`
+      warnings.push(registryWarning)
+      status = 'failed'
+      try {
+        ledgerRow = await writeInstallLedger(context.api.database, {
+          tenantId,
+          appId: blueprint.appId,
+          projectId,
+          templateId: blueprint.id,
+          templateVersion: blueprint.version,
+          mode,
+          status,
+          createdObjects,
+          createdViews,
+          warnings,
+          displayName: displayName || '',
+          config: config || {},
+        })
+      } catch (writeErr) {
+        throw new InstallerError(
+          ERROR_CODES.LEDGER_WRITE_FAILED,
+          `platform app instance registration failed and ledger write also failed: ${writeErr && writeErr.message ? writeErr.message : writeErr}`,
+        )
+      }
+      throw new InstallerError(
+        ERROR_CODES.PLATFORM_INSTANCE_WRITE_FAILED,
+        registryWarning,
+        {
+          projectId,
+          reportRef: ledgerRow.id,
+          status,
+          warnings,
+        },
+      )
+    }
+  }
 
   return {
     projectId,
@@ -574,24 +686,56 @@ async function loadCurrent(context, tenantId, appId) {
       'context.api.database is required for loadCurrent',
     )
   }
-  const row = await loadInstallLedger(context.api.database, tenantId, appId)
-  if (!row) {
+  const platformAppInstances = getPlatformAppInstanceRegistryService(context)
+  let instance = null
+  if (platformAppInstances) {
+    try {
+      instance = await platformAppInstances.getInstance({
+        workspaceId: tenantId,
+        appId,
+      })
+    } catch (err) {
+      context.logger && typeof context.logger.warn === 'function' &&
+        context.logger.warn('after-sales instance registry lookup failed; falling back to ledger', err)
+    }
+  }
+
+  let row = null
+  try {
+    row = await loadInstallLedger(context.api.database, tenantId, appId)
+  } catch (err) {
+    if (!instance) {
+      throw err
+    }
+  }
+
+  if (!row && !instance) {
     return { status: 'not-installed' }
   }
+
+  const projectId = (instance && instance.projectId) || (row && row.projectId) || getProjectId(tenantId, appId)
+  const status = row
+    ? row.status
+    : mapInstanceStatusToCurrentStatus(instance)
+  const displayName = (instance && instance.displayName) || (row && row.displayName) || ''
+  const config = (row && row.config) || (instance && instance.config) || {}
+  const warnings = row && Array.isArray(row.warnings) ? row.warnings : []
+  const reportRef = (row && row.id) || null
+
   return {
-    status: row.status,
-    projectId: row.projectId,
-    displayName: row.displayName,
-    config: row.config,
+    status,
+    projectId,
+    displayName,
+    config,
     installResult: {
-      projectId: row.projectId,
-      status: row.status,
-      createdObjects: row.createdObjects,
-      createdViews: row.createdViews,
-      warnings: row.warnings,
-      reportRef: row.id,
+      projectId,
+      status,
+      createdObjects: row ? row.createdObjects : [],
+      createdViews: row ? row.createdViews : [],
+      warnings,
+      reportRef,
     },
-    reportRef: row.id,
+    reportRef,
   }
 }
 

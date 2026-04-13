@@ -16,6 +16,7 @@
           </template>
           <template v-else>
             <router-link v-if="hasFeature('attendance')" to="/attendance" class="nav-link">{{ navLabels.attendance }}</router-link>
+            <router-link to="/apps" class="nav-link">{{ navLabels.apps }}</router-link>
             <router-link to="/grid" class="nav-link">{{ navLabels.grid }}</router-link>
             <router-link to="/spreadsheets" class="nav-link">{{ navLabels.spreadsheets }}</router-link>
             <router-link to="/kanban" class="nav-link">{{ navLabels.kanban }}</router-link>
@@ -117,6 +118,7 @@ const navLabels = computed(() => {
       form: '表单',
       workflows: '流程',
       approvals: '审批中心',
+      apps: '应用',
       users: '用户',
       roles: '角色',
       permissions: '权限',
@@ -140,6 +142,7 @@ const navLabels = computed(() => {
     form: 'Form',
     workflows: 'Workflows',
     approvals: 'Approvals',
+    apps: 'Apps',
     users: 'Users',
     roles: 'Roles',
     permissions: 'Permissions',

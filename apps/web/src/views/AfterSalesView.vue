@@ -76,7 +76,7 @@
         </form>
 
         <p class="after-sales-view__config-hint">
-          Install payload still targets the placeholder project ID <code>{{ placeholderProjectId }}</code>.
+          Install 请求会由后端生成并回填当前实例的 projectId；前端不再暴露占位 projectId。
         </p>
       </article>
     </section>
@@ -90,7 +90,7 @@
         </p>
         <ul class="after-sales-view__list">
           <li>templateId 固定为 <code>after-sales-default</code></li>
-          <li>v1 projectId 伪值为 <code>{{ placeholderProjectId }}</code></li>
+          <li>projectId 由安装器在后端生成并写回当前实例记录</li>
           <li>当前会真实创建售后模板的 6 个默认对象，覆盖工单、装机资产、客户、服务记录、配件和回访</li>
           <li>同时会创建 6 个默认视图，包括 <code>ticket-board</code>、<code>serviceRecord-calendar</code> 等基础入口</li>
         </ul>
@@ -2047,7 +2047,7 @@
             </div>
             <div>
               <dt>Project ID</dt>
-              <dd><code>{{ current.projectId || placeholderProjectId }}</code></dd>
+              <dd><code>{{ current.projectId || 'pending install' }}</code></dd>
             </div>
             <div>
               <dt>Display name</dt>
@@ -2651,7 +2651,6 @@ const serviceRecordFilters = ref<ServiceRecordFilterDraft>({
   search: '',
 })
 
-const placeholderProjectId = 'tenant:after-sales'
 const warnings = computed(() => current.value.installResult?.warnings ?? [])
 const createdObjectLabels = computed(() => current.value.installResult?.createdObjects ?? [])
 const createdViewLabels = computed(() => current.value.installResult?.createdViews ?? [])

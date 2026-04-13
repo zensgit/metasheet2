@@ -133,6 +133,11 @@ interface FakeContext {
     rbacProvisioning: {
       applyRoleMatrix: ReturnType<typeof vi.fn>
     }
+    platformAppInstances: {
+      upsertInstance: ReturnType<typeof vi.fn>
+      getInstance: ReturnType<typeof vi.fn>
+      listInstances: ReturnType<typeof vi.fn>
+    }
   }
   communication: {
     register: ReturnType<typeof vi.fn>
@@ -268,6 +273,9 @@ function createContext(): {
   automationUpsertRules: ReturnType<typeof vi.fn>
   automationListRules: ReturnType<typeof vi.fn>
   applyRoleMatrix: ReturnType<typeof vi.fn>
+  platformAppInstanceUpsert: ReturnType<typeof vi.fn>
+  platformAppInstanceGet: ReturnType<typeof vi.fn>
+  platformAppInstanceList: ReturnType<typeof vi.fn>
   db: FakeDatabase
 } {
   const routes = new Map<string, RegisteredHandler>()
@@ -647,6 +655,21 @@ function createContext(): {
       ? input.matrix.fieldPolicies.length
       : 0,
   }))
+  const platformAppInstanceUpsert = vi.fn(async (input: Record<string, unknown>) => ({
+    id: 'instance_after_sales_primary',
+    tenantId: input.tenantId,
+    workspaceId: input.workspaceId,
+    appId: input.appId,
+    pluginId: input.pluginId,
+    instanceKey: input.instanceKey || 'primary',
+    projectId: input.projectId,
+    displayName: input.displayName || '',
+    status: input.status || 'active',
+    config: input.config || {},
+    metadata: input.metadata || {},
+  }))
+  const platformAppInstanceGet = vi.fn(async () => null)
+  const platformAppInstanceList = vi.fn(async () => [])
   const communicationCall = vi.fn(async (pluginName: string, method: string, payload: Record<string, unknown>) => {
     if (pluginName === 'after-sales-approval-bridge' && method === 'getRefundApproval') {
       return {
@@ -712,6 +735,11 @@ function createContext(): {
       rbacProvisioning: {
         applyRoleMatrix,
       },
+      platformAppInstances: {
+        upsertInstance: platformAppInstanceUpsert,
+        getInstance: platformAppInstanceGet,
+        listInstances: platformAppInstanceList,
+      },
     },
     communication: {
       register: vi.fn(),
@@ -744,6 +772,9 @@ function createContext(): {
     automationUpsertRules,
     automationListRules,
     applyRoleMatrix,
+    platformAppInstanceUpsert,
+    platformAppInstanceGet,
+    platformAppInstanceList,
     db,
   }
 }
@@ -816,6 +847,9 @@ describe('plugin-after-sales routes', () => {
   let automationUpsertRules: ReturnType<typeof vi.fn>
   let automationListRules: ReturnType<typeof vi.fn>
   let applyRoleMatrix: ReturnType<typeof vi.fn>
+  let platformAppInstanceUpsert: ReturnType<typeof vi.fn>
+  let platformAppInstanceGet: ReturnType<typeof vi.fn>
+  let platformAppInstanceList: ReturnType<typeof vi.fn>
   let eventsOn: ReturnType<typeof vi.fn>
   let eventsOff: ReturnType<typeof vi.fn>
   let eventsEmit: ReturnType<typeof vi.fn>
@@ -844,6 +878,9 @@ describe('plugin-after-sales routes', () => {
     automationUpsertRules = setup.automationUpsertRules
     automationListRules = setup.automationListRules
     applyRoleMatrix = setup.applyRoleMatrix
+    platformAppInstanceUpsert = setup.platformAppInstanceUpsert
+    platformAppInstanceGet = setup.platformAppInstanceGet
+    platformAppInstanceList = setup.platformAppInstanceList
     eventsOn = setup.context.api.events.on
     eventsOff = setup.context.api.events.off
     eventsEmit = setup.context.api.events.emit
@@ -875,7 +912,57 @@ describe('plugin-after-sales routes', () => {
     })
   })
 
-  it('returns 401 when tenantId is missing from both request and tenant context', async () => {
+  it('returns installed current from instance registry when ledger is empty', async () => {
+    const handler = routes.get('GET /api/after-sales/projects/current')
+    const res = new FakeResponse()
+    platformAppInstanceGet.mockResolvedValueOnce({
+      id: 'instance_after_sales_primary',
+      tenantId: 'tenant_42',
+      workspaceId: 'tenant_42',
+      appId: 'after-sales',
+      pluginId: 'plugin-after-sales',
+      instanceKey: 'primary',
+      projectId: 'tenant_42:after-sales',
+      displayName: 'Acme Support',
+      status: 'active',
+      config: {
+        defaultSlaHours: 24,
+      },
+      metadata: {
+        source: 'after-sales-installer',
+      },
+    })
+
+    await handler?.(buildReq(), res)
+
+    expect(platformAppInstanceGet).toHaveBeenCalledWith({
+      workspaceId: 'tenant_42',
+      appId: 'after-sales',
+    })
+    expect(res.statusCode).toBe(200)
+    expect(res.body).toEqual({
+      ok: true,
+      data: {
+        status: 'installed',
+        projectId: 'tenant_42:after-sales',
+        displayName: 'Acme Support',
+        config: {
+          defaultSlaHours: 24,
+        },
+        installResult: {
+          projectId: 'tenant_42:after-sales',
+          status: 'installed',
+          createdObjects: [],
+          createdViews: [],
+          warnings: [],
+          reportRef: null,
+        },
+        reportRef: null,
+      },
+    })
+  })
+
+  it('returns 401 for current when user is authenticated but tenant scope is missing', async () => {
     const handler = routes.get('GET /api/after-sales/projects/current')
     const res = new FakeResponse()
     const req = buildReq({
@@ -891,6 +978,7 @@ describe('plugin-after-sales routes', () => {
 
     await handler?.(req, res)
 
+    expect(platformAppInstanceGet).not.toHaveBeenCalled()
     expect(res.statusCode).toBe(401)
     expect(res.body).toEqual({
       ok: false,
@@ -5814,7 +5902,82 @@ describe('plugin-after-sales routes', () => {
         projectId: 'tenant_42:after-sales',
       }),
     )
+    expect(platformAppInstanceUpsert).toHaveBeenCalledTimes(1)
+    expect(platformAppInstanceUpsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        tenantId: 'tenant_42',
+        workspaceId: 'tenant_42',
+        appId: 'after-sales',
+        pluginId: 'plugin-after-sales',
+        projectId: 'tenant_42:after-sales',
+        status: 'active',
+      }),
+    )
     expect(db.rows).toHaveLength(1)
+  })
+
+  it('returns 401 for install when user is authenticated but tenant scope is missing', async () => {
+    const handler = routes.get('POST /api/after-sales/projects/install')
+    const res = new FakeResponse()
+
+    await handler?.(buildReq({
+      user: {
+        id: 'user_42',
+        role: 'admin',
+        roles: ['admin'],
+        perms: ['*:*', 'after_sales:admin'],
+      },
+      body: {
+        templateId: 'after-sales-default',
+      },
+    }), res)
+
+    expect(res.statusCode).toBe(401)
+    expect(res.body).toEqual({
+      ok: false,
+      error: {
+        code: 'UNAUTHORIZED',
+        message: 'tenantId not found',
+      },
+    })
+    expect(platformAppInstanceUpsert).not.toHaveBeenCalled()
+    expect(db.rows).toHaveLength(0)
+  })
+
+  it('returns 500 and persists failed ledger state when platform app instance registration fails', async () => {
+    const handler = routes.get('POST /api/after-sales/projects/install')
+    const res = new FakeResponse()
+    platformAppInstanceUpsert.mockRejectedValueOnce(new Error('registry offline'))
+
+    await handler?.(buildReq({
+      body: {
+        templateId: 'after-sales-default',
+        displayName: 'Acme Support',
+      },
+    }), res)
+
+    expect(res.statusCode).toBe(500)
+    expect(res.body).toEqual({
+      ok: false,
+      error: {
+        code: 'platform-instance-write-failed',
+        message: 'platform app instance registration failed: registry offline',
+        details: {
+          projectId: 'tenant_42:after-sales',
+          reportRef: 'fake-uuid-1',
+          status: 'failed',
+          warnings: [
+            'platform app instance registration failed: registry offline',
+          ],
+        },
+      },
+    })
+    expect(platformAppInstanceUpsert).toHaveBeenCalledTimes(1)
+    expect(db.rows).toHaveLength(1)
+    expect(db.rows[0].status).toBe('failed')
+    expect(JSON.parse(db.rows[0].warnings_json)).toEqual([
+      'platform app instance registration failed: registry offline',
+    ])
   })
 
   it('returns 409 when enable is called twice for the same tenant', async () => {

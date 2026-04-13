@@ -214,6 +214,17 @@ export class PluginServiceFactory {
             throw new Error('rbacProvisioning is only available in runtime plugin contexts')
           },
         },
+        platformAppInstances: {
+          async upsertInstance() {
+            throw new Error('platformAppInstances is only available in runtime plugin contexts')
+          },
+          async getInstance() {
+            return null
+          },
+          async listInstances() {
+            return []
+          },
+        },
         websocket: await this.createWebSocketService(),
         security: await this.createSecurityService(),
         validation: await this.createValidationService(),
