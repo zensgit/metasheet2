@@ -191,6 +191,82 @@ function installOverviewMock(): void {
   })
 }
 
+function installZeroStateMock(): void {
+  vi.mocked(apiFetch).mockImplementation(async (input) => {
+    const url = typeof input === 'string' ? input : input.url
+
+    if (url.includes('/api/attendance/summary?')) {
+      return jsonResponse(200, {
+        ok: true,
+        data: {
+          total_days: 0,
+          total_minutes: 0,
+          total_late_minutes: 0,
+          total_early_leave_minutes: 0,
+          normal_days: 0,
+          late_days: 0,
+          early_leave_days: 0,
+          late_early_days: 0,
+          partial_days: 0,
+          absent_days: 0,
+          adjusted_days: 0,
+          off_days: 0,
+          leave_minutes: 0,
+          overtime_minutes: 0,
+        },
+      })
+    }
+    if (url.includes('/api/attendance/records?')) {
+      return jsonResponse(200, {
+        ok: true,
+        data: {
+          items: [],
+          total: 0,
+        },
+      })
+    }
+    if (url.includes('/api/attendance/requests?')) {
+      return jsonResponse(200, {
+        ok: true,
+        data: {
+          items: [],
+        },
+      })
+    }
+    if (url.includes('/api/attendance/anomalies?')) {
+      return jsonResponse(200, {
+        ok: true,
+        data: {
+          items: [],
+        },
+      })
+    }
+    if (url.includes('/api/attendance/reports/requests?')) {
+      return jsonResponse(200, { ok: true, data: { items: [] } })
+    }
+    if (url.includes('/api/attendance/holidays?')) {
+      return jsonResponse(200, { ok: true, data: { items: [] } })
+    }
+    if (url.includes('/api/attendance/settings')) {
+      return jsonResponse(200, { ok: true, data: {} })
+    }
+    if (url.includes('/api/attendance/rules/default')) {
+      return jsonResponse(200, { ok: true, data: {} })
+    }
+    if (url.includes('/api/attendance/rule-templates')) {
+      return jsonResponse(200, { ok: true, data: { system: [], library: [], versions: [] } })
+    }
+    if (url.includes('/api/attendance/leave-types')) {
+      return jsonResponse(200, { ok: true, data: { items: [] } })
+    }
+    if (url.includes('/api/attendance/overtime-rules')) {
+      return jsonResponse(200, { ok: true, data: { items: [] } })
+    }
+
+    return jsonResponse(200, { ok: true, data: { items: [], total: 0 } })
+  })
+}
+
 describe('Attendance self-service dashboard', () => {
   let app: App<Element> | null = null
   let container: HTMLDivElement | null = null
@@ -288,6 +364,24 @@ describe('Attendance self-service dashboard', () => {
     await flushUi(3)
     expect(requestType?.value).toBe('missed_check_in')
     expect(workDate?.value).toBe('2026-04-15')
+  })
+
+  it('explains zero-data onboarding when no attendance records exist yet', async () => {
+    installZeroStateMock()
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi()
+
+    const statusCard = container!.querySelector('[data-selfservice-card="status"]')?.textContent ?? ''
+    const setupHint = container!.querySelector('[data-selfservice-setup-hint]')?.textContent ?? ''
+    const focusList = container!.querySelector('[data-selfservice-focus-list]')?.textContent ?? ''
+    const actionsCard = container!.querySelector('[data-selfservice-card="actions"]')?.textContent ?? ''
+
+    expect(statusCard).toContain('No attendance data is available in this range yet.')
+    expect(setupHint).toContain('you may not be assigned to an attendance group yet')
+    expect(setupHint).toContain('confirm your group and shift setup')
+    expect(focusList).toContain('Check attendance setup')
+    expect(actionsCard).toContain('Wait for attendance setup')
   })
 
   it('surfaces punch-too-soon failures with status code, hint, and retry affordance', async () => {

@@ -148,6 +148,13 @@
                 : tr('No anomaly reminders in the current range.', '当前区间内没有异常提醒。')
             }}
           </p>
+          <p
+            v-if="selfServiceNeedsSetupHint"
+            class="attendance__field-hint attendance__field-hint--strong"
+            data-selfservice-setup-hint
+          >
+            {{ selfServiceSetupFollowupHint }}
+          </p>
           <ul class="attendance__selfservice-focus-list" data-selfservice-focus-list>
             <li v-for="item in selfServiceFocusItems" :key="item.key" class="attendance__selfservice-focus-item">
               <div class="attendance__selfservice-focus-copy">
@@ -5736,7 +5743,12 @@ const activeWorkbenchLatestPunchLabel = computed(() => {
 })
 
 const activeWorkbenchStatusDescription = computed(() =>
-  describeAttendanceStatus(activeWorkbenchRecord.value?.status)
+  selfServiceNeedsSetupHint.value
+    ? tr(
+      'No attendance data is available in this range yet.',
+      '当前区间内还没有考勤数据。',
+    )
+    : describeAttendanceStatus(activeWorkbenchRecord.value?.status)
 )
 
 const activeWorkbenchLateEarlyLabel = computed(() => {
@@ -5751,6 +5763,41 @@ const activeWorkbenchAttentionCount = computed(() => {
   if (!focusDate) return anomalies.value.length
   return anomalies.value.filter(item => item.workDate === focusDate).length
 })
+
+function attendanceSummaryHasSignal(value: AttendanceSummary | null): boolean {
+  if (!value) return false
+  return [
+    value.total_days,
+    value.total_minutes,
+    value.total_late_minutes ?? 0,
+    value.total_early_leave_minutes ?? 0,
+    value.normal_days,
+    value.late_days,
+    value.early_leave_days,
+    value.late_early_days,
+    value.partial_days,
+    value.absent_days,
+    value.adjusted_days,
+    value.off_days,
+    value.leave_minutes ?? 0,
+    value.overtime_minutes ?? 0,
+  ].some(item => Number(item) > 0)
+}
+
+const selfServiceNeedsSetupHint = computed(() => {
+  if (!summary.value) return false
+  if (records.value.length > 0 || requests.value.length > 0 || anomalies.value.length > 0) {
+    return false
+  }
+  return !attendanceSummaryHasSignal(summary.value)
+})
+
+const selfServiceSetupFollowupHint = computed(() =>
+  tr(
+    'If you recently joined or expected a schedule here, you may not be assigned to an attendance group yet. Ask an attendance admin to confirm your group and shift setup.',
+    '如果你是新入职员工，或原本应在这里看到班次/记录，可能还未被分配到考勤组。请联系考勤管理员确认你的分组和班次配置。',
+  )
+)
 
 function countRequestsByStatus(status: string): number {
   return requests.value.filter(item => item.status === status).length
@@ -5892,6 +5939,18 @@ const attendanceStatusGuideItems = computed<AttendanceSelfServiceStatusGuideItem
 ])
 
 const selfServiceFocusItems = computed<AttendanceSelfServiceFocusItem[]>(() => {
+  if (selfServiceNeedsSetupHint.value) {
+    return [
+      {
+        key: 'setup-guidance',
+        title: tr('Check attendance setup', '检查考勤配置'),
+        detail: selfServiceSetupFollowupHint.value,
+        action: null,
+        actionLabel: null,
+      },
+    ]
+  }
+
   const items: AttendanceSelfServiceFocusItem[] = []
   const focusRecord = activeWorkbenchRecord.value
   const attentionCount = activeWorkbenchAttentionCount.value
@@ -5953,6 +6012,15 @@ const selfServiceFocusItems = computed<AttendanceSelfServiceFocusItem[]>(() => {
 })
 
 const selfServicePrimaryAction = computed<AttendanceSelfServiceFocusItem>(() => {
+  if (selfServiceNeedsSetupHint.value) {
+    return {
+      key: 'setup-wait',
+      title: tr('Wait for attendance setup', '等待考勤配置'),
+      detail: selfServiceSetupFollowupHint.value,
+      action: null,
+      actionLabel: null,
+    }
+  }
   return selfServiceFocusItems.value.find(item => item.action && item.actionLabel) ?? {
     key: 'default-leave',
     title: tr('Start a new attendance request', '发起新的考勤申请'),
@@ -5966,6 +6034,9 @@ const selfServicePrimaryAction = computed<AttendanceSelfServiceFocusItem>(() => 
 })
 
 const selfServiceQuickActionHint = computed(() => {
+  if (selfServiceNeedsSetupHint.value) {
+    return selfServiceSetupFollowupHint.value
+  }
   if (activeWorkbenchAttentionCount.value > 0) {
     return tr(
       'Start with missing-punch handling to resolve the current anomaly reminder.',
