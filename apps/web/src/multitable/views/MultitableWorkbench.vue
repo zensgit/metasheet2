@@ -722,11 +722,7 @@ const activeEditingComment = computed(() => (
 const commentComposerInitialMentions = computed(() => (
   activeEditingComment.value ? buildEditingMentionSuggestions(activeEditingComment.value) : []
 ))
-const commentInboxBadgeCount = computed(() => (
-  mentionInboxState.unreadMentionCount.value ||
-  mentionInboxState.summary.value?.unresolvedMentionCount ||
-  0
-))
+const commentInboxBadgeCount = computed(() => commentInboxState.unreadCount.value)
 const sheetPresenceLabel = computed(() => (
   `${sheetPresenceState.activeCollaboratorCount.value} ${sheetPresenceState.activeCollaboratorCount.value === 1 ? 'active collaborator' : 'active collaborators'}`
 ))

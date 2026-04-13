@@ -6,6 +6,7 @@ const showSuccessSpy = vi.fn()
 const pushSpy = vi.fn().mockResolvedValue(undefined)
 const useMultitableSheetRealtimeMock = vi.fn()
 let sheetPresenceStateMock: any
+let commentInboxStateMock: any
 const { authAccessSnapshot, bulkImportRecordsMock } = vi.hoisted(() => ({
   authAccessSnapshot: {
     email: 'dev@example.com',
@@ -101,7 +102,7 @@ vi.mock('../src/multitable/composables/useMultitableComments', () => ({
 }))
 
 vi.mock('../src/multitable/composables/useMultitableCommentInbox', () => ({
-  useMultitableCommentInbox: () => ({
+  useMultitableCommentInbox: () => (commentInboxStateMock = {
     unreadCount: ref(0),
     refreshUnreadCount: vi.fn().mockResolvedValue(0),
   }),
@@ -2133,14 +2134,7 @@ describe('MultitableWorkbench view wiring', () => {
     mountWorkbench()
     await flushUi()
 
-    mentionInboxSummaryMock.summary.value = {
-      spreadsheetId: 'sheet_orders',
-      unresolvedMentionCount: 3,
-      unreadMentionCount: 2,
-      mentionedRecordCount: 2,
-      unreadRecordCount: 1,
-      items: [{ rowId: 'rec_1', mentionedCount: 3, unreadCount: 2, mentionedFieldIds: ['fld_title'] }],
-    }
+    commentInboxStateMock.unreadCount.value = 2
     await flushUi()
 
     const inboxButton = Array.from(container!.querySelectorAll<HTMLButtonElement>('button'))
@@ -2150,6 +2144,30 @@ describe('MultitableWorkbench view wiring', () => {
     expect(inboxButton?.textContent).toContain('2')
     expect(inboxButton?.className).toContain('mt-workbench__mgr-btn--attention')
     expect(inboxButton?.getAttribute('title')).toBe('2 comment updates need attention')
+  })
+
+  it('does not show inbox attention when only mention summary remains unread-free', async () => {
+    mountWorkbench()
+    await flushUi()
+
+    mentionInboxSummaryMock.summary.value = {
+      spreadsheetId: 'sheet_orders',
+      unresolvedMentionCount: 3,
+      unreadMentionCount: 0,
+      mentionedRecordCount: 2,
+      unreadRecordCount: 0,
+      items: [{ rowId: 'rec_1', mentionedCount: 3, unreadCount: 0, mentionedFieldIds: ['fld_title'] }],
+    }
+    commentInboxStateMock.unreadCount.value = 0
+    await flushUi()
+
+    const inboxButton = Array.from(container!.querySelectorAll<HTMLButtonElement>('button'))
+      .find((button) => button.textContent?.includes('Comment Inbox'))
+
+    expect(inboxButton).not.toBeNull()
+    expect(inboxButton?.textContent).not.toContain('3')
+    expect(inboxButton?.className).not.toContain('mt-workbench__mgr-btn--attention')
+    expect(inboxButton?.getAttribute('title')).toBe('Open comment inbox')
   })
 
   it('opens the mention popover and selects a mentioned record', async () => {
