@@ -125,52 +125,150 @@ export const IDashboardService = createIdentifier<IDashboardService>('dashboard-
 export const IPresenceService = createIdentifier<IPresenceService>('presence-service');
 export const ICommentService = createIdentifier<ICommentService>('comment-service');
 
+/**
+ * ============================================================================
+ * Comment API Types
+ * ============================================================================
+ *
+ * Naming convention (API contract layer):
+ *
+ * | API field        | DB column        | Frontend alias   | Description                        |
+ * |------------------|------------------|------------------|------------------------------------|
+ * | spreadsheetId    | spreadsheet_id   | containerId      | The sheet/table that owns the row   |
+ * | rowId            | row_id           | targetId         | The record the comment is attached  |
+ * | fieldId          | field_id         | targetFieldId    | Optional cell-level scope           |
+ *
+ * DB column names are intentionally kept as snake_case; the service layer maps
+ * them to camelCase for API responses. Frontend composables may alias
+ * `spreadsheetId` as `containerId` and `rowId` as `targetId` -- both refer to
+ * the same underlying identifiers.
+ *
+ * Deprecated DB columns (exist in schema but unused in code):
+ *   - target_type, target_id, target_field_id, container_type, container_id
+ *   These were added by migration zzzz20260318123000_formalize_meta_comments
+ *   but are NOT read or written anywhere. They are kept for migration safety
+ *   and should NOT be used in new code.
+ *
+ * Mention parsing precedence:
+ *   When creating or updating a comment, mentions can be supplied two ways:
+ *   1. Explicit `mentions: string[]` array in the request body.
+ *   2. Auto-parsed from `content` using the `@[Display Name](user-id)` format.
+ *   If an explicit `mentions` array is provided, it takes precedence and
+ *   content-based parsing is skipped entirely.
+ * ============================================================================
+ */
+
+/** Options for querying comments within a spreadsheet. */
 export interface CommentQueryOptions {
+    /** Filter to a specific record (row). Alias: targetId on frontend. */
     rowId?: string;
+    /** Filter to a specific cell field. */
     fieldId?: string;
+    /** Filter by resolved status. */
     resolved?: boolean;
+    /** Page size (clamped to 1..200, default 50). */
     limit?: number;
+    /** Pagination offset (default 0). */
     offset?: number;
 }
 
+/**
+ * Input for creating a new comment.
+ *
+ * Mention precedence: if `mentions` is provided, those user IDs are used
+ * directly. Otherwise, mentions are auto-parsed from `content` using the
+ * `@[Display Name](user-id)` format.
+ */
 export interface CommentCreateInput {
+    /**
+     * The spreadsheet/table ID that owns the target record.
+     * @deprecated Prefer using `containerId` in frontend code; `spreadsheetId` is the canonical API name.
+     */
     spreadsheetId: string;
+    /**
+     * The record (row) ID the comment is attached to.
+     * @deprecated Prefer using `targetId` in frontend code; `rowId` is the canonical API name.
+     */
     rowId: string;
+    /** Optional cell-level field scope. */
     fieldId?: string;
+    /** Comment body. May contain `@[Display Name](user-id)` mention tokens. */
     content: string;
+    /** User ID of the comment author. */
     authorId: string;
+    /** Parent comment ID for threading (replies). */
     parentId?: string;
+    /**
+     * Explicit mention list. When provided, takes precedence over auto-parsed
+     * mentions from `content`.
+     */
     mentions?: string[];
 }
 
+/**
+ * Input for updating an existing comment.
+ *
+ * Mention precedence: if `mentions` is provided, those user IDs are used
+ * directly. Otherwise, mentions are auto-parsed from `content`.
+ */
 export interface CommentUpdateInput {
+    /** Updated comment body. */
     content: string;
+    /**
+     * Explicit mention list. When provided, takes precedence over auto-parsed
+     * mentions from `content`.
+     */
     mentions?: string[];
 }
 
+/** A single comment record as returned by the API. */
 export interface CommentRecord {
     id: string;
+    /**
+     * The spreadsheet/table ID. Frontend may alias as `containerId`.
+     * @deprecated Prefer `containerId` in frontend composables; `spreadsheetId` is the canonical API name.
+     */
     spreadsheetId: string;
+    /**
+     * The record (row) ID. Frontend may alias as `targetId`.
+     * @deprecated Prefer `targetId` in frontend composables; `rowId` is the canonical API name.
+     */
     rowId: string;
+    /** Optional cell-level field scope. */
     fieldId?: string;
+    /** Comment body text. */
     content: string;
+    /** Author user ID. */
     authorId: string;
+    /** Parent comment ID if this is a reply. */
     parentId?: string;
+    /** Whether this comment thread has been resolved. */
     resolved: boolean;
+    /** ISO 8601 creation timestamp. */
     createdAt: string;
+    /** ISO 8601 last-update timestamp. */
     updatedAt: string;
+    /** User IDs mentioned in this comment. */
     mentions: string[];
 }
 
+/** An inbox entry extends CommentRecord with read/mention state and navigation context. */
 export interface CommentInboxItem extends CommentRecord {
+    /** True if the current user has NOT read this comment. */
     unread: boolean;
+    /** True if the current user is mentioned in this comment. */
     mentioned: boolean;
+    /** The base (workspace) ID for deep-link navigation. */
     baseId?: string | null;
+    /** The sheet ID for deep-link navigation. */
     sheetId?: string | null;
+    /** The default view ID for deep-link navigation. */
     viewId?: string | null;
+    /** The record ID for deep-link navigation. */
     recordId?: string | null;
 }
 
+/** Per-row comment presence summary used by the sheet grid indicator. */
 export interface CommentPresenceSummaryRecord {
     spreadsheetId: string;
     rowId: string;
@@ -180,6 +278,7 @@ export interface CommentPresenceSummaryRecord {
     mentionedFieldCounts: Record<string, number>;
 }
 
+/** Per-row mention summary item. */
 export interface CommentMentionSummaryItem {
     rowId: string;
     mentionedCount: number;
@@ -187,6 +286,7 @@ export interface CommentMentionSummaryItem {
     mentionedFieldIds: string[];
 }
 
+/** Aggregated mention summary for a spreadsheet scoped to a single user. */
 export interface CommentMentionSummary {
     spreadsheetId: string;
     unresolvedMentionCount: number;
@@ -196,14 +296,46 @@ export interface CommentMentionSummary {
     items: CommentMentionSummaryItem[];
 }
 
+/** A candidate user for @-mention autocomplete. */
 export interface CommentMentionCandidate {
     id: string;
     label: string;
     subtitle?: string;
 }
 
+/**
+ * Combined unread summary returned by `getUnreadSummary()`.
+ *
+ * - `unreadCount`: total comments the user has not read (regardless of mention).
+ * - `mentionUnreadCount`: subset of unread comments where the user is explicitly mentioned.
+ *
+ * The general `unreadCount` drives the notification badge; `mentionUnreadCount`
+ * drives the "mentions" tab indicator. These can differ because `getInbox()`
+ * includes both no-read-record items AND mentioned items, while `getUnreadCount()`
+ * historically only counted no-read-record items.
+ */
+export interface CommentUnreadSummary {
+    /** Total unread comments (no read record, excluding own comments). */
+    unreadCount: number;
+    /** Unread comments where the user is explicitly @-mentioned. */
+    mentionUnreadCount: number;
+}
+
 export interface ICommentService {
+    /**
+     * Create a comment.
+     *
+     * Mention precedence: if `data.mentions` is provided, those user IDs are
+     * stored directly. Otherwise, mentions are auto-parsed from `data.content`
+     * using the `@[Display Name](user-id)` format.
+     */
     createComment(data: CommentCreateInput): Promise<CommentRecord>;
+    /**
+     * Update a comment's content and optionally its mentions.
+     *
+     * Mention precedence: if `data.mentions` is provided, those user IDs are
+     * stored directly. Otherwise, mentions are auto-parsed from `data.content`.
+     */
     updateComment(commentId: string, userId: string, data: CommentUpdateInput): Promise<CommentRecord>;
     deleteComment(commentId: string, userId: string): Promise<void>;
     getComments(spreadsheetId: string, options?: CommentQueryOptions): Promise<{ items: CommentRecord[]; total: number }>;
@@ -212,7 +344,13 @@ export interface ICommentService {
       options?: { q?: string; limit?: number },
     ): Promise<{ items: CommentMentionCandidate[]; total: number }>;
     getInbox(userId: string, options?: Pick<CommentQueryOptions, 'limit' | 'offset'>): Promise<{ items: CommentInboxItem[]; total: number }>;
+    /** @deprecated Use `getUnreadSummary()` for richer unread data. */
     getUnreadCount(userId: string): Promise<number>;
+    /**
+     * Return combined unread summary with both general unread count
+     * and mention-specific unread count in a single call.
+     */
+    getUnreadSummary(userId: string): Promise<CommentUnreadSummary>;
     markCommentRead(commentId: string, userId: string): Promise<void>;
     getCommentPresenceSummary(
       spreadsheetId: string,

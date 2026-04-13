@@ -6,6 +6,7 @@ import {
   type CommentInboxItem,
   type CommentMentionCandidate,
   type CommentQueryOptions,
+  type CommentUnreadSummary,
 } from '../di/identifiers'
 import type { CollabService } from './CollabService'
 import { db } from '../db/db'
@@ -116,6 +117,13 @@ export class CommentService {
     private logger: ILogger,
   ) {}
 
+  /**
+   * Update a comment's content and optionally its mentions.
+   *
+   * Mention precedence: if `data.mentions` is provided, those user IDs are
+   * stored directly. Otherwise, mentions are auto-parsed from `data.content`
+   * using the `@[Display Name](user-id)` format.
+   */
   async updateComment(commentId: string, userId: string, data: {
     content: string
     mentions?: string[]
@@ -183,6 +191,13 @@ export class CommentService {
     this.publishCommentDeleted(existing, normalizedUserId)
   }
 
+  /**
+   * Create a new comment, optionally as a reply to an existing thread.
+   *
+   * Mention precedence: if `data.mentions` is provided, those user IDs are
+   * stored directly. Otherwise, mentions are auto-parsed from `data.content`
+   * using the `@[Display Name](user-id)` format.
+   */
   async createComment(data: {
     spreadsheetId: string
     rowId: string
@@ -440,6 +455,35 @@ export class CommentService {
       .executeTakeFirst()
 
     return row ? Number((row as { c: string | number }).c) : 0
+  }
+
+  /**
+   * Return combined unread summary with both general unread count and
+   * mention-specific unread count in a single DB round-trip.
+   *
+   * - `unreadCount`: comments the user has not read (no read record, excluding own).
+   * - `mentionUnreadCount`: subset of the above where the user is @-mentioned.
+   */
+  async getUnreadSummary(userId: string): Promise<CommentUnreadSummary> {
+    const mentionPredicate = sql<boolean>`c.mentions @> ${JSON.stringify([userId])}::jsonb`
+
+    const row = await db
+      .selectFrom('meta_comments as c')
+      .leftJoin('meta_comment_reads as r', (join) =>
+        join.onRef('r.comment_id', '=', 'c.id').on('r.user_id', '=', userId),
+      )
+      .select([
+        sql<number>`count(*)::int`.as('unread_count'),
+        sql<number>`count(*) filter (where ${mentionPredicate})::int`.as('mention_unread_count'),
+      ])
+      .where('c.author_id', '!=', userId)
+      .where(sql<boolean>`r.comment_id is null`)
+      .executeTakeFirst()
+
+    return {
+      unreadCount: row ? Number((row as { unread_count: string | number }).unread_count) : 0,
+      mentionUnreadCount: row ? Number((row as { mention_unread_count: string | number }).mention_unread_count) : 0,
+    }
   }
 
   async markCommentRead(commentId: string, userId: string): Promise<void> {
@@ -820,6 +864,18 @@ export class CommentService {
     return Array.isArray(parsed) ? this.normalizeMentions(parsed) : []
   }
 
+  /**
+   * Extract user IDs from mention tokens embedded in comment content.
+   *
+   * Expected format: `@[Display Name](user-id)`
+   * - `Display Name` is the human-readable label shown in the UI.
+   * - `user-id` is the stable user identifier stored in the mentions array.
+   *
+   * This method is only called when no explicit `mentions` array is provided
+   * in the request body (see mention precedence documentation above).
+   *
+   * @returns De-duplicated, trimmed array of mentioned user IDs.
+   */
   private parseMentions(content: string): string[] {
     const regex = /@\[([^\]]+)\]\(([^)]+)\)/g
     const mentions: string[] = []
@@ -830,6 +886,12 @@ export class CommentService {
     return this.normalizeMentions(mentions)
   }
 
+  /**
+   * De-duplicate and trim a list of mention user IDs.
+   * Non-string and empty-string entries are silently dropped.
+   *
+   * @returns A new array of unique, trimmed, non-empty user ID strings.
+   */
   private normalizeMentions(mentions: Iterable<unknown>): string[] {
     const normalized = new Set<string>()
     for (const mention of mentions) {
