@@ -410,6 +410,25 @@ const rpcLatencySeconds = new client.Histogram({
   buckets: [0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2, 5]
 })
 
+// Metrics Stream (real-time WebSocket streaming)
+const metricsStreamClients = new client.Gauge({
+  name: 'metasheet_metrics_stream_clients',
+  help: 'Active metrics streaming clients',
+  labelNames: [] as const
+})
+
+const metricsStreamPushesTotal = new client.Counter({
+  name: 'metasheet_metrics_stream_pushes_total',
+  help: 'Total push events sent via metrics stream',
+  labelNames: [] as const
+})
+
+const metricsStreamErrorsTotal = new client.Counter({
+  name: 'metasheet_metrics_stream_errors_total',
+  help: 'Total metrics stream push errors',
+  labelNames: [] as const
+})
+
 registry.registerMetric(httpHistogram)
 registry.registerMetric(httpSummary)
 registry.registerMetric(httpRequestsTotal)
@@ -473,6 +492,9 @@ registry.registerMetric(bpmnMessageEventsTotal)
 registry.registerMetric(bpmnProcessErrorsTotal)
 registry.registerMetric(bpmnStuckInstancesGauge)
 registry.registerMetric(rpcLatencySeconds)
+registry.registerMetric(metricsStreamClients)
+registry.registerMetric(metricsStreamPushesTotal)
+registry.registerMetric(metricsStreamErrorsTotal)
 
 export function installMetrics(app: Application) {
   app.get('/metrics', async (_req, res) => {
@@ -571,7 +593,11 @@ export const metrics = {
   bpmnProcessErrorsTotal,
   bpmnStuckInstancesGauge,
   // RPC Latency
-  rpcLatencySeconds
+  rpcLatencySeconds,
+  // Metrics Stream
+  metricsStreamClients,
+  metricsStreamPushesTotal,
+  metricsStreamErrorsTotal
 }
 
 /**
