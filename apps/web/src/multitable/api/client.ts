@@ -41,6 +41,7 @@ import type {
   MetaFieldPermissionEntry,
   MetaViewPermissionEntry,
   RecordPermissionEntry,
+  AutomationRule,
 } from '../types'
 import { apiFetch } from '../../utils/api'
 
@@ -713,6 +714,45 @@ export class MultitableApiClient {
   async deleteRecordPermission(sheetId: string, recordId: string, permissionId: string): Promise<void> {
     const res = await this.fetch(
       `/api/multitable/sheets/${encodeURIComponent(sheetId)}/records/${encodeURIComponent(recordId)}/permissions/${encodeURIComponent(permissionId)}`,
+      { method: 'DELETE' },
+    )
+    await parseJson(res)
+  }
+
+  // --- Automation rules ---
+  async listAutomationRules(sheetId: string): Promise<AutomationRule[]> {
+    const res = await this.fetch(`/api/multitable/sheets/${encodeURIComponent(sheetId)}/automations`)
+    const data = await parseJson<{ rules: AutomationRule[] }>(res)
+    return Array.isArray(data?.rules) ? data.rules : []
+  }
+
+  async createAutomationRule(
+    sheetId: string,
+    rule: Omit<AutomationRule, 'id' | 'sheetId' | 'enabled' | 'createdAt' | 'updatedAt' | 'createdBy'>,
+  ): Promise<AutomationRule> {
+    const res = await this.fetch(`/api/multitable/sheets/${encodeURIComponent(sheetId)}/automations`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(rule),
+    })
+    return parseJson<AutomationRule>(res)
+  }
+
+  async updateAutomationRule(sheetId: string, ruleId: string, updates: Partial<AutomationRule>): Promise<void> {
+    const res = await this.fetch(
+      `/api/multitable/sheets/${encodeURIComponent(sheetId)}/automations/${encodeURIComponent(ruleId)}`,
+      {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(updates),
+      },
+    )
+    await parseJson(res)
+  }
+
+  async deleteAutomationRule(sheetId: string, ruleId: string): Promise<void> {
+    const res = await this.fetch(
+      `/api/multitable/sheets/${encodeURIComponent(sheetId)}/automations/${encodeURIComponent(ruleId)}`,
       { method: 'DELETE' },
     )
     await parseJson(res)
