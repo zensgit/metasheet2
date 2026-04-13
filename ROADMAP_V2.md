@@ -260,21 +260,18 @@ METRICS_URL="http://production:4000/metrics/prom" ./scripts/phase5-observe.sh
  - [x] 系统健康聚合看板 (Health Aggregation)
  - [x] 综合负载与混沌测试 (Chaos Testing)
 
- ### Sprint 8: 实时洞察与高级可靠性 (Real-time Insights & Reliability)
- - [ ] WebSocket 实时指标流
- - [ ] 幂等性机制 (Idempotency)
- - [ ] RPC 延迟直方图
- - [ ] 金丝雀路由基础
+ ### Sprint 8: 实时洞察与高级可靠性 (Real-time Insights & Reliability) ✅ 已完成
+ - [x] WebSocket 实时指标流 (PR #844, MetricsStreamService, delta compression, backpressure)
+ - [x] 幂等性机制 (PR #843, Redis store + message dedup + event replay safety)
+ - [x] RPC 延迟直方图 (PR #842, metasheet_rpc_latency_seconds histogram)
+ - [x] 金丝雀路由基础 (PR #845, CanaryRouter + CanaryMetrics + Admin API)
 
  ## Near-Term Planned (Legacy)
 - Plugin hot swap during reload (cache module state)
 
 ## Future Enhancements
-- RPC latency histogram & active correlations gauge
 - Auditing expansion & structured logs
-- WebSocket real-time metrics streaming
 - Multi-region deployment support
-- 金丝雀发布流程
 - 多环境审批策略
 - 合规报告自动生成 (SOC2/ISO)
 - 变更日历可视化
