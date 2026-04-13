@@ -116,7 +116,23 @@ function getClientIP(req: Request): string {
 }
 
 function resolveRequestTenantId(req: Request): string | undefined {
-  return extractTenantFromHeaders(req.headers as Record<string, unknown> | undefined)
+  const headers = req.headers as Record<string, unknown> | undefined
+  const body = req.body && typeof req.body === 'object' ? req.body as Record<string, unknown> : undefined
+  const query = req.query && typeof req.query === 'object' ? req.query as Record<string, unknown> : undefined
+  const resolveString = (value: unknown): string | undefined => {
+    if (typeof value !== 'string') return undefined
+    const trimmed = value.trim()
+    return trimmed.length > 0 ? trimmed : undefined
+  }
+
+  return (
+    extractTenantFromHeaders(headers)
+    || resolveString(headers?.['x-workspace-id'])
+    || resolveString(body?.tenantId)
+    || resolveString(body?.workspaceId)
+    || resolveString(query?.tenantId)
+    || resolveString(query?.workspaceId)
+  )
 }
 
 function checkRateLimit(key: string, maxAttempts: number): { allowed: boolean; retryAfter?: number } {

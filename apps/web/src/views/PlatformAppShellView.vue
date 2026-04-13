@@ -56,7 +56,7 @@
             </div>
             <div>
               <dt>Install state</dt>
-              <dd>{{ resolvePlatformAppInstallState(app) }}</dd>
+              <dd>{{ resolvePlatformAppInstallState(app, runtimeInstallState) }}</dd>
             </div>
             <div>
               <dt>Entry path</dt>
@@ -177,6 +177,7 @@ import {
   resolvePlatformAppInstanceLabel,
   resolvePlatformAppPrimaryAction,
   resolvePlatformAppProjectLabel,
+  setPlatformAppRuntimeInstallState,
   usePlatformApps,
 } from '../composables/usePlatformApps'
 import { apiGet, apiPost } from '../utils/api'
@@ -204,7 +205,6 @@ const { apps, loading, error, fetchAppById } = usePlatformApps()
 
 const appId = computed(() => String(route.params.appId || ''))
 const app = computed(() => apps.value.find((item) => item.id === appId.value) || null)
-const primaryAction = computed(() => (app.value ? resolvePlatformAppPrimaryAction(app.value) : null))
 const visibleNavigationItems = computed(() =>
   (app.value?.navigation ?? []).filter((item) => item.location !== 'hidden'),
 )
@@ -214,9 +214,25 @@ const actionError = ref<string | null>(null)
 const runtimeCurrent = ref<RuntimeCurrentSnapshot | null>(null)
 const runtimeCurrentError = ref<string | null>(null)
 const runtimeWarnings = computed(() => runtimeCurrent.value?.installResult?.warnings ?? [])
+const runtimeInstallState = computed(() => resolveRuntimeInstallState(runtimeCurrent.value))
+const primaryAction = computed(() => (app.value ? resolvePlatformAppPrimaryAction(app.value, runtimeInstallState.value) : null))
 const showRuntimeDiagnostics = computed(() =>
   Boolean(app.value?.runtimeBindings?.currentPath || runtimeCurrent.value || runtimeCurrentError.value),
 )
+
+function resolveRuntimeInstallState(snapshot: RuntimeCurrentSnapshot | null): 'not-installed' | 'partial' | 'failed' | null {
+  if (!snapshot) return null
+  if (snapshot.status === 'partial' || snapshot.status === 'failed' || snapshot.status === 'not-installed') {
+    return snapshot.status
+  }
+
+  const installResultStatus = snapshot.installResult?.status
+  if (installResultStatus === 'partial' || installResultStatus === 'failed') {
+    return installResultStatus
+  }
+
+  return null
+}
 
 function normalizeRuntimeCurrentSnapshot(payload: unknown): RuntimeCurrentSnapshot | null {
   const candidate = payload && typeof payload === 'object' && 'data' in (payload as Record<string, unknown>)
@@ -266,6 +282,7 @@ async function loadRuntimeCurrent(targetApp: NonNullable<typeof app.value>): Pro
   if (!targetApp.runtimeBindings?.currentPath) {
     runtimeCurrent.value = null
     runtimeCurrentError.value = null
+    setPlatformAppRuntimeInstallState(targetApp.id, null)
     return
   }
 
@@ -273,6 +290,7 @@ async function loadRuntimeCurrent(targetApp: NonNullable<typeof app.value>): Pro
     const response = await apiGet<unknown>(targetApp.runtimeBindings.currentPath)
     runtimeCurrent.value = normalizeRuntimeCurrentSnapshot(response)
     runtimeCurrentError.value = null
+    setPlatformAppRuntimeInstallState(targetApp.id, resolveRuntimeInstallState(runtimeCurrent.value))
   } catch (err: any) {
     runtimeCurrent.value = null
     runtimeCurrentError.value = err?.message || 'Failed to load runtime diagnostics'
@@ -282,7 +300,7 @@ async function loadRuntimeCurrent(targetApp: NonNullable<typeof app.value>): Pro
 async function load(): Promise<void> {
   if (!appId.value) return
   actionError.value = null
-  const nextApp = await fetchAppById(appId.value, { force: true })
+  const nextApp = await fetchAppById(appId.value, { force: true, syncRuntimeState: false })
   if (nextApp) {
     await loadRuntimeCurrent(nextApp)
   } else {
@@ -300,7 +318,7 @@ async function runPrimaryAction(): Promise<void> {
     actionError.value = null
     try {
       await apiPost(primaryAction.value.mutation.path, primaryAction.value.mutation.payload)
-      const nextApp = await fetchAppById(appId.value, { force: true })
+      const nextApp = await fetchAppById(appId.value, { force: true, syncRuntimeState: false })
       if (nextApp) {
         await loadRuntimeCurrent(nextApp)
       }

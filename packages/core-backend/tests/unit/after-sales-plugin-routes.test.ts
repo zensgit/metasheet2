@@ -962,7 +962,7 @@ describe('plugin-after-sales routes', () => {
     })
   })
 
-  it('returns 401 when tenantId is missing from both request and tenant context', async () => {
+  it('falls back to default tenant scope when tenantId is missing but user is authenticated', async () => {
     const handler = routes.get('GET /api/after-sales/projects/current')
     const res = new FakeResponse()
     const req = buildReq({
@@ -978,12 +978,15 @@ describe('plugin-after-sales routes', () => {
 
     await handler?.(req, res)
 
-    expect(res.statusCode).toBe(401)
+    expect(platformAppInstanceGet).toHaveBeenCalledWith({
+      workspaceId: 'default',
+      appId: 'after-sales',
+    })
+    expect(res.statusCode).toBe(200)
     expect(res.body).toEqual({
-      ok: false,
-      error: {
-        code: 'UNAUTHORIZED',
-        message: 'tenantId not found',
+      ok: true,
+      data: {
+        status: 'not-installed',
       },
     })
   })

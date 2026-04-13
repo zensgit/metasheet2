@@ -1,5 +1,6 @@
 import { Router, type Request, type Response } from 'express'
 import { poolManager } from '../integration/db/connection-pool'
+import { tenantContext } from '../db/sharding/tenant-context'
 import type { PluginLoader } from '../core/plugin-loader'
 import {
   collectPlatformApps,
@@ -25,7 +26,34 @@ function resolveTenantId(req: Request): string {
   if (typeof req.user?.tenantId === 'string' && req.user.tenantId.trim().length > 0) {
     return req.user.tenantId.trim()
   }
+  const currentTenantId = tenantContext.getTenantId()
+  if (typeof currentTenantId === 'string' && currentTenantId.trim().length > 0) {
+    return currentTenantId.trim()
+  }
+  if (req.user?.id != null || req.user?.sub != null || req.user?.userId != null) {
+    return 'default'
+  }
   return ''
+}
+
+async function queryPlatformAppInstances(
+  tenantId: string,
+  sql: string,
+  params?: unknown[],
+): Promise<{ rows: unknown[]; rowCount?: number | null }> {
+  const shardedPoolManager = tenantContext.getPoolManager()
+  const result = tenantId && shardedPoolManager
+    ? await shardedPoolManager.queryForTenant(tenantId, sql, params)
+    : await poolManager.get().query(sql, params)
+
+  return {
+    rows: Array.isArray((result as { rows?: unknown[] }).rows)
+      ? (result as { rows: unknown[] }).rows
+      : [],
+    rowCount: typeof (result as { rowCount?: number }).rowCount === 'number'
+      ? (result as { rowCount: number }).rowCount
+      : undefined,
+  }
 }
 
 async function attachInstance(
@@ -35,9 +63,8 @@ async function attachInstance(
   const tenantId = resolveTenantId(req)
   if (!tenantId) return { ...app, instance: null }
 
-  const pool = poolManager.get()
   const instance = await getPlatformAppInstance(
-    async (sql, params) => pool.query(sql, params),
+    async (sql, params) => queryPlatformAppInstances(tenantId, sql, params),
     {
       workspaceId: tenantId,
       appId: String(app.id || ''),
@@ -68,9 +95,8 @@ export function createPlatformAppsRouter(options: PlatformAppsRouterOptions): Ro
         })
       }
 
-      const pool = poolManager.get()
       const instances = await listPlatformAppInstances(
-        async (sql, params) => pool.query(sql, params),
+        async (sql, params) => queryPlatformAppInstances(tenantId, sql, params),
         {
           workspaceId: tenantId,
           appIds: apps.map((item) => item.id),

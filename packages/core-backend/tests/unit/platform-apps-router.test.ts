@@ -6,11 +6,21 @@ import type { Router } from 'express'
 import type { LoadedPlugin } from '../../src/core/plugin-loader'
 
 const queryMock = vi.fn()
+const queryForTenantMock = vi.fn()
 
 vi.mock('../../src/integration/db/connection-pool', () => ({
   poolManager: {
     get: () => ({
       query: queryMock,
+    }),
+  },
+}))
+
+vi.mock('../../src/db/sharding/tenant-context', () => ({
+  tenantContext: {
+    getTenantId: () => undefined,
+    getPoolManager: () => ({
+      queryForTenant: queryForTenantMock,
     }),
   },
 }))
@@ -77,6 +87,7 @@ function createMockResponse() {
 describe('platform apps router', () => {
   beforeEach(() => {
     queryMock.mockReset()
+    queryForTenantMock.mockReset()
   })
 
   it('returns app list with tenant-scoped instance state', async () => {
@@ -97,7 +108,7 @@ describe('platform apps router', () => {
       integrations: [],
     })
 
-    queryMock.mockResolvedValue({
+    queryForTenantMock.mockResolvedValue({
       rows: [{
         id: 'pai_1',
         tenant_id: 'tenant_42',
@@ -145,6 +156,12 @@ describe('platform apps router', () => {
         status: 'active',
       },
     })
+    expect(queryForTenantMock).toHaveBeenCalledWith(
+      'tenant_42',
+      expect.stringContaining('FROM platform_app_instances'),
+      ['tenant_42', ['after-sales']],
+    )
+    expect(queryMock).not.toHaveBeenCalled()
   })
 
   it('returns a single app with null instance when tenant context is absent', async () => {
@@ -224,5 +241,69 @@ describe('platform apps router', () => {
       instance: null,
     })
     expect(queryMock).not.toHaveBeenCalled()
+  })
+
+  it('falls back to default tenant scope for authenticated users without tenantId', async () => {
+    const loaded = createLoadedPlugin('plugin-after-sales', {
+      id: 'after-sales',
+      version: '0.1.0',
+      displayName: 'After Sales',
+      pluginId: 'plugin-after-sales',
+      boundedContext: { code: 'after-sales' },
+      platformDependencies: ['multitable'],
+      navigation: [
+        { id: 'home', title: 'After Sales', path: '/p/plugin-after-sales/after-sales', location: 'main-nav', order: 1 },
+      ],
+      permissions: [],
+      featureFlags: [],
+      objects: [],
+      workflows: [],
+      integrations: [],
+    })
+
+    queryForTenantMock.mockResolvedValue({
+      rows: [{
+        id: 'pai_default',
+        tenant_id: 'default',
+        workspace_id: 'default',
+        app_id: 'after-sales',
+        plugin_id: 'plugin-after-sales',
+        instance_key: 'primary',
+        project_id: 'default:after-sales',
+        display_name: 'Default Support',
+        status: 'active',
+        config_json: '{}',
+        metadata_json: '{}',
+      }],
+      rowCount: 1,
+    })
+
+    const router = createPlatformAppsRouter({
+      pluginLoader: {
+        getPlugins: () => new Map([['plugin-after-sales', loaded]]),
+      } as any,
+    })
+    const handler = getRouteHandler(router, 'get', '/:appId')
+    const response = createMockResponse()
+
+    await handler({
+      params: { appId: 'after-sales' },
+      headers: {},
+      user: { id: 'user_42' },
+    }, response)
+
+    expect(response.statusCode).toBe(200)
+    expect(response.body).toMatchObject({
+      id: 'after-sales',
+      instance: {
+        workspaceId: 'default',
+        projectId: 'default:after-sales',
+      },
+    })
+    expect(queryForTenantMock).toHaveBeenCalledWith(
+      'default',
+      expect.stringContaining('FROM platform_app_instances'),
+      ['default', 'after-sales', 'primary'],
+    )
   })
 })

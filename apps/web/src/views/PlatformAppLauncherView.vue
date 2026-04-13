@@ -257,6 +257,11 @@ onMounted(async () => {
   color: #991b1b;
 }
 
+.platform-app-launcher__instance[data-state='partial'] {
+  background: #ffedd5;
+  color: #9a3412;
+}
+
 .platform-app-launcher__action-copy {
   color: #475569;
   font-size: 14px;

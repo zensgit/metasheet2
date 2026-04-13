@@ -50,6 +50,8 @@ describe('useAuth', () => {
     store.auth_token = 'auth-token'
     store.jwt = 'jwt-token'
     store.devToken = 'dev-token'
+    store.tenantId = 'tenant_42'
+    store.workspaceId = 'tenant_42'
 
     const { clearToken, getToken } = useAuth()
     clearToken()
@@ -57,22 +59,30 @@ describe('useAuth', () => {
     expect(store.auth_token).toBeUndefined()
     expect(store.jwt).toBeUndefined()
     expect(store.devToken).toBeUndefined()
+    expect(store.tenantId).toBeUndefined()
+    expect(store.workspaceId).toBeUndefined()
     expect(getToken()).toBeNull()
   })
 
   it('refreshes dev token and stores aliases', async () => {
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+    store.tenantId = 'tenant_42'
+    const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
       json: async () => ({ token: 'dev-jwt-token' }),
-    }))
+    })
+    vi.stubGlobal('fetch', fetchMock)
 
-    const { refreshDevToken, getToken } = useAuth()
+    const { refreshDevToken, getToken, buildAuthHeaders } = useAuth()
     await expect(refreshDevToken()).resolves.toBe('dev-jwt-token')
 
     expect(store.auth_token).toBe('dev-jwt-token')
     expect(store.jwt).toBe('dev-jwt-token')
     expect(store.devToken).toBe('dev-jwt-token')
+    expect(store.tenantId).toBe('tenant_42')
+    expect(store.workspaceId).toBe('tenant_42')
     expect(getToken()).toBe('dev-jwt-token')
+    expect(buildAuthHeaders()['x-tenant-id']).toBe('tenant_42')
+    expect(fetchMock).toHaveBeenCalledWith(expect.stringContaining('tenantId=tenant_42'))
   })
 
   it('derives admin access from token payload and stored permissions', () => {
@@ -97,6 +107,7 @@ describe('useAuth', () => {
 
   it('bootstraps session only once for the same token and reuses the cached payload', async () => {
     store.jwt = 'stable-token'
+    store.tenantId = 'tenant_42'
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
       status: 200,
@@ -127,6 +138,12 @@ describe('useAuth', () => {
     expect(first.ok).toBe(true)
     expect(second.ok).toBe(true)
     expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({
+      headers: expect.objectContaining({
+        Authorization: 'Bearer stable-token',
+        'x-tenant-id': 'tenant_42',
+      }),
+    })
     expect(getAccessSnapshot().roles).toContain('admin')
     expect(getAccessSnapshot().permissions).toContain('users:write')
     expect(store.user_roles).toBe(JSON.stringify(['admin']))

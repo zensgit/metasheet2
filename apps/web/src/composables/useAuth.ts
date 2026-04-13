@@ -2,6 +2,7 @@ import { getApiBase } from '../utils/api'
 
 const TOKEN_KEYS = ['auth_token', 'jwt', 'devToken'] as const
 const USER_SNAPSHOT_KEYS = ['user_permissions', 'user_roles'] as const
+const TENANT_HINT_KEYS = ['tenantId', 'workspaceId'] as const
 
 type AuthAccessSnapshot = {
   email: string
@@ -57,12 +58,15 @@ function persistUserSnapshot(user: unknown): void {
   }
 }
 
-function resetSessionBootstrap(clearUserSnapshot = false) {
+function resetSessionBootstrap(clearUserSnapshot = false, clearTenantHint = false) {
   sessionPromise = null
   sessionToken = null
   sessionCache = null
   if (clearUserSnapshot) {
     clearStoredUserSnapshot()
+  }
+  if (clearTenantHint) {
+    clearStoredTenantHint()
   }
 }
 
@@ -84,6 +88,25 @@ function extractUserId(user: unknown): string | null {
   return null
 }
 
+function extractTenantHint(value: unknown): string | null {
+  if (!value || typeof value !== 'object') return null
+  const record = value as Record<string, unknown>
+  const raw = record.tenantId ?? record.workspaceId
+  if (typeof raw === 'string' && raw.trim().length > 0) return raw.trim()
+  return null
+}
+
+function clearStoredTenantHint(): void {
+  try {
+    if (typeof localStorage === 'undefined') return
+    for (const key of TENANT_HINT_KEYS) {
+      localStorage.removeItem(key)
+    }
+  } catch (err) {
+    console.warn('[auth] failed to clear tenant hint from localStorage', err)
+  }
+}
+
 export function useAuth() {
   function readStoredToken(): string | null {
     try {
@@ -100,6 +123,51 @@ export function useAuth() {
     }
   }
 
+  function readStoredTenantHint(): string | null {
+    try {
+      if (typeof localStorage === 'undefined') return null
+      for (const key of TENANT_HINT_KEYS) {
+        const value = localStorage.getItem(key)
+        if (typeof value === 'string' && value.trim().length > 0) {
+          return value.trim()
+        }
+      }
+    } catch (err) {
+      console.warn('[auth] failed to read tenant hint from localStorage', err)
+    }
+    return null
+  }
+
+  function persistTenantHint(tenantId: string | null): void {
+    if (!tenantId || typeof localStorage === 'undefined') return
+    try {
+      localStorage.setItem('tenantId', tenantId)
+      localStorage.setItem('workspaceId', tenantId)
+    } catch (err) {
+      console.warn('[auth] failed to persist tenant hint in localStorage', err)
+    }
+  }
+
+  function readLocationTenantHint(): string | null {
+    try {
+      if (typeof window === 'undefined') return null
+      const params = new URLSearchParams(window.location.search || '')
+      for (const key of TENANT_HINT_KEYS) {
+        const value = params.get(key)
+        if (typeof value === 'string' && value.trim().length > 0) {
+          return value.trim()
+        }
+      }
+    } catch (err) {
+      console.warn('[auth] failed to read tenant hint from location', err)
+    }
+    return null
+  }
+
+  function readTenantHint(): string | null {
+    return readStoredTenantHint() || readLocationTenantHint()
+  }
+
   function getToken(): string | null {
     return readStoredToken()
   }
@@ -110,13 +178,15 @@ export function useAuth() {
       if (typeof localStorage === 'undefined') return
       localStorage.setItem('auth_token', token)
       localStorage.setItem('jwt', token)
+      clearStoredTenantHint()
+      persistTenantHint(extractTenantHint(parseJwtPayload(token)) || readLocationTenantHint())
     } catch (err) {
       console.warn('[auth] failed to persist token in localStorage', err)
     }
   }
 
   function clearToken() {
-    resetSessionBootstrap(true)
+    resetSessionBootstrap(true, true)
     try {
       if (typeof localStorage === 'undefined') return
       for (const key of TOKEN_KEYS) {
@@ -188,7 +258,13 @@ export function useAuth() {
     if (import.meta.env.PROD) return null
 
     try {
-      const response = await fetch(`${getApiBase()}/api/auth/dev-token`)
+      const devTokenUrl = new URL('/api/auth/dev-token', getApiBase())
+      const tenantHint = readTenantHint()
+      if (tenantHint) {
+        devTokenUrl.searchParams.set('tenantId', tenantHint)
+      }
+
+      const response = await fetch(devTokenUrl.toString())
       if (!response.ok) return null
 
       const payload = await response.json().catch(() => ({})) as Record<string, unknown>
@@ -201,6 +277,9 @@ export function useAuth() {
 
       if (!token) return null
       setToken(token)
+      if (tenantHint) {
+        persistTenantHint(tenantHint)
+      }
 
       try {
         if (typeof localStorage !== 'undefined') localStorage.setItem('devToken', token)
@@ -244,9 +323,7 @@ export function useAuth() {
     sessionPromise = (async (): Promise<SessionBootstrapResult> => {
       let resolvedToken = existingToken
       let response = await fetch(`${getApiBase()}/api/auth/me`, {
-        headers: {
-          Authorization: `Bearer ${resolvedToken}`,
-        },
+        headers: buildAuthHeaders(resolvedToken),
       }).catch(() => null)
 
       if (response?.status === 401) {
@@ -255,9 +332,7 @@ export function useAuth() {
           resolvedToken = refreshedToken
           sessionToken = refreshedToken
           response = await fetch(`${getApiBase()}/api/auth/me`, {
-            headers: {
-              Authorization: `Bearer ${resolvedToken}`,
-            },
+            headers: buildAuthHeaders(resolvedToken),
           }).catch(() => null)
         }
       }
@@ -291,6 +366,7 @@ export function useAuth() {
       }
 
       persistUserSnapshot(extractSessionUser(payload))
+      persistTenantHint(extractTenantHint(extractSessionUser(payload)))
       sessionCache = {
         ok: true,
         status: response.status,
@@ -316,12 +392,15 @@ export function useAuth() {
     }
     sessionPromise = null
     persistUserSnapshot(extractSessionUser(payload))
+    persistTenantHint(extractTenantHint(extractSessionUser(payload)))
   }
 
-  function buildAuthHeaders(): Record<string, string> {
+  function buildAuthHeaders(tokenOverride?: string | null): Record<string, string> {
     const headers: Record<string, string> = {}
-    const token = getToken()
+    const token = tokenOverride || getToken()
     if (token) headers['Authorization'] = `Bearer ${token}`
+    const tenantHint = readStoredTenantHint() || readLocationTenantHint() || extractTenantHint(parseJwtPayload(token || ''))
+    if (tenantHint) headers['x-tenant-id'] = tenantHint
     // Dev/test fallback aligns with backend flag behaviour
     if (!headers['Authorization']) headers['x-user-id'] = 'dev-user'
     return headers

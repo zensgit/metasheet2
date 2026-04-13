@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, nextTick, ref, type App as VueApp, type Component, type Ref } from 'vue'
-import type { PlatformAppSummary } from '../src/composables/usePlatformApps'
+import { setPlatformAppRuntimeInstallState, type PlatformAppSummary } from '../src/composables/usePlatformApps'
 
 let currentAppId = 'after-sales'
 const appsRef = ref<PlatformAppSummary[]>([])
@@ -113,6 +113,7 @@ describe('PlatformAppShellView', () => {
     appsRef.value = []
     loadingRef.value = false
     errorRef.value = null
+    setPlatformAppRuntimeInstallState('after-sales', null)
     fetchAppByIdMock.mockReset()
     apiGetMock.mockReset()
     apiPostMock.mockReset()
@@ -124,6 +125,7 @@ describe('PlatformAppShellView', () => {
     if (container) container.remove()
     app = null
     container = null
+    setPlatformAppRuntimeInstallState('after-sales', null)
   })
 
   it('renders runtime diagnostics from the bound current endpoint', async () => {
@@ -258,5 +260,54 @@ describe('PlatformAppShellView', () => {
     expect(fetchAppByIdMock).toHaveBeenCalledTimes(2)
     expect(container.textContent).toContain('App install completed and runtime state has been refreshed.')
     expect(container.textContent).toContain('ledger_2')
+  })
+
+  it('treats partial runtime snapshots as degraded in the shell', async () => {
+    const partialApp = createInstanceApp({
+      instance: {
+        id: 'pai_1',
+        tenantId: 'tenant_42',
+        workspaceId: 'tenant_42',
+        appId: 'after-sales',
+        pluginId: 'plugin-after-sales',
+        instanceKey: 'primary',
+        projectId: 'tenant_42:after-sales',
+        displayName: 'Acme Support',
+        status: 'active',
+        config: {},
+        metadata: {},
+      },
+    })
+
+    appsRef.value = [partialApp]
+    fetchAppByIdMock.mockResolvedValue(partialApp)
+    apiGetMock.mockResolvedValue({
+      ok: true,
+      data: {
+        status: 'partial',
+        projectId: 'tenant_42:after-sales',
+        reportRef: 'ledger_partial',
+        installResult: {
+          status: 'partial',
+          createdObjects: ['serviceTicket'],
+          createdViews: ['ticket-board'],
+          warnings: ['runtime install is incomplete'],
+          reportRef: 'ledger_partial',
+        },
+      },
+    })
+
+    const View = (await import('../src/views/PlatformAppShellView.vue')).default
+
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp(View as Component)
+    app.mount(container)
+    await flushUi()
+
+    const button = container.querySelector('.platform-app-shell__primary') as HTMLButtonElement | null
+    expect(button?.textContent).toContain('Reinstall app')
+    expect(container.textContent).toContain('partial')
+    expect(container.textContent).toContain('runtime install is incomplete')
   })
 })

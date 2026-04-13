@@ -277,8 +277,16 @@ function shouldProvisionObjectInMultitable(obj) {
   return obj.provisioning && typeof obj.provisioning === 'object' && obj.provisioning.multitable === true
 }
 
-function mapInstanceStatusToCurrentStatus(status) {
-  if (status === 'failed') return 'failed'
+function mapInstanceStatusToCurrentStatus(instance) {
+  const installStatus = instance
+    && instance.metadata
+    && typeof instance.metadata.installStatus === 'string'
+    ? instance.metadata.installStatus
+    : ''
+  if (installStatus === 'failed' || installStatus === 'partial' || installStatus === 'installed') {
+    return installStatus
+  }
+  if (instance && instance.status === 'failed') return 'failed'
   return 'installed'
 }
 
@@ -518,7 +526,7 @@ async function runInstall(input) {
           config: config || {},
           metadata: {
             source: 'after-sales-installer',
-            ledgerStatus: 'failed',
+            installStatus: 'failed',
           },
         })
       }
@@ -577,26 +585,6 @@ async function runInstall(input) {
     }
   }
 
-  if (platformAppInstances) {
-    try {
-      await upsertPlatformInstance(context, {
-        tenantId,
-        workspaceId: tenantId,
-        appId: blueprint.appId,
-        pluginId: resolvePluginId(context),
-        projectId,
-        displayName: displayName || '',
-        status: 'active',
-        config: config || {},
-        metadata: {
-          source: 'after-sales-installer',
-        },
-      })
-    } catch (err) {
-      warnings.push(`platform app instance registration failed: ${err && err.message ? err.message : err}`)
-    }
-  }
-
   // Step 11: determine terminal status and write ledger
   const status = warnings.length === 0 ? 'installed' : 'partial'
 
@@ -614,6 +602,28 @@ async function runInstall(input) {
     displayName: displayName || '',
     config: config || {},
   })
+
+  if (platformAppInstances) {
+    try {
+      await upsertPlatformInstance(context, {
+        tenantId,
+        workspaceId: tenantId,
+        appId: blueprint.appId,
+        pluginId: resolvePluginId(context),
+        projectId,
+        displayName: displayName || '',
+        status: status === 'installed' ? 'active' : 'inactive',
+        config: config || {},
+        metadata: {
+          source: 'after-sales-installer',
+          installStatus: status,
+          reportRef: ledgerRow.id,
+        },
+      })
+    } catch (err) {
+      warnings.push(`platform app instance registration failed: ${err && err.message ? err.message : err}`)
+    }
+  }
 
   return {
     projectId,
@@ -672,7 +682,7 @@ async function loadCurrent(context, tenantId, appId) {
   const projectId = (instance && instance.projectId) || (row && row.projectId) || getProjectId(tenantId, appId)
   const status = row
     ? row.status
-    : mapInstanceStatusToCurrentStatus(instance && instance.status)
+    : mapInstanceStatusToCurrentStatus(instance)
   const displayName = (instance && instance.displayName) || (row && row.displayName) || ''
   const config = (row && row.config) || (instance && instance.config) || {}
   const warnings = row && Array.isArray(row.warnings) ? row.warnings : []

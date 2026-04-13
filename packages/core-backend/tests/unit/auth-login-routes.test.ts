@@ -278,6 +278,39 @@ describe('auth login routes', () => {
     )
   })
 
+  it('forwards tenantId from the login request body into the normal login flow', async () => {
+    authServiceMocks.login.mockResolvedValue({
+      user: {
+        id: 'user-1',
+        email: 'admin@example.com',
+        name: 'Admin',
+        role: 'admin',
+        permissions: ['attendance:admin'],
+        tenantId: 'tenant_42',
+        created_at: new Date('2026-03-13T00:00:00.000Z'),
+        updated_at: new Date('2026-03-13T00:00:00.000Z'),
+      },
+      token: 'jwt-login-token',
+    })
+
+    const response = await invokeRoute('post', '/login', {
+      body: {
+        email: 'admin@example.com',
+        password: 'WelcomePass9A',
+        tenantId: 'tenant_42',
+      },
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect(authServiceMocks.login).toHaveBeenCalledWith(
+      'admin@example.com',
+      'WelcomePass9A',
+      expect.objectContaining({
+        tenantId: 'tenant_42',
+      }),
+    )
+  })
+
   it('issues a dev token with an optional tenant claim', async () => {
     const response = await invokeRoute('get', '/dev-token', {
       query: {

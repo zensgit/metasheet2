@@ -72,10 +72,95 @@ function resolveShellRoute(appId: string): string {
   return `/apps/${encodeURIComponent(appId)}`
 }
 
-export function resolvePlatformAppInstallState(app: PlatformAppSummary): string {
+export type PlatformAppRuntimeInstallState = 'not-installed' | 'installed' | 'partial' | 'failed'
+
+const runtimeInstallStateByAppId = ref<Record<string, PlatformAppRuntimeInstallState>>({})
+
+export function setPlatformAppRuntimeInstallState(appId: string, state: PlatformAppRuntimeInstallState | null): void {
+  const next = { ...runtimeInstallStateByAppId.value }
+  if (!state || state === 'installed') {
+    delete next[appId]
+  } else {
+    next[appId] = state
+  }
+  runtimeInstallStateByAppId.value = next
+}
+
+function resolveRuntimeInstallState(
+  app: PlatformAppSummary,
+  runtimeInstallState?: PlatformAppRuntimeInstallState | null,
+): PlatformAppRuntimeInstallState | 'active' | 'inactive' | 'direct' {
   if (app.runtimeModel === 'direct') {
     return 'direct'
   }
+
+  if (runtimeInstallState && runtimeInstallState !== 'installed') {
+    return runtimeInstallState
+  }
+
+  const cachedRuntimeState = runtimeInstallStateByAppId.value[app.id]
+  if (cachedRuntimeState) {
+    return cachedRuntimeState
+  }
+
+  const instanceInstallStatus = app.instance?.metadata?.installStatus
+  if (instanceInstallStatus === 'partial' || instanceInstallStatus === 'failed' || instanceInstallStatus === 'not-installed') {
+    return instanceInstallStatus
+  }
+
+  return app.instance?.status ?? 'not-installed'
+}
+
+function normalizeRuntimeInstallState(payload: unknown): PlatformAppRuntimeInstallState | null {
+  const candidate = payload && typeof payload === 'object' && 'data' in (payload as Record<string, unknown>)
+    ? (payload as { data?: unknown }).data
+    : payload
+  if (!candidate || typeof candidate !== 'object') return null
+
+  const candidateStatus = (candidate as { status?: unknown }).status
+  if (candidateStatus === 'partial' || candidateStatus === 'failed' || candidateStatus === 'not-installed') {
+    return candidateStatus
+  }
+
+  const installResult = (candidate as { installResult?: unknown }).installResult
+  if (!installResult || typeof installResult !== 'object') return null
+
+  const installResultStatus = (installResult as { status?: unknown }).status
+  if (installResultStatus === 'partial' || installResultStatus === 'failed' || installResultStatus === 'not-installed') {
+    return installResultStatus
+  }
+
+  return null
+}
+
+async function syncRuntimeInstallStates(appList: PlatformAppSummary[]): Promise<void> {
+  const currentStateRequests = appList
+    .filter((app) => app.runtimeModel === 'instance' && app.runtimeBindings?.currentPath)
+    .map(async (app) => {
+      try {
+        const response = await apiGet<unknown>(app.runtimeBindings!.currentPath!)
+        setPlatformAppRuntimeInstallState(app.id, normalizeRuntimeInstallState(response))
+      } catch {
+        // Keep the last known install state if the runtime snapshot cannot be refreshed.
+      }
+    })
+
+  await Promise.all(currentStateRequests)
+}
+
+export function resolvePlatformAppInstallState(
+  app: PlatformAppSummary,
+  runtimeInstallState?: PlatformAppRuntimeInstallState | null,
+): string {
+  if (app.runtimeModel === 'direct') {
+    return 'direct'
+  }
+
+  const resolvedRuntimeState = resolveRuntimeInstallState(app, runtimeInstallState)
+  if (resolvedRuntimeState === 'partial' || resolvedRuntimeState === 'failed' || resolvedRuntimeState === 'not-installed') {
+    return resolvedRuntimeState
+  }
+
   return app.instance?.status ?? 'not-installed'
 }
 
@@ -93,7 +178,10 @@ export function resolvePlatformAppInstanceLabel(app: PlatformAppSummary): string
   return app.instance?.displayName || 'App instance not installed for this tenant yet.'
 }
 
-export function resolvePlatformAppPrimaryAction(app: PlatformAppSummary): PlatformAppActionDescriptor {
+export function resolvePlatformAppPrimaryAction(
+  app: PlatformAppSummary,
+  runtimeInstallState?: PlatformAppRuntimeInstallState | null,
+): PlatformAppActionDescriptor {
   if (app.pluginStatus === 'failed') {
     return {
       kind: 'inspect',
@@ -112,7 +200,9 @@ export function resolvePlatformAppPrimaryAction(app: PlatformAppSummary): Platfo
     }
   }
 
-  if (!app.instance) {
+  const resolvedInstallState = resolveRuntimeInstallState(app, runtimeInstallState)
+
+  if (!app.instance || resolvedInstallState === 'not-installed') {
     if (app.runtimeBindings?.installPath) {
       return {
         kind: 'install',
@@ -133,12 +223,12 @@ export function resolvePlatformAppPrimaryAction(app: PlatformAppSummary): Platfo
     }
   }
 
-  if (app.instance.status === 'failed') {
+  if (resolvedInstallState === 'partial' || resolvedInstallState === 'failed') {
     if (app.runtimeBindings?.installPath) {
       return {
         kind: 'reinstall',
         label: 'Reinstall app',
-        description: 'The current app instance is in a failed state. Open the platform shell to reinstall it with the existing runtime contract.',
+        description: 'The current app runtime snapshot is degraded. Open the platform shell to reinstall it with the existing runtime contract.',
         route: resolveShellRoute(app.id),
         mutation: {
           path: app.runtimeBindings.installPath,
@@ -152,12 +242,12 @@ export function resolvePlatformAppPrimaryAction(app: PlatformAppSummary): Platfo
     return {
       kind: 'recover',
       label: 'Open recovery',
-      description: 'The current app instance is in a failed state. Enter the app to repair or reinstall it.',
+      description: 'The current app runtime snapshot is degraded. Enter the app to repair or reinstall it.',
       route: app.entryPath || resolveShellRoute(app.id),
     }
   }
 
-  if (app.instance.status === 'inactive') {
+  if (resolvedInstallState === 'inactive' || app.instance.status === 'inactive') {
     return {
       kind: 'inspect',
       label: 'Review shell',
@@ -222,7 +312,9 @@ async function fetchApps(options?: { force?: boolean }): Promise<void> {
   inflightList = (async () => {
     await runTrackedRequest(async () => {
       const response = await apiGet<{ list?: PlatformAppSummary[] }>('/api/platform/apps')
-      apps.value = sortApps(Array.isArray(response?.list) ? response.list : [])
+      const nextApps = sortApps(Array.isArray(response?.list) ? response.list : [])
+      apps.value = nextApps
+      await syncRuntimeInstallStates(nextApps)
     }, 'Failed to load platform apps')
   })()
 
@@ -233,7 +325,10 @@ async function fetchApps(options?: { force?: boolean }): Promise<void> {
   }
 }
 
-async function fetchAppById(appId: string, options?: { force?: boolean }): Promise<PlatformAppSummary | null> {
+async function fetchAppById(
+  appId: string,
+  options?: { force?: boolean; syncRuntimeState?: boolean },
+): Promise<PlatformAppSummary | null> {
   const normalizedAppId = appId.trim()
   if (!normalizedAppId) return null
   const existing = apps.value.find((item) => item.id === normalizedAppId)
@@ -249,6 +344,9 @@ async function fetchAppById(appId: string, options?: { force?: boolean }): Promi
     const next = apps.value.filter((item) => item.id !== app.id)
     next.push(app)
     apps.value = sortApps(next)
+    if (options?.syncRuntimeState !== false) {
+      await syncRuntimeInstallStates([app])
+    }
     return app
   }, 'Failed to load platform app').finally(() => {
     inflightByAppId.delete(normalizedAppId)

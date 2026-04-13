@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   resolvePlatformAppInstallState,
   resolvePlatformAppPrimaryAction,
+  type PlatformAppRuntimeInstallState,
   type PlatformAppSummary,
 } from '../src/composables/usePlatformApps'
 
@@ -102,6 +103,73 @@ describe('resolvePlatformAppPrimaryAction', () => {
           mode: 'reinstall',
         },
       },
+    })
+  })
+
+  it('treats partial runtime snapshots as degraded install state', () => {
+    const runtimeState: PlatformAppRuntimeInstallState = 'partial'
+    const app = createAppSummary({
+      runtimeBindings: {
+        currentPath: '/api/after-sales/projects/current',
+        installPath: '/api/after-sales/projects/install',
+        installPayload: {
+          templateId: 'after-sales-default',
+        },
+      },
+      instance: {
+        id: 'pai_1',
+        tenantId: 'tenant_42',
+        workspaceId: 'tenant_42',
+        appId: 'after-sales',
+        pluginId: 'plugin-after-sales',
+        instanceKey: 'primary',
+        projectId: 'tenant_42:after-sales',
+        displayName: 'Acme Support',
+        status: 'active',
+        config: {},
+        metadata: {},
+      },
+    })
+
+    expect(resolvePlatformAppInstallState(app, runtimeState)).toBe('partial')
+    expect(resolvePlatformAppPrimaryAction(app, runtimeState)).toMatchObject({
+      kind: 'reinstall',
+      label: 'Reinstall app',
+      route: '/apps/after-sales',
+    })
+  })
+
+  it('treats partial instance metadata as degraded install state before runtime refresh', () => {
+    const app = createAppSummary({
+      runtimeBindings: {
+        currentPath: '/api/after-sales/projects/current',
+        installPath: '/api/after-sales/projects/install',
+        installPayload: {
+          templateId: 'after-sales-default',
+        },
+      },
+      instance: {
+        id: 'pai_1',
+        tenantId: 'tenant_42',
+        workspaceId: 'tenant_42',
+        appId: 'after-sales',
+        pluginId: 'plugin-after-sales',
+        instanceKey: 'primary',
+        projectId: 'tenant_42:after-sales',
+        displayName: 'Acme Support',
+        status: 'inactive',
+        config: {},
+        metadata: {
+          installStatus: 'partial',
+        },
+      },
+    })
+
+    expect(resolvePlatformAppInstallState(app)).toBe('partial')
+    expect(resolvePlatformAppPrimaryAction(app)).toMatchObject({
+      kind: 'reinstall',
+      label: 'Reinstall app',
+      route: '/apps/after-sales',
     })
   })
 

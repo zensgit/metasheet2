@@ -1228,8 +1228,16 @@ export class MetaSheetServer {
     }
     const platformAppInstances = {
       upsertInstance: async (input: import('./types/plugin').PluginPlatformAppInstanceRegistryService extends { upsertInstance: infer T } ? T extends (input: infer I) => Promise<unknown> ? I : never : never) => {
+        const tenantId =
+          (typeof input.tenantId === 'string' && input.tenantId.trim().length > 0 ? input.tenantId.trim() : '')
+          || (typeof input.workspaceId === 'string' && input.workspaceId.trim().length > 0 ? input.workspaceId.trim() : '')
+          || tenantContext.getTenantId()
+          || ''
         const txQuery: PlatformAppInstanceRegistryQueryFn = async (sql, params) => {
-          const result = await poolManager.get().query(sql, params)
+          const shardedPoolManager = tenantContext.getPoolManager()
+          const result = tenantId && shardedPoolManager
+            ? await shardedPoolManager.queryForTenant(tenantId, sql, params)
+            : await poolManager.get().query(sql, params)
           return {
             rows: Array.isArray((result as { rows?: unknown[] }).rows)
               ? (result as { rows: unknown[] }).rows
@@ -1242,8 +1250,15 @@ export class MetaSheetServer {
         return upsertPlatformAppInstance(txQuery, input)
       },
       getInstance: async (input: import('./types/plugin').PluginPlatformAppInstanceRegistryService extends { getInstance: infer T } ? T extends (input: infer I) => Promise<unknown> ? I : never : never) => {
+        const tenantId =
+          (typeof input.workspaceId === 'string' && input.workspaceId.trim().length > 0 ? input.workspaceId.trim() : '')
+          || tenantContext.getTenantId()
+          || ''
         const txQuery: PlatformAppInstanceRegistryQueryFn = async (sql, params) => {
-          const result = await poolManager.get().query(sql, params)
+          const shardedPoolManager = tenantContext.getPoolManager()
+          const result = tenantId && shardedPoolManager
+            ? await shardedPoolManager.queryForTenant(tenantId, sql, params)
+            : await poolManager.get().query(sql, params)
           return {
             rows: Array.isArray((result as { rows?: unknown[] }).rows)
               ? (result as { rows: unknown[] }).rows
@@ -1256,8 +1271,15 @@ export class MetaSheetServer {
         return getPlatformAppInstance(txQuery, input)
       },
       listInstances: async (input: import('./types/plugin').PluginPlatformAppInstanceRegistryService extends { listInstances: infer T } ? T extends (input: infer I) => Promise<unknown> ? I : never : never) => {
+        const tenantId =
+          (typeof input.workspaceId === 'string' && input.workspaceId.trim().length > 0 ? input.workspaceId.trim() : '')
+          || tenantContext.getTenantId()
+          || ''
         const txQuery: PlatformAppInstanceRegistryQueryFn = async (sql, params) => {
-          const result = await poolManager.get().query(sql, params)
+          const shardedPoolManager = tenantContext.getPoolManager()
+          const result = tenantId && shardedPoolManager
+            ? await shardedPoolManager.queryForTenant(tenantId, sql, params)
+            : await poolManager.get().query(sql, params)
           return {
             rows: Array.isArray((result as { rows?: unknown[] }).rows)
               ? (result as { rows: unknown[] }).rows

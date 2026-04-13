@@ -147,6 +147,15 @@ function getTenantId(context, req, res) {
     : ''
   if (requestTenantId) return requestTenantId
 
+  const hasAuthenticatedUser = Boolean(
+    req
+    && req.user
+    && (req.user.id != null || req.user.sub != null || req.user.userId != null),
+  )
+  if (hasAuthenticatedUser) {
+    return 'default'
+  }
+
   sendTenantUnauthorized(res)
   return null
 }
