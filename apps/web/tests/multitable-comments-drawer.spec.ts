@@ -254,6 +254,7 @@ describe('MetaCommentsDrawer', () => {
 
     expect(container.textContent).toContain('field root')
     expect(container.textContent).toContain('reply without field')
+    expect(container.textContent).toContain('1 reply')
     expect(container.querySelectorAll('.meta-comments-drawer__reply')).toHaveLength(1)
 
     app.unmount()
@@ -329,6 +330,7 @@ describe('MetaCommentsDrawer', () => {
     expect(container.textContent).toContain('Edit')
     expect(container.textContent).toContain('Delete')
     expect(container.textContent).toContain('Editing Author')
+    expect(container.textContent).toContain('Ping @Amy Wong')
     expect(container.textContent).toContain('Save')
     expect(container.textContent).toContain('@Amy Wong')
 
@@ -349,6 +351,71 @@ describe('MetaCommentsDrawer', () => {
     await flushUi()
     expect(cancelEditSpy).toHaveBeenCalledTimes(1)
     expect(draftSpy).not.toHaveBeenCalled()
+
+    app.unmount()
+    container.remove()
+  })
+
+  it('shows reply context with a trimmed preview of the active thread', async () => {
+    const cancelReplySpy = vi.fn()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [
+        { path: '/', name: 'home', component: defineComponent({ render: () => h('div') }) },
+        { path: '/multitable/comments/inbox', name: 'multitable-comment-inbox', component: defineComponent({ render: () => h('div') }) },
+      ],
+    })
+
+    const app = createApp(defineComponent({
+      render() {
+        return h(MetaCommentsDrawer, {
+          visible: true,
+          comments: [
+            {
+              id: 'c1',
+              containerId: 'sheet_1',
+              targetId: 'row_1',
+              fieldId: null,
+              mentions: ['user_2'],
+              authorId: 'user_1',
+              authorName: 'Author',
+              content: 'Ping @[Amy Wong](user_2) before the handoff reaches the broader finance reviewers.',
+              resolved: false,
+              createdAt: '2026-04-01T09:00:00.000Z',
+            },
+          ],
+          loading: false,
+          canComment: true,
+          canResolve: true,
+          replyToCommentId: 'c1',
+          draft: '',
+          onResolve: vi.fn(),
+          onClose: vi.fn(),
+          onRetry: vi.fn(),
+          onReply: vi.fn(),
+          onCancelReply: cancelReplySpy,
+          'onUpdate:draft': vi.fn(),
+          onSubmit: vi.fn(),
+        })
+      },
+    }))
+
+    app.use(router)
+    await router.push('/')
+    await router.isReady()
+    app.mount(container)
+    await flushUi()
+
+    expect(container.textContent).toContain('Replying to Author')
+    expect(container.textContent).toContain('Ping @Amy Wong before the handoff reaches the broader finance reviewers.')
+
+    const cancelButton = container.querySelector('.meta-comments-drawer__reply-cancel') as HTMLButtonElement | null
+    cancelButton?.click()
+    await flushUi()
+    expect(cancelReplySpy).toHaveBeenCalledTimes(1)
 
     app.unmount()
     container.remove()
@@ -418,6 +485,7 @@ describe('MetaCommentsDrawer', () => {
     await flushUi()
 
     const actionLabels = Array.from(container.querySelectorAll('.meta-comments-drawer__reply')).map((button) => button.textContent?.trim())
+    expect(container.textContent).toContain('1 reply')
     expect(actionLabels).toContain('Edit')
     expect(actionLabels).toContain('Reply')
     expect(actionLabels).not.toContain('Delete')
