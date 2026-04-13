@@ -67,6 +67,7 @@ import { getPoolStats } from './db/pg'
 import { isDatabaseSchemaError } from './utils/database-errors'
 import { startOperationAuditRetention } from './audit/operation-audit-retention'
 import { startMultitableAttachmentCleanup } from './multitable/attachment-orphan-retention'
+import { AutomationService } from './multitable/automation-service'
 import { tenantContext } from './db/sharding/tenant-context'
 import { attendanceAuditMiddleware, attendanceSecurityMiddleware } from './middleware/attendance-production'
 import { approvalsRouter } from './routes/approvals'
@@ -154,6 +155,7 @@ export class MetaSheetServer {
   private observabilityEnabled = false
   private stopOperationAuditRetention?: () => void
   private stopMultitableAttachmentCleanup?: () => void
+  private automationService?: AutomationService
   private afterSalesApprovalBridgeService: AfterSalesApprovalBridgeService
   // Optional bypass/degraded-mode flags for local debug
   private disableWorkflow = process.env.DISABLE_WORKFLOW === 'true'
@@ -1378,6 +1380,13 @@ export class MetaSheetServer {
     }))
     shutdownTasks.push(Promise.resolve().then(() => {
       try {
+        this.automationService?.shutdown()
+      } catch (err) {
+        this.logger.warn(`AutomationService shutdown error: ${err instanceof Error ? err.message : String(err)}`)
+      }
+    }))
+    shutdownTasks.push(Promise.resolve().then(() => {
+      try {
         this.stopMultitableAttachmentCleanup?.()
       } catch (err) {
         this.logger.warn(`Multitable attachment cleanup stop error: ${err instanceof Error ? err.message : String(err)}`)
@@ -1514,6 +1523,16 @@ export class MetaSheetServer {
         // 降级容错：记录错误但继续启动，使 Redis / metrics 在缺表或总线故障时仍可观测
         this.logger.error('EventBusService initialization failed; continuing in degraded mode', e as Error)
       }
+    }
+
+    // Initialize AutomationService
+    try {
+      const pool = poolManager.get()
+      this.automationService = new AutomationService(eventBus, pool.query.bind(pool))
+      this.automationService.init()
+      this.logger.info('AutomationService initialized')
+    } catch (e) {
+      this.logger.error('AutomationService initialization failed; continuing in degraded mode', e as Error)
     }
 
     // 加载插件并启动 HTTP 服务
