@@ -106,6 +106,15 @@ async function onMarkRead(commentId: string) {
   }
 }
 
+function applyLocalReadState(commentId: string) {
+  const wasUnread = inbox.value.find((item) => item.id === commentId)?.unread === true
+  if (!wasUnread) return
+  inbox.value = inbox.value.map((item) => (
+    item.id === commentId ? { ...item, unread: false } : item
+  ))
+  unreadCount.value = inbox.value.filter((item) => item.unread).length
+}
+
 async function onOpen(commentId: string) {
   const item = inbox.value.find((entry) => entry.id === commentId)
   if (!item || openingId.value === commentId) return
@@ -142,7 +151,7 @@ async function onOpen(commentId: string) {
       },
     })
     if (item.unread) {
-      await onMarkRead(item.id)
+      applyLocalReadState(item.id)
     }
   } catch (error: any) {
     const message = error?.message ?? 'Failed to open comment'
