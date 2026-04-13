@@ -278,18 +278,67 @@ METRICS_URL="http://production:4000/metrics/prom" ./scripts/phase5-observe.sh
  - [x] Custom Field Type Registry (PR #847, plugin-extensible FieldTypeRegistry)
  - [x] Formula Engine Enhancement (PR #848, SWITCH/DATEDIF/COUNTA/LOOKUP + dependency tracking)
 
- ## Near-Term Planned (Legacy)
-- Plugin hot swap during reload (cache module state)
+---
 
-## Future Enhancements
+## 三个月路线图 (2026-04 → 2026-07)
+
+**产品定位**: MetaSheet = 平台工作台 + 多维表格 + 审批中心 + 业务应用挂载
+**钉钉定位**: 身份/组织/数据接入层（不是产品壳）
+
+### Phase 1: 平台底座收口 (2026-04-13 → 2026-05-10)
+- [ ] 稳定 platform-shell、租户隔离、应用安装、统一导航
+- [ ] 登录态完善（钉钉扫码 + 平台 Session）
+- [ ] 钉钉三件事：扫码登录、目录同步、成员准入
+- [ ] 不新增重业务页面，锁定公共模型
+- 重点代码: `platform-apps.ts`, `dingtalk-oauth.ts`, `directory-sync.ts`
+
+### Phase 2: 多维表格成为主产品 (2026-05-11 → 2026-06-14)
+- [ ] 协作体验 Wave 1：@提及编辑器、评论线程、未读追踪、在线感知
+- [ ] 仪表盘/图表基础
+- [ ] 表单外部分享
+- [ ] 多维表格挂为平台默认核心应用
+- [ ] 不碰钉钉业务接入，只复用登录和组织
+
+### Phase 3: 审批中心闭环 (2026-06-15 → 2026-07-19)
+- [ ] 审批模板、审批实例、统一 Inbox
+- [ ] 来源系统桥接 (platform + multitable + approval 打通)
+- [ ] PLM/考勤统一接入
+- [ ] 钉钉只做通知和身份映射
+
+### 5 个能力域 (长期维护)
+
+| 域 | 职责 |
+|----|------|
+| `platform-shell` | 应用启动器、租户隔离、统一导航、登录态 |
+| `multitable` | 表/视图/字段/权限/公式/自动化/协作 |
+| `approval` | 审批模板/实例/Inbox/来源桥接 |
+| `workflow` | BPMN 引擎/流程定义/执行器 |
+| `business-apps` | 考勤/售后/PLM 等挂载应用 |
+
+**规则**: 一个需求只允许 1 个主域 + 最多 1 个辅助域。横跨 3 域先拆 baseline。
+
+### 钉钉定位 (4 个固定接入点)
+
+| 接入点 | 职责 |
+|--------|------|
+| `auth` | 扫码登录 |
+| `directory` | 组织/成员同步 |
+| `admission` | 平台准入/应用准入 |
+| `integration` | 考勤/通知等外部数据通道 |
+
+### 分支约定
+
+每个主题 4 条 lane: `contracts → runtime → frontend → integration`
+命名: `codex/{domain}-{wave}-{lane}-{yearmonth}`
+合并顺序: baseline → contracts → runtime → frontend → integration → main
+
+---
+
+## Future Enhancements (Phase 3 之后)
 - Multi-region deployment support (Redis Cluster, DB replication, CDN)
-- 多环境审批策略 (dev/staging/prod approval gates)
 - 合规报告自动生成 (SOC2/ISO)
 - 变更日历可视化 (ChangeManagementService frontend)
 - 租户级消息 QoS (priority lanes beyond rate limiting)
-- Automation trigger expansion (webhook action, conditional logic, scheduling)
-- Multitable frontend for row-level permissions UI
-- Multitable frontend for automation rule builder UI
 
 ## 设计文档索引
 
