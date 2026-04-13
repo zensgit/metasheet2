@@ -402,6 +402,14 @@ const bpmnStuckInstancesGauge = new client.Gauge({
   labelNames: [] as const
 })
 
+// RPC Latency Histogram
+const rpcLatencySeconds = new client.Histogram({
+  name: 'metasheet_rpc_latency_seconds',
+  help: 'RPC call latency in seconds',
+  labelNames: ['method', 'plugin', 'status'] as const,
+  buckets: [0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2, 5]
+})
+
 registry.registerMetric(httpHistogram)
 registry.registerMetric(httpSummary)
 registry.registerMetric(httpRequestsTotal)
@@ -464,6 +472,7 @@ registry.registerMetric(bpmnSignalEventsTotal)
 registry.registerMetric(bpmnMessageEventsTotal)
 registry.registerMetric(bpmnProcessErrorsTotal)
 registry.registerMetric(bpmnStuckInstancesGauge)
+registry.registerMetric(rpcLatencySeconds)
 
 export function installMetrics(app: Application) {
   app.get('/metrics', async (_req, res) => {
@@ -560,5 +569,23 @@ export const metrics = {
   bpmnSignalEventsTotal,
   bpmnMessageEventsTotal,
   bpmnProcessErrorsTotal,
-  bpmnStuckInstancesGauge
+  bpmnStuckInstancesGauge,
+  // RPC Latency
+  rpcLatencySeconds
+}
+
+/**
+ * Observe RPC call latency in the Prometheus histogram.
+ * @param method - RPC method name
+ * @param plugin - Plugin identifier (caller or target)
+ * @param status - 'success' | 'failure' | 'timeout'
+ * @param durationSeconds - Duration in seconds
+ */
+export function observeRpcLatency(
+  method: string,
+  plugin: string,
+  status: 'success' | 'failure' | 'timeout',
+  durationSeconds: number
+): void {
+  rpcLatencySeconds.labels(method, plugin, status).observe(durationSeconds)
 }
