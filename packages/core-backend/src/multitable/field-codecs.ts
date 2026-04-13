@@ -1,3 +1,5 @@
+import { fieldTypeRegistry } from './field-type-registry'
+
 export type MultitableFieldType =
   | 'string'
   | 'number'
@@ -59,7 +61,7 @@ export function normalizeJsonArray(value: unknown): string[] {
   return []
 }
 
-export function mapFieldType(type: string): MultitableFieldType {
+export function mapFieldType(type: string): MultitableFieldType | string {
   const normalized = type.trim().toLowerCase()
   if (normalized === 'number') return 'number'
   if (normalized === 'boolean' || normalized === 'checkbox') return 'boolean'
@@ -70,6 +72,7 @@ export function mapFieldType(type: string): MultitableFieldType {
   if (normalized === 'lookup') return 'lookup'
   if (normalized === 'rollup') return 'rollup'
   if (normalized === 'attachment') return 'attachment'
+  if (fieldTypeRegistry.has(normalized)) return normalized
   return 'string'
 }
 
@@ -117,7 +120,7 @@ function parseRollupAggregation(value: unknown): 'count' | 'sum' | 'avg' | 'min'
 }
 
 export function sanitizeFieldProperty(
-  type: MultitableFieldType,
+  type: MultitableFieldType | string,
   property: unknown,
 ): Record<string, unknown> {
   const obj = normalizeJson(property)
@@ -231,6 +234,11 @@ export function sanitizeFieldProperty(
     }
   }
 
+  const customDef = fieldTypeRegistry.get(type)
+  if (customDef) {
+    return customDef.sanitizeProperty(property)
+  }
+
   return obj
 }
 
@@ -242,7 +250,7 @@ export function serializeFieldRow(row: any): MultitableField {
   return {
     id: String(row.id),
     name: String(row.name),
-    type: mappedType,
+    type: mappedType as MultitableFieldType,
     ...(mappedType === 'select' ? { options: extractSelectOptions(property) } : {}),
     order: Number.isFinite(order) ? order : 0,
     property,
