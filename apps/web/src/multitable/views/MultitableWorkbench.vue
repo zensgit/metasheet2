@@ -35,6 +35,9 @@
         <span v-if="mentionInboxState.unreadMentionCount.value > 0" class="mt-workbench__mention-chip-unread">{{ mentionInboxState.unreadMentionCount.value }} unread</span>
         <span class="mt-workbench__mention-chip-records">{{ mentionInboxState.summary.value.mentionedRecordCount }} records</span>
       </button>
+      <button class="mt-workbench__mgr-btn" @click="openCommentInbox()">
+        &#x1F4AC; Comment Inbox
+      </button>
       <button v-if="caps.canManageFields.value" class="mt-workbench__mgr-btn" @click="showFieldManager = true">&#x2699; Fields</button>
       <button v-if="caps.canManageSheetAccess.value" class="mt-workbench__mgr-btn" @click="showPermissionManager = true; void loadPermissionEntries()">&#x1F512; Access</button>
       <button v-if="caps.canManageViews.value && canConfigureCurrentView" class="mt-workbench__mgr-btn" @click="showViewManager = true">&#x2630; Views</button>
@@ -714,11 +717,11 @@ const commentComposerInitialMentions = computed(() => (
   activeEditingComment.value ? buildEditingMentionSuggestions(activeEditingComment.value) : []
 ))
 const sheetPresenceLabel = computed(() => (
-  sheetPresenceState.activeCollaboratorCount.value === 1 ? 'active collaborator' : 'active collaborators'
+  `${sheetPresenceState.activeCollaboratorCount.value} ${sheetPresenceState.activeCollaboratorCount.value === 1 ? 'active collaborator' : 'active collaborators'}`
 ))
 const sheetPresenceTitle = computed(() => {
   const ids = sheetPresenceState.activeCollaborators.value.map((user) => user.id)
-  return ids.length > 0 ? ids.join(', ') : 'No active collaborators'
+  return ids.length > 0 ? `Active now: ${ids.join(', ')}` : 'No active collaborators'
 })
 const conflictFieldName = computed(() => {
   const fieldId = grid.conflict.value?.fieldId
@@ -2289,6 +2292,12 @@ function openWorkflowDesigner(recordId?: string) {
       viewId: workbench.activeViewId.value || undefined,
       recordId: recordId || undefined,
     },
+  })
+}
+
+function openCommentInbox() {
+  void router.push({
+    name: 'multitable-comment-inbox',
   })
 }
 

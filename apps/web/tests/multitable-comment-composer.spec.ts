@@ -62,4 +62,96 @@ describe('MetaCommentComposer', () => {
 
     app.unmount()
   })
+
+  it('supports keyboard navigation and tab selection for mention suggestions', async () => {
+    const draft = ref('@j')
+    const submitSpy: Array<{ content: string; mentions: string[] }> = []
+
+    container = document.createElement('div')
+    document.body.appendChild(container)
+
+    const app = createApp({
+      setup() {
+        return () => h(MetaCommentComposer, {
+          modelValue: draft.value,
+          suggestions: [
+            { id: 'user_jamie', label: 'Jamie' },
+            { id: 'user_jordan', label: 'Jordan' },
+          ],
+          'onUpdate:modelValue': (value: string) => {
+            draft.value = value
+          },
+          onSubmit: (payload: { content: string; mentions: string[] }) => {
+            submitSpy.push(payload)
+          },
+        })
+      },
+    })
+
+    app.mount(container)
+    await nextTick()
+
+    const textarea = container.querySelector('textarea') as HTMLTextAreaElement | null
+    expect(container.querySelector('.meta-comment-composer__suggestion--active')?.textContent).toContain('Jamie')
+
+    textarea?.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }))
+    await nextTick()
+    expect(container.querySelector('.meta-comment-composer__suggestion--active')?.textContent).toContain('Jordan')
+
+    textarea?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true }))
+    await nextTick()
+
+    expect(textarea?.value).toContain('@Jordan')
+    expect(container.querySelector('.meta-comment-composer__hint')?.textContent).toContain('Ctrl/Cmd + Enter')
+
+    const submit = container.querySelector('.meta-comment-composer__submit') as HTMLButtonElement | null
+    submit?.click()
+    await nextTick()
+
+    expect(submitSpy).toEqual([{
+      content: '@[Jordan](user_jordan)',
+      mentions: ['user_jordan'],
+    }])
+
+    app.unmount()
+  })
+
+  it('dismisses suggestions with escape until the next input change', async () => {
+    const draft = ref('@ja')
+
+    container = document.createElement('div')
+    document.body.appendChild(container)
+
+    const app = createApp({
+      setup() {
+        return () => h(MetaCommentComposer, {
+          modelValue: draft.value,
+          suggestions: [
+            { id: 'user_jamie', label: 'Jamie' },
+            { id: 'user_jordan', label: 'Jordan' },
+          ],
+          'onUpdate:modelValue': (value: string) => {
+            draft.value = value
+          },
+        })
+      },
+    })
+
+    app.mount(container)
+    await nextTick()
+
+    const textarea = container.querySelector('textarea') as HTMLTextAreaElement | null
+    expect(container.querySelector('.meta-comment-composer__suggestions')).not.toBeNull()
+
+    textarea?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
+    await nextTick()
+    expect(container.querySelector('.meta-comment-composer__suggestions')).toBeNull()
+
+    textarea!.value = '@jam'
+    textarea!.dispatchEvent(new Event('input', { bubbles: true }))
+    await nextTick()
+    expect(container.querySelector('.meta-comment-composer__suggestions')).not.toBeNull()
+
+    app.unmount()
+  })
 })

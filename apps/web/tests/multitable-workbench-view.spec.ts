@@ -2108,7 +2108,24 @@ describe('MultitableWorkbench view wiring', () => {
     expect(chip).not.toBeNull()
     expect(chip?.textContent).toContain('2')
     expect(chip?.textContent).toContain('active collaborators')
-    expect(chip?.getAttribute('title')).toBe('user_a, user_b')
+    expect(chip?.getAttribute('title')).toBe('Active now: user_a, user_b')
+  })
+
+  it('shows a persistent comment inbox entry and routes to the inbox view', async () => {
+    mountWorkbench()
+    await flushUi()
+
+    const inboxButton = Array.from(container!.querySelectorAll<HTMLButtonElement>('button'))
+      .find((button) => button.textContent?.includes('Comment Inbox'))
+
+    expect(inboxButton).not.toBeNull()
+
+    inboxButton?.click()
+    await flushUi()
+
+    expect(pushSpy).toHaveBeenCalledWith({
+      name: 'multitable-comment-inbox',
+    })
   })
 
   it('opens the mention popover and selects a mentioned record', async () => {
