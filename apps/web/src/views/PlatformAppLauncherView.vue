@@ -18,68 +18,68 @@
     <p v-else-if="apps.length === 0" class="platform-app-launcher__state">No platform apps discovered.</p>
 
     <div v-else class="platform-app-launcher__grid">
-      <article v-for="app in apps" :key="app.id" class="platform-app-launcher__card">
+      <article v-for="card in appCards" :key="card.app.id" class="platform-app-launcher__card">
         <div class="platform-app-launcher__card-head">
           <div>
-            <p class="platform-app-launcher__app-id">{{ app.id }}</p>
-            <h2>{{ app.displayName }}</h2>
+            <p class="platform-app-launcher__app-id">{{ card.app.id }}</p>
+            <h2>{{ card.app.displayName }}</h2>
           </div>
-          <span class="platform-app-launcher__status" :data-status="app.pluginStatus">{{ app.pluginStatus }}</span>
+          <span class="platform-app-launcher__status" :data-status="card.app.pluginStatus">{{ card.app.pluginStatus }}</span>
         </div>
 
         <p class="platform-app-launcher__description">
-          {{ app.boundedContext.description || 'No bounded-context description.' }}
+          {{ card.app.boundedContext.description || 'No bounded-context description.' }}
         </p>
 
         <dl class="platform-app-launcher__meta">
           <div>
             <dt>Plugin</dt>
-            <dd>{{ app.pluginName }}</dd>
+            <dd>{{ card.app.pluginName }}</dd>
           </div>
           <div>
             <dt>Install</dt>
-            <dd>{{ resolvePlatformAppInstallState(app) }}</dd>
+            <dd>{{ card.installState }}</dd>
           </div>
           <div>
             <dt>Dependencies</dt>
-            <dd>{{ app.platformDependencies.length }}</dd>
+            <dd>{{ card.app.platformDependencies.length }}</dd>
           </div>
           <div>
             <dt>Objects</dt>
-            <dd>{{ app.objects.length }}</dd>
+            <dd>{{ card.app.objects.length }}</dd>
           </div>
           <div>
             <dt>Workflows</dt>
-            <dd>{{ app.workflows.length }}</dd>
+            <dd>{{ card.app.workflows.length }}</dd>
           </div>
           <div>
             <dt>Project</dt>
-            <dd>{{ resolvePlatformAppProjectLabel(app) }}</dd>
+            <dd>{{ card.projectLabel }}</dd>
           </div>
         </dl>
 
         <p
           class="platform-app-launcher__instance"
-          :data-state="resolvePlatformAppInstallState(app)"
+          :data-state="card.installState"
         >
-          {{ resolvePlatformAppInstanceLabel(app) }}
+          {{ card.instanceLabel }}
         </p>
 
         <p class="platform-app-launcher__action-copy">
-          {{ resolvePlatformAppPrimaryAction(app).description }}
+          {{ card.primaryAction.description }}
         </p>
 
         <div class="platform-app-launcher__actions">
           <RouterLink
             class="platform-app-launcher__primary"
-            :to="resolvePlatformAppPrimaryAction(app).route || `/apps/${app.id}`"
+            :to="card.primaryAction.route || card.shellRoute"
           >
-            {{ resolvePlatformAppPrimaryAction(app).label }}
+            {{ card.primaryAction.label }}
           </RouterLink>
           <RouterLink
-            v-if="resolvePlatformAppPrimaryAction(app).route !== `/apps/${app.id}`"
+            v-if="card.primaryAction.route !== card.shellRoute"
             class="platform-app-launcher__ghost"
-            :to="`/apps/${app.id}`"
+            :to="card.shellRoute"
           >
             Open shell
           </RouterLink>
@@ -90,9 +90,10 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted } from 'vue'
+import { computed, onMounted } from 'vue'
 import { RouterLink } from 'vue-router'
 import {
+  type PlatformAppSummary,
   resolvePlatformAppInstallState,
   resolvePlatformAppInstanceLabel,
   resolvePlatformAppPrimaryAction,
@@ -101,6 +102,22 @@ import {
 } from '../composables/usePlatformApps'
 
 const { apps, loading, error, fetchApps } = usePlatformApps()
+
+function resolveShellRoute(app: PlatformAppSummary): string {
+  return `/apps/${encodeURIComponent(app.id)}`
+}
+
+const appCards = computed(() => apps.value.map((app) => {
+  const primaryAction = resolvePlatformAppPrimaryAction(app)
+  return {
+    app,
+    installState: resolvePlatformAppInstallState(app),
+    instanceLabel: resolvePlatformAppInstanceLabel(app),
+    projectLabel: resolvePlatformAppProjectLabel(app),
+    primaryAction,
+    shellRoute: resolveShellRoute(app),
+  }
+}))
 
 async function refresh(): Promise<void> {
   await fetchApps({ force: true })

@@ -25,10 +25,6 @@ function resolveTenantId(req: Request): string {
   if (typeof req.user?.tenantId === 'string' && req.user.tenantId.trim().length > 0) {
     return req.user.tenantId.trim()
   }
-  const headerValue = req.headers['x-tenant-id']
-  if (typeof headerValue === 'string' && headerValue.trim().length > 0) {
-    return headerValue.trim()
-  }
   return ''
 }
 
@@ -64,7 +60,12 @@ export function createPlatformAppsRouter(options: PlatformAppsRouterOptions): Ro
       })
       const tenantId = resolveTenantId(req)
       if (!tenantId) {
-        return res.json({ list: apps })
+        return res.json({
+          list: apps.map((item) => ({
+            ...item,
+            instance: null,
+          })),
+        })
       }
 
       const pool = poolManager.get()

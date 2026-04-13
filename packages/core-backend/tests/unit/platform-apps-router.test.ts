@@ -128,8 +128,8 @@ describe('platform apps router', () => {
     const response = createMockResponse()
 
     await handler({
-      headers: { 'x-tenant-id': 'tenant_42' },
-      user: undefined,
+      headers: { 'x-tenant-id': 'tenant_ignored' },
+      user: { tenantId: 'tenant_42' },
     }, response)
 
     expect(response.statusCode).toBe(200)
@@ -181,6 +181,45 @@ describe('platform apps router', () => {
 
     expect(response.statusCode).toBe(200)
     expect(response.body).toMatchObject({
+      id: 'after-sales',
+      instance: null,
+    })
+    expect(queryMock).not.toHaveBeenCalled()
+  })
+
+  it('does not trust raw tenant headers when authenticated tenant context is absent', async () => {
+    const loaded = createLoadedPlugin('plugin-after-sales', {
+      id: 'after-sales',
+      version: '0.1.0',
+      displayName: 'After Sales',
+      pluginId: 'plugin-after-sales',
+      boundedContext: { code: 'after-sales' },
+      platformDependencies: ['multitable'],
+      navigation: [
+        { id: 'home', title: 'After Sales', path: '/p/plugin-after-sales/after-sales', location: 'main-nav', order: 1 },
+      ],
+      permissions: [],
+      featureFlags: [],
+      objects: [],
+      workflows: [],
+      integrations: [],
+    })
+
+    const router = createPlatformAppsRouter({
+      pluginLoader: {
+        getPlugins: () => new Map([['plugin-after-sales', loaded]]),
+      } as any,
+    })
+    const handler = getRouteHandler(router, 'get', '/')
+    const response = createMockResponse()
+
+    await handler({
+      headers: { 'x-tenant-id': 'tenant_42' },
+      user: undefined,
+    }, response)
+
+    expect(response.statusCode).toBe(200)
+    expect((response.body as any).list[0]).toMatchObject({
       id: 'after-sales',
       instance: null,
     })

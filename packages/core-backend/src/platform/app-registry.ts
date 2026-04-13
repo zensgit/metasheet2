@@ -37,6 +37,33 @@ export interface CollectPlatformAppsOptions {
   readTextFile?: (filePath: string) => Promise<string>
 }
 
+interface CachedManifestSummary {
+  id: string
+  pluginId: string
+  displayName: string
+  runtimeModel: PlatformAppManifest['runtimeModel']
+  boundedContext: PlatformAppManifest['boundedContext']
+  runtimeBindings?: PlatformAppManifest['runtimeBindings']
+  platformDependencies: PlatformAppManifest['platformDependencies']
+  navigation: PlatformAppManifest['navigation']
+  permissions: PlatformAppManifest['permissions']
+  featureFlags: PlatformAppManifest['featureFlags']
+  objects: PlatformAppManifest['objects']
+  workflows: PlatformAppManifest['workflows']
+  integrations: PlatformAppManifest['integrations']
+  entryPath: string | null
+}
+
+const manifestSummaryCache = new Map<string, CachedManifestSummary | null>()
+
+function buildManifestCacheKey(loaded: LoadedPlugin): string {
+  const loadedAt =
+    loaded.loadedAt instanceof Date
+      ? loaded.loadedAt.toISOString()
+      : String(loaded.loadedAt ?? '')
+  return `${loaded.path}::${loadedAt}`
+}
+
 function resolveEntryPath(manifest: PlatformAppManifest): string | null {
   const visibleItems = manifest.navigation.filter((item) => item.location !== 'hidden')
   const sortByOrder = (items: PlatformAppManifest['navigation']): typeof items =>
@@ -62,42 +89,73 @@ export async function collectPlatformApps(options: CollectPlatformAppsOptions): 
   const apps: PlatformAppSummary[] = []
 
   for (const loaded of options.loadedPlugins) {
-    const manifestPath = path.join(loaded.path, 'app.manifest.json')
-    let rawText: string
-    try {
-      rawText = await readTextFile(manifestPath)
-    } catch {
-      continue
+    const cacheKey = buildManifestCacheKey(loaded)
+    let cachedSummary = manifestSummaryCache.get(cacheKey)
+
+    if (cachedSummary === undefined) {
+      const manifestPath = path.join(loaded.path, 'app.manifest.json')
+      let rawText: string
+      try {
+        rawText = await readTextFile(manifestPath)
+      } catch {
+        cachedSummary = null
+        manifestSummaryCache.set(cacheKey, cachedSummary)
+        continue
+      }
+
+      let parsedManifest: PlatformAppManifest
+      try {
+        parsedManifest = parsePlatformAppManifest(JSON.parse(rawText))
+      } catch {
+        cachedSummary = null
+        manifestSummaryCache.set(cacheKey, cachedSummary)
+        continue
+      }
+
+      cachedSummary = {
+        id: parsedManifest.id,
+        pluginId: parsedManifest.pluginId ?? loaded.manifest.name,
+        displayName: parsedManifest.displayName,
+        runtimeModel: parsedManifest.runtimeModel,
+        boundedContext: parsedManifest.boundedContext,
+        runtimeBindings: parsedManifest.runtimeBindings,
+        platformDependencies: parsedManifest.platformDependencies,
+        navigation: parsedManifest.navigation,
+        permissions: parsedManifest.permissions,
+        featureFlags: parsedManifest.featureFlags,
+        objects: parsedManifest.objects,
+        workflows: parsedManifest.workflows,
+        integrations: parsedManifest.integrations,
+        entryPath: resolveEntryPath(parsedManifest),
+      }
+      manifestSummaryCache.set(cacheKey, cachedSummary)
     }
 
-    let parsedManifest: PlatformAppManifest
-    try {
-      parsedManifest = parsePlatformAppManifest(JSON.parse(rawText))
-    } catch {
+    if (!cachedSummary) {
       continue
     }
 
     const runtime = options.pluginStatus?.get(loaded.manifest.name)
     apps.push({
-      id: parsedManifest.id,
-      pluginId: parsedManifest.pluginId ?? loaded.manifest.name,
+      id: cachedSummary.id,
+      pluginId: cachedSummary.pluginId,
       pluginName: loaded.manifest.name,
       pluginVersion: loaded.manifest.version,
       pluginDisplayName: loaded.manifest.displayName,
       pluginStatus: runtime?.status ?? 'active',
       pluginError: runtime?.error,
-      displayName: parsedManifest.displayName,
-      runtimeModel: parsedManifest.runtimeModel,
-      boundedContext: parsedManifest.boundedContext,
-      runtimeBindings: parsedManifest.runtimeBindings,
-      platformDependencies: parsedManifest.platformDependencies,
-      navigation: parsedManifest.navigation,
-      permissions: parsedManifest.permissions,
-      featureFlags: parsedManifest.featureFlags,
-      objects: parsedManifest.objects,
-      workflows: parsedManifest.workflows,
-      integrations: parsedManifest.integrations,
-      entryPath: resolveEntryPath(parsedManifest),
+      displayName: cachedSummary.displayName,
+      runtimeModel: cachedSummary.runtimeModel,
+      boundedContext: cachedSummary.boundedContext,
+      runtimeBindings: cachedSummary.runtimeBindings,
+      platformDependencies: cachedSummary.platformDependencies,
+      navigation: cachedSummary.navigation,
+      permissions: cachedSummary.permissions,
+      featureFlags: cachedSummary.featureFlags,
+      objects: cachedSummary.objects,
+      workflows: cachedSummary.workflows,
+      integrations: cachedSummary.integrations,
+      entryPath: cachedSummary.entryPath,
     })
   }
 

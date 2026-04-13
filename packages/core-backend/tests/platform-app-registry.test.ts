@@ -1,7 +1,7 @@
 import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { collectPlatformApps } from '../src/platform/app-registry'
 import type { LoadedPlugin } from '../src/core/plugin-loader'
 
@@ -163,5 +163,33 @@ describe('collectPlatformApps', () => {
       runtimeModel: 'direct',
       entryPath: '/attendance',
     })
+  })
+
+  it('reuses cached manifest parsing for the same loaded plugin instance', async () => {
+    const loaded = createLoadedPlugin('plugin-after-sales', {
+      id: 'after-sales',
+      version: '0.1.0',
+      displayName: 'After Sales',
+      pluginId: 'plugin-after-sales',
+      boundedContext: { code: 'after-sales' },
+      platformDependencies: ['multitable'],
+      navigation: [
+        { id: 'home', title: 'After Sales', path: '/p/plugin-after-sales/after-sales', location: 'main-nav', order: 1 },
+      ],
+      permissions: [],
+      featureFlags: [],
+      objects: [],
+      workflows: [],
+      integrations: [],
+    })
+
+    const readTextFile = vi.fn(async (filePath: string) => fs.promises.readFile(filePath, 'utf-8'))
+
+    const first = await collectPlatformApps({ loadedPlugins: [loaded], readTextFile })
+    const second = await collectPlatformApps({ loadedPlugins: [loaded], readTextFile })
+
+    expect(first[0]?.id).toBe('after-sales')
+    expect(second[0]?.id).toBe('after-sales')
+    expect(readTextFile).toHaveBeenCalledTimes(1)
   })
 })
