@@ -402,6 +402,25 @@ const bpmnStuckInstancesGauge = new client.Gauge({
   labelNames: [] as const
 })
 
+// Metrics Stream (real-time WebSocket streaming)
+const metricsStreamClients = new client.Gauge({
+  name: 'metasheet_metrics_stream_clients',
+  help: 'Active metrics streaming clients',
+  labelNames: [] as const
+})
+
+const metricsStreamPushesTotal = new client.Counter({
+  name: 'metasheet_metrics_stream_pushes_total',
+  help: 'Total push events sent via metrics stream',
+  labelNames: [] as const
+})
+
+const metricsStreamErrorsTotal = new client.Counter({
+  name: 'metasheet_metrics_stream_errors_total',
+  help: 'Total metrics stream push errors',
+  labelNames: [] as const
+})
+
 registry.registerMetric(httpHistogram)
 registry.registerMetric(httpSummary)
 registry.registerMetric(httpRequestsTotal)
@@ -464,6 +483,9 @@ registry.registerMetric(bpmnSignalEventsTotal)
 registry.registerMetric(bpmnMessageEventsTotal)
 registry.registerMetric(bpmnProcessErrorsTotal)
 registry.registerMetric(bpmnStuckInstancesGauge)
+registry.registerMetric(metricsStreamClients)
+registry.registerMetric(metricsStreamPushesTotal)
+registry.registerMetric(metricsStreamErrorsTotal)
 
 export function installMetrics(app: Application) {
   app.get('/metrics', async (_req, res) => {
@@ -560,5 +582,9 @@ export const metrics = {
   bpmnSignalEventsTotal,
   bpmnMessageEventsTotal,
   bpmnProcessErrorsTotal,
-  bpmnStuckInstancesGauge
+  bpmnStuckInstancesGauge,
+  // Metrics Stream
+  metricsStreamClients,
+  metricsStreamPushesTotal,
+  metricsStreamErrorsTotal
 }

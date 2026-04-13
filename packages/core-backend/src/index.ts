@@ -98,6 +98,7 @@ import plmWorkbenchRouter from './routes/plm-workbench'
 import { univerMockRouter } from './routes/univer-mock'
 import { univerMetaRouter } from './routes/univer-meta'
 import { SnapshotService } from './services/SnapshotService'
+import { MetricsStreamService } from './services/MetricsStreamService'
 import { notificationService } from './services/NotificationService'
 import { AfterSalesApprovalBridgeService } from './services/AfterSalesApprovalBridgeService'
 import {
@@ -154,6 +155,7 @@ export class MetaSheetServer {
   // Optional bypass/degraded-mode flags for local debug
   private disableWorkflow = process.env.DISABLE_WORKFLOW === 'true'
   private disableEventBus = process.env.DISABLE_EVENT_BUS === 'true'
+  private metricsStreamService?: MetricsStreamService
   
   // IoC Container
   private injector: Injector
@@ -1369,6 +1371,15 @@ export class MetaSheetServer {
       }
     }))
 
+    // 0b. Shut down MetricsStreamService
+    if (this.metricsStreamService) {
+      shutdownTasks.push(
+        this.metricsStreamService.shutdown().catch((err) => {
+          this.logger.warn(`MetricsStreamService shutdown error: ${err instanceof Error ? err.message : String(err)}`)
+        }) as Promise<void>,
+      )
+    }
+
     // 1. Close HTTP server
     shutdownTasks.push(new Promise<void>((resolve) => {
       try {
@@ -1513,6 +1524,14 @@ export class MetaSheetServer {
       collabService.initialize(this.httpServer)
     } catch (e) {
       this.logger.error('Failed to initialize WebSocket service', e as Error)
+    }
+
+    // Initialize Metrics Stream Service (real-time metrics over WebSocket)
+    try {
+      this.metricsStreamService = new MetricsStreamService()
+      this.metricsStreamService.initialize(this.httpServer)
+    } catch (e) {
+      this.logger.error('Failed to initialize MetricsStreamService', e as Error)
     }
 
     this.logger.info('Starting HTTP server listen phase...')
