@@ -52,6 +52,7 @@ let loadCommentsSpy: ReturnType<typeof vi.fn>
 let addCommentSpy: ReturnType<typeof vi.fn>
 let resolveCommentSpy: ReturnType<typeof vi.fn>
 let mentionInboxSummaryMock: any
+let commentsStateMock: any
 const subscribeToMultitableCommentSheetRealtimeMock = vi.fn(() => vi.fn())
 
 vi.mock('../src/multitable/composables/useMultitableWorkbench', () => ({
@@ -85,7 +86,7 @@ vi.mock('../src/composables/useAuth', () => ({
 }))
 
 vi.mock('../src/multitable/composables/useMultitableComments', () => ({
-  useMultitableComments: () => ({
+  useMultitableComments: () => (commentsStateMock = {
     comments: ref([]),
     loading: ref(false),
     submitting: ref(false),
@@ -384,6 +385,7 @@ vi.mock('../src/multitable/components/MetaCommentsDrawer.vue', () => ({
     props: {
       visible: { type: Boolean, default: false },
       targetFieldId: { type: String, default: null },
+      highlightedCommentId: { type: String, default: null },
       mentionSuggestions: { type: Array, default: () => [] },
     },
     emits: ['close', 'submit', 'reply', 'cancel-reply', 'update:draft'],
@@ -391,6 +393,7 @@ vi.mock('../src/multitable/components/MetaCommentsDrawer.vue', () => ({
       if (!this.$props.visible) return null
       return h('div', {
         'data-current-comment-field': this.$props.targetFieldId ?? '',
+        'data-highlighted-comment': this.$props.highlightedCommentId ?? '',
         'data-mention-suggestions-count': String((this.$props.mentionSuggestions as unknown[]).length),
       }, [
         h(
@@ -820,6 +823,7 @@ function createWorkbenchMock() {
         total: 1,
         limit: 100,
       }),
+      markCommentRead: vi.fn().mockResolvedValue(undefined),
       createSheet: vi.fn(),
       createBase: vi.fn(),
       createField: vi.fn(),
@@ -950,6 +954,7 @@ describe('MultitableWorkbench view wiring', () => {
     addCommentSpy = vi.fn()
     resolveCommentSpy = vi.fn()
     mentionInboxSummaryMock = null
+    commentsStateMock = null
     sheetPresenceStateMock = null
     useMultitableSheetRealtimeMock.mockReset()
     subscribeToMultitableCommentSheetRealtimeMock.mockReset()
@@ -1903,6 +1908,56 @@ describe('MultitableWorkbench view wiring', () => {
       content: 'Need review',
       mentions: [],
     }))
+  })
+
+  it('derives field context from a highlighted reply when the deep link omits fieldId', async () => {
+    gridMock.fields.value = [{ id: 'fld_notes', name: 'Notes', type: 'text' }]
+    loadCommentsSpy.mockImplementation(async () => {
+      commentsStateMock.comments.value = [
+        {
+          id: 'c_root',
+          containerId: 'sheet_orders',
+          targetId: 'rec_remote',
+          fieldId: 'fld_notes',
+          targetFieldId: 'fld_notes',
+          mentions: [],
+          authorId: 'user_2',
+          content: 'Field thread root',
+          resolved: false,
+          createdAt: '2026-04-01T09:00:00.000Z',
+        },
+        {
+          id: 'c_reply',
+          containerId: 'sheet_orders',
+          targetId: 'rec_remote',
+          fieldId: null,
+          targetFieldId: null,
+          parentId: 'c_root',
+          mentions: [],
+          authorId: 'user_3',
+          content: 'Reply in the same thread',
+          resolved: false,
+          createdAt: '2026-04-01T10:00:00.000Z',
+        },
+      ]
+    })
+    workbenchMock.client.getRecord.mockResolvedValueOnce({
+      record: { id: 'rec_remote', version: 3, data: { fld_notes: 'Existing note' } },
+      commentsScope: {
+        containerType: 'meta_sheet',
+        containerId: 'sheet_orders',
+        targetType: 'meta_record',
+        targetId: 'rec_remote',
+      },
+      linkSummaries: {},
+      attachmentSummaries: {},
+    })
+
+    mountWorkbench({ recordId: 'rec_remote', commentId: 'c_reply', openComments: true })
+    await flushUi(10)
+
+    expect(loadCommentsSpy).toHaveBeenCalled()
+    expect(container!.querySelector('[data-current-comment-field="fld_notes"]')).not.toBeNull()
   })
 
   it('submits field-scoped replies with targetFieldId and parentId', async () => {

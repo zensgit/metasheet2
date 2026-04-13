@@ -1032,10 +1032,35 @@ async function loadCommentsForRecord(recordId: string, options?: { highlightComm
     ensureCommentMentionSuggestions(),
   ])
   highlightedCommentId.value = options?.highlightCommentId ?? null
+  if (!selectedCommentFieldId.value && options?.highlightCommentId) {
+    const derivedFieldId = resolveCommentThreadFieldId(options.highlightCommentId)
+    if (derivedFieldId) {
+      selectedCommentFieldId.value = derivedFieldId
+    }
+  }
   if (options?.markReadCommentId) {
     await workbench.client.markCommentRead(options.markReadCommentId).catch(() => undefined)
     await commentInboxState.refreshUnreadCount().catch(() => undefined)
   }
+}
+
+function resolveCommentThreadFieldId(commentId: string): string | null {
+  const commentsById = new Map(commentsState.comments.value.map((comment) => [comment.id, comment]))
+  const visited = new Set<string>()
+  let currentCommentId: string | null = commentId
+
+  while (currentCommentId && !visited.has(currentCommentId)) {
+    visited.add(currentCommentId)
+    const comment = commentsById.get(currentCommentId)
+    if (!comment) return null
+
+    const fieldId = comment.targetFieldId ?? comment.fieldId ?? null
+    if (fieldId) return fieldId
+
+    currentCommentId = comment.parentId ?? null
+  }
+
+  return null
 }
 
 async function ensureCommentMentionSuggestions(force = false) {
@@ -2035,6 +2060,19 @@ function parseDeepLink(): string | null {
   } catch { return null }
 }
 
+async function applyCommentDeepLink(recordId: string, options?: {
+  commentId?: string | null
+  fieldId?: string | null
+  openComments?: boolean
+}) {
+  await resolveDeepLink(recordId, {
+    openComments: options?.openComments === true || Boolean(options?.commentId),
+    highlightCommentId: options?.commentId ?? null,
+    markReadCommentId: options?.commentId ?? null,
+    targetFieldId: options?.fieldId ?? null,
+  })
+}
+
 // Update URL hash when a record is selected
 watch(selectedRecordId, (rid) => {
   try {
@@ -2379,6 +2417,27 @@ watch(
 )
 
 watch(
+  () => [props.recordId ?? '', props.commentId ?? '', props.fieldId ?? '', props.openComments === true ? '1' : '0'] as const,
+  async ([recordId, commentId, fieldId, openComments], [prevRecordId, prevCommentId, prevFieldId, prevOpenComments]) => {
+    if (!workbenchReady.value) return
+    if (
+      recordId === prevRecordId &&
+      commentId === prevCommentId &&
+      fieldId === prevFieldId &&
+      openComments === prevOpenComments
+    ) {
+      return
+    }
+    if (!recordId) return
+    await applyCommentDeepLink(recordId, {
+      commentId: commentId || null,
+      fieldId: fieldId || null,
+      openComments: openComments === '1',
+    })
+  },
+)
+
+watch(
   [hasBlockingUnloadState, pendingExternalContext],
   ([blocked, pending]) => {
     if (!workbenchReady.value || blocked || !pending) return
@@ -2404,11 +2463,10 @@ onMounted(async () => {
     await commentInboxState.refreshUnreadCount().catch(() => undefined)
     const deepRecordId = props.recordId ?? parseDeepLink()
     if (deepRecordId) {
-      await resolveDeepLink(deepRecordId, {
-        openComments: props.openComments === true || Boolean(props.commentId),
-        highlightCommentId: props.commentId ?? null,
-        markReadCommentId: props.commentId ?? null,
-        targetFieldId: props.fieldId ?? null,
+      await applyCommentDeepLink(deepRecordId, {
+        commentId: props.commentId ?? null,
+        fieldId: props.fieldId ?? null,
+        openComments: props.openComments === true,
       })
     }
     if (activeViewType.value === 'form') {
