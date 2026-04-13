@@ -114,6 +114,8 @@ export class EventBusService extends EventEmitter {
   private core?: CoreAPI
   private degradedMode: boolean = false
   private allowDegradation: boolean = false
+  /** Counter for events skipped during replay due to existing delivery */
+  private replaySkippedCount = 0
 
   constructor() {
     super()
@@ -491,9 +493,33 @@ export class EventBusService extends EventEmitter {
   }
 
   /**
+   * Private: Check if an event has already been delivered to a subscription.
+   * Used during replay to skip duplicate deliveries.
+   */
+  private async hasExistingDelivery(
+    eventId: string,
+    subscriptionId: string
+  ): Promise<boolean> {
+    try {
+      const rows = await db
+        .selectFrom('event_deliveries')
+        .select('event_id')
+        .where('event_id', '=', eventId)
+        .where('subscription_id', '=', subscriptionId)
+        .where('success', '=', true)
+        .limit(1)
+        .execute()
+      return rows.length > 0
+    } catch {
+      // If the table doesn't exist or query fails, assume no delivery
+      return false
+    }
+  }
+
+  /**
    * Private: Process event
    */
-  private async processEvent(event: Event): Promise<void> {
+  private async processEvent(event: Event, isReplay = false): Promise<void> {
     const startTime = Date.now()
 
     // Find matching subscriptions
@@ -505,6 +531,21 @@ export class EventBusService extends EventEmitter {
     // Process each subscription
     for (const subscription of subscriptions) {
       try {
+        // Replay idempotency: skip if already delivered to this subscriber
+        if (isReplay) {
+          const alreadyDelivered = await this.hasExistingDelivery(
+            event.event_id,
+            subscription.id
+          )
+          if (alreadyDelivered) {
+            this.logger.debug(
+              `Replay skip: event ${event.event_id} already delivered to ${subscription.id}`
+            )
+            this.replaySkippedCount++
+            continue
+          }
+        }
+
         // Check filter
         if (subscription.filter_expression && !this.matchesFilter(event, subscription.filter_expression)) {
           continue
@@ -1014,9 +1055,7 @@ export class EventBusService extends EventEmitter {
   /**
    * Private: Start replay
    */
-  private async startReplay(replayId: string, _criteria: ReplayCriteria): Promise<void> {
-    // This would be implemented as an async task
-    // For now, just update status
+  private async startReplay(replayId: string, criteria: ReplayCriteria): Promise<void> {
     await db
       .updateTable('event_replays')
       .set({
@@ -1026,7 +1065,44 @@ export class EventBusService extends EventEmitter {
       .where('id', '=', replayId)
       .execute()
 
-    // Replay logic would go here...
+    try {
+      // Fetch events matching criteria from event_store
+      let query = db.selectFrom('event_store').selectAll()
+
+      if (criteria.event_ids?.length) {
+        query = query.where('event_id', 'in', criteria.event_ids)
+      }
+      if (criteria.event_pattern) {
+        query = query.where('event_name', 'like', criteria.event_pattern.replace('*', '%'))
+      }
+      if (criteria.time_range) {
+        query = query
+          .where('occurred_at', '>=', criteria.time_range.start)
+          .where('occurred_at', '<=', criteria.time_range.end)
+      }
+
+      const events = await query.orderBy('occurred_at', 'asc').execute()
+
+      for (const row of events) {
+        const event: Event = {
+          event_id: row.event_id as string,
+          event_name: row.event_name as string,
+          event_version: (row as Record<string, unknown>).event_version as string ?? '1.0.0',
+          source_id: (row as Record<string, unknown>).source_id as string ?? 'replay',
+          source_type: (row as Record<string, unknown>).source_type as string ?? 'replay',
+          correlation_id: (row as Record<string, unknown>).correlation_id as string | undefined,
+          causation_id: (row as Record<string, unknown>).causation_id as string | undefined,
+          payload: (row as Record<string, unknown>).payload,
+          metadata: ((row as Record<string, unknown>).metadata as Record<string, unknown>) ?? {},
+          occurred_at: new Date((row as Record<string, unknown>).occurred_at as string)
+        }
+
+        // processEvent with isReplay=true enables delivery dedup
+        await this.processEvent(event, true)
+      }
+    } catch (error) {
+      this.logger.error('Replay failed', error instanceof Error ? error : undefined)
+    }
 
     await db
       .updateTable('event_replays')
@@ -1036,6 +1112,13 @@ export class EventBusService extends EventEmitter {
       })
       .where('id', '=', replayId)
       .execute()
+  }
+
+  /**
+   * Get the count of events skipped during replay (for metrics / testing).
+   */
+  getReplaySkippedCount(): number {
+    return this.replaySkippedCount
   }
 
   /**
