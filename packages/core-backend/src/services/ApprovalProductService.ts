@@ -16,7 +16,11 @@ import type {
   RuntimePolicy,
   UpdateApprovalTemplateRequest,
 } from '../types/approval-product'
-import { ApprovalGraphExecutor, validateApprovalFormData } from './ApprovalGraphExecutor'
+import {
+  ApprovalGraphExecutor,
+  type ApprovalGraphAutoApprovalEvent,
+  validateApprovalFormData,
+} from './ApprovalGraphExecutor'
 import type {
   ApprovalAssignmentDTO,
   ApprovalAssignmentRow,
@@ -960,6 +964,7 @@ export class ApprovalProductService {
       )
 
       await this.insertAssignments(client, instanceId, initial.assignments)
+      await this.insertAutoApprovalEvents(client, instanceId, 0, initial.status, initial.autoApprovalEvents)
       await this.insertCcEvents(client, instanceId, 0, initial.status, initial.ccEvents)
       await this.insertApprovalRecord(client, instanceId, {
         action: 'created',
@@ -1029,25 +1034,22 @@ export class ApprovalProductService {
         [id],
       )
 
-      if (request.action === 'return') {
-        if (!request.targetNodeKey?.trim()) {
-          throw new ServiceError('targetNodeKey is required for return', 400, 'VALIDATION_ERROR')
-        }
-        throw new ServiceError('Return action is not implemented yet', 409, 'APPROVAL_ACTION_NOT_SUPPORTED')
-      }
-
+      const runtimeGraph = asRuntimeGraph(runtime.runtime_graph)
+      const executor = new ApprovalGraphExecutor(runtimeGraph, toNullableRecord(instance.form_snapshot) || {})
+      const currentNodeKey = instance.current_node_key
       const actorRoles = actor.roles || []
-      const actorCanAct = assignments.rows.some((assignment) => assignmentMatchesActor(assignment, actor.userId, actorRoles))
       const actorName = actor.userName || actor.userId
+      const currentNodeAssignments = currentNodeKey
+        ? assignments.rows.filter((assignment) => assignment.node_key === currentNodeKey)
+        : []
+      const actorAssignments = currentNodeAssignments.filter((assignment) =>
+        assignmentMatchesActor(assignment, actor.userId, actorRoles))
+      const actorCanAct = actorAssignments.length > 0
+      const nextVersion = instance.version + 1
 
       if (request.action !== 'revoke' && !actorCanAct) {
         throw new ServiceError('Approval assignment not found for actor', 403, 'APPROVAL_ASSIGNMENT_REQUIRED')
       }
-
-      const runtimeGraph = asRuntimeGraph(runtime.runtime_graph)
-      const executor = new ApprovalGraphExecutor(runtimeGraph, toNullableRecord(instance.form_snapshot) || {})
-      const currentNodeKey = instance.current_node_key
-      const nextVersion = instance.version + 1
 
       if (request.action === 'comment') {
         await this.insertApprovalRecord(client, id, {
@@ -1072,10 +1074,7 @@ export class ApprovalProductService {
         if (!currentNodeKey) {
           throw new ServiceError('Approval does not have an active node', 409, APPROVAL_ERROR_CODES.INVALID_STATUS_TRANSITION)
         }
-        await client.query(
-          `UPDATE approval_assignments SET is_active = FALSE, updated_at = now() WHERE instance_id = $1 AND is_active = TRUE`,
-          [id],
-        )
+        await this.deactivateActorAssignmentsAtNode(client, id, currentNodeKey, actor.userId, actorRoles)
         await this.insertAssignments(client, id, executor.buildTransferAssignments(currentNodeKey, request.targetUserId))
         await this.insertApprovalRecord(client, id, {
           action: 'transfer',
@@ -1163,12 +1162,68 @@ export class ApprovalProductService {
         throw new ServiceError('Rejection comment is required', 400, APPROVAL_ERROR_CODES.REJECT_COMMENT_REQUIRED)
       }
 
-      await client.query(
-        `UPDATE approval_assignments SET is_active = FALSE, updated_at = now() WHERE instance_id = $1 AND is_active = TRUE`,
-        [id],
-      )
+      if (!currentNodeKey) {
+        throw new ServiceError('Approval does not have an active node', 409, APPROVAL_ERROR_CODES.INVALID_STATUS_TRANSITION)
+      }
+
+      if (request.action === 'return') {
+        const targetNodeKey = request.targetNodeKey?.trim()
+        if (!targetNodeKey) {
+          throw new ServiceError('targetNodeKey is required for return', 400, 'VALIDATION_ERROR')
+        }
+        const visitedApprovalNodes = executor.listVisitedApprovalNodeKeysUntil(currentNodeKey)
+        if (!visitedApprovalNodes.slice(0, -1).includes(targetNodeKey)) {
+          throw new ServiceError(
+            'Return target must be a previously visited approval node',
+            409,
+            'APPROVAL_RETURN_TARGET_INVALID',
+          )
+        }
+
+        await this.deactivateAllActiveAssignments(client, id)
+        const resolution = executor.resolveReturnToNode(targetNodeKey)
+        await client.query(
+          `UPDATE approval_instances
+           SET status = $2,
+               version = $3,
+               current_node_key = $4,
+               current_step = $5,
+               total_steps = $6,
+               updated_at = now()
+           WHERE id = $1`,
+          [
+            id,
+            resolution.status,
+            nextVersion,
+            resolution.currentNodeKey,
+            resolution.currentStep ?? instance.total_steps,
+            resolution.totalSteps,
+          ],
+        )
+        await this.insertAssignments(client, id, resolution.assignments)
+        await this.insertApprovalRecord(client, id, {
+          action: 'return',
+          actorId: actor.userId,
+          actorName,
+          comment: request.comment || null,
+          fromStatus: instance.status,
+          toStatus: resolution.status,
+          fromVersion: instance.version,
+          toVersion: nextVersion,
+          metadata: {
+            nodeKey: currentNodeKey,
+            targetNodeKey,
+            nextNodeKey: resolution.currentNodeKey,
+          },
+        }, actor)
+        await this.insertAutoApprovalEvents(client, id, nextVersion, resolution.status, resolution.autoApprovalEvents)
+        await this.insertCcEvents(client, id, nextVersion, resolution.status, resolution.ccEvents)
+        await client.query('COMMIT')
+        return (await this.getApproval(id))!
+      }
 
       if (request.action === 'reject') {
+        await this.deactivateAllActiveAssignments(client, id)
         await client.query(
           `UPDATE approval_instances
            SET status = 'rejected',
@@ -1194,8 +1249,40 @@ export class ApprovalProductService {
         return (await this.getApproval(id))!
       }
 
-      if (!currentNodeKey) {
-        throw new ServiceError('Approval does not have an active node', 409, APPROVAL_ERROR_CODES.INVALID_STATUS_TRANSITION)
+      const approvalMode = executor.getApprovalMode(currentNodeKey)
+      if (approvalMode === 'all') {
+        await this.deactivateActorAssignmentsAtNode(client, id, currentNodeKey, actor.userId, actorRoles)
+        const remainingAssignments = currentNodeAssignments.length - actorAssignments.length
+        if (remainingAssignments > 0) {
+          await client.query(
+            `UPDATE approval_instances
+             SET version = $2,
+                 updated_at = now()
+             WHERE id = $1`,
+            [id, nextVersion],
+          )
+          await this.insertApprovalRecord(client, id, {
+            action: 'approve',
+            actorId: actor.userId,
+            actorName,
+            comment: request.comment || null,
+            fromStatus: instance.status,
+            toStatus: instance.status,
+            fromVersion: instance.version,
+            toVersion: nextVersion,
+            metadata: {
+              nodeKey: currentNodeKey,
+              nextNodeKey: currentNodeKey,
+              approvalMode,
+              aggregateComplete: false,
+              remainingAssignments,
+            },
+          }, actor)
+          await client.query('COMMIT')
+          return (await this.getApproval(id))!
+        }
+      } else {
+        await this.deactivateAllActiveAssignments(client, id)
       }
 
       const resolution = executor.resolveAfterApprove(currentNodeKey)
@@ -1227,8 +1314,14 @@ export class ApprovalProductService {
         toStatus: resolution.status,
         fromVersion: instance.version,
         toVersion: nextVersion,
-        metadata: { nodeKey: currentNodeKey, nextNodeKey: resolution.currentNodeKey },
+        metadata: {
+          nodeKey: currentNodeKey,
+          nextNodeKey: resolution.currentNodeKey,
+          approvalMode,
+          aggregateComplete: true,
+        },
       }, actor)
+      await this.insertAutoApprovalEvents(client, id, nextVersion, resolution.status, resolution.autoApprovalEvents)
       await this.insertCcEvents(client, id, nextVersion, resolution.status, resolution.ccEvents)
 
       await client.query('COMMIT')
@@ -1351,6 +1444,37 @@ export class ApprovalProductService {
     }
   }
 
+  private async deactivateAllActiveAssignments(
+    client: { query: typeof pool.query },
+    instanceId: string,
+  ): Promise<void> {
+    await client.query(
+      `UPDATE approval_assignments SET is_active = FALSE, updated_at = now() WHERE instance_id = $1 AND is_active = TRUE`,
+      [instanceId],
+    )
+  }
+
+  private async deactivateActorAssignmentsAtNode(
+    client: { query: typeof pool.query },
+    instanceId: string,
+    nodeKey: string,
+    actorId: string,
+    actorRoles: string[],
+  ): Promise<void> {
+    await client.query(
+      `UPDATE approval_assignments
+       SET is_active = FALSE, updated_at = now()
+       WHERE instance_id = $1
+         AND node_key = $2
+         AND is_active = TRUE
+         AND (
+           (assignment_type = 'user' AND assignee_id = $3)
+           OR (assignment_type = 'role' AND assignee_id = ANY($4::text[]))
+         )`,
+      [instanceId, nodeKey, actorId, actorRoles],
+    )
+  }
+
   private async insertAssignments(
     client: { query: typeof pool.query },
     instanceId: string,
@@ -1369,6 +1493,34 @@ export class ApprovalProductService {
           assignment.nodeKey,
         ],
       )
+    }
+  }
+
+  private async insertAutoApprovalEvents(
+    client: { query: typeof pool.query },
+    instanceId: string,
+    version: number,
+    status: string,
+    autoApprovalEvents: ApprovalGraphAutoApprovalEvent[],
+  ): Promise<void> {
+    for (const event of autoApprovalEvents) {
+      await this.insertApprovalRecord(client, instanceId, {
+        action: 'approve',
+        actorId: 'system',
+        actorName: 'System',
+        comment: null,
+        fromStatus: status,
+        toStatus: status,
+        fromVersion: version,
+        toVersion: version,
+        metadata: {
+          nodeKey: event.nodeKey,
+          sourceStep: event.sourceStep,
+          approvalMode: event.approvalMode,
+          autoApproved: true,
+          reason: event.reason,
+        },
+      })
     }
   }
 
