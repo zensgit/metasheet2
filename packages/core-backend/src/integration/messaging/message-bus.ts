@@ -9,6 +9,7 @@
 
 import { randomUUID } from 'crypto'
 import { coreMetrics } from '../metrics/metrics'
+import { observeRpcLatency } from '../../metrics/metrics'
 import { delayService } from '../../services/DelayService'
 import { dlqService } from '../../services/DeadLetterQueueService'
 import { BackoffStrategy } from '../../utils/BackoffStrategy'
@@ -498,6 +499,7 @@ class MessageBus {
   ): Promise<TResponse> {
     const correlationId = randomUUID()
     const replyTopic = `__rpc.reply.${correlationId}`
+    const requestStartTime = Date.now()
 
     // Track active RPC correlations for monitoring
     coreMetrics.gauge('rpc_active_correlations', this.pendingRpc.size + 1)
@@ -519,6 +521,7 @@ class MessageBus {
       const timeout = setTimeout(() => {
         cleanup()
         coreMetrics.inc('rpcTimeouts')
+        observeRpcLatency(topic, 'message-bus', 'timeout', (Date.now() - requestStartTime) / 1000)
         reject(new Error('RPC timeout'))
       }, timeoutMs)
 
@@ -535,6 +538,13 @@ class MessageBus {
         const pending = this.pendingRpc.get(correlationId)
         if (pending) {
           clearTimeout(pending.timeout)
+          const durationSec = (Date.now() - requestStartTime) / 1000
+          const payload = msg.payload as Record<string, unknown>
+          if (payload && typeof payload === 'object' && 'error' in payload) {
+            observeRpcLatency(topic, 'message-bus', 'failure', durationSec)
+          } else {
+            observeRpcLatency(topic, 'message-bus', 'success', durationSec)
+          }
           pending.resolve(msg.payload as TResponse)
         }
         cleanup()

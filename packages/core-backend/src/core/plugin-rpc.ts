@@ -7,6 +7,7 @@
 import type { EventBus } from '../integration/events/event-bus';
 import type { Logger} from './logger';
 import { createLogger } from './logger';
+import { observeRpcLatency } from '../metrics/metrics';
 
 /**
  * RPC 调用请求
@@ -289,7 +290,9 @@ export class RpcServer {
         response
       );
 
-      this.updateStats(methodName, true, Date.now() - startTime);
+      const durationMs = Date.now() - startTime;
+      this.updateStats(methodName, true, durationMs);
+      observeRpcLatency(methodName, this.pluginId, 'success', durationMs / 1000);
 
       if (this.config.enableLogging) {
         this.logger.debug(`RPC call succeeded: ${methodName}`);
@@ -298,15 +301,18 @@ export class RpcServer {
     } catch (error: unknown) {
       // 发送错误响应
       const err = toError(error);
+      const isTimeout = err.message === 'RPC timeout';
 
       await this.sendError(request, {
-        code: RpcErrorCode.INTERNAL_ERROR,
+        code: isTimeout ? RpcErrorCode.TIMEOUT : RpcErrorCode.INTERNAL_ERROR,
         message: err.message,
         data: err.stack
       });
 
       const methodName = request.method;
-      this.updateStats(methodName, false, Date.now() - startTime);
+      const durationMs = Date.now() - startTime;
+      this.updateStats(methodName, false, durationMs);
+      observeRpcLatency(methodName, this.pluginId, isTimeout ? 'timeout' : 'failure', durationMs / 1000);
 
       if (this.config.enableLogging) {
         this.logger.error(`RPC call failed: ${methodName}`, err);
@@ -531,10 +537,13 @@ export class RpcClient {
       }
     };
 
+    const callStartTime = Date.now();
+
     return new Promise<T>((resolve, reject) => {
       // 设置超时
       const timeoutHandle = setTimeout(() => {
         this.pendingCalls.delete(requestId);
+        observeRpcLatency(method, targetPlugin, 'timeout', (Date.now() - callStartTime) / 1000);
         reject(new Error(`RPC call timeout: ${targetPlugin}.${method}`));
       }, timeout);
 
@@ -557,9 +566,12 @@ export class RpcClient {
             this.pendingCalls.delete(requestId);
             this.eventBus.unsubscribe(listenerId);
 
+            const durationSec = (Date.now() - callStartTime) / 1000;
             if (response.error) {
+              observeRpcLatency(method, targetPlugin, 'failure', durationSec);
               reject(new Error(response.error.message));
             } else {
+              observeRpcLatency(method, targetPlugin, 'success', durationSec);
               resolve(response.result as T);
             }
           }
@@ -577,6 +589,7 @@ export class RpcClient {
         clearTimeout(timeoutHandle);
         this.pendingCalls.delete(requestId);
         this.eventBus.unsubscribe(listenerId);
+        observeRpcLatency(method, targetPlugin, 'failure', (Date.now() - callStartTime) / 1000);
         reject(error);
       }
     });
