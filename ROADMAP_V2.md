@@ -39,7 +39,12 @@
 - SafetyGuard: risk assessment, double-confirm flow, Express middleware, metrics (dangerousOperationsTotal, blockedOperationsTotal, confirmationRequestsTotal)
 
 ## In Progress
-- None (All planned phases complete through Phase 9; Phase 5 baseline finalized locally, awaiting production rerun)
+- Approvals Wave 2 Pack 1A/1B (Codex — node capability expansion, parallel/join)
+- Phase 5 Production Baseline (local verified, production rerun pending)
+
+## Recently Completed (2026-04-13)
+- Sprint 8: Real-time Insights & Reliability (PRs #842-845)
+- Multitable 5 Enhancements: row permissions, cursor pagination, automation triggers, field type registry, formula engine (PRs #847-851)
 
 ---
 
@@ -266,17 +271,25 @@ METRICS_URL="http://production:4000/metrics/prom" ./scripts/phase5-observe.sh
  - [x] RPC 延迟直方图 (PR #842, metasheet_rpc_latency_seconds histogram)
  - [x] 金丝雀路由基础 (PR #845, CanaryRouter + CanaryMetrics + Admin API)
 
+ ### Multitable Enhancements (2026-04-13) ✅ 已完成
+ - [x] Row-Level Permissions (PR #850, record_permissions table, 4th permission layer)
+ - [x] Large Dataset Performance (PR #849, cursor pagination, GIN index, 30s cache)
+ - [x] Automation Triggers (PR #851, AutomationService, notify + update_field actions)
+ - [x] Custom Field Type Registry (PR #847, plugin-extensible FieldTypeRegistry)
+ - [x] Formula Engine Enhancement (PR #848, SWITCH/DATEDIF/COUNTA/LOOKUP + dependency tracking)
+
  ## Near-Term Planned (Legacy)
 - Plugin hot swap during reload (cache module state)
 
 ## Future Enhancements
-- Auditing expansion & structured logs
-- Multi-region deployment support
-- 多环境审批策略
+- Multi-region deployment support (Redis Cluster, DB replication, CDN)
+- 多环境审批策略 (dev/staging/prod approval gates)
 - 合规报告自动生成 (SOC2/ISO)
-- 变更日历可视化
-- 租户级消息 QoS
-- 幂等防重机制
+- 变更日历可视化 (ChangeManagementService frontend)
+- 租户级消息 QoS (priority lanes beyond rate limiting)
+- Automation trigger expansion (webhook action, conditional logic, scheduling)
+- Multitable frontend for row-level permissions UI
+- Multitable frontend for automation rule builder UI
 
 ## 设计文档索引
 
@@ -297,20 +310,28 @@ METRICS_URL="http://production:4000/metrics/prom" ./scripts/phase5-observe.sh
 ### 设计规划
 - [Phase 10 Advanced Messaging 设计](claudedocs/PHASE10_ADVANCED_MESSAGING_PLAN.md)
 - [Phase 11 Performance & Scale 规划](claudedocs/PHASE11_PERFORMANCE_SCALE_PLAN.md)
-- [Phase 10/11 综合设计笔记](claudedocs/PHASE10_11_DESIGN_NOTES.md)
+- [Phase 10/11 ��合设计笔记](claudedocs/PHASE10_11_DESIGN_NOTES.md)
 - [变更管理与快照体系设计](claudedocs/CHANGE_MANAGEMENT_SNAPSHOT_DESIGN.md)
+- [Sprint 8 基础设施设计与验证](docs/development/sprint8-infrastructure-design-verification-20260413.md)
+- [多表增强设计与验证](docs/development/multitable-enhancements-design-verification-20260413.md)
 
 ## Metric Backlog
-| Metric | Purpose | Priority |
-|--------|---------|----------|
-| rpcActiveCorrelations | RPC inflight gauge | Medium |
-| messagesDelayedTotal | Delay adoption (Phase 10) | Planned |
-| dlqMessagesTotal | DLQ monitoring (Phase 10) | Planned |
-| backoffDelayHistogram | Retry patterns (Phase 10) | Planned |
-| patternMatchDuration | Pattern perf (Phase 11) | Planned |
+| Metric | Purpose | Status |
+|--------|---------|--------|
+| rpcActiveCorrelations | RPC inflight gauge | ✅ Done (message-bus.ts) |
+| rpcLatencySeconds | RPC latency histogram | ✅ Done (Sprint 8, PR #842) |
+| messagesDelayedTotal | Delay adoption (Phase 10) | ✅ Done |
+| dlqMessagesTotal | DLQ monitoring (Phase 10) | ✅ Done |
+| backoffDelayHistogram | Retry patterns (Phase 10) | ✅ Done |
+| patternMatchDuration | Pattern perf (Phase 11) | ✅ Done |
 | shardDistribution | Data balance (Phase 11) | Planned |
 | changeRequestsCreatedTotal | 变更管理 (Sprint 3) | Planned |
 | changeDeploymentsTotal | 部署跟踪 (Sprint 3) | Planned |
+| idempotencyHits/Misses | Dedup monitoring | ✅ Done (Sprint 8, PR #843) |
+| messageDedupHitsTotal | Message dedup | ✅ Done (Sprint 8, PR #843) |
+| metricsStreamClients | WS stream clients | ✅ Done (Sprint 8, PR #844) |
+| canaryRequestsTotal | Canary traffic split | ✅ Done (Sprint 8, PR #845) |
+| canaryLatencySeconds | Canary latency compare | ✅ Done (Sprint 8, PR #845) |
 | protectionRuleBlocksTotal | 保护规则 (Sprint 2) | ✅ Done |
 | pluginHealthGauge | 插件健康 (Sprint 2) | ✅ Done |
 | dangerousOperationsTotal | 安全护栏 (Sprint 1) | ✅ Done |
@@ -319,10 +340,12 @@ METRICS_URL="http://production:4000/metrics/prom" ./scripts/phase5-observe.sh
 | snapshotCleanupTotal | Cleanup tracking | ✅ Done |
 
 ## Known Technical Debt
-- RPC timeout path still keeps reply subscription (will unsubscribe in enhancement)
-- Event bus previously had dual counting (now unified)
-- Linear scan of patternSubs (optimize later)
-- In-memory message queue (no persistence)
+- In-memory message queue (no persistence across restarts)
+- Record-level permission filtering is post-query (not SQL-level; acceptable for MVP, optimize for large datasets)
+- Automation `update_field` action operates on single record only (no batch)
+- Cross-table LOOKUP in formula engine is synchronous exact-match only (no range/fuzzy)
+- WebSocket metrics stream uses in-memory previous snapshot (not shared across instances)
+- CollabService Redis adapter stub not wired (WS_REDIS_ENABLED flag present but no-op)
 
 ## Principles
 - Ship minimal vertical slices with metrics
