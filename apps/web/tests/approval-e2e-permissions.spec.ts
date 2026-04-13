@@ -991,6 +991,7 @@ describe('Approval E2E Permissions', () => {
       routeParams = { id: 'apv_pending_1' }
       mockActiveApproval.value = mockPendingApproval({ currentNodeKey: 'approval_2' })
       mockHistoryRef.value = mockReturnHistory()
+      mockActiveTemplate.value = mockTemplateWithModes()
       await mountDetailView()
 
       const buttons = Array.from(container!.querySelectorAll('.approval-detail__actions button'))
@@ -1022,6 +1023,7 @@ describe('Approval E2E Permissions', () => {
       routeParams = { id: 'apv_pending_1' }
       mockActiveApproval.value = mockPendingApproval({ currentNodeKey: 'approval_2' })
       mockHistoryRef.value = mockReturnHistory()
+      mockActiveTemplate.value = mockTemplateWithModes()
       executeActionSpy.mockResolvedValue(mockPendingApproval())
       await mountDetailView()
 
@@ -1032,6 +1034,7 @@ describe('Approval E2E Permissions', () => {
 
       const dialog = container!.querySelector('[data-dialog-visible="true"][data-el-dialog="退回审批"]')
       expect(dialog).toBeTruthy()
+      expect(dialog?.textContent).toContain('部门主管审批')
 
       // Select a target node
       const select = dialog!.querySelector('[data-el-select]') as HTMLSelectElement
@@ -1106,6 +1109,7 @@ describe('Approval E2E Permissions', () => {
       routeParams = { id: 'apv_pending_1' }
       mockActiveApproval.value = mockPendingApproval({ currentNodeKey: 'approval_1' })
       mockHistoryRef.value = mockReturnHistory()
+      mockActiveTemplate.value = mockTemplateWithModes()
       await mountDetailView()
 
       const items = queryHistoryItems(container)
@@ -1113,7 +1117,7 @@ describe('Approval E2E Permissions', () => {
 
       const textContent = container!.textContent ?? ''
       expect(textContent).toContain('退回')
-      expect(textContent).toContain('退回至: approval_1')
+      expect(textContent).toContain('退回至: 部门主管审批')
       expect(textContent).toContain('金额有误，退回修改')
     })
 

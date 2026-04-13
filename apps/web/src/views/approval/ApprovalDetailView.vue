@@ -107,7 +107,7 @@
                     会签完成
                   </span>
                   <span v-if="item.action === 'return' && item.metadata?.targetNodeKey" class="approval-detail__meta-badge approval-detail__meta-badge--return">
-                    退回至: {{ item.metadata.targetNodeKey }}
+                    退回至: {{ nodeLabel(item.metadata.targetNodeKey as string) }}
                   </span>
                   <span v-if="item.metadata?.nodeKey" class="approval-detail__meta-badge">
                     节点: {{ item.metadata.nodeKey }}
@@ -322,10 +322,12 @@ import {
 import type { ApprovalActionType } from '../../types/approval'
 import { useApprovalStore } from '../../approvals/store'
 import { useApprovalPermissions } from '../../approvals/permissions'
+import { useApprovalTemplateStore } from '../../approvals/templateStore'
 
 const route = useRoute()
 const router = useRouter()
 const store = useApprovalStore()
+const templateStore = useApprovalTemplateStore()
 const { canAct } = useApprovalPermissions()
 
 const approval = computed(() => store.activeApproval)
@@ -355,7 +357,7 @@ const returnableNodes = computed(() => {
   }
   return Array.from(visited).map((key) => ({
     key,
-    label: key,
+    label: nodeLabel(key),
   }))
 })
 
@@ -390,7 +392,6 @@ function statusLabel(status: string) {
 
 function actionLabel(action: string, metadata?: Record<string, unknown>) {
   if (action === 'approve' && metadata?.autoApproved) return '自动通过'
-  if (action === 'return') return '退回'
   const map: Record<string, string> = {
     created: '发起',
     approve: '通过',
@@ -441,6 +442,12 @@ function hasTimelineMetadata(metadata?: Record<string, unknown>): boolean {
 function approvalModeLabel(mode: string): string {
   const map: Record<string, string> = { single: '单人', all: '会签', any: '或签' }
   return map[mode] ?? mode
+}
+
+function nodeLabel(nodeKey: string): string {
+  if (!nodeKey) return '-'
+  const node = templateStore.activeTemplate?.approvalGraph.nodes.find((entry) => entry.key === nodeKey)
+  return node?.name?.trim() || nodeKey
 }
 
 function formatDate(dateStr: string) {
@@ -573,6 +580,9 @@ async function handleRevoke() {
 onMounted(async () => {
   const id = route.params.id as string
   await Promise.all([store.loadDetail(id), store.loadHistory(id)])
+  if (store.activeApproval?.templateId) {
+    await templateStore.loadTemplate(store.activeApproval.templateId).catch(() => undefined)
+  }
 })
 </script>
 
