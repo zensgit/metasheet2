@@ -8,8 +8,10 @@ import { eventBus } from '../integration/events/event-bus'
 import {
   deriveFieldPermissions,
   deriveViewPermissions,
+  deriveRecordPermissions,
   type FieldPermissionScope,
   type ViewPermissionScope,
+  type RecordPermissionScope,
   isFieldAlwaysReadOnly,
   isFieldPermissionHidden,
 } from '../multitable/permission-derivation'
@@ -1694,6 +1696,70 @@ async function loadFieldPermissionScopeMap(
   }
 }
 
+async function loadRecordPermissionScopeMap(
+  query: QueryFn,
+  sheetId: string,
+  recordIds: string[],
+  userId: string,
+): Promise<Map<string, RecordPermissionScope>> {
+  if (!userId || !sheetId || recordIds.length === 0) return new Map()
+  try {
+    const result = await query(
+      `SELECT rp.record_id, rp.access_level
+       FROM record_permissions rp
+       WHERE rp.sheet_id = $2
+         AND rp.record_id = ANY($3::text[])
+         AND (
+           (rp.subject_type = 'user' AND rp.subject_id = $1)
+           OR (
+             rp.subject_type = 'role'
+             AND EXISTS (
+               SELECT 1 FROM user_roles ur
+               WHERE ur.user_id = $1 AND ur.role_id = rp.subject_id
+             )
+           )
+         )`,
+      [userId, sheetId, recordIds],
+    )
+    const scopes = new Map<string, RecordPermissionScope>()
+    for (const row of result.rows as Array<{ record_id: string; access_level: string }>) {
+      const recordId = typeof row.record_id === 'string' ? row.record_id : ''
+      if (!recordId) continue
+      const existing = scopes.get(recordId)
+      const level = row.access_level as 'read' | 'write' | 'admin'
+      // Most permissive wins: admin > write > read
+      if (existing) {
+        const rank = { read: 0, write: 1, admin: 2 } as const
+        if (rank[level] > rank[existing.accessLevel]) {
+          existing.accessLevel = level
+        }
+      } else {
+        scopes.set(recordId, { recordId, accessLevel: level })
+      }
+    }
+    return scopes
+  } catch (err) {
+    if (isUndefinedTableError(err, 'record_permissions') || isUndefinedTableError(err, 'user_roles')) return new Map()
+    throw err
+  }
+}
+
+async function hasRecordPermissionAssignments(
+  query: QueryFn,
+  sheetId: string,
+): Promise<boolean> {
+  try {
+    const result = await query(
+      'SELECT 1 FROM record_permissions WHERE sheet_id = $1 LIMIT 1',
+      [sheetId],
+    )
+    return result.rows.length > 0
+  } catch (err) {
+    if (isUndefinedTableError(err, 'record_permissions')) return false
+    throw err
+  }
+}
+
 function applySheetPermissionScope(
   capabilities: MultitableCapabilities,
   scope: SheetPermissionScope | undefined,
@@ -2006,9 +2072,18 @@ function ensureRecordWriteAllowed(
   access: ResolvedRequestAccess,
   createdBy: string | null | undefined,
   action: 'edit' | 'delete',
+  recordScopeMap?: Map<string, RecordPermissionScope>,
+  recordId?: string,
 ): boolean {
   const rowActions = deriveRecordRowActions(capabilities, scope, access, createdBy)
-  return action === 'edit' ? rowActions.canEdit : rowActions.canDelete
+  const baseAllowed = action === 'edit' ? rowActions.canEdit : rowActions.canDelete
+  if (baseAllowed) return true
+  // Fallback: check record-level permissions if available
+  if (recordScopeMap && recordId) {
+    const recordPerms = deriveRecordPermissions(recordId, capabilities, recordScopeMap)
+    return action === 'edit' ? recordPerms.canEdit : recordPerms.canDelete
+  }
+  return false
 }
 
 type FieldMutationGuard = {
@@ -3444,6 +3519,156 @@ export function univerMetaRouter(): Router {
     }
   })
 
+  // ── Record permission authoring ──
+
+  router.get('/sheets/:sheetId/records/:recordId/permissions', async (req: Request, res: Response) => {
+    const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
+    const recordId = typeof req.params.recordId === 'string' ? req.params.recordId.trim() : ''
+    if (!sheetId || !recordId) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId and recordId are required' } })
+    }
+
+    try {
+      const pool = poolManager.get()
+      const sheet = await loadSheetRow(pool.query.bind(pool), sheetId)
+      if (!sheet) {
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
+      }
+      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      if (!capabilities.canManageSheetAccess) return sendForbidden(res)
+
+      const recordCheck = await pool.query('SELECT id FROM meta_records WHERE id = $1 AND sheet_id = $2', [recordId, sheetId])
+      if (recordCheck.rows.length === 0) {
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Record not found: ${recordId}` } })
+      }
+
+      const result = await pool.query(
+        `SELECT id, sheet_id, record_id, subject_type, subject_id, access_level, created_at, created_by
+         FROM record_permissions WHERE sheet_id = $1 AND record_id = $2 ORDER BY created_at ASC`,
+        [sheetId, recordId],
+      )
+      const items = (result.rows as any[]).map((row) => ({
+        id: String(row.id),
+        sheetId: String(row.sheet_id),
+        recordId: String(row.record_id),
+        subjectType: String(row.subject_type),
+        subjectId: String(row.subject_id),
+        accessLevel: String(row.access_level),
+        createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : String(row.created_at ?? ''),
+      }))
+      return res.json({ ok: true, data: { items } })
+    } catch (err) {
+      if (isUndefinedTableError(err, 'record_permissions')) {
+        return res.json({ ok: true, data: { items: [] } })
+      }
+      const hint = getDbNotReadyMessage(err)
+      if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
+      console.error('[univer-meta] list record permissions failed:', err)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to list record permissions' } })
+    }
+  })
+
+  router.put('/sheets/:sheetId/records/:recordId/permissions', async (req: Request, res: Response) => {
+    const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
+    const recordId = typeof req.params.recordId === 'string' ? req.params.recordId.trim() : ''
+    if (!sheetId || !recordId) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId and recordId are required' } })
+    }
+
+    const schema = z.object({
+      subjectType: z.enum(['user', 'role']),
+      subjectId: z.string().min(1),
+      accessLevel: z.enum(['read', 'write', 'admin']),
+    })
+    const parsed = schema.safeParse(req.body)
+    if (!parsed.success) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+    }
+
+    try {
+      const pool = poolManager.get()
+      const sheet = await loadSheetRow(pool.query.bind(pool), sheetId)
+      if (!sheet) {
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
+      }
+      const { access, capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      if (!capabilities.canManageSheetAccess) return sendForbidden(res)
+
+      const recordCheck = await pool.query('SELECT id FROM meta_records WHERE id = $1 AND sheet_id = $2', [recordId, sheetId])
+      if (recordCheck.rows.length === 0) {
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Record not found: ${recordId}` } })
+      }
+
+      const { subjectType, subjectId, accessLevel } = parsed.data
+      if (subjectType === 'user') {
+        const userCheck = await pool.query('SELECT id FROM users WHERE id = $1', [subjectId])
+        if (userCheck.rows.length === 0) {
+          return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `User not found: ${subjectId}` } })
+        }
+      } else {
+        const roleCheck = await pool.query('SELECT id FROM roles WHERE id = $1', [subjectId])
+        if (roleCheck.rows.length === 0) {
+          return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Role not found: ${subjectId}` } })
+        }
+      }
+
+      await pool.query(
+        `INSERT INTO record_permissions(sheet_id, record_id, subject_type, subject_id, access_level, created_by)
+         VALUES ($1, $2, $3, $4, $5, $6)
+         ON CONFLICT (record_id, subject_type, subject_id)
+         DO UPDATE SET access_level = EXCLUDED.access_level`,
+        [sheetId, recordId, subjectType, subjectId, accessLevel, access.userId ?? null],
+      )
+
+      return res.json({
+        ok: true,
+        data: { sheetId, recordId, subjectType, subjectId, accessLevel },
+      })
+    } catch (err) {
+      const hint = getDbNotReadyMessage(err)
+      if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
+      console.error('[univer-meta] update record permission failed:', err)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to update record permission' } })
+    }
+  })
+
+  router.delete('/sheets/:sheetId/records/:recordId/permissions/:permissionId', async (req: Request, res: Response) => {
+    const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
+    const recordId = typeof req.params.recordId === 'string' ? req.params.recordId.trim() : ''
+    const permissionId = typeof req.params.permissionId === 'string' ? req.params.permissionId.trim() : ''
+    if (!sheetId || !recordId || !permissionId) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId, recordId, and permissionId are required' } })
+    }
+
+    try {
+      const pool = poolManager.get()
+      const sheet = await loadSheetRow(pool.query.bind(pool), sheetId)
+      if (!sheet) {
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
+      }
+      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      if (!capabilities.canManageSheetAccess) return sendForbidden(res)
+
+      const result = await pool.query(
+        'DELETE FROM record_permissions WHERE id = $1 AND sheet_id = $2 AND record_id = $3',
+        [permissionId, sheetId, recordId],
+      )
+      if ((result.rowCount ?? 0) === 0) {
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Permission not found: ${permissionId}` } })
+      }
+
+      return res.json({ ok: true, data: { deleted: true, permissionId } })
+    } catch (err) {
+      if (isUndefinedTableError(err, 'record_permissions')) {
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Permission not found: ${permissionId}` } })
+      }
+      const hint = getDbNotReadyMessage(err)
+      if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
+      console.error('[univer-meta] delete record permission failed:', err)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to delete record permission' } })
+    }
+  })
+
   router.get('/fields', async (req: Request, res: Response) => {
     const sheetId = typeof req.query.sheetId === 'string' ? req.query.sheetId.trim() : ''
     if (!sheetId) {
@@ -4484,6 +4709,25 @@ export function univerMetaRouter(): Router {
             visiblePropertyFieldIds,
           )
         : undefined
+      // Record-level permission filtering: remove records user cannot read (admin bypass)
+      if (!access.isAdminRole && access.userId && rows.length > 0) {
+        const hasRecordPerms = await hasRecordPermissionAssignments(pool.query.bind(pool), sheetId)
+        if (hasRecordPerms) {
+          const recordScopeMap = await loadRecordPermissionScopeMap(
+            pool.query.bind(pool),
+            sheetId,
+            rows.map((r) => r.id),
+            access.userId,
+          )
+          if (recordScopeMap.size > 0) {
+            rows = rows.filter((row) => {
+              const perms = deriveRecordPermissions(row.id, capabilities, recordScopeMap)
+              return perms.canRead
+            })
+          }
+        }
+      }
+
       const rowActionOverrides = buildRowActionOverrides(
         rows,
         requiresOwnWriteRowPolicy(sheetScope, access.isAdminRole)

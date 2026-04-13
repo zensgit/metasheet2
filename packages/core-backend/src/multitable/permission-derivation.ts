@@ -35,6 +35,17 @@ export type FieldPermissionScope = {
   readOnly: boolean
 }
 
+export type RecordPermissionScope = {
+  recordId: string
+  accessLevel: 'read' | 'write' | 'admin'
+}
+
+export type MultitableRecordPermission = {
+  canRead: boolean
+  canEdit: boolean
+  canDelete: boolean
+}
+
 export type FieldLike = {
   id: string
   type: string
@@ -106,4 +117,24 @@ export function deriveViewPermissions(
       ]
     }),
   )
+}
+
+export function deriveRecordPermissions(
+  recordId: string,
+  capabilities: Pick<MultitableCapabilities, 'canRead' | 'canEditRecord'>,
+  recordScopeMap?: Map<string, RecordPermissionScope>,
+): MultitableRecordPermission {
+  const scope = recordScopeMap?.get(recordId)
+  if (!scope) {
+    return {
+      canRead: capabilities.canRead,
+      canEdit: capabilities.canEditRecord,
+      canDelete: capabilities.canEditRecord,
+    }
+  }
+  return {
+    canRead: capabilities.canRead && (scope.accessLevel === 'read' || scope.accessLevel === 'write' || scope.accessLevel === 'admin'),
+    canEdit: capabilities.canEditRecord && (scope.accessLevel === 'write' || scope.accessLevel === 'admin'),
+    canDelete: capabilities.canEditRecord && scope.accessLevel === 'admin',
+  }
 }
