@@ -80,4 +80,65 @@ describe('usePlatformApps', () => {
     expect(refreshed?.instance?.projectId).toBe('tenant_42:after-sales')
     expect(apps.value[0]?.instance?.projectId).toBe('tenant_42:after-sales')
   })
+
+  it('deduplicates concurrent app fetches and clears stale error state', async () => {
+    const { usePlatformApps } = await import('../src/composables/usePlatformApps')
+    const { fetchAppById, apps, error, loading } = usePlatformApps()
+
+    error.value = 'stale error'
+
+    let resolveRequest: ((value: any) => void) | null = null
+    apiGetMock.mockImplementationOnce(() => new Promise((resolve) => {
+      resolveRequest = resolve
+    }))
+
+    const first = fetchAppById('after-sales')
+    const second = fetchAppById('after-sales')
+
+    expect(apiGetMock).toHaveBeenCalledTimes(1)
+    expect(error.value).toBeNull()
+    expect(loading.value).toBe(true)
+
+    resolveRequest?.({
+      id: 'after-sales',
+      pluginId: 'plugin-after-sales',
+      pluginName: 'plugin-after-sales',
+      pluginVersion: '1.0.0',
+      pluginDisplayName: 'After Sales Plugin',
+      pluginStatus: 'active',
+      displayName: 'After Sales',
+      runtimeModel: 'instance',
+      boundedContext: { code: 'after-sales' },
+      platformDependencies: [],
+      navigation: [],
+      permissions: [],
+      featureFlags: [],
+      objects: [],
+      workflows: [],
+      integrations: [],
+      entryPath: '/p/plugin-after-sales/after-sales',
+      instance: null,
+    })
+
+    const [app, duplicate] = await Promise.all([first, second])
+
+    expect(app?.id).toBe('after-sales')
+    expect(duplicate?.id).toBe('after-sales')
+    expect(apps.value).toHaveLength(1)
+    expect(loading.value).toBe(false)
+    expect(error.value).toBeNull()
+  })
+
+  it('publishes fetch failures through the shared error and loading state', async () => {
+    const { usePlatformApps } = await import('../src/composables/usePlatformApps')
+    const { fetchAppById, error, loading } = usePlatformApps()
+
+    apiGetMock.mockRejectedValueOnce(new Error('boom'))
+
+    const result = await fetchAppById('after-sales', { force: true })
+
+    expect(result).toBeNull()
+    expect(loading.value).toBe(false)
+    expect(error.value).toBe('boom')
+  })
 })

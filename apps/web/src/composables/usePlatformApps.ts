@@ -178,6 +178,38 @@ const apps = ref<PlatformAppSummary[]>([])
 const loading = ref(false)
 const error = ref<string | null>(null)
 let inflightList: Promise<void> | null = null
+const inflightByAppId = new Map<string, Promise<PlatformAppSummary | null>>()
+let pendingRequestCount = 0
+
+function beginRequest(): void {
+  pendingRequestCount += 1
+  loading.value = true
+}
+
+function endRequest(): void {
+  pendingRequestCount = Math.max(0, pendingRequestCount - 1)
+  loading.value = pendingRequestCount > 0
+}
+
+async function runTrackedRequest<T>(
+  handler: () => Promise<T>,
+  fallbackErrorMessage: string,
+): Promise<T | null> {
+  beginRequest()
+  error.value = null
+  try {
+    return await handler()
+  } catch (err: any) {
+    error.value = err?.message || fallbackErrorMessage
+    return null
+  } finally {
+    endRequest()
+  }
+}
+
+function sortApps(items: PlatformAppSummary[]): PlatformAppSummary[] {
+  return [...items].sort((a, b) => a.displayName.localeCompare(b.displayName))
+}
 
 async function fetchApps(options?: { force?: boolean }): Promise<void> {
   if (!options?.force && apps.value.length > 0) {
@@ -188,16 +220,10 @@ async function fetchApps(options?: { force?: boolean }): Promise<void> {
   }
 
   inflightList = (async () => {
-    loading.value = true
-    error.value = null
-    try {
+    await runTrackedRequest(async () => {
       const response = await apiGet<{ list?: PlatformAppSummary[] }>('/api/platform/apps')
-      apps.value = Array.isArray(response?.list) ? response.list : []
-    } catch (err: any) {
-      error.value = err?.message || 'Failed to load platform apps'
-    } finally {
-      loading.value = false
-    }
+      apps.value = sortApps(Array.isArray(response?.list) ? response.list : [])
+    }, 'Failed to load platform apps')
   })()
 
   try {
@@ -208,19 +234,28 @@ async function fetchApps(options?: { force?: boolean }): Promise<void> {
 }
 
 async function fetchAppById(appId: string, options?: { force?: boolean }): Promise<PlatformAppSummary | null> {
-  if (!appId.trim()) return null
-  const existing = apps.value.find((item) => item.id === appId)
+  const normalizedAppId = appId.trim()
+  if (!normalizedAppId) return null
+  const existing = apps.value.find((item) => item.id === normalizedAppId)
   if (existing && !options?.force) return existing
-  try {
-    const app = await apiGet<PlatformAppSummary>(`/api/platform/apps/${encodeURIComponent(appId)}`)
+
+  const inflight = inflightByAppId.get(normalizedAppId)
+  if (inflight) {
+    return inflight
+  }
+
+  const request = runTrackedRequest(async () => {
+    const app = await apiGet<PlatformAppSummary>(`/api/platform/apps/${encodeURIComponent(normalizedAppId)}`)
     const next = apps.value.filter((item) => item.id !== app.id)
     next.push(app)
-    apps.value = next.sort((a, b) => a.displayName.localeCompare(b.displayName))
+    apps.value = sortApps(next)
     return app
-  } catch (err: any) {
-    error.value = err?.message || 'Failed to load platform app'
-    return null
-  }
+  }, 'Failed to load platform app').finally(() => {
+    inflightByAppId.delete(normalizedAppId)
+  })
+
+  inflightByAppId.set(normalizedAppId, request)
+  return request
 }
 
 export function usePlatformApps() {
