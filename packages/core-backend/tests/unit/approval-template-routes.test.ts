@@ -335,7 +335,16 @@ describe('approval template routes', () => {
         approvalGraph: {
           nodes: [
             { key: 'start', type: 'start', config: {} },
-            { key: 'approve_1', type: 'approval', config: { assigneeType: 'role', assigneeIds: ['finance'] } },
+            {
+              key: 'approve_1',
+              type: 'approval',
+              config: {
+                assigneeType: 'role',
+                assigneeIds: ['finance'],
+                approvalMode: 'all',
+                emptyAssigneePolicy: 'auto-approve',
+              },
+            },
             { key: 'end', type: 'end', config: {} },
           ],
           edges: [
@@ -350,6 +359,12 @@ describe('approval template routes', () => {
     expect(response.body.status).toBe('draft')
     expect(response.body.latestVersionId).toMatch(/^ver-/)
     expect(response.body.formSchema.fields).toHaveLength(1)
+    expect(response.body.approvalGraph.nodes[1].config).toEqual({
+      assigneeType: 'role',
+      assigneeIds: ['finance'],
+      approvalMode: 'all',
+      emptyAssigneePolicy: 'auto-approve',
+    })
   })
 
   it('patches template metadata and creates a new draft version when graph changes', async () => {
@@ -386,7 +401,28 @@ describe('approval template routes', () => {
 
   it('publishes latest template version and injects runtime policy', async () => {
     const template = routeState.createTemplateFixture()
-    const version = routeState.createVersionFixture(template.id)
+    const version = routeState.createVersionFixture(template.id, {
+      approval_graph: {
+        nodes: [
+          { key: 'start', type: 'start', config: {} },
+          {
+            key: 'approve_1',
+            type: 'approval',
+            config: {
+              assigneeType: 'role',
+              assigneeIds: ['manager'],
+              approvalMode: 'any',
+              emptyAssigneePolicy: 'error',
+            },
+          },
+          { key: 'end', type: 'end', config: {} },
+        ],
+        edges: [
+          { key: 'e1', source: 'start', target: 'approve_1' },
+          { key: 'e2', source: 'approve_1', target: 'end' },
+        ],
+      },
+    })
     template.latest_version_id = version.id
 
     const app = createApp()
@@ -405,6 +441,12 @@ describe('approval template routes', () => {
     expect(response.body.runtimeGraph.policy).toEqual({
       allowRevoke: true,
       revokeBeforeNodeKeys: ['approve_1'],
+    })
+    expect(response.body.runtimeGraph.nodes[1].config).toEqual({
+      assigneeType: 'role',
+      assigneeIds: ['manager'],
+      approvalMode: 'any',
+      emptyAssigneePolicy: 'error',
     })
     expect(routeState.state.templates.get(template.id)?.active_version_id).toBe(version.id)
   })

@@ -1,12 +1,15 @@
 import crypto from 'crypto'
 import { pool } from '../db/pg'
 import type {
+  ApprovalActionRequest,
   ApprovalTemplateDetailDTO,
   ApprovalTemplateListItemDTO,
   ApprovalTemplateVersionDetailDTO,
   ApprovalGraph,
+  ApprovalMode,
   CreateApprovalRequest,
   CreateApprovalTemplateRequest,
+  EmptyAssigneePolicy,
   FormSchema,
   PublishApprovalTemplateRequest,
   RuntimeGraph,
@@ -15,7 +18,6 @@ import type {
 } from '../types/approval-product'
 import { ApprovalGraphExecutor, validateApprovalFormData } from './ApprovalGraphExecutor'
 import type {
-  ApprovalActionRequest,
   ApprovalAssignmentDTO,
   ApprovalAssignmentRow,
   ApprovalInstanceRow,
@@ -143,6 +145,8 @@ const FORM_FIELD_TYPES = new Set([
 
 const APPROVAL_NODE_TYPES = new Set(['start', 'approval', 'cc', 'condition', 'end'])
 const CONDITION_OPERATORS = new Set(['eq', 'neq', 'gt', 'gte', 'lt', 'lte', 'in', 'isEmpty'])
+const APPROVAL_MODES = new Set<ApprovalMode>(['single', 'all', 'any'])
+const EMPTY_ASSIGNEE_POLICIES = new Set<EmptyAssigneePolicy>(['error', 'auto-approve'])
 
 function toNullableRecord(value: unknown): Record<string, unknown> | null {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -156,6 +160,26 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function isNonEmptyString(value: unknown): value is string {
   return typeof value === 'string' && value.trim().length > 0
+}
+
+function normalizeApprovalMode(value: unknown, context: ValidationContext, path: string): ApprovalMode | undefined {
+  if (value === undefined) return undefined
+  if (typeof value !== 'string' || !APPROVAL_MODES.has(value as ApprovalMode)) {
+    failValidation(context, `${path} must be single, all, or any`)
+  }
+  return value as ApprovalMode
+}
+
+function normalizeEmptyAssigneePolicy(
+  value: unknown,
+  context: ValidationContext,
+  path: string,
+): EmptyAssigneePolicy | undefined {
+  if (value === undefined) return undefined
+  if (typeof value !== 'string' || !EMPTY_ASSIGNEE_POLICIES.has(value as EmptyAssigneePolicy)) {
+    failValidation(context, `${path} must be error or auto-approve`)
+  }
+  return value as EmptyAssigneePolicy
 }
 
 function failValidation(context: ValidationContext, message: string): never {
@@ -285,9 +309,23 @@ function normalizeApprovalGraph(value: unknown, context: ValidationContext): App
           || node.config.assigneeIds.some((entry) => !isNonEmptyString(entry))) {
           failValidation(context, `approvalGraph.nodes[${index}].config must define assigneeType and assigneeIds`)
         }
-        normalizedNode.config = {
-          assigneeType: node.config.assigneeType,
-          assigneeIds: node.config.assigneeIds.map((entry) => entry.trim()),
+        {
+          const approvalMode = normalizeApprovalMode(
+            node.config.approvalMode,
+            context,
+            `approvalGraph.nodes[${index}].config.approvalMode`,
+          )
+          const emptyAssigneePolicy = normalizeEmptyAssigneePolicy(
+            node.config.emptyAssigneePolicy,
+            context,
+            `approvalGraph.nodes[${index}].config.emptyAssigneePolicy`,
+          )
+          normalizedNode.config = {
+            assigneeType: node.config.assigneeType,
+            assigneeIds: node.config.assigneeIds.map((entry) => entry.trim()),
+            ...(approvalMode ? { approvalMode } : {}),
+            ...(emptyAssigneePolicy ? { emptyAssigneePolicy } : {}),
+          }
         }
         break
       case 'cc':
@@ -990,6 +1028,13 @@ export class ApprovalProductService {
         `SELECT * FROM approval_assignments WHERE instance_id = $1 AND is_active = TRUE ORDER BY created_at ASC`,
         [id],
       )
+
+      if (request.action === 'return') {
+        if (!request.targetNodeKey?.trim()) {
+          throw new ServiceError('targetNodeKey is required for return', 400, 'VALIDATION_ERROR')
+        }
+        throw new ServiceError('Return action is not implemented yet', 409, 'APPROVAL_ACTION_NOT_SUPPORTED')
+      }
 
       const actorRoles = actor.roles || []
       const actorCanAct = assignments.rows.some((assignment) => assignmentMatchesActor(assignment, actor.userId, actorRoles))
