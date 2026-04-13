@@ -3,10 +3,10 @@ import { sql } from 'kysely'
 import {
   ICollabService,
   ILogger,
-  type CommentCreateInput,
   type CommentInboxItem,
   type CommentMentionCandidate,
   type CommentQueryOptions,
+  type CommentUnreadSummary,
 } from '../di/identifiers'
 import type { CollabService } from './CollabService'
 import { db } from '../db/db'
@@ -43,9 +43,6 @@ export class CommentConflictError extends Error {
 
 export interface Comment {
   id: string
-  containerId: string
-  targetId: string
-  targetFieldId: string | null
   spreadsheetId: string
   rowId: string
   fieldId?: string
@@ -59,8 +56,6 @@ export interface Comment {
 }
 
 export interface CommentPresenceSummary {
-  containerId: string
-  targetId: string
   spreadsheetId: string
   rowId: string
   unresolvedCount: number
@@ -107,33 +102,11 @@ type MentionGroupedCountRow = {
 
 type CommentActivityPayload = {
   kind: 'created' | 'updated' | 'resolved' | 'deleted'
-  containerId: string
-  targetId: string
-  targetFieldId: string | null
   spreadsheetId: string
   rowId: string
   fieldId?: string
   commentId: string
   authorId?: string
-}
-
-type CommentRealtimePayload = {
-  containerId: string
-  targetId: string
-  targetFieldId: string | null
-  spreadsheetId: string
-  rowId: string
-  fieldId?: string
-  comment: Comment
-}
-
-type CommentScopeInput = {
-  containerId?: string
-  spreadsheetId?: string
-  targetId?: string
-  rowId?: string
-  targetFieldId?: string
-  fieldId?: string
 }
 
 export class CommentService {
@@ -144,6 +117,13 @@ export class CommentService {
     private logger: ILogger,
   ) {}
 
+  /**
+   * Update a comment's content and optionally its mentions.
+   *
+   * Mention precedence: if `data.mentions` is provided, those user IDs are
+   * stored directly. Otherwise, mentions are auto-parsed from `data.content`
+   * using the `@[Display Name](user-id)` format.
+   */
   async updateComment(commentId: string, userId: string, data: {
     content: string
     mentions?: string[]
@@ -211,11 +191,25 @@ export class CommentService {
     this.publishCommentDeleted(existing, normalizedUserId)
   }
 
-  async createComment(data: CommentCreateInput): Promise<Comment> {
+  /**
+   * Create a new comment, optionally as a reply to an existing thread.
+   *
+   * Mention precedence: if `data.mentions` is provided, those user IDs are
+   * stored directly. Otherwise, mentions are auto-parsed from `data.content`
+   * using the `@[Display Name](user-id)` format.
+   */
+  async createComment(data: {
+    spreadsheetId: string
+    rowId: string
+    fieldId?: string
+    content: string
+    authorId: string
+    parentId?: string
+    mentions?: string[]
+  }): Promise<Comment> {
     const id = `cmt_${randomUUID()}`
     const mentions = this.normalizeMentions(data.mentions ?? this.parseMentions(data.content))
-    const location = this.resolveCommentLocation(data)
-    let effectiveFieldId = location.fieldId
+    let effectiveFieldId = data.fieldId?.trim() || undefined
 
     if (data.parentId) {
       const parent = await db
@@ -230,7 +224,7 @@ export class CommentService {
       if (parent.parent_id) {
         throw new CommentValidationError('Replying to replies is not supported')
       }
-      if (parent.spreadsheet_id !== location.spreadsheetId || parent.row_id !== location.rowId) {
+      if (parent.spreadsheet_id !== data.spreadsheetId || parent.row_id !== data.rowId) {
         throw new CommentValidationError('Reply must target the same record thread')
       }
 
@@ -249,8 +243,8 @@ export class CommentService {
       .insertInto('meta_comments')
       .values({
         id,
-        spreadsheet_id: location.spreadsheetId,
-        row_id: location.rowId,
+        spreadsheet_id: data.spreadsheetId,
+        row_id: data.rowId,
         field_id: effectiveFieldId ?? null,
         content: data.content,
         author_id: data.authorId,
@@ -265,14 +259,19 @@ export class CommentService {
       throw new Error('Created comment could not be reloaded')
     }
 
-    const createdPayload = this.buildCommentRealtimePayload(comment)
+    const createdPayload = {
+      spreadsheetId: data.spreadsheetId,
+      rowId: data.rowId,
+      fieldId: effectiveFieldId,
+      comment,
+    }
     this.collabService.broadcastTo(
-      buildCommentRecordRoom({ spreadsheetId: location.spreadsheetId, rowId: location.rowId }),
+      buildCommentRecordRoom({ spreadsheetId: data.spreadsheetId, rowId: data.rowId }),
       'comment:created',
       createdPayload,
     )
     this.collabService.broadcastTo(
-      buildCommentSheetRoom({ spreadsheetId: location.spreadsheetId }),
+      buildCommentSheetRoom({ spreadsheetId: data.spreadsheetId }),
       'comment:created',
       createdPayload,
     )
@@ -281,11 +280,8 @@ export class CommentService {
       'comment:activity',
       {
         kind: 'created',
-        containerId: location.containerId,
-        targetId: location.targetId,
-        targetFieldId: effectiveFieldId ?? null,
-        spreadsheetId: location.spreadsheetId,
-        rowId: location.rowId,
+        spreadsheetId: data.spreadsheetId,
+        rowId: data.rowId,
         fieldId: effectiveFieldId,
         commentId: comment.id,
         authorId: data.authorId,
@@ -303,14 +299,12 @@ export class CommentService {
   async getComments(spreadsheetId: string, options?: CommentQueryOptions): Promise<{ items: Comment[]; total: number }> {
     let query = db.selectFrom('meta_comments').where('spreadsheet_id', '=', spreadsheetId)
 
-    const targetId = this.normalizeMaybeString(options?.targetId ?? options?.rowId)
-    if (targetId) {
-      query = query.where('row_id', '=', targetId)
+    if (options?.rowId) {
+      query = query.where('row_id', '=', options.rowId)
     }
 
-    const targetFieldId = this.normalizeMaybeString(options?.targetFieldId ?? options?.fieldId)
-    if (targetFieldId) {
-      query = query.where('field_id', '=', targetFieldId)
+    if (options?.fieldId) {
+      query = query.where('field_id', '=', options.fieldId)
     }
 
     if (typeof options?.resolved === 'boolean') {
@@ -463,6 +457,35 @@ export class CommentService {
     return row ? Number((row as { c: string | number }).c) : 0
   }
 
+  /**
+   * Return combined unread summary with both general unread count and
+   * mention-specific unread count in a single DB round-trip.
+   *
+   * - `unreadCount`: comments the user has not read (no read record, excluding own).
+   * - `mentionUnreadCount`: subset of the above where the user is @-mentioned.
+   */
+  async getUnreadSummary(userId: string): Promise<CommentUnreadSummary> {
+    const mentionPredicate = sql<boolean>`c.mentions @> ${JSON.stringify([userId])}::jsonb`
+
+    const row = await db
+      .selectFrom('meta_comments as c')
+      .leftJoin('meta_comment_reads as r', (join) =>
+        join.onRef('r.comment_id', '=', 'c.id').on('r.user_id', '=', userId),
+      )
+      .select([
+        sql<number>`count(*)::int`.as('unread_count'),
+        sql<number>`count(*) filter (where ${mentionPredicate})::int`.as('mention_unread_count'),
+      ])
+      .where('c.author_id', '!=', userId)
+      .where(sql<boolean>`r.comment_id is null`)
+      .executeTakeFirst()
+
+    return {
+      unreadCount: row ? Number((row as { unread_count: string | number }).unread_count) : 0,
+      mentionUnreadCount: row ? Number((row as { mention_unread_count: string | number }).mention_unread_count) : 0,
+    }
+  }
+
   async markCommentRead(commentId: string, userId: string): Promise<void> {
     const now = new Date().toISOString()
     await db
@@ -562,8 +585,6 @@ export class CommentService {
     const items = orderedRowIds.map((rowId) => {
       const summary = summaryByRow.get(rowId)!
       return {
-        containerId: spreadsheetId,
-        targetId: rowId,
         spreadsheetId,
         rowId,
         unresolvedCount: summary.unresolvedCount,
@@ -580,16 +601,13 @@ export class CommentService {
     spreadsheetId: string,
     mentionUserId: string,
   ): Promise<{
-    containerId: string
     spreadsheetId: string
     unresolvedMentionCount: number
     unreadMentionCount: number
     mentionedRecordCount: number
     unreadRecordCount: number
     items: Array<{
-      containerId: string
       rowId: string
-      targetId: string
       mentionedCount: number
       unreadCount: number
       mentionedFieldIds: string[]
@@ -598,7 +616,6 @@ export class CommentService {
     const normalizedUserId = mentionUserId.trim()
     if (!normalizedUserId) {
       return {
-        containerId: spreadsheetId,
         spreadsheetId,
         unresolvedMentionCount: 0,
         unreadMentionCount: 0,
@@ -636,16 +653,13 @@ export class CommentService {
     const items = [...byRow.entries()]
       .sort((a, b) => b[1].count - a[1].count || a[0].localeCompare(b[0]))
       .map(([rowId, data]) => ({
-        containerId: spreadsheetId,
         rowId,
-        targetId: rowId,
         mentionedCount: data.count,
         unreadCount: data.unread,
         mentionedFieldIds: [...data.fieldIds].sort(),
       }))
 
     return {
-      containerId: spreadsheetId,
       spreadsheetId,
       unresolvedMentionCount: items.reduce((sum, item) => sum + item.mentionedCount, 0),
       unreadMentionCount: items.reduce((sum, item) => sum + item.unreadCount, 0),
@@ -682,9 +696,6 @@ export class CommentService {
 
     if (result) {
       const resolvedPayload = {
-        containerId: result.spreadsheet_id,
-        targetId: result.row_id,
-        targetFieldId: result.field_id ?? null,
         spreadsheetId: result.spreadsheet_id,
         rowId: result.row_id,
         fieldId: result.field_id ?? undefined,
@@ -705,7 +716,10 @@ export class CommentService {
         'comment:activity',
         {
           kind: 'resolved',
-          ...resolvedPayload,
+          spreadsheetId: result.spreadsheet_id,
+          rowId: result.row_id,
+          fieldId: result.field_id ?? undefined,
+          commentId,
         } satisfies CommentActivityPayload,
       )
     }
@@ -740,7 +754,12 @@ export class CommentService {
   }
 
   private publishCommentUpdated(comment: Comment, authorId: string): void {
-    const payload = this.buildCommentRealtimePayload(comment)
+    const payload = {
+      spreadsheetId: comment.spreadsheetId,
+      rowId: comment.rowId,
+      fieldId: comment.fieldId,
+      comment,
+    }
     this.collabService.broadcastTo(
       buildCommentRecordRoom({ spreadsheetId: comment.spreadsheetId, rowId: comment.rowId }),
       'comment:updated',
@@ -756,9 +775,6 @@ export class CommentService {
       'comment:activity',
       {
         kind: 'updated',
-        containerId: comment.containerId,
-        targetId: comment.targetId,
-        targetFieldId: comment.targetFieldId,
         spreadsheetId: comment.spreadsheetId,
         rowId: comment.rowId,
         fieldId: comment.fieldId,
@@ -770,9 +786,6 @@ export class CommentService {
 
   private publishCommentDeleted(row: CommentRow, authorId: string): void {
     const payload = {
-      containerId: row.spreadsheet_id,
-      targetId: row.row_id,
-      targetFieldId: row.field_id ?? null,
       spreadsheetId: row.spreadsheet_id,
       rowId: row.row_id,
       fieldId: row.field_id ?? undefined,
@@ -793,7 +806,10 @@ export class CommentService {
       'comment:activity',
       {
         kind: 'deleted',
-        ...payload,
+        spreadsheetId: row.spreadsheet_id,
+        rowId: row.row_id,
+        fieldId: row.field_id ?? undefined,
+        commentId: row.id,
         authorId,
       } satisfies CommentActivityPayload,
     )
@@ -806,17 +822,11 @@ export class CommentService {
 
   private mapRowToComment(row: CommentRow): Comment {
     const mentions = this.parseMentionList(row.mentions)
-    const containerId = row.spreadsheet_id
-    const targetId = row.row_id
-    const targetFieldId = row.field_id ?? null
 
     return {
       id: row.id,
-      containerId,
-      targetId,
-      targetFieldId,
-      spreadsheetId: containerId,
-      rowId: targetId,
+      spreadsheetId: row.spreadsheet_id,
+      rowId: row.row_id,
       fieldId: row.field_id || undefined,
       content: row.content,
       authorId: row.author_id,
@@ -840,51 +850,6 @@ export class CommentService {
     }
   }
 
-  private buildCommentRealtimePayload(comment: Comment): CommentRealtimePayload {
-    return {
-      containerId: comment.containerId,
-      targetId: comment.targetId,
-      targetFieldId: comment.targetFieldId,
-      spreadsheetId: comment.spreadsheetId,
-      rowId: comment.rowId,
-      fieldId: comment.fieldId,
-      comment,
-    }
-  }
-
-  private resolveCommentLocation(data: CommentScopeInput): {
-    containerId: string
-    targetId: string
-    fieldId?: string
-    spreadsheetId: string
-    rowId: string
-  } {
-    const containerId = this.normalizeMaybeString(data.containerId ?? data.spreadsheetId)
-    const targetId = this.normalizeMaybeString(data.targetId ?? data.rowId)
-    const fieldId = this.normalizeMaybeString(data.targetFieldId ?? data.fieldId)
-
-    if (!containerId) {
-      throw new CommentValidationError('spreadsheetId or containerId required')
-    }
-    if (!targetId) {
-      throw new CommentValidationError('rowId or targetId required')
-    }
-
-    return {
-      containerId,
-      targetId,
-      fieldId,
-      spreadsheetId: containerId,
-      rowId: targetId,
-    }
-  }
-
-  private normalizeMaybeString(value: string | undefined | null): string | undefined {
-    if (typeof value !== 'string') return undefined
-    const trimmed = value.trim()
-    return trimmed.length > 0 ? trimmed : undefined
-  }
-
   private parseMentionList(mentions: unknown): string[] {
     const parsed =
       typeof mentions === 'string'
@@ -899,6 +864,18 @@ export class CommentService {
     return Array.isArray(parsed) ? this.normalizeMentions(parsed) : []
   }
 
+  /**
+   * Extract user IDs from mention tokens embedded in comment content.
+   *
+   * Expected format: `@[Display Name](user-id)`
+   * - `Display Name` is the human-readable label shown in the UI.
+   * - `user-id` is the stable user identifier stored in the mentions array.
+   *
+   * This method is only called when no explicit `mentions` array is provided
+   * in the request body (see mention precedence documentation above).
+   *
+   * @returns De-duplicated, trimmed array of mentioned user IDs.
+   */
   private parseMentions(content: string): string[] {
     const regex = /@\[([^\]]+)\]\(([^)]+)\)/g
     const mentions: string[] = []
@@ -909,6 +886,12 @@ export class CommentService {
     return this.normalizeMentions(mentions)
   }
 
+  /**
+   * De-duplicate and trim a list of mention user IDs.
+   * Non-string and empty-string entries are silently dropped.
+   *
+   * @returns A new array of unique, trimmed, non-empty user ID strings.
+   */
   private normalizeMentions(mentions: Iterable<unknown>): string[] {
     const normalized = new Set<string>()
     for (const mention of mentions) {

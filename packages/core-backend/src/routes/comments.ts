@@ -214,8 +214,16 @@ export function commentsRouter(injector?: Injector): Router {
 
   router.get('/api/comments/unread-count', rbacGuard('comments', 'read'), async (req: Request, res: Response) => {
     try {
-      const count = await commentService.getUnreadCount(getUserId(req))
-      return res.json({ ok: true, data: { count } })
+      const summary = await commentService.getUnreadSummary(getUserId(req))
+      return res.json({
+        ok: true,
+        data: {
+          unreadCount: summary.unreadCount,
+          mentionUnreadCount: summary.mentionUnreadCount,
+          /** @deprecated Use `unreadCount` instead. Kept for backward compatibility. */
+          count: summary.unreadCount,
+        },
+      })
     } catch (error) {
       logger.error('Failed to load unread comment count', error as Error)
       return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load unread comment count' } })
