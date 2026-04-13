@@ -259,6 +259,9 @@ export class CommentService {
       throw new Error('Created comment could not be reloaded')
     }
 
+    // Auto-mark as read for the author so their own comments never appear as "unread"
+    await this.markCommentRead(id, data.authorId)
+
     const createdPayload = {
       spreadsheetId: data.spreadsheetId,
       rowId: data.rowId,
@@ -512,33 +515,31 @@ export class CommentService {
     const normalizedRowIds = [...new Set((rowIds ?? []).map((rowId) => rowId.trim()).filter((rowId) => rowId.length > 0))]
     const normalizedMentionUserId = typeof mentionUserId === 'string' && mentionUserId.trim().length > 0 ? mentionUserId.trim() : null
 
-    let unresolvedQuery = db
+    // Single combined query with conditional aggregation instead of two separate queries
+    const mentionJsonb = normalizedMentionUserId
+      ? JSON.stringify([normalizedMentionUserId])
+      : null
+
+    let query = db
       .selectFrom('meta_comments')
-      .select(['row_id', 'field_id', sql<number>`count(*)::int`.as('comment_count')])
+      .select([
+        'row_id',
+        'field_id',
+        sql<number>`count(*)::int`.as('comment_count'),
+        ...(mentionJsonb
+          ? [sql<number>`count(*) filter (where mentions @> ${mentionJsonb}::jsonb)::int`.as('mentioned_count')]
+          : [sql<number>`0::int`.as('mentioned_count')]),
+      ])
       .where('spreadsheet_id', '=', spreadsheetId)
       .where('resolved', '=', false)
 
     if (normalizedRowIds.length > 0) {
-      unresolvedQuery = unresolvedQuery.where('row_id', 'in', normalizedRowIds)
+      query = query.where('row_id', 'in', normalizedRowIds)
     }
 
-    const unresolvedRows = (await unresolvedQuery.groupBy(['row_id', 'field_id']).execute()) as GroupedCountRow[]
-
-    let mentionedRows: GroupedCountRow[] = []
-    if (normalizedMentionUserId) {
-      let mentionedQuery = db
-        .selectFrom('meta_comments')
-        .select(['row_id', 'field_id', sql<number>`count(*)::int`.as('comment_count')])
-        .where('spreadsheet_id', '=', spreadsheetId)
-        .where('resolved', '=', false)
-        .where(sql<boolean>`mentions @> ${JSON.stringify([normalizedMentionUserId])}::jsonb`)
-
-      if (normalizedRowIds.length > 0) {
-        mentionedQuery = mentionedQuery.where('row_id', 'in', normalizedRowIds)
-      }
-
-      mentionedRows = (await mentionedQuery.groupBy(['row_id', 'field_id']).execute()) as GroupedCountRow[]
-    }
+    const rows = (await query.groupBy(['row_id', 'field_id']).execute()) as Array<
+      GroupedCountRow & { mentioned_count: number }
+    >
 
     const summaryByRow = new Map<
       string,
@@ -550,7 +551,7 @@ export class CommentService {
       }
     >()
 
-    for (const row of unresolvedRows) {
+    for (const row of rows) {
       const current = summaryByRow.get(row.row_id) ?? {
         unresolvedCount: 0,
         fieldCounts: {},
@@ -561,19 +562,9 @@ export class CommentService {
       if (row.field_id) {
         current.fieldCounts[row.field_id] = (current.fieldCounts[row.field_id] ?? 0) + row.comment_count
       }
-      summaryByRow.set(row.row_id, current)
-    }
-
-    for (const row of mentionedRows) {
-      const current = summaryByRow.get(row.row_id) ?? {
-        unresolvedCount: 0,
-        fieldCounts: {},
-        mentionedCount: 0,
-        mentionedFieldCounts: {},
-      }
-      current.mentionedCount += row.comment_count
-      if (row.field_id) {
-        current.mentionedFieldCounts[row.field_id] = (current.mentionedFieldCounts[row.field_id] ?? 0) + row.comment_count
+      current.mentionedCount += row.mentioned_count
+      if (row.field_id && row.mentioned_count > 0) {
+        current.mentionedFieldCounts[row.field_id] = (current.mentionedFieldCounts[row.field_id] ?? 0) + row.mentioned_count
       }
       summaryByRow.set(row.row_id, current)
     }
