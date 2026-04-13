@@ -3,15 +3,22 @@ import { io, type Socket } from 'socket.io-client'
 import { useAuth } from '../../composables/useAuth'
 import { getApiBase } from '../../utils/api'
 import type { MultitableComment } from '../types'
+import { normalizeMultitableComment } from '../api/client'
 
 type CommentEventPayload = {
   spreadsheetId?: string
+  containerId?: string
   comment?: Partial<MultitableComment> & {
+    containerId?: string
     spreadsheetId?: string
+    targetId?: string
     rowId?: string
+    targetFieldId?: string | null
   }
   commentId?: string
+  targetId?: string
   rowId?: string
+  targetFieldId?: string | null
   fieldId?: string | null
   authorId?: string
 }
@@ -38,33 +45,17 @@ function readValue<T>(source: MaybeReactive<T>): T {
 
 function normalizeRealtimeComment(payload: CommentEventPayload['comment']): MultitableComment | null {
   if (!payload) return null
-  const id = typeof payload.id === 'string' ? payload.id : ''
-  const containerId = typeof payload.containerId === 'string'
-    ? payload.containerId
-    : typeof payload.spreadsheetId === 'string'
-      ? payload.spreadsheetId
-      : ''
-  const targetId = typeof payload.targetId === 'string'
-    ? payload.targetId
-    : typeof payload.rowId === 'string'
-      ? payload.rowId
-      : ''
-  if (!id || !containerId || !targetId) return null
+  const comment = normalizeMultitableComment(payload)
+  if (!comment.id || !comment.containerId || !comment.targetId) return null
+  return comment
+}
 
-  return {
-    id,
-    containerId,
-    targetId,
-    fieldId: typeof payload.fieldId === 'string' ? payload.fieldId : null,
-    parentId: typeof payload.parentId === 'string' ? payload.parentId : undefined,
-    mentions: Array.isArray(payload.mentions) ? payload.mentions.filter((value): value is string => typeof value === 'string') : [],
-    authorId: typeof payload.authorId === 'string' ? payload.authorId : '',
-    authorName: typeof payload.authorName === 'string' ? payload.authorName : undefined,
-    content: typeof payload.content === 'string' ? payload.content : '',
-    resolved: payload.resolved === true,
-    createdAt: typeof payload.createdAt === 'string' ? payload.createdAt : new Date().toISOString(),
-    updatedAt: typeof payload.updatedAt === 'string' ? payload.updatedAt : undefined,
-  }
+function resolveRealtimeTargetId(payload: CommentEventPayload): string | null {
+  if (typeof payload.targetId === 'string' && payload.targetId.trim().length > 0) return payload.targetId
+  if (typeof payload.rowId === 'string' && payload.rowId.trim().length > 0) return payload.rowId
+  const comment = normalizeRealtimeComment(payload.comment)
+  if (comment?.targetId) return comment.targetId
+  return null
 }
 
 export function useMultitableCommentRealtime(options: UseMultitableCommentRealtimeOptions) {
@@ -138,20 +129,22 @@ export function useMultitableCommentRealtime(options: UseMultitableCommentRealti
           void refreshUnreadIfNeeded(comment?.authorId ?? payload.authorId)
         })
         nextSocket.on('comment:resolved', (payload: CommentEventPayload) => {
+          const targetId = resolveRealtimeTargetId(payload)
           if (
             typeof payload.commentId === 'string' &&
             payload.commentId.trim().length > 0 &&
-            shouldReloadForRowId(payload.rowId)
+            shouldReloadForRowId(targetId)
           ) {
             void options.reloadSelectedRecordComments()
           }
           void refreshUnreadIfNeeded(payload.authorId)
         })
         nextSocket.on('comment:deleted', (payload: CommentEventPayload) => {
+          const targetId = resolveRealtimeTargetId(payload)
           if (
             typeof payload.commentId === 'string' &&
             payload.commentId.trim().length > 0 &&
-            shouldReloadForRowId(payload.rowId)
+            shouldReloadForRowId(targetId)
           ) {
             void options.reloadSelectedRecordComments()
           }

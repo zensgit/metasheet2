@@ -54,8 +54,8 @@ describe('mention inbox realtime reconciliation', () => {
     inbox.onRealtimeCommentCreated({
       spreadsheetId: 'sheet_1',
       comment: {
-        containerId: 'sheet_1',
-        targetId: 'r1',
+        spreadsheetId: 'sheet_1',
+        rowId: 'r1',
         targetFieldId: 'f2',
         mentions: ['user_self'],
       },
@@ -79,8 +79,8 @@ describe('mention inbox realtime reconciliation', () => {
     inbox.onRealtimeCommentCreated({
       spreadsheetId: 'sheet_1',
       comment: {
-        containerId: 'sheet_1',
-        targetId: 'r1',
+        spreadsheetId: 'sheet_1',
+        rowId: 'r1',
         mentions: ['user_other'],
       },
     })
@@ -144,8 +144,8 @@ describe('mention inbox realtime reconciliation', () => {
       inbox.onRealtimeCommentCreated({
         spreadsheetId: 'sheet_1',
         comment: {
-          containerId: 'sheet_1',
-          targetId: 'r1',
+          spreadsheetId: 'sheet_1',
+          rowId: 'r1',
           createdAt: '2026-04-04T09:59:59.000Z',
           mentions: ['user_self'],
         },
@@ -157,8 +157,8 @@ describe('mention inbox realtime reconciliation', () => {
       inbox.onRealtimeCommentCreated({
         spreadsheetId: 'sheet_1',
         comment: {
-          containerId: 'sheet_1',
-          targetId: 'r1',
+          spreadsheetId: 'sheet_1',
+          rowId: 'r1',
           createdAt: '2026-04-04T10:00:01.000Z',
           mentions: ['user_self'],
         },

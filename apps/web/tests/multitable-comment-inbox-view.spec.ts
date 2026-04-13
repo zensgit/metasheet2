@@ -65,13 +65,13 @@ describe('MultitableCommentInboxView', () => {
         data: {
           items: [{
             id: 'c1',
-            spreadsheetId: 'sheet_ops',
-            rowId: 'rec_1',
+            containerId: 'sheet_ops',
+            targetId: 'rec_1',
+            targetFieldId: 'fld_notes',
             baseId: 'base_ops',
             sheetId: 'sheet_ops',
             viewId: 'view_grid',
             recordId: 'rec_1',
-            fieldId: 'fld_notes',
             authorId: 'user_2',
             authorName: 'Jamie',
             content: 'Need review',
@@ -96,13 +96,13 @@ describe('MultitableCommentInboxView', () => {
         data: {
           items: [{
             id: 'c1',
-            spreadsheetId: 'sheet_ops',
-            rowId: 'rec_1',
+            containerId: 'sheet_ops',
+            targetId: 'rec_1',
+            targetFieldId: 'fld_notes',
             baseId: 'base_ops',
             sheetId: 'sheet_ops',
             viewId: 'view_grid',
             recordId: 'rec_1',
-            fieldId: 'fld_notes',
             authorId: 'user_2',
             authorName: 'Jamie',
             content: 'Need review',

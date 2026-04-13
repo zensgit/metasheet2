@@ -128,6 +128,55 @@ type RawInboxItem = RawComment & {
   recordId?: string | null
 }
 
+type MultitableCommentIdentityPayload = {
+  containerId?: unknown
+  spreadsheetId?: unknown
+  targetId?: unknown
+  rowId?: unknown
+}
+
+type MultitableCommentFieldPayload = {
+  fieldId?: unknown
+  targetFieldId?: unknown
+}
+
+type MultitableCommentMentionsPayload = {
+  mentions?: unknown
+}
+
+function normalizeCommentId(value: unknown): string {
+  if (typeof value !== 'string') return ''
+  const trimmed = value.trim()
+  return trimmed.length > 0 ? trimmed : ''
+}
+
+function normalizeOptionalCommentId(value: unknown): string | undefined {
+  const normalized = normalizeCommentId(value)
+  return normalized.length > 0 ? normalized : undefined
+}
+
+export function normalizeMultitableCommentIdentity(payload: MultitableCommentIdentityPayload | null | undefined) {
+  const containerId = normalizeCommentId(payload?.containerId) || normalizeCommentId(payload?.spreadsheetId)
+  const targetId = normalizeCommentId(payload?.targetId) || normalizeCommentId(payload?.rowId)
+
+  return {
+    containerId,
+    targetId,
+    spreadsheetId: containerId || undefined,
+    rowId: targetId || undefined,
+  }
+}
+
+export function normalizeMultitableCommentFieldId(payload: MultitableCommentFieldPayload | null | undefined): string | null {
+  const fieldId = normalizeCommentId(payload?.fieldId) || normalizeCommentId(payload?.targetFieldId)
+  return fieldId.length > 0 ? fieldId : null
+}
+
+export function normalizeMultitableCommentMentions(payload: MultitableCommentMentionsPayload | null | undefined): string[] {
+  if (!Array.isArray(payload?.mentions)) return []
+  return payload.mentions.filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
+}
+
 function normalizeCommentPresenceList(payload: { items?: MultitableCommentPresenceSummary[] } | null | undefined): {
   items: MultitableCommentPresenceSummary[]
 } {
@@ -136,25 +185,19 @@ function normalizeCommentPresenceList(payload: { items?: MultitableCommentPresen
 }
 
 export function normalizeMultitableComment(payload: RawComment | null | undefined): MultitableComment {
+  const identity = normalizeMultitableCommentIdentity(payload)
+  const fieldId = normalizeMultitableCommentFieldId(payload)
   return {
-    id: typeof payload?.id === 'string' ? payload.id : '',
-    containerId: typeof payload?.containerId === 'string'
-      ? payload.containerId
-      : typeof payload?.spreadsheetId === 'string'
-        ? payload.spreadsheetId
-        : '',
-    targetId: typeof payload?.targetId === 'string'
-      ? payload.targetId
-      : typeof payload?.rowId === 'string'
-        ? payload.rowId
-        : '',
-    spreadsheetId: typeof payload?.spreadsheetId === 'string' ? payload.spreadsheetId : undefined,
-    rowId: typeof payload?.rowId === 'string' ? payload.rowId : undefined,
-    fieldId: typeof payload?.fieldId === 'string' ? payload.fieldId : null,
-    targetFieldId: typeof payload?.targetFieldId === 'string' ? payload.targetFieldId : null,
-    parentId: typeof payload?.parentId === 'string' ? payload.parentId : undefined,
-    mentions: Array.isArray(payload?.mentions) ? payload.mentions.filter((value): value is string => typeof value === 'string') : [],
-    authorId: typeof payload?.authorId === 'string' ? payload.authorId : '',
+    id: normalizeCommentId(payload?.id),
+    containerId: identity.containerId,
+    targetId: identity.targetId,
+    spreadsheetId: identity.spreadsheetId,
+    rowId: identity.rowId,
+    fieldId,
+    targetFieldId: fieldId,
+    parentId: normalizeOptionalCommentId(payload?.parentId),
+    mentions: normalizeMultitableCommentMentions(payload),
+    authorId: normalizeCommentId(payload?.authorId),
     authorName: typeof payload?.authorName === 'string' ? payload.authorName : undefined,
     content: typeof payload?.content === 'string' ? payload.content : '',
     resolved: payload?.resolved === true,

@@ -114,6 +114,7 @@
 import { computed } from 'vue'
 import { RouterLink } from 'vue-router'
 import type { MetaCommentMentionSuggestion, MultitableComment } from '../types'
+import { normalizeMultitableComment } from '../api/client'
 import MetaCommentComposer from './MetaCommentComposer.vue'
 
 export type MentionCandidateInput = {
@@ -181,12 +182,14 @@ const draftModel = computed({
   set: (value: string) => emit('update:draft', value),
 })
 
-const visibleComments = computed(() => {
-  if (!props.targetFieldId) return props.comments
+const normalizedComments = computed(() => props.comments.map((comment) => normalizeMultitableComment(comment)))
 
-  const commentsById = new Map(props.comments.map((comment) => [comment.id, comment]))
+const visibleComments = computed(() => {
+  if (!props.targetFieldId) return normalizedComments.value
+
+  const commentsById = new Map(normalizedComments.value.map((comment) => [comment.id, comment]))
   const childIdsByParent = new Map<string, string[]>()
-  for (const comment of props.comments) {
+  for (const comment of normalizedComments.value) {
     if (!comment.parentId) continue
     const siblings = childIdsByParent.get(comment.parentId) ?? []
     siblings.push(comment.id)
@@ -195,8 +198,8 @@ const visibleComments = computed(() => {
 
   const visibleIds = new Set<string>()
   const queue: string[] = []
-  for (const comment of props.comments) {
-    const fieldId = comment.fieldId ?? comment.targetFieldId ?? null
+  for (const comment of normalizedComments.value) {
+    const fieldId = comment.fieldId ?? null
     if (fieldId !== props.targetFieldId || visibleIds.has(comment.id)) continue
     visibleIds.add(comment.id)
     queue.push(comment.id)
@@ -219,7 +222,7 @@ const visibleComments = computed(() => {
     }
   }
 
-  return props.comments.filter((comment) => {
+  return normalizedComments.value.filter((comment) => {
     return visibleIds.has(comment.id)
   })
 })
@@ -269,7 +272,7 @@ const defaultMentionSuggestions = computed<MetaCommentMentionSuggestion[]>(() =>
       label: candidate.displayName?.trim() || candidate.userId.trim(),
       subtitle: candidate.secondaryLabel?.trim() || undefined,
     }))
-  const fromAuthors = props.comments
+  const fromAuthors = normalizedComments.value
     .map((comment) => ({
       id: comment.authorId.trim(),
       label: (comment.authorName ?? comment.authorId).trim() || comment.authorId,

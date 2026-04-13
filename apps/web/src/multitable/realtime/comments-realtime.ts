@@ -1,29 +1,54 @@
 import { io } from 'socket.io-client'
 import { getApiBase } from '../../utils/api'
+import {
+  normalizeMultitableComment,
+  normalizeMultitableCommentFieldId,
+  normalizeMultitableCommentIdentity,
+} from '../api/client'
 import type { MultitableComment } from '../types'
 
 export type MultitableCommentCreatedEvent = {
+  containerId?: string
   spreadsheetId?: string
   comment?: Partial<MultitableComment> | null
 }
 
 export type MultitableCommentUpdatedEvent = {
+  containerId?: string
   spreadsheetId?: string
   comment?: Partial<MultitableComment> | null
 }
 
 export type MultitableCommentResolvedEvent = {
+  containerId?: string
   spreadsheetId?: string
+  targetId?: string | null
   rowId?: string | null
+  targetFieldId?: string | null
   fieldId?: string | null
   commentId?: string | null
 }
 
 export type MultitableCommentDeletedEvent = {
+  containerId?: string
   spreadsheetId?: string
+  targetId?: string | null
   rowId?: string | null
+  targetFieldId?: string | null
   fieldId?: string | null
   commentId?: string | null
+}
+
+export type NormalizedMultitableCommentRealtimeEvent = {
+  spreadsheetId: string
+  comment: MultitableComment
+}
+
+export type NormalizedMultitableCommentMutationEvent = {
+  spreadsheetId: string
+  rowId: string
+  fieldId: string | null
+  commentId: string | null
 }
 
 export type MultitableCommentsRealtimeHandlers = {
@@ -66,6 +91,62 @@ function emitRoomSubscription(
       spreadsheetId: scope.containerId,
       rowId,
     })
+  }
+}
+
+function normalizeCommentId(value: unknown): string | null {
+  if (typeof value !== 'string') return null
+  const trimmed = value.trim()
+  return trimmed.length > 0 ? trimmed : null
+}
+
+export function normalizeMultitableCommentRealtimeEvent(
+  payload: MultitableCommentCreatedEvent | MultitableCommentUpdatedEvent | null | undefined,
+): NormalizedMultitableCommentRealtimeEvent | null {
+  const comment = payload?.comment
+    ? normalizeMultitableComment({
+        ...payload.comment,
+        containerId: payload.comment.containerId ?? payload.containerId ?? payload.spreadsheetId,
+        spreadsheetId: payload.comment.spreadsheetId ?? payload.containerId ?? payload.spreadsheetId,
+      })
+    : null
+
+  if (!comment) return null
+  if (!comment.containerId || !comment.targetId) return null
+
+  const identity = normalizeMultitableCommentIdentity({
+    containerId: payload?.containerId ?? payload?.spreadsheetId,
+    spreadsheetId: payload?.containerId ?? payload?.spreadsheetId,
+    targetId: comment.targetId,
+    rowId: comment.rowId ?? comment.targetId,
+  })
+
+  return {
+    spreadsheetId: identity.containerId || comment.containerId,
+    comment,
+  }
+}
+
+export function normalizeMultitableCommentMutationEvent(
+  payload: MultitableCommentResolvedEvent | MultitableCommentDeletedEvent | null | undefined,
+): NormalizedMultitableCommentMutationEvent | null {
+  const identity = normalizeMultitableCommentIdentity({
+    containerId: payload?.containerId ?? payload?.spreadsheetId,
+    spreadsheetId: payload?.containerId ?? payload?.spreadsheetId,
+    targetId: payload?.targetId ?? payload?.rowId,
+    rowId: payload?.targetId ?? payload?.rowId,
+  })
+
+  if (!identity.containerId || !identity.targetId) return null
+
+  return {
+    spreadsheetId: identity.containerId,
+    rowId: identity.targetId,
+    fieldId: normalizeMultitableCommentFieldId({
+      fieldId: payload?.fieldId ?? payload?.targetFieldId,
+      targetFieldId: payload?.targetFieldId ?? payload?.fieldId,
+    }),
+    commentId: normalizeCommentId(payload?.commentId),
   }
 }
 

@@ -122,7 +122,7 @@ describe('useMultitableCommentPresence', () => {
         id: 'c_new',
         spreadsheetId: 'sheet_orders',
         rowId: 'rec_1',
-        fieldId: 'fld_title',
+        targetFieldId: 'fld_title',
         authorId: 'u1',
         content: 'reply',
         resolved: false,

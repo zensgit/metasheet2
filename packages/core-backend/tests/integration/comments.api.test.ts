@@ -197,6 +197,11 @@ describe('Comments API', () => {
     const comment = created.data?.comment
     createdCommentIds.push(comment.id)
     expect(comment?.mentions).toEqual(['user_2'])
+    expect(comment.containerId).toBe(spreadsheetId)
+    expect(comment.targetId).toBe(rowId)
+    expect(comment.targetFieldId).toBeNull()
+    expect(comment.spreadsheetId).toBe(spreadsheetId)
+    expect(comment.rowId).toBe(rowId)
 
     const fallbackRes = await fetch(`${baseUrl}/api/comments`, {
       method: 'POST',
@@ -214,6 +219,9 @@ describe('Comments API', () => {
     const fallbackJson = await fallbackRes.json()
     createdCommentIds.push(fallbackJson.data.comment.id)
     expect(fallbackJson.data.comment.mentions).toEqual(['user_2'])
+    expect(fallbackJson.data.comment.containerId).toBe(spreadsheetId)
+    expect(fallbackJson.data.comment.targetId).toBe(rowId)
+    expect(fallbackJson.data.comment.targetFieldId).toBeNull()
 
     const plainRes = await fetch(`${baseUrl}/api/comments`, {
       method: 'POST',
@@ -232,13 +240,20 @@ describe('Comments API', () => {
     const plainComment = plainJson.data?.comment
     createdCommentIds.push(plainComment.id)
     expect(plainComment?.mentions).toEqual([])
+    expect(plainComment.containerId).toBe(spreadsheetId)
+    expect(plainComment.targetId).toBe(rowId)
+    expect(plainComment.targetFieldId).toBeNull()
 
     const listRes = await fetch(`${baseUrl}/api/comments?spreadsheetId=${spreadsheetId}`, {
       headers: { Authorization: `Bearer ${authorToken}` },
     })
     expect(listRes.status).toBe(200)
     const listJson = await listRes.json()
-    expect(listJson.data.items.some((item: any) => item.id === comment.id)).toBe(true)
+    const listedComment = listJson.data.items.find((item: any) => item.id === comment.id)
+    expect(listedComment).toBeTruthy()
+    expect(listedComment.containerId).toBe(spreadsheetId)
+    expect(listedComment.targetId).toBe(rowId)
+    expect(listedComment.targetFieldId).toBeNull()
 
     const unreadCountRes = await fetch(`${baseUrl}/api/comments/unread-count`, {
       headers: { Authorization: `Bearer ${mentionedToken}` },
@@ -356,6 +371,9 @@ describe('Comments API', () => {
     expect(patchJson.data.comment.content).toBe('Edited @[Reviewer](user_edit_other)')
     expect(patchJson.data.comment.mentions).toEqual(['user_edit_other'])
     expect(typeof patchJson.data.comment.updatedAt).toBe('string')
+    expect(patchJson.data.comment.containerId).toBe(spreadsheetId)
+    expect(patchJson.data.comment.targetId).toBe(rowId)
+    expect(patchJson.data.comment.targetFieldId).toBe('fld_note')
 
     const forbiddenPatchRes = await fetch(`${baseUrl}/api/comments/${rootComment.id}`, {
       method: 'PATCH',
@@ -385,6 +403,9 @@ describe('Comments API', () => {
     expect(replyRes.status).toBe(201)
     const replyComment = (await replyRes.json()).data?.comment
     createdCommentIds.push(replyComment.id)
+    expect(replyComment.containerId).toBe(spreadsheetId)
+    expect(replyComment.targetId).toBe(rowId)
+    expect(replyComment.targetFieldId).toBe('fld_note')
 
     const conflictDeleteRes = await fetch(`${baseUrl}/api/comments/${rootComment.id}`, {
       method: 'DELETE',
@@ -452,15 +473,17 @@ describe('Comments API', () => {
     const plainComment = (await createPlainRes.json()).data?.comment
     createdCommentIds.push(plainComment.id)
 
-    const summaryRes = await fetch(`${baseUrl}/api/comments/summary?spreadsheetId=${spreadsheetId}&rowIds=${rowId}`, {
+    const summaryRes = await fetch(`${baseUrl}/api/comments/summary?containerId=${spreadsheetId}&targetIds=${rowId}`, {
       headers: { Authorization: `Bearer ${mentionedToken}` },
     })
     expect(summaryRes.status).toBe(200)
     const summaryJson = await summaryRes.json()
     expect(summaryJson.data.items).toEqual([
       {
+        containerId: spreadsheetId,
         spreadsheetId,
         rowId,
+        targetId: rowId,
         unresolvedCount: 2,
         fieldCounts: { [fieldId]: 1 },
         mentionedCount: 1,
@@ -540,6 +563,9 @@ describe('Comments API', () => {
     const rootComment = (await rootRes.json()).data?.comment
     createdCommentIds.push(rootComment.id)
     expect(rootComment.fieldId).toBe(fieldId)
+    expect(rootComment.containerId).toBe(spreadsheetId)
+    expect(rootComment.targetId).toBe(rowId)
+    expect(rootComment.targetFieldId).toBe(fieldId)
 
     const replyRes = await fetch(`${baseUrl}/api/comments`, {
       method: 'POST',
@@ -559,6 +585,9 @@ describe('Comments API', () => {
     createdCommentIds.push(replyComment.id)
     expect(replyComment.parentId).toBe(rootComment.id)
     expect(replyComment.fieldId).toBe(fieldId)
+    expect(replyComment.containerId).toBe(spreadsheetId)
+    expect(replyComment.targetId).toBe(rowId)
+    expect(replyComment.targetFieldId).toBe(fieldId)
   })
 
   it('filters listed comments by field scope when fieldId is provided', async () => {
@@ -569,7 +598,7 @@ describe('Comments API', () => {
     const rowId = `rec_field_filter_${ts}`.slice(0, 50)
     const token = (await (await fetch(`${baseUrl}/api/auth/dev-token?userId=user_2`)).json()).token as string
 
-    const create = async (payload: { fieldId?: string; content: string }) => {
+    const create = async (payload: { containerId?: string; targetId?: string; targetFieldId?: string; fieldId?: string; content: string }) => {
       const response = await fetch(`${baseUrl}/api/comments`, {
         method: 'POST',
         headers: {
@@ -577,8 +606,9 @@ describe('Comments API', () => {
           Authorization: `Bearer ${token}`,
         },
         body: JSON.stringify({
-          spreadsheetId,
-          rowId,
+          containerId: payload.containerId ?? spreadsheetId,
+          targetId: payload.targetId ?? rowId,
+          targetFieldId: payload.targetFieldId ?? payload.fieldId,
           fieldId: payload.fieldId,
           content: payload.content,
         }),
@@ -589,11 +619,11 @@ describe('Comments API', () => {
       return json.data.comment
     }
 
-    const titleComment = await create({ fieldId: 'fld_title', content: 'Title note' })
-    await create({ fieldId: 'fld_status', content: 'Status note' })
+    const titleComment = await create({ targetFieldId: 'fld_title', content: 'Title note' })
+    await create({ targetFieldId: 'fld_status', content: 'Status note' })
     await create({ content: 'Record note' })
 
-    const response = await fetch(`${baseUrl}/api/comments?spreadsheetId=${spreadsheetId}&rowId=${rowId}&fieldId=fld_title`, {
+    const response = await fetch(`${baseUrl}/api/comments?containerId=${spreadsheetId}&targetId=${rowId}&targetFieldId=fld_title`, {
       headers: { Authorization: `Bearer ${token}` },
     })
     expect(response.status).toBe(200)
@@ -603,9 +633,12 @@ describe('Comments API', () => {
     expect(json.data.items).toHaveLength(1)
     expect(json.data.items[0]).toMatchObject({
       id: titleComment.id,
+      containerId: spreadsheetId,
       spreadsheetId,
       rowId,
+      targetId: rowId,
       fieldId: 'fld_title',
+      targetFieldId: 'fld_title',
       content: 'Title note',
     })
   })
@@ -724,7 +757,7 @@ describe('Comments API', () => {
       headers: { Authorization: `Bearer ${authorToken}` },
     })
 
-    const res = await fetch(`${baseUrl}/api/comments/mention-summary?spreadsheetId=${spreadsheetId}`, {
+    const res = await fetch(`${baseUrl}/api/comments/mention-summary?containerId=${spreadsheetId}`, {
       headers: { Authorization: `Bearer ${mentionedToken}` },
     })
     expect(res.status).toBe(200)
@@ -733,9 +766,10 @@ describe('Comments API', () => {
     expect(json.data.mentionedRecordCount).toBe(2)
     expect(json.data.unreadMentionCount).toBe(3)
     expect(json.data.unreadRecordCount).toBe(2)
+    expect(json.data.containerId).toBe(spreadsheetId)
     expect(json.data.items).toEqual([
-      { rowId: row1, mentionedCount: 2, unreadCount: 2, mentionedFieldIds: ['fld_a', 'fld_b'] },
-      { rowId: row2, mentionedCount: 1, unreadCount: 1, mentionedFieldIds: [] },
+      { containerId: spreadsheetId, rowId: row1, targetId: row1, mentionedCount: 2, unreadCount: 2, mentionedFieldIds: ['fld_a', 'fld_b'] },
+      { containerId: spreadsheetId, rowId: row2, targetId: row2, mentionedCount: 1, unreadCount: 1, mentionedFieldIds: [] },
     ])
 
     const markReadRes = await fetch(`${baseUrl}/api/comments/mention-summary/mark-read`, {
@@ -748,7 +782,7 @@ describe('Comments API', () => {
     })
     expect(markReadRes.status).toBe(204)
 
-    const afterMarkReadRes = await fetch(`${baseUrl}/api/comments/mention-summary?spreadsheetId=${spreadsheetId}`, {
+    const afterMarkReadRes = await fetch(`${baseUrl}/api/comments/mention-summary?containerId=${spreadsheetId}`, {
       headers: { Authorization: `Bearer ${mentionedToken}` },
     })
     expect(afterMarkReadRes.status).toBe(200)
@@ -756,10 +790,11 @@ describe('Comments API', () => {
     expect(afterMarkReadJson.data.unresolvedMentionCount).toBe(3)
     expect(afterMarkReadJson.data.unreadMentionCount).toBe(0)
     expect(afterMarkReadJson.data.unreadRecordCount).toBe(0)
+    expect(afterMarkReadJson.data.containerId).toBe(spreadsheetId)
 
     await create({ spreadsheetId, rowId: row2, content: 'fresh', mentions: ['target_user'] })
 
-    const afterFreshMentionRes = await fetch(`${baseUrl}/api/comments/mention-summary?spreadsheetId=${spreadsheetId}`, {
+    const afterFreshMentionRes = await fetch(`${baseUrl}/api/comments/mention-summary?containerId=${spreadsheetId}`, {
       headers: { Authorization: `Bearer ${mentionedToken}` },
     })
     expect(afterFreshMentionRes.status).toBe(200)
@@ -767,8 +802,8 @@ describe('Comments API', () => {
     expect(afterFreshMentionJson.data.unresolvedMentionCount).toBe(4)
     expect(afterFreshMentionJson.data.unreadMentionCount).toBe(1)
     expect(afterFreshMentionJson.data.items).toEqual([
-      { rowId: row1, mentionedCount: 2, unreadCount: 0, mentionedFieldIds: ['fld_a', 'fld_b'] },
-      { rowId: row2, mentionedCount: 2, unreadCount: 1, mentionedFieldIds: [] },
+      { containerId: spreadsheetId, rowId: row1, targetId: row1, mentionedCount: 2, unreadCount: 0, mentionedFieldIds: ['fld_a', 'fld_b'] },
+      { containerId: spreadsheetId, rowId: row2, targetId: row2, mentionedCount: 2, unreadCount: 1, mentionedFieldIds: [] },
     ])
   })
 
@@ -820,15 +855,17 @@ describe('Comments API', () => {
     })
     expect(resolveRes.status).toBe(204)
 
-    const summaryRes = await fetch(`${baseUrl}/api/comments/summary?spreadsheetId=${spreadsheetId}&rowIds=${rowOne},${rowTwo}`, {
+    const summaryRes = await fetch(`${baseUrl}/api/comments/summary?containerId=${spreadsheetId}&targetIds=${rowOne},${rowTwo}`, {
       headers: { Authorization: `Bearer ${token}` },
     })
     expect(summaryRes.status).toBe(200)
     const summaryJson = await summaryRes.json()
     expect(summaryJson.data.items).toEqual([
       {
+        containerId: spreadsheetId,
         spreadsheetId,
         rowId: rowOne,
+        targetId: rowOne,
         unresolvedCount: 2,
         fieldCounts: { fld_title: 2 },
         mentionedCount: 0,
@@ -873,10 +910,31 @@ describe('Comments API', () => {
       socket.emit('join-comment-inbox')
     })
 
+    await new Promise<void>((resolve, reject) => {
+      const t = setTimeout(() => reject(new Error('record join timeout')), 3000)
+      socket.on('joined-comment-record', (payload: any) => {
+        if (payload?.spreadsheetId !== spreadsheetId || payload?.rowId !== rowId) return
+        clearTimeout(t)
+        resolve()
+      })
+      socket.emit('join-comment-record', { spreadsheetId, rowId })
+    })
+
+    let createdCommentId = ''
+
+    const createdRealtime = new Promise<any>((resolve, reject) => {
+      const t = setTimeout(() => reject(new Error('create realtime timeout')), 3000)
+      socket.on('comment:created', (payload: any) => {
+        if (payload?.comment?.content !== 'Realtime inbox activity') return
+        clearTimeout(t)
+        resolve(payload)
+      })
+    })
+
     const createdActivity = new Promise<any>((resolve, reject) => {
       const t = setTimeout(() => reject(new Error('create activity timeout')), 3000)
       socket.on('comment:activity', (payload: any) => {
-        if (payload?.kind !== 'created') return
+        if (payload?.kind !== 'created' || payload?.rowId !== rowId) return
         clearTimeout(t)
         resolve(payload)
       })
@@ -897,28 +955,62 @@ describe('Comments API', () => {
     })
     expect(createRes.status).toBe(201)
     const createJson = await createRes.json()
-    const createdComment = createJson.data.comment as { id: string }
+    const createdComment = createJson.data.comment as { id: string; containerId: string; targetId: string; targetFieldId: string | null }
+    createdCommentId = createdComment.id
     createdCommentIds.push(createdComment.id)
+    expect(createdComment.containerId).toBe(spreadsheetId)
+    expect(createdComment.targetId).toBe(rowId)
+    expect(createdComment.targetFieldId).toBe('fld_note')
 
-    await expect(createdActivity).resolves.toEqual({
-      kind: 'created',
+    await expect(createdRealtime).resolves.toMatchObject({
+      containerId: spreadsheetId,
+      targetId: rowId,
+      targetFieldId: 'fld_note',
       spreadsheetId,
       rowId,
       fieldId: 'fld_note',
-      commentId: createdComment.id,
+      comment: {
+        id: createdCommentId,
+        containerId: spreadsheetId,
+        targetId: rowId,
+        targetFieldId: 'fld_note',
+        spreadsheetId,
+        rowId,
+        fieldId: 'fld_note',
+      },
+    })
+
+    await expect(createdActivity).resolves.toMatchObject({
+      kind: 'created',
+      containerId: spreadsheetId,
+      targetId: rowId,
+      targetFieldId: 'fld_note',
+      spreadsheetId,
+      rowId,
+      fieldId: 'fld_note',
+      commentId: createdCommentId,
       authorId: 'user_ws_author',
     })
 
-    const updatedActivity = new Promise<any>((resolve, reject) => {
-      const t = setTimeout(() => reject(new Error('update activity timeout')), 3000)
-      socket.on('comment:activity', (payload: any) => {
-        if (payload?.kind !== 'updated' || payload?.commentId !== createdComment.id) return
+    const updatedRealtime = new Promise<any>((resolve, reject) => {
+      const t = setTimeout(() => reject(new Error('update realtime timeout')), 3000)
+      socket.on('comment:updated', (payload: any) => {
+        if (payload?.comment?.id !== createdCommentId) return
         clearTimeout(t)
         resolve(payload)
       })
     })
 
-    const updateRes = await fetch(`${baseUrl}/api/comments/${createdComment.id}`, {
+    const updatedActivity = new Promise<any>((resolve, reject) => {
+      const t = setTimeout(() => reject(new Error('update activity timeout')), 3000)
+      socket.on('comment:activity', (payload: any) => {
+        if (payload?.kind !== 'updated' || payload?.commentId !== createdCommentId) return
+        clearTimeout(t)
+        resolve(payload)
+      })
+    })
+
+    const updateRes = await fetch(`${baseUrl}/api/comments/${createdCommentId}`, {
       method: 'PATCH',
       headers: {
         'Content-Type': 'application/json',
@@ -930,36 +1022,79 @@ describe('Comments API', () => {
     })
     expect(updateRes.status).toBe(200)
 
-    await expect(updatedActivity).resolves.toEqual({
-      kind: 'updated',
+    await expect(updatedRealtime).resolves.toMatchObject({
+      containerId: spreadsheetId,
+      targetId: rowId,
+      targetFieldId: 'fld_note',
       spreadsheetId,
       rowId,
       fieldId: 'fld_note',
-      commentId: createdComment.id,
+      comment: {
+        id: createdCommentId,
+        containerId: spreadsheetId,
+        targetId: rowId,
+        targetFieldId: 'fld_note',
+        spreadsheetId,
+        rowId,
+        fieldId: 'fld_note',
+      },
+    })
+
+    await expect(updatedActivity).resolves.toMatchObject({
+      kind: 'updated',
+      containerId: spreadsheetId,
+      targetId: rowId,
+      targetFieldId: 'fld_note',
+      spreadsheetId,
+      rowId,
+      fieldId: 'fld_note',
+      commentId: createdCommentId,
       authorId: 'user_ws_author',
     })
 
-    const resolvedActivity = new Promise<any>((resolve, reject) => {
-      const t = setTimeout(() => reject(new Error('resolve activity timeout')), 3000)
-      socket.on('comment:activity', (payload: any) => {
-        if (payload?.kind !== 'resolved' || payload?.commentId !== createdComment.id) return
+    const resolvedRealtime = new Promise<any>((resolve, reject) => {
+      const t = setTimeout(() => reject(new Error('resolve realtime timeout')), 3000)
+      socket.on('comment:resolved', (payload: any) => {
+        if (payload?.commentId !== createdCommentId) return
         clearTimeout(t)
         resolve(payload)
       })
     })
 
-    const resolveRes = await fetch(`${baseUrl}/api/comments/${createdComment.id}/resolve`, {
+    const resolvedActivity = new Promise<any>((resolve, reject) => {
+      const t = setTimeout(() => reject(new Error('resolve activity timeout')), 3000)
+      socket.on('comment:activity', (payload: any) => {
+        if (payload?.kind !== 'resolved' || payload?.commentId !== createdCommentId) return
+        clearTimeout(t)
+        resolve(payload)
+      })
+    })
+
+    const resolveRes = await fetch(`${baseUrl}/api/comments/${createdCommentId}/resolve`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${authorToken}` },
     })
     expect(resolveRes.status).toBe(204)
 
-    await expect(resolvedActivity).resolves.toEqual({
-      kind: 'resolved',
+    await expect(resolvedRealtime).resolves.toMatchObject({
+      containerId: spreadsheetId,
+      targetId: rowId,
+      targetFieldId: 'fld_note',
       spreadsheetId,
       rowId,
       fieldId: 'fld_note',
-      commentId: createdComment.id,
+      commentId: createdCommentId,
+    })
+
+    await expect(resolvedActivity).resolves.toMatchObject({
+      kind: 'resolved',
+      containerId: spreadsheetId,
+      targetId: rowId,
+      targetFieldId: 'fld_note',
+      spreadsheetId,
+      rowId,
+      fieldId: 'fld_note',
+      commentId: createdCommentId,
     })
 
     const leafRes = await fetch(`${baseUrl}/api/comments`, {
@@ -976,8 +1111,20 @@ describe('Comments API', () => {
     })
     expect(leafRes.status).toBe(201)
     const leafJson = await leafRes.json()
-    const leafComment = leafJson.data.comment as { id: string }
+    const leafComment = leafJson.data.comment as { id: string; containerId: string; targetId: string; targetFieldId: string | null }
     createdCommentIds.push(leafComment.id)
+    expect(leafComment.containerId).toBe(spreadsheetId)
+    expect(leafComment.targetId).toBe(rowId)
+    expect(leafComment.targetFieldId).toBeNull()
+
+    const deletedRealtime = new Promise<any>((resolve, reject) => {
+      const t = setTimeout(() => reject(new Error('delete realtime timeout')), 3000)
+      socket.on('comment:deleted', (payload: any) => {
+        if (payload?.commentId !== leafComment.id) return
+        clearTimeout(t)
+        resolve(payload)
+      })
+    })
 
     const deletedActivity = new Promise<any>((resolve, reject) => {
       const t = setTimeout(() => reject(new Error('delete activity timeout')), 3000)
@@ -994,12 +1141,70 @@ describe('Comments API', () => {
     })
     expect(deleteRes.status).toBe(204)
 
-    await expect(deletedActivity).resolves.toEqual({
+    await expect(deletedRealtime).resolves.toMatchObject({
+      containerId: spreadsheetId,
+      targetId: rowId,
+      targetFieldId: null,
+      spreadsheetId,
+      rowId,
+      commentId: leafComment.id,
+    })
+
+    await expect(deletedActivity).resolves.toMatchObject({
       kind: 'deleted',
+      containerId: spreadsheetId,
+      targetId: rowId,
+      targetFieldId: null,
       spreadsheetId,
       rowId,
       commentId: leafComment.id,
       authorId: 'user_ws_author',
+    })
+
+    const mentionRealtime = new Promise<any>((resolve, reject) => {
+      const t = setTimeout(() => reject(new Error('mention realtime timeout')), 3000)
+      socket.on('comment:mention', (payload: any) => {
+        if (payload?.comment?.content !== 'Mention @[Target](user_ws_target)') return
+        clearTimeout(t)
+        resolve(payload)
+      })
+    })
+
+    const mentionRes = await fetch(`${baseUrl}/api/comments`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${authorToken}`,
+      },
+      body: JSON.stringify({
+        spreadsheetId,
+        rowId,
+        content: 'Mention @[Target](user_ws_target)',
+        mentions: ['user_ws_target'],
+      }),
+    })
+    expect(mentionRes.status).toBe(201)
+    const mentionJson = await mentionRes.json()
+    const mentionComment = mentionJson.data.comment as { id: string; containerId: string; targetId: string; targetFieldId: string | null }
+    createdCommentIds.push(mentionComment.id)
+    expect(mentionComment.containerId).toBe(spreadsheetId)
+    expect(mentionComment.targetId).toBe(rowId)
+    expect(mentionComment.targetFieldId).toBeNull()
+
+    await expect(mentionRealtime).resolves.toMatchObject({
+      containerId: spreadsheetId,
+      targetId: rowId,
+      targetFieldId: null,
+      spreadsheetId,
+      rowId,
+      comment: {
+        id: mentionComment.id,
+        containerId: spreadsheetId,
+        targetId: rowId,
+        targetFieldId: null,
+        spreadsheetId,
+        rowId,
+      },
     })
 
     socket.close()

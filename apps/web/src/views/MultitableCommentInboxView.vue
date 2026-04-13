@@ -35,10 +35,10 @@
             <strong>{{ item.authorName ?? item.authorId }}</strong>
             <p class="mt-comment-inbox__meta">
               <span v-if="item.baseId">Base {{ item.baseId }}</span>
-              <span>Sheet {{ item.sheetId ?? item.containerId }}</span>
-              <span>Row {{ item.recordId ?? item.targetId }}</span>
+              <span>Sheet {{ resolveItemSheetId(item) }}</span>
+              <span>Row {{ resolveItemRecordId(item) }}</span>
               <span v-if="item.viewId">View {{ item.viewId }}</span>
-              <span v-if="item.fieldId">Field {{ item.fieldId }}</span>
+              <span v-if="resolveItemFieldId(item)">Field {{ resolveItemFieldId(item) }}</span>
             </p>
           </div>
           <div class="mt-comment-inbox__flags">
@@ -71,6 +71,7 @@ import { useRouter } from 'vue-router'
 import { useMultitableCommentInbox } from '../multitable/composables/useMultitableCommentInbox'
 import { useMultitableCommentInboxRealtime } from '../multitable/composables/useMultitableCommentInboxRealtime'
 import { multitableClient } from '../multitable/api/client'
+import type { MultitableCommentInboxItem } from '../multitable/types'
 import { AppRouteNames } from '../router/types'
 
 const inboxState = useMultitableCommentInbox(multitableClient)
@@ -111,10 +112,11 @@ async function onOpen(commentId: string) {
 
   openingId.value = commentId
   try {
-    const resolvedSheetId = item.sheetId ?? item.containerId
+    const resolvedSheetId = resolveItemSheetId(item)
     let resolvedBaseId = item.baseId ?? undefined
     let resolvedViewId = item.viewId ?? undefined
-    const resolvedRecordId = item.recordId ?? item.targetId
+    const resolvedRecordId = resolveItemRecordId(item)
+    const resolvedFieldId = resolveItemFieldId(item) ?? undefined
 
     if (!resolvedViewId) {
       const context = await multitableClient.loadContext({ sheetId: resolvedSheetId })
@@ -135,7 +137,7 @@ async function onOpen(commentId: string) {
         baseId: resolvedBaseId,
         recordId: resolvedRecordId,
         commentId: item.id,
-        fieldId: item.fieldId ?? item.targetFieldId ?? undefined,
+        fieldId: resolvedFieldId,
         openComments: 'true',
       },
     })
@@ -149,6 +151,18 @@ async function onOpen(commentId: string) {
   } finally {
     openingId.value = null
   }
+}
+
+function resolveItemSheetId(item: MultitableCommentInboxItem): string {
+  return item.sheetId ?? item.spreadsheetId ?? item.containerId
+}
+
+function resolveItemRecordId(item: MultitableCommentInboxItem): string {
+  return item.recordId ?? item.rowId ?? item.targetId
+}
+
+function resolveItemFieldId(item: MultitableCommentInboxItem): string | null {
+  return item.targetFieldId ?? item.fieldId ?? null
 }
 
 function formatTime(value: string): string {
