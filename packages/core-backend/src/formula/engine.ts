@@ -198,6 +198,12 @@ export class FormulaEngine {
     this.functions.set('VAR', this.variance.bind(this))
     this.functions.set('MEDIAN', this.median.bind(this))
     this.functions.set('MODE', this.mode.bind(this))
+
+    // Additional functions
+    this.functions.set('SWITCH', this.switchFunction.bind(this))
+    this.functions.set('CONCAT', this.concatenate.bind(this))
+    this.functions.set('DATEDIF', this.datedif.bind(this))
+    this.functions.set('COUNTA', this.counta.bind(this))
   }
 
   /**
@@ -684,6 +690,43 @@ export class FormulaEngine {
     }
 
     return mode
+  }
+
+  private switchFunction(...args: unknown[]): unknown {
+    if (args.length < 3) return '#VALUE!'
+    const expr = args[0]
+    for (let i = 1; i + 1 < args.length; i += 2) {
+      if (expr === args[i]) return args[i + 1]
+    }
+    // If odd number of remaining args after expr, the last one is the default
+    return args.length % 2 === 0 ? args[args.length - 1] : '#N/A'
+  }
+
+  private datedif(startDate: unknown, endDate: unknown, unit: unknown): number | string {
+    const start = startDate instanceof Date ? startDate : new Date(String(startDate))
+    const end = endDate instanceof Date ? endDate : new Date(String(endDate))
+    if (isNaN(start.getTime()) || isNaN(end.getTime())) return '#VALUE!'
+
+    const unitStr = String(unit).toUpperCase()
+    switch (unitStr) {
+      case 'D': {
+        const diffMs = end.getTime() - start.getTime()
+        return Math.floor(diffMs / (1000 * 60 * 60 * 24))
+      }
+      case 'M': {
+        return (end.getFullYear() - start.getFullYear()) * 12 + (end.getMonth() - start.getMonth())
+      }
+      case 'Y': {
+        return end.getFullYear() - start.getFullYear()
+      }
+      default:
+        return '#VALUE!'
+    }
+  }
+
+  private counta(...args: unknown[]): number {
+    const values = this.flattenValues(args)
+    return values.filter(val => val !== null && val !== undefined && val !== '').length
   }
 
   /**

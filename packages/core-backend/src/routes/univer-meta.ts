@@ -18,6 +18,9 @@ import { isAdmin, listUserPermissions } from '../rbac/service'
 import { StorageServiceImpl } from '../services/StorageService'
 import { createUploadMiddleware, loadMulter } from '../types/multer'
 import type { RequestWithFile } from '../types/multer'
+import { MultitableFormulaEngine } from '../multitable/formula-engine'
+
+const multitableFormulaEngine = new MultitableFormulaEngine()
 
 type UniverMetaField = {
   id: string
@@ -191,6 +194,30 @@ type PeopleSheetPreset = {
 
 function buildId(prefix: string): string {
   return `${prefix}_${randomUUID()}`
+}
+
+type FormulaDependencyQueryFn = (sql: string, params?: unknown[]) => Promise<{ rows: unknown[]; rowCount?: number | null }>
+
+async function syncFormulaDependencies(
+  query: FormulaDependencyQueryFn,
+  sheetId: string,
+  fieldId: string,
+  dependsOnFieldIds: string[],
+): Promise<void> {
+  // Remove old dependencies for this field
+  await query(
+    'DELETE FROM formula_dependencies WHERE sheet_id = $1 AND field_id = $2',
+    [sheetId, fieldId],
+  )
+  // Insert new dependencies
+  for (const depFieldId of dependsOnFieldIds) {
+    await query(
+      `INSERT INTO formula_dependencies (sheet_id, field_id, depends_on_field_id, depends_on_sheet_id)
+       VALUES ($1, $2, $3, NULL)
+       ON CONFLICT ON CONSTRAINT uq_formula_dep DO NOTHING`,
+      [sheetId, fieldId, depFieldId],
+    )
+  }
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -3526,6 +3553,12 @@ export function univerMetaRouter(): Router {
         )
         const row = (insert as any).rows?.[0]
         if (!row) throw new Error('Insert returned no rows')
+
+        // Track formula dependencies
+        if (type === 'formula' && property?.expression) {
+          const refs = multitableFormulaEngine.extractFieldReferences(String(property.expression))
+          await syncFormulaDependencies(query, sheetId, fieldId, refs)
+        }
       })
 
       const fieldRes = await pool.query(
@@ -3701,6 +3734,13 @@ export function univerMetaRouter(): Router {
         )
         const updatedRow = (update as any).rows?.[0]
         if (!updatedRow) throw new Error('Update returned no rows')
+
+        // Track formula dependencies on update
+        if (nextType === 'formula' && nextProperty?.expression) {
+          const refs = multitableFormulaEngine.extractFieldReferences(String(nextProperty.expression))
+          await syncFormulaDependencies(query, sheetId, fieldId, refs)
+        }
+
         return serializeFieldRow(updatedRow)
       })
 
@@ -4940,6 +4980,30 @@ export function univerMetaRouter(): Router {
             visibleFormFieldIds,
           )
         : undefined
+
+      // Recalculate dependent formula fields after record update
+      try {
+        const changedFieldIds = Object.keys(patch)
+        if (changedFieldIds.length > 0) {
+          const depRes = await pool.query(
+            `SELECT DISTINCT field_id FROM formula_dependencies
+             WHERE (depends_on_field_id = ANY($1::text[]))
+               AND (depends_on_sheet_id IS NULL OR depends_on_sheet_id = $2)
+               AND sheet_id = $2`,
+            [changedFieldIds, view.sheetId],
+          )
+          if (depRes.rows.length > 0) {
+            await multitableFormulaEngine.recalculateRecord(
+              pool.query.bind(pool),
+              view.sheetId,
+              record.id,
+              fields,
+            )
+          }
+        }
+      } catch (recalcErr) {
+        console.error('[univer-meta] formula recalculation failed:', recalcErr)
+      }
 
       publishMultitableSheetRealtime({
         spreadsheetId: view.sheetId,
