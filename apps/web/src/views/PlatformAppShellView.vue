@@ -1,9 +1,9 @@
 <template>
   <section class="platform-app-shell">
     <p v-if="error" class="platform-app-shell__error">{{ error }}</p>
-    <p v-else-if="actionError" class="platform-app-shell__error">{{ actionError }}</p>
-    <p v-else-if="actionMessage" class="platform-app-shell__notice">{{ actionMessage }}</p>
-    <p v-else-if="loading" class="platform-app-shell__state">Loading app shell...</p>
+    <p v-if="actionError" class="platform-app-shell__error">{{ actionError }}</p>
+    <p v-if="actionMessage" class="platform-app-shell__notice">{{ actionMessage }}</p>
+    <p v-if="loading" class="platform-app-shell__state">Loading app shell...</p>
     <p v-else-if="!app" class="platform-app-shell__state">Platform app not found.</p>
 
     <template v-else>
@@ -77,6 +77,49 @@
           </dl>
         </article>
 
+        <article v-if="showRuntimeDiagnostics" class="platform-app-shell__panel">
+          <h2>Runtime diagnostics</h2>
+          <p v-if="runtimeCurrentError" class="platform-app-shell__diagnostic-error">
+            {{ runtimeCurrentError }}
+          </p>
+          <template v-else-if="runtimeCurrent">
+            <dl class="platform-app-shell__meta">
+              <div>
+                <dt>Current status</dt>
+                <dd>{{ runtimeCurrent.status }}</dd>
+              </div>
+              <div>
+                <dt>Report ref</dt>
+                <dd>{{ runtimeCurrent.reportRef || runtimeCurrent.installResult?.reportRef || 'Unavailable' }}</dd>
+              </div>
+              <div>
+                <dt>Created objects</dt>
+                <dd>{{ runtimeCurrent.installResult?.createdObjects.length ?? 0 }}</dd>
+              </div>
+              <div>
+                <dt>Created views</dt>
+                <dd>{{ runtimeCurrent.installResult?.createdViews.length ?? 0 }}</dd>
+              </div>
+            </dl>
+            <div class="platform-app-shell__diagnostic-copy">
+              <p v-if="runtimeWarnings.length === 0">
+                No runtime warnings were reported for the current snapshot.
+              </p>
+              <template v-else>
+                <strong>Warnings</strong>
+                <ul class="platform-app-shell__list">
+                  <li v-for="item in runtimeWarnings" :key="item">
+                    <span>{{ item }}</span>
+                  </li>
+                </ul>
+              </template>
+            </div>
+          </template>
+          <p v-else class="platform-app-shell__muted-state">
+            Runtime diagnostics are declared for this app, but no current snapshot was returned yet.
+          </p>
+        </article>
+
         <article class="platform-app-shell__panel">
           <h2>Dependencies</h2>
           <ul class="platform-app-shell__chips">
@@ -136,7 +179,24 @@ import {
   resolvePlatformAppProjectLabel,
   usePlatformApps,
 } from '../composables/usePlatformApps'
-import { apiPost } from '../utils/api'
+import { apiGet, apiPost } from '../utils/api'
+
+interface RuntimeInstallResultSnapshot {
+  status: 'installed' | 'partial' | 'failed'
+  createdObjects: string[]
+  createdViews: string[]
+  warnings: string[]
+  reportRef?: string
+}
+
+interface RuntimeCurrentSnapshot {
+  status: 'not-installed' | 'installed' | 'partial' | 'failed'
+  projectId?: string
+  displayName?: string
+  config?: Record<string, unknown>
+  installResult?: RuntimeInstallResultSnapshot
+  reportRef?: string
+}
 
 const route = useRoute()
 const router = useRouter()
@@ -151,11 +211,84 @@ const visibleNavigationItems = computed(() =>
 const actionPending = ref(false)
 const actionMessage = ref<string | null>(null)
 const actionError = ref<string | null>(null)
+const runtimeCurrent = ref<RuntimeCurrentSnapshot | null>(null)
+const runtimeCurrentError = ref<string | null>(null)
+const runtimeWarnings = computed(() => runtimeCurrent.value?.installResult?.warnings ?? [])
+const showRuntimeDiagnostics = computed(() =>
+  Boolean(app.value?.runtimeBindings?.currentPath || runtimeCurrent.value || runtimeCurrentError.value),
+)
+
+function normalizeRuntimeCurrentSnapshot(payload: unknown): RuntimeCurrentSnapshot | null {
+  const candidate = payload && typeof payload === 'object' && 'data' in (payload as Record<string, unknown>)
+    ? (payload as { data?: unknown }).data
+    : payload
+  if (!candidate || typeof candidate !== 'object') return null
+  const status = (candidate as { status?: unknown }).status
+  if (typeof status !== 'string') return null
+  const installResultRaw = (candidate as { installResult?: unknown }).installResult
+  const installResult = installResultRaw && typeof installResultRaw === 'object'
+    ? {
+        status: typeof (installResultRaw as { status?: unknown }).status === 'string'
+          ? (installResultRaw as { status: 'installed' | 'partial' | 'failed' }).status
+          : 'installed',
+        createdObjects: Array.isArray((installResultRaw as { createdObjects?: unknown }).createdObjects)
+          ? (installResultRaw as { createdObjects: string[] }).createdObjects
+          : [],
+        createdViews: Array.isArray((installResultRaw as { createdViews?: unknown }).createdViews)
+          ? (installResultRaw as { createdViews: string[] }).createdViews
+          : [],
+        warnings: Array.isArray((installResultRaw as { warnings?: unknown }).warnings)
+          ? (installResultRaw as { warnings: string[] }).warnings
+          : [],
+        reportRef: typeof (installResultRaw as { reportRef?: unknown }).reportRef === 'string'
+          ? (installResultRaw as { reportRef: string }).reportRef
+          : undefined,
+      }
+    : undefined
+
+  return {
+    status: status as RuntimeCurrentSnapshot['status'],
+    projectId: typeof (candidate as { projectId?: unknown }).projectId === 'string'
+      ? (candidate as { projectId: string }).projectId
+      : undefined,
+    displayName: typeof (candidate as { displayName?: unknown }).displayName === 'string'
+      ? (candidate as { displayName: string }).displayName
+      : undefined,
+    config: (candidate as { config?: Record<string, unknown> }).config,
+    installResult,
+    reportRef: typeof (candidate as { reportRef?: unknown }).reportRef === 'string'
+      ? (candidate as { reportRef: string }).reportRef
+      : undefined,
+  }
+}
+
+async function loadRuntimeCurrent(targetApp: NonNullable<typeof app.value>): Promise<void> {
+  if (!targetApp.runtimeBindings?.currentPath) {
+    runtimeCurrent.value = null
+    runtimeCurrentError.value = null
+    return
+  }
+
+  try {
+    const response = await apiGet<unknown>(targetApp.runtimeBindings.currentPath)
+    runtimeCurrent.value = normalizeRuntimeCurrentSnapshot(response)
+    runtimeCurrentError.value = null
+  } catch (err: any) {
+    runtimeCurrent.value = null
+    runtimeCurrentError.value = err?.message || 'Failed to load runtime diagnostics'
+  }
+}
 
 async function load(): Promise<void> {
   if (!appId.value) return
   actionError.value = null
-  await fetchAppById(appId.value, { force: true })
+  const nextApp = await fetchAppById(appId.value, { force: true })
+  if (nextApp) {
+    await loadRuntimeCurrent(nextApp)
+  } else {
+    runtimeCurrent.value = null
+    runtimeCurrentError.value = null
+  }
 }
 
 async function runPrimaryAction(): Promise<void> {
@@ -167,7 +300,10 @@ async function runPrimaryAction(): Promise<void> {
     actionError.value = null
     try {
       await apiPost(primaryAction.value.mutation.path, primaryAction.value.mutation.payload)
-      await fetchAppById(appId.value, { force: true })
+      const nextApp = await fetchAppById(appId.value, { force: true })
+      if (nextApp) {
+        await loadRuntimeCurrent(nextApp)
+      }
       actionMessage.value = primaryAction.value.kind === 'reinstall'
         ? 'App reinstall completed and runtime state has been refreshed.'
         : 'App install completed and runtime state has been refreshed.'
@@ -349,5 +485,16 @@ watch(appId, () => {
 .platform-app-shell__notice {
   color: #166534;
   border-color: #bbf7d0;
+}
+
+.platform-app-shell__diagnostic-error {
+  color: #b91c1c;
+}
+
+.platform-app-shell__diagnostic-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  color: #475569;
 }
 </style>
