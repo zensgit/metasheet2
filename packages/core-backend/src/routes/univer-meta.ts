@@ -15,6 +15,12 @@ import {
 } from '../multitable/permission-derivation'
 import { rbacGuard, rbacGuardAny } from '../rbac/rbac'
 import { isAdmin, listUserPermissions } from '../rbac/service'
+import {
+  queryRecordsWithCursor,
+  buildRecordsCacheKey,
+  type CursorPaginatedResult,
+  type LoadedMultitableRecord,
+} from '../multitable/records'
 import { StorageServiceImpl } from '../services/StorageService'
 import { createUploadMiddleware, loadMulter } from '../types/multer'
 import type { RequestWithFile } from '../types/multer'
@@ -88,6 +94,36 @@ let multitableAttachmentStorage: StorageServiceImpl | null = null
 const metaSheetSummaryCache = new Map<string, { id: string; name: string }>()
 const metaFieldCache = new Map<string, UniverMetaField[]>()
 const metaViewConfigCache = new Map<string, UniverMetaViewConfig>()
+
+// ---------------------------------------------------------------------------
+// Lightweight query-result cache for cursor-paginated record queries
+// ---------------------------------------------------------------------------
+type RecordsCacheEntry = { data: unknown; expiresAt: number }
+const recordsQueryCache = new Map<string, RecordsCacheEntry>()
+const RECORDS_CACHE_TTL_MS = 30_000
+
+function getRecordsCache(key: string): unknown | null {
+  const entry = recordsQueryCache.get(key)
+  if (!entry) return null
+  if (Date.now() >= entry.expiresAt) {
+    recordsQueryCache.delete(key)
+    return null
+  }
+  return entry.data
+}
+
+function setRecordsCache(key: string, data: unknown): void {
+  recordsQueryCache.set(key, { data, expiresAt: Date.now() + RECORDS_CACHE_TTL_MS })
+}
+
+function invalidateRecordsCacheForSheet(sheetId: string): void {
+  const prefix = `mt:records:${sheetId}:`
+  for (const key of recordsQueryCache.keys()) {
+    if (key.startsWith(prefix)) {
+      recordsQueryCache.delete(key)
+    }
+  }
+}
 
 type UniverMetaBase = {
   id: string
@@ -2131,6 +2167,8 @@ function getRequestActorId(req: Request): string | null {
 
 function publishMultitableSheetRealtime(payload: MultitableSheetRealtimePayload): void {
   if (!payload.spreadsheetId) return
+  // Invalidate cursor-paginated record cache on any record mutation
+  invalidateRecordsCacheForSheet(payload.spreadsheetId)
   try {
     eventBus.publish('spreadsheet.cell.updated', payload)
   } catch (err) {
@@ -5358,6 +5396,84 @@ export function univerMetaRouter(): Router {
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
       console.error('[univer-meta] patch record failed:', err)
       return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to patch meta record' } })
+    }
+  })
+
+  /**
+   * GET /records - Cursor-based paginated record listing.
+   *
+   * Query params:
+   *   sheetId   (required)  - sheet to query
+   *   cursor    (optional)  - opaque cursor from previous response
+   *   limit     (optional)  - page size (default 100, max 5000)
+   *   sortField (optional)  - field id to sort by
+   *   sortDir   (optional)  - 'asc' | 'desc'
+   *   filter.*  (optional)  - field-level equality filters (e.g. filter.status=active)
+   *
+   * When `cursor` is absent the first page is returned.
+   * When `cursor` is present, offset-based params are ignored.
+   */
+  router.get('/records', async (req: Request, res: Response) => {
+    const sheetId = typeof req.query.sheetId === 'string' ? req.query.sheetId.trim() : ''
+    if (!sheetId) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId is required' } })
+    }
+
+    const cursor = typeof req.query.cursor === 'string' ? req.query.cursor.trim() : undefined
+    const limitRaw = typeof req.query.limit === 'string' ? Number.parseInt(req.query.limit, 10) : undefined
+    const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(limitRaw!, 1), 5000) : 100
+    const sortField = typeof req.query.sortField === 'string' ? req.query.sortField.trim() : undefined
+    const sortDir = req.query.sortDir === 'desc' ? 'desc' as const : 'asc' as const
+
+    // Collect filter.* query params
+    const filter: Record<string, string> = {}
+    for (const [key, val] of Object.entries(req.query)) {
+      if (key.startsWith('filter.') && typeof val === 'string') {
+        filter[key.slice(7)] = val
+      }
+    }
+
+    try {
+      const pool = poolManager.get()
+
+      // Check cache first
+      const sort = sortField ? { fieldId: sortField, direction: sortDir } : undefined
+      const cacheKey = buildRecordsCacheKey(sheetId, { filter, sort, cursor })
+      const cached = getRecordsCache(cacheKey)
+      if (cached) {
+        return res.json(cached)
+      }
+
+      const result: CursorPaginatedResult<LoadedMultitableRecord> = await queryRecordsWithCursor({
+        query: pool.query.bind(pool),
+        sheetId,
+        cursor: cursor || undefined,
+        limit,
+        sort,
+        filter,
+      })
+
+      const body = {
+        ok: true,
+        data: {
+          records: result.items.map((r) => ({ id: r.id, version: r.version, data: r.data })),
+          nextCursor: result.nextCursor,
+          hasMore: result.hasMore,
+        },
+      }
+      setRecordsCache(cacheKey, body)
+      return res.json(body)
+    } catch (err: any) {
+      if (err?.code === 'VALIDATION_ERROR') {
+        return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: err.message } })
+      }
+      if (err?.code === 'NOT_FOUND') {
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: err.message } })
+      }
+      const hint = getDbNotReadyMessage(err)
+      if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
+      console.error('[univer-meta] cursor records query failed:', err)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to query records' } })
     }
   })
 

@@ -1,4 +1,4 @@
-import { randomUUID } from 'crypto'
+import { createHash, randomUUID } from 'crypto'
 
 import { fieldTypeRegistry } from './field-type-registry'
 import { loadFieldsForSheet, loadSheetRow } from './loaders'
@@ -83,6 +83,58 @@ export type DeletedMultitableRecord = {
   id: string
   sheetId: string
   version: number
+}
+
+// ---------------------------------------------------------------------------
+// Cursor-based pagination types and helpers
+// ---------------------------------------------------------------------------
+
+export type CursorPaginatedResult<T> = {
+  items: T[]
+  nextCursor: string | null
+  hasMore: boolean
+}
+
+export type CursorQueryInput = {
+  query: MultitableRecordsQueryFn
+  sheetId: string
+  cursor?: string
+  limit?: number
+  sort?: MultitableRecordQueryOrder
+  filter?: Record<string, MultitableRecordFilterValue>
+}
+
+export function encodeRecordCursor(id: string, sortValue: string): string {
+  return Buffer.from(JSON.stringify({ id, sv: sortValue })).toString('base64url')
+}
+
+export function decodeRecordCursor(cursor: string): { id: string; sortValue: string } {
+  try {
+    const parsed = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8'))
+    if (typeof parsed.id !== 'string' || typeof parsed.sv !== 'string') {
+      throw new MultitableRecordValidationError('Invalid cursor format')
+    }
+    return { id: parsed.id, sortValue: parsed.sv }
+  } catch (err) {
+    if (err instanceof MultitableRecordValidationError) throw err
+    throw new MultitableRecordValidationError('Invalid cursor format')
+  }
+}
+
+/**
+ * Build a deterministic cache key hash from query parameters.
+ */
+export function buildRecordsCacheKey(
+  sheetId: string,
+  params: { filter?: Record<string, MultitableRecordFilterValue>; sort?: MultitableRecordQueryOrder; cursor?: string },
+): string {
+  const payload = JSON.stringify({
+    f: params.filter ?? {},
+    s: params.sort ?? {},
+    c: params.cursor ?? '',
+  })
+  const hash = createHash('sha256').update(payload).digest('hex').slice(0, 16)
+  return `mt:records:${sheetId}:${hash}`
 }
 
 type LoadedMultitableField = Awaited<ReturnType<typeof loadFieldsForSheet>>[number]
@@ -504,6 +556,94 @@ export async function queryRecords(
     version: Number(row.version ?? 1),
     data: normalizeRecordData(row.data),
   }))
+}
+
+/**
+ * Cursor-based pagination query.
+ *
+ * Uses keyset pagination: `WHERE (sort_column, id) > ($cursorSort, $cursorId)`.
+ * Fetches `limit + 1` rows to detect `hasMore` without a separate COUNT query.
+ */
+export async function queryRecordsWithCursor(
+  input: CursorQueryInput,
+): Promise<CursorPaginatedResult<LoadedMultitableRecord>> {
+  const query = input.query
+  const { fields } = await loadSheetAndFields(query, input.sheetId)
+  const filters = normalizeQueryFilters(fields, input.filter)
+  const orderBy = normalizeQueryOrder(fields, input.sort)
+  const limit = Math.min(Math.max(Number(input.limit) || 100, 1), 5000)
+
+  const params: unknown[] = [input.sheetId]
+  const where: string[] = ['sheet_id = $1']
+
+  for (const filter of filters) {
+    if (filter.value === null) {
+      params.push(filter.fieldId)
+      where.push(`data -> $${params.length} IS NULL`)
+      continue
+    }
+    params.push(filter.fieldId, String(filter.value))
+    where.push(`data ->> $${params.length - 1} = $${params.length}`)
+  }
+
+  // Determine sort column expression and direction
+  const direction = orderBy.direction.toUpperCase()
+  let sortExpr = 'id'
+  if (orderBy.fieldId) {
+    params.push(orderBy.fieldId)
+    sortExpr = `data ->> $${params.length}`
+  }
+
+  // Apply cursor keyset condition
+  if (input.cursor) {
+    const decoded = decodeRecordCursor(input.cursor)
+    const op = direction === 'DESC' ? '<' : '>'
+    params.push(decoded.sortValue, decoded.id)
+    if (orderBy.fieldId) {
+      where.push(
+        `(${sortExpr}, id) ${op} ($${params.length - 1}, $${params.length})`,
+      )
+    } else {
+      where.push(`id ${op} $${params.length}`)
+    }
+  }
+
+  // Fetch limit + 1 to detect hasMore
+  params.push(limit + 1)
+  const fetchLimitIndex = params.length
+
+  const orderSql = orderBy.fieldId
+    ? `ORDER BY ${sortExpr} ${direction} NULLS LAST, id ASC`
+    : `ORDER BY id ${direction}`
+
+  const sql = [
+    'SELECT id, sheet_id, version, data FROM meta_records',
+    `WHERE ${where.join(' AND ')}`,
+    orderSql,
+    `LIMIT $${fetchLimitIndex}`,
+  ].join(' ')
+
+  const recordRes = await query(sql, params)
+  const rows = (recordRes.rows as any[]).map((row) => ({
+    id: String(row.id),
+    sheetId: String(row.sheet_id),
+    version: Number(row.version ?? 1),
+    data: normalizeRecordData(row.data),
+  }))
+
+  const hasMore = rows.length > limit
+  const items = hasMore ? rows.slice(0, limit) : rows
+
+  let nextCursor: string | null = null
+  if (hasMore && items.length > 0) {
+    const last = items[items.length - 1]
+    const sortValue = orderBy.fieldId
+      ? String((last.data as Record<string, unknown>)[orderBy.fieldId] ?? '')
+      : last.id
+    nextCursor = encodeRecordCursor(last.id, sortValue)
+  }
+
+  return { items, nextCursor, hasMore }
 }
 
 export async function patchRecord(
