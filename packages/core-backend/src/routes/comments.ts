@@ -38,6 +38,15 @@ function readQueryValues(value: unknown): string[] | undefined {
   return undefined
 }
 
+function pickFirstNonEmpty(...values: Array<string | undefined>): string | undefined {
+  for (const value of values) {
+    if (typeof value !== 'string') continue
+    const trimmed = value.trim()
+    if (trimmed.length > 0) return trimmed
+  }
+  return undefined
+}
+
 function parseBoolean(value: string | undefined): boolean | undefined {
   if (value === 'true') return true
   if (value === 'false') return false
@@ -102,17 +111,23 @@ export function commentsRouter(injector?: Injector): Router {
 
   router.get('/api/comments', rbacGuard('comments', 'read'), async (req: Request, res: Response) => {
     const schema = z.object({
-      spreadsheetId: z.string().min(1),
+      spreadsheetId: z.string().min(1).optional(),
+      containerId: z.string().min(1).optional(),
       rowId: z.string().min(1).optional(),
+      targetId: z.string().min(1).optional(),
       fieldId: z.string().min(1).optional(),
+      targetFieldId: z.string().min(1).optional(),
       resolved: z.boolean().optional(),
       limit: z.number().int().nonnegative().optional(),
       offset: z.number().int().nonnegative().optional(),
     })
     const parsed = schema.safeParse({
       spreadsheetId: readQueryValue(req.query.spreadsheetId),
+      containerId: readQueryValue(req.query.containerId),
       rowId: readQueryValue(req.query.rowId),
+      targetId: readQueryValue(req.query.targetId),
       fieldId: readQueryValue(req.query.fieldId),
+      targetFieldId: readQueryValue(req.query.targetFieldId),
       resolved: parseBoolean(readQueryValue(req.query.resolved)),
       limit: parseNumberParam(readQueryValue(req.query.limit)),
       offset: parseNumberParam(readQueryValue(req.query.offset)),
@@ -122,16 +137,22 @@ export function commentsRouter(injector?: Injector): Router {
     }
 
     try {
+      const spreadsheetId = pickFirstNonEmpty(parsed.data.containerId, parsed.data.spreadsheetId)
+      if (!spreadsheetId) {
+        return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'spreadsheetId or containerId required' } })
+      }
       const limit = clampLimit(parsed.data.limit)
       const offset = clampOffset(parsed.data.offset)
       const options: CommentQueryOptions = {
         rowId: parsed.data.rowId,
+        targetId: parsed.data.targetId,
         fieldId: parsed.data.fieldId,
+        targetFieldId: parsed.data.targetFieldId,
         resolved: parsed.data.resolved,
         limit,
         offset,
       }
-      const result = await commentService.getComments(parsed.data.spreadsheetId, options)
+      const result = await commentService.getComments(spreadsheetId, options)
       return res.json({ ok: true, data: { items: result.items, total: result.total, limit, offset } })
     } catch (error) {
       logger.error('Failed to list comments', error as Error)
@@ -203,17 +224,23 @@ export function commentsRouter(injector?: Injector): Router {
 
   router.get('/api/comments/mention-summary', rbacGuard('comments', 'read'), async (req: Request, res: Response) => {
     const schema = z.object({
-      spreadsheetId: z.string().min(1),
+      spreadsheetId: z.string().min(1).optional(),
+      containerId: z.string().min(1).optional(),
     })
     const parsed = schema.safeParse({
       spreadsheetId: readQueryValue(req.query.spreadsheetId),
+      containerId: readQueryValue(req.query.containerId),
     })
     if (!parsed.success) {
       return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
     }
 
     try {
-      const result = await commentService.getMentionSummary(parsed.data.spreadsheetId, getUserId(req))
+      const spreadsheetId = pickFirstNonEmpty(parsed.data.containerId, parsed.data.spreadsheetId)
+      if (!spreadsheetId) {
+        return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'spreadsheetId or containerId required' } })
+      }
+      const result = await commentService.getMentionSummary(spreadsheetId, getUserId(req))
       return res.json({ ok: true, data: result })
     } catch (error) {
       logger.error('Failed to load mention summary', error as Error)
@@ -223,21 +250,30 @@ export function commentsRouter(injector?: Injector): Router {
 
   router.get('/api/comments/summary', rbacGuard('comments', 'read'), async (req: Request, res: Response) => {
     const schema = z.object({
-      spreadsheetId: z.string().min(1),
+      spreadsheetId: z.string().min(1).optional(),
+      containerId: z.string().min(1).optional(),
       rowIds: z.array(z.string().min(1)).optional(),
+      targetIds: z.array(z.string().min(1)).optional(),
     })
     const parsed = schema.safeParse({
       spreadsheetId: readQueryValue(req.query.spreadsheetId),
+      containerId: readQueryValue(req.query.containerId),
       rowIds: readQueryValues(req.query.rowIds),
+      targetIds: readQueryValues(req.query.targetIds),
     })
     if (!parsed.success) {
       return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
     }
 
     try {
+      const spreadsheetId = pickFirstNonEmpty(parsed.data.containerId, parsed.data.spreadsheetId)
+      if (!spreadsheetId) {
+        return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'spreadsheetId or containerId required' } })
+      }
+      const rowIds = parsed.data.targetIds ?? parsed.data.rowIds
       const result = await commentService.getCommentPresenceSummary(
-        parsed.data.spreadsheetId,
-        parsed.data.rowIds,
+        spreadsheetId,
+        rowIds,
         getUserId(req),
       )
       return res.json({ ok: true, data: { items: result.items, total: result.total } })
@@ -249,9 +285,12 @@ export function commentsRouter(injector?: Injector): Router {
 
   router.post('/api/comments', rbacGuard('comments', 'write'), async (req: Request, res: Response) => {
     const schema = z.object({
-      spreadsheetId: z.string().min(1),
-      rowId: z.string().min(1),
+      spreadsheetId: z.string().min(1).optional(),
+      containerId: z.string().min(1).optional(),
+      rowId: z.string().min(1).optional(),
+      targetId: z.string().min(1).optional(),
       fieldId: z.string().min(1).optional(),
+      targetFieldId: z.string().min(1).optional(),
       content: z.string().min(1),
       parentId: z.string().min(1).optional(),
       mentions: z.array(z.string().min(1)).optional(),
@@ -262,10 +301,22 @@ export function commentsRouter(injector?: Injector): Router {
     }
 
     try {
+      const spreadsheetId = pickFirstNonEmpty(parsed.data.containerId, parsed.data.spreadsheetId)
+      const rowId = pickFirstNonEmpty(parsed.data.targetId, parsed.data.rowId)
+      const fieldId = pickFirstNonEmpty(parsed.data.targetFieldId, parsed.data.fieldId)
+      if (!spreadsheetId) {
+        return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'spreadsheetId or containerId required' } })
+      }
+      if (!rowId) {
+        return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'rowId or targetId required' } })
+      }
       const comment = await commentService.createComment({
-        spreadsheetId: parsed.data.spreadsheetId,
-        rowId: parsed.data.rowId,
-        fieldId: parsed.data.fieldId,
+        spreadsheetId,
+        containerId: spreadsheetId,
+        rowId,
+        targetId: rowId,
+        fieldId,
+        targetFieldId: fieldId,
         content: parsed.data.content,
         parentId: parsed.data.parentId,
         mentions: parsed.data.mentions,

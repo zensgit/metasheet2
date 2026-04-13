@@ -127,16 +127,21 @@ export const ICommentService = createIdentifier<ICommentService>('comment-servic
 
 export interface CommentQueryOptions {
     rowId?: string;
+    targetId?: string;
     fieldId?: string;
+    targetFieldId?: string;
     resolved?: boolean;
     limit?: number;
     offset?: number;
 }
 
 export interface CommentCreateInput {
-    spreadsheetId: string;
-    rowId: string;
+    spreadsheetId?: string;
+    containerId?: string;
+    rowId?: string;
+    targetId?: string;
     fieldId?: string;
+    targetFieldId?: string;
     content: string;
     authorId: string;
     parentId?: string;
@@ -150,6 +155,9 @@ export interface CommentUpdateInput {
 
 export interface CommentRecord {
     id: string;
+    containerId: string;
+    targetId: string;
+    targetFieldId: string | null;
     spreadsheetId: string;
     rowId: string;
     fieldId?: string;
@@ -172,6 +180,8 @@ export interface CommentInboxItem extends CommentRecord {
 }
 
 export interface CommentPresenceSummaryRecord {
+    containerId: string;
+    targetId: string;
     spreadsheetId: string;
     rowId: string;
     unresolvedCount: number;
@@ -181,13 +191,16 @@ export interface CommentPresenceSummaryRecord {
 }
 
 export interface CommentMentionSummaryItem {
+    containerId: string;
     rowId: string;
+    targetId: string;
     mentionedCount: number;
     unreadCount: number;
     mentionedFieldIds: string[];
 }
 
 export interface CommentMentionSummary {
+    containerId: string;
     spreadsheetId: string;
     unresolvedMentionCount: number;
     unreadMentionCount: number;

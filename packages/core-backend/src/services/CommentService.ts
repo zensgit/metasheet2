@@ -3,6 +3,7 @@ import { sql } from 'kysely'
 import {
   ICollabService,
   ILogger,
+  type CommentCreateInput,
   type CommentInboxItem,
   type CommentMentionCandidate,
   type CommentQueryOptions,
@@ -42,6 +43,9 @@ export class CommentConflictError extends Error {
 
 export interface Comment {
   id: string
+  containerId: string
+  targetId: string
+  targetFieldId: string | null
   spreadsheetId: string
   rowId: string
   fieldId?: string
@@ -55,6 +59,8 @@ export interface Comment {
 }
 
 export interface CommentPresenceSummary {
+  containerId: string
+  targetId: string
   spreadsheetId: string
   rowId: string
   unresolvedCount: number
@@ -101,11 +107,33 @@ type MentionGroupedCountRow = {
 
 type CommentActivityPayload = {
   kind: 'created' | 'updated' | 'resolved' | 'deleted'
+  containerId: string
+  targetId: string
+  targetFieldId: string | null
   spreadsheetId: string
   rowId: string
   fieldId?: string
   commentId: string
   authorId?: string
+}
+
+type CommentRealtimePayload = {
+  containerId: string
+  targetId: string
+  targetFieldId: string | null
+  spreadsheetId: string
+  rowId: string
+  fieldId?: string
+  comment: Comment
+}
+
+type CommentScopeInput = {
+  containerId?: string
+  spreadsheetId?: string
+  targetId?: string
+  rowId?: string
+  targetFieldId?: string
+  fieldId?: string
 }
 
 export class CommentService {
@@ -183,18 +211,11 @@ export class CommentService {
     this.publishCommentDeleted(existing, normalizedUserId)
   }
 
-  async createComment(data: {
-    spreadsheetId: string
-    rowId: string
-    fieldId?: string
-    content: string
-    authorId: string
-    parentId?: string
-    mentions?: string[]
-  }): Promise<Comment> {
+  async createComment(data: CommentCreateInput): Promise<Comment> {
     const id = `cmt_${randomUUID()}`
     const mentions = this.normalizeMentions(data.mentions ?? this.parseMentions(data.content))
-    let effectiveFieldId = data.fieldId?.trim() || undefined
+    const location = this.resolveCommentLocation(data)
+    let effectiveFieldId = location.fieldId
 
     if (data.parentId) {
       const parent = await db
@@ -209,7 +230,7 @@ export class CommentService {
       if (parent.parent_id) {
         throw new CommentValidationError('Replying to replies is not supported')
       }
-      if (parent.spreadsheet_id !== data.spreadsheetId || parent.row_id !== data.rowId) {
+      if (parent.spreadsheet_id !== location.spreadsheetId || parent.row_id !== location.rowId) {
         throw new CommentValidationError('Reply must target the same record thread')
       }
 
@@ -228,8 +249,8 @@ export class CommentService {
       .insertInto('meta_comments')
       .values({
         id,
-        spreadsheet_id: data.spreadsheetId,
-        row_id: data.rowId,
+        spreadsheet_id: location.spreadsheetId,
+        row_id: location.rowId,
         field_id: effectiveFieldId ?? null,
         content: data.content,
         author_id: data.authorId,
@@ -244,19 +265,14 @@ export class CommentService {
       throw new Error('Created comment could not be reloaded')
     }
 
-    const createdPayload = {
-      spreadsheetId: data.spreadsheetId,
-      rowId: data.rowId,
-      fieldId: effectiveFieldId,
-      comment,
-    }
+    const createdPayload = this.buildCommentRealtimePayload(comment)
     this.collabService.broadcastTo(
-      buildCommentRecordRoom({ spreadsheetId: data.spreadsheetId, rowId: data.rowId }),
+      buildCommentRecordRoom({ spreadsheetId: location.spreadsheetId, rowId: location.rowId }),
       'comment:created',
       createdPayload,
     )
     this.collabService.broadcastTo(
-      buildCommentSheetRoom({ spreadsheetId: data.spreadsheetId }),
+      buildCommentSheetRoom({ spreadsheetId: location.spreadsheetId }),
       'comment:created',
       createdPayload,
     )
@@ -265,8 +281,11 @@ export class CommentService {
       'comment:activity',
       {
         kind: 'created',
-        spreadsheetId: data.spreadsheetId,
-        rowId: data.rowId,
+        containerId: location.containerId,
+        targetId: location.targetId,
+        targetFieldId: effectiveFieldId ?? null,
+        spreadsheetId: location.spreadsheetId,
+        rowId: location.rowId,
         fieldId: effectiveFieldId,
         commentId: comment.id,
         authorId: data.authorId,
@@ -284,12 +303,14 @@ export class CommentService {
   async getComments(spreadsheetId: string, options?: CommentQueryOptions): Promise<{ items: Comment[]; total: number }> {
     let query = db.selectFrom('meta_comments').where('spreadsheet_id', '=', spreadsheetId)
 
-    if (options?.rowId) {
-      query = query.where('row_id', '=', options.rowId)
+    const targetId = this.normalizeMaybeString(options?.targetId ?? options?.rowId)
+    if (targetId) {
+      query = query.where('row_id', '=', targetId)
     }
 
-    if (options?.fieldId) {
-      query = query.where('field_id', '=', options.fieldId)
+    const targetFieldId = this.normalizeMaybeString(options?.targetFieldId ?? options?.fieldId)
+    if (targetFieldId) {
+      query = query.where('field_id', '=', targetFieldId)
     }
 
     if (typeof options?.resolved === 'boolean') {
@@ -541,6 +562,8 @@ export class CommentService {
     const items = orderedRowIds.map((rowId) => {
       const summary = summaryByRow.get(rowId)!
       return {
+        containerId: spreadsheetId,
+        targetId: rowId,
         spreadsheetId,
         rowId,
         unresolvedCount: summary.unresolvedCount,
@@ -557,13 +580,16 @@ export class CommentService {
     spreadsheetId: string,
     mentionUserId: string,
   ): Promise<{
+    containerId: string
     spreadsheetId: string
     unresolvedMentionCount: number
     unreadMentionCount: number
     mentionedRecordCount: number
     unreadRecordCount: number
     items: Array<{
+      containerId: string
       rowId: string
+      targetId: string
       mentionedCount: number
       unreadCount: number
       mentionedFieldIds: string[]
@@ -572,6 +598,7 @@ export class CommentService {
     const normalizedUserId = mentionUserId.trim()
     if (!normalizedUserId) {
       return {
+        containerId: spreadsheetId,
         spreadsheetId,
         unresolvedMentionCount: 0,
         unreadMentionCount: 0,
@@ -609,13 +636,16 @@ export class CommentService {
     const items = [...byRow.entries()]
       .sort((a, b) => b[1].count - a[1].count || a[0].localeCompare(b[0]))
       .map(([rowId, data]) => ({
+        containerId: spreadsheetId,
         rowId,
+        targetId: rowId,
         mentionedCount: data.count,
         unreadCount: data.unread,
         mentionedFieldIds: [...data.fieldIds].sort(),
       }))
 
     return {
+      containerId: spreadsheetId,
       spreadsheetId,
       unresolvedMentionCount: items.reduce((sum, item) => sum + item.mentionedCount, 0),
       unreadMentionCount: items.reduce((sum, item) => sum + item.unreadCount, 0),
@@ -652,6 +682,9 @@ export class CommentService {
 
     if (result) {
       const resolvedPayload = {
+        containerId: result.spreadsheet_id,
+        targetId: result.row_id,
+        targetFieldId: result.field_id ?? null,
         spreadsheetId: result.spreadsheet_id,
         rowId: result.row_id,
         fieldId: result.field_id ?? undefined,
@@ -672,10 +705,7 @@ export class CommentService {
         'comment:activity',
         {
           kind: 'resolved',
-          spreadsheetId: result.spreadsheet_id,
-          rowId: result.row_id,
-          fieldId: result.field_id ?? undefined,
-          commentId,
+          ...resolvedPayload,
         } satisfies CommentActivityPayload,
       )
     }
@@ -710,12 +740,7 @@ export class CommentService {
   }
 
   private publishCommentUpdated(comment: Comment, authorId: string): void {
-    const payload = {
-      spreadsheetId: comment.spreadsheetId,
-      rowId: comment.rowId,
-      fieldId: comment.fieldId,
-      comment,
-    }
+    const payload = this.buildCommentRealtimePayload(comment)
     this.collabService.broadcastTo(
       buildCommentRecordRoom({ spreadsheetId: comment.spreadsheetId, rowId: comment.rowId }),
       'comment:updated',
@@ -731,6 +756,9 @@ export class CommentService {
       'comment:activity',
       {
         kind: 'updated',
+        containerId: comment.containerId,
+        targetId: comment.targetId,
+        targetFieldId: comment.targetFieldId,
         spreadsheetId: comment.spreadsheetId,
         rowId: comment.rowId,
         fieldId: comment.fieldId,
@@ -742,6 +770,9 @@ export class CommentService {
 
   private publishCommentDeleted(row: CommentRow, authorId: string): void {
     const payload = {
+      containerId: row.spreadsheet_id,
+      targetId: row.row_id,
+      targetFieldId: row.field_id ?? null,
       spreadsheetId: row.spreadsheet_id,
       rowId: row.row_id,
       fieldId: row.field_id ?? undefined,
@@ -762,10 +793,7 @@ export class CommentService {
       'comment:activity',
       {
         kind: 'deleted',
-        spreadsheetId: row.spreadsheet_id,
-        rowId: row.row_id,
-        fieldId: row.field_id ?? undefined,
-        commentId: row.id,
+        ...payload,
         authorId,
       } satisfies CommentActivityPayload,
     )
@@ -778,11 +806,17 @@ export class CommentService {
 
   private mapRowToComment(row: CommentRow): Comment {
     const mentions = this.parseMentionList(row.mentions)
+    const containerId = row.spreadsheet_id
+    const targetId = row.row_id
+    const targetFieldId = row.field_id ?? null
 
     return {
       id: row.id,
-      spreadsheetId: row.spreadsheet_id,
-      rowId: row.row_id,
+      containerId,
+      targetId,
+      targetFieldId,
+      spreadsheetId: containerId,
+      rowId: targetId,
       fieldId: row.field_id || undefined,
       content: row.content,
       authorId: row.author_id,
@@ -804,6 +838,51 @@ export class CommentService {
       viewId: row.view_id,
       recordId: row.record_id ?? row.row_id,
     }
+  }
+
+  private buildCommentRealtimePayload(comment: Comment): CommentRealtimePayload {
+    return {
+      containerId: comment.containerId,
+      targetId: comment.targetId,
+      targetFieldId: comment.targetFieldId,
+      spreadsheetId: comment.spreadsheetId,
+      rowId: comment.rowId,
+      fieldId: comment.fieldId,
+      comment,
+    }
+  }
+
+  private resolveCommentLocation(data: CommentScopeInput): {
+    containerId: string
+    targetId: string
+    fieldId?: string
+    spreadsheetId: string
+    rowId: string
+  } {
+    const containerId = this.normalizeMaybeString(data.containerId ?? data.spreadsheetId)
+    const targetId = this.normalizeMaybeString(data.targetId ?? data.rowId)
+    const fieldId = this.normalizeMaybeString(data.targetFieldId ?? data.fieldId)
+
+    if (!containerId) {
+      throw new CommentValidationError('spreadsheetId or containerId required')
+    }
+    if (!targetId) {
+      throw new CommentValidationError('rowId or targetId required')
+    }
+
+    return {
+      containerId,
+      targetId,
+      fieldId,
+      spreadsheetId: containerId,
+      rowId: targetId,
+    }
+  }
+
+  private normalizeMaybeString(value: string | undefined | null): string | undefined {
+    if (typeof value !== 'string') return undefined
+    const trimmed = value.trim()
+    return trimmed.length > 0 ? trimmed : undefined
   }
 
   private parseMentionList(mentions: unknown): string[] {
