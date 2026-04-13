@@ -3249,6 +3249,23 @@
             "items": {
               "type": "string"
             }
+          },
+          "approvalMode": {
+            "type": "string",
+            "enum": [
+              "single",
+              "all",
+              "any"
+            ],
+            "description": "Approval aggregation mode for a single approval node. `single`\npreserves the Wave 1 behavior, `all` represents countersign, and\n`any` represents any-sign.\n"
+          },
+          "emptyAssigneePolicy": {
+            "type": "string",
+            "enum": [
+              "error",
+              "auto-approve"
+            ],
+            "description": "Behavior when the approval node resolves to zero assignees. `error`\nblocks runtime execution, `auto-approve` allows the node to advance\nautomatically.\n"
           }
         },
         "required": [
@@ -3781,13 +3798,17 @@
               "reject",
               "transfer",
               "revoke",
-              "comment"
+              "comment",
+              "return"
             ]
           },
           "comment": {
             "type": "string"
           },
           "targetUserId": {
+            "type": "string"
+          },
+          "targetNodeKey": {
             "type": "string"
           }
         },
@@ -4922,7 +4943,7 @@
           "Approvals"
         ],
         "summary": "Execute an approval action",
-        "description": "Unified action dispatch endpoint. Supported actions: approve, reject,\ntransfer (requires targetUserId), revoke (subject to RuntimePolicy), and\ncomment (does not change status). Concurrent writes are serialized with a\ndatabase row lock. This endpoint does not accept a client version field.\n409 responses indicate a conflicting current state after serialization,\nsuch as an invalid status transition or a closed revoke window.\n",
+        "description": "Unified action dispatch endpoint. Accepted actions: approve, reject,\ntransfer (requires targetUserId), revoke (subject to RuntimePolicy),\ncomment (does not change status), and return (requires targetNodeKey).\nConcurrent writes are serialized with a database row lock. This endpoint\ndoes not accept a client version field. 409 responses indicate a\nconflicting current state after serialization, such as an invalid status\ntransition or a closed revoke window. The Wave 2 Pack 1A executor\nfollow-up will activate return semantics for template-runtime approvals.\n",
         "security": [
           {
             "bearerAuth": []
@@ -5173,7 +5194,7 @@
         ],
         "deprecated": true,
         "summary": "Return instance with optimistic locking",
-        "description": "Deprecated. Use POST /api/approvals/{id}/actions with {\"action\":\"reject\"} instead.\n",
+        "description": "Deprecated. Use POST /api/approvals/{id}/actions with\n{\"action\":\"return\",\"targetNodeKey\":\"...\"} instead.\n",
         "security": [
           {
             "bearerAuth": []

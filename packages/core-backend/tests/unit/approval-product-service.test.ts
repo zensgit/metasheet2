@@ -193,4 +193,80 @@ describe('ApprovalProductService', () => {
 
     expect(pgState.client.release).toHaveBeenCalledTimes(1)
   })
+
+  it('rejects return actions until pack 1A runtime semantics are implemented', async () => {
+    const runtimeGraph = buildRuntimeGraph()
+
+    pgState.client.query.mockImplementation(async (sql: string) => {
+      const statement = normalize(sql)
+      if (statement === 'BEGIN' || statement === 'ROLLBACK') {
+        return { rows: [], rowCount: 0 }
+      }
+      if (statement.startsWith('SELECT * FROM approval_instances WHERE id = $1')) {
+        return {
+          rows: [{
+            id: 'apr-1',
+            status: 'pending',
+            version: 4,
+            source_system: 'platform',
+            external_approval_id: null,
+            workflow_key: 'approval-product-template',
+            business_key: 'travel-request',
+            title: 'Travel Request',
+            requester_snapshot: { id: 'user-1', name: 'Owner One' },
+            subject_snapshot: {},
+            policy_snapshot: { allowRevoke: true },
+            metadata: {},
+            current_step: 1,
+            total_steps: 1,
+            source_updated_at: null,
+            last_synced_at: null,
+            sync_status: 'ok',
+            sync_error: null,
+            template_id: 'tpl-1',
+            template_version_id: 'ver-1',
+            published_definition_id: 'pub-1',
+            request_no: 'AP-100001',
+            form_snapshot: {},
+            current_node_key: 'approval_1',
+            created_at: new Date('2026-04-11T00:00:00.000Z'),
+            updated_at: new Date('2026-04-11T00:05:00.000Z'),
+          }],
+          rowCount: 1,
+        }
+      }
+      if (statement.startsWith('SELECT * FROM approval_published_definitions WHERE id = $1')) {
+        return {
+          rows: [{
+            id: 'pub-1',
+            template_id: 'tpl-1',
+            template_version_id: 'ver-1',
+            runtime_graph: runtimeGraph,
+            is_active: true,
+            published_at: new Date('2026-04-11T00:00:00.000Z'),
+          }],
+          rowCount: 1,
+        }
+      }
+      if (statement.startsWith('SELECT * FROM approval_assignments WHERE instance_id = $1')) {
+        return { rows: [], rowCount: 0 }
+      }
+      throw new Error(`Unhandled query: ${statement}`)
+    })
+
+    const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+    const service = new ApprovalProductService()
+
+    await expect(service.dispatchAction(
+      'apr-1',
+      { action: 'return', targetNodeKey: 'approval_1' },
+      { userId: 'user-1' },
+    )).rejects.toMatchObject({
+      message: 'Return action is not implemented yet',
+      statusCode: 409,
+      code: 'APPROVAL_ACTION_NOT_SUPPORTED',
+    })
+
+    expect(pgState.client.release).toHaveBeenCalledTimes(1)
+  })
 })

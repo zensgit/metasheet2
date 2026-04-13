@@ -528,17 +528,18 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
       }
 
       const action = req.body?.action
-      if (!['approve', 'reject', 'transfer', 'revoke', 'comment'].includes(String(action))) {
+      if (!['approve', 'reject', 'transfer', 'revoke', 'comment', 'return'].includes(String(action))) {
         return res.status(400).json({
           error: {
             code: 'VALIDATION_ERROR',
-            message: 'action must be approve, reject, transfer, revoke, or comment',
+            message: 'action must be approve, reject, transfer, revoke, comment, or return',
           },
         })
       }
 
       const comment = typeof req.body?.comment === 'string' ? req.body.comment : undefined
       const targetUserId = typeof req.body?.targetUserId === 'string' ? req.body.targetUserId.trim() : undefined
+      const targetNodeKey = typeof req.body?.targetNodeKey === 'string' ? req.body.targetNodeKey.trim() : undefined
       const actor = {
         userId,
         userName: resolveApprovalActorName(req, userId),
@@ -590,6 +591,7 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
               action,
               comment,
               targetUserId,
+              targetNodeKey,
             },
             actor,
           )

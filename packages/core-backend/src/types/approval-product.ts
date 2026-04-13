@@ -9,7 +9,9 @@ export type ApprovalProductPermission = typeof APPROVAL_PRODUCT_PERMISSIONS[numb
 
 export type ApprovalNodeType = 'start' | 'approval' | 'cc' | 'condition' | 'end'
 export type ApprovalAssigneeType = 'user' | 'role'
-export type ApprovalActionType = 'approve' | 'reject' | 'transfer' | 'revoke' | 'comment'
+export type ApprovalMode = 'single' | 'all' | 'any'
+export type EmptyAssigneePolicy = 'error' | 'auto-approve'
+export type ApprovalActionType = 'approve' | 'reject' | 'transfer' | 'revoke' | 'comment' | 'return'
 export type ApprovalStatus = 'draft' | 'pending' | 'approved' | 'rejected' | 'revoked' | 'cancelled'
 export type ApprovalTemplateStatus = 'draft' | 'published' | 'archived'
 export type FormFieldType =
@@ -33,6 +35,8 @@ export interface ApprovalNode {
 export interface ApprovalNodeConfig {
   assigneeType: ApprovalAssigneeType
   assigneeIds: string[]
+  approvalMode?: ApprovalMode
+  emptyAssigneePolicy?: EmptyAssigneePolicy
 }
 
 export interface ConditionNodeConfig {
@@ -170,6 +174,7 @@ export interface ApprovalActionRequest {
   action: ApprovalActionType
   comment?: string
   targetUserId?: string
+  targetNodeKey?: string
 }
 
 export interface ApprovalTemplateListItemDTO {
