@@ -19,6 +19,9 @@ import {
   mockPublishedTemplate,
   mockDraftTemplate,
   mockHistoryItems,
+  mockAutoApproveHistory,
+  mockReturnHistory,
+  mockTemplateWithModes,
   mockPermissions,
   CURRENT_USER_ID,
 } from './helpers/approval-test-fixtures'
@@ -976,6 +979,154 @@ describe('Approval E2E Permissions', () => {
 
       const empty = container!.querySelector('[data-el-empty]')
       expect(empty?.textContent).toContain('未找到模板')
+    })
+  })
+
+  // =========================================================================
+  // 6. Return action affordance
+  // =========================================================================
+  describe('Return action affordance', () => {
+    it('shows return button when history has visited approval nodes', async () => {
+      setMockPermissions(['approvals:read', 'approvals:act'])
+      routeParams = { id: 'apv_pending_1' }
+      mockActiveApproval.value = mockPendingApproval({ currentNodeKey: 'approval_2' })
+      mockHistoryRef.value = mockReturnHistory()
+      await mountDetailView()
+
+      const buttons = Array.from(container!.querySelectorAll('.approval-detail__actions button'))
+      const labels = buttons.map((b) => b.textContent?.trim())
+      expect(labels).toContain('退回')
+    })
+
+    it('does not show return button when no returnable nodes exist', async () => {
+      setMockPermissions(['approvals:read', 'approvals:act'])
+      routeParams = { id: 'apv_pending_1' }
+      // currentNodeKey is approval_1 and history only has 'start' (excluded) and approval_1 (current, excluded)
+      mockActiveApproval.value = mockPendingApproval({ currentNodeKey: 'approval_1' })
+      mockHistoryRef.value = [
+        {
+          id: 'hist_1', action: 'created', actorId: 'user_1', actorName: '张三',
+          comment: null, fromStatus: null, toStatus: 'pending',
+          occurredAt: '2026-04-09T08:00:00Z', metadata: { nodeKey: 'start' },
+        },
+      ]
+      await mountDetailView()
+
+      const buttons = Array.from(container!.querySelectorAll('.approval-detail__actions button'))
+      const labels = buttons.map((b) => b.textContent?.trim())
+      expect(labels).not.toContain('退回')
+    })
+
+    it('clicking return opens dialog and submits with targetNodeKey', async () => {
+      setMockPermissions(['approvals:read', 'approvals:act'])
+      routeParams = { id: 'apv_pending_1' }
+      mockActiveApproval.value = mockPendingApproval({ currentNodeKey: 'approval_2' })
+      mockHistoryRef.value = mockReturnHistory()
+      executeActionSpy.mockResolvedValue(mockPendingApproval())
+      await mountDetailView()
+
+      const returnBtn = Array.from(container!.querySelectorAll('.approval-detail__actions button'))
+        .find((b) => b.textContent?.trim() === '退回')
+      returnBtn!.click()
+      await flushUi()
+
+      const dialog = container!.querySelector('[data-dialog-visible="true"][data-el-dialog="退回审批"]')
+      expect(dialog).toBeTruthy()
+
+      // Select a target node
+      const select = dialog!.querySelector('[data-el-select]') as HTMLSelectElement
+      select.value = 'approval_1'
+      select.dispatchEvent(new Event('change', { bubbles: true }))
+      await flushUi()
+
+      const confirmBtn = Array.from(dialog!.querySelectorAll('button'))
+        .find((b) => b.textContent?.includes('确认退回'))
+      confirmBtn!.click()
+      await flushUi()
+
+      expect(executeActionSpy).toHaveBeenCalledWith('apv_pending_1', expect.objectContaining({
+        action: 'return',
+        targetNodeKey: 'approval_1',
+      }))
+    })
+  })
+
+  // =========================================================================
+  // 7. Template approvalMode / emptyAssigneePolicy display
+  // =========================================================================
+  describe('Template approvalMode and emptyAssigneePolicy display', () => {
+    it('renders approvalMode tags on approval nodes', async () => {
+      setMockPermissions(['approval-templates:manage'])
+      routeParams = { id: 'tpl_modes' }
+      mockActiveTemplate.value = mockTemplateWithModes()
+      await mountTemplateDetailView()
+
+      const nodes = queryTemplateGraphNodes(container)
+      expect(nodes.length).toBe(4) // start + 2 approval + end
+
+      const textContent = container!.textContent ?? ''
+      expect(textContent).toContain('会签')
+      expect(textContent).toContain('或签')
+    })
+
+    it('renders emptyAssigneePolicy tags on approval nodes', async () => {
+      setMockPermissions(['approval-templates:manage'])
+      routeParams = { id: 'tpl_modes' }
+      mockActiveTemplate.value = mockTemplateWithModes()
+      await mountTemplateDetailView()
+
+      const textContent = container!.textContent ?? ''
+      expect(textContent).toContain('无人时报错')
+      expect(textContent).toContain('无人时自动通过')
+    })
+  })
+
+  // =========================================================================
+  // 8. Auto-approve timeline display
+  // =========================================================================
+  describe('Auto-approve timeline display', () => {
+    it('renders auto-approved history item with system label', async () => {
+      setMockPermissions(['approvals:read'])
+      routeParams = { id: 'apv_approved_1' }
+      mockActiveApproval.value = mockApprovedApproval()
+      mockHistoryRef.value = mockAutoApproveHistory()
+      await mountDetailView()
+
+      const items = queryHistoryItems(container)
+      expect(items.length).toBe(2)
+
+      const textContent = container!.textContent ?? ''
+      expect(textContent).toContain('系统自动审批')
+      expect(textContent).toContain('自动通过')
+      expect(textContent).toContain('自动审批')
+    })
+
+    it('renders return event in timeline with metadata', async () => {
+      setMockPermissions(['approvals:read'])
+      routeParams = { id: 'apv_pending_1' }
+      mockActiveApproval.value = mockPendingApproval({ currentNodeKey: 'approval_1' })
+      mockHistoryRef.value = mockReturnHistory()
+      await mountDetailView()
+
+      const items = queryHistoryItems(container)
+      expect(items.length).toBe(3)
+
+      const textContent = container!.textContent ?? ''
+      expect(textContent).toContain('退回')
+      expect(textContent).toContain('退回至: approval_1')
+      expect(textContent).toContain('金额有误，退回修改')
+    })
+
+    it('renders aggregateComplete and approvalMode metadata in timeline', async () => {
+      setMockPermissions(['approvals:read'])
+      routeParams = { id: 'apv_pending_1' }
+      mockActiveApproval.value = mockPendingApproval({ currentNodeKey: 'approval_2' })
+      mockHistoryRef.value = mockReturnHistory()
+      await mountDetailView()
+
+      const textContent = container!.textContent ?? ''
+      expect(textContent).toContain('会签完成')
+      expect(textContent).toContain('审批模式: 会签')
     })
   })
 })
