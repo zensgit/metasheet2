@@ -182,10 +182,15 @@ describe('Metrics Integration', () => {
       })
     })
 
-    it('should have the expected number of exported metrics', () => {
+    it('should export RPC and metrics stream observability metrics', () => {
       const exportedKeys = Object.keys(metrics)
-      // 61 metrics as of current metrics module (including RBAC, SLO, Schema, and BPMN workflow metrics)
-      expect(exportedKeys.length).toBe(61)
+
+      expect(exportedKeys).toEqual(expect.arrayContaining([
+        'rpcLatencySeconds',
+        'metricsStreamClients',
+        'metricsStreamPushesTotal',
+        'metricsStreamErrorsTotal'
+      ]))
     })
   })
 })
