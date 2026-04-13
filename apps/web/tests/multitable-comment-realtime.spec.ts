@@ -24,6 +24,7 @@ vi.mock('../src/composables/useAuth', () => ({
 }))
 
 vi.mock('../src/utils/api', () => ({
+  apiFetch: vi.fn(),
   getApiBase: () => '',
 }))
 
@@ -82,8 +83,8 @@ describe('useMultitableCommentRealtime', () => {
     handlers.get('comment:created')?.({
       comment: {
         id: 'c1',
-        spreadsheetId: 'sheet_ops',
-        rowId: 'rec_1',
+        containerId: 'sheet_ops',
+        targetId: 'rec_1',
         authorId: 'user_other',
         content: 'hello',
         resolved: false,
@@ -96,8 +97,8 @@ describe('useMultitableCommentRealtime', () => {
     handlers.get('comment:mention')?.({
       comment: {
         id: 'c2',
-        spreadsheetId: 'sheet_ops',
-        rowId: 'rec_1',
+        containerId: 'sheet_ops',
+        targetId: 'rec_1',
         authorId: 'user_other',
         content: 'ping',
         resolved: false,
@@ -108,15 +109,15 @@ describe('useMultitableCommentRealtime', () => {
     expect(reloadSelectedRecordComments).toHaveBeenCalledTimes(2)
     expect(refreshUnreadCount).toHaveBeenCalledTimes(2)
 
-    handlers.get('comment:resolved')?.({ commentId: 'c2', rowId: 'rec_1', authorId: 'user_other' })
+    handlers.get('comment:resolved')?.({ commentId: 'c2', targetId: 'rec_1', authorId: 'user_other' })
     await flushUi(2)
     expect(reloadSelectedRecordComments).toHaveBeenCalledTimes(3)
 
     handlers.get('comment:updated')?.({
       comment: {
         id: 'c3',
-        spreadsheetId: 'sheet_ops',
-        rowId: 'rec_1',
+        containerId: 'sheet_ops',
+        targetId: 'rec_1',
         authorId: 'user_other',
         content: 'edited',
         resolved: false,
@@ -129,7 +130,7 @@ describe('useMultitableCommentRealtime', () => {
 
     handlers.get('comment:deleted')?.({
       commentId: 'c3',
-      rowId: 'rec_1',
+      targetId: 'rec_1',
       authorId: 'user_other',
     })
     await flushUi(2)

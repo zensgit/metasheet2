@@ -1,5 +1,12 @@
 import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest'
-import { MultitableApiClient, parseRetryAfterMs } from '../src/multitable/api/client'
+import {
+  MultitableApiClient,
+  normalizeMultitableComment,
+  normalizeMultitableCommentFieldId,
+  normalizeMultitableCommentIdentity,
+  normalizeMultitableCommentMentions,
+  parseRetryAfterMs,
+} from '../src/multitable/api/client'
 
 describe('MultitableApiClient', () => {
   beforeEach(() => {
@@ -78,6 +85,43 @@ describe('MultitableApiClient', () => {
     expect(fetchFn).toHaveBeenCalledWith('/api/comments/c1', expect.objectContaining({ method: 'DELETE' }))
   })
 
+  it('canonicalizes comment identity, field ids, and mentions', () => {
+    expect(normalizeMultitableCommentIdentity({
+      spreadsheetId: 'sheet_1',
+      rowId: 'row_1',
+    })).toEqual({
+      containerId: 'sheet_1',
+      targetId: 'row_1',
+      spreadsheetId: 'sheet_1',
+      rowId: 'row_1',
+    })
+    expect(normalizeMultitableCommentFieldId({
+      targetFieldId: 'fld_notes',
+    })).toBe('fld_notes')
+    expect(normalizeMultitableCommentMentions({
+      mentions: ['user_1', ' ', 7, 'user_2'],
+    })).toEqual(['user_1', 'user_2'])
+    expect(normalizeMultitableComment({
+      id: 'c1',
+      spreadsheetId: 'sheet_1',
+      rowId: 'row_1',
+      targetFieldId: 'fld_notes',
+      mentions: ['user_1', 'user_1', 'user_2'],
+      authorId: 'user_2',
+      content: 'hello',
+      resolved: false,
+      createdAt: '2026-03-25T12:00:00.000Z',
+    })).toMatchObject({
+      containerId: 'sheet_1',
+      targetId: 'row_1',
+      spreadsheetId: 'sheet_1',
+      rowId: 'row_1',
+      fieldId: 'fld_notes',
+      targetFieldId: 'fld_notes',
+      mentions: ['user_1', 'user_1', 'user_2'],
+    })
+  })
+
   it('loads inbox and unread counters from comment endpoints', async () => {
     const fetchFn = vi.fn(async (input: string) => {
       if (input.startsWith('/api/comments/inbox')) {
@@ -125,13 +169,13 @@ describe('MultitableApiClient', () => {
         containerId: 'sheet_1',
         targetId: 'row_1',
         fieldId: 'field_1',
-        targetFieldId: null,
+        targetFieldId: 'field_1',
         baseId: 'base_1',
         sheetId: 'sheet_1',
         viewId: 'view_1',
         recordId: 'row_1',
-        spreadsheetId: undefined,
-        rowId: undefined,
+        spreadsheetId: 'sheet_1',
+        rowId: 'row_1',
         parentId: undefined,
         mentions: ['user_2'],
         authorId: 'user_1',

@@ -2,11 +2,13 @@ import { computed, ref } from 'vue'
 import { useAuth } from '../../composables/useAuth'
 import type { CommentMentionSummary } from '../types'
 import { MultitableApiClient, multitableClient } from '../api/client'
-import type {
-  MultitableCommentCreatedEvent,
-  MultitableCommentDeletedEvent,
-  MultitableCommentUpdatedEvent,
-  MultitableCommentResolvedEvent,
+import {
+  normalizeMultitableCommentMutationEvent,
+  normalizeMultitableCommentRealtimeEvent,
+  type MultitableCommentCreatedEvent,
+  type MultitableCommentDeletedEvent,
+  type MultitableCommentUpdatedEvent,
+  type MultitableCommentResolvedEvent,
 } from '../realtime/comments-realtime'
 
 export function useMultitableCommentInboxSummary(opts?: {
@@ -106,72 +108,31 @@ export function useMultitableCommentInboxSummary(opts?: {
     lastMarkedReadAt = null
   }
 
-  function resolveEventSpreadsheetId(event: MultitableCommentCreatedEvent | MultitableCommentResolvedEvent): string {
-    if (typeof event.spreadsheetId === 'string' && event.spreadsheetId.trim()) return event.spreadsheetId
-    if ('comment' in event) {
-      const containerId = event.comment?.containerId
-      if (typeof containerId === 'string' && containerId.trim()) return containerId
-      const spreadsheetId = event.comment?.spreadsheetId
-      if (typeof spreadsheetId === 'string' && spreadsheetId.trim()) return spreadsheetId
-    }
-    return ''
-  }
-
-  function resolveEventRowId(event: MultitableCommentCreatedEvent | MultitableCommentResolvedEvent): string {
-    if ('rowId' in event && typeof event.rowId === 'string' && event.rowId.trim()) return event.rowId
-    if ('comment' in event) {
-      const targetId = event.comment?.targetId
-      if (typeof targetId === 'string' && targetId.trim()) return targetId
-      const rowId = event.comment?.rowId
-      if (typeof rowId === 'string' && rowId.trim()) return rowId
-    }
-    return ''
-  }
-
-  function resolveEventFieldId(event: MultitableCommentCreatedEvent): string | null {
-    const fieldId = event.comment?.targetFieldId ?? event.comment?.fieldId
-    return typeof fieldId === 'string' && fieldId.trim().length > 0 ? fieldId : null
-  }
-
-  function normalizeMentions(event: MultitableCommentCreatedEvent): string[] {
-    if (!Array.isArray(event.comment?.mentions)) return []
-    return event.comment.mentions.filter((mention): mention is string => typeof mention === 'string' && mention.trim().length > 0)
-  }
-
   function mergeMentionedFieldIds(existingFieldIds: string[], fieldId: string | null): string[] {
     if (!fieldId || existingFieldIds.includes(fieldId)) return existingFieldIds
     return [...existingFieldIds, fieldId]
-  }
-
-  function resolveEventCreatedAt(event: MultitableCommentCreatedEvent): number | null {
-    const createdAt = event.comment?.createdAt
-    if (typeof createdAt !== 'string' || !createdAt.trim()) return null
-    const timestamp = Date.parse(createdAt)
-    return Number.isNaN(timestamp) ? null : timestamp
   }
 
   async function reconcileRealtimeCommentCreated(event: MultitableCommentCreatedEvent) {
     const currentSummary = summary.value
     if (!currentSummary) return
 
-    const eventSpreadsheetId = resolveEventSpreadsheetId(event)
-    if (!eventSpreadsheetId || eventSpreadsheetId !== currentSummary.spreadsheetId) return
-
-    const rowId = resolveEventRowId(event)
-    if (!rowId) return
+    const normalizedEvent = normalizeMultitableCommentRealtimeEvent(event)
+    if (!normalizedEvent || normalizedEvent.spreadsheetId !== currentSummary.spreadsheetId) return
+    const { comment } = normalizedEvent
 
     const currentUserId = await resolveCurrentUserId()
     if (!currentUserId) return
-    if (!normalizeMentions(event).includes(currentUserId)) return
+    if (!comment.mentions.includes(currentUserId)) return
 
     const latestSummary = summary.value
-    if (!latestSummary || latestSummary.spreadsheetId !== eventSpreadsheetId) return
+    if (!latestSummary || latestSummary.spreadsheetId !== normalizedEvent.spreadsheetId) return
 
-    const createdAt = resolveEventCreatedAt(event)
+    const createdAt = comment.createdAt ? Date.parse(comment.createdAt) : null
     if (lastMarkedReadAt !== null && createdAt !== null && createdAt <= lastMarkedReadAt) return
 
-    const fieldId = resolveEventFieldId(event)
-    const existingItem = latestSummary.items.find((item) => item.rowId === rowId)
+    const fieldId = comment.fieldId ?? null
+    const existingItem = latestSummary.items.find((item) => item.rowId === comment.targetId)
 
     if (existingItem) {
       summary.value = {
@@ -182,7 +143,7 @@ export function useMultitableCommentInboxSummary(opts?: {
           ? latestSummary.unreadRecordCount + 1
           : latestSummary.unreadRecordCount,
         items: latestSummary.items.map((item) =>
-          item.rowId === rowId
+          item.rowId === comment.targetId
             ? {
                 ...item,
                 mentionedCount: item.mentionedCount + 1,
@@ -203,7 +164,7 @@ export function useMultitableCommentInboxSummary(opts?: {
       unreadRecordCount: latestSummary.unreadRecordCount + 1,
       items: [
         ...latestSummary.items,
-        { rowId, mentionedCount: 1, unreadCount: 1, mentionedFieldIds: fieldId ? [fieldId] : [] },
+        { rowId: comment.targetId, mentionedCount: 1, unreadCount: 1, mentionedFieldIds: fieldId ? [fieldId] : [] },
       ],
     }
   }
@@ -216,13 +177,10 @@ export function useMultitableCommentInboxSummary(opts?: {
     const currentSummary = summary.value
     if (!currentSummary) return
 
-    const eventSpreadsheetId = resolveEventSpreadsheetId(event)
-    if (!eventSpreadsheetId || eventSpreadsheetId !== currentSummary.spreadsheetId) return
+    const normalizedEvent = normalizeMultitableCommentMutationEvent(event)
+    if (!normalizedEvent || normalizedEvent.spreadsheetId !== currentSummary.spreadsheetId) return
 
-    const rowId = resolveEventRowId(event)
-    if (!rowId) return
-
-    const existingItem = currentSummary.items.find((item) => item.rowId === rowId)
+    const existingItem = currentSummary.items.find((item) => item.rowId === normalizedEvent.rowId)
     if (!existingItem) return
 
     void queueSummaryRefresh(currentSummary.spreadsheetId)
@@ -231,16 +189,16 @@ export function useMultitableCommentInboxSummary(opts?: {
   function onRealtimeCommentUpdated(event: MultitableCommentUpdatedEvent) {
     const currentSummary = summary.value
     if (!currentSummary) return
-    const eventSpreadsheetId = resolveEventSpreadsheetId(event)
-    if (!eventSpreadsheetId || eventSpreadsheetId !== currentSummary.spreadsheetId) return
+    const normalizedEvent = normalizeMultitableCommentRealtimeEvent(event)
+    if (!normalizedEvent || normalizedEvent.spreadsheetId !== currentSummary.spreadsheetId) return
     void queueSummaryRefresh(currentSummary.spreadsheetId)
   }
 
   function onRealtimeCommentDeleted(event: MultitableCommentDeletedEvent) {
     const currentSummary = summary.value
     if (!currentSummary) return
-    const eventSpreadsheetId = resolveEventSpreadsheetId(event)
-    if (!eventSpreadsheetId || eventSpreadsheetId !== currentSummary.spreadsheetId) return
+    const normalizedEvent = normalizeMultitableCommentMutationEvent(event)
+    if (!normalizedEvent || normalizedEvent.spreadsheetId !== currentSummary.spreadsheetId) return
     void queueSummaryRefresh(currentSummary.spreadsheetId)
   }
 

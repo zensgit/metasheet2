@@ -22,8 +22,9 @@ describe('useMultitableCommentInbox', () => {
         data: {
           items: [{
             id: 'c1',
-            spreadsheetId: 'sheet_ops',
-            rowId: 'rec_1',
+            containerId: 'sheet_ops',
+            targetId: 'rec_1',
+            targetFieldId: 'fld_notes',
             authorId: 'user_2',
             content: 'hello',
             resolved: false,
@@ -49,6 +50,8 @@ describe('useMultitableCommentInbox', () => {
 
     expect(state.items.value).toHaveLength(1)
     expect(state.items.value[0].containerId).toBe('sheet_ops')
+    expect(state.items.value[0].targetId).toBe('rec_1')
+    expect(state.items.value[0].targetFieldId).toBe('fld_notes')
     expect(state.unreadCount.value).toBe(1)
   })
 

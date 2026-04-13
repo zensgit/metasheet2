@@ -1,7 +1,9 @@
 import { onScopeDispose, ref } from 'vue'
-import type { MultitableComment, MultitableCommentPresenceSummary } from '../types'
-import { MultitableApiClient, multitableClient, normalizeMultitableComment } from '../api/client'
+import type { MultitableCommentPresenceSummary } from '../types'
+import { MultitableApiClient, multitableClient } from '../api/client'
 import {
+  normalizeMultitableCommentMutationEvent,
+  normalizeMultitableCommentRealtimeEvent,
   subscribeToMultitableCommentsRealtime,
   type MultitableCommentCreatedEvent,
   type MultitableCommentDeletedEvent,
@@ -125,10 +127,9 @@ export function useMultitableCommentPresence(client?: MultitableApiClient, optio
   }
 
   function handleRealtimeCreated(payload: MultitableCommentCreatedEvent) {
-    const comment = payload.comment && typeof payload.comment === 'object'
-      ? normalizeMultitableComment(payload.comment as Partial<MultitableComment>)
-      : null
-    if (!comment || !activeScope || comment.containerId !== activeScope.containerId || !activeTargetIdSet.has(comment.targetId)) return
+    const normalizedEvent = normalizeMultitableCommentRealtimeEvent(payload)
+    if (!normalizedEvent || !activeScope || normalizedEvent.spreadsheetId !== activeScope.containerId || !activeTargetIdSet.has(normalizedEvent.comment.targetId)) return
+    const comment = normalizedEvent.comment
 
     const current = presenceByRecordId.value[comment.targetId] ?? buildEmptyPresenceSummary(comment.containerId, comment.targetId)
     const nextFieldCounts = { ...current.fieldCounts }
@@ -147,29 +148,27 @@ export function useMultitableCommentPresence(client?: MultitableApiClient, optio
   }
 
   function handleRealtimeResolved(payload: MultitableCommentResolvedEvent) {
-    const spreadsheetId = typeof payload.spreadsheetId === 'string' ? payload.spreadsheetId : null
-    const rowId = typeof payload.rowId === 'string' ? payload.rowId : null
-    const fieldId = typeof payload.fieldId === 'string' ? payload.fieldId : null
-    if (!activeScope || !rowId) return
-    if (spreadsheetId && spreadsheetId !== activeScope.containerId) return
-    if (!activeTargetIdSet.has(rowId)) return
+    const normalizedEvent = normalizeMultitableCommentMutationEvent(payload)
+    if (!normalizedEvent || !activeScope) return
+    if (normalizedEvent.spreadsheetId !== activeScope.containerId) return
+    if (!activeTargetIdSet.has(normalizedEvent.rowId)) return
 
-    const current = presenceByRecordId.value[rowId]
+    const current = presenceByRecordId.value[normalizedEvent.rowId]
     if (!current) return
 
     const nextFieldCounts = { ...current.fieldCounts }
-    if (fieldId && nextFieldCounts[fieldId]) {
-      const nextCount = nextFieldCounts[fieldId] - 1
-      if (nextCount > 0) nextFieldCounts[fieldId] = nextCount
-      else delete nextFieldCounts[fieldId]
+    if (normalizedEvent.fieldId && nextFieldCounts[normalizedEvent.fieldId]) {
+      const nextCount = nextFieldCounts[normalizedEvent.fieldId] - 1
+      if (nextCount > 0) nextFieldCounts[normalizedEvent.fieldId] = nextCount
+      else delete nextFieldCounts[normalizedEvent.fieldId]
     }
     const unresolvedCount = Math.max(0, current.unresolvedCount - 1)
     const nextPresence = { ...presenceByRecordId.value }
 
     if (unresolvedCount === 0) {
-      delete nextPresence[rowId]
+      delete nextPresence[normalizedEvent.rowId]
     } else {
-      nextPresence[rowId] = {
+      nextPresence[normalizedEvent.rowId] = {
         ...current,
         unresolvedCount,
         fieldCounts: nextFieldCounts,
@@ -181,19 +180,16 @@ export function useMultitableCommentPresence(client?: MultitableApiClient, optio
   }
 
   function handleRealtimeUpdated(payload: MultitableCommentUpdatedEvent) {
-    const comment = payload.comment && typeof payload.comment === 'object'
-      ? normalizeMultitableComment(payload.comment as Partial<MultitableComment>)
-      : null
-    if (!comment || !activeScope || comment.containerId !== activeScope.containerId || !activeTargetIdSet.has(comment.targetId)) return
+    const normalizedEvent = normalizeMultitableCommentRealtimeEvent(payload)
+    if (!normalizedEvent || !activeScope || normalizedEvent.spreadsheetId !== activeScope.containerId || !activeTargetIdSet.has(normalizedEvent.comment.targetId)) return
     void refreshActivePresence()
   }
 
   function handleRealtimeDeleted(payload: MultitableCommentDeletedEvent) {
-    const spreadsheetId = typeof payload.spreadsheetId === 'string' ? payload.spreadsheetId : null
-    const rowId = typeof payload.rowId === 'string' ? payload.rowId : null
-    if (!activeScope || !rowId) return
-    if (spreadsheetId && spreadsheetId !== activeScope.containerId) return
-    if (!activeTargetIdSet.has(rowId)) return
+    const normalizedEvent = normalizeMultitableCommentMutationEvent(payload)
+    if (!normalizedEvent || !activeScope) return
+    if (normalizedEvent.spreadsheetId !== activeScope.containerId) return
+    if (!activeTargetIdSet.has(normalizedEvent.rowId)) return
     void refreshActivePresence()
   }
 
