@@ -84,23 +84,23 @@ Passed:
 
 ```bash
 cd .worktrees/approval-pack1a-integration-20260413
+DATABASE_URL='postgresql://chouhua@127.0.0.1:5432/postgres' PGHOST=127.0.0.1 PGPORT=5432 PGDATABASE=postgres PGUSER=chouhua \
+pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run tests/integration/approval-pack1a-lifecycle.api.test.ts --reporter=dot
+
 pnpm --filter @metasheet/core-backend exec tsc --noEmit --pretty false
 ```
 
-Added but not executable on this machine:
+Observed result:
 
-```bash
-cd .worktrees/approval-pack1a-integration-20260413
-pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run tests/integration/approval-pack1a-lifecycle.api.test.ts --reporter=dot
-```
+- `approval-pack1a-lifecycle.api.test.ts`: `3 passed`
+- `tsc --noEmit --pretty false`: passed
 
-Local blocker:
+Local environment note:
 
-- the new machine does not have a reachable PostgreSQL runtime
-- `docker`, `psql`, `pg_ctl`, and `postgres` are all unavailable
-- vitest integration run fails before suite execution with:
-  - `connect ECONNREFUSED 127.0.0.1:5432`
-  - `connect ECONNREFUSED ::1:5432`
+- PostgreSQL was provisioned locally via Homebrew service `postgresql@15`
+- local connectivity was verified with `psql -h 127.0.0.1 -p 5432 -d postgres`
+- the target integration suite now runs against `postgresql://chouhua@127.0.0.1:5432/postgres`
+- server startup still logs degraded-mode warnings for unrelated BPMN / EventBus tables that are absent in this lightweight local DB, but the approval Pack 1A lifecycle suite passes
 
 ## Known Limits
 
@@ -110,9 +110,8 @@ Local blocker:
 
 ## Recommended Next Verification
 
-When PostgreSQL is available, rerun:
+Keep the local PostgreSQL service running for any additional approval integration work:
 
 ```bash
-cd .worktrees/approval-pack1a-integration-20260413
-pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run tests/integration/approval-pack1a-lifecycle.api.test.ts --reporter=dot
+/opt/homebrew/bin/brew services start postgresql@15
 ```
