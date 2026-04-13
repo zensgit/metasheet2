@@ -55,6 +55,8 @@ describe('PlatformAppInstanceRegistryService', () => {
   })
 
   it('gets a single app instance by workspace/app/key', async () => {
+    const createdAt = new Date('2026-04-13T00:00:00Z')
+    const updatedAt = new Date('2026-04-13T01:00:00Z')
     const record = await getPlatformAppInstance(
       async () => ({
         rows: [{
@@ -68,7 +70,9 @@ describe('PlatformAppInstanceRegistryService', () => {
           display_name: '',
           status: 'active',
           config_json: '{}',
-          metadata_json: '{}',
+          metadata_json: 'not-valid-json',
+          created_at: createdAt,
+          updated_at: updatedAt,
         }],
       }),
       {
@@ -79,6 +83,9 @@ describe('PlatformAppInstanceRegistryService', () => {
 
     expect(record?.workspaceId).toBe('tenant-a')
     expect(record?.appId).toBe('after-sales')
+    expect(record?.metadata).toEqual({})
+    expect(record?.createdAt).toBe(createdAt.toISOString())
+    expect(record?.updatedAt).toBe(updatedAt.toISOString())
   })
 
   it('lists instances and filters by app ids when provided', async () => {

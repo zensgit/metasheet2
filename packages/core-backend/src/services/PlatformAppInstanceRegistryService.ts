@@ -62,10 +62,21 @@ function normalizeStatus(value: unknown): PlatformAppInstanceRecord['status'] {
 
 function parseJsonObject(value: unknown): Record<string, unknown> {
   if (typeof value === 'string') {
-    const parsed = JSON.parse(value) as Record<string, unknown> | null
-    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {}
+    try {
+      const parsed = JSON.parse(value) as Record<string, unknown> | null
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {}
+    } catch {
+      return {}
+    }
   }
   return value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : {}
+}
+
+function optionalIsoString(value: unknown): string | undefined {
+  if (value instanceof Date) {
+    return value.toISOString()
+  }
+  return optionalString(value)
 }
 
 function mapRow(row: Record<string, unknown>): PlatformAppInstanceRecord {
@@ -81,8 +92,8 @@ function mapRow(row: Record<string, unknown>): PlatformAppInstanceRecord {
     status: normalizeStatus(row.status),
     config: parseJsonObject(row.config_json),
     metadata: parseJsonObject(row.metadata_json),
-    createdAt: optionalString(row.created_at),
-    updatedAt: optionalString(row.updated_at),
+    createdAt: optionalIsoString(row.created_at),
+    updatedAt: optionalIsoString(row.updated_at),
   }
 }
 
