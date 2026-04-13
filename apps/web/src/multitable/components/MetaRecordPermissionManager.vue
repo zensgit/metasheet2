@@ -1,0 +1,450 @@
+<template>
+  <div v-if="visible" class="meta-record-perm__overlay" @click.self="requestClose">
+    <div class="meta-record-perm">
+      <div class="meta-record-perm__header">
+        <div>
+          <h4 class="meta-record-perm__title">Record Permissions</h4>
+          <p class="meta-record-perm__subtitle">Manage who can access this record and at what level.</p>
+        </div>
+        <button class="meta-record-perm__close" type="button" @click="requestClose">&times;</button>
+      </div>
+
+      <div class="meta-record-perm__body">
+        <div v-if="error" class="meta-record-perm__error" role="alert">{{ error }}</div>
+        <div v-if="status" class="meta-record-perm__status" role="status">{{ status }}</div>
+
+        <!-- Current permissions -->
+        <section class="meta-record-perm__section">
+          <div class="meta-record-perm__section-header">
+            <strong>Current access</strong>
+          </div>
+          <div v-if="loading" class="meta-record-perm__empty">Loading permissions&#x2026;</div>
+          <div v-else-if="!entries.length" class="meta-record-perm__empty">No record-specific permissions yet.</div>
+          <template v-else>
+          <div
+            v-for="entry in entries"
+            :key="entry.id"
+            class="meta-record-perm__row"
+            :data-record-permission-entry="entry.id"
+          >
+            <div class="meta-record-perm__identity">
+              <strong>{{ entry.subjectId }}</strong>
+              <span>{{ entry.subjectType === 'role' ? 'Role' : 'User' }}</span>
+            </div>
+            <span class="meta-record-perm__badge" :data-access-level="entryDrafts[entry.id] ?? entry.accessLevel">
+              {{ accessLevelLabel(entryDrafts[entry.id] ?? entry.accessLevel) }}
+            </span>
+            <select
+              :value="entryDrafts[entry.id] ?? entry.accessLevel"
+              class="meta-record-perm__select"
+              :disabled="busyKey === entry.id"
+              @change="setEntryDraft(entry.id, $event)"
+            >
+              <option value="read">Read</option>
+              <option value="write">Write</option>
+              <option value="admin">Admin</option>
+            </select>
+            <button
+              class="meta-record-perm__action"
+              type="button"
+              :disabled="busyKey === entry.id || (entryDrafts[entry.id] ?? entry.accessLevel) === entry.accessLevel"
+              @click="saveEntry(entry)"
+            >
+              Save
+            </button>
+            <button
+              class="meta-record-perm__action meta-record-perm__action--danger"
+              type="button"
+              :disabled="busyKey === entry.id"
+              @click="removeEntry(entry)"
+            >
+              Remove
+            </button>
+          </div>
+          </template>
+        </section>
+
+        <!-- Add permission -->
+        <section class="meta-record-perm__section">
+          <div class="meta-record-perm__section-header">
+            <strong>Add permission</strong>
+          </div>
+          <div class="meta-record-perm__add-row" data-record-permission-add="true">
+            <select v-model="addSubjectType" class="meta-record-perm__select">
+              <option value="user">User</option>
+              <option value="role">Role</option>
+            </select>
+            <input
+              v-model="addSubjectId"
+              class="meta-record-perm__input"
+              type="text"
+              placeholder="Subject ID"
+              data-record-permission-subject-input="true"
+            />
+            <select v-model="addAccessLevel" class="meta-record-perm__select">
+              <option value="read">Read</option>
+              <option value="write">Write</option>
+              <option value="admin">Admin</option>
+            </select>
+            <button
+              class="meta-record-perm__action meta-record-perm__action--primary"
+              type="button"
+              :disabled="!addSubjectId.trim() || busyKey === 'add'"
+              @click="grantNew"
+            >
+              Grant
+            </button>
+          </div>
+        </section>
+      </div>
+    </div>
+  </div>
+</template>
+
+<script setup lang="ts">
+import { ref, watch } from 'vue'
+import type { MultitableApiClient } from '../api/client'
+import type { RecordPermissionEntry, RecordPermissionAccessLevel } from '../types'
+
+const props = defineProps<{
+  visible: boolean
+  sheetId: string
+  recordId: string
+  client: MultitableApiClient
+}>()
+
+const emit = defineEmits<{
+  (e: 'close'): void
+  (e: 'updated'): void
+}>()
+
+const entries = ref<RecordPermissionEntry[]>([])
+const loading = ref(false)
+const error = ref('')
+const busyKey = ref<string | null>(null)
+const status = ref('')
+const entryDrafts = ref<Record<string, RecordPermissionAccessLevel>>({})
+
+const addSubjectType = ref<'user' | 'role'>('user')
+const addSubjectId = ref('')
+const addAccessLevel = ref<RecordPermissionAccessLevel>('read')
+
+function accessLevelLabel(level: string): string {
+  if (level === 'read') return 'Read'
+  if (level === 'write') return 'Write'
+  if (level === 'admin') return 'Admin'
+  return level
+}
+
+function requestClose() {
+  emit('close')
+}
+
+function clearMessages() {
+  status.value = ''
+  error.value = ''
+}
+
+function setEntryDraft(entryId: string, event: Event) {
+  entryDrafts.value = {
+    ...entryDrafts.value,
+    [entryId]: (event.target as HTMLSelectElement).value as RecordPermissionAccessLevel,
+  }
+}
+
+function syncEntryDrafts() {
+  entryDrafts.value = Object.fromEntries(
+    entries.value.map((entry) => [entry.id, entry.accessLevel]),
+  )
+}
+
+async function loadPermissions() {
+  if (!props.sheetId || !props.recordId) {
+    entries.value = []
+    return
+  }
+  loading.value = true
+  clearMessages()
+  try {
+    entries.value = await props.client.listRecordPermissions(props.sheetId, props.recordId)
+    syncEntryDrafts()
+  } catch (cause: any) {
+    error.value = cause?.message ?? 'Failed to load record permissions'
+  } finally {
+    loading.value = false
+  }
+}
+
+async function saveEntry(entry: RecordPermissionEntry) {
+  const nextLevel = entryDrafts.value[entry.id] ?? entry.accessLevel
+  busyKey.value = entry.id
+  clearMessages()
+  try {
+    await props.client.updateRecordPermission(props.sheetId, props.recordId, entry.subjectType, entry.subjectId, nextLevel)
+    await loadPermissions()
+    status.value = 'Permission updated'
+    emit('updated')
+  } catch (cause: any) {
+    error.value = cause?.message ?? 'Failed to update permission'
+  } finally {
+    busyKey.value = null
+  }
+}
+
+async function removeEntry(entry: RecordPermissionEntry) {
+  busyKey.value = entry.id
+  clearMessages()
+  try {
+    await props.client.deleteRecordPermission(props.sheetId, props.recordId, entry.id)
+    entries.value = entries.value.filter((e) => e.id !== entry.id)
+    status.value = 'Permission removed'
+    emit('updated')
+  } catch (cause: any) {
+    error.value = cause?.message ?? 'Failed to remove permission'
+  } finally {
+    busyKey.value = null
+  }
+}
+
+async function grantNew() {
+  const subjectId = addSubjectId.value.trim()
+  if (!subjectId) return
+  busyKey.value = 'add'
+  clearMessages()
+  try {
+    await props.client.updateRecordPermission(props.sheetId, props.recordId, addSubjectType.value, subjectId, addAccessLevel.value)
+    await loadPermissions()
+    status.value = 'Permission granted'
+    addSubjectId.value = ''
+    addAccessLevel.value = 'read'
+    emit('updated')
+  } catch (cause: any) {
+    error.value = cause?.message ?? 'Failed to grant permission'
+  } finally {
+    busyKey.value = null
+  }
+}
+
+watch(
+  () => [props.visible, props.sheetId, props.recordId] as const,
+  ([visible, sheetId, recordId]) => {
+    if (!visible || !sheetId || !recordId) return
+    void loadPermissions()
+  },
+  { immediate: true },
+)
+</script>
+
+<style scoped>
+.meta-record-perm__overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.26);
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  z-index: 50;
+  padding: 48px 16px;
+}
+
+.meta-record-perm {
+  width: min(640px, 100%);
+  max-height: calc(100vh - 96px);
+  overflow: auto;
+  background: #fff;
+  border-radius: 12px;
+  box-shadow: 0 24px 64px rgba(15, 23, 42, 0.18);
+  border: 1px solid #dbe4f0;
+}
+
+.meta-record-perm__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 18px 20px 14px;
+  border-bottom: 1px solid #eef2f7;
+}
+
+.meta-record-perm__title {
+  margin: 0;
+  font-size: 18px;
+  color: #0f172a;
+}
+
+.meta-record-perm__subtitle {
+  margin: 6px 0 0;
+  font-size: 13px;
+  color: #64748b;
+}
+
+.meta-record-perm__close {
+  border: 0;
+  background: transparent;
+  font-size: 24px;
+  line-height: 1;
+  color: #64748b;
+  cursor: pointer;
+}
+
+.meta-record-perm__body {
+  padding: 18px 20px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.meta-record-perm__section {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.meta-record-perm__section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: #0f172a;
+}
+
+.meta-record-perm__row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 80px 120px auto auto;
+  gap: 10px;
+  align-items: center;
+  padding: 10px 12px;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  background: #f8fafc;
+}
+
+.meta-record-perm__add-row {
+  display: grid;
+  grid-template-columns: 100px minmax(0, 1fr) 120px auto;
+  gap: 10px;
+  align-items: center;
+  padding: 10px 12px;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  background: #f8fafc;
+}
+
+.meta-record-perm__identity {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.meta-record-perm__identity strong {
+  color: #0f172a;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.meta-record-perm__identity span {
+  color: #64748b;
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.meta-record-perm__badge {
+  display: inline-flex;
+  justify-content: center;
+  align-items: center;
+  padding: 4px 8px;
+  border-radius: 999px;
+  background: #e2e8f0;
+  color: #334155;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.meta-record-perm__badge[data-access-level='write'] {
+  background: #dcfce7;
+  color: #166534;
+}
+
+.meta-record-perm__badge[data-access-level='admin'] {
+  background: #dbeafe;
+  color: #1d4ed8;
+}
+
+.meta-record-perm__badge[data-access-level='read'] {
+  background: #e2e8f0;
+  color: #334155;
+}
+
+.meta-record-perm__select,
+.meta-record-perm__input {
+  width: 100%;
+  min-width: 0;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 13px;
+  background: #fff;
+}
+
+.meta-record-perm__action {
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  padding: 8px 12px;
+  background: #fff;
+  color: #0f172a;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.meta-record-perm__action:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.meta-record-perm__action--primary {
+  border-color: #2563eb;
+  background: #2563eb;
+  color: #fff;
+}
+
+.meta-record-perm__action--danger {
+  border-color: #ef4444;
+  color: #b91c1c;
+}
+
+.meta-record-perm__status,
+.meta-record-perm__error,
+.meta-record-perm__empty {
+  padding: 10px 12px;
+  border-radius: 10px;
+  font-size: 13px;
+}
+
+.meta-record-perm__status {
+  background: #ecfdf5;
+  color: #166534;
+}
+
+.meta-record-perm__error {
+  background: #fef2f2;
+  color: #b91c1c;
+}
+
+.meta-record-perm__empty {
+  background: #f8fafc;
+  color: #64748b;
+}
+
+@media (max-width: 640px) {
+  .meta-record-perm__row {
+    grid-template-columns: 1fr;
+  }
+
+  .meta-record-perm__add-row {
+    grid-template-columns: 1fr;
+  }
+}
+</style>

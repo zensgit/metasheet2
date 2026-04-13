@@ -510,3 +510,18 @@ export interface MetaTimelineViewConfig {
   labelFieldId?: string | null
   zoom?: 'day' | 'week' | 'month'
 }
+
+// --- Record-level permissions ---
+export type RecordPermissionAccessLevel = 'read' | 'write' | 'admin'
+export type RecordPermissionSubjectType = 'user' | 'role'
+
+export interface RecordPermissionEntry {
+  id: string
+  sheetId: string
+  recordId: string
+  subjectType: RecordPermissionSubjectType
+  subjectId: string
+  accessLevel: RecordPermissionAccessLevel
+  createdAt?: string
+  createdBy?: string
+}

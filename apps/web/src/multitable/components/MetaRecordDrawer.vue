@@ -19,6 +19,7 @@
           <MetaCommentActionChip label="Comments" :state="drawerCommentAffordance" />
         </button>
         <button v-if="canManageAutomation" class="meta-record-drawer__btn" title="Open workflow designer" @click="emit('open-automation')">&#x2699; Workflow</button>
+        <button v-if="canManageRecordPermissions" class="meta-record-drawer__btn" title="Record Permissions" @click="showRecordPermissions = true">&#x1F512; Permissions</button>
         <button v-if="resolvedCanDelete" class="meta-record-drawer__btn meta-record-drawer__btn--danger" @click="emit('delete')">Delete</button>
         <button class="meta-record-drawer__close" aria-label="Close record drawer" @click="emit('close')">&times;</button>
       </div>
@@ -119,6 +120,15 @@
       </div>
     </div>
     <div v-else class="meta-record-drawer__empty">No record selected</div>
+    <MetaRecordPermissionManager
+      v-if="canManageRecordPermissions && record && sheetId && apiClient"
+      :visible="showRecordPermissions"
+      :sheet-id="sheetId"
+      :record-id="record.id"
+      :client="apiClient"
+      @close="showRecordPermissions = false"
+      @updated="emit('navigate', record!.id)"
+    />
   </div>
 </template>
 
@@ -135,9 +145,11 @@ import type {
   MetaRecord,
   MetaRowActions,
 } from '../types'
+import type { MultitableApiClient } from '../api/client'
 import MetaAttachmentList from './MetaAttachmentList.vue'
 import MetaCommentActionChip from './MetaCommentActionChip.vue'
 import MetaCommentAffordance from './MetaCommentAffordance.vue'
+import MetaRecordPermissionManager from './MetaRecordPermissionManager.vue'
 import {
   resolveCommentAffordanceStateClass,
   resolveFieldCommentAffordance,
@@ -162,6 +174,9 @@ const props = withDefaults(defineProps<{
   recordIds?: string[]
   uploadFn?: MetaAttachmentUploadFn
   deleteAttachmentFn?: MetaAttachmentDeleteFn
+  canManageRecordPermissions?: boolean
+  sheetId?: string
+  apiClient?: MultitableApiClient
 }>(), {
   recordIds: () => [],
 })
@@ -176,6 +191,8 @@ const emit = defineEmits<{
   (e: 'open-link-picker', field: MetaField): void
   (e: 'navigate', recordId: string): void
 }>()
+
+const showRecordPermissions = ref(false)
 
 const attachmentActivity = ref<Record<string, 'uploading' | 'removing' | 'clearing'>>({})
 const attachmentErrors = ref<Record<string, string>>({})

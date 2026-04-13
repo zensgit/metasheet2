@@ -40,6 +40,7 @@ import type {
   MetaSheetPermissionEntry,
   MetaFieldPermissionEntry,
   MetaViewPermissionEntry,
+  RecordPermissionEntry,
 } from '../types'
 import { apiFetch } from '../../utils/api'
 
@@ -682,6 +683,39 @@ export class MultitableApiClient {
   async deleteAttachment(attachmentId: string): Promise<{ deleted: string }> {
     const res = await this.fetch(`/api/multitable/attachments/${attachmentId}`, { method: 'DELETE' })
     return parseJson(res)
+  }
+
+  // --- Record permissions ---
+  async listRecordPermissions(sheetId: string, recordId: string): Promise<RecordPermissionEntry[]> {
+    const res = await this.fetch(`/api/multitable/sheets/${encodeURIComponent(sheetId)}/records/${encodeURIComponent(recordId)}/permissions`)
+    const data = await parseJson<{ permissions?: RecordPermissionEntry[] }>(res)
+    return Array.isArray(data?.permissions) ? data.permissions : []
+  }
+
+  async updateRecordPermission(
+    sheetId: string,
+    recordId: string,
+    subjectType: string,
+    subjectId: string,
+    accessLevel: string,
+  ): Promise<void> {
+    const res = await this.fetch(
+      `/api/multitable/sheets/${encodeURIComponent(sheetId)}/records/${encodeURIComponent(recordId)}/permissions`,
+      {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ subjectType, subjectId, accessLevel }),
+      },
+    )
+    await parseJson(res)
+  }
+
+  async deleteRecordPermission(sheetId: string, recordId: string, permissionId: string): Promise<void> {
+    const res = await this.fetch(
+      `/api/multitable/sheets/${encodeURIComponent(sheetId)}/records/${encodeURIComponent(recordId)}/permissions/${encodeURIComponent(permissionId)}`,
+      { method: 'DELETE' },
+    )
+    await parseJson(res)
   }
 
   // --- Comments (uses /api/comments) ---
