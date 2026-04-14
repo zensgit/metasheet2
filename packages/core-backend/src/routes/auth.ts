@@ -14,6 +14,7 @@ import {
   buildAuthUrl,
   DingTalkLoginPolicyError,
   exchangeCodeForUser,
+  getDingTalkRuntimeStatus,
   generateState,
   isDingTalkConfigured,
   validateState,
@@ -880,20 +881,20 @@ authRouter.post('/sessions/:sessionId/logout', async (req: Request, res: Respons
 // ============================================
 
 authRouter.get('/dingtalk/launch', async (req: Request, res: Response) => {
-  if (!isDingTalkConfigured()) {
-    return res.status(503).json({
-      success: false,
-      error: 'DingTalk login is not configured on this server',
-    })
-  }
-
   try {
+    const runtimeStatus = getDingTalkRuntimeStatus()
+
     if (isTruthyQueryFlag(req.query.probe)) {
       return res.json({
         success: true,
-        data: {
-          available: true,
-        },
+        data: runtimeStatus,
+      })
+    }
+
+    if (!runtimeStatus.available || !isDingTalkConfigured()) {
+      return res.status(503).json({
+        success: false,
+        error: 'DingTalk login is not configured on this server',
       })
     }
 

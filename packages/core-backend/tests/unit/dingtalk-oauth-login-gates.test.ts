@@ -36,7 +36,11 @@ vi.mock('../../src/integrations/dingtalk/client', () => ({
   readDingTalkOauthConfig: clientMocks.readDingTalkOauthConfig,
 }))
 
-import { __resetDingTalkOAuthStateStoreForTests, exchangeCodeForUser } from '../../src/auth/dingtalk-oauth'
+import {
+  __resetDingTalkOAuthStateStoreForTests,
+  exchangeCodeForUser,
+  getDingTalkRuntimeStatus,
+} from '../../src/auth/dingtalk-oauth'
 
 describe('dingtalk oauth login gates', () => {
   beforeEach(async () => {
@@ -132,5 +136,43 @@ describe('dingtalk oauth login gates', () => {
       .mockResolvedValueOnce({ rows: [] })
 
     await expect(exchangeCodeForUser('code-3')).rejects.toThrow('DingTalk account beta@example.com is not linked to an enabled local user')
+  })
+
+  it('reports runtime status with grant mode and allowlist details', () => {
+    vi.stubEnv('DINGTALK_CLIENT_ID', 'dt-client')
+    vi.stubEnv('DINGTALK_CLIENT_SECRET', 'dt-secret')
+    vi.stubEnv('DINGTALK_REDIRECT_URI', 'https://app.example.com/login/dingtalk/callback')
+    vi.stubEnv('DINGTALK_CORP_ID', 'ding-corp')
+    vi.stubEnv('DINGTALK_ALLOWED_CORP_IDS', 'ding-corp, ding-corp-2')
+    vi.stubEnv('DINGTALK_AUTH_REQUIRE_GRANT', '1')
+    vi.stubEnv('DINGTALK_AUTH_AUTO_LINK_EMAIL', '0')
+    vi.stubEnv('DINGTALK_AUTH_AUTO_PROVISION', '0')
+
+    expect(getDingTalkRuntimeStatus()).toEqual({
+      configured: true,
+      available: true,
+      corpId: 'ding-corp',
+      allowedCorpIds: ['ding-corp', 'ding-corp-2'],
+      requireGrant: true,
+      autoLinkEmail: false,
+      autoProvision: false,
+      unavailableReason: null,
+    })
+  })
+
+  it('reports a machine-friendly reason when corpId is blocked by the allowlist', () => {
+    vi.stubEnv('DINGTALK_CLIENT_ID', 'dt-client')
+    vi.stubEnv('DINGTALK_CLIENT_SECRET', 'dt-secret')
+    vi.stubEnv('DINGTALK_REDIRECT_URI', 'https://app.example.com/login/dingtalk/callback')
+    vi.stubEnv('DINGTALK_CORP_ID', 'ding-corp-blocked')
+    vi.stubEnv('DINGTALK_ALLOWED_CORP_IDS', 'ding-corp-allowed')
+
+    expect(getDingTalkRuntimeStatus()).toMatchObject({
+      configured: true,
+      available: false,
+      corpId: 'ding-corp-blocked',
+      allowedCorpIds: ['ding-corp-allowed'],
+      unavailableReason: 'corp_not_allowed',
+    })
   })
 })
