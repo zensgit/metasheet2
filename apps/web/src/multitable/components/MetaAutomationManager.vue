@@ -109,21 +109,44 @@
           <div class="meta-automation__card-desc">
             {{ describeTrigger(rule) }} &rarr; {{ describeAction(rule) }}
           </div>
+          <div v-if="ruleStats[rule.id]" class="meta-automation__card-stats">
+            <span class="meta-automation__stat meta-automation__stat--success">{{ ruleStats[rule.id].success }} ok</span>
+            <span class="meta-automation__stat meta-automation__stat--failed">{{ ruleStats[rule.id].failed }} fail</span>
+          </div>
           <div class="meta-automation__card-actions">
-            <button class="meta-automation__btn" type="button" data-automation-edit="true" @click="openEditForm(rule)">Edit</button>
+            <button class="meta-automation__btn" type="button" data-automation-edit="true" @click="openRuleEditor(rule)">Edit</button>
+            <button class="meta-automation__btn" type="button" data-automation-logs="true" @click="openLogViewer(rule)">View Logs</button>
             <button class="meta-automation__btn meta-automation__btn--danger" type="button" data-automation-delete="true" @click="onDelete(rule)">Delete</button>
           </div>
         </div>
       </div>
     </div>
+    <MetaAutomationRuleEditor
+      :visible="showRuleEditor"
+      :sheet-id="sheetId"
+      :rule="editingRule ?? undefined"
+      :fields="fields"
+      @close="showRuleEditor = false"
+      @save="onRuleEditorSave"
+      @test="onTestRule"
+    />
+    <MetaAutomationLogViewer
+      :visible="showLogViewer"
+      :sheet-id="sheetId"
+      :rule-id="logViewerRuleId"
+      :client="client"
+      @close="showLogViewer = false"
+    />
   </div>
 </template>
 
 <script setup lang="ts">
 import { ref, computed, watch } from 'vue'
-import type { AutomationRule, AutomationTriggerType, AutomationActionType } from '../types'
+import type { AutomationRule, AutomationTriggerType, AutomationActionType, AutomationStats } from '../types'
 import { useMultitableAutomations } from '../composables/useMultitableAutomations'
 import type { MultitableApiClient } from '../api/client'
+import MetaAutomationRuleEditor from './MetaAutomationRuleEditor.vue'
+import MetaAutomationLogViewer from './MetaAutomationLogViewer.vue'
 
 const props = defineProps<{
   visible: boolean
@@ -166,6 +189,61 @@ function emptyDraft(): DraftState {
 }
 
 const draft = ref<DraftState>(emptyDraft())
+
+// --- Rule editor + log viewer state ---
+const showRuleEditor = ref(false)
+const editingRule = ref<AutomationRule | null>(null)
+const showLogViewer = ref(false)
+const logViewerRuleId = ref('')
+const ruleStats = ref<Record<string, AutomationStats>>({})
+
+function openRuleEditor(rule?: AutomationRule) {
+  editingRule.value = rule ?? null
+  editingRuleId.value = rule?.id ?? null
+  showRuleEditor.value = true
+  showForm.value = false
+}
+
+function openLogViewer(rule: AutomationRule) {
+  logViewerRuleId.value = rule.id
+  showLogViewer.value = true
+}
+
+async function onRuleEditorSave(payload: Partial<AutomationRule>) {
+  try {
+    if (editingRule.value?.id) {
+      await updateRule(props.sheetId, editingRule.value.id, payload)
+    } else {
+      await createRule(props.sheetId, payload as Omit<AutomationRule, 'id' | 'sheetId' | 'enabled' | 'createdAt' | 'updatedAt' | 'createdBy'>)
+    }
+    showRuleEditor.value = false
+    editingRule.value = null
+    emit('updated')
+  } catch {
+    // error ref is set by composable
+  }
+}
+
+async function onTestRule(ruleId: string) {
+  if (!props.client) return
+  try {
+    await props.client.testAutomationRule(props.sheetId, ruleId)
+  } catch {
+    // silently fail
+  }
+}
+
+async function loadRuleStats() {
+  if (!props.client) return
+  for (const rule of rules.value) {
+    try {
+      const st = await props.client.getAutomationStats(props.sheetId, rule.id)
+      ruleStats.value[rule.id] = st
+    } catch {
+      // skip
+    }
+  }
+}
 
 const canSave = computed(() => {
   if (!draft.value.name.trim()) return false
@@ -293,10 +371,11 @@ function describeAction(rule: AutomationRule): string {
 
 watch(
   () => props.visible,
-  (v) => {
+  async (v) => {
     if (v && props.sheetId) {
-      void loadRules(props.sheetId)
+      await loadRules(props.sheetId)
       cancelForm()
+      void loadRuleStats()
     }
   },
   { immediate: true },
@@ -487,4 +566,14 @@ watch(
 .meta-automation__btn-add {
   align-self: flex-start;
 }
+
+.meta-automation__card-stats {
+  display: flex;
+  gap: 10px;
+  font-size: 12px;
+}
+
+.meta-automation__stat { font-weight: 600; }
+.meta-automation__stat--success { color: #16a34a; }
+.meta-automation__stat--failed { color: #dc2626; }
 </style>

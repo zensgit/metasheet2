@@ -1,0 +1,562 @@
+<template>
+  <div v-if="visible" class="meta-rule-editor__overlay" @click.self="$emit('close')">
+    <div class="meta-rule-editor">
+      <div class="meta-rule-editor__header">
+        <h4 class="meta-rule-editor__title">{{ rule ? 'Edit Automation Rule' : 'New Automation Rule' }}</h4>
+        <button class="meta-rule-editor__close" type="button" @click="$emit('close')">&times;</button>
+      </div>
+
+      <div class="meta-rule-editor__body">
+        <div v-if="error" class="meta-rule-editor__error" role="alert">{{ error }}</div>
+
+        <!-- Name -->
+        <label class="meta-rule-editor__label">Name</label>
+        <input v-model="draft.name" class="meta-rule-editor__input" type="text" placeholder="Automation name" data-field="name" />
+
+        <!-- 1. Trigger selector -->
+        <section class="meta-rule-editor__section">
+          <div class="meta-rule-editor__section-title">Trigger</div>
+          <select v-model="draft.triggerType" class="meta-rule-editor__select" data-field="triggerType">
+            <option value="record.created">When record created</option>
+            <option value="record.updated">When record updated</option>
+            <option value="record.deleted">When record deleted</option>
+            <option value="field.value_changed">When field value changed</option>
+            <option value="schedule.cron">Schedule (cron)</option>
+            <option value="schedule.interval">Schedule (interval)</option>
+            <option value="webhook.received">Webhook received</option>
+          </select>
+
+          <!-- field.value_changed config -->
+          <template v-if="draft.triggerType === 'field.value_changed'">
+            <label class="meta-rule-editor__label">Watch field</label>
+            <select v-model="draft.triggerConfig.fieldId" class="meta-rule-editor__select" data-field="triggerFieldId">
+              <option value="">-- select field --</option>
+              <option v-for="f in fields" :key="f.id" :value="f.id">{{ f.name }}</option>
+            </select>
+            <label class="meta-rule-editor__label">Condition</label>
+            <select v-model="draft.triggerConfig.condition" class="meta-rule-editor__select" data-field="triggerCondition">
+              <option value="any">Any change</option>
+              <option value="equals">Equals</option>
+              <option value="changed_to">Changed to</option>
+            </select>
+            <template v-if="draft.triggerConfig.condition !== 'any'">
+              <label class="meta-rule-editor__label">Value</label>
+              <input v-model="draft.triggerConfig.value" class="meta-rule-editor__input" type="text" placeholder="Value" data-field="triggerValue" />
+            </template>
+          </template>
+
+          <!-- schedule.cron config -->
+          <template v-if="draft.triggerType === 'schedule.cron'">
+            <label class="meta-rule-editor__label">Preset</label>
+            <select v-model="cronPreset" class="meta-rule-editor__select" data-field="cronPreset">
+              <option value="*/5 * * * *">Every 5 minutes</option>
+              <option value="0 * * * *">Every hour</option>
+              <option value="0 0 * * *">Daily at midnight</option>
+              <option value="0 0 * * 1">Weekly (Monday)</option>
+              <option value="custom">Custom</option>
+            </select>
+            <template v-if="cronPreset === 'custom'">
+              <label class="meta-rule-editor__label">Cron expression</label>
+              <input v-model="draft.triggerConfig.cron" class="meta-rule-editor__input" type="text" placeholder="* * * * *" data-field="cronExpression" />
+            </template>
+          </template>
+
+          <!-- schedule.interval config -->
+          <template v-if="draft.triggerType === 'schedule.interval'">
+            <label class="meta-rule-editor__label">Interval (minutes)</label>
+            <input v-model.number="draft.triggerConfig.intervalMinutes" class="meta-rule-editor__input" type="number" min="1" placeholder="5" data-field="intervalMinutes" />
+          </template>
+        </section>
+
+        <!-- 2. Conditions -->
+        <section class="meta-rule-editor__section">
+          <div class="meta-rule-editor__section-title">
+            Conditions
+            <span class="meta-rule-editor__hint">(optional)</span>
+          </div>
+          <div v-if="draft.conditions.conditions.length > 1" class="meta-rule-editor__conjunction">
+            <button
+              type="button"
+              class="meta-rule-editor__toggle-btn"
+              :class="{ 'meta-rule-editor__toggle-btn--active': draft.conditions.conjunction === 'AND' }"
+              @click="draft.conditions.conjunction = 'AND'"
+            >AND</button>
+            <button
+              type="button"
+              class="meta-rule-editor__toggle-btn"
+              :class="{ 'meta-rule-editor__toggle-btn--active': draft.conditions.conjunction === 'OR' }"
+              @click="draft.conditions.conjunction = 'OR'"
+            >OR</button>
+          </div>
+          <div
+            v-for="(cond, idx) in draft.conditions.conditions"
+            :key="idx"
+            class="meta-rule-editor__condition-row"
+            :data-condition-index="idx"
+          >
+            <select v-model="cond.fieldId" class="meta-rule-editor__select meta-rule-editor__select--sm">
+              <option value="">-- field --</option>
+              <option v-for="f in fields" :key="f.id" :value="f.id">{{ f.name }}</option>
+            </select>
+            <select v-model="cond.operator" class="meta-rule-editor__select meta-rule-editor__select--sm">
+              <option v-for="op in conditionOperators" :key="op.value" :value="op.value">{{ op.label }}</option>
+            </select>
+            <input
+              v-if="!isUnaryOperator(cond.operator)"
+              v-model="cond.value"
+              class="meta-rule-editor__input meta-rule-editor__input--sm"
+              type="text"
+              placeholder="Value"
+            />
+            <button class="meta-rule-editor__btn meta-rule-editor__btn--icon" type="button" @click="removeCondition(idx)" title="Remove condition">&times;</button>
+          </div>
+          <button class="meta-rule-editor__btn" type="button" data-action="add-condition" @click="addCondition">+ Add condition</button>
+        </section>
+
+        <!-- 3. Actions -->
+        <section class="meta-rule-editor__section">
+          <div class="meta-rule-editor__section-title">Actions <span class="meta-rule-editor__hint">(1-3 steps)</span></div>
+          <div
+            v-for="(action, idx) in draft.actions"
+            :key="idx"
+            class="meta-rule-editor__action-row"
+            :data-action-index="idx"
+          >
+            <div class="meta-rule-editor__action-header">
+              <span class="meta-rule-editor__action-num">{{ idx + 1 }}.</span>
+              <select v-model="action.type" class="meta-rule-editor__select">
+                <option value="update_record">Update record</option>
+                <option value="create_record">Create record</option>
+                <option value="send_webhook">Send webhook</option>
+                <option value="send_notification">Send notification</option>
+                <option value="lock_record">Lock record</option>
+              </select>
+              <div class="meta-rule-editor__action-btns">
+                <button v-if="idx > 0" class="meta-rule-editor__btn meta-rule-editor__btn--icon" type="button" @click="moveAction(idx, -1)" title="Move up">&#x2191;</button>
+                <button v-if="idx < draft.actions.length - 1" class="meta-rule-editor__btn meta-rule-editor__btn--icon" type="button" @click="moveAction(idx, 1)" title="Move down">&#x2193;</button>
+                <button class="meta-rule-editor__btn meta-rule-editor__btn--icon" type="button" @click="removeAction(idx)" title="Remove action">&times;</button>
+              </div>
+            </div>
+
+            <!-- update_record config -->
+            <div v-if="action.type === 'update_record'" class="meta-rule-editor__action-config">
+              <div v-for="(pair, pidx) in (action.config.fieldUpdates as FieldPair[] || [])" :key="pidx" class="meta-rule-editor__field-pair">
+                <select v-model="pair.fieldId" class="meta-rule-editor__select meta-rule-editor__select--sm">
+                  <option value="">-- field --</option>
+                  <option v-for="f in fields" :key="f.id" :value="f.id">{{ f.name }}</option>
+                </select>
+                <input v-model="pair.value" class="meta-rule-editor__input meta-rule-editor__input--sm" type="text" placeholder="Value" />
+                <button class="meta-rule-editor__btn meta-rule-editor__btn--icon" type="button" @click="removeFieldUpdate(action, pidx)">&times;</button>
+              </div>
+              <button class="meta-rule-editor__btn" type="button" @click="addFieldUpdate(action)">+ Field</button>
+            </div>
+
+            <!-- create_record config -->
+            <div v-if="action.type === 'create_record'" class="meta-rule-editor__action-config">
+              <label class="meta-rule-editor__label">Target sheet ID</label>
+              <input v-model="action.config.targetSheetId" class="meta-rule-editor__input" type="text" placeholder="Sheet ID" />
+              <div v-for="(pair, pidx) in (action.config.fieldValues as FieldPair[] || [])" :key="pidx" class="meta-rule-editor__field-pair">
+                <input v-model="pair.fieldId" class="meta-rule-editor__input meta-rule-editor__input--sm" type="text" placeholder="Field ID" />
+                <input v-model="pair.value" class="meta-rule-editor__input meta-rule-editor__input--sm" type="text" placeholder="Value" />
+                <button class="meta-rule-editor__btn meta-rule-editor__btn--icon" type="button" @click="removeCreateFieldValue(action, pidx)">&times;</button>
+              </div>
+              <button class="meta-rule-editor__btn" type="button" @click="addCreateFieldValue(action)">+ Field</button>
+            </div>
+
+            <!-- send_webhook config -->
+            <div v-if="action.type === 'send_webhook'" class="meta-rule-editor__action-config">
+              <label class="meta-rule-editor__label">URL</label>
+              <input v-model="action.config.url" class="meta-rule-editor__input" type="url" placeholder="https://..." />
+              <label class="meta-rule-editor__label">Method</label>
+              <select v-model="action.config.method" class="meta-rule-editor__select">
+                <option value="POST">POST</option>
+                <option value="PUT">PUT</option>
+                <option value="GET">GET</option>
+              </select>
+            </div>
+
+            <!-- send_notification config -->
+            <div v-if="action.type === 'send_notification'" class="meta-rule-editor__action-config">
+              <label class="meta-rule-editor__label">User ID</label>
+              <input v-model="action.config.userId" class="meta-rule-editor__input" type="text" placeholder="User ID" />
+              <label class="meta-rule-editor__label">Message</label>
+              <textarea v-model="action.config.message" class="meta-rule-editor__textarea" placeholder="Notification message" rows="3"></textarea>
+            </div>
+
+            <!-- lock_record config -->
+            <div v-if="action.type === 'lock_record'" class="meta-rule-editor__action-config">
+              <label class="meta-rule-editor__toggle-label">
+                <input type="checkbox" v-model="action.config.locked" />
+                Lock record
+              </label>
+            </div>
+          </div>
+          <button
+            v-if="draft.actions.length < 3"
+            class="meta-rule-editor__btn"
+            type="button"
+            data-action="add-action"
+            @click="addAction"
+          >+ Add action</button>
+        </section>
+      </div>
+
+      <!-- Footer -->
+      <div class="meta-rule-editor__footer">
+        <button class="meta-rule-editor__btn meta-rule-editor__btn--primary" type="button" :disabled="!canSave || saving" data-action="save" @click="onSave">
+          {{ saving ? 'Saving...' : 'Save' }}
+        </button>
+        <button class="meta-rule-editor__btn" type="button" :disabled="saving" @click="onTestRun" data-action="test">Test Run</button>
+        <button class="meta-rule-editor__btn" type="button" @click="$emit('close')">Cancel</button>
+      </div>
+    </div>
+  </div>
+</template>
+
+<script setup lang="ts">
+import { ref, computed, watch } from 'vue'
+import type {
+  AutomationRule,
+  AutomationTriggerType,
+  AutomationActionType,
+  ConditionOperator,
+  AutomationAction,
+  AutomationCondition,
+} from '../types'
+
+interface FieldPair {
+  fieldId: string
+  value: string
+}
+
+interface DraftAction {
+  type: AutomationActionType
+  config: Record<string, unknown>
+}
+
+interface Draft {
+  name: string
+  triggerType: AutomationTriggerType
+  triggerConfig: Record<string, unknown>
+  conditions: { conjunction: 'AND' | 'OR'; conditions: AutomationCondition[] }
+  actions: DraftAction[]
+}
+
+const props = defineProps<{
+  sheetId: string
+  rule?: AutomationRule
+  visible: boolean
+  fields: Array<{ id: string; name: string; type: string }>
+}>()
+
+const emit = defineEmits<{
+  (e: 'close'): void
+  (e: 'save', payload: Partial<AutomationRule>): void
+  (e: 'test', ruleId: string): void
+}>()
+
+const error = ref('')
+const saving = ref(false)
+const cronPreset = ref('0 * * * *')
+
+const conditionOperators: Array<{ value: ConditionOperator; label: string }> = [
+  { value: 'equals', label: 'Equals' },
+  { value: 'not_equals', label: 'Not equals' },
+  { value: 'contains', label: 'Contains' },
+  { value: 'not_contains', label: 'Not contains' },
+  { value: 'greater_than', label: 'Greater than' },
+  { value: 'less_than', label: 'Less than' },
+  { value: 'greater_or_equal', label: 'Greater or equal' },
+  { value: 'less_or_equal', label: 'Less or equal' },
+  { value: 'is_empty', label: 'Is empty' },
+  { value: 'is_not_empty', label: 'Is not empty' },
+]
+
+function isUnaryOperator(op: ConditionOperator): boolean {
+  return op === 'is_empty' || op === 'is_not_empty'
+}
+
+function emptyDraft(): Draft {
+  return {
+    name: '',
+    triggerType: 'record.created',
+    triggerConfig: {},
+    conditions: { conjunction: 'AND', conditions: [] },
+    actions: [{ type: 'update_record', config: { fieldUpdates: [] } }],
+  }
+}
+
+function draftFromRule(rule: AutomationRule): Draft {
+  return {
+    name: rule.name,
+    triggerType: rule.triggerType,
+    triggerConfig: { ...rule.triggerConfig, ...(rule.trigger?.config ?? {}) },
+    conditions: rule.conditions
+      ? { conjunction: rule.conditions.conjunction, conditions: rule.conditions.conditions.map((c) => ({ ...c })) }
+      : { conjunction: 'AND', conditions: [] },
+    actions: rule.actions && rule.actions.length
+      ? rule.actions.map((a) => ({ type: a.type, config: { ...a.config } }))
+      : [{ type: rule.actionType, config: { ...rule.actionConfig } }],
+  }
+}
+
+const draft = ref<Draft>(emptyDraft())
+
+watch(
+  () => props.visible,
+  (v) => {
+    if (v) {
+      draft.value = props.rule ? draftFromRule(props.rule) : emptyDraft()
+      error.value = ''
+      saving.value = false
+    }
+  },
+  { immediate: true },
+)
+
+const canSave = computed(() => {
+  if (!draft.value.name.trim()) return false
+  if (draft.value.actions.length < 1) return false
+  return true
+})
+
+function addCondition() {
+  draft.value.conditions.conditions.push({ fieldId: '', operator: 'equals', value: '' })
+}
+
+function removeCondition(idx: number) {
+  draft.value.conditions.conditions.splice(idx, 1)
+}
+
+function addAction() {
+  if (draft.value.actions.length >= 3) return
+  draft.value.actions.push({ type: 'update_record', config: { fieldUpdates: [] } })
+}
+
+function removeAction(idx: number) {
+  draft.value.actions.splice(idx, 1)
+}
+
+function moveAction(idx: number, dir: number) {
+  const target = idx + dir
+  if (target < 0 || target >= draft.value.actions.length) return
+  const arr = draft.value.actions
+  ;[arr[idx], arr[target]] = [arr[target], arr[idx]]
+}
+
+function addFieldUpdate(action: DraftAction) {
+  if (!Array.isArray(action.config.fieldUpdates)) action.config.fieldUpdates = []
+  ;(action.config.fieldUpdates as FieldPair[]).push({ fieldId: '', value: '' })
+}
+
+function removeFieldUpdate(action: DraftAction, idx: number) {
+  ;(action.config.fieldUpdates as FieldPair[]).splice(idx, 1)
+}
+
+function addCreateFieldValue(action: DraftAction) {
+  if (!Array.isArray(action.config.fieldValues)) action.config.fieldValues = []
+  ;(action.config.fieldValues as FieldPair[]).push({ fieldId: '', value: '' })
+}
+
+function removeCreateFieldValue(action: DraftAction, idx: number) {
+  ;(action.config.fieldValues as FieldPair[]).splice(idx, 1)
+}
+
+function buildPayload(): Partial<AutomationRule> {
+  const d = draft.value
+  const triggerConfig = { ...d.triggerConfig }
+  if (d.triggerType === 'schedule.cron' && cronPreset.value !== 'custom') {
+    triggerConfig.cron = cronPreset.value
+  }
+  return {
+    name: d.name.trim(),
+    triggerType: d.triggerType,
+    triggerConfig,
+    trigger: { type: d.triggerType, config: triggerConfig },
+    conditions: d.conditions.conditions.length > 0 ? d.conditions : undefined,
+    actions: d.actions.map((a) => ({ type: a.type, config: a.config })),
+    actionType: d.actions[0]?.type ?? 'update_record',
+    actionConfig: d.actions[0]?.config ?? {},
+  }
+}
+
+async function onSave() {
+  if (!canSave.value) return
+  saving.value = true
+  error.value = ''
+  try {
+    emit('save', buildPayload())
+  } catch (e: unknown) {
+    error.value = e instanceof Error ? e.message : 'Save failed'
+  } finally {
+    saving.value = false
+  }
+}
+
+function onTestRun() {
+  if (props.rule?.id) {
+    emit('test', props.rule.id)
+  }
+}
+</script>
+
+<style scoped>
+.meta-rule-editor__overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.35);
+}
+
+.meta-rule-editor {
+  background: #fff;
+  border-radius: 14px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.18);
+  width: 640px;
+  max-width: 95vw;
+  max-height: 90vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.meta-rule-editor__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 18px 20px 12px;
+  border-bottom: 1px solid #e2e8f0;
+}
+
+.meta-rule-editor__title { margin: 0; font-size: 16px; font-weight: 700; color: #0f172a; }
+.meta-rule-editor__close { border: none; background: none; font-size: 22px; cursor: pointer; color: #64748b; line-height: 1; padding: 0 4px; }
+
+.meta-rule-editor__body {
+  padding: 16px 20px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  flex: 1;
+}
+
+.meta-rule-editor__error { padding: 10px 12px; border-radius: 10px; font-size: 13px; background: #fef2f2; color: #b91c1c; }
+
+.meta-rule-editor__section {
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.meta-rule-editor__section-title { font-size: 14px; font-weight: 600; color: #0f172a; }
+.meta-rule-editor__hint { font-weight: 400; color: #94a3b8; font-size: 12px; }
+
+.meta-rule-editor__label { font-size: 12px; font-weight: 600; color: #475569; margin-top: 4px; }
+
+.meta-rule-editor__input,
+.meta-rule-editor__select,
+.meta-rule-editor__textarea {
+  width: 100%;
+  min-width: 0;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 13px;
+  background: #fff;
+  box-sizing: border-box;
+}
+
+.meta-rule-editor__textarea { resize: vertical; font-family: inherit; }
+
+.meta-rule-editor__input--sm,
+.meta-rule-editor__select--sm {
+  flex: 1;
+  min-width: 80px;
+}
+
+.meta-rule-editor__condition-row,
+.meta-rule-editor__field-pair {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.meta-rule-editor__conjunction { display: flex; gap: 4px; }
+
+.meta-rule-editor__toggle-btn {
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  padding: 4px 12px;
+  background: #fff;
+  font-size: 12px;
+  cursor: pointer;
+  color: #475569;
+}
+
+.meta-rule-editor__toggle-btn--active {
+  background: #2563eb;
+  border-color: #2563eb;
+  color: #fff;
+}
+
+.meta-rule-editor__action-row {
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.meta-rule-editor__action-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.meta-rule-editor__action-num { font-weight: 700; font-size: 14px; color: #2563eb; }
+
+.meta-rule-editor__action-btns { display: flex; gap: 4px; margin-left: auto; }
+
+.meta-rule-editor__action-config {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-left: 20px;
+}
+
+.meta-rule-editor__toggle-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: #475569;
+}
+
+.meta-rule-editor__footer {
+  display: flex;
+  gap: 8px;
+  padding: 12px 20px 16px;
+  border-top: 1px solid #e2e8f0;
+}
+
+.meta-rule-editor__btn {
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  padding: 6px 14px;
+  background: #fff;
+  color: #0f172a;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.meta-rule-editor__btn:disabled { opacity: 0.55; cursor: not-allowed; }
+.meta-rule-editor__btn--primary { border-color: #2563eb; background: #2563eb; color: #fff; }
+.meta-rule-editor__btn--danger { border-color: #ef4444; color: #b91c1c; }
+.meta-rule-editor__btn--icon { padding: 4px 8px; font-size: 14px; line-height: 1; }
+</style>
