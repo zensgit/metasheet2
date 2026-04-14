@@ -7,6 +7,7 @@ import {
   acknowledgeDirectorySyncAlert,
   bindDirectoryAccount,
   createDirectoryIntegration,
+  getDirectorySyncScheduleSnapshot,
   listDirectoryIntegrationAccounts,
   listDirectoryIntegrations,
   listDirectoryIntegrationReviewItems,
@@ -198,6 +199,23 @@ export function adminDirectoryRouter(): Router {
       })
     } catch (error) {
       jsonError(res, 500, 'DIRECTORY_RUNS_FAILED', readErrorMessage(error, 'Failed to load sync runs'))
+    }
+  })
+
+  router.get('/integrations/:integrationId/schedule', async (req: Request, res: Response) => {
+    const adminUserId = await ensurePlatformAdmin(req, res)
+    if (!adminUserId) return
+
+    try {
+      const snapshot = await getDirectorySyncScheduleSnapshot(req.params.integrationId)
+      if (!snapshot) {
+        jsonError(res, 404, 'DIRECTORY_NOT_FOUND', 'Directory integration not found')
+        return
+      }
+      jsonOk(res, { snapshot })
+    } catch (error) {
+      const message = readErrorMessage(error, 'Failed to load directory sync schedule')
+      jsonError(res, /required|invalid/i.test(message) ? 400 : 500, 'DIRECTORY_SCHEDULE_FAILED', message)
     }
   })
 

@@ -147,6 +147,48 @@
         <section v-if="selectedIntegration" class="directory-admin__section">
           <div class="directory-admin__section-head">
             <div>
+              <h3>自动同步观测</h3>
+              <p class="directory-admin__hint">区分“已配置自动同步”和“系统里已观察到自动触发”。下一次时间为按当前 cron 配置推算，不代表已完成调度注册。</p>
+            </div>
+            <button class="directory-admin__button directory-admin__button--secondary" type="button" :disabled="loadingSchedule" @click="void loadScheduleSnapshot(selectedIntegration.id)">
+              {{ loadingSchedule ? '刷新中...' : '刷新观测' }}
+            </button>
+          </div>
+
+          <div v-if="loadingSchedule" class="directory-admin__empty">自动同步观测加载中...</div>
+          <div v-else-if="!scheduleSnapshot" class="directory-admin__empty">暂无自动同步观测</div>
+          <template v-else>
+            <div class="directory-admin__chips">
+              <span class="directory-admin__chip" :class="readObservationStatusClass(scheduleSnapshot.observationStatus)">
+                {{ readObservationStatusLabel(scheduleSnapshot.observationStatus) }}
+              </span>
+              <span class="directory-admin__chip" :class="{ 'directory-admin__badge--inactive': !scheduleSnapshot.syncEnabled }">
+                {{ scheduleSnapshot.syncEnabled ? '已启用自动同步' : '仅手动同步' }}
+              </span>
+              <span class="directory-admin__chip">
+                Cron {{ scheduleSnapshot.scheduleCron || '未配置' }}
+              </span>
+              <span class="directory-admin__chip">
+                时区 {{ scheduleSnapshot.timezone }}
+              </span>
+            </div>
+
+            <div class="directory-admin__account-grid">
+              <p class="directory-admin__hint"><strong>按 cron 推算下一次：</strong>{{ formatDateTime(scheduleSnapshot.nextExpectedRunAt) }}</p>
+              <p class="directory-admin__hint"><strong>Cron 校验：</strong>{{ scheduleSnapshot.cronValid ? '通过' : '未通过 / 未配置' }}</p>
+              <p class="directory-admin__hint"><strong>最近一次执行：</strong>{{ formatDateTime(scheduleSnapshot.latestRunAt) }}</p>
+              <p class="directory-admin__hint"><strong>最近一次来源：</strong>{{ readTriggerSourceLabel(scheduleSnapshot.latestRunTriggerSource) }}</p>
+              <p class="directory-admin__hint"><strong>最近一次手动执行：</strong>{{ formatDateTime(scheduleSnapshot.latestManualRunAt) }}</p>
+              <p class="directory-admin__hint"><strong>最近一次自动执行：</strong>{{ formatDateTime(scheduleSnapshot.latestAutoRunAt) }}</p>
+            </div>
+
+            <p class="directory-admin__hint">{{ scheduleSnapshot.note }}</p>
+          </template>
+        </section>
+
+        <section v-if="selectedIntegration" class="directory-admin__section">
+          <div class="directory-admin__section-head">
+            <div>
               <h3>最近告警</h3>
               <p class="directory-admin__hint">展示最近 10 条目录同步告警，支持按确认状态筛选并逐条确认。</p>
             </div>
@@ -657,6 +699,33 @@ type DirectoryAlertCounts = {
   acknowledged: number
 }
 
+type DirectoryScheduleObservationStatus =
+  | 'disabled'
+  | 'missing_cron'
+  | 'invalid_cron'
+  | 'configured_no_runs'
+  | 'manual_only'
+  | 'auto_observed'
+
+type DirectoryScheduleSnapshot = {
+  integrationId: string
+  syncEnabled: boolean
+  scheduleCron: string | null
+  cronValid: boolean
+  nextExpectedRunAt: string | null
+  timezone: string
+  latestRunAt: string | null
+  latestRunStatus: string | null
+  latestRunTriggerSource: string | null
+  latestManualRunAt: string | null
+  latestManualRunStatus: string | null
+  latestAutoRunAt: string | null
+  latestAutoRunStatus: string | null
+  autoTriggerObserved: boolean
+  observationStatus: DirectoryScheduleObservationStatus
+  note: string
+}
+
 type LocalUserOption = {
   id: string
   email: string
@@ -702,6 +771,7 @@ const runs = ref<DirectoryRun[]>([])
 const accounts = ref<DirectoryAccount[]>([])
 const reviewItems = ref<DirectoryReviewItem[]>([])
 const alerts = ref<DirectorySyncAlert[]>([])
+const scheduleSnapshot = ref<DirectoryScheduleSnapshot | null>(null)
 const accountPageSizeOptions = [25, 50, 100]
 const accountPage = ref(1)
 const accountPageSize = ref(25)
@@ -709,6 +779,7 @@ const accountTotal = ref(0)
 const selectedIntegrationId = ref('')
 const loading = ref(false)
 const loadingRuns = ref(false)
+const loadingSchedule = ref(false)
 const loadingAccounts = ref(false)
 const loadingReviewItems = ref(false)
 const loadingAlerts = ref(false)
@@ -722,7 +793,7 @@ const statusTone = ref<'info' | 'error'>('info')
 const testResult = ref<TestResult | null>(null)
 const accountQuery = ref('')
 const reviewQueue = ref<'all' | DirectoryReviewReason>('all')
-const alertFilter = ref<DirectoryAlertFilter>('all')
+const alertFilter = ref<DirectoryAlertFilter>('pending')
 const reviewCounts = ref<DirectoryReviewCounts>({
   total: 0,
   needsBinding: 0,
@@ -819,12 +890,13 @@ function resetDraft() {
   accounts.value = []
   reviewItems.value = []
   alerts.value = []
+  scheduleSnapshot.value = null
   accountPage.value = 1
   accountPageSize.value = accountPageSizeOptions[0]
   accountTotal.value = 0
   accountQuery.value = ''
   reviewQueue.value = 'all'
-  alertFilter.value = 'all'
+  alertFilter.value = 'pending'
   reviewCounts.value = {
     total: 0,
     needsBinding: 0,
@@ -888,6 +960,7 @@ function selectIntegration(integrationId: string) {
   applyIntegrationToDraft(integration)
   void Promise.all([
     loadRuns(integrationId),
+    loadScheduleSnapshot(integrationId),
     loadAlerts(integrationId),
     loadReviewItems(integrationId),
     loadAccounts(integrationId),
@@ -1055,6 +1128,27 @@ function readAlertLevelClass(level: string | null | undefined): string {
   if (normalizedLevel === 'critical' || normalizedLevel === 'error') return 'directory-admin__chip--critical'
   if (normalizedLevel === 'warning') return 'directory-admin__chip--warning'
   return 'directory-admin__chip--info'
+}
+
+function readObservationStatusLabel(status: DirectoryScheduleObservationStatus): string {
+  if (status === 'disabled') return '未启用'
+  if (status === 'missing_cron') return '缺少 Cron'
+  if (status === 'invalid_cron') return 'Cron 无效'
+  if (status === 'configured_no_runs') return '仅有配置'
+  if (status === 'manual_only') return '仅观察到手动执行'
+  return '已观察到自动执行'
+}
+
+function readObservationStatusClass(status: DirectoryScheduleObservationStatus): string {
+  if (status === 'auto_observed') return 'directory-admin__chip--success'
+  if (status === 'disabled') return 'directory-admin__badge--inactive'
+  if (status === 'missing_cron' || status === 'invalid_cron') return 'directory-admin__chip--critical'
+  return 'directory-admin__chip--warning'
+}
+
+function readTriggerSourceLabel(triggerSource: string | null): string {
+  if (!triggerSource) return '未记录'
+  return triggerSource
 }
 
 function reviewBindingStateKey(accountId: string): string {
@@ -1257,6 +1351,7 @@ async function syncIntegration() {
     await Promise.all([
       loadIntegrations(),
       loadRuns(selectedIntegration.value.id),
+      loadScheduleSnapshot(selectedIntegration.value.id),
       loadAlerts(selectedIntegration.value.id),
       loadReviewItems(selectedIntegration.value.id),
       loadAccounts(selectedIntegration.value.id),
@@ -1295,6 +1390,21 @@ async function loadAlerts(integrationId: string) {
     setStatus(error instanceof Error ? error.message : '加载目录告警失败', 'error')
   } finally {
     loadingAlerts.value = false
+  }
+}
+
+async function loadScheduleSnapshot(integrationId: string) {
+  loadingSchedule.value = true
+  try {
+    const response = await apiFetch(`/api/admin/directory/integrations/${integrationId}/schedule`)
+    const body = await readJson(response)
+    if (!response.ok) throw new Error(readApiError(body, '加载自动同步观测失败'))
+    scheduleSnapshot.value = body?.data?.snapshot ?? null
+  } catch (error) {
+    scheduleSnapshot.value = null
+    setStatus(error instanceof Error ? error.message : '加载自动同步观测失败', 'error')
+  } finally {
+    loadingSchedule.value = false
   }
 }
 

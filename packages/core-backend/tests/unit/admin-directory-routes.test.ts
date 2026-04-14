@@ -16,6 +16,7 @@ const directoryMocks = vi.hoisted(() => ({
   testDirectoryIntegration: vi.fn(),
   syncDirectoryIntegration: vi.fn(),
   listDirectorySyncRuns: vi.fn(),
+  getDirectorySyncScheduleSnapshot: vi.fn(),
   listDirectorySyncAlerts: vi.fn(),
   listDirectoryIntegrationAccounts: vi.fn(),
   listDirectoryIntegrationReviewItems: vi.fn(),
@@ -39,6 +40,7 @@ vi.mock('../../src/directory/directory-sync', () => ({
   testDirectoryIntegration: directoryMocks.testDirectoryIntegration,
   syncDirectoryIntegration: directoryMocks.syncDirectoryIntegration,
   listDirectorySyncRuns: directoryMocks.listDirectorySyncRuns,
+  getDirectorySyncScheduleSnapshot: directoryMocks.getDirectorySyncScheduleSnapshot,
   listDirectorySyncAlerts: directoryMocks.listDirectorySyncAlerts,
   listDirectoryIntegrationAccounts: directoryMocks.listDirectoryIntegrationAccounts,
   listDirectoryIntegrationReviewItems: directoryMocks.listDirectoryIntegrationReviewItems,
@@ -126,6 +128,7 @@ describe('adminDirectoryRouter', () => {
     directoryMocks.testDirectoryIntegration.mockReset()
     directoryMocks.syncDirectoryIntegration.mockReset()
     directoryMocks.listDirectorySyncRuns.mockReset()
+    directoryMocks.getDirectorySyncScheduleSnapshot.mockReset()
     directoryMocks.listDirectorySyncAlerts.mockReset()
     directoryMocks.listDirectoryIntegrationAccounts.mockReset()
     directoryMocks.listDirectoryIntegrationReviewItems.mockReset()
@@ -312,6 +315,48 @@ describe('adminDirectoryRouter', () => {
           total: 3,
           pending: 2,
           acknowledged: 1,
+        },
+      },
+    })
+  })
+
+  it('returns a directory sync schedule snapshot', async () => {
+    directoryMocks.getDirectorySyncScheduleSnapshot.mockResolvedValue({
+      integrationId: 'dir-1',
+      syncEnabled: true,
+      scheduleCron: '0 * * * *',
+      cronValid: true,
+      nextExpectedRunAt: '2026-04-14T09:00:00.000Z',
+      timezone: 'UTC',
+      latestRunAt: '2026-04-14T08:00:00.000Z',
+      latestRunStatus: 'completed',
+      latestRunTriggerSource: 'manual',
+      latestManualRunAt: '2026-04-14T08:00:00.000Z',
+      latestManualRunStatus: 'completed',
+      latestAutoRunAt: null,
+      latestAutoRunStatus: null,
+      autoTriggerObserved: false,
+      observationStatus: 'manual_only',
+      note: '当前只观察到 manual 触发记录；尚未看到自动执行。',
+    })
+
+    const response = await invokeRoute('get', '/integrations/:integrationId/schedule', {
+      params: { integrationId: 'dir-1' },
+      user: {
+        id: 'admin-1',
+        role: 'admin',
+      },
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect(directoryMocks.getDirectorySyncScheduleSnapshot).toHaveBeenCalledWith('dir-1')
+    expect(response.body).toMatchObject({
+      ok: true,
+      data: {
+        snapshot: {
+          integrationId: 'dir-1',
+          scheduleCron: '0 * * * *',
+          observationStatus: 'manual_only',
         },
       },
     })

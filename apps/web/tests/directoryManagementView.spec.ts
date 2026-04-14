@@ -141,6 +141,33 @@ function createAlertListPayload(
   }
 }
 
+function createScheduleSnapshotPayload(overrides: Record<string, unknown> = {}) {
+  return {
+    ok: true,
+    data: {
+      snapshot: {
+        integrationId: 'dir-1',
+        syncEnabled: true,
+        scheduleCron: '0 * * * *',
+        cronValid: true,
+        nextExpectedRunAt: '2026-04-08T02:00:00.000Z',
+        timezone: 'UTC',
+        latestRunAt: '2026-04-08T01:00:00.000Z',
+        latestRunStatus: 'completed',
+        latestRunTriggerSource: 'manual',
+        latestManualRunAt: '2026-04-08T01:00:00.000Z',
+        latestManualRunStatus: 'completed',
+        latestAutoRunAt: null,
+        latestAutoRunStatus: null,
+        autoTriggerObserved: false,
+        observationStatus: 'manual_only',
+        note: '当前只观察到 manual 触发记录；尚未看到自动执行。',
+        ...overrides,
+      },
+    },
+  }
+}
+
 function createTestResultPayload(overrides: Record<string, unknown> = {}) {
   return {
     ok: true,
@@ -222,6 +249,16 @@ describe('DirectoryManagementView', () => {
         },
       }))
       .mockResolvedValueOnce(createJsonResponse(
+        createScheduleSnapshotPayload({
+          latestRunAt: '2026-04-08T02:00:00.000Z',
+          latestRunStatus: 'completed',
+          latestRunTriggerSource: 'manual',
+          latestManualRunAt: '2026-04-08T02:00:00.000Z',
+          latestManualRunStatus: 'completed',
+          nextExpectedRunAt: '2026-04-08T03:00:00.000Z',
+        }),
+      ))
+      .mockResolvedValueOnce(createJsonResponse(
         createAlertListPayload([
           {
             id: 'alert-2',
@@ -270,12 +307,14 @@ describe('DirectoryManagementView', () => {
 
     expect(apiFetchMock).toHaveBeenNthCalledWith(1, '/api/admin/directory/integrations')
     expect(apiFetchMock).toHaveBeenNthCalledWith(2, '/api/admin/directory/integrations/dir-1/runs?page=1&pageSize=10')
-    expect(apiFetchMock).toHaveBeenNthCalledWith(3, '/api/admin/directory/integrations/dir-1/alerts?page=1&pageSize=10&ack=all')
-    expect(apiFetchMock).toHaveBeenNthCalledWith(4, '/api/admin/directory/integrations/dir-1/review-items?page=1&pageSize=25&queue=all')
-    expect(apiFetchMock).toHaveBeenNthCalledWith(5, '/api/admin/directory/integrations/dir-1/accounts?page=1&pageSize=25')
+    expect(apiFetchMock).toHaveBeenNthCalledWith(3, '/api/admin/directory/integrations/dir-1/schedule')
+    expect(apiFetchMock).toHaveBeenNthCalledWith(4, '/api/admin/directory/integrations/dir-1/alerts?page=1&pageSize=10&ack=pending')
+    expect(apiFetchMock).toHaveBeenNthCalledWith(5, '/api/admin/directory/integrations/dir-1/review-items?page=1&pageSize=25&queue=all')
+    expect(apiFetchMock).toHaveBeenNthCalledWith(6, '/api/admin/directory/integrations/dir-1/accounts?page=1&pageSize=25')
     expect(container?.textContent).toContain('DingTalk CN')
     expect(container?.textContent).toContain('账号 98')
     expect(container?.textContent).toContain('completed')
+    expect(container?.textContent).toContain('自动同步观测')
     expect(container?.textContent).toContain('最近告警')
     expect(container?.textContent).toContain('待处理队列')
     expect(container?.textContent).toContain('Union ID')
@@ -295,6 +334,9 @@ describe('DirectoryManagementView', () => {
         ok: true,
         data: { items: [] },
       }))
+      .mockResolvedValueOnce(createJsonResponse(
+        createScheduleSnapshotPayload(),
+      ))
       .mockResolvedValueOnce(createJsonResponse(
         createAlertListPayload([]),
       ))
@@ -352,6 +394,16 @@ describe('DirectoryManagementView', () => {
           ],
         },
       }))
+      .mockResolvedValueOnce(createJsonResponse(
+        createScheduleSnapshotPayload({
+          latestRunAt: '2026-04-08T02:00:00.000Z',
+          latestRunStatus: 'completed',
+          latestRunTriggerSource: 'manual',
+          latestManualRunAt: '2026-04-08T02:00:00.000Z',
+          latestManualRunStatus: 'completed',
+          nextExpectedRunAt: '2026-04-08T03:00:00.000Z',
+        }),
+      ))
       .mockResolvedValueOnce(createJsonResponse(
         createAlertListPayload([
           {
@@ -422,7 +474,8 @@ describe('DirectoryManagementView', () => {
       '/api/admin/directory/integrations/dir-1/sync',
       expect.objectContaining({ method: 'POST' }),
     )
-    expect(apiFetchMock).toHaveBeenCalledWith('/api/admin/directory/integrations/dir-1/alerts?page=1&pageSize=10&ack=all')
+    expect(apiFetchMock).toHaveBeenCalledWith('/api/admin/directory/integrations/dir-1/schedule')
+    expect(apiFetchMock).toHaveBeenCalledWith('/api/admin/directory/integrations/dir-1/alerts?page=1&pageSize=10&ack=pending')
     expect(apiFetchMock).toHaveBeenCalledWith('/api/admin/directory/integrations/dir-1/review-items?page=1&pageSize=25&queue=all')
     expect(apiFetchMock).toHaveBeenCalledWith('/api/admin/directory/integrations/dir-1/accounts?page=1&pageSize=25')
     expect(container?.textContent).toContain('目录同步已完成')
@@ -441,6 +494,9 @@ describe('DirectoryManagementView', () => {
         ok: true,
         data: { items: [] },
       }))
+      .mockResolvedValueOnce(createJsonResponse(
+        createScheduleSnapshotPayload(),
+      ))
       .mockResolvedValueOnce(createJsonResponse(
         createAlertListPayload([
           {
@@ -638,6 +694,9 @@ describe('DirectoryManagementView', () => {
         data: { items: [] },
       }))
       .mockResolvedValueOnce(createJsonResponse(
+        createScheduleSnapshotPayload(),
+      ))
+      .mockResolvedValueOnce(createJsonResponse(
         createAlertListPayload([]),
       ))
       .mockResolvedValueOnce(createJsonResponse(
@@ -692,6 +751,9 @@ describe('DirectoryManagementView', () => {
         ok: true,
         data: { items: [] },
       }))
+      .mockResolvedValueOnce(createJsonResponse(
+        createScheduleSnapshotPayload(),
+      ))
       .mockResolvedValueOnce(createJsonResponse(
         createAlertListPayload([]),
       ))
@@ -831,6 +893,9 @@ describe('DirectoryManagementView', () => {
         data: { items: [] },
       }))
       .mockResolvedValueOnce(createJsonResponse(
+        createScheduleSnapshotPayload(),
+      ))
+      .mockResolvedValueOnce(createJsonResponse(
         createAlertListPayload([]),
       ))
       .mockResolvedValueOnce(createJsonResponse(
@@ -968,6 +1033,9 @@ describe('DirectoryManagementView', () => {
         ok: true,
         data: { items: [] },
       }))
+      .mockResolvedValueOnce(createJsonResponse(
+        createScheduleSnapshotPayload(),
+      ))
       .mockResolvedValueOnce(createJsonResponse(
         createAlertListPayload([]),
       ))
@@ -1161,6 +1229,9 @@ describe('DirectoryManagementView', () => {
         data: { items: [] },
       }))
       .mockResolvedValueOnce(createJsonResponse(
+        createScheduleSnapshotPayload(),
+      ))
+      .mockResolvedValueOnce(createJsonResponse(
         createAlertListPayload([]),
       ))
       .mockResolvedValueOnce(createJsonResponse(
@@ -1228,6 +1299,9 @@ describe('DirectoryManagementView', () => {
         ok: true,
         data: { items: [] },
       }))
+      .mockResolvedValueOnce(createJsonResponse(
+        createScheduleSnapshotPayload(),
+      ))
       .mockResolvedValueOnce(createJsonResponse(
         createAlertListPayload([]),
       ))
@@ -1331,6 +1405,9 @@ describe('DirectoryManagementView', () => {
         ok: true,
         data: { items: [] },
       }))
+      .mockResolvedValueOnce(createJsonResponse(
+        createScheduleSnapshotPayload(),
+      ))
       .mockResolvedValueOnce(createJsonResponse(
         createAlertListPayload([]),
       ))
@@ -1517,6 +1594,9 @@ describe('DirectoryManagementView', () => {
         data: { items: [] },
       }))
       .mockResolvedValueOnce(createJsonResponse(
+        createScheduleSnapshotPayload(),
+      ))
+      .mockResolvedValueOnce(createJsonResponse(
         createAlertListPayload([]),
       ))
       .mockResolvedValueOnce(createJsonResponse(
@@ -1698,6 +1778,9 @@ describe('DirectoryManagementView', () => {
         ok: true,
         data: { items: [] },
       }))
+      .mockResolvedValueOnce(createJsonResponse(
+        createScheduleSnapshotPayload(),
+      ))
       .mockResolvedValueOnce(createJsonResponse(
         createAlertListPayload([]),
       ))

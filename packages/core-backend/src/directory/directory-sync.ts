@@ -1,5 +1,6 @@
 import { Logger } from '../core/logger'
 import { query, transaction } from '../db/pg'
+import { SimpleCronExpression } from '../services/SchedulerService'
 import {
   fetchDingTalkAppAccessToken,
   getDingTalkUserDetail,
@@ -308,6 +309,33 @@ export type DirectorySyncAlertSummary = {
   acknowledgedBy: string | null
   createdAt: string
   updatedAt: string
+}
+
+export type DirectorySyncObservationStatus =
+  | 'disabled'
+  | 'missing_cron'
+  | 'invalid_cron'
+  | 'configured_no_runs'
+  | 'manual_only'
+  | 'auto_observed'
+
+export type DirectorySyncScheduleSnapshot = {
+  integrationId: string
+  syncEnabled: boolean
+  scheduleCron: string | null
+  cronValid: boolean
+  nextExpectedRunAt: string | null
+  timezone: string
+  latestRunAt: string | null
+  latestRunStatus: string | null
+  latestRunTriggerSource: string | null
+  latestManualRunAt: string | null
+  latestManualRunStatus: string | null
+  latestAutoRunAt: string | null
+  latestAutoRunStatus: string | null
+  autoTriggerObserved: boolean
+  observationStatus: DirectorySyncObservationStatus
+  note: string
 }
 
 export type DirectoryAccountBindInput = {
@@ -1405,6 +1433,102 @@ export async function acknowledgeDirectorySyncAlert(
 
   if (result.rows.length === 0) return null
   return summarizeAlert(result.rows[0])
+}
+
+export async function getDirectorySyncScheduleSnapshot(
+  integrationId: string,
+): Promise<DirectorySyncScheduleSnapshot | null> {
+  const normalizedIntegrationId = normalizeText(integrationId)
+  if (!normalizedIntegrationId) throw new Error('integrationId is required')
+
+  const integration = await getIntegrationRow(normalizedIntegrationId)
+  if (!integration) return null
+
+  const [latestRunResult, latestManualRunResult, latestAutoRunResult] = await Promise.all([
+    query<DirectoryRunRow>(
+      `SELECT id, integration_id, status, started_at, finished_at, stats, error_message, triggered_by, trigger_source, created_at, updated_at
+       FROM directory_sync_runs
+       WHERE integration_id = $1
+       ORDER BY started_at DESC
+       LIMIT 1`,
+      [normalizedIntegrationId],
+    ),
+    query<DirectoryRunRow>(
+      `SELECT id, integration_id, status, started_at, finished_at, stats, error_message, triggered_by, trigger_source, created_at, updated_at
+       FROM directory_sync_runs
+       WHERE integration_id = $1
+         AND trigger_source = 'manual'
+       ORDER BY started_at DESC
+       LIMIT 1`,
+      [normalizedIntegrationId],
+    ),
+    query<DirectoryRunRow>(
+      `SELECT id, integration_id, status, started_at, finished_at, stats, error_message, triggered_by, trigger_source, created_at, updated_at
+       FROM directory_sync_runs
+       WHERE integration_id = $1
+         AND trigger_source <> 'manual'
+       ORDER BY started_at DESC
+       LIMIT 1`,
+      [normalizedIntegrationId],
+    ),
+  ])
+
+  const scheduleCron = normalizeOptionalText(integration.schedule_cron)
+  let cronValid = false
+  let nextExpectedRunAt: string | null = null
+  if (scheduleCron) {
+    try {
+      const expression = new SimpleCronExpression(scheduleCron, 'UTC')
+      const nextRun = expression.next()
+      cronValid = nextRun !== null
+      nextExpectedRunAt = nextRun?.toISOString() ?? null
+    } catch {
+      cronValid = false
+      nextExpectedRunAt = null
+    }
+  }
+
+  const latestRun = latestRunResult.rows[0]
+  const latestManualRun = latestManualRunResult.rows[0]
+  const latestAutoRun = latestAutoRunResult.rows[0]
+
+  let observationStatus: DirectorySyncObservationStatus = 'configured_no_runs'
+  let note = '已保存自动同步配置，但尚未看到任何执行记录。'
+  if (!integration.sync_enabled) {
+    observationStatus = 'disabled'
+    note = '当前仅手动同步，未启用自动执行。'
+  } else if (!scheduleCron) {
+    observationStatus = 'missing_cron'
+    note = '已启用自动同步，但尚未配置 scheduleCron。'
+  } else if (!cronValid) {
+    observationStatus = 'invalid_cron'
+    note = 'scheduleCron 无法解析，系统无法推算下一次执行时间。'
+  } else if (latestAutoRun) {
+    observationStatus = 'auto_observed'
+    note = `已观察到自动触发记录（${latestAutoRun.trigger_source}）。`
+  } else if (latestManualRun) {
+    observationStatus = 'manual_only'
+    note = '当前只观察到 manual 触发记录；尚未看到自动执行。'
+  }
+
+  return {
+    integrationId: normalizedIntegrationId,
+    syncEnabled: Boolean(integration.sync_enabled),
+    scheduleCron,
+    cronValid,
+    nextExpectedRunAt,
+    timezone: 'UTC',
+    latestRunAt: latestRun?.started_at ?? null,
+    latestRunStatus: latestRun?.status ?? null,
+    latestRunTriggerSource: latestRun?.trigger_source ?? null,
+    latestManualRunAt: latestManualRun?.started_at ?? null,
+    latestManualRunStatus: latestManualRun?.status ?? null,
+    latestAutoRunAt: latestAutoRun?.started_at ?? null,
+    latestAutoRunStatus: latestAutoRun?.status ?? null,
+    autoTriggerObserved: Boolean(latestAutoRun),
+    observationStatus,
+    note,
+  }
 }
 
 async function getDirectoryAccountSummary(accountId: string): Promise<DirectoryIntegrationAccountSummary | null> {
