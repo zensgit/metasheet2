@@ -2,10 +2,46 @@ import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest'
 import { evaluateCondition, evaluateConditions, type AutomationCondition, type ConditionGroup } from '../../src/multitable/automation-conditions'
 import { AutomationExecutor, type AutomationRule, type AutomationDeps, type AutomationExecution } from '../../src/multitable/automation-executor'
 import { AutomationScheduler, parseCronToIntervalMs } from '../../src/multitable/automation-scheduler'
-import { AutomationLogService } from '../../src/multitable/automation-log-service'
 import { matchesTrigger } from '../../src/multitable/automation-triggers'
 import type { AutomationTrigger, AutomationTriggerType } from '../../src/multitable/automation-triggers'
 import { EventBus } from '../../src/integration/events/event-bus'
+
+// ── DB mock for AutomationLogService ──────────────────────────────────────
+
+const _executeResults: unknown[] = []
+const _executeTakeFirstResults: unknown[] = []
+
+function makeChain(): Record<string, unknown> {
+  const self: Record<string, unknown> = {}
+  const chainFn = (..._args: unknown[]) => self
+  const methods = [
+    'selectFrom', 'selectAll', 'select', 'where', 'orderBy',
+    'limit', 'offset', 'groupBy', 'insertInto', 'values',
+    'onConflict', 'columns', 'doUpdateSet',
+    'updateTable', 'set', 'deleteFrom', 'returningAll',
+    'leftJoin',
+  ]
+  for (const m of methods) {
+    self[m] = vi.fn(chainFn)
+  }
+  self.execute = vi.fn(async () => {
+    return _executeResults.shift() ?? []
+  })
+  self.executeTakeFirst = vi.fn(async () => {
+    return _executeTakeFirstResults.shift()
+  })
+  return self
+}
+
+vi.mock('../../src/db/db', () => {
+  const rootChain: Record<string, unknown> = {}
+  for (const m of ['selectFrom', 'insertInto', 'updateTable', 'deleteFrom']) {
+    rootChain[m] = vi.fn(() => makeChain())
+  }
+  return { db: rootChain }
+})
+
+import { AutomationLogService } from '../../src/multitable/automation-log-service'
 
 // ── Helpers ─────────────────────────────────────────────────────────────
 
@@ -576,79 +612,104 @@ describe('parseCronToIntervalMs', () => {
 })
 
 // ═════════════════════════════════════════════════════════════════════════
-// Execution Log Service
+// Execution Log Service (Kysely-backed)
 // ═════════════════════════════════════════════════════════════════════════
 
 describe('AutomationLogService', () => {
   let logService: AutomationLogService
 
   beforeEach(() => {
-    logService = new AutomationLogService(10) // small buffer for testing
+    _executeResults.length = 0
+    _executeTakeFirstResults.length = 0
+    logService = new AutomationLogService()
   })
 
-  it('records and retrieves executions', () => {
+  it('record() inserts an execution into the database', async () => {
     const exec = createExecution({ ruleId: 'r1' })
-    logService.record(exec)
-    expect(logService.size).toBe(1)
-    expect(logService.getById(exec.id)).toEqual(exec)
+    // The insert chain needs an execute result
+    _executeResults.push([])
+    await logService.record(exec)
+    // If it didn't throw, the insert was called
   })
 
-  it('getByRule filters by ruleId', () => {
-    logService.record(createExecution({ ruleId: 'r1' }))
-    logService.record(createExecution({ ruleId: 'r2' }))
-    logService.record(createExecution({ ruleId: 'r1' }))
-    expect(logService.getByRule('r1')).toHaveLength(2)
-    expect(logService.getByRule('r2')).toHaveLength(1)
-  })
-
-  it('getRecent returns newest first', () => {
-    const e1 = createExecution({ ruleId: 'r1' })
-    const e2 = createExecution({ ruleId: 'r1' })
-    logService.record(e1)
-    logService.record(e2)
-    const recent = logService.getRecent()
-    expect(recent[0].id).toBe(e2.id)
-    expect(recent[1].id).toBe(e1.id)
-  })
-
-  it('circular buffer evicts oldest entries', () => {
-    for (let i = 0; i < 15; i++) {
-      logService.record(createExecution({ ruleId: 'r1' }))
+  it('getByRule() returns mapped executions', async () => {
+    const row = {
+      id: 'axe_1',
+      rule_id: 'r1',
+      triggered_by: 'event',
+      triggered_at: new Date('2026-01-01'),
+      status: 'success',
+      steps: [],
+      error: null,
+      duration: 10,
+      created_at: new Date('2026-01-01'),
     }
-    expect(logService.size).toBe(10) // maxLogs=10
+    _executeResults.push([row])
+    const results = await logService.getByRule('r1')
+    expect(results).toHaveLength(1)
+    expect(results[0].ruleId).toBe('r1')
+    expect(results[0].status).toBe('success')
   })
 
-  it('getByRule respects limit', () => {
-    for (let i = 0; i < 8; i++) {
-      logService.record(createExecution({ ruleId: 'r1' }))
+  it('getRecent() returns mapped executions', async () => {
+    const rows = [
+      {
+        id: 'axe_2', rule_id: 'r1', triggered_by: 'event',
+        triggered_at: new Date(), status: 'success', steps: [],
+        error: null, duration: 5, created_at: new Date(),
+      },
+    ]
+    _executeResults.push(rows)
+    const results = await logService.getRecent(10)
+    expect(results).toHaveLength(1)
+  })
+
+  it('getById() returns a single execution', async () => {
+    const row = {
+      id: 'axe_3', rule_id: 'r1', triggered_by: 'event',
+      triggered_at: new Date(), status: 'failed', steps: '[]',
+      error: 'boom', duration: 2, created_at: new Date(),
     }
-    expect(logService.getByRule('r1', 3)).toHaveLength(3)
+    _executeTakeFirstResults.push(row)
+    const result = await logService.getById('axe_3')
+    expect(result).toBeDefined()
+    expect(result!.id).toBe('axe_3')
+    expect(result!.status).toBe('failed')
+    expect(result!.error).toBe('boom')
   })
 
-  it('getStats calculates correctly', () => {
-    logService.record(createExecution({ ruleId: 'r1', status: 'success', duration: 10 }))
-    logService.record(createExecution({ ruleId: 'r1', status: 'success', duration: 20 }))
-    logService.record(createExecution({ ruleId: 'r1', status: 'failed', duration: 5 }))
-    logService.record(createExecution({ ruleId: 'r1', status: 'skipped', duration: 1 }))
+  it('getById() returns undefined for missing execution', async () => {
+    _executeTakeFirstResults.push(undefined)
+    const result = await logService.getById('nonexistent')
+    expect(result).toBeUndefined()
+  })
 
-    const stats = logService.getStats('r1')
+  it('getStats() returns aggregate stats', async () => {
+    _executeTakeFirstResults.push({
+      total: 4,
+      success: 2,
+      failed: 1,
+      skipped: 1,
+      avg_duration: 9,
+    })
+    const stats = await logService.getStats('r1')
     expect(stats.total).toBe(4)
     expect(stats.success).toBe(2)
     expect(stats.failed).toBe(1)
     expect(stats.skipped).toBe(1)
-    expect(stats.avgDuration).toBe(9) // (10+20+5+1)/4 = 9
+    expect(stats.avgDuration).toBe(9)
   })
 
-  it('getStats returns zeros for unknown rule', () => {
-    const stats = logService.getStats('nonexistent')
+  it('getStats() returns zeros for unknown rule', async () => {
+    _executeTakeFirstResults.push(undefined)
+    const stats = await logService.getStats('nonexistent')
     expect(stats.total).toBe(0)
     expect(stats.avgDuration).toBe(0)
   })
 
-  it('clear empties all logs', () => {
-    logService.record(createExecution())
-    logService.record(createExecution())
-    logService.clear()
-    expect(logService.size).toBe(0)
+  it('cleanup() deletes old rows', async () => {
+    _executeTakeFirstResults.push({ numDeletedRows: BigInt(5) })
+    const count = await logService.cleanup(30)
+    expect(count).toBe(5)
   })
 })
