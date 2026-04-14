@@ -5,6 +5,7 @@ import {
   ILogger,
   type CommentInboxItem,
   type CommentMentionCandidate,
+  type CommentPresenceViewer,
   type CommentQueryOptions,
   type CommentUnreadSummary,
 } from '../di/identifiers'
@@ -658,6 +659,75 @@ export class CommentService {
       unreadRecordCount: items.filter((item) => item.unreadCount > 0).length,
       items,
     }
+  }
+
+  /**
+   * Mark every unread comment in a spreadsheet as read for the given user.
+   * Own comments are excluded from the batch (consistent with inbox logic).
+   *
+   * @returns The number of read records that were inserted or updated.
+   */
+  async markAllCommentsRead(spreadsheetId: string, userId: string): Promise<number> {
+    const normalizedUserId = userId.trim()
+    const normalizedSheetId = spreadsheetId.trim()
+    if (!normalizedUserId || !normalizedSheetId) return 0
+
+    // Collect IDs of all unread comments (not authored by this user)
+    const unreadRows = await db
+      .selectFrom('meta_comments as c')
+      .leftJoin('meta_comment_reads as r', (join) =>
+        join.onRef('r.comment_id', '=', 'c.id').on('r.user_id', '=', normalizedUserId),
+      )
+      .select('c.id')
+      .where('c.spreadsheet_id', '=', normalizedSheetId)
+      .where('c.author_id', '!=', normalizedUserId)
+      .where(sql<boolean>`r.comment_id is null`)
+      .execute()
+
+    if (unreadRows.length === 0) return 0
+
+    const now = new Date().toISOString()
+    await db
+      .insertInto('meta_comment_reads')
+      .values(unreadRows.map((row) => ({
+        comment_id: row.id,
+        user_id: normalizedUserId,
+        read_at: now,
+        created_at: now,
+      })))
+      .onConflict((oc) =>
+        oc.columns(['comment_id', 'user_id']).doUpdateSet({ read_at: now }),
+      )
+      .execute()
+
+    return unreadRows.length
+  }
+
+  /**
+   * Return comment presence summary, optionally enriched with the identities
+   * of users currently viewing the spreadsheet's comment room.
+   *
+   * When `includeViewers` is true, a `viewers` array is appended to the result
+   * containing each distinct userId present in the sheet's comment room.
+   */
+  async getCommentPresenceSummaryWithViewers(
+    spreadsheetId: string,
+    rowIds?: string[],
+    mentionUserId?: string,
+    includeViewers?: boolean,
+  ): Promise<{ items: CommentPresenceSummary[]; total: number; viewers?: CommentPresenceViewer[] }> {
+    const base = await this.getCommentPresenceSummary(spreadsheetId, rowIds, mentionUserId)
+
+    if (!includeViewers) {
+      return base
+    }
+
+    const { buildCommentSheetRoom } = await import('./commentRooms')
+    const room = buildCommentSheetRoom({ spreadsheetId })
+    const memberIds = await this.collabService.getRoomMembers(room)
+    const viewers: CommentPresenceViewer[] = memberIds.map((userId) => ({ userId }))
+
+    return { ...base, viewers }
   }
 
   async markMentionsRead(spreadsheetId: string, userId: string): Promise<void> {

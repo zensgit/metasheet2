@@ -424,5 +424,120 @@ export function commentsRouter(injector?: Injector): Router {
     }
   })
 
+  // ── Multitable-namespaced routes (Week-2 collab UX) ─────────────────────
+
+  /**
+   * GET /api/multitable/:spreadsheetId/mention-candidates
+   *
+   * Search for @-mention candidates scoped to a spreadsheet.
+   * Query params: q (search string), limit (max 10 by default for composer UX)
+   */
+  router.get('/api/multitable/:spreadsheetId/mention-candidates', rbacGuard('comments', 'read'), async (req: Request, res: Response) => {
+    const spreadsheetId = req.params.spreadsheetId?.trim()
+    if (!spreadsheetId) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'spreadsheetId required' } })
+    }
+
+    const schema = z.object({
+      q: z.string().optional(),
+      limit: z.number().int().nonnegative().optional(),
+    })
+    const parsed = schema.safeParse({
+      q: readQueryValue(req.query.q),
+      limit: parseNumberParam(readQueryValue(req.query.limit)),
+    })
+    if (!parsed.success) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+    }
+
+    try {
+      const limit = clampLimit(parsed.data.limit ?? 10)
+      const result = await commentService.listMentionCandidates(spreadsheetId, {
+        q: parsed.data.q,
+        limit,
+      })
+      // Map to { userId, displayName } shape expected by the mention composer
+      const items = result.items.map((candidate) => ({
+        userId: candidate.id,
+        displayName: candidate.label,
+        avatarUrl: undefined as string | undefined,
+      }))
+      return res.json({ ok: true, data: { items } })
+    } catch (error) {
+      logger.error('Failed to load mention candidates', error as Error)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load mention candidates' } })
+    }
+  })
+
+  /**
+   * POST /api/multitable/:spreadsheetId/comments/mark-all-read
+   * Body: { userId: string }
+   *
+   * Batch-mark all unread comments in this spreadsheet as read for the user.
+   */
+  router.post('/api/multitable/:spreadsheetId/comments/mark-all-read', rbacGuard('comments', 'write'), async (req: Request, res: Response) => {
+    const spreadsheetId = req.params.spreadsheetId?.trim()
+    if (!spreadsheetId) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'spreadsheetId required' } })
+    }
+
+    const schema = z.object({
+      userId: z.string().min(1).optional(),
+    })
+    const parsed = schema.safeParse(req.body)
+    if (!parsed.success) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+    }
+
+    try {
+      // Prefer body userId; fall back to authenticated user
+      const userId = parsed.data.userId?.trim() || getUserId(req)
+      const count = await commentService.markAllCommentsRead(spreadsheetId, userId)
+      return res.json({ ok: true, data: { markedRead: count } })
+    } catch (error) {
+      logger.error('Failed to mark all comments as read', error as Error)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to mark all comments as read' } })
+    }
+  })
+
+  /**
+   * GET /api/multitable/:spreadsheetId/comments/presence
+   * Query params: rowIds, includeViewers (bool)
+   *
+   * Returns comment presence summary per row. When includeViewers=true the
+   * response also includes a `viewers` array of users currently in the room.
+   */
+  router.get('/api/multitable/:spreadsheetId/comments/presence', rbacGuard('comments', 'read'), async (req: Request, res: Response) => {
+    const spreadsheetId = req.params.spreadsheetId?.trim()
+    if (!spreadsheetId) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'spreadsheetId required' } })
+    }
+
+    const schema = z.object({
+      rowIds: z.array(z.string().min(1)).optional(),
+      includeViewers: z.boolean().optional(),
+    })
+    const parsed = schema.safeParse({
+      rowIds: readQueryValues(req.query.rowIds),
+      includeViewers: parseBoolean(readQueryValue(req.query.includeViewers ?? req.query.includViewers)),
+    })
+    if (!parsed.success) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+    }
+
+    try {
+      const result = await commentService.getCommentPresenceSummaryWithViewers(
+        spreadsheetId,
+        parsed.data.rowIds,
+        getUserId(req),
+        parsed.data.includeViewers ?? false,
+      )
+      return res.json({ ok: true, data: result })
+    } catch (error) {
+      logger.error('Failed to load comment presence', error as Error)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load comment presence' } })
+    }
+  })
+
   return router
 }
