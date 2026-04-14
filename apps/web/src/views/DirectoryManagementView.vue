@@ -147,6 +147,206 @@
         <section v-if="selectedIntegration" class="directory-admin__section">
           <div class="directory-admin__section-head">
             <div>
+              <h3>最近告警</h3>
+              <p class="directory-admin__hint">展示最近 10 条目录同步告警，支持按确认状态筛选并逐条确认。</p>
+            </div>
+            <div class="directory-admin__actions">
+              <div class="directory-admin__filters directory-admin__filters--compact" role="group" aria-label="告警确认状态筛选">
+                <button
+                  v-for="option in alertFilterOptions"
+                  :key="option.value"
+                  class="directory-admin__filter"
+                  :class="{ 'directory-admin__filter--active': alertFilter === option.value }"
+                  type="button"
+                  @click="alertFilter = option.value"
+                >
+                  {{ option.label }}
+                </button>
+              </div>
+              <button class="directory-admin__button directory-admin__button--secondary" type="button" :disabled="loadingAlerts" @click="void loadAlerts(selectedIntegration.id)">
+                {{ loadingAlerts ? '刷新中...' : '刷新告警' }}
+              </button>
+            </div>
+          </div>
+
+          <div v-if="loadingAlerts" class="directory-admin__empty">告警加载中...</div>
+          <div v-else-if="alerts.length === 0" class="directory-admin__empty">当前筛选下暂无告警</div>
+          <article v-for="alert in alerts" :key="alert.id" class="directory-admin__alert">
+            <div class="directory-admin__alert-head">
+              <div>
+                <strong>{{ alert.code }}</strong>
+                <p class="directory-admin__hint">{{ alert.message }}</p>
+              </div>
+              <div class="directory-admin__chips">
+                <span class="directory-admin__chip" :class="readAlertLevelClass(alert.level)">
+                  {{ readAlertLevelLabel(alert.level) }}
+                </span>
+                <span class="directory-admin__chip" :class="alert.acknowledgedAt ? 'directory-admin__chip--success' : 'directory-admin__chip--warning'">
+                  {{ alert.acknowledgedAt ? '已确认' : '待确认' }}
+                </span>
+              </div>
+            </div>
+
+            <div class="directory-admin__alert-grid">
+              <p class="directory-admin__hint"><strong>创建时间：</strong>{{ formatDateTime(alert.createdAt) }}</p>
+              <p class="directory-admin__hint"><strong>确认时间：</strong>{{ formatDateTime(alert.acknowledgedAt) }}</p>
+            </div>
+
+            <div class="directory-admin__actions">
+              <button
+                class="directory-admin__button directory-admin__button--secondary"
+                type="button"
+                :disabled="acknowledgingAlertId === alert.id || Boolean(alert.acknowledgedAt)"
+                @click="void acknowledgeAlert(alert.id)"
+              >
+                {{ alert.acknowledgedAt ? '已确认' : acknowledgingAlertId === alert.id ? '确认中...' : '确认告警' }}
+              </button>
+            </div>
+          </article>
+        </section>
+
+        <section v-if="selectedIntegration" class="directory-admin__section">
+          <div class="directory-admin__section-head">
+            <div>
+              <h3>待处理队列</h3>
+              <p class="directory-admin__hint">先处理未绑定、目录停用但仍已绑定、以及缺身份键的成员。批量停权只会作用到当前选中且仍绑定本地用户的成员。</p>
+            </div>
+            <button class="directory-admin__button directory-admin__button--secondary" type="button" :disabled="loadingReviewItems" @click="void loadReviewItems(selectedIntegration.id)">
+              {{ loadingReviewItems ? '刷新中...' : '刷新队列' }}
+            </button>
+          </div>
+
+          <div class="directory-admin__filters" role="group" aria-label="待处理队列筛选">
+            <button
+              v-for="option in reviewQueueOptions"
+              :key="option.value"
+              class="directory-admin__filter"
+              :class="{ 'directory-admin__filter--active': reviewQueue === option.value }"
+              type="button"
+              @click="reviewQueue = option.value"
+            >
+              {{ option.label }} {{ reviewCounts[option.countKey] }}
+            </button>
+          </div>
+
+          <div v-if="reviewItems.length > 0" class="directory-admin__bulkbar">
+            <p class="directory-admin__hint">
+              已选择 {{ selectedReviewAccountIds.length }} 个待处理成员，其中 {{ selectedReviewLinkedAccountIds.length }} 个仍绑定本地用户。
+            </p>
+            <div class="directory-admin__actions">
+              <button class="directory-admin__button directory-admin__button--secondary" type="button" :disabled="loadingReviewItems || reviewItems.length === 0" @click="clearReviewSelection()">
+                清空选择
+              </button>
+              <button class="directory-admin__button directory-admin__button--secondary" type="button" :disabled="loadingReviewItems || reviewItems.length === 0" @click="selectVisibleReviewItems()">
+                选择当前队列
+              </button>
+              <label class="directory-admin__toggle directory-admin__toggle--compact">
+                <input v-model="reviewDisableGrant" type="checkbox" />
+                <span>解绑时同时关闭钉钉登录</span>
+              </label>
+              <button class="directory-admin__button" type="button" :disabled="batchUnbinding || selectedReviewLinkedAccountIds.length === 0" @click="void batchUnbindReviewItems()">
+                {{ batchUnbinding ? '处理中...' : '批量停权处理' }}
+              </button>
+              <button class="directory-admin__button" type="button" :disabled="batchBinding || selectedReviewBindingBindings.length === 0" @click="void batchBindReviewItems()">
+                {{ batchBinding ? '处理中...' : `批量绑定用户 (${selectedReviewBindingBindings.length})` }}
+              </button>
+            </div>
+          </div>
+
+          <div v-if="loadingReviewItems" class="directory-admin__empty">待处理队列加载中...</div>
+          <div v-else-if="reviewItems.length === 0" class="directory-admin__empty">当前筛选下暂无待处理成员</div>
+          <article v-for="account in reviewItems" :key="account.id" class="directory-admin__account directory-admin__account--review">
+            <div class="directory-admin__account-head">
+              <label class="directory-admin__toggle directory-admin__toggle--compact">
+                <input :checked="selectedReviewAccountIds.includes(account.id)" type="checkbox" @change="toggleReviewSelection(account.id, $event)" />
+                <span>选择</span>
+              </label>
+              <div>
+                <strong>{{ account.name }}</strong>
+                <p class="directory-admin__hint">
+                  {{ account.localUser ? `本地用户：${account.localUser.email || account.localUser.id}` : '未绑定本地用户，请在成员表中完成绑定' }}
+                </p>
+              </div>
+              <div class="directory-admin__chips">
+                <span v-for="reason in account.reviewReasons" :key="`${account.id}-${reason}`" class="directory-admin__chip directory-admin__chip--warning">
+                  {{ readReviewReasonLabel(reason) }}
+                </span>
+              </div>
+            </div>
+
+            <div class="directory-admin__account-grid">
+              <p class="directory-admin__hint"><strong>用户 ID：</strong>{{ account.externalUserId }}</p>
+              <p class="directory-admin__hint"><strong>Union ID：</strong>{{ account.unionId || '未返回' }}</p>
+              <p class="directory-admin__hint"><strong>Open ID：</strong>{{ account.openId || '未返回' }}</p>
+              <p class="directory-admin__hint"><strong>目录状态：</strong>{{ account.isActive ? '启用' : '停用' }}</p>
+            </div>
+
+            <div class="directory-admin__form-grid directory-admin__form-grid--account">
+              <label class="directory-admin__field">
+                <span>绑定到本地用户 ID / 邮箱</span>
+                <input
+                  :value="readReviewBindingDraft(account)"
+                  class="directory-admin__input"
+                  type="text"
+                  placeholder="例如 user-123 或 alpha@example.com"
+                  @input="onReviewBindingDraftInput(account.id, $event)"
+                  @focus="clearReviewBindingSearch(account.id)"
+                />
+              </label>
+              <label class="directory-admin__toggle directory-admin__toggle--compact">
+                <input
+                  :checked="readReviewGrantToggle(account.id)"
+                  type="checkbox"
+                  @change="onReviewGrantToggleChange(account.id, $event)"
+                />
+                <span>绑定后同时开通钉钉登录</span>
+              </label>
+            </div>
+
+            <div class="directory-admin__actions">
+              <button class="directory-admin__button directory-admin__button--secondary" type="button" @click="void focusReviewItem(account)">
+                在成员表中定位
+              </button>
+              <button
+                class="directory-admin__button directory-admin__button--secondary"
+                type="button"
+                :disabled="readReviewBindingDraft(account).trim().length === 0 || readReviewBindingSearchLoading(account.id)"
+                @click="void searchReviewLocalUsers(account.id)"
+              >
+                {{ readReviewBindingSearchLoading(account.id) ? '搜索中...' : '搜索候选用户' }}
+              </button>
+              <button
+                class="directory-admin__button"
+                type="button"
+                :disabled="reviewBindingAccountId === account.id || readReviewBindingDraft(account).trim().length === 0"
+                @click="void bindReviewAccount(account)"
+              >
+                {{ reviewBindingAccountId === account.id ? '绑定中...' : account.localUser ? '更新绑定' : '快速绑定' }}
+              </button>
+            </div>
+
+            <p v-if="readReviewBindingSearchError(account.id)" class="directory-admin__status directory-admin__status--error">
+              {{ readReviewBindingSearchError(account.id) }}
+            </p>
+            <div v-if="readReviewBindingSearchResults(account.id).length > 0" class="directory-admin__search-results">
+              <button
+                v-for="user in readReviewBindingSearchResults(account.id)"
+                :key="user.id"
+                class="directory-admin__search-result"
+                type="button"
+                @click="chooseReviewLocalUser(account.id, user)"
+              >
+                <strong>{{ user.name || user.email }}</strong>
+                <span>{{ user.email }}</span>
+                <small>{{ user.id }} · {{ user.role }} · {{ user.is_active ? 'active' : 'inactive' }}</small>
+              </button>
+            </div>
+          </article>
+        </section>
+
+        <section v-if="selectedIntegration" class="directory-admin__section">
+          <div class="directory-admin__section-head">
+            <div>
               <h3>成员账号</h3>
               <p class="directory-admin__hint">展示同步后的钉钉成员、钉钉 ID 与本地绑定状态；支持按本地用户 ID 或邮箱手工绑定，并按页管理大规模组织。</p>
             </div>
@@ -355,7 +555,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { apiFetch } from '../utils/api'
 
 type DirectoryIntegration = {
@@ -421,6 +621,42 @@ type DirectoryAccount = {
   departmentPaths: string[]
 }
 
+type DirectoryReviewReason = 'needs_binding' | 'inactive_linked' | 'missing_identity'
+
+type DirectoryReviewItem = DirectoryAccount & {
+  reviewReasons: DirectoryReviewReason[]
+}
+
+type DirectoryReviewCounts = {
+  total: number
+  needsBinding: number
+  inactiveLinked: number
+  missingIdentity: number
+}
+
+type DirectoryAlertFilter = 'all' | 'pending' | 'acknowledged'
+
+type DirectorySyncAlert = {
+  id: string
+  integrationId: string
+  runId: string | null
+  level: string
+  code: string
+  message: string
+  details: Record<string, unknown>
+  sentToWebhook: boolean
+  acknowledgedAt: string | null
+  acknowledgedBy: string | null
+  createdAt: string
+  updatedAt: string
+}
+
+type DirectoryAlertCounts = {
+  total: number
+  pending: number
+  acknowledged: number
+}
+
 type LocalUserOption = {
   id: string
   email: string
@@ -464,6 +700,8 @@ type DirectoryDraft = {
 const integrations = ref<DirectoryIntegration[]>([])
 const runs = ref<DirectoryRun[]>([])
 const accounts = ref<DirectoryAccount[]>([])
+const reviewItems = ref<DirectoryReviewItem[]>([])
+const alerts = ref<DirectorySyncAlert[]>([])
 const accountPageSizeOptions = [25, 50, 100]
 const accountPage = ref(1)
 const accountPageSize = ref(25)
@@ -472,18 +710,44 @@ const selectedIntegrationId = ref('')
 const loading = ref(false)
 const loadingRuns = ref(false)
 const loadingAccounts = ref(false)
+const loadingReviewItems = ref(false)
+const loadingAlerts = ref(false)
 const busy = ref(false)
 const bindingAccountId = ref('')
 const unbindingAccountId = ref('')
+const acknowledgingAlertId = ref('')
+const batchUnbinding = ref(false)
 const status = ref('')
 const statusTone = ref<'info' | 'error'>('info')
 const testResult = ref<TestResult | null>(null)
 const accountQuery = ref('')
+const reviewQueue = ref<'all' | DirectoryReviewReason>('all')
+const alertFilter = ref<DirectoryAlertFilter>('all')
+const reviewCounts = ref<DirectoryReviewCounts>({
+  total: 0,
+  needsBinding: 0,
+  inactiveLinked: 0,
+  missingIdentity: 0,
+})
+const alertCounts = ref<DirectoryAlertCounts>({
+  total: 0,
+  pending: 0,
+  acknowledged: 0,
+})
+const selectedReviewAccountIds = ref<string[]>([])
+const reviewDisableGrant = ref(true)
+const batchBinding = ref(false)
+const reviewBindingAccountId = ref('')
 const bindingDrafts = reactive<Record<string, string>>({})
 const userSearchResults = reactive<Record<string, LocalUserOption[]>>({})
 const userSearchLoading = reactive<Record<string, boolean>>({})
 const userSearchError = reactive<Record<string, string>>({})
 const grantToggles = reactive<Record<string, boolean>>({})
+const reviewBindingDrafts = reactive<Record<string, string>>({})
+const reviewUserSearchResults = reactive<Record<string, LocalUserOption[]>>({})
+const reviewUserSearchLoading = reactive<Record<string, boolean>>({})
+const reviewUserSearchError = reactive<Record<string, string>>({})
+const reviewGrantToggles = reactive<Record<string, boolean>>({})
 
 const draft = reactive<DirectoryDraft>({
   name: '',
@@ -513,6 +777,28 @@ const accountRangeEnd = computed(() => (
     ? 0
     : Math.min(accountPage.value * accountPageSize.value, accountTotal.value)
 ))
+const selectedReviewLinkedAccountIds = computed(() => reviewItems.value
+  .filter((item) => selectedReviewAccountIds.value.includes(item.id) && item.localUser)
+  .map((item) => item.id))
+const selectedReviewBindingBindings = computed(() => reviewItems.value
+  .filter((item) => selectedReviewAccountIds.value.includes(item.id))
+  .map((item) => ({
+    accountId: item.id,
+    localUserRef: readReviewBindingDraftByAccountId(item.id).trim(),
+    enableDingTalkGrant: readReviewGrantToggle(item.id),
+  }))
+  .filter((item) => item.localUserRef.length > 0))
+const reviewQueueOptions = [
+  { value: 'all', label: '全部待处理', countKey: 'total' },
+  { value: 'needs_binding', label: '待绑定', countKey: 'needsBinding' },
+  { value: 'inactive_linked', label: '目录停用但仍已绑定', countKey: 'inactiveLinked' },
+  { value: 'missing_identity', label: '缺身份键', countKey: 'missingIdentity' },
+] as const
+const alertFilterOptions = [
+  { value: 'pending', label: '待确认', countKey: 'pending' },
+  { value: 'acknowledged', label: '已确认', countKey: 'acknowledged' },
+  { value: 'all', label: '全部告警', countKey: 'total' },
+] as const
 
 const canSave = computed(() =>
   draft.name.trim().length > 0 &&
@@ -531,15 +817,40 @@ function resetDraft() {
   testResult.value = null
   runs.value = []
   accounts.value = []
+  reviewItems.value = []
+  alerts.value = []
   accountPage.value = 1
   accountPageSize.value = accountPageSizeOptions[0]
   accountTotal.value = 0
   accountQuery.value = ''
+  reviewQueue.value = 'all'
+  alertFilter.value = 'all'
+  reviewCounts.value = {
+    total: 0,
+    needsBinding: 0,
+    inactiveLinked: 0,
+    missingIdentity: 0,
+  }
+  alertCounts.value = {
+    total: 0,
+    pending: 0,
+    acknowledged: 0,
+  }
+  selectedReviewAccountIds.value = []
+  reviewDisableGrant.value = true
   for (const key of Object.keys(bindingDrafts)) delete bindingDrafts[key]
   for (const key of Object.keys(userSearchResults)) delete userSearchResults[key]
   for (const key of Object.keys(userSearchLoading)) delete userSearchLoading[key]
   for (const key of Object.keys(userSearchError)) delete userSearchError[key]
   for (const key of Object.keys(grantToggles)) delete grantToggles[key]
+  for (const key of Object.keys(reviewBindingDrafts)) delete reviewBindingDrafts[key]
+  for (const key of Object.keys(reviewUserSearchResults)) delete reviewUserSearchResults[key]
+  for (const key of Object.keys(reviewUserSearchLoading)) delete reviewUserSearchLoading[key]
+  for (const key of Object.keys(reviewUserSearchError)) delete reviewUserSearchError[key]
+  for (const key of Object.keys(reviewGrantToggles)) delete reviewGrantToggles[key]
+  batchBinding.value = false
+  reviewBindingAccountId.value = ''
+  acknowledgingAlertId.value = ''
   draft.name = ''
   draft.corpId = ''
   draft.appKey = ''
@@ -577,6 +888,8 @@ function selectIntegration(integrationId: string) {
   applyIntegrationToDraft(integration)
   void Promise.all([
     loadRuns(integrationId),
+    loadAlerts(integrationId),
+    loadReviewItems(integrationId),
     loadAccounts(integrationId),
   ])
 }
@@ -704,6 +1017,171 @@ function clearBindingSearch(accountId: string) {
   setBindingSearchState(accountId, { results: [], error: '' })
 }
 
+function clearReviewSelection() {
+  selectedReviewAccountIds.value = []
+}
+
+function selectVisibleReviewItems() {
+  selectedReviewAccountIds.value = reviewItems.value.map((item) => item.id)
+}
+
+function toggleReviewSelection(accountId: string, event: Event) {
+  const target = event.target
+  const checked = target instanceof HTMLInputElement ? target.checked : false
+  if (checked) {
+    if (!selectedReviewAccountIds.value.includes(accountId)) {
+      selectedReviewAccountIds.value = [...selectedReviewAccountIds.value, accountId]
+    }
+    return
+  }
+  selectedReviewAccountIds.value = selectedReviewAccountIds.value.filter((item) => item !== accountId)
+}
+
+function readReviewReasonLabel(reason: DirectoryReviewReason): string {
+  if (reason === 'needs_binding') return '待绑定'
+  if (reason === 'inactive_linked') return '目录停用但仍已绑定'
+  return '缺 openId / unionId'
+}
+
+function readAlertLevelLabel(level: string | null | undefined): string {
+  const normalizedLevel = typeof level === 'string' ? level.trim().toLowerCase() : ''
+  if (normalizedLevel === 'critical' || normalizedLevel === 'error') return '严重'
+  if (normalizedLevel === 'warning') return '警告'
+  return '信息'
+}
+
+function readAlertLevelClass(level: string | null | undefined): string {
+  const normalizedLevel = typeof level === 'string' ? level.trim().toLowerCase() : ''
+  if (normalizedLevel === 'critical' || normalizedLevel === 'error') return 'directory-admin__chip--critical'
+  if (normalizedLevel === 'warning') return 'directory-admin__chip--warning'
+  return 'directory-admin__chip--info'
+}
+
+function reviewBindingStateKey(accountId: string): string {
+  return `${selectedIntegrationId.value || 'review'}:${accountId}`
+}
+
+function readReviewBindingDraft(account: DirectoryReviewItem): string {
+  const key = reviewBindingStateKey(account.id)
+  return reviewBindingDrafts[key] ?? account.localUser?.email ?? account.localUser?.id ?? ''
+}
+
+function readReviewBindingDraftByAccountId(accountId: string): string {
+  const account = reviewItems.value.find((item) => item.id === accountId)
+  if (!account) return reviewBindingDrafts[reviewBindingStateKey(accountId)] ?? ''
+  return readReviewBindingDraft(account)
+}
+
+function updateReviewBindingDraft(accountId: string, value: string) {
+  reviewBindingDrafts[reviewBindingStateKey(accountId)] = value
+}
+
+function onReviewBindingDraftInput(accountId: string, event: Event) {
+  const target = event.target
+  updateReviewBindingDraft(accountId, target instanceof HTMLInputElement ? target.value : '')
+  clearReviewBindingSearch(accountId)
+}
+
+function readReviewBindingSearchResults(accountId: string): LocalUserOption[] {
+  return reviewUserSearchResults[reviewBindingStateKey(accountId)] ?? []
+}
+
+function readReviewBindingSearchLoading(accountId: string): boolean {
+  return reviewUserSearchLoading[reviewBindingStateKey(accountId)] ?? false
+}
+
+function readReviewBindingSearchError(accountId: string): string {
+  return reviewUserSearchError[reviewBindingStateKey(accountId)] ?? ''
+}
+
+function setReviewBindingSearchState(accountId: string, state: {
+  loading?: boolean
+  error?: string
+  results?: LocalUserOption[]
+}) {
+  const key = reviewBindingStateKey(accountId)
+  if (typeof state.loading === 'boolean') reviewUserSearchLoading[key] = state.loading
+  if (typeof state.error === 'string') reviewUserSearchError[key] = state.error
+  else delete reviewUserSearchError[key]
+  if (Array.isArray(state.results)) reviewUserSearchResults[key] = state.results
+}
+
+async function searchReviewLocalUsers(accountId: string) {
+  const term = readReviewBindingDraftByAccountId(accountId).trim()
+  if (!term) {
+    setReviewBindingSearchState(accountId, { results: [], error: '', loading: false })
+    return
+  }
+
+  setReviewBindingSearchState(accountId, { loading: true, error: '' })
+  try {
+    const params = new URLSearchParams({ page: '1', pageSize: '8', q: term })
+    const response = await apiFetch(`/api/admin/users?${params.toString()}`)
+    const body = await readJson(response)
+    if (!response.ok) throw new Error(readApiError(body, '搜索本地用户失败'))
+    const items = Array.isArray(body?.data?.items) ? body.data.items : []
+    setReviewBindingSearchState(accountId, { results: items, loading: false })
+  } catch (error) {
+    setReviewBindingSearchState(accountId, {
+      results: [],
+      loading: false,
+      error: error instanceof Error ? error.message : '搜索本地用户失败',
+    })
+  }
+}
+
+function chooseReviewLocalUser(accountId: string, user: LocalUserOption) {
+  updateReviewBindingDraft(accountId, user.email || user.id)
+  setReviewBindingSearchState(accountId, { results: [] })
+}
+
+function readReviewGrantToggle(accountId: string): boolean {
+  const key = reviewBindingStateKey(accountId)
+  return reviewGrantToggles[key] ?? true
+}
+
+function updateReviewGrantToggle(accountId: string, value: boolean) {
+  reviewGrantToggles[reviewBindingStateKey(accountId)] = value
+}
+
+function onReviewGrantToggleChange(accountId: string, event: Event) {
+  const target = event.target
+  updateReviewGrantToggle(accountId, target instanceof HTMLInputElement ? target.checked : true)
+}
+
+function clearReviewBindingSearch(accountId: string) {
+  setReviewBindingSearchState(accountId, { results: [], error: '' })
+}
+
+async function focusReviewItem(account: DirectoryReviewItem) {
+  if (!selectedIntegration.value) return
+  accountQuery.value = account.externalUserId
+  accountPage.value = 1
+  await loadAccounts(selectedIntegration.value.id)
+  setStatus(`已在成员表中定位目录成员 ${account.name}`)
+}
+
+async function submitReviewBindings(
+  bindings: Array<{ accountId: string; localUserRef: string; enableDingTalkGrant: boolean }>,
+  successMessage: string,
+) {
+  if (!selectedIntegration.value || bindings.length === 0) return
+
+  const response = await apiFetch('/api/admin/directory/accounts/batch-bind', {
+    method: 'POST',
+    body: JSON.stringify({ bindings }),
+  })
+  const body = await readJson(response)
+  if (!response.ok) throw new Error(readApiError(body, '批量绑定失败'))
+
+  await Promise.all([
+    loadIntegrations(),
+    loadReviewItems(selectedIntegration.value.id),
+    loadAccounts(selectedIntegration.value.id),
+  ])
+  setStatus(successMessage)
+}
+
 function buildPayload() {
   return {
     integrationId: selectedIntegration.value?.id,
@@ -779,12 +1257,62 @@ async function syncIntegration() {
     await Promise.all([
       loadIntegrations(),
       loadRuns(selectedIntegration.value.id),
+      loadAlerts(selectedIntegration.value.id),
+      loadReviewItems(selectedIntegration.value.id),
       loadAccounts(selectedIntegration.value.id),
     ])
   } catch (error) {
     setStatus(error instanceof Error ? error.message : '目录同步失败', 'error')
   } finally {
     busy.value = false
+  }
+}
+
+async function loadAlerts(integrationId: string) {
+  loadingAlerts.value = true
+  try {
+    const params = new URLSearchParams({
+      page: '1',
+      pageSize: '10',
+      ack: alertFilter.value,
+    })
+    const response = await apiFetch(`/api/admin/directory/integrations/${integrationId}/alerts?${params.toString()}`)
+    const body = await readJson(response)
+    if (!response.ok) throw new Error(readApiError(body, '加载目录告警失败'))
+    alerts.value = Array.isArray(body?.data?.items) ? body.data.items : []
+    alertCounts.value = {
+      total: Number(body?.data?.counts?.total ?? 0),
+      pending: Number(body?.data?.counts?.pending ?? 0),
+      acknowledged: Number(body?.data?.counts?.acknowledged ?? 0),
+    }
+  } catch (error) {
+    alerts.value = []
+    alertCounts.value = {
+      total: 0,
+      pending: 0,
+      acknowledged: 0,
+    }
+    setStatus(error instanceof Error ? error.message : '加载目录告警失败', 'error')
+  } finally {
+    loadingAlerts.value = false
+  }
+}
+
+async function acknowledgeAlert(alertId: string) {
+  if (!selectedIntegration.value) return
+  acknowledgingAlertId.value = alertId
+  try {
+    const response = await apiFetch(`/api/admin/directory/alerts/${alertId}/ack`, {
+      method: 'POST',
+    })
+    const body = await readJson(response)
+    if (!response.ok) throw new Error(readApiError(body, '确认目录告警失败'))
+    await loadAlerts(selectedIntegration.value.id)
+    setStatus('目录告警已确认')
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : '确认目录告警失败', 'error')
+  } finally {
+    acknowledgingAlertId.value = ''
   }
 }
 
@@ -847,6 +1375,39 @@ async function loadAccounts(integrationId: string) {
   }
 }
 
+async function loadReviewItems(integrationId: string) {
+  loadingReviewItems.value = true
+  try {
+    const params = new URLSearchParams({
+      page: '1',
+      pageSize: '25',
+      queue: reviewQueue.value,
+    })
+    const response = await apiFetch(`/api/admin/directory/integrations/${integrationId}/review-items?${params.toString()}`)
+    const body = await readJson(response)
+    if (!response.ok) throw new Error(readApiError(body, '加载待处理队列失败'))
+    reviewItems.value = Array.isArray(body?.data?.items) ? body.data.items : []
+    reviewCounts.value = {
+      total: Number(body?.data?.counts?.total ?? 0),
+      needsBinding: Number(body?.data?.counts?.needsBinding ?? 0),
+      inactiveLinked: Number(body?.data?.counts?.inactiveLinked ?? 0),
+      missingIdentity: Number(body?.data?.counts?.missingIdentity ?? 0),
+    }
+    selectedReviewAccountIds.value = selectedReviewAccountIds.value.filter((accountId) => reviewItems.value.some((item) => item.id === accountId))
+  } catch (error) {
+    reviewItems.value = []
+    reviewCounts.value = {
+      total: 0,
+      needsBinding: 0,
+      inactiveLinked: 0,
+      missingIdentity: 0,
+    }
+    setStatus(error instanceof Error ? error.message : '加载待处理队列失败', 'error')
+  } finally {
+    loadingReviewItems.value = false
+  }
+}
+
 async function loadRuns(integrationId: string) {
   loadingRuns.value = true
   try {
@@ -884,6 +1445,7 @@ async function bindAccount(account: DirectoryAccount) {
     setStatus(`目录成员 ${account.name} 已绑定到本地用户`)
     if (selectedIntegration.value) {
       await loadIntegrations()
+      await loadReviewItems(selectedIntegration.value.id)
       await loadAccounts(selectedIntegration.value.id)
     }
   } catch (error) {
@@ -918,12 +1480,81 @@ async function unbindAccount(account: DirectoryAccount) {
     setStatus(`目录成员 ${account.name} 已解除绑定`)
     if (selectedIntegration.value) {
       await loadIntegrations()
+      await loadReviewItems(selectedIntegration.value.id)
       await loadAccounts(selectedIntegration.value.id)
     }
   } catch (error) {
     setStatus(error instanceof Error ? error.message : '解除绑定失败', 'error')
   } finally {
     unbindingAccountId.value = ''
+  }
+}
+
+async function batchUnbindReviewItems() {
+  if (!selectedIntegration.value) return
+  const accountIds = selectedReviewLinkedAccountIds.value
+  if (accountIds.length === 0) return
+
+  batchUnbinding.value = true
+  try {
+    const response = await apiFetch('/api/admin/directory/accounts/batch-unbind', {
+      method: 'POST',
+      body: JSON.stringify({
+        accountIds,
+        disableDingTalkGrant: reviewDisableGrant.value,
+      }),
+    })
+    const body = await readJson(response)
+    if (!response.ok) throw new Error(readApiError(body, '批量停权失败'))
+
+    clearReviewSelection()
+    await loadIntegrations()
+    await loadReviewItems(selectedIntegration.value.id)
+    await loadAccounts(selectedIntegration.value.id)
+    setStatus(reviewDisableGrant.value
+      ? `已批量解除 ${accountIds.length} 个目录成员绑定并关闭钉钉登录`
+      : `已批量解除 ${accountIds.length} 个目录成员绑定`)
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : '批量停权失败', 'error')
+  } finally {
+    batchUnbinding.value = false
+  }
+}
+
+async function bindReviewAccount(account: DirectoryReviewItem) {
+  const localUserRef = readReviewBindingDraft(account).trim()
+  if (!selectedIntegration.value || localUserRef.length === 0) return
+
+  reviewBindingAccountId.value = account.id
+  try {
+    await submitReviewBindings([
+      {
+        accountId: account.id,
+        localUserRef,
+        enableDingTalkGrant: readReviewGrantToggle(account.id),
+      },
+    ], `目录成员 ${account.name} 已绑定到本地用户`)
+    clearReviewSelection()
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : '绑定目录成员失败', 'error')
+  } finally {
+    reviewBindingAccountId.value = ''
+  }
+}
+
+async function batchBindReviewItems() {
+  if (!selectedIntegration.value) return
+  const bindings = selectedReviewBindingBindings.value
+  if (bindings.length === 0) return
+
+  batchBinding.value = true
+  try {
+    await submitReviewBindings(bindings, `已批量绑定 ${bindings.length} 个目录成员`)
+    clearReviewSelection()
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : '批量绑定失败', 'error')
+  } finally {
+    batchBinding.value = false
   }
 }
 
@@ -940,8 +1571,8 @@ function formatDateTime(value: string | null): string {
   })
 }
 
-function readNumericStat(stats: Record<string, unknown>, key: string): number {
-  const value = stats[key]
+function readNumericStat(stats: Record<string, unknown> | null | undefined, key: string): number {
+  const value = stats && typeof stats === 'object' ? stats[key] : undefined
   if (typeof value === 'number') return value
   if (typeof value === 'string' && value.trim().length > 0 && !Number.isNaN(Number(value))) return Number(value)
   return 0
@@ -955,6 +1586,17 @@ function formatSampleUsers(users: Array<{ userId: string; name: string }>, hasMo
 
 onMounted(() => {
   void loadIntegrations()
+})
+
+watch(reviewQueue, async () => {
+  if (!selectedIntegration.value) return
+  clearReviewSelection()
+  await loadReviewItems(selectedIntegration.value.id)
+})
+
+watch(alertFilter, async () => {
+  if (!selectedIntegration.value) return
+  await loadAlerts(selectedIntegration.value.id)
 })
 </script>
 
@@ -1098,6 +1740,41 @@ onMounted(() => {
   gap: 8px;
 }
 
+.directory-admin__filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.directory-admin__filters--compact {
+  max-width: min(100%, 480px);
+}
+
+.directory-admin__filter {
+  border: 1px solid #cbd5e1;
+  border-radius: 999px;
+  background: #fff;
+  color: #1e293b;
+  padding: 8px 14px;
+  cursor: pointer;
+}
+
+.directory-admin__filter--active {
+  border-color: #1d4ed8;
+  background: #dbeafe;
+  color: #1d4ed8;
+}
+
+.directory-admin__bulkbar {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px 16px;
+  border: 1px solid #bfdbfe;
+  border-radius: 16px;
+  background: linear-gradient(180deg, #eff6ff 0%, #f8fafc 100%);
+}
+
 .directory-admin__chip,
 .directory-admin__badge {
   display: inline-flex;
@@ -1112,6 +1789,26 @@ onMounted(() => {
 .directory-admin__badge--inactive {
   background: #fef3c7;
   color: #92400e;
+}
+
+.directory-admin__chip--warning {
+  background: #fef3c7;
+  color: #92400e;
+}
+
+.directory-admin__chip--success {
+  background: #dcfce7;
+  color: #166534;
+}
+
+.directory-admin__chip--critical {
+  background: #fee2e2;
+  color: #991b1b;
+}
+
+.directory-admin__chip--info {
+  background: #dbeafe;
+  color: #1d4ed8;
 }
 
 .directory-admin__status {
@@ -1138,6 +1835,29 @@ onMounted(() => {
   border-radius: 14px;
   padding: 14px;
   background: #f8fafc;
+}
+
+.directory-admin__alert {
+  border: 1px solid #e2e8f0;
+  border-radius: 16px;
+  padding: 16px;
+  background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.directory-admin__alert-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.directory-admin__alert-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px 16px;
 }
 
 .directory-admin__account {

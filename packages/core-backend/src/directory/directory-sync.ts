@@ -64,6 +64,21 @@ type DirectoryRunRow = {
   updated_at: string
 }
 
+type DirectorySyncAlertRow = {
+  id: string
+  integration_id: string
+  run_id: string | null
+  level: string
+  code: string
+  message: string
+  details: JsonRecord | string | null
+  sent_to_webhook: boolean
+  acknowledged_at: string | null
+  acknowledged_by: string | null
+  created_at: string
+  updated_at: string
+}
+
 type DirectoryDepartmentRow = {
   id: string
   external_department_id: string
@@ -264,6 +279,37 @@ export type DirectoryIntegrationAccountSummary = {
   departmentPaths: string[]
 }
 
+export type DirectoryReviewReason = 'needs_binding' | 'inactive_linked' | 'missing_identity'
+export type DirectoryReviewQueue = 'all' | DirectoryReviewReason
+
+export type DirectoryIntegrationReviewItem = DirectoryIntegrationAccountSummary & {
+  reviewReasons: DirectoryReviewReason[]
+}
+
+export type DirectoryIntegrationReviewCounts = {
+  total: number
+  needsBinding: number
+  inactiveLinked: number
+  missingIdentity: number
+}
+
+export type DirectorySyncAlertFilter = 'all' | 'pending' | 'acknowledged'
+
+export type DirectorySyncAlertSummary = {
+  id: string
+  integrationId: string
+  runId: string | null
+  level: string
+  code: string
+  message: string
+  details: JsonRecord
+  sentToWebhook: boolean
+  acknowledgedAt: string | null
+  acknowledgedBy: string | null
+  createdAt: string
+  updatedAt: string
+}
+
 export type DirectoryAccountBindInput = {
   localUserRef: string
   adminUserId: string
@@ -272,6 +318,7 @@ export type DirectoryAccountBindInput = {
 
 export type DirectoryAccountUnbindInput = {
   adminUserId: string
+  disableDingTalkGrant?: boolean
 }
 
 export type DirectoryAccountMutationResult = {
@@ -372,6 +419,23 @@ function summarizeRun(row: DirectoryRunRow): DirectorySyncRunSummary {
   }
 }
 
+function summarizeAlert(row: DirectorySyncAlertRow): DirectorySyncAlertSummary {
+  return {
+    id: row.id,
+    integrationId: row.integration_id,
+    runId: row.run_id,
+    level: row.level,
+    code: row.code,
+    message: row.message,
+    details: parseJsonRecord(row.details),
+    sentToWebhook: Boolean(row.sent_to_webhook),
+    acknowledgedAt: row.acknowledged_at,
+    acknowledgedBy: row.acknowledged_by,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  }
+}
+
 function summarizeDirectoryAccount(row: DirectoryIntegrationAccountRow): DirectoryIntegrationAccountSummary {
   return {
     id: row.directory_account_id,
@@ -400,6 +464,27 @@ function summarizeDirectoryAccount(row: DirectoryIntegrationAccountRow): Directo
       }
       : null,
     departmentPaths: Array.isArray(row.department_paths) ? row.department_paths.filter(Boolean) : [],
+  }
+}
+
+function classifyDirectoryReviewReasons(account: DirectoryIntegrationAccountSummary): DirectoryReviewReason[] {
+  const reasons: DirectoryReviewReason[] = []
+  if (!account.localUser || account.linkStatus !== 'linked') {
+    reasons.push('needs_binding')
+  }
+  if (!account.isActive && account.localUser && account.linkStatus === 'linked') {
+    reasons.push('inactive_linked')
+  }
+  if (!normalizeText(account.openId) && !normalizeText(account.unionId)) {
+    reasons.push('missing_identity')
+  }
+  return reasons
+}
+
+function attachDirectoryReviewReasons(account: DirectoryIntegrationAccountSummary): DirectoryIntegrationReviewItem {
+  return {
+    ...account,
+    reviewReasons: classifyDirectoryReviewReasons(account),
   }
 }
 
@@ -1232,6 +1317,96 @@ export async function listDirectorySyncRuns(
   }
 }
 
+export async function listDirectorySyncAlerts(
+  integrationId: string,
+  pagination: { limit: number; offset: number },
+  filter: DirectorySyncAlertFilter = 'all',
+): Promise<{
+  items: DirectorySyncAlertSummary[]
+  total: number
+  counts: {
+    total: number
+    pending: number
+    acknowledged: number
+  }
+}> {
+  const normalizedIntegrationId = normalizeText(integrationId)
+  if (!normalizedIntegrationId) throw new Error('integrationId is required')
+
+  const whereClauses = ['integration_id = $1']
+  const params: unknown[] = [normalizedIntegrationId]
+  if (filter === 'pending') {
+    whereClauses.push('acknowledged_at IS NULL')
+  } else if (filter === 'acknowledged') {
+    whereClauses.push('acknowledged_at IS NOT NULL')
+  }
+  const whereSql = whereClauses.join(' AND ')
+
+  const [totalResult, countsResult, rowsResult] = await Promise.all([
+    query<{ total: number }>(
+      `SELECT COUNT(*)::int AS total
+       FROM directory_sync_alerts
+       WHERE ${whereSql}`,
+      params,
+    ),
+    query<{
+      total_count: number
+      pending_count: number
+      acknowledged_count: number
+    }>(
+      `SELECT
+         COUNT(*)::int AS total_count,
+         COUNT(*) FILTER (WHERE acknowledged_at IS NULL)::int AS pending_count,
+         COUNT(*) FILTER (WHERE acknowledged_at IS NOT NULL)::int AS acknowledged_count
+       FROM directory_sync_alerts
+       WHERE integration_id = $1`,
+      [normalizedIntegrationId],
+    ),
+    query<DirectorySyncAlertRow>(
+      `SELECT id, integration_id, run_id, level, code, message, details, sent_to_webhook, acknowledged_at, acknowledged_by, created_at, updated_at
+       FROM directory_sync_alerts
+       WHERE ${whereSql}
+       ORDER BY acknowledged_at IS NULL DESC, created_at DESC
+       LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
+      [...params, pagination.limit, pagination.offset],
+    ),
+  ])
+
+  const countsRow = countsResult.rows[0]
+  return {
+    items: rowsResult.rows.map(summarizeAlert),
+    total: Number(totalResult.rows[0]?.total ?? 0),
+    counts: {
+      total: Number(countsRow?.total_count ?? 0),
+      pending: Number(countsRow?.pending_count ?? 0),
+      acknowledged: Number(countsRow?.acknowledged_count ?? 0),
+    },
+  }
+}
+
+export async function acknowledgeDirectorySyncAlert(
+  alertId: string,
+  adminUserId: string,
+): Promise<DirectorySyncAlertSummary | null> {
+  const normalizedAlertId = normalizeText(alertId)
+  const normalizedAdminUserId = normalizeText(adminUserId)
+  if (!normalizedAlertId) throw new Error('alertId is required')
+  if (!normalizedAdminUserId) throw new Error('adminUserId is required')
+
+  const result = await query<DirectorySyncAlertRow>(
+    `UPDATE directory_sync_alerts
+     SET acknowledged_at = COALESCE(acknowledged_at, NOW()),
+         acknowledged_by = COALESCE(acknowledged_by, $2),
+         updated_at = NOW()
+     WHERE id = $1
+     RETURNING id, integration_id, run_id, level, code, message, details, sent_to_webhook, acknowledged_at, acknowledged_by, created_at, updated_at`,
+    [normalizedAlertId, normalizedAdminUserId],
+  )
+
+  if (result.rows.length === 0) return null
+  return summarizeAlert(result.rows[0])
+}
+
 async function getDirectoryAccountSummary(accountId: string): Promise<DirectoryIntegrationAccountSummary | null> {
   const result = await query<DirectoryIntegrationAccountRow>(
     `SELECT
@@ -1404,6 +1579,117 @@ export async function listDirectoryIntegrationAccounts(
   return {
     items: rowsResult.rows.map(summarizeDirectoryAccount),
     total: Number(countResult.rows[0]?.total ?? 0),
+  }
+}
+
+export async function listDirectoryIntegrationReviewItems(
+  integrationId: string,
+  pagination: { limit: number; offset: number },
+  queue: DirectoryReviewQueue = 'all',
+): Promise<{ items: DirectoryIntegrationReviewItem[]; total: number; counts: DirectoryIntegrationReviewCounts }> {
+  const normalizedIntegrationId = normalizeText(integrationId)
+  if (!normalizedIntegrationId) throw new Error('integrationId is required')
+
+  const needsBindingSql = `(l.local_user_id IS NULL OR COALESCE(l.link_status, 'unmatched') <> 'linked')`
+  const inactiveLinkedSql = `(a.is_active = FALSE AND l.local_user_id IS NOT NULL AND COALESCE(l.link_status, '') = 'linked')`
+  const missingIdentitySql = `(COALESCE(a.open_id, '') = '' AND COALESCE(a.union_id, '') = '')`
+
+  const whereClauses = ['a.integration_id = $1']
+  switch (queue) {
+    case 'needs_binding':
+      whereClauses.push(needsBindingSql)
+      break
+    case 'inactive_linked':
+      whereClauses.push(inactiveLinkedSql)
+      break
+    case 'missing_identity':
+      whereClauses.push(missingIdentitySql)
+      break
+    default:
+      whereClauses.push(`(${needsBindingSql} OR ${inactiveLinkedSql} OR ${missingIdentitySql})`)
+      break
+  }
+
+  const whereSql = whereClauses.join(' AND ')
+  const [countsResult, totalResult, rowsResult] = await Promise.all([
+    query<{
+      total_count: number | string
+      needs_binding_count: number | string
+      inactive_linked_count: number | string
+      missing_identity_count: number | string
+    }>(
+      `SELECT
+          COUNT(*) FILTER (WHERE ${needsBindingSql} OR ${inactiveLinkedSql} OR ${missingIdentitySql})::int AS total_count,
+          COUNT(*) FILTER (WHERE ${needsBindingSql})::int AS needs_binding_count,
+          COUNT(*) FILTER (WHERE ${inactiveLinkedSql})::int AS inactive_linked_count,
+          COUNT(*) FILTER (WHERE ${missingIdentitySql})::int AS missing_identity_count
+       FROM directory_accounts a
+       LEFT JOIN directory_account_links l ON l.directory_account_id = a.id
+       WHERE a.integration_id = $1`,
+      [normalizedIntegrationId],
+    ),
+    query<{ total: number | string }>(
+      `SELECT COUNT(*)::int AS total
+       FROM directory_accounts a
+       LEFT JOIN directory_account_links l ON l.directory_account_id = a.id
+       WHERE ${whereSql}`,
+      [normalizedIntegrationId],
+    ),
+    query<DirectoryIntegrationAccountRow>(
+      `SELECT
+          a.integration_id,
+          a.provider,
+          a.corp_id,
+          a.id AS directory_account_id,
+          a.external_user_id,
+          a.union_id,
+          a.open_id,
+          a.external_key,
+          a.name AS account_name,
+          a.email AS account_email,
+          a.mobile AS account_mobile,
+          a.is_active AS account_is_active,
+          a.updated_at AS account_updated_at,
+          l.link_status,
+          l.match_strategy,
+          l.reviewed_by,
+          l.review_note,
+          l.updated_at AS link_updated_at,
+          u.id AS local_user_id,
+          u.email AS local_user_email,
+          u.name AS local_user_name,
+          COALESCE(array_remove(array_agg(DISTINCT d.full_path), NULL), ARRAY[]::text[]) AS department_paths
+       FROM directory_accounts a
+       LEFT JOIN directory_account_links l ON l.directory_account_id = a.id
+       LEFT JOIN users u ON u.id = l.local_user_id
+       LEFT JOIN directory_account_departments ad ON ad.directory_account_id = a.id
+       LEFT JOIN directory_departments d ON d.id = ad.directory_department_id
+       WHERE ${whereSql}
+       GROUP BY
+         a.integration_id, a.provider, a.corp_id, a.id, a.external_user_id, a.union_id, a.open_id, a.external_key,
+         a.name, a.email, a.mobile, a.is_active, a.updated_at,
+         l.link_status, l.match_strategy, l.reviewed_by, l.review_note, l.updated_at,
+         u.id, u.email, u.name
+       ORDER BY
+         CASE WHEN ${inactiveLinkedSql} THEN 0 WHEN ${needsBindingSql} THEN 1 ELSE 2 END,
+         a.is_active DESC,
+         a.name ASC,
+         a.external_user_id ASC
+       LIMIT $2 OFFSET $3`,
+      [normalizedIntegrationId, pagination.limit, pagination.offset],
+    ),
+  ])
+
+  const countsRow = countsResult.rows[0]
+  return {
+    items: rowsResult.rows.map(summarizeDirectoryAccount).map(attachDirectoryReviewReasons),
+    total: Number(totalResult.rows[0]?.total ?? 0),
+    counts: {
+      total: Number(countsRow?.total_count ?? 0),
+      needsBinding: Number(countsRow?.needs_binding_count ?? 0),
+      inactiveLinked: Number(countsRow?.inactive_linked_count ?? 0),
+      missingIdentity: Number(countsRow?.missing_identity_count ?? 0),
+    },
   }
 }
 
@@ -1588,6 +1874,7 @@ export async function unbindDirectoryAccount(
 ): Promise<DirectoryAccountMutationResult> {
   const normalizedAccountId = normalizeText(directoryAccountId)
   const normalizedAdminUserId = normalizeText(input.adminUserId)
+  const disableDingTalkGrant = input.disableDingTalkGrant === true
 
   if (!normalizedAccountId) throw new Error('directoryAccountId is required')
   if (!normalizedAdminUserId) throw new Error('adminUserId is required')
@@ -1602,6 +1889,16 @@ export async function unbindDirectoryAccount(
 
   await transaction(async (client) => {
     if (previousLinkedUser?.local_user_id) {
+      if (disableDingTalkGrant) {
+        await client.query(
+          `INSERT INTO user_external_auth_grants (provider, local_user_id, enabled, granted_by, created_at, updated_at)
+           VALUES ($1, $2, FALSE, $3, NOW(), NOW())
+           ON CONFLICT (provider, local_user_id)
+           DO UPDATE SET enabled = FALSE, granted_by = EXCLUDED.granted_by, updated_at = NOW()`,
+          [account.provider, previousLinkedUser.local_user_id, normalizedAdminUserId],
+        )
+      }
+
       const deleteIdentityParams: unknown[] = [
         account.provider,
         previousLinkedUser.local_user_id,

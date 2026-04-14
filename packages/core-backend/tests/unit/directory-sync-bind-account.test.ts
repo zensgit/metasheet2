@@ -161,7 +161,7 @@ describe('bindDirectoryAccount', () => {
     expect(pgMocks.transaction).not.toHaveBeenCalled()
   })
 
-  it('removes the bound identity and resets the link on unbind', async () => {
+  it('removes the bound identity, optionally disables grant, and resets the link on unbind', async () => {
     const clientQuery = vi.fn()
     pgMocks.transaction.mockImplementation(async (handler) => handler({ query: clientQuery }))
     pgMocks.query
@@ -217,11 +217,17 @@ describe('bindDirectoryAccount', () => {
     clientQuery
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
 
     const result = await unbindDirectoryAccount('account-1', {
       adminUserId: 'admin-1',
+      disableDingTalkGrant: true,
     })
 
+    expect(clientQuery).toHaveBeenCalledWith(
+      expect.stringContaining('INSERT INTO user_external_auth_grants'),
+      ['dingtalk', 'user-1', 'admin-1'],
+    )
     expect(clientQuery).toHaveBeenCalledWith(
       expect.stringContaining('DELETE FROM user_external_identities'),
       ['dingtalk', 'user-1', 'dingcorp:open-1'],
