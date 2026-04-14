@@ -8,7 +8,8 @@
 
 import { eventBus } from '../core/EventBusService'
 import { Logger } from '../core/logger'
-import { webhookService } from './webhook-service'
+import { WebhookService } from './webhook-service'
+import { db } from '../db/db'
 import type { WebhookEventType } from './webhooks'
 
 const logger = new Logger('WebhookEventBridge')
@@ -24,6 +25,7 @@ const EVENT_MAP: Record<string, WebhookEventType> = {
 }
 
 let initialized = false
+const webhookService = new WebhookService(db)
 
 /**
  * Call once at application startup to bridge EventBus -> WebhookService.

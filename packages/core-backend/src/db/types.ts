@@ -101,6 +101,10 @@ export interface Database {
   meta_comment_reads: MetaCommentReadsTable
   meta_dashboards: MetaDashboardsTable
   meta_widgets: MetaWidgetsTable
+  // Multitable automation & dashboard
+  multitable_automation_executions: MultitableAutomationExecutionsTable
+  multitable_charts: MultitableChartsTable
+  multitable_dashboards: MultitableDashboardsTable
   // Multitable API tokens & webhooks
   multitable_api_tokens: MultitableApiTokensTable
   multitable_webhooks: MultitableWebhooksTable

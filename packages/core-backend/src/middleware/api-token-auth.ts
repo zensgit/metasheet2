@@ -4,7 +4,8 @@
  */
 
 import type { Request, Response, NextFunction } from 'express'
-import { apiTokenService } from '../multitable/api-token-service'
+import { ApiTokenService } from '../multitable/api-token-service'
+import { db } from '../db/db'
 import type { ApiTokenScope } from '../multitable/api-tokens'
 
 // Extend Express Request with api token context
@@ -19,6 +20,7 @@ declare global {
 }
 
 const TOKEN_PREFIX = 'mst_'
+const apiTokenService = new ApiTokenService(db)
 
 /**
  * Middleware that checks for `Authorization: Bearer mst_...` headers.
@@ -29,11 +31,11 @@ const TOKEN_PREFIX = 'mst_'
  *   - Invalid / revoked / expired tokens receive a 401.
  *   - Valid tokens have their scopes attached to `req.apiTokenScopes`.
  */
-export function apiTokenAuth(
+export async function apiTokenAuth(
   req: Request,
   res: Response,
   next: NextFunction,
-): void {
+): Promise<void> {
   const authHeader = req.headers.authorization
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
     next()
@@ -48,7 +50,7 @@ export function apiTokenAuth(
     return
   }
 
-  const result = apiTokenService.validateToken(token)
+  const result = await apiTokenService.validateToken(token)
 
   if (!result.valid) {
     res.status(401).json({
