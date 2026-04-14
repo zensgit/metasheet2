@@ -133,10 +133,10 @@ describe('MultitableCommentInboxView', () => {
     container = null
   })
 
-  it('renders inbox items, opens multitable, and marks them as read', async () => {
+  it('renders inbox items, opens multitable, and clears unread state locally', async () => {
     app = createApp(MultitableCommentInboxView)
     app.mount(container!)
-    await flushUi(6)
+    await flushUi(10)
 
     expect(container?.textContent).toContain('Comment Inbox')
     expect(container?.textContent).toContain('Jamie')
@@ -147,7 +147,7 @@ describe('MultitableCommentInboxView', () => {
 
     const openButton = Array.from(container!.querySelectorAll('button')).find((element) => element.textContent?.includes('Open')) as HTMLButtonElement | undefined
     openButton?.click()
-    await flushUi(6)
+    await flushUi(10)
 
     expect(pushSpy).toHaveBeenCalledWith({
       name: 'multitable',
@@ -164,7 +164,25 @@ describe('MultitableCommentInboxView', () => {
       },
     })
 
+    expect(container!.querySelector('.mt-comment-inbox__badge--unread')).toBeNull()
+    expect(container!.querySelector('.mt-comment-inbox__stat strong')?.textContent).toBe('0')
+    expect(apiFetchMock).not.toHaveBeenCalledWith('/api/comments/c1/read', { method: 'POST' })
+    expect(ioMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('marks an inbox item as read from the explicit action button', async () => {
+    app = createApp(MultitableCommentInboxView)
+    app.mount(container!)
+    await flushUi(6)
+
+    const markReadButton = Array.from(container!.querySelectorAll('button'))
+      .find((element) => element.textContent?.includes('Mark read')) as HTMLButtonElement | undefined
+    markReadButton?.click()
+    await flushUi(6)
+
     expect(apiFetchMock).toHaveBeenCalledWith('/api/comments/c1/read', { method: 'POST' })
+    expect(container!.querySelector('.mt-comment-inbox__badge--unread')).toBeNull()
+    expect(container!.querySelector('.mt-comment-inbox__stat strong')?.textContent).toBe('0')
     expect(ioMock).toHaveBeenCalledTimes(1)
   })
 })

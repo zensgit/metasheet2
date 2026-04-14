@@ -22,6 +22,10 @@
         rows="2"
         :disabled="disabled || submitting"
         @input="onInput"
+        @keydown.down.prevent="onNavigateSuggestion(1)"
+        @keydown.up.prevent="onNavigateSuggestion(-1)"
+        @keydown.tab.prevent="onSelectActiveSuggestion"
+        @keydown.esc.prevent="dismissSuggestions"
         @keydown.enter.ctrl.prevent="submit"
         @keydown.enter.meta.prevent="submit"
       />
@@ -35,7 +39,9 @@
           v-for="suggestion in filteredSuggestions"
           :key="suggestion.id"
           class="meta-comment-composer__suggestion"
+          :class="{ 'meta-comment-composer__suggestion--active': activeSuggestionId === suggestion.id }"
           type="button"
+          :aria-selected="activeSuggestionId === suggestion.id"
           @click="selectSuggestion(suggestion)"
         >
           <strong>@{{ suggestion.label }}</strong>
@@ -44,7 +50,7 @@
       </div>
     </div>
     <div class="meta-comment-composer__footer">
-      <span class="meta-comment-composer__hint">Ctrl/Cmd + Enter to send</span>
+      <span class="meta-comment-composer__hint">{{ composerHint }}</span>
       <button class="meta-comment-composer__submit" :disabled="submitting || disabled || !modelValue.trim()" type="button" @click="submit">
         {{ submitButtonLabel }}
       </button>
@@ -80,6 +86,8 @@ const emit = defineEmits<{
 
 const textareaRef = ref<HTMLTextAreaElement | null>(null)
 const selectedMentions = ref<MetaCommentMentionSuggestion[]>([])
+const activeSuggestionIndex = ref(0)
+const suggestionsDismissed = ref(false)
 const mentionMatch = computed(() => props.modelValue.match(/(?:^|\s)@([^\s@]*)$/))
 const mentionQuery = computed(() => mentionMatch.value?.[1] ?? '')
 
@@ -95,6 +103,7 @@ const filteredSuggestions = computed(() => {
 const showSuggestions = computed(() => {
   if (!props.modelValue.trim()) return false
   if (props.disabled || props.submitting) return false
+  if (suggestionsDismissed.value) return false
   return Boolean(mentionMatch.value) && filteredSuggestions.value.length > 0
 })
 
@@ -102,6 +111,18 @@ const submitButtonLabel = computed(() => {
   if (!props.submitting) return props.submitLabel
   return props.submitLabel === 'Save' ? 'Saving...' : 'Sending...'
 })
+
+const activeSuggestion = computed(() => {
+  if (!showSuggestions.value || filteredSuggestions.value.length === 0) return null
+  const normalizedIndex = Math.min(activeSuggestionIndex.value, filteredSuggestions.value.length - 1)
+  return filteredSuggestions.value[normalizedIndex] ?? null
+})
+
+const activeSuggestionId = computed(() => activeSuggestion.value?.id ?? null)
+
+const composerHint = computed(() => (
+  showSuggestions.value ? 'Tab to mention, Ctrl/Cmd + Enter to send' : 'Ctrl/Cmd + Enter to send'
+))
 
 watch(
   () => props.initialMentions,
@@ -114,6 +135,27 @@ watch(
     })
   },
   { immediate: true, deep: true },
+)
+
+watch(
+  filteredSuggestions,
+  (nextSuggestions) => {
+    if (nextSuggestions.length === 0) {
+      activeSuggestionIndex.value = 0
+      return
+    }
+    if (activeSuggestionIndex.value >= nextSuggestions.length) {
+      activeSuggestionIndex.value = 0
+    }
+  },
+  { immediate: true },
+)
+
+watch(
+  () => props.modelValue,
+  () => {
+    suggestionsDismissed.value = false
+  },
 )
 
 function escapeRegex(value: string): string {
@@ -141,6 +183,8 @@ function serializeContent(content: string): string {
 function onInput(event: Event) {
   const value = (event.target as HTMLTextAreaElement).value
   selectedMentions.value = selectedMentions.value.filter((mention) => hasMentionText(value, mention))
+  activeSuggestionIndex.value = 0
+  suggestionsDismissed.value = false
   emit('update:modelValue', value)
 }
 
@@ -154,12 +198,29 @@ function selectSuggestion(suggestion: MetaCommentMentionSuggestion) {
     return `${prefix}@${suggestion.label} `
   })
   selectedMentions.value = [...selectedMentions.value, suggestion]
+  activeSuggestionIndex.value = 0
+  suggestionsDismissed.value = false
   emit('update:modelValue', nextValue)
   void nextTick(() => {
     textareaRef.value?.focus()
     const caret = nextValue.length
     textareaRef.value?.setSelectionRange(caret, caret)
   })
+}
+
+function onNavigateSuggestion(direction: 1 | -1) {
+  if (!showSuggestions.value || filteredSuggestions.value.length === 0) return
+  activeSuggestionIndex.value = (activeSuggestionIndex.value + direction + filteredSuggestions.value.length) % filteredSuggestions.value.length
+}
+
+function onSelectActiveSuggestion() {
+  if (!showSuggestions.value || !activeSuggestion.value) return
+  selectSuggestion(activeSuggestion.value)
+}
+
+function dismissSuggestions() {
+  if (!showSuggestions.value) return
+  suggestionsDismissed.value = true
 }
 
 function submit() {
@@ -224,6 +285,7 @@ function submit() {
   cursor: pointer;
 }
 .meta-comment-composer__suggestion:hover { background: #f8fafc; }
+.meta-comment-composer__suggestion--active { background: #eff6ff; }
 .meta-comment-composer__suggestion small { color: #64748b; }
 .meta-comment-composer__footer { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .meta-comment-composer__hint { color: #6b7280; font-size: 12px; }

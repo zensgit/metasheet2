@@ -35,6 +35,15 @@
         <span v-if="mentionInboxState.unreadMentionCount.value > 0" class="mt-workbench__mention-chip-unread">{{ mentionInboxState.unreadMentionCount.value }} unread</span>
         <span class="mt-workbench__mention-chip-records">{{ mentionInboxState.summary.value.mentionedRecordCount }} records</span>
       </button>
+      <button
+        class="mt-workbench__mgr-btn"
+        :class="{ 'mt-workbench__mgr-btn--attention': commentInboxBadgeCount > 0 }"
+        :title="commentInboxBadgeCount > 0 ? `${commentInboxBadgeCount} comment updates need attention` : 'Open comment inbox'"
+        @click="openCommentInbox()"
+      >
+        &#x1F4AC; Comment Inbox
+        <span v-if="commentInboxBadgeCount > 0" class="mt-workbench__mgr-badge">{{ commentInboxBadgeCount }}</span>
+      </button>
       <button v-if="caps.canManageFields.value" class="mt-workbench__mgr-btn" @click="showFieldManager = true">&#x2699; Fields</button>
       <button v-if="caps.canManageSheetAccess.value" class="mt-workbench__mgr-btn" @click="showPermissionManager = true; void loadPermissionEntries()">&#x1F512; Access</button>
       <button v-if="caps.canManageViews.value && canConfigureCurrentView" class="mt-workbench__mgr-btn" @click="showViewManager = true">&#x2630; Views</button>
@@ -713,12 +722,13 @@ const activeEditingComment = computed(() => (
 const commentComposerInitialMentions = computed(() => (
   activeEditingComment.value ? buildEditingMentionSuggestions(activeEditingComment.value) : []
 ))
+const commentInboxBadgeCount = computed(() => commentInboxState.unreadCount.value)
 const sheetPresenceLabel = computed(() => (
-  sheetPresenceState.activeCollaboratorCount.value === 1 ? 'active collaborator' : 'active collaborators'
+  `${sheetPresenceState.activeCollaboratorCount.value} ${sheetPresenceState.activeCollaboratorCount.value === 1 ? 'active collaborator' : 'active collaborators'}`
 ))
 const sheetPresenceTitle = computed(() => {
   const ids = sheetPresenceState.activeCollaborators.value.map((user) => user.id)
-  return ids.length > 0 ? ids.join(', ') : 'No active collaborators'
+  return ids.length > 0 ? `Active now: ${ids.join(', ')}` : 'No active collaborators'
 })
 const conflictFieldName = computed(() => {
   const fieldId = grid.conflict.value?.fieldId
@@ -1022,10 +1032,35 @@ async function loadCommentsForRecord(recordId: string, options?: { highlightComm
     ensureCommentMentionSuggestions(),
   ])
   highlightedCommentId.value = options?.highlightCommentId ?? null
+  if (!selectedCommentFieldId.value && options?.highlightCommentId) {
+    const derivedFieldId = resolveCommentThreadFieldId(options.highlightCommentId)
+    if (derivedFieldId) {
+      selectedCommentFieldId.value = derivedFieldId
+    }
+  }
   if (options?.markReadCommentId) {
     await workbench.client.markCommentRead(options.markReadCommentId).catch(() => undefined)
     await commentInboxState.refreshUnreadCount().catch(() => undefined)
   }
+}
+
+function resolveCommentThreadFieldId(commentId: string): string | null {
+  const commentsById = new Map(commentsState.comments.value.map((comment) => [comment.id, comment]))
+  const visited = new Set<string>()
+  let currentCommentId: string | null = commentId
+
+  while (currentCommentId && !visited.has(currentCommentId)) {
+    visited.add(currentCommentId)
+    const comment = commentsById.get(currentCommentId)
+    if (!comment) return null
+
+    const fieldId = comment.targetFieldId ?? comment.fieldId ?? null
+    if (fieldId) return fieldId
+
+    currentCommentId = comment.parentId ?? null
+  }
+
+  return null
 }
 
 async function ensureCommentMentionSuggestions(force = false) {
@@ -2025,6 +2060,19 @@ function parseDeepLink(): string | null {
   } catch { return null }
 }
 
+async function applyCommentDeepLink(recordId: string, options?: {
+  commentId?: string | null
+  fieldId?: string | null
+  openComments?: boolean
+}) {
+  await resolveDeepLink(recordId, {
+    openComments: options?.openComments === true || Boolean(options?.commentId),
+    highlightCommentId: options?.commentId ?? null,
+    markReadCommentId: options?.commentId ?? null,
+    targetFieldId: options?.fieldId ?? null,
+  })
+}
+
 // Update URL hash when a record is selected
 watch(selectedRecordId, (rid) => {
   try {
@@ -2292,6 +2340,12 @@ function openWorkflowDesigner(recordId?: string) {
   })
 }
 
+function openCommentInbox() {
+  void router.push({
+    name: 'multitable-comment-inbox',
+  })
+}
+
 watch(
   [activeViewType, () => workbench.activeViewId.value, selectedRecordId],
   ([type, viewId]) => {
@@ -2363,6 +2417,27 @@ watch(
 )
 
 watch(
+  () => [props.recordId ?? '', props.commentId ?? '', props.fieldId ?? '', props.openComments === true ? '1' : '0'] as const,
+  async ([recordId, commentId, fieldId, openComments], [prevRecordId, prevCommentId, prevFieldId, prevOpenComments]) => {
+    if (!workbenchReady.value) return
+    if (
+      recordId === prevRecordId &&
+      commentId === prevCommentId &&
+      fieldId === prevFieldId &&
+      openComments === prevOpenComments
+    ) {
+      return
+    }
+    if (!recordId) return
+    await applyCommentDeepLink(recordId, {
+      commentId: commentId || null,
+      fieldId: fieldId || null,
+      openComments: openComments === '1',
+    })
+  },
+)
+
+watch(
   [hasBlockingUnloadState, pendingExternalContext],
   ([blocked, pending]) => {
     if (!workbenchReady.value || blocked || !pending) return
@@ -2388,11 +2463,10 @@ onMounted(async () => {
     await commentInboxState.refreshUnreadCount().catch(() => undefined)
     const deepRecordId = props.recordId ?? parseDeepLink()
     if (deepRecordId) {
-      await resolveDeepLink(deepRecordId, {
-        openComments: props.openComments === true || Boolean(props.commentId),
-        highlightCommentId: props.commentId ?? null,
-        markReadCommentId: props.commentId ?? null,
-        targetFieldId: props.fieldId ?? null,
+      await applyCommentDeepLink(deepRecordId, {
+        commentId: props.commentId ?? null,
+        fieldId: props.fieldId ?? null,
+        openComments: props.openComments === true,
       })
     }
     if (activeViewType.value === 'form') {
@@ -2524,6 +2598,8 @@ defineExpose({
 .mt-workbench__mention-chip-records { color: #999; font-size: 11px; }
 .mt-workbench__mgr-btn { padding: 3px 10px; border: 1px solid #ddd; border-radius: 4px; background: #fff; font-size: 12px; cursor: pointer; color: #666; }
 .mt-workbench__mgr-btn:hover { background: #f5f7fa; color: #409eff; border-color: #c0d8f0; }
+.mt-workbench__mgr-btn--attention { border-color: #f59e0b; color: #92400e; background: #fffbeb; }
+.mt-workbench__mgr-badge { display: inline-flex; align-items: center; justify-content: center; min-width: 18px; height: 18px; margin-left: 6px; padding: 0 6px; border-radius: 999px; background: #f59e0b; color: #fff; font-size: 11px; font-weight: 600; }
 .mt-workbench__base-bar { padding: 8px 16px 0; border-bottom: 1px solid #f0f0f0; }
 .mt-workbench__shortcuts-overlay { position: fixed; inset: 0; z-index: 100; background: rgba(0,0,0,.3); display: flex; align-items: center; justify-content: center; }
 .mt-workbench__shortcuts { background: #fff; border-radius: 8px; padding: 20px 24px; min-width: 320px; box-shadow: 0 8px 24px rgba(0,0,0,.15); }

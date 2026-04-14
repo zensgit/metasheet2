@@ -27,6 +27,10 @@
           <div class="meta-comments-drawer__meta">
             <span class="meta-comments-drawer__author">{{ thread.authorName ?? thread.authorId }}</span>
             <span class="meta-comments-drawer__time">{{ formatTime(thread.createdAt) }}</span>
+            <span
+              v-if="getReplyCount(thread.id) > 0"
+              class="meta-comments-drawer__thread-count"
+            >{{ formatReplyCount(getReplyCount(thread.id)) }}</span>
             <button
               v-if="canComment && !thread.resolved"
               class="meta-comments-drawer__reply"
@@ -89,11 +93,17 @@
         <button class="meta-comments-drawer__retry" @click="emit('retry')">Retry</button>
       </div>
       <div v-if="activeEditingComment" class="meta-comments-drawer__reply-banner">
-        <span>Editing {{ activeEditingComment.authorName ?? activeEditingComment.authorId }}</span>
+        <div class="meta-comments-drawer__reply-banner-copy">
+          <span>Editing {{ activeEditingComment.authorName ?? activeEditingComment.authorId }}</span>
+          <span class="meta-comments-drawer__reply-preview">{{ formatCommentPreview(activeEditingComment.content) }}</span>
+        </div>
         <button class="meta-comments-drawer__reply-cancel" @click="emit('cancel-edit')">Cancel</button>
       </div>
       <div v-else-if="activeReplyComment" class="meta-comments-drawer__reply-banner">
-        <span>Replying to {{ activeReplyComment.authorName ?? activeReplyComment.authorId }}</span>
+        <div class="meta-comments-drawer__reply-banner-copy">
+          <span>Replying to {{ activeReplyComment.authorName ?? activeReplyComment.authorId }}</span>
+          <span class="meta-comments-drawer__reply-preview">{{ formatCommentPreview(activeReplyComment.content) }}</span>
+        </div>
         <button class="meta-comments-drawer__reply-cancel" @click="emit('cancel-reply')">Cancel</button>
       </div>
       <MetaCommentComposer
@@ -318,12 +328,26 @@ function canDeleteComment(comment: MultitableComment): boolean {
   return !(repliesByParentId.value[comment.id]?.length)
 }
 
+function getReplyCount(commentId: string): number {
+  return repliesByParentId.value[commentId]?.length ?? 0
+}
+
+function formatReplyCount(count: number): string {
+  return count === 1 ? '1 reply' : `${count} replies`
+}
+
 function formatTime(iso: string): string {
   try { return new Date(iso).toLocaleString() } catch { return iso }
 }
 
 function formatContent(content: string): string {
   return content.replace(/@\[([^\]]+)\]\(([^)]+)\)/g, (_match, label) => `@${label}`)
+}
+
+function formatCommentPreview(content: string): string {
+  const normalized = formatContent(content).replace(/\s+/g, ' ').trim()
+  if (normalized.length <= 72) return normalized
+  return `${normalized.slice(0, 69).trimEnd()}...`
 }
 </script>
 
@@ -351,9 +375,12 @@ function formatContent(content: string): string {
 .meta-comments-drawer__resolve { border: none; background: none; color: #409eff; cursor: pointer; font-size: 11px; }
 .meta-comments-drawer__resolve:disabled { opacity: 0.55; cursor: wait; }
 .meta-comments-drawer__badge { color: #67c23a; font-size: 10px; }
+.meta-comments-drawer__thread-count { display: inline-flex; align-items: center; padding: 1px 6px; border-radius: 999px; background: #eef2ff; color: #4338ca; font-size: 10px; font-weight: 600; }
 .meta-comments-drawer__content { margin: 0; font-size: 13px; color: #333; line-height: 1.4; }
 .meta-comments-drawer__input-area { padding: 10px 14px; border-top: 1px solid #eee; display: flex; flex-direction: column; gap: 8px; }
 .meta-comments-drawer__reply-banner { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 8px; border-radius: 6px; background: #eff6ff; color: #1d4ed8; font-size: 12px; }
+.meta-comments-drawer__reply-banner-copy { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.meta-comments-drawer__reply-preview { color: #1e3a8a; font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .meta-comments-drawer__reply-cancel { border: none; background: none; color: #1d4ed8; cursor: pointer; font-size: 11px; }
 .meta-comments-drawer__error { margin-bottom: 8px; padding: 8px 10px; border-radius: 4px; background: #fef0f0; color: #f56c6c; font-size: 12px; display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .meta-comments-drawer__retry { border: 1px solid #f56c6c; background: #fff; color: #f56c6c; padding: 2px 8px; border-radius: 3px; font-size: 11px; cursor: pointer; white-space: nowrap; }
