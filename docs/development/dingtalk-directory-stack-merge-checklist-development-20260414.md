@@ -24,6 +24,7 @@ This checklist is for the combined DingTalk directory stack PR that includes:
   - review queue counts align with item classification
   - alert ack route returns stable payload and writes audit log
   - batch bind deduplicates by `accountId`
+  - batch bind / unbind semantics are reviewed as per-item mutations, not cross-item transactional rollback
   - batch unbind can optionally disable DingTalk grant
   - bulk user management routes validate all user IDs before mutating
   - schedule snapshot handles disabled, missing cron, invalid cron, configured-only, manual-only, and auto-observed states

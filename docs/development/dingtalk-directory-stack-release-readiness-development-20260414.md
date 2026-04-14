@@ -43,6 +43,14 @@ The Claude CLI review surfaced these highest-signal risks:
 2. Batch bind/unbind plus optional `disableDingTalkGrant` has real blast radius and deserves explicit review for partial-failure semantics.
 3. Schedule observation is intentionally read-only, but `manual_only` vs `auto_observed` depends on recorded history and can mislead if history is incomplete.
 
+## Alignment To Complete Report
+
+The broader workspace also contains a separate complete report for the full Feishu-gap program:
+
+- [metasheet-feishu-gap-complete-report-20260414.md](/Users/chouhua/Downloads/Github/metasheet2/docs/development/metasheet-feishu-gap-complete-report-20260414.md:1)
+
+That report summarizes the wider 16-PR, ~685-test effort. `#873` should be reviewed as a narrower DingTalk admin/ops slice inside that larger delivery, not as a partial replacement for the full report.
+
 ## Recommendation
 
 Treat this stack as review-ready, but keep the following out of scope for this PR:
