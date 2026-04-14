@@ -54,19 +54,28 @@ Notes:
 - local logs still include expected degraded-mode warnings about missing local Postgres database `chouhua`
 - the suite still completed successfully, matching the CI intent of no hard DB dependency for these paths
 
-### 3. OpenAPI artifact regeneration
+### 3. OpenAPI artifact verification
 
 Command:
 
 ```bash
 cd /tmp/metasheet2-dingtalk-stack
-pnpm exec tsx packages/openapi/tools/build.ts
+node ./scripts/ops/attendance-verify-zh-copy-contract.mjs
+git diff --exit-code -- \
+  packages/openapi/dist/combined.openapi.yml \
+  packages/openapi/dist/openapi.json \
+  packages/openapi/dist/openapi.yaml
 ```
 
 Result:
 
-- regenerated `3` files under `packages/openapi/dist`
-- local diff confirmed the branch had stale generated outputs before the rebuild
+- zh copy guard passed
+- generated OpenAPI outputs are now clean in git diff
+
+Note:
+
+- the isolated worktree does not provide a stable `pnpm exec tsx` path for the attendance helper shell script
+- the branch still contains the rebuilt `packages/openapi/dist/*` outputs, and the post-fix diff check is clean
 
 ### 4. Claude Code CLI availability
 
