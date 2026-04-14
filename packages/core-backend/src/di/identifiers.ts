@@ -59,6 +59,8 @@ export interface ICollabService {
   join(room: string, options?: { userId?: string; socketId?: string }): Promise<void>;
   leave(room: string, options?: { userId?: string; socketId?: string }): Promise<void>;
   onConnection(handler: (socket: Socket) => void): void;
+  /** Return user IDs currently present in the given Socket.IO room. */
+  getRoomMembers(room: string): Promise<string[]>;
 }
 
 export interface ICollectionManager {
@@ -303,6 +305,11 @@ export interface CommentMentionCandidate {
     subtitle?: string;
 }
 
+/** A viewer identity entry enriched onto presence summary responses. */
+export interface CommentPresenceViewer {
+    userId: string;
+}
+
 /**
  * Combined unread summary returned by `getUnreadSummary()`.
  *
@@ -360,6 +367,23 @@ export interface ICommentService {
     getMentionSummary(spreadsheetId: string, mentionUserId: string): Promise<CommentMentionSummary>;
     markMentionsRead(spreadsheetId: string, userId: string): Promise<void>;
     resolveComment(commentId: string): Promise<void>;
+    /**
+     * Mark every unread comment in a spreadsheet as read for the given user.
+     * Skips comments authored by the user themselves.
+     *
+     * @returns The number of comments that were newly marked as read.
+     */
+    markAllCommentsRead(spreadsheetId: string, userId: string): Promise<number>;
+    /**
+     * Return comment presence summary, optionally enriched with current room
+     * viewers when `includeViewers` is true.
+     */
+    getCommentPresenceSummaryWithViewers(
+      spreadsheetId: string,
+      rowIds?: string[],
+      mentionUserId?: string,
+      includeViewers?: boolean,
+    ): Promise<{ items: CommentPresenceSummaryRecord[]; total: number; viewers?: CommentPresenceViewer[] }>;
 }
 
 export interface IPresenceService {

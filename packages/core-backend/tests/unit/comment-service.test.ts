@@ -679,4 +679,135 @@ describe('CommentService', () => {
       expect(result.items[1].rowId).toBe('row-b')
     })
   })
+
+  // ── markAllCommentsRead ───────────────────────────────────────────────
+
+  describe('markAllCommentsRead', () => {
+    it('returns 0 when there are no unread comments', async () => {
+      // unread query returns empty list
+      pushExec([])
+
+      const count = await service.markAllCommentsRead('sheet-1', 'user-1')
+
+      expect(count).toBe(0)
+    })
+
+    it('returns 0 for empty spreadsheetId', async () => {
+      const count = await service.markAllCommentsRead('', 'user-1')
+      expect(count).toBe(0)
+    })
+
+    it('returns 0 for empty userId', async () => {
+      const count = await service.markAllCommentsRead('sheet-1', '')
+      expect(count).toBe(0)
+    })
+
+    it('inserts read records and returns the count', async () => {
+      // unread query: two unread comments
+      pushExec([{ id: 'cmt_a' }, { id: 'cmt_b' }])
+      // batch insert execute
+      pushExec([])
+
+      const count = await service.markAllCommentsRead('sheet-1', 'user-1')
+
+      expect(count).toBe(2)
+    })
+
+    it('trims whitespace from userId and spreadsheetId', async () => {
+      pushExec([{ id: 'cmt_c' }])
+      pushExec([])
+
+      const count = await service.markAllCommentsRead('  sheet-1  ', '  user-1  ')
+
+      expect(count).toBe(1)
+    })
+  })
+
+  // ── getCommentPresenceSummaryWithViewers ──────────────────────────────
+
+  describe('getCommentPresenceSummaryWithViewers', () => {
+    it('returns base presence without viewers when includeViewers is false', async () => {
+      pushExec([
+        { row_id: 'row-1', field_id: null, comment_count: 2, mentioned_count: 0 },
+      ])
+
+      const result = await service.getCommentPresenceSummaryWithViewers('sheet-1', undefined, undefined, false)
+
+      expect(result.items).toHaveLength(1)
+      expect(result.viewers).toBeUndefined()
+    })
+
+    it('returns base presence without viewers when includeViewers is omitted', async () => {
+      pushExec([
+        { row_id: 'row-1', field_id: null, comment_count: 1, mentioned_count: 0 },
+      ])
+
+      const result = await service.getCommentPresenceSummaryWithViewers('sheet-1')
+
+      expect(result.viewers).toBeUndefined()
+    })
+
+    it('appends viewers array when includeViewers is true', async () => {
+      // Mock getRoomMembers to return user list
+      mockCollabService.getRoomMembers = vi.fn().mockResolvedValue(['user-alice', 'user-bob'])
+
+      pushExec([
+        { row_id: 'row-1', field_id: null, comment_count: 3, mentioned_count: 1 },
+      ])
+
+      const result = await service.getCommentPresenceSummaryWithViewers('sheet-1', undefined, 'user-alice', true)
+
+      expect(result.viewers).toBeDefined()
+      expect(result.viewers).toHaveLength(2)
+      expect(result.viewers!.map((v) => v.userId)).toContain('user-alice')
+      expect(result.viewers!.map((v) => v.userId)).toContain('user-bob')
+    })
+
+    it('returns empty viewers array when room has no members', async () => {
+      mockCollabService.getRoomMembers = vi.fn().mockResolvedValue([])
+
+      pushExec([])
+
+      const result = await service.getCommentPresenceSummaryWithViewers('sheet-1', undefined, undefined, true)
+
+      expect(result.viewers).toBeDefined()
+      expect(result.viewers).toHaveLength(0)
+    })
+  })
+
+  // ── listMentionCandidates ─────────────────────────────────────────────
+
+  describe('listMentionCandidates', () => {
+    it('returns empty for blank spreadsheetId', async () => {
+      const result = await service.listMentionCandidates('  ')
+
+      expect(result.items).toEqual([])
+      expect(result.total).toBe(0)
+    })
+
+    it('maps user rows to candidate shape', async () => {
+      // total count
+      pushTakeFirst({ c: 1 })
+      // row data
+      pushExec([{ id: 'user-1', name: 'Alice', email: 'alice@example.com' }])
+
+      const result = await service.listMentionCandidates('sheet-1', { q: 'alic', limit: 10 })
+
+      expect(result.total).toBe(1)
+      expect(result.items).toHaveLength(1)
+      expect(result.items[0].id).toBe('user-1')
+      expect(result.items[0].label).toBe('Alice')
+      expect(result.items[0].subtitle).toBe('alice@example.com')
+    })
+
+    it('uses email as label when name is missing', async () => {
+      pushTakeFirst({ c: 1 })
+      pushExec([{ id: 'user-2', name: null, email: 'bob@example.com' }])
+
+      const result = await service.listMentionCandidates('sheet-1')
+
+      expect(result.items[0].label).toBe('bob@example.com')
+      expect(result.items[0].subtitle).toBeUndefined()
+    })
+  })
 })

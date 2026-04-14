@@ -287,4 +287,28 @@ export class CollabService {
     if (!this.io) return
     this.io.on('connection', handler)
   }
+
+  /**
+   * Return a list of user IDs currently present in the given room.
+   *
+   * When Socket.IO is not initialised (e.g. in unit tests or early startup),
+   * this method safely returns an empty array instead of throwing.
+   */
+  async getRoomMembers(room: string): Promise<string[]> {
+    if (!this.io) return []
+    try {
+      const sockets = await this.io.in(room).fetchSockets()
+      const userIds = new Set<string>()
+      for (const socket of sockets) {
+        const raw = socket.handshake?.query?.userId
+        const value = Array.isArray(raw) ? raw[0] : raw
+        if (typeof value === 'string' && value.trim().length > 0) {
+          userIds.add(value.trim())
+        }
+      }
+      return [...userIds]
+    } catch {
+      return []
+    }
+  }
 }
