@@ -527,9 +527,60 @@ export interface RecordPermissionEntry {
   createdBy?: string
 }
 
-// --- Automation rules ---
-export type AutomationTriggerType = 'record.created' | 'record.updated' | 'field.changed'
-export type AutomationActionType = 'notify' | 'update_field'
+// --- Automation rules (V1 engine) ---
+export type AutomationTriggerType =
+  | 'record.created'
+  | 'record.updated'
+  | 'record.deleted'
+  | 'field.value_changed'
+  | 'schedule.cron'
+  | 'schedule.interval'
+  | 'webhook.received'
+  // Legacy aliases
+  | 'field.changed'
+
+export type ConditionOperator =
+  | 'equals'
+  | 'not_equals'
+  | 'contains'
+  | 'not_contains'
+  | 'greater_than'
+  | 'less_than'
+  | 'greater_or_equal'
+  | 'less_or_equal'
+  | 'is_empty'
+  | 'is_not_empty'
+
+export interface AutomationCondition {
+  fieldId: string
+  operator: ConditionOperator
+  value?: unknown
+}
+
+export interface ConditionGroup {
+  conjunction: 'AND' | 'OR'
+  conditions: AutomationCondition[]
+}
+
+export type AutomationActionType =
+  | 'update_record'
+  | 'create_record'
+  | 'send_webhook'
+  | 'send_notification'
+  | 'lock_record'
+  // Legacy aliases
+  | 'notify'
+  | 'update_field'
+
+export interface AutomationTrigger {
+  type: AutomationTriggerType
+  config: Record<string, unknown>
+}
+
+export interface AutomationAction {
+  type: AutomationActionType
+  config: Record<string, unknown>
+}
 
 export interface AutomationRule {
   id: string
@@ -537,12 +588,118 @@ export interface AutomationRule {
   name: string
   triggerType: AutomationTriggerType
   triggerConfig: Record<string, unknown>
+  trigger?: AutomationTrigger
+  conditions?: ConditionGroup
+  actions?: AutomationAction[]
   actionType: AutomationActionType
   actionConfig: Record<string, unknown>
   enabled: boolean
   createdAt?: string
   updatedAt?: string
   createdBy?: string
+}
+
+export interface AutomationStepResult {
+  actionType: AutomationActionType
+  status: 'success' | 'failed' | 'skipped'
+  output?: unknown
+  error?: string
+  durationMs?: number
+}
+
+export interface AutomationExecution {
+  id: string
+  ruleId: string
+  status: 'success' | 'failed' | 'skipped'
+  triggerType: AutomationTriggerType
+  startedAt: string
+  completedAt?: string
+  durationMs?: number
+  steps?: AutomationStepResult[]
+  error?: string
+}
+
+export interface AutomationStats {
+  total: number
+  success: number
+  failed: number
+  skipped: number
+  avgDurationMs: number
+}
+
+// --- Charts ---
+export type ChartType = 'bar' | 'line' | 'pie' | 'number' | 'table'
+
+export type AggregationFunction = 'count' | 'sum' | 'avg' | 'min' | 'max' | 'count_distinct'
+
+export interface ChartDataSource {
+  sheetId: string
+  fieldId: string
+  groupFieldId?: string
+  aggregation: AggregationFunction
+}
+
+export interface ChartDisplayConfig {
+  title?: string
+  showLegend?: boolean
+  showValues?: boolean
+  colorScheme?: string
+  prefix?: string
+  suffix?: string
+  orientation?: 'horizontal' | 'vertical'
+}
+
+export interface ChartConfig {
+  id: string
+  sheetId: string
+  name: string
+  chartType: ChartType
+  dataSource: ChartDataSource
+  displayConfig?: ChartDisplayConfig
+  createdAt?: string
+  updatedAt?: string
+}
+
+export interface ChartCreateInput {
+  name: string
+  chartType: ChartType
+  dataSource: ChartDataSource
+  displayConfig?: ChartDisplayConfig
+}
+
+export interface ChartDataPoint {
+  label: string
+  value: number
+  color?: string
+}
+
+export interface ChartData {
+  chartType: ChartType
+  dataPoints: ChartDataPoint[]
+  total?: number
+  metadata?: Record<string, unknown>
+}
+
+// --- Dashboard ---
+export interface DashboardPanel {
+  id: string
+  chartId: string
+  size: 'small' | 'medium' | 'large'
+  order: number
+}
+
+export interface Dashboard {
+  id: string
+  sheetId: string
+  name: string
+  panels: DashboardPanel[]
+  createdAt?: string
+  updatedAt?: string
+}
+
+export interface DashboardUpdateInput {
+  name?: string
+  panels?: DashboardPanel[]
 }
 
 // --- Form Share ---
