@@ -3915,6 +3915,104 @@ export function univerMetaRouter(): Router {
     }
   })
 
+  router.post('/dashboard/query', async (req: Request, res: Response) => {
+    const schema = z.object({
+      sheetId: z.string().min(1).max(50).optional(),
+      viewId: z.string().min(1).max(50).optional(),
+      widgets: z.array(dashboardWidgetSchema).min(1).max(12),
+    })
+
+    const parsed = schema.safeParse(req.body)
+    if (!parsed.success) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+    }
+
+    try {
+      const pool = poolManager.get()
+      const resolved = await resolveMetaSheetId(pool as unknown as { query: QueryFn }, {
+        sheetId: parsed.data.sheetId,
+        viewId: parsed.data.viewId,
+      })
+      const sheetId = resolved.sheetId
+      const viewConfig = resolved.view
+      const widgets = parsed.data.widgets.map((widget) => serializeDashboardWidget(widget))
+      const { access, capabilities, sheetScope } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+
+      if (!access.userId) {
+        return res.status(401).json({ error: 'Authentication required' })
+      }
+      if (!capabilities.canRead) return sendForbidden(res)
+
+      const fields = await loadSheetFields(pool as unknown as { query: QueryFn }, sheetId)
+      const fieldScopeMap = access.userId
+        ? await loadFieldPermissionScopeMap(pool.query.bind(pool), sheetId, access.userId)
+        : new Map<string, FieldPermissionScope>()
+      const visibleFields = filterVisiblePropertyFields(fields).filter((field) => {
+        const permission = deriveFieldPermissions(fields, capabilities, {
+          hiddenFieldIds: viewConfig?.hiddenFieldIds ?? [],
+          fieldScopeMap,
+        })[field.id]
+        return permission?.visible !== false
+      })
+
+      const visibleFieldsById = new Map(visibleFields.map((field) => [field.id, field] as const))
+      for (const widget of widgets) {
+        const groupField = visibleFieldsById.get(widget.groupByFieldId)
+        if (!groupField) {
+          throw new ValidationError(`Dashboard group field not available: ${widget.groupByFieldId}`)
+        }
+        if (!DASHBOARD_GROUPABLE_FIELD_TYPES.has(groupField.type)) {
+          throw new ValidationError(`Field ${groupField.name} does not support dashboard grouping`)
+        }
+        if (widget.metric !== 'count') {
+          const valueField = widget.valueFieldId ? visibleFieldsById.get(widget.valueFieldId) : null
+          if (!valueField) {
+            throw new ValidationError('valueFieldId is required for sum and avg dashboard metrics')
+          }
+          if (!DASHBOARD_NUMERIC_FIELD_TYPES.has(valueField.type)) {
+            throw new ValidationError(`Field ${valueField.name} must be numeric for dashboard ${widget.metric}`)
+          }
+        }
+      }
+
+      const rows = await loadDashboardSourceRows({
+        req,
+        query: pool.query.bind(pool),
+        sheetId,
+        viewConfig,
+        fields,
+        visibleFields,
+        widgets,
+        access,
+        capabilities,
+        sheetScope,
+      })
+
+      const results = widgets.map((widget) => buildDashboardWidgetResult({
+        widget,
+        rows,
+        fields: visibleFields,
+      }))
+
+      return res.json({
+        ok: true,
+        data: {
+          sheetId,
+          viewId: viewConfig?.id ?? null,
+          widgets: results,
+        },
+      })
+    } catch (err) {
+      if (err instanceof ValidationError) {
+        return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: err.message } })
+      }
+      const hint = getDbNotReadyMessage(err)
+      if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
+      console.error('[univer-meta] dashboard query failed:', err)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load dashboard data' } })
+    }
+  })
+
   router.post('/person-fields/prepare', async (req: Request, res: Response) => {
     const schema = z.object({
       sheetId: z.string().min(1).max(50),
