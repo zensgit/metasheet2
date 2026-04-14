@@ -17,6 +17,8 @@ Delivered:
 - Restored `disableDingTalkGrant` behavior when unbinding a directory account
 - Recent directory alert visibility in the admin UI
 - Alert acknowledgement workflow for processed sync failures and warnings
+- Auto-sync schedule snapshot in the admin UI
+- Explicit distinction between configured cron and observed automatic execution
 
 ## Backend
 
@@ -28,6 +30,17 @@ Updated route surface in `packages/core-backend/src/routes/admin-directory.ts`:
   - Accepts:
     - `ack: 'all' | 'pending' | 'acknowledged'`
   - Returns recent alerts, overall counts, pagination metadata, and the active acknowledgement filter
+- `GET /api/admin/directory/integrations/:integrationId/schedule`
+  - Returns a schedule snapshot with:
+    - `syncEnabled`
+    - `scheduleCron`
+    - `cronValid`
+    - `nextExpectedRunAt`
+    - `latestRun*`
+    - `latestManualRun*`
+    - `latestAutoRun*`
+    - `observationStatus`
+    - `note`
 - `POST /api/admin/directory/alerts/:alertId/ack`
   - Marks a directory sync alert as acknowledged
   - Writes an audit record for the acknowledgement action
@@ -51,6 +64,8 @@ Updated service logic in `packages/core-backend/src/directory/directory-sync.ts`
 - Added review item classification and queue listing
 - Added directory alert listing with pending/acknowledged counts
 - Added directory alert acknowledgement mutation
+- Added directory sync schedule snapshot generation
+- Added server-side cron parsing for “next expected run” using the existing scheduler cron parser
 - Restored `disableDingTalkGrant` support in `unbindDirectoryAccount`
 
 Review reasons currently implemented:
@@ -67,11 +82,19 @@ Updated `apps/web/src/views/DirectoryManagementView.vue`:
 - Added queue filters with server-backed counts
 - Added selection state for review items
 - Added a recent alerts panel
+- Added an auto-sync observation card
 - Added alert filters:
   - `pending`
   - `acknowledged`
   - `all`
 - Added per-alert acknowledgement action
+- Added explicit labels for:
+  - disabled
+  - missing cron
+  - invalid cron
+  - configured but never observed
+  - manual only
+  - auto observed
 - Added inline review-queue binding controls:
   - local user draft
   - search candidate users
@@ -86,13 +109,18 @@ Updated `apps/web/src/views/DirectoryManagementView.vue`:
 Current admin workflow:
 
 1. Open `DirectoryManagementView`
-2. Review recent alerts and acknowledge handled sync failures/warnings
-3. Filter the review queue
-4. For `needs_binding` items, either:
+2. Check the auto-sync observation card:
+   - whether auto sync is enabled
+   - whether `scheduleCron` is valid
+   - when the next run is expected by config
+   - whether any non-manual trigger has actually been observed
+3. Review recent alerts and acknowledge handled sync failures/warnings
+4. Filter the review queue
+5. For `needs_binding` items, either:
    - bind directly inside the queue, or
    - select multiple queue items and run batch bind
-5. For linked inactive members, run batch deprovision
-6. Jump any exceptional items into the main account list when deeper manual review is needed
+6. For linked inactive members, run batch deprovision
+7. Jump any exceptional items into the main account list when deeper manual review is needed
 
 ## Tests
 
@@ -107,12 +135,14 @@ Updated frontend tests:
 
 Added coverage for:
 
+- Schedule snapshot route
 - Alert listing route
 - Alert acknowledgement route
 - Review queue listing
 - Batch bind route
 - Batch unbind route
 - `disableDingTalkGrant` on unbind
+- Auto-sync observation rendering in the UI
 - Alert filter and acknowledgement flow in the UI
 - Directory review queue filtering in the UI
 - Review queue batch bind flow in the UI
@@ -144,5 +174,7 @@ Current unrelated failures are in:
 ## Notes
 
 - Claude Code CLI is available in this environment and was used as a narrow read-only helper to review reusable queue-binding helpers; primary implementation remained local because the non-interactive CLI is less predictable than direct edits plus tests here.
+- Claude Code CLI was also used to re-check the scheduler wiring question; the current codebase confirms `scheduleCron` is persisted but directory sync is not yet registered into runtime scheduling.
 - Parallel execution was split across a local backend change and a frontend worker focused only on `DirectoryManagementView`.
 - Queue items without a prepared `localUserRef` still require either candidate search inside the queue or fallback to the main account table.
+- The new auto-sync card is intentionally phrased as a configuration/observation view, not proof that scheduled execution is already wired. If `observationStatus` stays `manual_only` or `configured_no_runs`, the system has not yet shown automatic execution in recorded runs.
