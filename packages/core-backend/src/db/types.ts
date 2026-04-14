@@ -101,6 +101,14 @@ export interface Database {
   meta_comment_reads: MetaCommentReadsTable
   meta_dashboards: MetaDashboardsTable
   meta_widgets: MetaWidgetsTable
+  // Multitable automation & dashboard
+  multitable_automation_executions: MultitableAutomationExecutionsTable
+  multitable_charts: MultitableChartsTable
+  multitable_dashboards: MultitableDashboardsTable
+  // Multitable API tokens & webhooks
+  multitable_api_tokens: MultitableApiTokensTable
+  multitable_webhooks: MultitableWebhooksTable
+  multitable_webhook_deliveries: MultitableWebhookDeliveriesTable
 }
 
 export interface SnapshotsTable {
@@ -1181,4 +1189,90 @@ export interface AttendancePayrollCyclesTable {
   metadata: JsonObjectColumn
   created_at: CreatedAt
   updated_at: UpdatedAt
+}
+
+// ============================================
+// Multitable Automation & Dashboard Tables
+// ============================================
+
+export interface MultitableAutomationExecutionsTable {
+  id: string
+  rule_id: string
+  triggered_by: string
+  triggered_at: CreatedAt
+  status: string
+  steps: JSONColumnType<Record<string, unknown>[]>
+  error: string | null
+  duration: number | null
+  created_at: CreatedAt
+}
+
+export interface MultitableChartsTable {
+  id: string
+  name: string
+  type: string
+  sheet_id: string
+  view_id: string | null
+  data_source: JSONColumnType<Record<string, unknown>>
+  display: JSONColumnType<Record<string, unknown>>
+  created_by: string
+  created_at: CreatedAt
+  updated_at: UpdatedAt
+}
+
+export interface MultitableDashboardsTable {
+  id: string
+  name: string
+  sheet_id: string
+  panels: JSONColumnType<Record<string, unknown>[]>
+  created_by: string
+  created_at: CreatedAt
+  updated_at: UpdatedAt
+}
+
+// ============================================
+// Multitable API Tokens & Webhooks
+// ============================================
+
+export interface MultitableApiTokensTable {
+  id: string
+  name: string
+  token_hash: string
+  token_prefix: string
+  scopes: JSONColumnType<string[]>
+  created_by: string
+  created_at: CreatedAt
+  last_used_at: NullableTimestamp
+  expires_at: NullableTimestamp
+  revoked: boolean
+  revoked_at: NullableTimestamp
+}
+
+export interface MultitableWebhooksTable {
+  id: string
+  name: string
+  url: string
+  secret: string | null
+  events: JSONColumnType<string[]>
+  active: boolean
+  created_by: string
+  created_at: CreatedAt
+  updated_at: NullableTimestamp
+  last_delivered_at: NullableTimestamp
+  failure_count: number
+  max_retries: number
+}
+
+export interface MultitableWebhookDeliveriesTable {
+  id: string
+  webhook_id: string
+  event: string
+  payload: JSONColumnType<unknown>
+  status: string
+  http_status: number | null
+  response_body: string | null
+  attempt_count: number
+  created_at: CreatedAt
+  delivered_at: NullableTimestamp
+  next_retry_at: NullableTimestamp
 }

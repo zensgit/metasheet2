@@ -1,11 +1,14 @@
 /**
  * API Token Service
- * In-memory token management for multitable open API access.
- * V1: in-memory store — tokens are lost on restart.
+ * PostgreSQL-backed token management for multitable open API access.
+ * V2: persistent store via Kysely — tokens survive restarts.
  */
 
 import { createHash, randomBytes } from 'crypto'
+import type { Kysely } from 'kysely'
 import { Logger } from '../core/logger'
+import type { Database } from '../db/types'
+import { nowTimestamp, toJsonValue } from '../db/type-helpers'
 import type {
   ApiToken,
   ApiTokenCreateInput,
@@ -29,16 +32,68 @@ function hashToken(plainText: string): string {
   return createHash('sha256').update(plainText).digest('hex')
 }
 
+/** Map a DB row to the domain ApiToken. */
+function rowToToken(row: {
+  id: string
+  name: string
+  token_hash: string
+  token_prefix: string
+  scopes: string | string[]
+  created_by: string
+  created_at: string | Date
+  last_used_at?: string | Date | null
+  expires_at?: string | Date | null
+  revoked: boolean
+  revoked_at?: string | Date | null
+}): ApiToken {
+  const scopes =
+    typeof row.scopes === 'string'
+      ? (JSON.parse(row.scopes) as ApiTokenScope[])
+      : (row.scopes as ApiTokenScope[])
+  return {
+    id: row.id,
+    name: row.name,
+    tokenHash: row.token_hash,
+    tokenPrefix: row.token_prefix,
+    scopes,
+    createdBy: row.created_by,
+    createdAt:
+      row.created_at instanceof Date
+        ? row.created_at.toISOString()
+        : row.created_at,
+    lastUsedAt: row.last_used_at
+      ? row.last_used_at instanceof Date
+        ? row.last_used_at.toISOString()
+        : row.last_used_at
+      : undefined,
+    expiresAt: row.expires_at
+      ? row.expires_at instanceof Date
+        ? row.expires_at.toISOString()
+        : row.expires_at
+      : undefined,
+    revoked: row.revoked,
+    revokedAt: row.revoked_at
+      ? row.revoked_at instanceof Date
+        ? row.revoked_at.toISOString()
+        : row.revoked_at
+      : undefined,
+  }
+}
+
 export class ApiTokenService {
-  /** tokenId -> ApiToken */
-  private tokens = new Map<string, ApiToken>()
-  /** tokenHash -> tokenId (reverse index for validation) */
-  private hashIndex = new Map<string, string>()
+  private db: Kysely<Database>
+
+  constructor(db: Kysely<Database>) {
+    this.db = db
+  }
 
   /**
    * Create a new API token. The plain-text token is returned only once.
    */
-  createToken(userId: string, input: ApiTokenCreateInput): ApiTokenCreateResult {
+  async createToken(
+    userId: string,
+    input: ApiTokenCreateInput,
+  ): Promise<ApiTokenCreateResult> {
     if (!input.name || input.name.trim().length === 0) {
       throw new Error('Token name is required')
     }
@@ -52,6 +107,21 @@ export class ApiTokenService {
     const id = generateTokenId()
     const now = new Date().toISOString()
 
+    await this.db
+      .insertInto('multitable_api_tokens')
+      .values({
+        id,
+        name: input.name.trim(),
+        token_hash: tokenHashValue,
+        token_prefix: tokenPrefix,
+        scopes: toJsonValue([...input.scopes]),
+        created_by: userId,
+        created_at: now,
+        expires_at: input.expiresAt ?? undefined,
+        revoked: false,
+      })
+      .execute()
+
     const token: ApiToken = {
       id,
       name: input.name.trim(),
@@ -64,79 +134,99 @@ export class ApiTokenService {
       revoked: false,
     }
 
-    this.tokens.set(id, token)
-    this.hashIndex.set(tokenHashValue, id)
-
     logger.info(`API token created: ${tokenPrefix}... by user ${userId}`)
 
     return { token, plainTextToken }
   }
 
   /**
-   * List all tokens belonging to a user. Token hashes are redacted.
+   * List all tokens belonging to a user (non-revoked). Token hashes are redacted.
    */
-  listTokens(userId: string): Omit<ApiToken, 'tokenHash'>[] {
-    const result: Omit<ApiToken, 'tokenHash'>[] = []
-    for (const token of this.tokens.values()) {
-      if (token.createdBy === userId) {
-        const { tokenHash: _hash, ...rest } = token
-        result.push(rest)
-      }
-    }
-    return result
+  async listTokens(userId: string): Promise<Omit<ApiToken, 'tokenHash'>[]> {
+    const rows = await this.db
+      .selectFrom('multitable_api_tokens')
+      .selectAll()
+      .where('created_by', '=', userId)
+      .where('revoked', '=', false)
+      .execute()
+
+    return rows.map((row) => {
+      const t = rowToToken(row as Parameters<typeof rowToToken>[0])
+      const { tokenHash: _hash, ...rest } = t
+      return rest
+    })
   }
 
   /**
    * Soft-revoke a token. Only the token owner can revoke.
    */
-  revokeToken(tokenId: string, userId: string): void {
-    const token = this.tokens.get(tokenId)
-    if (!token) {
+  async revokeToken(tokenId: string, userId: string): Promise<void> {
+    const row = await this.db
+      .selectFrom('multitable_api_tokens')
+      .selectAll()
+      .where('id', '=', tokenId)
+      .executeTakeFirst()
+
+    if (!row) {
       throw new Error('Token not found')
     }
-    if (token.createdBy !== userId) {
+    if (row.created_by !== userId) {
       throw new Error('Not authorized to revoke this token')
     }
-    if (token.revoked) {
+    if (row.revoked) {
       return // already revoked, idempotent
     }
 
-    token.revoked = true
-    token.revokedAt = new Date().toISOString()
+    await this.db
+      .updateTable('multitable_api_tokens')
+      .set({ revoked: true, revoked_at: nowTimestamp() })
+      .where('id', '=', tokenId)
+      .execute()
 
-    logger.info(`API token revoked: ${token.tokenPrefix}... by user ${userId}`)
+    logger.info(
+      `API token revoked: ${row.token_prefix}... by user ${userId}`,
+    )
   }
 
   /**
    * Validate a plain-text token. Returns the token with its scopes if valid.
    */
-  validateToken(
+  async validateToken(
     plainTextToken: string,
-  ): { valid: true; token: ApiToken } | { valid: false; reason: string } {
+  ): Promise<{ valid: true; token: ApiToken } | { valid: false; reason: string }> {
     if (!plainTextToken || !plainTextToken.startsWith(TOKEN_PREFIX)) {
       return { valid: false, reason: 'Invalid token format' }
     }
 
     const tokenHashValue = hashToken(plainTextToken)
-    const tokenId = this.hashIndex.get(tokenHashValue)
-    if (!tokenId) {
+
+    const row = await this.db
+      .selectFrom('multitable_api_tokens')
+      .selectAll()
+      .where('token_hash', '=', tokenHashValue)
+      .executeTakeFirst()
+
+    if (!row) {
       return { valid: false, reason: 'Token not found' }
     }
 
-    const token = this.tokens.get(tokenId)
-    if (!token) {
-      return { valid: false, reason: 'Token not found' }
-    }
-
-    if (token.revoked) {
+    if (row.revoked) {
       return { valid: false, reason: 'Token has been revoked' }
     }
 
-    if (token.expiresAt && new Date(token.expiresAt) < new Date()) {
+    if (row.expires_at && new Date(row.expires_at as unknown as string) < new Date()) {
       return { valid: false, reason: 'Token has expired' }
     }
 
     // Update last used timestamp
+    await this.db
+      .updateTable('multitable_api_tokens')
+      .set({ last_used_at: nowTimestamp() })
+      .where('id', '=', row.id)
+      .execute()
+
+    const token = rowToToken(row as Parameters<typeof rowToToken>[0])
+    // Re-read to get updated last_used_at
     token.lastUsedAt = new Date().toISOString()
 
     return { valid: true, token }
@@ -145,23 +235,72 @@ export class ApiTokenService {
   /**
    * Rotate a token: revoke the old one and create a new one with the same scopes.
    */
-  rotateToken(tokenId: string, userId: string): ApiTokenCreateResult {
-    const token = this.tokens.get(tokenId)
-    if (!token) {
+  async rotateToken(
+    tokenId: string,
+    userId: string,
+  ): Promise<ApiTokenCreateResult> {
+    const row = await this.db
+      .selectFrom('multitable_api_tokens')
+      .selectAll()
+      .where('id', '=', tokenId)
+      .executeTakeFirst()
+
+    if (!row) {
       throw new Error('Token not found')
     }
-    if (token.createdBy !== userId) {
+    if (row.created_by !== userId) {
       throw new Error('Not authorized to rotate this token')
     }
 
-    // Revoke old token
-    this.revokeToken(tokenId, userId)
+    const token = rowToToken(row as Parameters<typeof rowToToken>[0])
 
-    // Create new token with same name and scopes
-    return this.createToken(userId, {
-      name: token.name,
-      scopes: token.scopes,
-      expiresAt: token.expiresAt,
+    // Revoke old + create new in a transaction
+    return this.db.transaction().execute(async (trx) => {
+      await trx
+        .updateTable('multitable_api_tokens')
+        .set({ revoked: true, revoked_at: nowTimestamp() })
+        .where('id', '=', tokenId)
+        .execute()
+
+      // Create new token with same name and scopes
+      const plainTextToken = generatePlainTextToken()
+      const tokenHashValue = hashToken(plainTextToken)
+      const tokenPrefix = plainTextToken.slice(0, 8)
+      const id = generateTokenId()
+      const now = new Date().toISOString()
+
+      await trx
+        .insertInto('multitable_api_tokens')
+        .values({
+          id,
+          name: token.name,
+          token_hash: tokenHashValue,
+          token_prefix: tokenPrefix,
+          scopes: toJsonValue([...token.scopes]),
+          created_by: userId,
+          created_at: now,
+          expires_at: token.expiresAt ?? undefined,
+          revoked: false,
+        })
+        .execute()
+
+      const newToken: ApiToken = {
+        id,
+        name: token.name,
+        tokenHash: tokenHashValue,
+        tokenPrefix,
+        scopes: [...token.scopes],
+        createdBy: userId,
+        createdAt: now,
+        expiresAt: token.expiresAt,
+        revoked: false,
+      }
+
+      logger.info(
+        `API token rotated: ${row.token_prefix}... -> ${tokenPrefix}... by user ${userId}`,
+      )
+
+      return { token: newToken, plainTextToken }
     })
   }
 
@@ -175,10 +314,14 @@ export class ApiTokenService {
   /**
    * Get a token by ID (for internal use).
    */
-  getTokenById(tokenId: string): ApiToken | undefined {
-    return this.tokens.get(tokenId)
+  async getTokenById(tokenId: string): Promise<ApiToken | undefined> {
+    const row = await this.db
+      .selectFrom('multitable_api_tokens')
+      .selectAll()
+      .where('id', '=', tokenId)
+      .executeTakeFirst()
+
+    if (!row) return undefined
+    return rowToToken(row as Parameters<typeof rowToToken>[0])
   }
 }
-
-/** Singleton instance for V1 in-memory usage */
-export const apiTokenService = new ApiTokenService()

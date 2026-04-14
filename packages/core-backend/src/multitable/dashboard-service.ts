@@ -1,8 +1,9 @@
 /**
- * Dashboard Service — in-memory CRUD for charts and dashboards (V1).
+ * Dashboard Service — V2 (PostgreSQL-backed)
  *
- * Persistence is intentionally in-memory for V1; a future version will
- * use Postgres. The service delegates aggregation to ChartAggregationService.
+ * Replaces in-memory Maps with Kysely queries against
+ * multitable_charts and multitable_dashboards tables.
+ * Aggregation still delegates to ChartAggregationService.
  */
 
 import { randomUUID } from 'crypto'
@@ -11,16 +12,16 @@ import type { ChartConfig, ChartCreateInput } from './charts'
 import type {
   Dashboard,
   DashboardCreateInput,
+  DashboardPanel,
   DashboardUpdateInput,
 } from './dashboard'
 import { ChartAggregationService } from './chart-aggregation-service'
 import type { ChartData } from './chart-aggregation-service'
+import { db } from '../db/db'
 
 export type RecordProvider = (sheetId: string) => Promise<Array<{ data: Record<string, unknown> }>>
 
 export class DashboardService {
-  private dashboards: Map<string, Dashboard> = new Map()
-  private charts: Map<string, ChartConfig> = new Map()
   private aggregationService = new ChartAggregationService()
   private recordProvider: RecordProvider | undefined
 
@@ -36,7 +37,7 @@ export class DashboardService {
   // Chart CRUD
   // -----------------------------------------------------------------------
 
-  createChart(sheetId: string, input: ChartCreateInput): ChartConfig {
+  async createChart(sheetId: string, input: ChartCreateInput): Promise<ChartConfig> {
     const id = `chart_${randomUUID()}`
     const now = new Date().toISOString()
     const chart: ChartConfig = {
@@ -50,39 +51,99 @@ export class DashboardService {
       createdBy: input.createdBy ?? 'system',
       createdAt: now,
     }
-    this.charts.set(id, chart)
+
+    await db
+      .insertInto('multitable_charts')
+      .values({
+        id: chart.id,
+        name: chart.name,
+        type: chart.type,
+        sheet_id: chart.sheetId,
+        view_id: chart.viewId ?? null,
+        data_source: JSON.stringify(chart.dataSource) as unknown as Record<string, unknown>,
+        display: JSON.stringify(chart.display) as unknown as Record<string, unknown>,
+        created_by: chart.createdBy,
+      })
+      .execute()
+
     return chart
   }
 
-  getChart(chartId: string): ChartConfig | undefined {
-    return this.charts.get(chartId)
+  async getChart(chartId: string): Promise<ChartConfig | undefined> {
+    const row = await db
+      .selectFrom('multitable_charts')
+      .selectAll()
+      .where('id', '=', chartId)
+      .executeTakeFirst()
+
+    return row ? toChartConfig(row) : undefined
   }
 
-  listCharts(sheetId: string): ChartConfig[] {
-    return Array.from(this.charts.values()).filter((c) => c.sheetId === sheetId)
+  async listCharts(sheetId: string): Promise<ChartConfig[]> {
+    const rows = await db
+      .selectFrom('multitable_charts')
+      .selectAll()
+      .where('sheet_id', '=', sheetId)
+      .execute()
+
+    return rows.map(toChartConfig)
   }
 
-  updateChart(chartId: string, input: Partial<ChartConfig>): ChartConfig {
-    const existing = this.charts.get(chartId)
+  async updateChart(chartId: string, input: Partial<ChartConfig>): Promise<ChartConfig> {
+    const existing = await this.getChart(chartId)
     if (!existing) throw new Error(`Chart not found: ${chartId}`)
+
     const updated: ChartConfig = {
       ...existing,
       ...input,
-      id: existing.id, // prevent id overwrite
+      id: existing.id,
       sheetId: existing.sheetId,
       createdBy: existing.createdBy,
       createdAt: existing.createdAt,
       updatedAt: new Date().toISOString(),
     }
-    this.charts.set(chartId, updated)
+
+    await db
+      .updateTable('multitable_charts')
+      .set({
+        name: updated.name,
+        type: updated.type,
+        view_id: updated.viewId ?? null,
+        data_source: JSON.stringify(updated.dataSource) as unknown as Record<string, unknown>,
+        display: JSON.stringify(updated.display) as unknown as Record<string, unknown>,
+      })
+      .where('id', '=', chartId)
+      .execute()
+
     return updated
   }
 
-  deleteChart(chartId: string): void {
-    this.charts.delete(chartId)
+  async deleteChart(chartId: string): Promise<void> {
+    await db
+      .deleteFrom('multitable_charts')
+      .where('id', '=', chartId)
+      .execute()
+
     // Also remove from any dashboard panels
-    for (const dashboard of this.dashboards.values()) {
-      dashboard.panels = dashboard.panels.filter((p) => p.chartId !== chartId)
+    const dashboards = await db
+      .selectFrom('multitable_dashboards')
+      .selectAll()
+      .execute()
+
+    for (const dash of dashboards) {
+      const panels = (typeof dash.panels === 'string'
+        ? JSON.parse(dash.panels)
+        : dash.panels) as DashboardPanel[]
+      const filtered = panels.filter((p) => p.chartId !== chartId)
+      if (filtered.length !== panels.length) {
+        await db
+          .updateTable('multitable_dashboards')
+          .set({
+            panels: JSON.stringify(filtered) as unknown as Record<string, unknown>[],
+          })
+          .where('id', '=', dash.id)
+          .execute()
+      }
     }
   }
 
@@ -90,7 +151,7 @@ export class DashboardService {
   // Dashboard CRUD
   // -----------------------------------------------------------------------
 
-  createDashboard(input: DashboardCreateInput): Dashboard {
+  async createDashboard(input: DashboardCreateInput): Promise<Dashboard> {
     const id = `dash_${randomUUID()}`
     const now = new Date().toISOString()
     const dashboard: Dashboard = {
@@ -101,33 +162,69 @@ export class DashboardService {
       createdBy: input.createdBy ?? 'system',
       createdAt: now,
     }
-    this.dashboards.set(id, dashboard)
+
+    await db
+      .insertInto('multitable_dashboards')
+      .values({
+        id: dashboard.id,
+        name: dashboard.name,
+        sheet_id: dashboard.sheetId,
+        panels: JSON.stringify(dashboard.panels) as unknown as Record<string, unknown>[],
+        created_by: dashboard.createdBy,
+      })
+      .execute()
+
     return dashboard
   }
 
-  getDashboard(dashboardId: string): Dashboard | undefined {
-    return this.dashboards.get(dashboardId)
+  async getDashboard(dashboardId: string): Promise<Dashboard | undefined> {
+    const row = await db
+      .selectFrom('multitable_dashboards')
+      .selectAll()
+      .where('id', '=', dashboardId)
+      .executeTakeFirst()
+
+    return row ? toDashboard(row) : undefined
   }
 
-  listDashboards(sheetId: string): Dashboard[] {
-    return Array.from(this.dashboards.values()).filter((d) => d.sheetId === sheetId)
+  async listDashboards(sheetId: string): Promise<Dashboard[]> {
+    const rows = await db
+      .selectFrom('multitable_dashboards')
+      .selectAll()
+      .where('sheet_id', '=', sheetId)
+      .execute()
+
+    return rows.map(toDashboard)
   }
 
-  updateDashboard(dashboardId: string, input: DashboardUpdateInput): Dashboard {
-    const existing = this.dashboards.get(dashboardId)
+  async updateDashboard(dashboardId: string, input: DashboardUpdateInput): Promise<Dashboard> {
+    const existing = await this.getDashboard(dashboardId)
     if (!existing) throw new Error(`Dashboard not found: ${dashboardId}`)
+
     const updated: Dashboard = {
       ...existing,
       name: input.name ?? existing.name,
       panels: input.panels ?? existing.panels,
       updatedAt: new Date().toISOString(),
     }
-    this.dashboards.set(dashboardId, updated)
+
+    await db
+      .updateTable('multitable_dashboards')
+      .set({
+        name: updated.name,
+        panels: JSON.stringify(updated.panels) as unknown as Record<string, unknown>[],
+      })
+      .where('id', '=', dashboardId)
+      .execute()
+
     return updated
   }
 
-  deleteDashboard(dashboardId: string): void {
-    this.dashboards.delete(dashboardId)
+  async deleteDashboard(dashboardId: string): Promise<void> {
+    await db
+      .deleteFrom('multitable_dashboards')
+      .where('id', '=', dashboardId)
+      .execute()
   }
 
   // -----------------------------------------------------------------------
@@ -135,7 +232,7 @@ export class DashboardService {
   // -----------------------------------------------------------------------
 
   async getChartData(chartId: string): Promise<ChartData> {
-    const chart = this.charts.get(chartId)
+    const chart = await this.getChart(chartId)
     if (!chart) throw new Error(`Chart not found: ${chartId}`)
 
     let records: Array<{ data: Record<string, unknown> }> = []
@@ -144,5 +241,57 @@ export class DashboardService {
     }
 
     return this.aggregationService.computeChartData(chart, records)
+  }
+}
+
+// ── Row-to-domain mappers ───────────────────────────────────────────────────
+
+function toChartConfig(row: Record<string, unknown>): ChartConfig {
+  const dataSource = typeof row.data_source === 'string'
+    ? JSON.parse(row.data_source)
+    : row.data_source
+  const display = typeof row.display === 'string'
+    ? JSON.parse(row.display)
+    : row.display
+  return {
+    id: row.id as string,
+    name: row.name as string,
+    type: row.type as ChartConfig['type'],
+    sheetId: row.sheet_id as string,
+    viewId: (row.view_id as string) ?? undefined,
+    dataSource,
+    display: display ?? {},
+    createdBy: row.created_by as string,
+    createdAt:
+      row.created_at instanceof Date
+        ? row.created_at.toISOString()
+        : String(row.created_at),
+    updatedAt: row.updated_at
+      ? row.updated_at instanceof Date
+        ? row.updated_at.toISOString()
+        : String(row.updated_at)
+      : undefined,
+  }
+}
+
+function toDashboard(row: Record<string, unknown>): Dashboard {
+  const panels = typeof row.panels === 'string'
+    ? JSON.parse(row.panels)
+    : row.panels
+  return {
+    id: row.id as string,
+    name: row.name as string,
+    sheetId: row.sheet_id as string,
+    panels: panels ?? [],
+    createdBy: row.created_by as string,
+    createdAt:
+      row.created_at instanceof Date
+        ? row.created_at.toISOString()
+        : String(row.created_at),
+    updatedAt: row.updated_at
+      ? row.updated_at instanceof Date
+        ? row.updated_at.toISOString()
+        : String(row.updated_at)
+      : undefined,
   }
 }

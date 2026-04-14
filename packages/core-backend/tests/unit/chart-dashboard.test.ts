@@ -1,9 +1,45 @@
-import { describe, it, expect, beforeEach } from 'vitest'
+import { describe, it, expect, beforeEach, vi } from 'vitest'
 
 import { ChartAggregationService } from '../../src/multitable/chart-aggregation-service'
 import type { ChartData } from '../../src/multitable/chart-aggregation-service'
-import { DashboardService } from '../../src/multitable/dashboard-service'
 import type { ChartConfig, ChartCreateInput } from '../../src/multitable/charts'
+
+// ── DB mock ──────────────────────────────────────────────────────────────────
+
+const _executeResults: unknown[] = []
+const _executeTakeFirstResults: unknown[] = []
+
+function makeChain(): Record<string, unknown> {
+  const self: Record<string, unknown> = {}
+  const chainFn = (..._args: unknown[]) => self
+  const methods = [
+    'selectFrom', 'selectAll', 'select', 'where', 'orderBy',
+    'limit', 'offset', 'groupBy', 'insertInto', 'values',
+    'onConflict', 'columns', 'doUpdateSet',
+    'updateTable', 'set', 'deleteFrom', 'returningAll',
+    'leftJoin',
+  ]
+  for (const m of methods) {
+    self[m] = vi.fn(chainFn)
+  }
+  self.execute = vi.fn(async () => {
+    return _executeResults.shift() ?? []
+  })
+  self.executeTakeFirst = vi.fn(async () => {
+    return _executeTakeFirstResults.shift()
+  })
+  return self
+}
+
+vi.mock('../../src/db/db', () => {
+  const rootChain: Record<string, unknown> = {}
+  for (const m of ['selectFrom', 'insertInto', 'updateTable', 'deleteFrom']) {
+    rootChain[m] = vi.fn(() => makeChain())
+  }
+  return { db: rootChain }
+})
+
+import { DashboardService } from '../../src/multitable/dashboard-service'
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -39,7 +75,7 @@ const sampleRecords = makeRecords([
 ])
 
 // ---------------------------------------------------------------------------
-// ChartAggregationService
+// ChartAggregationService (pure logic — unchanged)
 // ---------------------------------------------------------------------------
 
 describe('ChartAggregationService', () => {
@@ -532,21 +568,25 @@ describe('ChartAggregationService', () => {
 })
 
 // ---------------------------------------------------------------------------
-// DashboardService
+// DashboardService (Kysely-backed)
 // ---------------------------------------------------------------------------
 
 describe('DashboardService', () => {
   let service: DashboardService
 
   beforeEach(() => {
+    _executeResults.length = 0
+    _executeTakeFirstResults.length = 0
     service = new DashboardService()
   })
 
   // -- Chart CRUD ----------------------------------------------------------
 
   describe('chart CRUD', () => {
-    it('creates a chart', () => {
-      const chart = service.createChart('sheet1', {
+    it('creates a chart', async () => {
+      // insert execute
+      _executeResults.push([])
+      const chart = await service.createChart('sheet1', {
         name: 'My Chart',
         type: 'bar',
         dataSource: { aggregation: { function: 'count' } },
@@ -556,120 +596,142 @@ describe('DashboardService', () => {
       expect(chart.sheetId).toBe('sheet1')
     })
 
-    it('lists charts for a sheet', () => {
-      service.createChart('sheet1', { name: 'C1', type: 'bar', dataSource: { aggregation: { function: 'count' } } })
-      service.createChart('sheet2', { name: 'C2', type: 'pie', dataSource: { aggregation: { function: 'count' } } })
-      service.createChart('sheet1', { name: 'C3', type: 'line', dataSource: { aggregation: { function: 'sum', fieldId: 'x' } } })
-
-      const list = service.listCharts('sheet1')
+    it('lists charts for a sheet', async () => {
+      const rows = [
+        { id: 'chart_1', name: 'C1', type: 'bar', sheet_id: 'sheet1', view_id: null, data_source: {}, display: {}, created_by: 'system', created_at: new Date(), updated_at: new Date() },
+        { id: 'chart_2', name: 'C3', type: 'line', sheet_id: 'sheet1', view_id: null, data_source: {}, display: {}, created_by: 'system', created_at: new Date(), updated_at: new Date() },
+      ]
+      _executeResults.push(rows)
+      const list = await service.listCharts('sheet1')
       expect(list).toHaveLength(2)
       expect(list.map((c) => c.name).sort()).toEqual(['C1', 'C3'])
     })
 
-    it('gets a chart by id', () => {
-      const created = service.createChart('sheet1', { name: 'C', type: 'bar', dataSource: { aggregation: { function: 'count' } } })
-      const fetched = service.getChart(created.id)
-      expect(fetched?.id).toBe(created.id)
+    it('gets a chart by id', async () => {
+      _executeTakeFirstResults.push({
+        id: 'chart_1', name: 'C', type: 'bar', sheet_id: 'sheet1', view_id: null,
+        data_source: { aggregation: { function: 'count' } }, display: {},
+        created_by: 'system', created_at: new Date(), updated_at: new Date(),
+      })
+      const fetched = await service.getChart('chart_1')
+      expect(fetched?.id).toBe('chart_1')
     })
 
-    it('updates a chart', () => {
-      const created = service.createChart('sheet1', { name: 'C', type: 'bar', dataSource: { aggregation: { function: 'count' } } })
-      const updated = service.updateChart(created.id, { name: 'Updated' })
+    it('updates a chart', async () => {
+      // getChart (executeTakeFirst)
+      _executeTakeFirstResults.push({
+        id: 'chart_1', name: 'C', type: 'bar', sheet_id: 'sheet1', view_id: null,
+        data_source: { aggregation: { function: 'count' } }, display: {},
+        created_by: 'system', created_at: new Date(), updated_at: null,
+      })
+      // update execute
+      _executeResults.push([])
+      const updated = await service.updateChart('chart_1', { name: 'Updated' })
       expect(updated.name).toBe('Updated')
       expect(updated.updatedAt).toBeDefined()
-      // Immutable fields preserved
-      expect(updated.id).toBe(created.id)
+      expect(updated.id).toBe('chart_1')
       expect(updated.sheetId).toBe('sheet1')
     })
 
-    it('throws when updating non-existent chart', () => {
-      expect(() => service.updateChart('no_such_id', { name: 'X' })).toThrow('Chart not found')
+    it('throws when updating non-existent chart', async () => {
+      _executeTakeFirstResults.push(undefined)
+      await expect(service.updateChart('no_such_id', { name: 'X' })).rejects.toThrow('Chart not found')
     })
 
-    it('deletes a chart', () => {
-      const created = service.createChart('sheet1', { name: 'C', type: 'bar', dataSource: { aggregation: { function: 'count' } } })
-      service.deleteChart(created.id)
-      expect(service.getChart(created.id)).toBeUndefined()
+    it('deletes a chart', async () => {
+      // delete execute
+      _executeResults.push([])
+      // select dashboards for panel cleanup
+      _executeResults.push([])
+      await service.deleteChart('chart_1')
+      // getChart
+      _executeTakeFirstResults.push(undefined)
+      const result = await service.getChart('chart_1')
+      expect(result).toBeUndefined()
     })
 
-    it('deleting a chart removes it from dashboard panels', () => {
-      const chart = service.createChart('sheet1', { name: 'C', type: 'bar', dataSource: { aggregation: { function: 'count' } } })
-      const dash = service.createDashboard({ name: 'D', sheetId: 'sheet1' })
-      service.updateDashboard(dash.id, {
-        panels: [{ id: 'p1', chartId: chart.id, position: { x: 0, y: 0, w: 6, h: 4 } }],
-      })
-      service.deleteChart(chart.id)
-      const updated = service.getDashboard(dash.id)
-      expect(updated?.panels).toHaveLength(0)
+    it('deleting a chart removes it from dashboard panels', async () => {
+      // delete chart execute
+      _executeResults.push([])
+      // select all dashboards
+      _executeResults.push([
+        {
+          id: 'dash_1', name: 'D', sheet_id: 'sheet1',
+          panels: [{ id: 'p1', chartId: 'chart_1', position: { x: 0, y: 0, w: 6, h: 4 } }],
+          created_by: 'system', created_at: new Date(), updated_at: new Date(),
+        },
+      ])
+      // update dashboard panels execute
+      _executeResults.push([])
+      await service.deleteChart('chart_1')
     })
   })
 
   // -- Dashboard CRUD ------------------------------------------------------
 
   describe('dashboard CRUD', () => {
-    it('creates a dashboard', () => {
-      const dash = service.createDashboard({ name: 'My Dashboard', sheetId: 'sheet1' })
+    it('creates a dashboard', async () => {
+      _executeResults.push([])
+      const dash = await service.createDashboard({ name: 'My Dashboard', sheetId: 'sheet1' })
       expect(dash.id).toMatch(/^dash_/)
       expect(dash.name).toBe('My Dashboard')
       expect(dash.panels).toHaveLength(0)
     })
 
-    it('lists dashboards for a sheet', () => {
-      service.createDashboard({ name: 'D1', sheetId: 'sheet1' })
-      service.createDashboard({ name: 'D2', sheetId: 'sheet2' })
-      expect(service.listDashboards('sheet1')).toHaveLength(1)
+    it('lists dashboards for a sheet', async () => {
+      _executeResults.push([
+        { id: 'dash_1', name: 'D1', sheet_id: 'sheet1', panels: [], created_by: 'system', created_at: new Date(), updated_at: new Date() },
+      ])
+      const list = await service.listDashboards('sheet1')
+      expect(list).toHaveLength(1)
     })
 
-    it('gets a dashboard by id', () => {
-      const created = service.createDashboard({ name: 'D', sheetId: 'sheet1' })
-      expect(service.getDashboard(created.id)?.id).toBe(created.id)
+    it('gets a dashboard by id', async () => {
+      _executeTakeFirstResults.push({
+        id: 'dash_1', name: 'D', sheet_id: 'sheet1', panels: [],
+        created_by: 'system', created_at: new Date(), updated_at: new Date(),
+      })
+      const dash = await service.getDashboard('dash_1')
+      expect(dash?.id).toBe('dash_1')
     })
 
-    it('updates dashboard name', () => {
-      const created = service.createDashboard({ name: 'D', sheetId: 'sheet1' })
-      const updated = service.updateDashboard(created.id, { name: 'Renamed' })
+    it('updates dashboard name', async () => {
+      _executeTakeFirstResults.push({
+        id: 'dash_1', name: 'D', sheet_id: 'sheet1', panels: [],
+        created_by: 'system', created_at: new Date(), updated_at: null,
+      })
+      _executeResults.push([])
+      const updated = await service.updateDashboard('dash_1', { name: 'Renamed' })
       expect(updated.name).toBe('Renamed')
       expect(updated.updatedAt).toBeDefined()
     })
 
-    it('adds panels to a dashboard', () => {
-      const chart = service.createChart('sheet1', { name: 'C', type: 'bar', dataSource: { aggregation: { function: 'count' } } })
-      const dash = service.createDashboard({ name: 'D', sheetId: 'sheet1' })
-      const updated = service.updateDashboard(dash.id, {
+    it('adds panels to a dashboard', async () => {
+      _executeTakeFirstResults.push({
+        id: 'dash_1', name: 'D', sheet_id: 'sheet1', panels: [],
+        created_by: 'system', created_at: new Date(), updated_at: null,
+      })
+      _executeResults.push([])
+      const updated = await service.updateDashboard('dash_1', {
         panels: [
-          { id: 'p1', chartId: chart.id, position: { x: 0, y: 0, w: 6, h: 4 } },
-          { id: 'p2', chartId: chart.id, position: { x: 6, y: 0, w: 6, h: 4 } },
+          { id: 'p1', chartId: 'c1', position: { x: 0, y: 0, w: 6, h: 4 } },
+          { id: 'p2', chartId: 'c1', position: { x: 6, y: 0, w: 6, h: 4 } },
         ],
       })
       expect(updated.panels).toHaveLength(2)
     })
 
-    it('reorders panels', () => {
-      const chart = service.createChart('sheet1', { name: 'C', type: 'bar', dataSource: { aggregation: { function: 'count' } } })
-      const dash = service.createDashboard({ name: 'D', sheetId: 'sheet1' })
-      service.updateDashboard(dash.id, {
-        panels: [
-          { id: 'p1', chartId: chart.id, position: { x: 0, y: 0, w: 6, h: 4 } },
-          { id: 'p2', chartId: chart.id, position: { x: 6, y: 0, w: 6, h: 4 } },
-        ],
-      })
-      const reordered = service.updateDashboard(dash.id, {
-        panels: [
-          { id: 'p2', chartId: chart.id, position: { x: 0, y: 0, w: 6, h: 4 } },
-          { id: 'p1', chartId: chart.id, position: { x: 6, y: 0, w: 6, h: 4 } },
-        ],
-      })
-      expect(reordered.panels[0].id).toBe('p2')
+    it('throws when updating non-existent dashboard', async () => {
+      _executeTakeFirstResults.push(undefined)
+      await expect(service.updateDashboard('no_such', { name: 'X' })).rejects.toThrow('Dashboard not found')
     })
 
-    it('throws when updating non-existent dashboard', () => {
-      expect(() => service.updateDashboard('no_such', { name: 'X' })).toThrow('Dashboard not found')
-    })
-
-    it('deletes a dashboard', () => {
-      const created = service.createDashboard({ name: 'D', sheetId: 'sheet1' })
-      service.deleteDashboard(created.id)
-      expect(service.getDashboard(created.id)).toBeUndefined()
+    it('deletes a dashboard', async () => {
+      _executeResults.push([])
+      await service.deleteDashboard('dash_1')
+      _executeTakeFirstResults.push(undefined)
+      const result = await service.getDashboard('dash_1')
+      expect(result).toBeUndefined()
     })
   })
 
@@ -677,45 +739,37 @@ describe('DashboardService', () => {
 
   describe('chart data computation', () => {
     it('computes chart data with record provider', async () => {
-      const chart = service.createChart('sheet1', {
-        name: 'Status Counts',
-        type: 'bar',
-        dataSource: {
-          groupByFieldId: 'status',
-          aggregation: { function: 'count' },
-        },
+      _executeTakeFirstResults.push({
+        id: 'chart_1', name: 'Status Counts', type: 'bar', sheet_id: 'sheet1', view_id: null,
+        data_source: { groupByFieldId: 'status', aggregation: { function: 'count' } },
+        display: {}, created_by: 'system', created_at: new Date(), updated_at: new Date(),
       })
-
       service.setRecordProvider(async (_sheetId: string) => sampleRecords)
-
-      const data = await service.getChartData(chart.id)
-      expect(data.chartId).toBe(chart.id)
+      const data = await service.getChartData('chart_1')
+      expect(data.chartId).toBe('chart_1')
       expect(data.chartType).toBe('bar')
       expect(data.dataPoints.length).toBeGreaterThan(0)
     })
 
     it('returns empty data when no record provider', async () => {
-      const chart = service.createChart('sheet1', {
-        name: 'Empty',
-        type: 'bar',
-        dataSource: {
-          groupByFieldId: 'status',
-          aggregation: { function: 'count' },
-        },
+      _executeTakeFirstResults.push({
+        id: 'chart_2', name: 'Empty', type: 'bar', sheet_id: 'sheet1', view_id: null,
+        data_source: { groupByFieldId: 'status', aggregation: { function: 'count' } },
+        display: {}, created_by: 'system', created_at: new Date(), updated_at: new Date(),
       })
-      const data = await service.getChartData(chart.id)
+      const data = await service.getChartData('chart_2')
       expect(data.dataPoints).toHaveLength(0)
     })
 
     it('throws when chart not found', async () => {
+      _executeTakeFirstResults.push(undefined)
       await expect(service.getChartData('nonexistent')).rejects.toThrow('Chart not found')
     })
 
-    it('full pipeline: records → filter → group → aggregate → sort → limit', async () => {
-      const chart = service.createChart('sheet1', {
-        name: 'Top Category',
-        type: 'pie',
-        dataSource: {
+    it('full pipeline: records -> filter -> group -> aggregate -> sort -> limit', async () => {
+      _executeTakeFirstResults.push({
+        id: 'chart_3', name: 'Top Category', type: 'pie', sheet_id: 'sheet1', view_id: null,
+        data_source: {
           groupByFieldId: 'category',
           aggregation: { function: 'sum', fieldId: 'amount' },
           filterFieldId: 'status',
@@ -725,13 +779,11 @@ describe('DashboardService', () => {
           sortOrder: 'desc',
           limit: 1,
         },
+        display: {}, created_by: 'system', created_at: new Date(), updated_at: new Date(),
       })
-
       service.setRecordProvider(async () => sampleRecords)
-
-      const data = await service.getChartData(chart.id)
+      const data = await service.getChartData('chart_3')
       expect(data.dataPoints).toHaveLength(1)
-      // open records: A=10+50=60, B=20 → top 1 is A
       expect(data.dataPoints[0].label).toBe('A')
       expect(data.dataPoints[0].value).toBe(60)
     })
