@@ -91,6 +91,27 @@ describe('loadFormContext API', () => {
     expect(result.fields).toHaveLength(1)
     expect(fetchFn).toHaveBeenCalledWith(expect.stringContaining('/api/multitable/form-context'))
   })
+
+  it('includes the public token when loading anonymous form context', async () => {
+    const fetchFn = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({
+        ok: true,
+        data: {
+          mode: 'form',
+          readOnly: false,
+          submitPath: '/api/multitable/views/v1/submit',
+          sheet: { id: 's1', name: 'S1' },
+          fields: [],
+          capabilities: { canRead: true },
+        },
+      }), { status: 200 }),
+    )
+    const client = mockClientWithFn(fetchFn)
+    await client.loadFormContext({ sheetId: 's1', viewId: 'v1', publicToken: 'pub_123' })
+
+    expect(fetchFn.mock.calls[0]?.[0]).toContain('/api/multitable/form-context')
+    expect(fetchFn.mock.calls[0]?.[0]).toContain('publicToken=pub_123')
+  })
 })
 
 // --- Record summaries ---
@@ -112,6 +133,56 @@ describe('listRecordSummaries API', () => {
     expect(result.records[0].display).toBe('Alice')
     expect(fetchFn).toHaveBeenCalledWith(expect.stringContaining('/api/multitable/records-summary'))
     expect(fetchFn).toHaveBeenCalledWith(expect.stringContaining('search=Al'))
+  })
+})
+
+// --- Form submit ---
+describe('form submit API', () => {
+  it('submitForm calls correct endpoint', async () => {
+    const fetchFn = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({
+        ok: true,
+        data: { mode: 'create', record: { id: 'r1', version: 1, data: {} }, commentsScope: {} },
+      }), { status: 200 }),
+    )
+    const client = mockClientWithFn(fetchFn)
+    const result = await client.submitForm('v1', { data: { name: 'Alice' } })
+    expect(result.mode).toBe('create')
+    expect(fetchFn).toHaveBeenCalledWith('/api/multitable/views/v1/submit', expect.objectContaining({ method: 'POST' }))
+  })
+
+  it('submitForm sends recordId for updates', async () => {
+    const fetchFn = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({
+        ok: true,
+        data: { mode: 'update', record: { id: 'r1', version: 2, data: {} }, commentsScope: {} },
+      }), { status: 200 }),
+    )
+    const client = mockClientWithFn(fetchFn)
+    await client.submitForm('v1', { recordId: 'r1', expectedVersion: 1, data: { name: 'Bob' } })
+    const body = JSON.parse(fetchFn.mock.calls[0][1].body)
+    expect(body.recordId).toBe('r1')
+    expect(body.expectedVersion).toBe(1)
+  })
+
+  it('submitForm sends the public token with anonymous form submissions', async () => {
+    const fetchFn = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({
+        ok: true,
+        data: {
+          mode: 'create',
+          record: { id: 'r1', version: 1, data: {} },
+          commentsScope: {},
+        },
+      }), { status: 200 }),
+    )
+    const client = mockClientWithFn(fetchFn)
+    await client.submitForm('v1', { publicToken: 'pub_123', data: { name: 'Bob' } })
+
+    expect(fetchFn.mock.calls[0]?.[0]).toContain('/api/multitable/views/v1/submit')
+    expect(fetchFn.mock.calls[0]?.[0]).toContain('publicToken=pub_123')
+    const body = JSON.parse(fetchFn.mock.calls[0][1].body)
+    expect(body.publicToken).toBe('pub_123')
   })
 })
 

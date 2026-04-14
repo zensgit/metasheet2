@@ -1,6 +1,6 @@
 import type { RouteRecordRaw } from 'vue-router'
 import { AppRouteNames, ROUTE_PATHS } from './types'
-import { buildMultitableRoute } from './multitableRoute'
+import { buildMultitableRoute, buildPublicMultitableFormRoute } from './multitableRoute'
 import GridView from '../views/GridView.vue'
 import KanbanView from '../views/KanbanView.vue'
 import CalendarView from '../views/CalendarView.vue'
@@ -104,6 +104,7 @@ export const appRoutes: RouteRecordRaw[] = [
     redirect: '/attendance',
     meta: { title: 'Attendance', titleZh: '考勤', requiresAuth: true, requiredFeature: 'attendance' },
   },
+  buildPublicMultitableFormRoute(() => import('../views/PublicMultitableFormView.vue')),
   buildMultitableRoute(() => import('../multitable/views/MultitableEmbedHost.vue')),
   {
     path: '/p/:plugin/:viewId',

@@ -44,6 +44,14 @@ export function resolveMultitableRouteProps(route: MultitableRouteSource) {
   }
 }
 
+export function resolvePublicMultitableFormRouteProps(route: MultitableRouteSource) {
+  return {
+    sheetId: typeof route.params.sheetId === 'string' ? route.params.sheetId : undefined,
+    viewId: typeof route.params.viewId === 'string' ? route.params.viewId : undefined,
+    publicToken: firstQueryValue(route.query.publicToken),
+  }
+}
+
 export function buildMultitableRoute(component: NonNullable<RouteRecordRaw['component']>): RouteRecordRaw {
   return {
     path: ROUTE_PATHS.MULTITABLE,
@@ -51,5 +59,15 @@ export function buildMultitableRoute(component: NonNullable<RouteRecordRaw['comp
     component,
     props: resolveMultitableRouteProps,
     meta: { title: 'Multitable', requiresAuth: true },
+  }
+}
+
+export function buildPublicMultitableFormRoute(component: NonNullable<RouteRecordRaw['component']>): RouteRecordRaw {
+  return {
+    path: ROUTE_PATHS.MULTITABLE_PUBLIC_FORM,
+    name: AppRouteNames.MULTITABLE_PUBLIC_FORM,
+    component,
+    props: resolvePublicMultitableFormRouteProps,
+    meta: { title: 'Public Multitable Form', hideNavbar: true, requiresAuth: false },
   }
 }

@@ -1,7 +1,12 @@
 import { describe, expect, it } from 'vitest'
 import { defineComponent } from 'vue'
 import { createMemoryHistory, createRouter } from 'vue-router'
-import { buildMultitableRoute, resolveMultitableRouteProps } from '../src/router/multitableRoute'
+import {
+  buildMultitableRoute,
+  buildPublicMultitableFormRoute,
+  resolveMultitableRouteProps,
+  resolvePublicMultitableFormRouteProps,
+} from '../src/router/multitableRoute'
 import { AppRouteNames, ROUTE_PATHS } from '../src/router/types'
 
 function resolveMultitableProps(path: string) {
@@ -72,6 +77,31 @@ describe('multitable app shell route wiring', () => {
       mode: undefined,
       embedded: undefined,
       role: undefined,
+    })
+  })
+})
+
+describe('public multitable form route wiring', () => {
+  it('maps the public form URL contract into route props', async () => {
+    const PublicFormStub = defineComponent({
+      name: 'PublicFormStub',
+      template: '<div />',
+    })
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [buildPublicMultitableFormRoute(PublicFormStub)],
+    })
+
+    await router.push('/multitable/public-form/sheet_orders/view_form?publicToken=pub_123')
+    await router.isReady()
+
+    expect(router.currentRoute.value.name).toBe(AppRouteNames.MULTITABLE_PUBLIC_FORM)
+    const matched = router.currentRoute.value.matched.find((record) => record.name === AppRouteNames.MULTITABLE_PUBLIC_FORM)
+    expect(matched?.path).toBe(ROUTE_PATHS.MULTITABLE_PUBLIC_FORM)
+    expect(resolvePublicMultitableFormRouteProps(router.currentRoute.value as any)).toEqual({
+      sheetId: 'sheet_orders',
+      viewId: 'view_form',
+      publicToken: 'pub_123',
     })
   })
 })

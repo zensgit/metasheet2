@@ -14,6 +14,21 @@ function createMockPool(queryHandler: QueryHandler) {
     if (sql.includes('FROM spreadsheet_permissions')) {
       return { rows: [], rowCount: 0 }
     }
+    if (sql.includes('FROM field_permissions')) {
+      return { rows: [], rowCount: 0 }
+    }
+    if (sql.includes('FROM view_permissions')) {
+      return { rows: [], rowCount: 0 }
+    }
+    if (sql.includes('FROM meta_view_permissions')) {
+      return { rows: [], rowCount: 0 }
+    }
+    if (sql.includes('FROM record_permissions')) {
+      return { rows: [], rowCount: 0 }
+    }
+    if (sql.includes('FROM formula_dependencies')) {
+      return { rows: [], rowCount: 0 }
+    }
     return queryHandler(sql, params)
   })
   const transaction = vi.fn(async (fn: (client: { query: typeof query }) => Promise<unknown>) => fn({ query }))
@@ -25,6 +40,7 @@ async function createApp(args: {
   tokenRoles?: string[]
   queryHandler?: QueryHandler
   fallbackPermissions?: string[]
+  user?: { id?: string; roles?: string[]; perms?: string[] } | null
 }) {
   vi.resetModules()
   vi.doMock('../../src/rbac/service', () => ({
@@ -42,14 +58,16 @@ async function createApp(args: {
 
   const app = express()
   app.use(express.json())
-  app.use((req, _res, next) => {
-    req.user = {
-      id: 'user_multitable_2',
-      roles: args.tokenRoles ?? [],
-      perms: args.tokenPerms ?? [],
-    }
-    next()
-  })
+  if (args.user !== null) {
+    app.use((req, _res, next) => {
+      req.user = {
+        id: args.user?.id ?? 'user_multitable_2',
+        roles: args.user?.roles ?? args.tokenRoles ?? [],
+        perms: args.user?.perms ?? args.tokenPerms ?? [],
+      }
+      next()
+    })
+  }
   app.use('/api/multitable', univerMetaRouter())
 
   return { app, mockPool }
@@ -273,6 +291,241 @@ describe('Multitable record and form context API', () => {
         thumbnailUrl: null,
         uploadedAt: '2026-03-19T11:00:00.000Z',
       })],
+    })
+  })
+
+  test('allows anonymous public form context and submission with a valid public token', async () => {
+    const { app } = await createApp({
+      user: null,
+      queryHandler: async (sql, params) => {
+        if (sql.includes('SELECT id, sheet_id, name, type, filter_info, sort_info, group_info, hidden_field_ids, config FROM meta_views WHERE id = $1')) {
+          expect(params).toEqual(['view_public_form'])
+          return {
+            rows: [{
+              id: 'view_public_form',
+              sheet_id: 'sheet_public',
+              name: 'Public Intake',
+              type: 'form',
+              filter_info: {},
+              sort_info: {},
+              group_info: {},
+              hidden_field_ids: [],
+              config: {
+                publicForm: {
+                  enabled: true,
+                  publicToken: 'pub_token_123',
+                  expiresAt: '2099-12-31T23:59:59.000Z',
+                },
+              },
+            }],
+          }
+        }
+        if (sql.includes('SELECT id, base_id, name, description FROM meta_sheets WHERE id = $1')) {
+          expect(params).toEqual(['sheet_public'])
+          return { rows: [{ id: 'sheet_public', base_id: 'base_public', name: 'Public', description: 'Public intake' }] }
+        }
+        if (sql.includes('SELECT id, name, type, property, "order" FROM meta_fields WHERE sheet_id = $1')) {
+          expect(params).toEqual(['sheet_public'])
+          return {
+            rows: [
+              { id: 'fld_title', name: 'Title', type: 'string', property: {}, order: 1 },
+            ],
+          }
+        }
+        if (sql.includes('INSERT INTO meta_records (id, sheet_id, data, version, created_by)')) {
+          expect(params?.[1]).toBe('sheet_public')
+          expect(params?.[2]).toBe(JSON.stringify({ fld_title: 'Anonymous submission' }))
+          expect(params?.[3]).toBeNull()
+          return { rows: [{ id: 'rec_public_1', version: 1 }] }
+        }
+        if (sql.includes('SELECT id, version, data FROM meta_records WHERE id = $1 AND sheet_id = $2')) {
+          expect(params).toEqual(['rec_public_1', 'sheet_public'])
+          return {
+            rows: [{
+              id: 'rec_public_1',
+              version: 1,
+              data: { fld_title: 'Anonymous submission' },
+            }],
+          }
+        }
+        throw new Error(`Unhandled SQL in test: ${sql}`)
+      },
+    })
+
+    const formResponse = await request(app)
+      .get('/api/multitable/form-context')
+      .query({ viewId: 'view_public_form', publicToken: 'pub_token_123' })
+      .expect(200)
+
+    expect(formResponse.body.ok).toBe(true)
+    expect(formResponse.body.data.readOnly).toBe(false)
+    expect(formResponse.body.data.submitPath).toBe('/api/multitable/views/view_public_form/submit?publicToken=pub_token_123')
+    expect(formResponse.body.data.capabilities).toMatchObject({
+      canRead: true,
+      canCreateRecord: true,
+      canEditRecord: false,
+    })
+
+    const submitResponse = await request(app)
+      .post(formResponse.body.data.submitPath)
+      .send({
+        data: {
+          fld_title: 'Anonymous submission',
+        },
+      })
+      .expect(200)
+
+    expect(submitResponse.body.ok).toBe(true)
+    expect(submitResponse.body.data.mode).toBe('create')
+    expect(submitResponse.body.data.record).toEqual({
+      id: 'rec_public_1',
+      version: 1,
+      data: {
+        fld_title: 'Anonymous submission',
+      },
+    })
+  })
+
+  test('rejects anonymous public form access when the public link is expired', async () => {
+    const { app } = await createApp({
+      user: null,
+      queryHandler: async (sql, params) => {
+        if (sql.includes('SELECT id, sheet_id, name, type, filter_info, sort_info, group_info, hidden_field_ids, config FROM meta_views WHERE id = $1')) {
+          expect(params).toEqual(['view_public_form'])
+          return {
+            rows: [{
+              id: 'view_public_form',
+              sheet_id: 'sheet_public',
+              name: 'Public Intake',
+              type: 'form',
+              filter_info: {},
+              sort_info: {},
+              group_info: {},
+              hidden_field_ids: [],
+              config: {
+                publicForm: {
+                  enabled: true,
+                  publicToken: 'pub_token_123',
+                  expiresAt: '2020-01-01T00:00:00.000Z',
+                },
+              },
+            }],
+          }
+        }
+        throw new Error(`Unhandled SQL in test: ${sql}`)
+      },
+    })
+
+    const response = await request(app)
+      .get('/api/multitable/form-context')
+      .query({ viewId: 'view_public_form', publicToken: 'pub_token_123' })
+      .expect(401)
+
+    expect(response.body.error).toBe('Authentication required')
+  })
+
+  test('rejects loading an existing record through a public form link', async () => {
+    const { app } = await createApp({
+      user: null,
+      queryHandler: async (sql, params) => {
+        if (sql.includes('SELECT id, sheet_id, name, type, filter_info, sort_info, group_info, hidden_field_ids, config FROM meta_views WHERE id = $1')) {
+          expect(params).toEqual(['view_public_form'])
+          return {
+            rows: [{
+              id: 'view_public_form',
+              sheet_id: 'sheet_public',
+              name: 'Public Intake',
+              type: 'form',
+              filter_info: {},
+              sort_info: {},
+              group_info: {},
+              hidden_field_ids: [],
+              config: {
+                publicForm: {
+                  enabled: true,
+                  publicToken: 'pub_token_123',
+                  expiresAt: '2099-12-31T23:59:59.000Z',
+                },
+              },
+            }],
+          }
+        }
+        if (sql.includes('SELECT id, base_id, name, description FROM meta_sheets WHERE id = $1')) {
+          expect(params).toEqual(['sheet_public'])
+          return { rows: [{ id: 'sheet_public', base_id: 'base_public', name: 'Public', description: 'Public intake' }] }
+        }
+        if (sql.includes('SELECT id, name, type, property, "order" FROM meta_fields WHERE sheet_id = $1')) {
+          expect(params).toEqual(['sheet_public'])
+          return { rows: [{ id: 'fld_title', name: 'Title', type: 'string', property: {}, order: 1 }] }
+        }
+        throw new Error(`Unhandled SQL in test: ${sql}`)
+      },
+    })
+
+    const response = await request(app)
+      .get('/api/multitable/form-context')
+      .query({ viewId: 'view_public_form', publicToken: 'pub_token_123', recordId: 'rec_existing' })
+      .expect(400)
+
+    expect(response.body).toMatchObject({
+      ok: false,
+      error: {
+        code: 'VALIDATION_ERROR',
+        message: 'Public forms do not support loading an existing record',
+      },
+    })
+  })
+
+  test('rejects updating an existing record through a public form link', async () => {
+    const { app } = await createApp({
+      user: null,
+      queryHandler: async (sql, params) => {
+        if (sql.includes('SELECT id, sheet_id, name, type, filter_info, sort_info, group_info, hidden_field_ids, config FROM meta_views WHERE id = $1')) {
+          expect(params).toEqual(['view_public_form'])
+          return {
+            rows: [{
+              id: 'view_public_form',
+              sheet_id: 'sheet_public',
+              name: 'Public Intake',
+              type: 'form',
+              filter_info: {},
+              sort_info: {},
+              group_info: {},
+              hidden_field_ids: [],
+              config: {
+                publicForm: {
+                  enabled: true,
+                  publicToken: 'pub_token_123',
+                  expiresAt: '2099-12-31T23:59:59.000Z',
+                },
+              },
+            }],
+          }
+        }
+        if (sql.includes('SELECT id, base_id, name, description FROM meta_sheets WHERE id = $1')) {
+          expect(params).toEqual(['sheet_public'])
+          return { rows: [{ id: 'sheet_public', base_id: 'base_public', name: 'Public', description: 'Public intake' }] }
+        }
+        throw new Error(`Unhandled SQL in test: ${sql}`)
+      },
+    })
+
+    const response = await request(app)
+      .post('/api/multitable/views/view_public_form/submit?publicToken=pub_token_123')
+      .send({
+        recordId: 'rec_existing',
+        data: {
+          fld_title: 'Should fail',
+        },
+      })
+      .expect(400)
+
+    expect(response.body).toMatchObject({
+      ok: false,
+      error: {
+        code: 'VALIDATION_ERROR',
+        message: 'Public forms do not support updating an existing record',
+      },
     })
   })
 

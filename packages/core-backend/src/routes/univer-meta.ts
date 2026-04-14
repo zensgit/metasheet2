@@ -230,8 +230,70 @@ type PeopleSheetPreset = {
   fieldProperty: Record<string, unknown>
 }
 
+type PublicFormConfig = {
+  enabled?: boolean
+  publicToken?: string
+  expiresAt?: unknown
+  expiresOn?: unknown
+}
+
+const PUBLIC_FORM_CAPABILITIES: MultitableCapabilities = {
+  canRead: true,
+  canCreateRecord: true,
+  canEditRecord: false,
+  canDeleteRecord: false,
+  canManageFields: false,
+  canManageSheetAccess: false,
+  canManageViews: false,
+  canComment: false,
+  canManageAutomation: false,
+  canExport: false,
+}
+
 function buildId(prefix: string): string {
   return `${prefix}_${randomUUID()}`
+}
+
+function getPublicFormConfig(view?: UniverMetaViewConfig | null): PublicFormConfig | null {
+  const config = view?.config
+  if (!isPlainObject(config)) return null
+  const publicForm = config.publicForm
+  if (!isPlainObject(publicForm)) return null
+  return publicForm as PublicFormConfig
+}
+
+function parsePublicFormExpiryMs(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isFinite(value)) return value
+  if (value instanceof Date) return value.getTime()
+  if (typeof value !== 'string') return null
+  const trimmed = value.trim()
+  if (!trimmed) return null
+  if (/^\d+$/.test(trimmed)) {
+    const numeric = Number(trimmed)
+    return Number.isFinite(numeric) ? numeric : null
+  }
+  const parsed = Date.parse(trimmed)
+  return Number.isFinite(parsed) ? parsed : null
+}
+
+function isPublicFormAccessAllowed(view: UniverMetaViewConfig | null | undefined, publicToken: string): boolean {
+  if (!view || !publicToken) return false
+  const publicForm = getPublicFormConfig(view)
+  if (!publicForm || publicForm.enabled !== true) return false
+  const configuredToken = typeof publicForm.publicToken === 'string' ? publicForm.publicToken.trim() : ''
+  if (!configuredToken || configuredToken !== publicToken) return false
+  const expiryMs = parsePublicFormExpiryMs(publicForm.expiresAt ?? publicForm.expiresOn)
+  if (expiryMs !== null && Date.now() >= expiryMs) return false
+  return true
+}
+
+function appendQueryParam(path: string, key: string, value: string): string {
+  const delimiter = path.includes('?') ? '&' : '?'
+  return `${path}${delimiter}${encodeURIComponent(key)}=${encodeURIComponent(value)}`
+}
+
+function buildPublicFormSubmitPath(viewId: string, publicToken: string): string {
+  return appendQueryParam(`/api/multitable/views/${viewId}/submit`, 'publicToken', publicToken)
 }
 
 type FormulaDependencyQueryFn = (sql: string, params?: unknown[]) => Promise<{ rows: unknown[]; rowCount?: number | null }>
@@ -4867,6 +4929,7 @@ export function univerMetaRouter(): Router {
     const sheetIdParam = typeof req.query.sheetId === 'string' ? req.query.sheetId.trim() : undefined
     const viewIdParam = typeof req.query.viewId === 'string' ? req.query.viewId.trim() : undefined
     const recordIdParam = typeof req.query.recordId === 'string' ? req.query.recordId.trim() : undefined
+    const publicTokenParam = typeof req.query.publicToken === 'string' ? req.query.publicToken.trim() : ''
 
     try {
       const pool = poolManager.get()
@@ -4876,16 +4939,27 @@ export function univerMetaRouter(): Router {
       })
       const sheetId = resolved.sheetId
       const { access, capabilities, capabilityOrigin, sheetScope } = await resolveSheetReadableCapabilities(req, pool.query.bind(pool), sheetId)
-      if (!access.userId) {
+      const publicAccessAllowed = isPublicFormAccessAllowed(resolved.view, publicTokenParam)
+      if (!access.userId && !publicAccessAllowed) {
         return res.status(401).json({ error: 'Authentication required' })
       }
-      if (!capabilities.canRead) return sendForbidden(res)
+      if (!publicAccessAllowed && !capabilities.canRead) return sendForbidden(res)
       const sheet = await loadSheetRow(pool.query.bind(pool), sheetId)
       if (!sheet) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
       }
 
       const fields = await loadFieldsForSheet(pool.query.bind(pool), sheetId)
+      const effectiveCapabilities = publicAccessAllowed ? PUBLIC_FORM_CAPABILITIES : capabilities
+      const effectiveCapabilityOrigin = publicAccessAllowed ? undefined : capabilityOrigin
+      const effectiveSheetScope = publicAccessAllowed ? undefined : sheetScope
+      const effectiveAccess = publicAccessAllowed ? { userId: '', permissions: [], isAdminRole: false } : access
+      if (publicAccessAllowed && recordIdParam) {
+        return res.status(400).json({
+          ok: false,
+          error: { code: 'VALIDATION_ERROR', message: 'Public forms do not support loading an existing record' },
+        })
+      }
 
       let record: UniverMetaRecord | undefined
       if (recordIdParam) {
@@ -4908,21 +4982,21 @@ export function univerMetaRouter(): Router {
       const hiddenFieldIds = new Set(resolved.view?.hiddenFieldIds ?? [])
       const visibleFields = fields.filter((field) => !hiddenFieldIds.has(field.id) && !isFieldPermissionHidden(field))
       const visibleFieldIds = new Set(visibleFields.map((field) => field.id))
-      const fieldScopeMap = access.userId ? await loadFieldPermissionScopeMap(pool.query.bind(pool), sheetId, access.userId) : new Map()
-      const viewScopeMap = (access.userId && resolved.view) ? await loadViewPermissionScopeMap(pool.query.bind(pool), [resolved.view.id], access.userId) : new Map()
-      const fieldPermissions = deriveFieldPermissions(fields, capabilities, {
+      const fieldScopeMap = effectiveAccess.userId ? await loadFieldPermissionScopeMap(pool.query.bind(pool), sheetId, effectiveAccess.userId) : new Map()
+      const viewScopeMap = (effectiveAccess.userId && resolved.view) ? await loadViewPermissionScopeMap(pool.query.bind(pool), [resolved.view.id], effectiveAccess.userId) : new Map()
+      const fieldPermissions = deriveFieldPermissions(fields, effectiveCapabilities, {
         hiddenFieldIds: resolved.view?.hiddenFieldIds ?? [],
         allowCreateOnly: !record,
         fieldScopeMap,
       })
-      const viewPermissions = resolved.view ? deriveViewPermissions([resolved.view], capabilities, viewScopeMap) : {}
+      const viewPermissions = resolved.view ? deriveViewPermissions([resolved.view], effectiveCapabilities, viewScopeMap) : {}
       const rowActions = record
-        ? deriveRecordRowActions(capabilities, sheetScope, access, record.createdBy)
+        ? deriveRecordRowActions(effectiveCapabilities, effectiveSheetScope, effectiveAccess, record.createdBy)
         : deriveRecordRowActions({
-            ...capabilities,
-            canEditRecord: capabilities.canCreateRecord,
+            ...effectiveCapabilities,
+            canEditRecord: effectiveCapabilities.canCreateRecord,
             canDeleteRecord: false,
-          }, sheetScope, access, null)
+          }, effectiveSheetScope, effectiveAccess, null)
       const attachmentFields = visibleFields.filter((field) => field.type === 'attachment')
       const attachmentSummaries = record && attachmentFields.length > 0
         ? filterSingleRecordFieldSummaryMap(
@@ -4946,13 +5020,17 @@ export function univerMetaRouter(): Router {
         ok: true,
         data: {
           mode: 'form',
-          readOnly: !capabilities.canCreateRecord,
-          submitPath: resolved.view ? `/api/multitable/views/${resolved.view.id}/submit` : '/api/multitable/records',
+          readOnly: !effectiveCapabilities.canCreateRecord,
+          submitPath: resolved.view
+            ? (publicAccessAllowed && publicTokenParam
+              ? buildPublicFormSubmitPath(resolved.view.id, publicTokenParam)
+              : `/api/multitable/views/${resolved.view.id}/submit`)
+            : '/api/multitable/records',
           sheet,
           ...(resolved.view ? { view: resolved.view } : {}),
           fields: visibleFields,
-          capabilities,
-          capabilityOrigin,
+          capabilities: effectiveCapabilities,
+          ...(effectiveCapabilityOrigin ? { capabilityOrigin: effectiveCapabilityOrigin } : {}),
           fieldPermissions,
           ...(resolved.view ? { viewPermissions } : {}),
           ...(record ? { rowActions } : {}),
@@ -4994,6 +5072,7 @@ export function univerMetaRouter(): Router {
     const schema = z.object({
       recordId: z.string().min(1).optional(),
       expectedVersion: z.number().int().nonnegative().optional(),
+      publicToken: z.string().min(1).optional(),
       data: z.record(z.unknown()).optional(),
     })
     const parsed = schema.safeParse(req.body)
@@ -5013,10 +5092,25 @@ export function univerMetaRouter(): Router {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${view.sheetId}` } })
       }
       const { access, capabilities, sheetScope } = await resolveSheetCapabilities(req, pool.query.bind(pool), view.sheetId)
-      if (!access.userId) {
+      const publicTokenParam = typeof parsed.data.publicToken === 'string'
+        ? parsed.data.publicToken.trim()
+        : typeof req.query.publicToken === 'string'
+          ? req.query.publicToken.trim()
+          : ''
+      const publicAccessAllowed = isPublicFormAccessAllowed(view, publicTokenParam)
+      if (!access.userId && !publicAccessAllowed) {
         return res.status(401).json({ error: 'Authentication required' })
       }
-      const canWriteFormRecord = parsed.data.recordId ? capabilities.canEditRecord : capabilities.canCreateRecord
+      const effectiveCapabilities = publicAccessAllowed ? PUBLIC_FORM_CAPABILITIES : capabilities
+      const effectiveSheetScope = publicAccessAllowed ? undefined : sheetScope
+      const effectiveAccess = publicAccessAllowed ? { userId: '', permissions: [], isAdminRole: false } : access
+      if (publicAccessAllowed && parsed.data.recordId) {
+        return res.status(400).json({
+          ok: false,
+          error: { code: 'VALIDATION_ERROR', message: 'Public forms do not support updating an existing record' },
+        })
+      }
+      const canWriteFormRecord = parsed.data.recordId ? effectiveCapabilities.canEditRecord : effectiveCapabilities.canCreateRecord
       if (!canWriteFormRecord) return sendForbidden(res)
 
       const fields = await loadFieldsForSheet(pool.query.bind(pool), view.sheetId)
@@ -5148,7 +5242,7 @@ export function univerMetaRouter(): Router {
             throw new NotFoundError(`Record not found: ${recordId}`)
           }
           const currentRow: any = (currentRes as any).rows[0]
-          if (!ensureRecordWriteAllowed(capabilities, sheetScope, access, typeof currentRow?.created_by === 'string' ? currentRow.created_by : null, 'edit')) {
+          if (!ensureRecordWriteAllowed(effectiveCapabilities, effectiveSheetScope, effectiveAccess, typeof currentRow?.created_by === 'string' ? currentRow.created_by : null, 'edit')) {
             throw new ValidationError('Record editing is not allowed for this row')
           }
           const serverVersion = Number(currentRow?.version ?? 1)
@@ -5205,7 +5299,7 @@ export function univerMetaRouter(): Router {
           `INSERT INTO meta_records (id, sheet_id, data, version, created_by)
            VALUES ($1, $2, $3::jsonb, 1, $4)
            RETURNING id, version`,
-          [resultRecordId, view.sheetId, JSON.stringify(patch), getRequestActorId(req)],
+          [resultRecordId, view.sheetId, JSON.stringify(patch), publicAccessAllowed ? null : getRequestActorId(req)],
         )
         resultRecordId = String((insertRes as any).rows[0]?.id ?? resultRecordId)
         nextVersion = Number((insertRes as any).rows[0]?.version ?? 1)

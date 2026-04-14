@@ -648,7 +648,7 @@ export class MultitableApiClient {
   }
 
   // --- Form context ---
-  async loadFormContext(params: { sheetId?: string; viewId?: string; recordId?: string }): Promise<MetaFormContext> {
+  async loadFormContext(params: { sheetId?: string; viewId?: string; recordId?: string; publicToken?: string }): Promise<MetaFormContext> {
     const res = await this.fetch(`/api/multitable/form-context${qs(params)}`)
     return parseJson(res)
   }
@@ -685,7 +685,7 @@ export class MultitableApiClient {
 
   // --- Form submit ---
   async submitForm(viewId: string, input: FormSubmitInput): Promise<FormSubmitResult> {
-    const res = await this.fetch(`/api/multitable/views/${viewId}/submit`, {
+    const res = await this.fetch(`/api/multitable/views/${viewId}/submit${qs({ publicToken: input.publicToken })}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(input),

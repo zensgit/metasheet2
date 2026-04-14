@@ -72,6 +72,7 @@ export const AppRouteNames = {
   // Attendance routes
   ATTENDANCE: 'attendance',
   MULTITABLE: 'multitable',
+  MULTITABLE_PUBLIC_FORM: 'multitable-public-form',
   MULTITABLE_COMMENT_INBOX: 'multitable-comment-inbox',
 
   // User routes
@@ -144,6 +145,7 @@ export interface AppRouteParams {
   'approval-history': Record<string, never>
   'attendance': Record<string, never>
   'multitable': { sheetId: string; viewId: string }
+  'multitable-public-form': { sheetId: string; viewId: string }
   'multitable-comment-inbox': Record<string, never>
   'user-settings': Record<string, never>
   'user-management': Record<string, never>
@@ -231,6 +233,10 @@ export interface AppRouteQuery {
     mode?: 'grid' | 'form' | 'kanban' | 'gallery' | 'calendar' | 'timeline'
     embedded?: string
     role?: 'owner' | 'editor' | 'commenter' | 'viewer'
+  }
+
+  'multitable-public-form': {
+    publicToken?: string
   }
 
   // Default (no query params) - index signature for untyped routes
@@ -420,6 +426,7 @@ export const ROUTE_PATHS = {
   // Attendance
   ATTENDANCE: '/attendance',
   MULTITABLE: '/multitable/:sheetId/:viewId',
+  MULTITABLE_PUBLIC_FORM: '/multitable/public-form/:sheetId/:viewId',
   MULTITABLE_COMMENT_INBOX: '/multitable/comments/inbox',
 
   // User

@@ -446,6 +446,7 @@ export interface PatchRecordsInput {
 export interface FormSubmitInput {
   recordId?: string
   expectedVersion?: number
+  publicToken?: string
   data: Record<string, unknown>
 }
 
