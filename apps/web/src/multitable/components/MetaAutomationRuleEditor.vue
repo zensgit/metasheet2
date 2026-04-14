@@ -229,9 +229,20 @@ interface FieldPair {
   value: string
 }
 
+type DraftActionConfig = Record<string, unknown> & {
+  fieldUpdates?: FieldPair[]
+  targetSheetId?: string
+  fieldValues?: FieldPair[]
+  url?: string
+  method?: string
+  userId?: string
+  message?: string
+  locked?: boolean
+}
+
 interface DraftAction {
   type: AutomationActionType
-  config: Record<string, unknown>
+  config: DraftActionConfig
 }
 
 interface Draft {
