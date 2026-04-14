@@ -49,6 +49,8 @@
       <button v-if="caps.canManageViews.value && canConfigureCurrentView" class="mt-workbench__mgr-btn" @click="showViewManager = true">&#x2630; Views</button>
       <button v-if="caps.canManageAutomation.value" class="mt-workbench__mgr-btn" @click="openWorkflowDesigner()">&#x2699; Workflow</button>
       <button v-if="caps.canManageAutomation.value" class="mt-workbench__mgr-btn" @click="showAutomationManager = true">&#x26A1; Automations</button>
+      <button v-if="activeViewType === 'form'" class="mt-workbench__mgr-btn" @click="showFormShareManager = true">&#x1F517; Share Form</button>
+      <button class="mt-workbench__mgr-btn" @click="showApiTokenManager = true">&#x1F511; API &amp; Webhooks</button>
     </div>
     <div
       v-if="capabilityOriginNotice"
@@ -283,6 +285,19 @@
       @close="showAutomationManager = false"
       @updated="showAutomationManager = false"
     />
+    <MetaFormShareManager
+      :visible="showFormShareManager"
+      :sheet-id="workbench.activeSheetId.value"
+      :view-id="workbench.activeViewId.value"
+      :client="workbench.client"
+      @close="showFormShareManager = false"
+      @updated="showFormShareManager = false"
+    />
+    <MetaApiTokenManager
+      :visible="showApiTokenManager"
+      :client="workbench.client"
+      @close="showApiTokenManager = false"
+    />
   </div>
 </template>
 
@@ -333,6 +348,8 @@ import MetaFieldManager from '../components/MetaFieldManager.vue'
 import MetaViewManager from '../components/MetaViewManager.vue'
 import MetaSheetPermissionManager from '../components/MetaSheetPermissionManager.vue'
 import MetaAutomationManager from '../components/MetaAutomationManager.vue'
+import MetaFormShareManager from '../components/MetaFormShareManager.vue'
+import MetaApiTokenManager from '../components/MetaApiTokenManager.vue'
 import MetaBasePicker from '../components/MetaBasePicker.vue'
 import MetaKanbanView from '../components/MetaKanbanView.vue'
 import MetaGalleryView from '../components/MetaGalleryView.vue'
@@ -387,6 +404,8 @@ const linkPickerCurrentValue = ref<unknown>(null)
 const showFieldManager = ref(false)
 const showPermissionManager = ref(false)
 const showAutomationManager = ref(false)
+const showFormShareManager = ref(false)
+const showApiTokenManager = ref(false)
 const fieldPermissionEntries = ref<MetaFieldPermissionEntry[]>([])
 const viewPermissionEntries = ref<MetaViewPermissionEntry[]>([])
 const showViewManager = ref(false)

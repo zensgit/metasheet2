@@ -42,6 +42,13 @@ import type {
   MetaViewPermissionEntry,
   RecordPermissionEntry,
   AutomationRule,
+  FormShareConfig,
+  FormShareConfigUpdate,
+  ApiToken,
+  ApiTokenCreateResult,
+  Webhook,
+  WebhookCreateInput,
+  WebhookDelivery,
 } from '../types'
 import { apiFetch } from '../../utils/api'
 
@@ -922,6 +929,96 @@ export class MultitableApiClient {
   async markCommentRead(commentId: string): Promise<void> {
     const res = await this.fetch(`/api/comments/${commentId}/read`, { method: 'POST' })
     return parseJson(res)
+  }
+
+  // --- Form Share ---
+  async getFormShareConfig(sheetId: string, viewId: string): Promise<FormShareConfig> {
+    const res = await this.fetch(`/api/multitable/sheets/${encodeURIComponent(sheetId)}/views/${encodeURIComponent(viewId)}/form-share`)
+    return parseJson(res)
+  }
+
+  async updateFormShareConfig(sheetId: string, viewId: string, config: FormShareConfigUpdate): Promise<FormShareConfig> {
+    const res = await this.fetch(`/api/multitable/sheets/${encodeURIComponent(sheetId)}/views/${encodeURIComponent(viewId)}/form-share`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(config),
+    })
+    return parseJson(res)
+  }
+
+  async regenerateFormShareToken(sheetId: string, viewId: string): Promise<{ publicToken: string }> {
+    const res = await this.fetch(`/api/multitable/sheets/${encodeURIComponent(sheetId)}/views/${encodeURIComponent(viewId)}/form-share/regenerate`, {
+      method: 'POST',
+    })
+    return parseJson(res)
+  }
+
+  // --- API Tokens ---
+  async listApiTokens(): Promise<ApiToken[]> {
+    const res = await this.fetch('/api/multitable/tokens')
+    const data = await parseJson<{ tokens: ApiToken[] }>(res)
+    return data.tokens ?? []
+  }
+
+  async createApiToken(input: { name: string; scopes: string[]; expiresAt?: string }): Promise<ApiTokenCreateResult> {
+    const res = await this.fetch('/api/multitable/tokens', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(input),
+    })
+    return parseJson(res)
+  }
+
+  async revokeApiToken(tokenId: string): Promise<void> {
+    const res = await this.fetch(`/api/multitable/tokens/${encodeURIComponent(tokenId)}`, {
+      method: 'DELETE',
+    })
+    return parseJson(res)
+  }
+
+  async rotateApiToken(tokenId: string): Promise<ApiTokenCreateResult> {
+    const res = await this.fetch(`/api/multitable/tokens/${encodeURIComponent(tokenId)}/rotate`, {
+      method: 'POST',
+    })
+    return parseJson(res)
+  }
+
+  // --- Webhooks ---
+  async listWebhooks(): Promise<Webhook[]> {
+    const res = await this.fetch('/api/multitable/webhooks')
+    const data = await parseJson<{ webhooks: Webhook[] }>(res)
+    return data.webhooks ?? []
+  }
+
+  async createWebhook(input: WebhookCreateInput): Promise<Webhook> {
+    const res = await this.fetch('/api/multitable/webhooks', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(input),
+    })
+    return parseJson(res)
+  }
+
+  async updateWebhook(id: string, input: Partial<WebhookCreateInput>): Promise<Webhook> {
+    const res = await this.fetch(`/api/multitable/webhooks/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(input),
+    })
+    return parseJson(res)
+  }
+
+  async deleteWebhook(id: string): Promise<void> {
+    const res = await this.fetch(`/api/multitable/webhooks/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+    })
+    return parseJson(res)
+  }
+
+  async getWebhookDeliveries(id: string): Promise<WebhookDelivery[]> {
+    const res = await this.fetch(`/api/multitable/webhooks/${encodeURIComponent(id)}/deliveries`)
+    const data = await parseJson<{ deliveries: WebhookDelivery[] }>(res)
+    return data.deliveries ?? []
   }
 }
 
