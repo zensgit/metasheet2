@@ -17,6 +17,7 @@ into:
 Result:
 
 - merge commit created locally with no conflicts
+- merge commit: `fd0c88983`
 
 ## What Came In From Main
 
@@ -35,6 +36,8 @@ Before this sync, `gh pr view 873` reported:
 - `mergeStateStatus: BEHIND`
 
 That meant the PR could not be treated as truly merge-ready even though the DingTalk-specific review materials were already complete.
+
+After the merge and push, the local branch contains `origin/main` with no remaining left-side commits in `git log --left-right --cherry-pick origin/main...HEAD`. If GitHub still shows `BEHIND` temporarily, treat that as server-side refresh lag until the remote status catches up.
 
 ## Validation Scope
 

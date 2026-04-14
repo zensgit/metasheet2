@@ -65,6 +65,16 @@ Before pushing the merge commit, `gh pr view 873` still reported:
 
 This is expected until the updated branch is pushed.
 
+After pushing:
+
+- `git push` succeeded for `codex/feishu-gap-rc-integration-202605`
+- local comparison `git log --oneline --left-right --cherry-pick origin/main...HEAD` showed only right-side commits (`>`)
+
+Interpretation:
+
+- the branch locally contains `origin/main`
+- if GitHub still reports `BEHIND`, that is most likely PR status refresh lag rather than a remaining missing merge
+
 ## Claude Code CLI
 
 Verified callable with:
