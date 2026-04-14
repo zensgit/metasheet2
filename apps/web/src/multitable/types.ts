@@ -544,3 +544,72 @@ export interface AutomationRule {
   updatedAt?: string
   createdBy?: string
 }
+
+// --- Form Share ---
+export interface FormShareConfig {
+  enabled: boolean
+  publicToken: string | null
+  expiresAt: string | null
+  status: 'active' | 'expired' | 'disabled'
+}
+
+export interface FormShareConfigUpdate {
+  enabled?: boolean
+  expiresAt?: string | null
+}
+
+// --- API Tokens ---
+export interface ApiToken {
+  id: string
+  name: string
+  prefix: string
+  scopes: string[]
+  createdAt: string
+  lastUsedAt: string | null
+  expiresAt: string | null
+}
+
+export interface ApiTokenCreateResult {
+  token: ApiToken
+  plaintext: string
+}
+
+// --- Webhooks ---
+export interface Webhook {
+  id: string
+  name: string
+  url: string
+  events: string[]
+  active: boolean
+  secret: string | null
+  failureCount: number
+  createdAt: string
+  updatedAt: string
+}
+
+export interface WebhookCreateInput {
+  name: string
+  url: string
+  events: string[]
+  secret?: string
+  active?: boolean
+}
+
+export interface WebhookDelivery {
+  id: string
+  webhookId: string
+  event: string
+  httpStatus: number | null
+  success: boolean
+  retryCount: number
+  timestamp: string
+}
+
+// --- Field Validation ---
+export type FieldValidationRuleType = 'required' | 'minLength' | 'maxLength' | 'pattern' | 'min' | 'max' | 'enum'
+
+export interface FieldValidationRule {
+  type: FieldValidationRuleType
+  value?: string | number | string[]
+  message?: string
+}
