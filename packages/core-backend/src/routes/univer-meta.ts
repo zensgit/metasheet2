@@ -27,6 +27,9 @@ import { StorageServiceImpl } from '../services/StorageService'
 import { createUploadMiddleware, loadMulter } from '../types/multer'
 import type { RequestWithFile } from '../types/multer'
 import { MultitableFormulaEngine } from '../multitable/formula-engine'
+import { validateRecord, getDefaultValidationRules } from '../multitable/field-validation-engine'
+import type { FieldValidationConfig } from '../multitable/field-validation'
+import { conditionalPublicRateLimiter, publicFormContextLimiter, publicFormSubmitLimiter } from '../middleware/rate-limiter'
 
 const multitableFormulaEngine = new MultitableFormulaEngine()
 
@@ -4925,7 +4928,7 @@ export function univerMetaRouter(): Router {
     }
   })
 
-  router.get('/form-context', async (req: Request, res: Response) => {
+  router.get('/form-context', conditionalPublicRateLimiter(publicFormContextLimiter), async (req: Request, res: Response) => {
     const sheetIdParam = typeof req.query.sheetId === 'string' ? req.query.sheetId.trim() : undefined
     const viewIdParam = typeof req.query.viewId === 'string' ? req.query.viewId.trim() : undefined
     const recordIdParam = typeof req.query.recordId === 'string' ? req.query.recordId.trim() : undefined
@@ -5063,7 +5066,7 @@ export function univerMetaRouter(): Router {
     }
   })
 
-  router.post('/views/:viewId/submit', async (req: Request, res: Response) => {
+  router.post('/views/:viewId/submit', conditionalPublicRateLimiter(publicFormSubmitLimiter), async (req: Request, res: Response) => {
     const viewId = typeof req.params.viewId === 'string' ? req.params.viewId.trim() : ''
     if (!viewId) {
       return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'viewId is required' } })
@@ -5228,6 +5231,28 @@ export function univerMetaRouter(): Router {
         })
       }
 
+      // --- Field validation rules ---
+      const validationFields = fields.map((f) => {
+        const prop = normalizeJson(f.property) as Record<string, unknown> | undefined
+        const explicitRules = Array.isArray(prop?.validation) ? prop!.validation as FieldValidationConfig : undefined
+        const defaultRules = getDefaultValidationRules(f.type, prop ?? undefined)
+        const mergedRules = explicitRules ?? defaultRules
+        return {
+          id: f.id,
+          name: f.name,
+          type: f.type,
+          config: mergedRules.length > 0 ? { validation: mergedRules } : undefined,
+        }
+      })
+      const validationResult = validateRecord(validationFields, patch)
+      if (!validationResult.valid) {
+        return res.status(422).json({
+          error: 'VALIDATION_FAILED',
+          message: 'Record validation failed',
+          fieldErrors: validationResult.errors,
+        })
+      }
+
       const recordId = parsed.data.recordId
       let resultRecordId = recordId ?? buildId('rec')
       let nextVersion = 1
@@ -5379,6 +5404,17 @@ export function univerMetaRouter(): Router {
         }
       } catch (recalcErr) {
         console.error('[univer-meta] formula recalculation failed:', recalcErr)
+      }
+
+      // Audit log for public form submissions
+      if (publicAccessAllowed && publicTokenParam) {
+        console.info('[public-form-submission]', JSON.stringify({
+          viewId,
+          publicToken: publicTokenParam.slice(0, 8) + '...',
+          ip: req.ip,
+          recordId: record.id,
+          timestamp: new Date().toISOString(),
+        }))
       }
 
       publishMultitableSheetRealtime({
@@ -6462,7 +6498,7 @@ export function univerMetaRouter(): Router {
       if (!capabilities.canCreateRecord) return sendForbidden(res)
 
       const fieldRes = await pool.query(
-        'SELECT id, type, property FROM meta_fields WHERE sheet_id = $1',
+        'SELECT id, name, type, property FROM meta_fields WHERE sheet_id = $1',
         [sheetId],
       )
       if (fieldRes.rows.length === 0) {
@@ -6592,6 +6628,29 @@ export function univerMetaRouter(): Router {
         }
 
         patch[fieldId] = value
+      }
+
+      // --- Field validation rules (direct record create) ---
+      const directValidationFields = (fieldRes.rows as any[]).map((f: any) => {
+        const prop = normalizeJson(f.property) as Record<string, unknown> | undefined
+        const fType = mapFieldType(String(f.type ?? 'string'))
+        const explicitRules = Array.isArray(prop?.validation) ? prop!.validation as FieldValidationConfig : undefined
+        const defaultRules = getDefaultValidationRules(fType, prop ?? undefined)
+        const mergedRules = explicitRules ?? defaultRules
+        return {
+          id: String(f.id),
+          name: String(f.name ?? f.id),
+          type: fType,
+          config: mergedRules.length > 0 ? { validation: mergedRules } : undefined,
+        }
+      })
+      const directValidationResult = validateRecord(directValidationFields, patch)
+      if (!directValidationResult.valid) {
+        return res.status(422).json({
+          error: 'VALIDATION_FAILED',
+          message: 'Record validation failed',
+          fieldErrors: directValidationResult.errors,
+        })
       }
 
       const recordId = `rec_${randomUUID()}`
