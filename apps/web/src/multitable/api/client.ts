@@ -42,6 +42,13 @@ import type {
   MetaViewPermissionEntry,
   RecordPermissionEntry,
   AutomationRule,
+  AutomationExecution,
+  AutomationStats,
+  ChartConfig,
+  ChartCreateInput,
+  ChartData,
+  Dashboard,
+  DashboardUpdateInput,
   FormShareConfig,
   FormShareConfigUpdate,
   ApiToken,
@@ -1019,6 +1026,109 @@ export class MultitableApiClient {
     const res = await this.fetch(`/api/multitable/webhooks/${encodeURIComponent(id)}/deliveries`)
     const data = await parseJson<{ deliveries: WebhookDelivery[] }>(res)
     return data.deliveries ?? []
+  }
+
+  // --- Automation V1: test / logs / stats ---
+  async testAutomationRule(sheetId: string, ruleId: string): Promise<AutomationExecution> {
+    const res = await this.fetch(
+      `/api/multitable/sheets/${encodeURIComponent(sheetId)}/automations/${encodeURIComponent(ruleId)}/test`,
+      { method: 'POST' },
+    )
+    return parseJson<AutomationExecution>(res)
+  }
+
+  async getAutomationLogs(sheetId: string, ruleId: string, limit?: number): Promise<AutomationExecution[]> {
+    const res = await this.fetch(
+      `/api/multitable/sheets/${encodeURIComponent(sheetId)}/automations/${encodeURIComponent(ruleId)}/logs${qs({ limit })}`,
+    )
+    const data = await parseJson<{ executions: AutomationExecution[] }>(res)
+    return Array.isArray(data?.executions) ? data.executions : []
+  }
+
+  async getAutomationStats(sheetId: string, ruleId: string): Promise<AutomationStats> {
+    const res = await this.fetch(
+      `/api/multitable/sheets/${encodeURIComponent(sheetId)}/automations/${encodeURIComponent(ruleId)}/stats`,
+    )
+    return parseJson<AutomationStats>(res)
+  }
+
+  // --- Charts ---
+  async listCharts(sheetId: string): Promise<ChartConfig[]> {
+    const res = await this.fetch(`/api/multitable/sheets/${encodeURIComponent(sheetId)}/charts`)
+    const data = await parseJson<{ charts: ChartConfig[] }>(res)
+    return Array.isArray(data?.charts) ? data.charts : []
+  }
+
+  async createChart(sheetId: string, input: ChartCreateInput): Promise<ChartConfig> {
+    const res = await this.fetch(`/api/multitable/sheets/${encodeURIComponent(sheetId)}/charts`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(input),
+    })
+    return parseJson<ChartConfig>(res)
+  }
+
+  async updateChart(sheetId: string, chartId: string, input: Partial<ChartCreateInput>): Promise<ChartConfig> {
+    const res = await this.fetch(
+      `/api/multitable/sheets/${encodeURIComponent(sheetId)}/charts/${encodeURIComponent(chartId)}`,
+      {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(input),
+      },
+    )
+    return parseJson<ChartConfig>(res)
+  }
+
+  async deleteChart(sheetId: string, chartId: string): Promise<void> {
+    const res = await this.fetch(
+      `/api/multitable/sheets/${encodeURIComponent(sheetId)}/charts/${encodeURIComponent(chartId)}`,
+      { method: 'DELETE' },
+    )
+    await parseJson(res)
+  }
+
+  async getChartData(sheetId: string, chartId: string): Promise<ChartData> {
+    const res = await this.fetch(
+      `/api/multitable/sheets/${encodeURIComponent(sheetId)}/charts/${encodeURIComponent(chartId)}/data`,
+    )
+    return parseJson<ChartData>(res)
+  }
+
+  // --- Dashboards ---
+  async listDashboards(sheetId: string): Promise<Dashboard[]> {
+    const res = await this.fetch(`/api/multitable/sheets/${encodeURIComponent(sheetId)}/dashboards`)
+    const data = await parseJson<{ dashboards: Dashboard[] }>(res)
+    return Array.isArray(data?.dashboards) ? data.dashboards : []
+  }
+
+  async createDashboard(sheetId: string, input: { name: string }): Promise<Dashboard> {
+    const res = await this.fetch(`/api/multitable/sheets/${encodeURIComponent(sheetId)}/dashboards`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(input),
+    })
+    return parseJson<Dashboard>(res)
+  }
+
+  async updateDashboard(sheetId: string, dashboardId: string, input: DashboardUpdateInput): Promise<Dashboard> {
+    const res = await this.fetch(
+      `/api/multitable/sheets/${encodeURIComponent(sheetId)}/dashboards/${encodeURIComponent(dashboardId)}`,
+      {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(input),
+      },
+    )
+    return parseJson<Dashboard>(res)
+  }
+
+  async deleteDashboard(sheetId: string, dashboardId: string): Promise<void> {
+    const res = await this.fetch(
+      `/api/multitable/sheets/${encodeURIComponent(sheetId)}/dashboards/${encodeURIComponent(dashboardId)}`,
+      { method: 'DELETE' },
+    )
+    await parseJson(res)
   }
 }
 
