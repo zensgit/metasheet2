@@ -131,6 +131,16 @@ function createApiImplementation(callLog: string[]) {
         data: {
           userId: 'user-1',
           requireGrant: true,
+          server: {
+            configured: true,
+            available: true,
+            corpId: 'dingcorp',
+            allowedCorpIds: ['dingcorp', 'dingcorp-2'],
+            requireGrant: true,
+            autoLinkEmail: false,
+            autoProvision: false,
+            unavailableReason: null,
+          },
           grant: {
             exists: true,
             enabled: true,
@@ -162,6 +172,16 @@ function createApiImplementation(callLog: string[]) {
           dingtalk: {
             userId: 'user-1',
             requireGrant: true,
+            server: {
+              configured: true,
+              available: true,
+              corpId: 'dingcorp',
+              allowedCorpIds: ['dingcorp', 'dingcorp-2'],
+              requireGrant: true,
+              autoLinkEmail: false,
+              autoProvision: false,
+              unavailableReason: null,
+            },
             grant: {
               exists: true,
               enabled: true,
@@ -242,6 +262,9 @@ describe('UserManagementView', () => {
 
     expect(container?.textContent).toContain('钉钉扫码登录')
     expect(container?.textContent).toContain('插件使用')
+    expect(container?.textContent).toContain('服务端已启用钉钉登录')
+    expect(container?.textContent).toContain('服务端钉钉登录可用')
+    expect(container?.textContent).toContain('允许企业：dingcorp、dingcorp-2')
     expect(container?.textContent).toContain('已开通钉钉扫码')
     expect(container?.textContent).toContain('插件使用未开通')
     expect(container?.textContent).toContain('当前不可用')

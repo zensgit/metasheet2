@@ -13,7 +13,14 @@ const mocks = vi.hoisted(() => ({
         json: async () => ({
           success: true,
           data: {
+            configured: true,
             available: true,
+            corpId: 'ding-corp',
+            allowedCorpIds: [],
+            requireGrant: false,
+            autoLinkEmail: false,
+            autoProvision: false,
+            unavailableReason: null,
           },
         }),
       }
@@ -173,5 +180,41 @@ describe('LoginView', () => {
     )
     const dingtalkButton = container?.querySelector('.login-dingtalk')
     expect(dingtalkButton).not.toBeNull()
+  })
+
+  it('shows a status hint and hides the button when the probe reports DingTalk unavailable', async () => {
+    mocks.apiFetch.mockImplementationOnce(async (path: string) => {
+      if (path === '/api/auth/dingtalk/launch?probe=1') {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            success: true,
+            data: {
+              configured: true,
+              available: false,
+              corpId: 'ding-corp-blocked',
+              allowedCorpIds: ['ding-corp-allowed'],
+              requireGrant: true,
+              autoLinkEmail: false,
+              autoProvision: false,
+              unavailableReason: 'corp_not_allowed',
+            },
+          }),
+        }
+      }
+
+      throw new Error(`Unexpected fetch path: ${path}`)
+    })
+
+    container = document.createElement('div')
+    document.body.appendChild(container)
+
+    app = createApp(LoginViewComponent)
+    app.mount(container)
+    await flushUi()
+
+    expect(container?.querySelector('.login-dingtalk')).toBeNull()
+    expect(container?.textContent).toContain('白名单')
   })
 })

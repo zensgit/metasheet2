@@ -64,6 +64,7 @@
         </button>
 
         <p v-if="dingtalkErrorMessage" class="login-error">{{ dingtalkErrorMessage }}</p>
+        <p v-else-if="dingtalkStatusMessage" class="login-hint">{{ dingtalkStatusMessage }}</p>
       </form>
     </div>
   </section>
@@ -94,6 +95,24 @@ interface AuthFeaturePayload {
   plm?: unknown
 }
 
+type DingTalkRuntimeUnavailableReason =
+  | 'missing_client_id'
+  | 'missing_client_secret'
+  | 'missing_redirect_uri'
+  | 'corp_not_allowed'
+  | null
+
+interface DingTalkRuntimeStatus {
+  configured?: unknown
+  available?: unknown
+  corpId?: unknown
+  allowedCorpIds?: unknown
+  requireGrant?: unknown
+  autoLinkEmail?: unknown
+  autoProvision?: unknown
+  unavailableReason?: unknown
+}
+
 const router = useRouter()
 const route = useRoute()
 const { setToken } = useAuth()
@@ -107,6 +126,7 @@ const errorMessage = ref('')
 const dingtalkAvailable = ref(false)
 const dingtalkSubmitting = ref(false)
 const dingtalkErrorMessage = ref('')
+const dingtalkStatusMessage = ref('')
 
 const text = computed(() => {
   if (isZh.value) {
@@ -127,6 +147,8 @@ const text = computed(() => {
       networkError: '登录失败，请稍后再试。',
       dingtalkUnavailable: '钉钉登录暂不可用，请稍后重试。',
       dingtalkMissingUrl: '未获取到钉钉登录地址。',
+      dingtalkCorpBlocked: '当前服务端钉钉企业白名单未放行，暂时无法使用钉钉登录。',
+      dingtalkConfigMissing: '当前服务端钉钉登录配置不完整。',
     }
   }
   return {
@@ -146,8 +168,26 @@ const text = computed(() => {
     networkError: 'Sign-in failed. Please try again.',
     dingtalkUnavailable: 'DingTalk login is unavailable right now.',
     dingtalkMissingUrl: 'No DingTalk login URL was returned.',
+    dingtalkCorpBlocked: 'DingTalk login is blocked by the current corporate allowlist.',
+    dingtalkConfigMissing: 'The server DingTalk login configuration is incomplete.',
   }
 })
+
+function readDingTalkStatusMessage(status: DingTalkRuntimeStatus | null): string {
+  const reason = typeof status?.unavailableReason === 'string' ? status.unavailableReason : null
+  if (reason === 'corp_not_allowed') return text.value.dingtalkCorpBlocked
+  if (
+    reason === 'missing_client_id' ||
+    reason === 'missing_client_secret' ||
+    reason === 'missing_redirect_uri'
+  ) {
+    return text.value.dingtalkConfigMissing
+  }
+  if (status && status.available === false) {
+    return text.value.dingtalkUnavailable
+  }
+  return ''
+}
 
 function extractUserRoles(user: AuthUserPayload | null): string[] {
   if (!user) return []
@@ -242,14 +282,19 @@ async function onSubmit(): Promise<void> {
 }
 
 async function probeDingTalkLogin(): Promise<void> {
+  dingtalkStatusMessage.value = ''
   try {
     const response = await apiFetch('/api/auth/dingtalk/launch?probe=1', {
       method: 'GET',
       suppressUnauthorizedRedirect: true,
     })
-    dingtalkAvailable.value = response.ok
+    const payload = await response.json().catch(() => null)
+    const status = (payload?.data ?? null) as DingTalkRuntimeStatus | null
+    dingtalkAvailable.value = response.ok && payload?.success === true && status?.available === true
+    dingtalkStatusMessage.value = dingtalkAvailable.value ? '' : readDingTalkStatusMessage(status)
   } catch {
     dingtalkAvailable.value = false
+    dingtalkStatusMessage.value = text.value.dingtalkUnavailable
   }
 }
 
@@ -394,6 +439,13 @@ onMounted(() => {
 .login-error {
   color: #c0392b;
   font-size: 13px;
+}
+
+.login-hint {
+  margin: 0;
+  color: #5f7088;
+  font-size: 13px;
+  line-height: 1.5;
 }
 
 .login-submit {
