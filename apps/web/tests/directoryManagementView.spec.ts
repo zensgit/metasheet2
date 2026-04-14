@@ -315,11 +315,56 @@ describe('DirectoryManagementView', () => {
     expect(container?.textContent).toContain('账号 98')
     expect(container?.textContent).toContain('completed')
     expect(container?.textContent).toContain('自动同步观测')
+    expect(container?.textContent).toContain('在出现“已观察到自动执行”前，请不要假定系统已接入自动调度')
     expect(container?.textContent).toContain('最近告警')
     expect(container?.textContent).toContain('待处理队列')
     expect(container?.textContent).toContain('Union ID')
     expect(container?.textContent).toContain('0447654442691174')
     expect(container?.textContent).toContain('第 1 / 3 页')
+  })
+
+  it('shows an explicit caution when only manual runs have been observed', async () => {
+    apiFetchMock
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: {
+          items: [createIntegration()],
+        },
+      }))
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: { items: [] },
+      }))
+      .mockResolvedValueOnce(createJsonResponse(
+        createScheduleSnapshotPayload({
+          syncEnabled: true,
+          observationStatus: 'manual_only',
+          latestRunTriggerSource: 'manual',
+          latestManualRunAt: '2026-04-08T01:00:00.000Z',
+          latestAutoRunAt: null,
+          note: '当前只观察到 manual 触发记录；尚未看到自动执行。',
+        }),
+      ))
+      .mockResolvedValueOnce(createJsonResponse(
+        createAlertListPayload([]),
+      ))
+      .mockResolvedValueOnce(createJsonResponse(
+        createReviewItemsPayload([]),
+      ))
+      .mockResolvedValueOnce(createJsonResponse(
+        createAccountListPayload([]),
+      ))
+
+    app = createApp(DirectoryManagementView)
+    app.component('RouterLink', {
+      props: ['to'],
+      template: '<a><slot /></a>',
+    })
+    app.mount(container!)
+    await flushUi()
+
+    expect(container?.textContent).toContain('当前只观察到 manual 触发记录；尚未看到自动执行。')
+    expect(container?.textContent).toContain('在出现“已观察到自动执行”前，请不要假定系统已接入自动调度')
   })
 
   it('posts manual sync and refreshes the selected integration', async () => {

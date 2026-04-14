@@ -183,6 +183,9 @@
             </div>
 
             <p class="directory-admin__hint">{{ scheduleSnapshot.note }}</p>
+            <p v-if="readObservationCaution(scheduleSnapshot)" class="directory-admin__status directory-admin__status--error">
+              {{ readObservationCaution(scheduleSnapshot) }}
+            </p>
           </template>
         </section>
 
@@ -1149,6 +1152,15 @@ function readObservationStatusClass(status: DirectoryScheduleObservationStatus):
 function readTriggerSourceLabel(triggerSource: string | null): string {
   if (!triggerSource) return '未记录'
   return triggerSource
+}
+
+function readObservationCaution(snapshot: DirectoryScheduleSnapshot | null): string {
+  if (!snapshot) return ''
+  if (snapshot.observationStatus === 'auto_observed') return ''
+  if (!snapshot.syncEnabled) {
+    return '当前未启用自动同步；此卡片只展示配置与历史记录，不代表系统已接入自动调度。'
+  }
+  return '当前卡片只反映配置与已记录执行历史；在出现“已观察到自动执行”前，请不要假定系统已接入自动调度。'
 }
 
 function reviewBindingStateKey(accountId: string): string {
