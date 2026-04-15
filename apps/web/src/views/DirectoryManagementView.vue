@@ -1560,22 +1560,32 @@ async function loadAlerts(integrationId: string) {
 }
 
 function normalizeReviewItems(items: unknown[]): DirectoryReviewItem[] {
-  return items.map((item) => ({
-    ...item,
-    recommendations: Array.isArray(item?.recommendations) ? item.recommendations : [],
-    recommendationStatus: item?.recommendationStatus && typeof item.recommendationStatus === 'object'
-      ? {
-        code: typeof item.recommendationStatus.code === 'string' ? item.recommendationStatus.code : 'no_exact_match',
-        message: typeof item.recommendationStatus.message === 'string'
-          ? item.recommendationStatus.message
-          : '未命中唯一的邮箱或手机号精确匹配，请人工搜索本地用户。',
-      }
-      : null,
-    actionable: {
-      canBatchUnbind: item?.actionable?.canBatchUnbind === true,
-      canConfirmRecommendation: item?.actionable?.canConfirmRecommendation === true,
-    },
-  }))
+  return items.map((item) => {
+    const raw = item && typeof item === 'object' ? item as Record<string, unknown> : {}
+    const recommendationStatusRaw = raw.recommendationStatus && typeof raw.recommendationStatus === 'object'
+      ? raw.recommendationStatus as Record<string, unknown>
+      : null
+    const actionableRaw = raw.actionable && typeof raw.actionable === 'object'
+      ? raw.actionable as Record<string, unknown>
+      : null
+
+    return {
+      ...raw,
+      recommendations: Array.isArray(raw.recommendations) ? raw.recommendations as DirectoryBindingRecommendation[] : [],
+      recommendationStatus: recommendationStatusRaw
+        ? {
+          code: typeof recommendationStatusRaw.code === 'string' ? recommendationStatusRaw.code as DirectoryBindingRecommendationStatusCode : 'no_exact_match',
+          message: typeof recommendationStatusRaw.message === 'string'
+            ? recommendationStatusRaw.message
+            : '未命中唯一的邮箱或手机号精确匹配，请人工搜索本地用户。',
+        }
+        : null,
+      actionable: {
+        canBatchUnbind: actionableRaw?.canBatchUnbind === true,
+        canConfirmRecommendation: actionableRaw?.canConfirmRecommendation === true,
+      },
+    } as DirectoryReviewItem
+  })
 }
 
 function mergeReviewItems(existingItems: DirectoryReviewItem[], incomingItems: DirectoryReviewItem[]): DirectoryReviewItem[] {
