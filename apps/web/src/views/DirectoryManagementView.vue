@@ -130,7 +130,7 @@
           </button>
         </footer>
 
-        <section v-if="selectedIntegration" class="directory-admin__section">
+        <section v-if="selectedIntegration" ref="accountsSectionRef" class="directory-admin__section">
           <h3>当前概览</h3>
           <div class="directory-admin__chips">
             <span class="directory-admin__chip">部门 {{ selectedIntegration.stats.departmentCount }}</span>
@@ -559,9 +559,41 @@
             </div>
           </div>
 
+          <article v-if="focusedAccountId" class="directory-admin__focus-card">
+            <div>
+              <strong>{{ focusedVisibleAccount ? `当前定位成员：${focusedVisibleAccount.name}` : `当前定位成员：${focusedAccountId}` }}</strong>
+              <p class="directory-admin__hint">
+                {{
+                  focusedVisibleAccount
+                    ? '已在当前成员结果中高亮显示，可直接继续绑定、解绑或复核。'
+                    : '当前定位成员不在本页结果中；如果你已切换筛选或分页，可清除定位后继续操作。'
+                }}
+              </p>
+            </div>
+            <div class="directory-admin__focus-actions">
+              <button
+                v-if="focusedVisibleAccount && focusedVisibleAccountBindDraft.length > 0"
+                class="directory-admin__button"
+                type="button"
+                :disabled="bindingAccountId === focusedVisibleAccount.id"
+                @click="void bindAccount(focusedVisibleAccount)"
+              >
+                {{ focusedVisibleAccountBindLabel }}
+              </button>
+              <button class="directory-admin__button directory-admin__button--secondary" type="button" @click="clearFocusedAccount()">
+                清除定位
+              </button>
+            </div>
+          </article>
+
           <div v-if="loadingAccounts" class="directory-admin__empty">成员加载中...</div>
           <div v-else-if="accounts.length === 0" class="directory-admin__empty">暂无同步成员</div>
-          <article v-for="account in accounts" :key="account.id" class="directory-admin__account">
+          <article
+            v-for="account in accounts"
+            :key="account.id"
+            class="directory-admin__account"
+            :class="{ 'directory-admin__account--focused': focusedAccountId === account.id }"
+          >
             <div class="directory-admin__account-head">
               <div>
                 <strong>{{ account.name }}</strong>
@@ -570,6 +602,7 @@
                 </p>
               </div>
               <div class="directory-admin__chips">
+                <span v-if="focusedAccountId === account.id" class="directory-admin__chip directory-admin__chip--success">已定位</span>
                 <span class="directory-admin__chip">{{ account.linkStatus }}</span>
                 <span v-if="account.matchStrategy" class="directory-admin__chip">策略 {{ account.matchStrategy }}</span>
                 <span class="directory-admin__chip" :class="{ 'directory-admin__badge--inactive': !account.isActive }">
@@ -744,7 +777,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, nextTick, onMounted, reactive, ref } from 'vue'
 import { apiFetch } from '../utils/api'
 
 type DirectoryIntegration = {
@@ -957,10 +990,13 @@ const accounts = ref<DirectoryAccount[]>([])
 const scheduleSnapshot = ref<DirectoryScheduleSnapshot | null>(null)
 const alerts = ref<DirectorySyncAlert[]>([])
 const reviewItems = ref<DirectoryReviewItem[]>([])
+const accountsSectionRef = ref<HTMLElement | null>(null)
 const accountPageSizeOptions = [25, 50, 100]
 const accountPage = ref(1)
 const accountPageSize = ref(25)
 const accountTotal = ref(0)
+const focusedAccountId = ref('')
+const pendingFocusedAccountScroll = ref(false)
 const selectedIntegrationId = ref('')
 const loading = ref(false)
 const loadingRuns = ref(false)
@@ -1079,6 +1115,18 @@ const showPendingBindingManualReasonFilters = computed(() => (
   && pendingBindingCounts.value.manual > 0
   && (reviewFilter.value === 'all' || reviewFilter.value === 'pending_binding')
 ))
+const focusedVisibleAccount = computed(() => (
+  accounts.value.find((account) => account.id === focusedAccountId.value) ?? null
+))
+const focusedVisibleAccountBindDraft = computed(() => {
+  if (!focusedVisibleAccount.value) return ''
+  return readBindingDraft(focusedVisibleAccount.value).trim()
+})
+const focusedVisibleAccountBindLabel = computed(() => {
+  if (!focusedVisibleAccount.value) return '绑定当前成员'
+  if (bindingAccountId.value === focusedVisibleAccount.value.id) return '绑定中...'
+  return focusedVisibleAccount.value.localUser ? '更新当前绑定' : '绑定当前成员'
+})
 const hasMoreReviewItems = computed(() => reviewItems.value.length < reviewTotal.value)
 const filteredReviewItems = computed(() => {
   if (reviewFilter.value === 'all') {
@@ -1208,6 +1256,7 @@ function applyIntegrationToDraft(integration: DirectoryIntegration) {
 function selectIntegration(integrationId: string) {
   selectedIntegrationId.value = integrationId
   testResult.value = null
+  clearFocusedAccount()
   accountPage.value = 1
   accountTotal.value = 0
   reviewBatchProgress.value = null
@@ -1273,6 +1322,11 @@ function readBindingDraftByAccountId(accountId: string): string {
   const account = accounts.value.find((item) => item.id === accountId)
   if (!account) return bindingDrafts[accountId] ?? ''
   return readBindingDraft(account)
+}
+
+function clearFocusedAccount() {
+  focusedAccountId.value = ''
+  pendingFocusedAccountScroll.value = false
 }
 
 function updateBindingDraft(accountId: string, value: string) {
@@ -1456,6 +1510,7 @@ async function syncIntegration() {
 
 async function searchAccounts() {
   if (!selectedIntegration.value) return
+  clearFocusedAccount()
   accountPage.value = 1
   await loadAccounts(selectedIntegration.value.id)
 }
@@ -1464,6 +1519,7 @@ async function changeAccountPage(nextPage: number) {
   if (!selectedIntegration.value) return
   const normalizedPage = Math.max(1, Math.min(nextPage, accountPageCount.value))
   if (normalizedPage === accountPage.value) return
+  clearFocusedAccount()
   accountPage.value = normalizedPage
   await loadAccounts(selectedIntegration.value.id)
 }
@@ -1473,9 +1529,23 @@ async function updateAccountPageSize(event: Event) {
   const target = event.target
   const nextPageSize = Number(target instanceof HTMLSelectElement ? target.value : accountPageSize.value)
   if (!Number.isFinite(nextPageSize) || nextPageSize <= 0 || nextPageSize === accountPageSize.value) return
+  clearFocusedAccount()
   accountPageSize.value = nextPageSize
   accountPage.value = 1
   await loadAccounts(selectedIntegration.value.id)
+}
+
+async function scrollFocusedAccountIntoView() {
+  await nextTick()
+  const section = accountsSectionRef.value
+  const focusedAccountElement = section?.querySelector('.directory-admin__account--focused')
+  if (focusedAccountElement instanceof HTMLElement) {
+    focusedAccountElement.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    return
+  }
+  if (section instanceof HTMLElement) {
+    section.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  }
 }
 
 async function loadAccounts(integrationId: string) {
@@ -1504,9 +1574,14 @@ async function loadAccounts(integrationId: string) {
     }
     accountTotal.value = normalizedTotal
     accounts.value = items
+    if (pendingFocusedAccountScroll.value) {
+      pendingFocusedAccountScroll.value = false
+      await scrollFocusedAccountIntoView()
+    }
   } catch (error) {
     accounts.value = []
     accountTotal.value = 0
+    pendingFocusedAccountScroll.value = false
     setStatus(error instanceof Error ? error.message : '加载目录成员失败', 'error')
   } finally {
     loadingAccounts.value = false
@@ -1867,6 +1942,8 @@ function onReviewSelectionChange(accountId: string, event: Event) {
 }
 
 function focusReviewAccount(item: DirectoryReviewItem) {
+  focusedAccountId.value = item.account.id
+  pendingFocusedAccountScroll.value = true
   accountQuery.value = item.account.externalUserId
   if (selectedIntegration.value) {
     accountPage.value = 1
@@ -2345,6 +2422,24 @@ onMounted(() => {
   color: #64748b;
 }
 
+.directory-admin__focus-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 16px;
+  border: 1px solid #99f6e4;
+  border-radius: 14px;
+  background: linear-gradient(180deg, #f0fdfa 0%, #ecfeff 100%);
+}
+
+.directory-admin__focus-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
 .directory-admin__run {
   border: 1px solid #e2e8f0;
   border-radius: 14px;
@@ -2397,6 +2492,11 @@ onMounted(() => {
   display: flex;
   flex-direction: column;
   gap: 12px;
+}
+
+.directory-admin__account--focused {
+  border-color: #0f766e;
+  box-shadow: 0 0 0 2px rgba(20, 184, 166, 0.16);
 }
 
 .directory-admin__account-head {

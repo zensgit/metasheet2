@@ -200,9 +200,16 @@ function createTestResultPayload(overrides: Record<string, unknown> = {}) {
 describe('DirectoryManagementView', () => {
   let app: App<Element> | null = null
   let container: HTMLDivElement | null = null
+  const originalScrollIntoView = HTMLElement.prototype.scrollIntoView
+  let scrollIntoViewMock = vi.fn()
 
   beforeEach(() => {
     apiFetchMock.mockReset()
+    scrollIntoViewMock = vi.fn()
+    Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', {
+      configurable: true,
+      value: scrollIntoViewMock,
+    })
     container = document.createElement('div')
     document.body.appendChild(container)
   })
@@ -210,6 +217,10 @@ describe('DirectoryManagementView', () => {
   afterEach(() => {
     if (app) app.unmount()
     if (container) container.remove()
+    Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', {
+      configurable: true,
+      value: originalScrollIntoView,
+    })
     app = null
     container = null
   })
@@ -679,6 +690,166 @@ describe('DirectoryManagementView', () => {
       }),
     )
     expect(container?.textContent).toContain('已完成快速绑定')
+    expect(container?.textContent).toContain('alpha@example.com')
+  })
+
+  it('focuses a reviewed account and quick-binds it from the accounts banner', async () => {
+    apiFetchMock
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: {
+          items: [createIntegration()],
+        },
+      }))
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: { items: [] },
+      }))
+      .mockResolvedValueOnce(createJsonResponse(
+        createScheduleSnapshotPayload(),
+      ))
+      .mockResolvedValueOnce(createJsonResponse(
+        createAlertListPayload([]),
+      ))
+      .mockResolvedValueOnce(createJsonResponse(
+        createReviewItemsPayload([
+          {
+            kind: 'pending_binding',
+            reason: '目录成员尚未绑定本地用户。',
+            account: createAccount({
+              id: 'account-focus',
+              name: '定位成员',
+              externalUserId: '0447654442691199',
+            }),
+            flags: {
+              missingUnionId: false,
+              missingOpenId: false,
+            },
+            actionable: {
+              canBatchUnbind: false,
+              canConfirmRecommendation: false,
+            },
+          },
+        ]),
+      ))
+      .mockResolvedValueOnce(createJsonResponse(
+        createAccountListPayload([
+          createAccount({
+            id: 'account-other',
+            name: '其他成员',
+            externalUserId: '0447654442691188',
+          }),
+        ]),
+      ))
+      .mockResolvedValueOnce(createJsonResponse(
+        createAccountListPayload([
+          createAccount({
+            id: 'account-focus',
+            name: '定位成员',
+            externalUserId: '0447654442691199',
+          }),
+        ], { total: 1 }),
+      ))
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: {
+          account: createAccount({
+            id: 'account-focus',
+            name: '定位成员',
+            externalUserId: '0447654442691199',
+            linkStatus: 'linked',
+            matchStrategy: 'manual_admin',
+            localUser: {
+              id: 'user-1',
+              email: 'alpha@example.com',
+              name: 'Alpha',
+            },
+          }),
+        },
+      }))
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: {
+          items: [createIntegration({
+            stats: {
+              departmentCount: 12,
+              accountCount: 98,
+              pendingLinkCount: 3,
+              linkedCount: 89,
+              lastRunStatus: 'completed',
+            },
+          })],
+        },
+      }))
+      .mockResolvedValueOnce(createJsonResponse(
+        createReviewItemsPayload([]),
+      ))
+      .mockResolvedValueOnce(createJsonResponse(
+        createAccountListPayload([
+          createAccount({
+            id: 'account-focus',
+            name: '定位成员',
+            externalUserId: '0447654442691199',
+            linkStatus: 'linked',
+            matchStrategy: 'manual_admin',
+            localUser: {
+              id: 'user-1',
+              email: 'alpha@example.com',
+              name: 'Alpha',
+            },
+          }),
+        ], { total: 1 }),
+      ))
+
+    app = createApp(DirectoryManagementView)
+    app.component('RouterLink', {
+      props: ['to'],
+      template: '<a><slot /></a>',
+    })
+    app.mount(container!)
+    await flushUi()
+
+    const reviewBindInput = container!.querySelector('.directory-admin__review-item input[placeholder="例如 user-123 或 alpha@example.com"]') as HTMLInputElement | null
+    expect(reviewBindInput).toBeTruthy()
+    reviewBindInput!.value = 'alpha@example.com'
+    reviewBindInput!.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi(2)
+
+    const focusButton = Array.from(container!.querySelectorAll('.directory-admin__review-item button')).find((button) => button.textContent?.includes('定位到成员'))
+    expect(focusButton).toBeTruthy()
+    focusButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi(8)
+
+    expect(apiFetchMock).toHaveBeenCalledWith('/api/admin/directory/integrations/dir-1/accounts?page=1&pageSize=25&q=0447654442691199')
+    expect(scrollIntoViewMock).toHaveBeenCalledWith(expect.objectContaining({
+      behavior: 'smooth',
+      block: 'start',
+    }))
+    const focusCard = container!.querySelector('.directory-admin__focus-card')
+    expect(focusCard?.textContent).toContain('当前定位成员：定位成员')
+    expect(focusCard?.textContent).toContain('已在当前成员结果中高亮显示，可直接继续绑定、解绑或复核。')
+    const focusedAccount = container!.querySelector('.directory-admin__account--focused')
+    expect(focusedAccount?.textContent).toContain('定位成员')
+    expect(focusedAccount?.textContent).toContain('已定位')
+    const focusedAccountBindInput = focusedAccount?.querySelector('input[placeholder="例如 user-123 或 alpha@example.com"]') as HTMLInputElement | null
+    expect(focusedAccountBindInput?.value).toBe('alpha@example.com')
+
+    const quickBindButton = Array.from(focusCard?.querySelectorAll('button') ?? []).find((button) => button.textContent?.includes('绑定当前成员'))
+    expect(quickBindButton).toBeTruthy()
+    quickBindButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi(8)
+
+    expect(apiFetchMock).toHaveBeenCalledWith(
+      '/api/admin/directory/accounts/account-focus/bind',
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({
+          localUserRef: 'alpha@example.com',
+          enableDingTalkGrant: true,
+        }),
+      }),
+    )
+    expect(container?.textContent).toContain('目录成员 定位成员 已绑定到本地用户')
     expect(container?.textContent).toContain('alpha@example.com')
   })
 
