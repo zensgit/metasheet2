@@ -1,11 +1,132 @@
 /**
- * Generic in-memory sliding-window rate limiter middleware.
+ * Generic sliding-window rate limiter middleware with pluggable store.
  *
- * V1 uses a Map-based store (no Redis dependency).
- * Suitable for single-process deployments; swap store for Redis in V2.
+ * V1 used an in-memory Map.
+ * V2 adds a RateLimitStore interface with Redis and Memory implementations.
+ * If a Redis store is provided but becomes unavailable, the middleware
+ * falls back to the in-memory store automatically.
  */
 
 import type { Request, Response, NextFunction } from 'express'
+
+// ---------------------------------------------------------------------------
+// Store interface
+// ---------------------------------------------------------------------------
+
+export interface RateLimitStore {
+  /**
+   * Increment the counter for `key` within the given window.
+   * Returns the current count and remaining TTL in milliseconds.
+   * Implementations must create the key with the given windowMs if it
+   * does not already exist.
+   */
+  increment(key: string, windowMs: number): Promise<{ count: number; ttlMs: number }>
+
+  /**
+   * Optional cleanup hook (e.g. clear timers).
+   */
+  destroy?(): void
+}
+
+// ---------------------------------------------------------------------------
+// In-memory store (default / fallback)
+// ---------------------------------------------------------------------------
+
+interface MemoryEntry {
+  count: number
+  /** epoch-ms when the window expires */
+  expiresAt: number
+}
+
+export class MemoryRateLimitStore implements RateLimitStore {
+  private store = new Map<string, MemoryEntry>()
+  private cleanupTimer: ReturnType<typeof setInterval> | null = null
+
+  constructor(cleanupIntervalMs?: number) {
+    if (cleanupIntervalMs && cleanupIntervalMs > 0) {
+      this.cleanupTimer = setInterval(() => {
+        const now = Date.now()
+        for (const [key, entry] of this.store.entries()) {
+          if (now >= entry.expiresAt) {
+            this.store.delete(key)
+          }
+        }
+      }, cleanupIntervalMs)
+      if (this.cleanupTimer && typeof this.cleanupTimer === 'object' && 'unref' in this.cleanupTimer) {
+        this.cleanupTimer.unref()
+      }
+    }
+  }
+
+  async increment(key: string, windowMs: number): Promise<{ count: number; ttlMs: number }> {
+    const now = Date.now()
+    let entry = this.store.get(key)
+
+    if (!entry || now >= entry.expiresAt) {
+      entry = { count: 0, expiresAt: now + windowMs }
+      this.store.set(key, entry)
+    }
+
+    entry.count += 1
+    const ttlMs = Math.max(0, entry.expiresAt - now)
+    return { count: entry.count, ttlMs }
+  }
+
+  /** Expose the internal map for testing purposes */
+  get _map(): Map<string, MemoryEntry> {
+    return this.store
+  }
+
+  destroy(): void {
+    if (this.cleanupTimer) {
+      clearInterval(this.cleanupTimer)
+      this.cleanupTimer = null
+    }
+    this.store.clear()
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Redis store (ioredis compatible)
+// ---------------------------------------------------------------------------
+
+/**
+ * Minimal ioredis-compatible interface so callers can pass any Redis client
+ * that supports incr + expire + ttl.
+ */
+export interface RedisClient {
+  incr(key: string): Promise<number>
+  expire(key: string, seconds: number): Promise<number | boolean>
+  pttl(key: string): Promise<number>
+}
+
+export class RedisRateLimitStore implements RateLimitStore {
+  private redis: RedisClient
+
+  constructor(redis: RedisClient) {
+    this.redis = redis
+  }
+
+  async increment(key: string, windowMs: number): Promise<{ count: number; ttlMs: number }> {
+    const count = await this.redis.incr(key)
+
+    // If this is the first increment (count === 1), set the expiry.
+    if (count === 1) {
+      const ttlSeconds = Math.max(1, Math.ceil(windowMs / 1000))
+      await this.redis.expire(key, ttlSeconds)
+    }
+
+    const pttl = await this.redis.pttl(key)
+    // pttl returns -1 if no expiry, -2 if key doesn't exist
+    const ttlMs = pttl > 0 ? pttl : windowMs
+
+    return { count, ttlMs }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Options
+// ---------------------------------------------------------------------------
 
 export interface RateLimiterOptions {
   /** Time window in milliseconds */
@@ -14,12 +135,14 @@ export interface RateLimiterOptions {
   maxRequests: number
   /** Prefix used to namespace keys (e.g. 'public-form-submit') */
   keyPrefix: string
+  /** Optional Redis client — enables distributed rate limiting.
+   *  If omitted or if Redis operations fail, falls back to in-memory store. */
+  redis?: RedisClient
 }
 
-interface WindowEntry {
-  /** Timestamps (ms) of requests within the current window */
-  timestamps: number[]
-}
+// ---------------------------------------------------------------------------
+// Middleware factory
+// ---------------------------------------------------------------------------
 
 /**
  * Create a rate limiter middleware with the given options.
@@ -28,67 +151,64 @@ interface WindowEntry {
  * - Anonymous requests: keyed by `req.ip`
  * - Authenticated requests: keyed by `(req as any).userId`
  *
- * On-access cleanup: expired entries are pruned every time a key is accessed
- * and a periodic sweep runs every `windowMs` to remove stale entries.
+ * When a Redis client is provided, it is used as the primary store.
+ * If any Redis operation throws, the middleware logs a warning and
+ * transparently falls back to the in-memory store for that request.
  */
 export function createRateLimiter(options: RateLimiterOptions) {
-  const { windowMs, maxRequests, keyPrefix } = options
-  const store = new Map<string, WindowEntry>()
+  const { windowMs, maxRequests, keyPrefix, redis } = options
 
-  // Periodic cleanup of stale entries
-  const cleanupInterval = setInterval(() => {
-    const now = Date.now()
-    for (const [key, entry] of store.entries()) {
-      entry.timestamps = entry.timestamps.filter((t) => now - t < windowMs)
-      if (entry.timestamps.length === 0) {
-        store.delete(key)
-      }
-    }
-  }, windowMs)
+  const memoryStore = new MemoryRateLimitStore(windowMs)
+  const redisStore = redis ? new RedisRateLimitStore(redis) : null
 
-  // Allow the timer to not block Node process exit
-  if (cleanupInterval && typeof cleanupInterval === 'object' && 'unref' in cleanupInterval) {
-    cleanupInterval.unref()
-  }
+  let redisFallbackWarned = false
 
   function middleware(req: Request, res: Response, next: NextFunction): void {
     const userId = (req as any).userId as string | undefined
     const rawKey = userId || req.ip || 'unknown'
-    const key = `${keyPrefix}:${rawKey}`
+    const key = `ratelimit:${keyPrefix}:${rawKey}`
 
-    const now = Date.now()
-    let entry = store.get(key)
-    if (!entry) {
-      entry = { timestamps: [] }
-      store.set(key, entry)
+    const handleResult = (result: { count: number; ttlMs: number }) => {
+      if (result.count > maxRequests) {
+        const retryAfterSeconds = Math.ceil(result.ttlMs / 1000)
+        res.set('Retry-After', String(retryAfterSeconds))
+        res.status(429).json({
+          ok: false,
+          error: {
+            code: 'RATE_LIMITED',
+            message: 'Too many requests. Please try again later.',
+            retryAfter: retryAfterSeconds,
+          },
+        })
+        return
+      }
+
+      next()
     }
 
-    // Prune timestamps outside the current window
-    entry.timestamps = entry.timestamps.filter((t) => now - t < windowMs)
+    const primaryStore = redisStore || memoryStore
 
-    if (entry.timestamps.length >= maxRequests) {
-      const oldestInWindow = entry.timestamps[0]
-      const retryAfterMs = windowMs - (now - oldestInWindow)
-      const retryAfterSeconds = Math.ceil(retryAfterMs / 1000)
-      res.set('Retry-After', String(retryAfterSeconds))
-      res.status(429).json({
-        ok: false,
-        error: {
-          code: 'RATE_LIMITED',
-          message: 'Too many requests. Please try again later.',
-          retryAfter: retryAfterSeconds,
-        },
+    // Synchronous wrapper that handles the async store call
+    primaryStore.increment(key, windowMs).then(handleResult).catch((err) => {
+      // Redis failed — fall back to memory store
+      if (!redisFallbackWarned) {
+        console.warn(
+          `[rate-limiter] Redis unavailable for prefix "${keyPrefix}", falling back to in-memory store:`,
+          err instanceof Error ? err.message : err,
+        )
+        redisFallbackWarned = true
+      }
+      memoryStore.increment(key, windowMs).then(handleResult).catch(() => {
+        // Memory store should never fail, but just in case, let the request through
+        next()
       })
-      return
-    }
-
-    entry.timestamps.push(now)
-    next()
+    })
   }
 
   // Expose internals for testing
-  middleware._store = store
-  middleware._cleanup = () => clearInterval(cleanupInterval)
+  middleware._memoryStore = memoryStore
+  middleware._redisStore = redisStore
+  middleware._cleanup = () => memoryStore.destroy()
 
   return middleware
 }
