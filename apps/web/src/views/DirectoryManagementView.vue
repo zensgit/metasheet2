@@ -789,6 +789,9 @@ type DirectoryObservationStatus =
   | 'invalid_cron'
   | 'awaiting_first_run'
   | 'scheduler_observed'
+  | 'configured_no_runs'
+  | 'manual_only'
+  | 'auto_observed'
 
 type DirectoryScheduleRun = {
   id: string
@@ -2067,8 +2070,9 @@ function formatDateTime(value: string | null): string {
 }
 
 function readObservationStatusLabel(status: DirectoryObservationStatus | null | undefined): string {
-  if (status === 'scheduler_observed') return '已观察到自动触发'
-  if (status === 'awaiting_first_run') return '等待首次自动触发'
+  if (status === 'auto_observed' || status === 'scheduler_observed') return '已观察到自动触发'
+  if (status === 'configured_no_runs' || status === 'awaiting_first_run') return '等待首次自动触发'
+  if (status === 'manual_only') return '仅观察到手动执行'
   if (status === 'missing_cron') return '缺少 cron'
   if (status === 'invalid_cron') return 'cron 无效'
   if (status === 'disabled') return '自动同步未启用'
@@ -2076,8 +2080,10 @@ function readObservationStatusLabel(status: DirectoryObservationStatus | null | 
 }
 
 function readObservationStatusClass(status: DirectoryObservationStatus | null | undefined): string {
-  if (status === 'scheduler_observed') return 'directory-admin__chip--success'
-  if (status === 'awaiting_first_run' || status === 'missing_cron' || status === 'disabled') return 'directory-admin__chip--warning'
+  if (status === 'auto_observed' || status === 'scheduler_observed') return 'directory-admin__chip--success'
+  if (status === 'manual_only' || status === 'configured_no_runs' || status === 'awaiting_first_run' || status === 'missing_cron' || status === 'disabled') {
+    return 'directory-admin__chip--warning'
+  }
   if (status === 'invalid_cron') return 'directory-admin__chip--danger'
   return ''
 }

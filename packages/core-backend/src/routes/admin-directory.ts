@@ -22,6 +22,28 @@ import { refreshDirectoryIntegrationSchedule } from '../directory/directory-sync
 import { isAdmin as isRbacAdmin } from '../rbac/service'
 import { jsonError, jsonOk, parsePagination } from '../util/response'
 
+function normalizeAlertFilter(value: unknown): 'all' | 'pending' | 'acknowledged' {
+  const normalized = typeof value === 'string' ? value.trim() : ''
+  if (normalized === 'pending' || normalized === 'acknowledged') return normalized
+  return 'all'
+}
+
+function normalizeReviewFilter(value: unknown): 'all' | 'pending_binding' | 'inactive_linked' | 'missing_identifier' {
+  const normalized = typeof value === 'string' ? value.trim() : ''
+  switch (normalized) {
+    case 'pending_binding':
+    case 'inactive_linked':
+    case 'missing_identifier':
+      return normalized
+    case 'needs_binding':
+      return 'pending_binding'
+    case 'missing_identity':
+      return 'missing_identifier'
+    default:
+      return 'all'
+  }
+}
+
 function readErrorMessage(error: unknown, fallback: string): string {
   if (error instanceof Error && error.message.trim().length > 0) return error.message
   return fallback
@@ -177,18 +199,20 @@ export function adminDirectoryRouter(): Router {
         defaultPageSize: 20,
         maxPageSize: 100,
       })
-      const filter = typeof req.query.filter === 'string' ? req.query.filter : 'all'
+      const filter = normalizeAlertFilter(req.query.ack ?? req.query.filter)
       const result = await listDirectorySyncAlerts(
         req.params.integrationId,
         { limit: pageSize, offset },
-        filter === 'pending' || filter === 'acknowledged' ? filter : 'all',
+        filter,
       )
       jsonOk(res, {
         items: result.items,
+        counts: result.counts,
         total: result.total,
         page,
         pageSize,
-        filter: filter === 'pending' || filter === 'acknowledged' ? filter : 'all',
+        filter,
+        ack: filter,
       })
     } catch (error) {
       const message = readErrorMessage(error, 'Failed to load directory alerts')
@@ -206,22 +230,19 @@ export function adminDirectoryRouter(): Router {
         defaultPageSize: 100,
         maxPageSize: 200,
       })
-      const filter = typeof req.query.filter === 'string' ? req.query.filter : 'all'
+      const filter = normalizeReviewFilter(req.query.queue ?? req.query.filter)
       const result = await listDirectoryReviewItems(
         req.params.integrationId,
         { limit: pageSize, offset },
-        filter === 'pending_binding' || filter === 'inactive_linked' || filter === 'missing_identifier'
-          ? filter
-          : 'all',
+        filter,
       )
       jsonOk(res, {
         items: result.items,
         total: result.total,
         page,
         pageSize,
-        filter: filter === 'pending_binding' || filter === 'inactive_linked' || filter === 'missing_identifier'
-          ? filter
-          : 'all',
+        filter,
+        queue: filter,
       })
     } catch (error) {
       const message = readErrorMessage(error, 'Failed to load directory review items')
@@ -334,10 +355,14 @@ export function adminDirectoryRouter(): Router {
           localUserEmail: result.account.localUser?.email ?? null,
           externalUserId: result.account.externalUserId,
           corpId: result.account.corpId,
-          batch: true,
+          mode: 'bulk',
+          selectionSize: bindings.length,
         },
       })))
-      jsonOk(res, { items: results.map((result) => result.account) })
+      jsonOk(res, {
+        items: results.map((result) => result.account),
+        updatedCount: results.length,
+      })
     } catch (error) {
       const message = readErrorMessage(error, 'Failed to batch bind directory accounts')
       const statusCode = /not found/i.test(message)
@@ -417,10 +442,15 @@ export function adminDirectoryRouter(): Router {
           previousLocalUserId: result.previousLocalUser?.id ?? null,
           previousLocalUserEmail: result.previousLocalUser?.email ?? null,
           disableDingTalkGrant,
-          batch: true,
+          mode: 'bulk',
+          selectionSize: accountIds.length,
         },
       })))
-      jsonOk(res, { items: results.map((result) => result.account) })
+      jsonOk(res, {
+        items: results.map((result) => result.account),
+        updatedCount: results.length,
+        disableDingTalkGrant,
+      })
     } catch (error) {
       const message = readErrorMessage(error, 'Failed to batch unbind directory accounts')
       const statusCode = /not found/i.test(message)
@@ -445,15 +475,17 @@ export function adminDirectoryRouter(): Router {
       await auditLog({
         actorId: adminUserId,
         actorType: 'user',
-        action: 'ack',
+        action: 'acknowledge',
         resourceType: 'directory-sync-alert',
         resourceId: alert.id,
         meta: {
           adminUserId,
+          alertId: alert.id,
           integrationId: alert.integrationId,
           runId: alert.runId,
-          level: alert.level,
           code: alert.code,
+          level: alert.level,
+          acknowledgedAt: alert.acknowledgedAt,
         },
       })
       jsonOk(res, { alert })

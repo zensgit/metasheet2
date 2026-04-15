@@ -305,6 +305,9 @@ export type DirectorySyncObservationStatus =
   | 'invalid_cron'
   | 'awaiting_first_run'
   | 'scheduler_observed'
+  | 'configured_no_runs'
+  | 'manual_only'
+  | 'auto_observed'
 
 export type DirectorySyncScheduleSnapshot = {
   integrationId: string
@@ -1676,21 +1679,43 @@ export async function listDirectorySyncAlerts(
   integrationId: string,
   pagination: { limit: number; offset: number },
   filter: DirectorySyncAlertFilter = 'all',
-): Promise<{ items: DirectorySyncAlertSummary[]; total: number }> {
+): Promise<{
+  items: DirectorySyncAlertSummary[]
+  total: number
+  counts: {
+    total: number
+    pending: number
+    acknowledged: number
+  }
+}> {
   const normalizedIntegrationId = normalizeText(integrationId)
   if (!normalizedIntegrationId) throw new Error('integrationId is required')
 
   const normalizedFilter: DirectorySyncAlertFilter = filter === 'pending' || filter === 'acknowledged' ? filter : 'all'
-  const where: string[] = ['integration_id = $1']
-  if (normalizedFilter === 'pending') where.push('acknowledged_at IS NULL')
-  if (normalizedFilter === 'acknowledged') where.push('acknowledged_at IS NOT NULL')
+  const whereClauses: string[] = ['integration_id = $1']
+  const params: unknown[] = [normalizedIntegrationId]
+  if (normalizedFilter === 'pending') whereClauses.push('acknowledged_at IS NULL')
+  if (normalizedFilter === 'acknowledged') whereClauses.push('acknowledged_at IS NOT NULL')
 
-  const whereSql = where.join(' AND ')
-  const [countResult, rowsResult] = await Promise.all([
+  const whereSql = whereClauses.join(' AND ')
+  const [countResult, countsResult, rowsResult] = await Promise.all([
     query<{ total: number }>(
       `SELECT COUNT(*)::int AS total
        FROM directory_sync_alerts
        WHERE ${whereSql}`,
+      params,
+    ),
+    query<{
+      total_count: number
+      pending_count: number
+      acknowledged_count: number
+    }>(
+      `SELECT
+         COUNT(*)::int AS total_count,
+         COUNT(*) FILTER (WHERE acknowledged_at IS NULL)::int AS pending_count,
+         COUNT(*) FILTER (WHERE acknowledged_at IS NOT NULL)::int AS acknowledged_count
+       FROM directory_sync_alerts
+       WHERE integration_id = $1`,
       [normalizedIntegrationId],
     ),
     query<DirectorySyncAlertRow>(
@@ -1709,15 +1734,21 @@ export async function listDirectorySyncAlerts(
           updated_at
        FROM directory_sync_alerts
        WHERE ${whereSql}
-       ORDER BY created_at DESC
-       LIMIT $2 OFFSET $3`,
-      [normalizedIntegrationId, pagination.limit, pagination.offset],
+       ORDER BY acknowledged_at IS NULL DESC, created_at DESC
+       LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
+      [...params, pagination.limit, pagination.offset],
     ),
   ])
 
+  const countsRow = countsResult.rows[0]
   return {
     items: rowsResult.rows.map(summarizeAlert),
     total: Number(countResult.rows[0]?.total ?? 0),
+    counts: {
+      total: Number(countsRow?.total_count ?? 0),
+      pending: Number(countsRow?.pending_count ?? 0),
+      acknowledged: Number(countsRow?.acknowledged_count ?? 0),
+    },
   }
 }
 
@@ -1758,6 +1789,7 @@ export async function acknowledgeDirectorySyncAlert(
 
 function readScheduleObservation(
   integration: DirectoryIntegrationRow,
+  lastManualRun: DirectoryRunRow | null,
   lastAutomaticRun: DirectoryRunRow | null,
 ): Pick<DirectorySyncScheduleSnapshot, 'cronValid' | 'nextExpectedRunAt' | 'observationStatus' | 'observationMessage'> {
   if (!integration.sync_enabled) {
@@ -1786,16 +1818,25 @@ function readScheduleObservation(
       return {
         cronValid: true,
         nextExpectedRunAt: nextRun?.toISOString() ?? null,
-        observationStatus: 'scheduler_observed',
-        observationMessage: '已观察到调度器触发的自动同步。',
+        observationStatus: 'auto_observed',
+        observationMessage: `已观察到自动触发记录（${lastAutomaticRun.trigger_source}）。`,
+      }
+    }
+
+    if (lastManualRun) {
+      return {
+        cronValid: true,
+        nextExpectedRunAt: nextRun?.toISOString() ?? null,
+        observationStatus: 'manual_only',
+        observationMessage: '当前只观察到 manual 触发记录；尚未看到自动执行。',
       }
     }
 
     return {
       cronValid: true,
       nextExpectedRunAt: nextRun?.toISOString() ?? null,
-      observationStatus: 'awaiting_first_run',
-      observationMessage: '已配置 cron，等待首次自动触发或尚未观察到调度执行。',
+      observationStatus: 'configured_no_runs',
+      observationMessage: '已保存自动同步配置，但尚未看到任何执行记录。',
     }
   } catch {
     return {
@@ -1846,7 +1887,7 @@ export async function getDirectorySyncScheduleSnapshot(
   const lastRun = lastRunResult.rows[0] ?? null
   const lastManualRun = lastManualRunResult.rows[0] ?? null
   const lastAutomaticRun = lastAutomaticRunResult.rows[0] ?? null
-  const observation = readScheduleObservation(integration, lastAutomaticRun)
+  const observation = readScheduleObservation(integration, lastManualRun, lastAutomaticRun)
 
   return {
     integrationId: normalizedIntegrationId,

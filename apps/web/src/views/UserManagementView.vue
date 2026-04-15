@@ -132,20 +132,126 @@
 
     <div class="user-admin__layout">
       <aside class="user-admin__panel">
-        <h2>用户列表</h2>
-        <div v-if="users.length === 0" class="user-admin__empty">暂无用户数据</div>
-        <button
-          v-for="user in users"
+        <div class="user-admin__section-head">
+          <div>
+            <h2>用户列表</h2>
+            <p class="user-admin__hint">按账号、钉钉和目录状态快速筛选，再执行批量治理动作。</p>
+          </div>
+        </div>
+        <div class="user-admin__summary">
+          <span class="user-admin__metric">
+            <strong>{{ governanceSummary.total }}</strong>
+            <small>总用户</small>
+          </span>
+          <span class="user-admin__metric">
+            <strong>{{ governanceSummary.accountEnabled }}</strong>
+            <small>账号启用</small>
+          </span>
+          <span class="user-admin__metric">
+            <strong>{{ governanceSummary.dingtalkEnabled }}</strong>
+            <small>钉钉启用</small>
+          </span>
+          <span class="user-admin__metric">
+            <strong>{{ governanceSummary.directoryLinked }}</strong>
+            <small>目录已链接</small>
+          </span>
+        </div>
+        <div class="user-admin__filters" role="group" aria-label="成员治理筛选">
+          <button
+            v-for="option in userFilterOptions"
+            :key="option.value"
+            class="user-admin__filter"
+            :class="{ 'user-admin__filter--active': userListFilter === option.value }"
+            type="button"
+            @click="userListFilter = option.value"
+          >
+            {{ option.label }}
+          </button>
+        </div>
+        <div v-if="visibleUsers.length > 0" class="user-admin__bulkbar">
+          <div>
+            <strong>批量操作</strong>
+            <p class="user-admin__hint">
+              已选择 {{ selectedUserIds.length }} / {{ visibleUsers.length }} 个当前筛选结果。
+            </p>
+          </div>
+          <div class="user-admin__bulk-group">
+            <select
+              v-model="selectedNamespace"
+              class="user-admin__select user-admin__select--namespace"
+              aria-label="插件命名空间"
+            >
+              <option value="">选择插件命名空间</option>
+              <option v-for="namespace in namespaceOptions" :key="namespace" :value="namespace">
+                {{ namespace }}
+              </option>
+            </select>
+            <p class="user-admin__hint">
+              命名空间优先来自当前成员准入，再合并角色目录可推导的插件范围。
+            </p>
+          </div>
+          <div class="user-admin__role-actions">
+            <button class="user-admin__button user-admin__button--secondary" type="button" :disabled="loading || bulkBusy || visibleUsers.length === 0" @click="void selectVisibleUsers()">
+              选择当前筛选结果
+            </button>
+            <button class="user-admin__button user-admin__button--secondary" type="button" :disabled="loading || bulkBusy || selectedUserIds.length === 0" @click="void clearSelectedUsers()">
+              清空选择
+            </button>
+            <button class="user-admin__button" type="button" :disabled="loading || bulkBusy || selectedUserIds.length === 0 || !selectedNamespace" @click="void bulkUpdateNamespaceAdmissions(true)">
+              批量开通插件使用
+            </button>
+            <button class="user-admin__button user-admin__button--secondary" type="button" :disabled="loading || bulkBusy || selectedUserIds.length === 0 || !selectedNamespace" @click="void bulkUpdateNamespaceAdmissions(false)">
+              批量关闭插件使用
+            </button>
+            <button class="user-admin__button" type="button" :disabled="loading || bulkBusy || selectedUserIds.length === 0" @click="void bulkUpdateDingTalkGrants(true)">
+              批量开通钉钉扫码
+            </button>
+            <button class="user-admin__button user-admin__button--secondary" type="button" :disabled="loading || bulkBusy || selectedUserIds.length === 0" @click="void bulkUpdateDingTalkGrants(false)">
+              批量关闭钉钉扫码
+            </button>
+          </div>
+        </div>
+        <div v-if="visibleUsers.length === 0" class="user-admin__empty">暂无用户数据</div>
+        <article
+          v-for="user in visibleUsers"
           :key="user.id"
           class="user-admin__user"
           :class="{ 'user-admin__user--active': selectedUserId === user.id }"
-          type="button"
-          @click="void selectUser(user.id)"
         >
-          <strong>{{ user.name || user.email }}</strong>
-          <span>{{ user.email }}</span>
-          <span class="user-admin__meta">{{ user.role }} · {{ user.is_active ? '启用' : '停用' }}</span>
-        </button>
+          <label class="user-admin__user-select">
+            <input
+              :checked="selectedUserIdSet.has(user.id)"
+              type="checkbox"
+              @change="void handleUserSelectionChange(user.id, $event)"
+            />
+            <span>选择</span>
+          </label>
+          <button class="user-admin__user-body" type="button" @click="void selectUser(user.id)">
+            <strong>{{ user.name || user.email }}</strong>
+            <span>{{ user.email }}</span>
+            <span class="user-admin__meta">{{ user.role }} · {{ user.is_active ? '启用' : '停用' }}</span>
+            <div class="user-admin__row-badges">
+              <span class="user-admin__row-badge" :class="{ 'user-admin__row-badge--success': user.is_active, 'user-admin__row-badge--danger': !user.is_active }">
+                {{ user.is_active ? '账号启用' : '账号停用' }}
+              </span>
+              <span class="user-admin__row-badge" :class="{ 'user-admin__row-badge--success': user.dingtalkLoginEnabled !== false, 'user-admin__row-badge--danger': user.dingtalkLoginEnabled === false }">
+                {{ user.dingtalkLoginEnabled === false ? '钉钉停用' : '钉钉启用' }}
+              </span>
+              <span class="user-admin__row-badge" :class="{ 'user-admin__row-badge--success': user.directoryLinked === true, 'user-admin__row-badge--danger': user.directoryLinked !== true }">
+                {{ user.directoryLinked === true ? '目录已链接' : '目录未链接' }}
+              </span>
+              <span v-if="user.platformAdminEnabled" class="user-admin__row-badge user-admin__row-badge--accent">
+                平台管理员
+              </span>
+              <span v-if="user.attendanceAdminEnabled" class="user-admin__row-badge user-admin__row-badge--accent">
+                考勤管理员
+              </span>
+              <span v-if="(user.businessRoleCount || 0) > 0" class="user-admin__row-badge user-admin__row-badge--muted">
+                业务角色 {{ user.businessRoleCount }}
+              </span>
+            </div>
+          </button>
+        </article>
       </aside>
 
       <section class="user-admin__panel user-admin__panel--detail">
@@ -446,6 +552,11 @@ type ManagedUser = {
   is_admin: boolean
   last_login_at: string | null
   created_at: string
+  platformAdminEnabled?: boolean
+  attendanceAdminEnabled?: boolean
+  dingtalkLoginEnabled?: boolean
+  directoryLinked?: boolean
+  businessRoleCount?: number
 }
 
 type RoleCatalogItem = {
@@ -596,14 +707,18 @@ const loadingInvites = ref(false)
 const loadingSessions = ref(false)
 const loadingDingTalk = ref(false)
 const loadingAdmission = ref(false)
+const bulkBusy = ref(false)
 const busy = ref(false)
 const status = ref('')
 const statusTone = ref<'info' | 'error'>('info')
 const search = ref('')
 const users = ref<ManagedUser[]>([])
+const selectedUserIds = ref<string[]>([])
+const userListFilter = ref<'all' | 'account-disabled' | 'dingtalk-disabled' | 'directory-unlinked' | 'platform-admin'>('all')
 const roleCatalog = ref<RoleCatalogItem[]>([])
 const accessPresets = ref<AccessPreset[]>([])
 const presetModeFilter = ref<'' | 'platform' | 'attendance' | 'plm-workbench'>('')
+const selectedNamespace = ref('')
 const selectedUserId = ref('')
 const selectedRoleId = ref('')
 const manualPassword = ref('')
@@ -626,6 +741,29 @@ const createForm = ref<CreateUserForm>({
   isActive: true,
 })
 const selectedPreset = computed(() => accessPresets.value.find((preset) => preset.id === createForm.value.presetId) || null)
+const governanceSummary = computed(() => ({
+  total: users.value.length,
+  accountEnabled: users.value.filter((user) => user.is_active).length,
+  dingtalkEnabled: users.value.filter((user) => user.dingtalkLoginEnabled !== false).length,
+  directoryLinked: users.value.filter((user) => user.directoryLinked === true).length,
+}))
+const visibleUsers = computed(() => {
+  return users.value.filter((user) => {
+    if (userListFilter.value === 'account-disabled') return !user.is_active
+    if (userListFilter.value === 'dingtalk-disabled') return user.dingtalkLoginEnabled === false
+    if (userListFilter.value === 'directory-unlinked') return user.directoryLinked !== true
+    if (userListFilter.value === 'platform-admin') return user.platformAdminEnabled === true
+    return true
+  })
+})
+const selectedUserIdSet = computed(() => new Set(selectedUserIds.value))
+const userFilterOptions = [
+  { value: 'all', label: '全部' },
+  { value: 'account-disabled', label: '账号停用' },
+  { value: 'dingtalk-disabled', label: '钉钉停用' },
+  { value: 'directory-unlinked', label: '目录未链接' },
+  { value: 'platform-admin', label: '平台管理员' },
+] as const
 const hasPlatformAdminAccess = computed(() => {
   if (!access.value) return false
   return access.value.roles.includes('admin') || access.value.user.role === 'admin' || access.value.user.is_admin
@@ -637,10 +775,70 @@ const hasAttendanceAdminAccess = computed(() => {
 const filteredAccessPresets = computed(() => {
   return accessPresets.value.filter((preset) => !presetModeFilter.value || preset.productMode === presetModeFilter.value)
 })
+const namespaceOptions = computed(() => {
+  const namespaces: string[] = []
+  const append = (namespace: string): void => {
+    const trimmed = namespace.trim()
+    if (!trimmed || namespaces.includes(trimmed)) return
+    namespaces.push(trimmed)
+  }
+
+  for (const admission of memberAdmission.value?.namespaceAdmissions || []) {
+    append(admission.namespace)
+  }
+
+  for (const role of roleCatalog.value) {
+    for (const permission of role.permissions) {
+      const namespace = extractNamespaceFromPermission(permission)
+      if (namespace) append(namespace)
+    }
+  }
+
+  return namespaces
+})
 
 function setStatus(message: string, tone: 'info' | 'error' = 'info'): void {
   status.value = message
   statusTone.value = tone
+}
+
+function extractNamespaceFromPermission(permission: string): string | null {
+  const value = permission.trim()
+  if (!value) return null
+  const namespace = value.split(/[:/]/, 1)[0]?.trim()
+  if (!namespace) return null
+  return namespace
+}
+
+function reconcileSelectedUsers(): void {
+  if (selectedUserIds.value.length === 0) return
+  const visibleUserIdSet = new Set(visibleUsers.value.map((user) => user.id))
+  selectedUserIds.value = selectedUserIds.value.filter((userId) => visibleUserIdSet.has(userId))
+}
+
+function clearSelectedUsers(): void {
+  selectedUserIds.value = []
+}
+
+function selectVisibleUsers(): void {
+  selectedUserIds.value = visibleUsers.value.map((user) => user.id)
+}
+
+function toggleUserSelection(userId: string, checked: boolean): void {
+  if (checked) {
+    if (!selectedUserIds.value.includes(userId)) {
+      selectedUserIds.value = [...selectedUserIds.value, userId]
+    }
+    return
+  }
+
+  selectedUserIds.value = selectedUserIds.value.filter((selectedUserId) => selectedUserId !== userId)
+}
+
+function handleUserSelectionChange(userId: string, event: Event): void {
+  const target = event.target
+  if (!(target instanceof HTMLInputElement)) return
+  toggleUserSelection(userId, target.checked)
 }
 
 function formatDate(value: string | null | undefined): string {
@@ -706,16 +904,25 @@ async function loadUsers(): Promise<void> {
   loading.value = true
   try {
     const params = new URLSearchParams()
-    if (search.value) params.set('q', search.value)
-    const query = params.toString()
-    const response = await apiFetch(`/api/admin/users${query ? `?${query}` : ''}`)
+    params.set('q', search.value)
+    const response = await apiFetch(`/api/admin/users?${params.toString()}`)
     const payload = await readJson(response)
     if (!response.ok || payload.ok !== true) {
       throw new Error(String((payload.error as Record<string, unknown> | undefined)?.message || '加载用户失败'))
     }
 
     const data = payload.data as { items?: ManagedUser[] } | undefined
-    users.value = Array.isArray(data?.items) ? data.items : []
+    users.value = Array.isArray(data?.items)
+      ? data.items.map((item) => ({
+          ...item,
+          platformAdminEnabled: item.platformAdminEnabled ?? (item.role === 'admin' || item.is_admin),
+          attendanceAdminEnabled: item.attendanceAdminEnabled ?? false,
+          dingtalkLoginEnabled: item.dingtalkLoginEnabled ?? false,
+          directoryLinked: item.directoryLinked ?? false,
+          businessRoleCount: item.businessRoleCount ?? 0,
+        }))
+      : []
+    reconcileSelectedUsers()
 
     if (!selectedUserId.value && users.value.length > 0) {
       await selectUser(users.value[0].id)
@@ -904,6 +1111,11 @@ async function loadMemberAdmission(userId?: string): Promise<void> {
   }
 }
 
+async function refreshCurrentDetailMemberAdmissionIfNeeded(userIds: string[]): Promise<void> {
+  if (!selectedUserId.value || !userIds.includes(selectedUserId.value)) return
+  await loadMemberAdmission(selectedUserId.value)
+}
+
 async function updateNamespaceAdmission(admission: NamespaceAdmission, enabled: boolean): Promise<void> {
   if (!access.value) return
   busy.value = true
@@ -960,6 +1172,68 @@ async function updateDingTalkGrant(enabled: boolean): Promise<void> {
     setStatus(error instanceof Error ? error.message : '更新钉钉登录状态失败', 'error')
   } finally {
     busy.value = false
+  }
+}
+
+async function bulkUpdateDingTalkGrants(enabled: boolean): Promise<void> {
+  const userIds = Array.from(new Set(selectedUserIds.value)).filter((userId) => userId.length > 0)
+  if (userIds.length === 0) return
+
+  bulkBusy.value = true
+  try {
+    const response = await apiFetch('/api/admin/users/dingtalk-grants/bulk', {
+      method: 'POST',
+      body: JSON.stringify({
+        userIds,
+        enabled,
+      }),
+    })
+    const payload = await readJson(response)
+    if (!response.ok || payload.ok !== true) {
+      throw new Error(String((payload.error as Record<string, unknown> | undefined)?.message || '批量更新钉钉扫码失败'))
+    }
+
+    await loadUsers()
+    if (selectedUserId.value && userIds.includes(selectedUserId.value)) {
+      await Promise.all([
+        loadDingTalkAccess(selectedUserId.value),
+        loadMemberAdmission(selectedUserId.value),
+      ])
+    }
+    setStatus(enabled ? `已批量开通 ${userIds.length} 个用户的钉钉扫码` : `已批量关闭 ${userIds.length} 个用户的钉钉扫码`)
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : '批量更新钉钉扫码失败', 'error')
+  } finally {
+    bulkBusy.value = false
+  }
+}
+
+async function bulkUpdateNamespaceAdmissions(enabled: boolean): Promise<void> {
+  const userIds = Array.from(new Set(selectedUserIds.value)).filter((userId) => userId.length > 0)
+  const namespace = selectedNamespace.value.trim()
+  if (userIds.length === 0 || !namespace) return
+
+  bulkBusy.value = true
+  try {
+    const response = await apiFetch(`/api/admin/users/namespaces/${encodeURIComponent(namespace)}/admission/bulk`, {
+      method: 'POST',
+      body: JSON.stringify({
+        userIds,
+        enabled,
+      }),
+    })
+    const payload = await readJson(response)
+    if (!response.ok || payload.ok !== true) {
+      throw new Error(String((payload.error as Record<string, unknown> | undefined)?.message || '批量更新插件使用失败'))
+    }
+
+    await loadUsers()
+    await refreshCurrentDetailMemberAdmissionIfNeeded(userIds)
+    setStatus(enabled ? `已批量开通 ${namespace} 插件使用` : `已批量关闭 ${namespace} 插件使用`)
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : '批量更新插件使用失败', 'error')
+  } finally {
+    bulkBusy.value = false
   }
 }
 
@@ -1077,6 +1351,17 @@ watch(presetModeFilter, async () => {
     createForm.value.presetId = ''
   }
 })
+
+watch(namespaceOptions, (options) => {
+  if (options.length === 0) {
+    selectedNamespace.value = ''
+    return
+  }
+
+  if (!selectedNamespace.value || !options.includes(selectedNamespace.value)) {
+    selectedNamespace.value = options[0] || ''
+  }
+}, { immediate: true })
 
 async function toggleUserStatus(): Promise<void> {
   if (!access.value) return
@@ -1380,16 +1665,62 @@ onMounted(async () => {
   gap: 16px;
 }
 
-.user-admin__user {
+.user-admin__summary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.user-admin__metric {
   display: grid;
   gap: 4px;
+  padding: 10px 12px;
+  border: 1px solid #e5e7eb;
+  border-radius: 10px;
+  background: #f8fafc;
+}
+
+.user-admin__metric strong {
+  font-size: 18px;
+  color: #111827;
+}
+
+.user-admin__metric small {
+  color: #6b7280;
+}
+
+.user-admin__filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.user-admin__filter {
+  height: 32px;
+  border: 1px solid #d1d5db;
+  border-radius: 999px;
+  background: #fff;
+  color: #374151;
+  padding: 0 12px;
+  cursor: pointer;
+}
+
+.user-admin__filter--active {
+  background: #2563eb;
+  color: #fff;
+  border-color: #2563eb;
+}
+
+.user-admin__user {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
   text-align: left;
   width: 100%;
   border: 1px solid #e5e7eb;
   border-radius: 10px;
   background: #fff;
   padding: 12px;
-  cursor: pointer;
 }
 
 .user-admin__user--active {
@@ -1397,9 +1728,68 @@ onMounted(async () => {
   background: #eff6ff;
 }
 
+.user-admin__user-select {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: #374151;
+  font-size: 12px;
+  user-select: none;
+  white-space: nowrap;
+}
+
+.user-admin__user-body {
+  flex: 1;
+  display: grid;
+  gap: 4px;
+  text-align: left;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
 .user-admin__meta {
   color: #6b7280;
   font-size: 12px;
+}
+
+.user-admin__row-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.user-admin__row-badge {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  background: #f3f4f6;
+  color: #374151;
+  padding: 4px 8px;
+  font-size: 12px;
+}
+
+.user-admin__row-badge--success {
+  background: #dcfce7;
+  color: #166534;
+}
+
+.user-admin__row-badge--danger {
+  background: #fee2e2;
+  color: #b91c1c;
+}
+
+.user-admin__row-badge--accent {
+  background: #dbeafe;
+  color: #1d4ed8;
+}
+
+.user-admin__row-badge--muted {
+  background: #e2e8f0;
+  color: #475569;
 }
 
 .user-admin__detail-head {
@@ -1418,6 +1808,22 @@ onMounted(async () => {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 12px;
+}
+
+.user-admin__bulkbar {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border-radius: 12px;
+  border: 1px solid #dbeafe;
+  background: linear-gradient(135deg, #eff6ff 0%, #f8fafc 100%);
+}
+
+.user-admin__bulk-group {
+  display: grid;
+  gap: 4px;
+  width: fit-content;
+  max-width: 100%;
 }
 
 .user-admin__badges,

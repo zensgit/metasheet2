@@ -696,7 +696,7 @@ describe('adminDirectoryRouter', () => {
     expect(response.statusCode).toBe(200)
     expect(directoryMocks.acknowledgeDirectorySyncAlert).toHaveBeenCalledWith('alert-1', 'admin-1')
     expect(auditMocks.auditLog).toHaveBeenCalledWith(expect.objectContaining({
-      action: 'ack',
+      action: 'acknowledge',
       resourceType: 'directory-sync-alert',
       resourceId: 'alert-1',
     }))

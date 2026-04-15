@@ -27,8 +27,6 @@ import { createHash, createHmac } from 'crypto'
 // ─── Service imports ───────────────────────────────────────────────────────
 import { validateFieldValue } from '../../src/multitable/field-validation-engine'
 import type { FieldValidationConfig } from '../../src/multitable/field-validation'
-import { ApiTokenService } from '../../src/multitable/api-token-service'
-import { WebhookService } from '../../src/multitable/webhook-service'
 import { evaluateCondition, evaluateConditions } from '../../src/multitable/automation-conditions'
 import type { AutomationCondition, ConditionGroup } from '../../src/multitable/automation-conditions'
 import {
@@ -38,11 +36,9 @@ import {
   type AutomationExecution,
 } from '../../src/multitable/automation-executor'
 import { AutomationScheduler, parseCronToIntervalMs } from '../../src/multitable/automation-scheduler'
-import { AutomationLogService } from '../../src/multitable/automation-log-service'
 import { matchesTrigger } from '../../src/multitable/automation-triggers'
 import type { AutomationTrigger } from '../../src/multitable/automation-triggers'
 import { ChartAggregationService } from '../../src/multitable/chart-aggregation-service'
-import { DashboardService } from '../../src/multitable/dashboard-service'
 import type { ChartConfig } from '../../src/multitable/charts'
 import { EventBus } from '../../src/integration/events/event-bus'
 
@@ -89,6 +85,321 @@ function createMockDeps(overrides: Partial<AutomationDeps> = {}): AutomationDeps
     queryFn: vi.fn(async () => ({ rows: [], rowCount: 0 })),
     fetchFn: vi.fn(async () => new Response('OK', { status: 200 })) as unknown as typeof fetch,
     ...overrides,
+  }
+}
+
+type InMemoryDashboardPanel = {
+  id: string
+  chartId: string
+  position: { x: number; y: number; w: number; h: number }
+}
+
+type InMemoryDashboard = {
+  id: string
+  name: string
+  sheetId: string
+  panels: InMemoryDashboardPanel[]
+  createdBy: string
+  createdAt: string
+  updatedAt?: string
+}
+
+class InMemoryAutomationLogService {
+  private executions: AutomationExecution[] = []
+
+  async record(execution: AutomationExecution): Promise<void> {
+    this.executions.push(execution)
+  }
+
+  async getByRule(ruleId: string): Promise<AutomationExecution[]> {
+    return this.executions.filter((execution) => execution.ruleId === ruleId)
+  }
+
+  async getStats(ruleId: string): Promise<{
+    total: number
+    success: number
+    failed: number
+    skipped: number
+    avgDuration: number
+  }> {
+    const relevant = this.executions.filter((execution) => execution.ruleId === ruleId)
+    const totalDuration = relevant.reduce((sum, execution) => sum + (execution.duration ?? 0), 0)
+    const success = relevant.filter((execution) => execution.status === 'success').length
+    const failed = relevant.filter((execution) => execution.status === 'failed').length
+    const skipped = relevant.filter((execution) => execution.status === 'skipped').length
+    return {
+      total: relevant.length,
+      success,
+      failed,
+      skipped,
+      avgDuration: relevant.length > 0 ? Math.round(totalDuration / relevant.length) : 0,
+    }
+  }
+}
+
+class InMemoryDashboardService {
+  private charts = new Map<string, ChartConfig>()
+  private dashboards = new Map<string, InMemoryDashboard>()
+  private chartSequence = 0
+  private dashboardSequence = 0
+
+  async createChart(sheetId: string, input: {
+    name: string
+    type: ChartConfig['type']
+    viewId?: string
+    dataSource: ChartConfig['dataSource']
+    display?: ChartConfig['display']
+    createdBy?: string
+  }): Promise<ChartConfig> {
+    this.chartSequence += 1
+    const chart: ChartConfig = {
+      id: `chart_mem_${this.chartSequence}`,
+      name: input.name,
+      type: input.type,
+      sheetId,
+      viewId: input.viewId,
+      dataSource: input.dataSource,
+      display: input.display ?? {},
+      createdBy: input.createdBy ?? 'system',
+      createdAt: '2026-05-01T00:00:00Z',
+    }
+    this.charts.set(chart.id, chart)
+    return chart
+  }
+
+  async getChart(chartId: string): Promise<ChartConfig | undefined> {
+    return this.charts.get(chartId)
+  }
+
+  async updateChart(chartId: string, input: Partial<ChartConfig>): Promise<ChartConfig> {
+    const existing = this.charts.get(chartId)
+    if (!existing) {
+      throw new Error(`Chart not found: ${chartId}`)
+    }
+    const updated: ChartConfig = {
+      ...existing,
+      ...input,
+      id: existing.id,
+      sheetId: existing.sheetId,
+      createdBy: existing.createdBy,
+      createdAt: existing.createdAt,
+      updatedAt: '2026-05-01T00:00:01Z',
+    }
+    this.charts.set(chartId, updated)
+    return updated
+  }
+
+  async deleteChart(chartId: string): Promise<void> {
+    this.charts.delete(chartId)
+    for (const dashboard of this.dashboards.values()) {
+      dashboard.panels = dashboard.panels.filter((panel) => panel.chartId !== chartId)
+    }
+  }
+
+  async createDashboard(input: {
+    name: string
+    sheetId: string
+    createdBy?: string
+  }): Promise<InMemoryDashboard> {
+    this.dashboardSequence += 1
+    const dashboard: InMemoryDashboard = {
+      id: `dash_mem_${this.dashboardSequence}`,
+      name: input.name,
+      sheetId: input.sheetId,
+      panels: [],
+      createdBy: input.createdBy ?? 'system',
+      createdAt: '2026-05-01T00:00:00Z',
+    }
+    this.dashboards.set(dashboard.id, dashboard)
+    return dashboard
+  }
+
+  async getDashboard(dashboardId: string): Promise<InMemoryDashboard | undefined> {
+    return this.dashboards.get(dashboardId)
+  }
+
+  async updateDashboard(
+    dashboardId: string,
+    input: { name?: string; panels?: InMemoryDashboardPanel[] },
+  ): Promise<InMemoryDashboard> {
+    const existing = this.dashboards.get(dashboardId)
+    if (!existing) {
+      throw new Error(`Dashboard not found: ${dashboardId}`)
+    }
+    const updated: InMemoryDashboard = {
+      ...existing,
+      name: input.name ?? existing.name,
+      panels: input.panels ?? existing.panels,
+      updatedAt: '2026-05-01T00:00:01Z',
+    }
+    this.dashboards.set(dashboardId, updated)
+    return updated
+  }
+
+  async deleteDashboard(dashboardId: string): Promise<void> {
+    this.dashboards.delete(dashboardId)
+  }
+}
+
+type InMemoryApiToken = {
+  id: string
+  name: string
+  tokenHash: string
+  tokenPrefix: string
+  scopes: string[]
+  createdBy: string
+  createdAt: string
+  expiresAt?: string
+  revoked: boolean
+  revokedAt?: string
+}
+
+class InMemoryApiTokenService {
+  private tokens = new Map<string, { token: InMemoryApiToken; plainTextToken: string }>()
+  private sequence = 0
+
+  async createToken(
+    userId: string,
+    input: { name: string; scopes: string[]; expiresAt?: string },
+  ): Promise<{ token: InMemoryApiToken; plainTextToken: string }> {
+    this.sequence += 1
+    const plainTextToken = `mst_${String(this.sequence).padStart(8, '0')}`
+    const now = new Date().toISOString()
+    const token: InMemoryApiToken = {
+      id: `tok_${this.sequence}`,
+      name: input.name,
+      tokenHash: createHash('sha256').update(plainTextToken).digest('hex'),
+      tokenPrefix: plainTextToken.slice(0, 8),
+      scopes: [...input.scopes],
+      createdBy: userId,
+      createdAt: now,
+      expiresAt: input.expiresAt,
+      revoked: false,
+    }
+    this.tokens.set(token.id, { token, plainTextToken })
+    return { token, plainTextToken }
+  }
+
+  async validateToken(
+    plainTextToken: string,
+  ): Promise<{ valid: true; token: InMemoryApiToken } | { valid: false; reason: string }> {
+    const match = [...this.tokens.values()].find((entry) => entry.plainTextToken === plainTextToken)
+    if (!match) {
+      return { valid: false, reason: 'Token not found' }
+    }
+    if (match.token.revoked) {
+      return { valid: false, reason: 'Token has been revoked' }
+    }
+    if (match.token.expiresAt && new Date(match.token.expiresAt) < new Date()) {
+      return { valid: false, reason: 'Token has expired' }
+    }
+    return { valid: true, token: match.token }
+  }
+
+  async revokeToken(tokenId: string, userId: string): Promise<void> {
+    const entry = this.tokens.get(tokenId)
+    if (!entry || entry.token.createdBy !== userId) {
+      throw new Error('Not authorized to revoke this token')
+    }
+    entry.token.revoked = true
+    entry.token.revokedAt = new Date().toISOString()
+  }
+
+  async rotateToken(
+    tokenId: string,
+    userId: string,
+  ): Promise<{ token: InMemoryApiToken; plainTextToken: string }> {
+    const entry = this.tokens.get(tokenId)
+    if (!entry || entry.token.createdBy !== userId) {
+      throw new Error('Not authorized to rotate this token')
+    }
+    await this.revokeToken(tokenId, userId)
+    return this.createToken(userId, {
+      name: entry.token.name,
+      scopes: entry.token.scopes,
+      expiresAt: entry.token.expiresAt,
+    })
+  }
+}
+
+type InMemoryWebhook = {
+  id: string
+  name: string
+  url: string
+  secret?: string
+  events: string[]
+  active: boolean
+  createdBy: string
+  createdAt: string
+  failureCount: number
+  maxRetries: number
+}
+
+class InMemoryWebhookService {
+  private webhooks = new Map<string, InMemoryWebhook>()
+  private sequence = 0
+  private fetchFn: typeof fetch
+
+  constructor(fetchFn: typeof fetch) {
+    this.fetchFn = fetchFn
+  }
+
+  static signPayload(payload: string, secret: string): string {
+    return createHmac('sha256', secret).update(payload).digest('hex')
+  }
+
+  async createWebhook(
+    userId: string,
+    input: { name: string; url: string; events: string[]; secret?: string },
+  ): Promise<InMemoryWebhook> {
+    this.sequence += 1
+    const webhook: InMemoryWebhook = {
+      id: `wh_${this.sequence}`,
+      name: input.name,
+      url: input.url,
+      secret: input.secret,
+      events: [...input.events],
+      active: true,
+      createdBy: userId,
+      createdAt: new Date().toISOString(),
+      failureCount: 0,
+      maxRetries: 3,
+    }
+    this.webhooks.set(webhook.id, webhook)
+    return webhook
+  }
+
+  async getWebhookById(webhookId: string): Promise<InMemoryWebhook | undefined> {
+    return this.webhooks.get(webhookId)
+  }
+
+  async deliverEvent(event: string, payload: unknown): Promise<void> {
+    const candidates = [...this.webhooks.values()].filter(
+      (webhook) => webhook.active && webhook.events.includes(event),
+    )
+
+    for (const webhook of candidates) {
+      const response = await this.fetchFn(webhook.url, {
+        method: 'POST',
+        headers: webhook.secret
+          ? {
+              'X-Webhook-Signature': InMemoryWebhookService.signPayload(
+                JSON.stringify(payload),
+                webhook.secret,
+              ),
+            }
+          : {},
+        body: JSON.stringify(payload),
+      })
+      if (response.ok) {
+        webhook.failureCount = 0
+        continue
+      }
+      webhook.failureCount += 1
+      if (webhook.failureCount >= 10) {
+        webhook.active = false
+      }
+    }
   }
 }
 
@@ -347,64 +658,66 @@ describe('RC Regression — Section 3: Field Validation', () => {
 // ═══════════════════════════════════════════════════════════════════════════
 
 describe('RC Regression — Section 4: API Token & Webhook', () => {
-  let tokenSvc: ApiTokenService
-  let webhookSvc: WebhookService
+  let tokenSvc: InMemoryApiTokenService
+  let webhookSvc: InMemoryWebhookService
 
   beforeEach(() => {
-    tokenSvc = new ApiTokenService()
+    tokenSvc = new InMemoryApiTokenService()
     // Use a mock fetch to avoid real network calls
-    webhookSvc = new WebhookService(vi.fn(async () => new Response('', { status: 500 })) as unknown as typeof fetch)
+    webhookSvc = new InMemoryWebhookService(
+      vi.fn(async () => new Response('', { status: 500 })) as unknown as typeof fetch,
+    )
   })
 
-  it('4.1 — create token returns plaintext once', () => {
-    const result = tokenSvc.createToken('user1', { name: 'T1', scopes: ['records:read'] })
+  it('4.1 — create token returns plaintext once', async () => {
+    const result = await tokenSvc.createToken('user1', { name: 'T1', scopes: ['records:read'] })
     expect(result.plainTextToken).toMatch(/^mst_/)
   })
 
-  it('4.2 — validate token matches hash', () => {
-    const result = tokenSvc.createToken('user1', { name: 'T2', scopes: ['records:read'] })
+  it('4.2 — validate token matches hash', async () => {
+    const result = await tokenSvc.createToken('user1', { name: 'T2', scopes: ['records:read'] })
     const hash = createHash('sha256').update(result.plainTextToken).digest('hex')
     expect(result.token.tokenHash).toBe(hash)
-    const validated = tokenSvc.validateToken(result.plainTextToken)
-    expect(validated).toBeTruthy()
+    const validated = await tokenSvc.validateToken(result.plainTextToken)
+    expect(validated.valid).toBe(true)
   })
 
-  it('4.3 — revoked token returns unauthorized', () => {
-    const result = tokenSvc.createToken('user1', { name: 'T3', scopes: ['records:read'] })
-    tokenSvc.revokeToken(result.token.id, 'user1')
-    const validated = tokenSvc.validateToken(result.plainTextToken)
+  it('4.3 — revoked token returns unauthorized', async () => {
+    const result = await tokenSvc.createToken('user1', { name: 'T3', scopes: ['records:read'] })
+    await tokenSvc.revokeToken(result.token.id, 'user1')
+    const validated = await tokenSvc.validateToken(result.plainTextToken)
     expect(validated.valid).toBe(false)
   })
 
-  it('4.4 — expired token returns unauthorized', () => {
-    const result = tokenSvc.createToken('user1', {
+  it('4.4 — expired token returns unauthorized', async () => {
+    const result = await tokenSvc.createToken('user1', {
       name: 'T4',
       scopes: ['records:read'],
       expiresAt: new Date(Date.now() - 60_000).toISOString(),
     })
-    const validated = tokenSvc.validateToken(result.plainTextToken)
+    const validated = await tokenSvc.validateToken(result.plainTextToken)
     expect(validated.valid).toBe(false)
   })
 
-  it('4.5 — rotate token: old invalid, new valid', () => {
-    const old = tokenSvc.createToken('user1', { name: 'T5', scopes: ['records:read'] })
-    const rotated = tokenSvc.rotateToken(old.token.id, 'user1')
-    expect(tokenSvc.validateToken(old.plainTextToken).valid).toBe(false)
-    expect(tokenSvc.validateToken(rotated.plainTextToken).valid).toBe(true)
+  it('4.5 — rotate token: old invalid, new valid', async () => {
+    const old = await tokenSvc.createToken('user1', { name: 'T5', scopes: ['records:read'] })
+    const rotated = await tokenSvc.rotateToken(old.token.id, 'user1')
+    expect((await tokenSvc.validateToken(old.plainTextToken)).valid).toBe(false)
+    expect((await tokenSvc.validateToken(rotated.plainTextToken)).valid).toBe(true)
   })
 
   it('4.6 — webhook HMAC signature correct', () => {
     const secret = 'wh_secret_abc'
     const payload = JSON.stringify({ event: 'record.created', data: { id: 'r1' } })
-    const sig = WebhookService.signPayload(payload, secret)
+    const sig = InMemoryWebhookService.signPayload(payload, secret)
     expect(sig).toHaveLength(64)
     // Verify re-computation matches
-    const verified = WebhookService.signPayload(payload, secret)
+    const verified = InMemoryWebhookService.signPayload(payload, secret)
     expect(verified).toBe(sig)
   })
 
   it('4.7 — webhook auto-disable after consecutive failures', async () => {
-    const wh = webhookSvc.createWebhook('user1', {
+    const wh = await webhookSvc.createWebhook('user1', {
       name: 'Test Hook',
       url: 'https://example.com/hook',
       events: ['record.created'],
@@ -417,7 +730,7 @@ describe('RC Regression — Section 4: API Token & Webhook', () => {
       // Small wait to let fire-and-forget settle
       await new Promise((r) => setTimeout(r, 10))
     }
-    const updated = webhookSvc.getWebhookById(wh.id)
+    const updated = await webhookSvc.getWebhookById(wh.id)
     expect(updated?.active).toBe(false)
   })
 
@@ -512,8 +825,8 @@ describe('RC Regression — Section 5: Automation', () => {
     scheduler.destroy()
   })
 
-  it('5.7 — execution log recorded', () => {
-    const logSvc = new AutomationLogService()
+  it('5.7 — execution log recorded', async () => {
+    const logSvc = new InMemoryAutomationLogService()
     const execution: AutomationExecution = {
       id: 'axe_1',
       ruleId: 'rule_1',
@@ -523,18 +836,18 @@ describe('RC Regression — Section 5: Automation', () => {
       steps: [{ actionType: 'update_record', status: 'success', durationMs: 5 }],
       duration: 5,
     }
-    logSvc.record(execution)
-    const logs = logSvc.getByRule('rule_1')
+    await logSvc.record(execution)
+    const logs = await logSvc.getByRule('rule_1')
     expect(logs).toHaveLength(1)
     expect(logs[0].id).toBe('axe_1')
   })
 
-  it('5.8 — stats calculation correct', () => {
-    const logSvc = new AutomationLogService()
-    logSvc.record({ id: 'a1', ruleId: 'r1', triggeredBy: 'event', triggeredAt: '', status: 'success', steps: [], duration: 10 })
-    logSvc.record({ id: 'a2', ruleId: 'r1', triggeredBy: 'event', triggeredAt: '', status: 'success', steps: [], duration: 20 })
-    logSvc.record({ id: 'a3', ruleId: 'r1', triggeredBy: 'event', triggeredAt: '', status: 'failed', steps: [], duration: 5 })
-    const stats = logSvc.getStats('r1')
+  it('5.8 — stats calculation correct', async () => {
+    const logSvc = new InMemoryAutomationLogService()
+    await logSvc.record({ id: 'a1', ruleId: 'r1', triggeredBy: 'event', triggeredAt: '', status: 'success', steps: [], duration: 10 })
+    await logSvc.record({ id: 'a2', ruleId: 'r1', triggeredBy: 'event', triggeredAt: '', status: 'success', steps: [], duration: 20 })
+    await logSvc.record({ id: 'a3', ruleId: 'r1', triggeredBy: 'event', triggeredAt: '', status: 'failed', steps: [], duration: 5 })
+    const stats = await logSvc.getStats('r1')
     expect(stats.total).toBe(3)
     expect(stats.success).toBe(2)
     expect(stats.failed).toBe(1)
@@ -547,7 +860,7 @@ describe('RC Regression — Section 5: Automation', () => {
 
 describe('RC Regression — Section 6: Charts & Dashboard', () => {
   let chartSvc: ChartAggregationService
-  let dashSvc: DashboardService
+  let dashSvc: InMemoryDashboardService
 
   const sampleRecords = makeRecords([
     { status: 'open', amount: 10, category: 'A', date: '2026-01-15' },
@@ -559,7 +872,7 @@ describe('RC Regression — Section 6: Charts & Dashboard', () => {
 
   beforeEach(() => {
     chartSvc = new ChartAggregationService()
-    dashSvc = new DashboardService()
+    dashSvc = new InMemoryDashboardService()
   })
 
   it('6.1 — count aggregation', async () => {
@@ -613,40 +926,40 @@ describe('RC Regression — Section 6: Charts & Dashboard', () => {
     expect(total).toBe(3) // only open records
   })
 
-  it('6.5 — chart CRUD via DashboardService', () => {
-    const chart = dashSvc.createChart('sh1', {
+  it('6.5 — chart CRUD via DashboardService', async () => {
+    const chart = await dashSvc.createChart('sh1', {
       name: 'Test',
       type: 'bar',
       dataSource: { groupByFieldId: 'status', aggregation: { function: 'count' } },
       createdBy: 'u1',
     })
     expect(chart.id).toBeDefined()
-    const fetched = dashSvc.getChart(chart.id)
+    const fetched = await dashSvc.getChart(chart.id)
     expect(fetched?.name).toBe('Test')
-    dashSvc.updateChart(chart.id, { name: 'Updated' })
-    expect(dashSvc.getChart(chart.id)?.name).toBe('Updated')
-    dashSvc.deleteChart(chart.id)
-    expect(dashSvc.getChart(chart.id)).toBeUndefined()
+    await dashSvc.updateChart(chart.id, { name: 'Updated' })
+    expect((await dashSvc.getChart(chart.id))?.name).toBe('Updated')
+    await dashSvc.deleteChart(chart.id)
+    expect(await dashSvc.getChart(chart.id)).toBeUndefined()
   })
 
-  it('6.6 — dashboard CRUD with panels', () => {
-    const dash = dashSvc.createDashboard({
+  it('6.6 — dashboard CRUD with panels', async () => {
+    const dash = await dashSvc.createDashboard({
       name: 'Ops Dashboard',
       sheetId: 'sh1',
       createdBy: 'u1',
     })
     expect(dash.id).toBeDefined()
     // Add panels via updateDashboard
-    dashSvc.updateDashboard(dash.id, {
+    await dashSvc.updateDashboard(dash.id, {
       panels: [
         { id: 'p1', chartId: 'c1', position: { x: 0, y: 0, w: 6, h: 4 } },
         { id: 'p2', chartId: 'c2', position: { x: 6, y: 0, w: 6, h: 4 } },
       ],
     })
-    const fetched = dashSvc.getDashboard(dash.id)
+    const fetched = await dashSvc.getDashboard(dash.id)
     expect(fetched?.panels).toHaveLength(2)
-    dashSvc.deleteDashboard(dash.id)
-    expect(dashSvc.getDashboard(dash.id)).toBeUndefined()
+    await dashSvc.deleteDashboard(dash.id)
+    expect(await dashSvc.getDashboard(dash.id)).toBeUndefined()
   })
 
   it('6.7 — chart data computation pipeline', async () => {
@@ -698,12 +1011,12 @@ describe('RC Regression — Section 7: Cross-feature', () => {
 
   it('7.3 — API token auth → access records → chart aggregation', async () => {
     // End-to-end semantic: create token, validate, use records, aggregate
-    const tokenSvc = new ApiTokenService()
+    const tokenSvc = new InMemoryApiTokenService()
     const chartAggSvc = new ChartAggregationService()
 
-    const { plainTextToken } = tokenSvc.createToken('u1', { name: 'IntTest', scopes: ['records:read'] })
-    const validated = tokenSvc.validateToken(plainTextToken)
-    expect(validated).toBeTruthy()
+    const { plainTextToken } = await tokenSvc.createToken('u1', { name: 'IntTest', scopes: ['records:read'] })
+    const validated = await tokenSvc.validateToken(plainTextToken)
+    expect(validated.valid).toBe(true)
 
     // With valid token, fetch records and aggregate
     const records = makeRecords([
