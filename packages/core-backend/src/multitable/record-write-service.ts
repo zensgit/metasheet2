@@ -1,0 +1,597 @@
+/**
+ * RecordWriteService — shared write-path for multitable record mutations.
+ *
+ * Extracts the 6-step record-patch pipeline from the PATCH route handler
+ * in `univer-meta.ts` so that both REST and the future Yjs CRDT bridge
+ * can share the same transactional write semantics.
+ *
+ * Steps:
+ * 1. DB transaction (SELECT FOR UPDATE → version check → field-type handling → data || patch::jsonb → link mutation → version++)
+ * 2. Computed field recalculation (lookup/rollup via applyLookupRollup)
+ * 3. Related record recomputation (cross-sheet dependent lookup/rollup)
+ * 4. Link/attachment summary rebuild
+ * 5. Realtime broadcast
+ * 6. EventBus emit (webhook/automation trigger)
+ */
+
+import type { EventBus } from '../integration/events/event-bus'
+import { publishMultitableSheetRealtime } from './realtime-publish'
+
+// ---------------------------------------------------------------------------
+// Shared types (mirrors the ones in univer-meta.ts to avoid coupling)
+// ---------------------------------------------------------------------------
+
+export type QueryFn = (sql: string, params?: unknown[]) => Promise<{ rows: unknown[]; rowCount?: number | null }>
+
+export type TransactionHandler<T> = (client: { query: QueryFn }) => Promise<T>
+
+/** Minimal pool interface required by the service. */
+export interface ConnectionPool {
+  query: QueryFn
+  transaction: <T>(handler: TransactionHandler<T>) => Promise<T>
+}
+
+export type UniverMetaField = {
+  id: string
+  name: string
+  type: 'string' | 'number' | 'boolean' | 'date' | 'formula' | 'select' | 'link' | 'lookup' | 'rollup' | 'attachment'
+  options?: Array<{ value: string; color?: string }>
+  order?: number
+  property?: Record<string, unknown>
+}
+
+export type UniverMetaRecord = {
+  id: string
+  version: number
+  data: Record<string, unknown>
+  createdBy?: string | null
+}
+
+export type LinkFieldConfig = {
+  foreignSheetId: string
+  limitSingleRecord: boolean
+}
+
+export type RelationalLinkField = { fieldId: string; cfg: LinkFieldConfig }
+
+export type LinkedRecordSummary = {
+  id: string
+  display: string
+}
+
+export type MultitableAttachment = {
+  id: string
+  filename: string
+  mimeType: string
+  size: number
+  url: string
+  thumbnailUrl: string | null
+  uploadedAt: string | null
+}
+
+// ---------------------------------------------------------------------------
+// Error types (re-exported so callers don't need to import from univer-meta)
+// ---------------------------------------------------------------------------
+
+export class VersionConflictError extends Error {
+  constructor(
+    public recordId: string,
+    public serverVersion: number,
+  ) {
+    super(`Version conflict for ${recordId}`)
+    this.name = 'VersionConflictError'
+  }
+}
+
+export class RecordNotFoundError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'RecordNotFoundError'
+  }
+}
+
+export class RecordValidationError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'RecordValidationError'
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Input / output types
+// ---------------------------------------------------------------------------
+
+export type RecordChange = {
+  recordId?: string
+  fieldId: string
+  value: unknown
+  expectedVersion?: number
+}
+
+export type MultitableCapabilities = {
+  canRead: boolean
+  canCreateRecord: boolean
+  canEditRecord: boolean
+  canDeleteRecord: boolean
+  canManageFields: boolean
+  canManageSheetAccess: boolean
+  canManageViews: boolean
+  canComment: boolean
+  canManageAutomation: boolean
+  canExport: boolean
+}
+
+export type SheetPermissionScope = {
+  hasAssignments: boolean
+  canRead: boolean
+  canWrite: boolean
+  canWriteOwn: boolean
+  canAdmin: boolean
+}
+
+export type AccessInfo = {
+  userId: string
+  permissions: string[]
+  isAdminRole: boolean
+}
+
+export type FieldMutationGuard = {
+  type: UniverMetaField['type']
+  options?: string[]
+  readOnly: boolean
+  hidden: boolean
+  link?: LinkFieldConfig | null
+}
+
+export interface RecordPatchInput {
+  sheetId: string
+  changesByRecord: Map<string, RecordChange[]>
+  actorId: string | null
+  fields: UniverMetaField[]
+  visiblePropertyFields: UniverMetaField[]
+  visiblePropertyFieldIds: Set<string>
+  attachmentFields: UniverMetaField[]
+  fieldById: Map<string, FieldMutationGuard>
+  capabilities: MultitableCapabilities
+  sheetScope?: SheetPermissionScope
+  access: AccessInfo
+}
+
+export interface RecordPatchResult {
+  updated: Array<{ recordId: string; version: number }>
+  records?: Array<{ recordId: string; data: Record<string, unknown> }>
+  linkSummaries?: Record<string, unknown>
+  attachmentSummaries?: Record<string, unknown>
+  relatedRecords?: Array<{ sheetId: string; recordId: string; data: Record<string, unknown> }>
+}
+
+// ---------------------------------------------------------------------------
+// Injectable helpers — these live in univer-meta.ts and depend on `req`
+// ---------------------------------------------------------------------------
+
+/** Helpers injected at construction time so we don't couple to Express `req`. */
+export interface RecordWriteHelpers {
+  normalizeLinkIds: (value: unknown) => string[]
+  normalizeAttachmentIds: (value: unknown) => string[]
+  normalizeJson: (value: unknown) => Record<string, unknown>
+  parseLinkFieldConfig: (property: unknown) => LinkFieldConfig | null
+  buildId: (prefix: string) => string
+  ensureRecordWriteAllowed: (
+    capabilities: MultitableCapabilities,
+    sheetScope: SheetPermissionScope | undefined,
+    access: AccessInfo,
+    createdBy: string | null | undefined,
+    action: 'edit' | 'delete',
+  ) => boolean
+  filterRecordDataByFieldIds: (data: unknown, allowedFieldIds: Set<string>) => Record<string, unknown>
+  extractLookupRollupData: (fields: UniverMetaField[], rowData: Record<string, unknown>) => Record<string, unknown>
+  mergeComputedRecords: (
+    base: Array<{ recordId: string; data: Record<string, unknown> }> | undefined,
+    extra: Array<{ recordId: string; data: Record<string, unknown> }>,
+  ) => Array<{ recordId: string; data: Record<string, unknown> }> | undefined
+  filterRecordFieldSummaryMap: <T>(
+    summaryMap: Record<string, Record<string, T>> | undefined,
+    allowedFieldIds: Set<string>,
+  ) => Record<string, Record<string, T>> | undefined
+  serializeLinkSummaryMap: (
+    linkSummaries: Map<string, Map<string, LinkedRecordSummary[]>>,
+  ) => Record<string, Record<string, LinkedRecordSummary[]>>
+  serializeAttachmentSummaryMap: (
+    attachmentSummaries: Map<string, Map<string, MultitableAttachment[]>>,
+  ) => Record<string, Record<string, MultitableAttachment[]>>
+
+  /** Async helpers that depend on `req` context (permission resolution). */
+  applyLookupRollup: (
+    query: QueryFn,
+    fields: UniverMetaField[],
+    rows: UniverMetaRecord[],
+    relationalLinkFields: RelationalLinkField[],
+    linkValuesByRecord: Map<string, Map<string, string[]>>,
+  ) => Promise<void>
+  computeDependentLookupRollupRecords: (
+    query: QueryFn,
+    updatedRecordIds: string[],
+  ) => Promise<Array<{ sheetId: string; recordId: string; data: Record<string, unknown> }>>
+  loadLinkValuesByRecord: (
+    query: QueryFn,
+    recordIds: string[],
+    relationalLinkFields: RelationalLinkField[],
+  ) => Promise<Map<string, Map<string, string[]>>>
+  buildLinkSummaries: (
+    query: QueryFn,
+    rows: UniverMetaRecord[],
+    relationalLinkFields: RelationalLinkField[],
+    linkValuesByRecord: Map<string, Map<string, string[]>>,
+  ) => Promise<Map<string, Map<string, LinkedRecordSummary[]>>>
+  buildAttachmentSummaries: (
+    query: QueryFn,
+    sheetId: string,
+    rows: UniverMetaRecord[],
+    attachmentFields: UniverMetaField[],
+  ) => Promise<Map<string, Map<string, MultitableAttachment[]>>>
+}
+
+// ---------------------------------------------------------------------------
+// Service
+// ---------------------------------------------------------------------------
+
+export class RecordWriteService {
+  constructor(
+    private pool: ConnectionPool,
+    private eventBus: EventBus,
+    private helpers: RecordWriteHelpers,
+  ) {}
+
+  /**
+   * Complete record-patch pipeline.
+   *
+   * Steps:
+   * 1. DB transaction: SELECT FOR UPDATE → version check → field-type handling
+   *    → `data || patch::jsonb` → link mutation → version++
+   * 2. Computed field recalculation (lookup/rollup)
+   * 3. Related record recomputation (cross-sheet)
+   * 4. Link/attachment summary rebuild for response
+   * 5. Realtime broadcast via `publishMultitableSheetRealtime()`
+   * 6. EventBus emit → webhook/automation trigger
+   */
+  async patchRecords(input: RecordPatchInput): Promise<RecordPatchResult> {
+    const {
+      sheetId,
+      changesByRecord,
+      actorId,
+      fields,
+      visiblePropertyFields,
+      visiblePropertyFieldIds,
+      attachmentFields,
+      fieldById,
+      capabilities,
+      sheetScope,
+      access,
+    } = input
+
+    const h = this.helpers
+
+    // -----------------------------------------------------------------------
+    // Step 1: DB transaction
+    // -----------------------------------------------------------------------
+    const updates = await this.pool.transaction(async ({ query }) => {
+      const updated: Array<{ recordId: string; version: number }> = []
+
+      for (const [recordId, changes] of changesByRecord.entries()) {
+        const expectedVersion = Array.from(
+          new Set(changes.map((c) => c.expectedVersion).filter((v): v is number => typeof v === 'number')),
+        )[0]
+
+        const recordRes = await query(
+          'SELECT id, version, created_by FROM meta_records WHERE sheet_id = $1 AND id = $2 FOR UPDATE',
+          [sheetId, recordId],
+        )
+        if ((recordRes.rows as any[]).length === 0) {
+          throw new RecordNotFoundError(`Record not found: ${recordId}`)
+        }
+        const recordRow: any = (recordRes.rows as any[])[0]
+
+        if (
+          !h.ensureRecordWriteAllowed(
+            capabilities,
+            sheetScope,
+            access,
+            typeof recordRow?.created_by === 'string' ? recordRow.created_by : null,
+            'edit',
+          )
+        ) {
+          throw new RecordValidationError(`Record editing is not allowed for ${recordId}`)
+        }
+
+        const serverVersion = Number(recordRow?.version ?? 1)
+        if (typeof expectedVersion === 'number' && expectedVersion !== serverVersion) {
+          throw new VersionConflictError(recordId, serverVersion)
+        }
+
+        const patch: Record<string, unknown> = {}
+        const linkUpdates = new Map<string, { ids: string[]; cfg: LinkFieldConfig }>()
+        let applied = 0
+
+        for (const change of changes) {
+          const field = fieldById.get(change.fieldId)
+          if (!field) continue
+
+          if (field.type === 'formula') {
+            if (typeof change.value !== 'string') continue
+            if (change.value !== '' && !change.value.startsWith('=')) continue
+          }
+
+          if (field.type === 'link' && field.link) {
+            const ids = h.normalizeLinkIds(change.value)
+            patch[change.fieldId] = ids
+            linkUpdates.set(change.fieldId, { ids, cfg: field.link })
+            applied += 1
+            continue
+          }
+
+          if (field.type === 'attachment') {
+            patch[change.fieldId] = h.normalizeAttachmentIds(change.value)
+            applied += 1
+            continue
+          }
+
+          patch[change.fieldId] = change.value
+          applied += 1
+        }
+
+        if (applied === 0) continue
+
+        // Validate link targets exist
+        for (const { ids, cfg } of linkUpdates.values()) {
+          if (ids.length === 0) continue
+          const exists = await query(
+            'SELECT id FROM meta_records WHERE sheet_id = $1 AND id = ANY($2::text[])',
+            [cfg.foreignSheetId, ids],
+          )
+          const found = new Set((exists as any).rows.map((r: any) => String(r.id)))
+          const missing = ids.filter((id) => !found.has(id))
+          if (missing.length > 0) {
+            throw new RecordValidationError(
+              `Linked record(s) not found in sheet ${cfg.foreignSheetId}: ${missing.join(', ')}`,
+            )
+          }
+        }
+
+        // Apply patch
+        const updateRes = await query(
+          `UPDATE meta_records
+           SET data = data || $1::jsonb, updated_at = now(), version = version + 1
+           WHERE sheet_id = $2 AND id = $3
+           RETURNING version`,
+          [JSON.stringify(patch), sheetId, recordId],
+        )
+        if ((updateRes.rows as any[]).length === 0) {
+          throw new RecordNotFoundError(`Record not found: ${recordId}`)
+        }
+
+        // Sync link table
+        if (linkUpdates.size > 0) {
+          for (const [fieldId, { ids }] of linkUpdates.entries()) {
+            if (ids.length === 0) {
+              try {
+                await query('DELETE FROM meta_links WHERE field_id = $1 AND record_id = $2', [fieldId, recordId])
+              } catch (err) {
+                throw err
+              }
+              continue
+            }
+
+            let existingIds: string[] = []
+            try {
+              const current = await query(
+                'SELECT foreign_record_id FROM meta_links WHERE field_id = $1 AND record_id = $2',
+                [fieldId, recordId],
+              )
+              existingIds = (current as any).rows.map((r: any) => String(r.foreign_record_id))
+            } catch (err) {
+              throw err
+            }
+
+            const existing = new Set(existingIds)
+            const next = new Set(ids)
+            const toDelete = existingIds.filter((id) => !next.has(id))
+            const toInsert = ids.filter((id) => !existing.has(id))
+
+            if (toDelete.length > 0) {
+              try {
+                await query(
+                  'DELETE FROM meta_links WHERE field_id = $1 AND record_id = $2 AND foreign_record_id = ANY($3::text[])',
+                  [fieldId, recordId, toDelete],
+                )
+              } catch (err) {
+                throw err
+              }
+            }
+
+            for (const foreignId of toInsert) {
+              try {
+                await query(
+                  `INSERT INTO meta_links (id, field_id, record_id, foreign_record_id)
+                   VALUES ($1, $2, $3, $4)
+                   ON CONFLICT DO NOTHING`,
+                  [h.buildId('lnk').slice(0, 50), fieldId, recordId, foreignId],
+                )
+              } catch (err) {
+                throw err
+              }
+            }
+          }
+        }
+
+        updated.push({ recordId, version: Number((updateRes.rows[0] as any).version) })
+      }
+
+      return updated
+    })
+
+    // -----------------------------------------------------------------------
+    // Step 2: Computed field recalculation (lookup / rollup)
+    // -----------------------------------------------------------------------
+    let computedRecords: Array<{ recordId: string; data: Record<string, unknown> }> | undefined
+    let updatedRowsForSummaries: UniverMetaRecord[] = []
+    const computedFieldIds = visiblePropertyFields.filter((f) => f.type === 'lookup' || f.type === 'rollup')
+
+    if (updates.length > 0 && (computedFieldIds.length > 0 || attachmentFields.length > 0)) {
+      const recordIds = updates.map((u) => u.recordId)
+      const recordRes = await this.pool.query(
+        'SELECT id, version, data FROM meta_records WHERE sheet_id = $1 AND id = ANY($2::text[])',
+        [sheetId, recordIds],
+      )
+      const rows = (recordRes.rows as any[]).map((row) => ({
+        id: String(row.id),
+        version: Number(row.version ?? 0),
+        data: h.normalizeJson(row.data),
+      })) as UniverMetaRecord[]
+      updatedRowsForSummaries = rows
+
+      const relationalLinkFields = fields
+        .map((f) => (f.type === 'link' ? { fieldId: f.id, cfg: h.parseLinkFieldConfig(f.property) } : null))
+        .filter((v): v is { fieldId: string; cfg: LinkFieldConfig } => !!v && !!v.cfg)
+
+      const linkValuesByRecord = await h.loadLinkValuesByRecord(
+        this.pool.query.bind(this.pool),
+        rows.map((r) => r.id),
+        relationalLinkFields,
+      )
+
+      await h.applyLookupRollup(
+        this.pool.query.bind(this.pool),
+        fields,
+        rows,
+        relationalLinkFields,
+        linkValuesByRecord,
+      )
+
+      for (const row of rows) {
+        row.data = h.filterRecordDataByFieldIds(row.data, visiblePropertyFieldIds)
+      }
+
+      if (computedFieldIds.length > 0) {
+        computedRecords = rows.map((row) => ({
+          recordId: row.id,
+          data: h.extractLookupRollupData(visiblePropertyFields, row.data),
+        }))
+      }
+    }
+
+    // -----------------------------------------------------------------------
+    // Step 3: Related record recomputation (cross-sheet)
+    // -----------------------------------------------------------------------
+    const relatedRecords =
+      updates.length > 0
+        ? await h.computeDependentLookupRollupRecords(
+            this.pool.query.bind(this.pool),
+            updates.map((u) => u.recordId),
+          )
+        : []
+
+    const sameSheetRelated = relatedRecords
+      .filter((record) => record.sheetId === sheetId)
+      .map((record) => ({
+        recordId: record.recordId,
+        data: h.filterRecordDataByFieldIds(record.data, visiblePropertyFieldIds),
+      }))
+    const crossSheetRelated = relatedRecords.filter((record) => record.sheetId !== sheetId)
+    const mergedRecords = h.mergeComputedRecords(computedRecords, sameSheetRelated)
+
+    // -----------------------------------------------------------------------
+    // Step 4: Link / attachment summary rebuild
+    // -----------------------------------------------------------------------
+    const relationalLinkFields = fields
+      .map((field) => (field.type === 'link' ? { fieldId: field.id, cfg: h.parseLinkFieldConfig(field.property) } : null))
+      .filter((value): value is RelationalLinkField => !!value && !!value.cfg)
+
+    const patchLinkSummaries =
+      relationalLinkFields.length > 0 && updates.length > 0
+        ? h.filterRecordFieldSummaryMap(
+            h.serializeLinkSummaryMap(
+              await h.buildLinkSummaries(
+                this.pool.query.bind(this.pool),
+                updates.map((update) => ({ id: update.recordId, version: 0, data: {} })),
+                relationalLinkFields,
+                await h.loadLinkValuesByRecord(
+                  this.pool.query.bind(this.pool),
+                  updates.map((update) => update.recordId),
+                  relationalLinkFields,
+                ),
+              ),
+            ),
+            visiblePropertyFieldIds,
+          )
+        : undefined
+
+    const patchAttachmentSummaries =
+      attachmentFields.length > 0 && updatedRowsForSummaries.length > 0
+        ? h.filterRecordFieldSummaryMap(
+            h.serializeAttachmentSummaryMap(
+              await h.buildAttachmentSummaries(
+                this.pool.query.bind(this.pool),
+                sheetId,
+                updatedRowsForSummaries,
+                attachmentFields,
+              ),
+            ),
+            visiblePropertyFieldIds,
+          )
+        : undefined
+
+    // -----------------------------------------------------------------------
+    // Step 5: Realtime broadcast
+    // -----------------------------------------------------------------------
+    if (updates.length > 0) {
+      publishMultitableSheetRealtime({
+        spreadsheetId: sheetId,
+        actorId,
+        source: 'multitable',
+        kind: 'record-updated',
+        recordIds: updates.map((update) => update.recordId),
+        fieldIds: [
+          ...new Set(
+            Array.from(changesByRecord.values()).flatMap((changes) => changes.map((change) => change.fieldId)),
+          ),
+        ],
+        recordPatches: updates.map((update) => ({
+          recordId: update.recordId,
+          version: update.version,
+          patch: Object.fromEntries(
+            (changesByRecord.get(update.recordId) ?? []).map((change) => [change.fieldId, change.value]),
+          ),
+        })),
+      })
+
+      // -------------------------------------------------------------------
+      // Step 6: EventBus emit
+      // -------------------------------------------------------------------
+      for (const update of updates) {
+        const changes = Object.fromEntries(
+          (changesByRecord.get(update.recordId) ?? []).map((change) => [change.fieldId, change.value]),
+        )
+        this.eventBus.emit('multitable.record.updated', {
+          sheetId,
+          recordId: update.recordId,
+          changes,
+          actorId,
+        })
+      }
+    }
+
+    return {
+      updated: updates,
+      ...(mergedRecords ? { records: mergedRecords } : {}),
+      ...(patchLinkSummaries ? { linkSummaries: patchLinkSummaries } : {}),
+      ...(patchAttachmentSummaries ? { attachmentSummaries: patchAttachmentSummaries } : {}),
+      ...(crossSheetRelated.length > 0 ? { relatedRecords: crossSheetRelated } : {}),
+    }
+  }
+
+  // TODO: Extract createRecord() and deleteRecord() methods in a follow-up.
+  // The CREATE handler (line ~7050-7080 in univer-meta.ts) and DELETE handler
+  // (line ~7130-7160) share a similar eventBus + realtime pattern but have
+  // simpler transaction logic. They should be extracted in a future PR to
+  // complete the shared write seam.
+}
