@@ -102,6 +102,7 @@ export interface Database {
   meta_dashboards: MetaDashboardsTable
   meta_widgets: MetaWidgetsTable
   // Multitable automation & dashboard
+  automation_rules: AutomationRulesTable
   multitable_automation_executions: MultitableAutomationExecutionsTable
   multitable_charts: MultitableChartsTable
   multitable_dashboards: MultitableDashboardsTable
@@ -1194,6 +1195,22 @@ export interface AttendancePayrollCyclesTable {
 // ============================================
 // Multitable Automation & Dashboard Tables
 // ============================================
+
+export interface AutomationRulesTable {
+  id: string
+  sheet_id: string
+  name: string | null
+  trigger_type: string
+  trigger_config: JSONColumnType<Record<string, unknown>>
+  action_type: string
+  action_config: JSONColumnType<Record<string, unknown>>
+  enabled: boolean
+  created_at: CreatedAt
+  updated_at: UpdatedAt
+  created_by: string | null
+  conditions: JSONColumnType<Record<string, unknown> | null>
+  actions: JSONColumnType<Record<string, unknown>[] | null>
+}
 
 export interface MultitableAutomationExecutionsTable {
   id: string

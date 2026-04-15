@@ -33,6 +33,11 @@ function makeChain(): Record<string, unknown> {
   return self
 }
 
+const mockDb: Record<string, unknown> = {}
+for (const m of ['selectFrom', 'insertInto', 'updateTable', 'deleteFrom']) {
+  mockDb[m] = vi.fn(() => makeChain())
+}
+
 vi.mock('../../src/db/db', () => {
   const rootChain: Record<string, unknown> = {}
   for (const m of ['selectFrom', 'insertInto', 'updateTable', 'deleteFrom']) {
@@ -42,6 +47,7 @@ vi.mock('../../src/db/db', () => {
 })
 
 import { AutomationLogService } from '../../src/multitable/automation-log-service'
+import { AutomationService } from '../../src/multitable/automation-service'
 
 // ── Helpers ─────────────────────────────────────────────────────────────
 
@@ -711,5 +717,188 @@ describe('AutomationLogService', () => {
     _executeTakeFirstResults.push({ numDeletedRows: BigInt(5) })
     const count = await logService.cleanup(30)
     expect(count).toBe(5)
+  })
+})
+
+// ═════════════════════════════════════════════════════════════════════════
+// AutomationService — Kysely-backed rule CRUD
+// ═════════════════════════════════════════════════════════════════════════
+
+describe('AutomationService — Rule CRUD', () => {
+  let service: AutomationService
+  let eventBus: EventBus
+  let queryFn: ReturnType<typeof vi.fn>
+
+  // Build a Kysely mock that returns controllable results
+  let dbExecuteResults: unknown[]
+  let dbExecuteTakeFirstResults: unknown[]
+
+  function makeMockDb() {
+    dbExecuteResults = []
+    dbExecuteTakeFirstResults = []
+
+    const chain: Record<string, unknown> = {}
+    const chainFn = (..._args: unknown[]) => chain
+    const methods = [
+      'selectFrom', 'selectAll', 'select', 'where', 'orderBy',
+      'limit', 'offset', 'groupBy', 'insertInto', 'values',
+      'onConflict', 'columns', 'doUpdateSet',
+      'updateTable', 'set', 'deleteFrom', 'returningAll',
+      'leftJoin',
+    ]
+    for (const m of methods) {
+      chain[m] = vi.fn(chainFn)
+    }
+    chain.execute = vi.fn(async () => {
+      return dbExecuteResults.shift() ?? []
+    })
+    chain.executeTakeFirst = vi.fn(async () => {
+      return dbExecuteTakeFirstResults.shift()
+    })
+    return chain
+  }
+
+  beforeEach(() => {
+    eventBus = new EventBus()
+    queryFn = vi.fn(async () => ({ rows: [], rowCount: 0 }))
+    const db = makeMockDb()
+    service = new AutomationService(eventBus, db as never, queryFn)
+  })
+
+  it('createRule inserts a rule and returns it', async () => {
+    dbExecuteResults.push([]) // for insertInto().execute()
+    const rule = await service.createRule('sheet_1', {
+      name: 'My Rule',
+      triggerType: 'record.created',
+      triggerConfig: {},
+      actionType: 'update_record',
+      actionConfig: { fields: { status: 'done' } },
+      createdBy: 'user_1',
+    })
+
+    expect(rule.id).toMatch(/^atr_/)
+    expect(rule.sheet_id).toBe('sheet_1')
+    expect(rule.name).toBe('My Rule')
+    expect(rule.trigger_type).toBe('record.created')
+    expect(rule.enabled).toBe(true)
+  })
+
+  it('getRule returns a rule when found', async () => {
+    const mockRow = {
+      id: 'atr_123',
+      sheet_id: 'sheet_1',
+      name: 'Test',
+      trigger_type: 'record.created',
+      trigger_config: {},
+      action_type: 'update_record',
+      action_config: { fields: { x: 1 } },
+      enabled: true,
+      created_at: new Date('2026-01-01'),
+      updated_at: new Date('2026-01-01'),
+      created_by: 'user_1',
+      conditions: null,
+      actions: null,
+    }
+    dbExecuteTakeFirstResults.push(mockRow)
+    const rule = await service.getRule('atr_123')
+    expect(rule).not.toBeNull()
+    expect(rule!.id).toBe('atr_123')
+    expect(rule!.trigger_type).toBe('record.created')
+  })
+
+  it('getRule returns null when not found', async () => {
+    dbExecuteTakeFirstResults.push(undefined)
+    const rule = await service.getRule('nonexistent')
+    expect(rule).toBeNull()
+  })
+
+  it('listRules returns rules for a sheet', async () => {
+    dbExecuteResults.push([
+      {
+        id: 'atr_1', sheet_id: 'sheet_1', name: 'R1',
+        trigger_type: 'record.created', trigger_config: {},
+        action_type: 'update_record', action_config: {},
+        enabled: true, created_at: new Date(), updated_at: new Date(),
+        created_by: 'u1', conditions: null, actions: null,
+      },
+      {
+        id: 'atr_2', sheet_id: 'sheet_1', name: 'R2',
+        trigger_type: 'record.updated', trigger_config: {},
+        action_type: 'send_notification', action_config: {},
+        enabled: false, created_at: new Date(), updated_at: new Date(),
+        created_by: 'u1', conditions: null, actions: null,
+      },
+    ])
+    const rules = await service.listRules('sheet_1')
+    expect(rules).toHaveLength(2)
+    expect(rules[0].id).toBe('atr_1')
+    expect(rules[1].id).toBe('atr_2')
+  })
+
+  it('updateRule returns updated rule', async () => {
+    const updatedRow = {
+      id: 'atr_1', sheet_id: 'sheet_1', name: 'Updated',
+      trigger_type: 'record.created', trigger_config: {},
+      action_type: 'update_record', action_config: {},
+      enabled: true, created_at: new Date(), updated_at: new Date(),
+      created_by: 'u1', conditions: null, actions: null,
+    }
+    dbExecuteResults.push([updatedRow])
+    const rule = await service.updateRule('atr_1', 'sheet_1', { name: 'Updated' })
+    expect(rule).not.toBeNull()
+    expect(rule!.name).toBe('Updated')
+  })
+
+  it('updateRule returns null when rule not found', async () => {
+    dbExecuteResults.push([]) // empty RETURNING
+    const rule = await service.updateRule('nonexistent', 'sheet_1', { name: 'X' })
+    expect(rule).toBeNull()
+  })
+
+  it('deleteRule returns true when deleted', async () => {
+    dbExecuteResults.push([{ numDeletedRows: BigInt(1) }])
+    const deleted = await service.deleteRule('atr_1', 'sheet_1')
+    expect(deleted).toBe(true)
+  })
+
+  it('deleteRule returns false when not found', async () => {
+    dbExecuteResults.push([{ numDeletedRows: BigInt(0) }])
+    const deleted = await service.deleteRule('nonexistent', 'sheet_1')
+    expect(deleted).toBe(false)
+  })
+
+  it('setRuleEnabled enables a rule', async () => {
+    const updatedRow = {
+      id: 'atr_1', sheet_id: 'sheet_1', name: 'Rule',
+      trigger_type: 'schedule.cron', trigger_config: { expression: '*/5 * * * *' },
+      action_type: 'update_record', action_config: {},
+      enabled: true, created_at: new Date(), updated_at: new Date(),
+      created_by: 'u1', conditions: null, actions: null,
+    }
+    dbExecuteResults.push([updatedRow])
+    const rule = await service.setRuleEnabled('atr_1', true)
+    expect(rule).not.toBeNull()
+    expect(rule!.enabled).toBe(true)
+  })
+
+  it('setRuleEnabled returns null when rule not found', async () => {
+    dbExecuteResults.push([])
+    const rule = await service.setRuleEnabled('nonexistent', false)
+    expect(rule).toBeNull()
+  })
+
+  it('loadEnabledRules returns only enabled rules via Kysely', async () => {
+    dbExecuteResults.push([
+      {
+        id: 'atr_1', sheet_id: 'sheet_1', name: 'Active',
+        trigger_type: 'record.created', trigger_config: {},
+        action_type: 'update_record', action_config: {},
+        enabled: true, created_at: new Date(), updated_at: new Date(),
+        created_by: 'u1', conditions: null, actions: null,
+      },
+    ])
+    const rules = await service.loadEnabledRules('sheet_1')
+    expect(rules).toHaveLength(1)
+    expect(rules[0].enabled).toBe(true)
   })
 })

@@ -4,6 +4,7 @@ import * as path from 'path'
 import { Router } from 'express'
 import { z } from 'zod'
 import { poolManager } from '../integration/db/connection-pool'
+import { db as kyselyDb } from '../db/db'
 import { eventBus } from '../integration/events/event-bus'
 import {
   deriveFieldPermissions,
@@ -7633,14 +7634,14 @@ export function univerMetaRouter(): Router {
       const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canManageAutomation) return sendForbidden(res)
 
-      const result = await pool.query(
-        `SELECT id, sheet_id, name, trigger_type, trigger_config, action_type, action_config, enabled, created_at, updated_at, created_by
-         FROM automation_rules
-         WHERE sheet_id = $1
-         ORDER BY created_at ASC`,
-        [sheetId],
-      )
-      return res.json({ ok: true, data: { rules: result.rows } })
+      const rules = await kyselyDb
+        .selectFrom('automation_rules')
+        .selectAll()
+        .where('sheet_id', '=', sheetId)
+        .orderBy('created_at', 'asc')
+        .execute()
+
+      return res.json({ ok: true, data: { rules } })
     } catch (err) {
       const hint = getDbNotReadyMessage(err)
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
@@ -7664,13 +7665,13 @@ export function univerMetaRouter(): Router {
       const body = req.body as Record<string, unknown> | undefined
       const name = typeof body?.name === 'string' ? body.name : null
       const triggerType = typeof body?.triggerType === 'string' ? body.triggerType : ''
-      const triggerConfig = (body?.triggerConfig && typeof body.triggerConfig === 'object') ? body.triggerConfig : {}
+      const triggerConfig = (body?.triggerConfig && typeof body.triggerConfig === 'object') ? body.triggerConfig as Record<string, unknown> : {}
       const actionType = typeof body?.actionType === 'string' ? body.actionType : ''
-      const actionConfig = (body?.actionConfig && typeof body.actionConfig === 'object') ? body.actionConfig : {}
+      const actionConfig = (body?.actionConfig && typeof body.actionConfig === 'object') ? body.actionConfig as Record<string, unknown> : {}
       const enabled = typeof body?.enabled === 'boolean' ? body.enabled : true
 
-      const validTriggers = new Set(['record.created', 'record.updated', 'field.changed'])
-      const validActions = new Set(['notify', 'update_field'])
+      const validTriggers = new Set(['record.created', 'record.updated', 'record.deleted', 'field.changed', 'field.value_changed', 'schedule.cron', 'schedule.interval', 'webhook.received'])
+      const validActions = new Set(['notify', 'update_field', 'update_record', 'create_record', 'send_webhook', 'send_notification', 'lock_record'])
       if (!validTriggers.has(triggerType)) {
         return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: `Invalid trigger_type: ${triggerType}` } })
       }
@@ -7679,11 +7680,25 @@ export function univerMetaRouter(): Router {
       }
 
       const ruleId = `atr_${randomUUID()}`
-      await pool.query(
-        `INSERT INTO automation_rules (id, sheet_id, name, trigger_type, trigger_config, action_type, action_config, enabled, created_by)
-         VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7::jsonb, $8, $9)`,
-        [ruleId, sheetId, name, triggerType, JSON.stringify(triggerConfig), actionType, JSON.stringify(actionConfig), enabled, access.userId],
-      )
+      const conditions = body?.conditions && typeof body.conditions === 'object' ? body.conditions : null
+      const actions = Array.isArray(body?.actions) ? body.actions : null
+
+      await kyselyDb
+        .insertInto('automation_rules')
+        .values({
+          id: ruleId,
+          sheet_id: sheetId,
+          name,
+          trigger_type: triggerType,
+          trigger_config: JSON.stringify(triggerConfig),
+          action_type: actionType,
+          action_config: JSON.stringify(actionConfig),
+          enabled,
+          created_by: access.userId,
+          conditions: conditions ? JSON.stringify(conditions) : null,
+          actions: actions ? JSON.stringify(actions) : null,
+        } as never)
+        .execute()
 
       return res.json({
         ok: true,
@@ -7711,59 +7726,56 @@ export function univerMetaRouter(): Router {
       if (!capabilities.canManageAutomation) return sendForbidden(res)
 
       const body = req.body as Record<string, unknown> | undefined
-      const sets: string[] = []
-      const params: unknown[] = []
-      let paramIdx = 1
+      const updates: Record<string, unknown> = {}
 
-      if (typeof body?.name === 'string') {
-        sets.push(`name = $${paramIdx++}`)
-        params.push(body.name)
-      }
+      if (typeof body?.name === 'string') updates.name = body.name
       if (typeof body?.triggerType === 'string') {
-        const validTriggers = new Set(['record.created', 'record.updated', 'field.changed'])
+        const validTriggers = new Set(['record.created', 'record.updated', 'record.deleted', 'field.changed', 'field.value_changed', 'schedule.cron', 'schedule.interval', 'webhook.received'])
         if (!validTriggers.has(body.triggerType)) {
           return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: `Invalid trigger_type: ${body.triggerType}` } })
         }
-        sets.push(`trigger_type = $${paramIdx++}`)
-        params.push(body.triggerType)
+        updates.trigger_type = body.triggerType
       }
       if (body?.triggerConfig && typeof body.triggerConfig === 'object') {
-        sets.push(`trigger_config = $${paramIdx++}::jsonb`)
-        params.push(JSON.stringify(body.triggerConfig))
+        updates.trigger_config = JSON.stringify(body.triggerConfig)
       }
       if (typeof body?.actionType === 'string') {
-        const validActions = new Set(['notify', 'update_field'])
+        const validActions = new Set(['notify', 'update_field', 'update_record', 'create_record', 'send_webhook', 'send_notification', 'lock_record'])
         if (!validActions.has(body.actionType)) {
           return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: `Invalid action_type: ${body.actionType}` } })
         }
-        sets.push(`action_type = $${paramIdx++}`)
-        params.push(body.actionType)
+        updates.action_type = body.actionType
       }
       if (body?.actionConfig && typeof body.actionConfig === 'object') {
-        sets.push(`action_config = $${paramIdx++}::jsonb`)
-        params.push(JSON.stringify(body.actionConfig))
+        updates.action_config = JSON.stringify(body.actionConfig)
       }
-      if (typeof body?.enabled === 'boolean') {
-        sets.push(`enabled = $${paramIdx++}`)
-        params.push(body.enabled)
+      if (typeof body?.enabled === 'boolean') updates.enabled = body.enabled
+      if (body?.conditions !== undefined) {
+        updates.conditions = body.conditions ? JSON.stringify(body.conditions) : null
+      }
+      if (body?.actions !== undefined) {
+        updates.actions = Array.isArray(body.actions) ? JSON.stringify(body.actions) : null
       }
 
-      if (sets.length === 0) {
+      if (Object.keys(updates).length === 0) {
         return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'No fields to update' } })
       }
 
-      sets.push(`updated_at = NOW()`)
-      params.push(ruleId, sheetId)
-      const result = await pool.query(
-        `UPDATE automation_rules SET ${sets.join(', ')} WHERE id = $${paramIdx++} AND sheet_id = $${paramIdx++} RETURNING *`,
-        params,
-      )
+      updates.updated_at = new Date().toISOString()
 
-      if ((result.rowCount ?? 0) === 0) {
+      const result = await kyselyDb
+        .updateTable('automation_rules')
+        .set(updates as never)
+        .where('id', '=', ruleId)
+        .where('sheet_id', '=', sheetId)
+        .returningAll()
+        .execute()
+
+      if (result.length === 0) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Automation rule not found' } })
       }
 
-      return res.json({ ok: true, data: { rule: result.rows[0] } })
+      return res.json({ ok: true, data: { rule: result[0] } })
     } catch (err) {
       const hint = getDbNotReadyMessage(err)
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
@@ -7783,12 +7795,13 @@ export function univerMetaRouter(): Router {
       const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canManageAutomation) return sendForbidden(res)
 
-      const result = await pool.query(
-        'DELETE FROM automation_rules WHERE id = $1 AND sheet_id = $2',
-        [ruleId, sheetId],
-      )
+      const result = await kyselyDb
+        .deleteFrom('automation_rules')
+        .where('id', '=', ruleId)
+        .where('sheet_id', '=', sheetId)
+        .execute()
 
-      if ((result.rowCount ?? 0) === 0) {
+      if (result.length === 0 || Number(result[0].numDeletedRows) === 0) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Automation rule not found' } })
       }
 
