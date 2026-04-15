@@ -95,13 +95,6 @@ interface AuthFeaturePayload {
   plm?: unknown
 }
 
-type DingTalkRuntimeUnavailableReason =
-  | 'missing_client_id'
-  | 'missing_client_secret'
-  | 'missing_redirect_uri'
-  | 'corp_not_allowed'
-  | null
-
 interface DingTalkRuntimeStatus {
   configured?: unknown
   available?: unknown
