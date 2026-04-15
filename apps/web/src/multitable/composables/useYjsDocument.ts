@@ -5,6 +5,7 @@ import * as syncProtocol from 'y-protocols/sync'
 import * as encoding from 'lib0/encoding'
 import * as decoding from 'lib0/decoding'
 import { io as socketIO, type Socket } from 'socket.io-client'
+import { useAuth } from '../../composables/useAuth'
 
 const MSG_SYNC = 0
 
@@ -40,19 +41,30 @@ export function useYjsDocument(recordId: Ref<string | null>) {
   const doc = shallowRef<Y.Doc | null>(null)
   const connected = ref(false)
   const synced = ref(false)
+  const error = ref<string | null>(null)
 
+  const auth = useAuth()
   let socket: Socket | null = null
   let currentRecordId: string | null = null
 
-  function connect(rid: string) {
+  async function connect(rid: string) {
     disconnect()
     currentRecordId = rid
+    error.value = null
+
+    // Get userId from auth — matches existing socket pattern in useMultitableSheetPresence
+    const userId = await auth.getCurrentUserId().catch(() => null)
+    if (!userId) {
+      error.value = 'Not authenticated'
+      return
+    }
 
     const yDoc = new Y.Doc()
     doc.value = yDoc
 
     socket = socketIO('/yjs', {
       transports: ['websocket'],
+      query: { userId },
     })
 
     socket.on('connect', () => {
@@ -86,6 +98,10 @@ export function useYjsDocument(recordId: Ref<string | null>) {
           data: Array.from(update),
         })
       }
+    })
+
+    socket.on('yjs:error', ({ code, message: msg }: { recordId: string; code: string; message: string }) => {
+      error.value = `${code}: ${msg}`
     })
 
     socket.on('disconnect', () => {
@@ -123,5 +139,5 @@ export function useYjsDocument(recordId: Ref<string | null>) {
 
   onUnmounted(disconnect)
 
-  return { doc, connected, synced, connect, disconnect }
+  return { doc, connected, synced, error, connect, disconnect }
 }

@@ -1672,18 +1672,42 @@ export class MetaSheetServer {
         const yjsSyncService = new YjsSyncService(yjsPersistence)
         const yjsWsAdapter = new YjsWebSocketAdapter(yjsSyncService)
 
-        // Auth gate: check record exists and user has read/write access
+        // Auth gate: check record exists + user has real read/write permissions
+        const { listUserPermissions: listPerms, isAdmin: checkAdmin } = await import('./rbac/service')
         yjsWsAdapter.setAuthChecker(async (userId, recordId) => {
           try {
             const pool = poolManager.get()
-            const result = await pool.query(
+            // 1. Record must exist, get its sheetId
+            const recResult = await pool.query(
               'SELECT id, sheet_id, created_by FROM meta_records WHERE id = $1',
               [recordId],
             )
-            if (result.rows.length === 0) return null
-            // POC: basic access — record exists → canRead=true, canWrite=true
-            // Full field-level permissions deferred to post-POC
-            return { canRead: true, canWrite: true }
+            if (recResult.rows.length === 0) return null
+            const sheetId = String((recResult.rows[0] as any).sheet_id)
+
+            // 2. Resolve user permissions (same source as REST path)
+            const admin = await checkAdmin(userId)
+            if (admin) return { canRead: true, canWrite: true }
+
+            const perms = await listPerms(userId)
+            const hasRead = perms.includes('multitable:read') || perms.includes('multitable:write') || perms.includes('multitable:*') || perms.includes('*:*')
+            const hasWrite = perms.includes('multitable:write') || perms.includes('multitable:*') || perms.includes('*:*')
+
+            if (!hasRead) return { canRead: false, canWrite: false }
+
+            // 3. Check sheet-level permission scope (if any assignments exist)
+            const scopeResult = await pool.query(
+              `SELECT permission FROM spreadsheet_permissions WHERE sheet_id = $1 AND subject_id = $2 LIMIT 1`,
+              [sheetId, userId],
+            )
+            if (scopeResult.rows.length > 0) {
+              const perm = String((scopeResult.rows[0] as any).permission)
+              const canWrite = perm === 'write' || perm === 'admin' || perm === 'owner'
+              return { canRead: true, canWrite }
+            }
+
+            // No sheet-level scope → fall back to global permission
+            return { canRead: hasRead, canWrite: hasWrite }
           } catch {
             return null
           }
@@ -1697,7 +1721,7 @@ export class MetaSheetServer {
           normalizeJson: (v) => (v && typeof v === 'object' && !Array.isArray(v) ? v as Record<string, unknown> : {}),
           parseLinkFieldConfig: () => null,
           buildId: (prefix) => `${prefix}_${Math.random().toString(36).slice(2, 10)}`,
-          ensureRecordWriteAllowed: () => true,
+          ensureRecordWriteAllowed: (caps) => caps.canEditRecord,
           filterRecordDataByFieldIds: (data, ids) => {
             if (!data || typeof data !== 'object') return {}
             return Object.fromEntries(Object.entries(data as Record<string, unknown>).filter(([k]) => ids.has(k)))
@@ -1732,27 +1756,53 @@ export class MetaSheetServer {
                 'SELECT id, name, type, property FROM meta_fields WHERE sheet_id = $1',
                 [sheetId],
               )
-              const fields = (fieldResult.rows as any[]).map((f: any) => ({
-                id: String(f.id), name: String(f.name), type: f.type, property: f.property,
-              }))
+              const fields = (fieldResult.rows as any[]).map((f: any) => {
+                const prop = f.property && typeof f.property === 'object' ? f.property : {}
+                return { id: String(f.id), name: String(f.name), type: f.type, property: prop, options: prop.options }
+              })
+
+              // Build real field mutation guards from DB (same logic as buildFieldMutationGuardMap)
+              const readOnlyTypes = new Set(['lookup', 'rollup'])
               const fieldById = new Map(
-                fields.map((f: any) => [f.id, { type: f.type, readOnly: false, hidden: false }]),
+                fields.map((f: any) => {
+                  const prop = f.property || {}
+                  const isReadOnly = readOnlyTypes.has(f.type) || prop.readOnly === true
+                  const isHidden = prop.hidden === true || prop.permissionHidden === true
+                  const guard: any = { type: f.type, readOnly: isReadOnly, hidden: isHidden }
+                  if (f.type === 'select' && Array.isArray(prop.options)) {
+                    guard.options = prop.options.map((o: any) => typeof o === 'string' ? o : o?.value ?? '')
+                  }
+                  if (f.type === 'link' && prop.foreignSheetId) {
+                    guard.link = { foreignSheetId: prop.foreignSheetId, limitSingleRecord: !!prop.limitSingleRecord }
+                  }
+                  return [f.id, guard] as const
+                }),
               )
+
+              const visibleFields = fields.filter((f: any) => {
+                const g = fieldById.get(f.id)
+                return g && !g.hidden
+              })
+
               const changesByRecord = new Map([
                 [recordId, Object.entries(patch).map(([fieldId, value]) => ({ fieldId, value }))],
               ])
+
+              // Resolve real user permissions for the bridge write
+              const bridgeAdmin = await checkAdmin('yjs-bridge')
+              const bridgePerms = await listPerms('yjs-bridge').catch(() => [] as string[])
 
               return {
                 sheetId,
                 changesByRecord,
                 actorId: 'yjs-bridge',
                 fields: fields as any,
-                visiblePropertyFields: fields as any,
-                visiblePropertyFieldIds: new Set(fields.map((f: any) => f.id)),
-                attachmentFields: [],
+                visiblePropertyFields: visibleFields as any,
+                visiblePropertyFieldIds: new Set(visibleFields.map((f: any) => f.id)),
+                attachmentFields: visibleFields.filter((f: any) => f.type === 'attachment') as any,
                 fieldById: fieldById as any,
-                capabilities: { canRead: true, canCreateRecord: true, canEditRecord: true, canDeleteRecord: false, canManageFields: false, canManageSheetAccess: false, canManageViews: false, canComment: false, canManageAutomation: false, canExport: false },
-                access: { userId: 'yjs-bridge', permissions: [], isAdminRole: false },
+                capabilities: { canRead: true, canCreateRecord: false, canEditRecord: true, canDeleteRecord: false, canManageFields: false, canManageSheetAccess: false, canManageViews: false, canComment: false, canManageAutomation: false, canExport: false },
+                access: { userId: 'yjs-bridge', permissions: bridgePerms, isAdminRole: bridgeAdmin },
               }
             } catch (err) {
               console.error(`[yjs-bridge] Failed to build write input for ${recordId}:`, err)
