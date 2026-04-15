@@ -361,6 +361,11 @@ describe('admin-users routes', () => {
           updated_at: '2026-03-13T00:00:00.000Z',
         }],
       })
+      .mockResolvedValueOnce({
+        rows: [{
+          linked_count: 2,
+        }],
+      })
 
     const response = await invokeRoute('get', '/api/admin/users/:userId/dingtalk-access', {
       params: { userId: 'user-1' },
@@ -380,6 +385,10 @@ describe('admin-users routes', () => {
         autoLinkEmail: false,
         autoProvision: false,
         unavailableReason: null,
+      },
+      directory: {
+        linked: true,
+        linkedCount: 2,
       },
       grant: { exists: true, enabled: true },
       identity: { exists: true, corpId: 'ding-corp' },
@@ -700,6 +709,81 @@ describe('admin-users routes', () => {
       action: 'grant',
       resourceType: 'user-namespace-admission',
       resourceId: 'user-1:crm',
+    }))
+  })
+
+  it('updates namespace admission in bulk and records an audit entry per user', async () => {
+    rbacMocks.isAdmin.mockResolvedValue(true)
+    namespaceAdmissionMocks.setUserNamespaceAdmission.mockResolvedValue([
+      {
+        namespace: 'crm',
+        enabled: false,
+        effective: false,
+        hasRole: true,
+        source: 'platform_admin',
+        grantedBy: null,
+        updatedBy: 'admin-1',
+        createdAt: '2026-03-12T00:00:00.000Z',
+        updatedAt: '2026-03-12T00:05:00.000Z',
+      },
+    ])
+    pgMocks.query.mockResolvedValueOnce({
+      rows: [
+        { id: 'user-1' },
+        { id: 'user-2' },
+      ],
+    })
+
+    const response = await invokeRoute('post', '/api/admin/users/namespaces/:namespace/admission/bulk', {
+      params: { namespace: 'crm' },
+      body: {
+        userIds: ['user-1', 'user-2', 'user-1'],
+        enabled: false,
+      },
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect((response.body as Record<string, any>).data).toMatchObject({
+      namespace: 'crm',
+      enabled: false,
+      updatedCount: 2,
+      userIds: ['user-1', 'user-2'],
+    })
+    expect(namespaceAdmissionMocks.setUserNamespaceAdmission).toHaveBeenCalledTimes(2)
+    expect(namespaceAdmissionMocks.setUserNamespaceAdmission).toHaveBeenNthCalledWith(1, expect.objectContaining({
+      userId: 'user-1',
+      namespace: 'crm',
+      enabled: false,
+      actorId: 'admin-1',
+      source: 'platform_admin',
+    }))
+    expect(namespaceAdmissionMocks.setUserNamespaceAdmission).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      userId: 'user-2',
+      namespace: 'crm',
+      enabled: false,
+      actorId: 'admin-1',
+      source: 'platform_admin',
+    }))
+    expect(rbacMocks.invalidateUserPerms).toHaveBeenCalledWith('user-1')
+    expect(rbacMocks.invalidateUserPerms).toHaveBeenCalledWith('user-2')
+    expect(auditMocks.auditLog).toHaveBeenCalledTimes(2)
+    expect(auditMocks.auditLog).toHaveBeenNthCalledWith(1, expect.objectContaining({
+      action: 'revoke',
+      resourceType: 'user-namespace-admission',
+      resourceId: 'user-1:crm',
+      meta: expect.objectContaining({
+        mode: 'bulk',
+        selectionSize: 2,
+      }),
+    }))
+    expect(auditMocks.auditLog).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      action: 'revoke',
+      resourceType: 'user-namespace-admission',
+      resourceId: 'user-2:crm',
+      meta: expect.objectContaining({
+        mode: 'bulk',
+        selectionSize: 2,
+      }),
     }))
   })
 
@@ -1628,6 +1712,7 @@ describe('admin-users routes', () => {
         }],
       })
       .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
 
     const response = await invokeRoute('patch', '/api/admin/users/:userId/dingtalk-grant', {
       params: { userId: 'user-1' },
@@ -1643,6 +1728,55 @@ describe('admin-users routes', () => {
       action: 'grant',
       resourceType: 'user-auth-grant',
       resourceId: 'user-1:dingtalk',
+    }))
+  })
+
+  it('updates dingtalk grants in bulk and records an audit entry per user', async () => {
+    rbacMocks.isAdmin.mockResolvedValue(true)
+    pgMocks.query
+      .mockResolvedValueOnce({
+        rows: [
+          { id: 'user-1' },
+          { id: 'user-2' },
+        ],
+      })
+      .mockResolvedValueOnce({ rows: [] })
+
+    const response = await invokeRoute('post', '/api/admin/users/dingtalk-grants/bulk', {
+      body: {
+        userIds: ['user-1', 'user-2', 'user-1'],
+        enabled: false,
+      },
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect((response.body as Record<string, any>).data).toMatchObject({
+      enabled: false,
+      updatedCount: 2,
+      userIds: ['user-1', 'user-2'],
+    })
+    expect(String(pgMocks.query.mock.calls[1]?.[0] || '')).toContain('INSERT INTO user_external_auth_grants')
+    expect(pgMocks.query.mock.calls[1]?.[1]).toEqual(['dingtalk', false, 'admin-1', ['user-1', 'user-2']])
+    expect(auditMocks.auditLog).toHaveBeenCalledTimes(2)
+    expect(auditMocks.auditLog).toHaveBeenNthCalledWith(1, expect.objectContaining({
+      action: 'revoke',
+      resourceType: 'user-auth-grant',
+      resourceId: 'user-1:dingtalk',
+      meta: expect.objectContaining({
+        enabled: false,
+        mode: 'bulk',
+        selectionSize: 2,
+      }),
+    }))
+    expect(auditMocks.auditLog).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      action: 'revoke',
+      resourceType: 'user-auth-grant',
+      resourceId: 'user-2:dingtalk',
+      meta: expect.objectContaining({
+        enabled: false,
+        mode: 'bulk',
+        selectionSize: 2,
+      }),
     }))
   })
 

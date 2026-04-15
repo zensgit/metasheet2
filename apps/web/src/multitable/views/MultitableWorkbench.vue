@@ -49,6 +49,7 @@
       <button v-if="caps.canManageViews.value && canConfigureCurrentView" class="mt-workbench__mgr-btn" @click="showViewManager = true">&#x2630; Views</button>
       <button v-if="caps.canManageAutomation.value" class="mt-workbench__mgr-btn" @click="openWorkflowDesigner()">&#x2699; Workflow</button>
       <button v-if="caps.canManageAutomation.value" class="mt-workbench__mgr-btn" @click="showAutomationManager = true">&#x26A1; Automations</button>
+      <button class="mt-workbench__mgr-btn" :class="{ 'mt-workbench__mgr-btn--active': showDashboardView }" @click="showDashboardView = !showDashboardView" data-action="toggle-dashboard">&#x1F4CA; Dashboard</button>
       <button v-if="activeViewType === 'form'" class="mt-workbench__mgr-btn" @click="showFormShareManager = true">&#x1F517; Share Form</button>
       <button class="mt-workbench__mgr-btn" @click="showApiTokenManager = true">&#x1F511; API &amp; Webhooks</button>
     </div>
@@ -87,8 +88,13 @@
     />
     <div class="mt-workbench__content">
       <div class="mt-workbench__main">
+        <MetaDashboardView
+          v-if="showDashboardView"
+          :sheet-id="workbench.activeSheetId.value"
+          :client="workbench.client"
+        />
         <MetaFormView
-          v-if="activeViewType === 'form'"
+          v-else-if="activeViewType === 'form'"
           :fields="scopedAllFields" :hidden-field-ids="workbench.activeView.value?.hiddenFieldIds"
           :record="selectedRecordResolved" :loading="grid.loading.value"
           :read-only="formReadOnly"
@@ -358,6 +364,7 @@ import MetaTimelineView from '../components/MetaTimelineView.vue'
 import MetaToast from '../components/MetaToast.vue'
 import MetaImportModal from '../components/MetaImportModal.vue'
 import MetaMentionPopover from '../components/MetaMentionPopover.vue'
+import MetaDashboardView from '../components/MetaDashboardView.vue'
 import type { MetaBase } from '../types'
 import { bulkImportRecords } from '../import/bulk-import'
 import { extractImportTokens, type ImportBuildFailure, type ImportBuildResult, type ImportValueResolver } from '../import/delimited'
@@ -404,6 +411,7 @@ const linkPickerCurrentValue = ref<unknown>(null)
 const showFieldManager = ref(false)
 const showPermissionManager = ref(false)
 const showAutomationManager = ref(false)
+const showDashboardView = ref(false)
 const showFormShareManager = ref(false)
 const showApiTokenManager = ref(false)
 const fieldPermissionEntries = ref<MetaFieldPermissionEntry[]>([])

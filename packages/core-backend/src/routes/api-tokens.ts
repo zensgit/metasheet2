@@ -8,8 +8,9 @@ import { Router } from 'express'
 import { z } from 'zod'
 import { Logger } from '../core/logger'
 import { authenticate } from '../middleware/auth'
-import { apiTokenService } from '../multitable/api-token-service'
-import { webhookService } from '../multitable/webhook-service'
+import { ApiTokenService } from '../multitable/api-token-service'
+import { WebhookService } from '../multitable/webhook-service'
+import { db } from '../db/db'
 import { ALL_API_TOKEN_SCOPES } from '../multitable/api-tokens'
 import { ALL_WEBHOOK_EVENT_TYPES } from '../multitable/webhooks'
 
@@ -60,6 +61,9 @@ function zodError(res: Response, err: z.ZodError): void {
 
 // ─── Router factory ────────────────────────────────────────────────────
 
+const apiTokenService = new ApiTokenService(db)
+const webhookService = new WebhookService(db)
+
 export function apiTokensRouter(): Router {
   const router = Router()
 
@@ -72,18 +76,18 @@ export function apiTokensRouter(): Router {
   // ── Token routes ──────────────────────────────────────────────────
 
   // GET /api/multitable/api-tokens — list user's tokens
-  router.get('/api/multitable/api-tokens', (req: Request, res: Response) => {
+  router.get('/api/multitable/api-tokens', async (req: Request, res: Response) => {
     const userId = getUserId(req)
     if (!userId) {
       res.status(401).json({ ok: false, error: { code: 'UNAUTHENTICATED' } })
       return
     }
-    const tokens = apiTokenService.listTokens(userId)
+    const tokens = await apiTokenService.listTokens(userId)
     res.json({ ok: true, data: tokens })
   })
 
   // POST /api/multitable/api-tokens — create token
-  router.post('/api/multitable/api-tokens', (req: Request, res: Response) => {
+  router.post('/api/multitable/api-tokens', async (req: Request, res: Response) => {
     const userId = getUserId(req)
     if (!userId) {
       res.status(401).json({ ok: false, error: { code: 'UNAUTHENTICATED' } })
@@ -91,7 +95,7 @@ export function apiTokensRouter(): Router {
     }
     try {
       const input = CreateTokenSchema.parse(req.body)
-      const result = apiTokenService.createToken(userId, {
+      const result = await apiTokenService.createToken(userId, {
         name: input.name,
         scopes: input.scopes as import('../multitable/api-tokens').ApiTokenScope[],
         expiresAt: input.expiresAt,
@@ -111,14 +115,14 @@ export function apiTokensRouter(): Router {
   })
 
   // DELETE /api/multitable/api-tokens/:id — revoke token
-  router.delete('/api/multitable/api-tokens/:id', (req: Request, res: Response) => {
+  router.delete('/api/multitable/api-tokens/:id', async (req: Request, res: Response) => {
     const userId = getUserId(req)
     if (!userId) {
       res.status(401).json({ ok: false, error: { code: 'UNAUTHENTICATED' } })
       return
     }
     try {
-      apiTokenService.revokeToken(req.params.id, userId)
+      await apiTokenService.revokeToken(req.params.id, userId)
       res.json({ ok: true })
     } catch (err) {
       logger.error('Failed to revoke token', err instanceof Error ? err : undefined)
@@ -131,14 +135,14 @@ export function apiTokensRouter(): Router {
   })
 
   // POST /api/multitable/api-tokens/:id/rotate — rotate token
-  router.post('/api/multitable/api-tokens/:id/rotate', (req: Request, res: Response) => {
+  router.post('/api/multitable/api-tokens/:id/rotate', async (req: Request, res: Response) => {
     const userId = getUserId(req)
     if (!userId) {
       res.status(401).json({ ok: false, error: { code: 'UNAUTHENTICATED' } })
       return
     }
     try {
-      const result = apiTokenService.rotateToken(req.params.id, userId)
+      const result = await apiTokenService.rotateToken(req.params.id, userId)
       res.json({ ok: true, data: result })
     } catch (err) {
       logger.error('Failed to rotate token', err instanceof Error ? err : undefined)
@@ -153,18 +157,18 @@ export function apiTokensRouter(): Router {
   // ── Webhook routes ────────────────────────────────────────────────
 
   // GET /api/multitable/webhooks — list webhooks
-  router.get('/api/multitable/webhooks', (req: Request, res: Response) => {
+  router.get('/api/multitable/webhooks', async (req: Request, res: Response) => {
     const userId = getUserId(req)
     if (!userId) {
       res.status(401).json({ ok: false, error: { code: 'UNAUTHENTICATED' } })
       return
     }
-    const webhooks = webhookService.listWebhooks(userId)
+    const webhooks = await webhookService.listWebhooks(userId)
     res.json({ ok: true, data: webhooks })
   })
 
   // POST /api/multitable/webhooks — create webhook
-  router.post('/api/multitable/webhooks', (req: Request, res: Response) => {
+  router.post('/api/multitable/webhooks', async (req: Request, res: Response) => {
     const userId = getUserId(req)
     if (!userId) {
       res.status(401).json({ ok: false, error: { code: 'UNAUTHENTICATED' } })
@@ -172,7 +176,7 @@ export function apiTokensRouter(): Router {
     }
     try {
       const input = CreateWebhookSchema.parse(req.body)
-      const webhook = webhookService.createWebhook(userId, {
+      const webhook = await webhookService.createWebhook(userId, {
         name: input.name,
         url: input.url,
         secret: input.secret,
@@ -193,7 +197,7 @@ export function apiTokensRouter(): Router {
   })
 
   // PATCH /api/multitable/webhooks/:id — update webhook
-  router.patch('/api/multitable/webhooks/:id', (req: Request, res: Response) => {
+  router.patch('/api/multitable/webhooks/:id', async (req: Request, res: Response) => {
     const userId = getUserId(req)
     if (!userId) {
       res.status(401).json({ ok: false, error: { code: 'UNAUTHENTICATED' } })
@@ -201,7 +205,7 @@ export function apiTokensRouter(): Router {
     }
     try {
       const input = UpdateWebhookSchema.parse(req.body)
-      const webhook = webhookService.updateWebhook(req.params.id, userId, {
+      const webhook = await webhookService.updateWebhook(req.params.id, userId, {
         name: input.name,
         url: input.url,
         secret: input.secret,
@@ -224,14 +228,14 @@ export function apiTokensRouter(): Router {
   })
 
   // DELETE /api/multitable/webhooks/:id — delete webhook
-  router.delete('/api/multitable/webhooks/:id', (req: Request, res: Response) => {
+  router.delete('/api/multitable/webhooks/:id', async (req: Request, res: Response) => {
     const userId = getUserId(req)
     if (!userId) {
       res.status(401).json({ ok: false, error: { code: 'UNAUTHENTICATED' } })
       return
     }
     try {
-      webhookService.deleteWebhook(req.params.id, userId)
+      await webhookService.deleteWebhook(req.params.id, userId)
       res.json({ ok: true })
     } catch (err) {
       logger.error('Failed to delete webhook', err instanceof Error ? err : undefined)
@@ -244,13 +248,13 @@ export function apiTokensRouter(): Router {
   })
 
   // GET /api/multitable/webhooks/:id/deliveries — list recent deliveries
-  router.get('/api/multitable/webhooks/:id/deliveries', (req: Request, res: Response) => {
+  router.get('/api/multitable/webhooks/:id/deliveries', async (req: Request, res: Response) => {
     const userId = getUserId(req)
     if (!userId) {
       res.status(401).json({ ok: false, error: { code: 'UNAUTHENTICATED' } })
       return
     }
-    const wh = webhookService.getWebhookById(req.params.id)
+    const wh = await webhookService.getWebhookById(req.params.id)
     if (!wh) {
       res.status(404).json({ ok: false, error: { code: 'NOT_FOUND' } })
       return
@@ -260,7 +264,7 @@ export function apiTokensRouter(): Router {
       return
     }
     const limit = Math.min(Math.max(Number(req.query.limit) || 50, 1), 200)
-    const deliveries = webhookService.listDeliveries(req.params.id, limit)
+    const deliveries = await webhookService.listDeliveries(req.params.id, limit)
     res.json({ ok: true, data: deliveries })
   })
 
