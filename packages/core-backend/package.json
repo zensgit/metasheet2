@@ -44,6 +44,7 @@
     "joi": "^18.0.2",
     "jsonwebtoken": "^9.0.2",
     "kysely": "^0.28.8",
+    "lib0": "^0.2.117",
     "lodash": "^4.17.21",
     "multer": "^2.1.1",
     "node-cron": "^4.2.1",
@@ -55,6 +56,8 @@
     "socket.io": "^4.6.1",
     "winston": "^3.17.0",
     "xml2js": "^0.6.2",
+    "y-protocols": "^1.0.7",
+    "yjs": "^13.6.30",
     "zod": "^3.22.4"
   },
   "devDependencies": {

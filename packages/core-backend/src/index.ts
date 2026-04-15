@@ -1658,6 +1658,26 @@ export class MetaSheetServer {
       this.logger.error('Failed to initialize WebSocket service', e as Error)
     }
 
+    // Initialize Yjs collaborative editing service
+    try {
+      const { YjsPersistenceAdapter } = await import('./collab/yjs-persistence-adapter')
+      const { YjsSyncService } = await import('./collab/yjs-sync-service')
+      const { YjsWebSocketAdapter } = await import('./collab/yjs-websocket-adapter')
+      const { db: kyselyDbYjs } = await import('./db/db')
+      const collabIO = this.injector.get(ICollabService).getIO()
+      if (collabIO) {
+        const yjsPersistence = new YjsPersistenceAdapter(kyselyDbYjs)
+        const yjsSyncService = new YjsSyncService(yjsPersistence)
+        const yjsWsAdapter = new YjsWebSocketAdapter(yjsSyncService)
+        yjsWsAdapter.register(collabIO)
+        this.logger.info('Yjs collaborative editing service initialized on /yjs namespace')
+      } else {
+        this.logger.warn('Yjs: CollabService IO not available, skipping')
+      }
+    } catch (e) {
+      this.logger.error('Failed to initialize Yjs service', e as Error)
+    }
+
     // Initialize Metrics Stream Service (real-time metrics over WebSocket)
     try {
       this.metricsStreamService = new MetricsStreamService()
