@@ -4,13 +4,21 @@ import * as encoding from 'lib0/encoding'
 import * as decoding from 'lib0/decoding'
 import type { Server as SocketServer } from 'socket.io'
 import type { YjsSyncService } from './yjs-sync-service'
+import type { YjsRecordBridge } from './yjs-record-bridge'
 
 // Message types
 const MSG_SYNC = 0
 // const MSG_AWARENESS = 1  // Not used in POC
 
 export class YjsWebSocketAdapter {
+  private bridge: YjsRecordBridge | null = null
+
   constructor(private syncService: YjsSyncService) {}
+
+  /** Attach bridge for Y.Text → RecordWriteService patching. */
+  setBridge(bridge: YjsRecordBridge): void {
+    this.bridge = bridge
+  }
 
   register(io: SocketServer): void {
     const nsp = io.of('/yjs')
@@ -22,6 +30,11 @@ export class YjsWebSocketAdapter {
         const doc = await this.syncService.getOrCreateDoc(recordId)
         const room = `yjs:${recordId}`
         socket.join(room)
+
+        // Start bridge observation if bridge is attached
+        if (this.bridge) {
+          this.bridge.observe(recordId, doc)
+        }
 
         // Send sync step 1: our state vector so the client can send us what we're missing
         const encoder = encoding.createEncoder()

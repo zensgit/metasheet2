@@ -372,3 +372,134 @@ describe('Yjs sync protocol', () => {
     clientDoc.destroy()
   })
 })
+
+// ---------------------------------------------------------------------------
+// YjsRecordBridge
+// ---------------------------------------------------------------------------
+
+describe('YjsRecordBridge', () => {
+  it('flushes Y.Text changes as a patch via RecordWriteService', async () => {
+    const { YjsRecordBridge } = await import('../../src/collab/yjs-record-bridge')
+
+    const doc = new Y.Doc()
+    const fields = doc.getMap('fields')
+    const textField = new Y.Text()
+    fields.set('fld_name', textField)
+
+    let capturedInput: any = null
+    const mockPatchRecords = vi.fn().mockImplementation(async (input: any) => {
+      capturedInput = input
+      return { updated: [{ recordId: 'rec1', version: 2 }] }
+    })
+
+    const mockRecordWriteService = { patchRecords: mockPatchRecords } as any
+    const mockSyncService = {} as any
+    const mockGetWriteInput = vi.fn().mockImplementation(async (recordId: string, patch: Record<string, unknown>) => ({
+      sheetId: 'sheet1',
+      changesByRecord: new Map([[recordId, Object.entries(patch).map(([fieldId, value]) => ({ fieldId, value }))]]),
+      actorId: 'yjs-bridge',
+      fields: [],
+      visiblePropertyFields: [],
+      visiblePropertyFieldIds: new Set<string>(),
+      attachmentFields: [],
+      fieldById: new Map([['fld_name', { type: 'string', readOnly: false, hidden: false }]]),
+      capabilities: { canEditRecord: true } as any,
+      access: { userId: 'yjs-bridge', permissions: [], isAdminRole: false },
+    }))
+
+    const bridge = new YjsRecordBridge(mockSyncService, mockRecordWriteService, mockGetWriteInput, {
+      mergeWindowMs: 10,
+      maxDelayMs: 50,
+    })
+
+    bridge.observe('rec1', doc)
+
+    // Simulate a Yjs client editing the text field
+    textField.insert(0, 'hello')
+
+    // Wait for debounce flush
+    await new Promise((r) => setTimeout(r, 50))
+
+    expect(mockGetWriteInput).toHaveBeenCalledWith('rec1', { fld_name: 'hello' })
+    expect(mockPatchRecords).toHaveBeenCalledTimes(1)
+
+    bridge.destroy()
+    doc.destroy()
+  })
+
+  it('merges rapid consecutive edits into single patch', async () => {
+    const { YjsRecordBridge } = await import('../../src/collab/yjs-record-bridge')
+
+    const doc = new Y.Doc()
+    const fields = doc.getMap('fields')
+    const textField = new Y.Text()
+    fields.set('fld_name', textField)
+
+    const mockPatchRecords = vi.fn().mockResolvedValue({ updated: [] })
+    const mockGetWriteInput = vi.fn().mockImplementation(async (recordId: string, patch: Record<string, unknown>) => ({
+      sheetId: 'sheet1',
+      changesByRecord: new Map([[recordId, Object.entries(patch).map(([fieldId, value]) => ({ fieldId, value }))]]),
+      actorId: 'yjs-bridge',
+      fields: [],
+      visiblePropertyFields: [],
+      visiblePropertyFieldIds: new Set<string>(),
+      attachmentFields: [],
+      fieldById: new Map([['fld_name', { type: 'string', readOnly: false, hidden: false }]]),
+      capabilities: { canEditRecord: true } as any,
+      access: { userId: 'yjs-bridge', permissions: [], isAdminRole: false },
+    }))
+
+    const bridge = new YjsRecordBridge({} as any, { patchRecords: mockPatchRecords } as any, mockGetWriteInput, {
+      mergeWindowMs: 30,
+      maxDelayMs: 200,
+    })
+
+    bridge.observe('rec1', doc)
+
+    // Rapid edits
+    textField.insert(0, 'a')
+    textField.insert(1, 'b')
+    textField.insert(2, 'c')
+
+    // Wait for single merged flush
+    await new Promise((r) => setTimeout(r, 80))
+
+    expect(mockPatchRecords).toHaveBeenCalledTimes(1)
+    expect(mockGetWriteInput).toHaveBeenCalledWith('rec1', { fld_name: 'abc' })
+
+    bridge.destroy()
+    doc.destroy()
+  })
+
+  it('skips changes with rest origin to avoid loops', async () => {
+    const { YjsRecordBridge } = await import('../../src/collab/yjs-record-bridge')
+
+    const doc = new Y.Doc()
+    const fields = doc.getMap('fields')
+    const textField = new Y.Text()
+    fields.set('fld_name', textField)
+
+    const mockPatchRecords = vi.fn().mockResolvedValue({ updated: [] })
+    const mockGetWriteInput = vi.fn().mockResolvedValue(null)
+
+    const bridge = new YjsRecordBridge({} as any, { patchRecords: mockPatchRecords } as any, mockGetWriteInput, {
+      mergeWindowMs: 10,
+      maxDelayMs: 50,
+    })
+
+    bridge.observe('rec1', doc)
+
+    // Edit with 'rest' origin — should be skipped
+    doc.transact(() => {
+      textField.insert(0, 'from-rest')
+    }, 'rest')
+
+    await new Promise((r) => setTimeout(r, 50))
+
+    expect(mockGetWriteInput).not.toHaveBeenCalled()
+    expect(mockPatchRecords).not.toHaveBeenCalled()
+
+    bridge.destroy()
+    doc.destroy()
+  })
+})
