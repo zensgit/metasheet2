@@ -2,7 +2,7 @@ import * as Y from 'yjs'
 import * as syncProtocol from 'y-protocols/sync'
 import * as encoding from 'lib0/encoding'
 import * as decoding from 'lib0/decoding'
-import type { Server as SocketServer } from 'socket.io'
+import type { Server as SocketServer, Socket } from 'socket.io'
 import type { YjsSyncService } from './yjs-sync-service'
 import type { YjsRecordBridge } from './yjs-record-bridge'
 
@@ -10,8 +10,21 @@ import type { YjsRecordBridge } from './yjs-record-bridge'
 const MSG_SYNC = 0
 // const MSG_AWARENESS = 1  // Not used in POC
 
+/**
+ * Callback to check if a user has access to a record.
+ * Returns { canRead, canWrite } or null if record doesn't exist.
+ */
+export type YjsAuthChecker = (
+  userId: string,
+  recordId: string,
+) => Promise<{ canRead: boolean; canWrite: boolean } | null>
+
 export class YjsWebSocketAdapter {
   private bridge: YjsRecordBridge | null = null
+  private authChecker: YjsAuthChecker | null = null
+
+  /** Per-socket permission cache: socket.id → recordId → canWrite */
+  private socketPermissions = new Map<string, Map<string, boolean>>()
 
   constructor(private syncService: YjsSyncService) {}
 
@@ -20,12 +33,49 @@ export class YjsWebSocketAdapter {
     this.bridge = bridge
   }
 
+  /** Attach auth checker for record-level access control. */
+  setAuthChecker(checker: YjsAuthChecker): void {
+    this.authChecker = checker
+  }
+
+  private getUserId(socket: Socket): string | undefined {
+    const raw = socket.handshake.query.userId
+    const value = Array.isArray(raw) ? raw[0] : raw
+    return typeof value === 'string' && value.trim().length > 0 ? value.trim() : undefined
+  }
+
   register(io: SocketServer): void {
     const nsp = io.of('/yjs')
 
     nsp.on('connection', (socket) => {
       socket.on('yjs:subscribe', async ({ recordId }: { recordId: string }) => {
         if (!recordId || typeof recordId !== 'string') return
+
+        // ── Auth gate: check record access ──
+        const userId = this.getUserId(socket)
+        if (!userId) {
+          socket.emit('yjs:error', { recordId, code: 'UNAUTHENTICATED', message: 'userId required' })
+          return
+        }
+
+        if (this.authChecker) {
+          const access = await this.authChecker(userId, recordId)
+          if (!access) {
+            socket.emit('yjs:error', { recordId, code: 'NOT_FOUND', message: 'Record not found' })
+            return
+          }
+          if (!access.canRead) {
+            socket.emit('yjs:error', { recordId, code: 'FORBIDDEN', message: 'No read access' })
+            return
+          }
+          // Cache write permission for this socket+record
+          let perms = this.socketPermissions.get(socket.id)
+          if (!perms) {
+            perms = new Map()
+            this.socketPermissions.set(socket.id, perms)
+          }
+          perms.set(recordId, access.canWrite)
+        }
 
         const doc = await this.syncService.getOrCreateDoc(recordId)
         const room = `yjs:${recordId}`
@@ -36,7 +86,7 @@ export class YjsWebSocketAdapter {
           this.bridge.observe(recordId, doc)
         }
 
-        // Send sync step 1: our state vector so the client can send us what we're missing
+        // Send sync step 1
         const encoder = encoding.createEncoder()
         encoding.writeVarUint(encoder, MSG_SYNC)
         syncProtocol.writeSyncStep1(encoder, doc)
@@ -51,7 +101,9 @@ export class YjsWebSocketAdapter {
         async ({ recordId, data }: { recordId: string; data: number[] }) => {
           if (!recordId || !data) return
 
-          const doc = await this.syncService.getOrCreateDoc(recordId)
+          const doc = this.syncService.getDoc(recordId)
+          if (!doc) return
+
           const message = new Uint8Array(data)
           const decoder = decoding.createDecoder(message)
           const messageType = decoding.readVarUint(decoder)
@@ -62,7 +114,6 @@ export class YjsWebSocketAdapter {
             syncProtocol.readSyncMessage(decoder, encoder, doc, socket.id)
 
             const reply = encoding.toUint8Array(encoder)
-            // reply.length > 1 means there is actual content beyond the message type byte
             if (reply.length > 1) {
               socket.emit('yjs:message', {
                 recordId,
@@ -78,7 +129,24 @@ export class YjsWebSocketAdapter {
         async ({ recordId, data }: { recordId: string; data: number[] }) => {
           if (!recordId || !data) return
 
-          const doc = await this.syncService.getOrCreateDoc(recordId)
+          // ── Auth gate: check write permission ──
+          if (this.authChecker) {
+            const perms = this.socketPermissions.get(socket.id)
+            const canWrite = perms?.get(recordId)
+            if (canWrite === false) {
+              socket.emit('yjs:error', { recordId, code: 'FORBIDDEN', message: 'No write access' })
+              return
+            }
+            if (canWrite === undefined) {
+              // Not subscribed to this record — reject
+              socket.emit('yjs:error', { recordId, code: 'FORBIDDEN', message: 'Not subscribed' })
+              return
+            }
+          }
+
+          const doc = this.syncService.getDoc(recordId)
+          if (!doc) return
+
           const update = new Uint8Array(data)
           Y.applyUpdate(doc, update, socket.id)
 
@@ -91,9 +159,14 @@ export class YjsWebSocketAdapter {
       socket.on('yjs:unsubscribe', ({ recordId }: { recordId: string }) => {
         if (!recordId) return
         socket.leave(`yjs:${recordId}`)
+        // Clean up cached permission for this record
+        const perms = this.socketPermissions.get(socket.id)
+        if (perms) perms.delete(recordId)
       })
 
-      // Socket.IO automatically handles room cleanup on disconnect
+      socket.on('disconnect', () => {
+        this.socketPermissions.delete(socket.id)
+      })
     })
   }
 }

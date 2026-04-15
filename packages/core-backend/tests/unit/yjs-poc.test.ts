@@ -84,11 +84,12 @@ describe('YjsSyncService', () => {
     expect(doc1).not.toBe(doc2)
   })
 
-  it('releaseDoc removes the doc from cache', async () => {
+  it('releaseDoc snapshots and removes the doc from cache', async () => {
     await service.getOrCreateDoc('rec-1')
     expect(service.size).toBe(1)
-    service.releaseDoc('rec-1')
+    await service.releaseDoc('rec-1')
     expect(service.size).toBe(0)
+    expect(persistence.storeSnapshot).toHaveBeenCalledWith('rec-1', expect.anything())
   })
 
   it('cleanupIdleDocs removes docs idle longer than threshold', async () => {
@@ -100,7 +101,7 @@ describe('YjsSyncService', () => {
     const originalNow = Date.now
     Date.now = () => originalNow() + 120_000 // simulate 120s into the future
     try {
-      service.cleanupIdleDocs(60_000)
+      await service.cleanupIdleDocs(60_000)
       expect(service.size).toBe(0)
     } finally {
       Date.now = originalNow

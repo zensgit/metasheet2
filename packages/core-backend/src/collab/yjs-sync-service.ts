@@ -47,27 +47,43 @@ export class YjsSyncService {
     return entry?.doc
   }
 
-  releaseDoc(recordId: string): void {
+  async releaseDoc(recordId: string): Promise<void> {
     const entry = this.docs.get(recordId)
     if (entry) {
+      // Snapshot before releasing so cross-restart recovery works
+      try {
+        await this.persistence.storeSnapshot(recordId, entry.doc)
+      } catch (err) {
+        console.error(`[yjs] Failed to snapshot doc ${recordId} on release:`, err)
+      }
       entry.doc.destroy()
       this.docs.delete(recordId)
     }
   }
 
-  cleanupIdleDocs(idleThreshold = 60_000): void {
+  async cleanupIdleDocs(idleThreshold = 60_000): Promise<void> {
     const now = Date.now()
     for (const [recordId, entry] of this.docs) {
       if (now - entry.lastAccess > idleThreshold) {
+        try {
+          await this.persistence.storeSnapshot(recordId, entry.doc)
+        } catch (err) {
+          console.error(`[yjs] Failed to snapshot idle doc ${recordId}:`, err)
+        }
         entry.doc.destroy()
         this.docs.delete(recordId)
       }
     }
   }
 
-  destroy(): void {
+  async destroy(): Promise<void> {
     clearInterval(this.cleanupTimer)
-    for (const [, entry] of this.docs) {
+    for (const [recordId, entry] of this.docs) {
+      try {
+        await this.persistence.storeSnapshot(recordId, entry.doc)
+      } catch (err) {
+        console.error(`[yjs] Failed to snapshot doc ${recordId} on destroy:`, err)
+      }
       entry.doc.destroy()
     }
     this.docs.clear()

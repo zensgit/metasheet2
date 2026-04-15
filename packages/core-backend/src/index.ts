@@ -1663,14 +1663,107 @@ export class MetaSheetServer {
       const { YjsPersistenceAdapter } = await import('./collab/yjs-persistence-adapter')
       const { YjsSyncService } = await import('./collab/yjs-sync-service')
       const { YjsWebSocketAdapter } = await import('./collab/yjs-websocket-adapter')
+      const { YjsRecordBridge } = await import('./collab/yjs-record-bridge')
+      const { RecordWriteService } = await import('./multitable/record-write-service')
       const { db: kyselyDbYjs } = await import('./db/db')
       const collabIO = this.injector.get(ICollabService).getIO()
       if (collabIO) {
         const yjsPersistence = new YjsPersistenceAdapter(kyselyDbYjs)
         const yjsSyncService = new YjsSyncService(yjsPersistence)
         const yjsWsAdapter = new YjsWebSocketAdapter(yjsSyncService)
+
+        // Auth gate: check record exists and user has read/write access
+        yjsWsAdapter.setAuthChecker(async (userId, recordId) => {
+          try {
+            const pool = poolManager.get()
+            const result = await pool.query(
+              'SELECT id, sheet_id, created_by FROM meta_records WHERE id = $1',
+              [recordId],
+            )
+            if (result.rows.length === 0) return null
+            // POC: basic access — record exists → canRead=true, canWrite=true
+            // Full field-level permissions deferred to post-POC
+            return { canRead: true, canWrite: true }
+          } catch {
+            return null
+          }
+        })
+
+        // Bridge: Y.Text changes → RecordWriteService.patchRecords()
+        const pool = poolManager.get()
+        const recordWriteService = new RecordWriteService(pool, eventBus, {
+          normalizeLinkIds: (v) => (Array.isArray(v) ? v.map(String) : []),
+          normalizeAttachmentIds: (v) => (Array.isArray(v) ? v.map(String) : []),
+          normalizeJson: (v) => (v && typeof v === 'object' && !Array.isArray(v) ? v as Record<string, unknown> : {}),
+          parseLinkFieldConfig: () => null,
+          buildId: (prefix) => `${prefix}_${Math.random().toString(36).slice(2, 10)}`,
+          ensureRecordWriteAllowed: () => true,
+          filterRecordDataByFieldIds: (data, ids) => {
+            if (!data || typeof data !== 'object') return {}
+            return Object.fromEntries(Object.entries(data as Record<string, unknown>).filter(([k]) => ids.has(k)))
+          },
+          extractLookupRollupData: () => ({}),
+          mergeComputedRecords: (base, extra) => ((!base || base.length === 0) && extra.length === 0 ? undefined : [...(base ?? []), ...extra]),
+          filterRecordFieldSummaryMap: (map) => map,
+          serializeLinkSummaryMap: () => ({}),
+          serializeAttachmentSummaryMap: () => ({}),
+          applyLookupRollup: async () => {},
+          computeDependentLookupRollupRecords: async () => [],
+          loadLinkValuesByRecord: async () => new Map(),
+          buildLinkSummaries: async () => new Map(),
+          buildAttachmentSummaries: async () => new Map(),
+          ensureAttachmentIdsExist: async () => null,
+        })
+
+        const yjsBridge = new YjsRecordBridge(
+          yjsSyncService,
+          recordWriteService,
+          async (recordId, patch) => {
+            // Build RecordPatchInput from recordId + patch fields
+            try {
+              const recResult = await pool.query(
+                'SELECT sheet_id FROM meta_records WHERE id = $1',
+                [recordId],
+              )
+              if (recResult.rows.length === 0) return null
+              const sheetId = String((recResult.rows[0] as any).sheet_id)
+
+              const fieldResult = await pool.query(
+                'SELECT id, name, type, property FROM meta_fields WHERE sheet_id = $1',
+                [sheetId],
+              )
+              const fields = (fieldResult.rows as any[]).map((f: any) => ({
+                id: String(f.id), name: String(f.name), type: f.type, property: f.property,
+              }))
+              const fieldById = new Map(
+                fields.map((f: any) => [f.id, { type: f.type, readOnly: false, hidden: false }]),
+              )
+              const changesByRecord = new Map([
+                [recordId, Object.entries(patch).map(([fieldId, value]) => ({ fieldId, value }))],
+              ])
+
+              return {
+                sheetId,
+                changesByRecord,
+                actorId: 'yjs-bridge',
+                fields: fields as any,
+                visiblePropertyFields: fields as any,
+                visiblePropertyFieldIds: new Set(fields.map((f: any) => f.id)),
+                attachmentFields: [],
+                fieldById: fieldById as any,
+                capabilities: { canRead: true, canCreateRecord: true, canEditRecord: true, canDeleteRecord: false, canManageFields: false, canManageSheetAccess: false, canManageViews: false, canComment: false, canManageAutomation: false, canExport: false },
+                access: { userId: 'yjs-bridge', permissions: [], isAdminRole: false },
+              }
+            } catch (err) {
+              console.error(`[yjs-bridge] Failed to build write input for ${recordId}:`, err)
+              return null
+            }
+          },
+        )
+
+        yjsWsAdapter.setBridge(yjsBridge)
         yjsWsAdapter.register(collabIO)
-        this.logger.info('Yjs collaborative editing service initialized on /yjs namespace')
+        this.logger.info('Yjs collaborative editing service initialized on /yjs namespace (bridge + auth active)')
       } else {
         this.logger.warn('Yjs: CollabService IO not available, skipping')
       }
