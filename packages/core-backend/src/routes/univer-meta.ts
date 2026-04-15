@@ -42,6 +42,7 @@ import {
   VersionConflictError as ServiceVersionConflictError,
   RecordNotFoundError as ServiceNotFoundError,
   RecordValidationError as ServiceValidationError,
+  RecordFieldForbiddenError as ServiceFieldForbiddenError,
   type RecordWriteHelpers,
 } from '../multitable/record-write-service'
 
@@ -7236,107 +7237,7 @@ export function univerMetaRouter(): Router {
         else changesByRecord.set(change.recordId, [change])
       }
 
-      for (const [recordId, changes] of changesByRecord.entries()) {
-        const expectedVersions = Array.from(new Set(changes.map(c => c.expectedVersion).filter((v): v is number => typeof v === 'number')))
-        if (expectedVersions.length > 1) {
-          return res.status(400).json({
-            ok: false,
-            error: { code: 'VALIDATION_ERROR', message: `Multiple expectedVersion values provided for ${recordId}` },
-          })
-        }
-
-        for (const change of changes) {
-          const field = fieldById.get(change.fieldId)
-          if (!field) {
-            return res.status(400).json({
-              ok: false,
-              error: { code: 'VALIDATION_ERROR', message: `Unknown fieldId: ${change.fieldId}` },
-            })
-          }
-
-          if (field.hidden) {
-            return res.status(403).json({
-              ok: false,
-              error: { code: 'FIELD_HIDDEN', message: `Field is hidden: ${change.fieldId}` },
-            })
-          }
-
-          // P0.3: Field-level readonly permission check
-          if (field.readOnly === true) {
-            return res.status(403).json({
-              ok: false,
-              error: { code: 'FIELD_READONLY', message: `Field is readonly: ${change.fieldId}` },
-            })
-          }
-
-          if (field.type === 'lookup' || field.type === 'rollup') {
-            return res.status(403).json({
-              ok: false,
-              error: { code: 'FIELD_READONLY', message: `Field is readonly: ${change.fieldId}` },
-            })
-          }
-
-          if (field.type === 'select') {
-            if (typeof change.value !== 'string') {
-              return res.status(400).json({
-                ok: false,
-                error: { code: 'VALIDATION_ERROR', message: `Select value must be string: ${change.fieldId}` },
-              })
-            }
-            const allowed = new Set(field.options ?? [])
-            if (change.value !== '' && !allowed.has(change.value)) {
-              return res.status(400).json({
-                ok: false,
-                error: { code: 'VALIDATION_ERROR', message: `Invalid select option for ${change.fieldId}: ${change.value}` },
-              })
-            }
-          }
-
-          if (field.type === 'link') {
-            if (field.link) {
-              const ids = normalizeLinkIds(change.value)
-              if (field.link.limitSingleRecord && ids.length > 1) {
-                return res.status(400).json({
-                  ok: false,
-                  error: { code: 'VALIDATION_ERROR', message: `Link field only allows a single record: ${change.fieldId}` },
-                })
-              }
-              const tooLong = ids.find((id) => id.length > 50)
-              if (tooLong) {
-                return res.status(400).json({
-                  ok: false,
-                  error: { code: 'VALIDATION_ERROR', message: `Link id too long (>50): ${tooLong}` },
-                })
-              }
-            } else if (typeof change.value !== 'string') {
-              return res.status(400).json({
-                ok: false,
-                error: { code: 'VALIDATION_ERROR', message: `Link value must be string: ${change.fieldId}` },
-              })
-            }
-          }
-
-          if (field.type === 'attachment') {
-            const ids = normalizeAttachmentIds(change.value)
-            const tooLong = ids.find((id) => id.length > 100)
-            if (tooLong) {
-              return res.status(400).json({
-                ok: false,
-                error: { code: 'VALIDATION_ERROR', message: `Attachment id too long: ${tooLong}` },
-              })
-            }
-            const attachmentError = await ensureAttachmentIdsExist(pool.query.bind(pool), sheetId, change.fieldId, ids)
-            if (attachmentError) {
-              return res.status(400).json({
-                ok: false,
-                error: { code: 'VALIDATION_ERROR', message: attachmentError },
-              })
-            }
-          }
-        }
-      }
-
-      // --------------- Delegate to RecordWriteService ---------------
+      // --------------- Delegate to RecordWriteService (validation + pipeline) ---------------
       const writeHelpers: RecordWriteHelpers = {
         normalizeLinkIds,
         normalizeAttachmentIds,
@@ -7355,6 +7256,7 @@ export function univerMetaRouter(): Router {
         loadLinkValuesByRecord,
         buildLinkSummaries: (q, rows, rl, lv) => buildLinkSummaries(req, q, rows, rl, lv),
         buildAttachmentSummaries: (q, sid, rows, af) => buildAttachmentSummaries(q, req, sid, rows, af),
+        ensureAttachmentIdsExist,
       }
       const recordWriteService = new RecordWriteService(pool, eventBus, writeHelpers)
 
@@ -7399,8 +7301,12 @@ export function univerMetaRouter(): Router {
       if (err instanceof NotFoundError || err instanceof ServiceNotFoundError) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: err.message } })
       }
+      if (err instanceof ServiceFieldForbiddenError) {
+        return res.status(403).json({ ok: false, error: { code: err.code, message: err.message } })
+      }
       if (err instanceof ValidationError || err instanceof ServiceValidationError) {
-        return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: err.message } })
+        const code = err instanceof ServiceValidationError ? (err.code || 'VALIDATION_ERROR') : 'VALIDATION_ERROR'
+        return res.status(400).json({ ok: false, error: { code, message: err.message } })
       }
       const hint = getDbNotReadyMessage(err)
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })

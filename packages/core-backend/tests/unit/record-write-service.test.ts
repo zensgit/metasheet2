@@ -4,6 +4,7 @@ import {
   VersionConflictError,
   RecordNotFoundError,
   RecordValidationError,
+  RecordFieldForbiddenError,
   type ConnectionPool,
   type RecordWriteHelpers,
   type RecordPatchInput,
@@ -50,6 +51,7 @@ function createMockHelpers(overrides: Partial<RecordWriteHelpers> = {}): RecordW
     loadLinkValuesByRecord: vi.fn().mockResolvedValue(new Map()),
     buildLinkSummaries: vi.fn().mockResolvedValue(new Map()),
     buildAttachmentSummaries: vi.fn().mockResolvedValue(new Map()),
+    ensureAttachmentIdsExist: vi.fn().mockResolvedValue(null),
     ...overrides,
   }
 }
@@ -328,12 +330,15 @@ describe('RecordWriteService', () => {
   })
 
   it('should not emit events when no records are updated', async () => {
-    // Pass a change with a fieldId that doesn't exist in fieldById, so applied === 0
+    // Pass a formula field change with invalid value (not starting with =), so applied === 0
     const changesByRecord = new Map([
-      ['rec1', [{ fieldId: 'nonexistent_field', value: 'x' }]],
+      ['rec1', [{ fieldId: 'fld_formula', value: 123 }]],
     ])
-
-    const input = buildTestInput({ changesByRecord })
+    // Add formula field to fieldById so validation passes
+    const fieldByIdWithFormula = new Map([
+      ['fld_formula', { type: 'formula' as const, readOnly: false, hidden: false }],
+    ])
+    const input = buildTestInput({ changesByRecord, fieldById: fieldByIdWithFormula })
     const service = new RecordWriteService(pool, eventBus as any, helpers)
     const result = await service.patchRecords(input)
 
@@ -351,5 +356,131 @@ describe('RecordWriteService', () => {
     const input = buildTestInput()
 
     await expect(service.patchRecords(input)).rejects.toThrow(RecordValidationError)
+  })
+
+  // -----------------------------------------------------------------------
+  // validateChanges — field writability and value constraint tests
+  // -----------------------------------------------------------------------
+
+  describe('validateChanges', () => {
+    it('rejects multiple expectedVersion values for same record', async () => {
+      const service = new RecordWriteService(pool, eventBus as any, helpers)
+      const changesByRecord = new Map([
+        ['rec1', [
+          { fieldId: 'fld1', value: 'a', expectedVersion: 1 },
+          { fieldId: 'fld2', value: 'b', expectedVersion: 2 },
+        ]],
+      ])
+      const fieldById = new Map([
+        ['fld1', { type: 'string' as const, readOnly: false, hidden: false }],
+        ['fld2', { type: 'string' as const, readOnly: false, hidden: false }],
+      ])
+
+      await expect(service.validateChanges({ sheetId: 's1', changesByRecord, fieldById }))
+        .rejects.toThrow(RecordValidationError)
+      await expect(service.validateChanges({ sheetId: 's1', changesByRecord, fieldById }))
+        .rejects.toThrow(/Multiple expectedVersion/)
+    })
+
+    it('rejects unknown fieldId', async () => {
+      const service = new RecordWriteService(pool, eventBus as any, helpers)
+      const changesByRecord = new Map([
+        ['rec1', [{ fieldId: 'nonexistent', value: 'x' }]],
+      ])
+      const fieldById = new Map<string, any>()
+
+      await expect(service.validateChanges({ sheetId: 's1', changesByRecord, fieldById }))
+        .rejects.toThrow(RecordValidationError)
+      await expect(service.validateChanges({ sheetId: 's1', changesByRecord, fieldById }))
+        .rejects.toThrow(/Unknown fieldId/)
+    })
+
+    it('rejects hidden field', async () => {
+      const service = new RecordWriteService(pool, eventBus as any, helpers)
+      const changesByRecord = new Map([
+        ['rec1', [{ fieldId: 'fld1', value: 'x' }]],
+      ])
+      const fieldById = new Map([
+        ['fld1', { type: 'string' as const, readOnly: false, hidden: true }],
+      ])
+
+      await expect(service.validateChanges({ sheetId: 's1', changesByRecord, fieldById }))
+        .rejects.toThrow(RecordFieldForbiddenError)
+    })
+
+    it('rejects readOnly field', async () => {
+      const service = new RecordWriteService(pool, eventBus as any, helpers)
+      const changesByRecord = new Map([
+        ['rec1', [{ fieldId: 'fld1', value: 'x' }]],
+      ])
+      const fieldById = new Map([
+        ['fld1', { type: 'string' as const, readOnly: true, hidden: false }],
+      ])
+
+      await expect(service.validateChanges({ sheetId: 's1', changesByRecord, fieldById }))
+        .rejects.toThrow(RecordFieldForbiddenError)
+    })
+
+    it('rejects lookup/rollup fields', async () => {
+      const service = new RecordWriteService(pool, eventBus as any, helpers)
+      for (const type of ['lookup', 'rollup'] as const) {
+        const changesByRecord = new Map([
+          ['rec1', [{ fieldId: 'fld1', value: 'x' }]],
+        ])
+        const fieldById = new Map([
+          ['fld1', { type, readOnly: false, hidden: false }],
+        ])
+
+        await expect(service.validateChanges({ sheetId: 's1', changesByRecord, fieldById }))
+          .rejects.toThrow(RecordFieldForbiddenError)
+      }
+    })
+
+    it('rejects invalid select option', async () => {
+      const service = new RecordWriteService(pool, eventBus as any, helpers)
+      const changesByRecord = new Map([
+        ['rec1', [{ fieldId: 'fld1', value: 'invalid' }]],
+      ])
+      const fieldById = new Map([
+        ['fld1', { type: 'select' as const, readOnly: false, hidden: false, options: ['a', 'b'] }],
+      ])
+
+      await expect(service.validateChanges({ sheetId: 's1', changesByRecord, fieldById }))
+        .rejects.toThrow(RecordValidationError)
+      await expect(service.validateChanges({ sheetId: 's1', changesByRecord, fieldById }))
+        .rejects.toThrow(/Invalid select option/)
+    })
+
+    it('rejects link field with multiple records when limitSingleRecord', async () => {
+      const service = new RecordWriteService(pool, eventBus as any, helpers)
+      const changesByRecord = new Map([
+        ['rec1', [{ fieldId: 'fld1', value: ['r1', 'r2'] }]],
+      ])
+      const fieldById = new Map([
+        ['fld1', { type: 'link' as const, readOnly: false, hidden: false, link: { foreignSheetId: 's2', limitSingleRecord: true } }],
+      ])
+
+      await expect(service.validateChanges({ sheetId: 's1', changesByRecord, fieldById }))
+        .rejects.toThrow(RecordValidationError)
+      await expect(service.validateChanges({ sheetId: 's1', changesByRecord, fieldById }))
+        .rejects.toThrow(/single record/)
+    })
+
+    it('passes valid changes', async () => {
+      const service = new RecordWriteService(pool, eventBus as any, helpers)
+      const changesByRecord = new Map([
+        ['rec1', [
+          { fieldId: 'fld1', value: 'hello', expectedVersion: 1 },
+          { fieldId: 'fld2', value: 42, expectedVersion: 1 },
+        ]],
+      ])
+      const fieldById = new Map([
+        ['fld1', { type: 'string' as const, readOnly: false, hidden: false }],
+        ['fld2', { type: 'number' as const, readOnly: false, hidden: false }],
+      ])
+
+      await expect(service.validateChanges({ sheetId: 's1', changesByRecord, fieldById }))
+        .resolves.not.toThrow()
+    })
   })
 })
