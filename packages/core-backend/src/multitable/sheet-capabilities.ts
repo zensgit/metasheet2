@@ -1,0 +1,217 @@
+/**
+ * Shared sheet capability resolution — used by both REST routes and Yjs bridge.
+ *
+ * Extracted from univer-meta.ts to avoid duplicating permission logic.
+ */
+
+import { listUserPermissions, isAdmin } from '../rbac/service'
+
+// ── Permission code sets ────────────────────────────────────────────
+
+export const SHEET_READ_PERMISSION_CODES = new Set([
+  'spreadsheet:read', 'spreadsheet:write', 'spreadsheet:write-own', 'spreadsheet:admin',
+  'spreadsheets:read', 'spreadsheets:write', 'spreadsheets:write-own', 'spreadsheets:admin',
+  'multitable:read', 'multitable:write', 'multitable:write-own', 'multitable:admin',
+])
+
+export const SHEET_WRITE_PERMISSION_CODES = new Set([
+  'spreadsheet:write', 'spreadsheet:admin',
+  'spreadsheets:write', 'spreadsheets:admin',
+  'multitable:write', 'multitable:admin',
+])
+
+export const SHEET_OWN_WRITE_PERMISSION_CODES = new Set([
+  'spreadsheet:write-own', 'spreadsheets:write-own', 'multitable:write-own',
+])
+
+export const SHEET_ADMIN_PERMISSION_CODES = new Set([
+  'spreadsheet:admin', 'spreadsheets:admin', 'multitable:admin',
+])
+
+// ── Types ───────────────────────────────────────────────────────────
+
+export type MultitableCapabilities = {
+  canRead: boolean
+  canCreateRecord: boolean
+  canEditRecord: boolean
+  canDeleteRecord: boolean
+  canManageFields: boolean
+  canManageSheetAccess: boolean
+  canManageViews: boolean
+  canComment: boolean
+  canManageAutomation: boolean
+  canExport: boolean
+}
+
+export type SheetPermissionScope = {
+  hasAssignments: boolean
+  canRead: boolean
+  canWrite: boolean
+  canWriteOwn: boolean
+  canAdmin: boolean
+}
+
+export type QueryFn = (sql: string, params?: unknown[]) => Promise<{ rows: unknown[] }>
+
+// ── Functions ───────────────────────────────────────────────────────
+
+export function hasPermission(permissions: string[], code: string): boolean {
+  if (permissions.includes(code)) return true
+  const [resource] = code.split(':')
+  return permissions.includes(`${resource}:*`) || permissions.includes('*:*')
+}
+
+export function deriveCapabilities(permissions: string[], isAdminRole: boolean): MultitableCapabilities {
+  const canRead = isAdminRole || hasPermission(permissions, 'multitable:read') || hasPermission(permissions, 'multitable:write')
+  const canWrite = isAdminRole || hasPermission(permissions, 'multitable:write')
+  const canManageSheetAccess = isAdminRole || hasPermission(permissions, 'multitable:share')
+  const canComment = isAdminRole || hasPermission(permissions, 'comments:write') || hasPermission(permissions, 'comments:read')
+  const canManageAutomation =
+    isAdminRole ||
+    hasPermission(permissions, 'workflow:all') ||
+    hasPermission(permissions, 'workflow:write') ||
+    hasPermission(permissions, 'workflow:create') ||
+    hasPermission(permissions, 'workflow:execute')
+
+  return {
+    canRead,
+    canCreateRecord: canWrite,
+    canEditRecord: canWrite,
+    canDeleteRecord: canWrite,
+    canManageFields: canWrite,
+    canManageSheetAccess,
+    canManageViews: canWrite,
+    canComment,
+    canManageAutomation,
+    canExport: canRead,
+  }
+}
+
+export function summarizeSheetPermissionCodes(codes: string[]): SheetPermissionScope {
+  return {
+    hasAssignments: codes.length > 0,
+    canRead: codes.some((code) => SHEET_READ_PERMISSION_CODES.has(code)),
+    canWrite: codes.some((code) => SHEET_WRITE_PERMISSION_CODES.has(code)),
+    canWriteOwn: codes.some((code) => SHEET_OWN_WRITE_PERMISSION_CODES.has(code)),
+    canAdmin: codes.some((code) => SHEET_ADMIN_PERMISSION_CODES.has(code)),
+  }
+}
+
+function applyContextSheetReadGrant(
+  capabilities: MultitableCapabilities,
+  scope: SheetPermissionScope | undefined,
+  isAdminRole: boolean,
+): MultitableCapabilities {
+  if (isAdminRole || !scope?.hasAssignments) return capabilities
+  if (scope.canRead) return { ...capabilities, canRead: true, canExport: true }
+  return capabilities
+}
+
+function applyContextSheetRecordWriteGrant(
+  capabilities: MultitableCapabilities,
+  scope: SheetPermissionScope | undefined,
+  isAdminRole: boolean,
+): MultitableCapabilities {
+  const scoped = applyContextSheetReadGrant(capabilities, scope, isAdminRole)
+  if (isAdminRole || !scope?.hasAssignments) return scoped
+  const canWriteAnyRecord = scope.canRead && (scope.canWrite || scope.canWriteOwn)
+  if (!canWriteAnyRecord) return scoped
+  return {
+    ...scoped,
+    canCreateRecord: true,
+    canEditRecord: true,
+    canDeleteRecord: true,
+  }
+}
+
+export function applyContextSheetSchemaWriteGrant(
+  capabilities: MultitableCapabilities,
+  scope: SheetPermissionScope | undefined,
+  isAdminRole: boolean,
+): MultitableCapabilities {
+  const scoped = applyContextSheetRecordWriteGrant(capabilities, scope, isAdminRole)
+  if (isAdminRole || !scope?.hasAssignments) return scoped
+  const canManageSchema = scope.canRead && scope.canWrite
+  if (!canManageSchema) return scoped
+  return {
+    ...scoped,
+    canManageFields: true,
+    canManageViews: true,
+    ...(scope.canAdmin ? { canManageSheetAccess: true } : {}),
+  }
+}
+
+export async function loadSheetPermissionScopeMap(
+  query: QueryFn,
+  sheetIds: string[],
+  userId: string,
+): Promise<Map<string, SheetPermissionScope>> {
+  if (!userId || sheetIds.length === 0) return new Map()
+  try {
+    const result = await query(
+      `SELECT sp.sheet_id, sp.perm_code, sp.subject_type
+       FROM spreadsheet_permissions sp
+       WHERE sp.sheet_id = ANY($2::text[])
+         AND (
+           (sp.subject_type = 'user' AND sp.subject_id = $1)
+           OR (
+             sp.subject_type = 'role'
+             AND EXISTS (
+               SELECT 1
+               FROM user_roles ur
+               WHERE ur.user_id = $1
+                 AND ur.role_id = sp.subject_id
+             )
+           )
+         )`,
+      [userId, sheetIds],
+    )
+    const grouped = new Map<string, { direct: string[]; role: string[] }>()
+    for (const row of result.rows as Array<{ sheet_id: string; perm_code: string; subject_type?: string }>) {
+      const sheetId = typeof row.sheet_id === 'string' ? row.sheet_id : ''
+      const code = typeof row.perm_code === 'string' ? row.perm_code.trim() : ''
+      if (!sheetId || !code) continue
+      const current = grouped.get(sheetId) ?? { direct: [], role: [] }
+      if (row.subject_type === 'user') current.direct.push(code)
+      else current.role.push(code)
+      grouped.set(sheetId, current)
+    }
+    return new Map(
+      Array.from(grouped.entries()).map(([sheetId, codes]) => [
+        sheetId,
+        summarizeSheetPermissionCodes(codes.direct.length > 0 ? codes.direct : codes.role),
+      ]),
+    )
+  } catch {
+    return new Map()
+  }
+}
+
+/**
+ * Resolve full sheet capabilities for a userId without Express req.
+ * This is the same logic as resolveSheetCapabilities in univer-meta.ts
+ * but decoupled from the HTTP layer.
+ */
+export async function resolveSheetCapabilitiesForUser(
+  query: QueryFn,
+  sheetId: string,
+  userId: string,
+): Promise<{
+  capabilities: MultitableCapabilities
+  sheetScope?: SheetPermissionScope
+  isAdminRole: boolean
+  permissions: string[]
+}> {
+  const isAdminRole = await isAdmin(userId)
+  const permissions = await listUserPermissions(userId)
+  const baseCapabilities = deriveCapabilities(permissions, isAdminRole)
+  const scopeMap = await loadSheetPermissionScopeMap(query, [sheetId], userId)
+  const sheetScope = scopeMap.get(sheetId)
+  const capabilities = applyContextSheetSchemaWriteGrant(baseCapabilities, sheetScope, isAdminRole)
+  return {
+    capabilities,
+    ...(sheetScope ? { sheetScope } : {}),
+    isAdminRole,
+    permissions,
+  }
+}

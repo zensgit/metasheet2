@@ -1682,42 +1682,24 @@ export class MetaSheetServer {
           }
         })
 
-        // Auth gate: check record exists + user has real read/write permissions
-        const { listUserPermissions: listPerms, isAdmin: checkAdmin } = await import('./rbac/service')
+        // Auth gate: uses the same sheet capability resolution as REST
+        const { resolveSheetCapabilitiesForUser } = await import('./multitable/sheet-capabilities')
         yjsWsAdapter.setAuthChecker(async (userId, recordId) => {
           try {
             const pool = poolManager.get()
-            // 1. Record must exist, get its sheetId
             const recResult = await pool.query(
-              'SELECT id, sheet_id, created_by FROM meta_records WHERE id = $1',
+              'SELECT id, sheet_id FROM meta_records WHERE id = $1',
               [recordId],
             )
             if (recResult.rows.length === 0) return null
             const sheetId = String((recResult.rows[0] as any).sheet_id)
 
-            // 2. Resolve user permissions (same source as REST path)
-            const admin = await checkAdmin(userId)
-            if (admin) return { canRead: true, canWrite: true }
-
-            const perms = await listPerms(userId)
-            const hasRead = perms.includes('multitable:read') || perms.includes('multitable:write') || perms.includes('multitable:*') || perms.includes('*:*')
-            const hasWrite = perms.includes('multitable:write') || perms.includes('multitable:*') || perms.includes('*:*')
-
-            if (!hasRead) return { canRead: false, canWrite: false }
-
-            // 3. Check sheet-level permission scope (if any assignments exist)
-            const scopeResult = await pool.query(
-              `SELECT permission FROM spreadsheet_permissions WHERE sheet_id = $1 AND subject_id = $2 LIMIT 1`,
-              [sheetId, userId],
+            const { capabilities } = await resolveSheetCapabilitiesForUser(
+              pool.query.bind(pool),
+              sheetId,
+              userId,
             )
-            if (scopeResult.rows.length > 0) {
-              const perm = String((scopeResult.rows[0] as any).permission)
-              const canWrite = perm === 'write' || perm === 'admin' || perm === 'owner'
-              return { canRead: true, canWrite }
-            }
-
-            // No sheet-level scope → fall back to global permission
-            return { canRead: hasRead, canWrite: hasWrite }
+            return { canRead: capabilities.canRead, canWrite: capabilities.canEditRecord }
           } catch {
             return null
           }
@@ -1731,7 +1713,7 @@ export class MetaSheetServer {
           normalizeJson: (v) => (v && typeof v === 'object' && !Array.isArray(v) ? v as Record<string, unknown> : {}),
           parseLinkFieldConfig: () => null,
           buildId: (prefix) => `${prefix}_${Math.random().toString(36).slice(2, 10)}`,
-          ensureRecordWriteAllowed: (caps) => caps.canEditRecord,
+          ensureRecordWriteAllowed: (caps, _scope, _access, _createdBy, _action) => caps.canEditRecord,
           filterRecordDataByFieldIds: (data, ids) => {
             if (!data || typeof data !== 'object') return {}
             return Object.fromEntries(Object.entries(data as Record<string, unknown>).filter(([k]) => ids.has(k)))
@@ -1798,10 +1780,9 @@ export class MetaSheetServer {
                 [recordId, Object.entries(patch).map(([fieldId, value]) => ({ fieldId, value }))],
               ])
 
-              // Resolve real user permissions for the actual editing user
-              const isActorAdmin = await checkAdmin(actorId)
-              const actorPerms = await listPerms(actorId).catch(() => [] as string[])
-              const hasWrite = isActorAdmin || actorPerms.includes('multitable:write') || actorPerms.includes('multitable:*') || actorPerms.includes('*:*')
+              // Resolve real user capabilities — same path as REST
+              const { capabilities, sheetScope, isAdminRole, permissions: actorPerms } =
+                await resolveSheetCapabilitiesForUser(pool.query.bind(pool), sheetId, actorId)
 
               return {
                 sheetId,
@@ -1812,8 +1793,9 @@ export class MetaSheetServer {
                 visiblePropertyFieldIds: new Set(visibleFields.map((f: any) => f.id)),
                 attachmentFields: visibleFields.filter((f: any) => f.type === 'attachment') as any,
                 fieldById: fieldById as any,
-                capabilities: { canRead: true, canCreateRecord: false, canEditRecord: hasWrite, canDeleteRecord: false, canManageFields: false, canManageSheetAccess: false, canManageViews: false, canComment: false, canManageAutomation: false, canExport: false },
-                access: { userId: actorId, permissions: actorPerms, isAdminRole: isActorAdmin },
+                capabilities,
+                sheetScope,
+                access: { userId: actorId, permissions: actorPerms, isAdminRole },
               }
             } catch (err) {
               console.error(`[yjs-bridge] Failed to build write input for ${recordId}:`, err)
