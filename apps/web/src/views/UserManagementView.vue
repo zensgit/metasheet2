@@ -418,6 +418,13 @@
               <span class="user-admin__chip" :class="{ 'user-admin__chip--permission': dingtalkAccess.requireGrant }">
                 {{ dingtalkAccess.requireGrant ? '严格白名单模式' : '宽松模式' }}
               </span>
+              <span
+                v-if="dingtalkAccess.server"
+                class="user-admin__chip"
+                :class="{ 'user-admin__chip--success': dingtalkAccess.server.available, 'user-admin__chip--danger': !dingtalkAccess.server.available }"
+              >
+                {{ dingtalkAccess.server.available ? '服务端已启用钉钉登录' : '服务端未启用钉钉登录' }}
+              </span>
               <span class="user-admin__chip" :class="{ 'user-admin__chip--success': dingtalkAccess.grant.enabled, 'user-admin__chip--danger': !dingtalkAccess.grant.enabled }">
                 {{ dingtalkAccess.grant.enabled ? '已开通钉钉扫码' : '未开通钉钉扫码' }}
               </span>
@@ -425,6 +432,15 @@
                 {{ dingtalkAccess.identity.exists ? '已绑定钉钉身份' : '未绑定钉钉身份' }}
               </span>
             </div>
+            <p v-if="dingtalkAccess?.server" class="user-admin__hint">
+              {{ readDingTalkServerStatus(dingtalkAccess) }}
+            </p>
+            <p v-if="dingtalkAccess?.server?.corpId" class="user-admin__hint">
+              服务端 corpId：{{ dingtalkAccess.server.corpId }}
+            </p>
+            <p v-if="dingtalkAccess?.server?.allowedCorpIds?.length" class="user-admin__hint">
+              允许企业：{{ dingtalkAccess.server.allowedCorpIds.join('、') }}
+            </p>
             <p v-if="dingtalkAccess?.identity.lastLoginAt" class="user-admin__hint">
               最近钉钉登录：{{ formatDate(dingtalkAccess.identity.lastLoginAt) }}
             </p>
@@ -573,11 +589,23 @@ type UserAccess = {
   isAdmin: boolean
 }
 
+type DingTalkRuntimeStatus = {
+  configured: boolean
+  available: boolean
+  corpId: string | null
+  allowedCorpIds: string[]
+  requireGrant: boolean
+  autoLinkEmail: boolean
+  autoProvision: boolean
+  unavailableReason: 'missing_client_id' | 'missing_client_secret' | 'missing_redirect_uri' | 'corp_not_allowed' | null
+}
+
 type DingTalkAccess = {
   provider: 'dingtalk'
   requireGrant: boolean
   autoLinkEmail: boolean
   autoProvision: boolean
+  server?: DingTalkRuntimeStatus
   grant: {
     exists: boolean
     enabled: boolean
@@ -846,6 +874,24 @@ function formatDate(value: string | null | undefined): string {
   const date = new Date(value)
   if (Number.isNaN(date.getTime())) return value
   return `${date.toLocaleDateString('zh-CN')} ${date.toLocaleTimeString('zh-CN', { hour12: false })}`
+}
+
+function readDingTalkServerStatus(accessValue: DingTalkAccess | null): string {
+  const reason = accessValue?.server?.unavailableReason ?? null
+  if (reason === 'corp_not_allowed') {
+    return '服务端企业白名单未放行当前 corpId'
+  }
+  if (
+    reason === 'missing_client_id' ||
+    reason === 'missing_client_secret' ||
+    reason === 'missing_redirect_uri'
+  ) {
+    return '服务端钉钉 OAuth 配置不完整'
+  }
+  if (accessValue?.server?.available === false) {
+    return '服务端钉钉登录暂不可用'
+  }
+  return '服务端钉钉登录可用'
 }
 
 function normalizeNamespaceAdmissions(value: unknown): NamespaceAdmission[] {
