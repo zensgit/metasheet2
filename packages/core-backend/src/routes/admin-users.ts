@@ -394,7 +394,7 @@ function isDatabaseUniqueConstraintError(error: unknown): boolean {
 }
 
 async function fetchDingTalkAccessSnapshot(userId: string) {
-  const [grantResult, identityResult] = await Promise.all([
+  const [grantResult, identityResult, linkedDirectoryResult] = await Promise.all([
     query<AdminDingTalkGrantRow>(
       `SELECT enabled, granted_by, created_at, updated_at
        FROM user_external_auth_grants
@@ -410,16 +410,30 @@ async function fetchDingTalkAccessSnapshot(userId: string) {
        LIMIT 1`,
       [DINGTALK_PROVIDER, userId],
     ),
+    query<{ linked_count: number | string }>(
+      `SELECT COUNT(*)::int AS linked_count
+       FROM directory_account_links l
+       JOIN directory_accounts a ON a.id = l.directory_account_id
+       WHERE l.local_user_id = $1
+         AND l.link_status = 'linked'
+         AND a.provider = $2`,
+      [userId, DINGTALK_PROVIDER],
+    ),
   ])
 
   const grant = grantResult.rows[0] ?? null
   const identity = identityResult.rows[0] ?? null
+  const linkedCount = Number(linkedDirectoryResult.rows[0]?.linked_count || 0)
 
   return {
     provider: DINGTALK_PROVIDER,
     requireGrant: readBooleanEnv('DINGTALK_AUTH_REQUIRE_GRANT', false),
     autoLinkEmail: readBooleanEnv('DINGTALK_AUTH_AUTO_LINK_EMAIL', true),
     autoProvision: readBooleanEnv('DINGTALK_AUTH_AUTO_PROVISION', false),
+    directory: {
+      linked: linkedCount > 0,
+      linkedCount,
+    },
     grant: {
       exists: grant !== null,
       enabled: grant?.enabled === true,
@@ -435,6 +449,29 @@ async function fetchDingTalkAccessSnapshot(userId: string) {
       updatedAt: identity?.updated_at ?? null,
     },
   }
+}
+
+function normalizeUserIdList(value: unknown): string[] {
+  if (!Array.isArray(value)) return []
+  const unique = new Set<string>()
+  for (const candidate of value) {
+    const userId = typeof candidate === 'string' ? candidate.trim() : ''
+    if (userId) unique.add(userId)
+  }
+  return Array.from(unique)
+}
+
+async function upsertDingTalkGrants(userIds: string[], enabled: boolean, adminUserId: string): Promise<void> {
+  if (userIds.length === 0) return
+
+  await query(
+    `INSERT INTO user_external_auth_grants (provider, local_user_id, enabled, granted_by, created_at, updated_at)
+     SELECT $1, target_user_id, $2, $3, NOW(), NOW()
+     FROM unnest($4::text[]) AS target(target_user_id)
+     ON CONFLICT (provider, local_user_id)
+     DO UPDATE SET enabled = EXCLUDED.enabled, granted_by = EXCLUDED.granted_by, updated_at = NOW()`,
+    [DINGTALK_PROVIDER, enabled, adminUserId, userIds],
+  )
 }
 
 function deriveDelegableNamespaces(roleIds: string[]): string[] {
@@ -2966,6 +3003,71 @@ export function adminUsersRouter(): Router {
     }
   })
 
+  r.post('/api/admin/users/namespaces/:namespace/admission/bulk', authenticate, async (req: Request, res: Response) => {
+    const adminUserId = await ensurePlatformAdmin(req, res)
+    if (!adminUserId) return
+
+    try {
+      const namespace = normalizeNamespace(req.params.namespace)
+      const enabled = req.body?.enabled
+      const userIds = normalizeUserIdList(req.body?.userIds)
+      if (!namespace) return jsonError(res, 400, 'NAMESPACE_REQUIRED', 'namespace is required')
+      if (typeof enabled !== 'boolean') return jsonError(res, 400, 'ENABLED_REQUIRED', 'enabled boolean is required')
+      if (userIds.length === 0) return jsonError(res, 400, 'USER_IDS_REQUIRED', 'userIds array is required')
+      if (!isNamespaceAdmissionControlledResource(namespace)) {
+        return jsonError(res, 400, 'NAMESPACE_NOT_SUPPORTED', 'namespace is not managed by plugin admission controls')
+      }
+
+      const existingResult = await query<{ id: string }>(
+        `SELECT id
+         FROM users
+         WHERE id = ANY($1::text[])`,
+        [userIds],
+      )
+      const existingIds = new Set(existingResult.rows.map((row) => row.id).filter(Boolean))
+      const missingUserIds = userIds.filter((userId) => !existingIds.has(userId))
+      if (missingUserIds.length > 0) {
+        return jsonError(res, 404, 'USERS_NOT_FOUND', 'One or more users were not found', { missingUserIds })
+      }
+
+      await Promise.all(userIds.map(async (userId) => {
+        await setUserNamespaceAdmission({
+          userId,
+          namespace,
+          enabled,
+          actorId: adminUserId,
+          source: 'platform_admin',
+        })
+        invalidateUserPerms(userId)
+        await auditLog({
+          actorId: adminUserId,
+          actorType: 'user',
+          action: enabled ? 'grant' : 'revoke',
+          resourceType: 'user-namespace-admission',
+          resourceId: `${userId}:${namespace}`,
+          meta: {
+            adminUserId,
+            userId,
+            namespace,
+            enabled,
+            mode: 'bulk',
+            selectionSize: userIds.length,
+          },
+        })
+      }))
+
+      return jsonOk(res, {
+        actorId: adminUserId,
+        namespace,
+        enabled,
+        updatedCount: userIds.length,
+        userIds,
+      })
+    } catch (error) {
+      return jsonError(res, 500, 'MEMBER_NAMESPACE_ADMISSION_BULK_FAILED', (error as Error)?.message || 'Failed to update namespace admission in bulk')
+    }
+  })
+
   r.patch('/api/admin/users/:userId/dingtalk-grant', authenticate, async (req: Request, res: Response) => {
     const adminUserId = await ensurePlatformAdmin(req, res)
     if (!adminUserId) return
@@ -2979,13 +3081,7 @@ export function adminUsersRouter(): Router {
       const profile = await fetchUserProfile(userId)
       if (!profile) return jsonError(res, 404, 'NOT_FOUND', 'User not found')
 
-      await query(
-        `INSERT INTO user_external_auth_grants (provider, local_user_id, enabled, granted_by, created_at, updated_at)
-         VALUES ($1, $2, $3, $4, NOW(), NOW())
-         ON CONFLICT (provider, local_user_id)
-         DO UPDATE SET enabled = EXCLUDED.enabled, granted_by = EXCLUDED.granted_by, updated_at = NOW()`,
-        [DINGTALK_PROVIDER, userId, enabled, adminUserId],
-      )
+      await upsertDingTalkGrants([userId], enabled, adminUserId)
 
       await auditLog({
         actorId: adminUserId,
@@ -3008,6 +3104,57 @@ export function adminUsersRouter(): Router {
       })
     } catch (error) {
       return jsonError(res, 500, 'DINGTALK_GRANT_UPDATE_FAILED', (error as Error)?.message || 'Failed to update DingTalk access')
+    }
+  })
+
+  r.post('/api/admin/users/dingtalk-grants/bulk', authenticate, async (req: Request, res: Response) => {
+    const adminUserId = await ensurePlatformAdmin(req, res)
+    if (!adminUserId) return
+
+    try {
+      const enabled = req.body?.enabled
+      const userIds = normalizeUserIdList(req.body?.userIds)
+      if (typeof enabled !== 'boolean') return jsonError(res, 400, 'ENABLED_REQUIRED', 'enabled boolean is required')
+      if (userIds.length === 0) return jsonError(res, 400, 'USER_IDS_REQUIRED', 'userIds array is required')
+
+      const existingResult = await query<{ id: string }>(
+        `SELECT id
+         FROM users
+         WHERE id = ANY($1::text[])`,
+        [userIds],
+      )
+      const existingIds = new Set(existingResult.rows.map((row) => row.id).filter(Boolean))
+      const missingUserIds = userIds.filter((userId) => !existingIds.has(userId))
+      if (missingUserIds.length > 0) {
+        return jsonError(res, 404, 'USERS_NOT_FOUND', 'One or more users were not found', { missingUserIds })
+      }
+
+      await upsertDingTalkGrants(userIds, enabled, adminUserId)
+
+      await Promise.all(userIds.map((userId) => auditLog({
+        actorId: adminUserId,
+        actorType: 'user',
+        action: enabled ? 'grant' : 'revoke',
+        resourceType: 'user-auth-grant',
+        resourceId: `${userId}:${DINGTALK_PROVIDER}`,
+        meta: {
+          adminUserId,
+          userId,
+          provider: DINGTALK_PROVIDER,
+          enabled,
+          mode: 'bulk',
+          selectionSize: userIds.length,
+        },
+      })))
+
+      return jsonOk(res, {
+        actorId: adminUserId,
+        enabled,
+        updatedCount: userIds.length,
+        userIds,
+      })
+    } catch (error) {
+      return jsonError(res, 500, 'DINGTALK_BULK_GRANT_UPDATE_FAILED', (error as Error)?.message || 'Failed to update DingTalk access in bulk')
     }
   })
 
