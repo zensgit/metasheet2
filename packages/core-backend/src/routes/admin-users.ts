@@ -3,6 +3,7 @@ import { Router } from 'express'
 import * as bcrypt from 'bcryptjs'
 import * as crypto from 'crypto'
 import { buildOnboardingPacket, getAccessPreset, listAccessPresets } from '../auth/access-presets'
+import { getDingTalkRuntimeStatus } from '../auth/dingtalk-oauth'
 import { recordInvite } from '../auth/invite-ledger'
 import { isInviteTokenExpired, issueInviteToken } from '../auth/invite-tokens'
 import { validatePassword } from '../auth/password-policy'
@@ -375,14 +376,6 @@ function normalizeInviteLedgerRow(row: AdminInviteLedgerRow): AdminInviteLedgerR
   return row
 }
 
-function readBooleanEnv(name: string, fallback: boolean): boolean {
-  const raw = String(process.env[name] ?? '').trim().toLowerCase()
-  if (!raw) return fallback
-  if (['1', 'true', 'yes', 'on', 'enabled'].includes(raw)) return true
-  if (['0', 'false', 'no', 'off', 'disabled'].includes(raw)) return false
-  return fallback
-}
-
 function isDatabaseUniqueConstraintError(error: unknown): boolean {
   const dbError = error as { code?: string, message?: string }
   if (dbError?.code === '23505') return true
@@ -423,13 +416,15 @@ async function fetchDingTalkAccessSnapshot(userId: string) {
 
   const grant = grantResult.rows[0] ?? null
   const identity = identityResult.rows[0] ?? null
+  const runtime = getDingTalkRuntimeStatus()
   const linkedCount = Number(linkedDirectoryResult.rows[0]?.linked_count || 0)
 
   return {
     provider: DINGTALK_PROVIDER,
-    requireGrant: readBooleanEnv('DINGTALK_AUTH_REQUIRE_GRANT', false),
-    autoLinkEmail: readBooleanEnv('DINGTALK_AUTH_AUTO_LINK_EMAIL', true),
-    autoProvision: readBooleanEnv('DINGTALK_AUTH_AUTO_PROVISION', false),
+    requireGrant: runtime.requireGrant,
+    autoLinkEmail: runtime.autoLinkEmail,
+    autoProvision: runtime.autoProvision,
+    server: runtime,
     directory: {
       linked: linkedCount > 0,
       linkedCount,

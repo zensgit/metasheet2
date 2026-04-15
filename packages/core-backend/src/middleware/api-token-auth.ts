@@ -52,7 +52,7 @@ export async function apiTokenAuth(
 
   const result = await apiTokenService.validateToken(token)
 
-  if (!result.valid) {
+  if ('reason' in result) {
     res.status(401).json({
       ok: false,
       error: { code: 'INVALID_API_TOKEN', message: result.reason },
@@ -65,10 +65,10 @@ export async function apiTokenAuth(
   req.apiTokenUserId = result.token.createdBy
 
   // Set a minimal user object so downstream route guards work
-  ;(req as Record<string, unknown>).user = {
+  req.user = {
     id: result.token.createdBy,
     apiToken: true,
-  }
+  } as Express.Request['user']
 
   next()
 }

@@ -37,6 +37,7 @@ const sessionRegistryMocks = vi.hoisted(() => ({
 
 const dingtalkOauthMocks = vi.hoisted(() => ({
   isDingTalkConfigured: vi.fn(),
+  getDingTalkRuntimeStatus: vi.fn(),
   generateState: vi.fn(),
   buildAuthUrl: vi.fn(),
   validateState: vi.fn(),
@@ -100,6 +101,7 @@ vi.mock('../../src/auth/session-registry', () => ({
 
 vi.mock('../../src/auth/dingtalk-oauth', () => ({
   isDingTalkConfigured: dingtalkOauthMocks.isDingTalkConfigured,
+  getDingTalkRuntimeStatus: dingtalkOauthMocks.getDingTalkRuntimeStatus,
   generateState: dingtalkOauthMocks.generateState,
   buildAuthUrl: dingtalkOauthMocks.buildAuthUrl,
   validateState: dingtalkOauthMocks.validateState,
@@ -206,11 +208,22 @@ describe('auth login routes', () => {
     sessionRegistryMocks.revokeUserSession.mockReset()
     sessionRegistryMocks.touchUserSession.mockReset()
     dingtalkOauthMocks.isDingTalkConfigured.mockReset()
+    dingtalkOauthMocks.getDingTalkRuntimeStatus.mockReset()
     dingtalkOauthMocks.generateState.mockReset()
     dingtalkOauthMocks.buildAuthUrl.mockReset()
     dingtalkOauthMocks.validateState.mockReset()
     dingtalkOauthMocks.exchangeCodeForUser.mockReset()
     rbacMocks.listUserPermissions.mockReset()
+    dingtalkOauthMocks.getDingTalkRuntimeStatus.mockReturnValue({
+      configured: true,
+      available: true,
+      corpId: 'ding-corp',
+      allowedCorpIds: [],
+      requireGrant: false,
+      autoLinkEmail: false,
+      autoProvision: false,
+      unavailableReason: null,
+    })
   })
 
   it('returns feature payload on successful login', async () => {
@@ -589,7 +602,16 @@ describe('auth login routes', () => {
   })
 
   it('supports probing DingTalk availability without generating OAuth state', async () => {
-    dingtalkOauthMocks.isDingTalkConfigured.mockReturnValue(true)
+    dingtalkOauthMocks.getDingTalkRuntimeStatus.mockReturnValue({
+      configured: true,
+      available: true,
+      corpId: 'ding-corp',
+      allowedCorpIds: ['ding-corp'],
+      requireGrant: true,
+      autoLinkEmail: true,
+      autoProvision: false,
+      unavailableReason: null,
+    })
 
     const response = await invokeRoute('get', '/dingtalk/launch', {
       query: {
@@ -601,7 +623,42 @@ describe('auth login routes', () => {
     expect(dingtalkOauthMocks.generateState).not.toHaveBeenCalled()
     expect(dingtalkOauthMocks.buildAuthUrl).not.toHaveBeenCalled()
     expect((response.body as Record<string, any>).data).toEqual({
+      configured: true,
       available: true,
+      corpId: 'ding-corp',
+      allowedCorpIds: ['ding-corp'],
+      requireGrant: true,
+      autoLinkEmail: true,
+      autoProvision: false,
+      unavailableReason: null,
+    })
+  })
+
+  it('returns runtime status from probe even when DingTalk login is unavailable', async () => {
+    dingtalkOauthMocks.isDingTalkConfigured.mockReturnValue(false)
+    dingtalkOauthMocks.getDingTalkRuntimeStatus.mockReturnValue({
+      configured: true,
+      available: false,
+      corpId: 'ding-corp-blocked',
+      allowedCorpIds: ['ding-corp-allowed'],
+      requireGrant: false,
+      autoLinkEmail: false,
+      autoProvision: false,
+      unavailableReason: 'corp_not_allowed',
+    })
+
+    const response = await invokeRoute('get', '/dingtalk/launch', {
+      query: {
+        probe: '1',
+      },
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect(dingtalkOauthMocks.generateState).not.toHaveBeenCalled()
+    expect(dingtalkOauthMocks.buildAuthUrl).not.toHaveBeenCalled()
+    expect((response.body as Record<string, any>).data).toMatchObject({
+      available: false,
+      unavailableReason: 'corp_not_allowed',
     })
   })
 

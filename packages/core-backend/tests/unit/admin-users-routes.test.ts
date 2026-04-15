@@ -42,6 +42,10 @@ const inviteMocks = vi.hoisted(() => ({
   isInviteTokenExpired: vi.fn((token: string) => token === 'eyJhbGciOiJIUzI1NiJ9.eyJ0eXBlIjoiaW52aXRlIiwiZXhwIjoxfQ.sig'),
 }))
 
+const dingtalkOauthMocks = vi.hoisted(() => ({
+  getDingTalkRuntimeStatus: vi.fn(),
+}))
+
 vi.mock('../../src/middleware/auth', () => ({
   authenticate: (req: Request, _res: Response, next: (error?: unknown) => void) => {
     req.user = state.authUser as never
@@ -79,6 +83,10 @@ vi.mock('../../src/rbac/namespace-admission', () => ({
 vi.mock('../../src/auth/invite-tokens', () => ({
   issueInviteToken: inviteMocks.issueInviteToken,
   isInviteTokenExpired: inviteMocks.isInviteTokenExpired,
+}))
+
+vi.mock('../../src/auth/dingtalk-oauth', () => ({
+  getDingTalkRuntimeStatus: dingtalkOauthMocks.getDingTalkRuntimeStatus,
 }))
 
 import { adminUsersRouter } from '../../src/routes/admin-users'
@@ -208,6 +216,17 @@ describe('admin-users routes', () => {
     inviteMocks.issueInviteToken.mockClear()
     inviteMocks.isInviteTokenExpired.mockClear()
     inviteMocks.isInviteTokenExpired.mockImplementation((token: string) => token === 'eyJhbGciOiJIUzI1NiJ9.eyJ0eXBlIjoiaW52aXRlIiwiZXhwIjoxfQ.sig')
+    dingtalkOauthMocks.getDingTalkRuntimeStatus.mockReset()
+    dingtalkOauthMocks.getDingTalkRuntimeStatus.mockReturnValue({
+      configured: true,
+      available: true,
+      corpId: 'ding-corp',
+      allowedCorpIds: [],
+      requireGrant: false,
+      autoLinkEmail: true,
+      autoProvision: false,
+      unavailableReason: null,
+    })
   })
 
   it('lists users with pagination payload', async () => {
@@ -301,6 +320,16 @@ describe('admin-users routes', () => {
     vi.stubEnv('DINGTALK_AUTH_REQUIRE_GRANT', '1')
     vi.stubEnv('DINGTALK_AUTH_AUTO_LINK_EMAIL', '0')
     vi.stubEnv('DINGTALK_AUTH_AUTO_PROVISION', '0')
+    dingtalkOauthMocks.getDingTalkRuntimeStatus.mockReturnValue({
+      configured: true,
+      available: true,
+      corpId: 'ding-corp',
+      allowedCorpIds: ['ding-corp'],
+      requireGrant: true,
+      autoLinkEmail: false,
+      autoProvision: false,
+      unavailableReason: null,
+    })
     rbacMocks.isAdmin.mockResolvedValue(true)
     pgMocks.query
       .mockResolvedValueOnce({
@@ -348,6 +377,15 @@ describe('admin-users routes', () => {
       requireGrant: true,
       autoLinkEmail: false,
       autoProvision: false,
+      server: {
+        configured: true,
+        available: true,
+        corpId: 'ding-corp',
+        requireGrant: true,
+        autoLinkEmail: false,
+        autoProvision: false,
+        unavailableReason: null,
+      },
       directory: {
         linked: true,
         linkedCount: 2,

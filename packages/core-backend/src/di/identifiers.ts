@@ -164,8 +164,12 @@ export const ICommentService = createIdentifier<ICommentService>('comment-servic
 export interface CommentQueryOptions {
     /** Filter to a specific record (row). Alias: targetId on frontend. */
     rowId?: string;
+    /** Canonical alias for `rowId`. */
+    targetId?: string;
     /** Filter to a specific cell field. */
     fieldId?: string;
+    /** Canonical alias for `fieldId`. */
+    targetFieldId?: string;
     /** Filter by resolved status. */
     resolved?: boolean;
     /** Page size (clamped to 1..200, default 50). */
