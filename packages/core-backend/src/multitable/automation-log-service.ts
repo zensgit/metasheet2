@@ -1,10 +1,12 @@
 /**
- * Automation Execution Log Service — V1
- * In-memory circular buffer for execution logs.
- * State is lost on restart; suitable for V1.
+ * Automation Execution Log Service — V2 (PostgreSQL-backed)
+ * Replaces the in-memory circular buffer with Kysely queries
+ * against the multitable_automation_executions table.
  */
 
-import type { AutomationExecution } from './automation-executor'
+import { sql } from 'kysely'
+import { db } from '../db/db'
+import type { AutomationExecution, AutomationStepResult } from './automation-executor'
 
 export interface AutomationStats {
   total: number
@@ -15,76 +17,125 @@ export interface AutomationStats {
 }
 
 export class AutomationLogService {
-  private logs: AutomationExecution[] = []
-  private maxLogs: number
-
-  constructor(maxLogs = 1000) {
-    this.maxLogs = maxLogs
-  }
-
   /**
-   * Record an execution log. Circular buffer — oldest entries are evicted.
+   * Record an execution log by inserting into the database.
    */
-  record(execution: AutomationExecution): void {
-    this.logs.push(execution)
-    if (this.logs.length > this.maxLogs) {
-      this.logs.splice(0, this.logs.length - this.maxLogs)
-    }
+  async record(execution: AutomationExecution): Promise<void> {
+    await db
+      .insertInto('multitable_automation_executions')
+      .values({
+        id: execution.id,
+        rule_id: execution.ruleId,
+        triggered_by: execution.triggeredBy,
+        triggered_at: execution.triggeredAt,
+        status: execution.status,
+        steps: JSON.stringify(execution.steps) as unknown as Record<string, unknown>[],
+        error: execution.error ?? null,
+        duration: execution.duration ?? null,
+      })
+      .execute()
   }
 
   /**
    * Get executions for a specific rule, newest first.
    */
-  getByRule(ruleId: string, limit = 50): AutomationExecution[] {
-    const filtered = this.logs.filter((l) => l.ruleId === ruleId)
-    return filtered.slice(-limit).reverse()
+  async getByRule(ruleId: string, limit = 50): Promise<AutomationExecution[]> {
+    const rows = await db
+      .selectFrom('multitable_automation_executions')
+      .selectAll()
+      .where('rule_id', '=', ruleId)
+      .orderBy('created_at', 'desc')
+      .limit(limit)
+      .execute()
+
+    return rows.map(toExecution)
   }
 
   /**
    * Get recent executions across all rules, newest first.
    */
-  getRecent(limit = 50): AutomationExecution[] {
-    return this.logs.slice(-limit).reverse()
+  async getRecent(limit = 50): Promise<AutomationExecution[]> {
+    const rows = await db
+      .selectFrom('multitable_automation_executions')
+      .selectAll()
+      .orderBy('created_at', 'desc')
+      .limit(limit)
+      .execute()
+
+    return rows.map(toExecution)
   }
 
   /**
    * Get a specific execution by ID.
    */
-  getById(executionId: string): AutomationExecution | undefined {
-    return this.logs.find((l) => l.id === executionId)
+  async getById(executionId: string): Promise<AutomationExecution | undefined> {
+    const row = await db
+      .selectFrom('multitable_automation_executions')
+      .selectAll()
+      .where('id', '=', executionId)
+      .executeTakeFirst()
+
+    return row ? toExecution(row) : undefined
   }
 
   /**
    * Get aggregate stats for a rule.
    */
-  getStats(ruleId: string): AutomationStats {
-    const ruleLogs = this.logs.filter((l) => l.ruleId === ruleId)
-    const total = ruleLogs.length
-    const success = ruleLogs.filter((l) => l.status === 'success').length
-    const failed = ruleLogs.filter((l) => l.status === 'failed').length
-    const skipped = ruleLogs.filter((l) => l.status === 'skipped').length
+  async getStats(ruleId: string): Promise<AutomationStats> {
+    const row = await db
+      .selectFrom('multitable_automation_executions')
+      .select([
+        sql<number>`COUNT(*)::int`.as('total'),
+        sql<number>`COUNT(*) FILTER (WHERE status = 'success')::int`.as('success'),
+        sql<number>`COUNT(*) FILTER (WHERE status = 'failed')::int`.as('failed'),
+        sql<number>`COUNT(*) FILTER (WHERE status = 'skipped')::int`.as('skipped'),
+        sql<number>`COALESCE(AVG(duration) FILTER (WHERE duration > 0), 0)::int`.as('avg_duration'),
+      ])
+      .where('rule_id', '=', ruleId)
+      .executeTakeFirst()
 
-    const durations = ruleLogs
-      .map((l) => l.duration)
-      .filter((d): d is number => typeof d === 'number' && d > 0)
-    const avgDuration = durations.length > 0
-      ? Math.round(durations.reduce((a, b) => a + b, 0) / durations.length)
-      : 0
+    if (!row) {
+      return { total: 0, success: 0, failed: 0, skipped: 0, avgDuration: 0 }
+    }
 
-    return { total, success, failed, skipped, avgDuration }
+    return {
+      total: Number(row.total),
+      success: Number(row.success),
+      failed: Number(row.failed),
+      skipped: Number(row.skipped),
+      avgDuration: Math.round(Number(row.avg_duration)),
+    }
   }
 
   /**
-   * Get total log count.
+   * Remove execution logs older than the given retention period.
    */
-  get size(): number {
-    return this.logs.length
-  }
+  async cleanup(retentionDays = 30): Promise<number> {
+    const result = await db
+      .deleteFrom('multitable_automation_executions')
+      .where('created_at', '<', sql`NOW() - INTERVAL '${sql.raw(String(retentionDays))} days'`)
+      .executeTakeFirst()
 
-  /**
-   * Clear all logs.
-   */
-  clear(): void {
-    this.logs = []
+    return Number(result.numDeletedRows ?? 0)
+  }
+}
+
+// ── Row-to-domain mapper ────────────────────────────────────────────────────
+
+function toExecution(row: Record<string, unknown>): AutomationExecution {
+  return {
+    id: row.id as string,
+    ruleId: row.rule_id as string,
+    triggeredBy: row.triggered_by as string,
+    triggeredAt:
+      row.triggered_at instanceof Date
+        ? row.triggered_at.toISOString()
+        : String(row.triggered_at),
+    status: row.status as AutomationExecution['status'],
+    steps: (typeof row.steps === 'string'
+      ? JSON.parse(row.steps)
+      : row.steps) as AutomationStepResult[],
+    error: (row.error as string) ?? undefined,
+    duration: row.duration != null ? Number(row.duration) : undefined,
   }
 }

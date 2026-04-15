@@ -94,6 +94,7 @@ import { viewsRouter } from './routes/views'
 import { initAdminRoutes } from './routes/admin-routes'
 import { adminUsersRouter } from './routes/admin-users'
 import { adminDirectoryRouter } from './routes/admin-directory'
+import { startDirectorySyncScheduler, stopDirectorySyncScheduler } from './directory/directory-sync-scheduler'
 import { canaryRoutes } from './routes/canary-routes'
 import { CanaryRouter } from './canary/CanaryRouter'
 import { createCanaryInterceptor } from './canary/CanaryInterceptor'
@@ -1537,6 +1538,15 @@ export class MetaSheetServer {
       })())
     }
 
+    shutdownTasks.push((async () => {
+      try {
+        await stopDirectorySyncScheduler()
+        this.logger.info('Directory sync scheduler stopped')
+      } catch (err) {
+        this.logger.warn(`Directory sync scheduler shutdown failed: ${err instanceof Error ? err.message : String(err)}`)
+      }
+    })())
+
     // 4. Destroy API Gateway resources
     // shutdownTasks.push((async () => {
     //   try {
@@ -1612,6 +1622,13 @@ export class MetaSheetServer {
       this.logger.info('AutomationService initialized')
     } catch (e) {
       this.logger.error('AutomationService initialization failed; continuing in degraded mode', e as Error)
+    }
+
+    try {
+      await startDirectorySyncScheduler()
+      this.logger.info('Directory sync scheduler initialized')
+    } catch (e) {
+      this.logger.error('Directory sync scheduler initialization failed; continuing in degraded mode', e as Error)
     }
 
     // 加载插件并启动 HTTP 服务

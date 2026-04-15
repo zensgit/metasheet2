@@ -1,11 +1,14 @@
 /**
  * Webhook Service
- * In-memory webhook management and delivery for multitable open API.
- * V1: in-memory store and delivery queue — state is lost on restart.
+ * PostgreSQL-backed webhook management and delivery for multitable open API.
+ * V2: persistent store via Kysely — state survives restarts.
  */
 
 import { createHmac, randomBytes } from 'crypto'
+import type { Kysely } from 'kysely'
 import { Logger } from '../core/logger'
+import type { Database } from '../db/types'
+import { nowTimestamp, toJsonValue } from '../db/type-helpers'
 import type {
   Webhook,
   WebhookCreateInput,
@@ -25,19 +28,108 @@ function generateId(): string {
   return randomBytes(16).toString('hex')
 }
 
+/** Map a DB row to the domain Webhook. */
+function rowToWebhook(row: {
+  id: string
+  name: string
+  url: string
+  secret: string | null
+  events: string | string[]
+  active: boolean
+  created_by: string
+  created_at: string | Date
+  updated_at?: string | Date | null
+  last_delivered_at?: string | Date | null
+  failure_count: number
+  max_retries: number
+}): Webhook {
+  const events =
+    typeof row.events === 'string'
+      ? (JSON.parse(row.events) as WebhookEventType[])
+      : (row.events as WebhookEventType[])
+  return {
+    id: row.id,
+    name: row.name,
+    url: row.url,
+    secret: row.secret ?? undefined,
+    events,
+    active: row.active,
+    createdBy: row.created_by,
+    createdAt:
+      row.created_at instanceof Date
+        ? row.created_at.toISOString()
+        : row.created_at,
+    updatedAt: row.updated_at
+      ? row.updated_at instanceof Date
+        ? row.updated_at.toISOString()
+        : row.updated_at
+      : undefined,
+    lastDeliveredAt: row.last_delivered_at
+      ? row.last_delivered_at instanceof Date
+        ? row.last_delivered_at.toISOString()
+        : row.last_delivered_at
+      : undefined,
+    failureCount: row.failure_count,
+    maxRetries: row.max_retries,
+  }
+}
+
+/** Map a DB row to the domain WebhookDelivery. */
+function rowToDelivery(row: {
+  id: string
+  webhook_id: string
+  event: string
+  payload: unknown
+  status: string
+  http_status: number | null
+  response_body: string | null
+  attempt_count: number
+  created_at: string | Date
+  delivered_at?: string | Date | null
+  next_retry_at?: string | Date | null
+}): WebhookDelivery {
+  return {
+    id: row.id,
+    webhookId: row.webhook_id,
+    event: row.event as WebhookEventType,
+    payload: row.payload,
+    status: row.status as WebhookDelivery['status'],
+    httpStatus: row.http_status ?? undefined,
+    responseBody: row.response_body ?? undefined,
+    attemptCount: row.attempt_count,
+    createdAt:
+      row.created_at instanceof Date
+        ? row.created_at.toISOString()
+        : row.created_at,
+    deliveredAt: row.delivered_at
+      ? row.delivered_at instanceof Date
+        ? row.delivered_at.toISOString()
+        : row.delivered_at
+      : undefined,
+    nextRetryAt: row.next_retry_at
+      ? row.next_retry_at instanceof Date
+        ? row.next_retry_at.toISOString()
+        : row.next_retry_at
+      : undefined,
+  }
+}
+
 export class WebhookService {
-  private webhooks = new Map<string, Webhook>()
-  private deliveries: WebhookDelivery[] = []
+  private db: Kysely<Database>
   /** Pluggable fetch for testing */
   private fetchFn: typeof fetch
 
-  constructor(fetchFn?: typeof fetch) {
+  constructor(db: Kysely<Database>, fetchFn?: typeof fetch) {
+    this.db = db
     this.fetchFn = fetchFn ?? globalThis.fetch
   }
 
   // ─── CRUD ────────────────────────────────────────────────────────────
 
-  createWebhook(userId: string, input: WebhookCreateInput): Webhook {
+  async createWebhook(
+    userId: string,
+    input: WebhookCreateInput,
+  ): Promise<Webhook> {
     if (!input.name || input.name.trim().length === 0) {
       throw new Error('Webhook name is required')
     }
@@ -68,6 +160,22 @@ export class WebhookService {
     const id = generateId()
     const now = new Date().toISOString()
 
+    await this.db
+      .insertInto('multitable_webhooks')
+      .values({
+        id,
+        name: input.name.trim(),
+        url: input.url.trim(),
+        secret: input.secret ?? null,
+        events: toJsonValue([...input.events]),
+        active: true,
+        created_by: userId,
+        created_at: now,
+        failure_count: 0,
+        max_retries: 3,
+      })
+      .execute()
+
     const webhook: Webhook = {
       id,
       name: input.name.trim(),
@@ -81,57 +189,95 @@ export class WebhookService {
       maxRetries: 3,
     }
 
-    this.webhooks.set(id, webhook)
     logger.info(`Webhook created: ${id} by user ${userId}`)
     return webhook
   }
 
-  listWebhooks(userId: string): Webhook[] {
-    const result: Webhook[] = []
-    for (const wh of this.webhooks.values()) {
-      if (wh.createdBy === userId) {
-        result.push(wh)
-      }
-    }
-    return result
+  async listWebhooks(userId: string): Promise<Webhook[]> {
+    const rows = await this.db
+      .selectFrom('multitable_webhooks')
+      .selectAll()
+      .where('created_by', '=', userId)
+      .execute()
+
+    return rows.map((r) => rowToWebhook(r as Parameters<typeof rowToWebhook>[0]))
   }
 
-  updateWebhook(
+  async updateWebhook(
     webhookId: string,
     userId: string,
     input: WebhookUpdateInput,
-  ): Webhook {
-    const wh = this.webhooks.get(webhookId)
-    if (!wh) throw new Error('Webhook not found')
-    if (wh.createdBy !== userId) throw new Error('Not authorized')
+  ): Promise<Webhook> {
+    const row = await this.db
+      .selectFrom('multitable_webhooks')
+      .selectAll()
+      .where('id', '=', webhookId)
+      .executeTakeFirst()
 
-    if (input.name !== undefined) wh.name = input.name.trim()
+    if (!row) throw new Error('Webhook not found')
+    if (row.created_by !== userId) throw new Error('Not authorized')
+
+    const updates: Record<string, unknown> = {
+      updated_at: nowTimestamp(),
+    }
+
+    if (input.name !== undefined) updates.name = input.name.trim()
     if (input.url !== undefined) {
       try {
         new URL(input.url)
       } catch {
         throw new Error('Webhook URL is not a valid URL')
       }
-      wh.url = input.url.trim()
+      updates.url = input.url.trim()
     }
-    if (input.secret !== undefined) wh.secret = input.secret
-    if (input.events !== undefined) wh.events = [...input.events]
-    if (input.active !== undefined) wh.active = input.active
-    wh.updatedAt = new Date().toISOString()
+    if (input.secret !== undefined) updates.secret = input.secret
+    if (input.events !== undefined)
+      updates.events = toJsonValue([...input.events])
+    if (input.active !== undefined) updates.active = input.active
 
-    return wh
+    await this.db
+      .updateTable('multitable_webhooks')
+      .set(updates as never)
+      .where('id', '=', webhookId)
+      .execute()
+
+    // Re-read the updated row
+    const updated = await this.db
+      .selectFrom('multitable_webhooks')
+      .selectAll()
+      .where('id', '=', webhookId)
+      .executeTakeFirstOrThrow()
+
+    return rowToWebhook(updated as Parameters<typeof rowToWebhook>[0])
   }
 
-  deleteWebhook(webhookId: string, userId: string): void {
-    const wh = this.webhooks.get(webhookId)
-    if (!wh) throw new Error('Webhook not found')
-    if (wh.createdBy !== userId) throw new Error('Not authorized')
-    this.webhooks.delete(webhookId)
+  async deleteWebhook(webhookId: string, userId: string): Promise<void> {
+    const row = await this.db
+      .selectFrom('multitable_webhooks')
+      .selectAll()
+      .where('id', '=', webhookId)
+      .executeTakeFirst()
+
+    if (!row) throw new Error('Webhook not found')
+    if (row.created_by !== userId) throw new Error('Not authorized')
+
+    await this.db
+      .deleteFrom('multitable_webhooks')
+      .where('id', '=', webhookId)
+      .execute()
+
     logger.info(`Webhook deleted: ${webhookId} by user ${userId}`)
   }
 
-  getWebhookById(webhookId: string): Webhook | undefined {
-    return this.webhooks.get(webhookId)
+  async getWebhookById(webhookId: string): Promise<Webhook | undefined> {
+    const row = await this.db
+      .selectFrom('multitable_webhooks')
+      .selectAll()
+      .where('id', '=', webhookId)
+      .executeTakeFirst()
+
+    if (!row) return undefined
+    return rowToWebhook(row as Parameters<typeof rowToWebhook>[0])
   }
 
   // ─── Delivery ────────────────────────────────────────────────────────
@@ -143,16 +289,19 @@ export class WebhookService {
     event: WebhookEventType,
     payload: unknown,
   ): Promise<WebhookDelivery[]> {
-    const matching: Webhook[] = []
-    for (const wh of this.webhooks.values()) {
-      if (wh.active && wh.events.includes(event)) {
-        matching.push(wh)
-      }
-    }
+    const rows = await this.db
+      .selectFrom('multitable_webhooks')
+      .selectAll()
+      .where('active', '=', true)
+      .execute()
+
+    const matching = rows
+      .map((r) => rowToWebhook(r as Parameters<typeof rowToWebhook>[0]))
+      .filter((wh) => wh.events.includes(event))
 
     const deliveries: WebhookDelivery[] = []
     for (const wh of matching) {
-      const delivery = this.createDeliveryRecord(wh.id, event, payload)
+      const delivery = await this.createDeliveryRecord(wh.id, event, payload)
       deliveries.push(delivery)
       // Fire-and-forget — do not await per delivery to avoid blocking the caller
       this.executeDelivery(delivery).catch((err) => {
@@ -169,8 +318,13 @@ export class WebhookService {
    * Execute a single webhook delivery attempt.
    */
   async executeDelivery(delivery: WebhookDelivery): Promise<void> {
-    const wh = this.webhooks.get(delivery.webhookId)
+    const wh = await this.getWebhookById(delivery.webhookId)
     if (!wh) {
+      await this.db
+        .updateTable('multitable_webhook_deliveries')
+        .set({ status: 'failed' })
+        .where('id', '=', delivery.id)
+        .execute()
       delivery.status = 'failed'
       return
     }
@@ -217,16 +371,32 @@ export class WebhookService {
       if (response.ok) {
         delivery.status = 'success'
         delivery.deliveredAt = new Date().toISOString()
-        wh.lastDeliveredAt = delivery.deliveredAt
-        wh.failureCount = 0
+
+        await this.db
+          .updateTable('multitable_webhook_deliveries')
+          .set({
+            status: 'success',
+            http_status: response.status,
+            response_body: delivery.responseBody ?? null,
+            attempt_count: delivery.attemptCount,
+            delivered_at: nowTimestamp(),
+          })
+          .where('id', '=', delivery.id)
+          .execute()
+
+        await this.db
+          .updateTable('multitable_webhooks')
+          .set({ last_delivered_at: nowTimestamp(), failure_count: 0 })
+          .where('id', '=', wh.id)
+          .execute()
       } else {
-        this.handleDeliveryFailure(delivery, wh)
+        await this.handleDeliveryFailure(delivery, wh)
       }
     } catch (err) {
       logger.error(
         `Webhook delivery error for ${wh.id}: ${err instanceof Error ? err.message : String(err)}`,
       )
-      this.handleDeliveryFailure(delivery, wh)
+      await this.handleDeliveryFailure(delivery, wh)
     }
   }
 
@@ -234,22 +404,37 @@ export class WebhookService {
    * Retry all failed deliveries that are due for retry.
    */
   async retryFailedDeliveries(): Promise<number> {
+    const rows = await this.db
+      .selectFrom('multitable_webhook_deliveries')
+      .selectAll()
+      .where('status', '=', 'pending')
+      .execute()
+
     const now = Date.now()
     let retried = 0
 
-    for (const delivery of this.deliveries) {
-      if (delivery.status !== 'pending') continue
+    for (const row of rows) {
+      const delivery = rowToDelivery(row as Parameters<typeof rowToDelivery>[0])
+
       if (!delivery.nextRetryAt) continue
       if (new Date(delivery.nextRetryAt).getTime() > now) continue
 
-      const wh = this.webhooks.get(delivery.webhookId)
+      const wh = await this.getWebhookById(delivery.webhookId)
       if (!wh || !wh.active) {
-        delivery.status = 'failed'
+        await this.db
+          .updateTable('multitable_webhook_deliveries')
+          .set({ status: 'failed' })
+          .where('id', '=', delivery.id)
+          .execute()
         continue
       }
 
       if (delivery.attemptCount >= wh.maxRetries) {
-        delivery.status = 'failed'
+        await this.db
+          .updateTable('multitable_webhook_deliveries')
+          .set({ status: 'failed' })
+          .where('id', '=', delivery.id)
+          .execute()
         continue
       }
 
@@ -263,47 +448,81 @@ export class WebhookService {
   /**
    * List recent deliveries for a webhook.
    */
-  listDeliveries(
+  async listDeliveries(
     webhookId: string,
     limit = 50,
-  ): WebhookDelivery[] {
-    return this.deliveries
-      .filter((d) => d.webhookId === webhookId)
-      .sort(
-        (a, b) =>
-          new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime(),
-      )
-      .slice(0, limit)
+  ): Promise<WebhookDelivery[]> {
+    const rows = await this.db
+      .selectFrom('multitable_webhook_deliveries')
+      .selectAll()
+      .where('webhook_id', '=', webhookId)
+      .orderBy('created_at', 'desc')
+      .limit(limit)
+      .execute()
+
+    return rows.map((r) =>
+      rowToDelivery(r as Parameters<typeof rowToDelivery>[0]),
+    )
   }
 
   // ─── Helpers ─────────────────────────────────────────────────────────
 
-  private createDeliveryRecord(
+  private async createDeliveryRecord(
     webhookId: string,
     event: WebhookEventType,
     payload: unknown,
-  ): WebhookDelivery {
-    const delivery: WebhookDelivery = {
-      id: generateId(),
+  ): Promise<WebhookDelivery> {
+    const id = generateId()
+    const now = new Date().toISOString()
+
+    await this.db
+      .insertInto('multitable_webhook_deliveries')
+      .values({
+        id,
+        webhook_id: webhookId,
+        event,
+        payload: toJsonValue(payload),
+        status: 'pending',
+        attempt_count: 0,
+        created_at: now,
+      })
+      .execute()
+
+    return {
+      id,
       webhookId,
-      event,
+      event: event as WebhookEventType,
       payload,
       status: 'pending',
       attemptCount: 0,
-      createdAt: new Date().toISOString(),
+      createdAt: now,
     }
-    this.deliveries.push(delivery)
-    return delivery
   }
 
-  private handleDeliveryFailure(
+  private async handleDeliveryFailure(
     delivery: WebhookDelivery,
     wh: Webhook,
-  ): void {
-    wh.failureCount += 1
+  ): Promise<void> {
+    const newFailureCount = wh.failureCount + 1
 
-    if (wh.failureCount >= MAX_CONSECUTIVE_FAILURES) {
-      wh.active = false
+    if (newFailureCount >= MAX_CONSECUTIVE_FAILURES) {
+      await this.db
+        .updateTable('multitable_webhooks')
+        .set({ active: false, failure_count: newFailureCount })
+        .where('id', '=', wh.id)
+        .execute()
+
+      await this.db
+        .updateTable('multitable_webhook_deliveries')
+        .set({
+          status: 'failed',
+          attempt_count: delivery.attemptCount,
+          http_status: delivery.httpStatus ?? null,
+          response_body: delivery.responseBody ?? null,
+        })
+        .where('id', '=', delivery.id)
+        .execute()
+
       delivery.status = 'failed'
       logger.warn(
         `Webhook ${wh.id} auto-disabled after ${MAX_CONSECUTIVE_FAILURES} consecutive failures`,
@@ -311,15 +530,45 @@ export class WebhookService {
       return
     }
 
+    await this.db
+      .updateTable('multitable_webhooks')
+      .set({ failure_count: newFailureCount })
+      .where('id', '=', wh.id)
+      .execute()
+
     if (delivery.attemptCount >= wh.maxRetries) {
+      await this.db
+        .updateTable('multitable_webhook_deliveries')
+        .set({
+          status: 'failed',
+          attempt_count: delivery.attemptCount,
+          http_status: delivery.httpStatus ?? null,
+          response_body: delivery.responseBody ?? null,
+        })
+        .where('id', '=', delivery.id)
+        .execute()
+
       delivery.status = 'failed'
       return
     }
 
     // Exponential backoff
     const delay = BASE_RETRY_DELAY_MS * Math.pow(2, delivery.attemptCount - 1)
-    delivery.nextRetryAt = new Date(Date.now() + delay).toISOString()
+    const nextRetry = new Date(Date.now() + delay).toISOString()
+    delivery.nextRetryAt = nextRetry
     delivery.status = 'pending'
+
+    await this.db
+      .updateTable('multitable_webhook_deliveries')
+      .set({
+        status: 'pending',
+        attempt_count: delivery.attemptCount,
+        next_retry_at: nextRetry,
+        http_status: delivery.httpStatus ?? null,
+        response_body: delivery.responseBody ?? null,
+      })
+      .where('id', '=', delivery.id)
+      .execute()
   }
 
   /**
@@ -329,6 +578,3 @@ export class WebhookService {
     return createHmac('sha256', secret).update(body).digest('hex')
   }
 }
-
-/** Singleton instance for V1 in-memory usage */
-export const webhookService = new WebhookService()
