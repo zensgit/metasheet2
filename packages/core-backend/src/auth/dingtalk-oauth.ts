@@ -6,9 +6,13 @@ import { query, transaction } from '../db/pg'
 import {
   exchangeCodeForUserAccessToken,
   fetchDingTalkCurrentUser,
-  isDingTalkConfigured as isClientConfigured,
   readDingTalkOauthConfig,
 } from '../integrations/dingtalk/client'
+import {
+  assertDingTalkCorpAllowed,
+  DingTalkCorpNotAllowedError,
+  readDingTalkAllowedCorpIds,
+} from '../integrations/dingtalk/runtime-policy'
 import { getBcryptSaltRounds } from '../security/auth-runtime-config'
 
 const logger = new Logger('DingTalkOAuth')
@@ -58,6 +62,24 @@ export interface StateValidationResult {
   redirectPath?: string
 }
 
+export type DingTalkRuntimeUnavailableReason =
+  | 'missing_client_id'
+  | 'missing_client_secret'
+  | 'missing_redirect_uri'
+  | 'corp_not_allowed'
+  | null
+
+export interface DingTalkRuntimeStatus {
+  configured: boolean
+  available: boolean
+  corpId: string | null
+  allowedCorpIds: string[]
+  requireGrant: boolean
+  autoLinkEmail: boolean
+  autoProvision: boolean
+  unavailableReason: DingTalkRuntimeUnavailableReason
+}
+
 export class DingTalkLoginPolicyError extends Error {
   readonly statusCode: number
   readonly code: string
@@ -88,6 +110,16 @@ function parseBooleanEnv(name: string, fallback: boolean): boolean {
   if (['1', 'true', 'yes', 'on', 'enabled'].includes(raw)) return true
   if (['0', 'false', 'no', 'off', 'disabled'].includes(raw)) return false
   return fallback
+}
+
+function readStringEnv(...keys: string[]): string {
+  for (const key of keys) {
+    const value = process.env[key]
+    if (typeof value === 'string' && value.trim().length > 0) {
+      return value.trim()
+    }
+  }
+  return ''
 }
 
 function shouldAutoLinkEmail(): boolean {
@@ -605,7 +637,48 @@ async function resolveLocalUser(dtUser: DingTalkUserInfo): Promise<{ localUser: 
 }
 
 export function isDingTalkConfigured(): boolean {
-  return isClientConfigured()
+  return getDingTalkRuntimeStatus().available
+}
+
+export function getDingTalkRuntimeStatus(): DingTalkRuntimeStatus {
+  const clientId = readStringEnv('DINGTALK_CLIENT_ID', 'DINGTALK_APP_KEY')
+  const clientSecret = readStringEnv('DINGTALK_CLIENT_SECRET', 'DINGTALK_APP_SECRET')
+  const redirectUri = readStringEnv('DINGTALK_REDIRECT_URI')
+  const corpId = readStringEnv('DINGTALK_CORP_ID') || null
+  const allowedCorpIds = readDingTalkAllowedCorpIds()
+
+  let unavailableReason: DingTalkRuntimeUnavailableReason = null
+  if (!clientId) {
+    unavailableReason = 'missing_client_id'
+  } else if (!clientSecret) {
+    unavailableReason = 'missing_client_secret'
+  } else if (!redirectUri) {
+    unavailableReason = 'missing_redirect_uri'
+  } else {
+    try {
+      assertDingTalkCorpAllowed(corpId, {
+        allowEmpty: true,
+        context: 'DINGTALK_CORP_ID',
+      })
+    } catch (error) {
+      if (error instanceof DingTalkCorpNotAllowedError) {
+        unavailableReason = 'corp_not_allowed'
+      } else {
+        unavailableReason = 'corp_not_allowed'
+      }
+    }
+  }
+
+  return {
+    configured: Boolean(clientId && clientSecret && redirectUri),
+    available: unavailableReason === null,
+    corpId,
+    allowedCorpIds,
+    requireGrant: shouldRequireGrant(),
+    autoLinkEmail: shouldAutoLinkEmail(),
+    autoProvision: shouldAutoProvision(),
+    unavailableReason,
+  }
 }
 
 export async function generateState(options: { redirectPath?: string | null } = {}): Promise<string> {

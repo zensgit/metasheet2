@@ -17436,6 +17436,7 @@
       "get": {
         "summary": "Load multitable form workbench context",
         "security": [
+          {},
           {
             "bearerAuth": []
           }
@@ -17463,6 +17464,14 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "in": "query",
+            "name": "publicToken",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Public form token from `view.config.publicForm.publicToken`."
           }
         ],
         "responses": {
@@ -17820,6 +17829,7 @@
       "post": {
         "summary": "Submit a multitable form view",
         "security": [
+          {},
           {
             "bearerAuth": []
           }
@@ -17832,6 +17842,14 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "in": "query",
+            "name": "publicToken",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Public form token from `view.config.publicForm.publicToken`."
           }
         ],
         "requestBody": {
@@ -17846,6 +17864,9 @@
                   },
                   "expectedVersion": {
                     "type": "integer"
+                  },
+                  "publicToken": {
+                    "type": "string"
                   },
                   "data": {
                     "type": "object",

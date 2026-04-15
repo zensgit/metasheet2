@@ -240,6 +240,41 @@ type PublicFormConfig = {
   expiresOn?: unknown
 }
 
+type DashboardChartType = 'bar' | 'line' | 'pie'
+type DashboardMetric = 'count' | 'sum' | 'avg'
+
+type DashboardWidgetInput = {
+  id?: string
+  title: string
+  chartType: DashboardChartType
+  groupByFieldId: string
+  metric: DashboardMetric
+  valueFieldId?: string | null
+  limit?: number
+}
+
+type DashboardDataPoint = {
+  key: string
+  label: string
+  value: number
+  recordCount: number
+}
+
+type DashboardWidgetResult = {
+  id: string
+  title: string
+  chartType: DashboardChartType
+  groupByFieldId: string
+  groupByFieldName: string | null
+  metric: DashboardMetric
+  valueFieldId: string | null
+  valueFieldName: string | null
+  limit: number
+  totalRecords: number
+  totalValue: number
+  points: DashboardDataPoint[]
+}
+
 const PUBLIC_FORM_CAPABILITIES: MultitableCapabilities = {
   canRead: true,
   canCreateRecord: true,
@@ -1203,6 +1238,71 @@ function toEpoch(value: unknown): number | null {
     if (Number.isFinite(parsed)) return parsed
   }
   return null
+}
+
+const DASHBOARD_GROUPABLE_FIELD_TYPES = new Set<UniverMetaField['type']>([
+  'string',
+  'number',
+  'boolean',
+  'date',
+  'formula',
+  'select',
+  'lookup',
+  'rollup',
+])
+
+const DASHBOARD_NUMERIC_FIELD_TYPES = new Set<UniverMetaField['type']>([
+  'number',
+  'rollup',
+])
+
+const dashboardWidgetSchema = z.object({
+  id: z.string().min(1).max(120).optional(),
+  title: z.string().min(1).max(120),
+  chartType: z.enum(['bar', 'line', 'pie']),
+  groupByFieldId: z.string().min(1).max(120),
+  metric: z.enum(['count', 'sum', 'avg']),
+  valueFieldId: z.string().min(1).max(120).nullable().optional(),
+  limit: z.number().int().min(1).max(24).optional(),
+})
+
+function serializeDashboardWidget(widget: DashboardWidgetInput): Required<Pick<DashboardWidgetInput, 'id' | 'title' | 'chartType' | 'groupByFieldId' | 'metric' | 'limit'>> & { valueFieldId: string | null } {
+  return {
+    id: typeof widget.id === 'string' && widget.id.trim().length > 0 ? widget.id.trim() : `dash_${randomUUID()}`,
+    title: widget.title.trim(),
+    chartType: widget.chartType,
+    groupByFieldId: widget.groupByFieldId.trim(),
+    metric: widget.metric,
+    valueFieldId: typeof widget.valueFieldId === 'string' && widget.valueFieldId.trim().length > 0 ? widget.valueFieldId.trim() : null,
+    limit: Number.isFinite(widget.limit) ? Math.min(Math.max(Math.round(widget.limit ?? 6), 1), 24) : 6,
+  }
+}
+
+function normalizeDashboardBucketKey(value: unknown): string {
+  if (value === null || value === undefined) return '__empty__'
+  if (value instanceof Date) return value.toISOString()
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value)
+  if (typeof value === 'string') {
+    const trimmed = value.trim()
+    return trimmed.length > 0 ? trimmed : '__empty__'
+  }
+  if (Array.isArray(value)) {
+    return value.length > 0 ? JSON.stringify(value.map((item) => toSummaryDisplay(item))) : '__empty__'
+  }
+  return JSON.stringify(value)
+}
+
+function normalizeDashboardBucketLabel(value: unknown): string {
+  if (value === null || value === undefined) return 'Empty'
+  if (value instanceof Date) return value.toISOString()
+  if (typeof value === 'boolean') return value ? 'True' : 'False'
+  if (Array.isArray(value)) return value.length > 0 ? value.map((item) => toSummaryDisplay(item)).join(', ') : 'Empty'
+  const text = toSummaryDisplay(value).trim()
+  return text.length > 0 ? text : 'Empty'
+}
+
+function toDashboardMetricNumber(value: unknown): number | null {
+  return toComparableNumber(value)
 }
 
 function getDbNotReadyMessage(err: unknown): string | null {
@@ -2251,6 +2351,177 @@ function filterRecordDataByFieldIds(data: unknown, allowedFieldIds: Set<string>)
   return Object.fromEntries(
     Object.entries(data as Record<string, unknown>).filter(([fieldId]) => allowedFieldIds.has(fieldId)),
   )
+}
+
+async function loadDashboardSourceRows(args: {
+  req: Request
+  query: QueryFn
+  sheetId: string
+  viewConfig: UniverMetaViewConfig | null
+  fields: UniverMetaField[]
+  visibleFields: UniverMetaField[]
+  widgets: Array<ReturnType<typeof serializeDashboardWidget>>
+  access: ResolvedRequestAccess
+  capabilities: MultitableCapabilities
+}): Promise<UniverMetaRecord[]> {
+  const { req, query, sheetId, viewConfig, fields, visibleFields, widgets, access, capabilities } = args
+  const recordRes = await query(
+    'SELECT id, version, data, created_at FROM meta_records WHERE sheet_id = $1 ORDER BY created_at ASC, id ASC',
+    [sheetId],
+  )
+
+  let rows = recordRes.rows.map((row: any) => ({
+    id: String(row.id),
+    version: Number(row.version ?? 1),
+    data: normalizeJson(row.data),
+    createdAt: row.created_at as unknown,
+  }))
+
+  const visibleFieldIds = new Set(visibleFields.map((field) => field.id))
+  const fieldTypeById = new Map(visibleFields.map((field) => [field.id, field.type] as const))
+  const rawFilterInfo = viewConfig ? parseMetaFilterInfo(viewConfig.filterInfo) : null
+  const filteredConditions = rawFilterInfo
+    ? rawFilterInfo.conditions.filter((condition) => fieldTypeById.has(condition.fieldId))
+    : []
+  const filterInfo = filteredConditions.length > 0 && rawFilterInfo
+    ? { ...rawFilterInfo, conditions: filteredConditions }
+    : null
+
+  const relationalLinkFields = fields
+    .map((field) => (field.type === 'link' ? { fieldId: field.id, cfg: parseLinkFieldConfig(field.property) } : null))
+    .filter((value): value is { fieldId: string; cfg: LinkFieldConfig } => !!value && !!value.cfg)
+  const computedFieldIds = new Set(
+    fields.filter((field) => field.type === 'lookup' || field.type === 'rollup').map((field) => field.id),
+  )
+  const widgetFieldIds = new Set<string>()
+  for (const widget of widgets) {
+    widgetFieldIds.add(widget.groupByFieldId)
+    if (widget.valueFieldId) widgetFieldIds.add(widget.valueFieldId)
+  }
+  const needsComputedFields =
+    Array.from(widgetFieldIds).some((fieldId) => computedFieldIds.has(fieldId)) ||
+    (filterInfo?.conditions ?? []).some((condition) => computedFieldIds.has(condition.fieldId))
+
+  if (needsComputedFields && rows.length > 0) {
+    const linkValuesByRecord = await loadLinkValuesByRecord(
+      query,
+      rows.map((row) => row.id),
+      relationalLinkFields,
+    )
+    await applyLookupRollup(req, query, fields, rows, relationalLinkFields, linkValuesByRecord)
+  }
+
+  if (filterInfo) {
+    rows = rows.filter((record) => {
+      const matches = (condition: MetaFilterCondition) => {
+        const fieldType = fieldTypeById.get(condition.fieldId)
+        if (!fieldType) return true
+        return evaluateMetaFilterCondition(fieldType, record.data[condition.fieldId], condition)
+      }
+      return filterInfo.conjunction === 'or'
+        ? filterInfo.conditions.some(matches)
+        : filterInfo.conditions.every(matches)
+    })
+  }
+
+  if (!access.isAdminRole && access.userId && rows.length > 0) {
+    const hasRecordPerms = await hasRecordPermissionAssignments(query, sheetId)
+    if (hasRecordPerms) {
+      const recordScopeMap = await loadRecordPermissionScopeMap(
+        query,
+        sheetId,
+        rows.map((row) => row.id),
+        access.userId,
+      )
+      if (recordScopeMap.size > 0) {
+        rows = rows.filter((row) => deriveRecordPermissions(row.id, capabilities, recordScopeMap).canRead)
+      }
+    }
+  }
+
+  return rows.map((row) => ({
+    ...row,
+    data: filterRecordDataByFieldIds(row.data, visibleFieldIds),
+  }))
+}
+
+function buildDashboardWidgetResult(args: {
+  widget: ReturnType<typeof serializeDashboardWidget>
+  rows: UniverMetaRecord[]
+  fields: UniverMetaField[]
+}): DashboardWidgetResult {
+  const { widget, rows, fields } = args
+  const fieldById = new Map(fields.map((field) => [field.id, field] as const))
+  const groupField = fieldById.get(widget.groupByFieldId) ?? null
+  const valueField = widget.valueFieldId ? fieldById.get(widget.valueFieldId) ?? null : null
+
+  const buckets = new Map<string, { key: string; label: string; sum: number; count: number; recordCount: number }>()
+  for (const row of rows) {
+    const rawGroupValue = row.data[widget.groupByFieldId]
+    const bucketKey = normalizeDashboardBucketKey(rawGroupValue)
+    const bucketLabel = normalizeDashboardBucketLabel(rawGroupValue)
+    const bucket = buckets.get(bucketKey) ?? {
+      key: bucketKey,
+      label: bucketLabel,
+      sum: 0,
+      count: 0,
+      recordCount: 0,
+    }
+    bucket.recordCount += 1
+    if (widget.metric === 'count') {
+      bucket.sum += 1
+      bucket.count += 1
+    } else {
+      const numericValue = widget.valueFieldId ? toDashboardMetricNumber(row.data[widget.valueFieldId]) : null
+      if (numericValue !== null) {
+        bucket.sum += numericValue
+        bucket.count += 1
+      }
+    }
+    buckets.set(bucketKey, bucket)
+  }
+
+  let points: DashboardDataPoint[] = Array.from(buckets.values()).map((bucket) => ({
+    key: bucket.key,
+    label: bucket.label,
+    value: widget.metric === 'avg'
+      ? (bucket.count > 0 ? bucket.sum / bucket.count : 0)
+      : bucket.sum,
+    recordCount: bucket.recordCount,
+  }))
+
+  if (widget.chartType === 'line') {
+    points = points.sort((left, right) => {
+      if (groupField?.type === 'date') {
+        const leftEpoch = toEpoch(left.key)
+        const rightEpoch = toEpoch(right.key)
+        if (leftEpoch !== null && rightEpoch !== null && leftEpoch !== rightEpoch) return leftEpoch - rightEpoch
+      }
+      if (groupField?.type === 'number' || groupField?.type === 'rollup') {
+        const leftNumber = toComparableNumber(left.key)
+        const rightNumber = toComparableNumber(right.key)
+        if (leftNumber !== null && rightNumber !== null && leftNumber !== rightNumber) return leftNumber - rightNumber
+      }
+      return left.label.localeCompare(right.label, undefined, { numeric: true, sensitivity: 'base' })
+    })
+  } else {
+    points = points.sort((left, right) => {
+      if (right.value !== left.value) return right.value - left.value
+      return left.label.localeCompare(right.label, undefined, { numeric: true, sensitivity: 'base' })
+    })
+  }
+
+  points = points.slice(0, widget.limit)
+
+  return {
+    ...widget,
+    groupByFieldName: groupField?.name ?? null,
+    valueFieldId: widget.valueFieldId,
+    valueFieldName: valueField?.name ?? null,
+    totalRecords: rows.length,
+    totalValue: points.reduce((sum, point) => sum + point.value, 0),
+    points,
+  }
 }
 
 function filterRecordFieldSummaryMap<T>(
@@ -3935,8 +4206,8 @@ export function univerMetaRouter(): Router {
       })
       const sheetId = resolved.sheetId
       const viewConfig = resolved.view
-      const widgets = parsed.data.widgets.map((widget) => serializeDashboardWidget(widget))
-      const { access, capabilities, sheetScope } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      const widgets = parsed.data.widgets.map((widget) => serializeDashboardWidget(widget as DashboardWidgetInput))
+      const { access, capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
 
       if (!access.userId) {
         return res.status(401).json({ error: 'Authentication required' })
@@ -3985,7 +4256,6 @@ export function univerMetaRouter(): Router {
         widgets,
         access,
         capabilities,
-        sheetScope,
       })
 
       const results = widgets.map((widget) => buildDashboardWidgetResult({

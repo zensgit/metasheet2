@@ -1,15 +1,31 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest'
 
-vi.mock('../../src/multitable/records', () => ({
-  patchRecord: vi.fn(async () => ({
-    id: 'rec1',
-    sheetId: 'sheet1',
-    version: 2,
-    data: {},
+const automationLogMocks = vi.hoisted(() => ({
+  record: vi.fn(async () => undefined),
+  getByRule: vi.fn(async () => []),
+  getRecent: vi.fn(async () => []),
+  getById: vi.fn(async () => undefined),
+  getStats: vi.fn(async () => ({
+    total: 0,
+    success: 0,
+    failed: 0,
+    skipped: 0,
+    avgDuration: 0,
   })),
+  cleanup: vi.fn(async () => 0),
 }))
 
-import { patchRecord } from '../../src/multitable/records'
+vi.mock('../../src/multitable/automation-log-service', () => ({
+  AutomationLogService: class {
+    record = automationLogMocks.record
+    getByRule = automationLogMocks.getByRule
+    getRecent = automationLogMocks.getRecent
+    getById = automationLogMocks.getById
+    getStats = automationLogMocks.getStats
+    cleanup = automationLogMocks.cleanup
+  },
+}))
+
 import { AutomationService, type AutomationRule, type AutomationEventPayload, type AutomationQueryFn } from '../../src/multitable/automation-service'
 import { EventBus } from '../../src/integration/events/event-bus'
 
@@ -20,8 +36,8 @@ function createMockRule(overrides: Partial<AutomationRule> = {}): AutomationRule
     name: 'Test Rule',
     trigger_type: 'record.created',
     trigger_config: {},
-    action_type: 'notify',
-    action_config: { channel: 'general' },
+    action_type: 'send_notification',
+    action_config: { userIds: ['user_notify'], message: 'Record changed' },
     enabled: true,
     created_at: '2026-01-01T00:00:00Z',
     updated_at: '2026-01-01T00:00:00Z',
@@ -43,11 +59,17 @@ describe('AutomationService', () => {
 
   beforeEach(() => {
     bus = new EventBus()
+    automationLogMocks.record.mockClear()
+    automationLogMocks.getByRule.mockClear()
+    automationLogMocks.getRecent.mockClear()
+    automationLogMocks.getById.mockClear()
+    automationLogMocks.getStats.mockClear()
+    automationLogMocks.cleanup.mockClear()
   })
 
   describe('rule matching', () => {
     it('matches record.created trigger on multitable.record.created event', async () => {
-      const rule = createMockRule({ trigger_type: 'record.created', action_type: 'notify' })
+      const rule = createMockRule({ trigger_type: 'record.created', action_type: 'send_notification' })
       const query = createMockQuery([rule])
       service = new AutomationService(bus, query)
 
@@ -60,16 +82,16 @@ describe('AutomationService', () => {
         actorId: 'user1',
       })
 
-      expect(emitSpy).toHaveBeenCalledWith('automation.notify', expect.objectContaining({
-        ruleId: 'atr_test1',
+      expect(emitSpy).toHaveBeenCalledWith('automation.notification', expect.objectContaining({
         sheetId: 'sheet1',
         recordId: 'rec1',
-        channel: 'general',
+        userIds: ['user_notify'],
+        message: 'Record changed',
       }))
     })
 
     it('matches record.updated trigger on multitable.record.updated event', async () => {
-      const rule = createMockRule({ trigger_type: 'record.updated', action_type: 'notify' })
+      const rule = createMockRule({ trigger_type: 'record.updated', action_type: 'send_notification' })
       const query = createMockQuery([rule])
       service = new AutomationService(bus, query)
 
@@ -82,17 +104,17 @@ describe('AutomationService', () => {
         actorId: 'user1',
       })
 
-      expect(emitSpy).toHaveBeenCalledWith('automation.notify', expect.objectContaining({
-        ruleId: 'atr_test1',
+      expect(emitSpy).toHaveBeenCalledWith('automation.notification', expect.objectContaining({
         sheetId: 'sheet1',
+        recordId: 'rec1',
       }))
     })
 
-    it('matches field.changed trigger when specific field is in changes', async () => {
+    it('matches field.value_changed trigger when specific field is in changes', async () => {
       const rule = createMockRule({
-        trigger_type: 'field.changed',
+        trigger_type: 'field.value_changed',
         trigger_config: { fieldId: 'status_field' },
-        action_type: 'notify',
+        action_type: 'send_notification',
       })
       const query = createMockQuery([rule])
       service = new AutomationService(bus, query)
@@ -106,16 +128,16 @@ describe('AutomationService', () => {
         actorId: 'user1',
       })
 
-      expect(emitSpy).toHaveBeenCalledWith('automation.notify', expect.objectContaining({
-        ruleId: 'atr_test1',
+      expect(emitSpy).toHaveBeenCalledWith('automation.notification', expect.objectContaining({
+        recordId: 'rec1',
       }))
     })
 
-    it('does not match field.changed trigger when field is not in changes', async () => {
+    it('does not match field.value_changed trigger when field is not in changes', async () => {
       const rule = createMockRule({
-        trigger_type: 'field.changed',
+        trigger_type: 'field.value_changed',
         trigger_config: { fieldId: 'status_field' },
-        action_type: 'notify',
+        action_type: 'send_notification',
       })
       const query = createMockQuery([rule])
       service = new AutomationService(bus, query)
@@ -129,14 +151,14 @@ describe('AutomationService', () => {
         actorId: 'user1',
       })
 
-      expect(emitSpy).not.toHaveBeenCalledWith('automation.notify', expect.anything())
+      expect(emitSpy).not.toHaveBeenCalledWith('automation.notification', expect.anything())
     })
 
-    it('does not match field.changed trigger on record.created events', async () => {
+    it('does not match field.value_changed trigger on record.created events', async () => {
       const rule = createMockRule({
-        trigger_type: 'field.changed',
+        trigger_type: 'field.value_changed',
         trigger_config: { fieldId: 'status_field' },
-        action_type: 'notify',
+        action_type: 'send_notification',
       })
       const query = createMockQuery([rule])
       service = new AutomationService(bus, query)
@@ -150,15 +172,15 @@ describe('AutomationService', () => {
         actorId: 'user1',
       })
 
-      expect(emitSpy).not.toHaveBeenCalledWith('automation.notify', expect.anything())
+      expect(emitSpy).not.toHaveBeenCalledWith('automation.notification', expect.anything())
     })
   })
 
   describe('notify action', () => {
-    it('emits automation.notify event with action_config merged', async () => {
+    it('emits automation.notification event with action_config merged', async () => {
       const rule = createMockRule({
-        action_type: 'notify',
-        action_config: { channel: '#alerts', message: 'Record changed' },
+        action_type: 'send_notification',
+        action_config: { userIds: ['user_a', 'user_b'], message: 'Record changed' },
       })
       const query = createMockQuery([rule])
       service = new AutomationService(bus, query)
@@ -172,23 +194,21 @@ describe('AutomationService', () => {
         actorId: 'user1',
       })
 
-      expect(emitSpy).toHaveBeenCalledWith('automation.notify', expect.objectContaining({
-        ruleId: 'atr_test1',
+      expect(emitSpy).toHaveBeenCalledWith('automation.notification', expect.objectContaining({
         sheetId: 'sheet1',
         recordId: 'rec1',
         actorId: 'user1',
-        channel: '#alerts',
+        userIds: ['user_a', 'user_b'],
         message: 'Record changed',
-        _automationDepth: 1,
       }))
     })
   })
 
   describe('update_field action', () => {
-    it('calls patchRecord and emits follow-up event', async () => {
+    it('runs update_record query and emits follow-up update event', async () => {
       const rule = createMockRule({
-        action_type: 'update_field',
-        action_config: { fieldId: 'target_field', value: 'auto_value' },
+        action_type: 'update_record',
+        action_config: { fields: { target_field: 'auto_value' } },
       })
       const query = createMockQuery([rule])
       service = new AutomationService(bus, query)
@@ -202,13 +222,10 @@ describe('AutomationService', () => {
         actorId: 'user1',
       })
 
-      // Should have called patchRecord with the correct args
-      expect(patchRecord).toHaveBeenCalledWith({
-        query,
-        sheetId: 'sheet1',
-        recordId: 'rec1',
-        changes: { target_field: 'auto_value' },
-      })
+      expect(query).toHaveBeenCalledWith(
+        expect.stringContaining('UPDATE meta_records SET'),
+        expect.arrayContaining(['{target_field}', JSON.stringify('auto_value'), 'rec1', 'sheet1']),
+      )
 
       // Should emit follow-up update event with incremented depth
       expect(emitSpy).toHaveBeenCalledWith('multitable.record.updated', expect.objectContaining({
@@ -222,7 +239,7 @@ describe('AutomationService', () => {
 
   describe('recursion guard', () => {
     it('blocks execution at depth >= 3', async () => {
-      const rule = createMockRule({ action_type: 'notify' })
+      const rule = createMockRule({ action_type: 'send_notification' })
       const query = createMockQuery([rule])
       service = new AutomationService(bus, query)
 
@@ -242,7 +259,7 @@ describe('AutomationService', () => {
     })
 
     it('allows execution at depth < 3', async () => {
-      const rule = createMockRule({ action_type: 'notify' })
+      const rule = createMockRule({ action_type: 'send_notification' })
       const query = createMockQuery([rule])
       service = new AutomationService(bus, query)
 
@@ -256,8 +273,9 @@ describe('AutomationService', () => {
         _automationDepth: 2,
       })
 
-      expect(emitSpy).toHaveBeenCalledWith('automation.notify', expect.objectContaining({
-        _automationDepth: 3,
+      expect(emitSpy).toHaveBeenCalledWith('automation.notification', expect.objectContaining({
+        recordId: 'rec1',
+        userIds: ['user_notify'],
       }))
     })
   })
@@ -290,7 +308,7 @@ describe('AutomationService', () => {
       const unsubscribeSpy = vi.spyOn(bus, 'unsubscribe')
 
       service.init()
-      expect(subscribeSpy).toHaveBeenCalledTimes(2)
+      expect(subscribeSpy).toHaveBeenCalledTimes(3)
       expect(subscribeSpy).toHaveBeenCalledWith(
         'multitable.record.created',
         expect.any(Function),
@@ -299,9 +317,13 @@ describe('AutomationService', () => {
         'multitable.record.updated',
         expect.any(Function),
       )
+      expect(subscribeSpy).toHaveBeenCalledWith(
+        'multitable.record.deleted',
+        expect.any(Function),
+      )
 
       service.shutdown()
-      expect(unsubscribeSpy).toHaveBeenCalledTimes(2)
+      expect(unsubscribeSpy).toHaveBeenCalledTimes(3)
     })
   })
 })

@@ -108,8 +108,8 @@ export class AutomationService {
     }
     this.executor = new AutomationExecutor(deps)
     this.logService = new AutomationLogService()
-    this.scheduler = new AutomationScheduler((rule) => {
-      return this.executeRule(rule, { _triggeredBy: 'schedule' })
+    this.scheduler = new AutomationScheduler(async (rule) => {
+      await this.executeRule(rule, { _triggeredBy: 'schedule' })
     })
   }
 

@@ -303,12 +303,15 @@ export class CommentService {
   async getComments(spreadsheetId: string, options?: CommentQueryOptions): Promise<{ items: Comment[]; total: number }> {
     let query = db.selectFrom('meta_comments').where('spreadsheet_id', '=', spreadsheetId)
 
-    if (options?.rowId) {
-      query = query.where('row_id', '=', options.rowId)
+    const rowId = options?.targetId ?? options?.rowId
+    const fieldId = options?.targetFieldId ?? options?.fieldId
+
+    if (rowId) {
+      query = query.where('row_id', '=', rowId)
     }
 
-    if (options?.fieldId) {
-      query = query.where('field_id', '=', options.fieldId)
+    if (fieldId) {
+      query = query.where('field_id', '=', fieldId)
     }
 
     if (typeof options?.resolved === 'boolean') {
