@@ -116,6 +116,16 @@ function toExecutorRule(rule: AutomationRule): ExecutorRule {
   }
 }
 
+let sharedAutomationService: AutomationService | null = null
+
+export function setAutomationServiceInstance(service: AutomationService | null): void {
+  sharedAutomationService = service
+}
+
+export function getAutomationServiceInstance(): AutomationService | null {
+  return sharedAutomationService
+}
+
 export class AutomationService {
   private eventBus: EventBus
   private db: Kysely<Database>

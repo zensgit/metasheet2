@@ -67,7 +67,7 @@ import { getPoolStats } from './db/pg'
 import { isDatabaseSchemaError } from './utils/database-errors'
 import { startOperationAuditRetention } from './audit/operation-audit-retention'
 import { startMultitableAttachmentCleanup } from './multitable/attachment-orphan-retention'
-import { AutomationService } from './multitable/automation-service'
+import { AutomationService, setAutomationServiceInstance } from './multitable/automation-service'
 import { tenantContext } from './db/sharding/tenant-context'
 import { attendanceAuditMiddleware, attendanceSecurityMiddleware } from './middleware/attendance-production'
 import { approvalsRouter } from './routes/approvals'
@@ -1461,6 +1461,7 @@ export class MetaSheetServer {
     shutdownTasks.push(Promise.resolve().then(() => {
       try {
         this.automationService?.shutdown()
+        setAutomationServiceInstance(null)
       } catch (err) {
         this.logger.warn(`AutomationService shutdown error: ${err instanceof Error ? err.message : String(err)}`)
       }
@@ -1620,6 +1621,7 @@ export class MetaSheetServer {
       const { db: kyselyDb } = await import('./db/db')
       this.automationService = new AutomationService(eventBus, kyselyDb, pool.query.bind(pool))
       this.automationService.init()
+      setAutomationServiceInstance(this.automationService)
       await this.automationService.loadAndRegisterAllScheduled()
       this.logger.info('AutomationService initialized')
     } catch (e) {

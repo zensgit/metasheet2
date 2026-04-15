@@ -53,6 +53,18 @@ function createMockQuery(rules: AutomationRule[]): AutomationQueryFn {
   }))
 }
 
+function createMockDb(rules: AutomationRule[]) {
+  const chain: Record<string, unknown> = {}
+  const chainFn = (..._args: unknown[]) => chain
+  for (const method of ['selectAll', 'where', 'orderBy']) {
+    chain[method] = vi.fn(chainFn)
+  }
+  chain.execute = vi.fn(async () => rules)
+  return {
+    selectFrom: vi.fn(() => chain),
+  }
+}
+
 describe('AutomationService', () => {
   let bus: EventBus
   let service: AutomationService
@@ -71,7 +83,7 @@ describe('AutomationService', () => {
     it('matches record.created trigger on multitable.record.created event', async () => {
       const rule = createMockRule({ trigger_type: 'record.created', action_type: 'send_notification' })
       const query = createMockQuery([rule])
-      service = new AutomationService(bus, query)
+      service = new AutomationService(bus, createMockDb([rule]) as never, query)
 
       const emitSpy = vi.spyOn(bus, 'emit')
 
@@ -93,7 +105,7 @@ describe('AutomationService', () => {
     it('matches record.updated trigger on multitable.record.updated event', async () => {
       const rule = createMockRule({ trigger_type: 'record.updated', action_type: 'send_notification' })
       const query = createMockQuery([rule])
-      service = new AutomationService(bus, query)
+      service = new AutomationService(bus, createMockDb([rule]) as never, query)
 
       const emitSpy = vi.spyOn(bus, 'emit')
 
@@ -117,7 +129,7 @@ describe('AutomationService', () => {
         action_type: 'send_notification',
       })
       const query = createMockQuery([rule])
-      service = new AutomationService(bus, query)
+      service = new AutomationService(bus, createMockDb([rule]) as never, query)
 
       const emitSpy = vi.spyOn(bus, 'emit')
 
@@ -140,7 +152,7 @@ describe('AutomationService', () => {
         action_type: 'send_notification',
       })
       const query = createMockQuery([rule])
-      service = new AutomationService(bus, query)
+      service = new AutomationService(bus, createMockDb([rule]) as never, query)
 
       const emitSpy = vi.spyOn(bus, 'emit')
 
@@ -161,7 +173,7 @@ describe('AutomationService', () => {
         action_type: 'send_notification',
       })
       const query = createMockQuery([rule])
-      service = new AutomationService(bus, query)
+      service = new AutomationService(bus, createMockDb([rule]) as never, query)
 
       const emitSpy = vi.spyOn(bus, 'emit')
 
@@ -183,7 +195,7 @@ describe('AutomationService', () => {
         action_config: { userIds: ['user_a', 'user_b'], message: 'Record changed' },
       })
       const query = createMockQuery([rule])
-      service = new AutomationService(bus, query)
+      service = new AutomationService(bus, createMockDb([rule]) as never, query)
 
       const emitSpy = vi.spyOn(bus, 'emit')
 
@@ -211,7 +223,7 @@ describe('AutomationService', () => {
         action_config: { fields: { target_field: 'auto_value' } },
       })
       const query = createMockQuery([rule])
-      service = new AutomationService(bus, query)
+      service = new AutomationService(bus, createMockDb([rule]) as never, query)
 
       const emitSpy = vi.spyOn(bus, 'emit')
 
@@ -241,7 +253,7 @@ describe('AutomationService', () => {
     it('blocks execution at depth >= 3', async () => {
       const rule = createMockRule({ action_type: 'send_notification' })
       const query = createMockQuery([rule])
-      service = new AutomationService(bus, query)
+      service = new AutomationService(bus, createMockDb([rule]) as never, query)
 
       const emitSpy = vi.spyOn(bus, 'emit')
 
@@ -261,7 +273,7 @@ describe('AutomationService', () => {
     it('allows execution at depth < 3', async () => {
       const rule = createMockRule({ action_type: 'send_notification' })
       const query = createMockQuery([rule])
-      service = new AutomationService(bus, query)
+      service = new AutomationService(bus, createMockDb([rule]) as never, query)
 
       const emitSpy = vi.spyOn(bus, 'emit')
 
@@ -284,7 +296,7 @@ describe('AutomationService', () => {
     it('skips disabled rules (query returns only enabled)', async () => {
       // The query only returns enabled rules, so we simulate empty result
       const query = createMockQuery([])
-      service = new AutomationService(bus, query)
+      service = new AutomationService(bus, createMockDb([]) as never, query)
 
       const emitSpy = vi.spyOn(bus, 'emit')
 
@@ -302,7 +314,7 @@ describe('AutomationService', () => {
   describe('init / shutdown', () => {
     it('subscribes to events on init and unsubscribes on shutdown', () => {
       const query = createMockQuery([])
-      service = new AutomationService(bus, query)
+      service = new AutomationService(bus, createMockDb([]) as never, query)
 
       const subscribeSpy = vi.spyOn(bus, 'subscribe')
       const unsubscribeSpy = vi.spyOn(bus, 'unsubscribe')
