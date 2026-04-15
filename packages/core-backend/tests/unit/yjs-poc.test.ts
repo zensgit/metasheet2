@@ -395,17 +395,17 @@ describe('YjsRecordBridge', () => {
 
     const mockRecordWriteService = { patchRecords: mockPatchRecords } as any
     const mockSyncService = {} as any
-    const mockGetWriteInput = vi.fn().mockImplementation(async (recordId: string, patch: Record<string, unknown>) => ({
+    const mockGetWriteInput = vi.fn().mockImplementation(async (recordId: string, patch: Record<string, unknown>, actorId: string) => ({
       sheetId: 'sheet1',
       changesByRecord: new Map([[recordId, Object.entries(patch).map(([fieldId, value]) => ({ fieldId, value }))]]),
-      actorId: 'yjs-bridge',
+      actorId: actorId || 'unknown',
       fields: [],
       visiblePropertyFields: [],
       visiblePropertyFieldIds: new Set<string>(),
       attachmentFields: [],
       fieldById: new Map([['fld_name', { type: 'string', readOnly: false, hidden: false }]]),
       capabilities: { canEditRecord: true } as any,
-      access: { userId: 'yjs-bridge', permissions: [], isAdminRole: false },
+      access: { userId: actorId || 'unknown', permissions: [], isAdminRole: false },
     }))
 
     const bridge = new YjsRecordBridge(mockSyncService, mockRecordWriteService, mockGetWriteInput, {
@@ -421,7 +421,7 @@ describe('YjsRecordBridge', () => {
     // Wait for debounce flush
     await new Promise((r) => setTimeout(r, 50))
 
-    expect(mockGetWriteInput).toHaveBeenCalledWith('rec1', { fld_name: 'hello' })
+    expect(mockGetWriteInput).toHaveBeenCalledWith('rec1', { fld_name: 'hello' }, 'unknown')
     expect(mockPatchRecords).toHaveBeenCalledTimes(1)
 
     bridge.destroy()
@@ -437,17 +437,17 @@ describe('YjsRecordBridge', () => {
     fields.set('fld_name', textField)
 
     const mockPatchRecords = vi.fn().mockResolvedValue({ updated: [] })
-    const mockGetWriteInput = vi.fn().mockImplementation(async (recordId: string, patch: Record<string, unknown>) => ({
+    const mockGetWriteInput = vi.fn().mockImplementation(async (recordId: string, patch: Record<string, unknown>, actorId: string) => ({
       sheetId: 'sheet1',
       changesByRecord: new Map([[recordId, Object.entries(patch).map(([fieldId, value]) => ({ fieldId, value }))]]),
-      actorId: 'yjs-bridge',
+      actorId: actorId || 'unknown',
       fields: [],
       visiblePropertyFields: [],
       visiblePropertyFieldIds: new Set<string>(),
       attachmentFields: [],
       fieldById: new Map([['fld_name', { type: 'string', readOnly: false, hidden: false }]]),
       capabilities: { canEditRecord: true } as any,
-      access: { userId: 'yjs-bridge', permissions: [], isAdminRole: false },
+      access: { userId: actorId || 'unknown', permissions: [], isAdminRole: false },
     }))
 
     const bridge = new YjsRecordBridge({} as any, { patchRecords: mockPatchRecords } as any, mockGetWriteInput, {
@@ -466,7 +466,7 @@ describe('YjsRecordBridge', () => {
     await new Promise((r) => setTimeout(r, 80))
 
     expect(mockPatchRecords).toHaveBeenCalledTimes(1)
-    expect(mockGetWriteInput).toHaveBeenCalledWith('rec1', { fld_name: 'abc' })
+    expect(mockGetWriteInput).toHaveBeenCalledWith('rec1', { fld_name: 'abc' }, 'unknown')
 
     bridge.destroy()
     doc.destroy()

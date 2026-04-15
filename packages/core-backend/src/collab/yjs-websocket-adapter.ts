@@ -19,9 +19,19 @@ export type YjsAuthChecker = (
   recordId: string,
 ) => Promise<{ canRead: boolean; canWrite: boolean } | null>
 
+/**
+ * Callback to verify a JWT token and return the trusted userId.
+ * Returns null if token is invalid/expired.
+ */
+export type YjsTokenVerifier = (token: string) => Promise<string | null>
+
 export class YjsWebSocketAdapter {
   private bridge: YjsRecordBridge | null = null
   private authChecker: YjsAuthChecker | null = null
+  private tokenVerifier: YjsTokenVerifier | null = null
+
+  /** Per-socket verified userId (from JWT, not from client query) */
+  private socketUserId = new Map<string, string>()
 
   /** Per-socket permission cache: socket.id → recordId → canWrite */
   private socketPermissions = new Map<string, Map<string, boolean>>()
@@ -38,23 +48,45 @@ export class YjsWebSocketAdapter {
     this.authChecker = checker
   }
 
-  private getUserId(socket: Socket): string | undefined {
-    const raw = socket.handshake.query.userId
-    const value = Array.isArray(raw) ? raw[0] : raw
-    return typeof value === 'string' && value.trim().length > 0 ? value.trim() : undefined
+  /** Attach JWT token verifier. */
+  setTokenVerifier(verifier: YjsTokenVerifier): void {
+    this.tokenVerifier = verifier
+  }
+
+  /** Get verified userId for a socket (set at connection time via JWT). */
+  getSocketUserId(socketId: string): string | undefined {
+    return this.socketUserId.get(socketId)
   }
 
   register(io: SocketServer): void {
     const nsp = io.of('/yjs')
 
+    // Verify JWT at connection time — reject unauthenticated sockets immediately
+    nsp.use(async (socket, next) => {
+      if (!this.tokenVerifier) return next()
+
+      const token = (socket.handshake.auth as { token?: string })?.token
+      if (!token || typeof token !== 'string') {
+        return next(new Error('UNAUTHENTICATED: token required'))
+      }
+
+      const userId = await this.tokenVerifier(token)
+      if (!userId) {
+        return next(new Error('UNAUTHENTICATED: invalid token'))
+      }
+
+      this.socketUserId.set(socket.id, userId)
+      next()
+    })
+
     nsp.on('connection', (socket) => {
       socket.on('yjs:subscribe', async ({ recordId }: { recordId: string }) => {
         if (!recordId || typeof recordId !== 'string') return
 
-        // ── Auth gate: check record access ──
-        const userId = this.getUserId(socket)
+        // ── Auth gate: userId is already verified by JWT middleware ──
+        const userId = this.socketUserId.get(socket.id)
         if (!userId) {
-          socket.emit('yjs:error', { recordId, code: 'UNAUTHENTICATED', message: 'userId required' })
+          socket.emit('yjs:error', { recordId, code: 'UNAUTHENTICATED', message: 'Not authenticated' })
           return
         }
 
@@ -100,6 +132,13 @@ export class YjsWebSocketAdapter {
         'yjs:message',
         async ({ recordId, data }: { recordId: string; data: number[] }) => {
           if (!recordId || !data) return
+
+          // ── Auth gate: must be subscribed to this record ──
+          const perms = this.socketPermissions.get(socket.id)
+          if (this.authChecker && !perms?.has(recordId)) {
+            socket.emit('yjs:error', { recordId, code: 'FORBIDDEN', message: 'Not subscribed' })
+            return
+          }
 
           const doc = this.syncService.getDoc(recordId)
           if (!doc) return
@@ -166,6 +205,7 @@ export class YjsWebSocketAdapter {
 
       socket.on('disconnect', () => {
         this.socketPermissions.delete(socket.id)
+        this.socketUserId.delete(socket.id)
       })
     })
   }

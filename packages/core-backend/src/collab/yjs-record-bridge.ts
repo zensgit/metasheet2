@@ -21,8 +21,12 @@ export interface YjsRecordBridgeConfig {
   maxDelayMs?: number
 }
 
+/** Resolves a socket.id (Yjs transaction origin) to a verified userId. */
+export type ActorResolver = (socketId: string) => string | undefined
+
 interface PendingWrite {
   fields: Record<string, string>
+  actorId: string
   timer: NodeJS.Timeout
   firstSeen: number
 }
@@ -41,12 +45,16 @@ export class YjsRecordBridge {
   private mergeWindowMs: number
   private maxDelayMs: number
 
+  private actorResolver: ActorResolver
+
   constructor(
     private syncService: YjsSyncService,
     private recordWriteService: RecordWriteService,
-    private getWriteInput: (recordId: string, patch: Record<string, unknown>) => Promise<RecordPatchInput | null>,
+    private getWriteInput: (recordId: string, patch: Record<string, unknown>, actorId: string) => Promise<RecordPatchInput | null>,
     config?: YjsRecordBridgeConfig,
+    actorResolver?: ActorResolver,
   ) {
+    this.actorResolver = actorResolver ?? (() => undefined)
     this.mergeWindowMs = config?.mergeWindowMs ?? 200
     this.maxDelayMs = config?.maxDelayMs ?? 500
   }
@@ -63,6 +71,10 @@ export class YjsRecordBridge {
     const handler = (events: Y.YEvent<any>[], transaction: Y.Transaction) => {
       // Skip changes from REST bridge or persistence to avoid loops
       if (transaction.origin === 'rest' || transaction.origin === 'persistence') return
+
+      // Resolve the real userId from the socket.id that originated this transaction
+      const originSocketId = typeof transaction.origin === 'string' ? transaction.origin : undefined
+      const actorId = originSocketId ? (this.actorResolver(originSocketId) ?? 'unknown') : 'unknown'
 
       // Collect changed text field values
       const changedFields: Record<string, string> = {}
@@ -89,7 +101,7 @@ export class YjsRecordBridge {
       }
 
       if (Object.keys(changedFields).length > 0) {
-        this.scheduleFlush(recordId, changedFields)
+        this.scheduleFlush(recordId, changedFields, actorId)
       }
     }
 
@@ -113,12 +125,13 @@ export class YjsRecordBridge {
     this.flushNow(recordId)
   }
 
-  private scheduleFlush(recordId: string, changedFields: Record<string, string>): void {
+  private scheduleFlush(recordId: string, changedFields: Record<string, string>, actorId: string): void {
     const existing = this.pendingWrites.get(recordId)
 
     if (existing) {
-      // Merge fields into pending
+      // Merge fields into pending, keep latest actorId
       Object.assign(existing.fields, changedFields)
+      existing.actorId = actorId
       clearTimeout(existing.timer)
 
       // Check if we've exceeded max delay — force flush
@@ -130,6 +143,7 @@ export class YjsRecordBridge {
 
     const entry: PendingWrite = existing ?? {
       fields: { ...changedFields },
+      actorId,
       timer: null!,
       firstSeen: Date.now(),
     }
@@ -149,15 +163,16 @@ export class YjsRecordBridge {
     this.pendingWrites.delete(recordId)
 
     const fields = { ...pending.fields }
+    const actorId = pending.actorId
 
     // Fire and forget — errors logged, not thrown
-    this.executePatch(recordId, fields).catch((err) => {
+    this.executePatch(recordId, fields, actorId).catch((err) => {
       console.error(`[yjs-bridge] Failed to flush patch for record ${recordId}:`, err)
     })
   }
 
-  private async executePatch(recordId: string, fields: Record<string, unknown>): Promise<void> {
-    const input = await this.getWriteInput(recordId, fields)
+  private async executePatch(recordId: string, fields: Record<string, unknown>, actorId: string): Promise<void> {
+    const input = await this.getWriteInput(recordId, fields, actorId)
     if (!input) return // record context not available (e.g., deleted)
 
     await this.recordWriteService.patchRecords(input)

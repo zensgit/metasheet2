@@ -52,9 +52,9 @@ export function useYjsDocument(recordId: Ref<string | null>) {
     currentRecordId = rid
     error.value = null
 
-    // Get userId from auth — matches existing socket pattern in useMultitableSheetPresence
-    const userId = await auth.getCurrentUserId().catch(() => null)
-    if (!userId) {
+    // Pass JWT token for server-side verification — not raw userId
+    const token = auth.getToken()
+    if (!token) {
       error.value = 'Not authenticated'
       return
     }
@@ -64,7 +64,7 @@ export function useYjsDocument(recordId: Ref<string | null>) {
 
     socket = socketIO('/yjs', {
       transports: ['websocket'],
-      query: { userId },
+      auth: { token },
     })
 
     socket.on('connect', () => {

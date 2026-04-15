@@ -1672,6 +1672,16 @@ export class MetaSheetServer {
         const yjsSyncService = new YjsSyncService(yjsPersistence)
         const yjsWsAdapter = new YjsWebSocketAdapter(yjsSyncService)
 
+        // JWT token verifier: verify token, extract trusted userId
+        yjsWsAdapter.setTokenVerifier(async (token: string) => {
+          try {
+            const user = await authService.verifyToken(token)
+            return user?.id?.toString() ?? null
+          } catch {
+            return null
+          }
+        })
+
         // Auth gate: check record exists + user has real read/write permissions
         const { listUserPermissions: listPerms, isAdmin: checkAdmin } = await import('./rbac/service')
         yjsWsAdapter.setAuthChecker(async (userId, recordId) => {
@@ -1742,8 +1752,8 @@ export class MetaSheetServer {
         const yjsBridge = new YjsRecordBridge(
           yjsSyncService,
           recordWriteService,
-          async (recordId, patch) => {
-            // Build RecordPatchInput from recordId + patch fields
+          async (recordId, patch, actorId) => {
+            // Build RecordPatchInput from recordId + patch fields + real actor
             try {
               const recResult = await pool.query(
                 'SELECT sheet_id FROM meta_records WHERE id = $1',
@@ -1788,27 +1798,30 @@ export class MetaSheetServer {
                 [recordId, Object.entries(patch).map(([fieldId, value]) => ({ fieldId, value }))],
               ])
 
-              // Resolve real user permissions for the bridge write
-              const bridgeAdmin = await checkAdmin('yjs-bridge')
-              const bridgePerms = await listPerms('yjs-bridge').catch(() => [] as string[])
+              // Resolve real user permissions for the actual editing user
+              const isActorAdmin = await checkAdmin(actorId)
+              const actorPerms = await listPerms(actorId).catch(() => [] as string[])
+              const hasWrite = isActorAdmin || actorPerms.includes('multitable:write') || actorPerms.includes('multitable:*') || actorPerms.includes('*:*')
 
               return {
                 sheetId,
                 changesByRecord,
-                actorId: 'yjs-bridge',
+                actorId,
                 fields: fields as any,
                 visiblePropertyFields: visibleFields as any,
                 visiblePropertyFieldIds: new Set(visibleFields.map((f: any) => f.id)),
                 attachmentFields: visibleFields.filter((f: any) => f.type === 'attachment') as any,
                 fieldById: fieldById as any,
-                capabilities: { canRead: true, canCreateRecord: false, canEditRecord: true, canDeleteRecord: false, canManageFields: false, canManageSheetAccess: false, canManageViews: false, canComment: false, canManageAutomation: false, canExport: false },
-                access: { userId: 'yjs-bridge', permissions: bridgePerms, isAdminRole: bridgeAdmin },
+                capabilities: { canRead: true, canCreateRecord: false, canEditRecord: hasWrite, canDeleteRecord: false, canManageFields: false, canManageSheetAccess: false, canManageViews: false, canComment: false, canManageAutomation: false, canExport: false },
+                access: { userId: actorId, permissions: actorPerms, isAdminRole: isActorAdmin },
               }
             } catch (err) {
               console.error(`[yjs-bridge] Failed to build write input for ${recordId}:`, err)
               return null
             }
           },
+          { mergeWindowMs: 200, maxDelayMs: 500 },
+          (socketId) => yjsWsAdapter.getSocketUserId(socketId),
         )
 
         yjsWsAdapter.setBridge(yjsBridge)
