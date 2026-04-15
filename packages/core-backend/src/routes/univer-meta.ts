@@ -31,6 +31,7 @@ import { MultitableFormulaEngine } from '../multitable/formula-engine'
 import { validateRecord, getDefaultValidationRules } from '../multitable/field-validation-engine'
 import type { FieldValidationConfig } from '../multitable/field-validation'
 import { conditionalPublicRateLimiter, publicFormContextLimiter, publicFormSubmitLimiter } from '../middleware/rate-limiter'
+import { getAutomationServiceInstance } from '../multitable/automation-service'
 
 const multitableFormulaEngine = new MultitableFormulaEngine()
 
@@ -7633,13 +7634,12 @@ export function univerMetaRouter(): Router {
       const pool = poolManager.get()
       const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canManageAutomation) return sendForbidden(res)
+      const automationService = getAutomationServiceInstance()
+      if (!automationService) {
+        return res.status(503).json({ ok: false, error: { code: 'SERVICE_UNAVAILABLE', message: 'Automation service is not available' } })
+      }
 
-      const rules = await kyselyDb
-        .selectFrom('automation_rules')
-        .selectAll()
-        .where('sheet_id', '=', sheetId)
-        .orderBy('created_at', 'asc')
-        .execute()
+      const rules = await automationService.listRules(sheetId)
 
       return res.json({ ok: true, data: { rules } })
     } catch (err) {
@@ -7661,6 +7661,10 @@ export function univerMetaRouter(): Router {
       if (!access.userId) return res.status(401).json({ error: 'Authentication required' })
       const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canManageAutomation) return sendForbidden(res)
+      const automationService = getAutomationServiceInstance()
+      if (!automationService) {
+        return res.status(503).json({ ok: false, error: { code: 'SERVICE_UNAVAILABLE', message: 'Automation service is not available' } })
+      }
 
       const body = req.body as Record<string, unknown> | undefined
       const name = typeof body?.name === 'string' ? body.name : null
@@ -7679,31 +7683,34 @@ export function univerMetaRouter(): Router {
         return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: `Invalid action_type: ${actionType}` } })
       }
 
-      const ruleId = `atr_${randomUUID()}`
-      const conditions = body?.conditions && typeof body.conditions === 'object' ? body.conditions : null
+      const conditions = body?.conditions && typeof body.conditions === 'object' ? body.conditions as never : null
       const actions = Array.isArray(body?.actions) ? body.actions : null
 
-      await kyselyDb
-        .insertInto('automation_rules')
-        .values({
-          id: ruleId,
-          sheet_id: sheetId,
-          name,
-          trigger_type: triggerType,
-          trigger_config: JSON.stringify(triggerConfig),
-          action_type: actionType,
-          action_config: JSON.stringify(actionConfig),
-          enabled,
-          created_by: access.userId,
-          conditions: conditions ? JSON.stringify(conditions) : null,
-          actions: actions ? JSON.stringify(actions) : null,
-        } as never)
-        .execute()
+      const rule = await automationService.createRule(sheetId, {
+        name,
+        triggerType,
+        triggerConfig,
+        actionType,
+        actionConfig,
+        enabled,
+        createdBy: access.userId,
+        conditions,
+        actions: actions as never,
+      })
 
       return res.json({
         ok: true,
         data: {
-          rule: { id: ruleId, sheetId, name, triggerType, triggerConfig, actionType, actionConfig, enabled },
+          rule: {
+            id: rule.id,
+            sheetId,
+            name: rule.name,
+            triggerType: rule.trigger_type,
+            triggerConfig: rule.trigger_config,
+            actionType: rule.action_type,
+            actionConfig: rule.action_config,
+            enabled: rule.enabled,
+          },
         },
       })
     } catch (err) {
@@ -7724,6 +7731,10 @@ export function univerMetaRouter(): Router {
       const pool = poolManager.get()
       const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canManageAutomation) return sendForbidden(res)
+      const automationService = getAutomationServiceInstance()
+      if (!automationService) {
+        return res.status(503).json({ ok: false, error: { code: 'SERVICE_UNAVAILABLE', message: 'Automation service is not available' } })
+      }
 
       const body = req.body as Record<string, unknown> | undefined
       const updates: Record<string, unknown> = {}
@@ -7761,21 +7772,26 @@ export function univerMetaRouter(): Router {
         return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'No fields to update' } })
       }
 
-      updates.updated_at = new Date().toISOString()
+      const updated = await automationService.updateRule(ruleId, sheetId, {
+        name: updates.name as string | null | undefined,
+        triggerType: updates.trigger_type as string | undefined,
+        triggerConfig: body?.triggerConfig && typeof body.triggerConfig === 'object'
+          ? body.triggerConfig as Record<string, unknown>
+          : undefined,
+        actionType: updates.action_type as string | undefined,
+        actionConfig: body?.actionConfig && typeof body.actionConfig === 'object'
+          ? body.actionConfig as Record<string, unknown>
+          : undefined,
+        enabled: typeof body?.enabled === 'boolean' ? body.enabled : undefined,
+        conditions: body?.conditions !== undefined ? (body.conditions as never) : undefined,
+        actions: body?.actions !== undefined ? (Array.isArray(body.actions) ? body.actions : null) as never : undefined,
+      })
 
-      const result = await kyselyDb
-        .updateTable('automation_rules')
-        .set(updates as never)
-        .where('id', '=', ruleId)
-        .where('sheet_id', '=', sheetId)
-        .returningAll()
-        .execute()
-
-      if (result.length === 0) {
+      if (!updated) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Automation rule not found' } })
       }
 
-      return res.json({ ok: true, data: { rule: result[0] } })
+      return res.json({ ok: true, data: { rule: updated } })
     } catch (err) {
       const hint = getDbNotReadyMessage(err)
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
@@ -7794,14 +7810,14 @@ export function univerMetaRouter(): Router {
       const pool = poolManager.get()
       const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canManageAutomation) return sendForbidden(res)
+      const automationService = getAutomationServiceInstance()
+      if (!automationService) {
+        return res.status(503).json({ ok: false, error: { code: 'SERVICE_UNAVAILABLE', message: 'Automation service is not available' } })
+      }
 
-      const result = await kyselyDb
-        .deleteFrom('automation_rules')
-        .where('id', '=', ruleId)
-        .where('sheet_id', '=', sheetId)
-        .execute()
+      const deleted = await automationService.deleteRule(ruleId, sheetId)
 
-      if (result.length === 0 || Number(result[0].numDeletedRows) === 0) {
+      if (!deleted) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Automation rule not found' } })
       }
 
