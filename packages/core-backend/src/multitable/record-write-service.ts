@@ -91,9 +91,23 @@ export class RecordNotFoundError extends Error {
 }
 
 export class RecordValidationError extends Error {
-  constructor(message: string) {
+  constructor(
+    message: string,
+    public code: string = 'VALIDATION_ERROR',
+  ) {
     super(message)
     this.name = 'RecordValidationError'
+  }
+}
+
+export class RecordFieldForbiddenError extends Error {
+  constructor(
+    message: string,
+    public fieldId: string,
+    public code: string = 'FIELD_READONLY',
+  ) {
+    super(message)
+    this.name = 'RecordFieldForbiddenError'
   }
 }
 
@@ -229,6 +243,12 @@ export interface RecordWriteHelpers {
     rows: UniverMetaRecord[],
     attachmentFields: UniverMetaField[],
   ) => Promise<Map<string, Map<string, MultitableAttachment[]>>>
+  ensureAttachmentIdsExist: (
+    query: QueryFn,
+    sheetId: string,
+    fieldId: string,
+    ids: string[],
+  ) => Promise<string | null>
 }
 
 // ---------------------------------------------------------------------------
@@ -243,9 +263,105 @@ export class RecordWriteService {
   ) {}
 
   /**
+   * Validate all changes before executing the write pipeline.
+   *
+   * Checks:
+   * - expectedVersion consistency (no multiple different versions per record)
+   * - Field existence (fieldId must be in fieldById)
+   * - Field writability (not hidden, not readOnly, not lookup/rollup)
+   * - Select option whitelist
+   * - Link single-record constraint and ID length
+   * - Attachment ID length and existence
+   *
+   * Throws RecordValidationError or RecordFieldForbiddenError on failure.
+   */
+  async validateChanges(input: {
+    sheetId: string
+    changesByRecord: Map<string, RecordChange[]>
+    fieldById: Map<string, FieldMutationGuard>
+  }): Promise<void> {
+    const { sheetId, changesByRecord, fieldById } = input
+    const h = this.helpers
+
+    for (const [recordId, changes] of changesByRecord.entries()) {
+      // expectedVersion consistency: reject multiple different values for same record
+      const expectedVersions = Array.from(
+        new Set(changes.map((c) => c.expectedVersion).filter((v): v is number => typeof v === 'number')),
+      )
+      if (expectedVersions.length > 1) {
+        throw new RecordValidationError(
+          `Multiple expectedVersion values provided for ${recordId}`,
+        )
+      }
+
+      for (const change of changes) {
+        const field = fieldById.get(change.fieldId)
+        if (!field) {
+          throw new RecordValidationError(`Unknown fieldId: ${change.fieldId}`)
+        }
+
+        if (field.hidden) {
+          throw new RecordFieldForbiddenError(`Field is hidden: ${change.fieldId}`, change.fieldId, 'FIELD_HIDDEN')
+        }
+
+        if (field.readOnly === true) {
+          throw new RecordFieldForbiddenError(`Field is readonly: ${change.fieldId}`, change.fieldId)
+        }
+
+        if (field.type === 'lookup' || field.type === 'rollup') {
+          throw new RecordFieldForbiddenError(`Field is readonly: ${change.fieldId}`, change.fieldId)
+        }
+
+        if (field.type === 'select') {
+          if (typeof change.value !== 'string') {
+            throw new RecordValidationError(`Select value must be string: ${change.fieldId}`)
+          }
+          const allowed = new Set(field.options ?? [])
+          if (change.value !== '' && !allowed.has(change.value)) {
+            throw new RecordValidationError(`Invalid select option for ${change.fieldId}: ${change.value}`)
+          }
+        }
+
+        if (field.type === 'link') {
+          if (field.link) {
+            const ids = h.normalizeLinkIds(change.value)
+            if (field.link.limitSingleRecord && ids.length > 1) {
+              throw new RecordValidationError(`Link field only allows a single record: ${change.fieldId}`)
+            }
+            const tooLong = ids.find((id) => id.length > 50)
+            if (tooLong) {
+              throw new RecordValidationError(`Link id too long (>50): ${tooLong}`)
+            }
+          } else if (typeof change.value !== 'string') {
+            throw new RecordValidationError(`Link value must be string: ${change.fieldId}`)
+          }
+        }
+
+        if (field.type === 'attachment') {
+          const ids = h.normalizeAttachmentIds(change.value)
+          const tooLong = ids.find((id) => id.length > 100)
+          if (tooLong) {
+            throw new RecordValidationError(`Attachment id too long: ${tooLong}`)
+          }
+          const attachmentError = await h.ensureAttachmentIdsExist(
+            this.pool.query.bind(this.pool) as unknown as QueryFn,
+            sheetId,
+            change.fieldId,
+            ids,
+          )
+          if (attachmentError) {
+            throw new RecordValidationError(attachmentError)
+          }
+        }
+      }
+    }
+  }
+
+  /**
    * Complete record-patch pipeline.
    *
    * Steps:
+   * 0. Validate changes (field writability, value constraints, expectedVersion consistency)
    * 1. DB transaction: SELECT FOR UPDATE → version check → field-type handling
    *    → `data || patch::jsonb` → link mutation → version++
    * 2. Computed field recalculation (lookup/rollup)
@@ -270,6 +386,11 @@ export class RecordWriteService {
     } = input
 
     const h = this.helpers
+
+    // -----------------------------------------------------------------------
+    // Step 0: Validate changes (field writability + value constraints)
+    // -----------------------------------------------------------------------
+    await this.validateChanges({ sheetId, changesByRecord, fieldById })
 
     // -----------------------------------------------------------------------
     // Step 1: DB transaction
