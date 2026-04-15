@@ -43,9 +43,9 @@ export function dashboardRouter() {
   // -----------------------------------------------------------------------
 
   /** GET /api/multitable/:sheetId/charts — list charts */
-  router.get('/:sheetId/charts', (_req: Request, res: Response) => {
+  router.get('/:sheetId/charts', async (_req: Request, res: Response) => {
     try {
-      const charts = dashboardService.listCharts(_req.params.sheetId)
+      const charts = await dashboardService.listCharts(_req.params.sheetId)
       res.json({ items: charts })
     } catch (err: unknown) {
       res.status(500).json({ error: (err as Error).message })
@@ -53,10 +53,10 @@ export function dashboardRouter() {
   })
 
   /** POST /api/multitable/:sheetId/charts — create chart */
-  router.post('/:sheetId/charts', (req: Request, res: Response) => {
+  router.post('/:sheetId/charts', async (req: Request, res: Response) => {
     try {
       const userId = getUserId(req)
-      const chart = dashboardService.createChart(req.params.sheetId, {
+      const chart = await dashboardService.createChart(req.params.sheetId, {
         ...req.body,
         createdBy: userId,
       })
@@ -67,8 +67,8 @@ export function dashboardRouter() {
   })
 
   /** GET /api/multitable/:sheetId/charts/:id — get chart config */
-  router.get('/:sheetId/charts/:id', (req: Request, res: Response) => {
-    const chart = dashboardService.getChart(req.params.id)
+  router.get('/:sheetId/charts/:id', async (req: Request, res: Response) => {
+    const chart = await dashboardService.getChart(req.params.id)
     if (!chart || chart.sheetId !== req.params.sheetId) {
       res.status(404).json({ error: 'Chart not found' })
       return
@@ -77,14 +77,14 @@ export function dashboardRouter() {
   })
 
   /** PATCH /api/multitable/:sheetId/charts/:id — update chart */
-  router.patch('/:sheetId/charts/:id', (req: Request, res: Response) => {
+  router.patch('/:sheetId/charts/:id', async (req: Request, res: Response) => {
     try {
-      const chart = dashboardService.getChart(req.params.id)
+      const chart = await dashboardService.getChart(req.params.id)
       if (!chart || chart.sheetId !== req.params.sheetId) {
         res.status(404).json({ error: 'Chart not found' })
         return
       }
-      const updated = dashboardService.updateChart(req.params.id, req.body)
+      const updated = await dashboardService.updateChart(req.params.id, req.body)
       res.json(updated)
     } catch (err: unknown) {
       res.status(400).json({ error: (err as Error).message })
@@ -92,20 +92,20 @@ export function dashboardRouter() {
   })
 
   /** DELETE /api/multitable/:sheetId/charts/:id — delete chart */
-  router.delete('/:sheetId/charts/:id', (req: Request, res: Response) => {
-    const chart = dashboardService.getChart(req.params.id)
+  router.delete('/:sheetId/charts/:id', async (req: Request, res: Response) => {
+    const chart = await dashboardService.getChart(req.params.id)
     if (!chart || chart.sheetId !== req.params.sheetId) {
       res.status(404).json({ error: 'Chart not found' })
       return
     }
-    dashboardService.deleteChart(req.params.id)
+    await dashboardService.deleteChart(req.params.id)
     res.status(204).send()
   })
 
   /** GET /api/multitable/:sheetId/charts/:id/data — get computed chart data */
   router.get('/:sheetId/charts/:id/data', async (req: Request, res: Response) => {
     try {
-      const chart = dashboardService.getChart(req.params.id)
+      const chart = await dashboardService.getChart(req.params.id)
       if (!chart || chart.sheetId !== req.params.sheetId) {
         res.status(404).json({ error: 'Chart not found' })
         return
@@ -122,9 +122,9 @@ export function dashboardRouter() {
   // -----------------------------------------------------------------------
 
   /** GET /api/multitable/:sheetId/dashboards — list dashboards */
-  router.get('/:sheetId/dashboards', (req: Request, res: Response) => {
+  router.get('/:sheetId/dashboards', async (req: Request, res: Response) => {
     try {
-      const dashboards = dashboardService.listDashboards(req.params.sheetId)
+      const dashboards = await dashboardService.listDashboards(req.params.sheetId)
       res.json({ items: dashboards })
     } catch (err: unknown) {
       res.status(500).json({ error: (err as Error).message })
@@ -132,10 +132,10 @@ export function dashboardRouter() {
   })
 
   /** POST /api/multitable/:sheetId/dashboards — create dashboard */
-  router.post('/:sheetId/dashboards', (req: Request, res: Response) => {
+  router.post('/:sheetId/dashboards', async (req: Request, res: Response) => {
     try {
       const userId = getUserId(req)
-      const dashboard = dashboardService.createDashboard({
+      const dashboard = await dashboardService.createDashboard({
         name: req.body.name,
         sheetId: req.params.sheetId,
         createdBy: userId,
@@ -147,8 +147,8 @@ export function dashboardRouter() {
   })
 
   /** GET /api/multitable/:sheetId/dashboards/:id — get dashboard */
-  router.get('/:sheetId/dashboards/:id', (req: Request, res: Response) => {
-    const dashboard = dashboardService.getDashboard(req.params.id)
+  router.get('/:sheetId/dashboards/:id', async (req: Request, res: Response) => {
+    const dashboard = await dashboardService.getDashboard(req.params.id)
     if (!dashboard || dashboard.sheetId !== req.params.sheetId) {
       res.status(404).json({ error: 'Dashboard not found' })
       return
@@ -157,14 +157,14 @@ export function dashboardRouter() {
   })
 
   /** PATCH /api/multitable/:sheetId/dashboards/:id — update dashboard */
-  router.patch('/:sheetId/dashboards/:id', (req: Request, res: Response) => {
+  router.patch('/:sheetId/dashboards/:id', async (req: Request, res: Response) => {
     try {
-      const dashboard = dashboardService.getDashboard(req.params.id)
+      const dashboard = await dashboardService.getDashboard(req.params.id)
       if (!dashboard || dashboard.sheetId !== req.params.sheetId) {
         res.status(404).json({ error: 'Dashboard not found' })
         return
       }
-      const updated = dashboardService.updateDashboard(req.params.id, req.body)
+      const updated = await dashboardService.updateDashboard(req.params.id, req.body)
       res.json(updated)
     } catch (err: unknown) {
       res.status(400).json({ error: (err as Error).message })
@@ -172,13 +172,13 @@ export function dashboardRouter() {
   })
 
   /** DELETE /api/multitable/:sheetId/dashboards/:id — delete dashboard */
-  router.delete('/:sheetId/dashboards/:id', (req: Request, res: Response) => {
-    const dashboard = dashboardService.getDashboard(req.params.id)
+  router.delete('/:sheetId/dashboards/:id', async (req: Request, res: Response) => {
+    const dashboard = await dashboardService.getDashboard(req.params.id)
     if (!dashboard || dashboard.sheetId !== req.params.sheetId) {
       res.status(404).json({ error: 'Dashboard not found' })
       return
     }
-    dashboardService.deleteDashboard(req.params.id)
+    await dashboardService.deleteDashboard(req.params.id)
     res.status(204).send()
   })
 

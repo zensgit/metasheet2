@@ -40,7 +40,7 @@ export function createAutomationRoutes(automationService: AutomationService): Ro
     }
 
     const limit = Math.min(Math.max(parseInt(String(req.query.limit), 10) || 50, 1), 200)
-    const logs = automationService.logs.getByRule(ruleId, limit)
+    const logs = await automationService.logs.getByRule(ruleId, limit)
     return res.json({ ok: true, data: { logs } })
   })
 
@@ -52,7 +52,7 @@ export function createAutomationRoutes(automationService: AutomationService): Ro
       return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'ruleId is required' } })
     }
 
-    const stats = automationService.logs.getStats(ruleId)
+    const stats = await automationService.logs.getStats(ruleId)
     return res.json({ ok: true, data: { stats } })
   })
 
