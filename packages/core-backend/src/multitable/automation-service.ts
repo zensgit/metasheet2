@@ -1,5 +1,6 @@
+import { randomUUID } from 'crypto'
+import type { Kysely } from 'kysely'
 import type { EventBus } from '../integration/events/event-bus'
-import { patchRecord, type MultitableRecordsQueryFn } from './records'
 import { Logger } from '../core/logger'
 import { matchesTrigger, TRIGGER_TYPE_BY_EVENT, type AutomationTriggerType } from './automation-triggers'
 import type { ConditionGroup } from './automation-conditions'
@@ -8,6 +9,7 @@ import type { AutomationAction } from './automation-actions'
 import type { AutomationTrigger } from './automation-triggers'
 import { AutomationScheduler } from './automation-scheduler'
 import { AutomationLogService } from './automation-log-service'
+import type { Database } from '../db/types'
 
 const logger = new Logger('AutomationService')
 
@@ -60,6 +62,31 @@ export type AutomationEventPayload = {
   _triggeredBy?: string
 }
 
+/** Input for creating a rule */
+export interface CreateRuleInput {
+  name?: string | null
+  triggerType: string
+  triggerConfig?: Record<string, unknown>
+  actionType: string
+  actionConfig?: Record<string, unknown>
+  enabled?: boolean
+  createdBy?: string | null
+  conditions?: ConditionGroup | null
+  actions?: AutomationAction[] | null
+}
+
+/** Input for updating a rule */
+export interface UpdateRuleInput {
+  name?: string | null
+  triggerType?: string
+  triggerConfig?: Record<string, unknown>
+  actionType?: string
+  actionConfig?: Record<string, unknown>
+  enabled?: boolean
+  conditions?: ConditionGroup | null
+  actions?: AutomationAction[] | null
+}
+
 /**
  * Convert a legacy DB rule to the executor rule format.
  */
@@ -91,19 +118,22 @@ function toExecutorRule(rule: AutomationRule): ExecutorRule {
 
 export class AutomationService {
   private eventBus: EventBus
-  private query: AutomationQueryFn
+  private db: Kysely<Database>
   private subscriptionIds: string[] = []
   private executor: AutomationExecutor
   private scheduler: AutomationScheduler
   private logService: AutomationLogService
+  /** Kept for backward-compat with raw SQL in executor actions */
+  private queryFn: AutomationQueryFn
 
-  constructor(eventBus: EventBus, query: AutomationQueryFn, fetchFn?: typeof fetch) {
+  constructor(eventBus: EventBus, db: Kysely<Database>, queryFn: AutomationQueryFn, fetchFn?: typeof fetch) {
     this.eventBus = eventBus
-    this.query = query
+    this.db = db
+    this.queryFn = queryFn
 
     const deps: AutomationDeps = {
       eventBus,
-      queryFn: query,
+      queryFn,
       fetchFn,
     }
     this.executor = new AutomationExecutor(deps)
@@ -145,6 +175,165 @@ export class AutomationService {
     logger.info('AutomationService initialized (V1)')
   }
 
+  // ── Rule CRUD (Kysely) ──────────────────────────────────────────────────
+
+  /**
+   * Create a new automation rule persisted to PostgreSQL.
+   */
+  async createRule(sheetId: string, input: CreateRuleInput): Promise<AutomationRule> {
+    const ruleId = `atr_${randomUUID()}`
+    const now = new Date().toISOString()
+
+    const row = {
+      id: ruleId,
+      sheet_id: sheetId,
+      name: input.name ?? null,
+      trigger_type: input.triggerType,
+      trigger_config: JSON.stringify(input.triggerConfig ?? {}),
+      action_type: input.actionType,
+      action_config: JSON.stringify(input.actionConfig ?? {}),
+      enabled: input.enabled ?? true,
+      created_by: input.createdBy ?? null,
+      conditions: input.conditions ? JSON.stringify(input.conditions) : null,
+      actions: input.actions ? JSON.stringify(input.actions) : null,
+    }
+
+    await this.db
+      .insertInto('automation_rules')
+      .values(row as never)
+      .execute()
+
+    const rule: AutomationRule = {
+      id: ruleId,
+      sheet_id: sheetId,
+      name: input.name ?? null,
+      trigger_type: input.triggerType,
+      trigger_config: input.triggerConfig ?? {},
+      action_type: input.actionType,
+      action_config: input.actionConfig ?? {},
+      enabled: input.enabled ?? true,
+      created_at: now,
+      updated_at: now,
+      created_by: input.createdBy ?? null,
+      conditions: input.conditions ?? null,
+      actions: input.actions ?? null,
+    }
+
+    this.registerSchedule(rule)
+    return rule
+  }
+
+  /**
+   * Get a single automation rule by ID.
+   */
+  async getRule(ruleId: string): Promise<AutomationRule | null> {
+    const row = await this.db
+      .selectFrom('automation_rules')
+      .selectAll()
+      .where('id', '=', ruleId)
+      .executeTakeFirst()
+
+    if (!row) return null
+    return this.mapRow(row)
+  }
+
+  /**
+   * List all automation rules for a sheet.
+   */
+  async listRules(sheetId: string): Promise<AutomationRule[]> {
+    const rows = await this.db
+      .selectFrom('automation_rules')
+      .selectAll()
+      .where('sheet_id', '=', sheetId)
+      .orderBy('created_at', 'asc')
+      .execute()
+
+    return rows.map((r) => this.mapRow(r))
+  }
+
+  /**
+   * Update an existing automation rule.
+   * Returns the updated rule, or null if not found.
+   */
+  async updateRule(ruleId: string, sheetId: string, input: UpdateRuleInput): Promise<AutomationRule | null> {
+    const updates: Record<string, unknown> = {}
+
+    if (input.name !== undefined) updates.name = input.name
+    if (input.triggerType !== undefined) updates.trigger_type = input.triggerType
+    if (input.triggerConfig !== undefined) updates.trigger_config = JSON.stringify(input.triggerConfig)
+    if (input.actionType !== undefined) updates.action_type = input.actionType
+    if (input.actionConfig !== undefined) updates.action_config = JSON.stringify(input.actionConfig)
+    if (input.enabled !== undefined) updates.enabled = input.enabled
+    if (input.conditions !== undefined) updates.conditions = input.conditions ? JSON.stringify(input.conditions) : null
+    if (input.actions !== undefined) updates.actions = input.actions ? JSON.stringify(input.actions) : null
+
+    if (Object.keys(updates).length === 0) return this.getRule(ruleId)
+
+    updates.updated_at = new Date().toISOString()
+
+    const result = await this.db
+      .updateTable('automation_rules')
+      .set(updates as never)
+      .where('id', '=', ruleId)
+      .where('sheet_id', '=', sheetId)
+      .returningAll()
+      .execute()
+
+    if (result.length === 0) return null
+
+    const rule = this.mapRow(result[0])
+
+    // Re-register with scheduler if trigger changed
+    this.unregisterSchedule(ruleId)
+    if (rule.enabled) this.registerSchedule(rule)
+
+    return rule
+  }
+
+  /**
+   * Delete an automation rule.
+   * Returns true if deleted, false if not found.
+   */
+  async deleteRule(ruleId: string, sheetId: string): Promise<boolean> {
+    const result = await this.db
+      .deleteFrom('automation_rules')
+      .where('id', '=', ruleId)
+      .where('sheet_id', '=', sheetId)
+      .execute()
+
+    const deleted = result.length > 0 && Number(result[0].numDeletedRows) > 0
+    if (deleted) {
+      this.unregisterSchedule(ruleId)
+    }
+    return deleted
+  }
+
+  /**
+   * Enable or disable a rule.
+   */
+  async setRuleEnabled(ruleId: string, enabled: boolean): Promise<AutomationRule | null> {
+    const result = await this.db
+      .updateTable('automation_rules')
+      .set({ enabled, updated_at: new Date().toISOString() } as never)
+      .where('id', '=', ruleId)
+      .returningAll()
+      .execute()
+
+    if (result.length === 0) return null
+
+    const rule = this.mapRow(result[0])
+
+    if (enabled) {
+      this.registerSchedule(rule)
+    } else {
+      this.unregisterSchedule(ruleId)
+    }
+
+    return rule
+  }
+
+  // ── Schedule registration ───────────────────────────────────────────────
+
   /**
    * Register all scheduled rules from a given sheet.
    */
@@ -154,6 +343,28 @@ export class AutomationService {
       if (rule.trigger_type === 'schedule.cron' || rule.trigger_type === 'schedule.interval') {
         this.scheduler.register(toExecutorRule(rule))
       }
+    }
+  }
+
+  /**
+   * Load all enabled rules across all sheets and register scheduled ones.
+   * Called on startup.
+   */
+  async loadAndRegisterAllScheduled(): Promise<void> {
+    const rows = await this.db
+      .selectFrom('automation_rules')
+      .selectAll()
+      .where('enabled', '=', true)
+      .where('trigger_type', 'in', ['schedule.cron', 'schedule.interval'])
+      .execute()
+
+    for (const row of rows) {
+      const rule = this.mapRow(row)
+      this.scheduler.register(toExecutorRule(rule))
+    }
+
+    if (rows.length > 0) {
+      logger.info(`Registered ${rows.length} scheduled automation rule(s) on startup`)
     }
   }
 
@@ -228,9 +439,8 @@ export class AutomationService {
    * Manual test run: execute a rule immediately with synthetic event.
    */
   async testRun(ruleId: string, sheetId: string): Promise<AutomationExecution> {
-    const rules = await this.loadEnabledRules(sheetId)
-    const rule = rules.find((r) => r.id === ruleId)
-    if (!rule) {
+    const rule = await this.getRule(ruleId)
+    if (!rule || !rule.enabled) {
       throw new Error(`Rule ${ruleId} not found or not enabled`)
     }
     const execRule = toExecutorRule(rule)
@@ -244,14 +454,38 @@ export class AutomationService {
     return this.executeRule(execRule, syntheticEvent)
   }
 
+  /**
+   * Load enabled rules for a sheet (Kysely).
+   */
   async loadEnabledRules(sheetId: string): Promise<AutomationRule[]> {
-    const result = await this.query(
-      `SELECT id, sheet_id, name, trigger_type, trigger_config, action_type, action_config, enabled, created_at, updated_at, created_by, conditions, actions
-       FROM automation_rules
-       WHERE sheet_id = $1 AND enabled = true
-       ORDER BY created_at ASC`,
-      [sheetId],
-    )
-    return result.rows as AutomationRule[]
+    const rows = await this.db
+      .selectFrom('automation_rules')
+      .selectAll()
+      .where('sheet_id', '=', sheetId)
+      .where('enabled', '=', true)
+      .orderBy('created_at', 'asc')
+      .execute()
+
+    return rows.map((r) => this.mapRow(r))
+  }
+
+  // ── Private helpers ─────────────────────────────────────────────────────
+
+  private mapRow(row: Record<string, unknown>): AutomationRule {
+    return {
+      id: row.id as string,
+      sheet_id: row.sheet_id as string,
+      name: (row.name as string) ?? null,
+      trigger_type: row.trigger_type as string,
+      trigger_config: (row.trigger_config as Record<string, unknown>) ?? {},
+      action_type: row.action_type as string,
+      action_config: (row.action_config as Record<string, unknown>) ?? {},
+      enabled: row.enabled as boolean,
+      created_at: row.created_at instanceof Date ? row.created_at.toISOString() : String(row.created_at ?? ''),
+      updated_at: row.updated_at instanceof Date ? row.updated_at.toISOString() : String(row.updated_at ?? ''),
+      created_by: (row.created_by as string) ?? null,
+      conditions: (row.conditions as ConditionGroup) ?? null,
+      actions: (row.actions as AutomationAction[]) ?? null,
+    }
   }
 }

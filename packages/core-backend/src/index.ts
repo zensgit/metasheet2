@@ -1617,8 +1617,10 @@ export class MetaSheetServer {
     // Initialize AutomationService
     try {
       const pool = poolManager.get()
-      this.automationService = new AutomationService(eventBus, pool.query.bind(pool))
+      const { db: kyselyDb } = await import('./db/db')
+      this.automationService = new AutomationService(eventBus, kyselyDb, pool.query.bind(pool))
       this.automationService.init()
+      await this.automationService.loadAndRegisterAllScheduled()
       this.logger.info('AutomationService initialized')
     } catch (e) {
       this.logger.error('AutomationService initialization failed; continuing in degraded mode', e as Error)
