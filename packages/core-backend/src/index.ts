@@ -1738,7 +1738,7 @@ export class MetaSheetServer {
         const yjsBridge = new YjsRecordBridge(
           yjsSyncService,
           recordWriteService,
-          async (recordId, patch, actorId) => {
+          async (recordId, patch, actorId, _allActorIds) => {
             // Build RecordPatchInput from recordId + patch fields + real actor
             try {
               const recResult = await pool.query(

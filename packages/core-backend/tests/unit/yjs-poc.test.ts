@@ -395,7 +395,7 @@ describe('YjsRecordBridge', () => {
 
     const mockRecordWriteService = { patchRecords: mockPatchRecords } as any
     const mockSyncService = {} as any
-    const mockGetWriteInput = vi.fn().mockImplementation(async (recordId: string, patch: Record<string, unknown>, actorId: string) => ({
+    const mockGetWriteInput = vi.fn().mockImplementation(async (recordId: string, patch: Record<string, unknown>, actorId: string, _allActorIds?: string[]) => ({
       sheetId: 'sheet1',
       changesByRecord: new Map([[recordId, Object.entries(patch).map(([fieldId, value]) => ({ fieldId, value }))]]),
       actorId: actorId || 'unknown',
@@ -421,7 +421,7 @@ describe('YjsRecordBridge', () => {
     // Wait for debounce flush
     await new Promise((r) => setTimeout(r, 50))
 
-    expect(mockGetWriteInput).toHaveBeenCalledWith('rec1', { fld_name: 'hello' }, 'unknown')
+    expect(mockGetWriteInput).toHaveBeenCalledWith('rec1', { fld_name: 'hello' }, 'unknown', ['unknown'])
     expect(mockPatchRecords).toHaveBeenCalledTimes(1)
 
     bridge.destroy()
@@ -437,7 +437,7 @@ describe('YjsRecordBridge', () => {
     fields.set('fld_name', textField)
 
     const mockPatchRecords = vi.fn().mockResolvedValue({ updated: [] })
-    const mockGetWriteInput = vi.fn().mockImplementation(async (recordId: string, patch: Record<string, unknown>, actorId: string) => ({
+    const mockGetWriteInput = vi.fn().mockImplementation(async (recordId: string, patch: Record<string, unknown>, actorId: string, _allActorIds?: string[]) => ({
       sheetId: 'sheet1',
       changesByRecord: new Map([[recordId, Object.entries(patch).map(([fieldId, value]) => ({ fieldId, value }))]]),
       actorId: actorId || 'unknown',
@@ -466,7 +466,7 @@ describe('YjsRecordBridge', () => {
     await new Promise((r) => setTimeout(r, 80))
 
     expect(mockPatchRecords).toHaveBeenCalledTimes(1)
-    expect(mockGetWriteInput).toHaveBeenCalledWith('rec1', { fld_name: 'abc' }, 'unknown')
+    expect(mockGetWriteInput).toHaveBeenCalledWith('rec1', { fld_name: 'abc' }, 'unknown', ['unknown'])
 
     bridge.destroy()
     doc.destroy()
@@ -552,5 +552,106 @@ describe('sheet-capabilities write-own', () => {
     expect(ensureRecordWriteAllowed(caps, scope, access, 'user-a', 'edit')).toBe(false)
     // user-a edits own record → allowed
     expect(ensureRecordWriteAllowed(caps, scope, { ...access, userId: 'user-a' }, 'user-a', 'edit')).toBe(true)
+  })
+})
+
+// ═══════════════════════════════════════════════════════════════════
+// YjsPersistenceAdapter: crash recovery (updates-only, no snapshot)
+// ═══════════════════════════════════════════════════════════════════
+describe('YjsPersistenceAdapter crash recovery', () => {
+  it('loadDoc recovers from updates-only when no snapshot exists', async () => {
+    // Simulate crash: updates were persisted but storeSnapshot never ran
+    const { YjsPersistenceAdapter } = await import('../../src/collab/yjs-persistence-adapter')
+
+    // Create a Y.Doc and encode an update
+    const srcDoc = new Y.Doc()
+    srcDoc.getText('field').insert(0, 'crash-test')
+    const update = Y.encodeStateAsUpdate(srcDoc)
+    srcDoc.destroy()
+
+    // Mock DB: no snapshot, but one update row
+    const mockChain = {
+      select: vi.fn().mockReturnThis(),
+      where: vi.fn().mockReturnThis(),
+      orderBy: vi.fn().mockReturnThis(),
+      executeTakeFirst: vi.fn().mockResolvedValue(null), // no snapshot
+      execute: vi.fn().mockResolvedValue([{ update_data: Buffer.from(update) }]), // one update
+    }
+    const mockDb = {
+      selectFrom: vi.fn(() => mockChain),
+    }
+
+    const adapter = new YjsPersistenceAdapter(mockDb as any)
+    const result = await adapter.loadDoc('rec-crash')
+
+    expect(result).not.toBeNull()
+
+    // Verify the recovered doc has the right content
+    const recovered = new Y.Doc()
+    Y.applyUpdate(recovered, result!)
+    expect(recovered.getText('field').toString()).toBe('crash-test')
+    recovered.destroy()
+  })
+})
+
+// ═══════════════════════════════════════════════════════════════════
+// YjsRecordBridge: multi-actor merge window
+// ═══════════════════════════════════════════════════════════════════
+describe('YjsRecordBridge multi-actor', () => {
+  it('tracks all actorIds in merge window, not just the last one', async () => {
+    const { YjsRecordBridge } = await import('../../src/collab/yjs-record-bridge')
+
+    const doc = new Y.Doc()
+    const fields = doc.getMap('fields')
+    const textField = new Y.Text()
+    fields.set('fld_name', textField)
+
+    let capturedAllActorIds: string[] | undefined
+    const mockPatchRecords = vi.fn().mockResolvedValue({ updated: [] })
+    const mockGetWriteInput = vi.fn().mockImplementation(
+      async (_recordId: string, _patch: Record<string, unknown>, _primaryActorId: string, allActorIds?: string[]) => {
+        capturedAllActorIds = allActorIds
+        return {
+          sheetId: 'sheet1',
+          changesByRecord: new Map(),
+          actorId: _primaryActorId,
+          fields: [],
+          visiblePropertyFields: [],
+          visiblePropertyFieldIds: new Set<string>(),
+          attachmentFields: [],
+          fieldById: new Map([['fld_name', { type: 'string', readOnly: false, hidden: false }]]),
+          capabilities: { canEditRecord: true } as any,
+          access: { userId: _primaryActorId, permissions: [], isAdminRole: false },
+        }
+      },
+    )
+
+    // actorResolver: map socket ids to user ids
+    const actorResolver = (socketId: string) => socketId === 'sock-a' ? 'user-a' : socketId === 'sock-b' ? 'user-b' : undefined
+
+    const bridge = new YjsRecordBridge(
+      {} as any,
+      { patchRecords: mockPatchRecords } as any,
+      mockGetWriteInput,
+      { mergeWindowMs: 50, maxDelayMs: 200 },
+      actorResolver,
+    )
+
+    bridge.observe('rec1', doc)
+
+    // Two different users edit within the merge window
+    doc.transact(() => { textField.insert(0, 'a') }, 'sock-a')
+    doc.transact(() => { textField.insert(1, 'b') }, 'sock-b')
+
+    await new Promise((r) => setTimeout(r, 100))
+
+    expect(mockGetWriteInput).toHaveBeenCalledTimes(1)
+    // Both actors should be tracked
+    expect(capturedAllActorIds).toContain('user-a')
+    expect(capturedAllActorIds).toContain('user-b')
+    expect(capturedAllActorIds).toHaveLength(2)
+
+    bridge.destroy()
+    doc.destroy()
   })
 })

@@ -26,7 +26,7 @@ export type ActorResolver = (socketId: string) => string | undefined
 
 interface PendingWrite {
   fields: Record<string, string>
-  actorId: string
+  actorIds: Set<string>
   timer: NodeJS.Timeout
   firstSeen: number
 }
@@ -50,7 +50,7 @@ export class YjsRecordBridge {
   constructor(
     private syncService: YjsSyncService,
     private recordWriteService: RecordWriteService,
-    private getWriteInput: (recordId: string, patch: Record<string, unknown>, actorId: string) => Promise<RecordPatchInput | null>,
+    private getWriteInput: (recordId: string, patch: Record<string, unknown>, primaryActorId: string, allActorIds: string[]) => Promise<RecordPatchInput | null>,
     config?: YjsRecordBridgeConfig,
     actorResolver?: ActorResolver,
   ) {
@@ -129,9 +129,8 @@ export class YjsRecordBridge {
     const existing = this.pendingWrites.get(recordId)
 
     if (existing) {
-      // Merge fields into pending, keep latest actorId
       Object.assign(existing.fields, changedFields)
-      existing.actorId = actorId
+      existing.actorIds.add(actorId)
       clearTimeout(existing.timer)
 
       // Check if we've exceeded max delay — force flush
@@ -143,7 +142,7 @@ export class YjsRecordBridge {
 
     const entry: PendingWrite = existing ?? {
       fields: { ...changedFields },
-      actorId,
+      actorIds: new Set([actorId]),
       timer: null!,
       firstSeen: Date.now(),
     }
@@ -163,16 +162,18 @@ export class YjsRecordBridge {
     this.pendingWrites.delete(recordId)
 
     const fields = { ...pending.fields }
-    const actorId = pending.actorId
+    const actorIds = [...pending.actorIds]
+    // Primary actor = first contributor in the window; all contributors tracked
+    const primaryActorId = actorIds[0] ?? 'unknown'
 
     // Fire and forget — errors logged, not thrown
-    this.executePatch(recordId, fields, actorId).catch((err) => {
+    this.executePatch(recordId, fields, primaryActorId, actorIds).catch((err) => {
       console.error(`[yjs-bridge] Failed to flush patch for record ${recordId}:`, err)
     })
   }
 
-  private async executePatch(recordId: string, fields: Record<string, unknown>, actorId: string): Promise<void> {
-    const input = await this.getWriteInput(recordId, fields, actorId)
+  private async executePatch(recordId: string, fields: Record<string, unknown>, primaryActorId: string, allActorIds: string[]): Promise<void> {
+    const input = await this.getWriteInput(recordId, fields, primaryActorId, allActorIds)
     if (!input) return // record context not available (e.g., deleted)
 
     await this.recordWriteService.patchRecords(input)

@@ -5,19 +5,14 @@ export class YjsPersistenceAdapter {
   constructor(private db: Kysely<any>) {}
 
   async loadDoc(recordId: string): Promise<Uint8Array | null> {
-    // First try full snapshot
+    // Load snapshot if available
     const snapshot = await this.db
       .selectFrom('meta_record_yjs_states')
       .select('doc_state')
       .where('record_id', '=', recordId)
       .executeTakeFirst()
 
-    if (!snapshot) return null
-
-    const doc = new Y.Doc()
-    Y.applyUpdate(doc, new Uint8Array(snapshot.doc_state))
-
-    // Apply any incremental updates on top
+    // Load incremental updates (may exist even without snapshot — crash recovery)
     const updates = await this.db
       .selectFrom('meta_record_yjs_updates')
       .select('update_data')
@@ -25,6 +20,17 @@ export class YjsPersistenceAdapter {
       .orderBy('id', 'asc')
       .execute()
 
+    // Nothing persisted at all
+    if (!snapshot && updates.length === 0) return null
+
+    const doc = new Y.Doc()
+
+    // Apply snapshot first if available
+    if (snapshot) {
+      Y.applyUpdate(doc, new Uint8Array(snapshot.doc_state))
+    }
+
+    // Apply incremental updates on top (covers crash recovery when no snapshot exists)
     for (const row of updates) {
       Y.applyUpdate(doc, new Uint8Array(row.update_data))
     }
