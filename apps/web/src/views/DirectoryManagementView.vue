@@ -147,6 +147,395 @@
         <section v-if="selectedIntegration" class="directory-admin__section">
           <div class="directory-admin__section-head">
             <div>
+              <h3>待处理队列</h3>
+              <p class="directory-admin__hint">展示待绑定、目录停用待停权、缺少钉钉身份标识的成员。</p>
+              <p class="directory-admin__hint">
+                待绑定中：可推荐 {{ pendingBindingCounts.recommended }} · 需人工 {{ pendingBindingCounts.manual }}
+              </p>
+              <p v-if="pendingBindingCounts.manual > 0" class="directory-admin__hint">
+                人工处理中：无精确匹配 {{ pendingBindingManualReasonCounts.no_exact_match }} ·
+                冲突待复核 {{ pendingBindingManualReasonCounts.conflict }}
+              </p>
+              <p v-if="reviewTotal > 0" class="directory-admin__hint">
+                当前已加载 {{ reviewItems.length }} / {{ reviewTotal }} 项，筛选统计基于已加载数据。
+              </p>
+            </div>
+            <div class="directory-admin__actions">
+              <button
+                v-for="option in reviewFilterOptions"
+                :key="option.value"
+                class="directory-admin__button directory-admin__button--secondary"
+                :class="{ 'directory-admin__button--active': reviewFilter === option.value }"
+                type="button"
+                :disabled="loadingReviewItems"
+                @click="void updateReviewFilter(option.value)"
+              >
+                {{ option.label }}{{ reviewCounts[option.value] > 0 ? ` (${reviewCounts[option.value]})` : '' }}
+              </button>
+              <button
+                v-for="option in pendingBindingViewOptions"
+                :key="option.value"
+                class="directory-admin__button directory-admin__button--secondary"
+                :class="{ 'directory-admin__button--active': pendingBindingView === option.value }"
+                type="button"
+                :disabled="loadingReviewItems || reviewCounts.pending_binding === 0"
+                @click="updatePendingBindingView(option.value)"
+              >
+                {{ option.label }}{{ pendingBindingCounts[option.value] > 0 ? ` (${pendingBindingCounts[option.value]})` : '' }}
+              </button>
+              <button
+                v-for="option in pendingBindingManualReasonOptions"
+                v-if="showPendingBindingManualReasonFilters"
+                :key="option.value"
+                class="directory-admin__button directory-admin__button--secondary"
+                :class="{ 'directory-admin__button--active': pendingBindingManualReason === option.value }"
+                type="button"
+                :disabled="loadingReviewItems || pendingBindingCounts.manual === 0"
+                @click="updatePendingBindingManualReason(option.value)"
+              >
+                {{ option.label }}{{ pendingBindingManualReasonCounts[option.value] > 0 ? ` (${pendingBindingManualReasonCounts[option.value]})` : '' }}
+              </button>
+              <button
+                class="directory-admin__button directory-admin__button--secondary"
+                type="button"
+                :disabled="loadingReviewItems"
+                @click="void loadReviewItems(selectedIntegration.id)"
+              >
+                {{ loadingReviewItems ? '刷新中...' : '刷新队列' }}
+              </button>
+            </div>
+          </div>
+          <article v-if="reviewBatchProgress" class="directory-admin__progress-card">
+            <div class="directory-admin__alert-head">
+              <div>
+                <strong>处理进度</strong>
+                <p class="directory-admin__hint">{{ reviewBatchProgress.message }}</p>
+              </div>
+              <div class="directory-admin__chips">
+                <span class="directory-admin__chip">{{ readReviewBatchProgressKindLabel(reviewBatchProgress.kind) }}</span>
+                <span class="directory-admin__chip" :class="readReviewBatchProgressPhaseClass(reviewBatchProgress.phase)">
+                  {{ readReviewBatchProgressPhaseLabel(reviewBatchProgress.phase) }}
+                </span>
+                <span class="directory-admin__chip">进度 {{ reviewBatchProgress.applied }} / {{ reviewBatchProgress.total }}</span>
+              </div>
+            </div>
+            <div v-if="!reviewBatchProcessing" class="directory-admin__actions">
+              <button
+                class="directory-admin__button directory-admin__button--secondary"
+                type="button"
+                @click="clearReviewBatchProgress()"
+              >
+                清除进度
+              </button>
+            </div>
+          </article>
+          <div class="directory-admin__actions" v-if="filteredReviewItems.length > 0">
+            <button
+              class="directory-admin__button directory-admin__button--secondary"
+              type="button"
+              :disabled="selectableVisibleReviewIds.length === 0"
+              @click="selectVisibleReviewItems()"
+            >
+              {{ `选择当前筛选 (${selectableVisibleReviewIds.length})` }}
+            </button>
+            <button
+              class="directory-admin__button directory-admin__button--secondary"
+              type="button"
+              :disabled="selectableVisibleRecommendedReviewIds.length === 0"
+              @click="selectVisibleRecommendedReviewItems()"
+            >
+              {{ `选择可推荐 (${selectableVisibleRecommendedReviewIds.length})` }}
+            </button>
+            <button
+              class="directory-admin__button directory-admin__button--secondary"
+              type="button"
+              :disabled="Object.keys(selectedReviewIds).length === 0"
+              @click="clearReviewSelection()"
+            >
+              清空选择
+            </button>
+            <button
+              class="directory-admin__button"
+              type="button"
+              :disabled="reviewBatchProcessing || selectedRecommendedReviewBindEntries.length === 0"
+              @click="void batchConfirmRecommendedReviewItems()"
+            >
+              {{ reviewBatchProcessing ? '处理中...' : `批量确认推荐 (${selectedRecommendedReviewBindEntries.length})` }}
+            </button>
+            <button
+              class="directory-admin__button"
+              type="button"
+              :disabled="reviewBatchProcessing || selectedReviewBindEntries.length === 0"
+              @click="void batchBindReviewItems()"
+            >
+              {{ reviewBatchProcessing ? '处理中...' : `批量绑定 (${selectedReviewBindEntries.length})` }}
+            </button>
+            <label class="directory-admin__toggle directory-admin__toggle--compact">
+              <input v-model="reviewDisableDingTalkGrant" type="checkbox" />
+              <span>停权时同时关闭钉钉登录</span>
+            </label>
+            <button
+              class="directory-admin__button"
+              type="button"
+              :disabled="reviewBatchProcessing || selectedReviewBatchIds.length === 0"
+              @click="void batchUnbindReviewItems()"
+            >
+              {{ reviewBatchProcessing ? '处理中...' : `批量停权处理 (${selectedReviewBatchIds.length})` }}
+            </button>
+          </div>
+          <div v-if="loadingReviewItems" class="directory-admin__empty">待处理队列加载中...</div>
+          <div v-else-if="filteredReviewItems.length === 0" class="directory-admin__empty">
+            {{ hasMoreReviewItems ? '当前筛选在已加载数据中暂无结果，可继续加载更多。' : '暂无待处理项' }}
+          </div>
+          <article v-for="item in filteredReviewItems" :key="`${item.kind}-${item.account.id}`" class="directory-admin__review-item">
+            <div class="directory-admin__review-head">
+              <div class="directory-admin__review-title">
+                <label v-if="item.actionable.canBatchUnbind || item.kind === 'pending_binding'" class="directory-admin__review-select">
+                  <input
+                    type="checkbox"
+                    :checked="Boolean(selectedReviewIds[item.account.id])"
+                    @change="onReviewSelectionChange(item.account.id, $event)"
+                  />
+                </label>
+                <div>
+                  <strong>{{ item.account.name }}</strong>
+                  <p class="directory-admin__hint">{{ item.reason }}</p>
+                </div>
+              </div>
+              <div class="directory-admin__chips">
+                <span class="directory-admin__chip" :class="readReviewKindClass(item.kind)">{{ readReviewKindLabel(item.kind) }}</span>
+                <span class="directory-admin__chip" :class="{ 'directory-admin__badge--inactive': !item.account.isActive }">
+                  {{ item.account.isActive ? '目录启用' : '目录停用' }}
+                </span>
+              </div>
+            </div>
+            <p class="directory-admin__hint">
+              本地用户：{{ item.account.localUser ? (item.account.localUser.email || item.account.localUser.id) : '未绑定' }} ·
+              外部用户：{{ item.account.externalUserId }} ·
+              部门：{{ item.account.departmentPaths.join('，') || '未分配部门' }}
+            </p>
+            <p v-if="item.kind === 'pending_binding' && item.recommendationStatus" class="directory-admin__hint">
+              推荐判断：{{ item.recommendationStatus.message }}
+            </p>
+            <div class="directory-admin__chips">
+              <span v-if="item.flags.missingUnionId" class="directory-admin__chip directory-admin__chip--warning">缺 unionId</span>
+              <span v-if="item.flags.missingOpenId" class="directory-admin__chip directory-admin__chip--warning">缺 openId</span>
+              <span class="directory-admin__chip">{{ item.account.linkStatus }}</span>
+              <span v-if="item.account.matchStrategy" class="directory-admin__chip">策略 {{ item.account.matchStrategy }}</span>
+            </div>
+            <div v-if="item.kind === 'pending_binding'" class="directory-admin__form-grid directory-admin__form-grid--account">
+              <label class="directory-admin__field">
+                <span>绑定到本地用户 ID / 邮箱</span>
+                <input
+                  :value="readBindingDraft(item.account)"
+                  class="directory-admin__input"
+                  type="text"
+                  placeholder="例如 user-123 或 alpha@example.com"
+                  @input="onBindingDraftInput(item.account.id, $event)"
+                  @focus="clearBindingSearch(item.account.id)"
+                />
+              </label>
+              <label class="directory-admin__toggle directory-admin__toggle--compact">
+                <input
+                  :checked="readGrantToggle(item.account.id)"
+                  type="checkbox"
+                  @change="onGrantToggleChange(item.account.id, $event)"
+                />
+                <span>绑定后同时开通钉钉登录</span>
+              </label>
+            </div>
+            <div v-if="item.kind === 'pending_binding' && item.recommendations.length > 0" class="directory-admin__search-results">
+              <button
+                v-for="recommendation in item.recommendations"
+                :key="`${item.account.id}-${recommendation.localUser.id}`"
+                class="directory-admin__search-result"
+                type="button"
+                @click="applyRecommendedLocalUser(item.account.id, recommendation)"
+              >
+                <strong>{{ recommendation.localUser.name || recommendation.localUser.email || recommendation.localUser.id }}</strong>
+                <span>{{ recommendation.localUser.email || recommendation.localUser.id }}</span>
+                <small>{{ readRecommendationReasonLabel(recommendation.reasons) }}</small>
+              </button>
+            </div>
+            <div v-if="item.kind === 'pending_binding' && readBindingSearchResults(item.account.id).length > 0" class="directory-admin__search-results">
+              <button
+                v-for="user in readBindingSearchResults(item.account.id)"
+                :key="user.id"
+                class="directory-admin__search-result"
+                type="button"
+                @click="chooseLocalUser(item.account.id, user)"
+              >
+                <strong>{{ user.name || user.email }}</strong>
+                <span>{{ user.email }}</span>
+                <small>{{ user.id }} · {{ user.role }} · {{ user.is_active ? 'active' : 'inactive' }}</small>
+              </button>
+            </div>
+            <p v-if="item.kind === 'pending_binding' && readBindingSearchError(item.account.id)" class="directory-admin__status directory-admin__status--error">
+              {{ readBindingSearchError(item.account.id) }}
+            </p>
+            <div class="directory-admin__actions">
+              <button
+                v-if="item.kind === 'pending_binding'"
+                class="directory-admin__button directory-admin__button--secondary"
+                type="button"
+                :disabled="readBindingDraft(item.account).trim().length === 0 || readBindingSearchLoading(item.account.id)"
+                @click="void searchLocalUsers(item.account.id)"
+              >
+                {{ readBindingSearchLoading(item.account.id) ? '搜索中...' : '搜索本地用户' }}
+              </button>
+              <button
+                class="directory-admin__button directory-admin__button--secondary"
+                type="button"
+                @click="focusReviewAccount(item)"
+              >
+                定位到成员
+              </button>
+              <button
+                v-if="item.kind === 'pending_binding'"
+                class="directory-admin__button"
+                type="button"
+                :disabled="reviewProcessingAccountId === item.account.id || !item.actionable.canConfirmRecommendation"
+                @click="void confirmRecommendedReviewBinding(item)"
+              >
+                {{ reviewProcessingAccountId === item.account.id ? '处理中...' : '确认推荐' }}
+              </button>
+              <button
+                v-if="item.kind === 'pending_binding'"
+                class="directory-admin__button"
+                type="button"
+                :disabled="reviewProcessingAccountId === item.account.id || readBindingDraft(item.account).trim().length === 0"
+                @click="void handleReviewBind(item)"
+              >
+                {{ reviewProcessingAccountId === item.account.id ? '处理中...' : '快速绑定' }}
+              </button>
+              <button
+                v-if="item.actionable.canBatchUnbind"
+                class="directory-admin__button"
+                type="button"
+                :disabled="reviewProcessingAccountId === item.account.id"
+                @click="void handleReviewUnbind(item)"
+              >
+                {{ reviewProcessingAccountId === item.account.id ? '处理中...' : '停权处理' }}
+              </button>
+            </div>
+          </article>
+          <div v-if="!loadingReviewItems && hasMoreReviewItems" class="directory-admin__actions">
+            <button
+              class="directory-admin__button directory-admin__button--secondary"
+              type="button"
+              :disabled="loadingMoreReviewItems"
+              @click="void loadMoreReviewItems()"
+            >
+              {{ loadingMoreReviewItems ? '加载中...' : `加载更多 (${Math.min(reviewPageSize, reviewTotal - reviewItems.length)})` }}
+            </button>
+          </div>
+        </section>
+
+        <section v-if="selectedIntegration" class="directory-admin__section">
+          <div class="directory-admin__section-head">
+            <div>
+              <h3>自动同步观测</h3>
+              <p class="directory-admin__hint">展示 cron 配置、预计下次运行、最近自动触发和观测状态。</p>
+            </div>
+            <button
+              class="directory-admin__button directory-admin__button--secondary"
+              type="button"
+              :disabled="loadingSchedule"
+              @click="void loadScheduleSnapshot(selectedIntegration.id)"
+            >
+              {{ loadingSchedule ? '刷新中...' : '刷新观测' }}
+            </button>
+          </div>
+          <div v-if="loadingSchedule" class="directory-admin__empty">自动同步观测加载中...</div>
+          <div v-else-if="!scheduleSnapshot" class="directory-admin__empty">暂无自动同步观测</div>
+          <article v-else class="directory-admin__schedule-card">
+            <div class="directory-admin__chips">
+              <span class="directory-admin__chip" :class="readObservationStatusClass(scheduleSnapshot.observationStatus)">
+                {{ readObservationStatusLabel(scheduleSnapshot.observationStatus) }}
+              </span>
+              <span class="directory-admin__chip" :class="{ 'directory-admin__chip--warning': !scheduleSnapshot.syncEnabled }">
+                {{ scheduleSnapshot.syncEnabled ? '自动同步已启用' : '仅手动同步' }}
+              </span>
+              <span class="directory-admin__chip" :class="{ 'directory-admin__chip--warning': !scheduleSnapshot.cronValid }">
+                {{ scheduleSnapshot.scheduleCron || '未配置 cron' }}
+              </span>
+              <span class="directory-admin__chip">下次执行 {{ formatDateTime(scheduleSnapshot.nextExpectedRunAt) }}</span>
+              <span class="directory-admin__chip">触发源 {{ readTriggerSourceLabel(scheduleSnapshot.lastRun?.triggerSource) }}</span>
+            </div>
+            <p class="directory-admin__hint">{{ scheduleSnapshot.observationMessage }}</p>
+            <p class="directory-admin__hint">
+              最近自动运行：{{ formatDateTime(scheduleSnapshot.lastAutomaticRun?.startedAt ?? null) }} ·
+              最近手动运行：{{ formatDateTime(scheduleSnapshot.lastManualRun?.startedAt ?? null) }} ·
+              最近运行：{{ formatDateTime(scheduleSnapshot.lastRun?.startedAt ?? null) }}
+            </p>
+          </article>
+        </section>
+
+        <section v-if="selectedIntegration" class="directory-admin__section">
+          <div class="directory-admin__section-head">
+            <div>
+              <h3>最近告警</h3>
+              <p class="directory-admin__hint">展示目录同步告警，并支持确认处理。</p>
+            </div>
+            <div class="directory-admin__actions">
+              <button
+                v-for="option in alertFilterOptions"
+                :key="option.value"
+                class="directory-admin__button directory-admin__button--secondary"
+                :class="{ 'directory-admin__button--active': alertFilter === option.value }"
+                type="button"
+                :disabled="loadingAlerts"
+                @click="void updateAlertFilter(option.value)"
+              >
+                {{ option.label }}{{ alertCounts[option.value] > 0 ? ` (${alertCounts[option.value]})` : '' }}
+              </button>
+              <button
+                class="directory-admin__button directory-admin__button--secondary"
+                type="button"
+                :disabled="loadingAlerts"
+                @click="void loadAlerts(selectedIntegration.id)"
+              >
+                {{ loadingAlerts ? '刷新中...' : '刷新告警' }}
+              </button>
+            </div>
+          </div>
+          <div v-if="loadingAlerts" class="directory-admin__empty">最近告警加载中...</div>
+          <div v-else-if="filteredAlerts.length === 0" class="directory-admin__empty">暂无告警</div>
+          <article v-for="alert in filteredAlerts" :key="alert.id" class="directory-admin__alert">
+            <div class="directory-admin__alert-head">
+              <div>
+                <strong>{{ readAlertLevelLabel(alert.level) }}</strong>
+                <p class="directory-admin__hint">{{ alert.code }} · {{ formatDateTime(alert.createdAt) }}</p>
+              </div>
+              <div class="directory-admin__chips">
+                <span class="directory-admin__chip" :class="readAlertLevelClass(alert.level)">
+                  {{ readAlertLevelLabel(alert.level) }}
+                </span>
+                <span class="directory-admin__chip" :class="{ 'directory-admin__chip--success': Boolean(alert.acknowledgedAt) }">
+                  {{ alert.acknowledgedAt ? '已确认' : '待确认' }}
+                </span>
+              </div>
+            </div>
+            <p>{{ alert.message }}</p>
+            <p v-if="alert.acknowledgedAt" class="directory-admin__hint">
+              确认时间：{{ formatDateTime(alert.acknowledgedAt) }}{{ alert.acknowledgedBy ? ` · ${alert.acknowledgedBy}` : '' }}
+            </p>
+            <div class="directory-admin__actions">
+              <button
+                class="directory-admin__button directory-admin__button--secondary"
+                type="button"
+                :disabled="acknowledgingAlertId === alert.id || Boolean(alert.acknowledgedAt)"
+                @click="void acknowledgeAlert(alert)"
+              >
+                {{ acknowledgingAlertId === alert.id ? '确认中...' : alert.acknowledgedAt ? '已确认' : '确认告警' }}
+              </button>
+            </div>
+          </article>
+        </section>
+
+        <section v-if="selectedIntegration" class="directory-admin__section">
+          <div class="directory-admin__section-head">
+            <div>
               <h3>成员账号</h3>
               <p class="directory-admin__hint">展示同步后的钉钉成员、钉钉 ID 与本地绑定状态；支持按本地用户 ID 或邮箱手工绑定，并按页管理大规模组织。</p>
             </div>
@@ -394,6 +783,104 @@ type DirectoryRun = {
   errorMessage: string | null
 }
 
+type DirectoryObservationStatus =
+  | 'disabled'
+  | 'missing_cron'
+  | 'invalid_cron'
+  | 'awaiting_first_run'
+  | 'scheduler_observed'
+
+type DirectoryScheduleRun = {
+  id: string
+  status: string
+  startedAt: string
+  finishedAt: string | null
+  stats: Record<string, unknown>
+  errorMessage: string | null
+  triggeredBy: string | null
+  triggerSource: string
+  createdAt: string
+  updatedAt: string
+}
+
+type DirectoryScheduleSnapshot = {
+  integrationId: string
+  syncEnabled: boolean
+  scheduleCron: string | null
+  cronValid: boolean
+  nextExpectedRunAt: string | null
+  lastRun: DirectoryScheduleRun | null
+  lastManualRun: DirectoryScheduleRun | null
+  lastAutomaticRun: DirectoryScheduleRun | null
+  observationStatus: DirectoryObservationStatus
+  observationMessage: string
+}
+
+type DirectoryAlertFilter = 'all' | 'pending' | 'acknowledged'
+
+type DirectorySyncAlert = {
+  id: string
+  integrationId: string
+  runId: string | null
+  level: 'info' | 'warning' | 'error'
+  code: string
+  message: string
+  details: Record<string, unknown> | null
+  createdAt: string
+  acknowledgedAt: string | null
+  acknowledgedBy: string | null
+}
+
+type DirectoryReviewItemFilter = 'all' | 'pending_binding' | 'inactive_linked' | 'missing_identifier'
+
+type DirectoryReviewItem = {
+  kind: DirectoryReviewItemFilter
+  reason: string
+  account: DirectoryAccount
+  recommendations: DirectoryBindingRecommendation[]
+  recommendationStatus: DirectoryBindingRecommendationStatus | null
+  flags: {
+    missingUnionId: boolean
+    missingOpenId: boolean
+  }
+  actionable: {
+    canBatchUnbind: boolean
+    canConfirmRecommendation: boolean
+  }
+}
+
+type DirectoryBindingRecommendationReason = 'pending_link' | 'email' | 'mobile'
+type DirectoryBindingRecommendationStatusCode =
+  | 'recommended'
+  | 'no_exact_match'
+  | 'ambiguous_exact_match'
+  | 'pending_link_conflict'
+  | 'linked_user_conflict'
+  | 'external_identity_conflict'
+
+type PendingBindingView = 'all' | 'recommended' | 'manual'
+type PendingBindingManualReasonFilter = 'all' | 'no_exact_match' | 'conflict'
+type ReviewBatchProgressKind = 'bind' | 'recommend' | 'unbind'
+type ReviewBatchProgressPhase = 'submitting' | 'refreshing' | 'completed' | 'failed'
+
+type ReviewBatchProgress = {
+  kind: ReviewBatchProgressKind
+  phase: ReviewBatchProgressPhase
+  total: number
+  applied: number
+  message: string
+}
+
+type DirectoryBindingRecommendation = {
+  localUser: LocalUserOption
+  reasons: DirectoryBindingRecommendationReason[]
+}
+
+type DirectoryBindingRecommendationStatus = {
+  code: DirectoryBindingRecommendationStatusCode
+  message: string
+}
+
 type DirectoryAccount = {
   id: string
   integrationId: string
@@ -464,6 +951,9 @@ type DirectoryDraft = {
 const integrations = ref<DirectoryIntegration[]>([])
 const runs = ref<DirectoryRun[]>([])
 const accounts = ref<DirectoryAccount[]>([])
+const scheduleSnapshot = ref<DirectoryScheduleSnapshot | null>(null)
+const alerts = ref<DirectorySyncAlert[]>([])
+const reviewItems = ref<DirectoryReviewItem[]>([])
 const accountPageSizeOptions = [25, 50, 100]
 const accountPage = ref(1)
 const accountPageSize = ref(25)
@@ -471,19 +961,58 @@ const accountTotal = ref(0)
 const selectedIntegrationId = ref('')
 const loading = ref(false)
 const loadingRuns = ref(false)
+const loadingSchedule = ref(false)
+const loadingAlerts = ref(false)
+const loadingReviewItems = ref(false)
+const loadingMoreReviewItems = ref(false)
 const loadingAccounts = ref(false)
 const busy = ref(false)
 const bindingAccountId = ref('')
 const unbindingAccountId = ref('')
+const acknowledgingAlertId = ref('')
+const reviewProcessingAccountId = ref('')
+const reviewBatchProcessing = ref(false)
+const reviewBatchProgress = ref<ReviewBatchProgress | null>(null)
 const status = ref('')
 const statusTone = ref<'info' | 'error'>('info')
 const testResult = ref<TestResult | null>(null)
 const accountQuery = ref('')
+const alertFilter = ref<DirectoryAlertFilter>('all')
+const reviewFilter = ref<DirectoryReviewItemFilter>('all')
+const pendingBindingView = ref<PendingBindingView>('recommended')
+const pendingBindingViewTouched = ref(false)
+const pendingBindingManualReason = ref<PendingBindingManualReasonFilter>('all')
 const bindingDrafts = reactive<Record<string, string>>({})
 const userSearchResults = reactive<Record<string, LocalUserOption[]>>({})
 const userSearchLoading = reactive<Record<string, boolean>>({})
 const userSearchError = reactive<Record<string, string>>({})
 const grantToggles = reactive<Record<string, boolean>>({})
+const selectedReviewIds = reactive<Record<string, boolean>>({})
+const reviewDisableDingTalkGrant = ref(true)
+const reviewPageSize = 100
+const reviewPage = ref(1)
+const reviewTotal = ref(0)
+const alertFilterOptions = [
+  { value: 'all' as const, label: '全部' },
+  { value: 'pending' as const, label: '待确认' },
+  { value: 'acknowledged' as const, label: '已确认' },
+]
+const reviewFilterOptions = [
+  { value: 'all' as const, label: '全部待处理' },
+  { value: 'pending_binding' as const, label: '待绑定' },
+  { value: 'inactive_linked' as const, label: '停用待停权' },
+  { value: 'missing_identifier' as const, label: '缺身份标识' },
+]
+const pendingBindingViewOptions = [
+  { value: 'all' as const, label: '全部待绑定' },
+  { value: 'recommended' as const, label: '可推荐处理' },
+  { value: 'manual' as const, label: '需人工处理' },
+]
+const pendingBindingManualReasonOptions = [
+  { value: 'all' as const, label: '全部人工' },
+  { value: 'no_exact_match' as const, label: '无精确匹配' },
+  { value: 'conflict' as const, label: '冲突待复核' },
+]
 
 const draft = reactive<DirectoryDraft>({
   name: '',
@@ -513,6 +1042,99 @@ const accountRangeEnd = computed(() => (
     ? 0
     : Math.min(accountPage.value * accountPageSize.value, accountTotal.value)
 ))
+const alertCounts = computed<Record<DirectoryAlertFilter, number>>(() => ({
+  all: alerts.value.length,
+  pending: alerts.value.filter((item) => !item.acknowledgedAt).length,
+  acknowledged: alerts.value.filter((item) => Boolean(item.acknowledgedAt)).length,
+}))
+const filteredAlerts = computed(() => {
+  if (alertFilter.value === 'pending') return alerts.value.filter((item) => !item.acknowledgedAt)
+  if (alertFilter.value === 'acknowledged') return alerts.value.filter((item) => Boolean(item.acknowledgedAt))
+  return alerts.value
+})
+const reviewCounts = computed<Record<DirectoryReviewItemFilter, number>>(() => ({
+  all: reviewItems.value.length,
+  pending_binding: reviewItems.value.filter((item) => item.kind === 'pending_binding').length,
+  inactive_linked: reviewItems.value.filter((item) => item.kind === 'inactive_linked').length,
+  missing_identifier: reviewItems.value.filter((item) => item.kind === 'missing_identifier').length,
+}))
+const pendingBindingCounts = computed<Record<PendingBindingView, number>>(() => ({
+  all: reviewItems.value.filter((item) => item.kind === 'pending_binding').length,
+  recommended: reviewItems.value.filter((item) => item.kind === 'pending_binding' && item.actionable.canConfirmRecommendation).length,
+  manual: reviewItems.value.filter((item) => item.kind === 'pending_binding' && !item.actionable.canConfirmRecommendation).length,
+}))
+const pendingBindingManualReasonCounts = computed<Record<PendingBindingManualReasonFilter, number>>(() => {
+  const manualItems = reviewItems.value.filter((item) => item.kind === 'pending_binding' && !item.actionable.canConfirmRecommendation)
+  return {
+    all: manualItems.length,
+    no_exact_match: manualItems.filter((item) => readPendingBindingManualReasonCode(item) === 'no_exact_match').length,
+    conflict: manualItems.filter((item) => readPendingBindingManualReasonCode(item) === 'conflict').length,
+  }
+})
+const showPendingBindingManualReasonFilters = computed(() => (
+  pendingBindingView.value === 'manual'
+  && pendingBindingCounts.value.manual > 0
+  && (reviewFilter.value === 'all' || reviewFilter.value === 'pending_binding')
+))
+const hasMoreReviewItems = computed(() => reviewItems.value.length < reviewTotal.value)
+const filteredReviewItems = computed(() => {
+  if (reviewFilter.value === 'all') {
+    if (pendingBindingView.value === 'all') return reviewItems.value
+    return reviewItems.value.filter((item) => (
+      item.kind === 'pending_binding'
+      && matchesPendingBindingView(item)
+    ))
+  }
+  if (reviewFilter.value !== 'pending_binding') {
+    return reviewItems.value.filter((item) => item.kind === reviewFilter.value)
+  }
+  if (pendingBindingView.value === 'all') {
+    return reviewItems.value.filter((item) => item.kind === 'pending_binding')
+  }
+  return reviewItems.value.filter((item) => (
+    item.kind === 'pending_binding'
+    && matchesPendingBindingView(item)
+  ))
+})
+const selectableVisibleReviewIds = computed(() => (
+  filteredReviewItems.value
+    .filter((item) => item.kind === 'pending_binding' || item.actionable.canBatchUnbind)
+    .map((item) => item.account.id)
+))
+const selectableVisibleRecommendedReviewIds = computed(() => (
+  filteredReviewItems.value
+    .filter((item) => item.kind === 'pending_binding' && item.actionable.canConfirmRecommendation)
+    .map((item) => item.account.id)
+))
+const selectedRecommendedReviewBindEntries = computed(() => (
+  filteredReviewItems.value
+    .filter((item) => (
+      item.kind === 'pending_binding'
+      && selectedReviewIds[item.account.id]
+      && item.actionable.canConfirmRecommendation
+      && item.recommendations.length > 0
+    ))
+    .map((item) => ({
+      accountId: item.account.id,
+      localUserRef: item.recommendations[0].localUser.id,
+      enableDingTalkGrant: readGrantToggle(item.account.id),
+    }))
+))
+const selectedReviewBindEntries = computed(() => (
+  filteredReviewItems.value
+    .filter((item) => item.kind === 'pending_binding' && selectedReviewIds[item.account.id])
+    .map((item) => ({
+      accountId: item.account.id,
+      localUserRef: readBindingDraft(item.account).trim(),
+      enableDingTalkGrant: readGrantToggle(item.account.id),
+    }))
+    .filter((item) => item.localUserRef.length > 0)
+))
+const selectedReviewBatchIds = computed(() => (
+  filteredReviewItems.value
+    .filter((item) => item.actionable.canBatchUnbind && selectedReviewIds[item.account.id])
+    .map((item) => item.account.id)
+))
 
 const canSave = computed(() =>
   draft.name.trim().length > 0 &&
@@ -531,15 +1153,28 @@ function resetDraft() {
   testResult.value = null
   runs.value = []
   accounts.value = []
+  reviewBatchProgress.value = null
+  scheduleSnapshot.value = null
+  alerts.value = []
+  reviewItems.value = []
+  reviewPage.value = 1
+  reviewTotal.value = 0
   accountPage.value = 1
   accountPageSize.value = accountPageSizeOptions[0]
   accountTotal.value = 0
   accountQuery.value = ''
+  alertFilter.value = 'all'
+  reviewFilter.value = 'all'
+  pendingBindingView.value = 'recommended'
+  pendingBindingViewTouched.value = false
+  pendingBindingManualReason.value = 'all'
+  reviewDisableDingTalkGrant.value = true
   for (const key of Object.keys(bindingDrafts)) delete bindingDrafts[key]
   for (const key of Object.keys(userSearchResults)) delete userSearchResults[key]
   for (const key of Object.keys(userSearchLoading)) delete userSearchLoading[key]
   for (const key of Object.keys(userSearchError)) delete userSearchError[key]
   for (const key of Object.keys(grantToggles)) delete grantToggles[key]
+  for (const key of Object.keys(selectedReviewIds)) delete selectedReviewIds[key]
   draft.name = ''
   draft.corpId = ''
   draft.appKey = ''
@@ -572,11 +1207,23 @@ function selectIntegration(integrationId: string) {
   testResult.value = null
   accountPage.value = 1
   accountTotal.value = 0
+  reviewBatchProgress.value = null
+  alertFilter.value = 'all'
+  reviewFilter.value = 'all'
+  pendingBindingView.value = 'recommended'
+  pendingBindingViewTouched.value = false
+  pendingBindingManualReason.value = 'all'
+  reviewPage.value = 1
+  reviewTotal.value = 0
+  for (const key of Object.keys(selectedReviewIds)) delete selectedReviewIds[key]
   const integration = integrations.value.find((item) => item.id === integrationId)
   if (!integration) return
   applyIntegrationToDraft(integration)
   void Promise.all([
     loadRuns(integrationId),
+    loadScheduleSnapshot(integrationId),
+    loadAlerts(integrationId),
+    loadReviewItems(integrationId),
     loadAccounts(integrationId),
   ])
 }
@@ -687,6 +1334,19 @@ function chooseLocalUser(accountId: string, user: LocalUserOption) {
   setBindingSearchState(accountId, { results: [] })
 }
 
+function applyRecommendedLocalUser(accountId: string, recommendation: DirectoryBindingRecommendation) {
+  updateBindingDraft(accountId, recommendation.localUser.email || recommendation.localUser.id)
+  clearBindingSearch(accountId)
+}
+
+function readRecommendationReasonLabel(reasons: DirectoryBindingRecommendationReason[]): string {
+  return reasons.map((reason) => {
+    if (reason === 'pending_link') return '已存在待确认匹配'
+    if (reason === 'email') return '邮箱精确匹配'
+    return '手机号精确匹配'
+  }).join(' · ')
+}
+
 function readGrantToggle(accountId: string): boolean {
   return grantToggles[accountId] ?? true
 }
@@ -779,6 +1439,9 @@ async function syncIntegration() {
     await Promise.all([
       loadIntegrations(),
       loadRuns(selectedIntegration.value.id),
+      loadScheduleSnapshot(selectedIntegration.value.id),
+      loadAlerts(selectedIntegration.value.id),
+      loadReviewItems(selectedIntegration.value.id),
       loadAccounts(selectedIntegration.value.id),
     ])
   } catch (error) {
@@ -862,6 +1525,233 @@ async function loadRuns(integrationId: string) {
   }
 }
 
+async function loadScheduleSnapshot(integrationId: string) {
+  loadingSchedule.value = true
+  try {
+    const response = await apiFetch(`/api/admin/directory/integrations/${integrationId}/schedule`)
+    const body = await readJson(response)
+    if (!response.ok) throw new Error(readApiError(body, '加载自动同步观测失败'))
+    scheduleSnapshot.value = body?.data?.snapshot ?? null
+  } catch (error) {
+    scheduleSnapshot.value = null
+    setStatus(error instanceof Error ? error.message : '加载自动同步观测失败', 'error')
+  } finally {
+    loadingSchedule.value = false
+  }
+}
+
+async function loadAlerts(integrationId: string) {
+  loadingAlerts.value = true
+  try {
+    const params = new URLSearchParams({ page: '1', pageSize: '20', filter: 'all' })
+    const response = await apiFetch(`/api/admin/directory/integrations/${integrationId}/alerts?${params.toString()}`)
+    const body = await readJson(response)
+    if (!response.ok) throw new Error(readApiError(body, '加载最近告警失败'))
+    alerts.value = Array.isArray(body?.data?.items) ? body.data.items : []
+  } catch (error) {
+    alerts.value = []
+    setStatus(error instanceof Error ? error.message : '加载最近告警失败', 'error')
+  } finally {
+    loadingAlerts.value = false
+  }
+}
+
+function normalizeReviewItems(items: unknown[]): DirectoryReviewItem[] {
+  return items.map((item) => ({
+    ...item,
+    recommendations: Array.isArray(item?.recommendations) ? item.recommendations : [],
+    recommendationStatus: item?.recommendationStatus && typeof item.recommendationStatus === 'object'
+      ? {
+        code: typeof item.recommendationStatus.code === 'string' ? item.recommendationStatus.code : 'no_exact_match',
+        message: typeof item.recommendationStatus.message === 'string'
+          ? item.recommendationStatus.message
+          : '未命中唯一的邮箱或手机号精确匹配，请人工搜索本地用户。',
+      }
+      : null,
+    actionable: {
+      canBatchUnbind: item?.actionable?.canBatchUnbind === true,
+      canConfirmRecommendation: item?.actionable?.canConfirmRecommendation === true,
+    },
+  }))
+}
+
+function mergeReviewItems(existingItems: DirectoryReviewItem[], incomingItems: DirectoryReviewItem[]): DirectoryReviewItem[] {
+  if (existingItems.length === 0) return incomingItems
+  const merged = [...existingItems]
+  const indexByAccountId = new Map(existingItems.map((item, index) => [item.account.id, index]))
+  for (const item of incomingItems) {
+    const existingIndex = indexByAccountId.get(item.account.id)
+    if (typeof existingIndex === 'number') {
+      merged[existingIndex] = item
+      continue
+    }
+    indexByAccountId.set(item.account.id, merged.length)
+    merged.push(item)
+  }
+  return merged
+}
+
+async function loadReviewItems(integrationId: string, options: { append?: boolean } = {}) {
+  const append = options.append === true
+  if (append) loadingMoreReviewItems.value = true
+  else loadingReviewItems.value = true
+  try {
+    const nextPage = append ? reviewPage.value + 1 : 1
+    const response = await apiFetch(`/api/admin/directory/integrations/${integrationId}/review-items?page=${nextPage}&pageSize=${reviewPageSize}&filter=all`)
+    const body = await readJson(response)
+    if (!response.ok) throw new Error(readApiError(body, '加载待处理队列失败'))
+    const items = Array.isArray(body?.data?.items) ? body.data.items : []
+    const total = typeof body?.data?.total === 'number'
+      ? body.data.total
+      : Number(body?.data?.total ?? items.length)
+    const normalizedTotal = Number.isFinite(total) && total >= 0 ? total : items.length
+    const normalizedItems = normalizeReviewItems(items)
+    reviewItems.value = append
+      ? mergeReviewItems(reviewItems.value, normalizedItems)
+      : normalizedItems
+    reviewTotal.value = normalizedTotal
+    if (!append) reviewPage.value = 1
+    else if (normalizedItems.length > 0) reviewPage.value = nextPage
+    const validIds = new Set(reviewItems.value.map((item) => item.account.id))
+    for (const key of Object.keys(selectedReviewIds)) {
+      if (!validIds.has(key)) delete selectedReviewIds[key]
+    }
+    syncPendingBindingQueueDefaults()
+  } catch (error) {
+    if (!append) {
+      reviewItems.value = []
+      reviewPage.value = 1
+      reviewTotal.value = 0
+      for (const key of Object.keys(selectedReviewIds)) delete selectedReviewIds[key]
+    }
+    setStatus(error instanceof Error ? error.message : '加载待处理队列失败', 'error')
+  } finally {
+    if (append) loadingMoreReviewItems.value = false
+    else loadingReviewItems.value = false
+  }
+}
+
+async function updateAlertFilter(value: DirectoryAlertFilter) {
+  alertFilter.value = value
+}
+
+async function updateReviewFilter(value: DirectoryReviewItemFilter) {
+  reviewFilter.value = value
+}
+
+function updatePendingBindingView(value: PendingBindingView) {
+  pendingBindingView.value = value
+  pendingBindingViewTouched.value = true
+  if (value !== 'manual') pendingBindingManualReason.value = 'all'
+}
+
+function updatePendingBindingManualReason(value: PendingBindingManualReasonFilter) {
+  pendingBindingManualReason.value = value
+}
+
+function syncPendingBindingQueueDefaults() {
+  if (reviewCounts.value.pending_binding === 0) {
+    pendingBindingView.value = 'all'
+    pendingBindingViewTouched.value = false
+    pendingBindingManualReason.value = 'all'
+    clearReviewSelection()
+    return
+  }
+
+  const recommendedAvailable = pendingBindingCounts.value.recommended > 0
+  const manualAvailable = pendingBindingCounts.value.manual > 0
+
+  const currentViewInvalid = (
+    (pendingBindingView.value === 'recommended' && !recommendedAvailable)
+    || (pendingBindingView.value === 'manual' && !manualAvailable)
+  )
+
+  if (!pendingBindingViewTouched.value || currentViewInvalid) {
+    if (recommendedAvailable) pendingBindingView.value = 'recommended'
+    else if (manualAvailable) pendingBindingView.value = 'manual'
+    else pendingBindingView.value = 'all'
+    pendingBindingViewTouched.value = false
+  }
+
+  if (!manualAvailable || pendingBindingView.value !== 'manual') {
+    pendingBindingManualReason.value = 'all'
+  } else if (
+    pendingBindingManualReason.value !== 'all'
+    && pendingBindingManualReasonCounts.value[pendingBindingManualReason.value] === 0
+  ) {
+    pendingBindingManualReason.value = 'all'
+  }
+
+  const hasSelection = Object.keys(selectedReviewIds).length > 0
+  if (!hasSelection && pendingBindingView.value === 'recommended' && selectableVisibleRecommendedReviewIds.value.length > 0) {
+    selectVisibleRecommendedReviewItems()
+  }
+}
+
+async function loadMoreReviewItems() {
+  if (!selectedIntegration.value || !hasMoreReviewItems.value || loadingMoreReviewItems.value) return
+  await loadReviewItems(selectedIntegration.value.id, { append: true })
+}
+
+function clearReviewBatchProgress() {
+  reviewBatchProgress.value = null
+}
+
+function readReviewBatchProgressKindLabel(kind: ReviewBatchProgressKind): string {
+  if (kind === 'recommend') return '推荐绑定确认'
+  if (kind === 'unbind') return '批量停权处理'
+  return '批量绑定'
+}
+
+function readReviewBatchProgressPhaseLabel(phase: ReviewBatchProgressPhase): string {
+  if (phase === 'submitting') return '提交中'
+  if (phase === 'refreshing') return '刷新中'
+  if (phase === 'completed') return '已完成'
+  return '失败'
+}
+
+function readReviewBatchProgressPhaseClass(phase: ReviewBatchProgressPhase): string {
+  if (phase === 'completed') return 'directory-admin__chip--success'
+  if (phase === 'failed') return 'directory-admin__chip--danger'
+  return 'directory-admin__chip--warning'
+}
+
+function setReviewBatchProgress(progress: ReviewBatchProgress) {
+  reviewBatchProgress.value = progress
+}
+
+function readPendingBindingManualReasonCode(item: DirectoryReviewItem): PendingBindingManualReasonFilter {
+  if (item.kind !== 'pending_binding' || item.actionable.canConfirmRecommendation) return 'all'
+  const code = item.recommendationStatus?.code ?? 'no_exact_match'
+  return code === 'no_exact_match' ? 'no_exact_match' : 'conflict'
+}
+
+function matchesPendingBindingView(item: DirectoryReviewItem): boolean {
+  if (pendingBindingView.value === 'all') return true
+  if (pendingBindingView.value === 'recommended') return item.actionable.canConfirmRecommendation
+  if (item.actionable.canConfirmRecommendation) return false
+  if (pendingBindingManualReason.value === 'all') return true
+  return readPendingBindingManualReasonCode(item) === pendingBindingManualReason.value
+}
+
+async function acknowledgeAlert(alert: DirectorySyncAlert) {
+  if (!selectedIntegration.value || alert.acknowledgedAt) return
+  acknowledgingAlertId.value = alert.id
+  try {
+    const response = await apiFetch(`/api/admin/directory/alerts/${alert.id}/ack`, {
+      method: 'POST',
+    })
+    const body = await readJson(response)
+    if (!response.ok) throw new Error(readApiError(body, '确认告警失败'))
+    await loadAlerts(selectedIntegration.value.id)
+    setStatus('目录告警已确认')
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : '确认告警失败', 'error')
+  } finally {
+    acknowledgingAlertId.value = ''
+  }
+}
+
 async function bindAccount(account: DirectoryAccount) {
   bindingAccountId.value = account.id
   try {
@@ -884,6 +1774,7 @@ async function bindAccount(account: DirectoryAccount) {
     setStatus(`目录成员 ${account.name} 已绑定到本地用户`)
     if (selectedIntegration.value) {
       await loadIntegrations()
+      await loadReviewItems(selectedIntegration.value.id)
       await loadAccounts(selectedIntegration.value.id)
     }
   } catch (error) {
@@ -893,11 +1784,17 @@ async function bindAccount(account: DirectoryAccount) {
   }
 }
 
-async function unbindAccount(account: DirectoryAccount) {
+async function unbindAccount(account: DirectoryAccount, options: {
+  disableDingTalkGrant?: boolean
+  successMessage?: string
+} = {}) {
   unbindingAccountId.value = account.id
   try {
     const response = await apiFetch(`/api/admin/directory/accounts/${account.id}/unbind`, {
       method: 'POST',
+      body: JSON.stringify({
+        disableDingTalkGrant: options.disableDingTalkGrant === true,
+      }),
     })
     const body = await readJson(response)
     if (!response.ok) throw new Error(readApiError(body, '解除绑定失败'))
@@ -915,15 +1812,244 @@ async function unbindAccount(account: DirectoryAccount) {
     })
     delete bindingDrafts[account.id]
     clearBindingSearch(account.id)
-    setStatus(`目录成员 ${account.name} 已解除绑定`)
+    setStatus(options.successMessage ?? `目录成员 ${account.name} 已解除绑定`)
     if (selectedIntegration.value) {
       await loadIntegrations()
+      await loadReviewItems(selectedIntegration.value.id)
       await loadAccounts(selectedIntegration.value.id)
     }
   } catch (error) {
     setStatus(error instanceof Error ? error.message : '解除绑定失败', 'error')
   } finally {
     unbindingAccountId.value = ''
+  }
+}
+
+function updateReviewSelection(accountId: string, checked: boolean) {
+  if (checked) selectedReviewIds[accountId] = true
+  else delete selectedReviewIds[accountId]
+}
+
+function clearReviewSelection() {
+  for (const key of Object.keys(selectedReviewIds)) delete selectedReviewIds[key]
+}
+
+function selectVisibleReviewItems() {
+  clearReviewSelection()
+  for (const accountId of selectableVisibleReviewIds.value) {
+    selectedReviewIds[accountId] = true
+  }
+}
+
+function selectVisibleRecommendedReviewItems() {
+  clearReviewSelection()
+  for (const accountId of selectableVisibleRecommendedReviewIds.value) {
+    selectedReviewIds[accountId] = true
+  }
+}
+
+function onReviewSelectionChange(accountId: string, event: Event) {
+  const target = event.target
+  updateReviewSelection(accountId, target instanceof HTMLInputElement ? target.checked : false)
+}
+
+function focusReviewAccount(item: DirectoryReviewItem) {
+  accountQuery.value = item.account.externalUserId
+  if (selectedIntegration.value) {
+    accountPage.value = 1
+    void loadAccounts(selectedIntegration.value.id)
+  }
+}
+
+async function handleReviewUnbind(item: DirectoryReviewItem) {
+  reviewProcessingAccountId.value = item.account.id
+  try {
+    await unbindAccount(item.account, {
+      disableDingTalkGrant: reviewDisableDingTalkGrant.value,
+      successMessage: `待处理成员 ${item.account.name} 已完成停权处理`,
+    })
+  } finally {
+    reviewProcessingAccountId.value = ''
+  }
+}
+
+async function submitReviewBindings(bindings: Array<{
+  accountId: string
+  localUserRef: string
+  enableDingTalkGrant: boolean
+}>, successMessage: string, failureMessage: string, progressKind?: ReviewBatchProgressKind) {
+  if (!selectedIntegration.value || bindings.length === 0) return
+  reviewBatchProcessing.value = true
+  let appliedCount = 0
+  try {
+    if (progressKind) {
+      setReviewBatchProgress({
+        kind: progressKind,
+        phase: 'submitting',
+        total: bindings.length,
+        applied: 0,
+        message: `正在提交${readReviewBatchProgressKindLabel(progressKind)}请求...`,
+      })
+    }
+    const response = await apiFetch('/api/admin/directory/accounts/batch-bind', {
+      method: 'POST',
+      body: JSON.stringify({ bindings }),
+    })
+    const body = await readJson(response)
+    if (!response.ok) throw new Error(readApiError(body, failureMessage))
+    const processedItems = Array.isArray(body?.data?.items) ? body.data.items : []
+    appliedCount = processedItems.length > 0 ? processedItems.length : bindings.length
+    if (progressKind) {
+      setReviewBatchProgress({
+        kind: progressKind,
+        phase: 'refreshing',
+        total: bindings.length,
+        applied: appliedCount,
+        message: `已提交 ${appliedCount} / ${bindings.length}，正在刷新目录成员与待处理队列...`,
+      })
+    }
+    for (const key of Object.keys(selectedReviewIds)) delete selectedReviewIds[key]
+    setStatus(successMessage)
+    await Promise.all([
+      loadIntegrations(),
+      loadReviewItems(selectedIntegration.value.id),
+      loadAccounts(selectedIntegration.value.id),
+    ])
+    if (progressKind) {
+      setReviewBatchProgress({
+        kind: progressKind,
+        phase: 'completed',
+        total: bindings.length,
+        applied: appliedCount,
+        message: successMessage,
+      })
+    }
+  } catch (error) {
+    if (progressKind) {
+      setReviewBatchProgress({
+        kind: progressKind,
+        phase: 'failed',
+        total: bindings.length,
+        applied: appliedCount,
+        message: error instanceof Error ? error.message : failureMessage,
+      })
+    }
+    setStatus(error instanceof Error ? error.message : failureMessage, 'error')
+  } finally {
+    reviewBatchProcessing.value = false
+  }
+}
+
+async function handleReviewBind(item: DirectoryReviewItem) {
+  reviewProcessingAccountId.value = item.account.id
+  try {
+    await submitReviewBindings([{
+      accountId: item.account.id,
+      localUserRef: readBindingDraft(item.account).trim(),
+      enableDingTalkGrant: readGrantToggle(item.account.id),
+    }], `待处理成员 ${item.account.name} 已完成快速绑定`, '快速绑定失败')
+  } finally {
+    reviewProcessingAccountId.value = ''
+  }
+}
+
+async function batchBindReviewItems() {
+  await submitReviewBindings(
+    selectedReviewBindEntries.value.map((item) => ({
+      accountId: item.accountId,
+      localUserRef: item.localUserRef,
+      enableDingTalkGrant: item.enableDingTalkGrant,
+    })),
+    `已完成 ${selectedReviewBindEntries.value.length} 个目录成员的批量绑定`,
+    '批量绑定失败',
+    'bind',
+  )
+}
+
+async function confirmRecommendedReviewBinding(item: DirectoryReviewItem) {
+  if (item.recommendations.length === 0) return
+  reviewProcessingAccountId.value = item.account.id
+  try {
+    const recommendation = item.recommendations[0]
+    await submitReviewBindings([{
+      accountId: item.account.id,
+      localUserRef: recommendation.localUser.id,
+      enableDingTalkGrant: readGrantToggle(item.account.id),
+    }], `待处理成员 ${item.account.name} 已确认推荐绑定`, '确认推荐绑定失败')
+  } finally {
+    reviewProcessingAccountId.value = ''
+  }
+}
+
+async function batchConfirmRecommendedReviewItems() {
+  await submitReviewBindings(
+    selectedRecommendedReviewBindEntries.value.map((item) => ({
+      accountId: item.accountId,
+      localUserRef: item.localUserRef,
+      enableDingTalkGrant: item.enableDingTalkGrant,
+    })),
+    `已完成 ${selectedRecommendedReviewBindEntries.value.length} 个目录成员的推荐绑定确认`,
+    '批量确认推荐绑定失败',
+    'recommend',
+  )
+}
+
+async function batchUnbindReviewItems() {
+  if (!selectedIntegration.value || selectedReviewBatchIds.value.length === 0) return
+  reviewBatchProcessing.value = true
+  let appliedCount = 0
+  try {
+    const batchIds = [...selectedReviewBatchIds.value]
+    setReviewBatchProgress({
+      kind: 'unbind',
+      phase: 'submitting',
+      total: batchIds.length,
+      applied: 0,
+      message: '正在提交批量停权处理请求...',
+    })
+    const response = await apiFetch('/api/admin/directory/accounts/batch-unbind', {
+      method: 'POST',
+      body: JSON.stringify({
+        accountIds: batchIds,
+        disableDingTalkGrant: reviewDisableDingTalkGrant.value,
+      }),
+    })
+    const body = await readJson(response)
+    if (!response.ok) throw new Error(readApiError(body, '批量停权处理失败'))
+    const processedItems = Array.isArray(body?.data?.items) ? body.data.items : []
+    appliedCount = processedItems.length > 0 ? processedItems.length : batchIds.length
+    setReviewBatchProgress({
+      kind: 'unbind',
+      phase: 'refreshing',
+      total: batchIds.length,
+      applied: appliedCount,
+      message: `已提交 ${appliedCount} / ${batchIds.length}，正在刷新目录成员与待处理队列...`,
+    })
+    for (const key of Object.keys(selectedReviewIds)) delete selectedReviewIds[key]
+    setStatus(`已完成 ${batchIds.length} 个目录成员的批量停权处理`)
+    await Promise.all([
+      loadIntegrations(),
+      loadReviewItems(selectedIntegration.value.id),
+      loadAccounts(selectedIntegration.value.id),
+    ])
+    setReviewBatchProgress({
+      kind: 'unbind',
+      phase: 'completed',
+      total: batchIds.length,
+      applied: appliedCount,
+      message: `已完成 ${batchIds.length} 个目录成员的批量停权处理`,
+    })
+  } catch (error) {
+    setReviewBatchProgress({
+      kind: 'unbind',
+      phase: 'failed',
+      total: selectedReviewBatchIds.value.length,
+      applied: appliedCount,
+      message: error instanceof Error ? error.message : '批量停权处理失败',
+    })
+    setStatus(error instanceof Error ? error.message : '批量停权处理失败', 'error')
+  } finally {
+    reviewBatchProcessing.value = false
   }
 }
 
@@ -938,6 +2064,55 @@ function formatDateTime(value: string | null): string {
     hour: '2-digit',
     minute: '2-digit',
   })
+}
+
+function readObservationStatusLabel(status: DirectoryObservationStatus | null | undefined): string {
+  if (status === 'scheduler_observed') return '已观察到自动触发'
+  if (status === 'awaiting_first_run') return '等待首次自动触发'
+  if (status === 'missing_cron') return '缺少 cron'
+  if (status === 'invalid_cron') return 'cron 无效'
+  if (status === 'disabled') return '自动同步未启用'
+  return '状态未知'
+}
+
+function readObservationStatusClass(status: DirectoryObservationStatus | null | undefined): string {
+  if (status === 'scheduler_observed') return 'directory-admin__chip--success'
+  if (status === 'awaiting_first_run' || status === 'missing_cron' || status === 'disabled') return 'directory-admin__chip--warning'
+  if (status === 'invalid_cron') return 'directory-admin__chip--danger'
+  return ''
+}
+
+function readTriggerSourceLabel(triggerSource: string | null | undefined): string {
+  if (!triggerSource) return '未记录'
+  if (triggerSource === 'scheduler') return '自动调度'
+  if (triggerSource === 'manual') return '手动触发'
+  return triggerSource
+}
+
+function readAlertLevelLabel(level: DirectorySyncAlert['level']): string {
+  if (level === 'info') return '信息'
+  if (level === 'warning') return '警告'
+  return '错误'
+}
+
+function readAlertLevelClass(level: DirectorySyncAlert['level']): string {
+  if (level === 'info') return 'directory-admin__chip--success'
+  if (level === 'warning') return 'directory-admin__chip--warning'
+  return 'directory-admin__chip--danger'
+}
+
+function readReviewKindLabel(kind: DirectoryReviewItem['kind']): string {
+  if (kind === 'pending_binding') return '待绑定'
+  if (kind === 'inactive_linked') return '停用待停权'
+  if (kind === 'missing_identifier') return '缺身份标识'
+  return '待处理'
+}
+
+function readReviewKindClass(kind: DirectoryReviewItem['kind']): string {
+  if (kind === 'pending_binding') return 'directory-admin__chip--warning'
+  if (kind === 'inactive_linked') return 'directory-admin__chip--danger'
+  if (kind === 'missing_identifier') return 'directory-admin__chip--warning'
+  return ''
 }
 
 function readNumericStat(stats: Record<string, unknown>, key: string): number {
@@ -1085,6 +2260,12 @@ onMounted(() => {
   color: #1d4ed8;
 }
 
+.directory-admin__button--active {
+  border-color: #1d4ed8;
+  background: #dbeafe;
+  color: #1e3a8a;
+}
+
 .directory-admin__section {
   display: flex;
   flex-direction: column;
@@ -1107,6 +2288,21 @@ onMounted(() => {
   background: #e2e8f0;
   color: #0f172a;
   font-size: 13px;
+}
+
+.directory-admin__chip--success {
+  background: #dcfce7;
+  color: #166534;
+}
+
+.directory-admin__chip--warning {
+  background: #fef3c7;
+  color: #92400e;
+}
+
+.directory-admin__chip--danger {
+  background: #fee2e2;
+  color: #991b1b;
 }
 
 .directory-admin__badge--inactive {
@@ -1138,6 +2334,43 @@ onMounted(() => {
   border-radius: 14px;
   padding: 14px;
   background: #f8fafc;
+}
+
+.directory-admin__schedule-card,
+.directory-admin__alert,
+.directory-admin__review-item,
+.directory-admin__progress-card {
+  border: 1px solid #e2e8f0;
+  border-radius: 14px;
+  padding: 14px;
+  background: #fff;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.directory-admin__alert-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.directory-admin__review-head,
+.directory-admin__review-title,
+.directory-admin__review-select {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.directory-admin__review-head {
+  justify-content: space-between;
+  flex-wrap: wrap;
+}
+
+.directory-admin__review-title {
+  align-items: flex-start;
 }
 
 .directory-admin__account {
