@@ -89,8 +89,16 @@ export class YjsSyncService {
     this.docs.clear()
   }
 
-  /** Expose doc count for testing */
+  /** Expose doc count for testing and observability */
   get size(): number {
     return this.docs.size
+  }
+
+  /** Metrics snapshot for observability */
+  getMetrics(): { activeDocCount: number; docIds: string[] } {
+    return {
+      activeDocCount: this.docs.size,
+      docIds: [...this.docs.keys()],
+    }
   }
 }
