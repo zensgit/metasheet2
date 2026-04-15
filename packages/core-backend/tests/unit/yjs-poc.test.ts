@@ -504,3 +504,53 @@ describe('YjsRecordBridge', () => {
     doc.destroy()
   })
 })
+
+// ═══════════════════════════════════════════════════════════════════
+// Sheet capabilities: write-own record enforcement
+// ═══════════════════════════════════════════════════════════════════
+describe('sheet-capabilities write-own', () => {
+  it('canWriteRecord returns true for creator when write-own policy active', async () => {
+    const { canWriteRecord } = await import('../../src/multitable/sheet-capabilities')
+
+    const caps = { canRead: true, canCreateRecord: true, canEditRecord: true, canDeleteRecord: true, canManageFields: false, canManageSheetAccess: false, canManageViews: false, canComment: true, canManageAutomation: false, canExport: true }
+    // write-own scope: hasAssignments + canWriteOwn + NOT canWrite
+    const scope = { hasAssignments: true, canRead: true, canWrite: false, canWriteOwn: true, canAdmin: false }
+
+    // Creator editing own record → allowed
+    expect(canWriteRecord(caps, scope, false, 'user-a', 'user-a')).toBe(true)
+  })
+
+  it('canWriteRecord returns false for non-creator when write-own policy active', async () => {
+    const { canWriteRecord } = await import('../../src/multitable/sheet-capabilities')
+
+    const caps = { canRead: true, canCreateRecord: true, canEditRecord: true, canDeleteRecord: true, canManageFields: false, canManageSheetAccess: false, canManageViews: false, canComment: true, canManageAutomation: false, canExport: true }
+    const scope = { hasAssignments: true, canRead: true, canWrite: false, canWriteOwn: true, canAdmin: false }
+
+    // Non-creator editing someone else's record → denied
+    expect(canWriteRecord(caps, scope, false, 'user-b', 'user-a')).toBe(false)
+  })
+
+  it('canWriteRecord returns true for any user when full write scope', async () => {
+    const { canWriteRecord } = await import('../../src/multitable/sheet-capabilities')
+
+    const caps = { canRead: true, canCreateRecord: true, canEditRecord: true, canDeleteRecord: true, canManageFields: false, canManageSheetAccess: false, canManageViews: false, canComment: true, canManageAutomation: false, canExport: true }
+    // Full write scope: canWrite = true
+    const scope = { hasAssignments: true, canRead: true, canWrite: true, canWriteOwn: false, canAdmin: false }
+
+    // Non-creator can edit when full write is granted
+    expect(canWriteRecord(caps, scope, false, 'user-b', 'user-a')).toBe(true)
+  })
+
+  it('ensureRecordWriteAllowed denies non-creator edit under write-own', async () => {
+    const { ensureRecordWriteAllowed } = await import('../../src/multitable/sheet-capabilities')
+
+    const caps = { canRead: true, canCreateRecord: true, canEditRecord: true, canDeleteRecord: true, canManageFields: false, canManageSheetAccess: false, canManageViews: false, canComment: true, canManageAutomation: false, canExport: true }
+    const scope = { hasAssignments: true, canRead: true, canWrite: false, canWriteOwn: true, canAdmin: false }
+    const access = { userId: 'user-b', permissions: [], isAdminRole: false }
+
+    // user-b tries to edit user-a's record → denied
+    expect(ensureRecordWriteAllowed(caps, scope, access, 'user-a', 'edit')).toBe(false)
+    // user-a edits own record → allowed
+    expect(ensureRecordWriteAllowed(caps, scope, { ...access, userId: 'user-a' }, 'user-a', 'edit')).toBe(true)
+  })
+})

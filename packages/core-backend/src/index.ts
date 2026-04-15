@@ -1682,24 +1682,28 @@ export class MetaSheetServer {
           }
         })
 
-        // Auth gate: uses the same sheet capability resolution as REST
-        const { resolveSheetCapabilitiesForUser } = await import('./multitable/sheet-capabilities')
+        // Auth gate: uses the same sheet + record-level capability resolution as REST
+        const sheetCaps = await import('./multitable/sheet-capabilities')
+        const { resolveSheetCapabilitiesForUser, canWriteRecord } = sheetCaps
         yjsWsAdapter.setAuthChecker(async (userId, recordId) => {
           try {
             const pool = poolManager.get()
             const recResult = await pool.query(
-              'SELECT id, sheet_id FROM meta_records WHERE id = $1',
+              'SELECT id, sheet_id, created_by FROM meta_records WHERE id = $1',
               [recordId],
             )
             if (recResult.rows.length === 0) return null
             const sheetId = String((recResult.rows[0] as any).sheet_id)
+            const createdBy = typeof (recResult.rows[0] as any).created_by === 'string'
+              ? (recResult.rows[0] as any).created_by : null
 
-            const { capabilities } = await resolveSheetCapabilitiesForUser(
+            const { capabilities, sheetScope, isAdminRole } = await resolveSheetCapabilitiesForUser(
               pool.query.bind(pool),
               sheetId,
               userId,
             )
-            return { canRead: capabilities.canRead, canWrite: capabilities.canEditRecord }
+            const canWrite = canWriteRecord(capabilities, sheetScope, isAdminRole, userId, createdBy)
+            return { canRead: capabilities.canRead, canWrite }
           } catch {
             return null
           }
@@ -1713,7 +1717,7 @@ export class MetaSheetServer {
           normalizeJson: (v) => (v && typeof v === 'object' && !Array.isArray(v) ? v as Record<string, unknown> : {}),
           parseLinkFieldConfig: () => null,
           buildId: (prefix) => `${prefix}_${Math.random().toString(36).slice(2, 10)}`,
-          ensureRecordWriteAllowed: (caps, _scope, _access, _createdBy, _action) => caps.canEditRecord,
+          ensureRecordWriteAllowed: sheetCaps.ensureRecordWriteAllowed,
           filterRecordDataByFieldIds: (data, ids) => {
             if (!data || typeof data !== 'object') return {}
             return Object.fromEntries(Object.entries(data as Record<string, unknown>).filter(([k]) => ids.has(k)))

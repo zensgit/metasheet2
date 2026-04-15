@@ -215,3 +215,64 @@ export async function resolveSheetCapabilitiesForUser(
     permissions,
   }
 }
+
+// ── Record-level own-write enforcement ──────────────────────────────
+
+export type AccessInfo = {
+  userId: string
+  permissions: string[]
+  isAdminRole: boolean
+}
+
+/**
+ * Whether the sheet scope requires per-record own-write enforcement.
+ * True when user has write-own but NOT full write on the sheet.
+ */
+export function requiresOwnWriteRowPolicy(
+  scope: SheetPermissionScope | undefined,
+  isAdminRole: boolean,
+): boolean {
+  return !isAdminRole && !!scope?.hasAssignments && scope.canWriteOwn && !scope.canWrite
+}
+
+/**
+ * Check if a user can edit/delete a specific record, considering own-write policy.
+ * This is the same logic as ensureRecordWriteAllowed in univer-meta.ts.
+ */
+export function ensureRecordWriteAllowed(
+  capabilities: MultitableCapabilities,
+  scope: SheetPermissionScope | undefined,
+  access: AccessInfo,
+  createdBy: string | null | undefined,
+  action: 'edit' | 'delete',
+): boolean {
+  if (access.isAdminRole) return true
+
+  if (!requiresOwnWriteRowPolicy(scope, access.isAdminRole)) {
+    // No own-write restriction: just check capability
+    return action === 'edit' ? capabilities.canEditRecord : capabilities.canDeleteRecord
+  }
+
+  // Own-write policy: must be the record creator
+  const isCreator = !!createdBy && !!access.userId && createdBy === access.userId
+  const capabilityCheck = action === 'edit' ? capabilities.canEditRecord : capabilities.canDeleteRecord
+  return capabilityCheck && isCreator
+}
+
+/**
+ * Check if a user can write to a specific record (for /yjs subscribe gate).
+ * Needs the record's created_by to evaluate own-write policy.
+ */
+export function canWriteRecord(
+  capabilities: MultitableCapabilities,
+  scope: SheetPermissionScope | undefined,
+  isAdminRole: boolean,
+  userId: string,
+  recordCreatedBy: string | null | undefined,
+): boolean {
+  if (isAdminRole) return true
+  if (!requiresOwnWriteRowPolicy(scope, isAdminRole)) {
+    return capabilities.canEditRecord
+  }
+  return capabilities.canEditRecord && !!recordCreatedBy && recordCreatedBy === userId
+}
