@@ -1658,6 +1658,168 @@ export class MetaSheetServer {
       this.logger.error('Failed to initialize WebSocket service', e as Error)
     }
 
+    // Initialize Yjs collaborative editing service
+    try {
+      const { YjsPersistenceAdapter } = await import('./collab/yjs-persistence-adapter')
+      const { YjsSyncService } = await import('./collab/yjs-sync-service')
+      const { YjsWebSocketAdapter } = await import('./collab/yjs-websocket-adapter')
+      const { YjsRecordBridge } = await import('./collab/yjs-record-bridge')
+      const { RecordWriteService } = await import('./multitable/record-write-service')
+      const { db: kyselyDbYjs } = await import('./db/db')
+      const collabIO = this.injector.get(ICollabService).getIO()
+      if (collabIO) {
+        const yjsPersistence = new YjsPersistenceAdapter(kyselyDbYjs)
+        const yjsSyncService = new YjsSyncService(yjsPersistence)
+        const yjsWsAdapter = new YjsWebSocketAdapter(yjsSyncService)
+
+        // JWT token verifier: verify token, extract trusted userId
+        yjsWsAdapter.setTokenVerifier(async (token: string) => {
+          try {
+            const user = await authService.verifyToken(token)
+            return user?.id?.toString() ?? null
+          } catch {
+            return null
+          }
+        })
+
+        // Auth gate: uses the same sheet + record-level capability resolution as REST
+        const sheetCaps = await import('./multitable/sheet-capabilities')
+        const { resolveSheetCapabilitiesForUser, canWriteRecord } = sheetCaps
+        yjsWsAdapter.setAuthChecker(async (userId, recordId) => {
+          try {
+            const pool = poolManager.get()
+            const recResult = await pool.query(
+              'SELECT id, sheet_id, created_by FROM meta_records WHERE id = $1',
+              [recordId],
+            )
+            if (recResult.rows.length === 0) return null
+            const sheetId = String((recResult.rows[0] as any).sheet_id)
+            const createdBy = typeof (recResult.rows[0] as any).created_by === 'string'
+              ? (recResult.rows[0] as any).created_by : null
+
+            const { capabilities, sheetScope, isAdminRole } = await resolveSheetCapabilitiesForUser(
+              pool.query.bind(pool),
+              sheetId,
+              userId,
+            )
+            const canWrite = canWriteRecord(capabilities, sheetScope, isAdminRole, userId, createdBy)
+            return { canRead: capabilities.canRead, canWrite }
+          } catch {
+            return null
+          }
+        })
+
+        // Bridge: Y.Text changes → RecordWriteService.patchRecords()
+        const pool = poolManager.get()
+        const recordWriteService = new RecordWriteService(pool, eventBus, {
+          normalizeLinkIds: (v) => (Array.isArray(v) ? v.map(String) : []),
+          normalizeAttachmentIds: (v) => (Array.isArray(v) ? v.map(String) : []),
+          normalizeJson: (v) => (v && typeof v === 'object' && !Array.isArray(v) ? v as Record<string, unknown> : {}),
+          parseLinkFieldConfig: () => null,
+          buildId: (prefix) => `${prefix}_${Math.random().toString(36).slice(2, 10)}`,
+          ensureRecordWriteAllowed: sheetCaps.ensureRecordWriteAllowed,
+          filterRecordDataByFieldIds: (data, ids) => {
+            if (!data || typeof data !== 'object') return {}
+            return Object.fromEntries(Object.entries(data as Record<string, unknown>).filter(([k]) => ids.has(k)))
+          },
+          extractLookupRollupData: () => ({}),
+          mergeComputedRecords: (base, extra) => ((!base || base.length === 0) && extra.length === 0 ? undefined : [...(base ?? []), ...extra]),
+          filterRecordFieldSummaryMap: (map) => map,
+          serializeLinkSummaryMap: () => ({}),
+          serializeAttachmentSummaryMap: () => ({}),
+          applyLookupRollup: async () => {},
+          computeDependentLookupRollupRecords: async () => [],
+          loadLinkValuesByRecord: async () => new Map(),
+          buildLinkSummaries: async () => new Map(),
+          buildAttachmentSummaries: async () => new Map(),
+          ensureAttachmentIdsExist: async () => null,
+        })
+
+        const yjsBridge = new YjsRecordBridge(
+          yjsSyncService,
+          recordWriteService,
+          async (recordId, patch, actorId, _allActorIds) => {
+            // Build RecordPatchInput from recordId + patch fields + real actor
+            try {
+              const recResult = await pool.query(
+                'SELECT sheet_id FROM meta_records WHERE id = $1',
+                [recordId],
+              )
+              if (recResult.rows.length === 0) return null
+              const sheetId = String((recResult.rows[0] as any).sheet_id)
+
+              const fieldResult = await pool.query(
+                'SELECT id, name, type, property FROM meta_fields WHERE sheet_id = $1',
+                [sheetId],
+              )
+              const fields = (fieldResult.rows as any[]).map((f: any) => {
+                const prop = f.property && typeof f.property === 'object' ? f.property : {}
+                return { id: String(f.id), name: String(f.name), type: f.type, property: prop, options: prop.options }
+              })
+
+              // Build real field mutation guards from DB (same logic as buildFieldMutationGuardMap)
+              const readOnlyTypes = new Set(['lookup', 'rollup'])
+              const fieldById = new Map(
+                fields.map((f: any) => {
+                  const prop = f.property || {}
+                  const isReadOnly = readOnlyTypes.has(f.type) || prop.readOnly === true
+                  const isHidden = prop.hidden === true || prop.permissionHidden === true
+                  const guard: any = { type: f.type, readOnly: isReadOnly, hidden: isHidden }
+                  if (f.type === 'select' && Array.isArray(prop.options)) {
+                    guard.options = prop.options.map((o: any) => typeof o === 'string' ? o : o?.value ?? '')
+                  }
+                  if (f.type === 'link' && prop.foreignSheetId) {
+                    guard.link = { foreignSheetId: prop.foreignSheetId, limitSingleRecord: !!prop.limitSingleRecord }
+                  }
+                  return [f.id, guard] as const
+                }),
+              )
+
+              const visibleFields = fields.filter((f: any) => {
+                const g = fieldById.get(f.id)
+                return g && !g.hidden
+              })
+
+              const changesByRecord = new Map([
+                [recordId, Object.entries(patch).map(([fieldId, value]) => ({ fieldId, value }))],
+              ])
+
+              // Resolve real user capabilities — same path as REST
+              const { capabilities, sheetScope, isAdminRole, permissions: actorPerms } =
+                await resolveSheetCapabilitiesForUser(pool.query.bind(pool), sheetId, actorId)
+
+              return {
+                sheetId,
+                changesByRecord,
+                actorId,
+                fields: fields as any,
+                visiblePropertyFields: visibleFields as any,
+                visiblePropertyFieldIds: new Set(visibleFields.map((f: any) => f.id)),
+                attachmentFields: visibleFields.filter((f: any) => f.type === 'attachment') as any,
+                fieldById: fieldById as any,
+                capabilities,
+                sheetScope,
+                access: { userId: actorId, permissions: actorPerms, isAdminRole },
+              }
+            } catch (err) {
+              console.error(`[yjs-bridge] Failed to build write input for ${recordId}:`, err)
+              return null
+            }
+          },
+          { mergeWindowMs: 200, maxDelayMs: 500 },
+          (socketId) => yjsWsAdapter.getSocketUserId(socketId),
+        )
+
+        yjsWsAdapter.setBridge(yjsBridge)
+        yjsWsAdapter.register(collabIO)
+        this.logger.info('Yjs collaborative editing service initialized on /yjs namespace (bridge + auth active)')
+      } else {
+        this.logger.warn('Yjs: CollabService IO not available, skipping')
+      }
+    } catch (e) {
+      this.logger.error('Failed to initialize Yjs service', e as Error)
+    }
+
     // Initialize Metrics Stream Service (real-time metrics over WebSocket)
     try {
       this.metricsStreamService = new MetricsStreamService()

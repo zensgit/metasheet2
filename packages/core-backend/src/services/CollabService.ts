@@ -234,6 +234,10 @@ export class CollabService {
     this.logger.info('CollabService (WebSocket) initialized')
   }
 
+  getIO(): SocketServer | null {
+    return this.io
+  }
+
   broadcast(event: string, data: unknown): void {
     if (!this.io) {
       this.logger.warn('Attempted to broadcast before initialization')
