@@ -249,4 +249,73 @@ describe('bindDirectoryAccount', () => {
       },
     })
   })
+
+  it('can disable the DingTalk grant while unbinding', async () => {
+    const clientQuery = vi.fn()
+    pgMocks.transaction.mockImplementation(async (handler) => handler({ query: clientQuery }))
+    pgMocks.query
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'account-1',
+          integration_id: 'dir-1',
+          provider: 'dingtalk',
+          corp_id: 'dingcorp',
+          external_user_id: '0447654442691174',
+          union_id: 'union-1',
+          open_id: 'open-1',
+          external_key: 'union-1',
+          name: '周华',
+          email: null,
+          mobile: '13758875801',
+        }],
+      })
+      .mockResolvedValueOnce({
+        rows: [{
+          local_user_id: 'user-1',
+          local_user_email: 'alpha@example.com',
+          local_user_name: 'Alpha',
+        }],
+      })
+      .mockResolvedValueOnce({
+        rows: [{
+          integration_id: 'dir-1',
+          provider: 'dingtalk',
+          corp_id: 'dingcorp',
+          directory_account_id: 'account-1',
+          external_user_id: '0447654442691174',
+          union_id: 'union-1',
+          open_id: 'open-1',
+          external_key: 'union-1',
+          account_name: '周华',
+          account_email: null,
+          account_mobile: '13758875801',
+          account_is_active: true,
+          account_updated_at: '2026-04-11T08:01:00.000Z',
+          link_status: 'unmatched',
+          match_strategy: 'manual_unbound',
+          reviewed_by: null,
+          review_note: null,
+          link_updated_at: '2026-04-11T08:01:00.000Z',
+          local_user_id: null,
+          local_user_email: null,
+          local_user_name: null,
+          department_paths: ['DingTalk CN'],
+        }],
+      })
+
+    clientQuery
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+
+    await unbindDirectoryAccount('account-1', {
+      adminUserId: 'admin-1',
+      disableDingTalkGrant: true,
+    })
+
+    expect(clientQuery).toHaveBeenCalledWith(
+      expect.stringContaining('INSERT INTO user_external_auth_grants'),
+      ['dingtalk', 'user-1', 'admin-1'],
+    )
+  })
 })

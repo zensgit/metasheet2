@@ -1,16 +1,16 @@
 import type { Request, Response } from 'express'
 import { Router } from 'express'
 import { auditLog } from '../audit/audit'
-import { isAdmin as isRbacAdmin } from '../rbac/service'
-import { jsonError, jsonOk, parsePagination } from '../util/response'
 import {
   acknowledgeDirectorySyncAlert,
+  batchBindDirectoryAccounts,
+  batchUnbindDirectoryAccounts,
   bindDirectoryAccount,
   createDirectoryIntegration,
   getDirectorySyncScheduleSnapshot,
   listDirectoryIntegrationAccounts,
   listDirectoryIntegrations,
-  listDirectoryIntegrationReviewItems,
+  listDirectoryReviewItems,
   listDirectorySyncAlerts,
   listDirectorySyncRuns,
   syncDirectoryIntegration,
@@ -18,59 +18,27 @@ import {
   unbindDirectoryAccount,
   updateDirectoryIntegration,
 } from '../directory/directory-sync'
-
-function normalizeStringList(value: unknown): string[] {
-  if (!Array.isArray(value)) return []
-  const unique = new Set<string>()
-  for (const candidate of value) {
-    const normalized = typeof candidate === 'string' ? candidate.trim() : ''
-    if (normalized) unique.add(normalized)
-  }
-  return Array.from(unique)
-}
-
-function normalizeBatchBindings(value: unknown): Array<{
-  accountId: string
-  localUserRef: string
-  enableDingTalkGrant: boolean
-}> {
-  if (!Array.isArray(value)) return []
-  const unique = new Map<string, {
-    accountId: string
-    localUserRef: string
-    enableDingTalkGrant: boolean
-  }>()
-  for (const candidate of value) {
-    if (!candidate || typeof candidate !== 'object') continue
-    const accountId = typeof candidate.accountId === 'string' ? candidate.accountId.trim() : ''
-    if (!accountId || unique.has(accountId)) continue
-    unique.set(accountId, {
-      accountId,
-      localUserRef: typeof candidate.localUserRef === 'string' ? candidate.localUserRef.trim() : '',
-      enableDingTalkGrant: candidate.enableDingTalkGrant !== false,
-    })
-  }
-  return Array.from(unique.values())
-}
-
-function normalizeReviewQueue(value: unknown): 'all' | 'needs_binding' | 'inactive_linked' | 'missing_identity' {
-  const normalized = typeof value === 'string' ? value.trim() : ''
-  switch (normalized) {
-    case 'needs_binding':
-    case 'inactive_linked':
-    case 'missing_identity':
-      return normalized
-    default:
-      return 'all'
-  }
-}
+import { refreshDirectoryIntegrationSchedule } from '../directory/directory-sync-scheduler'
+import { isAdmin as isRbacAdmin } from '../rbac/service'
+import { jsonError, jsonOk, parsePagination } from '../util/response'
 
 function normalizeAlertFilter(value: unknown): 'all' | 'pending' | 'acknowledged' {
   const normalized = typeof value === 'string' ? value.trim() : ''
+  if (normalized === 'pending' || normalized === 'acknowledged') return normalized
+  return 'all'
+}
+
+function normalizeReviewFilter(value: unknown): 'all' | 'pending_binding' | 'inactive_linked' | 'missing_identifier' {
+  const normalized = typeof value === 'string' ? value.trim() : ''
   switch (normalized) {
-    case 'pending':
-    case 'acknowledged':
+    case 'pending_binding':
+    case 'inactive_linked':
+    case 'missing_identifier':
       return normalized
+    case 'needs_binding':
+      return 'pending_binding'
+    case 'missing_identity':
+      return 'missing_identifier'
     default:
       return 'all'
   }
@@ -133,6 +101,7 @@ export function adminDirectoryRouter(): Router {
 
     try {
       const integration = await createDirectoryIntegration(req.body as Record<string, unknown> as never)
+      await refreshDirectoryIntegrationSchedule(integration.id)
       jsonOk(res, { integration })
     } catch (error) {
       jsonError(res, 400, 'DIRECTORY_CREATE_FAILED', readErrorMessage(error, 'Failed to create directory integration'))
@@ -149,6 +118,7 @@ export function adminDirectoryRouter(): Router {
         jsonError(res, 404, 'DIRECTORY_NOT_FOUND', 'Directory integration not found')
         return
       }
+      await refreshDirectoryIntegrationSchedule(integration.id)
       jsonOk(res, { integration })
     } catch (error) {
       jsonError(res, 400, 'DIRECTORY_UPDATE_FAILED', readErrorMessage(error, 'Failed to update directory integration'))
@@ -214,8 +184,8 @@ export function adminDirectoryRouter(): Router {
       }
       jsonOk(res, { snapshot })
     } catch (error) {
-      const message = readErrorMessage(error, 'Failed to load directory sync schedule')
-      jsonError(res, /required|invalid/i.test(message) ? 400 : 500, 'DIRECTORY_SCHEDULE_FAILED', message)
+      const message = readErrorMessage(error, 'Failed to load directory schedule')
+      jsonError(res, /required/i.test(message) ? 400 : 500, 'DIRECTORY_SCHEDULE_FAILED', message)
     }
   })
 
@@ -226,22 +196,57 @@ export function adminDirectoryRouter(): Router {
     try {
       const { page, pageSize, offset } = parsePagination(req.query as Record<string, unknown>, {
         defaultPage: 1,
-        defaultPageSize: 10,
+        defaultPageSize: 20,
         maxPageSize: 100,
       })
-      const ack = normalizeAlertFilter(req.query.ack)
-      const result = await listDirectorySyncAlerts(req.params.integrationId, { limit: pageSize, offset }, ack)
+      const filter = normalizeAlertFilter(req.query.ack ?? req.query.filter)
+      const result = await listDirectorySyncAlerts(
+        req.params.integrationId,
+        { limit: pageSize, offset },
+        filter,
+      )
       jsonOk(res, {
         items: result.items,
         counts: result.counts,
         total: result.total,
         page,
         pageSize,
-        ack,
+        filter,
+        ack: filter,
       })
     } catch (error) {
       const message = readErrorMessage(error, 'Failed to load directory alerts')
-      jsonError(res, /required|invalid/i.test(message) ? 400 : 500, 'DIRECTORY_ALERTS_FAILED', message)
+      jsonError(res, /required/i.test(message) ? 400 : 500, 'DIRECTORY_ALERTS_FAILED', message)
+    }
+  })
+
+  router.get('/integrations/:integrationId/review-items', async (req: Request, res: Response) => {
+    const adminUserId = await ensurePlatformAdmin(req, res)
+    if (!adminUserId) return
+
+    try {
+      const { page, pageSize, offset } = parsePagination(req.query as Record<string, unknown>, {
+        defaultPage: 1,
+        defaultPageSize: 100,
+        maxPageSize: 200,
+      })
+      const filter = normalizeReviewFilter(req.query.queue ?? req.query.filter)
+      const result = await listDirectoryReviewItems(
+        req.params.integrationId,
+        { limit: pageSize, offset },
+        filter,
+      )
+      jsonOk(res, {
+        items: result.items,
+        total: result.total,
+        page,
+        pageSize,
+        filter,
+        queue: filter,
+      })
+    } catch (error) {
+      const message = readErrorMessage(error, 'Failed to load directory review items')
+      jsonError(res, /required/i.test(message) ? 400 : 500, 'DIRECTORY_REVIEW_ITEMS_FAILED', message)
     }
   })
 
@@ -267,32 +272,6 @@ export function adminDirectoryRouter(): Router {
     } catch (error) {
       const message = readErrorMessage(error, 'Failed to load directory accounts')
       jsonError(res, /required|invalid/i.test(message) ? 400 : 500, 'DIRECTORY_ACCOUNTS_FAILED', message)
-    }
-  })
-
-  router.get('/integrations/:integrationId/review-items', async (req: Request, res: Response) => {
-    const adminUserId = await ensurePlatformAdmin(req, res)
-    if (!adminUserId) return
-
-    try {
-      const { page, pageSize, offset } = parsePagination(req.query as Record<string, unknown>, {
-        defaultPage: 1,
-        defaultPageSize: 25,
-        maxPageSize: 100,
-      })
-      const queue = normalizeReviewQueue(req.query.queue)
-      const result = await listDirectoryIntegrationReviewItems(req.params.integrationId, { limit: pageSize, offset }, queue)
-      jsonOk(res, {
-        items: result.items,
-        counts: result.counts,
-        total: result.total,
-        page,
-        pageSize,
-        queue,
-      })
-    } catch (error) {
-      const message = readErrorMessage(error, 'Failed to load review items')
-      jsonError(res, /required|invalid/i.test(message) ? 400 : 500, 'DIRECTORY_REVIEW_ITEMS_FAILED', message)
     }
   })
 
@@ -349,19 +328,18 @@ export function adminDirectoryRouter(): Router {
     if (!adminUserId) return
 
     try {
-      const bindings = normalizeBatchBindings(req.body?.bindings)
-      if (bindings.length === 0) {
-        jsonError(res, 400, 'BINDINGS_REQUIRED', 'bindings array is required')
-        return
-      }
+      const rawBindings = Array.isArray(req.body?.bindings) ? req.body.bindings : []
+      const bindings = rawBindings
+        .map((entry) => (entry && typeof entry === 'object' ? entry as Record<string, unknown> : null))
+        .filter((entry): entry is Record<string, unknown> => entry !== null)
+        .map((entry) => ({
+          accountId: typeof entry.accountId === 'string' ? entry.accountId : '',
+          localUserRef: typeof entry.localUserRef === 'string' ? entry.localUserRef : '',
+          enableDingTalkGrant: typeof entry.enableDingTalkGrant === 'boolean' ? entry.enableDingTalkGrant : true,
+        }))
 
-      const results = await Promise.all(bindings.map((binding) => bindDirectoryAccount(binding.accountId, {
-        localUserRef: binding.localUserRef,
-        adminUserId,
-        enableDingTalkGrant: binding.enableDingTalkGrant,
-      })))
-
-      await Promise.all(results.map((result, index) => auditLog({
+      const results = await batchBindDirectoryAccounts(bindings, { adminUserId })
+      await Promise.all(results.map((result) => auditLog({
         actorId: adminUserId,
         actorType: 'user',
         action: 'bind',
@@ -377,12 +355,10 @@ export function adminDirectoryRouter(): Router {
           localUserEmail: result.account.localUser?.email ?? null,
           externalUserId: result.account.externalUserId,
           corpId: result.account.corpId,
-          enableDingTalkGrant: bindings[index]?.enableDingTalkGrant ?? true,
           mode: 'bulk',
           selectionSize: bindings.length,
         },
       })))
-
       jsonOk(res, {
         items: results.map((result) => result.account),
         updatedCount: results.length,
@@ -391,10 +367,10 @@ export function adminDirectoryRouter(): Router {
       const message = readErrorMessage(error, 'Failed to batch bind directory accounts')
       const statusCode = /not found/i.test(message)
         ? 404
-        : /required|cannot be pre-bound/i.test(message)
-          ? 400
-          : /already bound|already linked/i.test(message)
-            ? 409
+        : /already bound|already linked/i.test(message)
+          ? 409
+          : /required|cannot be pre-bound/i.test(message)
+            ? 400
             : 500
       jsonError(res, statusCode, 'DIRECTORY_BATCH_BIND_FAILED', message)
     }
@@ -444,18 +420,13 @@ export function adminDirectoryRouter(): Router {
     if (!adminUserId) return
 
     try {
-      const accountIds = normalizeStringList(req.body?.accountIds)
+      const rawAccountIds = Array.isArray(req.body?.accountIds) ? req.body.accountIds : []
+      const accountIds = rawAccountIds.filter((value): value is string => typeof value === 'string')
       const disableDingTalkGrant = req.body?.disableDingTalkGrant === true
-      if (accountIds.length === 0) {
-        jsonError(res, 400, 'ACCOUNT_IDS_REQUIRED', 'accountIds array is required')
-        return
-      }
-
-      const results = await Promise.all(accountIds.map((accountId) => unbindDirectoryAccount(accountId, {
+      const results = await batchUnbindDirectoryAccounts(accountIds, {
         adminUserId,
         disableDingTalkGrant,
-      })))
-
+      })
       await Promise.all(results.map((result) => auditLog({
         actorId: adminUserId,
         actorType: 'user',
@@ -475,7 +446,6 @@ export function adminDirectoryRouter(): Router {
           selectionSize: accountIds.length,
         },
       })))
-
       jsonOk(res, {
         items: results.map((result) => result.account),
         updatedCount: results.length,
@@ -502,7 +472,6 @@ export function adminDirectoryRouter(): Router {
         jsonError(res, 404, 'DIRECTORY_ALERT_NOT_FOUND', 'Directory alert not found')
         return
       }
-
       await auditLog({
         actorId: adminUserId,
         actorType: 'user',
@@ -519,7 +488,6 @@ export function adminDirectoryRouter(): Router {
           acknowledgedAt: alert.acknowledgedAt,
         },
       })
-
       jsonOk(res, { alert })
     } catch (error) {
       const message = readErrorMessage(error, 'Failed to acknowledge directory alert')

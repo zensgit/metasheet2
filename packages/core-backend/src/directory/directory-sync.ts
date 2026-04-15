@@ -1,6 +1,5 @@
 import { Logger } from '../core/logger'
 import { query, transaction } from '../db/pg'
-import { SimpleCronExpression } from '../services/SchedulerService'
 import {
   fetchDingTalkAppAccessToken,
   getDingTalkUserDetail,
@@ -11,6 +10,7 @@ import {
 } from '../integrations/dingtalk/client'
 import { assertDingTalkCorpAllowed } from '../integrations/dingtalk/runtime-policy'
 import { decryptStoredSecretValue, normalizeStoredSecretValue } from '../security/encrypted-secrets'
+import { SimpleCronExpression } from '../services/SchedulerService'
 
 const logger = new Logger('DirectorySync')
 const DEFAULT_ORG_ID = 'default'
@@ -142,12 +142,41 @@ type DirectoryIntegrationAccountRow = {
   department_paths: string[] | null
 }
 
+type DirectoryReviewItemRow = DirectoryIntegrationAccountRow & {
+  review_kind: string
+  review_reason: string
+  missing_union_id: boolean
+  missing_open_id: boolean
+}
+
 type DirectoryBindingUserRow = {
   id: string
   email: string
   name: string | null
   role: string
   is_active: boolean
+}
+
+type DirectoryBindingCandidateRow = DirectoryBindingUserRow & {
+  mobile: string | null
+}
+
+type DirectoryLinkedAccountByUserRow = {
+  local_user_id: string
+  directory_account_id: string
+}
+
+type DirectoryIdentityByUserRow = {
+  local_user_id: string
+  external_key: string
+  provider_union_id: string | null
+  provider_open_id: string | null
+  corp_id: string | null
+}
+
+type DirectoryReviewRecommendationResult = {
+  recommendations: DirectoryBindingRecommendation[]
+  status: DirectoryBindingRecommendationStatus
 }
 
 type DirectoryBindingTargetAccountRow = {
@@ -253,6 +282,90 @@ export type DirectorySyncRunSummary = {
   updatedAt: string
 }
 
+export type DirectorySyncAlertFilter = 'all' | 'pending' | 'acknowledged'
+
+export type DirectorySyncAlertSummary = {
+  id: string
+  integrationId: string
+  runId: string | null
+  level: string
+  code: string
+  message: string
+  details: JsonRecord
+  sentToWebhook: boolean
+  acknowledgedAt: string | null
+  acknowledgedBy: string | null
+  createdAt: string
+  updatedAt: string
+}
+
+export type DirectorySyncObservationStatus =
+  | 'disabled'
+  | 'missing_cron'
+  | 'invalid_cron'
+  | 'awaiting_first_run'
+  | 'scheduler_observed'
+  | 'configured_no_runs'
+  | 'manual_only'
+  | 'auto_observed'
+
+export type DirectorySyncScheduleSnapshot = {
+  integrationId: string
+  syncEnabled: boolean
+  scheduleCron: string | null
+  cronValid: boolean
+  nextExpectedRunAt: string | null
+  lastRun: DirectorySyncRunSummary | null
+  lastManualRun: DirectorySyncRunSummary | null
+  lastAutomaticRun: DirectorySyncRunSummary | null
+  observationStatus: DirectorySyncObservationStatus
+  observationMessage: string
+}
+
+export type DirectoryReviewItemFilter = 'all' | 'pending_binding' | 'inactive_linked' | 'missing_identifier'
+
+export type DirectoryBindingRecommendationReason = 'pending_link' | 'email' | 'mobile'
+
+export type DirectoryBindingRecommendationStatusCode =
+  | 'recommended'
+  | 'no_exact_match'
+  | 'ambiguous_exact_match'
+  | 'pending_link_conflict'
+  | 'linked_user_conflict'
+  | 'external_identity_conflict'
+
+export type DirectoryBindingRecommendation = {
+  localUser: {
+    id: string
+    email: string
+    name: string | null
+    role: string
+    isActive: boolean
+  }
+  reasons: DirectoryBindingRecommendationReason[]
+}
+
+export type DirectoryBindingRecommendationStatus = {
+  code: DirectoryBindingRecommendationStatusCode
+  message: string
+}
+
+export type DirectoryReviewItemSummary = {
+  kind: DirectoryReviewItemFilter
+  reason: string
+  account: DirectoryIntegrationAccountSummary
+  recommendations: DirectoryBindingRecommendation[]
+  recommendationStatus: DirectoryBindingRecommendationStatus | null
+  flags: {
+    missingUnionId: boolean
+    missingOpenId: boolean
+  }
+  actionable: {
+    canBatchUnbind: boolean
+    canConfirmRecommendation: boolean
+  }
+}
+
 export type DirectoryIntegrationAccountSummary = {
   id: string
   integrationId: string
@@ -280,67 +393,15 @@ export type DirectoryIntegrationAccountSummary = {
   departmentPaths: string[]
 }
 
-export type DirectoryReviewReason = 'needs_binding' | 'inactive_linked' | 'missing_identity'
-export type DirectoryReviewQueue = 'all' | DirectoryReviewReason
-
-export type DirectoryIntegrationReviewItem = DirectoryIntegrationAccountSummary & {
-  reviewReasons: DirectoryReviewReason[]
-}
-
-export type DirectoryIntegrationReviewCounts = {
-  total: number
-  needsBinding: number
-  inactiveLinked: number
-  missingIdentity: number
-}
-
-export type DirectorySyncAlertFilter = 'all' | 'pending' | 'acknowledged'
-
-export type DirectorySyncAlertSummary = {
-  id: string
-  integrationId: string
-  runId: string | null
-  level: string
-  code: string
-  message: string
-  details: JsonRecord
-  sentToWebhook: boolean
-  acknowledgedAt: string | null
-  acknowledgedBy: string | null
-  createdAt: string
-  updatedAt: string
-}
-
-export type DirectorySyncObservationStatus =
-  | 'disabled'
-  | 'missing_cron'
-  | 'invalid_cron'
-  | 'configured_no_runs'
-  | 'manual_only'
-  | 'auto_observed'
-
-export type DirectorySyncScheduleSnapshot = {
-  integrationId: string
-  syncEnabled: boolean
-  scheduleCron: string | null
-  cronValid: boolean
-  nextExpectedRunAt: string | null
-  timezone: string
-  latestRunAt: string | null
-  latestRunStatus: string | null
-  latestRunTriggerSource: string | null
-  latestManualRunAt: string | null
-  latestManualRunStatus: string | null
-  latestAutoRunAt: string | null
-  latestAutoRunStatus: string | null
-  autoTriggerObserved: boolean
-  observationStatus: DirectorySyncObservationStatus
-  note: string
-}
-
 export type DirectoryAccountBindInput = {
   localUserRef: string
   adminUserId: string
+  enableDingTalkGrant?: boolean
+}
+
+export type DirectoryAccountBatchBindEntry = {
+  accountId: string
+  localUserRef: string
   enableDingTalkGrant?: boolean
 }
 
@@ -464,6 +525,37 @@ function summarizeAlert(row: DirectorySyncAlertRow): DirectorySyncAlertSummary {
   }
 }
 
+function summarizeReviewItem(
+  row: DirectoryReviewItemRow,
+  recommendation: DirectoryReviewRecommendationResult | null = null,
+): DirectoryReviewItemSummary {
+  const kind = row.review_kind === 'inactive_linked' || row.review_kind === 'missing_identifier'
+    ? row.review_kind
+    : 'pending_binding'
+  const recommendations = recommendation?.recommendations ?? []
+
+  return {
+    kind,
+    reason: row.review_reason,
+    account: summarizeDirectoryAccount(row),
+    recommendations,
+    recommendationStatus: kind === 'pending_binding'
+      ? recommendation?.status ?? {
+        code: 'no_exact_match',
+        message: '未命中唯一的邮箱或手机号精确匹配，请人工搜索本地用户。',
+      }
+      : null,
+    flags: {
+      missingUnionId: Boolean(row.missing_union_id),
+      missingOpenId: Boolean(row.missing_open_id),
+    },
+    actionable: {
+      canBatchUnbind: kind === 'inactive_linked' && Boolean(row.local_user_id),
+      canConfirmRecommendation: kind === 'pending_binding' && recommendations.length > 0,
+    },
+  }
+}
+
 function summarizeDirectoryAccount(row: DirectoryIntegrationAccountRow): DirectoryIntegrationAccountSummary {
   return {
     id: row.directory_account_id,
@@ -495,27 +587,6 @@ function summarizeDirectoryAccount(row: DirectoryIntegrationAccountRow): Directo
   }
 }
 
-function classifyDirectoryReviewReasons(account: DirectoryIntegrationAccountSummary): DirectoryReviewReason[] {
-  const reasons: DirectoryReviewReason[] = []
-  if (!account.localUser || account.linkStatus !== 'linked') {
-    reasons.push('needs_binding')
-  }
-  if (!account.isActive && account.localUser && account.linkStatus === 'linked') {
-    reasons.push('inactive_linked')
-  }
-  if (!normalizeText(account.openId) && !normalizeText(account.unionId)) {
-    reasons.push('missing_identity')
-  }
-  return reasons
-}
-
-function attachDirectoryReviewReasons(account: DirectoryIntegrationAccountSummary): DirectoryIntegrationReviewItem {
-  return {
-    ...account,
-    reviewReasons: classifyDirectoryReviewReasons(account),
-  }
-}
-
 function readErrorMessage(error: unknown, fallback: string): string {
   if (error instanceof Error && error.message.trim().length > 0) return error.message
   return fallback
@@ -538,6 +609,264 @@ function buildDingTalkIdentityExternalKey(corpId: string | null | undefined, ope
   }
 
   return normalizedUnionId || normalizedOpenId
+}
+
+function buildRecommendationScore(reasons: DirectoryBindingRecommendationReason[]): number {
+  let score = 0
+  if (reasons.includes('pending_link')) score += 100
+  if (reasons.includes('email')) score += 10
+  if (reasons.includes('mobile')) score += 5
+  return score
+}
+
+function sortRecommendationReasons(reasons: Iterable<DirectoryBindingRecommendationReason>): DirectoryBindingRecommendationReason[] {
+  const order: DirectoryBindingRecommendationReason[] = ['pending_link', 'email', 'mobile']
+  const values = new Set(reasons)
+  return order.filter((item) => values.has(item))
+}
+
+function buildRecommendationStatus(
+  code: DirectoryBindingRecommendationStatusCode,
+): DirectoryBindingRecommendationStatus {
+  if (code === 'recommended') {
+    return {
+      code,
+      message: '已命中唯一精确候选，可直接确认推荐绑定。',
+    }
+  }
+  if (code === 'ambiguous_exact_match') {
+    return {
+      code,
+      message: '邮箱或手机号命中多个本地用户，需人工确认。',
+    }
+  }
+  if (code === 'pending_link_conflict') {
+    return {
+      code,
+      message: '现有待确认匹配与精确候选不一致，请人工复核。',
+    }
+  }
+  if (code === 'linked_user_conflict') {
+    return {
+      code,
+      message: '候选本地用户已链接其他钉钉目录成员，请人工处理。',
+    }
+  }
+  if (code === 'external_identity_conflict') {
+    return {
+      code,
+      message: '候选本地用户已绑定其他钉钉身份，请人工处理。',
+    }
+  }
+  return {
+    code,
+    message: '未命中唯一的邮箱或手机号精确匹配，请人工搜索本地用户。',
+  }
+}
+
+function doesExternalIdentityMatchAccount(
+  identity: DirectoryIdentityByUserRow,
+  account: Pick<DirectoryReviewItemRow, 'corp_id' | 'external_key' | 'open_id' | 'union_id'>,
+): boolean {
+  const externalKey = buildDingTalkIdentityExternalKey(account.corp_id, account.open_id, account.union_id)
+  if (externalKey && identity.external_key === externalKey) return true
+
+  const scopedOpenKey = buildScopedIdentityKey(account.corp_id, account.open_id)
+  const identityOpenKey = buildScopedIdentityKey(identity.corp_id, identity.provider_open_id)
+  if (scopedOpenKey && identityOpenKey && scopedOpenKey === identityOpenKey) return true
+
+  const scopedUnionKey = buildScopedIdentityKey(account.corp_id, account.union_id)
+  const identityUnionKey = buildScopedIdentityKey(identity.corp_id, identity.provider_union_id)
+  if (scopedUnionKey && identityUnionKey && scopedUnionKey === identityUnionKey) return true
+
+  return normalizeText(identity.external_key) !== '' && identity.external_key === normalizeText(account.external_key)
+}
+
+async function loadDirectoryReviewRecommendations(
+  rows: DirectoryReviewItemRow[],
+): Promise<Map<string, DirectoryReviewRecommendationResult>> {
+  const pendingRows = rows.filter((row) => row.review_kind === 'pending_binding')
+  const emails = Array.from(new Set(
+    pendingRows
+      .map((row) => normalizeText(row.account_email).toLowerCase())
+      .filter(Boolean),
+  ))
+  const mobiles = Array.from(new Set(
+    pendingRows
+      .map((row) => normalizeText(row.account_mobile))
+      .filter(Boolean),
+  ))
+
+  if (pendingRows.length === 0) {
+    return new Map()
+  }
+
+  const candidateUsersResult = emails.length > 0 || mobiles.length > 0
+    ? await query<DirectoryBindingCandidateRow>(
+      `SELECT id,
+              email,
+              name,
+              COALESCE(role, 'user') AS role,
+              COALESCE(is_active, TRUE) AS is_active,
+              mobile
+       FROM users
+       WHERE COALESCE(is_active, TRUE) = TRUE
+         AND (
+           LOWER(email) = ANY($1::text[])
+           OR mobile = ANY($2::text[])
+         )`,
+      [emails, mobiles],
+    )
+    : { rows: [] }
+
+  const usersByEmail = new Map<string, DirectoryBindingCandidateRow[]>()
+  const usersByMobile = new Map<string, DirectoryBindingCandidateRow[]>()
+  const userDetailsById = new Map<string, DirectoryBindingCandidateRow>()
+
+  for (const user of candidateUsersResult.rows) {
+    userDetailsById.set(user.id, user)
+
+    const normalizedEmail = normalizeText(user.email).toLowerCase()
+    if (normalizedEmail) {
+      const items = usersByEmail.get(normalizedEmail) ?? []
+      items.push(user)
+      usersByEmail.set(normalizedEmail, items)
+    }
+
+    const normalizedMobile = normalizeText(user.mobile)
+    if (normalizedMobile) {
+      const items = usersByMobile.get(normalizedMobile) ?? []
+      items.push(user)
+      usersByMobile.set(normalizedMobile, items)
+    }
+  }
+
+  const candidateUserIds = Array.from(new Set(candidateUsersResult.rows.map((user) => user.id)))
+  const [linkedAccountsResult, identitiesResult] = candidateUserIds.length > 0
+    ? await Promise.all([
+      query<DirectoryLinkedAccountByUserRow>(
+        `SELECT l.local_user_id, l.directory_account_id
+         FROM directory_account_links l
+         JOIN directory_accounts a ON a.id = l.directory_account_id
+         WHERE a.provider = $1
+           AND l.link_status = 'linked'
+           AND l.local_user_id = ANY($2::text[])`,
+        [DEFAULT_PROVIDER, candidateUserIds],
+      ),
+      query<DirectoryIdentityByUserRow>(
+        `SELECT local_user_id, external_key, provider_union_id, provider_open_id, corp_id
+         FROM user_external_identities
+         WHERE provider = $1
+           AND local_user_id = ANY($2::text[])`,
+        [DEFAULT_PROVIDER, candidateUserIds],
+      ),
+    ])
+    : [{ rows: [] }, { rows: [] }]
+
+  const linkedAccountsByUser = new Map<string, Set<string>>()
+  for (const row of linkedAccountsResult.rows) {
+    const accountIds = linkedAccountsByUser.get(row.local_user_id) ?? new Set<string>()
+    accountIds.add(row.directory_account_id)
+    linkedAccountsByUser.set(row.local_user_id, accountIds)
+  }
+
+  const identitiesByUser = new Map<string, DirectoryIdentityByUserRow>()
+  for (const row of identitiesResult.rows) {
+    identitiesByUser.set(row.local_user_id, row)
+  }
+
+  const summaries = new Map<string, DirectoryReviewRecommendationResult>()
+  for (const row of pendingRows) {
+    const matches = new Map<string, Set<DirectoryBindingRecommendationReason>>()
+    const normalizedEmail = normalizeText(row.account_email).toLowerCase()
+    const normalizedMobile = normalizeText(row.account_mobile)
+    const emailMatches = normalizedEmail ? (usersByEmail.get(normalizedEmail) ?? []) : []
+    const mobileMatches = normalizedMobile ? (usersByMobile.get(normalizedMobile) ?? []) : []
+    const hasAmbiguousEmail = emailMatches.length > 1
+    const hasAmbiguousMobile = mobileMatches.length > 1
+
+    if (emailMatches.length === 1) {
+      matches.set(emailMatches[0].id, new Set<DirectoryBindingRecommendationReason>(['email']))
+    }
+    if (mobileMatches.length === 1) {
+      const reasons = matches.get(mobileMatches[0].id) ?? new Set<DirectoryBindingRecommendationReason>()
+      reasons.add('mobile')
+      matches.set(mobileMatches[0].id, reasons)
+    }
+
+    const pendingLocalUserId = normalizeText(row.local_user_id)
+    if (pendingLocalUserId) {
+      if (matches.size === 1 && matches.has(pendingLocalUserId)) {
+        matches.get(pendingLocalUserId)?.add('pending_link')
+      } else if (matches.size > 0) {
+        summaries.set(row.directory_account_id, {
+          recommendations: [],
+          status: buildRecommendationStatus('pending_link_conflict'),
+        })
+        continue
+      }
+    }
+
+    if (hasAmbiguousEmail || hasAmbiguousMobile || matches.size > 1) {
+      summaries.set(row.directory_account_id, {
+        recommendations: [],
+        status: buildRecommendationStatus('ambiguous_exact_match'),
+      })
+      continue
+    }
+
+    if (matches.size !== 1) {
+      summaries.set(row.directory_account_id, {
+        recommendations: [],
+        status: buildRecommendationStatus('no_exact_match'),
+      })
+      continue
+    }
+
+    const [candidateUserId, reasons] = Array.from(matches.entries())[0]
+    const user = userDetailsById.get(candidateUserId)
+    if (!user?.is_active) {
+      summaries.set(row.directory_account_id, {
+        recommendations: [],
+        status: buildRecommendationStatus('no_exact_match'),
+      })
+      continue
+    }
+
+    const linkedAccounts = linkedAccountsByUser.get(candidateUserId)
+    if (linkedAccounts && Array.from(linkedAccounts).some((accountId) => accountId !== row.directory_account_id)) {
+      summaries.set(row.directory_account_id, {
+        recommendations: [],
+        status: buildRecommendationStatus('linked_user_conflict'),
+      })
+      continue
+    }
+
+    const externalIdentity = identitiesByUser.get(candidateUserId)
+    if (externalIdentity && !doesExternalIdentityMatchAccount(externalIdentity, row)) {
+      summaries.set(row.directory_account_id, {
+        recommendations: [],
+        status: buildRecommendationStatus('external_identity_conflict'),
+      })
+      continue
+    }
+
+    summaries.set(row.directory_account_id, {
+      recommendations: [{
+        localUser: {
+          id: user.id,
+          email: user.email,
+          name: user.name,
+          role: user.role,
+          isActive: user.is_active,
+        },
+        reasons: sortRecommendationReasons(reasons),
+      }].sort((left, right) => buildRecommendationScore(right.reasons) - buildRecommendationScore(left.reasons)),
+      status: buildRecommendationStatus('recommended'),
+    })
+  }
+
+  return summaries
 }
 
 function normalizeIntegrationInput(
@@ -1031,6 +1360,7 @@ async function loadMatchMaps(accounts: DirectoryAccountRow[]) {
 export async function syncDirectoryIntegration(
   integrationId: string,
   triggeredBy: string,
+  triggerSource: 'manual' | 'scheduler' = 'manual',
 ): Promise<{ integration: DirectoryIntegrationSummary; run: DirectorySyncRunSummary }> {
   const integration = await getIntegrationRow(integrationId)
   if (!integration) throw new Error('Directory integration not found')
@@ -1040,9 +1370,9 @@ export async function syncDirectoryIntegration(
     `INSERT INTO directory_sync_runs (
        integration_id, status, started_at, stats, meta, triggered_by, trigger_source, created_at, updated_at
      )
-     VALUES ($1, 'running', NOW(), '{}'::jsonb, '{}'::jsonb, $2, 'manual', NOW(), NOW())
+     VALUES ($1, 'running', NOW(), '{}'::jsonb, '{}'::jsonb, $2, $3, NOW(), NOW())
      RETURNING id, integration_id, status, started_at, finished_at, stats, error_message, triggered_by, trigger_source, created_at, updated_at`,
-    [integrationId, triggeredBy],
+    [integrationId, triggeredBy, triggerSource],
   )
   const runId = runResult.rows[0].id
 
@@ -1361,16 +1691,14 @@ export async function listDirectorySyncAlerts(
   const normalizedIntegrationId = normalizeText(integrationId)
   if (!normalizedIntegrationId) throw new Error('integrationId is required')
 
-  const whereClauses = ['integration_id = $1']
+  const normalizedFilter: DirectorySyncAlertFilter = filter === 'pending' || filter === 'acknowledged' ? filter : 'all'
+  const whereClauses: string[] = ['integration_id = $1']
   const params: unknown[] = [normalizedIntegrationId]
-  if (filter === 'pending') {
-    whereClauses.push('acknowledged_at IS NULL')
-  } else if (filter === 'acknowledged') {
-    whereClauses.push('acknowledged_at IS NOT NULL')
-  }
-  const whereSql = whereClauses.join(' AND ')
+  if (normalizedFilter === 'pending') whereClauses.push('acknowledged_at IS NULL')
+  if (normalizedFilter === 'acknowledged') whereClauses.push('acknowledged_at IS NOT NULL')
 
-  const [totalResult, countsResult, rowsResult] = await Promise.all([
+  const whereSql = whereClauses.join(' AND ')
+  const [countResult, countsResult, rowsResult] = await Promise.all([
     query<{ total: number }>(
       `SELECT COUNT(*)::int AS total
        FROM directory_sync_alerts
@@ -1391,7 +1719,19 @@ export async function listDirectorySyncAlerts(
       [normalizedIntegrationId],
     ),
     query<DirectorySyncAlertRow>(
-      `SELECT id, integration_id, run_id, level, code, message, details, sent_to_webhook, acknowledged_at, acknowledged_by, created_at, updated_at
+      `SELECT
+          id,
+          integration_id,
+          run_id,
+          level,
+          code,
+          message,
+          details,
+          sent_to_webhook,
+          acknowledged_at,
+          acknowledged_by,
+          created_at,
+          updated_at
        FROM directory_sync_alerts
        WHERE ${whereSql}
        ORDER BY acknowledged_at IS NULL DESC, created_at DESC
@@ -1403,7 +1743,7 @@ export async function listDirectorySyncAlerts(
   const countsRow = countsResult.rows[0]
   return {
     items: rowsResult.rows.map(summarizeAlert),
-    total: Number(totalResult.rows[0]?.total ?? 0),
+    total: Number(countResult.rows[0]?.total ?? 0),
     counts: {
       total: Number(countsRow?.total_count ?? 0),
       pending: Number(countsRow?.pending_count ?? 0),
@@ -1414,12 +1754,12 @@ export async function listDirectorySyncAlerts(
 
 export async function acknowledgeDirectorySyncAlert(
   alertId: string,
-  adminUserId: string,
+  acknowledgedBy: string,
 ): Promise<DirectorySyncAlertSummary | null> {
   const normalizedAlertId = normalizeText(alertId)
-  const normalizedAdminUserId = normalizeText(adminUserId)
+  const normalizedAcknowledgedBy = normalizeText(acknowledgedBy)
   if (!normalizedAlertId) throw new Error('alertId is required')
-  if (!normalizedAdminUserId) throw new Error('adminUserId is required')
+  if (!normalizedAcknowledgedBy) throw new Error('acknowledgedBy is required')
 
   const result = await query<DirectorySyncAlertRow>(
     `UPDATE directory_sync_alerts
@@ -1427,12 +1767,85 @@ export async function acknowledgeDirectorySyncAlert(
          acknowledged_by = COALESCE(acknowledged_by, $2),
          updated_at = NOW()
      WHERE id = $1
-     RETURNING id, integration_id, run_id, level, code, message, details, sent_to_webhook, acknowledged_at, acknowledged_by, created_at, updated_at`,
-    [normalizedAlertId, normalizedAdminUserId],
+     RETURNING
+       id,
+       integration_id,
+       run_id,
+       level,
+       code,
+       message,
+       details,
+       sent_to_webhook,
+       acknowledged_at,
+       acknowledged_by,
+       created_at,
+       updated_at`,
+    [normalizedAlertId, normalizedAcknowledgedBy],
   )
 
-  if (result.rows.length === 0) return null
-  return summarizeAlert(result.rows[0])
+  const row = result.rows[0]
+  return row ? summarizeAlert(row) : null
+}
+
+function readScheduleObservation(
+  integration: DirectoryIntegrationRow,
+  lastManualRun: DirectoryRunRow | null,
+  lastAutomaticRun: DirectoryRunRow | null,
+): Pick<DirectorySyncScheduleSnapshot, 'cronValid' | 'nextExpectedRunAt' | 'observationStatus' | 'observationMessage'> {
+  if (!integration.sync_enabled) {
+    return {
+      cronValid: normalizeText(integration.schedule_cron).length > 0,
+      nextExpectedRunAt: null,
+      observationStatus: 'disabled',
+      observationMessage: '自动同步未启用。',
+    }
+  }
+
+  const cronExpression = normalizeText(integration.schedule_cron)
+  if (!cronExpression) {
+    return {
+      cronValid: false,
+      nextExpectedRunAt: null,
+      observationStatus: 'missing_cron',
+      observationMessage: '已启用自动同步，但尚未配置 cron 表达式。',
+    }
+  }
+
+  try {
+    const parser = new SimpleCronExpression(cronExpression, 'UTC')
+    const nextRun = parser.next()
+    if (lastAutomaticRun) {
+      return {
+        cronValid: true,
+        nextExpectedRunAt: nextRun?.toISOString() ?? null,
+        observationStatus: 'auto_observed',
+        observationMessage: `已观察到自动触发记录（${lastAutomaticRun.trigger_source}）。`,
+      }
+    }
+
+    if (lastManualRun) {
+      return {
+        cronValid: true,
+        nextExpectedRunAt: nextRun?.toISOString() ?? null,
+        observationStatus: 'manual_only',
+        observationMessage: '当前只观察到 manual 触发记录；尚未看到自动执行。',
+      }
+    }
+
+    return {
+      cronValid: true,
+      nextExpectedRunAt: nextRun?.toISOString() ?? null,
+      observationStatus: 'configured_no_runs',
+      observationMessage: '已保存自动同步配置，但尚未看到任何执行记录。',
+    }
+  } catch {
+    return {
+      cronValid: false,
+      nextExpectedRunAt: null,
+      observationStatus: 'invalid_cron',
+      observationMessage: 'cron 表达式无效，当前无法推算下次自动同步时间。',
+    }
+  }
 }
 
 export async function getDirectorySyncScheduleSnapshot(
@@ -1444,7 +1857,7 @@ export async function getDirectorySyncScheduleSnapshot(
   const integration = await getIntegrationRow(normalizedIntegrationId)
   if (!integration) return null
 
-  const [latestRunResult, latestManualRunResult, latestAutoRunResult] = await Promise.all([
+  const [lastRunResult, lastManualRunResult, lastAutomaticRunResult] = await Promise.all([
     query<DirectoryRunRow>(
       `SELECT id, integration_id, status, started_at, finished_at, stats, error_message, triggered_by, trigger_source, created_at, updated_at
        FROM directory_sync_runs
@@ -1456,8 +1869,7 @@ export async function getDirectorySyncScheduleSnapshot(
     query<DirectoryRunRow>(
       `SELECT id, integration_id, status, started_at, finished_at, stats, error_message, triggered_by, trigger_source, created_at, updated_at
        FROM directory_sync_runs
-       WHERE integration_id = $1
-         AND trigger_source = 'manual'
+       WHERE integration_id = $1 AND trigger_source = 'manual'
        ORDER BY started_at DESC
        LIMIT 1`,
       [normalizedIntegrationId],
@@ -1465,70 +1877,179 @@ export async function getDirectorySyncScheduleSnapshot(
     query<DirectoryRunRow>(
       `SELECT id, integration_id, status, started_at, finished_at, stats, error_message, triggered_by, trigger_source, created_at, updated_at
        FROM directory_sync_runs
-       WHERE integration_id = $1
-         AND trigger_source <> 'manual'
+       WHERE integration_id = $1 AND trigger_source = 'scheduler'
        ORDER BY started_at DESC
        LIMIT 1`,
       [normalizedIntegrationId],
     ),
   ])
 
-  const scheduleCron = normalizeOptionalText(integration.schedule_cron)
-  let cronValid = false
-  let nextExpectedRunAt: string | null = null
-  if (scheduleCron) {
-    try {
-      const expression = new SimpleCronExpression(scheduleCron, 'UTC')
-      const nextRun = expression.next()
-      cronValid = nextRun !== null
-      nextExpectedRunAt = nextRun?.toISOString() ?? null
-    } catch {
-      cronValid = false
-      nextExpectedRunAt = null
-    }
-  }
-
-  const latestRun = latestRunResult.rows[0]
-  const latestManualRun = latestManualRunResult.rows[0]
-  const latestAutoRun = latestAutoRunResult.rows[0]
-
-  let observationStatus: DirectorySyncObservationStatus = 'configured_no_runs'
-  let note = '已保存自动同步配置，但尚未看到任何执行记录。'
-  if (!integration.sync_enabled) {
-    observationStatus = 'disabled'
-    note = '当前仅手动同步，未启用自动执行。'
-  } else if (!scheduleCron) {
-    observationStatus = 'missing_cron'
-    note = '已启用自动同步，但尚未配置 scheduleCron。'
-  } else if (!cronValid) {
-    observationStatus = 'invalid_cron'
-    note = 'scheduleCron 无法解析，系统无法推算下一次执行时间。'
-  } else if (latestAutoRun) {
-    observationStatus = 'auto_observed'
-    note = `已观察到自动触发记录（${latestAutoRun.trigger_source}）。`
-  } else if (latestManualRun) {
-    observationStatus = 'manual_only'
-    note = '当前只观察到 manual 触发记录；尚未看到自动执行。'
-  }
+  const lastRun = lastRunResult.rows[0] ?? null
+  const lastManualRun = lastManualRunResult.rows[0] ?? null
+  const lastAutomaticRun = lastAutomaticRunResult.rows[0] ?? null
+  const observation = readScheduleObservation(integration, lastManualRun, lastAutomaticRun)
 
   return {
     integrationId: normalizedIntegrationId,
     syncEnabled: Boolean(integration.sync_enabled),
-    scheduleCron,
-    cronValid,
-    nextExpectedRunAt,
-    timezone: 'UTC',
-    latestRunAt: latestRun?.started_at ?? null,
-    latestRunStatus: latestRun?.status ?? null,
-    latestRunTriggerSource: latestRun?.trigger_source ?? null,
-    latestManualRunAt: latestManualRun?.started_at ?? null,
-    latestManualRunStatus: latestManualRun?.status ?? null,
-    latestAutoRunAt: latestAutoRun?.started_at ?? null,
-    latestAutoRunStatus: latestAutoRun?.status ?? null,
-    autoTriggerObserved: Boolean(latestAutoRun),
-    observationStatus,
-    note,
+    scheduleCron: integration.schedule_cron,
+    cronValid: observation.cronValid,
+    nextExpectedRunAt: observation.nextExpectedRunAt,
+    lastRun: lastRun ? summarizeRun(lastRun) : null,
+    lastManualRun: lastManualRun ? summarizeRun(lastManualRun) : null,
+    lastAutomaticRun: lastAutomaticRun ? summarizeRun(lastAutomaticRun) : null,
+    observationStatus: observation.observationStatus,
+    observationMessage: observation.observationMessage,
   }
+}
+
+function buildReviewFilterSql(filter: DirectoryReviewItemFilter): string {
+  if (filter === 'inactive_linked') {
+    return '(a.is_active = FALSE AND l.local_user_id IS NOT NULL)'
+  }
+  if (filter === 'missing_identifier') {
+    return "(COALESCE(a.union_id, '') = '' AND COALESCE(a.open_id, '') = '')"
+  }
+  if (filter === 'pending_binding') {
+    return "(l.local_user_id IS NULL OR COALESCE(l.link_status, 'pending') <> 'linked')"
+  }
+  return `(
+    (COALESCE(a.union_id, '') = '' AND COALESCE(a.open_id, '') = '')
+    OR (a.is_active = FALSE AND l.local_user_id IS NOT NULL)
+    OR (l.local_user_id IS NULL OR COALESCE(l.link_status, 'pending') <> 'linked')
+  )`
+}
+
+export async function listDirectoryReviewItems(
+  integrationId: string,
+  pagination: { limit: number; offset: number },
+  filter: DirectoryReviewItemFilter = 'all',
+): Promise<{ items: DirectoryReviewItemSummary[]; total: number }> {
+  const normalizedIntegrationId = normalizeText(integrationId)
+  if (!normalizedIntegrationId) throw new Error('integrationId is required')
+
+  const normalizedFilter: DirectoryReviewItemFilter = filter === 'pending_binding' || filter === 'inactive_linked' || filter === 'missing_identifier'
+    ? filter
+    : 'all'
+  const filterSql = buildReviewFilterSql(normalizedFilter)
+
+  const [countResult, rowsResult] = await Promise.all([
+    query<{ total: number }>(
+      `SELECT COUNT(*)::int AS total
+       FROM directory_accounts a
+       LEFT JOIN directory_account_links l ON l.directory_account_id = a.id
+       WHERE a.integration_id = $1 AND ${filterSql}`,
+      [normalizedIntegrationId],
+    ),
+    query<DirectoryReviewItemRow>(
+      `SELECT
+          a.integration_id,
+          a.provider,
+          a.corp_id,
+          a.id AS directory_account_id,
+          a.external_user_id,
+          a.union_id,
+          a.open_id,
+          a.external_key,
+          a.name AS account_name,
+          a.email AS account_email,
+          a.mobile AS account_mobile,
+          a.is_active AS account_is_active,
+          a.updated_at AS account_updated_at,
+          l.link_status,
+          l.match_strategy,
+          l.reviewed_by,
+          l.review_note,
+          l.updated_at AS link_updated_at,
+          u.id AS local_user_id,
+          u.email AS local_user_email,
+          u.name AS local_user_name,
+          COALESCE(array_remove(array_agg(DISTINCT d.full_path), NULL), ARRAY[]::text[]) AS department_paths,
+          CASE
+            WHEN COALESCE(a.union_id, '') = '' AND COALESCE(a.open_id, '') = '' THEN 'missing_identifier'
+            WHEN a.is_active = FALSE AND l.local_user_id IS NOT NULL THEN 'inactive_linked'
+            ELSE 'pending_binding'
+          END AS review_kind,
+          CASE
+            WHEN COALESCE(a.union_id, '') = '' AND COALESCE(a.open_id, '') = '' THEN '目录成员缺少 unionId/openId，无法用于钉钉登录绑定。'
+            WHEN a.is_active = FALSE AND l.local_user_id IS NOT NULL THEN '目录成员已停用，但仍绑定本地用户，需要停权处理。'
+            WHEN l.local_user_id IS NULL THEN '目录成员尚未绑定本地用户。'
+            ELSE '目录成员当前不是已确认绑定状态，建议复核。'
+          END AS review_reason,
+          (COALESCE(a.union_id, '') = '') AS missing_union_id,
+          (COALESCE(a.open_id, '') = '') AS missing_open_id
+       FROM directory_accounts a
+       LEFT JOIN directory_account_links l ON l.directory_account_id = a.id
+       LEFT JOIN users u ON u.id = l.local_user_id
+       LEFT JOIN directory_account_departments ad ON ad.directory_account_id = a.id
+       LEFT JOIN directory_departments d ON d.id = ad.directory_department_id
+       WHERE a.integration_id = $1 AND ${filterSql}
+       GROUP BY
+         a.integration_id, a.provider, a.corp_id, a.id, a.external_user_id, a.union_id, a.open_id, a.external_key,
+         a.name, a.email, a.mobile, a.is_active, a.updated_at,
+         l.link_status, l.match_strategy, l.reviewed_by, l.review_note, l.updated_at,
+         u.id, u.email, u.name
+       ORDER BY
+         CASE
+           WHEN COALESCE(a.union_id, '') = '' AND COALESCE(a.open_id, '') = '' THEN 0
+           WHEN a.is_active = FALSE AND l.local_user_id IS NOT NULL THEN 1
+           ELSE 2
+         END,
+         a.name ASC,
+         a.external_user_id ASC
+       LIMIT $2 OFFSET $3`,
+      [normalizedIntegrationId, pagination.limit, pagination.offset],
+    ),
+  ])
+
+  const recommendationsByAccount = await loadDirectoryReviewRecommendations(rowsResult.rows)
+
+  return {
+    items: rowsResult.rows.map((row) => summarizeReviewItem(
+      row,
+      recommendationsByAccount.get(row.directory_account_id) ?? null,
+    )),
+    total: Number(countResult.rows[0]?.total ?? 0),
+  }
+}
+
+export async function batchUnbindDirectoryAccounts(
+  directoryAccountIds: string[],
+  input: DirectoryAccountUnbindInput,
+): Promise<DirectoryAccountMutationResult[]> {
+  const normalizedIds = Array.from(new Set(directoryAccountIds.map((item) => normalizeText(item)).filter(Boolean)))
+  if (normalizedIds.length === 0) throw new Error('accountIds are required')
+
+  const results: DirectoryAccountMutationResult[] = []
+  for (const directoryAccountId of normalizedIds) {
+    results.push(await unbindDirectoryAccount(directoryAccountId, input))
+  }
+  return results
+}
+
+export async function batchBindDirectoryAccounts(
+  entries: DirectoryAccountBatchBindEntry[],
+  input: { adminUserId: string },
+): Promise<DirectoryAccountMutationResult[]> {
+  const normalizedEntries = entries
+    .map((entry) => ({
+      accountId: normalizeText(entry.accountId),
+      localUserRef: normalizeText(entry.localUserRef),
+      enableDingTalkGrant: entry.enableDingTalkGrant !== false,
+    }))
+    .filter((entry) => entry.accountId.length > 0 && entry.localUserRef.length > 0)
+
+  if (normalizedEntries.length === 0) throw new Error('bindings are required')
+
+  const results: DirectoryAccountMutationResult[] = []
+  for (const entry of normalizedEntries) {
+    results.push(await bindDirectoryAccount(entry.accountId, {
+      localUserRef: entry.localUserRef,
+      adminUserId: input.adminUserId,
+      enableDingTalkGrant: entry.enableDingTalkGrant,
+    }))
+  }
+  return results
 }
 
 async function getDirectoryAccountSummary(accountId: string): Promise<DirectoryIntegrationAccountSummary | null> {
@@ -1703,117 +2224,6 @@ export async function listDirectoryIntegrationAccounts(
   return {
     items: rowsResult.rows.map(summarizeDirectoryAccount),
     total: Number(countResult.rows[0]?.total ?? 0),
-  }
-}
-
-export async function listDirectoryIntegrationReviewItems(
-  integrationId: string,
-  pagination: { limit: number; offset: number },
-  queue: DirectoryReviewQueue = 'all',
-): Promise<{ items: DirectoryIntegrationReviewItem[]; total: number; counts: DirectoryIntegrationReviewCounts }> {
-  const normalizedIntegrationId = normalizeText(integrationId)
-  if (!normalizedIntegrationId) throw new Error('integrationId is required')
-
-  const needsBindingSql = `(l.local_user_id IS NULL OR COALESCE(l.link_status, 'unmatched') <> 'linked')`
-  const inactiveLinkedSql = `(a.is_active = FALSE AND l.local_user_id IS NOT NULL AND COALESCE(l.link_status, '') = 'linked')`
-  const missingIdentitySql = `(COALESCE(a.open_id, '') = '' AND COALESCE(a.union_id, '') = '')`
-
-  const whereClauses = ['a.integration_id = $1']
-  switch (queue) {
-    case 'needs_binding':
-      whereClauses.push(needsBindingSql)
-      break
-    case 'inactive_linked':
-      whereClauses.push(inactiveLinkedSql)
-      break
-    case 'missing_identity':
-      whereClauses.push(missingIdentitySql)
-      break
-    default:
-      whereClauses.push(`(${needsBindingSql} OR ${inactiveLinkedSql} OR ${missingIdentitySql})`)
-      break
-  }
-
-  const whereSql = whereClauses.join(' AND ')
-  const [countsResult, totalResult, rowsResult] = await Promise.all([
-    query<{
-      total_count: number | string
-      needs_binding_count: number | string
-      inactive_linked_count: number | string
-      missing_identity_count: number | string
-    }>(
-      `SELECT
-          COUNT(*) FILTER (WHERE ${needsBindingSql} OR ${inactiveLinkedSql} OR ${missingIdentitySql})::int AS total_count,
-          COUNT(*) FILTER (WHERE ${needsBindingSql})::int AS needs_binding_count,
-          COUNT(*) FILTER (WHERE ${inactiveLinkedSql})::int AS inactive_linked_count,
-          COUNT(*) FILTER (WHERE ${missingIdentitySql})::int AS missing_identity_count
-       FROM directory_accounts a
-       LEFT JOIN directory_account_links l ON l.directory_account_id = a.id
-       WHERE a.integration_id = $1`,
-      [normalizedIntegrationId],
-    ),
-    query<{ total: number | string }>(
-      `SELECT COUNT(*)::int AS total
-       FROM directory_accounts a
-       LEFT JOIN directory_account_links l ON l.directory_account_id = a.id
-       WHERE ${whereSql}`,
-      [normalizedIntegrationId],
-    ),
-    query<DirectoryIntegrationAccountRow>(
-      `SELECT
-          a.integration_id,
-          a.provider,
-          a.corp_id,
-          a.id AS directory_account_id,
-          a.external_user_id,
-          a.union_id,
-          a.open_id,
-          a.external_key,
-          a.name AS account_name,
-          a.email AS account_email,
-          a.mobile AS account_mobile,
-          a.is_active AS account_is_active,
-          a.updated_at AS account_updated_at,
-          l.link_status,
-          l.match_strategy,
-          l.reviewed_by,
-          l.review_note,
-          l.updated_at AS link_updated_at,
-          u.id AS local_user_id,
-          u.email AS local_user_email,
-          u.name AS local_user_name,
-          COALESCE(array_remove(array_agg(DISTINCT d.full_path), NULL), ARRAY[]::text[]) AS department_paths
-       FROM directory_accounts a
-       LEFT JOIN directory_account_links l ON l.directory_account_id = a.id
-       LEFT JOIN users u ON u.id = l.local_user_id
-       LEFT JOIN directory_account_departments ad ON ad.directory_account_id = a.id
-       LEFT JOIN directory_departments d ON d.id = ad.directory_department_id
-       WHERE ${whereSql}
-       GROUP BY
-         a.integration_id, a.provider, a.corp_id, a.id, a.external_user_id, a.union_id, a.open_id, a.external_key,
-         a.name, a.email, a.mobile, a.is_active, a.updated_at,
-         l.link_status, l.match_strategy, l.reviewed_by, l.review_note, l.updated_at,
-         u.id, u.email, u.name
-       ORDER BY
-         CASE WHEN ${inactiveLinkedSql} THEN 0 WHEN ${needsBindingSql} THEN 1 ELSE 2 END,
-         a.is_active DESC,
-         a.name ASC,
-         a.external_user_id ASC
-       LIMIT $2 OFFSET $3`,
-      [normalizedIntegrationId, pagination.limit, pagination.offset],
-    ),
-  ])
-
-  const countsRow = countsResult.rows[0]
-  return {
-    items: rowsResult.rows.map(summarizeDirectoryAccount).map(attachDirectoryReviewReasons),
-    total: Number(totalResult.rows[0]?.total ?? 0),
-    counts: {
-      total: Number(countsRow?.total_count ?? 0),
-      needsBinding: Number(countsRow?.needs_binding_count ?? 0),
-      inactiveLinked: Number(countsRow?.inactive_linked_count ?? 0),
-      missingIdentity: Number(countsRow?.missing_identity_count ?? 0),
-    },
   }
 }
 
@@ -2013,16 +2423,6 @@ export async function unbindDirectoryAccount(
 
   await transaction(async (client) => {
     if (previousLinkedUser?.local_user_id) {
-      if (disableDingTalkGrant) {
-        await client.query(
-          `INSERT INTO user_external_auth_grants (provider, local_user_id, enabled, granted_by, created_at, updated_at)
-           VALUES ($1, $2, FALSE, $3, NOW(), NOW())
-           ON CONFLICT (provider, local_user_id)
-           DO UPDATE SET enabled = FALSE, granted_by = EXCLUDED.granted_by, updated_at = NOW()`,
-          [account.provider, previousLinkedUser.local_user_id, normalizedAdminUserId],
-        )
-      }
-
       const deleteIdentityParams: unknown[] = [
         account.provider,
         previousLinkedUser.local_user_id,
@@ -2052,6 +2452,16 @@ export async function unbindDirectoryAccount(
           `DELETE FROM user_external_identities
            WHERE ${deleteIdentityClauses.join(' AND ')}`,
           deleteIdentityParams,
+        )
+      }
+
+      if (disableDingTalkGrant) {
+        await client.query(
+          `INSERT INTO user_external_auth_grants (provider, local_user_id, enabled, granted_by, created_at, updated_at)
+           VALUES ($1, $2, FALSE, $3, NOW(), NOW())
+           ON CONFLICT (provider, local_user_id)
+           DO UPDATE SET enabled = FALSE, granted_by = EXCLUDED.granted_by, updated_at = NOW()`,
+          [account.provider, previousLinkedUser.local_user_id, normalizedAdminUserId],
         )
       }
     }
