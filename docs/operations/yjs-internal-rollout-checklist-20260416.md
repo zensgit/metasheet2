@@ -25,7 +25,6 @@ YJS_BASE_URL=http://localhost:3000 \
 YJS_ADMIN_TOKEN=$ADMIN_TOKEN \
 node scripts/ops/check-yjs-rollout-status.mjs
 ```
-
 ## 监控项
 
 | 指标 | 来源 | 预期 | 告警阈值 |
