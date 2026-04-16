@@ -9,6 +9,12 @@ Run the first limited internal rollout with two operator-visible checks:
 1. runtime health from `GET /api/admin/yjs/status`
 2. storage/retention health from PostgreSQL
 
+Optional packet export:
+
+```bash
+node scripts/ops/export-yjs-rollout-packet.mjs
+```
+
 ## Runtime Check
 
 ```bash
