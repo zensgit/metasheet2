@@ -1658,8 +1658,12 @@ export class MetaSheetServer {
       this.logger.error('Failed to initialize WebSocket service', e as Error)
     }
 
-    // Initialize Yjs collaborative editing service
-    try {
+    // Initialize Yjs collaborative editing service (behind ENABLE_YJS_COLLAB feature flag)
+    const yjsEnabled = process.env.ENABLE_YJS_COLLAB === 'true'
+    if (!yjsEnabled) {
+      this.logger.info('Yjs collaborative editing disabled (ENABLE_YJS_COLLAB != true)')
+    }
+    if (yjsEnabled) try {
       const { YjsPersistenceAdapter } = await import('./collab/yjs-persistence-adapter')
       const { YjsSyncService } = await import('./collab/yjs-sync-service')
       const { YjsWebSocketAdapter } = await import('./collab/yjs-websocket-adapter')

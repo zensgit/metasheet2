@@ -41,6 +41,8 @@ interface PendingWrite {
 export class YjsRecordBridge {
   private pendingWrites = new Map<string, PendingWrite>()
   private observedDocs = new Map<string, () => void>()
+  private _flushSuccessCount = 0
+  private _flushFailureCount = 0
 
   private mergeWindowMs: number
   private maxDelayMs: number
@@ -167,9 +169,12 @@ export class YjsRecordBridge {
     const primaryActorId = actorIds[0] ?? 'unknown'
 
     // Fire and forget — errors logged, not thrown
-    this.executePatch(recordId, fields, primaryActorId, actorIds).catch((err) => {
-      console.error(`[yjs-bridge] Failed to flush patch for record ${recordId}:`, err)
-    })
+    this.executePatch(recordId, fields, primaryActorId, actorIds)
+      .then(() => { this._flushSuccessCount++ })
+      .catch((err) => {
+        this._flushFailureCount++
+        console.error(`[yjs-bridge] Failed to flush patch for record ${recordId}:`, err)
+      })
   }
 
   private async executePatch(recordId: string, fields: Record<string, unknown>, primaryActorId: string, allActorIds: string[]): Promise<void> {
@@ -186,6 +191,16 @@ export class YjsRecordBridge {
     const recordIds = [...this.pendingWrites.keys()]
     for (const recordId of recordIds) {
       this.flushNow(recordId)
+    }
+  }
+
+  /** Metrics snapshot for observability */
+  getMetrics(): { pendingWriteCount: number; observedDocCount: number; flushSuccessCount: number; flushFailureCount: number } {
+    return {
+      pendingWriteCount: this.pendingWrites.size,
+      observedDocCount: this.observedDocs.size,
+      flushSuccessCount: this._flushSuccessCount,
+      flushFailureCount: this._flushFailureCount,
     }
   }
 
