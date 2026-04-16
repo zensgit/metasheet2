@@ -13,6 +13,14 @@ export class YjsSyncService {
     this.cleanupTimer.unref()
   }
 
+  private async persistSnapshot(recordId: string, doc: Y.Doc): Promise<void> {
+    if (typeof (this.persistence as YjsPersistenceAdapter & { compactDoc?: (recordId: string, doc: Y.Doc) => Promise<void> }).compactDoc === 'function') {
+      await (this.persistence as YjsPersistenceAdapter & { compactDoc: (recordId: string, doc: Y.Doc) => Promise<void> }).compactDoc(recordId, doc)
+      return
+    }
+    await this.persistence.storeSnapshot(recordId, doc)
+  }
+
   async getOrCreateDoc(recordId: string): Promise<Y.Doc> {
     const existing = this.docs.get(recordId)
     if (existing) {
@@ -50,9 +58,10 @@ export class YjsSyncService {
   async releaseDoc(recordId: string): Promise<void> {
     const entry = this.docs.get(recordId)
     if (entry) {
-      // Snapshot before releasing so cross-restart recovery works
+      // Compact into a fresh snapshot before releasing so restart recovery
+      // stays bounded and old incremental updates do not accumulate forever.
       try {
-        await this.persistence.storeSnapshot(recordId, entry.doc)
+        await this.persistSnapshot(recordId, entry.doc)
       } catch (err) {
         console.error(`[yjs] Failed to snapshot doc ${recordId} on release:`, err)
       }
@@ -66,7 +75,7 @@ export class YjsSyncService {
     for (const [recordId, entry] of this.docs) {
       if (now - entry.lastAccess > idleThreshold) {
         try {
-          await this.persistence.storeSnapshot(recordId, entry.doc)
+          await this.persistSnapshot(recordId, entry.doc)
         } catch (err) {
           console.error(`[yjs] Failed to snapshot idle doc ${recordId}:`, err)
         }
@@ -80,7 +89,7 @@ export class YjsSyncService {
     clearInterval(this.cleanupTimer)
     for (const [recordId, entry] of this.docs) {
       try {
-        await this.persistence.storeSnapshot(recordId, entry.doc)
+        await this.persistSnapshot(recordId, entry.doc)
       } catch (err) {
         console.error(`[yjs] Failed to snapshot doc ${recordId} on destroy:`, err)
       }

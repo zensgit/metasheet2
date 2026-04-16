@@ -71,4 +71,34 @@ export class YjsPersistenceAdapter {
       )
       .execute()
   }
+
+  async compactDoc(recordId: string, doc: Y.Doc): Promise<void> {
+    const state = Y.encodeStateAsUpdate(doc)
+    const stateVector = Y.encodeStateVector(doc)
+    const updatedAt = new Date()
+
+    await this.db.transaction().execute(async (trx) => {
+      await trx
+        .insertInto('meta_record_yjs_states')
+        .values({
+          record_id: recordId,
+          doc_state: Buffer.from(state),
+          state_vector: Buffer.from(stateVector),
+          updated_at: updatedAt,
+        })
+        .onConflict((oc) =>
+          oc.column('record_id').doUpdateSet({
+            doc_state: Buffer.from(state),
+            state_vector: Buffer.from(stateVector),
+            updated_at: updatedAt,
+          }),
+        )
+        .execute()
+
+      await trx
+        .deleteFrom('meta_record_yjs_updates')
+        .where('record_id', '=', recordId)
+        .execute()
+    })
+  }
 }
