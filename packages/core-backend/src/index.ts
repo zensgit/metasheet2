@@ -164,6 +164,9 @@ export class MetaSheetServer {
   private stopOperationAuditRetention?: () => void
   private stopMultitableAttachmentCleanup?: () => void
   private automationService?: AutomationService
+  private yjsSyncMetricsSource?: { getMetrics(): { activeDocCount: number; docIds: string[] } }
+  private yjsBridgeMetricsSource?: { getMetrics(): { pendingWriteCount: number; observedDocCount: number; flushSuccessCount: number; flushFailureCount: number } }
+  private yjsSocketMetricsSource?: { getMetrics(): { activeRecordCount: number; activeSocketCount: number } }
   private afterSalesApprovalBridgeService: AfterSalesApprovalBridgeService
   // Optional bypass/degraded-mode flags for local debug
   private disableWorkflow = process.env.DISABLE_WORKFLOW === 'true'
@@ -904,6 +907,13 @@ export class MetaSheetServer {
       activatePlugin: this.activatePluginByName.bind(this),
       deactivatePlugin: this.deactivatePluginByName.bind(this),
       snapshotService: this.snapshotService,
+      getYjsStatus: () => ({
+        enabled: process.env.ENABLE_YJS_COLLAB === 'true',
+        initialized: !!(this.yjsSyncMetricsSource && this.yjsBridgeMetricsSource && this.yjsSocketMetricsSource),
+        sync: this.yjsSyncMetricsSource?.getMetrics() ?? null,
+        bridge: this.yjsBridgeMetricsSource?.getMetrics() ?? null,
+        socket: this.yjsSocketMetricsSource?.getMetrics() ?? null,
+      }),
     }))
     this.app.use(adminUsersRouter())
     this.app.use('/api/admin/directory', adminDirectoryRouter())
@@ -1816,6 +1826,9 @@ export class MetaSheetServer {
 
         yjsWsAdapter.setBridge(yjsBridge)
         yjsWsAdapter.register(collabIO)
+        this.yjsSyncMetricsSource = yjsSyncService
+        this.yjsBridgeMetricsSource = yjsBridge
+        this.yjsSocketMetricsSource = yjsWsAdapter
         this.logger.info('Yjs collaborative editing service initialized on /yjs namespace (bridge + auth active)')
       } else {
         this.logger.warn('Yjs: CollabService IO not available, skipping')
