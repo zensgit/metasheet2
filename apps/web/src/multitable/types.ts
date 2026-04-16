@@ -178,6 +178,17 @@ export interface MetaCapabilities {
   canExport: boolean
 }
 
+export interface YjsPresenceUser {
+  id: string
+  fieldIds: string[]
+}
+
+export interface YjsRecordPresence {
+  recordId: string
+  activeCount: number
+  users: YjsPresenceUser[]
+}
+
 export interface MetaCapabilityOrigin {
   source: 'admin' | 'global-rbac' | 'sheet-grant' | 'sheet-scope'
   hasSheetAssignments: boolean

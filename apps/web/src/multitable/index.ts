@@ -8,6 +8,8 @@ export { useMultitableGrid, buildSortInfo, buildFilterInfo, FILTER_OPERATORS_BY_
 export type { SortRule, FilterRule, FilterOperator, FilterConjunction, CellEdit } from './composables/useMultitableGrid'
 export { useMultitableCapabilities } from './composables/useMultitableCapabilities'
 export type { MultitableCapabilities, MultitableRole } from './composables/useMultitableCapabilities'
+export { useYjsDocument } from './composables/useYjsDocument'
+export { useYjsTextField } from './composables/useYjsTextField'
 export { useMultitableComments } from './composables/useMultitableComments'
 export { useMultitableCommentInboxSummary } from './composables/useMultitableCommentInboxSummary'
 export { useMultitableCommentPresence } from './composables/useMultitableCommentPresence'
@@ -27,6 +29,7 @@ export { default as MetaFieldHeader } from './components/MetaFieldHeader.vue'
 export { default as MetaViewTabBar } from './components/MetaViewTabBar.vue'
 export { default as MetaToolbar } from './components/MetaToolbar.vue'
 export { default as MetaFormView } from './components/MetaFormView.vue'
+export { default as MetaYjsPresenceChip } from './components/MetaYjsPresenceChip.vue'
 
 // View-type components
 export { default as MetaKanbanView } from './components/MetaKanbanView.vue'
