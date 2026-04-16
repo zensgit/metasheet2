@@ -8,6 +8,8 @@ const STACK = [
   { pr: 890, branch: 'codex/yjs-rollout-report-20260416', parent: 889 },
   { pr: 891, branch: 'codex/yjs-rollout-packet-20260416', parent: 890 },
   { pr: 892, branch: 'codex/yjs-rollout-signoff-20260416', parent: 891 },
+  { pr: 893, branch: 'codex/yjs-rollout-stack-advance-20260416', parent: 892 },
+  { pr: 894, branch: 'codex/yjs-rollout-gate-20260416', parent: 893 },
 ]
 
 function printHelp() {
@@ -16,21 +18,25 @@ function printHelp() {
 Checks the Yjs rollout PR stack and optionally retargets children to main once their parent PR is merged.
 
 Options:
-  --apply    Perform gh pr edit --base main for eligible child PRs
-  --json     Print JSON output
-  --help     Show this help
+  --apply                Perform gh pr edit --base main for eligible child PRs
+  --enable-auto-merge    After retargeting, enable gh pr merge --auto --squash
+  --json                 Print JSON output
+  --help                 Show this help
 `)
 }
 
 function parseArgs(argv) {
   const opts = {
     apply: false,
+    enableAutoMerge: false,
     showJson: false,
   }
 
   for (const arg of argv) {
     if (arg === '--apply') {
       opts.apply = true
+    } else if (arg === '--enable-auto-merge') {
+      opts.enableAutoMerge = true
     } else if (arg === '--json') {
       opts.showJson = true
     } else if (arg === '--help') {
@@ -68,16 +74,16 @@ function loadPr(prNumber) {
     'view',
     String(prNumber),
     '--json',
-    'number,state,mergedAt,mergeStateStatus,reviewDecision,baseRefName,headRefName,url',
+    'number,state,mergedAt,mergeStateStatus,reviewDecision,baseRefName,headRefName,url,autoMergeRequest',
   ]))
 }
 
 function renderSummary(entry) {
   const status = entry.pr
   const line = `#${status.number} ${status.headRefName} -> ${status.baseRefName} [${status.state}]`
-  const action = entry.action ? ` action=${entry.action}` : ''
+  const actions = entry.actions?.length ? ` actions=${entry.actions.join('+')}` : ''
   const reason = entry.reason ? ` reason=${entry.reason}` : ''
-  return `${line}${action}${reason}`
+  return `${line}${actions}${reason}`
 }
 
 async function main() {
@@ -95,7 +101,7 @@ async function main() {
     if (!item.parent) {
       decisions.push({
         pr,
-        action: null,
+        actions: [],
         reason: pr.state === 'OPEN' ? 'root PR still controls the stack' : 'root PR already merged',
       })
       continue
@@ -104,33 +110,38 @@ async function main() {
     const parent = statusMap.get(item.parent)
 
     if (pr.state !== 'OPEN') {
-      decisions.push({ pr, action: null, reason: 'already merged or closed' })
+      decisions.push({ pr, actions: [], reason: 'already merged or closed' })
       continue
     }
 
     if (!parent?.mergedAt) {
-      decisions.push({ pr, action: null, reason: `waiting for parent #${item.parent}` })
+      decisions.push({ pr, actions: [], reason: `waiting for parent #${item.parent}` })
       continue
     }
 
-    if (pr.baseRefName === 'main') {
-      decisions.push({ pr, action: null, reason: 'already retargeted to main' })
-      continue
+    const actions = []
+
+    if (pr.baseRefName !== 'main') {
+      actions.push('retarget-to-main')
     }
 
-    decisions.push({
-      pr,
-      action: 'retarget-to-main',
-      reason: `parent #${item.parent} merged`,
-    })
+    if (opts.enableAutoMerge && !pr.autoMergeRequest) {
+      actions.push('enable-auto-merge')
+    }
+
+    decisions.push({ pr, actions, reason: `parent #${item.parent} merged` })
   }
 
   const applied = []
   if (opts.apply) {
     for (const decision of decisions) {
-      if (decision.action === 'retarget-to-main') {
+      if (decision.actions.includes('retarget-to-main')) {
         runGh(['pr', 'edit', String(decision.pr.number), '--base', 'main'])
-        applied.push(decision.pr.number)
+        applied.push(`retarget:${decision.pr.number}`)
+      }
+      if (opts.enableAutoMerge && decision.actions.includes('enable-auto-merge')) {
+        runGh(['pr', 'merge', String(decision.pr.number), '--auto', '--squash'])
+        applied.push(`auto-merge:${decision.pr.number}`)
       }
     }
   }
@@ -144,7 +155,7 @@ async function main() {
       baseRefName: decision.pr.baseRefName,
       headRefName: decision.pr.headRefName,
       mergedAt: decision.pr.mergedAt,
-      action: decision.action,
+      actions: decision.actions,
       reason: decision.reason,
       url: decision.pr.url,
     })),
