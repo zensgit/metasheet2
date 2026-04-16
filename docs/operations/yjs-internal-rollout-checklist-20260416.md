@@ -24,8 +24,10 @@ Date: 2026-04-16
 YJS_BASE_URL=http://localhost:3000 \
 YJS_ADMIN_TOKEN=$ADMIN_TOKEN \
 node scripts/ops/check-yjs-rollout-status.mjs
-```
 
+YJS_DATABASE_URL=$DATABASE_URL \
+node scripts/ops/check-yjs-retention-health.mjs
+```
 ## 监控项
 
 | 指标 | 来源 | 预期 | 告警阈值 |

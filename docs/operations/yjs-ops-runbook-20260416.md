@@ -13,6 +13,10 @@ YJS_BASE_URL=http://localhost:3000 \
 YJS_ADMIN_TOKEN=$ADMIN_TOKEN \
 node scripts/ops/check-yjs-rollout-status.mjs
 
+# retention / orphan health
+YJS_DATABASE_URL=$DATABASE_URL \
+node scripts/ops/check-yjs-retention-health.mjs
+
 # 预期输出
 {
   "success": true,
@@ -93,3 +97,7 @@ DELETE FROM meta_record_yjs_states WHERE record_id = 'rec_xxx';
 TRUNCATE meta_record_yjs_updates;
 TRUNCATE meta_record_yjs_states;
 ```
+
+## 5. 执行包
+
+- [yjs-internal-rollout-execution-20260416.md](/tmp/metasheet2-yjs-rollout-execution/docs/operations/yjs-internal-rollout-execution-20260416.md:1)
