@@ -47,6 +47,18 @@ interface AdminRouteServices {
   activatePlugin?: (pluginId: string) => Promise<{ status: 'active' | 'inactive' | 'failed'; error?: string; lastAttempt?: string }>;
   deactivatePlugin?: (pluginId: string) => Promise<{ status: 'active' | 'inactive' | 'failed'; error?: string; lastAttempt?: string }>;
   snapshotService?: SnapshotService;
+  getYjsStatus?: () => {
+    enabled: boolean
+    initialized: boolean
+    sync: { activeDocCount: number; docIds: string[] } | null
+    bridge: {
+      pendingWriteCount: number
+      observedDocCount: number
+      flushSuccessCount: number
+      flushFailureCount: number
+    } | null
+    socket: { activeRecordCount: number; activeSocketCount: number } | null
+  };
 }
 
 // Use the global Express.Request type which already includes user property
@@ -1348,6 +1360,25 @@ router.get('/slo/status', async (req: Request, res: Response) => {
     });
   }
 });
+
+/**
+ * GET /api/admin/yjs/status
+ * Minimal runtime snapshot for Yjs rollout/ops visibility.
+ */
+router.get('/yjs/status', requireAdminRole(), async (_req: Request, res: Response) => {
+  const status = services.getYjsStatus?.() ?? {
+    enabled: process.env.ENABLE_YJS_COLLAB === 'true',
+    initialized: false,
+    sync: null,
+    bridge: null,
+    socket: null,
+  }
+
+  res.json({
+    success: true,
+    yjs: status,
+  })
+})
 
 // ═══════════════════════════════════════════════════════════════════
 // DLQ Management (Protected)
