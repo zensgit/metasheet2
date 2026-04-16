@@ -2,7 +2,7 @@ import * as Y from 'yjs'
 import * as syncProtocol from 'y-protocols/sync'
 import * as encoding from 'lib0/encoding'
 import * as decoding from 'lib0/decoding'
-import type { Server as SocketServer, Socket } from 'socket.io'
+import type { Server as SocketServer, Socket, Namespace } from 'socket.io'
 import type { YjsSyncService } from './yjs-sync-service'
 import type { YjsRecordBridge } from './yjs-record-bridge'
 
@@ -25,16 +25,36 @@ export type YjsAuthChecker = (
  */
 export type YjsTokenVerifier = (token: string) => Promise<string | null>
 
+export type YjsPresenceUser = {
+  id: string
+  fieldIds: string[]
+}
+
+export type YjsPresenceSnapshot = {
+  recordId: string
+  activeCount: number
+  users: YjsPresenceUser[]
+}
+
+type SocketPresenceState = {
+  userId: string
+  fieldId: string | null
+}
+
 export class YjsWebSocketAdapter {
   private bridge: YjsRecordBridge | null = null
   private authChecker: YjsAuthChecker | null = null
   private tokenVerifier: YjsTokenVerifier | null = null
+  private namespace: Namespace | null = null
 
   /** Per-socket verified userId (from JWT, not from client query) */
   private socketUserId = new Map<string, string>()
 
   /** Per-socket permission cache: socket.id → recordId → canWrite */
   private socketPermissions = new Map<string, Map<string, boolean>>()
+
+  /** Per-record presence state: recordId → socketId → { userId, fieldId } */
+  private recordPresence = new Map<string, Map<string, SocketPresenceState>>()
 
   constructor(private syncService: YjsSyncService) {}
 
@@ -58,8 +78,69 @@ export class YjsWebSocketAdapter {
     return this.socketUserId.get(socketId)
   }
 
+  getPresenceSnapshot(recordId: string): YjsPresenceSnapshot {
+    const bySocket = this.recordPresence.get(recordId)
+    const byUser = new Map<string, Set<string>>()
+
+    for (const [, state] of bySocket ?? []) {
+      const fieldIds = byUser.get(state.userId) ?? new Set<string>()
+      if (state.fieldId) fieldIds.add(state.fieldId)
+      byUser.set(state.userId, fieldIds)
+    }
+
+    const users = [...byUser.entries()]
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([id, fieldIds]) => ({
+        id,
+        fieldIds: [...fieldIds].sort((left, right) => left.localeCompare(right)),
+      }))
+
+    return {
+      recordId,
+      activeCount: users.length,
+      users,
+    }
+  }
+
+  getMetrics(): { activeRecordCount: number; activeSocketCount: number } {
+    return {
+      activeRecordCount: this.recordPresence.size,
+      activeSocketCount: [...this.recordPresence.values()].reduce((total, perRecord) => total + perRecord.size, 0),
+    }
+  }
+
+  private normalizeFieldId(value: unknown): string | null {
+    if (typeof value !== 'string') return null
+    const next = value.trim()
+    return next.length > 0 ? next : null
+  }
+
+  private upsertPresence(recordId: string, socketId: string, userId: string, fieldId: string | null) {
+    const bySocket = this.recordPresence.get(recordId) ?? new Map<string, SocketPresenceState>()
+    bySocket.set(socketId, { userId, fieldId })
+    this.recordPresence.set(recordId, bySocket)
+  }
+
+  private removePresence(recordId: string, socketId: string): boolean {
+    const bySocket = this.recordPresence.get(recordId)
+    if (!bySocket) return false
+    const existed = bySocket.delete(socketId)
+    if (bySocket.size === 0) {
+      this.recordPresence.delete(recordId)
+    } else {
+      this.recordPresence.set(recordId, bySocket)
+    }
+    return existed
+  }
+
+  private emitPresence(recordId: string) {
+    if (!this.namespace) return
+    this.namespace.to(`yjs:${recordId}`).emit('yjs:presence', this.getPresenceSnapshot(recordId))
+  }
+
   register(io: SocketServer): void {
     const nsp = io.of('/yjs')
+    this.namespace = nsp
 
     // Verify JWT at connection time — reject unauthenticated sockets immediately
     nsp.use(async (socket, next) => {
@@ -112,6 +193,7 @@ export class YjsWebSocketAdapter {
         const doc = await this.syncService.getOrCreateDoc(recordId)
         const room = `yjs:${recordId}`
         socket.join(room)
+        this.upsertPresence(recordId, socket.id, userId, null)
 
         // Start bridge observation if bridge is attached
         if (this.bridge) {
@@ -126,6 +208,7 @@ export class YjsWebSocketAdapter {
           recordId,
           data: Array.from(encoding.toUint8Array(encoder)),
         })
+        this.emitPresence(recordId)
       })
 
       socket.on(
@@ -195,17 +278,47 @@ export class YjsWebSocketAdapter {
         },
       )
 
+      socket.on(
+        'yjs:presence',
+        ({ recordId, fieldId }: { recordId: string; fieldId?: string | null }) => {
+          if (!recordId || typeof recordId !== 'string') return
+
+          const userId = this.socketUserId.get(socket.id)
+          if (!userId) {
+            socket.emit('yjs:error', { recordId, code: 'UNAUTHENTICATED', message: 'Not authenticated' })
+            return
+          }
+
+          const perms = this.socketPermissions.get(socket.id)
+          if (this.authChecker && !perms?.has(recordId)) {
+            socket.emit('yjs:error', { recordId, code: 'FORBIDDEN', message: 'Not subscribed' })
+            return
+          }
+
+          this.upsertPresence(recordId, socket.id, userId, this.normalizeFieldId(fieldId))
+          this.emitPresence(recordId)
+        },
+      )
+
       socket.on('yjs:unsubscribe', ({ recordId }: { recordId: string }) => {
         if (!recordId) return
         socket.leave(`yjs:${recordId}`)
         // Clean up cached permission for this record
         const perms = this.socketPermissions.get(socket.id)
         if (perms) perms.delete(recordId)
+        if (this.removePresence(recordId, socket.id)) {
+          this.emitPresence(recordId)
+        }
       })
 
       socket.on('disconnect', () => {
         this.socketPermissions.delete(socket.id)
         this.socketUserId.delete(socket.id)
+        for (const [recordId] of this.recordPresence) {
+          if (this.removePresence(recordId, socket.id)) {
+            this.emitPresence(recordId)
+          }
+        }
       })
     })
   }

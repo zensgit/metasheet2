@@ -1,4 +1,4 @@
-import { ref, shallowRef, onUnmounted, watch } from 'vue'
+import { computed, ref, shallowRef, onUnmounted, watch } from 'vue'
 import type { Ref } from 'vue'
 import * as Y from 'yjs'
 import * as syncProtocol from 'y-protocols/sync'
@@ -6,6 +6,7 @@ import * as encoding from 'lib0/encoding'
 import * as decoding from 'lib0/decoding'
 import { io as socketIO, type Socket } from 'socket.io-client'
 import { useAuth } from '../../composables/useAuth'
+import type { YjsRecordPresence, YjsPresenceUser } from '../types'
 
 const MSG_SYNC = 0
 
@@ -42,10 +43,41 @@ export function useYjsDocument(recordId: Ref<string | null>) {
   const connected = ref(false)
   const synced = ref(false)
   const error = ref<string | null>(null)
+  const presence = ref<YjsRecordPresence | null>(null)
+  const currentUserId = ref<string | null>(null)
 
   const auth = useAuth()
   let socket: Socket | null = null
   let currentRecordId: string | null = null
+
+  function normalizePresenceSnapshot(payload: unknown, expectedRecordId: string): YjsRecordPresence | null {
+    if (!payload || typeof payload !== 'object') return null
+    const record = payload as Record<string, unknown>
+    const nextRecordId = typeof record.recordId === 'string' ? record.recordId : ''
+    if (!nextRecordId || nextRecordId !== expectedRecordId) return null
+
+    const rawUsers = Array.isArray(record.users) ? record.users : []
+    const users: YjsPresenceUser[] = rawUsers.flatMap((entry) => {
+      if (!entry || typeof entry !== 'object') return []
+      const user = entry as Record<string, unknown>
+      const id = typeof user.id === 'string' ? user.id.trim() : ''
+      if (!id) return []
+      const fieldIds = Array.isArray(user.fieldIds)
+        ? user.fieldIds
+          .map((fieldId) => (typeof fieldId === 'string' ? fieldId.trim() : ''))
+          .filter((fieldId): fieldId is string => fieldId.length > 0)
+        : []
+      return [{ id, fieldIds: [...new Set(fieldIds)] }]
+    })
+
+    return {
+      recordId: nextRecordId,
+      activeCount: typeof record.activeCount === 'number' && Number.isFinite(record.activeCount)
+        ? record.activeCount
+        : users.length,
+      users,
+    }
+  }
 
   async function connect(rid: string) {
     disconnect()
@@ -58,6 +90,7 @@ export function useYjsDocument(recordId: Ref<string | null>) {
       error.value = 'Not authenticated'
       return
     }
+    currentUserId.value = await auth.getCurrentUserId().catch(() => null)
 
     const yDoc = new Y.Doc()
     doc.value = yDoc
@@ -90,6 +123,13 @@ export function useYjsDocument(recordId: Ref<string | null>) {
       },
     )
 
+    socket.on('yjs:presence', (payload: unknown) => {
+      const nextPresence = normalizePresenceSnapshot(payload, rid)
+      if (nextPresence) {
+        presence.value = nextPresence
+      }
+    })
+
     // Send local updates to server
     yDoc.on('update', (update: Uint8Array, origin: unknown) => {
       if (origin !== 'remote' && socket?.connected) {
@@ -107,7 +147,35 @@ export function useYjsDocument(recordId: Ref<string | null>) {
     socket.on('disconnect', () => {
       connected.value = false
       synced.value = false
+      presence.value = null
     })
+  }
+
+  function setActiveField(fieldId: string | null): void {
+    if (!socket || !currentRecordId) return
+    socket.emit('yjs:presence', {
+      recordId: currentRecordId,
+      fieldId: fieldId?.trim() ? fieldId.trim() : null,
+    })
+  }
+
+  const activeUsers = computed(() => presence.value?.users ?? [])
+
+  const activeCollaborators = computed(() => {
+    const selfId = currentUserId.value
+    return activeUsers.value.filter((user) => user.id !== selfId)
+  })
+
+  const activeCollaboratorCount = computed(() => activeCollaborators.value.length)
+
+  function getFieldCollaborators(fieldId: string): YjsPresenceUser[] {
+    const normalizedFieldId = fieldId.trim()
+    if (!normalizedFieldId) return []
+    const selfId = currentUserId.value
+    return activeUsers.value.filter((user) => (
+      user.id !== selfId
+      && user.fieldIds.includes(normalizedFieldId)
+    ))
   }
 
   function disconnect() {
@@ -125,6 +193,7 @@ export function useYjsDocument(recordId: Ref<string | null>) {
     currentRecordId = null
     connected.value = false
     synced.value = false
+    presence.value = null
   }
 
   // Auto-connect when recordId changes
@@ -139,5 +208,18 @@ export function useYjsDocument(recordId: Ref<string | null>) {
 
   onUnmounted(disconnect)
 
-  return { doc, connected, synced, error, connect, disconnect }
+  return {
+    doc,
+    connected,
+    synced,
+    error,
+    presence,
+    activeUsers,
+    activeCollaborators,
+    activeCollaboratorCount,
+    connect,
+    disconnect,
+    setActiveField,
+    getFieldCollaborators,
+  }
 }

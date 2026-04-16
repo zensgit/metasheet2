@@ -13,12 +13,16 @@ import * as Y from 'yjs'
 export function useYjsTextField(
   doc: ShallowRef<Y.Doc | null> | Ref<Y.Doc | null>,
   fieldId: string,
+  options?: {
+    setActiveField?: (fieldId: string | null) => void
+  },
 ) {
   const text = ref('')
   let yText: Y.Text | null = null
   let observer: ((event: Y.YTextEvent) => void) | null = null
 
   function cleanup() {
+    options?.setActiveField?.(null)
     if (yText && observer) {
       yText.unobserve(observer)
     }
@@ -45,6 +49,7 @@ export function useYjsTextField(
       yText = existing as Y.Text
 
       text.value = yText.toString()
+      options?.setActiveField?.(fieldId)
 
       observer = () => {
         text.value = yText!.toString()
