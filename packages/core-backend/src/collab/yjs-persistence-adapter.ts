@@ -72,6 +72,42 @@ export class YjsPersistenceAdapter {
       .execute()
   }
 
+  /**
+   * Find records with accumulated updates exceeding threshold.
+   * Used by cleanup job to decide which records need compaction.
+   */
+  async getRecordsNeedingCompaction(threshold: number = 500): Promise<string[]> {
+    const result = await this.db
+      .selectFrom('meta_record_yjs_updates')
+      .select('record_id')
+      .groupBy('record_id')
+      .having(this.db.fn.count('id'), '>', threshold)
+      .execute()
+    return result.map((row) => row.record_id)
+  }
+
+  /**
+   * Remove Yjs state for records that no longer exist in meta_records.
+   * Returns count of orphan records cleaned.
+   */
+  async cleanupOrphanStates(): Promise<number> {
+    const orphanStates = await this.db
+      .deleteFrom('meta_record_yjs_states')
+      .where('record_id', 'not in',
+        this.db.selectFrom('meta_records').select('id'),
+      )
+      .executeTakeFirst()
+
+    const orphanUpdates = await this.db
+      .deleteFrom('meta_record_yjs_updates')
+      .where('record_id', 'not in',
+        this.db.selectFrom('meta_records').select('id'),
+      )
+      .executeTakeFirst()
+
+    return Number(orphanStates?.numDeletedRows ?? 0) + Number(orphanUpdates?.numDeletedRows ?? 0)
+  }
+
   async compactDoc(recordId: string, doc: Y.Doc): Promise<void> {
     const state = Y.encodeStateAsUpdate(doc)
     const stateVector = Y.encodeStateVector(doc)

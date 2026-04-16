@@ -164,6 +164,7 @@ export class MetaSheetServer {
   private stopOperationAuditRetention?: () => void
   private stopMultitableAttachmentCleanup?: () => void
   private automationService?: AutomationService
+  private yjsCleanupTimer?: NodeJS.Timeout
   private yjsSyncMetricsSource?: { getMetrics(): { activeDocCount: number; docIds: string[] } }
   private yjsBridgeMetricsSource?: { getMetrics(): { pendingWriteCount: number; observedDocCount: number; flushSuccessCount: number; flushFailureCount: number } }
   private yjsSocketMetricsSource?: { getMetrics(): { activeRecordCount: number; activeSocketCount: number } }
@@ -1483,6 +1484,16 @@ export class MetaSheetServer {
         this.logger.warn(`Multitable attachment cleanup stop error: ${err instanceof Error ? err.message : String(err)}`)
       }
     }))
+    shutdownTasks.push(Promise.resolve().then(() => {
+      try {
+        if (this.yjsCleanupTimer) {
+          clearInterval(this.yjsCleanupTimer)
+          this.yjsCleanupTimer = undefined
+        }
+      } catch (err) {
+        this.logger.warn(`Yjs cleanup timer stop error: ${err instanceof Error ? err.message : String(err)}`)
+      }
+    }))
 
     // 0b. Shut down MetricsStreamService
     if (this.metricsStreamService) {
@@ -1829,7 +1840,20 @@ export class MetaSheetServer {
         this.yjsSyncMetricsSource = yjsSyncService
         this.yjsBridgeMetricsSource = yjsBridge
         this.yjsSocketMetricsSource = yjsWsAdapter
-        this.logger.info('Yjs collaborative editing service initialized on /yjs namespace (bridge + auth active)')
+        // Periodic cleanup: orphan states + compaction check every 10 minutes
+        this.yjsCleanupTimer = setInterval(async () => {
+          try {
+            const orphanCount = await yjsPersistence.cleanupOrphanStates()
+            if (orphanCount > 0) {
+              this.logger.info(`[yjs-cleanup] Removed ${orphanCount} orphan Yjs state rows`)
+            }
+          } catch (err) {
+            this.logger.error('[yjs-cleanup] Orphan cleanup failed', err as Error)
+          }
+        }, 10 * 60 * 1000) // 10 minutes
+        this.yjsCleanupTimer.unref()
+
+        this.logger.info('Yjs collaborative editing service initialized on /yjs namespace (bridge + auth + cleanup active)')
       } else {
         this.logger.warn('Yjs: CollabService IO not available, skipping')
       }
