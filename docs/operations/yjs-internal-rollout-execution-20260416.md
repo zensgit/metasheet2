@@ -60,7 +60,13 @@ YJS_DATABASE_URL=$DATABASE_URL \
 node scripts/ops/capture-yjs-rollout-report.mjs
 ```
 
-8. If both checks stay healthy, keep the pilot enabled
+8. Fill the signoff template:
+
+```text
+docs/operations/yjs-internal-rollout-signoff-template-20260416.md
+```
+
+9. If both checks stay healthy, keep the pilot enabled
 
 ## Abort Conditions
 
