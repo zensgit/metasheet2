@@ -45,7 +45,16 @@ Expected:
 4. Have pilot users open the selected test sheets
 5. Run `check-yjs-rollout-status.mjs` again after live editing begins
 6. Run `check-yjs-retention-health.mjs`
-7. If both checks stay healthy, keep the pilot enabled
+7. Optionally capture a rollout report artifact:
+
+```bash
+YJS_BASE_URL=http://localhost:3000 \
+YJS_ADMIN_TOKEN=$ADMIN_TOKEN \
+YJS_DATABASE_URL=$DATABASE_URL \
+node scripts/ops/capture-yjs-rollout-report.mjs
+```
+
+8. If both checks stay healthy, keep the pilot enabled
 
 ## Abort Conditions
 

@@ -21,6 +21,7 @@ Options:
   --max-orphan-updates <count>   Alert threshold, default ${DEFAULTS.maxOrphanUpdates}
   --top-limit <count>            Number of hottest records to print, default ${DEFAULTS.topLimit}
   --json                         Print raw JSON payload after the summary
+  --json-only                    Print JSON payload only
   --help                         Show this help
 
 Exit codes:
@@ -38,6 +39,7 @@ function parseArgs(argv) {
     maxOrphanUpdates: DEFAULTS.maxOrphanUpdates,
     topLimit: DEFAULTS.topLimit,
     showJson: false,
+    jsonOnly: false,
   }
 
   for (let i = 0; i < argv.length; i += 1) {
@@ -66,6 +68,9 @@ function parseArgs(argv) {
         break
       case '--json':
         opts.showJson = true
+        break
+      case '--json-only':
+        opts.jsonOnly = true
         break
       case '--help':
         printHelp()
@@ -191,10 +196,25 @@ async function main() {
   try {
     const payload = buildPayload(opts.databaseUrl, opts.topLimit)
     const failures = assessPayload(payload, opts)
-    printSummary(payload, failures)
+    const outputPayload = {
+      databaseUrlPresent: Boolean(opts.databaseUrl),
+      thresholds: {
+        maxUpdates: opts.maxUpdates,
+        maxOrphanStates: opts.maxOrphanStates,
+        maxOrphanUpdates: opts.maxOrphanUpdates,
+        topLimit: opts.topLimit,
+      },
+      failures,
+      ...payload,
+    }
 
-    if (opts.showJson) {
-      console.log(JSON.stringify(payload, null, 2))
+    if (opts.jsonOnly) {
+      console.log(JSON.stringify(outputPayload, null, 2))
+    } else {
+      printSummary(payload, failures)
+      if (opts.showJson) {
+        console.log(JSON.stringify(outputPayload, null, 2))
+      }
     }
 
     process.exit(failures.length === 0 ? 0 : 2)
