@@ -1829,7 +1829,20 @@ export class MetaSheetServer {
         this.yjsSyncMetricsSource = yjsSyncService
         this.yjsBridgeMetricsSource = yjsBridge
         this.yjsSocketMetricsSource = yjsWsAdapter
-        this.logger.info('Yjs collaborative editing service initialized on /yjs namespace (bridge + auth active)')
+        // Periodic cleanup: orphan states + compaction check every 10 minutes
+        const yjsCleanupInterval = setInterval(async () => {
+          try {
+            const orphanCount = await yjsPersistence.cleanupOrphanStates()
+            if (orphanCount > 0) {
+              this.logger.info(`[yjs-cleanup] Removed ${orphanCount} orphan Yjs state rows`)
+            }
+          } catch (err) {
+            this.logger.error('[yjs-cleanup] Orphan cleanup failed', err as Error)
+          }
+        }, 10 * 60 * 1000) // 10 minutes
+        yjsCleanupInterval.unref()
+
+        this.logger.info('Yjs collaborative editing service initialized on /yjs namespace (bridge + auth + cleanup active)')
       } else {
         this.logger.warn('Yjs: CollabService IO not available, skipping')
       }
