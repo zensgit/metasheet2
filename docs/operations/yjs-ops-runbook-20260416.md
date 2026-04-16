@@ -8,6 +8,11 @@ Date: 2026-04-16
 # 确认 Yjs 是否启用
 curl -s http://localhost:3000/api/admin/yjs/status -H "Authorization: Bearer $ADMIN_TOKEN" | jq .
 
+# 或直接使用仓库脚本
+YJS_BASE_URL=http://localhost:3000 \
+YJS_ADMIN_TOKEN=$ADMIN_TOKEN \
+node scripts/ops/check-yjs-rollout-status.mjs
+
 # 预期输出
 {
   "success": true,

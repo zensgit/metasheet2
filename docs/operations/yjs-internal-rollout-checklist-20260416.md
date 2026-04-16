@@ -18,6 +18,14 @@ Date: 2026-04-16
 4. 确认 `/api/admin/yjs/status` 返回 `initialized: true`
 5. 通知试点用户在浏览器中打开目标 sheet
 
+可选脚本化检查：
+
+```bash
+YJS_BASE_URL=http://localhost:3000 \
+YJS_ADMIN_TOKEN=$ADMIN_TOKEN \
+node scripts/ops/check-yjs-rollout-status.mjs
+```
+
 ## 监控项
 
 | 指标 | 来源 | 预期 | 告警阈值 |
