@@ -22,6 +22,7 @@ Options:
   --max-pending-writes <count> Alert threshold, default ${DEFAULTS.maxPendingWrites}
   --max-active-sockets <count> Alert threshold, default ${DEFAULTS.maxActiveSockets}
   --json                       Print raw JSON payload after the summary
+  --json-only                  Print JSON payload only
   --help                       Show this help
 
 Exit codes:
@@ -41,6 +42,7 @@ function parseArgs(argv) {
     maxPendingWrites: DEFAULTS.maxPendingWrites,
     maxActiveSockets: DEFAULTS.maxActiveSockets,
     showJson: false,
+    jsonOnly: false,
   }
 
   for (let i = 0; i < argv.length; i += 1) {
@@ -77,6 +79,9 @@ function parseArgs(argv) {
         break
       case '--json':
         opts.showJson = true
+        break
+      case '--json-only':
+        opts.jsonOnly = true
         break
       case '--help':
         printHelp()
@@ -129,7 +134,7 @@ function assessStatus(payload, thresholds) {
     failures.push(`activeSocketCount ${metrics.activeSocketCount} > ${thresholds.maxActiveSockets}`)
   }
 
-  return { metrics, failures }
+  return { metrics, failures, payload }
 }
 
 function printSummary(baseUrl, metrics, failures) {
@@ -179,14 +184,24 @@ async function main() {
     }
 
     const payload = await response.json()
-    const { metrics, failures } = assessStatus(payload, opts)
-    printSummary(opts.baseUrl, metrics, failures)
-
-    if (opts.showJson) {
-      console.log(JSON.stringify(payload, null, 2))
+    const assessed = assessStatus(payload, opts)
+    const outputPayload = {
+      baseUrl: opts.baseUrl,
+      metrics: assessed.metrics,
+      failures: assessed.failures,
+      payload,
     }
 
-    process.exit(failures.length === 0 ? 0 : 2)
+    if (opts.jsonOnly) {
+      console.log(JSON.stringify(outputPayload, null, 2))
+    } else {
+      printSummary(opts.baseUrl, assessed.metrics, assessed.failures)
+      if (opts.showJson) {
+        console.log(JSON.stringify(outputPayload, null, 2))
+      }
+    }
+
+    process.exit(assessed.failures.length === 0 ? 0 : 2)
   } catch (error) {
     console.error(`Failed to fetch Yjs status: ${error instanceof Error ? error.message : String(error)}`)
     process.exit(1)
