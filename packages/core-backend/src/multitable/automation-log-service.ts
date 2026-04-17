@@ -29,7 +29,7 @@ export class AutomationLogService {
         triggered_by: execution.triggeredBy,
         triggered_at: execution.triggeredAt,
         status: execution.status,
-        steps: JSON.stringify(execution.steps) as unknown as Record<string, unknown>[],
+        steps: JSON.stringify(execution.steps),
         error: execution.error ?? null,
         duration: execution.duration ?? null,
       })
@@ -113,7 +113,7 @@ export class AutomationLogService {
   async cleanup(retentionDays = 30): Promise<number> {
     const result = await db
       .deleteFrom('multitable_automation_executions')
-      .where('created_at', '<', sql`NOW() - INTERVAL '${sql.raw(String(retentionDays))} days'`)
+      .where('created_at', '<', sql<Date>`now() - (${retentionDays} * interval '1 day')`)
       .executeTakeFirst()
 
     return Number(result.numDeletedRows ?? 0)

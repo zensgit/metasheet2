@@ -1284,7 +1284,7 @@ export interface MultitableWebhookDeliveriesTable {
   id: string
   webhook_id: string
   event: string
-  payload: JSONColumnType<unknown>
+  payload: JSONColumnType<Record<string, unknown> | null>
   status: string
   http_status: number | null
   response_body: string | null

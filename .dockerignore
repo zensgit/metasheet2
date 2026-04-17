@@ -1,0 +1,11 @@
+.git
+.github
+node_modules
+**/node_modules
+output
+artifacts
+coverage
+.DS_Store
+packages/core-backend/dist
+packages/core-backend/dist-cache
+apps/web/dist

@@ -8,7 +8,7 @@ import { createHash, randomBytes } from 'crypto'
 import type { Kysely } from 'kysely'
 import { Logger } from '../core/logger'
 import type { Database } from '../db/types'
-import { nowTimestamp, toJsonValue } from '../db/type-helpers'
+import { nowTimestamp } from '../db/type-helpers'
 import type {
   ApiToken,
   ApiTokenCreateInput,
@@ -114,7 +114,7 @@ export class ApiTokenService {
         name: input.name.trim(),
         token_hash: tokenHashValue,
         token_prefix: tokenPrefix,
-        scopes: toJsonValue([...input.scopes]),
+        scopes: JSON.stringify([...input.scopes]),
         created_by: userId,
         created_at: now,
         expires_at: input.expiresAt ?? undefined,
@@ -276,7 +276,7 @@ export class ApiTokenService {
           name: token.name,
           token_hash: tokenHashValue,
           token_prefix: tokenPrefix,
-          scopes: toJsonValue([...token.scopes]),
+          scopes: JSON.stringify([...token.scopes]),
           created_by: userId,
           created_at: now,
           expires_at: token.expiresAt ?? undefined,

@@ -8,7 +8,7 @@ import { createHmac, randomBytes } from 'crypto'
 import type { Kysely } from 'kysely'
 import { Logger } from '../core/logger'
 import type { Database } from '../db/types'
-import { nowTimestamp, toJsonValue } from '../db/type-helpers'
+import { nowTimestamp } from '../db/type-helpers'
 import type {
   Webhook,
   WebhookCreateInput,
@@ -167,7 +167,7 @@ export class WebhookService {
         name: input.name.trim(),
         url: input.url.trim(),
         secret: input.secret ?? null,
-        events: toJsonValue([...input.events]),
+        events: JSON.stringify([...input.events]),
         active: true,
         created_by: userId,
         created_at: now,
@@ -231,8 +231,7 @@ export class WebhookService {
       updates.url = input.url.trim()
     }
     if (input.secret !== undefined) updates.secret = input.secret
-    if (input.events !== undefined)
-      updates.events = toJsonValue([...input.events])
+    if (input.events !== undefined) updates.events = JSON.stringify([...input.events])
     if (input.active !== undefined) updates.active = input.active
 
     await this.db
@@ -481,7 +480,7 @@ export class WebhookService {
         id,
         webhook_id: webhookId,
         event,
-        payload: toJsonValue(payload),
+        payload: JSON.stringify(payload),
         status: 'pending',
         attempt_count: 0,
         created_at: now,
