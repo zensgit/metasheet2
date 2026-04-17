@@ -11,8 +11,10 @@ import jwt, { type SignOptions } from 'jsonwebtoken'
 import { authService, type User } from '../auth/AuthService'
 import { buildOnboardingPacket, getAccessPreset } from '../auth/access-presets'
 import {
+  bindDingTalkIdentityToUser,
   buildAuthUrl,
   DingTalkLoginPolicyError,
+  exchangeCodeForDingTalkProfile,
   exchangeCodeForUser,
   getDingTalkRuntimeStatus,
   generateState,
@@ -249,6 +251,120 @@ function isTruthyQueryFlag(value: unknown): boolean {
   if (typeof value === 'boolean') return value
   if (typeof value !== 'string') return false
   return ['1', 'true', 'yes', 'on'].includes(value.trim().toLowerCase())
+}
+
+type DingTalkAccessSnapshot = {
+  available: boolean
+  userId: string
+  provider: 'dingtalk'
+  requireGrant: boolean
+  autoLinkEmail: boolean
+  autoProvision: boolean
+  server: ReturnType<typeof getDingTalkRuntimeStatus>
+  directory: {
+    linked: boolean
+    linkedCount: number
+  }
+  grant: {
+    exists: boolean
+    enabled: boolean
+    grantedBy: string | null
+    createdAt: string | null
+    updatedAt: string | null
+  }
+  identity: {
+    exists: boolean
+    corpId: string | null
+    lastLoginAt: string | null
+    createdAt: string | null
+    updatedAt: string | null
+  }
+}
+
+async function requireAuthenticatedUser(req: Request, res: Response): Promise<{ token: string; user: User } | null> {
+  const authHeader = req.headers.authorization
+  const token = authHeader?.startsWith('Bearer ') ? authHeader.substring(7) : null
+
+  if (!token) {
+    res.status(401).json({
+      success: false,
+      error: 'No token provided',
+    })
+    return null
+  }
+
+  const user = await authService.verifyToken(token)
+  if (!user) {
+    res.status(401).json({
+      success: false,
+      error: 'Invalid token',
+    })
+    return null
+  }
+
+  return { token, user }
+}
+
+async function fetchCurrentUserDingTalkAccessSnapshot(userId: string): Promise<DingTalkAccessSnapshot> {
+  const [grantResult, identityResult, linkedDirectoryResult] = await Promise.all([
+    query<{ enabled: boolean; granted_by: string | null; created_at: string | null; updated_at: string | null }>(
+      `SELECT enabled, granted_by, created_at, updated_at
+       FROM user_external_auth_grants
+       WHERE provider = $1 AND local_user_id = $2
+       LIMIT 1`,
+      ['dingtalk', userId],
+    ),
+    query<{ corp_id: string | null; last_login_at: string | null; created_at: string | null; updated_at: string | null }>(
+      `SELECT corp_id, last_login_at, created_at, updated_at
+       FROM user_external_identities
+       WHERE provider = $1 AND local_user_id = $2
+       ORDER BY updated_at DESC
+       LIMIT 1`,
+      ['dingtalk', userId],
+    ),
+    query<{ linked_count: number | string }>(
+      `SELECT COUNT(*)::int AS linked_count
+       FROM directory_account_links l
+       JOIN directory_accounts a ON a.id = l.directory_account_id
+       WHERE l.local_user_id = $1
+         AND l.link_status = 'linked'
+         AND a.provider = $2`,
+      [userId, 'dingtalk'],
+    ),
+  ])
+
+  const runtime = getDingTalkRuntimeStatus()
+  const grant = grantResult.rows[0] ?? null
+  const identity = identityResult.rows[0] ?? null
+  const linkedCount = Number(linkedDirectoryResult.rows[0]?.linked_count || 0)
+
+  return {
+    available: runtime.available,
+    userId,
+    provider: 'dingtalk',
+    requireGrant: runtime.requireGrant,
+    autoLinkEmail: runtime.autoLinkEmail,
+    autoProvision: runtime.autoProvision,
+    server: runtime,
+    directory: {
+      linked: linkedCount > 0,
+      linkedCount,
+    },
+    grant: {
+      exists: grant !== null,
+      enabled: grant?.enabled === true,
+      grantedBy: grant?.granted_by ?? null,
+      createdAt: grant?.created_at ?? null,
+      updatedAt: grant?.updated_at ?? null,
+    },
+    identity: {
+      exists: identity !== null,
+      corpId: identity?.corp_id ?? null,
+      lastLoginAt: identity?.last_login_at ?? null,
+      createdAt: identity?.created_at ?? null,
+      updatedAt: identity?.updated_at ?? null,
+    },
+  }
 }
 
 async function loadAuthPermissions(userId: string): Promise<string[]> {
@@ -719,23 +835,9 @@ authRouter.post('/logout', async (req: Request, res: Response) => {
  */
 authRouter.get('/sessions', async (req: Request, res: Response) => {
   try {
-    const authHeader = req.headers.authorization
-    const token = authHeader?.startsWith('Bearer ') ? authHeader.substring(7) : null
-
-    if (!token) {
-      return res.status(401).json({
-        success: false,
-        error: 'No token provided'
-      })
-    }
-
-    const user = await authService.verifyToken(token)
-    if (!user) {
-      return res.status(401).json({
-        success: false,
-        error: 'Invalid token'
-      })
-    }
+    const authResult = await requireAuthenticatedUser(req, res)
+    if (!authResult) return
+    const { token, user } = authResult
 
     const payload = authService.readTokenPayload(token)
     const currentSessionId = typeof payload?.sid === 'string' && payload.sid.trim().length > 0 ? payload.sid.trim() : null
@@ -763,23 +865,9 @@ authRouter.get('/sessions', async (req: Request, res: Response) => {
  */
 authRouter.post('/sessions/current/ping', async (req: Request, res: Response) => {
   try {
-    const authHeader = req.headers.authorization
-    const token = authHeader?.startsWith('Bearer ') ? authHeader.substring(7) : null
-
-    if (!token) {
-      return res.status(401).json({
-        success: false,
-        error: 'No token provided'
-      })
-    }
-
-    const user = await authService.verifyToken(token)
-    if (!user) {
-      return res.status(401).json({
-        success: false,
-        error: 'Invalid token'
-      })
-    }
+    const authResult = await requireAuthenticatedUser(req, res)
+    if (!authResult) return
+    const { token, user } = authResult
 
     const payload = authService.readTokenPayload(token)
     const sessionId = typeof payload?.sid === 'string' && payload.sid.trim().length > 0 ? payload.sid.trim() : null
@@ -820,23 +908,9 @@ authRouter.post('/sessions/current/ping', async (req: Request, res: Response) =>
  */
 authRouter.post('/sessions/:sessionId/logout', async (req: Request, res: Response) => {
   try {
-    const authHeader = req.headers.authorization
-    const token = authHeader?.startsWith('Bearer ') ? authHeader.substring(7) : null
-
-    if (!token) {
-      return res.status(401).json({
-        success: false,
-        error: 'No token provided'
-      })
-    }
-
-    const user = await authService.verifyToken(token)
-    if (!user) {
-      return res.status(401).json({
-        success: false,
-        error: 'Invalid token'
-      })
-    }
+    const authResult = await requireAuthenticatedUser(req, res)
+    if (!authResult) return
+    const { user } = authResult
 
     const sessionId = String(req.params.sessionId || '').trim()
     if (!sessionId) {
@@ -876,6 +950,58 @@ authRouter.post('/sessions/:sessionId/logout', async (req: Request, res: Respons
   }
 })
 
+authRouter.get('/dingtalk/access', async (req: Request, res: Response) => {
+  try {
+    const authResult = await requireAuthenticatedUser(req, res)
+    if (!authResult) return
+
+    const snapshot = await fetchCurrentUserDingTalkAccessSnapshot(authResult.user.id)
+    return res.json({
+      success: true,
+      data: snapshot,
+    })
+  } catch (error) {
+    logger.error('DingTalk access snapshot error', error instanceof Error ? error : undefined)
+    return res.status(500).json({
+      success: false,
+      error: 'Failed to load DingTalk access status',
+    })
+  }
+})
+
+authRouter.post('/dingtalk/unbind', async (req: Request, res: Response) => {
+  try {
+    const authResult = await requireAuthenticatedUser(req, res)
+    if (!authResult) return
+
+    const snapshot = await fetchCurrentUserDingTalkAccessSnapshot(authResult.user.id)
+    if (snapshot.directory.linked) {
+      return res.status(409).json({
+        success: false,
+        error: 'Current DingTalk identity is directory-managed. Please contact an administrator.',
+      })
+    }
+
+    await query(
+      `DELETE FROM user_external_identities
+       WHERE provider = $1 AND local_user_id = $2`,
+      ['dingtalk', authResult.user.id],
+    )
+
+    const nextSnapshot = await fetchCurrentUserDingTalkAccessSnapshot(authResult.user.id)
+    return res.json({
+      success: true,
+      data: nextSnapshot,
+    })
+  } catch (error) {
+    logger.error('DingTalk self-unbind error', error instanceof Error ? error : undefined)
+    return res.status(500).json({
+      success: false,
+      error: 'Failed to unbind DingTalk identity',
+    })
+  }
+})
+
 // ============================================
 // DingTalk OAuth
 // ============================================
@@ -898,8 +1024,22 @@ authRouter.get('/dingtalk/launch', async (req: Request, res: Response) => {
       })
     }
 
+    const rawIntent = typeof req.query.intent === 'string' ? req.query.intent.trim().toLowerCase() : ''
+    const mode: 'bind' | 'login' = rawIntent === 'bind' ? 'bind' : 'login'
     const redirectPath = normalizeDingTalkRedirectPath(req.query.redirect)
-    const state = await generateState({ redirectPath })
+
+    let bindUserId: string | null = null
+    if (mode === 'bind') {
+      const authResult = await requireAuthenticatedUser(req, res)
+      if (!authResult) return
+      bindUserId = authResult.user.id
+    }
+
+    const state = await generateState(
+      mode === 'bind'
+        ? { redirectPath, intent: 'bind', bindUserId }
+        : { redirectPath },
+    )
     const url = buildAuthUrl(state)
 
     return res.json({
@@ -907,6 +1047,7 @@ authRouter.get('/dingtalk/launch', async (req: Request, res: Response) => {
       data: {
         url,
         state,
+        mode,
       },
     })
   } catch (error) {
@@ -945,6 +1086,42 @@ authRouter.post('/dingtalk/callback', async (req: Request, res: Response) => {
       })
     }
 
+    if (stateCheck.intent === 'bind') {
+      const authResult = await requireAuthenticatedUser(req, res)
+      if (!authResult) return
+
+      const expectedUserId = stateCheck.bindUserId || ''
+      if (!expectedUserId || authResult.user.id !== expectedUserId) {
+        return res.status(403).json({
+          success: false,
+          error: 'DingTalk bind session does not match the current user',
+          code: 'bind_user_mismatch',
+        })
+      }
+
+      const dtUser = await exchangeCodeForDingTalkProfile(code)
+      await bindDingTalkIdentityToUser({
+        localUserId: authResult.user.id,
+        dtUser,
+        boundBy: authResult.user.id,
+        enableGrant: true,
+      })
+
+      const snapshot = await fetchCurrentUserDingTalkAccessSnapshot(authResult.user.id)
+
+      logger.info(`DingTalk self-bind for ${authResult.user.email} (openId: ${dtUser.openId})`)
+
+      return res.json({
+        success: true,
+        data: {
+          mode: 'bind',
+          bound: true,
+          redirectPath: stateCheck.redirectPath || null,
+          identity: snapshot,
+        },
+      })
+    }
+
     const result = await exchangeCodeForUser(code)
     const permissions = await loadAuthPermissions(result.localUserId)
     const user: User = {
@@ -963,6 +1140,7 @@ authRouter.post('/dingtalk/callback', async (req: Request, res: Response) => {
     return res.json({
       success: true,
       data: {
+        mode: 'login',
         user: {
           id: user.id,
           email: user.email,

@@ -51,15 +51,21 @@ interface LocalUserRow {
   is_active: boolean
 }
 
+export type DingTalkOAuthIntent = 'login' | 'bind'
+
 interface StateRecord {
   expiresAt: number
   redirectPath?: string
+  intent?: DingTalkOAuthIntent
+  bindUserId?: string
 }
 
 export interface StateValidationResult {
   valid: boolean
   error?: string
   redirectPath?: string
+  intent?: DingTalkOAuthIntent
+  bindUserId?: string
 }
 
 export type DingTalkRuntimeUnavailableReason =
@@ -322,6 +328,8 @@ async function validateStateFromRedis(state: string): Promise<StateValidationRes
     return {
       valid: true,
       redirectPath: parsed.redirectPath,
+      intent: parsed.intent,
+      bindUserId: parsed.bindUserId,
     }
   } catch (error) {
     logRedisFallback('Redis state validation failed', error)
@@ -351,6 +359,8 @@ function validateStateFromMemory(state: string): StateValidationResult {
   return {
     valid: true,
     redirectPath: record.redirectPath,
+    intent: record.intent,
+    bindUserId: record.bindUserId,
   }
 }
 
@@ -681,13 +691,23 @@ export function getDingTalkRuntimeStatus(): DingTalkRuntimeStatus {
   }
 }
 
-export async function generateState(options: { redirectPath?: string | null } = {}): Promise<string> {
+export async function generateState(options: {
+  redirectPath?: string | null
+  intent?: DingTalkOAuthIntent | null
+  bindUserId?: string | null
+} = {}): Promise<string> {
   const state = crypto.randomUUID()
+  const normalizedIntent = options.intent === 'bind' ? 'bind' : null
+  const normalizedBindUserId = typeof options.bindUserId === 'string' && options.bindUserId.trim().length > 0
+    ? options.bindUserId.trim()
+    : null
   const record: StateRecord = {
     expiresAt: Date.now() + STATE_TTL_MS,
     ...(typeof options.redirectPath === 'string' && options.redirectPath.trim().length > 0
       ? { redirectPath: options.redirectPath.trim() }
       : {}),
+    ...(normalizedIntent ? { intent: normalizedIntent } : {}),
+    ...(normalizedIntent === 'bind' && normalizedBindUserId ? { bindUserId: normalizedBindUserId } : {}),
   }
 
   const storedInRedis = await writeStateToRedis(state, record)
@@ -730,11 +750,10 @@ export function buildAuthUrl(state: string): string {
   return `https://login.dingtalk.com/oauth2/auth?${params.toString()}`
 }
 
-export async function exchangeCodeForUser(code: string): Promise<DingTalkExchangeResult> {
+export async function exchangeCodeForDingTalkProfile(code: string): Promise<DingTalkUserInfo> {
   const token = await exchangeCodeForUserAccessToken(code)
   const profile = await fetchDingTalkCurrentUser(token.accessToken)
-
-  const dingtalkUser: DingTalkUserInfo = {
+  return {
     openId: profile.openId,
     unionId: profile.unionId,
     nick: profile.nick,
@@ -742,7 +761,10 @@ export async function exchangeCodeForUser(code: string): Promise<DingTalkExchang
     mobile: profile.mobile,
     avatarUrl: profile.avatarUrl,
   }
+}
 
+export async function exchangeCodeForUser(code: string): Promise<DingTalkExchangeResult> {
+  const dingtalkUser = await exchangeCodeForDingTalkProfile(code)
   const { localUser, isNewUser } = await resolveLocalUser(dingtalkUser)
 
   return {
@@ -753,4 +775,94 @@ export async function exchangeCodeForUser(code: string): Promise<DingTalkExchang
     localUserRole: localUser.role,
     isNewUser,
   }
+}
+
+export async function bindDingTalkIdentityToUser(input: {
+  localUserId: string
+  dtUser: DingTalkUserInfo
+  boundBy?: string
+  enableGrant?: boolean
+}): Promise<void> {
+  const { localUserId, dtUser, enableGrant } = input
+  const boundBy = typeof input.boundBy === 'string' && input.boundBy.trim().length > 0
+    ? input.boundBy.trim()
+    : localUserId
+
+  const config = readDingTalkOauthConfig()
+  const externalKey = buildExternalKey(dtUser)
+  const profile = JSON.stringify(dtUser)
+  const openId = dtUser.openId || ''
+  const unionId = dtUser.unionId || ''
+
+  await transaction(async (client) => {
+    const conflictResult = await client.query(
+      `SELECT local_user_id
+       FROM user_external_identities
+       WHERE provider = $1
+         AND local_user_id <> $2
+         AND (
+           external_key = $3
+           OR ($4 <> '' AND provider_open_id = $4 AND corp_id IS NOT DISTINCT FROM $6)
+           OR ($5 <> '' AND provider_union_id = $5 AND corp_id IS NOT DISTINCT FROM $6)
+         )
+       LIMIT 1`,
+      [PROVIDER, localUserId, externalKey, openId, unionId, config.corpId || null],
+    )
+    if (conflictResult.rows.length > 0) {
+      throw createPolicyError('DingTalk identity is already bound to another local user', {
+        statusCode: 409,
+        code: 'identity_already_bound',
+      })
+    }
+
+    const existingByUser = await client.query(
+      `SELECT id
+       FROM user_external_identities
+       WHERE provider = $1 AND local_user_id = $2
+       LIMIT 1`,
+      [PROVIDER, localUserId],
+    )
+
+    if (existingByUser.rows.length > 0) {
+      await client.query(
+        `UPDATE user_external_identities
+         SET external_key = $3,
+             provider_union_id = $4,
+             provider_open_id = $5,
+             corp_id = $6,
+             profile = $7::jsonb,
+             bound_by = COALESCE(bound_by, $8),
+             updated_at = NOW()
+         WHERE provider = $1 AND local_user_id = $2`,
+        [PROVIDER, localUserId, externalKey, dtUser.unionId || null, dtUser.openId, config.corpId, profile, boundBy],
+      )
+    } else {
+      await client.query(
+        `INSERT INTO user_external_identities (
+           provider,
+           external_key,
+           provider_union_id,
+           provider_open_id,
+           corp_id,
+           local_user_id,
+           profile,
+           bound_by,
+           created_at,
+           updated_at
+         )
+         VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, NOW(), NOW())`,
+        [PROVIDER, externalKey, dtUser.unionId || null, dtUser.openId, config.corpId, localUserId, profile, boundBy],
+      )
+    }
+
+    if (enableGrant) {
+      await client.query(
+        `INSERT INTO user_external_auth_grants (provider, local_user_id, enabled, granted_by, created_at, updated_at)
+         VALUES ($1, $2, TRUE, $3, NOW(), NOW())
+         ON CONFLICT (provider, local_user_id)
+         DO UPDATE SET enabled = TRUE, granted_by = EXCLUDED.granted_by, updated_at = NOW()`,
+        [PROVIDER, localUserId, boundBy],
+      )
+    }
+  })
 }

@@ -52,18 +52,24 @@ const text = computed(() => {
   if (isZh.value) {
     return {
       loading: '正在验证钉钉登录，请稍候...',
+      bindLoading: '正在完成钉钉绑定，请稍候...',
       backToLogin: '返回登录',
       missingCode: '缺少授权码参数',
       missingToken: '登录成功但未获取到令牌',
       failed: '钉钉登录失败，请稍后重试。',
+      bindMissingSession: '绑定失败：当前未登录或登录已过期，请重新登录后再绑定钉钉。',
+      bindFailed: '钉钉绑定失败，请稍后重试。',
     }
   }
   return {
     loading: 'Completing DingTalk sign-in...',
+    bindLoading: 'Completing DingTalk bind...',
     backToLogin: 'Back to Sign In',
     missingCode: 'Missing authorization code',
     missingToken: 'Sign-in succeeded but no token was returned',
     failed: 'DingTalk sign-in failed. Please try again.',
+    bindMissingSession: 'DingTalk bind failed: current session is missing or expired. Please sign in again before binding.',
+    bindFailed: 'DingTalk bind failed. Please try again.',
   }
 })
 
@@ -110,31 +116,94 @@ function persistAuthContext(user: AuthUserPayload | null, features: AuthFeatureP
   }
 }
 
-async function handleCallback(): Promise<void> {
-  const existingToken = auth.getToken()
-  if (existingToken) {
-    const currentSession = await auth.bootstrapSession()
-    if (currentSession.ok) {
-      let fallbackPath = resolveHomePath()
-      try {
-        await loadProductFeatures()
-        fallbackPath = resolveHomePath()
-      } catch {
-        // Keep authenticated users on their current session even if feature probing fails.
-      }
+function readBindIntent(state: string): 'bind' | null {
+  if (!state || typeof sessionStorage === 'undefined') return null
+  try {
+    const key = `metasheet_dingtalk_intent_${state}`
+    const value = sessionStorage.getItem(key)
+    return value === 'bind' ? 'bind' : null
+  } catch {
+    return null
+  }
+}
 
-      const redirectPath = normalizePostLoginRedirect(route.query.redirect)
-      await router.replace(redirectPath || fallbackPath)
-      return
-    }
+function clearBindIntent(state: string): void {
+  if (!state || typeof sessionStorage === 'undefined') return
+  try {
+    sessionStorage.removeItem(`metasheet_dingtalk_intent_${state}`)
+  } catch {
+    // Ignore storage errors.
+  }
+}
+
+async function handleBindCallback(code: string, state: string): Promise<void> {
+  clearBindIntent(state)
+
+  const existingToken = auth.getToken()
+  if (!existingToken) {
+    loading.value = false
+    errorMessage.value = text.value.bindMissingSession
+    return
   }
 
+  try {
+    const response = await apiFetch('/api/auth/dingtalk/callback', {
+      method: 'POST',
+      body: JSON.stringify({ code, state }),
+      suppressUnauthorizedRedirect: true,
+    })
+    const payload = await response.json().catch(() => null)
+
+    if (!response.ok || !payload?.success) {
+      loading.value = false
+      errorMessage.value = readErrorMessage(payload, text.value.bindFailed)
+      return
+    }
+
+    const redirectPath =
+      normalizePostLoginRedirect(payload?.data?.redirectPath) ||
+      normalizePostLoginRedirect(route.query.redirect) ||
+      '/settings?dingtalk=bound'
+    await router.replace(redirectPath)
+  } catch (error) {
+    loading.value = false
+    errorMessage.value = readErrorMessage(error, text.value.bindFailed)
+  }
+}
+
+async function handleCallback(): Promise<void> {
   const code = typeof route.query.code === 'string' ? route.query.code : ''
   const state = typeof route.query.state === 'string' ? route.query.state : ''
+  const bindIntent = readBindIntent(state)
+
+  if (bindIntent !== 'bind') {
+    const existingToken = auth.getToken()
+    if (existingToken) {
+      const currentSession = await auth.bootstrapSession()
+      if (currentSession.ok) {
+        let fallbackPath = resolveHomePath()
+        try {
+          await loadProductFeatures()
+          fallbackPath = resolveHomePath()
+        } catch {
+          // Keep authenticated users on their current session even if feature probing fails.
+        }
+
+        const redirectPath = normalizePostLoginRedirect(route.query.redirect)
+        await router.replace(redirectPath || fallbackPath)
+        return
+      }
+    }
+  }
 
   if (!code) {
     loading.value = false
     errorMessage.value = text.value.missingCode
+    return
+  }
+
+  if (bindIntent === 'bind') {
+    await handleBindCallback(code, state)
     return
   }
 

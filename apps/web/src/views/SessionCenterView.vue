@@ -37,6 +37,76 @@
         </div>
       </div>
 
+      <section class="session-center__dingtalk">
+        <div class="session-center__dingtalk-head">
+          <div>
+            <h2>钉钉登录</h2>
+            <p class="session-center__current-meta">
+              查看当前账号的钉钉开通、绑定和目录接管状态，并发起自助绑定。
+            </p>
+          </div>
+          <button
+            class="session-center__button session-center__button--secondary"
+            type="button"
+            :disabled="dingtalkLoading || dingtalkBinding || dingtalkUnbinding"
+            @click="void loadDingTalkAccess()"
+          >
+            {{ dingtalkLoading ? '刷新中...' : '刷新钉钉状态' }}
+          </button>
+        </div>
+
+        <div v-if="dingtalkAccess" class="session-center__dingtalk-grid">
+          <article class="session-center__dingtalk-card">
+            <div class="session-center__badges">
+              <span class="session-center__badge" :class="{ 'session-center__badge--current': dingtalkAccess.available }">
+                {{ dingtalkAccess.available ? '可用' : '不可用' }}
+              </span>
+              <span class="session-center__badge" :class="{ 'session-center__badge--current': dingtalkAccess.grant.enabled }">
+                {{ dingtalkAccess.grant.enabled ? '已开通' : '未开通' }}
+              </span>
+              <span class="session-center__badge" :class="{ 'session-center__badge--current': dingtalkAccess.identity.exists }">
+                {{ dingtalkAccess.identity.exists ? '钉钉账号已绑定' : '未绑定钉钉账号' }}
+              </span>
+            </div>
+            <dl class="session-center__meta">
+              <div>
+                <dt>Corp ID</dt>
+                <dd>{{ dingtalkAccess.identity.corpId || dingtalkAccess.server?.corpId || '—' }}</dd>
+              </div>
+              <div>
+                <dt>目录接管</dt>
+                <dd>{{ dingtalkAccess.directory.linked ? `已关联 ${dingtalkAccess.directory.linkedCount} 个目录成员` : '未被目录接管' }}</dd>
+              </div>
+              <div>
+                <dt>最近钉钉登录</dt>
+                <dd>{{ formatDate(dingtalkAccess.identity.lastLoginAt) }}</dd>
+              </div>
+            </dl>
+            <p v-if="dingtalkAccess.directory.linked" class="session-center__status session-center__status--error">
+              当前钉钉身份由目录同步接管，请联系平台管理员。
+            </p>
+            <div class="session-center__actions">
+              <button
+                class="session-center__button"
+                type="button"
+                :disabled="dingtalkBinding || !dingtalkAccess.available"
+                @click="void launchDingTalkBind()"
+              >
+                {{ dingtalkBinding ? '跳转中...' : dingtalkAccess.identity.exists ? '重新绑定钉钉账号' : '绑定钉钉账号' }}
+              </button>
+              <button
+                class="session-center__button session-center__button--secondary"
+                type="button"
+                :disabled="dingtalkUnbinding || !canUnbindDingTalk"
+                @click="void unbindDingTalk()"
+              >
+                {{ dingtalkUnbinding ? '处理中...' : '解除当前绑定' }}
+              </button>
+            </div>
+          </article>
+        </div>
+      </section>
+
       <section v-if="currentSession" class="session-center__current">
         <div class="session-center__current-copy">
           <p class="session-center__current-label">当前设备</p>
@@ -131,7 +201,7 @@
 
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { useAuth } from '../composables/useAuth'
 import { apiFetch } from '../utils/api'
 
@@ -151,6 +221,44 @@ type SessionRecord = {
 
 type StatusTone = 'info' | 'error'
 
+type DingTalkAccessSnapshot = {
+  available: boolean
+  userId: string
+  provider: 'dingtalk'
+  requireGrant: boolean
+  autoLinkEmail: boolean
+  autoProvision: boolean
+  server: {
+    configured: boolean
+    available: boolean
+    corpId: string | null
+    allowedCorpIds: string[]
+    requireGrant: boolean
+    autoLinkEmail: boolean
+    autoProvision: boolean
+    unavailableReason: string | null
+  }
+  directory: {
+    linked: boolean
+    linkedCount: number
+  }
+  grant: {
+    exists: boolean
+    enabled: boolean
+    grantedBy: string | null
+    createdAt: string | null
+    updatedAt: string | null
+  }
+  identity: {
+    exists: boolean
+    corpId: string | null
+    lastLoginAt: string | null
+    createdAt: string | null
+    updatedAt: string | null
+  }
+}
+
+const route = useRoute()
 const router = useRouter()
 const auth = useAuth()
 
@@ -161,12 +269,22 @@ const sessions = ref<SessionRecord[]>([])
 const currentSessionId = ref<string | null>(null)
 const status = ref('')
 const statusTone = ref<StatusTone>('info')
+const dingtalkLoading = ref(false)
+const dingtalkBinding = ref(false)
+const dingtalkUnbinding = ref(false)
+const dingtalkAccess = ref<DingTalkAccessSnapshot | null>(null)
 let heartbeatTimer: ReturnType<typeof setTimeout> | null = null
 
 const accountEmail = computed(() => auth.getAccessSnapshot().email)
 const activeSessionCount = computed(() => sessions.value.filter((session) => !session.revokedAt).length)
 const revokedSessionCount = computed(() => sessions.value.filter((session) => Boolean(session.revokedAt)).length)
 const currentSession = computed(() => sessions.value.find((session) => session.id === currentSessionId.value) ?? null)
+const canUnbindDingTalk = computed(() =>
+  Boolean(
+    dingtalkAccess.value?.identity.exists
+    && !dingtalkAccess.value.directory.linked,
+  ),
+)
 
 function setStatus(message: string, tone: StatusTone = 'info') {
   status.value = message
@@ -253,6 +371,102 @@ async function loadSessions() {
     setStatus('加载会话失败，请稍后重试', 'error')
   } finally {
     loading.value = false
+  }
+}
+
+async function loadDingTalkAccess() {
+  dingtalkLoading.value = true
+
+  try {
+    const response = await apiFetch('/api/auth/dingtalk/access')
+    const payload = await response.json().catch(() => null)
+
+    if (response.status === 401) {
+      await redirectToLogin()
+      return
+    }
+
+    if (!response.ok) {
+      setStatus(extractError(payload) || '加载钉钉状态失败', 'error')
+      return
+    }
+
+    const data = payload && typeof payload === 'object' ? (payload as Record<string, unknown>).data : null
+    dingtalkAccess.value = data && typeof data === 'object' ? data as DingTalkAccessSnapshot : null
+  } catch {
+    setStatus('加载钉钉状态失败，请稍后重试', 'error')
+  } finally {
+    dingtalkLoading.value = false
+  }
+}
+
+async function launchDingTalkBind() {
+  dingtalkBinding.value = true
+  try {
+    const response = await apiFetch('/api/auth/dingtalk/launch?intent=bind&redirect=%2Fsettings%3Fdingtalk%3Dbound', {
+      method: 'GET',
+      suppressUnauthorizedRedirect: true,
+    })
+    const payload = await response.json().catch(() => null)
+
+    if (response.status === 401) {
+      await redirectToLogin()
+      return
+    }
+
+    if (!response.ok) {
+      setStatus(extractError(payload) || '发起钉钉绑定失败', 'error')
+      return
+    }
+
+    const data = payload && typeof payload === 'object' ? (payload as Record<string, unknown>).data : null
+    const url = data && typeof data === 'object' ? (data as Record<string, unknown>).url : null
+    const state = data && typeof data === 'object' ? (data as Record<string, unknown>).state : null
+    if (typeof url !== 'string' || url.trim().length === 0) {
+      setStatus('发起钉钉绑定失败', 'error')
+      return
+    }
+    if (typeof state === 'string' && state.trim().length > 0 && typeof sessionStorage !== 'undefined') {
+      try {
+        sessionStorage.setItem(`metasheet_dingtalk_intent_${state.trim()}`, 'bind')
+      } catch {
+        // sessionStorage may be unavailable (private mode); bind callback will fail gracefully.
+      }
+    }
+    window.open(url, '_self')
+  } catch {
+    setStatus('发起钉钉绑定失败，请稍后重试', 'error')
+  } finally {
+    dingtalkBinding.value = false
+  }
+}
+
+async function unbindDingTalk() {
+  dingtalkUnbinding.value = true
+  try {
+    const response = await apiFetch('/api/auth/dingtalk/unbind', {
+      method: 'POST',
+      suppressUnauthorizedRedirect: true,
+    })
+    const payload = await response.json().catch(() => null)
+
+    if (response.status === 401) {
+      await redirectToLogin()
+      return
+    }
+
+    if (!response.ok) {
+      setStatus(extractError(payload) || '解除钉钉绑定失败', 'error')
+      return
+    }
+
+    const data = payload && typeof payload === 'object' ? (payload as Record<string, unknown>).data : null
+    dingtalkAccess.value = data && typeof data === 'object' ? data as DingTalkAccessSnapshot : dingtalkAccess.value
+    setStatus('当前钉钉绑定已解除')
+  } catch {
+    setStatus('解除钉钉绑定失败，请稍后重试', 'error')
+  } finally {
+    dingtalkUnbinding.value = false
   }
 }
 
@@ -358,6 +572,10 @@ async function revokeSession(sessionId: string) {
 
 onMounted(() => {
   void loadSessions()
+  void loadDingTalkAccess()
+  if (route.query.dingtalk === 'bound') {
+    setStatus('已返回钉钉绑定流程，请确认当前账号状态')
+  }
 })
 
 onBeforeUnmount(() => {
@@ -427,6 +645,40 @@ onBeforeUnmount(() => {
   background: #fff;
   border: 1px solid #e2e8f0;
   box-shadow: 0 8px 30px rgba(15, 23, 42, 0.05);
+}
+
+.session-center__dingtalk {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  margin-bottom: 16px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid #e2e8f0;
+}
+
+.session-center__dingtalk-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.session-center__dingtalk-head h2 {
+  margin: 0 0 6px;
+  font-size: 20px;
+  color: #0f172a;
+}
+
+.session-center__dingtalk-grid {
+  display: grid;
+  gap: 16px;
+}
+
+.session-center__dingtalk-card {
+  padding: 18px;
+  border-radius: 16px;
+  border: 1px solid #e2e8f0;
+  background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%);
 }
 
 .session-center__summary {
@@ -602,7 +854,8 @@ onBeforeUnmount(() => {
   }
 
   .session-center__header,
-  .session-center__card-head {
+  .session-center__card-head,
+  .session-center__dingtalk-head {
     flex-direction: column;
   }
 
