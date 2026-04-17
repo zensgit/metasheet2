@@ -1099,6 +1099,17 @@ authRouter.post('/dingtalk/callback', async (req: Request, res: Response) => {
         })
       }
 
+      // Directory-managed users must not self-rebind — their DingTalk identity
+      // is owned by the admin directory sync flow.
+      const preSnapshot = await fetchCurrentUserDingTalkAccessSnapshot(authResult.user.id)
+      if (preSnapshot.directory.linked) {
+        return res.status(409).json({
+          success: false,
+          error: 'Current user is directory-managed for DingTalk. Please contact an administrator to rebind.',
+          code: 'directory_managed_conflict',
+        })
+      }
+
       const dtUser = await exchangeCodeForDingTalkProfile(code)
       await bindDingTalkIdentityToUser({
         localUserId: authResult.user.id,
