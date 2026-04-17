@@ -15,6 +15,15 @@ Optional packet export:
 node scripts/ops/export-yjs-rollout-packet.mjs
 ```
 
+Single-command gate:
+
+```bash
+YJS_BASE_URL=http://localhost:3000 \
+YJS_ADMIN_TOKEN=$ADMIN_TOKEN \
+YJS_DATABASE_URL=$DATABASE_URL \
+node scripts/ops/run-yjs-rollout-gate.mjs
+```
+
 ## Runtime Check
 
 ```bash
