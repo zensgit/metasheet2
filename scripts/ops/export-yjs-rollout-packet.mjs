@@ -43,6 +43,7 @@ function parseArgs(argv) {
 const packetFiles = [
   'docs/operations/yjs-internal-rollout-checklist-20260416.md',
   'docs/operations/yjs-internal-rollout-execution-20260416.md',
+  'docs/operations/yjs-internal-rollout-signoff-template-20260416.md',
   'docs/operations/yjs-ops-runbook-20260416.md',
   'docs/operations/yjs-retention-policy-20260416.md',
   'docs/operations/yjs-rollout-report-capture-20260416.md',
@@ -61,6 +62,7 @@ Generated at: ${new Date().toISOString()}
 
 - ${rel('docs/operations/yjs-internal-rollout-checklist-20260416.md')}
 - ${rel('docs/operations/yjs-internal-rollout-execution-20260416.md')}
+- ${rel('docs/operations/yjs-internal-rollout-signoff-template-20260416.md')}
 - ${rel('docs/operations/yjs-ops-runbook-20260416.md')}
 - ${rel('docs/operations/yjs-retention-policy-20260416.md')}
 - ${rel('docs/operations/yjs-rollout-report-capture-20260416.md')}
@@ -77,7 +79,8 @@ Generated at: ${new Date().toISOString()}
 2. Run the runtime status check
 3. Run the retention health check
 4. Run the combined report capture
-5. Store generated report artifacts alongside the rollout packet
+5. Fill the signoff template
+6. Store generated report artifacts alongside the rollout packet
 `
 }
 

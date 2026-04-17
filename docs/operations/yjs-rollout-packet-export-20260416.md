@@ -20,6 +20,7 @@ Included:
 
 - rollout checklist
 - rollout execution guide
+- rollout signoff template
 - ops runbook
 - retention policy
 - rollout report capture guide
