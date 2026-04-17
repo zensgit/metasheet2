@@ -430,6 +430,155 @@ describe('admin-users routes', () => {
     expect((response.body as Record<string, any>).data.isAdmin).toBe(false)
   })
 
+  it('updates user profile name and mobile', async () => {
+    rbacMocks.isAdmin
+      .mockResolvedValueOnce(true)
+      .mockResolvedValueOnce(false)
+    rbacMocks.listUserPermissions.mockResolvedValue(['crm:admin'])
+    pgMocks.query
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'user-1',
+          email: 'alpha@example.com',
+          name: 'Alpha',
+          mobile: null,
+          role: 'user',
+          is_active: true,
+          is_admin: false,
+          last_login_at: null,
+          created_at: '2026-03-12T00:00:00.000Z',
+          updated_at: '2026-03-12T00:00:00.000Z',
+        }],
+      })
+      .mockResolvedValueOnce({ rows: [{ id: 'user-1' }] })
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'user-1',
+          email: 'alpha@example.com',
+          name: 'Alpha Prime',
+          mobile: '13800138000',
+          role: 'user',
+          is_active: true,
+          is_admin: false,
+          last_login_at: null,
+          created_at: '2026-03-12T00:00:00.000Z',
+          updated_at: '2026-03-13T00:00:00.000Z',
+        }],
+      })
+      .mockResolvedValueOnce({
+        rows: [{ role_id: 'crm_admin' }],
+      })
+
+    const response = await invokeRoute('patch', '/api/admin/users/:userId/profile', {
+      params: { userId: 'user-1' },
+      body: { name: 'Alpha Prime', mobile: '13800138000', expectedMobile: null },
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect(pgMocks.query).toHaveBeenNthCalledWith(2,
+      expect.stringContaining('UPDATE users'),
+      ['Alpha Prime', '13800138000', 'user-1', true, null],
+    )
+    expect(auditMocks.auditLog).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'update',
+      resourceType: 'user',
+      resourceId: 'user-1',
+      meta: expect.objectContaining({
+        before: { name: 'Alpha', mobile: null },
+        after: { name: 'Alpha Prime', mobile: '13800138000' },
+      }),
+    }))
+    expect((response.body as Record<string, any>).data.user).toMatchObject({
+      id: 'user-1',
+      name: 'Alpha Prime',
+      mobile: '13800138000',
+    })
+  })
+
+  it('clears user mobile profile field', async () => {
+    rbacMocks.isAdmin
+      .mockResolvedValueOnce(true)
+      .mockResolvedValueOnce(false)
+    rbacMocks.listUserPermissions.mockResolvedValue([])
+    pgMocks.query
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'user-1',
+          email: 'alpha@example.com',
+          name: 'Alpha',
+          mobile: '13800138000',
+          role: 'user',
+          is_active: true,
+          is_admin: false,
+          last_login_at: null,
+          created_at: '2026-03-12T00:00:00.000Z',
+          updated_at: '2026-03-12T00:00:00.000Z',
+        }],
+      })
+      .mockResolvedValueOnce({ rows: [{ id: 'user-1' }] })
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'user-1',
+          email: 'alpha@example.com',
+          name: 'Alpha',
+          mobile: null,
+          role: 'user',
+          is_active: true,
+          is_admin: false,
+          last_login_at: null,
+          created_at: '2026-03-12T00:00:00.000Z',
+          updated_at: '2026-03-13T00:00:00.000Z',
+        }],
+      })
+      .mockResolvedValueOnce({
+        rows: [],
+      })
+
+    const response = await invokeRoute('patch', '/api/admin/users/:userId/profile', {
+      params: { userId: 'user-1' },
+      body: { mobile: '   ', expectedMobile: '13800138000' },
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect(pgMocks.query).toHaveBeenNthCalledWith(2,
+      expect.stringContaining('UPDATE users'),
+      ['Alpha', null, 'user-1', true, '13800138000'],
+    )
+    expect((response.body as Record<string, any>).data.user).toMatchObject({
+      id: 'user-1',
+      mobile: null,
+    })
+  })
+
+  it('returns 409 when expected mobile no longer matches current value', async () => {
+    rbacMocks.isAdmin.mockResolvedValue(true)
+    pgMocks.query
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'user-1',
+          email: 'alpha@example.com',
+          name: 'Alpha',
+          mobile: '13600000000',
+          role: 'user',
+          is_active: true,
+          is_admin: false,
+          last_login_at: null,
+          created_at: '2026-03-12T00:00:00.000Z',
+          updated_at: '2026-03-12T00:00:00.000Z',
+        }],
+      })
+      .mockResolvedValueOnce({ rows: [] })
+
+    const response = await invokeRoute('patch', '/api/admin/users/:userId/profile', {
+      params: { userId: 'user-1' },
+      body: { mobile: '13758875801', expectedMobile: '13500000000' },
+    })
+
+    expect(response.statusCode).toBe(409)
+    expect((response.body as Record<string, any>).error.code).toBe('PROFILE_MOBILE_CONFLICT')
+    expect(auditMocks.auditLog).not.toHaveBeenCalled()
+  })
+
   it('returns dingtalk access details for a user', async () => {
     vi.stubEnv('DINGTALK_AUTH_REQUIRE_GRANT', '1')
     vi.stubEnv('DINGTALK_AUTH_AUTO_LINK_EMAIL', '0')

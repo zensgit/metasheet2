@@ -416,6 +416,24 @@ function createApiImplementation(
       })
     }
 
+    const profileMatch = pathname.match(/^\/api\/admin\/users\/([^/]+)\/profile$/)
+    if (profileMatch) {
+      const user = findUserById(decodeURIComponent(profileMatch[1]))
+      const rawBody = typeof init?.body === 'string' ? init.body : ''
+      const parsed = rawBody ? JSON.parse(rawBody) as { name?: unknown; mobile?: unknown } : {}
+      if (typeof parsed.name === 'string') user.name = parsed.name
+      if (typeof parsed.mobile === 'string') user.mobile = parsed.mobile.trim() || null
+      return createJsonResponse({
+        ok: true,
+        data: {
+          user: buildUserPayload(user),
+          roles: ['crm_admin'],
+          permissions: ['crm:admin'],
+          isAdmin: user.role === 'admin',
+        },
+      })
+    }
+
     if (pathname === '/api/admin/invites') {
       return createJsonResponse({
         ok: true,
@@ -647,6 +665,97 @@ describe('UserManagementView', () => {
     expect(container?.textContent).toContain('已批量开通 finance 插件使用')
     expect(container?.textContent).toContain('finance')
     expect(container?.textContent).toContain('插件使用已开通')
+  })
+
+  it('can update user mobile profile and persist the refreshed detail snapshot', async () => {
+    app = createApp(UserManagementView)
+    registerRouterLink(app)
+    app.mount(container!)
+    await flushUi(20)
+
+    const bravoRow = findUserRow(container!, 'Bravo')
+    const bravoDetailButton = Array.from(bravoRow.querySelectorAll('button')).find((candidate) => candidate.textContent?.includes('Bravo'))
+    if (!(bravoDetailButton instanceof HTMLButtonElement)) {
+      throw new Error('Bravo detail button not found')
+    }
+    bravoDetailButton.click()
+    await waitForCondition(() => callLog.includes('/api/admin/users/user-2/access'))
+
+    const inputs = Array.from(container!.querySelectorAll('input[type="text"]'))
+    const mobileInput = inputs.find((candidate) => (candidate as HTMLInputElement).placeholder === '手机号，可留空')
+    if (!(mobileInput instanceof HTMLInputElement)) {
+      throw new Error('Profile mobile input not found')
+    }
+
+    mobileInput.value = '13800138000'
+    mobileInput.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+
+    findButtonByText(container!, '保存资料').click()
+    await waitForCondition(() => apiFetchMock.mock.calls.some((args) => String(args[0]) === '/api/admin/users/user-2/profile'))
+
+    const profileCall = apiFetchMock.mock.calls.find((args) => String(args[0]) === '/api/admin/users/user-2/profile')
+    if (!profileCall) throw new Error('Profile update request not found')
+    expect(JSON.parse(String((profileCall[1] as RequestInit | undefined)?.body))).toEqual({
+      name: 'Bravo',
+      mobile: '13800138000',
+      expectedMobile: null,
+    })
+
+    await waitForCondition(() => container?.textContent?.includes('用户资料已更新') ?? false)
+    expect(container?.textContent).toContain('手机号：13800138000')
+  })
+
+  it('refreshes and surfaces the latest mobile when a PROFILE_MOBILE_CONFLICT happens', async () => {
+    const state = createApiState()
+    const bravo = state.find((user) => user.id === 'user-2')
+    if (!bravo) throw new Error('Bravo fixture not found')
+    apiFetchMock.mockImplementation(createApiImplementation(callLog, state))
+
+    app = createApp(UserManagementView)
+    registerRouterLink(app)
+    app.mount(container!)
+    await flushUi(20)
+
+    const bravoRow = findUserRow(container!, 'Bravo')
+    const bravoDetailButton = Array.from(bravoRow.querySelectorAll('button')).find((candidate) => candidate.textContent?.includes('Bravo'))
+    if (!(bravoDetailButton instanceof HTMLButtonElement)) {
+      throw new Error('Bravo detail button not found')
+    }
+    bravoDetailButton.click()
+    await waitForCondition(() => callLog.includes('/api/admin/users/user-2/access'))
+
+    const inputs = Array.from(container!.querySelectorAll('input[type="text"]'))
+    const mobileInput = inputs.find((candidate) => (candidate as HTMLInputElement).placeholder === '手机号，可留空')
+    if (!(mobileInput instanceof HTMLInputElement)) {
+      throw new Error('Profile mobile input not found')
+    }
+    mobileInput.value = '13800000000'
+    mobileInput.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+
+    // Simulate a concurrent backend edit landing right before our PATCH lands.
+    bravo.mobile = '13999999999'
+    apiFetchMock.mockImplementationOnce(async (input) => {
+      callLog.push(String(input))
+      return createJsonResponse({
+        ok: false,
+        error: {
+          code: 'PROFILE_MOBILE_CONFLICT',
+          message: 'User mobile changed before update was applied',
+        },
+      }, 409)
+    })
+
+    const accessCallsBefore = callLog.filter((url) => url === '/api/admin/users/user-2/access').length
+    findButtonByText(container!, '保存资料').click()
+
+    await waitForCondition(() => container?.textContent?.includes('用户手机号已被其他操作更新为 13999999999') ?? false)
+
+    expect(container?.textContent).not.toContain('用户资料已更新')
+    expect(container?.textContent).toContain('手机号：13999999999')
+    const accessCallsAfter = callLog.filter((url) => url === '/api/admin/users/user-2/access').length
+    expect(accessCallsAfter).toBeGreaterThan(accessCallsBefore)
   })
 
   it('can auto-focus a user from directory query params and expose a link back to the directory member', async () => {
