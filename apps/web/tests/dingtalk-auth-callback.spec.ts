@@ -168,4 +168,70 @@ describe('DingTalkAuthCallbackView', () => {
     expect(setTokenMock).not.toHaveBeenCalled()
     expect(replaceMock).toHaveBeenCalledWith('/attendance')
   })
+
+  it('completes a DingTalk bind callback without overwriting the current session', async () => {
+    routeState.query.state = 'state-bind-1'
+    sessionStorage.setItem('metasheet_dingtalk_intent_state-bind-1', 'bind')
+    getTokenMock.mockReturnValue('existing-token')
+    bootstrapSessionMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      payload: {
+        data: {
+          user: {
+            id: 'user-1',
+          },
+        },
+      },
+    })
+    apiFetchMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        success: true,
+        data: {
+          mode: 'bind',
+          bound: true,
+          redirectPath: '/settings?dingtalk=bound',
+          identity: {
+            userId: 'user-1',
+            identity: { exists: true },
+          },
+        },
+      }),
+    })
+
+    app = createApp(DingTalkAuthCallbackView)
+    app.mount(container!)
+    await flushUi(6)
+
+    expect(apiFetchMock).toHaveBeenCalledWith(
+      '/api/auth/dingtalk/callback',
+      expect.objectContaining({
+        method: 'POST',
+        suppressUnauthorizedRedirect: true,
+      }),
+    )
+    expect(setTokenMock).not.toHaveBeenCalled()
+    expect(primeSessionMock).not.toHaveBeenCalled()
+    expect(replaceMock).toHaveBeenCalledWith('/settings?dingtalk=bound')
+    expect(sessionStorage.getItem('metasheet_dingtalk_intent_state-bind-1')).toBeNull()
+    sessionStorage.clear()
+  })
+
+  it('shows an error when attempting DingTalk bind without an active session', async () => {
+    routeState.query.state = 'state-bind-2'
+    sessionStorage.setItem('metasheet_dingtalk_intent_state-bind-2', 'bind')
+    getTokenMock.mockReturnValue(null)
+
+    app = createApp(DingTalkAuthCallbackView)
+    app.mount(container!)
+    await flushUi(6)
+
+    expect(apiFetchMock).not.toHaveBeenCalled()
+    expect(setTokenMock).not.toHaveBeenCalled()
+    expect(container?.textContent ?? '').toContain('绑定失败')
+    expect(sessionStorage.getItem('metasheet_dingtalk_intent_state-bind-2')).toBeNull()
+    sessionStorage.clear()
+  })
 })
