@@ -52,23 +52,19 @@ const text = computed(() => {
   if (isZh.value) {
     return {
       loading: '正在验证钉钉登录，请稍候...',
-      bindLoading: '正在完成钉钉绑定，请稍候...',
       backToLogin: '返回登录',
       missingCode: '缺少授权码参数',
       missingToken: '登录成功但未获取到令牌',
       failed: '钉钉登录失败，请稍后重试。',
-      bindMissingSession: '绑定失败：当前未登录或登录已过期，请重新登录后再绑定钉钉。',
       bindFailed: '钉钉绑定失败，请稍后重试。',
     }
   }
   return {
     loading: 'Completing DingTalk sign-in...',
-    bindLoading: 'Completing DingTalk bind...',
     backToLogin: 'Back to Sign In',
     missingCode: 'Missing authorization code',
     missingToken: 'Sign-in succeeded but no token was returned',
     failed: 'DingTalk sign-in failed. Please try again.',
-    bindMissingSession: 'DingTalk bind failed: current session is missing or expired. Please sign in again before binding.',
     bindFailed: 'DingTalk bind failed. Please try again.',
   }
 })
@@ -90,111 +86,52 @@ function extractUserPermissions(user: AuthUserPayload | null): string[] {
   return user.permissions.filter((item): item is string => typeof item === 'string')
 }
 
-function persistAuthContext(user: AuthUserPayload | null, features: AuthFeaturePayload | null): void {
-  if (typeof localStorage === 'undefined') return
-
-  const roles = extractUserRoles(user)
-  const permissions = extractUserPermissions(user)
-
-  if (roles.length > 0) {
-    localStorage.setItem('user_roles', JSON.stringify(roles))
-  } else {
-    localStorage.removeItem('user_roles')
-  }
-
-  if (permissions.length > 0) {
-    localStorage.setItem('user_permissions', JSON.stringify(permissions))
-  } else {
-    localStorage.removeItem('user_permissions')
-  }
-
-  if (features && typeof features === 'object') {
-    localStorage.setItem('metasheet_features', JSON.stringify(features))
-    if (typeof features.mode === 'string' && features.mode.trim().length > 0) {
-      localStorage.setItem('metasheet_product_mode', features.mode)
-    }
-  }
-}
-
-function readBindIntent(state: string): 'bind' | null {
-  if (!state || typeof sessionStorage === 'undefined') return null
+function safeLocalStorageSet(key: string, value: string): void {
   try {
-    const key = `metasheet_dingtalk_intent_${state}`
-    const value = sessionStorage.getItem(key)
-    return value === 'bind' ? 'bind' : null
+    localStorage.setItem(key, value)
   } catch {
-    return null
+    // localStorage can throw in restricted contexts (private mode, test stubs).
   }
 }
 
-function clearBindIntent(state: string): void {
-  if (!state || typeof sessionStorage === 'undefined') return
+function safeLocalStorageRemove(key: string): void {
   try {
-    sessionStorage.removeItem(`metasheet_dingtalk_intent_${state}`)
+    localStorage.removeItem(key)
   } catch {
     // Ignore storage errors.
   }
 }
 
-async function handleBindCallback(code: string, state: string): Promise<void> {
-  clearBindIntent(state)
+function persistAuthContext(user: AuthUserPayload | null, features: AuthFeaturePayload | null): void {
+  if (typeof localStorage === 'undefined') return
+  if (typeof localStorage.setItem !== 'function') return
 
-  const existingToken = auth.getToken()
-  if (!existingToken) {
-    loading.value = false
-    errorMessage.value = text.value.bindMissingSession
-    return
+  const roles = extractUserRoles(user)
+  const permissions = extractUserPermissions(user)
+
+  if (roles.length > 0) {
+    safeLocalStorageSet('user_roles', JSON.stringify(roles))
+  } else {
+    safeLocalStorageRemove('user_roles')
   }
 
-  try {
-    const response = await apiFetch('/api/auth/dingtalk/callback', {
-      method: 'POST',
-      body: JSON.stringify({ code, state }),
-      suppressUnauthorizedRedirect: true,
-    })
-    const payload = await response.json().catch(() => null)
+  if (permissions.length > 0) {
+    safeLocalStorageSet('user_permissions', JSON.stringify(permissions))
+  } else {
+    safeLocalStorageRemove('user_permissions')
+  }
 
-    if (!response.ok || !payload?.success) {
-      loading.value = false
-      errorMessage.value = readErrorMessage(payload, text.value.bindFailed)
-      return
+  if (features && typeof features === 'object') {
+    safeLocalStorageSet('metasheet_features', JSON.stringify(features))
+    if (typeof features.mode === 'string' && features.mode.trim().length > 0) {
+      safeLocalStorageSet('metasheet_product_mode', features.mode)
     }
-
-    const redirectPath =
-      normalizePostLoginRedirect(payload?.data?.redirectPath) ||
-      normalizePostLoginRedirect(route.query.redirect) ||
-      '/settings?dingtalk=bound'
-    await router.replace(redirectPath)
-  } catch (error) {
-    loading.value = false
-    errorMessage.value = readErrorMessage(error, text.value.bindFailed)
   }
 }
 
 async function handleCallback(): Promise<void> {
   const code = typeof route.query.code === 'string' ? route.query.code : ''
   const state = typeof route.query.state === 'string' ? route.query.state : ''
-  const bindIntent = readBindIntent(state)
-
-  if (bindIntent !== 'bind') {
-    const existingToken = auth.getToken()
-    if (existingToken) {
-      const currentSession = await auth.bootstrapSession()
-      if (currentSession.ok) {
-        let fallbackPath = resolveHomePath()
-        try {
-          await loadProductFeatures()
-          fallbackPath = resolveHomePath()
-        } catch {
-          // Keep authenticated users on their current session even if feature probing fails.
-        }
-
-        const redirectPath = normalizePostLoginRedirect(route.query.redirect)
-        await router.replace(redirectPath || fallbackPath)
-        return
-      }
-    }
-  }
 
   if (!code) {
     loading.value = false
@@ -202,11 +139,8 @@ async function handleCallback(): Promise<void> {
     return
   }
 
-  if (bindIntent === 'bind') {
-    await handleBindCallback(code, state)
-    return
-  }
-
+  // Backend state is the source of truth for login vs bind; we always POST
+  // when a code is present and let data.mode drive the post-callback action.
   try {
     const response = await apiFetch('/api/auth/dingtalk/callback', {
       method: 'POST',
@@ -217,7 +151,22 @@ async function handleCallback(): Promise<void> {
 
     if (!response.ok || !payload?.success) {
       loading.value = false
-      errorMessage.value = readErrorMessage(payload, text.value.failed)
+      const mode = payload?.data?.mode
+      errorMessage.value = readErrorMessage(
+        payload,
+        mode === 'bind' ? text.value.bindFailed : text.value.failed,
+      )
+      return
+    }
+
+    const mode: 'bind' | 'login' = payload?.data?.mode === 'bind' ? 'bind' : 'login'
+
+    if (mode === 'bind') {
+      const redirectPath =
+        normalizePostLoginRedirect(payload?.data?.redirectPath) ||
+        normalizePostLoginRedirect(route.query.redirect) ||
+        '/settings?dingtalk=bound'
+      await router.replace(redirectPath)
       return
     }
 

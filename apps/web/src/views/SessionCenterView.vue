@@ -421,17 +421,9 @@ async function launchDingTalkBind() {
 
     const data = payload && typeof payload === 'object' ? (payload as Record<string, unknown>).data : null
     const url = data && typeof data === 'object' ? (data as Record<string, unknown>).url : null
-    const state = data && typeof data === 'object' ? (data as Record<string, unknown>).state : null
     if (typeof url !== 'string' || url.trim().length === 0) {
       setStatus('发起钉钉绑定失败', 'error')
       return
-    }
-    if (typeof state === 'string' && state.trim().length > 0 && typeof sessionStorage !== 'undefined') {
-      try {
-        sessionStorage.setItem(`metasheet_dingtalk_intent_${state.trim()}`, 'bind')
-      } catch {
-        // sessionStorage may be unavailable (private mode); bind callback will fail gracefully.
-      }
     }
     window.open(url, '_self')
   } catch {

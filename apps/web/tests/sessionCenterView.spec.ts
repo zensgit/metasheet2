@@ -119,7 +119,6 @@ describe('SessionCenterView', () => {
   })
 
   it('starts DingTalk self-bind from settings', async () => {
-    sessionStorage.clear()
     const openMock = vi.spyOn(window, 'open').mockImplementation(() => null)
     apiFetchMock
       .mockResolvedValueOnce(createJsonResponse({
@@ -182,10 +181,8 @@ describe('SessionCenterView', () => {
         suppressUnauthorizedRedirect: true,
       }),
     )
-    expect(sessionStorage.getItem('metasheet_dingtalk_intent_state-bind-1')).toBe('bind')
     expect(openMock).toHaveBeenCalledWith('https://login.dingtalk.test/oauth-bind', '_self')
     openMock.mockRestore()
-    sessionStorage.clear()
   })
 
   it('allows a self-managed DingTalk identity to be unbound from settings', async () => {
