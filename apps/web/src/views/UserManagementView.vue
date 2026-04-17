@@ -289,6 +289,7 @@
             <div>
               <h2>{{ access.user.name || access.user.email }}</h2>
               <p>{{ access.user.email }}</p>
+              <p v-if="access.user.mobile" class="user-admin__hint">手机号：{{ access.user.mobile }}</p>
             </div>
             <div class="user-admin__badges">
               <span class="user-admin__badge">{{ access.user.role }}</span>
@@ -298,6 +299,34 @@
               <span class="user-admin__badge" :class="{ 'user-admin__badge--admin': access.isAdmin }">
                 {{ access.isAdmin ? '管理员' : '普通用户' }}
               </span>
+            </div>
+          </div>
+
+          <div class="user-admin__section">
+            <div class="user-admin__section-head">
+              <div>
+                <h3>基础资料</h3>
+                <p class="user-admin__hint">管理员可直接维护姓名和手机号，用于目录推荐绑定与钉钉匹配。</p>
+              </div>
+            </div>
+            <div class="user-admin__create-grid">
+              <input
+                v-model.trim="profileDraftName"
+                class="user-admin__search"
+                type="text"
+                placeholder="姓名"
+              />
+              <input
+                v-model.trim="profileDraftMobile"
+                class="user-admin__search"
+                type="text"
+                placeholder="手机号，可留空"
+              />
+            </div>
+            <div class="user-admin__role-actions">
+              <button class="user-admin__button" type="button" :disabled="busy || !hasProfileDraftChanges" @click="void saveUserProfile()">
+                保存资料
+              </button>
             </div>
           </div>
 
@@ -805,6 +834,8 @@ const userSessions = ref<UserSessionRecord[]>([])
 const access = ref<UserAccess | null>(null)
 const dingtalkAccess = ref<DingTalkAccess | null>(null)
 const memberAdmission = ref<MemberAdmission | null>(null)
+const profileDraftName = ref('')
+const profileDraftMobile = ref('')
 const appliedUserNavigationKey = ref('')
 const createForm = ref<CreateUserForm>({
   name: '',
@@ -849,6 +880,10 @@ const hasAttendanceAdminAccess = computed(() => {
 })
 const filteredAccessPresets = computed(() => {
   return accessPresets.value.filter((preset) => !presetModeFilter.value || preset.productMode === presetModeFilter.value)
+})
+const hasProfileDraftChanges = computed(() => {
+  if (!access.value) return false
+  return profileDraftName.value !== (access.value.user.name || '') || profileDraftMobile.value !== (access.value.user.mobile || '')
 })
 const namespaceOptions = computed(() => {
   const namespaces: string[] = []
@@ -978,6 +1013,11 @@ function syncUserNavigationFromLocation(): boolean {
   const nextKey = buildUserNavigationKey(next)
   userNavigation.value = next
   return currentKey !== nextKey
+}
+
+function syncProfileDraftFromAccess(): void {
+  profileDraftName.value = access.value?.user.name || ''
+  profileDraftMobile.value = access.value?.user.mobile || ''
 }
 
 function extractNamespaceFromPermission(permission: string): string | null {
@@ -1265,6 +1305,7 @@ async function selectUser(userId: string): Promise<void> {
     }
 
     access.value = payload.data as UserAccess
+    syncProfileDraftFromAccess()
     const navigationKey = buildUserNavigationKey(userNavigation.value)
     if (userNavigation.value.userId === userId && appliedUserNavigationKey.value !== navigationKey) {
       if (userNavigation.value.source === 'directory-sync') {
@@ -1504,6 +1545,7 @@ async function createUser(): Promise<void> {
     }
 
     access.value = payload.data as UserAccess
+    syncProfileDraftFromAccess()
     selectedUserId.value = access.value.user.id
     createdTemporaryPassword.value = String((payload.data as Record<string, unknown>).temporaryPassword || '')
     createdOnboarding.value = ((payload.data as Record<string, unknown>).onboarding as OnboardingPacket | undefined) || null
@@ -1618,6 +1660,7 @@ async function toggleUserStatus(): Promise<void> {
     }
 
     access.value = payload.data as UserAccess
+    syncProfileDraftFromAccess()
     await loadUsers()
     await loadMemberAdmission(access.value.user.id)
     setStatus(access.value.user.is_active ? '账号已启用' : '账号已停用')
@@ -1710,6 +1753,7 @@ async function updateRole(action: 'assign' | 'unassign'): Promise<void> {
     }
 
     access.value = payload.data as UserAccess
+    syncProfileDraftFromAccess()
     await loadUsers()
     await loadMemberAdmission(selectedUserId.value)
     setStatus(action === 'assign' ? '角色已分配' : '角色已撤销')
@@ -1734,6 +1778,7 @@ async function updateNamedRole(roleId: string, enabled: boolean): Promise<void> 
     }
 
     access.value = payload.data as UserAccess
+    syncProfileDraftFromAccess()
     await loadUsers()
     await loadMemberAdmission(selectedUserId.value)
     const label = roleId === 'admin' ? '平台管理员' : roleId === 'attendance_admin' ? '考勤管理员' : roleId
@@ -1776,6 +1821,49 @@ function buildDirectoryLocation(membership: MemberDirectoryMembership, userId: s
     integrationId: membership.integrationId,
     accountId: membership.directoryAccountId,
   })
+}
+
+async function saveUserProfile(): Promise<void> {
+  if (!access.value) return
+  busy.value = true
+  // Snapshot the mobile we believed the server held when we rendered the
+  // form; the backend uses this as a CAS witness on UPDATE so a concurrent
+  // edit can't get silently overwritten.
+  const baselineUserId = access.value.user.id
+  const baselineMobile = access.value.user.mobile ?? null
+  try {
+    const response = await apiFetch(`/api/admin/users/${encodeURIComponent(baselineUserId)}/profile`, {
+      method: 'PATCH',
+      body: JSON.stringify({
+        name: profileDraftName.value,
+        mobile: profileDraftMobile.value,
+        expectedMobile: baselineMobile,
+      }),
+    })
+    const payload = await readJson(response)
+    if (response.status === 409) {
+      const errorCode = (payload.error as Record<string, unknown> | undefined)?.code
+      if (errorCode === 'PROFILE_MOBILE_CONFLICT') {
+        await selectUser(baselineUserId)
+        const latest = access.value?.user.mobile ?? null
+        const latestLabel = latest === null || latest === '' ? '（空）' : latest
+        setStatus(`用户手机号已被其他操作更新为 ${latestLabel}，请确认最新值后重新保存`, 'error')
+        return
+      }
+    }
+    if (!response.ok || payload.ok !== true) {
+      throw new Error(String((payload.error as Record<string, unknown> | undefined)?.message || '更新用户资料失败'))
+    }
+
+    access.value = payload.data as UserAccess
+    syncProfileDraftFromAccess()
+    await loadUsers()
+    setStatus('用户资料已更新')
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : '更新用户资料失败', 'error')
+  } finally {
+    busy.value = false
+  }
 }
 
 const stopUserLocationSync = subscribeToLocationChanges(() => {

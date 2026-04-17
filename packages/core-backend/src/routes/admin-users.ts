@@ -353,6 +353,12 @@ function sanitizeName(name: string): string {
   return name.trim().replace(/[<>'"&;]/g, '').slice(0, 100)
 }
 
+function sanitizeMobile(mobile: string): string | null {
+  const value = mobile.trim().replace(/\s+/g, '')
+  if (!value) return null
+  return value.slice(0, 32)
+}
+
 function parseAuditRangeBoundary(value: unknown, mode: AuditRangeBoundaryMode): string | null {
   if (typeof value !== 'string') return null
   const trimmed = value.trim()
@@ -2908,6 +2914,84 @@ export function adminUsersRouter(): Router {
       })
     } catch (error) {
       return jsonError(res, 500, 'USER_CREATE_FAILED', (error as Error)?.message || 'Failed to create user')
+    }
+  })
+
+  r.patch('/api/admin/users/:userId/profile', authenticate, async (req: Request, res: Response) => {
+    const adminUserId = await ensurePlatformAdmin(req, res)
+    if (!adminUserId) return
+
+    try {
+      const userId = String(req.params.userId || '').trim()
+      if (!userId) return jsonError(res, 400, 'USER_ID_REQUIRED', 'userId is required')
+
+      const hasName = typeof req.body?.name === 'string'
+      const hasMobile = typeof req.body?.mobile === 'string'
+      const hasExpectedMobile = Object.prototype.hasOwnProperty.call(req.body ?? {}, 'expectedMobile')
+      if (!hasName && !hasMobile) {
+        return jsonError(res, 400, 'PROFILE_FIELDS_REQUIRED', 'name or mobile is required')
+      }
+
+      const profile = await fetchUserProfile(userId)
+      if (!profile) return jsonError(res, 404, 'NOT_FOUND', 'User not found')
+
+      const nextName = hasName ? sanitizeName(String(req.body.name)) : profile.name
+      const nextMobile = hasMobile ? sanitizeMobile(String(req.body.mobile)) : profile.mobile
+      const expectedMobile = hasExpectedMobile
+        ? req.body?.expectedMobile === null
+          ? null
+          : typeof req.body?.expectedMobile === 'string'
+            ? sanitizeMobile(String(req.body.expectedMobile))
+            : undefined
+        : undefined
+
+      if (hasName && (!nextName || nextName.length < 2 || nextName.length > 100)) {
+        return jsonError(res, 400, 'INVALID_NAME', 'Name must be between 2 and 100 characters')
+      }
+      if (hasExpectedMobile && expectedMobile === undefined) {
+        return jsonError(res, 400, 'INVALID_EXPECTED_MOBILE', 'expectedMobile must be string or null')
+      }
+
+      const updateResult = await query<{ id: string }>(
+        `UPDATE users
+         SET name = $1,
+             mobile = $2,
+             updated_at = NOW()
+         WHERE id = $3
+           AND ($4::boolean = FALSE OR (($5::text IS NULL AND mobile IS NULL) OR mobile = $5::text))
+         RETURNING id`,
+        [nextName, nextMobile, userId, hasExpectedMobile, expectedMobile ?? null],
+      )
+      if (updateResult.rows.length === 0) {
+        return jsonError(res, 409, 'PROFILE_MOBILE_CONFLICT', 'User mobile changed before update was applied')
+      }
+
+      await auditLog({
+        actorId: adminUserId,
+        actorType: 'user',
+        action: 'update',
+        resourceType: 'user',
+        resourceId: userId,
+        meta: {
+          adminUserId,
+          before: {
+            name: profile.name,
+            mobile: profile.mobile,
+          },
+          after: {
+            name: nextName,
+            mobile: nextMobile,
+          },
+        },
+      })
+
+      const snapshot = await fetchUserAccessSnapshot(userId)
+      return jsonOk(res, {
+        ...snapshot,
+        actorId: adminUserId,
+      })
+    } catch (error) {
+      return jsonError(res, 500, 'USER_PROFILE_UPDATE_FAILED', (error as Error)?.message || 'Failed to update user profile')
     }
   })
 
