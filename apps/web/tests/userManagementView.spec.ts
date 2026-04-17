@@ -78,10 +78,23 @@ async function setSelectValue(select: HTMLSelectElement, value: string): Promise
   await flushUi()
 }
 
+function registerRouterLink(app: App<Element>, withHref = false): void {
+  app.component('RouterLink', {
+    props: ['to'],
+    computed: {
+      resolvedHref(): string {
+        return typeof this.to === 'string' ? this.to : String(this.to || '')
+      },
+    },
+    template: withHref ? '<a :href="resolvedHref"><slot /></a>' : '<a><slot /></a>',
+  })
+}
+
 type UserFixture = {
   id: string
   email: string
   name: string
+  mobile: string | null
   role: string
   is_active: boolean
   grantEnabled: boolean
@@ -101,6 +114,7 @@ function createApiState(): UserFixture[] {
       id: 'user-1',
       email: 'alpha@example.com',
       name: 'Alpha',
+      mobile: null,
       role: 'user',
       is_active: true,
       grantEnabled: true,
@@ -119,6 +133,7 @@ function createApiState(): UserFixture[] {
       id: 'user-2',
       email: 'bravo@example.com',
       name: 'Bravo',
+      mobile: null,
       role: 'user',
       is_active: true,
       grantEnabled: false,
@@ -137,6 +152,7 @@ function createApiState(): UserFixture[] {
       id: 'user-3',
       email: 'charlie@example.com',
       name: 'Charlie',
+      mobile: null,
       role: 'user',
       is_active: false,
       grantEnabled: true,
@@ -155,6 +171,7 @@ function createApiState(): UserFixture[] {
       id: 'user-4',
       email: 'delta@example.com',
       name: 'Delta',
+      mobile: '13800000004',
       role: 'admin',
       is_active: true,
       grantEnabled: false,
@@ -172,7 +189,16 @@ function createApiState(): UserFixture[] {
   ]
 }
 
-function createApiImplementation(callLog: string[], state = createApiState()) {
+interface ApiImplementationOptions {
+  /** Limit the default user list to the first N rows so deep-link pinning can be exercised. */
+  paginatedPageSize?: number
+}
+
+function createApiImplementation(
+  callLog: string[],
+  state = createApiState(),
+  options: ApiImplementationOptions = {},
+) {
   return async (input: unknown, init?: RequestInit) => {
     const rawUrl = String(input)
     callLog.push(rawUrl)
@@ -180,7 +206,7 @@ function createApiImplementation(callLog: string[], state = createApiState()) {
     const pathname = url.pathname
     const query = url.searchParams.get('q')?.trim().toLowerCase() || ''
     const filteredUsers = query
-      ? state.filter((user) => [user.name, user.email, user.id, user.role].some((field) => field.toLowerCase().includes(query)))
+      ? state.filter((user) => [user.name, user.email, user.id, user.role, user.mobile || ''].some((field) => field.toLowerCase().includes(query)))
       : state
 
     const findUserById = (userId: string) => state.find((user) => user.id === userId) || state[0]
@@ -189,6 +215,7 @@ function createApiImplementation(callLog: string[], state = createApiState()) {
       id: user.id,
       email: user.email,
       name: user.name,
+      mobile: user.mobile,
       role: user.role,
       is_active: user.is_active,
       is_admin: user.role === 'admin',
@@ -300,10 +327,21 @@ function createApiImplementation(callLog: string[], state = createApiState()) {
     }
 
     if (pathname === '/api/admin/users') {
+      const pinUserId = url.searchParams.get('userId')?.trim() || ''
+      const visible = typeof options.paginatedPageSize === 'number'
+        ? filteredUsers.slice(0, Math.max(options.paginatedPageSize, 0))
+        : filteredUsers
+      const items = visible.map((user) => buildUserPayload(user))
+      if (pinUserId && !items.some((item) => item.id === pinUserId)) {
+        const pinned = state.find((user) => user.id === pinUserId)
+        if (pinned) items.unshift(buildUserPayload(pinned))
+      }
       return createJsonResponse({
         ok: true,
         data: {
-          items: filteredUsers.map((user) => buildUserPayload(user)),
+          items,
+          pinUserId,
+          pinUserIncluded: pinUserId ? items.some((item) => item.id === pinUserId) : null,
         },
       })
     }
@@ -450,6 +488,7 @@ describe('UserManagementView', () => {
   afterEach(() => {
     if (app) app.unmount()
     if (container) container.remove()
+    window.history.replaceState({}, '', '/')
     app = null
     container = null
   })
@@ -608,5 +647,166 @@ describe('UserManagementView', () => {
     expect(container?.textContent).toContain('已批量开通 finance 插件使用')
     expect(container?.textContent).toContain('finance')
     expect(container?.textContent).toContain('插件使用已开通')
+  })
+
+  it('can auto-focus a user from directory query params and expose a link back to the directory member', async () => {
+    window.history.replaceState({}, '', '/admin/users?userId=user-2&source=directory-sync&integrationId=ding-1&accountId=user-2-directory')
+    const state = createApiState()
+    const bravo = state.find((user) => user.id === 'user-2')
+    if (!bravo) throw new Error('Bravo fixture not found')
+    bravo.directoryLinked = true
+    apiFetchMock.mockImplementation(createApiImplementation(callLog, state))
+
+    app = createApp(UserManagementView)
+    registerRouterLink(app, true)
+    app.mount(container!)
+    await flushUi(20)
+
+    expect(container?.textContent).toContain('已从目录同步定位到用户 Bravo')
+    expect(container?.textContent).toContain('Bravo')
+
+    const directoryLink = Array.from(container!.querySelectorAll('a')).find((candidate) => candidate.textContent?.includes('前往目录成员'))
+    expect(directoryLink?.getAttribute('href')).toBe('/admin/directory?integrationId=ding-1&accountId=user-2-directory&source=user-management&userId=user-2')
+  })
+
+  it('shows a directory failure notice when returning from a missing directory account', async () => {
+    window.history.replaceState({}, '', '/admin/users?userId=user-2&source=directory-sync&integrationId=ding-1&accountId=user-2-directory&directoryFailure=missing_account')
+    const state = createApiState()
+    const bravo = state.find((user) => user.id === 'user-2')
+    if (!bravo) throw new Error('Bravo fixture not found')
+    bravo.directoryLinked = true
+    apiFetchMock.mockImplementation(createApiImplementation(callLog, state))
+
+    app = createApp(UserManagementView)
+    registerRouterLink(app, true)
+    app.mount(container!)
+    await flushUi(20)
+
+    expect(container?.textContent).toContain('已从目录同步定位到用户 Bravo')
+    expect(container?.textContent).toContain('目录页返回')
+    expect(container?.textContent).toContain('目录页未找到目录成员 user-2-directory。')
+    expect(container?.textContent).toContain('目标集成：ding-1')
+    expect(container?.textContent).toContain('目标成员：user-2-directory')
+    const retryDirectoryLink = Array.from(container!.querySelectorAll('a')).find((candidate) => candidate.textContent?.includes('重新前往目录页'))
+    expect(retryDirectoryLink?.getAttribute('href')).toBe('/admin/directory?integrationId=ding-1&accountId=user-2-directory&source=user-management&userId=user-2')
+
+    const keepUserButton = Array.from(container!.querySelectorAll('button')).find((candidate) => candidate.textContent?.includes('保留当前用户'))
+    expect(keepUserButton).toBeTruthy()
+    keepUserButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await waitForCondition(() => !(container?.textContent?.includes('目录页返回') ?? false))
+
+    expect(window.location.search).toBe('?userId=user-2')
+    expect(container?.textContent).toContain('已清除目录失败提示，保留当前用户 Bravo')
+    expect(container?.textContent).toContain('Bravo')
+  })
+
+  it('offers a recovery link to the current linked directory member when the failed target is stale', async () => {
+    window.history.replaceState({}, '', '/admin/users?userId=user-2&source=directory-sync&integrationId=ding-1&accountId=stale-directory&directoryFailure=missing_account')
+    const state = createApiState()
+    const bravo = state.find((user) => user.id === 'user-2')
+    if (!bravo) throw new Error('Bravo fixture not found')
+    bravo.directoryLinked = true
+    apiFetchMock.mockImplementation(createApiImplementation(callLog, state))
+
+    app = createApp(UserManagementView)
+    registerRouterLink(app, true)
+    app.mount(container!)
+    await flushUi(20)
+
+    expect(container?.textContent).toContain('目录页未找到目录成员 stale-directory。')
+    const retryDirectoryLink = Array.from(container!.querySelectorAll('a')).find((candidate) => candidate.textContent?.includes('重新前往目录页'))
+    expect(retryDirectoryLink?.getAttribute('href')).toBe('/admin/directory?integrationId=ding-1&accountId=stale-directory&source=user-management&userId=user-2')
+
+    const recoveryDirectoryLink = Array.from(container!.querySelectorAll('a')).find((candidate) => candidate.textContent?.includes('前往当前已链接成员'))
+    expect(recoveryDirectoryLink?.getAttribute('href')).toBe('/admin/directory?integrationId=ding-1&accountId=user-2-directory&source=user-management&userId=user-2')
+  })
+
+  it('can re-focus a user when query params change on the same mounted instance', async () => {
+    const state = createApiState()
+    const bravo = state.find((user) => user.id === 'user-2')
+    if (!bravo) throw new Error('Bravo fixture not found')
+    bravo.directoryLinked = true
+    apiFetchMock.mockImplementation(createApiImplementation(callLog, state))
+
+    app = createApp(UserManagementView)
+    registerRouterLink(app, true)
+    app.mount(container!)
+    await flushUi(20)
+
+    await setSearchValue(container!, 'Alpha')
+    findButtonByText(container!, '查询').click()
+    await waitForCondition(() => callLog.includes('/api/admin/users?q=Alpha'))
+    expect(container?.textContent).toContain('Alpha')
+
+    window.history.replaceState({}, '', '/admin/users?userId=user-2&source=directory-sync&integrationId=ding-1&accountId=user-2-directory')
+    await waitForCondition(() => container?.textContent?.includes('已从目录同步定位到用户 Bravo') ?? false)
+
+    const searchInput = container!.querySelector('input[type="search"]')
+    expect(searchInput).toBeInstanceOf(HTMLInputElement)
+    expect((searchInput as HTMLInputElement).value).toBe('')
+
+    const directoryLink = Array.from(container!.querySelectorAll('a')).find((candidate) => candidate.textContent?.includes('前往目录成员'))
+    expect(directoryLink?.getAttribute('href')).toBe('/admin/directory?integrationId=ding-1&accountId=user-2-directory&source=user-management&userId=user-2')
+  })
+
+  it('auto-focuses a deep-linked user whose row is outside the paginated first page', async () => {
+    window.history.replaceState({}, '', '/admin/users?userId=user-4&source=directory-sync&integrationId=ding-1&accountId=user-4-directory')
+    const state = createApiState()
+    apiFetchMock.mockImplementation(createApiImplementation(callLog, state, { paginatedPageSize: 2 }))
+
+    app = createApp(UserManagementView)
+    registerRouterLink(app, true)
+    app.mount(container!)
+    await flushUi(20)
+
+    const pinnedCall = callLog.find((url) => url.startsWith('/api/admin/users?') && url.includes('userId=user-4'))
+    expect(pinnedCall, 'expected loadUsers to forward the deep-link userId to the backend').toBeTruthy()
+
+    expect(container?.textContent).toContain('Delta')
+    expect(container?.textContent).toContain('已从目录同步定位到用户 Delta')
+  })
+
+  it('re-loads with the pinned userId when the deep link changes on the same instance', async () => {
+    const state = createApiState()
+    apiFetchMock.mockImplementation(createApiImplementation(callLog, state, { paginatedPageSize: 2 }))
+
+    app = createApp(UserManagementView)
+    registerRouterLink(app, true)
+    app.mount(container!)
+    await flushUi(20)
+
+    // Initially no deep link — Alpha (first row) should be selected.
+    expect(container?.textContent).toContain('Alpha')
+
+    window.history.replaceState({}, '', '/admin/users?userId=user-4&source=directory-sync&integrationId=ding-1&accountId=user-4-directory')
+    await waitForCondition(() => callLog.some((url) => url.startsWith('/api/admin/users?') && url.includes('userId=user-4')))
+    await waitForCondition(() => container?.textContent?.includes('已从目录同步定位到用户 Delta') ?? false)
+
+    expect(container?.textContent).toContain('Delta')
+  })
+
+  it('updates the directory failure notice when query params change on the same mounted instance', async () => {
+    const state = createApiState()
+    const bravo = state.find((user) => user.id === 'user-2')
+    if (!bravo) throw new Error('Bravo fixture not found')
+    bravo.directoryLinked = true
+    apiFetchMock.mockImplementation(createApiImplementation(callLog, state))
+
+    app = createApp(UserManagementView)
+    registerRouterLink(app, true)
+    app.mount(container!)
+    await flushUi(20)
+
+    expect(container?.textContent).not.toContain('目录页返回')
+
+    window.history.replaceState({}, '', '/admin/users?userId=user-2&source=directory-sync&integrationId=ding-missing&accountId=user-2-directory&directoryFailure=missing_integration')
+    await waitForCondition(() => container?.textContent?.includes('目录页未找到目录集成 ding-missing。') ?? false)
+
+    expect(container?.textContent).toContain('目录页返回')
+    expect(container?.textContent).toContain('目录页未找到目录集成 ding-missing。')
+    expect(container?.textContent).toContain('目标集成：ding-missing')
+    expect(container?.textContent).toContain('目标成员：user-2-directory')
+    const retryDirectoryLink = Array.from(container!.querySelectorAll('a')).find((candidate) => candidate.textContent?.includes('重新前往目录页'))
+    expect(retryDirectoryLink?.getAttribute('href')).toBe('/admin/directory?integrationId=ding-missing&accountId=user-2-directory&source=user-management&userId=user-2')
   })
 })
