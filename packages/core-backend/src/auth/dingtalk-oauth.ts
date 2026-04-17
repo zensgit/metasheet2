@@ -777,6 +777,11 @@ export async function exchangeCodeForUser(code: string): Promise<DingTalkExchang
   }
 }
 
+// Binds a DingTalk identity to a local user. Rebind semantics: if the user
+// already owns a DingTalk identity row it is updated to the incoming profile
+// (self-replacement is allowed by design — the user is opting in via callback).
+// A different user owning this identity always returns 409; cross-user
+// takeover must go through the admin directory flow, not self-service.
 export async function bindDingTalkIdentityToUser(input: {
   localUserId: string
   dtUser: DingTalkUserInfo

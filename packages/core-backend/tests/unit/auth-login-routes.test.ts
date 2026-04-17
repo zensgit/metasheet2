@@ -819,6 +819,49 @@ describe('auth login routes', () => {
     expect(dingtalkOauthMocks.bindDingTalkIdentityToUser).not.toHaveBeenCalled()
   })
 
+  it('rejects a bind callback when the current user is directory-managed for DingTalk', async () => {
+    dingtalkOauthMocks.validateState.mockResolvedValue({
+      valid: true,
+      redirectPath: '/settings?dingtalk=bound',
+      intent: 'bind',
+      bindUserId: 'user-1',
+    })
+    dingtalkOauthMocks.isDingTalkConfigured.mockReturnValue(true)
+    authServiceMocks.verifyToken.mockResolvedValue({
+      id: 'user-1',
+      email: 'manager@example.com',
+      name: 'Manager',
+      role: 'user',
+      permissions: [],
+    })
+    pgMocks.query
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({
+        rows: [{
+          corp_id: 'dingcorp',
+          last_login_at: '2026-04-11T12:00:00.000Z',
+          created_at: '2026-04-11T12:00:00.000Z',
+          updated_at: '2026-04-11T12:00:00.000Z',
+        }],
+      })
+      .mockResolvedValueOnce({ rows: [{ linked_count: 2 }] })
+
+    const response = await invokeRoute('post', '/dingtalk/callback', {
+      headers: {
+        authorization: 'Bearer live-token',
+      },
+      body: {
+        code: 'auth-code',
+        state: 'state-bind-1',
+      },
+    })
+
+    expect(response.statusCode).toBe(409)
+    expect((response.body as Record<string, any>).code).toBe('directory_managed_conflict')
+    expect(dingtalkOauthMocks.exchangeCodeForDingTalkProfile).not.toHaveBeenCalled()
+    expect(dingtalkOauthMocks.bindDingTalkIdentityToUser).not.toHaveBeenCalled()
+  })
+
   it('surfaces 409 when the DingTalk identity is already bound to another user', async () => {
     dingtalkOauthMocks.validateState.mockResolvedValue({
       valid: true,
@@ -834,6 +877,10 @@ describe('auth login routes', () => {
       role: 'user',
       permissions: [],
     })
+    pgMocks.query
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [{ linked_count: 0 }] })
     dingtalkOauthMocks.exchangeCodeForDingTalkProfile.mockResolvedValue({
       openId: 'open-id-1',
       unionId: 'union-id-1',
@@ -884,6 +931,11 @@ describe('auth login routes', () => {
     })
     dingtalkOauthMocks.bindDingTalkIdentityToUser.mockResolvedValue(undefined)
     pgMocks.query
+      // preSnapshot: directory-managed check must pass (linked_count=0)
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [{ linked_count: 0 }] })
+      // postSnapshot: returned in success payload
       .mockResolvedValueOnce({
         rows: [{
           enabled: true,
