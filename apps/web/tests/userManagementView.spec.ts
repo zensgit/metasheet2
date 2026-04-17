@@ -758,6 +758,62 @@ describe('UserManagementView', () => {
     expect(accessCallsAfter).toBeGreaterThan(accessCallsBefore)
   })
 
+  it('falls back to a generic message when the post-conflict access refresh fails', async () => {
+    const state = createApiState()
+    const bravo = state.find((user) => user.id === 'user-2')
+    if (!bravo) throw new Error('Bravo fixture not found')
+    apiFetchMock.mockImplementation(createApiImplementation(callLog, state))
+
+    app = createApp(UserManagementView)
+    registerRouterLink(app)
+    app.mount(container!)
+    await flushUi(20)
+
+    const bravoRow = findUserRow(container!, 'Bravo')
+    const bravoDetailButton = Array.from(bravoRow.querySelectorAll('button')).find((candidate) => candidate.textContent?.includes('Bravo'))
+    if (!(bravoDetailButton instanceof HTMLButtonElement)) {
+      throw new Error('Bravo detail button not found')
+    }
+    bravoDetailButton.click()
+    await waitForCondition(() => callLog.includes('/api/admin/users/user-2/access'))
+
+    const inputs = Array.from(container!.querySelectorAll('input[type="text"]'))
+    const mobileInput = inputs.find((candidate) => (candidate as HTMLInputElement).placeholder === '手机号，可留空')
+    if (!(mobileInput instanceof HTMLInputElement)) {
+      throw new Error('Profile mobile input not found')
+    }
+    mobileInput.value = '13800000000'
+    mobileInput.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+
+    // Backend reports a CAS conflict…
+    apiFetchMock.mockImplementationOnce(async (input) => {
+      callLog.push(String(input))
+      return createJsonResponse({
+        ok: false,
+        error: {
+          code: 'PROFILE_MOBILE_CONFLICT',
+          message: 'User mobile changed before update was applied',
+        },
+      }, 409)
+    })
+    // …and the follow-up access GET also fails, so the view can't confirm the
+    // true latest value. The UI must NOT advertise a stale mobile as "latest".
+    apiFetchMock.mockImplementationOnce(async (input) => {
+      callLog.push(String(input))
+      return createJsonResponse({
+        ok: false,
+        error: { code: 'USER_ACCESS_FAILED', message: 'downstream unavailable' },
+      }, 500)
+    })
+
+    findButtonByText(container!, '保存资料').click()
+    await waitForCondition(() => container?.textContent?.includes('用户手机号已被其他操作更新，请刷新后重试') ?? false)
+
+    expect(container?.textContent).not.toContain('用户手机号已被其他操作更新为')
+    expect(container?.textContent).not.toContain('用户资料已更新')
+  })
+
   it('can auto-focus a user from directory query params and expose a link back to the directory member', async () => {
     window.history.replaceState({}, '', '/admin/users?userId=user-2&source=directory-sync&integrationId=ding-1&accountId=user-2-directory')
     const state = createApiState()

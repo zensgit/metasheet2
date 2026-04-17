@@ -550,6 +550,57 @@ describe('admin-users routes', () => {
     })
   })
 
+  it('normalises whitespace on both sides of the mobile CAS witness', async () => {
+    rbacMocks.isAdmin
+      .mockResolvedValueOnce(true)
+      .mockResolvedValueOnce(false)
+    rbacMocks.listUserPermissions.mockResolvedValue([])
+    pgMocks.query
+      // fetchUserProfile returns legacy dirty data with embedded whitespace.
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'user-1',
+          email: 'alpha@example.com',
+          name: 'Alpha',
+          mobile: '138 0013 8000',
+          role: 'user',
+          is_active: true,
+          is_admin: false,
+          last_login_at: null,
+          created_at: '2026-03-12T00:00:00.000Z',
+          updated_at: '2026-03-12T00:00:00.000Z',
+        }],
+      })
+      // UPDATE still matches because both sides are normalised in SQL.
+      .mockResolvedValueOnce({ rows: [{ id: 'user-1' }] })
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'user-1',
+          email: 'alpha@example.com',
+          name: 'Alpha',
+          mobile: '13800138000',
+          role: 'user',
+          is_active: true,
+          is_admin: false,
+          last_login_at: null,
+          created_at: '2026-03-12T00:00:00.000Z',
+          updated_at: '2026-03-13T00:00:00.000Z',
+        }],
+      })
+      .mockResolvedValueOnce({ rows: [] })
+
+    const response = await invokeRoute('patch', '/api/admin/users/:userId/profile', {
+      params: { userId: 'user-1' },
+      body: { mobile: '13800138000', expectedMobile: '13800138000' },
+    })
+
+    expect(response.statusCode).toBe(200)
+    const updateCall = pgMocks.query.mock.calls[1]
+    expect(String(updateCall[0])).toContain('regexp_replace')
+    expect(String(updateCall[0])).toContain('IS NOT DISTINCT FROM')
+    expect(updateCall[1]).toEqual(['Alpha', '13800138000', 'user-1', true, '13800138000'])
+  })
+
   it('returns 409 when expected mobile no longer matches current value', async () => {
     rbacMocks.isAdmin.mockResolvedValue(true)
     pgMocks.query
