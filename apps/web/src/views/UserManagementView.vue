@@ -30,6 +30,35 @@
     <p v-if="status" class="user-admin__status" :class="{ 'user-admin__status--error': statusTone === 'error' }">
       {{ status }}
     </p>
+    <article v-if="directoryFailureNotice" class="user-admin__status user-admin__status--error user-admin__source-banner">
+      <strong>目录页返回</strong>
+      <p>{{ directoryFailureNotice.message }}</p>
+      <p v-if="directoryFailureNotice.integrationId">目标集成：{{ directoryFailureNotice.integrationId }}</p>
+      <p v-if="directoryFailureNotice.accountId">目标成员：{{ directoryFailureNotice.accountId }}</p>
+      <p>你可以继续检查当前用户的目录绑定状态，再决定是否重新跳转目录页处理。</p>
+      <div v-if="directoryFailureDirectoryLocation" class="user-admin__source-actions">
+        <router-link
+          class="user-admin__button user-admin__button--secondary user-admin__button-link"
+          :to="directoryFailureDirectoryLocation"
+        >
+          重新前往目录页
+        </router-link>
+        <router-link
+          v-if="directoryFailureRecoveryLocation"
+          class="user-admin__button user-admin__button--secondary user-admin__button-link"
+          :to="directoryFailureRecoveryLocation"
+        >
+          前往当前已链接成员
+        </router-link>
+        <button
+          class="user-admin__button user-admin__button--secondary"
+          type="button"
+          @click="clearDirectoryFailureContext()"
+        >
+          保留当前用户
+        </button>
+      </div>
+    </article>
 
     <section class="user-admin__panel user-admin__panel--create">
       <div class="user-admin__section-head">
@@ -323,6 +352,13 @@
                 <small>{{ membership.email || membership.mobile || membership.externalUserId }}</small>
                 <p v-if="membership.departmentPaths.length">部门：{{ membership.departmentPaths.join(' / ') }}</p>
                 <p>目录账号：{{ membership.accountEnabled ? '启用' : '停用' }} · 同步于 {{ formatDate(membership.accountUpdatedAt) }}</p>
+                <router-link
+                  v-if="access"
+                  class="user-admin__link"
+                  :to="buildDirectoryLocation(membership, access.user.id)"
+                >
+                  前往目录成员
+                </router-link>
               </article>
             </div>
             <div v-if="memberAdmission?.businessRoleIds.length" class="user-admin__chips">
@@ -555,14 +591,16 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useAuth } from '../composables/useAuth'
 import { apiFetch } from '../utils/api'
+import { subscribeToLocationChanges } from '../utils/browserLocation'
 
 type ManagedUser = {
   id: string
   email: string
   name: string | null
+  mobile?: string | null
   role: string
   is_active: boolean
   is_admin: boolean
@@ -727,6 +765,14 @@ type UserSessionRecord = {
   userAgent: string | null
 }
 
+type InitialUserNavigation = {
+  userId: string
+  source: string
+  integrationId: string
+  accountId: string
+  directoryFailure: string
+}
+
 const { hasAdminAccess } = useAuth()
 
 const adminAllowed = hasAdminAccess()
@@ -759,6 +805,7 @@ const userSessions = ref<UserSessionRecord[]>([])
 const access = ref<UserAccess | null>(null)
 const dingtalkAccess = ref<DingTalkAccess | null>(null)
 const memberAdmission = ref<MemberAdmission | null>(null)
+const appliedUserNavigationKey = ref('')
 const createForm = ref<CreateUserForm>({
   name: '',
   email: '',
@@ -824,10 +871,113 @@ const namespaceOptions = computed(() => {
 
   return namespaces
 })
+const userNavigation = ref(readInitialUserNavigation())
 
 function setStatus(message: string, tone: 'info' | 'error' = 'info'): void {
   status.value = message
   statusTone.value = tone
+}
+
+function readInitialUserNavigation(): InitialUserNavigation {
+  if (typeof window === 'undefined') {
+    return { userId: '', source: '', integrationId: '', accountId: '', directoryFailure: '' }
+  }
+  const params = new URL(window.location.href).searchParams
+  return {
+    userId: params.get('userId')?.trim() || '',
+    source: params.get('source')?.trim() || '',
+    integrationId: params.get('integrationId')?.trim() || '',
+    accountId: params.get('accountId')?.trim() || '',
+    directoryFailure: params.get('directoryFailure')?.trim() || '',
+  }
+}
+
+function buildUserNavigationKey(navigation: InitialUserNavigation): string {
+  return [
+    navigation.userId.trim(),
+    navigation.source.trim(),
+    navigation.integrationId.trim(),
+    navigation.accountId.trim(),
+    navigation.directoryFailure.trim(),
+  ].join('|')
+}
+
+function buildUserLocation(navigation: InitialUserNavigation): string {
+  if (typeof window === 'undefined') return '/admin/users'
+  const url = new URL(window.location.href)
+  const params = new URLSearchParams()
+  if (navigation.userId.trim().length > 0) params.set('userId', navigation.userId.trim())
+  if (navigation.source.trim().length > 0) params.set('source', navigation.source.trim())
+  if (navigation.integrationId.trim().length > 0) params.set('integrationId', navigation.integrationId.trim())
+  if (navigation.accountId.trim().length > 0) params.set('accountId', navigation.accountId.trim())
+  if (navigation.directoryFailure.trim().length > 0) params.set('directoryFailure', navigation.directoryFailure.trim())
+  const search = params.toString()
+  return `${url.pathname}${search ? `?${search}` : ''}${url.hash}`
+}
+
+function replaceUserNavigation(navigation: InitialUserNavigation): void {
+  if (typeof window === 'undefined') return
+  window.history.replaceState(window.history.state, '', buildUserLocation(navigation))
+}
+
+const directoryFailureNotice = computed(() => {
+  const navigation = userNavigation.value
+  if (navigation.source !== 'directory-sync') return null
+  const failureKind = navigation.directoryFailure.trim()
+  if (failureKind !== 'missing_integration' && failureKind !== 'missing_account') return null
+  const targetId = failureKind === 'missing_integration' ? navigation.integrationId.trim() : navigation.accountId.trim()
+  const message = failureKind === 'missing_integration'
+    ? `目录页未找到目录集成 ${targetId || '--'}。`
+    : `目录页未找到目录成员 ${targetId || '--'}。`
+  return {
+    kind: failureKind,
+    message,
+    integrationId: navigation.integrationId.trim(),
+    accountId: navigation.accountId.trim(),
+  }
+})
+const directoryFailureDirectoryLocation = computed(() => {
+  const navigation = userNavigation.value
+  if (navigation.source !== 'directory-sync') return ''
+  const userId = navigation.userId.trim()
+  const integrationId = navigation.integrationId.trim()
+  if (!userId || !integrationId) return ''
+  return buildDirectoryNavigationLocation({
+    userId,
+    integrationId,
+    accountId: navigation.accountId.trim(),
+  })
+})
+const directoryFailureRecoveryLocation = computed(() => {
+  if (!directoryFailureNotice.value || !access.value) return ''
+  const memberships = memberAdmission.value?.directoryMemberships || []
+  if (memberships.length === 0) return ''
+  const targetIntegrationId = directoryFailureNotice.value.integrationId.trim()
+  const matchedMembership = memberships.find((membership) => membership.integrationId === targetIntegrationId) || memberships[0]
+  if (!matchedMembership) return ''
+  const location = buildDirectoryLocation(matchedMembership, access.value.user.id)
+  return location === directoryFailureDirectoryLocation.value ? '' : location
+})
+
+function clearDirectoryFailureContext(): void {
+  const fallbackUserId = selectedUserId.value || access.value?.user.id || userNavigation.value.userId.trim()
+  replaceUserNavigation({
+    userId: fallbackUserId,
+    source: '',
+    integrationId: '',
+    accountId: '',
+    directoryFailure: '',
+  })
+  const fallbackUserName = access.value?.user.name || access.value?.user.email || fallbackUserId
+  setStatus(fallbackUserName ? `已清除目录失败提示，保留当前用户 ${fallbackUserName}` : '已清除目录失败提示')
+}
+
+function syncUserNavigationFromLocation(): boolean {
+  const next = readInitialUserNavigation()
+  const currentKey = buildUserNavigationKey(userNavigation.value)
+  const nextKey = buildUserNavigationKey(next)
+  userNavigation.value = next
+  return currentKey !== nextKey
 }
 
 function extractNamespaceFromPermission(permission: string): string | null {
@@ -951,6 +1101,8 @@ async function loadUsers(): Promise<void> {
   try {
     const params = new URLSearchParams()
     params.set('q', search.value)
+    const pinUserId = userNavigation.value.userId.trim()
+    if (pinUserId) params.set('userId', pinUserId)
     const response = await apiFetch(`/api/admin/users?${params.toString()}`)
     const payload = await readJson(response)
     if (!response.ok || payload.ok !== true) {
@@ -971,7 +1123,19 @@ async function loadUsers(): Promise<void> {
     reconcileSelectedUsers()
 
     if (!selectedUserId.value && users.value.length > 0) {
-      await selectUser(users.value[0].id)
+      const requestedUser = userNavigation.value.userId
+        ? users.value.find((item) => item.id === userNavigation.value.userId)
+        : null
+      await selectUser((requestedUser || users.value[0]).id)
+    } else if (userNavigation.value.userId) {
+      const navigationKey = buildUserNavigationKey(userNavigation.value)
+      const requestedUser = users.value.find((item) => item.id === userNavigation.value.userId)
+      if (
+        requestedUser
+        && (selectedUserId.value !== requestedUser.id || appliedUserNavigationKey.value !== navigationKey)
+      ) {
+        await selectUser(requestedUser.id)
+      }
     }
   } catch (error) {
     setStatus(error instanceof Error ? error.message : '加载用户失败', 'error')
@@ -1101,10 +1265,41 @@ async function selectUser(userId: string): Promise<void> {
     }
 
     access.value = payload.data as UserAccess
+    const navigationKey = buildUserNavigationKey(userNavigation.value)
+    if (userNavigation.value.userId === userId && appliedUserNavigationKey.value !== navigationKey) {
+      if (userNavigation.value.source === 'directory-sync') {
+        setStatus(`已从目录同步定位到用户 ${access.value.user.name || access.value.user.email}`)
+      }
+      appliedUserNavigationKey.value = navigationKey
+    }
     await Promise.all([loadInviteRecords(userId), loadUserSessions(userId), loadDingTalkAccess(userId), loadMemberAdmission(userId)])
   } catch (error) {
     setStatus(error instanceof Error ? error.message : '加载用户权限失败', 'error')
   }
+}
+
+async function handleUserNavigationChange(): Promise<void> {
+  const navigation = userNavigation.value
+  const navigationKey = buildUserNavigationKey(navigation)
+  if (!navigation.userId) {
+    appliedUserNavigationKey.value = navigationKey
+    return
+  }
+  if (navigationKey && appliedUserNavigationKey.value === navigationKey && selectedUserId.value === navigation.userId) return
+
+  if (search.value) {
+    search.value = ''
+    await loadUsers()
+    return
+  }
+
+  const requestedUser = users.value.find((item) => item.id === navigation.userId)
+  if (!requestedUser) {
+    await loadUsers()
+    return
+  }
+
+  await selectUser(requestedUser.id)
 }
 
 async function loadDingTalkAccess(userId?: string): Promise<void> {
@@ -1558,8 +1753,42 @@ async function unassignRole(): Promise<void> {
   await updateRole('unassign')
 }
 
+function buildDirectoryNavigationLocation({
+  userId,
+  integrationId,
+  accountId,
+}: {
+  userId: string
+  integrationId: string
+  accountId: string
+}): string {
+  const params = new URLSearchParams()
+  params.set('integrationId', integrationId)
+  if (accountId.trim().length > 0) params.set('accountId', accountId)
+  params.set('source', 'user-management')
+  params.set('userId', userId)
+  return `/admin/directory?${params.toString()}`
+}
+
+function buildDirectoryLocation(membership: MemberDirectoryMembership, userId: string): string {
+  return buildDirectoryNavigationLocation({
+    userId,
+    integrationId: membership.integrationId,
+    accountId: membership.directoryAccountId,
+  })
+}
+
+const stopUserLocationSync = subscribeToLocationChanges(() => {
+  if (!syncUserNavigationFromLocation()) return
+  void handleUserNavigationChange()
+})
+
 onMounted(async () => {
   await Promise.all([loadRoles(), loadUsers(), loadAccessPresets(), loadInviteRecords()])
+})
+
+onUnmounted(() => {
+  stopUserLocationSync()
 })
 </script>
 
@@ -1650,6 +1879,32 @@ onMounted(async () => {
 .user-admin__status--error {
   background: #fef2f2;
   color: #dc2626;
+}
+
+.user-admin__source-banner {
+  display: grid;
+  gap: 4px;
+}
+
+.user-admin__source-banner p {
+  margin: 0;
+}
+
+.user-admin__source-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.user-admin__button-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  text-decoration: none;
+}
+
+.user-admin__button-link:hover {
+  text-decoration: none;
 }
 
 .user-admin__layout {

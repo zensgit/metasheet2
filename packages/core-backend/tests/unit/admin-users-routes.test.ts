@@ -239,6 +239,7 @@ describe('admin-users routes', () => {
             id: 'user-1',
             email: 'alpha@example.com',
             name: 'Alpha',
+            mobile: '13800138000',
             role: 'user',
             is_active: true,
             is_admin: false,
@@ -266,7 +267,119 @@ describe('admin-users routes', () => {
     expect((response.body as Record<string, any>).data.items[0]).toMatchObject({
       id: 'user-1',
       email: 'alpha@example.com',
+      mobile: '13800138000',
     })
+  })
+
+  it('pins a deep-linked user when the row is outside the paginated window', async () => {
+    rbacMocks.isAdmin.mockResolvedValue(true)
+    pgMocks.query
+      .mockResolvedValueOnce({ rows: [{ c: 42 }] })
+      .mockResolvedValueOnce({
+        rows: [
+          {
+            id: 'user-first',
+            email: 'first@example.com',
+            name: 'First',
+            mobile: null,
+            role: 'user',
+            is_active: true,
+            is_admin: false,
+            last_login_at: null,
+            created_at: '2026-03-12T00:00:00.000Z',
+            updated_at: '2026-03-12T00:00:00.000Z',
+          },
+        ],
+      })
+      .mockResolvedValueOnce({
+        rows: [
+          {
+            id: 'user-pinned',
+            email: 'pinned@example.com',
+            name: 'Pinned',
+            mobile: null,
+            role: 'user',
+            is_active: true,
+            is_admin: false,
+            last_login_at: null,
+            created_at: '2026-03-01T00:00:00.000Z',
+            updated_at: '2026-03-01T00:00:00.000Z',
+          },
+        ],
+      })
+
+    const response = await invokeRoute('get', '/api/admin/users', {
+      query: { userId: 'user-pinned', page: '1', pageSize: '20' },
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect(pgMocks.query).toHaveBeenCalledTimes(3)
+    const items = (response.body as Record<string, any>).data.items
+    expect(items[0].id).toBe('user-pinned')
+    expect(items.map((row: Record<string, unknown>) => row.id)).toEqual(['user-pinned', 'user-first'])
+    expect((response.body as Record<string, any>).data.pinUserId).toBe('user-pinned')
+    expect((response.body as Record<string, any>).data.pinUserIncluded).toBe(true)
+  })
+
+  it('skips the extra pin lookup when the deep-linked user already appears in the first page', async () => {
+    rbacMocks.isAdmin.mockResolvedValue(true)
+    pgMocks.query
+      .mockResolvedValueOnce({ rows: [{ c: 3 }] })
+      .mockResolvedValueOnce({
+        rows: [
+          {
+            id: 'user-a',
+            email: 'a@example.com',
+            name: 'A',
+            mobile: null,
+            role: 'user',
+            is_active: true,
+            is_admin: false,
+            last_login_at: null,
+            created_at: '2026-03-10T00:00:00.000Z',
+            updated_at: '2026-03-10T00:00:00.000Z',
+          },
+          {
+            id: 'user-b',
+            email: 'b@example.com',
+            name: 'B',
+            mobile: null,
+            role: 'user',
+            is_active: true,
+            is_admin: false,
+            last_login_at: null,
+            created_at: '2026-03-09T00:00:00.000Z',
+            updated_at: '2026-03-09T00:00:00.000Z',
+          },
+        ],
+      })
+
+    const response = await invokeRoute('get', '/api/admin/users', {
+      query: { userId: 'user-a' },
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect(pgMocks.query).toHaveBeenCalledTimes(2)
+    expect((response.body as Record<string, any>).data.items.map((row: Record<string, unknown>) => row.id)).toEqual(['user-a', 'user-b'])
+    expect((response.body as Record<string, any>).data.pinUserIncluded).toBe(true)
+  })
+
+  it('reports pinUserIncluded=false when the deep-linked user does not exist', async () => {
+    rbacMocks.isAdmin.mockResolvedValue(true)
+    pgMocks.query
+      .mockResolvedValueOnce({ rows: [{ c: 0 }] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+
+    const response = await invokeRoute('get', '/api/admin/users', {
+      query: { userId: 'missing-user' },
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect(pgMocks.query).toHaveBeenCalledTimes(3)
+    expect((response.body as Record<string, any>).data.items).toEqual([])
+    expect((response.body as Record<string, any>).data.pinUserId).toBe('missing-user')
+    expect((response.body as Record<string, any>).data.pinUserIncluded).toBe(false)
   })
 
   it('rejects non-admin requests', async () => {
@@ -294,6 +407,7 @@ describe('admin-users routes', () => {
           id: 'user-1',
           email: 'alpha@example.com',
           name: 'Alpha',
+          mobile: '13800138000',
           role: 'user',
           is_active: true,
           is_admin: false,

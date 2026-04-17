@@ -31,6 +31,7 @@ type AdminUserProfile = {
   id: string
   email: string
   name: string | null
+  mobile: string | null
   role: string
   is_active: boolean
   is_admin: boolean
@@ -281,7 +282,7 @@ async function ensurePlatformAdmin(req: Request, res: Response): Promise<string 
 
 async function fetchUserProfile(userId: string): Promise<AdminUserProfile | null> {
   const result = await query<AdminUserProfile>(
-    `SELECT id, email, name, role, is_active, is_admin, last_login_at, created_at, updated_at
+    `SELECT id, email, name, mobile, role, is_active, is_admin, last_login_at, created_at, updated_at
      FROM users
      WHERE id = $1`,
     [userId],
@@ -2141,10 +2142,10 @@ export function adminUsersRouter(): Router {
           Promise.resolve([]),
           (async () => {
             const term = q ? `%${q}%` : '%'
-            const where = q ? 'WHERE email ILIKE $1 OR name ILIKE $1 OR id ILIKE $1' : ''
+            const where = q ? 'WHERE email ILIKE $1 OR name ILIKE $1 OR COALESCE(mobile, \'\') ILIKE $1 OR id ILIKE $1' : ''
             const countSql = `SELECT COUNT(*)::int AS c FROM users ${where}`
             const listSql = `
-              SELECT id, email, name, role, is_active, is_admin, last_login_at, created_at, updated_at
+              SELECT id, email, name, mobile, role, is_active, is_admin, last_login_at, created_at, updated_at
               FROM users
               ${where}
               ORDER BY created_at DESC
@@ -2439,6 +2440,7 @@ export function adminUsersRouter(): Router {
 
     try {
       const q = String(req.query.q || '').trim()
+      const pinUserId = String(req.query.userId || '').trim()
       const { page, pageSize, offset } = parsePagination(req.query as Record<string, unknown>, {
         defaultPage: 1,
         defaultPageSize: 20,
@@ -2446,10 +2448,10 @@ export function adminUsersRouter(): Router {
       })
 
       const term = q ? `%${q}%` : '%'
-      const where = q ? 'WHERE email ILIKE $1 OR name ILIKE $1 OR id ILIKE $1' : ''
+      const where = q ? 'WHERE email ILIKE $1 OR name ILIKE $1 OR COALESCE(mobile, \'\') ILIKE $1 OR id ILIKE $1' : ''
       const countSql = `SELECT COUNT(*)::int AS c FROM users ${where}`
       const listSql = `
-        SELECT id, email, name, role, is_active, is_admin, last_login_at, created_at, updated_at
+        SELECT id, email, name, mobile, role, is_active, is_admin, last_login_at, created_at, updated_at
         FROM users
         ${where}
         ORDER BY created_at DESC
@@ -2460,12 +2462,32 @@ export function adminUsersRouter(): Router {
       const total = count.rows[0]?.c ?? 0
       const list = await query<AdminUserProfile>(listSql, q ? [term, pageSize, offset] : [pageSize, offset])
 
+      const items = list.rows
+      let pinnedUserIncluded = true
+      if (pinUserId && !items.some((row) => row.id === pinUserId)) {
+        // Deep-link target was not in the paginated window — fetch the single
+        // row so the caller can focus it without a second round-trip.
+        const pinned = await query<AdminUserProfile>(
+          `SELECT id, email, name, mobile, role, is_active, is_admin, last_login_at, created_at, updated_at
+           FROM users
+           WHERE id = $1`,
+          [pinUserId],
+        )
+        if (pinned.rows[0]) {
+          items.unshift(pinned.rows[0])
+        } else {
+          pinnedUserIncluded = false
+        }
+      }
+
       return jsonOk(res, {
-        items: list.rows,
+        items,
         page,
         pageSize,
         total,
         query: q,
+        pinUserId: pinUserId || '',
+        pinUserIncluded: pinUserId ? pinnedUserIncluded : null,
         actorId: adminUserId,
       })
     } catch (error) {
