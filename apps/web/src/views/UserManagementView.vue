@@ -1289,6 +1289,15 @@ async function loadUserSessions(userId?: string): Promise<void> {
   }
 }
 
+async function fetchUserAccessOrThrow(userId: string): Promise<UserAccess> {
+  const response = await apiFetch(`/api/admin/users/${encodeURIComponent(userId)}/access`)
+  const payload = await readJson(response)
+  if (!response.ok || payload.ok !== true) {
+    throw new Error(String((payload.error as Record<string, unknown> | undefined)?.message || '加载用户权限失败'))
+  }
+  return payload.data as UserAccess
+}
+
 async function selectUser(userId: string): Promise<void> {
   selectedUserId.value = userId
   selectedRoleId.value = ''
@@ -1298,13 +1307,7 @@ async function selectUser(userId: string): Promise<void> {
   dingtalkAccess.value = null
   memberAdmission.value = null
   try {
-    const response = await apiFetch(`/api/admin/users/${encodeURIComponent(userId)}/access`)
-    const payload = await readJson(response)
-    if (!response.ok || payload.ok !== true) {
-      throw new Error(String((payload.error as Record<string, unknown> | undefined)?.message || '加载用户权限失败'))
-    }
-
-    access.value = payload.data as UserAccess
+    access.value = await fetchUserAccessOrThrow(userId)
     syncProfileDraftFromAccess()
     const navigationKey = buildUserNavigationKey(userNavigation.value)
     if (userNavigation.value.userId === userId && appliedUserNavigationKey.value !== navigationKey) {
@@ -1844,10 +1847,19 @@ async function saveUserProfile(): Promise<void> {
     if (response.status === 409) {
       const errorCode = (payload.error as Record<string, unknown> | undefined)?.code
       if (errorCode === 'PROFILE_MOBILE_CONFLICT') {
-        await selectUser(baselineUserId)
-        const latest = access.value?.user.mobile ?? null
-        const latestLabel = latest === null || latest === '' ? '（空）' : latest
-        setStatus(`用户手机号已被其他操作更新为 ${latestLabel}，请确认最新值后重新保存`, 'error')
+        try {
+          const latestAccess = await fetchUserAccessOrThrow(baselineUserId)
+          access.value = latestAccess
+          syncProfileDraftFromAccess()
+          const latest = latestAccess.user.mobile ?? null
+          const latestLabel = latest === null || latest === '' ? '（空）' : latest
+          setStatus(`用户手机号已被其他操作更新为 ${latestLabel}，请确认最新值后重新保存`, 'error')
+        } catch {
+          // If the refresh itself failed we must not advertise a stale value
+          // as the "latest" — it would mislead the admin about what the
+          // backend currently holds.
+          setStatus('用户手机号已被其他操作更新，请刷新后重试', 'error')
+        }
         return
       }
     }

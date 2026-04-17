@@ -2952,13 +2952,22 @@ export function adminUsersRouter(): Router {
         return jsonError(res, 400, 'INVALID_EXPECTED_MOBILE', 'expectedMobile must be string or null')
       }
 
+      // Both the stored value and the witness are normalised the same way
+      // (strip all whitespace, map empty to NULL) before comparison so legacy
+      // rows like "138 0013 8000" don't spuriously fail CAS when the client
+      // sends the already-sanitised "13800138000" witness.
       const updateResult = await query<{ id: string }>(
         `UPDATE users
          SET name = $1,
              mobile = $2,
              updated_at = NOW()
          WHERE id = $3
-           AND ($4::boolean = FALSE OR (($5::text IS NULL AND mobile IS NULL) OR mobile = $5::text))
+           AND (
+             $4::boolean = FALSE
+             OR NULLIF(regexp_replace(COALESCE(mobile, ''), '\\s+', '', 'g'), '')
+                IS NOT DISTINCT FROM
+                NULLIF(regexp_replace(COALESCE($5::text, ''), '\\s+', '', 'g'), '')
+           )
          RETURNING id`,
         [nextName, nextMobile, userId, hasExpectedMobile, expectedMobile ?? null],
       )
