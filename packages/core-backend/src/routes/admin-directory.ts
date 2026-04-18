@@ -8,6 +8,8 @@ import {
   bindDirectoryAccount,
   createDirectoryIntegration,
   getDirectorySyncScheduleSnapshot,
+  getDirectoryAccountSummary,
+  getDirectoryReviewItem,
   listDirectoryIntegrationAccounts,
   listDirectoryIntegrations,
   listDirectoryReviewItems,
@@ -272,6 +274,40 @@ export function adminDirectoryRouter(): Router {
     } catch (error) {
       const message = readErrorMessage(error, 'Failed to load directory accounts')
       jsonError(res, /required|invalid/i.test(message) ? 400 : 500, 'DIRECTORY_ACCOUNTS_FAILED', message)
+    }
+  })
+
+  router.get('/accounts/:accountId', async (req: Request, res: Response) => {
+    const adminUserId = await ensurePlatformAdmin(req, res)
+    if (!adminUserId) return
+
+    try {
+      const account = await getDirectoryAccountSummary(req.params.accountId)
+      if (!account) {
+        jsonError(res, 404, 'DIRECTORY_ACCOUNT_NOT_FOUND', 'Directory account not found')
+        return
+      }
+      jsonOk(res, { account })
+    } catch (error) {
+      const message = readErrorMessage(error, 'Failed to load directory account')
+      jsonError(res, /required/i.test(message) ? 400 : 500, 'DIRECTORY_ACCOUNT_FAILED', message)
+    }
+  })
+
+  router.get('/accounts/:accountId/review-item', async (req: Request, res: Response) => {
+    const adminUserId = await ensurePlatformAdmin(req, res)
+    if (!adminUserId) return
+
+    try {
+      const item = await getDirectoryReviewItem(req.params.accountId)
+      if (!item) {
+        jsonError(res, 404, 'DIRECTORY_REVIEW_ITEM_NOT_FOUND', 'Directory review item not found')
+        return
+      }
+      jsonOk(res, { item })
+    } catch (error) {
+      const message = readErrorMessage(error, 'Failed to load directory review item')
+      jsonError(res, /required/i.test(message) ? 400 : 500, 'DIRECTORY_REVIEW_ITEM_FAILED', message)
     }
   })
 

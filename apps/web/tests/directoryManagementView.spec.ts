@@ -23,6 +23,26 @@ function createJsonResponse(payload: unknown, status = 200) {
   }
 }
 
+function registerRouterLink(app: App<Element>, withHref = false): void {
+  app.component('RouterLink', {
+    props: ['to'],
+    computed: {
+      resolvedHref(): string {
+        return typeof this.to === 'string' ? this.to : String(this.to || '')
+      },
+    },
+    template: withHref ? '<a :href="resolvedHref"><slot /></a>' : '<a><slot /></a>',
+  })
+}
+
+function findAccountsSection(container: HTMLElement): HTMLElement {
+  const section = Array.from(container.querySelectorAll('.directory-admin__section')).find((candidate) => candidate.textContent?.includes('成员账号'))
+  if (!(section instanceof HTMLElement)) {
+    throw new Error('Accounts section not found')
+  }
+  return section
+}
+
 function createIntegration(overrides: Record<string, unknown> = {}) {
   return {
     id: 'dir-1',
@@ -221,6 +241,7 @@ describe('DirectoryManagementView', () => {
       configurable: true,
       value: originalScrollIntoView,
     })
+    window.history.replaceState({}, '', '/')
     app = null
     container = null
   })
@@ -294,10 +315,7 @@ describe('DirectoryManagementView', () => {
       ))
 
     app = createApp(DirectoryManagementView)
-    app.component('RouterLink', {
-      props: ['to'],
-      template: '<a><slot /></a>',
-    })
+    registerRouterLink(app)
     app.mount(container!)
     await flushUi()
 
@@ -853,6 +871,681 @@ describe('DirectoryManagementView', () => {
     expect(container?.textContent).toContain('alpha@example.com')
   })
 
+  it('can auto-focus a directory member from user-management query params and expose a link back to user management', async () => {
+    window.history.replaceState({}, '', '/admin/directory?integrationId=dir-1&accountId=account-focus&source=user-management&userId=user-1')
+
+    apiFetchMock
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: {
+          items: [createIntegration()],
+        },
+      }))
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: {
+          account: createAccount({
+            id: 'account-focus',
+            name: '定位成员',
+            externalUserId: '0447654442691199',
+            linkStatus: 'linked',
+            matchStrategy: 'manual_admin',
+            localUser: {
+              id: 'user-1',
+              email: 'alpha@example.com',
+              name: 'Alpha',
+            },
+          }),
+        },
+      }))
+      .mockResolvedValueOnce(createJsonResponse({ ok: true, data: { items: [] } }))
+      .mockResolvedValueOnce(createJsonResponse(createScheduleSnapshotPayload()))
+      .mockResolvedValueOnce(createJsonResponse(createAlertListPayload([])))
+      .mockResolvedValueOnce(createJsonResponse(createReviewItemsPayload([])))
+      .mockResolvedValueOnce(createJsonResponse(
+        createAccountListPayload([
+          createAccount({
+            id: 'account-focus',
+            name: '定位成员',
+            externalUserId: '0447654442691199',
+            linkStatus: 'linked',
+            matchStrategy: 'manual_admin',
+            localUser: {
+              id: 'user-1',
+              email: 'alpha@example.com',
+              name: 'Alpha',
+            },
+          }),
+        ], { total: 1 }),
+      ))
+
+    app = createApp(DirectoryManagementView)
+    registerRouterLink(app, true)
+    app.mount(container!)
+    await flushUi(12)
+
+    expect(apiFetchMock).toHaveBeenCalledWith('/api/admin/directory/accounts/account-focus')
+    expect(container?.textContent).toContain('已从用户管理定位到目录成员 定位成员')
+    expect(container?.textContent).toContain('当前定位成员：定位成员')
+
+    const userLink = Array.from(container!.querySelectorAll('a')).find((candidate) => candidate.textContent?.includes('前往用户管理'))
+    expect(userLink?.getAttribute('href')).toBe('/admin/users?userId=user-1&source=directory-sync&integrationId=dir-1&accountId=account-focus')
+  })
+
+  it('clears stale focus and shows a specific error when query targets a missing integration', async () => {
+    window.history.replaceState({}, '', '/admin/directory?integrationId=dir-1&accountId=account-focus&source=user-management&userId=user-1')
+
+    apiFetchMock
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: {
+          items: [createIntegration()],
+        },
+      }))
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: {
+          account: createAccount({
+            id: 'account-focus',
+            name: '定位成员',
+            externalUserId: '0447654442691199',
+            linkStatus: 'linked',
+            matchStrategy: 'manual_admin',
+            localUser: {
+              id: 'user-1',
+              email: 'alpha@example.com',
+              name: 'Alpha',
+            },
+          }),
+        },
+      }))
+      .mockResolvedValueOnce(createJsonResponse({ ok: true, data: { items: [] } }))
+      .mockResolvedValueOnce(createJsonResponse(createScheduleSnapshotPayload()))
+      .mockResolvedValueOnce(createJsonResponse(createAlertListPayload([])))
+      .mockResolvedValueOnce(createJsonResponse(createReviewItemsPayload([])))
+      .mockResolvedValueOnce(createJsonResponse(
+        createAccountListPayload([
+          createAccount({
+            id: 'account-focus',
+            name: '定位成员',
+            externalUserId: '0447654442691199',
+            linkStatus: 'linked',
+            matchStrategy: 'manual_admin',
+            localUser: {
+              id: 'user-1',
+              email: 'alpha@example.com',
+              name: 'Alpha',
+            },
+          }),
+        ], { total: 1 }),
+      ))
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: {
+          items: [createIntegration()],
+        },
+      }))
+      .mockResolvedValueOnce(createJsonResponse(
+        createAccountListPayload([
+          createAccount({
+            id: 'account-focus',
+            name: '定位成员',
+            externalUserId: '0447654442691199',
+            linkStatus: 'linked',
+            matchStrategy: 'manual_admin',
+            localUser: {
+              id: 'user-1',
+              email: 'alpha@example.com',
+              name: 'Alpha',
+            },
+          }),
+          createAccount({
+            id: 'account-other',
+            name: '恢复成员列表',
+            externalUserId: '0447654442691200',
+            linkStatus: 'unmatched',
+            matchStrategy: 'none',
+            localUser: null,
+          }),
+        ], { total: 2 }),
+      ))
+
+    app = createApp(DirectoryManagementView)
+    registerRouterLink(app, true)
+    app.mount(container!)
+    await flushUi(12)
+
+    expect(container?.textContent).toContain('当前定位成员：定位成员')
+
+    window.history.replaceState({}, '', '/admin/directory?integrationId=dir-missing&accountId=account-missing&source=user-management&userId=user-2')
+    await flushUi(12)
+
+    const accountsSection = findAccountsSection(container!)
+    const routeBanner = accountsSection.querySelector('.directory-admin__route-banner')
+    expect(routeBanner).toBeInstanceOf(HTMLElement)
+    expect(routeBanner?.textContent).toContain('定位未完成')
+    expect(routeBanner?.textContent).toContain('未找到目录集成 dir-missing')
+    expect(routeBanner?.textContent).toContain('目标集成：dir-missing')
+    expect(routeBanner?.textContent).toContain('目标成员：account-missing')
+    expect(routeBanner?.textContent).toContain('当前仍停留在 DingTalk CN')
+    const returnUserLink = Array.from(accountsSection.querySelectorAll('a')).find((candidate) => candidate.textContent?.includes('返回用户管理'))
+    expect(returnUserLink?.getAttribute('href')).toBe('/admin/users?userId=user-2&source=directory-sync&directoryFailure=missing_integration&integrationId=dir-missing&accountId=account-missing')
+    expect(container?.querySelector('.directory-admin__focus-card')).toBeNull()
+    expect(container?.querySelector('.directory-admin__account--focused')).toBeNull()
+    const accountSearch = container?.querySelector('input[placeholder="搜索姓名 / 邮箱 / 手机 / 钉钉 ID / 本地用户"]')
+    expect(accountSearch).toBeInstanceOf(HTMLInputElement)
+    expect((accountSearch as HTMLInputElement).value).toBe('')
+    expect(container?.textContent).toContain('恢复成员列表')
+    expect(apiFetchMock.mock.calls.filter((args) => String(args[0]) === '/api/admin/directory/accounts/account-missing')).toHaveLength(0)
+
+    const retainButton = Array.from(accountsSection.querySelectorAll('button')).find((candidate) => candidate.textContent?.includes('留在 DingTalk CN'))
+    expect(retainButton).toBeTruthy()
+    retainButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi(4)
+    expect(window.location.search).toBe('?integrationId=dir-1')
+    expect(container?.textContent).toContain('已保留当前目录上下文 DingTalk CN')
+    expect(findAccountsSection(container!).querySelector('.directory-admin__route-banner')).toBeNull()
+  })
+
+  it('clears stale focus and shows a specific error when query targets a missing account', async () => {
+    window.history.replaceState({}, '', '/admin/directory?integrationId=dir-1&accountId=account-focus&source=user-management&userId=user-1')
+
+    apiFetchMock
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: {
+          items: [createIntegration()],
+        },
+      }))
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: {
+          account: createAccount({
+            id: 'account-focus',
+            name: '定位成员',
+            externalUserId: '0447654442691199',
+            linkStatus: 'linked',
+            matchStrategy: 'manual_admin',
+            localUser: {
+              id: 'user-1',
+              email: 'alpha@example.com',
+              name: 'Alpha',
+            },
+          }),
+        },
+      }))
+      .mockResolvedValueOnce(createJsonResponse({ ok: true, data: { items: [] } }))
+      .mockResolvedValueOnce(createJsonResponse(createScheduleSnapshotPayload()))
+      .mockResolvedValueOnce(createJsonResponse(createAlertListPayload([])))
+      .mockResolvedValueOnce(createJsonResponse(createReviewItemsPayload([])))
+      .mockResolvedValueOnce(createJsonResponse(
+        createAccountListPayload([
+          createAccount({
+            id: 'account-focus',
+            name: '定位成员',
+            externalUserId: '0447654442691199',
+            linkStatus: 'linked',
+            matchStrategy: 'manual_admin',
+            localUser: {
+              id: 'user-1',
+              email: 'alpha@example.com',
+              name: 'Alpha',
+            },
+          }),
+        ], { total: 1 }),
+      ))
+      .mockResolvedValueOnce(createJsonResponse({ ok: false }, 404))
+      .mockResolvedValueOnce(createJsonResponse(createReviewItemsPayload([])))
+      .mockResolvedValueOnce(createJsonResponse(
+        createAccountListPayload([
+          createAccount({
+            id: 'account-focus',
+            name: '定位成员',
+            externalUserId: '0447654442691199',
+            linkStatus: 'linked',
+            matchStrategy: 'manual_admin',
+            localUser: {
+              id: 'user-1',
+              email: 'alpha@example.com',
+              name: 'Alpha',
+            },
+          }),
+        ], { total: 1 }),
+      ))
+
+    app = createApp(DirectoryManagementView)
+    registerRouterLink(app, true)
+    app.mount(container!)
+    await flushUi(12)
+
+    expect(container?.textContent).toContain('当前定位成员：定位成员')
+
+    window.history.replaceState({}, '', '/admin/directory?integrationId=dir-1&accountId=account-missing&source=user-management&userId=user-2')
+    await flushUi(12)
+
+    expect(apiFetchMock).toHaveBeenCalledWith('/api/admin/directory/accounts/account-missing')
+    const accountsSection = findAccountsSection(container!)
+    const routeBanner = accountsSection.querySelector('.directory-admin__route-banner')
+    expect(routeBanner).toBeInstanceOf(HTMLElement)
+    expect(routeBanner?.textContent).toContain('定位未完成')
+    expect(routeBanner?.textContent).toContain('未找到目录成员 account-missing')
+    expect(routeBanner?.textContent).toContain('目标集成：dir-1')
+    expect(routeBanner?.textContent).toContain('目标成员：account-missing')
+    expect(routeBanner?.textContent).toContain('当前仍停留在 DingTalk CN')
+    const returnUserLink = Array.from(accountsSection.querySelectorAll('a')).find((candidate) => candidate.textContent?.includes('返回用户管理'))
+    expect(returnUserLink?.getAttribute('href')).toBe('/admin/users?userId=user-2&source=directory-sync&directoryFailure=missing_account&integrationId=dir-1&accountId=account-missing')
+    expect(container?.querySelector('.directory-admin__focus-card')).toBeNull()
+    expect(container?.querySelector('.directory-admin__account--focused')).toBeNull()
+    const accountSearch = container?.querySelector('input[placeholder="搜索姓名 / 邮箱 / 手机 / 钉钉 ID / 本地用户"]')
+    expect(accountSearch).toBeInstanceOf(HTMLInputElement)
+    expect((accountSearch as HTMLInputElement).value).toBe('')
+  })
+
+  it('can retry route navigation from the failure banner after a missing account result', async () => {
+    window.history.replaceState({}, '', '/admin/directory?integrationId=dir-1&accountId=account-focus&source=user-management&userId=user-1')
+
+    apiFetchMock
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: {
+          items: [createIntegration()],
+        },
+      }))
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: {
+          account: createAccount({
+            id: 'account-focus',
+            name: '定位成员',
+            externalUserId: '0447654442691199',
+            linkStatus: 'linked',
+            matchStrategy: 'manual_admin',
+            localUser: {
+              id: 'user-1',
+              email: 'alpha@example.com',
+              name: 'Alpha',
+            },
+          }),
+        },
+      }))
+      .mockResolvedValueOnce(createJsonResponse({ ok: true, data: { items: [] } }))
+      .mockResolvedValueOnce(createJsonResponse(createScheduleSnapshotPayload()))
+      .mockResolvedValueOnce(createJsonResponse(createAlertListPayload([])))
+      .mockResolvedValueOnce(createJsonResponse(createReviewItemsPayload([])))
+      .mockResolvedValueOnce(createJsonResponse(
+        createAccountListPayload([
+          createAccount({
+            id: 'account-focus',
+            name: '定位成员',
+            externalUserId: '0447654442691199',
+            linkStatus: 'linked',
+            matchStrategy: 'manual_admin',
+            localUser: {
+              id: 'user-1',
+              email: 'alpha@example.com',
+              name: 'Alpha',
+            },
+          }),
+        ], { total: 1 }),
+      ))
+      .mockResolvedValueOnce(createJsonResponse({ ok: false }, 404))
+      .mockResolvedValueOnce(createJsonResponse(createReviewItemsPayload([])))
+      .mockResolvedValueOnce(createJsonResponse(
+        createAccountListPayload([
+          createAccount({
+            id: 'account-focus',
+            name: '定位成员',
+            externalUserId: '0447654442691199',
+            linkStatus: 'linked',
+            matchStrategy: 'manual_admin',
+            localUser: {
+              id: 'user-1',
+              email: 'alpha@example.com',
+              name: 'Alpha',
+            },
+          }),
+        ], { total: 1 }),
+      ))
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: {
+          account: createAccount({
+            id: 'account-missing',
+            name: '重试定位成员',
+            externalUserId: '0447654442692299',
+            linkStatus: 'linked',
+            matchStrategy: 'manual_admin',
+            localUser: {
+              id: 'user-2',
+              email: 'bravo@example.com',
+              name: 'Bravo',
+            },
+          }),
+        },
+      }))
+      .mockResolvedValueOnce(createJsonResponse(createReviewItemsPayload([])))
+      .mockResolvedValueOnce(createJsonResponse(
+        createAccountListPayload([
+          createAccount({
+            id: 'account-missing',
+            name: '重试定位成员',
+            externalUserId: '0447654442692299',
+            linkStatus: 'linked',
+            matchStrategy: 'manual_admin',
+            localUser: {
+              id: 'user-2',
+              email: 'bravo@example.com',
+              name: 'Bravo',
+            },
+          }),
+        ], { total: 1 }),
+      ))
+
+    app = createApp(DirectoryManagementView)
+    registerRouterLink(app, true)
+    app.mount(container!)
+    await flushUi(12)
+
+    window.history.replaceState({}, '', '/admin/directory?integrationId=dir-1&accountId=account-missing&source=user-management&userId=user-2')
+    await flushUi(12)
+
+    const accountsSection = findAccountsSection(container!)
+    const retryButton = Array.from(accountsSection.querySelectorAll('button')).find((candidate) => candidate.textContent?.includes('重试定位'))
+    expect(retryButton).toBeTruthy()
+    retryButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi(12)
+
+    expect(apiFetchMock.mock.calls.filter((args) => String(args[0]) === '/api/admin/directory/accounts/account-missing')).toHaveLength(2)
+    expect(findAccountsSection(container!).querySelector('.directory-admin__route-banner')).toBeNull()
+    expect(container?.textContent).toContain('已从用户管理定位到目录成员 重试定位成员')
+    expect(container?.textContent).toContain('当前定位成员：重试定位成员')
+  })
+
+  it('can re-focus a directory member when query params change on the same mounted instance', async () => {
+    apiFetchMock
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: {
+          items: [createIntegration()],
+        },
+      }))
+      .mockResolvedValueOnce(createJsonResponse({ ok: true, data: { items: [] } }))
+      .mockResolvedValueOnce(createJsonResponse(createScheduleSnapshotPayload()))
+      .mockResolvedValueOnce(createJsonResponse(createAlertListPayload([])))
+      .mockResolvedValueOnce(createJsonResponse(createReviewItemsPayload([])))
+      .mockResolvedValueOnce(createJsonResponse(createAccountListPayload([
+        createAccount({
+          id: 'account-initial',
+          name: '初始成员',
+          externalUserId: '0447654442691100',
+          linkStatus: 'linked',
+          matchStrategy: 'manual_admin',
+          localUser: {
+            id: 'user-0',
+            email: 'initial@example.com',
+            name: 'Initial',
+          },
+        }),
+      ], { total: 1 })))
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: {
+          account: createAccount({
+            id: 'account-focus',
+            name: '定位成员',
+            externalUserId: '0447654442691199',
+            linkStatus: 'linked',
+            matchStrategy: 'manual_admin',
+            localUser: {
+              id: 'user-1',
+              email: 'alpha@example.com',
+              name: 'Alpha',
+            },
+          }),
+        },
+      }))
+      .mockResolvedValueOnce(createJsonResponse(createReviewItemsPayload([])))
+      .mockResolvedValueOnce(createJsonResponse(
+        createAccountListPayload([
+          createAccount({
+            id: 'account-focus',
+            name: '定位成员',
+            externalUserId: '0447654442691199',
+            linkStatus: 'linked',
+            matchStrategy: 'manual_admin',
+            localUser: {
+              id: 'user-1',
+              email: 'alpha@example.com',
+              name: 'Alpha',
+            },
+          }),
+        ], { total: 1 }),
+      ))
+
+    app = createApp(DirectoryManagementView)
+    registerRouterLink(app, true)
+    app.mount(container!)
+    await flushUi(12)
+
+    window.history.replaceState({}, '', '/admin/directory?integrationId=dir-1&accountId=account-focus&source=user-management&userId=user-1')
+    await flushUi(12)
+
+    expect(apiFetchMock).toHaveBeenCalledWith('/api/admin/directory/accounts/account-focus')
+    expect(container?.textContent).toContain('已从用户管理定位到目录成员 定位成员')
+
+    const userLink = Array.from(container!.querySelectorAll('a')).find((candidate) => candidate.textContent?.includes('前往用户管理'))
+    expect(userLink?.getAttribute('href')).toBe('/admin/users?userId=user-1&source=directory-sync&integrationId=dir-1&accountId=account-focus')
+  })
+
+  it('can switch to a newly refreshed integration when query params target another integration', async () => {
+    apiFetchMock
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: {
+          items: [createIntegration({ id: 'dir-1', name: 'DingTalk CN 1', corpId: 'dingcorp-1' })],
+        },
+      }))
+      .mockResolvedValueOnce(createJsonResponse({ ok: true, data: { items: [] } }))
+      .mockResolvedValueOnce(createJsonResponse(createScheduleSnapshotPayload({ integrationId: 'dir-1' })))
+      .mockResolvedValueOnce(createJsonResponse(createAlertListPayload([])))
+      .mockResolvedValueOnce(createJsonResponse(createReviewItemsPayload([])))
+      .mockResolvedValueOnce(createJsonResponse(createAccountListPayload([
+        createAccount({
+          id: 'account-dir-1',
+          integrationId: 'dir-1',
+          name: '成员一',
+          externalUserId: 'dir1-user',
+        }),
+      ], { total: 1 })))
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: {
+          items: [
+            createIntegration({ id: 'dir-1', name: 'DingTalk CN 1', corpId: 'dingcorp-1' }),
+            createIntegration({ id: 'dir-2', name: 'DingTalk CN 2', corpId: 'dingcorp-2' }),
+          ],
+        },
+      }))
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: {
+          account: createAccount({
+            id: 'account-dir-2',
+            integrationId: 'dir-2',
+            name: '切换成员',
+            externalUserId: 'dir2-user',
+            linkStatus: 'linked',
+            matchStrategy: 'manual_admin',
+            localUser: {
+              id: 'user-2',
+              email: 'bravo@example.com',
+              name: 'Bravo',
+            },
+          }),
+        },
+      }))
+      .mockResolvedValueOnce(createJsonResponse({ ok: true, data: { items: [] } }))
+      .mockResolvedValueOnce(createJsonResponse(createScheduleSnapshotPayload({ integrationId: 'dir-2' })))
+      .mockResolvedValueOnce(createJsonResponse(createAlertListPayload([])))
+      .mockResolvedValueOnce(createJsonResponse(createReviewItemsPayload([])))
+      .mockResolvedValueOnce(createJsonResponse(createAccountListPayload([
+        createAccount({
+          id: 'account-dir-2',
+          integrationId: 'dir-2',
+          name: '切换成员',
+          externalUserId: 'dir2-user',
+          linkStatus: 'linked',
+          matchStrategy: 'manual_admin',
+          localUser: {
+            id: 'user-2',
+            email: 'bravo@example.com',
+            name: 'Bravo',
+          },
+        }),
+      ], { total: 1 })))
+
+    app = createApp(DirectoryManagementView)
+    registerRouterLink(app, true)
+    app.mount(container!)
+    await flushUi(12)
+
+    window.history.replaceState({}, '', '/admin/directory?integrationId=dir-2&accountId=account-dir-2&source=user-management&userId=user-2')
+    await flushUi(16)
+
+    expect(apiFetchMock.mock.calls.filter((args) => String(args[0]) === '/api/admin/directory/integrations')).toHaveLength(2)
+    expect(apiFetchMock).toHaveBeenCalledWith('/api/admin/directory/accounts/account-dir-2')
+    expect(container?.textContent).toContain('已从用户管理定位到目录成员 切换成员')
+    expect(container?.textContent).toContain('DingTalk CN 2')
+
+    const userLink = Array.from(container!.querySelectorAll('a')).find((candidate) => candidate.textContent?.includes('前往用户管理'))
+    expect(userLink?.getAttribute('href')).toBe('/admin/users?userId=user-2&source=directory-sync&integrationId=dir-2&accountId=account-dir-2')
+  })
+
+  it('keeps pending cross-integration navigation until a later refresh reveals the target integration', async () => {
+    apiFetchMock
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: {
+          items: [createIntegration({ id: 'dir-1', name: 'DingTalk CN 1', corpId: 'dingcorp-1' })],
+        },
+      }))
+      .mockResolvedValueOnce(createJsonResponse({ ok: true, data: { items: [] } }))
+      .mockResolvedValueOnce(createJsonResponse(createScheduleSnapshotPayload({ integrationId: 'dir-1' })))
+      .mockResolvedValueOnce(createJsonResponse(createAlertListPayload([])))
+      .mockResolvedValueOnce(createJsonResponse(createReviewItemsPayload([])))
+      .mockResolvedValueOnce(createJsonResponse(createAccountListPayload([
+        createAccount({
+          id: 'account-dir-1',
+          integrationId: 'dir-1',
+          name: '成员一',
+          externalUserId: 'dir1-user',
+        }),
+      ], { total: 1 })))
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: {
+          items: [createIntegration({ id: 'dir-1', name: 'DingTalk CN 1', corpId: 'dingcorp-1' })],
+        },
+      }))
+      .mockResolvedValueOnce(createJsonResponse(createAccountListPayload([
+        createAccount({
+          id: 'account-dir-1',
+          integrationId: 'dir-1',
+          name: '成员一',
+          externalUserId: 'dir1-user',
+        }),
+        createAccount({
+          id: 'account-dir-1b',
+          integrationId: 'dir-1',
+          name: '成员二',
+          externalUserId: 'dir1-user-b',
+        }),
+      ], { total: 2 })))
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: {
+          items: [
+            createIntegration({ id: 'dir-1', name: 'DingTalk CN 1', corpId: 'dingcorp-1' }),
+            createIntegration({ id: 'dir-2', name: 'DingTalk CN 2', corpId: 'dingcorp-2' }),
+          ],
+        },
+      }))
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: {
+          account: createAccount({
+            id: 'account-dir-2-late',
+            integrationId: 'dir-2',
+            name: '延迟出现成员',
+            externalUserId: 'dir2-late-user',
+            linkStatus: 'linked',
+            matchStrategy: 'manual_admin',
+            localUser: {
+              id: 'user-2',
+              email: 'bravo@example.com',
+              name: 'Bravo',
+            },
+          }),
+        },
+      }))
+      .mockResolvedValueOnce(createJsonResponse({ ok: true, data: { items: [] } }))
+      .mockResolvedValueOnce(createJsonResponse(createScheduleSnapshotPayload({ integrationId: 'dir-2' })))
+      .mockResolvedValueOnce(createJsonResponse(createAlertListPayload([])))
+      .mockResolvedValueOnce(createJsonResponse(createReviewItemsPayload([])))
+      .mockResolvedValueOnce(createJsonResponse(createAccountListPayload([
+        createAccount({
+          id: 'account-dir-2-late',
+          integrationId: 'dir-2',
+          name: '延迟出现成员',
+          externalUserId: 'dir2-late-user',
+          linkStatus: 'linked',
+          matchStrategy: 'manual_admin',
+          localUser: {
+            id: 'user-2',
+            email: 'bravo@example.com',
+            name: 'Bravo',
+          },
+        }),
+      ], { total: 1 })))
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: {
+          items: [
+            createIntegration({ id: 'dir-1', name: 'DingTalk CN 1', corpId: 'dingcorp-1' }),
+            createIntegration({ id: 'dir-2', name: 'DingTalk CN 2', corpId: 'dingcorp-2' }),
+          ],
+        },
+      }))
+
+    app = createApp(DirectoryManagementView)
+    registerRouterLink(app, true)
+    app.mount(container!)
+    await flushUi(12)
+
+    window.history.replaceState({}, '', '/admin/directory?integrationId=dir-2&accountId=account-dir-2-late&source=user-management&userId=user-2')
+    await flushUi(12)
+
+    expect(apiFetchMock.mock.calls.filter((args) => String(args[0]) === '/api/admin/directory/integrations')).toHaveLength(2)
+    expect(apiFetchMock.mock.calls.filter((args) => String(args[0]) === '/api/admin/directory/accounts/account-dir-2-late')).toHaveLength(0)
+    expect(container?.textContent).not.toContain('已从用户管理定位到目录成员 延迟出现成员')
+    expect(container?.textContent).toContain('成员二')
+
+    const refreshButton = Array.from(container!.querySelectorAll('button')).find((candidate) => candidate.textContent?.includes('刷新列表'))
+    expect(refreshButton).toBeTruthy()
+    refreshButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi(16)
+
+    expect(apiFetchMock.mock.calls.filter((args) => String(args[0]) === '/api/admin/directory/integrations')).toHaveLength(3)
+    expect(apiFetchMock.mock.calls.filter((args) => String(args[0]) === '/api/admin/directory/accounts/account-dir-2-late')).toHaveLength(1)
+    expect(container?.textContent).toContain('已从用户管理定位到目录成员 延迟出现成员')
+
+    refreshButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi(10)
+
+    expect(apiFetchMock.mock.calls.filter((args) => String(args[0]) === '/api/admin/directory/integrations')).toHaveLength(4)
+    expect(apiFetchMock.mock.calls.filter((args) => String(args[0]) === '/api/admin/directory/accounts/account-dir-2-late')).toHaveLength(1)
+  })
+
   it('confirms a recommended pending binding', async () => {
     apiFetchMock
       .mockResolvedValueOnce(createJsonResponse({
@@ -977,6 +1670,404 @@ describe('DirectoryManagementView', () => {
       }),
     )
     expect(container?.textContent).toContain('已确认推荐绑定')
+  })
+
+  it('requires explicit confirmation before overriding an existing user mobile during recommended binding', async () => {
+    apiFetchMock
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: {
+          items: [createIntegration()],
+        },
+      }))
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: { items: [] },
+      }))
+      .mockResolvedValueOnce(createJsonResponse(
+        createScheduleSnapshotPayload(),
+      ))
+      .mockResolvedValueOnce(createJsonResponse(
+        createAlertListPayload([]),
+      ))
+      .mockResolvedValueOnce(createJsonResponse(
+        createReviewItemsPayload([
+          {
+            kind: 'pending_binding',
+            reason: '目录成员当前不是已确认绑定状态，建议复核。',
+            account: createAccount({
+              id: 'account-mobile-bind',
+              mobile: '13758875801',
+              linkStatus: 'pending',
+              matchStrategy: 'mobile',
+              localUser: null,
+            }),
+            recommendations: [{
+              localUser: {
+                id: 'user-1',
+                email: 'alpha@example.com',
+                name: 'Alpha',
+                mobile: '13600000000',
+                role: 'user',
+                isActive: true,
+              },
+              reasons: ['mobile'],
+            }],
+            flags: {
+              missingUnionId: false,
+              missingOpenId: false,
+            },
+            actionable: {
+              canBatchUnbind: false,
+              canConfirmRecommendation: true,
+            },
+          },
+        ]),
+      ))
+      .mockResolvedValueOnce(createJsonResponse(
+        createAccountListPayload([createAccount({
+          id: 'account-mobile-bind',
+          mobile: '13758875801',
+          linkStatus: 'pending',
+          matchStrategy: 'mobile',
+        })]),
+      ))
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: {
+          user: {
+            id: 'user-1',
+            email: 'alpha@example.com',
+            name: 'Alpha',
+            mobile: '13758875801',
+          },
+          roles: ['user'],
+          permissions: [],
+          isAdmin: false,
+        },
+      }))
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: {
+          items: [
+            {
+              id: 'account-mobile-bind',
+              localUser: {
+                id: 'user-1',
+                email: 'alpha@example.com',
+              },
+            },
+          ],
+        },
+      }))
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: {
+          items: [createIntegration()],
+        },
+      }))
+      .mockResolvedValueOnce(createJsonResponse(
+        createReviewItemsPayload([]),
+      ))
+      .mockResolvedValueOnce(createJsonResponse(
+        createAccountListPayload([createAccount({
+          id: 'account-mobile-bind',
+          mobile: '13758875801',
+          linkStatus: 'linked',
+          matchStrategy: 'manual_admin',
+          localUser: {
+            id: 'user-1',
+            email: 'alpha@example.com',
+            name: 'Alpha',
+          },
+        })]),
+      ))
+
+    app = createApp(DirectoryManagementView)
+    app.component('RouterLink', {
+      props: ['to'],
+      template: '<a><slot /></a>',
+    })
+    app.mount(container!)
+    await flushUi()
+
+    const backfillAndBindButton = Array.from(container!.querySelectorAll('.directory-admin__review-item button')).find((button) => button.textContent?.includes('回填手机号后绑定'))
+    expect(backfillAndBindButton).toBeTruthy()
+    backfillAndBindButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi(4)
+
+    expect(apiFetchMock).not.toHaveBeenCalledWith(
+      '/api/admin/users/user-1/profile',
+      expect.anything(),
+    )
+    expect(container?.textContent).toContain('平台手机号：13600000000')
+    expect(container?.textContent).toContain('目录手机号：13758875801')
+    expect(container?.textContent).toContain('存在差异，覆盖前需确认。')
+    expect(container?.textContent).toContain('确认覆盖手机号并绑定')
+
+    const confirmOverrideButton = Array.from(container!.querySelectorAll('.directory-admin__review-item button')).find((button) => button.textContent?.includes('确认覆盖手机号并绑定'))
+    expect(confirmOverrideButton).toBeTruthy()
+    confirmOverrideButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi(10)
+
+    expect(apiFetchMock).toHaveBeenCalledWith(
+      '/api/admin/users/user-1/profile',
+      expect.objectContaining({
+        method: 'PATCH',
+        body: JSON.stringify({
+          mobile: '13758875801',
+          expectedMobile: '13600000000',
+        }),
+      }),
+    )
+    expect(apiFetchMock).toHaveBeenCalledWith(
+      '/api/admin/directory/accounts/batch-bind',
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({
+          bindings: [
+            {
+              accountId: 'account-mobile-bind',
+              localUserRef: 'user-1',
+              enableDingTalkGrant: true,
+            },
+          ],
+        }),
+      }),
+    )
+    expect(container?.textContent).toContain('已回填手机号并完成绑定')
+  })
+
+  it('clears override confirmation and refreshes review data when mobile CAS returns conflict', async () => {
+    apiFetchMock
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: {
+          items: [createIntegration()],
+        },
+      }))
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: { items: [] },
+      }))
+      .mockResolvedValueOnce(createJsonResponse(
+        createScheduleSnapshotPayload(),
+      ))
+      .mockResolvedValueOnce(createJsonResponse(
+        createAlertListPayload([]),
+      ))
+      .mockResolvedValueOnce(createJsonResponse(
+        createReviewItemsPayload([
+          {
+            kind: 'pending_binding',
+            reason: '目录成员当前不是已确认绑定状态，建议复核。',
+            account: createAccount({
+              id: 'account-mobile-conflict',
+              mobile: '13758875801',
+              linkStatus: 'pending',
+              matchStrategy: 'mobile',
+              localUser: null,
+            }),
+            recommendations: [{
+              localUser: {
+                id: 'user-1',
+                email: 'alpha@example.com',
+                name: 'Alpha',
+                mobile: '13600000000',
+                role: 'user',
+                isActive: true,
+              },
+              reasons: ['mobile'],
+            }],
+            flags: {
+              missingUnionId: false,
+              missingOpenId: false,
+            },
+            actionable: {
+              canBatchUnbind: false,
+              canConfirmRecommendation: true,
+            },
+          },
+        ]),
+      ))
+      .mockResolvedValueOnce(createJsonResponse(
+        createAccountListPayload([createAccount({
+          id: 'account-mobile-conflict',
+          mobile: '13758875801',
+          linkStatus: 'pending',
+          matchStrategy: 'mobile',
+        })]),
+      ))
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: false,
+        error: {
+          code: 'PROFILE_MOBILE_CONFLICT',
+          message: 'User mobile changed before update was applied',
+        },
+      }, 409))
+      .mockResolvedValueOnce(createJsonResponse(
+        {
+          ok: true,
+          data: {
+            item: {
+              kind: 'pending_binding',
+              reason: '目录成员当前不是已确认绑定状态，建议复核。',
+              account: createAccount({
+                id: 'account-mobile-conflict',
+                mobile: '13758875801',
+                linkStatus: 'pending',
+                matchStrategy: 'mobile',
+                localUser: null,
+              }),
+              recommendations: [{
+                localUser: {
+                  id: 'user-1',
+                  email: 'alpha@example.com',
+                  name: 'Alpha',
+                  mobile: '13700000000',
+                  role: 'user',
+                  isActive: true,
+                },
+                reasons: ['mobile'],
+              }],
+              flags: {
+                missingUnionId: false,
+                missingOpenId: false,
+              },
+              actionable: {
+                canBatchUnbind: false,
+                canConfirmRecommendation: true,
+              },
+            },
+          },
+        },
+      ))
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: {
+          account: createAccount({
+          id: 'account-mobile-conflict',
+          mobile: '13758875801',
+          linkStatus: 'pending',
+          matchStrategy: 'mobile',
+        }),
+        },
+      }))
+
+    app = createApp(DirectoryManagementView)
+    app.component('RouterLink', {
+      props: ['to'],
+      template: '<a><slot /></a>',
+    })
+    app.mount(container!)
+    await flushUi()
+
+    const initialBackfillButton = Array.from(container!.querySelectorAll('.directory-admin__review-item button')).find((button) => button.textContent?.includes('回填手机号后绑定'))
+    expect(initialBackfillButton).toBeTruthy()
+    initialBackfillButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi(4)
+
+    const confirmOverrideButton = Array.from(container!.querySelectorAll('.directory-admin__review-item button')).find((button) => button.textContent?.includes('确认覆盖手机号并绑定'))
+    expect(confirmOverrideButton).toBeTruthy()
+    confirmOverrideButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi(10)
+
+    expect(apiFetchMock).toHaveBeenCalledWith(
+      '/api/admin/users/user-1/profile',
+      expect.objectContaining({
+        method: 'PATCH',
+        body: JSON.stringify({
+          mobile: '13758875801',
+          expectedMobile: '13600000000',
+        }),
+      }),
+    )
+    expect(apiFetchMock).toHaveBeenCalledWith('/api/admin/directory/accounts/account-mobile-conflict/review-item')
+    expect(apiFetchMock).toHaveBeenCalledWith('/api/admin/directory/accounts/account-mobile-conflict')
+    expect(apiFetchMock).not.toHaveBeenCalledWith(
+      '/api/admin/directory/accounts/batch-bind',
+      expect.anything(),
+    )
+    expect(container?.textContent).toContain('平台手机号已被其他操作更新，请刷新后的最新差异为准')
+    expect(container?.textContent).toContain('平台手机号已更新为 13700000000，请按最新差异重新确认。')
+    expect(container?.textContent).not.toContain('确认覆盖手机号并绑定')
+    expect(container?.textContent).toContain('按最新手机号重试')
+    expect(container?.textContent).toContain('平台手机号：13700000000')
+  })
+
+  it('hides mobile backfill affordances when the directory and platform mobile already match', async () => {
+    apiFetchMock
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: {
+          items: [createIntegration()],
+        },
+      }))
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: { items: [] },
+      }))
+      .mockResolvedValueOnce(createJsonResponse(
+        createScheduleSnapshotPayload(),
+      ))
+      .mockResolvedValueOnce(createJsonResponse(
+        createAlertListPayload([]),
+      ))
+      .mockResolvedValueOnce(createJsonResponse(
+        createReviewItemsPayload([
+          {
+            kind: 'pending_binding',
+            reason: '目录成员当前不是已确认绑定状态，建议复核。',
+            account: createAccount({
+              id: 'account-mobile-same',
+              mobile: '13758875801',
+              linkStatus: 'pending',
+              matchStrategy: 'mobile',
+              localUser: null,
+            }),
+            recommendations: [{
+              localUser: {
+                id: 'user-1',
+                email: 'alpha@example.com',
+                name: 'Alpha',
+                mobile: '13758875801',
+                role: 'user',
+                isActive: true,
+              },
+              reasons: ['mobile'],
+            }],
+            flags: {
+              missingUnionId: false,
+              missingOpenId: false,
+            },
+            actionable: {
+              canBatchUnbind: false,
+              canConfirmRecommendation: true,
+            },
+          },
+        ]),
+      ))
+      .mockResolvedValueOnce(createJsonResponse(
+        createAccountListPayload([createAccount({
+          id: 'account-mobile-same',
+          mobile: '13758875801',
+          linkStatus: 'pending',
+          matchStrategy: 'mobile',
+        })]),
+      ))
+
+    app = createApp(DirectoryManagementView)
+    app.component('RouterLink', {
+      props: ['to'],
+      template: '<a><slot /></a>',
+    })
+    app.mount(container!)
+    await flushUi()
+
+    expect(container?.textContent).not.toContain('平台手机号：13758875801')
+    expect(container?.textContent).not.toContain('目录手机号：13758875801')
+    expect(container?.textContent).not.toContain('回填手机号后绑定')
+    expect(container?.textContent).not.toContain('确认覆盖手机号并绑定')
   })
 
   it('batch-binds selected pending review items', async () => {
