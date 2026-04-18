@@ -737,4 +737,69 @@ describe('MetaSheetPermissionManager', () => {
     expect(client.updateViewPermission).toHaveBeenNthCalledWith(2, 'view_board', 'member-group', 'group_north', 'admin')
     expect(updatedSpy).toHaveBeenCalledTimes(1)
   })
+
+  it('surfaces inactive lifecycle badges on orphan field and view overrides', async () => {
+    const client = {
+      listSheetPermissions: vi.fn().mockResolvedValue({
+        items: [],
+      }),
+      listSheetPermissionCandidates: vi.fn().mockResolvedValue({ items: [] }),
+      updateSheetPermission: vi.fn().mockResolvedValue({}),
+      updateFieldPermission: vi.fn().mockResolvedValue({}),
+      updateViewPermission: vi.fn().mockResolvedValue({}),
+    }
+
+    mountManager({
+      client,
+      fields: [
+        { id: 'fld_title', name: 'Title', type: 'string', property: {}, order: 0, options: [] },
+      ],
+      views: [
+        { id: 'view_grid', name: 'Grid View', type: 'grid', sheetId: 'sheet_orders' },
+      ],
+      fieldPermissionEntries: [
+        {
+          fieldId: 'fld_title',
+          subjectType: 'user',
+          subjectId: 'user_inactive',
+          subjectLabel: 'Morgan',
+          subjectSubtitle: 'morgan@example.com',
+          visible: false,
+          readOnly: false,
+          isActive: false,
+        },
+      ],
+      viewPermissionEntries: [
+        {
+          viewId: 'view_grid',
+          subjectType: 'user',
+          subjectId: 'user_inactive',
+          subjectLabel: 'Morgan',
+          subjectSubtitle: 'morgan@example.com',
+          permission: 'read',
+          isActive: false,
+        },
+      ],
+    })
+    await flushUi()
+
+    const tabs = Array.from(container!.querySelectorAll('[role="tab"]'))
+    const fieldTab = tabs.find((tab) => tab.textContent?.includes('Field Permissions')) as HTMLElement
+    fieldTab.click()
+    await flushUi()
+
+    const fieldOrphanRow = container!.querySelector('[data-field-permission-orphan-row="fld_title:user:user_inactive"]')!
+    expect(fieldOrphanRow.textContent).toContain('Morgan')
+    expect(fieldOrphanRow.textContent).toContain('Inactive user')
+    expect(fieldOrphanRow.textContent).toContain('No current sheet access')
+
+    const viewTab = tabs.find((tab) => tab.textContent?.includes('View Permissions')) as HTMLElement
+    viewTab.click()
+    await flushUi()
+
+    const viewOrphanRow = container!.querySelector('[data-view-permission-orphan-row="view_grid:user:user_inactive"]')!
+    expect(viewOrphanRow.textContent).toContain('Morgan')
+    expect(viewOrphanRow.textContent).toContain('Inactive user')
+    expect(viewOrphanRow.textContent).toContain('No current sheet access')
+  })
 })
