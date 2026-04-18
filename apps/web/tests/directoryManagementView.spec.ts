@@ -1995,6 +1995,81 @@ describe('DirectoryManagementView', () => {
     expect(container?.textContent).toContain('平台手机号：13700000000')
   })
 
+  it('hides mobile backfill affordances when the directory and platform mobile already match', async () => {
+    apiFetchMock
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: {
+          items: [createIntegration()],
+        },
+      }))
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: { items: [] },
+      }))
+      .mockResolvedValueOnce(createJsonResponse(
+        createScheduleSnapshotPayload(),
+      ))
+      .mockResolvedValueOnce(createJsonResponse(
+        createAlertListPayload([]),
+      ))
+      .mockResolvedValueOnce(createJsonResponse(
+        createReviewItemsPayload([
+          {
+            kind: 'pending_binding',
+            reason: '目录成员当前不是已确认绑定状态，建议复核。',
+            account: createAccount({
+              id: 'account-mobile-same',
+              mobile: '13758875801',
+              linkStatus: 'pending',
+              matchStrategy: 'mobile',
+              localUser: null,
+            }),
+            recommendations: [{
+              localUser: {
+                id: 'user-1',
+                email: 'alpha@example.com',
+                name: 'Alpha',
+                mobile: '13758875801',
+                role: 'user',
+                isActive: true,
+              },
+              reasons: ['mobile'],
+            }],
+            flags: {
+              missingUnionId: false,
+              missingOpenId: false,
+            },
+            actionable: {
+              canBatchUnbind: false,
+              canConfirmRecommendation: true,
+            },
+          },
+        ]),
+      ))
+      .mockResolvedValueOnce(createJsonResponse(
+        createAccountListPayload([createAccount({
+          id: 'account-mobile-same',
+          mobile: '13758875801',
+          linkStatus: 'pending',
+          matchStrategy: 'mobile',
+        })]),
+      ))
+
+    app = createApp(DirectoryManagementView)
+    app.component('RouterLink', {
+      props: ['to'],
+      template: '<a><slot /></a>',
+    })
+    app.mount(container!)
+    await flushUi()
+
+    expect(container?.textContent).not.toContain('平台手机号：13758875801')
+    expect(container?.textContent).not.toContain('目录手机号：13758875801')
+    expect(container?.textContent).not.toContain('回填手机号后绑定')
+    expect(container?.textContent).not.toContain('确认覆盖手机号并绑定')
+  })
+
   it('batch-binds selected pending review items', async () => {
     apiFetchMock
       .mockResolvedValueOnce(createJsonResponse({

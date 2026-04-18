@@ -380,7 +380,7 @@
               {{ readMobileConflictHint(item.account.id) }}
             </p>
             <p
-              v-if="item.kind === 'pending_binding' && item.account.mobile && readSelectedBindingUser(item)"
+              v-if="shouldOfferMobileBackfill(item)"
               class="directory-admin__hint"
               :class="{ 'directory-admin__status directory-admin__status--error': hasSelectedBindingUserMobileConflict(item) }"
             >
@@ -422,7 +422,7 @@
                 {{ reviewProcessingAccountId === item.account.id ? '处理中...' : '确认推荐' }}
               </button>
               <button
-                v-if="item.kind === 'pending_binding' && item.account.mobile && readSelectedBindingUser(item)"
+                v-if="shouldOfferMobileBackfill(item)"
                 class="directory-admin__button directory-admin__button--secondary"
                 type="button"
                 :disabled="reviewProcessingAccountId === item.account.id"
@@ -1741,6 +1741,13 @@ function hasSelectedBindingUserMobileConflict(item: DirectoryReviewItem): boolea
   const accountMobile = item.account.mobile?.trim() || ''
   const userMobile = selectedUser?.mobile?.trim() || ''
   return accountMobile.length > 0 && userMobile.length > 0 && accountMobile !== userMobile
+}
+
+function shouldOfferMobileBackfill(item: DirectoryReviewItem): boolean {
+  const selectedUser = readSelectedBindingUser(item)
+  const accountMobile = item.account.mobile?.trim() || ''
+  const userMobile = selectedUser?.mobile?.trim() || ''
+  return item.kind === 'pending_binding' && accountMobile.length > 0 && selectedUser !== null && accountMobile !== userMobile
 }
 
 function isAwaitingMobileOverrideConfirmation(accountId: string): boolean {
