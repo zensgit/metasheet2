@@ -10,7 +10,7 @@ vi.mock('../../src/db/pg', () => ({
   transaction: pgMocks.transaction,
 }))
 
-import { listDirectoryReviewItems } from '../../src/directory/directory-sync'
+import { getDirectoryReviewItem, listDirectoryReviewItems } from '../../src/directory/directory-sync'
 
 describe('listDirectoryReviewItems', () => {
   beforeEach(() => {
@@ -294,5 +294,37 @@ describe('listDirectoryReviewItems', () => {
       },
     })
     expect(result.items[0]?.recommendations).toEqual([])
+  })
+
+  it('uses grouped user columns instead of raw link columns in review list SQL', async () => {
+    pgMocks.query
+      .mockResolvedValueOnce({
+        rows: [{ total: 0 }],
+      })
+      .mockResolvedValueOnce({
+        rows: [],
+      })
+
+    await listDirectoryReviewItems('dir-1', { limit: 100, offset: 0 }, 'pending_binding')
+
+    const listSql = String(pgMocks.query.mock.calls[1]?.[0] ?? '')
+    expect(listSql).toContain("WHEN a.is_active = FALSE AND u.id IS NOT NULL THEN 'inactive_linked'")
+    expect(listSql).toContain("WHEN u.id IS NULL THEN '目录成员尚未绑定本地用户。'")
+    expect(listSql).not.toContain("WHEN a.is_active = FALSE AND l.local_user_id IS NOT NULL THEN 'inactive_linked'")
+    expect(listSql).not.toContain("WHEN l.local_user_id IS NULL THEN '目录成员尚未绑定本地用户。'")
+  })
+
+  it('uses grouped user columns instead of raw link columns in single review item SQL', async () => {
+    pgMocks.query.mockResolvedValueOnce({
+      rows: [],
+    })
+
+    await getDirectoryReviewItem('account-1')
+
+    const detailSql = String(pgMocks.query.mock.calls[0]?.[0] ?? '')
+    expect(detailSql).toContain("WHEN a.is_active = FALSE AND u.id IS NOT NULL THEN 'inactive_linked'")
+    expect(detailSql).toContain("WHEN u.id IS NULL THEN '目录成员尚未绑定本地用户。'")
+    expect(detailSql).not.toContain("WHEN a.is_active = FALSE AND l.local_user_id IS NOT NULL THEN 'inactive_linked'")
+    expect(detailSql).not.toContain("WHEN l.local_user_id IS NULL THEN '目录成员尚未绑定本地用户。'")
   })
 })

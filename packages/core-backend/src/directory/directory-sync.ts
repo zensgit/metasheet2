@@ -1969,13 +1969,13 @@ export async function listDirectoryReviewItems(
           COALESCE(array_remove(array_agg(DISTINCT d.full_path), NULL), ARRAY[]::text[]) AS department_paths,
           CASE
             WHEN COALESCE(a.union_id, '') = '' AND COALESCE(a.open_id, '') = '' THEN 'missing_identifier'
-            WHEN a.is_active = FALSE AND l.local_user_id IS NOT NULL THEN 'inactive_linked'
+            WHEN a.is_active = FALSE AND u.id IS NOT NULL THEN 'inactive_linked'
             ELSE 'pending_binding'
           END AS review_kind,
           CASE
             WHEN COALESCE(a.union_id, '') = '' AND COALESCE(a.open_id, '') = '' THEN '目录成员缺少 unionId/openId，无法用于钉钉登录绑定。'
-            WHEN a.is_active = FALSE AND l.local_user_id IS NOT NULL THEN '目录成员已停用，但仍绑定本地用户，需要停权处理。'
-            WHEN l.local_user_id IS NULL THEN '目录成员尚未绑定本地用户。'
+            WHEN a.is_active = FALSE AND u.id IS NOT NULL THEN '目录成员已停用，但仍绑定本地用户，需要停权处理。'
+            WHEN u.id IS NULL THEN '目录成员尚未绑定本地用户。'
             ELSE '目录成员当前不是已确认绑定状态，建议复核。'
           END AS review_reason,
           (COALESCE(a.union_id, '') = '') AS missing_union_id,
@@ -1994,7 +1994,7 @@ export async function listDirectoryReviewItems(
        ORDER BY
          CASE
            WHEN COALESCE(a.union_id, '') = '' AND COALESCE(a.open_id, '') = '' THEN 0
-           WHEN a.is_active = FALSE AND l.local_user_id IS NOT NULL THEN 1
+           WHEN a.is_active = FALSE AND u.id IS NOT NULL THEN 1
            ELSE 2
          END,
          a.name ASC,
@@ -2047,13 +2047,13 @@ export async function getDirectoryReviewItem(
         COALESCE(array_remove(array_agg(DISTINCT d.full_path), NULL), ARRAY[]::text[]) AS department_paths,
         CASE
           WHEN COALESCE(a.union_id, '') = '' AND COALESCE(a.open_id, '') = '' THEN 'missing_identifier'
-          WHEN a.is_active = FALSE AND l.local_user_id IS NOT NULL THEN 'inactive_linked'
+          WHEN a.is_active = FALSE AND u.id IS NOT NULL THEN 'inactive_linked'
           ELSE 'pending_binding'
         END AS review_kind,
         CASE
           WHEN COALESCE(a.union_id, '') = '' AND COALESCE(a.open_id, '') = '' THEN '目录成员缺少 unionId/openId，无法用于钉钉登录绑定。'
-          WHEN a.is_active = FALSE AND l.local_user_id IS NOT NULL THEN '目录成员已停用，但仍绑定本地用户，需要停权处理。'
-          WHEN l.local_user_id IS NULL THEN '目录成员尚未绑定本地用户。'
+          WHEN a.is_active = FALSE AND u.id IS NOT NULL THEN '目录成员已停用，但仍绑定本地用户，需要停权处理。'
+          WHEN u.id IS NULL THEN '目录成员尚未绑定本地用户。'
           ELSE '目录成员当前不是已确认绑定状态，建议复核。'
         END AS review_reason,
         (COALESCE(a.union_id, '') = '') AS missing_union_id,
