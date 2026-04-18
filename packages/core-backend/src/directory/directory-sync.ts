@@ -2118,6 +2118,9 @@ export async function batchBindDirectoryAccounts(
 }
 
 export async function getDirectoryAccountSummary(accountId: string): Promise<DirectoryIntegrationAccountSummary | null> {
+  const normalizedAccountId = normalizeText(accountId)
+  if (!normalizedAccountId) throw new Error('accountId is required')
+
   const result = await query<DirectoryIntegrationAccountRow>(
     `SELECT
         a.integration_id,
@@ -2153,7 +2156,7 @@ export async function getDirectoryAccountSummary(accountId: string): Promise<Dir
        a.name, a.email, a.mobile, a.is_active, a.updated_at,
        l.link_status, l.match_strategy, l.reviewed_by, l.review_note, l.updated_at,
        u.id, u.email, u.name`,
-    [accountId],
+    [normalizedAccountId],
   )
 
   const row = result.rows[0]

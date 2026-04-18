@@ -486,6 +486,24 @@ describe('adminDirectoryRouter', () => {
     })
   })
 
+  it('returns 400 when a single directory account lookup is missing accountId', async () => {
+    directoryMocks.getDirectoryAccountSummary.mockRejectedValue(new Error('accountId is required'))
+
+    const response = await invokeRoute('get', '/accounts/:accountId', {
+      params: { accountId: '   ' },
+      user: { id: 'admin-1', role: 'admin' },
+    })
+
+    expect(response.statusCode).toBe(400)
+    expect(response.body).toMatchObject({
+      ok: false,
+      error: {
+        code: 'DIRECTORY_ACCOUNT_FAILED',
+        message: 'accountId is required',
+      },
+    })
+  })
+
   it('returns a single directory review item', async () => {
     directoryMocks.getDirectoryReviewItem.mockResolvedValue({
       kind: 'pending_binding',
