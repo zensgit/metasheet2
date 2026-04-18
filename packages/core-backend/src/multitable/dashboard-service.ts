@@ -60,8 +60,8 @@ export class DashboardService {
         type: chart.type,
         sheet_id: chart.sheetId,
         view_id: chart.viewId ?? null,
-        data_source: JSON.stringify(chart.dataSource) as unknown as Record<string, unknown>,
-        display: JSON.stringify(chart.display) as unknown as Record<string, unknown>,
+        data_source: chart.dataSource as unknown as Record<string, unknown>,
+        display: chart.display as Record<string, unknown>,
         created_by: chart.createdBy,
       })
       .execute()
@@ -109,8 +109,8 @@ export class DashboardService {
         name: updated.name,
         type: updated.type,
         view_id: updated.viewId ?? null,
-        data_source: JSON.stringify(updated.dataSource) as unknown as Record<string, unknown>,
-        display: JSON.stringify(updated.display) as unknown as Record<string, unknown>,
+        data_source: updated.dataSource as unknown as Record<string, unknown>,
+        display: updated.display as Record<string, unknown>,
       })
       .where('id', '=', chartId)
       .execute()
@@ -139,7 +139,7 @@ export class DashboardService {
         await db
           .updateTable('multitable_dashboards')
           .set({
-            panels: JSON.stringify(filtered) as unknown as Record<string, unknown>[],
+            panels: filtered as unknown as Record<string, unknown>[],
           })
           .where('id', '=', dash.id)
           .execute()
@@ -169,7 +169,7 @@ export class DashboardService {
         id: dashboard.id,
         name: dashboard.name,
         sheet_id: dashboard.sheetId,
-        panels: JSON.stringify(dashboard.panels) as unknown as Record<string, unknown>[],
+        panels: dashboard.panels as unknown as Record<string, unknown>[],
         created_by: dashboard.createdBy,
       })
       .execute()
@@ -212,7 +212,7 @@ export class DashboardService {
       .updateTable('multitable_dashboards')
       .set({
         name: updated.name,
-        panels: JSON.stringify(updated.panels) as unknown as Record<string, unknown>[],
+        panels: updated.panels as unknown as Record<string, unknown>[],
       })
       .where('id', '=', dashboardId)
       .execute()

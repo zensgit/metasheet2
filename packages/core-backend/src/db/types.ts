@@ -11,6 +11,8 @@ export type UpdatedAt = ColumnType<Date, string | undefined, Date | string>
 export type NullableTimestamp = ColumnType<Date, string | undefined, Date | string | null> | null
 type JsonObjectColumn = JSONColumnType<Record<string, unknown> | null, Record<string, unknown> | null, Record<string, unknown> | null>
 type JsonObjectArrayColumn = JSONColumnType<Record<string, unknown>[] | null, Record<string, unknown>[] | null, Record<string, unknown>[] | null>
+type JsonStringArrayColumn = JSONColumnType<string[], string[], string[]>
+type JsonValueColumn = ColumnType<unknown | null, unknown | null, unknown | null>
 
 export interface Database {
   // Core tables
@@ -1218,7 +1220,7 @@ export interface MultitableAutomationExecutionsTable {
   triggered_by: string
   triggered_at: CreatedAt
   status: string
-  steps: JSONColumnType<Record<string, unknown>[]>
+  steps: JsonObjectArrayColumn
   error: string | null
   duration: number | null
   created_at: CreatedAt
@@ -1230,8 +1232,8 @@ export interface MultitableChartsTable {
   type: string
   sheet_id: string
   view_id: string | null
-  data_source: JSONColumnType<Record<string, unknown>>
-  display: JSONColumnType<Record<string, unknown>>
+  data_source: JsonObjectColumn
+  display: JsonObjectColumn
   created_by: string
   created_at: CreatedAt
   updated_at: UpdatedAt
@@ -1241,7 +1243,7 @@ export interface MultitableDashboardsTable {
   id: string
   name: string
   sheet_id: string
-  panels: JSONColumnType<Record<string, unknown>[]>
+  panels: JsonObjectArrayColumn
   created_by: string
   created_at: CreatedAt
   updated_at: UpdatedAt
@@ -1256,7 +1258,7 @@ export interface MultitableApiTokensTable {
   name: string
   token_hash: string
   token_prefix: string
-  scopes: JSONColumnType<string[]>
+  scopes: JsonStringArrayColumn
   created_by: string
   created_at: CreatedAt
   last_used_at: NullableTimestamp
@@ -1270,7 +1272,7 @@ export interface MultitableWebhooksTable {
   name: string
   url: string
   secret: string | null
-  events: JSONColumnType<string[]>
+  events: JsonStringArrayColumn
   active: boolean
   created_by: string
   created_at: CreatedAt
@@ -1284,7 +1286,7 @@ export interface MultitableWebhookDeliveriesTable {
   id: string
   webhook_id: string
   event: string
-  payload: JSONColumnType<unknown>
+  payload: JsonValueColumn
   status: string
   http_status: number | null
   response_body: string | null

@@ -29,7 +29,7 @@ export class AutomationLogService {
         triggered_by: execution.triggeredBy,
         triggered_at: execution.triggeredAt,
         status: execution.status,
-        steps: JSON.stringify(execution.steps) as unknown as Record<string, unknown>[],
+        steps: execution.steps as unknown as Record<string, unknown>[],
         error: execution.error ?? null,
         duration: execution.duration ?? null,
       })
@@ -111,9 +111,10 @@ export class AutomationLogService {
    * Remove execution logs older than the given retention period.
    */
   async cleanup(retentionDays = 30): Promise<number> {
+    const cutoff = new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000)
     const result = await db
       .deleteFrom('multitable_automation_executions')
-      .where('created_at', '<', sql`NOW() - INTERVAL '${sql.raw(String(retentionDays))} days'`)
+      .where('created_at', '<', cutoff)
       .executeTakeFirst()
 
     return Number(result.numDeletedRows ?? 0)
