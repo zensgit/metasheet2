@@ -52,6 +52,12 @@
                   Inactive user
                 </span>
                 <span
+                  v-if="subjectMutationBlocked(entry.subjectType, entry.isActive)"
+                  class="meta-sheet-perm__hint"
+                >
+                  Cleanup only
+                </span>
+                <span
                   v-if="hasSubjectOverrides(entry.subjectType, entry.subjectId)"
                   class="meta-sheet-perm__hint meta-sheet-perm__hint--inline"
                 >
@@ -63,7 +69,7 @@
               <select
                 :value="entryDrafts[subjectKey(entry.subjectType, entry.subjectId)] ?? entry.accessLevel"
                 class="meta-sheet-perm__select"
-                :disabled="busySubjectKey === subjectKey(entry.subjectType, entry.subjectId)"
+                :disabled="busySubjectKey === subjectKey(entry.subjectType, entry.subjectId) || subjectMutationBlocked(entry.subjectType, entry.isActive)"
                 @change="setEntryDraft(entry.subjectType, entry.subjectId, $event)"
               >
                 <option
@@ -77,7 +83,7 @@
               <button
                 class="meta-sheet-perm__action"
                 type="button"
-                :disabled="busySubjectKey === subjectKey(entry.subjectType, entry.subjectId) || (entryDrafts[subjectKey(entry.subjectType, entry.subjectId)] ?? entry.accessLevel) === entry.accessLevel"
+                :disabled="busySubjectKey === subjectKey(entry.subjectType, entry.subjectId) || subjectMutationBlocked(entry.subjectType, entry.isActive) || (entryDrafts[subjectKey(entry.subjectType, entry.subjectId)] ?? entry.accessLevel) === entry.accessLevel"
                 @click="applyEntry(entry.subjectType, entry.subjectId)"
               >
                 Save
@@ -137,12 +143,18 @@
                   >
                     Inactive user
                   </span>
+                  <span
+                    v-if="candidateGrantBlocked(candidate)"
+                    class="meta-sheet-perm__hint"
+                  >
+                    Grant blocked
+                  </span>
                 </div>
                 <span class="meta-sheet-perm__subject" data-subject-type="user">Person</span>
                 <select
                   :value="candidateDrafts[subjectKey(candidate.subjectType, candidate.subjectId)] ?? candidate.accessLevel ?? 'read'"
                   class="meta-sheet-perm__select"
-                  :disabled="busySubjectKey === subjectKey(candidate.subjectType, candidate.subjectId)"
+                  :disabled="busySubjectKey === subjectKey(candidate.subjectType, candidate.subjectId) || candidateGrantBlocked(candidate)"
                   @change="setCandidateDraft(candidate.subjectType, candidate.subjectId, $event)"
                 >
                   <option
@@ -156,7 +168,7 @@
                 <button
                   class="meta-sheet-perm__action meta-sheet-perm__action--primary"
                   type="button"
-                  :disabled="busySubjectKey === subjectKey(candidate.subjectType, candidate.subjectId)"
+                  :disabled="busySubjectKey === subjectKey(candidate.subjectType, candidate.subjectId) || candidateGrantBlocked(candidate)"
                   @click="grantCandidate(candidate.subjectType, candidate.subjectId)"
                 >
                   Apply
@@ -266,12 +278,25 @@
                   <div class="meta-sheet-perm__identity">
                     <strong>{{ entry.label }}</strong>
                     <span>{{ entry.subtitle || entry.subjectId }}</span>
+                    <span
+                      v-if="subjectMutationBlocked(entry.subjectType, entry.isActive)"
+                      class="meta-sheet-perm__lifecycle"
+                      data-lifecycle="inactive"
+                    >
+                      Inactive user
+                    </span>
+                    <span
+                      v-if="subjectMutationBlocked(entry.subjectType, entry.isActive)"
+                      class="meta-sheet-perm__hint"
+                    >
+                      Cleanup only
+                    </span>
                   </div>
                   <span class="meta-sheet-perm__subject" :data-subject-type="entry.subjectType">{{ subjectTypeBadgeLabel(entry.subjectType) }}</span>
                   <select
                     :value="fieldTemplateDraftValue(entry.subjectType, entry.subjectId)"
                     class="meta-sheet-perm__select"
-                    :disabled="busyFieldTemplateKey === subjectKey(entry.subjectType, entry.subjectId)"
+                    :disabled="busyFieldTemplateKey === subjectKey(entry.subjectType, entry.subjectId) || subjectMutationBlocked(entry.subjectType, entry.isActive)"
                     @change="setFieldTemplateDraft(entry.subjectType, entry.subjectId, $event)"
                   >
                     <option value="default">Default</option>
@@ -281,7 +306,7 @@
                   <button
                     class="meta-sheet-perm__action meta-sheet-perm__action--primary"
                     type="button"
-                    :disabled="busyFieldTemplateKey === subjectKey(entry.subjectType, entry.subjectId)"
+                    :disabled="busyFieldTemplateKey === subjectKey(entry.subjectType, entry.subjectId) || subjectMutationBlocked(entry.subjectType, entry.isActive)"
                     @click="applyFieldTemplate(entry.subjectType, entry.subjectId)"
                   >
                     Apply to all fields
@@ -318,6 +343,19 @@
                   <div class="meta-sheet-perm__identity">
                     <strong>{{ entry.label }}</strong>
                     <span>{{ subjectTypeBadgeLabel(entry.subjectType) }}</span>
+                    <span
+                      v-if="subjectMutationBlocked(entry.subjectType, entry.isActive)"
+                      class="meta-sheet-perm__lifecycle"
+                      data-lifecycle="inactive"
+                    >
+                      Inactive user
+                    </span>
+                    <span
+                      v-if="subjectMutationBlocked(entry.subjectType, entry.isActive)"
+                      class="meta-sheet-perm__hint"
+                    >
+                      Cleanup only
+                    </span>
                   </div>
                   <span
                     class="meta-sheet-perm__badge"
@@ -328,7 +366,7 @@
                   <select
                     :value="fieldPermDraftValue(field.id, entry.subjectType, entry.subjectId)"
                     class="meta-sheet-perm__select"
-                    :disabled="busyFieldPermKey === fieldPermKey(field.id, entry.subjectType, entry.subjectId)"
+                    :disabled="busyFieldPermKey === fieldPermKey(field.id, entry.subjectType, entry.subjectId) || subjectMutationBlocked(entry.subjectType, entry.isActive)"
                     @change="setFieldPermDraft(field.id, entry.subjectType, entry.subjectId, $event)"
                   >
                     <option value="default">Default</option>
@@ -338,7 +376,7 @@
                   <button
                     class="meta-sheet-perm__action meta-sheet-perm__action--primary"
                     type="button"
-                    :disabled="busyFieldPermKey === fieldPermKey(field.id, entry.subjectType, entry.subjectId)"
+                    :disabled="busyFieldPermKey === fieldPermKey(field.id, entry.subjectType, entry.subjectId) || subjectMutationBlocked(entry.subjectType, entry.isActive)"
                     @click="applyFieldPerm(field.id, entry.subjectType, entry.subjectId)"
                   >
                     Save
@@ -350,10 +388,17 @@
                   class="meta-sheet-perm__row meta-sheet-perm__row--field"
                   :data-field-permission-orphan-row="`${field.id}:${subjectKey(orphan.subjectType, orphan.subjectId)}`"
                 >
-                  <div class="meta-sheet-perm__identity">
-                    <strong>{{ orphan.subjectLabel || orphan.subjectId }}</strong>
-                    <span>{{ orphan.subjectSubtitle || `Orphan ${subjectTypeBadgeLabel(orphan.subjectType)}` }}</span>
-                  </div>
+                <div class="meta-sheet-perm__identity">
+                  <strong>{{ orphan.subjectLabel || orphan.subjectId }}</strong>
+                  <span>{{ orphan.subjectSubtitle || `Orphan ${subjectTypeBadgeLabel(orphan.subjectType)}` }}</span>
+                  <span
+                    v-if="subjectMutationBlocked(orphan.subjectType, orphan.isActive)"
+                    class="meta-sheet-perm__lifecycle"
+                    data-lifecycle="inactive"
+                  >
+                    Inactive user
+                  </span>
+                </div>
                   <span
                     class="meta-sheet-perm__badge"
                     :data-access-level="fieldPermDraftLabel(field.id, orphan.subjectType, orphan.subjectId)"
@@ -397,12 +442,25 @@
                   <div class="meta-sheet-perm__identity">
                     <strong>{{ entry.label }}</strong>
                     <span>{{ entry.subtitle || entry.subjectId }}</span>
+                    <span
+                      v-if="subjectMutationBlocked(entry.subjectType, entry.isActive)"
+                      class="meta-sheet-perm__lifecycle"
+                      data-lifecycle="inactive"
+                    >
+                      Inactive user
+                    </span>
+                    <span
+                      v-if="subjectMutationBlocked(entry.subjectType, entry.isActive)"
+                      class="meta-sheet-perm__hint"
+                    >
+                      Cleanup only
+                    </span>
                   </div>
                   <span class="meta-sheet-perm__subject" :data-subject-type="entry.subjectType">{{ subjectTypeBadgeLabel(entry.subjectType) }}</span>
                   <select
                     :value="viewTemplateDraftValue(entry.subjectType, entry.subjectId)"
                     class="meta-sheet-perm__select"
-                    :disabled="busyViewTemplateKey === subjectKey(entry.subjectType, entry.subjectId)"
+                    :disabled="busyViewTemplateKey === subjectKey(entry.subjectType, entry.subjectId) || subjectMutationBlocked(entry.subjectType, entry.isActive)"
                     @change="setViewTemplateDraft(entry.subjectType, entry.subjectId, $event)"
                   >
                     <option value="none">None</option>
@@ -413,7 +471,7 @@
                   <button
                     class="meta-sheet-perm__action meta-sheet-perm__action--primary"
                     type="button"
-                    :disabled="busyViewTemplateKey === subjectKey(entry.subjectType, entry.subjectId)"
+                    :disabled="busyViewTemplateKey === subjectKey(entry.subjectType, entry.subjectId) || subjectMutationBlocked(entry.subjectType, entry.isActive)"
                     @click="applyViewTemplate(entry.subjectType, entry.subjectId)"
                   >
                     Apply to all views
@@ -450,6 +508,19 @@
                   <div class="meta-sheet-perm__identity">
                     <strong>{{ entry.label }}</strong>
                     <span>{{ subjectTypeBadgeLabel(entry.subjectType) }}</span>
+                    <span
+                      v-if="subjectMutationBlocked(entry.subjectType, entry.isActive)"
+                      class="meta-sheet-perm__lifecycle"
+                      data-lifecycle="inactive"
+                    >
+                      Inactive user
+                    </span>
+                    <span
+                      v-if="subjectMutationBlocked(entry.subjectType, entry.isActive)"
+                      class="meta-sheet-perm__hint"
+                    >
+                      Cleanup only
+                    </span>
                   </div>
                   <span
                     class="meta-sheet-perm__badge"
@@ -460,7 +531,7 @@
                   <select
                     :value="viewPermDraftValue(view.id, entry.subjectType, entry.subjectId)"
                     class="meta-sheet-perm__select"
-                    :disabled="busyViewPermKey === viewPermKey(view.id, entry.subjectType, entry.subjectId)"
+                    :disabled="busyViewPermKey === viewPermKey(view.id, entry.subjectType, entry.subjectId) || subjectMutationBlocked(entry.subjectType, entry.isActive)"
                     @change="setViewPermDraft(view.id, entry.subjectType, entry.subjectId, $event)"
                   >
                     <option value="none">None</option>
@@ -471,7 +542,7 @@
                   <button
                     class="meta-sheet-perm__action meta-sheet-perm__action--primary"
                     type="button"
-                    :disabled="busyViewPermKey === viewPermKey(view.id, entry.subjectType, entry.subjectId)"
+                    :disabled="busyViewPermKey === viewPermKey(view.id, entry.subjectType, entry.subjectId) || subjectMutationBlocked(entry.subjectType, entry.isActive)"
                     @click="applyViewPerm(view.id, entry.subjectType, entry.subjectId)"
                   >
                     Save
@@ -483,10 +554,17 @@
                   class="meta-sheet-perm__row meta-sheet-perm__row--field"
                   :data-view-permission-orphan-row="`${view.id}:${subjectKey(orphan.subjectType, orphan.subjectId)}`"
                 >
-                  <div class="meta-sheet-perm__identity">
-                    <strong>{{ orphan.subjectLabel || orphan.subjectId }}</strong>
-                    <span>{{ orphan.subjectSubtitle || `Orphan ${subjectTypeBadgeLabel(orphan.subjectType)}` }}</span>
-                  </div>
+                <div class="meta-sheet-perm__identity">
+                  <strong>{{ orphan.subjectLabel || orphan.subjectId }}</strong>
+                  <span>{{ orphan.subjectSubtitle || `Orphan ${subjectTypeBadgeLabel(orphan.subjectType)}` }}</span>
+                  <span
+                    v-if="subjectMutationBlocked(orphan.subjectType, orphan.isActive)"
+                    class="meta-sheet-perm__lifecycle"
+                    data-lifecycle="inactive"
+                  >
+                    Inactive user
+                  </span>
+                </div>
                   <span
                     class="meta-sheet-perm__badge"
                     :data-access-level="viewPermDraftValue(view.id, orphan.subjectType, orphan.subjectId)"
@@ -943,8 +1021,16 @@ function subjectTypeBadgeLabel(subjectType: MetaSheetPermissionSubjectType) {
   return 'Person'
 }
 
-function subjectIsInactive(subjectType: MetaSheetPermissionSubjectType, isActive: boolean) {
+function subjectIsInactive(subjectType: MetaSheetPermissionSubjectType, isActive: boolean | undefined) {
   return subjectType === 'user' && isActive === false
+}
+
+function subjectMutationBlocked(subjectType: MetaSheetPermissionSubjectType, isActive: boolean | undefined) {
+  return subjectIsInactive(subjectType, isActive)
+}
+
+function candidateGrantBlocked(candidate: MetaSheetPermissionCandidate) {
+  return subjectMutationBlocked(candidate.subjectType, candidate.isActive)
 }
 
 function requestClose() {

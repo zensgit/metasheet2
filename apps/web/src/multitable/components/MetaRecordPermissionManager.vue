@@ -37,6 +37,12 @@
                 >
                   Inactive user
                 </span>
+                <span
+                  v-if="subjectMutationBlocked(entry.subjectType, entry.isActive)"
+                  class="meta-record-perm__hint"
+                >
+                  Cleanup only
+                </span>
               </div>
             <span class="meta-record-perm__subject" :data-subject-type="entry.subjectType">{{ subjectTypeLabel(entry.subjectType) }}</span>
             <span class="meta-record-perm__badge" :data-access-level="entryDrafts[entry.id] ?? entry.accessLevel">
@@ -45,7 +51,7 @@
             <select
               :value="entryDrafts[entry.id] ?? entry.accessLevel"
               class="meta-record-perm__select"
-              :disabled="busyKey === entry.id"
+              :disabled="busyKey === entry.id || subjectMutationBlocked(entry.subjectType, entry.isActive)"
               @change="setEntryDraft(entry.id, $event)"
             >
               <option value="read">Read</option>
@@ -55,7 +61,7 @@
             <button
               class="meta-record-perm__action"
               type="button"
-              :disabled="busyKey === entry.id || (entryDrafts[entry.id] ?? entry.accessLevel) === entry.accessLevel"
+              :disabled="busyKey === entry.id || subjectMutationBlocked(entry.subjectType, entry.isActive) || (entryDrafts[entry.id] ?? entry.accessLevel) === entry.accessLevel"
               @click="saveEntry(entry)"
             >
               Save
@@ -107,12 +113,18 @@
                 >
                   Inactive user
                 </span>
+                <span
+                  v-if="candidateGrantBlocked(candidate)"
+                  class="meta-record-perm__hint"
+                >
+                  Grant blocked
+                </span>
               </div>
               <span class="meta-record-perm__subject" data-subject-type="user">User</span>
               <select
                 :value="candidateDrafts[subjectKey(candidate.subjectType, candidate.subjectId)] ?? candidate.accessLevel ?? 'read'"
                 class="meta-record-perm__select"
-                :disabled="busyKey === subjectKey(candidate.subjectType, candidate.subjectId)"
+                :disabled="busyKey === subjectKey(candidate.subjectType, candidate.subjectId) || candidateGrantBlocked(candidate)"
                 @change="setCandidateDraft(candidate.subjectType, candidate.subjectId, $event)"
               >
                 <option value="read">Read</option>
@@ -122,7 +134,7 @@
               <button
                 class="meta-record-perm__action meta-record-perm__action--primary"
                 type="button"
-                :disabled="busyKey === subjectKey(candidate.subjectType, candidate.subjectId)"
+                :disabled="busyKey === subjectKey(candidate.subjectType, candidate.subjectId) || candidateGrantBlocked(candidate)"
                 @click="grantCandidate(candidate.subjectType, candidate.subjectId)"
               >
                 Grant
@@ -249,6 +261,14 @@ function subjectTypeLabel(subjectType: string): string {
 
 function subjectIsInactive(subjectType: string, isActive: boolean) {
   return subjectType === 'user' && isActive === false
+}
+
+function subjectMutationBlocked(subjectType: string, isActive: boolean) {
+  return subjectIsInactive(subjectType, isActive)
+}
+
+function candidateGrantBlocked(candidate: MetaSheetPermissionCandidate) {
+  return subjectMutationBlocked(candidate.subjectType, candidate.isActive)
 }
 
 function requestClose() {
@@ -562,6 +582,12 @@ watch(
   color: #b91c1c;
   font-size: 11px;
   font-weight: 600;
+}
+
+.meta-record-perm__hint {
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 500;
 }
 
 .meta-record-perm__subject {
