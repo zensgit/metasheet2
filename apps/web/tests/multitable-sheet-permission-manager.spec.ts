@@ -404,6 +404,114 @@ describe('MetaSheetPermissionManager', () => {
     expect(updatedSpy).toHaveBeenCalledTimes(1)
   })
 
+  it('clears all orphan field overrides for a field in one action', async () => {
+    const updatedSpy = vi.fn()
+    const client = {
+      listSheetPermissions: vi.fn().mockResolvedValue({ items: [] }),
+      listSheetPermissionCandidates: vi.fn().mockResolvedValue({ items: [] }),
+      updateSheetPermission: vi.fn().mockResolvedValue({}),
+      updateFieldPermission: vi.fn().mockResolvedValue({}),
+      updateViewPermission: vi.fn().mockResolvedValue({}),
+    }
+
+    mountManager({
+      client,
+      onUpdated: updatedSpy,
+      fields: [
+        { id: 'fld_title', name: 'Title', type: 'string', property: {}, order: 0, options: [] },
+      ],
+      fieldPermissionEntries: [
+        {
+          fieldId: 'fld_title',
+          subjectType: 'member-group',
+          subjectId: 'group_north',
+          subjectLabel: 'North Region',
+          subjectSubtitle: 'Regional operations',
+          visible: true,
+          readOnly: true,
+          isActive: true,
+        },
+        {
+          fieldId: 'fld_title',
+          subjectType: 'user',
+          subjectId: 'user_inactive',
+          subjectLabel: 'Morgan',
+          subjectSubtitle: 'morgan@example.com',
+          visible: false,
+          readOnly: false,
+          isActive: false,
+        },
+      ],
+    })
+    await flushUi()
+
+    const tabs = Array.from(container!.querySelectorAll('[role="tab"]'))
+    const fieldTab = tabs.find((tab) => tab.textContent?.includes('Field Permissions')) as HTMLElement
+    fieldTab.click()
+    await flushUi()
+
+    ;(container!.querySelector('[data-field-permission-clear-orphans="fld_title"]') as HTMLButtonElement).click()
+    await flushUi()
+
+    expect(client.updateFieldPermission).toHaveBeenCalledTimes(2)
+    expect(client.updateFieldPermission).toHaveBeenNthCalledWith(1, 'sheet_orders', 'fld_title', 'member-group', 'group_north', { remove: true })
+    expect(client.updateFieldPermission).toHaveBeenNthCalledWith(2, 'sheet_orders', 'fld_title', 'user', 'user_inactive', { remove: true })
+    expect(updatedSpy).toHaveBeenCalledTimes(1)
+  })
+
+  it('clears all orphan view overrides for a view in one action', async () => {
+    const updatedSpy = vi.fn()
+    const client = {
+      listSheetPermissions: vi.fn().mockResolvedValue({ items: [] }),
+      listSheetPermissionCandidates: vi.fn().mockResolvedValue({ items: [] }),
+      updateSheetPermission: vi.fn().mockResolvedValue({}),
+      updateFieldPermission: vi.fn().mockResolvedValue({}),
+      updateViewPermission: vi.fn().mockResolvedValue({}),
+    }
+
+    mountManager({
+      client,
+      onUpdated: updatedSpy,
+      views: [
+        { id: 'view_grid', name: 'Grid View', type: 'grid', sheetId: 'sheet_orders' },
+      ],
+      viewPermissionEntries: [
+        {
+          viewId: 'view_grid',
+          subjectType: 'member-group',
+          subjectId: 'group_north',
+          subjectLabel: 'North Region',
+          subjectSubtitle: 'Regional operations',
+          permission: 'admin',
+          isActive: true,
+        },
+        {
+          viewId: 'view_grid',
+          subjectType: 'user',
+          subjectId: 'user_inactive',
+          subjectLabel: 'Morgan',
+          subjectSubtitle: 'morgan@example.com',
+          permission: 'read',
+          isActive: false,
+        },
+      ],
+    })
+    await flushUi()
+
+    const tabs = Array.from(container!.querySelectorAll('[role="tab"]'))
+    const viewTab = tabs.find((tab) => tab.textContent?.includes('View Permissions')) as HTMLElement
+    viewTab.click()
+    await flushUi()
+
+    ;(container!.querySelector('[data-view-permission-clear-orphans="view_grid"]') as HTMLButtonElement).click()
+    await flushUi()
+
+    expect(client.updateViewPermission).toHaveBeenCalledTimes(2)
+    expect(client.updateViewPermission).toHaveBeenNthCalledWith(1, 'view_grid', 'member-group', 'group_north', 'none')
+    expect(client.updateViewPermission).toHaveBeenNthCalledWith(2, 'view_grid', 'user', 'user_inactive', 'none')
+    expect(updatedSpy).toHaveBeenCalledTimes(1)
+  })
+
   it('shows subject override summaries and clears downstream overrides for a sheet subject', async () => {
     const updatedSpy = vi.fn()
     const client = {
