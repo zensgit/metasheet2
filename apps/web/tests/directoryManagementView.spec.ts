@@ -66,6 +66,8 @@ function createIntegration(overrides: Record<string, unknown> = {}) {
       excludeDepartmentIds: [],
       memberGroupSyncMode: 'disabled',
       memberGroupDepartmentIds: [],
+      memberGroupDefaultRoleIds: [],
+      memberGroupDefaultNamespaces: [],
     },
     stats: {
       departmentCount: 12,
@@ -399,6 +401,9 @@ describe('DirectoryManagementView', () => {
               autoAdmissionExcludedCount: 1,
               memberGroupsSyncedCount: 2,
               memberGroupsCreatedCount: 1,
+              memberGroupGovernedUserCount: 3,
+              memberGroupDefaultRoleAssignmentsCount: 4,
+              memberGroupDefaultNamespaceAdmissionsCount: 6,
             },
           },
         },
@@ -437,6 +442,9 @@ describe('DirectoryManagementView', () => {
                 autoAdmissionExcludedCount: 1,
                 memberGroupsSyncedCount: 2,
                 memberGroupsCreatedCount: 1,
+                memberGroupGovernedUserCount: 3,
+                memberGroupDefaultRoleAssignmentsCount: 4,
+                memberGroupDefaultNamespaceAdmissionsCount: 6,
               },
               errorMessage: null,
             },
@@ -525,7 +533,7 @@ describe('DirectoryManagementView', () => {
     expect(apiFetchMock).toHaveBeenCalledWith('/api/admin/directory/integrations/dir-1/alerts?page=1&pageSize=20&filter=all')
     expect(apiFetchMock).toHaveBeenCalledWith('/api/admin/directory/integrations/dir-1/review-items?page=1&pageSize=100&filter=all')
     expect(apiFetchMock).toHaveBeenCalledWith('/api/admin/directory/integrations/dir-1/accounts?page=1&pageSize=25')
-    expect(container?.textContent).toContain('目录同步已完成，自动准入 2 位成员，1 位成员命中排除部门，未自动创建，同步 2 个成员组（新建 1 个）')
+    expect(container?.textContent).toContain('目录同步已完成，自动准入 2 位成员，1 位成员命中排除部门，未自动创建，同步 2 个成员组（新建 1 个），为 3 位成员补齐默认治理（角色新增 4 项，插件开通新增 6 项）')
     expect(container?.textContent).toContain('账号 99')
   })
 
@@ -4237,12 +4245,20 @@ describe('DirectoryManagementView', () => {
 
     const includeTextarea = container!.querySelector('textarea[placeholder*="将覆盖所选部门及其子部门"]') as HTMLTextAreaElement | null
     const excludeTextarea = container!.querySelector('textarea[placeholder*="会覆盖白名单父部门"]') as HTMLTextAreaElement | null
+    const roleTextarea = container!.querySelector('textarea[placeholder*="填写 role ID"]') as HTMLTextAreaElement | null
+    const namespaceTextarea = container!.querySelector('textarea[placeholder*="填写命名空间"]') as HTMLTextAreaElement | null
     expect(includeTextarea).toBeTruthy()
     expect(excludeTextarea).toBeTruthy()
+    expect(roleTextarea).toBeTruthy()
+    expect(namespaceTextarea).toBeTruthy()
     includeTextarea!.value = 'dept-root\ndept-child'
     includeTextarea!.dispatchEvent(new Event('input', { bubbles: true }))
     excludeTextarea!.value = 'dept-private'
     excludeTextarea!.dispatchEvent(new Event('input', { bubbles: true }))
+    roleTextarea!.value = 'crm_user\nsales_user'
+    roleTextarea!.dispatchEvent(new Event('input', { bubbles: true }))
+    namespaceTextarea!.value = 'crm\nsales'
+    namespaceTextarea!.dispatchEvent(new Event('input', { bubbles: true }))
     await flushUi(2)
 
     const testButton = Array.from(container!.querySelectorAll('button')).find((button) => button.textContent?.includes('测试连通性'))
@@ -4268,6 +4284,8 @@ describe('DirectoryManagementView', () => {
           excludeDepartmentIds: ['dept-private'],
           memberGroupSyncMode: 'disabled',
           memberGroupDepartmentIds: [],
+          memberGroupDefaultRoleIds: ['crm_user', 'sales_user'],
+          memberGroupDefaultNamespaces: ['crm', 'sales'],
           status: 'active',
           scheduleCron: '',
           defaultDeprovisionPolicy: 'mark_inactive',

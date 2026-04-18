@@ -27,6 +27,16 @@
     - `memberGroupSyncMode = sync_scoped_departments`
     - `memberGroupDepartmentIds = [...]`
   - Each selected department projects to one platform member group containing linked local users from that department subtree
+- Apply safe default governance to projected member-group members: **supported in this branch**
+  - Integration config:
+    - `memberGroupDefaultRoleIds = [...]`
+    - `memberGroupDefaultNamespaces = [...]`
+  - Sync fills only missing grants for linked local users inside projected groups
+  - Current safety rule:
+    - ordinary business roles only
+    - no `admin`
+    - no delegated-admin style roles
+    - namespaces must be admission-controlled resources
 
 ### Password capabilities
 
@@ -72,6 +82,15 @@ Still not implemented:
 
 - role templates or member-group projection during admission;
 - dedicated operator notification delivery for auto-admitted users.
+
+The branch now also allows projected member groups to add a safe downstream
+governance baseline after admission:
+
+- default business roles
+- default namespace admissions
+
+This is additive only and intentionally does not revoke grants when a user
+later leaves scope.
 
 ### Phase 3: password governance
 
