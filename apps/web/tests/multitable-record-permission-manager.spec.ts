@@ -192,6 +192,45 @@ describe('MetaRecordPermissionManager', () => {
     expect(updatedSpy).toHaveBeenCalledTimes(1)
   })
 
+  it('surfaces inactive users in current record access and candidate results', async () => {
+    const client = makeClient({
+      listRecordPermissions: vi.fn().mockResolvedValue([
+        {
+          id: 'perm_inactive',
+          sheetId: 'sheet_1',
+          recordId: 'record_1',
+          subjectType: 'user',
+          subjectId: 'user_inactive',
+          accessLevel: 'read',
+          label: 'Morgan',
+          subtitle: 'morgan@example.com',
+          isActive: false,
+        },
+      ]),
+      listSheetPermissions: vi.fn().mockResolvedValue({
+        items: [
+          {
+            subjectType: 'user',
+            subjectId: 'user_candidate_inactive',
+            accessLevel: 'read',
+            permissions: ['spreadsheet:read'],
+            label: 'Taylor',
+            subtitle: 'taylor@example.com',
+            isActive: false,
+          },
+        ],
+      }),
+    })
+
+    mountManager({ client })
+    await flushUi()
+
+    const inactiveEntry = container!.querySelector('[data-record-permission-entry="perm_inactive"]')!
+    const inactiveCandidate = container!.querySelector('[data-record-permission-candidate="user:user_candidate_inactive"]')!
+    expect(inactiveEntry.textContent).toContain('Inactive user')
+    expect(inactiveCandidate.textContent).toContain('Inactive user')
+  })
+
   it('searches across sheet subjects and global candidates when granting record access', async () => {
     const client = makeClient({
       listSheetPermissions: vi.fn().mockResolvedValue({

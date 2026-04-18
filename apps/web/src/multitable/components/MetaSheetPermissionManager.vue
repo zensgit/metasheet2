@@ -45,6 +45,13 @@
                 <strong>{{ entry.label }}</strong>
                 <span>{{ entry.subtitle || entry.subjectId }}</span>
                 <span
+                  v-if="subjectIsInactive(entry.subjectType, entry.isActive)"
+                  class="meta-sheet-perm__lifecycle"
+                  data-lifecycle="inactive"
+                >
+                  Inactive user
+                </span>
+                <span
                   v-if="hasSubjectOverrides(entry.subjectType, entry.subjectId)"
                   class="meta-sheet-perm__hint meta-sheet-perm__hint--inline"
                 >
@@ -123,6 +130,13 @@
                 <div class="meta-sheet-perm__identity">
                   <strong>{{ candidate.label }}</strong>
                   <span>{{ candidate.subtitle || candidate.subjectId }}</span>
+                  <span
+                    v-if="subjectIsInactive(candidate.subjectType, candidate.isActive)"
+                    class="meta-sheet-perm__lifecycle"
+                    data-lifecycle="inactive"
+                  >
+                    Inactive user
+                  </span>
                 </div>
                 <span class="meta-sheet-perm__subject" data-subject-type="user">Person</span>
                 <select
@@ -863,6 +877,10 @@ function subjectTypeBadgeLabel(subjectType: MetaSheetPermissionSubjectType) {
   return 'Person'
 }
 
+function subjectIsInactive(subjectType: MetaSheetPermissionSubjectType, isActive: boolean) {
+  return subjectType === 'user' && isActive === false
+}
+
 function requestClose() {
   emit('close')
 }
@@ -1194,6 +1212,18 @@ onBeforeUnmount(() => {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.meta-sheet-perm__lifecycle {
+  display: inline-flex;
+  width: fit-content;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: #fef2f2;
+  color: #b91c1c;
+  font-size: 11px;
+  font-weight: 600;
 }
 
 .meta-sheet-perm__badge {
