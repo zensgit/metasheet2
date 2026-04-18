@@ -623,7 +623,7 @@ describe('admin-users routes', () => {
 
     const response = await invokeRoute('patch', '/api/admin/users/:userId/profile', {
       params: { userId: 'user-1' },
-      body: { mobile: '13758875801', expectedMobile: '13500000000' },
+      body: { mobile: '13900001234', expectedMobile: '13500000000' },
     })
 
     expect(response.statusCode).toBe(409)

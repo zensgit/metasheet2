@@ -244,6 +244,7 @@ describe('auth invite routes', () => {
       expect.stringContaining('UPDATE users'),
       ['hashed-password', 'Alpha User', 'user-1', 'alpha@example.com'],
     )
+    expect(String(pgMocks.query.mock.calls[1]?.[0] || '')).toContain('must_change_password = FALSE')
     expect(sessionMocks.revokeUserSessions).toHaveBeenCalledWith('user-1', expect.objectContaining({
       updatedBy: 'user-1',
       reason: 'invite-accepted',

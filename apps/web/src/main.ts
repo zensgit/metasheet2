@@ -18,10 +18,17 @@ const router = createRouter({
   routes: appRoutes,
 })
 
+function requiresPasswordChange(user: unknown): boolean {
+  if (!user || typeof user !== 'object') return false
+  const record = user as Record<string, unknown>
+  return record.must_change_password === true || record.mustChangePassword === true
+}
+
 router.beforeEach(async (to, _from, next) => {
   const auth = useAuth()
   const token = auth.getToken()
   const isLoginRoute = to.path === ROUTE_PATHS.LOGIN
+  const isForcePasswordChangeRoute = to.path === ROUTE_PATHS.FORCE_PASSWORD_CHANGE
   const requiresAuth = to.meta?.requiresAuth !== false
   const flags = useFeatureFlags()
   const localeRaw =
@@ -35,6 +42,9 @@ router.beforeEach(async (to, _from, next) => {
     if (token) {
       const session = await auth.bootstrapSession()
       if (session.ok) {
+        if (requiresPasswordChange(auth.getCurrentUser())) {
+          return next(ROUTE_PATHS.FORCE_PASSWORD_CHANGE)
+        }
         try {
           await flags.loadProductFeatures()
         } catch {
@@ -67,9 +77,26 @@ router.beforeEach(async (to, _from, next) => {
           : { path: ROUTE_PATHS.LOGIN, query: { redirect } }
       )
     }
+
+    const currentUser = auth.getCurrentUser()
+    const mustChangePassword = requiresPasswordChange(currentUser)
+    if (mustChangePassword && !isForcePasswordChangeRoute) {
+      return next(ROUTE_PATHS.FORCE_PASSWORD_CHANGE)
+    }
+    if (!mustChangePassword && isForcePasswordChangeRoute) {
+      try {
+        await flags.loadProductFeatures()
+      } catch {
+        // Ignore transient feature load failures and fall back to default home.
+      }
+      return next(flags.resolveHomePath())
+    }
   }
 
   try {
+    if (to.meta?.skipShellBootstrap === true) {
+      return next()
+    }
     await flags.loadProductFeatures()
 
     const required = to.meta?.requiredFeature

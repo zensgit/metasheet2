@@ -707,6 +707,7 @@ export interface UsersTable {
   email: string
   name: string | null
   password_hash: string
+  must_change_password: boolean
   role: string
   permissions: JSONColumnType<string[]>
   avatar_url: string | null

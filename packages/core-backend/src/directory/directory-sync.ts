@@ -1,3 +1,9 @@
+import * as bcrypt from 'bcryptjs'
+import * as crypto from 'crypto'
+import { buildOnboardingPacket } from '../auth/access-presets'
+import { recordInvite } from '../auth/invite-ledger'
+import { issueInviteToken } from '../auth/invite-tokens'
+import { validatePassword } from '../auth/password-policy'
 import { Logger } from '../core/logger'
 import { query, transaction } from '../db/pg'
 import {
@@ -10,6 +16,7 @@ import {
 } from '../integrations/dingtalk/client'
 import { assertDingTalkCorpAllowed } from '../integrations/dingtalk/runtime-policy'
 import { decryptStoredSecretValue, normalizeStoredSecretValue } from '../security/encrypted-secrets'
+import { getBcryptSaltRounds } from '../security/auth-runtime-config'
 import { SimpleCronExpression } from '../services/SchedulerService'
 
 const logger = new Logger('DirectorySync')
@@ -17,8 +24,12 @@ const DEFAULT_ORG_ID = 'default'
 const DEFAULT_PROVIDER = 'dingtalk'
 const DEFAULT_ROOT_DEPARTMENT_ID = '1'
 const DEFAULT_PAGE_SIZE = 50
+const DEFAULT_ADMISSION_MODE = 'manual_only'
+const DEFAULT_MEMBER_GROUP_SYNC_MODE = 'disabled'
 
 type JsonRecord = Record<string, unknown>
+export type DirectoryAdmissionMode = 'manual_only' | 'auto_for_scoped_departments'
+export type DirectoryMemberGroupSyncMode = 'disabled' | 'sync_scoped_departments'
 
 type DirectoryIntegrationConfig = {
   appKey: string
@@ -26,6 +37,11 @@ type DirectoryIntegrationConfig = {
   rootDepartmentId: string
   baseUrl?: string
   pageSize?: number
+  admissionMode: DirectoryAdmissionMode
+  admissionDepartmentIds: string[]
+  excludeDepartmentIds: string[]
+  memberGroupSyncMode: DirectoryMemberGroupSyncMode
+  memberGroupDepartmentIds: string[]
 }
 
 type DirectoryIntegrationRow = {
@@ -83,6 +99,8 @@ type DirectorySyncAlertRow = {
 type DirectoryDepartmentRow = {
   id: string
   external_department_id: string
+  name?: string
+  full_path?: string | null
 }
 
 type DirectoryAccountRow = {
@@ -92,6 +110,7 @@ type DirectoryAccountRow = {
   union_id: string | null
   open_id: string | null
   external_key: string
+  name: string
   email: string | null
   mobile: string | null
 }
@@ -220,6 +239,11 @@ export type DirectoryIntegrationSummary = {
     rootDepartmentId: string
     baseUrl: string | null
     pageSize: number
+    admissionMode: DirectoryAdmissionMode
+    admissionDepartmentIds: string[]
+    excludeDepartmentIds: string[]
+    memberGroupSyncMode: DirectoryMemberGroupSyncMode
+    memberGroupDepartmentIds: string[]
   }
   stats: {
     departmentCount: number
@@ -238,6 +262,11 @@ export type DirectoryIntegrationInput = {
   rootDepartmentId?: string
   baseUrl?: string
   pageSize?: number
+  admissionMode?: DirectoryAdmissionMode | string
+  admissionDepartmentIds?: string[] | string
+  excludeDepartmentIds?: string[] | string
+  memberGroupSyncMode?: DirectoryMemberGroupSyncMode | string
+  memberGroupDepartmentIds?: string[] | string
   syncEnabled?: boolean
   scheduleCron?: string | null
   defaultDeprovisionPolicy?: string
@@ -420,6 +449,42 @@ export type DirectoryAccountMutationResult = {
   } | null
 }
 
+export type DirectoryAccountManualAdmissionInput = {
+  adminUserId: string
+  name: string
+  email: string
+  mobile?: string | null
+  enableDingTalkGrant?: boolean
+  password?: string
+}
+
+export type DirectoryAccountManualAdmissionResult = DirectoryAccountMutationResult & {
+  user: {
+    id: string
+    email: string
+    name: string
+    mobile: string | null
+    role: string
+    is_active: boolean
+  }
+  temporaryPassword?: string
+  inviteToken: string
+  onboarding: ReturnType<typeof buildOnboardingPacket>
+}
+
+export type DirectoryAutoAdmissionEligibility = {
+  inScope: boolean
+  missingEmail: boolean
+  excluded?: boolean
+}
+
+export type DirectoryProjectedMemberGroupPlan = {
+  externalDepartmentId: string
+  name: string
+  marker: string
+  memberUserIds: string[]
+}
+
 function parseJsonRecord(value: JsonRecord | string | null | undefined): JsonRecord {
   if (!value) return {}
   if (typeof value === 'string') {
@@ -442,10 +507,184 @@ function normalizeOptionalText(value: unknown): string | null {
   return text.length > 0 ? text : null
 }
 
+function sanitizeDirectoryAdmissionEmail(value: string): string {
+  return normalizeText(value).toLowerCase().slice(0, 255)
+}
+
+function sanitizeDirectoryAdmissionName(value: string): string {
+  return normalizeText(value).replace(/[<>'"&;]/g, '').slice(0, 100)
+}
+
+function sanitizeDirectoryAdmissionMobile(value: unknown): string | null {
+  const text = normalizeText(value).replace(/\s+/g, '')
+  if (!text) return null
+  return text.slice(0, 32)
+}
+
+function generateDirectoryAdmissionTemporaryPassword(): string {
+  return `Tmp-${crypto.randomBytes(8).toString('base64url')}9A`
+}
+
 function normalizePageSize(value: unknown): number {
   const numeric = Number(value)
   if (!Number.isFinite(numeric)) return DEFAULT_PAGE_SIZE
   return Math.min(Math.max(Math.trunc(numeric), 1), 100)
+}
+
+function normalizeAdmissionMode(value: unknown, fallback: DirectoryAdmissionMode = DEFAULT_ADMISSION_MODE): DirectoryAdmissionMode {
+  const normalized = normalizeText(value)
+  if (normalized === 'auto_for_scoped_departments') return normalized
+  return fallback
+}
+
+function normalizeMemberGroupSyncMode(
+  value: unknown,
+  fallback: DirectoryMemberGroupSyncMode = DEFAULT_MEMBER_GROUP_SYNC_MODE,
+): DirectoryMemberGroupSyncMode {
+  if (value === 'sync_scoped_departments') return 'sync_scoped_departments'
+  if (value === 'disabled') return 'disabled'
+  return fallback
+}
+
+function normalizeAdmissionDepartmentIds(value: unknown, fallback: string[] = []): string[] {
+  const rawValues = Array.isArray(value)
+    ? value
+    : typeof value === 'string'
+      ? value.split(/[\n,]+/)
+      : fallback
+  const deduped = new Set<string>()
+  for (const entry of rawValues) {
+    const normalized = normalizeText(entry)
+    if (!normalized) continue
+    deduped.add(normalized)
+  }
+  return Array.from(deduped)
+}
+
+function normalizeExcludeDepartmentIds(value: unknown, fallback: string[] = []): string[] {
+  return normalizeAdmissionDepartmentIds(value, fallback)
+}
+
+function normalizeMemberGroupDepartmentIds(value: unknown, fallback: string[] = []): string[] {
+  return normalizeAdmissionDepartmentIds(value, fallback)
+}
+
+export function isDirectoryUserWithinAdmissionScope(
+  userDepartmentIds: string[],
+  allowedDepartmentIds: string[],
+  departments: Map<string, Pick<DingTalkDepartment, 'id' | 'parentId'>>,
+): boolean {
+  if (allowedDepartmentIds.length === 0 || userDepartmentIds.length === 0) return false
+  const allowed = new Set(allowedDepartmentIds.map((value) => normalizeText(value)).filter(Boolean))
+  if (allowed.size === 0) return false
+
+  for (const departmentId of userDepartmentIds.map((value) => normalizeText(value)).filter(Boolean)) {
+    let currentId: string | null = departmentId
+    const seen = new Set<string>()
+
+    while (currentId && !seen.has(currentId)) {
+      if (allowed.has(currentId)) return true
+      seen.add(currentId)
+      currentId = departments.get(currentId)?.parentId ?? null
+    }
+  }
+
+  return false
+}
+
+export function evaluateDirectoryAutoAdmissionEligibility(options: {
+  admissionMode: DirectoryAdmissionMode
+  admissionDepartmentIds: string[]
+  excludeDepartmentIds: string[]
+  userDepartmentIds: string[]
+  departments: Map<string, Pick<DingTalkDepartment, 'id' | 'parentId'>>
+  email: string | null
+}): DirectoryAutoAdmissionEligibility {
+  if (options.admissionMode !== 'auto_for_scoped_departments') {
+    return { inScope: false, missingEmail: false }
+  }
+
+  const inAllowedScope = isDirectoryUserWithinAdmissionScope(
+    options.userDepartmentIds,
+    options.admissionDepartmentIds,
+    options.departments,
+  )
+  if (!inAllowedScope) return { inScope: false, missingEmail: false }
+
+  const excluded = isDirectoryUserWithinAdmissionScope(
+    options.userDepartmentIds,
+    options.excludeDepartmentIds,
+    options.departments,
+  )
+  if (excluded) {
+    return { inScope: false, missingEmail: false, excluded: true }
+  }
+
+  return {
+    inScope: true,
+    missingEmail: !normalizeText(options.email),
+  }
+}
+
+function normalizeDirectorySyncAuditUserId(adminUserId: string): string | null {
+  const normalized = normalizeText(adminUserId)
+  if (!normalized || normalized.startsWith('system:')) return null
+  return normalized
+}
+
+function buildDirectoryProjectedMemberGroupMarker(integrationId: string, externalDepartmentId: string): string {
+  return `dingtalk-sync-group:${normalizeText(integrationId)}:${normalizeText(externalDepartmentId)}`
+}
+
+function buildDirectoryProjectedMemberGroupName(
+  integrationName: string,
+  departmentPath: string,
+  externalDepartmentId: string,
+): string {
+  const normalizedPath = normalizeText(departmentPath)
+  const normalizedDepartmentId = normalizeText(externalDepartmentId)
+  return `钉钉同步 · ${normalizeText(integrationName)} · ${normalizedPath || normalizedDepartmentId}`
+}
+
+export function buildDirectoryProjectedMemberGroupPlans(options: {
+  integrationId: string
+  integrationName: string
+  memberGroupSyncMode: DirectoryMemberGroupSyncMode
+  memberGroupDepartmentIds: string[]
+  departments: Map<string, Pick<DingTalkDepartment, 'id' | 'parentId' | 'name'>>
+  departmentPathMap: Map<string, string>
+  userDepartmentIdsByExternalUserId: Map<string, string[]>
+  linkedUserIdByExternalUserId: Map<string, string>
+}): DirectoryProjectedMemberGroupPlan[] {
+  if (options.memberGroupSyncMode !== 'sync_scoped_departments') return []
+  const plans: DirectoryProjectedMemberGroupPlan[] = []
+  for (const externalDepartmentId of options.memberGroupDepartmentIds) {
+    const normalizedDepartmentId = normalizeText(externalDepartmentId)
+    if (!normalizedDepartmentId) continue
+    const department = options.departments.get(normalizedDepartmentId)
+    if (!department) continue
+    const memberUserIds = new Set<string>()
+    for (const [externalUserId, userId] of options.linkedUserIdByExternalUserId.entries()) {
+      const userDepartmentIds = options.userDepartmentIdsByExternalUserId.get(externalUserId) ?? []
+      const inScope = isDirectoryUserWithinAdmissionScope(
+        userDepartmentIds,
+        [normalizedDepartmentId],
+        options.departments,
+      )
+      if (inScope) memberUserIds.add(userId)
+    }
+    plans.push({
+      externalDepartmentId: normalizedDepartmentId,
+      name: buildDirectoryProjectedMemberGroupName(
+        options.integrationName,
+        options.departmentPathMap.get(normalizedDepartmentId) ?? department.name,
+        normalizedDepartmentId,
+      ),
+      marker: buildDirectoryProjectedMemberGroupMarker(options.integrationId, normalizedDepartmentId),
+      memberUserIds: Array.from(memberUserIds).sort(),
+    })
+  }
+  return plans
 }
 
 function parseIntegrationConfig(row: Pick<DirectoryIntegrationRow, 'config'>): DirectoryIntegrationConfig {
@@ -456,7 +695,23 @@ function parseIntegrationConfig(row: Pick<DirectoryIntegrationRow, 'config'>): D
   const rootDepartmentId = normalizeText(config.rootDepartmentId) || DEFAULT_ROOT_DEPARTMENT_ID
   const baseUrl = normalizeOptionalText(config.baseUrl) ?? undefined
   const pageSize = normalizePageSize(config.pageSize)
-  return { appKey, appSecret, rootDepartmentId, baseUrl, pageSize }
+  const admissionMode = normalizeAdmissionMode(config.admissionMode)
+  const admissionDepartmentIds = normalizeAdmissionDepartmentIds(config.admissionDepartmentIds)
+  const excludeDepartmentIds = normalizeExcludeDepartmentIds(config.excludeDepartmentIds)
+  const memberGroupSyncMode = normalizeMemberGroupSyncMode(config.memberGroupSyncMode)
+  const memberGroupDepartmentIds = normalizeMemberGroupDepartmentIds(config.memberGroupDepartmentIds)
+  return {
+    appKey,
+    appSecret,
+    rootDepartmentId,
+    baseUrl,
+    pageSize,
+    admissionMode,
+    admissionDepartmentIds,
+    excludeDepartmentIds,
+    memberGroupSyncMode,
+    memberGroupDepartmentIds,
+  }
 }
 
 function summarizeIntegration(row: DirectoryIntegrationRow): DirectoryIntegrationSummary {
@@ -482,6 +737,11 @@ function summarizeIntegration(row: DirectoryIntegrationRow): DirectoryIntegratio
       rootDepartmentId: config.rootDepartmentId,
       baseUrl: config.baseUrl ?? null,
       pageSize: config.pageSize,
+      admissionMode: config.admissionMode,
+      admissionDepartmentIds: config.admissionDepartmentIds,
+      excludeDepartmentIds: config.excludeDepartmentIds,
+      memberGroupSyncMode: config.memberGroupSyncMode,
+      memberGroupDepartmentIds: config.memberGroupDepartmentIds,
     },
     stats: {
       departmentCount: Number(row.department_count ?? 0),
@@ -880,6 +1140,11 @@ function normalizeIntegrationInput(
   const appKey = normalizeText(input.appKey)
   const appSecret = normalizeText(input.appSecret) || current?.appSecret || ''
   const rootDepartmentId = normalizeText(input.rootDepartmentId) || current?.rootDepartmentId || DEFAULT_ROOT_DEPARTMENT_ID
+  const admissionMode = normalizeAdmissionMode(input.admissionMode, current?.admissionMode ?? DEFAULT_ADMISSION_MODE)
+  const admissionDepartmentIds = normalizeAdmissionDepartmentIds(input.admissionDepartmentIds, current?.admissionDepartmentIds ?? [])
+  const excludeDepartmentIds = normalizeExcludeDepartmentIds(input.excludeDepartmentIds, current?.excludeDepartmentIds ?? [])
+  const memberGroupSyncMode = normalizeMemberGroupSyncMode(input.memberGroupSyncMode, current?.memberGroupSyncMode ?? DEFAULT_MEMBER_GROUP_SYNC_MODE)
+  const memberGroupDepartmentIds = normalizeMemberGroupDepartmentIds(input.memberGroupDepartmentIds, current?.memberGroupDepartmentIds ?? [])
   const defaultDeprovisionPolicy = normalizeText(input.defaultDeprovisionPolicy) || 'mark_inactive'
   const status = normalizeText(input.status) || 'active'
 
@@ -898,6 +1163,11 @@ function normalizeIntegrationInput(
     rootDepartmentId,
     baseUrl: normalizeOptionalText(input.baseUrl) ?? current?.baseUrl,
     pageSize: normalizePageSize(input.pageSize ?? current?.pageSize),
+    admissionMode,
+    admissionDepartmentIds,
+    excludeDepartmentIds,
+    memberGroupSyncMode,
+    memberGroupDepartmentIds,
     syncEnabled: input.syncEnabled ?? false,
     scheduleCron: normalizeOptionalText(input.scheduleCron),
     defaultDeprovisionPolicy,
@@ -972,6 +1242,11 @@ export async function createDirectoryIntegration(input: DirectoryIntegrationInpu
         rootDepartmentId: normalized.rootDepartmentId,
         baseUrl: normalized.baseUrl ?? null,
         pageSize: normalized.pageSize,
+        admissionMode: normalized.admissionMode,
+        admissionDepartmentIds: normalized.admissionDepartmentIds,
+        excludeDepartmentIds: normalized.excludeDepartmentIds,
+        memberGroupSyncMode: normalized.memberGroupSyncMode,
+        memberGroupDepartmentIds: normalized.memberGroupDepartmentIds,
       }),
       Boolean(normalized.syncEnabled),
       normalized.scheduleCron,
@@ -1015,6 +1290,11 @@ export async function updateDirectoryIntegration(
         rootDepartmentId: normalized.rootDepartmentId,
         baseUrl: normalized.baseUrl ?? null,
         pageSize: normalized.pageSize,
+        admissionMode: normalized.admissionMode,
+        admissionDepartmentIds: normalized.admissionDepartmentIds,
+        excludeDepartmentIds: normalized.excludeDepartmentIds,
+        memberGroupSyncMode: normalized.memberGroupSyncMode,
+        memberGroupDepartmentIds: normalized.memberGroupDepartmentIds,
       }),
       Boolean(normalized.syncEnabled),
       normalized.scheduleCron,
@@ -1383,6 +1663,7 @@ export async function syncDirectoryIntegration(
     const departmentPathMap = buildDepartmentPathMap(departments)
     const users = await fetchAllUsers(config, departments)
     const syncTimestamp = new Date().toISOString()
+    const autoAdmissionInvites: Array<{ userId: string; email: string; inviteToken: string }> = []
 
     await transaction(async (client) => {
       for (const department of departments.values()) {
@@ -1477,13 +1758,13 @@ export async function syncDirectoryIntegration(
 
       const [departmentRows, accountRows] = await Promise.all([
         client.query(
-          `SELECT id, external_department_id
+          `SELECT id, external_department_id, name, full_path
            FROM directory_departments
            WHERE integration_id = $1`,
           [integrationId],
         ),
         client.query(
-          `SELECT id, corp_id, external_user_id, union_id, open_id, external_key, email, mobile
+          `SELECT id, corp_id, external_user_id, union_id, open_id, external_key, name, email, mobile
            FROM directory_accounts
            WHERE integration_id = $1`,
           [integrationId],
@@ -1543,7 +1824,14 @@ export async function syncDirectoryIntegration(
       let linkedCount = 0
       let pendingCount = 0
       let unmatchedCount = 0
+      let autoAdmissionCandidateCount = 0
+      let autoAdmittedCount = 0
+      let autoAdmissionSkippedMissingEmailCount = 0
+      let autoAdmissionExcludedCount = 0
+      let autoAdmissionFailedCount = 0
+      const linkedUserIdByExternalUserId = new Map<string, string>()
       for (const account of accountIdMap.values()) {
+        const directoryUser = users.get(account.external_user_id)
         const existing = existingLinks.get(account.id)
         let localUserId: string | null = existing?.local_user_id ?? null
         let linkStatus = existing?.link_status ?? 'pending'
@@ -1571,9 +1859,80 @@ export async function syncDirectoryIntegration(
               linkStatus = 'pending'
               matchStrategy = 'mobile'
             } else {
-              localUserId = null
-              linkStatus = 'unmatched'
-              matchStrategy = 'none'
+              const autoAdmission = evaluateDirectoryAutoAdmissionEligibility({
+                admissionMode: config.admissionMode,
+                admissionDepartmentIds: config.admissionDepartmentIds,
+                excludeDepartmentIds: config.excludeDepartmentIds,
+                userDepartmentIds: directoryUser?.departmentIds ?? [],
+                departments,
+                email: account.email,
+              })
+              if (autoAdmission.inScope) autoAdmissionCandidateCount += 1
+              if (autoAdmission.excluded) autoAdmissionExcludedCount += 1
+
+              if (autoAdmission.inScope && !autoAdmission.missingEmail && directoryUser) {
+                try {
+                  const cleanName = sanitizeDirectoryAdmissionName(account.name)
+                  const cleanEmail = sanitizeDirectoryAdmissionEmail(account.email ?? '')
+                  const cleanMobile = sanitizeDirectoryAdmissionMobile(account.mobile)
+                  const generatedPassword = generateDirectoryAdmissionTemporaryPassword()
+                  const passwordHash = await bcrypt.hash(generatedPassword, getBcryptSaltRounds())
+                  const created = await createDirectoryAdmittedUserInTransaction(client, {
+                    account: {
+                      id: account.id,
+                      integration_id: integrationId,
+                      provider: DEFAULT_PROVIDER,
+                      corp_id: account.corp_id,
+                      external_user_id: account.external_user_id,
+                      union_id: account.union_id,
+                      open_id: account.open_id,
+                      external_key: account.external_key,
+                      name: account.name,
+                      email: account.email,
+                      mobile: account.mobile,
+                    },
+                    adminUserId: triggeredBy,
+                    name: cleanName,
+                    email: cleanEmail,
+                    mobile: cleanMobile,
+                    passwordHash,
+                    mustChangePassword: true,
+                    enableDingTalkGrant: true,
+                  })
+                  const inviteToken = issueInviteToken({
+                    userId: created.userId,
+                    email: cleanEmail,
+                    presetId: null,
+                  })
+                  autoAdmissionInvites.push({
+                    userId: created.userId,
+                    email: cleanEmail,
+                    inviteToken,
+                  })
+                  localUserId = created.userId
+                  linkStatus = 'linked'
+                  matchStrategy = 'auto_admit'
+                  autoAdmittedCount += 1
+                  emailMap.set(cleanEmail.toLowerCase(), created.userId)
+                  if (cleanMobile) mobileMap.set(cleanMobile, created.userId)
+                  externalIdentityMap.set(account.external_key, created.userId)
+                  const scopedOpenIdentityKey = buildScopedIdentityKey(account.corp_id, account.open_id)
+                  if (scopedOpenIdentityKey) scopedOpenIdentityMap.set(scopedOpenIdentityKey, created.userId)
+                  const scopedUnionIdentityKey = buildScopedIdentityKey(account.corp_id, account.union_id)
+                  if (scopedUnionIdentityKey) scopedUnionIdentityMap.set(scopedUnionIdentityKey, created.userId)
+                } catch (error) {
+                  autoAdmissionFailedCount += 1
+                  logger.warn(`Failed to auto-admit DingTalk directory account ${account.id}: ${readErrorMessage(error, 'unknown error')}`)
+                  localUserId = null
+                  linkStatus = 'unmatched'
+                  matchStrategy = 'none'
+                }
+              } else {
+                if (autoAdmission.missingEmail) autoAdmissionSkippedMissingEmailCount += 1
+                localUserId = null
+                linkStatus = 'unmatched'
+                matchStrategy = 'none'
+              }
             }
           }
         }
@@ -1581,6 +1940,10 @@ export async function syncDirectoryIntegration(
         if (linkStatus === 'linked') linkedCount += 1
         else if (linkStatus === 'pending') pendingCount += 1
         else unmatchedCount += 1
+
+        if (linkStatus === 'linked' && localUserId && directoryUser) {
+          linkedUserIdByExternalUserId.set(account.external_user_id, localUserId)
+        }
 
         await client.query(
           `INSERT INTO directory_account_links (
@@ -1597,12 +1960,38 @@ export async function syncDirectoryIntegration(
         )
       }
 
+      const memberGroupPlans = buildDirectoryProjectedMemberGroupPlans({
+        integrationId,
+        integrationName: integration.name,
+        memberGroupSyncMode: config.memberGroupSyncMode,
+        memberGroupDepartmentIds: config.memberGroupDepartmentIds,
+        departments,
+        departmentPathMap,
+        userDepartmentIdsByExternalUserId: new Map(
+          Array.from(users.values()).map((user) => [user.userId, user.departmentIds]),
+        ),
+        linkedUserIdByExternalUserId,
+      })
+      const memberGroupProjection = await syncProjectedDepartmentMemberGroupsInTransaction(
+        client,
+        memberGroupPlans,
+        triggeredBy,
+      )
+
       const stats = {
         departmentsSynced: departments.size,
         accountsSynced: users.size,
         linkedCount,
         pendingCount,
         unmatchedCount,
+        autoAdmissionCandidateCount,
+        autoAdmittedCount,
+        autoAdmissionSkippedMissingEmailCount,
+        autoAdmissionExcludedCount,
+        autoAdmissionFailedCount,
+        memberGroupsCreatedCount: memberGroupProjection.memberGroupsCreatedCount,
+        memberGroupsSyncedCount: memberGroupProjection.memberGroupsSyncedCount,
+        memberGroupMembershipsUpdatedCount: memberGroupProjection.memberGroupMembershipsUpdatedCount,
       }
 
       await client.query(
@@ -1624,6 +2013,18 @@ export async function syncDirectoryIntegration(
         [runId, JSON.stringify(stats)],
       )
     })
+
+    for (const invite of autoAdmissionInvites) {
+      await recordInvite({
+        userId: invite.userId,
+        email: invite.email,
+        presetId: null,
+        productMode: 'platform',
+        roleId: null,
+        invitedBy: triggeredBy,
+        inviteToken: invite.inviteToken,
+      })
+    }
 
     const [updatedIntegration, updatedRun] = await Promise.all([
       getIntegrationRow(integrationId),
@@ -2117,6 +2518,309 @@ export async function batchBindDirectoryAccounts(
   return results
 }
 
+async function applyDirectoryAccountBindInTransaction(
+  client: { query: (sql: string, params?: unknown[]) => Promise<{ rows: Array<Record<string, unknown>> }> },
+  options: {
+    normalizedAccountId: string
+    normalizedAdminUserId: string
+    enableDingTalkGrant: boolean
+    account: DirectoryBindingTargetAccountRow
+    localUser: Pick<DirectoryBindingUserRow, 'id' | 'email' | 'name'>
+  },
+): Promise<void> {
+  const { normalizedAccountId, normalizedAdminUserId, enableDingTalkGrant, account, localUser } = options
+  const identityExternalKey = buildDingTalkIdentityExternalKey(account.corp_id, account.open_id, account.union_id)
+  if (!identityExternalKey) {
+    throw new Error('Directory account is missing DingTalk openId/unionId and cannot be pre-bound for DingTalk login')
+  }
+
+  const profile = JSON.stringify({
+    source: 'directory_admin_bind',
+    integrationId: account.integration_id,
+    corpId: account.corp_id,
+    externalUserId: account.external_user_id,
+    unionId: account.union_id,
+    openId: account.open_id,
+    externalKey: account.external_key,
+    name: account.name,
+    email: account.email,
+    mobile: account.mobile,
+  })
+
+  const conflictingIdentityResult = await client.query(
+    `SELECT local_user_id
+     FROM user_external_identities
+     WHERE provider = $1
+       AND local_user_id <> $5
+       AND (
+         external_key = $2
+         OR ($3 IS NOT NULL AND provider_union_id = $3 AND corp_id IS NOT DISTINCT FROM $4)
+         OR ($6 IS NOT NULL AND provider_open_id = $6 AND corp_id IS NOT DISTINCT FROM $4)
+     )
+     LIMIT 1`,
+    [account.provider, identityExternalKey, account.union_id, account.corp_id, localUser.id, account.open_id],
+  )
+  if (conflictingIdentityResult.rows.length > 0) {
+    throw new Error('DingTalk account is already bound to another local user')
+  }
+
+  const conflictingLinkResult = await client.query(
+    `SELECT l.directory_account_id
+     FROM directory_account_links l
+     JOIN directory_accounts a ON a.id = l.directory_account_id
+     WHERE a.provider = $1
+       AND l.local_user_id = $2
+       AND l.link_status = 'linked'
+       AND l.directory_account_id <> $3
+     LIMIT 1`,
+    [account.provider, localUser.id, normalizedAccountId],
+  )
+  if (conflictingLinkResult.rows.length > 0) {
+    throw new Error('Local user is already linked to another DingTalk directory account')
+  }
+
+  const existingIdentityResult = await client.query(
+    `SELECT id
+     FROM user_external_identities
+     WHERE provider = $1 AND local_user_id = $2
+     LIMIT 1`,
+    [account.provider, localUser.id],
+  )
+
+  if (existingIdentityResult.rows.length > 0) {
+    await client.query(
+      `UPDATE user_external_identities
+       SET external_key = $3,
+           provider_union_id = $4,
+           provider_open_id = $5,
+           corp_id = $6,
+           profile = $7::jsonb,
+           bound_by = COALESCE(bound_by, $8),
+           updated_at = NOW()
+       WHERE provider = $1 AND local_user_id = $2`,
+      [
+        account.provider,
+        localUser.id,
+        identityExternalKey,
+        account.union_id,
+        account.open_id,
+        account.corp_id,
+        profile,
+        normalizedAdminUserId,
+      ],
+    )
+  } else {
+    await client.query(
+      `INSERT INTO user_external_identities (
+         provider,
+         external_key,
+         provider_union_id,
+         provider_open_id,
+         corp_id,
+         local_user_id,
+         profile,
+         bound_by,
+         created_at,
+         updated_at
+       )
+       VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, NOW(), NOW())`,
+      [
+        account.provider,
+        identityExternalKey,
+        account.union_id,
+        account.open_id,
+        account.corp_id,
+        localUser.id,
+        profile,
+        normalizedAdminUserId,
+      ],
+    )
+  }
+
+  if (enableDingTalkGrant) {
+    await client.query(
+      `INSERT INTO user_external_auth_grants (provider, local_user_id, enabled, granted_by, created_at, updated_at)
+       VALUES ($1, $2, TRUE, $3, NOW(), NOW())
+       ON CONFLICT (provider, local_user_id)
+       DO UPDATE SET enabled = TRUE, granted_by = EXCLUDED.granted_by, updated_at = NOW()`,
+      [account.provider, localUser.id, normalizedAdminUserId],
+    )
+  }
+
+  await client.query(
+    `INSERT INTO directory_account_links (
+       directory_account_id, local_user_id, link_status, match_strategy, reviewed_by, review_note, created_at, updated_at
+     )
+     VALUES ($1, $2, 'linked', 'manual_admin', $3, NULL, NOW(), NOW())
+     ON CONFLICT (directory_account_id)
+     DO UPDATE SET
+       local_user_id = EXCLUDED.local_user_id,
+       link_status = EXCLUDED.link_status,
+       match_strategy = EXCLUDED.match_strategy,
+       reviewed_by = EXCLUDED.reviewed_by,
+       review_note = EXCLUDED.review_note,
+       updated_at = NOW()`,
+    [normalizedAccountId, localUser.id, normalizedAdminUserId],
+  )
+}
+
+async function createDirectoryAdmittedUserInTransaction(
+  client: { query: (sql: string, params?: unknown[]) => Promise<{ rows: Array<Record<string, unknown>> }> },
+  options: {
+    account: DirectoryBindingTargetAccountRow
+    adminUserId: string
+    name: string
+    email: string
+    mobile: string | null
+    passwordHash: string
+    mustChangePassword: boolean
+    enableDingTalkGrant: boolean
+  },
+): Promise<{ userId: string }> {
+  const userId = crypto.randomUUID()
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(options.email)) {
+    throw new Error('Invalid email format')
+  }
+
+  const existingUserResult = await client.query(
+    `SELECT id
+     FROM users
+     WHERE email = $1
+     LIMIT 1`,
+    [options.email],
+  )
+  if (existingUserResult.rows.length > 0) {
+    throw new Error('User with this email already exists')
+  }
+
+  await client.query(
+    `INSERT INTO users (id, email, name, mobile, password_hash, must_change_password, role, permissions, is_active, is_admin, created_at, updated_at)
+     VALUES ($1, $2, $3, $4, $5, $6, 'user', $7::jsonb, TRUE, FALSE, NOW(), NOW())`,
+    [userId, options.email, options.name, options.mobile, options.passwordHash, options.mustChangePassword, JSON.stringify([])],
+  )
+
+  await applyDirectoryAccountBindInTransaction(client, {
+    normalizedAccountId: options.account.id,
+    normalizedAdminUserId: options.adminUserId,
+    enableDingTalkGrant: options.enableDingTalkGrant,
+    account: options.account,
+    localUser: {
+      id: userId,
+      email: options.email,
+      name: options.name,
+    },
+  })
+
+  return { userId }
+}
+
+async function syncProjectedDepartmentMemberGroupsInTransaction(
+  client: { query: (sql: string, params?: unknown[]) => Promise<{ rows: Array<Record<string, unknown>> }> },
+  plans: DirectoryProjectedMemberGroupPlan[],
+  adminUserId: string,
+): Promise<{
+  memberGroupsCreatedCount: number
+  memberGroupsSyncedCount: number
+  memberGroupMembershipsUpdatedCount: number
+}> {
+  if (plans.length === 0) {
+    return {
+      memberGroupsCreatedCount: 0,
+      memberGroupsSyncedCount: 0,
+      memberGroupMembershipsUpdatedCount: 0,
+    }
+  }
+
+  const auditUserId = normalizeDirectorySyncAuditUserId(adminUserId)
+  const existingGroupsResult = await client.query(
+    `SELECT id, description
+     FROM platform_member_groups
+     WHERE description = ANY($1::text[])`,
+    [plans.map((plan) => plan.marker)],
+  )
+  const groupIdByMarker = new Map<string, string>()
+  for (const row of existingGroupsResult.rows) {
+    const marker = normalizeText(row.description)
+    const groupId = normalizeText(row.id)
+    if (marker && groupId) groupIdByMarker.set(marker, groupId)
+  }
+
+  let memberGroupsCreatedCount = 0
+  let memberGroupsSyncedCount = 0
+  let memberGroupMembershipsUpdatedCount = 0
+
+  for (const plan of plans) {
+    let groupId = groupIdByMarker.get(plan.marker) ?? ''
+    if (!groupId) {
+      const createdGroupResult = await client.query(
+        `INSERT INTO platform_member_groups (
+           name, description, created_by, updated_by, created_at, updated_at
+         )
+         VALUES ($1, $2, $3, $3, NOW(), NOW())
+         RETURNING id`,
+        [plan.name, plan.marker, auditUserId],
+      )
+      groupId = normalizeText(createdGroupResult.rows[0]?.id)
+      if (!groupId) throw new Error('Failed to create projected platform member group')
+      groupIdByMarker.set(plan.marker, groupId)
+      memberGroupsCreatedCount += 1
+    } else {
+      await client.query(
+        `UPDATE platform_member_groups
+         SET name = $2,
+             updated_by = $3,
+             updated_at = NOW()
+         WHERE id = $1`,
+        [groupId, plan.name, auditUserId],
+      )
+    }
+
+    memberGroupsSyncedCount += 1
+
+    const currentMembersResult = await client.query(
+      `SELECT user_id
+       FROM platform_member_group_members
+       WHERE group_id = $1`,
+      [groupId],
+    )
+    const currentMembers = new Set(
+      currentMembersResult.rows
+        .map((row) => normalizeText(row.user_id))
+        .filter(Boolean),
+    )
+    const desiredMembers = new Set(plan.memberUserIds.map((value) => normalizeText(value)).filter(Boolean))
+
+    const membersToDelete = Array.from(currentMembers).filter((value) => !desiredMembers.has(value))
+    const membersToInsert = Array.from(desiredMembers).filter((value) => !currentMembers.has(value))
+
+    if (membersToDelete.length > 0) {
+      await client.query(
+        `DELETE FROM platform_member_group_members
+         WHERE group_id = $1
+           AND user_id = ANY($2::text[])`,
+        [groupId, membersToDelete],
+      )
+    }
+
+    for (const userId of membersToInsert) {
+      await client.query(
+        `INSERT INTO platform_member_group_members (group_id, user_id, created_at)
+         VALUES ($1, $2, NOW())
+         ON CONFLICT DO NOTHING`,
+        [groupId, userId],
+      )
+    }
+
+    memberGroupMembershipsUpdatedCount += membersToDelete.length + membersToInsert.length
+  }
+
+  return {
+    memberGroupsCreatedCount,
+    memberGroupsSyncedCount,
+    memberGroupMembershipsUpdatedCount,
+  }
+}
+
 export async function getDirectoryAccountSummary(accountId: string): Promise<DirectoryIntegrationAccountSummary | null> {
   const normalizedAccountId = normalizeText(accountId)
   if (!normalizedAccountId) throw new Error('accountId is required')
@@ -2314,143 +3018,21 @@ export async function bindDirectoryAccount(
   ])
   if (!account) throw new Error('Directory account not found')
 
-  const identityExternalKey = buildDingTalkIdentityExternalKey(account.corp_id, account.open_id, account.union_id)
-  if (!identityExternalKey) {
+  if (!buildDingTalkIdentityExternalKey(account.corp_id, account.open_id, account.union_id)) {
     throw new Error('Directory account is missing DingTalk openId/unionId and cannot be pre-bound for DingTalk login')
   }
 
   const localUser = await resolveDirectoryBindingUser(normalizedLocalUserRef)
   if (!localUser) throw new Error('Local user not found')
 
-  const profile = JSON.stringify({
-    source: 'directory_admin_bind',
-    integrationId: account.integration_id,
-    corpId: account.corp_id,
-    externalUserId: account.external_user_id,
-    unionId: account.union_id,
-    openId: account.open_id,
-    externalKey: account.external_key,
-    name: account.name,
-    email: account.email,
-    mobile: account.mobile,
-  })
-
   await transaction(async (client) => {
-    const conflictingIdentityResult = await client.query(
-      `SELECT local_user_id
-       FROM user_external_identities
-       WHERE provider = $1
-         AND local_user_id <> $5
-         AND (
-           external_key = $2
-           OR ($3 IS NOT NULL AND provider_union_id = $3 AND corp_id IS NOT DISTINCT FROM $4)
-           OR ($6 IS NOT NULL AND provider_open_id = $6 AND corp_id IS NOT DISTINCT FROM $4)
-       )
-       LIMIT 1`,
-      [account.provider, identityExternalKey, account.union_id, account.corp_id, localUser.id, account.open_id],
-    )
-    if (conflictingIdentityResult.rows.length > 0) {
-      throw new Error('DingTalk account is already bound to another local user')
-    }
-
-    const conflictingLinkResult = await client.query(
-      `SELECT l.directory_account_id
-       FROM directory_account_links l
-       JOIN directory_accounts a ON a.id = l.directory_account_id
-       WHERE a.provider = $1
-         AND l.local_user_id = $2
-         AND l.link_status = 'linked'
-         AND l.directory_account_id <> $3
-       LIMIT 1`,
-      [account.provider, localUser.id, normalizedAccountId],
-    )
-    if (conflictingLinkResult.rows.length > 0) {
-      throw new Error('Local user is already linked to another DingTalk directory account')
-    }
-
-    const existingIdentityResult = await client.query(
-      `SELECT id
-       FROM user_external_identities
-       WHERE provider = $1 AND local_user_id = $2
-       LIMIT 1`,
-      [account.provider, localUser.id],
-    )
-
-    if (existingIdentityResult.rows.length > 0) {
-      await client.query(
-        `UPDATE user_external_identities
-         SET external_key = $3,
-             provider_union_id = $4,
-             provider_open_id = $5,
-             corp_id = $6,
-             profile = $7::jsonb,
-             bound_by = COALESCE(bound_by, $8),
-             updated_at = NOW()
-         WHERE provider = $1 AND local_user_id = $2`,
-        [
-          account.provider,
-          localUser.id,
-          identityExternalKey,
-          account.union_id,
-          account.open_id,
-          account.corp_id,
-          profile,
-          normalizedAdminUserId,
-        ],
-      )
-    } else {
-      await client.query(
-        `INSERT INTO user_external_identities (
-           provider,
-           external_key,
-           provider_union_id,
-           provider_open_id,
-           corp_id,
-           local_user_id,
-           profile,
-           bound_by,
-           created_at,
-           updated_at
-         )
-         VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, NOW(), NOW())`,
-        [
-          account.provider,
-          identityExternalKey,
-          account.union_id,
-          account.open_id,
-          account.corp_id,
-          localUser.id,
-          profile,
-          normalizedAdminUserId,
-        ],
-      )
-    }
-
-    if (enableDingTalkGrant) {
-      await client.query(
-        `INSERT INTO user_external_auth_grants (provider, local_user_id, enabled, granted_by, created_at, updated_at)
-         VALUES ($1, $2, TRUE, $3, NOW(), NOW())
-         ON CONFLICT (provider, local_user_id)
-         DO UPDATE SET enabled = TRUE, granted_by = EXCLUDED.granted_by, updated_at = NOW()`,
-        [account.provider, localUser.id, normalizedAdminUserId],
-      )
-    }
-
-    await client.query(
-      `INSERT INTO directory_account_links (
-         directory_account_id, local_user_id, link_status, match_strategy, reviewed_by, review_note, created_at, updated_at
-       )
-       VALUES ($1, $2, 'linked', 'manual_admin', $3, NULL, NOW(), NOW())
-       ON CONFLICT (directory_account_id)
-       DO UPDATE SET
-         local_user_id = EXCLUDED.local_user_id,
-         link_status = EXCLUDED.link_status,
-         match_strategy = EXCLUDED.match_strategy,
-         reviewed_by = EXCLUDED.reviewed_by,
-         review_note = EXCLUDED.review_note,
-         updated_at = NOW()`,
-      [normalizedAccountId, localUser.id, normalizedAdminUserId],
-    )
+    await applyDirectoryAccountBindInTransaction(client, {
+      normalizedAccountId,
+      normalizedAdminUserId,
+      enableDingTalkGrant,
+      account,
+      localUser,
+    })
   })
 
   const summary = await getDirectoryAccountSummary(normalizedAccountId)
@@ -2467,6 +3049,107 @@ export async function bindDirectoryAccount(
         name: previousLinkedUser.local_user_name,
       }
       : null,
+  }
+}
+
+export async function admitDirectoryAccountUser(
+  directoryAccountId: string,
+  input: DirectoryAccountManualAdmissionInput,
+): Promise<DirectoryAccountManualAdmissionResult> {
+  const normalizedAccountId = normalizeText(directoryAccountId)
+  const normalizedAdminUserId = normalizeText(input.adminUserId)
+  const cleanName = sanitizeDirectoryAdmissionName(input.name)
+  const cleanEmail = sanitizeDirectoryAdmissionEmail(input.email)
+  const cleanMobile = sanitizeDirectoryAdmissionMobile(input.mobile)
+  const requestedPassword = normalizeText(input.password)
+  const enableDingTalkGrant = input.enableDingTalkGrant !== false
+
+  if (!normalizedAccountId) throw new Error('directoryAccountId is required')
+  if (!normalizedAdminUserId) throw new Error('adminUserId is required')
+  if (!cleanName || !cleanEmail) throw new Error('name and email are required')
+  if (cleanName.length < 2 || cleanName.length > 100) throw new Error('Name must be between 2 and 100 characters')
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) throw new Error('Invalid email format')
+
+  const generatedPassword = requestedPassword || generateDirectoryAdmissionTemporaryPassword()
+  const mustChangePassword = requestedPassword.length === 0
+  const passwordValidation = validatePassword(generatedPassword)
+  if (!passwordValidation.valid) {
+    throw new Error(passwordValidation.errors[0] || 'Password does not meet requirements')
+  }
+
+  const [account, previousLinkedUser] = await Promise.all([
+    loadDirectoryBindingTargetAccount(normalizedAccountId),
+    loadDirectoryLinkedUser(normalizedAccountId),
+  ])
+  if (!account) throw new Error('Directory account not found')
+
+  if (!buildDingTalkIdentityExternalKey(account.corp_id, account.open_id, account.union_id)) {
+    throw new Error('Directory account is missing DingTalk openId/unionId and cannot be pre-bound for DingTalk login')
+  }
+
+  const passwordHash = await bcrypt.hash(generatedPassword, getBcryptSaltRounds())
+  let userId = ''
+
+  await transaction(async (client) => {
+    const created = await createDirectoryAdmittedUserInTransaction(client, {
+      account,
+      adminUserId: normalizedAdminUserId,
+      name: cleanName,
+      email: cleanEmail,
+      mobile: cleanMobile,
+      passwordHash,
+      mustChangePassword,
+      enableDingTalkGrant,
+    })
+    userId = created.userId
+  })
+
+  const resolvedInviteToken = issueInviteToken({
+    userId,
+    email: cleanEmail,
+    presetId: null,
+  })
+
+  await recordInvite({
+    userId,
+    email: cleanEmail,
+    presetId: null,
+    productMode: 'platform',
+    roleId: null,
+    invitedBy: normalizedAdminUserId,
+    inviteToken: resolvedInviteToken,
+  })
+
+  const summary = await getDirectoryAccountSummary(normalizedAccountId)
+  if (!summary) {
+    throw new Error('Directory account bound but summary reload failed')
+  }
+
+  return {
+    account: summary,
+    previousLocalUser: previousLinkedUser?.local_user_id
+      ? {
+        id: previousLinkedUser.local_user_id,
+        email: previousLinkedUser.local_user_email,
+        name: previousLinkedUser.local_user_name,
+      }
+      : null,
+    user: {
+      id: userId,
+      email: cleanEmail,
+      name: cleanName,
+      mobile: cleanMobile,
+      role: 'user',
+      is_active: true,
+    },
+    temporaryPassword: requestedPassword.length === 0 ? generatedPassword : undefined,
+    inviteToken: resolvedInviteToken,
+    onboarding: buildOnboardingPacket({
+      email: cleanEmail,
+      temporaryPassword: requestedPassword.length === 0 ? generatedPassword : null,
+      preset: null,
+      inviteToken: resolvedInviteToken,
+    }),
   }
 }
 

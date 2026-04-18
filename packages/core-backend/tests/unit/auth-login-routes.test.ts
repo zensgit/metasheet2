@@ -330,6 +330,32 @@ describe('auth login routes', () => {
     )
   })
 
+  it('marks login responses that require a password change', async () => {
+    authServiceMocks.login.mockResolvedValue({
+      user: {
+        id: 'user-1',
+        email: 'admin@example.com',
+        name: 'Admin',
+        role: 'admin',
+        permissions: ['attendance:admin'],
+        must_change_password: true,
+        created_at: new Date('2026-03-13T00:00:00.000Z'),
+        updated_at: new Date('2026-03-13T00:00:00.000Z'),
+      },
+      token: 'jwt-login-token',
+    })
+
+    const response = await invokeRoute('post', '/login', {
+      body: {
+        email: 'admin@example.com',
+        password: 'WelcomePass9A',
+      },
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect((response.body as Record<string, any>).data.passwordChangeRequired).toBe(true)
+  })
+
   it('issues a dev token with an optional tenant claim', async () => {
     const response = await invokeRoute('get', '/dev-token', {
       query: {
@@ -376,6 +402,96 @@ describe('auth login routes', () => {
     expect(response.statusCode).toBe(200)
     expect(authServiceMocks.verifyToken).toHaveBeenCalledWith('live-token')
     expect((response.body as Record<string, any>).data.features.attendance).toBe(true)
+  })
+
+  it('changes password for an authenticated session that is forced to rotate password', async () => {
+    authServiceMocks.verifyToken.mockResolvedValue({
+      id: 'user-1',
+      email: 'manager@example.com',
+      name: 'Manager',
+      role: 'user',
+      permissions: ['attendance:read'],
+      must_change_password: true,
+      created_at: new Date('2026-03-13T00:00:00.000Z'),
+      updated_at: new Date('2026-03-13T00:00:00.000Z'),
+    })
+    bcryptMocks.hash.mockResolvedValue('hashed-password')
+    sessionMocks.revokeUserSessions.mockResolvedValue({ revokedAfter: '2026-03-13T00:10:00.000Z' })
+    authServiceMocks.createToken.mockReturnValue('fresh-token')
+    authServiceMocks.readTokenPayload.mockReturnValue({
+      sub: 'user-1',
+      sid: 'fresh-session',
+      exp: Math.floor(new Date('2026-03-14T00:00:00.000Z').getTime() / 1000),
+    })
+    pgMocks.query
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+
+    const response = await invokeRoute('post', '/password/change', {
+      headers: {
+        authorization: 'Bearer live-token',
+        'user-agent': 'Vitest',
+      },
+      body: {
+        password: 'WelcomePass9A',
+      },
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect(pgMocks.query).toHaveBeenNthCalledWith(
+      1,
+      expect.stringContaining('must_change_password = FALSE'),
+      ['hashed-password', 'user-1'],
+    )
+    expect(sessionMocks.revokeUserSessions).toHaveBeenCalledWith('user-1', expect.objectContaining({
+      updatedBy: 'user-1',
+      reason: 'password-change-required-cleared',
+    }))
+    expect(authServiceMocks.createToken).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: 'user-1',
+        must_change_password: false,
+      }),
+      expect.objectContaining({
+        sid: expect.any(String),
+      }),
+    )
+    expect(sessionRegistryMocks.createUserSession).toHaveBeenCalledWith(
+      'user-1',
+      expect.objectContaining({
+        sessionId: expect.any(String),
+        expiresAt: '2026-03-14T00:00:00.000Z',
+        ipAddress: '127.0.0.1',
+        userAgent: 'Vitest',
+      }),
+    )
+    expect((response.body as Record<string, any>).data.passwordChangeRequired).toBe(false)
+    expect((response.body as Record<string, any>).data.token).toBe('fresh-token')
+  })
+
+  it('rejects password-change calls when the session is not marked for forced rotation', async () => {
+    authServiceMocks.verifyToken.mockResolvedValue({
+      id: 'user-1',
+      email: 'manager@example.com',
+      name: 'Manager',
+      role: 'user',
+      permissions: ['attendance:read'],
+      must_change_password: false,
+      created_at: new Date('2026-03-13T00:00:00.000Z'),
+      updated_at: new Date('2026-03-13T00:00:00.000Z'),
+    })
+
+    const response = await invokeRoute('post', '/password/change', {
+      headers: {
+        authorization: 'Bearer live-token',
+      },
+      body: {
+        password: 'WelcomePass9A',
+      },
+    })
+
+    expect(response.statusCode).toBe(403)
+    expect((response.body as Record<string, any>).error.code).toBe('PASSWORD_CHANGE_NOT_REQUIRED')
   })
 
   it('disables plm in feature payload when ENABLE_PLM=0', async () => {

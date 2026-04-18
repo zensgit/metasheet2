@@ -36,6 +36,12 @@ What it does **not** do yet:
   `rootDepartmentId`;
 - auto-admit only selected departments into local users / local groups.
 
+Updated branch status:
+
+- manual local-user admission: implemented
+- scoped auto-admission with include/exclude departments: implemented
+- selected department -> platform member group projection: implemented
+
 ## Recommendation
 
 Do not make “sync from DingTalk” automatically create all local users by
@@ -105,6 +111,20 @@ Recommended feature:
   - choose manual vs scheduled refresh
 
 This gives a practical local governance layer without duplicating the org tree.
+
+Current branch implementation uses integration config fields instead of a new
+table:
+
+- `memberGroupSyncMode`
+- `memberGroupDepartmentIds`
+
+Behavior:
+
+- sync creates or updates one projected `platform_member_group` per selected
+  department;
+- group membership is derived from linked local users inside that department
+  subtree;
+- projected groups are tracked by a deterministic description marker.
 
 ### Phase 3: Scoped auto-admission for selected departments
 

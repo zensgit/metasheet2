@@ -193,6 +193,24 @@ function handleUnauthorized(path: string): void {
   }
 }
 
+function handlePasswordChangeRequired(path: string): void {
+  if (typeof window === 'undefined' || authRedirecting || isAuthRoute(path)) {
+    return
+  }
+  if ((window.location?.pathname || '') === '/force-password-change') {
+    return
+  }
+  authRedirecting = true
+  window.setTimeout(() => {
+    authRedirecting = false
+  }, 3000)
+  if (typeof window.location?.replace === 'function') {
+    window.location.replace('/force-password-change')
+  } else {
+    window.location.href = '/force-password-change'
+  }
+}
+
 /**
  * Make an authenticated fetch request
  */
@@ -219,6 +237,18 @@ export async function apiFetch(
 
   if (response.status === 401 && !suppressUnauthorizedRedirect) {
     handleUnauthorized(path)
+  }
+
+  if (response.status === 403 && !suppressUnauthorizedRedirect) {
+    try {
+      const payload = await response.clone().json() as Record<string, unknown>
+      const error = payload.error as Record<string, unknown> | undefined
+      if (error?.code === 'PASSWORD_CHANGE_REQUIRED') {
+        handlePasswordChangeRequired(path)
+      }
+    } catch {
+      // Ignore non-JSON 403 payloads.
+    }
   }
 
   return response

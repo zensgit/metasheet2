@@ -11,6 +11,7 @@ const auditMocks = vi.hoisted(() => ({
 
 const directoryMocks = vi.hoisted(() => ({
   acknowledgeDirectorySyncAlert: vi.fn(),
+  admitDirectoryAccountUser: vi.fn(),
   batchBindDirectoryAccounts: vi.fn(),
   batchUnbindDirectoryAccounts: vi.fn(),
   bindDirectoryAccount: vi.fn(),
@@ -43,6 +44,7 @@ vi.mock('../../src/audit/audit', () => ({
 
 vi.mock('../../src/directory/directory-sync', () => ({
   acknowledgeDirectorySyncAlert: directoryMocks.acknowledgeDirectorySyncAlert,
+  admitDirectoryAccountUser: directoryMocks.admitDirectoryAccountUser,
   batchBindDirectoryAccounts: directoryMocks.batchBindDirectoryAccounts,
   batchUnbindDirectoryAccounts: directoryMocks.batchUnbindDirectoryAccounts,
   bindDirectoryAccount: directoryMocks.bindDirectoryAccount,
@@ -139,6 +141,7 @@ describe('adminDirectoryRouter', () => {
     rbacMocks.isRbacAdmin.mockReset()
     auditMocks.auditLog.mockReset()
     directoryMocks.acknowledgeDirectorySyncAlert.mockReset()
+    directoryMocks.admitDirectoryAccountUser.mockReset()
     directoryMocks.batchBindDirectoryAccounts.mockReset()
     directoryMocks.batchUnbindDirectoryAccounts.mockReset()
     directoryMocks.bindDirectoryAccount.mockReset()
@@ -256,15 +259,15 @@ describe('adminDirectoryRouter', () => {
       departmentSampleCount: 0,
       sampledDepartments: [],
       userSampleCount: 1,
-      sampledUsers: [{ userId: '0447654442691174', name: '周华' }],
+      sampledUsers: [{ userId: '0447654442691174', name: '林岚' }],
       diagnostics: {
         rootDepartmentChildCount: 0,
         rootDepartmentDirectUserCount: 1,
         rootDepartmentDirectUserHasMore: false,
         rootDepartmentDirectUserCountWithAccessLimit: 1,
         rootDepartmentDirectUserHasMoreWithAccessLimit: false,
-        sampledRootDepartmentUsers: [{ userId: '0447654442691174', name: '周华' }],
-        sampledRootDepartmentUsersWithAccessLimit: [{ userId: '0447654442691174', name: '周华' }],
+        sampledRootDepartmentUsers: [{ userId: '0447654442691174', name: '林岚' }],
+        sampledRootDepartmentUsersWithAccessLimit: [{ userId: '0447654442691174', name: '林岚' }],
       },
       warnings: ['根部门 1 未返回任何子部门。'],
     })
@@ -398,7 +401,7 @@ describe('adminDirectoryRouter', () => {
             id: 'account-1',
             integrationId: 'dir-1',
             externalUserId: '0447654442691174',
-            name: '周华',
+            name: '林岚',
             localUser: {
               id: 'user-1',
               email: 'alpha@example.com',
@@ -464,7 +467,7 @@ describe('adminDirectoryRouter', () => {
     directoryMocks.getDirectoryAccountSummary.mockResolvedValue({
       id: 'account-1',
       integrationId: 'dir-1',
-      name: '周华',
+      name: '林岚',
     })
 
     const response = await invokeRoute('get', '/accounts/:accountId', {
@@ -480,7 +483,7 @@ describe('adminDirectoryRouter', () => {
         account: {
           id: 'account-1',
           integrationId: 'dir-1',
-          name: '周华',
+          name: '林岚',
         },
       },
     })
@@ -511,7 +514,7 @@ describe('adminDirectoryRouter', () => {
       account: {
         id: 'account-1',
         integrationId: 'dir-1',
-        name: '周华',
+        name: '林岚',
       },
       recommendations: [],
       recommendationStatus: {
@@ -592,6 +595,73 @@ describe('adminDirectoryRouter', () => {
       resourceType: 'directory-account-link',
       resourceId: 'account-1',
     }))
+  })
+
+  it('creates a local user and binds the directory account through manual admission', async () => {
+    directoryMocks.admitDirectoryAccountUser.mockResolvedValue({
+      account: {
+        id: 'account-1',
+        integrationId: 'dir-1',
+        corpId: 'dingcorp',
+        externalUserId: '0447654442691174',
+        localUser: {
+          id: 'user-created',
+          email: 'liqing@example.com',
+          name: '李青',
+        },
+      },
+      previousLocalUser: null,
+      user: {
+        id: 'user-created',
+        email: 'liqing@example.com',
+        name: '李青',
+        mobile: '13900001234',
+        role: 'user',
+        is_active: true,
+      },
+      temporaryPassword: 'Temp#123456',
+      inviteToken: 'invite-token-fixed',
+      onboarding: {
+        acceptInviteUrl: 'https://example.com/invite/abc',
+        inviteMessage: '请使用邀请链接加入平台',
+      },
+    })
+
+    const response = await invokeRoute('post', '/accounts/:accountId/admit-user', {
+      params: { accountId: 'account-1' },
+      body: {
+        name: '李青',
+        email: 'liqing@example.com',
+        mobile: '13900001234',
+        enableDingTalkGrant: true,
+      },
+      user: { id: 'admin-1', role: 'admin' },
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect(directoryMocks.admitDirectoryAccountUser).toHaveBeenCalledWith('account-1', {
+      adminUserId: 'admin-1',
+      name: '李青',
+      email: 'liqing@example.com',
+      mobile: '13900001234',
+      password: '',
+      enableDingTalkGrant: true,
+    })
+    expect(auditMocks.auditLog).toHaveBeenCalledTimes(2)
+    expect(response.body).toMatchObject({
+      ok: true,
+      data: {
+        account: {
+          id: 'account-1',
+        },
+        user: {
+          id: 'user-created',
+          email: 'liqing@example.com',
+        },
+        temporaryPassword: 'Temp#123456',
+        inviteToken: 'invite-token-fixed',
+      },
+    })
   })
 
   it('batch binds directory accounts', async () => {

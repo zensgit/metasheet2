@@ -42,6 +42,7 @@ export const AppRouteNames = {
   REGISTER: 'register',
   FORGOT_PASSWORD: 'forgot-password',
   RESET_PASSWORD: 'reset-password',
+  FORCE_PASSWORD_CHANGE: 'force-password-change',
 
   // Dashboard routes
   DASHBOARD: 'dashboard',
@@ -133,6 +134,7 @@ export interface AppRouteParams {
   'dingtalk-auth-callback': Record<string, never>
   'register': Record<string, never>
   'forgot-password': Record<string, never>
+  'force-password-change': Record<string, never>
   'dashboard': Record<string, never>
   'home': Record<string, never>
   'spreadsheet-list': Record<string, never>
@@ -264,6 +266,7 @@ export interface RouteMeta {
   layout?: 'default' | 'empty' | 'admin'
   hideNavbar?: boolean
   hideSidebar?: boolean
+  skipShellBootstrap?: boolean
 
   // Breadcrumb settings
   breadcrumb?: BreadcrumbItem[]
@@ -396,6 +399,7 @@ export const ROUTE_PATHS = {
   REGISTER: '/register',
   FORGOT_PASSWORD: '/forgot-password',
   RESET_PASSWORD: '/reset-password/:token',
+  FORCE_PASSWORD_CHANGE: '/force-password-change',
 
   // Dashboard
   DASHBOARD: '/dashboard',

@@ -65,7 +65,7 @@ Verified the synced account row:
 
 - `external_user_id = 0447654442691174`
 - `name = 周华`
-- `mobile = 13758875801`
+- `mobile = 13900001234`
 - `email = NULL`
 - `is_active = true`
 
