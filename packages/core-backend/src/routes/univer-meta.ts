@@ -3859,8 +3859,33 @@ export function univerMetaRouter(): Router {
       if (!capabilities.canManageViews) return sendForbidden(res)
 
       const result = await pool.query(
-        `SELECT id, view_id, subject_type, subject_id, permission, created_at, created_by
-         FROM meta_view_permissions WHERE view_id = $1 ORDER BY created_at ASC`,
+        `SELECT
+            vp.id,
+            vp.view_id,
+            vp.subject_type,
+            vp.subject_id,
+            vp.permission,
+            vp.created_at,
+            vp.created_by,
+            u.name AS user_name,
+            u.email AS user_email,
+            u.is_active AS user_is_active,
+            r.name AS role_name,
+            r.description AS role_description,
+            g.name AS group_name,
+            g.description AS group_description
+         FROM meta_view_permissions vp
+         LEFT JOIN users u
+           ON vp.subject_type = 'user'
+          AND u.id = vp.subject_id
+         LEFT JOIN roles r
+           ON vp.subject_type = 'role'
+          AND r.id::text = vp.subject_id
+         LEFT JOIN platform_member_groups g
+           ON vp.subject_type = 'member-group'
+          AND g.id::text = vp.subject_id
+         WHERE vp.view_id = $1
+         ORDER BY vp.created_at ASC`,
         [viewId],
       )
       const items = (result.rows as any[]).map((row) => ({
@@ -3868,6 +3893,19 @@ export function univerMetaRouter(): Router {
         viewId: String(row.view_id),
         subjectType: String(row.subject_type),
         subjectId: String(row.subject_id),
+        subjectLabel:
+          row.subject_type === 'user'
+            ? String(row.user_name ?? row.subject_id)
+            : row.subject_type === 'member-group'
+              ? String(row.group_name ?? row.subject_id)
+              : String(row.role_name ?? row.subject_id),
+        subjectSubtitle:
+          row.subject_type === 'user'
+            ? (typeof row.user_email === 'string' ? row.user_email : null)
+            : row.subject_type === 'member-group'
+              ? (typeof row.group_description === 'string' ? row.group_description : null)
+              : (typeof row.role_description === 'string' ? row.role_description : null),
+        isActive: row.subject_type === 'user' ? row.user_is_active !== false : true,
         permission: String(row.permission),
         createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : String(row.created_at ?? ''),
       }))
@@ -3967,8 +4005,34 @@ export function univerMetaRouter(): Router {
       if (!capabilities.canManageFields) return sendForbidden(res)
 
       const result = await pool.query(
-        `SELECT id, sheet_id, field_id, subject_type, subject_id, visible, read_only, created_at
-         FROM field_permissions WHERE sheet_id = $1 ORDER BY field_id ASC, created_at ASC`,
+        `SELECT
+            fp.id,
+            fp.sheet_id,
+            fp.field_id,
+            fp.subject_type,
+            fp.subject_id,
+            fp.visible,
+            fp.read_only,
+            fp.created_at,
+            u.name AS user_name,
+            u.email AS user_email,
+            u.is_active AS user_is_active,
+            r.name AS role_name,
+            r.description AS role_description,
+            g.name AS group_name,
+            g.description AS group_description
+         FROM field_permissions fp
+         LEFT JOIN users u
+           ON fp.subject_type = 'user'
+          AND u.id = fp.subject_id
+         LEFT JOIN roles r
+           ON fp.subject_type = 'role'
+          AND r.id::text = fp.subject_id
+         LEFT JOIN platform_member_groups g
+           ON fp.subject_type = 'member-group'
+          AND g.id::text = fp.subject_id
+         WHERE fp.sheet_id = $1
+         ORDER BY fp.field_id ASC, fp.created_at ASC`,
         [sheetId],
       )
       const items = (result.rows as any[]).map((row) => ({
@@ -3977,6 +4041,19 @@ export function univerMetaRouter(): Router {
         fieldId: String(row.field_id),
         subjectType: String(row.subject_type),
         subjectId: String(row.subject_id),
+        subjectLabel:
+          row.subject_type === 'user'
+            ? String(row.user_name ?? row.subject_id)
+            : row.subject_type === 'member-group'
+              ? String(row.group_name ?? row.subject_id)
+              : String(row.role_name ?? row.subject_id),
+        subjectSubtitle:
+          row.subject_type === 'user'
+            ? (typeof row.user_email === 'string' ? row.user_email : null)
+            : row.subject_type === 'member-group'
+              ? (typeof row.group_description === 'string' ? row.group_description : null)
+              : (typeof row.role_description === 'string' ? row.role_description : null),
+        isActive: row.subject_type === 'user' ? row.user_is_active !== false : true,
         visible: row.visible !== false,
         readOnly: row.read_only === true,
       }))

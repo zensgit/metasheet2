@@ -565,6 +565,8 @@ export class MultitableApiClient {
             subjectType: item.subjectType,
             subjectId: item.subjectId,
             subjectLabel: typeof item.subjectLabel === 'string' ? item.subjectLabel : undefined,
+            subjectSubtitle: typeof item.subjectSubtitle === 'string' || item.subjectSubtitle === null ? item.subjectSubtitle ?? null : null,
+            isActive: item.isActive !== false,
             visible: item.visible !== false,
             readOnly: item.readOnly === true,
           }))
@@ -577,7 +579,7 @@ export class MultitableApiClient {
     fieldId: string,
     subjectType: 'user' | 'role' | 'member-group',
     subjectId: string,
-    perm: { visible: boolean; readOnly: boolean },
+    perm: { visible?: boolean; readOnly?: boolean; remove?: boolean },
   ): Promise<{ fieldId: string; subjectType: string; subjectId: string; visible: boolean; readOnly: boolean }> {
     const res = await this.fetch(
       `/api/multitable/sheets/${encodeURIComponent(sheetId)}/field-permissions/${encodeURIComponent(fieldId)}/${encodeURIComponent(subjectType)}/${encodeURIComponent(subjectId)}`,
@@ -607,6 +609,8 @@ export class MultitableApiClient {
             subjectType: item.subjectType,
             subjectId: item.subjectId,
             subjectLabel: typeof item.subjectLabel === 'string' ? item.subjectLabel : undefined,
+            subjectSubtitle: typeof item.subjectSubtitle === 'string' || item.subjectSubtitle === null ? item.subjectSubtitle ?? null : null,
+            isActive: item.isActive !== false,
             permission: item.permission,
           }))
         : [],
