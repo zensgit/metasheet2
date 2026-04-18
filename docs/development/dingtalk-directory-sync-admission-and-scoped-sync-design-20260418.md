@@ -113,6 +113,13 @@ Recommended feature:
 
 This gives a practical local governance layer without duplicating the org tree.
 
+It also creates the correct bridge for future plugin governance:
+
+- DingTalk department subtree
+- projected platform member group
+- delegated plugin-admin scope
+- namespace-specific role / admission management
+
 Current branch implementation uses integration config fields instead of a new
 table:
 
@@ -248,6 +255,11 @@ mirroring, the best path is:
 4. add scoped auto-admission for allowlisted departments only;
 5. use projected groups to fill a safe default governance baseline where
    needed.
+
+For plugin governance, this should continue into:
+
+6. namespace-scoped plugin admins whose operative range is delegated by
+   department and/or projected member group.
 
 That gives:
 
