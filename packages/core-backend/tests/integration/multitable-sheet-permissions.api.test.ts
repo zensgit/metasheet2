@@ -13,7 +13,7 @@ function createMockPool(queryHandler: QueryHandler) {
   const query = vi.fn(async (sql: string, params?: unknown[]) => {
     if (sql.includes('FROM meta_view_permissions')) return { rows: [], rowCount: 0 }
     if (sql.includes('FROM field_permissions')) return { rows: [], rowCount: 0 }
-    if (sql.includes('FROM record_permissions')) return { rows: [], rowCount: 0 }
+    if (sql.includes('FROM record_permissions') && !sql.includes('FROM record_permissions rp')) return { rows: [], rowCount: 0 }
     return queryHandler(sql, params)
   })
   const transaction = vi.fn(async (fn: (client: { query: typeof query }) => Promise<unknown>) => fn({ query }))
@@ -2688,6 +2688,64 @@ describe('Multitable sheet-scoped permissions API', () => {
         color: '#1677ff',
         ownerId: 'owner_1',
         workspaceId: 'workspace_1',
+      },
+    ])
+  })
+
+  test('lists record permissions with hydrated member-group labels', async () => {
+    const { app } = await createApp({
+      tokenPerms: ['multitable:read'],
+      queryHandler: async (sql, params) => {
+        if (sql.includes('SELECT id, base_id, name, description FROM meta_sheets WHERE id = $1')) {
+          expect(params).toEqual(['sheet_ops'])
+          return { rows: [{ id: 'sheet_ops', base_id: 'base_ops', name: 'Ops', description: null }] }
+        }
+        if (sql.includes('FROM spreadsheet_permissions') && sql.includes('sheet_id = ANY')) {
+          expect(params).toEqual(['user_sheet_acl_1', ['sheet_ops']])
+          return { rows: [{ sheet_id: 'sheet_ops', perm_code: 'spreadsheet:admin', subject_type: 'user' }] }
+        }
+        if (sql.includes('SELECT id FROM meta_records WHERE id = $1 AND sheet_id = $2')) {
+          expect(params).toEqual(['record_1', 'sheet_ops'])
+          return { rows: [{ id: 'record_1' }] }
+        }
+        if (sql.includes('FROM record_permissions rp') && sql.includes('LEFT JOIN platform_member_groups g')) {
+          expect(params).toEqual(['sheet_ops', 'record_1'])
+          return {
+            rows: [
+              {
+                id: 'perm_group',
+                sheet_id: 'sheet_ops',
+                record_id: 'record_1',
+                subject_type: 'member-group',
+                subject_id: '3e9c4bc7-13c2-4d12-8b52-9f0d62045d3c',
+                access_level: 'write',
+                created_at: new Date('2026-04-18T11:30:00.000Z'),
+                group_name: 'North Region',
+                group_description: 'Regional operations team',
+              },
+            ],
+          }
+        }
+        throw new Error(`Unhandled SQL in test: ${sql}`)
+      },
+    })
+
+    const response = await request(app)
+      .get('/api/multitable/sheets/sheet_ops/records/record_1/permissions')
+      .expect(200)
+
+    expect(response.body.data.items).toEqual([
+      {
+        id: 'perm_group',
+        sheetId: 'sheet_ops',
+        recordId: 'record_1',
+        subjectType: 'member-group',
+        subjectId: '3e9c4bc7-13c2-4d12-8b52-9f0d62045d3c',
+        accessLevel: 'write',
+        label: 'North Region',
+        subtitle: 'Regional operations team',
+        isActive: true,
+        createdAt: '2026-04-18T11:30:00.000Z',
       },
     ])
   })

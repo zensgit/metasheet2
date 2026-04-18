@@ -534,6 +534,9 @@ export interface RecordPermissionEntry {
   subjectType: RecordPermissionSubjectType
   subjectId: string
   accessLevel: RecordPermissionAccessLevel
+  label: string
+  subtitle?: string | null
+  isActive: boolean
   createdAt?: string
   createdBy?: string
 }
