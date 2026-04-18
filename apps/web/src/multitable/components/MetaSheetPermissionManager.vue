@@ -143,6 +143,12 @@
                   >
                     Inactive user
                   </span>
+                  <span
+                    v-if="candidateGrantBlocked(candidate)"
+                    class="meta-sheet-perm__hint"
+                  >
+                    Grant blocked
+                  </span>
                 </div>
                 <span class="meta-sheet-perm__subject" data-subject-type="user">Person</span>
                 <select

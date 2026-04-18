@@ -113,6 +113,12 @@
                 >
                   Inactive user
                 </span>
+                <span
+                  v-if="candidateGrantBlocked(candidate)"
+                  class="meta-record-perm__hint"
+                >
+                  Grant blocked
+                </span>
               </div>
               <span class="meta-record-perm__subject" data-subject-type="user">User</span>
               <select

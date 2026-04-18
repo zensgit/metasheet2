@@ -272,6 +272,7 @@ describe('MetaSheetPermissionManager', () => {
     expect(inactiveEntry.textContent).toContain('Inactive user')
     expect(inactiveEntry.textContent).toContain('Cleanup only')
     expect(inactiveCandidate.textContent).toContain('Inactive user')
+    expect(inactiveCandidate.textContent).toContain('Grant blocked')
     expect((inactiveEntry.querySelector('.meta-sheet-perm__select') as HTMLSelectElement).disabled).toBe(true)
     expect((inactiveEntry.querySelector('.meta-sheet-perm__action') as HTMLButtonElement).disabled).toBe(true)
     expect((inactiveEntry.querySelector('.meta-sheet-perm__action--danger') as HTMLButtonElement).disabled).toBe(false)
