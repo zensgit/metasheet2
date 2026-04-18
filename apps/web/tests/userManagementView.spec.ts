@@ -78,10 +78,23 @@ async function setSelectValue(select: HTMLSelectElement, value: string): Promise
   await flushUi()
 }
 
+function registerRouterLink(app: App<Element>, withHref = false): void {
+  app.component('RouterLink', {
+    props: ['to'],
+    computed: {
+      resolvedHref(): string {
+        return typeof this.to === 'string' ? this.to : String(this.to || '')
+      },
+    },
+    template: withHref ? '<a :href="resolvedHref"><slot /></a>' : '<a><slot /></a>',
+  })
+}
+
 type UserFixture = {
   id: string
   email: string
   name: string
+  mobile: string | null
   role: string
   is_active: boolean
   grantEnabled: boolean
@@ -101,6 +114,7 @@ function createApiState(): UserFixture[] {
       id: 'user-1',
       email: 'alpha@example.com',
       name: 'Alpha',
+      mobile: null,
       role: 'user',
       is_active: true,
       grantEnabled: true,
@@ -119,6 +133,7 @@ function createApiState(): UserFixture[] {
       id: 'user-2',
       email: 'bravo@example.com',
       name: 'Bravo',
+      mobile: null,
       role: 'user',
       is_active: true,
       grantEnabled: false,
@@ -137,6 +152,7 @@ function createApiState(): UserFixture[] {
       id: 'user-3',
       email: 'charlie@example.com',
       name: 'Charlie',
+      mobile: null,
       role: 'user',
       is_active: false,
       grantEnabled: true,
@@ -155,6 +171,7 @@ function createApiState(): UserFixture[] {
       id: 'user-4',
       email: 'delta@example.com',
       name: 'Delta',
+      mobile: '13800000004',
       role: 'admin',
       is_active: true,
       grantEnabled: false,
@@ -172,7 +189,16 @@ function createApiState(): UserFixture[] {
   ]
 }
 
-function createApiImplementation(callLog: string[], state = createApiState()) {
+interface ApiImplementationOptions {
+  /** Limit the default user list to the first N rows so deep-link pinning can be exercised. */
+  paginatedPageSize?: number
+}
+
+function createApiImplementation(
+  callLog: string[],
+  state = createApiState(),
+  options: ApiImplementationOptions = {},
+) {
   return async (input: unknown, init?: RequestInit) => {
     const rawUrl = String(input)
     callLog.push(rawUrl)
@@ -180,7 +206,7 @@ function createApiImplementation(callLog: string[], state = createApiState()) {
     const pathname = url.pathname
     const query = url.searchParams.get('q')?.trim().toLowerCase() || ''
     const filteredUsers = query
-      ? state.filter((user) => [user.name, user.email, user.id, user.role].some((field) => field.toLowerCase().includes(query)))
+      ? state.filter((user) => [user.name, user.email, user.id, user.role, user.mobile || ''].some((field) => field.toLowerCase().includes(query)))
       : state
 
     const findUserById = (userId: string) => state.find((user) => user.id === userId) || state[0]
@@ -189,6 +215,7 @@ function createApiImplementation(callLog: string[], state = createApiState()) {
       id: user.id,
       email: user.email,
       name: user.name,
+      mobile: user.mobile,
       role: user.role,
       is_active: user.is_active,
       is_admin: user.role === 'admin',
@@ -300,10 +327,26 @@ function createApiImplementation(callLog: string[], state = createApiState()) {
     }
 
     if (pathname === '/api/admin/users') {
+      const pinUserId = url.searchParams.get('userId')?.trim() || ''
+      const visible = typeof options.paginatedPageSize === 'number'
+        ? filteredUsers.slice(0, Math.max(options.paginatedPageSize, 0))
+        : filteredUsers
+      const items = visible.map((user) => buildUserPayload(user))
+      if (pinUserId && !items.some((item) => item.id === pinUserId)) {
+        const pinned = state.find((user) => user.id === pinUserId)
+        if (pinned) {
+          items.unshift(buildUserPayload(pinned))
+          if (typeof options.paginatedPageSize === 'number' && items.length > options.paginatedPageSize) {
+            items.length = options.paginatedPageSize
+          }
+        }
+      }
       return createJsonResponse({
         ok: true,
         data: {
-          items: filteredUsers.map((user) => buildUserPayload(user)),
+          items,
+          pinUserId,
+          pinUserIncluded: pinUserId ? items.some((item) => item.id === pinUserId) : null,
         },
       })
     }
@@ -367,6 +410,24 @@ function createApiImplementation(callLog: string[], state = createApiState()) {
     const accessMatch = pathname.match(/^\/api\/admin\/users\/([^/]+)\/access$/)
     if (accessMatch) {
       const user = findUserById(decodeURIComponent(accessMatch[1]))
+      return createJsonResponse({
+        ok: true,
+        data: {
+          user: buildUserPayload(user),
+          roles: ['crm_admin'],
+          permissions: ['crm:admin'],
+          isAdmin: user.role === 'admin',
+        },
+      })
+    }
+
+    const profileMatch = pathname.match(/^\/api\/admin\/users\/([^/]+)\/profile$/)
+    if (profileMatch) {
+      const user = findUserById(decodeURIComponent(profileMatch[1]))
+      const rawBody = typeof init?.body === 'string' ? init.body : ''
+      const parsed = rawBody ? JSON.parse(rawBody) as { name?: unknown; mobile?: unknown } : {}
+      if (typeof parsed.name === 'string') user.name = parsed.name
+      if (typeof parsed.mobile === 'string') user.mobile = parsed.mobile.trim() || null
       return createJsonResponse({
         ok: true,
         data: {
@@ -450,6 +511,7 @@ describe('UserManagementView', () => {
   afterEach(() => {
     if (app) app.unmount()
     if (container) container.remove()
+    window.history.replaceState({}, '', '/')
     app = null
     container = null
   })
@@ -608,5 +670,230 @@ describe('UserManagementView', () => {
     expect(container?.textContent).toContain('已批量开通 finance 插件使用')
     expect(container?.textContent).toContain('finance')
     expect(container?.textContent).toContain('插件使用已开通')
+  })
+
+  it('can update user mobile profile and persist the refreshed detail snapshot', async () => {
+    app = createApp(UserManagementView)
+    registerRouterLink(app)
+    app.mount(container!)
+    await flushUi(20)
+
+    const bravoRow = findUserRow(container!, 'Bravo')
+    const bravoDetailButton = Array.from(bravoRow.querySelectorAll('button')).find((candidate) => candidate.textContent?.includes('Bravo'))
+    if (!(bravoDetailButton instanceof HTMLButtonElement)) {
+      throw new Error('Bravo detail button not found')
+    }
+    bravoDetailButton.click()
+    await waitForCondition(() => callLog.includes('/api/admin/users/user-2/access'))
+
+    const inputs = Array.from(container!.querySelectorAll('input[type="text"]'))
+    const mobileInput = inputs.find((candidate) => (candidate as HTMLInputElement).placeholder === '手机号，可留空')
+    if (!(mobileInput instanceof HTMLInputElement)) {
+      throw new Error('Profile mobile input not found')
+    }
+
+    mobileInput.value = '13800138000'
+    mobileInput.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+
+    findButtonByText(container!, '保存资料').click()
+    await waitForCondition(() => apiFetchMock.mock.calls.some((args) => String(args[0]) === '/api/admin/users/user-2/profile'))
+
+    const profileCall = apiFetchMock.mock.calls.find((args) => String(args[0]) === '/api/admin/users/user-2/profile')
+    if (!profileCall) throw new Error('Profile update request not found')
+    expect(JSON.parse(String((profileCall[1] as RequestInit | undefined)?.body))).toEqual({
+      name: 'Bravo',
+      mobile: '13800138000',
+      expectedMobile: null,
+    })
+
+    await waitForCondition(() => container?.textContent?.includes('用户资料已更新') ?? false)
+    expect(container?.textContent).toContain('手机号：13800138000')
+  })
+
+  it('refreshes and surfaces the latest mobile when a PROFILE_MOBILE_CONFLICT happens', async () => {
+    const state = createApiState()
+    const bravo = state.find((user) => user.id === 'user-2')
+    if (!bravo) throw new Error('Bravo fixture not found')
+    apiFetchMock.mockImplementation(createApiImplementation(callLog, state))
+
+    app = createApp(UserManagementView)
+    registerRouterLink(app)
+    app.mount(container!)
+    await flushUi(20)
+
+    const bravoRow = findUserRow(container!, 'Bravo')
+    const bravoDetailButton = Array.from(bravoRow.querySelectorAll('button')).find((candidate) => candidate.textContent?.includes('Bravo'))
+    if (!(bravoDetailButton instanceof HTMLButtonElement)) {
+      throw new Error('Bravo detail button not found')
+    }
+    bravoDetailButton.click()
+    await waitForCondition(() => callLog.includes('/api/admin/users/user-2/access'))
+
+    const inputs = Array.from(container!.querySelectorAll('input[type="text"]'))
+    const mobileInput = inputs.find((candidate) => (candidate as HTMLInputElement).placeholder === '手机号，可留空')
+    if (!(mobileInput instanceof HTMLInputElement)) {
+      throw new Error('Profile mobile input not found')
+    }
+    mobileInput.value = '13800000000'
+    mobileInput.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+
+    // Simulate a concurrent backend edit landing right before our PATCH lands.
+    bravo.mobile = '13999999999'
+    apiFetchMock.mockImplementationOnce(async (input) => {
+      callLog.push(String(input))
+      return createJsonResponse({
+        ok: false,
+        error: {
+          code: 'PROFILE_MOBILE_CONFLICT',
+          message: 'User mobile changed before update was applied',
+        },
+      }, 409)
+    })
+
+    const accessCallsBefore = callLog.filter((url) => url === '/api/admin/users/user-2/access').length
+    findButtonByText(container!, '保存资料').click()
+
+    await waitForCondition(() => container?.textContent?.includes('用户手机号已被其他操作更新为 13999999999') ?? false)
+
+    expect(container?.textContent).not.toContain('用户资料已更新')
+    expect(container?.textContent).toContain('手机号：13999999999')
+    const accessCallsAfter = callLog.filter((url) => url === '/api/admin/users/user-2/access').length
+    expect(accessCallsAfter).toBeGreaterThan(accessCallsBefore)
+  })
+
+  it('falls back to a generic message when the post-conflict access refresh fails', async () => {
+    const state = createApiState()
+    const bravo = state.find((user) => user.id === 'user-2')
+    if (!bravo) throw new Error('Bravo fixture not found')
+    apiFetchMock.mockImplementation(createApiImplementation(callLog, state))
+
+    app = createApp(UserManagementView)
+    registerRouterLink(app)
+    app.mount(container!)
+    await flushUi(20)
+
+    const bravoRow = findUserRow(container!, 'Bravo')
+    const bravoDetailButton = Array.from(bravoRow.querySelectorAll('button')).find((candidate) => candidate.textContent?.includes('Bravo'))
+    if (!(bravoDetailButton instanceof HTMLButtonElement)) {
+      throw new Error('Bravo detail button not found')
+    }
+    bravoDetailButton.click()
+    await waitForCondition(() => callLog.includes('/api/admin/users/user-2/access'))
+
+    const inputs = Array.from(container!.querySelectorAll('input[type="text"]'))
+    const mobileInput = inputs.find((candidate) => (candidate as HTMLInputElement).placeholder === '手机号，可留空')
+    if (!(mobileInput instanceof HTMLInputElement)) {
+      throw new Error('Profile mobile input not found')
+    }
+    mobileInput.value = '13800000000'
+    mobileInput.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+
+    // Backend reports a CAS conflict…
+    apiFetchMock.mockImplementationOnce(async (input) => {
+      callLog.push(String(input))
+      return createJsonResponse({
+        ok: false,
+        error: {
+          code: 'PROFILE_MOBILE_CONFLICT',
+          message: 'User mobile changed before update was applied',
+        },
+      }, 409)
+    })
+    // …and the follow-up access GET also fails, so the view can't confirm the
+    // true latest value. The UI must NOT advertise a stale mobile as "latest".
+    apiFetchMock.mockImplementationOnce(async (input) => {
+      callLog.push(String(input))
+      return createJsonResponse({
+        ok: false,
+        error: { code: 'USER_ACCESS_FAILED', message: 'downstream unavailable' },
+      }, 500)
+    })
+
+    findButtonByText(container!, '保存资料').click()
+    await waitForCondition(() => container?.textContent?.includes('用户手机号已被其他操作更新，请刷新后重试') ?? false)
+
+    expect(container?.textContent).not.toContain('用户手机号已被其他操作更新为')
+    expect(container?.textContent).not.toContain('用户资料已更新')
+  })
+
+  it('can auto-focus a user from directory query params', async () => {
+    window.history.replaceState({}, '', '/admin/users?userId=user-2&source=directory-sync&integrationId=ding-1&accountId=user-2-directory')
+    const state = createApiState()
+    const bravo = state.find((user) => user.id === 'user-2')
+    if (!bravo) throw new Error('Bravo fixture not found')
+    bravo.directoryLinked = true
+    apiFetchMock.mockImplementation(createApiImplementation(callLog, state))
+
+    app = createApp(UserManagementView)
+    registerRouterLink(app, true)
+    app.mount(container!)
+    await flushUi(20)
+
+    expect(container?.textContent).toContain('已从目录同步定位到用户 Bravo')
+    expect(container?.textContent).toContain('Bravo')
+  })
+
+  it('can re-focus a user when query params change on the same mounted instance', async () => {
+    const state = createApiState()
+    const bravo = state.find((user) => user.id === 'user-2')
+    if (!bravo) throw new Error('Bravo fixture not found')
+    bravo.directoryLinked = true
+    apiFetchMock.mockImplementation(createApiImplementation(callLog, state))
+
+    app = createApp(UserManagementView)
+    registerRouterLink(app, true)
+    app.mount(container!)
+    await flushUi(20)
+
+    await setSearchValue(container!, 'Alpha')
+    findButtonByText(container!, '查询').click()
+    await waitForCondition(() => callLog.includes('/api/admin/users?q=Alpha'))
+    expect(container?.textContent).toContain('Alpha')
+
+    window.history.replaceState({}, '', '/admin/users?userId=user-2&source=directory-sync&integrationId=ding-1&accountId=user-2-directory')
+    await waitForCondition(() => container?.textContent?.includes('已从目录同步定位到用户 Bravo') ?? false)
+
+    const searchInput = container!.querySelector('input[type="search"]')
+    expect(searchInput).toBeInstanceOf(HTMLInputElement)
+    expect((searchInput as HTMLInputElement).value).toBe('')
+  })
+
+  it('auto-focuses a deep-linked user whose row is outside the paginated first page', async () => {
+    window.history.replaceState({}, '', '/admin/users?userId=user-4&source=directory-sync&integrationId=ding-1&accountId=user-4-directory')
+    const state = createApiState()
+    apiFetchMock.mockImplementation(createApiImplementation(callLog, state, { paginatedPageSize: 2 }))
+
+    app = createApp(UserManagementView)
+    registerRouterLink(app, true)
+    app.mount(container!)
+    await flushUi(20)
+
+    const pinnedCall = callLog.find((url) => url.startsWith('/api/admin/users?') && url.includes('userId=user-4'))
+    expect(pinnedCall, 'expected loadUsers to forward the deep-link userId to the backend').toBeTruthy()
+
+    expect(container?.textContent).toContain('Delta')
+    expect(container?.textContent).toContain('已从目录同步定位到用户 Delta')
+  })
+
+  it('re-loads with the pinned userId when the deep link changes on the same instance', async () => {
+    const state = createApiState()
+    apiFetchMock.mockImplementation(createApiImplementation(callLog, state, { paginatedPageSize: 2 }))
+
+    app = createApp(UserManagementView)
+    registerRouterLink(app, true)
+    app.mount(container!)
+    await flushUi(20)
+
+    // Initially no deep link — Alpha (first row) should be selected.
+    expect(container?.textContent).toContain('Alpha')
+
+    window.history.replaceState({}, '', '/admin/users?userId=user-4&source=directory-sync&integrationId=ding-1&accountId=user-4-directory')
+    await waitForCondition(() => callLog.some((url) => url.startsWith('/api/admin/users?') && url.includes('userId=user-4')))
+    await waitForCondition(() => container?.textContent?.includes('已从目录同步定位到用户 Delta') ?? false)
+
+    expect(container?.textContent).toContain('Delta')
   })
 })

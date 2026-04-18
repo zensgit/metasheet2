@@ -56,6 +56,7 @@ const text = computed(() => {
       missingCode: '缺少授权码参数',
       missingToken: '登录成功但未获取到令牌',
       failed: '钉钉登录失败，请稍后重试。',
+      bindFailed: '钉钉绑定失败，请稍后重试。',
     }
   }
   return {
@@ -64,6 +65,7 @@ const text = computed(() => {
     missingCode: 'Missing authorization code',
     missingToken: 'Sign-in succeeded but no token was returned',
     failed: 'DingTalk sign-in failed. Please try again.',
+    bindFailed: 'DingTalk bind failed. Please try again.',
   }
 })
 
@@ -84,51 +86,50 @@ function extractUserPermissions(user: AuthUserPayload | null): string[] {
   return user.permissions.filter((item): item is string => typeof item === 'string')
 }
 
+function safeLocalStorageSet(key: string, value: string): void {
+  try {
+    localStorage.setItem(key, value)
+  } catch {
+    // localStorage can throw in restricted contexts (private mode, test stubs).
+  }
+}
+
+function safeLocalStorageRemove(key: string): void {
+  try {
+    localStorage.removeItem(key)
+  } catch {
+    // Ignore storage errors.
+  }
+}
+
 function persistAuthContext(user: AuthUserPayload | null, features: AuthFeaturePayload | null): void {
   if (typeof localStorage === 'undefined') return
+  if (typeof localStorage.setItem !== 'function') return
 
   const roles = extractUserRoles(user)
   const permissions = extractUserPermissions(user)
 
   if (roles.length > 0) {
-    localStorage.setItem('user_roles', JSON.stringify(roles))
+    safeLocalStorageSet('user_roles', JSON.stringify(roles))
   } else {
-    localStorage.removeItem('user_roles')
+    safeLocalStorageRemove('user_roles')
   }
 
   if (permissions.length > 0) {
-    localStorage.setItem('user_permissions', JSON.stringify(permissions))
+    safeLocalStorageSet('user_permissions', JSON.stringify(permissions))
   } else {
-    localStorage.removeItem('user_permissions')
+    safeLocalStorageRemove('user_permissions')
   }
 
   if (features && typeof features === 'object') {
-    localStorage.setItem('metasheet_features', JSON.stringify(features))
+    safeLocalStorageSet('metasheet_features', JSON.stringify(features))
     if (typeof features.mode === 'string' && features.mode.trim().length > 0) {
-      localStorage.setItem('metasheet_product_mode', features.mode)
+      safeLocalStorageSet('metasheet_product_mode', features.mode)
     }
   }
 }
 
 async function handleCallback(): Promise<void> {
-  const existingToken = auth.getToken()
-  if (existingToken) {
-    const currentSession = await auth.bootstrapSession()
-    if (currentSession.ok) {
-      let fallbackPath = resolveHomePath()
-      try {
-        await loadProductFeatures()
-        fallbackPath = resolveHomePath()
-      } catch {
-        // Keep authenticated users on their current session even if feature probing fails.
-      }
-
-      const redirectPath = normalizePostLoginRedirect(route.query.redirect)
-      await router.replace(redirectPath || fallbackPath)
-      return
-    }
-  }
-
   const code = typeof route.query.code === 'string' ? route.query.code : ''
   const state = typeof route.query.state === 'string' ? route.query.state : ''
 
@@ -138,6 +139,8 @@ async function handleCallback(): Promise<void> {
     return
   }
 
+  // Backend state is the source of truth for login vs bind; we always POST
+  // when a code is present and let data.mode drive the post-callback action.
   try {
     const response = await apiFetch('/api/auth/dingtalk/callback', {
       method: 'POST',
@@ -148,7 +151,22 @@ async function handleCallback(): Promise<void> {
 
     if (!response.ok || !payload?.success) {
       loading.value = false
-      errorMessage.value = readErrorMessage(payload, text.value.failed)
+      const mode = payload?.data?.mode
+      errorMessage.value = readErrorMessage(
+        payload,
+        mode === 'bind' ? text.value.bindFailed : text.value.failed,
+      )
+      return
+    }
+
+    const mode: 'bind' | 'login' = payload?.data?.mode === 'bind' ? 'bind' : 'login'
+
+    if (mode === 'bind') {
+      const redirectPath =
+        normalizePostLoginRedirect(payload?.data?.redirectPath) ||
+        normalizePostLoginRedirect(route.query.redirect) ||
+        '/settings?dingtalk=bound'
+      await router.replace(redirectPath)
       return
     }
 

@@ -30,7 +30,6 @@
     <p v-if="status" class="user-admin__status" :class="{ 'user-admin__status--error': statusTone === 'error' }">
       {{ status }}
     </p>
-
     <section class="user-admin__panel user-admin__panel--create">
       <div class="user-admin__section-head">
         <div>
@@ -260,6 +259,7 @@
             <div>
               <h2>{{ access.user.name || access.user.email }}</h2>
               <p>{{ access.user.email }}</p>
+              <p v-if="access.user.mobile" class="user-admin__hint">手机号：{{ access.user.mobile }}</p>
             </div>
             <div class="user-admin__badges">
               <span class="user-admin__badge">{{ access.user.role }}</span>
@@ -269,6 +269,34 @@
               <span class="user-admin__badge" :class="{ 'user-admin__badge--admin': access.isAdmin }">
                 {{ access.isAdmin ? '管理员' : '普通用户' }}
               </span>
+            </div>
+          </div>
+
+          <div class="user-admin__section">
+            <div class="user-admin__section-head">
+              <div>
+                <h3>基础资料</h3>
+                <p class="user-admin__hint">管理员可直接维护姓名和手机号，用于目录推荐绑定与钉钉匹配。</p>
+              </div>
+            </div>
+            <div class="user-admin__create-grid">
+              <input
+                v-model.trim="profileDraftName"
+                class="user-admin__search"
+                type="text"
+                placeholder="姓名"
+              />
+              <input
+                v-model.trim="profileDraftMobile"
+                class="user-admin__search"
+                type="text"
+                placeholder="手机号，可留空"
+              />
+            </div>
+            <div class="user-admin__role-actions">
+              <button class="user-admin__button" type="button" :disabled="busy || !hasProfileDraftChanges" @click="void saveUserProfile()">
+                保存资料
+              </button>
             </div>
           </div>
 
@@ -555,14 +583,16 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useAuth } from '../composables/useAuth'
 import { apiFetch } from '../utils/api'
+import { subscribeToLocationChanges } from '../utils/browserLocation'
 
 type ManagedUser = {
   id: string
   email: string
   name: string | null
+  mobile?: string | null
   role: string
   is_active: boolean
   is_admin: boolean
@@ -727,6 +757,11 @@ type UserSessionRecord = {
   userAgent: string | null
 }
 
+type InitialUserNavigation = {
+  userId: string
+  source: string
+}
+
 const { hasAdminAccess } = useAuth()
 
 const adminAllowed = hasAdminAccess()
@@ -759,6 +794,9 @@ const userSessions = ref<UserSessionRecord[]>([])
 const access = ref<UserAccess | null>(null)
 const dingtalkAccess = ref<DingTalkAccess | null>(null)
 const memberAdmission = ref<MemberAdmission | null>(null)
+const profileDraftName = ref('')
+const profileDraftMobile = ref('')
+const appliedUserNavigationKey = ref('')
 const createForm = ref<CreateUserForm>({
   name: '',
   email: '',
@@ -803,6 +841,10 @@ const hasAttendanceAdminAccess = computed(() => {
 const filteredAccessPresets = computed(() => {
   return accessPresets.value.filter((preset) => !presetModeFilter.value || preset.productMode === presetModeFilter.value)
 })
+const hasProfileDraftChanges = computed(() => {
+  if (!access.value) return false
+  return profileDraftName.value !== (access.value.user.name || '') || profileDraftMobile.value !== (access.value.user.mobile || '')
+})
 const namespaceOptions = computed(() => {
   const namespaces: string[] = []
   const append = (namespace: string): void => {
@@ -824,10 +866,57 @@ const namespaceOptions = computed(() => {
 
   return namespaces
 })
+const userNavigation = ref(readInitialUserNavigation())
 
 function setStatus(message: string, tone: 'info' | 'error' = 'info'): void {
   status.value = message
   statusTone.value = tone
+}
+
+function readInitialUserNavigation(): InitialUserNavigation {
+  if (typeof window === 'undefined') {
+    return { userId: '', source: '' }
+  }
+  const params = new URL(window.location.href).searchParams
+  return {
+    userId: params.get('userId')?.trim() || '',
+    source: params.get('source')?.trim() || '',
+  }
+}
+
+function buildUserNavigationKey(navigation: InitialUserNavigation): string {
+  return [
+    navigation.userId.trim(),
+    navigation.source.trim(),
+  ].join('|')
+}
+
+function buildUserLocation(navigation: InitialUserNavigation): string {
+  if (typeof window === 'undefined') return '/admin/users'
+  const url = new URL(window.location.href)
+  const params = new URLSearchParams()
+  if (navigation.userId.trim().length > 0) params.set('userId', navigation.userId.trim())
+  if (navigation.source.trim().length > 0) params.set('source', navigation.source.trim())
+  const search = params.toString()
+  return `${url.pathname}${search ? `?${search}` : ''}${url.hash}`
+}
+
+function replaceUserNavigation(navigation: InitialUserNavigation): void {
+  if (typeof window === 'undefined') return
+  window.history.replaceState(window.history.state, '', buildUserLocation(navigation))
+}
+
+function syncUserNavigationFromLocation(): boolean {
+  const next = readInitialUserNavigation()
+  const currentKey = buildUserNavigationKey(userNavigation.value)
+  const nextKey = buildUserNavigationKey(next)
+  userNavigation.value = next
+  return currentKey !== nextKey
+}
+
+function syncProfileDraftFromAccess(): void {
+  profileDraftName.value = access.value?.user.name || ''
+  profileDraftMobile.value = access.value?.user.mobile || ''
 }
 
 function extractNamespaceFromPermission(permission: string): string | null {
@@ -951,6 +1040,8 @@ async function loadUsers(): Promise<void> {
   try {
     const params = new URLSearchParams()
     params.set('q', search.value)
+    const pinUserId = userNavigation.value.userId.trim()
+    if (pinUserId) params.set('userId', pinUserId)
     const response = await apiFetch(`/api/admin/users?${params.toString()}`)
     const payload = await readJson(response)
     if (!response.ok || payload.ok !== true) {
@@ -971,7 +1062,19 @@ async function loadUsers(): Promise<void> {
     reconcileSelectedUsers()
 
     if (!selectedUserId.value && users.value.length > 0) {
-      await selectUser(users.value[0].id)
+      const requestedUser = userNavigation.value.userId
+        ? users.value.find((item) => item.id === userNavigation.value.userId)
+        : null
+      await selectUser((requestedUser || users.value[0]).id)
+    } else if (userNavigation.value.userId) {
+      const navigationKey = buildUserNavigationKey(userNavigation.value)
+      const requestedUser = users.value.find((item) => item.id === userNavigation.value.userId)
+      if (
+        requestedUser
+        && (selectedUserId.value !== requestedUser.id || appliedUserNavigationKey.value !== navigationKey)
+      ) {
+        await selectUser(requestedUser.id)
+      }
     }
   } catch (error) {
     setStatus(error instanceof Error ? error.message : '加载用户失败', 'error')
@@ -1085,6 +1188,15 @@ async function loadUserSessions(userId?: string): Promise<void> {
   }
 }
 
+async function fetchUserAccessOrThrow(userId: string): Promise<UserAccess> {
+  const response = await apiFetch(`/api/admin/users/${encodeURIComponent(userId)}/access`)
+  const payload = await readJson(response)
+  if (!response.ok || payload.ok !== true) {
+    throw new Error(String((payload.error as Record<string, unknown> | undefined)?.message || '加载用户权限失败'))
+  }
+  return payload.data as UserAccess
+}
+
 async function selectUser(userId: string): Promise<void> {
   selectedUserId.value = userId
   selectedRoleId.value = ''
@@ -1094,17 +1206,43 @@ async function selectUser(userId: string): Promise<void> {
   dingtalkAccess.value = null
   memberAdmission.value = null
   try {
-    const response = await apiFetch(`/api/admin/users/${encodeURIComponent(userId)}/access`)
-    const payload = await readJson(response)
-    if (!response.ok || payload.ok !== true) {
-      throw new Error(String((payload.error as Record<string, unknown> | undefined)?.message || '加载用户权限失败'))
+    access.value = await fetchUserAccessOrThrow(userId)
+    syncProfileDraftFromAccess()
+    const navigationKey = buildUserNavigationKey(userNavigation.value)
+    if (userNavigation.value.userId === userId && appliedUserNavigationKey.value !== navigationKey) {
+      if (userNavigation.value.source === 'directory-sync') {
+        setStatus(`已从目录同步定位到用户 ${access.value.user.name || access.value.user.email}`)
+      }
+      appliedUserNavigationKey.value = navigationKey
     }
-
-    access.value = payload.data as UserAccess
     await Promise.all([loadInviteRecords(userId), loadUserSessions(userId), loadDingTalkAccess(userId), loadMemberAdmission(userId)])
   } catch (error) {
     setStatus(error instanceof Error ? error.message : '加载用户权限失败', 'error')
   }
+}
+
+async function handleUserNavigationChange(): Promise<void> {
+  const navigation = userNavigation.value
+  const navigationKey = buildUserNavigationKey(navigation)
+  if (!navigation.userId) {
+    appliedUserNavigationKey.value = navigationKey
+    return
+  }
+  if (navigationKey && appliedUserNavigationKey.value === navigationKey && selectedUserId.value === navigation.userId) return
+
+  if (search.value) {
+    search.value = ''
+    await loadUsers()
+    return
+  }
+
+  const requestedUser = users.value.find((item) => item.id === navigation.userId)
+  if (!requestedUser) {
+    await loadUsers()
+    return
+  }
+
+  await selectUser(requestedUser.id)
 }
 
 async function loadDingTalkAccess(userId?: string): Promise<void> {
@@ -1309,6 +1447,7 @@ async function createUser(): Promise<void> {
     }
 
     access.value = payload.data as UserAccess
+    syncProfileDraftFromAccess()
     selectedUserId.value = access.value.user.id
     createdTemporaryPassword.value = String((payload.data as Record<string, unknown>).temporaryPassword || '')
     createdOnboarding.value = ((payload.data as Record<string, unknown>).onboarding as OnboardingPacket | undefined) || null
@@ -1423,6 +1562,7 @@ async function toggleUserStatus(): Promise<void> {
     }
 
     access.value = payload.data as UserAccess
+    syncProfileDraftFromAccess()
     await loadUsers()
     await loadMemberAdmission(access.value.user.id)
     setStatus(access.value.user.is_active ? '账号已启用' : '账号已停用')
@@ -1515,6 +1655,7 @@ async function updateRole(action: 'assign' | 'unassign'): Promise<void> {
     }
 
     access.value = payload.data as UserAccess
+    syncProfileDraftFromAccess()
     await loadUsers()
     await loadMemberAdmission(selectedUserId.value)
     setStatus(action === 'assign' ? '角色已分配' : '角色已撤销')
@@ -1539,6 +1680,7 @@ async function updateNamedRole(roleId: string, enabled: boolean): Promise<void> 
     }
 
     access.value = payload.data as UserAccess
+    syncProfileDraftFromAccess()
     await loadUsers()
     await loadMemberAdmission(selectedUserId.value)
     const label = roleId === 'admin' ? '平台管理员' : roleId === 'attendance_admin' ? '考勤管理员' : roleId
@@ -1558,8 +1700,69 @@ async function unassignRole(): Promise<void> {
   await updateRole('unassign')
 }
 
+async function saveUserProfile(): Promise<void> {
+  if (!access.value) return
+  busy.value = true
+  // Snapshot the mobile we believed the server held when we rendered the
+  // form; the backend uses this as a CAS witness on UPDATE so a concurrent
+  // edit can't get silently overwritten.
+  const baselineUserId = access.value.user.id
+  const baselineMobile = access.value.user.mobile ?? null
+  try {
+    const response = await apiFetch(`/api/admin/users/${encodeURIComponent(baselineUserId)}/profile`, {
+      method: 'PATCH',
+      body: JSON.stringify({
+        name: profileDraftName.value,
+        mobile: profileDraftMobile.value,
+        expectedMobile: baselineMobile,
+      }),
+    })
+    const payload = await readJson(response)
+    if (response.status === 409) {
+      const errorCode = (payload.error as Record<string, unknown> | undefined)?.code
+      if (errorCode === 'PROFILE_MOBILE_CONFLICT') {
+        try {
+          const latestAccess = await fetchUserAccessOrThrow(baselineUserId)
+          access.value = latestAccess
+          syncProfileDraftFromAccess()
+          const latest = latestAccess.user.mobile ?? null
+          const latestLabel = latest === null || latest === '' ? '（空）' : latest
+          setStatus(`用户手机号已被其他操作更新为 ${latestLabel}，请确认最新值后重新保存`, 'error')
+        } catch {
+          // If the refresh itself failed we must not advertise a stale value
+          // as the "latest" — it would mislead the admin about what the
+          // backend currently holds.
+          setStatus('用户手机号已被其他操作更新，请刷新后重试', 'error')
+        }
+        return
+      }
+    }
+    if (!response.ok || payload.ok !== true) {
+      throw new Error(String((payload.error as Record<string, unknown> | undefined)?.message || '更新用户资料失败'))
+    }
+
+    access.value = payload.data as UserAccess
+    syncProfileDraftFromAccess()
+    await loadUsers()
+    setStatus('用户资料已更新')
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : '更新用户资料失败', 'error')
+  } finally {
+    busy.value = false
+  }
+}
+
+const stopUserLocationSync = subscribeToLocationChanges(() => {
+  if (!syncUserNavigationFromLocation()) return
+  void handleUserNavigationChange()
+})
+
 onMounted(async () => {
   await Promise.all([loadRoles(), loadUsers(), loadAccessPresets(), loadInviteRecords()])
+})
+
+onUnmounted(() => {
+  stopUserLocationSync()
 })
 </script>
 
@@ -1650,6 +1853,32 @@ onMounted(async () => {
 .user-admin__status--error {
   background: #fef2f2;
   color: #dc2626;
+}
+
+.user-admin__source-banner {
+  display: grid;
+  gap: 4px;
+}
+
+.user-admin__source-banner p {
+  margin: 0;
+}
+
+.user-admin__source-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.user-admin__button-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  text-decoration: none;
+}
+
+.user-admin__button-link:hover {
+  text-decoration: none;
 }
 
 .user-admin__layout {

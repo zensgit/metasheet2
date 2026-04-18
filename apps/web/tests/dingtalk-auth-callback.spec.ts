@@ -51,7 +51,7 @@ vi.mock('vue-router', () => ({
   }),
 }))
 
-async function flushUi(cycles = 4): Promise<void> {
+async function flushUi(cycles = 6): Promise<void> {
   for (let i = 0; i < cycles; i += 1) {
     await Promise.resolve()
     await nextTick()
@@ -96,6 +96,7 @@ describe('DingTalkAuthCallbackView', () => {
       json: async () => ({
         success: true,
         data: {
+          mode: 'login',
           token: 'jwt-dingtalk-token',
           redirectPath: '/workflows',
           user: {
@@ -145,7 +146,7 @@ describe('DingTalkAuthCallbackView', () => {
     expect(container?.textContent).toContain('缺少授权码参数')
   })
 
-  it('keeps an existing authenticated session instead of overwriting it via callback', async () => {
+  it('still POSTs the callback when an existing session is present (mode=bind keeps token)', async () => {
     getTokenMock.mockReturnValue('existing-token')
     bootstrapSessionMock.mockResolvedValue({
       ok: true,
@@ -158,14 +159,63 @@ describe('DingTalkAuthCallbackView', () => {
         },
       },
     })
-    loadProductFeaturesMock.mockResolvedValue(undefined)
+    apiFetchMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        success: true,
+        data: {
+          mode: 'bind',
+          bound: true,
+          redirectPath: '/settings?dingtalk=bound',
+          identity: {
+            userId: 'user-1',
+            identity: { exists: true },
+          },
+        },
+      }),
+    })
 
     app = createApp(DingTalkAuthCallbackView)
     app.mount(container!)
     await flushUi(6)
 
-    expect(apiFetchMock).not.toHaveBeenCalled()
+    expect(apiFetchMock).toHaveBeenCalledWith(
+      '/api/auth/dingtalk/callback',
+      expect.objectContaining({
+        method: 'POST',
+        suppressUnauthorizedRedirect: true,
+      }),
+    )
     expect(setTokenMock).not.toHaveBeenCalled()
-    expect(replaceMock).toHaveBeenCalledWith('/attendance')
+    expect(primeSessionMock).not.toHaveBeenCalled()
+    expect(replaceMock).toHaveBeenCalledWith('/settings?dingtalk=bound')
+  })
+
+  it('surfaces a DingTalk bind error when the backend returns a conflict', async () => {
+    getTokenMock.mockReturnValue('existing-token')
+    apiFetchMock.mockResolvedValue({
+      ok: false,
+      status: 409,
+      json: async () => ({
+        success: false,
+        error: 'DingTalk identity is already bound to another local user',
+        code: 'identity_already_bound',
+        data: {
+          mode: 'bind',
+        },
+      }),
+    })
+
+    app = createApp(DingTalkAuthCallbackView)
+    app.mount(container!)
+    await flushUi(6)
+
+    expect(apiFetchMock).toHaveBeenCalledWith(
+      '/api/auth/dingtalk/callback',
+      expect.objectContaining({ method: 'POST' }),
+    )
+    expect(setTokenMock).not.toHaveBeenCalled()
+    expect(container?.textContent ?? '').toContain('already bound')
   })
 })

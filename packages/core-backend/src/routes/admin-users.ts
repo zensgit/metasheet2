@@ -31,6 +31,7 @@ type AdminUserProfile = {
   id: string
   email: string
   name: string | null
+  mobile: string | null
   role: string
   is_active: boolean
   is_admin: boolean
@@ -281,7 +282,7 @@ async function ensurePlatformAdmin(req: Request, res: Response): Promise<string 
 
 async function fetchUserProfile(userId: string): Promise<AdminUserProfile | null> {
   const result = await query<AdminUserProfile>(
-    `SELECT id, email, name, role, is_active, is_admin, last_login_at, created_at, updated_at
+    `SELECT id, email, name, mobile, role, is_active, is_admin, last_login_at, created_at, updated_at
      FROM users
      WHERE id = $1`,
     [userId],
@@ -350,6 +351,12 @@ function sanitizeEmail(email: string): string {
 
 function sanitizeName(name: string): string {
   return name.trim().replace(/[<>'"&;]/g, '').slice(0, 100)
+}
+
+function sanitizeMobile(mobile: string): string | null {
+  const value = mobile.trim().replace(/\s+/g, '')
+  if (!value) return null
+  return value.slice(0, 32)
 }
 
 function parseAuditRangeBoundary(value: unknown, mode: AuditRangeBoundaryMode): string | null {
@@ -2141,10 +2148,10 @@ export function adminUsersRouter(): Router {
           Promise.resolve([]),
           (async () => {
             const term = q ? `%${q}%` : '%'
-            const where = q ? 'WHERE email ILIKE $1 OR name ILIKE $1 OR id ILIKE $1' : ''
+            const where = q ? 'WHERE email ILIKE $1 OR name ILIKE $1 OR COALESCE(mobile, \'\') ILIKE $1 OR id ILIKE $1' : ''
             const countSql = `SELECT COUNT(*)::int AS c FROM users ${where}`
             const listSql = `
-              SELECT id, email, name, role, is_active, is_admin, last_login_at, created_at, updated_at
+              SELECT id, email, name, mobile, role, is_active, is_admin, last_login_at, created_at, updated_at
               FROM users
               ${where}
               ORDER BY created_at DESC
@@ -2439,6 +2446,7 @@ export function adminUsersRouter(): Router {
 
     try {
       const q = String(req.query.q || '').trim()
+      const pinUserId = String(req.query.userId || '').trim()
       const { page, pageSize, offset } = parsePagination(req.query as Record<string, unknown>, {
         defaultPage: 1,
         defaultPageSize: 20,
@@ -2446,10 +2454,10 @@ export function adminUsersRouter(): Router {
       })
 
       const term = q ? `%${q}%` : '%'
-      const where = q ? 'WHERE email ILIKE $1 OR name ILIKE $1 OR id ILIKE $1' : ''
+      const where = q ? 'WHERE email ILIKE $1 OR name ILIKE $1 OR COALESCE(mobile, \'\') ILIKE $1 OR id ILIKE $1' : ''
       const countSql = `SELECT COUNT(*)::int AS c FROM users ${where}`
       const listSql = `
-        SELECT id, email, name, role, is_active, is_admin, last_login_at, created_at, updated_at
+        SELECT id, email, name, mobile, role, is_active, is_admin, last_login_at, created_at, updated_at
         FROM users
         ${where}
         ORDER BY created_at DESC
@@ -2460,12 +2468,33 @@ export function adminUsersRouter(): Router {
       const total = count.rows[0]?.c ?? 0
       const list = await query<AdminUserProfile>(listSql, q ? [term, pageSize, offset] : [pageSize, offset])
 
+      const items = list.rows
+      let pinnedUserIncluded = true
+      if (pinUserId && !items.some((row) => row.id === pinUserId)) {
+        // Deep-link target was not in the paginated window — fetch the single
+        // row so the caller can focus it without a second round-trip.
+        const pinned = await query<AdminUserProfile>(
+          `SELECT id, email, name, mobile, role, is_active, is_admin, last_login_at, created_at, updated_at
+           FROM users
+           WHERE id = $1`,
+          [pinUserId],
+        )
+        if (pinned.rows[0]) {
+          items.unshift(pinned.rows[0])
+          if (items.length > pageSize) items.length = pageSize
+        } else {
+          pinnedUserIncluded = false
+        }
+      }
+
       return jsonOk(res, {
-        items: list.rows,
+        items,
         page,
         pageSize,
         total,
         query: q,
+        pinUserId: pinUserId || '',
+        pinUserIncluded: pinUserId ? pinnedUserIncluded : null,
         actorId: adminUserId,
       })
     } catch (error) {
@@ -2886,6 +2915,93 @@ export function adminUsersRouter(): Router {
       })
     } catch (error) {
       return jsonError(res, 500, 'USER_CREATE_FAILED', (error as Error)?.message || 'Failed to create user')
+    }
+  })
+
+  r.patch('/api/admin/users/:userId/profile', authenticate, async (req: Request, res: Response) => {
+    const adminUserId = await ensurePlatformAdmin(req, res)
+    if (!adminUserId) return
+
+    try {
+      const userId = String(req.params.userId || '').trim()
+      if (!userId) return jsonError(res, 400, 'USER_ID_REQUIRED', 'userId is required')
+
+      const hasName = typeof req.body?.name === 'string'
+      const hasMobile = typeof req.body?.mobile === 'string'
+      const hasExpectedMobile = Object.prototype.hasOwnProperty.call(req.body ?? {}, 'expectedMobile')
+      if (!hasName && !hasMobile) {
+        return jsonError(res, 400, 'PROFILE_FIELDS_REQUIRED', 'name or mobile is required')
+      }
+
+      const profile = await fetchUserProfile(userId)
+      if (!profile) return jsonError(res, 404, 'NOT_FOUND', 'User not found')
+
+      const nextName = hasName ? sanitizeName(String(req.body.name)) : profile.name
+      const nextMobile = hasMobile ? sanitizeMobile(String(req.body.mobile)) : profile.mobile
+      const expectedMobile = hasExpectedMobile
+        ? req.body?.expectedMobile === null
+          ? null
+          : typeof req.body?.expectedMobile === 'string'
+            ? sanitizeMobile(String(req.body.expectedMobile))
+            : undefined
+        : undefined
+
+      if (hasName && (!nextName || nextName.length < 2 || nextName.length > 100)) {
+        return jsonError(res, 400, 'INVALID_NAME', 'Name must be between 2 and 100 characters')
+      }
+      if (hasExpectedMobile && expectedMobile === undefined) {
+        return jsonError(res, 400, 'INVALID_EXPECTED_MOBILE', 'expectedMobile must be string or null')
+      }
+
+      // Both the stored value and the witness are normalised the same way
+      // (strip all whitespace, map empty to NULL) before comparison so legacy
+      // rows like "138 0013 8000" don't spuriously fail CAS when the client
+      // sends the already-sanitised "13800138000" witness.
+      const updateResult = await query<{ id: string }>(
+        `UPDATE users
+         SET name = $1,
+             mobile = $2,
+             updated_at = NOW()
+         WHERE id = $3
+           AND (
+             $4::boolean = FALSE
+             OR NULLIF(regexp_replace(COALESCE(mobile, ''), '\\s+', '', 'g'), '')
+                IS NOT DISTINCT FROM
+                NULLIF(regexp_replace(COALESCE($5::text, ''), '\\s+', '', 'g'), '')
+           )
+         RETURNING id`,
+        [nextName, nextMobile, userId, hasExpectedMobile, expectedMobile ?? null],
+      )
+      if (updateResult.rows.length === 0) {
+        return jsonError(res, 409, 'PROFILE_MOBILE_CONFLICT', 'User mobile changed before update was applied')
+      }
+
+      await auditLog({
+        actorId: adminUserId,
+        actorType: 'user',
+        action: 'update',
+        resourceType: 'user',
+        resourceId: userId,
+        meta: {
+          adminUserId,
+          before: {
+            name: profile.name,
+            mobile: profile.mobile,
+          },
+          after: {
+            name: nextName,
+            mobile: nextMobile,
+          },
+        },
+      })
+
+      const snapshot = await fetchUserAccessSnapshot(userId)
+      return jsonOk(res, {
+        ...snapshot,
+        actorId: adminUserId,
+      })
+    } catch (error) {
+      return jsonError(res, 500, 'USER_PROFILE_UPDATE_FAILED', (error as Error)?.message || 'Failed to update user profile')
     }
   })
 
