@@ -339,6 +339,7 @@ export type DirectoryBindingRecommendation = {
     id: string
     email: string
     name: string | null
+    mobile: string | null
     role: string
     isActive: boolean
   }
@@ -857,6 +858,7 @@ async function loadDirectoryReviewRecommendations(
           id: user.id,
           email: user.email,
           name: user.name,
+          mobile: user.mobile,
           role: user.role,
           isActive: user.is_active,
         },
@@ -2013,6 +2015,69 @@ export async function listDirectoryReviewItems(
   }
 }
 
+export async function getDirectoryReviewItem(
+  accountId: string,
+): Promise<DirectoryReviewItemSummary | null> {
+  const normalizedAccountId = normalizeText(accountId)
+  if (!normalizedAccountId) throw new Error('accountId is required')
+
+  const rowsResult = await query<DirectoryReviewItemRow>(
+    `SELECT
+        a.integration_id,
+        a.provider,
+        a.corp_id,
+        a.id AS directory_account_id,
+        a.external_user_id,
+        a.union_id,
+        a.open_id,
+        a.external_key,
+        a.name AS account_name,
+        a.email AS account_email,
+        a.mobile AS account_mobile,
+        a.is_active AS account_is_active,
+        a.updated_at AS account_updated_at,
+        l.link_status,
+        l.match_strategy,
+        l.reviewed_by,
+        l.review_note,
+        l.updated_at AS link_updated_at,
+        u.id AS local_user_id,
+        u.email AS local_user_email,
+        u.name AS local_user_name,
+        COALESCE(array_remove(array_agg(DISTINCT d.full_path), NULL), ARRAY[]::text[]) AS department_paths,
+        CASE
+          WHEN COALESCE(a.union_id, '') = '' AND COALESCE(a.open_id, '') = '' THEN 'missing_identifier'
+          WHEN a.is_active = FALSE AND l.local_user_id IS NOT NULL THEN 'inactive_linked'
+          ELSE 'pending_binding'
+        END AS review_kind,
+        CASE
+          WHEN COALESCE(a.union_id, '') = '' AND COALESCE(a.open_id, '') = '' THEN '目录成员缺少 unionId/openId，无法用于钉钉登录绑定。'
+          WHEN a.is_active = FALSE AND l.local_user_id IS NOT NULL THEN '目录成员已停用，但仍绑定本地用户，需要停权处理。'
+          WHEN l.local_user_id IS NULL THEN '目录成员尚未绑定本地用户。'
+          ELSE '目录成员当前不是已确认绑定状态，建议复核。'
+        END AS review_reason,
+        (COALESCE(a.union_id, '') = '') AS missing_union_id,
+        (COALESCE(a.open_id, '') = '') AS missing_open_id
+     FROM directory_accounts a
+     LEFT JOIN directory_account_links l ON l.directory_account_id = a.id
+     LEFT JOIN users u ON u.id = l.local_user_id
+     LEFT JOIN directory_account_departments ad ON ad.directory_account_id = a.id
+     LEFT JOIN directory_departments d ON d.id = ad.directory_department_id
+     WHERE a.id = $1
+     GROUP BY
+       a.integration_id, a.provider, a.corp_id, a.id, a.external_user_id, a.union_id, a.open_id, a.external_key,
+       a.name, a.email, a.mobile, a.is_active, a.updated_at,
+       l.link_status, l.match_strategy, l.reviewed_by, l.review_note, l.updated_at,
+       u.id, u.email, u.name`,
+    [normalizedAccountId],
+  )
+
+  const row = rowsResult.rows[0]
+  if (!row) return null
+  const recommendationsByAccount = await loadDirectoryReviewRecommendations([row])
+  return summarizeReviewItem(row, recommendationsByAccount.get(row.directory_account_id) ?? null)
+}
+
 export async function batchUnbindDirectoryAccounts(
   directoryAccountIds: string[],
   input: DirectoryAccountUnbindInput,
@@ -2052,7 +2117,7 @@ export async function batchBindDirectoryAccounts(
   return results
 }
 
-async function getDirectoryAccountSummary(accountId: string): Promise<DirectoryIntegrationAccountSummary | null> {
+export async function getDirectoryAccountSummary(accountId: string): Promise<DirectoryIntegrationAccountSummary | null> {
   const result = await query<DirectoryIntegrationAccountRow>(
     `SELECT
         a.integration_id,

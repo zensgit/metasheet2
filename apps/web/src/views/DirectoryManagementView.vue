@@ -37,7 +37,7 @@
           class="directory-admin__item"
           :class="{ 'directory-admin__item--active': selectedIntegrationId === integration.id }"
           type="button"
-          @click="selectIntegration(integration.id)"
+          @click="void selectIntegration(integration.id)"
         >
           <strong>{{ integration.name }}</strong>
           <span>{{ integration.corpId }}</span>
@@ -373,6 +373,21 @@
             <p v-if="item.kind === 'pending_binding' && readBindingSearchError(item.account.id)" class="directory-admin__status directory-admin__status--error">
               {{ readBindingSearchError(item.account.id) }}
             </p>
+            <p
+              v-if="item.kind === 'pending_binding' && readMobileConflictHint(item.account.id)"
+              class="directory-admin__status directory-admin__status--error"
+            >
+              {{ readMobileConflictHint(item.account.id) }}
+            </p>
+            <p
+              v-if="item.kind === 'pending_binding' && item.account.mobile && readSelectedBindingUser(item)"
+              class="directory-admin__hint"
+              :class="{ 'directory-admin__status directory-admin__status--error': hasSelectedBindingUserMobileConflict(item) }"
+            >
+              平台手机号：{{ readSelectedBindingUser(item)?.mobile || '未设置' }} ·
+              目录手机号：{{ item.account.mobile }} ·
+              {{ hasSelectedBindingUserMobileConflict(item) ? '存在差异，覆盖前需确认。' : '可直接回填到平台用户。' }}
+            </p>
             <div class="directory-admin__actions">
               <button
                 v-if="item.kind === 'pending_binding'"
@@ -390,6 +405,13 @@
               >
                 定位到成员
               </button>
+              <router-link
+                v-if="item.kind === 'pending_binding' && readSelectedBindingUser(item)"
+                class="directory-admin__button directory-admin__button--secondary"
+                :to="buildUserManagementLocation(readSelectedBindingUser(item)!.id, item.account)"
+              >
+                查看本地用户
+              </router-link>
               <button
                 v-if="item.kind === 'pending_binding'"
                 class="directory-admin__button"
@@ -398,6 +420,42 @@
                 @click="void confirmRecommendedReviewBinding(item)"
               >
                 {{ reviewProcessingAccountId === item.account.id ? '处理中...' : '确认推荐' }}
+              </button>
+              <button
+                v-if="item.kind === 'pending_binding' && item.account.mobile && readSelectedBindingUser(item)"
+                class="directory-admin__button directory-admin__button--secondary"
+                type="button"
+                :disabled="reviewProcessingAccountId === item.account.id"
+                @click="void backfillUserMobileAndBindReviewItem(item)"
+              >
+                {{ reviewProcessingAccountId === item.account.id ? '处理中...' : readBackfillAndBindLabel(item) }}
+              </button>
+              <button
+                v-if="item.kind === 'pending_binding' && isAwaitingMobileOverrideConfirmation(item.account.id)"
+                class="directory-admin__button directory-admin__button--secondary"
+                type="button"
+                :disabled="reviewProcessingAccountId === item.account.id"
+                @click="clearMobileOverrideConfirmation(item.account.id)"
+              >
+                取消覆盖确认
+              </button>
+              <button
+                v-if="item.kind === 'pending_binding' && readMobileConflictHint(item.account.id)"
+                class="directory-admin__button directory-admin__button--secondary"
+                type="button"
+                :disabled="reviewProcessingAccountId === item.account.id"
+                @click="clearMobileConflictHint(item.account.id)"
+              >
+                关闭冲突提示
+              </button>
+              <button
+                v-if="item.kind === 'pending_binding' && readMobileConflictHint(item.account.id)"
+                class="directory-admin__button directory-admin__button--secondary"
+                type="button"
+                :disabled="reviewProcessingAccountId === item.account.id"
+                @click="void retryBackfillUserMobileAndBindReviewItem(item)"
+              >
+                按最新手机号重试
               </button>
               <button
                 v-if="item.kind === 'pending_binding'"
@@ -558,6 +616,58 @@
               </button>
             </div>
           </div>
+          <article v-if="routeNavigationFailureNotice" class="directory-admin__route-banner">
+            <div class="directory-admin__alert-head">
+              <div>
+                <strong>定位未完成</strong>
+                <p class="directory-admin__hint">{{ routeNavigationFailureNotice.message }}</p>
+                <p v-if="routeNavigationFailureNotice.targetIntegrationId" class="directory-admin__hint">
+                  目标集成：{{ routeNavigationFailureNotice.targetIntegrationId }}
+                </p>
+                <p v-if="routeNavigationFailureNotice.targetAccountId" class="directory-admin__hint">
+                  目标成员：{{ routeNavigationFailureNotice.targetAccountId }}
+                </p>
+                <p v-if="routeNavigationFailureNotice.currentIntegrationName" class="directory-admin__hint">
+                  当前仍停留在 {{ routeNavigationFailureNotice.currentIntegrationName }}
+                </p>
+              </div>
+              <div class="directory-admin__chips">
+                <span class="directory-admin__chip directory-admin__chip--danger">导航失败</span>
+                <span class="directory-admin__chip">
+                  {{ routeNavigationFailureNotice.kind === 'missing_integration' ? '集成不存在' : '成员不存在' }}
+                </span>
+              </div>
+            </div>
+            <div class="directory-admin__actions">
+              <button
+                class="directory-admin__button"
+                type="button"
+                :disabled="routeNavigationFailureAction.length > 0"
+                @click="void retryRouteNavigationFailureNotice()"
+              >
+                {{ routeNavigationFailureAction === 'retry' ? '重试中...' : '重试定位' }}
+              </button>
+              <router-link
+                v-if="routeNavigationFailureUserManagementLocation"
+                class="directory-admin__button directory-admin__button--secondary"
+                :to="routeNavigationFailureUserManagementLocation"
+              >
+                返回用户管理
+              </router-link>
+              <button
+                class="directory-admin__button directory-admin__button--secondary"
+                type="button"
+                :disabled="routeNavigationFailureAction.length > 0"
+                @click="clearFailedDirectoryNavigation()"
+              >
+                {{
+                  routeNavigationFailureNotice.currentIntegrationName
+                    ? `留在 ${routeNavigationFailureNotice.currentIntegrationName}`
+                    : '清除失败定位'
+                }}
+              </button>
+            </div>
+          </article>
 
           <article v-if="focusedAccountId" class="directory-admin__focus-card">
             <div>
@@ -571,6 +681,13 @@
               </p>
             </div>
             <div class="directory-admin__focus-actions">
+              <router-link
+                v-if="focusedVisibleAccount?.localUser?.id"
+                class="directory-admin__button directory-admin__button--secondary"
+                :to="buildUserManagementLocation(focusedVisibleAccount.localUser.id, focusedVisibleAccount)"
+              >
+                前往用户管理
+              </router-link>
               <button
                 v-if="focusedVisibleAccount && focusedVisibleAccountBindDraft.length > 0"
                 class="directory-admin__button"
@@ -623,6 +740,14 @@
             <p class="directory-admin__hint">
               部门：{{ account.departmentPaths.join('，') || '未分配部门' }}
             </p>
+            <div v-if="account.localUser?.id" class="directory-admin__actions">
+              <router-link
+                class="directory-admin__button directory-admin__button--secondary"
+                :to="buildUserManagementLocation(account.localUser.id, account)"
+              >
+                前往用户管理
+              </router-link>
+            </div>
 
             <div class="directory-admin__form-grid directory-admin__form-grid--account">
               <label class="directory-admin__field">
@@ -777,8 +902,9 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onMounted, reactive, ref } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { apiFetch } from '../utils/api'
+import { subscribeToLocationChanges } from '../utils/browserLocation'
 
 type DirectoryIntegration = {
   id: string
@@ -948,8 +1074,24 @@ type LocalUserOption = {
   id: string
   email: string
   name: string | null
+  mobile?: string | null
   role: string
   is_active: boolean
+}
+
+type InitialDirectoryNavigation = {
+  integrationId: string
+  accountId: string
+  source: string
+  userId: string
+}
+
+type DirectoryRouteNavigationFailureNotice = {
+  kind: 'missing_integration' | 'missing_account'
+  message: string
+  targetIntegrationId: string
+  targetAccountId: string
+  currentIntegrationName: string
 }
 
 type TestResult = {
@@ -1014,6 +1156,8 @@ const reviewBatchProcessing = ref(false)
 const reviewBatchProgress = ref<ReviewBatchProgress | null>(null)
 const status = ref('')
 const statusTone = ref<'info' | 'error'>('info')
+const routeNavigationFailureNotice = ref<DirectoryRouteNavigationFailureNotice | null>(null)
+const routeNavigationFailureAction = ref<'retry' | 'clear' | ''>('')
 const testResult = ref<TestResult | null>(null)
 const accountQuery = ref('')
 const alertFilter = ref<DirectoryAlertFilter>('all')
@@ -1022,6 +1166,9 @@ const pendingBindingView = ref<PendingBindingView>('recommended')
 const pendingBindingViewTouched = ref(false)
 const pendingBindingManualReason = ref<PendingBindingManualReasonFilter>('all')
 const bindingDrafts = reactive<Record<string, string>>({})
+const selectedBindingUsers = reactive<Record<string, LocalUserOption>>({})
+const mobileOverrideConfirmations = reactive<Record<string, boolean>>({})
+const mobileConflictHints = reactive<Record<string, string>>({})
 const userSearchResults = reactive<Record<string, LocalUserOption[]>>({})
 const userSearchLoading = reactive<Record<string, boolean>>({})
 const userSearchError = reactive<Record<string, string>>({})
@@ -1031,6 +1178,7 @@ const reviewDisableDingTalkGrant = ref(true)
 const reviewPageSize = 100
 const reviewPage = ref(1)
 const reviewTotal = ref(0)
+const appliedDirectoryNavigationKey = ref('')
 const alertFilterOptions = [
   { value: 'all' as const, label: '全部' },
   { value: 'pending' as const, label: '待确认' },
@@ -1052,6 +1200,7 @@ const pendingBindingManualReasonOptions = [
   { value: 'no_exact_match' as const, label: '无精确匹配' },
   { value: 'conflict' as const, label: '冲突待复核' },
 ]
+const directoryNavigation = ref(readInitialDirectoryNavigation())
 
 const draft = reactive<DirectoryDraft>({
   name: '',
@@ -1070,6 +1219,21 @@ const draft = reactive<DirectoryDraft>({
 const selectedIntegration = computed(() =>
   integrations.value.find((integration) => integration.id === selectedIntegrationId.value) ?? null,
 )
+const routeNavigationFailureUserManagementLocation = computed(() => {
+  const navigation = directoryNavigation.value
+  if (navigation.source !== 'user-management' || navigation.userId.trim().length === 0) return ''
+  const params = new URLSearchParams({
+    userId: navigation.userId.trim(),
+    source: 'directory-sync',
+  })
+  const failureKind = routeNavigationFailureNotice.value?.kind?.trim() || ''
+  const integrationId = routeNavigationFailureNotice.value?.targetIntegrationId?.trim() || navigation.integrationId.trim()
+  const accountId = routeNavigationFailureNotice.value?.targetAccountId?.trim() || navigation.accountId.trim()
+  if (failureKind.length > 0) params.set('directoryFailure', failureKind)
+  if (integrationId.length > 0) params.set('integrationId', integrationId)
+  if (accountId.length > 0) params.set('accountId', accountId)
+  return `/admin/users?${params.toString()}`
+})
 const accountPageCount = computed(() => Math.max(1, Math.ceil(accountTotal.value / accountPageSize.value)))
 const accountRangeStart = computed(() => (
   accountTotal.value === 0
@@ -1199,6 +1363,57 @@ function setStatus(message: string, tone: 'info' | 'error' = 'info') {
   statusTone.value = tone
 }
 
+function readInitialDirectoryNavigation(): InitialDirectoryNavigation {
+  if (typeof window === 'undefined') {
+    return { integrationId: '', accountId: '', source: '', userId: '' }
+  }
+  const params = new URL(window.location.href).searchParams
+  return {
+    integrationId: params.get('integrationId')?.trim() || '',
+    accountId: params.get('accountId')?.trim() || '',
+    source: params.get('source')?.trim() || '',
+    userId: params.get('userId')?.trim() || '',
+  }
+}
+
+function buildDirectoryNavigationKey(navigation: InitialDirectoryNavigation): string {
+  return [
+    navigation.integrationId.trim(),
+    navigation.accountId.trim(),
+    navigation.source.trim(),
+    navigation.userId.trim(),
+  ].join('|')
+}
+
+function buildDirectoryLocation(navigation: InitialDirectoryNavigation): string {
+  if (typeof window === 'undefined') return '/admin/directory'
+  const url = new URL(window.location.href)
+  const params = new URLSearchParams(url.search)
+  const updateParam = (key: string, value: string) => {
+    if (value.trim().length > 0) params.set(key, value.trim())
+    else params.delete(key)
+  }
+  updateParam('integrationId', navigation.integrationId)
+  updateParam('accountId', navigation.accountId)
+  updateParam('source', navigation.source)
+  updateParam('userId', navigation.userId)
+  const search = params.toString()
+  return `${url.pathname}${search ? `?${search}` : ''}${url.hash}`
+}
+
+function replaceDirectoryNavigation(navigation: InitialDirectoryNavigation): void {
+  if (typeof window === 'undefined') return
+  window.history.replaceState(window.history.state, '', buildDirectoryLocation(navigation))
+}
+
+function syncDirectoryNavigationFromLocation(): boolean {
+  const next = readInitialDirectoryNavigation()
+  const currentKey = buildDirectoryNavigationKey(directoryNavigation.value)
+  const nextKey = buildDirectoryNavigationKey(next)
+  directoryNavigation.value = next
+  return currentKey !== nextKey
+}
+
 function resetDraft() {
   selectedIntegrationId.value = ''
   testResult.value = null
@@ -1221,6 +1436,9 @@ function resetDraft() {
   pendingBindingManualReason.value = 'all'
   reviewDisableDingTalkGrant.value = true
   for (const key of Object.keys(bindingDrafts)) delete bindingDrafts[key]
+  for (const key of Object.keys(selectedBindingUsers)) delete selectedBindingUsers[key]
+  for (const key of Object.keys(mobileOverrideConfirmations)) delete mobileOverrideConfirmations[key]
+  for (const key of Object.keys(mobileConflictHints)) delete mobileConflictHints[key]
   for (const key of Object.keys(userSearchResults)) delete userSearchResults[key]
   for (const key of Object.keys(userSearchLoading)) delete userSearchLoading[key]
   for (const key of Object.keys(userSearchError)) delete userSearchError[key]
@@ -1253,7 +1471,7 @@ function applyIntegrationToDraft(integration: DirectoryIntegration) {
   draft.syncEnabled = integration.syncEnabled
 }
 
-function selectIntegration(integrationId: string) {
+async function selectIntegration(integrationId: string): Promise<void> {
   selectedIntegrationId.value = integrationId
   testResult.value = null
   clearFocusedAccount()
@@ -1271,7 +1489,8 @@ function selectIntegration(integrationId: string) {
   const integration = integrations.value.find((item) => item.id === integrationId)
   if (!integration) return
   applyIntegrationToDraft(integration)
-  void Promise.all([
+  await applyInitialDirectoryNavigationBeforeLoads(integrationId)
+  await Promise.all([
     loadRuns(integrationId),
     loadScheduleSnapshot(integrationId),
     loadAlerts(integrationId),
@@ -1283,6 +1502,11 @@ function selectIntegration(integrationId: string) {
 function readApiError(payload: unknown, fallback: string): string {
   const error = payload && typeof payload === 'object' ? (payload as { error?: { message?: unknown } }).error : undefined
   return typeof error?.message === 'string' && error.message.trim().length > 0 ? error.message : fallback
+}
+
+function readApiErrorCode(payload: unknown): string {
+  const error = payload && typeof payload === 'object' ? (payload as { error?: { code?: unknown } }).error : undefined
+  return typeof error?.code === 'string' ? error.code : ''
 }
 
 async function readJson(response: Response): Promise<any> {
@@ -1301,8 +1525,54 @@ async function loadIntegrations() {
     if (!response.ok) throw new Error(readApiError(payload, '加载目录集成失败'))
 
     integrations.value = Array.isArray(payload?.data?.items) ? payload.data.items : []
+    const navigation = directoryNavigation.value
+    const navigationKey = buildDirectoryNavigationKey(navigation)
+    const hasPendingCrossIntegrationNavigation = (
+      navigation.accountId.length > 0
+      && navigation.integrationId.length > 0
+      && navigation.integrationId !== selectedIntegrationId.value
+      && navigationKey !== appliedDirectoryNavigationKey.value
+    )
     if (!selectedIntegrationId.value && integrations.value.length > 0) {
-      selectIntegration(integrations.value[0].id)
+      const requestedIntegrationId = navigation.integrationId
+      const requestedIntegration = requestedIntegrationId
+        ? integrations.value.find((item) => item.id === requestedIntegrationId)
+        : null
+      if (requestedIntegrationId && !requestedIntegration) {
+        clearFocusedAccountNavigationState()
+        const message = readDirectoryIntegrationMissingMessage(requestedIntegrationId)
+        setStatus(message, 'error')
+        setRouteNavigationFailureNotice({
+          kind: 'missing_integration',
+          message,
+          targetIntegrationId: requestedIntegrationId,
+          targetAccountId: navigation.accountId,
+          currentIntegrationName: integrations.value[0]?.name ?? '',
+        })
+      }
+      const targetIntegration = requestedIntegration || integrations.value[0]
+      if (targetIntegration) await selectIntegration(targetIntegration.id)
+    } else if (hasPendingCrossIntegrationNavigation) {
+      const targetIntegration = integrations.value.find((item) => item.id === navigation.integrationId)
+      if (targetIntegration) {
+        await selectIntegration(targetIntegration.id)
+        return
+      }
+      clearFocusedAccountNavigationState()
+      const message = readDirectoryIntegrationMissingMessage(navigation.integrationId)
+      setStatus(message, 'error')
+      setRouteNavigationFailureNotice({
+        kind: 'missing_integration',
+        message,
+        targetIntegrationId: navigation.integrationId,
+        targetAccountId: navigation.accountId,
+        currentIntegrationName: selectedIntegration.value?.name ?? '',
+      })
+      const current = integrations.value.find((item) => item.id === selectedIntegrationId.value)
+      if (current) {
+        applyIntegrationToDraft(current)
+        await loadAccounts(current.id)
+      }
     } else if (selectedIntegrationId.value) {
       const current = integrations.value.find((item) => item.id === selectedIntegrationId.value)
       if (current) applyIntegrationToDraft(current)
@@ -1329,8 +1599,68 @@ function clearFocusedAccount() {
   pendingFocusedAccountScroll.value = false
 }
 
+function clearFocusedAccountNavigationState() {
+  clearFocusedAccount()
+  accountQuery.value = ''
+  accountPage.value = 1
+}
+
+function clearRouteNavigationFailureNotice() {
+  routeNavigationFailureNotice.value = null
+}
+
+async function retryRouteNavigationFailureNotice(): Promise<void> {
+  if (!routeNavigationFailureNotice.value || routeNavigationFailureAction.value.length > 0) return
+  routeNavigationFailureAction.value = 'retry'
+  try {
+    appliedDirectoryNavigationKey.value = ''
+    await handleDirectoryNavigationChange()
+  } finally {
+    routeNavigationFailureAction.value = ''
+  }
+}
+
+function clearFailedDirectoryNavigation() {
+  if (!routeNavigationFailureNotice.value || routeNavigationFailureAction.value.length > 0) return
+  routeNavigationFailureAction.value = 'clear'
+  try {
+    const retainedIntegrationId = selectedIntegration.value?.id ?? selectedIntegrationId.value
+    const retainedIntegrationName = selectedIntegration.value?.name ?? routeNavigationFailureNotice.value.currentIntegrationName
+    clearRouteNavigationFailureNotice()
+    replaceDirectoryNavigation({
+      integrationId: retainedIntegrationId,
+      accountId: '',
+      source: '',
+      userId: '',
+    })
+    setStatus(retainedIntegrationName ? `已保留当前目录上下文 ${retainedIntegrationName}` : '已清除失败定位条件')
+  } finally {
+    routeNavigationFailureAction.value = ''
+  }
+}
+
+function setRouteNavigationFailureNotice(notice: DirectoryRouteNavigationFailureNotice) {
+  routeNavigationFailureNotice.value = notice
+}
+
+function readDirectoryIntegrationMissingMessage(integrationId: string): string {
+  return `未找到目录集成 ${integrationId}，请确认该集成仍存在或稍后刷新列表重试`
+}
+
+function readDirectoryAccountMissingMessage(accountId: string): string {
+  return `未找到目录成员 ${accountId}，请确认该成员仍存在`
+}
+
 function updateBindingDraft(accountId: string, value: string) {
   bindingDrafts[accountId] = value
+  const selectedUser = selectedBindingUsers[accountId]
+  if (!selectedUser) return
+  const normalizedValue = value.trim()
+  if (normalizedValue !== selectedUser.id && normalizedValue !== (selectedUser.email || '')) {
+    delete selectedBindingUsers[accountId]
+    delete mobileOverrideConfirmations[accountId]
+    delete mobileConflictHints[accountId]
+  }
 }
 
 function onBindingDraftInput(accountId: string, event: Event) {
@@ -1388,12 +1718,81 @@ async function searchLocalUsers(accountId: string) {
 
 function chooseLocalUser(accountId: string, user: LocalUserOption) {
   updateBindingDraft(accountId, user.email || user.id)
+  selectedBindingUsers[accountId] = user
+  delete mobileOverrideConfirmations[accountId]
+  delete mobileConflictHints[accountId]
   setBindingSearchState(accountId, { results: [] })
 }
 
 function applyRecommendedLocalUser(accountId: string, recommendation: DirectoryBindingRecommendation) {
   updateBindingDraft(accountId, recommendation.localUser.email || recommendation.localUser.id)
+  selectedBindingUsers[accountId] = recommendation.localUser
+  delete mobileOverrideConfirmations[accountId]
+  delete mobileConflictHints[accountId]
   clearBindingSearch(accountId)
+}
+
+function readSelectedBindingUser(item: DirectoryReviewItem): LocalUserOption | null {
+  return selectedBindingUsers[item.account.id] ?? item.recommendations[0]?.localUser ?? null
+}
+
+function hasSelectedBindingUserMobileConflict(item: DirectoryReviewItem): boolean {
+  const selectedUser = readSelectedBindingUser(item)
+  const accountMobile = item.account.mobile?.trim() || ''
+  const userMobile = selectedUser?.mobile?.trim() || ''
+  return accountMobile.length > 0 && userMobile.length > 0 && accountMobile !== userMobile
+}
+
+function isAwaitingMobileOverrideConfirmation(accountId: string): boolean {
+  return mobileOverrideConfirmations[accountId] === true
+}
+
+function clearMobileOverrideConfirmation(accountId: string): void {
+  delete mobileOverrideConfirmations[accountId]
+}
+
+function readBackfillAndBindLabel(item: DirectoryReviewItem): string {
+  if (hasSelectedBindingUserMobileConflict(item)) {
+    return isAwaitingMobileOverrideConfirmation(item.account.id) ? '确认覆盖手机号并绑定' : '回填手机号后绑定'
+  }
+  return '回填手机号后绑定'
+}
+
+async function refreshSingleReviewItem(accountId: string): Promise<void> {
+  const response = await apiFetch(`/api/admin/directory/accounts/${encodeURIComponent(accountId)}/review-item`)
+  const body = await readJson(response)
+  if (!response.ok) throw new Error(readApiError(body, '刷新待绑定项失败'))
+  const item = body?.data?.item
+  if (!item || typeof item !== 'object') return
+  const normalizedItem = normalizeReviewItems([item])[0]
+  if (!normalizedItem) return
+  const currentIndex = reviewItems.value.findIndex((entry) => entry.account.id === accountId)
+  if (currentIndex >= 0) {
+    reviewItems.value = reviewItems.value.map((entry, index) => index === currentIndex ? normalizedItem : entry)
+  } else {
+    reviewItems.value = [normalizedItem, ...reviewItems.value]
+  }
+  syncPendingBindingQueueDefaults()
+}
+
+function readMobileConflictHint(accountId: string): string {
+  return mobileConflictHints[accountId] ?? ''
+}
+
+function clearMobileConflictHint(accountId: string): void {
+  delete mobileConflictHints[accountId]
+}
+
+async function refreshSingleAccount(accountId: string): Promise<void> {
+  const response = await apiFetch(`/api/admin/directory/accounts/${encodeURIComponent(accountId)}`)
+  const body = await readJson(response)
+  if (!response.ok) throw new Error(readApiError(body, '刷新目录成员失败'))
+  const account = body?.data?.account as DirectoryAccount | undefined
+  if (!account) return
+  const currentIndex = accounts.value.findIndex((entry) => entry.id === accountId)
+  if (currentIndex >= 0) {
+    accounts.value = accounts.value.map((entry, index) => index === currentIndex ? account : entry)
+  }
 }
 
 function readRecommendationReasonLabel(reasons: DirectoryBindingRecommendationReason[]): string {
@@ -1457,7 +1856,7 @@ async function saveIntegration() {
     setStatus(selectedIntegration.value ? '目录集成已更新' : '目录集成已创建')
     testResult.value = null
     await loadIntegrations()
-    if (integration?.id) selectIntegration(integration.id)
+    if (integration?.id) await selectIntegration(integration.id)
   } catch (error) {
     setStatus(error instanceof Error ? error.message : '保存目录集成失败', 'error')
   } finally {
@@ -1951,6 +2350,92 @@ function focusReviewAccount(item: DirectoryReviewItem) {
   }
 }
 
+async function applyInitialDirectoryNavigationBeforeLoads(integrationId: string): Promise<void> {
+  const navigation = directoryNavigation.value
+  const navigationKey = buildDirectoryNavigationKey(navigation)
+  if (navigationKey && appliedDirectoryNavigationKey.value === navigationKey) return
+  const targetAccountId = navigation.accountId
+  if (!targetAccountId) {
+    appliedDirectoryNavigationKey.value = navigationKey
+    return
+  }
+  if (navigation.integrationId && navigation.integrationId !== integrationId) return
+
+  try {
+    clearFocusedAccountNavigationState()
+    const response = await apiFetch(`/api/admin/directory/accounts/${encodeURIComponent(targetAccountId)}`)
+    const body = await readJson(response)
+    if (!response.ok) {
+      const fallback = response.status === 404
+        ? readDirectoryAccountMissingMessage(targetAccountId)
+        : '定位目录成员失败'
+      throw new Error(readApiError(body, fallback))
+    }
+    const account = body?.data?.account as DirectoryAccount | undefined
+    if (!account) throw new Error(readDirectoryAccountMissingMessage(targetAccountId))
+    clearRouteNavigationFailureNotice()
+    focusedAccountId.value = account.id
+    pendingFocusedAccountScroll.value = true
+    accountQuery.value = account.externalUserId
+    accountPage.value = 1
+    if (navigation.source === 'user-management') {
+      setStatus(`已从用户管理定位到目录成员 ${account.name}`)
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : '定位目录成员失败'
+    setStatus(message, 'error')
+    setRouteNavigationFailureNotice({
+      kind: 'missing_account',
+      message,
+      targetIntegrationId: navigation.integrationId || integrationId,
+      targetAccountId,
+      currentIntegrationName: selectedIntegration.value?.name ?? '',
+    })
+  } finally {
+    appliedDirectoryNavigationKey.value = navigationKey
+  }
+}
+
+async function handleDirectoryNavigationChange(): Promise<void> {
+  const navigation = directoryNavigation.value
+  const navigationKey = buildDirectoryNavigationKey(navigation)
+  if (!navigation.accountId) {
+    clearRouteNavigationFailureNotice()
+    appliedDirectoryNavigationKey.value = navigationKey
+    return
+  }
+  if (navigationKey && appliedDirectoryNavigationKey.value === navigationKey) return
+
+  const targetIntegrationId = navigation.integrationId || selectedIntegrationId.value || integrations.value[0]?.id || ''
+  if (!targetIntegrationId) return
+
+  if (selectedIntegrationId.value !== targetIntegrationId) {
+    const targetExists = integrations.value.some((item) => item.id === targetIntegrationId)
+    if (targetExists) {
+      await selectIntegration(targetIntegrationId)
+      return
+    }
+    await loadIntegrations()
+    return
+  }
+
+  await applyInitialDirectoryNavigationBeforeLoads(targetIntegrationId)
+  await Promise.all([
+    loadReviewItems(targetIntegrationId),
+    loadAccounts(targetIntegrationId),
+  ])
+}
+
+function buildUserManagementLocation(userId: string, account: Pick<DirectoryAccount, 'id' | 'integrationId'>): string {
+  const params = new URLSearchParams({
+    userId,
+    source: 'directory-sync',
+    integrationId: account.integrationId,
+    accountId: account.id,
+  })
+  return `/admin/users?${params.toString()}`
+}
+
 async function handleReviewUnbind(item: DirectoryReviewItem) {
   reviewProcessingAccountId.value = item.account.id
   try {
@@ -2041,6 +2526,70 @@ async function handleReviewBind(item: DirectoryReviewItem) {
   } finally {
     reviewProcessingAccountId.value = ''
   }
+}
+
+async function backfillUserMobileAndBindReviewItem(item: DirectoryReviewItem) {
+  const selectedUser = readSelectedBindingUser(item)
+  const mobile = item.account.mobile?.trim()
+  if (!selectedUser || !mobile) return
+  if (hasSelectedBindingUserMobileConflict(item) && !isAwaitingMobileOverrideConfirmation(item.account.id)) {
+    mobileOverrideConfirmations[item.account.id] = true
+    setStatus(`待处理成员 ${item.account.name} 的平台手机号与目录手机号不一致，请再次确认后覆盖并绑定`, 'error')
+    return
+  }
+
+  reviewProcessingAccountId.value = item.account.id
+  try {
+    delete mobileConflictHints[item.account.id]
+    const profileResponse = await apiFetch(`/api/admin/users/${encodeURIComponent(selectedUser.id)}/profile`, {
+      method: 'PATCH',
+      body: JSON.stringify({
+        mobile,
+        expectedMobile: selectedUser.mobile ?? null,
+      }),
+    })
+    const profileBody = await readJson(profileResponse)
+    if (!profileResponse.ok) {
+      if (readApiErrorCode(profileBody) === 'PROFILE_MOBILE_CONFLICT') {
+        delete mobileOverrideConfirmations[item.account.id]
+        delete selectedBindingUsers[item.account.id]
+        await Promise.all([
+          refreshSingleReviewItem(item.account.id),
+          refreshSingleAccount(item.account.id),
+        ])
+        const refreshedItem = reviewItems.value.find((entry) => entry.account.id === item.account.id)
+        const refreshedUser = refreshedItem ? readSelectedBindingUser(refreshedItem) : null
+        mobileConflictHints[item.account.id] = refreshedUser?.mobile
+          ? `待处理成员 ${item.account.name} 的平台手机号已更新为 ${refreshedUser.mobile}，请按最新差异重新确认。`
+          : `待处理成员 ${item.account.name} 的平台手机号已被其他操作更新，请按最新差异重新确认。`
+        setStatus(`待处理成员 ${item.account.name} 的平台手机号已被其他操作更新，请刷新后的最新差异为准`, 'error')
+        return
+      }
+      throw new Error(readApiError(profileBody, '回填用户手机号失败'))
+    }
+
+    selectedBindingUsers[item.account.id] = {
+      ...selectedUser,
+      mobile,
+    }
+    delete mobileOverrideConfirmations[item.account.id]
+
+    await submitReviewBindings([{
+      accountId: item.account.id,
+      localUserRef: selectedUser.id,
+      enableDingTalkGrant: readGrantToggle(item.account.id),
+    }], `待处理成员 ${item.account.name} 已回填手机号并完成绑定`, '回填手机号并绑定失败')
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : '回填手机号并绑定失败', 'error')
+  } finally {
+    reviewProcessingAccountId.value = ''
+  }
+}
+
+async function retryBackfillUserMobileAndBindReviewItem(item: DirectoryReviewItem) {
+  clearMobileConflictHint(item.account.id)
+  clearMobileOverrideConfirmation(item.account.id)
+  await backfillUserMobileAndBindReviewItem(item)
 }
 
 async function batchBindReviewItems() {
@@ -2221,8 +2770,17 @@ function formatSampleUsers(users: Array<{ userId: string; name: string }>, hasMo
   return hasMore ? `${summary} 等` : summary
 }
 
+const stopDirectoryLocationSync = subscribeToLocationChanges(() => {
+  if (!syncDirectoryNavigationFromLocation()) return
+  void handleDirectoryNavigationChange()
+})
+
 onMounted(() => {
   void loadIntegrations()
+})
+
+onUnmounted(() => {
+  stopDirectoryLocationSync()
 })
 </script>
 
@@ -2420,6 +2978,16 @@ onMounted(() => {
 
 .directory-admin__empty {
   color: #64748b;
+}
+
+.directory-admin__route-banner {
+  border: 1px solid #fca5a5;
+  border-radius: 14px;
+  padding: 14px;
+  background: linear-gradient(180deg, #fff1f2 0%, #fff7ed 100%);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
 }
 
 .directory-admin__focus-card {

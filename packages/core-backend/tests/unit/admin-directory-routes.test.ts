@@ -16,6 +16,8 @@ const directoryMocks = vi.hoisted(() => ({
   bindDirectoryAccount: vi.fn(),
   createDirectoryIntegration: vi.fn(),
   getDirectorySyncScheduleSnapshot: vi.fn(),
+  getDirectoryAccountSummary: vi.fn(),
+  getDirectoryReviewItem: vi.fn(),
   listDirectoryIntegrationAccounts: vi.fn(),
   listDirectoryIntegrations: vi.fn(),
   listDirectoryReviewItems: vi.fn(),
@@ -46,6 +48,8 @@ vi.mock('../../src/directory/directory-sync', () => ({
   bindDirectoryAccount: directoryMocks.bindDirectoryAccount,
   createDirectoryIntegration: directoryMocks.createDirectoryIntegration,
   getDirectorySyncScheduleSnapshot: directoryMocks.getDirectorySyncScheduleSnapshot,
+  getDirectoryAccountSummary: directoryMocks.getDirectoryAccountSummary,
+  getDirectoryReviewItem: directoryMocks.getDirectoryReviewItem,
   listDirectoryIntegrationAccounts: directoryMocks.listDirectoryIntegrationAccounts,
   listDirectoryIntegrations: directoryMocks.listDirectoryIntegrations,
   listDirectoryReviewItems: directoryMocks.listDirectoryReviewItems,
@@ -140,6 +144,8 @@ describe('adminDirectoryRouter', () => {
     directoryMocks.bindDirectoryAccount.mockReset()
     directoryMocks.createDirectoryIntegration.mockReset()
     directoryMocks.getDirectorySyncScheduleSnapshot.mockReset()
+    directoryMocks.getDirectoryAccountSummary.mockReset()
+    directoryMocks.getDirectoryReviewItem.mockReset()
     directoryMocks.listDirectoryIntegrationAccounts.mockReset()
     directoryMocks.listDirectoryIntegrations.mockReset()
     directoryMocks.listDirectoryReviewItems.mockReset()
@@ -450,6 +456,76 @@ describe('adminDirectoryRouter', () => {
       data: {
         total: 1,
         query: '0447',
+      },
+    })
+  })
+
+  it('returns a single directory account summary', async () => {
+    directoryMocks.getDirectoryAccountSummary.mockResolvedValue({
+      id: 'account-1',
+      integrationId: 'dir-1',
+      name: '周华',
+    })
+
+    const response = await invokeRoute('get', '/accounts/:accountId', {
+      params: { accountId: 'account-1' },
+      user: { id: 'admin-1', role: 'admin' },
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect(directoryMocks.getDirectoryAccountSummary).toHaveBeenCalledWith('account-1')
+    expect(response.body).toMatchObject({
+      ok: true,
+      data: {
+        account: {
+          id: 'account-1',
+          integrationId: 'dir-1',
+          name: '周华',
+        },
+      },
+    })
+  })
+
+  it('returns a single directory review item', async () => {
+    directoryMocks.getDirectoryReviewItem.mockResolvedValue({
+      kind: 'pending_binding',
+      reason: '目录成员当前不是已确认绑定状态，建议复核。',
+      account: {
+        id: 'account-1',
+        integrationId: 'dir-1',
+        name: '周华',
+      },
+      recommendations: [],
+      recommendationStatus: {
+        code: 'no_exact_match',
+        message: '未命中唯一的邮箱或手机号精确匹配，请人工搜索本地用户。',
+      },
+      flags: {
+        missingUnionId: false,
+        missingOpenId: false,
+      },
+      actionable: {
+        canBatchUnbind: false,
+        canConfirmRecommendation: false,
+      },
+    })
+
+    const response = await invokeRoute('get', '/accounts/:accountId/review-item', {
+      params: { accountId: 'account-1' },
+      user: { id: 'admin-1', role: 'admin' },
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect(directoryMocks.getDirectoryReviewItem).toHaveBeenCalledWith('account-1')
+    expect(response.body).toMatchObject({
+      ok: true,
+      data: {
+        item: {
+          kind: 'pending_binding',
+          account: {
+            id: 'account-1',
+          },
+        },
       },
     })
   })
