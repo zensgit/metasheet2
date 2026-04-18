@@ -53,6 +53,13 @@ export type SheetPermissionScope = {
 
 export type QueryFn = (sql: string, params?: unknown[]) => Promise<{ rows: unknown[] }>
 
+function isUndefinedTableError(err: unknown, tableName: string): boolean {
+  const code = typeof (err as any)?.code === 'string' ? (err as any).code : null
+  const message = typeof (err as any)?.message === 'string' ? (err as any).message : ''
+  if (code === '42P01') return message.includes(tableName)
+  return message.includes(`relation "${tableName}" does not exist`)
+}
+
 // ── Functions ───────────────────────────────────────────────────────
 
 export function hasPermission(permissions: string[], code: string): boolean {
@@ -196,8 +203,15 @@ export async function loadSheetPermissionScopeMap(
         ),
       ]),
     )
-  } catch {
-    return new Map()
+  } catch (err) {
+    if (
+      isUndefinedTableError(err, 'spreadsheet_permissions')
+      || isUndefinedTableError(err, 'user_roles')
+      || isUndefinedTableError(err, 'platform_member_group_members')
+    ) {
+      return new Map()
+    }
+    throw err
   }
 }
 

@@ -3,6 +3,16 @@ import { sql } from 'kysely'
 
 export async function up(db: Kysely<unknown>): Promise<void> {
   await sql`
+    ALTER TABLE spreadsheet_permissions
+    DROP CONSTRAINT IF EXISTS spreadsheet_permissions_subject_type_check
+  `.execute(db)
+  await sql`
+    ALTER TABLE spreadsheet_permissions
+    ADD CONSTRAINT spreadsheet_permissions_subject_type_check
+    CHECK (subject_type IN ('user', 'role', 'member-group'))
+  `.execute(db)
+
+  await sql`
     ALTER TABLE meta_view_permissions
     DROP CONSTRAINT IF EXISTS meta_view_permissions_subject_type_check
   `.execute(db)
@@ -34,6 +44,20 @@ export async function up(db: Kysely<unknown>): Promise<void> {
 }
 
 export async function down(db: Kysely<unknown>): Promise<void> {
+  await sql`
+    DELETE FROM spreadsheet_permissions
+    WHERE subject_type = 'member-group'
+  `.execute(db)
+  await sql`
+    ALTER TABLE spreadsheet_permissions
+    DROP CONSTRAINT IF EXISTS spreadsheet_permissions_subject_type_check
+  `.execute(db)
+  await sql`
+    ALTER TABLE spreadsheet_permissions
+    ADD CONSTRAINT spreadsheet_permissions_subject_type_check
+    CHECK (subject_type IN ('user', 'role'))
+  `.execute(db)
+
   await sql`
     DELETE FROM meta_view_permissions
     WHERE subject_type = 'member-group'
