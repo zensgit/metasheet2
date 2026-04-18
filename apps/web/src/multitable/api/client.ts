@@ -405,6 +405,47 @@ function normalizeSheetPermissionCandidates(
   }
 }
 
+function normalizeRecordPermissionEntry(
+  payload: Partial<RecordPermissionEntry> | null | undefined,
+): RecordPermissionEntry | null {
+  const subjectType =
+    payload?.subjectType === 'user' || payload?.subjectType === 'role' || payload?.subjectType === 'member-group'
+      ? payload.subjectType
+      : null
+  const id = typeof payload?.id === 'string' ? payload.id : ''
+  const sheetId = typeof payload?.sheetId === 'string' ? payload.sheetId : ''
+  const recordId = typeof payload?.recordId === 'string' ? payload.recordId : ''
+  const subjectId = typeof payload?.subjectId === 'string' ? payload.subjectId : ''
+  const accessLevel =
+    payload?.accessLevel === 'read' || payload?.accessLevel === 'write' || payload?.accessLevel === 'admin'
+      ? payload.accessLevel
+      : null
+  if (!id || !sheetId || !recordId || !subjectType || !subjectId || !accessLevel) return null
+  return {
+    id,
+    sheetId,
+    recordId,
+    subjectType,
+    subjectId,
+    accessLevel,
+    label: typeof payload?.label === 'string' ? payload.label : subjectId,
+    subtitle: typeof payload?.subtitle === 'string' || payload?.subtitle === null ? payload.subtitle ?? null : null,
+    isActive: payload?.isActive !== false,
+    createdAt: typeof payload?.createdAt === 'string' ? payload.createdAt : undefined,
+    createdBy: typeof payload?.createdBy === 'string' ? payload.createdBy : undefined,
+  }
+}
+
+function normalizeRecordPermissionEntries(
+  payload: { items?: Array<Partial<RecordPermissionEntry>> } | null | undefined,
+): RecordPermissionEntry[] {
+  return Array.isArray(payload?.items)
+    ? payload.items
+      .map((item) => normalizeRecordPermissionEntry(item))
+      .filter((item): item is RecordPermissionEntry => !!item)
+    : []
+}
+
 function normalizeCommentsParams(params: { containerId: string; targetId: string; targetFieldId?: string | null } | MetaCommentsScope) {
   if ('containerType' in params) {
     return {
@@ -755,8 +796,8 @@ export class MultitableApiClient {
   // --- Record permissions ---
   async listRecordPermissions(sheetId: string, recordId: string): Promise<RecordPermissionEntry[]> {
     const res = await this.fetch(`/api/multitable/sheets/${encodeURIComponent(sheetId)}/records/${encodeURIComponent(recordId)}/permissions`)
-    const data = await parseJson<{ permissions?: RecordPermissionEntry[] }>(res)
-    return Array.isArray(data?.permissions) ? data.permissions : []
+    const data = await parseJson<{ items?: Array<Partial<RecordPermissionEntry>> }>(res)
+    return normalizeRecordPermissionEntries(data)
   }
 
   async updateRecordPermission(

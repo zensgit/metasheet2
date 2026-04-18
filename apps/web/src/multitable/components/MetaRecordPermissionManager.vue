@@ -19,7 +19,7 @@
             <strong>Current access</strong>
           </div>
           <div v-if="loading" class="meta-record-perm__empty">Loading permissions&#x2026;</div>
-          <div v-else-if="!entries.length" class="meta-record-perm__empty">No record-specific permissions yet.</div>
+        <div v-else-if="!entries.length" class="meta-record-perm__empty">No record-specific permissions yet.</div>
           <template v-else>
           <div
             v-for="entry in entries"
@@ -28,9 +28,10 @@
             :data-record-permission-entry="entry.id"
           >
             <div class="meta-record-perm__identity">
-              <strong>{{ entry.subjectId }}</strong>
-              <span>{{ subjectTypeLabel(entry.subjectType) }}</span>
+              <strong>{{ entry.label }}</strong>
+              <span>{{ entry.subtitle || entry.subjectId }}</span>
             </div>
+            <span class="meta-record-perm__subject" :data-subject-type="entry.subjectType">{{ subjectTypeLabel(entry.subjectType) }}</span>
             <span class="meta-record-perm__badge" :data-access-level="entryDrafts[entry.id] ?? entry.accessLevel">
               {{ accessLevelLabel(entryDrafts[entry.id] ?? entry.accessLevel) }}
             </span>
@@ -67,35 +68,123 @@
         <!-- Add permission -->
         <section class="meta-record-perm__section">
           <div class="meta-record-perm__section-header">
-            <strong>Add permission</strong>
+            <strong>Grant to people, member groups, or roles</strong>
           </div>
-          <div class="meta-record-perm__add-row" data-record-permission-add="true">
-            <select v-model="addSubjectType" class="meta-record-perm__select">
-              <option value="user">User</option>
-              <option value="role">Role</option>
-              <option value="member-group">Member group</option>
-            </select>
-            <input
-              v-model="addSubjectId"
-              class="meta-record-perm__input"
-              type="text"
-              placeholder="Subject ID"
-              data-record-permission-subject-input="true"
-            />
-            <select v-model="addAccessLevel" class="meta-record-perm__select">
-              <option value="read">Read</option>
-              <option value="write">Write</option>
-              <option value="admin">Admin</option>
-            </select>
-            <button
-              class="meta-record-perm__action meta-record-perm__action--primary"
-              type="button"
-              :disabled="!addSubjectId.trim() || busyKey === 'add'"
-              @click="grantNew"
+          <input
+            v-model="candidateSearch"
+            class="meta-record-perm__search"
+            type="search"
+            placeholder="Search people, member groups, or roles"
+            data-record-permission-search="true"
+          />
+          <div v-if="candidatesLoading" class="meta-record-perm__empty">Loading eligible people, member groups, and roles&#x2026;</div>
+          <div v-else-if="!availableCandidates.length" class="meta-record-perm__empty">No matching eligible people, member groups, or roles.</div>
+          <template v-else>
+            <div class="meta-record-perm__section-header">
+              <strong>People</strong>
+            </div>
+            <div v-if="!peopleCandidates.length" class="meta-record-perm__empty">No matching people.</div>
+            <div
+              v-for="candidate in peopleCandidates"
+              :key="`people-${subjectKey(candidate.subjectType, candidate.subjectId)}`"
+              class="meta-record-perm__row"
+              :data-record-permission-candidate="subjectKey(candidate.subjectType, candidate.subjectId)"
             >
-              Grant
-            </button>
-          </div>
+              <div class="meta-record-perm__identity">
+                <strong>{{ candidate.label }}</strong>
+                <span>{{ candidate.subtitle || candidate.subjectId }}</span>
+              </div>
+              <span class="meta-record-perm__subject" data-subject-type="user">User</span>
+              <select
+                :value="candidateDrafts[subjectKey(candidate.subjectType, candidate.subjectId)] ?? candidate.accessLevel ?? 'read'"
+                class="meta-record-perm__select"
+                :disabled="busyKey === subjectKey(candidate.subjectType, candidate.subjectId)"
+                @change="setCandidateDraft(candidate.subjectType, candidate.subjectId, $event)"
+              >
+                <option value="read">Read</option>
+                <option value="write">Write</option>
+                <option value="admin">Admin</option>
+              </select>
+              <button
+                class="meta-record-perm__action meta-record-perm__action--primary"
+                type="button"
+                :disabled="busyKey === subjectKey(candidate.subjectType, candidate.subjectId)"
+                @click="grantCandidate(candidate.subjectType, candidate.subjectId)"
+              >
+                Grant
+              </button>
+            </div>
+
+            <div class="meta-record-perm__section-header">
+              <strong>Member groups</strong>
+            </div>
+            <div v-if="!memberGroupCandidates.length" class="meta-record-perm__empty">No matching member groups.</div>
+            <div
+              v-for="candidate in memberGroupCandidates"
+              :key="`member-group-${subjectKey(candidate.subjectType, candidate.subjectId)}`"
+              class="meta-record-perm__row"
+              :data-record-permission-candidate="subjectKey(candidate.subjectType, candidate.subjectId)"
+            >
+              <div class="meta-record-perm__identity">
+                <strong>{{ candidate.label }}</strong>
+                <span>{{ candidate.subtitle || candidate.subjectId }}</span>
+              </div>
+              <span class="meta-record-perm__subject" data-subject-type="member-group">Member group</span>
+              <select
+                :value="candidateDrafts[subjectKey(candidate.subjectType, candidate.subjectId)] ?? candidate.accessLevel ?? 'read'"
+                class="meta-record-perm__select"
+                :disabled="busyKey === subjectKey(candidate.subjectType, candidate.subjectId)"
+                @change="setCandidateDraft(candidate.subjectType, candidate.subjectId, $event)"
+              >
+                <option value="read">Read</option>
+                <option value="write">Write</option>
+                <option value="admin">Admin</option>
+              </select>
+              <button
+                class="meta-record-perm__action meta-record-perm__action--primary"
+                type="button"
+                :disabled="busyKey === subjectKey(candidate.subjectType, candidate.subjectId)"
+                @click="grantCandidate(candidate.subjectType, candidate.subjectId)"
+              >
+                Grant
+              </button>
+            </div>
+
+            <div class="meta-record-perm__section-header">
+              <strong>Roles</strong>
+            </div>
+            <div v-if="!roleCandidates.length" class="meta-record-perm__empty">No matching roles.</div>
+            <div
+              v-for="candidate in roleCandidates"
+              :key="`role-${subjectKey(candidate.subjectType, candidate.subjectId)}`"
+              class="meta-record-perm__row"
+              :data-record-permission-candidate="subjectKey(candidate.subjectType, candidate.subjectId)"
+            >
+              <div class="meta-record-perm__identity">
+                <strong>{{ candidate.label }}</strong>
+                <span>{{ candidate.subtitle || candidate.subjectId }}</span>
+              </div>
+              <span class="meta-record-perm__subject" data-subject-type="role">Role</span>
+              <select
+                :value="candidateDrafts[subjectKey(candidate.subjectType, candidate.subjectId)] ?? candidate.accessLevel ?? 'read'"
+                class="meta-record-perm__select"
+                :disabled="busyKey === subjectKey(candidate.subjectType, candidate.subjectId)"
+                @change="setCandidateDraft(candidate.subjectType, candidate.subjectId, $event)"
+              >
+                <option value="read">Read</option>
+                <option value="write">Write</option>
+                <option value="admin">Admin</option>
+              </select>
+              <button
+                class="meta-record-perm__action meta-record-perm__action--primary"
+                type="button"
+                :disabled="busyKey === subjectKey(candidate.subjectType, candidate.subjectId)"
+                @click="grantCandidate(candidate.subjectType, candidate.subjectId)"
+              >
+                Grant
+              </button>
+            </div>
+          </template>
         </section>
       </div>
     </div>
@@ -103,9 +192,9 @@
 </template>
 
 <script setup lang="ts">
-import { ref, watch } from 'vue'
+import { computed, ref, watch } from 'vue'
 import type { MultitableApiClient } from '../api/client'
-import type { RecordPermissionEntry, RecordPermissionAccessLevel } from '../types'
+import type { MetaSheetPermissionCandidate, MetaSheetPermissionEntry, RecordPermissionAccessLevel, RecordPermissionEntry } from '../types'
 
 const props = defineProps<{
   visible: boolean
@@ -125,10 +214,11 @@ const error = ref('')
 const busyKey = ref<string | null>(null)
 const status = ref('')
 const entryDrafts = ref<Record<string, RecordPermissionAccessLevel>>({})
-
-const addSubjectType = ref<'user' | 'role' | 'member-group'>('user')
-const addSubjectId = ref('')
-const addAccessLevel = ref<RecordPermissionAccessLevel>('read')
+const candidateSearch = ref('')
+const candidatesLoading = ref(false)
+const subjectCandidates = ref<MetaSheetPermissionCandidate[]>([])
+const candidateDrafts = ref<Record<string, RecordPermissionAccessLevel>>({})
+let candidateLoadVersion = 0
 
 function accessLevelLabel(level: string): string {
   if (level === 'read') return 'Read'
@@ -145,6 +235,10 @@ function subjectTypeLabel(subjectType: string): string {
 
 function requestClose() {
   emit('close')
+}
+
+function subjectKey(subjectType: string, subjectId: string) {
+  return `${subjectType}:${subjectId}`
 }
 
 function clearMessages() {
@@ -165,6 +259,41 @@ function syncEntryDrafts() {
   )
 }
 
+function matchesCandidateSearch(candidate: MetaSheetPermissionCandidate, query: string): boolean {
+  if (!query) return true
+  const haystack = `${candidate.label} ${candidate.subtitle ?? ''} ${candidate.subjectId}`.toLowerCase()
+  return haystack.includes(query)
+}
+
+function normalizeSheetEntryCandidate(entry: MetaSheetPermissionEntry): MetaSheetPermissionCandidate {
+  return {
+    subjectType: entry.subjectType,
+    subjectId: entry.subjectId,
+    label: entry.label,
+    subtitle: entry.subtitle ?? null,
+    isActive: entry.isActive,
+    accessLevel: entry.accessLevel,
+  }
+}
+
+const availableCandidates = computed(() => {
+  const activeSubjects = new Set(entries.value.map((entry) => subjectKey(entry.subjectType, entry.subjectId)))
+  return subjectCandidates.value.filter((candidate) => !activeSubjects.has(subjectKey(candidate.subjectType, candidate.subjectId)))
+})
+
+const peopleCandidates = computed(() => availableCandidates.value.filter((candidate) => candidate.subjectType === 'user'))
+const memberGroupCandidates = computed(() => availableCandidates.value.filter((candidate) => candidate.subjectType === 'member-group'))
+const roleCandidates = computed(() => availableCandidates.value.filter((candidate) => candidate.subjectType === 'role'))
+
+function syncCandidateDrafts() {
+  const next: Record<string, RecordPermissionAccessLevel> = {}
+  for (const candidate of availableCandidates.value) {
+    const key = subjectKey(candidate.subjectType, candidate.subjectId)
+    next[key] = candidateDrafts.value[key] ?? candidate.accessLevel ?? 'read'
+  }
+  candidateDrafts.value = next
+}
+
 async function loadPermissions() {
   if (!props.sheetId || !props.recordId) {
     entries.value = []
@@ -179,6 +308,43 @@ async function loadPermissions() {
     error.value = cause?.message ?? 'Failed to load record permissions'
   } finally {
     loading.value = false
+  }
+}
+
+async function loadCandidates() {
+  if (!props.sheetId) {
+    subjectCandidates.value = []
+    return
+  }
+  const currentVersion = ++candidateLoadVersion
+  candidatesLoading.value = true
+  try {
+    const query = candidateSearch.value.trim().toLowerCase()
+    const [sheetEntries, candidatePage] = await Promise.all([
+      props.client.listSheetPermissions(props.sheetId),
+      props.client.listSheetPermissionCandidates(props.sheetId, { q: candidateSearch.value.trim() || undefined, limit: 20 }),
+    ])
+    if (currentVersion !== candidateLoadVersion) return
+
+    const combined = new Map<string, MetaSheetPermissionCandidate>()
+    for (const entry of sheetEntries.items.map((item) => normalizeSheetEntryCandidate(item))) {
+      if (!matchesCandidateSearch(entry, query)) continue
+      combined.set(subjectKey(entry.subjectType, entry.subjectId), entry)
+    }
+    for (const candidate of candidatePage.items) {
+      const key = subjectKey(candidate.subjectType, candidate.subjectId)
+      if (!matchesCandidateSearch(candidate, query) || combined.has(key)) continue
+      combined.set(key, candidate)
+    }
+    subjectCandidates.value = Array.from(combined.values())
+    syncCandidateDrafts()
+  } catch (cause: any) {
+    if (currentVersion !== candidateLoadVersion) return
+    error.value = cause?.message ?? 'Failed to load permission candidates'
+  } finally {
+    if (currentVersion === candidateLoadVersion) {
+      candidatesLoading.value = false
+    }
   }
 }
 
@@ -213,17 +379,28 @@ async function removeEntry(entry: RecordPermissionEntry) {
   }
 }
 
-async function grantNew() {
-  const subjectId = addSubjectId.value.trim()
-  if (!subjectId) return
-  busyKey.value = 'add'
+function setCandidateDraft(subjectType: string, subjectId: string, event: Event) {
+  const key = subjectKey(subjectType, subjectId)
+  candidateDrafts.value = {
+    ...candidateDrafts.value,
+    [key]: (event.target as HTMLSelectElement).value as RecordPermissionAccessLevel,
+  }
+}
+
+async function grantCandidate(subjectType: RecordPermissionEntry['subjectType'], subjectId: string) {
+  const key = subjectKey(subjectType, subjectId)
+  busyKey.value = key
   clearMessages()
   try {
-    await props.client.updateRecordPermission(props.sheetId, props.recordId, addSubjectType.value, subjectId, addAccessLevel.value)
-    await loadPermissions()
+    await props.client.updateRecordPermission(
+      props.sheetId,
+      props.recordId,
+      subjectType,
+      subjectId,
+      candidateDrafts.value[key] ?? 'read',
+    )
+    await Promise.all([loadPermissions(), loadCandidates()])
     status.value = 'Permission granted'
-    addSubjectId.value = ''
-    addAccessLevel.value = 'read'
     emit('updated')
   } catch (cause: any) {
     error.value = cause?.message ?? 'Failed to grant permission'
@@ -237,8 +414,17 @@ watch(
   ([visible, sheetId, recordId]) => {
     if (!visible || !sheetId || !recordId) return
     void loadPermissions()
+    void loadCandidates()
   },
   { immediate: true },
+)
+
+watch(
+  () => candidateSearch.value,
+  () => {
+    if (!props.visible || !props.sheetId) return
+    void loadCandidates()
+  },
 )
 </script>
 
@@ -312,22 +498,12 @@ watch(
   align-items: center;
   justify-content: space-between;
   color: #0f172a;
+  gap: 12px;
 }
 
 .meta-record-perm__row {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 80px 120px auto auto;
-  gap: 10px;
-  align-items: center;
-  padding: 10px 12px;
-  border: 1px solid #e2e8f0;
-  border-radius: 10px;
-  background: #f8fafc;
-}
-
-.meta-record-perm__add-row {
-  display: grid;
-  grid-template-columns: 100px minmax(0, 1fr) 120px auto;
   gap: 10px;
   align-items: center;
   padding: 10px 12px;
@@ -358,6 +534,28 @@ watch(
   text-overflow: ellipsis;
 }
 
+.meta-record-perm__subject {
+  display: inline-flex;
+  justify-content: center;
+  align-items: center;
+  padding: 4px 8px;
+  border-radius: 999px;
+  background: #eef2ff;
+  color: #3730a3;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.meta-record-perm__subject[data-subject-type='member-group'] {
+  background: #ecfeff;
+  color: #155e75;
+}
+
+.meta-record-perm__subject[data-subject-type='role'] {
+  background: #f5f3ff;
+  color: #6d28d9;
+}
+
 .meta-record-perm__badge {
   display: inline-flex;
   justify-content: center;
@@ -386,7 +584,7 @@ watch(
 }
 
 .meta-record-perm__select,
-.meta-record-perm__input {
+.meta-record-perm__search {
   width: 100%;
   min-width: 0;
   border: 1px solid #cbd5e1;
@@ -447,10 +645,6 @@ watch(
 
 @media (max-width: 640px) {
   .meta-record-perm__row {
-    grid-template-columns: 1fr;
-  }
-
-  .meta-record-perm__add-row {
     grid-template-columns: 1fr;
   }
 }

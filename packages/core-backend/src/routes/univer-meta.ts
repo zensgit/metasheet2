@@ -4094,8 +4094,34 @@ export function univerMetaRouter(): Router {
       }
 
       const result = await pool.query(
-        `SELECT id, sheet_id, record_id, subject_type, subject_id, access_level, created_at, created_by
-         FROM record_permissions WHERE sheet_id = $1 AND record_id = $2 ORDER BY created_at ASC`,
+        `SELECT
+            rp.id,
+            rp.sheet_id,
+            rp.record_id,
+            rp.subject_type,
+            rp.subject_id,
+            rp.access_level,
+            rp.created_at,
+            rp.created_by,
+            u.name AS user_name,
+            u.email AS user_email,
+            u.is_active AS user_is_active,
+            r.name AS role_name,
+            r.description AS role_description,
+            g.name AS group_name,
+            g.description AS group_description
+         FROM record_permissions rp
+         LEFT JOIN users u
+           ON rp.subject_type = 'user'
+          AND u.id = rp.subject_id
+         LEFT JOIN roles r
+           ON rp.subject_type = 'role'
+          AND r.id::text = rp.subject_id
+         LEFT JOIN platform_member_groups g
+           ON rp.subject_type = 'member-group'
+          AND g.id::text = rp.subject_id
+         WHERE rp.sheet_id = $1 AND rp.record_id = $2
+         ORDER BY rp.created_at ASC`,
         [sheetId, recordId],
       )
       const items = (result.rows as any[]).map((row) => ({
@@ -4105,6 +4131,19 @@ export function univerMetaRouter(): Router {
         subjectType: String(row.subject_type),
         subjectId: String(row.subject_id),
         accessLevel: String(row.access_level),
+        label:
+          row.subject_type === 'user'
+            ? String(row.user_name ?? row.subject_id)
+            : row.subject_type === 'member-group'
+              ? String(row.group_name ?? row.subject_id)
+              : String(row.role_name ?? row.subject_id),
+        subtitle:
+          row.subject_type === 'user'
+            ? (typeof row.user_email === 'string' ? row.user_email : null)
+            : row.subject_type === 'member-group'
+              ? (typeof row.group_description === 'string' ? row.group_description : null)
+              : (typeof row.role_description === 'string' ? row.role_description : null),
+        isActive: row.subject_type === 'user' ? row.user_is_active !== false : true,
         createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : String(row.created_at ?? ''),
       }))
       return res.json({ ok: true, data: { items } })
