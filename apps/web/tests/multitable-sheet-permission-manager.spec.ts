@@ -224,6 +224,47 @@ describe('MetaSheetPermissionManager', () => {
     expect(container!.querySelector('[data-sheet-permission-entry="member-group:3e9c4bc7-13c2-4d12-8b52-9f0d62045d3c"]')).not.toBeNull()
   })
 
+  it('surfaces inactive users in sheet entries and candidate results', async () => {
+    const client = {
+      listSheetPermissions: vi.fn().mockResolvedValue({
+        items: [
+          {
+            subjectType: 'user',
+            subjectId: 'user_inactive',
+            accessLevel: 'read',
+            permissions: ['spreadsheet:read'],
+            label: 'Morgan',
+            subtitle: 'morgan@example.com',
+            isActive: false,
+          },
+        ],
+      }),
+      listSheetPermissionCandidates: vi.fn().mockResolvedValue({
+        items: [
+          {
+            subjectType: 'user',
+            subjectId: 'user_candidate_inactive',
+            label: 'Taylor',
+            subtitle: 'taylor@example.com',
+            isActive: false,
+            accessLevel: null,
+          },
+        ],
+      }),
+      updateSheetPermission: vi.fn().mockResolvedValue({}),
+      updateFieldPermission: vi.fn().mockResolvedValue({}),
+      updateViewPermission: vi.fn().mockResolvedValue({}),
+    }
+
+    mountManager({ client })
+    await flushUi()
+
+    const inactiveEntry = container!.querySelector('[data-sheet-permission-entry="user:user_inactive"]')!
+    const inactiveCandidate = container!.querySelector('[data-sheet-permission-candidate="user:user_candidate_inactive"]')!
+    expect(inactiveEntry.textContent).toContain('Inactive user')
+    expect(inactiveCandidate.textContent).toContain('Inactive user')
+  })
+
   it('clears field defaults by removing overrides and shows orphan field overrides', async () => {
     const updatedSpy = vi.fn()
     const client = {

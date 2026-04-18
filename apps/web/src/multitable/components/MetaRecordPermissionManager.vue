@@ -26,11 +26,18 @@
             :key="entry.id"
             class="meta-record-perm__row"
             :data-record-permission-entry="entry.id"
-          >
-            <div class="meta-record-perm__identity">
-              <strong>{{ entry.label }}</strong>
-              <span>{{ entry.subtitle || entry.subjectId }}</span>
-            </div>
+            >
+              <div class="meta-record-perm__identity">
+                <strong>{{ entry.label }}</strong>
+                <span>{{ entry.subtitle || entry.subjectId }}</span>
+                <span
+                  v-if="subjectIsInactive(entry.subjectType, entry.isActive)"
+                  class="meta-record-perm__lifecycle"
+                  data-lifecycle="inactive"
+                >
+                  Inactive user
+                </span>
+              </div>
             <span class="meta-record-perm__subject" :data-subject-type="entry.subjectType">{{ subjectTypeLabel(entry.subjectType) }}</span>
             <span class="meta-record-perm__badge" :data-access-level="entryDrafts[entry.id] ?? entry.accessLevel">
               {{ accessLevelLabel(entryDrafts[entry.id] ?? entry.accessLevel) }}
@@ -93,6 +100,13 @@
               <div class="meta-record-perm__identity">
                 <strong>{{ candidate.label }}</strong>
                 <span>{{ candidate.subtitle || candidate.subjectId }}</span>
+                <span
+                  v-if="subjectIsInactive(candidate.subjectType, candidate.isActive)"
+                  class="meta-record-perm__lifecycle"
+                  data-lifecycle="inactive"
+                >
+                  Inactive user
+                </span>
               </div>
               <span class="meta-record-perm__subject" data-subject-type="user">User</span>
               <select
@@ -231,6 +245,10 @@ function subjectTypeLabel(subjectType: string): string {
   if (subjectType === 'role') return 'Role'
   if (subjectType === 'member-group') return 'Member group'
   return 'User'
+}
+
+function subjectIsInactive(subjectType: string, isActive: boolean) {
+  return subjectType === 'user' && isActive === false
 }
 
 function requestClose() {
@@ -532,6 +550,18 @@ watch(
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.meta-record-perm__lifecycle {
+  display: inline-flex;
+  width: fit-content;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: #fef2f2;
+  color: #b91c1c;
+  font-size: 11px;
+  font-weight: 600;
 }
 
 .meta-record-perm__subject {
