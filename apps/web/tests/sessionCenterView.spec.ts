@@ -318,8 +318,11 @@ describe('SessionCenterView', () => {
 
     expect(container?.textContent).toContain('已关联 1 个目录成员')
     expect(container?.textContent).toContain('请联系平台管理员')
+    const bindButton = Array.from(container?.querySelectorAll('button') ?? []).find((button) => button.textContent?.includes('重新绑定钉钉账号'))
+    expect(bindButton?.hasAttribute('disabled')).toBe(true)
     const unbindButton = Array.from(container?.querySelectorAll('button') ?? []).find((button) => button.textContent?.includes('解除当前绑定'))
     expect(unbindButton?.hasAttribute('disabled')).toBe(true)
+    bindButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
     expect(apiFetchMock).toHaveBeenCalledTimes(2)
   })
 })

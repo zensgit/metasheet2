@@ -89,7 +89,7 @@
               <button
                 class="session-center__button"
                 type="button"
-                :disabled="dingtalkBinding || !dingtalkAccess.available"
+                :disabled="dingtalkBinding || !canBindDingTalk"
                 @click="void launchDingTalkBind()"
               >
                 {{ dingtalkBinding ? '跳转中...' : dingtalkAccess.identity.exists ? '重新绑定钉钉账号' : '绑定钉钉账号' }}
@@ -279,6 +279,12 @@ const accountEmail = computed(() => auth.getAccessSnapshot().email)
 const activeSessionCount = computed(() => sessions.value.filter((session) => !session.revokedAt).length)
 const revokedSessionCount = computed(() => sessions.value.filter((session) => Boolean(session.revokedAt)).length)
 const currentSession = computed(() => sessions.value.find((session) => session.id === currentSessionId.value) ?? null)
+const canBindDingTalk = computed(() =>
+  Boolean(
+    dingtalkAccess.value?.available
+    && !dingtalkAccess.value.directory.linked,
+  ),
+)
 const canUnbindDingTalk = computed(() =>
   Boolean(
     dingtalkAccess.value?.identity.exists
@@ -401,6 +407,7 @@ async function loadDingTalkAccess() {
 }
 
 async function launchDingTalkBind() {
+  if (!canBindDingTalk.value) return
   dingtalkBinding.value = true
   try {
     const response = await apiFetch('/api/auth/dingtalk/launch?intent=bind&redirect=%2Fsettings%3Fdingtalk%3Dbound', {

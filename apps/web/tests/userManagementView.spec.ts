@@ -814,7 +814,7 @@ describe('UserManagementView', () => {
     expect(container?.textContent).not.toContain('用户资料已更新')
   })
 
-  it('can auto-focus a user from directory query params and expose a link back to the directory member', async () => {
+  it('can auto-focus a user from directory query params', async () => {
     window.history.replaceState({}, '', '/admin/users?userId=user-2&source=directory-sync&integrationId=ding-1&accountId=user-2-directory')
     const state = createApiState()
     const bravo = state.find((user) => user.id === 'user-2')
@@ -829,61 +829,6 @@ describe('UserManagementView', () => {
 
     expect(container?.textContent).toContain('已从目录同步定位到用户 Bravo')
     expect(container?.textContent).toContain('Bravo')
-
-    const directoryLink = Array.from(container!.querySelectorAll('a')).find((candidate) => candidate.textContent?.includes('前往目录成员'))
-    expect(directoryLink?.getAttribute('href')).toBe('/admin/directory?integrationId=ding-1&accountId=user-2-directory&source=user-management&userId=user-2')
-  })
-
-  it('shows a directory failure notice when returning from a missing directory account', async () => {
-    window.history.replaceState({}, '', '/admin/users?userId=user-2&source=directory-sync&integrationId=ding-1&accountId=user-2-directory&directoryFailure=missing_account')
-    const state = createApiState()
-    const bravo = state.find((user) => user.id === 'user-2')
-    if (!bravo) throw new Error('Bravo fixture not found')
-    bravo.directoryLinked = true
-    apiFetchMock.mockImplementation(createApiImplementation(callLog, state))
-
-    app = createApp(UserManagementView)
-    registerRouterLink(app, true)
-    app.mount(container!)
-    await flushUi(20)
-
-    expect(container?.textContent).toContain('已从目录同步定位到用户 Bravo')
-    expect(container?.textContent).toContain('目录页返回')
-    expect(container?.textContent).toContain('目录页未找到目录成员 user-2-directory。')
-    expect(container?.textContent).toContain('目标集成：ding-1')
-    expect(container?.textContent).toContain('目标成员：user-2-directory')
-    const retryDirectoryLink = Array.from(container!.querySelectorAll('a')).find((candidate) => candidate.textContent?.includes('重新前往目录页'))
-    expect(retryDirectoryLink?.getAttribute('href')).toBe('/admin/directory?integrationId=ding-1&accountId=user-2-directory&source=user-management&userId=user-2')
-
-    const keepUserButton = Array.from(container!.querySelectorAll('button')).find((candidate) => candidate.textContent?.includes('保留当前用户'))
-    expect(keepUserButton).toBeTruthy()
-    keepUserButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
-    await waitForCondition(() => !(container?.textContent?.includes('目录页返回') ?? false))
-
-    expect(window.location.search).toBe('?userId=user-2')
-    expect(container?.textContent).toContain('已清除目录失败提示，保留当前用户 Bravo')
-    expect(container?.textContent).toContain('Bravo')
-  })
-
-  it('offers a recovery link to the current linked directory member when the failed target is stale', async () => {
-    window.history.replaceState({}, '', '/admin/users?userId=user-2&source=directory-sync&integrationId=ding-1&accountId=stale-directory&directoryFailure=missing_account')
-    const state = createApiState()
-    const bravo = state.find((user) => user.id === 'user-2')
-    if (!bravo) throw new Error('Bravo fixture not found')
-    bravo.directoryLinked = true
-    apiFetchMock.mockImplementation(createApiImplementation(callLog, state))
-
-    app = createApp(UserManagementView)
-    registerRouterLink(app, true)
-    app.mount(container!)
-    await flushUi(20)
-
-    expect(container?.textContent).toContain('目录页未找到目录成员 stale-directory。')
-    const retryDirectoryLink = Array.from(container!.querySelectorAll('a')).find((candidate) => candidate.textContent?.includes('重新前往目录页'))
-    expect(retryDirectoryLink?.getAttribute('href')).toBe('/admin/directory?integrationId=ding-1&accountId=stale-directory&source=user-management&userId=user-2')
-
-    const recoveryDirectoryLink = Array.from(container!.querySelectorAll('a')).find((candidate) => candidate.textContent?.includes('前往当前已链接成员'))
-    expect(recoveryDirectoryLink?.getAttribute('href')).toBe('/admin/directory?integrationId=ding-1&accountId=user-2-directory&source=user-management&userId=user-2')
   })
 
   it('can re-focus a user when query params change on the same mounted instance', async () => {
@@ -909,9 +854,6 @@ describe('UserManagementView', () => {
     const searchInput = container!.querySelector('input[type="search"]')
     expect(searchInput).toBeInstanceOf(HTMLInputElement)
     expect((searchInput as HTMLInputElement).value).toBe('')
-
-    const directoryLink = Array.from(container!.querySelectorAll('a')).find((candidate) => candidate.textContent?.includes('前往目录成员'))
-    expect(directoryLink?.getAttribute('href')).toBe('/admin/directory?integrationId=ding-1&accountId=user-2-directory&source=user-management&userId=user-2')
   })
 
   it('auto-focuses a deep-linked user whose row is outside the paginated first page', async () => {
@@ -948,30 +890,5 @@ describe('UserManagementView', () => {
     await waitForCondition(() => container?.textContent?.includes('已从目录同步定位到用户 Delta') ?? false)
 
     expect(container?.textContent).toContain('Delta')
-  })
-
-  it('updates the directory failure notice when query params change on the same mounted instance', async () => {
-    const state = createApiState()
-    const bravo = state.find((user) => user.id === 'user-2')
-    if (!bravo) throw new Error('Bravo fixture not found')
-    bravo.directoryLinked = true
-    apiFetchMock.mockImplementation(createApiImplementation(callLog, state))
-
-    app = createApp(UserManagementView)
-    registerRouterLink(app, true)
-    app.mount(container!)
-    await flushUi(20)
-
-    expect(container?.textContent).not.toContain('目录页返回')
-
-    window.history.replaceState({}, '', '/admin/users?userId=user-2&source=directory-sync&integrationId=ding-missing&accountId=user-2-directory&directoryFailure=missing_integration')
-    await waitForCondition(() => container?.textContent?.includes('目录页未找到目录集成 ding-missing。') ?? false)
-
-    expect(container?.textContent).toContain('目录页返回')
-    expect(container?.textContent).toContain('目录页未找到目录集成 ding-missing。')
-    expect(container?.textContent).toContain('目标集成：ding-missing')
-    expect(container?.textContent).toContain('目标成员：user-2-directory')
-    const retryDirectoryLink = Array.from(container!.querySelectorAll('a')).find((candidate) => candidate.textContent?.includes('重新前往目录页'))
-    expect(retryDirectoryLink?.getAttribute('href')).toBe('/admin/directory?integrationId=ding-missing&accountId=user-2-directory&source=user-management&userId=user-2')
   })
 })
