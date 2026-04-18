@@ -96,4 +96,71 @@ describe('jwt auth middleware', () => {
     })
     expect(next).toHaveBeenCalledTimes(1)
   })
+
+  it('blocks non-whitelisted API access when the user must change password', async () => {
+    authServiceMocks.verifyToken.mockResolvedValue({
+      id: 'user-3',
+      email: 'forced@example.com',
+      name: 'Forced User',
+      role: 'user',
+      permissions: ['attendance:read'],
+      must_change_password: true,
+      created_at: new Date('2026-04-11T00:00:00.000Z'),
+      updated_at: new Date('2026-04-11T00:00:00.000Z'),
+    })
+
+    const req = {
+      path: '/api/admin/users',
+      originalUrl: '/api/admin/users',
+      headers: {
+        authorization: 'Bearer forced-token',
+      },
+    } as unknown as Request
+    const res = {
+      status: vi.fn().mockReturnThis(),
+      json: vi.fn().mockReturnThis(),
+    } as unknown as Response
+    const next = vi.fn() as NextFunction
+
+    await jwtAuthMiddleware(req, res, next)
+
+    expect(res.status).toHaveBeenCalledWith(403)
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({
+      ok: false,
+      error: expect.objectContaining({
+        code: 'PASSWORD_CHANGE_REQUIRED',
+      }),
+    }))
+    expect(next).not.toHaveBeenCalled()
+  })
+
+  it('allows whitelisted auth endpoints when the user must change password', async () => {
+    authServiceMocks.verifyToken.mockResolvedValue({
+      id: 'user-3',
+      email: 'forced@example.com',
+      name: 'Forced User',
+      role: 'user',
+      permissions: ['attendance:read'],
+      must_change_password: true,
+      created_at: new Date('2026-04-11T00:00:00.000Z'),
+      updated_at: new Date('2026-04-11T00:00:00.000Z'),
+    })
+
+    const req = {
+      path: '/api/auth/me',
+      originalUrl: '/api/auth/me',
+      headers: {
+        authorization: 'Bearer forced-token',
+      },
+    } as unknown as Request
+    const res = {
+      status: vi.fn().mockReturnThis(),
+      json: vi.fn().mockReturnThis(),
+    } as unknown as Response
+    const next = vi.fn() as NextFunction
+
+    await jwtAuthMiddleware(req, res, next)
+
+    expect(next).toHaveBeenCalledTimes(1)
+  })
 })

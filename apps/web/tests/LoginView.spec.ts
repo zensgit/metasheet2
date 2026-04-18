@@ -166,6 +166,80 @@ describe('LoginView', () => {
     expect(mocks.routerReplace).toHaveBeenCalledWith('/attendance')
   })
 
+  it('redirects to force-password-change when login requires password rotation', async () => {
+    mocks.apiFetch.mockImplementation(async (path: string) => {
+      if (path === '/api/auth/dingtalk/launch?probe=1') {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            success: true,
+            data: {
+              configured: true,
+              available: true,
+              corpId: 'ding-corp',
+              allowedCorpIds: [],
+              requireGrant: false,
+              autoLinkEmail: false,
+              autoProvision: false,
+              unavailableReason: null,
+            },
+          }),
+        }
+      }
+
+      if (path === '/api/auth/login') {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            success: true,
+            data: {
+              token: 'forced-login-token',
+              user: {
+                role: 'user',
+                permissions: ['attendance:read'],
+                must_change_password: true,
+              },
+              features: {
+                attendance: true,
+                workflow: false,
+                attendanceAdmin: false,
+                attendanceImport: false,
+                mode: 'attendance',
+              },
+            },
+          }),
+        }
+      }
+
+      throw new Error(`Unexpected fetch path: ${path}`)
+    })
+
+    container = document.createElement('div')
+    document.body.appendChild(container)
+
+    app = createApp(LoginViewComponent)
+    app.mount(container)
+    await flushUi()
+
+    const emailInput = container.querySelector('input[type="email"]') as HTMLInputElement | null
+    const passwordInput = container.querySelector('input[type="password"]') as HTMLInputElement | null
+    const submitButton = container.querySelector('button[type="submit"]') as HTMLButtonElement | null
+
+    emailInput!.value = 'forced@example.com'
+    emailInput!.dispatchEvent(new Event('input', { bubbles: true }))
+    passwordInput!.value = 'TempPass9A'
+    passwordInput!.dispatchEvent(new Event('input', { bubbles: true }))
+
+    submitButton?.click()
+    await flushUi(8)
+
+    expect(window.localStorage.getItem('auth_token')).toBe('forced-login-token')
+    expect(mocks.loadProductFeatures).not.toHaveBeenCalledWith(true, { skipSessionProbe: true })
+    expect(mocks.routerReplace).toHaveBeenCalledWith('/force-password-change')
+  })
+
   it('uses the probe flag when checking DingTalk availability on mount', async () => {
     container = document.createElement('div')
     document.body.appendChild(container)

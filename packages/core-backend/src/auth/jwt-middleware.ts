@@ -25,12 +25,24 @@ const AUTH_WHITELIST = [
   '/api/permissions/health'
 ]
 
+const PASSWORD_CHANGE_WHITELIST = [
+  '/api/auth/me',
+  '/api/auth/logout',
+  '/api/auth/password/change',
+  '/api/auth/refresh',
+  '/api/auth/refresh-token',
+] as const
+
 // Use the global Express.Request type which already includes user property
 // Exported for use by other modules that need authenticated request typing
 export type AuthenticatedRequest = Request
 
 export function isWhitelisted(path: string): boolean {
   return AUTH_WHITELIST.some(p => path.startsWith(p))
+}
+
+function isPasswordChangeWhitelisted(path: string): boolean {
+  return PASSWORD_CHANGE_WHITELIST.some((prefix) => path.startsWith(prefix))
 }
 
 export async function jwtAuthMiddleware(req: Request, res: Response, next: NextFunction) {
@@ -49,6 +61,16 @@ export async function jwtAuthMiddleware(req: Request, res: Response, next: NextF
       metrics.jwtAuthFail.inc({ reason: 'invalid_token' })
       metrics.authFailures.inc()
       return res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'Invalid token' } })
+    }
+
+    if (user.must_change_password === true && !isPasswordChangeWhitelisted(req.path || req.originalUrl || '')) {
+      return res.status(403).json({
+        ok: false,
+        error: {
+          code: 'PASSWORD_CHANGE_REQUIRED',
+          message: 'Password change required',
+        },
+      })
     }
 
     const headerTenantId = extractTenantFromHeaders(req.headers as Record<string, unknown> | undefined)

@@ -3,6 +3,7 @@ import { Router } from 'express'
 import { auditLog } from '../audit/audit'
 import {
   acknowledgeDirectorySyncAlert,
+  admitDirectoryAccountUser,
   batchBindDirectoryAccounts,
   batchUnbindDirectoryAccounts,
   bindDirectoryAccount,
@@ -356,6 +357,79 @@ export function adminDirectoryRouter(): Router {
             ? 400
             : 500
       jsonError(res, statusCode, 'DIRECTORY_BIND_FAILED', message)
+    }
+  })
+
+  router.post('/accounts/:accountId/admit-user', async (req: Request, res: Response) => {
+    const adminUserId = await ensurePlatformAdmin(req, res)
+    if (!adminUserId) return
+
+    try {
+      const result = await admitDirectoryAccountUser(req.params.accountId, {
+        adminUserId,
+        name: typeof req.body?.name === 'string' ? req.body.name : '',
+        email: typeof req.body?.email === 'string' ? req.body.email : '',
+        mobile: typeof req.body?.mobile === 'string' ? req.body.mobile : null,
+        password: typeof req.body?.password === 'string' ? req.body.password : '',
+        enableDingTalkGrant: typeof req.body?.enableDingTalkGrant === 'boolean' ? req.body.enableDingTalkGrant : true,
+      })
+
+      await Promise.all([
+        auditLog({
+          actorId: adminUserId,
+          actorType: 'user',
+          action: 'create',
+          resourceType: 'user',
+          resourceId: result.user.id,
+          meta: {
+            adminUserId,
+            source: 'directory_manual_admission',
+            directoryAccountId: result.account.id,
+            integrationId: result.account.integrationId,
+            email: result.user.email,
+            name: result.user.name,
+            mobile: result.user.mobile,
+            generatedPassword: typeof result.temporaryPassword === 'string',
+          },
+        }),
+        auditLog({
+          actorId: adminUserId,
+          actorType: 'user',
+          action: 'bind',
+          resourceType: 'directory-account-link',
+          resourceId: result.account.id,
+          meta: {
+            adminUserId,
+            directoryAccountId: result.account.id,
+            integrationId: result.account.integrationId,
+            previousLocalUserId: result.previousLocalUser?.id ?? null,
+            previousLocalUserEmail: result.previousLocalUser?.email ?? null,
+            localUserId: result.user.id,
+            localUserEmail: result.user.email,
+            externalUserId: result.account.externalUserId,
+            corpId: result.account.corpId,
+            mode: 'manual_admission',
+          },
+        }),
+      ])
+
+      jsonOk(res, {
+        account: result.account,
+        user: result.user,
+        temporaryPassword: result.temporaryPassword,
+        inviteToken: result.inviteToken,
+        onboarding: result.onboarding,
+      })
+    } catch (error) {
+      const message = readErrorMessage(error, 'Failed to create and bind local user for directory account')
+      const statusCode = /not found/i.test(message)
+        ? 404
+        : /already exists|already bound|already linked/i.test(message)
+          ? 409
+          : /required|invalid|password|cannot be pre-bound/i.test(message)
+            ? 400
+            : 500
+      jsonError(res, statusCode, 'DIRECTORY_ADMISSION_FAILED', message)
     }
   })
 

@@ -45,6 +45,12 @@ export const appRoutes: RouteRecordRaw[] = [
     meta: { title: 'Accept Invite', hideNavbar: true, requiresAuth: false }
   },
   {
+    path: ROUTE_PATHS.FORCE_PASSWORD_CHANGE,
+    name: AppRouteNames.FORCE_PASSWORD_CHANGE,
+    component: () => import('../views/ForcePasswordChangeView.vue'),
+    meta: { title: 'Change Password', titleZh: '修改密码', hideNavbar: true, requiresAuth: true, skipShellBootstrap: true }
+  },
+  {
     path: '/grid',
     name: 'grid',
     component: GridView,

@@ -74,6 +74,7 @@
 import { computed, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useAuth } from '../composables/useAuth'
+import { ROUTE_PATHS } from '../router/types'
 import { useLocale } from '../composables/useLocale'
 import { useFeatureFlags } from '../stores/featureFlags'
 import { normalizePostLoginRedirect } from '../utils/authRedirect'
@@ -84,6 +85,8 @@ interface AuthUserPayload {
   role?: unknown
   roles?: unknown
   permissions?: unknown
+  must_change_password?: unknown
+  mustChangePassword?: unknown
 }
 
 interface AuthFeaturePayload {
@@ -108,7 +111,7 @@ interface DingTalkRuntimeStatus {
 
 const router = useRouter()
 const route = useRoute()
-const { setToken } = useAuth()
+const { setToken, primeSession } = useAuth()
 const { locale, isZh, setLocale } = useLocale()
 const { loadProductFeatures, resolveHomePath } = useFeatureFlags()
 
@@ -199,6 +202,10 @@ function extractUserPermissions(user: AuthUserPayload | null): string[] {
   return user.permissions.filter((item): item is string => typeof item === 'string')
 }
 
+function requiresPasswordChange(user: AuthUserPayload | null): boolean {
+  return user?.must_change_password === true || user?.mustChangePassword === true
+}
+
 function persistAuthContext(user: AuthUserPayload | null, features: AuthFeaturePayload | null): void {
   if (typeof localStorage === 'undefined') return
 
@@ -256,12 +263,29 @@ async function onSubmit(): Promise<void> {
       return
     }
 
+    const userPayload = (payload?.data?.user ?? null) as AuthUserPayload | null
+    const featurePayload = (payload?.data?.features ?? null) as AuthFeaturePayload | null
+    const passwordChangeRequired = requiresPasswordChange(userPayload)
+
     setToken(token)
+    primeSession({
+      success: true,
+      data: {
+        user: payload?.data?.user ?? null,
+        features: payload?.data?.features ?? null,
+      },
+    })
 
     persistAuthContext(
-      (payload?.data?.user ?? null) as AuthUserPayload | null,
-      (payload?.data?.features ?? null) as AuthFeaturePayload | null,
+      userPayload,
+      featurePayload,
     )
+
+    if (passwordChangeRequired) {
+      await router.replace(ROUTE_PATHS.FORCE_PASSWORD_CHANGE)
+      return
+    }
+
     await loadProductFeatures(true, { skipSessionProbe: true })
 
     const redirect = normalizePostLoginRedirect(route.query.redirect)

@@ -21,6 +21,71 @@
       {{ status }}
     </p>
 
+    <article v-if="manualAdmissionResult" class="directory-admin__progress-card">
+      <div class="directory-admin__section-head">
+        <div>
+          <h2>最近创建并绑定结果</h2>
+          <p class="directory-admin__hint">
+            {{
+              manualAdmissionResult.bound
+                ? `已为目录成员 ${manualAdmissionResult.accountName} 创建本地用户并完成绑定。`
+                : `已为目录成员 ${manualAdmissionResult.accountName} 创建本地用户，但目录绑定仍需继续处理。`
+            }}
+          </p>
+        </div>
+        <div class="directory-admin__actions">
+          <router-link
+            class="directory-admin__button directory-admin__button--secondary"
+            :to="buildUserManagementLocation(manualAdmissionResult.userId, { id: manualAdmissionResult.accountId, integrationId: manualAdmissionResult.integrationId })"
+          >
+            查看本地用户
+          </router-link>
+          <button class="directory-admin__button directory-admin__button--secondary" type="button" @click="clearManualAdmissionResult()">
+            关闭结果
+          </button>
+        </div>
+      </div>
+      <div class="directory-admin__account-grid">
+        <div>
+          <strong>本地用户</strong>
+          <div>{{ manualAdmissionResult.userName || manualAdmissionResult.email || manualAdmissionResult.userId }}</div>
+        </div>
+        <div>
+          <strong>邮箱</strong>
+          <div>{{ manualAdmissionResult.email }}</div>
+        </div>
+        <div>
+          <strong>用户 ID</strong>
+          <div>{{ manualAdmissionResult.userId }}</div>
+        </div>
+        <div>
+          <strong>手机号</strong>
+          <div>{{ manualAdmissionResult.mobile || '未填写' }}</div>
+        </div>
+      </div>
+      <p v-if="manualAdmissionResult.temporaryPassword" class="directory-admin__status">
+        新用户临时密码：{{ manualAdmissionResult.temporaryPassword }}
+      </p>
+      <p v-if="manualAdmissionResult.mobileBackfillError" class="directory-admin__status directory-admin__status--error">
+        手机号未自动回填：{{ manualAdmissionResult.mobileBackfillError }}
+      </p>
+      <p v-else-if="manualAdmissionResult.mobile" class="directory-admin__hint">
+        {{ manualAdmissionResult.mobileBackfilled ? '目录手机号已回填到新用户资料。' : '目录手机号未回填到新用户资料。' }}
+      </p>
+      <p v-if="manualAdmissionResult.bindError" class="directory-admin__status directory-admin__status--error">
+        目录绑定未完成：{{ manualAdmissionResult.bindError }}
+      </p>
+      <p v-if="manualAdmissionResult.onboarding?.acceptInviteUrl" class="directory-admin__hint">
+        邀请链接：
+        <a :href="manualAdmissionResult.onboarding.acceptInviteUrl" target="_blank" rel="noreferrer">
+          {{ manualAdmissionResult.onboarding.acceptInviteUrl }}
+        </a>
+      </p>
+      <pre v-if="manualAdmissionResult.onboarding?.inviteMessage" class="directory-admin__invite">
+{{ manualAdmissionResult.onboarding.inviteMessage }}
+      </pre>
+    </article>
+
     <div class="directory-admin__layout">
       <aside class="directory-admin__panel directory-admin__panel--list">
         <div class="directory-admin__section-head">
@@ -41,6 +106,8 @@
         >
           <strong>{{ integration.name }}</strong>
           <span>{{ integration.corpId }}</span>
+          <small>{{ readAdmissionModeLabel(integration) }}</small>
+          <small>{{ readMemberGroupSyncLabel(integration) }}</small>
           <small>
             账号 {{ integration.stats.accountCount }} / 部门 {{ integration.stats.departmentCount }} / 待确认 {{ integration.stats.pendingLinkCount }}
           </small>
@@ -95,6 +162,65 @@
             <input v-model.number="draft.pageSize" class="directory-admin__input" type="number" min="1" max="100" />
           </label>
           <label class="directory-admin__field">
+            <span>准入模式</span>
+            <select v-model="draft.admissionMode" class="directory-admin__input">
+              <option value="manual_only">manual_only</option>
+              <option value="auto_for_scoped_departments">auto_for_scoped_departments</option>
+            </select>
+          </label>
+          <label class="directory-admin__field directory-admin__field--wide">
+            <span>自动准入部门白名单</span>
+            <textarea
+              v-model.trim="draft.admissionDepartmentIdsText"
+              class="directory-admin__input directory-admin__textarea"
+              rows="3"
+              placeholder="填写部门 ID，支持逗号或换行分隔；将覆盖所选部门及其子部门"
+            />
+          </label>
+          <label class="directory-admin__field directory-admin__field--wide">
+            <span>自动准入排除部门</span>
+            <textarea
+              v-model.trim="draft.excludeDepartmentIdsText"
+              class="directory-admin__input directory-admin__textarea"
+              rows="2"
+              placeholder="填写需要排除的部门 ID，支持逗号或换行分隔；会覆盖白名单父部门"
+            />
+          </label>
+          <label class="directory-admin__field">
+            <span>成员组同步模式</span>
+            <select v-model="draft.memberGroupSyncMode" class="directory-admin__input">
+              <option value="disabled">disabled</option>
+              <option value="sync_scoped_departments">sync_scoped_departments</option>
+            </select>
+          </label>
+          <label class="directory-admin__field directory-admin__field--wide">
+            <span>成员组同步部门</span>
+            <textarea
+              v-model.trim="draft.memberGroupDepartmentIdsText"
+              class="directory-admin__input directory-admin__textarea"
+              rows="2"
+              placeholder="填写需要投影为平台用户组的部门 ID，支持逗号或换行分隔"
+            />
+          </label>
+          <label class="directory-admin__field directory-admin__field--wide">
+            <span>成员组默认业务角色</span>
+            <textarea
+              v-model.trim="draft.memberGroupDefaultRoleIdsText"
+              class="directory-admin__input directory-admin__textarea"
+              rows="2"
+              placeholder="填写 role ID，支持逗号或换行分隔；仅对投影成员组里的已链接用户做单向补齐"
+            />
+          </label>
+          <label class="directory-admin__field directory-admin__field--wide">
+            <span>成员组默认插件开通</span>
+            <textarea
+              v-model.trim="draft.memberGroupDefaultNamespacesText"
+              class="directory-admin__input directory-admin__textarea"
+              rows="2"
+              placeholder="填写命名空间，例如 crm；支持逗号或换行分隔"
+            />
+          </label>
+          <label class="directory-admin__field">
             <span>状态</span>
             <select v-model="draft.status" class="directory-admin__input">
               <option value="active">active</option>
@@ -138,6 +264,8 @@
             <span class="directory-admin__chip">待确认 {{ selectedIntegration.stats.pendingLinkCount }}</span>
             <span class="directory-admin__chip">已链接 {{ selectedIntegration.stats.linkedCount }}</span>
             <span class="directory-admin__chip">上次成功 {{ formatDateTime(selectedIntegration.lastSuccessAt) }}</span>
+            <span class="directory-admin__chip">{{ readAdmissionModeLabel(selectedIntegration) }}</span>
+            <span class="directory-admin__chip">{{ readMemberGroupSyncLabel(selectedIntegration) }}</span>
           </div>
           <p v-if="selectedIntegration.lastError" class="directory-admin__status directory-admin__status--error">
             最近错误：{{ selectedIntegration.lastError }}
@@ -388,6 +516,45 @@
               目录手机号：{{ item.account.mobile }} ·
               {{ hasSelectedBindingUserMobileConflict(item) ? '存在差异，覆盖前需确认。' : '可直接回填到平台用户。' }}
             </p>
+            <div
+              v-if="item.kind === 'pending_binding' && isManualAdmissionExpanded(item.account.id)"
+              class="directory-admin__review-admission"
+            >
+              <p class="directory-admin__hint">适用于目录成员尚未入驻平台时，直接创建本地用户并完成绑定。</p>
+              <div class="directory-admin__form-grid">
+                <label class="directory-admin__field">
+                  <span>姓名</span>
+                  <input
+                    :value="readManualAdmissionDraft(item.account).name"
+                    class="directory-admin__input"
+                    type="text"
+                    placeholder="例如 李青"
+                    @input="onManualAdmissionDraftInput(item.account.id, 'name', $event)"
+                  />
+                </label>
+                <label class="directory-admin__field">
+                  <span>邮箱</span>
+                  <input
+                    :value="readManualAdmissionDraft(item.account).email"
+                    class="directory-admin__input"
+                    type="email"
+                    placeholder="例如 alpha@example.com"
+                    @input="onManualAdmissionDraftInput(item.account.id, 'email', $event)"
+                  />
+                </label>
+                <label class="directory-admin__field">
+                  <span>手机号</span>
+                  <input
+                    :value="readManualAdmissionDraft(item.account).mobile"
+                    class="directory-admin__input"
+                    type="text"
+                    placeholder="可选：目录手机号会自动带入"
+                    @input="onManualAdmissionDraftInput(item.account.id, 'mobile', $event)"
+                  />
+                </label>
+              </div>
+              <p class="directory-admin__hint">创建成功后会保留邀请信息；若后续绑定失败，目录卡片会自动选中新建用户，便于继续重试。</p>
+            </div>
             <div class="directory-admin__actions">
               <button
                 v-if="item.kind === 'pending_binding'"
@@ -405,6 +572,15 @@
               >
                 定位到成员
               </button>
+              <button
+                v-if="item.kind === 'pending_binding'"
+                class="directory-admin__button directory-admin__button--secondary"
+                type="button"
+                :disabled="reviewProcessingAccountId === item.account.id"
+                @click="toggleManualAdmission(item.account)"
+              >
+                {{ isManualAdmissionExpanded(item.account.id) ? '收起手动创建' : '手动创建用户' }}
+              </button>
               <router-link
                 v-if="item.kind === 'pending_binding' && readSelectedBindingUser(item)"
                 class="directory-admin__button directory-admin__button--secondary"
@@ -412,6 +588,15 @@
               >
                 查看本地用户
               </router-link>
+              <button
+                v-if="item.kind === 'pending_binding' && isManualAdmissionExpanded(item.account.id)"
+                class="directory-admin__button"
+                type="button"
+                :disabled="reviewProcessingAccountId === item.account.id || !canSubmitManualAdmission(item)"
+                @click="void createAndBindReviewUser(item)"
+              >
+                {{ reviewProcessingAccountId === item.account.id ? '处理中...' : '创建用户并绑定' }}
+              </button>
               <button
                 v-if="item.kind === 'pending_binding'"
                 class="directory-admin__button"
@@ -923,6 +1108,13 @@ type DirectoryIntegration = {
     rootDepartmentId: string
     baseUrl: string | null
     pageSize: number
+    admissionMode: 'manual_only' | 'auto_for_scoped_departments'
+    admissionDepartmentIds: string[]
+    excludeDepartmentIds: string[]
+    memberGroupSyncMode: 'disabled' | 'sync_scoped_departments'
+    memberGroupDepartmentIds: string[]
+    memberGroupDefaultRoleIds: string[]
+    memberGroupDefaultNamespaces: string[]
   }
   stats: {
     departmentCount: number
@@ -1079,6 +1271,33 @@ type LocalUserOption = {
   is_active: boolean
 }
 
+type OnboardingPacket = {
+  acceptInviteUrl?: string
+  inviteMessage?: string
+}
+
+type ManualAdmissionDraft = {
+  name: string
+  email: string
+  mobile: string
+}
+
+type ManualAdmissionResult = {
+  accountId: string
+  accountName: string
+  integrationId: string
+  userId: string
+  userName: string
+  email: string
+  mobile: string
+  temporaryPassword: string
+  onboarding: OnboardingPacket | null
+  bound: boolean
+  bindError: string
+  mobileBackfilled: boolean
+  mobileBackfillError: string
+}
+
 type InitialDirectoryNavigation = {
   integrationId: string
   accountId: string
@@ -1120,6 +1339,13 @@ type DirectoryDraft = {
   rootDepartmentId: string
   baseUrl: string
   pageSize: number
+  admissionMode: 'manual_only' | 'auto_for_scoped_departments'
+  admissionDepartmentIdsText: string
+  excludeDepartmentIdsText: string
+  memberGroupSyncMode: 'disabled' | 'sync_scoped_departments'
+  memberGroupDepartmentIdsText: string
+  memberGroupDefaultRoleIdsText: string
+  memberGroupDefaultNamespacesText: string
   status: string
   scheduleCron: string
   defaultDeprovisionPolicy: string
@@ -1172,6 +1398,9 @@ const mobileConflictHints = reactive<Record<string, string>>({})
 const userSearchResults = reactive<Record<string, LocalUserOption[]>>({})
 const userSearchLoading = reactive<Record<string, boolean>>({})
 const userSearchError = reactive<Record<string, string>>({})
+const manualAdmissionDrafts = reactive<Record<string, ManualAdmissionDraft>>({})
+const manualAdmissionExpanded = reactive<Record<string, boolean>>({})
+const manualAdmissionResult = ref<ManualAdmissionResult | null>(null)
 const grantToggles = reactive<Record<string, boolean>>({})
 const selectedReviewIds = reactive<Record<string, boolean>>({})
 const reviewDisableDingTalkGrant = ref(true)
@@ -1210,6 +1439,13 @@ const draft = reactive<DirectoryDraft>({
   rootDepartmentId: '1',
   baseUrl: '',
   pageSize: 50,
+  admissionMode: 'manual_only',
+  admissionDepartmentIdsText: '',
+  excludeDepartmentIdsText: '',
+  memberGroupSyncMode: 'disabled',
+  memberGroupDepartmentIdsText: '',
+  memberGroupDefaultRoleIdsText: '',
+  memberGroupDefaultNamespacesText: '',
   status: 'active',
   scheduleCron: '',
   defaultDeprovisionPolicy: 'mark_inactive',
@@ -1451,6 +1687,13 @@ function resetDraft() {
   draft.rootDepartmentId = '1'
   draft.baseUrl = ''
   draft.pageSize = 50
+  draft.admissionMode = 'manual_only'
+  draft.admissionDepartmentIdsText = ''
+  draft.excludeDepartmentIdsText = ''
+  draft.memberGroupSyncMode = 'disabled'
+  draft.memberGroupDepartmentIdsText = ''
+  draft.memberGroupDefaultRoleIdsText = ''
+  draft.memberGroupDefaultNamespacesText = ''
   draft.status = 'active'
   draft.scheduleCron = ''
   draft.defaultDeprovisionPolicy = 'mark_inactive'
@@ -1465,10 +1708,53 @@ function applyIntegrationToDraft(integration: DirectoryIntegration) {
   draft.rootDepartmentId = integration.config.rootDepartmentId
   draft.baseUrl = integration.config.baseUrl ?? ''
   draft.pageSize = integration.config.pageSize
+  draft.admissionMode = integration.config.admissionMode
+  draft.admissionDepartmentIdsText = integration.config.admissionDepartmentIds.join('\n')
+  draft.excludeDepartmentIdsText = integration.config.excludeDepartmentIds.join('\n')
+  draft.memberGroupSyncMode = integration.config.memberGroupSyncMode
+  draft.memberGroupDepartmentIdsText = integration.config.memberGroupDepartmentIds.join('\n')
+  draft.memberGroupDefaultRoleIdsText = integration.config.memberGroupDefaultRoleIds.join('\n')
+  draft.memberGroupDefaultNamespacesText = integration.config.memberGroupDefaultNamespaces.join('\n')
   draft.status = integration.status
   draft.scheduleCron = integration.scheduleCron ?? ''
   draft.defaultDeprovisionPolicy = integration.defaultDeprovisionPolicy
   draft.syncEnabled = integration.syncEnabled
+}
+
+function parseAdmissionDepartmentIdsText(value: string): string[] {
+  return Array.from(new Set(
+    value
+      .split(/[\n,]+/)
+      .map((entry) => entry.trim())
+      .filter((entry) => entry.length > 0),
+  ))
+}
+
+function readAdmissionModeLabel(integration: DirectoryIntegration): string {
+  if (integration.config.admissionMode === 'auto_for_scoped_departments') {
+    const includeCount = integration.config.admissionDepartmentIds.length
+    const excludeCount = integration.config.excludeDepartmentIds.length
+    const includeLabel = includeCount > 0 ? `${includeCount} 个部门白名单` : '未配置白名单'
+    if (excludeCount > 0) return `自动准入 · ${includeLabel} / 排除 ${excludeCount} 个部门`
+    return `自动准入 · ${includeLabel}`
+  }
+  return '自动准入已关闭'
+}
+
+function readMemberGroupSyncLabel(integration: DirectoryIntegration): string {
+  if (integration.config.memberGroupSyncMode === 'sync_scoped_departments') {
+    const count = integration.config.memberGroupDepartmentIds.length
+    const governanceParts: string[] = []
+    if (integration.config.memberGroupDefaultRoleIds.length > 0) {
+      governanceParts.push(`默认角色 ${integration.config.memberGroupDefaultRoleIds.length}`)
+    }
+    if (integration.config.memberGroupDefaultNamespaces.length > 0) {
+      governanceParts.push(`默认开通 ${integration.config.memberGroupDefaultNamespaces.length}`)
+    }
+    const scopeLabel = count > 0 ? `成员组同步 · ${count} 个部门` : '成员组同步 · 未配置部门'
+    return governanceParts.length > 0 ? `${scopeLabel} / ${governanceParts.join(' / ')}` : scopeLabel
+  }
+  return '成员组同步已关闭'
 }
 
 async function selectIntegration(integrationId: string): Promise<void> {
@@ -1827,6 +2113,69 @@ function clearBindingSearch(accountId: string) {
   setBindingSearchState(accountId, { results: [], error: '' })
 }
 
+function buildManualAdmissionDraft(account: DirectoryAccount): ManualAdmissionDraft {
+  return {
+    name: account.name?.trim() || '',
+    email: account.email?.trim() || '',
+    mobile: account.mobile?.trim() || '',
+  }
+}
+
+function readManualAdmissionDraft(account: DirectoryAccount): ManualAdmissionDraft {
+  if (!manualAdmissionDrafts[account.id]) {
+    manualAdmissionDrafts[account.id] = buildManualAdmissionDraft(account)
+  }
+  return manualAdmissionDrafts[account.id]
+}
+
+function isManualAdmissionExpanded(accountId: string): boolean {
+  return manualAdmissionExpanded[accountId] === true
+}
+
+function toggleManualAdmission(account: DirectoryAccount): void {
+  readManualAdmissionDraft(account)
+  manualAdmissionExpanded[account.id] = !isManualAdmissionExpanded(account.id)
+}
+
+function onManualAdmissionDraftInput(accountId: string, field: keyof ManualAdmissionDraft, event: Event): void {
+  const target = event.target
+  const nextValue = target instanceof HTMLInputElement ? target.value : ''
+  const current = manualAdmissionDrafts[accountId] ?? {
+    name: '',
+    email: '',
+    mobile: '',
+  }
+  manualAdmissionDrafts[accountId] = {
+    ...current,
+    [field]: nextValue,
+  }
+}
+
+function canSubmitManualAdmission(item: DirectoryReviewItem): boolean {
+  const draft = readManualAdmissionDraft(item.account)
+  return draft.name.trim().length > 0 && draft.email.trim().length > 0
+}
+
+function clearManualAdmissionResult(): void {
+  manualAdmissionResult.value = null
+}
+
+function readCreatedLocalUserOption(data: Record<string, unknown>, fallback: ManualAdmissionDraft): LocalUserOption {
+  const user = data.user && typeof data.user === 'object' ? data.user as Record<string, unknown> : null
+  const id = typeof user?.id === 'string' ? user.id.trim() : ''
+  if (!id) {
+    throw new Error('创建用户成功但未返回用户 ID')
+  }
+  return {
+    id,
+    email: typeof user?.email === 'string' && user.email.trim().length > 0 ? user.email : fallback.email,
+    name: typeof user?.name === 'string' && user.name.trim().length > 0 ? user.name : fallback.name,
+    mobile: typeof user?.mobile === 'string' && user.mobile.trim().length > 0 ? user.mobile : null,
+    role: typeof user?.role === 'string' && user.role.trim().length > 0 ? user.role : 'user',
+    is_active: typeof user?.is_active === 'boolean' ? user.is_active : true,
+  }
+}
+
 function buildPayload() {
   return {
     integrationId: selectedIntegration.value?.id,
@@ -1837,6 +2186,13 @@ function buildPayload() {
     rootDepartmentId: draft.rootDepartmentId.trim() || '1',
     baseUrl: draft.baseUrl.trim(),
     pageSize: Number(draft.pageSize || 50),
+    admissionMode: draft.admissionMode,
+    admissionDepartmentIds: parseAdmissionDepartmentIdsText(draft.admissionDepartmentIdsText),
+    excludeDepartmentIds: parseAdmissionDepartmentIdsText(draft.excludeDepartmentIdsText),
+    memberGroupSyncMode: draft.memberGroupSyncMode,
+    memberGroupDepartmentIds: parseAdmissionDepartmentIdsText(draft.memberGroupDepartmentIdsText),
+    memberGroupDefaultRoleIds: parseAdmissionDepartmentIdsText(draft.memberGroupDefaultRoleIdsText),
+    memberGroupDefaultNamespaces: parseAdmissionDepartmentIdsText(draft.memberGroupDefaultNamespacesText),
     status: draft.status,
     scheduleCron: draft.scheduleCron.trim(),
     defaultDeprovisionPolicy: draft.defaultDeprovisionPolicy,
@@ -1898,7 +2254,46 @@ async function syncIntegration() {
     })
     const body = await readJson(response)
     if (!response.ok) throw new Error(readApiError(body, '目录同步失败'))
-    setStatus('目录同步已完成')
+    const autoAdmittedCount = Number(body?.data?.run?.stats?.autoAdmittedCount ?? 0)
+    const autoAdmissionSkippedMissingEmailCount = Number(body?.data?.run?.stats?.autoAdmissionSkippedMissingEmailCount ?? 0)
+    const autoAdmissionExcludedCount = Number(body?.data?.run?.stats?.autoAdmissionExcludedCount ?? 0)
+    const memberGroupsSyncedCount = Number(body?.data?.run?.stats?.memberGroupsSyncedCount ?? 0)
+    const memberGroupsCreatedCount = Number(body?.data?.run?.stats?.memberGroupsCreatedCount ?? 0)
+    const memberGroupGovernedUserCount = Number(body?.data?.run?.stats?.memberGroupGovernedUserCount ?? 0)
+    const memberGroupDefaultRoleAssignmentsCount = Number(body?.data?.run?.stats?.memberGroupDefaultRoleAssignmentsCount ?? 0)
+    const memberGroupDefaultNamespaceAdmissionsCount = Number(body?.data?.run?.stats?.memberGroupDefaultNamespaceAdmissionsCount ?? 0)
+    if (
+      autoAdmittedCount > 0
+      || autoAdmissionSkippedMissingEmailCount > 0
+      || autoAdmissionExcludedCount > 0
+      || memberGroupsSyncedCount > 0
+      || memberGroupGovernedUserCount > 0
+    ) {
+      const parts = ['目录同步已完成']
+      if (autoAdmittedCount > 0) parts.push(`自动准入 ${autoAdmittedCount} 位成员`)
+      if (autoAdmissionSkippedMissingEmailCount > 0) parts.push(`${autoAdmissionSkippedMissingEmailCount} 位成员因缺少邮箱未自动创建`)
+      if (autoAdmissionExcludedCount > 0) parts.push(`${autoAdmissionExcludedCount} 位成员命中排除部门，未自动创建`)
+      if (memberGroupsSyncedCount > 0) {
+        if (memberGroupsCreatedCount > 0) {
+          parts.push(`同步 ${memberGroupsSyncedCount} 个成员组（新建 ${memberGroupsCreatedCount} 个）`)
+        } else {
+          parts.push(`同步 ${memberGroupsSyncedCount} 个成员组`)
+        }
+      }
+      if (memberGroupGovernedUserCount > 0) {
+        const governanceDetails: string[] = []
+        if (memberGroupDefaultRoleAssignmentsCount > 0) governanceDetails.push(`角色新增 ${memberGroupDefaultRoleAssignmentsCount} 项`)
+        if (memberGroupDefaultNamespaceAdmissionsCount > 0) governanceDetails.push(`插件开通新增 ${memberGroupDefaultNamespaceAdmissionsCount} 项`)
+        parts.push(
+          governanceDetails.length > 0
+            ? `为 ${memberGroupGovernedUserCount} 位成员补齐默认治理（${governanceDetails.join('，')}）`
+            : `为 ${memberGroupGovernedUserCount} 位成员补齐默认治理`,
+        )
+      }
+      setStatus(parts.join('，'))
+    } else {
+      setStatus('目录同步已完成')
+    }
     await Promise.all([
       loadIntegrations(),
       loadRuns(selectedIntegration.value.id),
@@ -2455,6 +2850,32 @@ async function handleReviewUnbind(item: DirectoryReviewItem) {
   }
 }
 
+async function postReviewBindings(bindings: Array<{
+  accountId: string
+  localUserRef: string
+  enableDingTalkGrant: boolean
+}>, failureMessage = '绑定目录成员失败'): Promise<number> {
+  if (!selectedIntegration.value || bindings.length === 0) return 0
+  const response = await apiFetch('/api/admin/directory/accounts/batch-bind', {
+    method: 'POST',
+    body: JSON.stringify({ bindings }),
+  })
+  const body = await readJson(response)
+  if (!response.ok) throw new Error(readApiError(body, failureMessage))
+  const processedItems = Array.isArray(body?.data?.items) ? body.data.items : []
+  return processedItems.length > 0 ? processedItems.length : bindings.length
+}
+
+async function refreshAfterReviewBindings(): Promise<void> {
+  if (!selectedIntegration.value) return
+  for (const key of Object.keys(selectedReviewIds)) delete selectedReviewIds[key]
+  await Promise.all([
+    loadIntegrations(),
+    loadReviewItems(selectedIntegration.value.id),
+    loadAccounts(selectedIntegration.value.id),
+  ])
+}
+
 async function submitReviewBindings(bindings: Array<{
   accountId: string
   localUserRef: string
@@ -2473,14 +2894,7 @@ async function submitReviewBindings(bindings: Array<{
         message: `正在提交${readReviewBatchProgressKindLabel(progressKind)}请求...`,
       })
     }
-    const response = await apiFetch('/api/admin/directory/accounts/batch-bind', {
-      method: 'POST',
-      body: JSON.stringify({ bindings }),
-    })
-    const body = await readJson(response)
-    if (!response.ok) throw new Error(readApiError(body, failureMessage))
-    const processedItems = Array.isArray(body?.data?.items) ? body.data.items : []
-    appliedCount = processedItems.length > 0 ? processedItems.length : bindings.length
+    appliedCount = await postReviewBindings(bindings, failureMessage)
     if (progressKind) {
       setReviewBatchProgress({
         kind: progressKind,
@@ -2490,13 +2904,8 @@ async function submitReviewBindings(bindings: Array<{
         message: `已提交 ${appliedCount} / ${bindings.length}，正在刷新目录成员与待处理队列...`,
       })
     }
-    for (const key of Object.keys(selectedReviewIds)) delete selectedReviewIds[key]
+    await refreshAfterReviewBindings()
     setStatus(successMessage)
-    await Promise.all([
-      loadIntegrations(),
-      loadReviewItems(selectedIntegration.value.id),
-      loadAccounts(selectedIntegration.value.id),
-    ])
     if (progressKind) {
       setReviewBatchProgress({
         kind: progressKind,
@@ -2588,6 +2997,72 @@ async function backfillUserMobileAndBindReviewItem(item: DirectoryReviewItem) {
     }], `待处理成员 ${item.account.name} 已回填手机号并完成绑定`, '回填手机号并绑定失败')
   } catch (error) {
     setStatus(error instanceof Error ? error.message : '回填手机号并绑定失败', 'error')
+  } finally {
+    reviewProcessingAccountId.value = ''
+  }
+}
+
+async function createAndBindReviewUser(item: DirectoryReviewItem) {
+  const draft = readManualAdmissionDraft(item.account)
+  const nextDraft: ManualAdmissionDraft = {
+    name: draft.name.trim(),
+    email: draft.email.trim(),
+    mobile: draft.mobile.trim(),
+  }
+  manualAdmissionDrafts[item.account.id] = nextDraft
+  if (!nextDraft.name || !nextDraft.email) {
+    setStatus(`待处理成员 ${item.account.name} 的姓名和邮箱不能为空`, 'error')
+    return
+  }
+
+  reviewProcessingAccountId.value = item.account.id
+  try {
+    const response = await apiFetch(`/api/admin/directory/accounts/${encodeURIComponent(item.account.id)}/admit-user`, {
+      method: 'POST',
+      body: JSON.stringify({
+        name: nextDraft.name,
+        email: nextDraft.email,
+        mobile: nextDraft.mobile || undefined,
+        enableDingTalkGrant: readGrantToggle(item.account.id),
+      }),
+    })
+    const body = await readJson(response)
+    if (!response.ok || body?.ok !== true) {
+      throw new Error(readApiError(body, '创建本地用户并绑定失败'))
+    }
+    const data = body?.data as Record<string, unknown> | undefined
+    const createdUser = readCreatedLocalUserOption(data ?? {}, nextDraft)
+    const temporaryPassword = typeof data?.temporaryPassword === 'string' ? data.temporaryPassword : ''
+    const onboarding = data?.onboarding && typeof data.onboarding === 'object'
+      ? data.onboarding as OnboardingPacket
+      : null
+
+    updateBindingDraft(item.account.id, createdUser.email || createdUser.id)
+    selectedBindingUsers[item.account.id] = createdUser
+    clearBindingSearch(item.account.id)
+    delete mobileOverrideConfirmations[item.account.id]
+    delete mobileConflictHints[item.account.id]
+    delete manualAdmissionExpanded[item.account.id]
+    delete manualAdmissionDrafts[item.account.id]
+    await refreshAfterReviewBindings()
+    manualAdmissionResult.value = {
+      accountId: item.account.id,
+      accountName: item.account.name,
+      integrationId: item.account.integrationId,
+      userId: createdUser.id,
+      userName: createdUser.name || nextDraft.name,
+      email: createdUser.email || nextDraft.email,
+      mobile: createdUser.mobile || nextDraft.mobile,
+      temporaryPassword,
+      onboarding,
+      bound: true,
+      bindError: '',
+      mobileBackfilled: nextDraft.mobile.length === 0 || (createdUser.mobile ?? '') === nextDraft.mobile,
+      mobileBackfillError: '',
+    }
+    setStatus(`待处理成员 ${item.account.name} 已创建本地用户并完成绑定`)
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : '创建本地用户并绑定失败', 'error')
   } finally {
     reviewProcessingAccountId.value = ''
   }
@@ -2876,6 +3351,10 @@ onUnmounted(() => {
   align-items: center;
 }
 
+.directory-admin__field--wide {
+  grid-column: 1 / -1;
+}
+
 .directory-admin__toggle {
   justify-content: flex-end;
 }
@@ -2893,6 +3372,11 @@ onUnmounted(() => {
 
 .directory-admin__input--compact {
   min-width: 88px;
+}
+
+.directory-admin__textarea {
+  min-height: 96px;
+  resize: vertical;
 }
 
 .directory-admin__button,
@@ -3093,6 +3577,16 @@ onUnmounted(() => {
   gap: 8px;
 }
 
+.directory-admin__review-admission {
+  border: 1px dashed #cbd5e1;
+  border-radius: 14px;
+  padding: 12px;
+  background: #f8fafc;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
 .directory-admin__search-result {
   display: flex;
   flex-direction: column;
@@ -3108,6 +3602,16 @@ onUnmounted(() => {
 .directory-admin__search-result span,
 .directory-admin__search-result small {
   color: #475569;
+}
+
+.directory-admin__invite {
+  margin: 0;
+  padding: 12px;
+  border-radius: 12px;
+  background: #0f172a;
+  color: #e2e8f0;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .directory-admin__pagination {

@@ -2797,6 +2797,7 @@ export function adminUsersRouter(): Router {
       const effectiveRole = roleId === PLATFORM_ADMIN_ROLE_ID || cleanRole === 'admin' ? 'admin' : cleanRole
       const isActive = typeof body.isActive === 'boolean' ? body.isActive : true
       const requestedPassword = typeof body.password === 'string' ? body.password.trim() : ''
+      const mustChangePassword = requestedPassword.length === 0
       const directPermissions = Array.from(new Set(preset?.permissions || []))
 
       if (!cleanEmail || !cleanName) {
@@ -2836,9 +2837,9 @@ export function adminUsersRouter(): Router {
       const passwordHash = await bcrypt.hash(password, getBcryptSaltRounds())
 
       await query(
-        `INSERT INTO users (id, email, name, password_hash, role, permissions, is_active, is_admin, created_at, updated_at)
-         VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, NOW(), NOW())`,
-        [userId, cleanEmail, cleanName, passwordHash, effectiveRole, JSON.stringify(directPermissions), isActive, effectiveRole === 'admin'],
+        `INSERT INTO users (id, email, name, password_hash, must_change_password, role, permissions, is_active, is_admin, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, NOW(), NOW())`,
+        [userId, cleanEmail, cleanName, passwordHash, mustChangePassword, effectiveRole, JSON.stringify(directPermissions), isActive, effectiveRole === 'admin'],
       )
 
       if (roleId) {
@@ -2876,6 +2877,7 @@ export function adminUsersRouter(): Router {
           presetId: preset?.id || null,
           roleId: roleId || null,
           is_active: isActive,
+          must_change_password: mustChangePassword,
           permissions: directPermissions,
           generatedPassword: requestedPassword.length === 0,
         },
@@ -3451,7 +3453,7 @@ export function adminUsersRouter(): Router {
       const passwordHash = await bcrypt.hash(temporaryPassword, getBcryptSaltRounds())
       await query(
         `UPDATE users
-         SET password_hash = $1, updated_at = NOW()
+         SET password_hash = $1, must_change_password = TRUE, updated_at = NOW()
          WHERE id = $2`,
         [passwordHash, userId],
       )

@@ -5,17 +5,45 @@ const pgMocks = vi.hoisted(() => ({
   transaction: vi.fn(),
 }))
 
+const authRuntimeMocks = vi.hoisted(() => ({
+  getBcryptSaltRounds: vi.fn(() => 10),
+}))
+
+const inviteLedgerMocks = vi.hoisted(() => ({
+  recordInvite: vi.fn(),
+}))
+
+const inviteTokenMocks = vi.hoisted(() => ({
+  issueInviteToken: vi.fn(() => 'invite-token-fixed'),
+}))
+
 vi.mock('../../src/db/pg', () => ({
   query: pgMocks.query,
   transaction: pgMocks.transaction,
 }))
 
-import { bindDirectoryAccount, unbindDirectoryAccount } from '../../src/directory/directory-sync'
+vi.mock('../../src/security/auth-runtime-config', () => ({
+  getBcryptSaltRounds: authRuntimeMocks.getBcryptSaltRounds,
+}))
+
+vi.mock('../../src/auth/invite-ledger', () => ({
+  recordInvite: inviteLedgerMocks.recordInvite,
+}))
+
+vi.mock('../../src/auth/invite-tokens', () => ({
+  issueInviteToken: inviteTokenMocks.issueInviteToken,
+}))
+
+import { admitDirectoryAccountUser, bindDirectoryAccount, unbindDirectoryAccount } from '../../src/directory/directory-sync'
 
 describe('bindDirectoryAccount', () => {
   beforeEach(() => {
     pgMocks.query.mockReset()
     pgMocks.transaction.mockReset()
+    inviteLedgerMocks.recordInvite.mockReset()
+    inviteLedgerMocks.recordInvite.mockResolvedValue(null)
+    inviteTokenMocks.issueInviteToken.mockReset()
+    inviteTokenMocks.issueInviteToken.mockReturnValue('invite-token-fixed')
   })
 
   it('writes an auth-compatible DingTalk identity and linked directory mapping', async () => {
@@ -32,9 +60,9 @@ describe('bindDirectoryAccount', () => {
           union_id: 'union-1',
           open_id: 'open-1',
           external_key: 'union-1',
-          name: '周华',
+          name: '林岚',
           email: null,
-          mobile: '13758875801',
+          mobile: '13900001234',
         }],
       })
       .mockResolvedValueOnce({
@@ -63,9 +91,9 @@ describe('bindDirectoryAccount', () => {
           union_id: 'union-1',
           open_id: 'open-1',
           external_key: 'union-1',
-          account_name: '周华',
+          account_name: '林岚',
           account_email: null,
-          account_mobile: '13758875801',
+          account_mobile: '13900001234',
           account_is_active: true,
           account_updated_at: '2026-04-11T08:00:00.000Z',
           link_status: 'linked',
@@ -139,9 +167,9 @@ describe('bindDirectoryAccount', () => {
           union_id: null,
           open_id: null,
           external_key: '0447654442691174',
-          name: '周华',
+          name: '林岚',
           email: null,
-          mobile: '13758875801',
+          mobile: '13900001234',
         }],
       })
       .mockResolvedValueOnce({
@@ -161,6 +189,115 @@ describe('bindDirectoryAccount', () => {
     expect(pgMocks.transaction).not.toHaveBeenCalled()
   })
 
+  it('creates a local user and binds it to a directory account in one server-side admission flow', async () => {
+    const clientQuery = vi.fn()
+    pgMocks.transaction.mockImplementation(async (handler) => handler({ query: clientQuery }))
+    pgMocks.query
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'account-admit-1',
+          integration_id: 'dir-1',
+          provider: 'dingtalk',
+          corp_id: 'dingcorp',
+          external_user_id: '0447654442691174',
+          union_id: 'union-1',
+          open_id: 'open-1',
+          external_key: 'union-1',
+          name: '李青',
+          email: null,
+          mobile: '13900001234',
+        }],
+      })
+      .mockResolvedValueOnce({
+        rows: [{
+          local_user_id: null,
+          local_user_email: null,
+          local_user_name: null,
+        }],
+      })
+      .mockResolvedValueOnce({
+        rows: [{
+          integration_id: 'dir-1',
+          provider: 'dingtalk',
+          corp_id: 'dingcorp',
+          directory_account_id: 'account-admit-1',
+          external_user_id: '0447654442691174',
+          union_id: 'union-1',
+          open_id: 'open-1',
+          external_key: 'union-1',
+          account_name: '李青',
+          account_email: null,
+          account_mobile: '13900001234',
+          account_is_active: true,
+          account_updated_at: '2026-04-11T08:00:00.000Z',
+          link_status: 'linked',
+          match_strategy: 'manual_admin',
+          reviewed_by: 'admin-1',
+          review_note: null,
+          link_updated_at: '2026-04-11T08:00:00.000Z',
+          local_user_id: 'user-created',
+          local_user_email: 'liqing@example.com',
+          local_user_name: '李青',
+          department_paths: ['DingTalk CN'],
+        }],
+      })
+
+    clientQuery
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+
+    const result = await admitDirectoryAccountUser('account-admit-1', {
+      adminUserId: 'admin-1',
+      name: '李青',
+      email: 'liqing@example.com',
+      mobile: '13900001234',
+      enableDingTalkGrant: true,
+    })
+
+    const createUserCall = clientQuery.mock.calls.find((entry) => String(entry[0]).includes('INSERT INTO users'))
+    const createdUserId = Array.isArray(createUserCall?.[1]) ? String(createUserCall?.[1]?.[0] || '') : ''
+    expect(createdUserId.length).toBeGreaterThan(0)
+    expect(createUserCall?.[1]).toEqual(expect.arrayContaining([
+      'liqing@example.com',
+      '李青',
+      '13900001234',
+      JSON.stringify([]),
+    ]))
+    expect(String(createUserCall?.[0])).toContain("'user'")
+    expect(clientQuery).toHaveBeenCalledWith(
+      expect.stringContaining('INSERT INTO user_external_auth_grants'),
+      ['dingtalk', createdUserId, 'admin-1'],
+    )
+    expect(clientQuery).toHaveBeenCalledWith(
+      expect.stringContaining('INSERT INTO directory_account_links'),
+      ['account-admit-1', createdUserId, 'admin-1'],
+    )
+    expect(inviteLedgerMocks.recordInvite).toHaveBeenCalledWith(expect.objectContaining({
+      userId: createdUserId,
+      email: 'liqing@example.com',
+      inviteToken: 'invite-token-fixed',
+    }))
+    expect(result).toMatchObject({
+      account: {
+        id: 'account-admit-1',
+        localUser: {
+          email: 'liqing@example.com',
+          name: '李青',
+        },
+      },
+      user: {
+        id: createdUserId,
+        email: 'liqing@example.com',
+        name: '李青',
+        mobile: '13900001234',
+      },
+      inviteToken: 'invite-token-fixed',
+    })
+  })
+
   it('removes the bound identity, optionally disables grant, and resets the link on unbind', async () => {
     const clientQuery = vi.fn()
     pgMocks.transaction.mockImplementation(async (handler) => handler({ query: clientQuery }))
@@ -175,9 +312,9 @@ describe('bindDirectoryAccount', () => {
           union_id: 'union-1',
           open_id: 'open-1',
           external_key: 'union-1',
-          name: '周华',
+          name: '林岚',
           email: null,
-          mobile: '13758875801',
+          mobile: '13900001234',
         }],
       })
       .mockResolvedValueOnce({
@@ -197,9 +334,9 @@ describe('bindDirectoryAccount', () => {
           union_id: 'union-1',
           open_id: 'open-1',
           external_key: 'union-1',
-          account_name: '周华',
+          account_name: '林岚',
           account_email: null,
-          account_mobile: '13758875801',
+          account_mobile: '13900001234',
           account_is_active: true,
           account_updated_at: '2026-04-11T08:01:00.000Z',
           link_status: 'unmatched',
@@ -264,9 +401,9 @@ describe('bindDirectoryAccount', () => {
           union_id: 'union-1',
           open_id: 'open-1',
           external_key: 'union-1',
-          name: '周华',
+          name: '林岚',
           email: null,
-          mobile: '13758875801',
+          mobile: '13900001234',
         }],
       })
       .mockResolvedValueOnce({
@@ -286,9 +423,9 @@ describe('bindDirectoryAccount', () => {
           union_id: 'union-1',
           open_id: 'open-1',
           external_key: 'union-1',
-          account_name: '周华',
+          account_name: '林岚',
           account_email: null,
-          account_mobile: '13758875801',
+          account_mobile: '13900001234',
           account_is_active: true,
           account_updated_at: '2026-04-11T08:01:00.000Z',
           link_status: 'unmatched',

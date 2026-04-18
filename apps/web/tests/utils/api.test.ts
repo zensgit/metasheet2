@@ -251,6 +251,41 @@ describe('API Utils', () => {
       expect(window.localStorage.getItem('auth_token')).toBe('expired-token')
       expect(replace).not.toHaveBeenCalled()
     })
+
+    it('redirects forced-password sessions to the dedicated password-change route on 403', async () => {
+      const replace = vi.fn()
+      Object.defineProperty(window, 'location', {
+        value: {
+          pathname: '/attendance',
+          search: '',
+          hash: '',
+          replace,
+          href: 'https://app.example.com/attendance',
+          origin: 'https://app.example.com',
+        },
+        writable: true,
+        configurable: true,
+      })
+
+      window.localStorage.setItem('auth_token', 'forced-token')
+      vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({
+        ok: false,
+        error: {
+          code: 'PASSWORD_CHANGE_REQUIRED',
+          message: 'Password change required',
+        },
+      }), {
+        status: 403,
+        headers: {
+          'Content-Type': 'application/json',
+        },
+      }))
+
+      await apiFetch('/api/admin/users')
+
+      expect(window.localStorage.getItem('auth_token')).toBe('forced-token')
+      expect(replace).toHaveBeenCalledWith('/force-password-change')
+    })
   })
 
   describe('apiFetch() content type handling', () => {

@@ -23,6 +23,7 @@ export interface User {
   permissions: string[]
   tenantId?: string
   is_active?: boolean
+  must_change_password?: boolean
   created_at: Date
   updated_at: Date
   // Index signature for compatibility with Express.Request.user
@@ -345,7 +346,7 @@ export class AuthService {
       try {
         const pool = poolManager.get()
         const result = await pool.query(
-          'SELECT id, email, name, role, permissions, password_hash, is_active, created_at, updated_at FROM users WHERE id = $1',
+          'SELECT id, email, name, role, permissions, password_hash, is_active, must_change_password, created_at, updated_at FROM users WHERE id = $1',
           [userId]
         )
 
@@ -359,6 +360,7 @@ export class AuthService {
             role: resolved.role,
             permissions: resolved.permissions,
             is_active: row.is_active,
+            must_change_password: row.must_change_password,
             password_hash: row.password_hash,
             created_at: row.created_at,
             updated_at: row.updated_at
@@ -377,6 +379,7 @@ export class AuthService {
           role: 'admin',
           permissions: ['*:*'],
           is_active: true,
+          must_change_password: false,
           password_hash: await bcrypt.hash('dev123', this.config.saltRounds),
           created_at: new Date(),
           updated_at: new Date()
@@ -398,7 +401,7 @@ export class AuthService {
       try {
         const pool = poolManager.get()
         const result = await pool.query(
-          'SELECT id, email, name, role, permissions, password_hash, is_active, created_at, updated_at FROM users WHERE email = $1',
+          'SELECT id, email, name, role, permissions, password_hash, is_active, must_change_password, created_at, updated_at FROM users WHERE email = $1',
           [email]
         )
 
@@ -412,6 +415,7 @@ export class AuthService {
             role: resolved.role,
             permissions: resolved.permissions,
             is_active: row.is_active,
+            must_change_password: row.must_change_password,
             password_hash: row.password_hash,
             created_at: row.created_at,
             updated_at: row.updated_at
@@ -485,7 +489,7 @@ export class AuthService {
         const result = await pool.query(
           `INSERT INTO users (id, email, name, password_hash, role, permissions, created_at, updated_at)
            VALUES ($1, $2, $3, $4, $5, $6::jsonb, NOW(), NOW())
-           RETURNING id, email, name, role, permissions, created_at, updated_at`,
+           RETURNING id, email, name, role, permissions, must_change_password, created_at, updated_at`,
           [userData.id, userData.email, userData.name, userData.password_hash, userData.role, permissionsJson]
         )
 
@@ -506,6 +510,7 @@ export class AuthService {
             name: row.name,
             role: row.role,
             permissions: Array.isArray(row.permissions) ? row.permissions : [],
+            must_change_password: row.must_change_password,
             created_at: row.created_at,
             updated_at: row.updated_at
           }

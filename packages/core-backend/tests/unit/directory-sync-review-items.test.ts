@@ -10,7 +10,7 @@ vi.mock('../../src/db/pg', () => ({
   transaction: pgMocks.transaction,
 }))
 
-import { listDirectoryReviewItems } from '../../src/directory/directory-sync'
+import { getDirectoryReviewItem, listDirectoryReviewItems } from '../../src/directory/directory-sync'
 
 describe('listDirectoryReviewItems', () => {
   beforeEach(() => {
@@ -33,9 +33,9 @@ describe('listDirectoryReviewItems', () => {
           union_id: 'union-1',
           open_id: 'open-1',
           external_key: 'union-1',
-          account_name: '周华',
+          account_name: '林岚',
           account_email: 'alpha@example.com',
-          account_mobile: '13758875801',
+          account_mobile: '13900001234',
           account_is_active: true,
           account_updated_at: '2026-04-15T08:00:00.000Z',
           link_status: 'pending',
@@ -60,7 +60,7 @@ describe('listDirectoryReviewItems', () => {
           name: 'Alpha',
           role: 'user',
           is_active: true,
-          mobile: '13758875801',
+          mobile: '13900001234',
         }],
       })
       .mockResolvedValueOnce({
@@ -119,9 +119,9 @@ describe('listDirectoryReviewItems', () => {
           union_id: 'union-1',
           open_id: 'open-1',
           external_key: 'union-1',
-          account_name: '周华',
+          account_name: '林岚',
           account_email: null,
-          account_mobile: '13758875801',
+          account_mobile: '13900001234',
           account_is_active: true,
           account_updated_at: '2026-04-15T08:00:00.000Z',
           link_status: 'unmatched',
@@ -147,7 +147,7 @@ describe('listDirectoryReviewItems', () => {
             name: 'Alpha',
             role: 'user',
             is_active: true,
-            mobile: '13758875801',
+            mobile: '13900001234',
           },
           {
             id: 'user-2',
@@ -155,7 +155,7 @@ describe('listDirectoryReviewItems', () => {
             name: 'Beta',
             role: 'user',
             is_active: true,
-            mobile: '13758875801',
+            mobile: '13900001234',
           },
         ],
       })
@@ -195,7 +195,7 @@ describe('listDirectoryReviewItems', () => {
           union_id: 'union-1',
           open_id: 'open-1',
           external_key: 'union-1',
-          account_name: '周华',
+          account_name: '林岚',
           account_email: null,
           account_mobile: null,
           account_is_active: true,
@@ -245,7 +245,7 @@ describe('listDirectoryReviewItems', () => {
           union_id: 'union-1',
           open_id: 'open-1',
           external_key: 'union-1',
-          account_name: '周华',
+          account_name: '林岚',
           account_email: 'alpha@example.com',
           account_mobile: null,
           account_is_active: true,
@@ -294,5 +294,37 @@ describe('listDirectoryReviewItems', () => {
       },
     })
     expect(result.items[0]?.recommendations).toEqual([])
+  })
+
+  it('uses grouped user columns instead of raw link columns in review list SQL', async () => {
+    pgMocks.query
+      .mockResolvedValueOnce({
+        rows: [{ total: 0 }],
+      })
+      .mockResolvedValueOnce({
+        rows: [],
+      })
+
+    await listDirectoryReviewItems('dir-1', { limit: 100, offset: 0 }, 'pending_binding')
+
+    const listSql = String(pgMocks.query.mock.calls[1]?.[0] ?? '')
+    expect(listSql).toContain("WHEN a.is_active = FALSE AND u.id IS NOT NULL THEN 'inactive_linked'")
+    expect(listSql).toContain("WHEN u.id IS NULL THEN '目录成员尚未绑定本地用户。'")
+    expect(listSql).not.toContain("WHEN a.is_active = FALSE AND l.local_user_id IS NOT NULL THEN 'inactive_linked'")
+    expect(listSql).not.toContain("WHEN l.local_user_id IS NULL THEN '目录成员尚未绑定本地用户。'")
+  })
+
+  it('uses grouped user columns instead of raw link columns in single review item SQL', async () => {
+    pgMocks.query.mockResolvedValueOnce({
+      rows: [],
+    })
+
+    await getDirectoryReviewItem('account-1')
+
+    const detailSql = String(pgMocks.query.mock.calls[0]?.[0] ?? '')
+    expect(detailSql).toContain("WHEN a.is_active = FALSE AND u.id IS NOT NULL THEN 'inactive_linked'")
+    expect(detailSql).toContain("WHEN u.id IS NULL THEN '目录成员尚未绑定本地用户。'")
+    expect(detailSql).not.toContain("WHEN a.is_active = FALSE AND l.local_user_id IS NOT NULL THEN 'inactive_linked'")
+    expect(detailSql).not.toContain("WHEN l.local_user_id IS NULL THEN '目录成员尚未绑定本地用户。'")
   })
 })

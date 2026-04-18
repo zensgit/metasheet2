@@ -429,6 +429,10 @@ function isInviteTokenConsumed(updatedAt: string, issuedAtSeconds?: number): boo
   return updatedAtMs > (issuedAtSeconds * 1000) + 1000
 }
 
+function requiresPasswordChange(user: User | null | undefined): boolean {
+  return user?.must_change_password === true
+}
+
 /**
  * 用户登录
  * Protected by rate limiting: 5 attempts per 15 minutes
@@ -475,6 +479,7 @@ authRouter.post('/login', loginRateLimiter, async (req: Request, res: Response) 
       data: {
         user: result.user,
         token: result.token,
+        passwordChangeRequired: requiresPasswordChange(result.user),
         features: buildFeaturePayload(result.user),
       }
     })
@@ -684,6 +689,7 @@ authRouter.post('/invite/accept', async (req: Request, res: Response) => {
     await query(
       `UPDATE users
        SET password_hash = $1,
+           must_change_password = FALSE,
            is_active = true,
            name = COALESCE(NULLIF($2, ''), name),
            updated_at = NOW()
@@ -717,6 +723,7 @@ authRouter.post('/invite/accept', async (req: Request, res: Response) => {
       data: {
         user: result.user,
         token: result.token,
+        passwordChangeRequired: false,
         onboarding: buildOnboardingPacket({
           email: payload.email,
           preset,
@@ -728,6 +735,77 @@ authRouter.post('/invite/accept', async (req: Request, res: Response) => {
     })
   } catch (error) {
     logger.error('Invite acceptance error', error instanceof Error ? error : undefined)
+    return res.status(500).json({
+      success: false,
+      error: 'Internal server error',
+    })
+  }
+})
+
+authRouter.post('/password/change', async (req: Request, res: Response) => {
+  try {
+    const authenticated = await requireAuthenticatedUser(req, res)
+    if (!authenticated) return
+
+    if (!requiresPasswordChange(authenticated.user)) {
+      return res.status(403).json({
+        success: false,
+        error: {
+          code: 'PASSWORD_CHANGE_NOT_REQUIRED',
+          message: 'Password change is not required for this session',
+        },
+      })
+    }
+
+    const password = typeof req.body?.password === 'string' ? req.body.password.trim() : ''
+    if (!password) {
+      return res.status(400).json({
+        success: false,
+        error: 'Password is required',
+      })
+    }
+
+    const passwordValidation = validatePassword(password)
+    if (!passwordValidation.valid) {
+      return res.status(400).json({
+        success: false,
+        error: 'Password does not meet requirements',
+        details: passwordValidation.errors,
+      })
+    }
+
+    const passwordHash = await bcrypt.hash(password, getBcryptSaltRounds())
+    await query(
+      `UPDATE users
+       SET password_hash = $1,
+           must_change_password = FALSE,
+           updated_at = NOW()
+       WHERE id = $2`,
+      [passwordHash, authenticated.user.id],
+    )
+
+    await revokeUserSessions(authenticated.user.id, {
+      updatedBy: authenticated.user.id,
+      reason: 'password-change-required-cleared',
+    })
+
+    const refreshedUser = {
+      ...authenticated.user,
+      must_change_password: false,
+    }
+    const token = await issueAuthSessionToken(refreshedUser, req)
+
+    return res.json({
+      success: true,
+      data: {
+        user: refreshedUser,
+        token,
+        passwordChangeRequired: false,
+        features: buildFeaturePayload(refreshedUser),
+      },
+    })
+  } catch (error) {
+    logger.error('Password change error', error instanceof Error ? error : undefined)
     return res.status(500).json({
       success: false,
       error: 'Internal server error',

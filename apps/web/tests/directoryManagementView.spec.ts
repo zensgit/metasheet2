@@ -61,6 +61,13 @@ function createIntegration(overrides: Record<string, unknown> = {}) {
       rootDepartmentId: '1',
       baseUrl: null,
       pageSize: 50,
+      admissionMode: 'manual_only',
+      admissionDepartmentIds: [],
+      excludeDepartmentIds: [],
+      memberGroupSyncMode: 'disabled',
+      memberGroupDepartmentIds: [],
+      memberGroupDefaultRoleIds: [],
+      memberGroupDefaultNamespaces: [],
     },
     stats: {
       departmentCount: 12,
@@ -83,9 +90,9 @@ function createAccount(overrides: Record<string, unknown> = {}) {
     unionId: 'union-1',
     openId: null,
     externalKey: 'union-1',
-    name: '周华',
+    name: '林岚',
     email: null,
-    mobile: '13758875801',
+    mobile: '13900001234',
     isActive: true,
     updatedAt: '2026-04-08T01:00:00.000Z',
     linkStatus: 'unmatched',
@@ -193,7 +200,7 @@ function createTestResultPayload(overrides: Record<string, unknown> = {}) {
       sampledDepartments: [],
       userSampleCount: 1,
       sampledUsers: [
-        { userId: '0447654442691174', name: '周华' },
+        { userId: '0447654442691174', name: '林岚' },
       ],
       diagnostics: {
         rootDepartmentChildCount: 0,
@@ -202,10 +209,10 @@ function createTestResultPayload(overrides: Record<string, unknown> = {}) {
         rootDepartmentDirectUserCountWithAccessLimit: 1,
         rootDepartmentDirectUserHasMoreWithAccessLimit: false,
         sampledRootDepartmentUsers: [
-          { userId: '0447654442691174', name: '周华' },
+          { userId: '0447654442691174', name: '林岚' },
         ],
         sampledRootDepartmentUsersWithAccessLimit: [
-          { userId: '0447654442691174', name: '周华' },
+          { userId: '0447654442691174', name: '林岚' },
         ],
       },
       warnings: [
@@ -386,7 +393,19 @@ describe('DirectoryManagementView', () => {
         ok: true,
         data: {
           integration: { id: 'dir-1' },
-          run: { id: 'run-2', status: 'completed' },
+          run: {
+            id: 'run-2',
+            status: 'completed',
+            stats: {
+              autoAdmittedCount: 2,
+              autoAdmissionExcludedCount: 1,
+              memberGroupsSyncedCount: 2,
+              memberGroupsCreatedCount: 1,
+              memberGroupGovernedUserCount: 3,
+              memberGroupDefaultRoleAssignmentsCount: 4,
+              memberGroupDefaultNamespaceAdmissionsCount: 6,
+            },
+          },
         },
       }))
       .mockResolvedValueOnce(createJsonResponse({
@@ -419,6 +438,13 @@ describe('DirectoryManagementView', () => {
                 accountsSynced: 99,
                 pendingCount: 3,
                 linkedCount: 89,
+                autoAdmittedCount: 2,
+                autoAdmissionExcludedCount: 1,
+                memberGroupsSyncedCount: 2,
+                memberGroupsCreatedCount: 1,
+                memberGroupGovernedUserCount: 3,
+                memberGroupDefaultRoleAssignmentsCount: 4,
+                memberGroupDefaultNamespaceAdmissionsCount: 6,
               },
               errorMessage: null,
             },
@@ -507,7 +533,7 @@ describe('DirectoryManagementView', () => {
     expect(apiFetchMock).toHaveBeenCalledWith('/api/admin/directory/integrations/dir-1/alerts?page=1&pageSize=20&filter=all')
     expect(apiFetchMock).toHaveBeenCalledWith('/api/admin/directory/integrations/dir-1/review-items?page=1&pageSize=100&filter=all')
     expect(apiFetchMock).toHaveBeenCalledWith('/api/admin/directory/integrations/dir-1/accounts?page=1&pageSize=25')
-    expect(container?.textContent).toContain('目录同步已完成')
+    expect(container?.textContent).toContain('目录同步已完成，自动准入 2 位成员，1 位成员命中排除部门，未自动创建，同步 2 个成员组（新建 1 个），为 3 位成员补齐默认治理（角色新增 4 项，插件开通新增 6 项）')
     expect(container?.textContent).toContain('账号 99')
   })
 
@@ -709,6 +735,145 @@ describe('DirectoryManagementView', () => {
     )
     expect(container?.textContent).toContain('已完成快速绑定')
     expect(container?.textContent).toContain('alpha@example.com')
+  })
+
+  it('creates a local user from a pending review item and binds it immediately', async () => {
+    apiFetchMock
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: {
+          items: [createIntegration()],
+        },
+      }))
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: { items: [] },
+      }))
+      .mockResolvedValueOnce(createJsonResponse(
+        createScheduleSnapshotPayload(),
+      ))
+      .mockResolvedValueOnce(createJsonResponse(
+        createAlertListPayload([]),
+      ))
+      .mockResolvedValueOnce(createJsonResponse(
+        createReviewItemsPayload([
+          {
+            kind: 'pending_binding',
+            reason: '目录成员尚未绑定本地用户。',
+            account: createAccount({
+              id: 'account-manual-create',
+              name: '李青',
+              email: null,
+              mobile: '13900001234',
+            }),
+            flags: {
+              missingUnionId: false,
+              missingOpenId: true,
+            },
+            actionable: {
+              canBatchUnbind: false,
+              canConfirmRecommendation: false,
+            },
+            recommendations: [],
+            recommendationStatus: {
+              code: 'no_exact_match',
+              message: '未匹配到本地用户',
+            },
+          },
+        ]),
+      ))
+      .mockResolvedValueOnce(createJsonResponse(
+        createAccountListPayload([createAccount({
+          id: 'account-manual-create',
+          name: '李青',
+          email: null,
+          mobile: '13900001234',
+        })], { total: 1 }),
+      ))
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: {
+          user: {
+            id: 'user-created',
+            email: 'liqing@example.com',
+            name: '李青',
+            mobile: null,
+            role: 'user',
+            is_active: true,
+          },
+          roles: [],
+          permissions: [],
+          isAdmin: false,
+          temporaryPassword: 'Temp#123456',
+          onboarding: {
+            acceptInviteUrl: 'https://example.com/invite/abc',
+            inviteMessage: '请使用邀请链接加入平台',
+          },
+        },
+      }))
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: {
+          items: [createIntegration()],
+        },
+      }))
+      .mockResolvedValueOnce(createJsonResponse(
+        createReviewItemsPayload([]),
+      ))
+      .mockResolvedValueOnce(createJsonResponse(
+        createAccountListPayload([createAccount({
+          id: 'account-manual-create',
+          name: '李青',
+          email: 'liqing@example.com',
+          mobile: '13900001234',
+          linkStatus: 'linked',
+          matchStrategy: 'manual_admin',
+          localUser: {
+            id: 'user-created',
+            email: 'liqing@example.com',
+            name: '李青',
+          },
+        })], { total: 1 }),
+      ))
+
+    app = createApp(DirectoryManagementView)
+    registerRouterLink(app)
+    app.mount(container!)
+    await flushUi()
+
+    const toggleButton = Array.from(container!.querySelectorAll('.directory-admin__review-item button')).find((button) => button.textContent?.includes('手动创建用户'))
+    expect(toggleButton).toBeTruthy()
+    toggleButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi(2)
+
+    const emailInput = Array.from(container!.querySelectorAll('input')).find((input) => input.getAttribute('type') === 'email') as HTMLInputElement | undefined
+    expect(emailInput).toBeTruthy()
+    emailInput!.value = 'liqing@example.com'
+    emailInput!.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi(2)
+
+    const createAndBindButton = Array.from(container!.querySelectorAll('.directory-admin__review-item button')).find((button) => button.textContent?.includes('创建用户并绑定'))
+    expect(createAndBindButton).toBeTruthy()
+    createAndBindButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi(12)
+
+    expect(apiFetchMock).toHaveBeenCalledWith(
+      '/api/admin/directory/accounts/account-manual-create/admit-user',
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({
+          name: '李青',
+          email: 'liqing@example.com',
+          mobile: '13900001234',
+          enableDingTalkGrant: true,
+        }),
+      }),
+    )
+    expect(container?.textContent).toContain('最近创建并绑定结果')
+    expect(container?.textContent).toContain('新用户临时密码：Temp#123456')
+    expect(container?.textContent).toContain('https://example.com/invite/abc')
+    expect(container?.textContent).toContain('请使用邀请链接加入平台')
+    expect(container?.textContent).toContain('已创建本地用户并完成绑定')
   })
 
   it('focuses a reviewed account and quick-binds it from the accounts banner', async () => {
@@ -1697,7 +1862,7 @@ describe('DirectoryManagementView', () => {
             reason: '目录成员当前不是已确认绑定状态，建议复核。',
             account: createAccount({
               id: 'account-mobile-bind',
-              mobile: '13758875801',
+              mobile: '13900001234',
               linkStatus: 'pending',
               matchStrategy: 'mobile',
               localUser: null,
@@ -1727,7 +1892,7 @@ describe('DirectoryManagementView', () => {
       .mockResolvedValueOnce(createJsonResponse(
         createAccountListPayload([createAccount({
           id: 'account-mobile-bind',
-          mobile: '13758875801',
+          mobile: '13900001234',
           linkStatus: 'pending',
           matchStrategy: 'mobile',
         })]),
@@ -1739,7 +1904,7 @@ describe('DirectoryManagementView', () => {
             id: 'user-1',
             email: 'alpha@example.com',
             name: 'Alpha',
-            mobile: '13758875801',
+            mobile: '13900001234',
           },
           roles: ['user'],
           permissions: [],
@@ -1772,7 +1937,7 @@ describe('DirectoryManagementView', () => {
       .mockResolvedValueOnce(createJsonResponse(
         createAccountListPayload([createAccount({
           id: 'account-mobile-bind',
-          mobile: '13758875801',
+          mobile: '13900001234',
           linkStatus: 'linked',
           matchStrategy: 'manual_admin',
           localUser: {
@@ -1801,7 +1966,7 @@ describe('DirectoryManagementView', () => {
       expect.anything(),
     )
     expect(container?.textContent).toContain('平台手机号：13600000000')
-    expect(container?.textContent).toContain('目录手机号：13758875801')
+    expect(container?.textContent).toContain('目录手机号：13900001234')
     expect(container?.textContent).toContain('存在差异，覆盖前需确认。')
     expect(container?.textContent).toContain('确认覆盖手机号并绑定')
 
@@ -1815,7 +1980,7 @@ describe('DirectoryManagementView', () => {
       expect.objectContaining({
         method: 'PATCH',
         body: JSON.stringify({
-          mobile: '13758875801',
+          mobile: '13900001234',
           expectedMobile: '13600000000',
         }),
       }),
@@ -1863,7 +2028,7 @@ describe('DirectoryManagementView', () => {
             reason: '目录成员当前不是已确认绑定状态，建议复核。',
             account: createAccount({
               id: 'account-mobile-conflict',
-              mobile: '13758875801',
+              mobile: '13900001234',
               linkStatus: 'pending',
               matchStrategy: 'mobile',
               localUser: null,
@@ -1893,7 +2058,7 @@ describe('DirectoryManagementView', () => {
       .mockResolvedValueOnce(createJsonResponse(
         createAccountListPayload([createAccount({
           id: 'account-mobile-conflict',
-          mobile: '13758875801',
+          mobile: '13900001234',
           linkStatus: 'pending',
           matchStrategy: 'mobile',
         })]),
@@ -1914,7 +2079,7 @@ describe('DirectoryManagementView', () => {
               reason: '目录成员当前不是已确认绑定状态，建议复核。',
               account: createAccount({
                 id: 'account-mobile-conflict',
-                mobile: '13758875801',
+                mobile: '13900001234',
                 linkStatus: 'pending',
                 matchStrategy: 'mobile',
                 localUser: null,
@@ -1947,7 +2112,7 @@ describe('DirectoryManagementView', () => {
         data: {
           account: createAccount({
           id: 'account-mobile-conflict',
-          mobile: '13758875801',
+          mobile: '13900001234',
           linkStatus: 'pending',
           matchStrategy: 'mobile',
         }),
@@ -1977,7 +2142,7 @@ describe('DirectoryManagementView', () => {
       expect.objectContaining({
         method: 'PATCH',
         body: JSON.stringify({
-          mobile: '13758875801',
+          mobile: '13900001234',
           expectedMobile: '13600000000',
         }),
       }),
@@ -2020,7 +2185,7 @@ describe('DirectoryManagementView', () => {
             reason: '目录成员当前不是已确认绑定状态，建议复核。',
             account: createAccount({
               id: 'account-mobile-same',
-              mobile: '13758875801',
+              mobile: '13900001234',
               linkStatus: 'pending',
               matchStrategy: 'mobile',
               localUser: null,
@@ -2030,7 +2195,7 @@ describe('DirectoryManagementView', () => {
                 id: 'user-1',
                 email: 'alpha@example.com',
                 name: 'Alpha',
-                mobile: '13758875801',
+                mobile: '13900001234',
                 role: 'user',
                 isActive: true,
               },
@@ -2050,7 +2215,7 @@ describe('DirectoryManagementView', () => {
       .mockResolvedValueOnce(createJsonResponse(
         createAccountListPayload([createAccount({
           id: 'account-mobile-same',
-          mobile: '13758875801',
+          mobile: '13900001234',
           linkStatus: 'pending',
           matchStrategy: 'mobile',
         })]),
@@ -2064,8 +2229,8 @@ describe('DirectoryManagementView', () => {
     app.mount(container!)
     await flushUi()
 
-    expect(container?.textContent).not.toContain('平台手机号：13758875801')
-    expect(container?.textContent).not.toContain('目录手机号：13758875801')
+    expect(container?.textContent).not.toContain('平台手机号：13900001234')
+    expect(container?.textContent).not.toContain('目录手机号：13900001234')
     expect(container?.textContent).not.toContain('回填手机号后绑定')
     expect(container?.textContent).not.toContain('确认覆盖手机号并绑定')
   })
@@ -3843,7 +4008,7 @@ describe('DirectoryManagementView', () => {
             reason: '目录成员尚未绑定本地用户。',
             account: createAccount({
               id: 'account-1',
-              name: '周华',
+              name: '林岚',
             }),
             flags: {
               missingUnionId: false,
@@ -4078,6 +4243,24 @@ describe('DirectoryManagementView', () => {
     app.mount(container!)
     await flushUi()
 
+    const includeTextarea = container!.querySelector('textarea[placeholder*="将覆盖所选部门及其子部门"]') as HTMLTextAreaElement | null
+    const excludeTextarea = container!.querySelector('textarea[placeholder*="会覆盖白名单父部门"]') as HTMLTextAreaElement | null
+    const roleTextarea = container!.querySelector('textarea[placeholder*="填写 role ID"]') as HTMLTextAreaElement | null
+    const namespaceTextarea = container!.querySelector('textarea[placeholder*="填写命名空间"]') as HTMLTextAreaElement | null
+    expect(includeTextarea).toBeTruthy()
+    expect(excludeTextarea).toBeTruthy()
+    expect(roleTextarea).toBeTruthy()
+    expect(namespaceTextarea).toBeTruthy()
+    includeTextarea!.value = 'dept-root\ndept-child'
+    includeTextarea!.dispatchEvent(new Event('input', { bubbles: true }))
+    excludeTextarea!.value = 'dept-private'
+    excludeTextarea!.dispatchEvent(new Event('input', { bubbles: true }))
+    roleTextarea!.value = 'crm_user\nsales_user'
+    roleTextarea!.dispatchEvent(new Event('input', { bubbles: true }))
+    namespaceTextarea!.value = 'crm\nsales'
+    namespaceTextarea!.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi(2)
+
     const testButton = Array.from(container!.querySelectorAll('button')).find((button) => button.textContent?.includes('测试连通性'))
     expect(testButton).toBeTruthy()
     testButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
@@ -4096,6 +4279,13 @@ describe('DirectoryManagementView', () => {
           rootDepartmentId: '1',
           baseUrl: '',
           pageSize: 50,
+          admissionMode: 'manual_only',
+          admissionDepartmentIds: ['dept-root', 'dept-child'],
+          excludeDepartmentIds: ['dept-private'],
+          memberGroupSyncMode: 'disabled',
+          memberGroupDepartmentIds: [],
+          memberGroupDefaultRoleIds: ['crm_user', 'sales_user'],
+          memberGroupDefaultNamespaces: ['crm', 'sales'],
           status: 'active',
           scheduleCron: '',
           defaultDeprovisionPolicy: 'mark_inactive',
@@ -4541,10 +4731,10 @@ describe('DirectoryManagementView', () => {
           rootDepartmentDirectUserCountWithAccessLimit: 1,
           rootDepartmentDirectUserHasMoreWithAccessLimit: false,
           sampledRootDepartmentUsers: [
-            { userId: '0447654442691174', name: '周华' },
+            { userId: '0447654442691174', name: '林岚' },
           ],
           sampledRootDepartmentUsersWithAccessLimit: [
-            { userId: '0447654442691174', name: '周华' },
+            { userId: '0447654442691174', name: '林岚' },
           ],
         },
         warnings: [],

@@ -92,7 +92,10 @@ const showNav = computed(() => {
 })
 
 const isPublicRoute = computed(() => {
-  return route.path === '/login' || route.meta?.requiresAuth === false || route.meta?.requiresGuest === true
+  return route.path === '/login'
+    || route.meta?.requiresAuth === false
+    || route.meta?.requiresGuest === true
+    || route.meta?.skipShellBootstrap === true
 })
 const attendanceFocused = computed(() => isAttendanceFocused())
 const plmWorkbenchFocused = computed(() => isPlmWorkbenchFocused())
