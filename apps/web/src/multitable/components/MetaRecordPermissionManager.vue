@@ -112,7 +112,7 @@
               <select
                 :value="candidateDrafts[subjectKey(candidate.subjectType, candidate.subjectId)] ?? candidate.accessLevel ?? 'read'"
                 class="meta-record-perm__select"
-                :disabled="busyKey === subjectKey(candidate.subjectType, candidate.subjectId)"
+                :disabled="busyKey === subjectKey(candidate.subjectType, candidate.subjectId) || candidateGrantBlocked(candidate)"
                 @change="setCandidateDraft(candidate.subjectType, candidate.subjectId, $event)"
               >
                 <option value="read">Read</option>
@@ -122,7 +122,7 @@
               <button
                 class="meta-record-perm__action meta-record-perm__action--primary"
                 type="button"
-                :disabled="busyKey === subjectKey(candidate.subjectType, candidate.subjectId)"
+                :disabled="busyKey === subjectKey(candidate.subjectType, candidate.subjectId) || candidateGrantBlocked(candidate)"
                 @click="grantCandidate(candidate.subjectType, candidate.subjectId)"
               >
                 Grant
@@ -249,6 +249,10 @@ function subjectTypeLabel(subjectType: string): string {
 
 function subjectIsInactive(subjectType: string, isActive: boolean) {
   return subjectType === 'user' && isActive === false
+}
+
+function candidateGrantBlocked(candidate: MetaSheetPermissionCandidate) {
+  return subjectIsInactive(candidate.subjectType, candidate.isActive)
 }
 
 function requestClose() {

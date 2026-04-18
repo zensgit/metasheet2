@@ -142,7 +142,7 @@
                 <select
                   :value="candidateDrafts[subjectKey(candidate.subjectType, candidate.subjectId)] ?? candidate.accessLevel ?? 'read'"
                   class="meta-sheet-perm__select"
-                  :disabled="busySubjectKey === subjectKey(candidate.subjectType, candidate.subjectId)"
+                  :disabled="busySubjectKey === subjectKey(candidate.subjectType, candidate.subjectId) || candidateGrantBlocked(candidate)"
                   @change="setCandidateDraft(candidate.subjectType, candidate.subjectId, $event)"
                 >
                   <option
@@ -156,7 +156,7 @@
                 <button
                   class="meta-sheet-perm__action meta-sheet-perm__action--primary"
                   type="button"
-                  :disabled="busySubjectKey === subjectKey(candidate.subjectType, candidate.subjectId)"
+                  :disabled="busySubjectKey === subjectKey(candidate.subjectType, candidate.subjectId) || candidateGrantBlocked(candidate)"
                   @click="grantCandidate(candidate.subjectType, candidate.subjectId)"
                 >
                   Apply
@@ -945,6 +945,10 @@ function subjectTypeBadgeLabel(subjectType: MetaSheetPermissionSubjectType) {
 
 function subjectIsInactive(subjectType: MetaSheetPermissionSubjectType, isActive: boolean) {
   return subjectType === 'user' && isActive === false
+}
+
+function candidateGrantBlocked(candidate: MetaSheetPermissionCandidate) {
+  return subjectIsInactive(candidate.subjectType, candidate.isActive)
 }
 
 function requestClose() {

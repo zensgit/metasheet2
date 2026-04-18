@@ -263,6 +263,8 @@ describe('MetaSheetPermissionManager', () => {
     const inactiveCandidate = container!.querySelector('[data-sheet-permission-candidate="user:user_candidate_inactive"]')!
     expect(inactiveEntry.textContent).toContain('Inactive user')
     expect(inactiveCandidate.textContent).toContain('Inactive user')
+    expect((inactiveCandidate.querySelector('.meta-sheet-perm__select') as HTMLSelectElement).disabled).toBe(true)
+    expect((inactiveCandidate.querySelector('.meta-sheet-perm__action--primary') as HTMLButtonElement).disabled).toBe(true)
   })
 
   it('clears field defaults by removing overrides and shows orphan field overrides', async () => {
