@@ -74,3 +74,10 @@ Current `main` backend build is unblocked again without replaying old mixed-bran
 - producing a real Yjs-ready GHCR image
 - continuing remote rollout validation
 - keeping multitable JSON persistence code type-safe on current `main`
+
+## Delivery Notes
+
+- The repair was committed on branch `codex/yjs-main-clean-20260418`
+- Code commit:
+  - `0f10cd181 fix(collab): restore backend build baseline on main`
+- A clean exported build context was used for Docker verification so local `node_modules` noise in the worktree would not affect image build results
