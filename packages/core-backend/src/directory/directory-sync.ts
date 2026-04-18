@@ -526,6 +526,16 @@ export type DirectoryAccountManualAdmissionResult = DirectoryAccountMutationResu
   onboarding: ReturnType<typeof buildOnboardingPacket>
 }
 
+export type DirectoryAutoAdmissionOnboardingPacket = {
+  userId: string
+  name: string
+  email: string | null
+  username: string | null
+  mobile: string | null
+  temporaryPassword: string
+  onboarding: ReturnType<typeof buildOnboardingPacket>
+}
+
 export type DirectoryAutoAdmissionEligibility = {
   inScope: boolean
   missingEmail: boolean
@@ -602,6 +612,29 @@ function resolveDirectoryAdmissionAccountLabel(options: {
   userId?: string | null
 }): string {
   return options.email || options.username || options.mobile || options.userId || '由管理员单独告知'
+}
+
+export function buildDirectoryAutoAdmissionUsername(account: {
+  id: string
+  external_user_id: string
+  union_id: string | null
+  open_id: string | null
+}): string {
+  const stableSource = [
+    normalizeText(account.external_user_id),
+    normalizeText(account.union_id),
+    normalizeText(account.open_id),
+    normalizeText(account.id).replace(/-/g, ''),
+  ].find((value) => value.length > 0) || 'user'
+  const normalizedSource = stableSource
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+  const uniqueSuffix = normalizeText(account.id).replace(/-/g, '').slice(0, 8).toLowerCase() || 'account'
+  const username = `dt_${normalizedSource || 'user'}_${uniqueSuffix}`
+    .replace(/_+/g, '_')
+    .slice(0, 64)
+  return username.length >= 3 ? username : `dt_${uniqueSuffix}`
 }
 
 function generateDirectoryAdmissionTemporaryPassword(): string {
@@ -1828,7 +1861,11 @@ export async function syncDirectoryIntegration(
   integrationId: string,
   triggeredBy: string,
   triggerSource: 'manual' | 'scheduler' = 'manual',
-): Promise<{ integration: DirectoryIntegrationSummary; run: DirectorySyncRunSummary }> {
+): Promise<{
+  integration: DirectoryIntegrationSummary
+  run: DirectorySyncRunSummary
+  autoAdmissionOnboardingPackets: DirectoryAutoAdmissionOnboardingPacket[]
+}> {
   const governedUserIds = new Set<string>()
   const integration = await getIntegrationRow(integrationId)
   if (!integration) throw new Error('Directory integration not found')
@@ -1850,6 +1887,7 @@ export async function syncDirectoryIntegration(
     const users = await fetchAllUsers(config, departments)
     const syncTimestamp = new Date().toISOString()
     const autoAdmissionInvites: Array<{ userId: string; email: string; inviteToken: string }> = []
+    const autoAdmissionOnboardingPackets: DirectoryAutoAdmissionOnboardingPacket[] = []
 
     await transaction(async (client) => {
       for (const department of departments.values()) {
@@ -2012,6 +2050,7 @@ export async function syncDirectoryIntegration(
       let unmatchedCount = 0
       let autoAdmissionCandidateCount = 0
       let autoAdmittedCount = 0
+      let autoAdmittedNoEmailCount = 0
       let autoAdmissionSkippedMissingEmailCount = 0
       let autoAdmissionExcludedCount = 0
       let autoAdmissionFailedCount = 0
@@ -2056,10 +2095,18 @@ export async function syncDirectoryIntegration(
               if (autoAdmission.inScope) autoAdmissionCandidateCount += 1
               if (autoAdmission.excluded) autoAdmissionExcludedCount += 1
 
-              if (autoAdmission.inScope && !autoAdmission.missingEmail && directoryUser) {
+              if (autoAdmission.inScope && directoryUser) {
                 try {
                   const cleanName = sanitizeDirectoryAdmissionName(account.name)
-                  const cleanEmail = sanitizeDirectoryAdmissionEmail(account.email ?? '')
+                  const cleanEmail = account.email ? sanitizeDirectoryAdmissionEmail(account.email) : null
+                  const generatedUsername = cleanEmail
+                    ? null
+                    : buildDirectoryAutoAdmissionUsername({
+                        id: account.id,
+                        external_user_id: account.external_user_id,
+                        union_id: account.union_id,
+                        open_id: account.open_id,
+                      })
                   const cleanMobile = sanitizeDirectoryAdmissionMobile(account.mobile)
                   const generatedPassword = generateDirectoryAdmissionTemporaryPassword()
                   const passwordHash = await bcrypt.hash(generatedPassword, getBcryptSaltRounds())
@@ -2080,27 +2127,52 @@ export async function syncDirectoryIntegration(
                     adminUserId: triggeredBy,
                     name: cleanName,
                     email: cleanEmail,
-                    username: null,
+                    username: generatedUsername,
                     mobile: cleanMobile,
                     passwordHash,
                     mustChangePassword: true,
                     enableDingTalkGrant: true,
                   })
-                  const inviteToken = issueInviteToken({
-                    userId: created.userId,
-                    email: cleanEmail,
-                    presetId: null,
-                  })
-                  autoAdmissionInvites.push({
-                    userId: created.userId,
-                    email: cleanEmail,
-                    inviteToken,
-                  })
+                  let inviteToken: string | null = null
+                  if (cleanEmail) {
+                    inviteToken = issueInviteToken({
+                      userId: created.userId,
+                      email: cleanEmail,
+                      presetId: null,
+                    })
+                    autoAdmissionInvites.push({
+                      userId: created.userId,
+                      email: cleanEmail,
+                      inviteToken,
+                    })
+                  } else {
+                    autoAdmittedNoEmailCount += 1
+                    autoAdmissionOnboardingPackets.push({
+                      userId: created.userId,
+                      name: cleanName,
+                      email: cleanEmail,
+                      username: generatedUsername,
+                      mobile: cleanMobile,
+                      temporaryPassword: generatedPassword,
+                      onboarding: buildOnboardingPacket({
+                        email: cleanEmail,
+                        accountLabel: resolveDirectoryAdmissionAccountLabel({
+                          email: cleanEmail,
+                          username: generatedUsername,
+                          mobile: cleanMobile,
+                          userId: created.userId,
+                        }),
+                        temporaryPassword: generatedPassword,
+                        preset: null,
+                        inviteToken,
+                      }),
+                    })
+                  }
                   localUserId = created.userId
                   linkStatus = 'linked'
                   matchStrategy = 'auto_admit'
                   autoAdmittedCount += 1
-                  emailMap.set(cleanEmail.toLowerCase(), created.userId)
+                  if (cleanEmail) emailMap.set(cleanEmail.toLowerCase(), created.userId)
                   if (cleanMobile) mobileMap.set(cleanMobile, created.userId)
                   externalIdentityMap.set(account.external_key, created.userId)
                   const scopedOpenIdentityKey = buildScopedIdentityKey(account.corp_id, account.open_id)
@@ -2181,6 +2253,7 @@ export async function syncDirectoryIntegration(
         unmatchedCount,
         autoAdmissionCandidateCount,
         autoAdmittedCount,
+        autoAdmittedNoEmailCount,
         autoAdmissionSkippedMissingEmailCount,
         autoAdmissionExcludedCount,
         autoAdmissionFailedCount,
@@ -2245,6 +2318,7 @@ export async function syncDirectoryIntegration(
     return {
       integration: summarizeIntegration(updatedIntegration),
       run: summarizeRun(updatedRun.rows[0]),
+      autoAdmissionOnboardingPackets,
     }
   } catch (error) {
     const message = readErrorMessage(error, 'Directory sync failed')

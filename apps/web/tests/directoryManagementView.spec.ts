@@ -398,6 +398,7 @@ describe('DirectoryManagementView', () => {
             status: 'completed',
             stats: {
               autoAdmittedCount: 2,
+              autoAdmittedNoEmailCount: 1,
               autoAdmissionExcludedCount: 1,
               memberGroupsSyncedCount: 2,
               memberGroupsCreatedCount: 1,
@@ -406,6 +407,21 @@ describe('DirectoryManagementView', () => {
               memberGroupDefaultNamespaceAdmissionsCount: 6,
             },
           },
+          autoAdmissionOnboardingPackets: [
+            {
+              userId: 'user-no-email-1',
+              name: '林岚',
+              email: null,
+              username: 'dt_linlan_12345678',
+              mobile: '13900001234',
+              temporaryPassword: 'Tmp-NoEmail-123',
+              onboarding: {
+                accountLabel: 'dt_linlan_12345678',
+                acceptInviteUrl: '',
+                inviteMessage: '账号：dt_linlan_12345678\n临时密码：Tmp-NoEmail-123',
+              },
+            },
+          ],
         },
       }))
       .mockResolvedValueOnce(createJsonResponse({
@@ -439,6 +455,7 @@ describe('DirectoryManagementView', () => {
                 pendingCount: 3,
                 linkedCount: 89,
                 autoAdmittedCount: 2,
+                autoAdmittedNoEmailCount: 1,
                 autoAdmissionExcludedCount: 1,
                 memberGroupsSyncedCount: 2,
                 memberGroupsCreatedCount: 1,
@@ -533,7 +550,11 @@ describe('DirectoryManagementView', () => {
     expect(apiFetchMock).toHaveBeenCalledWith('/api/admin/directory/integrations/dir-1/alerts?page=1&pageSize=20&filter=all')
     expect(apiFetchMock).toHaveBeenCalledWith('/api/admin/directory/integrations/dir-1/review-items?page=1&pageSize=100&filter=all')
     expect(apiFetchMock).toHaveBeenCalledWith('/api/admin/directory/integrations/dir-1/accounts?page=1&pageSize=25')
-    expect(container?.textContent).toContain('目录同步已完成，自动准入 2 位成员，1 位成员命中排除部门，未自动创建，同步 2 个成员组（新建 1 个），为 3 位成员补齐默认治理（角色新增 4 项，插件开通新增 6 项）')
+    expect(container?.textContent).toContain('目录同步已完成，自动准入 2 位成员，其中 1 位成员无邮箱，已生成平台登录账号和临时密码，1 位成员命中排除部门，未自动创建，同步 2 个成员组（新建 1 个），为 3 位成员补齐默认治理（角色新增 4 项，插件开通新增 6 项）')
+    expect(container?.textContent).toContain('本次自动准入临时凭据')
+    expect(container?.textContent).toContain('dt_linlan_12345678')
+    expect(container?.textContent).toContain('Tmp-NoEmail-123')
+    expect(container?.textContent).toContain('该账号未生成邀请链接，请直接分发登录账号和临时密码。')
     expect(container?.textContent).toContain('账号 99')
   })
 

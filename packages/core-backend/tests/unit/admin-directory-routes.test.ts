@@ -237,6 +237,21 @@ describe('adminDirectoryRouter', () => {
     directoryMocks.syncDirectoryIntegration.mockResolvedValue({
       integration: { id: 'dir-1', name: 'DingTalk CN' },
       run: { id: 'run-1', status: 'completed' },
+      autoAdmissionOnboardingPackets: [
+        {
+          userId: 'user-1',
+          name: '林岚',
+          email: null,
+          username: 'dt_linlan_12345678',
+          mobile: '13900001234',
+          temporaryPassword: 'Tmp-123',
+          onboarding: {
+            accountLabel: 'dt_linlan_12345678',
+            acceptInviteUrl: '',
+            inviteMessage: '账号：dt_linlan_12345678',
+          },
+        },
+      ],
     })
 
     const response = await invokeRoute('post', '/integrations/:integrationId/sync', {
@@ -251,6 +266,13 @@ describe('adminDirectoryRouter', () => {
       data: {
         integration: { id: 'dir-1' },
         run: { id: 'run-1', status: 'completed' },
+        autoAdmissionOnboardingPackets: [
+          {
+            userId: 'user-1',
+            username: 'dt_linlan_12345678',
+            temporaryPassword: 'Tmp-123',
+          },
+        ],
       },
     })
   })

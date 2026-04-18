@@ -86,6 +86,60 @@
       </pre>
     </article>
 
+    <article v-if="autoAdmissionOnboardingPackets.length > 0" class="directory-admin__progress-card">
+      <div class="directory-admin__section-head">
+        <div>
+          <h2>本次自动准入临时凭据</h2>
+          <p class="directory-admin__hint">以下无邮箱目录成员已自动创建本地用户，请通过安全渠道下发登录账号与临时密码。</p>
+        </div>
+        <div class="directory-admin__actions">
+          <button class="directory-admin__button directory-admin__button--secondary" type="button" @click="clearAutoAdmissionOnboardingPackets()">
+            关闭结果
+          </button>
+        </div>
+      </div>
+
+      <article
+        v-for="packet in autoAdmissionOnboardingPackets"
+        :key="packet.userId"
+        class="directory-admin__review-admission"
+      >
+        <div class="directory-admin__account-grid">
+          <div>
+            <strong>本地用户</strong>
+            <div>{{ packet.name || packet.email || packet.username || packet.mobile || packet.userId }}</div>
+          </div>
+          <div>
+            <strong>登录账号</strong>
+            <div>{{ packet.email || packet.username || packet.mobile || packet.userId }}</div>
+          </div>
+          <div>
+            <strong>用户 ID</strong>
+            <div>{{ packet.userId }}</div>
+          </div>
+          <div>
+            <strong>手机号</strong>
+            <div>{{ packet.mobile || '未填写' }}</div>
+          </div>
+        </div>
+        <p class="directory-admin__status">
+          临时密码：{{ packet.temporaryPassword }}
+        </p>
+        <p v-if="packet.onboarding?.acceptInviteUrl" class="directory-admin__hint">
+          邀请链接：
+          <a :href="packet.onboarding.acceptInviteUrl" target="_blank" rel="noreferrer">
+            {{ packet.onboarding.acceptInviteUrl }}
+          </a>
+        </p>
+        <p v-else class="directory-admin__hint">
+          该账号未生成邀请链接，请直接分发登录账号和临时密码。
+        </p>
+        <pre v-if="packet.onboarding?.inviteMessage" class="directory-admin__invite">
+{{ packet.onboarding.inviteMessage }}
+        </pre>
+      </article>
+    </article>
+
     <div class="directory-admin__layout">
       <aside class="directory-admin__panel directory-admin__panel--list">
         <div class="directory-admin__section-head">
@@ -1313,6 +1367,16 @@ type ManualAdmissionResult = {
   mobileBackfillError: string
 }
 
+type AutoAdmissionOnboardingPacket = {
+  userId: string
+  name: string
+  email: string | null
+  username: string | null
+  mobile: string | null
+  temporaryPassword: string
+  onboarding: OnboardingPacket | null
+}
+
 type InitialDirectoryNavigation = {
   integrationId: string
   accountId: string
@@ -1416,6 +1480,7 @@ const userSearchError = reactive<Record<string, string>>({})
 const manualAdmissionDrafts = reactive<Record<string, ManualAdmissionDraft>>({})
 const manualAdmissionExpanded = reactive<Record<string, boolean>>({})
 const manualAdmissionResult = ref<ManualAdmissionResult | null>(null)
+const autoAdmissionOnboardingPackets = ref<AutoAdmissionOnboardingPacket[]>([])
 const grantToggles = reactive<Record<string, boolean>>({})
 const selectedReviewIds = reactive<Record<string, boolean>>({})
 const reviewDisableDingTalkGrant = ref(true)
@@ -1695,6 +1760,7 @@ function resetDraft() {
   for (const key of Object.keys(userSearchError)) delete userSearchError[key]
   for (const key of Object.keys(grantToggles)) delete grantToggles[key]
   for (const key of Object.keys(selectedReviewIds)) delete selectedReviewIds[key]
+  autoAdmissionOnboardingPackets.value = []
   draft.name = ''
   draft.corpId = ''
   draft.appKey = ''
@@ -1775,6 +1841,7 @@ function readMemberGroupSyncLabel(integration: DirectoryIntegration): string {
 async function selectIntegration(integrationId: string): Promise<void> {
   selectedIntegrationId.value = integrationId
   testResult.value = null
+  clearAutoAdmissionOnboardingPackets()
   clearFocusedAccount()
   accountPage.value = 1
   accountTotal.value = 0
@@ -2194,6 +2261,10 @@ function clearManualAdmissionResult(): void {
   manualAdmissionResult.value = null
 }
 
+function clearAutoAdmissionOnboardingPackets(): void {
+  autoAdmissionOnboardingPackets.value = []
+}
+
 function readCreatedLocalUserOption(data: Record<string, unknown>, fallback: ManualAdmissionDraft): LocalUserOption {
   const user = data.user && typeof data.user === 'object' ? data.user as Record<string, unknown> : null
   const id = typeof user?.id === 'string' ? user.id.trim() : ''
@@ -2209,6 +2280,27 @@ function readCreatedLocalUserOption(data: Record<string, unknown>, fallback: Man
     role: typeof user?.role === 'string' && user.role.trim().length > 0 ? user.role : 'user',
     is_active: typeof user?.is_active === 'boolean' ? user.is_active : true,
   }
+}
+
+function readAutoAdmissionOnboardingPackets(data: Record<string, unknown> | undefined): AutoAdmissionOnboardingPacket[] {
+  const rawPackets = Array.isArray(data?.autoAdmissionOnboardingPackets) ? data.autoAdmissionOnboardingPackets : []
+  return rawPackets.flatMap((entry) => {
+    if (!entry || typeof entry !== 'object') return []
+    const packet = entry as Record<string, unknown>
+    const userId = typeof packet.userId === 'string' ? packet.userId.trim() : ''
+    if (!userId) return []
+    return [{
+      userId,
+      name: typeof packet.name === 'string' ? packet.name : '',
+      email: typeof packet.email === 'string' && packet.email.trim().length > 0 ? packet.email : null,
+      username: typeof packet.username === 'string' && packet.username.trim().length > 0 ? packet.username : null,
+      mobile: typeof packet.mobile === 'string' && packet.mobile.trim().length > 0 ? packet.mobile : null,
+      temporaryPassword: typeof packet.temporaryPassword === 'string' ? packet.temporaryPassword : '',
+      onboarding: packet.onboarding && typeof packet.onboarding === 'object'
+        ? packet.onboarding as OnboardingPacket
+        : null,
+    }]
+  })
 }
 
 function buildPayload() {
@@ -2284,12 +2376,15 @@ async function syncIntegration() {
   if (!selectedIntegration.value) return
   busy.value = true
   try {
+    clearAutoAdmissionOnboardingPackets()
     const response = await apiFetch(`/api/admin/directory/integrations/${selectedIntegration.value.id}/sync`, {
       method: 'POST',
     })
     const body = await readJson(response)
     if (!response.ok) throw new Error(readApiError(body, '目录同步失败'))
+    autoAdmissionOnboardingPackets.value = readAutoAdmissionOnboardingPackets(body?.data as Record<string, unknown> | undefined)
     const autoAdmittedCount = Number(body?.data?.run?.stats?.autoAdmittedCount ?? 0)
+    const autoAdmittedNoEmailCount = Number(body?.data?.run?.stats?.autoAdmittedNoEmailCount ?? 0)
     const autoAdmissionSkippedMissingEmailCount = Number(body?.data?.run?.stats?.autoAdmissionSkippedMissingEmailCount ?? 0)
     const autoAdmissionExcludedCount = Number(body?.data?.run?.stats?.autoAdmissionExcludedCount ?? 0)
     const memberGroupsSyncedCount = Number(body?.data?.run?.stats?.memberGroupsSyncedCount ?? 0)
@@ -2299,6 +2394,7 @@ async function syncIntegration() {
     const memberGroupDefaultNamespaceAdmissionsCount = Number(body?.data?.run?.stats?.memberGroupDefaultNamespaceAdmissionsCount ?? 0)
     if (
       autoAdmittedCount > 0
+      || autoAdmittedNoEmailCount > 0
       || autoAdmissionSkippedMissingEmailCount > 0
       || autoAdmissionExcludedCount > 0
       || memberGroupsSyncedCount > 0
@@ -2306,6 +2402,7 @@ async function syncIntegration() {
     ) {
       const parts = ['目录同步已完成']
       if (autoAdmittedCount > 0) parts.push(`自动准入 ${autoAdmittedCount} 位成员`)
+      if (autoAdmittedNoEmailCount > 0) parts.push(`其中 ${autoAdmittedNoEmailCount} 位成员无邮箱，已生成平台登录账号和临时密码`)
       if (autoAdmissionSkippedMissingEmailCount > 0) parts.push(`${autoAdmissionSkippedMissingEmailCount} 位成员因缺少邮箱未自动创建`)
       if (autoAdmissionExcludedCount > 0) parts.push(`${autoAdmissionExcludedCount} 位成员命中排除部门，未自动创建`)
       if (memberGroupsSyncedCount > 0) {
