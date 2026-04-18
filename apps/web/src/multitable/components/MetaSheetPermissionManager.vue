@@ -44,6 +44,12 @@
               <div class="meta-sheet-perm__identity">
                 <strong>{{ entry.label }}</strong>
                 <span>{{ entry.subtitle || entry.subjectId }}</span>
+                <span
+                  v-if="hasSubjectOverrides(entry.subjectType, entry.subjectId)"
+                  class="meta-sheet-perm__hint meta-sheet-perm__hint--inline"
+                >
+                  {{ subjectOverrideSummaryLabel(entry.subjectType, entry.subjectId) }}
+                </span>
               </div>
               <span class="meta-sheet-perm__subject" :data-subject-type="entry.subjectType">{{ subjectTypeBadgeLabel(entry.subjectType) }}</span>
               <span class="meta-sheet-perm__badge" :data-access-level="entry.accessLevel">{{ accessLevelLabel(entry.accessLevel) }}</span>
@@ -68,6 +74,16 @@
                 @click="applyEntry(entry.subjectType, entry.subjectId)"
               >
                 Save
+              </button>
+              <button
+                v-if="hasSubjectOverrides(entry.subjectType, entry.subjectId)"
+                class="meta-sheet-perm__action"
+                type="button"
+                :data-sheet-permission-clear-overrides="subjectKey(entry.subjectType, entry.subjectId)"
+                :disabled="busySubjectKey === subjectKey(entry.subjectType, entry.subjectId)"
+                @click="clearSubjectOverrides(entry.subjectType, entry.subjectId)"
+              >
+                Clear overrides
               </button>
               <button
                 class="meta-sheet-perm__action meta-sheet-perm__action--danger"
@@ -777,6 +793,22 @@ const peopleCandidates = computed(() => availableCandidates.value.filter((candid
 const memberGroupCandidates = computed(() => availableCandidates.value.filter((candidate) => candidate.subjectType === 'member-group'))
 const roleCandidates = computed(() => availableCandidates.value.filter((candidate) => candidate.subjectType === 'role'))
 const activeSheetSubjectKeys = computed(() => new Set(entries.value.map((entry) => subjectKey(entry.subjectType, entry.subjectId))))
+const subjectOverrideCounts = computed<Record<string, { fieldCount: number; viewCount: number }>>(() => {
+  const counts: Record<string, { fieldCount: number; viewCount: number }> = {}
+  for (const entry of props.fieldPermissionEntries) {
+    const key = subjectKey(entry.subjectType, entry.subjectId)
+    const current = counts[key] ?? { fieldCount: 0, viewCount: 0 }
+    current.fieldCount += 1
+    counts[key] = current
+  }
+  for (const entry of props.viewPermissionEntries) {
+    const key = subjectKey(entry.subjectType, entry.subjectId)
+    const current = counts[key] ?? { fieldCount: 0, viewCount: 0 }
+    current.viewCount += 1
+    counts[key] = current
+  }
+  return counts
+})
 const fieldPermissionOrphans = computed(() =>
   props.fieldPermissionEntries.filter((entry) => !activeSheetSubjectKeys.value.has(subjectKey(entry.subjectType, entry.subjectId))),
 )
@@ -799,6 +831,23 @@ const viewPermissionOrphansByView = computed<Record<string, MetaViewPermissionEn
 })
 const hasFieldOrphans = computed(() => fieldPermissionOrphans.value.length > 0)
 const hasViewOrphans = computed(() => viewPermissionOrphans.value.length > 0)
+
+function subjectOverrideCountsFor(subjectType: MetaSheetPermissionSubjectType, subjectId: string) {
+  return subjectOverrideCounts.value[subjectKey(subjectType, subjectId)] ?? { fieldCount: 0, viewCount: 0 }
+}
+
+function hasSubjectOverrides(subjectType: MetaSheetPermissionSubjectType, subjectId: string) {
+  const counts = subjectOverrideCountsFor(subjectType, subjectId)
+  return counts.fieldCount > 0 || counts.viewCount > 0
+}
+
+function subjectOverrideSummaryLabel(subjectType: MetaSheetPermissionSubjectType, subjectId: string) {
+  const counts = subjectOverrideCountsFor(subjectType, subjectId)
+  const parts: string[] = []
+  if (counts.fieldCount > 0) parts.push(`${counts.fieldCount} field override${counts.fieldCount === 1 ? '' : 's'}`)
+  if (counts.viewCount > 0) parts.push(`${counts.viewCount} view override${counts.viewCount === 1 ? '' : 's'}`)
+  return parts.join(' · ')
+}
 
 function accessLevelLabel(accessLevel: MetaSheetPermissionAccessLevel) {
   return ACCESS_LEVEL_OPTIONS.find((option) => option.value === accessLevel)?.label ?? accessLevel
@@ -939,6 +988,36 @@ async function removeEntry(subjectType: MetaSheetPermissionSubjectType, subjectI
 async function grantCandidate(subjectType: MetaSheetPermissionSubjectType, subjectId: string) {
   const key = subjectKey(subjectType, subjectId)
   await updateSubjectAccess(subjectType, subjectId, candidateDrafts.value[key] ?? 'read', 'Sheet access override saved')
+}
+
+async function clearSubjectOverrides(subjectType: MetaSheetPermissionSubjectType, subjectId: string) {
+  const key = subjectKey(subjectType, subjectId)
+  const fieldOverrides = props.fieldPermissionEntries.filter(
+    (entry) => entry.subjectType === subjectType && entry.subjectId === subjectId,
+  )
+  const viewOverrides = props.viewPermissionEntries.filter(
+    (entry) => entry.subjectType === subjectType && entry.subjectId === subjectId,
+  )
+  if (!fieldOverrides.length && !viewOverrides.length) return
+
+  busySubjectKey.value = key
+  clearMessages()
+  try {
+    await Promise.all([
+      ...fieldOverrides.map((entry) =>
+        props.client.updateFieldPermission(props.sheetId, entry.fieldId, subjectType, subjectId, { remove: true }),
+      ),
+      ...viewOverrides.map((entry) =>
+        props.client.updateViewPermission(entry.viewId, subjectType, subjectId, 'none'),
+      ),
+    ])
+    status.value = `Cleared ${subjectOverrideSummaryLabel(subjectType, subjectId)}`
+    emit('updated')
+  } catch (cause: any) {
+    error.value = cause?.message ?? 'Failed to clear subject overrides'
+  } finally {
+    busySubjectKey.value = null
+  }
 }
 
 watch(
@@ -1163,6 +1242,10 @@ onBeforeUnmount(() => {
   color: #64748b;
   font-size: 12px;
   font-weight: 500;
+}
+
+.meta-sheet-perm__hint--inline {
+  margin-top: 2px;
 }
 
 .meta-sheet-perm__subject {

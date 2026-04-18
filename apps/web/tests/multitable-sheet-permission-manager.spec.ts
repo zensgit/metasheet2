@@ -363,6 +363,88 @@ describe('MetaSheetPermissionManager', () => {
     expect(updatedSpy).toHaveBeenCalledTimes(1)
   })
 
+  it('shows subject override summaries and clears downstream overrides for a sheet subject', async () => {
+    const updatedSpy = vi.fn()
+    const client = {
+      listSheetPermissions: vi.fn().mockResolvedValue({
+        items: [
+          {
+            subjectType: 'member-group',
+            subjectId: 'group_north',
+            accessLevel: 'write',
+            permissions: ['spreadsheet:write'],
+            label: 'North Region',
+            subtitle: 'Regional operations',
+            isActive: true,
+          },
+        ],
+      }),
+      listSheetPermissionCandidates: vi.fn().mockResolvedValue({ items: [] }),
+      updateSheetPermission: vi.fn().mockResolvedValue({}),
+      updateFieldPermission: vi.fn().mockResolvedValue({}),
+      updateViewPermission: vi.fn().mockResolvedValue({}),
+    }
+
+    mountManager({
+      client,
+      onUpdated: updatedSpy,
+      fields: [
+        { id: 'fld_title', name: 'Title', type: 'string', property: {}, order: 0, options: [] },
+        { id: 'fld_owner', name: 'Owner', type: 'string', property: {}, order: 1, options: [] },
+      ],
+      views: [
+        { id: 'view_grid', name: 'Grid View', type: 'grid', sheetId: 'sheet_orders' },
+      ],
+      fieldPermissionEntries: [
+        {
+          fieldId: 'fld_title',
+          subjectType: 'member-group',
+          subjectId: 'group_north',
+          subjectLabel: 'North Region',
+          subjectSubtitle: 'Regional operations',
+          visible: true,
+          readOnly: true,
+          isActive: true,
+        },
+        {
+          fieldId: 'fld_owner',
+          subjectType: 'member-group',
+          subjectId: 'group_north',
+          subjectLabel: 'North Region',
+          subjectSubtitle: 'Regional operations',
+          visible: false,
+          readOnly: false,
+          isActive: true,
+        },
+      ],
+      viewPermissionEntries: [
+        {
+          viewId: 'view_grid',
+          subjectType: 'member-group',
+          subjectId: 'group_north',
+          subjectLabel: 'North Region',
+          subjectSubtitle: 'Regional operations',
+          permission: 'admin',
+          isActive: true,
+        },
+      ],
+    })
+    await flushUi()
+
+    const sheetRow = container!.querySelector('[data-sheet-permission-entry="member-group:group_north"]')!
+    expect(sheetRow.textContent).toContain('2 field overrides')
+    expect(sheetRow.textContent).toContain('1 view override')
+
+    ;(container!.querySelector('[data-sheet-permission-clear-overrides="member-group:group_north"]') as HTMLButtonElement).click()
+    await flushUi()
+
+    expect(client.updateFieldPermission).toHaveBeenCalledTimes(2)
+    expect(client.updateFieldPermission).toHaveBeenNthCalledWith(1, 'sheet_orders', 'fld_title', 'member-group', 'group_north', { remove: true })
+    expect(client.updateFieldPermission).toHaveBeenNthCalledWith(2, 'sheet_orders', 'fld_owner', 'member-group', 'group_north', { remove: true })
+    expect(client.updateViewPermission).toHaveBeenCalledWith('view_grid', 'member-group', 'group_north', 'none')
+    expect(updatedSpy).toHaveBeenCalledTimes(1)
+  })
+
   it('applies a field template to all fields for a member-group subject', async () => {
     const updatedSpy = vi.fn()
     const client = {
