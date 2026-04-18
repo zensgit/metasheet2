@@ -668,6 +668,73 @@ describe('adminDirectoryRouter', () => {
     })
   })
 
+  it('supports manual admission without email when username or mobile is provided', async () => {
+    directoryMocks.admitDirectoryAccountUser.mockResolvedValue({
+      account: {
+        id: 'account-1',
+        integrationId: 'dir-1',
+        corpId: 'dingcorp',
+        externalUserId: '0447654442691174',
+        localUser: {
+          id: 'user-created',
+          email: null,
+          username: 'liqing',
+          name: '李青',
+        },
+      },
+      previousLocalUser: null,
+      user: {
+        id: 'user-created',
+        email: null,
+        username: 'liqing',
+        name: '李青',
+        mobile: '13900001234',
+        role: 'user',
+        is_active: true,
+      },
+      temporaryPassword: 'Temp#123456',
+      inviteToken: null,
+      onboarding: {
+        accountLabel: 'liqing',
+        acceptInviteUrl: '',
+        inviteMessage: '账号：liqing',
+      },
+    })
+
+    const response = await invokeRoute('post', '/accounts/:accountId/admit-user', {
+      params: { accountId: 'account-1' },
+      body: {
+        name: '李青',
+        username: 'liqing',
+        mobile: '13900001234',
+        enableDingTalkGrant: true,
+      },
+      user: { id: 'admin-1', role: 'admin' },
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect(directoryMocks.admitDirectoryAccountUser).toHaveBeenCalledWith('account-1', {
+      adminUserId: 'admin-1',
+      name: '李青',
+      email: '',
+      username: 'liqing',
+      mobile: '13900001234',
+      password: '',
+      enableDingTalkGrant: true,
+    })
+    expect(response.body).toMatchObject({
+      ok: true,
+      data: {
+        user: {
+          id: 'user-created',
+          email: null,
+          username: 'liqing',
+        },
+        inviteToken: null,
+      },
+    })
+  })
+
   it('batch binds directory accounts', async () => {
     directoryMocks.batchBindDirectoryAccounts.mockResolvedValue([
       {

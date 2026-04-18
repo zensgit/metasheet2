@@ -92,7 +92,8 @@ function registerRouterLink(app: App<Element>, withHref = false): void {
 
 type UserFixture = {
   id: string
-  email: string
+  email: string | null
+  username?: string | null
   name: string
   mobile: string | null
   role: string
@@ -113,6 +114,7 @@ function createApiState(): UserFixture[] {
     {
       id: 'user-1',
       email: 'alpha@example.com',
+      username: 'alpha',
       name: 'Alpha',
       mobile: null,
       role: 'user',
@@ -132,6 +134,7 @@ function createApiState(): UserFixture[] {
     {
       id: 'user-2',
       email: 'bravo@example.com',
+      username: 'bravo',
       name: 'Bravo',
       mobile: null,
       role: 'user',
@@ -151,6 +154,7 @@ function createApiState(): UserFixture[] {
     {
       id: 'user-3',
       email: 'charlie@example.com',
+      username: 'charlie',
       name: 'Charlie',
       mobile: null,
       role: 'user',
@@ -170,6 +174,7 @@ function createApiState(): UserFixture[] {
     {
       id: 'user-4',
       email: 'delta@example.com',
+      username: 'delta',
       name: 'Delta',
       mobile: '13800000004',
       role: 'admin',
@@ -206,7 +211,7 @@ function createApiImplementation(
     const pathname = url.pathname
     const query = url.searchParams.get('q')?.trim().toLowerCase() || ''
     const filteredUsers = query
-      ? state.filter((user) => [user.name, user.email, user.id, user.role, user.mobile || ''].some((field) => field.toLowerCase().includes(query)))
+      ? state.filter((user) => [user.name, user.email || '', user.username || '', user.id, user.role, user.mobile || ''].some((field) => field.toLowerCase().includes(query)))
       : state
 
     const findUserById = (userId: string) => state.find((user) => user.id === userId) || state[0]
@@ -214,6 +219,7 @@ function createApiImplementation(
     const buildUserPayload = (user: UserFixture) => ({
       id: user.id,
       email: user.email,
+      username: user.username ?? null,
       name: user.name,
       mobile: user.mobile,
       role: user.role,
@@ -323,6 +329,44 @@ function createApiImplementation(
       return createJsonResponse({
         ok: true,
         data: { items: [] },
+      })
+    }
+
+    if (pathname === '/api/admin/users' && (init?.method || 'GET').toUpperCase() === 'POST') {
+      const rawBody = typeof init?.body === 'string' ? init.body : ''
+      const parsed = rawBody ? JSON.parse(rawBody) as {
+        name?: unknown
+        email?: unknown
+        username?: unknown
+        mobile?: unknown
+      } : {}
+      const newUser: UserFixture = {
+        id: 'user-created',
+        email: typeof parsed.email === 'string' && parsed.email.trim().length > 0 ? parsed.email.trim() : null,
+        username: typeof parsed.username === 'string' && parsed.username.trim().length > 0 ? parsed.username.trim() : null,
+        name: typeof parsed.name === 'string' && parsed.name.trim().length > 0 ? parsed.name.trim() : '新用户',
+        mobile: typeof parsed.mobile === 'string' && parsed.mobile.trim().length > 0 ? parsed.mobile.trim() : null,
+        role: 'user',
+        is_active: true,
+        grantEnabled: false,
+        directoryLinked: false,
+        namespaceAdmissions: [],
+      }
+      state.unshift(newUser)
+      return createJsonResponse({
+        ok: true,
+        data: {
+          user: buildUserPayload(newUser),
+          roles: [],
+          permissions: [],
+          isAdmin: false,
+          temporaryPassword: 'Temp#123456',
+          onboarding: {
+            accountLabel: newUser.username || newUser.mobile || newUser.id,
+            acceptInviteUrl: '',
+            inviteMessage: `账号：${newUser.username || newUser.mobile || newUser.id}`,
+          },
+        },
       })
     }
 
@@ -817,6 +861,48 @@ describe('UserManagementView', () => {
 
     expect(container?.textContent).not.toContain('用户手机号已被其他操作更新为')
     expect(container?.textContent).not.toContain('用户资料已更新')
+  })
+
+  it('creates a no-email user with username/mobile and surfaces temporary-password onboarding', async () => {
+    app = createApp(UserManagementView)
+    registerRouterLink(app)
+    app.mount(container!)
+    await flushUi(20)
+
+    const inputs = Array.from(container!.querySelectorAll('.user-admin__panel--create input'))
+    const nameInput = inputs.find((candidate) => candidate.getAttribute('placeholder') === '姓名') as HTMLInputElement | undefined
+    const usernameInput = inputs.find((candidate) => candidate.getAttribute('placeholder') === '用户名（可选）') as HTMLInputElement | undefined
+    const mobileInput = inputs.find((candidate) => candidate.getAttribute('placeholder') === '手机号（可选）') as HTMLInputElement | undefined
+    if (!nameInput || !usernameInput || !mobileInput) {
+      throw new Error('Create-user form inputs not found')
+    }
+
+    nameInput.value = '林岚'
+    nameInput.dispatchEvent(new Event('input', { bubbles: true }))
+    usernameInput.value = 'linlan'
+    usernameInput.dispatchEvent(new Event('input', { bubbles: true }))
+    mobileInput.value = '13900001234'
+    mobileInput.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi(2)
+
+    findButtonByText(container!, '创建用户').click()
+    await waitForCondition(() => apiFetchMock.mock.calls.some((args) => String(args[0]) === '/api/admin/users' && (args[1] as RequestInit | undefined)?.method === 'POST'))
+    await flushUi(8)
+
+    const createCall = apiFetchMock.mock.calls.find((args) => String(args[0]) === '/api/admin/users' && (args[1] as RequestInit | undefined)?.method === 'POST')
+    if (!createCall) throw new Error('Create-user request not found')
+    expect(JSON.parse(String((createCall[1] as RequestInit | undefined)?.body))).toEqual({
+      name: '林岚',
+      email: '',
+      username: 'linlan',
+      mobile: '13900001234',
+      role: 'user',
+      isActive: true,
+    })
+    expect(container?.textContent).toContain('用户已创建')
+    expect(container?.textContent).toContain('新用户临时密码：Temp#123456')
+    expect(container?.textContent).toContain('账号：linlan')
+    expect(container?.textContent).not.toContain('首次设置密码链接：')
   })
 
   it('can auto-focus a user from directory query params', async () => {

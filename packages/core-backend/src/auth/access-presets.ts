@@ -21,6 +21,7 @@ export interface OnboardingPacket {
   loginUrl: string
   acceptInvitePath: string
   acceptInviteUrl: string
+  accountLabel: string
   welcomeTitle: string
   checklist: string[]
   inviteMessage: string
@@ -117,7 +118,8 @@ function resolvePublicAppBase(): string {
 }
 
 export function buildOnboardingPacket(options: {
-  email: string
+  email?: string | null
+  accountLabel?: string | null
   temporaryPassword?: string | null
   preset: AccessPresetDefinition | null
   inviteToken?: string | null
@@ -133,13 +135,14 @@ export function buildOnboardingPacket(options: {
     : ''
   const welcomeTitle = options.preset?.welcomeTitle || 'MetaSheet 新用户引导'
   const checklist = options.preset?.checklist || ['登录后确认首页入口与权限范围']
+  const accountLabel = (options.accountLabel || options.email || '由管理员单独告知').trim()
   const passwordLine = options.temporaryPassword
     ? `临时密码：${options.temporaryPassword}`
     : '初始密码：由管理员单独告知'
 
   const inviteMessage = [
     `${welcomeTitle}`,
-    `账号：${options.email}`,
+    `账号：${accountLabel}`,
     passwordLine,
     ...(acceptInviteUrl ? [`首次设置密码：${acceptInviteUrl}`] : []),
     `登录地址：${loginUrl}`,
@@ -158,6 +161,7 @@ export function buildOnboardingPacket(options: {
     loginUrl,
     acceptInvitePath,
     acceptInviteUrl,
+    accountLabel,
     welcomeTitle,
     checklist,
     inviteMessage,

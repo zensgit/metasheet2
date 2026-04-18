@@ -365,10 +365,14 @@ export function adminDirectoryRouter(): Router {
     if (!adminUserId) return
 
     try {
+      const username = typeof req.body?.username === 'string' && req.body.username.trim().length > 0
+        ? req.body.username
+        : undefined
       const result = await admitDirectoryAccountUser(req.params.accountId, {
         adminUserId,
         name: typeof req.body?.name === 'string' ? req.body.name : '',
         email: typeof req.body?.email === 'string' ? req.body.email : '',
+        ...(username ? { username } : {}),
         mobile: typeof req.body?.mobile === 'string' ? req.body.mobile : null,
         password: typeof req.body?.password === 'string' ? req.body.password : '',
         enableDingTalkGrant: typeof req.body?.enableDingTalkGrant === 'boolean' ? req.body.enableDingTalkGrant : true,
@@ -387,6 +391,7 @@ export function adminDirectoryRouter(): Router {
             directoryAccountId: result.account.id,
             integrationId: result.account.integrationId,
             email: result.user.email,
+            username: result.user.username,
             name: result.user.name,
             mobile: result.user.mobile,
             generatedPassword: typeof result.temporaryPassword === 'string',
@@ -406,6 +411,7 @@ export function adminDirectoryRouter(): Router {
             previousLocalUserEmail: result.previousLocalUser?.email ?? null,
             localUserId: result.user.id,
             localUserEmail: result.user.email,
+            localUserUsername: result.user.username,
             externalUserId: result.account.externalUserId,
             corpId: result.account.corpId,
             mode: 'manual_admission',
