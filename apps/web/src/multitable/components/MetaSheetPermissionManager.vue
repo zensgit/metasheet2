@@ -295,7 +295,19 @@
               >
                 <div class="meta-sheet-perm__section-header">
                   <strong>{{ field.name }}</strong>
-                  <span class="meta-sheet-perm__badge">{{ field.type }}</span>
+                  <div class="meta-sheet-perm__section-actions">
+                    <span class="meta-sheet-perm__badge">{{ field.type }}</span>
+                    <button
+                      v-if="(fieldPermissionOrphansByField[field.id]?.length ?? 0) > 1"
+                      class="meta-sheet-perm__action meta-sheet-perm__action--danger"
+                      type="button"
+                      :data-field-permission-clear-orphans="field.id"
+                      :disabled="busyFieldOrphanBulkKey === field.id"
+                      @click="clearFieldOrphans(field.id)"
+                    >
+                      Clear orphan overrides
+                    </button>
+                  </div>
                 </div>
                 <div
                   v-for="entry in entries"
@@ -415,7 +427,19 @@
               >
                 <div class="meta-sheet-perm__section-header">
                   <strong>{{ view.name }}</strong>
-                  <span class="meta-sheet-perm__badge">{{ view.type }}</span>
+                  <div class="meta-sheet-perm__section-actions">
+                    <span class="meta-sheet-perm__badge">{{ view.type }}</span>
+                    <button
+                      v-if="(viewPermissionOrphansByView[view.id]?.length ?? 0) > 1"
+                      class="meta-sheet-perm__action meta-sheet-perm__action--danger"
+                      type="button"
+                      :data-view-permission-clear-orphans="view.id"
+                      :disabled="busyViewOrphanBulkKey === view.id"
+                      @click="clearViewOrphans(view.id)"
+                    >
+                      Clear orphan overrides
+                    </button>
+                  </div>
                 </div>
                 <div
                   v-for="entry in entries"
@@ -558,12 +582,14 @@ const fieldPermDrafts = ref<Record<string, string>>({})
 const busyFieldPermKey = ref<string | null>(null)
 const fieldTemplateDrafts = ref<Record<string, string>>({})
 const busyFieldTemplateKey = ref<string | null>(null)
+const busyFieldOrphanBulkKey = ref<string | null>(null)
 
 // View permission drafts
 const viewPermDrafts = ref<Record<string, string>>({})
 const busyViewPermKey = ref<string | null>(null)
 const viewTemplateDrafts = ref<Record<string, string>>({})
 const busyViewTemplateKey = ref<string | null>(null)
+const busyViewOrphanBulkKey = ref<string | null>(null)
 
 function subjectKey(subjectType: MetaSheetPermissionSubjectType, subjectId: string) {
   return `${subjectType}:${subjectId}`
@@ -655,6 +681,26 @@ async function clearFieldPerm(fieldId: string, subjectType: string, subjectId: s
     error.value = cause?.message ?? 'Failed to clear field permission'
   } finally {
     busyFieldPermKey.value = null
+  }
+}
+
+async function clearFieldOrphans(fieldId: string) {
+  const orphans = fieldPermissionOrphansByField.value[fieldId] ?? []
+  if (!orphans.length) return
+  busyFieldOrphanBulkKey.value = fieldId
+  clearMessages()
+  try {
+    await Promise.all(
+      orphans.map((entry) =>
+        props.client.updateFieldPermission(props.sheetId, fieldId, entry.subjectType, entry.subjectId, { remove: true }),
+      ),
+    )
+    status.value = `Cleared ${orphans.length} orphan field override${orphans.length === 1 ? '' : 's'}`
+    emit('updated')
+  } catch (cause: any) {
+    error.value = cause?.message ?? 'Failed to clear orphan field overrides'
+  } finally {
+    busyFieldOrphanBulkKey.value = null
   }
 }
 
@@ -768,6 +814,26 @@ async function clearViewPerm(viewId: string, subjectType: string, subjectId: str
     error.value = cause?.message ?? 'Failed to clear view permission'
   } finally {
     busyViewPermKey.value = null
+  }
+}
+
+async function clearViewOrphans(viewId: string) {
+  const orphans = viewPermissionOrphansByView.value[viewId] ?? []
+  if (!orphans.length) return
+  busyViewOrphanBulkKey.value = viewId
+  clearMessages()
+  try {
+    await Promise.all(
+      orphans.map((entry) =>
+        props.client.updateViewPermission(viewId, entry.subjectType, entry.subjectId, 'none'),
+      ),
+    )
+    status.value = `Cleared ${orphans.length} orphan view override${orphans.length === 1 ? '' : 's'}`
+    emit('updated')
+  } catch (cause: any) {
+    error.value = cause?.message ?? 'Failed to clear orphan view overrides'
+  } finally {
+    busyViewOrphanBulkKey.value = null
   }
 }
 
@@ -1159,6 +1225,14 @@ onBeforeUnmount(() => {
   align-items: center;
   justify-content: space-between;
   color: #0f172a;
+}
+
+.meta-sheet-perm__section-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
 }
 
 .meta-sheet-perm__row {
