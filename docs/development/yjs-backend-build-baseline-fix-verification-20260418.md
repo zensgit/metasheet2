@@ -58,5 +58,5 @@ docker build -f Dockerfile.frontend -t metasheet2-web:yjs-baseline-fix-0f10cd181
 - Vite printed its existing CJS deprecation warning during Vitest startup.
 - Frontend build and frontend Docker build both printed the existing large-chunk warnings from Vite, but completed successfully.
 - No new failing unit tests were introduced by this fix set.
-- The touched code path is backend-only; no frontend validation was needed for this repair.
+- The code changes are backend-only; frontend verification here was limited to build-level regression checks so the next GHCR release can use a clean full-stack baseline.
 - Docker verification used a clean `git archive` export instead of the active worktree because the worktree had local `node_modules` noise from `pnpm install`.

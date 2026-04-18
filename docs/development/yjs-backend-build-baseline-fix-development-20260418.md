@@ -30,7 +30,7 @@ There was also one non-JSON issue:
 
 ### 1. Normalize DB JSON column typings
 
-Updated [packages/core-backend/src/db/types.ts](/Users/chouhua/Downloads/Github/metasheet2/tmp/yjs-main-clean/packages/core-backend/src/db/types.ts:1):
+Updated `packages/core-backend/src/db/types.ts`:
 
 - added `JsonStringArrayColumn`
 - added `JsonValueColumn`
@@ -47,11 +47,11 @@ This makes Kysely treat insert/update payloads as actual JSON arrays/objects ins
 
 ### 2. Stop stringifying JSON before insert/update
 
-Updated [packages/core-backend/src/multitable/automation-log-service.ts](/Users/chouhua/Downloads/Github/metasheet2/tmp/yjs-main-clean/packages/core-backend/src/multitable/automation-log-service.ts:1):
+Updated `packages/core-backend/src/multitable/automation-log-service.ts`:
 
 - `steps` now writes the execution step array directly
 
-Updated [packages/core-backend/src/multitable/dashboard-service.ts](/Users/chouhua/Downloads/Github/metasheet2/tmp/yjs-main-clean/packages/core-backend/src/multitable/dashboard-service.ts:1):
+Updated `packages/core-backend/src/multitable/dashboard-service.ts`:
 
 - chart `data_source` now writes the structured object directly
 - chart `display` now writes the structured object directly
@@ -61,7 +61,7 @@ This removed the `JSON.stringify(... as unknown as Record<string, unknown>)` pat
 
 ### 3. Replace raw retention cutoff SQL with typed cutoff date
 
-Updated [packages/core-backend/src/multitable/automation-log-service.ts](/Users/chouhua/Downloads/Github/metasheet2/tmp/yjs-main-clean/packages/core-backend/src/multitable/automation-log-service.ts:1):
+Updated `packages/core-backend/src/multitable/automation-log-service.ts`:
 
 - `cleanup(retentionDays)` now computes a JS `Date` cutoff and compares `created_at < cutoff`
 
