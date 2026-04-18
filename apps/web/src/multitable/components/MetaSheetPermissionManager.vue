@@ -221,7 +221,7 @@
               <strong>Field-level permissions</strong>
             </div>
             <div v-if="!fields.length" class="meta-sheet-perm__empty">No fields available.</div>
-            <div v-else-if="!entries.length" class="meta-sheet-perm__empty">No subjects with sheet access. Grant sheet access first to configure field permissions.</div>
+            <div v-else-if="!entries.length && !hasFieldOrphans" class="meta-sheet-perm__empty">No subjects with sheet access. Grant sheet access first to configure field permissions.</div>
             <template v-else>
               <div
                 v-for="field in fields"
@@ -267,6 +267,32 @@
                     Save
                   </button>
                 </div>
+                <div
+                  v-for="orphan in fieldPermissionOrphansByField[field.id] ?? []"
+                  :key="`fp-orphan-${field.id}-${subjectKey(orphan.subjectType, orphan.subjectId)}`"
+                  class="meta-sheet-perm__row meta-sheet-perm__row--field"
+                  :data-field-permission-orphan-row="`${field.id}:${subjectKey(orphan.subjectType, orphan.subjectId)}`"
+                >
+                  <div class="meta-sheet-perm__identity">
+                    <strong>{{ orphan.subjectLabel || orphan.subjectId }}</strong>
+                    <span>{{ orphan.subjectSubtitle || `Orphan ${subjectTypeBadgeLabel(orphan.subjectType)}` }}</span>
+                  </div>
+                  <span
+                    class="meta-sheet-perm__badge"
+                    :data-access-level="fieldPermDraftLabel(field.id, orphan.subjectType, orphan.subjectId)"
+                  >
+                    {{ fieldPermDraftLabel(field.id, orphan.subjectType, orphan.subjectId) }}
+                  </span>
+                  <span class="meta-sheet-perm__hint">No current sheet access</span>
+                  <button
+                    class="meta-sheet-perm__action meta-sheet-perm__action--danger"
+                    type="button"
+                    :disabled="busyFieldPermKey === fieldPermKey(field.id, orphan.subjectType, orphan.subjectId)"
+                    @click="clearFieldPerm(field.id, orphan.subjectType, orphan.subjectId)"
+                  >
+                    Clear
+                  </button>
+                </div>
               </div>
             </template>
           </section>
@@ -279,7 +305,7 @@
               <strong>View-level permissions</strong>
             </div>
             <div v-if="!views.length" class="meta-sheet-perm__empty">No views available.</div>
-            <div v-else-if="!entries.length" class="meta-sheet-perm__empty">No subjects with sheet access. Grant sheet access first to configure view permissions.</div>
+            <div v-else-if="!entries.length && !hasViewOrphans" class="meta-sheet-perm__empty">No subjects with sheet access. Grant sheet access first to configure view permissions.</div>
             <template v-else>
               <div
                 v-for="view in views"
@@ -324,6 +350,32 @@
                     @click="applyViewPerm(view.id, entry.subjectType, entry.subjectId)"
                   >
                     Save
+                  </button>
+                </div>
+                <div
+                  v-for="orphan in viewPermissionOrphansByView[view.id] ?? []"
+                  :key="`vp-orphan-${view.id}-${subjectKey(orphan.subjectType, orphan.subjectId)}`"
+                  class="meta-sheet-perm__row meta-sheet-perm__row--field"
+                  :data-view-permission-orphan-row="`${view.id}:${subjectKey(orphan.subjectType, orphan.subjectId)}`"
+                >
+                  <div class="meta-sheet-perm__identity">
+                    <strong>{{ orphan.subjectLabel || orphan.subjectId }}</strong>
+                    <span>{{ orphan.subjectSubtitle || `Orphan ${subjectTypeBadgeLabel(orphan.subjectType)}` }}</span>
+                  </div>
+                  <span
+                    class="meta-sheet-perm__badge"
+                    :data-access-level="viewPermDraftValue(view.id, orphan.subjectType, orphan.subjectId)"
+                  >
+                    {{ viewPermDisplayLabel(viewPermDraftValue(view.id, orphan.subjectType, orphan.subjectId)) }}
+                  </span>
+                  <span class="meta-sheet-perm__hint">No current sheet access</span>
+                  <button
+                    class="meta-sheet-perm__action meta-sheet-perm__action--danger"
+                    type="button"
+                    :disabled="busyViewPermKey === viewPermKey(view.id, orphan.subjectType, orphan.subjectId)"
+                    @click="clearViewPerm(view.id, orphan.subjectType, orphan.subjectId)"
+                  >
+                    Clear
                   </button>
                 </div>
               </div>
@@ -382,7 +434,7 @@ const props = withDefaults(defineProps<{
 const emit = defineEmits<{
   (e: 'close'): void
   (e: 'updated'): void
-  (e: 'update-field-permission', fieldId: string, subjectType: string, subjectId: string, perm: { visible: boolean; readOnly: boolean }): void
+  (e: 'update-field-permission', fieldId: string, subjectType: string, subjectId: string, perm: { visible: boolean; readOnly: boolean } | { remove: true }): void
   (e: 'update-view-permission', viewId: string, subjectType: string, subjectId: string, permission: string): void
 }>()
 
@@ -456,22 +508,35 @@ function fieldPermFromDraftValue(val: string): { visible: boolean; readOnly: boo
 async function applyFieldPerm(fieldId: string, subjectType: string, subjectId: string) {
   const key = fieldPermKey(fieldId, subjectType, subjectId)
   const val = fieldPermDrafts.value[key] ?? resolveFieldPerm(fieldId, subjectType, subjectId)
-  const perm = fieldPermFromDraftValue(val)
   busyFieldPermKey.value = key
   clearMessages()
   try {
-    await props.client.updateFieldPermission(
-      props.sheetId,
-      fieldId,
-      subjectType as MetaSheetPermissionSubjectType,
-      subjectId,
-      perm,
-    )
-    status.value = 'Field permission updated'
-    emit('update-field-permission', fieldId, subjectType, subjectId, perm)
+    const isDefault = val === 'default'
+    const perm: { remove: true } | { visible: boolean; readOnly: boolean } = isDefault
+      ? { remove: true }
+      : fieldPermFromDraftValue(val)
+    await props.client.updateFieldPermission(props.sheetId, fieldId, subjectType as MetaSheetPermissionSubjectType, subjectId, perm)
+    status.value = isDefault ? 'Field permission cleared' : 'Field permission updated'
+    emit('update-field-permission', fieldId, subjectType, subjectId, isDefault ? { visible: true, readOnly: false } : perm)
     emit('updated')
   } catch (cause: any) {
     error.value = cause?.message ?? 'Failed to update field permission'
+  } finally {
+    busyFieldPermKey.value = null
+  }
+}
+
+async function clearFieldPerm(fieldId: string, subjectType: string, subjectId: string) {
+  const key = fieldPermKey(fieldId, subjectType, subjectId)
+  busyFieldPermKey.value = key
+  clearMessages()
+  try {
+    await props.client.updateFieldPermission(props.sheetId, fieldId, subjectType as MetaSheetPermissionSubjectType, subjectId, { remove: true })
+    status.value = 'Field permission cleared'
+    emit('update-field-permission', fieldId, subjectType, subjectId, { visible: true, readOnly: false })
+    emit('updated')
+  } catch (cause: any) {
+    error.value = cause?.message ?? 'Failed to clear field permission'
   } finally {
     busyFieldPermKey.value = null
   }
@@ -531,6 +596,22 @@ async function applyViewPerm(viewId: string, subjectType: string, subjectId: str
   }
 }
 
+async function clearViewPerm(viewId: string, subjectType: string, subjectId: string) {
+  const key = viewPermKey(viewId, subjectType, subjectId)
+  busyViewPermKey.value = key
+  clearMessages()
+  try {
+    await props.client.updateViewPermission(viewId, subjectType as MetaSheetPermissionSubjectType, subjectId, 'none')
+    status.value = 'View permission cleared'
+    emit('update-view-permission', viewId, subjectType, subjectId, 'none')
+    emit('updated')
+  } catch (cause: any) {
+    error.value = cause?.message ?? 'Failed to clear view permission'
+  } finally {
+    busyViewPermKey.value = null
+  }
+}
+
 // --- Sheet access helpers (existing) ---
 const availableCandidates = computed(() => {
   const activeSubjectKeys = new Set(entries.value.map((entry) => subjectKey(entry.subjectType, entry.subjectId)))
@@ -540,6 +621,29 @@ const availableCandidates = computed(() => {
 const peopleCandidates = computed(() => availableCandidates.value.filter((candidate) => candidate.subjectType === 'user'))
 const memberGroupCandidates = computed(() => availableCandidates.value.filter((candidate) => candidate.subjectType === 'member-group'))
 const roleCandidates = computed(() => availableCandidates.value.filter((candidate) => candidate.subjectType === 'role'))
+const activeSheetSubjectKeys = computed(() => new Set(entries.value.map((entry) => subjectKey(entry.subjectType, entry.subjectId))))
+const fieldPermissionOrphans = computed(() =>
+  props.fieldPermissionEntries.filter((entry) => !activeSheetSubjectKeys.value.has(subjectKey(entry.subjectType, entry.subjectId))),
+)
+const viewPermissionOrphans = computed(() =>
+  props.viewPermissionEntries.filter((entry) => !activeSheetSubjectKeys.value.has(subjectKey(entry.subjectType, entry.subjectId))),
+)
+const fieldPermissionOrphansByField = computed<Record<string, MetaFieldPermissionEntry[]>>(() => {
+  const grouped: Record<string, MetaFieldPermissionEntry[]> = {}
+  for (const entry of fieldPermissionOrphans.value) {
+    ;(grouped[entry.fieldId] ??= []).push(entry)
+  }
+  return grouped
+})
+const viewPermissionOrphansByView = computed<Record<string, MetaViewPermissionEntry[]>>(() => {
+  const grouped: Record<string, MetaViewPermissionEntry[]> = {}
+  for (const entry of viewPermissionOrphans.value) {
+    ;(grouped[entry.viewId] ??= []).push(entry)
+  }
+  return grouped
+})
+const hasFieldOrphans = computed(() => fieldPermissionOrphans.value.length > 0)
+const hasViewOrphans = computed(() => viewPermissionOrphans.value.length > 0)
 
 function accessLevelLabel(accessLevel: MetaSheetPermissionAccessLevel) {
   return ACCESS_LEVEL_OPTIONS.find((option) => option.value === accessLevel)?.label ?? accessLevel
@@ -894,6 +998,12 @@ onBeforeUnmount(() => {
 .meta-sheet-perm__badge[data-access-level='Read-only'] {
   background: #fef3c7;
   color: #92400e;
+}
+
+.meta-sheet-perm__hint {
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 500;
 }
 
 .meta-sheet-perm__subject {

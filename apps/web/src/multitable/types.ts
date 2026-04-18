@@ -221,6 +221,8 @@ export interface MetaFieldPermissionEntry {
   subjectType: MetaSheetPermissionSubjectType
   subjectId: string
   subjectLabel?: string
+  subjectSubtitle?: string | null
+  isActive?: boolean
   visible: boolean
   readOnly: boolean
 }
@@ -230,6 +232,8 @@ export interface MetaViewPermissionEntry {
   subjectType: MetaSheetPermissionSubjectType
   subjectId: string
   subjectLabel?: string
+  subjectSubtitle?: string | null
+  isActive?: boolean
   permission: string
 }
 
