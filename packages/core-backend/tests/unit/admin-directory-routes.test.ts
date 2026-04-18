@@ -197,6 +197,8 @@ describe('adminDirectoryRouter', () => {
       appSecret: 'secret',
       syncEnabled: true,
       scheduleCron: '*/15 * * * *',
+      memberGroupDefaultRoleIds: ['crm_user'],
+      memberGroupDefaultNamespaces: ['crm'],
     }
 
     const response = await invokeRoute('post', '/integrations', {
@@ -216,6 +218,8 @@ describe('adminDirectoryRouter', () => {
       name: 'DingTalk CN',
       scheduleCron: '*/10 * * * *',
       syncEnabled: true,
+      memberGroupDefaultRoleIds: ['crm_user'],
+      memberGroupDefaultNamespaces: ['crm'],
     }
 
     const response = await invokeRoute('put', '/integrations/:integrationId', {

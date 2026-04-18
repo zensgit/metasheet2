@@ -202,6 +202,24 @@
               placeholder="填写需要投影为平台用户组的部门 ID，支持逗号或换行分隔"
             />
           </label>
+          <label class="directory-admin__field directory-admin__field--wide">
+            <span>成员组默认业务角色</span>
+            <textarea
+              v-model.trim="draft.memberGroupDefaultRoleIdsText"
+              class="directory-admin__input directory-admin__textarea"
+              rows="2"
+              placeholder="填写 role ID，支持逗号或换行分隔；仅对投影成员组里的已链接用户做单向补齐"
+            />
+          </label>
+          <label class="directory-admin__field directory-admin__field--wide">
+            <span>成员组默认插件开通</span>
+            <textarea
+              v-model.trim="draft.memberGroupDefaultNamespacesText"
+              class="directory-admin__input directory-admin__textarea"
+              rows="2"
+              placeholder="填写命名空间，例如 crm；支持逗号或换行分隔"
+            />
+          </label>
           <label class="directory-admin__field">
             <span>状态</span>
             <select v-model="draft.status" class="directory-admin__input">
@@ -1095,6 +1113,8 @@ type DirectoryIntegration = {
     excludeDepartmentIds: string[]
     memberGroupSyncMode: 'disabled' | 'sync_scoped_departments'
     memberGroupDepartmentIds: string[]
+    memberGroupDefaultRoleIds: string[]
+    memberGroupDefaultNamespaces: string[]
   }
   stats: {
     departmentCount: number
@@ -1324,6 +1344,8 @@ type DirectoryDraft = {
   excludeDepartmentIdsText: string
   memberGroupSyncMode: 'disabled' | 'sync_scoped_departments'
   memberGroupDepartmentIdsText: string
+  memberGroupDefaultRoleIdsText: string
+  memberGroupDefaultNamespacesText: string
   status: string
   scheduleCron: string
   defaultDeprovisionPolicy: string
@@ -1422,6 +1444,8 @@ const draft = reactive<DirectoryDraft>({
   excludeDepartmentIdsText: '',
   memberGroupSyncMode: 'disabled',
   memberGroupDepartmentIdsText: '',
+  memberGroupDefaultRoleIdsText: '',
+  memberGroupDefaultNamespacesText: '',
   status: 'active',
   scheduleCron: '',
   defaultDeprovisionPolicy: 'mark_inactive',
@@ -1668,6 +1692,8 @@ function resetDraft() {
   draft.excludeDepartmentIdsText = ''
   draft.memberGroupSyncMode = 'disabled'
   draft.memberGroupDepartmentIdsText = ''
+  draft.memberGroupDefaultRoleIdsText = ''
+  draft.memberGroupDefaultNamespacesText = ''
   draft.status = 'active'
   draft.scheduleCron = ''
   draft.defaultDeprovisionPolicy = 'mark_inactive'
@@ -1687,6 +1713,8 @@ function applyIntegrationToDraft(integration: DirectoryIntegration) {
   draft.excludeDepartmentIdsText = integration.config.excludeDepartmentIds.join('\n')
   draft.memberGroupSyncMode = integration.config.memberGroupSyncMode
   draft.memberGroupDepartmentIdsText = integration.config.memberGroupDepartmentIds.join('\n')
+  draft.memberGroupDefaultRoleIdsText = integration.config.memberGroupDefaultRoleIds.join('\n')
+  draft.memberGroupDefaultNamespacesText = integration.config.memberGroupDefaultNamespaces.join('\n')
   draft.status = integration.status
   draft.scheduleCron = integration.scheduleCron ?? ''
   draft.defaultDeprovisionPolicy = integration.defaultDeprovisionPolicy
@@ -1716,7 +1744,15 @@ function readAdmissionModeLabel(integration: DirectoryIntegration): string {
 function readMemberGroupSyncLabel(integration: DirectoryIntegration): string {
   if (integration.config.memberGroupSyncMode === 'sync_scoped_departments') {
     const count = integration.config.memberGroupDepartmentIds.length
-    return count > 0 ? `成员组同步 · ${count} 个部门` : '成员组同步 · 未配置部门'
+    const governanceParts: string[] = []
+    if (integration.config.memberGroupDefaultRoleIds.length > 0) {
+      governanceParts.push(`默认角色 ${integration.config.memberGroupDefaultRoleIds.length}`)
+    }
+    if (integration.config.memberGroupDefaultNamespaces.length > 0) {
+      governanceParts.push(`默认开通 ${integration.config.memberGroupDefaultNamespaces.length}`)
+    }
+    const scopeLabel = count > 0 ? `成员组同步 · ${count} 个部门` : '成员组同步 · 未配置部门'
+    return governanceParts.length > 0 ? `${scopeLabel} / ${governanceParts.join(' / ')}` : scopeLabel
   }
   return '成员组同步已关闭'
 }
@@ -2155,6 +2191,8 @@ function buildPayload() {
     excludeDepartmentIds: parseAdmissionDepartmentIdsText(draft.excludeDepartmentIdsText),
     memberGroupSyncMode: draft.memberGroupSyncMode,
     memberGroupDepartmentIds: parseAdmissionDepartmentIdsText(draft.memberGroupDepartmentIdsText),
+    memberGroupDefaultRoleIds: parseAdmissionDepartmentIdsText(draft.memberGroupDefaultRoleIdsText),
+    memberGroupDefaultNamespaces: parseAdmissionDepartmentIdsText(draft.memberGroupDefaultNamespacesText),
     status: draft.status,
     scheduleCron: draft.scheduleCron.trim(),
     defaultDeprovisionPolicy: draft.defaultDeprovisionPolicy,
@@ -2221,11 +2259,15 @@ async function syncIntegration() {
     const autoAdmissionExcludedCount = Number(body?.data?.run?.stats?.autoAdmissionExcludedCount ?? 0)
     const memberGroupsSyncedCount = Number(body?.data?.run?.stats?.memberGroupsSyncedCount ?? 0)
     const memberGroupsCreatedCount = Number(body?.data?.run?.stats?.memberGroupsCreatedCount ?? 0)
+    const memberGroupGovernedUserCount = Number(body?.data?.run?.stats?.memberGroupGovernedUserCount ?? 0)
+    const memberGroupDefaultRoleAssignmentsCount = Number(body?.data?.run?.stats?.memberGroupDefaultRoleAssignmentsCount ?? 0)
+    const memberGroupDefaultNamespaceAdmissionsCount = Number(body?.data?.run?.stats?.memberGroupDefaultNamespaceAdmissionsCount ?? 0)
     if (
       autoAdmittedCount > 0
       || autoAdmissionSkippedMissingEmailCount > 0
       || autoAdmissionExcludedCount > 0
       || memberGroupsSyncedCount > 0
+      || memberGroupGovernedUserCount > 0
     ) {
       const parts = ['目录同步已完成']
       if (autoAdmittedCount > 0) parts.push(`自动准入 ${autoAdmittedCount} 位成员`)
@@ -2237,6 +2279,16 @@ async function syncIntegration() {
         } else {
           parts.push(`同步 ${memberGroupsSyncedCount} 个成员组`)
         }
+      }
+      if (memberGroupGovernedUserCount > 0) {
+        const governanceDetails: string[] = []
+        if (memberGroupDefaultRoleAssignmentsCount > 0) governanceDetails.push(`角色新增 ${memberGroupDefaultRoleAssignmentsCount} 项`)
+        if (memberGroupDefaultNamespaceAdmissionsCount > 0) governanceDetails.push(`插件开通新增 ${memberGroupDefaultNamespaceAdmissionsCount} 项`)
+        parts.push(
+          governanceDetails.length > 0
+            ? `为 ${memberGroupGovernedUserCount} 位成员补齐默认治理（${governanceDetails.join('，')}）`
+            : `为 ${memberGroupGovernedUserCount} 位成员补齐默认治理`,
+        )
       }
       setStatus(parts.join('，'))
     } else {

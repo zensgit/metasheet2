@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest'
-import { buildDirectoryProjectedMemberGroupPlans } from '../../src/directory/directory-sync'
+import {
+  buildDirectoryProjectedGovernanceGrantSet,
+  buildDirectoryProjectedMemberGroupPlans,
+} from '../../src/directory/directory-sync'
 
 describe('directory member-group projection', () => {
   it('projects a selected department subtree to linked local users', () => {
@@ -65,5 +68,32 @@ describe('directory member-group projection', () => {
     })
 
     expect(plans).toEqual([])
+  })
+
+  it('builds a deduplicated governance grant set for projected member groups', () => {
+    const grantSet = buildDirectoryProjectedGovernanceGrantSet({
+      plans: [
+        {
+          externalDepartmentId: 'dept-sales',
+          marker: 'marker-1',
+          name: '销售',
+          memberUserIds: ['user-1', 'user-2'],
+        },
+        {
+          externalDepartmentId: 'dept-sales-east',
+          marker: 'marker-2',
+          name: '华东销售',
+          memberUserIds: ['user-2', 'user-3'],
+        },
+      ],
+      defaultRoleIds: ['crm_user', 'crm_user', 'sales_user'],
+      defaultNamespaces: ['crm', 'crm', 'sales'],
+    })
+
+    expect(grantSet).toEqual({
+      userIds: ['user-1', 'user-2', 'user-3'],
+      roleIds: ['crm_user', 'sales_user'],
+      namespaces: ['crm', 'sales'],
+    })
   })
 })

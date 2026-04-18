@@ -41,6 +41,7 @@ Updated branch status:
 - manual local-user admission: implemented
 - scoped auto-admission with include/exclude departments: implemented
 - selected department -> platform member group projection: implemented
+- projected member groups -> safe default role/plugin governance linkage: implemented
 
 ## Recommendation
 
@@ -125,6 +126,16 @@ Behavior:
 - group membership is derived from linked local users inside that department
   subtree;
 - projected groups are tracked by a deterministic description marker.
+- projected groups can also fill a safe additive governance baseline for linked
+  users via:
+  - `memberGroupDefaultRoleIds`
+  - `memberGroupDefaultNamespaces`
+
+Current safety boundary:
+
+- configured roles must exist;
+- `admin` and delegated-admin style roles are rejected;
+- configured namespaces must be admission-controlled.
 
 ### Phase 3: Scoped auto-admission for selected departments
 
@@ -221,6 +232,7 @@ Recommended order:
 1. manual user admission
 2. department -> member group projection
 3. scoped auto-admission
+4. safe default role / namespace linkage for projected member groups
 
 Do **not** ship auto-admission before manual admission and audit visibility are
 available.
@@ -233,7 +245,9 @@ mirroring, the best path is:
 1. keep DingTalk sync as the source directory mirror;
 2. add manual `create local user + bind`;
 3. project selected synced departments into `platform_member_groups`;
-4. later add scoped auto-admission for allowlisted departments only.
+4. add scoped auto-admission for allowlisted departments only;
+5. use projected groups to fill a safe default governance baseline where
+   needed.
 
 That gives:
 

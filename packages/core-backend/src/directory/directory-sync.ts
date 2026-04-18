@@ -15,6 +15,12 @@ import {
   type DingTalkDirectoryUser,
 } from '../integrations/dingtalk/client'
 import { assertDingTalkCorpAllowed } from '../integrations/dingtalk/runtime-policy'
+import {
+  deriveDelegatedAdminNamespace,
+  isNamespaceAdmissionControlledResource,
+  normalizeNamespace,
+} from '../rbac/namespace-admission'
+import { invalidateUserPerms } from '../rbac/service'
 import { decryptStoredSecretValue, normalizeStoredSecretValue } from '../security/encrypted-secrets'
 import { getBcryptSaltRounds } from '../security/auth-runtime-config'
 import { SimpleCronExpression } from '../services/SchedulerService'
@@ -42,6 +48,8 @@ type DirectoryIntegrationConfig = {
   excludeDepartmentIds: string[]
   memberGroupSyncMode: DirectoryMemberGroupSyncMode
   memberGroupDepartmentIds: string[]
+  memberGroupDefaultRoleIds: string[]
+  memberGroupDefaultNamespaces: string[]
 }
 
 type DirectoryIntegrationRow = {
@@ -244,6 +252,8 @@ export type DirectoryIntegrationSummary = {
     excludeDepartmentIds: string[]
     memberGroupSyncMode: DirectoryMemberGroupSyncMode
     memberGroupDepartmentIds: string[]
+    memberGroupDefaultRoleIds: string[]
+    memberGroupDefaultNamespaces: string[]
   }
   stats: {
     departmentCount: number
@@ -267,6 +277,8 @@ export type DirectoryIntegrationInput = {
   excludeDepartmentIds?: string[] | string
   memberGroupSyncMode?: DirectoryMemberGroupSyncMode | string
   memberGroupDepartmentIds?: string[] | string
+  memberGroupDefaultRoleIds?: string[] | string
+  memberGroupDefaultNamespaces?: string[] | string
   syncEnabled?: boolean
   scheduleCron?: string | null
   defaultDeprovisionPolicy?: string
@@ -275,6 +287,39 @@ export type DirectoryIntegrationInput = {
 
 export type DirectoryIntegrationTestInput = DirectoryIntegrationInput & {
   integrationId?: string
+}
+
+type NormalizedDirectoryIntegrationInput = Omit<
+  DirectoryIntegrationInput,
+  | 'name'
+  | 'corpId'
+  | 'appKey'
+  | 'appSecret'
+  | 'rootDepartmentId'
+  | 'admissionMode'
+  | 'admissionDepartmentIds'
+  | 'excludeDepartmentIds'
+  | 'memberGroupSyncMode'
+  | 'memberGroupDepartmentIds'
+  | 'memberGroupDefaultRoleIds'
+  | 'memberGroupDefaultNamespaces'
+  | 'defaultDeprovisionPolicy'
+  | 'status'
+> & {
+  name: string
+  corpId: string
+  appKey: string
+  appSecret: string
+  rootDepartmentId: string
+  admissionMode: DirectoryAdmissionMode
+  admissionDepartmentIds: string[]
+  excludeDepartmentIds: string[]
+  memberGroupSyncMode: DirectoryMemberGroupSyncMode
+  memberGroupDepartmentIds: string[]
+  memberGroupDefaultRoleIds: string[]
+  memberGroupDefaultNamespaces: string[]
+  defaultDeprovisionPolicy: string
+  status: string
 }
 
 export type DirectoryIntegrationTestResult = {
@@ -485,6 +530,12 @@ export type DirectoryProjectedMemberGroupPlan = {
   memberUserIds: string[]
 }
 
+export type DirectoryProjectedGovernanceGrantSet = {
+  userIds: string[]
+  roleIds: string[]
+  namespaces: string[]
+}
+
 function parseJsonRecord(value: JsonRecord | string | null | undefined): JsonRecord {
   if (!value) return {}
   if (typeof value === 'string') {
@@ -567,6 +618,36 @@ function normalizeExcludeDepartmentIds(value: unknown, fallback: string[] = []):
 
 function normalizeMemberGroupDepartmentIds(value: unknown, fallback: string[] = []): string[] {
   return normalizeAdmissionDepartmentIds(value, fallback)
+}
+
+function normalizeMemberGroupDefaultRoleIds(value: unknown, fallback: string[] = []): string[] {
+  const rawValues = Array.isArray(value)
+    ? value
+    : typeof value === 'string'
+      ? value.split(/[\n,]+/)
+      : fallback
+  const deduped = new Set<string>()
+  for (const entry of rawValues) {
+    const normalized = normalizeText(entry)
+    if (!normalized) continue
+    deduped.add(normalized)
+  }
+  return Array.from(deduped)
+}
+
+function normalizeMemberGroupDefaultNamespaces(value: unknown, fallback: string[] = []): string[] {
+  const rawValues = Array.isArray(value)
+    ? value
+    : typeof value === 'string'
+      ? value.split(/[\n,]+/)
+      : fallback
+  const deduped = new Set<string>()
+  for (const entry of rawValues) {
+    const normalized = normalizeNamespace(entry)
+    if (!normalized || !isNamespaceAdmissionControlledResource(normalized)) continue
+    deduped.add(normalized)
+  }
+  return Array.from(deduped)
 }
 
 export function isDirectoryUserWithinAdmissionScope(
@@ -687,6 +768,54 @@ export function buildDirectoryProjectedMemberGroupPlans(options: {
   return plans
 }
 
+export function buildDirectoryProjectedGovernanceGrantSet(options: {
+  plans: DirectoryProjectedMemberGroupPlan[]
+  defaultRoleIds: string[]
+  defaultNamespaces: string[]
+}): DirectoryProjectedGovernanceGrantSet {
+  const userIds = Array.from(new Set(
+    options.plans.flatMap((plan) => plan.memberUserIds.map((value) => normalizeText(value)).filter(Boolean)),
+  )).sort()
+  return {
+    userIds,
+    roleIds: normalizeMemberGroupDefaultRoleIds(options.defaultRoleIds),
+    namespaces: normalizeMemberGroupDefaultNamespaces(options.defaultNamespaces),
+  }
+}
+
+async function assertDirectoryProjectedGovernanceConfigValid(config: Pick<
+  DirectoryIntegrationConfig,
+  'memberGroupDefaultRoleIds' | 'memberGroupDefaultNamespaces'
+>): Promise<void> {
+  const roleIds = normalizeMemberGroupDefaultRoleIds(config.memberGroupDefaultRoleIds)
+  const namespaces = normalizeMemberGroupDefaultNamespaces(config.memberGroupDefaultNamespaces)
+
+  for (const roleId of roleIds) {
+    if (roleId === 'admin' || deriveDelegatedAdminNamespace(roleId)) {
+      throw new Error('Projected member-group default roles cannot include platform admin or delegated admin roles')
+    }
+  }
+
+  if (roleIds.length > 0) {
+    const existingRoles = await query<{ id: string }>(
+      `SELECT id
+       FROM roles
+       WHERE id = ANY($1::text[])`,
+      [roleIds],
+    )
+    const existingRoleIds = new Set(existingRoles.rows.map((row) => normalizeText(row.id)).filter(Boolean))
+    const missingRoleIds = roleIds.filter((roleId) => !existingRoleIds.has(roleId))
+    if (missingRoleIds.length > 0) {
+      throw new Error(`Projected member-group default roles not found: ${missingRoleIds.join(', ')}`)
+    }
+  }
+
+  const unsupportedNamespaces = namespaces.filter((namespace) => !isNamespaceAdmissionControlledResource(namespace))
+  if (unsupportedNamespaces.length > 0) {
+    throw new Error(`Projected member-group default namespaces are not admission-controlled: ${unsupportedNamespaces.join(', ')}`)
+  }
+}
+
 function parseIntegrationConfig(row: Pick<DirectoryIntegrationRow, 'config'>): DirectoryIntegrationConfig {
   const config = parseJsonRecord(row.config)
   const appKey = normalizeText(config.appKey)
@@ -700,6 +829,8 @@ function parseIntegrationConfig(row: Pick<DirectoryIntegrationRow, 'config'>): D
   const excludeDepartmentIds = normalizeExcludeDepartmentIds(config.excludeDepartmentIds)
   const memberGroupSyncMode = normalizeMemberGroupSyncMode(config.memberGroupSyncMode)
   const memberGroupDepartmentIds = normalizeMemberGroupDepartmentIds(config.memberGroupDepartmentIds)
+  const memberGroupDefaultRoleIds = normalizeMemberGroupDefaultRoleIds(config.memberGroupDefaultRoleIds)
+  const memberGroupDefaultNamespaces = normalizeMemberGroupDefaultNamespaces(config.memberGroupDefaultNamespaces)
   return {
     appKey,
     appSecret,
@@ -711,6 +842,8 @@ function parseIntegrationConfig(row: Pick<DirectoryIntegrationRow, 'config'>): D
     excludeDepartmentIds,
     memberGroupSyncMode,
     memberGroupDepartmentIds,
+    memberGroupDefaultRoleIds,
+    memberGroupDefaultNamespaces,
   }
 }
 
@@ -742,6 +875,8 @@ function summarizeIntegration(row: DirectoryIntegrationRow): DirectoryIntegratio
       excludeDepartmentIds: config.excludeDepartmentIds,
       memberGroupSyncMode: config.memberGroupSyncMode,
       memberGroupDepartmentIds: config.memberGroupDepartmentIds,
+      memberGroupDefaultRoleIds: config.memberGroupDefaultRoleIds,
+      memberGroupDefaultNamespaces: config.memberGroupDefaultNamespaces,
     },
     stats: {
       departmentCount: Number(row.department_count ?? 0),
@@ -1134,7 +1269,7 @@ async function loadDirectoryReviewRecommendations(
 function normalizeIntegrationInput(
   input: DirectoryIntegrationInput,
   current?: DirectoryIntegrationConfig,
-): DirectoryIntegrationInput & Required<Pick<DirectoryIntegrationInput, 'name' | 'corpId' | 'appKey' | 'appSecret' | 'rootDepartmentId' | 'defaultDeprovisionPolicy' | 'status'>> {
+): NormalizedDirectoryIntegrationInput {
   const name = normalizeText(input.name)
   const corpId = normalizeText(input.corpId)
   const appKey = normalizeText(input.appKey)
@@ -1145,6 +1280,8 @@ function normalizeIntegrationInput(
   const excludeDepartmentIds = normalizeExcludeDepartmentIds(input.excludeDepartmentIds, current?.excludeDepartmentIds ?? [])
   const memberGroupSyncMode = normalizeMemberGroupSyncMode(input.memberGroupSyncMode, current?.memberGroupSyncMode ?? DEFAULT_MEMBER_GROUP_SYNC_MODE)
   const memberGroupDepartmentIds = normalizeMemberGroupDepartmentIds(input.memberGroupDepartmentIds, current?.memberGroupDepartmentIds ?? [])
+  const memberGroupDefaultRoleIds = normalizeMemberGroupDefaultRoleIds(input.memberGroupDefaultRoleIds, current?.memberGroupDefaultRoleIds ?? [])
+  const memberGroupDefaultNamespaces = normalizeMemberGroupDefaultNamespaces(input.memberGroupDefaultNamespaces, current?.memberGroupDefaultNamespaces ?? [])
   const defaultDeprovisionPolicy = normalizeText(input.defaultDeprovisionPolicy) || 'mark_inactive'
   const status = normalizeText(input.status) || 'active'
 
@@ -1168,6 +1305,8 @@ function normalizeIntegrationInput(
     excludeDepartmentIds,
     memberGroupSyncMode,
     memberGroupDepartmentIds,
+    memberGroupDefaultRoleIds,
+    memberGroupDefaultNamespaces,
     syncEnabled: input.syncEnabled ?? false,
     scheduleCron: normalizeOptionalText(input.scheduleCron),
     defaultDeprovisionPolicy,
@@ -1222,6 +1361,10 @@ export async function listDirectoryIntegrations(orgId = DEFAULT_ORG_ID): Promise
 
 export async function createDirectoryIntegration(input: DirectoryIntegrationInput): Promise<DirectoryIntegrationSummary> {
   const normalized = normalizeIntegrationInput(input)
+  await assertDirectoryProjectedGovernanceConfigValid({
+    memberGroupDefaultRoleIds: normalized.memberGroupDefaultRoleIds,
+    memberGroupDefaultNamespaces: normalized.memberGroupDefaultNamespaces,
+  })
   const result = await query<DirectoryIntegrationRow>(
     `INSERT INTO directory_integrations (
        org_id, provider, name, status, corp_id, config, sync_enabled, schedule_cron,
@@ -1247,6 +1390,8 @@ export async function createDirectoryIntegration(input: DirectoryIntegrationInpu
         excludeDepartmentIds: normalized.excludeDepartmentIds,
         memberGroupSyncMode: normalized.memberGroupSyncMode,
         memberGroupDepartmentIds: normalized.memberGroupDepartmentIds,
+        memberGroupDefaultRoleIds: normalized.memberGroupDefaultRoleIds,
+        memberGroupDefaultNamespaces: normalized.memberGroupDefaultNamespaces,
       }),
       Boolean(normalized.syncEnabled),
       normalized.scheduleCron,
@@ -1266,6 +1411,10 @@ export async function updateDirectoryIntegration(
 
   const currentConfig = parseIntegrationConfig(current)
   const normalized = normalizeIntegrationInput(input, currentConfig)
+  await assertDirectoryProjectedGovernanceConfigValid({
+    memberGroupDefaultRoleIds: normalized.memberGroupDefaultRoleIds,
+    memberGroupDefaultNamespaces: normalized.memberGroupDefaultNamespaces,
+  })
   const result = await query<DirectoryIntegrationRow>(
     `UPDATE directory_integrations
      SET name = $2,
@@ -1295,6 +1444,8 @@ export async function updateDirectoryIntegration(
         excludeDepartmentIds: normalized.excludeDepartmentIds,
         memberGroupSyncMode: normalized.memberGroupSyncMode,
         memberGroupDepartmentIds: normalized.memberGroupDepartmentIds,
+        memberGroupDefaultRoleIds: normalized.memberGroupDefaultRoleIds,
+        memberGroupDefaultNamespaces: normalized.memberGroupDefaultNamespaces,
       }),
       Boolean(normalized.syncEnabled),
       normalized.scheduleCron,
@@ -1644,6 +1795,7 @@ export async function syncDirectoryIntegration(
   triggeredBy: string,
   triggerSource: 'manual' | 'scheduler' = 'manual',
 ): Promise<{ integration: DirectoryIntegrationSummary; run: DirectorySyncRunSummary }> {
+  const governedUserIds = new Set<string>()
   const integration = await getIntegrationRow(integrationId)
   if (!integration) throw new Error('Directory integration not found')
 
@@ -1975,8 +2127,16 @@ export async function syncDirectoryIntegration(
       const memberGroupProjection = await syncProjectedDepartmentMemberGroupsInTransaction(
         client,
         memberGroupPlans,
+        {
+          defaultRoleIds: config.memberGroupDefaultRoleIds,
+          defaultNamespaces: config.memberGroupDefaultNamespaces,
+        },
         triggeredBy,
       )
+      for (const userId of memberGroupProjection.governedUserIds) {
+        const normalizedUserId = normalizeText(userId)
+        if (normalizedUserId) governedUserIds.add(normalizedUserId)
+      }
 
       const stats = {
         departmentsSynced: departments.size,
@@ -1992,6 +2152,9 @@ export async function syncDirectoryIntegration(
         memberGroupsCreatedCount: memberGroupProjection.memberGroupsCreatedCount,
         memberGroupsSyncedCount: memberGroupProjection.memberGroupsSyncedCount,
         memberGroupMembershipsUpdatedCount: memberGroupProjection.memberGroupMembershipsUpdatedCount,
+        memberGroupGovernedUserCount: memberGroupProjection.memberGroupGovernedUserCount,
+        memberGroupDefaultRoleAssignmentsCount: memberGroupProjection.memberGroupDefaultRoleAssignmentsCount,
+        memberGroupDefaultNamespaceAdmissionsCount: memberGroupProjection.memberGroupDefaultNamespaceAdmissionsCount,
       }
 
       await client.query(
@@ -2024,6 +2187,10 @@ export async function syncDirectoryIntegration(
         invitedBy: triggeredBy,
         inviteToken: invite.inviteToken,
       })
+    }
+
+    for (const userId of governedUserIds) {
+      invalidateUserPerms(userId)
     }
 
     const [updatedIntegration, updatedRun] = await Promise.all([
@@ -2714,20 +2881,124 @@ async function createDirectoryAdmittedUserInTransaction(
   return { userId }
 }
 
+async function applyDirectoryProjectedMemberGroupGovernanceInTransaction(
+  client: { query: (sql: string, params?: unknown[]) => Promise<{ rows: Array<Record<string, unknown>> }> },
+  options: {
+    plans: DirectoryProjectedMemberGroupPlan[]
+    defaultRoleIds: string[]
+    defaultNamespaces: string[]
+    adminUserId: string
+  },
+): Promise<{
+  governedUserIds: string[]
+  defaultRoleAssignmentsCount: number
+  defaultNamespaceAdmissionsCount: number
+}> {
+  const grantSet = buildDirectoryProjectedGovernanceGrantSet({
+    plans: options.plans,
+    defaultRoleIds: options.defaultRoleIds,
+    defaultNamespaces: options.defaultNamespaces,
+  })
+  if (
+    grantSet.userIds.length === 0
+    || (grantSet.roleIds.length === 0 && grantSet.namespaces.length === 0)
+  ) {
+    return {
+      governedUserIds: [],
+      defaultRoleAssignmentsCount: 0,
+      defaultNamespaceAdmissionsCount: 0,
+    }
+  }
+
+  const auditUserId = normalizeDirectorySyncAuditUserId(options.adminUserId)
+  let defaultRoleAssignmentsCount = 0
+  let defaultNamespaceAdmissionsCount = 0
+
+  if (grantSet.roleIds.length > 0) {
+    const insertedRolesResult = await client.query(
+      `INSERT INTO user_roles (user_id, role_id)
+       SELECT u.user_id, r.role_id
+       FROM unnest($1::text[]) AS u(user_id)
+       CROSS JOIN unnest($2::text[]) AS r(role_id)
+       ON CONFLICT DO NOTHING
+       RETURNING user_id, role_id`,
+      [grantSet.userIds, grantSet.roleIds],
+    )
+    defaultRoleAssignmentsCount = insertedRolesResult.rows.length
+  }
+
+  if (grantSet.namespaces.length > 0) {
+    const existingAdmissionsResult = await client.query(
+      `SELECT user_id, namespace, enabled
+       FROM user_namespace_admissions
+       WHERE user_id = ANY($1::text[])
+         AND namespace = ANY($2::text[])`,
+      [grantSet.userIds, grantSet.namespaces],
+    )
+    const existingEnabledPairs = new Set(
+      existingAdmissionsResult.rows
+        .filter((row) => row.enabled === true)
+        .map((row) => `${normalizeText(row.user_id)}:${normalizeNamespace(row.namespace)}`),
+    )
+    for (const userId of grantSet.userIds) {
+      for (const namespace of grantSet.namespaces) {
+        if (!existingEnabledPairs.has(`${userId}:${namespace}`)) {
+          defaultNamespaceAdmissionsCount += 1
+        }
+      }
+    }
+
+    await client.query(
+      `INSERT INTO user_namespace_admissions (
+         user_id, namespace, enabled, source, granted_by, updated_by, created_at, updated_at
+       )
+       SELECT u.user_id, n.namespace, TRUE, $3, $4, $4, NOW(), NOW()
+       FROM unnest($1::text[]) AS u(user_id)
+       CROSS JOIN unnest($2::text[]) AS n(namespace)
+       ON CONFLICT (user_id, namespace)
+       DO UPDATE SET
+         enabled = TRUE,
+         source = EXCLUDED.source,
+         granted_by = EXCLUDED.granted_by,
+         updated_by = EXCLUDED.updated_by,
+         updated_at = NOW()`,
+      [grantSet.userIds, grantSet.namespaces, 'directory_member_group_sync', auditUserId],
+    )
+  }
+
+  return {
+    governedUserIds: grantSet.userIds,
+    defaultRoleAssignmentsCount,
+    defaultNamespaceAdmissionsCount,
+  }
+}
+
 async function syncProjectedDepartmentMemberGroupsInTransaction(
   client: { query: (sql: string, params?: unknown[]) => Promise<{ rows: Array<Record<string, unknown>> }> },
   plans: DirectoryProjectedMemberGroupPlan[],
+  options: {
+    defaultRoleIds: string[]
+    defaultNamespaces: string[]
+  },
   adminUserId: string,
 ): Promise<{
   memberGroupsCreatedCount: number
   memberGroupsSyncedCount: number
   memberGroupMembershipsUpdatedCount: number
+  memberGroupGovernedUserCount: number
+  memberGroupDefaultRoleAssignmentsCount: number
+  memberGroupDefaultNamespaceAdmissionsCount: number
+  governedUserIds: string[]
 }> {
   if (plans.length === 0) {
     return {
       memberGroupsCreatedCount: 0,
       memberGroupsSyncedCount: 0,
       memberGroupMembershipsUpdatedCount: 0,
+      memberGroupGovernedUserCount: 0,
+      memberGroupDefaultRoleAssignmentsCount: 0,
+      memberGroupDefaultNamespaceAdmissionsCount: 0,
+      governedUserIds: [],
     }
   }
 
@@ -2814,10 +3085,21 @@ async function syncProjectedDepartmentMemberGroupsInTransaction(
     memberGroupMembershipsUpdatedCount += membersToDelete.length + membersToInsert.length
   }
 
+  const governance = await applyDirectoryProjectedMemberGroupGovernanceInTransaction(client, {
+    plans,
+    defaultRoleIds: options.defaultRoleIds,
+    defaultNamespaces: options.defaultNamespaces,
+    adminUserId,
+  })
+
   return {
     memberGroupsCreatedCount,
     memberGroupsSyncedCount,
     memberGroupMembershipsUpdatedCount,
+    memberGroupGovernedUserCount: governance.governedUserIds.length,
+    memberGroupDefaultRoleAssignmentsCount: governance.defaultRoleAssignmentsCount,
+    memberGroupDefaultNamespaceAdmissionsCount: governance.defaultNamespaceAdmissionsCount,
+    governedUserIds: governance.governedUserIds,
   }
 }
 
