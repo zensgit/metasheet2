@@ -362,4 +362,108 @@ describe('MetaSheetPermissionManager', () => {
     expect(client.updateViewPermission).toHaveBeenCalledWith('view_grid', 'member-group', 'group_north', 'none')
     expect(updatedSpy).toHaveBeenCalledTimes(1)
   })
+
+  it('applies a field template to all fields for a member-group subject', async () => {
+    const updatedSpy = vi.fn()
+    const client = {
+      listSheetPermissions: vi.fn().mockResolvedValue({
+        items: [
+          {
+            subjectType: 'member-group',
+            subjectId: 'group_north',
+            accessLevel: 'write',
+            permissions: ['spreadsheet:write'],
+            label: 'North Region',
+            subtitle: 'Regional operations',
+            isActive: true,
+          },
+        ],
+      }),
+      listSheetPermissionCandidates: vi.fn().mockResolvedValue({ items: [] }),
+      updateSheetPermission: vi.fn().mockResolvedValue({}),
+      updateFieldPermission: vi.fn().mockResolvedValue({}),
+      updateViewPermission: vi.fn().mockResolvedValue({}),
+    }
+
+    mountManager({
+      client,
+      onUpdated: updatedSpy,
+      fields: [
+        { id: 'fld_title', name: 'Title', type: 'string', property: {}, order: 0, options: [] },
+        { id: 'fld_owner', name: 'Owner', type: 'string', property: {}, order: 1, options: [] },
+      ],
+    })
+    await flushUi()
+
+    const tabs = Array.from(container!.querySelectorAll('[role="tab"]'))
+    const fieldTab = tabs.find((tab) => tab.textContent?.includes('Field Permissions')) as HTMLElement
+    fieldTab.click()
+    await flushUi()
+
+    const templateRow = container!.querySelector('[data-field-permission-template="member-group:group_north"]')!
+    const select = templateRow.querySelector('select') as HTMLSelectElement
+    select.value = 'readonly'
+    select.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi()
+
+    ;(templateRow.querySelector('.meta-sheet-perm__action--primary') as HTMLButtonElement).click()
+    await flushUi()
+
+    expect(client.updateFieldPermission).toHaveBeenCalledTimes(2)
+    expect(client.updateFieldPermission).toHaveBeenNthCalledWith(1, 'sheet_orders', 'fld_title', 'member-group', 'group_north', { visible: true, readOnly: true })
+    expect(client.updateFieldPermission).toHaveBeenNthCalledWith(2, 'sheet_orders', 'fld_owner', 'member-group', 'group_north', { visible: true, readOnly: true })
+    expect(updatedSpy).toHaveBeenCalledTimes(1)
+  })
+
+  it('applies a view template to all views for a member-group subject', async () => {
+    const updatedSpy = vi.fn()
+    const client = {
+      listSheetPermissions: vi.fn().mockResolvedValue({
+        items: [
+          {
+            subjectType: 'member-group',
+            subjectId: 'group_north',
+            accessLevel: 'write',
+            permissions: ['spreadsheet:write'],
+            label: 'North Region',
+            subtitle: 'Regional operations',
+            isActive: true,
+          },
+        ],
+      }),
+      listSheetPermissionCandidates: vi.fn().mockResolvedValue({ items: [] }),
+      updateSheetPermission: vi.fn().mockResolvedValue({}),
+      updateFieldPermission: vi.fn().mockResolvedValue({}),
+      updateViewPermission: vi.fn().mockResolvedValue({}),
+    }
+
+    mountManager({
+      client,
+      onUpdated: updatedSpy,
+      views: [
+        { id: 'view_grid', name: 'Grid View', type: 'grid', sheetId: 'sheet_orders' },
+        { id: 'view_board', name: 'Board View', type: 'board', sheetId: 'sheet_orders' },
+      ],
+    })
+    await flushUi()
+
+    const tabs = Array.from(container!.querySelectorAll('[role="tab"]'))
+    const viewTab = tabs.find((tab) => tab.textContent?.includes('View Permissions')) as HTMLElement
+    viewTab.click()
+    await flushUi()
+
+    const templateRow = container!.querySelector('[data-view-permission-template="member-group:group_north"]')!
+    const select = templateRow.querySelector('select') as HTMLSelectElement
+    select.value = 'admin'
+    select.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi()
+
+    ;(templateRow.querySelector('.meta-sheet-perm__action--primary') as HTMLButtonElement).click()
+    await flushUi()
+
+    expect(client.updateViewPermission).toHaveBeenCalledTimes(2)
+    expect(client.updateViewPermission).toHaveBeenNthCalledWith(1, 'view_grid', 'member-group', 'group_north', 'admin')
+    expect(client.updateViewPermission).toHaveBeenNthCalledWith(2, 'view_board', 'member-group', 'group_north', 'admin')
+    expect(updatedSpy).toHaveBeenCalledTimes(1)
+  })
 })

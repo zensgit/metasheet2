@@ -223,6 +223,41 @@
             <div v-if="!fields.length" class="meta-sheet-perm__empty">No fields available.</div>
             <div v-else-if="!entries.length && !hasFieldOrphans" class="meta-sheet-perm__empty">No subjects with sheet access. Grant sheet access first to configure field permissions.</div>
             <template v-else>
+              <div v-if="entries.length" class="meta-sheet-perm__section">
+                <div class="meta-sheet-perm__section-header">
+                  <strong>Bulk apply to all fields</strong>
+                </div>
+                <div
+                  v-for="entry in entries"
+                  :key="`fp-template-${subjectKey(entry.subjectType, entry.subjectId)}`"
+                  class="meta-sheet-perm__row meta-sheet-perm__row--template"
+                  :data-field-permission-template="subjectKey(entry.subjectType, entry.subjectId)"
+                >
+                  <div class="meta-sheet-perm__identity">
+                    <strong>{{ entry.label }}</strong>
+                    <span>{{ entry.subtitle || entry.subjectId }}</span>
+                  </div>
+                  <span class="meta-sheet-perm__subject" :data-subject-type="entry.subjectType">{{ subjectTypeBadgeLabel(entry.subjectType) }}</span>
+                  <select
+                    :value="fieldTemplateDraftValue(entry.subjectType, entry.subjectId)"
+                    class="meta-sheet-perm__select"
+                    :disabled="busyFieldTemplateKey === subjectKey(entry.subjectType, entry.subjectId)"
+                    @change="setFieldTemplateDraft(entry.subjectType, entry.subjectId, $event)"
+                  >
+                    <option value="default">Default</option>
+                    <option value="hidden">Hidden</option>
+                    <option value="readonly">Read-only</option>
+                  </select>
+                  <button
+                    class="meta-sheet-perm__action meta-sheet-perm__action--primary"
+                    type="button"
+                    :disabled="busyFieldTemplateKey === subjectKey(entry.subjectType, entry.subjectId)"
+                    @click="applyFieldTemplate(entry.subjectType, entry.subjectId)"
+                  >
+                    Apply to all fields
+                  </button>
+                </div>
+              </div>
               <div
                 v-for="field in fields"
                 :key="field.id"
@@ -307,6 +342,42 @@
             <div v-if="!views.length" class="meta-sheet-perm__empty">No views available.</div>
             <div v-else-if="!entries.length && !hasViewOrphans" class="meta-sheet-perm__empty">No subjects with sheet access. Grant sheet access first to configure view permissions.</div>
             <template v-else>
+              <div v-if="entries.length" class="meta-sheet-perm__section">
+                <div class="meta-sheet-perm__section-header">
+                  <strong>Bulk apply to all views</strong>
+                </div>
+                <div
+                  v-for="entry in entries"
+                  :key="`vp-template-${subjectKey(entry.subjectType, entry.subjectId)}`"
+                  class="meta-sheet-perm__row meta-sheet-perm__row--template"
+                  :data-view-permission-template="subjectKey(entry.subjectType, entry.subjectId)"
+                >
+                  <div class="meta-sheet-perm__identity">
+                    <strong>{{ entry.label }}</strong>
+                    <span>{{ entry.subtitle || entry.subjectId }}</span>
+                  </div>
+                  <span class="meta-sheet-perm__subject" :data-subject-type="entry.subjectType">{{ subjectTypeBadgeLabel(entry.subjectType) }}</span>
+                  <select
+                    :value="viewTemplateDraftValue(entry.subjectType, entry.subjectId)"
+                    class="meta-sheet-perm__select"
+                    :disabled="busyViewTemplateKey === subjectKey(entry.subjectType, entry.subjectId)"
+                    @change="setViewTemplateDraft(entry.subjectType, entry.subjectId, $event)"
+                  >
+                    <option value="none">None</option>
+                    <option value="read">Read</option>
+                    <option value="write">Write</option>
+                    <option value="admin">Admin</option>
+                  </select>
+                  <button
+                    class="meta-sheet-perm__action meta-sheet-perm__action--primary"
+                    type="button"
+                    :disabled="busyViewTemplateKey === subjectKey(entry.subjectType, entry.subjectId)"
+                    @click="applyViewTemplate(entry.subjectType, entry.subjectId)"
+                  >
+                    Apply to all views
+                  </button>
+                </div>
+              </div>
               <div
                 v-for="view in views"
                 :key="view.id"
@@ -455,10 +526,14 @@ let searchTimer: number | null = null
 // Field permission drafts
 const fieldPermDrafts = ref<Record<string, string>>({})
 const busyFieldPermKey = ref<string | null>(null)
+const fieldTemplateDrafts = ref<Record<string, string>>({})
+const busyFieldTemplateKey = ref<string | null>(null)
 
 // View permission drafts
 const viewPermDrafts = ref<Record<string, string>>({})
 const busyViewPermKey = ref<string | null>(null)
+const viewTemplateDrafts = ref<Record<string, string>>({})
+const busyViewTemplateKey = ref<string | null>(null)
 
 function subjectKey(subjectType: MetaSheetPermissionSubjectType, subjectId: string) {
   return `${subjectType}:${subjectId}`
@@ -491,11 +566,22 @@ function fieldPermDraftLabel(fieldId: string, subjectType: string, subjectId: st
   return 'Default'
 }
 
+function fieldTemplateDraftValue(subjectType: string, subjectId: string): string {
+  return fieldTemplateDrafts.value[subjectKey(subjectType as MetaSheetPermissionSubjectType, subjectId)] ?? 'default'
+}
+
 function setFieldPermDraft(fieldId: string, subjectType: string, subjectId: string, event: Event) {
   const key = fieldPermKey(fieldId, subjectType, subjectId)
   fieldPermDrafts.value = {
     ...fieldPermDrafts.value,
     [key]: (event.target as HTMLSelectElement).value,
+  }
+}
+
+function setFieldTemplateDraft(subjectType: string, subjectId: string, event: Event) {
+  fieldTemplateDrafts.value = {
+    ...fieldTemplateDrafts.value,
+    [subjectKey(subjectType as MetaSheetPermissionSubjectType, subjectId)]: (event.target as HTMLSelectElement).value,
   }
 }
 
@@ -542,6 +628,38 @@ async function clearFieldPerm(fieldId: string, subjectType: string, subjectId: s
   }
 }
 
+async function applyFieldTemplate(subjectType: string, subjectId: string) {
+  if (!props.fields.length) return
+  const key = subjectKey(subjectType as MetaSheetPermissionSubjectType, subjectId)
+  const draft = fieldTemplateDraftValue(subjectType, subjectId)
+  const perm: { remove: true } | { visible: boolean; readOnly: boolean } = draft === 'default'
+    ? { remove: true }
+    : fieldPermFromDraftValue(draft)
+  busyFieldTemplateKey.value = key
+  clearMessages()
+  try {
+    await Promise.all(
+      props.fields.map((field) =>
+        props.client.updateFieldPermission(
+          props.sheetId,
+          field.id,
+          subjectType as MetaSheetPermissionSubjectType,
+          subjectId,
+          perm,
+        ),
+      ),
+    )
+    status.value = draft === 'default'
+      ? `Cleared field permission overrides on ${props.fields.length} fields`
+      : `Applied field permission to ${props.fields.length} fields`
+    emit('updated')
+  } catch (cause: any) {
+    error.value = cause?.message ?? 'Failed to apply field permission template'
+  } finally {
+    busyFieldTemplateKey.value = null
+  }
+}
+
 // --- View permission helpers ---
 function viewPermKey(viewId: string, subjectType: string, subjectId: string) {
   return `${viewId}:${subjectType}:${subjectId}`
@@ -559,6 +677,10 @@ function viewPermDraftValue(viewId: string, subjectType: string, subjectId: stri
   return viewPermDrafts.value[key] ?? resolveViewPerm(viewId, subjectType, subjectId)
 }
 
+function viewTemplateDraftValue(subjectType: string, subjectId: string): string {
+  return viewTemplateDrafts.value[subjectKey(subjectType as MetaSheetPermissionSubjectType, subjectId)] ?? 'read'
+}
+
 function viewPermDisplayLabel(val: string): string {
   if (val === 'read') return 'Read'
   if (val === 'write') return 'Write'
@@ -571,6 +693,13 @@ function setViewPermDraft(viewId: string, subjectType: string, subjectId: string
   viewPermDrafts.value = {
     ...viewPermDrafts.value,
     [key]: (event.target as HTMLSelectElement).value,
+  }
+}
+
+function setViewTemplateDraft(subjectType: string, subjectId: string, event: Event) {
+  viewTemplateDrafts.value = {
+    ...viewTemplateDrafts.value,
+    [subjectKey(subjectType as MetaSheetPermissionSubjectType, subjectId)]: (event.target as HTMLSelectElement).value,
   }
 }
 
@@ -609,6 +738,32 @@ async function clearViewPerm(viewId: string, subjectType: string, subjectId: str
     error.value = cause?.message ?? 'Failed to clear view permission'
   } finally {
     busyViewPermKey.value = null
+  }
+}
+
+async function applyViewTemplate(subjectType: string, subjectId: string) {
+  if (!props.views.length) return
+  const key = subjectKey(subjectType as MetaSheetPermissionSubjectType, subjectId)
+  const permission = viewTemplateDraftValue(subjectType, subjectId)
+  busyViewTemplateKey.value = key
+  clearMessages()
+  try {
+    await Promise.all(
+      props.views.map((view) =>
+        props.client.updateViewPermission(
+          view.id,
+          subjectType as MetaSheetPermissionSubjectType,
+          subjectId,
+          permission,
+        ),
+      ),
+    )
+    status.value = `Applied view permission to ${props.views.length} views`
+    emit('updated')
+  } catch (cause: any) {
+    error.value = cause?.message ?? 'Failed to apply view permission template'
+  } finally {
+    busyViewTemplateKey.value = null
   }
 }
 
@@ -924,6 +1079,10 @@ onBeforeUnmount(() => {
   grid-template-columns: minmax(0, 1fr) 100px 120px auto;
 }
 
+.meta-sheet-perm__row--template {
+  grid-template-columns: minmax(0, 1fr) 100px 140px auto;
+}
+
 .meta-sheet-perm__field-group {
   display: flex;
   flex-direction: column;
@@ -1093,6 +1252,10 @@ onBeforeUnmount(() => {
   }
 
   .meta-sheet-perm__row--field {
+    grid-template-columns: 1fr;
+  }
+
+  .meta-sheet-perm__row--template {
     grid-template-columns: 1fr;
   }
 }
