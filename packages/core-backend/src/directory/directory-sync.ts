@@ -572,6 +572,10 @@ function normalizeText(value: unknown): string {
   return typeof value === 'string' ? value.trim() : String(value ?? '').trim()
 }
 
+function normalizeMobileIdentifier(value: unknown): string {
+  return normalizeText(value).replace(/\s+/g, '')
+}
+
 function normalizeOptionalText(value: unknown): string | null {
   const text = normalizeText(value)
   return text.length > 0 ? text : null
@@ -586,7 +590,7 @@ function sanitizeDirectoryAdmissionName(value: string): string {
 }
 
 function sanitizeDirectoryAdmissionMobile(value: unknown): string | null {
-  const text = normalizeText(value).replace(/\s+/g, '')
+  const text = normalizeMobileIdentifier(value)
   if (!text) return null
   return text.slice(0, 32)
 }
