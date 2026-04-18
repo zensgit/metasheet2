@@ -256,15 +256,53 @@ describe('MetaSheetPermissionManager', () => {
       updateViewPermission: vi.fn().mockResolvedValue({}),
     }
 
-    mountManager({ client })
+    mountManager({
+      client,
+      fields: [
+        { id: 'fld_title', name: 'Title', type: 'string', property: {}, order: 0, options: [] },
+      ],
+      views: [
+        { id: 'view_grid', name: 'Grid View', type: 'grid', sheetId: 'sheet_orders' },
+      ],
+    })
     await flushUi()
 
     const inactiveEntry = container!.querySelector('[data-sheet-permission-entry="user:user_inactive"]')!
     const inactiveCandidate = container!.querySelector('[data-sheet-permission-candidate="user:user_candidate_inactive"]')!
     expect(inactiveEntry.textContent).toContain('Inactive user')
     expect(inactiveCandidate.textContent).toContain('Inactive user')
+    expect((inactiveEntry.querySelector('.meta-sheet-perm__select') as HTMLSelectElement).disabled).toBe(true)
+    expect((inactiveEntry.querySelector('.meta-sheet-perm__action') as HTMLButtonElement).disabled).toBe(true)
+    expect((inactiveEntry.querySelector('.meta-sheet-perm__action--danger') as HTMLButtonElement).disabled).toBe(false)
     expect((inactiveCandidate.querySelector('.meta-sheet-perm__select') as HTMLSelectElement).disabled).toBe(true)
     expect((inactiveCandidate.querySelector('.meta-sheet-perm__action--primary') as HTMLButtonElement).disabled).toBe(true)
+
+    const tabs = Array.from(container!.querySelectorAll('[role="tab"]'))
+    const fieldTab = tabs.find((tab) => tab.textContent?.includes('Field Permissions')) as HTMLElement
+    fieldTab.click()
+    await flushUi()
+
+    const fieldTemplateRow = container!.querySelector('[data-field-permission-template="user:user_inactive"]')!
+    const fieldRow = container!.querySelector('[data-field-permission-row="fld_title:user:user_inactive"]')!
+    expect(fieldTemplateRow.textContent).toContain('Inactive user')
+    expect(fieldRow.textContent).toContain('Inactive user')
+    expect((fieldTemplateRow.querySelector('.meta-sheet-perm__select') as HTMLSelectElement).disabled).toBe(true)
+    expect((fieldTemplateRow.querySelector('.meta-sheet-perm__action--primary') as HTMLButtonElement).disabled).toBe(true)
+    expect((fieldRow.querySelector('.meta-sheet-perm__select') as HTMLSelectElement).disabled).toBe(true)
+    expect((fieldRow.querySelector('.meta-sheet-perm__action--primary') as HTMLButtonElement).disabled).toBe(true)
+
+    const viewTab = tabs.find((tab) => tab.textContent?.includes('View Permissions')) as HTMLElement
+    viewTab.click()
+    await flushUi()
+
+    const viewTemplateRow = container!.querySelector('[data-view-permission-template="user:user_inactive"]')!
+    const viewRow = container!.querySelector('[data-view-permission-row="view_grid:user:user_inactive"]')!
+    expect(viewTemplateRow.textContent).toContain('Inactive user')
+    expect(viewRow.textContent).toContain('Inactive user')
+    expect((viewTemplateRow.querySelector('.meta-sheet-perm__select') as HTMLSelectElement).disabled).toBe(true)
+    expect((viewTemplateRow.querySelector('.meta-sheet-perm__action--primary') as HTMLButtonElement).disabled).toBe(true)
+    expect((viewRow.querySelector('.meta-sheet-perm__select') as HTMLSelectElement).disabled).toBe(true)
+    expect((viewRow.querySelector('.meta-sheet-perm__action--primary') as HTMLButtonElement).disabled).toBe(true)
   })
 
   it('clears field defaults by removing overrides and shows orphan field overrides', async () => {

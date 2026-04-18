@@ -45,7 +45,7 @@
             <select
               :value="entryDrafts[entry.id] ?? entry.accessLevel"
               class="meta-record-perm__select"
-              :disabled="busyKey === entry.id"
+              :disabled="busyKey === entry.id || subjectMutationBlocked(entry.subjectType, entry.isActive)"
               @change="setEntryDraft(entry.id, $event)"
             >
               <option value="read">Read</option>
@@ -55,7 +55,7 @@
             <button
               class="meta-record-perm__action"
               type="button"
-              :disabled="busyKey === entry.id || (entryDrafts[entry.id] ?? entry.accessLevel) === entry.accessLevel"
+              :disabled="busyKey === entry.id || subjectMutationBlocked(entry.subjectType, entry.isActive) || (entryDrafts[entry.id] ?? entry.accessLevel) === entry.accessLevel"
               @click="saveEntry(entry)"
             >
               Save
@@ -251,8 +251,12 @@ function subjectIsInactive(subjectType: string, isActive: boolean) {
   return subjectType === 'user' && isActive === false
 }
 
+function subjectMutationBlocked(subjectType: string, isActive: boolean) {
+  return subjectIsInactive(subjectType, isActive)
+}
+
 function candidateGrantBlocked(candidate: MetaSheetPermissionCandidate) {
-  return subjectIsInactive(candidate.subjectType, candidate.isActive)
+  return subjectMutationBlocked(candidate.subjectType, candidate.isActive)
 }
 
 function requestClose() {
