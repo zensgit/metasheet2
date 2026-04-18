@@ -15,12 +15,12 @@ export function ensureLocationChangeEvents(): void {
   const originalPushState = window.history.pushState.bind(window.history)
   const originalReplaceState = window.history.replaceState.bind(window.history)
 
-  window.history.pushState = function pushState(...args): void {
+  window.history.pushState = function pushState(...args: Parameters<History['pushState']>): void {
     originalPushState(...args)
     dispatchLocationChange()
   }
 
-  window.history.replaceState = function replaceState(...args): void {
+  window.history.replaceState = function replaceState(...args: Parameters<History['replaceState']>): void {
     originalReplaceState(...args)
     dispatchLocationChange()
   }

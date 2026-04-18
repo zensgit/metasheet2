@@ -2481,6 +2481,7 @@ export function adminUsersRouter(): Router {
         )
         if (pinned.rows[0]) {
           items.unshift(pinned.rows[0])
+          if (items.length > pageSize) items.length = pageSize
         } else {
           pinnedUserIncluded = false
         }

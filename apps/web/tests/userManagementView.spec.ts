@@ -334,7 +334,12 @@ function createApiImplementation(
       const items = visible.map((user) => buildUserPayload(user))
       if (pinUserId && !items.some((item) => item.id === pinUserId)) {
         const pinned = state.find((user) => user.id === pinUserId)
-        if (pinned) items.unshift(buildUserPayload(pinned))
+        if (pinned) {
+          items.unshift(buildUserPayload(pinned))
+          if (typeof options.paginatedPageSize === 'number' && items.length > options.paginatedPageSize) {
+            items.length = options.paginatedPageSize
+          }
+        }
       }
       return createJsonResponse({
         ok: true,

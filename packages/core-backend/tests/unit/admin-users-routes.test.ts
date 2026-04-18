@@ -309,14 +309,15 @@ describe('admin-users routes', () => {
       })
 
     const response = await invokeRoute('get', '/api/admin/users', {
-      query: { userId: 'user-pinned', page: '1', pageSize: '20' },
+      query: { userId: 'user-pinned', page: '1', pageSize: '1' },
     })
 
     expect(response.statusCode).toBe(200)
     expect(pgMocks.query).toHaveBeenCalledTimes(3)
     const items = (response.body as Record<string, any>).data.items
     expect(items[0].id).toBe('user-pinned')
-    expect(items.map((row: Record<string, unknown>) => row.id)).toEqual(['user-pinned', 'user-first'])
+    expect(items.map((row: Record<string, unknown>) => row.id)).toEqual(['user-pinned'])
+    expect(items).toHaveLength(1)
     expect((response.body as Record<string, any>).data.pinUserId).toBe('user-pinned')
     expect((response.body as Record<string, any>).data.pinUserIncluded).toBe(true)
   })
