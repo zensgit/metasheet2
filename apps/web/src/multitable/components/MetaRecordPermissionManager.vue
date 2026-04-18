@@ -37,6 +37,12 @@
                 >
                   Inactive user
                 </span>
+                <span
+                  v-if="subjectMutationBlocked(entry.subjectType, entry.isActive)"
+                  class="meta-record-perm__hint"
+                >
+                  Cleanup only
+                </span>
               </div>
             <span class="meta-record-perm__subject" :data-subject-type="entry.subjectType">{{ subjectTypeLabel(entry.subjectType) }}</span>
             <span class="meta-record-perm__badge" :data-access-level="entryDrafts[entry.id] ?? entry.accessLevel">
@@ -570,6 +576,12 @@ watch(
   color: #b91c1c;
   font-size: 11px;
   font-weight: 600;
+}
+
+.meta-record-perm__hint {
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 500;
 }
 
 .meta-record-perm__subject {

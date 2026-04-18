@@ -52,6 +52,12 @@
                   Inactive user
                 </span>
                 <span
+                  v-if="subjectMutationBlocked(entry.subjectType, entry.isActive)"
+                  class="meta-sheet-perm__hint"
+                >
+                  Cleanup only
+                </span>
+                <span
                   v-if="hasSubjectOverrides(entry.subjectType, entry.subjectId)"
                   class="meta-sheet-perm__hint meta-sheet-perm__hint--inline"
                 >
@@ -273,6 +279,12 @@
                     >
                       Inactive user
                     </span>
+                    <span
+                      v-if="subjectMutationBlocked(entry.subjectType, entry.isActive)"
+                      class="meta-sheet-perm__hint"
+                    >
+                      Cleanup only
+                    </span>
                   </div>
                   <span class="meta-sheet-perm__subject" :data-subject-type="entry.subjectType">{{ subjectTypeBadgeLabel(entry.subjectType) }}</span>
                   <select
@@ -331,6 +343,12 @@
                       data-lifecycle="inactive"
                     >
                       Inactive user
+                    </span>
+                    <span
+                      v-if="subjectMutationBlocked(entry.subjectType, entry.isActive)"
+                      class="meta-sheet-perm__hint"
+                    >
+                      Cleanup only
                     </span>
                   </div>
                   <span
@@ -425,6 +443,12 @@
                     >
                       Inactive user
                     </span>
+                    <span
+                      v-if="subjectMutationBlocked(entry.subjectType, entry.isActive)"
+                      class="meta-sheet-perm__hint"
+                    >
+                      Cleanup only
+                    </span>
                   </div>
                   <span class="meta-sheet-perm__subject" :data-subject-type="entry.subjectType">{{ subjectTypeBadgeLabel(entry.subjectType) }}</span>
                   <select
@@ -484,6 +508,12 @@
                       data-lifecycle="inactive"
                     >
                       Inactive user
+                    </span>
+                    <span
+                      v-if="subjectMutationBlocked(entry.subjectType, entry.isActive)"
+                      class="meta-sheet-perm__hint"
+                    >
+                      Cleanup only
                     </span>
                   </div>
                   <span

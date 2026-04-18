@@ -228,6 +228,7 @@ describe('MetaRecordPermissionManager', () => {
     const inactiveEntry = container!.querySelector('[data-record-permission-entry="perm_inactive"]')!
     const inactiveCandidate = container!.querySelector('[data-record-permission-candidate="user:user_candidate_inactive"]')!
     expect(inactiveEntry.textContent).toContain('Inactive user')
+    expect(inactiveEntry.textContent).toContain('Cleanup only')
     expect(inactiveCandidate.textContent).toContain('Inactive user')
     expect((inactiveEntry.querySelector('.meta-record-perm__select') as HTMLSelectElement).disabled).toBe(true)
     expect((inactiveEntry.querySelector('.meta-record-perm__action') as HTMLButtonElement).disabled).toBe(true)
