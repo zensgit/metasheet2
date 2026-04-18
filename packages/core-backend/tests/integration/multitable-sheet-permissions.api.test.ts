@@ -10,7 +10,22 @@ type QueryResult = {
 type QueryHandler = (sql: string, params?: unknown[]) => QueryResult | Promise<QueryResult>
 
 function createMockPool(queryHandler: QueryHandler) {
-  const query = vi.fn(async (sql: string, params?: unknown[]) => queryHandler(sql, params))
+  const query = vi.fn(async (sql: string, params?: unknown[]) => {
+    if (
+      sql.includes('FROM meta_view_permissions')
+      && !(sql.includes('FROM meta_view_permissions vp') && sql.includes('LEFT JOIN platform_member_groups g'))
+    ) {
+      return { rows: [], rowCount: 0 }
+    }
+    if (
+      sql.includes('FROM field_permissions')
+      && !(sql.includes('FROM field_permissions fp') && sql.includes('LEFT JOIN platform_member_groups g'))
+    ) {
+      return { rows: [], rowCount: 0 }
+    }
+    if (sql.includes('FROM record_permissions') && !sql.includes('FROM record_permissions rp')) return { rows: [], rowCount: 0 }
+    return queryHandler(sql, params)
+  })
   const transaction = vi.fn(async (fn: (client: { query: typeof query }) => Promise<unknown>) => fn({ query }))
   return { query, transaction }
 }
@@ -130,6 +145,7 @@ describe('Multitable sheet-scoped permissions API', () => {
       canManageViews: false,
       canComment: true,
       canManageAutomation: false,
+      canExport: true,
     })
     expect(contextResponse.body.data.viewPermissions).toEqual({
       view_grid: {
@@ -1357,6 +1373,13 @@ describe('Multitable sheet-scoped permissions API', () => {
                 user_is_active: true,
               },
               {
+                subject_type: 'member-group',
+                subject_id: '3e9c4bc7-13c2-4d12-8b52-9f0d62045d3c',
+                permission_codes: ['spreadsheet:write'],
+                group_name: 'North Region',
+                group_description: 'Regional operations team',
+              },
+              {
                 subject_type: 'role',
                 subject_id: 'role_ops_writer',
                 permission_codes: ['spreadsheet:admin'],
@@ -1376,6 +1399,15 @@ describe('Multitable sheet-scoped permissions API', () => {
                 user_email: 'alpha@example.com',
                 user_is_active: true,
                 permission_codes: ['spreadsheet:read'],
+              },
+              {
+                subject_type: 'member-group',
+                subject_id: '3e9c4bc7-13c2-4d12-8b52-9f0d62045d3c',
+                group_name: 'North Region',
+                group_description: 'Regional operations team',
+                member_count: 12,
+                user_is_active: true,
+                permission_codes: ['spreadsheet:write'],
               },
               {
                 subject_type: 'role',
@@ -1410,6 +1442,15 @@ describe('Multitable sheet-scoped permissions API', () => {
         isActive: true,
       },
       {
+        subjectType: 'member-group',
+        subjectId: '3e9c4bc7-13c2-4d12-8b52-9f0d62045d3c',
+        accessLevel: 'write',
+        permissions: ['spreadsheet:write'],
+        label: 'North Region',
+        subtitle: 'Regional operations team',
+        isActive: true,
+      },
+      {
         subjectType: 'role',
         subjectId: 'role_ops_writer',
         accessLevel: 'admin',
@@ -1436,6 +1477,14 @@ describe('Multitable sheet-scoped permissions API', () => {
           accessLevel: 'read',
         },
         {
+          subjectType: 'member-group',
+          subjectId: '3e9c4bc7-13c2-4d12-8b52-9f0d62045d3c',
+          label: 'North Region',
+          subtitle: 'Regional operations team',
+          isActive: true,
+          accessLevel: 'write',
+        },
+        {
           subjectType: 'role',
           subjectId: 'role_ops_writer',
           label: 'Ops Writers',
@@ -1444,7 +1493,7 @@ describe('Multitable sheet-scoped permissions API', () => {
           accessLevel: 'admin',
         },
       ],
-      total: 2,
+      total: 3,
       limit: 20,
       query: '',
     })
@@ -1514,6 +1563,69 @@ describe('Multitable sheet-scoped permissions API', () => {
     })
   })
 
+  test('derives effective sheet access from member-group grants', async () => {
+    const { app } = await createApp({
+      tokenPerms: [],
+      queryHandler: async (sql, params) => {
+        if (sql.includes('FROM meta_sheets s') && sql.includes('LEFT JOIN meta_bases')) {
+          expect(params).toEqual(['sheet_ops'])
+          return {
+            rows: [{ id: 'sheet_ops', base_id: 'base_ops', name: 'Orders', description: 'Ops records' }],
+          }
+        }
+        if (sql.includes('FROM meta_bases') && sql.includes('WHERE id = $1')) {
+          expect(params).toEqual(['base_ops'])
+          return {
+            rows: [{ id: 'base_ops', name: 'Ops Base', icon: 'table', color: '#1677ff', owner_id: 'owner_1', workspace_id: 'workspace_1' }],
+          }
+        }
+        if (sql.includes('FROM meta_sheets') && sql.includes('WHERE base_id = $1')) {
+          expect(params).toEqual(['base_ops'])
+          return {
+            rows: [{ id: 'sheet_ops', base_id: 'base_ops', name: 'Orders', description: 'Ops records' }],
+          }
+        }
+        if (sql.includes('FROM spreadsheet_permissions') && sql.includes('sheet_id = ANY')) {
+          expect(params).toEqual(['user_sheet_acl_1', ['sheet_ops']])
+          return {
+            rows: [{ sheet_id: 'sheet_ops', perm_code: 'spreadsheet:write', subject_type: 'member-group' }],
+          }
+        }
+        if (sql.includes('FROM meta_views') && sql.includes('WHERE sheet_id = $1')) {
+          expect(params).toEqual(['sheet_ops'])
+          return {
+            rows: [{ id: 'view_grid', sheet_id: 'sheet_ops', name: 'Grid', type: 'grid', filter_info: {}, sort_info: {}, group_info: {}, hidden_field_ids: [], config: {} }],
+          }
+        }
+        if (sql.includes('SELECT id, name, type, property, \"order\" FROM meta_fields WHERE sheet_id = $1')) {
+          expect(params).toEqual(['sheet_ops'])
+          return {
+            rows: [{ id: 'fld_name', name: 'Name', type: 'string', property: {}, order: 1 }],
+          }
+        }
+        throw new Error(`Unhandled SQL in test: ${sql}`)
+      },
+    })
+
+    const response = await request(app)
+      .get('/api/multitable/context')
+      .query({ sheetId: 'sheet_ops' })
+      .expect(200)
+
+    expect(response.body.data.capabilities).toMatchObject({
+      canRead: true,
+      canCreateRecord: true,
+      canEditRecord: true,
+      canDeleteRecord: true,
+      canManageFields: true,
+      canManageViews: true,
+    })
+    expect(response.body.data.capabilityOrigin).toEqual({
+      source: 'sheet-grant',
+      hasSheetAssignments: true,
+    })
+  })
+
   test('filters permission candidates that lack global multitable access', async () => {
     const { app } = await createApp({
       tokenPerms: ['multitable:read'],
@@ -1548,6 +1660,15 @@ describe('Multitable sheet-scoped permissions API', () => {
                 user_email: 'scope@example.com',
                 user_is_active: true,
                 permission_codes: ['spreadsheet:read'],
+              },
+              {
+                subject_type: 'member-group',
+                subject_id: '3e9c4bc7-13c2-4d12-8b52-9f0d62045d3c',
+                group_name: 'North Region',
+                group_description: null,
+                member_count: 12,
+                user_is_active: true,
+                permission_codes: [],
               },
               {
                 subject_type: 'role',
@@ -1590,6 +1711,14 @@ describe('Multitable sheet-scoped permissions API', () => {
           accessLevel: null,
         },
         {
+          subjectType: 'member-group',
+          subjectId: '3e9c4bc7-13c2-4d12-8b52-9f0d62045d3c',
+          label: 'North Region',
+          subtitle: '12 members',
+          isActive: true,
+          accessLevel: null,
+        },
+        {
           subjectType: 'role',
           subjectId: 'role_allowed',
           label: 'Allowed Role',
@@ -1598,7 +1727,7 @@ describe('Multitable sheet-scoped permissions API', () => {
           accessLevel: null,
         },
       ],
-      total: 2,
+      total: 3,
       limit: 20,
       query: '',
     })
@@ -1684,6 +1813,90 @@ describe('Multitable sheet-scoped permissions API', () => {
         permissions: ['spreadsheet:write-own'],
         label: 'Target User',
         subtitle: 'target@example.com',
+        isActive: true,
+      },
+    })
+  })
+
+  test('sets sheet permission access levels for member groups through the authoring endpoint', async () => {
+    const deleteCalls: Array<unknown[] | undefined> = []
+    const insertCalls: Array<unknown[] | undefined> = []
+
+    const { app } = await createApp({
+      tokenPerms: ['multitable:read'],
+      queryHandler: async (sql, params) => {
+        if (sql.includes('SELECT id, base_id, name, description FROM meta_sheets WHERE id = $1')) {
+          expect(params).toEqual(['sheet_ops'])
+          return { rows: [{ id: 'sheet_ops', base_id: 'base_ops', name: 'Ops', description: null }] }
+        }
+        if (sql.includes('FROM spreadsheet_permissions') && sql.includes('sheet_id = ANY')) {
+          expect(params).toEqual(['user_sheet_acl_1', ['sheet_ops']])
+          return { rows: [{ sheet_id: 'sheet_ops', perm_code: 'spreadsheet:admin', subject_type: 'user' }] }
+        }
+        if (sql.includes('SELECT id FROM platform_member_groups WHERE id::text = $1')) {
+          expect(params).toEqual(['3e9c4bc7-13c2-4d12-8b52-9f0d62045d3c'])
+          return { rows: [{ id: '3e9c4bc7-13c2-4d12-8b52-9f0d62045d3c' }] }
+        }
+        if (sql.includes('DELETE FROM spreadsheet_permissions') && sql.includes('subject_type = $2')) {
+          deleteCalls.push(params)
+          return { rows: [], rowCount: 2 }
+        }
+        if (sql.includes('INSERT INTO spreadsheet_permissions(sheet_id, user_id, subject_type, subject_id, perm_code)')) {
+          insertCalls.push(params)
+          return { rows: [], rowCount: 1 }
+        }
+        if (sql.includes('FROM spreadsheet_permissions sp') && sql.includes('GROUP BY sp.subject_type, sp.subject_id')) {
+          expect(params).toEqual(['sheet_ops'])
+          return {
+            rows: [{
+              subject_type: 'member-group',
+              subject_id: '3e9c4bc7-13c2-4d12-8b52-9f0d62045d3c',
+              permission_codes: ['spreadsheet:write'],
+              group_name: 'North Region',
+              group_description: 'Regional operations team',
+            }],
+          }
+        }
+        throw new Error(`Unhandled SQL in test: ${sql}`)
+      },
+    })
+
+    const response = await request(app)
+      .put('/api/multitable/sheets/sheet_ops/permissions/member-group/3e9c4bc7-13c2-4d12-8b52-9f0d62045d3c')
+      .send({ accessLevel: 'write' })
+      .expect(200)
+
+    expect(deleteCalls).toEqual([[
+      'sheet_ops',
+      'member-group',
+      '3e9c4bc7-13c2-4d12-8b52-9f0d62045d3c',
+      [
+        'spreadsheet:read',
+        'spreadsheet:write',
+        'spreadsheet:write-own',
+        'spreadsheet:admin',
+        'spreadsheets:read',
+        'spreadsheets:write',
+        'spreadsheets:write-own',
+        'spreadsheets:admin',
+        'multitable:read',
+        'multitable:write',
+        'multitable:write-own',
+        'multitable:admin',
+      ],
+    ]])
+    expect(insertCalls).toEqual([['sheet_ops', null, 'member-group', '3e9c4bc7-13c2-4d12-8b52-9f0d62045d3c', 'spreadsheet:write']])
+    expect(response.body.data).toEqual({
+      subjectType: 'member-group',
+      subjectId: '3e9c4bc7-13c2-4d12-8b52-9f0d62045d3c',
+      accessLevel: 'write',
+      entry: {
+        subjectType: 'member-group',
+        subjectId: '3e9c4bc7-13c2-4d12-8b52-9f0d62045d3c',
+        accessLevel: 'write',
+        permissions: ['spreadsheet:write'],
+        label: 'North Region',
+        subtitle: 'Regional operations team',
         isActive: true,
       },
     })
@@ -2485,6 +2698,169 @@ describe('Multitable sheet-scoped permissions API', () => {
         color: '#1677ff',
         ownerId: 'owner_1',
         workspaceId: 'workspace_1',
+      },
+    ])
+  })
+
+  test('lists record permissions with hydrated member-group labels', async () => {
+    const { app } = await createApp({
+      tokenPerms: ['multitable:read'],
+      queryHandler: async (sql, params) => {
+        if (sql.includes('SELECT id, base_id, name, description FROM meta_sheets WHERE id = $1')) {
+          expect(params).toEqual(['sheet_ops'])
+          return { rows: [{ id: 'sheet_ops', base_id: 'base_ops', name: 'Ops', description: null }] }
+        }
+        if (sql.includes('FROM spreadsheet_permissions') && sql.includes('sheet_id = ANY')) {
+          expect(params).toEqual(['user_sheet_acl_1', ['sheet_ops']])
+          return { rows: [{ sheet_id: 'sheet_ops', perm_code: 'spreadsheet:admin', subject_type: 'user' }] }
+        }
+        if (sql.includes('SELECT id FROM meta_records WHERE id = $1 AND sheet_id = $2')) {
+          expect(params).toEqual(['record_1', 'sheet_ops'])
+          return { rows: [{ id: 'record_1' }] }
+        }
+        if (sql.includes('FROM record_permissions rp') && sql.includes('LEFT JOIN platform_member_groups g')) {
+          expect(params).toEqual(['sheet_ops', 'record_1'])
+          return {
+            rows: [
+              {
+                id: 'perm_group',
+                sheet_id: 'sheet_ops',
+                record_id: 'record_1',
+                subject_type: 'member-group',
+                subject_id: '3e9c4bc7-13c2-4d12-8b52-9f0d62045d3c',
+                access_level: 'write',
+                created_at: new Date('2026-04-18T11:30:00.000Z'),
+                group_name: 'North Region',
+                group_description: 'Regional operations team',
+              },
+            ],
+          }
+        }
+        throw new Error(`Unhandled SQL in test: ${sql}`)
+      },
+    })
+
+    const response = await request(app)
+      .get('/api/multitable/sheets/sheet_ops/records/record_1/permissions')
+      .expect(200)
+
+    expect(response.body.data.items).toEqual([
+      {
+        id: 'perm_group',
+        sheetId: 'sheet_ops',
+        recordId: 'record_1',
+        subjectType: 'member-group',
+        subjectId: '3e9c4bc7-13c2-4d12-8b52-9f0d62045d3c',
+        accessLevel: 'write',
+        label: 'North Region',
+        subtitle: 'Regional operations team',
+        isActive: true,
+        createdAt: '2026-04-18T11:30:00.000Z',
+      },
+    ])
+  })
+
+  test('lists field permissions with hydrated member-group labels', async () => {
+    const { app } = await createApp({
+      tokenPerms: ['multitable:read'],
+      queryHandler: async (sql, params) => {
+        if (sql.includes('SELECT id, base_id, name, description FROM meta_sheets WHERE id = $1')) {
+          expect(params).toEqual(['sheet_ops'])
+          return { rows: [{ id: 'sheet_ops', base_id: 'base_ops', name: 'Ops', description: null }] }
+        }
+        if (sql.includes('FROM spreadsheet_permissions') && sql.includes('sheet_id = ANY')) {
+          expect(params).toEqual(['user_sheet_acl_1', ['sheet_ops']])
+          return { rows: [{ sheet_id: 'sheet_ops', perm_code: 'spreadsheet:admin', subject_type: 'user' }] }
+        }
+        if (sql.includes('FROM field_permissions fp') && sql.includes('LEFT JOIN platform_member_groups g')) {
+          expect(params).toEqual(['sheet_ops'])
+          return {
+            rows: [
+              {
+                id: 'field_perm_1',
+                sheet_id: 'sheet_ops',
+                field_id: 'fld_title',
+                subject_type: 'member-group',
+                subject_id: 'group_north',
+                visible: true,
+                read_only: true,
+                group_name: 'North Region',
+                group_description: 'Regional operations team',
+              },
+            ],
+          }
+        }
+        throw new Error(`Unhandled SQL in test: ${sql}`)
+      },
+    })
+
+    const response = await request(app)
+      .get('/api/multitable/sheets/sheet_ops/field-permissions')
+      .expect(200)
+
+    expect(response.body.data.items).toEqual([
+      {
+        id: 'field_perm_1',
+        sheetId: 'sheet_ops',
+        fieldId: 'fld_title',
+        subjectType: 'member-group',
+        subjectId: 'group_north',
+        subjectLabel: 'North Region',
+        subjectSubtitle: 'Regional operations team',
+        isActive: true,
+        visible: true,
+        readOnly: true,
+      },
+    ])
+  })
+
+  test('lists view permissions with hydrated member-group labels', async () => {
+    const { app } = await createApp({
+      tokenPerms: ['multitable:read'],
+      queryHandler: async (sql, params) => {
+        if (sql.includes('SELECT id, sheet_id FROM meta_views WHERE id = $1')) {
+          expect(params).toEqual(['view_ops'])
+          return { rows: [{ id: 'view_ops', sheet_id: 'sheet_ops' }] }
+        }
+        if (sql.includes('FROM spreadsheet_permissions') && sql.includes('sheet_id = ANY')) {
+          expect(params).toEqual(['user_sheet_acl_1', ['sheet_ops']])
+          return { rows: [{ sheet_id: 'sheet_ops', perm_code: 'spreadsheet:admin', subject_type: 'user' }] }
+        }
+        if (sql.includes('FROM meta_view_permissions vp') && sql.includes('LEFT JOIN platform_member_groups g')) {
+          expect(params).toEqual(['view_ops'])
+          return {
+            rows: [
+              {
+                id: 'view_perm_1',
+                view_id: 'view_ops',
+                subject_type: 'member-group',
+                subject_id: 'group_north',
+                permission: 'admin',
+                group_name: 'North Region',
+                group_description: 'Regional operations team',
+              },
+            ],
+          }
+        }
+        throw new Error(`Unhandled SQL in test: ${sql}`)
+      },
+    })
+
+    const response = await request(app)
+      .get('/api/multitable/views/view_ops/permissions')
+      .expect(200)
+
+    expect(response.body.data.items).toEqual([
+      {
+        id: 'view_perm_1',
+        viewId: 'view_ops',
+        subjectType: 'member-group',
+        subjectId: 'group_north',
+        subjectLabel: 'North Region',
+        subjectSubtitle: 'Regional operations team',
+        isActive: true,
+        permission: 'admin',
+        createdAt: '',
       },
     ])
   })

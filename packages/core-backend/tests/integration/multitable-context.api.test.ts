@@ -14,6 +14,15 @@ function createMockPool(queryHandler: QueryHandler) {
     if (sql.includes('FROM spreadsheet_permissions')) {
       return { rows: [], rowCount: 0 }
     }
+    if (sql.includes('FROM meta_view_permissions')) {
+      return { rows: [], rowCount: 0 }
+    }
+    if (sql.includes('FROM field_permissions')) {
+      return { rows: [], rowCount: 0 }
+    }
+    if (sql.includes('FROM record_permissions')) {
+      return { rows: [], rowCount: 0 }
+    }
     return queryHandler(sql, params)
   })
   const transaction = vi.fn(async (fn: (client: { query: typeof query }) => Promise<unknown>) => fn({ query }))
@@ -150,6 +159,7 @@ describe('Multitable context API', () => {
       canManageViews: false,
       canComment: true,
       canManageAutomation: true,
+      canExport: true,
     })
     expect(response.body.data.capabilityOrigin).toEqual({
       source: 'global-rbac',
@@ -331,6 +341,7 @@ describe('Multitable context API', () => {
       canManageViews: true,
       canComment: true,
       canManageAutomation: true,
+      canExport: true,
     })
     expect(response.body.data.viewPermissions).toEqual({
       view_grid: {

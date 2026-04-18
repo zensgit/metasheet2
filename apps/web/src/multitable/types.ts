@@ -195,7 +195,7 @@ export interface MetaCapabilityOrigin {
 }
 
 export type MetaSheetPermissionAccessLevel = 'read' | 'write' | 'write-own' | 'admin'
-export type MetaSheetPermissionSubjectType = 'user' | 'role'
+export type MetaSheetPermissionSubjectType = 'user' | 'role' | 'member-group'
 
 export interface MetaSheetPermissionEntry {
   subjectType: MetaSheetPermissionSubjectType
@@ -221,6 +221,8 @@ export interface MetaFieldPermissionEntry {
   subjectType: MetaSheetPermissionSubjectType
   subjectId: string
   subjectLabel?: string
+  subjectSubtitle?: string | null
+  isActive?: boolean
   visible: boolean
   readOnly: boolean
 }
@@ -230,6 +232,8 @@ export interface MetaViewPermissionEntry {
   subjectType: MetaSheetPermissionSubjectType
   subjectId: string
   subjectLabel?: string
+  subjectSubtitle?: string | null
+  isActive?: boolean
   permission: string
 }
 
@@ -525,7 +529,7 @@ export interface MetaTimelineViewConfig {
 
 // --- Record-level permissions ---
 export type RecordPermissionAccessLevel = 'read' | 'write' | 'admin'
-export type RecordPermissionSubjectType = 'user' | 'role'
+export type RecordPermissionSubjectType = 'user' | 'role' | 'member-group'
 
 export interface RecordPermissionEntry {
   id: string
@@ -534,6 +538,9 @@ export interface RecordPermissionEntry {
   subjectType: RecordPermissionSubjectType
   subjectId: string
   accessLevel: RecordPermissionAccessLevel
+  label: string
+  subtitle?: string | null
+  isActive: boolean
   createdAt?: string
   createdBy?: string
 }

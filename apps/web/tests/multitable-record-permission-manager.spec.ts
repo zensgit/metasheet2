@@ -14,11 +14,15 @@ async function flushUi(cycles = 4) {
 
 function makeClient(overrides?: {
   listRecordPermissions?: ReturnType<typeof vi.fn>
+  listSheetPermissions?: ReturnType<typeof vi.fn>
+  listSheetPermissionCandidates?: ReturnType<typeof vi.fn>
   updateRecordPermission?: ReturnType<typeof vi.fn>
   deleteRecordPermission?: ReturnType<typeof vi.fn>
 }) {
   return {
     listRecordPermissions: overrides?.listRecordPermissions ?? vi.fn().mockResolvedValue([]),
+    listSheetPermissions: overrides?.listSheetPermissions ?? vi.fn().mockResolvedValue({ items: [] }),
+    listSheetPermissionCandidates: overrides?.listSheetPermissionCandidates ?? vi.fn().mockResolvedValue({ items: [], total: 0, limit: 20, query: '' }),
     updateRecordPermission: overrides?.updateRecordPermission ?? vi.fn().mockResolvedValue(undefined),
     deleteRecordPermission: overrides?.deleteRecordPermission ?? vi.fn().mockResolvedValue(undefined),
   }
@@ -61,6 +65,9 @@ describe('MetaRecordPermissionManager', () => {
           subjectType: 'user',
           subjectId: 'user_alice',
           accessLevel: 'write',
+          label: 'Alice',
+          subtitle: 'alice@example.com',
+          isActive: true,
           createdAt: '2026-01-01T00:00:00Z',
         },
         {
@@ -70,6 +77,9 @@ describe('MetaRecordPermissionManager', () => {
           subjectType: 'role',
           subjectId: 'role_ops',
           accessLevel: 'read',
+          label: 'Ops Reviewers',
+          subtitle: 'Operations review role',
+          isActive: true,
         },
       ]),
     })
@@ -80,11 +90,12 @@ describe('MetaRecordPermissionManager', () => {
     expect(client.listRecordPermissions).toHaveBeenCalledWith('sheet_1', 'record_1')
     expect(container!.querySelector('[data-record-permission-entry="perm_1"]')).not.toBeNull()
     expect(container!.querySelector('[data-record-permission-entry="perm_2"]')).not.toBeNull()
-    expect(container!.textContent).toContain('user_alice')
-    expect(container!.textContent).toContain('role_ops')
+    expect(container!.textContent).toContain('Alice')
+    expect(container!.textContent).toContain('alice@example.com')
+    expect(container!.textContent).toContain('Ops Reviewers')
   })
 
-  it('calls API on grant', async () => {
+  it('grants record access from sheet subjects without raw subject-id input', async () => {
     const client = makeClient({
       listRecordPermissions: vi.fn()
         .mockResolvedValueOnce([])
@@ -96,35 +107,173 @@ describe('MetaRecordPermissionManager', () => {
             subjectType: 'user',
             subjectId: 'user_bob',
             accessLevel: 'write',
+            label: 'Bob',
+            subtitle: 'bob@example.com',
+            isActive: true,
           },
         ]),
+      listSheetPermissions: vi.fn().mockResolvedValue({
+        items: [
+          {
+            subjectType: 'user',
+            subjectId: 'user_bob',
+            accessLevel: 'read',
+            permissions: ['spreadsheet:read'],
+            label: 'Bob',
+            subtitle: 'bob@example.com',
+            isActive: true,
+          },
+        ],
+      }),
     })
     const updatedSpy = vi.fn()
 
     mountManager({ client, onUpdated: updatedSpy })
     await flushUi()
 
-    // Fill in the add form
-    const subjectInput = container!.querySelector('[data-record-permission-subject-input]') as HTMLInputElement
-    subjectInput.value = 'user_bob'
-    subjectInput.dispatchEvent(new Event('input', { bubbles: true }))
-    await flushUi()
-
-    // Change access level to write
-    const addRow = container!.querySelector('[data-record-permission-add]')!
-    const selects = addRow.querySelectorAll('select')
-    const accessSelect = selects[1] as HTMLSelectElement
+    const candidateRow = container!.querySelector('[data-record-permission-candidate="user:user_bob"]')!
+    const accessSelect = candidateRow.querySelector('select') as HTMLSelectElement
     accessSelect.value = 'write'
     accessSelect.dispatchEvent(new Event('change', { bubbles: true }))
     await flushUi()
 
-    // Click grant
-    const grantBtn = addRow.querySelector('.meta-record-perm__action--primary') as HTMLButtonElement
+    const grantBtn = candidateRow.querySelector('.meta-record-perm__action--primary') as HTMLButtonElement
     grantBtn.click()
     await flushUi()
 
     expect(client.updateRecordPermission).toHaveBeenCalledWith('sheet_1', 'record_1', 'user', 'user_bob', 'write')
     expect(updatedSpy).toHaveBeenCalledTimes(1)
+  })
+
+  it('supports granting member-group record permissions', async () => {
+    const client = makeClient({
+      listRecordPermissions: vi.fn()
+        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce([
+          {
+            id: 'perm_group',
+            sheetId: 'sheet_1',
+            recordId: 'record_1',
+            subjectType: 'member-group',
+            subjectId: '4df0f2f2-8bc1-4d89-9c47-2746bde6bc4d',
+            accessLevel: 'read',
+            label: 'North Region',
+            subtitle: 'Regional operations',
+            isActive: true,
+          },
+        ]),
+      listSheetPermissions: vi.fn().mockResolvedValue({
+        items: [
+          {
+            subjectType: 'member-group',
+            subjectId: '4df0f2f2-8bc1-4d89-9c47-2746bde6bc4d',
+            accessLevel: 'read',
+            permissions: ['spreadsheet:read'],
+            label: 'North Region',
+            subtitle: 'Regional operations',
+            isActive: true,
+          },
+        ],
+      }),
+    })
+    const updatedSpy = vi.fn()
+
+    mountManager({ client, onUpdated: updatedSpy })
+    await flushUi()
+
+    const candidateRow = container!.querySelector('[data-record-permission-candidate="member-group:4df0f2f2-8bc1-4d89-9c47-2746bde6bc4d"]')!
+    expect(candidateRow.textContent).toContain('North Region')
+    expect(candidateRow.textContent).toContain('Member group')
+    const grantBtn = candidateRow.querySelector('.meta-record-perm__action--primary') as HTMLButtonElement
+    grantBtn.click()
+    await flushUi()
+
+    expect(client.updateRecordPermission).toHaveBeenCalledWith('sheet_1', 'record_1', 'member-group', '4df0f2f2-8bc1-4d89-9c47-2746bde6bc4d', 'read')
+    expect(updatedSpy).toHaveBeenCalledTimes(1)
+  })
+
+  it('surfaces inactive users in current record access and candidate results', async () => {
+    const client = makeClient({
+      listRecordPermissions: vi.fn().mockResolvedValue([
+        {
+          id: 'perm_inactive',
+          sheetId: 'sheet_1',
+          recordId: 'record_1',
+          subjectType: 'user',
+          subjectId: 'user_inactive',
+          accessLevel: 'read',
+          label: 'Morgan',
+          subtitle: 'morgan@example.com',
+          isActive: false,
+        },
+      ]),
+      listSheetPermissions: vi.fn().mockResolvedValue({
+        items: [
+          {
+            subjectType: 'user',
+            subjectId: 'user_candidate_inactive',
+            accessLevel: 'read',
+            permissions: ['spreadsheet:read'],
+            label: 'Taylor',
+            subtitle: 'taylor@example.com',
+            isActive: false,
+          },
+        ],
+      }),
+    })
+
+    mountManager({ client })
+    await flushUi()
+
+    const inactiveEntry = container!.querySelector('[data-record-permission-entry="perm_inactive"]')!
+    const inactiveCandidate = container!.querySelector('[data-record-permission-candidate="user:user_candidate_inactive"]')!
+    expect(inactiveEntry.textContent).toContain('Inactive user')
+    expect(inactiveCandidate.textContent).toContain('Inactive user')
+  })
+
+  it('searches across sheet subjects and global candidates when granting record access', async () => {
+    const client = makeClient({
+      listSheetPermissions: vi.fn().mockResolvedValue({
+        items: [
+          {
+            subjectType: 'member-group',
+            subjectId: 'group_north',
+            accessLevel: 'read',
+            permissions: ['spreadsheet:read'],
+            label: 'North Region',
+            subtitle: 'Regional operations',
+            isActive: true,
+          },
+        ],
+      }),
+      listSheetPermissionCandidates: vi.fn().mockResolvedValue({
+        items: [
+          {
+            subjectType: 'role',
+            subjectId: 'role_ops',
+            label: 'Ops Reviewers',
+            subtitle: 'Operations review role',
+            isActive: true,
+            accessLevel: null,
+          },
+        ],
+        total: 1,
+        limit: 20,
+        query: 'north',
+      }),
+    })
+
+    mountManager({ client })
+    await flushUi()
+
+    const searchInput = container!.querySelector('[data-record-permission-search]') as HTMLInputElement
+    searchInput.value = 'north'
+    searchInput.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+
+    expect(client.listSheetPermissionCandidates).toHaveBeenLastCalledWith('sheet_1', { q: 'north', limit: 20 })
+    expect(container!.querySelector('[data-record-permission-candidate="member-group:group_north"]')).not.toBeNull()
+    expect(container!.querySelector('[data-record-permission-candidate="role:role_ops"]')).toBeNull()
   })
 
   it('calls API on revoke', async () => {
