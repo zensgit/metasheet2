@@ -141,6 +141,7 @@ type ExternalIdentityRow = {
 type LocalUserRow = {
   id: string
   email?: string | null
+  username?: string | null
   mobile?: string | null
 }
 
@@ -165,6 +166,7 @@ type DirectoryIntegrationAccountRow = {
   link_updated_at: string | null
   local_user_id: string | null
   local_user_email: string | null
+  local_user_username: string | null
   local_user_name: string | null
   department_paths: string[] | null
 }
@@ -178,7 +180,9 @@ type DirectoryReviewItemRow = DirectoryIntegrationAccountRow & {
 
 type DirectoryBindingUserRow = {
   id: string
-  email: string
+  email: string | null
+  username: string | null
+  mobile: string | null
   name: string | null
   role: string
   is_active: boolean
@@ -223,6 +227,7 @@ type DirectoryBindingTargetAccountRow = {
 type DirectoryAccountLinkedUserRow = {
   local_user_id: string | null
   local_user_email: string | null
+  local_user_username: string | null
   local_user_name: string | null
 }
 
@@ -411,7 +416,8 @@ export type DirectoryBindingRecommendationStatusCode =
 export type DirectoryBindingRecommendation = {
   localUser: {
     id: string
-    email: string
+    email: string | null
+    username: string | null
     name: string | null
     mobile: string | null
     role: string
@@ -463,6 +469,7 @@ export type DirectoryIntegrationAccountSummary = {
   localUser: {
     id: string
     email: string | null
+    username: string | null
     name: string | null
   } | null
   departmentPaths: string[]
@@ -497,7 +504,8 @@ export type DirectoryAccountMutationResult = {
 export type DirectoryAccountManualAdmissionInput = {
   adminUserId: string
   name: string
-  email: string
+  email?: string
+  username?: string
   mobile?: string | null
   enableDingTalkGrant?: boolean
   password?: string
@@ -506,14 +514,15 @@ export type DirectoryAccountManualAdmissionInput = {
 export type DirectoryAccountManualAdmissionResult = DirectoryAccountMutationResult & {
   user: {
     id: string
-    email: string
+    email: string | null
+    username: string | null
     name: string
     mobile: string | null
     role: string
     is_active: boolean
   }
   temporaryPassword?: string
-  inviteToken: string
+  inviteToken: string | null
   onboarding: ReturnType<typeof buildOnboardingPacket>
 }
 
@@ -570,6 +579,29 @@ function sanitizeDirectoryAdmissionMobile(value: unknown): string | null {
   const text = normalizeText(value).replace(/\s+/g, '')
   if (!text) return null
   return text.slice(0, 32)
+}
+
+function sanitizeDirectoryAdmissionUsername(value: unknown): string | null {
+  const text = normalizeText(value).toLowerCase()
+  if (!text) return null
+  return text.slice(0, 64)
+}
+
+function validateDirectoryAdmissionUsername(username: string | null): string | null {
+  if (!username) return null
+  if (!/^(?=.*[a-z])[a-z0-9._-]{3,64}$/.test(username)) {
+    return 'Username must be 3-64 characters and include at least one letter. Only lowercase letters, numbers, dot, underscore, and dash are allowed'
+  }
+  return null
+}
+
+function resolveDirectoryAdmissionAccountLabel(options: {
+  email?: string | null
+  username?: string | null
+  mobile?: string | null
+  userId?: string | null
+}): string {
+  return options.email || options.username || options.mobile || options.userId || '由管理员单独告知'
 }
 
 function generateDirectoryAdmissionTemporaryPassword(): string {
@@ -976,6 +1008,7 @@ function summarizeDirectoryAccount(row: DirectoryIntegrationAccountRow): Directo
       ? {
         id: row.local_user_id,
         email: row.local_user_email,
+        username: row.local_user_username,
         name: row.local_user_name,
       }
       : null,
@@ -1252,6 +1285,7 @@ async function loadDirectoryReviewRecommendations(
         localUser: {
           id: user.id,
           email: user.email,
+          username: user.username ?? null,
           name: user.name,
           mobile: user.mobile,
           role: user.role,
@@ -2046,6 +2080,7 @@ export async function syncDirectoryIntegration(
                     adminUserId: triggeredBy,
                     name: cleanName,
                     email: cleanEmail,
+                    username: null,
                     mobile: cleanMobile,
                     passwordHash,
                     mustChangePassword: true,
@@ -2533,6 +2568,7 @@ export async function listDirectoryReviewItems(
           l.updated_at AS link_updated_at,
           u.id AS local_user_id,
           u.email AS local_user_email,
+          u.username AS local_user_username,
           u.name AS local_user_name,
           COALESCE(array_remove(array_agg(DISTINCT d.full_path), NULL), ARRAY[]::text[]) AS department_paths,
           CASE
@@ -2558,7 +2594,7 @@ export async function listDirectoryReviewItems(
          a.integration_id, a.provider, a.corp_id, a.id, a.external_user_id, a.union_id, a.open_id, a.external_key,
          a.name, a.email, a.mobile, a.is_active, a.updated_at,
          l.link_status, l.match_strategy, l.reviewed_by, l.review_note, l.updated_at,
-         u.id, u.email, u.name
+         u.id, u.email, u.username, u.name
        ORDER BY
          CASE
            WHEN COALESCE(a.union_id, '') = '' AND COALESCE(a.open_id, '') = '' THEN 0
@@ -2611,6 +2647,7 @@ export async function getDirectoryReviewItem(
         l.updated_at AS link_updated_at,
         u.id AS local_user_id,
         u.email AS local_user_email,
+        u.username AS local_user_username,
         u.name AS local_user_name,
         COALESCE(array_remove(array_agg(DISTINCT d.full_path), NULL), ARRAY[]::text[]) AS department_paths,
         CASE
@@ -2636,7 +2673,7 @@ export async function getDirectoryReviewItem(
        a.integration_id, a.provider, a.corp_id, a.id, a.external_user_id, a.union_id, a.open_id, a.external_key,
        a.name, a.email, a.mobile, a.is_active, a.updated_at,
        l.link_status, l.match_strategy, l.reviewed_by, l.review_note, l.updated_at,
-       u.id, u.email, u.name`,
+       u.id, u.email, u.username, u.name`,
     [normalizedAccountId],
   )
 
@@ -2692,7 +2729,7 @@ async function applyDirectoryAccountBindInTransaction(
     normalizedAdminUserId: string
     enableDingTalkGrant: boolean
     account: DirectoryBindingTargetAccountRow
-    localUser: Pick<DirectoryBindingUserRow, 'id' | 'email' | 'name'>
+    localUser: Pick<DirectoryBindingUserRow, 'id' | 'email' | 'username' | 'name'>
   },
 ): Promise<void> {
   const { normalizedAccountId, normalizedAdminUserId, enableDingTalkGrant, account, localUser } = options
@@ -2837,7 +2874,8 @@ async function createDirectoryAdmittedUserInTransaction(
     account: DirectoryBindingTargetAccountRow
     adminUserId: string
     name: string
-    email: string
+    email: string | null
+    username: string | null
     mobile: string | null
     passwordHash: string
     mustChangePassword: boolean
@@ -2845,25 +2883,60 @@ async function createDirectoryAdmittedUserInTransaction(
   },
 ): Promise<{ userId: string }> {
   const userId = crypto.randomUUID()
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(options.email)) {
+  if (options.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(options.email)) {
     throw new Error('Invalid email format')
   }
+  const usernameValidationError = validateDirectoryAdmissionUsername(options.username)
+  if (usernameValidationError) {
+    throw new Error(usernameValidationError)
+  }
+  if (!options.email && !options.username && !options.mobile) {
+    throw new Error('At least one account identifier (email, username, or mobile) is required')
+  }
 
-  const existingUserResult = await client.query(
-    `SELECT id
-     FROM users
-     WHERE email = $1
-     LIMIT 1`,
-    [options.email],
-  )
-  if (existingUserResult.rows.length > 0) {
-    throw new Error('User with this email already exists')
+  if (options.email) {
+    const existingUserResult = await client.query(
+      `SELECT id
+       FROM users
+       WHERE email = $1
+       LIMIT 1`,
+      [options.email],
+    )
+    if (existingUserResult.rows.length > 0) {
+      throw new Error('User with this email already exists')
+    }
+  }
+
+  if (options.username) {
+    const existingUsernameResult = await client.query(
+      `SELECT id
+       FROM users
+       WHERE lower(username) = lower($1)
+       LIMIT 1`,
+      [options.username],
+    )
+    if (existingUsernameResult.rows.length > 0) {
+      throw new Error('User with this username already exists')
+    }
+  }
+
+  if (options.mobile) {
+    const existingMobileResult = await client.query(
+      `SELECT id
+       FROM users
+       WHERE mobile = $1
+       LIMIT 1`,
+      [options.mobile],
+    )
+    if (existingMobileResult.rows.length > 0) {
+      throw new Error('User with this mobile already exists')
+    }
   }
 
   await client.query(
-    `INSERT INTO users (id, email, name, mobile, password_hash, must_change_password, role, permissions, is_active, is_admin, created_at, updated_at)
-     VALUES ($1, $2, $3, $4, $5, $6, 'user', $7::jsonb, TRUE, FALSE, NOW(), NOW())`,
-    [userId, options.email, options.name, options.mobile, options.passwordHash, options.mustChangePassword, JSON.stringify([])],
+    `INSERT INTO users (id, email, username, name, mobile, password_hash, must_change_password, role, permissions, is_active, is_admin, created_at, updated_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, 'user', $8::jsonb, TRUE, FALSE, NOW(), NOW())`,
+    [userId, options.email, options.username, options.name, options.mobile, options.passwordHash, options.mustChangePassword, JSON.stringify([])],
   )
 
   await applyDirectoryAccountBindInTransaction(client, {
@@ -2874,6 +2947,7 @@ async function createDirectoryAdmittedUserInTransaction(
     localUser: {
       id: userId,
       email: options.email,
+      username: options.username,
       name: options.name,
     },
   })
@@ -3129,6 +3203,7 @@ export async function getDirectoryAccountSummary(accountId: string): Promise<Dir
         l.updated_at AS link_updated_at,
         u.id AS local_user_id,
         u.email AS local_user_email,
+        u.username AS local_user_username,
         u.name AS local_user_name,
         COALESCE(array_remove(array_agg(DISTINCT d.full_path), NULL), ARRAY[]::text[]) AS department_paths
      FROM directory_accounts a
@@ -3141,7 +3216,7 @@ export async function getDirectoryAccountSummary(accountId: string): Promise<Dir
        a.integration_id, a.provider, a.corp_id, a.id, a.external_user_id, a.union_id, a.open_id, a.external_key,
        a.name, a.email, a.mobile, a.is_active, a.updated_at,
        l.link_status, l.match_strategy, l.reviewed_by, l.review_note, l.updated_at,
-       u.id, u.email, u.name`,
+       u.id, u.email, u.username, u.name`,
     [normalizedAccountId],
   )
 
@@ -3156,12 +3231,24 @@ async function resolveDirectoryBindingUser(localUserRef: string): Promise<Direct
   const result = await query<DirectoryBindingUserRow>(
     `SELECT id,
             email,
+            username,
+            mobile,
             name,
             COALESCE(role, 'user') AS role,
             COALESCE(is_active, TRUE) AS is_active
      FROM users
-     WHERE id = $1 OR LOWER(email) = LOWER($1)
-     ORDER BY CASE WHEN id = $1 THEN 0 ELSE 1 END
+     WHERE id = $1
+        OR LOWER(COALESCE(email, '')) = LOWER($1)
+        OR LOWER(COALESCE(username, '')) = LOWER($1)
+        OR regexp_replace(COALESCE(mobile, ''), '\\s+', '', 'g') = regexp_replace($1, '\\s+', '', 'g')
+     ORDER BY
+       CASE
+         WHEN id = $1 THEN 0
+         WHEN LOWER(COALESCE(email, '')) = LOWER($1) THEN 1
+         WHEN LOWER(COALESCE(username, '')) = LOWER($1) THEN 2
+         WHEN regexp_replace(COALESCE(mobile, ''), '\\s+', '', 'g') = regexp_replace($1, '\\s+', '', 'g') THEN 3
+         ELSE 4
+       END
      LIMIT 1`,
     [ref],
   )
@@ -3184,6 +3271,7 @@ async function loadDirectoryLinkedUser(directoryAccountId: string): Promise<Dire
   const result = await query<DirectoryAccountLinkedUserRow>(
     `SELECT l.local_user_id,
             u.email AS local_user_email,
+            u.username AS local_user_username,
             u.name AS local_user_name
      FROM directory_account_links l
      LEFT JOIN users u ON u.id = l.local_user_id
@@ -3256,6 +3344,7 @@ export async function listDirectoryIntegrationAccounts(
           l.updated_at AS link_updated_at,
           u.id AS local_user_id,
           u.email AS local_user_email,
+          u.username AS local_user_username,
           u.name AS local_user_name,
           COALESCE(array_remove(array_agg(DISTINCT d.full_path), NULL), ARRAY[]::text[]) AS department_paths
        FROM directory_accounts a
@@ -3268,7 +3357,7 @@ export async function listDirectoryIntegrationAccounts(
          a.integration_id, a.provider, a.corp_id, a.id, a.external_user_id, a.union_id, a.open_id, a.external_key,
          a.name, a.email, a.mobile, a.is_active, a.updated_at,
          l.link_status, l.match_strategy, l.reviewed_by, l.review_note, l.updated_at,
-         u.id, u.email, u.name
+         u.id, u.email, u.username, u.name
        ORDER BY a.is_active DESC, a.name ASC, a.external_user_id ASC
        LIMIT $${values.length + 1} OFFSET $${values.length + 2}`,
       listValues,
@@ -3342,15 +3431,20 @@ export async function admitDirectoryAccountUser(
   const normalizedAdminUserId = normalizeText(input.adminUserId)
   const cleanName = sanitizeDirectoryAdmissionName(input.name)
   const cleanEmail = sanitizeDirectoryAdmissionEmail(input.email)
+  const cleanUsername = sanitizeDirectoryAdmissionUsername(input.username)
   const cleanMobile = sanitizeDirectoryAdmissionMobile(input.mobile)
   const requestedPassword = normalizeText(input.password)
   const enableDingTalkGrant = input.enableDingTalkGrant !== false
 
   if (!normalizedAccountId) throw new Error('directoryAccountId is required')
   if (!normalizedAdminUserId) throw new Error('adminUserId is required')
-  if (!cleanName || !cleanEmail) throw new Error('name and email are required')
+  if (!cleanName || (!cleanEmail && !cleanUsername && !cleanMobile)) {
+    throw new Error('name and at least one account identifier (email, username, or mobile) are required')
+  }
   if (cleanName.length < 2 || cleanName.length > 100) throw new Error('Name must be between 2 and 100 characters')
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) throw new Error('Invalid email format')
+  if (cleanEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) throw new Error('Invalid email format')
+  const usernameValidationError = validateDirectoryAdmissionUsername(cleanUsername)
+  if (usernameValidationError) throw new Error(usernameValidationError)
 
   const generatedPassword = requestedPassword || generateDirectoryAdmissionTemporaryPassword()
   const mustChangePassword = requestedPassword.length === 0
@@ -3377,7 +3471,8 @@ export async function admitDirectoryAccountUser(
       account,
       adminUserId: normalizedAdminUserId,
       name: cleanName,
-      email: cleanEmail,
+      email: cleanEmail || null,
+      username: cleanUsername,
       mobile: cleanMobile,
       passwordHash,
       mustChangePassword,
@@ -3386,21 +3481,25 @@ export async function admitDirectoryAccountUser(
     userId = created.userId
   })
 
-  const resolvedInviteToken = issueInviteToken({
-    userId,
-    email: cleanEmail,
-    presetId: null,
-  })
+  const resolvedInviteToken = cleanEmail
+    ? issueInviteToken({
+      userId,
+      email: cleanEmail,
+      presetId: null,
+    })
+    : null
 
-  await recordInvite({
-    userId,
-    email: cleanEmail,
-    presetId: null,
-    productMode: 'platform',
-    roleId: null,
-    invitedBy: normalizedAdminUserId,
-    inviteToken: resolvedInviteToken,
-  })
+  if (cleanEmail && resolvedInviteToken) {
+    await recordInvite({
+      userId,
+      email: cleanEmail,
+      presetId: null,
+      productMode: 'platform',
+      roleId: null,
+      invitedBy: normalizedAdminUserId,
+      inviteToken: resolvedInviteToken,
+    })
+  }
 
   const summary = await getDirectoryAccountSummary(normalizedAccountId)
   if (!summary) {
@@ -3418,7 +3517,8 @@ export async function admitDirectoryAccountUser(
       : null,
     user: {
       id: userId,
-      email: cleanEmail,
+      email: cleanEmail || null,
+      username: cleanUsername,
       name: cleanName,
       mobile: cleanMobile,
       role: 'user',
@@ -3427,7 +3527,13 @@ export async function admitDirectoryAccountUser(
     temporaryPassword: requestedPassword.length === 0 ? generatedPassword : undefined,
     inviteToken: resolvedInviteToken,
     onboarding: buildOnboardingPacket({
-      email: cleanEmail,
+      email: cleanEmail || null,
+      accountLabel: resolveDirectoryAdmissionAccountLabel({
+        email: cleanEmail || null,
+        username: cleanUsername,
+        mobile: cleanMobile,
+        userId,
+      }),
       temporaryPassword: requestedPassword.length === 0 ? generatedPassword : null,
       preset: null,
       inviteToken: resolvedInviteToken,

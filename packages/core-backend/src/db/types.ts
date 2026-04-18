@@ -707,8 +707,10 @@ export interface MetaWidgetsTable {
 
 export interface UsersTable {
   id: Generated<string>
-  email: string
+  email: string | null
+  username: string | null
   name: string | null
+  mobile: string | null
   password_hash: string
   must_change_password: boolean
   role: string

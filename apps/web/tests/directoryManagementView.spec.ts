@@ -876,6 +876,150 @@ describe('DirectoryManagementView', () => {
     expect(container?.textContent).toContain('已创建本地用户并完成绑定')
   })
 
+  it('supports no-email manual admission with username/mobile and shows temporary-password onboarding', async () => {
+    apiFetchMock
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: {
+          items: [createIntegration()],
+        },
+      }))
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: { items: [] },
+      }))
+      .mockResolvedValueOnce(createJsonResponse(
+        createScheduleSnapshotPayload(),
+      ))
+      .mockResolvedValueOnce(createJsonResponse(
+        createAlertListPayload([]),
+      ))
+      .mockResolvedValueOnce(createJsonResponse(
+        createReviewItemsPayload([
+          {
+            kind: 'pending_binding',
+            reason: '目录成员尚未绑定本地用户。',
+            account: createAccount({
+              id: 'account-manual-no-email',
+              name: '林岚',
+              email: null,
+              mobile: '13900004567',
+            }),
+            flags: {
+              missingUnionId: false,
+              missingOpenId: true,
+            },
+            actionable: {
+              canBatchUnbind: false,
+              canConfirmRecommendation: false,
+            },
+            recommendations: [],
+            recommendationStatus: {
+              code: 'no_exact_match',
+              message: '未匹配到本地用户',
+            },
+          },
+        ]),
+      ))
+      .mockResolvedValueOnce(createJsonResponse(
+        createAccountListPayload([createAccount({
+          id: 'account-manual-no-email',
+          name: '林岚',
+          email: null,
+          mobile: '13900004567',
+        })], { total: 1 }),
+      ))
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: {
+          user: {
+            id: 'user-created-no-email',
+            email: null,
+            username: 'linlan',
+            name: '林岚',
+            mobile: '13900004567',
+            role: 'user',
+            is_active: true,
+          },
+          roles: [],
+          permissions: [],
+          isAdmin: false,
+          temporaryPassword: 'Temp#654321',
+          onboarding: {
+            accountLabel: 'linlan',
+            acceptInviteUrl: '',
+            inviteMessage: '账号：linlan',
+          },
+        },
+      }))
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: {
+          items: [createIntegration()],
+        },
+      }))
+      .mockResolvedValueOnce(createJsonResponse(
+        createReviewItemsPayload([]),
+      ))
+      .mockResolvedValueOnce(createJsonResponse(
+        createAccountListPayload([createAccount({
+          id: 'account-manual-no-email',
+          name: '林岚',
+          email: null,
+          mobile: '13900004567',
+          linkStatus: 'linked',
+          matchStrategy: 'manual_admin',
+          localUser: {
+            id: 'user-created-no-email',
+            email: null,
+            username: 'linlan',
+            name: '林岚',
+          },
+        })], { total: 1 }),
+      ))
+
+    app = createApp(DirectoryManagementView)
+    registerRouterLink(app)
+    app.mount(container!)
+    await flushUi()
+
+    const toggleButton = Array.from(container!.querySelectorAll('.directory-admin__review-item button')).find((button) => button.textContent?.includes('手动创建用户'))
+    expect(toggleButton).toBeTruthy()
+    toggleButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi(2)
+
+    const inputs = Array.from(container!.querySelectorAll('.directory-admin__review-item input'))
+    const usernameInput = inputs.find((input) => input.getAttribute('placeholder') === '例如 liqing') as HTMLInputElement | undefined
+    if (!usernameInput) throw new Error('Username input not found')
+    usernameInput.value = 'linlan'
+    usernameInput.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi(2)
+
+    const createAndBindButton = Array.from(container!.querySelectorAll('.directory-admin__review-item button')).find((button) => button.textContent?.includes('创建用户并绑定'))
+    expect(createAndBindButton).toBeTruthy()
+    createAndBindButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi(12)
+
+    expect(apiFetchMock).toHaveBeenCalledWith(
+      '/api/admin/directory/accounts/account-manual-no-email/admit-user',
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({
+          name: '林岚',
+          username: 'linlan',
+          mobile: '13900004567',
+          enableDingTalkGrant: true,
+        }),
+      }),
+    )
+    expect(container?.textContent).toContain('最近创建并绑定结果')
+    expect(container?.textContent).toContain('新用户临时密码：Temp#654321')
+    expect(container?.textContent).toContain('账号：linlan')
+    expect(container?.textContent).toContain('登录账号')
+    expect(container?.textContent).toContain('linlan')
+    expect(container?.textContent).not.toContain('https://example.com/invite/abc')
+  })
+
   it('focuses a reviewed account and quick-binds it from the accounts banner', async () => {
     apiFetchMock
       .mockResolvedValueOnce(createJsonResponse({

@@ -15,7 +15,7 @@
           v-model.trim="search"
           class="user-admin__search"
           type="search"
-          placeholder="搜索邮箱、姓名或用户 ID"
+          placeholder="搜索邮箱、用户名、手机号、姓名或用户 ID"
           @keyup.enter="void loadUsers()"
         />
         <button class="user-admin__button" type="button" :disabled="loading" @click="void loadUsers()">
@@ -39,7 +39,9 @@
       </div>
       <div class="user-admin__create-grid">
         <input v-model.trim="createForm.name" class="user-admin__search" type="text" placeholder="姓名" />
-        <input v-model.trim="createForm.email" class="user-admin__search" type="email" placeholder="邮箱" />
+        <input v-model.trim="createForm.email" class="user-admin__search" type="email" placeholder="邮箱（可选）" />
+        <input v-model.trim="createForm.username" class="user-admin__search" type="text" placeholder="用户名（可选）" />
+        <input v-model.trim="createForm.mobile" class="user-admin__search" type="text" placeholder="手机号（可选）" />
         <input v-model.trim="createForm.password" class="user-admin__search" type="text" placeholder="可选：初始密码" />
         <select v-model="presetModeFilter" class="user-admin__select">
           <option value="">预设模式（全部）</option>
@@ -226,8 +228,8 @@
             <span>选择</span>
           </label>
           <button class="user-admin__user-body" type="button" @click="void selectUser(user.id)">
-            <strong>{{ user.name || user.email }}</strong>
-            <span>{{ user.email }}</span>
+            <strong>{{ user.name || formatManagedUserLabel(user) }}</strong>
+            <span>{{ formatManagedUserIdentifier(user) }}</span>
             <span class="user-admin__meta">{{ user.role }} · {{ user.is_active ? '启用' : '停用' }}</span>
             <div class="user-admin__row-badges">
               <span class="user-admin__row-badge" :class="{ 'user-admin__row-badge--success': user.is_active, 'user-admin__row-badge--danger': !user.is_active }">
@@ -257,8 +259,8 @@
         <template v-if="access">
           <div class="user-admin__detail-head">
             <div>
-              <h2>{{ access.user.name || access.user.email }}</h2>
-              <p>{{ access.user.email }}</p>
+              <h2>{{ access.user.name || formatManagedUserLabel(access.user) }}</h2>
+              <p>{{ formatManagedUserIdentifier(access.user) }}</p>
               <p v-if="access.user.mobile" class="user-admin__hint">手机号：{{ access.user.mobile }}</p>
             </div>
             <div class="user-admin__badges">
@@ -590,7 +592,8 @@ import { subscribeToLocationChanges } from '../utils/browserLocation'
 
 type ManagedUser = {
   id: string
-  email: string
+  email: string | null
+  username?: string | null
   name: string | null
   mobile?: string | null
   role: string
@@ -694,6 +697,8 @@ type NamespaceAdmission = {
 type CreateUserForm = {
   name: string
   email: string
+  username: string
+  mobile: string
   password: string
   presetId: string
   role: string
@@ -722,6 +727,7 @@ type OnboardingPacket = {
   loginUrl: string
   acceptInvitePath: string
   acceptInviteUrl: string
+  accountLabel: string
   welcomeTitle: string
   checklist: string[]
   inviteMessage: string
@@ -800,6 +806,8 @@ const appliedUserNavigationKey = ref('')
 const createForm = ref<CreateUserForm>({
   name: '',
   email: '',
+  username: '',
+  mobile: '',
   password: '',
   presetId: '',
   role: 'user',
@@ -845,6 +853,16 @@ const hasProfileDraftChanges = computed(() => {
   if (!access.value) return false
   return profileDraftName.value !== (access.value.user.name || '') || profileDraftMobile.value !== (access.value.user.mobile || '')
 })
+
+function formatManagedUserIdentifier(user: ManagedUser | null | undefined): string {
+  if (!user) return ''
+  return user.email || user.username || user.mobile || user.id
+}
+
+function formatManagedUserLabel(user: ManagedUser | null | undefined): string {
+  if (!user) return ''
+  return user.name || formatManagedUserIdentifier(user)
+}
 const namespaceOptions = computed(() => {
   const namespaces: string[] = []
   const append = (namespace: string): void => {
@@ -1211,7 +1229,7 @@ async function selectUser(userId: string): Promise<void> {
     const navigationKey = buildUserNavigationKey(userNavigation.value)
     if (userNavigation.value.userId === userId && appliedUserNavigationKey.value !== navigationKey) {
       if (userNavigation.value.source === 'directory-sync') {
-        setStatus(`已从目录同步定位到用户 ${access.value.user.name || access.value.user.email}`)
+        setStatus(`已从目录同步定位到用户 ${formatManagedUserLabel(access.value.user)}`)
       }
       appliedUserNavigationKey.value = navigationKey
     }
@@ -1432,6 +1450,8 @@ async function createUser(): Promise<void> {
       body: JSON.stringify({
         name: createForm.value.name,
         email: createForm.value.email,
+        username: createForm.value.username || undefined,
+        mobile: createForm.value.mobile || undefined,
         password: createForm.value.password || undefined,
         presetId: createForm.value.presetId || undefined,
         role: createForm.value.role || undefined,
@@ -1455,6 +1475,8 @@ async function createUser(): Promise<void> {
     createForm.value = {
       name: '',
       email: '',
+      username: '',
+      mobile: '',
       password: '',
       presetId: '',
       role: 'user',
