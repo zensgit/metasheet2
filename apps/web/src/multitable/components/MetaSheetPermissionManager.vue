@@ -364,10 +364,17 @@
                   class="meta-sheet-perm__row meta-sheet-perm__row--field"
                   :data-field-permission-orphan-row="`${field.id}:${subjectKey(orphan.subjectType, orphan.subjectId)}`"
                 >
-                  <div class="meta-sheet-perm__identity">
-                    <strong>{{ orphan.subjectLabel || orphan.subjectId }}</strong>
-                    <span>{{ orphan.subjectSubtitle || `Orphan ${subjectTypeBadgeLabel(orphan.subjectType)}` }}</span>
-                  </div>
+                <div class="meta-sheet-perm__identity">
+                  <strong>{{ orphan.subjectLabel || orphan.subjectId }}</strong>
+                  <span>{{ orphan.subjectSubtitle || `Orphan ${subjectTypeBadgeLabel(orphan.subjectType)}` }}</span>
+                  <span
+                    v-if="subjectMutationBlocked(orphan.subjectType, orphan.isActive)"
+                    class="meta-sheet-perm__lifecycle"
+                    data-lifecycle="inactive"
+                  >
+                    Inactive user
+                  </span>
+                </div>
                   <span
                     class="meta-sheet-perm__badge"
                     :data-access-level="fieldPermDraftLabel(field.id, orphan.subjectType, orphan.subjectId)"
@@ -511,10 +518,17 @@
                   class="meta-sheet-perm__row meta-sheet-perm__row--field"
                   :data-view-permission-orphan-row="`${view.id}:${subjectKey(orphan.subjectType, orphan.subjectId)}`"
                 >
-                  <div class="meta-sheet-perm__identity">
-                    <strong>{{ orphan.subjectLabel || orphan.subjectId }}</strong>
-                    <span>{{ orphan.subjectSubtitle || `Orphan ${subjectTypeBadgeLabel(orphan.subjectType)}` }}</span>
-                  </div>
+                <div class="meta-sheet-perm__identity">
+                  <strong>{{ orphan.subjectLabel || orphan.subjectId }}</strong>
+                  <span>{{ orphan.subjectSubtitle || `Orphan ${subjectTypeBadgeLabel(orphan.subjectType)}` }}</span>
+                  <span
+                    v-if="subjectMutationBlocked(orphan.subjectType, orphan.isActive)"
+                    class="meta-sheet-perm__lifecycle"
+                    data-lifecycle="inactive"
+                  >
+                    Inactive user
+                  </span>
+                </div>
                   <span
                     class="meta-sheet-perm__badge"
                     :data-access-level="viewPermDraftValue(view.id, orphan.subjectType, orphan.subjectId)"
@@ -971,11 +985,11 @@ function subjectTypeBadgeLabel(subjectType: MetaSheetPermissionSubjectType) {
   return 'Person'
 }
 
-function subjectIsInactive(subjectType: MetaSheetPermissionSubjectType, isActive: boolean) {
+function subjectIsInactive(subjectType: MetaSheetPermissionSubjectType, isActive: boolean | undefined) {
   return subjectType === 'user' && isActive === false
 }
 
-function subjectMutationBlocked(subjectType: MetaSheetPermissionSubjectType, isActive: boolean) {
+function subjectMutationBlocked(subjectType: MetaSheetPermissionSubjectType, isActive: boolean | undefined) {
   return subjectIsInactive(subjectType, isActive)
 }
 
