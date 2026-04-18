@@ -16,6 +16,11 @@ async function migrateToLatest() {
 
   const migrator = new Migrator({
     db,
+    // Some deployed environments already executed later migrations before
+    // newly-added earlier-named migrations were merged into main. Allow
+    // unordered histories so those environments can continue applying the
+    // still-missing migrations instead of hard-failing on order checks.
+    allowUnorderedMigrations: true,
     provider: {
       async getMigrations() {
         const migrations = await baseProvider.getMigrations()
