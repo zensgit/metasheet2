@@ -195,7 +195,7 @@ export interface MetaCapabilityOrigin {
 }
 
 export type MetaSheetPermissionAccessLevel = 'read' | 'write' | 'write-own' | 'admin'
-export type MetaSheetPermissionSubjectType = 'user' | 'role'
+export type MetaSheetPermissionSubjectType = 'user' | 'role' | 'member-group'
 
 export interface MetaSheetPermissionEntry {
   subjectType: MetaSheetPermissionSubjectType
@@ -525,7 +525,7 @@ export interface MetaTimelineViewConfig {
 
 // --- Record-level permissions ---
 export type RecordPermissionAccessLevel = 'read' | 'write' | 'admin'
-export type RecordPermissionSubjectType = 'user' | 'role'
+export type RecordPermissionSubjectType = 'user' | 'role' | 'member-group'
 
 export interface RecordPermissionEntry {
   id: string

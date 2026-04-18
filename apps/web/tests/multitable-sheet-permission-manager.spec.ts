@@ -80,7 +80,7 @@ describe('MetaSheetPermissionManager', () => {
 
     expect(client.listSheetPermissions).toHaveBeenCalledWith('sheet_orders')
     expect(client.listSheetPermissionCandidates).toHaveBeenCalledWith('sheet_orders', { q: undefined, limit: 12 })
-    expect(container!.textContent).toContain('Override sheet-level access for eligible people or roles. Admin includes sharing and sheet deletion. Write-own remains user-only.')
+    expect(container!.textContent).toContain('Override sheet-level access for eligible people, member groups, or roles. Admin includes sharing and sheet deletion. Write-own remains user-only.')
     expect(container!.querySelector('[data-sheet-permission-entry="user:user_1"]')).not.toBeNull()
     expect(container!.querySelector('[data-sheet-permission-entry="role:role_ops"]')).not.toBeNull()
     expect(container!.querySelector('[data-sheet-permission-candidate="user:user_1"]')).toBeNull()
@@ -142,5 +142,69 @@ describe('MetaSheetPermissionManager', () => {
     expect(updatedSpy).toHaveBeenCalledTimes(1)
     expect(container!.querySelector('[data-sheet-permission-entry="role:role_ops_writer"]')).not.toBeNull()
     expect(container!.querySelector('[data-sheet-permission-candidate="role:role_ops_writer"]')).toBeNull()
+  })
+
+  it('renders member-group candidates and applies sheet access without write-own', async () => {
+    const updatedSpy = vi.fn()
+    const client = {
+      listSheetPermissions: vi.fn()
+        .mockResolvedValueOnce({ items: [] })
+        .mockResolvedValueOnce({
+          items: [
+            {
+              subjectType: 'member-group',
+              subjectId: '3e9c4bc7-13c2-4d12-8b52-9f0d62045d3c',
+              accessLevel: 'write',
+              permissions: ['spreadsheet:write'],
+              label: 'North Region',
+              subtitle: '12 members',
+              isActive: true,
+            },
+          ],
+        }),
+      listSheetPermissionCandidates: vi.fn()
+        .mockResolvedValueOnce({
+          items: [
+            {
+              subjectType: 'member-group',
+              subjectId: '3e9c4bc7-13c2-4d12-8b52-9f0d62045d3c',
+              label: 'North Region',
+              subtitle: '12 members',
+              isActive: true,
+              accessLevel: null,
+            },
+          ],
+        })
+        .mockResolvedValueOnce({
+          items: [
+            {
+              subjectType: 'member-group',
+              subjectId: '3e9c4bc7-13c2-4d12-8b52-9f0d62045d3c',
+              label: 'North Region',
+              subtitle: '12 members',
+              isActive: true,
+              accessLevel: 'write',
+            },
+          ],
+        }),
+      updateSheetPermission: vi.fn().mockResolvedValue({}),
+    }
+
+    mountManager({ client, onUpdated: updatedSpy })
+    await flushUi()
+
+    const select = container!.querySelector('[data-sheet-permission-candidate="member-group:3e9c4bc7-13c2-4d12-8b52-9f0d62045d3c"] .meta-sheet-perm__select') as HTMLSelectElement
+    const optionValues = Array.from(select.options).map((option) => option.value)
+    expect(optionValues).toEqual(['read', 'write', 'admin'])
+    select.value = 'write'
+    select.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi()
+
+    ;(container!.querySelector('[data-sheet-permission-candidate="member-group:3e9c4bc7-13c2-4d12-8b52-9f0d62045d3c"] .meta-sheet-perm__action--primary') as HTMLButtonElement).click()
+    await flushUi()
+
+    expect(client.updateSheetPermission).toHaveBeenCalledWith('sheet_orders', 'member-group', '3e9c4bc7-13c2-4d12-8b52-9f0d62045d3c', 'write')
+    expect(updatedSpy).toHaveBeenCalledTimes(1)
+    expect(container!.querySelector('[data-sheet-permission-entry="member-group:3e9c4bc7-13c2-4d12-8b52-9f0d62045d3c"]')).not.toBeNull()
   })
 })

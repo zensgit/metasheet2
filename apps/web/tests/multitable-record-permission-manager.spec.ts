@@ -127,6 +127,46 @@ describe('MetaRecordPermissionManager', () => {
     expect(updatedSpy).toHaveBeenCalledTimes(1)
   })
 
+  it('supports granting member-group record permissions', async () => {
+    const client = makeClient({
+      listRecordPermissions: vi.fn()
+        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce([
+          {
+            id: 'perm_group',
+            sheetId: 'sheet_1',
+            recordId: 'record_1',
+            subjectType: 'member-group',
+            subjectId: '4df0f2f2-8bc1-4d89-9c47-2746bde6bc4d',
+            accessLevel: 'read',
+          },
+        ]),
+    })
+    const updatedSpy = vi.fn()
+
+    mountManager({ client, onUpdated: updatedSpy })
+    await flushUi()
+
+    const addRow = container!.querySelector('[data-record-permission-add]')!
+    const selects = addRow.querySelectorAll('select')
+    const subjectTypeSelect = selects[0] as HTMLSelectElement
+    expect(Array.from(subjectTypeSelect.options).map((option) => option.value)).toEqual(['user', 'role', 'member-group'])
+    subjectTypeSelect.value = 'member-group'
+    subjectTypeSelect.dispatchEvent(new Event('change', { bubbles: true }))
+
+    const subjectInput = container!.querySelector('[data-record-permission-subject-input]') as HTMLInputElement
+    subjectInput.value = '4df0f2f2-8bc1-4d89-9c47-2746bde6bc4d'
+    subjectInput.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+
+    const grantBtn = addRow.querySelector('.meta-record-perm__action--primary') as HTMLButtonElement
+    grantBtn.click()
+    await flushUi()
+
+    expect(client.updateRecordPermission).toHaveBeenCalledWith('sheet_1', 'record_1', 'member-group', '4df0f2f2-8bc1-4d89-9c47-2746bde6bc4d', 'read')
+    expect(updatedSpy).toHaveBeenCalledTimes(1)
+  })
+
   it('calls API on revoke', async () => {
     const client = makeClient({
       listRecordPermissions: vi.fn().mockResolvedValue([

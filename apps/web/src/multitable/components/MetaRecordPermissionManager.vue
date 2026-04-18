@@ -29,7 +29,7 @@
           >
             <div class="meta-record-perm__identity">
               <strong>{{ entry.subjectId }}</strong>
-              <span>{{ entry.subjectType === 'role' ? 'Role' : 'User' }}</span>
+              <span>{{ subjectTypeLabel(entry.subjectType) }}</span>
             </div>
             <span class="meta-record-perm__badge" :data-access-level="entryDrafts[entry.id] ?? entry.accessLevel">
               {{ accessLevelLabel(entryDrafts[entry.id] ?? entry.accessLevel) }}
@@ -73,6 +73,7 @@
             <select v-model="addSubjectType" class="meta-record-perm__select">
               <option value="user">User</option>
               <option value="role">Role</option>
+              <option value="member-group">Member group</option>
             </select>
             <input
               v-model="addSubjectId"
@@ -125,7 +126,7 @@ const busyKey = ref<string | null>(null)
 const status = ref('')
 const entryDrafts = ref<Record<string, RecordPermissionAccessLevel>>({})
 
-const addSubjectType = ref<'user' | 'role'>('user')
+const addSubjectType = ref<'user' | 'role' | 'member-group'>('user')
 const addSubjectId = ref('')
 const addAccessLevel = ref<RecordPermissionAccessLevel>('read')
 
@@ -134,6 +135,12 @@ function accessLevelLabel(level: string): string {
   if (level === 'write') return 'Write'
   if (level === 'admin') return 'Admin'
   return level
+}
+
+function subjectTypeLabel(subjectType: string): string {
+  if (subjectType === 'role') return 'Role'
+  if (subjectType === 'member-group') return 'Member group'
+  return 'User'
 }
 
 function requestClose() {

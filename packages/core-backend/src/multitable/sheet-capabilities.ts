@@ -155,6 +155,15 @@ export async function loadSheetPermissionScopeMap(
          AND (
            (sp.subject_type = 'user' AND sp.subject_id = $1)
            OR (
+             sp.subject_type = 'member-group'
+             AND EXISTS (
+               SELECT 1
+               FROM platform_member_group_members pgm
+               WHERE pgm.user_id = $1
+                 AND pgm.group_id::text = sp.subject_id
+             )
+           )
+           OR (
              sp.subject_type = 'role'
              AND EXISTS (
                SELECT 1
@@ -166,20 +175,25 @@ export async function loadSheetPermissionScopeMap(
          )`,
       [userId, sheetIds],
     )
-    const grouped = new Map<string, { direct: string[]; role: string[] }>()
+    const grouped = new Map<string, { direct: string[]; memberGroup: string[]; role: string[] }>()
     for (const row of result.rows as Array<{ sheet_id: string; perm_code: string; subject_type?: string }>) {
       const sheetId = typeof row.sheet_id === 'string' ? row.sheet_id : ''
       const code = typeof row.perm_code === 'string' ? row.perm_code.trim() : ''
       if (!sheetId || !code) continue
-      const current = grouped.get(sheetId) ?? { direct: [], role: [] }
+      const current = grouped.get(sheetId) ?? { direct: [], memberGroup: [], role: [] }
       if (row.subject_type === 'user') current.direct.push(code)
+      else if (row.subject_type === 'member-group') current.memberGroup.push(code)
       else current.role.push(code)
       grouped.set(sheetId, current)
     }
     return new Map(
       Array.from(grouped.entries()).map(([sheetId, codes]) => [
         sheetId,
-        summarizeSheetPermissionCodes(codes.direct.length > 0 ? codes.direct : codes.role),
+        summarizeSheetPermissionCodes(
+          codes.direct.length > 0 ? codes.direct
+            : codes.memberGroup.length > 0 ? codes.memberGroup
+              : codes.role,
+        ),
       ]),
     )
   } catch {

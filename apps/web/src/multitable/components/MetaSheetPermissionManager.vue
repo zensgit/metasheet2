@@ -4,7 +4,7 @@
       <div class="meta-sheet-perm__header">
         <div>
           <h4 class="meta-sheet-perm__title">Manage Access</h4>
-          <p class="meta-sheet-perm__subtitle">Override sheet-level access for eligible people or roles. Admin includes sharing and sheet deletion. Write-own remains user-only.</p>
+          <p class="meta-sheet-perm__subtitle">Override sheet-level access for eligible people, member groups, or roles. Admin includes sharing and sheet deletion. Write-own remains user-only.</p>
         </div>
         <button class="meta-sheet-perm__close" type="button" @click="requestClose">&times;</button>
       </div>
@@ -45,7 +45,7 @@
                 <strong>{{ entry.label }}</strong>
                 <span>{{ entry.subtitle || entry.subjectId }}</span>
               </div>
-              <span class="meta-sheet-perm__subject" :data-subject-type="entry.subjectType">{{ entry.subjectType === 'role' ? 'Role' : 'Person' }}</span>
+              <span class="meta-sheet-perm__subject" :data-subject-type="entry.subjectType">{{ subjectTypeBadgeLabel(entry.subjectType) }}</span>
               <span class="meta-sheet-perm__badge" :data-access-level="entry.accessLevel">{{ accessLevelLabel(entry.accessLevel) }}</span>
               <select
                 :value="entryDrafts[subjectKey(entry.subjectType, entry.subjectId)] ?? entry.accessLevel"
@@ -82,7 +82,7 @@
 
           <section class="meta-sheet-perm__section">
             <div class="meta-sheet-perm__section-header">
-              <strong>Eligible people or roles</strong>
+              <strong>Eligible people, member groups, or roles</strong>
             </div>
             <input
               v-model="search"
@@ -91,8 +91,8 @@
               placeholder="Search people or roles"
               data-sheet-permission-search="true"
             />
-            <div v-if="candidatesLoading" class="meta-sheet-perm__empty">Searching eligible people and roles&#x2026;</div>
-            <div v-else-if="!availableCandidates.length" class="meta-sheet-perm__empty">No matching eligible people or roles.</div>
+            <div v-if="candidatesLoading" class="meta-sheet-perm__empty">Searching eligible people, member groups, and roles&#x2026;</div>
+            <div v-else-if="!availableCandidates.length" class="meta-sheet-perm__empty">No matching eligible people, member groups, or roles.</div>
             <template v-else>
               <div class="meta-sheet-perm__section-header">
                 <strong>People</strong>
@@ -109,6 +109,45 @@
                   <span>{{ candidate.subtitle || candidate.subjectId }}</span>
                 </div>
                 <span class="meta-sheet-perm__subject" data-subject-type="user">Person</span>
+                <select
+                  :value="candidateDrafts[subjectKey(candidate.subjectType, candidate.subjectId)] ?? candidate.accessLevel ?? 'read'"
+                  class="meta-sheet-perm__select"
+                  :disabled="busySubjectKey === subjectKey(candidate.subjectType, candidate.subjectId)"
+                  @change="setCandidateDraft(candidate.subjectType, candidate.subjectId, $event)"
+                >
+                  <option
+                    v-for="option in accessLevelOptionsFor(candidate.subjectType)"
+                    :key="`${candidate.subjectType}:${option.value}`"
+                    :value="option.value"
+                  >
+                    {{ option.label }}
+                  </option>
+                </select>
+                <button
+                  class="meta-sheet-perm__action meta-sheet-perm__action--primary"
+                  type="button"
+                  :disabled="busySubjectKey === subjectKey(candidate.subjectType, candidate.subjectId)"
+                  @click="grantCandidate(candidate.subjectType, candidate.subjectId)"
+                >
+                  Apply
+                </button>
+              </div>
+
+              <div class="meta-sheet-perm__section-header">
+                <strong>Member groups</strong>
+              </div>
+              <div v-if="!memberGroupCandidates.length" class="meta-sheet-perm__empty">No matching member groups.</div>
+              <div
+                v-for="candidate in memberGroupCandidates"
+                :key="subjectKey(candidate.subjectType, candidate.subjectId)"
+                class="meta-sheet-perm__row"
+                :data-sheet-permission-candidate="subjectKey(candidate.subjectType, candidate.subjectId)"
+              >
+                <div class="meta-sheet-perm__identity">
+                  <strong>{{ candidate.label }}</strong>
+                  <span>{{ candidate.subtitle || candidate.subjectId }}</span>
+                </div>
+                <span class="meta-sheet-perm__subject" data-subject-type="member-group">Member group</span>
                 <select
                   :value="candidateDrafts[subjectKey(candidate.subjectType, candidate.subjectId)] ?? candidate.accessLevel ?? 'read'"
                   class="meta-sheet-perm__select"
@@ -201,7 +240,7 @@
                 >
                   <div class="meta-sheet-perm__identity">
                     <strong>{{ entry.label }}</strong>
-                    <span>{{ entry.subjectType === 'role' ? 'Role' : 'Person' }}</span>
+                    <span>{{ subjectTypeBadgeLabel(entry.subjectType) }}</span>
                   </div>
                   <span
                     class="meta-sheet-perm__badge"
@@ -259,7 +298,7 @@
                 >
                   <div class="meta-sheet-perm__identity">
                     <strong>{{ entry.label }}</strong>
-                    <span>{{ entry.subjectType === 'role' ? 'Role' : 'Person' }}</span>
+                    <span>{{ subjectTypeBadgeLabel(entry.subjectType) }}</span>
                   </div>
                   <span
                     class="meta-sheet-perm__badge"
@@ -424,7 +463,7 @@ async function applyFieldPerm(fieldId: string, subjectType: string, subjectId: s
     await props.client.updateFieldPermission(
       props.sheetId,
       fieldId,
-      subjectType as 'user' | 'role',
+      subjectType as MetaSheetPermissionSubjectType,
       subjectId,
       perm,
     )
@@ -478,7 +517,7 @@ async function applyViewPerm(viewId: string, subjectType: string, subjectId: str
   try {
     await props.client.updateViewPermission(
       viewId,
-      subjectType as 'user' | 'role',
+      subjectType as MetaSheetPermissionSubjectType,
       subjectId,
       permission,
     )
@@ -499,6 +538,7 @@ const availableCandidates = computed(() => {
 })
 
 const peopleCandidates = computed(() => availableCandidates.value.filter((candidate) => candidate.subjectType === 'user'))
+const memberGroupCandidates = computed(() => availableCandidates.value.filter((candidate) => candidate.subjectType === 'member-group'))
 const roleCandidates = computed(() => availableCandidates.value.filter((candidate) => candidate.subjectType === 'role'))
 
 function accessLevelLabel(accessLevel: MetaSheetPermissionAccessLevel) {
@@ -506,7 +546,13 @@ function accessLevelLabel(accessLevel: MetaSheetPermissionAccessLevel) {
 }
 
 function accessLevelOptionsFor(subjectType: MetaSheetPermissionSubjectType) {
-  return subjectType === 'role' ? ROLE_ACCESS_LEVEL_OPTIONS : ACCESS_LEVEL_OPTIONS
+  return subjectType === 'user' ? ACCESS_LEVEL_OPTIONS : ROLE_ACCESS_LEVEL_OPTIONS
+}
+
+function subjectTypeBadgeLabel(subjectType: MetaSheetPermissionSubjectType) {
+  if (subjectType === 'role') return 'Role'
+  if (subjectType === 'member-group') return 'Member group'
+  return 'Person'
 }
 
 function requestClose() {
@@ -526,7 +572,7 @@ function syncCandidateDrafts(nextCandidates: MetaSheetPermissionCandidate[]) {
   const nextDrafts: Record<string, MetaSheetPermissionAccessLevel> = { ...candidateDrafts.value }
   for (const candidate of nextCandidates) {
     const key = subjectKey(candidate.subjectType, candidate.subjectId)
-    const fallback = candidate.subjectType === 'role' ? 'read' : 'read'
+    const fallback = 'read'
     nextDrafts[key] = candidate.accessLevel ?? nextDrafts[key] ?? fallback
   }
   candidateDrafts.value = nextDrafts

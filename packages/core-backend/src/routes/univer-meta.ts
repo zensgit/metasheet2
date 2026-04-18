@@ -1442,7 +1442,7 @@ type SheetPermissionScope = {
   canAdmin: boolean
 }
 
-type MultitableSheetPermissionSubjectType = 'user' | 'role'
+type MultitableSheetPermissionSubjectType = 'user' | 'role' | 'member-group'
 type MultitableSheetAccessLevel = 'read' | 'write' | 'write-own' | 'admin'
 
 type MultitableSheetPermissionEntry = {
@@ -1523,7 +1523,7 @@ const CANONICAL_SHEET_PERMISSION_CODE_BY_ACCESS_LEVEL: Record<MultitableSheetAcc
 }
 
 function isSheetPermissionSubjectType(value: unknown): value is MultitableSheetPermissionSubjectType {
-  return value === 'user' || value === 'role'
+  return value === 'user' || value === 'role' || value === 'member-group'
 }
 
 async function resolveRequestAccess(req: Request): Promise<ResolvedRequestAccess> {
@@ -1616,7 +1616,9 @@ async function listSheetPermissionEntries(
         u.name AS user_name,
         u.email AS user_email,
         u.is_active AS user_is_active,
-        r.name AS role_name
+        r.name AS role_name,
+        g.name AS group_name,
+        g.description AS group_description
      FROM spreadsheet_permissions sp
      LEFT JOIN users u
        ON sp.subject_type = 'user'
@@ -1624,12 +1626,19 @@ async function listSheetPermissionEntries(
      LEFT JOIN roles r
        ON sp.subject_type = 'role'
       AND r.id = sp.subject_id
+     LEFT JOIN platform_member_groups g
+       ON sp.subject_type = 'member-group'
+      AND g.id::text = sp.subject_id
      WHERE sp.sheet_id = $1
-     GROUP BY sp.subject_type, sp.subject_id, u.name, u.email, u.is_active, r.name
+     GROUP BY sp.subject_type, sp.subject_id, u.name, u.email, u.is_active, r.name, g.name, g.description
      ORDER BY
-       CASE WHEN sp.subject_type = 'user' THEN 0 ELSE 1 END,
+       CASE
+         WHEN sp.subject_type = 'user' THEN 0
+         WHEN sp.subject_type = 'member-group' THEN 1
+         ELSE 2
+       END,
        CASE WHEN sp.subject_type = 'user' AND COALESCE(u.is_active, true) THEN 0 WHEN sp.subject_type = 'user' THEN 1 ELSE 0 END,
-       COALESCE(NULLIF(u.name, ''), NULLIF(u.email, ''), NULLIF(r.name, ''), sp.subject_id) ASC`,
+       COALESCE(NULLIF(u.name, ''), NULLIF(u.email, ''), NULLIF(g.name, ''), NULLIF(r.name, ''), sp.subject_id) ASC`,
     [sheetId],
   )
 
@@ -1641,6 +1650,8 @@ async function listSheetPermissionEntries(
     user_email?: string | null
     user_is_active?: boolean | null
     role_name?: string | null
+    group_name?: string | null
+    group_description?: string | null
   }>)
     .map((row) => {
       const subjectType = isSheetPermissionSubjectType(row.subject_type) ? row.subject_type : 'user'
@@ -1651,17 +1662,25 @@ async function listSheetPermissionEntries(
       const userName = typeof row.user_name === 'string' ? row.user_name.trim() : ''
       const userEmail = typeof row.user_email === 'string' ? row.user_email.trim() : ''
       const roleName = typeof row.role_name === 'string' ? row.role_name.trim() : ''
+      const groupName = typeof row.group_name === 'string' ? row.group_name.trim() : ''
+      const groupDescription = typeof row.group_description === 'string' ? row.group_description.trim() : ''
       return {
         subjectType,
         subjectId,
         accessLevel,
         permissions,
-        label: subjectType === 'user'
-          ? userName || userEmail || subjectId
-          : roleName || subjectId,
-        subtitle: subjectType === 'user'
-          ? (userEmail || (userName && userName !== subjectId ? subjectId : null))
-          : (roleName && roleName !== subjectId ? subjectId : 'Role'),
+        label:
+          subjectType === 'user'
+            ? (userName || userEmail || subjectId)
+            : subjectType === 'member-group'
+              ? (groupName || subjectId)
+              : (roleName || subjectId),
+        subtitle:
+          subjectType === 'user'
+            ? (userEmail || (userName && userName !== subjectId ? subjectId : null))
+            : subjectType === 'member-group'
+              ? (groupDescription || (groupName && groupName !== subjectId ? subjectId : 'Member group'))
+              : (roleName && roleName !== subjectId ? subjectId : 'Role'),
         isActive: subjectType === 'user' ? row.user_is_active !== false : true,
       } satisfies MultitableSheetPermissionEntry
     })
@@ -1684,6 +1703,9 @@ async function listSheetPermissionCandidates(
           u.email AS user_email,
           u.is_active AS user_is_active,
           NULL::text AS role_name,
+          NULL::text AS group_name,
+          NULL::text AS group_description,
+          NULL::integer AS member_count,
           COALESCE(
             ARRAY_AGG(sp.perm_code ORDER BY sp.perm_code) FILTER (WHERE sp.perm_code IS NOT NULL),
             ARRAY[]::text[]
@@ -1696,6 +1718,31 @@ async function listSheetPermissionCandidates(
         WHERE ($2 = '' OR u.id ILIKE $3 OR u.email ILIKE $3 OR COALESCE(u.name, '') ILIKE $3)
         GROUP BY u.id, u.name, u.email, u.is_active
       ),
+      member_group_candidates AS (
+        SELECT
+          'member-group'::text AS subject_type,
+          g.id::text AS subject_id,
+          NULL::text AS user_name,
+          NULL::text AS user_email,
+          true AS user_is_active,
+          NULL::text AS role_name,
+          g.name AS group_name,
+          g.description AS group_description,
+          COUNT(gm.user_id)::integer AS member_count,
+          COALESCE(
+            ARRAY_AGG(sp.perm_code ORDER BY sp.perm_code) FILTER (WHERE sp.perm_code IS NOT NULL),
+            ARRAY[]::text[]
+          ) AS permission_codes
+        FROM platform_member_groups g
+        LEFT JOIN platform_member_group_members gm
+          ON gm.group_id = g.id
+        LEFT JOIN spreadsheet_permissions sp
+          ON sp.sheet_id = $1
+         AND sp.subject_type = 'member-group'
+         AND sp.subject_id = g.id::text
+        WHERE ($2 = '' OR g.id::text ILIKE $3 OR COALESCE(g.name, '') ILIKE $3 OR COALESCE(g.description, '') ILIKE $3)
+        GROUP BY g.id, g.name, g.description
+      ),
       role_candidates AS (
         SELECT
           'role'::text AS subject_type,
@@ -1704,6 +1751,9 @@ async function listSheetPermissionCandidates(
           NULL::text AS user_email,
           true AS user_is_active,
           r.name AS role_name,
+          NULL::text AS group_name,
+          NULL::text AS group_description,
+          NULL::integer AS member_count,
           COALESCE(
             ARRAY_AGG(sp.perm_code ORDER BY sp.perm_code) FILTER (WHERE sp.perm_code IS NOT NULL),
             ARRAY[]::text[]
@@ -1720,12 +1770,18 @@ async function listSheetPermissionCandidates(
       FROM (
         SELECT * FROM user_candidates
         UNION ALL
+        SELECT * FROM member_group_candidates
+        UNION ALL
         SELECT * FROM role_candidates
       ) candidates
       ORDER BY
-        CASE WHEN subject_type = 'user' THEN 0 ELSE 1 END,
+        CASE
+          WHEN subject_type = 'user' THEN 0
+          WHEN subject_type = 'member-group' THEN 1
+          ELSE 2
+        END,
         CASE WHEN user_is_active THEN 0 ELSE 1 END,
-        COALESCE(NULLIF(user_name, ''), NULLIF(user_email, ''), NULLIF(role_name, ''), subject_id) ASC
+        COALESCE(NULLIF(user_name, ''), NULLIF(user_email, ''), NULLIF(group_name, ''), NULLIF(role_name, ''), subject_id) ASC
       LIMIT $4`,
     [sheetId, q, term, params.limit],
   )
@@ -1737,6 +1793,9 @@ async function listSheetPermissionCandidates(
     user_email?: string | null
     user_is_active?: boolean | null
     role_name?: string | null
+    group_name?: string | null
+    group_description?: string | null
+    member_count?: number | null
     permission_codes?: string[]
   }>)
     .map((row) => {
@@ -1745,15 +1804,24 @@ async function listSheetPermissionCandidates(
       const name = typeof row.user_name === 'string' ? row.user_name.trim() : ''
       const email = typeof row.user_email === 'string' ? row.user_email.trim() : ''
       const roleName = typeof row.role_name === 'string' ? row.role_name.trim() : ''
+      const groupName = typeof row.group_name === 'string' ? row.group_name.trim() : ''
+      const groupDescription = typeof row.group_description === 'string' ? row.group_description.trim() : ''
+      const memberCount = typeof row.member_count === 'number' ? row.member_count : null
       return {
         subjectType,
         subjectId,
-        label: subjectType === 'user'
-          ? (name || email || subjectId)
-          : (roleName || subjectId),
-        subtitle: subjectType === 'user'
-          ? (email || (name && name !== subjectId ? subjectId : null))
-          : (roleName && roleName !== subjectId ? subjectId : 'Role'),
+        label:
+          subjectType === 'user'
+            ? (name || email || subjectId)
+            : subjectType === 'member-group'
+              ? (groupName || subjectId)
+              : (roleName || subjectId),
+        subtitle:
+          subjectType === 'user'
+            ? (email || (name && name !== subjectId ? subjectId : null))
+            : subjectType === 'member-group'
+              ? (groupDescription || (memberCount != null ? `${memberCount} member${memberCount === 1 ? '' : 's'}` : 'Member group'))
+              : (roleName && roleName !== subjectId ? subjectId : 'Role'),
         isActive: subjectType === 'user' ? row.user_is_active !== false : true,
         accessLevel: deriveSheetAccessLevel(normalizePermissionCodes(row.permission_codes)),
       } satisfies MultitableSheetPermissionCandidate
@@ -1761,6 +1829,7 @@ async function listSheetPermissionCandidates(
 
   const eligibility = await Promise.all(
     candidates.map(async (candidate) => {
+      if (candidate.subjectType === 'member-group') return true
       if (candidate.subjectType === 'role') {
         if (candidate.subjectId === 'admin') return true
         const result = await query(
@@ -1798,6 +1867,15 @@ async function loadSheetPermissionScopeMap(
          AND (
            (sp.subject_type = 'user' AND sp.subject_id = $1)
            OR (
+             sp.subject_type = 'member-group'
+             AND EXISTS (
+               SELECT 1
+               FROM platform_member_group_members pgm
+               WHERE pgm.user_id = $1
+                 AND pgm.group_id::text = sp.subject_id
+             )
+           )
+           OR (
              sp.subject_type = 'role'
              AND EXISTS (
                SELECT 1
@@ -1809,24 +1887,33 @@ async function loadSheetPermissionScopeMap(
          )`,
       [userId, sheetIds],
     )
-    const grouped = new Map<string, { direct: string[]; role: string[] }>()
+    const grouped = new Map<string, { direct: string[]; memberGroup: string[]; role: string[] }>()
     for (const row of result.rows as Array<{ sheet_id: string; perm_code: string; subject_type?: string }>) {
       const sheetId = typeof row.sheet_id === 'string' ? row.sheet_id : ''
       const code = typeof row.perm_code === 'string' ? row.perm_code.trim() : ''
       if (!sheetId || !code) continue
-      const current = grouped.get(sheetId) ?? { direct: [], role: [] }
+      const current = grouped.get(sheetId) ?? { direct: [], memberGroup: [], role: [] }
       if (row.subject_type === 'user') current.direct.push(code)
+      else if (row.subject_type === 'member-group') current.memberGroup.push(code)
       else current.role.push(code)
       grouped.set(sheetId, current)
     }
     return new Map(
       Array.from(grouped.entries()).map(([sheetId, codes]) => [
         sheetId,
-        summarizeSheetPermissionCodes(codes.direct.length > 0 ? codes.direct : codes.role),
+        summarizeSheetPermissionCodes(
+          codes.direct.length > 0 ? codes.direct
+            : codes.memberGroup.length > 0 ? codes.memberGroup
+              : codes.role,
+        ),
       ]),
     )
   } catch (err) {
-    if (isUndefinedTableError(err, 'spreadsheet_permissions') || isUndefinedTableError(err, 'user_roles')) return new Map()
+    if (
+      isUndefinedTableError(err, 'spreadsheet_permissions')
+      || isUndefinedTableError(err, 'user_roles')
+      || isUndefinedTableError(err, 'platform_member_group_members')
+    ) return new Map()
     throw err
   }
 }
@@ -1850,6 +1937,13 @@ async function loadViewPermissionScopeMap(
          WHERE vp.view_id = ANY($2::text[])
            AND (
              (vp.subject_type = 'user' AND vp.subject_id = $1)
+             OR (
+               vp.subject_type = 'member-group'
+               AND EXISTS (
+                 SELECT 1 FROM platform_member_group_members pgm
+                 WHERE pgm.user_id = $1 AND pgm.group_id::text = vp.subject_id
+               )
+             )
              OR (
                vp.subject_type = 'role'
                AND EXISTS (
@@ -1888,7 +1982,11 @@ async function loadViewPermissionScopeMap(
       }),
     )
   } catch (err) {
-    if (isUndefinedTableError(err, 'meta_view_permissions') || isUndefinedTableError(err, 'user_roles')) return new Map()
+    if (
+      isUndefinedTableError(err, 'meta_view_permissions')
+      || isUndefinedTableError(err, 'user_roles')
+      || isUndefinedTableError(err, 'platform_member_group_members')
+    ) return new Map()
     throw err
   }
 }
@@ -1906,6 +2004,13 @@ async function loadFieldPermissionScopeMap(
        WHERE fp.sheet_id = $2
          AND (
            (fp.subject_type = 'user' AND fp.subject_id = $1)
+           OR (
+             fp.subject_type = 'member-group'
+             AND EXISTS (
+               SELECT 1 FROM platform_member_group_members pgm
+               WHERE pgm.user_id = $1 AND pgm.group_id::text = fp.subject_id
+             )
+           )
            OR (
              fp.subject_type = 'role'
              AND EXISTS (
@@ -1934,7 +2039,11 @@ async function loadFieldPermissionScopeMap(
     }
     return scopes
   } catch (err) {
-    if (isUndefinedTableError(err, 'field_permissions') || isUndefinedTableError(err, 'user_roles')) return new Map()
+    if (
+      isUndefinedTableError(err, 'field_permissions')
+      || isUndefinedTableError(err, 'user_roles')
+      || isUndefinedTableError(err, 'platform_member_group_members')
+    ) return new Map()
     throw err
   }
 }
@@ -1954,6 +2063,13 @@ async function loadRecordPermissionScopeMap(
          AND rp.record_id = ANY($3::text[])
          AND (
            (rp.subject_type = 'user' AND rp.subject_id = $1)
+           OR (
+             rp.subject_type = 'member-group'
+             AND EXISTS (
+               SELECT 1 FROM platform_member_group_members pgm
+               WHERE pgm.user_id = $1 AND pgm.group_id::text = rp.subject_id
+             )
+           )
            OR (
              rp.subject_type = 'role'
              AND EXISTS (
@@ -1982,7 +2098,11 @@ async function loadRecordPermissionScopeMap(
     }
     return scopes
   } catch (err) {
-    if (isUndefinedTableError(err, 'record_permissions') || isUndefinedTableError(err, 'user_roles')) return new Map()
+    if (
+      isUndefinedTableError(err, 'record_permissions')
+      || isUndefinedTableError(err, 'user_roles')
+      || isUndefinedTableError(err, 'platform_member_group_members')
+    ) return new Map()
     throw err
   }
 }
@@ -3647,7 +3767,7 @@ export function univerMetaRouter(): Router {
       const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canManageSheetAccess) return sendForbidden(res)
 
-      if (subjectType === 'role' && parsed.data.accessLevel === 'write-own') {
+      if (subjectType !== 'user' && parsed.data.accessLevel === 'write-own') {
         return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'write-own is only supported for direct user grants' } })
       }
 
@@ -3659,13 +3779,21 @@ export function univerMetaRouter(): Router {
         if (userResult.rows.length === 0) {
           return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `User not found: ${subjectId}` } })
         }
-      } else {
+      } else if (subjectType === 'role') {
         const roleResult = await pool.query(
           'SELECT id FROM roles WHERE id = $1',
           [subjectId],
         )
         if (roleResult.rows.length === 0) {
           return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Role not found: ${subjectId}` } })
+        }
+      } else {
+        const groupResult = await pool.query(
+          'SELECT id FROM platform_member_groups WHERE id::text = $1',
+          [subjectId],
+        )
+        if (groupResult.rows.length === 0) {
+          return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Member group not found: ${subjectId}` } })
         }
       }
 
@@ -3759,8 +3887,8 @@ export function univerMetaRouter(): Router {
     const viewId = typeof req.params.viewId === 'string' ? req.params.viewId.trim() : ''
     const subjectType = typeof req.params.subjectType === 'string' ? req.params.subjectType.trim() : ''
     const subjectId = typeof req.params.subjectId === 'string' ? req.params.subjectId.trim() : ''
-    if (!viewId || !subjectId || (subjectType !== 'user' && subjectType !== 'role')) {
-      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'viewId, subjectType (user|role), and subjectId are required' } })
+    if (!viewId || !subjectId || !isSheetPermissionSubjectType(subjectType)) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'viewId, subjectType (user|member-group|role), and subjectId are required' } })
     }
 
     const schema = z.object({
@@ -3786,10 +3914,15 @@ export function univerMetaRouter(): Router {
         if (userCheck.rows.length === 0) {
           return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `User not found: ${subjectId}` } })
         }
-      } else {
+      } else if (subjectType === 'role') {
         const roleCheck = await pool.query('SELECT id FROM roles WHERE id = $1', [subjectId])
         if (roleCheck.rows.length === 0) {
           return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Role not found: ${subjectId}` } })
+        }
+      } else {
+        const groupCheck = await pool.query('SELECT id FROM platform_member_groups WHERE id::text = $1', [subjectId])
+        if (groupCheck.rows.length === 0) {
+          return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Member group not found: ${subjectId}` } })
         }
       }
 
@@ -3864,8 +3997,8 @@ export function univerMetaRouter(): Router {
     const fieldId = typeof req.params.fieldId === 'string' ? req.params.fieldId.trim() : ''
     const subjectType = typeof req.params.subjectType === 'string' ? req.params.subjectType.trim() : ''
     const subjectId = typeof req.params.subjectId === 'string' ? req.params.subjectId.trim() : ''
-    if (!sheetId || !fieldId || !subjectId || (subjectType !== 'user' && subjectType !== 'role')) {
-      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId, fieldId, subjectType (user|role), and subjectId are required' } })
+    if (!sheetId || !fieldId || !subjectId || !isSheetPermissionSubjectType(subjectType)) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId, fieldId, subjectType (user|member-group|role), and subjectId are required' } })
     }
 
     const schema = z.object({
@@ -3897,10 +4030,15 @@ export function univerMetaRouter(): Router {
         if (userCheck.rows.length === 0) {
           return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `User not found: ${subjectId}` } })
         }
-      } else {
+      } else if (subjectType === 'role') {
         const roleCheck = await pool.query('SELECT id FROM roles WHERE id = $1', [subjectId])
         if (roleCheck.rows.length === 0) {
           return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Role not found: ${subjectId}` } })
+        }
+      } else {
+        const groupCheck = await pool.query('SELECT id FROM platform_member_groups WHERE id::text = $1', [subjectId])
+        if (groupCheck.rows.length === 0) {
+          return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Member group not found: ${subjectId}` } })
         }
       }
 
@@ -3989,7 +4127,7 @@ export function univerMetaRouter(): Router {
     }
 
     const schema = z.object({
-      subjectType: z.enum(['user', 'role']),
+      subjectType: z.enum(['user', 'role', 'member-group']),
       subjectId: z.string().min(1),
       accessLevel: z.enum(['read', 'write', 'admin']),
     })
@@ -4018,10 +4156,15 @@ export function univerMetaRouter(): Router {
         if (userCheck.rows.length === 0) {
           return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `User not found: ${subjectId}` } })
         }
-      } else {
+      } else if (subjectType === 'role') {
         const roleCheck = await pool.query('SELECT id FROM roles WHERE id = $1', [subjectId])
         if (roleCheck.rows.length === 0) {
           return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Role not found: ${subjectId}` } })
+        }
+      } else {
+        const groupCheck = await pool.query('SELECT id FROM platform_member_groups WHERE id::text = $1', [subjectId])
+        if (groupCheck.rows.length === 0) {
+          return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Member group not found: ${subjectId}` } })
         }
       }
 

@@ -338,7 +338,10 @@ function normalizeCommentMentionSuggestions(
 function normalizeSheetPermissionEntry(
   payload: Partial<MetaSheetPermissionEntry> | null | undefined,
 ): MetaSheetPermissionEntry | null {
-  const subjectType = payload?.subjectType === 'user' || payload?.subjectType === 'role' ? payload.subjectType : null
+  const subjectType =
+    payload?.subjectType === 'user' || payload?.subjectType === 'role' || payload?.subjectType === 'member-group'
+      ? payload.subjectType
+      : null
   const subjectId = typeof payload?.subjectId === 'string' ? payload.subjectId : ''
   const accessLevel = payload?.accessLevel
   if (!subjectType || !subjectId || (accessLevel !== 'read' && accessLevel !== 'write' && accessLevel !== 'write-own' && accessLevel !== 'admin')) {
@@ -375,7 +378,10 @@ function normalizeSheetPermissionCandidates(
   const items: MetaSheetPermissionCandidate[] = []
   if (Array.isArray(payload?.items)) {
     for (const item of payload.items) {
-      const subjectType = item?.subjectType === 'user' || item?.subjectType === 'role' ? item.subjectType : null
+      const subjectType =
+        item?.subjectType === 'user' || item?.subjectType === 'role' || item?.subjectType === 'member-group'
+          ? item.subjectType
+          : null
       const subjectId = typeof item?.subjectId === 'string' ? item.subjectId : ''
       const label = typeof item?.label === 'string' ? item.label : ''
       if (!subjectType || !subjectId || !label) continue
@@ -474,23 +480,26 @@ export class MultitableApiClient {
 
   async updateSheetPermission(
     sheetId: string,
-    subjectType: 'user' | 'role',
+    subjectType: 'user' | 'role' | 'member-group',
     subjectId: string,
     accessLevel: MetaSheetPermissionAccessLevel | 'none',
-  ): Promise<{ subjectType: 'user' | 'role'; subjectId: string; accessLevel: MetaSheetPermissionAccessLevel | 'none'; entry: MetaSheetPermissionEntry | null }> {
+  ): Promise<{ subjectType: 'user' | 'role' | 'member-group'; subjectId: string; accessLevel: MetaSheetPermissionAccessLevel | 'none'; entry: MetaSheetPermissionEntry | null }> {
     const res = await this.fetch(`/api/multitable/sheets/${encodeURIComponent(sheetId)}/permissions/${encodeURIComponent(subjectType)}/${encodeURIComponent(subjectId)}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ accessLevel }),
     })
     const data = await parseJson<{
-      subjectType?: 'user' | 'role'
+      subjectType?: 'user' | 'role' | 'member-group'
       subjectId?: string
       accessLevel?: MetaSheetPermissionAccessLevel | 'none'
       entry?: Partial<MetaSheetPermissionEntry> | null
     }>(res)
     return {
-      subjectType: data?.subjectType === 'user' || data?.subjectType === 'role' ? data.subjectType : subjectType,
+      subjectType:
+        data?.subjectType === 'user' || data?.subjectType === 'role' || data?.subjectType === 'member-group'
+          ? data.subjectType
+          : subjectType,
       subjectId: typeof data?.subjectId === 'string' ? data.subjectId : subjectId,
       accessLevel: data?.accessLevel === 'read' || data?.accessLevel === 'write' || data?.accessLevel === 'write-own' || data?.accessLevel === 'admin' || data?.accessLevel === 'none'
         ? data.accessLevel
@@ -508,7 +517,7 @@ export class MultitableApiClient {
         ? data.items
           .filter((item): item is MetaFieldPermissionEntry =>
             typeof item?.fieldId === 'string' &&
-            (item?.subjectType === 'user' || item?.subjectType === 'role') &&
+            (item?.subjectType === 'user' || item?.subjectType === 'role' || item?.subjectType === 'member-group') &&
             typeof item?.subjectId === 'string')
           .map((item) => ({
             fieldId: item.fieldId,
@@ -525,7 +534,7 @@ export class MultitableApiClient {
   async updateFieldPermission(
     sheetId: string,
     fieldId: string,
-    subjectType: 'user' | 'role',
+    subjectType: 'user' | 'role' | 'member-group',
     subjectId: string,
     perm: { visible: boolean; readOnly: boolean },
   ): Promise<{ fieldId: string; subjectType: string; subjectId: string; visible: boolean; readOnly: boolean }> {
@@ -549,7 +558,7 @@ export class MultitableApiClient {
         ? data.items
           .filter((item): item is MetaViewPermissionEntry =>
             typeof item?.viewId === 'string' &&
-            (item?.subjectType === 'user' || item?.subjectType === 'role') &&
+            (item?.subjectType === 'user' || item?.subjectType === 'role' || item?.subjectType === 'member-group') &&
             typeof item?.subjectId === 'string' &&
             typeof item?.permission === 'string')
           .map((item) => ({
@@ -565,7 +574,7 @@ export class MultitableApiClient {
 
   async updateViewPermission(
     viewId: string,
-    subjectType: 'user' | 'role',
+    subjectType: 'user' | 'role' | 'member-group',
     subjectId: string,
     permission: string,
   ): Promise<{ viewId: string; subjectType: string; subjectId: string; permission: string }> {
