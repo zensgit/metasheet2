@@ -109,6 +109,45 @@
           </template>
 
           <template v-if="draft.actionType === 'send_dingtalk_person_message'">
+            <label class="meta-automation__label">Search and add users</label>
+            <input
+              v-model="dingtalkPersonUserSearch"
+              class="meta-automation__input"
+              type="text"
+              placeholder="Search by name, email, or userId"
+              data-automation-field="dingtalkPersonUserSearch"
+              @input="void loadDingTalkPersonSuggestions()"
+            />
+            <div v-if="dingtalkPersonUserSearchLoading" class="meta-automation__hint">Searching users…</div>
+            <div v-else-if="dingtalkPersonUserSearchError" class="meta-automation__hint meta-automation__hint--error">{{ dingtalkPersonUserSearchError }}</div>
+            <div v-else-if="availableDingTalkPersonSuggestions.length" class="meta-automation__recipient-list">
+              <button
+                v-for="candidate in availableDingTalkPersonSuggestions"
+                :key="candidate.id"
+                class="meta-automation__recipient-option"
+                type="button"
+                :data-automation-person-suggestion="candidate.id"
+                @click="addDingTalkPersonRecipient(candidate)"
+              >
+                <strong>{{ candidate.label }}</strong>
+                <span>{{ candidate.subtitle || candidate.id }}</span>
+              </button>
+            </div>
+            <div v-else-if="dingtalkPersonUserSearch.trim()" class="meta-automation__hint">No matching users</div>
+            <div v-if="selectedDingTalkPersonRecipients.length" class="meta-automation__recipient-list meta-automation__recipient-list--selected">
+              <button
+                v-for="recipient in selectedDingTalkPersonRecipients"
+                :key="recipient.id"
+                class="meta-automation__recipient-chip"
+                type="button"
+                :data-automation-person-recipient="recipient.id"
+                @click="removeDingTalkPersonRecipient(recipient.id)"
+              >
+                <strong>{{ recipient.label }}</strong>
+                <span>{{ recipient.subtitle || recipient.id }}</span>
+                <em>Remove</em>
+              </button>
+            </div>
             <label class="meta-automation__label">Local user IDs</label>
             <textarea
               v-model="draft.dingtalkPersonUserIds"
@@ -225,6 +264,7 @@ import type {
   AutomationActionType,
   AutomationStats,
   DingTalkGroupDestination,
+  MetaCommentMentionSuggestion,
   MetaView,
 } from '../types'
 import { useMultitableAutomations } from '../composables/useMultitableAutomations'
@@ -295,8 +335,90 @@ function emptyDraft(): DraftState {
 
 const draft = ref<DraftState>(emptyDraft())
 const dingTalkDestinations = ref<DingTalkGroupDestination[]>([])
+const dingtalkPersonUserSearch = ref('')
+const dingtalkPersonUserSearchLoading = ref(false)
+const dingtalkPersonUserSearchError = ref('')
+const dingtalkPersonUserSuggestions = ref<MetaCommentMentionSuggestion[]>([])
+const dingtalkPersonUserDirectory = ref<Record<string, { label: string; subtitle?: string }>>({})
+let dingtalkPersonSuggestionLoadId = 0
 const formViews = computed(() => (props.views ?? []).filter((view) => view.type === 'form'))
 const internalViews = computed(() => props.views ?? [])
+
+function parseUserIdsText(value: string): string[] {
+  return value
+    .split(/[\n,]+/)
+    .map((entry) => entry.trim())
+    .filter(Boolean)
+}
+
+function rememberDingTalkPersonSuggestions(items: MetaCommentMentionSuggestion[]) {
+  const next = { ...dingtalkPersonUserDirectory.value }
+  for (const item of items) {
+    next[item.id] = { label: item.label, subtitle: item.subtitle }
+  }
+  dingtalkPersonUserDirectory.value = next
+}
+
+const selectedDingTalkPersonRecipients = computed(() =>
+  parseUserIdsText(draft.value.dingtalkPersonUserIds).map((id) => ({
+    id,
+    label: dingtalkPersonUserDirectory.value[id]?.label ?? id,
+    subtitle: dingtalkPersonUserDirectory.value[id]?.subtitle,
+  })),
+)
+
+const availableDingTalkPersonSuggestions = computed(() => {
+  const selected = new Set(parseUserIdsText(draft.value.dingtalkPersonUserIds))
+  return dingtalkPersonUserSuggestions.value.filter((candidate) => !selected.has(candidate.id))
+})
+
+async function loadDingTalkPersonSuggestions() {
+  const query = dingtalkPersonUserSearch.value.trim()
+  if (!props.client || !showForm.value || draft.value.actionType !== 'send_dingtalk_person_message' || !query) {
+    dingtalkPersonUserSuggestions.value = []
+    dingtalkPersonUserSearchError.value = ''
+    dingtalkPersonUserSearchLoading.value = false
+    return
+  }
+
+  const requestId = ++dingtalkPersonSuggestionLoadId
+  dingtalkPersonUserSearchLoading.value = true
+  dingtalkPersonUserSearchError.value = ''
+  try {
+    const response = await props.client.listCommentMentionSuggestions({
+      spreadsheetId: props.sheetId,
+      q: query,
+      limit: 8,
+    })
+    if (requestId !== dingtalkPersonSuggestionLoadId) return
+    rememberDingTalkPersonSuggestions(response.items)
+    dingtalkPersonUserSuggestions.value = response.items
+  } catch (error) {
+    if (requestId !== dingtalkPersonSuggestionLoadId) return
+    dingtalkPersonUserSuggestions.value = []
+    dingtalkPersonUserSearchError.value = error instanceof Error ? error.message : 'Failed to search users'
+  } finally {
+    if (requestId === dingtalkPersonSuggestionLoadId) {
+      dingtalkPersonUserSearchLoading.value = false
+    }
+  }
+}
+
+function addDingTalkPersonRecipient(candidate: MetaCommentMentionSuggestion) {
+  const ids = new Set(parseUserIdsText(draft.value.dingtalkPersonUserIds))
+  ids.add(candidate.id)
+  draft.value.dingtalkPersonUserIds = Array.from(ids).join(', ')
+  rememberDingTalkPersonSuggestions([candidate])
+  dingtalkPersonUserSearch.value = ''
+  dingtalkPersonUserSuggestions.value = []
+  dingtalkPersonUserSearchError.value = ''
+}
+
+function removeDingTalkPersonRecipient(userId: string) {
+  draft.value.dingtalkPersonUserIds = parseUserIdsText(draft.value.dingtalkPersonUserIds)
+    .filter((id) => id !== userId)
+    .join(', ')
+}
 
 // --- Rule editor + log viewer state ---
 const showRuleEditor = ref(false)
@@ -374,6 +496,9 @@ const canSave = computed(() => {
 function openCreateForm() {
   editingRuleId.value = null
   draft.value = emptyDraft()
+  dingtalkPersonUserSearch.value = ''
+  dingtalkPersonUserSuggestions.value = []
+  dingtalkPersonUserSearchError.value = ''
   showForm.value = true
 }
 
@@ -398,6 +523,9 @@ function openEditForm(rule: AutomationRule) {
     dingtalkPersonPublicFormViewId: (rule.actionConfig?.publicFormViewId as string) ?? '',
     dingtalkPersonInternalViewId: (rule.actionConfig?.internalViewId as string) ?? '',
   }
+  dingtalkPersonUserSearch.value = ''
+  dingtalkPersonUserSuggestions.value = []
+  dingtalkPersonUserSearchError.value = ''
   showForm.value = true
 }
 
@@ -405,6 +533,9 @@ function cancelForm() {
   showForm.value = false
   editingRuleId.value = null
   draft.value = emptyDraft()
+  dingtalkPersonUserSearch.value = ''
+  dingtalkPersonUserSuggestions.value = []
+  dingtalkPersonUserSearchError.value = ''
 }
 
 function buildTriggerConfig(): Record<string, unknown> {
@@ -637,6 +768,15 @@ watch(
   margin-top: 4px;
 }
 
+.meta-automation__hint {
+  font-size: 12px;
+  color: #64748b;
+}
+
+.meta-automation__hint--error {
+  color: #b91c1c;
+}
+
 .meta-automation__input,
 .meta-automation__select {
   width: 100%;
@@ -647,6 +787,38 @@ watch(
   font-size: 13px;
   background: #fff;
   box-sizing: border-box;
+}
+
+.meta-automation__recipient-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.meta-automation__recipient-list--selected {
+  margin-bottom: 4px;
+}
+
+.meta-automation__recipient-option,
+.meta-automation__recipient-chip {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  background: #fff;
+  padding: 8px 10px;
+  cursor: pointer;
+  color: #0f172a;
+}
+
+.meta-automation__recipient-option span,
+.meta-automation__recipient-chip span,
+.meta-automation__recipient-chip em {
+  font-size: 12px;
+  color: #64748b;
+  font-style: normal;
 }
 
 .meta-automation__form-actions {

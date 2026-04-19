@@ -30,6 +30,14 @@ function mockClient() {
         createdAt: '2026-04-01T00:00:00Z',
       },
     ]),
+    listCommentMentionSuggestions: vi.fn(async () => ({
+      items: [
+        { id: 'user_1', label: 'Lin Lan', subtitle: 'lin@example.com' },
+        { id: 'user_2', label: 'Zhao Ming', subtitle: 'zhao@example.com' },
+      ],
+      total: 2,
+      limit: 8,
+    })),
   }
 }
 
@@ -327,5 +335,60 @@ describe('MetaAutomationRuleEditor', () => {
         internalViewId: 'view_grid',
       },
     })
+  })
+
+  it('can search and add DingTalk person recipients', async () => {
+    const saved = vi.fn()
+    const client = mockClient()
+    const { container } = mount({
+      visible: true,
+      sheetId: 'sheet_1',
+      fields,
+      views,
+      client,
+      onSave: saved,
+    })
+    await flushPromises()
+
+    const nameInput = container.querySelector('[data-field="name"]') as HTMLInputElement
+    nameInput.value = 'Notify search recipients'
+    nameInput.dispatchEvent(new Event('input'))
+    await flushPromises()
+
+    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header select') as HTMLSelectElement
+    actionSelect.value = 'send_dingtalk_person_message'
+    actionSelect.dispatchEvent(new Event('change'))
+    await flushPromises()
+
+    const searchInput = container.querySelector('[data-field="dingtalkPersonUserSearch"]') as HTMLInputElement
+    searchInput.value = 'lin'
+    searchInput.dispatchEvent(new Event('input'))
+    await flushPromises()
+
+    const suggestion = container.querySelector('[data-person-recipient-suggestion="user_1"]') as HTMLButtonElement
+    expect(suggestion).toBeTruthy()
+    suggestion.click()
+    await flushPromises()
+
+    const userIdsInput = container.querySelector('[data-field="dingtalkPersonUserIds"]') as HTMLTextAreaElement
+    expect(userIdsInput.value).toBe('user_1')
+
+    const titleInput = container.querySelector('[data-field="dingtalkPersonTitleTemplate"]') as HTMLInputElement
+    titleInput.value = 'Ticket {{recordId}}'
+    titleInput.dispatchEvent(new Event('input'))
+
+    const bodyInput = container.querySelector('[data-field="dingtalkPersonBodyTemplate"]') as HTMLTextAreaElement
+    bodyInput.value = 'Please review'
+    bodyInput.dispatchEvent(new Event('input'))
+    await flushPromises()
+
+    const saveBtn = container.querySelector('[data-action="save"]') as HTMLButtonElement
+    saveBtn.click()
+    await flushPromises()
+
+    expect(saved).toHaveBeenCalledTimes(1)
+    const payload = saved.mock.calls[0][0]
+    expect(payload.actionConfig.userIds).toEqual(['user_1'])
+    expect(client.listCommentMentionSuggestions).toHaveBeenCalledTimes(1)
   })
 })
