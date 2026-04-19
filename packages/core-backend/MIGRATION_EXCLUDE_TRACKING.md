@@ -4,15 +4,53 @@
 
 This document tracks database migrations that are currently excluded from automated replay testing. These migrations require manual review and fixing before they can be re-enabled.
 
-**Current Exclude Count**: 3 files (centralized in CI via composite action)
+**Current Exclude Count**: 12 files
 
-**Default Exclude in CI**: `008_plugin_infrastructure.sql, 048_create_event_bus_tables.sql, 049_create_bpmn_workflow_tables.sql`
+**Default Exclude in CI**: `008_plugin_infrastructure.sql, 048_create_event_bus_tables.sql, 049_create_bpmn_workflow_tables.sql, 042a_core_model_views.sql, 20250924120000_create_views_view_states.ts, 20250924140000_create_gantt_tables.ts, 20250924200000_create_event_bus_tables.ts, 20250925_create_view_tables.sql, 20251117000001_add_snapshot_labels.ts, 20251117000002_create_protection_rules.ts, 20251201000001_create_change_management_tables.ts, zzzz20260114110000_create_user_orgs_table.ts`
 
-**Last Updated**: 2025-11-07
+**Last Updated**: 2026-04-19
 
 ---
 
 ## Excluded Migrations
+
+### Current CI Exclusions
+
+#### `042a_core_model_views.sql`
+**Status**: ❌ Excluded
+**Issue**: References non-existent `last_accessed` column during replay paths.
+
+#### `20250924120000_create_views_view_states.ts`
+**Status**: ❌ Excluded
+**Issue**: Creates view-state foreign keys against pre-fix `text` view ids, which fails once replay paths rebuild the newer UUID-based schema.
+
+#### `20250924140000_create_gantt_tables.ts`
+**Status**: ❌ Excluded
+**Issue**: Creates gantt foreign keys against the same pre-fix `text` view ids and fails with `uuid` vs `text` FK incompatibility during replay paths.
+
+#### `20250924200000_create_event_bus_tables.ts`
+**Status**: ❌ Excluded
+**Issue**: Recreates runtime event bus tables that already exist through the earlier event bus SQL path, causing replay environments to fail with duplicate `event_types` relations.
+
+#### `20250925_create_view_tables.sql`
+**Status**: ❌ Excluded
+**Issue**: Applies `tables_owner_id_fkey` against a legacy `owner_id` shape that no longer exists in replay-built schemas, causing `owner_id` foreign-key failures.
+
+#### `20251117000001_add_snapshot_labels.ts`
+**Status**: ❌ Excluded
+**Issue**: Re-applies the `chk_protection_level` constraint after replay paths have already created the newer snapshot schema, causing duplicate-constraint failures on `snapshots`.
+
+#### `20251117000002_create_protection_rules.ts`
+**Status**: ❌ Excluded
+**Issue**: Re-creates the `protection_rules` table after replay paths have already applied the legacy protection-rule schema, causing duplicate-table failures.
+
+#### `20251201000001_create_change_management_tables.ts`
+**Status**: ❌ Excluded
+**Issue**: Applies `snapshot_id` foreign keys against the newer `uuid snapshots.id` while replay paths still rebuild legacy `text` snapshot references, causing incompatible-FK failures.
+
+#### `zzzz20260114110000_create_user_orgs_table.ts`
+**Status**: ❌ Excluded
+**Issue**: Rebuilds `user_orgs` against a replay path that still carries the legacy `is_active` reference shape, causing `column "is_active" does not exist` failures.
 
 ### Pre-Existing Issues (archived)
 

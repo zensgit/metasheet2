@@ -21,7 +21,6 @@ async function main() {
     const adminRoleId = process.env.RBAC_ADMIN_ROLE || process.env.SEED_USER_ROLE || 'admin'
     const adminEmail = process.env.SEED_USER_EMAIL || `${adminUserId}@test.local`
     const adminRole = adminRoleId || 'admin'
-    const isAdmin = adminRole === 'admin'
     const perms: Array<[string, string, string | null]> = [
       ['demo:read', 'Demo Read', 'Demo read permission for CI'],
       ['permissions:read', 'Permissions Read', 'List permissions'],
@@ -40,13 +39,14 @@ async function main() {
       )
     }
     await client.query(
-      `INSERT INTO users (id, email, name, password_hash, role, permissions, is_admin)
-       VALUES ($1, $2, $3, $4, $5, '[]'::jsonb, $6)
+      `INSERT INTO users (id, email, name, password_hash, role)
+       VALUES ($1, $2, $3, $4, $5)
        ON CONFLICT (id) DO UPDATE
        SET email = EXCLUDED.email,
-           role = EXCLUDED.role,
-           is_admin = EXCLUDED.is_admin`,
-      [adminUserId, adminEmail, adminUserId, 'seeded', adminRole, isAdmin]
+           name = EXCLUDED.name,
+           password_hash = EXCLUDED.password_hash,
+           role = EXCLUDED.role`,
+      [adminUserId, adminEmail, adminUserId, 'seeded', adminRole]
     )
     await client.query(
       'INSERT INTO user_roles(user_id, role_id) VALUES ($1,$2) ON CONFLICT (user_id, role_id) DO NOTHING',
