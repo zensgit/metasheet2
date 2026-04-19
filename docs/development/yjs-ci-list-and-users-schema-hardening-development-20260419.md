@@ -8,6 +8,7 @@ This slice hardens two non-Yjs-runtime CI failures that surfaced while closing P
 
 1. `migration-replay` still failed after the replay-only exclusion list was aligned, because the `List migrations` step ran `db:list` without `MIGRATION_EXCLUDE`.
 2. `after-sales integration` and one `e2e` job were still inserting into `users.is_active` / `users.is_admin`, even though replay-built databases can still expose the older minimal `users` table shape created by `054_create_users_table.sql`.
+3. `after-sales integration` still assumed a `supervisor` role row already existed before seeding `user_roles`, which is not guaranteed in replay-built databases.
 
 ## Root Cause
 
@@ -69,9 +70,11 @@ Changes:
   - `is_admin`
   - `permissions`
 - kept `ON CONFLICT` updates restricted to the same compatible columns.
+- added an idempotent `roles` insert for the test-only `supervisor` role before inserting into `user_roles`, so after-sales integration no longer depends on pre-existing seed data outside the test fixture.
 
 ## Outcome
 
 - `migration-replay` no longer has a separate unexcluded `db:list` path.
 - `seed-rbac` and after-sales integration seeding are compatible with both the legacy SQL `users` table and the newer code-created shape.
+- `after-sales` integration no longer fails on a missing `roles.supervisor` FK prerequisite.
 - The remaining PR `#918` work stays focused on CI hardening around the already-validated Yjs rollout path.

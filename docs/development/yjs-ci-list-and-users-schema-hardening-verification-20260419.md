@@ -9,13 +9,15 @@ This slice changed:
 - one workflow step in `migration-replay.yml`
 - one CI seed script
 - one integration-test fixture
+- one additional role seed in the same integration-test fixture
 
 Verification therefore focused on:
 
 1. confirming that `migration-replay` now passes the same `MIGRATION_EXCLUDE` list to `db:list`;
 2. confirming that the edited backend files still compile;
 3. confirming that the existing migration-provider hardening tests still pass;
-4. attempting the after-sales integration test locally and recording the environment blocker.
+4. confirming that the after-sales fixture now seeds its required role row before `user_roles`;
+5. attempting the after-sales integration test locally and recording the environment blocker.
 
 ## Commands Run
 
@@ -33,6 +35,7 @@ DATABASE_URL=postgresql://postgres@localhost:5432/metasheet_test pnpm --filter @
 - workflow/file grep confirmed:
   - `migration-replay.yml` now sets `MIGRATION_EXCLUDE` for both `Run migrations twice (replay)` and `List migrations`
   - the edited CI helpers no longer insert `is_active` / `is_admin`
+  - the after-sales fixture now seeds `roles(id='supervisor')` before inserting into `user_roles`
 - local after-sales integration attempt:
   - could not complete on this machine because local PostgreSQL does not expose role `postgres`
   - failure was environment access:
