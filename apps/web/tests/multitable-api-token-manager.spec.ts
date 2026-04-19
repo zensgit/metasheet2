@@ -10,7 +10,7 @@ async function flushPromises() {
 
 import MetaApiTokenManager from '../src/multitable/components/MetaApiTokenManager.vue'
 import { MultitableApiClient } from '../src/multitable/api/client'
-import type { ApiToken, Webhook, WebhookDelivery } from '../src/multitable/types'
+import type { ApiToken, DingTalkGroupDestination, Webhook, WebhookDelivery } from '../src/multitable/types'
 
 function fakeToken(overrides: Partial<ApiToken> = {}): ApiToken {
   return {
@@ -53,7 +53,28 @@ function fakeDelivery(overrides: Partial<WebhookDelivery> = {}): WebhookDelivery
   }
 }
 
-function mockClient(tokens: ApiToken[] = [], webhooks: Webhook[] = [], deliveries: WebhookDelivery[] = []) {
+function fakeDingTalkGroup(overrides: Partial<DingTalkGroupDestination> = {}): DingTalkGroupDestination {
+  return {
+    id: 'dt_1',
+    name: 'Ops DingTalk Group',
+    webhookUrl: 'https://oapi.dingtalk.com/robot/send?access_token=test-token',
+    enabled: true,
+    createdBy: 'user_1',
+    createdAt: '2026-04-01T00:00:00Z',
+    updatedAt: '2026-04-01T00:00:00Z',
+    lastTestedAt: '2026-04-01T01:00:00Z',
+    lastTestStatus: 'success',
+    lastTestError: undefined,
+    ...overrides,
+  }
+}
+
+function mockClient(
+  tokens: ApiToken[] = [],
+  webhooks: Webhook[] = [],
+  deliveries: WebhookDelivery[] = [],
+  dingTalkGroups: DingTalkGroupDestination[] = [],
+) {
   const ok = (body: unknown) =>
     new Response(JSON.stringify({ data: body }), { status: 200, headers: { 'Content-Type': 'application/json' } })
   const noContent = () => new Response(null, { status: 204 })
@@ -92,6 +113,29 @@ function mockClient(tokens: ApiToken[] = [], webhooks: Webhook[] = [], deliverie
     }
     if (method === 'GET' && url.includes('/deliveries')) {
       return ok({ deliveries })
+    }
+
+    // DingTalk groups
+    if (method === 'GET' && url.includes('/dingtalk-groups') && !url.includes('/test-send')) {
+      return ok({ destinations: dingTalkGroups })
+    }
+    if (method === 'POST' && url.includes('/dingtalk-groups') && !url.includes('/test-send')) {
+      const body = JSON.parse(init?.body as string)
+      return ok({
+        id: 'dt_new',
+        createdBy: 'user_1',
+        createdAt: '2026-04-01T00:00:00Z',
+        ...body,
+      })
+    }
+    if (method === 'PATCH' && url.includes('/dingtalk-groups/')) {
+      return ok(dingTalkGroups[0] ?? {})
+    }
+    if (method === 'DELETE' && url.includes('/dingtalk-groups/')) {
+      return noContent()
+    }
+    if (method === 'POST' && url.includes('/dingtalk-groups/') && url.includes('/test-send')) {
+      return noContent()
     }
 
     return ok({})
@@ -307,5 +351,71 @@ describe('MetaApiTokenManager', () => {
 
     const deliveryRows = document.querySelectorAll('[data-delivery-id]')
     expect(deliveryRows.length).toBe(1)
+  })
+
+  // ---- DingTalk group tests ----
+
+  it('switches to DingTalk groups tab', async () => {
+    const { client } = mockClient([], [], [], [fakeDingTalkGroup()])
+    mount({ visible: true, client })
+    await flushPromises()
+
+    const dingTalkTab = document.querySelectorAll('[role="tab"]')[2] as HTMLButtonElement
+    dingTalkTab.click()
+    await flushPromises()
+
+    const cards = document.querySelectorAll('[data-dingtalk-group-id]')
+    expect(cards.length).toBe(1)
+  })
+
+  it('creates a DingTalk group destination', async () => {
+    const { client, fetchFn } = mockClient()
+    mount({ visible: true, client })
+    await flushPromises()
+
+    const dingTalkTab = document.querySelectorAll('[role="tab"]')[2] as HTMLButtonElement
+    dingTalkTab.click()
+    await flushPromises()
+
+    const newBtn = document.querySelector('[data-dingtalk-group-new]') as HTMLButtonElement
+    newBtn.click()
+    await flushPromises()
+
+    const nameInput = document.querySelector('[data-dingtalk-group-name]') as HTMLInputElement
+    nameInput.value = 'Support group'
+    nameInput.dispatchEvent(new Event('input', { bubbles: true }))
+
+    const urlInput = document.querySelector('[data-dingtalk-group-webhook-url]') as HTMLInputElement
+    urlInput.value = 'https://oapi.dingtalk.com/robot/send?access_token=test-token'
+    urlInput.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushPromises()
+
+    const saveBtn = document.querySelector('[data-dingtalk-group-save]') as HTMLButtonElement
+    saveBtn.click()
+    await flushPromises()
+
+    const createCalls = fetchFn.mock.calls.filter(
+      (c: [string, RequestInit?]) => c[1]?.method === 'POST' && c[0].includes('/dingtalk-groups') && !c[0].includes('/test-send'),
+    )
+    expect(createCalls.length).toBe(1)
+  })
+
+  it('tests a DingTalk group destination', async () => {
+    const { client, fetchFn } = mockClient([], [], [], [fakeDingTalkGroup()])
+    mount({ visible: true, client })
+    await flushPromises()
+
+    const dingTalkTab = document.querySelectorAll('[role="tab"]')[2] as HTMLButtonElement
+    dingTalkTab.click()
+    await flushPromises()
+
+    const testSendBtn = document.querySelector('[data-dingtalk-group-test-send]') as HTMLButtonElement
+    testSendBtn.click()
+    await flushPromises()
+
+    const testSendCalls = fetchFn.mock.calls.filter(
+      (c: [string, RequestInit?]) => c[1]?.method === 'POST' && c[0].includes('/dingtalk-groups/') && c[0].includes('/test-send'),
+    )
+    expect(testSendCalls.length).toBe(1)
   })
 })

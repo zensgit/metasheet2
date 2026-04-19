@@ -103,6 +103,7 @@ import workflowDesignerRouter from './routes/workflow-designer'
 import plmWorkbenchRouter from './routes/plm-workbench'
 import { univerMockRouter } from './routes/univer-mock'
 import { univerMetaRouter } from './routes/univer-meta'
+import { apiTokensRouter } from './routes/api-tokens'
 import { SnapshotService } from './services/SnapshotService'
 import { MetricsStreamService } from './services/MetricsStreamService'
 import { notificationService } from './services/NotificationService'
@@ -859,6 +860,7 @@ export class MetaSheetServer {
 
     // Canonical multitable API used by the frontend and OpenAPI contracts.
     this.app.use('/api/multitable', univerMetaRouter())
+    this.app.use(apiTokensRouter())
     // Keep the legacy dev alias while existing tools/worktrees still reference it.
     if (process.env.NODE_ENV !== 'production') {
       this.app.use('/api/univer-meta', univerMetaRouter())

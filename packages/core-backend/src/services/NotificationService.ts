@@ -3,7 +3,6 @@
  * 支持多渠道通知发送，模板管理，订阅管理
  */
 
-import { createHmac } from 'node:crypto'
 import { EventEmitter } from 'eventemitter3'
 import type {
   NotificationService,
@@ -21,6 +20,13 @@ import type {
 import { Logger } from '../core/logger'
 import { BackoffStrategy } from '../utils/BackoffStrategy'
 import { maskDingTalkWebhookUrl } from '../integrations/dingtalk/runtime-policy'
+import {
+  buildDingTalkMarkdown,
+  buildSignedDingTalkWebhookUrl,
+  type DingTalkRobotPayload,
+  DingTalkRobotResponseError,
+  validateDingTalkRobotResponse,
+} from '../integrations/dingtalk/robot'
 
 /**
  * Email notification payload
@@ -51,19 +57,6 @@ interface FeishuMessagePayload {
   data?: unknown
 }
 
-interface DingTalkRobotPayload {
-  msgtype: 'markdown'
-  markdown: {
-    title: string
-    text: string
-  }
-}
-
-interface DingTalkRobotResponse {
-  errcode?: number
-  errmsg?: string
-}
-
 function resolvePositiveInt(value: unknown, fallback: number, min = 1, max = Number.MAX_SAFE_INTEGER): number {
   const numeric = typeof value === 'number' ? value : Number(value)
   if (!Number.isFinite(numeric)) return fallback
@@ -86,17 +79,6 @@ async function readJsonSafely(response: Response): Promise<unknown> {
   } catch {
     return null
   }
-}
-
-function validateDingTalkRobotResponse(payload: unknown): void {
-  const data = payload as DingTalkRobotResponse | null
-  if (!data || typeof data !== 'object') return
-  const errcode = typeof data.errcode === 'number' ? data.errcode : 0
-  if (errcode === 0) return
-  const errmsg = typeof data.errmsg === 'string' && data.errmsg.trim().length > 0
-    ? data.errmsg.trim()
-    : 'DingTalk robot request failed'
-  throw new NonRetryableNotificationError(`DingTalk errcode ${errcode}: ${errmsg}`)
 }
 
 async function postJsonWithRetry(options: {
@@ -149,7 +131,7 @@ async function postJsonWithRetry(options: {
       return
     } catch (error) {
       lastError = error as Error
-      if (error instanceof NonRetryableNotificationError) {
+      if (error instanceof NonRetryableNotificationError || error instanceof DingTalkRobotResponseError) {
         throw error
       }
       if (attempt >= options.maxAttempts) break
@@ -167,29 +149,6 @@ async function postJsonWithRetry(options: {
   }
 
   throw lastError ?? new Error(`${options.context} failed`)
-}
-
-function buildDingTalkMarkdown(subject: string, content: string): DingTalkRobotPayload {
-  const title = subject.trim() || 'MetaSheet Notification'
-  const body = content.trim() || title
-  return {
-    msgtype: 'markdown',
-    markdown: {
-      title,
-      text: `### ${title}\n\n${body}`,
-    },
-  }
-}
-
-function buildSignedDingTalkWebhookUrl(baseUrl: string, secret?: string): string {
-  const normalizedSecret = typeof secret === 'string' ? secret.trim() : ''
-  if (!normalizedSecret) return baseUrl
-
-  const timestamp = Date.now()
-  const stringToSign = `${timestamp}\n${normalizedSecret}`
-  const sign = encodeURIComponent(createHmac('sha256', normalizedSecret).update(stringToSign).digest('base64'))
-  const separator = baseUrl.includes('?') ? '&' : '?'
-  return `${baseUrl}${separator}timestamp=${timestamp}&sign=${sign}`
 }
 
 /**

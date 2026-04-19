@@ -780,6 +780,28 @@ export interface WebhookDelivery {
   timestamp: string
 }
 
+// --- DingTalk Group Destinations ---
+export interface DingTalkGroupDestination {
+  id: string
+  name: string
+  webhookUrl: string
+  secret?: string
+  enabled: boolean
+  createdBy: string
+  createdAt: string
+  updatedAt?: string
+  lastTestedAt?: string
+  lastTestStatus?: 'success' | 'failed'
+  lastTestError?: string
+}
+
+export interface DingTalkGroupDestinationInput {
+  name: string
+  webhookUrl: string
+  secret?: string
+  enabled?: boolean
+}
+
 // --- Field Validation ---
 export type FieldValidationRuleType = 'required' | 'minLength' | 'maxLength' | 'pattern' | 'min' | 'max' | 'enum'
 

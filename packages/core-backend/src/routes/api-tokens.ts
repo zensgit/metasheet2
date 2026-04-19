@@ -1,22 +1,34 @@
 /**
- * API Token & Webhook REST Routes
- * Provides CRUD endpoints for managing API tokens and webhooks.
+ * API Token, Webhook, and DingTalk group destination REST routes.
  */
 
 import type { Request, Response } from 'express'
 import { Router } from 'express'
 import { z } from 'zod'
+import { db } from '../db/db'
 import { Logger } from '../core/logger'
 import { authenticate } from '../middleware/auth'
 import { ApiTokenService } from '../multitable/api-token-service'
-import { WebhookService } from '../multitable/webhook-service'
-import { db } from '../db/db'
 import { ALL_API_TOKEN_SCOPES } from '../multitable/api-tokens'
+import { DingTalkGroupDestinationService } from '../multitable/dingtalk-group-destination-service'
+import { WebhookService } from '../multitable/webhook-service'
 import { ALL_WEBHOOK_EVENT_TYPES } from '../multitable/webhooks'
 
 const logger = new Logger('ApiTokenRoutes')
 
-// ─── Zod schemas ───────────────────────────────────────────────────────
+const apiTokenService = new ApiTokenService(db)
+const webhookService = new WebhookService(db)
+const dingTalkGroupDestinationService = new DingTalkGroupDestinationService(db)
+
+const tokenListPaths = ['/api/multitable/api-tokens', '/api/multitable/tokens']
+const tokenItemPaths = ['/api/multitable/api-tokens/:id', '/api/multitable/tokens/:id']
+const tokenRotatePaths = ['/api/multitable/api-tokens/:id/rotate', '/api/multitable/tokens/:id/rotate']
+const webhookPaths = ['/api/multitable/webhooks', '/api/multitable/webhooks/:id', '/api/multitable/webhooks/:id/deliveries']
+const dingTalkGroupPaths = [
+  '/api/multitable/dingtalk-groups',
+  '/api/multitable/dingtalk-groups/:id',
+  '/api/multitable/dingtalk-groups/:id/test-send',
+]
 
 const CreateTokenSchema = z.object({
   name: z.string().min(1).max(100),
@@ -28,23 +40,35 @@ const CreateWebhookSchema = z.object({
   name: z.string().min(1).max(100),
   url: z.string().url(),
   secret: z.string().optional(),
-  events: z
-    .array(z.enum(ALL_WEBHOOK_EVENT_TYPES as [string, ...string[]]))
-    .min(1),
+  events: z.array(z.enum(ALL_WEBHOOK_EVENT_TYPES as [string, ...string[]])).min(1),
 })
 
 const UpdateWebhookSchema = z.object({
   name: z.string().min(1).max(100).optional(),
   url: z.string().url().optional(),
   secret: z.string().optional(),
-  events: z
-    .array(z.enum(ALL_WEBHOOK_EVENT_TYPES as [string, ...string[]]))
-    .min(1)
-    .optional(),
+  events: z.array(z.enum(ALL_WEBHOOK_EVENT_TYPES as [string, ...string[]])).min(1).optional(),
   active: z.boolean().optional(),
 })
 
-// ─── Helpers ───────────────────────────────────────────────────────────
+const CreateDingTalkGroupSchema = z.object({
+  name: z.string().min(1).max(100),
+  webhookUrl: z.string().url(),
+  secret: z.string().optional(),
+  enabled: z.boolean().optional(),
+})
+
+const UpdateDingTalkGroupSchema = z.object({
+  name: z.string().min(1).max(100).optional(),
+  webhookUrl: z.string().url().optional(),
+  secret: z.string().optional(),
+  enabled: z.boolean().optional(),
+})
+
+const DingTalkGroupTestSendSchema = z.object({
+  subject: z.string().min(1).max(100).optional(),
+  content: z.string().min(1).max(4000).optional(),
+})
 
 function getUserId(req: Request): string {
   const user = req.user as Record<string, unknown> | undefined
@@ -59,35 +83,50 @@ function zodError(res: Response, err: z.ZodError): void {
   })
 }
 
-// ─── Router factory ────────────────────────────────────────────────────
+function serviceErrorResponse(res: Response, err: unknown, action: string): void {
+  const message = err instanceof Error ? err.message : 'Unknown error'
+  let status = 500
+  let code = `${action.toUpperCase()}_FAILED`
 
-const apiTokenService = new ApiTokenService(db)
-const webhookService = new WebhookService(db)
+  if (message === 'Destination not found' || message === 'Token not found' || message === 'Webhook not found') {
+    status = 404
+  } else if (message === 'Not authorized') {
+    status = 403
+    code = 'FORBIDDEN'
+  } else if (
+    message.includes('required')
+    || message.includes('valid URL')
+    || message.includes('HTTPS')
+    || message.includes('At least one scope')
+  ) {
+    status = 400
+  }
+
+  res.status(status).json({
+    ok: false,
+    error: { code, message },
+  })
+}
 
 export function apiTokensRouter(): Router {
   const router = Router()
 
-  // All routes require authentication
   router.use(
-    ['/api/multitable/api-tokens', '/api/multitable/webhooks'],
+    [...tokenListPaths, ...tokenItemPaths, ...tokenRotatePaths, ...webhookPaths, ...dingTalkGroupPaths],
     authenticate,
   )
 
-  // ── Token routes ──────────────────────────────────────────────────
-
-  // GET /api/multitable/api-tokens — list user's tokens
-  router.get('/api/multitable/api-tokens', async (req: Request, res: Response) => {
+  router.get(tokenListPaths, async (req: Request, res: Response) => {
     const userId = getUserId(req)
     if (!userId) {
       res.status(401).json({ ok: false, error: { code: 'UNAUTHENTICATED' } })
       return
     }
     const tokens = await apiTokenService.listTokens(userId)
-    res.json({ ok: true, data: tokens })
+    res.json({ ok: true, data: { tokens } })
   })
 
-  // POST /api/multitable/api-tokens — create token
-  router.post('/api/multitable/api-tokens', async (req: Request, res: Response) => {
+  router.post(tokenListPaths, async (req: Request, res: Response) => {
     const userId = getUserId(req)
     if (!userId) {
       res.status(401).json({ ok: false, error: { code: 'UNAUTHENTICATED' } })
@@ -100,22 +139,24 @@ export function apiTokensRouter(): Router {
         scopes: input.scopes as import('../multitable/api-tokens').ApiTokenScope[],
         expiresAt: input.expiresAt,
       })
-      res.status(201).json({ ok: true, data: result })
+      res.status(201).json({
+        ok: true,
+        data: {
+          token: result.token,
+          plaintext: result.plainTextToken,
+        },
+      })
     } catch (err) {
       if (err instanceof z.ZodError) {
         zodError(res, err)
         return
       }
       logger.error('Failed to create token', err instanceof Error ? err : undefined)
-      res.status(500).json({
-        ok: false,
-        error: { code: 'CREATE_FAILED', message: err instanceof Error ? err.message : 'Unknown error' },
-      })
+      serviceErrorResponse(res, err, 'create')
     }
   })
 
-  // DELETE /api/multitable/api-tokens/:id — revoke token
-  router.delete('/api/multitable/api-tokens/:id', async (req: Request, res: Response) => {
+  router.delete(tokenItemPaths, async (req: Request, res: Response) => {
     const userId = getUserId(req)
     if (!userId) {
       res.status(401).json({ ok: false, error: { code: 'UNAUTHENTICATED' } })
@@ -123,19 +164,14 @@ export function apiTokensRouter(): Router {
     }
     try {
       await apiTokenService.revokeToken(req.params.id, userId)
-      res.json({ ok: true })
+      res.status(204).end()
     } catch (err) {
       logger.error('Failed to revoke token', err instanceof Error ? err : undefined)
-      const status = (err instanceof Error && err.message === 'Token not found') ? 404 : 500
-      res.status(status).json({
-        ok: false,
-        error: { code: 'REVOKE_FAILED', message: err instanceof Error ? err.message : 'Unknown error' },
-      })
+      serviceErrorResponse(res, err, 'revoke')
     }
   })
 
-  // POST /api/multitable/api-tokens/:id/rotate — rotate token
-  router.post('/api/multitable/api-tokens/:id/rotate', async (req: Request, res: Response) => {
+  router.post(tokenRotatePaths, async (req: Request, res: Response) => {
     const userId = getUserId(req)
     if (!userId) {
       res.status(401).json({ ok: false, error: { code: 'UNAUTHENTICATED' } })
@@ -143,20 +179,19 @@ export function apiTokensRouter(): Router {
     }
     try {
       const result = await apiTokenService.rotateToken(req.params.id, userId)
-      res.json({ ok: true, data: result })
+      res.json({
+        ok: true,
+        data: {
+          token: result.token,
+          plaintext: result.plainTextToken,
+        },
+      })
     } catch (err) {
       logger.error('Failed to rotate token', err instanceof Error ? err : undefined)
-      const status = (err instanceof Error && err.message === 'Token not found') ? 404 : 500
-      res.status(status).json({
-        ok: false,
-        error: { code: 'ROTATE_FAILED', message: err instanceof Error ? err.message : 'Unknown error' },
-      })
+      serviceErrorResponse(res, err, 'rotate')
     }
   })
 
-  // ── Webhook routes ────────────────────────────────────────────────
-
-  // GET /api/multitable/webhooks — list webhooks
   router.get('/api/multitable/webhooks', async (req: Request, res: Response) => {
     const userId = getUserId(req)
     if (!userId) {
@@ -164,10 +199,9 @@ export function apiTokensRouter(): Router {
       return
     }
     const webhooks = await webhookService.listWebhooks(userId)
-    res.json({ ok: true, data: webhooks })
+    res.json({ ok: true, data: { webhooks } })
   })
 
-  // POST /api/multitable/webhooks — create webhook
   router.post('/api/multitable/webhooks', async (req: Request, res: Response) => {
     const userId = getUserId(req)
     if (!userId) {
@@ -189,14 +223,10 @@ export function apiTokensRouter(): Router {
         return
       }
       logger.error('Failed to create webhook', err instanceof Error ? err : undefined)
-      res.status(400).json({
-        ok: false,
-        error: { code: 'CREATE_FAILED', message: err instanceof Error ? err.message : 'Unknown error' },
-      })
+      serviceErrorResponse(res, err, 'create')
     }
   })
 
-  // PATCH /api/multitable/webhooks/:id — update webhook
   router.patch('/api/multitable/webhooks/:id', async (req: Request, res: Response) => {
     const userId = getUserId(req)
     if (!userId) {
@@ -219,15 +249,10 @@ export function apiTokensRouter(): Router {
         return
       }
       logger.error('Failed to update webhook', err instanceof Error ? err : undefined)
-      const status = (err instanceof Error && err.message === 'Webhook not found') ? 404 : 500
-      res.status(status).json({
-        ok: false,
-        error: { code: 'UPDATE_FAILED', message: err instanceof Error ? err.message : 'Unknown error' },
-      })
+      serviceErrorResponse(res, err, 'update')
     }
   })
 
-  // DELETE /api/multitable/webhooks/:id — delete webhook
   router.delete('/api/multitable/webhooks/:id', async (req: Request, res: Response) => {
     const userId = getUserId(req)
     if (!userId) {
@@ -236,36 +261,126 @@ export function apiTokensRouter(): Router {
     }
     try {
       await webhookService.deleteWebhook(req.params.id, userId)
-      res.json({ ok: true })
+      res.status(204).end()
     } catch (err) {
       logger.error('Failed to delete webhook', err instanceof Error ? err : undefined)
-      const status = (err instanceof Error && err.message === 'Webhook not found') ? 404 : 500
-      res.status(status).json({
-        ok: false,
-        error: { code: 'DELETE_FAILED', message: err instanceof Error ? err.message : 'Unknown error' },
-      })
+      serviceErrorResponse(res, err, 'delete')
     }
   })
 
-  // GET /api/multitable/webhooks/:id/deliveries — list recent deliveries
   router.get('/api/multitable/webhooks/:id/deliveries', async (req: Request, res: Response) => {
     const userId = getUserId(req)
     if (!userId) {
       res.status(401).json({ ok: false, error: { code: 'UNAUTHENTICATED' } })
       return
     }
-    const wh = await webhookService.getWebhookById(req.params.id)
-    if (!wh) {
+    const webhook = await webhookService.getWebhookById(req.params.id)
+    if (!webhook) {
       res.status(404).json({ ok: false, error: { code: 'NOT_FOUND' } })
       return
     }
-    if (wh.createdBy !== userId) {
+    if (webhook.createdBy !== userId) {
       res.status(403).json({ ok: false, error: { code: 'FORBIDDEN' } })
       return
     }
     const limit = Math.min(Math.max(Number(req.query.limit) || 50, 1), 200)
     const deliveries = await webhookService.listDeliveries(req.params.id, limit)
-    res.json({ ok: true, data: deliveries })
+    res.json({ ok: true, data: { deliveries } })
+  })
+
+  router.get('/api/multitable/dingtalk-groups', async (req: Request, res: Response) => {
+    const userId = getUserId(req)
+    if (!userId) {
+      res.status(401).json({ ok: false, error: { code: 'UNAUTHENTICATED' } })
+      return
+    }
+    const destinations = await dingTalkGroupDestinationService.listDestinations(userId)
+    res.json({ ok: true, data: { destinations } })
+  })
+
+  router.post('/api/multitable/dingtalk-groups', async (req: Request, res: Response) => {
+    const userId = getUserId(req)
+    if (!userId) {
+      res.status(401).json({ ok: false, error: { code: 'UNAUTHENTICATED' } })
+      return
+    }
+    try {
+      const input = CreateDingTalkGroupSchema.parse(req.body)
+      const destination = await dingTalkGroupDestinationService.createDestination(userId, {
+        name: input.name,
+        webhookUrl: input.webhookUrl,
+        secret: input.secret,
+        enabled: input.enabled,
+      })
+      res.status(201).json({ ok: true, data: destination })
+    } catch (err) {
+      if (err instanceof z.ZodError) {
+        zodError(res, err)
+        return
+      }
+      logger.error('Failed to create DingTalk group destination', err instanceof Error ? err : undefined)
+      serviceErrorResponse(res, err, 'create')
+    }
+  })
+
+  router.patch('/api/multitable/dingtalk-groups/:id', async (req: Request, res: Response) => {
+    const userId = getUserId(req)
+    if (!userId) {
+      res.status(401).json({ ok: false, error: { code: 'UNAUTHENTICATED' } })
+      return
+    }
+    try {
+      const input = UpdateDingTalkGroupSchema.parse(req.body)
+      const destination = await dingTalkGroupDestinationService.updateDestination(req.params.id, userId, {
+        name: input.name,
+        webhookUrl: input.webhookUrl,
+        secret: input.secret,
+        enabled: input.enabled,
+      })
+      res.json({ ok: true, data: destination })
+    } catch (err) {
+      if (err instanceof z.ZodError) {
+        zodError(res, err)
+        return
+      }
+      logger.error('Failed to update DingTalk group destination', err instanceof Error ? err : undefined)
+      serviceErrorResponse(res, err, 'update')
+    }
+  })
+
+  router.delete('/api/multitable/dingtalk-groups/:id', async (req: Request, res: Response) => {
+    const userId = getUserId(req)
+    if (!userId) {
+      res.status(401).json({ ok: false, error: { code: 'UNAUTHENTICATED' } })
+      return
+    }
+    try {
+      await dingTalkGroupDestinationService.deleteDestination(req.params.id, userId)
+      res.status(204).end()
+    } catch (err) {
+      logger.error('Failed to delete DingTalk group destination', err instanceof Error ? err : undefined)
+      serviceErrorResponse(res, err, 'delete')
+    }
+  })
+
+  router.post('/api/multitable/dingtalk-groups/:id/test-send', async (req: Request, res: Response) => {
+    const userId = getUserId(req)
+    if (!userId) {
+      res.status(401).json({ ok: false, error: { code: 'UNAUTHENTICATED' } })
+      return
+    }
+    try {
+      const input = DingTalkGroupTestSendSchema.parse(req.body ?? {})
+      await dingTalkGroupDestinationService.testSend(req.params.id, userId, input)
+      res.status(204).end()
+    } catch (err) {
+      if (err instanceof z.ZodError) {
+        zodError(res, err)
+        return
+      }
+      logger.error('Failed to test DingTalk group destination', err instanceof Error ? err : undefined)
+      serviceErrorResponse(res, err, 'test_send')
+    }
   })
 
   return router
