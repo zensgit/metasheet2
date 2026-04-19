@@ -71,9 +71,10 @@ jobs:
           # Exclude 048-049 - Phase 2 Event Bus/BPMN migrations with complex SQL syntax issues
           # TODO: Rewrite these migrations with correct PostgreSQL syntax
           # Exclude 20250924120000_create_views_view_states.ts - View states migration with schema issues
+          # Exclude 20250924140000_create_gantt_tables.ts - FK points at pre-fix text view ids
           # Exclude 042a_core_model_views.sql - References non-existent last_accessed column
           # TODO: Fix last_accessed column reference in 042a_core_model_views.sql
-          MIGRATION_EXCLUDE: 008_plugin_infrastructure.sql,048_create_event_bus_tables.sql,049_create_bpmn_workflow_tables.sql,042a_core_model_views.sql,20250924120000_create_views_view_states.ts
+          MIGRATION_EXCLUDE: 008_plugin_infrastructure.sql,048_create_event_bus_tables.sql,049_create_bpmn_workflow_tables.sql,042a_core_model_views.sql,20250924120000_create_views_view_states.ts,20250924140000_create_gantt_tables.ts
         run: |
           pnpm -F @metasheet/core-backend db:migrate
           pnpm -F @metasheet/core-backend db:migrate

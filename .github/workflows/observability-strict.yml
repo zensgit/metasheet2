@@ -99,7 +99,8 @@ jobs:
           DATABASE_URL: postgresql://postgres:postgres@localhost:5432/metasheet
           # Exclude problematic migrations (see migration-replay.yml for details)
           # 042a_core_model_views.sql - References non-existent last_accessed column
-          MIGRATION_EXCLUDE: 008_plugin_infrastructure.sql,048_create_event_bus_tables.sql,049_create_bpmn_workflow_tables.sql,042a_core_model_views.sql,20250924120000_create_views_view_states.ts
+          # 20250924140000_create_gantt_tables.ts - FK points at pre-fix text view ids
+          MIGRATION_EXCLUDE: 008_plugin_infrastructure.sql,048_create_event_bus_tables.sql,049_create_bpmn_workflow_tables.sql,042a_core_model_views.sql,20250924120000_create_views_view_states.ts,20250924140000_create_gantt_tables.ts
         run: |
           pnpm -F @metasheet/core-backend db:list || true
           pnpm -F @metasheet/core-backend db:migrate

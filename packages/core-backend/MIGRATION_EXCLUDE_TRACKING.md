@@ -4,15 +4,29 @@
 
 This document tracks database migrations that are currently excluded from automated replay testing. These migrations require manual review and fixing before they can be re-enabled.
 
-**Current Exclude Count**: 3 files (centralized in CI via composite action)
+**Current Exclude Count**: 6 files
 
-**Default Exclude in CI**: `008_plugin_infrastructure.sql, 048_create_event_bus_tables.sql, 049_create_bpmn_workflow_tables.sql`
+**Default Exclude in CI**: `008_plugin_infrastructure.sql, 048_create_event_bus_tables.sql, 049_create_bpmn_workflow_tables.sql, 042a_core_model_views.sql, 20250924120000_create_views_view_states.ts, 20250924140000_create_gantt_tables.ts`
 
-**Last Updated**: 2025-11-07
+**Last Updated**: 2026-04-19
 
 ---
 
 ## Excluded Migrations
+
+### Current CI Exclusions
+
+#### `042a_core_model_views.sql`
+**Status**: ❌ Excluded
+**Issue**: References non-existent `last_accessed` column during replay paths.
+
+#### `20250924120000_create_views_view_states.ts`
+**Status**: ❌ Excluded
+**Issue**: Creates view-state foreign keys against pre-fix `text` view ids, which fails once replay paths rebuild the newer UUID-based schema.
+
+#### `20250924140000_create_gantt_tables.ts`
+**Status**: ❌ Excluded
+**Issue**: Creates gantt foreign keys against the same pre-fix `text` view ids and fails with `uuid` vs `text` FK incompatibility during replay paths.
 
 ### Pre-Existing Issues (archived)
 
