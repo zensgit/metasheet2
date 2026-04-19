@@ -4,9 +4,9 @@
 
 This document tracks database migrations that are currently excluded from automated replay testing. These migrations require manual review and fixing before they can be re-enabled.
 
-**Current Exclude Count**: 6 files
+**Current Exclude Count**: 7 files
 
-**Default Exclude in CI**: `008_plugin_infrastructure.sql, 048_create_event_bus_tables.sql, 049_create_bpmn_workflow_tables.sql, 042a_core_model_views.sql, 20250924120000_create_views_view_states.ts, 20250924140000_create_gantt_tables.ts`
+**Default Exclude in CI**: `008_plugin_infrastructure.sql, 048_create_event_bus_tables.sql, 049_create_bpmn_workflow_tables.sql, 042a_core_model_views.sql, 20250924120000_create_views_view_states.ts, 20250924140000_create_gantt_tables.ts, 20250924200000_create_event_bus_tables.ts`
 
 **Last Updated**: 2026-04-19
 
@@ -27,6 +27,10 @@ This document tracks database migrations that are currently excluded from automa
 #### `20250924140000_create_gantt_tables.ts`
 **Status**: ❌ Excluded
 **Issue**: Creates gantt foreign keys against the same pre-fix `text` view ids and fails with `uuid` vs `text` FK incompatibility during replay paths.
+
+#### `20250924200000_create_event_bus_tables.ts`
+**Status**: ❌ Excluded
+**Issue**: Recreates runtime event bus tables that already exist through the earlier event bus SQL path, causing replay environments to fail with duplicate `event_types` relations.
 
 ### Pre-Existing Issues (archived)
 

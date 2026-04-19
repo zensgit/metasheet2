@@ -12,7 +12,7 @@ This slice only changed workflow configuration and migration-exclusion tracking 
 ## Commands Run
 
 ```bash
-rg -n "MIGRATION_EXCLUDE: .*20250924140000_create_gantt_tables.ts" .github/workflows
+rg -n "MIGRATION_EXCLUDE: .*20250924200000_create_event_bus_tables.ts" .github/workflows
 pnpm --filter @metasheet/core-backend exec vitest run tests/unit/migration-provider.test.ts tests/unit/migrations.rollback.test.ts tests/unit/db.test.ts --watch=false
 pnpm --filter @metasheet/core-backend build
 MIGRATION_EXCLUDE='056_add_users_must_change_password.sql,zzzz20260501100000_create_yjs_state_tables.ts' \
@@ -36,5 +36,5 @@ pnpm exec node --input-type=module -e "import path from 'node:path'; import { pa
 ## Conclusion
 
 - The workflow layer is now aligned with the migration-provider runtime behavior.
-- The specific replay-only failures seen in `migration-replay`, `observability-e2e`, and `plugin-tests` are covered by the updated exclusion list.
+- The specific replay-only failures seen in `migration-replay`, `observability-e2e`, `safety-guard-e2e`, and `plugin-tests` are covered by the updated exclusion list.
 - No additional remote deployment or schema change was required for this hardening slice.
