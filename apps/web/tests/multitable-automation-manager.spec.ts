@@ -28,6 +28,18 @@ function mockClient(rules: AutomationRule[] = []) {
 
   const fetchFn = vi.fn(async (url: string, init?: RequestInit) => {
     const method = init?.method ?? 'GET'
+    if (method === 'GET' && url.includes('/dingtalk-groups')) {
+      return ok({
+        destinations: [{
+          id: 'dt_1',
+          name: 'Ops Group',
+          webhookUrl: 'https://oapi.dingtalk.com/robot/send?access_token=test',
+          enabled: true,
+          createdBy: 'user_1',
+          createdAt: '2026-04-01T00:00:00Z',
+        }],
+      })
+    }
     if (method === 'GET' && url.includes('/automations')) {
       return ok({ rules })
     }
@@ -59,6 +71,11 @@ const fields = [
   { id: 'fld_2', name: 'Name', type: 'string' },
 ]
 
+const views = [
+  { id: 'view_grid', sheetId: 'sheet_1', name: 'Grid', type: 'grid' },
+  { id: 'view_form', sheetId: 'sheet_1', name: 'Public Form', type: 'form' },
+]
+
 describe('MetaAutomationManager', () => {
   afterEach(() => {
     document.body.innerHTML = ''
@@ -67,7 +84,7 @@ describe('MetaAutomationManager', () => {
 
   it('renders rule list when visible', async () => {
     const { client } = mockClient([fakeRule()])
-    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, client })
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
     await flushPromises()
 
     const cards = container.querySelectorAll('[data-automation-rule]')
@@ -77,7 +94,7 @@ describe('MetaAutomationManager', () => {
 
   it('shows empty state when no rules', async () => {
     const { client } = mockClient([])
-    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, client })
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
     await flushPromises()
 
     const el = container.querySelector('[data-automation-empty]')
@@ -88,7 +105,7 @@ describe('MetaAutomationManager', () => {
   it('creates rule via form', async () => {
     const { client, fetchFn } = mockClient([])
     const updatedSpy = vi.fn()
-    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, client, onUpdated: updatedSpy })
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client, onUpdated: updatedSpy })
     await flushPromises()
 
     // Open form
@@ -123,7 +140,7 @@ describe('MetaAutomationManager', () => {
 
   it('toggles rule enabled/disabled', async () => {
     const { client, fetchFn } = mockClient([fakeRule()])
-    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, client })
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
     await flushPromises()
 
     const toggle = container.querySelector('[data-automation-toggle]') as HTMLInputElement
@@ -139,7 +156,7 @@ describe('MetaAutomationManager', () => {
 
   it('deletes rule', async () => {
     const { client, fetchFn } = mockClient([fakeRule()])
-    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, client })
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
     await flushPromises()
 
     const deleteBtn = container.querySelector('[data-automation-delete]') as HTMLButtonElement
@@ -153,7 +170,7 @@ describe('MetaAutomationManager', () => {
 
   it('shows field picker for field.changed trigger', async () => {
     const { client } = mockClient([])
-    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, client })
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
     await flushPromises()
 
     // Open form
@@ -178,7 +195,7 @@ describe('MetaAutomationManager', () => {
 
   it('shows appropriate action config for each action type', async () => {
     const { client } = mockClient([])
-    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, client })
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
     await flushPromises()
 
     // Open form
@@ -199,5 +216,61 @@ describe('MetaAutomationManager', () => {
     expect(container.querySelector('[data-automation-field="notifyMessage"]')).toBeNull()
     expect(container.querySelector('[data-automation-field="targetFieldId"]')).not.toBeNull()
     expect(container.querySelector('[data-automation-field="targetValue"]')).not.toBeNull()
+  })
+
+  it('creates DingTalk group automation via form', async () => {
+    const { client, fetchFn } = mockClient([])
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
+    await flushPromises()
+
+    const addBtn = container.querySelector('.meta-automation__btn-add') as HTMLButtonElement
+    addBtn.click()
+    await nextTick()
+
+    const nameInput = container.querySelector('[data-automation-field="name"]') as HTMLInputElement
+    nameInput.value = 'DingTalk notify'
+    nameInput.dispatchEvent(new Event('input', { bubbles: true }))
+
+    const actionSelect = container.querySelector('[data-automation-field="actionType"]') as HTMLSelectElement
+    actionSelect.value = 'send_dingtalk_group_message'
+    actionSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushPromises()
+
+    const destinationSelect = container.querySelector('[data-automation-field="dingtalkDestinationId"]') as HTMLSelectElement
+    destinationSelect.value = 'dt_1'
+    destinationSelect.dispatchEvent(new Event('change', { bubbles: true }))
+
+    const titleInput = container.querySelector('[data-automation-field="dingtalkTitleTemplate"]') as HTMLInputElement
+    titleInput.value = 'Ticket {{recordId}}'
+    titleInput.dispatchEvent(new Event('input', { bubbles: true }))
+
+    const bodyInput = container.querySelector('[data-automation-field="dingtalkBodyTemplate"]') as HTMLTextAreaElement
+    bodyInput.value = 'Please fill {{record.status}}'
+    bodyInput.dispatchEvent(new Event('input', { bubbles: true }))
+
+    const publicFormSelect = container.querySelector('[data-automation-field="publicFormViewId"]') as HTMLSelectElement
+    publicFormSelect.value = 'view_form'
+    publicFormSelect.dispatchEvent(new Event('change', { bubbles: true }))
+
+    const internalViewSelect = container.querySelector('[data-automation-field="internalViewId"]') as HTMLSelectElement
+    internalViewSelect.value = 'view_grid'
+    internalViewSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushPromises()
+
+    const saveBtn = container.querySelector('.meta-automation__btn--primary') as HTMLButtonElement
+    saveBtn.click()
+    await flushPromises()
+
+    const postCalls = fetchFn.mock.calls.filter(([, init]: [string, RequestInit | undefined]) => init?.method === 'POST')
+    expect(postCalls.length).toBe(1)
+    const body = JSON.parse(postCalls[0][1]?.body as string)
+    expect(body.actionType).toBe('send_dingtalk_group_message')
+    expect(body.actionConfig).toEqual({
+      destinationId: 'dt_1',
+      titleTemplate: 'Ticket {{recordId}}',
+      bodyTemplate: 'Please fill {{record.status}}',
+      publicFormViewId: 'view_form',
+      internalViewId: 'view_grid',
+    })
   })
 })

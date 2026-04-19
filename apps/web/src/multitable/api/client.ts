@@ -56,6 +56,9 @@ import type {
   Webhook,
   WebhookCreateInput,
   WebhookDelivery,
+  DingTalkGroupDestination,
+  DingTalkGroupDelivery,
+  DingTalkGroupDestinationInput,
 } from '../types'
 import { apiFetch } from '../../utils/api'
 
@@ -1079,6 +1082,53 @@ export class MultitableApiClient {
   async getWebhookDeliveries(id: string): Promise<WebhookDelivery[]> {
     const res = await this.fetch(`/api/multitable/webhooks/${encodeURIComponent(id)}/deliveries`)
     const data = await parseJson<{ deliveries: WebhookDelivery[] }>(res)
+    return data.deliveries ?? []
+  }
+
+  // --- DingTalk Group Destinations ---
+  async listDingTalkGroups(): Promise<DingTalkGroupDestination[]> {
+    const res = await this.fetch('/api/multitable/dingtalk-groups')
+    const data = await parseJson<{ destinations: DingTalkGroupDestination[] }>(res)
+    return data.destinations ?? []
+  }
+
+  async createDingTalkGroup(input: DingTalkGroupDestinationInput): Promise<DingTalkGroupDestination> {
+    const res = await this.fetch('/api/multitable/dingtalk-groups', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(input),
+    })
+    return parseJson(res)
+  }
+
+  async updateDingTalkGroup(id: string, input: Partial<DingTalkGroupDestinationInput>): Promise<DingTalkGroupDestination> {
+    const res = await this.fetch(`/api/multitable/dingtalk-groups/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(input),
+    })
+    return parseJson(res)
+  }
+
+  async deleteDingTalkGroup(id: string): Promise<void> {
+    const res = await this.fetch(`/api/multitable/dingtalk-groups/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+    })
+    return parseJson(res)
+  }
+
+  async testDingTalkGroup(id: string, input?: { subject?: string; content?: string }): Promise<void> {
+    const res = await this.fetch(`/api/multitable/dingtalk-groups/${encodeURIComponent(id)}/test-send`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(input ?? {}),
+    })
+    return parseJson(res)
+  }
+
+  async getDingTalkGroupDeliveries(id: string): Promise<DingTalkGroupDelivery[]> {
+    const res = await this.fetch(`/api/multitable/dingtalk-groups/${encodeURIComponent(id)}/deliveries`)
+    const data = await parseJson<{ deliveries: DingTalkGroupDelivery[] }>(res)
     return data.deliveries ?? []
   }
 

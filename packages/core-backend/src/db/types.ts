@@ -112,6 +112,8 @@ export interface Database {
   multitable_api_tokens: MultitableApiTokensTable
   multitable_webhooks: MultitableWebhooksTable
   multitable_webhook_deliveries: MultitableWebhookDeliveriesTable
+  dingtalk_group_destinations: DingTalkGroupDestinationsTable
+  dingtalk_group_deliveries: DingTalkGroupDeliveriesTable
 }
 
 export interface SnapshotsTable {
@@ -1295,4 +1297,35 @@ export interface MultitableWebhookDeliveriesTable {
   created_at: CreatedAt
   delivered_at: NullableTimestamp
   next_retry_at: NullableTimestamp
+}
+
+export interface DingTalkGroupDestinationsTable {
+  id: string
+  name: string
+  webhook_url: string
+  secret: string | null
+  enabled: boolean
+  created_by: string
+  created_at: CreatedAt
+  updated_at: NullableTimestamp
+  last_tested_at: NullableTimestamp
+  last_test_status: string | null
+  last_test_error: string | null
+}
+
+export interface DingTalkGroupDeliveriesTable {
+  id: string
+  destination_id: string
+  source_type: string
+  subject: string
+  content: string
+  success: boolean
+  http_status: number | null
+  response_body: string | null
+  error_message: string | null
+  automation_rule_id: string | null
+  record_id: string | null
+  initiated_by: string | null
+  created_at: CreatedAt
+  delivered_at: NullableTimestamp
 }

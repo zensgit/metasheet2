@@ -585,6 +585,7 @@ export type AutomationActionType =
   | 'create_record'
   | 'send_webhook'
   | 'send_notification'
+  | 'send_dingtalk_group_message'
   | 'lock_record'
   // Legacy aliases
   | 'notify'
@@ -778,6 +779,45 @@ export interface WebhookDelivery {
   success: boolean
   retryCount: number
   timestamp: string
+}
+
+// --- DingTalk Group Destinations ---
+export interface DingTalkGroupDestination {
+  id: string
+  name: string
+  webhookUrl: string
+  secret?: string
+  enabled: boolean
+  createdBy: string
+  createdAt: string
+  updatedAt?: string
+  lastTestedAt?: string
+  lastTestStatus?: 'success' | 'failed'
+  lastTestError?: string
+}
+
+export interface DingTalkGroupDestinationInput {
+  name: string
+  webhookUrl: string
+  secret?: string
+  enabled?: boolean
+}
+
+export interface DingTalkGroupDelivery {
+  id: string
+  destinationId: string
+  sourceType: 'manual_test' | 'automation'
+  subject: string
+  content: string
+  success: boolean
+  httpStatus?: number
+  responseBody?: string
+  errorMessage?: string
+  automationRuleId?: string
+  recordId?: string
+  initiatedBy?: string
+  createdAt: string
+  deliveredAt?: string
 }
 
 // --- Field Validation ---

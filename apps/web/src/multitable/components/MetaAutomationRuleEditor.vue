@@ -124,11 +124,12 @@
           >
             <div class="meta-rule-editor__action-header">
               <span class="meta-rule-editor__action-num">{{ idx + 1 }}.</span>
-              <select v-model="action.type" class="meta-rule-editor__select">
+              <select v-model="action.type" class="meta-rule-editor__select" @change="onDraftActionTypeChange(action)">
                 <option value="update_record">Update record</option>
                 <option value="create_record">Create record</option>
                 <option value="send_webhook">Send webhook</option>
                 <option value="send_notification">Send notification</option>
+                <option value="send_dingtalk_group_message">Send DingTalk group message</option>
                 <option value="lock_record">Lock record</option>
               </select>
               <div class="meta-rule-editor__action-btns">
@@ -183,6 +184,56 @@
               <textarea v-model="action.config.message" class="meta-rule-editor__textarea" placeholder="Notification message" rows="3"></textarea>
             </div>
 
+            <!-- send_dingtalk_group_message config -->
+            <div v-if="action.type === 'send_dingtalk_group_message'" class="meta-rule-editor__action-config">
+              <label class="meta-rule-editor__label">DingTalk group</label>
+              <select
+                v-model="action.config.destinationId"
+                class="meta-rule-editor__select"
+                data-field="dingtalkDestinationId"
+              >
+                <option value="">-- select DingTalk group --</option>
+                <option v-for="destination in dingTalkDestinations" :key="destination.id" :value="destination.id">
+                  {{ destination.name }}
+                </option>
+              </select>
+              <div v-if="dingTalkDestinationsError" class="meta-rule-editor__hint">{{ dingTalkDestinationsError }}</div>
+              <label class="meta-rule-editor__label">Title template</label>
+              <input
+                v-model="action.config.titleTemplate"
+                class="meta-rule-editor__input"
+                type="text"
+                placeholder="例如：{{record.title}} 待处理"
+                data-field="dingtalkTitleTemplate"
+              />
+              <label class="meta-rule-editor__label">Body template</label>
+              <textarea
+                v-model="action.config.bodyTemplate"
+                class="meta-rule-editor__textarea"
+                rows="4"
+                placeholder="支持 {{record.xxx}}、{{recordId}}、{{sheetId}}、{{actorId}}"
+                data-field="dingtalkBodyTemplate"
+              ></textarea>
+              <label class="meta-rule-editor__label">Public form view (optional)</label>
+              <select
+                v-model="action.config.publicFormViewId"
+                class="meta-rule-editor__select"
+                data-field="publicFormViewId"
+              >
+                <option value="">-- no public form link --</option>
+                <option v-for="view in formViews" :key="view.id" :value="view.id">{{ view.name }}</option>
+              </select>
+              <label class="meta-rule-editor__label">Internal processing view (optional)</label>
+              <select
+                v-model="action.config.internalViewId"
+                class="meta-rule-editor__select"
+                data-field="internalViewId"
+              >
+                <option value="">-- no internal link --</option>
+                <option v-for="view in internalViews" :key="view.id" :value="view.id">{{ view.name }}</option>
+              </select>
+            </div>
+
             <!-- lock_record config -->
             <div v-if="action.type === 'lock_record'" class="meta-rule-editor__action-config">
               <label class="meta-rule-editor__toggle-label">
@@ -215,6 +266,7 @@
 
 <script setup lang="ts">
 import { ref, computed, watch } from 'vue'
+import type { MultitableApiClient } from '../api/client'
 import type {
   AutomationRule,
   AutomationTriggerType,
@@ -222,6 +274,8 @@ import type {
   ConditionOperator,
   AutomationAction,
   AutomationCondition,
+  DingTalkGroupDestination,
+  MetaView,
 } from '../types'
 
 interface FieldPair {
@@ -237,6 +291,11 @@ type DraftActionConfig = Record<string, unknown> & {
   method?: string
   userId?: string
   message?: string
+  destinationId?: string
+  titleTemplate?: string
+  bodyTemplate?: string
+  publicFormViewId?: string
+  internalViewId?: string
   locked?: boolean
 }
 
@@ -258,6 +317,8 @@ const props = defineProps<{
   rule?: AutomationRule
   visible: boolean
   fields: Array<{ id: string; name: string; type: string }>
+  client?: MultitableApiClient
+  views?: MetaView[]
 }>()
 
 const emit = defineEmits<{
@@ -269,6 +330,11 @@ const emit = defineEmits<{
 const error = ref('')
 const saving = ref(false)
 const cronPreset = ref('0 * * * *')
+const dingTalkDestinations = ref<DingTalkGroupDestination[]>([])
+const dingTalkDestinationsError = ref('')
+
+const formViews = computed(() => (props.views ?? []).filter((view) => view.type === 'form'))
+const internalViews = computed(() => props.views ?? [])
 
 const conditionOperators: Array<{ value: ConditionOperator; label: string }> = [
   { value: 'equals', label: 'Equals' },
@@ -293,7 +359,7 @@ function emptyDraft(): Draft {
     triggerType: 'record.created',
     triggerConfig: {},
     conditions: { conjunction: 'AND', conditions: [] },
-    actions: [{ type: 'update_record', config: { fieldUpdates: [] } }],
+    actions: [{ type: 'update_record', config: defaultConfigForActionType('update_record') }],
   }
 }
 
@@ -315,11 +381,22 @@ const draft = ref<Draft>(emptyDraft())
 
 watch(
   () => props.visible,
-  (v) => {
+  async (v) => {
     if (v) {
       draft.value = props.rule ? draftFromRule(props.rule) : emptyDraft()
       error.value = ''
       saving.value = false
+      dingTalkDestinationsError.value = ''
+      if (props.client) {
+        try {
+          dingTalkDestinations.value = await props.client.listDingTalkGroups()
+        } catch (err) {
+          dingTalkDestinations.value = []
+          dingTalkDestinationsError.value = err instanceof Error ? err.message : 'Failed to load DingTalk groups'
+        }
+      } else {
+        dingTalkDestinations.value = []
+      }
     }
   },
   { immediate: true },
@@ -328,6 +405,14 @@ watch(
 const canSave = computed(() => {
   if (!draft.value.name.trim()) return false
   if (draft.value.actions.length < 1) return false
+  for (const action of draft.value.actions) {
+    if (action.type === 'send_dingtalk_group_message') {
+      const destinationId = typeof action.config.destinationId === 'string' ? action.config.destinationId.trim() : ''
+      const titleTemplate = typeof action.config.titleTemplate === 'string' ? action.config.titleTemplate.trim() : ''
+      const bodyTemplate = typeof action.config.bodyTemplate === 'string' ? action.config.bodyTemplate.trim() : ''
+      if (!destinationId || !titleTemplate || !bodyTemplate) return false
+    }
+  }
   return true
 })
 
@@ -341,7 +426,36 @@ function removeCondition(idx: number) {
 
 function addAction() {
   if (draft.value.actions.length >= 3) return
-  draft.value.actions.push({ type: 'update_record', config: { fieldUpdates: [] } })
+  draft.value.actions.push({ type: 'update_record', config: defaultConfigForActionType('update_record') })
+}
+
+function defaultConfigForActionType(type: AutomationActionType): DraftActionConfig {
+  switch (type) {
+    case 'update_record':
+      return { fieldUpdates: [] }
+    case 'create_record':
+      return { fieldValues: [] }
+    case 'send_webhook':
+      return { method: 'POST' }
+    case 'send_notification':
+      return { userId: '', message: '' }
+    case 'send_dingtalk_group_message':
+      return {
+        destinationId: '',
+        titleTemplate: '',
+        bodyTemplate: '',
+        publicFormViewId: '',
+        internalViewId: '',
+      }
+    case 'lock_record':
+      return { locked: true }
+    default:
+      return {}
+  }
+}
+
+function onDraftActionTypeChange(action: DraftAction) {
+  action.config = defaultConfigForActionType(action.type)
 }
 
 function removeAction(idx: number) {
