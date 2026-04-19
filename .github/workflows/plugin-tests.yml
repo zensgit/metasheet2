@@ -95,7 +95,7 @@ jobs:
       - name: Run DB migrations
         env:
           DATABASE_URL: postgresql://postgres@localhost:5432/metasheet_test
-          MIGRATION_EXCLUDE: 008_plugin_infrastructure.sql,048_create_event_bus_tables.sql,049_create_bpmn_workflow_tables.sql,042a_core_model_views.sql,20250924120000_create_views_view_states.ts,20250924140000_create_gantt_tables.ts,20250924200000_create_event_bus_tables.ts,20250925_create_view_tables.sql
+          MIGRATION_EXCLUDE: 008_plugin_infrastructure.sql,048_create_event_bus_tables.sql,049_create_bpmn_workflow_tables.sql,042a_core_model_views.sql,20250924120000_create_views_view_states.ts,20250924140000_create_gantt_tables.ts,20250924200000_create_event_bus_tables.ts,20250925_create_view_tables.sql,20251117000001_add_snapshot_labels.ts
         run: |
           pnpm --filter @metasheet/core-backend db:migrate
 
@@ -227,7 +227,7 @@ jobs:
       - name: Run DB migrations
         env:
           DATABASE_URL: postgresql://postgres@localhost:5432/metasheet_test
-          MIGRATION_EXCLUDE: 008_plugin_infrastructure.sql,048_create_event_bus_tables.sql,049_create_bpmn_workflow_tables.sql,042a_core_model_views.sql,20250924120000_create_views_view_states.ts,20250924140000_create_gantt_tables.ts,20250924200000_create_event_bus_tables.ts,20250925_create_view_tables.sql
+          MIGRATION_EXCLUDE: 008_plugin_infrastructure.sql,048_create_event_bus_tables.sql,049_create_bpmn_workflow_tables.sql,042a_core_model_views.sql,20250924120000_create_views_view_states.ts,20250924140000_create_gantt_tables.ts,20250924200000_create_event_bus_tables.ts,20250925_create_view_tables.sql,20251117000001_add_snapshot_labels.ts
         run: |
           pnpm --filter @metasheet/core-backend db:migrate
 
