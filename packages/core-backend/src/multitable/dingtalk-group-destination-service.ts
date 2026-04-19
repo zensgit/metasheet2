@@ -18,6 +18,7 @@ import type {
 } from './dingtalk-group-destinations'
 
 const logger = new Logger('DingTalkGroupDestinationService')
+const DINGTALK_REQUEST_TIMEOUT_MS = 5_000
 
 function generateId(): string {
   return randomBytes(16).toString('hex')
@@ -254,14 +255,22 @@ export class DingTalkGroupDestinationService {
     let responseBody: string | null = null
 
     try {
-      const response = await this.fetchFn(signedUrl, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'User-Agent': 'MetaSheet-DingTalk-Destination-Test/1.0',
-        },
-        body: JSON.stringify(payload),
-      })
+      const controller = new AbortController()
+      const timeout = setTimeout(() => controller.abort(), DINGTALK_REQUEST_TIMEOUT_MS)
+      let response: Response
+      try {
+        response = await this.fetchFn(signedUrl, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'User-Agent': 'MetaSheet-DingTalk-Destination-Test/1.0',
+          },
+          body: JSON.stringify(payload),
+          signal: controller.signal,
+        })
+      } finally {
+        clearTimeout(timeout)
+      }
 
       const parsed = await readJsonSafely(response)
       responseStatus = response.status

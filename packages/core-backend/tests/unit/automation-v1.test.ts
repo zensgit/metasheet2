@@ -440,6 +440,7 @@ describe('AutomationExecutor', () => {
 
     const [url, init] = fetchFn.mock.calls[0] as [string, RequestInit]
     expect(url).toContain('https://oapi.dingtalk.com/robot/send?access_token=test')
+    expect(init.signal).toBeTruthy()
     const payload = JSON.parse(init.body as string)
     expect(payload.markdown.title).toBe('Record Incident ready')
     expect(payload.markdown.text).toContain('Status: open')

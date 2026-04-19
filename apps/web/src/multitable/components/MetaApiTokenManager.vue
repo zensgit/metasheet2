@@ -248,7 +248,7 @@
               </span>
             </div>
             <div class="meta-api-mgr__card-meta">
-              <span>Webhook: {{ group.webhookUrl }}</span>
+              <span>Webhook: {{ maskDingTalkWebhookUrl(group.webhookUrl) }}</span>
               <span>Created: {{ formatDate(group.createdAt) }}</span>
               <span v-if="group.lastTestedAt">Last test: {{ formatDate(group.lastTestedAt) }}</span>
               <span v-if="group.lastTestStatus" :data-dingtalk-group-test-status="group.lastTestStatus">
@@ -388,6 +388,23 @@ function formatDate(iso: string): string {
     return new Date(iso).toLocaleDateString()
   } catch {
     return iso
+  }
+}
+
+function maskDingTalkWebhookUrl(url: string): string {
+  try {
+    const parsed = new URL(url)
+    for (const key of ['access_token', 'timestamp', 'sign']) {
+      if (parsed.searchParams.has(key)) {
+        parsed.searchParams.set(key, '***')
+      }
+    }
+    if (parsed.password) {
+      parsed.password = '***'
+    }
+    return parsed.toString()
+  } catch {
+    return String(url || '').replace(/([?&](?:access_token|timestamp|sign)=)[^&]+/gi, '$1***')
   }
 }
 

@@ -640,17 +640,25 @@ export class AutomationExecutor {
     let responseBody: string | null = null
 
     try {
-      const response = await (this.deps.fetchFn ?? globalThis.fetch)(
-        buildSignedDingTalkWebhookUrl(destination.webhook_url, destination.secret ?? undefined),
-        {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'User-Agent': 'MetaSheet-Automation-DingTalk/1.0',
+      const controller = new AbortController()
+      const timeout = setTimeout(() => controller.abort(), WEBHOOK_TIMEOUT_MS)
+      let response: Response
+      try {
+        response = await (this.deps.fetchFn ?? globalThis.fetch)(
+          buildSignedDingTalkWebhookUrl(destination.webhook_url, destination.secret ?? undefined),
+          {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'User-Agent': 'MetaSheet-Automation-DingTalk/1.0',
+            },
+            body: JSON.stringify(buildDingTalkMarkdown(renderedTitle, bodyWithLinks)),
+            signal: controller.signal,
           },
-          body: JSON.stringify(buildDingTalkMarkdown(renderedTitle, bodyWithLinks)),
-        },
-      )
+        )
+      } finally {
+        clearTimeout(timeout)
+      }
       const parsed = await readJsonSafely(response)
       responseStatus = response.status
       responseBody = parsed ? JSON.stringify(parsed) : response.statusText || null

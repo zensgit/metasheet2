@@ -416,6 +416,23 @@ describe('MetaApiTokenManager', () => {
     expect(cards.length).toBe(1)
   })
 
+  it('masks DingTalk webhook access token in card display', async () => {
+    const { client } = mockClient([], [], [], [fakeDingTalkGroup({
+      webhookUrl: 'https://oapi.dingtalk.com/robot/send?access_token=super-secret-token',
+    })])
+    mount({ visible: true, client })
+    await flushPromises()
+
+    const dingTalkTab = document.querySelectorAll('[role="tab"]')[2] as HTMLButtonElement
+    dingTalkTab.click()
+    await flushPromises()
+
+    const card = document.querySelector('[data-dingtalk-group-id]') as HTMLElement
+    const text = card.textContent ?? ''
+    expect(text).toContain('access_token=***')
+    expect(text).not.toContain('super-secret-token')
+  })
+
   it('creates a DingTalk group destination', async () => {
     const { client, fetchFn } = mockClient()
     mount({ visible: true, client })

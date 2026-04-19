@@ -180,6 +180,8 @@ describe('DingTalkGroupDestinationService', () => {
     await expect(service.testSend('dt_1', 'user_1', {})).resolves.toEqual({ ok: true })
 
     expect(fetchFn).toHaveBeenCalledTimes(1)
+    const fetchInit = fetchFn.mock.calls[0]?.[1] as RequestInit | undefined
+    expect(fetchInit?.signal).toBeTruthy()
     expect(roots.insertInto).toHaveBeenCalledWith('dingtalk_group_deliveries')
     const insertChain = roots.insertInto.mock.results[0]?.value as MockChain | undefined
     const deliveryValues = insertChain?.values?.mock.calls[0]?.[0] as Record<string, unknown> | undefined
