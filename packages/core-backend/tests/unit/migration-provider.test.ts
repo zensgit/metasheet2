@@ -33,7 +33,7 @@ describe('createCoreBackendMigrationProvider', () => {
     const legacySqlDir = path.join(projectRoot, 'migrations')
 
     await writeFile(
-      path.join(sourceMigrationsDir, '20260101000000_code.js'),
+      path.join(sourceMigrationsDir, '20260101000000_code.mjs'),
       'export async function up() {}\n'
     )
     await writeFile(
@@ -65,7 +65,7 @@ describe('createCoreBackendMigrationProvider', () => {
     const legacySqlDir = path.join(projectRoot, 'migrations')
 
     await writeFile(
-      path.join(distMigrationsDir, '20260101000002_code.js'),
+      path.join(distMigrationsDir, '20260101000002_code.mjs'),
       'export async function up() {}\n'
     )
     await writeFile(
@@ -80,6 +80,30 @@ describe('createCoreBackendMigrationProvider', () => {
       '056_add_users_must_change_password',
       '20260101000002_code',
     ])
+  })
+
+  it('honors MIGRATION_EXCLUDE-style names with or without file extensions', async () => {
+    const projectRoot = await createTempProjectRoot()
+    const runtimeDir = path.join(projectRoot, 'src/db')
+    const sourceMigrationsDir = path.join(runtimeDir, 'migrations')
+    const legacySqlDir = path.join(projectRoot, 'migrations')
+
+    await writeFile(
+      path.join(sourceMigrationsDir, '20260101000000_code.mjs'),
+      'export async function up() {}\n'
+    )
+    await writeFile(
+      path.join(legacySqlDir, '056_add_users_must_change_password.sql'),
+      'alter table users add column must_change_password boolean not null default false;'
+    )
+
+    const provider = createCoreBackendMigrationProvider({
+      runtimeDir,
+      excludedNames: ['056_add_users_must_change_password.sql', '20260101000000_code.ts'],
+    })
+    const migrations = await provider.getMigrations()
+
+    expect(Object.keys(migrations)).toEqual([])
   })
 
   it('fails fast on duplicate migration names across providers', async () => {

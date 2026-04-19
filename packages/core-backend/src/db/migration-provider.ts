@@ -14,6 +14,7 @@ interface CreateCoreBackendMigrationProviderOptions {
   fsImpl?: NodeFsLike
   pathImpl?: NodePathLike
   runtimeDir?: string
+  excludedNames?: string[]
 }
 
 function dedupe(values: string[]): string[] {
@@ -38,6 +39,19 @@ function getMigrationFolderCandidates(
     pathImpl.resolve(runtimeDir, '../../migrations'),
     pathImpl.resolve(runtimeDir, '../../../migrations'),
   ])
+}
+
+function normalizeMigrationName(name: string): string {
+  const trimmed = name.trim()
+  return trimmed.replace(/\.(sql|ts|js|mjs|mts)$/i, '')
+}
+
+function getExcludedNames(values: string[]): Set<string> {
+  return new Set(
+    values
+      .map((value) => normalizeMigrationName(path.basename(value)))
+      .filter(Boolean)
+  )
 }
 
 function createSqlFileMigration(
@@ -114,6 +128,13 @@ export function createCoreBackendMigrationProvider(
   const pathImpl = options.pathImpl ?? path
   const runtimeDir = options.runtimeDir ?? __dirname
   const candidateFolders = getMigrationFolderCandidates(runtimeDir, pathImpl)
+  const excludedNames = getExcludedNames(
+    options.excludedNames ??
+      (process.env.MIGRATION_EXCLUDE || '')
+        .split(',')
+        .map((value) => value.trim())
+        .filter(Boolean)
+  )
 
   return {
     async getMigrations() {
@@ -140,7 +161,9 @@ export function createCoreBackendMigrationProvider(
         await addSqlFileMigrations(migrations, folder, fsImpl, pathImpl)
       }
 
-      return migrations
+      return Object.fromEntries(
+        Object.entries(migrations).filter(([name]) => !excludedNames.has(name))
+      )
     },
   }
 }
