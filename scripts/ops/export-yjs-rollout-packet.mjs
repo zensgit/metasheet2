@@ -50,6 +50,7 @@ const packetFiles = [
   'scripts/ops/check-yjs-rollout-status.mjs',
   'scripts/ops/check-yjs-retention-health.mjs',
   'scripts/ops/capture-yjs-rollout-report.mjs',
+  'scripts/ops/prefill-yjs-rollout-signoff.mjs',
 ]
 
 function renderReadme(outputDir) {
@@ -72,6 +73,7 @@ Generated at: ${new Date().toISOString()}
 - ${rel('scripts/ops/check-yjs-rollout-status.mjs')}
 - ${rel('scripts/ops/check-yjs-retention-health.mjs')}
 - ${rel('scripts/ops/capture-yjs-rollout-report.mjs')}
+- ${rel('scripts/ops/prefill-yjs-rollout-signoff.mjs')}
 
 ## Recommended Order
 
@@ -79,7 +81,7 @@ Generated at: ${new Date().toISOString()}
 2. Run the runtime status check
 3. Run the retention health check
 4. Run the combined report capture
-5. Fill the signoff template
+5. Prefill the signoff draft from current evidence
 6. Store generated report artifacts alongside the rollout packet
 `
 }
