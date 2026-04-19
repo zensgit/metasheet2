@@ -302,6 +302,11 @@ describe('AutomationExecutor', () => {
     executor = new AutomationExecutor(deps)
   })
 
+  afterEach(() => {
+    delete process.env.APP_BASE_URL
+    delete process.env.PUBLIC_APP_URL
+  })
+
   it('executes update_record action successfully', async () => {
     const rule = createMockRule({
       actions: [{ type: 'update_record', config: { fields: { status: 'done' } } }],
@@ -389,6 +394,79 @@ describe('AutomationExecutor', () => {
     const result = await executor.execute(rule, { recordId: 'r1', sheetId: 'sheet_1' })
     expect(result.status).toBe('success')
     expect(emitSpy).toHaveBeenCalledWith('automation.notification', expect.objectContaining({ userIds: ['u1', 'u2'] }))
+  })
+
+  it('executes send_dingtalk_group_message action successfully', async () => {
+    process.env.APP_BASE_URL = 'https://app.example.com'
+    const queryFn = vi.fn()
+      .mockResolvedValueOnce({
+        rows: [{ id: 'dt_1', name: 'Ops Group', webhook_url: 'https://oapi.dingtalk.com/robot/send?access_token=test', secret: null, enabled: true }],
+      })
+      .mockResolvedValueOnce({
+        rows: [{ id: 'view_form', sheet_id: 'sheet_1', config: { publicForm: { enabled: true, publicToken: 'public-token' } } }],
+      })
+      .mockResolvedValueOnce({ rows: [{ id: 'view_grid' }] })
+    const fetchFn = vi.fn(async () => new Response(JSON.stringify({ errcode: 0, errmsg: 'ok' }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    })) as unknown as typeof fetch
+
+    deps = createMockDeps({ queryFn, fetchFn })
+    executor = new AutomationExecutor(deps)
+
+    const rule = createMockRule({
+      actions: [{
+        type: 'send_dingtalk_group_message',
+        config: {
+          destinationId: 'dt_1',
+          titleTemplate: 'Record {{record.title}} ready',
+          bodyTemplate: 'Status: {{record.status}}',
+          publicFormViewId: 'view_form',
+          internalViewId: 'view_grid',
+        },
+      }],
+    })
+    const result = await executor.execute(rule, {
+      recordId: 'r1',
+      data: { title: 'Incident', status: 'open' },
+      sheetId: 'sheet_1',
+      actorId: 'user_1',
+    })
+
+    expect(result.status).toBe('success')
+    expect(result.steps[0].actionType).toBe('send_dingtalk_group_message')
+    expect(queryFn).toHaveBeenCalledTimes(3)
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+
+    const [url, init] = fetchFn.mock.calls[0] as [string, RequestInit]
+    expect(url).toContain('https://oapi.dingtalk.com/robot/send?access_token=test')
+    const payload = JSON.parse(init.body as string)
+    expect(payload.markdown.title).toBe('Record Incident ready')
+    expect(payload.markdown.text).toContain('Status: open')
+    expect(payload.markdown.text).toContain('/multitable/public-form/sheet_1/view_form?publicToken=public-token')
+    expect(payload.markdown.text).toContain('/multitable/sheet_1/view_grid?recordId=r1')
+  })
+
+  it('fails send_dingtalk_group_message when destination is missing', async () => {
+    const queryFn = vi.fn(async () => ({ rows: [] }))
+    deps = createMockDeps({ queryFn })
+    executor = new AutomationExecutor(deps)
+
+    const rule = createMockRule({
+      actions: [{
+        type: 'send_dingtalk_group_message',
+        config: {
+          destinationId: 'dt_missing',
+          titleTemplate: 'Title',
+          bodyTemplate: 'Body',
+        },
+      }],
+    })
+
+    const result = await executor.execute(rule, { recordId: 'r1', sheetId: 'sheet_1' })
+    expect(result.status).toBe('failed')
+    expect(result.steps[0].status).toBe('failed')
+    expect(result.steps[0].error).toContain('destination not found')
   })
 
   it('fails send_notification with no userIds', async () => {

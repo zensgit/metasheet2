@@ -41,6 +41,7 @@
           <select v-model="draft.actionType" class="meta-automation__select" data-automation-field="actionType">
             <option value="notify">Send notification</option>
             <option value="update_field">Update field value</option>
+            <option value="send_dingtalk_group_message">Send DingTalk group message</option>
           </select>
 
           <template v-if="draft.actionType === 'notify'">
@@ -68,6 +69,42 @@
               placeholder="New value"
               data-automation-field="targetValue"
             />
+          </template>
+
+          <template v-if="draft.actionType === 'send_dingtalk_group_message'">
+            <label class="meta-automation__label">DingTalk group</label>
+            <select v-model="draft.dingtalkDestinationId" class="meta-automation__select" data-automation-field="dingtalkDestinationId">
+              <option value="">-- select DingTalk group --</option>
+              <option v-for="destination in dingTalkDestinations" :key="destination.id" :value="destination.id">
+                {{ destination.name }}
+              </option>
+            </select>
+            <label class="meta-automation__label">Title template</label>
+            <input
+              v-model="draft.dingtalkTitleTemplate"
+              class="meta-automation__input"
+              type="text"
+              placeholder="例如：{{record.title}} 待处理"
+              data-automation-field="dingtalkTitleTemplate"
+            />
+            <label class="meta-automation__label">Body template</label>
+            <textarea
+              v-model="draft.dingtalkBodyTemplate"
+              class="meta-automation__input"
+              rows="4"
+              placeholder="支持 {{record.xxx}}、{{recordId}}、{{sheetId}}、{{actorId}}"
+              data-automation-field="dingtalkBodyTemplate"
+            ></textarea>
+            <label class="meta-automation__label">Public form view (optional)</label>
+            <select v-model="draft.publicFormViewId" class="meta-automation__select" data-automation-field="publicFormViewId">
+              <option value="">-- no public form link --</option>
+              <option v-for="view in formViews" :key="view.id" :value="view.id">{{ view.name }}</option>
+            </select>
+            <label class="meta-automation__label">Internal processing view (optional)</label>
+            <select v-model="draft.internalViewId" class="meta-automation__select" data-automation-field="internalViewId">
+              <option value="">-- no internal link --</option>
+              <option v-for="view in internalViews" :key="view.id" :value="view.id">{{ view.name }}</option>
+            </select>
           </template>
 
           <div class="meta-automation__form-actions">
@@ -126,6 +163,8 @@
       :sheet-id="sheetId"
       :rule="editingRule ?? undefined"
       :fields="fields"
+      :client="client"
+      :views="views"
       @close="showRuleEditor = false"
       @save="onRuleEditorSave"
       @test="onTestRule"
@@ -142,7 +181,14 @@
 
 <script setup lang="ts">
 import { ref, computed, watch } from 'vue'
-import type { AutomationRule, AutomationTriggerType, AutomationActionType, AutomationStats } from '../types'
+import type {
+  AutomationRule,
+  AutomationTriggerType,
+  AutomationActionType,
+  AutomationStats,
+  DingTalkGroupDestination,
+  MetaView,
+} from '../types'
 import { useMultitableAutomations } from '../composables/useMultitableAutomations'
 import type { MultitableApiClient } from '../api/client'
 import MetaAutomationRuleEditor from './MetaAutomationRuleEditor.vue'
@@ -153,6 +199,7 @@ const props = defineProps<{
   sheetId: string
   fields: Array<{ id: string; name: string; type: string }>
   client?: MultitableApiClient
+  views?: MetaView[]
 }>()
 
 const emit = defineEmits<{
@@ -174,6 +221,11 @@ interface DraftState {
   notifyMessage: string
   targetFieldId: string
   targetValue: string
+  dingtalkDestinationId: string
+  dingtalkTitleTemplate: string
+  dingtalkBodyTemplate: string
+  publicFormViewId: string
+  internalViewId: string
 }
 
 function emptyDraft(): DraftState {
@@ -185,10 +237,18 @@ function emptyDraft(): DraftState {
     notifyMessage: '',
     targetFieldId: '',
     targetValue: '',
+    dingtalkDestinationId: '',
+    dingtalkTitleTemplate: '',
+    dingtalkBodyTemplate: '',
+    publicFormViewId: '',
+    internalViewId: '',
   }
 }
 
 const draft = ref<DraftState>(emptyDraft())
+const dingTalkDestinations = ref<DingTalkGroupDestination[]>([])
+const formViews = computed(() => (props.views ?? []).filter((view) => view.type === 'form'))
+const internalViews = computed(() => props.views ?? [])
 
 // --- Rule editor + log viewer state ---
 const showRuleEditor = ref(false)
@@ -250,6 +310,11 @@ const canSave = computed(() => {
   if (draft.value.triggerType === 'field.changed' && !draft.value.triggerFieldId) return false
   if (draft.value.actionType === 'notify' && !draft.value.notifyMessage.trim()) return false
   if (draft.value.actionType === 'update_field' && (!draft.value.targetFieldId || !draft.value.targetValue.trim())) return false
+  if (draft.value.actionType === 'send_dingtalk_group_message') {
+    if (!draft.value.dingtalkDestinationId) return false
+    if (!draft.value.dingtalkTitleTemplate.trim()) return false
+    if (!draft.value.dingtalkBodyTemplate.trim()) return false
+  }
   return true
 })
 
@@ -269,6 +334,11 @@ function openEditForm(rule: AutomationRule) {
     notifyMessage: (rule.actionConfig?.message as string) ?? '',
     targetFieldId: (rule.actionConfig?.fieldId as string) ?? '',
     targetValue: (rule.actionConfig?.value as string) ?? '',
+    dingtalkDestinationId: (rule.actionConfig?.destinationId as string) ?? '',
+    dingtalkTitleTemplate: (rule.actionConfig?.titleTemplate as string) ?? '',
+    dingtalkBodyTemplate: (rule.actionConfig?.bodyTemplate as string) ?? '',
+    publicFormViewId: (rule.actionConfig?.publicFormViewId as string) ?? '',
+    internalViewId: (rule.actionConfig?.internalViewId as string) ?? '',
   }
   showForm.value = true
 }
@@ -292,6 +362,15 @@ function buildActionConfig(): Record<string, unknown> {
   }
   if (draft.value.actionType === 'update_field') {
     return { fieldId: draft.value.targetFieldId, value: draft.value.targetValue }
+  }
+  if (draft.value.actionType === 'send_dingtalk_group_message') {
+    return {
+      destinationId: draft.value.dingtalkDestinationId,
+      titleTemplate: draft.value.dingtalkTitleTemplate,
+      bodyTemplate: draft.value.dingtalkBodyTemplate,
+      publicFormViewId: draft.value.publicFormViewId || undefined,
+      internalViewId: draft.value.internalViewId || undefined,
+    }
   }
   return {}
 }
@@ -364,6 +443,8 @@ function describeAction(rule: AutomationRule): string {
       const fid = rule.actionConfig?.fieldId as string | undefined
       return fid ? `Update "${fieldNameById(fid)}"` : 'Update field value'
     }
+    case 'send_dingtalk_group_message':
+      return 'Send DingTalk group message'
     default:
       return String(rule.actionType)
   }
@@ -373,6 +454,13 @@ watch(
   () => props.visible,
   async (v) => {
     if (v && props.sheetId) {
+      if (props.client) {
+        try {
+          dingTalkDestinations.value = await props.client.listDingTalkGroups()
+        } catch {
+          dingTalkDestinations.value = []
+        }
+      }
       await loadRules(props.sheetId)
       cancelForm()
       void loadRuleStats()

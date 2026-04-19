@@ -7626,7 +7626,7 @@ export function univerMetaRouter(): Router {
       const enabled = typeof body?.enabled === 'boolean' ? body.enabled : true
 
       const validTriggers = new Set(['record.created', 'record.updated', 'record.deleted', 'field.changed', 'field.value_changed', 'schedule.cron', 'schedule.interval', 'webhook.received'])
-      const validActions = new Set(['notify', 'update_field', 'update_record', 'create_record', 'send_webhook', 'send_notification', 'lock_record'])
+      const validActions = new Set(['notify', 'update_field', 'update_record', 'create_record', 'send_webhook', 'send_notification', 'send_dingtalk_group_message', 'lock_record'])
       if (!validTriggers.has(triggerType)) {
         return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: `Invalid trigger_type: ${triggerType}` } })
       }
@@ -7702,7 +7702,7 @@ export function univerMetaRouter(): Router {
         updates.trigger_config = JSON.stringify(body.triggerConfig)
       }
       if (typeof body?.actionType === 'string') {
-        const validActions = new Set(['notify', 'update_field', 'update_record', 'create_record', 'send_webhook', 'send_notification', 'lock_record'])
+        const validActions = new Set(['notify', 'update_field', 'update_record', 'create_record', 'send_webhook', 'send_notification', 'send_dingtalk_group_message', 'lock_record'])
         if (!validActions.has(body.actionType)) {
           return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: `Invalid action_type: ${body.actionType}` } })
         }

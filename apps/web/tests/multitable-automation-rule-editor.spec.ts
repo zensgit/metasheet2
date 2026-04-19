@@ -13,6 +13,26 @@ const fields = [
   { id: 'fld_2', name: 'Name', type: 'string' },
 ]
 
+const views = [
+  { id: 'view_grid', sheetId: 'sheet_1', name: 'Grid', type: 'grid' },
+  { id: 'view_form', sheetId: 'sheet_1', name: 'Public Form', type: 'form' },
+]
+
+function mockClient() {
+  return {
+    listDingTalkGroups: vi.fn(async () => [
+      {
+        id: 'dt_1',
+        name: 'Ops Group',
+        webhookUrl: 'https://oapi.dingtalk.com/robot/send?access_token=test',
+        enabled: true,
+        createdBy: 'user_1',
+        createdAt: '2026-04-01T00:00:00Z',
+      },
+    ]),
+  }
+}
+
 function fakeRule(overrides: Partial<AutomationRule> = {}): AutomationRule {
   return {
     id: 'rule_1',
@@ -164,5 +184,77 @@ describe('MetaAutomationRuleEditor', () => {
 
     const triggerSelect = container.querySelector('[data-field="triggerType"]') as HTMLSelectElement
     expect(triggerSelect.value).toBe('record.updated')
+  })
+
+  it('emits DingTalk group action config with optional links', async () => {
+    const saved = vi.fn()
+    const client = mockClient()
+    const { container } = mount({
+      visible: true,
+      sheetId: 'sheet_1',
+      fields,
+      views,
+      client,
+      onSave: saved,
+    })
+    await flushPromises()
+
+    const nameInput = container.querySelector('[data-field="name"]') as HTMLInputElement
+    nameInput.value = 'Notify DingTalk'
+    nameInput.dispatchEvent(new Event('input'))
+    await flushPromises()
+
+    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header select') as HTMLSelectElement
+    actionSelect.value = 'send_dingtalk_group_message'
+    actionSelect.dispatchEvent(new Event('change'))
+    await flushPromises()
+
+    const destinationSelect = container.querySelector('[data-field="dingtalkDestinationId"]') as HTMLSelectElement
+    destinationSelect.value = 'dt_1'
+    destinationSelect.dispatchEvent(new Event('change'))
+
+    const titleInput = container.querySelector('[data-field="dingtalkTitleTemplate"]') as HTMLInputElement
+    titleInput.value = 'Ticket {{recordId}}'
+    titleInput.dispatchEvent(new Event('input'))
+
+    const bodyInput = container.querySelector('[data-field="dingtalkBodyTemplate"]') as HTMLTextAreaElement
+    bodyInput.value = 'Please review {{record.status}}'
+    bodyInput.dispatchEvent(new Event('input'))
+
+    const publicFormSelect = container.querySelector('[data-field="publicFormViewId"]') as HTMLSelectElement
+    publicFormSelect.value = 'view_form'
+    publicFormSelect.dispatchEvent(new Event('change'))
+
+    const internalViewSelect = container.querySelector('[data-field="internalViewId"]') as HTMLSelectElement
+    internalViewSelect.value = 'view_grid'
+    internalViewSelect.dispatchEvent(new Event('change'))
+    await flushPromises()
+
+    const saveBtn = container.querySelector('[data-action="save"]') as HTMLButtonElement
+    expect(saveBtn.disabled).toBe(false)
+    saveBtn.click()
+    await flushPromises()
+
+    expect(saved).toHaveBeenCalledTimes(1)
+    const payload = saved.mock.calls[0][0]
+    expect(payload.actionType).toBe('send_dingtalk_group_message')
+    expect(payload.actionConfig).toEqual({
+      destinationId: 'dt_1',
+      titleTemplate: 'Ticket {{recordId}}',
+      bodyTemplate: 'Please review {{record.status}}',
+      publicFormViewId: 'view_form',
+      internalViewId: 'view_grid',
+    })
+    expect(payload.actions[0]).toEqual({
+      type: 'send_dingtalk_group_message',
+      config: {
+        destinationId: 'dt_1',
+        titleTemplate: 'Ticket {{recordId}}',
+        bodyTemplate: 'Please review {{record.status}}',
+        publicFormViewId: 'view_form',
+        internalViewId: 'view_grid',
+      },
+    })
+    expect(client.listDingTalkGroups).toHaveBeenCalledTimes(1)
   })
 })
