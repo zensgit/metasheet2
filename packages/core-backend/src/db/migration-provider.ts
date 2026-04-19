@@ -30,12 +30,24 @@ function isMissingDirectoryError(error: unknown): boolean {
   )
 }
 
-function getMigrationFolderCandidates(
+function getProviderFolderCandidates(
   runtimeDir: string,
   pathImpl: NodePathLike
 ): string[] {
   return dedupe([
     pathImpl.join(runtimeDir, 'migrations'),
+    pathImpl.resolve(runtimeDir, '../../migrations'),
+    pathImpl.resolve(runtimeDir, '../../../migrations'),
+  ])
+}
+
+function getSqlFolderCandidates(
+  runtimeDir: string,
+  pathImpl: NodePathLike
+): string[] {
+  return dedupe([
+    pathImpl.join(runtimeDir, 'migrations'),
+    pathImpl.resolve(runtimeDir, '../../../src/db/migrations'),
     pathImpl.resolve(runtimeDir, '../../migrations'),
     pathImpl.resolve(runtimeDir, '../../../migrations'),
   ])
@@ -127,7 +139,8 @@ export function createCoreBackendMigrationProvider(
   const fsImpl = options.fsImpl ?? fs
   const pathImpl = options.pathImpl ?? path
   const runtimeDir = options.runtimeDir ?? __dirname
-  const candidateFolders = getMigrationFolderCandidates(runtimeDir, pathImpl)
+  const providerFolders = getProviderFolderCandidates(runtimeDir, pathImpl)
+  const sqlFolders = getSqlFolderCandidates(runtimeDir, pathImpl)
   const excludedNames = getExcludedNames(
     options.excludedNames ??
       (process.env.MIGRATION_EXCLUDE || '')
@@ -140,7 +153,7 @@ export function createCoreBackendMigrationProvider(
     async getMigrations() {
       const migrations: Record<string, Migration> = {}
 
-      for (const folder of candidateFolders) {
+      for (const folder of providerFolders) {
         await addProviderMigrations(
           migrations,
           new FileMigrationProvider({
@@ -157,7 +170,7 @@ export function createCoreBackendMigrationProvider(
         })
       }
 
-      for (const folder of candidateFolders) {
+      for (const folder of sqlFolders) {
         await addSqlFileMigrations(migrations, folder, fsImpl, pathImpl)
       }
 
