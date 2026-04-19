@@ -22,6 +22,7 @@ function makeChain(): MockChain {
     'select',
     'where',
     'orderBy',
+    'limit',
     'insertInto',
     'values',
     'updateTable',
@@ -76,6 +77,26 @@ function destinationRow(overrides: Record<string, unknown> = {}) {
   }
 }
 
+function deliveryRow(overrides: Record<string, unknown> = {}) {
+  return {
+    id: 'dtd_1',
+    destination_id: 'dt_1',
+    source_type: 'automation',
+    subject: 'Please fill incident details',
+    content: 'Body',
+    success: true,
+    http_status: 200,
+    response_body: '{"errcode":0,"errmsg":"ok"}',
+    error_message: null,
+    automation_rule_id: 'rule_1',
+    record_id: 'rec_1',
+    initiated_by: 'user_1',
+    created_at: '2026-04-19T10:30:00.000Z',
+    delivered_at: '2026-04-19T10:30:01.000Z',
+    ...overrides,
+  }
+}
+
 describe('DingTalkGroupDestinationService', () => {
   beforeEach(() => {
     executeQueue = []
@@ -123,6 +144,20 @@ describe('DingTalkGroupDestinationService', () => {
     expect(updated.webhookUrl).toContain('access_token=next')
   })
 
+  test('lists deliveries for a destination', async () => {
+    const { db } = createMockDb()
+    const service = new DingTalkGroupDestinationService(db, vi.fn())
+
+    executeQueue.push([deliveryRow(), deliveryRow({ id: 'dtd_2', source_type: 'manual_test', success: false, error_message: 'signature mismatch' })])
+    const deliveries = await service.listDeliveries('dt_1', 20)
+
+    expect(deliveries).toHaveLength(2)
+    expect(deliveries[0].destinationId).toBe('dt_1')
+    expect(deliveries[0].subject).toBe('Please fill incident details')
+    expect(deliveries[1].sourceType).toBe('manual_test')
+    expect(deliveries[1].success).toBe(false)
+  })
+
   test('deletes a destination after ownership check', async () => {
     const { db, roots } = createMockDb()
     const service = new DingTalkGroupDestinationService(db, vi.fn())
@@ -145,6 +180,11 @@ describe('DingTalkGroupDestinationService', () => {
     await expect(service.testSend('dt_1', 'user_1', {})).resolves.toEqual({ ok: true })
 
     expect(fetchFn).toHaveBeenCalledTimes(1)
+    expect(roots.insertInto).toHaveBeenCalledWith('dingtalk_group_deliveries')
+    const insertChain = roots.insertInto.mock.results[0]?.value as MockChain | undefined
+    const deliveryValues = insertChain?.values?.mock.calls[0]?.[0] as Record<string, unknown> | undefined
+    expect(deliveryValues?.http_status).toBe(200)
+    expect(deliveryValues?.response_body).toContain('"errcode":0')
     const updateChain = roots.updateTable.mock.results[0]?.value as MockChain | undefined
     const setArg = updateChain?.set?.mock.calls[0]?.[0] as Record<string, unknown> | undefined
     expect(setArg?.last_test_status).toBe('success')
@@ -162,9 +202,36 @@ describe('DingTalkGroupDestinationService', () => {
     executeTakeFirstQueue.push(destinationRow())
     await expect(service.testSend('dt_1', 'user_1', {})).rejects.toThrow('signature mismatch')
 
+    expect(roots.insertInto).toHaveBeenCalledWith('dingtalk_group_deliveries')
+    const insertChain = roots.insertInto.mock.results[0]?.value as MockChain | undefined
+    const deliveryValues = insertChain?.values?.mock.calls[0]?.[0] as Record<string, unknown> | undefined
+    expect(deliveryValues?.http_status).toBe(200)
+    expect(deliveryValues?.response_body).toContain('signature mismatch')
+    expect(deliveryValues?.error_message).toContain('signature mismatch')
     const updateChain = roots.updateTable.mock.results[0]?.value as MockChain | undefined
     const setArg = updateChain?.set?.mock.calls[0]?.[0] as Record<string, unknown> | undefined
     expect(setArg?.last_test_status).toBe('failed')
     expect(setArg?.last_test_error).toMatch(/signature mismatch/)
+  })
+
+  test('testSend still succeeds when delivery history persistence fails', async () => {
+    const { db, roots } = createMockDb()
+    const fetchFn = vi.fn(async () => new Response(
+      JSON.stringify({ errcode: 0, errmsg: 'ok' }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } },
+    ))
+    const deliveryInsertChain = makeChain()
+    deliveryInsertChain.execute = vi.fn(async () => {
+      throw new Error('delivery history unavailable')
+    })
+    roots.insertInto.mockReturnValueOnce(deliveryInsertChain as never)
+    const service = new DingTalkGroupDestinationService(db, fetchFn as typeof fetch)
+
+    executeTakeFirstQueue.push(destinationRow())
+    await expect(service.testSend('dt_1', 'user_1', {})).resolves.toEqual({ ok: true })
+
+    const updateChain = roots.updateTable.mock.results[0]?.value as MockChain | undefined
+    const setArg = updateChain?.set?.mock.calls[0]?.[0] as Record<string, unknown> | undefined
+    expect(setArg?.last_test_status).toBe('success')
   })
 })

@@ -265,12 +265,49 @@
               <button class="meta-api-mgr__btn" type="button" :disabled="busy" data-dingtalk-group-toggle="true" @click="onToggleDingTalkGroup(group)">
                 {{ group.enabled ? 'Disable' : 'Enable' }}
               </button>
+              <button class="meta-api-mgr__btn" type="button" data-dingtalk-group-deliveries="true" @click="onViewDingTalkDeliveries(group.id)">
+                Deliveries
+              </button>
               <button class="meta-api-mgr__btn" type="button" :disabled="busy" data-dingtalk-group-test-send="true" @click="onTestDingTalkGroup(group.id)">
                 Test send
               </button>
               <button class="meta-api-mgr__btn meta-api-mgr__btn--danger" type="button" :disabled="busy" data-dingtalk-group-delete="true" @click="onDeleteDingTalkGroup(group.id)">
                 Delete
               </button>
+            </div>
+
+            <div
+              v-if="dingTalkDeliveriesGroupId === group.id"
+              class="meta-api-mgr__deliveries"
+              data-dingtalk-deliveries="true"
+            >
+              <strong class="meta-api-mgr__label">Recent Deliveries</strong>
+              <div v-if="dingTalkDeliveriesLoading" class="meta-api-mgr__empty" data-dingtalk-deliveries-loading="true">
+                Loading DingTalk deliveries…
+              </div>
+              <div
+                v-else-if="!dingTalkDeliveries.length"
+                class="meta-api-mgr__empty"
+                data-dingtalk-deliveries-empty="true"
+              >
+                No DingTalk deliveries yet.
+              </div>
+              <template v-else>
+                <div
+                  v-for="delivery in dingTalkDeliveries"
+                  :key="delivery.id"
+                  class="meta-api-mgr__delivery-row"
+                  :data-dingtalk-delivery-id="delivery.id"
+                >
+                  <span :class="delivery.success ? 'meta-api-mgr__delivery--ok' : 'meta-api-mgr__delivery--fail'">
+                    {{ delivery.success ? 'OK' : 'FAIL' }}
+                  </span>
+                  <span>{{ delivery.sourceType === 'manual_test' ? 'Manual test' : 'Automation' }}</span>
+                  <span>{{ delivery.subject }}</span>
+                  <span>HTTP {{ delivery.httpStatus ?? '-' }}</span>
+                  <span>{{ formatDate(delivery.createdAt) }}</span>
+                </div>
+              </template>
             </div>
           </div>
         </template>
@@ -281,7 +318,13 @@
 
 <script setup lang="ts">
 import { ref, computed, watch } from 'vue'
-import type { ApiToken, DingTalkGroupDestination, Webhook, WebhookDelivery } from '../types'
+import type {
+  ApiToken,
+  DingTalkGroupDelivery,
+  DingTalkGroupDestination,
+  Webhook,
+  WebhookDelivery,
+} from '../types'
 import type { MultitableApiClient } from '../api/client'
 
 const props = defineProps<{
@@ -321,6 +364,10 @@ const dingTalkGroups = ref<DingTalkGroupDestination[]>([])
 const dingTalkGroupsLoading = ref(false)
 const showDingTalkGroupForm = ref(false)
 const editingDingTalkGroupId = ref<string | null>(null)
+const dingTalkDeliveriesGroupId = ref<string | null>(null)
+const dingTalkDeliveriesLoading = ref(false)
+const dingTalkDeliveries = ref<DingTalkGroupDelivery[]>([])
+let dingTalkDeliveriesRequestToken = 0
 const dingTalkGroupDraft = ref({
   name: '',
   webhookUrl: '',
@@ -633,11 +680,51 @@ async function onTestDingTalkGroup(groupId: string) {
   try {
     await props.client.testDingTalkGroup(groupId)
     await loadDingTalkGroups()
+    if (dingTalkDeliveriesGroupId.value === groupId) {
+      await loadDingTalkDeliveries(groupId)
+    }
   } catch (err) {
     error.value = err instanceof Error ? err.message : 'Failed to test DingTalk group'
   } finally {
     busy.value = false
   }
+}
+
+async function loadDingTalkDeliveries(groupId: string) {
+  if (!props.client) return
+  const requestToken = ++dingTalkDeliveriesRequestToken
+  dingTalkDeliveriesGroupId.value = groupId
+  dingTalkDeliveriesLoading.value = true
+  dingTalkDeliveries.value = []
+  error.value = null
+  try {
+    const deliveries = await props.client.getDingTalkGroupDeliveries(groupId)
+    if (requestToken !== dingTalkDeliveriesRequestToken || dingTalkDeliveriesGroupId.value !== groupId) {
+      return
+    }
+    dingTalkDeliveries.value = deliveries
+  } catch (err) {
+    if (requestToken !== dingTalkDeliveriesRequestToken || dingTalkDeliveriesGroupId.value !== groupId) {
+      return
+    }
+    error.value = err instanceof Error ? err.message : 'Failed to load DingTalk deliveries'
+  } finally {
+    if (requestToken === dingTalkDeliveriesRequestToken && dingTalkDeliveriesGroupId.value === groupId) {
+      dingTalkDeliveriesLoading.value = false
+    }
+  }
+}
+
+async function onViewDingTalkDeliveries(groupId: string) {
+  if (!props.client) return
+  if (dingTalkDeliveriesGroupId.value === groupId) {
+    dingTalkDeliveriesRequestToken += 1
+    dingTalkDeliveriesGroupId.value = null
+    dingTalkDeliveriesLoading.value = false
+    dingTalkDeliveries.value = []
+    return
+  }
+  await loadDingTalkDeliveries(groupId)
 }
 
 async function onDeleteDingTalkGroup(groupId: string) {
@@ -646,6 +733,12 @@ async function onDeleteDingTalkGroup(groupId: string) {
   error.value = null
   try {
     await props.client.deleteDingTalkGroup(groupId)
+    if (dingTalkDeliveriesGroupId.value === groupId) {
+      dingTalkDeliveriesRequestToken += 1
+      dingTalkDeliveriesGroupId.value = null
+      dingTalkDeliveriesLoading.value = false
+      dingTalkDeliveries.value = []
+    }
     await loadDingTalkGroups()
   } catch (err) {
     error.value = err instanceof Error ? err.message : 'Failed to delete DingTalk group'

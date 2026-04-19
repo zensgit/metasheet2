@@ -27,6 +27,7 @@ const webhookPaths = ['/api/multitable/webhooks', '/api/multitable/webhooks/:id'
 const dingTalkGroupPaths = [
   '/api/multitable/dingtalk-groups',
   '/api/multitable/dingtalk-groups/:id',
+  '/api/multitable/dingtalk-groups/:id/deliveries',
   '/api/multitable/dingtalk-groups/:id/test-send',
 ]
 
@@ -361,6 +362,26 @@ export function apiTokensRouter(): Router {
       logger.error('Failed to delete DingTalk group destination', err instanceof Error ? err : undefined)
       serviceErrorResponse(res, err, 'delete')
     }
+  })
+
+  router.get('/api/multitable/dingtalk-groups/:id/deliveries', async (req: Request, res: Response) => {
+    const userId = getUserId(req)
+    if (!userId) {
+      res.status(401).json({ ok: false, error: { code: 'UNAUTHENTICATED' } })
+      return
+    }
+    const destination = await dingTalkGroupDestinationService.getDestinationById(req.params.id)
+    if (!destination) {
+      res.status(404).json({ ok: false, error: { code: 'NOT_FOUND' } })
+      return
+    }
+    if (destination.createdBy !== userId) {
+      res.status(403).json({ ok: false, error: { code: 'FORBIDDEN' } })
+      return
+    }
+    const limit = Math.min(Math.max(Number(req.query.limit) || 50, 1), 200)
+    const deliveries = await dingTalkGroupDestinationService.listDeliveries(req.params.id, limit)
+    res.json({ ok: true, data: { deliveries } })
   })
 
   router.post('/api/multitable/dingtalk-groups/:id/test-send', async (req: Request, res: Response) => {

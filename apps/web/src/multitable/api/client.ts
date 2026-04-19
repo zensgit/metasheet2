@@ -57,6 +57,7 @@ import type {
   WebhookCreateInput,
   WebhookDelivery,
   DingTalkGroupDestination,
+  DingTalkGroupDelivery,
   DingTalkGroupDestinationInput,
 } from '../types'
 import { apiFetch } from '../../utils/api'
@@ -1123,6 +1124,12 @@ export class MultitableApiClient {
       body: JSON.stringify(input ?? {}),
     })
     return parseJson(res)
+  }
+
+  async getDingTalkGroupDeliveries(id: string): Promise<DingTalkGroupDelivery[]> {
+    const res = await this.fetch(`/api/multitable/dingtalk-groups/${encodeURIComponent(id)}/deliveries`)
+    const data = await parseJson<{ deliveries: DingTalkGroupDelivery[] }>(res)
+    return data.deliveries ?? []
   }
 
   // --- Automation V1: test / logs / stats ---

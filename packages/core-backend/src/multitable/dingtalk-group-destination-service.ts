@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto'
-import type { Kysely } from 'kysely'
+import { sql, type Kysely } from 'kysely'
 import { Logger } from '../core/logger'
 import type { Database } from '../db/types'
 import { nowTimestamp } from '../db/type-helpers'
@@ -10,6 +10,7 @@ import {
 } from '../integrations/dingtalk/robot'
 import { maskDingTalkWebhookUrl } from '../integrations/dingtalk/runtime-policy'
 import type {
+  DingTalkGroupDelivery,
   DingTalkGroupDestination,
   DingTalkGroupDestinationCreateInput,
   DingTalkGroupDestinationUpdateInput,
@@ -49,6 +50,40 @@ function rowToDestination(row: {
       ? row.last_test_status
       : undefined,
     lastTestError: row.last_test_error ?? undefined,
+  }
+}
+
+function rowToDelivery(row: {
+  id: string
+  destination_id: string
+  source_type: string
+  subject: string
+  content: string
+  success: boolean
+  http_status: number | null
+  response_body: string | null
+  error_message: string | null
+  automation_rule_id: string | null
+  record_id: string | null
+  initiated_by: string | null
+  created_at: string | Date
+  delivered_at?: string | Date | null
+}): DingTalkGroupDelivery {
+  return {
+    id: row.id,
+    destinationId: row.destination_id,
+    sourceType: row.source_type === 'manual_test' ? 'manual_test' : 'automation',
+    subject: row.subject,
+    content: row.content,
+    success: row.success,
+    httpStatus: row.http_status ?? undefined,
+    responseBody: row.response_body ?? undefined,
+    errorMessage: row.error_message ?? undefined,
+    automationRuleId: row.automation_rule_id ?? undefined,
+    recordId: row.record_id ?? undefined,
+    initiatedBy: row.initiated_by ?? undefined,
+    createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : row.created_at,
+    deliveredAt: row.delivered_at ? (row.delivered_at instanceof Date ? row.delivered_at.toISOString() : row.delivered_at) : undefined,
   }
 }
 
@@ -128,6 +163,16 @@ export class DingTalkGroupDestinationService {
     return rowToDestination(row as Parameters<typeof rowToDestination>[0])
   }
 
+  async listDeliveries(id: string, limit = 50): Promise<DingTalkGroupDelivery[]> {
+    const rows = await this.db.selectFrom('dingtalk_group_deliveries')
+      .selectAll()
+      .where('destination_id', '=', id)
+      .orderBy('created_at', 'desc')
+      .limit(limit)
+      .execute()
+    return rows.map((row) => rowToDelivery(row as Parameters<typeof rowToDelivery>[0]))
+  }
+
   async updateDestination(
     id: string,
     userId: string,
@@ -204,6 +249,9 @@ export class DingTalkGroupDestinationService {
     const content = input.content?.trim() || 'This is a standard DingTalk group destination test message.'
     const payload = buildDingTalkMarkdown(subject, content)
     const signedUrl = buildSignedDingTalkWebhookUrl(row.webhook_url, row.secret ?? undefined)
+    let deliveryRecorded = false
+    let responseStatus: number | null = null
+    let responseBody: string | null = null
 
     try {
       const response = await this.fetchFn(signedUrl, {
@@ -216,10 +264,51 @@ export class DingTalkGroupDestinationService {
       })
 
       const parsed = await readJsonSafely(response)
+      responseStatus = response.status
+      responseBody = parsed ? JSON.stringify(parsed) : response.statusText || null
       if (!response.ok) {
+        deliveryRecorded = true
+        await this.recordDeliverySafely({
+          destinationId: id,
+          sourceType: 'manual_test',
+          subject,
+          content,
+          initiatedBy: userId,
+          success: false,
+          httpStatus: response.status,
+          responseBody,
+          errorMessage: `HTTP ${response.status}: ${response.statusText}`,
+        })
         throw new Error(`HTTP ${response.status}: ${response.statusText}`)
       }
-      validateDingTalkRobotResponse(parsed)
+      try {
+        validateDingTalkRobotResponse(parsed)
+      } catch (error) {
+        deliveryRecorded = true
+        await this.recordDeliverySafely({
+          destinationId: id,
+          sourceType: 'manual_test',
+          subject,
+          content,
+          initiatedBy: userId,
+          success: false,
+          httpStatus: response.status,
+          responseBody,
+          errorMessage: error instanceof Error ? error.message : 'DingTalk robot response validation failed',
+        })
+        throw error
+      }
+      deliveryRecorded = true
+      await this.recordDeliverySafely({
+        destinationId: id,
+        sourceType: 'manual_test',
+        subject,
+        content,
+        initiatedBy: userId,
+        success: true,
+        httpStatus: response.status,
+        responseBody,
+      })
 
       await this.db.updateTable('dingtalk_group_destinations')
         .set({
@@ -235,6 +324,19 @@ export class DingTalkGroupDestinationService {
       return { ok: true }
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown error'
+      if (!deliveryRecorded) {
+        await this.recordDeliverySafely({
+          destinationId: id,
+          sourceType: 'manual_test',
+          subject,
+          content,
+          initiatedBy: userId,
+          success: false,
+          httpStatus: responseStatus,
+          responseBody,
+          errorMessage: message,
+        })
+      }
       await this.db.updateTable('dingtalk_group_destinations')
         .set({
           updated_at: nowTimestamp(),
@@ -245,6 +347,48 @@ export class DingTalkGroupDestinationService {
         .where('id', '=', id)
         .execute()
       throw new Error(message)
+    }
+  }
+
+  private async recordDelivery(input: {
+    destinationId: string
+    sourceType: 'manual_test' | 'automation'
+    subject: string
+    content: string
+    initiatedBy?: string | null
+    automationRuleId?: string | null
+    recordId?: string | null
+    success: boolean
+    httpStatus?: number | null
+    responseBody?: string | null
+    errorMessage?: string | null
+  }): Promise<void> {
+    await this.db.insertInto('dingtalk_group_deliveries').values({
+      id: generateId(),
+      destination_id: input.destinationId,
+      source_type: input.sourceType,
+      subject: input.subject,
+      content: input.content,
+      success: input.success,
+      http_status: input.httpStatus ?? null,
+      response_body: input.responseBody ?? null,
+      error_message: input.errorMessage ?? null,
+      automation_rule_id: input.automationRuleId ?? null,
+      record_id: input.recordId ?? null,
+      initiated_by: input.initiatedBy ?? null,
+      delivered_at: input.success ? sql<string>`CURRENT_TIMESTAMP` : null,
+    }).execute()
+  }
+
+  private async recordDeliverySafely(input: Parameters<DingTalkGroupDestinationService['recordDelivery']>[0]): Promise<void> {
+    try {
+      await this.recordDelivery(input)
+    } catch (error) {
+      logger.warn('Failed to persist DingTalk group delivery history', {
+        error: error instanceof Error ? error.message : String(error),
+        destinationId: input.destinationId,
+        sourceType: input.sourceType,
+      })
     }
   }
 }

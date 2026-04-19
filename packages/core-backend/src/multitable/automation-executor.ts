@@ -85,6 +85,65 @@ function buildAppLink(baseUrl: string, path: string, search?: Record<string, str
   return url.toString()
 }
 
+async function recordDingTalkGroupDelivery(
+  queryFn: AutomationDeps['queryFn'],
+  input: {
+    destinationId: string
+    sourceType: 'automation' | 'manual_test'
+    subject: string
+    content: string
+    success: boolean
+    httpStatus?: number | null
+    responseBody?: string | null
+    errorMessage?: string | null
+    automationRuleId?: string | null
+    recordId?: string | null
+    initiatedBy?: string | null
+  },
+): Promise<void> {
+  await queryFn(
+    `INSERT INTO dingtalk_group_deliveries (
+       id, destination_id, source_type, subject, content, success,
+       http_status, response_body, error_message, automation_rule_id,
+       record_id, initiated_by, delivered_at
+     ) VALUES (
+       $1, $2, $3, $4, $5, $6,
+       $7, $8, $9, $10,
+       $11, $12, $13
+     )`,
+    [
+      randomUUID(),
+      input.destinationId,
+      input.sourceType,
+      input.subject,
+      input.content,
+      input.success,
+      input.httpStatus ?? null,
+      input.responseBody ?? null,
+      input.errorMessage ?? null,
+      input.automationRuleId ?? null,
+      input.recordId ?? null,
+      input.initiatedBy ?? null,
+      input.success ? new Date().toISOString() : null,
+    ],
+  )
+}
+
+async function recordDingTalkGroupDeliverySafely(
+  queryFn: AutomationDeps['queryFn'],
+  input: Parameters<typeof recordDingTalkGroupDelivery>[1],
+): Promise<void> {
+  try {
+    await recordDingTalkGroupDelivery(queryFn, input)
+  } catch (error) {
+    logger.warn('Failed to persist DingTalk group delivery history', {
+      error: error instanceof Error ? error.message : String(error),
+      destinationId: input.destinationId,
+      sourceType: input.sourceType,
+    })
+  }
+}
+
 // ── Types ─────────────────────────────────────────────────────────────────
 
 export interface AutomationRule {
@@ -120,6 +179,7 @@ export interface AutomationStepResult {
 }
 
 export interface ExecutionContext {
+  ruleId: string
   sheetId: string
   recordId: string
   recordData: Record<string, unknown>
@@ -163,6 +223,7 @@ export class AutomationExecutor {
     // Build execution context from trigger event
     const payload = triggerEvent as Record<string, unknown>
     const context: ExecutionContext = {
+      ruleId: rule.id,
       sheetId: rule.sheetId,
       recordId: (payload?.recordId as string) ?? '',
       recordData: (payload?.data as Record<string, unknown>) ?? (payload?.changes as Record<string, unknown>) ?? {},
@@ -574,6 +635,9 @@ export class AutomationExecutor {
       renderedBody,
       linkLines.length > 0 ? ['**快捷入口**', ...linkLines].join('\n') : '',
     ].filter(Boolean).join('\n\n')
+    let deliveryRecorded = false
+    let responseStatus: number | null = null
+    let responseBody: string | null = null
 
     try {
       const response = await (this.deps.fetchFn ?? globalThis.fetch)(
@@ -588,14 +652,65 @@ export class AutomationExecutor {
         },
       )
       const parsed = await readJsonSafely(response)
+      responseStatus = response.status
+      responseBody = parsed ? JSON.stringify(parsed) : response.statusText || null
       if (!response.ok) {
+        deliveryRecorded = true
+        await recordDingTalkGroupDeliverySafely(this.deps.queryFn, {
+          destinationId: destination.id,
+          sourceType: 'automation',
+          subject: renderedTitle,
+          content: bodyWithLinks,
+          success: false,
+          httpStatus: response.status,
+          responseBody,
+          errorMessage: `DingTalk request failed with HTTP ${response.status}`,
+          automationRuleId: context.ruleId,
+          recordId: context.recordId,
+          initiatedBy: context.actorId ?? null,
+        })
         return {
           actionType: 'send_dingtalk_group_message',
           status: 'failed',
           error: `DingTalk request failed with HTTP ${response.status}`,
         }
       }
-      validateDingTalkRobotResponse(parsed)
+      try {
+        validateDingTalkRobotResponse(parsed)
+      } catch (err) {
+        deliveryRecorded = true
+        await recordDingTalkGroupDeliverySafely(this.deps.queryFn, {
+          destinationId: destination.id,
+          sourceType: 'automation',
+          subject: renderedTitle,
+          content: bodyWithLinks,
+          success: false,
+          httpStatus: response.status,
+          responseBody,
+          errorMessage: err instanceof Error ? err.message : String(err),
+          automationRuleId: context.ruleId,
+          recordId: context.recordId,
+          initiatedBy: context.actorId ?? null,
+        })
+        return {
+          actionType: 'send_dingtalk_group_message',
+          status: 'failed',
+          error: err instanceof Error ? err.message : String(err),
+        }
+      }
+      deliveryRecorded = true
+      await recordDingTalkGroupDeliverySafely(this.deps.queryFn, {
+        destinationId: destination.id,
+        sourceType: 'automation',
+        subject: renderedTitle,
+        content: bodyWithLinks,
+        success: true,
+        httpStatus: response.status,
+        responseBody,
+        automationRuleId: context.ruleId,
+        recordId: context.recordId,
+        initiatedBy: context.actorId ?? null,
+      })
       return {
         actionType: 'send_dingtalk_group_message',
         status: 'success',
@@ -606,6 +721,21 @@ export class AutomationExecutor {
         },
       }
     } catch (err) {
+      if (!deliveryRecorded) {
+        await recordDingTalkGroupDeliverySafely(this.deps.queryFn, {
+          destinationId: destination.id,
+          sourceType: 'automation',
+          subject: renderedTitle,
+          content: bodyWithLinks,
+          success: false,
+          httpStatus: responseStatus,
+          responseBody,
+          errorMessage: err instanceof Error ? err.message : String(err),
+          automationRuleId: context.ruleId,
+          recordId: context.recordId,
+          initiatedBy: context.actorId ?? null,
+        })
+      }
       return {
         actionType: 'send_dingtalk_group_message',
         status: 'failed',

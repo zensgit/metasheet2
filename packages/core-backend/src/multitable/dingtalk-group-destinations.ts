@@ -30,3 +30,20 @@ export interface DingTalkGroupTestSendInput {
   subject?: string
   content?: string
 }
+
+export interface DingTalkGroupDelivery {
+  id: string
+  destinationId: string
+  sourceType: 'manual_test' | 'automation'
+  subject: string
+  content: string
+  success: boolean
+  httpStatus?: number
+  responseBody?: string
+  errorMessage?: string
+  automationRuleId?: string
+  recordId?: string
+  initiatedBy?: string
+  createdAt: string
+  deliveredAt?: string
+}

@@ -435,7 +435,7 @@ describe('AutomationExecutor', () => {
 
     expect(result.status).toBe('success')
     expect(result.steps[0].actionType).toBe('send_dingtalk_group_message')
-    expect(queryFn).toHaveBeenCalledTimes(3)
+    expect(queryFn).toHaveBeenCalledTimes(4)
     expect(fetchFn).toHaveBeenCalledTimes(1)
 
     const [url, init] = fetchFn.mock.calls[0] as [string, RequestInit]
@@ -445,6 +445,89 @@ describe('AutomationExecutor', () => {
     expect(payload.markdown.text).toContain('Status: open')
     expect(payload.markdown.text).toContain('/multitable/public-form/sheet_1/view_form?publicToken=public-token')
     expect(payload.markdown.text).toContain('/multitable/sheet_1/view_grid?recordId=r1')
+    expect((queryFn.mock.calls[3]?.[0] as string) ?? '').toContain('INSERT INTO dingtalk_group_deliveries')
+  })
+
+  it('records DingTalk application error diagnostics for send_dingtalk_group_message', async () => {
+    const queryFn = vi.fn()
+      .mockResolvedValueOnce({
+        rows: [{ id: 'dt_1', name: 'Ops Group', webhook_url: 'https://oapi.dingtalk.com/robot/send?access_token=test', secret: null, enabled: true }],
+      })
+      .mockResolvedValueOnce({ rows: [], rowCount: 1 })
+    const fetchFn = vi.fn(async () => new Response(JSON.stringify({ errcode: 310000, errmsg: 'signature mismatch' }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    })) as unknown as typeof fetch
+
+    deps = createMockDeps({ queryFn, fetchFn })
+    executor = new AutomationExecutor(deps)
+
+    const rule = createMockRule({
+      actions: [{
+        type: 'send_dingtalk_group_message',
+        config: {
+          destinationId: 'dt_1',
+          titleTemplate: 'Record {{record.title}} ready',
+          bodyTemplate: 'Status: {{record.status}}',
+        },
+      }],
+    })
+    const result = await executor.execute(rule, {
+      recordId: 'r1',
+      data: { title: 'Incident', status: 'open' },
+      sheetId: 'sheet_1',
+      actorId: 'user_1',
+    })
+
+    expect(result.status).toBe('failed')
+    expect(result.steps[0].error).toContain('signature mismatch')
+    const insertArgs = queryFn.mock.calls[1]?.[1] as unknown[] | undefined
+    expect(insertArgs?.[6]).toBe(200)
+    expect(insertArgs?.[7]).toContain('signature mismatch')
+    expect(insertArgs?.[8]).toContain('signature mismatch')
+  })
+
+  it('keeps send_dingtalk_group_message successful when delivery history persistence fails', async () => {
+    process.env.APP_BASE_URL = 'https://app.example.com'
+    const queryFn = vi.fn()
+      .mockResolvedValueOnce({
+        rows: [{ id: 'dt_1', name: 'Ops Group', webhook_url: 'https://oapi.dingtalk.com/robot/send?access_token=test', secret: null, enabled: true }],
+      })
+      .mockResolvedValueOnce({
+        rows: [{ id: 'view_form', sheet_id: 'sheet_1', config: { publicForm: { enabled: true, publicToken: 'public-token' } } }],
+      })
+      .mockResolvedValueOnce({ rows: [{ id: 'view_grid' }] })
+      .mockRejectedValueOnce(new Error('delivery history unavailable'))
+    const fetchFn = vi.fn(async () => new Response(JSON.stringify({ errcode: 0, errmsg: 'ok' }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    })) as unknown as typeof fetch
+
+    deps = createMockDeps({ queryFn, fetchFn })
+    executor = new AutomationExecutor(deps)
+
+    const rule = createMockRule({
+      actions: [{
+        type: 'send_dingtalk_group_message',
+        config: {
+          destinationId: 'dt_1',
+          titleTemplate: 'Record {{record.title}} ready',
+          bodyTemplate: 'Status: {{record.status}}',
+          publicFormViewId: 'view_form',
+          internalViewId: 'view_grid',
+        },
+      }],
+    })
+    const result = await executor.execute(rule, {
+      recordId: 'r1',
+      data: { title: 'Incident', status: 'open' },
+      sheetId: 'sheet_1',
+      actorId: 'user_1',
+    })
+
+    expect(result.status).toBe('success')
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    expect(queryFn).toHaveBeenCalledTimes(4)
   })
 
   it('fails send_dingtalk_group_message when destination is missing', async () => {
