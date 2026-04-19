@@ -130,6 +130,7 @@
                 <option value="send_webhook">Send webhook</option>
                 <option value="send_notification">Send notification</option>
                 <option value="send_dingtalk_group_message">Send DingTalk group message</option>
+                <option value="send_dingtalk_person_message">Send DingTalk person message</option>
                 <option value="lock_record">Lock record</option>
               </select>
               <div class="meta-rule-editor__action-btns">
@@ -234,6 +235,52 @@
               </select>
             </div>
 
+            <!-- send_dingtalk_person_message config -->
+            <div v-if="action.type === 'send_dingtalk_person_message'" class="meta-rule-editor__action-config">
+              <label class="meta-rule-editor__label">Local user IDs</label>
+              <textarea
+                v-model="action.config.userIdsText"
+                class="meta-rule-editor__textarea"
+                rows="3"
+                placeholder="使用逗号或换行分隔本地 userId"
+                data-field="dingtalkPersonUserIds"
+              ></textarea>
+              <label class="meta-rule-editor__label">Title template</label>
+              <input
+                v-model="action.config.titleTemplate"
+                class="meta-rule-editor__input"
+                type="text"
+                placeholder="例如：{{record.title}} 待处理"
+                data-field="dingtalkPersonTitleTemplate"
+              />
+              <label class="meta-rule-editor__label">Body template</label>
+              <textarea
+                v-model="action.config.bodyTemplate"
+                class="meta-rule-editor__textarea"
+                rows="4"
+                placeholder="支持 {{record.xxx}}、{{recordId}}、{{sheetId}}、{{actorId}}"
+                data-field="dingtalkPersonBodyTemplate"
+              ></textarea>
+              <label class="meta-rule-editor__label">Public form view (optional)</label>
+              <select
+                v-model="action.config.publicFormViewId"
+                class="meta-rule-editor__select"
+                data-field="dingtalkPersonPublicFormViewId"
+              >
+                <option value="">-- no public form link --</option>
+                <option v-for="view in formViews" :key="view.id" :value="view.id">{{ view.name }}</option>
+              </select>
+              <label class="meta-rule-editor__label">Internal processing view (optional)</label>
+              <select
+                v-model="action.config.internalViewId"
+                class="meta-rule-editor__select"
+                data-field="dingtalkPersonInternalViewId"
+              >
+                <option value="">-- no internal link --</option>
+                <option v-for="view in internalViews" :key="view.id" :value="view.id">{{ view.name }}</option>
+              </select>
+            </div>
+
             <!-- lock_record config -->
             <div v-if="action.type === 'lock_record'" class="meta-rule-editor__action-config">
               <label class="meta-rule-editor__toggle-label">
@@ -290,6 +337,7 @@ type DraftActionConfig = Record<string, unknown> & {
   url?: string
   method?: string
   userId?: string
+  userIdsText?: string
   message?: string
   destinationId?: string
   titleTemplate?: string
@@ -363,6 +411,18 @@ function emptyDraft(): Draft {
   }
 }
 
+function draftConfigFromAction(type: AutomationActionType, config: Record<string, unknown>): DraftActionConfig {
+  if (type === 'send_dingtalk_person_message') {
+    return {
+      ...config,
+      userIdsText: Array.isArray(config.userIds)
+        ? config.userIds.join(', ')
+        : '',
+    }
+  }
+  return { ...config }
+}
+
 function draftFromRule(rule: AutomationRule): Draft {
   return {
     name: rule.name,
@@ -372,8 +432,8 @@ function draftFromRule(rule: AutomationRule): Draft {
       ? { conjunction: rule.conditions.conjunction, conditions: rule.conditions.conditions.map((c) => ({ ...c })) }
       : { conjunction: 'AND', conditions: [] },
     actions: rule.actions && rule.actions.length
-      ? rule.actions.map((a) => ({ type: a.type, config: { ...a.config } }))
-      : [{ type: rule.actionType, config: { ...rule.actionConfig } }],
+      ? rule.actions.map((a) => ({ type: a.type, config: draftConfigFromAction(a.type, a.config) }))
+      : [{ type: rule.actionType, config: draftConfigFromAction(rule.actionType, rule.actionConfig) }],
   }
 }
 
@@ -412,6 +472,12 @@ const canSave = computed(() => {
       const bodyTemplate = typeof action.config.bodyTemplate === 'string' ? action.config.bodyTemplate.trim() : ''
       if (!destinationId || !titleTemplate || !bodyTemplate) return false
     }
+    if (action.type === 'send_dingtalk_person_message') {
+      const userIdsText = typeof action.config.userIdsText === 'string' ? action.config.userIdsText.trim() : ''
+      const titleTemplate = typeof action.config.titleTemplate === 'string' ? action.config.titleTemplate.trim() : ''
+      const bodyTemplate = typeof action.config.bodyTemplate === 'string' ? action.config.bodyTemplate.trim() : ''
+      if (!userIdsText || !titleTemplate || !bodyTemplate) return false
+    }
   }
   return true
 })
@@ -442,6 +508,14 @@ function defaultConfigForActionType(type: AutomationActionType): DraftActionConf
     case 'send_dingtalk_group_message':
       return {
         destinationId: '',
+        titleTemplate: '',
+        bodyTemplate: '',
+        publicFormViewId: '',
+        internalViewId: '',
+      }
+    case 'send_dingtalk_person_message':
+      return {
+        userIdsText: '',
         titleTemplate: '',
         bodyTemplate: '',
         publicFormViewId: '',
@@ -493,15 +567,40 @@ function buildPayload(): Partial<AutomationRule> {
   if (d.triggerType === 'schedule.cron' && cronPreset.value !== 'custom') {
     triggerConfig.cron = cronPreset.value
   }
+  const actions = d.actions.map((action) => {
+    if (action.type === 'send_dingtalk_person_message') {
+      const userIds = typeof action.config.userIdsText === 'string'
+        ? action.config.userIdsText
+          .split(/[\n,]+/)
+          .map((entry) => entry.trim())
+          .filter(Boolean)
+        : []
+      return {
+        type: action.type,
+        config: {
+          userIds,
+          titleTemplate: typeof action.config.titleTemplate === 'string' ? action.config.titleTemplate.trim() : '',
+          bodyTemplate: typeof action.config.bodyTemplate === 'string' ? action.config.bodyTemplate.trim() : '',
+          publicFormViewId: typeof action.config.publicFormViewId === 'string' && action.config.publicFormViewId.trim()
+            ? action.config.publicFormViewId.trim()
+            : undefined,
+          internalViewId: typeof action.config.internalViewId === 'string' && action.config.internalViewId.trim()
+            ? action.config.internalViewId.trim()
+            : undefined,
+        },
+      }
+    }
+    return { type: action.type, config: action.config }
+  })
   return {
     name: d.name.trim(),
     triggerType: d.triggerType,
     triggerConfig,
     trigger: { type: d.triggerType, config: triggerConfig },
     conditions: d.conditions.conditions.length > 0 ? d.conditions : undefined,
-    actions: d.actions.map((a) => ({ type: a.type, config: a.config })),
-    actionType: d.actions[0]?.type ?? 'update_record',
-    actionConfig: d.actions[0]?.config ?? {},
+    actions,
+    actionType: actions[0]?.type ?? 'update_record',
+    actionConfig: actions[0]?.config ?? {},
   }
 }
 

@@ -586,6 +586,7 @@ export type AutomationActionType =
   | 'send_webhook'
   | 'send_notification'
   | 'send_dingtalk_group_message'
+  | 'send_dingtalk_person_message'
   | 'lock_record'
   // Legacy aliases
   | 'notify'

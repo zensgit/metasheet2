@@ -114,6 +114,7 @@ export interface Database {
   multitable_webhook_deliveries: MultitableWebhookDeliveriesTable
   dingtalk_group_destinations: DingTalkGroupDestinationsTable
   dingtalk_group_deliveries: DingTalkGroupDeliveriesTable
+  dingtalk_person_deliveries: DingTalkPersonDeliveriesTable
 }
 
 export interface SnapshotsTable {
@@ -1316,6 +1317,24 @@ export interface DingTalkGroupDestinationsTable {
 export interface DingTalkGroupDeliveriesTable {
   id: string
   destination_id: string
+  source_type: string
+  subject: string
+  content: string
+  success: boolean
+  http_status: number | null
+  response_body: string | null
+  error_message: string | null
+  automation_rule_id: string | null
+  record_id: string | null
+  initiated_by: string | null
+  created_at: CreatedAt
+  delivered_at: NullableTimestamp
+}
+
+export interface DingTalkPersonDeliveriesTable {
+  id: string
+  local_user_id: string
+  dingtalk_user_id: string | null
   source_type: string
   subject: string
   content: string

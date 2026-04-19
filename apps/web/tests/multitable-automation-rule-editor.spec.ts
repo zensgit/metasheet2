@@ -257,4 +257,75 @@ describe('MetaAutomationRuleEditor', () => {
     })
     expect(client.listDingTalkGroups).toHaveBeenCalledTimes(1)
   })
+
+  it('emits DingTalk person action config with optional links', async () => {
+    const saved = vi.fn()
+    const client = mockClient()
+    const { container } = mount({
+      visible: true,
+      sheetId: 'sheet_1',
+      fields,
+      views,
+      client,
+      onSave: saved,
+    })
+    await flushPromises()
+
+    const nameInput = container.querySelector('[data-field="name"]') as HTMLInputElement
+    nameInput.value = 'Notify People'
+    nameInput.dispatchEvent(new Event('input'))
+    await flushPromises()
+
+    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header select') as HTMLSelectElement
+    actionSelect.value = 'send_dingtalk_person_message'
+    actionSelect.dispatchEvent(new Event('change'))
+    await flushPromises()
+
+    const userIdsInput = container.querySelector('[data-field="dingtalkPersonUserIds"]') as HTMLTextAreaElement
+    userIdsInput.value = 'user_1, user_2'
+    userIdsInput.dispatchEvent(new Event('input'))
+
+    const titleInput = container.querySelector('[data-field="dingtalkPersonTitleTemplate"]') as HTMLInputElement
+    titleInput.value = 'Ticket {{recordId}}'
+    titleInput.dispatchEvent(new Event('input'))
+
+    const bodyInput = container.querySelector('[data-field="dingtalkPersonBodyTemplate"]') as HTMLTextAreaElement
+    bodyInput.value = 'Please review {{record.status}}'
+    bodyInput.dispatchEvent(new Event('input'))
+
+    const publicFormSelect = container.querySelector('[data-field="dingtalkPersonPublicFormViewId"]') as HTMLSelectElement
+    publicFormSelect.value = 'view_form'
+    publicFormSelect.dispatchEvent(new Event('change'))
+
+    const internalViewSelect = container.querySelector('[data-field="dingtalkPersonInternalViewId"]') as HTMLSelectElement
+    internalViewSelect.value = 'view_grid'
+    internalViewSelect.dispatchEvent(new Event('change'))
+    await flushPromises()
+
+    const saveBtn = container.querySelector('[data-action="save"]') as HTMLButtonElement
+    expect(saveBtn.disabled).toBe(false)
+    saveBtn.click()
+    await flushPromises()
+
+    expect(saved).toHaveBeenCalledTimes(1)
+    const payload = saved.mock.calls[0][0]
+    expect(payload.actionType).toBe('send_dingtalk_person_message')
+    expect(payload.actionConfig).toEqual({
+      userIds: ['user_1', 'user_2'],
+      titleTemplate: 'Ticket {{recordId}}',
+      bodyTemplate: 'Please review {{record.status}}',
+      publicFormViewId: 'view_form',
+      internalViewId: 'view_grid',
+    })
+    expect(payload.actions[0]).toEqual({
+      type: 'send_dingtalk_person_message',
+      config: {
+        userIds: ['user_1', 'user_2'],
+        titleTemplate: 'Ticket {{recordId}}',
+        bodyTemplate: 'Please review {{record.status}}',
+        publicFormViewId: 'view_form',
+        internalViewId: 'view_grid',
+      },
+    })
+  })
 })

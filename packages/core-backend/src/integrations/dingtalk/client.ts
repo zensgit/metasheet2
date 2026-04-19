@@ -31,6 +31,26 @@ export interface DingTalkDirectoryConfig {
   baseUrl?: string
 }
 
+export interface DingTalkMessageConfig extends DingTalkDirectoryConfig {
+  agentId: string
+}
+
+export interface DingTalkWorkNotificationInput {
+  userIds: string[]
+  title: string
+  content: string
+}
+
+export interface DingTalkWorkNotificationResult {
+  taskId?: string
+  requestId?: string
+  raw: Record<string, unknown>
+}
+
+interface DingTalkRequestOptions {
+  fetchFn?: typeof fetch
+}
+
 export interface DingTalkDepartment {
   id: string
   parentId: string | null
@@ -66,7 +86,7 @@ export interface DingTalkDirectoryUser {
   source: Record<string, unknown>
 }
 
-class DingTalkRequestError extends Error {
+export class DingTalkRequestError extends Error {
   statusCode: number
   responseBody: Record<string, unknown> | null
 
@@ -74,6 +94,16 @@ class DingTalkRequestError extends Error {
     super(message)
     this.name = 'DingTalkRequestError'
     this.statusCode = statusCode
+    this.responseBody = responseBody
+  }
+}
+
+export class DingTalkBusinessError extends Error {
+  responseBody: Record<string, unknown> | null
+
+  constructor(message: string, responseBody: Record<string, unknown> | null) {
+    super(message)
+    this.name = 'DingTalkBusinessError'
     this.responseBody = responseBody
   }
 }
@@ -118,8 +148,9 @@ async function requestDingTalkJson(
   input: string,
   init: RequestInit,
   fallbackError: string,
+  options?: DingTalkRequestOptions,
 ): Promise<Record<string, unknown>> {
-  const response = await fetch(input, init)
+  const response = await (options?.fetchFn ?? fetch)(input, init)
   const payload = await readJson(response)
 
   if (!response.ok) {
@@ -150,7 +181,7 @@ function readNestedPayload(payload: Record<string, unknown>, key = 'result'): Re
 function normalizeDingTalkApiPayload(payload: Record<string, unknown>, fallbackError: string): Record<string, unknown> {
   const errcode = readNumericField(payload, 'errcode', 'code')
   if (errcode !== null && errcode !== 0) {
-    throw new Error(normalizeErrorMessage(payload, fallbackError))
+    throw new DingTalkBusinessError(normalizeErrorMessage(payload, fallbackError), payload)
   }
   return payload
 }
@@ -167,11 +198,13 @@ async function requestDingTalkDirectoryJson(
   init: RequestInit,
   fallbackError: string,
   baseUrl?: string,
+  options?: DingTalkRequestOptions,
 ): Promise<Record<string, unknown>> {
   const payload = await requestDingTalkJson(
     `${normalizeDirectoryBaseUrl(baseUrl)}${path}`,
     init,
     fallbackError,
+    options,
   )
   return normalizeDingTalkApiPayload(payload, fallbackError)
 }
@@ -192,6 +225,24 @@ export function readDingTalkOauthConfig(): DingTalkOauthConfig {
     clientSecret,
     redirectUri,
     corpId,
+  }
+}
+
+export function readDingTalkMessageConfig(): DingTalkMessageConfig {
+  const appKey = readStringEnv('DINGTALK_APP_KEY', 'DINGTALK_CLIENT_ID')
+  const appSecret = readStringEnv('DINGTALK_APP_SECRET', 'DINGTALK_CLIENT_SECRET')
+  const agentId = readStringEnv('DINGTALK_AGENT_ID', 'DINGTALK_NOTIFY_AGENT_ID')
+  const baseUrl = readStringEnv('DINGTALK_BASE_URL') || undefined
+
+  if (!appKey) throw new Error('DINGTALK_APP_KEY or DINGTALK_CLIENT_ID is not configured')
+  if (!appSecret) throw new Error('DINGTALK_APP_SECRET or DINGTALK_CLIENT_SECRET is not configured')
+  if (!agentId) throw new Error('DINGTALK_AGENT_ID or DINGTALK_NOTIFY_AGENT_ID is not configured')
+
+  return {
+    appKey,
+    appSecret,
+    agentId,
+    baseUrl,
   }
 }
 
@@ -305,7 +356,10 @@ export async function fetchDingTalkCurrentUser(accessToken: string): Promise<Din
   }
 }
 
-export async function fetchDingTalkAppAccessToken(config: DingTalkDirectoryConfig): Promise<string> {
+export async function fetchDingTalkAppAccessToken(
+  config: DingTalkDirectoryConfig,
+  options?: DingTalkRequestOptions,
+): Promise<string> {
   const baseUrl = normalizeDirectoryBaseUrl(config.baseUrl)
   const payload = await requestDingTalkDirectoryJson(
     `/gettoken?appkey=${encodeURIComponent(config.appKey)}&appsecret=${encodeURIComponent(config.appSecret)}`,
@@ -317,6 +371,7 @@ export async function fetchDingTalkAppAccessToken(config: DingTalkDirectoryConfi
     },
     'Failed to obtain DingTalk app access token',
     baseUrl,
+    options,
   )
 
   const token = typeof payload.access_token === 'string'
@@ -483,4 +538,61 @@ export async function getDingTalkUserDetail(
   }
 }
 
-export { DingTalkRequestError }
+export async function sendDingTalkWorkNotification(
+  accessToken: string,
+  input: DingTalkWorkNotificationInput,
+  config: DingTalkMessageConfig = readDingTalkMessageConfig(),
+  options?: DingTalkRequestOptions,
+): Promise<DingTalkWorkNotificationResult> {
+  const userIds = Array.from(new Set(
+    input.userIds
+      .map((userId) => String(userId ?? '').trim())
+      .filter(Boolean),
+  ))
+  const title = input.title.trim()
+  const content = input.content.trim()
+
+  if (userIds.length === 0) throw new Error('At least one DingTalk userId is required')
+  if (!title) throw new Error('DingTalk title is required')
+  if (!content) throw new Error('DingTalk content is required')
+
+  const payload = await requestDingTalkDirectoryJson(
+    `/topapi/message/corpconversation/asyncsend_v2?access_token=${encodeURIComponent(accessToken)}`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        agent_id: Number.isNaN(Number(config.agentId)) ? config.agentId : Number(config.agentId),
+        userid_list: userIds.join(','),
+        to_all_user: false,
+        msg: {
+          msgtype: 'markdown',
+          markdown: {
+            title,
+            text: `### ${title}\n\n${content}`,
+          },
+        },
+      }),
+    },
+    'Failed to send DingTalk work notification',
+    config.baseUrl,
+    options,
+  )
+
+  const result = readNestedPayload(payload)
+  const taskIdValue = payload.task_id ?? payload.taskId ?? result.task_id ?? result.taskId
+  const requestIdValue = payload.request_id ?? payload.requestId ?? result.request_id ?? result.requestId
+  return {
+    taskId:
+      typeof taskIdValue === 'number'
+        ? String(taskIdValue)
+        : typeof taskIdValue === 'string'
+          ? taskIdValue
+              : undefined,
+    requestId:
+      typeof requestIdValue === 'string'
+        ? requestIdValue
+          : undefined,
+    raw: payload,
+  }
+}

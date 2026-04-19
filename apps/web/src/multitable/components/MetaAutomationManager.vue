@@ -42,6 +42,7 @@
             <option value="notify">Send notification</option>
             <option value="update_field">Update field value</option>
             <option value="send_dingtalk_group_message">Send DingTalk group message</option>
+            <option value="send_dingtalk_person_message">Send DingTalk person message</option>
           </select>
 
           <template v-if="draft.actionType === 'notify'">
@@ -102,6 +103,43 @@
             </select>
             <label class="meta-automation__label">Internal processing view (optional)</label>
             <select v-model="draft.internalViewId" class="meta-automation__select" data-automation-field="internalViewId">
+              <option value="">-- no internal link --</option>
+              <option v-for="view in internalViews" :key="view.id" :value="view.id">{{ view.name }}</option>
+            </select>
+          </template>
+
+          <template v-if="draft.actionType === 'send_dingtalk_person_message'">
+            <label class="meta-automation__label">Local user IDs</label>
+            <textarea
+              v-model="draft.dingtalkPersonUserIds"
+              class="meta-automation__input"
+              rows="3"
+              placeholder="使用逗号或换行分隔本地 userId"
+              data-automation-field="dingtalkPersonUserIds"
+            ></textarea>
+            <label class="meta-automation__label">Title template</label>
+            <input
+              v-model="draft.dingtalkPersonTitleTemplate"
+              class="meta-automation__input"
+              type="text"
+              placeholder="例如：{{record.title}} 待处理"
+              data-automation-field="dingtalkPersonTitleTemplate"
+            />
+            <label class="meta-automation__label">Body template</label>
+            <textarea
+              v-model="draft.dingtalkPersonBodyTemplate"
+              class="meta-automation__input"
+              rows="4"
+              placeholder="支持 {{record.xxx}}、{{recordId}}、{{sheetId}}、{{actorId}}"
+              data-automation-field="dingtalkPersonBodyTemplate"
+            ></textarea>
+            <label class="meta-automation__label">Public form view (optional)</label>
+            <select v-model="draft.dingtalkPersonPublicFormViewId" class="meta-automation__select" data-automation-field="dingtalkPersonPublicFormViewId">
+              <option value="">-- no public form link --</option>
+              <option v-for="view in formViews" :key="view.id" :value="view.id">{{ view.name }}</option>
+            </select>
+            <label class="meta-automation__label">Internal processing view (optional)</label>
+            <select v-model="draft.dingtalkPersonInternalViewId" class="meta-automation__select" data-automation-field="dingtalkPersonInternalViewId">
               <option value="">-- no internal link --</option>
               <option v-for="view in internalViews" :key="view.id" :value="view.id">{{ view.name }}</option>
             </select>
@@ -226,6 +264,11 @@ interface DraftState {
   dingtalkBodyTemplate: string
   publicFormViewId: string
   internalViewId: string
+  dingtalkPersonUserIds: string
+  dingtalkPersonTitleTemplate: string
+  dingtalkPersonBodyTemplate: string
+  dingtalkPersonPublicFormViewId: string
+  dingtalkPersonInternalViewId: string
 }
 
 function emptyDraft(): DraftState {
@@ -242,6 +285,11 @@ function emptyDraft(): DraftState {
     dingtalkBodyTemplate: '',
     publicFormViewId: '',
     internalViewId: '',
+    dingtalkPersonUserIds: '',
+    dingtalkPersonTitleTemplate: '',
+    dingtalkPersonBodyTemplate: '',
+    dingtalkPersonPublicFormViewId: '',
+    dingtalkPersonInternalViewId: '',
   }
 }
 
@@ -315,6 +363,11 @@ const canSave = computed(() => {
     if (!draft.value.dingtalkTitleTemplate.trim()) return false
     if (!draft.value.dingtalkBodyTemplate.trim()) return false
   }
+  if (draft.value.actionType === 'send_dingtalk_person_message') {
+    if (!draft.value.dingtalkPersonUserIds.trim()) return false
+    if (!draft.value.dingtalkPersonTitleTemplate.trim()) return false
+    if (!draft.value.dingtalkPersonBodyTemplate.trim()) return false
+  }
   return true
 })
 
@@ -339,6 +392,11 @@ function openEditForm(rule: AutomationRule) {
     dingtalkBodyTemplate: (rule.actionConfig?.bodyTemplate as string) ?? '',
     publicFormViewId: (rule.actionConfig?.publicFormViewId as string) ?? '',
     internalViewId: (rule.actionConfig?.internalViewId as string) ?? '',
+    dingtalkPersonUserIds: Array.isArray(rule.actionConfig?.userIds) ? rule.actionConfig?.userIds.join(', ') : '',
+    dingtalkPersonTitleTemplate: (rule.actionConfig?.titleTemplate as string) ?? '',
+    dingtalkPersonBodyTemplate: (rule.actionConfig?.bodyTemplate as string) ?? '',
+    dingtalkPersonPublicFormViewId: (rule.actionConfig?.publicFormViewId as string) ?? '',
+    dingtalkPersonInternalViewId: (rule.actionConfig?.internalViewId as string) ?? '',
   }
   showForm.value = true
 }
@@ -370,6 +428,18 @@ function buildActionConfig(): Record<string, unknown> {
       bodyTemplate: draft.value.dingtalkBodyTemplate,
       publicFormViewId: draft.value.publicFormViewId || undefined,
       internalViewId: draft.value.internalViewId || undefined,
+    }
+  }
+  if (draft.value.actionType === 'send_dingtalk_person_message') {
+    return {
+      userIds: draft.value.dingtalkPersonUserIds
+        .split(/[\n,]+/)
+        .map((entry) => entry.trim())
+        .filter(Boolean),
+      titleTemplate: draft.value.dingtalkPersonTitleTemplate,
+      bodyTemplate: draft.value.dingtalkPersonBodyTemplate,
+      publicFormViewId: draft.value.dingtalkPersonPublicFormViewId || undefined,
+      internalViewId: draft.value.dingtalkPersonInternalViewId || undefined,
     }
   }
   return {}
@@ -445,6 +515,8 @@ function describeAction(rule: AutomationRule): string {
     }
     case 'send_dingtalk_group_message':
       return 'Send DingTalk group message'
+    case 'send_dingtalk_person_message':
+      return 'Send DingTalk person message'
     default:
       return String(rule.actionType)
   }

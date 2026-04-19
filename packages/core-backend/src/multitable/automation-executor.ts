@@ -5,6 +5,13 @@
 
 import { randomUUID } from 'crypto'
 import { Logger } from '../core/logger'
+import {
+  DingTalkBusinessError,
+  DingTalkRequestError,
+  fetchDingTalkAppAccessToken,
+  readDingTalkMessageConfig,
+  sendDingTalkWorkNotification,
+} from '../integrations/dingtalk/client'
 import type { EventBus } from '../integration/events/event-bus'
 import {
   buildDingTalkMarkdown,
@@ -15,6 +22,7 @@ import type {
   AutomationAction,
   AutomationActionType,
   SendDingTalkGroupMessageConfig,
+  SendDingTalkPersonMessageConfig,
 } from './automation-actions'
 import type { ConditionGroup } from './automation-conditions'
 import { evaluateConditions } from './automation-conditions'
@@ -24,6 +32,7 @@ const logger = new Logger('AutomationExecutor')
 
 const WEBHOOK_TIMEOUT_MS = 5_000
 const MAX_WEBHOOK_RETRIES = 2
+const DINGTALK_PERSON_BATCH_SIZE = 100
 
 function readJsonSafely(response: Response): Promise<unknown> {
   return response.json().catch(() => null)
@@ -54,6 +63,33 @@ function renderAutomationTemplate(template: string, data: Record<string, unknown
   return template.replace(/\{\{\s*([\w.]+)\s*\}\}/g, (_match, key: string) =>
     renderTemplateValue(lookupTemplateValue(key, data)),
   )
+}
+
+function normalizeUserIds(value: unknown): string[] {
+  if (!Array.isArray(value)) return []
+  return Array.from(new Set(
+    value
+      .map((entry) => (typeof entry === 'string' ? entry.trim() : ''))
+      .filter(Boolean),
+  ))
+}
+
+function chunkItems<T>(items: T[], size: number): T[][] {
+  if (items.length === 0) return []
+  const chunks: T[][] = []
+  for (let index = 0; index < items.length; index += size) {
+    chunks.push(items.slice(index, index + size))
+  }
+  return chunks
+}
+
+function stringifyResponseBody(payload: unknown, fallback: string | null = null): string | null {
+  if (payload === null || payload === undefined) return fallback
+  try {
+    return JSON.stringify(payload)
+  } catch {
+    return fallback
+  }
 }
 
 function parseViewConfig(raw: unknown): Record<string, unknown> | null {
@@ -139,6 +175,67 @@ async function recordDingTalkGroupDeliverySafely(
     logger.warn('Failed to persist DingTalk group delivery history', {
       error: error instanceof Error ? error.message : String(error),
       destinationId: input.destinationId,
+      sourceType: input.sourceType,
+    })
+  }
+}
+
+async function recordDingTalkPersonDelivery(
+  queryFn: AutomationDeps['queryFn'],
+  input: {
+    localUserId: string
+    dingtalkUserId?: string | null
+    sourceType: 'automation'
+    subject: string
+    content: string
+    success: boolean
+    httpStatus?: number | null
+    responseBody?: string | null
+    errorMessage?: string | null
+    automationRuleId?: string | null
+    recordId?: string | null
+    initiatedBy?: string | null
+  },
+): Promise<void> {
+  await queryFn(
+    `INSERT INTO dingtalk_person_deliveries (
+       id, local_user_id, dingtalk_user_id, source_type, subject, content, success,
+       http_status, response_body, error_message, automation_rule_id,
+       record_id, initiated_by, delivered_at
+     ) VALUES (
+       $1, $2, $3, $4, $5, $6, $7,
+       $8, $9, $10, $11,
+       $12, $13, $14
+     )`,
+    [
+      randomUUID(),
+      input.localUserId,
+      input.dingtalkUserId ?? null,
+      input.sourceType,
+      input.subject,
+      input.content,
+      input.success,
+      input.httpStatus ?? null,
+      input.responseBody ?? null,
+      input.errorMessage ?? null,
+      input.automationRuleId ?? null,
+      input.recordId ?? null,
+      input.initiatedBy ?? null,
+      input.success ? new Date().toISOString() : null,
+    ],
+  )
+}
+
+async function recordDingTalkPersonDeliverySafely(
+  queryFn: AutomationDeps['queryFn'],
+  input: Parameters<typeof recordDingTalkPersonDelivery>[1],
+): Promise<void> {
+  try {
+    await recordDingTalkPersonDelivery(queryFn, input)
+  } catch (error) {
+    logger.warn('Failed to persist DingTalk person delivery history', {
+      error: error instanceof Error ? error.message : String(error),
+      localUserId: input.localUserId,
       sourceType: input.sourceType,
     })
   }
@@ -289,6 +386,9 @@ export class AutomationExecutor {
             break
           case 'send_dingtalk_group_message':
             result = await this.executeSendDingTalkGroupMessage(action.config as unknown as SendDingTalkGroupMessageConfig, context)
+            break
+          case 'send_dingtalk_person_message':
+            result = await this.executeSendDingTalkPersonMessage(action.config as unknown as SendDingTalkPersonMessageConfig, context)
             break
           case 'lock_record':
             result = await this.executeLockRecord(action.config, context)
@@ -492,6 +592,233 @@ export class AutomationExecutor {
       }
     } catch (err) {
       return { actionType: 'send_notification', status: 'failed', error: err instanceof Error ? err.message : String(err) }
+    }
+  }
+
+  private async executeSendDingTalkPersonMessage(
+    config: SendDingTalkPersonMessageConfig,
+    context: ExecutionContext,
+  ): Promise<AutomationStepResult> {
+    const userIds = normalizeUserIds(config.userIds)
+    const titleTemplate = typeof config.titleTemplate === 'string' ? config.titleTemplate.trim() : ''
+    const bodyTemplate = typeof config.bodyTemplate === 'string' ? config.bodyTemplate.trim() : ''
+    const publicFormViewId = typeof config.publicFormViewId === 'string' ? config.publicFormViewId.trim() : ''
+    const internalViewId = typeof config.internalViewId === 'string' ? config.internalViewId.trim() : ''
+
+    if (userIds.length === 0) {
+      return { actionType: 'send_dingtalk_person_message', status: 'failed', error: 'At least one local userId is required' }
+    }
+    if (!titleTemplate) {
+      return { actionType: 'send_dingtalk_person_message', status: 'failed', error: 'DingTalk title template is required' }
+    }
+    if (!bodyTemplate) {
+      return { actionType: 'send_dingtalk_person_message', status: 'failed', error: 'DingTalk body template is required' }
+    }
+
+    let baseUrl: string | null = null
+    const linkLines: string[] = []
+    if (publicFormViewId || internalViewId) {
+      baseUrl = resolveAutomationAppBaseUrl()
+      if (!baseUrl) {
+        return {
+          actionType: 'send_dingtalk_person_message',
+          status: 'failed',
+          error: 'PUBLIC_APP_URL or APP_BASE_URL is required for DingTalk automation links',
+        }
+      }
+    }
+
+    if (publicFormViewId && baseUrl) {
+      const publicViewResult = await this.deps.queryFn(
+        `SELECT id, sheet_id, config
+           FROM meta_views
+          WHERE id = $1 AND sheet_id = $2`,
+        [publicFormViewId, context.sheetId],
+      )
+      const publicView = (publicViewResult.rows[0] ?? null) as {
+        id: string
+        sheet_id: string
+        config: unknown
+      } | null
+      if (!publicView) {
+        return { actionType: 'send_dingtalk_person_message', status: 'failed', error: 'Public form view not found' }
+      }
+
+      const viewConfig = parseViewConfig(publicView.config)
+      const publicForm = viewConfig?.publicForm
+      const publicToken = publicForm && typeof publicForm === 'object' && !Array.isArray(publicForm)
+        ? typeof (publicForm as Record<string, unknown>).publicToken === 'string'
+          ? ((publicForm as Record<string, unknown>).publicToken as string).trim()
+          : ''
+        : ''
+      const enabled = publicForm && typeof publicForm === 'object' && !Array.isArray(publicForm)
+        ? (publicForm as Record<string, unknown>).enabled === true
+        : false
+
+      if (!enabled || !publicToken) {
+        return {
+          actionType: 'send_dingtalk_person_message',
+          status: 'failed',
+          error: 'Selected public form view is not shared',
+        }
+      }
+
+      linkLines.push(`- [填写入口](${buildAppLink(baseUrl, `/multitable/public-form/${context.sheetId}/${publicFormViewId}`, { publicToken })})`)
+    }
+
+    if (internalViewId && baseUrl) {
+      const internalViewResult = await this.deps.queryFn(
+        `SELECT id
+           FROM meta_views
+          WHERE id = $1 AND sheet_id = $2`,
+        [internalViewId, context.sheetId],
+      )
+      if (!internalViewResult.rows[0]) {
+        return { actionType: 'send_dingtalk_person_message', status: 'failed', error: 'Internal view not found' }
+      }
+      linkLines.push(`- [处理入口](${buildAppLink(baseUrl, `/multitable/${context.sheetId}/${internalViewId}`, { recordId: context.recordId })})`)
+    }
+
+    const templateData: Record<string, unknown> = {
+      sheetId: context.sheetId,
+      recordId: context.recordId,
+      actorId: context.actorId ?? '',
+      record: context.recordData,
+    }
+    const renderedTitle = renderAutomationTemplate(titleTemplate, templateData).trim()
+    const renderedBody = renderAutomationTemplate(bodyTemplate, templateData).trim()
+    const bodyWithLinks = [
+      renderedBody,
+      linkLines.length > 0 ? ['**快捷入口**', ...linkLines].join('\n') : '',
+    ].filter(Boolean).join('\n\n')
+
+    const recipientsResult = await this.deps.queryFn(
+      `SELECT u.id AS local_user_id,
+              u.is_active AS local_user_active,
+              linked.external_user_id AS dingtalk_user_id
+         FROM users u
+         LEFT JOIN LATERAL (
+           SELECT a.external_user_id
+             FROM directory_account_links l
+             JOIN directory_accounts a ON a.id = l.directory_account_id
+            WHERE l.local_user_id = u.id
+              AND l.link_status = 'linked'
+              AND a.provider = 'dingtalk'
+              AND a.is_active = TRUE
+            ORDER BY a.updated_at DESC
+            LIMIT 1
+         ) linked ON TRUE
+        WHERE u.id = ANY($1::text[])`,
+      [userIds],
+    )
+
+    const recipientMap = new Map<string, { localUserId: string; dingtalkUserId: string }>()
+    for (const row of recipientsResult.rows as Array<Record<string, unknown>>) {
+      const localUserId = typeof row.local_user_id === 'string' ? row.local_user_id.trim() : ''
+      const dingtalkUserId = typeof row.dingtalk_user_id === 'string' ? row.dingtalk_user_id.trim() : ''
+      const isActive = row.local_user_active === true
+      if (!localUserId || !isActive || !dingtalkUserId || recipientMap.has(localUserId)) continue
+      recipientMap.set(localUserId, { localUserId, dingtalkUserId })
+    }
+
+    const missingUserIds = userIds.filter((userId) => !recipientMap.has(userId))
+    if (missingUserIds.length > 0) {
+      await Promise.all(missingUserIds.map((userId) => recordDingTalkPersonDeliverySafely(this.deps.queryFn, {
+        localUserId: userId,
+        sourceType: 'automation',
+        subject: renderedTitle,
+        content: bodyWithLinks,
+        success: false,
+        errorMessage: 'DingTalk account is not linked or user is inactive',
+        automationRuleId: context.ruleId,
+        recordId: context.recordId,
+        initiatedBy: context.actorId ?? null,
+      })))
+      return {
+        actionType: 'send_dingtalk_person_message',
+        status: 'failed',
+        error: `DingTalk account not linked for users: ${missingUserIds.join(', ')}`,
+      }
+    }
+
+    const resolvedRecipients = userIds
+      .map((userId) => recipientMap.get(userId))
+      .filter((entry): entry is { localUserId: string; dingtalkUserId: string } => Boolean(entry))
+    const batches = chunkItems(resolvedRecipients, DINGTALK_PERSON_BATCH_SIZE)
+
+    try {
+      const messageConfig = readDingTalkMessageConfig()
+      const accessToken = await fetchDingTalkAppAccessToken(messageConfig, { fetchFn: this.deps.fetchFn })
+      let responseCount = 0
+
+      for (const batch of batches) {
+        const result = await sendDingTalkWorkNotification(
+          accessToken,
+          {
+            userIds: batch.map((recipient) => recipient.dingtalkUserId),
+            title: renderedTitle,
+            content: bodyWithLinks,
+          },
+          messageConfig,
+          { fetchFn: this.deps.fetchFn },
+        )
+        const responseBody = stringifyResponseBody(result.raw)
+        responseCount += 1
+
+        await Promise.all(batch.map((recipient) => recordDingTalkPersonDeliverySafely(this.deps.queryFn, {
+          localUserId: recipient.localUserId,
+          dingtalkUserId: recipient.dingtalkUserId,
+          sourceType: 'automation',
+          subject: renderedTitle,
+          content: bodyWithLinks,
+          success: true,
+          httpStatus: 200,
+          responseBody,
+          automationRuleId: context.ruleId,
+          recordId: context.recordId,
+          initiatedBy: context.actorId ?? null,
+        })))
+      }
+
+      return {
+        actionType: 'send_dingtalk_person_message',
+        status: 'success',
+        output: {
+          notifiedUsers: resolvedRecipients.length,
+          batchCount: batches.length,
+          linkCount: linkLines.length,
+          responseCount,
+        },
+      }
+    } catch (error) {
+      const httpStatus = error instanceof DingTalkRequestError ? error.statusCode : error instanceof DingTalkBusinessError ? 200 : null
+      const responseBody = error instanceof DingTalkRequestError
+        ? stringifyResponseBody(error.responseBody)
+        : error instanceof DingTalkBusinessError
+          ? stringifyResponseBody(error.responseBody)
+          : null
+      const errorMessage = error instanceof Error ? error.message : String(error)
+
+      await Promise.all(resolvedRecipients.map((recipient) => recordDingTalkPersonDeliverySafely(this.deps.queryFn, {
+        localUserId: recipient.localUserId,
+        dingtalkUserId: recipient.dingtalkUserId,
+        sourceType: 'automation',
+        subject: renderedTitle,
+        content: bodyWithLinks,
+        success: false,
+        httpStatus,
+        responseBody,
+        errorMessage,
+        automationRuleId: context.ruleId,
+        recordId: context.recordId,
+        initiatedBy: context.actorId ?? null,
+      })))
+
+      return {
+        actionType: 'send_dingtalk_person_message',
+        status: 'failed',
+        error: errorMessage,
+      }
     }
   }
 
