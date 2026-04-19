@@ -98,6 +98,33 @@
               >
                 Clear overrides
               </button>
+              <template v-if="entry.subjectType === 'member-group'">
+                <select
+                  :value="subjectAclTemplateSourceValue(entry.subjectId)"
+                  class="meta-sheet-perm__select"
+                  :data-sheet-permission-copy-source="entry.subjectId"
+                  :disabled="busySubjectAclCopyKey === entry.subjectId || memberGroupTemplateSourceOptions(entry.subjectId).length === 0"
+                  @change="setSubjectAclTemplateSource(entry.subjectId, $event)"
+                >
+                  <option value="">Copy downstream ACL…</option>
+                  <option
+                    v-for="option in memberGroupTemplateSourceOptions(entry.subjectId)"
+                    :key="`sp-copy-${entry.subjectId}-${option.subjectId}`"
+                    :value="option.subjectId"
+                  >
+                    {{ option.label }}
+                  </option>
+                </select>
+                <button
+                  class="meta-sheet-perm__action"
+                  type="button"
+                  :data-sheet-permission-copy-action="entry.subjectId"
+                  :disabled="busySubjectAclCopyKey === entry.subjectId || subjectAclTemplateSourceValue(entry.subjectId).length === 0"
+                  @click="copySubjectAclFromMemberGroup(entry.subjectId)"
+                >
+                  Copy field+view ACL
+                </button>
+              </template>
               <button
                 class="meta-sheet-perm__action meta-sheet-perm__action--danger"
                 type="button"
@@ -702,6 +729,8 @@ const candidates = ref<MetaSheetPermissionCandidate[]>([])
 const loading = ref(false)
 const candidatesLoading = ref(false)
 const busySubjectKey = ref<string | null>(null)
+const subjectAclTemplateSourceDrafts = ref<Record<string, string>>({})
+const busySubjectAclCopyKey = ref<string | null>(null)
 const status = ref('')
 const error = ref('')
 const search = ref('')
@@ -729,6 +758,17 @@ const busyViewOrphanBulkKey = ref<string | null>(null)
 
 function subjectKey(subjectType: MetaSheetPermissionSubjectType, subjectId: string) {
   return `${subjectType}:${subjectId}`
+}
+
+function subjectAclTemplateSourceValue(subjectId: string) {
+  return subjectAclTemplateSourceDrafts.value[subjectId] ?? ''
+}
+
+function setSubjectAclTemplateSource(subjectId: string, event: Event) {
+  subjectAclTemplateSourceDrafts.value = {
+    ...subjectAclTemplateSourceDrafts.value,
+    [subjectId]: (event.target as HTMLSelectElement).value,
+  }
 }
 
 // --- Field permission helpers ---
@@ -890,23 +930,10 @@ async function copyFieldTemplateFromMemberGroup(targetSubjectId: string) {
   busyFieldTemplateCopyKey.value = targetSubjectId
   clearMessages()
   try {
-    const operations: Array<Promise<unknown>> = props.fields.flatMap((field) => {
-        const sourceValue = resolveFieldPerm(field.id, 'member-group', sourceSubjectId)
-        const targetValue = resolveFieldPerm(field.id, 'member-group', targetSubjectId)
-        if (sourceValue === targetValue) return []
-        return sourceValue === 'default'
-          ? [props.client.updateFieldPermission(props.sheetId, field.id, 'member-group', targetSubjectId, { remove: true })]
-          : [props.client.updateFieldPermission(
-              props.sheetId,
-              field.id,
-              'member-group',
-              targetSubjectId,
-              fieldPermFromDraftValue(sourceValue),
-            )]
-      })
-
-    await Promise.all(operations)
-    status.value = 'Copied field ACL template from source member group'
+    const operationCount = await syncFieldTemplateBetweenMemberGroups(sourceSubjectId, targetSubjectId)
+    status.value = operationCount > 0
+      ? 'Copied field ACL template from source member group'
+      : 'Field ACL template already matches source member group'
     emit('updated')
   } catch (cause: any) {
     error.value = cause?.message ?? 'Failed to copy field ACL template'
@@ -1060,20 +1087,67 @@ async function copyViewTemplateFromMemberGroup(targetSubjectId: string) {
   busyViewTemplateCopyKey.value = targetSubjectId
   clearMessages()
   try {
-    const operations: Array<Promise<unknown>> = props.views.flatMap((view) => {
-        const sourceValue = resolveViewPerm(view.id, 'member-group', sourceSubjectId)
-        const targetValue = resolveViewPerm(view.id, 'member-group', targetSubjectId)
-        if (sourceValue === targetValue) return []
-        return [props.client.updateViewPermission(view.id, 'member-group', targetSubjectId, sourceValue)]
-      })
-
-    await Promise.all(operations)
-    status.value = 'Copied view ACL template from source member group'
+    const operationCount = await syncViewTemplateBetweenMemberGroups(sourceSubjectId, targetSubjectId)
+    status.value = operationCount > 0
+      ? 'Copied view ACL template from source member group'
+      : 'View ACL template already matches source member group'
     emit('updated')
   } catch (cause: any) {
     error.value = cause?.message ?? 'Failed to copy view ACL template'
   } finally {
     busyViewTemplateCopyKey.value = null
+  }
+}
+
+async function syncFieldTemplateBetweenMemberGroups(sourceSubjectId: string, targetSubjectId: string) {
+  const operations: Array<Promise<unknown>> = props.fields.flatMap((field) => {
+    const sourceValue = resolveFieldPerm(field.id, 'member-group', sourceSubjectId)
+    const targetValue = resolveFieldPerm(field.id, 'member-group', targetSubjectId)
+    if (sourceValue === targetValue) return []
+    return sourceValue === 'default'
+      ? [props.client.updateFieldPermission(props.sheetId, field.id, 'member-group', targetSubjectId, { remove: true })]
+      : [props.client.updateFieldPermission(
+          props.sheetId,
+          field.id,
+          'member-group',
+          targetSubjectId,
+          fieldPermFromDraftValue(sourceValue),
+        )]
+  })
+  await Promise.all(operations)
+  return operations.length
+}
+
+async function syncViewTemplateBetweenMemberGroups(sourceSubjectId: string, targetSubjectId: string) {
+  const operations: Array<Promise<unknown>> = props.views.flatMap((view) => {
+    const sourceValue = resolveViewPerm(view.id, 'member-group', sourceSubjectId)
+    const targetValue = resolveViewPerm(view.id, 'member-group', targetSubjectId)
+    if (sourceValue === targetValue) return []
+    return [props.client.updateViewPermission(view.id, 'member-group', targetSubjectId, sourceValue)]
+  })
+  await Promise.all(operations)
+  return operations.length
+}
+
+async function copySubjectAclFromMemberGroup(targetSubjectId: string) {
+  const sourceSubjectId = subjectAclTemplateSourceValue(targetSubjectId)
+  if (!sourceSubjectId) return
+  busySubjectAclCopyKey.value = targetSubjectId
+  clearMessages()
+  try {
+    const [fieldOperationCount, viewOperationCount] = await Promise.all([
+      syncFieldTemplateBetweenMemberGroups(sourceSubjectId, targetSubjectId),
+      syncViewTemplateBetweenMemberGroups(sourceSubjectId, targetSubjectId),
+    ])
+    const totalOperationCount = fieldOperationCount + viewOperationCount
+    status.value = totalOperationCount > 0
+      ? 'Copied downstream field and view ACL from source member group'
+      : 'Downstream field and view ACL already matches source member group'
+    emit('updated')
+  } catch (cause: any) {
+    error.value = cause?.message ?? 'Failed to copy downstream member-group ACL'
+  } finally {
+    busySubjectAclCopyKey.value = null
   }
 }
 

@@ -906,6 +906,110 @@ describe('MetaSheetPermissionManager', () => {
     expect(updatedSpy).toHaveBeenCalledTimes(1)
   })
 
+  it('copies downstream field and view ACL from one member group to another from sheet access', async () => {
+    const updatedSpy = vi.fn()
+    const client = {
+      listSheetPermissions: vi.fn().mockResolvedValue({
+        items: [
+          {
+            subjectType: 'member-group',
+            subjectId: 'group_north',
+            accessLevel: 'write',
+            permissions: ['spreadsheet:write'],
+            label: 'North Region',
+            subtitle: 'Regional operations',
+            isActive: true,
+          },
+          {
+            subjectType: 'member-group',
+            subjectId: 'group_south',
+            accessLevel: 'write',
+            permissions: ['spreadsheet:write'],
+            label: 'South Region',
+            subtitle: 'Regional operations',
+            isActive: true,
+          },
+        ],
+      }),
+      listSheetPermissionCandidates: vi.fn().mockResolvedValue({ items: [] }),
+      updateSheetPermission: vi.fn().mockResolvedValue({}),
+      updateFieldPermission: vi.fn().mockResolvedValue({}),
+      updateViewPermission: vi.fn().mockResolvedValue({}),
+    }
+
+    mountManager({
+      client,
+      onUpdated: updatedSpy,
+      fields: [
+        { id: 'fld_title', name: 'Title', type: 'string', property: {}, order: 0, options: [] },
+        { id: 'fld_owner', name: 'Owner', type: 'string', property: {}, order: 1, options: [] },
+      ],
+      views: [
+        { id: 'view_grid', name: 'Grid View', type: 'grid', sheetId: 'sheet_orders' },
+        { id: 'view_board', name: 'Board View', type: 'board', sheetId: 'sheet_orders' },
+      ],
+      fieldPermissionEntries: [
+        {
+          fieldId: 'fld_title',
+          subjectType: 'member-group',
+          subjectId: 'group_north',
+          subjectLabel: 'North Region',
+          subjectSubtitle: 'Regional operations',
+          visible: true,
+          readOnly: true,
+          isActive: true,
+        },
+        {
+          fieldId: 'fld_owner',
+          subjectType: 'member-group',
+          subjectId: 'group_south',
+          subjectLabel: 'South Region',
+          subjectSubtitle: 'Regional operations',
+          visible: false,
+          readOnly: false,
+          isActive: true,
+        },
+      ],
+      viewPermissionEntries: [
+        {
+          viewId: 'view_grid',
+          subjectType: 'member-group',
+          subjectId: 'group_north',
+          subjectLabel: 'North Region',
+          subjectSubtitle: 'Regional operations',
+          permission: 'admin',
+          isActive: true,
+        },
+        {
+          viewId: 'view_board',
+          subjectType: 'member-group',
+          subjectId: 'group_south',
+          subjectLabel: 'South Region',
+          subjectSubtitle: 'Regional operations',
+          permission: 'admin',
+          isActive: true,
+        },
+      ],
+    })
+    await flushUi()
+
+    const sourceSelect = container!.querySelector('[data-sheet-permission-copy-source="group_south"]') as HTMLSelectElement
+    sourceSelect.value = 'group_north'
+    sourceSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi()
+
+    ;(container!.querySelector('[data-sheet-permission-copy-action="group_south"]') as HTMLButtonElement).click()
+    await flushUi()
+
+    expect(client.updateFieldPermission).toHaveBeenCalledTimes(2)
+    expect(client.updateFieldPermission).toHaveBeenCalledWith('sheet_orders', 'fld_title', 'member-group', 'group_south', { visible: true, readOnly: true })
+    expect(client.updateFieldPermission).toHaveBeenCalledWith('sheet_orders', 'fld_owner', 'member-group', 'group_south', { remove: true })
+    expect(client.updateViewPermission).toHaveBeenCalledTimes(2)
+    expect(client.updateViewPermission).toHaveBeenCalledWith('view_grid', 'member-group', 'group_south', 'admin')
+    expect(client.updateViewPermission).toHaveBeenCalledWith('view_board', 'member-group', 'group_south', 'none')
+    expect(updatedSpy).toHaveBeenCalledTimes(1)
+  })
+
   it('surfaces inactive lifecycle badges on orphan field and view overrides', async () => {
     const client = {
       listSheetPermissions: vi.fn().mockResolvedValue({
