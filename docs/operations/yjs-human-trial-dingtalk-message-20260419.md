@@ -57,3 +57,8 @@ Date: 2026-04-19
 - 试用清单：
   - `docs/operations/yjs-human-collab-trial-checklist-20260419.md`
 
+## 发送记录
+
+- 2026-04-19 17:17:09 CST 已通过用户提供的钉钉机器人 webhook + secret
+  真实试发
+- 钉钉返回：`statusCode=200` / `errcode=0` / `errmsg=ok`
