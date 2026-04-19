@@ -29,7 +29,8 @@ import { jsonError, jsonOk, parsePagination } from '../util/response'
 
 type AdminUserProfile = {
   id: string
-  email: string
+  email: string | null
+  username: string | null
   name: string | null
   mobile: string | null
   role: string
@@ -236,6 +237,8 @@ type AuditRangeBoundaryMode = 'start' | 'end'
 
 type CreateUserRequestBody = {
   email?: string
+  username?: string
+  mobile?: string
   name?: string
   password?: string
   role?: string
@@ -282,7 +285,7 @@ async function ensurePlatformAdmin(req: Request, res: Response): Promise<string 
 
 async function fetchUserProfile(userId: string): Promise<AdminUserProfile | null> {
   const result = await query<AdminUserProfile>(
-    `SELECT id, email, name, mobile, role, is_active, is_admin, last_login_at, created_at, updated_at
+    `SELECT id, email, username, name, mobile, role, is_active, is_admin, last_login_at, created_at, updated_at
      FROM users
      WHERE id = $1`,
     [userId],
@@ -357,6 +360,29 @@ function sanitizeMobile(mobile: string): string | null {
   const value = mobile.trim().replace(/\s+/g, '')
   if (!value) return null
   return value.slice(0, 32)
+}
+
+function sanitizeUsername(username: string): string | null {
+  const value = username.trim().toLowerCase()
+  if (!value) return null
+  return value.slice(0, 64)
+}
+
+function validateUsername(username: string | null): string | null {
+  if (!username) return null
+  if (!/^(?=.*[a-z])[a-z0-9._-]{3,64}$/.test(username)) {
+    return 'Username must be 3-64 characters and include at least one letter. Only lowercase letters, numbers, dot, underscore, and dash are allowed'
+  }
+  return null
+}
+
+function resolveUserAccountLabel(options: {
+  email?: string | null
+  username?: string | null
+  mobile?: string | null
+  userId?: string | null
+}): string {
+  return options.email || options.username || options.mobile || options.userId || '由管理员单独告知'
 }
 
 function parseAuditRangeBoundary(value: unknown, mode: AuditRangeBoundaryMode): string | null {
@@ -2148,10 +2174,10 @@ export function adminUsersRouter(): Router {
           Promise.resolve([]),
           (async () => {
             const term = q ? `%${q}%` : '%'
-            const where = q ? 'WHERE email ILIKE $1 OR name ILIKE $1 OR COALESCE(mobile, \'\') ILIKE $1 OR id ILIKE $1' : ''
+            const where = q ? 'WHERE COALESCE(email, \'\') ILIKE $1 OR COALESCE(username, \'\') ILIKE $1 OR name ILIKE $1 OR COALESCE(mobile, \'\') ILIKE $1 OR id ILIKE $1' : ''
             const countSql = `SELECT COUNT(*)::int AS c FROM users ${where}`
             const listSql = `
-              SELECT id, email, name, mobile, role, is_active, is_admin, last_login_at, created_at, updated_at
+              SELECT id, email, username, name, mobile, role, is_active, is_admin, last_login_at, created_at, updated_at
               FROM users
               ${where}
               ORDER BY created_at DESC
@@ -2454,10 +2480,10 @@ export function adminUsersRouter(): Router {
       })
 
       const term = q ? `%${q}%` : '%'
-      const where = q ? 'WHERE email ILIKE $1 OR name ILIKE $1 OR COALESCE(mobile, \'\') ILIKE $1 OR id ILIKE $1' : ''
+      const where = q ? 'WHERE COALESCE(email, \'\') ILIKE $1 OR COALESCE(username, \'\') ILIKE $1 OR name ILIKE $1 OR COALESCE(mobile, \'\') ILIKE $1 OR id ILIKE $1' : ''
       const countSql = `SELECT COUNT(*)::int AS c FROM users ${where}`
       const listSql = `
-        SELECT id, email, name, mobile, role, is_active, is_admin, last_login_at, created_at, updated_at
+        SELECT id, email, username, name, mobile, role, is_active, is_admin, last_login_at, created_at, updated_at
         FROM users
         ${where}
         ORDER BY created_at DESC
@@ -2474,7 +2500,7 @@ export function adminUsersRouter(): Router {
         // Deep-link target was not in the paginated window — fetch the single
         // row so the caller can focus it without a second round-trip.
         const pinned = await query<AdminUserProfile>(
-          `SELECT id, email, name, mobile, role, is_active, is_admin, last_login_at, created_at, updated_at
+          `SELECT id, email, username, name, mobile, role, is_active, is_admin, last_login_at, created_at, updated_at
            FROM users
            WHERE id = $1`,
           [pinUserId],
@@ -2786,6 +2812,8 @@ export function adminUsersRouter(): Router {
     try {
       const body = (req.body || {}) as CreateUserRequestBody
       const cleanEmail = typeof body.email === 'string' ? sanitizeEmail(body.email) : ''
+      const cleanUsername = typeof body.username === 'string' ? sanitizeUsername(body.username) : null
+      const cleanMobile = typeof body.mobile === 'string' ? sanitizeMobile(body.mobile) : null
       const cleanName = typeof body.name === 'string' ? sanitizeName(body.name) : ''
       const preset = getAccessPreset(typeof body.presetId === 'string' ? body.presetId.trim() : '')
       const cleanRole = typeof body.role === 'string' && body.role.trim()
@@ -2800,13 +2828,18 @@ export function adminUsersRouter(): Router {
       const mustChangePassword = requestedPassword.length === 0
       const directPermissions = Array.from(new Set(preset?.permissions || []))
 
-      if (!cleanEmail || !cleanName) {
-        return jsonError(res, 400, 'USER_FIELDS_REQUIRED', 'email and name are required')
+      if (!cleanName || (!cleanEmail && !cleanUsername && !cleanMobile)) {
+        return jsonError(res, 400, 'USER_FIELDS_REQUIRED', 'name and at least one account identifier (email, username, or mobile) are required')
       }
 
       const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
-      if (!emailRegex.test(cleanEmail)) {
+      if (cleanEmail && !emailRegex.test(cleanEmail)) {
         return jsonError(res, 400, 'INVALID_EMAIL', 'Invalid email format')
+      }
+
+      const usernameValidationError = validateUsername(cleanUsername)
+      if (usernameValidationError) {
+        return jsonError(res, 400, 'INVALID_USERNAME', usernameValidationError)
       }
 
       if (cleanName.length < 2 || cleanName.length > 100) {
@@ -2821,9 +2854,29 @@ export function adminUsersRouter(): Router {
         })
       }
 
-      const existing = await query<{ id: string }>('SELECT id FROM users WHERE email = $1', [cleanEmail])
-      if (existing.rows.length > 0) {
-        return jsonError(res, 409, 'USER_ALREADY_EXISTS', 'User with this email already exists')
+      if (cleanEmail) {
+        const existing = await query<{ id: string }>('SELECT id FROM users WHERE email = $1', [cleanEmail])
+        if (existing.rows.length > 0) {
+          return jsonError(res, 409, 'USER_ALREADY_EXISTS', 'User with this email already exists')
+        }
+      }
+      if (cleanUsername) {
+        const existingUsername = await query<{ id: string }>(
+          'SELECT id FROM users WHERE lower(username) = lower($1)',
+          [cleanUsername],
+        )
+        if (existingUsername.rows.length > 0) {
+          return jsonError(res, 409, 'USERNAME_ALREADY_EXISTS', 'User with this username already exists')
+        }
+      }
+      if (cleanMobile) {
+        const existingMobile = await query<{ id: string }>(
+          'SELECT id FROM users WHERE mobile = $1',
+          [cleanMobile],
+        )
+        if (existingMobile.rows.length > 0) {
+          return jsonError(res, 409, 'MOBILE_ALREADY_EXISTS', 'User with this mobile already exists')
+        }
       }
 
       if (roleId) {
@@ -2835,11 +2888,29 @@ export function adminUsersRouter(): Router {
 
       const userId = crypto.randomUUID()
       const passwordHash = await bcrypt.hash(password, getBcryptSaltRounds())
+      const accountLabel = resolveUserAccountLabel({
+        email: cleanEmail || null,
+        username: cleanUsername,
+        mobile: cleanMobile,
+        userId,
+      })
 
       await query(
-        `INSERT INTO users (id, email, name, password_hash, must_change_password, role, permissions, is_active, is_admin, created_at, updated_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, NOW(), NOW())`,
-        [userId, cleanEmail, cleanName, passwordHash, mustChangePassword, effectiveRole, JSON.stringify(directPermissions), isActive, effectiveRole === 'admin'],
+        `INSERT INTO users (id, email, username, name, mobile, password_hash, must_change_password, role, permissions, is_active, is_admin, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10, $11, NOW(), NOW())`,
+        [
+          userId,
+          cleanEmail || null,
+          cleanUsername,
+          cleanName,
+          cleanMobile,
+          passwordHash,
+          mustChangePassword,
+          effectiveRole,
+          JSON.stringify(directPermissions),
+          isActive,
+          effectiveRole === 'admin',
+        ],
       )
 
       if (roleId) {
@@ -2871,6 +2942,9 @@ export function adminUsersRouter(): Router {
         resourceId: userId,
         meta: {
           email: cleanEmail,
+          username: cleanUsername,
+          mobile: cleanMobile,
+          accountLabel,
           name: cleanName,
           adminUserId,
           role: effectiveRole,
@@ -2888,20 +2962,24 @@ export function adminUsersRouter(): Router {
         return jsonError(res, 500, 'USER_CREATE_FAILED', 'User created but failed to load access snapshot')
       }
 
-      const inviteToken = issueInviteToken({
-        userId,
-        email: cleanEmail,
-        presetId: preset?.id || null,
-      })
-      await recordInvite({
-        userId,
-        email: cleanEmail,
-        presetId: preset?.id || null,
-        productMode: preset?.productMode || 'platform',
-        roleId: roleId || preset?.roleId || null,
-        invitedBy: adminUserId,
-        inviteToken,
-      })
+      const inviteToken = cleanEmail
+        ? issueInviteToken({
+          userId,
+          email: cleanEmail,
+          presetId: preset?.id || null,
+        })
+        : null
+      if (cleanEmail && inviteToken) {
+        await recordInvite({
+          userId,
+          email: cleanEmail,
+          presetId: preset?.id || null,
+          productMode: preset?.productMode || 'platform',
+          roleId: roleId || preset?.roleId || null,
+          invitedBy: adminUserId,
+          inviteToken,
+        })
+      }
 
       return jsonOk(res, {
         ...snapshot,
@@ -2909,7 +2987,8 @@ export function adminUsersRouter(): Router {
         temporaryPassword: requestedPassword.length === 0 ? password : undefined,
         inviteToken,
         onboarding: buildOnboardingPacket({
-          email: cleanEmail,
+          email: cleanEmail || null,
+          accountLabel,
           temporaryPassword: requestedPassword.length === 0 ? password : null,
           preset,
           inviteToken,

@@ -176,12 +176,18 @@ function resetRateLimit(key: string): void {
 // Rate limit middleware for login
 const loginRateLimiter = (req: Request, res: Response, next: NextFunction) => {
   const ip = getClientIP(req)
-  const email = req.body?.email?.toLowerCase() || ''
-  const key = `login:${ip}:${email}`
+  const identifier = sanitizeLoginIdentifier(
+    typeof req.body?.identifier === 'string'
+      ? req.body.identifier
+      : typeof req.body?.email === 'string'
+        ? req.body.email
+        : '',
+  ).toLowerCase()
+  const key = `login:${ip}:${identifier}`
 
   const result = checkRateLimit(key, MAX_LOGIN_ATTEMPTS)
   if (!result.allowed) {
-    logger.warn(`Rate limit exceeded for login: ${ip} / ${email}`)
+    logger.warn(`Rate limit exceeded for login: ${ip} / ${identifier}`)
     return res.status(429).json({
       success: false,
       error: 'Too many login attempts. Please try again later.',
@@ -213,6 +219,10 @@ const registerRateLimiter = (req: Request, res: Response, next: NextFunction) =>
 // ============================================
 function sanitizeEmail(email: string): string {
   return email.trim().toLowerCase().slice(0, 255)
+}
+
+function sanitizeLoginIdentifier(identifier: string): string {
+  return identifier.trim().slice(0, 255)
 }
 
 function sanitizeName(name: string): string {
@@ -441,37 +451,37 @@ authRouter.post('/login', loginRateLimiter, async (req: Request, res: Response) 
   const ip = getClientIP(req)
 
   try {
-    const { email, password } = req.body
+    const legacyEmail = typeof req.body?.email === 'string' ? req.body.email : ''
+    const rawIdentifier = typeof req.body?.identifier === 'string' ? req.body.identifier : legacyEmail
+    const password = typeof req.body?.password === 'string' ? req.body.password : ''
+    const identifier = sanitizeLoginIdentifier(rawIdentifier)
 
     // 验证请求参数
-    if (!email || !password) {
+    if (!identifier || !password) {
       return res.status(400).json({
         success: false,
-        error: 'Email and password are required'
+        error: 'Account identifier and password are required'
       })
     }
 
-    // Sanitize email
-    const cleanEmail = sanitizeEmail(email)
-
     // 尝试登录
-    const result = await authService.login(cleanEmail, password, {
+    const result = await authService.login(identifier, password, {
       ipAddress: ip,
       userAgent: req.headers['user-agent'] || null,
       tenantId: resolveRequestTenantId(req),
     })
 
     if (!result) {
-      logger.warn(`Failed login attempt for ${cleanEmail} from ${ip}`)
+      logger.warn(`Failed login attempt for ${identifier} from ${ip}`)
       return res.status(401).json({
         success: false,
-        error: 'Invalid email or password'
+        error: 'Invalid account or password'
       })
     }
 
     // Success - reset rate limit
-    resetRateLimit(`login:${ip}:${cleanEmail}`)
-    logger.info(`Successful login for ${cleanEmail} from ${ip}`)
+    resetRateLimit(`login:${ip}:${identifier.toLowerCase()}`)
+    logger.info(`Successful login for ${identifier} from ${ip}`)
 
     // 返回用户信息和token
     res.json({

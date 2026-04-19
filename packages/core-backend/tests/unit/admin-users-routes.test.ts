@@ -2495,6 +2495,51 @@ describe('admin-users routes', () => {
     expect((response.body as Record<string, any>).error.code).toBe('PASSWORD_POLICY_FAILED')
   })
 
+  it('creates a no-email user with username/mobile and skips invite issuance', async () => {
+    rbacMocks.isAdmin.mockResolvedValue(true)
+    bcryptMocks.hash.mockResolvedValue('hashed-temp-password')
+    pgMocks.query
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'user-no-email',
+          email: null,
+          username: 'liqing',
+          name: '李青',
+          mobile: '13900001234',
+          role: 'user',
+          is_active: true,
+          is_admin: false,
+          last_login_at: null,
+          created_at: '2026-04-18T00:00:00.000Z',
+          updated_at: '2026-04-18T00:00:00.000Z',
+        }],
+      })
+      .mockResolvedValueOnce({
+        rows: [],
+      })
+
+    const response = await invokeRoute('post', '/api/admin/users', {
+      body: {
+        name: '李青',
+        username: 'liqing',
+        mobile: '13900001234',
+        isActive: true,
+      },
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect((response.body as Record<string, any>).data.user.email).toBeNull()
+    expect((response.body as Record<string, any>).data.user.username).toBe('liqing')
+    expect((response.body as Record<string, any>).data.temporaryPassword).toBeTruthy()
+    expect((response.body as Record<string, any>).data.inviteToken).toBeNull()
+    expect(String((response.body as Record<string, any>).data.onboarding.acceptInviteUrl || '')).toBe('')
+    expect(String((response.body as Record<string, any>).data.onboarding.inviteMessage)).toContain('账号：liqing')
+    expect(inviteMocks.issueInviteToken).not.toHaveBeenCalled()
+  })
+
   it('resets password and returns temporary password', async () => {
     rbacMocks.isAdmin.mockResolvedValue(true)
     bcryptMocks.hash.mockResolvedValue('hashed-temp-password')
