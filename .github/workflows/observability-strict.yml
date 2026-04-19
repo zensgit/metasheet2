@@ -103,7 +103,8 @@ jobs:
           # 20250924200000_create_event_bus_tables.ts - runtime schema clashes with earlier event bus tables during replay
           # 20250925_create_view_tables.sql - legacy owner_id FK assumes pre-text user ids during replay
           # 20251117000001_add_snapshot_labels.ts - re-applies chk_protection_level after earlier snapshot schema creation during replay
-          MIGRATION_EXCLUDE: 008_plugin_infrastructure.sql,048_create_event_bus_tables.sql,049_create_bpmn_workflow_tables.sql,042a_core_model_views.sql,20250924120000_create_views_view_states.ts,20250924140000_create_gantt_tables.ts,20250924200000_create_event_bus_tables.ts,20250925_create_view_tables.sql,20251117000001_add_snapshot_labels.ts
+          # 20251117000002_create_protection_rules.ts - re-creates protection_rules after replay paths already created the table
+          MIGRATION_EXCLUDE: 008_plugin_infrastructure.sql,048_create_event_bus_tables.sql,049_create_bpmn_workflow_tables.sql,042a_core_model_views.sql,20250924120000_create_views_view_states.ts,20250924140000_create_gantt_tables.ts,20250924200000_create_event_bus_tables.ts,20250925_create_view_tables.sql,20251117000001_add_snapshot_labels.ts,20251117000002_create_protection_rules.ts
         run: |
           pnpm -F @metasheet/core-backend db:list || true
           pnpm -F @metasheet/core-backend db:migrate

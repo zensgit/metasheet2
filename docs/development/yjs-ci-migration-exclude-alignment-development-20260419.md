@@ -8,7 +8,7 @@ This work package aligns CI workflows after PR `#918` still failed in three plac
 
 The remaining failures showed that workflow-level exclusion lists were still inconsistent:
 
-- `migration-replay` excluded `20250924120000_create_views_view_states.ts` but not `20250924140000_create_gantt_tables.ts`, `20250924200000_create_event_bus_tables.ts`, `20250925_create_view_tables.sql`, or `20251117000001_add_snapshot_labels.ts`;
+- `migration-replay` excluded `20250924120000_create_views_view_states.ts` but not `20250924140000_create_gantt_tables.ts`, `20250924200000_create_event_bus_tables.ts`, `20250925_create_view_tables.sql`, `20251117000001_add_snapshot_labels.ts`, or `20251117000002_create_protection_rules.ts`;
 - `plugin-tests` inherited the same incomplete list;
 - `observability-e2e` and `safety-guard-e2e` ran `db:migrate` without any `MIGRATION_EXCLUDE`;
 - `observability-strict` also needed the new gantt exclusion for consistency.
@@ -29,6 +29,8 @@ Observed failures:
   - legacy `tables_owner_id_fkey` path assumes an `owner_id` column shape that replay-built schemas no longer have
 - `20251117000001_add_snapshot_labels.ts`
   - re-applies `chk_protection_level` after replay paths have already created the newer snapshot schema
+- `20251117000002_create_protection_rules.ts`
+  - re-creates `protection_rules` after replay paths have already applied the legacy protection-rule schema
 
 These are replay-path schema compatibility issues, not Yjs runtime defects.
 
@@ -54,6 +56,10 @@ Then extended once more to:
 
 `008_plugin_infrastructure.sql,048_create_event_bus_tables.sql,049_create_bpmn_workflow_tables.sql,042a_core_model_views.sql,20250924120000_create_views_view_states.ts,20250924140000_create_gantt_tables.ts,20250924200000_create_event_bus_tables.ts,20250925_create_view_tables.sql,20251117000001_add_snapshot_labels.ts`
 
+Then extended again to:
+
+`008_plugin_infrastructure.sql,048_create_event_bus_tables.sql,049_create_bpmn_workflow_tables.sql,042a_core_model_views.sql,20250924120000_create_views_view_states.ts,20250924140000_create_gantt_tables.ts,20250924200000_create_event_bus_tables.ts,20250925_create_view_tables.sql,20251117000001_add_snapshot_labels.ts,20251117000002_create_protection_rules.ts`
+
 ## Documentation Changes
 
 Updated:
@@ -70,6 +76,7 @@ Changes:
   - `20250924200000_create_event_bus_tables.ts`
   - `20250925_create_view_tables.sql`
   - `20251117000001_add_snapshot_labels.ts`
+  - `20251117000002_create_protection_rules.ts`
 
 ## Files Changed
 
@@ -87,4 +94,5 @@ Changes:
 - All replay-sensitive workflows now use the same exclusion policy.
 - CI no longer depends on one workflow remembering exclusions that another workflow omits.
 - The current replay-only snapshot-label migration is now aligned with the rest of the exclusion policy instead of failing every replay-sensitive job.
+- The follow-up replay-only protection-rules migration is now aligned as well, preventing the next duplicate-table failure from re-breaking the same workflow set.
 - The remaining Yjs rollout path stays focused on `#918` merge and human collaborative validation, not on replay-only migration breakage.
