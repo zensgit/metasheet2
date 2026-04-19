@@ -8,7 +8,7 @@ This work package aligns CI workflows after PR `#918` still failed in three plac
 
 The remaining failures showed that workflow-level exclusion lists were still inconsistent:
 
-- `migration-replay` excluded `20250924120000_create_views_view_states.ts` but not `20250924140000_create_gantt_tables.ts`, `20250924200000_create_event_bus_tables.ts`, `20250925_create_view_tables.sql`, `20251117000001_add_snapshot_labels.ts`, `20251117000002_create_protection_rules.ts`, or `20251201000001_create_change_management_tables.ts`;
+- `migration-replay` excluded `20250924120000_create_views_view_states.ts` but not `20250924140000_create_gantt_tables.ts`, `20250924200000_create_event_bus_tables.ts`, `20250925_create_view_tables.sql`, `20251117000001_add_snapshot_labels.ts`, `20251117000002_create_protection_rules.ts`, `20251201000001_create_change_management_tables.ts`, or `zzzz20260114110000_create_user_orgs_table.ts`;
 - `plugin-tests` inherited the same incomplete list;
 - `observability-e2e` and `safety-guard-e2e` ran `db:migrate` without any `MIGRATION_EXCLUDE`;
 - `observability-strict` also needed the new gantt exclusion for consistency.
@@ -33,6 +33,8 @@ Observed failures:
   - re-creates `protection_rules` after replay paths have already applied the legacy protection-rule schema
 - `20251201000001_create_change_management_tables.ts`
   - creates `snapshot_id` foreign keys against the newer `uuid snapshots.id`, which replay paths still rebuild as legacy `text` references
+- `zzzz20260114110000_create_user_orgs_table.ts`
+  - rebuilds `user_orgs` against a replay path that still carries the legacy `is_active` reference shape
 
 These are replay-path schema compatibility issues, not Yjs runtime defects.
 
@@ -66,6 +68,10 @@ Then extended again to:
 
 `008_plugin_infrastructure.sql,048_create_event_bus_tables.sql,049_create_bpmn_workflow_tables.sql,042a_core_model_views.sql,20250924120000_create_views_view_states.ts,20250924140000_create_gantt_tables.ts,20250924200000_create_event_bus_tables.ts,20250925_create_view_tables.sql,20251117000001_add_snapshot_labels.ts,20251117000002_create_protection_rules.ts,20251201000001_create_change_management_tables.ts`
 
+Then extended again to:
+
+`008_plugin_infrastructure.sql,048_create_event_bus_tables.sql,049_create_bpmn_workflow_tables.sql,042a_core_model_views.sql,20250924120000_create_views_view_states.ts,20250924140000_create_gantt_tables.ts,20250924200000_create_event_bus_tables.ts,20250925_create_view_tables.sql,20251117000001_add_snapshot_labels.ts,20251117000002_create_protection_rules.ts,20251201000001_create_change_management_tables.ts,zzzz20260114110000_create_user_orgs_table.ts`
+
 ## Documentation Changes
 
 Updated:
@@ -84,6 +90,7 @@ Changes:
   - `20251117000001_add_snapshot_labels.ts`
   - `20251117000002_create_protection_rules.ts`
   - `20251201000001_create_change_management_tables.ts`
+  - `zzzz20260114110000_create_user_orgs_table.ts`
 
 ## Files Changed
 
@@ -103,4 +110,5 @@ Changes:
 - The current replay-only snapshot-label migration is now aligned with the rest of the exclusion policy instead of failing every replay-sensitive job.
 - The follow-up replay-only protection-rules migration is now aligned as well, preventing the next duplicate-table failure from re-breaking the same workflow set.
 - The next replay-only change-management migration is now aligned too, covering the latest legacy `text` vs `uuid` snapshot FK mismatch.
+- The replay-only `user_orgs` migration is now aligned too, covering the latest legacy `is_active` reference mismatch.
 - The remaining Yjs rollout path stays focused on `#918` merge and human collaborative validation, not on replay-only migration breakage.
