@@ -692,6 +692,88 @@ describe('MetaSheetPermissionManager', () => {
     expect(updatedSpy).toHaveBeenCalledTimes(1)
   })
 
+  it('copies field ACL overrides from one member group to another and clears stale target overrides', async () => {
+    const updatedSpy = vi.fn()
+    const client = {
+      listSheetPermissions: vi.fn().mockResolvedValue({
+        items: [
+          {
+            subjectType: 'member-group',
+            subjectId: 'group_north',
+            accessLevel: 'write',
+            permissions: ['spreadsheet:write'],
+            label: 'North Region',
+            subtitle: 'Regional operations',
+            isActive: true,
+          },
+          {
+            subjectType: 'member-group',
+            subjectId: 'group_south',
+            accessLevel: 'write',
+            permissions: ['spreadsheet:write'],
+            label: 'South Region',
+            subtitle: 'Regional operations',
+            isActive: true,
+          },
+        ],
+      }),
+      listSheetPermissionCandidates: vi.fn().mockResolvedValue({ items: [] }),
+      updateSheetPermission: vi.fn().mockResolvedValue({}),
+      updateFieldPermission: vi.fn().mockResolvedValue({}),
+      updateViewPermission: vi.fn().mockResolvedValue({}),
+    }
+
+    mountManager({
+      client,
+      onUpdated: updatedSpy,
+      fields: [
+        { id: 'fld_title', name: 'Title', type: 'string', property: {}, order: 0, options: [] },
+        { id: 'fld_owner', name: 'Owner', type: 'string', property: {}, order: 1, options: [] },
+      ],
+      fieldPermissionEntries: [
+        {
+          fieldId: 'fld_title',
+          subjectType: 'member-group',
+          subjectId: 'group_north',
+          subjectLabel: 'North Region',
+          subjectSubtitle: 'Regional operations',
+          visible: true,
+          readOnly: true,
+          isActive: true,
+        },
+        {
+          fieldId: 'fld_owner',
+          subjectType: 'member-group',
+          subjectId: 'group_south',
+          subjectLabel: 'South Region',
+          subjectSubtitle: 'Regional operations',
+          visible: false,
+          readOnly: false,
+          isActive: true,
+        },
+      ],
+    })
+    await flushUi()
+
+    const tabs = Array.from(container!.querySelectorAll('[role="tab"]'))
+    const fieldTab = tabs.find((tab) => tab.textContent?.includes('Field Permissions')) as HTMLElement
+    fieldTab.click()
+    await flushUi()
+
+    const sourceSelect = container!.querySelector('[data-field-permission-copy-source="group_south"]') as HTMLSelectElement
+    sourceSelect.value = 'group_north'
+    sourceSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi()
+
+    ;(container!.querySelector('[data-field-permission-copy-action="group_south"]') as HTMLButtonElement).click()
+    await flushUi()
+
+    expect(client.updateFieldPermission).toHaveBeenCalledTimes(2)
+    expect(client.updateFieldPermission).toHaveBeenNthCalledWith(1, 'sheet_orders', 'fld_title', 'member-group', 'group_south', { visible: true, readOnly: true })
+    expect(client.updateFieldPermission).toHaveBeenNthCalledWith(2, 'sheet_orders', 'fld_owner', 'member-group', 'group_south', { remove: true })
+    expect(updatedSpy).toHaveBeenCalledTimes(1)
+  })
+
   it('applies a view template to all views for a member-group subject', async () => {
     const updatedSpy = vi.fn()
     const client = {
@@ -741,6 +823,86 @@ describe('MetaSheetPermissionManager', () => {
     expect(client.updateViewPermission).toHaveBeenCalledTimes(2)
     expect(client.updateViewPermission).toHaveBeenNthCalledWith(1, 'view_grid', 'member-group', 'group_north', 'admin')
     expect(client.updateViewPermission).toHaveBeenNthCalledWith(2, 'view_board', 'member-group', 'group_north', 'admin')
+    expect(updatedSpy).toHaveBeenCalledTimes(1)
+  })
+
+  it('copies view ACL overrides from one member group to another and clears stale target overrides', async () => {
+    const updatedSpy = vi.fn()
+    const client = {
+      listSheetPermissions: vi.fn().mockResolvedValue({
+        items: [
+          {
+            subjectType: 'member-group',
+            subjectId: 'group_north',
+            accessLevel: 'write',
+            permissions: ['spreadsheet:write'],
+            label: 'North Region',
+            subtitle: 'Regional operations',
+            isActive: true,
+          },
+          {
+            subjectType: 'member-group',
+            subjectId: 'group_south',
+            accessLevel: 'write',
+            permissions: ['spreadsheet:write'],
+            label: 'South Region',
+            subtitle: 'Regional operations',
+            isActive: true,
+          },
+        ],
+      }),
+      listSheetPermissionCandidates: vi.fn().mockResolvedValue({ items: [] }),
+      updateSheetPermission: vi.fn().mockResolvedValue({}),
+      updateFieldPermission: vi.fn().mockResolvedValue({}),
+      updateViewPermission: vi.fn().mockResolvedValue({}),
+    }
+
+    mountManager({
+      client,
+      onUpdated: updatedSpy,
+      views: [
+        { id: 'view_grid', name: 'Grid View', type: 'grid', sheetId: 'sheet_orders' },
+        { id: 'view_board', name: 'Board View', type: 'board', sheetId: 'sheet_orders' },
+      ],
+      viewPermissionEntries: [
+        {
+          viewId: 'view_grid',
+          subjectType: 'member-group',
+          subjectId: 'group_north',
+          subjectLabel: 'North Region',
+          subjectSubtitle: 'Regional operations',
+          permission: 'admin',
+          isActive: true,
+        },
+        {
+          viewId: 'view_board',
+          subjectType: 'member-group',
+          subjectId: 'group_south',
+          subjectLabel: 'South Region',
+          subjectSubtitle: 'Regional operations',
+          permission: 'admin',
+          isActive: true,
+        },
+      ],
+    })
+    await flushUi()
+
+    const tabs = Array.from(container!.querySelectorAll('[role="tab"]'))
+    const viewTab = tabs.find((tab) => tab.textContent?.includes('View Permissions')) as HTMLElement
+    viewTab.click()
+    await flushUi()
+
+    const sourceSelect = container!.querySelector('[data-view-permission-copy-source="group_south"]') as HTMLSelectElement
+    sourceSelect.value = 'group_north'
+    sourceSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi()
+
+    ;(container!.querySelector('[data-view-permission-copy-action="group_south"]') as HTMLButtonElement).click()
+    await flushUi()
+
+    expect(client.updateViewPermission).toHaveBeenCalledTimes(2)
+    expect(client.updateViewPermission).toHaveBeenNthCalledWith(1, 'view_grid', 'member-group', 'group_south', 'admin')
+    expect(client.updateViewPermission).toHaveBeenNthCalledWith(2, 'view_board', 'member-group', 'group_south', 'none')
     expect(updatedSpy).toHaveBeenCalledTimes(1)
   })
 

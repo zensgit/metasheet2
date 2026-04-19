@@ -311,6 +311,33 @@
                   >
                     Apply to all fields
                   </button>
+                  <template v-if="entry.subjectType === 'member-group'">
+                    <select
+                      :value="fieldTemplateSourceValue(entry.subjectId)"
+                      class="meta-sheet-perm__select"
+                      :data-field-permission-copy-source="entry.subjectId"
+                      :disabled="busyFieldTemplateCopyKey === entry.subjectId || memberGroupTemplateSourceOptions(entry.subjectId).length === 0"
+                      @change="setFieldTemplateSource(entry.subjectId, $event)"
+                    >
+                      <option value="">Copy from member group…</option>
+                      <option
+                        v-for="option in memberGroupTemplateSourceOptions(entry.subjectId)"
+                        :key="`fp-copy-${entry.subjectId}-${option.subjectId}`"
+                        :value="option.subjectId"
+                      >
+                        {{ option.label }}
+                      </option>
+                    </select>
+                    <button
+                      class="meta-sheet-perm__action"
+                      type="button"
+                      :data-field-permission-copy-action="entry.subjectId"
+                      :disabled="busyFieldTemplateCopyKey === entry.subjectId || fieldTemplateSourceValue(entry.subjectId).length === 0"
+                      @click="copyFieldTemplateFromMemberGroup(entry.subjectId)"
+                    >
+                      Copy ACL
+                    </button>
+                  </template>
                 </div>
               </div>
               <div
@@ -476,6 +503,33 @@
                   >
                     Apply to all views
                   </button>
+                  <template v-if="entry.subjectType === 'member-group'">
+                    <select
+                      :value="viewTemplateSourceValue(entry.subjectId)"
+                      class="meta-sheet-perm__select"
+                      :data-view-permission-copy-source="entry.subjectId"
+                      :disabled="busyViewTemplateCopyKey === entry.subjectId || memberGroupTemplateSourceOptions(entry.subjectId).length === 0"
+                      @change="setViewTemplateSource(entry.subjectId, $event)"
+                    >
+                      <option value="">Copy from member group…</option>
+                      <option
+                        v-for="option in memberGroupTemplateSourceOptions(entry.subjectId)"
+                        :key="`vp-copy-${entry.subjectId}-${option.subjectId}`"
+                        :value="option.subjectId"
+                      >
+                        {{ option.label }}
+                      </option>
+                    </select>
+                    <button
+                      class="meta-sheet-perm__action"
+                      type="button"
+                      :data-view-permission-copy-action="entry.subjectId"
+                      :disabled="busyViewTemplateCopyKey === entry.subjectId || viewTemplateSourceValue(entry.subjectId).length === 0"
+                      @click="copyViewTemplateFromMemberGroup(entry.subjectId)"
+                    >
+                      Copy ACL
+                    </button>
+                  </template>
                 </div>
               </div>
               <div
@@ -660,6 +714,8 @@ const fieldPermDrafts = ref<Record<string, string>>({})
 const busyFieldPermKey = ref<string | null>(null)
 const fieldTemplateDrafts = ref<Record<string, string>>({})
 const busyFieldTemplateKey = ref<string | null>(null)
+const fieldTemplateSourceDrafts = ref<Record<string, string>>({})
+const busyFieldTemplateCopyKey = ref<string | null>(null)
 const busyFieldOrphanBulkKey = ref<string | null>(null)
 
 // View permission drafts
@@ -667,6 +723,8 @@ const viewPermDrafts = ref<Record<string, string>>({})
 const busyViewPermKey = ref<string | null>(null)
 const viewTemplateDrafts = ref<Record<string, string>>({})
 const busyViewTemplateKey = ref<string | null>(null)
+const viewTemplateSourceDrafts = ref<Record<string, string>>({})
+const busyViewTemplateCopyKey = ref<string | null>(null)
 const busyViewOrphanBulkKey = ref<string | null>(null)
 
 function subjectKey(subjectType: MetaSheetPermissionSubjectType, subjectId: string) {
@@ -704,6 +762,10 @@ function fieldTemplateDraftValue(subjectType: string, subjectId: string): string
   return fieldTemplateDrafts.value[subjectKey(subjectType as MetaSheetPermissionSubjectType, subjectId)] ?? 'default'
 }
 
+function fieldTemplateSourceValue(subjectId: string): string {
+  return fieldTemplateSourceDrafts.value[subjectId] ?? ''
+}
+
 function setFieldPermDraft(fieldId: string, subjectType: string, subjectId: string, event: Event) {
   const key = fieldPermKey(fieldId, subjectType, subjectId)
   fieldPermDrafts.value = {
@@ -716,6 +778,13 @@ function setFieldTemplateDraft(subjectType: string, subjectId: string, event: Ev
   fieldTemplateDrafts.value = {
     ...fieldTemplateDrafts.value,
     [subjectKey(subjectType as MetaSheetPermissionSubjectType, subjectId)]: (event.target as HTMLSelectElement).value,
+  }
+}
+
+function setFieldTemplateSource(subjectId: string, event: Event) {
+  fieldTemplateSourceDrafts.value = {
+    ...fieldTemplateSourceDrafts.value,
+    [subjectId]: (event.target as HTMLSelectElement).value,
   }
 }
 
@@ -814,6 +883,38 @@ async function applyFieldTemplate(subjectType: string, subjectId: string) {
   }
 }
 
+async function copyFieldTemplateFromMemberGroup(targetSubjectId: string) {
+  if (!props.fields.length) return
+  const sourceSubjectId = fieldTemplateSourceValue(targetSubjectId)
+  if (!sourceSubjectId) return
+  busyFieldTemplateCopyKey.value = targetSubjectId
+  clearMessages()
+  try {
+    const operations: Array<Promise<unknown>> = props.fields.flatMap((field) => {
+        const sourceValue = resolveFieldPerm(field.id, 'member-group', sourceSubjectId)
+        const targetValue = resolveFieldPerm(field.id, 'member-group', targetSubjectId)
+        if (sourceValue === targetValue) return []
+        return sourceValue === 'default'
+          ? [props.client.updateFieldPermission(props.sheetId, field.id, 'member-group', targetSubjectId, { remove: true })]
+          : [props.client.updateFieldPermission(
+              props.sheetId,
+              field.id,
+              'member-group',
+              targetSubjectId,
+              fieldPermFromDraftValue(sourceValue),
+            )]
+      })
+
+    await Promise.all(operations)
+    status.value = 'Copied field ACL template from source member group'
+    emit('updated')
+  } catch (cause: any) {
+    error.value = cause?.message ?? 'Failed to copy field ACL template'
+  } finally {
+    busyFieldTemplateCopyKey.value = null
+  }
+}
+
 // --- View permission helpers ---
 function viewPermKey(viewId: string, subjectType: string, subjectId: string) {
   return `${viewId}:${subjectType}:${subjectId}`
@@ -829,6 +930,10 @@ function resolveViewPerm(viewId: string, subjectType: string, subjectId: string)
 function viewPermDraftValue(viewId: string, subjectType: string, subjectId: string): string {
   const key = viewPermKey(viewId, subjectType, subjectId)
   return viewPermDrafts.value[key] ?? resolveViewPerm(viewId, subjectType, subjectId)
+}
+
+function viewTemplateSourceValue(subjectId: string): string {
+  return viewTemplateSourceDrafts.value[subjectId] ?? ''
 }
 
 function viewTemplateDraftValue(subjectType: string, subjectId: string): string {
@@ -854,6 +959,13 @@ function setViewTemplateDraft(subjectType: string, subjectId: string, event: Eve
   viewTemplateDrafts.value = {
     ...viewTemplateDrafts.value,
     [subjectKey(subjectType as MetaSheetPermissionSubjectType, subjectId)]: (event.target as HTMLSelectElement).value,
+  }
+}
+
+function setViewTemplateSource(subjectId: string, event: Event) {
+  viewTemplateSourceDrafts.value = {
+    ...viewTemplateSourceDrafts.value,
+    [subjectId]: (event.target as HTMLSelectElement).value,
   }
 }
 
@@ -941,6 +1053,30 @@ async function applyViewTemplate(subjectType: string, subjectId: string) {
   }
 }
 
+async function copyViewTemplateFromMemberGroup(targetSubjectId: string) {
+  if (!props.views.length) return
+  const sourceSubjectId = viewTemplateSourceValue(targetSubjectId)
+  if (!sourceSubjectId) return
+  busyViewTemplateCopyKey.value = targetSubjectId
+  clearMessages()
+  try {
+    const operations: Array<Promise<unknown>> = props.views.flatMap((view) => {
+        const sourceValue = resolveViewPerm(view.id, 'member-group', sourceSubjectId)
+        const targetValue = resolveViewPerm(view.id, 'member-group', targetSubjectId)
+        if (sourceValue === targetValue) return []
+        return [props.client.updateViewPermission(view.id, 'member-group', targetSubjectId, sourceValue)]
+      })
+
+    await Promise.all(operations)
+    status.value = 'Copied view ACL template from source member group'
+    emit('updated')
+  } catch (cause: any) {
+    error.value = cause?.message ?? 'Failed to copy view ACL template'
+  } finally {
+    busyViewTemplateCopyKey.value = null
+  }
+}
+
 // --- Sheet access helpers (existing) ---
 const availableCandidates = computed(() => {
   const activeSubjectKeys = new Set(entries.value.map((entry) => subjectKey(entry.subjectType, entry.subjectId)))
@@ -950,6 +1086,7 @@ const availableCandidates = computed(() => {
 const peopleCandidates = computed(() => availableCandidates.value.filter((candidate) => candidate.subjectType === 'user'))
 const memberGroupCandidates = computed(() => availableCandidates.value.filter((candidate) => candidate.subjectType === 'member-group'))
 const roleCandidates = computed(() => availableCandidates.value.filter((candidate) => candidate.subjectType === 'role'))
+const memberGroupEntries = computed(() => entries.value.filter((entry) => entry.subjectType === 'member-group'))
 const activeSheetSubjectKeys = computed(() => new Set(entries.value.map((entry) => subjectKey(entry.subjectType, entry.subjectId))))
 const subjectOverrideCounts = computed<Record<string, { fieldCount: number; viewCount: number }>>(() => {
   const counts: Record<string, { fieldCount: number; viewCount: number }> = {}
@@ -1005,6 +1142,10 @@ function subjectOverrideSummaryLabel(subjectType: MetaSheetPermissionSubjectType
   if (counts.fieldCount > 0) parts.push(`${counts.fieldCount} field override${counts.fieldCount === 1 ? '' : 's'}`)
   if (counts.viewCount > 0) parts.push(`${counts.viewCount} view override${counts.viewCount === 1 ? '' : 's'}`)
   return parts.join(' · ')
+}
+
+function memberGroupTemplateSourceOptions(targetSubjectId: string) {
+  return memberGroupEntries.value.filter((entry) => entry.subjectId !== targetSubjectId)
 }
 
 function accessLevelLabel(accessLevel: MetaSheetPermissionAccessLevel) {
