@@ -120,24 +120,42 @@ async function resolveRoleRecipients(context, roleSlugs) {
   const slugs = Array.from(new Set((roleSlugs || []).filter((role) => typeof role === 'string' && role.trim()).map((role) => role.trim())))
   if (slugs.length === 0) return {}
 
-  try {
-    const rows = await context.api.database.query(
+  const queryRoleRecipients = async (includeActiveFilter) => {
+    const activeUserFilter = includeActiveFilter ? '\n           AND COALESCE(u.is_active, TRUE) = TRUE' : ''
+    return context.api.database.query(
       `SELECT role_id, user_id, email
        FROM (
          SELECT ur.role_id AS role_id, u.id AS user_id, u.email AS email
          FROM user_roles ur
          JOIN users u ON u.id = ur.user_id
-         WHERE ur.role_id = ANY($1::text[])
-           AND COALESCE(u.is_active, TRUE) = TRUE
+         WHERE ur.role_id = ANY($1::text[])${activeUserFilter}
          UNION
          SELECT u.role AS role_id, u.id AS user_id, u.email AS email
          FROM users u
-         WHERE u.role = ANY($1::text[])
-           AND COALESCE(u.is_active, TRUE) = TRUE
+         WHERE u.role = ANY($1::text[])${activeUserFilter}
        ) resolved
        ORDER BY role_id ASC, user_id ASC`,
       [slugs],
     )
+  }
+
+  const isLegacyMissingIsActive = (error) => {
+    const message = error && typeof error.message === 'string' ? error.message : ''
+    return (error && error.code === '42703' && /is_active/i.test(message))
+      || /is_active/i.test(message)
+  }
+
+  try {
+    let rows
+    try {
+      rows = await queryRoleRecipients(true)
+    } catch (error) {
+      if (!isLegacyMissingIsActive(error)) {
+        throw error
+      }
+      context.logger?.warn?.('after-sales role recipient lookup falling back without users.is_active filter', error)
+      rows = await queryRoleRecipients(false)
+    }
 
     const recipientsByRole = {}
     for (const role of slugs) {

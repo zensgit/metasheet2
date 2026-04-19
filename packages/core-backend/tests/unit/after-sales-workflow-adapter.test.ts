@@ -659,4 +659,58 @@ describe('after-sales workflow adapter', () => {
       'sub:followup.due',
     ])
   })
+
+  it('falls back when legacy users schema does not expose is_active', async () => {
+    const missingIsActive = Object.assign(new Error('column u.is_active does not exist'), {
+      code: '42703',
+    })
+    const query = vi.fn()
+      .mockRejectedValueOnce(missingIsActive)
+      .mockResolvedValueOnce([
+        {
+          role_id: 'supervisor',
+          user_id: 'lead_legacy',
+          email: 'lead-legacy@example.com',
+        },
+      ])
+    const context = createContext(query)
+    const sendTopicNotification = vi.fn(async () => [])
+    const runtime = adapter.createWorkflowRuntime(context, {
+      loadCurrent: vi.fn(async () => ({
+        status: 'installed',
+        projectId: 'tenant_42:after-sales',
+        config: {
+          enableRefundApproval: true,
+          defaultSlaHours: 24,
+          urgentSlaHours: 4,
+        },
+      })),
+      sendTopicNotification,
+    })
+
+    await runtime.onServiceRecorded({
+      tenantId: 'tenant_42',
+      projectId: 'tenant_42:after-sales',
+      serviceRecord: {
+        id: 'sr_legacy',
+        ticketNo: 'TK-LEGACY-1',
+      },
+    })
+
+    expect(query).toHaveBeenCalledTimes(2)
+    expect(query.mock.calls[0]?.[0]).toContain('COALESCE(u.is_active, TRUE) = TRUE')
+    expect(query.mock.calls[1]?.[0]).not.toContain('COALESCE(u.is_active, TRUE) = TRUE')
+    expect(sendTopicNotification).toHaveBeenCalledWith(
+      context,
+      expect.objectContaining({
+        topic: 'after-sales.service.recorded',
+        roleRecipients: {
+          supervisor: [
+            { id: 'lead_legacy', type: 'user' },
+            { id: 'lead-legacy@example.com', type: 'email' },
+          ],
+        },
+      }),
+    )
+  })
 })
