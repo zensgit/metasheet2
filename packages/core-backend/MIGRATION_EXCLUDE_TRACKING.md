@@ -4,9 +4,9 @@
 
 This document tracks database migrations that are currently excluded from automated replay testing. These migrations require manual review and fixing before they can be re-enabled.
 
-**Current Exclude Count**: 10 files
+**Current Exclude Count**: 11 files
 
-**Default Exclude in CI**: `008_plugin_infrastructure.sql, 048_create_event_bus_tables.sql, 049_create_bpmn_workflow_tables.sql, 042a_core_model_views.sql, 20250924120000_create_views_view_states.ts, 20250924140000_create_gantt_tables.ts, 20250924200000_create_event_bus_tables.ts, 20250925_create_view_tables.sql, 20251117000001_add_snapshot_labels.ts, 20251117000002_create_protection_rules.ts`
+**Default Exclude in CI**: `008_plugin_infrastructure.sql, 048_create_event_bus_tables.sql, 049_create_bpmn_workflow_tables.sql, 042a_core_model_views.sql, 20250924120000_create_views_view_states.ts, 20250924140000_create_gantt_tables.ts, 20250924200000_create_event_bus_tables.ts, 20250925_create_view_tables.sql, 20251117000001_add_snapshot_labels.ts, 20251117000002_create_protection_rules.ts, 20251201000001_create_change_management_tables.ts`
 
 **Last Updated**: 2026-04-19
 
@@ -43,6 +43,10 @@ This document tracks database migrations that are currently excluded from automa
 #### `20251117000002_create_protection_rules.ts`
 **Status**: ❌ Excluded
 **Issue**: Re-creates the `protection_rules` table after replay paths have already applied the legacy protection-rule schema, causing duplicate-table failures.
+
+#### `20251201000001_create_change_management_tables.ts`
+**Status**: ❌ Excluded
+**Issue**: Applies `snapshot_id` foreign keys against the newer `uuid snapshots.id` while replay paths still rebuild legacy `text` snapshot references, causing incompatible-FK failures.
 
 ### Pre-Existing Issues (archived)
 

@@ -6,13 +6,13 @@ Date: 2026-04-19
 
 This slice only changed workflow configuration and migration-exclusion tracking docs. Verification therefore focused on:
 
-1. confirming that all replay-sensitive workflows now carry the same exclusion list, including `20251117000001_add_snapshot_labels.ts` and `20251117000002_create_protection_rules.ts`;
+1. confirming that all replay-sensitive workflows now carry the same exclusion list, including `20251117000001_add_snapshot_labels.ts`, `20251117000002_create_protection_rules.ts`, and `20251201000001_create_change_management_tables.ts`;
 2. confirming that the already-fixed migration provider still honors `MIGRATION_EXCLUDE` at runtime.
 
 ## Commands Run
 
 ```bash
-rg -n "MIGRATION_EXCLUDE: .*20251117000002_create_protection_rules.ts" .github/workflows
+rg -n "MIGRATION_EXCLUDE: .*20251201000001_create_change_management_tables.ts" .github/workflows
 pnpm --filter @metasheet/core-backend exec vitest run tests/unit/migration-provider.test.ts tests/unit/migrations.rollback.test.ts tests/unit/db.test.ts --watch=false
 pnpm --filter @metasheet/core-backend build
 MIGRATION_EXCLUDE='056_add_users_must_change_password.sql,zzzz20260501100000_create_yjs_state_tables.ts' \
@@ -36,5 +36,5 @@ pnpm exec node --input-type=module -e "import path from 'node:path'; import { pa
 ## Conclusion
 
 - The workflow layer is now aligned with the migration-provider runtime behavior.
-- The specific replay-only failures seen in `migration-replay`, `observability-e2e`, `safety-guard-e2e`, `plugin-tests`, and downstream Node test jobs are covered by the updated exclusion list, including the snapshot-label and protection-rules follow-on failures.
+- The specific replay-only failures seen in `migration-replay`, `observability-e2e`, `safety-guard-e2e`, `plugin-tests`, and downstream Node test jobs are covered by the updated exclusion list, including the snapshot-label, protection-rules, and change-management follow-on failures.
 - No additional remote deployment or schema change was required for this hardening slice.

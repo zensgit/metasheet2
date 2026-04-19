@@ -76,9 +76,10 @@ jobs:
           # Exclude 20250925_create_view_tables.sql - legacy owner_id FK assumes pre-text user ids during replay
           # Exclude 20251117000001_add_snapshot_labels.ts - re-applies chk_protection_level after earlier snapshot schema creation during replay
           # Exclude 20251117000002_create_protection_rules.ts - re-creates protection_rules after replay paths already created the table
+          # Exclude 20251201000001_create_change_management_tables.ts - legacy snapshot_id text FKs no longer match replay-built uuid snapshot ids
           # Exclude 042a_core_model_views.sql - References non-existent last_accessed column
           # TODO: Fix last_accessed column reference in 042a_core_model_views.sql
-          MIGRATION_EXCLUDE: 008_plugin_infrastructure.sql,048_create_event_bus_tables.sql,049_create_bpmn_workflow_tables.sql,042a_core_model_views.sql,20250924120000_create_views_view_states.ts,20250924140000_create_gantt_tables.ts,20250924200000_create_event_bus_tables.ts,20250925_create_view_tables.sql,20251117000001_add_snapshot_labels.ts,20251117000002_create_protection_rules.ts
+          MIGRATION_EXCLUDE: 008_plugin_infrastructure.sql,048_create_event_bus_tables.sql,049_create_bpmn_workflow_tables.sql,042a_core_model_views.sql,20250924120000_create_views_view_states.ts,20250924140000_create_gantt_tables.ts,20250924200000_create_event_bus_tables.ts,20250925_create_view_tables.sql,20251117000001_add_snapshot_labels.ts,20251117000002_create_protection_rules.ts,20251201000001_create_change_management_tables.ts
         run: |
           pnpm -F @metasheet/core-backend db:migrate
           pnpm -F @metasheet/core-backend db:migrate
