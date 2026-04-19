@@ -8,7 +8,7 @@ This work package aligns CI workflows after PR `#918` still failed in three plac
 
 The remaining failures showed that workflow-level exclusion lists were still inconsistent:
 
-- `migration-replay` excluded `20250924120000_create_views_view_states.ts` but not `20250924140000_create_gantt_tables.ts` or `20250924200000_create_event_bus_tables.ts`;
+- `migration-replay` excluded `20250924120000_create_views_view_states.ts` but not `20250924140000_create_gantt_tables.ts`, `20250924200000_create_event_bus_tables.ts`, or `20250925_create_view_tables.sql`;
 - `plugin-tests` inherited the same incomplete list;
 - `observability-e2e` and `safety-guard-e2e` ran `db:migrate` without any `MIGRATION_EXCLUDE`;
 - `observability-strict` also needed the new gantt exclusion for consistency.
@@ -25,6 +25,8 @@ Observed failures:
   - `gantt_tasks_view_id_fkey` / UUID vs text mismatch
 - `20250924200000_create_event_bus_tables.ts`
   - duplicate `event_types` relation after earlier event-bus schema creation paths
+- `20250925_create_view_tables.sql`
+  - legacy `tables_owner_id_fkey` path assumes an `owner_id` column shape that replay-built schemas no longer have
 
 These are replay-path schema compatibility issues, not Yjs runtime defects.
 
@@ -44,7 +46,7 @@ Aligned `MIGRATION_EXCLUDE` to:
 
 Then extended again to:
 
-`008_plugin_infrastructure.sql,048_create_event_bus_tables.sql,049_create_bpmn_workflow_tables.sql,042a_core_model_views.sql,20250924120000_create_views_view_states.ts,20250924140000_create_gantt_tables.ts,20250924200000_create_event_bus_tables.ts`
+`008_plugin_infrastructure.sql,048_create_event_bus_tables.sql,049_create_bpmn_workflow_tables.sql,042a_core_model_views.sql,20250924120000_create_views_view_states.ts,20250924140000_create_gantt_tables.ts,20250924200000_create_event_bus_tables.ts,20250925_create_view_tables.sql`
 
 ## Documentation Changes
 
