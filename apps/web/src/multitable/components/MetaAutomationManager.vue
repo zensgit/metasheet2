@@ -230,6 +230,15 @@
           <div class="meta-automation__card-actions">
             <button class="meta-automation__btn" type="button" data-automation-edit="true" @click="openRuleEditor(rule)">Edit</button>
             <button class="meta-automation__btn" type="button" data-automation-logs="true" @click="openLogViewer(rule)">View Logs</button>
+            <button
+              v-if="rule.actionType === 'send_dingtalk_person_message'"
+              class="meta-automation__btn"
+              type="button"
+              :data-automation-person-deliveries="rule.id"
+              @click="openPersonDeliveryViewer(rule)"
+            >
+              View Deliveries
+            </button>
             <button class="meta-automation__btn meta-automation__btn--danger" type="button" data-automation-delete="true" @click="onDelete(rule)">Delete</button>
           </div>
         </div>
@@ -253,6 +262,13 @@
       :client="client"
       @close="showLogViewer = false"
     />
+    <MetaAutomationPersonDeliveryViewer
+      :visible="showPersonDeliveryViewer"
+      :sheet-id="sheetId"
+      :rule-id="personDeliveryViewerRuleId"
+      :client="client"
+      @close="showPersonDeliveryViewer = false"
+    />
   </div>
 </template>
 
@@ -271,6 +287,7 @@ import { useMultitableAutomations } from '../composables/useMultitableAutomation
 import type { MultitableApiClient } from '../api/client'
 import MetaAutomationRuleEditor from './MetaAutomationRuleEditor.vue'
 import MetaAutomationLogViewer from './MetaAutomationLogViewer.vue'
+import MetaAutomationPersonDeliveryViewer from './MetaAutomationPersonDeliveryViewer.vue'
 
 const props = defineProps<{
   visible: boolean
@@ -425,6 +442,8 @@ const showRuleEditor = ref(false)
 const editingRule = ref<AutomationRule | null>(null)
 const showLogViewer = ref(false)
 const logViewerRuleId = ref('')
+const showPersonDeliveryViewer = ref(false)
+const personDeliveryViewerRuleId = ref('')
 const ruleStats = ref<Record<string, AutomationStats>>({})
 
 function openRuleEditor(rule?: AutomationRule) {
@@ -437,6 +456,11 @@ function openRuleEditor(rule?: AutomationRule) {
 function openLogViewer(rule: AutomationRule) {
   logViewerRuleId.value = rule.id
   showLogViewer.value = true
+}
+
+function openPersonDeliveryViewer(rule: AutomationRule) {
+  personDeliveryViewerRuleId.value = rule.id
+  showPersonDeliveryViewer.value = true
 }
 
 async function onRuleEditorSave(payload: Partial<AutomationRule>) {

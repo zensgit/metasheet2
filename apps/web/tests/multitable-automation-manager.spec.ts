@@ -6,7 +6,7 @@ function flushPromises() {
 }
 import MetaAutomationManager from '../src/multitable/components/MetaAutomationManager.vue'
 import { MultitableApiClient } from '../src/multitable/api/client'
-import type { AutomationRule } from '../src/multitable/types'
+import type { AutomationRule, DingTalkPersonDelivery } from '../src/multitable/types'
 
 function fakeRule(overrides: Partial<AutomationRule> = {}): AutomationRule {
   return {
@@ -25,6 +25,21 @@ function fakeRule(overrides: Partial<AutomationRule> = {}): AutomationRule {
 function mockClient(rules: AutomationRule[] = []) {
   const ok = (body: unknown) => new Response(JSON.stringify({ data: body }), { status: 200, headers: { 'Content-Type': 'application/json' } })
   const noContent = () => new Response(null, { status: 204 })
+  const personDeliveries: DingTalkPersonDelivery[] = [
+    {
+      id: 'dpd_1',
+      localUserId: 'user_1',
+      dingtalkUserId: 'dt_1',
+      sourceType: 'automation',
+      subject: 'Ticket rec_1 ready',
+      content: 'Please review the latest changes.',
+      success: true,
+      createdAt: '2026-04-19T12:00:00.000Z',
+      localUserLabel: 'Lin Lan',
+      localUserSubtitle: 'lin@example.com',
+      localUserIsActive: true,
+    },
+  ]
 
   const fetchFn = vi.fn(async (url: string, init?: RequestInit) => {
     const method = init?.method ?? 'GET'
@@ -41,6 +56,9 @@ function mockClient(rules: AutomationRule[] = []) {
       })
     }
     if (method === 'GET' && url.includes('/automations')) {
+      if (url.includes('/dingtalk-person-deliveries')) {
+        return ok({ deliveries: personDeliveries })
+      }
       return ok({ rules })
     }
     if (method === 'POST' && url.includes('/automations')) {
@@ -388,5 +406,30 @@ describe('MetaAutomationManager', () => {
     const body = JSON.parse(postCalls[0][1]?.body as string)
     expect(body.actionConfig.userIds).toEqual(['user_1'])
     expect(client.listCommentMentionSuggestions).toHaveBeenCalledTimes(1)
+  })
+
+  it('opens DingTalk person delivery viewer for person message rules', async () => {
+    const { client } = mockClient([
+      fakeRule({
+        name: 'DingTalk person notify',
+        actionType: 'send_dingtalk_person_message',
+        actionConfig: {
+          userIds: ['user_1'],
+          titleTemplate: 'Ticket {{recordId}}',
+          bodyTemplate: 'Please fill {{record.status}}',
+        },
+      }),
+    ])
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
+    await flushPromises()
+
+    const deliveriesBtn = container.querySelector('[data-automation-person-deliveries="rule_1"]') as HTMLButtonElement
+    expect(deliveriesBtn).toBeTruthy()
+    deliveriesBtn.click()
+    await flushPromises()
+
+    const delivery = document.querySelector('[data-person-delivery-id="dpd_1"]')
+    expect(delivery?.textContent).toContain('Lin Lan')
+    expect(delivery?.textContent).toContain('Ticket rec_1 ready')
   })
 })

@@ -821,6 +821,27 @@ export interface DingTalkGroupDelivery {
   deliveredAt?: string
 }
 
+export interface DingTalkPersonDelivery {
+  id: string
+  localUserId: string
+  dingtalkUserId?: string
+  sourceType: 'manual_test' | 'automation'
+  subject: string
+  content: string
+  success: boolean
+  httpStatus?: number
+  responseBody?: string
+  errorMessage?: string
+  automationRuleId?: string
+  recordId?: string
+  initiatedBy?: string
+  createdAt: string
+  deliveredAt?: string
+  localUserLabel?: string
+  localUserSubtitle?: string
+  localUserIsActive: boolean
+}
+
 // --- Field Validation ---
 export type FieldValidationRuleType = 'required' | 'minLength' | 'maxLength' | 'pattern' | 'min' | 'max' | 'enum'
 

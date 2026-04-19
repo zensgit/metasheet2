@@ -58,6 +58,7 @@ import type {
   WebhookDelivery,
   DingTalkGroupDestination,
   DingTalkGroupDelivery,
+  DingTalkPersonDelivery,
   DingTalkGroupDestinationInput,
 } from '../types'
 import { apiFetch } from '../../utils/api'
@@ -1154,6 +1155,14 @@ export class MultitableApiClient {
       `/api/multitable/sheets/${encodeURIComponent(sheetId)}/automations/${encodeURIComponent(ruleId)}/stats`,
     )
     return parseJson<AutomationStats>(res)
+  }
+
+  async getAutomationDingTalkPersonDeliveries(sheetId: string, ruleId: string, limit?: number): Promise<DingTalkPersonDelivery[]> {
+    const res = await this.fetch(
+      `/api/multitable/sheets/${encodeURIComponent(sheetId)}/automations/${encodeURIComponent(ruleId)}/dingtalk-person-deliveries${qs({ limit })}`,
+    )
+    const data = await parseJson<{ deliveries: DingTalkPersonDelivery[] }>(res)
+    return Array.isArray(data?.deliveries) ? data.deliveries : []
   }
 
   // --- Charts ---
