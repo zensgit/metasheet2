@@ -42,6 +42,7 @@
             <option value="notify">Send notification</option>
             <option value="update_field">Update field value</option>
             <option value="send_dingtalk_group_message">Send DingTalk group message</option>
+            <option value="send_dingtalk_person_message">Send DingTalk person message</option>
           </select>
 
           <template v-if="draft.actionType === 'notify'">
@@ -107,6 +108,82 @@
             </select>
           </template>
 
+          <template v-if="draft.actionType === 'send_dingtalk_person_message'">
+            <label class="meta-automation__label">Search and add users</label>
+            <input
+              v-model="dingtalkPersonUserSearch"
+              class="meta-automation__input"
+              type="text"
+              placeholder="Search by name, email, or userId"
+              data-automation-field="dingtalkPersonUserSearch"
+              @input="void loadDingTalkPersonSuggestions()"
+            />
+            <div v-if="dingtalkPersonUserSearchLoading" class="meta-automation__hint">Searching users…</div>
+            <div v-else-if="dingtalkPersonUserSearchError" class="meta-automation__hint meta-automation__hint--error">{{ dingtalkPersonUserSearchError }}</div>
+            <div v-else-if="availableDingTalkPersonSuggestions.length" class="meta-automation__recipient-list">
+              <button
+                v-for="candidate in availableDingTalkPersonSuggestions"
+                :key="candidate.id"
+                class="meta-automation__recipient-option"
+                type="button"
+                :data-automation-person-suggestion="candidate.id"
+                @click="addDingTalkPersonRecipient(candidate)"
+              >
+                <strong>{{ candidate.label }}</strong>
+                <span>{{ candidate.subtitle || candidate.id }}</span>
+              </button>
+            </div>
+            <div v-else-if="dingtalkPersonUserSearch.trim()" class="meta-automation__hint">No matching users</div>
+            <div v-if="selectedDingTalkPersonRecipients.length" class="meta-automation__recipient-list meta-automation__recipient-list--selected">
+              <button
+                v-for="recipient in selectedDingTalkPersonRecipients"
+                :key="recipient.id"
+                class="meta-automation__recipient-chip"
+                type="button"
+                :data-automation-person-recipient="recipient.id"
+                @click="removeDingTalkPersonRecipient(recipient.id)"
+              >
+                <strong>{{ recipient.label }}</strong>
+                <span>{{ recipient.subtitle || recipient.id }}</span>
+                <em>Remove</em>
+              </button>
+            </div>
+            <label class="meta-automation__label">Local user IDs</label>
+            <textarea
+              v-model="draft.dingtalkPersonUserIds"
+              class="meta-automation__input"
+              rows="3"
+              placeholder="使用逗号或换行分隔本地 userId"
+              data-automation-field="dingtalkPersonUserIds"
+            ></textarea>
+            <label class="meta-automation__label">Title template</label>
+            <input
+              v-model="draft.dingtalkPersonTitleTemplate"
+              class="meta-automation__input"
+              type="text"
+              placeholder="例如：{{record.title}} 待处理"
+              data-automation-field="dingtalkPersonTitleTemplate"
+            />
+            <label class="meta-automation__label">Body template</label>
+            <textarea
+              v-model="draft.dingtalkPersonBodyTemplate"
+              class="meta-automation__input"
+              rows="4"
+              placeholder="支持 {{record.xxx}}、{{recordId}}、{{sheetId}}、{{actorId}}"
+              data-automation-field="dingtalkPersonBodyTemplate"
+            ></textarea>
+            <label class="meta-automation__label">Public form view (optional)</label>
+            <select v-model="draft.dingtalkPersonPublicFormViewId" class="meta-automation__select" data-automation-field="dingtalkPersonPublicFormViewId">
+              <option value="">-- no public form link --</option>
+              <option v-for="view in formViews" :key="view.id" :value="view.id">{{ view.name }}</option>
+            </select>
+            <label class="meta-automation__label">Internal processing view (optional)</label>
+            <select v-model="draft.dingtalkPersonInternalViewId" class="meta-automation__select" data-automation-field="dingtalkPersonInternalViewId">
+              <option value="">-- no internal link --</option>
+              <option v-for="view in internalViews" :key="view.id" :value="view.id">{{ view.name }}</option>
+            </select>
+          </template>
+
           <div class="meta-automation__form-actions">
             <button class="meta-automation__btn meta-automation__btn--primary" type="button" :disabled="!canSave" @click="onSave">
               {{ editingRuleId ? 'Update' : 'Create' }}
@@ -153,6 +230,15 @@
           <div class="meta-automation__card-actions">
             <button class="meta-automation__btn" type="button" data-automation-edit="true" @click="openRuleEditor(rule)">Edit</button>
             <button class="meta-automation__btn" type="button" data-automation-logs="true" @click="openLogViewer(rule)">View Logs</button>
+            <button
+              v-if="rule.actionType === 'send_dingtalk_person_message'"
+              class="meta-automation__btn"
+              type="button"
+              :data-automation-person-deliveries="rule.id"
+              @click="openPersonDeliveryViewer(rule)"
+            >
+              View Deliveries
+            </button>
             <button class="meta-automation__btn meta-automation__btn--danger" type="button" data-automation-delete="true" @click="onDelete(rule)">Delete</button>
           </div>
         </div>
@@ -176,6 +262,13 @@
       :client="client"
       @close="showLogViewer = false"
     />
+    <MetaAutomationPersonDeliveryViewer
+      :visible="showPersonDeliveryViewer"
+      :sheet-id="sheetId"
+      :rule-id="personDeliveryViewerRuleId"
+      :client="client"
+      @close="showPersonDeliveryViewer = false"
+    />
   </div>
 </template>
 
@@ -187,12 +280,14 @@ import type {
   AutomationActionType,
   AutomationStats,
   DingTalkGroupDestination,
+  MetaCommentMentionSuggestion,
   MetaView,
 } from '../types'
 import { useMultitableAutomations } from '../composables/useMultitableAutomations'
 import type { MultitableApiClient } from '../api/client'
 import MetaAutomationRuleEditor from './MetaAutomationRuleEditor.vue'
 import MetaAutomationLogViewer from './MetaAutomationLogViewer.vue'
+import MetaAutomationPersonDeliveryViewer from './MetaAutomationPersonDeliveryViewer.vue'
 
 const props = defineProps<{
   visible: boolean
@@ -226,6 +321,11 @@ interface DraftState {
   dingtalkBodyTemplate: string
   publicFormViewId: string
   internalViewId: string
+  dingtalkPersonUserIds: string
+  dingtalkPersonTitleTemplate: string
+  dingtalkPersonBodyTemplate: string
+  dingtalkPersonPublicFormViewId: string
+  dingtalkPersonInternalViewId: string
 }
 
 function emptyDraft(): DraftState {
@@ -242,19 +342,108 @@ function emptyDraft(): DraftState {
     dingtalkBodyTemplate: '',
     publicFormViewId: '',
     internalViewId: '',
+    dingtalkPersonUserIds: '',
+    dingtalkPersonTitleTemplate: '',
+    dingtalkPersonBodyTemplate: '',
+    dingtalkPersonPublicFormViewId: '',
+    dingtalkPersonInternalViewId: '',
   }
 }
 
 const draft = ref<DraftState>(emptyDraft())
 const dingTalkDestinations = ref<DingTalkGroupDestination[]>([])
+const dingtalkPersonUserSearch = ref('')
+const dingtalkPersonUserSearchLoading = ref(false)
+const dingtalkPersonUserSearchError = ref('')
+const dingtalkPersonUserSuggestions = ref<MetaCommentMentionSuggestion[]>([])
+const dingtalkPersonUserDirectory = ref<Record<string, { label: string; subtitle?: string }>>({})
+let dingtalkPersonSuggestionLoadId = 0
 const formViews = computed(() => (props.views ?? []).filter((view) => view.type === 'form'))
 const internalViews = computed(() => props.views ?? [])
+
+function parseUserIdsText(value: string): string[] {
+  return value
+    .split(/[\n,]+/)
+    .map((entry) => entry.trim())
+    .filter(Boolean)
+}
+
+function rememberDingTalkPersonSuggestions(items: MetaCommentMentionSuggestion[]) {
+  const next = { ...dingtalkPersonUserDirectory.value }
+  for (const item of items) {
+    next[item.id] = { label: item.label, subtitle: item.subtitle }
+  }
+  dingtalkPersonUserDirectory.value = next
+}
+
+const selectedDingTalkPersonRecipients = computed(() =>
+  parseUserIdsText(draft.value.dingtalkPersonUserIds).map((id) => ({
+    id,
+    label: dingtalkPersonUserDirectory.value[id]?.label ?? id,
+    subtitle: dingtalkPersonUserDirectory.value[id]?.subtitle,
+  })),
+)
+
+const availableDingTalkPersonSuggestions = computed(() => {
+  const selected = new Set(parseUserIdsText(draft.value.dingtalkPersonUserIds))
+  return dingtalkPersonUserSuggestions.value.filter((candidate) => !selected.has(candidate.id))
+})
+
+async function loadDingTalkPersonSuggestions() {
+  const query = dingtalkPersonUserSearch.value.trim()
+  if (!props.client || !showForm.value || draft.value.actionType !== 'send_dingtalk_person_message' || !query) {
+    dingtalkPersonUserSuggestions.value = []
+    dingtalkPersonUserSearchError.value = ''
+    dingtalkPersonUserSearchLoading.value = false
+    return
+  }
+
+  const requestId = ++dingtalkPersonSuggestionLoadId
+  dingtalkPersonUserSearchLoading.value = true
+  dingtalkPersonUserSearchError.value = ''
+  try {
+    const response = await props.client.listCommentMentionSuggestions({
+      spreadsheetId: props.sheetId,
+      q: query,
+      limit: 8,
+    })
+    if (requestId !== dingtalkPersonSuggestionLoadId) return
+    rememberDingTalkPersonSuggestions(response.items)
+    dingtalkPersonUserSuggestions.value = response.items
+  } catch (error) {
+    if (requestId !== dingtalkPersonSuggestionLoadId) return
+    dingtalkPersonUserSuggestions.value = []
+    dingtalkPersonUserSearchError.value = error instanceof Error ? error.message : 'Failed to search users'
+  } finally {
+    if (requestId === dingtalkPersonSuggestionLoadId) {
+      dingtalkPersonUserSearchLoading.value = false
+    }
+  }
+}
+
+function addDingTalkPersonRecipient(candidate: MetaCommentMentionSuggestion) {
+  const ids = new Set(parseUserIdsText(draft.value.dingtalkPersonUserIds))
+  ids.add(candidate.id)
+  draft.value.dingtalkPersonUserIds = Array.from(ids).join(', ')
+  rememberDingTalkPersonSuggestions([candidate])
+  dingtalkPersonUserSearch.value = ''
+  dingtalkPersonUserSuggestions.value = []
+  dingtalkPersonUserSearchError.value = ''
+}
+
+function removeDingTalkPersonRecipient(userId: string) {
+  draft.value.dingtalkPersonUserIds = parseUserIdsText(draft.value.dingtalkPersonUserIds)
+    .filter((id) => id !== userId)
+    .join(', ')
+}
 
 // --- Rule editor + log viewer state ---
 const showRuleEditor = ref(false)
 const editingRule = ref<AutomationRule | null>(null)
 const showLogViewer = ref(false)
 const logViewerRuleId = ref('')
+const showPersonDeliveryViewer = ref(false)
+const personDeliveryViewerRuleId = ref('')
 const ruleStats = ref<Record<string, AutomationStats>>({})
 
 function openRuleEditor(rule?: AutomationRule) {
@@ -267,6 +456,11 @@ function openRuleEditor(rule?: AutomationRule) {
 function openLogViewer(rule: AutomationRule) {
   logViewerRuleId.value = rule.id
   showLogViewer.value = true
+}
+
+function openPersonDeliveryViewer(rule: AutomationRule) {
+  personDeliveryViewerRuleId.value = rule.id
+  showPersonDeliveryViewer.value = true
 }
 
 async function onRuleEditorSave(payload: Partial<AutomationRule>) {
@@ -315,12 +509,20 @@ const canSave = computed(() => {
     if (!draft.value.dingtalkTitleTemplate.trim()) return false
     if (!draft.value.dingtalkBodyTemplate.trim()) return false
   }
+  if (draft.value.actionType === 'send_dingtalk_person_message') {
+    if (!draft.value.dingtalkPersonUserIds.trim()) return false
+    if (!draft.value.dingtalkPersonTitleTemplate.trim()) return false
+    if (!draft.value.dingtalkPersonBodyTemplate.trim()) return false
+  }
   return true
 })
 
 function openCreateForm() {
   editingRuleId.value = null
   draft.value = emptyDraft()
+  dingtalkPersonUserSearch.value = ''
+  dingtalkPersonUserSuggestions.value = []
+  dingtalkPersonUserSearchError.value = ''
   showForm.value = true
 }
 
@@ -339,7 +541,15 @@ function openEditForm(rule: AutomationRule) {
     dingtalkBodyTemplate: (rule.actionConfig?.bodyTemplate as string) ?? '',
     publicFormViewId: (rule.actionConfig?.publicFormViewId as string) ?? '',
     internalViewId: (rule.actionConfig?.internalViewId as string) ?? '',
+    dingtalkPersonUserIds: Array.isArray(rule.actionConfig?.userIds) ? rule.actionConfig?.userIds.join(', ') : '',
+    dingtalkPersonTitleTemplate: (rule.actionConfig?.titleTemplate as string) ?? '',
+    dingtalkPersonBodyTemplate: (rule.actionConfig?.bodyTemplate as string) ?? '',
+    dingtalkPersonPublicFormViewId: (rule.actionConfig?.publicFormViewId as string) ?? '',
+    dingtalkPersonInternalViewId: (rule.actionConfig?.internalViewId as string) ?? '',
   }
+  dingtalkPersonUserSearch.value = ''
+  dingtalkPersonUserSuggestions.value = []
+  dingtalkPersonUserSearchError.value = ''
   showForm.value = true
 }
 
@@ -347,6 +557,9 @@ function cancelForm() {
   showForm.value = false
   editingRuleId.value = null
   draft.value = emptyDraft()
+  dingtalkPersonUserSearch.value = ''
+  dingtalkPersonUserSuggestions.value = []
+  dingtalkPersonUserSearchError.value = ''
 }
 
 function buildTriggerConfig(): Record<string, unknown> {
@@ -370,6 +583,18 @@ function buildActionConfig(): Record<string, unknown> {
       bodyTemplate: draft.value.dingtalkBodyTemplate,
       publicFormViewId: draft.value.publicFormViewId || undefined,
       internalViewId: draft.value.internalViewId || undefined,
+    }
+  }
+  if (draft.value.actionType === 'send_dingtalk_person_message') {
+    return {
+      userIds: draft.value.dingtalkPersonUserIds
+        .split(/[\n,]+/)
+        .map((entry) => entry.trim())
+        .filter(Boolean),
+      titleTemplate: draft.value.dingtalkPersonTitleTemplate,
+      bodyTemplate: draft.value.dingtalkPersonBodyTemplate,
+      publicFormViewId: draft.value.dingtalkPersonPublicFormViewId || undefined,
+      internalViewId: draft.value.dingtalkPersonInternalViewId || undefined,
     }
   }
   return {}
@@ -445,6 +670,8 @@ function describeAction(rule: AutomationRule): string {
     }
     case 'send_dingtalk_group_message':
       return 'Send DingTalk group message'
+    case 'send_dingtalk_person_message':
+      return 'Send DingTalk person message'
     default:
       return String(rule.actionType)
   }
@@ -565,6 +792,15 @@ watch(
   margin-top: 4px;
 }
 
+.meta-automation__hint {
+  font-size: 12px;
+  color: #64748b;
+}
+
+.meta-automation__hint--error {
+  color: #b91c1c;
+}
+
 .meta-automation__input,
 .meta-automation__select {
   width: 100%;
@@ -575,6 +811,38 @@ watch(
   font-size: 13px;
   background: #fff;
   box-sizing: border-box;
+}
+
+.meta-automation__recipient-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.meta-automation__recipient-list--selected {
+  margin-bottom: 4px;
+}
+
+.meta-automation__recipient-option,
+.meta-automation__recipient-chip {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  background: #fff;
+  padding: 8px 10px;
+  cursor: pointer;
+  color: #0f172a;
+}
+
+.meta-automation__recipient-option span,
+.meta-automation__recipient-chip span,
+.meta-automation__recipient-chip em {
+  font-size: 12px;
+  color: #64748b;
+  font-style: normal;
 }
 
 .meta-automation__form-actions {

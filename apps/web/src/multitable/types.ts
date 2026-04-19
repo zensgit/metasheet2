@@ -586,6 +586,7 @@ export type AutomationActionType =
   | 'send_webhook'
   | 'send_notification'
   | 'send_dingtalk_group_message'
+  | 'send_dingtalk_person_message'
   | 'lock_record'
   // Legacy aliases
   | 'notify'
@@ -818,6 +819,27 @@ export interface DingTalkGroupDelivery {
   initiatedBy?: string
   createdAt: string
   deliveredAt?: string
+}
+
+export interface DingTalkPersonDelivery {
+  id: string
+  localUserId: string
+  dingtalkUserId?: string
+  sourceType: 'manual_test' | 'automation'
+  subject: string
+  content: string
+  success: boolean
+  httpStatus?: number
+  responseBody?: string
+  errorMessage?: string
+  automationRuleId?: string
+  recordId?: string
+  initiatedBy?: string
+  createdAt: string
+  deliveredAt?: string
+  localUserLabel?: string
+  localUserSubtitle?: string
+  localUserIsActive: boolean
 }
 
 // --- Field Validation ---

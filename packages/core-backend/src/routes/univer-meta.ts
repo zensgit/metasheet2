@@ -32,6 +32,7 @@ import { validateRecord, getDefaultValidationRules } from '../multitable/field-v
 import type { FieldValidationConfig } from '../multitable/field-validation'
 import { conditionalPublicRateLimiter, publicFormContextLimiter, publicFormSubmitLimiter } from '../middleware/rate-limiter'
 import { getAutomationServiceInstance } from '../multitable/automation-service'
+import { listAutomationDingTalkPersonDeliveries } from '../multitable/dingtalk-person-delivery-service'
 import {
   publishMultitableSheetRealtime as publishMultitableSheetRealtimeShared,
   setRealtimeCacheInvalidator,
@@ -7626,7 +7627,7 @@ export function univerMetaRouter(): Router {
       const enabled = typeof body?.enabled === 'boolean' ? body.enabled : true
 
       const validTriggers = new Set(['record.created', 'record.updated', 'record.deleted', 'field.changed', 'field.value_changed', 'schedule.cron', 'schedule.interval', 'webhook.received'])
-      const validActions = new Set(['notify', 'update_field', 'update_record', 'create_record', 'send_webhook', 'send_notification', 'send_dingtalk_group_message', 'lock_record'])
+      const validActions = new Set(['notify', 'update_field', 'update_record', 'create_record', 'send_webhook', 'send_notification', 'send_dingtalk_group_message', 'send_dingtalk_person_message', 'lock_record'])
       if (!validTriggers.has(triggerType)) {
         return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: `Invalid trigger_type: ${triggerType}` } })
       }
@@ -7702,7 +7703,7 @@ export function univerMetaRouter(): Router {
         updates.trigger_config = JSON.stringify(body.triggerConfig)
       }
       if (typeof body?.actionType === 'string') {
-        const validActions = new Set(['notify', 'update_field', 'update_record', 'create_record', 'send_webhook', 'send_notification', 'send_dingtalk_group_message', 'lock_record'])
+        const validActions = new Set(['notify', 'update_field', 'update_record', 'create_record', 'send_webhook', 'send_notification', 'send_dingtalk_group_message', 'send_dingtalk_person_message', 'lock_record'])
         if (!validActions.has(body.actionType)) {
           return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: `Invalid action_type: ${body.actionType}` } })
         }
@@ -7778,6 +7779,37 @@ export function univerMetaRouter(): Router {
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
       console.error('[univer-meta] delete automation rule failed:', err)
       return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to delete automation rule' } })
+    }
+  })
+
+  router.get('/sheets/:sheetId/automations/:ruleId/dingtalk-person-deliveries', async (req: Request, res: Response) => {
+    const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId : ''
+    const ruleId = typeof req.params.ruleId === 'string' ? req.params.ruleId : ''
+    if (!sheetId || !ruleId) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId and ruleId are required' } })
+    }
+    try {
+      const pool = poolManager.get()
+      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      if (!capabilities.canManageAutomation) return sendForbidden(res)
+      const automationService = getAutomationServiceInstance()
+      if (!automationService) {
+        return res.status(503).json({ ok: false, error: { code: 'SERVICE_UNAVAILABLE', message: 'Automation service is not available' } })
+      }
+
+      const rule = await automationService.getRule(ruleId)
+      if (!rule || rule.sheet_id !== sheetId) {
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Automation rule not found' } })
+      }
+
+      const limit = Math.min(Math.max(Number(req.query.limit) || 50, 1), 200)
+      const deliveries = await listAutomationDingTalkPersonDeliveries(pool.query.bind(pool), ruleId, limit)
+      return res.json({ ok: true, data: { deliveries } })
+    } catch (err) {
+      const hint = getDbNotReadyMessage(err)
+      if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
+      console.error('[univer-meta] list dingtalk person deliveries failed:', err)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to list DingTalk person deliveries' } })
     }
   })
 

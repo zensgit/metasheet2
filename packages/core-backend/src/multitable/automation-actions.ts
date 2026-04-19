@@ -9,6 +9,7 @@ export type AutomationActionType =
   | 'send_webhook'
   | 'send_notification'
   | 'send_dingtalk_group_message'
+  | 'send_dingtalk_person_message'
   | 'lock_record'
 
 export const ALL_ACTION_TYPES: AutomationActionType[] = [
@@ -17,6 +18,7 @@ export const ALL_ACTION_TYPES: AutomationActionType[] = [
   'send_webhook',
   'send_notification',
   'send_dingtalk_group_message',
+  'send_dingtalk_person_message',
   'lock_record',
 ]
 
@@ -48,6 +50,15 @@ export interface SendNotificationConfig {
 /** Config shape for send_dingtalk_group_message */
 export interface SendDingTalkGroupMessageConfig {
   destinationId: string
+  titleTemplate: string
+  bodyTemplate: string
+  publicFormViewId?: string
+  internalViewId?: string
+}
+
+/** Config shape for send_dingtalk_person_message */
+export interface SendDingTalkPersonMessageConfig {
+  userIds: string[]
   titleTemplate: string
   bodyTemplate: string
   publicFormViewId?: string

@@ -6,7 +6,7 @@ function flushPromises() {
 }
 import MetaAutomationManager from '../src/multitable/components/MetaAutomationManager.vue'
 import { MultitableApiClient } from '../src/multitable/api/client'
-import type { AutomationRule } from '../src/multitable/types'
+import type { AutomationRule, DingTalkPersonDelivery } from '../src/multitable/types'
 
 function fakeRule(overrides: Partial<AutomationRule> = {}): AutomationRule {
   return {
@@ -25,6 +25,21 @@ function fakeRule(overrides: Partial<AutomationRule> = {}): AutomationRule {
 function mockClient(rules: AutomationRule[] = []) {
   const ok = (body: unknown) => new Response(JSON.stringify({ data: body }), { status: 200, headers: { 'Content-Type': 'application/json' } })
   const noContent = () => new Response(null, { status: 204 })
+  const personDeliveries: DingTalkPersonDelivery[] = [
+    {
+      id: 'dpd_1',
+      localUserId: 'user_1',
+      dingtalkUserId: 'dt_1',
+      sourceType: 'automation',
+      subject: 'Ticket rec_1 ready',
+      content: 'Please review the latest changes.',
+      success: true,
+      createdAt: '2026-04-19T12:00:00.000Z',
+      localUserLabel: 'Lin Lan',
+      localUserSubtitle: 'lin@example.com',
+      localUserIsActive: true,
+    },
+  ]
 
   const fetchFn = vi.fn(async (url: string, init?: RequestInit) => {
     const method = init?.method ?? 'GET'
@@ -41,6 +56,9 @@ function mockClient(rules: AutomationRule[] = []) {
       })
     }
     if (method === 'GET' && url.includes('/automations')) {
+      if (url.includes('/dingtalk-person-deliveries')) {
+        return ok({ deliveries: personDeliveries })
+      }
       return ok({ rules })
     }
     if (method === 'POST' && url.includes('/automations')) {
@@ -55,7 +73,16 @@ function mockClient(rules: AutomationRule[] = []) {
     }
     return ok({})
   })
-  return { client: new MultitableApiClient({ fetchFn }), fetchFn }
+  const client = new MultitableApiClient({ fetchFn })
+  client.listCommentMentionSuggestions = vi.fn(async () => ({
+    items: [
+      { id: 'user_1', label: 'Lin Lan', subtitle: 'lin@example.com' },
+      { id: 'user_2', label: 'Zhao Ming', subtitle: 'zhao@example.com' },
+    ],
+    total: 2,
+    limit: 8,
+  }))
+  return { client, fetchFn }
 }
 
 function mount(props: Record<string, unknown>) {
@@ -272,5 +299,137 @@ describe('MetaAutomationManager', () => {
       publicFormViewId: 'view_form',
       internalViewId: 'view_grid',
     })
+  })
+
+  it('creates DingTalk person automation via form', async () => {
+    const { client, fetchFn } = mockClient([])
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
+    await flushPromises()
+
+    const addBtn = container.querySelector('.meta-automation__btn-add') as HTMLButtonElement
+    addBtn.click()
+    await nextTick()
+
+    const nameInput = container.querySelector('[data-automation-field="name"]') as HTMLInputElement
+    nameInput.value = 'DingTalk person notify'
+    nameInput.dispatchEvent(new Event('input', { bubbles: true }))
+
+    const actionSelect = container.querySelector('[data-automation-field="actionType"]') as HTMLSelectElement
+    actionSelect.value = 'send_dingtalk_person_message'
+    actionSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushPromises()
+
+    const userIdsInput = container.querySelector('[data-automation-field="dingtalkPersonUserIds"]') as HTMLTextAreaElement
+    userIdsInput.value = 'user_1, user_2'
+    userIdsInput.dispatchEvent(new Event('input', { bubbles: true }))
+
+    const titleInput = container.querySelector('[data-automation-field="dingtalkPersonTitleTemplate"]') as HTMLInputElement
+    titleInput.value = 'Ticket {{recordId}}'
+    titleInput.dispatchEvent(new Event('input', { bubbles: true }))
+
+    const bodyInput = container.querySelector('[data-automation-field="dingtalkPersonBodyTemplate"]') as HTMLTextAreaElement
+    bodyInput.value = 'Please fill {{record.status}}'
+    bodyInput.dispatchEvent(new Event('input', { bubbles: true }))
+
+    const publicFormSelect = container.querySelector('[data-automation-field="dingtalkPersonPublicFormViewId"]') as HTMLSelectElement
+    publicFormSelect.value = 'view_form'
+    publicFormSelect.dispatchEvent(new Event('change', { bubbles: true }))
+
+    const internalViewSelect = container.querySelector('[data-automation-field="dingtalkPersonInternalViewId"]') as HTMLSelectElement
+    internalViewSelect.value = 'view_grid'
+    internalViewSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushPromises()
+
+    const saveBtn = container.querySelector('.meta-automation__btn--primary') as HTMLButtonElement
+    saveBtn.click()
+    await flushPromises()
+
+    const postCalls = fetchFn.mock.calls.filter(([, init]: [string, RequestInit | undefined]) => init?.method === 'POST')
+    expect(postCalls.length).toBe(1)
+    const body = JSON.parse(postCalls[0][1]?.body as string)
+    expect(body.actionType).toBe('send_dingtalk_person_message')
+    expect(body.actionConfig).toEqual({
+      userIds: ['user_1', 'user_2'],
+      titleTemplate: 'Ticket {{recordId}}',
+      bodyTemplate: 'Please fill {{record.status}}',
+      publicFormViewId: 'view_form',
+      internalViewId: 'view_grid',
+    })
+  })
+
+  it('can search and add DingTalk person recipients before save', async () => {
+    const { client, fetchFn } = mockClient([])
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
+    await flushPromises()
+
+    const addBtn = container.querySelector('.meta-automation__btn-add') as HTMLButtonElement
+    addBtn.click()
+    await nextTick()
+
+    const nameInput = container.querySelector('[data-automation-field="name"]') as HTMLInputElement
+    nameInput.value = 'DingTalk search notify'
+    nameInput.dispatchEvent(new Event('input', { bubbles: true }))
+
+    const actionSelect = container.querySelector('[data-automation-field="actionType"]') as HTMLSelectElement
+    actionSelect.value = 'send_dingtalk_person_message'
+    actionSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushPromises()
+
+    const searchInput = container.querySelector('[data-automation-field="dingtalkPersonUserSearch"]') as HTMLInputElement
+    searchInput.value = 'lin'
+    searchInput.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushPromises()
+
+    const suggestion = container.querySelector('[data-automation-person-suggestion="user_1"]') as HTMLButtonElement
+    expect(suggestion).toBeTruthy()
+    suggestion.click()
+    await flushPromises()
+
+    const userIdsInput = container.querySelector('[data-automation-field="dingtalkPersonUserIds"]') as HTMLTextAreaElement
+    expect(userIdsInput.value).toBe('user_1')
+
+    const titleInput = container.querySelector('[data-automation-field="dingtalkPersonTitleTemplate"]') as HTMLInputElement
+    titleInput.value = 'Ticket {{recordId}}'
+    titleInput.dispatchEvent(new Event('input', { bubbles: true }))
+
+    const bodyInput = container.querySelector('[data-automation-field="dingtalkPersonBodyTemplate"]') as HTMLTextAreaElement
+    bodyInput.value = 'Please fill {{record.status}}'
+    bodyInput.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushPromises()
+
+    const saveBtn = container.querySelector('.meta-automation__btn--primary') as HTMLButtonElement
+    saveBtn.click()
+    await flushPromises()
+
+    const postCalls = fetchFn.mock.calls.filter(([, init]: [string, RequestInit | undefined]) => init?.method === 'POST')
+    expect(postCalls.length).toBe(1)
+    const body = JSON.parse(postCalls[0][1]?.body as string)
+    expect(body.actionConfig.userIds).toEqual(['user_1'])
+    expect(client.listCommentMentionSuggestions).toHaveBeenCalledTimes(1)
+  })
+
+  it('opens DingTalk person delivery viewer for person message rules', async () => {
+    const { client } = mockClient([
+      fakeRule({
+        name: 'DingTalk person notify',
+        actionType: 'send_dingtalk_person_message',
+        actionConfig: {
+          userIds: ['user_1'],
+          titleTemplate: 'Ticket {{recordId}}',
+          bodyTemplate: 'Please fill {{record.status}}',
+        },
+      }),
+    ])
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
+    await flushPromises()
+
+    const deliveriesBtn = container.querySelector('[data-automation-person-deliveries="rule_1"]') as HTMLButtonElement
+    expect(deliveriesBtn).toBeTruthy()
+    deliveriesBtn.click()
+    await flushPromises()
+
+    const delivery = document.querySelector('[data-person-delivery-id="dpd_1"]')
+    expect(delivery?.textContent).toContain('Lin Lan')
+    expect(delivery?.textContent).toContain('Ticket rec_1 ready')
   })
 })

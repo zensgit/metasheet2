@@ -130,6 +130,7 @@
                 <option value="send_webhook">Send webhook</option>
                 <option value="send_notification">Send notification</option>
                 <option value="send_dingtalk_group_message">Send DingTalk group message</option>
+                <option value="send_dingtalk_person_message">Send DingTalk person message</option>
                 <option value="lock_record">Lock record</option>
               </select>
               <div class="meta-rule-editor__action-btns">
@@ -234,6 +235,91 @@
               </select>
             </div>
 
+            <!-- send_dingtalk_person_message config -->
+            <div v-if="action.type === 'send_dingtalk_person_message'" class="meta-rule-editor__action-config">
+              <label class="meta-rule-editor__label">Search and add users</label>
+              <input
+                v-model="action.config.userIdsSearch"
+                class="meta-rule-editor__input"
+                type="text"
+                placeholder="Search by name, email, or userId"
+                data-field="dingtalkPersonUserSearch"
+                @input="void loadPersonRecipientSuggestions(idx, action)"
+              />
+              <div v-if="personRecipientLoading[idx]" class="meta-rule-editor__hint">Searching users…</div>
+              <div v-else-if="personRecipientErrors[idx]" class="meta-rule-editor__hint meta-rule-editor__hint--error">{{ personRecipientErrors[idx] }}</div>
+              <div v-else-if="availablePersonRecipientSuggestions(idx, action).length" class="meta-rule-editor__recipient-list">
+                <button
+                  v-for="candidate in availablePersonRecipientSuggestions(idx, action)"
+                  :key="candidate.id"
+                  class="meta-rule-editor__recipient-option"
+                  type="button"
+                  :data-person-recipient-suggestion="candidate.id"
+                  @click="addPersonRecipient(action, candidate, idx)"
+                >
+                  <strong>{{ candidate.label }}</strong>
+                  <span>{{ candidate.subtitle || candidate.id }}</span>
+                </button>
+              </div>
+              <div v-else-if="typeof action.config.userIdsSearch === 'string' && action.config.userIdsSearch.trim()" class="meta-rule-editor__hint">No matching users</div>
+              <div v-if="selectedPersonRecipients(action).length" class="meta-rule-editor__recipient-list meta-rule-editor__recipient-list--selected">
+                <button
+                  v-for="recipient in selectedPersonRecipients(action)"
+                  :key="recipient.id"
+                  class="meta-rule-editor__recipient-chip"
+                  type="button"
+                  :data-person-recipient="recipient.id"
+                  @click="removePersonRecipient(action, recipient.id)"
+                >
+                  <strong>{{ recipient.label }}</strong>
+                  <span>{{ recipient.subtitle || recipient.id }}</span>
+                  <em>Remove</em>
+                </button>
+              </div>
+              <label class="meta-rule-editor__label">Local user IDs</label>
+              <textarea
+                v-model="action.config.userIdsText"
+                class="meta-rule-editor__textarea"
+                rows="3"
+                placeholder="使用逗号或换行分隔本地 userId"
+                data-field="dingtalkPersonUserIds"
+              ></textarea>
+              <label class="meta-rule-editor__label">Title template</label>
+              <input
+                v-model="action.config.titleTemplate"
+                class="meta-rule-editor__input"
+                type="text"
+                placeholder="例如：{{record.title}} 待处理"
+                data-field="dingtalkPersonTitleTemplate"
+              />
+              <label class="meta-rule-editor__label">Body template</label>
+              <textarea
+                v-model="action.config.bodyTemplate"
+                class="meta-rule-editor__textarea"
+                rows="4"
+                placeholder="支持 {{record.xxx}}、{{recordId}}、{{sheetId}}、{{actorId}}"
+                data-field="dingtalkPersonBodyTemplate"
+              ></textarea>
+              <label class="meta-rule-editor__label">Public form view (optional)</label>
+              <select
+                v-model="action.config.publicFormViewId"
+                class="meta-rule-editor__select"
+                data-field="dingtalkPersonPublicFormViewId"
+              >
+                <option value="">-- no public form link --</option>
+                <option v-for="view in formViews" :key="view.id" :value="view.id">{{ view.name }}</option>
+              </select>
+              <label class="meta-rule-editor__label">Internal processing view (optional)</label>
+              <select
+                v-model="action.config.internalViewId"
+                class="meta-rule-editor__select"
+                data-field="dingtalkPersonInternalViewId"
+              >
+                <option value="">-- no internal link --</option>
+                <option v-for="view in internalViews" :key="view.id" :value="view.id">{{ view.name }}</option>
+              </select>
+            </div>
+
             <!-- lock_record config -->
             <div v-if="action.type === 'lock_record'" class="meta-rule-editor__action-config">
               <label class="meta-rule-editor__toggle-label">
@@ -275,6 +361,7 @@ import type {
   AutomationAction,
   AutomationCondition,
   DingTalkGroupDestination,
+  MetaCommentMentionSuggestion,
   MetaView,
 } from '../types'
 
@@ -290,6 +377,8 @@ type DraftActionConfig = Record<string, unknown> & {
   url?: string
   method?: string
   userId?: string
+  userIdsText?: string
+  userIdsSearch?: string
   message?: string
   destinationId?: string
   titleTemplate?: string
@@ -332,6 +421,11 @@ const saving = ref(false)
 const cronPreset = ref('0 * * * *')
 const dingTalkDestinations = ref<DingTalkGroupDestination[]>([])
 const dingTalkDestinationsError = ref('')
+const personRecipientSuggestions = ref<Record<number, MetaCommentMentionSuggestion[]>>({})
+const personRecipientLoading = ref<Record<number, boolean>>({})
+const personRecipientErrors = ref<Record<number, string>>({})
+const personRecipientDirectory = ref<Record<string, { label: string; subtitle?: string }>>({})
+let personRecipientSuggestionLoadId = 0
 
 const formViews = computed(() => (props.views ?? []).filter((view) => view.type === 'form'))
 const internalViews = computed(() => props.views ?? [])
@@ -363,6 +457,19 @@ function emptyDraft(): Draft {
   }
 }
 
+function draftConfigFromAction(type: AutomationActionType, config: Record<string, unknown>): DraftActionConfig {
+  if (type === 'send_dingtalk_person_message') {
+    return {
+      ...config,
+      userIdsText: Array.isArray(config.userIds)
+        ? config.userIds.join(', ')
+        : '',
+      userIdsSearch: '',
+    }
+  }
+  return { ...config }
+}
+
 function draftFromRule(rule: AutomationRule): Draft {
   return {
     name: rule.name,
@@ -372,8 +479,8 @@ function draftFromRule(rule: AutomationRule): Draft {
       ? { conjunction: rule.conditions.conjunction, conditions: rule.conditions.conditions.map((c) => ({ ...c })) }
       : { conjunction: 'AND', conditions: [] },
     actions: rule.actions && rule.actions.length
-      ? rule.actions.map((a) => ({ type: a.type, config: { ...a.config } }))
-      : [{ type: rule.actionType, config: { ...rule.actionConfig } }],
+      ? rule.actions.map((a) => ({ type: a.type, config: draftConfigFromAction(a.type, a.config) }))
+      : [{ type: rule.actionType, config: draftConfigFromAction(rule.actionType, rule.actionConfig) }],
   }
 }
 
@@ -387,6 +494,9 @@ watch(
       error.value = ''
       saving.value = false
       dingTalkDestinationsError.value = ''
+      personRecipientSuggestions.value = {}
+      personRecipientLoading.value = {}
+      personRecipientErrors.value = {}
       if (props.client) {
         try {
           dingTalkDestinations.value = await props.client.listDingTalkGroups()
@@ -412,6 +522,12 @@ const canSave = computed(() => {
       const bodyTemplate = typeof action.config.bodyTemplate === 'string' ? action.config.bodyTemplate.trim() : ''
       if (!destinationId || !titleTemplate || !bodyTemplate) return false
     }
+    if (action.type === 'send_dingtalk_person_message') {
+      const userIdsText = typeof action.config.userIdsText === 'string' ? action.config.userIdsText.trim() : ''
+      const titleTemplate = typeof action.config.titleTemplate === 'string' ? action.config.titleTemplate.trim() : ''
+      const bodyTemplate = typeof action.config.bodyTemplate === 'string' ? action.config.bodyTemplate.trim() : ''
+      if (!userIdsText || !titleTemplate || !bodyTemplate) return false
+    }
   }
   return true
 })
@@ -429,6 +545,86 @@ function addAction() {
   draft.value.actions.push({ type: 'update_record', config: defaultConfigForActionType('update_record') })
 }
 
+function parseUserIdsText(value: unknown): string[] {
+  if (typeof value !== 'string') return []
+  return value
+    .split(/[\n,]+/)
+    .map((entry) => entry.trim())
+    .filter(Boolean)
+}
+
+function rememberPersonRecipientSuggestions(items: MetaCommentMentionSuggestion[]) {
+  const next = { ...personRecipientDirectory.value }
+  for (const item of items) {
+    next[item.id] = { label: item.label, subtitle: item.subtitle }
+  }
+  personRecipientDirectory.value = next
+}
+
+function selectedPersonRecipients(action: DraftAction) {
+  return parseUserIdsText(action.config.userIdsText).map((id) => ({
+    id,
+    label: personRecipientDirectory.value[id]?.label ?? id,
+    subtitle: personRecipientDirectory.value[id]?.subtitle,
+  }))
+}
+
+function availablePersonRecipientSuggestions(idx: number, action: DraftAction) {
+  const selected = new Set(parseUserIdsText(action.config.userIdsText))
+  return (personRecipientSuggestions.value[idx] ?? []).filter((candidate) => !selected.has(candidate.id))
+}
+
+async function loadPersonRecipientSuggestions(idx: number, action: DraftAction) {
+  const query = typeof action.config.userIdsSearch === 'string' ? action.config.userIdsSearch.trim() : ''
+  if (!props.client || !query) {
+    personRecipientSuggestions.value = { ...personRecipientSuggestions.value, [idx]: [] }
+    personRecipientErrors.value = { ...personRecipientErrors.value, [idx]: '' }
+    personRecipientLoading.value = { ...personRecipientLoading.value, [idx]: false }
+    return
+  }
+
+  const requestId = ++personRecipientSuggestionLoadId
+  personRecipientLoading.value = { ...personRecipientLoading.value, [idx]: true }
+  personRecipientErrors.value = { ...personRecipientErrors.value, [idx]: '' }
+  try {
+    const response = await props.client.listCommentMentionSuggestions({
+      spreadsheetId: props.sheetId,
+      q: query,
+      limit: 8,
+    })
+    if (requestId !== personRecipientSuggestionLoadId) return
+    rememberPersonRecipientSuggestions(response.items)
+    personRecipientSuggestions.value = { ...personRecipientSuggestions.value, [idx]: response.items }
+  } catch (error) {
+    if (requestId !== personRecipientSuggestionLoadId) return
+    personRecipientSuggestions.value = { ...personRecipientSuggestions.value, [idx]: [] }
+    personRecipientErrors.value = {
+      ...personRecipientErrors.value,
+      [idx]: error instanceof Error ? error.message : 'Failed to search users',
+    }
+  } finally {
+    if (requestId === personRecipientSuggestionLoadId) {
+      personRecipientLoading.value = { ...personRecipientLoading.value, [idx]: false }
+    }
+  }
+}
+
+function addPersonRecipient(action: DraftAction, candidate: MetaCommentMentionSuggestion, idx: number) {
+  const ids = new Set(parseUserIdsText(action.config.userIdsText))
+  ids.add(candidate.id)
+  action.config.userIdsText = Array.from(ids).join(', ')
+  action.config.userIdsSearch = ''
+  rememberPersonRecipientSuggestions([candidate])
+  personRecipientSuggestions.value = { ...personRecipientSuggestions.value, [idx]: [] }
+  personRecipientErrors.value = { ...personRecipientErrors.value, [idx]: '' }
+}
+
+function removePersonRecipient(action: DraftAction, userId: string) {
+  action.config.userIdsText = parseUserIdsText(action.config.userIdsText)
+    .filter((id) => id !== userId)
+    .join(', ')
+}
+
 function defaultConfigForActionType(type: AutomationActionType): DraftActionConfig {
   switch (type) {
     case 'update_record':
@@ -442,6 +638,15 @@ function defaultConfigForActionType(type: AutomationActionType): DraftActionConf
     case 'send_dingtalk_group_message':
       return {
         destinationId: '',
+        titleTemplate: '',
+        bodyTemplate: '',
+        publicFormViewId: '',
+        internalViewId: '',
+      }
+    case 'send_dingtalk_person_message':
+      return {
+        userIdsText: '',
+        userIdsSearch: '',
         titleTemplate: '',
         bodyTemplate: '',
         publicFormViewId: '',
@@ -493,15 +698,40 @@ function buildPayload(): Partial<AutomationRule> {
   if (d.triggerType === 'schedule.cron' && cronPreset.value !== 'custom') {
     triggerConfig.cron = cronPreset.value
   }
+  const actions = d.actions.map((action) => {
+    if (action.type === 'send_dingtalk_person_message') {
+      const userIds = typeof action.config.userIdsText === 'string'
+        ? action.config.userIdsText
+          .split(/[\n,]+/)
+          .map((entry) => entry.trim())
+          .filter(Boolean)
+        : []
+      return {
+        type: action.type,
+        config: {
+          userIds,
+          titleTemplate: typeof action.config.titleTemplate === 'string' ? action.config.titleTemplate.trim() : '',
+          bodyTemplate: typeof action.config.bodyTemplate === 'string' ? action.config.bodyTemplate.trim() : '',
+          publicFormViewId: typeof action.config.publicFormViewId === 'string' && action.config.publicFormViewId.trim()
+            ? action.config.publicFormViewId.trim()
+            : undefined,
+          internalViewId: typeof action.config.internalViewId === 'string' && action.config.internalViewId.trim()
+            ? action.config.internalViewId.trim()
+            : undefined,
+        },
+      }
+    }
+    return { type: action.type, config: action.config }
+  })
   return {
     name: d.name.trim(),
     triggerType: d.triggerType,
     triggerConfig,
     trigger: { type: d.triggerType, config: triggerConfig },
     conditions: d.conditions.conditions.length > 0 ? d.conditions : undefined,
-    actions: d.actions.map((a) => ({ type: a.type, config: a.config })),
-    actionType: d.actions[0]?.type ?? 'update_record',
-    actionConfig: d.actions[0]?.config ?? {},
+    actions,
+    actionType: actions[0]?.type ?? 'update_record',
+    actionConfig: actions[0]?.config ?? {},
   }
 }
 
@@ -583,6 +813,8 @@ function onTestRun() {
 
 .meta-rule-editor__label { font-size: 12px; font-weight: 600; color: #475569; margin-top: 4px; }
 
+.meta-rule-editor__hint--error { color: #b91c1c; }
+
 .meta-rule-editor__input,
 .meta-rule-editor__select,
 .meta-rule-editor__textarea {
@@ -653,6 +885,38 @@ function onTestRun() {
   flex-direction: column;
   gap: 6px;
   padding-left: 20px;
+}
+
+.meta-rule-editor__recipient-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.meta-rule-editor__recipient-list--selected {
+  margin-bottom: 4px;
+}
+
+.meta-rule-editor__recipient-option,
+.meta-rule-editor__recipient-chip {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  background: #fff;
+  padding: 8px 10px;
+  cursor: pointer;
+  color: #0f172a;
+}
+
+.meta-rule-editor__recipient-option span,
+.meta-rule-editor__recipient-chip span,
+.meta-rule-editor__recipient-chip em {
+  font-size: 12px;
+  color: #64748b;
+  font-style: normal;
 }
 
 .meta-rule-editor__toggle-label {
