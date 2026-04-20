@@ -112,6 +112,7 @@ function mount(props: Record<string, unknown>) {
 const fields = [
   { id: 'fld_1', name: 'Status', type: 'select' },
   { id: 'fld_2', name: 'Name', type: 'string' },
+  { id: 'assigneeUserIds', name: 'Assignees', type: 'user' },
 ]
 
 const views = [
@@ -440,6 +441,31 @@ describe('MetaAutomationManager', () => {
     })
   })
 
+  it('can pick a record recipient field for DingTalk person automation', async () => {
+    const { client } = mockClient([])
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
+    await flushPromises()
+
+    const addBtn = container.querySelector('.meta-automation__btn-add') as HTMLButtonElement
+    addBtn.click()
+    await nextTick()
+
+    const actionSelect = container.querySelector('[data-automation-field="actionType"]') as HTMLSelectElement
+    actionSelect.value = 'send_dingtalk_person_message'
+    actionSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushPromises()
+
+    const fieldSelect = container.querySelector('[data-automation-field="dingtalkPersonRecipientFieldSelect"]') as HTMLSelectElement
+    fieldSelect.value = 'assigneeUserIds'
+    fieldSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushPromises()
+
+    const recipientFieldInput = container.querySelector('[data-automation-field="dingtalkPersonRecipientFieldPath"]') as HTMLInputElement
+    const summary = container.querySelector('[data-automation-summary="person"]')
+    expect(recipientFieldInput.value).toBe('record.assigneeUserIds')
+    expect(summary?.textContent).toContain('Assignees (record.assigneeUserIds)')
+  })
+
   it('can search and add DingTalk person recipients before save', async () => {
     const { client, fetchFn } = mockClient([])
     const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
@@ -666,7 +692,7 @@ describe('MetaAutomationManager', () => {
     expect(summary?.textContent).toContain('Handle {{record.xxx}}')
     expect(summary?.textContent).toContain('Need action record_demo_001')
     expect(summary?.textContent).toContain('Handle 示例字段值')
-    expect(summary?.textContent).toContain('record.assigneeUserIds')
+    expect(summary?.textContent).toContain('Assignees (record.assigneeUserIds)')
     expect(summary?.textContent).toContain('No public form link')
     expect(summary?.textContent).toContain('No internal link')
   })
@@ -705,7 +731,7 @@ describe('MetaAutomationManager', () => {
     const recipientFieldInput = document.querySelector('[data-field="dingtalkPersonRecipientFieldPath"]') as HTMLInputElement
     expect(recipientFieldInput.value).toBe('record.assigneeUserIds')
     expect(document.body.textContent).toContain('Record recipients:')
-    expect(document.body.textContent).toContain('record.assigneeUserIds')
+    expect(document.body.textContent).toContain('Assignees (record.assigneeUserIds)')
   })
 
   it('shows DingTalk template syntax warnings in the inline create form', async () => {

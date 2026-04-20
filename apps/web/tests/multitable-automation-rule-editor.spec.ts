@@ -11,6 +11,7 @@ import type { AutomationRule } from '../src/multitable/types'
 const fields = [
   { id: 'fld_1', name: 'Status', type: 'select' },
   { id: 'fld_2', name: 'Name', type: 'string' },
+  { id: 'assigneeUserIds', name: 'Assignees', type: 'user' },
 ]
 
 const views = [
@@ -413,7 +414,33 @@ describe('MetaAutomationRuleEditor', () => {
       },
     })
     expect(container.textContent).toContain('Record recipients:')
-    expect(container.textContent).toContain('record.assigneeUserIds')
+    expect(container.textContent).toContain('Assignees (record.assigneeUserIds)')
+  })
+
+  it('can pick a record recipient field in the rule editor', async () => {
+    const client = mockClient()
+    const { container } = mount({
+      visible: true,
+      sheetId: 'sheet_1',
+      fields,
+      views,
+      client,
+    })
+    await flushPromises()
+
+    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header select') as HTMLSelectElement
+    actionSelect.value = 'send_dingtalk_person_message'
+    actionSelect.dispatchEvent(new Event('change'))
+    await flushPromises()
+
+    const fieldSelect = container.querySelector('[data-field="dingtalkPersonRecipientFieldSelect"]') as HTMLSelectElement
+    fieldSelect.value = 'assigneeUserIds'
+    fieldSelect.dispatchEvent(new Event('change'))
+    await flushPromises()
+
+    const recipientFieldInput = container.querySelector('[data-field="dingtalkPersonRecipientFieldPath"]') as HTMLInputElement
+    expect(recipientFieldInput.value).toBe('record.assigneeUserIds')
+    expect(container.textContent).toContain('Assignees (record.assigneeUserIds)')
   })
 
   it('can search and add DingTalk person recipients', async () => {
