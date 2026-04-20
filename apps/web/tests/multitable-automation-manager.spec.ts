@@ -389,6 +389,57 @@ describe('MetaAutomationManager', () => {
     })
   })
 
+  it('creates DingTalk person automation with only a dynamic record recipient path', async () => {
+    const { client, fetchFn } = mockClient([])
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
+    await flushPromises()
+
+    const addBtn = container.querySelector('.meta-automation__btn-add') as HTMLButtonElement
+    addBtn.click()
+    await nextTick()
+
+    const nameInput = container.querySelector('[data-automation-field="name"]') as HTMLInputElement
+    nameInput.value = 'DingTalk dynamic notify'
+    nameInput.dispatchEvent(new Event('input', { bubbles: true }))
+
+    const actionSelect = container.querySelector('[data-automation-field="actionType"]') as HTMLSelectElement
+    actionSelect.value = 'send_dingtalk_person_message'
+    actionSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushPromises()
+
+    const recipientFieldInput = container.querySelector('[data-automation-field="dingtalkPersonRecipientFieldPath"]') as HTMLInputElement
+    recipientFieldInput.value = 'record.assigneeUserIds'
+    recipientFieldInput.dispatchEvent(new Event('input', { bubbles: true }))
+
+    const titleInput = container.querySelector('[data-automation-field="dingtalkPersonTitleTemplate"]') as HTMLInputElement
+    titleInput.value = 'Ticket {{recordId}}'
+    titleInput.dispatchEvent(new Event('input', { bubbles: true }))
+
+    const bodyInput = container.querySelector('[data-automation-field="dingtalkPersonBodyTemplate"]') as HTMLTextAreaElement
+    bodyInput.value = 'Please fill {{record.status}}'
+    bodyInput.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushPromises()
+
+    const summary = container.querySelector('[data-automation-summary="person"]')
+    expect(summary?.textContent).toContain('Record recipients:')
+    expect(summary?.textContent).toContain('record.assigneeUserIds')
+
+    const saveBtn = container.querySelector('.meta-automation__btn--primary') as HTMLButtonElement
+    expect(saveBtn.disabled).toBe(false)
+    saveBtn.click()
+    await flushPromises()
+
+    const postCalls = fetchFn.mock.calls.filter(([, init]: [string, RequestInit | undefined]) => init?.method === 'POST')
+    expect(postCalls.length).toBe(1)
+    const body = JSON.parse(postCalls[0][1]?.body as string)
+    expect(body.actionConfig).toEqual({
+      userIds: [],
+      userIdFieldPath: 'record.assigneeUserIds',
+      titleTemplate: 'Ticket {{recordId}}',
+      bodyTemplate: 'Please fill {{record.status}}',
+    })
+  })
+
   it('can search and add DingTalk person recipients before save', async () => {
     const { client, fetchFn } = mockClient([])
     const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
@@ -592,6 +643,10 @@ describe('MetaAutomationManager', () => {
     actionSelect.dispatchEvent(new Event('change', { bubbles: true }))
     await flushPromises()
 
+    const recipientFieldInput = container.querySelector('[data-automation-field="dingtalkPersonRecipientFieldPath"]') as HTMLInputElement
+    recipientFieldInput.value = 'record.assigneeUserIds'
+    recipientFieldInput.dispatchEvent(new Event('input', { bubbles: true }))
+
     const userIdsInput = container.querySelector('[data-automation-field="dingtalkPersonUserIds"]') as HTMLTextAreaElement
     userIdsInput.value = 'user_1'
     userIdsInput.dispatchEvent(new Event('input', { bubbles: true }))
@@ -611,8 +666,46 @@ describe('MetaAutomationManager', () => {
     expect(summary?.textContent).toContain('Handle {{record.xxx}}')
     expect(summary?.textContent).toContain('Need action record_demo_001')
     expect(summary?.textContent).toContain('Handle 示例字段值')
+    expect(summary?.textContent).toContain('record.assigneeUserIds')
     expect(summary?.textContent).toContain('No public form link')
     expect(summary?.textContent).toContain('No internal link')
+  })
+
+  it('loads dynamic record recipient path into the edit form', async () => {
+    const rules = [
+      fakeRule({
+        id: 'rule_dynamic',
+        actionType: 'send_dingtalk_person_message',
+        actionConfig: {
+          userIds: [],
+          userIdFieldPath: 'record.assigneeUserIds',
+          titleTemplate: 'Ticket {{recordId}}',
+          bodyTemplate: 'Please fill {{record.status}}',
+        },
+        actions: [{
+          type: 'send_dingtalk_person_message',
+          config: {
+            userIds: [],
+            userIdFieldPath: 'record.assigneeUserIds',
+            titleTemplate: 'Ticket {{recordId}}',
+            bodyTemplate: 'Please fill {{record.status}}',
+          },
+        }],
+      }),
+    ]
+    const { client } = mockClient(rules)
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
+    await flushPromises()
+
+    const editBtn = container.querySelector('[data-automation-edit="true"]') as HTMLButtonElement
+    expect(editBtn).toBeTruthy()
+    editBtn.click()
+    await flushPromises()
+
+    const recipientFieldInput = document.querySelector('[data-field="dingtalkPersonRecipientFieldPath"]') as HTMLInputElement
+    expect(recipientFieldInput.value).toBe('record.assigneeUserIds')
+    expect(document.body.textContent).toContain('Record recipients:')
+    expect(document.body.textContent).toContain('record.assigneeUserIds')
   })
 
   it('shows DingTalk template syntax warnings in the inline create form', async () => {

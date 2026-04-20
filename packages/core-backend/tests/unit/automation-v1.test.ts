@@ -645,6 +645,91 @@ describe('AutomationExecutor', () => {
     expect(insertCall?.[1]?.[1]).toBe('user_2')
   })
 
+  it('executes send_dingtalk_person_message with dynamic record recipients', async () => {
+    process.env.DINGTALK_APP_KEY = 'dt-app-key'
+    process.env.DINGTALK_APP_SECRET = 'dt-app-secret'
+    process.env.DINGTALK_AGENT_ID = '123456789'
+
+    const queryFn = vi.fn()
+      .mockResolvedValueOnce({
+        rows: [
+          { local_user_id: 'user_1', local_user_active: true, dingtalk_user_id: 'dt-user-1' },
+          { local_user_id: 'user_2', local_user_active: true, dingtalk_user_id: 'dt-user-2' },
+        ],
+      })
+      .mockResolvedValue({ rows: [] })
+    const fetchFn = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ access_token: 'app-access-token' }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ errcode: 0, errmsg: 'ok', task_id: 778899 }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      })) as unknown as typeof fetch
+
+    deps = createMockDeps({ queryFn, fetchFn })
+    executor = new AutomationExecutor(deps)
+
+    const rule = createMockRule({
+      actions: [{
+        type: 'send_dingtalk_person_message',
+        config: {
+          userIdFieldPath: 'record.assigneeUserIds',
+          titleTemplate: 'Record {{record.title}} ready',
+          bodyTemplate: 'Status: {{record.status}}',
+        },
+      }],
+    })
+    const result = await executor.execute(rule, {
+      recordId: 'r1',
+      data: {
+        title: 'Incident',
+        status: 'open',
+        assigneeUserIds: ['user_1', { id: 'user_2' }, 'user_1'],
+      },
+      sheetId: 'sheet_1',
+      actorId: 'user_1',
+    })
+
+    expect(result.status).toBe('success')
+    expect(fetchFn).toHaveBeenCalledTimes(2)
+    const [, sendInit] = fetchFn.mock.calls[1] as [string, RequestInit]
+    const payload = JSON.parse(sendInit.body as string)
+    expect(payload.userid_list).toBe('dt-user-1,dt-user-2')
+    expect(result.steps[0].output).toMatchObject({
+      notifiedUsers: 2,
+      staticRecipientCount: 0,
+      dynamicRecipientCount: 2,
+      recipientFieldPath: 'assigneeUserIds',
+    })
+  })
+
+  it('fails send_dingtalk_person_message when dynamic record path resolves no recipients', async () => {
+    deps = createMockDeps()
+    executor = new AutomationExecutor(deps)
+
+    const rule = createMockRule({
+      actions: [{
+        type: 'send_dingtalk_person_message',
+        config: {
+          userIdFieldPath: 'record.assigneeUserIds',
+          titleTemplate: 'Title',
+          bodyTemplate: 'Body',
+        },
+      }],
+    })
+    const result = await executor.execute(rule, {
+      recordId: 'r1',
+      data: { assigneeUserIds: [] },
+      sheetId: 'sheet_1',
+      actorId: 'user_1',
+    })
+
+    expect(result.status).toBe('failed')
+    expect(result.steps[0].error).toContain('record field path "assigneeUserIds"')
+  })
+
   it('fails send_notification with no userIds', async () => {
     const rule = createMockRule({
       actions: [{ type: 'send_notification', config: { message: 'Hi' } }],

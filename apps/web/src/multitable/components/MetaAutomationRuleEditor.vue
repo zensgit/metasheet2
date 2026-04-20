@@ -366,6 +366,17 @@
                 placeholder="使用逗号或换行分隔本地 userId"
                 data-field="dingtalkPersonUserIds"
               ></textarea>
+              <label class="meta-rule-editor__label">Record recipient field path (optional)</label>
+              <input
+                v-model="action.config.recipientFieldPath"
+                class="meta-rule-editor__input"
+                type="text"
+                placeholder="例如：record.assigneeUserIds"
+                data-field="dingtalkPersonRecipientFieldPath"
+              />
+              <div class="meta-rule-editor__hint">
+                Supports `record.xxx` paths that resolve to one userId, a comma-separated string, or a userId array.
+              </div>
               <label class="meta-rule-editor__label">Title template</label>
               <input
                 v-model="action.config.titleTemplate"
@@ -443,6 +454,7 @@
               <div class="meta-rule-editor__preview" data-field="personMessageSummary">
                 <div class="meta-rule-editor__preview-title">Message summary</div>
                 <div><strong>Recipients:</strong> {{ personRecipientSummary(action) }}</div>
+                <div><strong>Record recipients:</strong> {{ recipientFieldPathSummary(action.config.recipientFieldPath) }}</div>
                 <div><strong>Title template:</strong> {{ templatePreviewText(action.config.titleTemplate, 'No title template') }}</div>
                 <div class="meta-rule-editor__preview-body"><strong>Body template:</strong> {{ templatePreviewText(action.config.bodyTemplate, 'No body template') }}</div>
                 <div class="meta-rule-editor__preview-line">
@@ -539,6 +551,7 @@ type DraftActionConfig = Record<string, unknown> & {
   userId?: string
   userIdsText?: string
   userIdsSearch?: string
+  recipientFieldPath?: string
   message?: string
   destinationId?: string
   titleTemplate?: string
@@ -626,6 +639,9 @@ function draftConfigFromAction(type: AutomationActionType, config: Record<string
       userIdsText: Array.isArray(config.userIds)
         ? config.userIds.join(', ')
         : '',
+      recipientFieldPath: typeof config.userIdFieldPath === 'string'
+        ? config.userIdFieldPath
+        : '',
       userIdsSearch: '',
     }
   }
@@ -686,9 +702,10 @@ const canSave = computed(() => {
     }
     if (action.type === 'send_dingtalk_person_message') {
       const userIdsText = typeof action.config.userIdsText === 'string' ? action.config.userIdsText.trim() : ''
+      const recipientFieldPath = typeof action.config.recipientFieldPath === 'string' ? action.config.recipientFieldPath.trim() : ''
       const titleTemplate = typeof action.config.titleTemplate === 'string' ? action.config.titleTemplate.trim() : ''
       const bodyTemplate = typeof action.config.bodyTemplate === 'string' ? action.config.bodyTemplate.trim() : ''
-      if (!userIdsText || !titleTemplate || !bodyTemplate) return false
+      if ((!userIdsText && !recipientFieldPath) || !titleTemplate || !bodyTemplate) return false
     }
   }
   return true
@@ -827,6 +844,12 @@ function personRecipientSummary(action: DraftAction) {
   return selected.map((item) => item.label).join(', ')
 }
 
+function recipientFieldPathSummary(value: unknown) {
+  if (typeof value !== 'string' || !value.trim()) return 'No dynamic recipient field'
+  const normalized = value.trim().replace(/^record\./, '')
+  return normalized ? `record.${normalized}` : 'No dynamic recipient field'
+}
+
 function templateSyntaxWarnings(value: unknown) {
   return typeof value === 'string' ? listDingTalkTemplateSyntaxWarnings(value) : []
 }
@@ -909,6 +932,7 @@ function defaultConfigForActionType(type: AutomationActionType): DraftActionConf
       return {
         userIdsText: '',
         userIdsSearch: '',
+        recipientFieldPath: '',
         titleTemplate: '',
         bodyTemplate: '',
         publicFormViewId: '',
@@ -972,6 +996,9 @@ function buildPayload(): Partial<AutomationRule> {
         type: action.type,
         config: {
           userIds,
+          userIdFieldPath: typeof action.config.recipientFieldPath === 'string' && action.config.recipientFieldPath.trim()
+            ? action.config.recipientFieldPath.trim()
+            : undefined,
           titleTemplate: typeof action.config.titleTemplate === 'string' ? action.config.titleTemplate.trim() : '',
           bodyTemplate: typeof action.config.bodyTemplate === 'string' ? action.config.bodyTemplate.trim() : '',
           publicFormViewId: typeof action.config.publicFormViewId === 'string' && action.config.publicFormViewId.trim()

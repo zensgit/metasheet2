@@ -74,6 +74,49 @@ function normalizeUserIds(value: unknown): string[] {
   ))
 }
 
+function normalizeUserIdScalar(value: unknown): string[] {
+  if (typeof value === 'string') {
+    return value
+      .split(/[\n,]+/)
+      .map((entry) => entry.trim())
+      .filter(Boolean)
+  }
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return [String(value)]
+  }
+  if (typeof value === 'object' && value && !Array.isArray(value)) {
+    const record = value as Record<string, unknown>
+    for (const key of ['localUserId', 'userId', 'id', 'value']) {
+      const candidate = record[key]
+      if (typeof candidate === 'string' && candidate.trim()) return [candidate.trim()]
+      if (typeof candidate === 'number' && Number.isFinite(candidate)) return [String(candidate)]
+    }
+  }
+  return []
+}
+
+function normalizeUserIdsFromUnknown(value: unknown): string[] {
+  if (Array.isArray(value)) {
+    return Array.from(new Set(
+      value.flatMap((entry) => normalizeUserIdsFromUnknown(entry)),
+    ))
+  }
+  return normalizeUserIdScalar(value)
+}
+
+function normalizeRecipientFieldPath(value: unknown): string {
+  if (typeof value !== 'string') return ''
+  const trimmed = value.trim()
+  if (!trimmed) return ''
+  return trimmed.replace(/^record\./, '')
+}
+
+function resolveRecipientUserIdsFromRecord(recordData: Record<string, unknown>, fieldPath: unknown): string[] {
+  const normalizedPath = normalizeRecipientFieldPath(fieldPath)
+  if (!normalizedPath) return []
+  return normalizeUserIdsFromUnknown(lookupTemplateValue(normalizedPath, recordData))
+}
+
 function chunkItems<T>(items: T[], size: number): T[][] {
   if (items.length === 0) return []
   const chunks: T[][] = []
@@ -599,14 +642,28 @@ export class AutomationExecutor {
     config: SendDingTalkPersonMessageConfig,
     context: ExecutionContext,
   ): Promise<AutomationStepResult> {
-    const userIds = normalizeUserIds(config.userIds)
+    const staticUserIds = normalizeUserIds(config.userIds)
+    const recipientFieldPath = normalizeRecipientFieldPath(config.userIdFieldPath)
+    const recordUserIds = resolveRecipientUserIdsFromRecord(context.recordData, recipientFieldPath)
+    const userIds = Array.from(new Set([...staticUserIds, ...recordUserIds]))
     const titleTemplate = typeof config.titleTemplate === 'string' ? config.titleTemplate.trim() : ''
     const bodyTemplate = typeof config.bodyTemplate === 'string' ? config.bodyTemplate.trim() : ''
     const publicFormViewId = typeof config.publicFormViewId === 'string' ? config.publicFormViewId.trim() : ''
     const internalViewId = typeof config.internalViewId === 'string' ? config.internalViewId.trim() : ''
 
     if (userIds.length === 0) {
-      return { actionType: 'send_dingtalk_person_message', status: 'failed', error: 'At least one local userId is required' }
+      if (recipientFieldPath) {
+        return {
+          actionType: 'send_dingtalk_person_message',
+          status: 'failed',
+          error: `No local userIds resolved from record field path "${recipientFieldPath}"`,
+        }
+      }
+      return {
+        actionType: 'send_dingtalk_person_message',
+        status: 'failed',
+        error: 'At least one local userId or record recipient field path is required',
+      }
     }
     if (!titleTemplate) {
       return { actionType: 'send_dingtalk_person_message', status: 'failed', error: 'DingTalk title template is required' }
@@ -785,6 +842,9 @@ export class AutomationExecutor {
         status: 'success',
         output: {
           notifiedUsers: resolvedRecipients.length,
+          staticRecipientCount: staticUserIds.length,
+          dynamicRecipientCount: recordUserIds.length,
+          recipientFieldPath: recipientFieldPath || null,
           batchCount: batches.length,
           linkCount: linkLines.length,
           responseCount,
