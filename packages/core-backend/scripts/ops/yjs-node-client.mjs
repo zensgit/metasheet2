@@ -36,7 +36,13 @@ async function fetchStatus() {
   const res = await fetch(`${BASE_URL}/api/admin/yjs/status`, {
     headers: { Authorization: `Bearer ${TOKEN}` },
   })
+  if (!res.ok) {
+    throw new Error(`status endpoint ${res.status} ${res.statusText} (token may be invalid/expired)`)
+  }
   const json = await res.json()
+  if (!json.yjs) {
+    throw new Error(`status endpoint responded ok but had no yjs payload: ${JSON.stringify(json).slice(0, 200)}`)
+  }
   return json.yjs
 }
 
