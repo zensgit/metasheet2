@@ -452,6 +452,59 @@ describe('AutomationExecutor', () => {
     expect((queryFn.mock.calls[3]?.[0] as string) ?? '').toContain('INSERT INTO dingtalk_group_deliveries')
   })
 
+  it('executes send_dingtalk_group_message across multiple destinations', async () => {
+    const queryFn = vi.fn()
+      .mockResolvedValueOnce({
+        rows: [
+          { id: 'dt_1', name: 'Ops Group', webhook_url: 'https://oapi.dingtalk.com/robot/send?access_token=test', secret: null, enabled: true },
+          { id: 'dt_2', name: 'Escalation Group', webhook_url: 'https://oapi.dingtalk.com/robot/send?access_token=test-2', secret: null, enabled: true },
+        ],
+      })
+      .mockResolvedValue({ rows: [] })
+    const fetchFn = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ errcode: 0, errmsg: 'ok' }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ errcode: 0, errmsg: 'ok' }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      })) as unknown as typeof fetch
+
+    deps = createMockDeps({ queryFn, fetchFn })
+    executor = new AutomationExecutor(deps)
+
+    const rule = createMockRule({
+      actions: [{
+        type: 'send_dingtalk_group_message',
+        config: {
+          destinationIds: ['dt_1', 'dt_2'],
+          titleTemplate: 'Record {{record.title}} ready',
+          bodyTemplate: 'Status: {{record.status}}',
+        },
+      }],
+    })
+
+    const result = await executor.execute(rule, {
+      recordId: 'r1',
+      data: { title: 'Incident', status: 'open' },
+      sheetId: 'sheet_1',
+      actorId: 'user_1',
+    })
+
+    expect(result.status).toBe('success')
+    expect(result.steps[0].output).toEqual(expect.objectContaining({
+      destinationIds: ['dt_1', 'dt_2'],
+      destinationNames: ['Ops Group', 'Escalation Group'],
+      sentCount: 2,
+    }))
+    expect(fetchFn).toHaveBeenCalledTimes(2)
+    expect(String(fetchFn.mock.calls[0]?.[0] ?? '')).toContain('access_token=test')
+    expect(String(fetchFn.mock.calls[1]?.[0] ?? '')).toContain('access_token=test-2')
+    const insertCalls = queryFn.mock.calls.filter((call) => String(call[0]).includes('INSERT INTO dingtalk_group_deliveries'))
+    expect(insertCalls).toHaveLength(2)
+  })
+
   it('records DingTalk application error diagnostics for send_dingtalk_group_message', async () => {
     const queryFn = vi.fn()
       .mockResolvedValueOnce({
@@ -553,7 +606,8 @@ describe('AutomationExecutor', () => {
     const result = await executor.execute(rule, { recordId: 'r1', sheetId: 'sheet_1' })
     expect(result.status).toBe('failed')
     expect(result.steps[0].status).toBe('failed')
-    expect(result.steps[0].error).toContain('destination not found')
+    expect(result.steps[0].error).toContain('destinations not found')
+    expect(result.steps[0].error).toContain('dt_missing')
   })
 
   it('executes send_dingtalk_person_message action successfully', async () => {
