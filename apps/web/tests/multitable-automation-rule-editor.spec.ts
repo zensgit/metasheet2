@@ -43,12 +43,19 @@ function mockClient() {
       },
     ]),
     listCommentMentionSuggestions: vi.fn(async () => ({
-      items: [
-        { id: 'user_1', label: 'Lin Lan', subtitle: 'lin@example.com' },
-        { id: 'user_2', label: 'Zhao Ming', subtitle: 'zhao@example.com' },
-      ],
-      total: 2,
+      items: [],
+      total: 0,
       limit: 8,
+    })),
+    listFormShareCandidates: vi.fn(async () => ({
+      items: [
+        { subjectType: 'user', subjectId: 'user_1', label: 'Lin Lan', subtitle: 'lin@example.com', isActive: true },
+        { subjectType: 'user', subjectId: 'user_2', label: 'Zhao Ming', subtitle: 'zhao@example.com', isActive: true },
+        { subjectType: 'member-group', subjectId: 'group_1', label: 'Sales Team', subtitle: '3 members', isActive: true },
+      ],
+      total: 3,
+      limit: 8,
+      query: '',
     })),
   }
 }
@@ -604,13 +611,24 @@ describe('MetaAutomationRuleEditor', () => {
     searchInput.dispatchEvent(new Event('input'))
     await flushPromises()
 
-    const suggestion = container.querySelector('[data-person-recipient-suggestion="user_1"]') as HTMLButtonElement
+    const suggestion = container.querySelector('[data-person-recipient-suggestion="user:user_1"]') as HTMLButtonElement
     expect(suggestion).toBeTruthy()
     suggestion.click()
     await flushPromises()
 
+    searchInput.value = 'sales'
+    searchInput.dispatchEvent(new Event('input'))
+    await flushPromises()
+
+    const groupSuggestion = container.querySelector('[data-person-recipient-suggestion="member-group:group_1"]') as HTMLButtonElement
+    expect(groupSuggestion).toBeTruthy()
+    groupSuggestion.click()
+    await flushPromises()
+
     const userIdsInput = container.querySelector('[data-field="dingtalkPersonUserIds"]') as HTMLTextAreaElement
     expect(userIdsInput.value).toBe('user_1')
+    const memberGroupIdsInput = container.querySelector('[data-field="dingtalkPersonMemberGroupIds"]') as HTMLTextAreaElement
+    expect(memberGroupIdsInput.value).toBe('group_1')
 
     const titleInput = container.querySelector('[data-field="dingtalkPersonTitleTemplate"]') as HTMLInputElement
     titleInput.value = 'Ticket {{recordId}}'
@@ -628,7 +646,8 @@ describe('MetaAutomationRuleEditor', () => {
     expect(saved).toHaveBeenCalledTimes(1)
     const payload = saved.mock.calls[0][0]
     expect(payload.actionConfig.userIds).toEqual(['user_1'])
-    expect(client.listCommentMentionSuggestions).toHaveBeenCalledTimes(1)
+    expect(payload.actionConfig.memberGroupIds).toEqual(['group_1'])
+    expect(client.listFormShareCandidates).toHaveBeenCalledTimes(2)
   })
 
   it('applies DingTalk group message presets', async () => {

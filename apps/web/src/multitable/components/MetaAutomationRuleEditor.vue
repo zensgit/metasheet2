@@ -337,31 +337,31 @@
                 <button class="meta-rule-editor__btn" type="button" data-field="personPresetInternal" @click="applyPersonPreset(action, 'internal_process')">Internal processing</button>
                 <button class="meta-rule-editor__btn" type="button" data-field="personPresetBoth" @click="applyPersonPreset(action, 'form_and_process')">Form + processing</button>
               </div>
-              <label class="meta-rule-editor__label">Search and add users</label>
+              <label class="meta-rule-editor__label">Search and add users or member groups</label>
               <input
                 v-model="action.config.userIdsSearch"
                 class="meta-rule-editor__input"
                 type="text"
-                placeholder="Search by name, email, or userId"
+                placeholder="Search by user, member group, email, or subject ID"
                 data-field="dingtalkPersonUserSearch"
                 @input="void loadPersonRecipientSuggestions(idx, action)"
               />
-              <div v-if="personRecipientLoading[idx]" class="meta-rule-editor__hint">Searching users…</div>
+              <div v-if="personRecipientLoading[idx]" class="meta-rule-editor__hint">Searching users and member groups…</div>
               <div v-else-if="personRecipientErrors[idx]" class="meta-rule-editor__hint meta-rule-editor__hint--error">{{ personRecipientErrors[idx] }}</div>
               <div v-else-if="availablePersonRecipientSuggestions(idx, action).length" class="meta-rule-editor__recipient-list">
                 <button
                   v-for="candidate in availablePersonRecipientSuggestions(idx, action)"
-                  :key="candidate.id"
+                  :key="personRecipientCandidateKey(candidate)"
                   class="meta-rule-editor__recipient-option"
                   type="button"
-                  :data-person-recipient-suggestion="candidate.id"
+                  :data-person-recipient-suggestion="personRecipientCandidateKey(candidate)"
                   @click="addPersonRecipient(action, candidate, idx)"
                 >
                   <strong>{{ candidate.label }}</strong>
-                  <span>{{ candidate.subtitle || candidate.id }}</span>
+                  <span>{{ candidate.subtitle || candidate.subjectId }}</span>
                 </button>
               </div>
-              <div v-else-if="typeof action.config.userIdsSearch === 'string' && action.config.userIdsSearch.trim()" class="meta-rule-editor__hint">No matching users</div>
+              <div v-else-if="typeof action.config.userIdsSearch === 'string' && action.config.userIdsSearch.trim()" class="meta-rule-editor__hint">No matching users or member groups</div>
               <div v-if="selectedPersonRecipients(action).length" class="meta-rule-editor__recipient-list meta-rule-editor__recipient-list--selected">
                 <button
                   v-for="recipient in selectedPersonRecipients(action)"
@@ -376,6 +376,20 @@
                   <em>Remove</em>
                 </button>
               </div>
+              <div v-if="selectedPersonRecipientGroups(action).length" class="meta-rule-editor__recipient-list meta-rule-editor__recipient-list--selected">
+                <button
+                  v-for="group in selectedPersonRecipientGroups(action)"
+                  :key="group.id"
+                  class="meta-rule-editor__recipient-chip"
+                  type="button"
+                  :data-person-member-group="group.id"
+                  @click="removePersonRecipientGroup(action, group.id)"
+                >
+                  <strong>{{ group.label }}</strong>
+                  <span>{{ group.subtitle || group.id }}</span>
+                  <em>Remove</em>
+                </button>
+              </div>
               <label class="meta-rule-editor__label">Local user IDs</label>
               <textarea
                 v-model="action.config.userIdsText"
@@ -383,6 +397,14 @@
                 rows="3"
                 placeholder="使用逗号或换行分隔本地 userId"
                 data-field="dingtalkPersonUserIds"
+              ></textarea>
+              <label class="meta-rule-editor__label">Member group IDs (optional)</label>
+              <textarea
+                v-model="action.config.memberGroupIdsText"
+                class="meta-rule-editor__textarea"
+                rows="2"
+                placeholder="使用逗号或换行分隔成员组 ID"
+                data-field="dingtalkPersonMemberGroupIds"
               ></textarea>
               <label class="meta-rule-editor__label">Record recipient field paths (optional)</label>
               <input
@@ -577,7 +599,7 @@ import type {
   AutomationAction,
   AutomationCondition,
   DingTalkGroupDestination,
-  MetaCommentMentionSuggestion,
+  MetaSheetPermissionCandidate,
   MetaView,
 } from '../types'
 import { applyDingTalkNotificationPreset, type DingTalkNotificationPreset } from '../utils/dingtalkNotificationPresets'
@@ -602,6 +624,7 @@ type DraftActionConfig = Record<string, unknown> & {
   method?: string
   userId?: string
   userIdsText?: string
+  memberGroupIdsText?: string
   userIdsSearch?: string
   recipientFieldPath?: string
   message?: string
@@ -648,7 +671,7 @@ const saving = ref(false)
 const cronPreset = ref('0 * * * *')
 const dingTalkDestinations = ref<DingTalkGroupDestination[]>([])
 const dingTalkDestinationsError = ref('')
-const personRecipientSuggestions = ref<Record<number, MetaCommentMentionSuggestion[]>>({})
+const personRecipientSuggestions = ref<Record<number, MetaSheetPermissionCandidate[]>>({})
 const personRecipientLoading = ref<Record<number, boolean>>({})
 const personRecipientErrors = ref<Record<number, string>>({})
 const personRecipientDirectory = ref<Record<string, { label: string; subtitle?: string }>>({})
@@ -700,6 +723,9 @@ function draftConfigFromAction(type: AutomationActionType, config: Record<string
       ...config,
       userIdsText: Array.isArray(config.userIds)
         ? config.userIds.join(', ')
+        : '',
+      memberGroupIdsText: Array.isArray(config.memberGroupIds)
+        ? config.memberGroupIds.join(', ')
         : '',
       recipientFieldPath: Array.isArray(config.userIdFieldPaths)
         ? config.userIdFieldPaths.join(', ')
@@ -766,10 +792,11 @@ const canSave = computed(() => {
     }
     if (action.type === 'send_dingtalk_person_message') {
       const userIdsText = typeof action.config.userIdsText === 'string' ? action.config.userIdsText.trim() : ''
+      const memberGroupIdsText = typeof action.config.memberGroupIdsText === 'string' ? action.config.memberGroupIdsText.trim() : ''
       const recipientFieldPath = typeof action.config.recipientFieldPath === 'string' ? action.config.recipientFieldPath.trim() : ''
       const titleTemplate = typeof action.config.titleTemplate === 'string' ? action.config.titleTemplate.trim() : ''
       const bodyTemplate = typeof action.config.bodyTemplate === 'string' ? action.config.bodyTemplate.trim() : ''
-      if ((!userIdsText && !recipientFieldPath) || !titleTemplate || !bodyTemplate) return false
+      if ((!userIdsText && !memberGroupIdsText && !recipientFieldPath) || !titleTemplate || !bodyTemplate) return false
     }
   }
   return true
@@ -811,10 +838,27 @@ function parseGroupDestinationIds(value: unknown): string[] {
   return []
 }
 
-function rememberPersonRecipientSuggestions(items: MetaCommentMentionSuggestion[]) {
+function parseMemberGroupIdsText(value: unknown): string[] {
+  if (typeof value !== 'string') return []
+  return value
+    .split(/[\n,]+/)
+    .map((entry) => entry.trim())
+    .filter(Boolean)
+}
+
+function personRecipientDirectoryKey(subjectType: 'user' | 'member-group', subjectId: string) {
+  return `${subjectType}:${subjectId}`
+}
+
+function personRecipientCandidateKey(candidate: MetaSheetPermissionCandidate) {
+  return personRecipientDirectoryKey(candidate.subjectType === 'member-group' ? 'member-group' : 'user', candidate.subjectId)
+}
+
+function rememberPersonRecipientSuggestions(items: MetaSheetPermissionCandidate[]) {
   const next = { ...personRecipientDirectory.value }
   for (const item of items) {
-    next[item.id] = { label: item.label, subtitle: item.subtitle }
+    if (item.subjectType !== 'user' && item.subjectType !== 'member-group') continue
+    next[personRecipientDirectoryKey(item.subjectType, item.subjectId)] = { label: item.label, subtitle: item.subtitle ?? undefined }
   }
   personRecipientDirectory.value = next
 }
@@ -822,14 +866,26 @@ function rememberPersonRecipientSuggestions(items: MetaCommentMentionSuggestion[
 function selectedPersonRecipients(action: DraftAction) {
   return parseUserIdsText(action.config.userIdsText).map((id) => ({
     id,
-    label: personRecipientDirectory.value[id]?.label ?? id,
-    subtitle: personRecipientDirectory.value[id]?.subtitle,
+    label: personRecipientDirectory.value[personRecipientDirectoryKey('user', id)]?.label ?? id,
+    subtitle: personRecipientDirectory.value[personRecipientDirectoryKey('user', id)]?.subtitle,
+  }))
+}
+
+function selectedPersonRecipientGroups(action: DraftAction) {
+  return parseMemberGroupIdsText(action.config.memberGroupIdsText).map((id) => ({
+    id,
+    label: personRecipientDirectory.value[personRecipientDirectoryKey('member-group', id)]?.label ?? id,
+    subtitle: personRecipientDirectory.value[personRecipientDirectoryKey('member-group', id)]?.subtitle,
   }))
 }
 
 function availablePersonRecipientSuggestions(idx: number, action: DraftAction) {
   const selected = new Set(parseUserIdsText(action.config.userIdsText))
-  return (personRecipientSuggestions.value[idx] ?? []).filter((candidate) => !selected.has(candidate.id))
+  const selectedGroups = new Set(parseMemberGroupIdsText(action.config.memberGroupIdsText))
+  return (personRecipientSuggestions.value[idx] ?? []).filter((candidate) => {
+    if (candidate.subjectType === 'member-group') return !selectedGroups.has(candidate.subjectId)
+    return !selected.has(candidate.subjectId)
+  })
 }
 
 async function loadPersonRecipientSuggestions(idx: number, action: DraftAction) {
@@ -845,8 +901,7 @@ async function loadPersonRecipientSuggestions(idx: number, action: DraftAction) 
   personRecipientLoading.value = { ...personRecipientLoading.value, [idx]: true }
   personRecipientErrors.value = { ...personRecipientErrors.value, [idx]: '' }
   try {
-    const response = await props.client.listCommentMentionSuggestions({
-      spreadsheetId: props.sheetId,
+    const response = await props.client.listFormShareCandidates(props.sheetId, {
       q: query,
       limit: 8,
     })
@@ -858,7 +913,7 @@ async function loadPersonRecipientSuggestions(idx: number, action: DraftAction) 
     personRecipientSuggestions.value = { ...personRecipientSuggestions.value, [idx]: [] }
     personRecipientErrors.value = {
       ...personRecipientErrors.value,
-      [idx]: error instanceof Error ? error.message : 'Failed to search users',
+      [idx]: error instanceof Error ? error.message : 'Failed to search users and member groups',
     }
   } finally {
     if (requestId === personRecipientSuggestionLoadId) {
@@ -867,10 +922,16 @@ async function loadPersonRecipientSuggestions(idx: number, action: DraftAction) 
   }
 }
 
-function addPersonRecipient(action: DraftAction, candidate: MetaCommentMentionSuggestion, idx: number) {
-  const ids = new Set(parseUserIdsText(action.config.userIdsText))
-  ids.add(candidate.id)
-  action.config.userIdsText = Array.from(ids).join(', ')
+function addPersonRecipient(action: DraftAction, candidate: MetaSheetPermissionCandidate, idx: number) {
+  if (candidate.subjectType === 'member-group') {
+    const ids = new Set(parseMemberGroupIdsText(action.config.memberGroupIdsText))
+    ids.add(candidate.subjectId)
+    action.config.memberGroupIdsText = Array.from(ids).join(', ')
+  } else {
+    const ids = new Set(parseUserIdsText(action.config.userIdsText))
+    ids.add(candidate.subjectId)
+    action.config.userIdsText = Array.from(ids).join(', ')
+  }
   action.config.userIdsSearch = ''
   rememberPersonRecipientSuggestions([candidate])
   personRecipientSuggestions.value = { ...personRecipientSuggestions.value, [idx]: [] }
@@ -922,6 +983,12 @@ function dingTalkGroupSummary(action: DraftAction) {
   return selected.map((item) => item.label).join(', ')
 }
 
+function removePersonRecipientGroup(action: DraftAction, groupId: string) {
+  action.config.memberGroupIdsText = parseMemberGroupIdsText(action.config.memberGroupIdsText)
+    .filter((id) => id !== groupId)
+    .join(', ')
+}
+
 function viewSummaryName(viewId: unknown, fallback: string) {
   const id = typeof viewId === 'string' ? viewId : ''
   if (!id) return fallback
@@ -951,9 +1018,14 @@ function copyPreviewText(key: string, text: string) {
 }
 
 function personRecipientSummary(action: DraftAction) {
-  const selected = selectedPersonRecipients(action)
-  if (!selected.length) return 'No recipients selected'
-  return selected.map((item) => item.label).join(', ')
+  const selectedUsers = selectedPersonRecipients(action).map((item) => item.label)
+  const selectedGroups = selectedPersonRecipientGroups(action).map((item) => item.label)
+  const parts = [
+    selectedUsers.length ? `Users: ${selectedUsers.join(', ')}` : '',
+    selectedGroups.length ? `Groups: ${selectedGroups.join(', ')}` : '',
+  ].filter(Boolean)
+  if (!parts.length) return 'No recipients selected'
+  return parts.join(' | ')
 }
 
 function parseRecipientFieldPathsText(value: unknown): string[] {
@@ -1098,6 +1170,7 @@ function defaultConfigForActionType(type: AutomationActionType): DraftActionConf
     case 'send_dingtalk_person_message':
       return {
         userIdsText: '',
+        memberGroupIdsText: '',
         userIdsSearch: '',
         recipientFieldPath: '',
         titleTemplate: '',
@@ -1177,12 +1250,19 @@ function buildPayload(): Partial<AutomationRule> {
           .map((entry) => entry.trim())
           .filter(Boolean)
         : []
+      const memberGroupIds = typeof action.config.memberGroupIdsText === 'string'
+        ? action.config.memberGroupIdsText
+          .split(/[\n,]+/)
+          .map((entry) => entry.trim())
+          .filter(Boolean)
+        : []
       const userIdFieldPaths = parseRecipientFieldPathsText(action.config.recipientFieldPath)
         .map((path) => `record.${path}`)
       return {
         type: action.type,
         config: {
           userIds,
+          memberGroupIds: memberGroupIds.length ? memberGroupIds : undefined,
           userIdFieldPath: userIdFieldPaths[0] || undefined,
           userIdFieldPaths: userIdFieldPaths.length ? userIdFieldPaths : undefined,
           titleTemplate: typeof action.config.titleTemplate === 'string' ? action.config.titleTemplate.trim() : '',

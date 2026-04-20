@@ -213,31 +213,31 @@
               <button class="meta-automation__btn" type="button" data-automation-preset="person-internal" @click="applyPersonPreset('internal_process')">Internal processing</button>
               <button class="meta-automation__btn" type="button" data-automation-preset="person-both" @click="applyPersonPreset('form_and_process')">Form + processing</button>
             </div>
-            <label class="meta-automation__label">Search and add users</label>
+            <label class="meta-automation__label">Search and add users or member groups</label>
             <input
               v-model="dingtalkPersonUserSearch"
               class="meta-automation__input"
               type="text"
-              placeholder="Search by name, email, or userId"
+              placeholder="Search by user, member group, email, or subject ID"
               data-automation-field="dingtalkPersonUserSearch"
               @input="void loadDingTalkPersonSuggestions()"
             />
-            <div v-if="dingtalkPersonUserSearchLoading" class="meta-automation__hint">Searching users…</div>
+            <div v-if="dingtalkPersonUserSearchLoading" class="meta-automation__hint">Searching users and member groups…</div>
             <div v-else-if="dingtalkPersonUserSearchError" class="meta-automation__hint meta-automation__hint--error">{{ dingtalkPersonUserSearchError }}</div>
             <div v-else-if="availableDingTalkPersonSuggestions.length" class="meta-automation__recipient-list">
               <button
                 v-for="candidate in availableDingTalkPersonSuggestions"
-                :key="candidate.id"
+                :key="personRecipientCandidateKey(candidate)"
                 class="meta-automation__recipient-option"
                 type="button"
-                :data-automation-person-suggestion="candidate.id"
+                :data-automation-person-suggestion="personRecipientCandidateKey(candidate)"
                 @click="addDingTalkPersonRecipient(candidate)"
               >
                 <strong>{{ candidate.label }}</strong>
-                <span>{{ candidate.subtitle || candidate.id }}</span>
+                <span>{{ candidate.subtitle || candidate.subjectId }}</span>
               </button>
             </div>
-            <div v-else-if="dingtalkPersonUserSearch.trim()" class="meta-automation__hint">No matching users</div>
+            <div v-else-if="dingtalkPersonUserSearch.trim()" class="meta-automation__hint">No matching users or member groups</div>
             <div v-if="selectedDingTalkPersonRecipients.length" class="meta-automation__recipient-list meta-automation__recipient-list--selected">
               <button
                 v-for="recipient in selectedDingTalkPersonRecipients"
@@ -252,6 +252,20 @@
                 <em>Remove</em>
               </button>
             </div>
+            <div v-if="selectedDingTalkPersonMemberGroups.length" class="meta-automation__recipient-list meta-automation__recipient-list--selected">
+              <button
+                v-for="group in selectedDingTalkPersonMemberGroups"
+                :key="group.id"
+                class="meta-automation__recipient-chip"
+                type="button"
+                :data-automation-person-member-group="group.id"
+                @click="removeDingTalkPersonMemberGroup(group.id)"
+              >
+                <strong>{{ group.label }}</strong>
+                <span>{{ group.subtitle || group.id }}</span>
+                <em>Remove</em>
+              </button>
+            </div>
             <label class="meta-automation__label">Local user IDs</label>
             <textarea
               v-model="draft.dingtalkPersonUserIds"
@@ -259,6 +273,14 @@
               rows="3"
               placeholder="使用逗号或换行分隔本地 userId"
               data-automation-field="dingtalkPersonUserIds"
+            ></textarea>
+            <label class="meta-automation__label">Member group IDs (optional)</label>
+            <textarea
+              v-model="draft.dingtalkPersonMemberGroupIds"
+              class="meta-automation__input"
+              rows="2"
+              placeholder="使用逗号或换行分隔成员组 ID"
+              data-automation-field="dingtalkPersonMemberGroupIds"
             ></textarea>
             <label class="meta-automation__label">Record recipient field paths (optional)</label>
             <input
@@ -516,7 +538,7 @@ import type {
   AutomationActionType,
   AutomationStats,
   DingTalkGroupDestination,
-  MetaCommentMentionSuggestion,
+  MetaSheetPermissionCandidate,
   MetaView,
 } from '../types'
 import { useMultitableAutomations } from '../composables/useMultitableAutomations'
@@ -568,6 +590,7 @@ interface DraftState {
   publicFormViewId: string
   internalViewId: string
   dingtalkPersonUserIds: string
+  dingtalkPersonMemberGroupIds: string
   dingtalkPersonRecipientFieldPath: string
   dingtalkPersonTitleTemplate: string
   dingtalkPersonBodyTemplate: string
@@ -591,6 +614,7 @@ function emptyDraft(): DraftState {
     publicFormViewId: '',
     internalViewId: '',
     dingtalkPersonUserIds: '',
+    dingtalkPersonMemberGroupIds: '',
     dingtalkPersonRecipientFieldPath: '',
     dingtalkPersonTitleTemplate: '',
     dingtalkPersonBodyTemplate: '',
@@ -604,7 +628,7 @@ const dingTalkDestinations = ref<DingTalkGroupDestination[]>([])
 const dingtalkPersonUserSearch = ref('')
 const dingtalkPersonUserSearchLoading = ref(false)
 const dingtalkPersonUserSearchError = ref('')
-const dingtalkPersonUserSuggestions = ref<MetaCommentMentionSuggestion[]>([])
+const dingtalkPersonUserSuggestions = ref<MetaSheetPermissionCandidate[]>([])
 const dingtalkPersonUserDirectory = ref<Record<string, { label: string; subtitle?: string }>>({})
 const copiedPreviewKey = ref('')
 let dingtalkPersonSuggestionLoadId = 0
@@ -619,10 +643,26 @@ function parseUserIdsText(value: string): string[] {
     .filter(Boolean)
 }
 
-function rememberDingTalkPersonSuggestions(items: MetaCommentMentionSuggestion[]) {
+function parseMemberGroupIdsText(value: string): string[] {
+  return value
+    .split(/[\n,]+/)
+    .map((entry) => entry.trim())
+    .filter(Boolean)
+}
+
+function personRecipientDirectoryKey(subjectType: 'user' | 'member-group', subjectId: string) {
+  return `${subjectType}:${subjectId}`
+}
+
+function personRecipientCandidateKey(candidate: MetaSheetPermissionCandidate) {
+  return personRecipientDirectoryKey(candidate.subjectType === 'member-group' ? 'member-group' : 'user', candidate.subjectId)
+}
+
+function rememberDingTalkPersonSuggestions(items: MetaSheetPermissionCandidate[]) {
   const next = { ...dingtalkPersonUserDirectory.value }
   for (const item of items) {
-    next[item.id] = { label: item.label, subtitle: item.subtitle }
+    if (item.subjectType !== 'user' && item.subjectType !== 'member-group') continue
+    next[personRecipientDirectoryKey(item.subjectType, item.subjectId)] = { label: item.label, subtitle: item.subtitle ?? undefined }
   }
   dingtalkPersonUserDirectory.value = next
 }
@@ -630,14 +670,26 @@ function rememberDingTalkPersonSuggestions(items: MetaCommentMentionSuggestion[]
 const selectedDingTalkPersonRecipients = computed(() =>
   parseUserIdsText(draft.value.dingtalkPersonUserIds).map((id) => ({
     id,
-    label: dingtalkPersonUserDirectory.value[id]?.label ?? id,
-    subtitle: dingtalkPersonUserDirectory.value[id]?.subtitle,
+    label: dingtalkPersonUserDirectory.value[personRecipientDirectoryKey('user', id)]?.label ?? id,
+    subtitle: dingtalkPersonUserDirectory.value[personRecipientDirectoryKey('user', id)]?.subtitle,
+  })),
+)
+
+const selectedDingTalkPersonMemberGroups = computed(() =>
+  parseMemberGroupIdsText(draft.value.dingtalkPersonMemberGroupIds).map((id) => ({
+    id,
+    label: dingtalkPersonUserDirectory.value[personRecipientDirectoryKey('member-group', id)]?.label ?? id,
+    subtitle: dingtalkPersonUserDirectory.value[personRecipientDirectoryKey('member-group', id)]?.subtitle,
   })),
 )
 
 const availableDingTalkPersonSuggestions = computed(() => {
   const selected = new Set(parseUserIdsText(draft.value.dingtalkPersonUserIds))
-  return dingtalkPersonUserSuggestions.value.filter((candidate) => !selected.has(candidate.id))
+  const selectedGroups = new Set(parseMemberGroupIdsText(draft.value.dingtalkPersonMemberGroupIds))
+  return dingtalkPersonUserSuggestions.value.filter((candidate) => {
+    if (candidate.subjectType === 'member-group') return !selectedGroups.has(candidate.subjectId)
+    return !selected.has(candidate.subjectId)
+  })
 })
 
 async function loadDingTalkPersonSuggestions() {
@@ -653,8 +705,7 @@ async function loadDingTalkPersonSuggestions() {
   dingtalkPersonUserSearchLoading.value = true
   dingtalkPersonUserSearchError.value = ''
   try {
-    const response = await props.client.listCommentMentionSuggestions({
-      spreadsheetId: props.sheetId,
+    const response = await props.client.listFormShareCandidates(props.sheetId, {
       q: query,
       limit: 8,
     })
@@ -664,7 +715,7 @@ async function loadDingTalkPersonSuggestions() {
   } catch (error) {
     if (requestId !== dingtalkPersonSuggestionLoadId) return
     dingtalkPersonUserSuggestions.value = []
-    dingtalkPersonUserSearchError.value = error instanceof Error ? error.message : 'Failed to search users'
+    dingtalkPersonUserSearchError.value = error instanceof Error ? error.message : 'Failed to search users and member groups'
   } finally {
     if (requestId === dingtalkPersonSuggestionLoadId) {
       dingtalkPersonUserSearchLoading.value = false
@@ -672,10 +723,16 @@ async function loadDingTalkPersonSuggestions() {
   }
 }
 
-function addDingTalkPersonRecipient(candidate: MetaCommentMentionSuggestion) {
-  const ids = new Set(parseUserIdsText(draft.value.dingtalkPersonUserIds))
-  ids.add(candidate.id)
-  draft.value.dingtalkPersonUserIds = Array.from(ids).join(', ')
+function addDingTalkPersonRecipient(candidate: MetaSheetPermissionCandidate) {
+  if (candidate.subjectType === 'member-group') {
+    const ids = new Set(parseMemberGroupIdsText(draft.value.dingtalkPersonMemberGroupIds))
+    ids.add(candidate.subjectId)
+    draft.value.dingtalkPersonMemberGroupIds = Array.from(ids).join(', ')
+  } else {
+    const ids = new Set(parseUserIdsText(draft.value.dingtalkPersonUserIds))
+    ids.add(candidate.subjectId)
+    draft.value.dingtalkPersonUserIds = Array.from(ids).join(', ')
+  }
   rememberDingTalkPersonSuggestions([candidate])
   dingtalkPersonUserSearch.value = ''
   dingtalkPersonUserSuggestions.value = []
@@ -685,6 +742,12 @@ function addDingTalkPersonRecipient(candidate: MetaCommentMentionSuggestion) {
 function removeDingTalkPersonRecipient(userId: string) {
   draft.value.dingtalkPersonUserIds = parseUserIdsText(draft.value.dingtalkPersonUserIds)
     .filter((id) => id !== userId)
+    .join(', ')
+}
+
+function removeDingTalkPersonMemberGroup(groupId: string) {
+  draft.value.dingtalkPersonMemberGroupIds = parseMemberGroupIdsText(draft.value.dingtalkPersonMemberGroupIds)
+    .filter((id) => id !== groupId)
     .join(', ')
 }
 
@@ -701,6 +764,11 @@ function parseGroupDestinationIds(value: unknown): string[] {
     return [value.trim()]
   }
   return []
+}
+
+function dingTalkGroupName(destinationId: string) {
+  if (!destinationId) return 'No group selected'
+  return dingTalkDestinations.value.find((item) => item.id === destinationId)?.name ?? destinationId
 }
 
 const selectedDingTalkGroupDestinations = computed(() =>
@@ -765,8 +833,14 @@ function copyPreviewText(key: string, text: string) {
 }
 
 const dingTalkPersonRecipientSummary = computed(() => {
-  if (!selectedDingTalkPersonRecipients.value.length) return 'No recipients selected'
-  return selectedDingTalkPersonRecipients.value.map((item) => item.label).join(', ')
+  const userLabels = selectedDingTalkPersonRecipients.value.map((item) => item.label)
+  const groupLabels = selectedDingTalkPersonMemberGroups.value.map((item) => item.label)
+  const parts = [
+    userLabels.length ? `Users: ${userLabels.join(', ')}` : '',
+    groupLabels.length ? `Groups: ${groupLabels.join(', ')}` : '',
+  ].filter(Boolean)
+  if (!parts.length) return 'No recipients selected'
+  return parts.join(' | ')
 })
 
 function parseRecipientFieldPathsText(value: string): string[] {
@@ -963,7 +1037,11 @@ const canSave = computed(() => {
     if (!draft.value.dingtalkBodyTemplate.trim()) return false
   }
   if (draft.value.actionType === 'send_dingtalk_person_message') {
-    if (!draft.value.dingtalkPersonUserIds.trim() && !draft.value.dingtalkPersonRecipientFieldPath.trim()) return false
+    if (
+      !draft.value.dingtalkPersonUserIds.trim()
+      && !draft.value.dingtalkPersonMemberGroupIds.trim()
+      && !draft.value.dingtalkPersonRecipientFieldPath.trim()
+    ) return false
     if (!draft.value.dingtalkPersonTitleTemplate.trim()) return false
     if (!draft.value.dingtalkPersonBodyTemplate.trim()) return false
   }
@@ -996,6 +1074,7 @@ function openEditForm(rule: AutomationRule) {
     publicFormViewId: (rule.actionConfig?.publicFormViewId as string) ?? '',
     internalViewId: (rule.actionConfig?.internalViewId as string) ?? '',
     dingtalkPersonUserIds: Array.isArray(rule.actionConfig?.userIds) ? rule.actionConfig?.userIds.join(', ') : '',
+    dingtalkPersonMemberGroupIds: Array.isArray(rule.actionConfig?.memberGroupIds) ? rule.actionConfig?.memberGroupIds.join(', ') : '',
     dingtalkPersonRecipientFieldPath: Array.isArray(rule.actionConfig?.userIdFieldPaths)
       ? (rule.actionConfig?.userIdFieldPaths as string[]).join(', ')
       : (rule.actionConfig?.userIdFieldPath as string) ?? '',
@@ -1045,6 +1124,10 @@ function buildActionConfig(): Record<string, unknown> {
     }
   }
   if (draft.value.actionType === 'send_dingtalk_person_message') {
+    const memberGroupIds = draft.value.dingtalkPersonMemberGroupIds
+      .split(/[\n,]+/)
+      .map((entry) => entry.trim())
+      .filter(Boolean)
     const userIdFieldPaths = parseRecipientFieldPathsText(draft.value.dingtalkPersonRecipientFieldPath)
       .map((path) => `record.${path}`)
     return {
@@ -1052,6 +1135,7 @@ function buildActionConfig(): Record<string, unknown> {
         .split(/[\n,]+/)
         .map((entry) => entry.trim())
         .filter(Boolean),
+      memberGroupIds: memberGroupIds.length ? memberGroupIds : undefined,
       userIdFieldPath: userIdFieldPaths[0] || undefined,
       userIdFieldPaths: userIdFieldPaths.length ? userIdFieldPaths : undefined,
       titleTemplate: draft.value.dingtalkPersonTitleTemplate,

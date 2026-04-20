@@ -672,6 +672,72 @@ describe('AutomationExecutor', () => {
     expect(insertCalls).toHaveLength(2)
   })
 
+  it('executes send_dingtalk_person_message for member group recipients', async () => {
+    process.env.DINGTALK_APP_KEY = 'dt-app-key'
+    process.env.DINGTALK_APP_SECRET = 'dt-app-secret'
+    process.env.DINGTALK_AGENT_ID = '123456789'
+
+    const queryFn = vi.fn()
+      .mockResolvedValueOnce({
+        rows: [{ id: 'group_1' }],
+      })
+      .mockResolvedValueOnce({
+        rows: [
+          { local_user_id: 'user_1' },
+          { local_user_id: 'user_2' },
+        ],
+      })
+      .mockResolvedValueOnce({
+        rows: [
+          { local_user_id: 'user_1', local_user_active: true, dingtalk_user_id: 'dt-user-1' },
+          { local_user_id: 'user_2', local_user_active: true, dingtalk_user_id: 'dt-user-2' },
+        ],
+      })
+      .mockResolvedValue({ rows: [] })
+    const fetchFn = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ access_token: 'app-access-token' }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ errcode: 0, errmsg: 'ok', task_id: 778899 }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      })) as unknown as typeof fetch
+
+    deps = createMockDeps({ queryFn, fetchFn })
+    executor = new AutomationExecutor(deps)
+
+    const rule = createMockRule({
+      actions: [{
+        type: 'send_dingtalk_person_message',
+        config: {
+          memberGroupIds: ['group_1'],
+          titleTemplate: 'Record {{record.title}} ready',
+          bodyTemplate: 'Status: {{record.status}}',
+        },
+      }],
+    })
+    const result = await executor.execute(rule, {
+      recordId: 'r1',
+      data: { title: 'Incident', status: 'open' },
+      sheetId: 'sheet_1',
+      actorId: 'user_1',
+    })
+
+    expect(result.status).toBe('success')
+    expect(fetchFn).toHaveBeenCalledTimes(2)
+    const [, sendInit] = fetchFn.mock.calls[1] as [string, RequestInit]
+    const payload = JSON.parse(sendInit.body as string)
+    expect(payload.userid_list).toBe('dt-user-1,dt-user-2')
+    expect(result.steps[0].output).toMatchObject({
+      notifiedUsers: 2,
+      staticRecipientCount: 0,
+      memberGroupRecipientCount: 2,
+      dynamicRecipientCount: 0,
+      memberGroupIds: ['group_1'],
+    })
+  })
+
   it('fails send_dingtalk_person_message when a user has no linked DingTalk account', async () => {
     const queryFn = vi.fn()
       .mockResolvedValueOnce({
