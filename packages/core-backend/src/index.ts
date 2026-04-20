@@ -104,6 +104,7 @@ import plmWorkbenchRouter from './routes/plm-workbench'
 import { univerMockRouter } from './routes/univer-mock'
 import { univerMetaRouter } from './routes/univer-meta'
 import { dashboardRouter } from './routes/dashboard'
+import { createAutomationRoutes } from './routes/automation'
 import { apiTokensRouter } from './routes/api-tokens'
 import { SnapshotService } from './services/SnapshotService'
 import { MetricsStreamService } from './services/MetricsStreamService'
@@ -866,6 +867,10 @@ export class MetaSheetServer {
     // Mounted separately from univerMetaRouter because it lives in its own
     // module with a dedicated DashboardService.
     this.app.use('/api/multitable', dashboardRouter())
+    // Automation test/logs/stats (paths: /sheets/:sheetId/automations/:ruleId/{test,logs,stats}).
+    // Uses a lazy resolver because AutomationService is initialized later
+    // in the startup sequence than route mounting happens.
+    this.app.use('/api/multitable', createAutomationRoutes(() => this.automationService))
     this.app.use(apiTokensRouter())
     // Keep the legacy dev alias while existing tools/worktrees still reference it.
     if (process.env.NODE_ENV !== 'production') {
