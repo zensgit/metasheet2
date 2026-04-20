@@ -60,6 +60,7 @@ export interface SendDingTalkGroupMessageConfig {
 /** Config shape for send_dingtalk_person_message */
 export interface SendDingTalkPersonMessageConfig {
   userIds: string[]
+  memberGroupIds?: string[]
   userIdFieldPath?: string
   userIdFieldPaths?: string[]
   titleTemplate: string

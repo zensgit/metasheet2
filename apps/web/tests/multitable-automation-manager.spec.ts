@@ -101,13 +101,15 @@ function mockClient(rules: AutomationRule[] = []) {
     return ok({})
   })
   const client = new MultitableApiClient({ fetchFn })
-  client.listCommentMentionSuggestions = vi.fn(async () => ({
+  client.listFormShareCandidates = vi.fn(async () => ({
     items: [
-      { id: 'user_1', label: 'Lin Lan', subtitle: 'lin@example.com' },
-      { id: 'user_2', label: 'Zhao Ming', subtitle: 'zhao@example.com' },
+      { subjectType: 'user', subjectId: 'user_1', label: 'Lin Lan', subtitle: 'lin@example.com', isActive: true },
+      { subjectType: 'user', subjectId: 'user_2', label: 'Zhao Ming', subtitle: 'zhao@example.com', isActive: true },
+      { subjectType: 'member-group', subjectId: 'group_1', label: 'Sales Team', subtitle: '3 members', isActive: true },
     ],
-    total: 2,
+    total: 3,
     limit: 8,
+    query: '',
   }))
   return { client, fetchFn }
 }
@@ -615,13 +617,24 @@ describe('MetaAutomationManager', () => {
     searchInput.dispatchEvent(new Event('input', { bubbles: true }))
     await flushPromises()
 
-    const suggestion = container.querySelector('[data-automation-person-suggestion="user_1"]') as HTMLButtonElement
+    const suggestion = container.querySelector('[data-automation-person-suggestion="user:user_1"]') as HTMLButtonElement
     expect(suggestion).toBeTruthy()
     suggestion.click()
     await flushPromises()
 
+    searchInput.value = 'sales'
+    searchInput.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushPromises()
+
+    const groupSuggestion = container.querySelector('[data-automation-person-suggestion="member-group:group_1"]') as HTMLButtonElement
+    expect(groupSuggestion).toBeTruthy()
+    groupSuggestion.click()
+    await flushPromises()
+
     const userIdsInput = container.querySelector('[data-automation-field="dingtalkPersonUserIds"]') as HTMLTextAreaElement
     expect(userIdsInput.value).toBe('user_1')
+    const memberGroupIdsInput = container.querySelector('[data-automation-field="dingtalkPersonMemberGroupIds"]') as HTMLTextAreaElement
+    expect(memberGroupIdsInput.value).toBe('group_1')
 
     const titleInput = container.querySelector('[data-automation-field="dingtalkPersonTitleTemplate"]') as HTMLInputElement
     titleInput.value = 'Ticket {{recordId}}'
@@ -640,7 +653,8 @@ describe('MetaAutomationManager', () => {
     expect(postCalls.length).toBe(1)
     const body = JSON.parse(postCalls[0][1]?.body as string)
     expect(body.actionConfig.userIds).toEqual(['user_1'])
-    expect(client.listCommentMentionSuggestions).toHaveBeenCalledTimes(1)
+    expect(body.actionConfig.memberGroupIds).toEqual(['group_1'])
+    expect(client.listFormShareCandidates).toHaveBeenCalledTimes(2)
   })
 
   it('opens DingTalk person delivery viewer for person message rules', async () => {

@@ -665,28 +665,13 @@ export class AutomationExecutor {
     context: ExecutionContext,
   ): Promise<AutomationStepResult> {
     const staticUserIds = normalizeUserIds(config.userIds)
+    const memberGroupIds = normalizeUserIds(config.memberGroupIds)
     const recipientFieldPaths = normalizeRecipientFieldPaths(config.userIdFieldPath, config.userIdFieldPaths)
     const recordUserIds = resolveRecipientUserIdsFromRecord(context.recordData, recipientFieldPaths)
-    const userIds = Array.from(new Set([...staticUserIds, ...recordUserIds]))
     const titleTemplate = typeof config.titleTemplate === 'string' ? config.titleTemplate.trim() : ''
     const bodyTemplate = typeof config.bodyTemplate === 'string' ? config.bodyTemplate.trim() : ''
     const publicFormViewId = typeof config.publicFormViewId === 'string' ? config.publicFormViewId.trim() : ''
     const internalViewId = typeof config.internalViewId === 'string' ? config.internalViewId.trim() : ''
-
-    if (userIds.length === 0) {
-      if (recipientFieldPaths.length > 0) {
-        return {
-          actionType: 'send_dingtalk_person_message',
-          status: 'failed',
-          error: `No local userIds resolved from record field paths: ${recipientFieldPaths.join(', ')}`,
-        }
-      }
-      return {
-        actionType: 'send_dingtalk_person_message',
-        status: 'failed',
-        error: 'At least one local userId or record recipient field path is required',
-      }
-    }
     if (!titleTemplate) {
       return { actionType: 'send_dingtalk_person_message', status: 'failed', error: 'DingTalk title template is required' }
     }
@@ -770,6 +755,64 @@ export class AutomationExecutor {
       renderedBody,
       linkLines.length > 0 ? ['**快捷入口**', ...linkLines].join('\n') : '',
     ].filter(Boolean).join('\n\n')
+
+    let memberGroupUserIds: string[] = []
+    if (memberGroupIds.length > 0) {
+      const existingGroupsResult = await this.deps.queryFn(
+        'SELECT id::text AS id FROM platform_member_groups WHERE id::text = ANY($1::text[])',
+        [memberGroupIds],
+      )
+      const existingGroupIds = new Set(
+        (existingGroupsResult.rows as Array<Record<string, unknown>>)
+          .map((row) => (typeof row.id === 'string' ? row.id.trim() : ''))
+          .filter(Boolean),
+      )
+      const missingGroupIds = memberGroupIds.filter((groupId) => !existingGroupIds.has(groupId))
+      if (missingGroupIds.length > 0) {
+        return {
+          actionType: 'send_dingtalk_person_message',
+          status: 'failed',
+          error: `Member groups not found: ${missingGroupIds.join(', ')}`,
+        }
+      }
+
+      const memberGroupRecipientsResult = await this.deps.queryFn(
+        `SELECT DISTINCT gm.user_id::text AS local_user_id
+           FROM platform_member_group_members gm
+           JOIN users u ON u.id = gm.user_id
+          WHERE gm.group_id::text = ANY($1::text[])
+            AND u.is_active = TRUE`,
+        [memberGroupIds],
+      )
+      memberGroupUserIds = Array.from(new Set(
+        (memberGroupRecipientsResult.rows as Array<Record<string, unknown>>)
+          .map((row) => (typeof row.local_user_id === 'string' ? row.local_user_id.trim() : ''))
+          .filter(Boolean),
+      ))
+    }
+
+    const userIds = Array.from(new Set([...staticUserIds, ...memberGroupUserIds, ...recordUserIds]))
+    if (userIds.length === 0) {
+      if (memberGroupIds.length > 0) {
+        return {
+          actionType: 'send_dingtalk_person_message',
+          status: 'failed',
+          error: `No local userIds resolved from member groups: ${memberGroupIds.join(', ')}`,
+        }
+      }
+      if (recipientFieldPaths.length > 0) {
+        return {
+          actionType: 'send_dingtalk_person_message',
+          status: 'failed',
+          error: `No local userIds resolved from record field paths: ${recipientFieldPaths.join(', ')}`,
+        }
+      }
+      return {
+        actionType: 'send_dingtalk_person_message',
+        status: 'failed',
+        error: 'At least one local userId, memberGroupId, or record recipient field path is required',
+      }
+    }
 
     const recipientsResult = await this.deps.queryFn(
       `SELECT u.id AS local_user_id,
@@ -865,7 +908,9 @@ export class AutomationExecutor {
         output: {
           notifiedUsers: resolvedRecipients.length,
           staticRecipientCount: staticUserIds.length,
+          memberGroupRecipientCount: memberGroupUserIds.length,
           dynamicRecipientCount: recordUserIds.length,
+          memberGroupIds,
           recipientFieldPath: recipientFieldPaths[0] ?? null,
           recipientFieldPaths,
           batchCount: batches.length,
