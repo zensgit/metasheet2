@@ -661,7 +661,7 @@ watch(
       personRecipientErrors.value = {}
       if (props.client) {
         try {
-          dingTalkDestinations.value = await props.client.listDingTalkGroups()
+          dingTalkDestinations.value = await props.client.listDingTalkGroups(props.sheetId)
         } catch (err) {
           dingTalkDestinations.value = []
           dingTalkDestinationsError.value = err instanceof Error ? err.message : 'Failed to load DingTalk groups'

@@ -965,7 +965,7 @@ watch(
     if (v && props.sheetId) {
       if (props.client) {
         try {
-          dingTalkDestinations.value = await props.client.listDingTalkGroups()
+          dingTalkDestinations.value = await props.client.listDingTalkGroups(props.sheetId)
         } catch {
           dingTalkDestinations.value = []
         }

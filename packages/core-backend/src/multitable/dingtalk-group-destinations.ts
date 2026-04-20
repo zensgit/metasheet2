@@ -4,6 +4,7 @@ export interface DingTalkGroupDestination {
   webhookUrl: string
   secret?: string
   enabled: boolean
+  sheetId?: string
   createdBy: string
   createdAt: string
   updatedAt?: string
@@ -17,6 +18,7 @@ export interface DingTalkGroupDestinationCreateInput {
   webhookUrl: string
   secret?: string
   enabled?: boolean
+  sheetId?: string
 }
 
 export interface DingTalkGroupDestinationUpdateInput {

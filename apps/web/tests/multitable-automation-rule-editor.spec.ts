@@ -26,6 +26,7 @@ function mockClient() {
         name: 'Ops Group',
         webhookUrl: 'https://oapi.dingtalk.com/robot/send?access_token=test',
         enabled: true,
+        sheetId: 'sheet_1',
         createdBy: 'user_1',
         createdAt: '2026-04-01T00:00:00Z',
       },
@@ -279,6 +280,7 @@ describe('MetaAutomationRuleEditor', () => {
       },
     })
     expect(client.listDingTalkGroups).toHaveBeenCalledTimes(1)
+    expect(client.listDingTalkGroups).toHaveBeenCalledWith('sheet_1')
   })
 
   it('emits DingTalk person action config with optional links', async () => {
