@@ -366,20 +366,19 @@
                 placeholder="使用逗号或换行分隔本地 userId"
                 data-field="dingtalkPersonUserIds"
               ></textarea>
-              <label class="meta-rule-editor__label">Record recipient field path (optional)</label>
+              <label class="meta-rule-editor__label">Record recipient field paths (optional)</label>
               <input
                 v-model="action.config.recipientFieldPath"
                 class="meta-rule-editor__input"
                 type="text"
-                placeholder="例如：record.fld_assignee 或 record.assigneeUserIds"
+                placeholder="例如：record.assigneeUserIds, record.reviewerUserId"
                 data-field="dingtalkPersonRecipientFieldPath"
               />
               <label class="meta-rule-editor__label">Pick recipient field</label>
               <select
-                :value="selectedRecipientFieldId(action.config.recipientFieldPath)"
                 class="meta-rule-editor__select"
                 data-field="dingtalkPersonRecipientFieldSelect"
-                @change="selectRecipientFieldPath(action, ($event.target as HTMLSelectElement).value)"
+                @change="appendRecipientFieldPath(action, ($event.target as HTMLSelectElement))"
               >
                 <option value="">-- choose a record field --</option>
                 <option v-for="field in props.fields" :key="field.id" :value="field.id">
@@ -387,7 +386,7 @@
                 </option>
               </select>
               <div class="meta-rule-editor__hint">
-                Record data is keyed by field ID. Use a <code>record.&lt;fieldId&gt;</code> path or choose a field above.
+                Record data is keyed by field ID. Use comma or newline separated <code>record.&lt;fieldId&gt;</code> paths, or append fields above.
               </div>
               <label class="meta-rule-editor__label">Title template</label>
               <input
@@ -651,9 +650,11 @@ function draftConfigFromAction(type: AutomationActionType, config: Record<string
       userIdsText: Array.isArray(config.userIds)
         ? config.userIds.join(', ')
         : '',
-      recipientFieldPath: typeof config.userIdFieldPath === 'string'
-        ? config.userIdFieldPath
-        : '',
+      recipientFieldPath: Array.isArray(config.userIdFieldPaths)
+        ? config.userIdFieldPaths.join(', ')
+        : typeof config.userIdFieldPath === 'string'
+          ? config.userIdFieldPath
+          : '',
       userIdsSearch: '',
     }
   }
@@ -856,21 +857,40 @@ function personRecipientSummary(action: DraftAction) {
   return selected.map((item) => item.label).join(', ')
 }
 
-function recipientFieldPathSummary(value: unknown) {
-  if (typeof value !== 'string' || !value.trim()) return 'No dynamic recipient field'
-  const normalized = value.trim().replace(/^record\./, '')
-  if (!normalized) return 'No dynamic recipient field'
+function parseRecipientFieldPathsText(value: unknown): string[] {
+  if (typeof value !== 'string') return []
+  return Array.from(new Set(
+    value
+      .split(/[\n,]+/)
+      .map((entry) => entry.trim().replace(/^record\./, ''))
+      .filter(Boolean),
+  ))
+}
+
+function recipientFieldSummaryLabel(path: string) {
+  const normalized = path.trim().replace(/^record\./, '')
+  if (!normalized) return ''
   const field = props.fields.find((item) => item.id === normalized)
   return field ? `${field.name} (record.${normalized})` : `record.${normalized}`
 }
 
-function selectedRecipientFieldId(value: unknown) {
-  if (typeof value !== 'string' || !value.trim()) return ''
-  return value.trim().replace(/^record\./, '')
+function recipientFieldPathSummary(value: unknown) {
+  const labels = parseRecipientFieldPathsText(value)
+    .map((path) => recipientFieldSummaryLabel(path))
+    .filter(Boolean)
+  if (!labels.length) return 'No dynamic recipient field'
+  return labels.join(', ')
 }
 
-function selectRecipientFieldPath(action: DraftAction, fieldId: string) {
-  action.config.recipientFieldPath = fieldId ? `record.${fieldId}` : ''
+function appendRecipientFieldPath(action: DraftAction, select: HTMLSelectElement) {
+  const fieldId = select.value.trim()
+  if (!fieldId) return
+  const paths = parseRecipientFieldPathsText(action.config.recipientFieldPath)
+  paths.push(fieldId)
+  action.config.recipientFieldPath = Array.from(new Set(paths))
+    .map((path) => `record.${path}`)
+    .join(', ')
+  select.value = ''
 }
 
 function templateSyntaxWarnings(value: unknown) {
@@ -1015,13 +1035,14 @@ function buildPayload(): Partial<AutomationRule> {
           .map((entry) => entry.trim())
           .filter(Boolean)
         : []
+      const userIdFieldPaths = parseRecipientFieldPathsText(action.config.recipientFieldPath)
+        .map((path) => `record.${path}`)
       return {
         type: action.type,
         config: {
           userIds,
-          userIdFieldPath: typeof action.config.recipientFieldPath === 'string' && action.config.recipientFieldPath.trim()
-            ? action.config.recipientFieldPath.trim()
-            : undefined,
+          userIdFieldPath: userIdFieldPaths[0] || undefined,
+          userIdFieldPaths: userIdFieldPaths.length ? userIdFieldPaths : undefined,
           titleTemplate: typeof action.config.titleTemplate === 'string' ? action.config.titleTemplate.trim() : '',
           bodyTemplate: typeof action.config.bodyTemplate === 'string' ? action.config.bodyTemplate.trim() : '',
           publicFormViewId: typeof action.config.publicFormViewId === 'string' && action.config.publicFormViewId.trim()

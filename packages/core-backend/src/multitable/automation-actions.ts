@@ -60,6 +60,7 @@ export interface SendDingTalkGroupMessageConfig {
 export interface SendDingTalkPersonMessageConfig {
   userIds: string[]
   userIdFieldPath?: string
+  userIdFieldPaths?: string[]
   titleTemplate: string
   bodyTemplate: string
   publicFormViewId?: string
