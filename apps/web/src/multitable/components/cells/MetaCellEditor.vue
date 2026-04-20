@@ -23,16 +23,23 @@
       @keydown.escape="emit('cancel')"
     />
     <!-- string: normal -->
-    <input
-      v-else-if="field.type === 'string'"
-      ref="inputRef"
-      class="meta-cell-editor__input"
-      type="text"
-      :value="modelValue ?? ''"
-      @input="emit('update:modelValue', ($event.target as HTMLInputElement).value)"
-      @keydown.enter="emit('confirm')"
-      @keydown.escape="emit('cancel')"
-    />
+    <div v-else-if="field.type === 'string'" class="meta-cell-editor__text-wrap">
+      <input
+        ref="inputRef"
+        class="meta-cell-editor__input"
+        type="text"
+        :value="yjsActive ? yjsText : (modelValue ?? '')"
+        @input="onTextInput"
+        @keydown.enter="onTextConfirm"
+        @keydown.escape="emit('cancel')"
+      />
+      <MetaYjsPresenceChip
+        v-if="yjsActive && yjsCollaborators.length > 0"
+        class="meta-cell-editor__presence"
+        label="Editing"
+        :users="yjsCollaborators"
+      />
+    </div>
 
     <!-- number -->
     <input
@@ -125,11 +132,13 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, toRef } from 'vue'
 import type { MetaAttachment, MetaAttachmentDeleteFn, MetaAttachmentUploadContext, MetaAttachmentUploadFn, MetaField } from '../../types'
 import MetaAttachmentList from '../MetaAttachmentList.vue'
+import MetaYjsPresenceChip from '../MetaYjsPresenceChip.vue'
 import { attachmentAcceptAttr, resolveAttachmentFieldProperty, shouldReplaceAttachmentSelection, validateAttachmentSelection } from '../../utils/field-config'
 import { linkActionLabel as formatLinkActionLabel } from '../../utils/link-fields'
+import { useYjsCellBinding } from '../../composables/useYjsCellBinding'
 
 const props = defineProps<{
   field: MetaField
@@ -138,6 +147,12 @@ const props = defineProps<{
   deleteAttachmentFn?: MetaAttachmentDeleteFn
   uploadContext?: MetaAttachmentUploadContext
   attachmentSummaries?: MetaAttachment[]
+  /**
+   * Record id of the cell being edited — required for Yjs binding. When
+   * absent, the Yjs opt-in cannot engage; the editor falls back to the
+   * existing REST path regardless of the build-time flag.
+   */
+  recordId?: string | null
 }>()
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}/
@@ -154,7 +169,57 @@ const emit = defineEmits<{
   (e: 'confirm'): void
   (e: 'cancel'): void
   (e: 'open-link-picker'): void
+  /**
+   * Emitted *before* `confirm` when the user's edit was carried by the
+   * Yjs opt-in path. Parents listening for this should suppress the
+   * normal REST patch — the server-side Yjs bridge will persist the
+   * change via `meta_records`. Pass-through REST is safe but redundant.
+   */
+  (e: 'yjs-commit'): void
 }>()
+
+// --- Yjs opt-in binding (text cells only; inert when flag off) ---
+// See useYjsCellBinding for flag gating + timeout + fallback. The editor
+// always renders; `yjsActive` flips true only when a live Y.Doc is
+// attached, at which point the `<input>` is driven by Y.Text instead of
+// `modelValue`. On any failure (flag off, timeout, server error, mid-edit
+// disconnect) `yjsActive` stays/returns to false and the input falls
+// back to the REST path untouched.
+const recordIdRef = toRef(props, 'recordId') as unknown as import('vue').Ref<string | null | undefined>
+const fieldIdRef = computed<string | null>(() => {
+  if (props.field?.type !== 'string') return null
+  if (isDateLike.value) return null
+  if (!props.recordId) return null
+  return props.field.id
+})
+const yjsBinding = useYjsCellBinding({
+  recordId: computed<string | null>(() => recordIdRef.value ?? null),
+  fieldId: fieldIdRef,
+  onFallback: (reason) => {
+    if (reason === 'disabled') return // expected, no noise
+    // Soft warning only — the REST path remains fully usable.
+    // eslint-disable-next-line no-console
+    console.warn(`[multitable] Yjs cell binding fell back to REST (${reason})`)
+  },
+})
+const yjsActive = computed(() => yjsBinding.active.value)
+const yjsText = computed(() => yjsBinding.text.value)
+const yjsCollaborators = computed(() => yjsBinding.collaborators.value)
+
+function onTextInput(event: Event) {
+  const next = (event.target as HTMLInputElement).value
+  if (yjsActive.value) {
+    // Drive Y.Text; mirror via update:modelValue so parent state
+    // (undo buffers, derived cell previews) stays in sync.
+    yjsBinding.setText(next)
+  }
+  emit('update:modelValue', next)
+}
+
+function onTextConfirm() {
+  if (yjsActive.value) emit('yjs-commit')
+  emit('confirm')
+}
 
 const inputRef = ref<HTMLElement | null>(null)
 const linkButtonLabel = computed(() => {
@@ -305,9 +370,15 @@ onMounted(() => {
 
 <style scoped>
 .meta-cell-editor { display: flex; align-items: center; }
+.meta-cell-editor__text-wrap {
+  display: flex; align-items: center; gap: 6px; width: 100%;
+}
 .meta-cell-editor__input {
   width: 100%; padding: 2px 6px; border: 1px solid #409eff; border-radius: 3px;
   font-size: 13px; outline: none;
+}
+.meta-cell-editor__presence {
+  flex-shrink: 0;
 }
 .meta-cell-editor__select {
   width: 100%; padding: 2px 4px; border: 1px solid #409eff; border-radius: 3px;
