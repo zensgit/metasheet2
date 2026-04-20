@@ -6,7 +6,7 @@ function flushPromises() {
 }
 import MetaAutomationManager from '../src/multitable/components/MetaAutomationManager.vue'
 import { MultitableApiClient } from '../src/multitable/api/client'
-import type { AutomationRule, DingTalkPersonDelivery } from '../src/multitable/types'
+import type { AutomationRule, DingTalkGroupDelivery, DingTalkPersonDelivery } from '../src/multitable/types'
 
 function fakeRule(overrides: Partial<AutomationRule> = {}): AutomationRule {
   return {
@@ -40,6 +40,18 @@ function mockClient(rules: AutomationRule[] = []) {
       localUserIsActive: true,
     },
   ]
+  const groupDeliveries: DingTalkGroupDelivery[] = [
+    {
+      id: 'dgd_1',
+      destinationId: 'dt_1',
+      destinationName: 'Ops Group',
+      sourceType: 'automation',
+      subject: 'Ticket rec_1 pending',
+      content: 'Please process the latest update.',
+      success: true,
+      createdAt: '2026-04-19T12:00:00.000Z',
+    },
+  ]
 
   const fetchFn = vi.fn(async (url: string, init?: RequestInit) => {
     const method = init?.method ?? 'GET'
@@ -56,6 +68,9 @@ function mockClient(rules: AutomationRule[] = []) {
       })
     }
     if (method === 'GET' && url.includes('/automations')) {
+      if (url.includes('/dingtalk-group-deliveries')) {
+        return ok({ deliveries: groupDeliveries })
+      }
       if (url.includes('/dingtalk-person-deliveries')) {
         return ok({ deliveries: personDeliveries })
       }
@@ -431,5 +446,30 @@ describe('MetaAutomationManager', () => {
     const delivery = document.querySelector('[data-person-delivery-id="dpd_1"]')
     expect(delivery?.textContent).toContain('Lin Lan')
     expect(delivery?.textContent).toContain('Ticket rec_1 ready')
+  })
+
+  it('opens DingTalk group delivery viewer for group message rules', async () => {
+    const { client } = mockClient([
+      fakeRule({
+        name: 'DingTalk group notify',
+        actionType: 'send_dingtalk_group_message',
+        actionConfig: {
+          destinationId: 'dt_1',
+          titleTemplate: 'Ticket {{recordId}}',
+          bodyTemplate: 'Please fill {{record.status}}',
+        },
+      }),
+    ])
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
+    await flushPromises()
+
+    const deliveriesBtn = container.querySelector('[data-automation-group-deliveries="rule_1"]') as HTMLButtonElement
+    expect(deliveriesBtn).toBeTruthy()
+    deliveriesBtn.click()
+    await flushPromises()
+
+    const delivery = document.querySelector('[data-group-delivery-id="dgd_1"]')
+    expect(delivery?.textContent).toContain('Ops Group')
+    expect(delivery?.textContent).toContain('Ticket rec_1 pending')
   })
 })

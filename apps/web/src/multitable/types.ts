@@ -807,6 +807,7 @@ export interface DingTalkGroupDestinationInput {
 export interface DingTalkGroupDelivery {
   id: string
   destinationId: string
+  destinationName?: string
   sourceType: 'manual_test' | 'automation'
   subject: string
   content: string
