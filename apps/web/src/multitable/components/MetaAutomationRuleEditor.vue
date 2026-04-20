@@ -385,6 +385,22 @@
                   {{ field.name }} (record.{{ field.id }})
                 </option>
               </select>
+              <div
+                v-if="selectedRecipientFields(action).length"
+                class="meta-rule-editor__recipient-list meta-rule-editor__recipient-list--selected"
+              >
+                <button
+                  v-for="field in selectedRecipientFields(action)"
+                  :key="field.id"
+                  class="meta-rule-editor__recipient-chip"
+                  type="button"
+                  :data-field-recipient="field.id"
+                  @click="removeRecipientFieldPath(action, field.id)"
+                >
+                  <strong>{{ field.label }}</strong>
+                  <em>Remove</em>
+                </button>
+              </div>
               <div class="meta-rule-editor__hint">
                 Record data is keyed by field ID. Use comma or newline separated <code>record.&lt;fieldId&gt;</code> paths, or append fields above.
               </div>
@@ -874,6 +890,15 @@ function recipientFieldSummaryLabel(path: string) {
   return field ? `${field.name} (record.${normalized})` : `record.${normalized}`
 }
 
+function selectedRecipientFields(action: DraftAction) {
+  return parseRecipientFieldPathsText(action.config.recipientFieldPath)
+    .map((path) => ({
+      id: path,
+      label: recipientFieldSummaryLabel(path),
+    }))
+    .filter((item) => item.label)
+}
+
 function recipientFieldPathSummary(value: unknown) {
   const labels = parseRecipientFieldPathsText(value)
     .map((path) => recipientFieldSummaryLabel(path))
@@ -891,6 +916,13 @@ function appendRecipientFieldPath(action: DraftAction, select: HTMLSelectElement
     .map((path) => `record.${path}`)
     .join(', ')
   select.value = ''
+}
+
+function removeRecipientFieldPath(action: DraftAction, path: string) {
+  action.config.recipientFieldPath = parseRecipientFieldPathsText(action.config.recipientFieldPath)
+    .filter((entry) => entry !== path)
+    .map((entry) => `record.${entry}`)
+    .join(', ')
 }
 
 function templateSyntaxWarnings(value: unknown) {
