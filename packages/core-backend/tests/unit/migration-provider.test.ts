@@ -62,11 +62,16 @@ describe('createCoreBackendMigrationProvider', () => {
     const projectRoot = await createTempProjectRoot()
     const runtimeDir = path.join(projectRoot, 'dist/src/db')
     const distMigrationsDir = path.join(runtimeDir, 'migrations')
+    const sourceSqlDir = path.join(projectRoot, 'src/db/migrations')
     const legacySqlDir = path.join(projectRoot, 'migrations')
 
     await writeFile(
       path.join(distMigrationsDir, '20260101000002_code.mjs'),
       'export async function up() {}\n'
+    )
+    await writeFile(
+      path.join(sourceSqlDir, '20250925_create_view_tables.sql'),
+      'create table if not exists views (id uuid primary key);'
     )
     await writeFile(
       path.join(legacySqlDir, '056_add_users_must_change_password.sql'),
@@ -78,6 +83,7 @@ describe('createCoreBackendMigrationProvider', () => {
 
     expect(Object.keys(migrations).sort()).toEqual([
       '056_add_users_must_change_password',
+      '20250925_create_view_tables',
       '20260101000002_code',
     ])
   })
