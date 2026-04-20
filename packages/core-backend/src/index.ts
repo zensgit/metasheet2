@@ -35,7 +35,7 @@ import { poolManager } from './integration/db/connection-pool'
 import { eventBus } from './integration/events/event-bus'
 import { initializeEventBusService } from './integration/events/event-bus-service'
 import { messageBus } from './integration/messaging/message-bus'
-import { jwtAuthMiddleware, isPublicFormAuthBypass, isWhitelisted } from './auth/jwt-middleware'
+import { jwtAuthMiddleware, optionalJwtAuthMiddleware, isPublicFormAuthBypass, isWhitelisted } from './auth/jwt-middleware'
 import { authService } from './auth/AuthService'
 import { cache } from './cache-init'
 import {
@@ -745,7 +745,7 @@ export class MetaSheetServer {
     // 全局 JWT 保护 `/api/**`（白名单在中间件内判定）
     this.app.use((req: Request, res: Response, next: NextFunction) => {
       if (isWhitelisted(req.path)) return next()
-      if (isPublicFormAuthBypass(req)) return next()
+      if (isPublicFormAuthBypass(req)) return optionalJwtAuthMiddleware(req, res, next)
       if (req.path.startsWith('/api/')) return jwtAuthMiddleware(req, res, next)
       return next()
     })

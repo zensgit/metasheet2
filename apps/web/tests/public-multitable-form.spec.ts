@@ -10,12 +10,17 @@ async function flushUi(cycles = 4): Promise<void> {
 
 const loadFormContextSpy = vi.fn()
 const submitFormSpy = vi.fn()
+const apiFetchSpy = vi.fn()
 
 vi.mock('../src/multitable/api/client', () => ({
   multitableClient: {
     loadFormContext: (...args: any[]) => loadFormContextSpy(...args),
     submitForm: (...args: any[]) => submitFormSpy(...args),
   },
+}))
+
+vi.mock('../src/utils/api', () => ({
+  apiFetch: (...args: any[]) => apiFetchSpy(...args),
 }))
 
 vi.mock('../src/multitable/components/MetaFormView.vue', () => ({
@@ -52,6 +57,7 @@ describe('PublicMultitableFormView', () => {
     container = null
     loadFormContextSpy.mockReset()
     submitFormSpy.mockReset()
+    apiFetchSpy.mockReset()
   })
 
   it('loads form context anonymously and submits with the public token', async () => {
@@ -122,5 +128,43 @@ describe('PublicMultitableFormView', () => {
     }))
     expect(container.textContent).toContain('Submission received')
     expect(container.textContent).toContain('Your response has been submitted successfully.')
+  })
+
+  it('launches DingTalk sign-in when the form requires authenticated DingTalk access', async () => {
+    loadFormContextSpy.mockRejectedValue(Object.assign(new Error('DingTalk sign-in is required for this form'), {
+      code: 'DINGTALK_AUTH_REQUIRED',
+    }))
+    apiFetchSpy.mockResolvedValue(new Response(JSON.stringify({
+      success: true,
+      data: { url: 'https://login.dingtalk.com/oauth2/auth?demo=1' },
+    }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    }))
+
+    const { default: PublicMultitableFormView } = await import('../src/views/PublicMultitableFormView.vue')
+
+    container = document.createElement('div')
+    document.body.appendChild(container)
+
+    const Root = defineComponent({
+      render() {
+        return h(PublicMultitableFormView, {
+          sheetId: 'sheet_orders',
+          viewId: 'view_form',
+          publicToken: 'pub_123',
+        })
+      },
+    })
+
+    app = createApp(Root)
+    app.mount(container)
+    await flushUi()
+
+    expect(apiFetchSpy).toHaveBeenCalledWith(
+      expect.stringContaining('/api/auth/dingtalk/launch?redirect='),
+      expect.objectContaining({ suppressUnauthorizedRedirect: true }),
+    )
+    expect(container.textContent).toContain('Redirecting to DingTalk sign-in…')
   })
 })

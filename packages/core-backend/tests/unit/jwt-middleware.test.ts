@@ -18,7 +18,7 @@ vi.mock('../../src/metrics/metrics', () => ({
   metrics: metricsMocks,
 }))
 
-import { isPublicFormAuthBypass, isWhitelisted, jwtAuthMiddleware } from '../../src/auth/jwt-middleware'
+import { isPublicFormAuthBypass, isWhitelisted, jwtAuthMiddleware, optionalJwtAuthMiddleware } from '../../src/auth/jwt-middleware'
 
 describe('jwt auth whitelist', () => {
   it('allows DingTalk launch without a bearer token', () => {
@@ -197,6 +197,53 @@ describe('jwt auth middleware', () => {
 
     await jwtAuthMiddleware(req, res, next)
 
+    expect(next).toHaveBeenCalledTimes(1)
+  })
+
+  it('optionally hydrates the user on public form routes when a bearer token is present', async () => {
+    authServiceMocks.verifyToken.mockResolvedValue({
+      id: 'user-4',
+      email: 'bound@example.com',
+      name: 'Bound User',
+      role: 'user',
+      permissions: ['multitable:read'],
+      created_at: new Date('2026-04-20T00:00:00.000Z'),
+      updated_at: new Date('2026-04-20T00:00:00.000Z'),
+    })
+
+    const req = {
+      path: '/api/multitable/form-context',
+      headers: {
+        authorization: 'Bearer optional-token',
+      },
+    } as unknown as Request
+    const res = {
+      status: vi.fn().mockReturnThis(),
+      json: vi.fn().mockReturnThis(),
+    } as unknown as Response
+    const next = vi.fn() as NextFunction
+
+    await optionalJwtAuthMiddleware(req, res, next)
+
+    expect(req.user).toMatchObject({ id: 'user-4' })
+    expect(next).toHaveBeenCalledTimes(1)
+  })
+
+  it('optional public form auth bypass does not fail when no bearer token is present', async () => {
+    authServiceMocks.verifyToken.mockReset()
+    const req = {
+      path: '/api/multitable/form-context',
+      headers: {},
+    } as unknown as Request
+    const res = {
+      status: vi.fn().mockReturnThis(),
+      json: vi.fn().mockReturnThis(),
+    } as unknown as Response
+    const next = vi.fn() as NextFunction
+
+    await optionalJwtAuthMiddleware(req, res, next)
+
+    expect(authServiceMocks.verifyToken).not.toHaveBeenCalled()
     expect(next).toHaveBeenCalledTimes(1)
   })
 })

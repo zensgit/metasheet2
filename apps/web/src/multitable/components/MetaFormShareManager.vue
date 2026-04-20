@@ -32,6 +32,23 @@
 
           <!-- Link + actions (only when enabled) -->
           <template v-if="config?.enabled && config.publicToken">
+            <div class="meta-form-share__auth-section">
+              <label class="meta-form-share__label" for="meta-form-share-access-mode">Access mode</label>
+              <select
+                id="meta-form-share-access-mode"
+                class="meta-form-share__input"
+                :value="config.accessMode"
+                data-form-share-access-mode="true"
+                :disabled="busy"
+                @change="onAccessModeChange"
+              >
+                <option value="public">Anyone with the link</option>
+                <option value="dingtalk">Bound DingTalk users only</option>
+                <option value="dingtalk_granted">DingTalk-authorized users only</option>
+              </select>
+              <p class="meta-form-share__hint">{{ accessModeHint }}</p>
+            </div>
+
             <div class="meta-form-share__link-section">
               <label class="meta-form-share__label">Public link</label>
               <div class="meta-form-share__link-row">
@@ -145,6 +162,16 @@ const expiryDateValue = computed(() => {
   if (!config.value?.expiresAt) return ''
   return config.value.expiresAt.substring(0, 10)
 })
+const accessModeHint = computed(() => {
+  switch (config.value?.accessMode) {
+    case 'dingtalk':
+      return 'The form opens only after DingTalk sign-in, and the user must already be bound to a local account.'
+    case 'dingtalk_granted':
+      return 'The form opens only for DingTalk-bound users whose DingTalk grant is enabled by an administrator.'
+    default:
+      return 'Anyone who has the link can open and submit this form.'
+  }
+})
 
 async function loadConfig() {
   if (!props.client) return
@@ -170,6 +197,24 @@ async function onToggleEnabled() {
     emit('updated')
   } catch (err) {
     error.value = err instanceof Error ? err.message : 'Failed to update'
+  } finally {
+    busy.value = false
+  }
+}
+
+async function onAccessModeChange(event: Event) {
+  if (!props.client || busy.value) return
+  const select = event.target as HTMLSelectElement | null
+  if (!select) return
+  busy.value = true
+  error.value = null
+  try {
+    config.value = await props.client.updateFormShareConfig(props.sheetId, props.viewId, {
+      accessMode: select.value as FormShareConfig['accessMode'],
+    })
+    emit('updated')
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : 'Failed to update access mode'
   } finally {
     busy.value = false
   }
@@ -365,6 +410,7 @@ watch(
   color: #475569;
 }
 
+.meta-form-share__auth-section,
 .meta-form-share__link-section,
 .meta-form-share__expiry-section {
   display: flex;
@@ -413,5 +459,12 @@ watch(
   border-color: #2563eb;
   background: #2563eb;
   color: #fff;
+}
+
+.meta-form-share__hint {
+  margin: 0;
+  font-size: 12px;
+  color: #64748b;
+  line-height: 1.5;
 }
 </style>
