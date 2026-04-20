@@ -380,8 +380,8 @@
                 data-field="dingtalkPersonRecipientFieldSelect"
                 @change="appendRecipientFieldPath(action, ($event.target as HTMLSelectElement))"
               >
-                <option value="">-- choose a record field --</option>
-                <option v-for="field in props.fields" :key="field.id" :value="field.id">
+                <option value="">-- choose a user field --</option>
+                <option v-for="field in recipientCandidateFields" :key="field.id" :value="field.id">
                   {{ field.name }} (record.{{ field.id }})
                 </option>
               </select>
@@ -401,8 +401,15 @@
                   <em>Remove</em>
                 </button>
               </div>
+              <div
+                v-for="warning in recipientFieldPathWarnings(action.config.recipientFieldPath)"
+                :key="`person-recipient-${warning}`"
+                class="meta-rule-editor__hint meta-rule-editor__hint--warning"
+              >
+                {{ warning }}
+              </div>
               <div class="meta-rule-editor__hint">
-                Record data is keyed by field ID. Use comma or newline separated <code>record.&lt;fieldId&gt;</code> paths, or append fields above.
+                Record data is keyed by field ID. Use comma or newline separated <code>record.&lt;fieldId&gt;</code> paths. The picker only lists user fields.
               </div>
               <label class="meta-rule-editor__label">Title template</label>
               <input
@@ -631,6 +638,7 @@ let copiedPreviewResetTimer: ReturnType<typeof setTimeout> | null = null
 
 const formViews = computed(() => (props.views ?? []).filter((view) => view.type === 'form'))
 const internalViews = computed(() => props.views ?? [])
+const recipientCandidateFields = computed(() => props.fields.filter((field) => field.type === 'user'))
 
 const conditionOperators: Array<{ value: ConditionOperator; label: string }> = [
   { value: 'equals', label: 'Equals' },
@@ -897,6 +905,13 @@ function selectedRecipientFields(action: DraftAction) {
       label: recipientFieldSummaryLabel(path),
     }))
     .filter((item) => item.label)
+}
+
+function recipientFieldPathWarnings(value: unknown) {
+  const candidateIds = new Set(recipientCandidateFields.value.map((field) => field.id))
+  return parseRecipientFieldPathsText(value)
+    .filter((path) => !candidateIds.has(path))
+    .map((path) => `record.${path} is not a user field; DingTalk person messages expect local user IDs.`)
 }
 
 function recipientFieldPathSummary(value: unknown) {

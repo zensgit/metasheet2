@@ -252,8 +252,8 @@
               data-automation-field="dingtalkPersonRecipientFieldSelect"
               @change="appendDingTalkPersonRecipientField($event.target as HTMLSelectElement)"
             >
-              <option value="">-- choose a record field --</option>
-              <option v-for="field in props.fields" :key="field.id" :value="field.id">
+              <option value="">-- choose a user field --</option>
+              <option v-for="field in dingTalkPersonRecipientCandidateFields" :key="field.id" :value="field.id">
                 {{ field.name }} (record.{{ field.id }})
               </option>
             </select>
@@ -273,8 +273,15 @@
                 <em>Remove</em>
               </button>
             </div>
+            <div
+              v-for="warning in recipientFieldPathWarnings(draft.dingtalkPersonRecipientFieldPath)"
+              :key="`draft-person-recipient-${warning}`"
+              class="meta-automation__hint meta-automation__hint--warning"
+            >
+              {{ warning }}
+            </div>
             <div class="meta-automation__hint">
-              Record data is keyed by field ID. Use comma or newline separated <code>record.&lt;fieldId&gt;</code> paths, or append fields above.
+              Record data is keyed by field ID. Use comma or newline separated <code>record.&lt;fieldId&gt;</code> paths. The picker only lists user fields.
             </div>
             <label class="meta-automation__label">Title template</label>
             <input
@@ -711,12 +718,21 @@ function recipientFieldSummaryLabel(path: string) {
   return field ? `${field.name} (record.${normalized})` : `record.${normalized}`
 }
 
+const dingTalkPersonRecipientCandidateFields = computed(() => props.fields.filter((field) => field.type === 'user'))
+
 const selectedDingTalkPersonRecipientFields = computed(() => parseRecipientFieldPathsText(draft.value.dingtalkPersonRecipientFieldPath)
   .map((path) => ({
     id: path,
     label: recipientFieldSummaryLabel(path),
   }))
   .filter((item) => item.label))
+
+function recipientFieldPathWarnings(value: string) {
+  const candidateIds = new Set(dingTalkPersonRecipientCandidateFields.value.map((field) => field.id))
+  return parseRecipientFieldPathsText(value)
+    .filter((path) => !candidateIds.has(path))
+    .map((path) => `record.${path} is not a user field; DingTalk person messages expect local user IDs.`)
+}
 
 const dingTalkPersonRecipientFieldSummary = computed(() => {
   const labels = selectedDingTalkPersonRecipientFields.value.map((item) => item.label)
