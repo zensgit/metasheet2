@@ -238,19 +238,19 @@
               placeholder="使用逗号或换行分隔本地 userId"
               data-automation-field="dingtalkPersonUserIds"
             ></textarea>
-            <label class="meta-automation__label">Record recipient field path (optional)</label>
+            <label class="meta-automation__label">Record recipient field paths (optional)</label>
             <input
               v-model="draft.dingtalkPersonRecipientFieldPath"
               class="meta-automation__input"
               type="text"
-              placeholder="例如：record.fld_assignee 或 record.assigneeUserIds"
+              placeholder="例如：record.assigneeUserIds, record.reviewerUserId"
               data-automation-field="dingtalkPersonRecipientFieldPath"
             />
             <label class="meta-automation__label">Pick recipient field</label>
             <select
-              v-model="dingTalkPersonRecipientFieldId"
               class="meta-automation__select"
               data-automation-field="dingtalkPersonRecipientFieldSelect"
+              @change="appendDingTalkPersonRecipientField($event.target as HTMLSelectElement)"
             >
               <option value="">-- choose a record field --</option>
               <option v-for="field in props.fields" :key="field.id" :value="field.id">
@@ -258,7 +258,7 @@
               </option>
             </select>
             <div class="meta-automation__hint">
-              Record data is keyed by field ID. Use a <code>record.&lt;fieldId&gt;</code> path or choose a field above.
+              Record data is keyed by field ID. Use comma or newline separated <code>record.&lt;fieldId&gt;</code> paths, or append fields above.
             </div>
             <label class="meta-automation__label">Title template</label>
             <input
@@ -679,24 +679,40 @@ const dingTalkPersonRecipientSummary = computed(() => {
   return selectedDingTalkPersonRecipients.value.map((item) => item.label).join(', ')
 })
 
-const dingTalkPersonRecipientFieldSummary = computed(() => {
-  const trimmed = draft.value.dingtalkPersonRecipientFieldPath.trim()
-  if (!trimmed) return 'No dynamic recipient field'
-  const normalized = trimmed.replace(/^record\./, '')
-  if (!normalized) return 'No dynamic recipient field'
+function parseRecipientFieldPathsText(value: string): string[] {
+  return Array.from(new Set(
+    value
+      .split(/[\n,]+/)
+      .map((entry) => entry.trim().replace(/^record\./, ''))
+      .filter(Boolean),
+  ))
+}
+
+function recipientFieldSummaryLabel(path: string) {
+  const normalized = path.trim().replace(/^record\./, '')
+  if (!normalized) return ''
   const field = props.fields.find((item) => item.id === normalized)
   return field ? `${field.name} (record.${normalized})` : `record.${normalized}`
+}
+
+const dingTalkPersonRecipientFieldSummary = computed(() => {
+  const labels = parseRecipientFieldPathsText(draft.value.dingtalkPersonRecipientFieldPath)
+    .map((path) => recipientFieldSummaryLabel(path))
+    .filter(Boolean)
+  if (!labels.length) return 'No dynamic recipient field'
+  return labels.join(', ')
 })
 
-const dingTalkPersonRecipientFieldId = computed({
-  get() {
-    const trimmed = draft.value.dingtalkPersonRecipientFieldPath.trim()
-    return trimmed ? trimmed.replace(/^record\./, '') : ''
-  },
-  set(value: string) {
-    draft.value.dingtalkPersonRecipientFieldPath = value ? `record.${value}` : ''
-  },
-})
+function appendDingTalkPersonRecipientField(select: HTMLSelectElement) {
+  const value = select.value.trim()
+  if (!value) return
+  const paths = parseRecipientFieldPathsText(draft.value.dingtalkPersonRecipientFieldPath)
+  paths.push(value)
+  draft.value.dingtalkPersonRecipientFieldPath = Array.from(new Set(paths))
+    .map((path) => `record.${path}`)
+    .join(', ')
+  select.value = ''
+}
 
 function templateSyntaxWarnings(value: string) {
   return listDingTalkTemplateSyntaxWarnings(value)
@@ -868,7 +884,9 @@ function openEditForm(rule: AutomationRule) {
     publicFormViewId: (rule.actionConfig?.publicFormViewId as string) ?? '',
     internalViewId: (rule.actionConfig?.internalViewId as string) ?? '',
     dingtalkPersonUserIds: Array.isArray(rule.actionConfig?.userIds) ? rule.actionConfig?.userIds.join(', ') : '',
-    dingtalkPersonRecipientFieldPath: (rule.actionConfig?.userIdFieldPath as string) ?? '',
+    dingtalkPersonRecipientFieldPath: Array.isArray(rule.actionConfig?.userIdFieldPaths)
+      ? (rule.actionConfig?.userIdFieldPaths as string[]).join(', ')
+      : (rule.actionConfig?.userIdFieldPath as string) ?? '',
     dingtalkPersonTitleTemplate: (rule.actionConfig?.titleTemplate as string) ?? '',
     dingtalkPersonBodyTemplate: (rule.actionConfig?.bodyTemplate as string) ?? '',
     dingtalkPersonPublicFormViewId: (rule.actionConfig?.publicFormViewId as string) ?? '',
@@ -913,12 +931,15 @@ function buildActionConfig(): Record<string, unknown> {
     }
   }
   if (draft.value.actionType === 'send_dingtalk_person_message') {
+    const userIdFieldPaths = parseRecipientFieldPathsText(draft.value.dingtalkPersonRecipientFieldPath)
+      .map((path) => `record.${path}`)
     return {
       userIds: draft.value.dingtalkPersonUserIds
         .split(/[\n,]+/)
         .map((entry) => entry.trim())
         .filter(Boolean),
-      userIdFieldPath: draft.value.dingtalkPersonRecipientFieldPath.trim() || undefined,
+      userIdFieldPath: userIdFieldPaths[0] || undefined,
+      userIdFieldPaths: userIdFieldPaths.length ? userIdFieldPaths : undefined,
       titleTemplate: draft.value.dingtalkPersonTitleTemplate,
       bodyTemplate: draft.value.dingtalkPersonBodyTemplate,
       publicFormViewId: draft.value.dingtalkPersonPublicFormViewId || undefined,

@@ -111,10 +111,32 @@ function normalizeRecipientFieldPath(value: unknown): string {
   return trimmed.replace(/^record\./, '')
 }
 
-function resolveRecipientUserIdsFromRecord(recordData: Record<string, unknown>, fieldPath: unknown): string[] {
-  const normalizedPath = normalizeRecipientFieldPath(fieldPath)
-  if (!normalizedPath) return []
-  return normalizeUserIdsFromUnknown(lookupTemplateValue(normalizedPath, recordData))
+function normalizeRecipientFieldPaths(primary: unknown, additional: unknown): string[] {
+  const values = [
+    primary,
+    ...(Array.isArray(additional) ? additional : [additional]),
+  ]
+
+  return Array.from(new Set(
+    values
+      .flatMap((value) => {
+        if (typeof value !== 'string') return []
+        return value
+          .split(/[\n,]+/)
+          .map((entry) => normalizeRecipientFieldPath(entry))
+          .filter(Boolean)
+      }),
+  ))
+}
+
+function resolveRecipientUserIdsFromRecord(recordData: Record<string, unknown>, fieldPaths: unknown[]): string[] {
+  return Array.from(new Set(
+    fieldPaths.flatMap((fieldPath) => {
+      const normalizedPath = normalizeRecipientFieldPath(fieldPath)
+      if (!normalizedPath) return []
+      return normalizeUserIdsFromUnknown(lookupTemplateValue(normalizedPath, recordData))
+    }),
+  ))
 }
 
 function chunkItems<T>(items: T[], size: number): T[][] {
@@ -643,8 +665,8 @@ export class AutomationExecutor {
     context: ExecutionContext,
   ): Promise<AutomationStepResult> {
     const staticUserIds = normalizeUserIds(config.userIds)
-    const recipientFieldPath = normalizeRecipientFieldPath(config.userIdFieldPath)
-    const recordUserIds = resolveRecipientUserIdsFromRecord(context.recordData, recipientFieldPath)
+    const recipientFieldPaths = normalizeRecipientFieldPaths(config.userIdFieldPath, config.userIdFieldPaths)
+    const recordUserIds = resolveRecipientUserIdsFromRecord(context.recordData, recipientFieldPaths)
     const userIds = Array.from(new Set([...staticUserIds, ...recordUserIds]))
     const titleTemplate = typeof config.titleTemplate === 'string' ? config.titleTemplate.trim() : ''
     const bodyTemplate = typeof config.bodyTemplate === 'string' ? config.bodyTemplate.trim() : ''
@@ -652,11 +674,11 @@ export class AutomationExecutor {
     const internalViewId = typeof config.internalViewId === 'string' ? config.internalViewId.trim() : ''
 
     if (userIds.length === 0) {
-      if (recipientFieldPath) {
+      if (recipientFieldPaths.length > 0) {
         return {
           actionType: 'send_dingtalk_person_message',
           status: 'failed',
-          error: `No local userIds resolved from record field path "${recipientFieldPath}"`,
+          error: `No local userIds resolved from record field paths: ${recipientFieldPaths.join(', ')}`,
         }
       }
       return {
@@ -844,7 +866,8 @@ export class AutomationExecutor {
           notifiedUsers: resolvedRecipients.length,
           staticRecipientCount: staticUserIds.length,
           dynamicRecipientCount: recordUserIds.length,
-          recipientFieldPath: recipientFieldPath || null,
+          recipientFieldPath: recipientFieldPaths[0] ?? null,
+          recipientFieldPaths,
           batchCount: batches.length,
           linkCount: linkLines.length,
           responseCount,

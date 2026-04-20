@@ -727,7 +727,65 @@ describe('AutomationExecutor', () => {
     })
 
     expect(result.status).toBe('failed')
-    expect(result.steps[0].error).toContain('record field path "assigneeUserIds"')
+    expect(result.steps[0].error).toContain('record field paths: assigneeUserIds')
+  })
+
+  it('merges multiple dynamic DingTalk person recipient fields from the record', async () => {
+    process.env.DINGTALK_APP_KEY = 'dt-app-key'
+    process.env.DINGTALK_APP_SECRET = 'dt-app-secret'
+    process.env.DINGTALK_AGENT_ID = '123456789'
+
+    const queryFn = vi.fn()
+      .mockResolvedValueOnce({
+        rows: [
+          { local_user_id: 'user_1', local_user_active: true, dingtalk_user_id: 'dt-user-1' },
+          { local_user_id: 'user_2', local_user_active: true, dingtalk_user_id: 'dt-user-2' },
+        ],
+      })
+      .mockResolvedValue({ rows: [] })
+    const fetchFn = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ access_token: 'app-access-token' }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ errcode: 0, errmsg: 'ok', task_id: 778899 }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      })) as unknown as typeof fetch
+
+    deps = createMockDeps({ queryFn, fetchFn })
+    executor = new AutomationExecutor(deps)
+
+    const rule = createMockRule({
+      actions: [{
+        type: 'send_dingtalk_person_message',
+        config: {
+          userIdFieldPaths: ['record.assigneeUserIds', 'record.reviewerUserId'],
+          titleTemplate: 'Record {{record.title}} ready',
+          bodyTemplate: 'Status: {{record.status}}',
+        },
+      }],
+    })
+    const result = await executor.execute(rule, {
+      recordId: 'r1',
+      data: {
+        title: 'Incident',
+        status: 'open',
+        assigneeUserIds: ['user_1'],
+        reviewerUserId: 'user_2',
+      },
+      sheetId: 'sheet_1',
+      actorId: 'user_1',
+    })
+
+    expect(result.status).toBe('success')
+    expect(result.steps[0].output).toMatchObject({
+      notifiedUsers: 2,
+      staticRecipientCount: 0,
+      dynamicRecipientCount: 2,
+      recipientFieldPath: 'assigneeUserIds',
+      recipientFieldPaths: ['assigneeUserIds', 'reviewerUserId'],
+    })
   })
 
   it('fails send_notification with no userIds', async () => {
