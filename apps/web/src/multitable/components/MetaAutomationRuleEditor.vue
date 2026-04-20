@@ -265,6 +265,14 @@
                 <option value="">-- no internal link --</option>
                 <option v-for="view in internalViews" :key="view.id" :value="view.id">{{ view.name }}</option>
               </select>
+              <div class="meta-rule-editor__preview" data-field="groupMessageSummary">
+                <div class="meta-rule-editor__preview-title">Message summary</div>
+                <div><strong>Group:</strong> {{ dingTalkGroupName(action.config.destinationId) }}</div>
+                <div><strong>Title:</strong> {{ templatePreviewText(action.config.titleTemplate, 'No title template') }}</div>
+                <div class="meta-rule-editor__preview-body"><strong>Body:</strong> {{ templatePreviewText(action.config.bodyTemplate, 'No body template') }}</div>
+                <div><strong>Public form:</strong> {{ viewSummaryName(action.config.publicFormViewId, 'No public form link') }}</div>
+                <div><strong>Internal processing:</strong> {{ viewSummaryName(action.config.internalViewId, 'No internal link') }}</div>
+              </div>
             </div>
 
             <!-- send_dingtalk_person_message config -->
@@ -382,6 +390,14 @@
                 <option value="">-- no internal link --</option>
                 <option v-for="view in internalViews" :key="view.id" :value="view.id">{{ view.name }}</option>
               </select>
+              <div class="meta-rule-editor__preview" data-field="personMessageSummary">
+                <div class="meta-rule-editor__preview-title">Message summary</div>
+                <div><strong>Recipients:</strong> {{ personRecipientSummary(action) }}</div>
+                <div><strong>Title:</strong> {{ templatePreviewText(action.config.titleTemplate, 'No title template') }}</div>
+                <div class="meta-rule-editor__preview-body"><strong>Body:</strong> {{ templatePreviewText(action.config.bodyTemplate, 'No body template') }}</div>
+                <div><strong>Public form:</strong> {{ viewSummaryName(action.config.publicFormViewId, 'No public form link') }}</div>
+                <div><strong>Internal processing:</strong> {{ viewSummaryName(action.config.internalViewId, 'No internal link') }}</div>
+              </div>
             </div>
 
             <!-- lock_record config -->
@@ -693,6 +709,28 @@ function removePersonRecipient(action: DraftAction, userId: string) {
   action.config.userIdsText = parseUserIdsText(action.config.userIdsText)
     .filter((id) => id !== userId)
     .join(', ')
+}
+
+function dingTalkGroupName(destinationId: unknown) {
+  const id = typeof destinationId === 'string' ? destinationId : ''
+  if (!id) return 'No group selected'
+  return dingTalkDestinations.value.find((item) => item.id === id)?.name ?? id
+}
+
+function viewSummaryName(viewId: unknown, fallback: string) {
+  const id = typeof viewId === 'string' ? viewId : ''
+  if (!id) return fallback
+  return (props.views ?? []).find((view) => view.id === id)?.name ?? id
+}
+
+function templatePreviewText(value: unknown, fallback: string) {
+  return typeof value === 'string' && value.trim() ? value.trim() : fallback
+}
+
+function personRecipientSummary(action: DraftAction) {
+  const selected = selectedPersonRecipients(action)
+  if (!selected.length) return 'No recipients selected'
+  return selected.map((item) => item.label).join(', ')
 }
 
 function applyGroupPreset(action: DraftAction, preset: DingTalkNotificationPreset) {
@@ -1028,6 +1066,27 @@ function onTestRun() {
   font-size: 12px;
   font-weight: 600;
   color: #475569;
+}
+
+.meta-rule-editor__preview {
+  border: 1px solid #dbeafe;
+  background: #f8fbff;
+  border-radius: 8px;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: #334155;
+}
+
+.meta-rule-editor__preview-title {
+  font-weight: 700;
+  color: #1e3a8a;
+}
+
+.meta-rule-editor__preview-body {
+  white-space: pre-wrap;
 }
 
 .meta-rule-editor__recipient-list {

@@ -138,6 +138,14 @@
               <option value="">-- no internal link --</option>
               <option v-for="view in internalViews" :key="view.id" :value="view.id">{{ view.name }}</option>
             </select>
+            <div class="meta-automation__preview" data-automation-summary="group">
+              <div class="meta-automation__preview-title">Message summary</div>
+              <div><strong>Group:</strong> {{ dingTalkGroupName(draft.dingtalkDestinationId) }}</div>
+              <div><strong>Title:</strong> {{ templatePreviewText(draft.dingtalkTitleTemplate, 'No title template') }}</div>
+              <div class="meta-automation__preview-body"><strong>Body:</strong> {{ templatePreviewText(draft.dingtalkBodyTemplate, 'No body template') }}</div>
+              <div><strong>Public form:</strong> {{ viewSummaryName(draft.publicFormViewId, 'No public form link') }}</div>
+              <div><strong>Internal processing:</strong> {{ viewSummaryName(draft.internalViewId, 'No internal link') }}</div>
+            </div>
           </template>
 
           <template v-if="draft.actionType === 'send_dingtalk_person_message'">
@@ -246,6 +254,14 @@
               <option value="">-- no internal link --</option>
               <option v-for="view in internalViews" :key="view.id" :value="view.id">{{ view.name }}</option>
             </select>
+            <div class="meta-automation__preview" data-automation-summary="person">
+              <div class="meta-automation__preview-title">Message summary</div>
+              <div><strong>Recipients:</strong> {{ dingTalkPersonRecipientSummary }}</div>
+              <div><strong>Title:</strong> {{ templatePreviewText(draft.dingtalkPersonTitleTemplate, 'No title template') }}</div>
+              <div class="meta-automation__preview-body"><strong>Body:</strong> {{ templatePreviewText(draft.dingtalkPersonBodyTemplate, 'No body template') }}</div>
+              <div><strong>Public form:</strong> {{ viewSummaryName(draft.dingtalkPersonPublicFormViewId, 'No public form link') }}</div>
+              <div><strong>Internal processing:</strong> {{ viewSummaryName(draft.dingtalkPersonInternalViewId, 'No internal link') }}</div>
+            </div>
           </template>
 
           <div class="meta-automation__form-actions">
@@ -523,6 +539,25 @@ function removeDingTalkPersonRecipient(userId: string) {
     .filter((id) => id !== userId)
     .join(', ')
 }
+
+function dingTalkGroupName(destinationId: string) {
+  if (!destinationId) return 'No group selected'
+  return dingTalkDestinations.value.find((item) => item.id === destinationId)?.name ?? destinationId
+}
+
+function viewSummaryName(viewId: string, fallback: string) {
+  if (!viewId) return fallback
+  return (props.views ?? []).find((view) => view.id === viewId)?.name ?? viewId
+}
+
+function templatePreviewText(value: string, fallback: string) {
+  return value.trim() ? value.trim() : fallback
+}
+
+const dingTalkPersonRecipientSummary = computed(() => {
+  if (!selectedDingTalkPersonRecipients.value.length) return 'No recipients selected'
+  return selectedDingTalkPersonRecipients.value.map((item) => item.label).join(', ')
+})
 
 function applyGroupPreset(preset: DingTalkNotificationPreset) {
   const next = applyDingTalkNotificationPreset(
@@ -979,6 +1014,27 @@ watch(
   font-size: 12px;
   font-weight: 600;
   color: #475569;
+}
+
+.meta-automation__preview {
+  border: 1px solid #dbeafe;
+  background: #f8fbff;
+  border-radius: 8px;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: #334155;
+}
+
+.meta-automation__preview-title {
+  font-weight: 700;
+  color: #1e3a8a;
+}
+
+.meta-automation__preview-body {
+  white-space: pre-wrap;
 }
 
 .meta-automation__recipient-option,

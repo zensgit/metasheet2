@@ -484,4 +484,41 @@ describe('MetaAutomationRuleEditor', () => {
     expect(titleInput.value).toBe('{{recordId}}')
     expect(bodyInput.value).toBe('{{record.xxx}}')
   })
+
+  it('shows DingTalk group message summary in the rule editor', async () => {
+    const client = mockClient()
+    const { container } = mount({
+      visible: true,
+      sheetId: 'sheet_1',
+      fields,
+      views,
+      client,
+    })
+    await flushPromises()
+
+    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header select') as HTMLSelectElement
+    actionSelect.value = 'send_dingtalk_group_message'
+    actionSelect.dispatchEvent(new Event('change'))
+    await flushPromises()
+
+    const destinationSelect = container.querySelector('[data-field="dingtalkDestinationId"]') as HTMLSelectElement
+    destinationSelect.value = 'dt_1'
+    destinationSelect.dispatchEvent(new Event('change'))
+
+    const titleInput = container.querySelector('[data-field="dingtalkTitleTemplate"]') as HTMLInputElement
+    titleInput.value = 'Ticket {{recordId}}'
+    titleInput.dispatchEvent(new Event('input'))
+
+    const bodyInput = container.querySelector('[data-field="dingtalkBodyTemplate"]') as HTMLTextAreaElement
+    bodyInput.value = 'Please fill {{record.xxx}}'
+    bodyInput.dispatchEvent(new Event('input'))
+    await flushPromises()
+
+    const summary = container.querySelector('[data-field="groupMessageSummary"]')
+    expect(summary?.textContent).toContain('Ops Group')
+    expect(summary?.textContent).toContain('Ticket {{recordId}}')
+    expect(summary?.textContent).toContain('Please fill {{record.xxx}}')
+    expect(summary?.textContent).toContain('No public form link')
+    expect(summary?.textContent).toContain('No internal link')
+  })
 })
