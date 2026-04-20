@@ -535,4 +535,28 @@ describe('MetaAutomationManager', () => {
     expect(publicFormSelect.value).toBe('view_form')
     expect(internalViewSelect.value).toBe('view_grid')
   })
+
+  it('inserts DingTalk template tokens in the inline create form', async () => {
+    const { client } = mockClient([])
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
+    await flushPromises()
+
+    const addBtn = container.querySelector('.meta-automation__btn-add') as HTMLButtonElement
+    addBtn.click()
+    await nextTick()
+
+    const actionSelect = container.querySelector('[data-automation-field="actionType"]') as HTMLSelectElement
+    actionSelect.value = 'send_dingtalk_person_message'
+    actionSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushPromises()
+
+    ;(container.querySelector('[data-automation-token="person-title-recordId"]') as HTMLButtonElement).click()
+    ;(container.querySelector('[data-automation-token="person-body-recordField"]') as HTMLButtonElement).click()
+    await flushPromises()
+
+    const titleInput = container.querySelector('[data-automation-field="dingtalkPersonTitleTemplate"]') as HTMLInputElement
+    const bodyInput = container.querySelector('[data-automation-field="dingtalkPersonBodyTemplate"]') as HTMLTextAreaElement
+    expect(titleInput.value).toBe('{{recordId}}')
+    expect(bodyInput.value).toBe('{{record.xxx}}')
+  })
 })
