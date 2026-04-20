@@ -113,6 +113,7 @@ const fields = [
   { id: 'fld_1', name: 'Status', type: 'select' },
   { id: 'fld_2', name: 'Name', type: 'string' },
   { id: 'assigneeUserIds', name: 'Assignees', type: 'user' },
+  { id: 'reviewerUserId', name: 'Reviewer', type: 'user' },
 ]
 
 const views = [
@@ -467,6 +468,27 @@ describe('MetaAutomationManager', () => {
     expect(summary?.textContent).toContain('Assignees (record.assigneeUserIds)')
   })
 
+  it('only lists user fields in the DingTalk person recipient picker', async () => {
+    const { client } = mockClient([])
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
+    await flushPromises()
+
+    const addBtn = container.querySelector('.meta-automation__btn-add') as HTMLButtonElement
+    addBtn.click()
+    await nextTick()
+
+    const actionSelect = container.querySelector('[data-automation-field="actionType"]') as HTMLSelectElement
+    actionSelect.value = 'send_dingtalk_person_message'
+    actionSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushPromises()
+
+    const fieldSelect = container.querySelector('[data-automation-field="dingtalkPersonRecipientFieldSelect"]') as HTMLSelectElement
+    const optionValues = Array.from(fieldSelect.options).map((option) => option.value)
+    expect(optionValues).toContain('assigneeUserIds')
+    expect(optionValues).toContain('reviewerUserId')
+    expect(optionValues).not.toContain('fld_1')
+  })
+
   it('can append multiple record recipient fields for DingTalk person automation', async () => {
     const { client, fetchFn } = mockClient([])
     const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
@@ -489,12 +511,12 @@ describe('MetaAutomationManager', () => {
     fieldSelect.value = 'assigneeUserIds'
     fieldSelect.dispatchEvent(new Event('change', { bubbles: true }))
     await flushPromises()
-    fieldSelect.value = 'fld_1'
+    fieldSelect.value = 'reviewerUserId'
     fieldSelect.dispatchEvent(new Event('change', { bubbles: true }))
     await flushPromises()
 
     const recipientFieldInput = container.querySelector('[data-automation-field="dingtalkPersonRecipientFieldPath"]') as HTMLInputElement
-    expect(recipientFieldInput.value).toBe('record.assigneeUserIds, record.fld_1')
+    expect(recipientFieldInput.value).toBe('record.assigneeUserIds, record.reviewerUserId')
 
     const titleInput = container.querySelector('[data-automation-field="dingtalkPersonTitleTemplate"]') as HTMLInputElement
     titleInput.value = 'Ticket {{recordId}}'
@@ -514,7 +536,7 @@ describe('MetaAutomationManager', () => {
     expect(body.actionConfig).toEqual({
       userIds: [],
       userIdFieldPath: 'record.assigneeUserIds',
-      userIdFieldPaths: ['record.assigneeUserIds', 'record.fld_1'],
+      userIdFieldPaths: ['record.assigneeUserIds', 'record.reviewerUserId'],
       titleTemplate: 'Ticket {{recordId}}',
       bodyTemplate: 'Please fill {{record.status}}',
     })
@@ -538,7 +560,7 @@ describe('MetaAutomationManager', () => {
     fieldSelect.value = 'assigneeUserIds'
     fieldSelect.dispatchEvent(new Event('change', { bubbles: true }))
     await flushPromises()
-    fieldSelect.value = 'fld_1'
+    fieldSelect.value = 'reviewerUserId'
     fieldSelect.dispatchEvent(new Event('change', { bubbles: true }))
     await flushPromises()
 
@@ -548,7 +570,7 @@ describe('MetaAutomationManager', () => {
     await flushPromises()
 
     const recipientFieldInput = container.querySelector('[data-automation-field="dingtalkPersonRecipientFieldPath"]') as HTMLInputElement
-    expect(recipientFieldInput.value).toBe('record.fld_1')
+    expect(recipientFieldInput.value).toBe('record.reviewerUserId')
     expect(container.querySelector('[data-automation-recipient-field="assigneeUserIds"]')).toBeNull()
   })
 
@@ -864,6 +886,28 @@ describe('MetaAutomationManager', () => {
     await flushPromises()
 
     expect(container.textContent).toContain('Unknown placeholder {{record}}')
+  })
+
+  it('warns when a DingTalk person recipient path is not a user field in the inline create form', async () => {
+    const { client } = mockClient([])
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
+    await flushPromises()
+
+    const addBtn = container.querySelector('.meta-automation__btn-add') as HTMLButtonElement
+    addBtn.click()
+    await nextTick()
+
+    const actionSelect = container.querySelector('[data-automation-field="actionType"]') as HTMLSelectElement
+    actionSelect.value = 'send_dingtalk_person_message'
+    actionSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushPromises()
+
+    const recipientFieldInput = container.querySelector('[data-automation-field="dingtalkPersonRecipientFieldPath"]') as HTMLInputElement
+    recipientFieldInput.value = 'record.fld_1'
+    recipientFieldInput.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushPromises()
+
+    expect(container.textContent).toContain('record.fld_1 is not a user field')
   })
 
   it('copies rendered DingTalk person body example in the inline create form', async () => {
