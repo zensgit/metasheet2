@@ -458,4 +458,30 @@ describe('MetaAutomationRuleEditor', () => {
     expect(publicFormSelect.value).toBe('')
     expect(internalViewSelect.value).toBe('view_grid')
   })
+
+  it('inserts DingTalk template tokens in the rule editor', async () => {
+    const client = mockClient()
+    const { container } = mount({
+      visible: true,
+      sheetId: 'sheet_1',
+      fields,
+      views,
+      client,
+    })
+    await flushPromises()
+
+    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header select') as HTMLSelectElement
+    actionSelect.value = 'send_dingtalk_group_message'
+    actionSelect.dispatchEvent(new Event('change'))
+    await flushPromises()
+
+    ;(container.querySelector('[data-field="groupTitleToken-recordId"]') as HTMLButtonElement).click()
+    ;(container.querySelector('[data-field="groupBodyToken-recordField"]') as HTMLButtonElement).click()
+    await flushPromises()
+
+    const titleInput = container.querySelector('[data-field="dingtalkTitleTemplate"]') as HTMLInputElement
+    const bodyInput = container.querySelector('[data-field="dingtalkBodyTemplate"]') as HTMLTextAreaElement
+    expect(titleInput.value).toBe('{{recordId}}')
+    expect(bodyInput.value).toBe('{{record.xxx}}')
+  })
 })
