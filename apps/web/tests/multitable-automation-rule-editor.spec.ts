@@ -11,6 +11,8 @@ import type { AutomationRule } from '../src/multitable/types'
 const fields = [
   { id: 'fld_1', name: 'Status', type: 'select' },
   { id: 'fld_2', name: 'Name', type: 'string' },
+  { id: 'assigneeUserIds', name: 'Assignees', type: 'user' },
+  { id: 'reviewerUserId', name: 'Reviewer', type: 'user' },
 ]
 
 const views = [
@@ -354,6 +356,210 @@ describe('MetaAutomationRuleEditor', () => {
     })
   })
 
+  it('emits DingTalk person action config with only a dynamic record recipient path', async () => {
+    const saved = vi.fn()
+    const client = mockClient()
+    const { container } = mount({
+      visible: true,
+      sheetId: 'sheet_1',
+      fields,
+      views,
+      client,
+      onSave: saved,
+    })
+    await flushPromises()
+
+    const nameInput = container.querySelector('[data-field="name"]') as HTMLInputElement
+    nameInput.value = 'Notify dynamic recipients'
+    nameInput.dispatchEvent(new Event('input'))
+    await flushPromises()
+
+    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header select') as HTMLSelectElement
+    actionSelect.value = 'send_dingtalk_person_message'
+    actionSelect.dispatchEvent(new Event('change'))
+    await flushPromises()
+
+    const recipientFieldInput = container.querySelector('[data-field="dingtalkPersonRecipientFieldPath"]') as HTMLInputElement
+    recipientFieldInput.value = 'record.assigneeUserIds'
+    recipientFieldInput.dispatchEvent(new Event('input'))
+
+    const titleInput = container.querySelector('[data-field="dingtalkPersonTitleTemplate"]') as HTMLInputElement
+    titleInput.value = 'Ticket {{recordId}}'
+    titleInput.dispatchEvent(new Event('input'))
+
+    const bodyInput = container.querySelector('[data-field="dingtalkPersonBodyTemplate"]') as HTMLTextAreaElement
+    bodyInput.value = 'Please review {{record.status}}'
+    bodyInput.dispatchEvent(new Event('input'))
+    await flushPromises()
+
+    const saveBtn = container.querySelector('[data-action="save"]') as HTMLButtonElement
+    expect(saveBtn.disabled).toBe(false)
+    saveBtn.click()
+    await flushPromises()
+
+    expect(saved).toHaveBeenCalledTimes(1)
+    const payload = saved.mock.calls[0][0]
+    expect(payload.actionConfig).toEqual({
+      userIds: [],
+      userIdFieldPath: 'record.assigneeUserIds',
+      userIdFieldPaths: ['record.assigneeUserIds'],
+      titleTemplate: 'Ticket {{recordId}}',
+      bodyTemplate: 'Please review {{record.status}}',
+    })
+    expect(payload.actions[0]).toEqual({
+      type: 'send_dingtalk_person_message',
+      config: {
+        userIds: [],
+        userIdFieldPath: 'record.assigneeUserIds',
+        userIdFieldPaths: ['record.assigneeUserIds'],
+        titleTemplate: 'Ticket {{recordId}}',
+        bodyTemplate: 'Please review {{record.status}}',
+      },
+    })
+    expect(container.textContent).toContain('Record recipients:')
+    expect(container.textContent).toContain('Assignees (record.assigneeUserIds)')
+  })
+
+  it('can pick a record recipient field in the rule editor', async () => {
+    const client = mockClient()
+    const { container } = mount({
+      visible: true,
+      sheetId: 'sheet_1',
+      fields,
+      views,
+      client,
+    })
+    await flushPromises()
+
+    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header select') as HTMLSelectElement
+    actionSelect.value = 'send_dingtalk_person_message'
+    actionSelect.dispatchEvent(new Event('change'))
+    await flushPromises()
+
+    const fieldSelect = container.querySelector('[data-field="dingtalkPersonRecipientFieldSelect"]') as HTMLSelectElement
+    fieldSelect.value = 'assigneeUserIds'
+    fieldSelect.dispatchEvent(new Event('change'))
+    await flushPromises()
+
+    const recipientFieldInput = container.querySelector('[data-field="dingtalkPersonRecipientFieldPath"]') as HTMLInputElement
+    expect(recipientFieldInput.value).toBe('record.assigneeUserIds')
+    expect(container.textContent).toContain('Assignees (record.assigneeUserIds)')
+  })
+
+  it('only lists user fields in the DingTalk person recipient picker for the rule editor', async () => {
+    const client = mockClient()
+    const { container } = mount({
+      visible: true,
+      sheetId: 'sheet_1',
+      fields,
+      views,
+      client,
+    })
+    await flushPromises()
+
+    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header select') as HTMLSelectElement
+    actionSelect.value = 'send_dingtalk_person_message'
+    actionSelect.dispatchEvent(new Event('change'))
+    await flushPromises()
+
+    const fieldSelect = container.querySelector('[data-field="dingtalkPersonRecipientFieldSelect"]') as HTMLSelectElement
+    const optionValues = Array.from(fieldSelect.options).map((option) => option.value)
+    expect(optionValues).toContain('assigneeUserIds')
+    expect(optionValues).toContain('reviewerUserId')
+    expect(optionValues).not.toContain('fld_1')
+  })
+
+  it('can append multiple record recipient fields in the rule editor', async () => {
+    const saved = vi.fn()
+    const client = mockClient()
+    const { container } = mount({
+      visible: true,
+      sheetId: 'sheet_1',
+      fields,
+      views,
+      client,
+      onSave: saved,
+    })
+    await flushPromises()
+
+    const nameInput = container.querySelector('[data-field="name"]') as HTMLInputElement
+    nameInput.value = 'Notify multiple recipients'
+    nameInput.dispatchEvent(new Event('input'))
+    await flushPromises()
+
+    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header select') as HTMLSelectElement
+    actionSelect.value = 'send_dingtalk_person_message'
+    actionSelect.dispatchEvent(new Event('change'))
+    await flushPromises()
+
+    const fieldSelect = container.querySelector('[data-field="dingtalkPersonRecipientFieldSelect"]') as HTMLSelectElement
+    fieldSelect.value = 'assigneeUserIds'
+    fieldSelect.dispatchEvent(new Event('change'))
+    await flushPromises()
+    fieldSelect.value = 'reviewerUserId'
+    fieldSelect.dispatchEvent(new Event('change'))
+    await flushPromises()
+
+    const recipientFieldInput = container.querySelector('[data-field="dingtalkPersonRecipientFieldPath"]') as HTMLInputElement
+    expect(recipientFieldInput.value).toBe('record.assigneeUserIds, record.reviewerUserId')
+
+    const titleInput = container.querySelector('[data-field="dingtalkPersonTitleTemplate"]') as HTMLInputElement
+    titleInput.value = 'Ticket {{recordId}}'
+    titleInput.dispatchEvent(new Event('input'))
+
+    const bodyInput = container.querySelector('[data-field="dingtalkPersonBodyTemplate"]') as HTMLTextAreaElement
+    bodyInput.value = 'Please review {{record.status}}'
+    bodyInput.dispatchEvent(new Event('input'))
+    await flushPromises()
+
+    const saveBtn = container.querySelector('[data-action="save"]') as HTMLButtonElement
+    saveBtn.click()
+    await flushPromises()
+
+    const payload = saved.mock.calls[0][0]
+    expect(payload.actionConfig).toEqual({
+      userIds: [],
+      userIdFieldPath: 'record.assigneeUserIds',
+      userIdFieldPaths: ['record.assigneeUserIds', 'record.reviewerUserId'],
+      titleTemplate: 'Ticket {{recordId}}',
+      bodyTemplate: 'Please review {{record.status}}',
+    })
+  })
+
+  it('can remove a selected dynamic recipient field chip in the rule editor', async () => {
+    const client = mockClient()
+    const { container } = mount({
+      visible: true,
+      sheetId: 'sheet_1',
+      fields,
+      views,
+      client,
+    })
+    await flushPromises()
+
+    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header select') as HTMLSelectElement
+    actionSelect.value = 'send_dingtalk_person_message'
+    actionSelect.dispatchEvent(new Event('change'))
+    await flushPromises()
+
+    const fieldSelect = container.querySelector('[data-field="dingtalkPersonRecipientFieldSelect"]') as HTMLSelectElement
+    fieldSelect.value = 'assigneeUserIds'
+    fieldSelect.dispatchEvent(new Event('change'))
+    await flushPromises()
+    fieldSelect.value = 'reviewerUserId'
+    fieldSelect.dispatchEvent(new Event('change'))
+    await flushPromises()
+
+    const firstChip = container.querySelector('[data-field-recipient="assigneeUserIds"]') as HTMLButtonElement
+    expect(firstChip?.textContent).toContain('Assignees')
+    firstChip.click()
+    await flushPromises()
+
+    const recipientFieldInput = container.querySelector('[data-field="dingtalkPersonRecipientFieldPath"]') as HTMLInputElement
+    expect(recipientFieldInput.value).toBe('record.reviewerUserId')
+    expect(container.querySelector('[data-field-recipient="assigneeUserIds"]')).toBeNull()
+  })
+
   it('can search and add DingTalk person recipients', async () => {
     const saved = vi.fn()
     const client = mockClient()
@@ -587,6 +793,30 @@ describe('MetaAutomationRuleEditor', () => {
     await flushPromises()
 
     expect(container.textContent).toContain('Unknown placeholder {{recoredId}}')
+  })
+
+  it('warns when a DingTalk person recipient path is not a user field in the rule editor', async () => {
+    const client = mockClient()
+    const { container } = mount({
+      visible: true,
+      sheetId: 'sheet_1',
+      fields,
+      views,
+      client,
+    })
+    await flushPromises()
+
+    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header select') as HTMLSelectElement
+    actionSelect.value = 'send_dingtalk_person_message'
+    actionSelect.dispatchEvent(new Event('change'))
+    await flushPromises()
+
+    const recipientFieldInput = container.querySelector('[data-field="dingtalkPersonRecipientFieldPath"]') as HTMLInputElement
+    recipientFieldInput.value = 'record.fld_1'
+    recipientFieldInput.dispatchEvent(new Event('input'))
+    await flushPromises()
+
+    expect(container.textContent).toContain('record.fld_1 is not a user field')
   })
 
   it('copies rendered DingTalk group body example in the rule editor', async () => {

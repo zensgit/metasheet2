@@ -238,6 +238,51 @@
               placeholder="使用逗号或换行分隔本地 userId"
               data-automation-field="dingtalkPersonUserIds"
             ></textarea>
+            <label class="meta-automation__label">Record recipient field paths (optional)</label>
+            <input
+              v-model="draft.dingtalkPersonRecipientFieldPath"
+              class="meta-automation__input"
+              type="text"
+              placeholder="例如：record.assigneeUserIds, record.reviewerUserId"
+              data-automation-field="dingtalkPersonRecipientFieldPath"
+            />
+            <label class="meta-automation__label">Pick recipient field</label>
+            <select
+              class="meta-automation__select"
+              data-automation-field="dingtalkPersonRecipientFieldSelect"
+              @change="appendDingTalkPersonRecipientField($event.target as HTMLSelectElement)"
+            >
+              <option value="">-- choose a user field --</option>
+              <option v-for="field in dingTalkPersonRecipientCandidateFields" :key="field.id" :value="field.id">
+                {{ field.name }} (record.{{ field.id }})
+              </option>
+            </select>
+            <div
+              v-if="selectedDingTalkPersonRecipientFields.length"
+              class="meta-automation__recipient-list meta-automation__recipient-list--selected"
+            >
+              <button
+                v-for="field in selectedDingTalkPersonRecipientFields"
+                :key="field.id"
+                class="meta-automation__recipient-chip"
+                type="button"
+                :data-automation-recipient-field="field.id"
+                @click="removeDingTalkPersonRecipientField(field.id)"
+              >
+                <strong>{{ field.label }}</strong>
+                <em>Remove</em>
+              </button>
+            </div>
+            <div
+              v-for="warning in recipientFieldPathWarnings(draft.dingtalkPersonRecipientFieldPath)"
+              :key="`draft-person-recipient-${warning}`"
+              class="meta-automation__hint meta-automation__hint--warning"
+            >
+              {{ warning }}
+            </div>
+            <div class="meta-automation__hint">
+              Record data is keyed by field ID. Use comma or newline separated <code>record.&lt;fieldId&gt;</code> paths. The picker only lists user fields.
+            </div>
             <label class="meta-automation__label">Title template</label>
             <input
               v-model="draft.dingtalkPersonTitleTemplate"
@@ -307,6 +352,7 @@
             <div class="meta-automation__preview" data-automation-summary="person">
               <div class="meta-automation__preview-title">Message summary</div>
               <div><strong>Recipients:</strong> {{ dingTalkPersonRecipientSummary }}</div>
+              <div><strong>Record recipients:</strong> {{ dingTalkPersonRecipientFieldSummary }}</div>
               <div><strong>Title template:</strong> {{ templatePreviewText(draft.dingtalkPersonTitleTemplate, 'No title template') }}</div>
               <div class="meta-automation__preview-body"><strong>Body template:</strong> {{ templatePreviewText(draft.dingtalkPersonBodyTemplate, 'No body template') }}</div>
               <div class="meta-automation__preview-line">
@@ -499,6 +545,7 @@ interface DraftState {
   publicFormViewId: string
   internalViewId: string
   dingtalkPersonUserIds: string
+  dingtalkPersonRecipientFieldPath: string
   dingtalkPersonTitleTemplate: string
   dingtalkPersonBodyTemplate: string
   dingtalkPersonPublicFormViewId: string
@@ -520,6 +567,7 @@ function emptyDraft(): DraftState {
     publicFormViewId: '',
     internalViewId: '',
     dingtalkPersonUserIds: '',
+    dingtalkPersonRecipientFieldPath: '',
     dingtalkPersonTitleTemplate: '',
     dingtalkPersonBodyTemplate: '',
     dingtalkPersonPublicFormViewId: '',
@@ -653,6 +701,62 @@ const dingTalkPersonRecipientSummary = computed(() => {
   if (!selectedDingTalkPersonRecipients.value.length) return 'No recipients selected'
   return selectedDingTalkPersonRecipients.value.map((item) => item.label).join(', ')
 })
+
+function parseRecipientFieldPathsText(value: string): string[] {
+  return Array.from(new Set(
+    value
+      .split(/[\n,]+/)
+      .map((entry) => entry.trim().replace(/^record\./, ''))
+      .filter(Boolean),
+  ))
+}
+
+function recipientFieldSummaryLabel(path: string) {
+  const normalized = path.trim().replace(/^record\./, '')
+  if (!normalized) return ''
+  const field = props.fields.find((item) => item.id === normalized)
+  return field ? `${field.name} (record.${normalized})` : `record.${normalized}`
+}
+
+const dingTalkPersonRecipientCandidateFields = computed(() => props.fields.filter((field) => field.type === 'user'))
+
+const selectedDingTalkPersonRecipientFields = computed(() => parseRecipientFieldPathsText(draft.value.dingtalkPersonRecipientFieldPath)
+  .map((path) => ({
+    id: path,
+    label: recipientFieldSummaryLabel(path),
+  }))
+  .filter((item) => item.label))
+
+function recipientFieldPathWarnings(value: string) {
+  const candidateIds = new Set(dingTalkPersonRecipientCandidateFields.value.map((field) => field.id))
+  return parseRecipientFieldPathsText(value)
+    .filter((path) => !candidateIds.has(path))
+    .map((path) => `record.${path} is not a user field; DingTalk person messages expect local user IDs.`)
+}
+
+const dingTalkPersonRecipientFieldSummary = computed(() => {
+  const labels = selectedDingTalkPersonRecipientFields.value.map((item) => item.label)
+  if (!labels.length) return 'No dynamic recipient field'
+  return labels.join(', ')
+})
+
+function appendDingTalkPersonRecipientField(select: HTMLSelectElement) {
+  const value = select.value.trim()
+  if (!value) return
+  const paths = parseRecipientFieldPathsText(draft.value.dingtalkPersonRecipientFieldPath)
+  paths.push(value)
+  draft.value.dingtalkPersonRecipientFieldPath = Array.from(new Set(paths))
+    .map((path) => `record.${path}`)
+    .join(', ')
+  select.value = ''
+}
+
+function removeDingTalkPersonRecipientField(path: string) {
+  draft.value.dingtalkPersonRecipientFieldPath = parseRecipientFieldPathsText(draft.value.dingtalkPersonRecipientFieldPath)
+    .filter((entry) => entry !== path)
+    .map((entry) => `record.${entry}`)
+    .join(', ')
+}
 
 function templateSyntaxWarnings(value: string) {
   return listDingTalkTemplateSyntaxWarnings(value)
@@ -792,7 +896,7 @@ const canSave = computed(() => {
     if (!draft.value.dingtalkBodyTemplate.trim()) return false
   }
   if (draft.value.actionType === 'send_dingtalk_person_message') {
-    if (!draft.value.dingtalkPersonUserIds.trim()) return false
+    if (!draft.value.dingtalkPersonUserIds.trim() && !draft.value.dingtalkPersonRecipientFieldPath.trim()) return false
     if (!draft.value.dingtalkPersonTitleTemplate.trim()) return false
     if (!draft.value.dingtalkPersonBodyTemplate.trim()) return false
   }
@@ -824,6 +928,9 @@ function openEditForm(rule: AutomationRule) {
     publicFormViewId: (rule.actionConfig?.publicFormViewId as string) ?? '',
     internalViewId: (rule.actionConfig?.internalViewId as string) ?? '',
     dingtalkPersonUserIds: Array.isArray(rule.actionConfig?.userIds) ? rule.actionConfig?.userIds.join(', ') : '',
+    dingtalkPersonRecipientFieldPath: Array.isArray(rule.actionConfig?.userIdFieldPaths)
+      ? (rule.actionConfig?.userIdFieldPaths as string[]).join(', ')
+      : (rule.actionConfig?.userIdFieldPath as string) ?? '',
     dingtalkPersonTitleTemplate: (rule.actionConfig?.titleTemplate as string) ?? '',
     dingtalkPersonBodyTemplate: (rule.actionConfig?.bodyTemplate as string) ?? '',
     dingtalkPersonPublicFormViewId: (rule.actionConfig?.publicFormViewId as string) ?? '',
@@ -868,11 +975,15 @@ function buildActionConfig(): Record<string, unknown> {
     }
   }
   if (draft.value.actionType === 'send_dingtalk_person_message') {
+    const userIdFieldPaths = parseRecipientFieldPathsText(draft.value.dingtalkPersonRecipientFieldPath)
+      .map((path) => `record.${path}`)
     return {
       userIds: draft.value.dingtalkPersonUserIds
         .split(/[\n,]+/)
         .map((entry) => entry.trim())
         .filter(Boolean),
+      userIdFieldPath: userIdFieldPaths[0] || undefined,
+      userIdFieldPaths: userIdFieldPaths.length ? userIdFieldPaths : undefined,
       titleTemplate: draft.value.dingtalkPersonTitleTemplate,
       bodyTemplate: draft.value.dingtalkPersonBodyTemplate,
       publicFormViewId: draft.value.dingtalkPersonPublicFormViewId || undefined,

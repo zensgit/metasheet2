@@ -366,6 +366,51 @@
                 placeholder="使用逗号或换行分隔本地 userId"
                 data-field="dingtalkPersonUserIds"
               ></textarea>
+              <label class="meta-rule-editor__label">Record recipient field paths (optional)</label>
+              <input
+                v-model="action.config.recipientFieldPath"
+                class="meta-rule-editor__input"
+                type="text"
+                placeholder="例如：record.assigneeUserIds, record.reviewerUserId"
+                data-field="dingtalkPersonRecipientFieldPath"
+              />
+              <label class="meta-rule-editor__label">Pick recipient field</label>
+              <select
+                class="meta-rule-editor__select"
+                data-field="dingtalkPersonRecipientFieldSelect"
+                @change="appendRecipientFieldPath(action, ($event.target as HTMLSelectElement))"
+              >
+                <option value="">-- choose a user field --</option>
+                <option v-for="field in recipientCandidateFields" :key="field.id" :value="field.id">
+                  {{ field.name }} (record.{{ field.id }})
+                </option>
+              </select>
+              <div
+                v-if="selectedRecipientFields(action).length"
+                class="meta-rule-editor__recipient-list meta-rule-editor__recipient-list--selected"
+              >
+                <button
+                  v-for="field in selectedRecipientFields(action)"
+                  :key="field.id"
+                  class="meta-rule-editor__recipient-chip"
+                  type="button"
+                  :data-field-recipient="field.id"
+                  @click="removeRecipientFieldPath(action, field.id)"
+                >
+                  <strong>{{ field.label }}</strong>
+                  <em>Remove</em>
+                </button>
+              </div>
+              <div
+                v-for="warning in recipientFieldPathWarnings(action.config.recipientFieldPath)"
+                :key="`person-recipient-${warning}`"
+                class="meta-rule-editor__hint meta-rule-editor__hint--warning"
+              >
+                {{ warning }}
+              </div>
+              <div class="meta-rule-editor__hint">
+                Record data is keyed by field ID. Use comma or newline separated <code>record.&lt;fieldId&gt;</code> paths. The picker only lists user fields.
+              </div>
               <label class="meta-rule-editor__label">Title template</label>
               <input
                 v-model="action.config.titleTemplate"
@@ -443,6 +488,7 @@
               <div class="meta-rule-editor__preview" data-field="personMessageSummary">
                 <div class="meta-rule-editor__preview-title">Message summary</div>
                 <div><strong>Recipients:</strong> {{ personRecipientSummary(action) }}</div>
+                <div><strong>Record recipients:</strong> {{ recipientFieldPathSummary(action.config.recipientFieldPath) }}</div>
                 <div><strong>Title template:</strong> {{ templatePreviewText(action.config.titleTemplate, 'No title template') }}</div>
                 <div class="meta-rule-editor__preview-body"><strong>Body template:</strong> {{ templatePreviewText(action.config.bodyTemplate, 'No body template') }}</div>
                 <div class="meta-rule-editor__preview-line">
@@ -539,6 +585,7 @@ type DraftActionConfig = Record<string, unknown> & {
   userId?: string
   userIdsText?: string
   userIdsSearch?: string
+  recipientFieldPath?: string
   message?: string
   destinationId?: string
   titleTemplate?: string
@@ -591,6 +638,7 @@ let copiedPreviewResetTimer: ReturnType<typeof setTimeout> | null = null
 
 const formViews = computed(() => (props.views ?? []).filter((view) => view.type === 'form'))
 const internalViews = computed(() => props.views ?? [])
+const recipientCandidateFields = computed(() => props.fields.filter((field) => field.type === 'user'))
 
 const conditionOperators: Array<{ value: ConditionOperator; label: string }> = [
   { value: 'equals', label: 'Equals' },
@@ -626,6 +674,11 @@ function draftConfigFromAction(type: AutomationActionType, config: Record<string
       userIdsText: Array.isArray(config.userIds)
         ? config.userIds.join(', ')
         : '',
+      recipientFieldPath: Array.isArray(config.userIdFieldPaths)
+        ? config.userIdFieldPaths.join(', ')
+        : typeof config.userIdFieldPath === 'string'
+          ? config.userIdFieldPath
+          : '',
       userIdsSearch: '',
     }
   }
@@ -686,9 +739,10 @@ const canSave = computed(() => {
     }
     if (action.type === 'send_dingtalk_person_message') {
       const userIdsText = typeof action.config.userIdsText === 'string' ? action.config.userIdsText.trim() : ''
+      const recipientFieldPath = typeof action.config.recipientFieldPath === 'string' ? action.config.recipientFieldPath.trim() : ''
       const titleTemplate = typeof action.config.titleTemplate === 'string' ? action.config.titleTemplate.trim() : ''
       const bodyTemplate = typeof action.config.bodyTemplate === 'string' ? action.config.bodyTemplate.trim() : ''
-      if (!userIdsText || !titleTemplate || !bodyTemplate) return false
+      if ((!userIdsText && !recipientFieldPath) || !titleTemplate || !bodyTemplate) return false
     }
   }
   return true
@@ -827,6 +881,65 @@ function personRecipientSummary(action: DraftAction) {
   return selected.map((item) => item.label).join(', ')
 }
 
+function parseRecipientFieldPathsText(value: unknown): string[] {
+  if (typeof value !== 'string') return []
+  return Array.from(new Set(
+    value
+      .split(/[\n,]+/)
+      .map((entry) => entry.trim().replace(/^record\./, ''))
+      .filter(Boolean),
+  ))
+}
+
+function recipientFieldSummaryLabel(path: string) {
+  const normalized = path.trim().replace(/^record\./, '')
+  if (!normalized) return ''
+  const field = props.fields.find((item) => item.id === normalized)
+  return field ? `${field.name} (record.${normalized})` : `record.${normalized}`
+}
+
+function selectedRecipientFields(action: DraftAction) {
+  return parseRecipientFieldPathsText(action.config.recipientFieldPath)
+    .map((path) => ({
+      id: path,
+      label: recipientFieldSummaryLabel(path),
+    }))
+    .filter((item) => item.label)
+}
+
+function recipientFieldPathWarnings(value: unknown) {
+  const candidateIds = new Set(recipientCandidateFields.value.map((field) => field.id))
+  return parseRecipientFieldPathsText(value)
+    .filter((path) => !candidateIds.has(path))
+    .map((path) => `record.${path} is not a user field; DingTalk person messages expect local user IDs.`)
+}
+
+function recipientFieldPathSummary(value: unknown) {
+  const labels = parseRecipientFieldPathsText(value)
+    .map((path) => recipientFieldSummaryLabel(path))
+    .filter(Boolean)
+  if (!labels.length) return 'No dynamic recipient field'
+  return labels.join(', ')
+}
+
+function appendRecipientFieldPath(action: DraftAction, select: HTMLSelectElement) {
+  const fieldId = select.value.trim()
+  if (!fieldId) return
+  const paths = parseRecipientFieldPathsText(action.config.recipientFieldPath)
+  paths.push(fieldId)
+  action.config.recipientFieldPath = Array.from(new Set(paths))
+    .map((path) => `record.${path}`)
+    .join(', ')
+  select.value = ''
+}
+
+function removeRecipientFieldPath(action: DraftAction, path: string) {
+  action.config.recipientFieldPath = parseRecipientFieldPathsText(action.config.recipientFieldPath)
+    .filter((entry) => entry !== path)
+    .map((entry) => `record.${entry}`)
+    .join(', ')
+}
+
 function templateSyntaxWarnings(value: unknown) {
   return typeof value === 'string' ? listDingTalkTemplateSyntaxWarnings(value) : []
 }
@@ -909,6 +1022,7 @@ function defaultConfigForActionType(type: AutomationActionType): DraftActionConf
       return {
         userIdsText: '',
         userIdsSearch: '',
+        recipientFieldPath: '',
         titleTemplate: '',
         bodyTemplate: '',
         publicFormViewId: '',
@@ -968,10 +1082,14 @@ function buildPayload(): Partial<AutomationRule> {
           .map((entry) => entry.trim())
           .filter(Boolean)
         : []
+      const userIdFieldPaths = parseRecipientFieldPathsText(action.config.recipientFieldPath)
+        .map((path) => `record.${path}`)
       return {
         type: action.type,
         config: {
           userIds,
+          userIdFieldPath: userIdFieldPaths[0] || undefined,
+          userIdFieldPaths: userIdFieldPaths.length ? userIdFieldPaths : undefined,
           titleTemplate: typeof action.config.titleTemplate === 'string' ? action.config.titleTemplate.trim() : '',
           bodyTemplate: typeof action.config.bodyTemplate === 'string' ? action.config.bodyTemplate.trim() : '',
           publicFormViewId: typeof action.config.publicFormViewId === 'string' && action.config.publicFormViewId.trim()
