@@ -213,6 +213,19 @@
                 placeholder="例如：{{record.title}} 待处理"
                 data-field="dingtalkTitleTemplate"
               />
+              <div class="meta-rule-editor__token-row">
+                <span class="meta-rule-editor__preset-label">Template tokens</span>
+                <button
+                  v-for="token in DINGTALK_TITLE_TEMPLATE_TOKENS"
+                  :key="token.key"
+                  class="meta-rule-editor__btn"
+                  type="button"
+                  :data-field="`groupTitleToken-${token.key}`"
+                  @click="appendGroupTemplateToken(action, 'titleTemplate', token.value)"
+                >
+                  {{ token.label }}
+                </button>
+              </div>
               <label class="meta-rule-editor__label">Body template</label>
               <textarea
                 v-model="action.config.bodyTemplate"
@@ -221,6 +234,19 @@
                 placeholder="支持 {{record.xxx}}、{{recordId}}、{{sheetId}}、{{actorId}}"
                 data-field="dingtalkBodyTemplate"
               ></textarea>
+              <div class="meta-rule-editor__token-row">
+                <span class="meta-rule-editor__preset-label">Template tokens</span>
+                <button
+                  v-for="token in DINGTALK_BODY_TEMPLATE_TOKENS"
+                  :key="token.key"
+                  class="meta-rule-editor__btn"
+                  type="button"
+                  :data-field="`groupBodyToken-${token.key}`"
+                  @click="appendGroupTemplateToken(action, 'bodyTemplate', token.value, true)"
+                >
+                  {{ token.label }}
+                </button>
+              </div>
               <label class="meta-rule-editor__label">Public form view (optional)</label>
               <select
                 v-model="action.config.publicFormViewId"
@@ -304,6 +330,19 @@
                 placeholder="例如：{{record.title}} 待处理"
                 data-field="dingtalkPersonTitleTemplate"
               />
+              <div class="meta-rule-editor__token-row">
+                <span class="meta-rule-editor__preset-label">Template tokens</span>
+                <button
+                  v-for="token in DINGTALK_TITLE_TEMPLATE_TOKENS"
+                  :key="token.key"
+                  class="meta-rule-editor__btn"
+                  type="button"
+                  :data-field="`personTitleToken-${token.key}`"
+                  @click="appendPersonTemplateToken(action, 'titleTemplate', token.value)"
+                >
+                  {{ token.label }}
+                </button>
+              </div>
               <label class="meta-rule-editor__label">Body template</label>
               <textarea
                 v-model="action.config.bodyTemplate"
@@ -312,6 +351,19 @@
                 placeholder="支持 {{record.xxx}}、{{recordId}}、{{sheetId}}、{{actorId}}"
                 data-field="dingtalkPersonBodyTemplate"
               ></textarea>
+              <div class="meta-rule-editor__token-row">
+                <span class="meta-rule-editor__preset-label">Template tokens</span>
+                <button
+                  v-for="token in DINGTALK_BODY_TEMPLATE_TOKENS"
+                  :key="token.key"
+                  class="meta-rule-editor__btn"
+                  type="button"
+                  :data-field="`personBodyToken-${token.key}`"
+                  @click="appendPersonTemplateToken(action, 'bodyTemplate', token.value, true)"
+                >
+                  {{ token.label }}
+                </button>
+              </div>
               <label class="meta-rule-editor__label">Public form view (optional)</label>
               <select
                 v-model="action.config.publicFormViewId"
@@ -377,6 +429,11 @@ import type {
   MetaView,
 } from '../types'
 import { applyDingTalkNotificationPreset, type DingTalkNotificationPreset } from '../utils/dingtalkNotificationPresets'
+import {
+  appendTemplateToken,
+  DINGTALK_BODY_TEMPLATE_TOKENS,
+  DINGTALK_TITLE_TEMPLATE_TOKENS,
+} from '../utils/dingtalkNotificationTemplateTokens'
 
 interface FieldPair {
   fieldId: string
@@ -670,6 +727,26 @@ function applyPersonPreset(action: DraftAction, preset: DingTalkNotificationPres
   }
 }
 
+function appendGroupTemplateToken(
+  action: DraftAction,
+  field: 'titleTemplate' | 'bodyTemplate',
+  token: string,
+  multiline = false,
+) {
+  const current = typeof action.config[field] === 'string' ? action.config[field] : ''
+  action.config[field] = appendTemplateToken(current, token, multiline)
+}
+
+function appendPersonTemplateToken(
+  action: DraftAction,
+  field: 'titleTemplate' | 'bodyTemplate',
+  token: string,
+  multiline = false,
+) {
+  const current = typeof action.config[field] === 'string' ? action.config[field] : ''
+  action.config[field] = appendTemplateToken(current, token, multiline)
+}
+
 function defaultConfigForActionType(type: AutomationActionType): DraftActionConfig {
   switch (type) {
     case 'update_record':
@@ -937,6 +1014,14 @@ function onTestRun() {
   flex-wrap: wrap;
   align-items: center;
   gap: 8px;
+}
+
+.meta-rule-editor__token-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 0 12px;
 }
 
 .meta-rule-editor__preset-label {

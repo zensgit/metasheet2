@@ -94,6 +94,19 @@
               placeholder="例如：{{record.title}} 待处理"
               data-automation-field="dingtalkTitleTemplate"
             />
+            <div class="meta-automation__preset-row">
+              <span class="meta-automation__preset-label">Template tokens</span>
+              <button
+                v-for="token in DINGTALK_TITLE_TEMPLATE_TOKENS"
+                :key="token.key"
+                class="meta-automation__btn"
+                type="button"
+                :data-automation-token="`group-title-${token.key}`"
+                @click="appendGroupTemplateToken('title', token.value)"
+              >
+                {{ token.label }}
+              </button>
+            </div>
             <label class="meta-automation__label">Body template</label>
             <textarea
               v-model="draft.dingtalkBodyTemplate"
@@ -102,6 +115,19 @@
               placeholder="支持 {{record.xxx}}、{{recordId}}、{{sheetId}}、{{actorId}}"
               data-automation-field="dingtalkBodyTemplate"
             ></textarea>
+            <div class="meta-automation__preset-row">
+              <span class="meta-automation__preset-label">Template tokens</span>
+              <button
+                v-for="token in DINGTALK_BODY_TEMPLATE_TOKENS"
+                :key="token.key"
+                class="meta-automation__btn"
+                type="button"
+                :data-automation-token="`group-body-${token.key}`"
+                @click="appendGroupTemplateToken('body', token.value)"
+              >
+                {{ token.label }}
+              </button>
+            </div>
             <label class="meta-automation__label">Public form view (optional)</label>
             <select v-model="draft.publicFormViewId" class="meta-automation__select" data-automation-field="publicFormViewId">
               <option value="">-- no public form link --</option>
@@ -176,6 +202,19 @@
               placeholder="例如：{{record.title}} 待处理"
               data-automation-field="dingtalkPersonTitleTemplate"
             />
+            <div class="meta-automation__preset-row">
+              <span class="meta-automation__preset-label">Template tokens</span>
+              <button
+                v-for="token in DINGTALK_TITLE_TEMPLATE_TOKENS"
+                :key="token.key"
+                class="meta-automation__btn"
+                type="button"
+                :data-automation-token="`person-title-${token.key}`"
+                @click="appendPersonTemplateToken('title', token.value)"
+              >
+                {{ token.label }}
+              </button>
+            </div>
             <label class="meta-automation__label">Body template</label>
             <textarea
               v-model="draft.dingtalkPersonBodyTemplate"
@@ -184,6 +223,19 @@
               placeholder="支持 {{record.xxx}}、{{recordId}}、{{sheetId}}、{{actorId}}"
               data-automation-field="dingtalkPersonBodyTemplate"
             ></textarea>
+            <div class="meta-automation__preset-row">
+              <span class="meta-automation__preset-label">Template tokens</span>
+              <button
+                v-for="token in DINGTALK_BODY_TEMPLATE_TOKENS"
+                :key="token.key"
+                class="meta-automation__btn"
+                type="button"
+                :data-automation-token="`person-body-${token.key}`"
+                @click="appendPersonTemplateToken('body', token.value)"
+              >
+                {{ token.label }}
+              </button>
+            </div>
             <label class="meta-automation__label">Public form view (optional)</label>
             <select v-model="draft.dingtalkPersonPublicFormViewId" class="meta-automation__select" data-automation-field="dingtalkPersonPublicFormViewId">
               <option value="">-- no public form link --</option>
@@ -318,6 +370,11 @@ import MetaAutomationLogViewer from './MetaAutomationLogViewer.vue'
 import MetaAutomationGroupDeliveryViewer from './MetaAutomationGroupDeliveryViewer.vue'
 import MetaAutomationPersonDeliveryViewer from './MetaAutomationPersonDeliveryViewer.vue'
 import { applyDingTalkNotificationPreset, type DingTalkNotificationPreset } from '../utils/dingtalkNotificationPresets'
+import {
+  appendTemplateToken,
+  DINGTALK_BODY_TEMPLATE_TOKENS,
+  DINGTALK_TITLE_TEMPLATE_TOKENS,
+} from '../utils/dingtalkNotificationTemplateTokens'
 
 const props = defineProps<{
   visible: boolean
@@ -499,6 +556,22 @@ function applyPersonPreset(preset: DingTalkNotificationPreset) {
   draft.value.dingtalkPersonBodyTemplate = next.bodyTemplate ?? ''
   draft.value.dingtalkPersonPublicFormViewId = next.publicFormViewId ?? ''
   draft.value.dingtalkPersonInternalViewId = next.internalViewId ?? ''
+}
+
+function appendGroupTemplateToken(field: 'title' | 'body', token: string) {
+  if (field === 'title') {
+    draft.value.dingtalkTitleTemplate = appendTemplateToken(draft.value.dingtalkTitleTemplate, token)
+    return
+  }
+  draft.value.dingtalkBodyTemplate = appendTemplateToken(draft.value.dingtalkBodyTemplate, token, true)
+}
+
+function appendPersonTemplateToken(field: 'title' | 'body', token: string) {
+  if (field === 'title') {
+    draft.value.dingtalkPersonTitleTemplate = appendTemplateToken(draft.value.dingtalkPersonTitleTemplate, token)
+    return
+  }
+  draft.value.dingtalkPersonBodyTemplate = appendTemplateToken(draft.value.dingtalkPersonBodyTemplate, token, true)
 }
 
 // --- Rule editor + log viewer state ---
