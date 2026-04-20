@@ -103,6 +103,7 @@ import workflowDesignerRouter from './routes/workflow-designer'
 import plmWorkbenchRouter from './routes/plm-workbench'
 import { univerMockRouter } from './routes/univer-mock'
 import { univerMetaRouter } from './routes/univer-meta'
+import { dashboardRouter } from './routes/dashboard'
 import { apiTokensRouter } from './routes/api-tokens'
 import { SnapshotService } from './services/SnapshotService'
 import { MetricsStreamService } from './services/MetricsStreamService'
@@ -861,6 +862,10 @@ export class MetaSheetServer {
 
     // Canonical multitable API used by the frontend and OpenAPI contracts.
     this.app.use('/api/multitable', univerMetaRouter())
+    // Chart / Dashboard CRUD (paths: /sheets/:sheetId/charts, /sheets/:sheetId/dashboards).
+    // Mounted separately from univerMetaRouter because it lives in its own
+    // module with a dedicated DashboardService.
+    this.app.use('/api/multitable', dashboardRouter())
     this.app.use(apiTokensRouter())
     // Keep the legacy dev alias while existing tools/worktrees still reference it.
     if (process.env.NODE_ENV !== 'production') {
