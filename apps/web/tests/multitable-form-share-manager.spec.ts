@@ -17,6 +17,7 @@ function fakeConfig(overrides: Record<string, unknown> = {}) {
     publicToken: 'tok_abc123',
     expiresAt: null,
     status: 'active',
+    accessMode: 'public',
     ...overrides,
   }
 }
@@ -154,5 +155,24 @@ describe('MetaFormShareManager', () => {
     expect(patchCalls.length).toBe(1)
     const body = JSON.parse(patchCalls[0][1].body as string)
     expect(body.enabled).toBe(false)
+  })
+
+  it('updates access mode', async () => {
+    const { client, fetchFn } = mockClient()
+    mount({ visible: true, sheetId: 'sh_1', viewId: 'v_1', client })
+    await flushPromises()
+
+    const select = document.querySelector('[data-form-share-access-mode]') as HTMLSelectElement
+    expect(select).toBeTruthy()
+    select.value = 'dingtalk_granted'
+    select.dispatchEvent(new Event('change'))
+    await flushPromises()
+
+    const patchCalls = fetchFn.mock.calls.filter(
+      (c: [string, RequestInit?]) => c[1]?.method === 'PATCH' && c[0].includes('/form-share'),
+    )
+    expect(patchCalls.length).toBeGreaterThan(0)
+    const body = JSON.parse(String(patchCalls.at(-1)?.[1]?.body ?? '{}'))
+    expect(body.accessMode).toBe('dingtalk_granted')
   })
 })

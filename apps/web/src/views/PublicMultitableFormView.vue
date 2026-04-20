@@ -7,7 +7,9 @@
         <p v-if="subtitle" class="public-multitable-form__subtitle">{{ subtitle }}</p>
       </header>
 
-      <div v-if="loading" class="public-multitable-form__state">Loading form…</div>
+      <div v-if="loading || redirectingToDingTalk" class="public-multitable-form__state">
+        {{ redirectingToDingTalk ? redirectingMessage : 'Loading form…' }}
+      </div>
       <div v-else-if="loadError" class="public-multitable-form__state public-multitable-form__state--error">
         {{ loadError }}
       </div>
@@ -45,6 +47,7 @@ import { computed, ref, watch } from 'vue'
 import type { FormSubmitResult, MetaFormContext } from '../multitable/types'
 import { multitableClient } from '../multitable/api/client'
 import MetaFormView from '../multitable/components/MetaFormView.vue'
+import { apiFetch } from '../utils/api'
 
 const props = defineProps<{
   sheetId?: string
@@ -61,6 +64,7 @@ const fieldErrors = ref<Record<string, string> | null>(null)
 const submitted = ref(false)
 const submissionResult = ref<FormSubmitResult | null>(null)
 const formKey = ref(0)
+const redirectingToDingTalk = ref(false)
 
 const title = computed(() => context.value?.view?.name || context.value?.sheet?.name || 'Public multitable form')
 const subtitle = computed(() => {
@@ -74,6 +78,7 @@ const submissionMessage = computed(() => {
     ? 'Your response has been updated successfully.'
     : 'Your response has been submitted successfully.'
 })
+const redirectingMessage = computed(() => 'Redirecting to DingTalk sign-in…')
 
 async function loadForm(): Promise<void> {
   loading.value = true
@@ -82,6 +87,7 @@ async function loadForm(): Promise<void> {
   fieldErrors.value = null
   submitted.value = false
   submissionResult.value = null
+  redirectingToDingTalk.value = false
   try {
     const publicToken = props.publicToken?.trim()
     if (!publicToken) {
@@ -96,10 +102,16 @@ async function loadForm(): Promise<void> {
       publicToken,
     })
   } catch (error) {
+    if (isDingTalkAuthRequired(error)) {
+      const launched = await launchDingTalkSignIn()
+      if (launched) return
+    }
     context.value = null
-    loadError.value = readErrorMessage(error, 'Failed to load public form')
+    loadError.value = readPublicFormErrorMessage(error, 'Failed to load public form')
   } finally {
-    loading.value = false
+    if (!redirectingToDingTalk.value) {
+      loading.value = false
+    }
   }
 }
 
@@ -124,7 +136,11 @@ async function onSubmit(data: Record<string, unknown>): Promise<void> {
     submissionResult.value = result
     submitted.value = true
   } catch (error) {
-    submitError.value = readErrorMessage(error, 'Failed to submit public form')
+    if (isDingTalkAuthRequired(error)) {
+      const launched = await launchDingTalkSignIn()
+      if (launched) return
+    }
+    submitError.value = readPublicFormErrorMessage(error, 'Failed to submit public form')
     fieldErrors.value = readFieldErrors(error)
   } finally {
     submitting.value = false
@@ -142,6 +158,61 @@ function resetForm(): void {
 function readErrorMessage(error: unknown, fallback: string): string {
   if (error instanceof Error && error.message.trim()) return error.message
   return fallback
+}
+
+function readErrorCode(error: unknown): string {
+  return error instanceof Error && typeof (error as Error & { code?: unknown }).code === 'string'
+    ? String((error as Error & { code?: unknown }).code)
+    : ''
+}
+
+function isDingTalkAuthRequired(error: unknown): boolean {
+  return readErrorCode(error) === 'DINGTALK_AUTH_REQUIRED'
+}
+
+function readPublicFormErrorMessage(error: unknown, fallback: string): string {
+  const code = readErrorCode(error)
+  if (code === 'DINGTALK_BIND_REQUIRED') {
+    return 'This form only accepts users with a bound DingTalk account.'
+  }
+  if (code === 'DINGTALK_GRANT_REQUIRED') {
+    return 'This form only accepts DingTalk-authorized users.'
+  }
+  return readErrorMessage(error, fallback)
+}
+
+function currentPublicFormRedirect(): string {
+  if (typeof window === 'undefined') return '/login'
+  const path = `${window.location.pathname || ''}${window.location.search || ''}${window.location.hash || ''}`.trim()
+  return path || '/login'
+}
+
+async function launchDingTalkSignIn(): Promise<boolean> {
+  redirectingToDingTalk.value = true
+  loadError.value = null
+  try {
+    const response = await apiFetch(
+      `/api/auth/dingtalk/launch?redirect=${encodeURIComponent(currentPublicFormRedirect())}`,
+      { suppressUnauthorizedRedirect: true },
+    )
+    const payload = await response.json().catch(() => null)
+    if (!response.ok || !payload?.success || typeof payload?.data?.url !== 'string' || payload.data.url.trim().length === 0) {
+      throw new Error(readErrorMessage(payload, 'Failed to start DingTalk sign-in'))
+    }
+    if (typeof window !== 'undefined' && typeof window.location?.assign === 'function') {
+      window.location.assign(payload.data.url)
+      return true
+    }
+    if (typeof window !== 'undefined') {
+      window.location.href = payload.data.url
+      return true
+    }
+    return false
+  } catch (error) {
+    redirectingToDingTalk.value = false
+    loadError.value = readErrorMessage(error, 'Failed to start DingTalk sign-in')
+    return false
+  }
 }
 
 function readFieldErrors(error: unknown): Record<string, string> | null {
