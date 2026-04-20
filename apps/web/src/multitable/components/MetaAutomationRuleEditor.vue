@@ -213,6 +213,13 @@
                 placeholder="例如：{{record.title}} 待处理"
                 data-field="dingtalkTitleTemplate"
               />
+              <div
+                v-for="warning in templateSyntaxWarnings(action.config.titleTemplate)"
+                :key="`group-title-${warning}`"
+                class="meta-rule-editor__hint meta-rule-editor__hint--warning"
+              >
+                {{ warning }}
+              </div>
               <div class="meta-rule-editor__token-row">
                 <span class="meta-rule-editor__preset-label">Template tokens</span>
                 <button
@@ -234,6 +241,13 @@
                 placeholder="支持 {{record.xxx}}、{{recordId}}、{{sheetId}}、{{actorId}}"
                 data-field="dingtalkBodyTemplate"
               ></textarea>
+              <div
+                v-for="warning in templateSyntaxWarnings(action.config.bodyTemplate)"
+                :key="`group-body-${warning}`"
+                class="meta-rule-editor__hint meta-rule-editor__hint--warning"
+              >
+                {{ warning }}
+              </div>
               <div class="meta-rule-editor__token-row">
                 <span class="meta-rule-editor__preset-label">Template tokens</span>
                 <button
@@ -338,6 +352,13 @@
                 placeholder="例如：{{record.title}} 待处理"
                 data-field="dingtalkPersonTitleTemplate"
               />
+              <div
+                v-for="warning in templateSyntaxWarnings(action.config.titleTemplate)"
+                :key="`person-title-${warning}`"
+                class="meta-rule-editor__hint meta-rule-editor__hint--warning"
+              >
+                {{ warning }}
+              </div>
               <div class="meta-rule-editor__token-row">
                 <span class="meta-rule-editor__preset-label">Template tokens</span>
                 <button
@@ -359,6 +380,13 @@
                 placeholder="支持 {{record.xxx}}、{{recordId}}、{{sheetId}}、{{actorId}}"
                 data-field="dingtalkPersonBodyTemplate"
               ></textarea>
+              <div
+                v-for="warning in templateSyntaxWarnings(action.config.bodyTemplate)"
+                :key="`person-body-${warning}`"
+                class="meta-rule-editor__hint meta-rule-editor__hint--warning"
+              >
+                {{ warning }}
+              </div>
               <div class="meta-rule-editor__token-row">
                 <span class="meta-rule-editor__preset-label">Template tokens</span>
                 <button
@@ -450,6 +478,7 @@ import {
   DINGTALK_BODY_TEMPLATE_TOKENS,
   DINGTALK_TITLE_TEMPLATE_TOKENS,
 } from '../utils/dingtalkNotificationTemplateTokens'
+import { listDingTalkTemplateSyntaxWarnings } from '../utils/dingtalkNotificationTemplateLint'
 
 interface FieldPair {
   fieldId: string
@@ -733,6 +762,10 @@ function personRecipientSummary(action: DraftAction) {
   return selected.map((item) => item.label).join(', ')
 }
 
+function templateSyntaxWarnings(value: unknown) {
+  return typeof value === 'string' ? listDingTalkTemplateSyntaxWarnings(value) : []
+}
+
 function applyGroupPreset(action: DraftAction, preset: DingTalkNotificationPreset) {
   action.config = {
     ...action.config,
@@ -974,6 +1007,8 @@ function onTestRun() {
 .meta-rule-editor__label { font-size: 12px; font-weight: 600; color: #475569; margin-top: 4px; }
 
 .meta-rule-editor__hint--error { color: #b91c1c; }
+
+.meta-rule-editor__hint--warning { color: #b45309; }
 
 .meta-rule-editor__input,
 .meta-rule-editor__select,
