@@ -339,6 +339,32 @@ function normalizeCommentMentionSuggestions(
   }
 }
 
+function normalizeFormShareConfig(payload: Partial<FormShareConfig> | null | undefined): FormShareConfig {
+  const accessMode =
+    payload?.accessMode === 'dingtalk' || payload?.accessMode === 'dingtalk_granted'
+      ? payload.accessMode
+      : 'public'
+  return {
+    enabled: payload?.enabled === true,
+    publicToken: typeof payload?.publicToken === 'string' ? payload.publicToken : null,
+    expiresAt: typeof payload?.expiresAt === 'string' ? payload.expiresAt : null,
+    status: payload?.status === 'active' || payload?.status === 'expired' ? payload.status : 'disabled',
+    accessMode,
+    allowedUserIds: Array.isArray(payload?.allowedUserIds)
+      ? payload.allowedUserIds.filter((value): value is string => typeof value === 'string')
+      : [],
+    allowedUsers: normalizeSheetPermissionCandidates({
+      items: Array.isArray(payload?.allowedUsers) ? payload.allowedUsers : [],
+    }).items.filter((item) => item.subjectType === 'user'),
+    allowedMemberGroupIds: Array.isArray(payload?.allowedMemberGroupIds)
+      ? payload.allowedMemberGroupIds.filter((value): value is string => typeof value === 'string')
+      : [],
+    allowedMemberGroups: normalizeSheetPermissionCandidates({
+      items: Array.isArray(payload?.allowedMemberGroups) ? payload.allowedMemberGroups : [],
+    }).items.filter((item) => item.subjectType === 'member-group'),
+  }
+}
+
 function normalizeSheetPermissionEntry(
   payload: Partial<MetaSheetPermissionEntry> | null | undefined,
 ): MetaSheetPermissionEntry | null {
@@ -1006,7 +1032,8 @@ export class MultitableApiClient {
   // --- Form Share ---
   async getFormShareConfig(sheetId: string, viewId: string): Promise<FormShareConfig> {
     const res = await this.fetch(`/api/multitable/sheets/${encodeURIComponent(sheetId)}/views/${encodeURIComponent(viewId)}/form-share`)
-    return parseJson(res)
+    const data = await parseJson<Partial<FormShareConfig>>(res)
+    return normalizeFormShareConfig(data)
   }
 
   async updateFormShareConfig(sheetId: string, viewId: string, config: FormShareConfigUpdate): Promise<FormShareConfig> {
@@ -1015,7 +1042,8 @@ export class MultitableApiClient {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(config),
     })
-    return parseJson(res)
+    const data = await parseJson<Partial<FormShareConfig>>(res)
+    return normalizeFormShareConfig(data)
   }
 
   async regenerateFormShareToken(sheetId: string, viewId: string): Promise<{ publicToken: string }> {
@@ -1023,6 +1051,15 @@ export class MultitableApiClient {
       method: 'POST',
     })
     return parseJson(res)
+  }
+
+  async listFormShareCandidates(
+    sheetId: string,
+    params?: { q?: string; limit?: number },
+  ): Promise<{ items: MetaSheetPermissionCandidate[]; total: number; limit: number; query: string }> {
+    const res = await this.fetch(`/api/multitable/sheets/${encodeURIComponent(sheetId)}/form-share-candidates${qs(params ?? {})}`)
+    const data = await parseJson<{ items?: Array<Partial<MetaSheetPermissionCandidate>>; total?: number; limit?: number; query?: string }>(res)
+    return normalizeSheetPermissionCandidates(data)
   }
 
   // --- API Tokens ---

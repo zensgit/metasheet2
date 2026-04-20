@@ -258,6 +258,16 @@ type PublicFormConfig = {
   expiresAt?: unknown
   expiresOn?: unknown
   accessMode?: unknown
+  allowedUserIds?: unknown
+  allowedMemberGroupIds?: unknown
+}
+
+type PublicFormAllowedSubjectSummary = {
+  subjectType: 'user' | 'member-group'
+  subjectId: string
+  label: string
+  subtitle: string | null
+  isActive: boolean
 }
 
 type PublicFormShareConfigResponse = {
@@ -266,6 +276,10 @@ type PublicFormShareConfigResponse = {
   expiresAt: string | null
   status: 'active' | 'expired' | 'disabled'
   accessMode: PublicFormAccessMode
+  allowedUserIds: string[]
+  allowedUsers: PublicFormAllowedSubjectSummary[]
+  allowedMemberGroupIds: string[]
+  allowedMemberGroups: PublicFormAllowedSubjectSummary[]
 }
 
 type DashboardChartType = 'bar' | 'line' | 'pie'
@@ -348,6 +362,10 @@ function normalizePublicFormAccessMode(value: unknown): PublicFormAccessMode {
   return 'public'
 }
 
+function normalizePublicFormAllowlistIds(value: unknown): string[] {
+  return Array.from(new Set(normalizeJsonArray(value)))
+}
+
 function buildPublicFormToken(): string {
   return buildId('pub')
 }
@@ -363,7 +381,95 @@ function isPublicFormAccessAllowed(view: UniverMetaViewConfig | null | undefined
   return true
 }
 
-function serializePublicFormShareConfig(view: UniverMetaViewConfig | null | undefined): PublicFormShareConfigResponse {
+async function loadPublicFormAllowedSubjectSummaries(
+  query: QueryFn,
+  config: PublicFormConfig | null | undefined,
+): Promise<{
+  allowedUserIds: string[]
+  allowedUsers: PublicFormAllowedSubjectSummary[]
+  allowedMemberGroupIds: string[]
+  allowedMemberGroups: PublicFormAllowedSubjectSummary[]
+}> {
+  const allowedUserIds = normalizePublicFormAllowlistIds(config?.allowedUserIds)
+  const allowedMemberGroupIds = normalizePublicFormAllowlistIds(config?.allowedMemberGroupIds)
+
+  const [userResult, groupResult] = await Promise.all([
+    allowedUserIds.length > 0
+      ? query(
+        `SELECT id, name, email, is_active
+         FROM users
+         WHERE id = ANY($1::text[])`,
+        [allowedUserIds],
+      )
+      : Promise.resolve({ rows: [], rowCount: 0 }),
+    allowedMemberGroupIds.length > 0
+      ? query(
+        `SELECT g.id::text AS id, g.name, g.description, COUNT(m.user_id)::int AS member_count
+         FROM platform_member_groups g
+         LEFT JOIN platform_member_group_members m ON m.group_id = g.id
+         WHERE g.id::text = ANY($1::text[])
+         GROUP BY g.id, g.name, g.description`,
+        [allowedMemberGroupIds],
+      )
+      : Promise.resolve({ rows: [], rowCount: 0 }),
+  ])
+
+  const usersById = new Map(
+    (userResult.rows as Array<{ id: string; name?: string | null; email?: string | null; is_active?: boolean | null }>)
+      .map((row) => [
+        String(row.id),
+        {
+          subjectType: 'user' as const,
+          subjectId: String(row.id),
+          label: String(row.name ?? row.email ?? row.id),
+          subtitle: typeof row.email === 'string' && row.email.trim().length > 0 ? row.email.trim() : null,
+          isActive: row.is_active !== false,
+        } satisfies PublicFormAllowedSubjectSummary,
+      ]),
+  )
+  const groupsById = new Map(
+    (groupResult.rows as Array<{ id: string; name?: string | null; description?: string | null; member_count?: number | null }>)
+      .map((row) => [
+        String(row.id),
+        {
+          subjectType: 'member-group' as const,
+          subjectId: String(row.id),
+          label: String(row.name ?? row.id),
+          subtitle:
+            typeof row.description === 'string' && row.description.trim().length > 0
+              ? row.description.trim()
+              : typeof row.member_count === 'number'
+                ? `${row.member_count} member${row.member_count === 1 ? '' : 's'}`
+                : 'Member group',
+          isActive: true,
+        } satisfies PublicFormAllowedSubjectSummary,
+      ]),
+  )
+
+  return {
+    allowedUserIds,
+    allowedUsers: allowedUserIds.map((userId) => usersById.get(userId) ?? {
+      subjectType: 'user',
+      subjectId: userId,
+      label: userId,
+      subtitle: null,
+      isActive: false,
+    }),
+    allowedMemberGroupIds,
+    allowedMemberGroups: allowedMemberGroupIds.map((groupId) => groupsById.get(groupId) ?? {
+      subjectType: 'member-group',
+      subjectId: groupId,
+      label: groupId,
+      subtitle: 'Member group',
+      isActive: true,
+    }),
+  }
+}
+
+async function serializePublicFormShareConfig(
+  query: QueryFn,
+  view: UniverMetaViewConfig | null | undefined,
+): Promise<PublicFormShareConfigResponse> {
   const publicForm = getPublicFormConfig(view)
   const enabled = publicForm?.enabled === true
   const publicToken = typeof publicForm?.publicToken === 'string' && publicForm.publicToken.trim().length > 0
@@ -372,12 +478,17 @@ function serializePublicFormShareConfig(view: UniverMetaViewConfig | null | unde
   const expiryMs = parsePublicFormExpiryMs(publicForm?.expiresAt ?? publicForm?.expiresOn)
   const expiresAt = expiryMs === null ? null : new Date(expiryMs).toISOString()
   const status = !enabled || !publicToken ? 'disabled' : expiryMs !== null && Date.now() >= expiryMs ? 'expired' : 'active'
+  const allowlists = await loadPublicFormAllowedSubjectSummaries(query, publicForm)
   return {
     enabled,
     publicToken,
     expiresAt,
     status,
     accessMode: normalizePublicFormAccessMode(publicForm?.accessMode),
+    allowedUserIds: allowlists.allowedUserIds,
+    allowedUsers: allowlists.allowedUsers,
+    allowedMemberGroupIds: allowlists.allowedMemberGroupIds,
+    allowedMemberGroups: allowlists.allowedMemberGroups,
   }
 }
 
@@ -461,6 +572,33 @@ async function evaluateProtectedPublicFormAccess(
       statusCode: 403,
       code: 'DINGTALK_GRANT_REQUIRED',
       message: 'A DingTalk-authorized account is required for this form',
+    }
+  }
+
+  const publicForm = getPublicFormConfig(view)
+  const allowedUserIds = normalizePublicFormAllowlistIds(publicForm?.allowedUserIds)
+  const allowedMemberGroupIds = normalizePublicFormAllowlistIds(publicForm?.allowedMemberGroupIds)
+  if (allowedUserIds.length > 0 || allowedMemberGroupIds.length > 0) {
+    const directAllowed = allowedUserIds.includes(userId)
+    let memberGroupAllowed = false
+    if (!directAllowed && allowedMemberGroupIds.length > 0) {
+      const membershipResult = await query(
+        `SELECT 1
+         FROM platform_member_group_members
+         WHERE user_id = $1
+           AND group_id::text = ANY($2::text[])
+         LIMIT 1`,
+        [userId, allowedMemberGroupIds],
+      )
+      memberGroupAllowed = membershipResult.rows.length > 0
+    }
+    if (!directAllowed && !memberGroupAllowed) {
+      return {
+        allowed: false,
+        statusCode: 403,
+        code: 'DINGTALK_FORM_NOT_ALLOWED',
+        message: 'Only selected system users or member groups can access this form',
+      }
     }
   }
 
@@ -5201,7 +5339,7 @@ export function univerMetaRouter(): Router {
         config: normalizeJson(row.config),
       }
 
-      return res.json({ ok: true, data: serializePublicFormShareConfig(view) })
+      return res.json({ ok: true, data: await serializePublicFormShareConfig(pool.query.bind(pool), view) })
     } catch (err) {
       const hint = getDbNotReadyMessage(err)
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
@@ -5221,6 +5359,8 @@ export function univerMetaRouter(): Router {
       enabled: z.boolean().optional(),
       expiresAt: z.string().datetime().nullable().optional(),
       accessMode: z.enum(['public', 'dingtalk', 'dingtalk_granted']).optional(),
+      allowedUserIds: z.array(z.string().min(1)).optional(),
+      allowedMemberGroupIds: z.array(z.string().min(1)).optional(),
     })
 
     const parsed = schema.safeParse(req.body)
@@ -5274,6 +5414,62 @@ export function univerMetaRouter(): Router {
             ? { expiresAt: existingPublicForm?.expiresAt ?? existingPublicForm?.expiresOn }
             : {}),
         accessMode: parsed.data.accessMode ?? normalizePublicFormAccessMode(existingPublicForm?.accessMode),
+        allowedUserIds: parsed.data.allowedUserIds !== undefined
+          ? normalizePublicFormAllowlistIds(parsed.data.allowedUserIds)
+          : normalizePublicFormAllowlistIds(existingPublicForm?.allowedUserIds),
+        allowedMemberGroupIds: parsed.data.allowedMemberGroupIds !== undefined
+          ? normalizePublicFormAllowlistIds(parsed.data.allowedMemberGroupIds)
+          : normalizePublicFormAllowlistIds(existingPublicForm?.allowedMemberGroupIds),
+      }
+      const nextAccessMode = normalizePublicFormAccessMode(nextPublicForm.accessMode)
+      const allowedUserIds = normalizePublicFormAllowlistIds(nextPublicForm.allowedUserIds)
+      const allowedMemberGroupIds = normalizePublicFormAllowlistIds(nextPublicForm.allowedMemberGroupIds)
+      if (nextAccessMode === 'public' && (allowedUserIds.length > 0 || allowedMemberGroupIds.length > 0)) {
+        return res.status(400).json({
+          ok: false,
+          error: {
+            code: 'VALIDATION_ERROR',
+            message: 'Allowed users and member groups require a DingTalk-protected access mode',
+          },
+        })
+      }
+      if (allowedUserIds.length > 0) {
+        const userCheck = await pool.query(
+          'SELECT id FROM users WHERE id = ANY($1::text[])',
+          [allowedUserIds],
+        )
+        const existingUserIds = new Set(
+          (userCheck.rows as Array<{ id: string }>).map((entry) => String(entry.id)),
+        )
+        const missingUserIds = allowedUserIds.filter((userId) => !existingUserIds.has(userId))
+        if (missingUserIds.length > 0) {
+          return res.status(400).json({
+            ok: false,
+            error: {
+              code: 'VALIDATION_ERROR',
+              message: `Unknown allowed users: ${missingUserIds.join(', ')}`,
+            },
+          })
+        }
+      }
+      if (allowedMemberGroupIds.length > 0) {
+        const groupCheck = await pool.query(
+          'SELECT id::text AS id FROM platform_member_groups WHERE id::text = ANY($1::text[])',
+          [allowedMemberGroupIds],
+        )
+        const existingGroupIds = new Set(
+          (groupCheck.rows as Array<{ id: string }>).map((entry) => String(entry.id)),
+        )
+        const missingGroupIds = allowedMemberGroupIds.filter((groupId) => !existingGroupIds.has(groupId))
+        if (missingGroupIds.length > 0) {
+          return res.status(400).json({
+            ok: false,
+            error: {
+              code: 'VALIDATION_ERROR',
+              message: `Unknown allowed member groups: ${missingGroupIds.join(', ')}`,
+            },
+          })
+        }
       }
       nextConfig.publicForm = nextPublicForm as Record<string, unknown>
 
@@ -5296,7 +5492,7 @@ export function univerMetaRouter(): Router {
         config: nextConfig,
       }
       metaViewConfigCache.set(viewId, view)
-      return res.json({ ok: true, data: serializePublicFormShareConfig(view) })
+      return res.json({ ok: true, data: await serializePublicFormShareConfig(pool.query.bind(pool), view) })
     } catch (err) {
       const hint = getDbNotReadyMessage(err)
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
@@ -5369,12 +5565,47 @@ export function univerMetaRouter(): Router {
         config: nextConfig,
       }
       metaViewConfigCache.set(viewId, view)
-      return res.json({ ok: true, data: { publicToken: serializePublicFormShareConfig(view).publicToken } })
+      return res.json({
+        ok: true,
+        data: {
+          publicToken: (await serializePublicFormShareConfig(pool.query.bind(pool), view)).publicToken,
+        },
+      })
     } catch (err) {
       const hint = getDbNotReadyMessage(err)
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
       console.error('[univer-meta] regenerate form share token failed:', err)
       return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to regenerate form share token' } })
+    }
+  })
+
+  router.get('/sheets/:sheetId/form-share-candidates', async (req: Request, res: Response) => {
+    const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
+    if (!sheetId) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId is required' } })
+    }
+
+    const q = typeof req.query.q === 'string' ? req.query.q.trim() : ''
+    const rawLimit = typeof req.query.limit === 'string' ? Number(req.query.limit) : undefined
+    const limit = Number.isFinite(rawLimit) ? Math.min(50, Math.max(1, Math.floor(rawLimit as number))) : 20
+
+    try {
+      const pool = poolManager.get()
+      const sheet = await loadSheetRow(pool.query.bind(pool), sheetId)
+      if (!sheet) {
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
+      }
+      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      if (!capabilities.canManageViews) return sendForbidden(res)
+
+      const items = (await listSheetPermissionCandidates(pool.query.bind(pool), sheetId, { q, limit }))
+        .filter((candidate) => candidate.subjectType === 'user' || candidate.subjectType === 'member-group')
+      return res.json({ ok: true, data: { items, total: items.length, limit, query: q } })
+    } catch (err) {
+      const hint = getDbNotReadyMessage(err)
+      if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
+      console.error('[univer-meta] list form-share candidates failed:', err)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to list form-share candidates' } })
     }
   })
 

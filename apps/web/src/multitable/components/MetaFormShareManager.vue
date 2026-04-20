@@ -11,7 +11,6 @@
         <div v-if="loading" class="meta-form-share__empty">Loading share settings&#x2026;</div>
 
         <template v-else>
-          <!-- Enable toggle -->
           <div class="meta-form-share__toggle-row">
             <label class="meta-form-share__toggle">
               <input
@@ -30,7 +29,6 @@
             </span>
           </div>
 
-          <!-- Link + actions (only when enabled) -->
           <template v-if="config?.enabled && config.publicToken">
             <div class="meta-form-share__auth-section">
               <label class="meta-form-share__label" for="meta-form-share-access-mode">Access mode</label>
@@ -47,6 +45,110 @@
                 <option value="dingtalk_granted">DingTalk-authorized users only</option>
               </select>
               <p class="meta-form-share__hint">{{ accessModeHint }}</p>
+            </div>
+
+            <div v-if="showAllowlistSection" class="meta-form-share__allowlist-section">
+              <div class="meta-form-share__allowlist-header">
+                <div>
+                  <label class="meta-form-share__label" for="meta-form-share-allowlist-search">Allowed system users and member groups</label>
+                  <p class="meta-form-share__hint">
+                    DingTalk is only the sign-in and delivery channel. The allowlist still targets your local users and member groups.
+                  </p>
+                </div>
+              </div>
+
+              <input
+                id="meta-form-share-allowlist-search"
+                v-model.trim="candidateQuery"
+                class="meta-form-share__input"
+                type="search"
+                placeholder="Search local users or member groups"
+                data-form-share-allowlist-search="true"
+                :disabled="busy"
+              />
+
+              <div class="meta-form-share__allowlist-subsection">
+                <label class="meta-form-share__label">Allowed users</label>
+                <div v-if="allowedUsers.length > 0" class="meta-form-share__chip-list">
+                  <span
+                    v-for="user in allowedUsers"
+                    :key="`user:${user.subjectId}`"
+                    class="meta-form-share__chip"
+                    :data-inactive="user.isActive ? 'false' : 'true'"
+                  >
+                    <span class="meta-form-share__chip-text">
+                      {{ user.label }}
+                      <span v-if="user.subtitle" class="meta-form-share__chip-subtitle">{{ user.subtitle }}</span>
+                      <span v-if="!user.isActive" class="meta-form-share__chip-subtitle">Inactive user</span>
+                    </span>
+                    <button
+                      class="meta-form-share__chip-remove"
+                      type="button"
+                      :disabled="busy"
+                      :data-form-share-remove-user="user.subjectId"
+                      @click="void removeAllowedSubject('user', user.subjectId)"
+                    >
+                      Remove
+                    </button>
+                  </span>
+                </div>
+                <div v-else class="meta-form-share__empty">No user allowlist. Any DingTalk user matching the selected access mode can fill this form.</div>
+              </div>
+
+              <div class="meta-form-share__allowlist-subsection">
+                <label class="meta-form-share__label">Allowed member groups</label>
+                <div v-if="allowedMemberGroups.length > 0" class="meta-form-share__chip-list">
+                  <span
+                    v-for="group in allowedMemberGroups"
+                    :key="`member-group:${group.subjectId}`"
+                    class="meta-form-share__chip"
+                    :data-inactive="group.isActive ? 'false' : 'true'"
+                  >
+                    <span class="meta-form-share__chip-text">
+                      {{ group.label }}
+                      <span v-if="group.subtitle" class="meta-form-share__chip-subtitle">{{ group.subtitle }}</span>
+                    </span>
+                    <button
+                      class="meta-form-share__chip-remove"
+                      type="button"
+                      :disabled="busy"
+                      :data-form-share-remove-group="group.subjectId"
+                      @click="void removeAllowedSubject('member-group', group.subjectId)"
+                    >
+                      Remove
+                    </button>
+                  </span>
+                </div>
+                <div v-else class="meta-form-share__empty">No member-group allowlist configured.</div>
+              </div>
+
+              <div class="meta-form-share__allowlist-subsection">
+                <label class="meta-form-share__label">Add from eligible people and groups</label>
+                <div v-if="candidatesLoading" class="meta-form-share__empty">Searching users and member groups&#x2026;</div>
+                <div v-else-if="filteredCandidates.length === 0" class="meta-form-share__empty">No matching candidates.</div>
+                <div v-else class="meta-form-share__candidate-list">
+                  <button
+                    v-for="candidate in filteredCandidates"
+                    :key="`${candidate.subjectType}:${candidate.subjectId}`"
+                    class="meta-form-share__candidate"
+                    type="button"
+                    :disabled="busy || (candidate.subjectType === 'user' && !candidate.isActive)"
+                    :data-form-share-add-subject="`${candidate.subjectType}:${candidate.subjectId}`"
+                    @click="void addAllowedSubject(candidate)"
+                  >
+                    <span class="meta-form-share__candidate-title">
+                      {{ candidate.label }}
+                      <span class="meta-form-share__candidate-badge">
+                        {{ candidate.subjectType === 'user' ? 'User' : 'Member group' }}
+                      </span>
+                    </span>
+                    <span v-if="candidate.subtitle" class="meta-form-share__candidate-subtitle">{{ candidate.subtitle }}</span>
+                    <span v-if="candidate.subjectType === 'user' && !candidate.isActive" class="meta-form-share__candidate-subtitle">
+                      Inactive users cannot be added
+                    </span>
+                  </button>
+                </div>
+              </div>
             </div>
 
             <div class="meta-form-share__link-section">
@@ -90,7 +192,6 @@
               </button>
             </div>
 
-            <!-- Expiry -->
             <div class="meta-form-share__expiry-section">
               <label class="meta-form-share__label">Expiry</label>
               <div class="meta-form-share__expiry-row">
@@ -121,8 +222,8 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch } from 'vue'
-import type { FormShareConfig } from '../types'
+import { computed, ref, watch } from 'vue'
+import type { FormShareConfig, MetaSheetPermissionCandidate } from '../types'
 import type { MultitableApiClient } from '../api/client'
 
 const props = defineProps<{
@@ -142,6 +243,10 @@ const loading = ref(false)
 const error = ref<string | null>(null)
 const busy = ref(false)
 const copied = ref(false)
+const candidateQuery = ref('')
+const candidates = ref<MetaSheetPermissionCandidate[]>([])
+const candidatesLoading = ref(false)
+let candidateTimer: number | null = null
 
 const statusLabel = computed(() => {
   if (!config.value) return 'Disabled'
@@ -162,16 +267,31 @@ const expiryDateValue = computed(() => {
   if (!config.value?.expiresAt) return ''
   return config.value.expiresAt.substring(0, 10)
 })
+
+const showAllowlistSection = computed(() =>
+  config.value?.enabled === true
+  && config.value.accessMode !== 'public',
+)
+
 const accessModeHint = computed(() => {
-  switch (config.value?.accessMode) {
-    case 'dingtalk':
-      return 'The form opens only after DingTalk sign-in, and the user must already be bound to a local account.'
-    case 'dingtalk_granted':
-      return 'The form opens only for DingTalk-bound users whose DingTalk grant is enabled by an administrator.'
-    default:
-      return 'Anyone who has the link can open and submit this form.'
+  if (config.value?.accessMode === 'dingtalk_granted') {
+    return 'The form opens only for DingTalk-bound users whose DingTalk grant is enabled by an administrator.'
   }
+  if (config.value?.accessMode === 'dingtalk') {
+    return 'The form opens only after DingTalk sign-in, and the user must already be bound to a local account.'
+  }
+  return 'Anyone who has the link can open and submit this form.'
 })
+
+const allowedUsers = computed(() => config.value?.allowedUsers ?? [])
+const allowedMemberGroups = computed(() => config.value?.allowedMemberGroups ?? [])
+const selectedSubjectKeys = computed(() => new Set([
+  ...allowedUsers.value.map((user) => `user:${user.subjectId}`),
+  ...allowedMemberGroups.value.map((group) => `member-group:${group.subjectId}`),
+]))
+const filteredCandidates = computed(() =>
+  candidates.value.filter((candidate) => !selectedSubjectKeys.value.has(`${candidate.subjectType}:${candidate.subjectId}`)),
+)
 
 async function loadConfig() {
   if (!props.client) return
@@ -184,6 +304,77 @@ async function loadConfig() {
   } finally {
     loading.value = false
   }
+}
+
+async function loadCandidates() {
+  if (!props.client || !props.visible || !showAllowlistSection.value) {
+    candidates.value = []
+    return
+  }
+  candidatesLoading.value = true
+  try {
+    const response = await props.client.listFormShareCandidates(props.sheetId, {
+      q: candidateQuery.value,
+      limit: 20,
+    })
+    candidates.value = response.items
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : 'Failed to load allowlist candidates'
+  } finally {
+    candidatesLoading.value = false
+  }
+}
+
+function scheduleCandidateLoad() {
+  if (candidateTimer !== null) window.clearTimeout(candidateTimer)
+  candidateTimer = window.setTimeout(() => {
+    void loadCandidates()
+  }, 180)
+}
+
+async function persistAllowlist(update: Pick<FormShareConfig, 'allowedUserIds' | 'allowedMemberGroupIds'>) {
+  if (!props.client || busy.value || !config.value) return
+  busy.value = true
+  error.value = null
+  try {
+    config.value = await props.client.updateFormShareConfig(props.sheetId, props.viewId, update)
+    emit('updated')
+    await loadCandidates()
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : 'Failed to update allowlist'
+  } finally {
+    busy.value = false
+  }
+}
+
+async function addAllowedSubject(candidate: MetaSheetPermissionCandidate) {
+  if (!config.value) return
+  if (candidate.subjectType === 'member-group') {
+    await persistAllowlist({
+      allowedUserIds: config.value.allowedUserIds,
+      allowedMemberGroupIds: Array.from(new Set([...config.value.allowedMemberGroupIds, candidate.subjectId])),
+    })
+    return
+  }
+  await persistAllowlist({
+    allowedUserIds: Array.from(new Set([...config.value.allowedUserIds, candidate.subjectId])),
+    allowedMemberGroupIds: config.value.allowedMemberGroupIds,
+  })
+}
+
+async function removeAllowedSubject(subjectType: 'user' | 'member-group', subjectId: string) {
+  if (!config.value) return
+  if (subjectType === 'member-group') {
+    await persistAllowlist({
+      allowedUserIds: config.value.allowedUserIds,
+      allowedMemberGroupIds: config.value.allowedMemberGroupIds.filter((id) => id !== subjectId),
+    })
+    return
+  }
+  await persistAllowlist({
+    allowedUserIds: config.value.allowedUserIds.filter((id) => id !== subjectId),
+    allowedMemberGroupIds: config.value.allowedMemberGroupIds,
+  })
 }
 
 async function onToggleEnabled() {
@@ -203,9 +394,17 @@ async function onToggleEnabled() {
 }
 
 async function onAccessModeChange(event: Event) {
-  if (!props.client || busy.value) return
+  if (!props.client || busy.value || !config.value) return
   const select = event.target as HTMLSelectElement | null
   if (!select) return
+  if (
+    select.value === 'public'
+    && (config.value.allowedUserIds.length > 0 || config.value.allowedMemberGroupIds.length > 0)
+  ) {
+    error.value = 'Clear the allowed users and member groups before switching back to a fully public form.'
+    select.value = config.value.accessMode
+    return
+  }
   busy.value = true
   error.value = null
   try {
@@ -213,6 +412,7 @@ async function onAccessModeChange(event: Event) {
       accessMode: select.value as FormShareConfig['accessMode'],
     })
     emit('updated')
+    await loadCandidates()
   } catch (err) {
     error.value = err instanceof Error ? err.message : 'Failed to update access mode'
   } finally {
@@ -293,6 +493,22 @@ watch(
   },
   { immediate: true },
 )
+
+watch(
+  () => [props.visible, props.sheetId, config.value?.enabled, config.value?.accessMode] as const,
+  ([isVisible]) => {
+    if (isVisible && showAllowlistSection.value) {
+      void loadCandidates()
+    } else {
+      candidates.value = []
+    }
+  },
+  { immediate: true },
+)
+
+watch(candidateQuery, () => {
+  if (showAllowlistSection.value) scheduleCandidateLoad()
+})
 </script>
 
 <style scoped>
@@ -310,7 +526,7 @@ watch(
   background: #fff;
   border-radius: 14px;
   box-shadow: 0 8px 32px rgba(0, 0, 0, 0.18);
-  width: 520px;
+  width: 560px;
   max-width: 95vw;
   max-height: 85vh;
   display: flex;
@@ -411,11 +627,111 @@ watch(
 }
 
 .meta-form-share__auth-section,
+.meta-form-share__allowlist-section,
 .meta-form-share__link-section,
 .meta-form-share__expiry-section {
   display: flex;
   flex-direction: column;
   gap: 6px;
+}
+
+.meta-form-share__allowlist-section {
+  padding: 12px;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  background: #f8fafc;
+}
+
+.meta-form-share__allowlist-header,
+.meta-form-share__allowlist-subsection {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.meta-form-share__chip-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.meta-form-share__chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-radius: 999px;
+  background: #e2e8f0;
+  color: #0f172a;
+}
+
+.meta-form-share__chip[data-inactive="true"] {
+  background: #fee2e2;
+}
+
+.meta-form-share__chip-text {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.meta-form-share__chip-subtitle {
+  font-weight: 500;
+  color: #64748b;
+}
+
+.meta-form-share__chip-remove {
+  border: none;
+  background: transparent;
+  color: #0f172a;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.meta-form-share__candidate-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.meta-form-share__candidate {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  width: 100%;
+  border: 1px solid #cbd5e1;
+  border-radius: 10px;
+  background: #fff;
+  padding: 10px 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.meta-form-share__candidate-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #0f172a;
+}
+
+.meta-form-share__candidate-badge {
+  border-radius: 999px;
+  padding: 2px 8px;
+  background: #dbeafe;
+  color: #1d4ed8;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.meta-form-share__candidate-subtitle {
+  font-size: 12px;
+  color: #64748b;
 }
 
 .meta-form-share__link-row,
@@ -450,7 +766,9 @@ watch(
   cursor: pointer;
 }
 
-.meta-form-share__btn:disabled {
+.meta-form-share__btn:disabled,
+.meta-form-share__candidate:disabled,
+.meta-form-share__chip-remove:disabled {
   opacity: 0.55;
   cursor: not-allowed;
 }

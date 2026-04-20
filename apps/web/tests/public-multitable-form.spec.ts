@@ -167,4 +167,31 @@ describe('PublicMultitableFormView', () => {
     )
     expect(container.textContent).toContain('Redirecting to DingTalk sign-in…')
   })
+
+  it('shows an allowlist message when the DingTalk user is not selected for the form', async () => {
+    loadFormContextSpy.mockRejectedValue(Object.assign(new Error('Only selected system users or member groups can access this form'), {
+      code: 'DINGTALK_FORM_NOT_ALLOWED',
+    }))
+
+    const { default: PublicMultitableFormView } = await import('../src/views/PublicMultitableFormView.vue')
+
+    container = document.createElement('div')
+    document.body.appendChild(container)
+
+    const Root = defineComponent({
+      render() {
+        return h(PublicMultitableFormView, {
+          sheetId: 'sheet_orders',
+          viewId: 'view_form',
+          publicToken: 'pub_123',
+        })
+      },
+    })
+
+    app = createApp(Root)
+    app.mount(container)
+    await flushUi()
+
+    expect(container.textContent).toContain('This form only accepts selected system users or member groups.')
+  })
 })
