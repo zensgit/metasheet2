@@ -1,4 +1,8 @@
 import { EventEmitter } from 'events'
+import type {
+  CircuitBreakerStore,
+  CircuitBreakerThresholds,
+} from './circuit-breaker-store'
 
 export interface CircuitBreakerConfig {
   timeout?: number         // Request timeout in ms
@@ -34,6 +38,17 @@ interface RequestRecord {
   error?: Error
 }
 
+export interface CircuitBreakerRuntimeOptions {
+  /**
+   * Optional pluggable store for cross-process state (typically
+   * `RedisCircuitBreakerStore`). When omitted, the breaker behaves
+   * exactly like the legacy in-process implementation.
+   */
+  store?: CircuitBreakerStore
+  /** Circuit identifier when using a shared store. Default: 'default'. */
+  id?: string
+}
+
 export class CircuitBreaker extends EventEmitter {
   private config: Required<CircuitBreakerConfig>
   private state: CircuitState = CircuitState.CLOSED
@@ -43,8 +58,13 @@ export class CircuitBreaker extends EventEmitter {
   private halfOpenRequests: number = 0
   private metrics: CircuitMetrics
   private cleanupTimer: NodeJS.Timeout
+  private readonly store: CircuitBreakerStore | null
+  private readonly circuitId: string
 
-  constructor(config: CircuitBreakerConfig = {}) {
+  constructor(
+    config: CircuitBreakerConfig = {},
+    runtime: CircuitBreakerRuntimeOptions = {},
+  ) {
     super()
 
     this.config = {
@@ -55,6 +75,9 @@ export class CircuitBreaker extends EventEmitter {
       windowSize: config.windowSize || 10000,
       halfOpenRequests: config.halfOpenRequests || 3
     }
+
+    this.store = runtime.store ?? null
+    this.circuitId = runtime.id ?? 'default'
 
     this.metrics = {
       requests: 0,
@@ -69,6 +92,56 @@ export class CircuitBreaker extends EventEmitter {
 
     // Clean up old records periodically
     this.cleanupTimer = setInterval(() => this.cleanupWindow(), 1000)
+  }
+
+  private thresholds(): CircuitBreakerThresholds {
+    return {
+      errorThreshold: this.config.errorThreshold,
+      volumeThreshold: this.config.volumeThreshold,
+      windowSizeMs: this.config.windowSize,
+      resetTimeoutMs: this.config.resetTimeout,
+    }
+  }
+
+  /**
+   * Read (and possibly refresh) the circuit state via the configured
+   * store. Returns the in-process state when no store is attached.
+   */
+  async refreshSharedState(): Promise<CircuitState> {
+    if (!this.store) return this.state
+    const snap = await this.store.checkAndUpdate(
+      this.circuitId,
+      this.thresholds(),
+    )
+    if (snap.state !== this.state) {
+      const from = this.state
+      this.state = snap.state
+      this.stateChangedAt = new Date(snap.lastTransitionAt || Date.now())
+      this.metrics.state = snap.state
+      this.metrics.stateChangedAt = this.stateChangedAt
+      this.metrics.nextAttempt =
+        snap.nextAttemptAt > 0 ? new Date(snap.nextAttemptAt) : undefined
+      this.emit('stateChange', { from, to: snap.state })
+    }
+    return this.state
+  }
+
+  /** Record a success/failure through the shared store (no-op if none). */
+  async reportToStore(success: boolean): Promise<void> {
+    if (!this.store) return
+    const snap = success
+      ? await this.store.recordSuccess(this.circuitId, this.thresholds())
+      : await this.store.recordFailure(this.circuitId, this.thresholds())
+    if (snap.state !== this.state) {
+      const from = this.state
+      this.state = snap.state
+      this.stateChangedAt = new Date(snap.lastTransitionAt || Date.now())
+      this.metrics.state = snap.state
+      this.metrics.stateChangedAt = this.stateChangedAt
+      this.metrics.nextAttempt =
+        snap.nextAttemptAt > 0 ? new Date(snap.nextAttemptAt) : undefined
+      this.emit('stateChange', { from, to: snap.state })
+    }
   }
 
   async execute<T>(fn: () => Promise<T>): Promise<T> {
