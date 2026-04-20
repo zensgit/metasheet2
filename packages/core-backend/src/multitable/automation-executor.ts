@@ -74,7 +74,7 @@ function normalizeUserIds(value: unknown): string[] {
   ))
 }
 
-function normalizeUserIdScalar(value: unknown): string[] {
+function normalizeIdScalar(value: unknown, objectKeys: string[]): string[] {
   if (typeof value === 'string') {
     return value
       .split(/[\n,]+/)
@@ -86,13 +86,21 @@ function normalizeUserIdScalar(value: unknown): string[] {
   }
   if (typeof value === 'object' && value && !Array.isArray(value)) {
     const record = value as Record<string, unknown>
-    for (const key of ['localUserId', 'userId', 'id', 'value']) {
+    for (const key of objectKeys) {
       const candidate = record[key]
       if (typeof candidate === 'string' && candidate.trim()) return [candidate.trim()]
       if (typeof candidate === 'number' && Number.isFinite(candidate)) return [String(candidate)]
     }
   }
   return []
+}
+
+function normalizeUserIdScalar(value: unknown): string[] {
+  return normalizeIdScalar(value, ['localUserId', 'userId', 'id', 'value'])
+}
+
+function normalizeMemberGroupIdScalar(value: unknown): string[] {
+  return normalizeIdScalar(value, ['memberGroupId', 'groupId', 'subjectId', 'id', 'value'])
 }
 
 function normalizeUserIdsFromUnknown(value: unknown): string[] {
@@ -102,6 +110,15 @@ function normalizeUserIdsFromUnknown(value: unknown): string[] {
     ))
   }
   return normalizeUserIdScalar(value)
+}
+
+function normalizeMemberGroupIdsFromUnknown(value: unknown): string[] {
+  if (Array.isArray(value)) {
+    return Array.from(new Set(
+      value.flatMap((entry) => normalizeMemberGroupIdsFromUnknown(entry)),
+    ))
+  }
+  return normalizeMemberGroupIdScalar(value)
 }
 
 function normalizeRecipientFieldPath(value: unknown): string {
@@ -135,6 +152,16 @@ function resolveRecipientUserIdsFromRecord(recordData: Record<string, unknown>, 
       const normalizedPath = normalizeRecipientFieldPath(fieldPath)
       if (!normalizedPath) return []
       return normalizeUserIdsFromUnknown(lookupTemplateValue(normalizedPath, recordData))
+    }),
+  ))
+}
+
+function resolveRecipientMemberGroupIdsFromRecord(recordData: Record<string, unknown>, fieldPaths: unknown[]): string[] {
+  return Array.from(new Set(
+    fieldPaths.flatMap((fieldPath) => {
+      const normalizedPath = normalizeRecipientFieldPath(fieldPath)
+      if (!normalizedPath) return []
+      return normalizeMemberGroupIdsFromUnknown(lookupTemplateValue(normalizedPath, recordData))
     }),
   ))
 }
@@ -665,9 +692,12 @@ export class AutomationExecutor {
     context: ExecutionContext,
   ): Promise<AutomationStepResult> {
     const staticUserIds = normalizeUserIds(config.userIds)
-    const memberGroupIds = normalizeUserIds(config.memberGroupIds)
+    const staticMemberGroupIds = normalizeUserIds(config.memberGroupIds)
     const recipientFieldPaths = normalizeRecipientFieldPaths(config.userIdFieldPath, config.userIdFieldPaths)
+    const memberGroupRecipientFieldPaths = normalizeRecipientFieldPaths(config.memberGroupIdFieldPath, config.memberGroupIdFieldPaths)
     const recordUserIds = resolveRecipientUserIdsFromRecord(context.recordData, recipientFieldPaths)
+    const recordMemberGroupIds = resolveRecipientMemberGroupIdsFromRecord(context.recordData, memberGroupRecipientFieldPaths)
+    const memberGroupIds = Array.from(new Set([...staticMemberGroupIds, ...recordMemberGroupIds]))
     const titleTemplate = typeof config.titleTemplate === 'string' ? config.titleTemplate.trim() : ''
     const bodyTemplate = typeof config.bodyTemplate === 'string' ? config.bodyTemplate.trim() : ''
     const publicFormViewId = typeof config.publicFormViewId === 'string' ? config.publicFormViewId.trim() : ''
@@ -794,6 +824,13 @@ export class AutomationExecutor {
     const userIds = Array.from(new Set([...staticUserIds, ...memberGroupUserIds, ...recordUserIds]))
     if (userIds.length === 0) {
       if (memberGroupIds.length > 0) {
+        if (memberGroupRecipientFieldPaths.length > 0) {
+          return {
+            actionType: 'send_dingtalk_person_message',
+            status: 'failed',
+            error: `No local userIds resolved from member group record field paths: ${memberGroupRecipientFieldPaths.join(', ')}`,
+          }
+        }
         return {
           actionType: 'send_dingtalk_person_message',
           status: 'failed',
@@ -807,10 +844,17 @@ export class AutomationExecutor {
           error: `No local userIds resolved from record field paths: ${recipientFieldPaths.join(', ')}`,
         }
       }
+      if (memberGroupRecipientFieldPaths.length > 0) {
+        return {
+          actionType: 'send_dingtalk_person_message',
+          status: 'failed',
+          error: `No local userIds resolved from member group record field paths: ${memberGroupRecipientFieldPaths.join(', ')}`,
+        }
+      }
       return {
         actionType: 'send_dingtalk_person_message',
         status: 'failed',
-        error: 'At least one local userId, memberGroupId, or record recipient field path is required',
+        error: 'At least one local userId, memberGroupId, record recipient field path, or member group record field path is required',
       }
     }
 
@@ -910,9 +954,12 @@ export class AutomationExecutor {
           staticRecipientCount: staticUserIds.length,
           memberGroupRecipientCount: memberGroupUserIds.length,
           dynamicRecipientCount: recordUserIds.length,
+          dynamicMemberGroupRecipientCount: recordMemberGroupIds.length,
           memberGroupIds,
           recipientFieldPath: recipientFieldPaths[0] ?? null,
           recipientFieldPaths,
+          memberGroupRecipientFieldPath: memberGroupRecipientFieldPaths[0] ?? null,
+          memberGroupRecipientFieldPaths,
           batchCount: batches.length,
           linkCount: linkLines.length,
           responseCount,

@@ -451,6 +451,17 @@
               <div class="meta-rule-editor__hint">
                 Record data is keyed by field ID. Use comma or newline separated <code>record.&lt;fieldId&gt;</code> paths. The picker only lists user fields.
               </div>
+              <label class="meta-rule-editor__label">Record member group field paths (optional)</label>
+              <input
+                v-model="action.config.memberGroupRecipientFieldPath"
+                class="meta-rule-editor__input"
+                type="text"
+                placeholder="例如：record.watcherGroupIds, record.escalationGroupId"
+                data-field="dingtalkPersonMemberGroupRecipientFieldPath"
+              />
+              <div class="meta-rule-editor__hint">
+                Use comma or newline separated <code>record.&lt;fieldId&gt;</code> paths whose values resolve to member group IDs.
+              </div>
               <label class="meta-rule-editor__label">Title template</label>
               <input
                 v-model="action.config.titleTemplate"
@@ -529,6 +540,7 @@
                 <div class="meta-rule-editor__preview-title">Message summary</div>
                 <div><strong>Recipients:</strong> {{ personRecipientSummary(action) }}</div>
                 <div><strong>Record recipients:</strong> {{ recipientFieldPathSummary(action.config.recipientFieldPath) }}</div>
+                <div><strong>Record member groups:</strong> {{ recipientFieldPathSummary(action.config.memberGroupRecipientFieldPath) }}</div>
                 <div><strong>Title template:</strong> {{ templatePreviewText(action.config.titleTemplate, 'No title template') }}</div>
                 <div class="meta-rule-editor__preview-body"><strong>Body template:</strong> {{ templatePreviewText(action.config.bodyTemplate, 'No body template') }}</div>
                 <div class="meta-rule-editor__preview-line">
@@ -627,6 +639,7 @@ type DraftActionConfig = Record<string, unknown> & {
   memberGroupIdsText?: string
   userIdsSearch?: string
   recipientFieldPath?: string
+  memberGroupRecipientFieldPath?: string
   message?: string
   destinationId?: string
   destinationIds?: string[]
@@ -732,6 +745,11 @@ function draftConfigFromAction(type: AutomationActionType, config: Record<string
         : typeof config.userIdFieldPath === 'string'
           ? config.userIdFieldPath
           : '',
+      memberGroupRecipientFieldPath: Array.isArray(config.memberGroupIdFieldPaths)
+        ? config.memberGroupIdFieldPaths.join(', ')
+        : typeof config.memberGroupIdFieldPath === 'string'
+          ? config.memberGroupIdFieldPath
+          : '',
       userIdsSearch: '',
     }
   }
@@ -794,9 +812,12 @@ const canSave = computed(() => {
       const userIdsText = typeof action.config.userIdsText === 'string' ? action.config.userIdsText.trim() : ''
       const memberGroupIdsText = typeof action.config.memberGroupIdsText === 'string' ? action.config.memberGroupIdsText.trim() : ''
       const recipientFieldPath = typeof action.config.recipientFieldPath === 'string' ? action.config.recipientFieldPath.trim() : ''
+      const memberGroupRecipientFieldPath = typeof action.config.memberGroupRecipientFieldPath === 'string'
+        ? action.config.memberGroupRecipientFieldPath.trim()
+        : ''
       const titleTemplate = typeof action.config.titleTemplate === 'string' ? action.config.titleTemplate.trim() : ''
       const bodyTemplate = typeof action.config.bodyTemplate === 'string' ? action.config.bodyTemplate.trim() : ''
-      if ((!userIdsText && !memberGroupIdsText && !recipientFieldPath) || !titleTemplate || !bodyTemplate) return false
+      if ((!userIdsText && !memberGroupIdsText && !recipientFieldPath && !memberGroupRecipientFieldPath) || !titleTemplate || !bodyTemplate) return false
     }
   }
   return true
@@ -1173,6 +1194,7 @@ function defaultConfigForActionType(type: AutomationActionType): DraftActionConf
         memberGroupIdsText: '',
         userIdsSearch: '',
         recipientFieldPath: '',
+        memberGroupRecipientFieldPath: '',
         titleTemplate: '',
         bodyTemplate: '',
         publicFormViewId: '',
@@ -1258,13 +1280,17 @@ function buildPayload(): Partial<AutomationRule> {
         : []
       const userIdFieldPaths = parseRecipientFieldPathsText(action.config.recipientFieldPath)
         .map((path) => `record.${path}`)
+      const memberGroupIdFieldPaths = parseRecipientFieldPathsText(action.config.memberGroupRecipientFieldPath)
+        .map((path) => `record.${path}`)
       return {
         type: action.type,
         config: {
           userIds,
           memberGroupIds: memberGroupIds.length ? memberGroupIds : undefined,
-          userIdFieldPath: userIdFieldPaths[0] || undefined,
-          userIdFieldPaths: userIdFieldPaths.length ? userIdFieldPaths : undefined,
+          ...(userIdFieldPaths[0] ? { userIdFieldPath: userIdFieldPaths[0] } : {}),
+          ...(userIdFieldPaths.length ? { userIdFieldPaths } : {}),
+          ...(memberGroupIdFieldPaths[0] ? { memberGroupIdFieldPath: memberGroupIdFieldPaths[0] } : {}),
+          ...(memberGroupIdFieldPaths.length ? { memberGroupIdFieldPaths } : {}),
           titleTemplate: typeof action.config.titleTemplate === 'string' ? action.config.titleTemplate.trim() : '',
           bodyTemplate: typeof action.config.bodyTemplate === 'string' ? action.config.bodyTemplate.trim() : '',
           publicFormViewId: typeof action.config.publicFormViewId === 'string' && action.config.publicFormViewId.trim()

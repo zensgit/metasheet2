@@ -327,6 +327,17 @@
             <div class="meta-automation__hint">
               Record data is keyed by field ID. Use comma or newline separated <code>record.&lt;fieldId&gt;</code> paths. The picker only lists user fields.
             </div>
+            <label class="meta-automation__label">Record member group field paths (optional)</label>
+            <input
+              v-model="draft.dingtalkPersonMemberGroupRecipientFieldPath"
+              class="meta-automation__input"
+              type="text"
+              placeholder="例如：record.watcherGroupIds, record.escalationGroupId"
+              data-automation-field="dingtalkPersonMemberGroupRecipientFieldPath"
+            />
+            <div class="meta-automation__hint">
+              Use comma or newline separated <code>record.&lt;fieldId&gt;</code> paths whose values resolve to member group IDs.
+            </div>
             <label class="meta-automation__label">Title template</label>
             <input
               v-model="draft.dingtalkPersonTitleTemplate"
@@ -397,6 +408,7 @@
               <div class="meta-automation__preview-title">Message summary</div>
               <div><strong>Recipients:</strong> {{ dingTalkPersonRecipientSummary }}</div>
               <div><strong>Record recipients:</strong> {{ dingTalkPersonRecipientFieldSummary }}</div>
+              <div><strong>Record member groups:</strong> {{ dingTalkPersonMemberGroupFieldSummary }}</div>
               <div><strong>Title template:</strong> {{ templatePreviewText(draft.dingtalkPersonTitleTemplate, 'No title template') }}</div>
               <div class="meta-automation__preview-body"><strong>Body template:</strong> {{ templatePreviewText(draft.dingtalkPersonBodyTemplate, 'No body template') }}</div>
               <div class="meta-automation__preview-line">
@@ -592,6 +604,7 @@ interface DraftState {
   dingtalkPersonUserIds: string
   dingtalkPersonMemberGroupIds: string
   dingtalkPersonRecipientFieldPath: string
+  dingtalkPersonMemberGroupRecipientFieldPath: string
   dingtalkPersonTitleTemplate: string
   dingtalkPersonBodyTemplate: string
   dingtalkPersonPublicFormViewId: string
@@ -616,6 +629,7 @@ function emptyDraft(): DraftState {
     dingtalkPersonUserIds: '',
     dingtalkPersonMemberGroupIds: '',
     dingtalkPersonRecipientFieldPath: '',
+    dingtalkPersonMemberGroupRecipientFieldPath: '',
     dingtalkPersonTitleTemplate: '',
     dingtalkPersonBodyTemplate: '',
     dingtalkPersonPublicFormViewId: '',
@@ -881,6 +895,14 @@ const dingTalkPersonRecipientFieldSummary = computed(() => {
   return labels.join(', ')
 })
 
+const dingTalkPersonMemberGroupFieldSummary = computed(() => {
+  const labels = parseRecipientFieldPathsText(draft.value.dingtalkPersonMemberGroupRecipientFieldPath)
+    .map((path) => recipientFieldSummaryLabel(path))
+    .filter(Boolean)
+  if (!labels.length) return 'No dynamic member group field'
+  return labels.join(', ')
+})
+
 function appendDingTalkPersonRecipientField(select: HTMLSelectElement) {
   const value = select.value.trim()
   if (!value) return
@@ -1041,6 +1063,7 @@ const canSave = computed(() => {
       !draft.value.dingtalkPersonUserIds.trim()
       && !draft.value.dingtalkPersonMemberGroupIds.trim()
       && !draft.value.dingtalkPersonRecipientFieldPath.trim()
+      && !draft.value.dingtalkPersonMemberGroupRecipientFieldPath.trim()
     ) return false
     if (!draft.value.dingtalkPersonTitleTemplate.trim()) return false
     if (!draft.value.dingtalkPersonBodyTemplate.trim()) return false
@@ -1078,6 +1101,9 @@ function openEditForm(rule: AutomationRule) {
     dingtalkPersonRecipientFieldPath: Array.isArray(rule.actionConfig?.userIdFieldPaths)
       ? (rule.actionConfig?.userIdFieldPaths as string[]).join(', ')
       : (rule.actionConfig?.userIdFieldPath as string) ?? '',
+    dingtalkPersonMemberGroupRecipientFieldPath: Array.isArray(rule.actionConfig?.memberGroupIdFieldPaths)
+      ? (rule.actionConfig?.memberGroupIdFieldPaths as string[]).join(', ')
+      : (rule.actionConfig?.memberGroupIdFieldPath as string) ?? '',
     dingtalkPersonTitleTemplate: (rule.actionConfig?.titleTemplate as string) ?? '',
     dingtalkPersonBodyTemplate: (rule.actionConfig?.bodyTemplate as string) ?? '',
     dingtalkPersonPublicFormViewId: (rule.actionConfig?.publicFormViewId as string) ?? '',
@@ -1130,6 +1156,8 @@ function buildActionConfig(): Record<string, unknown> {
       .filter(Boolean)
     const userIdFieldPaths = parseRecipientFieldPathsText(draft.value.dingtalkPersonRecipientFieldPath)
       .map((path) => `record.${path}`)
+    const memberGroupIdFieldPaths = parseRecipientFieldPathsText(draft.value.dingtalkPersonMemberGroupRecipientFieldPath)
+      .map((path) => `record.${path}`)
     return {
       userIds: draft.value.dingtalkPersonUserIds
         .split(/[\n,]+/)
@@ -1138,6 +1166,8 @@ function buildActionConfig(): Record<string, unknown> {
       memberGroupIds: memberGroupIds.length ? memberGroupIds : undefined,
       userIdFieldPath: userIdFieldPaths[0] || undefined,
       userIdFieldPaths: userIdFieldPaths.length ? userIdFieldPaths : undefined,
+      memberGroupIdFieldPath: memberGroupIdFieldPaths[0] || undefined,
+      memberGroupIdFieldPaths: memberGroupIdFieldPaths.length ? memberGroupIdFieldPaths : undefined,
       titleTemplate: draft.value.dingtalkPersonTitleTemplate,
       bodyTemplate: draft.value.dingtalkPersonBodyTemplate,
       publicFormViewId: draft.value.dingtalkPersonPublicFormViewId || undefined,
