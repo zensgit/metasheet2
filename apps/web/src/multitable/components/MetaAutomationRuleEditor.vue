@@ -282,8 +282,10 @@
               <div class="meta-rule-editor__preview" data-field="groupMessageSummary">
                 <div class="meta-rule-editor__preview-title">Message summary</div>
                 <div><strong>Group:</strong> {{ dingTalkGroupName(action.config.destinationId) }}</div>
-                <div><strong>Title:</strong> {{ templatePreviewText(action.config.titleTemplate, 'No title template') }}</div>
-                <div class="meta-rule-editor__preview-body"><strong>Body:</strong> {{ templatePreviewText(action.config.bodyTemplate, 'No body template') }}</div>
+                <div><strong>Title template:</strong> {{ templatePreviewText(action.config.titleTemplate, 'No title template') }}</div>
+                <div class="meta-rule-editor__preview-body"><strong>Body template:</strong> {{ templatePreviewText(action.config.bodyTemplate, 'No body template') }}</div>
+                <div><strong>Rendered title:</strong> {{ renderedTemplateExample(action.config.titleTemplate, 'No rendered title') }}</div>
+                <div class="meta-rule-editor__preview-body"><strong>Rendered body:</strong> {{ renderedTemplateExample(action.config.bodyTemplate, 'No rendered body') }}</div>
                 <div><strong>Public form:</strong> {{ viewSummaryName(action.config.publicFormViewId, 'No public form link') }}</div>
                 <div><strong>Internal processing:</strong> {{ viewSummaryName(action.config.internalViewId, 'No internal link') }}</div>
               </div>
@@ -421,8 +423,10 @@
               <div class="meta-rule-editor__preview" data-field="personMessageSummary">
                 <div class="meta-rule-editor__preview-title">Message summary</div>
                 <div><strong>Recipients:</strong> {{ personRecipientSummary(action) }}</div>
-                <div><strong>Title:</strong> {{ templatePreviewText(action.config.titleTemplate, 'No title template') }}</div>
-                <div class="meta-rule-editor__preview-body"><strong>Body:</strong> {{ templatePreviewText(action.config.bodyTemplate, 'No body template') }}</div>
+                <div><strong>Title template:</strong> {{ templatePreviewText(action.config.titleTemplate, 'No title template') }}</div>
+                <div class="meta-rule-editor__preview-body"><strong>Body template:</strong> {{ templatePreviewText(action.config.bodyTemplate, 'No body template') }}</div>
+                <div><strong>Rendered title:</strong> {{ renderedTemplateExample(action.config.titleTemplate, 'No rendered title') }}</div>
+                <div class="meta-rule-editor__preview-body"><strong>Rendered body:</strong> {{ renderedTemplateExample(action.config.bodyTemplate, 'No rendered body') }}</div>
                 <div><strong>Public form:</strong> {{ viewSummaryName(action.config.publicFormViewId, 'No public form link') }}</div>
                 <div><strong>Internal processing:</strong> {{ viewSummaryName(action.config.internalViewId, 'No internal link') }}</div>
               </div>
@@ -479,6 +483,7 @@ import {
   DINGTALK_TITLE_TEMPLATE_TOKENS,
 } from '../utils/dingtalkNotificationTemplateTokens'
 import { listDingTalkTemplateSyntaxWarnings } from '../utils/dingtalkNotificationTemplateLint'
+import { renderDingTalkTemplateExample } from '../utils/dingtalkNotificationTemplateExample'
 
 interface FieldPair {
   fieldId: string
@@ -754,6 +759,12 @@ function viewSummaryName(viewId: unknown, fallback: string) {
 
 function templatePreviewText(value: unknown, fallback: string) {
   return typeof value === 'string' && value.trim() ? value.trim() : fallback
+}
+
+function renderedTemplateExample(value: unknown, fallback: string) {
+  if (typeof value !== 'string' || !value.trim()) return fallback
+  const rendered = renderDingTalkTemplateExample(value).trim()
+  return rendered || fallback
 }
 
 function personRecipientSummary(action: DraftAction) {
