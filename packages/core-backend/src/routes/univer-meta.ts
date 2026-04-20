@@ -32,6 +32,7 @@ import { validateRecord, getDefaultValidationRules } from '../multitable/field-v
 import type { FieldValidationConfig } from '../multitable/field-validation'
 import { conditionalPublicRateLimiter, publicFormContextLimiter, publicFormSubmitLimiter } from '../middleware/rate-limiter'
 import { getAutomationServiceInstance } from '../multitable/automation-service'
+import { listAutomationDingTalkGroupDeliveries } from '../multitable/dingtalk-group-delivery-service'
 import { listAutomationDingTalkPersonDeliveries } from '../multitable/dingtalk-person-delivery-service'
 import {
   publishMultitableSheetRealtime as publishMultitableSheetRealtimeShared,
@@ -7810,6 +7811,37 @@ export function univerMetaRouter(): Router {
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
       console.error('[univer-meta] list dingtalk person deliveries failed:', err)
       return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to list DingTalk person deliveries' } })
+    }
+  })
+
+  router.get('/sheets/:sheetId/automations/:ruleId/dingtalk-group-deliveries', async (req: Request, res: Response) => {
+    const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId : ''
+    const ruleId = typeof req.params.ruleId === 'string' ? req.params.ruleId : ''
+    if (!sheetId || !ruleId) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId and ruleId are required' } })
+    }
+    try {
+      const pool = poolManager.get()
+      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      if (!capabilities.canManageAutomation) return sendForbidden(res)
+      const automationService = getAutomationServiceInstance()
+      if (!automationService) {
+        return res.status(503).json({ ok: false, error: { code: 'SERVICE_UNAVAILABLE', message: 'Automation service is not available' } })
+      }
+
+      const rule = await automationService.getRule(ruleId)
+      if (!rule || rule.sheet_id !== sheetId) {
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Automation rule not found' } })
+      }
+
+      const limit = Math.min(Math.max(Number(req.query.limit) || 50, 1), 200)
+      const deliveries = await listAutomationDingTalkGroupDeliveries(pool.query.bind(pool), ruleId, limit)
+      return res.json({ ok: true, data: { deliveries } })
+    } catch (err) {
+      const hint = getDbNotReadyMessage(err)
+      if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
+      console.error('[univer-meta] list dingtalk group deliveries failed:', err)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to list DingTalk group deliveries' } })
     }
   })
 

@@ -1165,6 +1165,14 @@ export class MultitableApiClient {
     return Array.isArray(data?.deliveries) ? data.deliveries : []
   }
 
+  async getAutomationDingTalkGroupDeliveries(sheetId: string, ruleId: string, limit?: number): Promise<DingTalkGroupDelivery[]> {
+    const res = await this.fetch(
+      `/api/multitable/sheets/${encodeURIComponent(sheetId)}/automations/${encodeURIComponent(ruleId)}/dingtalk-group-deliveries${qs({ limit })}`,
+    )
+    const data = await parseJson<{ deliveries: DingTalkGroupDelivery[] }>(res)
+    return Array.isArray(data?.deliveries) ? data.deliveries : []
+  }
+
   // --- Charts ---
   async listCharts(sheetId: string): Promise<ChartConfig[]> {
     const res = await this.fetch(`/api/multitable/sheets/${encodeURIComponent(sheetId)}/charts`)
