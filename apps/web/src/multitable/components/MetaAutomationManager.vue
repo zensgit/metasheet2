@@ -94,6 +94,13 @@
               placeholder="例如：{{record.title}} 待处理"
               data-automation-field="dingtalkTitleTemplate"
             />
+            <div
+              v-for="warning in templateSyntaxWarnings(draft.dingtalkTitleTemplate)"
+              :key="`draft-group-title-${warning}`"
+              class="meta-automation__hint meta-automation__hint--warning"
+            >
+              {{ warning }}
+            </div>
             <div class="meta-automation__preset-row">
               <span class="meta-automation__preset-label">Template tokens</span>
               <button
@@ -115,6 +122,13 @@
               placeholder="支持 {{record.xxx}}、{{recordId}}、{{sheetId}}、{{actorId}}"
               data-automation-field="dingtalkBodyTemplate"
             ></textarea>
+            <div
+              v-for="warning in templateSyntaxWarnings(draft.dingtalkBodyTemplate)"
+              :key="`draft-group-body-${warning}`"
+              class="meta-automation__hint meta-automation__hint--warning"
+            >
+              {{ warning }}
+            </div>
             <div class="meta-automation__preset-row">
               <span class="meta-automation__preset-label">Template tokens</span>
               <button
@@ -210,6 +224,13 @@
               placeholder="例如：{{record.title}} 待处理"
               data-automation-field="dingtalkPersonTitleTemplate"
             />
+            <div
+              v-for="warning in templateSyntaxWarnings(draft.dingtalkPersonTitleTemplate)"
+              :key="`draft-person-title-${warning}`"
+              class="meta-automation__hint meta-automation__hint--warning"
+            >
+              {{ warning }}
+            </div>
             <div class="meta-automation__preset-row">
               <span class="meta-automation__preset-label">Template tokens</span>
               <button
@@ -231,6 +252,13 @@
               placeholder="支持 {{record.xxx}}、{{recordId}}、{{sheetId}}、{{actorId}}"
               data-automation-field="dingtalkPersonBodyTemplate"
             ></textarea>
+            <div
+              v-for="warning in templateSyntaxWarnings(draft.dingtalkPersonBodyTemplate)"
+              :key="`draft-person-body-${warning}`"
+              class="meta-automation__hint meta-automation__hint--warning"
+            >
+              {{ warning }}
+            </div>
             <div class="meta-automation__preset-row">
               <span class="meta-automation__preset-label">Template tokens</span>
               <button
@@ -391,6 +419,7 @@ import {
   DINGTALK_BODY_TEMPLATE_TOKENS,
   DINGTALK_TITLE_TEMPLATE_TOKENS,
 } from '../utils/dingtalkNotificationTemplateTokens'
+import { listDingTalkTemplateSyntaxWarnings } from '../utils/dingtalkNotificationTemplateLint'
 
 const props = defineProps<{
   visible: boolean
@@ -558,6 +587,10 @@ const dingTalkPersonRecipientSummary = computed(() => {
   if (!selectedDingTalkPersonRecipients.value.length) return 'No recipients selected'
   return selectedDingTalkPersonRecipients.value.map((item) => item.label).join(', ')
 })
+
+function templateSyntaxWarnings(value: string) {
+  return listDingTalkTemplateSyntaxWarnings(value)
+}
 
 function applyGroupPreset(preset: DingTalkNotificationPreset) {
   const next = applyDingTalkNotificationPreset(
@@ -978,6 +1011,10 @@ watch(
 
 .meta-automation__hint--error {
   color: #b91c1c;
+}
+
+.meta-automation__hint--warning {
+  color: #b45309;
 }
 
 .meta-automation__input,
