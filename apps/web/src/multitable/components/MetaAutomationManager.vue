@@ -155,8 +155,10 @@
             <div class="meta-automation__preview" data-automation-summary="group">
               <div class="meta-automation__preview-title">Message summary</div>
               <div><strong>Group:</strong> {{ dingTalkGroupName(draft.dingtalkDestinationId) }}</div>
-              <div><strong>Title:</strong> {{ templatePreviewText(draft.dingtalkTitleTemplate, 'No title template') }}</div>
-              <div class="meta-automation__preview-body"><strong>Body:</strong> {{ templatePreviewText(draft.dingtalkBodyTemplate, 'No body template') }}</div>
+              <div><strong>Title template:</strong> {{ templatePreviewText(draft.dingtalkTitleTemplate, 'No title template') }}</div>
+              <div class="meta-automation__preview-body"><strong>Body template:</strong> {{ templatePreviewText(draft.dingtalkBodyTemplate, 'No body template') }}</div>
+              <div><strong>Rendered title:</strong> {{ renderedTemplateExample(draft.dingtalkTitleTemplate, 'No rendered title') }}</div>
+              <div class="meta-automation__preview-body"><strong>Rendered body:</strong> {{ renderedTemplateExample(draft.dingtalkBodyTemplate, 'No rendered body') }}</div>
               <div><strong>Public form:</strong> {{ viewSummaryName(draft.publicFormViewId, 'No public form link') }}</div>
               <div><strong>Internal processing:</strong> {{ viewSummaryName(draft.internalViewId, 'No internal link') }}</div>
             </div>
@@ -285,8 +287,10 @@
             <div class="meta-automation__preview" data-automation-summary="person">
               <div class="meta-automation__preview-title">Message summary</div>
               <div><strong>Recipients:</strong> {{ dingTalkPersonRecipientSummary }}</div>
-              <div><strong>Title:</strong> {{ templatePreviewText(draft.dingtalkPersonTitleTemplate, 'No title template') }}</div>
-              <div class="meta-automation__preview-body"><strong>Body:</strong> {{ templatePreviewText(draft.dingtalkPersonBodyTemplate, 'No body template') }}</div>
+              <div><strong>Title template:</strong> {{ templatePreviewText(draft.dingtalkPersonTitleTemplate, 'No title template') }}</div>
+              <div class="meta-automation__preview-body"><strong>Body template:</strong> {{ templatePreviewText(draft.dingtalkPersonBodyTemplate, 'No body template') }}</div>
+              <div><strong>Rendered title:</strong> {{ renderedTemplateExample(draft.dingtalkPersonTitleTemplate, 'No rendered title') }}</div>
+              <div class="meta-automation__preview-body"><strong>Rendered body:</strong> {{ renderedTemplateExample(draft.dingtalkPersonBodyTemplate, 'No rendered body') }}</div>
               <div><strong>Public form:</strong> {{ viewSummaryName(draft.dingtalkPersonPublicFormViewId, 'No public form link') }}</div>
               <div><strong>Internal processing:</strong> {{ viewSummaryName(draft.dingtalkPersonInternalViewId, 'No internal link') }}</div>
             </div>
@@ -420,6 +424,7 @@ import {
   DINGTALK_TITLE_TEMPLATE_TOKENS,
 } from '../utils/dingtalkNotificationTemplateTokens'
 import { listDingTalkTemplateSyntaxWarnings } from '../utils/dingtalkNotificationTemplateLint'
+import { renderDingTalkTemplateExample } from '../utils/dingtalkNotificationTemplateExample'
 
 const props = defineProps<{
   visible: boolean
@@ -581,6 +586,13 @@ function viewSummaryName(viewId: string, fallback: string) {
 
 function templatePreviewText(value: string, fallback: string) {
   return value.trim() ? value.trim() : fallback
+}
+
+function renderedTemplateExample(value: string, fallback: string) {
+  const trimmed = value.trim()
+  if (!trimmed) return fallback
+  const rendered = renderDingTalkTemplateExample(trimmed).trim()
+  return rendered || fallback
 }
 
 const dingTalkPersonRecipientSummary = computed(() => {

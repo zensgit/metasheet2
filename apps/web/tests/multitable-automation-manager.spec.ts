@@ -591,6 +591,8 @@ describe('MetaAutomationManager', () => {
     expect(summary?.textContent).toContain('user_1')
     expect(summary?.textContent).toContain('Need action {{recordId}}')
     expect(summary?.textContent).toContain('Handle {{record.xxx}}')
+    expect(summary?.textContent).toContain('Need action record_demo_001')
+    expect(summary?.textContent).toContain('Handle 示例字段值')
     expect(summary?.textContent).toContain('No public form link')
     expect(summary?.textContent).toContain('No internal link')
   })

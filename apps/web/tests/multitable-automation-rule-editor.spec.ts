@@ -518,6 +518,8 @@ describe('MetaAutomationRuleEditor', () => {
     expect(summary?.textContent).toContain('Ops Group')
     expect(summary?.textContent).toContain('Ticket {{recordId}}')
     expect(summary?.textContent).toContain('Please fill {{record.xxx}}')
+    expect(summary?.textContent).toContain('Ticket record_demo_001')
+    expect(summary?.textContent).toContain('Please fill 示例字段值')
     expect(summary?.textContent).toContain('No public form link')
     expect(summary?.textContent).toContain('No internal link')
   })
