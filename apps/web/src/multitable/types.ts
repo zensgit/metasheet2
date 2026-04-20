@@ -728,11 +728,13 @@ export interface FormShareConfig {
   publicToken: string | null
   expiresAt: string | null
   status: 'active' | 'expired' | 'disabled'
+  accessMode: 'public' | 'dingtalk' | 'dingtalk_granted'
 }
 
 export interface FormShareConfigUpdate {
   enabled?: boolean
   expiresAt?: string | null
+  accessMode?: 'public' | 'dingtalk' | 'dingtalk_granted'
 }
 
 // --- API Tokens ---

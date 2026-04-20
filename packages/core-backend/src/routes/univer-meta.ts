@@ -250,11 +250,22 @@ type PeopleSheetPreset = {
   fieldProperty: Record<string, unknown>
 }
 
+type PublicFormAccessMode = 'public' | 'dingtalk' | 'dingtalk_granted'
+
 type PublicFormConfig = {
   enabled?: boolean
   publicToken?: string
   expiresAt?: unknown
   expiresOn?: unknown
+  accessMode?: unknown
+}
+
+type PublicFormShareConfigResponse = {
+  enabled: boolean
+  publicToken: string | null
+  expiresAt: string | null
+  status: 'active' | 'expired' | 'disabled'
+  accessMode: PublicFormAccessMode
 }
 
 type DashboardChartType = 'bar' | 'line' | 'pie'
@@ -331,6 +342,16 @@ function parsePublicFormExpiryMs(value: unknown): number | null {
   return Number.isFinite(parsed) ? parsed : null
 }
 
+function normalizePublicFormAccessMode(value: unknown): PublicFormAccessMode {
+  if (value === 'dingtalk') return 'dingtalk'
+  if (value === 'dingtalk_granted') return 'dingtalk_granted'
+  return 'public'
+}
+
+function buildPublicFormToken(): string {
+  return buildId('pub')
+}
+
 function isPublicFormAccessAllowed(view: UniverMetaViewConfig | null | undefined, publicToken: string): boolean {
   if (!view || !publicToken) return false
   const publicForm = getPublicFormConfig(view)
@@ -340,6 +361,110 @@ function isPublicFormAccessAllowed(view: UniverMetaViewConfig | null | undefined
   const expiryMs = parsePublicFormExpiryMs(publicForm.expiresAt ?? publicForm.expiresOn)
   if (expiryMs !== null && Date.now() >= expiryMs) return false
   return true
+}
+
+function serializePublicFormShareConfig(view: UniverMetaViewConfig | null | undefined): PublicFormShareConfigResponse {
+  const publicForm = getPublicFormConfig(view)
+  const enabled = publicForm?.enabled === true
+  const publicToken = typeof publicForm?.publicToken === 'string' && publicForm.publicToken.trim().length > 0
+    ? publicForm.publicToken.trim()
+    : null
+  const expiryMs = parsePublicFormExpiryMs(publicForm?.expiresAt ?? publicForm?.expiresOn)
+  const expiresAt = expiryMs === null ? null : new Date(expiryMs).toISOString()
+  const status = !enabled || !publicToken ? 'disabled' : expiryMs !== null && Date.now() >= expiryMs ? 'expired' : 'active'
+  return {
+    enabled,
+    publicToken,
+    expiresAt,
+    status,
+    accessMode: normalizePublicFormAccessMode(publicForm?.accessMode),
+  }
+}
+
+async function loadDingTalkPublicFormAccessState(query: QueryFn, userId: string): Promise<{
+  hasBinding: boolean
+  grantEnabled: boolean
+}> {
+  const [identityResult, linkResult, grantResult] = await Promise.all([
+    query(
+      `SELECT 1
+       FROM user_external_identities
+       WHERE provider = $1 AND local_user_id = $2
+       LIMIT 1`,
+      ['dingtalk', userId],
+    ),
+    query(
+      `SELECT 1
+       FROM directory_account_links l
+       JOIN directory_accounts a ON a.id = l.directory_account_id
+       WHERE l.local_user_id = $1
+         AND l.link_status = 'linked'
+         AND a.provider = $2
+       LIMIT 1`,
+      [userId, 'dingtalk'],
+    ),
+    query(
+      `SELECT enabled
+       FROM user_external_auth_grants
+       WHERE provider = $1 AND local_user_id = $2
+       LIMIT 1`,
+      ['dingtalk', userId],
+    ),
+  ])
+
+  const hasBinding = identityResult.rows.length > 0 || linkResult.rows.length > 0
+  const grantRow = grantResult.rows[0] as { enabled?: boolean } | undefined
+  const grantEnabled = grantRow?.enabled === true
+
+  return {
+    hasBinding,
+    grantEnabled,
+  }
+}
+
+async function evaluateProtectedPublicFormAccess(
+  query: QueryFn,
+  req: Request,
+  view: UniverMetaViewConfig | null | undefined,
+): Promise<
+  | { allowed: true; accessMode: PublicFormAccessMode }
+  | { allowed: false; statusCode: number; code: string; message: string }
+> {
+  const accessMode = normalizePublicFormAccessMode(getPublicFormConfig(view)?.accessMode)
+  if (accessMode === 'public') {
+    return { allowed: true, accessMode }
+  }
+
+  const userId = req.user?.id?.toString() ?? req.user?.sub?.toString() ?? req.user?.userId?.toString() ?? ''
+  if (!userId) {
+    return {
+      allowed: false,
+      statusCode: 401,
+      code: 'DINGTALK_AUTH_REQUIRED',
+      message: 'DingTalk sign-in is required for this form',
+    }
+  }
+
+  const dingtalkAccess = await loadDingTalkPublicFormAccessState(query, userId)
+  if (!dingtalkAccess.hasBinding) {
+    return {
+      allowed: false,
+      statusCode: 403,
+      code: 'DINGTALK_BIND_REQUIRED',
+      message: 'A bound DingTalk account is required for this form',
+    }
+  }
+
+  if (accessMode === 'dingtalk_granted' && !dingtalkAccess.grantEnabled) {
+    return {
+      allowed: false,
+      statusCode: 403,
+      code: 'DINGTALK_GRANT_REQUIRED',
+      message: 'A DingTalk-authorized account is required for this form',
+    }
+  }
+
+  return { allowed: true, accessMode }
 }
 
 function appendQueryParam(path: string, key: string, value: string): string {
@@ -5039,6 +5164,220 @@ export function univerMetaRouter(): Router {
     }
   })
 
+  router.get('/sheets/:sheetId/views/:viewId/form-share', async (req: Request, res: Response) => {
+    const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
+    const viewId = typeof req.params.viewId === 'string' ? req.params.viewId.trim() : ''
+    if (!sheetId || !viewId) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId and viewId are required' } })
+    }
+
+    try {
+      const pool = poolManager.get()
+      const current = await pool.query(
+        'SELECT id, sheet_id, name, type, filter_info, sort_info, group_info, hidden_field_ids, config FROM meta_views WHERE id = $1',
+        [viewId],
+      )
+      if (current.rows.length === 0) {
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `View not found: ${viewId}` } })
+      }
+
+      const row: any = current.rows[0]
+      if (String(row.sheet_id) !== sheetId) {
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `View ${viewId} does not belong to sheet ${sheetId}` } })
+      }
+
+      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      if (!capabilities.canManageViews) return sendForbidden(res)
+
+      const view: UniverMetaViewConfig = {
+        id: viewId,
+        sheetId,
+        name: String(row.name),
+        type: String(row.type ?? 'grid'),
+        filterInfo: normalizeJson(row.filter_info),
+        sortInfo: normalizeJson(row.sort_info),
+        groupInfo: normalizeJson(row.group_info),
+        hiddenFieldIds: normalizeJsonArray(row.hidden_field_ids),
+        config: normalizeJson(row.config),
+      }
+
+      return res.json({ ok: true, data: serializePublicFormShareConfig(view) })
+    } catch (err) {
+      const hint = getDbNotReadyMessage(err)
+      if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
+      console.error('[univer-meta] get form share config failed:', err)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load form share config' } })
+    }
+  })
+
+  router.patch('/sheets/:sheetId/views/:viewId/form-share', async (req: Request, res: Response) => {
+    const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
+    const viewId = typeof req.params.viewId === 'string' ? req.params.viewId.trim() : ''
+    if (!sheetId || !viewId) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId and viewId are required' } })
+    }
+
+    const schema = z.object({
+      enabled: z.boolean().optional(),
+      expiresAt: z.string().datetime().nullable().optional(),
+      accessMode: z.enum(['public', 'dingtalk', 'dingtalk_granted']).optional(),
+    })
+
+    const parsed = schema.safeParse(req.body)
+    if (!parsed.success) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+    }
+
+    try {
+      const pool = poolManager.get()
+      const current = await pool.query(
+        'SELECT id, sheet_id, name, type, filter_info, sort_info, group_info, hidden_field_ids, config FROM meta_views WHERE id = $1',
+        [viewId],
+      )
+      if (current.rows.length === 0) {
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `View not found: ${viewId}` } })
+      }
+
+      const row: any = current.rows[0]
+      if (String(row.sheet_id) !== sheetId) {
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `View ${viewId} does not belong to sheet ${sheetId}` } })
+      }
+
+      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      if (!capabilities.canManageViews) return sendForbidden(res)
+
+      const nextConfig = normalizeJson(row.config)
+      const existingPublicForm = getPublicFormConfig({
+        id: viewId,
+        sheetId,
+        name: String(row.name),
+        type: String(row.type ?? 'grid'),
+        filterInfo: normalizeJson(row.filter_info),
+        sortInfo: normalizeJson(row.sort_info),
+        groupInfo: normalizeJson(row.group_info),
+        hiddenFieldIds: normalizeJsonArray(row.hidden_field_ids),
+        config: nextConfig,
+      })
+      const nextEnabled = parsed.data.enabled ?? (existingPublicForm?.enabled === true)
+      const nextPublicToken = (() => {
+        const existing = typeof existingPublicForm?.publicToken === 'string' ? existingPublicForm.publicToken.trim() : ''
+        if (existing) return existing
+        return nextEnabled ? buildPublicFormToken() : ''
+      })()
+      const nextPublicForm: PublicFormConfig = {
+        ...(existingPublicForm ?? {}),
+        enabled: nextEnabled,
+        publicToken: nextPublicToken || undefined,
+        ...(parsed.data.expiresAt !== undefined
+          ? (parsed.data.expiresAt ? { expiresAt: parsed.data.expiresAt } : { expiresAt: null })
+          : (existingPublicForm?.expiresAt ?? existingPublicForm?.expiresOn) !== undefined
+            ? { expiresAt: existingPublicForm?.expiresAt ?? existingPublicForm?.expiresOn }
+            : {}),
+        accessMode: parsed.data.accessMode ?? normalizePublicFormAccessMode(existingPublicForm?.accessMode),
+      }
+      nextConfig.publicForm = nextPublicForm as Record<string, unknown>
+
+      await pool.query(
+        `UPDATE meta_views
+         SET config = $2::jsonb
+         WHERE id = $1`,
+        [viewId, JSON.stringify(nextConfig)],
+      )
+
+      const view: UniverMetaViewConfig = {
+        id: viewId,
+        sheetId,
+        name: String(row.name),
+        type: String(row.type ?? 'grid'),
+        filterInfo: normalizeJson(row.filter_info),
+        sortInfo: normalizeJson(row.sort_info),
+        groupInfo: normalizeJson(row.group_info),
+        hiddenFieldIds: normalizeJsonArray(row.hidden_field_ids),
+        config: nextConfig,
+      }
+      metaViewConfigCache.set(viewId, view)
+      return res.json({ ok: true, data: serializePublicFormShareConfig(view) })
+    } catch (err) {
+      const hint = getDbNotReadyMessage(err)
+      if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
+      console.error('[univer-meta] update form share config failed:', err)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to update form share config' } })
+    }
+  })
+
+  router.post('/sheets/:sheetId/views/:viewId/form-share/regenerate', async (req: Request, res: Response) => {
+    const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
+    const viewId = typeof req.params.viewId === 'string' ? req.params.viewId.trim() : ''
+    if (!sheetId || !viewId) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId and viewId are required' } })
+    }
+
+    try {
+      const pool = poolManager.get()
+      const current = await pool.query(
+        'SELECT id, sheet_id, name, type, filter_info, sort_info, group_info, hidden_field_ids, config FROM meta_views WHERE id = $1',
+        [viewId],
+      )
+      if (current.rows.length === 0) {
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `View not found: ${viewId}` } })
+      }
+
+      const row: any = current.rows[0]
+      if (String(row.sheet_id) !== sheetId) {
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `View ${viewId} does not belong to sheet ${sheetId}` } })
+      }
+
+      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      if (!capabilities.canManageViews) return sendForbidden(res)
+
+      const nextConfig = normalizeJson(row.config)
+      const existingPublicForm = getPublicFormConfig({
+        id: viewId,
+        sheetId,
+        name: String(row.name),
+        type: String(row.type ?? 'grid'),
+        filterInfo: normalizeJson(row.filter_info),
+        sortInfo: normalizeJson(row.sort_info),
+        groupInfo: normalizeJson(row.group_info),
+        hiddenFieldIds: normalizeJsonArray(row.hidden_field_ids),
+        config: nextConfig,
+      })
+      const nextPublicToken = buildPublicFormToken()
+      nextConfig.publicForm = {
+        ...(existingPublicForm ?? {}),
+        enabled: existingPublicForm?.enabled === true,
+        publicToken: nextPublicToken,
+        accessMode: normalizePublicFormAccessMode(existingPublicForm?.accessMode),
+      } as Record<string, unknown>
+
+      await pool.query(
+        `UPDATE meta_views
+         SET config = $2::jsonb
+         WHERE id = $1`,
+        [viewId, JSON.stringify(nextConfig)],
+      )
+
+      const view: UniverMetaViewConfig = {
+        id: viewId,
+        sheetId,
+        name: String(row.name),
+        type: String(row.type ?? 'grid'),
+        filterInfo: normalizeJson(row.filter_info),
+        sortInfo: normalizeJson(row.sort_info),
+        groupInfo: normalizeJson(row.group_info),
+        hiddenFieldIds: normalizeJsonArray(row.hidden_field_ids),
+        config: nextConfig,
+      }
+      metaViewConfigCache.set(viewId, view)
+      return res.json({ ok: true, data: { publicToken: serializePublicFormShareConfig(view).publicToken } })
+    } catch (err) {
+      const hint = getDbNotReadyMessage(err)
+      if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
+      console.error('[univer-meta] regenerate form share token failed:', err)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to regenerate form share token' } })
+    }
+  })
+
   router.delete('/views/:viewId', async (req: Request, res: Response) => {
     const viewId = req.params.viewId
     if (!viewId || typeof viewId !== 'string') {
@@ -5584,21 +5923,34 @@ export function univerMetaRouter(): Router {
       const sheetId = resolved.sheetId
       const { access, capabilities, capabilityOrigin, sheetScope } = await resolveSheetReadableCapabilities(req, pool.query.bind(pool), sheetId)
       const publicAccessAllowed = isPublicFormAccessAllowed(resolved.view, publicTokenParam)
+      const protectedPublicAccess = publicAccessAllowed
+        ? await evaluateProtectedPublicFormAccess(pool.query.bind(pool), req, resolved.view)
+        : null
+      if (protectedPublicAccess?.allowed === false) {
+        return res.status(protectedPublicAccess.statusCode).json({
+          ok: false,
+          error: {
+            code: protectedPublicAccess.code,
+            message: protectedPublicAccess.message,
+          },
+        })
+      }
+      const effectivePublicAccessAllowed = publicAccessAllowed && (!protectedPublicAccess || protectedPublicAccess.allowed)
       if (!access.userId && !publicAccessAllowed) {
         return res.status(401).json({ error: 'Authentication required' })
       }
-      if (!publicAccessAllowed && !capabilities.canRead) return sendForbidden(res)
+      if (!effectivePublicAccessAllowed && !capabilities.canRead) return sendForbidden(res)
       const sheet = await loadSheetRow(pool.query.bind(pool), sheetId)
       if (!sheet) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
       }
 
       const fields = await loadFieldsForSheet(pool.query.bind(pool), sheetId)
-      const effectiveCapabilities = publicAccessAllowed ? PUBLIC_FORM_CAPABILITIES : capabilities
-      const effectiveCapabilityOrigin = publicAccessAllowed ? undefined : capabilityOrigin
-      const effectiveSheetScope = publicAccessAllowed ? undefined : sheetScope
-      const effectiveAccess = publicAccessAllowed ? { userId: '', permissions: [], isAdminRole: false } : access
-      if (publicAccessAllowed && recordIdParam) {
+      const effectiveCapabilities = effectivePublicAccessAllowed ? PUBLIC_FORM_CAPABILITIES : capabilities
+      const effectiveCapabilityOrigin = effectivePublicAccessAllowed ? undefined : capabilityOrigin
+      const effectiveSheetScope = effectivePublicAccessAllowed ? undefined : sheetScope
+      const effectiveAccess = effectivePublicAccessAllowed ? { userId: '', permissions: [], isAdminRole: false } : access
+      if (effectivePublicAccessAllowed && recordIdParam) {
         return res.status(400).json({
           ok: false,
           error: { code: 'VALIDATION_ERROR', message: 'Public forms do not support loading an existing record' },
@@ -5666,7 +6018,7 @@ export function univerMetaRouter(): Router {
           mode: 'form',
           readOnly: !effectiveCapabilities.canCreateRecord,
           submitPath: resolved.view
-            ? (publicAccessAllowed && publicTokenParam
+            ? (effectivePublicAccessAllowed && publicTokenParam
               ? buildPublicFormSubmitPath(resolved.view.id, publicTokenParam)
               : `/api/multitable/views/${resolved.view.id}/submit`)
             : '/api/multitable/records',
@@ -5742,13 +6094,26 @@ export function univerMetaRouter(): Router {
           ? req.query.publicToken.trim()
           : ''
       const publicAccessAllowed = isPublicFormAccessAllowed(view, publicTokenParam)
+      const protectedPublicAccess = publicAccessAllowed
+        ? await evaluateProtectedPublicFormAccess(pool.query.bind(pool), req, view)
+        : null
+      if (protectedPublicAccess?.allowed === false) {
+        return res.status(protectedPublicAccess.statusCode).json({
+          ok: false,
+          error: {
+            code: protectedPublicAccess.code,
+            message: protectedPublicAccess.message,
+          },
+        })
+      }
+      const effectivePublicAccessAllowed = publicAccessAllowed && (!protectedPublicAccess || protectedPublicAccess.allowed)
       if (!access.userId && !publicAccessAllowed) {
         return res.status(401).json({ error: 'Authentication required' })
       }
-      const effectiveCapabilities = publicAccessAllowed ? PUBLIC_FORM_CAPABILITIES : capabilities
-      const effectiveSheetScope = publicAccessAllowed ? undefined : sheetScope
-      const effectiveAccess = publicAccessAllowed ? { userId: '', permissions: [], isAdminRole: false } : access
-      if (publicAccessAllowed && parsed.data.recordId) {
+      const effectiveCapabilities = effectivePublicAccessAllowed ? PUBLIC_FORM_CAPABILITIES : capabilities
+      const effectiveSheetScope = effectivePublicAccessAllowed ? undefined : sheetScope
+      const effectiveAccess = effectivePublicAccessAllowed ? { userId: '', permissions: [], isAdminRole: false } : access
+      if (effectivePublicAccessAllowed && parsed.data.recordId) {
         return res.status(400).json({
           ok: false,
           error: { code: 'VALIDATION_ERROR', message: 'Public forms do not support updating an existing record' },
@@ -5965,7 +6330,12 @@ export function univerMetaRouter(): Router {
           `INSERT INTO meta_records (id, sheet_id, data, version, created_by)
            VALUES ($1, $2, $3::jsonb, 1, $4)
            RETURNING id, version`,
-          [resultRecordId, view.sheetId, JSON.stringify(patch), publicAccessAllowed ? null : getRequestActorId(req)],
+          [
+            resultRecordId,
+            view.sheetId,
+            JSON.stringify(patch),
+            effectivePublicAccessAllowed && !access.userId ? null : getRequestActorId(req),
+          ],
         )
         resultRecordId = String((insertRes as any).rows[0]?.id ?? resultRecordId)
         nextVersion = Number((insertRes as any).rows[0]?.version ?? 1)
