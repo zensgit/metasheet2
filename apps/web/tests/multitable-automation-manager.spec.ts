@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, h, nextTick } from 'vue'
 
 function flushPromises() {
@@ -119,9 +119,24 @@ const views = [
 ]
 
 describe('MetaAutomationManager', () => {
+  const originalClipboard = navigator.clipboard
+
+  beforeEach(() => {
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: {
+        writeText: vi.fn().mockResolvedValue(undefined),
+      },
+    })
+  })
+
   afterEach(() => {
     document.body.innerHTML = ''
     vi.restoreAllMocks()
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: originalClipboard,
+    })
   })
 
   it('renders rule list when visible', async () => {
@@ -471,5 +486,200 @@ describe('MetaAutomationManager', () => {
     const delivery = document.querySelector('[data-group-delivery-id="dgd_1"]')
     expect(delivery?.textContent).toContain('Ops Group')
     expect(delivery?.textContent).toContain('Ticket rec_1 pending')
+  })
+
+  it('applies DingTalk group presets in the inline create form', async () => {
+    const { client } = mockClient([])
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
+    await flushPromises()
+
+    const addBtn = container.querySelector('.meta-automation__btn-add') as HTMLButtonElement
+    addBtn.click()
+    await nextTick()
+
+    const actionSelect = container.querySelector('[data-automation-field="actionType"]') as HTMLSelectElement
+    actionSelect.value = 'send_dingtalk_group_message'
+    actionSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushPromises()
+
+    const presetBtn = container.querySelector('[data-automation-preset="group-form"]') as HTMLButtonElement
+    presetBtn.click()
+    await flushPromises()
+
+    const titleInput = container.querySelector('[data-automation-field="dingtalkTitleTemplate"]') as HTMLInputElement
+    const bodyInput = container.querySelector('[data-automation-field="dingtalkBodyTemplate"]') as HTMLTextAreaElement
+    const publicFormSelect = container.querySelector('[data-automation-field="publicFormViewId"]') as HTMLSelectElement
+    const internalViewSelect = container.querySelector('[data-automation-field="internalViewId"]') as HTMLSelectElement
+
+    expect(titleInput.value).toBe('{{recordId}} 待填写')
+    expect(bodyInput.value).toContain('请完成本次表单填写')
+    expect(publicFormSelect.value).toBe('view_form')
+    expect(internalViewSelect.value).toBe('')
+  })
+
+  it('applies DingTalk person presets in the inline create form', async () => {
+    const { client } = mockClient([])
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
+    await flushPromises()
+
+    const addBtn = container.querySelector('.meta-automation__btn-add') as HTMLButtonElement
+    addBtn.click()
+    await nextTick()
+
+    const actionSelect = container.querySelector('[data-automation-field="actionType"]') as HTMLSelectElement
+    actionSelect.value = 'send_dingtalk_person_message'
+    actionSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushPromises()
+
+    const userIdsInput = container.querySelector('[data-automation-field="dingtalkPersonUserIds"]') as HTMLTextAreaElement
+    userIdsInput.value = 'user_1'
+    userIdsInput.dispatchEvent(new Event('input', { bubbles: true }))
+
+    const presetBtn = container.querySelector('[data-automation-preset="person-both"]') as HTMLButtonElement
+    presetBtn.click()
+    await flushPromises()
+
+    const titleInput = container.querySelector('[data-automation-field="dingtalkPersonTitleTemplate"]') as HTMLInputElement
+    const bodyInput = container.querySelector('[data-automation-field="dingtalkPersonBodyTemplate"]') as HTMLTextAreaElement
+    const publicFormSelect = container.querySelector('[data-automation-field="dingtalkPersonPublicFormViewId"]') as HTMLSelectElement
+    const internalViewSelect = container.querySelector('[data-automation-field="dingtalkPersonInternalViewId"]') as HTMLSelectElement
+
+    expect(userIdsInput.value).toBe('user_1')
+    expect(titleInput.value).toBe('{{recordId}} 待填写并处理')
+    expect(bodyInput.value).toContain('请先填写所需信息')
+    expect(publicFormSelect.value).toBe('view_form')
+    expect(internalViewSelect.value).toBe('view_grid')
+  })
+
+  it('inserts DingTalk template tokens in the inline create form', async () => {
+    const { client } = mockClient([])
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
+    await flushPromises()
+
+    const addBtn = container.querySelector('.meta-automation__btn-add') as HTMLButtonElement
+    addBtn.click()
+    await nextTick()
+
+    const actionSelect = container.querySelector('[data-automation-field="actionType"]') as HTMLSelectElement
+    actionSelect.value = 'send_dingtalk_person_message'
+    actionSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushPromises()
+
+    ;(container.querySelector('[data-automation-token="person-title-recordId"]') as HTMLButtonElement).click()
+    ;(container.querySelector('[data-automation-token="person-body-recordField"]') as HTMLButtonElement).click()
+    await flushPromises()
+
+    const titleInput = container.querySelector('[data-automation-field="dingtalkPersonTitleTemplate"]') as HTMLInputElement
+    const bodyInput = container.querySelector('[data-automation-field="dingtalkPersonBodyTemplate"]') as HTMLTextAreaElement
+    expect(titleInput.value).toBe('{{recordId}}')
+    expect(bodyInput.value).toBe('{{record.xxx}}')
+  })
+
+  it('shows DingTalk person message summary in the inline create form', async () => {
+    const { client } = mockClient([])
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
+    await flushPromises()
+
+    const addBtn = container.querySelector('.meta-automation__btn-add') as HTMLButtonElement
+    addBtn.click()
+    await nextTick()
+
+    const actionSelect = container.querySelector('[data-automation-field="actionType"]') as HTMLSelectElement
+    actionSelect.value = 'send_dingtalk_person_message'
+    actionSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushPromises()
+
+    const userIdsInput = container.querySelector('[data-automation-field="dingtalkPersonUserIds"]') as HTMLTextAreaElement
+    userIdsInput.value = 'user_1'
+    userIdsInput.dispatchEvent(new Event('input', { bubbles: true }))
+
+    const titleInput = container.querySelector('[data-automation-field="dingtalkPersonTitleTemplate"]') as HTMLInputElement
+    titleInput.value = 'Need action {{recordId}}'
+    titleInput.dispatchEvent(new Event('input', { bubbles: true }))
+
+    const bodyInput = container.querySelector('[data-automation-field="dingtalkPersonBodyTemplate"]') as HTMLTextAreaElement
+    bodyInput.value = 'Handle {{record.xxx}}'
+    bodyInput.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushPromises()
+
+    const summary = container.querySelector('[data-automation-summary="person"]')
+    expect(summary?.textContent).toContain('user_1')
+    expect(summary?.textContent).toContain('Need action {{recordId}}')
+    expect(summary?.textContent).toContain('Handle {{record.xxx}}')
+    expect(summary?.textContent).toContain('Need action record_demo_001')
+    expect(summary?.textContent).toContain('Handle 示例字段值')
+    expect(summary?.textContent).toContain('No public form link')
+    expect(summary?.textContent).toContain('No internal link')
+  })
+
+  it('shows DingTalk template syntax warnings in the inline create form', async () => {
+    const { client } = mockClient([])
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
+    await flushPromises()
+
+    const addBtn = container.querySelector('.meta-automation__btn-add') as HTMLButtonElement
+    addBtn.click()
+    await nextTick()
+
+    const actionSelect = container.querySelector('[data-automation-field="actionType"]') as HTMLSelectElement
+    actionSelect.value = 'send_dingtalk_person_message'
+    actionSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushPromises()
+
+    const bodyInput = container.querySelector('[data-automation-field="dingtalkPersonBodyTemplate"]') as HTMLTextAreaElement
+    bodyInput.value = '{{recordId'
+    bodyInput.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushPromises()
+
+    expect(container.textContent).toContain('Unclosed placeholder braces detected')
+  })
+
+  it('shows DingTalk unknown placeholder warnings in the inline create form', async () => {
+    const { client } = mockClient([])
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
+    await flushPromises()
+
+    const addBtn = container.querySelector('.meta-automation__btn-add') as HTMLButtonElement
+    addBtn.click()
+    await nextTick()
+
+    const actionSelect = container.querySelector('[data-automation-field="actionType"]') as HTMLSelectElement
+    actionSelect.value = 'send_dingtalk_person_message'
+    actionSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushPromises()
+
+    const bodyInput = container.querySelector('[data-automation-field="dingtalkPersonBodyTemplate"]') as HTMLTextAreaElement
+    bodyInput.value = '{{record}}'
+    bodyInput.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushPromises()
+
+    expect(container.textContent).toContain('Unknown placeholder {{record}}')
+  })
+
+  it('copies rendered DingTalk person body example in the inline create form', async () => {
+    const { client } = mockClient([])
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
+    await flushPromises()
+
+    const addBtn = container.querySelector('.meta-automation__btn-add') as HTMLButtonElement
+    addBtn.click()
+    await nextTick()
+
+    const actionSelect = container.querySelector('[data-automation-field="actionType"]') as HTMLSelectElement
+    actionSelect.value = 'send_dingtalk_person_message'
+    actionSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushPromises()
+
+    const bodyInput = container.querySelector('[data-automation-field="dingtalkPersonBodyTemplate"]') as HTMLTextAreaElement
+    bodyInput.value = 'Handle {{record.xxx}}'
+    bodyInput.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushPromises()
+
+    ;(container.querySelector('[data-automation-copy="person-rendered-body"]') as HTMLButtonElement).click()
+    await flushPromises()
+
+    expect(navigator.clipboard?.writeText).toHaveBeenCalledTimes(1)
+    expect(vi.mocked(navigator.clipboard!.writeText).mock.calls[0]?.[0]).toBe('Handle 示例字段值')
+    expect(container.textContent).toContain('Copied')
   })
 })

@@ -187,6 +187,12 @@
 
             <!-- send_dingtalk_group_message config -->
             <div v-if="action.type === 'send_dingtalk_group_message'" class="meta-rule-editor__action-config">
+              <div class="meta-rule-editor__preset-row">
+                <span class="meta-rule-editor__preset-label">Message preset</span>
+                <button class="meta-rule-editor__btn" type="button" data-field="groupPresetForm" @click="applyGroupPreset(action, 'form_request')">Form request</button>
+                <button class="meta-rule-editor__btn" type="button" data-field="groupPresetInternal" @click="applyGroupPreset(action, 'internal_process')">Internal processing</button>
+                <button class="meta-rule-editor__btn" type="button" data-field="groupPresetBoth" @click="applyGroupPreset(action, 'form_and_process')">Form + processing</button>
+              </div>
               <label class="meta-rule-editor__label">DingTalk group</label>
               <select
                 v-model="action.config.destinationId"
@@ -207,6 +213,26 @@
                 placeholder="例如：{{record.title}} 待处理"
                 data-field="dingtalkTitleTemplate"
               />
+              <div
+                v-for="warning in templateSyntaxWarnings(action.config.titleTemplate)"
+                :key="`group-title-${warning}`"
+                class="meta-rule-editor__hint meta-rule-editor__hint--warning"
+              >
+                {{ warning }}
+              </div>
+              <div class="meta-rule-editor__token-row">
+                <span class="meta-rule-editor__preset-label">Template tokens</span>
+                <button
+                  v-for="token in DINGTALK_TITLE_TEMPLATE_TOKENS"
+                  :key="token.key"
+                  class="meta-rule-editor__btn"
+                  type="button"
+                  :data-field="`groupTitleToken-${token.key}`"
+                  @click="appendGroupTemplateToken(action, 'titleTemplate', token.value)"
+                >
+                  {{ token.label }}
+                </button>
+              </div>
               <label class="meta-rule-editor__label">Body template</label>
               <textarea
                 v-model="action.config.bodyTemplate"
@@ -215,6 +241,26 @@
                 placeholder="支持 {{record.xxx}}、{{recordId}}、{{sheetId}}、{{actorId}}"
                 data-field="dingtalkBodyTemplate"
               ></textarea>
+              <div
+                v-for="warning in templateSyntaxWarnings(action.config.bodyTemplate)"
+                :key="`group-body-${warning}`"
+                class="meta-rule-editor__hint meta-rule-editor__hint--warning"
+              >
+                {{ warning }}
+              </div>
+              <div class="meta-rule-editor__token-row">
+                <span class="meta-rule-editor__preset-label">Template tokens</span>
+                <button
+                  v-for="token in DINGTALK_BODY_TEMPLATE_TOKENS"
+                  :key="token.key"
+                  class="meta-rule-editor__btn"
+                  type="button"
+                  :data-field="`groupBodyToken-${token.key}`"
+                  @click="appendGroupTemplateToken(action, 'bodyTemplate', token.value, true)"
+                >
+                  {{ token.label }}
+                </button>
+              </div>
               <label class="meta-rule-editor__label">Public form view (optional)</label>
               <select
                 v-model="action.config.publicFormViewId"
@@ -233,10 +279,46 @@
                 <option value="">-- no internal link --</option>
                 <option v-for="view in internalViews" :key="view.id" :value="view.id">{{ view.name }}</option>
               </select>
+              <div class="meta-rule-editor__preview" data-field="groupMessageSummary">
+                <div class="meta-rule-editor__preview-title">Message summary</div>
+                <div><strong>Group:</strong> {{ dingTalkGroupName(action.config.destinationId) }}</div>
+                <div><strong>Title template:</strong> {{ templatePreviewText(action.config.titleTemplate, 'No title template') }}</div>
+                <div class="meta-rule-editor__preview-body"><strong>Body template:</strong> {{ templatePreviewText(action.config.bodyTemplate, 'No body template') }}</div>
+                <div class="meta-rule-editor__preview-line">
+                  <span><strong>Rendered title:</strong> {{ renderedTemplateExample(action.config.titleTemplate, 'No rendered title') }}</span>
+                  <button
+                    class="meta-rule-editor__copy-btn"
+                    type="button"
+                    :data-field="`groupRenderedTitleCopy-${idx}`"
+                    @click="copyPreviewText(`group-title-${idx}`, renderedTemplateExample(action.config.titleTemplate, ''))"
+                  >
+                    {{ copiedPreviewKey === `group-title-${idx}` ? 'Copied' : 'Copy' }}
+                  </button>
+                </div>
+                <div class="meta-rule-editor__preview-line meta-rule-editor__preview-body">
+                  <span><strong>Rendered body:</strong> {{ renderedTemplateExample(action.config.bodyTemplate, 'No rendered body') }}</span>
+                  <button
+                    class="meta-rule-editor__copy-btn"
+                    type="button"
+                    :data-field="`groupRenderedBodyCopy-${idx}`"
+                    @click="copyPreviewText(`group-body-${idx}`, renderedTemplateExample(action.config.bodyTemplate, ''))"
+                  >
+                    {{ copiedPreviewKey === `group-body-${idx}` ? 'Copied' : 'Copy' }}
+                  </button>
+                </div>
+                <div><strong>Public form:</strong> {{ viewSummaryName(action.config.publicFormViewId, 'No public form link') }}</div>
+                <div><strong>Internal processing:</strong> {{ viewSummaryName(action.config.internalViewId, 'No internal link') }}</div>
+              </div>
             </div>
 
             <!-- send_dingtalk_person_message config -->
             <div v-if="action.type === 'send_dingtalk_person_message'" class="meta-rule-editor__action-config">
+              <div class="meta-rule-editor__preset-row">
+                <span class="meta-rule-editor__preset-label">Message preset</span>
+                <button class="meta-rule-editor__btn" type="button" data-field="personPresetForm" @click="applyPersonPreset(action, 'form_request')">Form request</button>
+                <button class="meta-rule-editor__btn" type="button" data-field="personPresetInternal" @click="applyPersonPreset(action, 'internal_process')">Internal processing</button>
+                <button class="meta-rule-editor__btn" type="button" data-field="personPresetBoth" @click="applyPersonPreset(action, 'form_and_process')">Form + processing</button>
+              </div>
               <label class="meta-rule-editor__label">Search and add users</label>
               <input
                 v-model="action.config.userIdsSearch"
@@ -292,6 +374,26 @@
                 placeholder="例如：{{record.title}} 待处理"
                 data-field="dingtalkPersonTitleTemplate"
               />
+              <div
+                v-for="warning in templateSyntaxWarnings(action.config.titleTemplate)"
+                :key="`person-title-${warning}`"
+                class="meta-rule-editor__hint meta-rule-editor__hint--warning"
+              >
+                {{ warning }}
+              </div>
+              <div class="meta-rule-editor__token-row">
+                <span class="meta-rule-editor__preset-label">Template tokens</span>
+                <button
+                  v-for="token in DINGTALK_TITLE_TEMPLATE_TOKENS"
+                  :key="token.key"
+                  class="meta-rule-editor__btn"
+                  type="button"
+                  :data-field="`personTitleToken-${token.key}`"
+                  @click="appendPersonTemplateToken(action, 'titleTemplate', token.value)"
+                >
+                  {{ token.label }}
+                </button>
+              </div>
               <label class="meta-rule-editor__label">Body template</label>
               <textarea
                 v-model="action.config.bodyTemplate"
@@ -300,6 +402,26 @@
                 placeholder="支持 {{record.xxx}}、{{recordId}}、{{sheetId}}、{{actorId}}"
                 data-field="dingtalkPersonBodyTemplate"
               ></textarea>
+              <div
+                v-for="warning in templateSyntaxWarnings(action.config.bodyTemplate)"
+                :key="`person-body-${warning}`"
+                class="meta-rule-editor__hint meta-rule-editor__hint--warning"
+              >
+                {{ warning }}
+              </div>
+              <div class="meta-rule-editor__token-row">
+                <span class="meta-rule-editor__preset-label">Template tokens</span>
+                <button
+                  v-for="token in DINGTALK_BODY_TEMPLATE_TOKENS"
+                  :key="token.key"
+                  class="meta-rule-editor__btn"
+                  type="button"
+                  :data-field="`personBodyToken-${token.key}`"
+                  @click="appendPersonTemplateToken(action, 'bodyTemplate', token.value, true)"
+                >
+                  {{ token.label }}
+                </button>
+              </div>
               <label class="meta-rule-editor__label">Public form view (optional)</label>
               <select
                 v-model="action.config.publicFormViewId"
@@ -318,6 +440,36 @@
                 <option value="">-- no internal link --</option>
                 <option v-for="view in internalViews" :key="view.id" :value="view.id">{{ view.name }}</option>
               </select>
+              <div class="meta-rule-editor__preview" data-field="personMessageSummary">
+                <div class="meta-rule-editor__preview-title">Message summary</div>
+                <div><strong>Recipients:</strong> {{ personRecipientSummary(action) }}</div>
+                <div><strong>Title template:</strong> {{ templatePreviewText(action.config.titleTemplate, 'No title template') }}</div>
+                <div class="meta-rule-editor__preview-body"><strong>Body template:</strong> {{ templatePreviewText(action.config.bodyTemplate, 'No body template') }}</div>
+                <div class="meta-rule-editor__preview-line">
+                  <span><strong>Rendered title:</strong> {{ renderedTemplateExample(action.config.titleTemplate, 'No rendered title') }}</span>
+                  <button
+                    class="meta-rule-editor__copy-btn"
+                    type="button"
+                    :data-field="`personRenderedTitleCopy-${idx}`"
+                    @click="copyPreviewText(`person-title-${idx}`, renderedTemplateExample(action.config.titleTemplate, ''))"
+                  >
+                    {{ copiedPreviewKey === `person-title-${idx}` ? 'Copied' : 'Copy' }}
+                  </button>
+                </div>
+                <div class="meta-rule-editor__preview-line meta-rule-editor__preview-body">
+                  <span><strong>Rendered body:</strong> {{ renderedTemplateExample(action.config.bodyTemplate, 'No rendered body') }}</span>
+                  <button
+                    class="meta-rule-editor__copy-btn"
+                    type="button"
+                    :data-field="`personRenderedBodyCopy-${idx}`"
+                    @click="copyPreviewText(`person-body-${idx}`, renderedTemplateExample(action.config.bodyTemplate, ''))"
+                  >
+                    {{ copiedPreviewKey === `person-body-${idx}` ? 'Copied' : 'Copy' }}
+                  </button>
+                </div>
+                <div><strong>Public form:</strong> {{ viewSummaryName(action.config.publicFormViewId, 'No public form link') }}</div>
+                <div><strong>Internal processing:</strong> {{ viewSummaryName(action.config.internalViewId, 'No internal link') }}</div>
+              </div>
             </div>
 
             <!-- lock_record config -->
@@ -351,7 +503,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch } from 'vue'
+import { ref, computed, watch, onBeforeUnmount } from 'vue'
 import type { MultitableApiClient } from '../api/client'
 import type {
   AutomationRule,
@@ -364,6 +516,14 @@ import type {
   MetaCommentMentionSuggestion,
   MetaView,
 } from '../types'
+import { applyDingTalkNotificationPreset, type DingTalkNotificationPreset } from '../utils/dingtalkNotificationPresets'
+import {
+  appendTemplateToken,
+  DINGTALK_BODY_TEMPLATE_TOKENS,
+  DINGTALK_TITLE_TEMPLATE_TOKENS,
+} from '../utils/dingtalkNotificationTemplateTokens'
+import { listDingTalkTemplateSyntaxWarnings } from '../utils/dingtalkNotificationTemplateLint'
+import { renderDingTalkTemplateExample } from '../utils/dingtalkNotificationTemplateExample'
 
 interface FieldPair {
   fieldId: string
@@ -425,7 +585,9 @@ const personRecipientSuggestions = ref<Record<number, MetaCommentMentionSuggesti
 const personRecipientLoading = ref<Record<number, boolean>>({})
 const personRecipientErrors = ref<Record<number, string>>({})
 const personRecipientDirectory = ref<Record<string, { label: string; subtitle?: string }>>({})
+const copiedPreviewKey = ref('')
 let personRecipientSuggestionLoadId = 0
+let copiedPreviewResetTimer: ReturnType<typeof setTimeout> | null = null
 
 const formViews = computed(() => (props.views ?? []).filter((view) => view.type === 'form'))
 const internalViews = computed(() => props.views ?? [])
@@ -625,6 +787,106 @@ function removePersonRecipient(action: DraftAction, userId: string) {
     .join(', ')
 }
 
+function dingTalkGroupName(destinationId: unknown) {
+  const id = typeof destinationId === 'string' ? destinationId : ''
+  if (!id) return 'No group selected'
+  return dingTalkDestinations.value.find((item) => item.id === id)?.name ?? id
+}
+
+function viewSummaryName(viewId: unknown, fallback: string) {
+  const id = typeof viewId === 'string' ? viewId : ''
+  if (!id) return fallback
+  return (props.views ?? []).find((view) => view.id === id)?.name ?? id
+}
+
+function templatePreviewText(value: unknown, fallback: string) {
+  return typeof value === 'string' && value.trim() ? value.trim() : fallback
+}
+
+function renderedTemplateExample(value: unknown, fallback: string) {
+  if (typeof value !== 'string' || !value.trim()) return fallback
+  const rendered = renderDingTalkTemplateExample(value).trim()
+  return rendered || fallback
+}
+
+function copyPreviewText(key: string, text: string) {
+  const trimmed = text.trim()
+  if (!trimmed || !navigator.clipboard?.writeText) return
+  void navigator.clipboard.writeText(trimmed).then(() => {
+    copiedPreviewKey.value = key
+    if (copiedPreviewResetTimer) window.clearTimeout(copiedPreviewResetTimer)
+    copiedPreviewResetTimer = window.setTimeout(() => {
+      if (copiedPreviewKey.value === key) copiedPreviewKey.value = ''
+    }, 1500)
+  }).catch(() => {})
+}
+
+function personRecipientSummary(action: DraftAction) {
+  const selected = selectedPersonRecipients(action)
+  if (!selected.length) return 'No recipients selected'
+  return selected.map((item) => item.label).join(', ')
+}
+
+function templateSyntaxWarnings(value: unknown) {
+  return typeof value === 'string' ? listDingTalkTemplateSyntaxWarnings(value) : []
+}
+
+onBeforeUnmount(() => {
+  if (copiedPreviewResetTimer) window.clearTimeout(copiedPreviewResetTimer)
+})
+
+function applyGroupPreset(action: DraftAction, preset: DingTalkNotificationPreset) {
+  action.config = {
+    ...action.config,
+    ...applyDingTalkNotificationPreset(
+      {
+        titleTemplate: typeof action.config.titleTemplate === 'string' ? action.config.titleTemplate : '',
+        bodyTemplate: typeof action.config.bodyTemplate === 'string' ? action.config.bodyTemplate : '',
+        publicFormViewId: typeof action.config.publicFormViewId === 'string' ? action.config.publicFormViewId : '',
+        internalViewId: typeof action.config.internalViewId === 'string' ? action.config.internalViewId : '',
+      },
+      preset,
+      props.views ?? [],
+    ),
+  }
+}
+
+function applyPersonPreset(action: DraftAction, preset: DingTalkNotificationPreset) {
+  action.config = {
+    ...action.config,
+    ...applyDingTalkNotificationPreset(
+      {
+        titleTemplate: typeof action.config.titleTemplate === 'string' ? action.config.titleTemplate : '',
+        bodyTemplate: typeof action.config.bodyTemplate === 'string' ? action.config.bodyTemplate : '',
+        publicFormViewId: typeof action.config.publicFormViewId === 'string' ? action.config.publicFormViewId : '',
+        internalViewId: typeof action.config.internalViewId === 'string' ? action.config.internalViewId : '',
+      },
+      preset,
+      props.views ?? [],
+    ),
+  }
+}
+
+function appendGroupTemplateToken(
+  action: DraftAction,
+  field: 'titleTemplate' | 'bodyTemplate',
+  token: string,
+  multiline = false,
+) {
+  const current = typeof action.config[field] === 'string' ? action.config[field] : ''
+  action.config[field] = appendTemplateToken(current, token, multiline)
+}
+
+function appendPersonTemplateToken(
+  action: DraftAction,
+  field: 'titleTemplate' | 'bodyTemplate',
+  token: string,
+  multiline = false,
+) {
+  const current = typeof action.config[field] === 'string' ? action.config[field] : ''
+  action.config[field] = appendTemplateToken(current, token, multiline)
+}
+
 function defaultConfigForActionType(type: AutomationActionType): DraftActionConfig {
   switch (type) {
     case 'update_record':
@@ -815,6 +1077,8 @@ function onTestRun() {
 
 .meta-rule-editor__hint--error { color: #b91c1c; }
 
+.meta-rule-editor__hint--warning { color: #b45309; }
+
 .meta-rule-editor__input,
 .meta-rule-editor__select,
 .meta-rule-editor__textarea {
@@ -885,6 +1149,66 @@ function onTestRun() {
   flex-direction: column;
   gap: 6px;
   padding-left: 20px;
+}
+
+.meta-rule-editor__preset-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.meta-rule-editor__token-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 0 12px;
+}
+
+.meta-rule-editor__preset-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: #475569;
+}
+
+.meta-rule-editor__preview {
+  border: 1px solid #dbeafe;
+  background: #f8fbff;
+  border-radius: 8px;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: #334155;
+}
+
+.meta-rule-editor__preview-title {
+  font-weight: 700;
+  color: #1e3a8a;
+}
+
+.meta-rule-editor__preview-line {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.meta-rule-editor__preview-body {
+  white-space: pre-wrap;
+}
+
+.meta-rule-editor__copy-btn {
+  flex-shrink: 0;
+  border: 1px solid #bfdbfe;
+  background: #fff;
+  color: #1d4ed8;
+  border-radius: 999px;
+  padding: 2px 8px;
+  font-size: 11px;
+  cursor: pointer;
 }
 
 .meta-rule-editor__recipient-list {

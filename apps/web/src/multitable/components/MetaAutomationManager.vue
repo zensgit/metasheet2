@@ -73,6 +73,12 @@
           </template>
 
           <template v-if="draft.actionType === 'send_dingtalk_group_message'">
+            <div class="meta-automation__preset-row">
+              <span class="meta-automation__preset-label">Message preset</span>
+              <button class="meta-automation__btn" type="button" data-automation-preset="group-form" @click="applyGroupPreset('form_request')">Form request</button>
+              <button class="meta-automation__btn" type="button" data-automation-preset="group-internal" @click="applyGroupPreset('internal_process')">Internal processing</button>
+              <button class="meta-automation__btn" type="button" data-automation-preset="group-both" @click="applyGroupPreset('form_and_process')">Form + processing</button>
+            </div>
             <label class="meta-automation__label">DingTalk group</label>
             <select v-model="draft.dingtalkDestinationId" class="meta-automation__select" data-automation-field="dingtalkDestinationId">
               <option value="">-- select DingTalk group --</option>
@@ -88,6 +94,26 @@
               placeholder="例如：{{record.title}} 待处理"
               data-automation-field="dingtalkTitleTemplate"
             />
+            <div
+              v-for="warning in templateSyntaxWarnings(draft.dingtalkTitleTemplate)"
+              :key="`draft-group-title-${warning}`"
+              class="meta-automation__hint meta-automation__hint--warning"
+            >
+              {{ warning }}
+            </div>
+            <div class="meta-automation__preset-row">
+              <span class="meta-automation__preset-label">Template tokens</span>
+              <button
+                v-for="token in DINGTALK_TITLE_TEMPLATE_TOKENS"
+                :key="token.key"
+                class="meta-automation__btn"
+                type="button"
+                :data-automation-token="`group-title-${token.key}`"
+                @click="appendGroupTemplateToken('title', token.value)"
+              >
+                {{ token.label }}
+              </button>
+            </div>
             <label class="meta-automation__label">Body template</label>
             <textarea
               v-model="draft.dingtalkBodyTemplate"
@@ -96,6 +122,26 @@
               placeholder="支持 {{record.xxx}}、{{recordId}}、{{sheetId}}、{{actorId}}"
               data-automation-field="dingtalkBodyTemplate"
             ></textarea>
+            <div
+              v-for="warning in templateSyntaxWarnings(draft.dingtalkBodyTemplate)"
+              :key="`draft-group-body-${warning}`"
+              class="meta-automation__hint meta-automation__hint--warning"
+            >
+              {{ warning }}
+            </div>
+            <div class="meta-automation__preset-row">
+              <span class="meta-automation__preset-label">Template tokens</span>
+              <button
+                v-for="token in DINGTALK_BODY_TEMPLATE_TOKENS"
+                :key="token.key"
+                class="meta-automation__btn"
+                type="button"
+                :data-automation-token="`group-body-${token.key}`"
+                @click="appendGroupTemplateToken('body', token.value)"
+              >
+                {{ token.label }}
+              </button>
+            </div>
             <label class="meta-automation__label">Public form view (optional)</label>
             <select v-model="draft.publicFormViewId" class="meta-automation__select" data-automation-field="publicFormViewId">
               <option value="">-- no public form link --</option>
@@ -106,9 +152,45 @@
               <option value="">-- no internal link --</option>
               <option v-for="view in internalViews" :key="view.id" :value="view.id">{{ view.name }}</option>
             </select>
+            <div class="meta-automation__preview" data-automation-summary="group">
+              <div class="meta-automation__preview-title">Message summary</div>
+              <div><strong>Group:</strong> {{ dingTalkGroupName(draft.dingtalkDestinationId) }}</div>
+              <div><strong>Title template:</strong> {{ templatePreviewText(draft.dingtalkTitleTemplate, 'No title template') }}</div>
+              <div class="meta-automation__preview-body"><strong>Body template:</strong> {{ templatePreviewText(draft.dingtalkBodyTemplate, 'No body template') }}</div>
+              <div class="meta-automation__preview-line">
+                <span><strong>Rendered title:</strong> {{ renderedTemplateExample(draft.dingtalkTitleTemplate, 'No rendered title') }}</span>
+                <button
+                  class="meta-automation__copy-btn"
+                  type="button"
+                  data-automation-copy="group-rendered-title"
+                  @click="copyPreviewText('group-title', renderedTemplateExample(draft.dingtalkTitleTemplate, ''))"
+                >
+                  {{ copiedPreviewKey === 'group-title' ? 'Copied' : 'Copy' }}
+                </button>
+              </div>
+              <div class="meta-automation__preview-line meta-automation__preview-body">
+                <span><strong>Rendered body:</strong> {{ renderedTemplateExample(draft.dingtalkBodyTemplate, 'No rendered body') }}</span>
+                <button
+                  class="meta-automation__copy-btn"
+                  type="button"
+                  data-automation-copy="group-rendered-body"
+                  @click="copyPreviewText('group-body', renderedTemplateExample(draft.dingtalkBodyTemplate, ''))"
+                >
+                  {{ copiedPreviewKey === 'group-body' ? 'Copied' : 'Copy' }}
+                </button>
+              </div>
+              <div><strong>Public form:</strong> {{ viewSummaryName(draft.publicFormViewId, 'No public form link') }}</div>
+              <div><strong>Internal processing:</strong> {{ viewSummaryName(draft.internalViewId, 'No internal link') }}</div>
+            </div>
           </template>
 
           <template v-if="draft.actionType === 'send_dingtalk_person_message'">
+            <div class="meta-automation__preset-row">
+              <span class="meta-automation__preset-label">Message preset</span>
+              <button class="meta-automation__btn" type="button" data-automation-preset="person-form" @click="applyPersonPreset('form_request')">Form request</button>
+              <button class="meta-automation__btn" type="button" data-automation-preset="person-internal" @click="applyPersonPreset('internal_process')">Internal processing</button>
+              <button class="meta-automation__btn" type="button" data-automation-preset="person-both" @click="applyPersonPreset('form_and_process')">Form + processing</button>
+            </div>
             <label class="meta-automation__label">Search and add users</label>
             <input
               v-model="dingtalkPersonUserSearch"
@@ -164,6 +246,26 @@
               placeholder="例如：{{record.title}} 待处理"
               data-automation-field="dingtalkPersonTitleTemplate"
             />
+            <div
+              v-for="warning in templateSyntaxWarnings(draft.dingtalkPersonTitleTemplate)"
+              :key="`draft-person-title-${warning}`"
+              class="meta-automation__hint meta-automation__hint--warning"
+            >
+              {{ warning }}
+            </div>
+            <div class="meta-automation__preset-row">
+              <span class="meta-automation__preset-label">Template tokens</span>
+              <button
+                v-for="token in DINGTALK_TITLE_TEMPLATE_TOKENS"
+                :key="token.key"
+                class="meta-automation__btn"
+                type="button"
+                :data-automation-token="`person-title-${token.key}`"
+                @click="appendPersonTemplateToken('title', token.value)"
+              >
+                {{ token.label }}
+              </button>
+            </div>
             <label class="meta-automation__label">Body template</label>
             <textarea
               v-model="draft.dingtalkPersonBodyTemplate"
@@ -172,6 +274,26 @@
               placeholder="支持 {{record.xxx}}、{{recordId}}、{{sheetId}}、{{actorId}}"
               data-automation-field="dingtalkPersonBodyTemplate"
             ></textarea>
+            <div
+              v-for="warning in templateSyntaxWarnings(draft.dingtalkPersonBodyTemplate)"
+              :key="`draft-person-body-${warning}`"
+              class="meta-automation__hint meta-automation__hint--warning"
+            >
+              {{ warning }}
+            </div>
+            <div class="meta-automation__preset-row">
+              <span class="meta-automation__preset-label">Template tokens</span>
+              <button
+                v-for="token in DINGTALK_BODY_TEMPLATE_TOKENS"
+                :key="token.key"
+                class="meta-automation__btn"
+                type="button"
+                :data-automation-token="`person-body-${token.key}`"
+                @click="appendPersonTemplateToken('body', token.value)"
+              >
+                {{ token.label }}
+              </button>
+            </div>
             <label class="meta-automation__label">Public form view (optional)</label>
             <select v-model="draft.dingtalkPersonPublicFormViewId" class="meta-automation__select" data-automation-field="dingtalkPersonPublicFormViewId">
               <option value="">-- no public form link --</option>
@@ -182,6 +304,36 @@
               <option value="">-- no internal link --</option>
               <option v-for="view in internalViews" :key="view.id" :value="view.id">{{ view.name }}</option>
             </select>
+            <div class="meta-automation__preview" data-automation-summary="person">
+              <div class="meta-automation__preview-title">Message summary</div>
+              <div><strong>Recipients:</strong> {{ dingTalkPersonRecipientSummary }}</div>
+              <div><strong>Title template:</strong> {{ templatePreviewText(draft.dingtalkPersonTitleTemplate, 'No title template') }}</div>
+              <div class="meta-automation__preview-body"><strong>Body template:</strong> {{ templatePreviewText(draft.dingtalkPersonBodyTemplate, 'No body template') }}</div>
+              <div class="meta-automation__preview-line">
+                <span><strong>Rendered title:</strong> {{ renderedTemplateExample(draft.dingtalkPersonTitleTemplate, 'No rendered title') }}</span>
+                <button
+                  class="meta-automation__copy-btn"
+                  type="button"
+                  data-automation-copy="person-rendered-title"
+                  @click="copyPreviewText('person-title', renderedTemplateExample(draft.dingtalkPersonTitleTemplate, ''))"
+                >
+                  {{ copiedPreviewKey === 'person-title' ? 'Copied' : 'Copy' }}
+                </button>
+              </div>
+              <div class="meta-automation__preview-line meta-automation__preview-body">
+                <span><strong>Rendered body:</strong> {{ renderedTemplateExample(draft.dingtalkPersonBodyTemplate, 'No rendered body') }}</span>
+                <button
+                  class="meta-automation__copy-btn"
+                  type="button"
+                  data-automation-copy="person-rendered-body"
+                  @click="copyPreviewText('person-body', renderedTemplateExample(draft.dingtalkPersonBodyTemplate, ''))"
+                >
+                  {{ copiedPreviewKey === 'person-body' ? 'Copied' : 'Copy' }}
+                </button>
+              </div>
+              <div><strong>Public form:</strong> {{ viewSummaryName(draft.dingtalkPersonPublicFormViewId, 'No public form link') }}</div>
+              <div><strong>Internal processing:</strong> {{ viewSummaryName(draft.dingtalkPersonInternalViewId, 'No internal link') }}</div>
+            </div>
           </template>
 
           <div class="meta-automation__form-actions">
@@ -289,7 +441,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch } from 'vue'
+import { ref, computed, watch, onBeforeUnmount } from 'vue'
 import type {
   AutomationRule,
   AutomationTriggerType,
@@ -305,6 +457,14 @@ import MetaAutomationRuleEditor from './MetaAutomationRuleEditor.vue'
 import MetaAutomationLogViewer from './MetaAutomationLogViewer.vue'
 import MetaAutomationGroupDeliveryViewer from './MetaAutomationGroupDeliveryViewer.vue'
 import MetaAutomationPersonDeliveryViewer from './MetaAutomationPersonDeliveryViewer.vue'
+import { applyDingTalkNotificationPreset, type DingTalkNotificationPreset } from '../utils/dingtalkNotificationPresets'
+import {
+  appendTemplateToken,
+  DINGTALK_BODY_TEMPLATE_TOKENS,
+  DINGTALK_TITLE_TEMPLATE_TOKENS,
+} from '../utils/dingtalkNotificationTemplateTokens'
+import { listDingTalkTemplateSyntaxWarnings } from '../utils/dingtalkNotificationTemplateLint'
+import { renderDingTalkTemplateExample } from '../utils/dingtalkNotificationTemplateExample'
 
 const props = defineProps<{
   visible: boolean
@@ -374,7 +534,9 @@ const dingtalkPersonUserSearchLoading = ref(false)
 const dingtalkPersonUserSearchError = ref('')
 const dingtalkPersonUserSuggestions = ref<MetaCommentMentionSuggestion[]>([])
 const dingtalkPersonUserDirectory = ref<Record<string, { label: string; subtitle?: string }>>({})
+const copiedPreviewKey = ref('')
 let dingtalkPersonSuggestionLoadId = 0
+let copiedPreviewResetTimer: ReturnType<typeof setTimeout> | null = null
 const formViews = computed(() => (props.views ?? []).filter((view) => view.type === 'form'))
 const internalViews = computed(() => props.views ?? [])
 
@@ -452,6 +614,102 @@ function removeDingTalkPersonRecipient(userId: string) {
   draft.value.dingtalkPersonUserIds = parseUserIdsText(draft.value.dingtalkPersonUserIds)
     .filter((id) => id !== userId)
     .join(', ')
+}
+
+function dingTalkGroupName(destinationId: string) {
+  if (!destinationId) return 'No group selected'
+  return dingTalkDestinations.value.find((item) => item.id === destinationId)?.name ?? destinationId
+}
+
+function viewSummaryName(viewId: string, fallback: string) {
+  if (!viewId) return fallback
+  return (props.views ?? []).find((view) => view.id === viewId)?.name ?? viewId
+}
+
+function templatePreviewText(value: string, fallback: string) {
+  return value.trim() ? value.trim() : fallback
+}
+
+function renderedTemplateExample(value: string, fallback: string) {
+  const trimmed = value.trim()
+  if (!trimmed) return fallback
+  const rendered = renderDingTalkTemplateExample(trimmed).trim()
+  return rendered || fallback
+}
+
+function copyPreviewText(key: string, text: string) {
+  const trimmed = text.trim()
+  if (!trimmed || !navigator.clipboard?.writeText) return
+  void navigator.clipboard.writeText(trimmed).then(() => {
+    copiedPreviewKey.value = key
+    if (copiedPreviewResetTimer) window.clearTimeout(copiedPreviewResetTimer)
+    copiedPreviewResetTimer = window.setTimeout(() => {
+      if (copiedPreviewKey.value === key) copiedPreviewKey.value = ''
+    }, 1500)
+  }).catch(() => {})
+}
+
+const dingTalkPersonRecipientSummary = computed(() => {
+  if (!selectedDingTalkPersonRecipients.value.length) return 'No recipients selected'
+  return selectedDingTalkPersonRecipients.value.map((item) => item.label).join(', ')
+})
+
+function templateSyntaxWarnings(value: string) {
+  return listDingTalkTemplateSyntaxWarnings(value)
+}
+
+onBeforeUnmount(() => {
+  if (copiedPreviewResetTimer) window.clearTimeout(copiedPreviewResetTimer)
+})
+
+function applyGroupPreset(preset: DingTalkNotificationPreset) {
+  const next = applyDingTalkNotificationPreset(
+    {
+      titleTemplate: draft.value.dingtalkTitleTemplate,
+      bodyTemplate: draft.value.dingtalkBodyTemplate,
+      publicFormViewId: draft.value.publicFormViewId,
+      internalViewId: draft.value.internalViewId,
+    },
+    preset,
+    props.views ?? [],
+  )
+  draft.value.dingtalkTitleTemplate = next.titleTemplate ?? ''
+  draft.value.dingtalkBodyTemplate = next.bodyTemplate ?? ''
+  draft.value.publicFormViewId = next.publicFormViewId ?? ''
+  draft.value.internalViewId = next.internalViewId ?? ''
+}
+
+function applyPersonPreset(preset: DingTalkNotificationPreset) {
+  const next = applyDingTalkNotificationPreset(
+    {
+      titleTemplate: draft.value.dingtalkPersonTitleTemplate,
+      bodyTemplate: draft.value.dingtalkPersonBodyTemplate,
+      publicFormViewId: draft.value.dingtalkPersonPublicFormViewId,
+      internalViewId: draft.value.dingtalkPersonInternalViewId,
+    },
+    preset,
+    props.views ?? [],
+  )
+  draft.value.dingtalkPersonTitleTemplate = next.titleTemplate ?? ''
+  draft.value.dingtalkPersonBodyTemplate = next.bodyTemplate ?? ''
+  draft.value.dingtalkPersonPublicFormViewId = next.publicFormViewId ?? ''
+  draft.value.dingtalkPersonInternalViewId = next.internalViewId ?? ''
+}
+
+function appendGroupTemplateToken(field: 'title' | 'body', token: string) {
+  if (field === 'title') {
+    draft.value.dingtalkTitleTemplate = appendTemplateToken(draft.value.dingtalkTitleTemplate, token)
+    return
+  }
+  draft.value.dingtalkBodyTemplate = appendTemplateToken(draft.value.dingtalkBodyTemplate, token, true)
+}
+
+function appendPersonTemplateToken(field: 'title' | 'body', token: string) {
+  if (field === 'title') {
+    draft.value.dingtalkPersonTitleTemplate = appendTemplateToken(draft.value.dingtalkPersonTitleTemplate, token)
+    return
+  }
+  draft.value.dingtalkPersonBodyTemplate = appendTemplateToken(draft.value.dingtalkPersonBodyTemplate, token, true)
 }
 
 // --- Rule editor + log viewer state ---
@@ -825,6 +1083,10 @@ watch(
   color: #b91c1c;
 }
 
+.meta-automation__hint--warning {
+  color: #b45309;
+}
+
 .meta-automation__input,
 .meta-automation__select {
   width: 100%;
@@ -845,6 +1107,59 @@ watch(
 
 .meta-automation__recipient-list--selected {
   margin-bottom: 4px;
+}
+
+.meta-automation__preset-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.meta-automation__preset-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: #475569;
+}
+
+.meta-automation__preview {
+  border: 1px solid #dbeafe;
+  background: #f8fbff;
+  border-radius: 8px;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: #334155;
+}
+
+.meta-automation__preview-title {
+  font-weight: 700;
+  color: #1e3a8a;
+}
+
+.meta-automation__preview-line {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.meta-automation__preview-body {
+  white-space: pre-wrap;
+}
+
+.meta-automation__copy-btn {
+  flex-shrink: 0;
+  border: 1px solid #bfdbfe;
+  background: #fff;
+  color: #1d4ed8;
+  border-radius: 999px;
+  padding: 2px 8px;
+  font-size: 11px;
+  cursor: pointer;
 }
 
 .meta-automation__recipient-option,
