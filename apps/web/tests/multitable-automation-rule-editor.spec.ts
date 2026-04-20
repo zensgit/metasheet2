@@ -502,6 +502,40 @@ describe('MetaAutomationRuleEditor', () => {
     })
   })
 
+  it('can remove a selected dynamic recipient field chip in the rule editor', async () => {
+    const client = mockClient()
+    const { container } = mount({
+      visible: true,
+      sheetId: 'sheet_1',
+      fields,
+      views,
+      client,
+    })
+    await flushPromises()
+
+    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header select') as HTMLSelectElement
+    actionSelect.value = 'send_dingtalk_person_message'
+    actionSelect.dispatchEvent(new Event('change'))
+    await flushPromises()
+
+    const fieldSelect = container.querySelector('[data-field="dingtalkPersonRecipientFieldSelect"]') as HTMLSelectElement
+    fieldSelect.value = 'assigneeUserIds'
+    fieldSelect.dispatchEvent(new Event('change'))
+    await flushPromises()
+    fieldSelect.value = 'fld_1'
+    fieldSelect.dispatchEvent(new Event('change'))
+    await flushPromises()
+
+    const firstChip = container.querySelector('[data-field-recipient="assigneeUserIds"]') as HTMLButtonElement
+    expect(firstChip?.textContent).toContain('Assignees')
+    firstChip.click()
+    await flushPromises()
+
+    const recipientFieldInput = container.querySelector('[data-field="dingtalkPersonRecipientFieldPath"]') as HTMLInputElement
+    expect(recipientFieldInput.value).toBe('record.fld_1')
+    expect(container.querySelector('[data-field-recipient="assigneeUserIds"]')).toBeNull()
+  })
+
   it('can search and add DingTalk person recipients', async () => {
     const saved = vi.fn()
     const client = mockClient()

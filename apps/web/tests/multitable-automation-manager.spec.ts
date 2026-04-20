@@ -520,6 +520,38 @@ describe('MetaAutomationManager', () => {
     })
   })
 
+  it('can remove a selected dynamic recipient field chip in the inline form', async () => {
+    const { client } = mockClient([])
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
+    await flushPromises()
+
+    const addBtn = container.querySelector('.meta-automation__btn-add') as HTMLButtonElement
+    addBtn.click()
+    await nextTick()
+
+    const actionSelect = container.querySelector('[data-automation-field="actionType"]') as HTMLSelectElement
+    actionSelect.value = 'send_dingtalk_person_message'
+    actionSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushPromises()
+
+    const fieldSelect = container.querySelector('[data-automation-field="dingtalkPersonRecipientFieldSelect"]') as HTMLSelectElement
+    fieldSelect.value = 'assigneeUserIds'
+    fieldSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushPromises()
+    fieldSelect.value = 'fld_1'
+    fieldSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushPromises()
+
+    const firstChip = container.querySelector('[data-automation-recipient-field="assigneeUserIds"]') as HTMLButtonElement
+    expect(firstChip?.textContent).toContain('Assignees')
+    firstChip.click()
+    await flushPromises()
+
+    const recipientFieldInput = container.querySelector('[data-automation-field="dingtalkPersonRecipientFieldPath"]') as HTMLInputElement
+    expect(recipientFieldInput.value).toBe('record.fld_1')
+    expect(container.querySelector('[data-automation-recipient-field="assigneeUserIds"]')).toBeNull()
+  })
+
   it('can search and add DingTalk person recipients before save', async () => {
     const { client, fetchFn } = mockClient([])
     const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })

@@ -257,6 +257,22 @@
                 {{ field.name }} (record.{{ field.id }})
               </option>
             </select>
+            <div
+              v-if="selectedDingTalkPersonRecipientFields.length"
+              class="meta-automation__recipient-list meta-automation__recipient-list--selected"
+            >
+              <button
+                v-for="field in selectedDingTalkPersonRecipientFields"
+                :key="field.id"
+                class="meta-automation__recipient-chip"
+                type="button"
+                :data-automation-recipient-field="field.id"
+                @click="removeDingTalkPersonRecipientField(field.id)"
+              >
+                <strong>{{ field.label }}</strong>
+                <em>Remove</em>
+              </button>
+            </div>
             <div class="meta-automation__hint">
               Record data is keyed by field ID. Use comma or newline separated <code>record.&lt;fieldId&gt;</code> paths, or append fields above.
             </div>
@@ -695,10 +711,15 @@ function recipientFieldSummaryLabel(path: string) {
   return field ? `${field.name} (record.${normalized})` : `record.${normalized}`
 }
 
+const selectedDingTalkPersonRecipientFields = computed(() => parseRecipientFieldPathsText(draft.value.dingtalkPersonRecipientFieldPath)
+  .map((path) => ({
+    id: path,
+    label: recipientFieldSummaryLabel(path),
+  }))
+  .filter((item) => item.label))
+
 const dingTalkPersonRecipientFieldSummary = computed(() => {
-  const labels = parseRecipientFieldPathsText(draft.value.dingtalkPersonRecipientFieldPath)
-    .map((path) => recipientFieldSummaryLabel(path))
-    .filter(Boolean)
+  const labels = selectedDingTalkPersonRecipientFields.value.map((item) => item.label)
   if (!labels.length) return 'No dynamic recipient field'
   return labels.join(', ')
 })
@@ -712,6 +733,13 @@ function appendDingTalkPersonRecipientField(select: HTMLSelectElement) {
     .map((path) => `record.${path}`)
     .join(', ')
   select.value = ''
+}
+
+function removeDingTalkPersonRecipientField(path: string) {
+  draft.value.dingtalkPersonRecipientFieldPath = parseRecipientFieldPathsText(draft.value.dingtalkPersonRecipientFieldPath)
+    .filter((entry) => entry !== path)
+    .map((entry) => `record.${entry}`)
+    .join(', ')
 }
 
 function templateSyntaxWarnings(value: string) {
