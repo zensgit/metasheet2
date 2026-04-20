@@ -32,6 +32,15 @@ function mockClient() {
         createdBy: 'user_1',
         createdAt: '2026-04-01T00:00:00Z',
       },
+      {
+        id: 'dt_2',
+        name: 'Escalation Group',
+        webhookUrl: 'https://oapi.dingtalk.com/robot/send?access_token=test-2',
+        enabled: true,
+        sheetId: 'sheet_1',
+        createdBy: 'user_1',
+        createdAt: '2026-04-01T00:00:00Z',
+      },
     ]),
     listCommentMentionSuggestions: vi.fn(async () => ({
       items: [
@@ -235,8 +244,11 @@ describe('MetaAutomationRuleEditor', () => {
     actionSelect.dispatchEvent(new Event('change'))
     await flushPromises()
 
-    const destinationSelect = container.querySelector('[data-field="dingtalkDestinationId"]') as HTMLSelectElement
+    const destinationSelect = container.querySelector('[data-field="dingtalkDestinationPickerId"]') as HTMLSelectElement
     destinationSelect.value = 'dt_1'
+    destinationSelect.dispatchEvent(new Event('change'))
+    await flushPromises()
+    destinationSelect.value = 'dt_2'
     destinationSelect.dispatchEvent(new Event('change'))
 
     const titleInput = container.querySelector('[data-field="dingtalkTitleTemplate"]') as HTMLInputElement
@@ -266,6 +278,7 @@ describe('MetaAutomationRuleEditor', () => {
     expect(payload.actionType).toBe('send_dingtalk_group_message')
     expect(payload.actionConfig).toEqual({
       destinationId: 'dt_1',
+      destinationIds: ['dt_1', 'dt_2'],
       titleTemplate: 'Ticket {{recordId}}',
       bodyTemplate: 'Please review {{record.status}}',
       publicFormViewId: 'view_form',
@@ -275,12 +288,15 @@ describe('MetaAutomationRuleEditor', () => {
       type: 'send_dingtalk_group_message',
       config: {
         destinationId: 'dt_1',
+        destinationIds: ['dt_1', 'dt_2'],
         titleTemplate: 'Ticket {{recordId}}',
         bodyTemplate: 'Please review {{record.status}}',
         publicFormViewId: 'view_form',
         internalViewId: 'view_grid',
       },
     })
+    expect(container.querySelector('[data-group-destination="dt_1"]')).not.toBeNull()
+    expect(container.querySelector('[data-group-destination="dt_2"]')).not.toBeNull()
     expect(client.listDingTalkGroups).toHaveBeenCalledTimes(1)
     expect(client.listDingTalkGroups).toHaveBeenCalledWith('sheet_1')
   })
@@ -724,7 +740,7 @@ describe('MetaAutomationRuleEditor', () => {
     actionSelect.dispatchEvent(new Event('change'))
     await flushPromises()
 
-    const destinationSelect = container.querySelector('[data-field="dingtalkDestinationId"]') as HTMLSelectElement
+    const destinationSelect = container.querySelector('[data-field="dingtalkDestinationPickerId"]') as HTMLSelectElement
     destinationSelect.value = 'dt_1'
     destinationSelect.dispatchEvent(new Event('change'))
 

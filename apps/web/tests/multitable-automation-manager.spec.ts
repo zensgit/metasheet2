@@ -57,15 +57,26 @@ function mockClient(rules: AutomationRule[] = []) {
     const method = init?.method ?? 'GET'
     if (method === 'GET' && url.includes('/dingtalk-groups')) {
       return ok({
-        destinations: [{
-          id: 'dt_1',
-          name: 'Ops Group',
-          webhookUrl: 'https://oapi.dingtalk.com/robot/send?access_token=test',
-          enabled: true,
-          sheetId: 'sheet_1',
-          createdBy: 'user_1',
-          createdAt: '2026-04-01T00:00:00Z',
-        }],
+        destinations: [
+          {
+            id: 'dt_1',
+            name: 'Ops Group',
+            webhookUrl: 'https://oapi.dingtalk.com/robot/send?access_token=test',
+            enabled: true,
+            sheetId: 'sheet_1',
+            createdBy: 'user_1',
+            createdAt: '2026-04-01T00:00:00Z',
+          },
+          {
+            id: 'dt_2',
+            name: 'Escalation Group',
+            webhookUrl: 'https://oapi.dingtalk.com/robot/send?access_token=test-2',
+            enabled: true,
+            sheetId: 'sheet_1',
+            createdBy: 'user_1',
+            createdAt: '2026-04-01T00:00:00Z',
+          },
+        ],
       })
     }
     if (method === 'GET' && url.includes('/automations')) {
@@ -296,8 +307,11 @@ describe('MetaAutomationManager', () => {
     actionSelect.dispatchEvent(new Event('change', { bubbles: true }))
     await flushPromises()
 
-    const destinationSelect = container.querySelector('[data-automation-field="dingtalkDestinationId"]') as HTMLSelectElement
+    const destinationSelect = container.querySelector('[data-automation-field="dingtalkDestinationPickerId"]') as HTMLSelectElement
     destinationSelect.value = 'dt_1'
+    destinationSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushPromises()
+    destinationSelect.value = 'dt_2'
     destinationSelect.dispatchEvent(new Event('change', { bubbles: true }))
 
     const titleInput = container.querySelector('[data-automation-field="dingtalkTitleTemplate"]') as HTMLInputElement
@@ -317,6 +331,9 @@ describe('MetaAutomationManager', () => {
     internalViewSelect.dispatchEvent(new Event('change', { bubbles: true }))
     await flushPromises()
 
+    expect(container.querySelector('[data-automation-group-destination="dt_1"]')).not.toBeNull()
+    expect(container.querySelector('[data-automation-group-destination="dt_2"]')).not.toBeNull()
+
     const saveBtn = container.querySelector('.meta-automation__btn--primary') as HTMLButtonElement
     saveBtn.click()
     await flushPromises()
@@ -327,6 +344,7 @@ describe('MetaAutomationManager', () => {
     expect(body.actionType).toBe('send_dingtalk_group_message')
     expect(body.actionConfig).toEqual({
       destinationId: 'dt_1',
+      destinationIds: ['dt_1', 'dt_2'],
       titleTemplate: 'Ticket {{recordId}}',
       bodyTemplate: 'Please fill {{record.status}}',
       publicFormViewId: 'view_form',

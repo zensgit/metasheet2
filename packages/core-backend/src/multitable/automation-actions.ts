@@ -49,7 +49,8 @@ export interface SendNotificationConfig {
 
 /** Config shape for send_dingtalk_group_message */
 export interface SendDingTalkGroupMessageConfig {
-  destinationId: string
+  destinationId?: string
+  destinationIds?: string[]
   titleTemplate: string
   bodyTemplate: string
   publicFormViewId?: string

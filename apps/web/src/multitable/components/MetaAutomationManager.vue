@@ -79,13 +79,35 @@
               <button class="meta-automation__btn" type="button" data-automation-preset="group-internal" @click="applyGroupPreset('internal_process')">Internal processing</button>
               <button class="meta-automation__btn" type="button" data-automation-preset="group-both" @click="applyGroupPreset('form_and_process')">Form + processing</button>
             </div>
-            <label class="meta-automation__label">DingTalk group</label>
-            <select v-model="draft.dingtalkDestinationId" class="meta-automation__select" data-automation-field="dingtalkDestinationId">
-              <option value="">-- select DingTalk group --</option>
-              <option v-for="destination in dingTalkDestinations" :key="destination.id" :value="destination.id">
+            <label class="meta-automation__label">Add DingTalk groups</label>
+            <select
+              v-model="draft.dingtalkDestinationPickerId"
+              class="meta-automation__select"
+              data-automation-field="dingtalkDestinationPickerId"
+              @change="appendDingTalkGroupDestination($event.target as HTMLSelectElement)"
+            >
+              <option value="">-- add DingTalk group --</option>
+              <option v-for="destination in availableDingTalkGroupDestinations" :key="destination.id" :value="destination.id">
                 {{ destination.name }}
               </option>
             </select>
+            <div
+              v-if="selectedDingTalkGroupDestinations.length"
+              class="meta-automation__recipient-list meta-automation__recipient-list--selected"
+            >
+              <button
+                v-for="destination in selectedDingTalkGroupDestinations"
+                :key="destination.id"
+                class="meta-automation__recipient-chip"
+                type="button"
+                :data-automation-group-destination="destination.id"
+                @click="removeDingTalkGroupDestination(destination.id)"
+              >
+                <strong>{{ destination.label }}</strong>
+                <span>{{ destination.subtitle || destination.id }}</span>
+                <em>Remove</em>
+              </button>
+            </div>
             <label class="meta-automation__label">Title template</label>
             <input
               v-model="draft.dingtalkTitleTemplate"
@@ -154,7 +176,7 @@
             </select>
             <div class="meta-automation__preview" data-automation-summary="group">
               <div class="meta-automation__preview-title">Message summary</div>
-              <div><strong>Group:</strong> {{ dingTalkGroupName(draft.dingtalkDestinationId) }}</div>
+              <div><strong>Groups:</strong> {{ dingTalkGroupSummary }}</div>
               <div><strong>Title template:</strong> {{ templatePreviewText(draft.dingtalkTitleTemplate, 'No title template') }}</div>
               <div class="meta-automation__preview-body"><strong>Body template:</strong> {{ templatePreviewText(draft.dingtalkBodyTemplate, 'No body template') }}</div>
               <div class="meta-automation__preview-line">
@@ -539,7 +561,8 @@ interface DraftState {
   notifyMessage: string
   targetFieldId: string
   targetValue: string
-  dingtalkDestinationId: string
+  dingtalkDestinationIds: string[]
+  dingtalkDestinationPickerId: string
   dingtalkTitleTemplate: string
   dingtalkBodyTemplate: string
   publicFormViewId: string
@@ -561,7 +584,8 @@ function emptyDraft(): DraftState {
     notifyMessage: '',
     targetFieldId: '',
     targetValue: '',
-    dingtalkDestinationId: '',
+    dingtalkDestinationIds: [],
+    dingtalkDestinationPickerId: '',
     dingtalkTitleTemplate: '',
     dingtalkBodyTemplate: '',
     publicFormViewId: '',
@@ -664,10 +688,53 @@ function removeDingTalkPersonRecipient(userId: string) {
     .join(', ')
 }
 
-function dingTalkGroupName(destinationId: string) {
-  if (!destinationId) return 'No group selected'
-  return dingTalkDestinations.value.find((item) => item.id === destinationId)?.name ?? destinationId
+function parseGroupDestinationIds(value: unknown): string[] {
+  if (Array.isArray(value)) {
+    return Array.from(new Set(
+      value
+        .filter((item): item is string => typeof item === 'string')
+        .map((item) => item.trim())
+        .filter(Boolean),
+    ))
+  }
+  if (typeof value === 'string' && value.trim()) {
+    return [value.trim()]
+  }
+  return []
 }
+
+const selectedDingTalkGroupDestinations = computed(() =>
+  draft.value.dingtalkDestinationIds.map((id) => {
+    const destination = dingTalkDestinations.value.find((item) => item.id === id)
+    return {
+      id,
+      label: destination?.name ?? id,
+      subtitle: destination?.sheetId ? `sheet: ${destination.sheetId}` : undefined,
+    }
+  }),
+)
+
+const availableDingTalkGroupDestinations = computed(() => {
+  const selected = new Set(draft.value.dingtalkDestinationIds)
+  return dingTalkDestinations.value.filter((destination) => !selected.has(destination.id))
+})
+
+function appendDingTalkGroupDestination(select: HTMLSelectElement) {
+  const destinationId = select.value.trim()
+  if (!destinationId) return
+  draft.value.dingtalkDestinationIds = Array.from(new Set([...draft.value.dingtalkDestinationIds, destinationId]))
+  draft.value.dingtalkDestinationPickerId = ''
+  select.value = ''
+}
+
+function removeDingTalkGroupDestination(destinationId: string) {
+  draft.value.dingtalkDestinationIds = draft.value.dingtalkDestinationIds.filter((id) => id !== destinationId)
+}
+
+const dingTalkGroupSummary = computed(() => {
+  if (!selectedDingTalkGroupDestinations.value.length) return 'No groups selected'
+  return selectedDingTalkGroupDestinations.value.map((item) => item.label).join(', ')
+})
 
 function viewSummaryName(viewId: string, fallback: string) {
   if (!viewId) return fallback
@@ -891,7 +958,7 @@ const canSave = computed(() => {
   if (draft.value.actionType === 'notify' && !draft.value.notifyMessage.trim()) return false
   if (draft.value.actionType === 'update_field' && (!draft.value.targetFieldId || !draft.value.targetValue.trim())) return false
   if (draft.value.actionType === 'send_dingtalk_group_message') {
-    if (!draft.value.dingtalkDestinationId) return false
+    if (!draft.value.dingtalkDestinationIds.length) return false
     if (!draft.value.dingtalkTitleTemplate.trim()) return false
     if (!draft.value.dingtalkBodyTemplate.trim()) return false
   }
@@ -922,7 +989,8 @@ function openEditForm(rule: AutomationRule) {
     notifyMessage: (rule.actionConfig?.message as string) ?? '',
     targetFieldId: (rule.actionConfig?.fieldId as string) ?? '',
     targetValue: (rule.actionConfig?.value as string) ?? '',
-    dingtalkDestinationId: (rule.actionConfig?.destinationId as string) ?? '',
+    dingtalkDestinationIds: parseGroupDestinationIds(rule.actionConfig?.destinationIds ?? rule.actionConfig?.destinationId),
+    dingtalkDestinationPickerId: '',
     dingtalkTitleTemplate: (rule.actionConfig?.titleTemplate as string) ?? '',
     dingtalkBodyTemplate: (rule.actionConfig?.bodyTemplate as string) ?? '',
     publicFormViewId: (rule.actionConfig?.publicFormViewId as string) ?? '',
@@ -966,8 +1034,10 @@ function buildActionConfig(): Record<string, unknown> {
     return { fieldId: draft.value.targetFieldId, value: draft.value.targetValue }
   }
   if (draft.value.actionType === 'send_dingtalk_group_message') {
+    const destinationIds = Array.from(new Set(draft.value.dingtalkDestinationIds.map((id) => id.trim()).filter(Boolean)))
     return {
-      destinationId: draft.value.dingtalkDestinationId,
+      destinationId: destinationIds[0] || undefined,
+      destinationIds: destinationIds.length ? destinationIds : undefined,
       titleTemplate: draft.value.dingtalkTitleTemplate,
       bodyTemplate: draft.value.dingtalkBodyTemplate,
       publicFormViewId: draft.value.publicFormViewId || undefined,

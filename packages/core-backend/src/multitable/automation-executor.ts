@@ -932,14 +932,24 @@ export class AutomationExecutor {
     config: SendDingTalkGroupMessageConfig,
     context: ExecutionContext,
   ): Promise<AutomationStepResult> {
-    const destinationId = typeof config.destinationId === 'string' ? config.destinationId.trim() : ''
+    const destinationIds = Array.from(new Set([
+      ...(Array.isArray(config.destinationIds)
+        ? config.destinationIds
+          .filter((value): value is string => typeof value === 'string')
+          .map((value) => value.trim())
+          .filter(Boolean)
+        : []),
+      ...(typeof config.destinationId === 'string' && config.destinationId.trim()
+        ? [config.destinationId.trim()]
+        : []),
+    ]))
     const titleTemplate = typeof config.titleTemplate === 'string' ? config.titleTemplate.trim() : ''
     const bodyTemplate = typeof config.bodyTemplate === 'string' ? config.bodyTemplate.trim() : ''
     const publicFormViewId = typeof config.publicFormViewId === 'string' ? config.publicFormViewId.trim() : ''
     const internalViewId = typeof config.internalViewId === 'string' ? config.internalViewId.trim() : ''
 
-    if (!destinationId) {
-      return { actionType: 'send_dingtalk_group_message', status: 'failed', error: 'DingTalk destination is required' }
+    if (!destinationIds.length) {
+      return { actionType: 'send_dingtalk_group_message', status: 'failed', error: 'At least one DingTalk destination is required' }
     }
     if (!titleTemplate) {
       return { actionType: 'send_dingtalk_group_message', status: 'failed', error: 'DingTalk title template is required' }
@@ -951,22 +961,34 @@ export class AutomationExecutor {
     const destinationResult = await this.deps.queryFn(
       `SELECT id, name, webhook_url, secret, enabled
          FROM dingtalk_group_destinations
-        WHERE id = $1`,
-      [destinationId],
+        WHERE id = ANY($1)`,
+      [destinationIds],
     )
-    const destination = (destinationResult.rows[0] ?? null) as {
+    const destinations = destinationResult.rows as Array<{
       id: string
       name: string
       webhook_url: string
       secret: string | null
       enabled: boolean
-    } | null
-
-    if (!destination) {
-      return { actionType: 'send_dingtalk_group_message', status: 'failed', error: 'DingTalk destination not found' }
+    }>
+    const destinationsById = new Map(destinations.map((destination) => [destination.id, destination]))
+    const missingDestinationIds = destinationIds.filter((id) => !destinationsById.has(id))
+    if (missingDestinationIds.length) {
+      return {
+        actionType: 'send_dingtalk_group_message',
+        status: 'failed',
+        error: `DingTalk destinations not found: ${missingDestinationIds.join(', ')}`,
+      }
     }
-    if (destination.enabled !== true) {
-      return { actionType: 'send_dingtalk_group_message', status: 'failed', error: 'DingTalk destination is disabled' }
+    const disabledDestinations = destinationIds
+      .map((id) => destinationsById.get(id))
+      .filter((destination): destination is NonNullable<typeof destination> => Boolean(destination) && destination.enabled !== true)
+    if (disabledDestinations.length) {
+      return {
+        actionType: 'send_dingtalk_group_message',
+        status: 'failed',
+        error: `DingTalk destinations are disabled: ${disabledDestinations.map((destination) => destination.name || destination.id).join(', ')}`,
+      }
     }
 
     let baseUrl: string | null = null
@@ -1045,16 +1067,20 @@ export class AutomationExecutor {
       renderedBody,
       linkLines.length > 0 ? ['**快捷入口**', ...linkLines].join('\n') : '',
     ].filter(Boolean).join('\n\n')
-    let deliveryRecorded = false
-    let responseStatus: number | null = null
-    let responseBody: string | null = null
+    const orderedDestinations = destinationIds
+      .map((id) => destinationsById.get(id))
+      .filter((destination): destination is NonNullable<typeof destination> => Boolean(destination))
+    const successfulDestinations: Array<{ id: string; name: string }> = []
+    const failedDestinations: Array<{ id: string; name: string; error: string }> = []
 
-    try {
+    for (const destination of orderedDestinations) {
+      let deliveryRecorded = false
+      let responseStatus: number | null = null
+      let responseBody: string | null = null
       const controller = new AbortController()
       const timeout = setTimeout(() => controller.abort(), WEBHOOK_TIMEOUT_MS)
-      let response: Response
       try {
-        response = await (this.deps.fetchFn ?? globalThis.fetch)(
+        const response = await (this.deps.fetchFn ?? globalThis.fetch)(
           buildSignedDingTalkWebhookUrl(destination.webhook_url, destination.secret ?? undefined),
           {
             method: 'POST',
@@ -1066,99 +1092,115 @@ export class AutomationExecutor {
             signal: controller.signal,
           },
         )
+        const parsed = await readJsonSafely(response)
+        responseStatus = response.status
+        responseBody = parsed ? JSON.stringify(parsed) : response.statusText || null
+        if (!response.ok) {
+          const errorMessage = `DingTalk request failed with HTTP ${response.status}`
+          deliveryRecorded = true
+          await recordDingTalkGroupDeliverySafely(this.deps.queryFn, {
+            destinationId: destination.id,
+            sourceType: 'automation',
+            subject: renderedTitle,
+            content: bodyWithLinks,
+            success: false,
+            httpStatus: response.status,
+            responseBody,
+            errorMessage,
+            automationRuleId: context.ruleId,
+            recordId: context.recordId,
+            initiatedBy: context.actorId ?? null,
+          })
+          failedDestinations.push({ id: destination.id, name: destination.name, error: errorMessage })
+          continue
+        }
+        try {
+          validateDingTalkRobotResponse(parsed)
+        } catch (err) {
+          const errorMessage = err instanceof Error ? err.message : String(err)
+          deliveryRecorded = true
+          await recordDingTalkGroupDeliverySafely(this.deps.queryFn, {
+            destinationId: destination.id,
+            sourceType: 'automation',
+            subject: renderedTitle,
+            content: bodyWithLinks,
+            success: false,
+            httpStatus: response.status,
+            responseBody,
+            errorMessage,
+            automationRuleId: context.ruleId,
+            recordId: context.recordId,
+            initiatedBy: context.actorId ?? null,
+          })
+          failedDestinations.push({ id: destination.id, name: destination.name, error: errorMessage })
+          continue
+        }
+        deliveryRecorded = true
+        await recordDingTalkGroupDeliverySafely(this.deps.queryFn, {
+          destinationId: destination.id,
+          sourceType: 'automation',
+          subject: renderedTitle,
+          content: bodyWithLinks,
+          success: true,
+          httpStatus: response.status,
+          responseBody,
+          automationRuleId: context.ruleId,
+          recordId: context.recordId,
+          initiatedBy: context.actorId ?? null,
+        })
+        successfulDestinations.push({ id: destination.id, name: destination.name })
+      } catch (err) {
+        if (!deliveryRecorded) {
+          await recordDingTalkGroupDeliverySafely(this.deps.queryFn, {
+            destinationId: destination.id,
+            sourceType: 'automation',
+            subject: renderedTitle,
+            content: bodyWithLinks,
+            success: false,
+            httpStatus: responseStatus,
+            responseBody,
+            errorMessage: err instanceof Error ? err.message : String(err),
+            automationRuleId: context.ruleId,
+            recordId: context.recordId,
+            initiatedBy: context.actorId ?? null,
+          })
+        }
+        failedDestinations.push({
+          id: destination.id,
+          name: destination.name,
+          error: err instanceof Error ? err.message : String(err),
+        })
       } finally {
         clearTimeout(timeout)
       }
-      const parsed = await readJsonSafely(response)
-      responseStatus = response.status
-      responseBody = parsed ? JSON.stringify(parsed) : response.statusText || null
-      if (!response.ok) {
-        deliveryRecorded = true
-        await recordDingTalkGroupDeliverySafely(this.deps.queryFn, {
-          destinationId: destination.id,
-          sourceType: 'automation',
-          subject: renderedTitle,
-          content: bodyWithLinks,
-          success: false,
-          httpStatus: response.status,
-          responseBody,
-          errorMessage: `DingTalk request failed with HTTP ${response.status}`,
-          automationRuleId: context.ruleId,
-          recordId: context.recordId,
-          initiatedBy: context.actorId ?? null,
-        })
-        return {
-          actionType: 'send_dingtalk_group_message',
-          status: 'failed',
-          error: `DingTalk request failed with HTTP ${response.status}`,
-        }
-      }
-      try {
-        validateDingTalkRobotResponse(parsed)
-      } catch (err) {
-        deliveryRecorded = true
-        await recordDingTalkGroupDeliverySafely(this.deps.queryFn, {
-          destinationId: destination.id,
-          sourceType: 'automation',
-          subject: renderedTitle,
-          content: bodyWithLinks,
-          success: false,
-          httpStatus: response.status,
-          responseBody,
-          errorMessage: err instanceof Error ? err.message : String(err),
-          automationRuleId: context.ruleId,
-          recordId: context.recordId,
-          initiatedBy: context.actorId ?? null,
-        })
-        return {
-          actionType: 'send_dingtalk_group_message',
-          status: 'failed',
-          error: err instanceof Error ? err.message : String(err),
-        }
-      }
-      deliveryRecorded = true
-      await recordDingTalkGroupDeliverySafely(this.deps.queryFn, {
-        destinationId: destination.id,
-        sourceType: 'automation',
-        subject: renderedTitle,
-        content: bodyWithLinks,
-        success: true,
-        httpStatus: response.status,
-        responseBody,
-        automationRuleId: context.ruleId,
-        recordId: context.recordId,
-        initiatedBy: context.actorId ?? null,
-      })
-      return {
-        actionType: 'send_dingtalk_group_message',
-        status: 'success',
-        output: {
-          destinationId: destination.id,
-          destinationName: destination.name,
-          linkCount: linkLines.length,
-        },
-      }
-    } catch (err) {
-      if (!deliveryRecorded) {
-        await recordDingTalkGroupDeliverySafely(this.deps.queryFn, {
-          destinationId: destination.id,
-          sourceType: 'automation',
-          subject: renderedTitle,
-          content: bodyWithLinks,
-          success: false,
-          httpStatus: responseStatus,
-          responseBody,
-          errorMessage: err instanceof Error ? err.message : String(err),
-          automationRuleId: context.ruleId,
-          recordId: context.recordId,
-          initiatedBy: context.actorId ?? null,
-        })
-      }
+    }
+
+    if (failedDestinations.length) {
       return {
         actionType: 'send_dingtalk_group_message',
         status: 'failed',
-        error: err instanceof Error ? err.message : String(err),
+        error: `${failedDestinations.length} of ${orderedDestinations.length} DingTalk destinations failed: ${failedDestinations.map((destination) => `${destination.name} (${destination.error})`).join('; ')}`,
+        output: {
+          destinationIds: orderedDestinations.map((destination) => destination.id),
+          destinationNames: orderedDestinations.map((destination) => destination.name),
+          sentCount: successfulDestinations.length,
+          failedDestinationIds: failedDestinations.map((destination) => destination.id),
+          linkCount: linkLines.length,
+        },
       }
+    }
+
+    return {
+      actionType: 'send_dingtalk_group_message',
+      status: 'success',
+      output: {
+        destinationId: successfulDestinations[0]?.id,
+        destinationName: successfulDestinations[0]?.name,
+        destinationIds: successfulDestinations.map((destination) => destination.id),
+        destinationNames: successfulDestinations.map((destination) => destination.name),
+        sentCount: successfulDestinations.length,
+        linkCount: linkLines.length,
+      },
     }
   }
 }
