@@ -59,6 +59,7 @@ const CreateDingTalkGroupSchema = z.object({
   webhookUrl: z.string().url(),
   secret: z.string().optional(),
   enabled: z.boolean().optional(),
+  sheetId: z.string().optional(),
 })
 
 const UpdateDingTalkGroupSchema = z.object({
@@ -328,7 +329,7 @@ export function apiTokensRouter(): Router {
     }
     try {
       const input = CreateDingTalkGroupSchema.parse(req.body)
-      const sheetId = getSheetId((req.body as Record<string, unknown> | undefined)?.sheetId)
+      const sheetId = getSheetId(input.sheetId)
       if (sheetId && !await requireSheetAutomationAccess(res, userId, sheetId)) return
       const destination = await dingTalkGroupDestinationService.createDestination(userId, {
         name: input.name,

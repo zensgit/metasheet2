@@ -658,17 +658,19 @@ async function onSaveDingTalkGroup() {
   busy.value = true
   error.value = null
   try {
-    const input = {
+    const createInput = {
       name: dingTalkGroupDraft.value.name.trim(),
       webhookUrl: dingTalkGroupDraft.value.webhookUrl.trim(),
       secret: dingTalkGroupDraft.value.secret || undefined,
       enabled: dingTalkGroupDraft.value.enabled,
-      sheetId: props.sheetId,
     }
     if (editingDingTalkGroupId.value) {
-      await props.client.updateDingTalkGroup(editingDingTalkGroupId.value, input, props.sheetId)
+      await props.client.updateDingTalkGroup(editingDingTalkGroupId.value, createInput, props.sheetId)
     } else {
-      await props.client.createDingTalkGroup(input)
+      await props.client.createDingTalkGroup({
+        ...createInput,
+        sheetId: props.sheetId,
+      })
     }
     cancelDingTalkGroupForm()
     await loadDingTalkGroups()

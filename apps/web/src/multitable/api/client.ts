@@ -1146,7 +1146,7 @@ export class MultitableApiClient {
     return parseJson(res)
   }
 
-  async updateDingTalkGroup(id: string, input: Partial<DingTalkGroupDestinationInput>, sheetId?: string): Promise<DingTalkGroupDestination> {
+  async updateDingTalkGroup(id: string, input: Partial<Omit<DingTalkGroupDestinationInput, 'sheetId'>>, sheetId?: string): Promise<DingTalkGroupDestination> {
     const res = await this.fetch(`/api/multitable/dingtalk-groups/${encodeURIComponent(id)}${qs(sheetId ? { sheetId } : {})}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },

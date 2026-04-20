@@ -202,7 +202,7 @@ export class DingTalkGroupDestinationService {
       .where('id', '=', id)
       .executeTakeFirst()
     if (!row) throw new Error('Destination not found')
-    if (row.sheet_id) {
+    if (row.sheet_id !== null) {
       if (!sheetId || row.sheet_id !== sheetId) throw new Error('Not authorized')
       return row
     }
