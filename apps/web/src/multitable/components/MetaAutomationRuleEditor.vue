@@ -371,11 +371,23 @@
                 v-model="action.config.recipientFieldPath"
                 class="meta-rule-editor__input"
                 type="text"
-                placeholder="例如：record.assigneeUserIds"
+                placeholder="例如：record.fld_assignee 或 record.assigneeUserIds"
                 data-field="dingtalkPersonRecipientFieldPath"
               />
+              <label class="meta-rule-editor__label">Pick recipient field</label>
+              <select
+                :value="selectedRecipientFieldId(action.config.recipientFieldPath)"
+                class="meta-rule-editor__select"
+                data-field="dingtalkPersonRecipientFieldSelect"
+                @change="selectRecipientFieldPath(action, ($event.target as HTMLSelectElement).value)"
+              >
+                <option value="">-- choose a record field --</option>
+                <option v-for="field in props.fields" :key="field.id" :value="field.id">
+                  {{ field.name }} (record.{{ field.id }})
+                </option>
+              </select>
               <div class="meta-rule-editor__hint">
-                Supports `record.xxx` paths that resolve to one userId, a comma-separated string, or a userId array.
+                Record data is keyed by field ID. Use a <code>record.&lt;fieldId&gt;</code> path or choose a field above.
               </div>
               <label class="meta-rule-editor__label">Title template</label>
               <input
@@ -847,7 +859,18 @@ function personRecipientSummary(action: DraftAction) {
 function recipientFieldPathSummary(value: unknown) {
   if (typeof value !== 'string' || !value.trim()) return 'No dynamic recipient field'
   const normalized = value.trim().replace(/^record\./, '')
-  return normalized ? `record.${normalized}` : 'No dynamic recipient field'
+  if (!normalized) return 'No dynamic recipient field'
+  const field = props.fields.find((item) => item.id === normalized)
+  return field ? `${field.name} (record.${normalized})` : `record.${normalized}`
+}
+
+function selectedRecipientFieldId(value: unknown) {
+  if (typeof value !== 'string' || !value.trim()) return ''
+  return value.trim().replace(/^record\./, '')
+}
+
+function selectRecipientFieldPath(action: DraftAction, fieldId: string) {
+  action.config.recipientFieldPath = fieldId ? `record.${fieldId}` : ''
 }
 
 function templateSyntaxWarnings(value: unknown) {

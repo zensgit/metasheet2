@@ -243,11 +243,22 @@
               v-model="draft.dingtalkPersonRecipientFieldPath"
               class="meta-automation__input"
               type="text"
-              placeholder="例如：record.assigneeUserIds"
+              placeholder="例如：record.fld_assignee 或 record.assigneeUserIds"
               data-automation-field="dingtalkPersonRecipientFieldPath"
             />
+            <label class="meta-automation__label">Pick recipient field</label>
+            <select
+              v-model="dingTalkPersonRecipientFieldId"
+              class="meta-automation__select"
+              data-automation-field="dingtalkPersonRecipientFieldSelect"
+            >
+              <option value="">-- choose a record field --</option>
+              <option v-for="field in props.fields" :key="field.id" :value="field.id">
+                {{ field.name }} (record.{{ field.id }})
+              </option>
+            </select>
             <div class="meta-automation__hint">
-              Supports `record.xxx` paths that resolve to one userId, a comma-separated string, or a userId array.
+              Record data is keyed by field ID. Use a <code>record.&lt;fieldId&gt;</code> path or choose a field above.
             </div>
             <label class="meta-automation__label">Title template</label>
             <input
@@ -672,7 +683,19 @@ const dingTalkPersonRecipientFieldSummary = computed(() => {
   const trimmed = draft.value.dingtalkPersonRecipientFieldPath.trim()
   if (!trimmed) return 'No dynamic recipient field'
   const normalized = trimmed.replace(/^record\./, '')
-  return normalized ? `record.${normalized}` : 'No dynamic recipient field'
+  if (!normalized) return 'No dynamic recipient field'
+  const field = props.fields.find((item) => item.id === normalized)
+  return field ? `${field.name} (record.${normalized})` : `record.${normalized}`
+})
+
+const dingTalkPersonRecipientFieldId = computed({
+  get() {
+    const trimmed = draft.value.dingtalkPersonRecipientFieldPath.trim()
+    return trimmed ? trimmed.replace(/^record\./, '') : ''
+  },
+  set(value: string) {
+    draft.value.dingtalkPersonRecipientFieldPath = value ? `record.${value}` : ''
+  },
 })
 
 function templateSyntaxWarnings(value: string) {
