@@ -106,6 +106,9 @@ function mockVersionDetail(templateId: string, versionId: string): ApprovalTempl
 function mockApproval(index: number): UnifiedApprovalDTO {
   const statuses: ApprovalStatus[] = ['pending', 'approved', 'rejected', 'revoked', 'cancelled']
   const status = statuses[index % statuses.length]
+  // Surface an any-mode fixture on a stable slot so dev-mode always exercises the UI branch.
+  const isAnyModeFixture = index % 5 === 1
+  const baseAssignmentNodeKey = isAnyModeFixture ? 'approval_any' : 'approval_1'
   return {
     id: `apv_${index}`,
     sourceSystem: 'platform',
@@ -124,22 +127,49 @@ function mockApproval(index: number): UnifiedApprovalDTO {
     publishedDefinitionId: 'def_1',
     requestNo: `AP-${String(100000 + index)}`,
     formSnapshot: { fld_reason: '出差报销', fld_amount: 5000, fld_type: 'reimbursement' },
-    currentNodeKey: status === 'pending' ? 'approval_1' : null,
-    assignments: status === 'pending' ? [{
-      id: `asgn_${index}`,
-      type: 'approval',
-      assigneeId: 'user_current',
-      sourceStep: 1,
-      nodeKey: 'approval_1',
-      isActive: true,
-      metadata: {},
-    }] : [],
+    currentNodeKey: status === 'pending' ? baseAssignmentNodeKey : null,
+    assignments: status === 'pending'
+      ? (isAnyModeFixture
+        ? [
+          {
+            id: `asgn_${index}_a`,
+            type: 'approval',
+            assigneeId: 'user_current',
+            sourceStep: 1,
+            nodeKey: baseAssignmentNodeKey,
+            isActive: true,
+            metadata: {},
+          },
+          {
+            id: `asgn_${index}_b`,
+            type: 'approval',
+            assigneeId: 'user_other',
+            sourceStep: 1,
+            nodeKey: baseAssignmentNodeKey,
+            isActive: true,
+            metadata: {},
+          },
+        ]
+        : [
+          {
+            id: `asgn_${index}`,
+            type: 'approval',
+            assigneeId: 'user_current',
+            sourceStep: 1,
+            nodeKey: baseAssignmentNodeKey,
+            isActive: true,
+            metadata: {},
+          },
+        ])
+      : [],
     createdAt: new Date(Date.now() - index * 86400000).toISOString(),
     updatedAt: new Date(Date.now() - index * 3600000).toISOString(),
   }
 }
 
 function mockHistory(approvalId: string): UnifiedApprovalHistoryDTO[] {
+  // Dev-mode fixture: preserve the existing workflow story then append an any-mode (或签)
+  // completion event so the timeline exercises the first-wins aggregateCancelled path.
   return [
     {
       id: 'hist_1',
@@ -195,6 +225,39 @@ function mockHistory(approvalId: string): UnifiedApprovalHistoryDTO[] {
       toStatus: 'approved',
       occurredAt: new Date().toISOString(),
       metadata: { nodeKey: 'approval_1' },
+    },
+    {
+      id: 'hist_6',
+      action: 'approve',
+      actorId: 'user_7',
+      actorName: '赵六',
+      comment: '先行审批',
+      fromStatus: 'pending',
+      toStatus: 'approved',
+      occurredAt: new Date().toISOString(),
+      metadata: {
+        nodeKey: 'approval_any',
+        approvalMode: 'any',
+        aggregateComplete: true,
+        aggregateCancelled: ['user_8'],
+      },
+    },
+    {
+      id: 'hist_7',
+      action: 'sign',
+      actorId: 'system',
+      actorName: '系统',
+      comment: null,
+      fromStatus: 'pending',
+      toStatus: 'approved',
+      occurredAt: new Date().toISOString(),
+      metadata: {
+        nodeKey: 'approval_any',
+        autoCancelled: true,
+        aggregateMode: 'any',
+        aggregateCancelledBy: 'user_7',
+        cancelledAssignees: ['user_8'],
+      },
     },
   ]
 }

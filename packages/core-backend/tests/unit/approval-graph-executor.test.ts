@@ -184,6 +184,42 @@ describe('ApprovalGraphExecutor', () => {
     ])
   })
 
+  it('tags resolveAfterApprove resolutions with the resolved-away node aggregate mode', () => {
+    const runtimeGraph: RuntimeGraph = {
+      nodes: [
+        { key: 'start', type: 'start', config: {} },
+        {
+          key: 'any_review',
+          type: 'approval',
+          config: {
+            assigneeType: 'user',
+            assigneeIds: ['approver-a', 'approver-b'],
+            approvalMode: 'any',
+          },
+        },
+        { key: 'end', type: 'end', config: {} },
+      ],
+      edges: [
+        { key: 'edge-start-any', source: 'start', target: 'any_review' },
+        { key: 'edge-any-end', source: 'any_review', target: 'end' },
+      ],
+      policy: { allowRevoke: true },
+    }
+
+    const executor = new ApprovalGraphExecutor(runtimeGraph, {})
+
+    const initial = executor.resolveInitialState()
+    expect(initial.aggregateMode).toBeNull()
+    expect(initial.aggregateComplete).toBe(false)
+    expect(executor.getApprovalMode('any_review')).toBe('any')
+    expect(executor.getApprovalNodeAssigneeIds('any_review')).toEqual(['approver-a', 'approver-b'])
+
+    const completed = executor.resolveAfterApprove('any_review')
+    expect(completed.status).toBe('approved')
+    expect(completed.aggregateMode).toBe('any')
+    expect(completed.aggregateComplete).toBe(true)
+  })
+
   it('lists the visited approval nodes for return validation on the active path', () => {
     const runtimeGraph: RuntimeGraph = {
       nodes: [
