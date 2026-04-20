@@ -40,7 +40,18 @@ interface PendingWrite {
  */
 export class YjsRecordBridge {
   private pendingWrites = new Map<string, PendingWrite>()
-  private observedDocs = new Map<string, () => void>()
+  /**
+   * Tracks per-record observer state. Keyed by recordId. Value holds the
+   * current Y.Doc ref and the cleanup closure for that observer.
+   *
+   * We key by recordId AND validate the Y.Doc identity on every observe()
+   * call. The sync service may destroy and recreate Y.Doc instances across
+   * idle-release cycles; if the incoming doc is a different instance than
+   * the one we previously hooked, we must tear down the stale observer and
+   * re-register on the new doc. Without this, edits on the recreated doc
+   * have no observer and silently fail to flush.
+   */
+  private observedDocs = new Map<string, { doc: Y.Doc; cleanup: () => void }>()
   private _flushSuccessCount = 0
   private _flushFailureCount = 0
 
@@ -66,7 +77,17 @@ export class YjsRecordBridge {
    * Call this after YjsSyncService.getOrCreateDoc().
    */
   observe(recordId: string, doc: Y.Doc): void {
-    if (this.observedDocs.has(recordId)) return
+    // If we already observe this record and the caller is handing us the
+    // SAME Y.Doc instance, nothing to do — the existing observer is live.
+    const existing = this.observedDocs.get(recordId)
+    if (existing && existing.doc === doc) return
+
+    // Doc identity changed (recreated after idle release). Clean up the
+    // stale observer binding first so we don't leak / double-observe.
+    if (existing) {
+      try { existing.cleanup() } catch { /* ignore */ }
+      this.observedDocs.delete(recordId)
+    }
 
     const fields = doc.getMap('fields')
 
@@ -109,8 +130,11 @@ export class YjsRecordBridge {
 
     fields.observeDeep(handler)
 
-    this.observedDocs.set(recordId, () => {
-      fields.unobserveDeep(handler)
+    this.observedDocs.set(recordId, {
+      doc,
+      cleanup: () => {
+        fields.unobserveDeep(handler)
+      },
     })
   }
 
@@ -118,9 +142,9 @@ export class YjsRecordBridge {
    * Stop observing a record doc.
    */
   unobserve(recordId: string): void {
-    const cleanup = this.observedDocs.get(recordId)
-    if (cleanup) {
-      cleanup()
+    const entry = this.observedDocs.get(recordId)
+    if (entry) {
+      entry.cleanup()
       this.observedDocs.delete(recordId)
     }
     // Flush any pending writes immediately
