@@ -391,4 +391,71 @@ describe('MetaAutomationRuleEditor', () => {
     expect(payload.actionConfig.userIds).toEqual(['user_1'])
     expect(client.listCommentMentionSuggestions).toHaveBeenCalledTimes(1)
   })
+
+  it('applies DingTalk group message presets', async () => {
+    const client = mockClient()
+    const { container } = mount({
+      visible: true,
+      sheetId: 'sheet_1',
+      fields,
+      views,
+      client,
+    })
+    await flushPromises()
+
+    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header select') as HTMLSelectElement
+    actionSelect.value = 'send_dingtalk_group_message'
+    actionSelect.dispatchEvent(new Event('change'))
+    await flushPromises()
+
+    const presetBtn = container.querySelector('[data-field="groupPresetBoth"]') as HTMLButtonElement
+    presetBtn.click()
+    await flushPromises()
+
+    const titleInput = container.querySelector('[data-field="dingtalkTitleTemplate"]') as HTMLInputElement
+    const bodyInput = container.querySelector('[data-field="dingtalkBodyTemplate"]') as HTMLTextAreaElement
+    const publicFormSelect = container.querySelector('[data-field="publicFormViewId"]') as HTMLSelectElement
+    const internalViewSelect = container.querySelector('[data-field="internalViewId"]') as HTMLSelectElement
+
+    expect(titleInput.value).toBe('{{recordId}} 待填写并处理')
+    expect(bodyInput.value).toContain('请先填写所需信息')
+    expect(publicFormSelect.value).toBe('view_form')
+    expect(internalViewSelect.value).toBe('view_grid')
+  })
+
+  it('applies DingTalk person message presets without touching recipients', async () => {
+    const client = mockClient()
+    const { container } = mount({
+      visible: true,
+      sheetId: 'sheet_1',
+      fields,
+      views,
+      client,
+    })
+    await flushPromises()
+
+    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header select') as HTMLSelectElement
+    actionSelect.value = 'send_dingtalk_person_message'
+    actionSelect.dispatchEvent(new Event('change'))
+    await flushPromises()
+
+    const userIdsInput = container.querySelector('[data-field="dingtalkPersonUserIds"]') as HTMLTextAreaElement
+    userIdsInput.value = 'user_1'
+    userIdsInput.dispatchEvent(new Event('input'))
+
+    const presetBtn = container.querySelector('[data-field="personPresetInternal"]') as HTMLButtonElement
+    presetBtn.click()
+    await flushPromises()
+
+    const titleInput = container.querySelector('[data-field="dingtalkPersonTitleTemplate"]') as HTMLInputElement
+    const bodyInput = container.querySelector('[data-field="dingtalkPersonBodyTemplate"]') as HTMLTextAreaElement
+    const publicFormSelect = container.querySelector('[data-field="dingtalkPersonPublicFormViewId"]') as HTMLSelectElement
+    const internalViewSelect = container.querySelector('[data-field="dingtalkPersonInternalViewId"]') as HTMLSelectElement
+
+    expect(userIdsInput.value).toBe('user_1')
+    expect(titleInput.value).toBe('{{recordId}} 待处理')
+    expect(bodyInput.value).toContain('请查看并处理该记录')
+    expect(publicFormSelect.value).toBe('')
+    expect(internalViewSelect.value).toBe('view_grid')
+  })
 })

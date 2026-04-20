@@ -73,6 +73,12 @@
           </template>
 
           <template v-if="draft.actionType === 'send_dingtalk_group_message'">
+            <div class="meta-automation__preset-row">
+              <span class="meta-automation__preset-label">Message preset</span>
+              <button class="meta-automation__btn" type="button" data-automation-preset="group-form" @click="applyGroupPreset('form_request')">Form request</button>
+              <button class="meta-automation__btn" type="button" data-automation-preset="group-internal" @click="applyGroupPreset('internal_process')">Internal processing</button>
+              <button class="meta-automation__btn" type="button" data-automation-preset="group-both" @click="applyGroupPreset('form_and_process')">Form + processing</button>
+            </div>
             <label class="meta-automation__label">DingTalk group</label>
             <select v-model="draft.dingtalkDestinationId" class="meta-automation__select" data-automation-field="dingtalkDestinationId">
               <option value="">-- select DingTalk group --</option>
@@ -109,6 +115,12 @@
           </template>
 
           <template v-if="draft.actionType === 'send_dingtalk_person_message'">
+            <div class="meta-automation__preset-row">
+              <span class="meta-automation__preset-label">Message preset</span>
+              <button class="meta-automation__btn" type="button" data-automation-preset="person-form" @click="applyPersonPreset('form_request')">Form request</button>
+              <button class="meta-automation__btn" type="button" data-automation-preset="person-internal" @click="applyPersonPreset('internal_process')">Internal processing</button>
+              <button class="meta-automation__btn" type="button" data-automation-preset="person-both" @click="applyPersonPreset('form_and_process')">Form + processing</button>
+            </div>
             <label class="meta-automation__label">Search and add users</label>
             <input
               v-model="dingtalkPersonUserSearch"
@@ -305,6 +317,7 @@ import MetaAutomationRuleEditor from './MetaAutomationRuleEditor.vue'
 import MetaAutomationLogViewer from './MetaAutomationLogViewer.vue'
 import MetaAutomationGroupDeliveryViewer from './MetaAutomationGroupDeliveryViewer.vue'
 import MetaAutomationPersonDeliveryViewer from './MetaAutomationPersonDeliveryViewer.vue'
+import { applyDingTalkNotificationPreset, type DingTalkNotificationPreset } from '../utils/dingtalkNotificationPresets'
 
 const props = defineProps<{
   visible: boolean
@@ -452,6 +465,40 @@ function removeDingTalkPersonRecipient(userId: string) {
   draft.value.dingtalkPersonUserIds = parseUserIdsText(draft.value.dingtalkPersonUserIds)
     .filter((id) => id !== userId)
     .join(', ')
+}
+
+function applyGroupPreset(preset: DingTalkNotificationPreset) {
+  const next = applyDingTalkNotificationPreset(
+    {
+      titleTemplate: draft.value.dingtalkTitleTemplate,
+      bodyTemplate: draft.value.dingtalkBodyTemplate,
+      publicFormViewId: draft.value.publicFormViewId,
+      internalViewId: draft.value.internalViewId,
+    },
+    preset,
+    props.views ?? [],
+  )
+  draft.value.dingtalkTitleTemplate = next.titleTemplate ?? ''
+  draft.value.dingtalkBodyTemplate = next.bodyTemplate ?? ''
+  draft.value.publicFormViewId = next.publicFormViewId ?? ''
+  draft.value.internalViewId = next.internalViewId ?? ''
+}
+
+function applyPersonPreset(preset: DingTalkNotificationPreset) {
+  const next = applyDingTalkNotificationPreset(
+    {
+      titleTemplate: draft.value.dingtalkPersonTitleTemplate,
+      bodyTemplate: draft.value.dingtalkPersonBodyTemplate,
+      publicFormViewId: draft.value.dingtalkPersonPublicFormViewId,
+      internalViewId: draft.value.dingtalkPersonInternalViewId,
+    },
+    preset,
+    props.views ?? [],
+  )
+  draft.value.dingtalkPersonTitleTemplate = next.titleTemplate ?? ''
+  draft.value.dingtalkPersonBodyTemplate = next.bodyTemplate ?? ''
+  draft.value.dingtalkPersonPublicFormViewId = next.publicFormViewId ?? ''
+  draft.value.dingtalkPersonInternalViewId = next.internalViewId ?? ''
 }
 
 // --- Rule editor + log viewer state ---
@@ -845,6 +892,20 @@ watch(
 
 .meta-automation__recipient-list--selected {
   margin-bottom: 4px;
+}
+
+.meta-automation__preset-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.meta-automation__preset-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: #475569;
 }
 
 .meta-automation__recipient-option,

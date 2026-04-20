@@ -187,6 +187,12 @@
 
             <!-- send_dingtalk_group_message config -->
             <div v-if="action.type === 'send_dingtalk_group_message'" class="meta-rule-editor__action-config">
+              <div class="meta-rule-editor__preset-row">
+                <span class="meta-rule-editor__preset-label">Message preset</span>
+                <button class="meta-rule-editor__btn" type="button" data-field="groupPresetForm" @click="applyGroupPreset(action, 'form_request')">Form request</button>
+                <button class="meta-rule-editor__btn" type="button" data-field="groupPresetInternal" @click="applyGroupPreset(action, 'internal_process')">Internal processing</button>
+                <button class="meta-rule-editor__btn" type="button" data-field="groupPresetBoth" @click="applyGroupPreset(action, 'form_and_process')">Form + processing</button>
+              </div>
               <label class="meta-rule-editor__label">DingTalk group</label>
               <select
                 v-model="action.config.destinationId"
@@ -237,6 +243,12 @@
 
             <!-- send_dingtalk_person_message config -->
             <div v-if="action.type === 'send_dingtalk_person_message'" class="meta-rule-editor__action-config">
+              <div class="meta-rule-editor__preset-row">
+                <span class="meta-rule-editor__preset-label">Message preset</span>
+                <button class="meta-rule-editor__btn" type="button" data-field="personPresetForm" @click="applyPersonPreset(action, 'form_request')">Form request</button>
+                <button class="meta-rule-editor__btn" type="button" data-field="personPresetInternal" @click="applyPersonPreset(action, 'internal_process')">Internal processing</button>
+                <button class="meta-rule-editor__btn" type="button" data-field="personPresetBoth" @click="applyPersonPreset(action, 'form_and_process')">Form + processing</button>
+              </div>
               <label class="meta-rule-editor__label">Search and add users</label>
               <input
                 v-model="action.config.userIdsSearch"
@@ -364,6 +376,7 @@ import type {
   MetaCommentMentionSuggestion,
   MetaView,
 } from '../types'
+import { applyDingTalkNotificationPreset, type DingTalkNotificationPreset } from '../utils/dingtalkNotificationPresets'
 
 interface FieldPair {
   fieldId: string
@@ -623,6 +636,38 @@ function removePersonRecipient(action: DraftAction, userId: string) {
   action.config.userIdsText = parseUserIdsText(action.config.userIdsText)
     .filter((id) => id !== userId)
     .join(', ')
+}
+
+function applyGroupPreset(action: DraftAction, preset: DingTalkNotificationPreset) {
+  action.config = {
+    ...action.config,
+    ...applyDingTalkNotificationPreset(
+      {
+        titleTemplate: typeof action.config.titleTemplate === 'string' ? action.config.titleTemplate : '',
+        bodyTemplate: typeof action.config.bodyTemplate === 'string' ? action.config.bodyTemplate : '',
+        publicFormViewId: typeof action.config.publicFormViewId === 'string' ? action.config.publicFormViewId : '',
+        internalViewId: typeof action.config.internalViewId === 'string' ? action.config.internalViewId : '',
+      },
+      preset,
+      props.views ?? [],
+    ),
+  }
+}
+
+function applyPersonPreset(action: DraftAction, preset: DingTalkNotificationPreset) {
+  action.config = {
+    ...action.config,
+    ...applyDingTalkNotificationPreset(
+      {
+        titleTemplate: typeof action.config.titleTemplate === 'string' ? action.config.titleTemplate : '',
+        bodyTemplate: typeof action.config.bodyTemplate === 'string' ? action.config.bodyTemplate : '',
+        publicFormViewId: typeof action.config.publicFormViewId === 'string' ? action.config.publicFormViewId : '',
+        internalViewId: typeof action.config.internalViewId === 'string' ? action.config.internalViewId : '',
+      },
+      preset,
+      props.views ?? [],
+    ),
+  }
 }
 
 function defaultConfigForActionType(type: AutomationActionType): DraftActionConfig {
@@ -885,6 +930,19 @@ function onTestRun() {
   flex-direction: column;
   gap: 6px;
   padding-left: 20px;
+}
+
+.meta-rule-editor__preset-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.meta-rule-editor__preset-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: #475569;
 }
 
 .meta-rule-editor__recipient-list {
