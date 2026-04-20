@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, h, nextTick } from 'vue'
 
 function flushPromises() {
@@ -119,9 +119,24 @@ const views = [
 ]
 
 describe('MetaAutomationManager', () => {
+  const originalClipboard = navigator.clipboard
+
+  beforeEach(() => {
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: {
+        writeText: vi.fn().mockResolvedValue(undefined),
+      },
+    })
+  })
+
   afterEach(() => {
     document.body.innerHTML = ''
     vi.restoreAllMocks()
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: originalClipboard,
+    })
   })
 
   it('renders rule list when visible', async () => {
@@ -617,5 +632,32 @@ describe('MetaAutomationManager', () => {
     await flushPromises()
 
     expect(container.textContent).toContain('Unclosed placeholder braces detected')
+  })
+
+  it('copies rendered DingTalk person body example in the inline create form', async () => {
+    const { client } = mockClient([])
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
+    await flushPromises()
+
+    const addBtn = container.querySelector('.meta-automation__btn-add') as HTMLButtonElement
+    addBtn.click()
+    await nextTick()
+
+    const actionSelect = container.querySelector('[data-automation-field="actionType"]') as HTMLSelectElement
+    actionSelect.value = 'send_dingtalk_person_message'
+    actionSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushPromises()
+
+    const bodyInput = container.querySelector('[data-automation-field="dingtalkPersonBodyTemplate"]') as HTMLTextAreaElement
+    bodyInput.value = 'Handle {{record.xxx}}'
+    bodyInput.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushPromises()
+
+    ;(container.querySelector('[data-automation-copy="person-rendered-body"]') as HTMLButtonElement).click()
+    await flushPromises()
+
+    expect(navigator.clipboard?.writeText).toHaveBeenCalledTimes(1)
+    expect(vi.mocked(navigator.clipboard!.writeText).mock.calls[0]?.[0]).toBe('Handle 示例字段值')
+    expect(container.textContent).toContain('Copied')
   })
 })

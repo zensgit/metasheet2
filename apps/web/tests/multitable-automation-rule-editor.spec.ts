@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, h, nextTick } from 'vue'
 
 function flushPromises() {
@@ -65,9 +65,24 @@ function mount(props: Record<string, unknown>) {
 }
 
 describe('MetaAutomationRuleEditor', () => {
+  const originalClipboard = navigator.clipboard
+
+  beforeEach(() => {
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: {
+        writeText: vi.fn().mockResolvedValue(undefined),
+      },
+    })
+  })
+
   afterEach(() => {
     document.body.innerHTML = ''
     vi.restoreAllMocks()
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: originalClipboard,
+    })
   })
 
   it('renders trigger type selector when visible', async () => {
@@ -546,5 +561,34 @@ describe('MetaAutomationRuleEditor', () => {
     await flushPromises()
 
     expect(container.textContent).toContain('Unsupported placeholder syntax {{record-id}}')
+  })
+
+  it('copies rendered DingTalk group body example in the rule editor', async () => {
+    const client = mockClient()
+    const { container } = mount({
+      visible: true,
+      sheetId: 'sheet_1',
+      fields,
+      views,
+      client,
+    })
+    await flushPromises()
+
+    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header select') as HTMLSelectElement
+    actionSelect.value = 'send_dingtalk_group_message'
+    actionSelect.dispatchEvent(new Event('change'))
+    await flushPromises()
+
+    const bodyInput = container.querySelector('[data-field="dingtalkBodyTemplate"]') as HTMLTextAreaElement
+    bodyInput.value = 'Please fill {{record.xxx}}'
+    bodyInput.dispatchEvent(new Event('input'))
+    await flushPromises()
+
+    ;(container.querySelector('[data-field="groupRenderedBodyCopy-0"]') as HTMLButtonElement).click()
+    await flushPromises()
+
+    expect(navigator.clipboard?.writeText).toHaveBeenCalledTimes(1)
+    expect(vi.mocked(navigator.clipboard!.writeText).mock.calls[0]?.[0]).toBe('Please fill 示例字段值')
+    expect(container.textContent).toContain('Copied')
   })
 })

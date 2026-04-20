@@ -157,8 +157,28 @@
               <div><strong>Group:</strong> {{ dingTalkGroupName(draft.dingtalkDestinationId) }}</div>
               <div><strong>Title template:</strong> {{ templatePreviewText(draft.dingtalkTitleTemplate, 'No title template') }}</div>
               <div class="meta-automation__preview-body"><strong>Body template:</strong> {{ templatePreviewText(draft.dingtalkBodyTemplate, 'No body template') }}</div>
-              <div><strong>Rendered title:</strong> {{ renderedTemplateExample(draft.dingtalkTitleTemplate, 'No rendered title') }}</div>
-              <div class="meta-automation__preview-body"><strong>Rendered body:</strong> {{ renderedTemplateExample(draft.dingtalkBodyTemplate, 'No rendered body') }}</div>
+              <div class="meta-automation__preview-line">
+                <span><strong>Rendered title:</strong> {{ renderedTemplateExample(draft.dingtalkTitleTemplate, 'No rendered title') }}</span>
+                <button
+                  class="meta-automation__copy-btn"
+                  type="button"
+                  data-automation-copy="group-rendered-title"
+                  @click="copyPreviewText('group-title', renderedTemplateExample(draft.dingtalkTitleTemplate, ''))"
+                >
+                  {{ copiedPreviewKey === 'group-title' ? 'Copied' : 'Copy' }}
+                </button>
+              </div>
+              <div class="meta-automation__preview-line meta-automation__preview-body">
+                <span><strong>Rendered body:</strong> {{ renderedTemplateExample(draft.dingtalkBodyTemplate, 'No rendered body') }}</span>
+                <button
+                  class="meta-automation__copy-btn"
+                  type="button"
+                  data-automation-copy="group-rendered-body"
+                  @click="copyPreviewText('group-body', renderedTemplateExample(draft.dingtalkBodyTemplate, ''))"
+                >
+                  {{ copiedPreviewKey === 'group-body' ? 'Copied' : 'Copy' }}
+                </button>
+              </div>
               <div><strong>Public form:</strong> {{ viewSummaryName(draft.publicFormViewId, 'No public form link') }}</div>
               <div><strong>Internal processing:</strong> {{ viewSummaryName(draft.internalViewId, 'No internal link') }}</div>
             </div>
@@ -289,8 +309,28 @@
               <div><strong>Recipients:</strong> {{ dingTalkPersonRecipientSummary }}</div>
               <div><strong>Title template:</strong> {{ templatePreviewText(draft.dingtalkPersonTitleTemplate, 'No title template') }}</div>
               <div class="meta-automation__preview-body"><strong>Body template:</strong> {{ templatePreviewText(draft.dingtalkPersonBodyTemplate, 'No body template') }}</div>
-              <div><strong>Rendered title:</strong> {{ renderedTemplateExample(draft.dingtalkPersonTitleTemplate, 'No rendered title') }}</div>
-              <div class="meta-automation__preview-body"><strong>Rendered body:</strong> {{ renderedTemplateExample(draft.dingtalkPersonBodyTemplate, 'No rendered body') }}</div>
+              <div class="meta-automation__preview-line">
+                <span><strong>Rendered title:</strong> {{ renderedTemplateExample(draft.dingtalkPersonTitleTemplate, 'No rendered title') }}</span>
+                <button
+                  class="meta-automation__copy-btn"
+                  type="button"
+                  data-automation-copy="person-rendered-title"
+                  @click="copyPreviewText('person-title', renderedTemplateExample(draft.dingtalkPersonTitleTemplate, ''))"
+                >
+                  {{ copiedPreviewKey === 'person-title' ? 'Copied' : 'Copy' }}
+                </button>
+              </div>
+              <div class="meta-automation__preview-line meta-automation__preview-body">
+                <span><strong>Rendered body:</strong> {{ renderedTemplateExample(draft.dingtalkPersonBodyTemplate, 'No rendered body') }}</span>
+                <button
+                  class="meta-automation__copy-btn"
+                  type="button"
+                  data-automation-copy="person-rendered-body"
+                  @click="copyPreviewText('person-body', renderedTemplateExample(draft.dingtalkPersonBodyTemplate, ''))"
+                >
+                  {{ copiedPreviewKey === 'person-body' ? 'Copied' : 'Copy' }}
+                </button>
+              </div>
               <div><strong>Public form:</strong> {{ viewSummaryName(draft.dingtalkPersonPublicFormViewId, 'No public form link') }}</div>
               <div><strong>Internal processing:</strong> {{ viewSummaryName(draft.dingtalkPersonInternalViewId, 'No internal link') }}</div>
             </div>
@@ -401,7 +441,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch } from 'vue'
+import { ref, computed, watch, onBeforeUnmount } from 'vue'
 import type {
   AutomationRule,
   AutomationTriggerType,
@@ -494,7 +534,9 @@ const dingtalkPersonUserSearchLoading = ref(false)
 const dingtalkPersonUserSearchError = ref('')
 const dingtalkPersonUserSuggestions = ref<MetaCommentMentionSuggestion[]>([])
 const dingtalkPersonUserDirectory = ref<Record<string, { label: string; subtitle?: string }>>({})
+const copiedPreviewKey = ref('')
 let dingtalkPersonSuggestionLoadId = 0
+let copiedPreviewResetTimer: ReturnType<typeof setTimeout> | null = null
 const formViews = computed(() => (props.views ?? []).filter((view) => view.type === 'form'))
 const internalViews = computed(() => props.views ?? [])
 
@@ -595,6 +637,18 @@ function renderedTemplateExample(value: string, fallback: string) {
   return rendered || fallback
 }
 
+function copyPreviewText(key: string, text: string) {
+  const trimmed = text.trim()
+  if (!trimmed || !navigator.clipboard?.writeText) return
+  void navigator.clipboard.writeText(trimmed).then(() => {
+    copiedPreviewKey.value = key
+    if (copiedPreviewResetTimer) window.clearTimeout(copiedPreviewResetTimer)
+    copiedPreviewResetTimer = window.setTimeout(() => {
+      if (copiedPreviewKey.value === key) copiedPreviewKey.value = ''
+    }, 1500)
+  }).catch(() => {})
+}
+
 const dingTalkPersonRecipientSummary = computed(() => {
   if (!selectedDingTalkPersonRecipients.value.length) return 'No recipients selected'
   return selectedDingTalkPersonRecipients.value.map((item) => item.label).join(', ')
@@ -603,6 +657,10 @@ const dingTalkPersonRecipientSummary = computed(() => {
 function templateSyntaxWarnings(value: string) {
   return listDingTalkTemplateSyntaxWarnings(value)
 }
+
+onBeforeUnmount(() => {
+  if (copiedPreviewResetTimer) window.clearTimeout(copiedPreviewResetTimer)
+})
 
 function applyGroupPreset(preset: DingTalkNotificationPreset) {
   const next = applyDingTalkNotificationPreset(
@@ -1082,8 +1140,26 @@ watch(
   color: #1e3a8a;
 }
 
+.meta-automation__preview-line {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+
 .meta-automation__preview-body {
   white-space: pre-wrap;
+}
+
+.meta-automation__copy-btn {
+  flex-shrink: 0;
+  border: 1px solid #bfdbfe;
+  background: #fff;
+  color: #1d4ed8;
+  border-radius: 999px;
+  padding: 2px 8px;
+  font-size: 11px;
+  cursor: pointer;
 }
 
 .meta-automation__recipient-option,

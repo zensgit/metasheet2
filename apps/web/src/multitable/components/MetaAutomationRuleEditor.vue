@@ -284,8 +284,28 @@
                 <div><strong>Group:</strong> {{ dingTalkGroupName(action.config.destinationId) }}</div>
                 <div><strong>Title template:</strong> {{ templatePreviewText(action.config.titleTemplate, 'No title template') }}</div>
                 <div class="meta-rule-editor__preview-body"><strong>Body template:</strong> {{ templatePreviewText(action.config.bodyTemplate, 'No body template') }}</div>
-                <div><strong>Rendered title:</strong> {{ renderedTemplateExample(action.config.titleTemplate, 'No rendered title') }}</div>
-                <div class="meta-rule-editor__preview-body"><strong>Rendered body:</strong> {{ renderedTemplateExample(action.config.bodyTemplate, 'No rendered body') }}</div>
+                <div class="meta-rule-editor__preview-line">
+                  <span><strong>Rendered title:</strong> {{ renderedTemplateExample(action.config.titleTemplate, 'No rendered title') }}</span>
+                  <button
+                    class="meta-rule-editor__copy-btn"
+                    type="button"
+                    :data-field="`groupRenderedTitleCopy-${idx}`"
+                    @click="copyPreviewText(`group-title-${idx}`, renderedTemplateExample(action.config.titleTemplate, ''))"
+                  >
+                    {{ copiedPreviewKey === `group-title-${idx}` ? 'Copied' : 'Copy' }}
+                  </button>
+                </div>
+                <div class="meta-rule-editor__preview-line meta-rule-editor__preview-body">
+                  <span><strong>Rendered body:</strong> {{ renderedTemplateExample(action.config.bodyTemplate, 'No rendered body') }}</span>
+                  <button
+                    class="meta-rule-editor__copy-btn"
+                    type="button"
+                    :data-field="`groupRenderedBodyCopy-${idx}`"
+                    @click="copyPreviewText(`group-body-${idx}`, renderedTemplateExample(action.config.bodyTemplate, ''))"
+                  >
+                    {{ copiedPreviewKey === `group-body-${idx}` ? 'Copied' : 'Copy' }}
+                  </button>
+                </div>
                 <div><strong>Public form:</strong> {{ viewSummaryName(action.config.publicFormViewId, 'No public form link') }}</div>
                 <div><strong>Internal processing:</strong> {{ viewSummaryName(action.config.internalViewId, 'No internal link') }}</div>
               </div>
@@ -425,8 +445,28 @@
                 <div><strong>Recipients:</strong> {{ personRecipientSummary(action) }}</div>
                 <div><strong>Title template:</strong> {{ templatePreviewText(action.config.titleTemplate, 'No title template') }}</div>
                 <div class="meta-rule-editor__preview-body"><strong>Body template:</strong> {{ templatePreviewText(action.config.bodyTemplate, 'No body template') }}</div>
-                <div><strong>Rendered title:</strong> {{ renderedTemplateExample(action.config.titleTemplate, 'No rendered title') }}</div>
-                <div class="meta-rule-editor__preview-body"><strong>Rendered body:</strong> {{ renderedTemplateExample(action.config.bodyTemplate, 'No rendered body') }}</div>
+                <div class="meta-rule-editor__preview-line">
+                  <span><strong>Rendered title:</strong> {{ renderedTemplateExample(action.config.titleTemplate, 'No rendered title') }}</span>
+                  <button
+                    class="meta-rule-editor__copy-btn"
+                    type="button"
+                    :data-field="`personRenderedTitleCopy-${idx}`"
+                    @click="copyPreviewText(`person-title-${idx}`, renderedTemplateExample(action.config.titleTemplate, ''))"
+                  >
+                    {{ copiedPreviewKey === `person-title-${idx}` ? 'Copied' : 'Copy' }}
+                  </button>
+                </div>
+                <div class="meta-rule-editor__preview-line meta-rule-editor__preview-body">
+                  <span><strong>Rendered body:</strong> {{ renderedTemplateExample(action.config.bodyTemplate, 'No rendered body') }}</span>
+                  <button
+                    class="meta-rule-editor__copy-btn"
+                    type="button"
+                    :data-field="`personRenderedBodyCopy-${idx}`"
+                    @click="copyPreviewText(`person-body-${idx}`, renderedTemplateExample(action.config.bodyTemplate, ''))"
+                  >
+                    {{ copiedPreviewKey === `person-body-${idx}` ? 'Copied' : 'Copy' }}
+                  </button>
+                </div>
                 <div><strong>Public form:</strong> {{ viewSummaryName(action.config.publicFormViewId, 'No public form link') }}</div>
                 <div><strong>Internal processing:</strong> {{ viewSummaryName(action.config.internalViewId, 'No internal link') }}</div>
               </div>
@@ -463,7 +503,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch } from 'vue'
+import { ref, computed, watch, onBeforeUnmount } from 'vue'
 import type { MultitableApiClient } from '../api/client'
 import type {
   AutomationRule,
@@ -545,7 +585,9 @@ const personRecipientSuggestions = ref<Record<number, MetaCommentMentionSuggesti
 const personRecipientLoading = ref<Record<number, boolean>>({})
 const personRecipientErrors = ref<Record<number, string>>({})
 const personRecipientDirectory = ref<Record<string, { label: string; subtitle?: string }>>({})
+const copiedPreviewKey = ref('')
 let personRecipientSuggestionLoadId = 0
+let copiedPreviewResetTimer: ReturnType<typeof setTimeout> | null = null
 
 const formViews = computed(() => (props.views ?? []).filter((view) => view.type === 'form'))
 const internalViews = computed(() => props.views ?? [])
@@ -767,6 +809,18 @@ function renderedTemplateExample(value: unknown, fallback: string) {
   return rendered || fallback
 }
 
+function copyPreviewText(key: string, text: string) {
+  const trimmed = text.trim()
+  if (!trimmed || !navigator.clipboard?.writeText) return
+  void navigator.clipboard.writeText(trimmed).then(() => {
+    copiedPreviewKey.value = key
+    if (copiedPreviewResetTimer) window.clearTimeout(copiedPreviewResetTimer)
+    copiedPreviewResetTimer = window.setTimeout(() => {
+      if (copiedPreviewKey.value === key) copiedPreviewKey.value = ''
+    }, 1500)
+  }).catch(() => {})
+}
+
 function personRecipientSummary(action: DraftAction) {
   const selected = selectedPersonRecipients(action)
   if (!selected.length) return 'No recipients selected'
@@ -776,6 +830,10 @@ function personRecipientSummary(action: DraftAction) {
 function templateSyntaxWarnings(value: unknown) {
   return typeof value === 'string' ? listDingTalkTemplateSyntaxWarnings(value) : []
 }
+
+onBeforeUnmount(() => {
+  if (copiedPreviewResetTimer) window.clearTimeout(copiedPreviewResetTimer)
+})
 
 function applyGroupPreset(action: DraftAction, preset: DingTalkNotificationPreset) {
   action.config = {
@@ -1131,8 +1189,26 @@ function onTestRun() {
   color: #1e3a8a;
 }
 
+.meta-rule-editor__preview-line {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+
 .meta-rule-editor__preview-body {
   white-space: pre-wrap;
+}
+
+.meta-rule-editor__copy-btn {
+  flex-shrink: 0;
+  border: 1px solid #bfdbfe;
+  background: #fff;
+  color: #1d4ed8;
+  border-radius: 999px;
+  padding: 2px 8px;
+  font-size: 11px;
+  cursor: pointer;
 }
 
 .meta-rule-editor__recipient-list {
