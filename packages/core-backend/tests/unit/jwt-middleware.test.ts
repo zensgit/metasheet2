@@ -18,7 +18,7 @@ vi.mock('../../src/metrics/metrics', () => ({
   metrics: metricsMocks,
 }))
 
-import { isWhitelisted, jwtAuthMiddleware } from '../../src/auth/jwt-middleware'
+import { isPublicFormAuthBypass, isWhitelisted, jwtAuthMiddleware } from '../../src/auth/jwt-middleware'
 
 describe('jwt auth whitelist', () => {
   it('allows DingTalk launch without a bearer token', () => {
@@ -28,6 +28,42 @@ describe('jwt auth whitelist', () => {
 
   it('allows DingTalk callback without a bearer token', () => {
     expect(isWhitelisted('/api/auth/dingtalk/callback')).toBe(true)
+  })
+
+  it('allows public form context when a public token is present', () => {
+    expect(isPublicFormAuthBypass({
+      method: 'GET',
+      path: '/api/multitable/form-context',
+      query: { publicToken: 'pub_123' },
+      body: undefined,
+    } as unknown as Request)).toBe(true)
+  })
+
+  it('allows public form submission when a public token is present', () => {
+    expect(isPublicFormAuthBypass({
+      method: 'POST',
+      path: '/api/multitable/views/view_public_form/submit',
+      query: { publicToken: 'pub_123' },
+      body: undefined,
+    } as unknown as Request)).toBe(true)
+  })
+
+  it('does not allow sibling multitable routes without an exact public form path', () => {
+    expect(isPublicFormAuthBypass({
+      method: 'GET',
+      path: '/api/multitable/views/view_public_form',
+      query: { publicToken: 'pub_123' },
+      body: undefined,
+    } as unknown as Request)).toBe(false)
+  })
+
+  it('does not allow public form routes without a token', () => {
+    expect(isPublicFormAuthBypass({
+      method: 'GET',
+      path: '/api/multitable/form-context',
+      query: {},
+      body: undefined,
+    } as unknown as Request)).toBe(false)
   })
 })
 

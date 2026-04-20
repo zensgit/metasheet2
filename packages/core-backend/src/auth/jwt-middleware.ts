@@ -41,6 +41,28 @@ export function isWhitelisted(path: string): boolean {
   return AUTH_WHITELIST.some(p => path.startsWith(p))
 }
 
+const PUBLIC_FORM_CONTEXT_PATH = '/api/multitable/form-context'
+const PUBLIC_FORM_SUBMIT_PATH = /^\/api\/multitable\/views\/[^/]+\/submit$/
+
+type PublicFormBypassRequest = Pick<Request, 'path' | 'method' | 'query' | 'body'>
+
+function extractPublicToken(req: PublicFormBypassRequest): string {
+  const queryToken = typeof req.query?.publicToken === 'string' ? req.query.publicToken.trim() : ''
+  if (queryToken) return queryToken
+  return typeof req.body?.publicToken === 'string' ? req.body.publicToken.trim() : ''
+}
+
+export function isPublicFormAuthBypass(req: PublicFormBypassRequest): boolean {
+  const method = (req.method || '').toUpperCase()
+  const path = req.path || ''
+  const publicToken = extractPublicToken(req)
+
+  if (!publicToken) return false
+  if (method === 'GET' && path === PUBLIC_FORM_CONTEXT_PATH) return true
+  if (method === 'POST' && PUBLIC_FORM_SUBMIT_PATH.test(path)) return true
+  return false
+}
+
 function isPasswordChangeWhitelisted(path: string): boolean {
   return PASSWORD_CHANGE_WHITELIST.some((prefix) => path.startsWith(prefix))
 }
