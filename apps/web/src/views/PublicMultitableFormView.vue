@@ -178,6 +178,9 @@ function readPublicFormErrorMessage(error: unknown, fallback: string): string {
   if (code === 'DINGTALK_GRANT_REQUIRED') {
     return 'This form only accepts DingTalk-authorized users.'
   }
+  if (code === 'DINGTALK_FORM_NOT_ALLOWED') {
+    return 'This form only accepts selected system users or member groups.'
+  }
   return readErrorMessage(error, fallback)
 }
 

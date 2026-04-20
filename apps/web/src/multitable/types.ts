@@ -729,12 +729,18 @@ export interface FormShareConfig {
   expiresAt: string | null
   status: 'active' | 'expired' | 'disabled'
   accessMode: 'public' | 'dingtalk' | 'dingtalk_granted'
+  allowedUserIds: string[]
+  allowedUsers: MetaSheetPermissionCandidate[]
+  allowedMemberGroupIds: string[]
+  allowedMemberGroups: MetaSheetPermissionCandidate[]
 }
 
 export interface FormShareConfigUpdate {
   enabled?: boolean
   expiresAt?: string | null
   accessMode?: 'public' | 'dingtalk' | 'dingtalk_granted'
+  allowedUserIds?: string[]
+  allowedMemberGroupIds?: string[]
 }
 
 // --- API Tokens ---
