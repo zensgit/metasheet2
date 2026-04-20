@@ -62,6 +62,7 @@ function mockClient(rules: AutomationRule[] = []) {
           name: 'Ops Group',
           webhookUrl: 'https://oapi.dingtalk.com/robot/send?access_token=test',
           enabled: true,
+          sheetId: 'sheet_1',
           createdBy: 'user_1',
           createdAt: '2026-04-01T00:00:00Z',
         }],
@@ -329,6 +330,7 @@ describe('MetaAutomationManager', () => {
       publicFormViewId: 'view_form',
       internalViewId: 'view_grid',
     })
+    expect(fetchFn.mock.calls.some(([url]) => String(url).includes('/api/multitable/dingtalk-groups?sheetId=sheet_1'))).toBe(true)
   })
 
   it('creates DingTalk person automation via form', async () => {
@@ -464,7 +466,7 @@ describe('MetaAutomationManager', () => {
   })
 
   it('opens DingTalk group delivery viewer for group message rules', async () => {
-    const { client } = mockClient([
+    const { client, fetchFn } = mockClient([
       fakeRule({
         name: 'DingTalk group notify',
         actionType: 'send_dingtalk_group_message',
@@ -486,6 +488,7 @@ describe('MetaAutomationManager', () => {
     const delivery = document.querySelector('[data-group-delivery-id="dgd_1"]')
     expect(delivery?.textContent).toContain('Ops Group')
     expect(delivery?.textContent).toContain('Ticket rec_1 pending')
+    expect(fetchFn.mock.calls.some(([url]) => String(url).includes('/api/multitable/sheets/sheet_1/automations/rule_1/dingtalk-group-deliveries'))).toBe(true)
   })
 
   it('applies DingTalk group presets in the inline create form', async () => {

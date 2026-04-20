@@ -302,6 +302,7 @@
     />
     <MetaApiTokenManager
       :visible="showApiTokenManager"
+      :sheet-id="workbench.activeSheetId.value"
       :client="workbench.client"
       @close="showApiTokenManager = false"
     />

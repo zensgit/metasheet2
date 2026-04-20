@@ -67,6 +67,7 @@ function destinationRow(overrides: Record<string, unknown> = {}) {
     webhook_url: 'https://oapi.dingtalk.com/robot/send?access_token=test-token',
     secret: 'SEC123',
     enabled: true,
+    sheet_id: null,
     created_by: 'user_1',
     created_at: '2026-04-19T10:00:00.000Z',
     updated_at: '2026-04-19T10:10:00.000Z',
@@ -111,15 +112,40 @@ describe('DingTalkGroupDestinationService', () => {
       name: ' Ops DingTalk Group ',
       webhookUrl: 'https://oapi.dingtalk.com/robot/send?access_token=test-token',
       secret: 'SEC123',
+      sheetId: 'sheet_1',
     })
 
     expect(created.name).toBe('Ops DingTalk Group')
     expect(created.enabled).toBe(true)
+    expect(created.sheetId).toBe('sheet_1')
 
-    executeQueue.push([destinationRow()])
-    const listed = await service.listDestinations('user_1')
-    expect(listed).toHaveLength(1)
+    executeQueue.push([destinationRow({ sheet_id: 'sheet_1' }), destinationRow({ id: 'dt_legacy', sheet_id: null })])
+    const listed = await service.listDestinations('user_1', 'sheet_1')
+    expect(listed).toHaveLength(2)
     expect(listed[0].name).toBe('Ops DingTalk Group')
+    expect(listed[0].sheetId).toBe('sheet_1')
+  })
+
+  test('shared sheet destinations can be managed by non-owners on the same sheet', async () => {
+    const { db, roots } = createMockDb()
+    const service = new DingTalkGroupDestinationService(db, vi.fn())
+
+    executeTakeFirstQueue.push(destinationRow({ sheet_id: 'sheet_1', created_by: 'owner_user' }))
+    executeTakeFirstQueue.push(destinationRow({
+      sheet_id: 'sheet_1',
+      created_by: 'owner_user',
+      name: 'Updated shared group',
+      enabled: false,
+    }))
+
+    const updated = await service.updateDestination('dt_1', 'user_2', {
+      name: 'Updated shared group',
+      enabled: false,
+    }, 'sheet_1')
+
+    expect(updated.name).toBe('Updated shared group')
+    expect(updated.sheetId).toBe('sheet_1')
+    expect(roots.updateTable).toHaveBeenCalledWith('dingtalk_group_destinations')
   })
 
   test('updates a destination', async () => {
@@ -168,6 +194,16 @@ describe('DingTalkGroupDestinationService', () => {
     expect(roots.deleteFrom).toHaveBeenCalledWith('dingtalk_group_destinations')
   })
 
+  test('deletes a shared destination when sheet access matches even for non-owner', async () => {
+    const { db, roots } = createMockDb()
+    const service = new DingTalkGroupDestinationService(db, vi.fn())
+
+    executeTakeFirstQueue.push(destinationRow({ sheet_id: 'sheet_1', created_by: 'owner_user' }))
+    await service.deleteDestination('dt_1', 'user_2', 'sheet_1')
+
+    expect(roots.deleteFrom).toHaveBeenCalledWith('dingtalk_group_destinations')
+  })
+
   test('testSend marks success when DingTalk responds ok', async () => {
     const { db, roots } = createMockDb()
     const fetchFn = vi.fn(async () => new Response(
@@ -191,6 +227,19 @@ describe('DingTalkGroupDestinationService', () => {
     const setArg = updateChain?.set?.mock.calls[0]?.[0] as Record<string, unknown> | undefined
     expect(setArg?.last_test_status).toBe('success')
     expect(setArg?.last_test_error).toBeNull()
+  })
+
+  test('testSend allows shared destination access for non-owner on the same sheet', async () => {
+    const { db } = createMockDb()
+    const fetchFn = vi.fn(async () => new Response(
+      JSON.stringify({ errcode: 0, errmsg: 'ok' }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } },
+    ))
+    const service = new DingTalkGroupDestinationService(db, fetchFn as typeof fetch)
+
+    executeTakeFirstQueue.push(destinationRow({ sheet_id: 'sheet_1', created_by: 'owner_user' }))
+    await expect(service.testSend('dt_1', 'user_2', {}, 'sheet_1')).resolves.toEqual({ ok: true })
+    expect(fetchFn).toHaveBeenCalledTimes(1)
   })
 
   test('testSend marks failure when DingTalk returns an error', async () => {

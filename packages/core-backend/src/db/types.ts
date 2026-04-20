@@ -1306,6 +1306,7 @@ export interface DingTalkGroupDestinationsTable {
   webhook_url: string
   secret: string | null
   enabled: boolean
+  sheet_id: string | null
   created_by: string
   created_at: CreatedAt
   updated_at: NullableTimestamp
