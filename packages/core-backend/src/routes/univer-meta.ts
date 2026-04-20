@@ -940,8 +940,125 @@ function sanitizeStringArray(value: unknown): string[] {
     .filter((item) => item.length > 0)
 }
 
+const FIELD_VALIDATION_RULE_TYPES: ReadonlySet<string> = new Set([
+  'required',
+  'min',
+  'max',
+  'minLength',
+  'maxLength',
+  'pattern',
+  'enum',
+  'custom',
+])
+
+/**
+ * Normalise a single validation-rule entry to the engine contract
+ * (`{ type, params?, message? }`).
+ *
+ * Accepts both the engine shape and the flat UI shape emitted by
+ * `MetaFieldValidationPanel` (`{ type, value, message }`) so that clients
+ * stuck on either format round-trip correctly. Returns `null` for
+ * entries we can't safely reason about.
+ */
+function normalizeFieldValidationRule(raw: unknown): Record<string, unknown> | null {
+  if (!isPlainObject(raw)) return null
+  const ruleType = typeof raw.type === 'string' ? raw.type : ''
+  if (!FIELD_VALIDATION_RULE_TYPES.has(ruleType)) return null
+
+  const message = typeof raw.message === 'string' && raw.message.length > 0 ? raw.message : undefined
+  const paramsRaw = isPlainObject(raw.params) ? raw.params : undefined
+  const flatValue = 'value' in raw ? raw.value : undefined
+
+  let params: Record<string, unknown> | undefined
+
+  switch (ruleType) {
+    case 'required':
+      break
+    case 'custom':
+      // `custom` rules are pass-throughs for external handlers — the
+      // engine doesn't interpret them, but downstream consumers rely
+      // on `params`, so keep it verbatim if present.
+      if (paramsRaw) params = { ...paramsRaw }
+      break
+    case 'min':
+    case 'max':
+    case 'minLength':
+    case 'maxLength': {
+      const candidate = paramsRaw && 'value' in paramsRaw ? paramsRaw.value : flatValue
+      const num = typeof candidate === 'number' ? candidate : Number(candidate)
+      if (!Number.isFinite(num)) return null
+      params = { value: num }
+      break
+    }
+    case 'pattern': {
+      const regex = paramsRaw && typeof paramsRaw.regex === 'string'
+        ? paramsRaw.regex
+        : typeof flatValue === 'string'
+          ? flatValue
+          : ''
+      if (!regex) return null
+      const flags = paramsRaw && typeof paramsRaw.flags === 'string' ? paramsRaw.flags : undefined
+      params = flags ? { regex, flags } : { regex }
+      break
+    }
+    case 'enum': {
+      let values: string[] | undefined
+      if (paramsRaw && Array.isArray(paramsRaw.values)) {
+        values = paramsRaw.values
+          .map((v) => (typeof v === 'string' ? v : typeof v === 'number' ? String(v) : ''))
+          .filter((v) => v.length > 0)
+      } else if (Array.isArray(flatValue)) {
+        values = flatValue
+          .map((v) => (typeof v === 'string' ? v : typeof v === 'number' ? String(v) : ''))
+          .filter((v) => v.length > 0)
+      }
+      if (!values) return null
+      params = { values }
+      break
+    }
+    default:
+      return null
+  }
+
+  return {
+    type: ruleType,
+    ...(params ? { params } : {}),
+    ...(message ? { message } : {}),
+  }
+}
+
+function sanitizeFieldValidationRules(value: unknown): Record<string, unknown>[] | undefined {
+  if (!Array.isArray(value)) return undefined
+  const normalised: Record<string, unknown>[] = []
+  for (const entry of value) {
+    const rule = normalizeFieldValidationRule(entry)
+    if (rule) normalised.push(rule)
+  }
+  return normalised
+}
+
+/**
+ * Rewrite the `validation` key on a field-property object to the engine
+ * contract. Applied once up front so every type-specific branch of
+ * `sanitizeFieldProperty` sees already-normalised rules via the
+ * downstream spread.
+ *
+ * An empty array is preserved (it is a meaningful "disable defaults"
+ * signal). A non-array value is dropped entirely so the engine's
+ * default rules kick back in.
+ */
+function applyFieldValidationNormalisation(obj: Record<string, unknown>): Record<string, unknown> {
+  if (!('validation' in obj)) return obj
+  if (!Array.isArray(obj.validation)) {
+    const { validation: _omit, ...rest } = obj
+    return rest
+  }
+  const normalised = sanitizeFieldValidationRules(obj.validation) ?? []
+  return { ...obj, validation: normalised }
+}
+
 function sanitizeFieldProperty(type: UniverMetaField['type'], property: unknown): Record<string, unknown> {
-  const obj = normalizeJson(property)
+  const obj = applyFieldValidationNormalisation(normalizeJson(property))
   if (type === 'select') {
     const options = extractSelectOptions(obj) ?? []
     return { ...obj, options }
