@@ -238,6 +238,17 @@
               placeholder="使用逗号或换行分隔本地 userId"
               data-automation-field="dingtalkPersonUserIds"
             ></textarea>
+            <label class="meta-automation__label">Record recipient field path (optional)</label>
+            <input
+              v-model="draft.dingtalkPersonRecipientFieldPath"
+              class="meta-automation__input"
+              type="text"
+              placeholder="例如：record.assigneeUserIds"
+              data-automation-field="dingtalkPersonRecipientFieldPath"
+            />
+            <div class="meta-automation__hint">
+              Supports `record.xxx` paths that resolve to one userId, a comma-separated string, or a userId array.
+            </div>
             <label class="meta-automation__label">Title template</label>
             <input
               v-model="draft.dingtalkPersonTitleTemplate"
@@ -307,6 +318,7 @@
             <div class="meta-automation__preview" data-automation-summary="person">
               <div class="meta-automation__preview-title">Message summary</div>
               <div><strong>Recipients:</strong> {{ dingTalkPersonRecipientSummary }}</div>
+              <div><strong>Record recipients:</strong> {{ dingTalkPersonRecipientFieldSummary }}</div>
               <div><strong>Title template:</strong> {{ templatePreviewText(draft.dingtalkPersonTitleTemplate, 'No title template') }}</div>
               <div class="meta-automation__preview-body"><strong>Body template:</strong> {{ templatePreviewText(draft.dingtalkPersonBodyTemplate, 'No body template') }}</div>
               <div class="meta-automation__preview-line">
@@ -499,6 +511,7 @@ interface DraftState {
   publicFormViewId: string
   internalViewId: string
   dingtalkPersonUserIds: string
+  dingtalkPersonRecipientFieldPath: string
   dingtalkPersonTitleTemplate: string
   dingtalkPersonBodyTemplate: string
   dingtalkPersonPublicFormViewId: string
@@ -520,6 +533,7 @@ function emptyDraft(): DraftState {
     publicFormViewId: '',
     internalViewId: '',
     dingtalkPersonUserIds: '',
+    dingtalkPersonRecipientFieldPath: '',
     dingtalkPersonTitleTemplate: '',
     dingtalkPersonBodyTemplate: '',
     dingtalkPersonPublicFormViewId: '',
@@ -652,6 +666,13 @@ function copyPreviewText(key: string, text: string) {
 const dingTalkPersonRecipientSummary = computed(() => {
   if (!selectedDingTalkPersonRecipients.value.length) return 'No recipients selected'
   return selectedDingTalkPersonRecipients.value.map((item) => item.label).join(', ')
+})
+
+const dingTalkPersonRecipientFieldSummary = computed(() => {
+  const trimmed = draft.value.dingtalkPersonRecipientFieldPath.trim()
+  if (!trimmed) return 'No dynamic recipient field'
+  const normalized = trimmed.replace(/^record\./, '')
+  return normalized ? `record.${normalized}` : 'No dynamic recipient field'
 })
 
 function templateSyntaxWarnings(value: string) {
@@ -792,7 +813,7 @@ const canSave = computed(() => {
     if (!draft.value.dingtalkBodyTemplate.trim()) return false
   }
   if (draft.value.actionType === 'send_dingtalk_person_message') {
-    if (!draft.value.dingtalkPersonUserIds.trim()) return false
+    if (!draft.value.dingtalkPersonUserIds.trim() && !draft.value.dingtalkPersonRecipientFieldPath.trim()) return false
     if (!draft.value.dingtalkPersonTitleTemplate.trim()) return false
     if (!draft.value.dingtalkPersonBodyTemplate.trim()) return false
   }
@@ -824,6 +845,7 @@ function openEditForm(rule: AutomationRule) {
     publicFormViewId: (rule.actionConfig?.publicFormViewId as string) ?? '',
     internalViewId: (rule.actionConfig?.internalViewId as string) ?? '',
     dingtalkPersonUserIds: Array.isArray(rule.actionConfig?.userIds) ? rule.actionConfig?.userIds.join(', ') : '',
+    dingtalkPersonRecipientFieldPath: (rule.actionConfig?.userIdFieldPath as string) ?? '',
     dingtalkPersonTitleTemplate: (rule.actionConfig?.titleTemplate as string) ?? '',
     dingtalkPersonBodyTemplate: (rule.actionConfig?.bodyTemplate as string) ?? '',
     dingtalkPersonPublicFormViewId: (rule.actionConfig?.publicFormViewId as string) ?? '',
@@ -873,6 +895,7 @@ function buildActionConfig(): Record<string, unknown> {
         .split(/[\n,]+/)
         .map((entry) => entry.trim())
         .filter(Boolean),
+      userIdFieldPath: draft.value.dingtalkPersonRecipientFieldPath.trim() || undefined,
       titleTemplate: draft.value.dingtalkPersonTitleTemplate,
       bodyTemplate: draft.value.dingtalkPersonBodyTemplate,
       publicFormViewId: draft.value.dingtalkPersonPublicFormViewId || undefined,
