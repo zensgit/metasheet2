@@ -443,6 +443,7 @@ describe('AutomationExecutor', () => {
     expect(String(queryFn.mock.calls[0]?.[0] ?? '')).toContain('sheet_id = $2')
     expect(String(queryFn.mock.calls[0]?.[0] ?? '')).toContain('created_by = $3')
     expect(queryFn.mock.calls[0]?.[1]).toEqual([['dt_1'], 'sheet_1', 'user_1'])
+    expect(String(queryFn.mock.calls[1]?.[0] ?? '')).toContain("type = 'form'")
 
     const [url, init] = fetchFn.mock.calls[0] as [string, RequestInit]
     expect(url).toContain('https://oapi.dingtalk.com/robot/send?access_token=test')
@@ -453,6 +454,47 @@ describe('AutomationExecutor', () => {
     expect(payload.markdown.text).toContain('/multitable/public-form/sheet_1/view_form?publicToken=public-token')
     expect(payload.markdown.text).toContain('/multitable/sheet_1/view_grid?recordId=r1')
     expect((queryFn.mock.calls[3]?.[0] as string) ?? '').toContain('INSERT INTO dingtalk_group_deliveries')
+  })
+
+  it('fails send_dingtalk_group_message when the internal processing view is not in the sheet', async () => {
+    process.env.APP_BASE_URL = 'https://app.example.com'
+    const queryFn = vi.fn()
+      .mockResolvedValueOnce({
+        rows: [{ id: 'dt_1', name: 'Ops Group', webhook_url: 'https://oapi.dingtalk.com/robot/send?access_token=test', secret: null, enabled: true }],
+      })
+      .mockResolvedValueOnce({ rows: [], rowCount: 0 })
+    const fetchFn = vi.fn(async () => new Response(JSON.stringify({ errcode: 0, errmsg: 'ok' }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    })) as unknown as typeof fetch
+
+    deps = createMockDeps({ queryFn, fetchFn })
+    executor = new AutomationExecutor(deps)
+
+    const rule = createMockRule({
+      actions: [{
+        type: 'send_dingtalk_group_message',
+        config: {
+          destinationId: 'dt_1',
+          titleTemplate: 'Record {{record.title}} ready',
+          bodyTemplate: 'Status: {{record.status}}',
+          internalViewId: 'missing_view',
+        },
+      }],
+    })
+
+    const result = await executor.execute(rule, {
+      recordId: 'r1',
+      data: { title: 'Incident', status: 'open' },
+      sheetId: 'sheet_1',
+      actorId: 'user_1',
+    })
+
+    expect(result.status).toBe('failed')
+    expect(result.steps[0].error).toContain('Internal view not found')
+    expect(String(queryFn.mock.calls[1]?.[0] ?? '')).toContain('sheet_id = $2')
+    expect(queryFn.mock.calls[1]?.[1]).toEqual(['missing_view', 'sheet_1'])
+    expect(fetchFn).not.toHaveBeenCalled()
   })
 
   it('executes send_dingtalk_group_message across multiple destinations', async () => {
@@ -671,6 +713,51 @@ describe('AutomationExecutor', () => {
     expect(result.steps[0].error).toContain('dt_missing')
   })
 
+  it('fails send_dingtalk_group_message when the selected public form share is expired', async () => {
+    process.env.APP_BASE_URL = 'https://app.example.com'
+    const queryFn = vi.fn()
+      .mockResolvedValueOnce({
+        rows: [{ id: 'dt_1', name: 'Ops Group', webhook_url: 'https://oapi.dingtalk.com/robot/send?access_token=test', secret: null, enabled: true }],
+      })
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'view_form',
+          sheet_id: 'sheet_1',
+          config: { publicForm: { enabled: true, publicToken: 'public-token', expiresAt: '2000-01-01T00:00:00.000Z' } },
+        }],
+      })
+    const fetchFn = vi.fn(async () => new Response(JSON.stringify({ errcode: 0, errmsg: 'ok' }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    })) as unknown as typeof fetch
+    deps = createMockDeps({ queryFn, fetchFn })
+    executor = new AutomationExecutor(deps)
+
+    const rule = createMockRule({
+      actions: [{
+        type: 'send_dingtalk_group_message',
+        config: {
+          destinationId: 'dt_1',
+          titleTemplate: 'Title',
+          bodyTemplate: 'Body',
+          publicFormViewId: 'view_form',
+        },
+      }],
+    })
+
+    const result = await executor.execute(rule, {
+      recordId: 'r1',
+      data: { title: 'Incident' },
+      sheetId: 'sheet_1',
+      actorId: 'user_1',
+    })
+
+    expect(result.status).toBe('failed')
+    expect(result.steps[0].error).toContain('Selected public form view has expired')
+    expect(String(queryFn.mock.calls[1]?.[0] ?? '')).toContain("type = 'form'")
+    expect(fetchFn).not.toHaveBeenCalled()
+  })
+
   it('scopes send_dingtalk_group_message destinations to the current sheet and rule creator', async () => {
     const queryFn = vi.fn(async (sql: string, params?: unknown[]) => {
       expect(sql).toContain('sheet_id = $2')
@@ -785,6 +872,7 @@ describe('AutomationExecutor', () => {
     expect(result.status).toBe('success')
     expect(result.steps[0].actionType).toBe('send_dingtalk_person_message')
     expect(fetchFn).toHaveBeenCalledTimes(2)
+    expect(String(queryFn.mock.calls[0]?.[0] ?? '')).toContain("type = 'form'")
     const [, sendInit] = fetchFn.mock.calls[1] as [string, RequestInit]
     const payload = JSON.parse(sendInit.body as string)
     expect(payload.userid_list).toBe('dt-user-1,dt-user-2')
@@ -792,6 +880,85 @@ describe('AutomationExecutor', () => {
     expect(payload.msg.markdown.text).toContain('/multitable/sheet_1/view_grid?recordId=r1')
     const insertCalls = queryFn.mock.calls.filter((call) => String(call[0]).includes('INSERT INTO dingtalk_person_deliveries'))
     expect(insertCalls).toHaveLength(2)
+  })
+
+  it('fails send_dingtalk_person_message when the internal processing view is not in the sheet', async () => {
+    process.env.DINGTALK_APP_KEY = 'dt-app-key'
+    process.env.DINGTALK_APP_SECRET = 'dt-app-secret'
+    process.env.DINGTALK_AGENT_ID = '123456789'
+    process.env.APP_BASE_URL = 'https://app.example.com'
+
+    const queryFn = vi.fn()
+      .mockResolvedValueOnce({ rows: [], rowCount: 0 })
+    const fetchFn = vi.fn(async () => new Response(JSON.stringify({ errcode: 0, errmsg: 'ok' }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    })) as unknown as typeof fetch
+
+    deps = createMockDeps({ queryFn, fetchFn })
+    executor = new AutomationExecutor(deps)
+
+    const rule = createMockRule({
+      actions: [{
+        type: 'send_dingtalk_person_message',
+        config: {
+          userIds: ['user_1'],
+          titleTemplate: 'Record {{record.title}} ready',
+          bodyTemplate: 'Status: {{record.status}}',
+          internalViewId: 'missing_view',
+        },
+      }],
+    })
+    const result = await executor.execute(rule, {
+      recordId: 'r1',
+      data: { title: 'Incident', status: 'open' },
+      sheetId: 'sheet_1',
+      actorId: 'user_1',
+    })
+
+    expect(result.status).toBe('failed')
+    expect(result.steps[0].error).toContain('Internal view not found')
+    expect(String(queryFn.mock.calls[0]?.[0] ?? '')).toContain('sheet_id = $2')
+    expect(queryFn.mock.calls[0]?.[1]).toEqual(['missing_view', 'sheet_1'])
+    expect(fetchFn).not.toHaveBeenCalled()
+  })
+
+  it('fails send_dingtalk_person_message when the selected public form view is not a form view', async () => {
+    process.env.APP_BASE_URL = 'https://app.example.com'
+    const queryFn = vi.fn(async (sql: string, params?: unknown[]) => {
+      expect(sql).toContain("type = 'form'")
+      expect(params).toEqual(['view_grid', 'sheet_1'])
+      return { rows: [], rowCount: 0 }
+    })
+    const fetchFn = vi.fn(async () => new Response(JSON.stringify({ errcode: 0, errmsg: 'ok' }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    })) as unknown as typeof fetch
+    deps = createMockDeps({ queryFn, fetchFn })
+    executor = new AutomationExecutor(deps)
+
+    const rule = createMockRule({
+      actions: [{
+        type: 'send_dingtalk_person_message',
+        config: {
+          userIds: ['user_1'],
+          titleTemplate: 'Title',
+          bodyTemplate: 'Body',
+          publicFormViewId: 'view_grid',
+        },
+      }],
+    })
+
+    const result = await executor.execute(rule, {
+      recordId: 'r1',
+      data: { title: 'Incident' },
+      sheetId: 'sheet_1',
+      actorId: 'user_1',
+    })
+
+    expect(result.status).toBe('failed')
+    expect(result.steps[0].error).toContain('Public form view not found')
+    expect(fetchFn).not.toHaveBeenCalled()
   })
 
   it('executes send_dingtalk_person_message for member group recipients', async () => {
