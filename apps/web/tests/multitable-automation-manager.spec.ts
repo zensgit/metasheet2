@@ -1,11 +1,20 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, h, nextTick } from 'vue'
 
+const routerPushMock = vi.hoisted(() => vi.fn())
+
+vi.mock('vue-router', () => ({
+  useRouter: () => ({
+    push: routerPushMock,
+  }),
+}))
+
 function flushPromises() {
   return new Promise<void>((resolve) => setTimeout(resolve, 0)).then(() => nextTick())
 }
 import MetaAutomationManager from '../src/multitable/components/MetaAutomationManager.vue'
 import { MultitableApiClient } from '../src/multitable/api/client'
+import { AppRouteNames } from '../src/router/types'
 import type { AutomationRule, DingTalkGroupDelivery, DingTalkPersonDelivery } from '../src/multitable/types'
 
 function fakeRule(overrides: Partial<AutomationRule> = {}): AutomationRule {
@@ -221,6 +230,7 @@ describe('MetaAutomationManager', () => {
   const originalClipboard = navigator.clipboard
 
   beforeEach(() => {
+    routerPushMock.mockClear()
     Object.defineProperty(navigator, 'clipboard', {
       configurable: true,
       value: {
@@ -278,6 +288,26 @@ describe('MetaAutomationManager', () => {
     expect(desc?.textContent).toContain('Send DingTalk group message')
     expect(desc?.textContent).toContain('Public form: Public Form')
     expect(desc?.textContent).toContain('Internal processing: Grid')
+
+    const publicLink = container.querySelector('[data-automation-card-link="public-form:view_form"]') as HTMLAnchorElement
+    expect(publicLink).not.toBeNull()
+    expect(publicLink.textContent).toContain('Open public form: Public Form')
+    expect(publicLink.getAttribute('href')).toBe(`${window.location.origin}/multitable/public-form/sheet_1/view_form?publicToken=pub_view_form`)
+    expect(publicLink.getAttribute('target')).toBe('_blank')
+
+    const internalLink = container.querySelector('[data-automation-card-link="internal-view:view_grid"]') as HTMLButtonElement
+    expect(internalLink).not.toBeNull()
+    expect(internalLink.textContent).toContain('Open internal view: Grid')
+    internalLink.click()
+    await flushPromises()
+
+    expect(routerPushMock).toHaveBeenCalledWith({
+      name: AppRouteNames.MULTITABLE,
+      params: {
+        sheetId: 'sheet_1',
+        viewId: 'view_grid',
+      },
+    })
   })
 
   it('describes V1 multi-action DingTalk person rules in the list', async () => {
@@ -309,6 +339,24 @@ describe('MetaAutomationManager', () => {
     expect(desc?.textContent).toContain('Send DingTalk person message')
     expect(desc?.textContent).toContain('Public form: Public Form')
     expect(desc?.textContent).toContain('Internal processing: Grid')
+  })
+
+  it('does not render a public form card link when sharing is missing a public token', async () => {
+    const { client } = mockClient([
+      fakeRule({
+        actionType: 'send_dingtalk_group_message',
+        actionConfig: {
+          destinationId: 'dt_1',
+          publicFormViewId: 'view_form',
+          internalViewId: 'view_grid',
+        },
+      }),
+    ])
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views: viewsWithMissingPublicToken, client })
+    await flushPromises()
+
+    expect(container.querySelector('[data-automation-card-link="public-form:view_form"]')).toBeNull()
+    expect(container.querySelector('[data-automation-card-link="internal-view:view_grid"]')).not.toBeNull()
   })
 
   it('shows empty state when no rules', async () => {
