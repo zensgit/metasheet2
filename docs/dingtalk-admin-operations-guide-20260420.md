@@ -96,11 +96,15 @@ Management-side UI path:
 
 Automation authoring guardrail:
 
-- if a selected public form view is not shared, has no public token, or has expired, the automation editor warns before save
+- if a selected public form view is not shared, has no public token, or has expired, the automation editor warns and disables save
+- if a selected internal processing view is no longer in the current sheet, the automation editor warns and disables save
 - if a DingTalk group rule links to a fully public form, the automation editor warns that anyone with the message link can submit
 - if a DingTalk group rule links to a DingTalk-protected form without allowed users or member groups, the editor warns that all bound or authorized DingTalk users can submit
+- the message summary shows `Public form access`, including fully public, bound DingTalk users, authorized DingTalk users, and allowlist-constrained states
 - the warning is advisory; runtime delivery still performs the backend validation before sending the link
+- automation create/update APIs reject invalid public form or internal processing links before saving
 - runtime delivery refuses non-form public views and expired public-form shares before sending DingTalk messages
+- runtime delivery refuses missing internal processing views before sending DingTalk messages
 
 Supported access modes:
 
@@ -208,6 +212,7 @@ Authoring guardrail:
 
 - if the selected form is still fully public, the DingTalk group rule editor warns before save
 - if the selected protected form has no allowed users or member groups, the DingTalk group rule editor warns before save
+- check `Public form access` in the automation message summary before saving
 - switch the form to `Bound DingTalk users only` or `Authorized DingTalk users only` before relying on allowlists
 
 ### Scenario 3: Notify specific staff only
