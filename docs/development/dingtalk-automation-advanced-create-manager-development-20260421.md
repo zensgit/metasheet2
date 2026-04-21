@@ -38,6 +38,6 @@ The missing coverage was the manager-level save-through path: a user clicks the 
 
 ## Notes
 
-- No production component code was required because the advanced create entry already exists in the stacked base branch.
+- No production component code was required because the advanced create entry and API contract normalizer already exist on `main`.
 - This PR is intentionally a focused frontend regression hardening slice after the API contract canonicalization work.
 - Dependency install created tracked `node_modules` symlink changes in plugin/tool workspaces; those artifacts are intentionally excluded from the commit.

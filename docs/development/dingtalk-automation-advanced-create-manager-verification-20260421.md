@@ -3,8 +3,8 @@
 ## Environment
 
 - Worktree: `.worktrees/dingtalk-automation-advanced-create-manager-20260421`
-- Branch: `codex/dingtalk-automation-advanced-create-manager-20260421`
-- Base: `818bab3bd` from PR #1010
+- Branch: `codex/dingtalk-automation-advanced-create-manager-main-20260421`
+- Base: `origin/main` at `81edca7d`
 - Package manager: `pnpm`
 
 ## Commands Run
