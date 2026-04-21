@@ -3382,6 +3382,9 @@ async function resolveDirectoryBindingUser(localUserRef: string): Promise<Direct
   const idMatch = result.rows.find((row) => row.id === ref)
   if (idMatch) return idMatch
 
+  const distinctUserIds = new Set(result.rows.map((row) => row.id))
+  if (distinctUserIds.size > 1) throw new Error('Local user reference is ambiguous')
+
   const emailMatches = result.rows.filter((row) => typeof row.email === 'string' && row.email.toLowerCase() === normalizedRef)
   if (emailMatches.length > 1) throw new Error('Local user reference is ambiguous')
   if (emailMatches.length === 1) return emailMatches[0]

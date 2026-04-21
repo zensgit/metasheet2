@@ -250,6 +250,150 @@ describe('bindDirectoryAccount', () => {
     expect(pgMocks.transaction).not.toHaveBeenCalled()
   })
 
+  it('fails closed when a binding reference matches different users across account fields', async () => {
+    pgMocks.query
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'account-1',
+          integration_id: 'dir-1',
+          provider: 'dingtalk',
+          corp_id: 'dingcorp',
+          external_user_id: '0447654442691174',
+          union_id: 'union-1',
+          open_id: 'open-1',
+          external_key: 'union-1',
+          name: '林岚',
+          email: null,
+          mobile: '13900001234',
+        }],
+      })
+      .mockResolvedValueOnce({
+        rows: [{
+          local_user_id: null,
+          local_user_email: null,
+          local_user_name: null,
+        }],
+      })
+      .mockResolvedValueOnce({
+        rows: [
+          {
+            id: 'user-1',
+            email: 'shared@example.com',
+            username: 'liqing',
+            mobile: '13900001234',
+            name: '李青',
+            role: 'user',
+            is_active: true,
+          },
+          {
+            id: 'user-2',
+            email: null,
+            username: 'shared@example.com',
+            mobile: '13900004567',
+            name: '林岚',
+            role: 'user',
+            is_active: true,
+          },
+        ],
+      })
+
+    await expect(bindDirectoryAccount('account-1', {
+      localUserRef: 'shared@example.com',
+      adminUserId: 'admin-1',
+      enableDingTalkGrant: true,
+    })).rejects.toThrow('Local user reference is ambiguous')
+
+    expect(pgMocks.transaction).not.toHaveBeenCalled()
+  })
+
+  it('prefers an exact local user id over cross-field identifier ambiguity', async () => {
+    const clientQuery = vi.fn().mockResolvedValue({ rows: [] })
+    pgMocks.transaction.mockImplementation(async (handler) => handler({ query: clientQuery }))
+    pgMocks.query
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'account-1',
+          integration_id: 'dir-1',
+          provider: 'dingtalk',
+          corp_id: 'dingcorp',
+          external_user_id: '0447654442691174',
+          union_id: 'union-1',
+          open_id: 'open-1',
+          external_key: 'union-1',
+          name: '林岚',
+          email: null,
+          mobile: '13900001234',
+        }],
+      })
+      .mockResolvedValueOnce({
+        rows: [{
+          local_user_id: null,
+          local_user_email: null,
+          local_user_name: null,
+        }],
+      })
+      .mockResolvedValueOnce({
+        rows: [
+          {
+            id: 'user-1',
+            email: 'alpha@example.com',
+            username: 'alpha',
+            mobile: '13900001234',
+            name: 'Alpha',
+            role: 'user',
+            is_active: true,
+          },
+          {
+            id: 'user-2',
+            email: 'user-1',
+            username: 'user-1',
+            mobile: '13900004567',
+            name: 'Shadow',
+            role: 'user',
+            is_active: true,
+          },
+        ],
+      })
+      .mockResolvedValueOnce({
+        rows: [{
+          integration_id: 'dir-1',
+          provider: 'dingtalk',
+          corp_id: 'dingcorp',
+          directory_account_id: 'account-1',
+          external_user_id: '0447654442691174',
+          union_id: 'union-1',
+          open_id: 'open-1',
+          external_key: 'union-1',
+          account_name: '林岚',
+          account_email: null,
+          account_mobile: '13900001234',
+          account_is_active: true,
+          account_updated_at: '2026-04-11T08:00:00.000Z',
+          link_status: 'linked',
+          match_strategy: 'manual_admin',
+          reviewed_by: 'admin-1',
+          review_note: null,
+          link_updated_at: '2026-04-11T08:00:00.000Z',
+          local_user_id: 'user-1',
+          local_user_email: 'alpha@example.com',
+          local_user_name: 'Alpha',
+          department_paths: ['DingTalk CN'],
+        }],
+      })
+
+    const result = await bindDirectoryAccount('account-1', {
+      localUserRef: 'user-1',
+      adminUserId: 'admin-1',
+      enableDingTalkGrant: true,
+    })
+
+    expect(clientQuery).toHaveBeenCalledWith(
+      expect.stringContaining('INSERT INTO directory_account_links'),
+      ['account-1', 'user-1', 'admin-1'],
+    )
+    expect(result.account.localUser?.id).toBe('user-1')
+  })
+
   it('creates a local user and binds it to a directory account in one server-side admission flow', async () => {
     const clientQuery = vi.fn().mockResolvedValue({ rows: [] })
     pgMocks.transaction.mockImplementation(async (handler) => handler({ query: clientQuery }))

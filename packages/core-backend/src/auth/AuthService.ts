@@ -435,12 +435,8 @@ export class AuthService {
           [normalizedEmail, normalizedUsername, normalizedMobile]
         )
 
-        const emailMatches = result.rows.filter((row) => typeof row.email === 'string' && row.email.toLowerCase() === normalizedEmail)
-        const usernameMatches = result.rows.filter((row) => typeof row.username === 'string' && row.username.toLowerCase() === normalizedUsername)
-        if (emailMatches.length > 1 || usernameMatches.length > 1) {
-          return null
-        }
-        if (result.rows.length > 1 && emailMatches.length === 0 && usernameMatches.length === 0) {
+        const distinctUserIds = new Set(result.rows.map((row) => row.id))
+        if (distinctUserIds.size > 1) {
           return null
         }
 

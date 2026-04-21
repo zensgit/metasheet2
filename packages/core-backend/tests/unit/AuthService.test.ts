@@ -511,6 +511,48 @@ describe('AuthService.login', () => {
     expect(result).toBeNull()
     expect(sessionMocks.createUserSession).not.toHaveBeenCalled()
   })
+
+  it('returns null when one identifier matches different users across account fields', async () => {
+    const passwordHash = await bcrypt.hash('WelcomePass9A', 10)
+    poolMocks.query.mockResolvedValueOnce({
+      rows: [
+        {
+          id: 'user-1',
+          email: 'shared@example.com',
+          username: 'liqing',
+          mobile: '13900001234',
+          name: '李青',
+          role: 'user',
+          permissions: ['attendance:read'],
+          password_hash: passwordHash,
+          is_active: true,
+          must_change_password: false,
+          created_at: new Date('2026-04-18T00:00:00.000Z'),
+          updated_at: new Date('2026-04-18T00:00:00.000Z'),
+        },
+        {
+          id: 'user-2',
+          email: null,
+          username: 'shared@example.com',
+          mobile: '13900004567',
+          name: '林岚',
+          role: 'user',
+          permissions: ['attendance:read'],
+          password_hash: passwordHash,
+          is_active: true,
+          must_change_password: false,
+          created_at: new Date('2026-04-18T00:00:00.000Z'),
+          updated_at: new Date('2026-04-18T00:00:00.000Z'),
+        },
+      ],
+    })
+
+    const auth = new AuthService()
+    const result = await auth.login('shared@example.com', 'WelcomePass9A')
+
+    expect(result).toBeNull()
+    expect(sessionMocks.createUserSession).not.toHaveBeenCalled()
+  })
 })
 
 describe('AuthService.createToken', () => {
