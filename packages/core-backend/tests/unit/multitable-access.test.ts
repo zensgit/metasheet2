@@ -38,6 +38,7 @@ describe('multitable access helper', () => {
     const result = await resolveRequestAccess(req)
 
     expect(result).toEqual({
+      userId: 'user_1',
       permissions: ['multitable:write'],
       isAdminRole: false,
     })
@@ -59,11 +60,26 @@ describe('multitable access helper', () => {
     const result = await resolveRequestAccess(req)
 
     expect(result).toEqual({
+      userId: 'user_2',
       permissions: ['comments:write'],
       isAdminRole: false,
     })
     expect(listUserPermissions).toHaveBeenCalledWith('user_2')
     expect(isAdmin).toHaveBeenCalledWith('user_2')
+  })
+
+  it('returns an empty userId when req.user has no identifier fields', async () => {
+    const req = { user: { roles: ['user'] } } as any
+
+    const result = await resolveRequestAccess(req)
+
+    expect(result).toEqual({
+      userId: '',
+      permissions: [],
+      isAdminRole: false,
+    })
+    expect(listUserPermissions).not.toHaveBeenCalled()
+    expect(isAdmin).not.toHaveBeenCalled()
   })
 
   it('derives full write capability set from multitable:write', () => {
@@ -73,9 +89,32 @@ describe('multitable access helper', () => {
       canEditRecord: true,
       canDeleteRecord: true,
       canManageFields: true,
+      canManageSheetAccess: false,
       canManageViews: true,
       canComment: false,
       canManageAutomation: false,
+      canExport: true,
+    })
+  })
+
+  it('propagates canManageSheetAccess when multitable:share is granted', () => {
+    const capabilities = deriveCapabilities(['multitable:read', 'multitable:share'], false)
+    expect(capabilities.canManageSheetAccess).toBe(true)
+    expect(capabilities.canExport).toBe(true)
+  })
+
+  it('grants every capability (including canManageSheetAccess and canExport) for admin role', () => {
+    expect(deriveCapabilities([], true)).toEqual({
+      canRead: true,
+      canCreateRecord: true,
+      canEditRecord: true,
+      canDeleteRecord: true,
+      canManageFields: true,
+      canManageSheetAccess: true,
+      canManageViews: true,
+      canComment: true,
+      canManageAutomation: true,
+      canExport: true,
     })
   })
 

@@ -40,6 +40,22 @@ describe('multitable loaders helper', () => {
     })
   })
 
+  it('accepts a pool wrapper in addition to a raw query for loadSheetRow', async () => {
+    const pool = createPool((_sql, params) => {
+      expect(params).toEqual(['sheet_wrap'])
+      return [
+        { id: 'sheet_wrap', base_id: null, name: 'Wrapped', description: null },
+      ]
+    })
+
+    await expect(loadSheetRow(pool, 'sheet_wrap')).resolves.toEqual({
+      id: 'sheet_wrap',
+      baseId: null,
+      name: 'Wrapped',
+      description: null,
+    })
+  })
+
   it('loads fields and caches them', async () => {
     let calls = 0
     const cache = new Map<string, any[]>()
@@ -67,6 +83,27 @@ describe('multitable loaders helper', () => {
       type: 'select',
       options: [{ value: 'open' }],
     })
+  })
+
+  it('accepts a raw query for loadFieldsForSheet', async () => {
+    let calls = 0
+    const pool = createPool((_sql, params) => {
+      calls += 1
+      expect(params).toEqual(['sheet_raw'])
+      return [
+        {
+          id: 'fld_name',
+          name: 'Name',
+          type: 'string',
+          property: {},
+          order: 0,
+        },
+      ]
+    })
+
+    const result = await loadFieldsForSheet(pool.query, 'sheet_raw')
+    expect(calls).toBe(1)
+    expect(result[0]).toMatchObject({ id: 'fld_name', type: 'string' })
   })
 
   it('loads one view config and caches it', async () => {
@@ -100,5 +137,58 @@ describe('multitable loaders helper', () => {
       sheetId: 'sheet_ops',
       hiddenFieldIds: ['fld_hidden'],
     })
+  })
+
+  it('falls back to a module-level cache when no cache is supplied to tryResolveView', async () => {
+    let calls = 0
+    const pool = createPool((_sql, params) => {
+      calls += 1
+      expect(params).toEqual(['view_default_cache_probe'])
+      return [
+        {
+          id: 'view_default_cache_probe',
+          sheet_id: 'sheet_any',
+          name: 'Default Cache Probe',
+          type: 'grid',
+          filter_info: {},
+          sort_info: {},
+          group_info: {},
+          hidden_field_ids: [],
+          config: {},
+        },
+      ]
+    })
+
+    const first = await tryResolveView(pool, 'view_default_cache_probe')
+    const second = await tryResolveView(pool, 'view_default_cache_probe')
+
+    expect(calls).toBe(1)
+    expect(first).toBe(second)
+  })
+
+  it('accepts a raw query for tryResolveView', async () => {
+    let calls = 0
+    const cache = new Map<string, any>()
+    const pool = createPool((_sql, params) => {
+      calls += 1
+      expect(params).toEqual(['view_raw'])
+      return [
+        {
+          id: 'view_raw',
+          sheet_id: 'sheet_any',
+          name: 'Raw Query',
+          type: 'grid',
+          filter_info: {},
+          sort_info: {},
+          group_info: {},
+          hidden_field_ids: [],
+          config: {},
+        },
+      ]
+    })
+
+    const result = await tryResolveView(pool.query, 'view_raw', cache)
+    expect(calls).toBe(1)
+    expect(result).toMatchObject({ id: 'view_raw', sheetId: 'sheet_any' })
   })
 })
