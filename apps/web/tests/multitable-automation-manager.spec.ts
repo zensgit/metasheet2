@@ -125,7 +125,16 @@ function mockClient(
     }
     if (method === 'POST' && url.includes('/automations')) {
       const body = JSON.parse(init?.body as string)
-      return ok({ id: 'rule_new', sheetId: 'sheet_1', enabled: true, ...body })
+      return ok({
+        rule: {
+          id: 'rule_new',
+          sheetId: 'sheet_1',
+          enabled: true,
+          createdAt: '2026-04-21T00:00:00.000Z',
+          updatedAt: '2026-04-21T00:00:00.000Z',
+          ...body,
+        },
+      })
     }
     if (method === 'PATCH' && url.includes('/automations/')) {
       return noContent()
@@ -318,6 +327,191 @@ describe('MetaAutomationManager', () => {
     expect(container.querySelector('[data-field="triggerType"]')).not.toBeNull()
     expect(container.querySelector('[data-field="dingtalkDestinationPickerId"]')).toBeNull()
     expect(container.querySelector('[data-automation-field="name"]')).toBeNull()
+  })
+
+  it('creates DingTalk group automation via the advanced rule editor', async () => {
+    const { client, fetchFn } = mockClient([])
+    const updatedSpy = vi.fn()
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client, onUpdated: updatedSpy })
+    await flushPromises()
+
+    ;(container.querySelector('[data-automation-new-rule="advanced"]') as HTMLButtonElement).click()
+    await flushPromises()
+
+    const nameInput = container.querySelector('[data-field="name"]') as HTMLInputElement
+    nameInput.value = 'Advanced DingTalk group'
+    nameInput.dispatchEvent(new Event('input'))
+
+    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header select') as HTMLSelectElement
+    actionSelect.value = 'send_dingtalk_group_message'
+    actionSelect.dispatchEvent(new Event('change'))
+    await flushPromises()
+
+    const destinationSelect = container.querySelector('[data-field="dingtalkDestinationPickerId"]') as HTMLSelectElement
+    destinationSelect.value = 'dt_1'
+    destinationSelect.dispatchEvent(new Event('change'))
+    await flushPromises()
+    destinationSelect.value = 'dt_2'
+    destinationSelect.dispatchEvent(new Event('change'))
+
+    const destinationFieldInput = container.querySelector('[data-field="dingtalkDestinationFieldPath"]') as HTMLInputElement
+    destinationFieldInput.value = 'record.fld_2'
+    destinationFieldInput.dispatchEvent(new Event('input'))
+
+    const titleInput = container.querySelector('[data-field="dingtalkTitleTemplate"]') as HTMLInputElement
+    titleInput.value = 'Ticket {{recordId}}'
+    titleInput.dispatchEvent(new Event('input'))
+
+    const bodyInput = container.querySelector('[data-field="dingtalkBodyTemplate"]') as HTMLTextAreaElement
+    bodyInput.value = 'Please fill {{record.status}}'
+    bodyInput.dispatchEvent(new Event('input'))
+
+    const publicFormSelect = container.querySelector('[data-field="publicFormViewId"]') as HTMLSelectElement
+    publicFormSelect.value = 'view_form'
+    publicFormSelect.dispatchEvent(new Event('change'))
+
+    const internalViewSelect = container.querySelector('[data-field="internalViewId"]') as HTMLSelectElement
+    internalViewSelect.value = 'view_grid'
+    internalViewSelect.dispatchEvent(new Event('change'))
+    await flushPromises()
+
+    const saveBtn = container.querySelector('[data-action="save"]') as HTMLButtonElement
+    expect(saveBtn.disabled).toBe(false)
+    saveBtn.click()
+    await flushPromises()
+
+    const postCalls = fetchFn.mock.calls.filter(([, init]: [string, RequestInit | undefined]) => init?.method === 'POST')
+    expect(postCalls.length).toBe(1)
+    const body = JSON.parse(postCalls[0][1]?.body as string)
+    expect(body).toMatchObject({
+      name: 'Advanced DingTalk group',
+      triggerType: 'record.created',
+      actionType: 'send_dingtalk_group_message',
+      actionConfig: {
+        destinationId: 'dt_1',
+        destinationIds: ['dt_1', 'dt_2'],
+        destinationIdFieldPath: 'record.fld_2',
+        destinationIdFieldPaths: ['record.fld_2'],
+        titleTemplate: 'Ticket {{recordId}}',
+        bodyTemplate: 'Please fill {{record.status}}',
+        publicFormViewId: 'view_form',
+        internalViewId: 'view_grid',
+      },
+    })
+    expect(body.actions).toEqual([{
+      type: 'send_dingtalk_group_message',
+      config: {
+        destinationId: 'dt_1',
+        destinationIds: ['dt_1', 'dt_2'],
+        destinationIdFieldPath: 'record.fld_2',
+        destinationIdFieldPaths: ['record.fld_2'],
+        titleTemplate: 'Ticket {{recordId}}',
+        bodyTemplate: 'Please fill {{record.status}}',
+        publicFormViewId: 'view_form',
+        internalViewId: 'view_grid',
+      },
+    }])
+    expect(updatedSpy).toHaveBeenCalledTimes(1)
+    expect(container.querySelector('[data-automation-rule="rule_new"]')?.textContent).toContain('Advanced DingTalk group')
+    expect(container.querySelector('[data-automation-rule="rule_new"] .meta-automation__card-desc')?.textContent).toContain('Send DingTalk group message')
+    expect(container.querySelector('.meta-rule-editor__overlay')).toBeNull()
+  })
+
+  it('creates DingTalk person automation via the advanced rule editor', async () => {
+    const { client, fetchFn } = mockClient([])
+    const updatedSpy = vi.fn()
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client, onUpdated: updatedSpy })
+    await flushPromises()
+
+    ;(container.querySelector('[data-automation-new-rule="advanced"]') as HTMLButtonElement).click()
+    await flushPromises()
+
+    const nameInput = container.querySelector('[data-field="name"]') as HTMLInputElement
+    nameInput.value = 'Advanced DingTalk person'
+    nameInput.dispatchEvent(new Event('input'))
+
+    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header select') as HTMLSelectElement
+    actionSelect.value = 'send_dingtalk_person_message'
+    actionSelect.dispatchEvent(new Event('change'))
+    await flushPromises()
+
+    const userIdsInput = container.querySelector('[data-field="dingtalkPersonUserIds"]') as HTMLTextAreaElement
+    userIdsInput.value = 'user_1, user_2'
+    userIdsInput.dispatchEvent(new Event('input'))
+
+    const memberGroupIdsInput = container.querySelector('[data-field="dingtalkPersonMemberGroupIds"]') as HTMLTextAreaElement
+    memberGroupIdsInput.value = 'group_1'
+    memberGroupIdsInput.dispatchEvent(new Event('input'))
+
+    const recipientFieldInput = container.querySelector('[data-field="dingtalkPersonRecipientFieldPath"]') as HTMLInputElement
+    recipientFieldInput.value = 'record.assigneeUserIds'
+    recipientFieldInput.dispatchEvent(new Event('input'))
+
+    const memberGroupFieldInput = container.querySelector('[data-field="dingtalkPersonMemberGroupRecipientFieldPath"]') as HTMLInputElement
+    memberGroupFieldInput.value = 'record.watcherGroupIds'
+    memberGroupFieldInput.dispatchEvent(new Event('input'))
+
+    const titleInput = container.querySelector('[data-field="dingtalkPersonTitleTemplate"]') as HTMLInputElement
+    titleInput.value = 'Ticket {{recordId}}'
+    titleInput.dispatchEvent(new Event('input'))
+
+    const bodyInput = container.querySelector('[data-field="dingtalkPersonBodyTemplate"]') as HTMLTextAreaElement
+    bodyInput.value = 'Please process {{record.status}}'
+    bodyInput.dispatchEvent(new Event('input'))
+
+    const publicFormSelect = container.querySelector('[data-field="dingtalkPersonPublicFormViewId"]') as HTMLSelectElement
+    publicFormSelect.value = 'view_form'
+    publicFormSelect.dispatchEvent(new Event('change'))
+
+    const internalViewSelect = container.querySelector('[data-field="dingtalkPersonInternalViewId"]') as HTMLSelectElement
+    internalViewSelect.value = 'view_grid'
+    internalViewSelect.dispatchEvent(new Event('change'))
+    await flushPromises()
+
+    const saveBtn = container.querySelector('[data-action="save"]') as HTMLButtonElement
+    expect(saveBtn.disabled).toBe(false)
+    saveBtn.click()
+    await flushPromises()
+
+    const postCalls = fetchFn.mock.calls.filter(([, init]: [string, RequestInit | undefined]) => init?.method === 'POST')
+    expect(postCalls.length).toBe(1)
+    const body = JSON.parse(postCalls[0][1]?.body as string)
+    expect(body).toMatchObject({
+      name: 'Advanced DingTalk person',
+      triggerType: 'record.created',
+      actionType: 'send_dingtalk_person_message',
+      actionConfig: {
+        userIds: ['user_1', 'user_2'],
+        memberGroupIds: ['group_1'],
+        userIdFieldPath: 'record.assigneeUserIds',
+        userIdFieldPaths: ['record.assigneeUserIds'],
+        memberGroupIdFieldPath: 'record.watcherGroupIds',
+        memberGroupIdFieldPaths: ['record.watcherGroupIds'],
+        titleTemplate: 'Ticket {{recordId}}',
+        bodyTemplate: 'Please process {{record.status}}',
+        publicFormViewId: 'view_form',
+        internalViewId: 'view_grid',
+      },
+    })
+    expect(body.actions).toEqual([{
+      type: 'send_dingtalk_person_message',
+      config: {
+        userIds: ['user_1', 'user_2'],
+        memberGroupIds: ['group_1'],
+        userIdFieldPath: 'record.assigneeUserIds',
+        userIdFieldPaths: ['record.assigneeUserIds'],
+        memberGroupIdFieldPath: 'record.watcherGroupIds',
+        memberGroupIdFieldPaths: ['record.watcherGroupIds'],
+        titleTemplate: 'Ticket {{recordId}}',
+        bodyTemplate: 'Please process {{record.status}}',
+        publicFormViewId: 'view_form',
+        internalViewId: 'view_grid',
+      },
+    }])
+    expect(updatedSpy).toHaveBeenCalledTimes(1)
+    expect(container.querySelector('[data-automation-rule="rule_new"]')?.textContent).toContain('Advanced DingTalk person')
+    expect(container.querySelector('[data-automation-rule="rule_new"] .meta-automation__card-desc')?.textContent).toContain('Send DingTalk person message')
+    expect(container.querySelector('.meta-rule-editor__overlay')).toBeNull()
   })
 
   it('creates rule via form', async () => {
