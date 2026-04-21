@@ -85,6 +85,16 @@ Follow-up fix, iteration 2:
 - Sign through the app's compiled `authService.createToken()` implementation.
 - Filter stdout to the JWT-shaped line before exporting `YJS_TOKEN`, so logger output cannot contaminate the token value.
 
+Third default-branch validation advanced from `401 Invalid token` to `403 ADMIN_REQUIRED`.
+
+Root cause: the selected user had legacy `users.role='admin'`, but `requireAdminRole()` checks the RBAC bridge table via `user_roles(role_id='admin')`.
+
+Follow-up fix, iteration 3:
+
+- Prefer users already present in `user_roles(role_id='admin')`.
+- If only a legacy active admin user exists, insert the missing `roles('admin')` and `user_roles(user_id, 'admin')` bridge.
+- Then sign the token through `authService.createToken()`.
+
 Re-run static checks:
 
 ```text

@@ -108,19 +108,40 @@ jobs:
           try {
             await client.connect()
             const result = await client.query(`
-              SELECT u.id, u.email, u.username, u.name, u.mobile, u.role, u.permissions, u.is_active, u.must_change_password
+              SELECT
+                u.id,
+                u.email,
+                u.username,
+                u.name,
+                u.mobile,
+                u.role,
+                u.permissions,
+                u.is_active,
+                u.must_change_password,
+                (ur.user_id IS NOT NULL) AS has_rbac_admin
               FROM users u
               LEFT JOIN user_roles ur ON ur.user_id = u.id AND ur.role_id = 'admin'
               WHERE COALESCE(u.is_active, true) = true
                 AND COALESCE(u.must_change_password, false) = false
                 AND (u.role = 'admin' OR ur.user_id IS NOT NULL)
-              ORDER BY CASE WHEN u.id = 'admin' THEN 0 ELSE 1 END, u.created_at ASC
+              ORDER BY
+                CASE WHEN ur.user_id IS NOT NULL THEN 0 ELSE 1 END,
+                CASE WHEN u.id = 'admin' THEN 0 ELSE 1 END,
+                u.created_at ASC
               LIMIT 1
             `)
             const row = result.rows[0]
             if (!row) {
               console.error('No active admin user found for Yjs validation token')
               process.exit(3)
+            }
+
+            if (!row.has_rbac_admin) {
+              await client.query("INSERT INTO roles (id, name) VALUES ('admin', 'Admin') ON CONFLICT (id) DO NOTHING")
+              await client.query(
+                "INSERT INTO user_roles (user_id, role_id) VALUES ($1, 'admin') ON CONFLICT DO NOTHING",
+                [row.id],
+              )
             }
 
             const token = authService.createToken({
