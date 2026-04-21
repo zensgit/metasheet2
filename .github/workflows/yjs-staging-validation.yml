@@ -44,6 +44,7 @@ jobs:
           DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
           DEPLOY_SSH_KEY_B64: ${{ secrets.DEPLOY_SSH_KEY_B64 }}
           DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+          DEPLOY_COMPOSE_FILE: ${{ secrets.DEPLOY_COMPOSE_FILE }}
         run: |
           set -euo pipefail
 
@@ -70,7 +71,7 @@ jobs:
           DEPLOY_PATH="${DEPLOY_PATH:-metasheet2}"
 
           token="$(
-            ssh $ssh_opts "$DEPLOY_USER@$DEPLOY_HOST" "DEPLOY_PATH='${DEPLOY_PATH}' bash -s" <<'EOF'
+            ssh $ssh_opts "$DEPLOY_USER@$DEPLOY_HOST" "DEPLOY_PATH='${DEPLOY_PATH}' DEPLOY_COMPOSE_FILE='${DEPLOY_COMPOSE_FILE:-docker-compose.app.yml}' bash -s" <<'EOF'
           set -euo pipefail
           if [[ "${DEPLOY_PATH}" == /* ]]; then
             DEPLOY_REPO_PATH="${DEPLOY_PATH}"
@@ -80,60 +81,47 @@ jobs:
             DEPLOY_REPO_PATH="${HOME}/${DEPLOY_PATH}"
           fi
           cd "${DEPLOY_REPO_PATH}"
-          python3 - <<'PY'
-          from pathlib import Path
-          import base64
-          import hashlib
-          import hmac
-          import json
-          import sys
-          import time
+          if docker compose version >/dev/null 2>&1; then
+            COMPOSE_CMD=(docker compose)
+          elif command -v docker-compose >/dev/null 2>&1; then
+            COMPOSE_CMD=(docker-compose)
+          else
+            echo "docker compose is not available" >&2
+            exit 125
+          fi
+          "${COMPOSE_CMD[@]}" -f "${DEPLOY_COMPOSE_FILE:-docker-compose.app.yml}" exec -T backend node - <<'NODE'
+          const crypto = require('node:crypto')
 
-          def strip_outer_quotes(value):
-              value = value.strip()
-              if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
-                  return value[1:-1]
-              return value
-
-          def base64url(raw):
-              return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
-
-          env_path = Path("docker/app.env")
-          if not env_path.exists():
-              raise SystemExit("docker/app.env not found")
-
-          values = {}
-          for line in env_path.read_text().splitlines():
-              stripped = line.strip()
-              if not stripped or stripped.startswith("#") or "=" not in stripped:
-                  continue
-              key, value = stripped.split("=", 1)
-              values[key] = strip_outer_quotes(value)
-
-          secret = values.get("JWT_SECRET", "")
-          if not secret:
-              raise SystemExit("JWT_SECRET missing from docker/app.env")
-
-          now = int(time.time())
-          header = {"alg": "HS256", "typ": "JWT"}
-          payload = {
-              "id": "admin",
-              "roles": ["admin"],
-              "perms": ["*:*"],
-              "iat": now,
-              "exp": now + 7200,
+          const secret = process.env.JWT_SECRET
+          if (!secret) {
+            console.error('JWT_SECRET missing from backend runtime env')
+            process.exit(2)
           }
-          signing_input = ".".join([
-              base64url(json.dumps(header, separators=(",", ":")).encode("utf-8")),
-              base64url(json.dumps(payload, separators=(",", ":")).encode("utf-8")),
-          ])
-          signature = hmac.new(
-              secret.encode("utf-8"),
-              signing_input.encode("ascii"),
-              hashlib.sha256,
-          ).digest()
-          print(f"{signing_input}.{base64url(signature)}")
-          PY
+
+          function base64url(input) {
+            return Buffer.from(input)
+              .toString('base64')
+              .replace(/\+/g, '-')
+              .replace(/\//g, '_')
+              .replace(/=/g, '')
+          }
+
+          const now = Math.floor(Date.now() / 1000)
+          const header = { alg: 'HS256', typ: 'JWT' }
+          const payload = {
+            id: 'admin',
+            roles: ['admin'],
+            perms: ['*:*'],
+            iat: now,
+            exp: now + 7200,
+          }
+          const signingInput = `${base64url(JSON.stringify(header))}.${base64url(JSON.stringify(payload))}`
+          const signature = crypto.createHmac('sha256', secret).update(signingInput).digest('base64')
+            .replace(/\+/g, '-')
+            .replace(/\//g, '_')
+            .replace(/=/g, '')
+          console.log(`${signingInput}.${signature}`)
+          NODE
           EOF
           )"
 
