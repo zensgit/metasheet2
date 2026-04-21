@@ -16,6 +16,7 @@ const DISABLED_FORM_VIEW_ID = 'view_form_disabled'
 const EXPIRED_FORM_VIEW_ID = 'view_form_expired'
 const OTHER_SHEET_FORM_VIEW_ID = 'view_form_other_sheet'
 const INTERNAL_VIEW_ID = 'view_internal_grid'
+const MISSING_INTERNAL_VIEW_ID = 'view_internal_missing'
 const RULE_ID = 'rule_dingtalk_links'
 
 type ViewRow = {
@@ -258,6 +259,32 @@ describe('DingTalk automation link route validation', () => {
     }))
   })
 
+  it('rejects an invalid internal processing link on automation create before persisting the rule', async () => {
+    const { app, automationService } = await createApp()
+
+    const res = await request(app)
+      .post(`/api/multitable/sheets/${SHEET_ID}/automations`)
+      .send({
+        name: 'Notify group',
+        triggerType: 'record.created',
+        triggerConfig: {},
+        actionType: 'send_dingtalk_group_message',
+        actionConfig: {
+          destinationId: 'group_1',
+          title: 'Please process',
+          content: 'Open internal link',
+          internalViewId: MISSING_INTERNAL_VIEW_ID,
+        },
+      })
+
+    expect(res.status).toBe(400)
+    expect(res.body.error).toEqual({
+      code: 'VALIDATION_ERROR',
+      message: `Internal processing view not found: ${MISSING_INTERNAL_VIEW_ID}`,
+    })
+    expect(automationService.createRule).not.toHaveBeenCalled()
+  })
+
   it('validates V1 actions on automation create', async () => {
     const { app, automationService } = await createApp()
 
@@ -338,9 +365,6 @@ describe('DingTalk automation link route validation', () => {
     expect(automationService.updateRule).toHaveBeenCalledWith(RULE_ID, SHEET_ID, expect.objectContaining({
       enabled: false,
     }))
-    expect(mockPool.query).not.toHaveBeenCalledWith(
-      expect.stringContaining('FROM meta_views'),
-      expect.anything(),
-    )
+    expect(mockPool.query.mock.calls.some(([sql]) => String(sql).includes('FROM meta_views'))).toBe(false)
   })
 })

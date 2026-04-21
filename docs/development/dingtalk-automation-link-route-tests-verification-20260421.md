@@ -22,6 +22,21 @@ git diff --check
 - Backend TypeScript build passed.
 - Diff whitespace check passed.
 
+## Review-Fix Verification
+
+Additional targeted rerun after tightening the enable-only assertion and adding
+the invalid internal-view route case:
+
+```bash
+pnpm --filter @metasheet/core-backend exec vitest run tests/integration/dingtalk-automation-link-routes.api.test.ts --watch=false
+git diff --check
+```
+
+Result:
+
+- Route integration test passed: 1 file, 6 tests.
+- Diff whitespace check passed.
+
 ## Notes
 
 - No live DingTalk webhook call is made.
