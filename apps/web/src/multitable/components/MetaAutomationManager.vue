@@ -602,7 +602,7 @@
             <button class="meta-automation__btn" type="button" data-automation-edit="true" @click="openRuleEditor(rule)">Edit</button>
             <button class="meta-automation__btn" type="button" data-automation-logs="true" @click="openLogViewer(rule)">View Logs</button>
             <button
-              v-if="rule.actionType === 'send_dingtalk_group_message'"
+              v-if="ruleHasActionType(rule, 'send_dingtalk_group_message')"
               class="meta-automation__btn"
               type="button"
               :data-automation-group-deliveries="rule.id"
@@ -611,7 +611,7 @@
               View Deliveries
             </button>
             <button
-              v-if="rule.actionType === 'send_dingtalk_person_message'"
+              v-if="ruleHasActionType(rule, 'send_dingtalk_person_message')"
               class="meta-automation__btn"
               type="button"
               :data-automation-person-deliveries="rule.id"
@@ -1552,6 +1552,10 @@ function describeAction(rule: AutomationRule): string {
     default:
       return String(rule.actionType)
   }
+}
+
+function ruleHasActionType(rule: AutomationRule, actionType: AutomationActionType): boolean {
+  return rule.actionType === actionType || (rule.actions ?? []).some((action) => action.type === actionType)
 }
 
 watch(
