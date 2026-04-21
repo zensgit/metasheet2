@@ -194,18 +194,21 @@ export class YjsRecordBridge {
 
     // Fire and forget — errors logged, not thrown
     this.executePatch(recordId, fields, primaryActorId, actorIds)
-      .then(() => { this._flushSuccessCount++ })
+      .then((applied) => {
+        if (applied) this._flushSuccessCount++
+      })
       .catch((err) => {
         this._flushFailureCount++
         console.error(`[yjs-bridge] Failed to flush patch for record ${recordId}:`, err)
       })
   }
 
-  private async executePatch(recordId: string, fields: Record<string, unknown>, primaryActorId: string, allActorIds: string[]): Promise<void> {
+  private async executePatch(recordId: string, fields: Record<string, unknown>, primaryActorId: string, allActorIds: string[]): Promise<boolean> {
     const input = await this.getWriteInput(recordId, fields, primaryActorId, allActorIds)
-    if (!input) return // record context not available (e.g., deleted)
+    if (!input) return false // record context not available (e.g., deleted)
 
-    await this.recordWriteService.patchRecords(input)
+    const result = await this.recordWriteService.patchRecords(input)
+    return result.updated.length > 0
   }
 
   /**

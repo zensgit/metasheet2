@@ -59,11 +59,42 @@ function handleIncomingMessage(doc, socket, message) {
   if (messageType !== MSG_SYNC) return
   const encoder = encoding.createEncoder()
   encoding.writeVarUint(encoder, MSG_SYNC)
-  syncProtocol.readSyncMessage(decoder, encoder, doc, 'server')
+  syncProtocol.readSyncMessage(decoder, encoder, doc, 'remote')
   const reply = encoding.toUint8Array(encoder)
   if (reply.length > 1) {
     socket.emit('yjs:message', { recordId: RECORD_ID, data: Array.from(reply) })
   }
+}
+
+function sendSyncStep1(doc, socket) {
+  const encoder = encoding.createEncoder()
+  encoding.writeVarUint(encoder, MSG_SYNC)
+  syncProtocol.writeSyncStep1(encoder, doc)
+  socket.emit('yjs:message', { recordId: RECORD_ID, data: Array.from(encoding.toUint8Array(encoder)) })
+}
+
+async function waitForYTextField(doc, fieldId, timeoutMs = 5000) {
+  const fields = doc.getMap('fields')
+  const current = fields.get(fieldId)
+  if (current instanceof Y.Text) return current
+
+  return await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      fields.unobserve(observer)
+      reject(new Error(`timed out waiting for server-seeded Y.Text field ${fieldId}`))
+    }, timeoutMs)
+
+    const observer = (event) => {
+      if (!event.keysChanged.has(fieldId)) return
+      const next = fields.get(fieldId)
+      if (!(next instanceof Y.Text)) return
+      clearTimeout(timer)
+      fields.unobserve(observer)
+      resolve(next)
+    }
+
+    fields.observe(observer)
+  })
 }
 
 async function run() {
@@ -99,9 +130,14 @@ async function run() {
   log('  socket connected:', socket.id)
 
   socket.on('yjs:error', (err) => log('  yjs:error', err))
+  let requestedServerState = false
   socket.on('yjs:message', ({ recordId, data }) => {
     if (recordId !== RECORD_ID) return
     handleIncomingMessage(doc, socket, new Uint8Array(data))
+    if (!requestedServerState) {
+      requestedServerState = true
+      sendSyncStep1(doc, socket)
+    }
   })
   socket.on('yjs:update', ({ recordId, data }) => {
     if (recordId !== RECORD_ID) return
@@ -126,12 +162,7 @@ async function run() {
   log('  activeSocketCount:', midStatus.socket.activeSocketCount, `(expected: ${preStatus.socket.activeSocketCount + 1})`)
 
   log('\n  Injecting Y.Text edit via Y.Map("fields")')
-  const fields = doc.getMap('fields')
-  let yText = fields.get(FIELD_ID)
-  if (!(yText instanceof Y.Text)) {
-    yText = new Y.Text()
-    fields.set(FIELD_ID, yText)
-  }
+  const yText = await waitForYTextField(doc, FIELD_ID)
   const stamp = `YJS-NODE-${new Date().toISOString().slice(11, 19)}`
   doc.transact(() => {
     yText.delete(0, yText.length)
@@ -167,7 +198,9 @@ async function run() {
 
   log('\n=== RESULT ===')
   const ok = {
-    connected: midStatus.sync.activeDocCount > preStatus.sync.activeDocCount,
+    connected:
+      midStatus.sync.activeDocCount >= preStatus.sync.activeDocCount
+      && midStatus.socket.activeSocketCount > preStatus.socket.activeSocketCount,
     flushed: postFlushStatus.bridge.flushSuccessCount > preStatus.bridge.flushSuccessCount,
     noFailures: postFlushStatus.bridge.flushFailureCount === preStatus.bridge.flushFailureCount,
     bridgedToDB: postTitle === stamp,

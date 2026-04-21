@@ -22,13 +22,23 @@ function handleSyncMessage(
   if (messageType === MSG_SYNC) {
     const encoder = encoding.createEncoder()
     encoding.writeVarUint(encoder, MSG_SYNC)
-    syncProtocol.readSyncMessage(decoder, encoder, doc, 'server')
+    syncProtocol.readSyncMessage(decoder, encoder, doc, 'remote')
 
     const reply = encoding.toUint8Array(encoder)
     if (reply.length > 1) {
       socket.emit('yjs:message', { recordId, data: Array.from(reply) })
     }
   }
+}
+
+function sendSyncStep1(doc: Y.Doc, socket: Socket, recordId: string): void {
+  const encoder = encoding.createEncoder()
+  encoding.writeVarUint(encoder, MSG_SYNC)
+  syncProtocol.writeSyncStep1(encoder, doc)
+  socket.emit('yjs:message', {
+    recordId,
+    data: Array.from(encoding.toUint8Array(encoder)),
+  })
 }
 
 /**
@@ -125,6 +135,7 @@ export function useYjsDocument(recordId: Ref<string | null>, options: UseYjsDocu
 
     const yDoc = new Y.Doc()
     doc.value = yDoc
+    let requestedServerState = false
 
     socket = socketIO('/yjs', {
       transports: ['websocket'],
@@ -142,6 +153,10 @@ export function useYjsDocument(recordId: Ref<string | null>, options: UseYjsDocu
         if (rid2 !== currentRecordId) return
         const message = new Uint8Array(data)
         handleSyncMessage(yDoc, socket!, rid2, message)
+        if (!requestedServerState) {
+          requestedServerState = true
+          sendSyncStep1(yDoc, socket!, rid2)
+        }
         synced.value = true
       },
     )
