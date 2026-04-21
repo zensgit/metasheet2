@@ -39,3 +39,7 @@ The old inline form remains in place to reduce risk and preserve existing quick-
 Users who click `+ New Automation` now start in the same advanced editor used for edits. This makes DingTalk group/person notification configuration, form links, and internal processing links available immediately during creation.
 
 Existing quick-form behavior remains accessible through the secondary button.
+
+## Main-target delivery note
+
+The source branch for this change was stacked on a non-`main` base. For final delivery, the single create-entry commit was cherry-picked onto `main` after the preceding DingTalk service validation work landed, so the PR contains only the automation manager entry-point change and its focused tests/docs.
