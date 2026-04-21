@@ -42,3 +42,23 @@ export function listDingTalkGroupDestinationFieldPathWarnings(
     return []
   })
 }
+
+export function listDingTalkPersonMemberGroupRecipientFieldPathWarnings(
+  value: unknown,
+  fields: readonly DingTalkRecipientWarningField[],
+): string[] {
+  const fieldMap = new Map(fields.map((field) => [field.id, field]))
+  return parseRecordFieldPaths(value).flatMap((path) => {
+    const field = fieldMap.get(path)
+    if (!field) {
+      return [`record.${path} is not a known field in this sheet; DingTalk person member-group recipients expect field IDs that resolve to member group IDs.`]
+    }
+    if (field.type === 'user') {
+      return [`record.${path} is a user field; use Record recipient field paths instead.`]
+    }
+    if (!isDingTalkMemberGroupRecipientField(field)) {
+      return [`record.${path} is not a member group field; DingTalk person member-group recipients expect member group fields.`]
+    }
+    return []
+  })
+}

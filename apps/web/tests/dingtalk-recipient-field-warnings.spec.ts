@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest'
 import {
   isDingTalkMemberGroupRecipientField,
   listDingTalkGroupDestinationFieldPathWarnings,
+  listDingTalkPersonMemberGroupRecipientFieldPathWarnings,
 } from '../src/multitable/utils/dingtalkRecipientFieldWarnings'
 
 const fields = [
@@ -41,6 +42,31 @@ describe('dingtalk recipient field warnings', () => {
   it('returns no dynamic group destination warnings for empty or non-string input', () => {
     expect(listDingTalkGroupDestinationFieldPathWarnings('', fields)).toEqual([])
     expect(listDingTalkGroupDestinationFieldPathWarnings(['record.assigneeUserIds'], fields)).toEqual([])
+  })
+
+  it('lists dynamic person member-group recipient field path warnings from normalized record paths', () => {
+    expect(listDingTalkPersonMemberGroupRecipientFieldPathWarnings(
+      [
+        'record.missingGroupId',
+        'record.assigneeUserIds',
+        'record.name',
+        'record.watcherGroupIds',
+        'record.escalationGroupId',
+        'record.reviewGroupId',
+        'record.approvalGroupId',
+        'name',
+      ].join(',\n'),
+      fields,
+    )).toEqual([
+      'record.missingGroupId is not a known field in this sheet; DingTalk person member-group recipients expect field IDs that resolve to member group IDs.',
+      'record.assigneeUserIds is a user field; use Record recipient field paths instead.',
+      'record.name is not a member group field; DingTalk person member-group recipients expect member group fields.',
+    ])
+  })
+
+  it('returns no person member-group recipient warnings for empty or non-string input', () => {
+    expect(listDingTalkPersonMemberGroupRecipientFieldPathWarnings('', fields)).toEqual([])
+    expect(listDingTalkPersonMemberGroupRecipientFieldPathWarnings(['record.name'], fields)).toEqual([])
   })
 
   it('detects member group recipient fields from type aliases and ref metadata', () => {
