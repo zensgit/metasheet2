@@ -443,6 +443,138 @@ describe('MetaAutomationRuleEditor', () => {
     expect(container.textContent).toContain('Assignees (record.assigneeUserIds)')
   })
 
+  it('emits DingTalk person action config with only a dynamic member group record path', async () => {
+    const saved = vi.fn()
+    const client = mockClient()
+    const { container } = mount({
+      visible: true,
+      sheetId: 'sheet_1',
+      fields,
+      views,
+      client,
+      onSave: saved,
+    })
+    await flushPromises()
+
+    const nameInput = container.querySelector('[data-field="name"]') as HTMLInputElement
+    nameInput.value = 'Notify dynamic member groups'
+    nameInput.dispatchEvent(new Event('input'))
+    await flushPromises()
+
+    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header select') as HTMLSelectElement
+    actionSelect.value = 'send_dingtalk_person_message'
+    actionSelect.dispatchEvent(new Event('change'))
+    await flushPromises()
+
+    const memberGroupFieldInput = container.querySelector('[data-field="dingtalkPersonMemberGroupRecipientFieldPath"]') as HTMLInputElement
+    memberGroupFieldInput.value = 'record.watcherGroupIds'
+    memberGroupFieldInput.dispatchEvent(new Event('input'))
+
+    const titleInput = container.querySelector('[data-field="dingtalkPersonTitleTemplate"]') as HTMLInputElement
+    titleInput.value = 'Ticket {{recordId}}'
+    titleInput.dispatchEvent(new Event('input'))
+
+    const bodyInput = container.querySelector('[data-field="dingtalkPersonBodyTemplate"]') as HTMLTextAreaElement
+    bodyInput.value = 'Please review {{record.status}}'
+    bodyInput.dispatchEvent(new Event('input'))
+    await flushPromises()
+
+    const saveBtn = container.querySelector('[data-action="save"]') as HTMLButtonElement
+    expect(saveBtn.disabled).toBe(false)
+    saveBtn.click()
+    await flushPromises()
+
+    expect(saved).toHaveBeenCalledTimes(1)
+    const payload = saved.mock.calls[0][0]
+    expect(payload.actionConfig).toEqual({
+      userIds: [],
+      memberGroupIdFieldPath: 'record.watcherGroupIds',
+      memberGroupIdFieldPaths: ['record.watcherGroupIds'],
+      titleTemplate: 'Ticket {{recordId}}',
+      bodyTemplate: 'Please review {{record.status}}',
+    })
+    expect(container.textContent).toContain('Record member groups:')
+    expect(container.textContent).toContain('record.watcherGroupIds')
+  })
+
+  it('can remove a selected dynamic member group recipient field chip in the rule editor', async () => {
+    const client = mockClient()
+    const { container } = mount({
+      visible: true,
+      sheetId: 'sheet_1',
+      fields,
+      views,
+      client,
+    })
+    await flushPromises()
+
+    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header select') as HTMLSelectElement
+    actionSelect.value = 'send_dingtalk_person_message'
+    actionSelect.dispatchEvent(new Event('change'))
+    await flushPromises()
+
+    const memberGroupFieldInput = container.querySelector('[data-field="dingtalkPersonMemberGroupRecipientFieldPath"]') as HTMLInputElement
+    memberGroupFieldInput.value = 'record.watcherGroupIds, record.escalationGroupId'
+    memberGroupFieldInput.dispatchEvent(new Event('input'))
+    await flushPromises()
+
+    const firstChip = container.querySelector('[data-member-group-recipient-field="watcherGroupIds"]') as HTMLButtonElement
+    expect(firstChip?.textContent).toContain('record.watcherGroupIds')
+    firstChip.click()
+    await flushPromises()
+
+    expect(memberGroupFieldInput.value).toBe('record.escalationGroupId')
+    expect(container.querySelector('[data-member-group-recipient-field="watcherGroupIds"]')).toBeNull()
+  })
+
+  it('warns when a dynamic member group recipient path is unknown in the rule editor', async () => {
+    const client = mockClient()
+    const { container } = mount({
+      visible: true,
+      sheetId: 'sheet_1',
+      fields,
+      views,
+      client,
+    })
+    await flushPromises()
+
+    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header select') as HTMLSelectElement
+    actionSelect.value = 'send_dingtalk_person_message'
+    actionSelect.dispatchEvent(new Event('change'))
+    await flushPromises()
+
+    const memberGroupFieldInput = container.querySelector('[data-field="dingtalkPersonMemberGroupRecipientFieldPath"]') as HTMLInputElement
+    memberGroupFieldInput.value = 'record.unknownGroupField'
+    memberGroupFieldInput.dispatchEvent(new Event('input'))
+    await flushPromises()
+
+    expect(container.textContent).toContain('record.unknownGroupField is not a known field in this sheet')
+  })
+
+  it('warns when a dynamic member group recipient path points at a user field in the rule editor', async () => {
+    const client = mockClient()
+    const { container } = mount({
+      visible: true,
+      sheetId: 'sheet_1',
+      fields,
+      views,
+      client,
+    })
+    await flushPromises()
+
+    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header select') as HTMLSelectElement
+    actionSelect.value = 'send_dingtalk_person_message'
+    actionSelect.dispatchEvent(new Event('change'))
+    await flushPromises()
+
+    const memberGroupFieldInput = container.querySelector('[data-field="dingtalkPersonMemberGroupRecipientFieldPath"]') as HTMLInputElement
+    memberGroupFieldInput.value = 'record.assigneeUserIds'
+    memberGroupFieldInput.dispatchEvent(new Event('input'))
+    await flushPromises()
+
+    expect(container.textContent).toContain('record.assigneeUserIds is a user field; use Record recipient field paths instead.')
+  })
+
   it('can pick a record recipient field in the rule editor', async () => {
     const client = mockClient()
     const { container } = mount({
