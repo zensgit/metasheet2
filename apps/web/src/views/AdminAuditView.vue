@@ -3,7 +3,7 @@
     <header class="admin-audit__header">
       <div>
         <h1>管理审计</h1>
-        <p>查看用户、角色、权限和会话治理相关的后台操作记录。</p>
+        <p>查看后台敏感操作的审计日志（对应 <code>operation_audit_logs</code>），支持按资源、动作、时间范围过滤与导出。</p>
       </div>
 
       <div class="admin-audit__actions">
@@ -11,11 +11,20 @@
         <router-link class="admin-audit__link" to="/admin/roles">角色管理</router-link>
         <router-link class="admin-audit__link" to="/admin/permissions">权限管理</router-link>
         <input
-          v-model.trim="search"
+          v-model.trim="resourceIdInput"
           class="admin-audit__input"
           type="search"
-          placeholder="搜索用户、资源 ID、邮箱或原因"
-          @keyup.enter="void reloadAll()"
+          placeholder="按 resource_id 精确匹配"
+          title="精确匹配 resource_id（例如 user UUID 或 租户 ID）"
+          @keyup.enter="void loadActivityLogs(1)"
+        >
+        <input
+          v-model.trim="actorIdInput"
+          class="admin-audit__input"
+          type="search"
+          placeholder="按 actor_id 精确匹配"
+          title="精确匹配 actor_id（操作人 ID）"
+          @keyup.enter="void loadActivityLogs(1)"
         >
         <select v-model="resourceTypeFilter" class="admin-audit__select">
           <option value="">全部资源</option>
@@ -29,11 +38,12 @@
           <option value="update">update</option>
           <option value="grant">grant</option>
           <option value="revoke">revoke</option>
+          <option value="delete">delete</option>
         </select>
         <input v-model="fromDate" class="admin-audit__input" type="date">
         <input v-model="toDate" class="admin-audit__input" type="date">
-        <button class="admin-audit__button admin-audit__button--primary" type="button" :disabled="activityLoading || revocationLoading" @click="void reloadAll()">
-          {{ activityLoading || revocationLoading ? '加载中...' : '刷新' }}
+        <button class="admin-audit__button admin-audit__button--primary" type="button" :disabled="activityLoading" @click="void loadActivityLogs(1)">
+          {{ activityLoading ? '加载中...' : '刷新' }}
         </button>
         <button class="admin-audit__button" type="button" :disabled="exporting || activityLoading" @click="void exportActivityCsv()">
           {{ exporting ? '导出中...' : '导出 CSV' }}
@@ -47,21 +57,21 @@
 
     <section class="admin-audit__summary">
       <article class="admin-audit__summary-card">
-        <span class="admin-audit__summary-label">IAM 活动日志</span>
+        <span class="admin-audit__summary-label">审计日志总数</span>
         <strong>{{ activityTotal }}</strong>
       </article>
       <article class="admin-audit__summary-card">
-        <span class="admin-audit__summary-label">会话撤销记录</span>
-        <strong>{{ revocationTotal }}</strong>
+        <span class="admin-audit__summary-label">当前过滤条件</span>
+        <strong>{{ activeFilterSummary }}</strong>
       </article>
     </section>
 
-    <div class="admin-audit__layout">
+    <div class="admin-audit__layout admin-audit__layout--single">
       <section class="admin-audit__panel">
         <div class="admin-audit__panel-head">
           <div>
-            <h2>IAM 活动日志</h2>
-            <p>覆盖用户创建、账号启停、密码重置、角色分配、直接授权等管理动作。</p>
+            <h2>操作审计日志</h2>
+            <p>覆盖用户、角色、权限、会话等后台管理动作。按 occurred_at 倒序排序。</p>
           </div>
           <div class="admin-audit__pagination">
             <button class="admin-audit__button" type="button" :disabled="activityLoading || activityPage <= 1" @click="void loadActivityLogs(activityPage - 1)">
@@ -79,77 +89,49 @@
             <thead>
               <tr>
                 <th>时间</th>
+                <th>操作人</th>
                 <th>资源</th>
                 <th>动作</th>
                 <th>对象</th>
-                <th>摘要</th>
+                <th>请求信息</th>
+                <th>Meta 摘要</th>
               </tr>
             </thead>
             <tbody>
               <tr v-for="item in activityLogs" :key="item.id">
-                <td>{{ formatDate(item.created_at) }}</td>
-                <td>{{ item.resource_type || '--' }}</td>
-                <td>{{ item.action }}</td>
-                <td>{{ item.resource_id || '--' }}</td>
+                <td>{{ formatDate(item.occurred_at) }}</td>
                 <td>
-                  <div class="admin-audit__detail-line">{{ summarizeAction(item) }}</div>
-                  <small class="admin-audit__muted">{{ actorSummary(item) }}</small>
+                  <div>{{ item.actor_id || '—' }}</div>
+                  <small class="admin-audit__muted">{{ item.actor_type || '' }}</small>
+                </td>
+                <td>{{ item.resource_type || '—' }}</td>
+                <td>{{ item.action || '—' }}</td>
+                <td>{{ item.resource_id || '—' }}</td>
+                <td>
+                  <div class="admin-audit__detail-line">{{ item.ip || '—' }}</div>
+                  <small class="admin-audit__muted">{{ item.route || '' }}{{ item.status_code != null ? ` · ${item.status_code}` : '' }}</small>
+                </td>
+                <td>
+                  <div class="admin-audit__detail-line">{{ summarizeMeta(item) }}</div>
+                  <small v-if="item.request_id" class="admin-audit__muted">req: {{ item.request_id }}</small>
                 </td>
               </tr>
             </tbody>
           </table>
           <div v-else class="admin-audit__empty">
-            {{ activityLoading ? '正在加载日志...' : '暂无 IAM 管理日志。' }}
+            {{ activityLoading ? '正在加载日志...' : '暂无审计日志。' }}
           </div>
         </div>
       </section>
 
-      <section class="admin-audit__panel">
+      <section class="admin-audit__panel admin-audit__panel--placeholder">
         <div class="admin-audit__panel-head">
           <div>
             <h2>会话撤销记录</h2>
-            <p>记录强制下线、停用账号、重置密码触发的会话失效事件。</p>
-          </div>
-          <div class="admin-audit__pagination">
-            <button class="admin-audit__button" type="button" :disabled="revocationLoading || revocationPage <= 1" @click="void loadSessionRevocations(revocationPage - 1)">
-              上一页
-            </button>
-            <span>第 {{ revocationPage }} / {{ revocationTotalPages }} 页</span>
-            <button class="admin-audit__button" type="button" :disabled="revocationLoading || revocationPage >= revocationTotalPages" @click="void loadSessionRevocations(revocationPage + 1)">
-              下一页
-            </button>
+            <p>暂未提供后端数据源，将在后续版本接入 <code>/api/admin/session-revocations</code>。</p>
           </div>
         </div>
-
-        <div class="admin-audit__table-wrapper">
-          <table v-if="sessionRevocations.length" class="admin-audit__table">
-            <thead>
-              <tr>
-                <th>用户</th>
-                <th>原因</th>
-                <th>操作人</th>
-                <th>撤销时间</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr v-for="item in sessionRevocations" :key="`${item.user_id}-${item.updated_at}`">
-                <td>
-                  <div>{{ item.user_name || item.user_email || item.user_id }}</div>
-                  <small class="admin-audit__muted">{{ item.user_email || item.user_id }}</small>
-                </td>
-                <td>{{ item.reason || '--' }}</td>
-                <td>
-                  <div>{{ item.updated_by_name || item.updated_by_email || item.updated_by || '--' }}</div>
-                  <small class="admin-audit__muted">{{ item.updated_by_email || item.updated_by || '' }}</small>
-                </td>
-                <td>{{ formatDate(item.revoked_after) }}</td>
-              </tr>
-            </tbody>
-          </table>
-          <div v-else class="admin-audit__empty">
-            {{ revocationLoading ? '正在加载会话撤销记录...' : '暂无会话撤销记录。' }}
-          </div>
-        </div>
+        <div class="admin-audit__empty">当前版本使用 <code>/api/audit-logs</code> 的 <code>user-session</code> 资源条目作为替代，请在上方资源过滤中选择「用户会话」。</div>
       </section>
     </div>
   </section>
@@ -160,31 +142,20 @@ import { computed, onMounted, ref } from 'vue'
 import { apiFetch } from '../utils/api'
 
 type AdminAuditLogItem = {
-  id: number
-  created_at: string
-  event_type: string
-  event_category: string
-  event_severity: string
+  id: string
+  occurred_at: string
+  actor_id: string | null
+  actor_type: string | null
   action: string
   resource_type: string | null
   resource_id: string | null
-  user_id: number | null
-  user_name: string | null
-  user_email: string | null
-  action_details: Record<string, unknown> | null
-  error_code: string | null
-}
-
-type SessionRevocationItem = {
-  user_id: string
-  revoked_after: string
-  updated_at: string
-  updated_by: string | null
-  reason: string | null
-  user_email: string | null
-  user_name: string | null
-  updated_by_email: string | null
-  updated_by_name: string | null
+  request_id: string | null
+  ip: string | null
+  user_agent: string | null
+  meta: Record<string, unknown> | null
+  route: string | null
+  status_code: number | null
+  latency_ms: number | null
 }
 
 const resourceTypeOptions = [
@@ -199,25 +170,32 @@ const resourceTypeOptions = [
 ] as const
 
 const activityLoading = ref(false)
-const revocationLoading = ref(false)
 const exporting = ref(false)
 const status = ref('')
 const statusTone = ref<'info' | 'error'>('info')
-const search = ref('')
+const actorIdInput = ref('')
+const resourceIdInput = ref('')
 const resourceTypeFilter = ref('')
 const actionFilter = ref('')
 const fromDate = ref('')
 const toDate = ref('')
 const activityLogs = ref<AdminAuditLogItem[]>([])
-const sessionRevocations = ref<SessionRevocationItem[]>([])
 const activityPage = ref(1)
-const revocationPage = ref(1)
 const activityTotal = ref(0)
-const revocationTotal = ref(0)
 const pageSize = 20
 
 const activityTotalPages = computed(() => Math.max(1, Math.ceil(activityTotal.value / pageSize)))
-const revocationTotalPages = computed(() => Math.max(1, Math.ceil(revocationTotal.value / pageSize)))
+
+const activeFilterSummary = computed(() => {
+  const parts: string[] = []
+  if (actorIdInput.value) parts.push(`actor=${actorIdInput.value}`)
+  if (resourceIdInput.value) parts.push(`resourceId=${resourceIdInput.value}`)
+  if (resourceTypeFilter.value) parts.push(`resourceType=${resourceTypeFilter.value}`)
+  if (actionFilter.value) parts.push(`action=${actionFilter.value}`)
+  if (fromDate.value) parts.push(`from=${fromDate.value}`)
+  if (toDate.value) parts.push(`to=${toDate.value}`)
+  return parts.length ? parts.join(' · ') : '无（显示全部）'
+})
 
 function setStatus(message: string, tone: 'info' | 'error' = 'info'): void {
   status.value = message
@@ -233,14 +211,15 @@ async function readJson(response: Response): Promise<Record<string, unknown>> {
 }
 
 function formatDate(value: string | null | undefined): string {
-  if (!value) return '--'
+  if (!value) return '—'
   const date = new Date(value)
   if (Number.isNaN(date.getTime())) return value
   return `${date.toLocaleDateString('zh-CN')} ${date.toLocaleTimeString('zh-CN', { hour12: false })}`
 }
 
-function summarizeAction(item: AdminAuditLogItem): string {
-  const details = item.action_details || {}
+function summarizeMeta(item: AdminAuditLogItem): string {
+  const meta = item.meta || {}
+  if (!meta || typeof meta !== 'object') return '—'
   const pairs: string[] = []
   const append = (label: string, value: unknown) => {
     if (value == null) return
@@ -248,95 +227,90 @@ function summarizeAction(item: AdminAuditLogItem): string {
       if (value.length) pairs.push(`${label}: ${value.join(', ')}`)
       return
     }
-    if (typeof value === 'object') return
+    if (typeof value === 'object') {
+      try {
+        const text = JSON.stringify(value)
+        if (text && text !== '{}') pairs.push(`${label}: ${text}`)
+      } catch {
+        /* ignore */
+      }
+      return
+    }
     const text = String(value).trim()
     if (text) pairs.push(`${label}: ${text}`)
   }
 
-  append('邮箱', details.email)
-  append('姓名', details.name)
-  append('角色', details.roleId || details.role)
-  append('预设', details.presetId)
-  append('权限', details.permissions)
-  append('原因', details.reason)
-  append('临时密码', details.generatedPassword === true ? '系统生成' : undefined)
+  append('email', (meta as Record<string, unknown>).email)
+  append('name', (meta as Record<string, unknown>).name)
+  append('role', (meta as Record<string, unknown>).roleId || (meta as Record<string, unknown>).role)
+  append('preset', (meta as Record<string, unknown>).presetId)
+  append('permissions', (meta as Record<string, unknown>).permissions)
+  append('reason', (meta as Record<string, unknown>).reason)
 
-  const before = details.before
-  const after = details.after
-  if (before && after && typeof before === 'object' && typeof after === 'object') {
-    const beforeState = JSON.stringify(before)
-    const afterState = JSON.stringify(after)
-    if (beforeState !== afterState) {
-      pairs.push(`变更: ${beforeState} -> ${afterState}`)
+  const before = (meta as Record<string, unknown>).before
+  const after = (meta as Record<string, unknown>).after
+  if (before != null && after != null) {
+    try {
+      const beforeState = JSON.stringify(before)
+      const afterState = JSON.stringify(after)
+      if (beforeState !== afterState) {
+        pairs.push(`变更: ${beforeState} -> ${afterState}`)
+      }
+    } catch {
+      /* ignore */
     }
   }
 
-  return pairs.join(' · ') || '无补充摘要'
+  if (pairs.length) return pairs.join(' · ')
+
+  try {
+    const fallback = JSON.stringify(meta)
+    return fallback === '{}' ? '—' : fallback.slice(0, 280)
+  } catch {
+    return '—'
+  }
 }
 
-function actorSummary(item: AdminAuditLogItem): string {
-  const adminUserId = typeof item.action_details?.adminUserId === 'string' ? item.action_details.adminUserId : ''
-  if (item.user_email || item.user_name) {
-    return `${item.user_name || item.user_email}${adminUserId ? ` · ${adminUserId}` : ''}`
+function toIsoBound(value: string, endOfDay = false): string {
+  // value is a YYYY-MM-DD from <input type="date">
+  if (!value) return ''
+  if (endOfDay) return `${value}T23:59:59.999Z`
+  return `${value}T00:00:00.000Z`
+}
+
+function buildQueryParams(extra: Record<string, string> = {}): URLSearchParams {
+  const params = new URLSearchParams()
+  if (actorIdInput.value) params.set('actorId', actorIdInput.value)
+  if (resourceIdInput.value) params.set('resourceId', resourceIdInput.value)
+  if (resourceTypeFilter.value) params.set('resourceType', resourceTypeFilter.value)
+  if (actionFilter.value) params.set('action', actionFilter.value)
+  if (fromDate.value) params.set('from', toIsoBound(fromDate.value))
+  if (toDate.value) params.set('to', toIsoBound(toDate.value, true))
+  for (const [key, value] of Object.entries(extra)) {
+    params.set(key, value)
   }
-  return adminUserId ? `操作人：${adminUserId}` : '操作人未记录'
+  return params
 }
 
 async function loadActivityLogs(page = 1): Promise<void> {
   activityLoading.value = true
+  setStatus('')
   try {
-    const params = new URLSearchParams({
-      page: String(page),
-      pageSize: String(pageSize),
-    })
-    if (search.value) params.set('q', search.value)
-    if (resourceTypeFilter.value) params.set('resourceType', resourceTypeFilter.value)
-    if (actionFilter.value) params.set('action', actionFilter.value)
-    if (fromDate.value) params.set('from', fromDate.value)
-    if (toDate.value) params.set('to', toDate.value)
-
-    const response = await apiFetch(`/api/admin/audit-activity?${params.toString()}`)
+    const params = buildQueryParams({ page: String(page), pageSize: String(pageSize) })
+    const response = await apiFetch(`/api/audit-logs?${params.toString()}`)
     const payload = await readJson(response)
     if (!response.ok || payload.ok !== true) {
-      throw new Error(String((payload.error as Record<string, unknown> | undefined)?.message || '加载管理审计失败'))
+      throw new Error(String((payload.error as Record<string, unknown> | undefined)?.message || '加载审计日志失败'))
     }
 
     const data = payload.data as { items?: AdminAuditLogItem[]; total?: number; page?: number } | undefined
-    activityLogs.value = Array.isArray(data?.items) ? data.items : []
+    activityLogs.value = Array.isArray(data?.items) ? data!.items! : []
     activityTotal.value = Number(data?.total ?? activityLogs.value.length) || 0
     activityPage.value = Number(data?.page ?? page) || page
   } catch (error) {
-    setStatus(error instanceof Error ? error.message : '加载管理审计失败', 'error')
+    setStatus(error instanceof Error ? error.message : '加载审计日志失败', 'error')
   } finally {
     activityLoading.value = false
-  }
-}
-
-async function loadSessionRevocations(page = 1): Promise<void> {
-  revocationLoading.value = true
-  try {
-    const params = new URLSearchParams({
-      page: String(page),
-      pageSize: String(pageSize),
-    })
-    if (search.value) params.set('q', search.value)
-    if (fromDate.value) params.set('from', fromDate.value)
-    if (toDate.value) params.set('to', toDate.value)
-
-    const response = await apiFetch(`/api/admin/session-revocations?${params.toString()}`)
-    const payload = await readJson(response)
-    if (!response.ok || payload.ok !== true) {
-      throw new Error(String((payload.error as Record<string, unknown> | undefined)?.message || '加载会话撤销记录失败'))
-    }
-
-    const data = payload.data as { items?: SessionRevocationItem[]; total?: number; page?: number } | undefined
-    sessionRevocations.value = Array.isArray(data?.items) ? data.items : []
-    revocationTotal.value = Number(data?.total ?? sessionRevocations.value.length) || 0
-    revocationPage.value = Number(data?.page ?? page) || page
-  } catch (error) {
-    setStatus(error instanceof Error ? error.message : '加载会话撤销记录失败', 'error')
-  } finally {
-    revocationLoading.value = false
   }
 }
 
@@ -354,41 +328,33 @@ function downloadBlob(filename: string, blob: Blob): void {
 function resolveExportFilename(response: Response): string {
   const disposition = response.headers.get('content-disposition') || ''
   const match = disposition.match(/filename="([^"]+)"/i)
-  return match?.[1] || 'iam-admin-audit.csv'
+  return match?.[1] || 'audit-logs.csv'
 }
 
 async function exportActivityCsv(): Promise<void> {
   exporting.value = true
   try {
-    const params = new URLSearchParams({ limit: '5000' })
-    if (search.value) params.set('q', search.value)
-    if (resourceTypeFilter.value) params.set('resourceType', resourceTypeFilter.value)
-    if (actionFilter.value) params.set('action', actionFilter.value)
-    if (fromDate.value) params.set('from', fromDate.value)
-    if (toDate.value) params.set('to', toDate.value)
-
-    const response = await apiFetch(`/api/admin/audit-activity/export.csv?${params.toString()}`)
+    const params = buildQueryParams({ format: 'csv', limit: '100000' })
+    const response = await apiFetch(`/api/audit-logs?${params.toString()}`, {
+      method: 'GET',
+      headers: { Accept: 'text/csv' },
+    })
     if (!response.ok) {
       const payload = await readJson(response)
-      throw new Error(String((payload.error as Record<string, unknown> | undefined)?.message || '导出管理审计失败'))
+      throw new Error(String((payload.error as Record<string, unknown> | undefined)?.message || '导出审计日志失败'))
     }
 
     downloadBlob(resolveExportFilename(response), await response.blob())
-    setStatus('管理审计 CSV 已导出')
+    setStatus('审计日志 CSV 已导出')
   } catch (error) {
-    setStatus(error instanceof Error ? error.message : '导出管理审计失败', 'error')
+    setStatus(error instanceof Error ? error.message : '导出审计日志失败', 'error')
   } finally {
     exporting.value = false
   }
 }
 
-async function reloadAll(): Promise<void> {
-  setStatus('')
-  await Promise.all([loadActivityLogs(1), loadSessionRevocations(1)])
-}
-
 onMounted(() => {
-  void reloadAll()
+  void loadActivityLogs(1)
 })
 </script>
 
@@ -476,10 +442,19 @@ onMounted(() => {
   gap: 16px;
 }
 
+.admin-audit__layout--single {
+  grid-template-columns: minmax(0, 1fr);
+}
+
 .admin-audit__panel {
   display: flex;
   flex-direction: column;
   gap: 12px;
+}
+
+.admin-audit__panel--placeholder {
+  background: #f8fafc;
+  border-style: dashed;
 }
 
 .admin-audit__panel-head,
