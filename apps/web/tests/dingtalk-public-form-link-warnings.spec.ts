@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import {
   describeDingTalkPublicFormLinkAccess,
+  getDingTalkPublicFormLinkAccessLevel,
   listDingTalkPublicFormLinkBlockingErrors,
   listDingTalkPublicFormLinkWarnings,
 } from '../src/multitable/utils/dingtalkPublicFormLinkWarnings'
@@ -156,6 +157,22 @@ describe('dingtalk public form link warnings', () => {
     expect(describeDingTalkPublicFormLinkAccess('view_form_expired', views, nowMs)).toBe('Public form sharing has expired')
     expect(describeDingTalkPublicFormLinkAccess('view_grid', views, nowMs)).toBe('Selected view is not a form')
     expect(describeDingTalkPublicFormLinkAccess('missing_view', views, nowMs)).toBe('View unavailable in this sheet')
+  })
+
+  it('returns stable access levels for automation badges', () => {
+    expect(getDingTalkPublicFormLinkAccessLevel('', views, nowMs)).toBe('none')
+    expect(getDingTalkPublicFormLinkAccessLevel('view_form_enabled', views, nowMs)).toBe('public')
+    expect(getDingTalkPublicFormLinkAccessLevel('view_form_protected', views, nowMs)).toBe('dingtalk')
+    expect(getDingTalkPublicFormLinkAccessLevel('view_form_protected_allowed_user', views, nowMs)).toBe('dingtalk')
+    expect(getDingTalkPublicFormLinkAccessLevel('view_form_granted_without_allowlist', views, nowMs)).toBe('dingtalk_granted')
+    expect(getDingTalkPublicFormLinkAccessLevel('view_form_granted_allowed_group', views, nowMs)).toBe('dingtalk_granted')
+    expect(getDingTalkPublicFormLinkAccessLevel('missing_view', views, nowMs)).toBe('unavailable')
+    expect(getDingTalkPublicFormLinkAccessLevel('view_grid', views, nowMs)).toBe('unavailable')
+    expect(getDingTalkPublicFormLinkAccessLevel('view_form_unconfigured', views, nowMs)).toBe('unavailable')
+    expect(getDingTalkPublicFormLinkAccessLevel('view_form_disabled', views, nowMs)).toBe('unavailable')
+    expect(getDingTalkPublicFormLinkAccessLevel('view_form_missing_token', views, nowMs)).toBe('unavailable')
+    expect(getDingTalkPublicFormLinkAccessLevel('view_form_expired', views, nowMs)).toBe('unavailable')
+    expect(getDingTalkPublicFormLinkAccessLevel('view_form_expires_on', views, nowMs)).toBe('unavailable')
   })
 
   it('separates blocking link errors from advisory access warnings', () => {
