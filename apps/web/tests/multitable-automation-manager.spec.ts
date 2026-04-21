@@ -1294,6 +1294,7 @@ describe('MetaAutomationManager', () => {
   })
 
   it('shows a successful automation test run status and refreshes stats', async () => {
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
     const { client, fetchFn } = mockClient([
       fakeRule({
         name: 'DingTalk group notify',
@@ -1367,6 +1368,7 @@ describe('MetaAutomationManager', () => {
   })
 
   it('shows failed automation test run step errors', async () => {
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
     const { client } = mockClient([
       fakeRule({
         name: 'DingTalk group notify',
@@ -1402,6 +1404,7 @@ describe('MetaAutomationManager', () => {
   })
 
   it('shows automation test run API errors instead of failing silently', async () => {
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
     const { client } = mockClient([
       fakeRule({
         name: 'DingTalk person notify',
