@@ -70,11 +70,20 @@ Initial default-branch validation after PR #1025 proved the SSH resolver ran, bu
 
 Root cause: signing from host `docker/app.env` can drift from the running backend container's actual `JWT_SECRET`.
 
-Follow-up fix:
+Follow-up fix, iteration 1:
 
 - Generate the short-lived admin JWT by running `node` inside the `backend` container.
 - Read `process.env.JWT_SECRET` from the actual runtime env used by the API.
 - Keep token masking and `GITHUB_ENV` propagation unchanged.
+
+Second default-branch validation still returned `401 Invalid token`, which showed that signing with the correct runtime secret is not sufficient: production-like auth does not trust arbitrary token claims, and it validates the user/RBAC state.
+
+Follow-up fix, iteration 2:
+
+- Run token generation inside the backend container.
+- Query the deployment database for a real active admin user.
+- Sign through the app's compiled `authService.createToken()` implementation.
+- Filter stdout to the JWT-shaped line before exporting `YJS_TOKEN`, so logger output cannot contaminate the token value.
 
 Re-run static checks:
 

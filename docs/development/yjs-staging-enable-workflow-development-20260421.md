@@ -37,10 +37,11 @@ Updated `.github/workflows/yjs-staging-validation.yml` with a token resolution s
 1. Use `secrets.YJS_ADMIN_TOKEN` if present.
 2. Otherwise, use existing deploy SSH secrets to connect to the configured deploy host.
 3. Execute `node` inside the running backend container.
-4. Generate a short-lived HS256 admin JWT from the backend runtime `process.env.JWT_SECRET`.
-5. Mask the token and write it to `GITHUB_ENV` for the validation steps.
+4. Select a real active admin user from the deployment database.
+5. Generate a short-lived admin JWT through the app's own `authService.createToken()` path.
+6. Mask the token and write it to `GITHUB_ENV` for the validation steps.
 
-This avoids copying the remote `JWT_SECRET` into GitHub repository secrets, avoids requiring a long-lived admin token, and avoids host env-file versus container runtime secret drift.
+This avoids copying the remote `JWT_SECRET` into GitHub repository secrets, avoids requiring a long-lived admin token, avoids host env-file versus container runtime secret drift, and preserves the same user/RBAC checks used by normal API requests.
 
 ## Security Notes
 
