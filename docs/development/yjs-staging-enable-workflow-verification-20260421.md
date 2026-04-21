@@ -64,3 +64,22 @@ The real remote Yjs validation is intentionally not run before this PR is merged
 - The validation workflow changes must exist on the default branch before manual dispatch can use them.
 - The repository variables must be set before rebuilding the frontend image and reconciling backend runtime env.
 
+## Post-Merge Token Resolver Follow-Up
+
+Initial default-branch validation after PR #1025 proved the SSH resolver ran, but `/api/admin/yjs/status` rejected the generated token with `401 Invalid token`.
+
+Root cause: signing from host `docker/app.env` can drift from the running backend container's actual `JWT_SECRET`.
+
+Follow-up fix:
+
+- Generate the short-lived admin JWT by running `node` inside the `backend` container.
+- Read `process.env.JWT_SECRET` from the actual runtime env used by the API.
+- Keep token masking and `GITHUB_ENV` propagation unchanged.
+
+Re-run static checks:
+
+```text
+yaml ok
+bash syntax ok
+git diff --check clean
+```
