@@ -104,9 +104,44 @@ Local environment note:
 
 ## Known Limits
 
-- return target labels still render `nodeKey`; they do not yet map back to template node names
+- return target labels now resolve to template node names when the template graph is available; they fall back to `nodeKey` only when node metadata cannot be resolved
 - the frontend return candidate list is history-driven, not graph-aware
 - backend lifecycle verification has passed locally, but it still benefits from one CI run against a fuller migrated schema
+
+## Current Recheck - 2026-04-21
+
+Rechecked against `origin/main` @ `923b43ebd` while updating PR `#837`.
+
+Current state:
+
+- `ApprovalDetailView` still exposes the return action and submits `targetNodeKey`.
+- `ApprovalDetailView` timeline still renders `approvalMode`, `aggregateComplete`, auto-approve, and return metadata.
+- `TemplateDetailView` still renders `approvalMode` and `emptyAssigneePolicy` tags.
+- `ApprovalNewView` remains a request-submission form and does not author runtime policy fields.
+- `approvalMode=all` is a same-node assignee aggregation, not a parallel branch/join model.
+- `approvalMode=any` is typed and accepted, but runtime behavior currently follows the same path as `single`.
+
+Recheck verification:
+
+```bash
+pnpm --filter @metasheet/core-backend exec vitest run \
+  tests/unit/approval-graph-executor.test.ts \
+  tests/unit/approval-product-service.test.ts \
+  tests/unit/approval-template-routes.test.ts \
+  tests/unit/approval-rbac-boundary.test.ts \
+  --reporter=verbose
+
+pnpm --filter @metasheet/web exec vitest run \
+  tests/approval-center.spec.ts \
+  tests/approval-e2e-lifecycle.spec.ts \
+  tests/approval-e2e-permissions.spec.ts \
+  --watch=false
+```
+
+Observed result:
+
+- Backend targeted tests: `36 passed`
+- Frontend targeted tests: `85 passed`
 
 ## Recommended Next Verification
 
