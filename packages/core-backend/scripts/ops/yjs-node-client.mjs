@@ -198,7 +198,9 @@ async function run() {
 
   log('\n=== RESULT ===')
   const ok = {
-    connected: midStatus.sync.activeDocCount > preStatus.sync.activeDocCount,
+    connected:
+      midStatus.sync.activeDocCount >= preStatus.sync.activeDocCount
+      && midStatus.socket.activeSocketCount > preStatus.socket.activeSocketCount,
     flushed: postFlushStatus.bridge.flushSuccessCount > preStatus.bridge.flushSuccessCount,
     noFailures: postFlushStatus.bridge.flushFailureCount === preStatus.bridge.flushFailureCount,
     bridgedToDB: postTitle === stamp,
