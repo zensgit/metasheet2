@@ -250,6 +250,54 @@ function buildAppLink(baseUrl: string, path: string, search?: Record<string, str
   return url.toString()
 }
 
+function normalizePublicFormAccessMode(value: unknown): 'public' | 'dingtalk' | 'dingtalk_granted' {
+  return value === 'dingtalk' || value === 'dingtalk_granted' ? value : 'public'
+}
+
+function countStringIds(value: unknown): number {
+  if (!Array.isArray(value)) return 0
+  return new Set(
+    value
+      .filter((entry): entry is string => typeof entry === 'string')
+      .map((entry) => entry.trim())
+      .filter(Boolean),
+  ).size
+}
+
+function describeLocalAllowlistCount(userCount: number, memberGroupCount: number): string {
+  const parts: string[] = []
+  if (userCount > 0) parts.push(`${userCount} 个本地用户`)
+  if (memberGroupCount > 0) parts.push(`${memberGroupCount} 个本地成员组`)
+  return parts.join('、')
+}
+
+function describeDingTalkPublicFormRuntimeLines(publicForm: Record<string, unknown>): string[] {
+  const accessMode = normalizePublicFormAccessMode(publicForm.accessMode)
+  if (accessMode === 'public') {
+    return ['- 表单访问：任何获得链接的人可填写']
+  }
+
+  const userCount = countStringIds(publicForm.allowedUserIds)
+  const memberGroupCount = countStringIds(publicForm.allowedMemberGroupIds)
+  const modeLabel = accessMode === 'dingtalk_granted'
+    ? '钉钉登录 + 本地授权'
+    : '钉钉登录 + 绑定本地用户'
+  if (userCount === 0 && memberGroupCount === 0) {
+    const audience = accessMode === 'dingtalk_granted'
+      ? '所有已授权钉钉的本地用户可填写'
+      : '所有已绑定钉钉的本地用户可填写'
+    return [
+      `- 表单访问：${modeLabel}`,
+      `- 允许范围：${audience}`,
+    ]
+  }
+
+  return [
+    `- 表单访问：${modeLabel}`,
+    `- 允许范围：${describeLocalAllowlistCount(userCount, memberGroupCount)}通过钉钉校验后可填写`,
+  ]
+}
+
 async function recordDingTalkGroupDelivery(
   queryFn: AutomationDeps['queryFn'],
   input: {
@@ -779,16 +827,19 @@ export class AutomationExecutor {
 
       const viewConfig = parseViewConfig(publicView.config)
       const publicForm = viewConfig?.publicForm
-      const publicToken = publicForm && typeof publicForm === 'object' && !Array.isArray(publicForm)
-        ? typeof (publicForm as Record<string, unknown>).publicToken === 'string'
-          ? ((publicForm as Record<string, unknown>).publicToken as string).trim()
+      const publicFormRecord = publicForm && typeof publicForm === 'object' && !Array.isArray(publicForm)
+        ? publicForm as Record<string, unknown>
+        : null
+      const publicToken = publicFormRecord
+        ? typeof publicFormRecord.publicToken === 'string'
+          ? publicFormRecord.publicToken.trim()
           : ''
         : ''
-      const enabled = publicForm && typeof publicForm === 'object' && !Array.isArray(publicForm)
-        ? (publicForm as Record<string, unknown>).enabled === true
+      const enabled = publicFormRecord
+        ? publicFormRecord.enabled === true
         : false
 
-      if (!enabled || !publicToken) {
+      if (!publicFormRecord || !enabled || !publicToken) {
         return {
           actionType: 'send_dingtalk_person_message',
           status: 'failed',
@@ -796,9 +847,7 @@ export class AutomationExecutor {
         }
       }
       const expiryMs = parsePublicFormExpiryMs(
-        publicForm && typeof publicForm === 'object' && !Array.isArray(publicForm)
-          ? (publicForm as Record<string, unknown>).expiresAt ?? (publicForm as Record<string, unknown>).expiresOn
-          : undefined,
+        publicFormRecord.expiresAt ?? publicFormRecord.expiresOn,
       )
       if (expiryMs !== null && Date.now() >= expiryMs) {
         return {
@@ -809,6 +858,7 @@ export class AutomationExecutor {
       }
 
       linkLines.push(`- [填写入口](${buildAppLink(baseUrl, `/multitable/public-form/${context.sheetId}/${publicFormViewId}`, { publicToken })})`)
+      linkLines.push(...describeDingTalkPublicFormRuntimeLines(publicFormRecord))
     }
 
     if (internalViewId && baseUrl) {
@@ -1179,16 +1229,19 @@ export class AutomationExecutor {
 
       const viewConfig = parseViewConfig(publicView.config)
       const publicForm = viewConfig?.publicForm
-      const publicToken = publicForm && typeof publicForm === 'object' && !Array.isArray(publicForm)
-        ? typeof (publicForm as Record<string, unknown>).publicToken === 'string'
-          ? ((publicForm as Record<string, unknown>).publicToken as string).trim()
+      const publicFormRecord = publicForm && typeof publicForm === 'object' && !Array.isArray(publicForm)
+        ? publicForm as Record<string, unknown>
+        : null
+      const publicToken = publicFormRecord
+        ? typeof publicFormRecord.publicToken === 'string'
+          ? publicFormRecord.publicToken.trim()
           : ''
         : ''
-      const enabled = publicForm && typeof publicForm === 'object' && !Array.isArray(publicForm)
-        ? (publicForm as Record<string, unknown>).enabled === true
+      const enabled = publicFormRecord
+        ? publicFormRecord.enabled === true
         : false
 
-      if (!enabled || !publicToken) {
+      if (!publicFormRecord || !enabled || !publicToken) {
         return {
           actionType: 'send_dingtalk_group_message',
           status: 'failed',
@@ -1196,9 +1249,7 @@ export class AutomationExecutor {
         }
       }
       const expiryMs = parsePublicFormExpiryMs(
-        publicForm && typeof publicForm === 'object' && !Array.isArray(publicForm)
-          ? (publicForm as Record<string, unknown>).expiresAt ?? (publicForm as Record<string, unknown>).expiresOn
-          : undefined,
+        publicFormRecord.expiresAt ?? publicFormRecord.expiresOn,
       )
       if (expiryMs !== null && Date.now() >= expiryMs) {
         return {
@@ -1209,6 +1260,7 @@ export class AutomationExecutor {
       }
 
       linkLines.push(`- [填写入口](${buildAppLink(baseUrl, `/multitable/public-form/${context.sheetId}/${publicFormViewId}`, { publicToken })})`)
+      linkLines.push(...describeDingTalkPublicFormRuntimeLines(publicFormRecord))
     }
 
     if (internalViewId && baseUrl) {
