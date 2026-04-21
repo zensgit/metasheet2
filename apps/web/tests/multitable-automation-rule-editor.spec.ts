@@ -228,6 +228,75 @@ describe('MetaAutomationRuleEditor', () => {
     expect(saveBtn.disabled).toBe(true)
   })
 
+  it('disables Test Run for unsaved rules and explains why', async () => {
+    const tested = vi.fn()
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, onTest: tested })
+    await flushPromises()
+
+    const testBtn = container.querySelector('[data-action="test"]') as HTMLButtonElement
+    expect(testBtn.disabled).toBe(true)
+    testBtn.click()
+    await flushPromises()
+
+    expect(tested).not.toHaveBeenCalled()
+    expect(container.textContent).toContain('Save this automation before running a test.')
+  })
+
+  it('warns that DingTalk Test Run can send real messages and emits the saved rule id', async () => {
+    const tested = vi.fn()
+    const { container } = mount({
+      visible: true,
+      sheetId: 'sheet_1',
+      fields,
+      views,
+      rule: fakeRule({
+        actionType: 'send_dingtalk_group_message',
+        actionConfig: {
+          destinationId: 'dt_1',
+          titleTemplate: 'Ticket {{recordId}}',
+          bodyTemplate: 'Please fill',
+        },
+        actions: [{
+          type: 'send_dingtalk_group_message',
+          config: { destinationId: 'dt_1', titleTemplate: 'Ticket {{recordId}}', bodyTemplate: 'Please fill' },
+        }],
+      }),
+      onTest: tested,
+    })
+    await flushPromises()
+
+    expect(container.querySelector('[data-field="dingtalkTestRunWarning"]')?.textContent).toContain('can send real DingTalk messages')
+
+    const testBtn = container.querySelector('[data-action="test"]') as HTMLButtonElement
+    expect(testBtn.disabled).toBe(false)
+    testBtn.click()
+    await flushPromises()
+
+    expect(tested).toHaveBeenCalledWith('rule_1')
+  })
+
+  it('shows Test Run feedback and disables duplicate clicks while running', async () => {
+    const tested = vi.fn()
+    const { container } = mount({
+      visible: true,
+      sheetId: 'sheet_1',
+      fields,
+      rule: fakeRule(),
+      testRunState: { status: 'running', message: 'Running test. DingTalk actions may send real messages.' },
+      onTest: tested,
+    })
+    await flushPromises()
+
+    const testBtn = container.querySelector('[data-action="test"]') as HTMLButtonElement
+    expect(testBtn.disabled).toBe(true)
+    expect(testBtn.textContent).toContain('Running...')
+    expect(container.querySelector('[data-field="testRunStatus"]')?.textContent).toContain('Running test')
+
+    testBtn.click()
+    await flushPromises()
+    expect(tested).not.toHaveBeenCalled()
+  })
+
   it('emits save with payload when name is filled', async () => {
     const saved = vi.fn()
     const { container } = mount({
