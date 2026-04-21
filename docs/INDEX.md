@@ -69,6 +69,7 @@
 |------|------|
 | [attendance-plugin-design-20260119.md](./attendance-plugin-design-20260119.md) | 考勤插件设计说明 |
 | [attendance-plugin-development-report-20260120.md](./attendance-plugin-development-report-20260120.md) | 考勤插件开发报告 (2026-01-20) |
+| [dingtalk-admin-operations-guide-20260420.md](./dingtalk-admin-operations-guide-20260420.md) | 钉钉群/个人通知、公开表单访问模式、指定本地用户或成员组填写 |
 
 **Phase 1 验证明细（2025-12-21/22）**:
 - `docs/phase1-stabilization-summary-2025-12-21.md`

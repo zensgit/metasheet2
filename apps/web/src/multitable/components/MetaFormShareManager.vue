@@ -92,7 +92,9 @@
                     </button>
                   </span>
                 </div>
-                <div v-else class="meta-form-share__empty">No user allowlist. Any DingTalk user matching the selected access mode can fill this form.</div>
+                <div v-else class="meta-form-share__empty">
+                  No local user allowlist configured. Access is still gated by the selected DingTalk mode; add local users or member groups to narrow who can fill this form.
+                </div>
               </div>
 
               <div class="meta-form-share__allowlist-subsection">
@@ -119,7 +121,9 @@
                     </button>
                   </span>
                 </div>
-                <div v-else class="meta-form-share__empty">No member-group allowlist configured.</div>
+                <div v-else class="meta-form-share__empty">
+                  No local member-group allowlist configured. Add a local member group to let its members fill this form.
+                </div>
               </div>
 
               <div class="meta-form-share__allowlist-subsection">
