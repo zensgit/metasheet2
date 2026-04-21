@@ -483,4 +483,103 @@ describe('RecordWriteService', () => {
         .resolves.not.toThrow()
     })
   })
+
+  // -------------------------------------------------------------------------
+  // Yjs invalidation wiring (REST → Yjs consistency hook)
+  // -------------------------------------------------------------------------
+  //
+  // These tests prove that `patchRecords` correctly drives the injected
+  // invalidator so Yjs snapshots are dropped after REST commits. The
+  // isolated `yjs-rest-invalidation.test.ts` covers what `invalidateDocs`
+  // actually does; this block proves the HOOK fires at all and respects
+  // the `source` field that prevents bridge-originated writes from
+  // destroying the live Y.Doc they just read from.
+  //
+  describe('Yjs invalidation hook', () => {
+    it('calls the invalidator with committed record IDs on a default (source unset) patch', async () => {
+      const invalidator = vi.fn().mockResolvedValue(undefined)
+      const service = new RecordWriteService(pool, eventBus as any, helpers, invalidator)
+
+      await service.patchRecords(buildTestInput())
+
+      expect(invalidator).toHaveBeenCalledTimes(1)
+      expect(invalidator).toHaveBeenCalledWith(['rec1'])
+    })
+
+    it('invalidates before realtime broadcast and eventBus notification', async () => {
+      const invalidator = vi.fn().mockResolvedValue(undefined)
+      const service = new RecordWriteService(pool, eventBus as any, helpers, invalidator)
+
+      await service.patchRecords(buildTestInput())
+
+      expect(invalidator).toHaveBeenCalledOnce()
+      expect(mockPublish).toHaveBeenCalledOnce()
+      expect(eventBus.emit).toHaveBeenCalledOnce()
+      expect(invalidator.mock.invocationCallOrder[0]).toBeLessThan(mockPublish.mock.invocationCallOrder[0])
+      expect(invalidator.mock.invocationCallOrder[0]).toBeLessThan(eventBus.emit.mock.invocationCallOrder[0])
+    })
+
+    it("calls the invalidator when source === 'rest' (explicit)", async () => {
+      const invalidator = vi.fn().mockResolvedValue(undefined)
+      const service = new RecordWriteService(pool, eventBus as any, helpers, invalidator)
+
+      await service.patchRecords(buildTestInput({ source: 'rest' }))
+
+      expect(invalidator).toHaveBeenCalledWith(['rec1'])
+    })
+
+    it("does NOT call the invalidator when source === 'yjs-bridge'", async () => {
+      const invalidator = vi.fn().mockResolvedValue(undefined)
+      const service = new RecordWriteService(pool, eventBus as any, helpers, invalidator)
+
+      // The bridge's own writes must not invalidate the Y.Doc they were
+      // derived from — that would tear out a live editor mid-session and
+      // re-seed from DB that hasn't yet caught up to the bridge's commit.
+      await service.patchRecords(buildTestInput({ source: 'yjs-bridge' }))
+
+      expect(invalidator).not.toHaveBeenCalled()
+    })
+
+    it('does not fail the REST patch when the invalidator throws', async () => {
+      const invalidator = vi.fn().mockRejectedValue(new Error('purge failed'))
+      const service = new RecordWriteService(pool, eventBus as any, helpers, invalidator)
+
+      const result = await service.patchRecords(buildTestInput())
+
+      expect(result.updated).toHaveLength(1)
+      expect(invalidator).toHaveBeenCalledOnce()
+    })
+
+    it('setYjsInvalidator replaces the callable post-construction', async () => {
+      const service = new RecordWriteService(pool, eventBus as any, helpers)
+      const first = vi.fn().mockResolvedValue(undefined)
+      service.setYjsInvalidator(first)
+
+      await service.patchRecords(buildTestInput())
+      expect(first).toHaveBeenCalledTimes(1)
+
+      // Replace with null → no-op, no throw.
+      service.setYjsInvalidator(null)
+      await service.patchRecords(buildTestInput())
+      expect(first).toHaveBeenCalledTimes(1) // still 1, no new call
+    })
+
+    it('passes every committed record ID (multi-record patch)', async () => {
+      const invalidator = vi.fn().mockResolvedValue(undefined)
+      const service = new RecordWriteService(pool, eventBus as any, helpers, invalidator)
+
+      // Two records in the same patch. The mock pool returns version=2
+      // for any UPDATE regardless of recordId, so both commit.
+      const changesByRecord = new Map<string, Array<{ fieldId: string; value: unknown }>>([
+        ['rec1', [{ fieldId: 'fld_name', value: 'Alice' }]],
+        ['rec2', [{ fieldId: 'fld_name', value: 'Bob' }]],
+      ])
+
+      await service.patchRecords(buildTestInput({ changesByRecord }))
+
+      expect(invalidator).toHaveBeenCalledTimes(1)
+      const args = invalidator.mock.calls[0][0] as string[]
+      expect(args.sort()).toEqual(['rec1', 'rec2'])
+    })
+  })
 })

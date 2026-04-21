@@ -169,7 +169,28 @@ export interface RecordPatchInput {
   capabilities: MultitableCapabilities
   sheetScope?: SheetPermissionScope
   access: AccessInfo
+  /**
+   * Write origin. Default (unset or `'rest'`) triggers post-commit Yjs
+   * invalidation so any persisted Y.Doc state for the affected records
+   * is wiped — next `getOrCreateDoc` re-seeds from `meta_records.data`.
+   *
+   * The `YjsRecordBridge` sets this to `'yjs-bridge'` on its own flushes
+   * because those writes originate from the in-memory Y.Doc; destroying
+   * that doc immediately after would tear out a live editor's state.
+   */
+  source?: 'rest' | 'yjs-bridge'
 }
+
+/**
+ * Injected by `index.ts` when the Yjs path is wired. Takes record IDs
+ * whose REST write just committed and wipes any Yjs state for them
+ * (in-memory + persisted). Must first cancel any bridge-pending flushes
+ * for those records — the wiring in `index.ts` composes both.
+ *
+ * Best-effort: errors are logged and swallowed; a failed invalidation
+ * does NOT fail the REST write that already succeeded.
+ */
+export type YjsInvalidator = (recordIds: string[]) => Promise<void>
 
 export interface RecordPatchResult {
   updated: Array<{ recordId: string; version: number }>
@@ -260,7 +281,23 @@ export class RecordWriteService {
     private pool: ConnectionPool,
     private eventBus: EventBus,
     private helpers: RecordWriteHelpers,
+    /**
+     * Optional Yjs invalidator. Leave `null` when the Yjs collab path is
+     * disabled (flag off, non-Yjs deployments). When present, called
+     * after every successful `patchRecords` that did NOT originate from
+     * the Yjs bridge itself.
+     */
+    private yjsInvalidator: YjsInvalidator | null = null,
   ) {}
+
+  /**
+   * Replace the Yjs invalidator after construction. Used when
+   * `YjsSyncService`/bridge are wired up later in the boot sequence than
+   * `RecordWriteService`.
+   */
+  setYjsInvalidator(invalidator: YjsInvalidator | null): void {
+    this.yjsInvalidator = invalidator
+  }
 
   /**
    * Validate all changes before executing the write pipeline.
@@ -662,7 +699,29 @@ export class RecordWriteService {
         : undefined
 
     // -----------------------------------------------------------------------
-    // Step 5: Realtime broadcast
+    // Step 5: Yjs invalidation (post-commit, pre-notification, best effort)
+    //
+    // REST writes to meta_records.data make any persisted Y.Doc snapshot
+    // for those records stale. Drop in-memory + persisted Yjs state before
+    // notifying clients/listeners, so a fast reconnect cannot reopen the old
+    // snapshot. Skipped when the write itself originated from the Yjs bridge
+    // (those writes ARE the Y.Doc's content; invalidating would nuke a live
+    // editor).
+    // -----------------------------------------------------------------------
+    if (this.yjsInvalidator && input.source !== 'yjs-bridge' && updates.length > 0) {
+      const recordIds = updates.map((u) => u.recordId)
+      try {
+        await this.yjsInvalidator(recordIds)
+      } catch (err) {
+        console.error(
+          `[record-write] Yjs invalidation failed for records ${recordIds.join(',')} — Yjs state may be stale until next idle-release:`,
+          err,
+        )
+      }
+    }
+
+    // -----------------------------------------------------------------------
+    // Step 6: Realtime broadcast
     // -----------------------------------------------------------------------
     if (updates.length > 0) {
       publishMultitableSheetRealtime({
@@ -686,7 +745,7 @@ export class RecordWriteService {
       })
 
       // -------------------------------------------------------------------
-      // Step 6: EventBus emit
+      // Step 7: EventBus emit
       // -------------------------------------------------------------------
       for (const update of updates) {
         const changes = Object.fromEntries(
