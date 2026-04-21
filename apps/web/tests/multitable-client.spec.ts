@@ -7,6 +7,7 @@ import {
   normalizeMultitableCommentMentions,
   parseRetryAfterMs,
 } from '../src/multitable/api/client'
+import type { AutomationRule } from '../src/multitable/types'
 
 describe('MultitableApiClient', () => {
   beforeEach(() => {
@@ -24,6 +25,129 @@ describe('MultitableApiClient', () => {
     })
 
     await expect(client.resolveComment('c1')).resolves.toBeUndefined()
+  })
+
+  it('normalizes automation rule list responses from snake_case API rows', async () => {
+    const fetchFn = vi.fn(async (input: string) => {
+      expect(input).toBe('/api/multitable/sheets/sheet_1/automations')
+      return new Response(JSON.stringify({
+        ok: true,
+        data: {
+          rules: [{
+            id: 'atr_1',
+            sheet_id: 'sheet_1',
+            name: 'DingTalk group',
+            trigger_type: 'record.created',
+            trigger_config: {},
+            action_type: 'send_dingtalk_group_message',
+            action_config: { destinationId: 'dt_1' },
+            enabled: true,
+            created_at: '2026-04-21T00:00:00.000Z',
+            updated_at: '2026-04-21T00:01:00.000Z',
+            created_by: 'user_1',
+            conditions: { conjunction: 'AND', conditions: [] },
+            actions: [{
+              type: 'send_dingtalk_group_message',
+              config: {
+                destinationIds: ['dt_1'],
+                titleTemplate: 'Please fill',
+                bodyTemplate: 'Open form',
+              },
+            }],
+          }],
+        },
+      }), { status: 200 })
+    })
+    const client = new MultitableApiClient({ fetchFn })
+
+    await expect(client.listAutomationRules('sheet_1')).resolves.toEqual([{
+      id: 'atr_1',
+      sheetId: 'sheet_1',
+      name: 'DingTalk group',
+      triggerType: 'record.created',
+      triggerConfig: {},
+      trigger: {
+        type: 'record.created',
+        config: {},
+      },
+      actionType: 'send_dingtalk_group_message',
+      actionConfig: { destinationId: 'dt_1' },
+      enabled: true,
+      createdAt: '2026-04-21T00:00:00.000Z',
+      updatedAt: '2026-04-21T00:01:00.000Z',
+      createdBy: 'user_1',
+      conditions: { conjunction: 'AND', conditions: [] },
+      actions: [{
+        type: 'send_dingtalk_group_message',
+        config: {
+          destinationIds: ['dt_1'],
+          titleTemplate: 'Please fill',
+          bodyTemplate: 'Open form',
+        },
+      }],
+    }])
+  })
+
+  it('unwraps automation create rule envelopes before returning the rule', async () => {
+    const fetchFn = vi.fn(async () => new Response(JSON.stringify({
+      ok: true,
+      data: {
+        rule: {
+          id: 'atr_new',
+          sheetId: 'sheet_1',
+          name: 'Advanced group',
+          triggerType: 'record.created',
+          triggerConfig: {},
+          actionType: 'send_dingtalk_group_message',
+          actionConfig: { destinationId: 'dt_1' },
+          actions: [{
+            type: 'send_dingtalk_group_message',
+            config: {
+              destinationIds: ['dt_1'],
+              titleTemplate: 'Please fill',
+              bodyTemplate: 'Open form',
+            },
+          }],
+          enabled: true,
+        },
+      },
+    }), { status: 200 }))
+    const client = new MultitableApiClient({ fetchFn })
+    const input: Omit<AutomationRule, 'id' | 'sheetId' | 'enabled' | 'createdAt' | 'updatedAt' | 'createdBy'> = {
+      name: 'Advanced group',
+      triggerType: 'record.created',
+      triggerConfig: {},
+      actionType: 'send_dingtalk_group_message',
+      actionConfig: { destinationId: 'dt_1' },
+      actions: [{
+        type: 'send_dingtalk_group_message',
+        config: {
+          destinationIds: ['dt_1'],
+          titleTemplate: 'Please fill',
+          bodyTemplate: 'Open form',
+        },
+      }],
+    }
+
+    const rule = await client.createAutomationRule('sheet_1', input)
+
+    expect(rule).toMatchObject({
+      id: 'atr_new',
+      sheetId: 'sheet_1',
+      actionType: 'send_dingtalk_group_message',
+      actions: [{
+        type: 'send_dingtalk_group_message',
+        config: {
+          destinationIds: ['dt_1'],
+          titleTemplate: 'Please fill',
+          bodyTemplate: 'Open form',
+        },
+      }],
+    })
+    expect(fetchFn).toHaveBeenCalledWith('/api/multitable/sheets/sheet_1/automations', expect.objectContaining({
+      method: 'POST',
+      body: JSON.stringify(input),
+    }))
   })
 
   it('updates and deletes comments through dedicated endpoints', async () => {
