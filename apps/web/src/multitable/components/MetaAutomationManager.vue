@@ -1352,7 +1352,8 @@ const canSave = computed(() => {
   if (draft.value.actionType === 'notify' && !draft.value.notifyMessage.trim()) return false
   if (draft.value.actionType === 'update_field' && (!draft.value.targetFieldId || !draft.value.targetValue.trim())) return false
   if (draft.value.actionType === 'send_dingtalk_group_message') {
-    if (!draft.value.dingtalkDestinationIds.length && !draft.value.dingtalkDestinationFieldPath.trim()) return false
+    const destinationFieldPaths = parseRecipientFieldPathsText(draft.value.dingtalkDestinationFieldPath)
+    if (!draft.value.dingtalkDestinationIds.length && !destinationFieldPaths.length) return false
     if (!draft.value.dingtalkTitleTemplate.trim()) return false
     if (!draft.value.dingtalkBodyTemplate.trim()) return false
     if (publicFormLinkBlockingErrors(draft.value.publicFormViewId).length) return false
