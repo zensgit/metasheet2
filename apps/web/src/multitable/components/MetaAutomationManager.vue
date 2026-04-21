@@ -335,6 +335,17 @@
               placeholder="例如：record.watcherGroupIds, record.escalationGroupId"
               data-automation-field="dingtalkPersonMemberGroupRecipientFieldPath"
             />
+            <label class="meta-automation__label">Pick member group field</label>
+            <select
+              class="meta-automation__select"
+              data-automation-field="dingtalkPersonMemberGroupRecipientFieldSelect"
+              @change="appendDingTalkPersonMemberGroupRecipientField($event.target as HTMLSelectElement)"
+            >
+              <option value="">-- choose a member group field --</option>
+              <option v-for="field in dingTalkPersonMemberGroupRecipientCandidateFields" :key="field.id" :value="field.id">
+                {{ field.name }} (record.{{ field.id }})
+              </option>
+            </select>
             <div
               v-if="selectedDingTalkPersonMemberGroupRecipientFields.length"
               class="meta-automation__recipient-list meta-automation__recipient-list--selected"
@@ -359,7 +370,7 @@
               {{ warning }}
             </div>
             <div class="meta-automation__hint">
-              Use comma or newline separated <code>record.&lt;fieldId&gt;</code> paths whose values resolve to member group IDs.
+              Use comma or newline separated <code>record.&lt;fieldId&gt;</code> paths whose values resolve to member group IDs. The picker only lists explicit member group fields.
             </div>
             <label class="meta-automation__label">Title template</label>
             <input
@@ -896,7 +907,17 @@ function recipientFieldSummaryLabel(path: string) {
   return field ? `${field.name} (record.${normalized})` : `record.${normalized}`
 }
 
+function isMemberGroupRecipientCandidateField(field: { type?: unknown, property?: Record<string, unknown> | undefined }) {
+  const type = typeof field.type === 'string' ? field.type.trim().toLowerCase() : ''
+  const refKind = typeof field.property?.refKind === 'string' ? field.property.refKind.trim().toLowerCase() : ''
+  return refKind === 'member-group'
+    || type === 'member-group'
+    || type === 'member_group'
+    || type === 'membergroup'
+}
+
 const dingTalkPersonRecipientCandidateFields = computed(() => props.fields.filter((field) => field.type === 'user'))
+const dingTalkPersonMemberGroupRecipientCandidateFields = computed(() => props.fields.filter(isMemberGroupRecipientCandidateField))
 
 const selectedDingTalkPersonRecipientFields = computed(() => parseRecipientFieldPathsText(draft.value.dingtalkPersonRecipientFieldPath)
   .map((path) => ({
@@ -963,6 +984,17 @@ function removeDingTalkPersonRecipientField(path: string) {
     .filter((entry) => entry !== path)
     .map((entry) => `record.${entry}`)
     .join(', ')
+}
+
+function appendDingTalkPersonMemberGroupRecipientField(select: HTMLSelectElement) {
+  const value = select.value.trim()
+  if (!value) return
+  const paths = parseRecipientFieldPathsText(draft.value.dingtalkPersonMemberGroupRecipientFieldPath)
+  paths.push(value)
+  draft.value.dingtalkPersonMemberGroupRecipientFieldPath = Array.from(new Set(paths))
+    .map((path) => `record.${path}`)
+    .join(', ')
+  select.value = ''
 }
 
 function removeDingTalkPersonMemberGroupRecipientField(path: string) {
