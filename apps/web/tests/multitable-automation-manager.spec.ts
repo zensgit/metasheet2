@@ -1293,6 +1293,70 @@ describe('MetaAutomationManager', () => {
     expect(fetchFn.mock.calls.some(([url]) => String(url).includes('/api/multitable/sheets/sheet_1/automations/rule_1/dingtalk-group-deliveries'))).toBe(true)
   })
 
+  it('opens DingTalk group delivery viewer for V1 multi-action rules', async () => {
+    const { client, fetchFn } = mockClient([
+      fakeRule({
+        name: 'Multi-step group notify',
+        actionType: 'notify',
+        actionConfig: { message: 'Internal note' },
+        actions: [
+          { type: 'notify', config: { message: 'Internal note' } },
+          {
+            type: 'send_dingtalk_group_message',
+            config: {
+              destinationId: 'dt_1',
+              titleTemplate: 'Ticket {{recordId}}',
+              bodyTemplate: 'Please fill {{record.status}}',
+            },
+          },
+        ],
+      }),
+    ])
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
+    await flushPromises()
+
+    const deliveriesBtn = container.querySelector('[data-automation-group-deliveries="rule_1"]') as HTMLButtonElement
+    expect(deliveriesBtn).toBeTruthy()
+    deliveriesBtn.click()
+    await flushPromises()
+
+    const delivery = document.querySelector('[data-group-delivery-id="dgd_1"]')
+    expect(delivery?.textContent).toContain('Ops Group')
+    expect(fetchFn.mock.calls.some(([url]) => String(url).includes('/api/multitable/sheets/sheet_1/automations/rule_1/dingtalk-group-deliveries'))).toBe(true)
+  })
+
+  it('opens DingTalk person delivery viewer for V1 multi-action rules', async () => {
+    const { client, fetchFn } = mockClient([
+      fakeRule({
+        name: 'Multi-step person notify',
+        actionType: 'notify',
+        actionConfig: { message: 'Internal note' },
+        actions: [
+          { type: 'notify', config: { message: 'Internal note' } },
+          {
+            type: 'send_dingtalk_person_message',
+            config: {
+              userIds: ['user_1'],
+              titleTemplate: 'Ticket {{recordId}}',
+              bodyTemplate: 'Please fill {{record.status}}',
+            },
+          },
+        ],
+      }),
+    ])
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
+    await flushPromises()
+
+    const deliveriesBtn = container.querySelector('[data-automation-person-deliveries="rule_1"]') as HTMLButtonElement
+    expect(deliveriesBtn).toBeTruthy()
+    deliveriesBtn.click()
+    await flushPromises()
+
+    const delivery = document.querySelector('[data-person-delivery-id="dpd_1"]')
+    expect(delivery?.textContent).toContain('Lin Lan')
+    expect(fetchFn.mock.calls.some(([url]) => String(url).includes('/api/multitable/sheets/sheet_1/automations/rule_1/dingtalk-person-deliveries'))).toBe(true)
+  })
+
   it('shows a successful automation test run status and refreshes stats', async () => {
     vi.spyOn(window, 'confirm').mockReturnValue(true)
     const { client, fetchFn } = mockClient([
