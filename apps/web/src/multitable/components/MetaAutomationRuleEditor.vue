@@ -722,6 +722,7 @@ import {
 } from '../utils/dingtalkRecipientFieldWarnings'
 import {
   describeDingTalkPublicFormLinkAccess,
+  listDingTalkPublicFormLinkBlockingErrors,
   listDingTalkPublicFormLinkWarnings,
 } from '../utils/dingtalkPublicFormLinkWarnings'
 
@@ -918,6 +919,7 @@ const canSave = computed(() => {
       const titleTemplate = typeof action.config.titleTemplate === 'string' ? action.config.titleTemplate.trim() : ''
       const bodyTemplate = typeof action.config.bodyTemplate === 'string' ? action.config.bodyTemplate.trim() : ''
       if ((!destinationIds.length && !destinationFieldPath) || !titleTemplate || !bodyTemplate) return false
+      if (publicFormLinkBlockingErrors(action.config.publicFormViewId).length) return false
     }
     if (action.type === 'send_dingtalk_person_message') {
       const userIdsText = typeof action.config.userIdsText === 'string' ? action.config.userIdsText.trim() : ''
@@ -929,6 +931,7 @@ const canSave = computed(() => {
       const titleTemplate = typeof action.config.titleTemplate === 'string' ? action.config.titleTemplate.trim() : ''
       const bodyTemplate = typeof action.config.bodyTemplate === 'string' ? action.config.bodyTemplate.trim() : ''
       if ((!userIdsText && !memberGroupIdsText && !recipientFieldPath && !memberGroupRecipientFieldPath) || !titleTemplate || !bodyTemplate) return false
+      if (publicFormLinkBlockingErrors(action.config.publicFormViewId).length) return false
     }
   }
   return true
@@ -1181,6 +1184,10 @@ function publicFormLinkWarnings(value: unknown, warnWhenGroupAccessRisk = false)
     warnWhenFullyPublic: warnWhenGroupAccessRisk,
     warnWhenProtectedWithoutAllowlist: warnWhenGroupAccessRisk,
   })
+}
+
+function publicFormLinkBlockingErrors(value: unknown) {
+  return listDingTalkPublicFormLinkBlockingErrors(value, props.views ?? [])
 }
 
 function publicFormAccessSummary(value: unknown) {

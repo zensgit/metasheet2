@@ -667,6 +667,7 @@ import {
 } from '../utils/dingtalkRecipientFieldWarnings'
 import {
   describeDingTalkPublicFormLinkAccess,
+  listDingTalkPublicFormLinkBlockingErrors,
   listDingTalkPublicFormLinkWarnings,
 } from '../utils/dingtalkPublicFormLinkWarnings'
 
@@ -945,6 +946,10 @@ function publicFormLinkWarnings(value: unknown, warnWhenGroupAccessRisk = false)
     warnWhenFullyPublic: warnWhenGroupAccessRisk,
     warnWhenProtectedWithoutAllowlist: warnWhenGroupAccessRisk,
   })
+}
+
+function publicFormLinkBlockingErrors(value: unknown) {
+  return listDingTalkPublicFormLinkBlockingErrors(value, props.views ?? [])
 }
 
 function publicFormAccessSummary(value: unknown) {
@@ -1249,6 +1254,7 @@ const canSave = computed(() => {
     if (!draft.value.dingtalkDestinationIds.length && !draft.value.dingtalkDestinationFieldPath.trim()) return false
     if (!draft.value.dingtalkTitleTemplate.trim()) return false
     if (!draft.value.dingtalkBodyTemplate.trim()) return false
+    if (publicFormLinkBlockingErrors(draft.value.publicFormViewId).length) return false
   }
   if (draft.value.actionType === 'send_dingtalk_person_message') {
     if (
@@ -1259,6 +1265,7 @@ const canSave = computed(() => {
     ) return false
     if (!draft.value.dingtalkPersonTitleTemplate.trim()) return false
     if (!draft.value.dingtalkPersonBodyTemplate.trim()) return false
+    if (publicFormLinkBlockingErrors(draft.value.dingtalkPersonPublicFormViewId).length) return false
   }
   return true
 })

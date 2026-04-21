@@ -96,7 +96,7 @@ Management-side UI path:
 
 Automation authoring guardrail:
 
-- if a selected public form view is not shared, has no public token, or has expired, the automation editor warns before save
+- if a selected public form view is not shared, has no public token, or has expired, the automation editor warns and disables save
 - if a DingTalk group rule links to a fully public form, the automation editor warns that anyone with the message link can submit
 - if a DingTalk group rule links to a DingTalk-protected form without allowed users or member groups, the editor warns that all bound or authorized DingTalk users can submit
 - the message summary shows `Public form access`, including fully public, bound DingTalk users, authorized DingTalk users, and allowlist-constrained states

@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import {
   describeDingTalkPublicFormLinkAccess,
+  listDingTalkPublicFormLinkBlockingErrors,
   listDingTalkPublicFormLinkWarnings,
 } from '../src/multitable/utils/dingtalkPublicFormLinkWarnings'
 
@@ -155,5 +156,16 @@ describe('dingtalk public form link warnings', () => {
     expect(describeDingTalkPublicFormLinkAccess('view_form_expired', views, nowMs)).toBe('Public form sharing has expired')
     expect(describeDingTalkPublicFormLinkAccess('view_grid', views, nowMs)).toBe('Selected view is not a form')
     expect(describeDingTalkPublicFormLinkAccess('missing_view', views, nowMs)).toBe('View unavailable in this sheet')
+  })
+
+  it('separates blocking link errors from advisory access warnings', () => {
+    expect(listDingTalkPublicFormLinkBlockingErrors('view_form_disabled', views, nowMs)).toEqual([
+      'Public form sharing is disabled for "Disabled Form"; enable sharing before sending this DingTalk fill link.',
+    ])
+    expect(listDingTalkPublicFormLinkBlockingErrors('view_form_expired', views, nowMs)).toEqual([
+      'Public form sharing for "Expired Form" has expired; renew sharing before sending this DingTalk fill link.',
+    ])
+    expect(listDingTalkPublicFormLinkBlockingErrors('view_form_enabled', views, { nowMs, warnWhenFullyPublic: true })).toEqual([])
+    expect(listDingTalkPublicFormLinkBlockingErrors('view_form_protected', views, { nowMs, warnWhenProtectedWithoutAllowlist: true })).toEqual([])
   })
 })
