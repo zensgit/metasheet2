@@ -22,7 +22,14 @@ function fakeRule(overrides: Partial<AutomationRule> = {}): AutomationRule {
   }
 }
 
-function mockClient(rules: AutomationRule[] = []) {
+function mockClient(
+  rules: AutomationRule[] = [],
+  options: {
+    testExecution?: Record<string, unknown>
+    testErrorMessage?: string
+    stats?: Record<string, unknown>
+  } = {},
+) {
   const ok = (body: unknown) => new Response(JSON.stringify({ data: body }), { status: 200, headers: { 'Content-Type': 'application/json' } })
   const noContent = () => new Response(null, { status: 204 })
   const personDeliveries: DingTalkPersonDelivery[] = [
@@ -79,12 +86,32 @@ function mockClient(rules: AutomationRule[] = []) {
         ],
       })
     }
+    if (method === 'POST' && url.includes('/automations/') && url.endsWith('/test')) {
+      if (options.testErrorMessage) {
+        return new Response(
+          JSON.stringify({ error: { code: 'TEST_RUN_FAILED', message: options.testErrorMessage } }),
+          { status: 500, headers: { 'Content-Type': 'application/json' } },
+        )
+      }
+      return ok(options.testExecution ?? {
+        id: 'exec_1',
+        ruleId: 'rule_1',
+        status: 'success',
+        triggerType: 'record.created',
+        startedAt: '2026-04-21T00:00:00.000Z',
+        durationMs: 32,
+        steps: [],
+      })
+    }
     if (method === 'GET' && url.includes('/automations')) {
       if (url.includes('/dingtalk-group-deliveries')) {
         return ok({ deliveries: groupDeliveries })
       }
       if (url.includes('/dingtalk-person-deliveries')) {
         return ok({ deliveries: personDeliveries })
+      }
+      if (url.endsWith('/stats')) {
+        return ok(options.stats ?? { total: 1, success: 1, failed: 0, skipped: 0, avgDurationMs: 32 })
       }
       return ok({ rules })
     }
@@ -1264,6 +1291,99 @@ describe('MetaAutomationManager', () => {
     expect(delivery?.textContent).toContain('Ops Group')
     expect(delivery?.textContent).toContain('Ticket rec_1 pending')
     expect(fetchFn.mock.calls.some(([url]) => String(url).includes('/api/multitable/sheets/sheet_1/automations/rule_1/dingtalk-group-deliveries'))).toBe(true)
+  })
+
+  it('shows a successful automation test run status and refreshes stats', async () => {
+    const { client, fetchFn } = mockClient([
+      fakeRule({
+        name: 'DingTalk group notify',
+        actionType: 'send_dingtalk_group_message',
+        actionConfig: {
+          destinationId: 'dt_1',
+          titleTemplate: 'Ticket {{recordId}}',
+          bodyTemplate: 'Please fill {{record.status}}',
+        },
+        actions: [{
+          type: 'send_dingtalk_group_message',
+          config: { destinationId: 'dt_1', titleTemplate: 'Ticket {{recordId}}', bodyTemplate: 'Please fill' },
+        }],
+      }),
+    ])
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
+    await flushPromises()
+
+    ;(container.querySelector('[data-automation-edit="true"]') as HTMLButtonElement).click()
+    await flushPromises()
+
+    const testBtn = container.querySelector('[data-action="test"]') as HTMLButtonElement
+    expect(testBtn.disabled).toBe(false)
+    expect(container.textContent).toContain('can send real DingTalk messages')
+
+    testBtn.click()
+    await flushPromises()
+
+    expect(fetchFn.mock.calls.some(([url, init]) =>
+      String(url).includes('/api/multitable/sheets/sheet_1/automations/rule_1/test') && init?.method === 'POST',
+    )).toBe(true)
+    expect(container.querySelector('[data-field="testRunStatus"]')?.textContent).toContain('Test run succeeded')
+    expect(container.querySelector('[data-automation-test-status="rule_1"]')?.textContent).toContain('Test run succeeded')
+    expect(fetchFn.mock.calls.filter(([url]) => String(url).endsWith('/stats')).length).toBeGreaterThanOrEqual(2)
+  })
+
+  it('shows failed automation test run step errors', async () => {
+    const { client } = mockClient([
+      fakeRule({
+        name: 'DingTalk group notify',
+        actionType: 'send_dingtalk_group_message',
+        actionConfig: { destinationId: 'dt_1', titleTemplate: 'Ticket {{recordId}}', bodyTemplate: 'Please fill' },
+        actions: [{ type: 'send_dingtalk_group_message', config: { destinationId: 'dt_1' } }],
+      }),
+    ], {
+      testExecution: {
+        id: 'exec_failed',
+        ruleId: 'rule_1',
+        status: 'failed',
+        triggerType: 'record.created',
+        startedAt: '2026-04-21T00:00:00.000Z',
+        steps: [{
+          actionType: 'send_dingtalk_group_message',
+          status: 'failed',
+          error: 'DingTalk robot keyword blocked',
+        }],
+      },
+    })
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
+    await flushPromises()
+
+    ;(container.querySelector('[data-automation-edit="true"]') as HTMLButtonElement).click()
+    await flushPromises()
+    ;(container.querySelector('[data-action="test"]') as HTMLButtonElement).click()
+    await flushPromises()
+
+    const status = container.querySelector('[data-field="testRunStatus"]')
+    expect(status?.textContent).toContain('DingTalk robot keyword blocked')
+    expect(status?.getAttribute('data-status')).toBe('failed')
+  })
+
+  it('shows automation test run API errors instead of failing silently', async () => {
+    const { client } = mockClient([
+      fakeRule({
+        name: 'DingTalk person notify',
+        actionType: 'send_dingtalk_person_message',
+        actionConfig: { userIds: ['user_1'], titleTemplate: 'Ticket {{recordId}}', bodyTemplate: 'Please fill' },
+        actions: [{ type: 'send_dingtalk_person_message', config: { userIds: ['user_1'] } }],
+      }),
+    ], { testErrorMessage: 'Automation service unavailable' })
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
+    await flushPromises()
+
+    ;(container.querySelector('[data-automation-edit="true"]') as HTMLButtonElement).click()
+    await flushPromises()
+    ;(container.querySelector('[data-action="test"]') as HTMLButtonElement).click()
+    await flushPromises()
+
+    expect(container.querySelector('[data-field="testRunStatus"]')?.textContent).toContain('Automation service unavailable')
+    expect(container.querySelector('[data-field="testRunStatus"]')?.getAttribute('data-status')).toBe('failed')
   })
 
   it('applies DingTalk group presets in the inline create form', async () => {
