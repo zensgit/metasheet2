@@ -304,6 +304,22 @@ describe('MetaAutomationManager', () => {
     expect(el!.textContent).toContain('No automations yet')
   })
 
+  it('opens the advanced rule editor from the primary new automation entry', async () => {
+    const { client } = mockClient([])
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
+    await flushPromises()
+
+    const advancedButton = container.querySelector('[data-automation-new-rule="advanced"]') as HTMLButtonElement
+    expect(advancedButton?.textContent).toContain('+ New Automation')
+    advancedButton.click()
+    await flushPromises()
+
+    expect(container.querySelector('.meta-rule-editor__title')?.textContent).toContain('New Automation Rule')
+    expect(container.querySelector('[data-field="triggerType"]')).not.toBeNull()
+    expect(container.querySelector('[data-field="dingtalkDestinationPickerId"]')).toBeNull()
+    expect(container.querySelector('[data-automation-field="name"]')).toBeNull()
+  })
+
   it('creates rule via form', async () => {
     const { client, fetchFn } = mockClient([])
     const updatedSpy = vi.fn()

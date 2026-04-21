@@ -554,10 +554,25 @@
           </div>
         </section>
 
-        <!-- Add button -->
-        <button v-if="!showForm" class="meta-automation__btn meta-automation__btn--primary meta-automation__btn-add" type="button" @click="openCreateForm">
-          + New Automation
-        </button>
+        <!-- Add buttons -->
+        <div v-if="!showForm && !showRuleEditor" class="meta-automation__add-row">
+          <button
+            class="meta-automation__btn meta-automation__btn--primary"
+            type="button"
+            data-automation-new-rule="advanced"
+            @click="openRuleEditor()"
+          >
+            + New Automation
+          </button>
+          <button
+            class="meta-automation__btn meta-automation__btn-add"
+            type="button"
+            data-automation-new-rule="quick"
+            @click="openCreateForm"
+          >
+            Quick legacy form
+          </button>
+        </div>
 
         <!-- Rule list -->
         <div v-if="loading" class="meta-automation__empty">Loading automations&#x2026;</div>
@@ -1738,6 +1753,7 @@ watch(
   margin-bottom: 4px;
 }
 
+.meta-automation__add-row,
 .meta-automation__preset-row {
   display: flex;
   flex-wrap: wrap;
