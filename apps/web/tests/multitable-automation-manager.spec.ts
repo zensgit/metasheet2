@@ -423,6 +423,35 @@ describe('MetaAutomationManager', () => {
     expect(optionValues).not.toContain('view_other_sheet')
   })
 
+  it('filters public form options to the current sheet in the inline form', async () => {
+    const { client } = mockClient([])
+    const { container } = mount({
+      visible: true,
+      sheetId: 'sheet_1',
+      fields,
+      views: [
+        ...views,
+        { id: 'view_other_form', sheetId: 'sheet_2', name: 'Other Sheet Form', type: 'form' },
+      ],
+      client,
+    })
+    await flushPromises()
+
+    const addBtn = container.querySelector('.meta-automation__btn-add') as HTMLButtonElement
+    addBtn.click()
+    await nextTick()
+
+    const actionSelect = container.querySelector('[data-automation-field="actionType"]') as HTMLSelectElement
+    actionSelect.value = 'send_dingtalk_group_message'
+    actionSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushPromises()
+
+    const publicFormSelect = container.querySelector('[data-automation-field="publicFormViewId"]') as HTMLSelectElement
+    const optionValues = Array.from(publicFormSelect.options).map((option) => option.value)
+    expect(optionValues).toContain('view_form')
+    expect(optionValues).not.toContain('view_other_form')
+  })
+
   it('disables creating a DingTalk group automation when the selected public form link cannot work', async () => {
     const { client, fetchFn } = mockClient([])
     const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views: viewsWithMissingPublicToken, client })

@@ -770,7 +770,9 @@ const dingtalkPersonUserDirectory = ref<Record<string, { label: string; subtitle
 const copiedPreviewKey = ref('')
 let dingtalkPersonSuggestionLoadId = 0
 let copiedPreviewResetTimer: ReturnType<typeof setTimeout> | null = null
-const formViews = computed(() => (props.views ?? []).filter((view) => view.type === 'form'))
+const formViews = computed(() => (props.views ?? []).filter((view) =>
+  view.type === 'form' && (!view.sheetId || view.sheetId === props.sheetId),
+))
 const internalViews = computed(() => (props.views ?? []).filter((view) => !view.sheetId || view.sheetId === props.sheetId))
 
 function parseUserIdsText(value: string): string[] {
@@ -960,14 +962,14 @@ function renderedTemplateExample(value: string, fallback: string) {
 }
 
 function publicFormLinkWarnings(value: unknown, warnWhenGroupAccessRisk = false) {
-  return listDingTalkPublicFormLinkWarnings(value, props.views ?? [], {
+  return listDingTalkPublicFormLinkWarnings(value, formViews.value, {
     warnWhenFullyPublic: warnWhenGroupAccessRisk,
     warnWhenProtectedWithoutAllowlist: warnWhenGroupAccessRisk,
   })
 }
 
 function publicFormLinkBlockingErrors(value: unknown) {
-  return listDingTalkPublicFormLinkBlockingErrors(value, props.views ?? [])
+  return listDingTalkPublicFormLinkBlockingErrors(value, formViews.value)
 }
 
 function internalViewLinkWarnings(value: unknown) {
@@ -979,7 +981,7 @@ function internalViewLinkBlockingErrors(value: unknown) {
 }
 
 function publicFormAccessSummary(value: unknown) {
-  return describeDingTalkPublicFormLinkAccess(value, props.views ?? [])
+  return describeDingTalkPublicFormLinkAccess(value, formViews.value)
 }
 
 function copyPreviewText(key: string, text: string) {
