@@ -175,6 +175,12 @@ export function useYjsDocument(recordId: Ref<string | null>, options: UseYjsDocu
       error.value = `${code}: ${msg}`
     })
 
+    socket.on('yjs:invalidated', ({ recordId: rid2 }: { recordId: string; reason?: string }) => {
+      if (rid2 !== currentRecordId) return
+      error.value = 'INVALIDATED: document invalidated by REST write'
+      disconnect()
+    })
+
     socket.on('disconnect', () => {
       connected.value = false
       synced.value = false
