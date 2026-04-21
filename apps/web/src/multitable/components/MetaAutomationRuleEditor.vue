@@ -338,15 +338,20 @@
               >
                 {{ warning }}
               </div>
-              <div
-                v-if="action.config.publicFormViewId"
-                class="meta-rule-editor__hint meta-rule-editor__access-summary"
-                :class="`meta-rule-editor__access-summary--${publicFormAccessLevel(action.config.publicFormViewId)}`"
-                :data-field="`groupPublicFormAccessSummary-${idx}`"
-                :data-access-level="publicFormAccessLevel(action.config.publicFormViewId)"
+              <template
+                v-for="accessState in [publicFormAccessState(action.config.publicFormViewId)]"
+                :key="`group-public-form-access-${idx}`"
               >
-                <strong>Access:</strong> {{ publicFormAccessSummary(action.config.publicFormViewId) }}
-              </div>
+                <div
+                  v-if="accessState.hasSelection"
+                  class="meta-rule-editor__hint meta-rule-editor__access-summary"
+                  :class="`meta-rule-editor__access-summary--${accessState.level}`"
+                  :data-field="`groupPublicFormAccessSummary-${idx}`"
+                  :data-access-level="accessState.level"
+                >
+                  <strong>Access:</strong> {{ accessState.summary }}
+                </div>
+              </template>
               <label class="meta-rule-editor__label">Internal processing view (optional)</label>
               <select
                 v-model="action.config.internalViewId"
@@ -392,7 +397,7 @@
                   </button>
                 </div>
                 <div><strong>Public form:</strong> {{ viewSummaryName(action.config.publicFormViewId, 'No public form link') }}</div>
-                <div><strong>Public form access:</strong> {{ publicFormAccessSummary(action.config.publicFormViewId) }}</div>
+                <div><strong>Public form access:</strong> {{ publicFormAccessState(action.config.publicFormViewId).summary }}</div>
                 <div><strong>Internal processing:</strong> {{ viewSummaryName(action.config.internalViewId, 'No internal link') }}</div>
               </div>
             </div>
@@ -636,15 +641,20 @@
               >
                 {{ warning }}
               </div>
-              <div
-                v-if="action.config.publicFormViewId"
-                class="meta-rule-editor__hint meta-rule-editor__access-summary"
-                :class="`meta-rule-editor__access-summary--${publicFormAccessLevel(action.config.publicFormViewId)}`"
-                :data-field="`personPublicFormAccessSummary-${idx}`"
-                :data-access-level="publicFormAccessLevel(action.config.publicFormViewId)"
+              <template
+                v-for="accessState in [publicFormAccessState(action.config.publicFormViewId)]"
+                :key="`person-public-form-access-${idx}`"
               >
-                <strong>Access:</strong> {{ publicFormAccessSummary(action.config.publicFormViewId) }}
-              </div>
+                <div
+                  v-if="accessState.hasSelection"
+                  class="meta-rule-editor__hint meta-rule-editor__access-summary"
+                  :class="`meta-rule-editor__access-summary--${accessState.level}`"
+                  :data-field="`personPublicFormAccessSummary-${idx}`"
+                  :data-access-level="accessState.level"
+                >
+                  <strong>Access:</strong> {{ accessState.summary }}
+                </div>
+              </template>
               <label class="meta-rule-editor__label">Internal processing view (optional)</label>
               <select
                 v-model="action.config.internalViewId"
@@ -691,7 +701,7 @@
                   </button>
                 </div>
                 <div><strong>Public form:</strong> {{ viewSummaryName(action.config.publicFormViewId, 'No public form link') }}</div>
-                <div><strong>Public form access:</strong> {{ publicFormAccessSummary(action.config.publicFormViewId) }}</div>
+                <div><strong>Public form access:</strong> {{ publicFormAccessState(action.config.publicFormViewId).summary }}</div>
                 <div><strong>Internal processing:</strong> {{ viewSummaryName(action.config.internalViewId, 'No internal link') }}</div>
               </div>
             </div>
@@ -780,8 +790,7 @@ import {
   listDingTalkPersonRecipientFieldPathWarnings,
 } from '../utils/dingtalkRecipientFieldWarnings'
 import {
-  describeDingTalkPublicFormLinkAccess,
-  getDingTalkPublicFormLinkAccessLevel,
+  getDingTalkPublicFormLinkAccessState,
   listDingTalkPublicFormLinkBlockingErrors,
   listDingTalkPublicFormLinkWarnings,
 } from '../utils/dingtalkPublicFormLinkWarnings'
@@ -1237,7 +1246,7 @@ function removePersonRecipientGroup(action: DraftAction, groupId: string) {
 }
 
 function viewSummaryName(viewId: unknown, fallback: string) {
-  const id = typeof viewId === 'string' ? viewId : ''
+  const id = typeof viewId === 'string' ? viewId.trim() : ''
   if (!id) return fallback
   return (props.views ?? []).find((view) => view.id === id)?.name ?? id
 }
@@ -1271,12 +1280,8 @@ function internalViewLinkBlockingErrors(value: unknown) {
   return listDingTalkInternalViewLinkBlockingErrors(value, internalViews.value)
 }
 
-function publicFormAccessSummary(value: unknown) {
-  return describeDingTalkPublicFormLinkAccess(value, formViews.value)
-}
-
-function publicFormAccessLevel(value: unknown) {
-  return getDingTalkPublicFormLinkAccessLevel(value, formViews.value)
+function publicFormAccessState(value: unknown) {
+  return getDingTalkPublicFormLinkAccessState(value, formViews.value)
 }
 
 function isDingTalkActionType(value: unknown): boolean {

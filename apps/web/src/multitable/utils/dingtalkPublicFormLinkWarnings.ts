@@ -18,6 +18,12 @@ export type DingTalkPublicFormLinkAccessLevel =
   | 'dingtalk'
   | 'dingtalk_granted'
 
+export interface DingTalkPublicFormLinkAccessState {
+  hasSelection: boolean
+  level: DingTalkPublicFormLinkAccessLevel
+  summary: string
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
@@ -107,6 +113,21 @@ export function getDingTalkPublicFormLinkAccessLevel(
   if (expiryMs !== null && nowMs >= expiryMs) return 'unavailable'
 
   return normalizeAccessMode(publicForm.accessMode)
+}
+
+export function getDingTalkPublicFormLinkAccessState(
+  viewId: unknown,
+  views: readonly DingTalkPublicFormLinkView[],
+  optionsOrNowMs?: number | DingTalkPublicFormLinkWarningOptions,
+): DingTalkPublicFormLinkAccessState {
+  const options = normalizeWarningOptions(optionsOrNowMs)
+  const stableOptions = { ...options, nowMs: options.nowMs ?? Date.now() }
+  const id = typeof viewId === 'string' ? viewId.trim() : ''
+  return {
+    hasSelection: Boolean(id),
+    level: getDingTalkPublicFormLinkAccessLevel(id, views, stableOptions),
+    summary: describeDingTalkPublicFormLinkAccess(id, views, stableOptions),
+  }
 }
 
 export function listDingTalkPublicFormLinkBlockingErrors(

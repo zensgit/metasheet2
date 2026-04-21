@@ -262,11 +262,11 @@
               <div><strong>Public form:</strong> {{ viewSummaryName(draft.publicFormViewId, 'No public form link') }}</div>
               <div
                 class="meta-automation__public-form-access"
-                :class="`meta-automation__public-form-access--${publicFormAccessLevel(draft.publicFormViewId)}`"
+                :class="`meta-automation__public-form-access--${draftGroupPublicFormAccessState.level}`"
                 data-automation-public-form-access="group"
-                :data-access-level="publicFormAccessLevel(draft.publicFormViewId)"
+                :data-access-level="draftGroupPublicFormAccessState.level"
               >
-                <strong>Public form access:</strong> {{ publicFormAccessSummary(draft.publicFormViewId) }}
+                <strong>Public form access:</strong> {{ draftGroupPublicFormAccessState.summary }}
               </div>
               <div><strong>Internal processing:</strong> {{ viewSummaryName(draft.internalViewId, 'No internal link') }}</div>
             </div>
@@ -550,11 +550,11 @@
               <div><strong>Public form:</strong> {{ viewSummaryName(draft.dingtalkPersonPublicFormViewId, 'No public form link') }}</div>
               <div
                 class="meta-automation__public-form-access"
-                :class="`meta-automation__public-form-access--${publicFormAccessLevel(draft.dingtalkPersonPublicFormViewId)}`"
+                :class="`meta-automation__public-form-access--${draftPersonPublicFormAccessState.level}`"
                 data-automation-public-form-access="person"
-                :data-access-level="publicFormAccessLevel(draft.dingtalkPersonPublicFormViewId)"
+                :data-access-level="draftPersonPublicFormAccessState.level"
               >
-                <strong>Public form access:</strong> {{ publicFormAccessSummary(draft.dingtalkPersonPublicFormViewId) }}
+                <strong>Public form access:</strong> {{ draftPersonPublicFormAccessState.summary }}
               </div>
               <div><strong>Internal processing:</strong> {{ viewSummaryName(draft.dingtalkPersonInternalViewId, 'No internal link') }}</div>
             </div>
@@ -760,8 +760,7 @@ import {
   listDingTalkPersonRecipientFieldPathWarnings,
 } from '../utils/dingtalkRecipientFieldWarnings'
 import {
-  describeDingTalkPublicFormLinkAccess,
-  getDingTalkPublicFormLinkAccessLevel,
+  getDingTalkPublicFormLinkAccessState,
   type DingTalkPublicFormLinkAccessLevel,
   listDingTalkPublicFormLinkBlockingErrors,
   listDingTalkPublicFormLinkWarnings,
@@ -863,6 +862,12 @@ const formViews = computed(() => (props.views ?? []).filter((view) =>
   view.type === 'form' && (!view.sheetId || view.sheetId === props.sheetId),
 ))
 const internalViews = computed(() => (props.views ?? []).filter((view) => !view.sheetId || view.sheetId === props.sheetId))
+const draftGroupPublicFormAccessState = computed(() =>
+  getDingTalkPublicFormLinkAccessState(draft.value.publicFormViewId, formViews.value),
+)
+const draftPersonPublicFormAccessState = computed(() =>
+  getDingTalkPublicFormLinkAccessState(draft.value.dingtalkPersonPublicFormViewId, formViews.value),
+)
 
 interface DingTalkCardLink {
   key: string
@@ -1044,8 +1049,9 @@ const dingTalkGroupSummary = computed(() => {
 })
 
 function viewSummaryName(viewId: string, fallback: string) {
-  if (!viewId) return fallback
-  return (props.views ?? []).find((view) => view.id === viewId)?.name ?? viewId
+  const id = viewId.trim()
+  if (!id) return fallback
+  return (props.views ?? []).find((view) => view.id === id)?.name ?? id
 }
 
 function templatePreviewText(value: string, fallback: string) {
@@ -1076,14 +1082,6 @@ function internalViewLinkWarnings(value: unknown) {
 
 function internalViewLinkBlockingErrors(value: unknown) {
   return listDingTalkInternalViewLinkBlockingErrors(value, internalViews.value)
-}
-
-function publicFormAccessSummary(value: unknown) {
-  return describeDingTalkPublicFormLinkAccess(value, formViews.value)
-}
-
-function publicFormAccessLevel(value: unknown) {
-  return getDingTalkPublicFormLinkAccessLevel(value, formViews.value)
 }
 
 function readPublicFormToken(view: MetaView): string {
@@ -1121,13 +1119,14 @@ function dingTalkCardLinks(rule: AutomationRule): DingTalkCardLink[] {
       const publicToken = view ? readPublicFormToken(view) : ''
       const key = `public-form:${publicFormViewId}`
       if (view && publicToken && !seen.has(key)) {
+        const accessState = getDingTalkPublicFormLinkAccessState(publicFormViewId, formViews.value)
         seen.add(key)
         links.push({
           key,
           label: `Open public form: ${viewSummaryName(publicFormViewId, publicFormViewId)}`,
           href: buildPublicFormHref(publicFormViewId, publicToken),
-          accessSummary: describeDingTalkPublicFormLinkAccess(publicFormViewId, formViews.value),
-          accessLevel: publicFormAccessLevel(publicFormViewId),
+          accessSummary: accessState.summary,
+          accessLevel: accessState.level,
         })
       }
     }
