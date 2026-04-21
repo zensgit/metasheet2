@@ -153,6 +153,17 @@ Unit tests exercise **pure-JS twins** (`applyTokenBucketScript`, `applyRecordFai
 
 The `MemoryCircuitBreakerStore` also serves as an executable specification of the expected Redis behavior: the full `CLOSED → OPEN → HALF_OPEN → CLOSED` cycle is asserted there, and the Redis-backed test runs the same set of assertions through the shim, verifying the Lua twins produce identical results.
 
+### Live Redis smoke addendum — 2026-04-21
+
+Reviewer feedback correctly pointed out that the unit tests prove the JS twin and mocked dispatch semantics, but not a real Redis server's Lua execution path. This branch now includes `packages/core-backend/tests/integration/redis-runtime-stores.integration.test.ts`.
+
+Design of the live smoke:
+
+- The suite is gated by `REDIS_URL`; without a real Redis URL it is skipped, so normal CI remains infrastructure-neutral.
+- The token bucket case runs real Redis `SCRIPT LOAD` + `EVALSHA`, validates burst exhaustion and TTL, then runs `SCRIPT FLUSH` and verifies `NOSCRIPT` recovery through the same store instance.
+- The circuit breaker case runs real Redis Lua through `RedisCircuitBreakerStore`, drives `CLOSED -> OPEN`, validates persisted window counters and TTL, then runs `SCRIPT FLUSH` and verifies `NOSCRIPT` recovery via `checkAndUpdate`.
+- The test uses a unique key prefix per case and deletes matching keys after each run, avoiding `FLUSHDB` against a shared Redis.
+
 ## Why `CircuitBreaker` + `TokenBucket` and not `AutomationScheduler`?
 
 - Both TB and CB are **stateless** between requests (the only "state" is the counter/window itself) and **hot-path**: they are consulted on every gateway request. Moving them to Redis immediately benefits any horizontally-scaled deployment.
