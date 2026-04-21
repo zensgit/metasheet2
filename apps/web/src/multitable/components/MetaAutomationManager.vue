@@ -600,6 +600,29 @@
           <div class="meta-automation__card-desc">
             {{ describeTrigger(rule) }} &rarr; {{ describeAction(rule) }}
           </div>
+          <div v-if="dingTalkCardLinks(rule).length" class="meta-automation__card-links">
+            <template v-for="link in dingTalkCardLinks(rule)" :key="link.key">
+              <a
+                v-if="link.href"
+                class="meta-automation__btn meta-automation__btn-link"
+                :href="link.href"
+                target="_blank"
+                rel="noopener noreferrer"
+                :data-automation-card-link="link.key"
+              >
+                {{ link.label }}
+              </a>
+              <button
+                v-else
+                class="meta-automation__btn meta-automation__btn-link"
+                type="button"
+                :data-automation-card-link="link.key"
+                @click="openInternalView(link.viewId ?? '')"
+              >
+                {{ link.label }}
+              </button>
+            </template>
+          </div>
           <div v-if="ruleStats[rule.id]" class="meta-automation__card-stats">
             <span class="meta-automation__stat meta-automation__stat--success">{{ ruleStats[rule.id].success }} ok</span>
             <span class="meta-automation__stat meta-automation__stat--failed">{{ ruleStats[rule.id].failed }} fail</span>
@@ -677,6 +700,7 @@
 
 <script setup lang="ts">
 import { ref, computed, watch, onBeforeUnmount } from 'vue'
+import { useRouter } from 'vue-router'
 import type {
   AutomationExecution,
   AutomationRule,
@@ -687,6 +711,7 @@ import type {
   MetaSheetPermissionCandidate,
   MetaView,
 } from '../types'
+import { AppRouteNames } from '../../router/types'
 import { useMultitableAutomations } from '../composables/useMultitableAutomations'
 import type { MultitableApiClient } from '../api/client'
 import MetaAutomationRuleEditor from './MetaAutomationRuleEditor.vue'
@@ -729,6 +754,8 @@ const emit = defineEmits<{
   (e: 'close'): void
   (e: 'updated'): void
 }>()
+
+const router = useRouter()
 
 type AutomationTestRunState = {
   status: 'running' | 'success' | 'failed' | 'skipped'
@@ -807,6 +834,13 @@ const formViews = computed(() => (props.views ?? []).filter((view) =>
   view.type === 'form' && (!view.sheetId || view.sheetId === props.sheetId),
 ))
 const internalViews = computed(() => (props.views ?? []).filter((view) => !view.sheetId || view.sheetId === props.sheetId))
+
+interface DingTalkCardLink {
+  key: string
+  label: string
+  href?: string
+  viewId?: string
+}
 
 function parseUserIdsText(value: string): string[] {
   return value
@@ -1015,6 +1049,80 @@ function internalViewLinkBlockingErrors(value: unknown) {
 
 function publicFormAccessSummary(value: unknown) {
   return describeDingTalkPublicFormLinkAccess(value, formViews.value)
+}
+
+function readPublicFormToken(view: MetaView): string {
+  const publicForm = view.config?.publicForm
+  if (!publicForm || typeof publicForm !== 'object' || Array.isArray(publicForm)) return ''
+  const token = (publicForm as Record<string, unknown>).publicToken
+  return typeof token === 'string' ? token.trim() : ''
+}
+
+function buildPublicFormHref(viewId: string, publicToken: string): string {
+  return `${window.location.origin}/multitable/public-form/${props.sheetId}/${viewId}?publicToken=${encodeURIComponent(publicToken)}`
+}
+
+function dingTalkActionConfigs(rule: AutomationRule): Record<string, unknown>[] {
+  const actionTypes: AutomationActionType[] = ['send_dingtalk_group_message', 'send_dingtalk_person_message']
+  const configs = (rule.actions ?? [])
+    .filter((action) => actionTypes.includes(action.type))
+    .map((action) => action.config)
+  if (!configs.length && actionTypes.includes(rule.actionType)) {
+    configs.push(rule.actionConfig)
+  }
+  return configs
+}
+
+function dingTalkCardLinks(rule: AutomationRule): DingTalkCardLink[] {
+  const seen = new Set<string>()
+  const links: DingTalkCardLink[] = []
+
+  for (const actionConfig of dingTalkActionConfigs(rule)) {
+    const publicFormViewId = typeof actionConfig.publicFormViewId === 'string'
+      ? actionConfig.publicFormViewId.trim()
+      : ''
+    if (publicFormViewId && !listDingTalkPublicFormLinkBlockingErrors(publicFormViewId, formViews.value).length) {
+      const view = formViews.value.find((item) => item.id === publicFormViewId)
+      const publicToken = view ? readPublicFormToken(view) : ''
+      const key = `public-form:${publicFormViewId}`
+      if (view && publicToken && !seen.has(key)) {
+        seen.add(key)
+        links.push({
+          key,
+          label: `Open public form: ${viewSummaryName(publicFormViewId, publicFormViewId)}`,
+          href: buildPublicFormHref(publicFormViewId, publicToken),
+        })
+      }
+    }
+
+    const internalViewId = typeof actionConfig.internalViewId === 'string'
+      ? actionConfig.internalViewId.trim()
+      : ''
+    if (internalViewId && !listDingTalkInternalViewLinkBlockingErrors(internalViewId, internalViews.value).length) {
+      const key = `internal-view:${internalViewId}`
+      if (!seen.has(key)) {
+        seen.add(key)
+        links.push({
+          key,
+          label: `Open internal view: ${viewSummaryName(internalViewId, internalViewId)}`,
+          viewId: internalViewId,
+        })
+      }
+    }
+  }
+
+  return links
+}
+
+function openInternalView(viewId: string) {
+  if (!viewId) return
+  void router.push({
+    name: AppRouteNames.MULTITABLE,
+    params: {
+      sheetId: props.sheetId,
+      viewId,
+    },
+  })
 }
 
 function copyPreviewText(key: string, text: string) {
@@ -1884,6 +1992,13 @@ watch(
   color: #475569;
 }
 
+.meta-automation__card-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 2px;
+}
+
 .meta-automation__card-actions {
   display: flex;
   gap: 8px;
@@ -1899,6 +2014,10 @@ watch(
   color: #0f172a;
   font-size: 13px;
   cursor: pointer;
+}
+
+.meta-automation__btn-link {
+  text-decoration: none;
 }
 
 .meta-automation__btn:disabled {
