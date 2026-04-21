@@ -243,6 +243,27 @@ describe('YjsRecordBridge.cancelPending', () => {
     vi.useRealTimers()
   })
 
+  it('route-level setter accepts and replaces the invalidator', async () => {
+    // The direct-SQL PATCH /records/:recordId handler in univer-meta.ts
+    // reads a module-level `yjsInvalidator` variable that is wired up by
+    // index.ts on boot via `setYjsInvalidatorForRoutes(...)`. The full
+    // HTTP-level path is out of scope for a unit test (heavy auth +
+    // permission + sheet fixtures), but locking in the setter's
+    // existence + shape guards against a future refactor that drops the
+    // wiring point.
+    const routesModule = await import('../../src/routes/univer-meta')
+    expect(typeof routesModule.setYjsInvalidatorForRoutes).toBe('function')
+
+    const first = vi.fn()
+    routesModule.setYjsInvalidatorForRoutes(first)
+    // Replace with null — safe no-op for Yjs-off deployments.
+    routesModule.setYjsInvalidatorForRoutes(null)
+    // (Nothing to assert on the stored var directly — it's file-private.
+    // The manual staging verification plan step #7 in the verification MD
+    // exercises the end-to-end path with a real HTTP PATCH.)
+    expect(() => routesModule.setYjsInvalidatorForRoutes(null)).not.toThrow()
+  })
+
   it('cancelPending on records with no pending flush is a no-op', () => {
     const persistence = makePersistence()
     const svc = new YjsSyncService(persistence as any)

@@ -167,6 +167,24 @@ from a DB row that hasn't yet caught up to the just-committed patch.
 Default polarity is invalidate-on-unset, so any future REST entry
 point that forgets to set `source` errs on the safe side.
 
+#### Why the bridge-vs-REST race is safe
+
+Row-level `SELECT ... FOR UPDATE` inside `patchRecords`' transaction
+serializes bridge and REST writes for the same record. Whichever
+commits last is the final DB value, and because only `source='rest'`
+(or unset) triggers invalidation, the Yjs snapshot never outlives a
+commit that post-dates it:
+
+- REST commits first → invalidates → bridge commits second → bridge's
+  Yjs-cached value wins the final DB state, Yjs snapshot stays dropped
+  until next open re-seeds from that fresh value.
+- Bridge commits first → does NOT invalidate (source='yjs-bridge') →
+  REST commits second → invalidates → Yjs state purged; next open
+  re-seeds from REST's value.
+
+Either way, the next `getOrCreateDoc` reads the last committed DB
+value. No path leaves a stale snapshot shadowing a newer DB row.
+
 ### View layer confirmation
 
 `apps/web/src/multitable/components/cells/MetaCellEditor.vue` was
@@ -228,16 +246,22 @@ The P0 fix therefore cascades correctly to the render path.
 - `apps/web/tests/yjs-awareness-presence.spec.ts` — same primer pattern
   so `setActiveField` fires as expected.
 
-### Known limitation — documented, not fixed in this PR
+### Known limitations — documented, not fixed in this PR
 
-Active WebSocket editors on a record lose their in-memory Y.Doc when
-a REST write on that same record invalidates. They see subsequent
-local edits stop persisting until the socket is reconnected
-(refreshing the page reseeds from the new DB state). For POC /
-internal rollout this is acceptable — REST writes to records with
-live Yjs editors should be rare, and when they happen the user can
-refresh. The proper fix (`yjs:invalidated` server event → client-side
-reseed) is out of scope for this PR.
+- **Live editor mid-session invalidation.** Active WebSocket editors
+  on a record lose their in-memory Y.Doc when a REST write on that
+  same record invalidates. They see subsequent local edits stop
+  persisting until the socket is reconnected (refreshing the page
+  reseeds from the new DB state). For POC / internal rollout this is
+  acceptable — REST writes to records with live Yjs editors should
+  be rare, and when they happen the user can refresh. Proper fix:
+  `yjs:invalidated` server event → client-side reseed; out of scope.
+- **Record DELETE path.** Record deletion does not fire the
+  invalidator. The periodic 10-minute orphan cleanup
+  (`YjsPersistenceAdapter.cleanupOrphanStates`) eventually drops the
+  persisted rows, but a client cached on `recordId` could briefly
+  hit a stale Y.Doc on the server between delete and cleanup.
+  Out of scope; fold into follow-up alongside live-editor reseed.
 
 ## Risk
 

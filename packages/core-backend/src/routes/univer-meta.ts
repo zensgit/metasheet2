@@ -7061,10 +7061,22 @@ export function univerMetaRouter(): Router {
         }
       })
 
-      // Post-commit: wipe any Yjs state for this record so the next Y.Doc
-      // open re-seeds from the just-updated meta_records.data. Best-effort —
-      // a failure here does NOT fail the REST write. See record-write-service
-      // for the matching hook on the batch PATCH path.
+      // -----------------------------------------------------------------
+      // LOAD-BEARING — DO NOT REMOVE
+      //
+      // Wipes any persisted / in-memory Y.Doc state for this record so the
+      // next getOrCreateDoc re-seeds from the just-updated meta_records.data.
+      // Without this, the P0 stale-snapshot bug returns (docs/development/
+      // yjs-text-cell-seed-and-stale-guard-development-20260420.md).
+      //
+      // The batch PATCH path goes through RecordWriteService.patchRecords,
+      // which runs an equivalent hook on every commit that isn't
+      // source='yjs-bridge'. This direct-SQL route bypasses that service,
+      // so it must fire the invalidator itself.
+      //
+      // Best-effort: a purge failure is logged and swallowed; the REST
+      // write still succeeds.
+      // -----------------------------------------------------------------
       if (yjsInvalidator) {
         try {
           await yjsInvalidator([recordId])
