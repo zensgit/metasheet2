@@ -1811,6 +1811,11 @@ function normalizePermissionCodes(value: unknown): string[] {
     .filter((item) => item.length > 0)
 }
 
+function parseDingTalkAutomationDeliveryLimit(value: unknown): number {
+  const raw = typeof value === 'string' ? Number(value) : undefined
+  return Number.isFinite(raw) ? Math.min(Math.max(Math.floor(raw as number), 1), 200) : 50
+}
+
 type ResolvedRequestAccess = {
   userId: string
   permissions: string[]
@@ -8556,7 +8561,7 @@ export function univerMetaRouter(): Router {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Automation rule not found' } })
       }
 
-      const limit = Math.min(Math.max(Number(req.query.limit) || 50, 1), 200)
+      const limit = parseDingTalkAutomationDeliveryLimit(req.query.limit)
       const deliveries = await listAutomationDingTalkPersonDeliveries(pool.query.bind(pool), ruleId, limit)
       return res.json({ ok: true, data: { deliveries } })
     } catch (err) {
@@ -8587,7 +8592,7 @@ export function univerMetaRouter(): Router {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Automation rule not found' } })
       }
 
-      const limit = Math.min(Math.max(Number(req.query.limit) || 50, 1), 200)
+      const limit = parseDingTalkAutomationDeliveryLimit(req.query.limit)
       const deliveries = await listAutomationDingTalkGroupDeliveries(pool.query.bind(pool), ruleId, limit)
       return res.json({ ok: true, data: { deliveries } })
     } catch (err) {
