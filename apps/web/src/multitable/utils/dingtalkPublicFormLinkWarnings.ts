@@ -77,7 +77,7 @@ export function describeDingTalkPublicFormLinkAccess(
   return 'Fully public; anyone with the link can submit'
 }
 
-export function listDingTalkPublicFormLinkWarnings(
+export function listDingTalkPublicFormLinkBlockingErrors(
   viewId: unknown,
   views: readonly DingTalkPublicFormLinkView[],
   optionsOrNowMs?: number | DingTalkPublicFormLinkWarningOptions,
@@ -112,6 +112,25 @@ export function listDingTalkPublicFormLinkWarnings(
   if (expiryMs !== null && nowMs >= expiryMs) {
     return [`Public form sharing for "${publicFormLabel(view, id)}" has expired; renew sharing before sending this DingTalk fill link.`]
   }
+
+  return []
+}
+
+export function listDingTalkPublicFormLinkWarnings(
+  viewId: unknown,
+  views: readonly DingTalkPublicFormLinkView[],
+  optionsOrNowMs?: number | DingTalkPublicFormLinkWarningOptions,
+): string[] {
+  const options = normalizeWarningOptions(optionsOrNowMs)
+  const id = typeof viewId === 'string' ? viewId.trim() : ''
+  if (!id) return []
+
+  const blockingErrors = listDingTalkPublicFormLinkBlockingErrors(id, views, options)
+  if (blockingErrors.length) return blockingErrors
+
+  const view = views.find((item) => item.id === id)
+  const publicForm = isRecord(view?.config?.publicForm) ? view.config.publicForm : null
+  if (!publicForm) return []
 
   const accessMode = normalizeAccessMode(publicForm.accessMode)
   if (options.warnWhenFullyPublic && accessMode === 'public') {
