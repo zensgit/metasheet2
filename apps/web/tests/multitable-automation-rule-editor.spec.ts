@@ -278,6 +278,38 @@ describe('MetaAutomationRuleEditor', () => {
     expect(confirmSpy).toHaveBeenCalledWith(expect.stringContaining('Unsaved changes are not included'))
   })
 
+  it('requires confirmation when saved V1 actions contain DingTalk but legacy actionType does not', async () => {
+    const tested = vi.fn()
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
+    const { container } = mount({
+      visible: true,
+      sheetId: 'sheet_1',
+      fields,
+      views,
+      rule: fakeRule({
+        actionType: 'notify',
+        actionConfig: { message: 'Internal notification' },
+        actions: [
+          { type: 'notify', config: { message: 'Internal notification' } },
+          {
+            type: 'send_dingtalk_group_message',
+            config: { destinationId: 'dt_1', titleTemplate: 'Ticket {{recordId}}', bodyTemplate: 'Please fill' },
+          },
+        ],
+      }),
+      onTest: tested,
+    })
+    await flushPromises()
+
+    expect(container.querySelector('[data-field="dingtalkTestRunWarning"]')?.textContent).toContain('can send real DingTalk messages')
+
+    ;(container.querySelector('[data-action="test"]') as HTMLButtonElement).click()
+    await flushPromises()
+
+    expect(confirmSpy).toHaveBeenCalledTimes(1)
+    expect(tested).toHaveBeenCalledWith('rule_1')
+  })
+
   it('does not emit DingTalk Test Run when confirmation is canceled', async () => {
     const tested = vi.fn()
     const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false)
