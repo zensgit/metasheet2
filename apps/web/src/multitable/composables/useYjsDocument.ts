@@ -35,8 +35,11 @@ function handleSyncMessage(
  * Composable that manages a Yjs document bound to a specific record,
  * connected via Socket.IO /yjs namespace.
  *
- * POC scope: single record, single text field, character-level merge,
- * disconnect/reconnect recovery.
+ * Scope: single record, text fields with minimal-diff edits (see
+ * `useYjsTextField` for the diff semantics), disconnect/reconnect
+ * recovery. Concurrent edits to different ranges of the same field
+ * merge per-range via Yjs CRDT; overlapping edits interleave at the
+ * nearest common anchor.
  */
 export function useYjsDocument(recordId: Ref<string | null>) {
   const doc = shallowRef<Y.Doc | null>(null)

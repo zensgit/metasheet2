@@ -104,7 +104,10 @@ The claim "Yjs collaborative editing is working end-to-end" is **not supported b
 
 What is NOT supported:
 
-- Two users editing the same text field → character-level merge (untested in browser)
+- Two users editing the same text field → range-scoped merge via the
+  diff-based `useYjsTextField.setText`
+  (common-prefix/common-suffix — see `yjs-frontend-opt-in-wired-20260420.md`)
+  (untested in browser)
 - Disconnect/reconnect recovery (untested in browser)
 - Real Presence UI showing who is editing (untested in browser)
 

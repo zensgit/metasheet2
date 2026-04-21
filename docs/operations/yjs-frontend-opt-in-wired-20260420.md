@@ -103,13 +103,24 @@ the places a regression would be silent rather than loud:
    across edits (e.g. single persistent editor with dynamic target),
    `release` must also be called explicitly on blur to avoid leaking
    sockets.
-4. **Character-level merge NOT shipped** — `useYjsTextField.setText`
-   does `delete(0, length); insert(0, newText)` on every keystroke
-   (last-write-wins, not CRDT-per-character). For this opt-in POC
-   that's acceptable. A follow-up should diff `old` vs `new` and emit
-   `insertAt` / `deleteRange` ops for real character-level merge.
-   Until then, two simultaneous editors on the same cell will see
-   replacement, not merge.
+4. **Diff-based edits (common-prefix/common-suffix)** —
+   `useYjsTextField.setText` now computes a minimal diff between the
+   current Y.Text content and the new value, and emits scoped
+   `delete(pos, count)` + `insert(pos, slice)` ops. This means:
+
+   - Typing one char emits an `insert(pos, char)`, not a full replace
+   - Deleting one char emits a `delete(pos, 1)`
+   - Edits in the middle only touch the changed range
+
+   Two concurrent editors modifying *different* ranges of the same
+   text merge per-range via Yjs. Overlapping ranges interleave at the
+   nearest common anchor — still no whole-string replacement.
+
+   **Remaining limitation**: the diff is prefix/suffix heuristic, not
+   a true LCS. Paste-replacing a middle selection produces one
+   coarse `delete` + one coarse `insert`. That's correct, just
+   coarser than char-level. Good enough for the opt-in POC; revisit
+   if/when we need merges that survive paste-replaces.
 5. **Date-like string cells stay on REST** — `fieldIdRef` returns
    `null` for `isDateLike` strings, so the Yjs path never engages for
    them. Intentional: they render a `<input type="date">` which the
