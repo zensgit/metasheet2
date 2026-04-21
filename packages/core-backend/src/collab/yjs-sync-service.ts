@@ -118,6 +118,41 @@ export class YjsSyncService {
     return entry?.doc
   }
 
+  /**
+   * Drop cached Y.Docs and persisted state for the given records so the
+   * next `getOrCreateDoc` re-seeds from `meta_records.data`.
+   *
+   * Contract:
+   *   - In-memory Y.Docs are destroyed WITHOUT snapshotting. The snapshot
+   *     would encode pre-REST state and thus "win" on the next open —
+   *     the exact bug this method exists to close.
+   *   - Persisted snapshot + update rows are deleted via
+   *     `persistence.purgeRecords` when available.
+   *   - Best effort on persistence failures: in-memory eviction still
+   *     happens, errors surface to the caller who should log and continue
+   *     (the REST write has already committed).
+   *
+   * Callers MUST cancel any in-flight bridge flushes for these records
+   * FIRST, otherwise a debounced bridge write will re-materialize the
+   * stale Yjs-cached value over the REST write.
+   */
+  async invalidateDocs(recordIds: string[]): Promise<void> {
+    if (recordIds.length === 0) return
+    for (const recordId of recordIds) {
+      const entry = this.docs.get(recordId)
+      if (entry) {
+        entry.doc.destroy()
+        this.docs.delete(recordId)
+      }
+    }
+    const adapter = this.persistence as YjsPersistenceAdapter & {
+      purgeRecords?: (ids: string[]) => Promise<void>
+    }
+    if (typeof adapter.purgeRecords === 'function') {
+      await adapter.purgeRecords(recordIds)
+    }
+  }
+
   async releaseDoc(recordId: string): Promise<void> {
     const entry = this.docs.get(recordId)
     if (entry) {

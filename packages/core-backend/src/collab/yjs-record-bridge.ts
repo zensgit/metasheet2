@@ -209,6 +209,23 @@ export class YjsRecordBridge {
   }
 
   /**
+   * Cancel any pending debounced flushes for the given records.
+   *
+   * Called by the REST → Yjs invalidation path BEFORE wiping the Yjs
+   * state. Without this, the 200–500ms debounce window can fire AFTER
+   * invalidation and re-materialize the stale Yjs-cached values on top
+   * of the just-committed REST write.
+   */
+  cancelPending(recordIds: string[]): void {
+    for (const recordId of recordIds) {
+      const pending = this.pendingWrites.get(recordId)
+      if (!pending) continue
+      clearTimeout(pending.timer)
+      this.pendingWrites.delete(recordId)
+    }
+  }
+
+  /**
    * Flush all pending writes (e.g., on shutdown).
    */
   async flushAll(): Promise<void> {

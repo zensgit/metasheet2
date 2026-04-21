@@ -46,9 +46,23 @@ import {
   RecordValidationError as ServiceValidationError,
   RecordFieldForbiddenError as ServiceFieldForbiddenError,
   type RecordWriteHelpers,
+  type YjsInvalidator,
 } from '../multitable/record-write-service'
 
 const multitableFormulaEngine = new MultitableFormulaEngine()
+
+/**
+ * Module-level Yjs invalidator set by `index.ts` when the Yjs collab
+ * path is wired. Used by the direct-SQL PATCH handler at
+ * `PATCH /records/:recordId` which bypasses `RecordWriteService`.
+ *
+ * When `null`, no invalidation happens — safe for Yjs-off deployments.
+ */
+let yjsInvalidator: YjsInvalidator | null = null
+
+export function setYjsInvalidatorForRoutes(invalidator: YjsInvalidator | null): void {
+  yjsInvalidator = invalidator
+}
 
 type UniverMetaField = {
   id: string
@@ -7046,6 +7060,21 @@ export function univerMetaRouter(): Router {
           }
         }
       })
+
+      // Post-commit: wipe any Yjs state for this record so the next Y.Doc
+      // open re-seeds from the just-updated meta_records.data. Best-effort —
+      // a failure here does NOT fail the REST write. See record-write-service
+      // for the matching hook on the batch PATCH path.
+      if (yjsInvalidator) {
+        try {
+          await yjsInvalidator([recordId])
+        } catch (err) {
+          console.error(
+            `[univer-meta] Yjs invalidation failed for record ${recordId} — Yjs state may be stale until next idle-release:`,
+            err,
+          )
+        }
+      }
 
       const recordRes = await pool.query(
         'SELECT id, version, data FROM meta_records WHERE id = $1 AND sheet_id = $2',

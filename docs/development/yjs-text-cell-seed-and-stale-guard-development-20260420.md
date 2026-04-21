@@ -10,21 +10,41 @@
 
 The initial PR #960 shipped a minimal-diff frontend binding (see the
 prior dev MD `yjs-text-cell-diff-binding-development-20260420.md`),
-but the reviewer found two blocking issues on top of the LWW fix:
+but two subsequent reviewer findings required additional work before
+merge:
 
-- **P0** — `useYjsTextField` auto-created an empty `Y.Text` whenever the
-  field was missing; the backend `YjsSyncService` only loaded Yjs
-  snapshots/updates and never seeded from `meta_records.data`. First
-  opener of an existing text cell saw an empty textbox; confirm/typing
-  overwrote the original DB value with whatever the user typed on top
-  of the empty state.
-- **P1** — `useYjsDocument.connect` awaited `getCurrentUserId()` before
-  creating the doc/socket. The cell-binding timeout fallback could fire
-  during that await. After the await returned, no stale-guard protected
-  the resume path — it could still construct a socket/doc that the
-  caller had already given up on.
+- **2026-04-20 review (P0/P1)** — empty Y.Text overwrite + connect race.
+- **2026-04-21 review (P0)** — REST → Yjs consistency gap.
 
-Both fixes land in this change.
+### P0 2026-04-20 — empty-Y.Text overwrite
+
+`useYjsTextField` auto-created an empty `Y.Text` whenever the field
+was missing; the backend `YjsSyncService` only loaded Yjs
+snapshots/updates and never seeded from `meta_records.data`. First
+opener of an existing text cell saw an empty textbox; confirm/typing
+overwrote the original DB value with whatever the user typed on top
+of the empty state.
+
+### P1 2026-04-20 — connect stale-guard
+
+`useYjsDocument.connect` awaited `getCurrentUserId()` before creating
+the doc/socket. The cell-binding timeout fallback could fire during
+that await. After the await returned, no stale-guard protected the
+resume path — it could still construct a socket/doc that the caller
+had already given up on.
+
+### P0 2026-04-21 — REST → Yjs stale snapshot
+
+With the seed fix landed (P0 above), a later class of bug became
+visible: `YjsSyncService.getOrCreateDoc` seeds from
+`meta_records.data` **only on fresh create** (when persistence
+returned `null`). Once a Y.Doc snapshot exists, any REST write to
+`meta_records.data` is invisible to the next Yjs opener — the
+snapshot wins. Example: user A edits via Yjs → snapshot stored; user
+B PATCHes the same record via REST; user A re-opens → sees the
+pre-REST value.
+
+All three fixes land in this change.
 
 ## Changes
 
@@ -97,6 +117,56 @@ Both fixes land in this change.
 - `disconnect()` also bumps `connectGen` so any in-flight connect from
   a prior cycle aborts cleanly.
 
+### REST → Yjs invalidation hook
+
+Three new surfaces close the stale-snapshot bug from the 2026-04-21 review:
+
+- `YjsPersistenceAdapter.purgeRecords(ids)` — single transaction deletes
+  from `meta_record_yjs_states` and `meta_record_yjs_updates` for the
+  given record IDs. No-op on empty input or unknown IDs.
+- `YjsSyncService.invalidateDocs(ids)` — destroys cached Y.Docs WITHOUT
+  snapshotting (a snapshot now would encode pre-REST state and defeat
+  the fix) then calls `purgeRecords`. Documented: callers MUST cancel
+  bridge pending flushes FIRST.
+- `YjsRecordBridge.cancelPending(ids)` — clears `pendingWrites` entries
+  and their `setTimeout` timers for the given records. Without this,
+  the 200–500ms debounce could fire after invalidation and re-write
+  the stale Y.Doc-cached value on top of the REST change.
+
+#### Wiring
+
+`packages/core-backend/src/index.ts` composes the invalidator:
+
+```ts
+const yjsInvalidate = async (recordIds: string[]) => {
+  if (recordIds.length === 0) return
+  yjsBridge.cancelPending(recordIds)              // 1. stop scheduled flushes
+  await yjsSyncService.invalidateDocs(recordIds)   // 2. evict + purge
+}
+recordWriteService.setYjsInvalidator(yjsInvalidate)
+univerMetaModule.setYjsInvalidatorForRoutes(yjsInvalidate)
+```
+
+Both write sites fire the hook **post-commit, best-effort**:
+
+- `RecordWriteService.patchRecords` — called for every record in the
+  patch unless `input.source === 'yjs-bridge'`. Errors are logged; the
+  REST write still returns success.
+- `PATCH /records/:recordId` direct-SQL handler in `univer-meta.ts` —
+  called after the transaction commits. Same log-and-swallow contract.
+
+#### Loop prevention
+
+`RecordPatchInput.source?: 'rest' | 'yjs-bridge'`. The bridge's
+`getWriteInput` closure sets `source: 'yjs-bridge'` on the input it
+builds. `RecordWriteService.patchRecords` skips invalidation when
+`source === 'yjs-bridge'` — those writes originate from the live
+in-memory Y.Doc; destroying it would tear out the editor and re-seed
+from a DB row that hasn't yet caught up to the just-committed patch.
+
+Default polarity is invalidate-on-unset, so any future REST entry
+point that forgets to set `source` errs on the safe side.
+
 ### View layer confirmation
 
 `apps/web/src/multitable/components/cells/MetaCellEditor.vue` was
@@ -109,6 +179,18 @@ The P0 fix therefore cascades correctly to the render path.
 
 ### New
 
+- `packages/core-backend/tests/unit/yjs-rest-invalidation.test.ts` (7 cases)
+  - **Regression test from the 2026-04-21 review**: snapshot exists →
+    REST update + invalidate → next Yjs open reads the REST value, not
+    the stale snapshot
+  - `invalidateDocs` evicts in-memory without snapshotting (prevents a
+    "flush then invalidate" from persisting the stale value)
+  - Record never opened → no-op
+  - Empty array → no-op
+  - Service without seeder: invalidation still works, next open empty
+  - Bridge debounce race: scheduled flush is cancelled before timer
+    fires, so no `patchRecords` call after invalidation
+  - `cancelPending` on untouched records does not throw
 - `packages/core-backend/tests/unit/yjs-sync-seed.test.ts` (7 cases)
   - Seeds string Y.Text from `meta_records.data`
   - Skips non-string fields
@@ -145,6 +227,17 @@ The P0 fix therefore cascades correctly to the render path.
   carrying a Y.Text for the field, matching backend seed behavior.
 - `apps/web/tests/yjs-awareness-presence.spec.ts` — same primer pattern
   so `setActiveField` fires as expected.
+
+### Known limitation — documented, not fixed in this PR
+
+Active WebSocket editors on a record lose their in-memory Y.Doc when
+a REST write on that same record invalidates. They see subsequent
+local edits stop persisting until the socket is reconnected
+(refreshing the page reseeds from the new DB state). For POC /
+internal rollout this is acceptable — REST writes to records with
+live Yjs editors should be rare, and when they happen the user can
+refresh. The proper fix (`yjs:invalidated` server event → client-side
+reseed) is out of scope for this PR.
 
 ## Risk
 

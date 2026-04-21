@@ -1859,6 +1859,12 @@ export class MetaSheetServer {
                 capabilities,
                 sheetScope,
                 access: { userId: actorId, permissions: actorPerms, isAdminRole },
+                // Mark bridge-originated writes so RecordWriteService does NOT
+                // fire the Yjs invalidation hook on them — those writes ARE the
+                // Y.Doc's authoritative content; wiping it would tear out any
+                // live editor and re-seed from stale data (the bridge write
+                // hasn't finished appearing in meta_records.data at that point).
+                source: 'yjs-bridge' as const,
               }
             } catch (err) {
               console.error(`[yjs-bridge] Failed to build write input for ${recordId}:`, err)
@@ -1871,6 +1877,22 @@ export class MetaSheetServer {
 
         yjsWsAdapter.setBridge(yjsBridge)
         yjsWsAdapter.register(collabIO)
+
+        // REST → Yjs invalidator: every REST write to meta_records.data
+        // wipes the corresponding Y.Doc state so the next getOrCreateDoc
+        // re-seeds from the authoritative DB row. Must cancel bridge
+        // pending flushes FIRST — without that a 200–500ms debounced
+        // bridge write would re-materialize the stale Yjs-cached value
+        // on top of the just-committed REST change.
+        const yjsInvalidate = async (recordIds: string[]) => {
+          if (recordIds.length === 0) return
+          yjsBridge.cancelPending(recordIds)
+          await yjsSyncService.invalidateDocs(recordIds)
+        }
+        recordWriteService.setYjsInvalidator(yjsInvalidate)
+        const univerMetaModule = await import('./routes/univer-meta')
+        univerMetaModule.setYjsInvalidatorForRoutes(yjsInvalidate)
+
         this.yjsSyncMetricsSource = yjsSyncService
         this.yjsBridgeMetricsSource = yjsBridge
         this.yjsSocketMetricsSource = yjsWsAdapter

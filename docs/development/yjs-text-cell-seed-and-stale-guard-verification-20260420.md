@@ -8,11 +8,14 @@
 
 | Risk surfaced in review      | How the fix closes it                                   | Test(s)                                                                    |
 | ---------------------------- | ------------------------------------------------------- | -------------------------------------------------------------------------- |
-| P0 empty-Y.Text overwrite    | Frontend refuses to create Y.Text; backend seeds from `meta_records.data` | `yjs-sync-seed.test.ts` (7), `yjs-text-field-seed-guard.spec.ts` (6)       |
+| P0 empty-Y.Text overwrite (2026-04-20) | Frontend refuses to create Y.Text; backend seeds from `meta_records.data` | `yjs-sync-seed.test.ts` (7), `yjs-text-field-seed-guard.spec.ts` (6)       |
 | P0 seed writes stale DB      | `origin='seed'` skipped in persistence listener         | `yjs-sync-seed.test.ts › seeding does NOT create a DB update row`          |
 | P0 cached-doc overwrite      | Second `getOrCreateDoc` returns cached, no re-seed      | `yjs-sync-seed.test.ts › does NOT overwrite an existing entry via seed`    |
 | Client Y.Text arrives async  | `fields` Y.Map observer attaches when Y.Text is set later | `multitable-yjs-cell-binding.spec.ts › drives Y.Text`                      |
 | P1 stale-guard on timeout    | `connectGen` monotonic counter; both connect/disconnect bump | `yjs-document-stale-guard.spec.ts` (2)                                     |
+| P0 REST stale snapshot (2026-04-21) | `invalidateDocs` + `purgeRecords` called post-commit; bridge `cancelPending` first | `yjs-rest-invalidation.test.ts` (7)                                        |
+| P0 bridge debounce race      | `cancelPending` clears scheduled `setTimeout` before the REST invalidation returns | `yjs-rest-invalidation.test.ts › cancelPending clears a scheduled flush` |
+| Bridge writes self-invalidate | `RecordPatchInput.source='yjs-bridge'` skipped in invalidation hook | Source check in `record-write-service.patchRecords`; negative path covered by bridge test |
 | View-layer fallback intact   | `MetaCellEditor.vue:31` reads modelValue when inactive  | Read-verified; `multitable-yjs-cell-binding.spec.ts › timeout` covers fallback |
 
 ## Test runs
@@ -23,14 +26,17 @@ files listed in the dev MD.
 ### Backend — `YjsSyncService` + existing Yjs suite
 
 ```
-pnpm --filter @metasheet/core-backend exec vitest run yjs
-# Test Files  7 passed (7)
-#      Tests  54 passed (54)
+pnpm --filter @metasheet/core-backend exec vitest run yjs record-write
+# Test Files  9 passed (9)
+#      Tests  79 passed (79)
 ```
 
 Covers:
 - New `yjs-sync-seed.test.ts` (7 cases)
-- Pre-existing `yjs-poc.test.ts`, `yjs-*.test.ts` (54 total)
+- New `yjs-rest-invalidation.test.ts` (7 cases — includes the
+  reviewer-requested regression: snapshot exists → REST update →
+  next Yjs open reads the REST value, not the stale snapshot)
+- Pre-existing `yjs-poc.test.ts`, `yjs-*.test.ts`, `record-write-service.test.ts` (79 total)
 
 ### Frontend — Yjs composables and cell binding
 
@@ -70,6 +76,14 @@ Run: `pnpm --filter @metasheet/web exec vitest run`.
   None touch Yjs / cell-editor / useYjs* paths.
 - No new failure introduced by this change.
 
+### Wider backend regression
+
+Run: `pnpm --filter @metasheet/core-backend exec vitest run`.
+
+- 2281 tests pass. One test file (`api-token-webhook-migration.test.ts`)
+  fails to load — missing migration file, pre-existing, unrelated to
+  this PR (untracked orphan test referencing a non-existent migration).
+
 ## Manual verification plan (staging)
 
 Blocked on merge of this PR. Per the rollout test assignment MD
@@ -94,6 +108,14 @@ Blocked on merge of this PR. Per the rollout test assignment MD
    - **Expected**: empty input; typing works via REST fallback if
      seed skipped that field (non-string) or via Yjs insert if seeded
      empty string.
+7. **REST → Yjs consistency (2026-04-21 review)**. With browser A's
+   cell editor closed (so the record is idle-released server-side),
+   PATCH the same field via REST (curl or the browser's dev console),
+   then open the cell again in browser A.
+   - **Expected**: the REST value appears. Y.Doc was wiped; seed
+     re-read from `meta_records.data`.
+   - **Fail signal**: old Yjs value appears — means the invalidation
+     didn't fire or `purgeRecords` didn't run.
 
 ## Rollback
 
