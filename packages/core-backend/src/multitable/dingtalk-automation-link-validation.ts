@@ -34,15 +34,26 @@ function parsePublicFormExpiryMs(value: unknown): number | null {
   return Number.isFinite(parsed) ? parsed : null
 }
 
-function collectDingTalkActionConfigs(
+type DingTalkAutomationActionType = 'send_dingtalk_group_message' | 'send_dingtalk_person_message'
+
+type DingTalkAutomationActionEntry = {
+  type: DingTalkAutomationActionType
+  config: Record<string, unknown> | null
+}
+
+function isDingTalkAutomationActionType(value: unknown): value is DingTalkAutomationActionType {
+  return value === 'send_dingtalk_group_message' || value === 'send_dingtalk_person_message'
+}
+
+function collectDingTalkActionEntries(
   actionType: unknown,
   actionConfig: unknown,
   actions: unknown,
-): Record<string, unknown>[] {
-  const configs: Record<string, unknown>[] = []
+): DingTalkAutomationActionEntry[] {
+  const entries: DingTalkAutomationActionEntry[] = []
   const addIfDingTalkAction = (type: unknown, config: unknown) => {
-    if (type !== 'send_dingtalk_group_message' && type !== 'send_dingtalk_person_message') return
-    if (isPlainObject(config)) configs.push(config)
+    if (!isDingTalkAutomationActionType(type)) return
+    entries.push({ type, config: isPlainObject(config) ? config : null })
   }
 
   addIfDingTalkAction(actionType, actionConfig)
@@ -53,7 +64,129 @@ function collectDingTalkActionConfigs(
     }
   }
 
-  return configs
+  return entries
+}
+
+function collectDingTalkActionConfigs(
+  actionType: unknown,
+  actionConfig: unknown,
+  actions: unknown,
+): Record<string, unknown>[] {
+  return collectDingTalkActionEntries(actionType, actionConfig, actions)
+    .map((entry) => entry.config)
+    .filter((config): config is Record<string, unknown> => Boolean(config))
+}
+
+function normalizeStringList(value: unknown): string[] {
+  if (Array.isArray(value)) {
+    return value
+      .filter((entry): entry is string => typeof entry === 'string')
+      .flatMap((entry) => entry.split(/[\n,]+/))
+      .map((entry) => entry.trim())
+      .filter(Boolean)
+  }
+  if (typeof value === 'string') {
+    return value
+      .split(/[\n,]+/)
+      .map((entry) => entry.trim())
+      .filter(Boolean)
+  }
+  return []
+}
+
+function normalizeFieldPaths(value: unknown): string[] {
+  return normalizeStringList(value)
+    .map((entry) => entry.replace(/^record\./, '').trim())
+    .filter(Boolean)
+}
+
+function hasText(value: unknown): boolean {
+  return typeof value === 'string' && value.trim().length > 0
+}
+
+function normalizeDingTalkMessageConfig(config: Record<string, unknown>): Record<string, unknown> {
+  const normalized = { ...config }
+  if (!hasText(normalized.titleTemplate) && hasText(normalized.title)) {
+    normalized.titleTemplate = normalized.title
+  }
+  if (!hasText(normalized.bodyTemplate) && hasText(normalized.content)) {
+    normalized.bodyTemplate = normalized.content
+  }
+  return normalized
+}
+
+export function normalizeDingTalkAutomationActionInputs(
+  actionType: unknown,
+  actionConfig: unknown,
+  actions: unknown,
+): { actionConfig: unknown; actions: unknown } {
+  const normalizedActionConfig = isDingTalkAutomationActionType(actionType) && isPlainObject(actionConfig)
+    ? normalizeDingTalkMessageConfig(actionConfig)
+    : actionConfig
+  const normalizedActions = Array.isArray(actions)
+    ? actions.map((item) => {
+      if (!isPlainObject(item) || !isDingTalkAutomationActionType(item.type) || !isPlainObject(item.config)) return item
+      return { ...item, config: normalizeDingTalkMessageConfig(item.config) }
+    })
+    : actions
+  return { actionConfig: normalizedActionConfig, actions: normalizedActions }
+}
+
+function validateGroupMessageConfig(config: Record<string, unknown>): string | null {
+  const destinationIds = [
+    ...normalizeStringList(config.destinationId),
+    ...normalizeStringList(config.destinationIds),
+  ]
+  const destinationFieldPaths = [
+    ...normalizeFieldPaths(config.destinationIdFieldPath),
+    ...normalizeFieldPaths(config.destinationIdFieldPaths),
+  ]
+  if (destinationIds.length === 0 && destinationFieldPaths.length === 0) {
+    return 'At least one DingTalk destination or record destination field path is required'
+  }
+  if (!hasText(config.titleTemplate)) return 'DingTalk titleTemplate is required'
+  if (!hasText(config.bodyTemplate)) return 'DingTalk bodyTemplate is required'
+  return null
+}
+
+function validatePersonMessageConfig(config: Record<string, unknown>): string | null {
+  const userIds = normalizeStringList(config.userIds)
+  const memberGroupIds = normalizeStringList(config.memberGroupIds)
+  const recipientFieldPaths = [
+    ...normalizeFieldPaths(config.userIdFieldPath),
+    ...normalizeFieldPaths(config.userIdFieldPaths),
+  ]
+  const memberGroupRecipientFieldPaths = [
+    ...normalizeFieldPaths(config.memberGroupIdFieldPath),
+    ...normalizeFieldPaths(config.memberGroupIdFieldPaths),
+  ]
+  if (
+    userIds.length === 0
+    && memberGroupIds.length === 0
+    && recipientFieldPaths.length === 0
+    && memberGroupRecipientFieldPaths.length === 0
+  ) {
+    return 'At least one local userId, memberGroupId, record recipient field path, or member group record field path is required'
+  }
+  if (!hasText(config.titleTemplate)) return 'DingTalk titleTemplate is required'
+  if (!hasText(config.bodyTemplate)) return 'DingTalk bodyTemplate is required'
+  return null
+}
+
+export function validateDingTalkAutomationActionConfigs(
+  actionType: unknown,
+  actionConfig: unknown,
+  actions: unknown,
+): string | null {
+  const normalized = normalizeDingTalkAutomationActionInputs(actionType, actionConfig, actions)
+  for (const entry of collectDingTalkActionEntries(actionType, normalized.actionConfig, normalized.actions)) {
+    if (!entry.config) return 'DingTalk action config must be an object'
+    const error = entry.type === 'send_dingtalk_group_message'
+      ? validateGroupMessageConfig(entry.config)
+      : validatePersonMessageConfig(entry.config)
+    if (error) return error
+  }
+  return null
 }
 
 export function collectDingTalkAutomationLinkIds(

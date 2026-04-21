@@ -47,7 +47,7 @@ vi.mock('../../src/db/db', () => {
 })
 
 import { AutomationLogService } from '../../src/multitable/automation-log-service'
-import { AutomationService } from '../../src/multitable/automation-service'
+import { AutomationRuleValidationError, AutomationService } from '../../src/multitable/automation-service'
 
 // ── Helpers ─────────────────────────────────────────────────────────────
 
@@ -1663,6 +1663,25 @@ describe('AutomationService — Rule CRUD', () => {
     return chain
   }
 
+  function makeRuleRow(overrides: Record<string, unknown> = {}) {
+    return {
+      id: 'atr_1',
+      sheet_id: 'sheet_1',
+      name: 'Rule',
+      trigger_type: 'record.created',
+      trigger_config: {},
+      action_type: 'update_record',
+      action_config: {},
+      enabled: true,
+      created_at: new Date(),
+      updated_at: new Date(),
+      created_by: 'u1',
+      conditions: null,
+      actions: null,
+      ...overrides,
+    }
+  }
+
   beforeEach(() => {
     eventBus = new EventBus()
     queryFn = vi.fn(async () => ({ rows: [], rowCount: 0 }))
@@ -1686,6 +1705,77 @@ describe('AutomationService — Rule CRUD', () => {
     expect(rule.name).toBe('My Rule')
     expect(rule.trigger_type).toBe('record.created')
     expect(rule.enabled).toBe(true)
+  })
+
+  it('createRule normalizes legacy DingTalk title and content fields', async () => {
+    dbExecuteResults.push([])
+    const rule = await service.createRule('sheet_1', {
+      name: 'DingTalk group',
+      triggerType: 'record.created',
+      triggerConfig: {},
+      actionType: 'send_dingtalk_group_message',
+      actionConfig: {
+        destinationId: 'group_1',
+        title: 'Please fill',
+        content: 'Open form',
+      },
+      createdBy: 'user_1',
+    })
+
+    expect(rule.action_config).toMatchObject({
+      destinationId: 'group_1',
+      titleTemplate: 'Please fill',
+      bodyTemplate: 'Open form',
+    })
+  })
+
+  it('createRule rejects invalid DingTalk person configs before insert', async () => {
+    const promise = service.createRule('sheet_1', {
+      name: 'Bad DingTalk person',
+      triggerType: 'record.created',
+      triggerConfig: {},
+      actionType: 'send_dingtalk_person_message',
+      actionConfig: {
+        userIds: [','],
+        memberGroupIds: [],
+        userIdFieldPath: 'record.',
+        titleTemplate: 'Please fill',
+        bodyTemplate: 'Open form',
+      },
+      createdBy: 'user_1',
+    })
+
+    await expect(promise).rejects.toBeInstanceOf(AutomationRuleValidationError)
+    await expect(promise).rejects.toThrow('At least one local userId, memberGroupId, record recipient field path, or member group record field path is required')
+
+    expect(dbExecuteResults).toHaveLength(0)
+  })
+
+  it('createRule rejects invalid V1 DingTalk actions before insert', async () => {
+    const promise = service.createRule('sheet_1', {
+      name: 'Bad DingTalk action',
+      triggerType: 'record.created',
+      triggerConfig: {},
+      actionType: 'notify',
+      actionConfig: {},
+      actions: [
+        {
+          type: 'send_dingtalk_group_message',
+          config: {
+            destinationIds: [],
+            destinationIdFieldPath: 'record.',
+            titleTemplate: 'Please fill',
+            bodyTemplate: 'Open form',
+          },
+        },
+      ],
+      createdBy: 'user_1',
+    })
+
+    await expect(promise).rejects.toBeInstanceOf(AutomationRuleValidationError)
+    await expect(promise).rejects.toThrow('At least one DingTalk destination or record destination field path is required')
+
+    expect(dbExecuteResults).toHaveLength(0)
   })
 
   it('getRule returns a rule when found', async () => {
@@ -1741,17 +1831,86 @@ describe('AutomationService — Rule CRUD', () => {
   })
 
   it('updateRule returns updated rule', async () => {
-    const updatedRow = {
-      id: 'atr_1', sheet_id: 'sheet_1', name: 'Updated',
-      trigger_type: 'record.created', trigger_config: {},
-      action_type: 'update_record', action_config: {},
-      enabled: true, created_at: new Date(), updated_at: new Date(),
-      created_by: 'u1', conditions: null, actions: null,
-    }
+    const updatedRow = makeRuleRow({ name: 'Updated' })
     dbExecuteResults.push([updatedRow])
     const rule = await service.updateRule('atr_1', 'sheet_1', { name: 'Updated' })
     expect(rule).not.toBeNull()
     expect(rule!.name).toBe('Updated')
+  })
+
+  it('updateRule validates the merged state when only actionType changes to DingTalk', async () => {
+    dbExecuteTakeFirstResults.push(makeRuleRow({
+      action_type: 'notify',
+      action_config: {},
+    }))
+
+    const promise = service.updateRule('atr_1', 'sheet_1', {
+      actionType: 'send_dingtalk_group_message',
+    })
+
+    await expect(promise).rejects.toBeInstanceOf(AutomationRuleValidationError)
+    await expect(promise).rejects.toThrow('At least one DingTalk destination or record destination field path is required')
+
+    expect(dbExecuteResults).toHaveLength(0)
+  })
+
+  it('updateRule rejects merged invalid DingTalk configs before update', async () => {
+    dbExecuteTakeFirstResults.push(makeRuleRow({
+      name: 'DingTalk person',
+      action_type: 'send_dingtalk_person_message',
+      action_config: {
+        userIds: ['user_1'],
+        titleTemplate: 'Old title',
+        bodyTemplate: 'Old body',
+      },
+    }))
+
+    const promise = service.updateRule('atr_1', 'sheet_1', {
+      actionConfig: {
+        userIds: [],
+        memberGroupIds: [','],
+        userIdFieldPath: 'record.',
+        titleTemplate: 'New title',
+        bodyTemplate: 'New body',
+      },
+    })
+
+    await expect(promise).rejects.toBeInstanceOf(AutomationRuleValidationError)
+    await expect(promise).rejects.toThrow('At least one local userId, memberGroupId, record recipient field path, or member group record field path is required')
+
+    expect(dbExecuteResults).toHaveLength(0)
+  })
+
+  it('updateRule rejects invalid V1 DingTalk actions before update', async () => {
+    dbExecuteTakeFirstResults.push(makeRuleRow({
+      action_type: 'notify',
+      action_config: {},
+      actions: [
+        {
+          type: 'update_record',
+          config: { fields: { status: 'done' } },
+        },
+      ],
+    }))
+
+    const promise = service.updateRule('atr_1', 'sheet_1', {
+      actions: [
+        {
+          type: 'send_dingtalk_person_message',
+          config: {
+            userIds: [],
+            memberGroupIdFieldPaths: ['record.'],
+            titleTemplate: 'Please fill',
+            bodyTemplate: 'Open form',
+          },
+        },
+      ],
+    })
+
+    await expect(promise).rejects.toBeInstanceOf(AutomationRuleValidationError)
+    await expect(promise).rejects.toThrow('At least one local userId, memberGroupId, record recipient field path, or member group record field path is required')
+
+    expect(dbExecuteResults).toHaveLength(0)
   })
 
   it('updateRule returns null when rule not found', async () => {

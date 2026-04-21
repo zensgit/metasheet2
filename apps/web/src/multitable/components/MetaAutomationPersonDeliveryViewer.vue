@@ -13,10 +13,13 @@
             <option value="success">Success</option>
             <option value="failed">Failed</option>
           </select>
-          <button class="meta-person-delivery__btn" type="button" data-action="refresh" @click="loadData">Refresh</button>
+          <button class="meta-person-delivery__btn" type="button" :disabled="loading" data-action="refresh" @click="loadData">Refresh</button>
         </div>
 
         <div v-if="loading" class="meta-person-delivery__empty">Loading deliveries...</div>
+        <div v-else-if="errorMessage" class="meta-person-delivery__error-state" data-person-delivery-error="true">
+          {{ errorMessage }}
+        </div>
         <div v-else-if="filteredDeliveries.length === 0" class="meta-person-delivery__empty" data-empty="true">
           No DingTalk person deliveries found.
         </div>
@@ -72,6 +75,7 @@ defineEmits<{
 const loading = ref(false)
 const deliveries = ref<DingTalkPersonDelivery[]>([])
 const statusFilter = ref('')
+const errorMessage = ref('')
 
 const filteredDeliveries = computed(() => {
   if (!statusFilter.value) return deliveries.value
@@ -87,13 +91,21 @@ function formatTime(ts: string): string {
   }
 }
 
+function readErrorMessage(error: unknown): string {
+  return error instanceof Error && error.message.trim()
+    ? error.message
+    : 'Failed to load DingTalk person deliveries.'
+}
+
 async function loadData() {
   if (!props.client || !props.sheetId || !props.ruleId) return
   loading.value = true
+  errorMessage.value = ''
   try {
     deliveries.value = await props.client.getAutomationDingTalkPersonDeliveries(props.sheetId, props.ruleId, 50)
-  } catch {
+  } catch (error) {
     deliveries.value = []
+    errorMessage.value = readErrorMessage(error)
   } finally {
     loading.value = false
   }
@@ -266,5 +278,14 @@ watch(
 .meta-person-delivery__error {
   font-size: 12px;
   color: #b91c1c;
+}
+
+.meta-person-delivery__error-state {
+  padding: 10px 12px;
+  border: 1px solid #fecaca;
+  border-radius: 10px;
+  background: #fef2f2;
+  color: #b91c1c;
+  font-size: 13px;
 }
 </style>

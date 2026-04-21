@@ -758,6 +758,8 @@ import { renderDingTalkTemplateExample } from '../utils/dingtalkNotificationTemp
 import {
   isDingTalkMemberGroupRecipientField,
   listDingTalkGroupDestinationFieldPathWarnings,
+  listDingTalkPersonMemberGroupRecipientFieldPathWarnings,
+  listDingTalkPersonRecipientFieldPathWarnings,
 } from '../utils/dingtalkRecipientFieldWarnings'
 import {
   describeDingTalkPublicFormLinkAccess,
@@ -967,23 +969,21 @@ const canSave = computed(() => {
   for (const action of draft.value.actions) {
     if (action.type === 'send_dingtalk_group_message') {
       const destinationIds = parseGroupDestinationIds(action.config.destinationIds ?? action.config.destinationId)
-      const destinationFieldPath = typeof action.config.destinationFieldPath === 'string' ? action.config.destinationFieldPath.trim() : ''
+      const destinationFieldPaths = parseRecipientFieldPathsText(action.config.destinationFieldPath)
       const titleTemplate = typeof action.config.titleTemplate === 'string' ? action.config.titleTemplate.trim() : ''
       const bodyTemplate = typeof action.config.bodyTemplate === 'string' ? action.config.bodyTemplate.trim() : ''
-      if ((!destinationIds.length && !destinationFieldPath) || !titleTemplate || !bodyTemplate) return false
+      if ((!destinationIds.length && !destinationFieldPaths.length) || !titleTemplate || !bodyTemplate) return false
       if (publicFormLinkBlockingErrors(action.config.publicFormViewId).length) return false
       if (internalViewLinkBlockingErrors(action.config.internalViewId).length) return false
     }
     if (action.type === 'send_dingtalk_person_message') {
-      const userIdsText = typeof action.config.userIdsText === 'string' ? action.config.userIdsText.trim() : ''
-      const memberGroupIdsText = typeof action.config.memberGroupIdsText === 'string' ? action.config.memberGroupIdsText.trim() : ''
-      const recipientFieldPath = typeof action.config.recipientFieldPath === 'string' ? action.config.recipientFieldPath.trim() : ''
-      const memberGroupRecipientFieldPath = typeof action.config.memberGroupRecipientFieldPath === 'string'
-        ? action.config.memberGroupRecipientFieldPath.trim()
-        : ''
+      const userIds = parseUserIdsText(action.config.userIdsText)
+      const memberGroupIds = parseMemberGroupIdsText(action.config.memberGroupIdsText)
+      const recipientFieldPaths = parseRecipientFieldPathsText(action.config.recipientFieldPath)
+      const memberGroupRecipientFieldPaths = parseRecipientFieldPathsText(action.config.memberGroupRecipientFieldPath)
       const titleTemplate = typeof action.config.titleTemplate === 'string' ? action.config.titleTemplate.trim() : ''
       const bodyTemplate = typeof action.config.bodyTemplate === 'string' ? action.config.bodyTemplate.trim() : ''
-      if ((!userIdsText && !memberGroupIdsText && !recipientFieldPath && !memberGroupRecipientFieldPath) || !titleTemplate || !bodyTemplate) return false
+      if ((!userIds.length && !memberGroupIds.length && !recipientFieldPaths.length && !memberGroupRecipientFieldPaths.length) || !titleTemplate || !bodyTemplate) return false
       if (publicFormLinkBlockingErrors(action.config.publicFormViewId).length) return false
       if (internalViewLinkBlockingErrors(action.config.internalViewId).length) return false
     }
@@ -1325,24 +1325,11 @@ function selectedMemberGroupRecipientFields(action: DraftAction) {
 }
 
 function recipientFieldPathWarnings(value: unknown) {
-  const candidateIds = new Set(recipientCandidateFields.value.map((field) => field.id))
-  return parseRecipientFieldPathsText(value)
-    .filter((path) => !candidateIds.has(path))
-    .map((path) => `record.${path} is not a user field; DingTalk person messages expect local user IDs.`)
+  return listDingTalkPersonRecipientFieldPathWarnings(value, props.fields)
 }
 
 function memberGroupRecipientFieldPathWarnings(value: unknown) {
-  const fieldMap = new Map(props.fields.map((field) => [field.id, field]))
-  return parseRecipientFieldPathsText(value).flatMap((path) => {
-    const field = fieldMap.get(path)
-    if (!field) {
-      return [`record.${path} is not a known field in this sheet; DingTalk person member-group recipients expect field IDs that resolve to member group IDs.`]
-    }
-    if (field.type === 'user') {
-      return [`record.${path} is a user field; use Record recipient field paths instead.`]
-    }
-    return []
-  })
+  return listDingTalkPersonMemberGroupRecipientFieldPathWarnings(value, props.fields)
 }
 
 function recipientFieldPathSummary(value: unknown) {
