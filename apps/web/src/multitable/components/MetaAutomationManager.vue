@@ -690,6 +690,7 @@ import {
   isDingTalkMemberGroupRecipientField,
   listDingTalkGroupDestinationFieldPathWarnings,
   listDingTalkPersonMemberGroupRecipientFieldPathWarnings,
+  listDingTalkPersonRecipientFieldPathWarnings,
 } from '../utils/dingtalkRecipientFieldWarnings'
 import {
   describeDingTalkPublicFormLinkAccess,
@@ -1069,10 +1070,7 @@ const selectedDingTalkPersonMemberGroupRecipientFields = computed(() => parseRec
   .filter((item) => item.label))
 
 function recipientFieldPathWarnings(value: string) {
-  const candidateIds = new Set(dingTalkPersonRecipientCandidateFields.value.map((field) => field.id))
-  return parseRecipientFieldPathsText(value)
-    .filter((path) => !candidateIds.has(path))
-    .map((path) => `record.${path} is not a user field; DingTalk person messages expect local user IDs.`)
+  return listDingTalkPersonRecipientFieldPathWarnings(value, props.fields)
 }
 
 function memberGroupRecipientFieldPathWarnings(value: string) {

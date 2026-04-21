@@ -43,6 +43,18 @@ export function listDingTalkGroupDestinationFieldPathWarnings(
   })
 }
 
+export function listDingTalkPersonRecipientFieldPathWarnings(
+  value: unknown,
+  fields: readonly DingTalkRecipientWarningField[],
+): string[] {
+  const userFieldIds = new Set(fields
+    .filter((field) => field.type === 'user')
+    .map((field) => field.id))
+  return parseRecordFieldPaths(value)
+    .filter((path) => !userFieldIds.has(path))
+    .map((path) => `record.${path} is not a user field; DingTalk person messages expect local user IDs.`)
+}
+
 export function listDingTalkPersonMemberGroupRecipientFieldPathWarnings(
   value: unknown,
   fields: readonly DingTalkRecipientWarningField[],
