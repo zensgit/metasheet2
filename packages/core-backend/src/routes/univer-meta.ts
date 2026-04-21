@@ -31,7 +31,7 @@ import { MultitableFormulaEngine } from '../multitable/formula-engine'
 import { validateRecord, getDefaultValidationRules } from '../multitable/field-validation-engine'
 import type { FieldValidationConfig } from '../multitable/field-validation'
 import { conditionalPublicRateLimiter, publicFormContextLimiter, publicFormSubmitLimiter } from '../middleware/rate-limiter'
-import { getAutomationServiceInstance } from '../multitable/automation-service'
+import { AutomationRuleValidationError, getAutomationServiceInstance } from '../multitable/automation-service'
 import {
   normalizeDingTalkAutomationActionInputs,
   validateDingTalkAutomationActionConfigs,
@@ -8414,6 +8414,9 @@ export function univerMetaRouter(): Router {
         },
       })
     } catch (err) {
+      if (err instanceof AutomationRuleValidationError) {
+        return res.status(400).json({ ok: false, error: { code: err.code, message: err.message } })
+      }
       const hint = getDbNotReadyMessage(err)
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
       console.error('[univer-meta] create automation rule failed:', err)
@@ -8540,6 +8543,9 @@ export function univerMetaRouter(): Router {
 
       return res.json({ ok: true, data: { rule: updated } })
     } catch (err) {
+      if (err instanceof AutomationRuleValidationError) {
+        return res.status(400).json({ ok: false, error: { code: err.code, message: err.message } })
+      }
       const hint = getDbNotReadyMessage(err)
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
       console.error('[univer-meta] update automation rule failed:', err)

@@ -9,11 +9,24 @@ import type { AutomationAction } from './automation-actions'
 import type { AutomationTrigger } from './automation-triggers'
 import { AutomationScheduler } from './automation-scheduler'
 import { AutomationLogService } from './automation-log-service'
+import {
+  normalizeDingTalkAutomationActionInputs,
+  validateDingTalkAutomationActionConfigs,
+} from './dingtalk-automation-link-validation'
 import type { Database } from '../db/types'
 
 const logger = new Logger('AutomationService')
 
 const MAX_AUTOMATION_DEPTH = 3
+
+export class AutomationRuleValidationError extends Error {
+  readonly code = 'VALIDATION_ERROR'
+
+  constructor(message: string) {
+    super(message)
+    this.name = 'AutomationRuleValidationError'
+  }
+}
 
 const VALID_TRIGGER_TYPES = new Set([
   'record.created',
@@ -193,6 +206,19 @@ export class AutomationService {
   async createRule(sheetId: string, input: CreateRuleInput): Promise<AutomationRule> {
     const ruleId = `atr_${randomUUID()}`
     const now = new Date().toISOString()
+    const normalizedDingTalkInputs = normalizeDingTalkAutomationActionInputs(
+      input.actionType,
+      input.actionConfig ?? {},
+      input.actions ?? null,
+    )
+    const actionConfig = normalizedDingTalkInputs.actionConfig && typeof normalizedDingTalkInputs.actionConfig === 'object'
+      ? normalizedDingTalkInputs.actionConfig as Record<string, unknown>
+      : input.actionConfig ?? {}
+    const actions = Array.isArray(normalizedDingTalkInputs.actions)
+      ? normalizedDingTalkInputs.actions as AutomationAction[]
+      : input.actions ?? null
+    const actionConfigValidationError = validateDingTalkAutomationActionConfigs(input.actionType, actionConfig, actions)
+    if (actionConfigValidationError) throw new AutomationRuleValidationError(actionConfigValidationError)
 
     const row = {
       id: ruleId,
@@ -201,11 +227,11 @@ export class AutomationService {
       trigger_type: input.triggerType,
       trigger_config: JSON.stringify(input.triggerConfig ?? {}),
       action_type: input.actionType,
-      action_config: JSON.stringify(input.actionConfig ?? {}),
+      action_config: JSON.stringify(actionConfig),
       enabled: input.enabled ?? true,
       created_by: input.createdBy ?? null,
       conditions: input.conditions ? JSON.stringify(input.conditions) : null,
-      actions: input.actions ? JSON.stringify(input.actions) : null,
+      actions: actions ? JSON.stringify(actions) : null,
     }
 
     await this.db
@@ -220,13 +246,13 @@ export class AutomationService {
       trigger_type: input.triggerType,
       trigger_config: input.triggerConfig ?? {},
       action_type: input.actionType,
-      action_config: input.actionConfig ?? {},
+      action_config: actionConfig,
       enabled: input.enabled ?? true,
       created_at: now,
       updated_at: now,
       created_by: input.createdBy ?? null,
       conditions: input.conditions ?? null,
-      actions: input.actions ?? null,
+      actions,
     }
 
     this.registerSchedule(rule)
@@ -267,15 +293,43 @@ export class AutomationService {
    */
   async updateRule(ruleId: string, sheetId: string, input: UpdateRuleInput): Promise<AutomationRule | null> {
     const updates: Record<string, unknown> = {}
+    const shouldValidateActions = input.actionType !== undefined || input.actionConfig !== undefined || input.actions !== undefined
+    let normalizedActionConfigForUpdate: Record<string, unknown> | undefined
+    let normalizedActionsForUpdate: AutomationAction[] | null | undefined
+
+    if (shouldValidateActions) {
+      const existing = await this.getRule(ruleId)
+      if (!existing || existing.sheet_id !== sheetId) return null
+
+      const nextActionType = input.actionType ?? existing.action_type
+      const nextActionConfig = input.actionConfig ?? existing.action_config
+      const nextActions = input.actions !== undefined ? input.actions : existing.actions ?? null
+      const normalizedDingTalkInputs = normalizeDingTalkAutomationActionInputs(nextActionType, nextActionConfig, nextActions)
+      const normalizedNextActionConfig = normalizedDingTalkInputs.actionConfig && typeof normalizedDingTalkInputs.actionConfig === 'object'
+        ? normalizedDingTalkInputs.actionConfig as Record<string, unknown>
+        : nextActionConfig
+      const normalizedNextActions = Array.isArray(normalizedDingTalkInputs.actions)
+        ? normalizedDingTalkInputs.actions as AutomationAction[]
+        : nextActions
+      const actionConfigValidationError = validateDingTalkAutomationActionConfigs(
+        nextActionType,
+        normalizedNextActionConfig,
+        normalizedNextActions,
+      )
+      if (actionConfigValidationError) throw new AutomationRuleValidationError(actionConfigValidationError)
+
+      if (input.actionConfig !== undefined) normalizedActionConfigForUpdate = normalizedNextActionConfig
+      if (input.actions !== undefined) normalizedActionsForUpdate = Array.isArray(input.actions) ? normalizedNextActions : null
+    }
 
     if (input.name !== undefined) updates.name = input.name
     if (input.triggerType !== undefined) updates.trigger_type = input.triggerType
     if (input.triggerConfig !== undefined) updates.trigger_config = JSON.stringify(input.triggerConfig)
     if (input.actionType !== undefined) updates.action_type = input.actionType
-    if (input.actionConfig !== undefined) updates.action_config = JSON.stringify(input.actionConfig)
+    if (input.actionConfig !== undefined) updates.action_config = JSON.stringify(normalizedActionConfigForUpdate ?? input.actionConfig)
     if (input.enabled !== undefined) updates.enabled = input.enabled
     if (input.conditions !== undefined) updates.conditions = input.conditions ? JSON.stringify(input.conditions) : null
-    if (input.actions !== undefined) updates.actions = input.actions ? JSON.stringify(input.actions) : null
+    if (input.actions !== undefined) updates.actions = normalizedActionsForUpdate ? JSON.stringify(normalizedActionsForUpdate) : null
 
     if (Object.keys(updates).length === 0) return this.getRule(ruleId)
 
