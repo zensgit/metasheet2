@@ -11,6 +11,13 @@ export interface DingTalkPublicFormLinkWarningOptions {
   warnWhenProtectedWithoutAllowlist?: boolean
 }
 
+export type DingTalkPublicFormLinkAccessLevel =
+  | 'none'
+  | 'unavailable'
+  | 'public'
+  | 'dingtalk'
+  | 'dingtalk_granted'
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
@@ -75,6 +82,31 @@ export function describeDingTalkPublicFormLinkAccess(
     return hasAllowlist ? 'Authorized DingTalk users in allowlist can submit' : 'All authorized DingTalk users can submit'
   }
   return 'Fully public; anyone with the link can submit'
+}
+
+export function getDingTalkPublicFormLinkAccessLevel(
+  viewId: unknown,
+  views: readonly DingTalkPublicFormLinkView[],
+  optionsOrNowMs?: number | DingTalkPublicFormLinkWarningOptions,
+): DingTalkPublicFormLinkAccessLevel {
+  const options = normalizeWarningOptions(optionsOrNowMs)
+  const nowMs = options.nowMs ?? Date.now()
+  const id = typeof viewId === 'string' ? viewId.trim() : ''
+  if (!id) return 'none'
+
+  const view = views.find((item) => item.id === id)
+  if (!view || view.type !== 'form') return 'unavailable'
+
+  const publicForm = isRecord(view.config?.publicForm) ? view.config.publicForm : null
+  if (!publicForm || publicForm.enabled !== true) return 'unavailable'
+
+  const publicToken = typeof publicForm.publicToken === 'string' ? publicForm.publicToken.trim() : ''
+  if (!publicToken) return 'unavailable'
+
+  const expiryMs = parseExpiryMs(publicForm.expiresAt ?? publicForm.expiresOn)
+  if (expiryMs !== null && nowMs >= expiryMs) return 'unavailable'
+
+  return normalizeAccessMode(publicForm.accessMode)
 }
 
 export function listDingTalkPublicFormLinkBlockingErrors(

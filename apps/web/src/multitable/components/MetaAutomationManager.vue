@@ -628,7 +628,9 @@
               <span
                 v-if="link.accessSummary"
                 class="meta-automation__card-link-access"
+                :class="`meta-automation__card-link-access--${link.accessLevel ?? 'none'}`"
                 :data-automation-card-link-access="link.key"
+                :data-access-level="link.accessLevel"
               >
                 {{ link.accessSummary }}
               </span>
@@ -745,6 +747,8 @@ import {
 } from '../utils/dingtalkRecipientFieldWarnings'
 import {
   describeDingTalkPublicFormLinkAccess,
+  getDingTalkPublicFormLinkAccessLevel,
+  type DingTalkPublicFormLinkAccessLevel,
   listDingTalkPublicFormLinkBlockingErrors,
   listDingTalkPublicFormLinkWarnings,
 } from '../utils/dingtalkPublicFormLinkWarnings'
@@ -852,6 +856,7 @@ interface DingTalkCardLink {
   href?: string
   viewId?: string
   accessSummary?: string
+  accessLevel?: DingTalkPublicFormLinkAccessLevel
 }
 
 function parseUserIdsText(value: string): string[] {
@@ -1063,6 +1068,10 @@ function publicFormAccessSummary(value: unknown) {
   return describeDingTalkPublicFormLinkAccess(value, formViews.value)
 }
 
+function publicFormAccessLevel(value: unknown) {
+  return getDingTalkPublicFormLinkAccessLevel(value, formViews.value)
+}
+
 function readPublicFormToken(view: MetaView): string {
   const publicForm = view.config?.publicForm
   if (!publicForm || typeof publicForm !== 'object' || Array.isArray(publicForm)) return ''
@@ -1104,6 +1113,7 @@ function dingTalkCardLinks(rule: AutomationRule): DingTalkCardLink[] {
           label: `Open public form: ${viewSummaryName(publicFormViewId, publicFormViewId)}`,
           href: buildPublicFormHref(publicFormViewId, publicToken),
           accessSummary: describeDingTalkPublicFormLinkAccess(publicFormViewId, formViews.value),
+          accessLevel: publicFormAccessLevel(publicFormViewId),
         })
       }
     }
@@ -2026,6 +2036,26 @@ watch(
   font-size: 12px;
   line-height: 1;
   padding: 5px 8px;
+}
+
+.meta-automation__card-link-access--public {
+  background: #fffbeb;
+  color: #92400e;
+}
+
+.meta-automation__card-link-access--dingtalk {
+  background: #eff6ff;
+  color: #1d4ed8;
+}
+
+.meta-automation__card-link-access--dingtalk_granted {
+  background: #ecfdf5;
+  color: #047857;
+}
+
+.meta-automation__card-link-access--unavailable {
+  background: #fef2f2;
+  color: #b91c1c;
 }
 
 .meta-automation__card-actions {
