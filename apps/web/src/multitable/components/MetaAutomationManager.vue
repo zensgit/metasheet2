@@ -1084,6 +1084,9 @@ function memberGroupRecipientFieldPathWarnings(value: string) {
     if (field.type === 'user') {
       return [`record.${path} is a user field; use Record recipient field paths instead.`]
     }
+    if (!isDingTalkMemberGroupRecipientField(field)) {
+      return [`record.${path} is not a member group field; DingTalk person member-group recipients expect member group fields.`]
+    }
     return []
   })
 }
