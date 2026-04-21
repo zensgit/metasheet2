@@ -261,6 +261,76 @@ describe('DingTalk automation link route validation', () => {
     }))
   })
 
+  it('returns a canonical camelCase automation rule response with V1 DingTalk actions', async () => {
+    const { app } = await createApp()
+
+    const res = await request(app)
+      .post(`/api/multitable/sheets/${SHEET_ID}/automations`)
+      .send({
+        name: 'Advanced group rule',
+        triggerType: 'record.created',
+        triggerConfig: {},
+        actionType: 'send_dingtalk_group_message',
+        actionConfig: {
+          destinationId: 'group_1',
+          title: 'Please fill',
+          content: 'Open form',
+          publicFormViewId: VALID_FORM_VIEW_ID,
+          internalViewId: INTERNAL_VIEW_ID,
+        },
+        conditions: { conjunction: 'AND', conditions: [] },
+        actions: [{
+          type: 'send_dingtalk_group_message',
+          config: {
+            destinationIds: ['group_1'],
+            title: 'Please fill',
+            content: 'Open form',
+            publicFormViewId: VALID_FORM_VIEW_ID,
+            internalViewId: INTERNAL_VIEW_ID,
+          },
+        }],
+      })
+
+    expect(res.status).toBe(200)
+    expect(res.body.data.rule).toMatchObject({
+      id: RULE_ID,
+      sheetId: SHEET_ID,
+      name: 'Advanced group rule',
+      triggerType: 'record.created',
+      triggerConfig: {},
+      trigger: {
+        type: 'record.created',
+        config: {},
+      },
+      conditions: { conjunction: 'AND', conditions: [] },
+      actionType: 'send_dingtalk_group_message',
+      actionConfig: expect.objectContaining({
+        titleTemplate: 'Please fill',
+        bodyTemplate: 'Open form',
+        publicFormViewId: VALID_FORM_VIEW_ID,
+        internalViewId: INTERNAL_VIEW_ID,
+      }),
+      enabled: true,
+      createdAt: '2026-04-21T00:00:00.000Z',
+      updatedAt: '2026-04-21T00:00:00.000Z',
+      createdBy: 'admin_1',
+    })
+    expect(res.body.data.rule.actions).toEqual([
+      expect.objectContaining({
+        type: 'send_dingtalk_group_message',
+        config: expect.objectContaining({
+          destinationIds: ['group_1'],
+          titleTemplate: 'Please fill',
+          bodyTemplate: 'Open form',
+          publicFormViewId: VALID_FORM_VIEW_ID,
+          internalViewId: INTERNAL_VIEW_ID,
+        }),
+      }),
+    ])
+    expect(res.body.data.rule).not.toHaveProperty('sheet_id')
+    expect(res.body.data.rule).not.toHaveProperty('action_type')
+  })
+
   it('rejects a DingTalk group rule without an effective destination before persisting the rule', async () => {
     const { app, automationService } = await createApp()
 
