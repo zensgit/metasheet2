@@ -1887,7 +1887,11 @@ export class MetaSheetServer {
         const yjsInvalidate = async (recordIds: string[]) => {
           if (recordIds.length === 0) return
           yjsBridge.cancelPending(recordIds)
-          await yjsSyncService.invalidateDocs(recordIds)
+          try {
+            await yjsSyncService.invalidateDocs(recordIds)
+          } finally {
+            yjsWsAdapter.notifyInvalidated(recordIds)
+          }
         }
         recordWriteService.setYjsInvalidator(yjsInvalidate)
         const univerMetaModule = await import('./routes/univer-meta')
