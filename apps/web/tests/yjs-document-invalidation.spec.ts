@@ -107,4 +107,23 @@ describe('useYjsDocument invalidation event', () => {
     expect(api.connected.value).toBe(true)
     expect(api.error.value).toBeNull()
   })
+
+  it('ignores malformed invalidation payloads without throwing', async () => {
+    const { api } = mountDocument('rec_1')
+    await flushUi()
+
+    handlers.get('connect')?.()
+    await flushUi()
+
+    const invalidatedHandler = handlers.get('yjs:invalidated')
+    expect(() => invalidatedHandler?.(undefined)).not.toThrow()
+    expect(() => invalidatedHandler?.('rec_1')).not.toThrow()
+    expect(() => invalidatedHandler?.({ recordId: 123 })).not.toThrow()
+    await flushUi()
+
+    expect(disconnectMock).not.toHaveBeenCalled()
+    expect(api.doc.value).not.toBeNull()
+    expect(api.connected.value).toBe(true)
+    expect(api.error.value).toBeNull()
+  })
 })

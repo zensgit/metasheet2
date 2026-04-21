@@ -49,7 +49,7 @@ Result:
 
 ```text
 Test Files  3 passed (3)
-Tests       8 passed (8)
+Tests       9 passed (9)
 ```
 
 Coverage:
@@ -58,6 +58,8 @@ Coverage:
   Y.Doc, clears connected/synced state, and leaves an explicit invalidation
   error.
 - Other-record `yjs:invalidated` events are ignored.
+- Malformed invalidation payloads (`undefined`, primitive values, and non-string
+  `recordId`) are ignored without throwing or disconnecting.
 - Existing stale-connect guard and cell-binding fallback behavior still pass.
 
 ## Wider Yjs Regression

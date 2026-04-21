@@ -69,8 +69,10 @@ needed.
   - Calls `yjsWsAdapter.notifyInvalidated(recordIds)` after
     `yjsSyncService.invalidateDocs(recordIds)`.
 - `apps/web/src/multitable/composables/useYjsDocument.ts`
-  - Handles `yjs:invalidated` for the current record by setting error and
-    disconnecting the document.
+  - Handles validated `yjs:invalidated` payloads for the current record by
+    setting error and disconnecting the document.
+  - Ignores malformed / non-object invalidation payloads defensively so a
+    protocol mismatch cannot throw inside the socket event handler.
 - `packages/core-backend/tests/unit/yjs-awareness.test.ts`
   - Covers room-scoped invalidation broadcast.
 - `apps/web/tests/yjs-document-invalidation.spec.ts`
@@ -84,6 +86,7 @@ needed.
   stop using the old in-memory doc.
 - Non-subscribed sockets do not receive the event.
 - Events for another record are ignored client-side.
+- Malformed invalidation payloads are ignored client-side.
 
 ## Remaining Limits
 
