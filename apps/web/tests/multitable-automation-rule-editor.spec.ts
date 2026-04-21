@@ -788,6 +788,8 @@ describe('MetaAutomationRuleEditor', () => {
     await flushPromises()
 
     expect(container.textContent).toContain('Public form sharing is disabled for "Public Form"')
+    expect(container.querySelector('[data-field="groupPublicFormAccessSummary-0"]')?.getAttribute('data-access-level'))
+      .toBe('unavailable')
   })
 
   it('disables saving a DingTalk group message when the selected public form link cannot work', async () => {
@@ -862,6 +864,8 @@ describe('MetaAutomationRuleEditor', () => {
     expect(container.textContent).toContain('Use DingTalk-protected access and an allowlist')
     expect(container.querySelector('[data-field="groupPublicFormAccessSummary-0"]')?.textContent)
       .toContain('Fully public; anyone with the link can submit')
+    expect(container.querySelector('[data-field="groupPublicFormAccessSummary-0"]')?.getAttribute('data-access-level'))
+      .toBe('public')
     expect(container.querySelector('[data-field="groupMessageSummary"]')?.textContent).toContain('Fully public; anyone with the link can submit')
   })
 
@@ -915,6 +919,8 @@ describe('MetaAutomationRuleEditor', () => {
     expect(container.textContent).not.toContain('is fully public')
     expect(container.querySelector('[data-field="groupPublicFormAccessSummary-0"]')?.textContent)
       .toContain('DingTalk-bound users in allowlist can submit')
+    expect(container.querySelector('[data-field="groupPublicFormAccessSummary-0"]')?.getAttribute('data-access-level'))
+      .toBe('dingtalk')
     expect(container.querySelector('[data-field="groupMessageSummary"]')?.textContent).toContain('DingTalk-bound users in allowlist can submit')
   })
 
@@ -941,6 +947,8 @@ describe('MetaAutomationRuleEditor', () => {
 
     expect(container.querySelector('[data-field="personPublicFormAccessSummary-0"]')?.textContent)
       .toContain('Authorized DingTalk users in allowlist can submit')
+    expect(container.querySelector('[data-field="personPublicFormAccessSummary-0"]')?.getAttribute('data-access-level'))
+      .toBe('dingtalk_granted')
     expect(container.querySelector('[data-field="personMessageSummary"]')?.textContent)
       .toContain('Authorized DingTalk users in allowlist can submit')
   })
@@ -1091,6 +1099,8 @@ describe('MetaAutomationRuleEditor', () => {
 
     const saveBtn = container.querySelector('[data-action="save"]') as HTMLButtonElement
     expect(container.textContent).toContain('Public form sharing is disabled for "Public Form"')
+    expect(container.querySelector('[data-field="personPublicFormAccessSummary-0"]')?.getAttribute('data-access-level'))
+      .toBe('unavailable')
     expect(saveBtn.disabled).toBe(true)
     saveBtn.click()
     await flushPromises()
