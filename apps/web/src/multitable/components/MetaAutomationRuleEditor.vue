@@ -338,6 +338,13 @@
               >
                 {{ warning }}
               </div>
+              <div
+                v-if="action.config.publicFormViewId"
+                class="meta-rule-editor__hint"
+                :data-field="`groupPublicFormAccessSummary-${idx}`"
+              >
+                <strong>Access:</strong> {{ publicFormAccessSummary(action.config.publicFormViewId) }}
+              </div>
               <label class="meta-rule-editor__label">Internal processing view (optional)</label>
               <select
                 v-model="action.config.internalViewId"
@@ -626,6 +633,13 @@
                 class="meta-rule-editor__hint meta-rule-editor__hint--warning"
               >
                 {{ warning }}
+              </div>
+              <div
+                v-if="action.config.publicFormViewId"
+                class="meta-rule-editor__hint"
+                :data-field="`personPublicFormAccessSummary-${idx}`"
+              >
+                <strong>Access:</strong> {{ publicFormAccessSummary(action.config.publicFormViewId) }}
               </div>
               <label class="meta-rule-editor__label">Internal processing view (optional)</label>
               <select
