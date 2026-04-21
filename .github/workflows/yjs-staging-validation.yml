@@ -89,38 +89,57 @@ jobs:
             echo "docker compose is not available" >&2
             exit 125
           fi
-          "${COMPOSE_CMD[@]}" -f "${DEPLOY_COMPOSE_FILE:-docker-compose.app.yml}" exec -T backend node - <<'NODE'
-          const crypto = require('node:crypto')
+          "${COMPOSE_CMD[@]}" -f "${DEPLOY_COMPOSE_FILE:-docker-compose.app.yml}" exec -T backend node --input-type=module - <<'NODE' | awk '/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/ { token = $0 } END { if (token) print token }'
+          import pg from 'pg'
+          import { authService } from '/app/packages/core-backend/dist/src/auth/AuthService.js'
 
-          const secret = process.env.JWT_SECRET
-          if (!secret) {
-            console.error('JWT_SECRET missing from backend runtime env')
+          const { Client } = pg
+          const databaseUrl = process.env.DATABASE_URL
+          if (!databaseUrl) {
+            console.error('DATABASE_URL missing from backend runtime env')
             process.exit(2)
           }
 
-          function base64url(input) {
-            return Buffer.from(input)
-              .toString('base64')
-              .replace(/\+/g, '-')
-              .replace(/\//g, '_')
-              .replace(/=/g, '')
-          }
+          const client = new Client({
+            connectionString: databaseUrl,
+            ssl: process.env.DB_SSL === 'true' ? { rejectUnauthorized: false } : false,
+          })
 
-          const now = Math.floor(Date.now() / 1000)
-          const header = { alg: 'HS256', typ: 'JWT' }
-          const payload = {
-            id: 'admin',
-            roles: ['admin'],
-            perms: ['*:*'],
-            iat: now,
-            exp: now + 7200,
+          try {
+            await client.connect()
+            const result = await client.query(`
+              SELECT u.id, u.email, u.username, u.name, u.mobile, u.role, u.permissions, u.is_active, u.must_change_password
+              FROM users u
+              LEFT JOIN user_roles ur ON ur.user_id = u.id AND ur.role_id = 'admin'
+              WHERE COALESCE(u.is_active, true) = true
+                AND COALESCE(u.must_change_password, false) = false
+                AND (u.role = 'admin' OR ur.user_id IS NOT NULL)
+              ORDER BY CASE WHEN u.id = 'admin' THEN 0 ELSE 1 END, u.created_at ASC
+              LIMIT 1
+            `)
+            const row = result.rows[0]
+            if (!row) {
+              console.error('No active admin user found for Yjs validation token')
+              process.exit(3)
+            }
+
+            const token = authService.createToken({
+              id: String(row.id),
+              email: typeof row.email === 'string' ? row.email : '',
+              username: row.username ?? null,
+              name: typeof row.name === 'string' && row.name.trim() ? row.name : 'Yjs Validation Admin',
+              mobile: row.mobile ?? null,
+              role: typeof row.role === 'string' && row.role.trim() ? row.role : 'admin',
+              permissions: Array.isArray(row.permissions) ? row.permissions : [],
+              is_active: row.is_active,
+              must_change_password: row.must_change_password,
+              created_at: new Date(),
+              updated_at: new Date(),
+            })
+            console.log(token)
+          } finally {
+            await client.end().catch(() => {})
           }
-          const signingInput = `${base64url(JSON.stringify(header))}.${base64url(JSON.stringify(payload))}`
-          const signature = crypto.createHmac('sha256', secret).update(signingInput).digest('base64')
-            .replace(/\+/g, '-')
-            .replace(/\//g, '_')
-            .replace(/=/g, '')
-          console.log(`${signingInput}.${signature}`)
           NODE
           EOF
           )"
