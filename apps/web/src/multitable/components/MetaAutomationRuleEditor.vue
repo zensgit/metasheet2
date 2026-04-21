@@ -700,6 +700,10 @@ import {
 } from '../utils/dingtalkNotificationTemplateTokens'
 import { listDingTalkTemplateSyntaxWarnings } from '../utils/dingtalkNotificationTemplateLint'
 import { renderDingTalkTemplateExample } from '../utils/dingtalkNotificationTemplateExample'
+import {
+  isDingTalkMemberGroupRecipientField,
+  listDingTalkGroupDestinationFieldPathWarnings,
+} from '../utils/dingtalkRecipientFieldWarnings'
 
 interface FieldPair {
   fieldId: string
@@ -747,7 +751,7 @@ const props = defineProps<{
   sheetId: string
   rule?: AutomationRule
   visible: boolean
-  fields: Array<{ id: string; name: string; type: string }>
+  fields: Array<{ id: string; name: string; type: string; property?: Record<string, unknown> }>
   client?: MultitableApiClient
   views?: MetaView[]
 }>()
@@ -775,7 +779,7 @@ const formViews = computed(() => (props.views ?? []).filter((view) => view.type 
 const internalViews = computed(() => props.views ?? [])
 const groupDestinationCandidateFields = computed(() => props.fields)
 const recipientCandidateFields = computed(() => props.fields.filter((field) => field.type === 'user'))
-const memberGroupRecipientCandidateFields = computed(() => props.fields.filter(isMemberGroupRecipientCandidateField))
+const memberGroupRecipientCandidateFields = computed(() => props.fields.filter(isDingTalkMemberGroupRecipientField))
 
 const conditionOperators: Array<{ value: ConditionOperator; label: string }> = [
   { value: 'equals', label: 'Equals' },
@@ -1101,20 +1105,7 @@ function dingTalkGroupSummary(action: DraftAction) {
 }
 
 function groupDestinationFieldPathWarnings(value: unknown) {
-  const fieldMap = new Map(props.fields.map((field) => [field.id, field]))
-  return parseRecipientFieldPathsText(value).flatMap((path) => {
-    const field = fieldMap.get(path)
-    if (!field) {
-      return [`record.${path} is not a known field in this sheet; DingTalk group messages expect field IDs that resolve to destination IDs.`]
-    }
-    if (field.type === 'user') {
-      return [`record.${path} is a user field; use DingTalk person recipient fields instead.`]
-    }
-    if (isMemberGroupRecipientCandidateField(field)) {
-      return [`record.${path} is a member group field; use DingTalk person member-group recipient fields instead.`]
-    }
-    return []
-  })
+  return listDingTalkGroupDestinationFieldPathWarnings(value, props.fields)
 }
 
 function groupDestinationFieldPathSummary(value: unknown) {
@@ -1203,15 +1194,6 @@ function recipientFieldSummaryLabel(path: string) {
   if (!normalized) return ''
   const field = props.fields.find((item) => item.id === normalized)
   return field ? `${field.name} (record.${normalized})` : `record.${normalized}`
-}
-
-function isMemberGroupRecipientCandidateField(field: { type?: unknown, property?: Record<string, unknown> | undefined }) {
-  const type = typeof field.type === 'string' ? field.type.trim().toLowerCase() : ''
-  const refKind = typeof field.property?.refKind === 'string' ? field.property.refKind.trim().toLowerCase() : ''
-  return refKind === 'member-group'
-    || type === 'member-group'
-    || type === 'member_group'
-    || type === 'membergroup'
 }
 
 function selectedRecipientFields(action: DraftAction) {

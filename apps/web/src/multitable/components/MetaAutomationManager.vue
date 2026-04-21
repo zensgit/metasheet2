@@ -645,11 +645,15 @@ import {
 } from '../utils/dingtalkNotificationTemplateTokens'
 import { listDingTalkTemplateSyntaxWarnings } from '../utils/dingtalkNotificationTemplateLint'
 import { renderDingTalkTemplateExample } from '../utils/dingtalkNotificationTemplateExample'
+import {
+  isDingTalkMemberGroupRecipientField,
+  listDingTalkGroupDestinationFieldPathWarnings,
+} from '../utils/dingtalkRecipientFieldWarnings'
 
 const props = defineProps<{
   visible: boolean
   sheetId: string
-  fields: Array<{ id: string; name: string; type: string }>
+  fields: Array<{ id: string; name: string; type: string; property?: Record<string, unknown> }>
   client?: MultitableApiClient
   views?: MetaView[]
 }>()
@@ -963,33 +967,11 @@ function recipientFieldSummaryLabel(path: string) {
 }
 
 function groupDestinationFieldPathWarnings(value: string) {
-  const fieldMap = new Map(props.fields.map((field) => [field.id, field]))
-  return parseRecipientFieldPathsText(value).flatMap((path) => {
-    const field = fieldMap.get(path)
-    if (!field) {
-      return [`record.${path} is not a known field in this sheet; DingTalk group messages expect field IDs that resolve to destination IDs.`]
-    }
-    if (field.type === 'user') {
-      return [`record.${path} is a user field; use DingTalk person recipient fields instead.`]
-    }
-    if (isMemberGroupRecipientCandidateField(field)) {
-      return [`record.${path} is a member group field; use DingTalk person member-group recipient fields instead.`]
-    }
-    return []
-  })
-}
-
-function isMemberGroupRecipientCandidateField(field: { type?: unknown, property?: Record<string, unknown> | undefined }) {
-  const type = typeof field.type === 'string' ? field.type.trim().toLowerCase() : ''
-  const refKind = typeof field.property?.refKind === 'string' ? field.property.refKind.trim().toLowerCase() : ''
-  return refKind === 'member-group'
-    || type === 'member-group'
-    || type === 'member_group'
-    || type === 'membergroup'
+  return listDingTalkGroupDestinationFieldPathWarnings(value, props.fields)
 }
 
 const dingTalkPersonRecipientCandidateFields = computed(() => props.fields.filter((field) => field.type === 'user'))
-const dingTalkPersonMemberGroupRecipientCandidateFields = computed(() => props.fields.filter(isMemberGroupRecipientCandidateField))
+const dingTalkPersonMemberGroupRecipientCandidateFields = computed(() => props.fields.filter(isDingTalkMemberGroupRecipientField))
 
 const selectedDingTalkPersonRecipientFields = computed(() => parseRecipientFieldPathsText(draft.value.dingtalkPersonRecipientFieldPath)
   .map((path) => ({
