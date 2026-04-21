@@ -104,7 +104,10 @@ The claim "Yjs collaborative editing is working end-to-end" is **not supported b
 
 What is NOT supported:
 
-- Two users editing the same text field → character-level merge (untested in browser)
+- Two users editing the same text field → range-scoped merge via the
+  diff-based `useYjsTextField.setText`
+  (common-prefix/common-suffix — see `yjs-frontend-opt-in-wired-20260420.md`)
+  (untested in browser)
 - Disconnect/reconnect recovery (untested in browser)
 - Real Presence UI showing who is editing (untested in browser)
 
@@ -149,3 +152,23 @@ Record the current state, leave Yjs at "backend ready, frontend opt-in pending",
 - Baseline snapshot: `output/yjs-rollout/trial-20260420/monitoring/t0-before.json`
 - Full poll log (200 samples): `output/yjs-rollout/trial-20260420/monitoring/poll-log.ndjson`
 - Trial start marker: `output/yjs-rollout/trial-20260420/trial-start.txt`
+
+---
+
+## 7. Follow-up: Frontend opt-in wired (2026-04-20, same-day)
+
+A follow-up branch (`codex/wire-yjs-text-cell-20260420`) has now
+wired `useYjsDocument` / `useYjsTextField` into the actual
+`MetaCellEditor` for grid text cells, behind the build-time flag
+`VITE_ENABLE_YJS_COLLAB=true`. The flag is off by default and the
+REST path remains the default behavior.
+
+This closes audit PR #944 gap #4 (frontend wiring) at the code level.
+It does NOT retroactively validate end-to-end browser collaboration —
+that still requires a fresh session with the flag on, captured in
+`output/yjs-rollout/frontend-opt-in-<date>/` per the preflight
+checklist item #1.
+
+See `docs/operations/yjs-frontend-opt-in-wired-20260420.md` for the
+wiring contract, enabling instructions, fallback semantics, and
+reviewer-attention items.

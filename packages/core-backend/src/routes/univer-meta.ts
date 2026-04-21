@@ -46,9 +46,23 @@ import {
   RecordValidationError as ServiceValidationError,
   RecordFieldForbiddenError as ServiceFieldForbiddenError,
   type RecordWriteHelpers,
+  type YjsInvalidator,
 } from '../multitable/record-write-service'
 
 const multitableFormulaEngine = new MultitableFormulaEngine()
+
+/**
+ * Module-level Yjs invalidator set by `index.ts` when the Yjs collab
+ * path is wired. Used by REST write handlers that must purge stale Yjs
+ * state after committing `meta_records.data` outside the Yjs bridge.
+ *
+ * When `null`, no invalidation happens — safe for Yjs-off deployments.
+ */
+let yjsInvalidator: YjsInvalidator | null = null
+
+export function setYjsInvalidatorForRoutes(invalidator: YjsInvalidator | null): void {
+  yjsInvalidator = invalidator
+}
 
 type UniverMetaField = {
   id: string
@@ -7047,6 +7061,33 @@ export function univerMetaRouter(): Router {
         }
       })
 
+      // -----------------------------------------------------------------
+      // LOAD-BEARING — DO NOT REMOVE
+      //
+      // Wipes any persisted / in-memory Y.Doc state for this record so the
+      // next getOrCreateDoc re-seeds from the just-updated meta_records.data.
+      // Without this, the P0 stale-snapshot bug returns (docs/development/
+      // yjs-text-cell-seed-and-stale-guard-development-20260420.md).
+      //
+      // The batch PATCH path goes through RecordWriteService.patchRecords,
+      // which runs an equivalent hook on every commit that isn't
+      // source='yjs-bridge'. This direct-SQL route bypasses that service,
+      // so it must fire the invalidator itself.
+      //
+      // Best-effort: a purge failure is logged and swallowed; the REST
+      // write still succeeds.
+      // -----------------------------------------------------------------
+      if (yjsInvalidator) {
+        try {
+          await yjsInvalidator([recordId])
+        } catch (err) {
+          console.error(
+            `[univer-meta] Yjs invalidation failed for record ${recordId} — Yjs state may be stale until next idle-release:`,
+            err,
+          )
+        }
+      }
+
       const recordRes = await pool.query(
         'SELECT id, version, data FROM meta_records WHERE id = $1 AND sheet_id = $2',
         [recordId, sheetId],
@@ -8237,7 +8278,7 @@ export function univerMetaRouter(): Router {
         buildAttachmentSummaries: (q, sid, rows, af) => buildAttachmentSummaries(q, req, sid, rows, af),
         ensureAttachmentIdsExist,
       }
-      const recordWriteService = new RecordWriteService(pool, eventBus, writeHelpers)
+      const recordWriteService = new RecordWriteService(pool, eventBus, writeHelpers, yjsInvalidator)
 
       const result = await recordWriteService.patchRecords({
         sheetId,
