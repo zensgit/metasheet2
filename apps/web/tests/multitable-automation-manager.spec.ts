@@ -226,6 +226,21 @@ const viewsWithProtectedPublicFormAllowlist = [
   },
 ]
 
+const viewsWithGrantedPublicFormAllowlist = [
+  views[0],
+  {
+    ...views[1],
+    config: {
+      publicForm: {
+        enabled: true,
+        publicToken: 'pub_view_form',
+        accessMode: 'dingtalk_granted',
+        allowedUserIds: ['user_1'],
+      },
+    },
+  },
+]
+
 describe('MetaAutomationManager', () => {
   const originalClipboard = navigator.clipboard
 
@@ -294,6 +309,8 @@ describe('MetaAutomationManager', () => {
     expect(publicLink.textContent).toContain('Open public form: Public Form')
     expect(publicLink.getAttribute('href')).toBe(`${window.location.origin}/multitable/public-form/sheet_1/view_form?publicToken=pub_view_form`)
     expect(publicLink.getAttribute('target')).toBe('_blank')
+    expect(container.querySelector('[data-automation-card-link-access="public-form:view_form"]')?.textContent)
+      .toContain('Fully public; anyone with the link can submit')
 
     const internalLink = container.querySelector('[data-automation-card-link="internal-view:view_grid"]') as HTMLButtonElement
     expect(internalLink).not.toBeNull()
@@ -339,6 +356,44 @@ describe('MetaAutomationManager', () => {
     expect(desc?.textContent).toContain('Send DingTalk person message')
     expect(desc?.textContent).toContain('Public form: Public Form')
     expect(desc?.textContent).toContain('Internal processing: Grid')
+    expect(container.querySelector('[data-automation-card-link-access="public-form:view_form"]')?.textContent)
+      .toContain('Fully public; anyone with the link can submit')
+  })
+
+  it('shows DingTalk-bound public form access on rule card links', async () => {
+    const { client } = mockClient([
+      fakeRule({
+        actionType: 'send_dingtalk_group_message',
+        actionConfig: {
+          destinationId: 'dt_1',
+          publicFormViewId: 'view_form',
+        },
+      }),
+    ])
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views: viewsWithProtectedPublicFormAllowlist, client })
+    await flushPromises()
+
+    expect(container.querySelector('[data-automation-card-link="public-form:view_form"]')).not.toBeNull()
+    expect(container.querySelector('[data-automation-card-link-access="public-form:view_form"]')?.textContent)
+      .toContain('DingTalk-bound users in allowlist can submit')
+  })
+
+  it('shows DingTalk-authorized public form access on rule card links', async () => {
+    const { client } = mockClient([
+      fakeRule({
+        actionType: 'send_dingtalk_person_message',
+        actionConfig: {
+          userIds: ['user_1'],
+          publicFormViewId: 'view_form',
+        },
+      }),
+    ])
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views: viewsWithGrantedPublicFormAllowlist, client })
+    await flushPromises()
+
+    expect(container.querySelector('[data-automation-card-link="public-form:view_form"]')).not.toBeNull()
+    expect(container.querySelector('[data-automation-card-link-access="public-form:view_form"]')?.textContent)
+      .toContain('Authorized DingTalk users in allowlist can submit')
   })
 
   it('does not render a public form card link when sharing is missing a public token', async () => {
