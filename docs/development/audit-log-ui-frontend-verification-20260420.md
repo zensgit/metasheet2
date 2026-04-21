@@ -74,3 +74,76 @@ panel).
 - Session revocations panel is a placeholder until a backend endpoint ships.
 - No broader `pnpm test` run was done (per task scope: new spec + one
   neighbour regression).
+
+---
+
+## Rebase verification — 2026-04-21
+
+Branch rebased from base `0756ff61d` onto latest `origin/main@c4093dcb8` (+21 commits upstream, no business-file overlap with this branch). Rebase was pure fast-forward with no merge conflict; business diff unchanged (4 files, +635 / −174).
+
+Post-rebase HEAD: `be2553690`.
+
+### Commands run (2026-04-21, .worktrees/audit-ui)
+
+```bash
+git -C .worktrees/audit-ui checkout -- plugins/ tools/   # clean dirty pnpm symlinks
+git -C .worktrees/audit-ui fetch origin main
+git -C .worktrees/audit-ui rebase origin/main             # no conflicts
+
+pnpm --filter @metasheet/web exec vue-tsc --noEmit
+
+pnpm --filter @metasheet/web exec vitest run \
+  tests/adminAuditView.spec.ts \
+  tests/directoryManagementView.spec.ts --reporter=dot
+```
+
+### Results
+
+| Step | Outcome | Counts |
+| ---- | ------- | ------ |
+| vue-tsc --noEmit | PASS | zero diagnostics |
+| adminAuditView.spec.ts (new) | PASS | 5/5 |
+| directoryManagementView.spec.ts (neighbour regression) | PASS | 33/33 |
+| Total spec | PASS | 38/38 |
+
+### Baseline
+
+| Field | Value |
+| ----- | ----- |
+| Original base commit | `0756ff61d` |
+| Rebase target | `c4093dcb8` (origin/main, +21 commits) |
+| New branch HEAD | `be2553690` |
+| Upstream business-file overlap | none |
+| Rebase conflicts | none |
+
+---
+
+## Latest-main verification — 2026-04-21
+
+After the DingTalk/Yjs queue landed, this branch was advanced again from `origin/main@c4093dcb8` to `origin/main@81edca7d9`. Rebase used `git rebase --autostash origin/main`, preserved the verification MD changes, and completed with no conflicts.
+
+Post-latest-main HEAD: `2efddecea`.
+
+### Commands run (2026-04-21, .worktrees/audit-ui)
+
+```bash
+git -C .worktrees/audit-ui rebase --autostash origin/main
+
+pnpm --filter @metasheet/web exec vue-tsc --noEmit
+
+pnpm --filter @metasheet/web exec vitest run \
+  tests/adminAuditView.spec.ts \
+  tests/directoryManagementView.spec.ts --reporter=dot
+```
+
+### Results
+
+| Step | Outcome | Counts |
+| ---- | ------- | ------ |
+| Rebase onto `81edca7d9` | PASS | zero conflicts |
+| vue-tsc --noEmit | PASS | zero diagnostics |
+| adminAuditView.spec.ts (new) | PASS | 5/5 |
+| directoryManagementView.spec.ts (neighbour regression) | PASS | 33/33 |
+| Total spec | PASS | 38/38 |
+
+Vitest still prints the known JSDOM diagnostic `Not implemented: navigation to another Document` for the synthetic download click. It is non-fatal and unchanged from the earlier run.
