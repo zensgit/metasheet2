@@ -109,6 +109,7 @@ Automation authoring guardrail:
 - the message summary and rule card show `Public form access`, including fully public, bound DingTalk users, authorized DingTalk users, and allowlist-constrained states
 - the message summary and rule card also show `Allowed audience`, derived from local allowlist users/member groups when the form is DingTalk-protected
 - the warning is advisory; runtime delivery still performs the backend validation before sending the link
+- runtime DingTalk messages include `表单访问` and `允许范围` lines below the public form fill link, so recipients can see the access mode before opening the form
 - automation create/update APIs reject invalid public form or internal processing links before saving
 - runtime delivery refuses non-form public views and expired public-form shares before sending DingTalk messages
 - runtime delivery refuses missing internal processing views before sending DingTalk messages
@@ -149,6 +150,7 @@ Behavior:
 - without an allowlist, `Bound DingTalk users only` admits all bound DingTalk local users and `Authorized DingTalk users only` admits all locally authorized DingTalk users
 - the form share manager shows `Local allowlist limits` so owners can confirm whether no local limit is set or how many local users/member groups can fill after DingTalk checks
 - the automation editor and rule cards show the same local allowlist audience as `Allowed audience`, so authors can verify it without reopening the form share manager
+- the actual DingTalk message uses the same access-mode and local allowlist data in its runtime `允许范围` text
 
 Important rule:
 

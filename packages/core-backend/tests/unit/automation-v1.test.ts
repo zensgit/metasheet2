@@ -452,6 +452,7 @@ describe('AutomationExecutor', () => {
     expect(payload.markdown.title).toBe('Record Incident ready')
     expect(payload.markdown.text).toContain('Status: open')
     expect(payload.markdown.text).toContain('/multitable/public-form/sheet_1/view_form?publicToken=public-token')
+    expect(payload.markdown.text).toContain('表单访问：任何获得链接的人可填写')
     expect(payload.markdown.text).toContain('/multitable/sheet_1/view_grid?recordId=r1')
     expect((queryFn.mock.calls[3]?.[0] as string) ?? '').toContain('INSERT INTO dingtalk_group_deliveries')
   })
@@ -654,7 +655,7 @@ describe('AutomationExecutor', () => {
         rows: [{ id: 'dt_1', name: 'Ops Group', webhook_url: 'https://oapi.dingtalk.com/robot/send?access_token=test', secret: null, enabled: true }],
       })
       .mockResolvedValueOnce({
-        rows: [{ id: 'view_form', sheet_id: 'sheet_1', config: { publicForm: { enabled: true, publicToken: 'public-token' } } }],
+        rows: [{ id: 'view_form', sheet_id: 'sheet_1', config: { publicForm: { enabled: true, publicToken: 'public-token', accessMode: 'dingtalk' } } }],
       })
       .mockResolvedValueOnce({ rows: [{ id: 'view_grid' }] })
       .mockRejectedValueOnce(new Error('delivery history unavailable'))
@@ -688,6 +689,10 @@ describe('AutomationExecutor', () => {
     expect(result.status).toBe('success')
     expect(fetchFn).toHaveBeenCalledTimes(1)
     expect(queryFn).toHaveBeenCalledTimes(4)
+    const [, sendInit] = fetchFn.mock.calls[0] as [string, RequestInit]
+    const payload = JSON.parse(sendInit.body as string)
+    expect(payload.markdown.text).toContain('表单访问：钉钉登录 + 绑定本地用户')
+    expect(payload.markdown.text).toContain('允许范围：所有已绑定钉钉的本地用户可填写')
   })
 
   it('fails send_dingtalk_group_message when destination is missing', async () => {
@@ -827,7 +832,19 @@ describe('AutomationExecutor', () => {
 
     const queryFn = vi.fn()
       .mockResolvedValueOnce({
-        rows: [{ id: 'view_form', sheet_id: 'sheet_1', config: { publicForm: { enabled: true, publicToken: 'public-token' } } }],
+        rows: [{
+          id: 'view_form',
+          sheet_id: 'sheet_1',
+          config: {
+            publicForm: {
+              enabled: true,
+              publicToken: 'public-token',
+              accessMode: 'dingtalk_granted',
+              allowedUserIds: ['user_1'],
+              allowedMemberGroupIds: ['group_1'],
+            },
+          },
+        }],
       })
       .mockResolvedValueOnce({ rows: [{ id: 'view_grid' }] })
       .mockResolvedValueOnce({
@@ -877,6 +894,8 @@ describe('AutomationExecutor', () => {
     const payload = JSON.parse(sendInit.body as string)
     expect(payload.userid_list).toBe('dt-user-1,dt-user-2')
     expect(payload.msg.markdown.text).toContain('/multitable/public-form/sheet_1/view_form?publicToken=public-token')
+    expect(payload.msg.markdown.text).toContain('表单访问：钉钉登录 + 本地授权')
+    expect(payload.msg.markdown.text).toContain('允许范围：1 个本地用户、1 个本地成员组通过钉钉校验后可填写')
     expect(payload.msg.markdown.text).toContain('/multitable/sheet_1/view_grid?recordId=r1')
     const insertCalls = queryFn.mock.calls.filter((call) => String(call[0]).includes('INSERT INTO dingtalk_person_deliveries'))
     expect(insertCalls).toHaveLength(2)
