@@ -32,6 +32,7 @@ import { validateRecord, getDefaultValidationRules } from '../multitable/field-v
 import type { FieldValidationConfig } from '../multitable/field-validation'
 import { conditionalPublicRateLimiter, publicFormContextLimiter, publicFormSubmitLimiter } from '../middleware/rate-limiter'
 import { getAutomationServiceInstance } from '../multitable/automation-service'
+import { validateDingTalkAutomationLinks } from '../multitable/dingtalk-automation-link-validation'
 import { listAutomationDingTalkGroupDeliveries } from '../multitable/dingtalk-group-delivery-service'
 import { listAutomationDingTalkPersonDeliveries } from '../multitable/dingtalk-person-delivery-service'
 import {
@@ -654,56 +655,6 @@ function normalizeJson(value: unknown): Record<string, unknown> {
     }
   }
   return {}
-}
-
-function collectDingTalkInternalViewIdsFromAutomation(
-  actionType: unknown,
-  actionConfig: unknown,
-  actions: unknown,
-): string[] {
-  const ids: string[] = []
-  const addIfDingTalkAction = (type: unknown, config: unknown) => {
-    if (type !== 'send_dingtalk_group_message' && type !== 'send_dingtalk_person_message') return
-    if (!isPlainObject(config)) return
-    const id = typeof config.internalViewId === 'string' ? config.internalViewId.trim() : ''
-    if (id) ids.push(id)
-  }
-
-  addIfDingTalkAction(actionType, actionConfig)
-  if (Array.isArray(actions)) {
-    for (const item of actions) {
-      if (!isPlainObject(item)) continue
-      addIfDingTalkAction(item.type, item.config)
-    }
-  }
-
-  return Array.from(new Set(ids))
-}
-
-async function validateDingTalkInternalViewLinks(
-  query: QueryFn,
-  sheetId: string,
-  actionType: unknown,
-  actionConfig: unknown,
-  actions: unknown,
-): Promise<string | null> {
-  const internalViewIds = collectDingTalkInternalViewIdsFromAutomation(actionType, actionConfig, actions)
-  if (!internalViewIds.length) return null
-
-  const result = await query(
-    `SELECT id::text AS id
-       FROM meta_views
-      WHERE sheet_id = $1
-        AND id::text = ANY($2::text[])`,
-    [sheetId, internalViewIds],
-  )
-  const foundIds = new Set(
-    result.rows
-      .map((row) => (isPlainObject(row) && typeof row.id === 'string' ? row.id.trim() : ''))
-      .filter(Boolean),
-  )
-  const missingIds = internalViewIds.filter((id) => !foundIds.has(id))
-  return missingIds.length > 0 ? `Internal processing view not found: ${missingIds.join(', ')}` : null
 }
 
 function normalizeJsonArray(value: unknown): string[] {
@@ -8406,15 +8357,15 @@ export function univerMetaRouter(): Router {
 
       const conditions = body?.conditions && typeof body.conditions === 'object' ? body.conditions as never : null
       const actions = Array.isArray(body?.actions) ? body.actions : null
-      const internalViewValidationError = await validateDingTalkInternalViewLinks(
+      const linkValidationError = await validateDingTalkAutomationLinks(
         pool.query.bind(pool),
         sheetId,
         actionType,
         actionConfig,
         actions,
       )
-      if (internalViewValidationError) {
-        return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: internalViewValidationError } })
+      if (linkValidationError) {
+        return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: linkValidationError } })
       }
 
       const rule = await automationService.createRule(sheetId, {
@@ -8515,15 +8466,15 @@ export function univerMetaRouter(): Router {
         const nextActions = body?.actions !== undefined
           ? Array.isArray(body.actions) ? body.actions : null
           : existing.actions
-        const internalViewValidationError = await validateDingTalkInternalViewLinks(
+        const linkValidationError = await validateDingTalkAutomationLinks(
           pool.query.bind(pool),
           sheetId,
           nextActionType,
           nextActionConfig,
           nextActions,
         )
-        if (internalViewValidationError) {
-          return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: internalViewValidationError } })
+        if (linkValidationError) {
+          return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: linkValidationError } })
         }
       }
 

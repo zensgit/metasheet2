@@ -698,10 +698,35 @@
 
       <!-- Footer -->
       <div class="meta-rule-editor__footer">
+        <div class="meta-rule-editor__test-run-feedback">
+          <div v-if="savedRuleHasDingTalkActions" class="meta-rule-editor__hint meta-rule-editor__hint--warning" data-field="dingtalkTestRunWarning">
+            Test Run executes the saved rule and can send real DingTalk messages to configured groups or users.
+          </div>
+          <div v-if="!props.rule?.id" class="meta-rule-editor__hint" data-field="testRunUnsavedHint">
+            Save this automation before running a test.
+          </div>
+          <div
+            v-if="props.testRunState"
+            class="meta-rule-editor__test-run-status"
+            :class="`meta-rule-editor__test-run-status--${props.testRunState.status}`"
+            data-field="testRunStatus"
+            :data-status="props.testRunState.status"
+          >
+            {{ props.testRunState.message }}
+          </div>
+        </div>
         <button class="meta-rule-editor__btn meta-rule-editor__btn--primary" type="button" :disabled="!canSave || saving" data-action="save" @click="onSave">
           {{ saving ? 'Saving...' : 'Save' }}
         </button>
-        <button class="meta-rule-editor__btn" type="button" :disabled="saving" @click="onTestRun" data-action="test">Test Run</button>
+        <button
+          class="meta-rule-editor__btn"
+          type="button"
+          :disabled="saving || !props.rule?.id || props.testRunState?.status === 'running'"
+          @click="onTestRun"
+          data-action="test"
+        >
+          {{ props.testRunState?.status === 'running' ? 'Running...' : 'Test Run' }}
+        </button>
         <button class="meta-rule-editor__btn" type="button" @click="$emit('close')">Cancel</button>
       </div>
     </div>
@@ -789,6 +814,10 @@ interface Draft {
 const props = defineProps<{
   sheetId: string
   rule?: AutomationRule
+  testRunState?: {
+    status: 'running' | 'success' | 'failed' | 'skipped'
+    message: string
+  }
   visible: boolean
   fields: Array<{ id: string; name: string; type: string; property?: Record<string, unknown> }>
   client?: MultitableApiClient
@@ -814,11 +843,16 @@ const copiedPreviewKey = ref('')
 let personRecipientSuggestionLoadId = 0
 let copiedPreviewResetTimer: ReturnType<typeof setTimeout> | null = null
 
-const formViews = computed(() => (props.views ?? []).filter((view) => view.type === 'form'))
+const formViews = computed(() => (props.views ?? []).filter((view) =>
+  view.type === 'form' && (!view.sheetId || view.sheetId === props.sheetId),
+))
 const internalViews = computed(() => (props.views ?? []).filter((view) => !view.sheetId || view.sheetId === props.sheetId))
 const groupDestinationCandidateFields = computed(() => props.fields)
 const recipientCandidateFields = computed(() => props.fields.filter((field) => field.type === 'user'))
 const memberGroupRecipientCandidateFields = computed(() => props.fields.filter(isDingTalkMemberGroupRecipientField))
+const savedRuleHasDingTalkActions = computed(() => ruleHasDingTalkActions(props.rule))
+const DINGTALK_TEST_RUN_CONFIRM_MESSAGE =
+  'Test Run executes the saved rule and can send real DingTalk messages to configured groups or users. Unsaved changes are not included. Continue?'
 
 const conditionOperators: Array<{ value: ConditionOperator; label: string }> = [
   { value: 'equals', label: 'Equals' },
@@ -1200,14 +1234,14 @@ function renderedTemplateExample(value: unknown, fallback: string) {
 }
 
 function publicFormLinkWarnings(value: unknown, warnWhenGroupAccessRisk = false) {
-  return listDingTalkPublicFormLinkWarnings(value, props.views ?? [], {
+  return listDingTalkPublicFormLinkWarnings(value, formViews.value, {
     warnWhenFullyPublic: warnWhenGroupAccessRisk,
     warnWhenProtectedWithoutAllowlist: warnWhenGroupAccessRisk,
   })
 }
 
 function publicFormLinkBlockingErrors(value: unknown) {
-  return listDingTalkPublicFormLinkBlockingErrors(value, props.views ?? [])
+  return listDingTalkPublicFormLinkBlockingErrors(value, formViews.value)
 }
 
 function internalViewLinkWarnings(value: unknown) {
@@ -1219,7 +1253,17 @@ function internalViewLinkBlockingErrors(value: unknown) {
 }
 
 function publicFormAccessSummary(value: unknown) {
-  return describeDingTalkPublicFormLinkAccess(value, props.views ?? [])
+  return describeDingTalkPublicFormLinkAccess(value, formViews.value)
+}
+
+function isDingTalkActionType(value: unknown): boolean {
+  return value === 'send_dingtalk_group_message' || value === 'send_dingtalk_person_message'
+}
+
+function ruleHasDingTalkActions(rule: AutomationRule | undefined): boolean {
+  if (!rule) return false
+  return isDingTalkActionType(rule.actionType)
+    || (rule.actions ?? []).some((action) => isDingTalkActionType(action.type))
 }
 
 function copyPreviewText(key: string, text: string) {
@@ -1572,9 +1616,9 @@ async function onSave() {
 }
 
 function onTestRun() {
-  if (props.rule?.id) {
-    emit('test', props.rule.id)
-  }
+  if (saving.value || props.testRunState?.status === 'running' || !props.rule?.id) return
+  if (savedRuleHasDingTalkActions.value && !window.confirm(DINGTALK_TEST_RUN_CONFIRM_MESSAGE)) return
+  emit('test', props.rule.id)
 }
 </script>
 
@@ -1639,6 +1683,23 @@ function onTestRun() {
 .meta-rule-editor__hint--error { color: #b91c1c; }
 
 .meta-rule-editor__hint--warning { color: #b45309; }
+
+.meta-rule-editor__test-run-feedback {
+  flex: 1 1 280px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.meta-rule-editor__test-run-status {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.meta-rule-editor__test-run-status--success { color: #15803d; }
+.meta-rule-editor__test-run-status--failed { color: #b91c1c; }
+.meta-rule-editor__test-run-status--skipped { color: #b45309; }
+.meta-rule-editor__test-run-status--running { color: #1d4ed8; }
 
 .meta-rule-editor__input,
 .meta-rule-editor__select,
@@ -1814,6 +1875,8 @@ function onTestRun() {
 
 .meta-rule-editor__footer {
   display: flex;
+  align-items: center;
+  flex-wrap: wrap;
   gap: 8px;
   padding: 12px 20px 16px;
   border-top: 1px solid #e2e8f0;

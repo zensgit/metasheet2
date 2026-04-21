@@ -589,11 +589,20 @@
             <span class="meta-automation__stat meta-automation__stat--success">{{ ruleStats[rule.id].success }} ok</span>
             <span class="meta-automation__stat meta-automation__stat--failed">{{ ruleStats[rule.id].failed }} fail</span>
           </div>
+          <div
+            v-if="ruleTestRunStates[rule.id]"
+            class="meta-automation__test-run-status"
+            :class="`meta-automation__test-run-status--${ruleTestRunStates[rule.id].status}`"
+            :data-automation-test-status="rule.id"
+            :data-status="ruleTestRunStates[rule.id].status"
+          >
+            {{ ruleTestRunStates[rule.id].message }}
+          </div>
           <div class="meta-automation__card-actions">
             <button class="meta-automation__btn" type="button" data-automation-edit="true" @click="openRuleEditor(rule)">Edit</button>
             <button class="meta-automation__btn" type="button" data-automation-logs="true" @click="openLogViewer(rule)">View Logs</button>
             <button
-              v-if="rule.actionType === 'send_dingtalk_group_message'"
+              v-if="ruleHasActionType(rule, 'send_dingtalk_group_message')"
               class="meta-automation__btn"
               type="button"
               :data-automation-group-deliveries="rule.id"
@@ -602,7 +611,7 @@
               View Deliveries
             </button>
             <button
-              v-if="rule.actionType === 'send_dingtalk_person_message'"
+              v-if="ruleHasActionType(rule, 'send_dingtalk_person_message')"
               class="meta-automation__btn"
               type="button"
               :data-automation-person-deliveries="rule.id"
@@ -622,6 +631,7 @@
       :fields="fields"
       :client="client"
       :views="views"
+      :test-run-state="activeRuleTestRunState"
       @close="showRuleEditor = false"
       @save="onRuleEditorSave"
       @test="onTestRule"
@@ -653,6 +663,7 @@
 <script setup lang="ts">
 import { ref, computed, watch, onBeforeUnmount } from 'vue'
 import type {
+  AutomationExecution,
   AutomationRule,
   AutomationTriggerType,
   AutomationActionType,
@@ -701,6 +712,11 @@ const emit = defineEmits<{
   (e: 'close'): void
   (e: 'updated'): void
 }>()
+
+type AutomationTestRunState = {
+  status: 'running' | 'success' | 'failed' | 'skipped'
+  message: string
+}
 
 const { rules, loading, error, loadRules, createRule, updateRule, deleteRule, toggleRule } =
   useMultitableAutomations(props.client)
@@ -770,7 +786,9 @@ const dingtalkPersonUserDirectory = ref<Record<string, { label: string; subtitle
 const copiedPreviewKey = ref('')
 let dingtalkPersonSuggestionLoadId = 0
 let copiedPreviewResetTimer: ReturnType<typeof setTimeout> | null = null
-const formViews = computed(() => (props.views ?? []).filter((view) => view.type === 'form'))
+const formViews = computed(() => (props.views ?? []).filter((view) =>
+  view.type === 'form' && (!view.sheetId || view.sheetId === props.sheetId),
+))
 const internalViews = computed(() => (props.views ?? []).filter((view) => !view.sheetId || view.sheetId === props.sheetId))
 
 function parseUserIdsText(value: string): string[] {
@@ -960,14 +978,14 @@ function renderedTemplateExample(value: string, fallback: string) {
 }
 
 function publicFormLinkWarnings(value: unknown, warnWhenGroupAccessRisk = false) {
-  return listDingTalkPublicFormLinkWarnings(value, props.views ?? [], {
+  return listDingTalkPublicFormLinkWarnings(value, formViews.value, {
     warnWhenFullyPublic: warnWhenGroupAccessRisk,
     warnWhenProtectedWithoutAllowlist: warnWhenGroupAccessRisk,
   })
 }
 
 function publicFormLinkBlockingErrors(value: unknown) {
-  return listDingTalkPublicFormLinkBlockingErrors(value, props.views ?? [])
+  return listDingTalkPublicFormLinkBlockingErrors(value, formViews.value)
 }
 
 function internalViewLinkWarnings(value: unknown) {
@@ -979,7 +997,7 @@ function internalViewLinkBlockingErrors(value: unknown) {
 }
 
 function publicFormAccessSummary(value: unknown) {
-  return describeDingTalkPublicFormLinkAccess(value, props.views ?? [])
+  return describeDingTalkPublicFormLinkAccess(value, formViews.value)
 }
 
 function copyPreviewText(key: string, text: string) {
@@ -1212,6 +1230,11 @@ const groupDeliveryViewerRuleId = ref('')
 const showPersonDeliveryViewer = ref(false)
 const personDeliveryViewerRuleId = ref('')
 const ruleStats = ref<Record<string, AutomationStats>>({})
+const ruleTestRunStates = ref<Record<string, AutomationTestRunState>>({})
+const activeRuleTestRunState = computed(() => {
+  const ruleId = editingRule.value?.id
+  return ruleId ? ruleTestRunStates.value[ruleId] : undefined
+})
 
 function openRuleEditor(rule?: AutomationRule) {
   editingRule.value = rule ?? null
@@ -1252,22 +1275,85 @@ async function onRuleEditorSave(payload: Partial<AutomationRule>) {
 
 async function onTestRule(ruleId: string) {
   if (!props.client) return
+  setRuleTestRunState(ruleId, {
+    status: 'running',
+    message: testRunPendingMessage(ruleId),
+  })
   try {
-    await props.client.testAutomationRule(props.sheetId, ruleId)
+    const execution = await props.client.testAutomationRule(props.sheetId, ruleId)
+    setRuleTestRunState(ruleId, describeTestRunExecution(execution))
+    await loadRuleStatsForRule(ruleId)
+  } catch (err: unknown) {
+    setRuleTestRunState(ruleId, {
+      status: 'failed',
+      message: `Test run request failed: ${readErrorMessage(err)}`,
+    })
+  }
+}
+
+function setRuleTestRunState(ruleId: string, state: AutomationTestRunState) {
+  ruleTestRunStates.value = { ...ruleTestRunStates.value, [ruleId]: state }
+}
+
+function readErrorMessage(err: unknown): string {
+  return err instanceof Error && err.message.trim() ? err.message : 'Unknown error'
+}
+
+function testRunPendingMessage(ruleId: string): string {
+  return hasDingTalkRuleActions(rules.value.find((rule) => rule.id === ruleId))
+    ? 'Running test. DingTalk actions may send real messages.'
+    : 'Running test.'
+}
+
+function hasDingTalkRuleActions(rule: AutomationRule | undefined): boolean {
+  if (!rule) return false
+  return isDingTalkActionType(rule.actionType) || Boolean(rule.actions?.some((action) => isDingTalkActionType(action.type)))
+}
+
+function isDingTalkActionType(actionType: AutomationActionType): boolean {
+  return actionType === 'send_dingtalk_group_message' || actionType === 'send_dingtalk_person_message'
+}
+
+function describeTestRunExecution(execution: AutomationExecution): AutomationTestRunState {
+  const failedStep = execution.steps?.find((step) => step.status === 'failed')
+  const durationMs = typeof execution.durationMs === 'number'
+    ? execution.durationMs
+    : typeof execution.duration === 'number'
+      ? execution.duration
+      : undefined
+  const duration = typeof durationMs === 'number' ? ` (${Math.round(durationMs)} ms)` : ''
+  if (execution.status === 'failed' || failedStep) {
+    return {
+      status: 'failed',
+      message: `Test run failed: ${execution.error || failedStep?.error || 'At least one action failed.'}`,
+    }
+  }
+  if (execution.status === 'skipped') {
+    return {
+      status: 'skipped',
+      message: `Test run skipped${duration}.`,
+    }
+  }
+  return {
+    status: 'success',
+    message: `Test run succeeded${duration}.`,
+  }
+}
+
+async function loadRuleStatsForRule(ruleId: string) {
+  if (!props.client) return
+  try {
+    const st = await props.client.getAutomationStats(props.sheetId, ruleId)
+    ruleStats.value = { ...ruleStats.value, [ruleId]: st }
   } catch {
-    // silently fail
+    // skip
   }
 }
 
 async function loadRuleStats() {
   if (!props.client) return
   for (const rule of rules.value) {
-    try {
-      const st = await props.client.getAutomationStats(props.sheetId, rule.id)
-      ruleStats.value[rule.id] = st
-    } catch {
-      // skip
-    }
+    await loadRuleStatsForRule(rule.id)
   }
 }
 
@@ -1472,20 +1558,40 @@ function describeTrigger(rule: AutomationRule): string {
 }
 
 function describeAction(rule: AutomationRule): string {
-  switch (rule.actionType) {
+  if (rule.actions?.length) {
+    return rule.actions.map((action) => describeActionType(action.type, action.config)).join(' + ')
+  }
+  return describeActionType(rule.actionType, rule.actionConfig)
+}
+
+function describeActionType(actionType: AutomationActionType, actionConfig: Record<string, unknown>): string {
+  switch (actionType) {
     case 'notify':
+    case 'send_notification':
       return 'Send notification'
     case 'update_field': {
-      const fid = rule.actionConfig?.fieldId as string | undefined
+      const fid = actionConfig?.fieldId as string | undefined
       return fid ? `Update "${fieldNameById(fid)}"` : 'Update field value'
     }
+    case 'update_record':
+      return 'Update record'
+    case 'create_record':
+      return 'Create record'
+    case 'send_webhook':
+      return 'Send webhook'
     case 'send_dingtalk_group_message':
       return 'Send DingTalk group message'
     case 'send_dingtalk_person_message':
       return 'Send DingTalk person message'
+    case 'lock_record':
+      return 'Lock record'
     default:
-      return String(rule.actionType)
+      return String(actionType)
   }
+}
+
+function ruleHasActionType(rule: AutomationRule, actionType: AutomationActionType): boolean {
+  return rule.actionType === actionType || (rule.actions ?? []).some((action) => action.type === actionType)
 }
 
 watch(
@@ -1800,4 +1906,14 @@ watch(
 .meta-automation__stat { font-weight: 600; }
 .meta-automation__stat--success { color: #16a34a; }
 .meta-automation__stat--failed { color: #dc2626; }
+
+.meta-automation__test-run-status {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.meta-automation__test-run-status--success { color: #15803d; }
+.meta-automation__test-run-status--failed { color: #b91c1c; }
+.meta-automation__test-run-status--skipped { color: #b45309; }
+.meta-automation__test-run-status--running { color: #1d4ed8; }
 </style>
