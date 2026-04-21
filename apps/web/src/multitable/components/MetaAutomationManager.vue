@@ -1538,19 +1538,35 @@ function describeTrigger(rule: AutomationRule): string {
 }
 
 function describeAction(rule: AutomationRule): string {
-  switch (rule.actionType) {
+  if (rule.actions?.length) {
+    return rule.actions.map((action) => describeActionType(action.type, action.config)).join(' + ')
+  }
+  return describeActionType(rule.actionType, rule.actionConfig)
+}
+
+function describeActionType(actionType: AutomationActionType, actionConfig: Record<string, unknown>): string {
+  switch (actionType) {
     case 'notify':
+    case 'send_notification':
       return 'Send notification'
     case 'update_field': {
-      const fid = rule.actionConfig?.fieldId as string | undefined
+      const fid = actionConfig?.fieldId as string | undefined
       return fid ? `Update "${fieldNameById(fid)}"` : 'Update field value'
     }
+    case 'update_record':
+      return 'Update record'
+    case 'create_record':
+      return 'Create record'
+    case 'send_webhook':
+      return 'Send webhook'
     case 'send_dingtalk_group_message':
       return 'Send DingTalk group message'
     case 'send_dingtalk_person_message':
       return 'Send DingTalk person message'
+    case 'lock_record':
+      return 'Lock record'
     default:
-      return String(rule.actionType)
+      return String(actionType)
   }
 }
 

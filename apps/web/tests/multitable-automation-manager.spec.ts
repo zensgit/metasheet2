@@ -229,6 +229,61 @@ describe('MetaAutomationManager', () => {
     const cards = container.querySelectorAll('[data-automation-rule]')
     expect(cards.length).toBe(1)
     expect(container.querySelector('.meta-automation__card-name')?.textContent).toBe('Notify on create')
+    expect(container.querySelector('.meta-automation__card-desc')?.textContent).toContain('Send notification')
+  })
+
+  it('describes V1 multi-action DingTalk group rules in the list', async () => {
+    const { client } = mockClient([
+      fakeRule({
+        name: 'Multi-step group notify',
+        actionType: 'notify',
+        actionConfig: { message: 'Internal note' },
+        actions: [
+          { type: 'notify', config: { message: 'Internal note' } },
+          {
+            type: 'send_dingtalk_group_message',
+            config: {
+              destinationId: 'dt_1',
+              titleTemplate: 'Ticket {{recordId}}',
+              bodyTemplate: 'Please fill {{record.status}}',
+            },
+          },
+        ],
+      }),
+    ])
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
+    await flushPromises()
+
+    const desc = container.querySelector('[data-automation-rule="rule_1"] .meta-automation__card-desc')
+    expect(desc?.textContent).toContain('Send notification')
+    expect(desc?.textContent).toContain('Send DingTalk group message')
+  })
+
+  it('describes V1 multi-action DingTalk person rules in the list', async () => {
+    const { client } = mockClient([
+      fakeRule({
+        name: 'Multi-step person notify',
+        actionType: 'notify',
+        actionConfig: { message: 'Internal note' },
+        actions: [
+          { type: 'notify', config: { message: 'Internal note' } },
+          {
+            type: 'send_dingtalk_person_message',
+            config: {
+              userIds: ['user_1'],
+              titleTemplate: 'Ticket {{recordId}}',
+              bodyTemplate: 'Please fill {{record.status}}',
+            },
+          },
+        ],
+      }),
+    ])
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
+    await flushPromises()
+
+    const desc = container.querySelector('[data-automation-rule="rule_1"] .meta-automation__card-desc')
+    expect(desc?.textContent).toContain('Send notification')
+    expect(desc?.textContent).toContain('Send DingTalk person message')
   })
 
   it('shows empty state when no rules', async () => {
