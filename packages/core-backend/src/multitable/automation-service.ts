@@ -12,6 +12,7 @@ import { AutomationLogService } from './automation-log-service'
 import {
   normalizeDingTalkAutomationActionInputs,
   validateDingTalkAutomationActionConfigs,
+  validateDingTalkAutomationLinks,
 } from './dingtalk-automation-link-validation'
 import type { Database } from '../db/types'
 
@@ -219,6 +220,14 @@ export class AutomationService {
       : input.actions ?? null
     const actionConfigValidationError = validateDingTalkAutomationActionConfigs(input.actionType, actionConfig, actions)
     if (actionConfigValidationError) throw new AutomationRuleValidationError(actionConfigValidationError)
+    const linkValidationError = await validateDingTalkAutomationLinks(
+      this.queryFn,
+      sheetId,
+      input.actionType,
+      actionConfig,
+      actions,
+    )
+    if (linkValidationError) throw new AutomationRuleValidationError(linkValidationError)
 
     const row = {
       id: ruleId,
@@ -317,6 +326,14 @@ export class AutomationService {
         normalizedNextActions,
       )
       if (actionConfigValidationError) throw new AutomationRuleValidationError(actionConfigValidationError)
+      const linkValidationError = await validateDingTalkAutomationLinks(
+        this.queryFn,
+        sheetId,
+        nextActionType,
+        normalizedNextActionConfig,
+        normalizedNextActions,
+      )
+      if (linkValidationError) throw new AutomationRuleValidationError(linkValidationError)
 
       if (input.actionConfig !== undefined) normalizedActionConfigForUpdate = normalizedNextActionConfig
       if (input.actions !== undefined) normalizedActionsForUpdate = Array.isArray(input.actions) ? normalizedNextActions : null
