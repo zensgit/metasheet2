@@ -3,6 +3,8 @@ import net from 'net'
 import { MetaSheetServer } from '../../src/index'
 import { poolManager } from '../../src/integration/db/connection-pool'
 
+const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
+
 type JsonRecord = Record<string, unknown>
 
 type ApprovalRecordRow = {
@@ -302,7 +304,7 @@ function buildAnyModeGraph() {
   }
 }
 
-describe('Approval Wave 2 WP1 any-mode (或签) API', () => {
+describeIfDatabase('Approval Wave 2 WP1 any-mode (或签) API', () => {
   let server: MetaSheetServer | undefined
   let baseUrl = ''
   const createdTemplateIds = new Set<string>()

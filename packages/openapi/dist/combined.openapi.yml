@@ -2487,6 +2487,14 @@ components:
           type: boolean
         metadata:
           type: object
+          description: >
+            Runtime-populated metadata. Optional keys written by the approval
+            executor:
+              - `aggregateCancelledBy` (string): userId of the approver whose any-mode (或签)
+                first-wins decision deactivated this sibling assignment.
+              - `aggregateCancelledAt` (string, ISO-8601): timestamp when the cancellation fired.
+              - `aggregateMode` ('any'): aggregation mode that triggered the cancellation;
+                present alongside `aggregateCancelledBy` on cancelled sibling assignments.
           additionalProperties: true
       required:
         - id

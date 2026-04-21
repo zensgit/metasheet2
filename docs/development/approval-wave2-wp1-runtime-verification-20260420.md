@@ -202,3 +202,40 @@ pnpm --filter @metasheet/core-backend exec vitest run tests/unit/approval-graph-
 | Executor unit | PASS | 8/8 |
 
 The BPMN/EventBus/Automation startup diagnostics in the integration logs are expected for this local partial-schema test database; the server continues in degraded mode and the targeted approval tests pass.
+
+---
+
+## CI correction — 2026-04-21
+
+After PR opening, CI exposed two packaging issues that local focused verification did not catch:
+
+1. `contracts (openapi)` failed because generated OpenAPI dist files were not rebuilt after `packages/openapi/src/base.yml` changed.
+2. `test (18.x)` picked up `tests/integration/approval-wp1-any-mode.api.test.ts` through the default Vitest include set and failed in the no-Postgres CI environment.
+
+Fix:
+
+- Rebuilt OpenAPI dist with `pnpm exec tsx packages/openapi/tools/build.ts`.
+- Gated the WP1 DB-backed integration test with `describe.skip` when `DATABASE_URL` is not set. The integration test still runs normally under `vitest.integration.config.ts` when `DATABASE_URL` is provided.
+
+### Commands run
+
+```bash
+pnpm exec tsx packages/openapi/tools/build.ts
+pnpm --filter @metasheet/core-backend exec vitest run \
+  tests/integration/approval-wp1-any-mode.api.test.ts --reporter=dot
+DATABASE_URL='postgresql://chouhua@127.0.0.1:5432/postgres' PGHOST=127.0.0.1 PGPORT=5432 PGDATABASE=postgres PGUSER=chouhua \
+  pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run \
+    tests/integration/approval-wp1-any-mode.api.test.ts --reporter=dot
+pnpm --filter @metasheet/core-backend exec tsc --noEmit --pretty false
+```
+
+### Results
+
+| Step | Outcome | Counts |
+| ---- | ------- | ------ |
+| OpenAPI build | PASS | dist regenerated |
+| Default Vitest include without `DATABASE_URL` | PASS | 1 skipped |
+| DB-backed integration with `DATABASE_URL` | PASS | 1/1 |
+| tsc --noEmit | PASS | zero diagnostics |
+
+Note: running `scripts/ops/attendance-run-gate-contract-case.sh openapi` before committing regenerated dist still reports expected local git drift. CI should validate the committed dist after this correction lands on the PR branch.
