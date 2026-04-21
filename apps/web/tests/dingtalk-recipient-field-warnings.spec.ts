@@ -4,6 +4,7 @@ import {
   isDingTalkMemberGroupRecipientField,
   listDingTalkGroupDestinationFieldPathWarnings,
   listDingTalkPersonMemberGroupRecipientFieldPathWarnings,
+  listDingTalkPersonRecipientFieldPathWarnings,
 } from '../src/multitable/utils/dingtalkRecipientFieldWarnings'
 
 const fields = [
@@ -42,6 +43,28 @@ describe('dingtalk recipient field warnings', () => {
   it('returns no dynamic group destination warnings for empty or non-string input', () => {
     expect(listDingTalkGroupDestinationFieldPathWarnings('', fields)).toEqual([])
     expect(listDingTalkGroupDestinationFieldPathWarnings(['record.assigneeUserIds'], fields)).toEqual([])
+  })
+
+  it('lists dynamic person recipient field path warnings from normalized record paths', () => {
+    expect(listDingTalkPersonRecipientFieldPathWarnings(
+      [
+        'record.missingUserId',
+        'record.name',
+        'record.assigneeUserIds',
+        'record.watcherGroupIds',
+        'name',
+      ].join(',\n'),
+      fields,
+    )).toEqual([
+      'record.missingUserId is not a user field; DingTalk person messages expect local user IDs.',
+      'record.name is not a user field; DingTalk person messages expect local user IDs.',
+      'record.watcherGroupIds is not a user field; DingTalk person messages expect local user IDs.',
+    ])
+  })
+
+  it('returns no person recipient warnings for empty or non-string input', () => {
+    expect(listDingTalkPersonRecipientFieldPathWarnings('', fields)).toEqual([])
+    expect(listDingTalkPersonRecipientFieldPathWarnings(['record.name'], fields)).toEqual([])
   })
 
   it('lists dynamic person member-group recipient field path warnings from normalized record paths', () => {
