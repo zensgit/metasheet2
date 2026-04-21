@@ -98,6 +98,7 @@ Automation authoring guardrail:
 
 - if a selected public form view is not shared, has no public token, or has expired, the automation editor warns before save
 - if a DingTalk group rule links to a fully public form, the automation editor warns that anyone with the message link can submit
+- if a DingTalk group rule links to a DingTalk-protected form without allowed users or member groups, the editor warns that all bound or authorized DingTalk users can submit
 - the warning is advisory; runtime delivery still performs the backend validation before sending the link
 
 Supported access modes:
@@ -133,6 +134,7 @@ Behavior:
 - the visitor must pass the selected DingTalk protection mode first
 - the system then resolves the local user
 - the local user must be directly allowed or belong to an allowed member group
+- without an allowlist, `Bound DingTalk users only` admits all bound DingTalk local users and `Authorized DingTalk users only` admits all locally authorized DingTalk users
 
 Important rule:
 
@@ -204,6 +206,7 @@ Use:
 Authoring guardrail:
 
 - if the selected form is still fully public, the DingTalk group rule editor warns before save
+- if the selected protected form has no allowed users or member groups, the DingTalk group rule editor warns before save
 - switch the form to `Bound DingTalk users only` or `Authorized DingTalk users only` before relying on allowlists
 
 ### Scenario 3: Notify specific staff only

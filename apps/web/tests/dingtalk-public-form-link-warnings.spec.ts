@@ -25,6 +25,47 @@ const views = [
       },
     },
   },
+  {
+    id: 'view_form_protected_allowed_user',
+    name: 'Protected User Form',
+    type: 'form',
+    config: {
+      publicForm: {
+        enabled: true,
+        publicToken: 'pub_protected_user',
+        accessMode: 'dingtalk',
+        allowedUserIds: ['user_1'],
+        expiresAt: '2026-04-22T00:00:00.000Z',
+      },
+    },
+  },
+  {
+    id: 'view_form_granted_allowed_group',
+    name: 'Granted Group Form',
+    type: 'form',
+    config: {
+      publicForm: {
+        enabled: true,
+        publicToken: 'pub_granted_group',
+        accessMode: 'dingtalk_granted',
+        allowedMemberGroupIds: ['group_1'],
+        expiresAt: '2026-04-22T00:00:00.000Z',
+      },
+    },
+  },
+  {
+    id: 'view_form_granted_without_allowlist',
+    name: 'Granted Open Form',
+    type: 'form',
+    config: {
+      publicForm: {
+        enabled: true,
+        publicToken: 'pub_granted_open',
+        accessMode: 'dingtalk_granted',
+        expiresAt: '2026-04-22T00:00:00.000Z',
+      },
+    },
+  },
   { id: 'view_form_unconfigured', name: 'Unconfigured Form', type: 'form' },
   {
     id: 'view_form_disabled',
@@ -56,6 +97,7 @@ describe('dingtalk public form link warnings', () => {
   it('returns no warning for empty input or active public form sharing', () => {
     expect(listDingTalkPublicFormLinkWarnings('', views, nowMs)).toEqual([])
     expect(listDingTalkPublicFormLinkWarnings('view_form_enabled', views, nowMs)).toEqual([])
+    expect(listDingTalkPublicFormLinkWarnings('view_form_protected', views, nowMs)).toEqual([])
   })
 
   it('warns when the selected public form view cannot produce a working fill link', () => {
@@ -87,5 +129,16 @@ describe('dingtalk public form link warnings', () => {
       'Public form sharing for "Enabled Form" is fully public; everyone who can open the DingTalk message link can submit. Use DingTalk-protected access and an allowlist when only selected users should fill.',
     ])
     expect(listDingTalkPublicFormLinkWarnings('view_form_protected', views, { nowMs, warnWhenFullyPublic: true })).toEqual([])
+  })
+
+  it('warns for protected form links without allowlists when group-message access guardrails are enabled', () => {
+    expect(listDingTalkPublicFormLinkWarnings('view_form_protected', views, { nowMs, warnWhenProtectedWithoutAllowlist: true })).toEqual([
+      'Public form sharing for "Protected Form" allows all bound DingTalk users to submit; add allowed users or member groups when only selected users should fill.',
+    ])
+    expect(listDingTalkPublicFormLinkWarnings('view_form_granted_without_allowlist', views, { nowMs, warnWhenProtectedWithoutAllowlist: true })).toEqual([
+      'Public form sharing for "Granted Open Form" allows all authorized DingTalk users to submit; add allowed users or member groups when only selected users should fill.',
+    ])
+    expect(listDingTalkPublicFormLinkWarnings('view_form_protected_allowed_user', views, { nowMs, warnWhenProtectedWithoutAllowlist: true })).toEqual([])
+    expect(listDingTalkPublicFormLinkWarnings('view_form_granted_allowed_group', views, { nowMs, warnWhenProtectedWithoutAllowlist: true })).toEqual([])
   })
 })

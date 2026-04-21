@@ -36,6 +36,29 @@ const viewsWithDisabledPublicForm = [
   },
 ]
 
+const viewsWithProtectedPublicFormWithoutAllowlist = [
+  views[0],
+  {
+    ...views[1],
+    config: { publicForm: { enabled: true, publicToken: 'pub_view_form', accessMode: 'dingtalk' } },
+  },
+]
+
+const viewsWithProtectedPublicFormAllowlist = [
+  views[0],
+  {
+    ...views[1],
+    config: {
+      publicForm: {
+        enabled: true,
+        publicToken: 'pub_view_form',
+        accessMode: 'dingtalk',
+        allowedUserIds: ['user_1'],
+      },
+    },
+  },
+]
+
 function mockClient() {
   return {
     listDingTalkGroups: vi.fn(async () => [
@@ -475,6 +498,56 @@ describe('MetaAutomationRuleEditor', () => {
 
     expect(container.textContent).toContain('Public form sharing for "Public Form" is fully public')
     expect(container.textContent).toContain('Use DingTalk-protected access and an allowlist')
+  })
+
+  it('warns when a DingTalk group message uses a protected public form without an allowlist', async () => {
+    const client = mockClient()
+    const { container } = mount({
+      visible: true,
+      sheetId: 'sheet_1',
+      fields,
+      views: viewsWithProtectedPublicFormWithoutAllowlist,
+      client,
+    })
+    await flushPromises()
+
+    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header select') as HTMLSelectElement
+    actionSelect.value = 'send_dingtalk_group_message'
+    actionSelect.dispatchEvent(new Event('change'))
+    await flushPromises()
+
+    const publicFormSelect = container.querySelector('[data-field="publicFormViewId"]') as HTMLSelectElement
+    publicFormSelect.value = 'view_form'
+    publicFormSelect.dispatchEvent(new Event('change'))
+    await flushPromises()
+
+    expect(container.textContent).toContain('Public form sharing for "Public Form" allows all bound DingTalk users to submit')
+    expect(container.textContent).toContain('add allowed users or member groups')
+  })
+
+  it('does not warn when a DingTalk group message uses a protected public form with an allowlist', async () => {
+    const client = mockClient()
+    const { container } = mount({
+      visible: true,
+      sheetId: 'sheet_1',
+      fields,
+      views: viewsWithProtectedPublicFormAllowlist,
+      client,
+    })
+    await flushPromises()
+
+    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header select') as HTMLSelectElement
+    actionSelect.value = 'send_dingtalk_group_message'
+    actionSelect.dispatchEvent(new Event('change'))
+    await flushPromises()
+
+    const publicFormSelect = container.querySelector('[data-field="publicFormViewId"]') as HTMLSelectElement
+    publicFormSelect.value = 'view_form'
+    publicFormSelect.dispatchEvent(new Event('change'))
+    await flushPromises()
+
+    expect(container.textContent).not.toContain('allows all bound DingTalk users to submit')
+    expect(container.textContent).not.toContain('is fully public')
   })
 
   it('emits DingTalk person action config with optional links', async () => {

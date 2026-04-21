@@ -8,6 +8,7 @@ export interface DingTalkPublicFormLinkView {
 export interface DingTalkPublicFormLinkWarningOptions {
   nowMs?: number
   warnWhenFullyPublic?: boolean
+  warnWhenProtectedWithoutAllowlist?: boolean
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -32,6 +33,10 @@ function normalizeWarningOptions(value: number | DingTalkPublicFormLinkWarningOp
 
 function normalizeAccessMode(value: unknown): 'public' | 'dingtalk' | 'dingtalk_granted' {
   return value === 'dingtalk' || value === 'dingtalk_granted' ? value : 'public'
+}
+
+function hasAllowlistIds(value: unknown): boolean {
+  return Array.isArray(value) && value.some((item) => typeof item === 'string' && item.trim())
 }
 
 export function listDingTalkPublicFormLinkWarnings(
@@ -70,8 +75,18 @@ export function listDingTalkPublicFormLinkWarnings(
     return [`Public form sharing for "${publicFormLabel(view, id)}" has expired; renew sharing before sending this DingTalk fill link.`]
   }
 
-  if (options.warnWhenFullyPublic && normalizeAccessMode(publicForm.accessMode) === 'public') {
+  const accessMode = normalizeAccessMode(publicForm.accessMode)
+  if (options.warnWhenFullyPublic && accessMode === 'public') {
     return [`Public form sharing for "${publicFormLabel(view, id)}" is fully public; everyone who can open the DingTalk message link can submit. Use DingTalk-protected access and an allowlist when only selected users should fill.`]
+  }
+  if (
+    options.warnWhenProtectedWithoutAllowlist
+    && (accessMode === 'dingtalk' || accessMode === 'dingtalk_granted')
+    && !hasAllowlistIds(publicForm.allowedUserIds)
+    && !hasAllowlistIds(publicForm.allowedMemberGroupIds)
+  ) {
+    const audience = accessMode === 'dingtalk_granted' ? 'authorized DingTalk users' : 'bound DingTalk users'
+    return [`Public form sharing for "${publicFormLabel(view, id)}" allows all ${audience} to submit; add allowed users or member groups when only selected users should fill.`]
   }
 
   return []

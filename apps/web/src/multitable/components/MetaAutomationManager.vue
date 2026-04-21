@@ -935,8 +935,11 @@ function renderedTemplateExample(value: string, fallback: string) {
   return rendered || fallback
 }
 
-function publicFormLinkWarnings(value: unknown, warnWhenFullyPublic = false) {
-  return listDingTalkPublicFormLinkWarnings(value, props.views ?? [], { warnWhenFullyPublic })
+function publicFormLinkWarnings(value: unknown, warnWhenGroupAccessRisk = false) {
+  return listDingTalkPublicFormLinkWarnings(value, props.views ?? [], {
+    warnWhenFullyPublic: warnWhenGroupAccessRisk,
+    warnWhenProtectedWithoutAllowlist: warnWhenGroupAccessRisk,
+  })
 }
 
 function copyPreviewText(key: string, text: string) {

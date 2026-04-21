@@ -223,7 +223,8 @@ This is the preferred implementation for:
 Authoring guardrail:
 
 - group-message automations warn when the selected public form link is still fully public
-- the warning directs owners toward DingTalk-protected access plus allowlists
+- group-message automations warn when a DingTalk-protected form has no allowed users or member groups
+- the warnings direct owners toward DingTalk-protected access plus allowlists
 
 ## Current limitations
 
