@@ -1360,11 +1360,13 @@ const canSave = computed(() => {
     if (internalViewLinkBlockingErrors(draft.value.internalViewId).length) return false
   }
   if (draft.value.actionType === 'send_dingtalk_person_message') {
+    const userIds = parseUserIdsText(draft.value.dingtalkPersonUserIds)
+    const memberGroupIds = parseMemberGroupIdsText(draft.value.dingtalkPersonMemberGroupIds)
     const recipientFieldPaths = parseRecipientFieldPathsText(draft.value.dingtalkPersonRecipientFieldPath)
     const memberGroupRecipientFieldPaths = parseRecipientFieldPathsText(draft.value.dingtalkPersonMemberGroupRecipientFieldPath)
     if (
-      !draft.value.dingtalkPersonUserIds.trim()
-      && !draft.value.dingtalkPersonMemberGroupIds.trim()
+      !userIds.length
+      && !memberGroupIds.length
       && !recipientFieldPaths.length
       && !memberGroupRecipientFieldPaths.length
     ) return false

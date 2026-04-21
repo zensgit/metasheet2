@@ -977,13 +977,13 @@ const canSave = computed(() => {
       if (internalViewLinkBlockingErrors(action.config.internalViewId).length) return false
     }
     if (action.type === 'send_dingtalk_person_message') {
-      const userIdsText = typeof action.config.userIdsText === 'string' ? action.config.userIdsText.trim() : ''
-      const memberGroupIdsText = typeof action.config.memberGroupIdsText === 'string' ? action.config.memberGroupIdsText.trim() : ''
+      const userIds = parseUserIdsText(action.config.userIdsText)
+      const memberGroupIds = parseMemberGroupIdsText(action.config.memberGroupIdsText)
       const recipientFieldPaths = parseRecipientFieldPathsText(action.config.recipientFieldPath)
       const memberGroupRecipientFieldPaths = parseRecipientFieldPathsText(action.config.memberGroupRecipientFieldPath)
       const titleTemplate = typeof action.config.titleTemplate === 'string' ? action.config.titleTemplate.trim() : ''
       const bodyTemplate = typeof action.config.bodyTemplate === 'string' ? action.config.bodyTemplate.trim() : ''
-      if ((!userIdsText && !memberGroupIdsText && !recipientFieldPaths.length && !memberGroupRecipientFieldPaths.length) || !titleTemplate || !bodyTemplate) return false
+      if ((!userIds.length && !memberGroupIds.length && !recipientFieldPaths.length && !memberGroupRecipientFieldPaths.length) || !titleTemplate || !bodyTemplate) return false
       if (publicFormLinkBlockingErrors(action.config.publicFormViewId).length) return false
       if (internalViewLinkBlockingErrors(action.config.internalViewId).length) return false
     }
