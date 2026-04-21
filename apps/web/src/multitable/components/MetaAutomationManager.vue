@@ -335,6 +335,22 @@
               placeholder="例如：record.watcherGroupIds, record.escalationGroupId"
               data-automation-field="dingtalkPersonMemberGroupRecipientFieldPath"
             />
+            <div
+              v-if="selectedDingTalkPersonMemberGroupRecipientFields.length"
+              class="meta-automation__recipient-list meta-automation__recipient-list--selected"
+            >
+              <button
+                v-for="field in selectedDingTalkPersonMemberGroupRecipientFields"
+                :key="field.id"
+                class="meta-automation__recipient-chip"
+                type="button"
+                :data-automation-member-group-recipient-field="field.id"
+                @click="removeDingTalkPersonMemberGroupRecipientField(field.id)"
+              >
+                <strong>{{ field.label }}</strong>
+                <em>Remove</em>
+              </button>
+            </div>
             <div class="meta-automation__hint">
               Use comma or newline separated <code>record.&lt;fieldId&gt;</code> paths whose values resolve to member group IDs.
             </div>
@@ -882,6 +898,13 @@ const selectedDingTalkPersonRecipientFields = computed(() => parseRecipientField
   }))
   .filter((item) => item.label))
 
+const selectedDingTalkPersonMemberGroupRecipientFields = computed(() => parseRecipientFieldPathsText(draft.value.dingtalkPersonMemberGroupRecipientFieldPath)
+  .map((path) => ({
+    id: path,
+    label: recipientFieldSummaryLabel(path),
+  }))
+  .filter((item) => item.label))
+
 function recipientFieldPathWarnings(value: string) {
   const candidateIds = new Set(dingTalkPersonRecipientCandidateFields.value.map((field) => field.id))
   return parseRecipientFieldPathsText(value)
@@ -916,6 +939,13 @@ function appendDingTalkPersonRecipientField(select: HTMLSelectElement) {
 
 function removeDingTalkPersonRecipientField(path: string) {
   draft.value.dingtalkPersonRecipientFieldPath = parseRecipientFieldPathsText(draft.value.dingtalkPersonRecipientFieldPath)
+    .filter((entry) => entry !== path)
+    .map((entry) => `record.${entry}`)
+    .join(', ')
+}
+
+function removeDingTalkPersonMemberGroupRecipientField(path: string) {
+  draft.value.dingtalkPersonMemberGroupRecipientFieldPath = parseRecipientFieldPathsText(draft.value.dingtalkPersonMemberGroupRecipientFieldPath)
     .filter((entry) => entry !== path)
     .map((entry) => `record.${entry}`)
     .join(', ')

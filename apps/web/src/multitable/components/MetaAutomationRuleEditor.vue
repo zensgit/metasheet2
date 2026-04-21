@@ -459,6 +459,22 @@
                 placeholder="例如：record.watcherGroupIds, record.escalationGroupId"
                 data-field="dingtalkPersonMemberGroupRecipientFieldPath"
               />
+              <div
+                v-if="selectedMemberGroupRecipientFields(action).length"
+                class="meta-rule-editor__recipient-list meta-rule-editor__recipient-list--selected"
+              >
+                <button
+                  v-for="field in selectedMemberGroupRecipientFields(action)"
+                  :key="field.id"
+                  class="meta-rule-editor__recipient-chip"
+                  type="button"
+                  :data-member-group-recipient-field="field.id"
+                  @click="removeMemberGroupRecipientFieldPath(action, field.id)"
+                >
+                  <strong>{{ field.label }}</strong>
+                  <em>Remove</em>
+                </button>
+              </div>
               <div class="meta-rule-editor__hint">
                 Use comma or newline separated <code>record.&lt;fieldId&gt;</code> paths whose values resolve to member group IDs.
               </div>
@@ -1075,6 +1091,15 @@ function selectedRecipientFields(action: DraftAction) {
     .filter((item) => item.label)
 }
 
+function selectedMemberGroupRecipientFields(action: DraftAction) {
+  return parseRecipientFieldPathsText(action.config.memberGroupRecipientFieldPath)
+    .map((path) => ({
+      id: path,
+      label: recipientFieldSummaryLabel(path),
+    }))
+    .filter((item) => item.label)
+}
+
 function recipientFieldPathWarnings(value: unknown) {
   const candidateIds = new Set(recipientCandidateFields.value.map((field) => field.id))
   return parseRecipientFieldPathsText(value)
@@ -1103,6 +1128,13 @@ function appendRecipientFieldPath(action: DraftAction, select: HTMLSelectElement
 
 function removeRecipientFieldPath(action: DraftAction, path: string) {
   action.config.recipientFieldPath = parseRecipientFieldPathsText(action.config.recipientFieldPath)
+    .filter((entry) => entry !== path)
+    .map((entry) => `record.${entry}`)
+    .join(', ')
+}
+
+function removeMemberGroupRecipientFieldPath(action: DraftAction, path: string) {
+  action.config.memberGroupRecipientFieldPath = parseRecipientFieldPathsText(action.config.memberGroupRecipientFieldPath)
     .filter((entry) => entry !== path)
     .map((entry) => `record.${entry}`)
     .join(', ')

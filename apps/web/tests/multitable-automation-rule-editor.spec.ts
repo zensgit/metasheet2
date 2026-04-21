@@ -497,6 +497,36 @@ describe('MetaAutomationRuleEditor', () => {
     expect(container.textContent).toContain('record.watcherGroupIds')
   })
 
+  it('can remove a selected dynamic member group recipient field chip in the rule editor', async () => {
+    const client = mockClient()
+    const { container } = mount({
+      visible: true,
+      sheetId: 'sheet_1',
+      fields,
+      views,
+      client,
+    })
+    await flushPromises()
+
+    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header select') as HTMLSelectElement
+    actionSelect.value = 'send_dingtalk_person_message'
+    actionSelect.dispatchEvent(new Event('change'))
+    await flushPromises()
+
+    const memberGroupFieldInput = container.querySelector('[data-field="dingtalkPersonMemberGroupRecipientFieldPath"]') as HTMLInputElement
+    memberGroupFieldInput.value = 'record.watcherGroupIds, record.escalationGroupId'
+    memberGroupFieldInput.dispatchEvent(new Event('input'))
+    await flushPromises()
+
+    const firstChip = container.querySelector('[data-member-group-recipient-field="watcherGroupIds"]') as HTMLButtonElement
+    expect(firstChip?.textContent).toContain('record.watcherGroupIds')
+    firstChip.click()
+    await flushPromises()
+
+    expect(memberGroupFieldInput.value).toBe('record.escalationGroupId')
+    expect(container.querySelector('[data-member-group-recipient-field="watcherGroupIds"]')).toBeNull()
+  })
+
   it('can pick a record recipient field in the rule editor', async () => {
     const client = mockClient()
     const { container } = mount({
