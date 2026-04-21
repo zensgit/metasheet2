@@ -75,8 +75,8 @@ normal successful path race.
 ## Review Thread Close-Out: Frontend Opt-In Boundaries
 
 After the backend consistency fixes, the PR still had non-blocking Copilot
-review threads around frontend opt-in boundaries. Two low-risk tightenings were
-landed:
+review threads around frontend opt-in boundaries. Three low-risk tightenings
+were landed:
 
 ### Direct Vite env access
 
@@ -108,12 +108,37 @@ Other editors receive a tiny inert binding object. This keeps number/date/select
 /link/attachment editors on the REST path without creating Yjs document watchers
 or socket-related state when the flag is enabled.
 
-The larger suggestion to move Yjs imports behind dynamic imports was not included
-in this PR because it would turn a small POC close-out into a chunking/lazy-load
-refactor. The current change closes the runtime-footprint issue and preserves
-direct Vite flag replacement. Bundle splitting can remain a separate follow-up if
-we decide the opt-in path must also be physically excluded from the default
-bundle.
+### Lazy Yjs runtime import
+
+The opt-in path now also physically lazy-loads the Yjs runtime modules:
+
+```ts
+const [{ useYjsDocument }, { useYjsTextField }] = await Promise.all([
+  import('./useYjsDocument'),
+  import('./useYjsTextField'),
+])
+```
+
+This keeps `useYjsCellBinding()` inert in default flag-off production builds
+before creating a `Y.Doc`, Socket.IO connection, document watcher, or Yjs runtime
+chunk. Production flag-off builds return through a compile-time early branch:
+
+```ts
+const viteYjsCollabEnabled = import.meta.env.VITE_ENABLE_YJS_COLLAB === 'true'
+const allowProcessEnvFlagFallback = import.meta.env.MODE === 'test'
+
+if (!viteYjsCollabEnabled && !allowProcessEnvFlagFallback) {
+  return inertBinding
+}
+```
+
+Vitest still uses the `process.env` fallback so `vi.stubEnv()` can exercise both
+enabled and disabled paths without changing the production bundle contract.
+
+Because dynamic imports can resolve after Vue setup has completed,
+`useYjsDocument()` and `useYjsTextField()` now support
+`registerUnmount: false` plus an explicit `dispose()` method. `useYjsCellBinding`
+owns those disposers and calls them from `release()` / component unmount.
 
 ## Files Changed
 
@@ -129,11 +154,22 @@ bundle.
     realtime and eventBus notification.
 - `apps/web/src/multitable/composables/useYjsCellBinding.ts`
   - Switches to direct `import.meta.env.VITE_ENABLE_YJS_COLLAB` access.
+  - Lazy-loads `useYjsDocument` / `useYjsTextField` only when the flag is
+    enabled.
+  - Adds a compile-time flag-off early return so default production builds do
+    not emit the Yjs runtime chunks.
+- `apps/web/src/multitable/composables/useYjsDocument.ts`
+  - Adds `registerUnmount: false` and explicit `dispose()` for lazy callers.
+- `apps/web/src/multitable/composables/useYjsTextField.ts`
+  - Adds `registerUnmount: false` and explicit `dispose()` for lazy callers.
 - `apps/web/src/multitable/components/cells/MetaCellEditor.vue`
   - Avoids constructing a Yjs binding for non-text editors.
 - `apps/web/tests/multitable-yjs-cell-editor.spec.ts`
   - Adds eligibility tests proving non-string editors do not instantiate the
     Yjs binding while normal string editors still do.
+- `apps/web/tests/multitable-yjs-cell-binding.spec.ts`
+  - Waits for lazy runtime imports in enabled-path tests and keeps disabled-path
+    tests locked to zero Socket.IO construction.
 
 ## Remaining Limitations
 

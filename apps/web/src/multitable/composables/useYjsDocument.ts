@@ -41,7 +41,16 @@ function handleSyncMessage(
  * merge per-range via Yjs CRDT; overlapping edits interleave at the
  * nearest common anchor.
  */
-export function useYjsDocument(recordId: Ref<string | null>) {
+export interface UseYjsDocumentOptions {
+  /**
+   * Register Vue's onUnmounted cleanup automatically. Dynamic/lazy callers
+   * may instantiate this composable after setup(), where onUnmounted is not
+   * available; those callers must pass false and call dispose() themselves.
+   */
+  registerUnmount?: boolean
+}
+
+export function useYjsDocument(recordId: Ref<string | null>, options: UseYjsDocumentOptions = {}) {
   const doc = shallowRef<Y.Doc | null>(null)
   const connected = ref(false)
   const synced = ref(false)
@@ -222,7 +231,7 @@ export function useYjsDocument(recordId: Ref<string | null>) {
   }
 
   // Auto-connect when recordId changes
-  watch(
+  const stopRecordWatch = watch(
     recordId,
     (newId) => {
       if (newId) connect(newId)
@@ -231,7 +240,14 @@ export function useYjsDocument(recordId: Ref<string | null>) {
     { immediate: true },
   )
 
-  onUnmounted(disconnect)
+  function dispose(): void {
+    try { stopRecordWatch() } catch { /* ignore */ }
+    disconnect()
+  }
+
+  if (options.registerUnmount !== false) {
+    onUnmounted(dispose)
+  }
 
   return {
     doc,
@@ -244,6 +260,7 @@ export function useYjsDocument(recordId: Ref<string | null>) {
     activeCollaboratorCount,
     connect,
     disconnect,
+    dispose,
     setActiveField,
     getFieldCollaborators,
   }

@@ -42,6 +42,11 @@ export function useYjsTextField(
   fieldId: string,
   options?: {
     setActiveField?: (fieldId: string | null) => void
+    /**
+     * Register Vue's onUnmounted cleanup automatically. Lazy callers that
+     * instantiate after setup() must pass false and call dispose() manually.
+     */
+    registerUnmount?: boolean
   },
 ) {
   const text = ref('')
@@ -82,7 +87,7 @@ export function useYjsTextField(
     fieldsObserver = null
   }
 
-  watch(
+  const stopDocWatch = watch(
     doc,
     (newDoc) => {
       cleanup()
@@ -116,6 +121,11 @@ export function useYjsTextField(
     },
     { immediate: true },
   )
+
+  function dispose() {
+    try { stopDocWatch() } catch { /* ignore */ }
+    cleanup()
+  }
 
   /**
    * Apply newText to the bound Y.Text using a minimal diff so concurrent
@@ -184,7 +194,9 @@ export function useYjsTextField(
     yText?.delete(index, length)
   }
 
-  onUnmounted(cleanup)
+  if (options?.registerUnmount !== false) {
+    onUnmounted(dispose)
+  }
 
   return {
     text: readonly(text),
@@ -193,6 +205,7 @@ export function useYjsTextField(
     setText,
     insertAt,
     deleteRange,
+    dispose,
     /** Internal — exposed for tests. Pure, does not touch Y.Text. */
     _diffTextEdit: diffTextEdit,
   }

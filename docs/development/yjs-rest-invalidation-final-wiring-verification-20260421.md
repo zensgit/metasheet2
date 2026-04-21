@@ -113,12 +113,43 @@ Coverage from this run:
 - Non-string `MetaCellEditor` instances do not construct `useYjsCellBinding`.
 - Normal string `MetaCellEditor` instances with a record ID still construct the
   binding.
+- Flag-off `useYjsCellBinding()` remains inert and constructs no Socket.IO
+  client.
+- Flag-on `useYjsCellBinding()` waits for the lazy Yjs runtime import, then
+  connects, subscribes, and drives `Y.Text`.
+- Timeout fallback still tears down the lazy runtime and returns to REST.
 - Existing Yjs diff, seed-guard, stale-connect guard, awareness, and cell-binding
   behavior still pass.
 
+Command:
+
+```bash
+pnpm --filter @metasheet/web build
+```
+
+Result:
+
+```text
+vue-tsc -b && vite build
+✓ 2351 modules transformed.
+✓ built in 5.01s
+EXIT=0
+```
+
+Bundle check from this default flag-off production build:
+
+```text
+No dist asset named useYjsDocument-*.js
+No dist asset named useYjsTextField-*.js
+No dist asset named yjs-*.js
+```
+
+This verifies the opt-in boundary at bundle level: default builds do not emit the
+Yjs runtime chunks unless `VITE_ENABLE_YJS_COLLAB=true` is set for the build.
+
 ### GitHub checks
 
-Observed on PR #960 before adding this documentation-only commit:
+Observed on PR #960 before the latest lazy-runtime close-out commit:
 
 ```text
 after-sales integration      pass

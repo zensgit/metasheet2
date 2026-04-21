@@ -28,11 +28,16 @@ vi.mock('../src/composables/useAuth', () => ({
   }),
 }))
 
-async function flushUi(cycles = 6): Promise<void> {
+async function flushUi(cycles = 12): Promise<void> {
   for (let index = 0; index < cycles; index += 1) {
     await Promise.resolve()
     await nextTick()
   }
+}
+
+async function flushLazyRuntime(): Promise<void> {
+  await vi.dynamicImportSettled()
+  await flushUi()
 }
 
 async function loadBinding() {
@@ -86,7 +91,7 @@ describe('useYjsCellBinding', () => {
       },
     }))
     app.mount(container!)
-    await flushUi()
+    await flushLazyRuntime()
 
     // Discriminating assertion: no Socket.IO client was constructed.
     expect(ioMock).not.toHaveBeenCalled()
@@ -115,7 +120,7 @@ describe('useYjsCellBinding', () => {
       },
     }))
     app.mount(container!)
-    await flushUi()
+    await flushLazyRuntime()
 
     expect(ioMock).not.toHaveBeenCalled()
   })
@@ -123,7 +128,8 @@ describe('useYjsCellBinding', () => {
   it('drives Y.Text when flag is on and the sync handshake completes', async () => {
     vi.stubEnv('VITE_ENABLE_YJS_COLLAB', 'true')
     vi.resetModules()
-    const { useYjsCellBinding } = await loadBinding()
+    const { useYjsCellBinding, isYjsCollabEnabled } = await loadBinding()
+    expect(isYjsCollabEnabled()).toBe(true)
 
     let activeRef: Ref<boolean> | null = null
     let textRef: Ref<string> | null = null
@@ -144,7 +150,7 @@ describe('useYjsCellBinding', () => {
       },
     }))
     app.mount(container!)
-    await flushUi()
+    await flushLazyRuntime()
 
     // io() was called, socket subscribe sent.
     expect(ioMock).toHaveBeenCalledTimes(1)
@@ -194,7 +200,8 @@ describe('useYjsCellBinding', () => {
     vi.stubEnv('VITE_ENABLE_YJS_COLLAB', 'true')
     vi.resetModules()
     vi.useFakeTimers()
-    const { useYjsCellBinding } = await loadBinding()
+    const { useYjsCellBinding, isYjsCollabEnabled } = await loadBinding()
+    expect(isYjsCollabEnabled()).toBe(true)
 
     const onFallback = vi.fn()
     let activeRef: Ref<boolean> | null = null
@@ -214,11 +221,9 @@ describe('useYjsCellBinding', () => {
       },
     }))
     app.mount(container!)
-    // Flush the initial watcher without advancing the fake timer.
-    await Promise.resolve()
-    await nextTick()
-    await Promise.resolve()
-    await nextTick()
+    // Flush initial watcher + lazy Yjs runtime import without advancing
+    // the fake timer.
+    await flushLazyRuntime()
 
     expect(ioMock).toHaveBeenCalledTimes(1)
     // Intentionally do NOT fire `connect` / `yjs:message`.

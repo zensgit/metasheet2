@@ -1,8 +1,10 @@
 import { ref, shallowRef, watch, onUnmounted } from 'vue'
 import type { Ref } from 'vue'
-import { useYjsDocument } from './useYjsDocument'
-import { useYjsTextField } from './useYjsTextField'
 import type { YjsPresenceUser } from '../types'
+
+type UseYjsDocumentFn = typeof import('./useYjsDocument')['useYjsDocument']
+type UseYjsTextFieldFn = typeof import('./useYjsTextField')['useYjsTextField']
+type YjsDocumentApi = ReturnType<UseYjsDocumentFn>
 
 /**
  * Opt-in Yjs binding for a single text cell.
@@ -21,13 +23,17 @@ import type { YjsPresenceUser } from '../types'
  *   with REST — this composable never throws and never swallows user edits.
  *
  * Scope: POC wiring. Only text (`string` non-date-like) cells should call
- * this. Other field types stay on REST.
+ * this. Other field types stay on REST. The Yjs runtime modules are loaded
+ * lazily only after the flag is on, keeping the default flag-off path from
+ * eagerly importing the Socket.IO/Yjs composables.
  *
  * To enable at build time:
  *   VITE_ENABLE_YJS_COLLAB=true npm --workspace @metasheet/web run build
  */
 
 export const YJS_COLLAB_ENV_FLAG = 'VITE_ENABLE_YJS_COLLAB'
+const viteYjsCollabEnabled = import.meta.env.VITE_ENABLE_YJS_COLLAB === 'true'
+const allowProcessEnvFlagFallback = import.meta.env.MODE === 'test'
 
 /**
  * Reads the build-time flag from `import.meta.env`, which Vite replaces at
@@ -39,10 +45,12 @@ export const YJS_COLLAB_ENV_FLAG = 'VITE_ENABLE_YJS_COLLAB'
  */
 export function isYjsCollabEnabled(): boolean {
   try {
-    if (import.meta.env.VITE_ENABLE_YJS_COLLAB === 'true') return true
+    if (viteYjsCollabEnabled) return true
+    if (!allowProcessEnvFlagFallback) return false
     // Fallback to process.env so `vi.stubEnv` (which writes to process.env
-    // in Node) picks the flag up in Vitest. In a browser build there is
-    // no `process` global, so this check is a no-op.
+    // in Node) picks the flag up in Vitest. This path is intentionally
+    // test-only; production flag-off builds can return before the lazy
+    // Yjs imports so the runtime chunk is dropped.
     const globalProcess = (globalThis as unknown as {
       process?: { env?: Record<string, string | undefined> }
     }).process
@@ -97,6 +105,17 @@ export function useYjsCellBinding(options: UseYjsCellBindingOptions): YjsCellBin
   const text = ref('')
   const collaborators = ref<YjsPresenceUser[]>([])
 
+  if (!viteYjsCollabEnabled && !allowProcessEnvFlagFallback) {
+    options.onFallback?.('disabled')
+    return {
+      active,
+      text,
+      setText: () => { /* inactive: no-op, caller uses REST path */ },
+      collaborators,
+      release: () => { /* nothing to release */ },
+    }
+  }
+
   if (!isYjsCollabEnabled()) {
     // Flag off: composable is inert. No watchers, no socket call.
     options.onFallback?.('disabled')
@@ -119,6 +138,7 @@ export function useYjsCellBinding(options: UseYjsCellBindingOptions): YjsCellBin
   let timeoutHandle: ReturnType<typeof setTimeout> | null = null
   let released = false
   let yjsTextApi: { setText: (next: string) => void } | null = null
+  let yjsTextDispose: (() => void) | null = null
   let textWatchStop: (() => void) | null = null
   let yjsActiveStop: (() => void) | null = null
   // Mirrors the Y.Text-exists signal from useYjsTextField for the active
@@ -127,20 +147,16 @@ export function useYjsCellBinding(options: UseYjsCellBindingOptions): YjsCellBin
   // useYjsTextField.ts — if the Y.Text doesn't exist we MUST fall back
   // to REST rather than creating an empty Y.Text and risking overwrite.
   const boundYjsActive = ref(false)
+  let yjs: YjsDocumentApi | null = null
+  let useYjsTextFieldRuntime: UseYjsTextFieldFn | null = null
+  let runtimeReady = false
 
-  const yjs = useYjsDocument(liveRecordId)
+  let stopPresenceWatch: (() => void) | null = null
+  let stopErrorWatch: (() => void) | null = null
+  let stopSyncedWatch: (() => void) | null = null
+  let stopConnectedWatch: (() => void) | null = null
 
-  // Presence → per-field collaborators. `getFieldCollaborators` already
-  // excludes the current user; we only need to refresh on presence updates.
-  const stopPresenceWatch = watch(
-    () => yjs.activeUsers.value,
-    () => {
-      collaborators.value = fieldKey.value
-        ? yjs.getFieldCollaborators(fieldKey.value)
-        : []
-    },
-    { deep: true },
-  )
+  void loadYjsRuntime()
 
   function clearTimer() {
     if (timeoutHandle) {
@@ -157,6 +173,10 @@ export function useYjsCellBinding(options: UseYjsCellBindingOptions): YjsCellBin
     collaborators.value = []
     text.value = ''
     yjsTextApi = null
+    if (yjsTextDispose) {
+      try { yjsTextDispose() } catch { /* ignore */ }
+      yjsTextDispose = null
+    }
     if (textWatchStop) {
       try { textWatchStop() } catch { /* ignore */ }
       textWatchStop = null
@@ -172,15 +192,18 @@ export function useYjsCellBinding(options: UseYjsCellBindingOptions): YjsCellBin
   }
 
   function bindField(fid: string) {
+    if (!yjs || !useYjsTextFieldRuntime) return
     fieldKey.value = fid
     // useYjsTextField returns reactive text + setText/insertAt/deleteRange
     // + yjsActive (true only when a Y.Text already exists under this
     // fieldId). We refuse to activate our binding until yjsActive flips
     // true so we never drive the input off an empty Y.Text.
-    const bound = useYjsTextField(yjs.doc, fid, {
+    const bound = useYjsTextFieldRuntime(yjs.doc, fid, {
       setActiveField: yjs.setActiveField,
+      registerUnmount: false,
     })
     yjsTextApi = { setText: bound.setText }
+    yjsTextDispose = bound.dispose
     boundYjsActive.value = bound.yjsActive.value
     textWatchStop = watch(
       () => bound.text.value,
@@ -198,75 +221,118 @@ export function useYjsCellBinding(options: UseYjsCellBindingOptions): YjsCellBin
     )
   }
 
-  // Listen for error events surfaced by useYjsDocument (missing JWT,
-  // explicit 'yjs:error' from server, etc.) and treat them as soft
-  // fallbacks.
-  const stopErrorWatch = watch(
-    () => yjs.error.value,
-    (err) => {
-      if (err) fallback('error')
-    },
-  )
-
-  // Consider the binding active once BOTH (a) the sync handshake
-  // completes AND (b) a Y.Text actually exists for this field. Without
-  // (b) we'd bind the input to a useYjsTextField that returns
-  // `text: ""` and a no-op `setText`, silently sending empty edits.
-  // The seed on the backend ensures (b) for existing fields, but if
-  // seed is delayed or failed we stay inactive and the caller keeps
-  // REST.
-  const stopSyncedWatch = watch(
-    [() => yjs.synced.value, () => boundYjsActive.value],
-    ([isSynced, hasYText]) => {
+  async function loadYjsRuntime(): Promise<void> {
+    try {
+      const [{ useYjsDocument }, { useYjsTextField }] = await Promise.all([
+        import('./useYjsDocument'),
+        import('./useYjsTextField'),
+      ])
       if (released) return
-      if (isSynced && hasYText) {
-        clearTimer()
-        active.value = true
-      } else if (!hasYText && active.value) {
-        // Y.Text disappeared mid-session (shouldn't happen in normal
-        // flow; defensive). Fall back to REST.
-        active.value = false
-      }
-    },
-  )
+      yjs = useYjsDocument(liveRecordId, { registerUnmount: false })
+      useYjsTextFieldRuntime = useYjsTextField
 
-  // Mid-session disconnect → fall back so the caller goes back to REST.
-  const stopConnectedWatch = watch(
-    () => yjs.connected.value,
-    (isConnected) => {
-      if (!isConnected && active.value) fallback('error')
-    },
-  )
+      // Presence → per-field collaborators. `getFieldCollaborators` already
+      // excludes the current user; we only need to refresh on presence updates.
+      stopPresenceWatch = watch(
+        () => yjs!.activeUsers.value,
+        () => {
+          collaborators.value = fieldKey.value && yjs
+            ? yjs.getFieldCollaborators(fieldKey.value)
+            : []
+        },
+        { deep: true },
+      )
+
+      // Listen for error events surfaced by useYjsDocument (missing JWT,
+      // explicit 'yjs:error' from server, etc.) and treat them as soft
+      // fallbacks.
+      stopErrorWatch = watch(
+        () => yjs!.error.value,
+        (err) => {
+          if (err) fallback('error')
+        },
+      )
+
+      // Consider the binding active once BOTH (a) the sync handshake
+      // completes AND (b) a Y.Text actually exists for this field. Without
+      // (b) we'd bind the input to a useYjsTextField that returns
+      // `text: ""` and a no-op `setText`, silently sending empty edits.
+      // The seed on the backend ensures (b) for existing fields, but if
+      // seed is delayed or failed we stay inactive and the caller keeps
+      // REST.
+      stopSyncedWatch = watch(
+        [() => yjs!.synced.value, () => boundYjsActive.value],
+        ([isSynced, hasYText]) => {
+          if (released) return
+          if (isSynced && hasYText) {
+            clearTimer()
+            active.value = true
+          } else if (!hasYText && active.value) {
+            // Y.Text disappeared mid-session (shouldn't happen in normal
+            // flow; defensive). Fall back to REST.
+            active.value = false
+          }
+        },
+      )
+
+      // Mid-session disconnect → fall back so the caller goes back to REST.
+      stopConnectedWatch = watch(
+        () => yjs!.connected.value,
+        (isConnected) => {
+          if (!isConnected && active.value) fallback('error')
+        },
+      )
+
+      runtimeReady = true
+      startBinding(options.recordId.value, options.fieldId.value)
+    } catch (err) {
+      console.warn('[multitable] failed to load Yjs cell binding runtime', err)
+      fallback('error')
+    }
+  }
+
+  function resetActiveFieldBinding(): void {
+    clearTimer()
+    active.value = false
+    boundYjsActive.value = false
+    collaborators.value = []
+    text.value = ''
+    yjsTextApi = null
+    if (yjsTextDispose) {
+      try { yjsTextDispose() } catch { /* ignore */ }
+      yjsTextDispose = null
+    }
+    if (textWatchStop) {
+      try { textWatchStop() } catch { /* ignore */ }
+      textWatchStop = null
+    }
+    if (yjsActiveStop) {
+      try { yjsActiveStop() } catch { /* ignore */ }
+      yjsActiveStop = null
+    }
+  }
+
+  function startBinding(newRecordId: string | null, newFieldId: string | null): void {
+    resetActiveFieldBinding()
+    if (!runtimeReady) return
+    if (!newRecordId || !newFieldId) {
+      fieldKey.value = null
+      liveRecordId.value = null
+      return
+    }
+    liveRecordId.value = newRecordId
+    bindField(newFieldId)
+    timeoutHandle = setTimeout(() => {
+      if (!active.value) fallback('timeout')
+    }, timeoutMs)
+  }
 
   // Main driver: (re)bind when record/field inputs change.
   const stopInputsWatch = watch(
     [options.recordId, options.fieldId],
     ([newRecordId, newFieldId]) => {
       if (released) return
-      clearTimer()
-      active.value = false
-      boundYjsActive.value = false
-      collaborators.value = []
-      text.value = ''
-      yjsTextApi = null
-      if (textWatchStop) {
-        try { textWatchStop() } catch { /* ignore */ }
-        textWatchStop = null
-      }
-      if (yjsActiveStop) {
-        try { yjsActiveStop() } catch { /* ignore */ }
-        yjsActiveStop = null
-      }
-      if (!newRecordId || !newFieldId) {
-        fieldKey.value = null
-        liveRecordId.value = null
-        return
-      }
-      liveRecordId.value = newRecordId
-      bindField(newFieldId)
-      timeoutHandle = setTimeout(() => {
-        if (!active.value) fallback('timeout')
-      }, timeoutMs)
+      startBinding(newRecordId, newFieldId)
     },
     { immediate: true },
   )
@@ -284,6 +350,10 @@ export function useYjsCellBinding(options: UseYjsCellBindingOptions): YjsCellBin
     collaborators.value = []
     text.value = ''
     yjsTextApi = null
+    if (yjsTextDispose) {
+      try { yjsTextDispose() } catch { /* ignore */ }
+      yjsTextDispose = null
+    }
     if (textWatchStop) {
       try { textWatchStop() } catch { /* ignore */ }
       textWatchStop = null
@@ -295,12 +365,12 @@ export function useYjsCellBinding(options: UseYjsCellBindingOptions): YjsCellBin
     boundYjsActive.value = false
     fieldKey.value = null
     liveRecordId.value = null
-    try { stopPresenceWatch() } catch { /* ignore */ }
-    try { stopErrorWatch() } catch { /* ignore */ }
-    try { stopSyncedWatch() } catch { /* ignore */ }
-    try { stopConnectedWatch() } catch { /* ignore */ }
+    if (stopPresenceWatch) try { stopPresenceWatch() } catch { /* ignore */ }
+    if (stopErrorWatch) try { stopErrorWatch() } catch { /* ignore */ }
+    if (stopSyncedWatch) try { stopSyncedWatch() } catch { /* ignore */ }
+    if (stopConnectedWatch) try { stopConnectedWatch() } catch { /* ignore */ }
     try { stopInputsWatch() } catch { /* ignore */ }
-    try { yjs.disconnect() } catch { /* ignore */ }
+    try { yjs?.dispose() } catch { /* ignore */ }
   }
 
   onUnmounted(release)
