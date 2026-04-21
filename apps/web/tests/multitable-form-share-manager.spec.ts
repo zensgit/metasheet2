@@ -197,9 +197,27 @@ describe('MetaFormShareManager', () => {
     mount({ visible: true, sheetId: 'sh_1', viewId: 'v_1', client })
     await flushPromises()
 
-    expect(document.querySelector('[data-form-share-allowlist-search]')).toBeTruthy()
+    const search = document.querySelector('[data-form-share-allowlist-search]') as HTMLInputElement
+    expect(search).toBeTruthy()
+    expect(search.placeholder).toBe('Search local users or member groups')
+    expect(document.body.textContent).toContain('The form opens only after DingTalk sign-in, and the user must already be bound to a local account.')
+    expect(document.body.textContent).toContain('Allowed system users and member groups')
+    expect(document.body.textContent).toContain('DingTalk is only the sign-in and delivery channel. The allowlist still targets your local users and member groups.')
+    expect(document.body.textContent).toContain('No local user allowlist configured. Access is still gated by the selected DingTalk mode; add local users or member groups to narrow who can fill this form.')
+    expect(document.body.textContent).toContain('No local member-group allowlist configured. Add a local member group to let its members fill this form.')
     expect(document.querySelector('[data-form-share-add-subject="user:user_1"]')).toBeTruthy()
     expect(document.querySelector('[data-form-share-add-subject="member-group:group_ops"]')).toBeTruthy()
+  })
+
+  it('explains DingTalk delivery still uses local allowlists for granted mode', async () => {
+    const { client } = mockClient(fakeConfig({ accessMode: 'dingtalk_granted' }))
+    mount({ visible: true, sheetId: 'sh_1', viewId: 'v_1', client })
+    await flushPromises()
+
+    expect(document.querySelector('[data-form-share-allowlist-search]')).toBeTruthy()
+    expect(document.body.textContent).toContain('The form opens only for DingTalk-bound users whose DingTalk grant is enabled by an administrator.')
+    expect(document.body.textContent).toContain('DingTalk is only the sign-in and delivery channel. The allowlist still targets your local users and member groups.')
+    expect(document.body.textContent).toContain('No local user allowlist configured. Access is still gated by the selected DingTalk mode; add local users or member groups to narrow who can fill this form.')
   })
 
   it('adds an allowed user through the allowlist controls', async () => {

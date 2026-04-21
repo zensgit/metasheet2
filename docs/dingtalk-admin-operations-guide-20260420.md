@@ -15,6 +15,12 @@ This guide explains the management-side UI flow for:
 
 It does not cover end-user filling behavior beyond the links they receive.
 
+## Quick entry
+
+- Send a table-triggered message to a DingTalk group: see [C. Configure a DingTalk group notification rule](#c-configure-a-dingtalk-group-notification-rule).
+- Send a form link that users can fill: see [D. Configure a public form](#d-configure-a-public-form).
+- Send to a DingTalk group while only selected local users or member groups can fill: see [E. Configure protected public-form allowlists](#e-configure-protected-public-form-allowlists) and [Scenario 2](#scenario-2-broadcast-to-a-group-but-only-selected-users-can-fill).
+
 ## Before you start
 
 You need all of the following:
