@@ -3,7 +3,7 @@
 - Branch: `codex/wire-yjs-text-cell-20260420`
 - PR: `#960`
 - Date: 2026-04-21
-- Commits: `96d2f76ca`, `e014c8182`
+- Fix commits after rebase: `ed32fce30`, `41a6826d6`
 - Scope: final REST -> Yjs consistency close-out before merge.
 
 ## Context

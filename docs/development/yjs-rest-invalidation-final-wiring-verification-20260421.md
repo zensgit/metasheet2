@@ -3,7 +3,7 @@
 - Branch: `codex/wire-yjs-text-cell-20260420`
 - PR: `#960`
 - Date: 2026-04-21
-- Verified commits: `96d2f76ca`, `e014c8182`
+- Verified fix commits after rebase: `ed32fce30`, `41a6826d6`
 - Linked development MD:
   `docs/development/yjs-rest-invalidation-final-wiring-development-20260421.md`
 
@@ -80,7 +80,7 @@ Strict E2E with Enhanced Gates skipping
 PR metadata at that point:
 
 ```text
-head: e014c81821dd5da82f58b82a27d6589bf6cd6638
+head: e014c81821dd5da82f58b82a27d6589bf6cd6638 (pre-rebase)
 mergeable: MERGEABLE
 reviewDecision: REVIEW_REQUIRED
 ```
