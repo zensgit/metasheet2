@@ -100,6 +100,11 @@ Protected forms still use the existing create-only public-form model:
 - public form != view the internal table
 - public form != edit existing records
 
+Runtime guardrail:
+
+- DingTalk automation delivery only emits public-form links for same-sheet form views with active sharing
+- expired public-form sharing is rejected before sending the DingTalk message
+
 ### 6. Protected public-form allowlists
 
 Implemented in the current protected-public-form branch:
@@ -222,8 +227,13 @@ This is the preferred implementation for:
 
 Authoring guardrail:
 
+- group-message and person-message automations disable save when the selected public form link cannot produce a working fill link
+- group-message and person-message automations disable save when the selected internal processing view is not in the current sheet
+- automation create/update APIs reject invalid public form or internal processing links before rules are saved
 - group-message automations warn when the selected public form link is still fully public
-- the warning directs owners toward DingTalk-protected access plus allowlists
+- group-message automations warn when a DingTalk-protected form has no allowed users or member groups
+- group-message and person-message automation previews show the selected public form access range before save
+- the warnings direct owners toward DingTalk-protected access plus allowlists
 
 ## Current limitations
 
