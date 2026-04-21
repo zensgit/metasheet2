@@ -244,6 +244,7 @@ describe('MetaAutomationRuleEditor', () => {
 
   it('warns that DingTalk Test Run can send real messages and emits the saved rule id', async () => {
     const tested = vi.fn()
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
     const { container } = mount({
       visible: true,
       sheetId: 'sheet_1',
@@ -272,6 +273,102 @@ describe('MetaAutomationRuleEditor', () => {
     testBtn.click()
     await flushPromises()
 
+    expect(tested).toHaveBeenCalledWith('rule_1')
+    expect(confirmSpy).toHaveBeenCalledWith(expect.stringContaining('can send real DingTalk messages'))
+    expect(confirmSpy).toHaveBeenCalledWith(expect.stringContaining('Unsaved changes are not included'))
+  })
+
+  it('does not emit DingTalk Test Run when confirmation is canceled', async () => {
+    const tested = vi.fn()
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false)
+    const { container } = mount({
+      visible: true,
+      sheetId: 'sheet_1',
+      fields,
+      views,
+      rule: fakeRule({
+        actionType: 'send_dingtalk_person_message',
+        actionConfig: {
+          userIds: ['user_1'],
+          titleTemplate: 'Ticket {{recordId}}',
+          bodyTemplate: 'Please fill',
+        },
+        actions: [{
+          type: 'send_dingtalk_person_message',
+          config: { userIds: ['user_1'], titleTemplate: 'Ticket {{recordId}}', bodyTemplate: 'Please fill' },
+        }],
+      }),
+      onTest: tested,
+    })
+    await flushPromises()
+
+    const testBtn = container.querySelector('[data-action="test"]') as HTMLButtonElement
+    expect(testBtn.disabled).toBe(false)
+    testBtn.click()
+    await flushPromises()
+
+    expect(confirmSpy).toHaveBeenCalledTimes(1)
+    expect(tested).not.toHaveBeenCalled()
+  })
+
+  it('requires confirmation based on the saved rule even when the draft action changes', async () => {
+    const tested = vi.fn()
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
+    const { container } = mount({
+      visible: true,
+      sheetId: 'sheet_1',
+      fields,
+      views,
+      rule: fakeRule({
+        actionType: 'send_dingtalk_group_message',
+        actionConfig: {
+          destinationId: 'dt_1',
+          titleTemplate: 'Ticket {{recordId}}',
+          bodyTemplate: 'Please fill',
+        },
+        actions: [{
+          type: 'send_dingtalk_group_message',
+          config: { destinationId: 'dt_1', titleTemplate: 'Ticket {{recordId}}', bodyTemplate: 'Please fill' },
+        }],
+      }),
+      onTest: tested,
+    })
+    await flushPromises()
+
+    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header select') as HTMLSelectElement
+    actionSelect.value = 'notify'
+    actionSelect.dispatchEvent(new Event('change'))
+    await flushPromises()
+
+    ;(container.querySelector('[data-action="test"]') as HTMLButtonElement).click()
+    await flushPromises()
+
+    expect(confirmSpy).toHaveBeenCalledTimes(1)
+    expect(tested).toHaveBeenCalledWith('rule_1')
+  })
+
+  it('does not require confirmation for non-DingTalk Test Run', async () => {
+    const tested = vi.fn()
+    const confirmSpy = vi.spyOn(window, 'confirm')
+    const { container } = mount({
+      visible: true,
+      sheetId: 'sheet_1',
+      fields,
+      rule: fakeRule({
+        actionType: 'notify',
+        actionConfig: { message: 'Hello' },
+        actions: [{ type: 'notify', config: { message: 'Hello' } }],
+      }),
+      onTest: tested,
+    })
+    await flushPromises()
+
+    const testBtn = container.querySelector('[data-action="test"]') as HTMLButtonElement
+    expect(testBtn.disabled).toBe(false)
+    testBtn.click()
+    await flushPromises()
+
+    expect(confirmSpy).not.toHaveBeenCalled()
     expect(tested).toHaveBeenCalledWith('rule_1')
   })
 
