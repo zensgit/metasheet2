@@ -100,6 +100,11 @@ Protected forms still use the existing create-only public-form model:
 - public form != view the internal table
 - public form != edit existing records
 
+Runtime guardrail:
+
+- DingTalk automation delivery only emits public-form links for same-sheet form views with active sharing
+- expired public-form sharing is rejected before sending the DingTalk message
+
 ### 6. Protected public-form allowlists
 
 Implemented in the current protected-public-form branch:

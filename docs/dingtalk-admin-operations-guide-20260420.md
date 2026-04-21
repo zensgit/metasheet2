@@ -100,6 +100,7 @@ Automation authoring guardrail:
 - if a DingTalk group rule links to a fully public form, the automation editor warns that anyone with the message link can submit
 - if a DingTalk group rule links to a DingTalk-protected form without allowed users or member groups, the editor warns that all bound or authorized DingTalk users can submit
 - the warning is advisory; runtime delivery still performs the backend validation before sending the link
+- runtime delivery refuses non-form public views and expired public-form shares before sending DingTalk messages
 
 Supported access modes:
 
