@@ -110,6 +110,7 @@ Automation authoring guardrail:
 - the message summary and rule card also show `Allowed audience`, derived from local allowlist users/member groups when the form is DingTalk-protected
 - the warning is advisory; runtime delivery still performs the backend validation before sending the link
 - runtime DingTalk messages include `表单访问` and `允许范围` lines below the public form fill link, so recipients can see the access mode before opening the form
+- runtime DingTalk messages include `处理权限` below internal processing links, so group recipients know the link still requires system login and table/view permission
 - automation create/update APIs reject invalid public form or internal processing links before saving
 - runtime delivery refuses non-form public views and expired public-form shares before sending DingTalk messages
 - runtime delivery refuses missing internal processing views before sending DingTalk messages
@@ -174,6 +175,7 @@ Remember:
 
 - public form link != internal table access
 - internal link still obeys local ACL
+- DingTalk recipients without local access can see the message but cannot use the internal processing link to open the table/view
 
 ## G. Delivery history and troubleshooting
 

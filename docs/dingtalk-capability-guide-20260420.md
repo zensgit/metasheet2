@@ -105,6 +105,7 @@ Runtime guardrail:
 - DingTalk automation delivery only emits public-form links for same-sheet form views with active sharing
 - expired public-form sharing is rejected before sending the DingTalk message
 - runtime DingTalk messages append `表单访问` and `允许范围` below the fill link, reflecting public, DingTalk-bound, DingTalk-authorized, and local allowlist-constrained access
+- runtime DingTalk messages append `处理权限` below internal processing links, reminding recipients that the link requires system login and table/view permission
 
 ### 6. Protected public-form allowlists
 
@@ -234,6 +235,7 @@ Authoring guardrail:
 - group-message automations warn when the selected public form link is still fully public
 - group-message automations warn when a DingTalk-protected form has no allowed users or member groups
 - group-message and person-message automation previews show the selected public form access range before save
+- group-message and person-message runtime messages show the internal processing link permission requirement after delivery
 - the warnings direct owners toward DingTalk-protected access plus allowlists
 
 ## Current limitations
