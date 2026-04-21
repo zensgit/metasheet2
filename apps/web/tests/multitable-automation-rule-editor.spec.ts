@@ -452,6 +452,31 @@ describe('MetaAutomationRuleEditor', () => {
     expect(container.textContent).toContain('Public form sharing is disabled for "Public Form"')
   })
 
+  it('warns when a DingTalk group message includes a fully public form link', async () => {
+    const client = mockClient()
+    const { container } = mount({
+      visible: true,
+      sheetId: 'sheet_1',
+      fields,
+      views,
+      client,
+    })
+    await flushPromises()
+
+    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header select') as HTMLSelectElement
+    actionSelect.value = 'send_dingtalk_group_message'
+    actionSelect.dispatchEvent(new Event('change'))
+    await flushPromises()
+
+    const publicFormSelect = container.querySelector('[data-field="publicFormViewId"]') as HTMLSelectElement
+    publicFormSelect.value = 'view_form'
+    publicFormSelect.dispatchEvent(new Event('change'))
+    await flushPromises()
+
+    expect(container.textContent).toContain('Public form sharing for "Public Form" is fully public')
+    expect(container.textContent).toContain('Use DingTalk-protected access and an allowlist')
+  })
+
   it('emits DingTalk person action config with optional links', async () => {
     const saved = vi.fn()
     const client = mockClient()

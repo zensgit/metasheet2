@@ -12,6 +12,19 @@ const views = [
     type: 'form',
     config: { publicForm: { enabled: true, publicToken: 'pub_enabled', expiresAt: '2026-04-22T00:00:00.000Z' } },
   },
+  {
+    id: 'view_form_protected',
+    name: 'Protected Form',
+    type: 'form',
+    config: {
+      publicForm: {
+        enabled: true,
+        publicToken: 'pub_protected',
+        accessMode: 'dingtalk',
+        expiresAt: '2026-04-22T00:00:00.000Z',
+      },
+    },
+  },
   { id: 'view_form_unconfigured', name: 'Unconfigured Form', type: 'form' },
   {
     id: 'view_form_disabled',
@@ -67,5 +80,12 @@ describe('dingtalk public form link warnings', () => {
     expect(listDingTalkPublicFormLinkWarnings('view_form_expires_on', views, nowMs)).toEqual([
       'Public form sharing for "Expires On Form" has expired; renew sharing before sending this DingTalk fill link.',
     ])
+  })
+
+  it('warns for fully public form links when group-message access guardrails are enabled', () => {
+    expect(listDingTalkPublicFormLinkWarnings('view_form_enabled', views, { nowMs, warnWhenFullyPublic: true })).toEqual([
+      'Public form sharing for "Enabled Form" is fully public; everyone who can open the DingTalk message link can submit. Use DingTalk-protected access and an allowlist when only selected users should fill.',
+    ])
+    expect(listDingTalkPublicFormLinkWarnings('view_form_protected', views, { nowMs, warnWhenFullyPublic: true })).toEqual([])
   })
 })

@@ -466,6 +466,29 @@ describe('MetaAutomationManager', () => {
     expect(container.textContent).toContain('record.watcherGroupIds is a member group field')
   })
 
+  it('warns when a DingTalk group message includes a fully public form link in the inline form', async () => {
+    const { client } = mockClient([])
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
+    await flushPromises()
+
+    const addBtn = container.querySelector('.meta-automation__btn-add') as HTMLButtonElement
+    addBtn.click()
+    await nextTick()
+
+    const actionSelect = container.querySelector('[data-automation-field="actionType"]') as HTMLSelectElement
+    actionSelect.value = 'send_dingtalk_group_message'
+    actionSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushPromises()
+
+    const publicFormSelect = container.querySelector('[data-automation-field="publicFormViewId"]') as HTMLSelectElement
+    publicFormSelect.value = 'view_form'
+    publicFormSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushPromises()
+
+    expect(container.textContent).toContain('Public form sharing for "Public Form" is fully public')
+    expect(container.textContent).toContain('Use DingTalk-protected access and an allowlist')
+  })
+
   it('warns when a DingTalk person message selects a public form without a token in the inline form', async () => {
     const { client } = mockClient([])
     const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views: viewsWithMissingPublicToken, client })

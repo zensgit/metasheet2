@@ -213,7 +213,7 @@
               <option v-for="view in formViews" :key="view.id" :value="view.id">{{ view.name }}</option>
             </select>
             <div
-              v-for="warning in publicFormLinkWarnings(draft.publicFormViewId)"
+              v-for="warning in publicFormLinkWarnings(draft.publicFormViewId, true)"
               :key="`draft-group-public-form-${warning}`"
               class="meta-automation__hint meta-automation__hint--warning"
             >
@@ -935,8 +935,8 @@ function renderedTemplateExample(value: string, fallback: string) {
   return rendered || fallback
 }
 
-function publicFormLinkWarnings(value: unknown) {
-  return listDingTalkPublicFormLinkWarnings(value, props.views ?? [])
+function publicFormLinkWarnings(value: unknown, warnWhenFullyPublic = false) {
+  return listDingTalkPublicFormLinkWarnings(value, props.views ?? [], { warnWhenFullyPublic })
 }
 
 function copyPreviewText(key: string, text: string) {

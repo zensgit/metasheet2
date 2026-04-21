@@ -61,8 +61,8 @@ Supported:
 
 Current behavior:
 
-- one rule targets one group destination
-- one table can target multiple groups by using multiple rules
+- one rule can target multiple configured DingTalk group destinations
+- one rule can also resolve DingTalk group destination IDs from record field paths
 - destinations are manually registered; groups are not auto-imported from DingTalk
 
 ### 4. DingTalk person notifications
@@ -219,6 +219,11 @@ Use:
 This is the preferred implementation for:
 
 - “the whole group sees the message, but only specific people can submit”
+
+Authoring guardrail:
+
+- group-message automations warn when the selected public form link is still fully public
+- the warning directs owners toward DingTalk-protected access plus allowlists
 
 ## Current limitations
 
