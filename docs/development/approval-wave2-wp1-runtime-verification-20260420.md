@@ -169,7 +169,7 @@ Follow-up proposal (do NOT include in this PR, scope creep): wrap `ensureApprova
 
 After the DingTalk/Yjs queue landed, this branch was advanced again from `origin/main@c4093dcb8` to `origin/main@81edca7d9`. Rebase used `git rebase --autostash origin/main`, preserved the verification MD changes, and completed with no conflicts.
 
-Post-latest-main HEAD: `f2c030f33`.
+Post-latest-main feature HEAD before this verification doc commit: `f2c030f33`.
 
 ### Commands run (2026-04-21, .worktrees/wp1)
 
