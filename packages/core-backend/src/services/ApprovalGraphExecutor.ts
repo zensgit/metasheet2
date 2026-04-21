@@ -38,6 +38,19 @@ export interface ApprovalGraphResolution {
   assignments: ApprovalGraphAssignment[]
   ccEvents: ApprovalCcEvent[]
   autoApprovalEvents: ApprovalGraphAutoApprovalEvent[]
+  /**
+   * Aggregation mode of the node that was just resolved away from (by `resolveAfterApprove`).
+   * `null` for `resolveInitialState`, `resolveReturnToNode`, and non-approval advancement paths.
+   * Any-mode resolution carries `'any'`; all-mode carries `'all'` only when aggregation is complete
+   * (the route short-circuits incomplete all-mode before calling `resolveAfterApprove`).
+   */
+  aggregateMode: 'single' | 'all' | 'any' | null
+  /**
+   * Indicates that the previous node's aggregation requirement is satisfied and resolution advanced.
+   * Always `true` when `resolveAfterApprove` returns (incomplete aggregation never reaches here).
+   * `false` from the other entry points that do not represent an aggregation completion event.
+   */
+  aggregateComplete: boolean
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -312,10 +325,17 @@ export class ApprovalGraphExecutor {
     if (!start) {
       throw new Error('Runtime graph must contain a start node')
     }
-    return this.resolveFromNode(start.key)
+    return this.resolveFromNode(start.key, { aggregateMode: null, aggregateComplete: false })
   }
 
   resolveAfterApprove(currentNodeKey: string): ApprovalGraphResolution {
+    // The caller (ApprovalProductService) only reaches `resolveAfterApprove` after aggregation
+    // is satisfied for the current node. For 'any' mode that is on the first approver; for 'all'
+    // it is after the last approver; 'single' always satisfies on the sole approver. The resolution
+    // therefore carries `aggregateComplete: true` along with the current node's approval mode so
+    // downstream audit writers can distinguish `'any'` first-wins from `'all'` last-wins.
+    const aggregateMode = this.getApprovalMode(currentNodeKey)
+    const completionContext = { aggregateMode, aggregateComplete: true as const }
     const next = this.firstTargetForNode(currentNodeKey)
     if (!next) {
       return {
@@ -326,18 +346,24 @@ export class ApprovalGraphExecutor {
         assignments: [],
         ccEvents: [],
         autoApprovalEvents: [],
+        aggregateMode,
+        aggregateComplete: true,
       }
     }
-    return this.resolveFromNode(next)
+    return this.resolveFromNode(next, completionContext)
   }
 
   getApprovalMode(nodeKey: string): ApprovalMode {
     return normalizeApprovalMode(this.getApprovalNodeConfig(nodeKey).approvalMode)
   }
 
+  getApprovalNodeAssigneeIds(nodeKey: string): string[] {
+    return [...this.getApprovalNodeConfig(nodeKey).assigneeIds]
+  }
+
   resolveReturnToNode(targetNodeKey: string): ApprovalGraphResolution {
     this.getApprovalNodeConfig(targetNodeKey)
-    return this.resolveFromNode(targetNodeKey)
+    return this.resolveFromNode(targetNodeKey, { aggregateMode: null, aggregateComplete: false })
   }
 
   listVisitedApprovalNodeKeysUntil(currentNodeKey: string): string[] {
@@ -405,7 +431,10 @@ export class ApprovalGraphExecutor {
     }]
   }
 
-  private resolveFromNode(nodeKey: string): ApprovalGraphResolution {
+  private resolveFromNode(
+    nodeKey: string,
+    context: { aggregateMode: 'single' | 'all' | 'any' | null; aggregateComplete: boolean },
+  ): ApprovalGraphResolution {
     const ccEvents: ApprovalCcEvent[] = []
     const autoApprovalEvents: ApprovalGraphAutoApprovalEvent[] = []
     let currentKey: string | null = nodeKey
@@ -477,6 +506,8 @@ export class ApprovalGraphExecutor {
           })),
           ccEvents,
           autoApprovalEvents,
+          aggregateMode: context.aggregateMode,
+          aggregateComplete: context.aggregateComplete,
         }
       }
 
@@ -489,6 +520,8 @@ export class ApprovalGraphExecutor {
           assignments: [],
           ccEvents,
           autoApprovalEvents,
+          aggregateMode: context.aggregateMode,
+          aggregateComplete: context.aggregateComplete,
         }
       }
 
@@ -503,6 +536,8 @@ export class ApprovalGraphExecutor {
       assignments: [],
       ccEvents,
       autoApprovalEvents,
+      aggregateMode: context.aggregateMode,
+      aggregateComplete: context.aggregateComplete,
     }
   }
 

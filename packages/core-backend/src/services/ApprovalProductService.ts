@@ -1250,6 +1250,12 @@ export class ApprovalProductService {
       }
 
       const approvalMode = executor.getApprovalMode(currentNodeKey)
+      // Approval aggregation semantics:
+      //   'all'    (会签): deactivate only the actor's assignment, short-circuit if siblings remain.
+      //   'any'    (或签): first approver wins — deactivate siblings with an audit trail
+      //                    (aggregateCancelledBy/aggregateCancelledAt metadata) + one 'sign' record.
+      //   'single' / default: exactly one assignee expected; blanket-deactivate all active rows.
+      let aggregateCancelledAssigneeIds: string[] = []
       if (approvalMode === 'all') {
         await this.deactivateActorAssignmentsAtNode(client, id, currentNodeKey, actor.userId, actorRoles)
         const remainingAssignments = currentNodeAssignments.length - actorAssignments.length
@@ -1281,6 +1287,32 @@ export class ApprovalProductService {
           await client.query('COMMIT')
           return (await this.getApproval(id))!
         }
+      } else if (approvalMode === 'any') {
+        // Deactivate actor's own assignment first.
+        await this.deactivateActorAssignmentsAtNode(client, id, currentNodeKey, actor.userId, actorRoles)
+        // Identify siblings (still-active, non-actor) whose assignments the first-wins aggregation cancels.
+        const siblingAssignments = currentNodeAssignments.filter((assignment) =>
+          !assignmentMatchesActor(assignment, actor.userId, actorRoles))
+        aggregateCancelledAssigneeIds = Array.from(
+          new Set(siblingAssignments.map((assignment) => assignment.assignee_id)),
+        )
+        if (siblingAssignments.length > 0) {
+          await client.query(
+            `UPDATE approval_assignments
+             SET is_active = FALSE,
+                 metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object(
+                   'aggregateCancelledBy', $3::text,
+                   'aggregateCancelledAt', now()::text,
+                   'aggregateMode', 'any'
+                 ),
+                 updated_at = now()
+             WHERE instance_id = $1
+               AND node_key = $2
+               AND is_active = TRUE
+               AND id = ANY($4::uuid[])`,
+            [id, currentNodeKey, actor.userId, siblingAssignments.map((assignment) => assignment.id)],
+          )
+        }
       } else {
         await this.deactivateAllActiveAssignments(client, id)
       }
@@ -1305,6 +1337,15 @@ export class ApprovalProductService {
         ],
       )
       await this.insertAssignments(client, id, resolution.assignments)
+      const approveRecordMetadata: Record<string, unknown> = {
+        nodeKey: currentNodeKey,
+        nextNodeKey: resolution.currentNodeKey,
+        approvalMode,
+        aggregateComplete: true,
+      }
+      if (approvalMode === 'any' && aggregateCancelledAssigneeIds.length > 0) {
+        approveRecordMetadata.aggregateCancelled = aggregateCancelledAssigneeIds
+      }
       await this.insertApprovalRecord(client, id, {
         action: 'approve',
         actorId: actor.userId,
@@ -1314,13 +1355,29 @@ export class ApprovalProductService {
         toStatus: resolution.status,
         fromVersion: instance.version,
         toVersion: nextVersion,
-        metadata: {
-          nodeKey: currentNodeKey,
-          nextNodeKey: resolution.currentNodeKey,
-          approvalMode,
-          aggregateComplete: true,
-        },
+        metadata: approveRecordMetadata,
       }, actor)
+      if (approvalMode === 'any' && aggregateCancelledAssigneeIds.length > 0) {
+        // One 'sign' audit row describing the aggregation cancellation — lets the timeline UI
+        // render a muted "已被 {approver} 的决定覆盖" line without mining assignment metadata.
+        await this.insertApprovalRecord(client, id, {
+          action: 'sign',
+          actorId: 'system',
+          actorName: 'System',
+          comment: null,
+          fromStatus: instance.status,
+          toStatus: resolution.status,
+          fromVersion: instance.version,
+          toVersion: nextVersion,
+          metadata: {
+            nodeKey: currentNodeKey,
+            autoCancelled: true,
+            aggregateMode: 'any',
+            aggregateCancelledBy: actor.userId,
+            cancelledAssignees: aggregateCancelledAssigneeIds,
+          },
+        })
+      }
       await this.insertAutoApprovalEvents(client, id, nextVersion, resolution.status, resolution.autoApprovalEvents)
       await this.insertCcEvents(client, id, nextVersion, resolution.status, resolution.ccEvents)
 

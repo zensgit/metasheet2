@@ -3606,6 +3606,7 @@
           },
           "metadata": {
             "type": "object",
+            "description": "Runtime-populated metadata. Optional keys written by the approval executor:\n  - `aggregateCancelledBy` (string): userId of the approver whose any-mode (或签)\n    first-wins decision deactivated this sibling assignment.\n  - `aggregateCancelledAt` (string, ISO-8601): timestamp when the cancellation fired.\n  - `aggregateMode` ('any'): aggregation mode that triggered the cancellation;\n    present alongside `aggregateCancelledBy` on cancelled sibling assignments.\n",
             "additionalProperties": true
           }
         },

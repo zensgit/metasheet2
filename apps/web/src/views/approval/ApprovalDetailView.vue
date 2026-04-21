@@ -103,8 +103,17 @@
                   <span v-if="item.metadata?.approvalMode" class="approval-detail__meta-badge">
                     审批模式: {{ approvalModeLabel(item.metadata.approvalMode as string) }}
                   </span>
-                  <span v-if="item.metadata?.aggregateComplete" class="approval-detail__meta-badge approval-detail__meta-badge--complete">
+                  <span v-if="item.metadata?.aggregateComplete && item.metadata?.approvalMode === 'all'" class="approval-detail__meta-badge approval-detail__meta-badge--complete">
                     会签完成
+                  </span>
+                  <span v-if="item.metadata?.aggregateComplete && item.metadata?.approvalMode === 'any'" class="approval-detail__meta-badge approval-detail__meta-badge--complete">
+                    或签完成
+                  </span>
+                  <span v-if="cancelledAssigneesLabel(item.metadata)" class="approval-detail__meta-badge approval-detail__meta-badge--cancelled">
+                    {{ cancelledAssigneesLabel(item.metadata) }}
+                  </span>
+                  <span v-if="item.action === 'sign' && item.metadata?.autoCancelled" class="approval-detail__meta-badge approval-detail__meta-badge--cancelled">
+                    （已被 {{ item.metadata?.aggregateCancelledBy || '发起人' }} 的决定覆盖）
                   </span>
                   <span v-if="item.action === 'return' && item.metadata?.targetNodeKey" class="approval-detail__meta-badge approval-detail__meta-badge--return">
                     退回至: {{ nodeLabel(item.metadata.targetNodeKey as string) }}
@@ -392,6 +401,7 @@ function statusLabel(status: string) {
 
 function actionLabel(action: string, metadata?: Record<string, unknown>) {
   if (action === 'approve' && metadata?.autoApproved) return '自动通过'
+  if (action === 'sign' && metadata?.autoCancelled) return '自动失效'
   const map: Record<string, string> = {
     created: '发起',
     approve: '通过',
@@ -400,6 +410,7 @@ function actionLabel(action: string, metadata?: Record<string, unknown>) {
     revoke: '撤回',
     comment: '评论',
     return: '退回',
+    sign: '签字',
   }
   return map[action] ?? action
 }
@@ -436,12 +447,33 @@ function timelineIcon(action: string, metadata?: Record<string, unknown>) {
 
 function hasTimelineMetadata(metadata?: Record<string, unknown>): boolean {
   if (!metadata) return false
-  return !!(metadata.autoApproved || metadata.approvalMode || metadata.aggregateComplete || metadata.nodeKey || metadata.targetNodeKey)
+  return !!(
+    metadata.autoApproved
+    || metadata.approvalMode
+    || metadata.aggregateComplete
+    || metadata.aggregateCancelled
+    || metadata.autoCancelled
+    || metadata.aggregateCancelledBy
+    || metadata.nodeKey
+    || metadata.targetNodeKey
+  )
 }
 
 function approvalModeLabel(mode: string): string {
   const map: Record<string, string> = { single: '单人', all: '会签', any: '或签' }
   return map[mode] ?? mode
+}
+
+/**
+ * Builds a muted note listing sibling approvers whose active assignments were cancelled by
+ * an any-mode (或签) first-wins resolution. Returns empty string when metadata carries no
+ * aggregateCancelled list or when the list is empty — callers `v-if` on the truthy string.
+ */
+function cancelledAssigneesLabel(metadata?: Record<string, unknown>): string {
+  if (!metadata) return ''
+  const cancelled = metadata.aggregateCancelled
+  if (!Array.isArray(cancelled) || cancelled.length === 0) return ''
+  return `其他审批人已失效: ${cancelled.map((id) => String(id)).join(', ')}`
 }
 
 function nodeLabel(nodeKey: string): string {
