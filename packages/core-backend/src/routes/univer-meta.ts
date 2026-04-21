@@ -32,7 +32,11 @@ import { validateRecord, getDefaultValidationRules } from '../multitable/field-v
 import type { FieldValidationConfig } from '../multitable/field-validation'
 import { conditionalPublicRateLimiter, publicFormContextLimiter, publicFormSubmitLimiter } from '../middleware/rate-limiter'
 import { getAutomationServiceInstance } from '../multitable/automation-service'
-import { validateDingTalkAutomationLinks } from '../multitable/dingtalk-automation-link-validation'
+import {
+  normalizeDingTalkAutomationActionInputs,
+  validateDingTalkAutomationActionConfigs,
+  validateDingTalkAutomationLinks,
+} from '../multitable/dingtalk-automation-link-validation'
 import { listAutomationDingTalkGroupDeliveries } from '../multitable/dingtalk-group-delivery-service'
 import { listAutomationDingTalkPersonDeliveries } from '../multitable/dingtalk-person-delivery-service'
 import {
@@ -8348,7 +8352,7 @@ export function univerMetaRouter(): Router {
       const triggerType = typeof body?.triggerType === 'string' ? body.triggerType : ''
       const triggerConfig = (body?.triggerConfig && typeof body.triggerConfig === 'object') ? body.triggerConfig as Record<string, unknown> : {}
       const actionType = typeof body?.actionType === 'string' ? body.actionType : ''
-      const actionConfig = (body?.actionConfig && typeof body.actionConfig === 'object') ? body.actionConfig as Record<string, unknown> : {}
+      let actionConfig = (body?.actionConfig && typeof body.actionConfig === 'object') ? body.actionConfig as Record<string, unknown> : {}
       const enabled = typeof body?.enabled === 'boolean' ? body.enabled : true
 
       const validTriggers = new Set(['record.created', 'record.updated', 'record.deleted', 'field.changed', 'field.value_changed', 'schedule.cron', 'schedule.interval', 'webhook.received'])
@@ -8361,7 +8365,16 @@ export function univerMetaRouter(): Router {
       }
 
       const conditions = body?.conditions && typeof body.conditions === 'object' ? body.conditions as never : null
-      const actions = Array.isArray(body?.actions) ? body.actions : null
+      let actions = Array.isArray(body?.actions) ? body.actions : null
+      const normalizedDingTalkInputs = normalizeDingTalkAutomationActionInputs(actionType, actionConfig, actions)
+      actionConfig = normalizedDingTalkInputs.actionConfig && typeof normalizedDingTalkInputs.actionConfig === 'object'
+        ? normalizedDingTalkInputs.actionConfig as Record<string, unknown>
+        : actionConfig
+      actions = Array.isArray(normalizedDingTalkInputs.actions) ? normalizedDingTalkInputs.actions : actions
+      const actionConfigValidationError = validateDingTalkAutomationActionConfigs(actionType, actionConfig, actions)
+      if (actionConfigValidationError) {
+        return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: actionConfigValidationError } })
+      }
       const linkValidationError = await validateDingTalkAutomationLinks(
         pool.query.bind(pool),
         sheetId,
@@ -8425,6 +8438,8 @@ export function univerMetaRouter(): Router {
 
       const body = req.body as Record<string, unknown> | undefined
       const updates: Record<string, unknown> = {}
+      let normalizedActionConfigForUpdate: Record<string, unknown> | undefined
+      let normalizedActionsForUpdate: unknown[] | null | undefined
 
       if (typeof body?.name === 'string') updates.name = body.name
       if (typeof body?.triggerType === 'string') {
@@ -8471,15 +8486,36 @@ export function univerMetaRouter(): Router {
         const nextActions = body?.actions !== undefined
           ? Array.isArray(body.actions) ? body.actions : null
           : existing.actions
+        const normalizedDingTalkInputs = normalizeDingTalkAutomationActionInputs(nextActionType, nextActionConfig, nextActions)
+        const normalizedNextActionConfig = normalizedDingTalkInputs.actionConfig && typeof normalizedDingTalkInputs.actionConfig === 'object'
+          ? normalizedDingTalkInputs.actionConfig as Record<string, unknown>
+          : nextActionConfig
+        const normalizedNextActions = Array.isArray(normalizedDingTalkInputs.actions)
+          ? normalizedDingTalkInputs.actions
+          : nextActions
+        const actionConfigValidationError = validateDingTalkAutomationActionConfigs(
+          nextActionType,
+          normalizedNextActionConfig,
+          normalizedNextActions,
+        )
+        if (actionConfigValidationError) {
+          return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: actionConfigValidationError } })
+        }
         const linkValidationError = await validateDingTalkAutomationLinks(
           pool.query.bind(pool),
           sheetId,
           nextActionType,
-          nextActionConfig,
-          nextActions,
+          normalizedNextActionConfig,
+          normalizedNextActions,
         )
         if (linkValidationError) {
           return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: linkValidationError } })
+        }
+        if (body?.actionConfig && typeof body.actionConfig === 'object') {
+          normalizedActionConfigForUpdate = normalizedNextActionConfig as Record<string, unknown>
+        }
+        if (body?.actions !== undefined) {
+          normalizedActionsForUpdate = Array.isArray(body.actions) ? normalizedNextActions as unknown[] : null
         }
       }
 
@@ -8491,11 +8527,11 @@ export function univerMetaRouter(): Router {
           : undefined,
         actionType: updates.action_type as string | undefined,
         actionConfig: body?.actionConfig && typeof body.actionConfig === 'object'
-          ? body.actionConfig as Record<string, unknown>
+          ? normalizedActionConfigForUpdate ?? body.actionConfig as Record<string, unknown>
           : undefined,
         enabled: typeof body?.enabled === 'boolean' ? body.enabled : undefined,
         conditions: body?.conditions !== undefined ? (body.conditions as never) : undefined,
-        actions: body?.actions !== undefined ? (Array.isArray(body.actions) ? body.actions : null) as never : undefined,
+        actions: body?.actions !== undefined ? (normalizedActionsForUpdate ?? (Array.isArray(body.actions) ? body.actions : null)) as never : undefined,
       })
 
       if (!updated) {

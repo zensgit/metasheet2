@@ -2,6 +2,8 @@ import { describe, expect, it, vi } from 'vitest'
 
 import {
   collectDingTalkAutomationLinkIds,
+  normalizeDingTalkAutomationActionInputs,
+  validateDingTalkAutomationActionConfigs,
   validateDingTalkAutomationLinks,
   type AutomationLinkQueryFn,
 } from '../../src/multitable/dingtalk-automation-link-validation'
@@ -14,6 +16,77 @@ function queryWithRows(rowsByCall: unknown[][]): AutomationLinkQueryFn {
 }
 
 describe('dingtalk automation link validation', () => {
+  it('normalizes legacy DingTalk title and content fields before persistence', () => {
+    const normalized = normalizeDingTalkAutomationActionInputs(
+      'send_dingtalk_group_message',
+      { destinationId: 'group_1', title: 'Please fill', content: 'Open form' },
+      [
+        {
+          type: 'send_dingtalk_person_message',
+          config: { userIds: ['user_1'], title: 'Person title', content: 'Person body' },
+        },
+      ],
+    )
+
+    expect(normalized.actionConfig).toMatchObject({
+      titleTemplate: 'Please fill',
+      bodyTemplate: 'Open form',
+    })
+    expect(normalized.actions).toEqual([
+      {
+        type: 'send_dingtalk_person_message',
+        config: {
+          userIds: ['user_1'],
+          title: 'Person title',
+          content: 'Person body',
+          titleTemplate: 'Person title',
+          bodyTemplate: 'Person body',
+        },
+      },
+    ])
+  })
+
+  it('rejects DingTalk group actions without an effective destination source', () => {
+    expect(validateDingTalkAutomationActionConfigs(
+      'send_dingtalk_group_message',
+      {
+        destinationIds: [],
+        destinationIdFieldPath: 'record., ,',
+        titleTemplate: 'Please fill',
+        bodyTemplate: 'Open form',
+      },
+      null,
+    )).toBe('At least one DingTalk destination or record destination field path is required')
+  })
+
+  it('rejects DingTalk person actions without an effective recipient source', () => {
+    expect(validateDingTalkAutomationActionConfigs(
+      'send_dingtalk_person_message',
+      {
+        userIds: [','],
+        memberGroupIds: [],
+        userIdFieldPaths: ['record.'],
+        memberGroupIdFieldPath: ',',
+        titleTemplate: 'Please fill',
+        bodyTemplate: 'Open form',
+      },
+      null,
+    )).toBe('At least one local userId, memberGroupId, record recipient field path, or member group record field path is required')
+  })
+
+  it('rejects DingTalk actions without executable template fields', () => {
+    expect(validateDingTalkAutomationActionConfigs(
+      'notify',
+      {},
+      [
+        {
+          type: 'send_dingtalk_person_message',
+          config: { userIds: ['user_1'], titleTemplate: ' ', bodyTemplate: 'Open form' },
+        },
+      ],
+    )).toBe('DingTalk titleTemplate is required')
+  })
+
   it('collects public form and internal view ids from legacy and multi-action configs', () => {
     expect(collectDingTalkAutomationLinkIds(
       'send_dingtalk_group_message',
