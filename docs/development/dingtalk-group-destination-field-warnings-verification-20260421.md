@@ -10,6 +10,7 @@ pnpm install --frozen-lockfile
 pnpm --filter @metasheet/web exec vitest run tests/dingtalk-recipient-field-warnings.spec.ts tests/multitable-automation-rule-editor.spec.ts tests/multitable-automation-manager.spec.ts --watch=false
 pnpm --filter @metasheet/web build
 git diff --check
+git diff --cached --check
 ```
 
 ## Results
@@ -17,6 +18,7 @@ git diff --check
 - Frontend tests: `71 passed`
 - `pnpm --filter @metasheet/web build`: passed
 - `git diff --check`: passed
+- `git diff --cached --check`: passed
 
 ## Focused Coverage Added
 
