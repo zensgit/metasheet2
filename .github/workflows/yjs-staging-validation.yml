@@ -28,17 +28,127 @@ jobs:
   validate:
     name: Yjs End-to-End Validation
     runs-on: ubuntu-latest
-    # The admin token must be set as a repository or environment secret.
-    # Set up via: gh secret set YJS_ADMIN_TOKEN --body '<jwt>'
     env:
       YJS_BASE_URL: ${{ inputs.base_url }}
-      YJS_TOKEN: ${{ secrets.YJS_ADMIN_TOKEN }}
       RECORD_ID: ${{ inputs.record_id }}
       FIELD_ID: ${{ inputs.field_id }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Resolve admin token
+        env:
+          YJS_ADMIN_TOKEN_SECRET: ${{ secrets.YJS_ADMIN_TOKEN }}
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_SSH_KEY_B64: ${{ secrets.DEPLOY_SSH_KEY_B64 }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+        run: |
+          set -euo pipefail
+
+          if [[ -n "${YJS_ADMIN_TOKEN_SECRET:-}" ]]; then
+            echo "::add-mask::${YJS_ADMIN_TOKEN_SECRET}"
+            {
+              echo 'YJS_TOKEN<<EOF'
+              echo "${YJS_ADMIN_TOKEN_SECRET}"
+              echo 'EOF'
+            } >> "$GITHUB_ENV"
+            echo "Using YJS_ADMIN_TOKEN secret"
+            exit 0
+          fi
+
+          if [[ -z "${DEPLOY_HOST:-}" || -z "${DEPLOY_USER:-}" || -z "${DEPLOY_SSH_KEY_B64:-}" ]]; then
+            echo "::error::YJS_ADMIN_TOKEN is not set and DEPLOY_HOST/DEPLOY_USER/DEPLOY_SSH_KEY_B64 are incomplete"
+            exit 1
+          fi
+
+          mkdir -p ~/.ssh
+          printf '%s' "$DEPLOY_SSH_KEY_B64" | base64 -d > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh_opts="-o StrictHostKeyChecking=no -o IdentitiesOnly=yes -i ~/.ssh/deploy_key"
+          DEPLOY_PATH="${DEPLOY_PATH:-metasheet2}"
+
+          token="$(
+            ssh $ssh_opts "$DEPLOY_USER@$DEPLOY_HOST" "DEPLOY_PATH='${DEPLOY_PATH}' bash -s" <<'EOF'
+          set -euo pipefail
+          if [[ "${DEPLOY_PATH}" == /* ]]; then
+            DEPLOY_REPO_PATH="${DEPLOY_PATH}"
+          elif [[ "${DEPLOY_PATH}" == ~/* ]]; then
+            DEPLOY_REPO_PATH="${HOME}/${DEPLOY_PATH#~/}"
+          else
+            DEPLOY_REPO_PATH="${HOME}/${DEPLOY_PATH}"
+          fi
+          cd "${DEPLOY_REPO_PATH}"
+          python3 - <<'PY'
+          from pathlib import Path
+          import base64
+          import hashlib
+          import hmac
+          import json
+          import sys
+          import time
+
+          def strip_outer_quotes(value):
+              value = value.strip()
+              if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+                  return value[1:-1]
+              return value
+
+          def base64url(raw):
+              return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+          env_path = Path("docker/app.env")
+          if not env_path.exists():
+              raise SystemExit("docker/app.env not found")
+
+          values = {}
+          for line in env_path.read_text().splitlines():
+              stripped = line.strip()
+              if not stripped or stripped.startswith("#") or "=" not in stripped:
+                  continue
+              key, value = stripped.split("=", 1)
+              values[key] = strip_outer_quotes(value)
+
+          secret = values.get("JWT_SECRET", "")
+          if not secret:
+              raise SystemExit("JWT_SECRET missing from docker/app.env")
+
+          now = int(time.time())
+          header = {"alg": "HS256", "typ": "JWT"}
+          payload = {
+              "id": "admin",
+              "roles": ["admin"],
+              "perms": ["*:*"],
+              "iat": now,
+              "exp": now + 7200,
+          }
+          signing_input = ".".join([
+              base64url(json.dumps(header, separators=(",", ":")).encode("utf-8")),
+              base64url(json.dumps(payload, separators=(",", ":")).encode("utf-8")),
+          ])
+          signature = hmac.new(
+              secret.encode("utf-8"),
+              signing_input.encode("ascii"),
+              hashlib.sha256,
+          ).digest()
+          print(f"{signing_input}.{base64url(signature)}")
+          PY
+          EOF
+          )"
+
+          if [[ -z "${token:-}" ]]; then
+            echo "::error::failed to mint Yjs admin token from deploy host"
+            exit 1
+          fi
+
+          echo "::add-mask::${token}"
+          {
+            echo 'YJS_TOKEN<<EOF'
+            echo "${token}"
+            echo 'EOF'
+          } >> "$GITHUB_ENV"
+          echo "Minted temporary Yjs admin token from deploy host"
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -57,7 +167,7 @@ jobs:
       - name: Sanity — is Yjs even enabled?
         run: |
           if [ -z "$YJS_TOKEN" ]; then
-            echo "::error::YJS_ADMIN_TOKEN secret is not set"
+            echo "::error::YJS_TOKEN could not be resolved from YJS_ADMIN_TOKEN or deploy host"
             exit 1
           fi
           # Use repo's pinned status script so alerts + formatting stay consistent.

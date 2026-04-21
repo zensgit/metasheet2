@@ -116,6 +116,7 @@ jobs:
           DEPLOY_IMAGE_TAG: ${{ github.sha }}
           DEPLOY_JWT_SECRET: ${{ secrets.DEPLOY_JWT_SECRET || secrets.JWT_SECRET || '' }}
           DEPLOY_BCRYPT_SALT_ROUNDS: ${{ vars.DEPLOY_BCRYPT_SALT_ROUNDS || '12' }}
+          ENABLE_YJS_COLLAB: ${{ vars.ENABLE_YJS_COLLAB || 'false' }}
           DRILL_FAIL_STAGE: ${{ github.event.inputs.drill_fail_stage || 'none' }}
         run: |
           set -euo pipefail
@@ -138,6 +139,7 @@ jobs:
             "DEPLOY_IMAGE_TAG=\"${DEPLOY_IMAGE_TAG:-${GITHUB_SHA}}\""
             "DEPLOY_JWT_SECRET=\"${DEPLOY_JWT_SECRET:-}\""
             "DEPLOY_BCRYPT_SALT_ROUNDS=\"${DEPLOY_BCRYPT_SALT_ROUNDS:-12}\""
+            "ENABLE_YJS_COLLAB=\"${ENABLE_YJS_COLLAB:-false}\""
             "DRILL_FAIL_STAGE=\"${DRILL_FAIL_STAGE:-none}\""
             'if [[ "${DEPLOY_PATH}" == /* ]]; then'
             '  DEPLOY_REPO_PATH="${DEPLOY_PATH}"'
@@ -185,13 +187,16 @@ jobs:
             '  database_url="${database_url_line#DATABASE_URL=}"'
             '  database_url="${database_url%\"}"'
             '  database_url="${database_url#\"}"'
-            '  python3 - "${ENV_FILE_PATH}" "${DEPLOY_JWT_SECRET:-}" "${DEPLOY_BCRYPT_SALT_ROUNDS:-12}" "${database_url}" <<'\''PY'\'''
+            '  python3 - "${ENV_FILE_PATH}" "${DEPLOY_JWT_SECRET:-}" "${DEPLOY_BCRYPT_SALT_ROUNDS:-12}" "${database_url}" "${ENABLE_YJS_COLLAB:-false}" <<'\''PY'\'''
             'from pathlib import Path'
             'import sys'
             'path = Path(sys.argv[1])'
             'deploy_jwt_secret = sys.argv[2].strip()'
             'deploy_bcrypt_rounds = sys.argv[3].strip() or "12"'
             'database_url = sys.argv[4]'
+            'enable_yjs_collab = (sys.argv[5].strip().lower() or "false")'
+            'if enable_yjs_collab not in ("true", "false"):'
+            '    enable_yjs_collab = "false"'
             'text = path.read_text()'
             'if "\\n" in text:'
             '    text = text.replace("\\n", "\n")'
@@ -224,6 +229,9 @@ jobs:
             '    entries["BCRYPT_SALT_ROUNDS"] = deploy_bcrypt_rounds'
             '    if "BCRYPT_SALT_ROUNDS" not in order:'
             '        order.append("BCRYPT_SALT_ROUNDS")'
+            'entries["ENABLE_YJS_COLLAB"] = enable_yjs_collab'
+            'if "ENABLE_YJS_COLLAB" not in order:'
+            '    order.append("ENABLE_YJS_COLLAB")'
             'seen = set()'
             'for line in lines:'
             '    if "=" in line and not line.lstrip().startswith("#"):'
@@ -251,6 +259,11 @@ jobs:
             '  fi'
             '  if grep -qE "^BCRYPT_SALT_ROUNDS=" "${ENV_FILE_PATH}"; then'
             '    echo "[deploy] BCRYPT_SALT_ROUNDS present in ${ENV_FILE_PATH}"'
+            '  fi'
+            '  if grep -qE "^ENABLE_YJS_COLLAB=true$" "${ENV_FILE_PATH}"; then'
+            '    echo "[deploy] ENABLE_YJS_COLLAB=true in ${ENV_FILE_PATH}"'
+            '  else'
+            '    echo "[deploy] ENABLE_YJS_COLLAB=false in ${ENV_FILE_PATH}"'
             '  fi'
             'fi'
             'COMPOSE_ENV_FILE=".env"'
