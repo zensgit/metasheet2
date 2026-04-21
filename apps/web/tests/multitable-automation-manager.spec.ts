@@ -515,6 +515,34 @@ describe('MetaAutomationManager', () => {
     })
   })
 
+  it('can remove a selected dynamic member group recipient field chip in the inline form', async () => {
+    const { client } = mockClient([])
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
+    await flushPromises()
+
+    const addBtn = container.querySelector('.meta-automation__btn-add') as HTMLButtonElement
+    addBtn.click()
+    await nextTick()
+
+    const actionSelect = container.querySelector('[data-automation-field="actionType"]') as HTMLSelectElement
+    actionSelect.value = 'send_dingtalk_person_message'
+    actionSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushPromises()
+
+    const memberGroupFieldInput = container.querySelector('[data-automation-field="dingtalkPersonMemberGroupRecipientFieldPath"]') as HTMLInputElement
+    memberGroupFieldInput.value = 'record.watcherGroupIds, record.escalationGroupId'
+    memberGroupFieldInput.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushPromises()
+
+    const firstChip = container.querySelector('[data-automation-member-group-recipient-field="watcherGroupIds"]') as HTMLButtonElement
+    expect(firstChip?.textContent).toContain('record.watcherGroupIds')
+    firstChip.click()
+    await flushPromises()
+
+    expect(memberGroupFieldInput.value).toBe('record.escalationGroupId')
+    expect(container.querySelector('[data-automation-member-group-recipient-field="watcherGroupIds"]')).toBeNull()
+  })
+
   it('can pick a record recipient field for DingTalk person automation', async () => {
     const { client } = mockClient([])
     const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
