@@ -40,8 +40,11 @@ jobs:
           docker push ghcr.io/zensgit/metasheet2-backend:${{ github.sha }}
       
       - name: Build and push frontend
+        env:
+          VITE_ENABLE_YJS_COLLAB: ${{ vars.VITE_ENABLE_YJS_COLLAB || 'false' }}
         run: |
           docker build -f Dockerfile.frontend \
+            --build-arg VITE_ENABLE_YJS_COLLAB="${VITE_ENABLE_YJS_COLLAB}" \
             -t ghcr.io/zensgit/metasheet2-web:latest \
             -t ghcr.io/zensgit/metasheet2-web:${{ github.sha }} \
             .
