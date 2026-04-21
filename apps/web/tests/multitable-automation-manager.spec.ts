@@ -127,6 +127,8 @@ const fields = [
   { id: 'fld_2', name: 'Name', type: 'string' },
   { id: 'assigneeUserIds', name: 'Assignees', type: 'user' },
   { id: 'reviewerUserId', name: 'Reviewer', type: 'user' },
+  { id: 'watcherGroupIds', name: 'Watcher groups', type: 'link', property: { refKind: 'member-group' } },
+  { id: 'escalationGroupId', name: 'Escalation group', type: 'member-group' },
 ]
 
 const views = [
@@ -585,6 +587,53 @@ describe('MetaAutomationManager', () => {
     await flushPromises()
 
     expect(container.textContent).toContain('record.assigneeUserIds is a user field; use Record recipient field paths instead.')
+  })
+
+  it('can pick a member group recipient field for DingTalk person automation', async () => {
+    const { client } = mockClient([])
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
+    await flushPromises()
+
+    const addBtn = container.querySelector('.meta-automation__btn-add') as HTMLButtonElement
+    addBtn.click()
+    await nextTick()
+
+    const actionSelect = container.querySelector('[data-automation-field="actionType"]') as HTMLSelectElement
+    actionSelect.value = 'send_dingtalk_person_message'
+    actionSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushPromises()
+
+    const fieldSelect = container.querySelector('[data-automation-field="dingtalkPersonMemberGroupRecipientFieldSelect"]') as HTMLSelectElement
+    fieldSelect.value = 'watcherGroupIds'
+    fieldSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushPromises()
+
+    const memberGroupFieldInput = container.querySelector('[data-automation-field="dingtalkPersonMemberGroupRecipientFieldPath"]') as HTMLInputElement
+    const summary = container.querySelector('[data-automation-summary="person"]')
+    expect(memberGroupFieldInput.value).toBe('record.watcherGroupIds')
+    expect(summary?.textContent).toContain('Watcher groups (record.watcherGroupIds)')
+  })
+
+  it('only lists explicit member group fields in the member group recipient picker', async () => {
+    const { client } = mockClient([])
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
+    await flushPromises()
+
+    const addBtn = container.querySelector('.meta-automation__btn-add') as HTMLButtonElement
+    addBtn.click()
+    await nextTick()
+
+    const actionSelect = container.querySelector('[data-automation-field="actionType"]') as HTMLSelectElement
+    actionSelect.value = 'send_dingtalk_person_message'
+    actionSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushPromises()
+
+    const fieldSelect = container.querySelector('[data-automation-field="dingtalkPersonMemberGroupRecipientFieldSelect"]') as HTMLSelectElement
+    const optionValues = Array.from(fieldSelect.options).map((option) => option.value)
+    expect(optionValues).toContain('watcherGroupIds')
+    expect(optionValues).toContain('escalationGroupId')
+    expect(optionValues).not.toContain('assigneeUserIds')
+    expect(optionValues).not.toContain('fld_1')
   })
 
   it('can pick a record recipient field for DingTalk person automation', async () => {

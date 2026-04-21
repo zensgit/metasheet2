@@ -459,6 +459,17 @@
                 placeholder="例如：record.watcherGroupIds, record.escalationGroupId"
                 data-field="dingtalkPersonMemberGroupRecipientFieldPath"
               />
+              <label class="meta-rule-editor__label">Pick member group field</label>
+              <select
+                class="meta-rule-editor__select"
+                data-field="dingtalkPersonMemberGroupRecipientFieldSelect"
+                @change="appendMemberGroupRecipientFieldPath(action, $event.target as HTMLSelectElement)"
+              >
+                <option value="">-- choose a member group field --</option>
+                <option v-for="field in memberGroupRecipientCandidateFields" :key="field.id" :value="field.id">
+                  {{ field.name }} (record.{{ field.id }})
+                </option>
+              </select>
               <div
                 v-if="selectedMemberGroupRecipientFields(action).length"
                 class="meta-rule-editor__recipient-list meta-rule-editor__recipient-list--selected"
@@ -483,7 +494,7 @@
                 {{ warning }}
               </div>
               <div class="meta-rule-editor__hint">
-                Use comma or newline separated <code>record.&lt;fieldId&gt;</code> paths whose values resolve to member group IDs.
+                Use comma or newline separated <code>record.&lt;fieldId&gt;</code> paths whose values resolve to member group IDs. The picker only lists explicit member group fields.
               </div>
               <label class="meta-rule-editor__label">Title template</label>
               <input
@@ -718,6 +729,7 @@ let copiedPreviewResetTimer: ReturnType<typeof setTimeout> | null = null
 const formViews = computed(() => (props.views ?? []).filter((view) => view.type === 'form'))
 const internalViews = computed(() => props.views ?? [])
 const recipientCandidateFields = computed(() => props.fields.filter((field) => field.type === 'user'))
+const memberGroupRecipientCandidateFields = computed(() => props.fields.filter(isMemberGroupRecipientCandidateField))
 
 const conditionOperators: Array<{ value: ConditionOperator; label: string }> = [
   { value: 'equals', label: 'Equals' },
@@ -1089,6 +1101,15 @@ function recipientFieldSummaryLabel(path: string) {
   return field ? `${field.name} (record.${normalized})` : `record.${normalized}`
 }
 
+function isMemberGroupRecipientCandidateField(field: { type?: unknown, property?: Record<string, unknown> | undefined }) {
+  const type = typeof field.type === 'string' ? field.type.trim().toLowerCase() : ''
+  const refKind = typeof field.property?.refKind === 'string' ? field.property.refKind.trim().toLowerCase() : ''
+  return refKind === 'member-group'
+    || type === 'member-group'
+    || type === 'member_group'
+    || type === 'membergroup'
+}
+
 function selectedRecipientFields(action: DraftAction) {
   return parseRecipientFieldPathsText(action.config.recipientFieldPath)
     .map((path) => ({
@@ -1152,6 +1173,17 @@ function removeRecipientFieldPath(action: DraftAction, path: string) {
     .filter((entry) => entry !== path)
     .map((entry) => `record.${entry}`)
     .join(', ')
+}
+
+function appendMemberGroupRecipientFieldPath(action: DraftAction, select: HTMLSelectElement) {
+  const fieldId = select.value.trim()
+  if (!fieldId) return
+  const paths = parseRecipientFieldPathsText(action.config.memberGroupRecipientFieldPath)
+  paths.push(fieldId)
+  action.config.memberGroupRecipientFieldPath = Array.from(new Set(paths))
+    .map((path) => `record.${path}`)
+    .join(', ')
+  select.value = ''
 }
 
 function removeMemberGroupRecipientFieldPath(action: DraftAction, path: string) {
