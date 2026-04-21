@@ -351,6 +351,13 @@
                 <em>Remove</em>
               </button>
             </div>
+            <div
+              v-for="warning in memberGroupRecipientFieldPathWarnings(draft.dingtalkPersonMemberGroupRecipientFieldPath)"
+              :key="`draft-person-member-group-recipient-${warning}`"
+              class="meta-automation__hint meta-automation__hint--warning"
+            >
+              {{ warning }}
+            </div>
             <div class="meta-automation__hint">
               Use comma or newline separated <code>record.&lt;fieldId&gt;</code> paths whose values resolve to member group IDs.
             </div>
@@ -910,6 +917,20 @@ function recipientFieldPathWarnings(value: string) {
   return parseRecipientFieldPathsText(value)
     .filter((path) => !candidateIds.has(path))
     .map((path) => `record.${path} is not a user field; DingTalk person messages expect local user IDs.`)
+}
+
+function memberGroupRecipientFieldPathWarnings(value: string) {
+  const fieldMap = new Map(props.fields.map((field) => [field.id, field]))
+  return parseRecipientFieldPathsText(value).flatMap((path) => {
+    const field = fieldMap.get(path)
+    if (!field) {
+      return [`record.${path} is not a known field in this sheet; DingTalk person member-group recipients expect field IDs that resolve to member group IDs.`]
+    }
+    if (field.type === 'user') {
+      return [`record.${path} is a user field; use Record recipient field paths instead.`]
+    }
+    return []
+  })
 }
 
 const dingTalkPersonRecipientFieldSummary = computed(() => {
