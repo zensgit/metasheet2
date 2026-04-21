@@ -634,6 +634,7 @@ export interface AutomationExecution {
   triggerType: AutomationTriggerType
   startedAt: string
   completedAt?: string
+  duration?: number
   durationMs?: number
   steps?: AutomationStepResult[]
   error?: string

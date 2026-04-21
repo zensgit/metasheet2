@@ -156,12 +156,14 @@
                   v-if="isEditing(row.id, field.id)"
                   :field="field"
                   :model-value="editCell!.value"
+                  :record-id="row.id"
                   :upload-fn="props.uploadFn"
                   :delete-attachment-fn="props.deleteAttachmentFn"
                   :attachment-summaries="props.attachmentSummaries?.[row.id]?.[field.id]"
                   :upload-context="{ recordId: row.id, fieldId: field.id }"
                   @update:model-value="editCell!.value = $event"
                   @confirm="confirmEdit(row)"
+                  @yjs-commit="markYjsHandled(row.id, field.id)"
                   @cancel="cancelEdit"
                   @open-link-picker="openLinkPickerFromCell(row.id, field)"
                 />
@@ -309,6 +311,19 @@ const focusCol = ref(-1)
 const selectedIds = ref<Set<string>>(new Set())
 const expandedRowIds = ref<Set<string>>(new Set())
 
+/**
+ * Set when MetaCellEditor emits `yjs-commit`, meaning the active edit was
+ * carried over Yjs and the server-side bridge will persist it. We then
+ * suppress the REST `patch-cell` emit in `confirmEdit` to avoid a
+ * redundant write — the backend Yjs bridge writes to `meta_records` via
+ * `RecordWriteService.patchRecords`. Cleared on every new edit start.
+ */
+const yjsHandledCellKey = ref<string | null>(null)
+const cellKey = (recordId: string, fieldId: string) => `${recordId}::${fieldId}`
+function markYjsHandled(recordId: string, fieldId: string): void {
+  yjsHandledCellKey.value = cellKey(recordId, fieldId)
+}
+
 function toggleRowExpand(rowId: string) {
   const s = new Set(expandedRowIds.value)
   if (s.has(rowId)) s.delete(rowId)
@@ -450,17 +465,25 @@ function onCellClick(ri: number, ci: number, rid: string) {
 
 function startEdit(row: MetaRecord, field: MetaField) {
   if (!isEditable(row.id, field)) return
+  yjsHandledCellKey.value = null
   editCell.value = { recordId: row.id, fieldId: field.id, value: row.data[field.id] ?? null }
 }
 
 function confirmEdit(row: MetaRecord) {
   if (!editCell.value) return
   const { recordId, fieldId, value } = editCell.value
-  if (value !== row.data[fieldId]) emit('patch-cell', recordId, fieldId, value, row.version)
+  // Skip the REST patch only when the editor signalled that Yjs carried
+  // the edit for this exact cell. If the Yjs path was not active (flag
+  // off, timeout, error) we stay on REST unchanged.
+  const handledViaYjs = yjsHandledCellKey.value === cellKey(recordId, fieldId)
+  if (!handledViaYjs && value !== row.data[fieldId]) {
+    emit('patch-cell', recordId, fieldId, value, row.version)
+  }
   editCell.value = null
+  yjsHandledCellKey.value = null
 }
 
-function cancelEdit() { editCell.value = null }
+function cancelEdit() { editCell.value = null; yjsHandledCellKey.value = null }
 
 function openLinkPickerFromCell(recordId: string, field: MetaField) {
   cancelEdit()
