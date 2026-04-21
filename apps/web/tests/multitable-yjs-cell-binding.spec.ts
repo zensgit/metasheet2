@@ -154,16 +154,23 @@ describe('useYjsCellBinding', () => {
 
     // Simulate a sync-protocol message: useYjsDocument uses real
     // y-protocols readSyncMessage, so we need a well-formed envelope. We
-    // send a SyncStep2 carrying an empty Y.Doc update; the handler
-    // applies it and flips `synced` true.
+    // send a SyncStep2 carrying a primer Y.Doc update that already
+    // contains a Y.Text for 'fld_title' — matching what the backend
+    // YjsSyncService does by seeding from meta_records.data. Without
+    // this, useYjsTextField's seed guard would keep yjsActive=false
+    // (no auto-create of empty Y.Text).
     const encodingModule = await import('lib0/encoding')
     const Y = await import('yjs')
-    const emptyDoc = new Y.Doc()
-    const emptyUpdate = Y.encodeStateAsUpdate(emptyDoc)
+    const primerDoc = new Y.Doc()
+    const seededText = new Y.Text()
+    seededText.insert(0, '')
+    primerDoc.getMap('fields').set('fld_title', seededText)
+    const primerUpdate = Y.encodeStateAsUpdate(primerDoc)
+    primerDoc.destroy()
     const encoder = encodingModule.createEncoder()
     encodingModule.writeVarUint(encoder, 0) // MSG_SYNC (outer envelope in useYjsDocument)
     encodingModule.writeVarUint(encoder, 1) // messageYjsSyncStep2 (y-protocols)
-    encodingModule.writeVarUint8Array(encoder, emptyUpdate)
+    encodingModule.writeVarUint8Array(encoder, primerUpdate)
     const payload = encodingModule.toUint8Array(encoder)
     handlers.get('yjs:message')?.({ recordId: 'rec_1', data: Array.from(payload) })
     await flushUi()

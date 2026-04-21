@@ -122,6 +122,13 @@ export function useYjsCellBinding(options: UseYjsCellBindingOptions): YjsCellBin
   let released = false
   let yjsTextApi: { setText: (next: string) => void } | null = null
   let textWatchStop: (() => void) | null = null
+  let yjsActiveStop: (() => void) | null = null
+  // Mirrors the Y.Text-exists signal from useYjsTextField for the active
+  // field binding. Only when this is true AND the sync handshake has
+  // completed do we flip `active` on. See seed contract in
+  // useYjsTextField.ts — if the Y.Text doesn't exist we MUST fall back
+  // to REST rather than creating an empty Y.Text and risking overwrite.
+  const boundYjsActive = ref(false)
 
   const yjs = useYjsDocument(liveRecordId)
 
@@ -147,16 +154,18 @@ export function useYjsCellBinding(options: UseYjsCellBindingOptions): YjsCellBin
   function fallback(reason: 'timeout' | 'error') {
     if (released) return
     clearTimer()
-    if (active.value === false && !yjs.connected.value && !yjs.synced.value) {
-      // already inert
-    }
     active.value = false
+    boundYjsActive.value = false
     collaborators.value = []
     text.value = ''
     yjsTextApi = null
     if (textWatchStop) {
       try { textWatchStop() } catch { /* ignore */ }
       textWatchStop = null
+    }
+    if (yjsActiveStop) {
+      try { yjsActiveStop() } catch { /* ignore */ }
+      yjsActiveStop = null
     }
     fieldKey.value = null
     // Setting liveRecordId to null triggers useYjsDocument's disconnect.
@@ -166,17 +175,26 @@ export function useYjsCellBinding(options: UseYjsCellBindingOptions): YjsCellBin
 
   function bindField(fid: string) {
     fieldKey.value = fid
-    // useYjsTextField returns reactive text + setText/insertAt/deleteRange.
+    // useYjsTextField returns reactive text + setText/insertAt/deleteRange
+    // + yjsActive (true only when a Y.Text already exists under this
+    // fieldId). We refuse to activate our binding until yjsActive flips
+    // true so we never drive the input off an empty Y.Text.
     const bound = useYjsTextField(yjs.doc, fid, {
       setActiveField: yjs.setActiveField,
     })
     yjsTextApi = { setText: bound.setText }
-    // Mirror the Y.Text-backed ref into our own reactive `text` so the
-    // caller only needs to touch this module's API.
+    boundYjsActive.value = bound.yjsActive.value
     textWatchStop = watch(
       () => bound.text.value,
       (next) => {
         text.value = next
+      },
+      { immediate: true },
+    )
+    yjsActiveStop = watch(
+      () => bound.yjsActive.value,
+      (next) => {
+        boundYjsActive.value = next
       },
       { immediate: true },
     )
@@ -192,15 +210,24 @@ export function useYjsCellBinding(options: UseYjsCellBindingOptions): YjsCellBin
     },
   )
 
-  // Consider the binding active once the sync handshake completes. This
-  // keeps us from marking active on a bare socket connect (we want a real
-  // Y.Doc with state, not just a TCP handshake).
+  // Consider the binding active once BOTH (a) the sync handshake
+  // completes AND (b) a Y.Text actually exists for this field. Without
+  // (b) we'd bind the input to a useYjsTextField that returns
+  // `text: ""` and a no-op `setText`, silently sending empty edits.
+  // The seed on the backend ensures (b) for existing fields, but if
+  // seed is delayed or failed we stay inactive and the caller keeps
+  // REST.
   const stopSyncedWatch = watch(
-    () => yjs.synced.value,
-    (isSynced) => {
-      if (isSynced && !released) {
+    [() => yjs.synced.value, () => boundYjsActive.value],
+    ([isSynced, hasYText]) => {
+      if (released) return
+      if (isSynced && hasYText) {
         clearTimer()
         active.value = true
+      } else if (!hasYText && active.value) {
+        // Y.Text disappeared mid-session (shouldn't happen in normal
+        // flow; defensive). Fall back to REST.
+        active.value = false
       }
     },
   )
@@ -220,12 +247,17 @@ export function useYjsCellBinding(options: UseYjsCellBindingOptions): YjsCellBin
       if (released) return
       clearTimer()
       active.value = false
+      boundYjsActive.value = false
       collaborators.value = []
       text.value = ''
       yjsTextApi = null
       if (textWatchStop) {
         try { textWatchStop() } catch { /* ignore */ }
         textWatchStop = null
+      }
+      if (yjsActiveStop) {
+        try { yjsActiveStop() } catch { /* ignore */ }
+        yjsActiveStop = null
       }
       if (!newRecordId || !newFieldId) {
         fieldKey.value = null
@@ -258,6 +290,11 @@ export function useYjsCellBinding(options: UseYjsCellBindingOptions): YjsCellBin
       try { textWatchStop() } catch { /* ignore */ }
       textWatchStop = null
     }
+    if (yjsActiveStop) {
+      try { yjsActiveStop() } catch { /* ignore */ }
+      yjsActiveStop = null
+    }
+    boundYjsActive.value = false
     fieldKey.value = null
     liveRecordId.value = null
     try { stopPresenceWatch() } catch { /* ignore */ }

@@ -1,13 +1,36 @@
 import * as Y from 'yjs'
 import type { YjsPersistenceAdapter } from './yjs-persistence-adapter'
 
+/**
+ * Seeds a fresh Y.Doc's `fields` Y.Map from the record's current value in
+ * `meta_records.data`. Only invoked when there's no persisted Yjs state
+ * yet (no snapshot, no incremental updates).
+ *
+ * Seeding rule:
+ *   - For each field whose current value is a string, create a Y.Text
+ *     pre-populated with that string and put it in the fields map under
+ *     the fieldId key.
+ *   - Non-string values are left out of the fields map. The frontend
+ *     `useYjsTextField` only binds to Y.Text entries, so non-string
+ *     fields continue to go through the existing REST edit path.
+ *
+ * Returning null (e.g. record was deleted) leaves the Y.Doc empty;
+ * `useYjsTextField` will then decline to activate for that cell and the
+ * caller falls back to REST.
+ */
+export type YjsRecordSeedFn = (
+  recordId: string,
+) => Promise<Record<string, unknown> | null>
+
 export class YjsSyncService {
   private docs = new Map<string, { doc: Y.Doc; lastAccess: number }>()
   private persistence: YjsPersistenceAdapter
   private cleanupTimer: NodeJS.Timeout
+  private recordSeed: YjsRecordSeedFn | null
 
-  constructor(persistence: YjsPersistenceAdapter) {
+  constructor(persistence: YjsPersistenceAdapter, recordSeed?: YjsRecordSeedFn) {
     this.persistence = persistence
+    this.recordSeed = recordSeed ?? null
     // Cleanup idle docs every 30 seconds
     this.cleanupTimer = setInterval(() => this.cleanupIdleDocs(), 30_000)
     this.cleanupTimer.unref()
@@ -19,6 +42,36 @@ export class YjsSyncService {
       return
     }
     await this.persistence.storeSnapshot(recordId, doc)
+  }
+
+  private async seedFreshDoc(recordId: string, doc: Y.Doc): Promise<void> {
+    if (!this.recordSeed) return
+    let data: Record<string, unknown> | null = null
+    try {
+      data = await this.recordSeed(recordId)
+    } catch (err) {
+      console.error(`[yjs] recordSeed threw for ${recordId}:`, err)
+      return
+    }
+    if (!data) return
+
+    const fields = doc.getMap('fields')
+    // Use 'seed' as the transaction origin so the persistence listener
+    // skips this initial seed — otherwise we'd write a bootstrap update
+    // to the DB on every fresh doc, bloating meta_record_yjs_updates.
+    doc.transact(() => {
+      for (const [fieldId, value] of Object.entries(data!)) {
+        if (typeof value !== 'string') continue
+        // Don't overwrite anything that already exists in fields (defense
+        // in depth — persistence.loadDoc returning null SHOULD mean an
+        // empty Y.Doc, but if future refactors change that, we'd rather
+        // no-op than clobber).
+        if (fields.has(fieldId)) continue
+        const yText = new Y.Text()
+        yText.insert(0, value)
+        fields.set(fieldId, yText)
+      }
+    }, 'seed')
   }
 
   async getOrCreateDoc(recordId: string): Promise<Y.Doc> {
@@ -36,14 +89,24 @@ export class YjsSyncService {
       Y.applyUpdate(doc, state, 'persistence')
     }
 
-    // Listen for updates to persist incrementally
+    // Wire the persistence listener BEFORE seeding, so if we later decide
+    // the seed should also be persisted we can opt in by changing the
+    // origin check. Today: origin === 'seed' is excluded, so the seed
+    // stays in memory and is materialized into DB only after a real
+    // user edit lands on top of it.
     doc.on('update', (update: Uint8Array, origin: unknown) => {
-      if (origin !== 'persistence') {
-        this.persistence.storeUpdate(recordId, update).catch((err) =>
-          console.error(`Failed to persist yjs update for ${recordId}:`, err),
-        )
-      }
+      if (origin === 'persistence' || origin === 'seed') return
+      this.persistence.storeUpdate(recordId, update).catch((err) =>
+        console.error(`Failed to persist yjs update for ${recordId}:`, err),
+      )
     })
+
+    // Only seed from meta_records if nothing had been persisted yet.
+    // A loaded snapshot/updates pair represents the authoritative Y.Doc
+    // state and must not be shadowed by stale `meta_records.data`.
+    if (!state) {
+      await this.seedFreshDoc(recordId, doc)
+    }
 
     this.docs.set(recordId, { doc, lastAccess: Date.now() })
     return doc

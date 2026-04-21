@@ -1707,7 +1707,28 @@ export class MetaSheetServer {
       const collabIO = this.injector.get(ICollabService).getIO()
       if (collabIO) {
         const yjsPersistence = new YjsPersistenceAdapter(kyselyDbYjs)
-        const yjsSyncService = new YjsSyncService(yjsPersistence)
+        // Seed fresh Y.Docs from meta_records so the first opener of an
+        // existing cell sees its current value, not an empty textbox.
+        // See yjs-sync-service.ts for the seeding rule (strings only).
+        const yjsPoolRef = poolManager.get()
+        const yjsRecordSeeder = async (recordId: string) => {
+          try {
+            const result = await yjsPoolRef.query(
+              'SELECT data FROM meta_records WHERE id = $1',
+              [recordId],
+            )
+            const row = (result.rows as Array<{ data: unknown } | undefined>)[0]
+            if (!row) return null
+            if (row.data && typeof row.data === 'object' && !Array.isArray(row.data)) {
+              return row.data as Record<string, unknown>
+            }
+            return null
+          } catch (err) {
+            console.error(`[yjs] recordSeeder query failed for ${recordId}:`, err)
+            return null
+          }
+        }
+        const yjsSyncService = new YjsSyncService(yjsPersistence, yjsRecordSeeder)
         const yjsWsAdapter = new YjsWebSocketAdapter(yjsSyncService)
 
         // JWT token verifier: verify token, extract trusted userId

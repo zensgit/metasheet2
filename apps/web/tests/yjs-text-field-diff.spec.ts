@@ -116,13 +116,21 @@ describe('useYjsTextField diff', () => {
     })
   })
 
+  // Helper: seed doc with an initial Y.Text value before mounting
+  // (matches what the backend YjsSyncService does via its recordSeed
+  // callback — the composable declines to create a Y.Text from the
+  // client side to avoid the data-overwrite vector).
+  function seedDoc(doc: Y.Doc, value: string, fieldId = 'fld_title') {
+    const t = new Y.Text()
+    t.insert(0, value)
+    doc.getMap('fields').set(fieldId, t)
+  }
+
   describe('setText emits minimal Y.Text ops', () => {
     it('single-char insert only emits a 1-char insert', () => {
       const doc = new Y.Doc()
+      seedDoc(doc, 'hello')
       const h = harness(doc)
-
-      h.composable.setText('hello')
-      // Seed the field with initial value
 
       // Record only the follow-up op
       const deltas: any[] = []
@@ -147,9 +155,8 @@ describe('useYjsTextField diff', () => {
 
     it('single-char delete only emits a 1-char delete', () => {
       const doc = new Y.Doc()
+      seedDoc(doc, 'helloX')
       const h = harness(doc)
-
-      h.composable.setText('helloX')
 
       const deltas: any[] = []
       const yText = doc.getMap('fields').get('fld_title') as Y.Text
@@ -172,9 +179,8 @@ describe('useYjsTextField diff', () => {
 
     it('middle-insert does not replace the whole string', () => {
       const doc = new Y.Doc()
+      seedDoc(doc, 'hello world')
       const h = harness(doc)
-
-      h.composable.setText('hello world')
 
       const deltas: any[] = []
       const yText = doc.getMap('fields').get('fld_title') as Y.Text
@@ -201,12 +207,13 @@ describe('useYjsTextField diff', () => {
 
   describe('concurrent non-overlapping edits merge (smoke)', () => {
     it('two editors editing different ranges merge — both changes survive', () => {
-      // Editor A's doc
+      // Editor A's doc — seed so useYjsTextField activates.
       const docA = new Y.Doc()
+      seedDoc(docA, 'the quick brown fox')
       const hA = harness(docA, 'fld_title')
-      hA.composable.setText('the quick brown fox')
 
-      // Mirror state to docB
+      // Mirror state to docB BEFORE mounting so its useYjsTextField picks
+      // up the Y.Text as soon as the watch runs.
       const docB = new Y.Doc()
       Y.applyUpdate(docB, Y.encodeStateAsUpdate(docA))
       const hB = harness(docB, 'fld_title')

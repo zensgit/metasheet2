@@ -52,6 +52,15 @@ export function useYjsDocument(recordId: Ref<string | null>) {
   const auth = useAuth()
   let socket: Socket | null = null
   let currentRecordId: string | null = null
+  /**
+   * Monotonically-increasing generation counter for connect()/disconnect()
+   * cycles. Every connect() bumps it; every await path checks `connectGen`
+   * against a captured copy and aborts if they differ. This closes the
+   * race where `disconnect()` fires while `getCurrentUserId()` is in
+   * flight — without the guard, the resolved promise would proceed to
+   * create a socket that the caller has already marked stale.
+   */
+  let connectGen = 0
 
   function normalizePresenceSnapshot(payload: unknown, expectedRecordId: string): YjsRecordPresence | null {
     if (!payload || typeof payload !== 'object') return null
@@ -84,6 +93,11 @@ export function useYjsDocument(recordId: Ref<string | null>) {
 
   async function connect(rid: string) {
     disconnect()
+    // Bump generation AFTER disconnect() so any await in a prior
+    // connect() sees a different value and bails. Capture locally so
+    // we can compare after every await.
+    connectGen += 1
+    const myGen = connectGen
     currentRecordId = rid
     error.value = null
 
@@ -93,7 +107,12 @@ export function useYjsDocument(recordId: Ref<string | null>) {
       error.value = 'Not authenticated'
       return
     }
-    currentUserId.value = await auth.getCurrentUserId().catch(() => null)
+    const resolvedUserId = await auth.getCurrentUserId().catch(() => null)
+    // Stale-guard: if disconnect() or another connect() ran during the
+    // getCurrentUserId() await, do NOT proceed to open a socket. The
+    // newer call is already in charge of wiring up the next doc.
+    if (myGen !== connectGen) return
+    currentUserId.value = resolvedUserId
 
     const yDoc = new Y.Doc()
     doc.value = yDoc
@@ -182,6 +201,9 @@ export function useYjsDocument(recordId: Ref<string | null>) {
   }
 
   function disconnect() {
+    // Bump generation so any in-flight connect() await aborts before it
+    // creates a socket/doc that nobody is going to watch.
+    connectGen += 1
     if (socket) {
       if (currentRecordId) {
         socket.emit('yjs:unsubscribe', { recordId: currentRecordId })
