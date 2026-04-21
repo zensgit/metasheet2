@@ -1275,9 +1275,16 @@ async function onRuleEditorSave(payload: Partial<AutomationRule>) {
 
 async function onTestRule(ruleId: string) {
   if (!props.client) return
+  const rule = rules.value.find((item) => item.id === ruleId)
+  const message = rule && (
+    ruleHasActionType(rule, 'send_dingtalk_group_message')
+    || ruleHasActionType(rule, 'send_dingtalk_person_message')
+  )
+    ? 'Running test. DingTalk actions may send real messages.'
+    : 'Running test.'
   setRuleTestRunState(ruleId, {
     status: 'running',
-    message: 'Running test. DingTalk actions may send real messages.',
+    message,
   })
   try {
     const execution = await props.client.testAutomationRule(props.sheetId, ruleId)

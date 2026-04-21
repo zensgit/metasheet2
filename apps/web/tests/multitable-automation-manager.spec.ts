@@ -26,6 +26,7 @@ function mockClient(
   rules: AutomationRule[] = [],
   options: {
     testExecution?: Record<string, unknown>
+    testExecutionPromise?: Promise<Record<string, unknown>>
     testErrorMessage?: string
     stats?: Record<string, unknown>
   } = {},
@@ -93,7 +94,8 @@ function mockClient(
           { status: 500, headers: { 'Content-Type': 'application/json' } },
         )
       }
-      return ok(options.testExecution ?? {
+      const testExecution = options.testExecutionPromise ? await options.testExecutionPromise : options.testExecution
+      return ok(testExecution ?? {
         id: 'exec_1',
         ruleId: 'rule_1',
         status: 'success',
@@ -1410,6 +1412,45 @@ describe('MetaAutomationManager', () => {
     const delivery = document.querySelector('[data-person-delivery-id="dpd_1"]')
     expect(delivery?.textContent).toContain('Lin Lan')
     expect(fetchFn.mock.calls.some(([url]) => String(url).includes('/api/multitable/sheets/sheet_1/automations/rule_1/dingtalk-person-deliveries'))).toBe(true)
+  })
+
+  it('shows a generic running status for non-DingTalk automation test runs', async () => {
+    let resolveExecution!: (value: Record<string, unknown>) => void
+    const testExecutionPromise = new Promise<Record<string, unknown>>((resolve) => {
+      resolveExecution = resolve
+    })
+    const { client } = mockClient([
+      fakeRule({
+        name: 'Internal notification',
+        actionType: 'notify',
+        actionConfig: { message: 'Internal only' },
+        actions: [{ type: 'notify', config: { message: 'Internal only' } }],
+      }),
+    ], { testExecutionPromise })
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
+    await flushPromises()
+
+    ;(container.querySelector('[data-automation-edit="true"]') as HTMLButtonElement).click()
+    await flushPromises()
+    ;(container.querySelector('[data-action="test"]') as HTMLButtonElement).click()
+    await nextTick()
+
+    const status = container.querySelector('[data-field="testRunStatus"]')
+    expect(status?.textContent).toContain('Running test.')
+    expect(status?.textContent).not.toContain('DingTalk')
+
+    resolveExecution({
+      id: 'exec_1',
+      ruleId: 'rule_1',
+      status: 'success',
+      triggerType: 'record.created',
+      startedAt: '2026-04-21T00:00:00.000Z',
+      durationMs: 32,
+      steps: [],
+    })
+    await flushPromises()
+
+    expect(container.querySelector('[data-field="testRunStatus"]')?.textContent).toContain('Test run succeeded')
   })
 
   it('shows a successful automation test run status and refreshes stats', async () => {
