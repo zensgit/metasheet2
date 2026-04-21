@@ -1682,6 +1682,20 @@ describe('AutomationService — Rule CRUD', () => {
     }
   }
 
+  function makePublicFormViewRow(id: string, publicForm: Record<string, unknown> = {}) {
+    return {
+      id,
+      type: 'form',
+      config: {
+        publicForm: {
+          enabled: true,
+          publicToken: `pub_${id}`,
+          ...publicForm,
+        },
+      },
+    }
+  }
+
   beforeEach(() => {
     eventBus = new EventBus()
     queryFn = vi.fn(async () => ({ rows: [], rowCount: 0 }))
@@ -1778,6 +1792,30 @@ describe('AutomationService — Rule CRUD', () => {
     expect(dbExecuteResults).toHaveLength(0)
   })
 
+  it('createRule rejects invalid DingTalk public form links before insert', async () => {
+    queryFn.mockResolvedValueOnce({ rows: [], rowCount: 0 })
+
+    const promise = service.createRule('sheet_1', {
+      name: 'Bad DingTalk link',
+      triggerType: 'record.created',
+      triggerConfig: {},
+      actionType: 'send_dingtalk_group_message',
+      actionConfig: {
+        destinationId: 'group_1',
+        titleTemplate: 'Please fill',
+        bodyTemplate: 'Open form',
+        publicFormViewId: 'view_missing',
+      },
+      createdBy: 'user_1',
+    })
+
+    await expect(promise).rejects.toBeInstanceOf(AutomationRuleValidationError)
+    await expect(promise).rejects.toThrow('Public form view not found: view_missing')
+
+    expect(queryFn).toHaveBeenCalledWith(expect.stringContaining('FROM meta_views'), ['sheet_1', ['view_missing']])
+    expect(dbExecuteResults).toHaveLength(0)
+  })
+
   it('getRule returns a rule when found', async () => {
     const mockRow = {
       id: 'atr_123',
@@ -1836,6 +1874,7 @@ describe('AutomationService — Rule CRUD', () => {
     const rule = await service.updateRule('atr_1', 'sheet_1', { name: 'Updated' })
     expect(rule).not.toBeNull()
     expect(rule!.name).toBe('Updated')
+    expect(queryFn).not.toHaveBeenCalled()
   })
 
   it('updateRule validates the merged state when only actionType changes to DingTalk', async () => {
@@ -1910,6 +1949,41 @@ describe('AutomationService — Rule CRUD', () => {
     await expect(promise).rejects.toBeInstanceOf(AutomationRuleValidationError)
     await expect(promise).rejects.toThrow('At least one local userId, memberGroupId, record recipient field path, or member group record field path is required')
 
+    expect(dbExecuteResults).toHaveLength(0)
+  })
+
+  it('updateRule rejects invalid merged DingTalk public form links before update', async () => {
+    dbExecuteTakeFirstResults.push(makeRuleRow({
+      name: 'DingTalk person',
+      action_type: 'send_dingtalk_person_message',
+      action_config: {
+        userIds: ['user_1'],
+        titleTemplate: 'Old title',
+        bodyTemplate: 'Old body',
+      },
+    }))
+    queryFn.mockResolvedValueOnce({
+      rows: [
+        makePublicFormViewRow('view_expired', {
+          expiresAt: Date.now() - 1_000,
+        }),
+      ],
+      rowCount: 1,
+    })
+
+    const promise = service.updateRule('atr_1', 'sheet_1', {
+      actionConfig: {
+        userIds: ['user_1'],
+        titleTemplate: 'New title',
+        bodyTemplate: 'New body',
+        publicFormViewId: 'view_expired',
+      },
+    })
+
+    await expect(promise).rejects.toBeInstanceOf(AutomationRuleValidationError)
+    await expect(promise).rejects.toThrow('Selected public form view has expired: view_expired')
+
+    expect(queryFn).toHaveBeenCalledWith(expect.stringContaining('FROM meta_views'), ['sheet_1', ['view_expired']])
     expect(dbExecuteResults).toHaveLength(0)
   })
 
