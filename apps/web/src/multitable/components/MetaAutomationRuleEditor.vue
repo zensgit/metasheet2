@@ -969,10 +969,10 @@ const canSave = computed(() => {
   for (const action of draft.value.actions) {
     if (action.type === 'send_dingtalk_group_message') {
       const destinationIds = parseGroupDestinationIds(action.config.destinationIds ?? action.config.destinationId)
-      const destinationFieldPath = typeof action.config.destinationFieldPath === 'string' ? action.config.destinationFieldPath.trim() : ''
+      const destinationFieldPaths = parseRecipientFieldPathsText(action.config.destinationFieldPath)
       const titleTemplate = typeof action.config.titleTemplate === 'string' ? action.config.titleTemplate.trim() : ''
       const bodyTemplate = typeof action.config.bodyTemplate === 'string' ? action.config.bodyTemplate.trim() : ''
-      if ((!destinationIds.length && !destinationFieldPath) || !titleTemplate || !bodyTemplate) return false
+      if ((!destinationIds.length && !destinationFieldPaths.length) || !titleTemplate || !bodyTemplate) return false
       if (publicFormLinkBlockingErrors(action.config.publicFormViewId).length) return false
       if (internalViewLinkBlockingErrors(action.config.internalViewId).length) return false
     }
