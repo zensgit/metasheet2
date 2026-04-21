@@ -429,6 +429,29 @@ describe('MetaAutomationManager', () => {
     expect(container.querySelector('[data-automation-group-destination-field="fld_2"]')).not.toBeNull()
   })
 
+  it('warns when a dynamic DingTalk group destination path points to a user or member group field in the inline form', async () => {
+    const { client } = mockClient([])
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
+    await flushPromises()
+
+    const addBtn = container.querySelector('.meta-automation__btn-add') as HTMLButtonElement
+    addBtn.click()
+    await nextTick()
+
+    const actionSelect = container.querySelector('[data-automation-field="actionType"]') as HTMLSelectElement
+    actionSelect.value = 'send_dingtalk_group_message'
+    actionSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushPromises()
+
+    const fieldInput = container.querySelector('[data-automation-field="dingtalkDestinationFieldPath"]') as HTMLInputElement
+    fieldInput.value = 'record.assigneeUserIds, record.watcherGroupIds'
+    fieldInput.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushPromises()
+
+    expect(container.textContent).toContain('record.assigneeUserIds is a user field')
+    expect(container.textContent).toContain('record.watcherGroupIds is a member group field')
+  })
+
   it('creates DingTalk person automation via form', async () => {
     const { client, fetchFn } = mockClient([])
     const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })

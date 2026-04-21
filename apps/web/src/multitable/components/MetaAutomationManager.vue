@@ -969,6 +969,12 @@ function groupDestinationFieldPathWarnings(value: string) {
     if (!field) {
       return [`record.${path} is not a known field in this sheet; DingTalk group messages expect field IDs that resolve to destination IDs.`]
     }
+    if (field.type === 'user') {
+      return [`record.${path} is a user field; use DingTalk person recipient fields instead.`]
+    }
+    if (isMemberGroupRecipientCandidateField(field)) {
+      return [`record.${path} is a member group field; use DingTalk person member-group recipient fields instead.`]
+    }
     return []
   })
 }

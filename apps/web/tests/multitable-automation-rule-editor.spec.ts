@@ -389,6 +389,31 @@ describe('MetaAutomationRuleEditor', () => {
     expect(container.querySelector('[data-group-destination-field="fld_2"]')).not.toBeNull()
   })
 
+  it('warns when a dynamic DingTalk group destination path points to a user or member group field', async () => {
+    const client = mockClient()
+    const { container } = mount({
+      visible: true,
+      sheetId: 'sheet_1',
+      fields,
+      views,
+      client,
+    })
+    await flushPromises()
+
+    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header select') as HTMLSelectElement
+    actionSelect.value = 'send_dingtalk_group_message'
+    actionSelect.dispatchEvent(new Event('change'))
+    await flushPromises()
+
+    const fieldInput = container.querySelector('[data-field="dingtalkDestinationFieldPath"]') as HTMLInputElement
+    fieldInput.value = 'record.assigneeUserIds, record.watcherGroupIds'
+    fieldInput.dispatchEvent(new Event('input'))
+    await flushPromises()
+
+    expect(container.textContent).toContain('record.assigneeUserIds is a user field')
+    expect(container.textContent).toContain('record.watcherGroupIds is a member group field')
+  })
+
   it('emits DingTalk person action config with optional links', async () => {
     const saved = vi.fn()
     const client = mockClient()
