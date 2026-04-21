@@ -506,6 +506,19 @@ describe('RecordWriteService', () => {
       expect(invalidator).toHaveBeenCalledWith(['rec1'])
     })
 
+    it('invalidates before realtime broadcast and eventBus notification', async () => {
+      const invalidator = vi.fn().mockResolvedValue(undefined)
+      const service = new RecordWriteService(pool, eventBus as any, helpers, invalidator)
+
+      await service.patchRecords(buildTestInput())
+
+      expect(invalidator).toHaveBeenCalledOnce()
+      expect(mockPublish).toHaveBeenCalledOnce()
+      expect(eventBus.emit).toHaveBeenCalledOnce()
+      expect(invalidator.mock.invocationCallOrder[0]).toBeLessThan(mockPublish.mock.invocationCallOrder[0])
+      expect(invalidator.mock.invocationCallOrder[0]).toBeLessThan(eventBus.emit.mock.invocationCallOrder[0])
+    })
+
     it("calls the invalidator when source === 'rest' (explicit)", async () => {
       const invalidator = vi.fn().mockResolvedValue(undefined)
       const service = new RecordWriteService(pool, eventBus as any, helpers, invalidator)

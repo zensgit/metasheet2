@@ -699,7 +699,29 @@ export class RecordWriteService {
         : undefined
 
     // -----------------------------------------------------------------------
-    // Step 5: Realtime broadcast
+    // Step 5: Yjs invalidation (post-commit, pre-notification, best effort)
+    //
+    // REST writes to meta_records.data make any persisted Y.Doc snapshot
+    // for those records stale. Drop in-memory + persisted Yjs state before
+    // notifying clients/listeners, so a fast reconnect cannot reopen the old
+    // snapshot. Skipped when the write itself originated from the Yjs bridge
+    // (those writes ARE the Y.Doc's content; invalidating would nuke a live
+    // editor).
+    // -----------------------------------------------------------------------
+    if (this.yjsInvalidator && input.source !== 'yjs-bridge' && updates.length > 0) {
+      const recordIds = updates.map((u) => u.recordId)
+      try {
+        await this.yjsInvalidator(recordIds)
+      } catch (err) {
+        console.error(
+          `[record-write] Yjs invalidation failed for records ${recordIds.join(',')} — Yjs state may be stale until next idle-release:`,
+          err,
+        )
+      }
+    }
+
+    // -----------------------------------------------------------------------
+    // Step 6: Realtime broadcast
     // -----------------------------------------------------------------------
     if (updates.length > 0) {
       publishMultitableSheetRealtime({
@@ -723,7 +745,7 @@ export class RecordWriteService {
       })
 
       // -------------------------------------------------------------------
-      // Step 6: EventBus emit
+      // Step 7: EventBus emit
       // -------------------------------------------------------------------
       for (const update of updates) {
         const changes = Object.fromEntries(
@@ -735,27 +757,6 @@ export class RecordWriteService {
           changes,
           actorId,
         })
-      }
-    }
-
-    // -----------------------------------------------------------------------
-    // Step 7: Yjs invalidation (post-commit, best effort)
-    //
-    // REST writes to meta_records.data make any persisted Y.Doc snapshot
-    // for those records stale. Drop in-memory + persisted Yjs state so the
-    // next `getOrCreateDoc` re-seeds from the just-updated DB row. Skipped
-    // when the write itself originated from the Yjs bridge (those writes
-    // ARE the Y.Doc's content; invalidating would nuke a live editor).
-    // -----------------------------------------------------------------------
-    if (this.yjsInvalidator && input.source !== 'yjs-bridge' && updates.length > 0) {
-      const recordIds = updates.map((u) => u.recordId)
-      try {
-        await this.yjsInvalidator(recordIds)
-      } catch (err) {
-        console.error(
-          `[record-write] Yjs invalidation failed for records ${recordIds.join(',')} — Yjs state may be stale until next idle-release:`,
-          err,
-        )
       }
     }
 
