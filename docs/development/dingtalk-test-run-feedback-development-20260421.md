@@ -23,6 +23,18 @@ Before this slice, `MetaAutomationRuleEditor` emitted a test event but did not e
   - API errors are surfaced instead of silently failing.
 - Refreshed per-rule automation stats after a completed test run.
 
+## Review Fixes
+
+- Normalized the frontend API error parser so backend responses shaped as
+  `{ error: "message" }` surface the real message instead of falling back to
+  `API <status>`.
+- Kept compatibility with object-shaped errors such as
+  `{ error: { code, message, fieldErrors } }`.
+- Updated Test Run duration rendering to accept both backend-shaped
+  `duration` and frontend-shaped `durationMs`.
+- Scoped the running-state “DingTalk actions may send real messages” text to
+  rules that actually include DingTalk group/person actions.
+
 ## Behavior Notes
 
 - Test Run executes the saved server-side automation rule.
@@ -34,5 +46,7 @@ Before this slice, `MetaAutomationRuleEditor` emitted a test event but did not e
 
 - `apps/web/src/multitable/components/MetaAutomationRuleEditor.vue`
 - `apps/web/src/multitable/components/MetaAutomationManager.vue`
+- `apps/web/src/multitable/api/client.ts`
+- `apps/web/src/multitable/types.ts`
 - `apps/web/tests/multitable-automation-rule-editor.spec.ts`
 - `apps/web/tests/multitable-automation-manager.spec.ts`

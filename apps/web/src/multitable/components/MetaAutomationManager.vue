@@ -1277,7 +1277,7 @@ async function onTestRule(ruleId: string) {
   if (!props.client) return
   setRuleTestRunState(ruleId, {
     status: 'running',
-    message: 'Running test. DingTalk actions may send real messages.',
+    message: testRunPendingMessage(ruleId),
   })
   try {
     const execution = await props.client.testAutomationRule(props.sheetId, ruleId)
@@ -1299,9 +1299,29 @@ function readErrorMessage(err: unknown): string {
   return err instanceof Error && err.message.trim() ? err.message : 'Unknown error'
 }
 
+function testRunPendingMessage(ruleId: string): string {
+  return hasDingTalkRuleActions(rules.value.find((rule) => rule.id === ruleId))
+    ? 'Running test. DingTalk actions may send real messages.'
+    : 'Running test.'
+}
+
+function hasDingTalkRuleActions(rule: AutomationRule | undefined): boolean {
+  if (!rule) return false
+  return isDingTalkActionType(rule.actionType) || Boolean(rule.actions?.some((action) => isDingTalkActionType(action.type)))
+}
+
+function isDingTalkActionType(actionType: AutomationActionType): boolean {
+  return actionType === 'send_dingtalk_group_message' || actionType === 'send_dingtalk_person_message'
+}
+
 function describeTestRunExecution(execution: AutomationExecution): AutomationTestRunState {
   const failedStep = execution.steps?.find((step) => step.status === 'failed')
-  const duration = typeof execution.durationMs === 'number' ? ` (${Math.round(execution.durationMs)} ms)` : ''
+  const durationMs = typeof execution.durationMs === 'number'
+    ? execution.durationMs
+    : typeof execution.duration === 'number'
+      ? execution.duration
+      : undefined
+  const duration = typeof durationMs === 'number' ? ` (${Math.round(durationMs)} ms)` : ''
   if (execution.status === 'failed' || failedStep) {
     return {
       status: 'failed',

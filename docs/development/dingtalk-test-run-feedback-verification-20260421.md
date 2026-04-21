@@ -20,6 +20,33 @@ git diff --check
 - Frontend production build passed.
 - Build emitted existing Vite warnings for `WorkflowDesigner.vue` mixed dynamic/static imports and large chunks.
 
+## Review-Fix Verification
+
+Additional targeted rerun after the API error-envelope and duration fixes:
+
+```bash
+pnpm --filter @metasheet/web exec vitest run tests/multitable-automation-manager.spec.ts --watch=false
+pnpm --filter @metasheet/web exec vitest run tests/multitable-automation-rule-editor.spec.ts --watch=false
+pnpm --filter @metasheet/web exec vue-tsc -b --noEmit
+git diff --check
+```
+
+Result:
+
+- `multitable-automation-manager.spec.ts`: 48/48 passed.
+- `multitable-automation-rule-editor.spec.ts`: 44/44 passed.
+- Combined rerun: 2 files, 92/92 passed.
+- `vue-tsc -b --noEmit`: passed.
+- `git diff --check`: passed.
+
+Expected assertions added or strengthened:
+
+- Backend-shaped `{ error: "Automation service unavailable" }` is displayed as
+  `Automation service unavailable`, not `API 500`.
+- Backend-shaped `duration` renders in Test Run success feedback.
+- Non-DingTalk automations show a generic `Running test.` message while the
+  test request is pending.
+
 ## Coverage
 
 - Unsaved rules cannot trigger Test Run.
@@ -27,3 +54,4 @@ git diff --check
 - Successful Test Run displays success feedback and refreshes stats.
 - Failed Test Run displays execution step errors.
 - Test Run API failures display errors instead of failing silently.
+- Non-DingTalk Test Run pending feedback does not warn about DingTalk sends.

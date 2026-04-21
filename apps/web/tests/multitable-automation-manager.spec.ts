@@ -25,7 +25,7 @@ function fakeRule(overrides: Partial<AutomationRule> = {}): AutomationRule {
 function mockClient(
   rules: AutomationRule[] = [],
   options: {
-    testExecution?: Record<string, unknown>
+    testExecution?: Record<string, unknown> | Promise<Record<string, unknown>>
     testErrorMessage?: string
     stats?: Record<string, unknown>
   } = {},
@@ -89,19 +89,19 @@ function mockClient(
     if (method === 'POST' && url.includes('/automations/') && url.endsWith('/test')) {
       if (options.testErrorMessage) {
         return new Response(
-          JSON.stringify({ error: { code: 'TEST_RUN_FAILED', message: options.testErrorMessage } }),
+          JSON.stringify({ error: options.testErrorMessage }),
           { status: 500, headers: { 'Content-Type': 'application/json' } },
         )
       }
-      return ok(options.testExecution ?? {
+      return ok(await (options.testExecution ?? {
         id: 'exec_1',
         ruleId: 'rule_1',
         status: 'success',
         triggerType: 'record.created',
         startedAt: '2026-04-21T00:00:00.000Z',
-        durationMs: 32,
+        duration: 32,
         steps: [],
-      })
+      }))
     }
     if (method === 'GET' && url.includes('/automations')) {
       if (url.includes('/dingtalk-group-deliveries')) {
@@ -1325,9 +1325,45 @@ describe('MetaAutomationManager', () => {
     expect(fetchFn.mock.calls.some(([url, init]) =>
       String(url).includes('/api/multitable/sheets/sheet_1/automations/rule_1/test') && init?.method === 'POST',
     )).toBe(true)
-    expect(container.querySelector('[data-field="testRunStatus"]')?.textContent).toContain('Test run succeeded')
-    expect(container.querySelector('[data-automation-test-status="rule_1"]')?.textContent).toContain('Test run succeeded')
+    expect(container.querySelector('[data-field="testRunStatus"]')?.textContent).toContain('Test run succeeded (32 ms)')
+    expect(container.querySelector('[data-automation-test-status="rule_1"]')?.textContent).toContain('Test run succeeded (32 ms)')
     expect(fetchFn.mock.calls.filter(([url]) => String(url).endsWith('/stats')).length).toBeGreaterThanOrEqual(2)
+  })
+
+  it('uses a generic running message for non-DingTalk automation tests', async () => {
+    let resolveExecution!: (value: Record<string, unknown>) => void
+    const testExecution = new Promise<Record<string, unknown>>((resolve) => {
+      resolveExecution = resolve
+    })
+    const { client } = mockClient([
+      fakeRule({
+        actionType: 'update_record',
+        actionConfig: { fieldId: 'fld_1', value: 'Done' },
+        actions: [{ type: 'update_record', config: { fieldId: 'fld_1', value: 'Done' } }],
+      }),
+    ], { testExecution })
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
+    await flushPromises()
+
+    ;(container.querySelector('[data-automation-edit="true"]') as HTMLButtonElement).click()
+    await flushPromises()
+    ;(container.querySelector('[data-action="test"]') as HTMLButtonElement).click()
+    await nextTick()
+
+    const runningStatus = container.querySelector('[data-field="testRunStatus"]')
+    expect(runningStatus?.textContent).toContain('Running test.')
+    expect(runningStatus?.textContent).not.toContain('DingTalk actions may send real messages')
+
+    resolveExecution({
+      id: 'exec_1',
+      ruleId: 'rule_1',
+      status: 'success',
+      triggerType: 'record.created',
+      startedAt: '2026-04-21T00:00:00.000Z',
+      duration: 10,
+      steps: [],
+    })
+    await flushPromises()
   })
 
   it('shows failed automation test run step errors', async () => {
