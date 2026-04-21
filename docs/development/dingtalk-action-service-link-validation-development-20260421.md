@@ -42,3 +42,7 @@ Service-level callers now reject DingTalk rules that reference:
 - Missing internal processing views.
 
 The validation uses the service `queryFn`, so it applies to both legacy single-action configs and V1 `actions[]`.
+
+## Main-target delivery note
+
+The source branch for this change was stacked on a non-`main` base. For final delivery, the single service-link validation commit was cherry-picked onto `main` after the DingTalk automation validation stack landed, so the PR contains only this service-layer validation seam and its focused tests/docs.
