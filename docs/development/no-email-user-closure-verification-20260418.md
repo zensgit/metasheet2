@@ -80,3 +80,49 @@ pnpm --filter @metasheet/web build
 - 本轮未做远端部署
 - 本轮新增数据库迁移：
   - `zzzz20260418170000_allow_no_email_users_and_add_username.ts`
+
+## Rebase 验证 - 2026-04-21
+
+### 基线
+
+- PR #916 分支 rebase 到 `origin/main`。
+- `directory-sync.ts` 冲突已解决。
+- `feat(directory): return no-email auto-admission onboarding packets` 在 rebase 中被判定为已上游等价存在，未重复应用。
+
+### 命令与结果
+
+```bash
+pnpm --filter @metasheet/core-backend exec vitest run \
+  tests/unit/AuthService.test.ts \
+  tests/unit/auth-login-routes.test.ts \
+  tests/unit/admin-users-routes.test.ts \
+  tests/unit/admin-directory-routes.test.ts \
+  tests/unit/directory-sync-bind-account.test.ts \
+  tests/unit/directory-sync-auto-admission.test.ts \
+  --watch=false
+```
+
+- 结果：`6 files passed`, `142 tests passed`
+
+```bash
+pnpm --filter @metasheet/web exec vitest run \
+  tests/LoginView.spec.ts \
+  tests/userManagementView.spec.ts \
+  tests/directoryManagementView.spec.ts \
+  --watch=false
+```
+
+- 结果：`3 files passed`, `49 tests passed`
+
+```bash
+pnpm --filter @metasheet/web exec vue-tsc -b --noEmit
+pnpm --filter @metasheet/core-backend build
+git diff --check
+```
+
+- 结果：全部通过
+
+### 备注
+
+- 新 `/tmp` worktree 初次运行测试时缺少 package-level `node_modules` 链接，出现过依赖解析失败；补临时 symlink 后重跑通过。
+- 前端 Vitest 仍打印既有 `WebSocket server error: Port is already in use`，不影响测试结论。

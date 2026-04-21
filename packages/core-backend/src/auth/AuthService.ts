@@ -420,14 +420,14 @@ export class AuthService {
         const result = await pool.query(
           `SELECT id, email, username, mobile, name, role, permissions, password_hash, is_active, must_change_password, created_at, updated_at
            FROM users
-           WHERE lower(COALESCE(email, '')) = $1
-              OR lower(COALESCE(username, '')) = $2
-              OR regexp_replace(COALESCE(mobile, ''), '\\s+', '', 'g') = $3
+           WHERE lower(email) = $1
+              OR lower(username) = $2
+              OR regexp_replace(mobile, '\\s+', '', 'g') = $3
            ORDER BY
              CASE
-               WHEN lower(COALESCE(email, '')) = $1 THEN 0
-               WHEN lower(COALESCE(username, '')) = $2 THEN 1
-               WHEN regexp_replace(COALESCE(mobile, ''), '\\s+', '', 'g') = $3 THEN 2
+               WHEN lower(email) = $1 THEN 0
+               WHEN lower(username) = $2 THEN 1
+               WHEN regexp_replace(mobile, '\\s+', '', 'g') = $3 THEN 2
                ELSE 3
              END ASC,
              created_at ASC
@@ -435,12 +435,8 @@ export class AuthService {
           [normalizedEmail, normalizedUsername, normalizedMobile]
         )
 
-        const emailMatches = result.rows.filter((row) => typeof row.email === 'string' && row.email.toLowerCase() === normalizedEmail)
-        const usernameMatches = result.rows.filter((row) => typeof row.username === 'string' && row.username.toLowerCase() === normalizedUsername)
-        if (emailMatches.length > 1 || usernameMatches.length > 1) {
-          return null
-        }
-        if (result.rows.length > 1 && emailMatches.length === 0 && usernameMatches.length === 0) {
+        const distinctUserIds = new Set(result.rows.map((row) => row.id))
+        if (distinctUserIds.size > 1) {
           return null
         }
 
