@@ -70,7 +70,7 @@ Management-side UI path:
 1. Open the table’s automation area.
 2. Create or edit a rule.
 3. Choose action `Send DingTalk group message`.
-4. Choose one configured DingTalk group destination.
+4. Choose one or more configured DingTalk group destinations.
 5. Configure:
    - title template
    - body template
@@ -78,10 +78,11 @@ Management-side UI path:
    - optional internal processing view
 6. Save the rule.
 
-Important limits:
+Dynamic routing:
 
-- one rule targets one group
-- one table can target multiple groups by creating multiple rules
+- a rule can combine manually selected group destinations and record field paths
+- record field paths must resolve to DingTalk group destination IDs
+- the editor warns if a selected record field is a user/member-group field instead of a group-destination ID field
 
 ## D. Configure a public form
 
@@ -92,6 +93,18 @@ Management-side UI path:
 3. Enable public form sharing.
 4. Choose or confirm the public form view.
 5. Copy the generated public form link or let automation include it in a DingTalk message.
+
+Automation authoring guardrail:
+
+- if a selected public form view is not shared, has no public token, or has expired, the automation editor warns and disables save
+- if a selected internal processing view is no longer in the current sheet, the automation editor warns and disables save
+- if a DingTalk group rule links to a fully public form, the automation editor warns that anyone with the message link can submit
+- if a DingTalk group rule links to a DingTalk-protected form without allowed users or member groups, the editor warns that all bound or authorized DingTalk users can submit
+- the message summary shows `Public form access`, including fully public, bound DingTalk users, authorized DingTalk users, and allowlist-constrained states
+- the warning is advisory; runtime delivery still performs the backend validation before sending the link
+- automation create/update APIs reject invalid public form or internal processing links before saving
+- runtime delivery refuses non-form public views and expired public-form shares before sending DingTalk messages
+- runtime delivery refuses missing internal processing views before sending DingTalk messages
 
 Supported access modes:
 
@@ -126,6 +139,7 @@ Behavior:
 - the visitor must pass the selected DingTalk protection mode first
 - the system then resolves the local user
 - the local user must be directly allowed or belong to an allowed member group
+- without an allowlist, `Bound DingTalk users only` admits all bound DingTalk local users and `Authorized DingTalk users only` admits all locally authorized DingTalk users
 
 Important rule:
 
@@ -194,6 +208,13 @@ Use:
 - protected public form
 - allowlist of local users or member groups
 
+Authoring guardrail:
+
+- if the selected form is still fully public, the DingTalk group rule editor warns before save
+- if the selected protected form has no allowed users or member groups, the DingTalk group rule editor warns before save
+- check `Public form access` in the automation message summary before saving
+- switch the form to `Bound DingTalk users only` or `Authorized DingTalk users only` before relying on allowlists
+
 ### Scenario 3: Notify specific staff only
 
 Use:
@@ -206,8 +227,8 @@ Use:
 
 Use:
 
-- multiple automation rules
-- one group destination per rule
+- one rule with multiple configured DingTalk groups
+- optional record group field paths when each row should choose one or more group destinations dynamically
 
 ## I. What ordinary users see
 
@@ -228,7 +249,6 @@ Ordinary users only:
 Current gaps to be aware of:
 
 - DingTalk group roster is not auto-imported
-- one rule cannot target multiple groups directly
 - row/field-specific fill assignment is not yet first-class
 - precise protected-form allowlists depend on local user/member-group governance, not raw DingTalk identities
 

@@ -79,13 +79,78 @@
               <button class="meta-automation__btn" type="button" data-automation-preset="group-internal" @click="applyGroupPreset('internal_process')">Internal processing</button>
               <button class="meta-automation__btn" type="button" data-automation-preset="group-both" @click="applyGroupPreset('form_and_process')">Form + processing</button>
             </div>
-            <label class="meta-automation__label">DingTalk group</label>
-            <select v-model="draft.dingtalkDestinationId" class="meta-automation__select" data-automation-field="dingtalkDestinationId">
-              <option value="">-- select DingTalk group --</option>
-              <option v-for="destination in dingTalkDestinations" :key="destination.id" :value="destination.id">
+            <label class="meta-automation__label">Add DingTalk groups</label>
+            <select
+              v-model="draft.dingtalkDestinationPickerId"
+              class="meta-automation__select"
+              data-automation-field="dingtalkDestinationPickerId"
+              @change="appendDingTalkGroupDestination($event.target as HTMLSelectElement)"
+            >
+              <option value="">-- add DingTalk group --</option>
+              <option v-for="destination in availableDingTalkGroupDestinations" :key="destination.id" :value="destination.id">
                 {{ destination.name }}
               </option>
             </select>
+            <div
+              v-if="selectedDingTalkGroupDestinations.length"
+              class="meta-automation__recipient-list meta-automation__recipient-list--selected"
+            >
+              <button
+                v-for="destination in selectedDingTalkGroupDestinations"
+                :key="destination.id"
+                class="meta-automation__recipient-chip"
+                type="button"
+                :data-automation-group-destination="destination.id"
+                @click="removeDingTalkGroupDestination(destination.id)"
+              >
+                <strong>{{ destination.label }}</strong>
+                <span>{{ destination.subtitle || destination.id }}</span>
+                <em>Remove</em>
+              </button>
+            </div>
+            <label class="meta-automation__label">Record group field paths (optional)</label>
+            <input
+              v-model="draft.dingtalkDestinationFieldPath"
+              class="meta-automation__input"
+              type="text"
+              placeholder="record.opsDestinationId, record.escalationDestinationIds"
+              data-automation-field="dingtalkDestinationFieldPath"
+            />
+            <label class="meta-automation__label">Pick group field</label>
+            <select
+              class="meta-automation__select"
+              data-automation-field="dingtalkDestinationFieldSelect"
+              @change="appendDingTalkGroupDestinationField($event.target as HTMLSelectElement)"
+            >
+              <option value="">-- pick field --</option>
+              <option v-for="field in dingTalkGroupDestinationCandidateFields" :key="field.id" :value="field.id">
+                {{ field.name }}
+              </option>
+            </select>
+            <div
+              v-if="selectedDingTalkGroupDestinationFields.length"
+              class="meta-automation__recipient-list meta-automation__recipient-list--selected"
+            >
+              <button
+                v-for="field in selectedDingTalkGroupDestinationFields"
+                :key="field.id"
+                class="meta-automation__recipient-chip"
+                type="button"
+                :data-automation-group-destination-field="field.id"
+                @click="removeDingTalkGroupDestinationField(field.id)"
+              >
+                <strong>{{ field.label }}</strong>
+                <span>{{ field.id }}</span>
+                <em>Remove</em>
+              </button>
+            </div>
+            <div
+              v-for="warning in groupDestinationFieldPathWarnings(draft.dingtalkDestinationFieldPath)"
+              :key="`draft-group-destination-${warning}`"
+              class="meta-automation__hint meta-automation__hint--warning"
+            >
+              {{ warning }}
+            </div>
             <label class="meta-automation__label">Title template</label>
             <input
               v-model="draft.dingtalkTitleTemplate"
@@ -147,14 +212,29 @@
               <option value="">-- no public form link --</option>
               <option v-for="view in formViews" :key="view.id" :value="view.id">{{ view.name }}</option>
             </select>
+            <div
+              v-for="warning in publicFormLinkWarnings(draft.publicFormViewId, true)"
+              :key="`draft-group-public-form-${warning}`"
+              class="meta-automation__hint meta-automation__hint--warning"
+            >
+              {{ warning }}
+            </div>
             <label class="meta-automation__label">Internal processing view (optional)</label>
             <select v-model="draft.internalViewId" class="meta-automation__select" data-automation-field="internalViewId">
               <option value="">-- no internal link --</option>
               <option v-for="view in internalViews" :key="view.id" :value="view.id">{{ view.name }}</option>
             </select>
+            <div
+              v-for="warning in internalViewLinkWarnings(draft.internalViewId)"
+              :key="`draft-group-internal-view-${warning}`"
+              class="meta-automation__hint meta-automation__hint--warning"
+            >
+              {{ warning }}
+            </div>
             <div class="meta-automation__preview" data-automation-summary="group">
               <div class="meta-automation__preview-title">Message summary</div>
-              <div><strong>Group:</strong> {{ dingTalkGroupName(draft.dingtalkDestinationId) }}</div>
+              <div><strong>Groups:</strong> {{ dingTalkGroupSummary }}</div>
+              <div><strong>Record groups:</strong> {{ dingTalkGroupFieldSummary }}</div>
               <div><strong>Title template:</strong> {{ templatePreviewText(draft.dingtalkTitleTemplate, 'No title template') }}</div>
               <div class="meta-automation__preview-body"><strong>Body template:</strong> {{ templatePreviewText(draft.dingtalkBodyTemplate, 'No body template') }}</div>
               <div class="meta-automation__preview-line">
@@ -180,6 +260,7 @@
                 </button>
               </div>
               <div><strong>Public form:</strong> {{ viewSummaryName(draft.publicFormViewId, 'No public form link') }}</div>
+              <div><strong>Public form access:</strong> {{ publicFormAccessSummary(draft.publicFormViewId) }}</div>
               <div><strong>Internal processing:</strong> {{ viewSummaryName(draft.internalViewId, 'No internal link') }}</div>
             </div>
           </template>
@@ -191,31 +272,31 @@
               <button class="meta-automation__btn" type="button" data-automation-preset="person-internal" @click="applyPersonPreset('internal_process')">Internal processing</button>
               <button class="meta-automation__btn" type="button" data-automation-preset="person-both" @click="applyPersonPreset('form_and_process')">Form + processing</button>
             </div>
-            <label class="meta-automation__label">Search and add users</label>
+            <label class="meta-automation__label">Search and add users or member groups</label>
             <input
               v-model="dingtalkPersonUserSearch"
               class="meta-automation__input"
               type="text"
-              placeholder="Search by name, email, or userId"
+              placeholder="Search by user, member group, email, or subject ID"
               data-automation-field="dingtalkPersonUserSearch"
               @input="void loadDingTalkPersonSuggestions()"
             />
-            <div v-if="dingtalkPersonUserSearchLoading" class="meta-automation__hint">Searching users…</div>
+            <div v-if="dingtalkPersonUserSearchLoading" class="meta-automation__hint">Searching users and member groups…</div>
             <div v-else-if="dingtalkPersonUserSearchError" class="meta-automation__hint meta-automation__hint--error">{{ dingtalkPersonUserSearchError }}</div>
             <div v-else-if="availableDingTalkPersonSuggestions.length" class="meta-automation__recipient-list">
               <button
                 v-for="candidate in availableDingTalkPersonSuggestions"
-                :key="candidate.id"
+                :key="personRecipientCandidateKey(candidate)"
                 class="meta-automation__recipient-option"
                 type="button"
-                :data-automation-person-suggestion="candidate.id"
+                :data-automation-person-suggestion="personRecipientCandidateKey(candidate)"
                 @click="addDingTalkPersonRecipient(candidate)"
               >
                 <strong>{{ candidate.label }}</strong>
-                <span>{{ candidate.subtitle || candidate.id }}</span>
+                <span>{{ candidate.subtitle || candidate.subjectId }}</span>
               </button>
             </div>
-            <div v-else-if="dingtalkPersonUserSearch.trim()" class="meta-automation__hint">No matching users</div>
+            <div v-else-if="dingtalkPersonUserSearch.trim()" class="meta-automation__hint">No matching users or member groups</div>
             <div v-if="selectedDingTalkPersonRecipients.length" class="meta-automation__recipient-list meta-automation__recipient-list--selected">
               <button
                 v-for="recipient in selectedDingTalkPersonRecipients"
@@ -230,6 +311,20 @@
                 <em>Remove</em>
               </button>
             </div>
+            <div v-if="selectedDingTalkPersonMemberGroups.length" class="meta-automation__recipient-list meta-automation__recipient-list--selected">
+              <button
+                v-for="group in selectedDingTalkPersonMemberGroups"
+                :key="group.id"
+                class="meta-automation__recipient-chip"
+                type="button"
+                :data-automation-person-member-group="group.id"
+                @click="removeDingTalkPersonMemberGroup(group.id)"
+              >
+                <strong>{{ group.label }}</strong>
+                <span>{{ group.subtitle || group.id }}</span>
+                <em>Remove</em>
+              </button>
+            </div>
             <label class="meta-automation__label">Local user IDs</label>
             <textarea
               v-model="draft.dingtalkPersonUserIds"
@@ -238,6 +333,104 @@
               placeholder="使用逗号或换行分隔本地 userId"
               data-automation-field="dingtalkPersonUserIds"
             ></textarea>
+            <label class="meta-automation__label">Member group IDs (optional)</label>
+            <textarea
+              v-model="draft.dingtalkPersonMemberGroupIds"
+              class="meta-automation__input"
+              rows="2"
+              placeholder="使用逗号或换行分隔成员组 ID"
+              data-automation-field="dingtalkPersonMemberGroupIds"
+            ></textarea>
+            <label class="meta-automation__label">Record recipient field paths (optional)</label>
+            <input
+              v-model="draft.dingtalkPersonRecipientFieldPath"
+              class="meta-automation__input"
+              type="text"
+              placeholder="例如：record.assigneeUserIds, record.reviewerUserId"
+              data-automation-field="dingtalkPersonRecipientFieldPath"
+            />
+            <label class="meta-automation__label">Pick recipient field</label>
+            <select
+              class="meta-automation__select"
+              data-automation-field="dingtalkPersonRecipientFieldSelect"
+              @change="appendDingTalkPersonRecipientField($event.target as HTMLSelectElement)"
+            >
+              <option value="">-- choose a user field --</option>
+              <option v-for="field in dingTalkPersonRecipientCandidateFields" :key="field.id" :value="field.id">
+                {{ field.name }} (record.{{ field.id }})
+              </option>
+            </select>
+            <div
+              v-if="selectedDingTalkPersonRecipientFields.length"
+              class="meta-automation__recipient-list meta-automation__recipient-list--selected"
+            >
+              <button
+                v-for="field in selectedDingTalkPersonRecipientFields"
+                :key="field.id"
+                class="meta-automation__recipient-chip"
+                type="button"
+                :data-automation-recipient-field="field.id"
+                @click="removeDingTalkPersonRecipientField(field.id)"
+              >
+                <strong>{{ field.label }}</strong>
+                <em>Remove</em>
+              </button>
+            </div>
+            <div
+              v-for="warning in recipientFieldPathWarnings(draft.dingtalkPersonRecipientFieldPath)"
+              :key="`draft-person-recipient-${warning}`"
+              class="meta-automation__hint meta-automation__hint--warning"
+            >
+              {{ warning }}
+            </div>
+            <div class="meta-automation__hint">
+              Record data is keyed by field ID. Use comma or newline separated <code>record.&lt;fieldId&gt;</code> paths. The picker only lists user fields.
+            </div>
+            <label class="meta-automation__label">Record member group field paths (optional)</label>
+            <input
+              v-model="draft.dingtalkPersonMemberGroupRecipientFieldPath"
+              class="meta-automation__input"
+              type="text"
+              placeholder="例如：record.watcherGroupIds, record.escalationGroupId"
+              data-automation-field="dingtalkPersonMemberGroupRecipientFieldPath"
+            />
+            <label class="meta-automation__label">Pick member group field</label>
+            <select
+              class="meta-automation__select"
+              data-automation-field="dingtalkPersonMemberGroupRecipientFieldSelect"
+              @change="appendDingTalkPersonMemberGroupRecipientField($event.target as HTMLSelectElement)"
+            >
+              <option value="">-- choose a member group field --</option>
+              <option v-for="field in dingTalkPersonMemberGroupRecipientCandidateFields" :key="field.id" :value="field.id">
+                {{ field.name }} (record.{{ field.id }})
+              </option>
+            </select>
+            <div
+              v-if="selectedDingTalkPersonMemberGroupRecipientFields.length"
+              class="meta-automation__recipient-list meta-automation__recipient-list--selected"
+            >
+              <button
+                v-for="field in selectedDingTalkPersonMemberGroupRecipientFields"
+                :key="field.id"
+                class="meta-automation__recipient-chip"
+                type="button"
+                :data-automation-member-group-recipient-field="field.id"
+                @click="removeDingTalkPersonMemberGroupRecipientField(field.id)"
+              >
+                <strong>{{ field.label }}</strong>
+                <em>Remove</em>
+              </button>
+            </div>
+            <div
+              v-for="warning in memberGroupRecipientFieldPathWarnings(draft.dingtalkPersonMemberGroupRecipientFieldPath)"
+              :key="`draft-person-member-group-recipient-${warning}`"
+              class="meta-automation__hint meta-automation__hint--warning"
+            >
+              {{ warning }}
+            </div>
+            <div class="meta-automation__hint">
+              Use comma or newline separated <code>record.&lt;fieldId&gt;</code> paths whose values resolve to member group IDs. The picker only lists explicit member group fields.
+            </div>
             <label class="meta-automation__label">Title template</label>
             <input
               v-model="draft.dingtalkPersonTitleTemplate"
@@ -299,14 +492,30 @@
               <option value="">-- no public form link --</option>
               <option v-for="view in formViews" :key="view.id" :value="view.id">{{ view.name }}</option>
             </select>
+            <div
+              v-for="warning in publicFormLinkWarnings(draft.dingtalkPersonPublicFormViewId)"
+              :key="`draft-person-public-form-${warning}`"
+              class="meta-automation__hint meta-automation__hint--warning"
+            >
+              {{ warning }}
+            </div>
             <label class="meta-automation__label">Internal processing view (optional)</label>
             <select v-model="draft.dingtalkPersonInternalViewId" class="meta-automation__select" data-automation-field="dingtalkPersonInternalViewId">
               <option value="">-- no internal link --</option>
               <option v-for="view in internalViews" :key="view.id" :value="view.id">{{ view.name }}</option>
             </select>
+            <div
+              v-for="warning in internalViewLinkWarnings(draft.dingtalkPersonInternalViewId)"
+              :key="`draft-person-internal-view-${warning}`"
+              class="meta-automation__hint meta-automation__hint--warning"
+            >
+              {{ warning }}
+            </div>
             <div class="meta-automation__preview" data-automation-summary="person">
               <div class="meta-automation__preview-title">Message summary</div>
               <div><strong>Recipients:</strong> {{ dingTalkPersonRecipientSummary }}</div>
+              <div><strong>Record recipients:</strong> {{ dingTalkPersonRecipientFieldSummary }}</div>
+              <div><strong>Record member groups:</strong> {{ dingTalkPersonMemberGroupFieldSummary }}</div>
               <div><strong>Title template:</strong> {{ templatePreviewText(draft.dingtalkPersonTitleTemplate, 'No title template') }}</div>
               <div class="meta-automation__preview-body"><strong>Body template:</strong> {{ templatePreviewText(draft.dingtalkPersonBodyTemplate, 'No body template') }}</div>
               <div class="meta-automation__preview-line">
@@ -332,6 +541,7 @@
                 </button>
               </div>
               <div><strong>Public form:</strong> {{ viewSummaryName(draft.dingtalkPersonPublicFormViewId, 'No public form link') }}</div>
+              <div><strong>Public form access:</strong> {{ publicFormAccessSummary(draft.dingtalkPersonPublicFormViewId) }}</div>
               <div><strong>Internal processing:</strong> {{ viewSummaryName(draft.dingtalkPersonInternalViewId, 'No internal link') }}</div>
             </div>
           </template>
@@ -379,11 +589,20 @@
             <span class="meta-automation__stat meta-automation__stat--success">{{ ruleStats[rule.id].success }} ok</span>
             <span class="meta-automation__stat meta-automation__stat--failed">{{ ruleStats[rule.id].failed }} fail</span>
           </div>
+          <div
+            v-if="ruleTestRunStates[rule.id]"
+            class="meta-automation__test-run-status"
+            :class="`meta-automation__test-run-status--${ruleTestRunStates[rule.id].status}`"
+            :data-automation-test-status="rule.id"
+            :data-status="ruleTestRunStates[rule.id].status"
+          >
+            {{ ruleTestRunStates[rule.id].message }}
+          </div>
           <div class="meta-automation__card-actions">
             <button class="meta-automation__btn" type="button" data-automation-edit="true" @click="openRuleEditor(rule)">Edit</button>
             <button class="meta-automation__btn" type="button" data-automation-logs="true" @click="openLogViewer(rule)">View Logs</button>
             <button
-              v-if="rule.actionType === 'send_dingtalk_group_message'"
+              v-if="ruleHasActionType(rule, 'send_dingtalk_group_message')"
               class="meta-automation__btn"
               type="button"
               :data-automation-group-deliveries="rule.id"
@@ -392,7 +611,7 @@
               View Deliveries
             </button>
             <button
-              v-if="rule.actionType === 'send_dingtalk_person_message'"
+              v-if="ruleHasActionType(rule, 'send_dingtalk_person_message')"
               class="meta-automation__btn"
               type="button"
               :data-automation-person-deliveries="rule.id"
@@ -412,6 +631,7 @@
       :fields="fields"
       :client="client"
       :views="views"
+      :test-run-state="activeRuleTestRunState"
       @close="showRuleEditor = false"
       @save="onRuleEditorSave"
       @test="onTestRule"
@@ -443,12 +663,13 @@
 <script setup lang="ts">
 import { ref, computed, watch, onBeforeUnmount } from 'vue'
 import type {
+  AutomationExecution,
   AutomationRule,
   AutomationTriggerType,
   AutomationActionType,
   AutomationStats,
   DingTalkGroupDestination,
-  MetaCommentMentionSuggestion,
+  MetaSheetPermissionCandidate,
   MetaView,
 } from '../types'
 import { useMultitableAutomations } from '../composables/useMultitableAutomations'
@@ -465,11 +686,24 @@ import {
 } from '../utils/dingtalkNotificationTemplateTokens'
 import { listDingTalkTemplateSyntaxWarnings } from '../utils/dingtalkNotificationTemplateLint'
 import { renderDingTalkTemplateExample } from '../utils/dingtalkNotificationTemplateExample'
+import {
+  isDingTalkMemberGroupRecipientField,
+  listDingTalkGroupDestinationFieldPathWarnings,
+} from '../utils/dingtalkRecipientFieldWarnings'
+import {
+  describeDingTalkPublicFormLinkAccess,
+  listDingTalkPublicFormLinkBlockingErrors,
+  listDingTalkPublicFormLinkWarnings,
+} from '../utils/dingtalkPublicFormLinkWarnings'
+import {
+  listDingTalkInternalViewLinkBlockingErrors,
+  listDingTalkInternalViewLinkWarnings,
+} from '../utils/dingtalkInternalViewLinkWarnings'
 
 const props = defineProps<{
   visible: boolean
   sheetId: string
-  fields: Array<{ id: string; name: string; type: string }>
+  fields: Array<{ id: string; name: string; type: string; property?: Record<string, unknown> }>
   client?: MultitableApiClient
   views?: MetaView[]
 }>()
@@ -478,6 +712,11 @@ const emit = defineEmits<{
   (e: 'close'): void
   (e: 'updated'): void
 }>()
+
+type AutomationTestRunState = {
+  status: 'running' | 'success' | 'failed' | 'skipped'
+  message: string
+}
 
 const { rules, loading, error, loadRules, createRule, updateRule, deleteRule, toggleRule } =
   useMultitableAutomations(props.client)
@@ -493,12 +732,17 @@ interface DraftState {
   notifyMessage: string
   targetFieldId: string
   targetValue: string
-  dingtalkDestinationId: string
+  dingtalkDestinationIds: string[]
+  dingtalkDestinationPickerId: string
+  dingtalkDestinationFieldPath: string
   dingtalkTitleTemplate: string
   dingtalkBodyTemplate: string
   publicFormViewId: string
   internalViewId: string
   dingtalkPersonUserIds: string
+  dingtalkPersonMemberGroupIds: string
+  dingtalkPersonRecipientFieldPath: string
+  dingtalkPersonMemberGroupRecipientFieldPath: string
   dingtalkPersonTitleTemplate: string
   dingtalkPersonBodyTemplate: string
   dingtalkPersonPublicFormViewId: string
@@ -514,12 +758,17 @@ function emptyDraft(): DraftState {
     notifyMessage: '',
     targetFieldId: '',
     targetValue: '',
-    dingtalkDestinationId: '',
+    dingtalkDestinationIds: [],
+    dingtalkDestinationPickerId: '',
+    dingtalkDestinationFieldPath: '',
     dingtalkTitleTemplate: '',
     dingtalkBodyTemplate: '',
     publicFormViewId: '',
     internalViewId: '',
     dingtalkPersonUserIds: '',
+    dingtalkPersonMemberGroupIds: '',
+    dingtalkPersonRecipientFieldPath: '',
+    dingtalkPersonMemberGroupRecipientFieldPath: '',
     dingtalkPersonTitleTemplate: '',
     dingtalkPersonBodyTemplate: '',
     dingtalkPersonPublicFormViewId: '',
@@ -532,13 +781,15 @@ const dingTalkDestinations = ref<DingTalkGroupDestination[]>([])
 const dingtalkPersonUserSearch = ref('')
 const dingtalkPersonUserSearchLoading = ref(false)
 const dingtalkPersonUserSearchError = ref('')
-const dingtalkPersonUserSuggestions = ref<MetaCommentMentionSuggestion[]>([])
+const dingtalkPersonUserSuggestions = ref<MetaSheetPermissionCandidate[]>([])
 const dingtalkPersonUserDirectory = ref<Record<string, { label: string; subtitle?: string }>>({})
 const copiedPreviewKey = ref('')
 let dingtalkPersonSuggestionLoadId = 0
 let copiedPreviewResetTimer: ReturnType<typeof setTimeout> | null = null
-const formViews = computed(() => (props.views ?? []).filter((view) => view.type === 'form'))
-const internalViews = computed(() => props.views ?? [])
+const formViews = computed(() => (props.views ?? []).filter((view) =>
+  view.type === 'form' && (!view.sheetId || view.sheetId === props.sheetId),
+))
+const internalViews = computed(() => (props.views ?? []).filter((view) => !view.sheetId || view.sheetId === props.sheetId))
 
 function parseUserIdsText(value: string): string[] {
   return value
@@ -547,10 +798,26 @@ function parseUserIdsText(value: string): string[] {
     .filter(Boolean)
 }
 
-function rememberDingTalkPersonSuggestions(items: MetaCommentMentionSuggestion[]) {
+function parseMemberGroupIdsText(value: string): string[] {
+  return value
+    .split(/[\n,]+/)
+    .map((entry) => entry.trim())
+    .filter(Boolean)
+}
+
+function personRecipientDirectoryKey(subjectType: 'user' | 'member-group', subjectId: string) {
+  return `${subjectType}:${subjectId}`
+}
+
+function personRecipientCandidateKey(candidate: MetaSheetPermissionCandidate) {
+  return personRecipientDirectoryKey(candidate.subjectType === 'member-group' ? 'member-group' : 'user', candidate.subjectId)
+}
+
+function rememberDingTalkPersonSuggestions(items: MetaSheetPermissionCandidate[]) {
   const next = { ...dingtalkPersonUserDirectory.value }
   for (const item of items) {
-    next[item.id] = { label: item.label, subtitle: item.subtitle }
+    if (item.subjectType !== 'user' && item.subjectType !== 'member-group') continue
+    next[personRecipientDirectoryKey(item.subjectType, item.subjectId)] = { label: item.label, subtitle: item.subtitle ?? undefined }
   }
   dingtalkPersonUserDirectory.value = next
 }
@@ -558,14 +825,26 @@ function rememberDingTalkPersonSuggestions(items: MetaCommentMentionSuggestion[]
 const selectedDingTalkPersonRecipients = computed(() =>
   parseUserIdsText(draft.value.dingtalkPersonUserIds).map((id) => ({
     id,
-    label: dingtalkPersonUserDirectory.value[id]?.label ?? id,
-    subtitle: dingtalkPersonUserDirectory.value[id]?.subtitle,
+    label: dingtalkPersonUserDirectory.value[personRecipientDirectoryKey('user', id)]?.label ?? id,
+    subtitle: dingtalkPersonUserDirectory.value[personRecipientDirectoryKey('user', id)]?.subtitle,
+  })),
+)
+
+const selectedDingTalkPersonMemberGroups = computed(() =>
+  parseMemberGroupIdsText(draft.value.dingtalkPersonMemberGroupIds).map((id) => ({
+    id,
+    label: dingtalkPersonUserDirectory.value[personRecipientDirectoryKey('member-group', id)]?.label ?? id,
+    subtitle: dingtalkPersonUserDirectory.value[personRecipientDirectoryKey('member-group', id)]?.subtitle,
   })),
 )
 
 const availableDingTalkPersonSuggestions = computed(() => {
   const selected = new Set(parseUserIdsText(draft.value.dingtalkPersonUserIds))
-  return dingtalkPersonUserSuggestions.value.filter((candidate) => !selected.has(candidate.id))
+  const selectedGroups = new Set(parseMemberGroupIdsText(draft.value.dingtalkPersonMemberGroupIds))
+  return dingtalkPersonUserSuggestions.value.filter((candidate) => {
+    if (candidate.subjectType === 'member-group') return !selectedGroups.has(candidate.subjectId)
+    return !selected.has(candidate.subjectId)
+  })
 })
 
 async function loadDingTalkPersonSuggestions() {
@@ -581,8 +860,7 @@ async function loadDingTalkPersonSuggestions() {
   dingtalkPersonUserSearchLoading.value = true
   dingtalkPersonUserSearchError.value = ''
   try {
-    const response = await props.client.listCommentMentionSuggestions({
-      spreadsheetId: props.sheetId,
+    const response = await props.client.listFormShareCandidates(props.sheetId, {
       q: query,
       limit: 8,
     })
@@ -592,7 +870,7 @@ async function loadDingTalkPersonSuggestions() {
   } catch (error) {
     if (requestId !== dingtalkPersonSuggestionLoadId) return
     dingtalkPersonUserSuggestions.value = []
-    dingtalkPersonUserSearchError.value = error instanceof Error ? error.message : 'Failed to search users'
+    dingtalkPersonUserSearchError.value = error instanceof Error ? error.message : 'Failed to search users and member groups'
   } finally {
     if (requestId === dingtalkPersonSuggestionLoadId) {
       dingtalkPersonUserSearchLoading.value = false
@@ -600,10 +878,16 @@ async function loadDingTalkPersonSuggestions() {
   }
 }
 
-function addDingTalkPersonRecipient(candidate: MetaCommentMentionSuggestion) {
-  const ids = new Set(parseUserIdsText(draft.value.dingtalkPersonUserIds))
-  ids.add(candidate.id)
-  draft.value.dingtalkPersonUserIds = Array.from(ids).join(', ')
+function addDingTalkPersonRecipient(candidate: MetaSheetPermissionCandidate) {
+  if (candidate.subjectType === 'member-group') {
+    const ids = new Set(parseMemberGroupIdsText(draft.value.dingtalkPersonMemberGroupIds))
+    ids.add(candidate.subjectId)
+    draft.value.dingtalkPersonMemberGroupIds = Array.from(ids).join(', ')
+  } else {
+    const ids = new Set(parseUserIdsText(draft.value.dingtalkPersonUserIds))
+    ids.add(candidate.subjectId)
+    draft.value.dingtalkPersonUserIds = Array.from(ids).join(', ')
+  }
   rememberDingTalkPersonSuggestions([candidate])
   dingtalkPersonUserSearch.value = ''
   dingtalkPersonUserSuggestions.value = []
@@ -616,10 +900,66 @@ function removeDingTalkPersonRecipient(userId: string) {
     .join(', ')
 }
 
+function removeDingTalkPersonMemberGroup(groupId: string) {
+  draft.value.dingtalkPersonMemberGroupIds = parseMemberGroupIdsText(draft.value.dingtalkPersonMemberGroupIds)
+    .filter((id) => id !== groupId)
+    .join(', ')
+}
+
+function parseGroupDestinationIds(value: unknown): string[] {
+  if (Array.isArray(value)) {
+    return Array.from(new Set(
+      value
+        .filter((item): item is string => typeof item === 'string')
+        .map((item) => item.trim())
+        .filter(Boolean),
+    ))
+  }
+  if (typeof value === 'string' && value.trim()) {
+    return [value.trim()]
+  }
+  return []
+}
+
 function dingTalkGroupName(destinationId: string) {
   if (!destinationId) return 'No group selected'
   return dingTalkDestinations.value.find((item) => item.id === destinationId)?.name ?? destinationId
 }
+
+const selectedDingTalkGroupDestinations = computed(() =>
+  draft.value.dingtalkDestinationIds.map((id) => {
+    const destination = dingTalkDestinations.value.find((item) => item.id === id)
+    return {
+      id,
+      label: destination?.name ?? id,
+      subtitle: destination?.sheetId ? `sheet: ${destination.sheetId}` : undefined,
+    }
+  }),
+)
+
+const dingTalkGroupDestinationCandidateFields = computed(() => props.fields)
+
+const availableDingTalkGroupDestinations = computed(() => {
+  const selected = new Set(draft.value.dingtalkDestinationIds)
+  return dingTalkDestinations.value.filter((destination) => !selected.has(destination.id))
+})
+
+function appendDingTalkGroupDestination(select: HTMLSelectElement) {
+  const destinationId = select.value.trim()
+  if (!destinationId) return
+  draft.value.dingtalkDestinationIds = Array.from(new Set([...draft.value.dingtalkDestinationIds, destinationId]))
+  draft.value.dingtalkDestinationPickerId = ''
+  select.value = ''
+}
+
+function removeDingTalkGroupDestination(destinationId: string) {
+  draft.value.dingtalkDestinationIds = draft.value.dingtalkDestinationIds.filter((id) => id !== destinationId)
+}
+
+const dingTalkGroupSummary = computed(() => {
+  if (!selectedDingTalkGroupDestinations.value.length) return 'No groups selected'
+  return selectedDingTalkGroupDestinations.value.map((item) => item.label).join(', ')
+})
 
 function viewSummaryName(viewId: string, fallback: string) {
   if (!viewId) return fallback
@@ -637,6 +977,29 @@ function renderedTemplateExample(value: string, fallback: string) {
   return rendered || fallback
 }
 
+function publicFormLinkWarnings(value: unknown, warnWhenGroupAccessRisk = false) {
+  return listDingTalkPublicFormLinkWarnings(value, formViews.value, {
+    warnWhenFullyPublic: warnWhenGroupAccessRisk,
+    warnWhenProtectedWithoutAllowlist: warnWhenGroupAccessRisk,
+  })
+}
+
+function publicFormLinkBlockingErrors(value: unknown) {
+  return listDingTalkPublicFormLinkBlockingErrors(value, formViews.value)
+}
+
+function internalViewLinkWarnings(value: unknown) {
+  return listDingTalkInternalViewLinkWarnings(value, internalViews.value)
+}
+
+function internalViewLinkBlockingErrors(value: unknown) {
+  return listDingTalkInternalViewLinkBlockingErrors(value, internalViews.value)
+}
+
+function publicFormAccessSummary(value: unknown) {
+  return describeDingTalkPublicFormLinkAccess(value, formViews.value)
+}
+
 function copyPreviewText(key: string, text: string) {
   const trimmed = text.trim()
   if (!trimmed || !navigator.clipboard?.writeText) return
@@ -650,9 +1013,154 @@ function copyPreviewText(key: string, text: string) {
 }
 
 const dingTalkPersonRecipientSummary = computed(() => {
-  if (!selectedDingTalkPersonRecipients.value.length) return 'No recipients selected'
-  return selectedDingTalkPersonRecipients.value.map((item) => item.label).join(', ')
+  const userLabels = selectedDingTalkPersonRecipients.value.map((item) => item.label)
+  const groupLabels = selectedDingTalkPersonMemberGroups.value.map((item) => item.label)
+  const parts = [
+    userLabels.length ? `Users: ${userLabels.join(', ')}` : '',
+    groupLabels.length ? `Groups: ${groupLabels.join(', ')}` : '',
+  ].filter(Boolean)
+  if (!parts.length) return 'No recipients selected'
+  return parts.join(' | ')
 })
+
+const selectedDingTalkGroupDestinationFields = computed(() => parseRecipientFieldPathsText(draft.value.dingtalkDestinationFieldPath)
+  .map((path) => ({
+    id: path,
+    label: recipientFieldSummaryLabel(path),
+  }))
+  .filter((item) => item.label))
+
+function parseRecipientFieldPathsText(value: string): string[] {
+  return Array.from(new Set(
+    value
+      .split(/[\n,]+/)
+      .map((entry) => entry.trim().replace(/^record\./, ''))
+      .filter(Boolean),
+  ))
+}
+
+function recipientFieldSummaryLabel(path: string) {
+  const normalized = path.trim().replace(/^record\./, '')
+  if (!normalized) return ''
+  const field = props.fields.find((item) => item.id === normalized)
+  return field ? `${field.name} (record.${normalized})` : `record.${normalized}`
+}
+
+function groupDestinationFieldPathWarnings(value: string) {
+  return listDingTalkGroupDestinationFieldPathWarnings(value, props.fields)
+}
+
+const dingTalkPersonRecipientCandidateFields = computed(() => props.fields.filter((field) => field.type === 'user'))
+const dingTalkPersonMemberGroupRecipientCandidateFields = computed(() => props.fields.filter(isDingTalkMemberGroupRecipientField))
+
+const selectedDingTalkPersonRecipientFields = computed(() => parseRecipientFieldPathsText(draft.value.dingtalkPersonRecipientFieldPath)
+  .map((path) => ({
+    id: path,
+    label: recipientFieldSummaryLabel(path),
+  }))
+  .filter((item) => item.label))
+
+const selectedDingTalkPersonMemberGroupRecipientFields = computed(() => parseRecipientFieldPathsText(draft.value.dingtalkPersonMemberGroupRecipientFieldPath)
+  .map((path) => ({
+    id: path,
+    label: recipientFieldSummaryLabel(path),
+  }))
+  .filter((item) => item.label))
+
+function recipientFieldPathWarnings(value: string) {
+  const candidateIds = new Set(dingTalkPersonRecipientCandidateFields.value.map((field) => field.id))
+  return parseRecipientFieldPathsText(value)
+    .filter((path) => !candidateIds.has(path))
+    .map((path) => `record.${path} is not a user field; DingTalk person messages expect local user IDs.`)
+}
+
+function memberGroupRecipientFieldPathWarnings(value: string) {
+  const fieldMap = new Map(props.fields.map((field) => [field.id, field]))
+  return parseRecipientFieldPathsText(value).flatMap((path) => {
+    const field = fieldMap.get(path)
+    if (!field) {
+      return [`record.${path} is not a known field in this sheet; DingTalk person member-group recipients expect field IDs that resolve to member group IDs.`]
+    }
+    if (field.type === 'user') {
+      return [`record.${path} is a user field; use Record recipient field paths instead.`]
+    }
+    return []
+  })
+}
+
+const dingTalkPersonRecipientFieldSummary = computed(() => {
+  const labels = selectedDingTalkPersonRecipientFields.value.map((item) => item.label)
+  if (!labels.length) return 'No dynamic recipient field'
+  return labels.join(', ')
+})
+
+const dingTalkPersonMemberGroupFieldSummary = computed(() => {
+  const labels = parseRecipientFieldPathsText(draft.value.dingtalkPersonMemberGroupRecipientFieldPath)
+    .map((path) => recipientFieldSummaryLabel(path))
+    .filter(Boolean)
+  if (!labels.length) return 'No dynamic member group field'
+  return labels.join(', ')
+})
+
+const dingTalkGroupFieldSummary = computed(() => {
+  const labels = selectedDingTalkGroupDestinationFields.value.map((item) => item.label)
+  if (!labels.length) return 'No dynamic group field'
+  return labels.join(', ')
+})
+
+function appendDingTalkGroupDestinationField(select: HTMLSelectElement) {
+  const value = select.value.trim()
+  if (!value) return
+  const paths = parseRecipientFieldPathsText(draft.value.dingtalkDestinationFieldPath)
+  paths.push(value)
+  draft.value.dingtalkDestinationFieldPath = Array.from(new Set(paths))
+    .map((path) => `record.${path}`)
+    .join(', ')
+  select.value = ''
+}
+
+function removeDingTalkGroupDestinationField(path: string) {
+  draft.value.dingtalkDestinationFieldPath = parseRecipientFieldPathsText(draft.value.dingtalkDestinationFieldPath)
+    .filter((entry) => entry !== path)
+    .map((entry) => `record.${entry}`)
+    .join(', ')
+}
+
+function appendDingTalkPersonRecipientField(select: HTMLSelectElement) {
+  const value = select.value.trim()
+  if (!value) return
+  const paths = parseRecipientFieldPathsText(draft.value.dingtalkPersonRecipientFieldPath)
+  paths.push(value)
+  draft.value.dingtalkPersonRecipientFieldPath = Array.from(new Set(paths))
+    .map((path) => `record.${path}`)
+    .join(', ')
+  select.value = ''
+}
+
+function removeDingTalkPersonRecipientField(path: string) {
+  draft.value.dingtalkPersonRecipientFieldPath = parseRecipientFieldPathsText(draft.value.dingtalkPersonRecipientFieldPath)
+    .filter((entry) => entry !== path)
+    .map((entry) => `record.${entry}`)
+    .join(', ')
+}
+
+function appendDingTalkPersonMemberGroupRecipientField(select: HTMLSelectElement) {
+  const value = select.value.trim()
+  if (!value) return
+  const paths = parseRecipientFieldPathsText(draft.value.dingtalkPersonMemberGroupRecipientFieldPath)
+  paths.push(value)
+  draft.value.dingtalkPersonMemberGroupRecipientFieldPath = Array.from(new Set(paths))
+    .map((path) => `record.${path}`)
+    .join(', ')
+  select.value = ''
+}
+
+function removeDingTalkPersonMemberGroupRecipientField(path: string) {
+  draft.value.dingtalkPersonMemberGroupRecipientFieldPath = parseRecipientFieldPathsText(draft.value.dingtalkPersonMemberGroupRecipientFieldPath)
+    .filter((entry) => entry !== path)
+    .map((entry) => `record.${entry}`)
+    .join(', ')
+}
 
 function templateSyntaxWarnings(value: string) {
   return listDingTalkTemplateSyntaxWarnings(value)
@@ -722,6 +1230,11 @@ const groupDeliveryViewerRuleId = ref('')
 const showPersonDeliveryViewer = ref(false)
 const personDeliveryViewerRuleId = ref('')
 const ruleStats = ref<Record<string, AutomationStats>>({})
+const ruleTestRunStates = ref<Record<string, AutomationTestRunState>>({})
+const activeRuleTestRunState = computed(() => {
+  const ruleId = editingRule.value?.id
+  return ruleId ? ruleTestRunStates.value[ruleId] : undefined
+})
 
 function openRuleEditor(rule?: AutomationRule) {
   editingRule.value = rule ?? null
@@ -762,22 +1275,85 @@ async function onRuleEditorSave(payload: Partial<AutomationRule>) {
 
 async function onTestRule(ruleId: string) {
   if (!props.client) return
+  setRuleTestRunState(ruleId, {
+    status: 'running',
+    message: testRunPendingMessage(ruleId),
+  })
   try {
-    await props.client.testAutomationRule(props.sheetId, ruleId)
+    const execution = await props.client.testAutomationRule(props.sheetId, ruleId)
+    setRuleTestRunState(ruleId, describeTestRunExecution(execution))
+    await loadRuleStatsForRule(ruleId)
+  } catch (err: unknown) {
+    setRuleTestRunState(ruleId, {
+      status: 'failed',
+      message: `Test run request failed: ${readErrorMessage(err)}`,
+    })
+  }
+}
+
+function setRuleTestRunState(ruleId: string, state: AutomationTestRunState) {
+  ruleTestRunStates.value = { ...ruleTestRunStates.value, [ruleId]: state }
+}
+
+function readErrorMessage(err: unknown): string {
+  return err instanceof Error && err.message.trim() ? err.message : 'Unknown error'
+}
+
+function testRunPendingMessage(ruleId: string): string {
+  return hasDingTalkRuleActions(rules.value.find((rule) => rule.id === ruleId))
+    ? 'Running test. DingTalk actions may send real messages.'
+    : 'Running test.'
+}
+
+function hasDingTalkRuleActions(rule: AutomationRule | undefined): boolean {
+  if (!rule) return false
+  return isDingTalkActionType(rule.actionType) || Boolean(rule.actions?.some((action) => isDingTalkActionType(action.type)))
+}
+
+function isDingTalkActionType(actionType: AutomationActionType): boolean {
+  return actionType === 'send_dingtalk_group_message' || actionType === 'send_dingtalk_person_message'
+}
+
+function describeTestRunExecution(execution: AutomationExecution): AutomationTestRunState {
+  const failedStep = execution.steps?.find((step) => step.status === 'failed')
+  const durationMs = typeof execution.durationMs === 'number'
+    ? execution.durationMs
+    : typeof execution.duration === 'number'
+      ? execution.duration
+      : undefined
+  const duration = typeof durationMs === 'number' ? ` (${Math.round(durationMs)} ms)` : ''
+  if (execution.status === 'failed' || failedStep) {
+    return {
+      status: 'failed',
+      message: `Test run failed: ${execution.error || failedStep?.error || 'At least one action failed.'}`,
+    }
+  }
+  if (execution.status === 'skipped') {
+    return {
+      status: 'skipped',
+      message: `Test run skipped${duration}.`,
+    }
+  }
+  return {
+    status: 'success',
+    message: `Test run succeeded${duration}.`,
+  }
+}
+
+async function loadRuleStatsForRule(ruleId: string) {
+  if (!props.client) return
+  try {
+    const st = await props.client.getAutomationStats(props.sheetId, ruleId)
+    ruleStats.value = { ...ruleStats.value, [ruleId]: st }
   } catch {
-    // silently fail
+    // skip
   }
 }
 
 async function loadRuleStats() {
   if (!props.client) return
   for (const rule of rules.value) {
-    try {
-      const st = await props.client.getAutomationStats(props.sheetId, rule.id)
-      ruleStats.value[rule.id] = st
-    } catch {
-      // skip
-    }
+    await loadRuleStatsForRule(rule.id)
   }
 }
 
@@ -787,14 +1363,23 @@ const canSave = computed(() => {
   if (draft.value.actionType === 'notify' && !draft.value.notifyMessage.trim()) return false
   if (draft.value.actionType === 'update_field' && (!draft.value.targetFieldId || !draft.value.targetValue.trim())) return false
   if (draft.value.actionType === 'send_dingtalk_group_message') {
-    if (!draft.value.dingtalkDestinationId) return false
+    if (!draft.value.dingtalkDestinationIds.length && !draft.value.dingtalkDestinationFieldPath.trim()) return false
     if (!draft.value.dingtalkTitleTemplate.trim()) return false
     if (!draft.value.dingtalkBodyTemplate.trim()) return false
+    if (publicFormLinkBlockingErrors(draft.value.publicFormViewId).length) return false
+    if (internalViewLinkBlockingErrors(draft.value.internalViewId).length) return false
   }
   if (draft.value.actionType === 'send_dingtalk_person_message') {
-    if (!draft.value.dingtalkPersonUserIds.trim()) return false
+    if (
+      !draft.value.dingtalkPersonUserIds.trim()
+      && !draft.value.dingtalkPersonMemberGroupIds.trim()
+      && !draft.value.dingtalkPersonRecipientFieldPath.trim()
+      && !draft.value.dingtalkPersonMemberGroupRecipientFieldPath.trim()
+    ) return false
     if (!draft.value.dingtalkPersonTitleTemplate.trim()) return false
     if (!draft.value.dingtalkPersonBodyTemplate.trim()) return false
+    if (publicFormLinkBlockingErrors(draft.value.dingtalkPersonPublicFormViewId).length) return false
+    if (internalViewLinkBlockingErrors(draft.value.dingtalkPersonInternalViewId).length) return false
   }
   return true
 })
@@ -818,12 +1403,23 @@ function openEditForm(rule: AutomationRule) {
     notifyMessage: (rule.actionConfig?.message as string) ?? '',
     targetFieldId: (rule.actionConfig?.fieldId as string) ?? '',
     targetValue: (rule.actionConfig?.value as string) ?? '',
-    dingtalkDestinationId: (rule.actionConfig?.destinationId as string) ?? '',
+    dingtalkDestinationIds: parseGroupDestinationIds(rule.actionConfig?.destinationIds ?? rule.actionConfig?.destinationId),
+    dingtalkDestinationPickerId: '',
+    dingtalkDestinationFieldPath: Array.isArray(rule.actionConfig?.destinationIdFieldPaths)
+      ? (rule.actionConfig?.destinationIdFieldPaths as string[]).join(', ')
+      : (rule.actionConfig?.destinationIdFieldPath as string) ?? '',
     dingtalkTitleTemplate: (rule.actionConfig?.titleTemplate as string) ?? '',
     dingtalkBodyTemplate: (rule.actionConfig?.bodyTemplate as string) ?? '',
     publicFormViewId: (rule.actionConfig?.publicFormViewId as string) ?? '',
     internalViewId: (rule.actionConfig?.internalViewId as string) ?? '',
     dingtalkPersonUserIds: Array.isArray(rule.actionConfig?.userIds) ? rule.actionConfig?.userIds.join(', ') : '',
+    dingtalkPersonMemberGroupIds: Array.isArray(rule.actionConfig?.memberGroupIds) ? rule.actionConfig?.memberGroupIds.join(', ') : '',
+    dingtalkPersonRecipientFieldPath: Array.isArray(rule.actionConfig?.userIdFieldPaths)
+      ? (rule.actionConfig?.userIdFieldPaths as string[]).join(', ')
+      : (rule.actionConfig?.userIdFieldPath as string) ?? '',
+    dingtalkPersonMemberGroupRecipientFieldPath: Array.isArray(rule.actionConfig?.memberGroupIdFieldPaths)
+      ? (rule.actionConfig?.memberGroupIdFieldPaths as string[]).join(', ')
+      : (rule.actionConfig?.memberGroupIdFieldPath as string) ?? '',
     dingtalkPersonTitleTemplate: (rule.actionConfig?.titleTemplate as string) ?? '',
     dingtalkPersonBodyTemplate: (rule.actionConfig?.bodyTemplate as string) ?? '',
     dingtalkPersonPublicFormViewId: (rule.actionConfig?.publicFormViewId as string) ?? '',
@@ -859,8 +1455,14 @@ function buildActionConfig(): Record<string, unknown> {
     return { fieldId: draft.value.targetFieldId, value: draft.value.targetValue }
   }
   if (draft.value.actionType === 'send_dingtalk_group_message') {
+    const destinationIds = Array.from(new Set(draft.value.dingtalkDestinationIds.map((id) => id.trim()).filter(Boolean)))
+    const destinationIdFieldPaths = parseRecipientFieldPathsText(draft.value.dingtalkDestinationFieldPath)
+      .map((path) => `record.${path}`)
     return {
-      destinationId: draft.value.dingtalkDestinationId,
+      destinationId: destinationIds[0] || undefined,
+      destinationIds: destinationIds.length ? destinationIds : undefined,
+      destinationIdFieldPath: destinationIdFieldPaths[0] || undefined,
+      destinationIdFieldPaths: destinationIdFieldPaths.length ? destinationIdFieldPaths : undefined,
       titleTemplate: draft.value.dingtalkTitleTemplate,
       bodyTemplate: draft.value.dingtalkBodyTemplate,
       publicFormViewId: draft.value.publicFormViewId || undefined,
@@ -868,11 +1470,24 @@ function buildActionConfig(): Record<string, unknown> {
     }
   }
   if (draft.value.actionType === 'send_dingtalk_person_message') {
+    const memberGroupIds = draft.value.dingtalkPersonMemberGroupIds
+      .split(/[\n,]+/)
+      .map((entry) => entry.trim())
+      .filter(Boolean)
+    const userIdFieldPaths = parseRecipientFieldPathsText(draft.value.dingtalkPersonRecipientFieldPath)
+      .map((path) => `record.${path}`)
+    const memberGroupIdFieldPaths = parseRecipientFieldPathsText(draft.value.dingtalkPersonMemberGroupRecipientFieldPath)
+      .map((path) => `record.${path}`)
     return {
       userIds: draft.value.dingtalkPersonUserIds
         .split(/[\n,]+/)
         .map((entry) => entry.trim())
         .filter(Boolean),
+      memberGroupIds: memberGroupIds.length ? memberGroupIds : undefined,
+      userIdFieldPath: userIdFieldPaths[0] || undefined,
+      userIdFieldPaths: userIdFieldPaths.length ? userIdFieldPaths : undefined,
+      memberGroupIdFieldPath: memberGroupIdFieldPaths[0] || undefined,
+      memberGroupIdFieldPaths: memberGroupIdFieldPaths.length ? memberGroupIdFieldPaths : undefined,
       titleTemplate: draft.value.dingtalkPersonTitleTemplate,
       bodyTemplate: draft.value.dingtalkPersonBodyTemplate,
       publicFormViewId: draft.value.dingtalkPersonPublicFormViewId || undefined,
@@ -943,20 +1558,40 @@ function describeTrigger(rule: AutomationRule): string {
 }
 
 function describeAction(rule: AutomationRule): string {
-  switch (rule.actionType) {
+  if (rule.actions?.length) {
+    return rule.actions.map((action) => describeActionType(action.type, action.config)).join(' + ')
+  }
+  return describeActionType(rule.actionType, rule.actionConfig)
+}
+
+function describeActionType(actionType: AutomationActionType, actionConfig: Record<string, unknown>): string {
+  switch (actionType) {
     case 'notify':
+    case 'send_notification':
       return 'Send notification'
     case 'update_field': {
-      const fid = rule.actionConfig?.fieldId as string | undefined
+      const fid = actionConfig?.fieldId as string | undefined
       return fid ? `Update "${fieldNameById(fid)}"` : 'Update field value'
     }
+    case 'update_record':
+      return 'Update record'
+    case 'create_record':
+      return 'Create record'
+    case 'send_webhook':
+      return 'Send webhook'
     case 'send_dingtalk_group_message':
       return 'Send DingTalk group message'
     case 'send_dingtalk_person_message':
       return 'Send DingTalk person message'
+    case 'lock_record':
+      return 'Lock record'
     default:
-      return String(rule.actionType)
+      return String(actionType)
   }
+}
+
+function ruleHasActionType(rule: AutomationRule, actionType: AutomationActionType): boolean {
+  return rule.actionType === actionType || (rule.actions ?? []).some((action) => action.type === actionType)
 }
 
 watch(
@@ -1271,4 +1906,14 @@ watch(
 .meta-automation__stat { font-weight: 600; }
 .meta-automation__stat--success { color: #16a34a; }
 .meta-automation__stat--failed { color: #dc2626; }
+
+.meta-automation__test-run-status {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.meta-automation__test-run-status--success { color: #15803d; }
+.meta-automation__test-run-status--failed { color: #b91c1c; }
+.meta-automation__test-run-status--skipped { color: #b45309; }
+.meta-automation__test-run-status--running { color: #1d4ed8; }
 </style>

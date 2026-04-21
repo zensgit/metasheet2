@@ -17,6 +17,8 @@
     "seed:demo": "echo 'Seeding demo data...' && exit 0",
     "seed:rbac": "tsx scripts/seed-rbac.ts",
     "smoke:plugins": "tsx scripts/smoke-plugins.ts",
+    "yjs:status": "node ../../scripts/ops/check-yjs-rollout-status.mjs",
+    "yjs:validate": "node scripts/ops/yjs-node-client.mjs",
     "test": "vitest",
     "test:phase5": "vitest --config vitest.phase5.config.ts run",
     "test:unit": "vitest run tests/unit --reporter=dot",

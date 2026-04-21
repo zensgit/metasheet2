@@ -103,6 +103,8 @@ import workflowDesignerRouter from './routes/workflow-designer'
 import plmWorkbenchRouter from './routes/plm-workbench'
 import { univerMockRouter } from './routes/univer-mock'
 import { univerMetaRouter } from './routes/univer-meta'
+import { dashboardRouter } from './routes/dashboard'
+import { createAutomationRoutes } from './routes/automation'
 import { apiTokensRouter } from './routes/api-tokens'
 import { SnapshotService } from './services/SnapshotService'
 import { MetricsStreamService } from './services/MetricsStreamService'
@@ -861,6 +863,14 @@ export class MetaSheetServer {
 
     // Canonical multitable API used by the frontend and OpenAPI contracts.
     this.app.use('/api/multitable', univerMetaRouter())
+    // Chart / Dashboard CRUD (paths: /sheets/:sheetId/charts, /sheets/:sheetId/dashboards).
+    // Mounted separately from univerMetaRouter because it lives in its own
+    // module with a dedicated DashboardService.
+    this.app.use('/api/multitable', dashboardRouter())
+    // Automation test/logs/stats (paths: /sheets/:sheetId/automations/:ruleId/{test,logs,stats}).
+    // Uses a lazy resolver because AutomationService is initialized later
+    // in the startup sequence than route mounting happens.
+    this.app.use('/api/multitable', createAutomationRoutes(() => this.automationService))
     this.app.use(apiTokensRouter())
     // Keep the legacy dev alias while existing tools/worktrees still reference it.
     if (process.env.NODE_ENV !== 'production') {
@@ -1697,7 +1707,28 @@ export class MetaSheetServer {
       const collabIO = this.injector.get(ICollabService).getIO()
       if (collabIO) {
         const yjsPersistence = new YjsPersistenceAdapter(kyselyDbYjs)
-        const yjsSyncService = new YjsSyncService(yjsPersistence)
+        // Seed fresh Y.Docs from meta_records so the first opener of an
+        // existing cell sees its current value, not an empty textbox.
+        // See yjs-sync-service.ts for the seeding rule (strings only).
+        const yjsPoolRef = poolManager.get()
+        const yjsRecordSeeder = async (recordId: string) => {
+          try {
+            const result = await yjsPoolRef.query(
+              'SELECT data FROM meta_records WHERE id = $1',
+              [recordId],
+            )
+            const row = (result.rows as Array<{ data: unknown } | undefined>)[0]
+            if (!row) return null
+            if (row.data && typeof row.data === 'object' && !Array.isArray(row.data)) {
+              return row.data as Record<string, unknown>
+            }
+            return null
+          } catch (err) {
+            console.error(`[yjs] recordSeeder query failed for ${recordId}:`, err)
+            return null
+          }
+        }
+        const yjsSyncService = new YjsSyncService(yjsPersistence, yjsRecordSeeder)
         const yjsWsAdapter = new YjsWebSocketAdapter(yjsSyncService)
 
         // JWT token verifier: verify token, extract trusted userId
@@ -1828,6 +1859,12 @@ export class MetaSheetServer {
                 capabilities,
                 sheetScope,
                 access: { userId: actorId, permissions: actorPerms, isAdminRole },
+                // Mark bridge-originated writes so RecordWriteService does NOT
+                // fire the Yjs invalidation hook on them — those writes ARE the
+                // Y.Doc's authoritative content; wiping it would tear out any
+                // live editor and re-seed from stale data (the bridge write
+                // hasn't finished appearing in meta_records.data at that point).
+                source: 'yjs-bridge' as const,
               }
             } catch (err) {
               console.error(`[yjs-bridge] Failed to build write input for ${recordId}:`, err)
@@ -1840,6 +1877,26 @@ export class MetaSheetServer {
 
         yjsWsAdapter.setBridge(yjsBridge)
         yjsWsAdapter.register(collabIO)
+
+        // REST → Yjs invalidator: every REST write to meta_records.data
+        // wipes the corresponding Y.Doc state so the next getOrCreateDoc
+        // re-seeds from the authoritative DB row. Must cancel bridge
+        // pending flushes FIRST — without that a 200–500ms debounced
+        // bridge write would re-materialize the stale Yjs-cached value
+        // on top of the just-committed REST change.
+        const yjsInvalidate = async (recordIds: string[]) => {
+          if (recordIds.length === 0) return
+          yjsBridge.cancelPending(recordIds)
+          try {
+            await yjsSyncService.invalidateDocs(recordIds)
+          } finally {
+            yjsWsAdapter.notifyInvalidated(recordIds)
+          }
+        }
+        recordWriteService.setYjsInvalidator(yjsInvalidate)
+        const univerMetaModule = await import('./routes/univer-meta')
+        univerMetaModule.setYjsInvalidatorForRoutes(yjsInvalidate)
+
         this.yjsSyncMetricsSource = yjsSyncService
         this.yjsBridgeMetricsSource = yjsBridge
         this.yjsSocketMetricsSource = yjsWsAdapter

@@ -430,4 +430,174 @@ describe('MetaFieldManager', () => {
 
     app.unmount()
   })
+
+  it('renders the validation panel when configuring a text field', async () => {
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+
+    const app = createApp({
+      render() {
+        return h(MetaFieldManager, {
+          visible: true,
+          sheetId: 'sheet_1',
+          sheets: [],
+          fields: [
+            { id: 'fld_name', name: 'Name', type: 'string', property: {} },
+          ],
+        })
+      },
+    })
+
+    app.mount(container)
+    await nextTick()
+
+    ;(container.querySelector('.meta-field-mgr__action[title="Configure"]') as HTMLButtonElement | null)?.click()
+    await nextTick()
+
+    // The validation panel itself must render and expose its
+    // text-field-specific rule rows (data-rule-type hooks are stable
+    // markers on the panel template).
+    expect(container.querySelector('.meta-field-mgr__validation')).not.toBeNull()
+    expect(container.querySelector('[data-rule-toggle="required"]')).not.toBeNull()
+    expect(container.querySelector('[data-rule-type="minLength"]')).not.toBeNull()
+    expect(container.querySelector('[data-rule-type="pattern"]')).not.toBeNull()
+    expect(container.querySelector('[data-rule-type="min"]')).toBeNull()
+
+    app.unmount()
+  })
+
+  it('hydrates stored engine-shape validation rules into the panel when opening', async () => {
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+
+    const app = createApp({
+      render() {
+        return h(MetaFieldManager, {
+          visible: true,
+          sheetId: 'sheet_1',
+          sheets: [],
+          fields: [
+            {
+              id: 'fld_bio',
+              name: 'Bio',
+              type: 'string',
+              property: {
+                validation: [
+                  { type: 'required', message: 'Bio required' },
+                  { type: 'maxLength', params: { value: 200 } },
+                ],
+              },
+            },
+          ],
+        })
+      },
+    })
+
+    app.mount(container)
+    await nextTick()
+
+    ;(container.querySelector('.meta-field-mgr__action[title="Configure"]') as HTMLButtonElement | null)?.click()
+    await nextTick()
+
+    const requiredToggle = container.querySelector('[data-rule-toggle="required"]') as HTMLInputElement
+    expect(requiredToggle.checked).toBe(true)
+
+    const maxLengthInput = container.querySelector('[data-rule-value="maxLength"]') as HTMLInputElement
+    expect(maxLengthInput.value).toBe('200')
+
+    app.unmount()
+  })
+
+  it('does not emit update-field when closing the validation panel without edits', async () => {
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const updateSpy = vi.fn()
+
+    const app = createApp({
+      render() {
+        return h(MetaFieldManager, {
+          visible: true,
+          sheetId: 'sheet_1',
+          sheets: [],
+          fields: [
+            { id: 'fld_name', name: 'Name', type: 'string', property: {} },
+          ],
+          onUpdateField: updateSpy,
+        })
+      },
+    })
+
+    app.mount(container)
+    await nextTick()
+
+    ;(container.querySelector('.meta-field-mgr__action[title="Configure"]') as HTMLButtonElement | null)?.click()
+    await nextTick()
+
+    // User opened the panel but didn't touch anything. Clicking save
+    // must be a no-op — otherwise we would wipe `property` back to
+    // `{}` on the server and clobber engine defaults like the
+    // string `maxLength: 10000`.
+    ;(Array.from(container.querySelectorAll('.meta-field-mgr__btn-add')) as HTMLButtonElement[])
+      .find((button) => button.textContent?.includes('Save field settings'))
+      ?.click()
+    await nextTick()
+
+    expect(updateSpy).not.toHaveBeenCalled()
+
+    app.unmount()
+  })
+
+  it('emits engine-shape validation rules in the property payload on save', async () => {
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const updateSpy = vi.fn()
+
+    const app = createApp({
+      render() {
+        return h(MetaFieldManager, {
+          visible: true,
+          sheetId: 'sheet_1',
+          sheets: [],
+          fields: [
+            { id: 'fld_name', name: 'Name', type: 'string', property: {} },
+          ],
+          onUpdateField: updateSpy,
+        })
+      },
+    })
+
+    app.mount(container)
+    await nextTick()
+
+    ;(container.querySelector('.meta-field-mgr__action[title="Configure"]') as HTMLButtonElement | null)?.click()
+    await nextTick()
+
+    // Flip required on, set minLength to 3.
+    const requiredToggle = container.querySelector('[data-rule-toggle="required"]') as HTMLInputElement
+    requiredToggle.checked = true
+    requiredToggle.dispatchEvent(new Event('change', { bubbles: true }))
+    await nextTick()
+
+    const minLengthInput = container.querySelector('[data-rule-value="minLength"]') as HTMLInputElement
+    minLengthInput.value = '3'
+    minLengthInput.dispatchEvent(new Event('input', { bubbles: true }))
+    await nextTick()
+
+    ;(Array.from(container.querySelectorAll('.meta-field-mgr__btn-add')) as HTMLButtonElement[])
+      .find((button) => button.textContent?.includes('Save field settings'))
+      ?.click()
+    await nextTick()
+
+    expect(updateSpy).toHaveBeenCalledTimes(1)
+    const [emittedFieldId, emittedPayload] = updateSpy.mock.calls[0]
+    expect(emittedFieldId).toBe('fld_name')
+    expect(emittedPayload.property).toMatchObject({
+      validation: [
+        { type: 'required' },
+        { type: 'minLength', params: { value: 3 } },
+      ],
+    })
+
+    app.unmount()
+  })
 })
