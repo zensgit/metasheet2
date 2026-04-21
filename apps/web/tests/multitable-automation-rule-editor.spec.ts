@@ -1756,6 +1756,30 @@ describe('MetaAutomationRuleEditor', () => {
     expect(container.textContent).toContain('record.fld_1 is not a user field')
   })
 
+  it('warns when a DingTalk person member-group recipient path is not a member group field in the rule editor', async () => {
+    const client = mockClient()
+    const { container } = mount({
+      visible: true,
+      sheetId: 'sheet_1',
+      fields,
+      views,
+      client,
+    })
+    await flushPromises()
+
+    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header select') as HTMLSelectElement
+    actionSelect.value = 'send_dingtalk_person_message'
+    actionSelect.dispatchEvent(new Event('change'))
+    await flushPromises()
+
+    const memberGroupFieldInput = container.querySelector('[data-field="dingtalkPersonMemberGroupRecipientFieldPath"]') as HTMLInputElement
+    memberGroupFieldInput.value = 'record.fld_1'
+    memberGroupFieldInput.dispatchEvent(new Event('input'))
+    await flushPromises()
+
+    expect(container.textContent).toContain('record.fld_1 is not a member group field')
+  })
+
   it('copies rendered DingTalk group body example in the rule editor', async () => {
     const client = mockClient()
     const { container } = mount({
