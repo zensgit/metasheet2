@@ -395,6 +395,7 @@ export interface ExecutionContext {
   sheetId: string
   recordId: string
   recordData: Record<string, unknown>
+  ruleCreatedBy: string
   actorId?: string | null
   triggerEvent: unknown
 }
@@ -439,6 +440,7 @@ export class AutomationExecutor {
       sheetId: rule.sheetId,
       recordId: (payload?.recordId as string) ?? '',
       recordData: (payload?.data as Record<string, unknown>) ?? (payload?.changes as Record<string, unknown>) ?? {},
+      ruleCreatedBy: rule.createdBy,
       actorId: (payload?.actorId as string) ?? null,
       triggerEvent,
     }
@@ -1086,8 +1088,12 @@ export class AutomationExecutor {
     const destinationResult = await this.deps.queryFn(
       `SELECT id, name, webhook_url, secret, enabled
          FROM dingtalk_group_destinations
-        WHERE id = ANY($1)`,
-      [destinationIds],
+        WHERE id = ANY($1)
+          AND (
+            sheet_id = $2
+            OR (sheet_id IS NULL AND created_by = $3)
+          )`,
+      [destinationIds, context.sheetId, context.ruleCreatedBy],
     )
     const destinations = destinationResult.rows as Array<{
       id: string

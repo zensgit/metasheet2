@@ -440,6 +440,9 @@ describe('AutomationExecutor', () => {
     expect(result.steps[0].actionType).toBe('send_dingtalk_group_message')
     expect(queryFn).toHaveBeenCalledTimes(4)
     expect(fetchFn).toHaveBeenCalledTimes(1)
+    expect(String(queryFn.mock.calls[0]?.[0] ?? '')).toContain('sheet_id = $2')
+    expect(String(queryFn.mock.calls[0]?.[0] ?? '')).toContain('created_by = $3')
+    expect(queryFn.mock.calls[0]?.[1]).toEqual([['dt_1'], 'sheet_1', 'user_1'])
 
     const [url, init] = fetchFn.mock.calls[0] as [string, RequestInit]
     expect(url).toContain('https://oapi.dingtalk.com/robot/send?access_token=test')
@@ -666,6 +669,41 @@ describe('AutomationExecutor', () => {
     expect(result.steps[0].status).toBe('failed')
     expect(result.steps[0].error).toContain('destinations not found')
     expect(result.steps[0].error).toContain('dt_missing')
+  })
+
+  it('scopes send_dingtalk_group_message destinations to the current sheet and rule creator', async () => {
+    const queryFn = vi.fn(async (sql: string, params?: unknown[]) => {
+      expect(sql).toContain('sheet_id = $2')
+      expect(sql).toContain('created_by = $3')
+      expect(params).toEqual([['dt_other_sheet'], 'sheet_1', 'user_1'])
+      return { rows: [], rowCount: 0 }
+    })
+    deps = createMockDeps({ queryFn })
+    executor = new AutomationExecutor(deps)
+
+    const rule = createMockRule({
+      createdBy: 'user_1',
+      actions: [{
+        type: 'send_dingtalk_group_message',
+        config: {
+          destinationId: 'dt_other_sheet',
+          titleTemplate: 'Title',
+          bodyTemplate: 'Body',
+        },
+      }],
+    })
+
+    const result = await executor.execute(rule, {
+      recordId: 'r1',
+      sheetId: 'sheet_1',
+      actorId: 'user_2',
+    })
+
+    expect(result.status).toBe('failed')
+    expect(result.steps[0].status).toBe('failed')
+    expect(result.steps[0].error).toContain('DingTalk destinations not found')
+    expect(result.steps[0].error).toContain('dt_other_sheet')
+    expect(queryFn).toHaveBeenCalledTimes(1)
   })
 
   it('fails send_dingtalk_group_message when dynamic record path resolves no destinations', async () => {
