@@ -456,6 +456,47 @@ describe('AutomationExecutor', () => {
     expect((queryFn.mock.calls[3]?.[0] as string) ?? '').toContain('INSERT INTO dingtalk_group_deliveries')
   })
 
+  it('fails send_dingtalk_group_message when the internal processing view is not in the sheet', async () => {
+    process.env.APP_BASE_URL = 'https://app.example.com'
+    const queryFn = vi.fn()
+      .mockResolvedValueOnce({
+        rows: [{ id: 'dt_1', name: 'Ops Group', webhook_url: 'https://oapi.dingtalk.com/robot/send?access_token=test', secret: null, enabled: true }],
+      })
+      .mockResolvedValueOnce({ rows: [], rowCount: 0 })
+    const fetchFn = vi.fn(async () => new Response(JSON.stringify({ errcode: 0, errmsg: 'ok' }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    })) as unknown as typeof fetch
+
+    deps = createMockDeps({ queryFn, fetchFn })
+    executor = new AutomationExecutor(deps)
+
+    const rule = createMockRule({
+      actions: [{
+        type: 'send_dingtalk_group_message',
+        config: {
+          destinationId: 'dt_1',
+          titleTemplate: 'Record {{record.title}} ready',
+          bodyTemplate: 'Status: {{record.status}}',
+          internalViewId: 'missing_view',
+        },
+      }],
+    })
+
+    const result = await executor.execute(rule, {
+      recordId: 'r1',
+      data: { title: 'Incident', status: 'open' },
+      sheetId: 'sheet_1',
+      actorId: 'user_1',
+    })
+
+    expect(result.status).toBe('failed')
+    expect(result.steps[0].error).toContain('Internal view not found')
+    expect(String(queryFn.mock.calls[1]?.[0] ?? '')).toContain('sheet_id = $2')
+    expect(queryFn.mock.calls[1]?.[1]).toEqual(['missing_view', 'sheet_1'])
+    expect(fetchFn).not.toHaveBeenCalled()
+  })
+
   it('executes send_dingtalk_group_message across multiple destinations', async () => {
     const queryFn = vi.fn()
       .mockResolvedValueOnce({
@@ -839,6 +880,47 @@ describe('AutomationExecutor', () => {
     expect(payload.msg.markdown.text).toContain('/multitable/sheet_1/view_grid?recordId=r1')
     const insertCalls = queryFn.mock.calls.filter((call) => String(call[0]).includes('INSERT INTO dingtalk_person_deliveries'))
     expect(insertCalls).toHaveLength(2)
+  })
+
+  it('fails send_dingtalk_person_message when the internal processing view is not in the sheet', async () => {
+    process.env.DINGTALK_APP_KEY = 'dt-app-key'
+    process.env.DINGTALK_APP_SECRET = 'dt-app-secret'
+    process.env.DINGTALK_AGENT_ID = '123456789'
+    process.env.APP_BASE_URL = 'https://app.example.com'
+
+    const queryFn = vi.fn()
+      .mockResolvedValueOnce({ rows: [], rowCount: 0 })
+    const fetchFn = vi.fn(async () => new Response(JSON.stringify({ errcode: 0, errmsg: 'ok' }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    })) as unknown as typeof fetch
+
+    deps = createMockDeps({ queryFn, fetchFn })
+    executor = new AutomationExecutor(deps)
+
+    const rule = createMockRule({
+      actions: [{
+        type: 'send_dingtalk_person_message',
+        config: {
+          userIds: ['user_1'],
+          titleTemplate: 'Record {{record.title}} ready',
+          bodyTemplate: 'Status: {{record.status}}',
+          internalViewId: 'missing_view',
+        },
+      }],
+    })
+    const result = await executor.execute(rule, {
+      recordId: 'r1',
+      data: { title: 'Incident', status: 'open' },
+      sheetId: 'sheet_1',
+      actorId: 'user_1',
+    })
+
+    expect(result.status).toBe('failed')
+    expect(result.steps[0].error).toContain('Internal view not found')
+    expect(String(queryFn.mock.calls[0]?.[0] ?? '')).toContain('sheet_id = $2')
+    expect(queryFn.mock.calls[0]?.[1]).toEqual(['missing_view', 'sheet_1'])
+    expect(fetchFn).not.toHaveBeenCalled()
   })
 
   it('fails send_dingtalk_person_message when the selected public form view is not a form view', async () => {

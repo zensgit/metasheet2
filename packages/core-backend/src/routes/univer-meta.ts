@@ -32,6 +32,7 @@ import { validateRecord, getDefaultValidationRules } from '../multitable/field-v
 import type { FieldValidationConfig } from '../multitable/field-validation'
 import { conditionalPublicRateLimiter, publicFormContextLimiter, publicFormSubmitLimiter } from '../middleware/rate-limiter'
 import { getAutomationServiceInstance } from '../multitable/automation-service'
+import { validateDingTalkAutomationLinks } from '../multitable/dingtalk-automation-link-validation'
 import { listAutomationDingTalkGroupDeliveries } from '../multitable/dingtalk-group-delivery-service'
 import { listAutomationDingTalkPersonDeliveries } from '../multitable/dingtalk-person-delivery-service'
 import {
@@ -8356,6 +8357,16 @@ export function univerMetaRouter(): Router {
 
       const conditions = body?.conditions && typeof body.conditions === 'object' ? body.conditions as never : null
       const actions = Array.isArray(body?.actions) ? body.actions : null
+      const linkValidationError = await validateDingTalkAutomationLinks(
+        pool.query.bind(pool),
+        sheetId,
+        actionType,
+        actionConfig,
+        actions,
+      )
+      if (linkValidationError) {
+        return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: linkValidationError } })
+      }
 
       const rule = await automationService.createRule(sheetId, {
         name,
@@ -8441,6 +8452,30 @@ export function univerMetaRouter(): Router {
 
       if (Object.keys(updates).length === 0) {
         return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'No fields to update' } })
+      }
+
+      if (typeof body?.actionType === 'string' || (body?.actionConfig && typeof body.actionConfig === 'object') || body?.actions !== undefined) {
+        const existing = await automationService.getRule(ruleId)
+        if (!existing || existing.sheet_id !== sheetId) {
+          return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Automation rule not found' } })
+        }
+        const nextActionType = typeof body?.actionType === 'string' ? body.actionType : existing.action_type
+        const nextActionConfig = body?.actionConfig && typeof body.actionConfig === 'object'
+          ? body.actionConfig
+          : existing.action_config
+        const nextActions = body?.actions !== undefined
+          ? Array.isArray(body.actions) ? body.actions : null
+          : existing.actions
+        const linkValidationError = await validateDingTalkAutomationLinks(
+          pool.query.bind(pool),
+          sheetId,
+          nextActionType,
+          nextActionConfig,
+          nextActions,
+        )
+        if (linkValidationError) {
+          return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: linkValidationError } })
+        }
       }
 
       const updated = await automationService.updateRule(ruleId, sheetId, {
