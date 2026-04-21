@@ -268,6 +268,9 @@
               >
                 <strong>Public form access:</strong> {{ draftGroupPublicFormAccessState.summary }}
               </div>
+              <div data-automation-public-form-audience="group">
+                <strong>Allowed audience:</strong> {{ draftGroupPublicFormAccessState.audienceSummary }}
+              </div>
               <div><strong>Internal processing:</strong> {{ viewSummaryName(draft.internalViewId, 'No internal link') }}</div>
             </div>
           </template>
@@ -556,6 +559,9 @@
               >
                 <strong>Public form access:</strong> {{ draftPersonPublicFormAccessState.summary }}
               </div>
+              <div data-automation-public-form-audience="person">
+                <strong>Allowed audience:</strong> {{ draftPersonPublicFormAccessState.audienceSummary }}
+              </div>
               <div><strong>Internal processing:</strong> {{ viewSummaryName(draft.dingtalkPersonInternalViewId, 'No internal link') }}</div>
             </div>
           </template>
@@ -647,6 +653,13 @@
                 :data-access-level="link.accessLevel"
               >
                 {{ link.accessSummary }}
+              </span>
+              <span
+                v-if="link.audienceSummary"
+                class="meta-automation__card-link-audience"
+                :data-automation-card-link-audience="link.key"
+              >
+                Allowed audience: {{ link.audienceSummary }}
               </span>
             </div>
           </div>
@@ -875,6 +888,7 @@ interface DingTalkCardLink {
   href?: string
   viewId?: string
   accessSummary?: string
+  audienceSummary?: string
   accessLevel?: DingTalkPublicFormLinkAccessLevel
 }
 
@@ -1126,6 +1140,7 @@ function dingTalkCardLinks(rule: AutomationRule): DingTalkCardLink[] {
           label: `Open public form: ${viewSummaryName(publicFormViewId, publicFormViewId)}`,
           href: buildPublicFormHref(publicFormViewId, publicToken),
           accessSummary: accessState.summary,
+          audienceSummary: accessState.audienceSummary,
           accessLevel: accessState.level,
         })
       }
@@ -2069,6 +2084,15 @@ watch(
 .meta-automation__card-link-access--unavailable {
   background: #fef2f2;
   color: #b91c1c;
+}
+
+.meta-automation__card-link-audience {
+  border-radius: 999px;
+  background: #f8fafc;
+  color: #475569;
+  font-size: 12px;
+  line-height: 1;
+  padding: 5px 8px;
 }
 
 .meta-automation__public-form-access {

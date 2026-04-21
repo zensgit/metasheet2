@@ -106,7 +106,8 @@ Automation authoring guardrail:
 - if a selected internal processing view is no longer in the current sheet, the automation editor warns and disables save
 - if a DingTalk group rule links to a fully public form, the automation editor warns that anyone with the message link can submit
 - if a DingTalk group rule links to a DingTalk-protected form without allowed users or member groups, the editor warns that all bound or authorized DingTalk users can submit
-- the message summary shows `Public form access`, including fully public, bound DingTalk users, authorized DingTalk users, and allowlist-constrained states
+- the message summary and rule card show `Public form access`, including fully public, bound DingTalk users, authorized DingTalk users, and allowlist-constrained states
+- the message summary and rule card also show `Allowed audience`, derived from local allowlist users/member groups when the form is DingTalk-protected
 - the warning is advisory; runtime delivery still performs the backend validation before sending the link
 - automation create/update APIs reject invalid public form or internal processing links before saving
 - runtime delivery refuses non-form public views and expired public-form shares before sending DingTalk messages
@@ -147,6 +148,7 @@ Behavior:
 - the local user must be directly allowed or belong to an allowed member group
 - without an allowlist, `Bound DingTalk users only` admits all bound DingTalk local users and `Authorized DingTalk users only` admits all locally authorized DingTalk users
 - the form share manager shows `Local allowlist limits` so owners can confirm whether no local limit is set or how many local users/member groups can fill after DingTalk checks
+- the automation editor and rule cards show the same local allowlist audience as `Allowed audience`, so authors can verify it without reopening the form share manager
 
 Important rule:
 
@@ -219,7 +221,7 @@ Authoring guardrail:
 
 - if the selected form is still fully public, the DingTalk group rule editor warns before save
 - if the selected protected form has no allowed users or member groups, the DingTalk group rule editor warns before save
-- check `Public form access` in the automation message summary and `Local allowlist limits` in form sharing before saving
+- check `Public form access` and `Allowed audience` in the automation message summary, plus `Local allowlist limits` in form sharing before saving
 - switch the form to `Bound DingTalk users only` or `Authorized DingTalk users only` before relying on allowlists
 
 ### Scenario 3: Notify specific staff only
@@ -258,7 +260,7 @@ Current gaps to be aware of:
 - DingTalk group roster is not auto-imported
 - row/field-specific fill assignment is not yet first-class
 - precise protected-form allowlists depend on local user/member-group governance, not raw DingTalk identities
-- the allowlist audience summary is derived from local allowlist users/groups; it does not infer or sync DingTalk group members
+- `Allowed audience` and `Local allowlist limits` are derived from local allowlist users/groups; they do not infer or sync DingTalk group members
 
 ## K. Operational recommendations
 

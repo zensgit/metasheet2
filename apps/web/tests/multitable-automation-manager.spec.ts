@@ -313,6 +313,8 @@ describe('MetaAutomationManager', () => {
       .toContain('Fully public; anyone with the link can submit')
     expect(container.querySelector('[data-automation-card-link-access="public-form:view_form"]')?.getAttribute('data-access-level'))
       .toBe('public')
+    expect(container.querySelector('[data-automation-card-link-audience="public-form:view_form"]')?.textContent)
+      .toContain('Allowed audience: Anyone with the link can submit')
 
     const internalLink = container.querySelector('[data-automation-card-link="internal-view:view_grid"]') as HTMLButtonElement
     expect(internalLink).not.toBeNull()
@@ -362,6 +364,8 @@ describe('MetaAutomationManager', () => {
       .toContain('Fully public; anyone with the link can submit')
     expect(container.querySelector('[data-automation-card-link-access="public-form:view_form"]')?.getAttribute('data-access-level'))
       .toBe('public')
+    expect(container.querySelector('[data-automation-card-link-audience="public-form:view_form"]')?.textContent)
+      .toContain('Allowed audience: Anyone with the link can submit')
   })
 
   it('shows DingTalk-bound public form access on rule card links', async () => {
@@ -382,6 +386,8 @@ describe('MetaAutomationManager', () => {
       .toContain('DingTalk-bound users in allowlist can submit')
     expect(container.querySelector('[data-automation-card-link-access="public-form:view_form"]')?.getAttribute('data-access-level'))
       .toBe('dingtalk')
+    expect(container.querySelector('[data-automation-card-link-audience="public-form:view_form"]')?.textContent)
+      .toContain('Allowed audience: 1 local member group can submit after DingTalk checks')
   })
 
   it('shows DingTalk-authorized public form access on rule card links', async () => {
@@ -402,6 +408,8 @@ describe('MetaAutomationManager', () => {
       .toContain('Authorized DingTalk users in allowlist can submit')
     expect(container.querySelector('[data-automation-card-link-access="public-form:view_form"]')?.getAttribute('data-access-level'))
       .toBe('dingtalk_granted')
+    expect(container.querySelector('[data-automation-card-link-audience="public-form:view_form"]')?.textContent)
+      .toContain('Allowed audience: 1 local user can submit after DingTalk checks')
   })
 
   it('does not render a public form card link when sharing is missing a public token', async () => {
@@ -1073,6 +1081,8 @@ describe('MetaAutomationManager', () => {
     expect(container.textContent).toContain('Public form sharing for "Public Form" is fully public')
     expect(container.textContent).toContain('Use DingTalk-protected access and an allowlist')
     expect(container.querySelector('[data-automation-summary="group"]')?.textContent).toContain('Fully public; anyone with the link can submit')
+    expect(container.querySelector('[data-automation-public-form-audience="group"]')?.textContent)
+      .toContain('Anyone with the link can submit')
     expect(container.querySelector('[data-automation-public-form-access="group"]')?.getAttribute('data-access-level')).toBe('public')
     expect(container.querySelector('[data-automation-public-form-access="group"]')?.classList.contains('meta-automation__public-form-access--public')).toBe(true)
   })
@@ -1104,6 +1114,8 @@ describe('MetaAutomationManager', () => {
 
     expect(container.textContent).toContain('Public form sharing for "Public Form" allows all bound DingTalk users to submit')
     expect(container.textContent).toContain('add allowed users or member groups')
+    expect(container.querySelector('[data-automation-public-form-audience="group"]')?.textContent)
+      .toContain('No local allowlist limits are set; all bound DingTalk users can submit')
     expect(container.querySelector('[data-automation-public-form-access="group"]')?.getAttribute('data-access-level')).toBe('dingtalk')
     expect(container.querySelector('[data-automation-public-form-access="group"]')?.classList.contains('meta-automation__public-form-access--dingtalk')).toBe(true)
   })
@@ -1136,6 +1148,8 @@ describe('MetaAutomationManager', () => {
     expect(container.textContent).not.toContain('allows all bound DingTalk users to submit')
     expect(container.textContent).not.toContain('is fully public')
     expect(container.querySelector('[data-automation-summary="group"]')?.textContent).toContain('DingTalk-bound users in allowlist can submit')
+    expect(container.querySelector('[data-automation-public-form-audience="group"]')?.textContent)
+      .toContain('1 local member group can submit after DingTalk checks')
     expect(container.querySelector('[data-automation-public-form-access="group"]')?.getAttribute('data-access-level')).toBe('dingtalk')
   })
 
@@ -1159,6 +1173,8 @@ describe('MetaAutomationManager', () => {
     await flushPromises()
 
     expect(container.textContent).toContain('Public form sharing for "Public Form" is missing a public token')
+    expect(container.querySelector('[data-automation-public-form-audience="person"]')?.textContent)
+      .toContain('Allowed audience unavailable')
     expect(container.querySelector('[data-automation-public-form-access="person"]')?.getAttribute('data-access-level')).toBe('unavailable')
     expect(container.querySelector('[data-automation-public-form-access="person"]')?.classList.contains('meta-automation__public-form-access--unavailable')).toBe(true)
   })

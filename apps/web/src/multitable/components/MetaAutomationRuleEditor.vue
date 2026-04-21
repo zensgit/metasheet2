@@ -351,6 +351,13 @@
                 >
                   <strong>Access:</strong> {{ accessState.summary }}
                 </div>
+                <div
+                  v-if="accessState.hasSelection"
+                  class="meta-rule-editor__hint meta-rule-editor__access-audience"
+                  :data-field="`groupPublicFormAudienceSummary-${idx}`"
+                >
+                  <strong>Allowed audience:</strong> {{ accessState.audienceSummary }}
+                </div>
               </template>
               <label class="meta-rule-editor__label">Internal processing view (optional)</label>
               <select
@@ -398,6 +405,7 @@
                 </div>
                 <div><strong>Public form:</strong> {{ viewSummaryName(action.config.publicFormViewId, 'No public form link') }}</div>
                 <div><strong>Public form access:</strong> {{ publicFormAccessState(action.config.publicFormViewId).summary }}</div>
+                <div><strong>Allowed audience:</strong> {{ publicFormAccessState(action.config.publicFormViewId).audienceSummary }}</div>
                 <div><strong>Internal processing:</strong> {{ viewSummaryName(action.config.internalViewId, 'No internal link') }}</div>
               </div>
             </div>
@@ -654,6 +662,13 @@
                 >
                   <strong>Access:</strong> {{ accessState.summary }}
                 </div>
+                <div
+                  v-if="accessState.hasSelection"
+                  class="meta-rule-editor__hint meta-rule-editor__access-audience"
+                  :data-field="`personPublicFormAudienceSummary-${idx}`"
+                >
+                  <strong>Allowed audience:</strong> {{ accessState.audienceSummary }}
+                </div>
               </template>
               <label class="meta-rule-editor__label">Internal processing view (optional)</label>
               <select
@@ -702,6 +717,7 @@
                 </div>
                 <div><strong>Public form:</strong> {{ viewSummaryName(action.config.publicFormViewId, 'No public form link') }}</div>
                 <div><strong>Public form access:</strong> {{ publicFormAccessState(action.config.publicFormViewId).summary }}</div>
+                <div><strong>Allowed audience:</strong> {{ publicFormAccessState(action.config.publicFormViewId).audienceSummary }}</div>
                 <div><strong>Internal processing:</strong> {{ viewSummaryName(action.config.internalViewId, 'No internal link') }}</div>
               </div>
             </div>
@@ -1695,6 +1711,13 @@ function onTestRun() {
 
 .meta-rule-editor__access-summary {
   border-radius: 8px;
+  padding: 6px 8px;
+}
+
+.meta-rule-editor__access-audience {
+  border-radius: 8px;
+  background: #f8fafc;
+  color: #475569;
   padding: 6px 8px;
 }
 
