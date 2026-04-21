@@ -224,6 +224,13 @@
               <option value="">-- no internal link --</option>
               <option v-for="view in internalViews" :key="view.id" :value="view.id">{{ view.name }}</option>
             </select>
+            <div
+              v-for="warning in internalViewLinkWarnings(draft.internalViewId)"
+              :key="`draft-group-internal-view-${warning}`"
+              class="meta-automation__hint meta-automation__hint--warning"
+            >
+              {{ warning }}
+            </div>
             <div class="meta-automation__preview" data-automation-summary="group">
               <div class="meta-automation__preview-title">Message summary</div>
               <div><strong>Groups:</strong> {{ dingTalkGroupSummary }}</div>
@@ -497,6 +504,13 @@
               <option value="">-- no internal link --</option>
               <option v-for="view in internalViews" :key="view.id" :value="view.id">{{ view.name }}</option>
             </select>
+            <div
+              v-for="warning in internalViewLinkWarnings(draft.dingtalkPersonInternalViewId)"
+              :key="`draft-person-internal-view-${warning}`"
+              class="meta-automation__hint meta-automation__hint--warning"
+            >
+              {{ warning }}
+            </div>
             <div class="meta-automation__preview" data-automation-summary="person">
               <div class="meta-automation__preview-title">Message summary</div>
               <div><strong>Recipients:</strong> {{ dingTalkPersonRecipientSummary }}</div>
@@ -670,6 +684,10 @@ import {
   listDingTalkPublicFormLinkBlockingErrors,
   listDingTalkPublicFormLinkWarnings,
 } from '../utils/dingtalkPublicFormLinkWarnings'
+import {
+  listDingTalkInternalViewLinkBlockingErrors,
+  listDingTalkInternalViewLinkWarnings,
+} from '../utils/dingtalkInternalViewLinkWarnings'
 
 const props = defineProps<{
   visible: boolean
@@ -753,7 +771,7 @@ const copiedPreviewKey = ref('')
 let dingtalkPersonSuggestionLoadId = 0
 let copiedPreviewResetTimer: ReturnType<typeof setTimeout> | null = null
 const formViews = computed(() => (props.views ?? []).filter((view) => view.type === 'form'))
-const internalViews = computed(() => props.views ?? [])
+const internalViews = computed(() => (props.views ?? []).filter((view) => !view.sheetId || view.sheetId === props.sheetId))
 
 function parseUserIdsText(value: string): string[] {
   return value
@@ -950,6 +968,14 @@ function publicFormLinkWarnings(value: unknown, warnWhenGroupAccessRisk = false)
 
 function publicFormLinkBlockingErrors(value: unknown) {
   return listDingTalkPublicFormLinkBlockingErrors(value, props.views ?? [])
+}
+
+function internalViewLinkWarnings(value: unknown) {
+  return listDingTalkInternalViewLinkWarnings(value, internalViews.value)
+}
+
+function internalViewLinkBlockingErrors(value: unknown) {
+  return listDingTalkInternalViewLinkBlockingErrors(value, internalViews.value)
 }
 
 function publicFormAccessSummary(value: unknown) {
@@ -1255,6 +1281,7 @@ const canSave = computed(() => {
     if (!draft.value.dingtalkTitleTemplate.trim()) return false
     if (!draft.value.dingtalkBodyTemplate.trim()) return false
     if (publicFormLinkBlockingErrors(draft.value.publicFormViewId).length) return false
+    if (internalViewLinkBlockingErrors(draft.value.internalViewId).length) return false
   }
   if (draft.value.actionType === 'send_dingtalk_person_message') {
     if (
@@ -1266,6 +1293,7 @@ const canSave = computed(() => {
     if (!draft.value.dingtalkPersonTitleTemplate.trim()) return false
     if (!draft.value.dingtalkPersonBodyTemplate.trim()) return false
     if (publicFormLinkBlockingErrors(draft.value.dingtalkPersonPublicFormViewId).length) return false
+    if (internalViewLinkBlockingErrors(draft.value.dingtalkPersonInternalViewId).length) return false
   }
   return true
 })

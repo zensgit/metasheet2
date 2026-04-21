@@ -347,6 +347,13 @@
                 <option value="">-- no internal link --</option>
                 <option v-for="view in internalViews" :key="view.id" :value="view.id">{{ view.name }}</option>
               </select>
+              <div
+                v-for="warning in internalViewLinkWarnings(action.config.internalViewId)"
+                :key="`group-internal-view-${warning}`"
+                class="meta-rule-editor__hint meta-rule-editor__hint--warning"
+              >
+                {{ warning }}
+              </div>
               <div class="meta-rule-editor__preview" data-field="groupMessageSummary">
                 <div class="meta-rule-editor__preview-title">Message summary</div>
                 <div><strong>Groups:</strong> {{ dingTalkGroupSummary(action) }}</div>
@@ -629,6 +636,13 @@
                 <option value="">-- no internal link --</option>
                 <option v-for="view in internalViews" :key="view.id" :value="view.id">{{ view.name }}</option>
               </select>
+              <div
+                v-for="warning in internalViewLinkWarnings(action.config.internalViewId)"
+                :key="`person-internal-view-${warning}`"
+                class="meta-rule-editor__hint meta-rule-editor__hint--warning"
+              >
+                {{ warning }}
+              </div>
               <div class="meta-rule-editor__preview" data-field="personMessageSummary">
                 <div class="meta-rule-editor__preview-title">Message summary</div>
                 <div><strong>Recipients:</strong> {{ personRecipientSummary(action) }}</div>
@@ -725,6 +739,10 @@ import {
   listDingTalkPublicFormLinkBlockingErrors,
   listDingTalkPublicFormLinkWarnings,
 } from '../utils/dingtalkPublicFormLinkWarnings'
+import {
+  listDingTalkInternalViewLinkBlockingErrors,
+  listDingTalkInternalViewLinkWarnings,
+} from '../utils/dingtalkInternalViewLinkWarnings'
 
 interface FieldPair {
   fieldId: string
@@ -797,7 +815,7 @@ let personRecipientSuggestionLoadId = 0
 let copiedPreviewResetTimer: ReturnType<typeof setTimeout> | null = null
 
 const formViews = computed(() => (props.views ?? []).filter((view) => view.type === 'form'))
-const internalViews = computed(() => props.views ?? [])
+const internalViews = computed(() => (props.views ?? []).filter((view) => !view.sheetId || view.sheetId === props.sheetId))
 const groupDestinationCandidateFields = computed(() => props.fields)
 const recipientCandidateFields = computed(() => props.fields.filter((field) => field.type === 'user'))
 const memberGroupRecipientCandidateFields = computed(() => props.fields.filter(isDingTalkMemberGroupRecipientField))
@@ -920,6 +938,7 @@ const canSave = computed(() => {
       const bodyTemplate = typeof action.config.bodyTemplate === 'string' ? action.config.bodyTemplate.trim() : ''
       if ((!destinationIds.length && !destinationFieldPath) || !titleTemplate || !bodyTemplate) return false
       if (publicFormLinkBlockingErrors(action.config.publicFormViewId).length) return false
+      if (internalViewLinkBlockingErrors(action.config.internalViewId).length) return false
     }
     if (action.type === 'send_dingtalk_person_message') {
       const userIdsText = typeof action.config.userIdsText === 'string' ? action.config.userIdsText.trim() : ''
@@ -932,6 +951,7 @@ const canSave = computed(() => {
       const bodyTemplate = typeof action.config.bodyTemplate === 'string' ? action.config.bodyTemplate.trim() : ''
       if ((!userIdsText && !memberGroupIdsText && !recipientFieldPath && !memberGroupRecipientFieldPath) || !titleTemplate || !bodyTemplate) return false
       if (publicFormLinkBlockingErrors(action.config.publicFormViewId).length) return false
+      if (internalViewLinkBlockingErrors(action.config.internalViewId).length) return false
     }
   }
   return true
@@ -1188,6 +1208,14 @@ function publicFormLinkWarnings(value: unknown, warnWhenGroupAccessRisk = false)
 
 function publicFormLinkBlockingErrors(value: unknown) {
   return listDingTalkPublicFormLinkBlockingErrors(value, props.views ?? [])
+}
+
+function internalViewLinkWarnings(value: unknown) {
+  return listDingTalkInternalViewLinkWarnings(value, internalViews.value)
+}
+
+function internalViewLinkBlockingErrors(value: unknown) {
+  return listDingTalkInternalViewLinkBlockingErrors(value, internalViews.value)
 }
 
 function publicFormAccessSummary(value: unknown) {

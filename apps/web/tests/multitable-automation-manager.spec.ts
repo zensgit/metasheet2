@@ -394,6 +394,35 @@ describe('MetaAutomationManager', () => {
     expect(fetchFn.mock.calls.some(([url]) => String(url).includes('/api/multitable/dingtalk-groups?sheetId=sheet_1'))).toBe(true)
   })
 
+  it('filters internal processing options to the current sheet in the inline form', async () => {
+    const { client } = mockClient([])
+    const { container } = mount({
+      visible: true,
+      sheetId: 'sheet_1',
+      fields,
+      views: [
+        ...views,
+        { id: 'view_other_sheet', sheetId: 'sheet_2', name: 'Other Sheet Grid', type: 'grid' },
+      ],
+      client,
+    })
+    await flushPromises()
+
+    const addBtn = container.querySelector('.meta-automation__btn-add') as HTMLButtonElement
+    addBtn.click()
+    await nextTick()
+
+    const actionSelect = container.querySelector('[data-automation-field="actionType"]') as HTMLSelectElement
+    actionSelect.value = 'send_dingtalk_group_message'
+    actionSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushPromises()
+
+    const internalViewSelect = container.querySelector('[data-automation-field="internalViewId"]') as HTMLSelectElement
+    const optionValues = Array.from(internalViewSelect.options).map((option) => option.value)
+    expect(optionValues).toContain('view_grid')
+    expect(optionValues).not.toContain('view_other_sheet')
+  })
+
   it('disables creating a DingTalk group automation when the selected public form link cannot work', async () => {
     const { client, fetchFn } = mockClient([])
     const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views: viewsWithMissingPublicToken, client })
@@ -1379,6 +1408,34 @@ describe('MetaAutomationManager', () => {
     expect(recipientFieldInput.value).toBe('record.assigneeUserIds')
     expect(document.body.textContent).toContain('Record recipients:')
     expect(document.body.textContent).toContain('Assignees (record.assigneeUserIds)')
+  })
+
+  it('shows a blocking warning when editing a rule with a missing internal processing view', async () => {
+    const config = {
+      destinationIds: ['dt_1'],
+      titleTemplate: 'Ticket {{recordId}}',
+      bodyTemplate: 'Please review {{record.status}}',
+      internalViewId: 'missing_view',
+    }
+    const rules = [
+      fakeRule({
+        id: 'rule_missing_internal',
+        actionType: 'send_dingtalk_group_message',
+        actionConfig: config,
+        actions: [{ type: 'send_dingtalk_group_message', config }],
+      }),
+    ]
+    const { client } = mockClient(rules)
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
+    await flushPromises()
+
+    const editBtn = container.querySelector('[data-automation-edit="true"]') as HTMLButtonElement
+    editBtn.click()
+    await flushPromises()
+
+    const saveBtn = document.querySelector('[data-action="save"]') as HTMLButtonElement
+    expect(document.body.textContent).toContain('Internal processing view "missing_view" is not available in this sheet')
+    expect(saveBtn.disabled).toBe(true)
   })
 
   it('shows DingTalk template syntax warnings in the inline create form', async () => {

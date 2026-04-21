@@ -672,6 +672,38 @@ describe('MetaAutomationRuleEditor', () => {
     })
   })
 
+  it('disables saving a DingTalk group message when the internal processing view is missing', async () => {
+    const saved = vi.fn()
+    const client = mockClient()
+    const config = {
+      destinationIds: ['dt_1'],
+      titleTemplate: 'Ticket {{recordId}}',
+      bodyTemplate: 'Please review {{record.status}}',
+      internalViewId: 'missing_view',
+    }
+    const { container } = mount({
+      visible: true,
+      sheetId: 'sheet_1',
+      fields,
+      views,
+      client,
+      rule: fakeRule({
+        actionType: 'send_dingtalk_group_message',
+        actionConfig: config,
+        actions: [{ type: 'send_dingtalk_group_message', config }],
+      }),
+      onSave: saved,
+    })
+    await flushPromises()
+
+    const saveBtn = container.querySelector('[data-action="save"]') as HTMLButtonElement
+    expect(container.textContent).toContain('Internal processing view "missing_view" is not available in this sheet')
+    expect(saveBtn.disabled).toBe(true)
+    saveBtn.click()
+    await flushPromises()
+    expect(saved).not.toHaveBeenCalled()
+  })
+
   it('disables saving a DingTalk person message when the selected public form link cannot work', async () => {
     const saved = vi.fn()
     const client = mockClient()
@@ -713,6 +745,38 @@ describe('MetaAutomationRuleEditor', () => {
 
     const saveBtn = container.querySelector('[data-action="save"]') as HTMLButtonElement
     expect(container.textContent).toContain('Public form sharing is disabled for "Public Form"')
+    expect(saveBtn.disabled).toBe(true)
+    saveBtn.click()
+    await flushPromises()
+    expect(saved).not.toHaveBeenCalled()
+  })
+
+  it('disables saving a DingTalk person message when the internal processing view is missing', async () => {
+    const saved = vi.fn()
+    const client = mockClient()
+    const config = {
+      userIds: ['user_1'],
+      titleTemplate: 'Ticket {{recordId}}',
+      bodyTemplate: 'Please review {{record.status}}',
+      internalViewId: 'missing_view',
+    }
+    const { container } = mount({
+      visible: true,
+      sheetId: 'sheet_1',
+      fields,
+      views,
+      client,
+      rule: fakeRule({
+        actionType: 'send_dingtalk_person_message',
+        actionConfig: config,
+        actions: [{ type: 'send_dingtalk_person_message', config }],
+      }),
+      onSave: saved,
+    })
+    await flushPromises()
+
+    const saveBtn = container.querySelector('[data-action="save"]') as HTMLButtonElement
+    expect(container.textContent).toContain('Internal processing view "missing_view" is not available in this sheet')
     expect(saveBtn.disabled).toBe(true)
     saveBtn.click()
     await flushPromises()

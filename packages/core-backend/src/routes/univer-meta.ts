@@ -656,6 +656,56 @@ function normalizeJson(value: unknown): Record<string, unknown> {
   return {}
 }
 
+function collectDingTalkInternalViewIdsFromAutomation(
+  actionType: unknown,
+  actionConfig: unknown,
+  actions: unknown,
+): string[] {
+  const ids: string[] = []
+  const addIfDingTalkAction = (type: unknown, config: unknown) => {
+    if (type !== 'send_dingtalk_group_message' && type !== 'send_dingtalk_person_message') return
+    if (!isPlainObject(config)) return
+    const id = typeof config.internalViewId === 'string' ? config.internalViewId.trim() : ''
+    if (id) ids.push(id)
+  }
+
+  addIfDingTalkAction(actionType, actionConfig)
+  if (Array.isArray(actions)) {
+    for (const item of actions) {
+      if (!isPlainObject(item)) continue
+      addIfDingTalkAction(item.type, item.config)
+    }
+  }
+
+  return Array.from(new Set(ids))
+}
+
+async function validateDingTalkInternalViewLinks(
+  query: QueryFn,
+  sheetId: string,
+  actionType: unknown,
+  actionConfig: unknown,
+  actions: unknown,
+): Promise<string | null> {
+  const internalViewIds = collectDingTalkInternalViewIdsFromAutomation(actionType, actionConfig, actions)
+  if (!internalViewIds.length) return null
+
+  const result = await query(
+    `SELECT id::text AS id
+       FROM meta_views
+      WHERE sheet_id = $1
+        AND id::text = ANY($2::text[])`,
+    [sheetId, internalViewIds],
+  )
+  const foundIds = new Set(
+    result.rows
+      .map((row) => (isPlainObject(row) && typeof row.id === 'string' ? row.id.trim() : ''))
+      .filter(Boolean),
+  )
+  const missingIds = internalViewIds.filter((id) => !foundIds.has(id))
+  return missingIds.length > 0 ? `Internal processing view not found: ${missingIds.join(', ')}` : null
+}
+
 function normalizeJsonArray(value: unknown): string[] {
   if (!value) return []
   if (Array.isArray(value)) {
@@ -8356,6 +8406,16 @@ export function univerMetaRouter(): Router {
 
       const conditions = body?.conditions && typeof body.conditions === 'object' ? body.conditions as never : null
       const actions = Array.isArray(body?.actions) ? body.actions : null
+      const internalViewValidationError = await validateDingTalkInternalViewLinks(
+        pool.query.bind(pool),
+        sheetId,
+        actionType,
+        actionConfig,
+        actions,
+      )
+      if (internalViewValidationError) {
+        return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: internalViewValidationError } })
+      }
 
       const rule = await automationService.createRule(sheetId, {
         name,
@@ -8441,6 +8501,30 @@ export function univerMetaRouter(): Router {
 
       if (Object.keys(updates).length === 0) {
         return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'No fields to update' } })
+      }
+
+      if (typeof body?.actionType === 'string' || (body?.actionConfig && typeof body.actionConfig === 'object') || body?.actions !== undefined) {
+        const existing = await automationService.getRule(ruleId)
+        if (!existing || existing.sheet_id !== sheetId) {
+          return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Automation rule not found' } })
+        }
+        const nextActionType = typeof body?.actionType === 'string' ? body.actionType : existing.action_type
+        const nextActionConfig = body?.actionConfig && typeof body.actionConfig === 'object'
+          ? body.actionConfig
+          : existing.action_config
+        const nextActions = body?.actions !== undefined
+          ? Array.isArray(body.actions) ? body.actions : null
+          : existing.actions
+        const internalViewValidationError = await validateDingTalkInternalViewLinks(
+          pool.query.bind(pool),
+          sheetId,
+          nextActionType,
+          nextActionConfig,
+          nextActions,
+        )
+        if (internalViewValidationError) {
+          return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: internalViewValidationError } })
+        }
       }
 
       const updated = await automationService.updateRule(ruleId, sheetId, {
