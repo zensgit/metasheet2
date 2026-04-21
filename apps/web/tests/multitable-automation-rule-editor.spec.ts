@@ -19,7 +19,44 @@ const fields = [
 
 const views = [
   { id: 'view_grid', sheetId: 'sheet_1', name: 'Grid', type: 'grid' },
-  { id: 'view_form', sheetId: 'sheet_1', name: 'Public Form', type: 'form' },
+  {
+    id: 'view_form',
+    sheetId: 'sheet_1',
+    name: 'Public Form',
+    type: 'form',
+    config: { publicForm: { enabled: true, publicToken: 'pub_view_form' } },
+  },
+]
+
+const viewsWithDisabledPublicForm = [
+  views[0],
+  {
+    ...views[1],
+    config: { publicForm: { enabled: false, publicToken: 'pub_view_form' } },
+  },
+]
+
+const viewsWithProtectedPublicFormWithoutAllowlist = [
+  views[0],
+  {
+    ...views[1],
+    config: { publicForm: { enabled: true, publicToken: 'pub_view_form', accessMode: 'dingtalk' } },
+  },
+]
+
+const viewsWithProtectedPublicFormAllowlist = [
+  views[0],
+  {
+    ...views[1],
+    config: {
+      publicForm: {
+        enabled: true,
+        publicToken: 'pub_view_form',
+        accessMode: 'dingtalk',
+        allowedUserIds: ['user_1'],
+      },
+    },
+  },
 ]
 
 function mockClient() {
@@ -189,6 +226,204 @@ describe('MetaAutomationRuleEditor', () => {
 
     const saveBtn = container.querySelector('[data-action="save"]') as HTMLButtonElement
     expect(saveBtn.disabled).toBe(true)
+  })
+
+  it('disables Test Run for unsaved rules and explains why', async () => {
+    const tested = vi.fn()
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, onTest: tested })
+    await flushPromises()
+
+    const testBtn = container.querySelector('[data-action="test"]') as HTMLButtonElement
+    expect(testBtn.disabled).toBe(true)
+    testBtn.click()
+    await flushPromises()
+
+    expect(tested).not.toHaveBeenCalled()
+    expect(container.textContent).toContain('Save this automation before running a test.')
+  })
+
+  it('warns that DingTalk Test Run can send real messages and emits the saved rule id', async () => {
+    const tested = vi.fn()
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
+    const { container } = mount({
+      visible: true,
+      sheetId: 'sheet_1',
+      fields,
+      views,
+      rule: fakeRule({
+        actionType: 'send_dingtalk_group_message',
+        actionConfig: {
+          destinationId: 'dt_1',
+          titleTemplate: 'Ticket {{recordId}}',
+          bodyTemplate: 'Please fill',
+        },
+        actions: [{
+          type: 'send_dingtalk_group_message',
+          config: { destinationId: 'dt_1', titleTemplate: 'Ticket {{recordId}}', bodyTemplate: 'Please fill' },
+        }],
+      }),
+      onTest: tested,
+    })
+    await flushPromises()
+
+    expect(container.querySelector('[data-field="dingtalkTestRunWarning"]')?.textContent).toContain('can send real DingTalk messages')
+
+    const testBtn = container.querySelector('[data-action="test"]') as HTMLButtonElement
+    expect(testBtn.disabled).toBe(false)
+    testBtn.click()
+    await flushPromises()
+
+    expect(tested).toHaveBeenCalledWith('rule_1')
+    expect(confirmSpy).toHaveBeenCalledWith(expect.stringContaining('can send real DingTalk messages'))
+    expect(confirmSpy).toHaveBeenCalledWith(expect.stringContaining('Unsaved changes are not included'))
+  })
+
+  it('requires confirmation when saved V1 actions contain DingTalk but legacy actionType does not', async () => {
+    const tested = vi.fn()
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
+    const { container } = mount({
+      visible: true,
+      sheetId: 'sheet_1',
+      fields,
+      views,
+      rule: fakeRule({
+        actionType: 'notify',
+        actionConfig: { message: 'Internal notification' },
+        actions: [
+          { type: 'notify', config: { message: 'Internal notification' } },
+          {
+            type: 'send_dingtalk_group_message',
+            config: { destinationId: 'dt_1', titleTemplate: 'Ticket {{recordId}}', bodyTemplate: 'Please fill' },
+          },
+        ],
+      }),
+      onTest: tested,
+    })
+    await flushPromises()
+
+    expect(container.querySelector('[data-field="dingtalkTestRunWarning"]')?.textContent).toContain('can send real DingTalk messages')
+
+    ;(container.querySelector('[data-action="test"]') as HTMLButtonElement).click()
+    await flushPromises()
+
+    expect(confirmSpy).toHaveBeenCalledTimes(1)
+    expect(tested).toHaveBeenCalledWith('rule_1')
+  })
+
+  it('does not emit DingTalk Test Run when confirmation is canceled', async () => {
+    const tested = vi.fn()
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false)
+    const { container } = mount({
+      visible: true,
+      sheetId: 'sheet_1',
+      fields,
+      views,
+      rule: fakeRule({
+        actionType: 'send_dingtalk_person_message',
+        actionConfig: {
+          userIds: ['user_1'],
+          titleTemplate: 'Ticket {{recordId}}',
+          bodyTemplate: 'Please fill',
+        },
+        actions: [{
+          type: 'send_dingtalk_person_message',
+          config: { userIds: ['user_1'], titleTemplate: 'Ticket {{recordId}}', bodyTemplate: 'Please fill' },
+        }],
+      }),
+      onTest: tested,
+    })
+    await flushPromises()
+
+    const testBtn = container.querySelector('[data-action="test"]') as HTMLButtonElement
+    expect(testBtn.disabled).toBe(false)
+    testBtn.click()
+    await flushPromises()
+
+    expect(confirmSpy).toHaveBeenCalledTimes(1)
+    expect(tested).not.toHaveBeenCalled()
+  })
+
+  it('requires confirmation based on the saved rule even when the draft action changes', async () => {
+    const tested = vi.fn()
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
+    const { container } = mount({
+      visible: true,
+      sheetId: 'sheet_1',
+      fields,
+      views,
+      rule: fakeRule({
+        actionType: 'send_dingtalk_group_message',
+        actionConfig: {
+          destinationId: 'dt_1',
+          titleTemplate: 'Ticket {{recordId}}',
+          bodyTemplate: 'Please fill',
+        },
+        actions: [{
+          type: 'send_dingtalk_group_message',
+          config: { destinationId: 'dt_1', titleTemplate: 'Ticket {{recordId}}', bodyTemplate: 'Please fill' },
+        }],
+      }),
+      onTest: tested,
+    })
+    await flushPromises()
+
+    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header select') as HTMLSelectElement
+    actionSelect.value = 'notify'
+    actionSelect.dispatchEvent(new Event('change'))
+    await flushPromises()
+
+    ;(container.querySelector('[data-action="test"]') as HTMLButtonElement).click()
+    await flushPromises()
+
+    expect(confirmSpy).toHaveBeenCalledTimes(1)
+    expect(tested).toHaveBeenCalledWith('rule_1')
+  })
+
+  it('does not require confirmation for non-DingTalk Test Run', async () => {
+    const tested = vi.fn()
+    const confirmSpy = vi.spyOn(window, 'confirm')
+    const { container } = mount({
+      visible: true,
+      sheetId: 'sheet_1',
+      fields,
+      rule: fakeRule({
+        actionType: 'notify',
+        actionConfig: { message: 'Hello' },
+        actions: [{ type: 'notify', config: { message: 'Hello' } }],
+      }),
+      onTest: tested,
+    })
+    await flushPromises()
+
+    const testBtn = container.querySelector('[data-action="test"]') as HTMLButtonElement
+    expect(testBtn.disabled).toBe(false)
+    testBtn.click()
+    await flushPromises()
+
+    expect(confirmSpy).not.toHaveBeenCalled()
+    expect(tested).toHaveBeenCalledWith('rule_1')
+  })
+
+  it('shows Test Run feedback and disables duplicate clicks while running', async () => {
+    const tested = vi.fn()
+    const { container } = mount({
+      visible: true,
+      sheetId: 'sheet_1',
+      fields,
+      rule: fakeRule(),
+      testRunState: { status: 'running', message: 'Running test. DingTalk actions may send real messages.' },
+      onTest: tested,
+    })
+    await flushPromises()
+
+    const testBtn = container.querySelector('[data-action="test"]') as HTMLButtonElement
+    expect(testBtn.disabled).toBe(true)
+    expect(testBtn.textContent).toContain('Running...')
+    expect(container.querySelector('[data-field="testRunStatus"]')?.textContent).toContain('Running test')
+
+    testBtn.click()
+    await flushPromises()
+    expect(tested).not.toHaveBeenCalled()
   })
 
   it('emits save with payload when name is filled', async () => {
@@ -389,6 +624,179 @@ describe('MetaAutomationRuleEditor', () => {
     expect(container.querySelector('[data-group-destination-field="fld_2"]')).not.toBeNull()
   })
 
+  it('warns when a dynamic DingTalk group destination path points to a user or member group field', async () => {
+    const client = mockClient()
+    const { container } = mount({
+      visible: true,
+      sheetId: 'sheet_1',
+      fields,
+      views,
+      client,
+    })
+    await flushPromises()
+
+    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header select') as HTMLSelectElement
+    actionSelect.value = 'send_dingtalk_group_message'
+    actionSelect.dispatchEvent(new Event('change'))
+    await flushPromises()
+
+    const fieldInput = container.querySelector('[data-field="dingtalkDestinationFieldPath"]') as HTMLInputElement
+    fieldInput.value = 'record.assigneeUserIds, record.watcherGroupIds'
+    fieldInput.dispatchEvent(new Event('input'))
+    await flushPromises()
+
+    expect(container.textContent).toContain('record.assigneeUserIds is a user field')
+    expect(container.textContent).toContain('record.watcherGroupIds is a member group field')
+  })
+
+  it('warns when a DingTalk group message selects a disabled public form link', async () => {
+    const client = mockClient()
+    const { container } = mount({
+      visible: true,
+      sheetId: 'sheet_1',
+      fields,
+      views: viewsWithDisabledPublicForm,
+      client,
+    })
+    await flushPromises()
+
+    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header select') as HTMLSelectElement
+    actionSelect.value = 'send_dingtalk_group_message'
+    actionSelect.dispatchEvent(new Event('change'))
+    await flushPromises()
+
+    const publicFormSelect = container.querySelector('[data-field="publicFormViewId"]') as HTMLSelectElement
+    publicFormSelect.value = 'view_form'
+    publicFormSelect.dispatchEvent(new Event('change'))
+    await flushPromises()
+
+    expect(container.textContent).toContain('Public form sharing is disabled for "Public Form"')
+  })
+
+  it('disables saving a DingTalk group message when the selected public form link cannot work', async () => {
+    const saved = vi.fn()
+    const client = mockClient()
+    const { container } = mount({
+      visible: true,
+      sheetId: 'sheet_1',
+      fields,
+      views: viewsWithDisabledPublicForm,
+      client,
+      onSave: saved,
+    })
+    await flushPromises()
+
+    const nameInput = container.querySelector('[data-field="name"]') as HTMLInputElement
+    nameInput.value = 'Notify DingTalk'
+    nameInput.dispatchEvent(new Event('input'))
+
+    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header select') as HTMLSelectElement
+    actionSelect.value = 'send_dingtalk_group_message'
+    actionSelect.dispatchEvent(new Event('change'))
+    await flushPromises()
+
+    const destinationSelect = container.querySelector('[data-field="dingtalkDestinationPickerId"]') as HTMLSelectElement
+    destinationSelect.value = 'dt_1'
+    destinationSelect.dispatchEvent(new Event('change'))
+
+    const titleInput = container.querySelector('[data-field="dingtalkTitleTemplate"]') as HTMLInputElement
+    titleInput.value = 'Ticket {{recordId}}'
+    titleInput.dispatchEvent(new Event('input'))
+
+    const bodyInput = container.querySelector('[data-field="dingtalkBodyTemplate"]') as HTMLTextAreaElement
+    bodyInput.value = 'Please review {{record.status}}'
+    bodyInput.dispatchEvent(new Event('input'))
+
+    const publicFormSelect = container.querySelector('[data-field="publicFormViewId"]') as HTMLSelectElement
+    publicFormSelect.value = 'view_form'
+    publicFormSelect.dispatchEvent(new Event('change'))
+    await flushPromises()
+
+    const saveBtn = container.querySelector('[data-action="save"]') as HTMLButtonElement
+    expect(container.textContent).toContain('Public form sharing is disabled for "Public Form"')
+    expect(saveBtn.disabled).toBe(true)
+    saveBtn.click()
+    await flushPromises()
+    expect(saved).not.toHaveBeenCalled()
+  })
+
+  it('warns when a DingTalk group message includes a fully public form link', async () => {
+    const client = mockClient()
+    const { container } = mount({
+      visible: true,
+      sheetId: 'sheet_1',
+      fields,
+      views,
+      client,
+    })
+    await flushPromises()
+
+    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header select') as HTMLSelectElement
+    actionSelect.value = 'send_dingtalk_group_message'
+    actionSelect.dispatchEvent(new Event('change'))
+    await flushPromises()
+
+    const publicFormSelect = container.querySelector('[data-field="publicFormViewId"]') as HTMLSelectElement
+    publicFormSelect.value = 'view_form'
+    publicFormSelect.dispatchEvent(new Event('change'))
+    await flushPromises()
+
+    expect(container.textContent).toContain('Public form sharing for "Public Form" is fully public')
+    expect(container.textContent).toContain('Use DingTalk-protected access and an allowlist')
+    expect(container.querySelector('[data-field="groupMessageSummary"]')?.textContent).toContain('Fully public; anyone with the link can submit')
+  })
+
+  it('warns when a DingTalk group message uses a protected public form without an allowlist', async () => {
+    const client = mockClient()
+    const { container } = mount({
+      visible: true,
+      sheetId: 'sheet_1',
+      fields,
+      views: viewsWithProtectedPublicFormWithoutAllowlist,
+      client,
+    })
+    await flushPromises()
+
+    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header select') as HTMLSelectElement
+    actionSelect.value = 'send_dingtalk_group_message'
+    actionSelect.dispatchEvent(new Event('change'))
+    await flushPromises()
+
+    const publicFormSelect = container.querySelector('[data-field="publicFormViewId"]') as HTMLSelectElement
+    publicFormSelect.value = 'view_form'
+    publicFormSelect.dispatchEvent(new Event('change'))
+    await flushPromises()
+
+    expect(container.textContent).toContain('Public form sharing for "Public Form" allows all bound DingTalk users to submit')
+    expect(container.textContent).toContain('add allowed users or member groups')
+  })
+
+  it('does not warn when a DingTalk group message uses a protected public form with an allowlist', async () => {
+    const client = mockClient()
+    const { container } = mount({
+      visible: true,
+      sheetId: 'sheet_1',
+      fields,
+      views: viewsWithProtectedPublicFormAllowlist,
+      client,
+    })
+    await flushPromises()
+
+    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header select') as HTMLSelectElement
+    actionSelect.value = 'send_dingtalk_group_message'
+    actionSelect.dispatchEvent(new Event('change'))
+    await flushPromises()
+
+    const publicFormSelect = container.querySelector('[data-field="publicFormViewId"]') as HTMLSelectElement
+    publicFormSelect.value = 'view_form'
+    publicFormSelect.dispatchEvent(new Event('change'))
+    await flushPromises()
+
+    expect(container.textContent).not.toContain('allows all bound DingTalk users to submit')
+    expect(container.textContent).not.toContain('is fully public')
+    expect(container.querySelector('[data-field="groupMessageSummary"]')?.textContent).toContain('DingTalk-bound users in allowlist can submit')
+  })
+
   it('emits DingTalk person action config with optional links', async () => {
     const saved = vi.fn()
     const client = mockClient()
@@ -433,6 +841,8 @@ describe('MetaAutomationRuleEditor', () => {
     internalViewSelect.dispatchEvent(new Event('change'))
     await flushPromises()
 
+    expect(container.querySelector('[data-field="personMessageSummary"]')?.textContent).toContain('Fully public; anyone with the link can submit')
+
     const saveBtn = container.querySelector('[data-action="save"]') as HTMLButtonElement
     expect(saveBtn.disabled).toBe(false)
     saveBtn.click()
@@ -458,6 +868,117 @@ describe('MetaAutomationRuleEditor', () => {
         internalViewId: 'view_grid',
       },
     })
+  })
+
+  it('disables saving a DingTalk group message when the internal processing view is missing', async () => {
+    const saved = vi.fn()
+    const client = mockClient()
+    const config = {
+      destinationIds: ['dt_1'],
+      titleTemplate: 'Ticket {{recordId}}',
+      bodyTemplate: 'Please review {{record.status}}',
+      internalViewId: 'missing_view',
+    }
+    const { container } = mount({
+      visible: true,
+      sheetId: 'sheet_1',
+      fields,
+      views,
+      client,
+      rule: fakeRule({
+        actionType: 'send_dingtalk_group_message',
+        actionConfig: config,
+        actions: [{ type: 'send_dingtalk_group_message', config }],
+      }),
+      onSave: saved,
+    })
+    await flushPromises()
+
+    const saveBtn = container.querySelector('[data-action="save"]') as HTMLButtonElement
+    expect(container.textContent).toContain('Internal processing view "missing_view" is not available in this sheet')
+    expect(saveBtn.disabled).toBe(true)
+    saveBtn.click()
+    await flushPromises()
+    expect(saved).not.toHaveBeenCalled()
+  })
+
+  it('disables saving a DingTalk person message when the selected public form link cannot work', async () => {
+    const saved = vi.fn()
+    const client = mockClient()
+    const { container } = mount({
+      visible: true,
+      sheetId: 'sheet_1',
+      fields,
+      views: viewsWithDisabledPublicForm,
+      client,
+      onSave: saved,
+    })
+    await flushPromises()
+
+    const nameInput = container.querySelector('[data-field="name"]') as HTMLInputElement
+    nameInput.value = 'Notify People'
+    nameInput.dispatchEvent(new Event('input'))
+
+    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header select') as HTMLSelectElement
+    actionSelect.value = 'send_dingtalk_person_message'
+    actionSelect.dispatchEvent(new Event('change'))
+    await flushPromises()
+
+    const userIdsInput = container.querySelector('[data-field="dingtalkPersonUserIds"]') as HTMLTextAreaElement
+    userIdsInput.value = 'user_1'
+    userIdsInput.dispatchEvent(new Event('input'))
+
+    const titleInput = container.querySelector('[data-field="dingtalkPersonTitleTemplate"]') as HTMLInputElement
+    titleInput.value = 'Ticket {{recordId}}'
+    titleInput.dispatchEvent(new Event('input'))
+
+    const bodyInput = container.querySelector('[data-field="dingtalkPersonBodyTemplate"]') as HTMLTextAreaElement
+    bodyInput.value = 'Please review {{record.status}}'
+    bodyInput.dispatchEvent(new Event('input'))
+
+    const publicFormSelect = container.querySelector('[data-field="dingtalkPersonPublicFormViewId"]') as HTMLSelectElement
+    publicFormSelect.value = 'view_form'
+    publicFormSelect.dispatchEvent(new Event('change'))
+    await flushPromises()
+
+    const saveBtn = container.querySelector('[data-action="save"]') as HTMLButtonElement
+    expect(container.textContent).toContain('Public form sharing is disabled for "Public Form"')
+    expect(saveBtn.disabled).toBe(true)
+    saveBtn.click()
+    await flushPromises()
+    expect(saved).not.toHaveBeenCalled()
+  })
+
+  it('disables saving a DingTalk person message when the internal processing view is missing', async () => {
+    const saved = vi.fn()
+    const client = mockClient()
+    const config = {
+      userIds: ['user_1'],
+      titleTemplate: 'Ticket {{recordId}}',
+      bodyTemplate: 'Please review {{record.status}}',
+      internalViewId: 'missing_view',
+    }
+    const { container } = mount({
+      visible: true,
+      sheetId: 'sheet_1',
+      fields,
+      views,
+      client,
+      rule: fakeRule({
+        actionType: 'send_dingtalk_person_message',
+        actionConfig: config,
+        actions: [{ type: 'send_dingtalk_person_message', config }],
+      }),
+      onSave: saved,
+    })
+    await flushPromises()
+
+    const saveBtn = container.querySelector('[data-action="save"]') as HTMLButtonElement
+    expect(container.textContent).toContain('Internal processing view "missing_view" is not available in this sheet')
+    expect(saveBtn.disabled).toBe(true)
+    saveBtn.click()
+    await flushPromises()
+    expect(saved).not.toHaveBeenCalled()
   })
 
   it('emits DingTalk person action config with only a dynamic record recipient path', async () => {

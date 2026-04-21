@@ -222,6 +222,20 @@ function parseViewConfig(raw: unknown): Record<string, unknown> | null {
   return typeof raw === 'object' && !Array.isArray(raw) ? raw as Record<string, unknown> : null
 }
 
+function parsePublicFormExpiryMs(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isFinite(value)) return value
+  if (value instanceof Date) return value.getTime()
+  if (typeof value !== 'string') return null
+  const trimmed = value.trim()
+  if (!trimmed) return null
+  if (/^\d+$/.test(trimmed)) {
+    const numeric = Number(trimmed)
+    return Number.isFinite(numeric) ? numeric : null
+  }
+  const parsed = Date.parse(trimmed)
+  return Number.isFinite(parsed) ? parsed : null
+}
+
 function resolveAutomationAppBaseUrl(): string | null {
   const raw = process.env.PUBLIC_APP_URL?.trim() || process.env.APP_BASE_URL?.trim() || ''
   if (!raw) return null
@@ -395,6 +409,7 @@ export interface ExecutionContext {
   sheetId: string
   recordId: string
   recordData: Record<string, unknown>
+  ruleCreatedBy: string
   actorId?: string | null
   triggerEvent: unknown
 }
@@ -439,6 +454,7 @@ export class AutomationExecutor {
       sheetId: rule.sheetId,
       recordId: (payload?.recordId as string) ?? '',
       recordData: (payload?.data as Record<string, unknown>) ?? (payload?.changes as Record<string, unknown>) ?? {},
+      ruleCreatedBy: rule.createdBy,
       actorId: (payload?.actorId as string) ?? null,
       triggerEvent,
     }
@@ -749,7 +765,7 @@ export class AutomationExecutor {
       const publicViewResult = await this.deps.queryFn(
         `SELECT id, sheet_id, config
            FROM meta_views
-          WHERE id = $1 AND sheet_id = $2`,
+          WHERE id = $1 AND sheet_id = $2 AND type = 'form'`,
         [publicFormViewId, context.sheetId],
       )
       const publicView = (publicViewResult.rows[0] ?? null) as {
@@ -777,6 +793,18 @@ export class AutomationExecutor {
           actionType: 'send_dingtalk_person_message',
           status: 'failed',
           error: 'Selected public form view is not shared',
+        }
+      }
+      const expiryMs = parsePublicFormExpiryMs(
+        publicForm && typeof publicForm === 'object' && !Array.isArray(publicForm)
+          ? (publicForm as Record<string, unknown>).expiresAt ?? (publicForm as Record<string, unknown>).expiresOn
+          : undefined,
+      )
+      if (expiryMs !== null && Date.now() >= expiryMs) {
+        return {
+          actionType: 'send_dingtalk_person_message',
+          status: 'failed',
+          error: 'Selected public form view has expired',
         }
       }
 
@@ -1086,8 +1114,12 @@ export class AutomationExecutor {
     const destinationResult = await this.deps.queryFn(
       `SELECT id, name, webhook_url, secret, enabled
          FROM dingtalk_group_destinations
-        WHERE id = ANY($1)`,
-      [destinationIds],
+        WHERE id = ANY($1)
+          AND (
+            sheet_id = $2
+            OR (sheet_id IS NULL AND created_by = $3)
+          )`,
+      [destinationIds, context.sheetId, context.ruleCreatedBy],
     )
     const destinations = destinationResult.rows as Array<{
       id: string
@@ -1133,7 +1165,7 @@ export class AutomationExecutor {
       const publicViewResult = await this.deps.queryFn(
         `SELECT id, sheet_id, config
            FROM meta_views
-          WHERE id = $1 AND sheet_id = $2`,
+          WHERE id = $1 AND sheet_id = $2 AND type = 'form'`,
         [publicFormViewId, context.sheetId],
       )
       const publicView = (publicViewResult.rows[0] ?? null) as {
@@ -1161,6 +1193,18 @@ export class AutomationExecutor {
           actionType: 'send_dingtalk_group_message',
           status: 'failed',
           error: 'Selected public form view is not shared',
+        }
+      }
+      const expiryMs = parsePublicFormExpiryMs(
+        publicForm && typeof publicForm === 'object' && !Array.isArray(publicForm)
+          ? (publicForm as Record<string, unknown>).expiresAt ?? (publicForm as Record<string, unknown>).expiresOn
+          : undefined,
+      )
+      if (expiryMs !== null && Date.now() >= expiryMs) {
+        return {
+          actionType: 'send_dingtalk_group_message',
+          status: 'failed',
+          error: 'Selected public form view has expired',
         }
       }
 
