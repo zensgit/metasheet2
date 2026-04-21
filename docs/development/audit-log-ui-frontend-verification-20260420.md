@@ -122,7 +122,7 @@ pnpm --filter @metasheet/web exec vitest run \
 
 After the DingTalk/Yjs queue landed, this branch was advanced again from `origin/main@c4093dcb8` to `origin/main@81edca7d9`. Rebase used `git rebase --autostash origin/main`, preserved the verification MD changes, and completed with no conflicts.
 
-Post-latest-main HEAD: `2efddecea`.
+Post-latest-main feature HEAD before this verification doc commit: `2efddecea`.
 
 ### Commands run (2026-04-21, .worktrees/audit-ui)
 
