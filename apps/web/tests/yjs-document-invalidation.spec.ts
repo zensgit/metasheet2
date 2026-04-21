@@ -126,4 +126,52 @@ describe('useYjsDocument invalidation event', () => {
     expect(api.connected.value).toBe(true)
     expect(api.error.value).toBeNull()
   })
+
+  it('requests server state after the server sync step and does not echo remote sync updates', async () => {
+    const { api } = mountDocument('rec_1')
+    await flushUi()
+
+    handlers.get('connect')?.()
+    await flushUi()
+    expect(emitMock).toHaveBeenCalledWith('yjs:subscribe', { recordId: 'rec_1' })
+
+    const Y = await import('yjs')
+    const syncProtocol = await import('y-protocols/sync')
+    const encodingModule = await import('lib0/encoding')
+
+    const serverDoc = new Y.Doc()
+    const fields = serverDoc.getMap('fields')
+    const seededText = new Y.Text()
+    seededText.insert(0, 'from-server')
+    fields.set('fld_title', seededText)
+
+    const step1Encoder = encodingModule.createEncoder()
+    encodingModule.writeVarUint(step1Encoder, 0)
+    syncProtocol.writeSyncStep1(step1Encoder, serverDoc)
+    handlers.get('yjs:message')?.({
+      recordId: 'rec_1',
+      data: Array.from(encodingModule.toUint8Array(step1Encoder)),
+    })
+    await flushUi()
+
+    const emittedMessages = emitMock.mock.calls.filter((call) => call[0] === 'yjs:message')
+    expect(emittedMessages.length).toBeGreaterThanOrEqual(2)
+    expect(emitMock.mock.calls.some((call) => call[0] === 'yjs:update')).toBe(false)
+
+    const step2Encoder = encodingModule.createEncoder()
+    encodingModule.writeVarUint(step2Encoder, 0)
+    syncProtocol.writeSyncStep2(step2Encoder, serverDoc)
+    handlers.get('yjs:message')?.({
+      recordId: 'rec_1',
+      data: Array.from(encodingModule.toUint8Array(step2Encoder)),
+    })
+    await flushUi()
+
+    const clientText = api.doc.value?.getMap('fields').get('fld_title')
+    expect(clientText).toBeInstanceOf(Y.Text)
+    expect((clientText as { toString(): string }).toString()).toBe('from-server')
+    expect(emitMock.mock.calls.some((call) => call[0] === 'yjs:update')).toBe(false)
+
+    serverDoc.destroy()
+  })
 })

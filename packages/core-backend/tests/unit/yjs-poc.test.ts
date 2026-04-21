@@ -503,6 +503,36 @@ describe('YjsRecordBridge', () => {
     bridge.destroy()
     doc.destroy()
   })
+
+  it('does not count a skipped write input as a successful flush', async () => {
+    const { YjsRecordBridge } = await import('../../src/collab/yjs-record-bridge')
+
+    const doc = new Y.Doc()
+    const fields = doc.getMap('fields')
+    const textField = new Y.Text()
+    fields.set('fld_name', textField)
+
+    const mockPatchRecords = vi.fn().mockResolvedValue({ updated: [{ recordId: 'rec1', version: 2 }] })
+    const mockGetWriteInput = vi.fn().mockResolvedValue(null)
+
+    const bridge = new YjsRecordBridge({} as any, { patchRecords: mockPatchRecords } as any, mockGetWriteInput, {
+      mergeWindowMs: 10,
+      maxDelayMs: 50,
+    })
+
+    bridge.observe('rec1', doc)
+    textField.insert(0, 'hello')
+
+    await new Promise((r) => setTimeout(r, 50))
+
+    expect(mockGetWriteInput).toHaveBeenCalledTimes(1)
+    expect(mockPatchRecords).not.toHaveBeenCalled()
+    expect(bridge.getMetrics().flushSuccessCount).toBe(0)
+    expect(bridge.getMetrics().flushFailureCount).toBe(0)
+
+    bridge.destroy()
+    doc.destroy()
+  })
 })
 
 // ═══════════════════════════════════════════════════════════════════

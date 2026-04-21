@@ -182,6 +182,7 @@ describe('useYjsCellBinding', () => {
     await flushUi()
 
     expect(activeRef?.value).toBe(true)
+    expect(emitMock.mock.calls.some((call) => call[0] === 'yjs:update')).toBe(false)
 
     // Writing via setText should fire a yjs:update emit (Y.Doc 'update' path).
     setText('hello')
