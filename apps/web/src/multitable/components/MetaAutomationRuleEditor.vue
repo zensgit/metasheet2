@@ -331,6 +331,13 @@
                 <option value="">-- no public form link --</option>
                 <option v-for="view in formViews" :key="view.id" :value="view.id">{{ view.name }}</option>
               </select>
+              <div
+                v-for="warning in publicFormLinkWarnings(action.config.publicFormViewId)"
+                :key="`group-public-form-${warning}`"
+                class="meta-rule-editor__hint meta-rule-editor__hint--warning"
+              >
+                {{ warning }}
+              </div>
               <label class="meta-rule-editor__label">Internal processing view (optional)</label>
               <select
                 v-model="action.config.internalViewId"
@@ -605,6 +612,13 @@
                 <option value="">-- no public form link --</option>
                 <option v-for="view in formViews" :key="view.id" :value="view.id">{{ view.name }}</option>
               </select>
+              <div
+                v-for="warning in publicFormLinkWarnings(action.config.publicFormViewId)"
+                :key="`person-public-form-${warning}`"
+                class="meta-rule-editor__hint meta-rule-editor__hint--warning"
+              >
+                {{ warning }}
+              </div>
               <label class="meta-rule-editor__label">Internal processing view (optional)</label>
               <select
                 v-model="action.config.internalViewId"
@@ -704,6 +718,7 @@ import {
   isDingTalkMemberGroupRecipientField,
   listDingTalkGroupDestinationFieldPathWarnings,
 } from '../utils/dingtalkRecipientFieldWarnings'
+import { listDingTalkPublicFormLinkWarnings } from '../utils/dingtalkPublicFormLinkWarnings'
 
 interface FieldPair {
   fieldId: string
@@ -1154,6 +1169,10 @@ function renderedTemplateExample(value: unknown, fallback: string) {
   if (typeof value !== 'string' || !value.trim()) return fallback
   const rendered = renderDingTalkTemplateExample(value).trim()
   return rendered || fallback
+}
+
+function publicFormLinkWarnings(value: unknown) {
+  return listDingTalkPublicFormLinkWarnings(value, props.views ?? [])
 }
 
 function copyPreviewText(key: string, text: string) {

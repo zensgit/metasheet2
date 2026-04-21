@@ -70,7 +70,7 @@ Management-side UI path:
 1. Open the table’s automation area.
 2. Create or edit a rule.
 3. Choose action `Send DingTalk group message`.
-4. Choose one configured DingTalk group destination.
+4. Choose one or more configured DingTalk group destinations.
 5. Configure:
    - title template
    - body template
@@ -78,10 +78,11 @@ Management-side UI path:
    - optional internal processing view
 6. Save the rule.
 
-Important limits:
+Dynamic routing:
 
-- one rule targets one group
-- one table can target multiple groups by creating multiple rules
+- a rule can combine manually selected group destinations and record field paths
+- record field paths must resolve to DingTalk group destination IDs
+- the editor warns if a selected record field is a user/member-group field instead of a group-destination ID field
 
 ## D. Configure a public form
 
@@ -92,6 +93,11 @@ Management-side UI path:
 3. Enable public form sharing.
 4. Choose or confirm the public form view.
 5. Copy the generated public form link or let automation include it in a DingTalk message.
+
+Automation authoring guardrail:
+
+- if a selected public form view is not shared, has no public token, or has expired, the automation editor warns before save
+- the warning is advisory; runtime delivery still performs the backend validation before sending the link
 
 Supported access modes:
 
@@ -206,8 +212,8 @@ Use:
 
 Use:
 
-- multiple automation rules
-- one group destination per rule
+- one rule with multiple configured DingTalk groups
+- optional record group field paths when each row should choose one or more group destinations dynamically
 
 ## I. What ordinary users see
 
@@ -228,7 +234,6 @@ Ordinary users only:
 Current gaps to be aware of:
 
 - DingTalk group roster is not auto-imported
-- one rule cannot target multiple groups directly
 - row/field-specific fill assignment is not yet first-class
 - precise protected-form allowlists depend on local user/member-group governance, not raw DingTalk identities
 

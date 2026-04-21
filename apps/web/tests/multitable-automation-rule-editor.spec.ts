@@ -19,7 +19,21 @@ const fields = [
 
 const views = [
   { id: 'view_grid', sheetId: 'sheet_1', name: 'Grid', type: 'grid' },
-  { id: 'view_form', sheetId: 'sheet_1', name: 'Public Form', type: 'form' },
+  {
+    id: 'view_form',
+    sheetId: 'sheet_1',
+    name: 'Public Form',
+    type: 'form',
+    config: { publicForm: { enabled: true, publicToken: 'pub_view_form' } },
+  },
+]
+
+const viewsWithDisabledPublicForm = [
+  views[0],
+  {
+    ...views[1],
+    config: { publicForm: { enabled: false, publicToken: 'pub_view_form' } },
+  },
 ]
 
 function mockClient() {
@@ -412,6 +426,30 @@ describe('MetaAutomationRuleEditor', () => {
 
     expect(container.textContent).toContain('record.assigneeUserIds is a user field')
     expect(container.textContent).toContain('record.watcherGroupIds is a member group field')
+  })
+
+  it('warns when a DingTalk group message selects a disabled public form link', async () => {
+    const client = mockClient()
+    const { container } = mount({
+      visible: true,
+      sheetId: 'sheet_1',
+      fields,
+      views: viewsWithDisabledPublicForm,
+      client,
+    })
+    await flushPromises()
+
+    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header select') as HTMLSelectElement
+    actionSelect.value = 'send_dingtalk_group_message'
+    actionSelect.dispatchEvent(new Event('change'))
+    await flushPromises()
+
+    const publicFormSelect = container.querySelector('[data-field="publicFormViewId"]') as HTMLSelectElement
+    publicFormSelect.value = 'view_form'
+    publicFormSelect.dispatchEvent(new Event('change'))
+    await flushPromises()
+
+    expect(container.textContent).toContain('Public form sharing is disabled for "Public Form"')
   })
 
   it('emits DingTalk person action config with optional links', async () => {

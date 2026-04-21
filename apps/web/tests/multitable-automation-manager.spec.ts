@@ -133,7 +133,21 @@ const fields = [
 
 const views = [
   { id: 'view_grid', sheetId: 'sheet_1', name: 'Grid', type: 'grid' },
-  { id: 'view_form', sheetId: 'sheet_1', name: 'Public Form', type: 'form' },
+  {
+    id: 'view_form',
+    sheetId: 'sheet_1',
+    name: 'Public Form',
+    type: 'form',
+    config: { publicForm: { enabled: true, publicToken: 'pub_view_form' } },
+  },
+]
+
+const viewsWithMissingPublicToken = [
+  views[0],
+  {
+    ...views[1],
+    config: { publicForm: { enabled: true, publicToken: '' } },
+  },
 ]
 
 describe('MetaAutomationManager', () => {
@@ -450,6 +464,28 @@ describe('MetaAutomationManager', () => {
 
     expect(container.textContent).toContain('record.assigneeUserIds is a user field')
     expect(container.textContent).toContain('record.watcherGroupIds is a member group field')
+  })
+
+  it('warns when a DingTalk person message selects a public form without a token in the inline form', async () => {
+    const { client } = mockClient([])
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views: viewsWithMissingPublicToken, client })
+    await flushPromises()
+
+    const addBtn = container.querySelector('.meta-automation__btn-add') as HTMLButtonElement
+    addBtn.click()
+    await nextTick()
+
+    const actionSelect = container.querySelector('[data-automation-field="actionType"]') as HTMLSelectElement
+    actionSelect.value = 'send_dingtalk_person_message'
+    actionSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushPromises()
+
+    const publicFormSelect = container.querySelector('[data-automation-field="dingtalkPersonPublicFormViewId"]') as HTMLSelectElement
+    publicFormSelect.value = 'view_form'
+    publicFormSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushPromises()
+
+    expect(container.textContent).toContain('Public form sharing for "Public Form" is missing a public token')
   })
 
   it('creates DingTalk person automation via form', async () => {

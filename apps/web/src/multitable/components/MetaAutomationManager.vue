@@ -212,6 +212,13 @@
               <option value="">-- no public form link --</option>
               <option v-for="view in formViews" :key="view.id" :value="view.id">{{ view.name }}</option>
             </select>
+            <div
+              v-for="warning in publicFormLinkWarnings(draft.publicFormViewId)"
+              :key="`draft-group-public-form-${warning}`"
+              class="meta-automation__hint meta-automation__hint--warning"
+            >
+              {{ warning }}
+            </div>
             <label class="meta-automation__label">Internal processing view (optional)</label>
             <select v-model="draft.internalViewId" class="meta-automation__select" data-automation-field="internalViewId">
               <option value="">-- no internal link --</option>
@@ -477,6 +484,13 @@
               <option value="">-- no public form link --</option>
               <option v-for="view in formViews" :key="view.id" :value="view.id">{{ view.name }}</option>
             </select>
+            <div
+              v-for="warning in publicFormLinkWarnings(draft.dingtalkPersonPublicFormViewId)"
+              :key="`draft-person-public-form-${warning}`"
+              class="meta-automation__hint meta-automation__hint--warning"
+            >
+              {{ warning }}
+            </div>
             <label class="meta-automation__label">Internal processing view (optional)</label>
             <select v-model="draft.dingtalkPersonInternalViewId" class="meta-automation__select" data-automation-field="dingtalkPersonInternalViewId">
               <option value="">-- no internal link --</option>
@@ -649,6 +663,7 @@ import {
   isDingTalkMemberGroupRecipientField,
   listDingTalkGroupDestinationFieldPathWarnings,
 } from '../utils/dingtalkRecipientFieldWarnings'
+import { listDingTalkPublicFormLinkWarnings } from '../utils/dingtalkPublicFormLinkWarnings'
 
 const props = defineProps<{
   visible: boolean
@@ -918,6 +933,10 @@ function renderedTemplateExample(value: string, fallback: string) {
   if (!trimmed) return fallback
   const rendered = renderDingTalkTemplateExample(trimmed).trim()
   return rendered || fallback
+}
+
+function publicFormLinkWarnings(value: unknown) {
+  return listDingTalkPublicFormLinkWarnings(value, props.views ?? [])
 }
 
 function copyPreviewText(key: string, text: string) {

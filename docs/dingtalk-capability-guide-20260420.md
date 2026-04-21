@@ -228,11 +228,16 @@ Not yet supported:
 
 - auto-syncing DingTalk group rosters
 - browsing a live DingTalk group list from OAuth
-- one rule selecting multiple groups in a single config row
 
-Current workaround:
+Currently supported:
 
-- create multiple rules, one per group
+- one rule can target multiple configured DingTalk group destinations
+- one rule can also resolve DingTalk group destination IDs from record field paths
+- authoring warns when record field paths point to user/member-group fields instead of group-destination ID fields
+
+Current workaround for live DingTalk group discovery:
+
+- manually register DingTalk robot webhook destinations per table
 
 ### Public-form precision beyond allowlists
 
@@ -260,7 +265,7 @@ Recommended future direction:
 
 Recommended next steps after the current branch chain lands:
 
-1. merge and deploy protected public-form modes and allowlists
+1. merge and deploy the current dynamic destination and form-link guardrail slices
 2. add shared/group-governed DingTalk destinations
 3. add row/field-level fill assignment
 4. add richer notification governance such as approval-oriented presets and review templates
