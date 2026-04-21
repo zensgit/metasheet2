@@ -19,6 +19,7 @@ export type DingTalkPublicFormLinkAccessLevel =
   | 'dingtalk_granted'
 
 export interface DingTalkPublicFormLinkAccessState {
+  audienceSummary: string
   hasSelection: boolean
   level: DingTalkPublicFormLinkAccessLevel
   summary: string
@@ -50,6 +51,63 @@ function normalizeAccessMode(value: unknown): 'public' | 'dingtalk' | 'dingtalk_
 
 function hasAllowlistIds(value: unknown): boolean {
   return Array.isArray(value) && value.some((item) => typeof item === 'string' && item.trim())
+}
+
+function countAllowlistIds(value: unknown): number {
+  if (!Array.isArray(value)) return 0
+  return new Set(
+    value
+      .filter((item): item is string => typeof item === 'string')
+      .map((item) => item.trim())
+      .filter(Boolean),
+  ).size
+}
+
+function describeAllowlistCounts(userCount: number, memberGroupCount: number): string {
+  const parts: string[] = []
+  if (userCount > 0) {
+    parts.push(`${userCount} ${userCount === 1 ? 'local user' : 'local users'}`)
+  }
+  if (memberGroupCount > 0) {
+    parts.push(`${memberGroupCount} ${memberGroupCount === 1 ? 'local member group' : 'local member groups'}`)
+  }
+  return parts.join(' and ')
+}
+
+export function describeDingTalkPublicFormLinkAudience(
+  viewId: unknown,
+  views: readonly DingTalkPublicFormLinkView[],
+  optionsOrNowMs?: number | DingTalkPublicFormLinkWarningOptions,
+): string {
+  const options = normalizeWarningOptions(optionsOrNowMs)
+  const nowMs = options.nowMs ?? Date.now()
+  const id = typeof viewId === 'string' ? viewId.trim() : ''
+  if (!id) return 'No public form link'
+
+  const view = views.find((item) => item.id === id)
+  if (!view || view.type !== 'form') return 'Allowed audience unavailable'
+
+  const publicForm = isRecord(view.config?.publicForm) ? view.config.publicForm : null
+  if (!publicForm || publicForm.enabled !== true) return 'Allowed audience unavailable'
+
+  const publicToken = typeof publicForm.publicToken === 'string' ? publicForm.publicToken.trim() : ''
+  if (!publicToken) return 'Allowed audience unavailable'
+
+  const expiryMs = parseExpiryMs(publicForm.expiresAt ?? publicForm.expiresOn)
+  if (expiryMs !== null && nowMs >= expiryMs) return 'Allowed audience unavailable'
+
+  const accessMode = normalizeAccessMode(publicForm.accessMode)
+  if (accessMode === 'public') return 'Anyone with the link can submit'
+
+  const userCount = countAllowlistIds(publicForm.allowedUserIds)
+  const memberGroupCount = countAllowlistIds(publicForm.allowedMemberGroupIds)
+  if (userCount === 0 && memberGroupCount === 0) {
+    return accessMode === 'dingtalk_granted'
+      ? 'No local allowlist limits are set; all authorized DingTalk users can submit'
+      : 'No local allowlist limits are set; all bound DingTalk users can submit'
+  }
+
+  return `${describeAllowlistCounts(userCount, memberGroupCount)} can submit after DingTalk checks`
 }
 
 export function describeDingTalkPublicFormLinkAccess(
@@ -124,6 +182,7 @@ export function getDingTalkPublicFormLinkAccessState(
   const stableOptions = { ...options, nowMs: options.nowMs ?? Date.now() }
   const id = typeof viewId === 'string' ? viewId.trim() : ''
   return {
+    audienceSummary: describeDingTalkPublicFormLinkAudience(id, views, stableOptions),
     hasSelection: Boolean(id),
     level: getDingTalkPublicFormLinkAccessLevel(id, views, stableOptions),
     summary: describeDingTalkPublicFormLinkAccess(id, views, stableOptions),
