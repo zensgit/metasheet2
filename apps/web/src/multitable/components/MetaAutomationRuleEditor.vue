@@ -376,6 +376,7 @@
                   </button>
                 </div>
                 <div><strong>Public form:</strong> {{ viewSummaryName(action.config.publicFormViewId, 'No public form link') }}</div>
+                <div><strong>Public form access:</strong> {{ publicFormAccessSummary(action.config.publicFormViewId) }}</div>
                 <div><strong>Internal processing:</strong> {{ viewSummaryName(action.config.internalViewId, 'No internal link') }}</div>
               </div>
             </div>
@@ -658,6 +659,7 @@
                   </button>
                 </div>
                 <div><strong>Public form:</strong> {{ viewSummaryName(action.config.publicFormViewId, 'No public form link') }}</div>
+                <div><strong>Public form access:</strong> {{ publicFormAccessSummary(action.config.publicFormViewId) }}</div>
                 <div><strong>Internal processing:</strong> {{ viewSummaryName(action.config.internalViewId, 'No internal link') }}</div>
               </div>
             </div>
@@ -718,7 +720,10 @@ import {
   isDingTalkMemberGroupRecipientField,
   listDingTalkGroupDestinationFieldPathWarnings,
 } from '../utils/dingtalkRecipientFieldWarnings'
-import { listDingTalkPublicFormLinkWarnings } from '../utils/dingtalkPublicFormLinkWarnings'
+import {
+  describeDingTalkPublicFormLinkAccess,
+  listDingTalkPublicFormLinkWarnings,
+} from '../utils/dingtalkPublicFormLinkWarnings'
 
 interface FieldPair {
   fieldId: string
@@ -1176,6 +1181,10 @@ function publicFormLinkWarnings(value: unknown, warnWhenGroupAccessRisk = false)
     warnWhenFullyPublic: warnWhenGroupAccessRisk,
     warnWhenProtectedWithoutAllowlist: warnWhenGroupAccessRisk,
   })
+}
+
+function publicFormAccessSummary(value: unknown) {
+  return describeDingTalkPublicFormLinkAccess(value, props.views ?? [])
 }
 
 function copyPreviewText(key: string, text: string) {

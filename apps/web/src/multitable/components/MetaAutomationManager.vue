@@ -253,6 +253,7 @@
                 </button>
               </div>
               <div><strong>Public form:</strong> {{ viewSummaryName(draft.publicFormViewId, 'No public form link') }}</div>
+              <div><strong>Public form access:</strong> {{ publicFormAccessSummary(draft.publicFormViewId) }}</div>
               <div><strong>Internal processing:</strong> {{ viewSummaryName(draft.internalViewId, 'No internal link') }}</div>
             </div>
           </template>
@@ -526,6 +527,7 @@
                 </button>
               </div>
               <div><strong>Public form:</strong> {{ viewSummaryName(draft.dingtalkPersonPublicFormViewId, 'No public form link') }}</div>
+              <div><strong>Public form access:</strong> {{ publicFormAccessSummary(draft.dingtalkPersonPublicFormViewId) }}</div>
               <div><strong>Internal processing:</strong> {{ viewSummaryName(draft.dingtalkPersonInternalViewId, 'No internal link') }}</div>
             </div>
           </template>
@@ -663,7 +665,10 @@ import {
   isDingTalkMemberGroupRecipientField,
   listDingTalkGroupDestinationFieldPathWarnings,
 } from '../utils/dingtalkRecipientFieldWarnings'
-import { listDingTalkPublicFormLinkWarnings } from '../utils/dingtalkPublicFormLinkWarnings'
+import {
+  describeDingTalkPublicFormLinkAccess,
+  listDingTalkPublicFormLinkWarnings,
+} from '../utils/dingtalkPublicFormLinkWarnings'
 
 const props = defineProps<{
   visible: boolean
@@ -940,6 +945,10 @@ function publicFormLinkWarnings(value: unknown, warnWhenGroupAccessRisk = false)
     warnWhenFullyPublic: warnWhenGroupAccessRisk,
     warnWhenProtectedWithoutAllowlist: warnWhenGroupAccessRisk,
   })
+}
+
+function publicFormAccessSummary(value: unknown) {
+  return describeDingTalkPublicFormLinkAccess(value, props.views ?? [])
 }
 
 function copyPreviewText(key: string, text: string) {

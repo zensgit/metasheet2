@@ -498,6 +498,7 @@ describe('MetaAutomationRuleEditor', () => {
 
     expect(container.textContent).toContain('Public form sharing for "Public Form" is fully public')
     expect(container.textContent).toContain('Use DingTalk-protected access and an allowlist')
+    expect(container.querySelector('[data-field="groupMessageSummary"]')?.textContent).toContain('Fully public; anyone with the link can submit')
   })
 
   it('warns when a DingTalk group message uses a protected public form without an allowlist', async () => {
@@ -548,6 +549,7 @@ describe('MetaAutomationRuleEditor', () => {
 
     expect(container.textContent).not.toContain('allows all bound DingTalk users to submit')
     expect(container.textContent).not.toContain('is fully public')
+    expect(container.querySelector('[data-field="groupMessageSummary"]')?.textContent).toContain('DingTalk-bound users in allowlist can submit')
   })
 
   it('emits DingTalk person action config with optional links', async () => {
@@ -593,6 +595,8 @@ describe('MetaAutomationRuleEditor', () => {
     internalViewSelect.value = 'view_grid'
     internalViewSelect.dispatchEvent(new Event('change'))
     await flushPromises()
+
+    expect(container.querySelector('[data-field="personMessageSummary"]')?.textContent).toContain('Fully public; anyone with the link can submit')
 
     const saveBtn = container.querySelector('[data-action="save"]') as HTMLButtonElement
     expect(saveBtn.disabled).toBe(false)

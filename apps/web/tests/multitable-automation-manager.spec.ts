@@ -510,6 +510,7 @@ describe('MetaAutomationManager', () => {
 
     expect(container.textContent).toContain('Public form sharing for "Public Form" is fully public')
     expect(container.textContent).toContain('Use DingTalk-protected access and an allowlist')
+    expect(container.querySelector('[data-automation-summary="group"]')?.textContent).toContain('Fully public; anyone with the link can submit')
   })
 
   it('warns when a DingTalk group message uses a protected public form without an allowlist in the inline form', async () => {
@@ -568,6 +569,7 @@ describe('MetaAutomationManager', () => {
 
     expect(container.textContent).not.toContain('allows all bound DingTalk users to submit')
     expect(container.textContent).not.toContain('is fully public')
+    expect(container.querySelector('[data-automation-summary="group"]')?.textContent).toContain('DingTalk-bound users in allowlist can submit')
   })
 
   it('warns when a DingTalk person message selects a public form without a token in the inline form', async () => {
@@ -1232,6 +1234,10 @@ describe('MetaAutomationManager', () => {
     const bodyInput = container.querySelector('[data-automation-field="dingtalkPersonBodyTemplate"]') as HTMLTextAreaElement
     bodyInput.value = 'Handle {{record.xxx}}'
     bodyInput.dispatchEvent(new Event('input', { bubbles: true }))
+
+    const publicFormSelect = container.querySelector('[data-automation-field="dingtalkPersonPublicFormViewId"]') as HTMLSelectElement
+    publicFormSelect.value = 'view_form'
+    publicFormSelect.dispatchEvent(new Event('change', { bubbles: true }))
     await flushPromises()
 
     const summary = container.querySelector('[data-automation-summary="person"]')
@@ -1241,7 +1247,8 @@ describe('MetaAutomationManager', () => {
     expect(summary?.textContent).toContain('Need action record_demo_001')
     expect(summary?.textContent).toContain('Handle 示例字段值')
     expect(summary?.textContent).toContain('Assignees (record.assigneeUserIds)')
-    expect(summary?.textContent).toContain('No public form link')
+    expect(summary?.textContent).toContain('Public Form')
+    expect(summary?.textContent).toContain('Fully public; anyone with the link can submit')
     expect(summary?.textContent).toContain('No internal link')
   })
 

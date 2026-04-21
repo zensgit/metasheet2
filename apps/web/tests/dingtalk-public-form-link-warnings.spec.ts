@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest'
 
-import { listDingTalkPublicFormLinkWarnings } from '../src/multitable/utils/dingtalkPublicFormLinkWarnings'
+import {
+  describeDingTalkPublicFormLinkAccess,
+  listDingTalkPublicFormLinkWarnings,
+} from '../src/multitable/utils/dingtalkPublicFormLinkWarnings'
 
 const nowMs = Date.parse('2026-04-21T00:00:00.000Z')
 
@@ -140,5 +143,17 @@ describe('dingtalk public form link warnings', () => {
     ])
     expect(listDingTalkPublicFormLinkWarnings('view_form_protected_allowed_user', views, { nowMs, warnWhenProtectedWithoutAllowlist: true })).toEqual([])
     expect(listDingTalkPublicFormLinkWarnings('view_form_granted_allowed_group', views, { nowMs, warnWhenProtectedWithoutAllowlist: true })).toEqual([])
+  })
+
+  it('describes selected public form access for DingTalk message summaries', () => {
+    expect(describeDingTalkPublicFormLinkAccess('', views, nowMs)).toBe('No public form link')
+    expect(describeDingTalkPublicFormLinkAccess('view_form_enabled', views, nowMs)).toBe('Fully public; anyone with the link can submit')
+    expect(describeDingTalkPublicFormLinkAccess('view_form_protected', views, nowMs)).toBe('All bound DingTalk users can submit')
+    expect(describeDingTalkPublicFormLinkAccess('view_form_protected_allowed_user', views, nowMs)).toBe('DingTalk-bound users in allowlist can submit')
+    expect(describeDingTalkPublicFormLinkAccess('view_form_granted_without_allowlist', views, nowMs)).toBe('All authorized DingTalk users can submit')
+    expect(describeDingTalkPublicFormLinkAccess('view_form_granted_allowed_group', views, nowMs)).toBe('Authorized DingTalk users in allowlist can submit')
+    expect(describeDingTalkPublicFormLinkAccess('view_form_expired', views, nowMs)).toBe('Public form sharing has expired')
+    expect(describeDingTalkPublicFormLinkAccess('view_grid', views, nowMs)).toBe('Selected view is not a form')
+    expect(describeDingTalkPublicFormLinkAccess('missing_view', views, nowMs)).toBe('View unavailable in this sheet')
   })
 })

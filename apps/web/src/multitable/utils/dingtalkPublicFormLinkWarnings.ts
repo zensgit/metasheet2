@@ -39,6 +39,44 @@ function hasAllowlistIds(value: unknown): boolean {
   return Array.isArray(value) && value.some((item) => typeof item === 'string' && item.trim())
 }
 
+export function describeDingTalkPublicFormLinkAccess(
+  viewId: unknown,
+  views: readonly DingTalkPublicFormLinkView[],
+  optionsOrNowMs?: number | DingTalkPublicFormLinkWarningOptions,
+): string {
+  const options = normalizeWarningOptions(optionsOrNowMs)
+  const nowMs = options.nowMs ?? Date.now()
+  const id = typeof viewId === 'string' ? viewId.trim() : ''
+  if (!id) return 'No public form link'
+
+  const view = views.find((item) => item.id === id)
+  if (!view) return 'View unavailable in this sheet'
+  if (view.type !== 'form') return 'Selected view is not a form'
+
+  const publicForm = isRecord(view.config?.publicForm) ? view.config.publicForm : null
+  if (!publicForm) return 'Public form sharing is not configured'
+  if (publicForm.enabled !== true) return 'Public form sharing is disabled'
+
+  const publicToken = typeof publicForm.publicToken === 'string' ? publicForm.publicToken.trim() : ''
+  if (!publicToken) return 'Public form sharing is missing a public token'
+
+  const expiryMs = parseExpiryMs(publicForm.expiresAt ?? publicForm.expiresOn)
+  if (expiryMs !== null && nowMs >= expiryMs) return 'Public form sharing has expired'
+
+  const hasUserAllowlist = hasAllowlistIds(publicForm.allowedUserIds)
+  const hasGroupAllowlist = hasAllowlistIds(publicForm.allowedMemberGroupIds)
+  const hasAllowlist = hasUserAllowlist || hasGroupAllowlist
+  const accessMode = normalizeAccessMode(publicForm.accessMode)
+
+  if (accessMode === 'dingtalk') {
+    return hasAllowlist ? 'DingTalk-bound users in allowlist can submit' : 'All bound DingTalk users can submit'
+  }
+  if (accessMode === 'dingtalk_granted') {
+    return hasAllowlist ? 'Authorized DingTalk users in allowlist can submit' : 'All authorized DingTalk users can submit'
+  }
+  return 'Fully public; anyone with the link can submit'
+}
+
 export function listDingTalkPublicFormLinkWarnings(
   viewId: unknown,
   views: readonly DingTalkPublicFormLinkView[],
