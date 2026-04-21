@@ -1756,6 +1756,81 @@ describe('MetaAutomationManager', () => {
     expect(document.body.textContent).toContain('Assignees (record.assigneeUserIds)')
   })
 
+  it('opens the rule editor with DingTalk group config from V1 actions when legacy action fields are stale', async () => {
+    const rules = [
+      fakeRule({
+        id: 'rule_stale_group',
+        name: 'Stale group action',
+        actionType: 'notify',
+        actionConfig: { message: 'stale legacy notification' },
+        actions: [{
+          type: 'send_dingtalk_group_message',
+          config: {
+            destinationId: 'dt_1',
+            destinationIds: ['dt_1', 'dt_2'],
+            titleTemplate: 'Ticket {{recordId}}',
+            bodyTemplate: 'Please review {{record.status}}',
+            publicFormViewId: 'view_form',
+            internalViewId: 'view_grid',
+          },
+        }],
+      }),
+    ]
+    const { client } = mockClient(rules)
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
+    await flushPromises()
+
+    const editBtn = container.querySelector('[data-automation-edit="true"]') as HTMLButtonElement
+    expect(editBtn).toBeTruthy()
+    editBtn.click()
+    await flushPromises()
+
+    const actionSelect = document.querySelector('[data-action-index="0"] .meta-rule-editor__action-header select') as HTMLSelectElement
+    expect(actionSelect.value).toBe('send_dingtalk_group_message')
+    expect(document.querySelector('[data-group-destination="dt_1"]')?.textContent).toContain('Ops Group')
+    expect(document.querySelector('[data-group-destination="dt_2"]')?.textContent).toContain('Escalation Group')
+    expect((document.querySelector('[data-field="dingtalkTitleTemplate"]') as HTMLInputElement).value).toBe('Ticket {{recordId}}')
+    expect((document.querySelector('[data-field="dingtalkBodyTemplate"]') as HTMLTextAreaElement).value).toBe('Please review {{record.status}}')
+  })
+
+  it('opens the rule editor with DingTalk person dynamic recipients from V1 actions when legacy action fields are stale', async () => {
+    const rules = [
+      fakeRule({
+        id: 'rule_stale_person',
+        name: 'Stale person action',
+        actionType: 'notify',
+        actionConfig: { message: 'stale legacy notification' },
+        actions: [{
+          type: 'send_dingtalk_person_message',
+          config: {
+            userIds: [],
+            userIdFieldPath: 'record.assigneeUserIds',
+            userIdFieldPaths: ['record.assigneeUserIds'],
+            titleTemplate: 'Ticket {{recordId}}',
+            bodyTemplate: 'Please fill {{record.status}}',
+          },
+        }],
+      }),
+    ]
+    const { client } = mockClient(rules)
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
+    await flushPromises()
+
+    const editBtn = container.querySelector('[data-automation-edit="true"]') as HTMLButtonElement
+    expect(editBtn).toBeTruthy()
+    editBtn.click()
+    await flushPromises()
+
+    const actionSelect = document.querySelector('[data-action-index="0"] .meta-rule-editor__action-header select') as HTMLSelectElement
+    const recipientFieldInput = document.querySelector('[data-field="dingtalkPersonRecipientFieldPath"]') as HTMLInputElement
+    expect(actionSelect.value).toBe('send_dingtalk_person_message')
+    expect(recipientFieldInput.value).toBe('record.assigneeUserIds')
+    expect((document.querySelector('[data-field="dingtalkPersonTitleTemplate"]') as HTMLInputElement).value).toBe('Ticket {{recordId}}')
+    expect((document.querySelector('[data-field="dingtalkPersonBodyTemplate"]') as HTMLTextAreaElement).value).toBe('Please fill {{record.status}}')
+    expect(document.body.textContent).toContain('Record recipients:')
+    expect(document.body.textContent).toContain('Assignees (record.assigneeUserIds)')
+  })
+
   it('shows a blocking warning when editing a rule with a missing internal processing view', async () => {
     const config = {
       destinationIds: ['dt_1'],
