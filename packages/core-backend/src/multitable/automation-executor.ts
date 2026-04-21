@@ -103,6 +103,10 @@ function normalizeMemberGroupIdScalar(value: unknown): string[] {
   return normalizeIdScalar(value, ['memberGroupId', 'groupId', 'subjectId', 'id', 'value'])
 }
 
+function normalizeGroupDestinationIdScalar(value: unknown): string[] {
+  return normalizeIdScalar(value, ['destinationId', 'groupDestinationId', 'id', 'value'])
+}
+
 function normalizeUserIdsFromUnknown(value: unknown): string[] {
   if (Array.isArray(value)) {
     return Array.from(new Set(
@@ -119,6 +123,15 @@ function normalizeMemberGroupIdsFromUnknown(value: unknown): string[] {
     ))
   }
   return normalizeMemberGroupIdScalar(value)
+}
+
+function normalizeGroupDestinationIdsFromUnknown(value: unknown): string[] {
+  if (Array.isArray(value)) {
+    return Array.from(new Set(
+      value.flatMap((entry) => normalizeGroupDestinationIdsFromUnknown(entry)),
+    ))
+  }
+  return normalizeGroupDestinationIdScalar(value)
 }
 
 function normalizeRecipientFieldPath(value: unknown): string {
@@ -166,6 +179,16 @@ function resolveRecipientMemberGroupIdsFromRecord(recordData: Record<string, unk
   ))
 }
 
+function resolveGroupDestinationIdsFromRecord(recordData: Record<string, unknown>, fieldPaths: unknown[]): string[] {
+  return Array.from(new Set(
+    fieldPaths.flatMap((fieldPath) => {
+      const normalizedPath = normalizeRecipientFieldPath(fieldPath)
+      if (!normalizedPath) return []
+      return normalizeGroupDestinationIdsFromUnknown(lookupTemplateValue(normalizedPath, recordData))
+    }),
+  ))
+}
+
 function chunkItems<T>(items: T[], size: number): T[][] {
   if (items.length === 0) return []
   const chunks: T[][] = []
@@ -197,6 +220,20 @@ function parseViewConfig(raw: unknown): Record<string, unknown> | null {
     }
   }
   return typeof raw === 'object' && !Array.isArray(raw) ? raw as Record<string, unknown> : null
+}
+
+function parsePublicFormExpiryMs(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isFinite(value)) return value
+  if (value instanceof Date) return value.getTime()
+  if (typeof value !== 'string') return null
+  const trimmed = value.trim()
+  if (!trimmed) return null
+  if (/^\d+$/.test(trimmed)) {
+    const numeric = Number(trimmed)
+    return Number.isFinite(numeric) ? numeric : null
+  }
+  const parsed = Date.parse(trimmed)
+  return Number.isFinite(parsed) ? parsed : null
 }
 
 function resolveAutomationAppBaseUrl(): string | null {
@@ -372,6 +409,7 @@ export interface ExecutionContext {
   sheetId: string
   recordId: string
   recordData: Record<string, unknown>
+  ruleCreatedBy: string
   actorId?: string | null
   triggerEvent: unknown
 }
@@ -416,6 +454,7 @@ export class AutomationExecutor {
       sheetId: rule.sheetId,
       recordId: (payload?.recordId as string) ?? '',
       recordData: (payload?.data as Record<string, unknown>) ?? (payload?.changes as Record<string, unknown>) ?? {},
+      ruleCreatedBy: rule.createdBy,
       actorId: (payload?.actorId as string) ?? null,
       triggerEvent,
     }
@@ -726,7 +765,7 @@ export class AutomationExecutor {
       const publicViewResult = await this.deps.queryFn(
         `SELECT id, sheet_id, config
            FROM meta_views
-          WHERE id = $1 AND sheet_id = $2`,
+          WHERE id = $1 AND sheet_id = $2 AND type = 'form'`,
         [publicFormViewId, context.sheetId],
       )
       const publicView = (publicViewResult.rows[0] ?? null) as {
@@ -754,6 +793,18 @@ export class AutomationExecutor {
           actionType: 'send_dingtalk_person_message',
           status: 'failed',
           error: 'Selected public form view is not shared',
+        }
+      }
+      const expiryMs = parsePublicFormExpiryMs(
+        publicForm && typeof publicForm === 'object' && !Array.isArray(publicForm)
+          ? (publicForm as Record<string, unknown>).expiresAt ?? (publicForm as Record<string, unknown>).expiresOn
+          : undefined,
+      )
+      if (expiryMs !== null && Date.now() >= expiryMs) {
+        return {
+          actionType: 'send_dingtalk_person_message',
+          status: 'failed',
+          error: 'Selected public form view has expired',
         }
       }
 
@@ -1024,7 +1075,7 @@ export class AutomationExecutor {
     config: SendDingTalkGroupMessageConfig,
     context: ExecutionContext,
   ): Promise<AutomationStepResult> {
-    const destinationIds = Array.from(new Set([
+    const staticDestinationIds = Array.from(new Set([
       ...(Array.isArray(config.destinationIds)
         ? config.destinationIds
           .filter((value): value is string => typeof value === 'string')
@@ -1035,13 +1086,23 @@ export class AutomationExecutor {
         ? [config.destinationId.trim()]
         : []),
     ]))
+    const destinationFieldPaths = normalizeRecipientFieldPaths(config.destinationIdFieldPath, config.destinationIdFieldPaths)
+    const recordDestinationIds = resolveGroupDestinationIdsFromRecord(context.recordData, destinationFieldPaths)
+    const destinationIds = Array.from(new Set([...staticDestinationIds, ...recordDestinationIds]))
     const titleTemplate = typeof config.titleTemplate === 'string' ? config.titleTemplate.trim() : ''
     const bodyTemplate = typeof config.bodyTemplate === 'string' ? config.bodyTemplate.trim() : ''
     const publicFormViewId = typeof config.publicFormViewId === 'string' ? config.publicFormViewId.trim() : ''
     const internalViewId = typeof config.internalViewId === 'string' ? config.internalViewId.trim() : ''
 
     if (!destinationIds.length) {
-      return { actionType: 'send_dingtalk_group_message', status: 'failed', error: 'At least one DingTalk destination is required' }
+      if (destinationFieldPaths.length > 0) {
+        return {
+          actionType: 'send_dingtalk_group_message',
+          status: 'failed',
+          error: `No DingTalk destinationIds resolved from record field paths: ${destinationFieldPaths.join(', ')}`,
+        }
+      }
+      return { actionType: 'send_dingtalk_group_message', status: 'failed', error: 'At least one DingTalk destination or record destination field path is required' }
     }
     if (!titleTemplate) {
       return { actionType: 'send_dingtalk_group_message', status: 'failed', error: 'DingTalk title template is required' }
@@ -1053,8 +1114,12 @@ export class AutomationExecutor {
     const destinationResult = await this.deps.queryFn(
       `SELECT id, name, webhook_url, secret, enabled
          FROM dingtalk_group_destinations
-        WHERE id = ANY($1)`,
-      [destinationIds],
+        WHERE id = ANY($1)
+          AND (
+            sheet_id = $2
+            OR (sheet_id IS NULL AND created_by = $3)
+          )`,
+      [destinationIds, context.sheetId, context.ruleCreatedBy],
     )
     const destinations = destinationResult.rows as Array<{
       id: string
@@ -1100,7 +1165,7 @@ export class AutomationExecutor {
       const publicViewResult = await this.deps.queryFn(
         `SELECT id, sheet_id, config
            FROM meta_views
-          WHERE id = $1 AND sheet_id = $2`,
+          WHERE id = $1 AND sheet_id = $2 AND type = 'form'`,
         [publicFormViewId, context.sheetId],
       )
       const publicView = (publicViewResult.rows[0] ?? null) as {
@@ -1128,6 +1193,18 @@ export class AutomationExecutor {
           actionType: 'send_dingtalk_group_message',
           status: 'failed',
           error: 'Selected public form view is not shared',
+        }
+      }
+      const expiryMs = parsePublicFormExpiryMs(
+        publicForm && typeof publicForm === 'object' && !Array.isArray(publicForm)
+          ? (publicForm as Record<string, unknown>).expiresAt ?? (publicForm as Record<string, unknown>).expiresOn
+          : undefined,
+      )
+      if (expiryMs !== null && Date.now() >= expiryMs) {
+        return {
+          actionType: 'send_dingtalk_group_message',
+          status: 'failed',
+          error: 'Selected public form view has expired',
         }
       }
 
@@ -1273,8 +1350,12 @@ export class AutomationExecutor {
         status: 'failed',
         error: `${failedDestinations.length} of ${orderedDestinations.length} DingTalk destinations failed: ${failedDestinations.map((destination) => `${destination.name} (${destination.error})`).join('; ')}`,
         output: {
+          staticDestinationCount: staticDestinationIds.length,
+          dynamicDestinationCount: recordDestinationIds.length,
           destinationIds: orderedDestinations.map((destination) => destination.id),
           destinationNames: orderedDestinations.map((destination) => destination.name),
+          destinationFieldPath: destinationFieldPaths[0] ?? null,
+          destinationFieldPaths,
           sentCount: successfulDestinations.length,
           failedDestinationIds: failedDestinations.map((destination) => destination.id),
           linkCount: linkLines.length,
@@ -1288,8 +1369,12 @@ export class AutomationExecutor {
       output: {
         destinationId: successfulDestinations[0]?.id,
         destinationName: successfulDestinations[0]?.name,
+        staticDestinationCount: staticDestinationIds.length,
+        dynamicDestinationCount: recordDestinationIds.length,
         destinationIds: successfulDestinations.map((destination) => destination.id),
         destinationNames: successfulDestinations.map((destination) => destination.name),
+        destinationFieldPath: destinationFieldPaths[0] ?? null,
+        destinationFieldPaths,
         sentCount: successfulDestinations.length,
         linkCount: linkLines.length,
       },

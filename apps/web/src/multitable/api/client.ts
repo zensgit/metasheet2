@@ -98,7 +98,7 @@ async function parseJson<T>(res: Response): Promise<T> {
   const raw = await res.text()
   const body = raw ? safeParseJson(raw) : null
   if (!res.ok) {
-    const payload = (body?.error ?? {}) as ApiErrorPayload
+    const payload = normalizeApiErrorPayload(body)
     const error = new Error(firstFieldError(payload.fieldErrors) ?? payload.message ?? `API ${res.status}`) as Error & {
       status?: number
       code?: string
@@ -115,15 +115,30 @@ async function parseJson<T>(res: Response): Promise<T> {
     throw error
   }
   if (res.status === 204 || !raw.trim()) return undefined as T
-  return (body?.data ?? body) as T
+  return (unwrapDataBody(body) ?? body) as T
 }
 
-function safeParseJson(raw: string): any {
+function safeParseJson(raw: string): unknown {
   try {
     return JSON.parse(raw)
   } catch {
     return null
   }
+}
+
+function normalizeApiErrorPayload(body: unknown): ApiErrorPayload {
+  if (!body || typeof body !== 'object') return {}
+  const record = body as Record<string, unknown>
+  const error = record.error
+  if (typeof error === 'string') return { message: error }
+  if (error && typeof error === 'object') return error as ApiErrorPayload
+  if (typeof record.message === 'string') return { message: record.message }
+  return {}
+}
+
+function unwrapDataBody(body: unknown): unknown {
+  if (!body || typeof body !== 'object') return undefined
+  return (body as { data?: unknown }).data
 }
 
 function firstFieldError(fieldErrors?: Record<string, string>): string | null {
