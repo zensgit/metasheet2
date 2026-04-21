@@ -543,6 +543,50 @@ describe('MetaAutomationManager', () => {
     expect(container.querySelector('[data-automation-member-group-recipient-field="watcherGroupIds"]')).toBeNull()
   })
 
+  it('warns when a dynamic member group recipient path is unknown in the inline form', async () => {
+    const { client } = mockClient([])
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
+    await flushPromises()
+
+    const addBtn = container.querySelector('.meta-automation__btn-add') as HTMLButtonElement
+    addBtn.click()
+    await nextTick()
+
+    const actionSelect = container.querySelector('[data-automation-field="actionType"]') as HTMLSelectElement
+    actionSelect.value = 'send_dingtalk_person_message'
+    actionSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushPromises()
+
+    const memberGroupFieldInput = container.querySelector('[data-automation-field="dingtalkPersonMemberGroupRecipientFieldPath"]') as HTMLInputElement
+    memberGroupFieldInput.value = 'record.unknownGroupField'
+    memberGroupFieldInput.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushPromises()
+
+    expect(container.textContent).toContain('record.unknownGroupField is not a known field in this sheet')
+  })
+
+  it('warns when a dynamic member group recipient path points at a user field in the inline form', async () => {
+    const { client } = mockClient([])
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
+    await flushPromises()
+
+    const addBtn = container.querySelector('.meta-automation__btn-add') as HTMLButtonElement
+    addBtn.click()
+    await nextTick()
+
+    const actionSelect = container.querySelector('[data-automation-field="actionType"]') as HTMLSelectElement
+    actionSelect.value = 'send_dingtalk_person_message'
+    actionSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushPromises()
+
+    const memberGroupFieldInput = container.querySelector('[data-automation-field="dingtalkPersonMemberGroupRecipientFieldPath"]') as HTMLInputElement
+    memberGroupFieldInput.value = 'record.assigneeUserIds'
+    memberGroupFieldInput.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushPromises()
+
+    expect(container.textContent).toContain('record.assigneeUserIds is a user field; use Record recipient field paths instead.')
+  })
+
   it('can pick a record recipient field for DingTalk person automation', async () => {
     const { client } = mockClient([])
     const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
