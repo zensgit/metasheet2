@@ -31,7 +31,11 @@ import { MultitableFormulaEngine } from '../multitable/formula-engine'
 import { validateRecord, getDefaultValidationRules } from '../multitable/field-validation-engine'
 import type { FieldValidationConfig } from '../multitable/field-validation'
 import { conditionalPublicRateLimiter, publicFormContextLimiter, publicFormSubmitLimiter } from '../middleware/rate-limiter'
-import { AutomationRuleValidationError, getAutomationServiceInstance } from '../multitable/automation-service'
+import {
+  AutomationRuleValidationError,
+  getAutomationServiceInstance,
+  type AutomationRule as AutomationServiceRule,
+} from '../multitable/automation-service'
 import {
   normalizeDingTalkAutomationActionInputs,
   validateDingTalkAutomationActionConfigs,
@@ -8306,6 +8310,30 @@ export function univerMetaRouter(): Router {
 
   // ── Automation rule CRUD ──────────────────────────────────────────────
 
+  function serializeAutomationRule(rule: AutomationServiceRule) {
+    const triggerConfig = rule.trigger_config ?? {}
+    const actionConfig = rule.action_config ?? {}
+    return {
+      id: rule.id,
+      sheetId: rule.sheet_id,
+      name: rule.name ?? '',
+      triggerType: rule.trigger_type,
+      triggerConfig,
+      trigger: {
+        type: rule.trigger_type,
+        config: triggerConfig,
+      },
+      conditions: rule.conditions ?? undefined,
+      actions: rule.actions ?? undefined,
+      actionType: rule.action_type,
+      actionConfig,
+      enabled: rule.enabled,
+      createdAt: rule.created_at,
+      updatedAt: rule.updated_at,
+      createdBy: rule.created_by ?? undefined,
+    }
+  }
+
   router.get('/sheets/:sheetId/automations', async (req: Request, res: Response) => {
     const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId : ''
     if (!sheetId) {
@@ -8322,7 +8350,7 @@ export function univerMetaRouter(): Router {
 
       const rules = await automationService.listRules(sheetId)
 
-      return res.json({ ok: true, data: { rules } })
+      return res.json({ ok: true, data: { rules: rules.map(serializeAutomationRule) } })
     } catch (err) {
       const hint = getDbNotReadyMessage(err)
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
@@ -8351,8 +8379,14 @@ export function univerMetaRouter(): Router {
       const name = typeof body?.name === 'string' ? body.name : null
       const triggerType = typeof body?.triggerType === 'string' ? body.triggerType : ''
       const triggerConfig = (body?.triggerConfig && typeof body.triggerConfig === 'object') ? body.triggerConfig as Record<string, unknown> : {}
-      const actionType = typeof body?.actionType === 'string' ? body.actionType : ''
+      let actions = Array.isArray(body?.actions) ? body.actions : null
+      const firstAction = actions?.find((item): item is Record<string, unknown> => !!item && typeof item === 'object' && !Array.isArray(item))
+      let actionType = typeof body?.actionType === 'string' ? body.actionType : ''
       let actionConfig = (body?.actionConfig && typeof body.actionConfig === 'object') ? body.actionConfig as Record<string, unknown> : {}
+      if (!actionType && typeof firstAction?.type === 'string') actionType = firstAction.type
+      if (Object.keys(actionConfig).length === 0 && firstAction?.config && typeof firstAction.config === 'object' && !Array.isArray(firstAction.config)) {
+        actionConfig = firstAction.config as Record<string, unknown>
+      }
       const enabled = typeof body?.enabled === 'boolean' ? body.enabled : true
 
       const validTriggers = new Set(['record.created', 'record.updated', 'record.deleted', 'field.changed', 'field.value_changed', 'schedule.cron', 'schedule.interval', 'webhook.received'])
@@ -8365,7 +8399,6 @@ export function univerMetaRouter(): Router {
       }
 
       const conditions = body?.conditions && typeof body.conditions === 'object' ? body.conditions as never : null
-      let actions = Array.isArray(body?.actions) ? body.actions : null
       const normalizedDingTalkInputs = normalizeDingTalkAutomationActionInputs(actionType, actionConfig, actions)
       actionConfig = normalizedDingTalkInputs.actionConfig && typeof normalizedDingTalkInputs.actionConfig === 'object'
         ? normalizedDingTalkInputs.actionConfig as Record<string, unknown>
@@ -8401,16 +8434,7 @@ export function univerMetaRouter(): Router {
       return res.json({
         ok: true,
         data: {
-          rule: {
-            id: rule.id,
-            sheetId,
-            name: rule.name,
-            triggerType: rule.trigger_type,
-            triggerConfig: rule.trigger_config,
-            actionType: rule.action_type,
-            actionConfig: rule.action_config,
-            enabled: rule.enabled,
-          },
+          rule: serializeAutomationRule(rule),
         },
       })
     } catch (err) {
@@ -8541,7 +8565,7 @@ export function univerMetaRouter(): Router {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Automation rule not found' } })
       }
 
-      return res.json({ ok: true, data: { rule: updated } })
+      return res.json({ ok: true, data: { rule: serializeAutomationRule(updated) } })
     } catch (err) {
       if (err instanceof AutomationRuleValidationError) {
         return res.status(400).json({ ok: false, error: { code: err.code, message: err.message } })

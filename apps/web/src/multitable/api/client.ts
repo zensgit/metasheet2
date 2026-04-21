@@ -141,6 +141,56 @@ function unwrapDataBody(body: unknown): unknown {
   return (body as { data?: unknown }).data
 }
 
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === 'object' && !Array.isArray(value)
+}
+
+function stringValue(value: unknown, fallback = ''): string {
+  return typeof value === 'string' ? value : fallback
+}
+
+function optionalStringValue(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim() ? value : undefined
+}
+
+function objectValue(value: unknown): Record<string, unknown> {
+  return isPlainObject(value) ? value : {}
+}
+
+function normalizeAutomationRulePayload(value: unknown): AutomationRule {
+  const payload = isPlainObject(value) && isPlainObject(value.rule) ? value.rule : value
+  const record = objectValue(payload)
+  const triggerType = stringValue(record.triggerType ?? record.trigger_type) as AutomationRule['triggerType']
+  const triggerConfig = objectValue(record.triggerConfig ?? record.trigger_config)
+  const actionType = stringValue(record.actionType ?? record.action_type) as AutomationRule['actionType']
+  const actionConfig = objectValue(record.actionConfig ?? record.action_config)
+  const conditions = isPlainObject(record.conditions)
+    ? record.conditions as unknown as AutomationRule['conditions']
+    : undefined
+  const actions = Array.isArray(record.actions)
+    ? record.actions as AutomationRule['actions']
+    : undefined
+
+  return {
+    id: stringValue(record.id),
+    sheetId: stringValue(record.sheetId ?? record.sheet_id),
+    name: stringValue(record.name),
+    triggerType,
+    triggerConfig,
+    trigger: isPlainObject(record.trigger)
+      ? record.trigger as unknown as AutomationRule['trigger']
+      : { type: triggerType, config: triggerConfig },
+    conditions,
+    actions,
+    actionType,
+    actionConfig,
+    enabled: record.enabled !== false,
+    createdAt: optionalStringValue(record.createdAt ?? record.created_at),
+    updatedAt: optionalStringValue(record.updatedAt ?? record.updated_at),
+    createdBy: optionalStringValue(record.createdBy ?? record.created_by),
+  }
+}
+
 function firstFieldError(fieldErrors?: Record<string, string>): string | null {
   if (!fieldErrors) return null
   const first = Object.values(fieldErrors).find((msg) => typeof msg === 'string' && msg.trim())
@@ -885,8 +935,13 @@ export class MultitableApiClient {
   // --- Automation rules ---
   async listAutomationRules(sheetId: string): Promise<AutomationRule[]> {
     const res = await this.fetch(`/api/multitable/sheets/${encodeURIComponent(sheetId)}/automations`)
-    const data = await parseJson<{ rules: AutomationRule[] }>(res)
-    return Array.isArray(data?.rules) ? data.rules : []
+    const data = await parseJson<{ rules?: unknown[] } | unknown[]>(res)
+    const rules = Array.isArray(data)
+      ? data
+      : isPlainObject(data) && Array.isArray(data.rules)
+        ? data.rules
+        : []
+    return rules.map(normalizeAutomationRulePayload)
   }
 
   async createAutomationRule(
@@ -898,7 +953,8 @@ export class MultitableApiClient {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(rule),
     })
-    return parseJson<AutomationRule>(res)
+    const data = await parseJson<unknown>(res)
+    return normalizeAutomationRulePayload(data)
   }
 
   async updateAutomationRule(sheetId: string, ruleId: string, updates: Partial<AutomationRule>): Promise<void> {
