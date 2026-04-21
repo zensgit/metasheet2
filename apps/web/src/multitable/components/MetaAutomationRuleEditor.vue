@@ -699,7 +699,7 @@
       <!-- Footer -->
       <div class="meta-rule-editor__footer">
         <div class="meta-rule-editor__test-run-feedback">
-          <div v-if="hasDingTalkActions" class="meta-rule-editor__hint meta-rule-editor__hint--warning" data-field="dingtalkTestRunWarning">
+          <div v-if="savedRuleHasDingTalkActions" class="meta-rule-editor__hint meta-rule-editor__hint--warning" data-field="dingtalkTestRunWarning">
             Test Run executes the saved rule and can send real DingTalk messages to configured groups or users.
           </div>
           <div v-if="!props.rule?.id" class="meta-rule-editor__hint" data-field="testRunUnsavedHint">
@@ -850,9 +850,9 @@ const internalViews = computed(() => (props.views ?? []).filter((view) => !view.
 const groupDestinationCandidateFields = computed(() => props.fields)
 const recipientCandidateFields = computed(() => props.fields.filter((field) => field.type === 'user'))
 const memberGroupRecipientCandidateFields = computed(() => props.fields.filter(isDingTalkMemberGroupRecipientField))
-const hasDingTalkActions = computed(() => draft.value.actions.some((action) =>
-  action.type === 'send_dingtalk_group_message' || action.type === 'send_dingtalk_person_message',
-))
+const savedRuleHasDingTalkActions = computed(() => ruleHasDingTalkActions(props.rule))
+const DINGTALK_TEST_RUN_CONFIRM_MESSAGE =
+  'Test Run executes the saved rule and can send real DingTalk messages to configured groups or users. Unsaved changes are not included. Continue?'
 
 const conditionOperators: Array<{ value: ConditionOperator; label: string }> = [
   { value: 'equals', label: 'Equals' },
@@ -1256,6 +1256,16 @@ function publicFormAccessSummary(value: unknown) {
   return describeDingTalkPublicFormLinkAccess(value, formViews.value)
 }
 
+function isDingTalkActionType(value: unknown): boolean {
+  return value === 'send_dingtalk_group_message' || value === 'send_dingtalk_person_message'
+}
+
+function ruleHasDingTalkActions(rule: AutomationRule | undefined): boolean {
+  if (!rule) return false
+  return isDingTalkActionType(rule.actionType)
+    || (rule.actions ?? []).some((action) => isDingTalkActionType(action.type))
+}
+
 function copyPreviewText(key: string, text: string) {
   const trimmed = text.trim()
   if (!trimmed || !navigator.clipboard?.writeText) return
@@ -1607,6 +1617,7 @@ async function onSave() {
 
 function onTestRun() {
   if (saving.value || props.testRunState?.status === 'running' || !props.rule?.id) return
+  if (savedRuleHasDingTalkActions.value && !window.confirm(DINGTALK_TEST_RUN_CONFIRM_MESSAGE)) return
   emit('test', props.rule.id)
 }
 </script>
