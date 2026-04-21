@@ -27,10 +27,16 @@ function mockClient(
   options: {
     testExecution?: Record<string, unknown> | Promise<Record<string, unknown>>
     testErrorMessage?: string
+    groupDeliveryErrorMessage?: string
+    personDeliveryErrorMessage?: string
     stats?: Record<string, unknown>
   } = {},
 ) {
   const ok = (body: unknown) => new Response(JSON.stringify({ data: body }), { status: 200, headers: { 'Content-Type': 'application/json' } })
+  const apiError = (message: string) => new Response(
+    JSON.stringify({ error: { code: 'INTERNAL_ERROR', message } }),
+    { status: 500, headers: { 'Content-Type': 'application/json' } },
+  )
   const noContent = () => new Response(null, { status: 204 })
   const personDeliveries: DingTalkPersonDelivery[] = [
     {
@@ -105,9 +111,11 @@ function mockClient(
     }
     if (method === 'GET' && url.includes('/automations')) {
       if (url.includes('/dingtalk-group-deliveries')) {
+        if (options.groupDeliveryErrorMessage) return apiError(options.groupDeliveryErrorMessage)
         return ok({ deliveries: groupDeliveries })
       }
       if (url.includes('/dingtalk-person-deliveries')) {
+        if (options.personDeliveryErrorMessage) return apiError(options.personDeliveryErrorMessage)
         return ok({ deliveries: personDeliveries })
       }
       if (url.endsWith('/stats')) {
@@ -1348,6 +1356,31 @@ describe('MetaAutomationManager', () => {
     expect(fetchFn.mock.calls.some(([url]) => String(url).includes('/api/multitable/sheets/sheet_1/automations/rule_1/dingtalk-group-deliveries'))).toBe(true)
   })
 
+  it('shows DingTalk group delivery load errors instead of an empty history', async () => {
+    const { client } = mockClient([
+      fakeRule({
+        name: 'DingTalk group notify',
+        actionType: 'send_dingtalk_group_message',
+        actionConfig: {
+          destinationId: 'dt_1',
+          titleTemplate: 'Ticket {{recordId}}',
+          bodyTemplate: 'Please fill {{record.status}}',
+        },
+      }),
+    ], { groupDeliveryErrorMessage: 'Delivery history unavailable' })
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
+    await flushPromises()
+
+    const deliveriesBtn = container.querySelector('[data-automation-group-deliveries="rule_1"]') as HTMLButtonElement
+    deliveriesBtn.click()
+    await flushPromises()
+
+    const error = document.querySelector('[data-group-delivery-error="true"]')
+    expect(error?.textContent).toContain('Delivery history unavailable')
+    expect(document.querySelector('[data-group-delivery-id="dgd_1"]')).toBeNull()
+    expect(document.querySelector('.meta-group-delivery [data-empty="true"]')).toBeNull()
+  })
+
   it('opens DingTalk group delivery viewer for V1 multi-action rules', async () => {
     const { client, fetchFn } = mockClient([
       fakeRule({
@@ -1410,6 +1443,31 @@ describe('MetaAutomationManager', () => {
     const delivery = document.querySelector('[data-person-delivery-id="dpd_1"]')
     expect(delivery?.textContent).toContain('Lin Lan')
     expect(fetchFn.mock.calls.some(([url]) => String(url).includes('/api/multitable/sheets/sheet_1/automations/rule_1/dingtalk-person-deliveries'))).toBe(true)
+  })
+
+  it('shows DingTalk person delivery load errors instead of an empty history', async () => {
+    const { client } = mockClient([
+      fakeRule({
+        name: 'Multi-step person notify',
+        actionType: 'send_dingtalk_person_message',
+        actionConfig: {
+          userIds: ['user_1'],
+          titleTemplate: 'Ticket {{recordId}}',
+          bodyTemplate: 'Please fill {{record.status}}',
+        },
+      }),
+    ], { personDeliveryErrorMessage: 'Person delivery query failed' })
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
+    await flushPromises()
+
+    const deliveriesBtn = container.querySelector('[data-automation-person-deliveries="rule_1"]') as HTMLButtonElement
+    deliveriesBtn.click()
+    await flushPromises()
+
+    const error = document.querySelector('[data-person-delivery-error="true"]')
+    expect(error?.textContent).toContain('Person delivery query failed')
+    expect(document.querySelector('[data-person-delivery-id="dpd_1"]')).toBeNull()
+    expect(document.querySelector('.meta-person-delivery [data-empty="true"]')).toBeNull()
   })
 
   it('shows a generic running status for non-DingTalk automation test runs', async () => {
