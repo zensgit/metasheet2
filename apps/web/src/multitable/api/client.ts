@@ -98,7 +98,7 @@ async function parseJson<T>(res: Response): Promise<T> {
   const raw = await res.text()
   const body = raw ? safeParseJson(raw) : null
   if (!res.ok) {
-    const payload = (body?.error ?? {}) as ApiErrorPayload
+    const payload = normalizeApiErrorPayload(body)
     const error = new Error(firstFieldError(payload.fieldErrors) ?? payload.message ?? `API ${res.status}`) as Error & {
       status?: number
       code?: string
@@ -115,15 +115,30 @@ async function parseJson<T>(res: Response): Promise<T> {
     throw error
   }
   if (res.status === 204 || !raw.trim()) return undefined as T
-  return (body?.data ?? body) as T
+  return (unwrapDataBody(body) ?? body) as T
 }
 
-function safeParseJson(raw: string): any {
+function safeParseJson(raw: string): unknown {
   try {
     return JSON.parse(raw)
   } catch {
     return null
   }
+}
+
+function normalizeApiErrorPayload(body: unknown): ApiErrorPayload {
+  if (!body || typeof body !== 'object') return {}
+  const record = body as Record<string, unknown>
+  const error = record.error
+  if (typeof error === 'string') return { message: error }
+  if (error && typeof error === 'object') return error as ApiErrorPayload
+  if (typeof record.message === 'string') return { message: record.message }
+  return {}
+}
+
+function unwrapDataBody(body: unknown): unknown {
+  if (!body || typeof body !== 'object') return undefined
+  return (body as { data?: unknown }).data
 }
 
 function firstFieldError(fieldErrors?: Record<string, string>): string | null {
@@ -1131,8 +1146,8 @@ export class MultitableApiClient {
   }
 
   // --- DingTalk Group Destinations ---
-  async listDingTalkGroups(): Promise<DingTalkGroupDestination[]> {
-    const res = await this.fetch('/api/multitable/dingtalk-groups')
+  async listDingTalkGroups(sheetId?: string): Promise<DingTalkGroupDestination[]> {
+    const res = await this.fetch(`/api/multitable/dingtalk-groups${qs(sheetId ? { sheetId } : {})}`)
     const data = await parseJson<{ destinations: DingTalkGroupDestination[] }>(res)
     return data.destinations ?? []
   }
@@ -1146,8 +1161,8 @@ export class MultitableApiClient {
     return parseJson(res)
   }
 
-  async updateDingTalkGroup(id: string, input: Partial<DingTalkGroupDestinationInput>): Promise<DingTalkGroupDestination> {
-    const res = await this.fetch(`/api/multitable/dingtalk-groups/${encodeURIComponent(id)}`, {
+  async updateDingTalkGroup(id: string, input: Partial<Omit<DingTalkGroupDestinationInput, 'sheetId'>>, sheetId?: string): Promise<DingTalkGroupDestination> {
+    const res = await this.fetch(`/api/multitable/dingtalk-groups/${encodeURIComponent(id)}${qs(sheetId ? { sheetId } : {})}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(input),
@@ -1155,15 +1170,15 @@ export class MultitableApiClient {
     return parseJson(res)
   }
 
-  async deleteDingTalkGroup(id: string): Promise<void> {
-    const res = await this.fetch(`/api/multitable/dingtalk-groups/${encodeURIComponent(id)}`, {
+  async deleteDingTalkGroup(id: string, sheetId?: string): Promise<void> {
+    const res = await this.fetch(`/api/multitable/dingtalk-groups/${encodeURIComponent(id)}${qs(sheetId ? { sheetId } : {})}`, {
       method: 'DELETE',
     })
     return parseJson(res)
   }
 
-  async testDingTalkGroup(id: string, input?: { subject?: string; content?: string }): Promise<void> {
-    const res = await this.fetch(`/api/multitable/dingtalk-groups/${encodeURIComponent(id)}/test-send`, {
+  async testDingTalkGroup(id: string, input?: { subject?: string; content?: string }, sheetId?: string): Promise<void> {
+    const res = await this.fetch(`/api/multitable/dingtalk-groups/${encodeURIComponent(id)}/test-send${qs(sheetId ? { sheetId } : {})}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(input ?? {}),
@@ -1171,8 +1186,8 @@ export class MultitableApiClient {
     return parseJson(res)
   }
 
-  async getDingTalkGroupDeliveries(id: string): Promise<DingTalkGroupDelivery[]> {
-    const res = await this.fetch(`/api/multitable/dingtalk-groups/${encodeURIComponent(id)}/deliveries`)
+  async getDingTalkGroupDeliveries(id: string, sheetId?: string): Promise<DingTalkGroupDelivery[]> {
+    const res = await this.fetch(`/api/multitable/dingtalk-groups/${encodeURIComponent(id)}/deliveries${qs(sheetId ? { sheetId } : {})}`)
     const data = await parseJson<{ deliveries: DingTalkGroupDelivery[] }>(res)
     return data.deliveries ?? []
   }

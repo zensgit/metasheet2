@@ -655,3 +655,115 @@ describe('YjsRecordBridge multi-actor', () => {
     doc.destroy()
   })
 })
+
+// ═══════════════════════════════════════════════════════════════════
+// Regression: YjsRecordBridge re-observes when Y.Doc is recreated
+// ═══════════════════════════════════════════════════════════════════
+// This reproduces the Run 2 bug from yjs-node-client-validation-20260420.md:
+// after a Y.Doc is destroyed by idle cleanup and recreated on next subscribe,
+// bridge.observe() used to early-return because observedDocs still had the
+// recordId entry, leaving the new doc unobserved → edits silently skipped.
+describe('YjsRecordBridge doc lifecycle', () => {
+  it('re-registers observer when Y.Doc instance changes for the same record', async () => {
+    const { YjsRecordBridge } = await import('../../src/collab/yjs-record-bridge')
+
+    const mockPatch = vi.fn().mockResolvedValue({ updated: [] })
+    const mockGetInput = vi.fn().mockImplementation(
+      async (recordId: string, patch: Record<string, unknown>, pAid: string, allAids: string[]) => ({
+        sheetId: 'sheet1',
+        changesByRecord: new Map([[recordId, Object.entries(patch).map(([fieldId, value]) => ({ fieldId, value }))]]),
+        actorId: pAid,
+        fields: [],
+        visiblePropertyFields: [],
+        visiblePropertyFieldIds: new Set<string>(),
+        attachmentFields: [],
+        fieldById: new Map([['fld_name', { type: 'string', readOnly: false, hidden: false }]]),
+        capabilities: { canEditRecord: true } as any,
+        access: { userId: pAid, permissions: [], isAdminRole: false },
+      }),
+    )
+
+    const bridge = new YjsRecordBridge(
+      {} as any,
+      { patchRecords: mockPatch } as any,
+      mockGetInput,
+      { mergeWindowMs: 20, maxDelayMs: 100 },
+    )
+
+    // First doc: simulates first subscribe cycle
+    const doc1 = new Y.Doc()
+    const text1 = new Y.Text()
+    doc1.getMap('fields').set('fld_name', text1)
+    bridge.observe('rec1', doc1)
+    text1.insert(0, 'first')
+    await new Promise((r) => setTimeout(r, 60))
+    expect(mockPatch).toHaveBeenCalledTimes(1)
+
+    // Simulate cleanup: destroy doc1 (but don't call unobserve — matches
+    // real sync-service behavior where idle cleanup nukes the Y.Doc without
+    // notifying the bridge).
+    doc1.destroy()
+
+    // Second doc: simulates resubscribe after idle release. Fresh Y.Doc,
+    // fresh Y.Text. Previous bug: observe() early-returned and this edit
+    // never reached the bridge.
+    const doc2 = new Y.Doc()
+    const text2 = new Y.Text()
+    doc2.getMap('fields').set('fld_name', text2)
+    bridge.observe('rec1', doc2)
+    text2.insert(0, 'second')
+    await new Promise((r) => setTimeout(r, 60))
+
+    // With the fix: observer is re-registered on doc2, so this edit flushes.
+    expect(mockPatch).toHaveBeenCalledTimes(2)
+    expect(mockGetInput).toHaveBeenLastCalledWith('rec1', { fld_name: 'second' }, 'unknown', ['unknown'])
+
+    bridge.destroy()
+    doc2.destroy()
+  })
+
+  it('does not re-register when observe() is called with the same Y.Doc', async () => {
+    const { YjsRecordBridge } = await import('../../src/collab/yjs-record-bridge')
+
+    const mockPatch = vi.fn().mockResolvedValue({ updated: [] })
+    const mockGetInput = vi.fn().mockImplementation(
+      async (recordId: string, patch: Record<string, unknown>, pAid: string) => ({
+        sheetId: 'sheet1',
+        changesByRecord: new Map([[recordId, [{ fieldId: 'fld_name', value: (patch as any).fld_name }]]]),
+        actorId: pAid,
+        fields: [],
+        visiblePropertyFields: [],
+        visiblePropertyFieldIds: new Set<string>(),
+        attachmentFields: [],
+        fieldById: new Map([['fld_name', { type: 'string', readOnly: false, hidden: false }]]),
+        capabilities: { canEditRecord: true } as any,
+        access: { userId: pAid, permissions: [], isAdminRole: false },
+      }),
+    )
+
+    const bridge = new YjsRecordBridge(
+      {} as any,
+      { patchRecords: mockPatch } as any,
+      mockGetInput,
+      { mergeWindowMs: 20, maxDelayMs: 100 },
+    )
+
+    const doc = new Y.Doc()
+    const text = new Y.Text()
+    doc.getMap('fields').set('fld_name', text)
+
+    bridge.observe('rec1', doc)
+    bridge.observe('rec1', doc) // idempotent second call — same doc instance
+    bridge.observe('rec1', doc)
+
+    text.insert(0, 'hello')
+    await new Promise((r) => setTimeout(r, 60))
+
+    // Expected: ONE flush (not 3). If observer was registered 3 times we'd
+    // see 3 flushes.
+    expect(mockPatch).toHaveBeenCalledTimes(1)
+
+    bridge.destroy()
+    doc.destroy()
+  })
+})

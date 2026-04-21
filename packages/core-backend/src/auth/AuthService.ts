@@ -17,8 +17,10 @@ import { createUserSession, isUserSessionActive } from './session-registry'
 
 export interface User {
   id: string
-  email: string
+  email: string | null
+  username?: string | null
   name: string
+  mobile?: string | null
   role: string
   permissions: string[]
   tenantId?: string
@@ -214,7 +216,7 @@ export class AuthService {
   createToken(user: User, options: { sid?: string } = {}): string {
     const payload: Omit<TokenPayload, 'iat' | 'exp'> = {
       userId: user.id,
-      email: user.email,
+      email: user.email ?? '',
       role: user.role,
       ...(typeof user.tenantId === 'string' && user.tenantId.trim().length > 0 ? { tenantId: user.tenantId.trim() } : {}),
       ...(typeof options.sid === 'string' && options.sid.trim().length > 0 ? { sid: options.sid.trim() } : {}),
@@ -243,12 +245,12 @@ export class AuthService {
    * 用户登录
    */
   async login(
-    email: string,
+    identifier: string,
     password: string,
     options: { ipAddress?: string | null; userAgent?: string | null; tenantId?: string | null } = {},
   ): Promise<{ user: User; token: string } | null> {
     try {
-      const user = await this.getUserByEmail(email)
+      const user = await this.getUserByIdentifier(identifier)
       if (!user) {
         return null
       }
@@ -346,7 +348,7 @@ export class AuthService {
       try {
         const pool = poolManager.get()
         const result = await pool.query(
-          'SELECT id, email, name, role, permissions, password_hash, is_active, must_change_password, created_at, updated_at FROM users WHERE id = $1',
+          'SELECT id, email, username, mobile, name, role, permissions, password_hash, is_active, must_change_password, created_at, updated_at FROM users WHERE id = $1',
           [userId]
         )
 
@@ -356,6 +358,8 @@ export class AuthService {
           return {
             id: row.id,
             email: row.email,
+            username: row.username ?? null,
+            mobile: row.mobile ?? null,
             name: row.name,
             role: resolved.role,
             permissions: resolved.permissions,
@@ -375,7 +379,9 @@ export class AuthService {
         return {
           id: userId,
           email: 'dev@metasheet.com',
+          username: 'dev-user',
           name: 'Development User',
+          mobile: null,
           role: 'admin',
           permissions: ['*:*'],
           is_active: true,
@@ -393,17 +399,46 @@ export class AuthService {
     }
   }
 
-  /**
-   * 通过邮箱获取用户
-   */
   private async getUserByEmail(email: string): Promise<(User & { password_hash: string }) | null> {
+    return this.getUserByIdentifier(email)
+  }
+
+  /**
+   * 通过邮箱、用户名或手机号获取用户
+   */
+  private async getUserByIdentifier(identifier: string): Promise<(User & { password_hash: string }) | null> {
     try {
+      const trimmedIdentifier = identifier.trim()
+      if (!trimmedIdentifier) return null
+
+      const normalizedEmail = trimmedIdentifier.toLowerCase()
+      const normalizedUsername = trimmedIdentifier.toLowerCase()
+      const normalizedMobile = trimmedIdentifier.replace(/\s+/g, '')
+
       try {
         const pool = poolManager.get()
         const result = await pool.query(
-          'SELECT id, email, name, role, permissions, password_hash, is_active, must_change_password, created_at, updated_at FROM users WHERE email = $1',
-          [email]
+          `SELECT id, email, username, mobile, name, role, permissions, password_hash, is_active, must_change_password, created_at, updated_at
+           FROM users
+           WHERE lower(email) = $1
+              OR lower(username) = $2
+              OR regexp_replace(mobile, '\\s+', '', 'g') = $3
+           ORDER BY
+             CASE
+               WHEN lower(email) = $1 THEN 0
+               WHEN lower(username) = $2 THEN 1
+               WHEN regexp_replace(mobile, '\\s+', '', 'g') = $3 THEN 2
+               ELSE 3
+             END ASC,
+             created_at ASC
+           LIMIT 2`,
+          [normalizedEmail, normalizedUsername, normalizedMobile]
         )
+
+        const distinctUserIds = new Set(result.rows.map((row) => row.id))
+        if (distinctUserIds.size > 1) {
+          return null
+        }
 
         if (result.rows.length > 0) {
           const row = result.rows[0] as UserRow
@@ -411,6 +446,8 @@ export class AuthService {
           return {
             id: row.id,
             email: row.email,
+            username: row.username ?? null,
+            mobile: row.mobile ?? null,
             name: row.name,
             role: resolved.role,
             permissions: resolved.permissions,
@@ -426,7 +463,7 @@ export class AuthService {
       }
       return null
     } catch (error) {
-      this.logger.error('Get user by email error', error instanceof Error ? error : undefined)
+      this.logger.error('Get user by identifier error', error instanceof Error ? error : undefined)
       return null
     }
   }

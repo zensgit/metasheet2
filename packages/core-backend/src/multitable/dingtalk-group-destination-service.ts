@@ -20,29 +20,33 @@ import type {
 const logger = new Logger('DingTalkGroupDestinationService')
 const DINGTALK_REQUEST_TIMEOUT_MS = 5_000
 
-function generateId(): string {
-  return randomBytes(16).toString('hex')
-}
-
-function rowToDestination(row: {
+type DingTalkGroupDestinationRow = {
   id: string
   name: string
   webhook_url: string
   secret: string | null
   enabled: boolean
+  sheet_id: string | null
   created_by: string
   created_at: string | Date
   updated_at?: string | Date | null
   last_tested_at?: string | Date | null
   last_test_status?: string | null
   last_test_error?: string | null
-}): DingTalkGroupDestination {
+}
+
+function generateId(): string {
+  return randomBytes(16).toString('hex')
+}
+
+function rowToDestination(row: DingTalkGroupDestinationRow): DingTalkGroupDestination {
   return {
     id: row.id,
     name: row.name,
     webhookUrl: row.webhook_url,
     secret: row.secret ?? undefined,
     enabled: row.enabled,
+    sheetId: row.sheet_id ?? undefined,
     createdBy: row.created_by,
     createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : row.created_at,
     updatedAt: row.updated_at ? (row.updated_at instanceof Date ? row.updated_at.toISOString() : row.updated_at) : undefined,
@@ -108,6 +112,7 @@ export class DingTalkGroupDestinationService {
   async createDestination(userId: string, input: DingTalkGroupDestinationCreateInput): Promise<DingTalkGroupDestination> {
     const name = input.name?.trim()
     const webhookUrl = input.webhookUrl?.trim()
+    const sheetId = typeof input.sheetId === 'string' && input.sheetId.trim() ? input.sheetId.trim() : null
     if (!name) throw new Error('Destination name is required')
     if (!webhookUrl) throw new Error('Webhook URL is required')
     try {
@@ -130,6 +135,7 @@ export class DingTalkGroupDestinationService {
       webhook_url: webhookUrl,
       secret: input.secret ?? null,
       enabled,
+      sheet_id: sheetId,
       created_by: userId,
       created_at: now,
     }).execute()
@@ -141,17 +147,29 @@ export class DingTalkGroupDestinationService {
       webhookUrl,
       secret: input.secret,
       enabled,
+      ...(sheetId ? { sheetId } : {}),
       createdBy: userId,
       createdAt: now,
     }
   }
 
-  async listDestinations(userId: string): Promise<DingTalkGroupDestination[]> {
-    const rows = await this.db.selectFrom('dingtalk_group_destinations')
-      .selectAll()
-      .where('created_by', '=', userId)
-      .orderBy('created_at', 'desc')
-      .execute()
+  async listDestinations(userId: string, sheetId?: string): Promise<DingTalkGroupDestination[]> {
+    const normalizedSheetId = typeof sheetId === 'string' && sheetId.trim() ? sheetId.trim() : ''
+    let builder = this.db.selectFrom('dingtalk_group_destinations').selectAll()
+    if (normalizedSheetId) {
+      builder = builder.where((eb) =>
+        eb.or([
+          eb('sheet_id', '=', normalizedSheetId),
+          eb.and([
+            eb('sheet_id', 'is', null),
+            eb('created_by', '=', userId),
+          ]),
+        ]),
+      )
+    } else {
+      builder = builder.where('created_by', '=', userId)
+    }
+    const rows = await builder.orderBy('created_at', 'desc').execute()
     return rows.map((row) => rowToDestination(row as Parameters<typeof rowToDestination>[0]))
   }
 
@@ -174,17 +192,31 @@ export class DingTalkGroupDestinationService {
     return rows.map((row) => rowToDelivery(row as Parameters<typeof rowToDelivery>[0]))
   }
 
-  async updateDestination(
+  private async loadAuthorizedDestination(
     id: string,
     userId: string,
-    input: DingTalkGroupDestinationUpdateInput,
-  ): Promise<DingTalkGroupDestination> {
+    sheetId?: string,
+  ): Promise<DingTalkGroupDestinationRow> {
     const row = await this.db.selectFrom('dingtalk_group_destinations')
       .selectAll()
       .where('id', '=', id)
       .executeTakeFirst()
     if (!row) throw new Error('Destination not found')
+    if (row.sheet_id !== null) {
+      if (!sheetId || row.sheet_id !== sheetId) throw new Error('Not authorized')
+      return row
+    }
     if (row.created_by !== userId) throw new Error('Not authorized')
+    return row
+  }
+
+  async updateDestination(
+    id: string,
+    userId: string,
+    input: DingTalkGroupDestinationUpdateInput,
+    sheetId?: string,
+  ): Promise<DingTalkGroupDestination> {
+    await this.loadAuthorizedDestination(id, userId, sheetId)
 
     const updates: Record<string, unknown> = { updated_at: nowTimestamp() }
     if (input.name !== undefined) {
@@ -221,14 +253,8 @@ export class DingTalkGroupDestinationService {
     return rowToDestination(updated as Parameters<typeof rowToDestination>[0])
   }
 
-  async deleteDestination(id: string, userId: string): Promise<void> {
-    const row = await this.db.selectFrom('dingtalk_group_destinations')
-      .selectAll()
-      .where('id', '=', id)
-      .executeTakeFirst()
-    if (!row) throw new Error('Destination not found')
-    if (row.created_by !== userId) throw new Error('Not authorized')
-
+  async deleteDestination(id: string, userId: string, sheetId?: string): Promise<void> {
+    await this.loadAuthorizedDestination(id, userId, sheetId)
     await this.db.deleteFrom('dingtalk_group_destinations')
       .where('id', '=', id)
       .execute()
@@ -238,13 +264,9 @@ export class DingTalkGroupDestinationService {
     id: string,
     userId: string,
     input: DingTalkGroupTestSendInput,
+    sheetId?: string,
   ): Promise<{ ok: true }> {
-    const row = await this.db.selectFrom('dingtalk_group_destinations')
-      .selectAll()
-      .where('id', '=', id)
-      .executeTakeFirst()
-    if (!row) throw new Error('Destination not found')
-    if (row.created_by !== userId) throw new Error('Not authorized')
+    const row = await this.loadAuthorizedDestination(id, userId, sheetId)
 
     const subject = input.subject?.trim() || 'MetaSheet DingTalk group test'
     const content = input.content?.trim() || 'This is a standard DingTalk group destination test message.'

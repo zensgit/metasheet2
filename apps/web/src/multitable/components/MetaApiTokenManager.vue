@@ -249,6 +249,7 @@
             </div>
             <div class="meta-api-mgr__card-meta">
               <span>Webhook: {{ maskDingTalkWebhookUrl(group.webhookUrl) }}</span>
+              <span>{{ group.sheetId ? 'Shared with this sheet' : 'Private legacy group' }}</span>
               <span>Created: {{ formatDate(group.createdAt) }}</span>
               <span v-if="group.lastTestedAt">Last test: {{ formatDate(group.lastTestedAt) }}</span>
               <span v-if="group.lastTestStatus" :data-dingtalk-group-test-status="group.lastTestStatus">
@@ -329,6 +330,7 @@ import type { MultitableApiClient } from '../api/client'
 
 const props = defineProps<{
   visible: boolean
+  sheetId?: string
   client?: MultitableApiClient
 }>()
 
@@ -616,7 +618,7 @@ async function loadDingTalkGroups() {
   dingTalkGroupsLoading.value = true
   error.value = null
   try {
-    dingTalkGroups.value = await props.client.listDingTalkGroups()
+    dingTalkGroups.value = await props.client.listDingTalkGroups(props.sheetId)
   } catch (err) {
     error.value = err instanceof Error ? err.message : 'Failed to load DingTalk groups'
   } finally {
@@ -656,16 +658,19 @@ async function onSaveDingTalkGroup() {
   busy.value = true
   error.value = null
   try {
-    const input = {
+    const createInput = {
       name: dingTalkGroupDraft.value.name.trim(),
       webhookUrl: dingTalkGroupDraft.value.webhookUrl.trim(),
       secret: dingTalkGroupDraft.value.secret || undefined,
       enabled: dingTalkGroupDraft.value.enabled,
     }
     if (editingDingTalkGroupId.value) {
-      await props.client.updateDingTalkGroup(editingDingTalkGroupId.value, input)
+      await props.client.updateDingTalkGroup(editingDingTalkGroupId.value, createInput, props.sheetId)
     } else {
-      await props.client.createDingTalkGroup(input)
+      await props.client.createDingTalkGroup({
+        ...createInput,
+        sheetId: props.sheetId,
+      })
     }
     cancelDingTalkGroupForm()
     await loadDingTalkGroups()
@@ -681,7 +686,7 @@ async function onToggleDingTalkGroup(group: DingTalkGroupDestination) {
   busy.value = true
   error.value = null
   try {
-    await props.client.updateDingTalkGroup(group.id, { enabled: !group.enabled })
+    await props.client.updateDingTalkGroup(group.id, { enabled: !group.enabled }, props.sheetId)
     await loadDingTalkGroups()
   } catch (err) {
     error.value = err instanceof Error ? err.message : 'Failed to toggle DingTalk group'
@@ -695,7 +700,7 @@ async function onTestDingTalkGroup(groupId: string) {
   busy.value = true
   error.value = null
   try {
-    await props.client.testDingTalkGroup(groupId)
+    await props.client.testDingTalkGroup(groupId, undefined, props.sheetId)
     await loadDingTalkGroups()
     if (dingTalkDeliveriesGroupId.value === groupId) {
       await loadDingTalkDeliveries(groupId)
@@ -715,7 +720,7 @@ async function loadDingTalkDeliveries(groupId: string) {
   dingTalkDeliveries.value = []
   error.value = null
   try {
-    const deliveries = await props.client.getDingTalkGroupDeliveries(groupId)
+    const deliveries = await props.client.getDingTalkGroupDeliveries(groupId, props.sheetId)
     if (requestToken !== dingTalkDeliveriesRequestToken || dingTalkDeliveriesGroupId.value !== groupId) {
       return
     }
@@ -749,7 +754,7 @@ async function onDeleteDingTalkGroup(groupId: string) {
   busy.value = true
   error.value = null
   try {
-    await props.client.deleteDingTalkGroup(groupId)
+    await props.client.deleteDingTalkGroup(groupId, props.sheetId)
     if (dingTalkDeliveriesGroupId.value === groupId) {
       dingTalkDeliveriesRequestToken += 1
       dingTalkDeliveriesGroupId.value = null

@@ -7,10 +7,12 @@ import { Router } from 'express'
 import { z } from 'zod'
 import { db } from '../db/db'
 import { Logger } from '../core/logger'
+import { query } from '../db/pg'
 import { authenticate } from '../middleware/auth'
 import { ApiTokenService } from '../multitable/api-token-service'
 import { ALL_API_TOKEN_SCOPES } from '../multitable/api-tokens'
 import { DingTalkGroupDestinationService } from '../multitable/dingtalk-group-destination-service'
+import { resolveSheetCapabilitiesForUser } from '../multitable/sheet-capabilities'
 import { WebhookService } from '../multitable/webhook-service'
 import { ALL_WEBHOOK_EVENT_TYPES } from '../multitable/webhooks'
 
@@ -57,6 +59,7 @@ const CreateDingTalkGroupSchema = z.object({
   webhookUrl: z.string().url(),
   secret: z.string().optional(),
   enabled: z.boolean().optional(),
+  sheetId: z.string().optional(),
 })
 
 const UpdateDingTalkGroupSchema = z.object({
@@ -70,6 +73,23 @@ const DingTalkGroupTestSendSchema = z.object({
   subject: z.string().min(1).max(100).optional(),
   content: z.string().min(1).max(4000).optional(),
 })
+
+function getSheetId(value: unknown): string {
+  return typeof value === 'string' ? value.trim() : ''
+}
+
+async function requireSheetAutomationAccess(res: Response, userId: string, sheetId: string): Promise<boolean> {
+  if (!sheetId) {
+    res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId is required' } })
+    return false
+  }
+  const { capabilities } = await resolveSheetCapabilitiesForUser(query, sheetId, userId)
+  if (!capabilities.canManageAutomation) {
+    res.status(403).json({ ok: false, error: { code: 'FORBIDDEN' } })
+    return false
+  }
+  return true
+}
 
 function getUserId(req: Request): string {
   const user = req.user as Record<string, unknown> | undefined
@@ -295,7 +315,9 @@ export function apiTokensRouter(): Router {
       res.status(401).json({ ok: false, error: { code: 'UNAUTHENTICATED' } })
       return
     }
-    const destinations = await dingTalkGroupDestinationService.listDestinations(userId)
+    const sheetId = getSheetId(req.query.sheetId)
+    if (sheetId && !await requireSheetAutomationAccess(res, userId, sheetId)) return
+    const destinations = await dingTalkGroupDestinationService.listDestinations(userId, sheetId || undefined)
     res.json({ ok: true, data: { destinations } })
   })
 
@@ -307,11 +329,14 @@ export function apiTokensRouter(): Router {
     }
     try {
       const input = CreateDingTalkGroupSchema.parse(req.body)
+      const sheetId = getSheetId(input.sheetId)
+      if (sheetId && !await requireSheetAutomationAccess(res, userId, sheetId)) return
       const destination = await dingTalkGroupDestinationService.createDestination(userId, {
         name: input.name,
         webhookUrl: input.webhookUrl,
         secret: input.secret,
         enabled: input.enabled,
+        sheetId: sheetId || undefined,
       })
       res.status(201).json({ ok: true, data: destination })
     } catch (err) {
@@ -332,12 +357,14 @@ export function apiTokensRouter(): Router {
     }
     try {
       const input = UpdateDingTalkGroupSchema.parse(req.body)
+      const sheetId = getSheetId(req.query.sheetId)
+      if (sheetId && !await requireSheetAutomationAccess(res, userId, sheetId)) return
       const destination = await dingTalkGroupDestinationService.updateDestination(req.params.id, userId, {
         name: input.name,
         webhookUrl: input.webhookUrl,
         secret: input.secret,
         enabled: input.enabled,
-      })
+      }, sheetId || undefined)
       res.json({ ok: true, data: destination })
     } catch (err) {
       if (err instanceof z.ZodError) {
@@ -356,7 +383,9 @@ export function apiTokensRouter(): Router {
       return
     }
     try {
-      await dingTalkGroupDestinationService.deleteDestination(req.params.id, userId)
+      const sheetId = getSheetId(req.query.sheetId)
+      if (sheetId && !await requireSheetAutomationAccess(res, userId, sheetId)) return
+      await dingTalkGroupDestinationService.deleteDestination(req.params.id, userId, sheetId || undefined)
       res.status(204).end()
     } catch (err) {
       logger.error('Failed to delete DingTalk group destination', err instanceof Error ? err : undefined)
@@ -370,12 +399,14 @@ export function apiTokensRouter(): Router {
       res.status(401).json({ ok: false, error: { code: 'UNAUTHENTICATED' } })
       return
     }
+    const sheetId = getSheetId(req.query.sheetId)
+    if (sheetId && !await requireSheetAutomationAccess(res, userId, sheetId)) return
     const destination = await dingTalkGroupDestinationService.getDestinationById(req.params.id)
     if (!destination) {
       res.status(404).json({ ok: false, error: { code: 'NOT_FOUND' } })
       return
     }
-    if (destination.createdBy !== userId) {
+    if (destination.sheetId ? destination.sheetId !== sheetId : destination.createdBy !== userId) {
       res.status(403).json({ ok: false, error: { code: 'FORBIDDEN' } })
       return
     }
@@ -392,7 +423,9 @@ export function apiTokensRouter(): Router {
     }
     try {
       const input = DingTalkGroupTestSendSchema.parse(req.body ?? {})
-      await dingTalkGroupDestinationService.testSend(req.params.id, userId, input)
+      const sheetId = getSheetId(req.query.sheetId)
+      if (sheetId && !await requireSheetAutomationAccess(res, userId, sheetId)) return
+      await dingTalkGroupDestinationService.testSend(req.params.id, userId, input, sheetId || undefined)
       res.status(204).end()
     } catch (err) {
       if (err instanceof z.ZodError) {

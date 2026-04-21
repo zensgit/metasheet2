@@ -130,17 +130,17 @@ describe('LoginView', () => {
     app.mount(container)
     await flushUi()
 
-    const emailInput = container.querySelector('input[type="email"]') as HTMLInputElement | null
+    const identifierInput = container.querySelector('input[autocomplete="username"]') as HTMLInputElement | null
     const passwordInput = container.querySelector('input[type="password"]') as HTMLInputElement | null
     const submitButton = container.querySelector('button[type="submit"]') as HTMLButtonElement | null
 
-    expect(emailInput).not.toBeNull()
+    expect(identifierInput).not.toBeNull()
     expect(passwordInput).not.toBeNull()
     expect(submitButton).not.toBeNull()
 
-    if (emailInput) {
-      emailInput.value = 'admin@example.com'
-      emailInput.dispatchEvent(new Event('input', { bubbles: true }))
+    if (identifierInput) {
+      identifierInput.value = 'admin@example.com'
+      identifierInput.dispatchEvent(new Event('input', { bubbles: true }))
     }
     if (passwordInput) {
       passwordInput.value = 'secret'
@@ -156,7 +156,16 @@ describe('LoginView', () => {
       '/api/auth/dingtalk/launch?probe=1',
       expect.objectContaining({ method: 'GET', suppressUnauthorizedRedirect: true }),
     )
-    expect(mocks.apiFetch).toHaveBeenCalledWith('/api/auth/login', expect.objectContaining({ method: 'POST' }))
+    expect(mocks.apiFetch).toHaveBeenCalledWith(
+      '/api/auth/login',
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({
+          identifier: 'admin@example.com',
+          password: 'secret',
+        }),
+      }),
+    )
     expect(window.localStorage.getItem('auth_token')).toBe('login-token')
     expect(window.localStorage.getItem('user_roles')).toBe(JSON.stringify(['admin']))
     expect(window.localStorage.getItem('user_permissions')).toBe(JSON.stringify(['attendance:read']))
@@ -223,12 +232,12 @@ describe('LoginView', () => {
     app.mount(container)
     await flushUi()
 
-    const emailInput = container.querySelector('input[type="email"]') as HTMLInputElement | null
+    const identifierInput = container.querySelector('input[autocomplete="username"]') as HTMLInputElement | null
     const passwordInput = container.querySelector('input[type="password"]') as HTMLInputElement | null
     const submitButton = container.querySelector('button[type="submit"]') as HTMLButtonElement | null
 
-    emailInput!.value = 'forced@example.com'
-    emailInput!.dispatchEvent(new Event('input', { bubbles: true }))
+    identifierInput!.value = 'forced@example.com'
+    identifierInput!.dispatchEvent(new Event('input', { bubbles: true }))
     passwordInput!.value = 'TempPass9A'
     passwordInput!.dispatchEvent(new Event('input', { bubbles: true }))
 

@@ -634,6 +634,7 @@ export interface AutomationExecution {
   triggerType: AutomationTriggerType
   startedAt: string
   completedAt?: string
+  duration?: number
   durationMs?: number
   steps?: AutomationStepResult[]
   error?: string
@@ -797,6 +798,7 @@ export interface DingTalkGroupDestination {
   webhookUrl: string
   secret?: string
   enabled: boolean
+  sheetId?: string
   createdBy: string
   createdAt: string
   updatedAt?: string
@@ -810,6 +812,7 @@ export interface DingTalkGroupDestinationInput {
   webhookUrl: string
   secret?: string
   enabled?: boolean
+  sheetId?: string
 }
 
 export interface DingTalkGroupDelivery {

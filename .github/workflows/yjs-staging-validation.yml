@@ -1,0 +1,97 @@
+name: Yjs Staging Validation
+
+# Manual-dispatch only. Hits a live staging server with an admin token.
+# Never runs on push / PR — would require secrets + a running /yjs namespace.
+# Use this to verify the Yjs stack end-to-end against staging after a
+# backend/infra change, or as a periodic health check.
+
+on:
+  workflow_dispatch:
+    inputs:
+      base_url:
+        description: 'Yjs base URL (backend, not reverse-proxy)'
+        required: true
+        default: 'http://142.171.239.56:8081'
+      record_id:
+        description: 'Record ID with a fld_pilot_title text field to edit'
+        required: true
+      field_id:
+        description: 'Field ID to edit (must be text type)'
+        required: false
+        default: 'fld_pilot_title'
+      run_twice:
+        description: 'Run twice to validate warm-doc path (catches stale-observer class bugs)'
+        required: false
+        default: 'true'
+
+jobs:
+  validate:
+    name: Yjs End-to-End Validation
+    runs-on: ubuntu-latest
+    # The admin token must be set as a repository or environment secret.
+    # Set up via: gh secret set YJS_ADMIN_TOKEN --body '<jwt>'
+    env:
+      YJS_BASE_URL: ${{ inputs.base_url }}
+      YJS_TOKEN: ${{ secrets.YJS_ADMIN_TOKEN }}
+      RECORD_ID: ${{ inputs.record_id }}
+      FIELD_ID: ${{ inputs.field_id }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Install deps (core-backend only)
+        working-directory: packages/core-backend
+        run: pnpm install --frozen-lockfile --filter @metasheet/core-backend...
+
+      - name: Sanity — is Yjs even enabled?
+        run: |
+          if [ -z "$YJS_TOKEN" ]; then
+            echo "::error::YJS_ADMIN_TOKEN secret is not set"
+            exit 1
+          fi
+          # Use repo's pinned status script so alerts + formatting stay consistent.
+          node scripts/ops/check-yjs-rollout-status.mjs \
+            --base-url "$YJS_BASE_URL" \
+            --token "$YJS_TOKEN"
+
+      - name: Run A — cold start validation
+        id: run_a
+        working-directory: packages/core-backend
+        run: |
+          node scripts/ops/yjs-node-client.mjs 2>&1 | tee run-a.log
+          # Script exits 0 on all-green, 2 on check-failure
+          status=${PIPESTATUS[0]}
+          echo "exit_code=$status" >> "$GITHUB_OUTPUT"
+          exit $status
+
+      - name: Run B — warm-doc validation (stale-observer regression)
+        if: ${{ inputs.run_twice == 'true' }}
+        working-directory: packages/core-backend
+        run: |
+          # Give the server a moment to settle, but stay within the
+          # 60s idle-release threshold so the Y.Doc is still warm.
+          sleep 5
+          node scripts/ops/yjs-node-client.mjs 2>&1 | tee run-b.log
+          exit ${PIPESTATUS[0]}
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: yjs-validation-logs-${{ github.run_id }}
+          path: |
+            packages/core-backend/run-a.log
+            packages/core-backend/run-b.log
+          retention-days: 30
+          if-no-files-found: warn

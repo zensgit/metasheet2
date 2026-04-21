@@ -70,6 +70,23 @@ function waitForEvent<T>(
   })
 }
 
+function waitForNoEvent(client: ClientSocket, event: string, timeoutMs = 100): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      client.off(event, handler)
+      resolve()
+    }, timeoutMs)
+
+    const handler = (payload: unknown) => {
+      clearTimeout(timeout)
+      client.off(event, handler)
+      reject(new Error(`unexpected ${event}: ${JSON.stringify(payload)}`))
+    }
+
+    client.on(event, handler)
+  })
+}
+
 describe('Yjs awareness presence socket protocol', () => {
   let httpServer: ReturnType<typeof createServer>
   let io: Server
@@ -179,6 +196,37 @@ describe('Yjs awareness presence socket protocol', () => {
       })
     } finally {
       client.disconnect()
+    }
+  })
+
+  it('broadcasts invalidation only to sockets subscribed to the record room', async () => {
+    const alice = await connectClient(baseUrl, 'token-user_alice')
+    const bob = await connectClient(baseUrl, 'token-user_bob')
+
+    try {
+      const alicePresence = waitForEvent(alice, 'yjs:presence', (payload: any) => (
+        payload.recordId === 'rec_presence'
+        && payload.activeCount === 1
+      ))
+      alice.emit('yjs:subscribe', { recordId: 'rec_presence' })
+      await alicePresence
+
+      const invalidated = waitForEvent(alice, 'yjs:invalidated', (payload: any) => (
+        payload.recordId === 'rec_presence'
+        && payload.reason === 'rest-write'
+      ))
+      const noBobEvent = waitForNoEvent(bob, 'yjs:invalidated')
+
+      adapter.notifyInvalidated(['rec_presence'])
+
+      await expect(invalidated).resolves.toMatchObject({
+        recordId: 'rec_presence',
+        reason: 'rest-write',
+      })
+      await expect(noBobEvent).resolves.toBeUndefined()
+    } finally {
+      alice.disconnect()
+      bob.disconnect()
     }
   })
 })

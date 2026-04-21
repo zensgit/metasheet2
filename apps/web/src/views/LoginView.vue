@@ -22,13 +22,13 @@
 
       <form class="login-form" @submit.prevent="onSubmit">
         <label class="login-field">
-          <span>{{ text.email }}</span>
+          <span>{{ text.identifier }}</span>
           <input
-            v-model="email"
-            type="email"
+            v-model="identifier"
+            type="text"
             autocomplete="username"
             required
-            :placeholder="text.emailPlaceholder"
+            :placeholder="text.identifierPlaceholder"
           />
         </label>
 
@@ -115,7 +115,7 @@ const { setToken, primeSession } = useAuth()
 const { locale, isZh, setLocale } = useLocale()
 const { loadProductFeatures, resolveHomePath } = useFeatureFlags()
 
-const email = ref('')
+const identifier = ref('')
 const password = ref('')
 const submitting = ref(false)
 const errorMessage = ref('')
@@ -129,10 +129,10 @@ const text = computed(() => {
     return {
       title: '登录 MetaSheet',
       subtitle: '输入账号密码后进入系统。',
-      email: '邮箱',
+      identifier: '账号',
       password: '密码',
       language: '语言',
-      emailPlaceholder: 'admin@metasheet.app',
+      identifierPlaceholder: '邮箱、手机号或用户名',
       passwordPlaceholder: '请输入密码',
       submit: '登录',
       submitting: '登录中...',
@@ -150,17 +150,17 @@ const text = computed(() => {
   return {
     title: 'Sign in to MetaSheet',
     subtitle: 'Use your account credentials to continue.',
-    email: 'Email',
+    identifier: 'Account',
     password: 'Password',
     language: 'Language',
-    emailPlaceholder: 'admin@metasheet.app',
+    identifierPlaceholder: 'Email, mobile, or username',
     passwordPlaceholder: 'Enter password',
     submit: 'Sign in',
     submitting: 'Signing in...',
     alternative: 'or',
     dingtalkSubmit: 'Continue with DingTalk',
     dingtalkSubmitting: 'Redirecting to DingTalk...',
-    failed: 'Sign-in failed. Check your email or password.',
+    failed: 'Sign-in failed. Check your account or password.',
     networkError: 'Sign-in failed. Please try again.',
     dingtalkUnavailable: 'DingTalk login is unavailable right now.',
     dingtalkMissingUrl: 'No DingTalk login URL was returned.',
@@ -246,7 +246,7 @@ async function onSubmit(): Promise<void> {
     const response = await apiFetch('/api/auth/login', {
       method: 'POST',
       body: JSON.stringify({
-        email: email.value.trim(),
+        identifier: identifier.value.trim(),
         password: password.value,
       }),
     })

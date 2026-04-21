@@ -707,8 +707,10 @@ export interface MetaWidgetsTable {
 
 export interface UsersTable {
   id: Generated<string>
-  email: string
+  email: string | null
+  username: string | null
   name: string | null
+  mobile: string | null
   password_hash: string
   must_change_password: boolean
   role: string
@@ -1306,6 +1308,7 @@ export interface DingTalkGroupDestinationsTable {
   webhook_url: string
   secret: string | null
   enabled: boolean
+  sheet_id: string | null
   created_by: string
   created_at: CreatedAt
   updated_at: NullableTimestamp

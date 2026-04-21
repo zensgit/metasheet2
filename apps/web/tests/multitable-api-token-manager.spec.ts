@@ -83,6 +83,7 @@ function fakeDingTalkGroup(overrides: Partial<DingTalkGroupDestination> = {}): D
     name: 'Ops DingTalk Group',
     webhookUrl: 'https://oapi.dingtalk.com/robot/send?access_token=test-token',
     enabled: true,
+    sheetId: 'sheet_1',
     createdBy: 'user_1',
     createdAt: '2026-04-01T00:00:00Z',
     updatedAt: '2026-04-01T00:00:00Z',
@@ -194,7 +195,7 @@ function mockClient(
 function mount(props: Record<string, unknown>) {
   const container = document.createElement('div')
   document.body.appendChild(container)
-  const app = createApp({ render: () => h(MetaApiTokenManager, props) })
+  const app = createApp({ render: () => h(MetaApiTokenManager, { sheetId: 'sheet_1', ...props }) })
   app.mount(container)
   return { container, app }
 }
@@ -404,7 +405,7 @@ describe('MetaApiTokenManager', () => {
   // ---- DingTalk group tests ----
 
   it('switches to DingTalk groups tab', async () => {
-    const { client } = mockClient([], [], [], [fakeDingTalkGroup()])
+    const { client, fetchFn } = mockClient([], [], [], [fakeDingTalkGroup()])
     mount({ visible: true, client })
     await flushPromises()
 
@@ -414,6 +415,7 @@ describe('MetaApiTokenManager', () => {
 
     const cards = document.querySelectorAll('[data-dingtalk-group-id]')
     expect(cards.length).toBe(1)
+    expect(fetchFn.mock.calls.some(([url]) => String(url).includes('/api/multitable/dingtalk-groups?sheetId=sheet_1'))).toBe(true)
   })
 
   it('masks DingTalk webhook access token in card display', async () => {
@@ -463,6 +465,11 @@ describe('MetaApiTokenManager', () => {
       (c: [string, RequestInit?]) => c[1]?.method === 'POST' && c[0].includes('/dingtalk-groups') && !c[0].includes('/test-send'),
     )
     expect(createCalls.length).toBe(1)
+    expect(JSON.parse(createCalls[0][1]?.body as string)).toMatchObject({
+      name: 'Support group',
+      webhookUrl: 'https://oapi.dingtalk.com/robot/send?access_token=test-token',
+      sheetId: 'sheet_1',
+    })
   })
 
   it('tests a DingTalk group destination', async () => {
@@ -482,10 +489,11 @@ describe('MetaApiTokenManager', () => {
       (c: [string, RequestInit?]) => c[1]?.method === 'POST' && c[0].includes('/dingtalk-groups/') && c[0].includes('/test-send'),
     )
     expect(testSendCalls.length).toBe(1)
+    expect(testSendCalls[0][0]).toContain('sheetId=sheet_1')
   })
 
   it('views DingTalk group deliveries', async () => {
-    const { client } = mockClient([], [], [], [fakeDingTalkGroup()], [fakeDingTalkDelivery()])
+    const { client, fetchFn } = mockClient([], [], [], [fakeDingTalkGroup()], [fakeDingTalkDelivery()])
     mount({ visible: true, client })
     await flushPromises()
 
@@ -501,6 +509,7 @@ describe('MetaApiTokenManager', () => {
     expect(rows.length).toBe(1)
     expect(rows[0]?.textContent).toContain('Please fill incident details')
     expect(rows[0]?.textContent).toContain('Automation')
+    expect(fetchFn.mock.calls.some(([url]) => String(url).includes('/api/multitable/dingtalk-groups/dt_1/deliveries?sheetId=sheet_1'))).toBe(true)
   })
 
   it('refreshes open DingTalk delivery history after test send', async () => {

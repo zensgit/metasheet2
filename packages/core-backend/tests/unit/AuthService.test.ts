@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import * as bcrypt from 'bcryptjs'
 
 const jwtMocks = vi.hoisted(() => ({
   verify: vi.fn(),
@@ -391,6 +392,166 @@ describe('AuthService.register', () => {
       expect.stringContaining('INSERT INTO user_roles'),
       [expect.any(String), 'attendance_employee'],
     )
+  })
+})
+
+describe('AuthService.login', () => {
+  beforeEach(() => {
+    process.env.NODE_ENV = 'test'
+    process.env.RBAC_TOKEN_TRUST = 'false'
+    jwtMocks.verify.mockReset()
+    jwtMocks.sign.mockReset()
+    jwtMocks.sign.mockReturnValue('signed-login-token')
+    poolMocks.query.mockReset()
+    poolMocks.query.mockResolvedValue({ rows: [] })
+    rbacMocks.isAdmin.mockReset()
+    rbacMocks.isAdmin.mockResolvedValue(false)
+    rbacMocks.listUserPermissions.mockReset()
+    rbacMocks.listUserPermissions.mockResolvedValue(['attendance:read'])
+    sessionMocks.createUserSession.mockReset()
+    sessionMocks.isUserSessionRevoked.mockReset()
+    sessionMocks.isUserSessionActive.mockReset()
+    secretManagerMocks.get.mockReset()
+    secretManagerMocks.get.mockReturnValue('unit-test-secret-abcdefghijklmnopqrstuvwxyz123456')
+  })
+
+  it('logs in with a username identifier', async () => {
+    const passwordHash = await bcrypt.hash('WelcomePass9A', 10)
+    poolMocks.query
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'user-1',
+          email: null,
+          username: 'liqing',
+          mobile: '13900001234',
+          name: '李青',
+          role: 'user',
+          permissions: ['attendance:read'],
+          password_hash: passwordHash,
+          is_active: true,
+          must_change_password: false,
+          created_at: new Date('2026-04-18T00:00:00.000Z'),
+          updated_at: new Date('2026-04-18T00:00:00.000Z'),
+        }],
+      })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+    jwtMocks.verify.mockReturnValue({
+      userId: 'user-1',
+      email: '',
+      role: 'user',
+      exp: Math.floor(new Date('2026-04-19T00:00:00.000Z').getTime() / 1000),
+      iat: Math.floor(new Date('2026-04-18T00:00:00.000Z').getTime() / 1000),
+      sid: 'session-1',
+    })
+
+    const auth = new AuthService()
+    const result = await auth.login('liqing', 'WelcomePass9A', {
+      ipAddress: '127.0.0.1',
+      userAgent: 'vitest',
+    })
+
+    expect(result?.user.username).toBe('liqing')
+    expect(result?.user.email).toBeNull()
+    expect(sessionMocks.createUserSession).toHaveBeenCalledWith(
+      'user-1',
+      expect.objectContaining({
+        sessionId: expect.any(String),
+      }),
+    )
+    expect(poolMocks.query).toHaveBeenNthCalledWith(
+      1,
+      expect.stringContaining('lower(username) = $2'),
+      ['liqing', 'liqing', 'liqing'],
+    )
+    const loginSql = String(poolMocks.query.mock.calls[0]?.[0] ?? '')
+    expect(loginSql).not.toContain('COALESCE(email')
+    expect(loginSql).not.toContain('COALESCE(username')
+    expect(loginSql).not.toContain('COALESCE(mobile')
+  })
+
+  it('returns null when a mobile identifier matches multiple users', async () => {
+    const passwordHash = await bcrypt.hash('WelcomePass9A', 10)
+    poolMocks.query.mockResolvedValueOnce({
+      rows: [
+        {
+          id: 'user-1',
+          email: null,
+          username: 'liqing',
+          mobile: '13900001234',
+          name: '李青',
+          role: 'user',
+          permissions: ['attendance:read'],
+          password_hash: passwordHash,
+          is_active: true,
+          must_change_password: false,
+          created_at: new Date('2026-04-18T00:00:00.000Z'),
+          updated_at: new Date('2026-04-18T00:00:00.000Z'),
+        },
+        {
+          id: 'user-2',
+          email: null,
+          username: 'linlan',
+          mobile: '13900001234',
+          name: '林岚',
+          role: 'user',
+          permissions: ['attendance:read'],
+          password_hash: passwordHash,
+          is_active: true,
+          must_change_password: false,
+          created_at: new Date('2026-04-18T00:00:00.000Z'),
+          updated_at: new Date('2026-04-18T00:00:00.000Z'),
+        },
+      ],
+    })
+
+    const auth = new AuthService()
+    const result = await auth.login('13900001234', 'WelcomePass9A')
+
+    expect(result).toBeNull()
+    expect(sessionMocks.createUserSession).not.toHaveBeenCalled()
+  })
+
+  it('returns null when one identifier matches different users across account fields', async () => {
+    const passwordHash = await bcrypt.hash('WelcomePass9A', 10)
+    poolMocks.query.mockResolvedValueOnce({
+      rows: [
+        {
+          id: 'user-1',
+          email: 'shared@example.com',
+          username: 'liqing',
+          mobile: '13900001234',
+          name: '李青',
+          role: 'user',
+          permissions: ['attendance:read'],
+          password_hash: passwordHash,
+          is_active: true,
+          must_change_password: false,
+          created_at: new Date('2026-04-18T00:00:00.000Z'),
+          updated_at: new Date('2026-04-18T00:00:00.000Z'),
+        },
+        {
+          id: 'user-2',
+          email: null,
+          username: 'shared@example.com',
+          mobile: '13900004567',
+          name: '林岚',
+          role: 'user',
+          permissions: ['attendance:read'],
+          password_hash: passwordHash,
+          is_active: true,
+          must_change_password: false,
+          created_at: new Date('2026-04-18T00:00:00.000Z'),
+          updated_at: new Date('2026-04-18T00:00:00.000Z'),
+        },
+      ],
+    })
+
+    const auth = new AuthService()
+    const result = await auth.login('shared@example.com', 'WelcomePass9A')
+
+    expect(result).toBeNull()
+    expect(sessionMocks.createUserSession).not.toHaveBeenCalled()
   })
 })
 

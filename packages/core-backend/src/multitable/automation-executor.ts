@@ -74,6 +74,121 @@ function normalizeUserIds(value: unknown): string[] {
   ))
 }
 
+function normalizeIdScalar(value: unknown, objectKeys: string[]): string[] {
+  if (typeof value === 'string') {
+    return value
+      .split(/[\n,]+/)
+      .map((entry) => entry.trim())
+      .filter(Boolean)
+  }
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return [String(value)]
+  }
+  if (typeof value === 'object' && value && !Array.isArray(value)) {
+    const record = value as Record<string, unknown>
+    for (const key of objectKeys) {
+      const candidate = record[key]
+      if (typeof candidate === 'string' && candidate.trim()) return [candidate.trim()]
+      if (typeof candidate === 'number' && Number.isFinite(candidate)) return [String(candidate)]
+    }
+  }
+  return []
+}
+
+function normalizeUserIdScalar(value: unknown): string[] {
+  return normalizeIdScalar(value, ['localUserId', 'userId', 'id', 'value'])
+}
+
+function normalizeMemberGroupIdScalar(value: unknown): string[] {
+  return normalizeIdScalar(value, ['memberGroupId', 'groupId', 'subjectId', 'id', 'value'])
+}
+
+function normalizeGroupDestinationIdScalar(value: unknown): string[] {
+  return normalizeIdScalar(value, ['destinationId', 'groupDestinationId', 'id', 'value'])
+}
+
+function normalizeUserIdsFromUnknown(value: unknown): string[] {
+  if (Array.isArray(value)) {
+    return Array.from(new Set(
+      value.flatMap((entry) => normalizeUserIdsFromUnknown(entry)),
+    ))
+  }
+  return normalizeUserIdScalar(value)
+}
+
+function normalizeMemberGroupIdsFromUnknown(value: unknown): string[] {
+  if (Array.isArray(value)) {
+    return Array.from(new Set(
+      value.flatMap((entry) => normalizeMemberGroupIdsFromUnknown(entry)),
+    ))
+  }
+  return normalizeMemberGroupIdScalar(value)
+}
+
+function normalizeGroupDestinationIdsFromUnknown(value: unknown): string[] {
+  if (Array.isArray(value)) {
+    return Array.from(new Set(
+      value.flatMap((entry) => normalizeGroupDestinationIdsFromUnknown(entry)),
+    ))
+  }
+  return normalizeGroupDestinationIdScalar(value)
+}
+
+function normalizeRecipientFieldPath(value: unknown): string {
+  if (typeof value !== 'string') return ''
+  const trimmed = value.trim()
+  if (!trimmed) return ''
+  return trimmed.replace(/^record\./, '')
+}
+
+function normalizeRecipientFieldPaths(primary: unknown, additional: unknown): string[] {
+  const values = [
+    primary,
+    ...(Array.isArray(additional) ? additional : [additional]),
+  ]
+
+  return Array.from(new Set(
+    values
+      .flatMap((value) => {
+        if (typeof value !== 'string') return []
+        return value
+          .split(/[\n,]+/)
+          .map((entry) => normalizeRecipientFieldPath(entry))
+          .filter(Boolean)
+      }),
+  ))
+}
+
+function resolveRecipientUserIdsFromRecord(recordData: Record<string, unknown>, fieldPaths: unknown[]): string[] {
+  return Array.from(new Set(
+    fieldPaths.flatMap((fieldPath) => {
+      const normalizedPath = normalizeRecipientFieldPath(fieldPath)
+      if (!normalizedPath) return []
+      return normalizeUserIdsFromUnknown(lookupTemplateValue(normalizedPath, recordData))
+    }),
+  ))
+}
+
+function resolveRecipientMemberGroupIdsFromRecord(recordData: Record<string, unknown>, fieldPaths: unknown[]): string[] {
+  return Array.from(new Set(
+    fieldPaths.flatMap((fieldPath) => {
+      const normalizedPath = normalizeRecipientFieldPath(fieldPath)
+      if (!normalizedPath) return []
+      return normalizeMemberGroupIdsFromUnknown(lookupTemplateValue(normalizedPath, recordData))
+    }),
+  ))
+}
+
+function resolveGroupDestinationIdsFromRecord(recordData: Record<string, unknown>, fieldPaths: unknown[]): string[] {
+  return Array.from(new Set(
+    fieldPaths.flatMap((fieldPath) => {
+      const normalizedPath = normalizeRecipientFieldPath(fieldPath)
+      if (!normalizedPath) return []
+      return normalizeGroupDestinationIdsFromUnknown(lookupTemplateValue(normalizedPath, recordData))
+    }),
+  ))
+}
+
 function chunkItems<T>(items: T[], size: number): T[][] {
   if (items.length === 0) return []
   const chunks: T[][] = []
@@ -105,6 +220,20 @@ function parseViewConfig(raw: unknown): Record<string, unknown> | null {
     }
   }
   return typeof raw === 'object' && !Array.isArray(raw) ? raw as Record<string, unknown> : null
+}
+
+function parsePublicFormExpiryMs(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isFinite(value)) return value
+  if (value instanceof Date) return value.getTime()
+  if (typeof value !== 'string') return null
+  const trimmed = value.trim()
+  if (!trimmed) return null
+  if (/^\d+$/.test(trimmed)) {
+    const numeric = Number(trimmed)
+    return Number.isFinite(numeric) ? numeric : null
+  }
+  const parsed = Date.parse(trimmed)
+  return Number.isFinite(parsed) ? parsed : null
 }
 
 function resolveAutomationAppBaseUrl(): string | null {
@@ -280,6 +409,7 @@ export interface ExecutionContext {
   sheetId: string
   recordId: string
   recordData: Record<string, unknown>
+  ruleCreatedBy: string
   actorId?: string | null
   triggerEvent: unknown
 }
@@ -324,6 +454,7 @@ export class AutomationExecutor {
       sheetId: rule.sheetId,
       recordId: (payload?.recordId as string) ?? '',
       recordData: (payload?.data as Record<string, unknown>) ?? (payload?.changes as Record<string, unknown>) ?? {},
+      ruleCreatedBy: rule.createdBy,
       actorId: (payload?.actorId as string) ?? null,
       triggerEvent,
     }
@@ -599,15 +730,17 @@ export class AutomationExecutor {
     config: SendDingTalkPersonMessageConfig,
     context: ExecutionContext,
   ): Promise<AutomationStepResult> {
-    const userIds = normalizeUserIds(config.userIds)
+    const staticUserIds = normalizeUserIds(config.userIds)
+    const staticMemberGroupIds = normalizeUserIds(config.memberGroupIds)
+    const recipientFieldPaths = normalizeRecipientFieldPaths(config.userIdFieldPath, config.userIdFieldPaths)
+    const memberGroupRecipientFieldPaths = normalizeRecipientFieldPaths(config.memberGroupIdFieldPath, config.memberGroupIdFieldPaths)
+    const recordUserIds = resolveRecipientUserIdsFromRecord(context.recordData, recipientFieldPaths)
+    const recordMemberGroupIds = resolveRecipientMemberGroupIdsFromRecord(context.recordData, memberGroupRecipientFieldPaths)
+    const memberGroupIds = Array.from(new Set([...staticMemberGroupIds, ...recordMemberGroupIds]))
     const titleTemplate = typeof config.titleTemplate === 'string' ? config.titleTemplate.trim() : ''
     const bodyTemplate = typeof config.bodyTemplate === 'string' ? config.bodyTemplate.trim() : ''
     const publicFormViewId = typeof config.publicFormViewId === 'string' ? config.publicFormViewId.trim() : ''
     const internalViewId = typeof config.internalViewId === 'string' ? config.internalViewId.trim() : ''
-
-    if (userIds.length === 0) {
-      return { actionType: 'send_dingtalk_person_message', status: 'failed', error: 'At least one local userId is required' }
-    }
     if (!titleTemplate) {
       return { actionType: 'send_dingtalk_person_message', status: 'failed', error: 'DingTalk title template is required' }
     }
@@ -632,7 +765,7 @@ export class AutomationExecutor {
       const publicViewResult = await this.deps.queryFn(
         `SELECT id, sheet_id, config
            FROM meta_views
-          WHERE id = $1 AND sheet_id = $2`,
+          WHERE id = $1 AND sheet_id = $2 AND type = 'form'`,
         [publicFormViewId, context.sheetId],
       )
       const publicView = (publicViewResult.rows[0] ?? null) as {
@@ -660,6 +793,18 @@ export class AutomationExecutor {
           actionType: 'send_dingtalk_person_message',
           status: 'failed',
           error: 'Selected public form view is not shared',
+        }
+      }
+      const expiryMs = parsePublicFormExpiryMs(
+        publicForm && typeof publicForm === 'object' && !Array.isArray(publicForm)
+          ? (publicForm as Record<string, unknown>).expiresAt ?? (publicForm as Record<string, unknown>).expiresOn
+          : undefined,
+      )
+      if (expiryMs !== null && Date.now() >= expiryMs) {
+        return {
+          actionType: 'send_dingtalk_person_message',
+          status: 'failed',
+          error: 'Selected public form view has expired',
         }
       }
 
@@ -691,6 +836,78 @@ export class AutomationExecutor {
       renderedBody,
       linkLines.length > 0 ? ['**快捷入口**', ...linkLines].join('\n') : '',
     ].filter(Boolean).join('\n\n')
+
+    let memberGroupUserIds: string[] = []
+    if (memberGroupIds.length > 0) {
+      const existingGroupsResult = await this.deps.queryFn(
+        'SELECT id::text AS id FROM platform_member_groups WHERE id::text = ANY($1::text[])',
+        [memberGroupIds],
+      )
+      const existingGroupIds = new Set(
+        (existingGroupsResult.rows as Array<Record<string, unknown>>)
+          .map((row) => (typeof row.id === 'string' ? row.id.trim() : ''))
+          .filter(Boolean),
+      )
+      const missingGroupIds = memberGroupIds.filter((groupId) => !existingGroupIds.has(groupId))
+      if (missingGroupIds.length > 0) {
+        return {
+          actionType: 'send_dingtalk_person_message',
+          status: 'failed',
+          error: `Member groups not found: ${missingGroupIds.join(', ')}`,
+        }
+      }
+
+      const memberGroupRecipientsResult = await this.deps.queryFn(
+        `SELECT DISTINCT gm.user_id::text AS local_user_id
+           FROM platform_member_group_members gm
+           JOIN users u ON u.id = gm.user_id
+          WHERE gm.group_id::text = ANY($1::text[])
+            AND u.is_active = TRUE`,
+        [memberGroupIds],
+      )
+      memberGroupUserIds = Array.from(new Set(
+        (memberGroupRecipientsResult.rows as Array<Record<string, unknown>>)
+          .map((row) => (typeof row.local_user_id === 'string' ? row.local_user_id.trim() : ''))
+          .filter(Boolean),
+      ))
+    }
+
+    const userIds = Array.from(new Set([...staticUserIds, ...memberGroupUserIds, ...recordUserIds]))
+    if (userIds.length === 0) {
+      if (memberGroupIds.length > 0) {
+        if (memberGroupRecipientFieldPaths.length > 0) {
+          return {
+            actionType: 'send_dingtalk_person_message',
+            status: 'failed',
+            error: `No local userIds resolved from member group record field paths: ${memberGroupRecipientFieldPaths.join(', ')}`,
+          }
+        }
+        return {
+          actionType: 'send_dingtalk_person_message',
+          status: 'failed',
+          error: `No local userIds resolved from member groups: ${memberGroupIds.join(', ')}`,
+        }
+      }
+      if (recipientFieldPaths.length > 0) {
+        return {
+          actionType: 'send_dingtalk_person_message',
+          status: 'failed',
+          error: `No local userIds resolved from record field paths: ${recipientFieldPaths.join(', ')}`,
+        }
+      }
+      if (memberGroupRecipientFieldPaths.length > 0) {
+        return {
+          actionType: 'send_dingtalk_person_message',
+          status: 'failed',
+          error: `No local userIds resolved from member group record field paths: ${memberGroupRecipientFieldPaths.join(', ')}`,
+        }
+      }
+      return {
+        actionType: 'send_dingtalk_person_message',
+        status: 'failed',
+        error: 'At least one local userId, memberGroupId, record recipient field path, or member group record field path is required',
+      }
+    }
 
     const recipientsResult = await this.deps.queryFn(
       `SELECT u.id AS local_user_id,
@@ -785,6 +1002,15 @@ export class AutomationExecutor {
         status: 'success',
         output: {
           notifiedUsers: resolvedRecipients.length,
+          staticRecipientCount: staticUserIds.length,
+          memberGroupRecipientCount: memberGroupUserIds.length,
+          dynamicRecipientCount: recordUserIds.length,
+          dynamicMemberGroupRecipientCount: recordMemberGroupIds.length,
+          memberGroupIds,
+          recipientFieldPath: recipientFieldPaths[0] ?? null,
+          recipientFieldPaths,
+          memberGroupRecipientFieldPath: memberGroupRecipientFieldPaths[0] ?? null,
+          memberGroupRecipientFieldPaths,
           batchCount: batches.length,
           linkCount: linkLines.length,
           responseCount,
@@ -849,14 +1075,34 @@ export class AutomationExecutor {
     config: SendDingTalkGroupMessageConfig,
     context: ExecutionContext,
   ): Promise<AutomationStepResult> {
-    const destinationId = typeof config.destinationId === 'string' ? config.destinationId.trim() : ''
+    const staticDestinationIds = Array.from(new Set([
+      ...(Array.isArray(config.destinationIds)
+        ? config.destinationIds
+          .filter((value): value is string => typeof value === 'string')
+          .map((value) => value.trim())
+          .filter(Boolean)
+        : []),
+      ...(typeof config.destinationId === 'string' && config.destinationId.trim()
+        ? [config.destinationId.trim()]
+        : []),
+    ]))
+    const destinationFieldPaths = normalizeRecipientFieldPaths(config.destinationIdFieldPath, config.destinationIdFieldPaths)
+    const recordDestinationIds = resolveGroupDestinationIdsFromRecord(context.recordData, destinationFieldPaths)
+    const destinationIds = Array.from(new Set([...staticDestinationIds, ...recordDestinationIds]))
     const titleTemplate = typeof config.titleTemplate === 'string' ? config.titleTemplate.trim() : ''
     const bodyTemplate = typeof config.bodyTemplate === 'string' ? config.bodyTemplate.trim() : ''
     const publicFormViewId = typeof config.publicFormViewId === 'string' ? config.publicFormViewId.trim() : ''
     const internalViewId = typeof config.internalViewId === 'string' ? config.internalViewId.trim() : ''
 
-    if (!destinationId) {
-      return { actionType: 'send_dingtalk_group_message', status: 'failed', error: 'DingTalk destination is required' }
+    if (!destinationIds.length) {
+      if (destinationFieldPaths.length > 0) {
+        return {
+          actionType: 'send_dingtalk_group_message',
+          status: 'failed',
+          error: `No DingTalk destinationIds resolved from record field paths: ${destinationFieldPaths.join(', ')}`,
+        }
+      }
+      return { actionType: 'send_dingtalk_group_message', status: 'failed', error: 'At least one DingTalk destination or record destination field path is required' }
     }
     if (!titleTemplate) {
       return { actionType: 'send_dingtalk_group_message', status: 'failed', error: 'DingTalk title template is required' }
@@ -868,22 +1114,38 @@ export class AutomationExecutor {
     const destinationResult = await this.deps.queryFn(
       `SELECT id, name, webhook_url, secret, enabled
          FROM dingtalk_group_destinations
-        WHERE id = $1`,
-      [destinationId],
+        WHERE id = ANY($1)
+          AND (
+            sheet_id = $2
+            OR (sheet_id IS NULL AND created_by = $3)
+          )`,
+      [destinationIds, context.sheetId, context.ruleCreatedBy],
     )
-    const destination = (destinationResult.rows[0] ?? null) as {
+    const destinations = destinationResult.rows as Array<{
       id: string
       name: string
       webhook_url: string
       secret: string | null
       enabled: boolean
-    } | null
-
-    if (!destination) {
-      return { actionType: 'send_dingtalk_group_message', status: 'failed', error: 'DingTalk destination not found' }
+    }>
+    const destinationsById = new Map(destinations.map((destination) => [destination.id, destination]))
+    const missingDestinationIds = destinationIds.filter((id) => !destinationsById.has(id))
+    if (missingDestinationIds.length) {
+      return {
+        actionType: 'send_dingtalk_group_message',
+        status: 'failed',
+        error: `DingTalk destinations not found: ${missingDestinationIds.join(', ')}`,
+      }
     }
-    if (destination.enabled !== true) {
-      return { actionType: 'send_dingtalk_group_message', status: 'failed', error: 'DingTalk destination is disabled' }
+    const disabledDestinations = destinationIds
+      .map((id) => destinationsById.get(id))
+      .filter((destination): destination is NonNullable<typeof destination> => Boolean(destination) && destination.enabled !== true)
+    if (disabledDestinations.length) {
+      return {
+        actionType: 'send_dingtalk_group_message',
+        status: 'failed',
+        error: `DingTalk destinations are disabled: ${disabledDestinations.map((destination) => destination.name || destination.id).join(', ')}`,
+      }
     }
 
     let baseUrl: string | null = null
@@ -903,7 +1165,7 @@ export class AutomationExecutor {
       const publicViewResult = await this.deps.queryFn(
         `SELECT id, sheet_id, config
            FROM meta_views
-          WHERE id = $1 AND sheet_id = $2`,
+          WHERE id = $1 AND sheet_id = $2 AND type = 'form'`,
         [publicFormViewId, context.sheetId],
       )
       const publicView = (publicViewResult.rows[0] ?? null) as {
@@ -931,6 +1193,18 @@ export class AutomationExecutor {
           actionType: 'send_dingtalk_group_message',
           status: 'failed',
           error: 'Selected public form view is not shared',
+        }
+      }
+      const expiryMs = parsePublicFormExpiryMs(
+        publicForm && typeof publicForm === 'object' && !Array.isArray(publicForm)
+          ? (publicForm as Record<string, unknown>).expiresAt ?? (publicForm as Record<string, unknown>).expiresOn
+          : undefined,
+      )
+      if (expiryMs !== null && Date.now() >= expiryMs) {
+        return {
+          actionType: 'send_dingtalk_group_message',
+          status: 'failed',
+          error: 'Selected public form view has expired',
         }
       }
 
@@ -962,16 +1236,20 @@ export class AutomationExecutor {
       renderedBody,
       linkLines.length > 0 ? ['**快捷入口**', ...linkLines].join('\n') : '',
     ].filter(Boolean).join('\n\n')
-    let deliveryRecorded = false
-    let responseStatus: number | null = null
-    let responseBody: string | null = null
+    const orderedDestinations = destinationIds
+      .map((id) => destinationsById.get(id))
+      .filter((destination): destination is NonNullable<typeof destination> => Boolean(destination))
+    const successfulDestinations: Array<{ id: string; name: string }> = []
+    const failedDestinations: Array<{ id: string; name: string; error: string }> = []
 
-    try {
+    for (const destination of orderedDestinations) {
+      let deliveryRecorded = false
+      let responseStatus: number | null = null
+      let responseBody: string | null = null
       const controller = new AbortController()
       const timeout = setTimeout(() => controller.abort(), WEBHOOK_TIMEOUT_MS)
-      let response: Response
       try {
-        response = await (this.deps.fetchFn ?? globalThis.fetch)(
+        const response = await (this.deps.fetchFn ?? globalThis.fetch)(
           buildSignedDingTalkWebhookUrl(destination.webhook_url, destination.secret ?? undefined),
           {
             method: 'POST',
@@ -983,99 +1261,123 @@ export class AutomationExecutor {
             signal: controller.signal,
           },
         )
+        const parsed = await readJsonSafely(response)
+        responseStatus = response.status
+        responseBody = parsed ? JSON.stringify(parsed) : response.statusText || null
+        if (!response.ok) {
+          const errorMessage = `DingTalk request failed with HTTP ${response.status}`
+          deliveryRecorded = true
+          await recordDingTalkGroupDeliverySafely(this.deps.queryFn, {
+            destinationId: destination.id,
+            sourceType: 'automation',
+            subject: renderedTitle,
+            content: bodyWithLinks,
+            success: false,
+            httpStatus: response.status,
+            responseBody,
+            errorMessage,
+            automationRuleId: context.ruleId,
+            recordId: context.recordId,
+            initiatedBy: context.actorId ?? null,
+          })
+          failedDestinations.push({ id: destination.id, name: destination.name, error: errorMessage })
+          continue
+        }
+        try {
+          validateDingTalkRobotResponse(parsed)
+        } catch (err) {
+          const errorMessage = err instanceof Error ? err.message : String(err)
+          deliveryRecorded = true
+          await recordDingTalkGroupDeliverySafely(this.deps.queryFn, {
+            destinationId: destination.id,
+            sourceType: 'automation',
+            subject: renderedTitle,
+            content: bodyWithLinks,
+            success: false,
+            httpStatus: response.status,
+            responseBody,
+            errorMessage,
+            automationRuleId: context.ruleId,
+            recordId: context.recordId,
+            initiatedBy: context.actorId ?? null,
+          })
+          failedDestinations.push({ id: destination.id, name: destination.name, error: errorMessage })
+          continue
+        }
+        deliveryRecorded = true
+        await recordDingTalkGroupDeliverySafely(this.deps.queryFn, {
+          destinationId: destination.id,
+          sourceType: 'automation',
+          subject: renderedTitle,
+          content: bodyWithLinks,
+          success: true,
+          httpStatus: response.status,
+          responseBody,
+          automationRuleId: context.ruleId,
+          recordId: context.recordId,
+          initiatedBy: context.actorId ?? null,
+        })
+        successfulDestinations.push({ id: destination.id, name: destination.name })
+      } catch (err) {
+        if (!deliveryRecorded) {
+          await recordDingTalkGroupDeliverySafely(this.deps.queryFn, {
+            destinationId: destination.id,
+            sourceType: 'automation',
+            subject: renderedTitle,
+            content: bodyWithLinks,
+            success: false,
+            httpStatus: responseStatus,
+            responseBody,
+            errorMessage: err instanceof Error ? err.message : String(err),
+            automationRuleId: context.ruleId,
+            recordId: context.recordId,
+            initiatedBy: context.actorId ?? null,
+          })
+        }
+        failedDestinations.push({
+          id: destination.id,
+          name: destination.name,
+          error: err instanceof Error ? err.message : String(err),
+        })
       } finally {
         clearTimeout(timeout)
       }
-      const parsed = await readJsonSafely(response)
-      responseStatus = response.status
-      responseBody = parsed ? JSON.stringify(parsed) : response.statusText || null
-      if (!response.ok) {
-        deliveryRecorded = true
-        await recordDingTalkGroupDeliverySafely(this.deps.queryFn, {
-          destinationId: destination.id,
-          sourceType: 'automation',
-          subject: renderedTitle,
-          content: bodyWithLinks,
-          success: false,
-          httpStatus: response.status,
-          responseBody,
-          errorMessage: `DingTalk request failed with HTTP ${response.status}`,
-          automationRuleId: context.ruleId,
-          recordId: context.recordId,
-          initiatedBy: context.actorId ?? null,
-        })
-        return {
-          actionType: 'send_dingtalk_group_message',
-          status: 'failed',
-          error: `DingTalk request failed with HTTP ${response.status}`,
-        }
-      }
-      try {
-        validateDingTalkRobotResponse(parsed)
-      } catch (err) {
-        deliveryRecorded = true
-        await recordDingTalkGroupDeliverySafely(this.deps.queryFn, {
-          destinationId: destination.id,
-          sourceType: 'automation',
-          subject: renderedTitle,
-          content: bodyWithLinks,
-          success: false,
-          httpStatus: response.status,
-          responseBody,
-          errorMessage: err instanceof Error ? err.message : String(err),
-          automationRuleId: context.ruleId,
-          recordId: context.recordId,
-          initiatedBy: context.actorId ?? null,
-        })
-        return {
-          actionType: 'send_dingtalk_group_message',
-          status: 'failed',
-          error: err instanceof Error ? err.message : String(err),
-        }
-      }
-      deliveryRecorded = true
-      await recordDingTalkGroupDeliverySafely(this.deps.queryFn, {
-        destinationId: destination.id,
-        sourceType: 'automation',
-        subject: renderedTitle,
-        content: bodyWithLinks,
-        success: true,
-        httpStatus: response.status,
-        responseBody,
-        automationRuleId: context.ruleId,
-        recordId: context.recordId,
-        initiatedBy: context.actorId ?? null,
-      })
-      return {
-        actionType: 'send_dingtalk_group_message',
-        status: 'success',
-        output: {
-          destinationId: destination.id,
-          destinationName: destination.name,
-          linkCount: linkLines.length,
-        },
-      }
-    } catch (err) {
-      if (!deliveryRecorded) {
-        await recordDingTalkGroupDeliverySafely(this.deps.queryFn, {
-          destinationId: destination.id,
-          sourceType: 'automation',
-          subject: renderedTitle,
-          content: bodyWithLinks,
-          success: false,
-          httpStatus: responseStatus,
-          responseBody,
-          errorMessage: err instanceof Error ? err.message : String(err),
-          automationRuleId: context.ruleId,
-          recordId: context.recordId,
-          initiatedBy: context.actorId ?? null,
-        })
-      }
+    }
+
+    if (failedDestinations.length) {
       return {
         actionType: 'send_dingtalk_group_message',
         status: 'failed',
-        error: err instanceof Error ? err.message : String(err),
+        error: `${failedDestinations.length} of ${orderedDestinations.length} DingTalk destinations failed: ${failedDestinations.map((destination) => `${destination.name} (${destination.error})`).join('; ')}`,
+        output: {
+          staticDestinationCount: staticDestinationIds.length,
+          dynamicDestinationCount: recordDestinationIds.length,
+          destinationIds: orderedDestinations.map((destination) => destination.id),
+          destinationNames: orderedDestinations.map((destination) => destination.name),
+          destinationFieldPath: destinationFieldPaths[0] ?? null,
+          destinationFieldPaths,
+          sentCount: successfulDestinations.length,
+          failedDestinationIds: failedDestinations.map((destination) => destination.id),
+          linkCount: linkLines.length,
+        },
       }
+    }
+
+    return {
+      actionType: 'send_dingtalk_group_message',
+      status: 'success',
+      output: {
+        destinationId: successfulDestinations[0]?.id,
+        destinationName: successfulDestinations[0]?.name,
+        staticDestinationCount: staticDestinationIds.length,
+        dynamicDestinationCount: recordDestinationIds.length,
+        destinationIds: successfulDestinations.map((destination) => destination.id),
+        destinationNames: successfulDestinations.map((destination) => destination.name),
+        destinationFieldPath: destinationFieldPaths[0] ?? null,
+        destinationFieldPaths,
+        sentCount: successfulDestinations.length,
+        linkCount: linkLines.length,
+      },
     }
   }
 }
