@@ -43,3 +43,7 @@ The DingTalk automation editor now emits advanced V1 payloads with `actions`, `c
 
 - This PR is stacked on the DingTalk automation editor entry work. It is intentionally focused on API contract correctness, not adding new UI controls.
 - `pnpm install --frozen-lockfile` produced tracked `node_modules` symlink changes under plugin/tool workspaces in this worktree. Those files are dependency artifacts and are intentionally excluded from the commit.
+
+## Main-target delivery note
+
+The source branch for this change was stacked on a non-`main` base. For final delivery, the single API-contract commit was cherry-picked onto `main` after the create-entry PR landed, so the PR contains only the route/client contract normalization and its focused tests/docs.
