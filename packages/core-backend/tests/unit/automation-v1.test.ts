@@ -505,6 +505,64 @@ describe('AutomationExecutor', () => {
     expect(insertCalls).toHaveLength(2)
   })
 
+  it('executes send_dingtalk_group_message with dynamic record destinations', async () => {
+    const queryFn = vi.fn()
+      .mockResolvedValueOnce({
+        rows: [
+          { id: 'dt_1', name: 'Ops Group', webhook_url: 'https://oapi.dingtalk.com/robot/send?access_token=test', secret: null, enabled: true },
+          { id: 'dt_2', name: 'Escalation Group', webhook_url: 'https://oapi.dingtalk.com/robot/send?access_token=test-2', secret: null, enabled: true },
+        ],
+      })
+      .mockResolvedValue({ rows: [] })
+    const fetchFn = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ errcode: 0, errmsg: 'ok' }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ errcode: 0, errmsg: 'ok' }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      })) as unknown as typeof fetch
+
+    deps = createMockDeps({ queryFn, fetchFn })
+    executor = new AutomationExecutor(deps)
+
+    const rule = createMockRule({
+      actions: [{
+        type: 'send_dingtalk_group_message',
+        config: {
+          destinationIdFieldPaths: ['record.opsDestinationId', 'record.escalationDestinationIds'],
+          titleTemplate: 'Record {{record.title}} ready',
+          bodyTemplate: 'Status: {{record.status}}',
+        },
+      }],
+    })
+
+    const result = await executor.execute(rule, {
+      recordId: 'r1',
+      data: {
+        title: 'Incident',
+        status: 'open',
+        opsDestinationId: 'dt_1',
+        escalationDestinationIds: ['dt_2', { destinationId: 'dt_1' }],
+      },
+      sheetId: 'sheet_1',
+      actorId: 'user_1',
+    })
+
+    expect(result.status).toBe('success')
+    expect(result.steps[0].output).toEqual(expect.objectContaining({
+      destinationIds: ['dt_1', 'dt_2'],
+      destinationNames: ['Ops Group', 'Escalation Group'],
+      staticDestinationCount: 0,
+      dynamicDestinationCount: 2,
+      destinationFieldPath: 'opsDestinationId',
+      destinationFieldPaths: ['opsDestinationId', 'escalationDestinationIds'],
+      sentCount: 2,
+    }))
+    expect(fetchFn).toHaveBeenCalledTimes(2)
+  })
+
   it('records DingTalk application error diagnostics for send_dingtalk_group_message', async () => {
     const queryFn = vi.fn()
       .mockResolvedValueOnce({
@@ -608,6 +666,32 @@ describe('AutomationExecutor', () => {
     expect(result.steps[0].status).toBe('failed')
     expect(result.steps[0].error).toContain('destinations not found')
     expect(result.steps[0].error).toContain('dt_missing')
+  })
+
+  it('fails send_dingtalk_group_message when dynamic record path resolves no destinations', async () => {
+    deps = createMockDeps()
+    executor = new AutomationExecutor(deps)
+
+    const rule = createMockRule({
+      actions: [{
+        type: 'send_dingtalk_group_message',
+        config: {
+          destinationIdFieldPath: 'record.opsDestinationId',
+          titleTemplate: 'Title',
+          bodyTemplate: 'Body',
+        },
+      }],
+    })
+
+    const result = await executor.execute(rule, {
+      recordId: 'r1',
+      data: { opsDestinationId: [] },
+      sheetId: 'sheet_1',
+      actorId: 'user_1',
+    })
+
+    expect(result.status).toBe('failed')
+    expect(result.steps[0].error).toContain('record field paths: opsDestinationId')
   })
 
   it('executes send_dingtalk_person_message action successfully', async () => {

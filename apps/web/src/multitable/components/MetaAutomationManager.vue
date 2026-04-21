@@ -108,6 +108,49 @@
                 <em>Remove</em>
               </button>
             </div>
+            <label class="meta-automation__label">Record group field paths (optional)</label>
+            <input
+              v-model="draft.dingtalkDestinationFieldPath"
+              class="meta-automation__input"
+              type="text"
+              placeholder="record.opsDestinationId, record.escalationDestinationIds"
+              data-automation-field="dingtalkDestinationFieldPath"
+            />
+            <label class="meta-automation__label">Pick group field</label>
+            <select
+              class="meta-automation__select"
+              data-automation-field="dingtalkDestinationFieldSelect"
+              @change="appendDingTalkGroupDestinationField($event.target as HTMLSelectElement)"
+            >
+              <option value="">-- pick field --</option>
+              <option v-for="field in dingTalkGroupDestinationCandidateFields" :key="field.id" :value="field.id">
+                {{ field.name }}
+              </option>
+            </select>
+            <div
+              v-if="selectedDingTalkGroupDestinationFields.length"
+              class="meta-automation__recipient-list meta-automation__recipient-list--selected"
+            >
+              <button
+                v-for="field in selectedDingTalkGroupDestinationFields"
+                :key="field.id"
+                class="meta-automation__recipient-chip"
+                type="button"
+                :data-automation-group-destination-field="field.id"
+                @click="removeDingTalkGroupDestinationField(field.id)"
+              >
+                <strong>{{ field.label }}</strong>
+                <span>{{ field.id }}</span>
+                <em>Remove</em>
+              </button>
+            </div>
+            <div
+              v-for="warning in groupDestinationFieldPathWarnings(draft.dingtalkDestinationFieldPath)"
+              :key="`draft-group-destination-${warning}`"
+              class="meta-automation__hint meta-automation__hint--warning"
+            >
+              {{ warning }}
+            </div>
             <label class="meta-automation__label">Title template</label>
             <input
               v-model="draft.dingtalkTitleTemplate"
@@ -177,6 +220,7 @@
             <div class="meta-automation__preview" data-automation-summary="group">
               <div class="meta-automation__preview-title">Message summary</div>
               <div><strong>Groups:</strong> {{ dingTalkGroupSummary }}</div>
+              <div><strong>Record groups:</strong> {{ dingTalkGroupFieldSummary }}</div>
               <div><strong>Title template:</strong> {{ templatePreviewText(draft.dingtalkTitleTemplate, 'No title template') }}</div>
               <div class="meta-automation__preview-body"><strong>Body template:</strong> {{ templatePreviewText(draft.dingtalkBodyTemplate, 'No body template') }}</div>
               <div class="meta-automation__preview-line">
@@ -631,6 +675,7 @@ interface DraftState {
   targetValue: string
   dingtalkDestinationIds: string[]
   dingtalkDestinationPickerId: string
+  dingtalkDestinationFieldPath: string
   dingtalkTitleTemplate: string
   dingtalkBodyTemplate: string
   publicFormViewId: string
@@ -656,6 +701,7 @@ function emptyDraft(): DraftState {
     targetValue: '',
     dingtalkDestinationIds: [],
     dingtalkDestinationPickerId: '',
+    dingtalkDestinationFieldPath: '',
     dingtalkTitleTemplate: '',
     dingtalkBodyTemplate: '',
     publicFormViewId: '',
@@ -830,6 +876,8 @@ const selectedDingTalkGroupDestinations = computed(() =>
   }),
 )
 
+const dingTalkGroupDestinationCandidateFields = computed(() => props.fields)
+
 const availableDingTalkGroupDestinations = computed(() => {
   const selected = new Set(draft.value.dingtalkDestinationIds)
   return dingTalkDestinations.value.filter((destination) => !selected.has(destination.id))
@@ -891,6 +939,13 @@ const dingTalkPersonRecipientSummary = computed(() => {
   return parts.join(' | ')
 })
 
+const selectedDingTalkGroupDestinationFields = computed(() => parseRecipientFieldPathsText(draft.value.dingtalkDestinationFieldPath)
+  .map((path) => ({
+    id: path,
+    label: recipientFieldSummaryLabel(path),
+  }))
+  .filter((item) => item.label))
+
 function parseRecipientFieldPathsText(value: string): string[] {
   return Array.from(new Set(
     value
@@ -905,6 +960,17 @@ function recipientFieldSummaryLabel(path: string) {
   if (!normalized) return ''
   const field = props.fields.find((item) => item.id === normalized)
   return field ? `${field.name} (record.${normalized})` : `record.${normalized}`
+}
+
+function groupDestinationFieldPathWarnings(value: string) {
+  const fieldMap = new Map(props.fields.map((field) => [field.id, field]))
+  return parseRecipientFieldPathsText(value).flatMap((path) => {
+    const field = fieldMap.get(path)
+    if (!field) {
+      return [`record.${path} is not a known field in this sheet; DingTalk group messages expect field IDs that resolve to destination IDs.`]
+    }
+    return []
+  })
 }
 
 function isMemberGroupRecipientCandidateField(field: { type?: unknown, property?: Record<string, unknown> | undefined }) {
@@ -967,6 +1033,30 @@ const dingTalkPersonMemberGroupFieldSummary = computed(() => {
   if (!labels.length) return 'No dynamic member group field'
   return labels.join(', ')
 })
+
+const dingTalkGroupFieldSummary = computed(() => {
+  const labels = selectedDingTalkGroupDestinationFields.value.map((item) => item.label)
+  if (!labels.length) return 'No dynamic group field'
+  return labels.join(', ')
+})
+
+function appendDingTalkGroupDestinationField(select: HTMLSelectElement) {
+  const value = select.value.trim()
+  if (!value) return
+  const paths = parseRecipientFieldPathsText(draft.value.dingtalkDestinationFieldPath)
+  paths.push(value)
+  draft.value.dingtalkDestinationFieldPath = Array.from(new Set(paths))
+    .map((path) => `record.${path}`)
+    .join(', ')
+  select.value = ''
+}
+
+function removeDingTalkGroupDestinationField(path: string) {
+  draft.value.dingtalkDestinationFieldPath = parseRecipientFieldPathsText(draft.value.dingtalkDestinationFieldPath)
+    .filter((entry) => entry !== path)
+    .map((entry) => `record.${entry}`)
+    .join(', ')
+}
 
 function appendDingTalkPersonRecipientField(select: HTMLSelectElement) {
   const value = select.value.trim()
@@ -1137,7 +1227,7 @@ const canSave = computed(() => {
   if (draft.value.actionType === 'notify' && !draft.value.notifyMessage.trim()) return false
   if (draft.value.actionType === 'update_field' && (!draft.value.targetFieldId || !draft.value.targetValue.trim())) return false
   if (draft.value.actionType === 'send_dingtalk_group_message') {
-    if (!draft.value.dingtalkDestinationIds.length) return false
+    if (!draft.value.dingtalkDestinationIds.length && !draft.value.dingtalkDestinationFieldPath.trim()) return false
     if (!draft.value.dingtalkTitleTemplate.trim()) return false
     if (!draft.value.dingtalkBodyTemplate.trim()) return false
   }
@@ -1175,6 +1265,9 @@ function openEditForm(rule: AutomationRule) {
     targetValue: (rule.actionConfig?.value as string) ?? '',
     dingtalkDestinationIds: parseGroupDestinationIds(rule.actionConfig?.destinationIds ?? rule.actionConfig?.destinationId),
     dingtalkDestinationPickerId: '',
+    dingtalkDestinationFieldPath: Array.isArray(rule.actionConfig?.destinationIdFieldPaths)
+      ? (rule.actionConfig?.destinationIdFieldPaths as string[]).join(', ')
+      : (rule.actionConfig?.destinationIdFieldPath as string) ?? '',
     dingtalkTitleTemplate: (rule.actionConfig?.titleTemplate as string) ?? '',
     dingtalkBodyTemplate: (rule.actionConfig?.bodyTemplate as string) ?? '',
     publicFormViewId: (rule.actionConfig?.publicFormViewId as string) ?? '',
@@ -1223,9 +1316,13 @@ function buildActionConfig(): Record<string, unknown> {
   }
   if (draft.value.actionType === 'send_dingtalk_group_message') {
     const destinationIds = Array.from(new Set(draft.value.dingtalkDestinationIds.map((id) => id.trim()).filter(Boolean)))
+    const destinationIdFieldPaths = parseRecipientFieldPathsText(draft.value.dingtalkDestinationFieldPath)
+      .map((path) => `record.${path}`)
     return {
       destinationId: destinationIds[0] || undefined,
       destinationIds: destinationIds.length ? destinationIds : undefined,
+      destinationIdFieldPath: destinationIdFieldPaths[0] || undefined,
+      destinationIdFieldPaths: destinationIdFieldPaths.length ? destinationIdFieldPaths : undefined,
       titleTemplate: draft.value.dingtalkTitleTemplate,
       bodyTemplate: draft.value.dingtalkBodyTemplate,
       publicFormViewId: draft.value.publicFormViewId || undefined,

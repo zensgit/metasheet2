@@ -223,6 +223,49 @@
                 </button>
               </div>
               <div v-if="dingTalkDestinationsError" class="meta-rule-editor__hint">{{ dingTalkDestinationsError }}</div>
+              <label class="meta-rule-editor__label">Record group field paths (optional)</label>
+              <input
+                v-model="action.config.destinationFieldPath"
+                class="meta-rule-editor__input"
+                type="text"
+                placeholder="record.opsDestinationId, record.escalationDestinationIds"
+                data-field="dingtalkDestinationFieldPath"
+              />
+              <label class="meta-rule-editor__label">Pick group field</label>
+              <select
+                class="meta-rule-editor__select"
+                data-field="dingtalkDestinationFieldSelect"
+                @change="appendGroupDestinationFieldPath(action, $event.target as HTMLSelectElement)"
+              >
+                <option value="">-- pick field --</option>
+                <option v-for="field in groupDestinationCandidateFields" :key="field.id" :value="field.id">
+                  {{ field.name }}
+                </option>
+              </select>
+              <div
+                v-if="selectedGroupDestinationFields(action).length"
+                class="meta-rule-editor__recipient-list meta-rule-editor__recipient-list--selected"
+              >
+                <button
+                  v-for="field in selectedGroupDestinationFields(action)"
+                  :key="field.id"
+                  class="meta-rule-editor__recipient-chip"
+                  type="button"
+                  :data-group-destination-field="field.id"
+                  @click="removeGroupDestinationFieldPath(action, field.id)"
+                >
+                  <strong>{{ field.label }}</strong>
+                  <span>{{ field.id }}</span>
+                  <em>Remove</em>
+                </button>
+              </div>
+              <div
+                v-for="warning in groupDestinationFieldPathWarnings(action.config.destinationFieldPath)"
+                :key="`group-destination-${warning}`"
+                class="meta-rule-editor__hint meta-rule-editor__hint--warning"
+              >
+                {{ warning }}
+              </div>
               <label class="meta-rule-editor__label">Title template</label>
               <input
                 v-model="action.config.titleTemplate"
@@ -300,6 +343,7 @@
               <div class="meta-rule-editor__preview" data-field="groupMessageSummary">
                 <div class="meta-rule-editor__preview-title">Message summary</div>
                 <div><strong>Groups:</strong> {{ dingTalkGroupSummary(action) }}</div>
+                <div><strong>Record groups:</strong> {{ groupDestinationFieldPathSummary(action.config.destinationFieldPath) }}</div>
                 <div><strong>Title template:</strong> {{ templatePreviewText(action.config.titleTemplate, 'No title template') }}</div>
                 <div class="meta-rule-editor__preview-body"><strong>Body template:</strong> {{ templatePreviewText(action.config.bodyTemplate, 'No body template') }}</div>
                 <div class="meta-rule-editor__preview-line">
@@ -678,6 +722,7 @@ type DraftActionConfig = Record<string, unknown> & {
   destinationId?: string
   destinationIds?: string[]
   destinationPickerId?: string
+  destinationFieldPath?: string
   titleTemplate?: string
   bodyTemplate?: string
   publicFormViewId?: string
@@ -728,6 +773,7 @@ let copiedPreviewResetTimer: ReturnType<typeof setTimeout> | null = null
 
 const formViews = computed(() => (props.views ?? []).filter((view) => view.type === 'form'))
 const internalViews = computed(() => props.views ?? [])
+const groupDestinationCandidateFields = computed(() => props.fields)
 const recipientCandidateFields = computed(() => props.fields.filter((field) => field.type === 'user'))
 const memberGroupRecipientCandidateFields = computed(() => props.fields.filter(isMemberGroupRecipientCandidateField))
 
@@ -763,6 +809,11 @@ function draftConfigFromAction(type: AutomationActionType, config: Record<string
     return {
       ...config,
       destinationIds: parseGroupDestinationIds(config.destinationIds ?? config.destinationId),
+      destinationFieldPath: Array.isArray(config.destinationIdFieldPaths)
+        ? config.destinationIdFieldPaths.join(', ')
+        : typeof config.destinationIdFieldPath === 'string'
+          ? config.destinationIdFieldPath
+          : '',
       destinationPickerId: '',
     }
   }
@@ -839,9 +890,10 @@ const canSave = computed(() => {
   for (const action of draft.value.actions) {
     if (action.type === 'send_dingtalk_group_message') {
       const destinationIds = parseGroupDestinationIds(action.config.destinationIds ?? action.config.destinationId)
+      const destinationFieldPath = typeof action.config.destinationFieldPath === 'string' ? action.config.destinationFieldPath.trim() : ''
       const titleTemplate = typeof action.config.titleTemplate === 'string' ? action.config.titleTemplate.trim() : ''
       const bodyTemplate = typeof action.config.bodyTemplate === 'string' ? action.config.bodyTemplate.trim() : ''
-      if (!destinationIds.length || !titleTemplate || !bodyTemplate) return false
+      if ((!destinationIds.length && !destinationFieldPath) || !titleTemplate || !bodyTemplate) return false
     }
     if (action.type === 'send_dingtalk_person_message') {
       const userIdsText = typeof action.config.userIdsText === 'string' ? action.config.userIdsText.trim() : ''
@@ -1011,6 +1063,15 @@ function selectedGroupDestinations(action: DraftAction) {
   })
 }
 
+function selectedGroupDestinationFields(action: DraftAction) {
+  return parseRecipientFieldPathsText(action.config.destinationFieldPath)
+    .map((path) => ({
+      id: path,
+      label: recipientFieldSummaryLabel(path),
+    }))
+    .filter((item) => item.label)
+}
+
 function availableGroupDestinations(action: DraftAction) {
   const selected = new Set(parseGroupDestinationIds(action.config.destinationIds ?? action.config.destinationId))
   return dingTalkDestinations.value.filter((destination) => !selected.has(destination.id))
@@ -1037,6 +1098,43 @@ function dingTalkGroupSummary(action: DraftAction) {
   const selected = selectedGroupDestinations(action)
   if (!selected.length) return 'No groups selected'
   return selected.map((item) => item.label).join(', ')
+}
+
+function groupDestinationFieldPathWarnings(value: unknown) {
+  const fieldMap = new Map(props.fields.map((field) => [field.id, field]))
+  return parseRecipientFieldPathsText(value).flatMap((path) => {
+    const field = fieldMap.get(path)
+    if (!field) {
+      return [`record.${path} is not a known field in this sheet; DingTalk group messages expect field IDs that resolve to destination IDs.`]
+    }
+    return []
+  })
+}
+
+function groupDestinationFieldPathSummary(value: unknown) {
+  const labels = parseRecipientFieldPathsText(value)
+    .map((path) => recipientFieldSummaryLabel(path))
+    .filter(Boolean)
+  if (!labels.length) return 'No dynamic group field'
+  return labels.join(', ')
+}
+
+function appendGroupDestinationFieldPath(action: DraftAction, select: HTMLSelectElement) {
+  const fieldId = select.value.trim()
+  if (!fieldId) return
+  const paths = parseRecipientFieldPathsText(action.config.destinationFieldPath)
+  paths.push(fieldId)
+  action.config.destinationFieldPath = Array.from(new Set(paths))
+    .map((path) => `record.${path}`)
+    .join(', ')
+  select.value = ''
+}
+
+function removeGroupDestinationFieldPath(action: DraftAction, path: string) {
+  action.config.destinationFieldPath = parseRecipientFieldPathsText(action.config.destinationFieldPath)
+    .filter((entry) => entry !== path)
+    .map((entry) => `record.${entry}`)
+    .join(', ')
 }
 
 function removePersonRecipientGroup(action: DraftAction, groupId: string) {
@@ -1268,6 +1366,7 @@ function defaultConfigForActionType(type: AutomationActionType): DraftActionConf
         destinationId: '',
         destinationIds: [],
         destinationPickerId: '',
+        destinationFieldPath: '',
         titleTemplate: '',
         bodyTemplate: '',
         publicFormViewId: '',
@@ -1334,11 +1433,15 @@ function buildPayload(): Partial<AutomationRule> {
   const actions = d.actions.map((action) => {
     if (action.type === 'send_dingtalk_group_message') {
       const destinationIds = parseGroupDestinationIds(action.config.destinationIds ?? action.config.destinationId)
+      const destinationIdFieldPaths = parseRecipientFieldPathsText(action.config.destinationFieldPath)
+        .map((path) => `record.${path}`)
       return {
         type: action.type,
         config: {
           destinationId: destinationIds[0] || undefined,
           destinationIds: destinationIds.length ? destinationIds : undefined,
+          ...(destinationIdFieldPaths[0] ? { destinationIdFieldPath: destinationIdFieldPaths[0] } : {}),
+          ...(destinationIdFieldPaths.length ? { destinationIdFieldPaths } : {}),
           titleTemplate: typeof action.config.titleTemplate === 'string' ? action.config.titleTemplate.trim() : '',
           bodyTemplate: typeof action.config.bodyTemplate === 'string' ? action.config.bodyTemplate.trim() : '',
           publicFormViewId: typeof action.config.publicFormViewId === 'string' && action.config.publicFormViewId.trim()

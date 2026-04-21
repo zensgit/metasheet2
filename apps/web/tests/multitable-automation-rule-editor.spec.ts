@@ -310,6 +310,85 @@ describe('MetaAutomationRuleEditor', () => {
     expect(client.listDingTalkGroups).toHaveBeenCalledWith('sheet_1')
   })
 
+  it('emits DingTalk group action config with only dynamic record destination paths', async () => {
+    const saved = vi.fn()
+    const client = mockClient()
+    const { container } = mount({
+      visible: true,
+      sheetId: 'sheet_1',
+      fields,
+      views,
+      client,
+      onSave: saved,
+    })
+    await flushPromises()
+
+    const nameInput = container.querySelector('[data-field="name"]') as HTMLInputElement
+    nameInput.value = 'Notify dynamic groups'
+    nameInput.dispatchEvent(new Event('input'))
+    await flushPromises()
+
+    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header select') as HTMLSelectElement
+    actionSelect.value = 'send_dingtalk_group_message'
+    actionSelect.dispatchEvent(new Event('change'))
+    await flushPromises()
+
+    const destinationFieldInput = container.querySelector('[data-field="dingtalkDestinationFieldPath"]') as HTMLInputElement
+    destinationFieldInput.value = 'record.fld_2'
+    destinationFieldInput.dispatchEvent(new Event('input'))
+
+    const titleInput = container.querySelector('[data-field="dingtalkTitleTemplate"]') as HTMLInputElement
+    titleInput.value = 'Ticket {{recordId}}'
+    titleInput.dispatchEvent(new Event('input'))
+
+    const bodyInput = container.querySelector('[data-field="dingtalkBodyTemplate"]') as HTMLTextAreaElement
+    bodyInput.value = 'Please review {{record.status}}'
+    bodyInput.dispatchEvent(new Event('input'))
+    await flushPromises()
+
+    const saveBtn = container.querySelector('[data-action="save"]') as HTMLButtonElement
+    expect(saveBtn.disabled).toBe(false)
+    saveBtn.click()
+    await flushPromises()
+
+    expect(saved).toHaveBeenCalledTimes(1)
+    const payload = saved.mock.calls[0][0]
+    expect(payload.actionConfig).toEqual({
+      destinationIdFieldPath: 'record.fld_2',
+      destinationIdFieldPaths: ['record.fld_2'],
+      titleTemplate: 'Ticket {{recordId}}',
+      bodyTemplate: 'Please review {{record.status}}',
+    })
+  })
+
+  it('can pick a dynamic DingTalk group destination field', async () => {
+    const client = mockClient()
+    const { container } = mount({
+      visible: true,
+      sheetId: 'sheet_1',
+      fields,
+      views,
+      client,
+    })
+    await flushPromises()
+
+    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header select') as HTMLSelectElement
+    actionSelect.value = 'send_dingtalk_group_message'
+    actionSelect.dispatchEvent(new Event('change'))
+    await flushPromises()
+
+    const fieldSelect = container.querySelector('[data-field="dingtalkDestinationFieldSelect"]') as HTMLSelectElement
+    fieldSelect.value = 'fld_2'
+    fieldSelect.dispatchEvent(new Event('change'))
+    await flushPromises()
+
+    const fieldInput = container.querySelector('[data-field="dingtalkDestinationFieldPath"]') as HTMLInputElement
+    const summary = container.querySelector('[data-field="groupMessageSummary"]')
+    expect(fieldInput.value).toBe('record.fld_2')
+    expect(summary?.textContent).toContain('Name (record.fld_2)')
+    expect(container.querySelector('[data-group-destination-field="fld_2"]')).not.toBeNull()
+  })
+
   it('emits DingTalk person action config with optional links', async () => {
     const saved = vi.fn()
     const client = mockClient()

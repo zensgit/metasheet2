@@ -103,6 +103,10 @@ function normalizeMemberGroupIdScalar(value: unknown): string[] {
   return normalizeIdScalar(value, ['memberGroupId', 'groupId', 'subjectId', 'id', 'value'])
 }
 
+function normalizeGroupDestinationIdScalar(value: unknown): string[] {
+  return normalizeIdScalar(value, ['destinationId', 'groupDestinationId', 'id', 'value'])
+}
+
 function normalizeUserIdsFromUnknown(value: unknown): string[] {
   if (Array.isArray(value)) {
     return Array.from(new Set(
@@ -119,6 +123,15 @@ function normalizeMemberGroupIdsFromUnknown(value: unknown): string[] {
     ))
   }
   return normalizeMemberGroupIdScalar(value)
+}
+
+function normalizeGroupDestinationIdsFromUnknown(value: unknown): string[] {
+  if (Array.isArray(value)) {
+    return Array.from(new Set(
+      value.flatMap((entry) => normalizeGroupDestinationIdsFromUnknown(entry)),
+    ))
+  }
+  return normalizeGroupDestinationIdScalar(value)
 }
 
 function normalizeRecipientFieldPath(value: unknown): string {
@@ -162,6 +175,16 @@ function resolveRecipientMemberGroupIdsFromRecord(recordData: Record<string, unk
       const normalizedPath = normalizeRecipientFieldPath(fieldPath)
       if (!normalizedPath) return []
       return normalizeMemberGroupIdsFromUnknown(lookupTemplateValue(normalizedPath, recordData))
+    }),
+  ))
+}
+
+function resolveGroupDestinationIdsFromRecord(recordData: Record<string, unknown>, fieldPaths: unknown[]): string[] {
+  return Array.from(new Set(
+    fieldPaths.flatMap((fieldPath) => {
+      const normalizedPath = normalizeRecipientFieldPath(fieldPath)
+      if (!normalizedPath) return []
+      return normalizeGroupDestinationIdsFromUnknown(lookupTemplateValue(normalizedPath, recordData))
     }),
   ))
 }
@@ -1024,7 +1047,7 @@ export class AutomationExecutor {
     config: SendDingTalkGroupMessageConfig,
     context: ExecutionContext,
   ): Promise<AutomationStepResult> {
-    const destinationIds = Array.from(new Set([
+    const staticDestinationIds = Array.from(new Set([
       ...(Array.isArray(config.destinationIds)
         ? config.destinationIds
           .filter((value): value is string => typeof value === 'string')
@@ -1035,13 +1058,23 @@ export class AutomationExecutor {
         ? [config.destinationId.trim()]
         : []),
     ]))
+    const destinationFieldPaths = normalizeRecipientFieldPaths(config.destinationIdFieldPath, config.destinationIdFieldPaths)
+    const recordDestinationIds = resolveGroupDestinationIdsFromRecord(context.recordData, destinationFieldPaths)
+    const destinationIds = Array.from(new Set([...staticDestinationIds, ...recordDestinationIds]))
     const titleTemplate = typeof config.titleTemplate === 'string' ? config.titleTemplate.trim() : ''
     const bodyTemplate = typeof config.bodyTemplate === 'string' ? config.bodyTemplate.trim() : ''
     const publicFormViewId = typeof config.publicFormViewId === 'string' ? config.publicFormViewId.trim() : ''
     const internalViewId = typeof config.internalViewId === 'string' ? config.internalViewId.trim() : ''
 
     if (!destinationIds.length) {
-      return { actionType: 'send_dingtalk_group_message', status: 'failed', error: 'At least one DingTalk destination is required' }
+      if (destinationFieldPaths.length > 0) {
+        return {
+          actionType: 'send_dingtalk_group_message',
+          status: 'failed',
+          error: `No DingTalk destinationIds resolved from record field paths: ${destinationFieldPaths.join(', ')}`,
+        }
+      }
+      return { actionType: 'send_dingtalk_group_message', status: 'failed', error: 'At least one DingTalk destination or record destination field path is required' }
     }
     if (!titleTemplate) {
       return { actionType: 'send_dingtalk_group_message', status: 'failed', error: 'DingTalk title template is required' }
@@ -1273,8 +1306,12 @@ export class AutomationExecutor {
         status: 'failed',
         error: `${failedDestinations.length} of ${orderedDestinations.length} DingTalk destinations failed: ${failedDestinations.map((destination) => `${destination.name} (${destination.error})`).join('; ')}`,
         output: {
+          staticDestinationCount: staticDestinationIds.length,
+          dynamicDestinationCount: recordDestinationIds.length,
           destinationIds: orderedDestinations.map((destination) => destination.id),
           destinationNames: orderedDestinations.map((destination) => destination.name),
+          destinationFieldPath: destinationFieldPaths[0] ?? null,
+          destinationFieldPaths,
           sentCount: successfulDestinations.length,
           failedDestinationIds: failedDestinations.map((destination) => destination.id),
           linkCount: linkLines.length,
@@ -1288,8 +1325,12 @@ export class AutomationExecutor {
       output: {
         destinationId: successfulDestinations[0]?.id,
         destinationName: successfulDestinations[0]?.name,
+        staticDestinationCount: staticDestinationIds.length,
+        dynamicDestinationCount: recordDestinationIds.length,
         destinationIds: successfulDestinations.map((destination) => destination.id),
         destinationNames: successfulDestinations.map((destination) => destination.name),
+        destinationFieldPath: destinationFieldPaths[0] ?? null,
+        destinationFieldPaths,
         sentCount: successfulDestinations.length,
         linkCount: linkLines.length,
       },
