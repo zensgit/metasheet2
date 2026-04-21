@@ -37,6 +37,7 @@ These PRs were not merged directly to `main`; they were merged into their stack 
 | --- | --- | --- | --- |
 | #995 | `refactor(dingtalk): share person recipient warnings` | Merged to `codex/dingtalk-person-recipient-warning-utils-base-20260421` | `7bb22b2697396c0bf1f6edb6a4b96fd8cc04f310` |
 | #996 | `fix(dingtalk): require parsed person recipient paths` | Merged to `codex/dingtalk-person-recipient-can-save-base-20260421` | `a9198b44a1c460c52c46e0cab689701d83cb64ea` |
+| #998 | `fix(dingtalk): require parsed group destination paths` | Merged to `codex/dingtalk-group-destination-can-save-base-20260421` | `ef12119d8948841bc7a42a9d552d9ea9e0375fef` |
 
 ## Verification
 
@@ -109,6 +110,28 @@ Result:
 ```text
 Test Files  2 passed (2)
 Tests       111 passed (111)
+```
+
+```bash
+pnpm --filter @metasheet/web build
+```
+
+Result: passed. Vite emitted existing chunk-size and mixed dynamic/static import warnings.
+
+For #998:
+
+```bash
+pnpm --filter @metasheet/web exec vitest run \
+  tests/multitable-automation-rule-editor.spec.ts \
+  tests/multitable-automation-manager.spec.ts \
+  --watch=false
+```
+
+Result:
+
+```text
+Test Files  2 passed (2)
+Tests       113 passed (113)
 ```
 
 ```bash
