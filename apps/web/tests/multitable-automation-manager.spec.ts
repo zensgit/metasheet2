@@ -263,6 +263,8 @@ describe('MetaAutomationManager', () => {
               destinationId: 'dt_1',
               titleTemplate: 'Ticket {{recordId}}',
               bodyTemplate: 'Please fill {{record.status}}',
+              publicFormViewId: 'view_form',
+              internalViewId: 'view_grid',
             },
           },
         ],
@@ -274,6 +276,8 @@ describe('MetaAutomationManager', () => {
     const desc = container.querySelector('[data-automation-rule="rule_1"] .meta-automation__card-desc')
     expect(desc?.textContent).toContain('Send notification')
     expect(desc?.textContent).toContain('Send DingTalk group message')
+    expect(desc?.textContent).toContain('Public form: Public Form')
+    expect(desc?.textContent).toContain('Internal processing: Grid')
   })
 
   it('describes V1 multi-action DingTalk person rules in the list', async () => {
@@ -290,6 +294,8 @@ describe('MetaAutomationManager', () => {
               userIds: ['user_1'],
               titleTemplate: 'Ticket {{recordId}}',
               bodyTemplate: 'Please fill {{record.status}}',
+              publicFormViewId: 'view_form',
+              internalViewId: 'view_grid',
             },
           },
         ],
@@ -301,6 +307,8 @@ describe('MetaAutomationManager', () => {
     const desc = container.querySelector('[data-automation-rule="rule_1"] .meta-automation__card-desc')
     expect(desc?.textContent).toContain('Send notification')
     expect(desc?.textContent).toContain('Send DingTalk person message')
+    expect(desc?.textContent).toContain('Public form: Public Form')
+    expect(desc?.textContent).toContain('Internal processing: Grid')
   })
 
   it('shows empty state when no rules', async () => {
