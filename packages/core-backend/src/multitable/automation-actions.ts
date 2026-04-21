@@ -49,7 +49,10 @@ export interface SendNotificationConfig {
 
 /** Config shape for send_dingtalk_group_message */
 export interface SendDingTalkGroupMessageConfig {
-  destinationId: string
+  destinationId?: string
+  destinationIds?: string[]
+  destinationIdFieldPath?: string
+  destinationIdFieldPaths?: string[]
   titleTemplate: string
   bodyTemplate: string
   publicFormViewId?: string
@@ -59,8 +62,11 @@ export interface SendDingTalkGroupMessageConfig {
 /** Config shape for send_dingtalk_person_message */
 export interface SendDingTalkPersonMessageConfig {
   userIds: string[]
+  memberGroupIds?: string[]
   userIdFieldPath?: string
   userIdFieldPaths?: string[]
+  memberGroupIdFieldPath?: string
+  memberGroupIdFieldPaths?: string[]
   titleTemplate: string
   bodyTemplate: string
   publicFormViewId?: string

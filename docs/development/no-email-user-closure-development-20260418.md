@@ -98,3 +98,14 @@
 - 需要执行数据库迁移：
   - `zzzz20260418170000_allow_no_email_users_and_add_username.ts`
 - 本轮未做远端部署
+
+## Rebase 收口 - 2026-04-21
+
+- 将 PR #916 分支 rebase 到 `origin/main`，基线为 `d0b5883b4`。
+- 解决 `packages/core-backend/src/directory/directory-sync.ts` 与后续 DingTalk hardening 的重叠冲突。
+- 保留的合并语义：
+  - 无邮箱自动准入继续生成稳定 `dt_*` username。
+  - 手机号匹配继续使用 `normalizeMobileIdentifier()` 去空白后比较。
+  - 自动准入创建用户时传入 `generatedUsername`，避免无邮箱账号落成无登录标识。
+  - onboarding packet 保留 `accountLabel` 和临时密码信息。
+- `feat(directory): return no-email auto-admission onboarding packets` 在 rebase 时被 Git 判定为 patch contents already upstream，未重复应用。

@@ -108,6 +108,31 @@ export class YjsPersistenceAdapter {
     return Number(orphanStates?.numDeletedRows ?? 0) + Number(orphanUpdates?.numDeletedRows ?? 0)
   }
 
+  /**
+   * Wipe all persisted Yjs state for the given records in one round trip.
+   *
+   * Used by the REST → Yjs invalidation hook: when a REST write changes
+   * `meta_records.data`, any snapshot/updates we have for those records
+   * are stale. Next `YjsSyncService.getOrCreateDoc` will then re-seed
+   * from `meta_records.data`.
+   *
+   * No-op for record IDs that have no rows. Best-effort — callers do
+   * not fail their REST write on purge failure (see `index.ts`).
+   */
+  async purgeRecords(recordIds: string[]): Promise<void> {
+    if (recordIds.length === 0) return
+    await this.db.transaction().execute(async (trx) => {
+      await trx
+        .deleteFrom('meta_record_yjs_states')
+        .where('record_id', 'in', recordIds)
+        .execute()
+      await trx
+        .deleteFrom('meta_record_yjs_updates')
+        .where('record_id', 'in', recordIds)
+        .execute()
+    })
+  }
+
   async compactDoc(recordId: string, doc: Y.Doc): Promise<void> {
     const state = Y.encodeStateAsUpdate(doc)
     const stateVector = Y.encodeStateVector(doc)

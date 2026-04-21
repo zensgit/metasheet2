@@ -32,6 +32,7 @@ import { validateRecord, getDefaultValidationRules } from '../multitable/field-v
 import type { FieldValidationConfig } from '../multitable/field-validation'
 import { conditionalPublicRateLimiter, publicFormContextLimiter, publicFormSubmitLimiter } from '../middleware/rate-limiter'
 import { getAutomationServiceInstance } from '../multitable/automation-service'
+import { validateDingTalkAutomationLinks } from '../multitable/dingtalk-automation-link-validation'
 import { listAutomationDingTalkGroupDeliveries } from '../multitable/dingtalk-group-delivery-service'
 import { listAutomationDingTalkPersonDeliveries } from '../multitable/dingtalk-person-delivery-service'
 import {
@@ -46,9 +47,23 @@ import {
   RecordValidationError as ServiceValidationError,
   RecordFieldForbiddenError as ServiceFieldForbiddenError,
   type RecordWriteHelpers,
+  type YjsInvalidator,
 } from '../multitable/record-write-service'
 
 const multitableFormulaEngine = new MultitableFormulaEngine()
+
+/**
+ * Module-level Yjs invalidator set by `index.ts` when the Yjs collab
+ * path is wired. Used by REST write handlers that must purge stale Yjs
+ * state after committing `meta_records.data` outside the Yjs bridge.
+ *
+ * When `null`, no invalidation happens — safe for Yjs-off deployments.
+ */
+let yjsInvalidator: YjsInvalidator | null = null
+
+export function setYjsInvalidatorForRoutes(invalidator: YjsInvalidator | null): void {
+  yjsInvalidator = invalidator
+}
 
 type UniverMetaField = {
   id: string
@@ -940,8 +955,125 @@ function sanitizeStringArray(value: unknown): string[] {
     .filter((item) => item.length > 0)
 }
 
+const FIELD_VALIDATION_RULE_TYPES: ReadonlySet<string> = new Set([
+  'required',
+  'min',
+  'max',
+  'minLength',
+  'maxLength',
+  'pattern',
+  'enum',
+  'custom',
+])
+
+/**
+ * Normalise a single validation-rule entry to the engine contract
+ * (`{ type, params?, message? }`).
+ *
+ * Accepts both the engine shape and the flat UI shape emitted by
+ * `MetaFieldValidationPanel` (`{ type, value, message }`) so that clients
+ * stuck on either format round-trip correctly. Returns `null` for
+ * entries we can't safely reason about.
+ */
+function normalizeFieldValidationRule(raw: unknown): Record<string, unknown> | null {
+  if (!isPlainObject(raw)) return null
+  const ruleType = typeof raw.type === 'string' ? raw.type : ''
+  if (!FIELD_VALIDATION_RULE_TYPES.has(ruleType)) return null
+
+  const message = typeof raw.message === 'string' && raw.message.length > 0 ? raw.message : undefined
+  const paramsRaw = isPlainObject(raw.params) ? raw.params : undefined
+  const flatValue = 'value' in raw ? raw.value : undefined
+
+  let params: Record<string, unknown> | undefined
+
+  switch (ruleType) {
+    case 'required':
+      break
+    case 'custom':
+      // `custom` rules are pass-throughs for external handlers — the
+      // engine doesn't interpret them, but downstream consumers rely
+      // on `params`, so keep it verbatim if present.
+      if (paramsRaw) params = { ...paramsRaw }
+      break
+    case 'min':
+    case 'max':
+    case 'minLength':
+    case 'maxLength': {
+      const candidate = paramsRaw && 'value' in paramsRaw ? paramsRaw.value : flatValue
+      const num = typeof candidate === 'number' ? candidate : Number(candidate)
+      if (!Number.isFinite(num)) return null
+      params = { value: num }
+      break
+    }
+    case 'pattern': {
+      const regex = paramsRaw && typeof paramsRaw.regex === 'string'
+        ? paramsRaw.regex
+        : typeof flatValue === 'string'
+          ? flatValue
+          : ''
+      if (!regex) return null
+      const flags = paramsRaw && typeof paramsRaw.flags === 'string' ? paramsRaw.flags : undefined
+      params = flags ? { regex, flags } : { regex }
+      break
+    }
+    case 'enum': {
+      let values: string[] | undefined
+      if (paramsRaw && Array.isArray(paramsRaw.values)) {
+        values = paramsRaw.values
+          .map((v) => (typeof v === 'string' ? v : typeof v === 'number' ? String(v) : ''))
+          .filter((v) => v.length > 0)
+      } else if (Array.isArray(flatValue)) {
+        values = flatValue
+          .map((v) => (typeof v === 'string' ? v : typeof v === 'number' ? String(v) : ''))
+          .filter((v) => v.length > 0)
+      }
+      if (!values) return null
+      params = { values }
+      break
+    }
+    default:
+      return null
+  }
+
+  return {
+    type: ruleType,
+    ...(params ? { params } : {}),
+    ...(message ? { message } : {}),
+  }
+}
+
+function sanitizeFieldValidationRules(value: unknown): Record<string, unknown>[] | undefined {
+  if (!Array.isArray(value)) return undefined
+  const normalised: Record<string, unknown>[] = []
+  for (const entry of value) {
+    const rule = normalizeFieldValidationRule(entry)
+    if (rule) normalised.push(rule)
+  }
+  return normalised
+}
+
+/**
+ * Rewrite the `validation` key on a field-property object to the engine
+ * contract. Applied once up front so every type-specific branch of
+ * `sanitizeFieldProperty` sees already-normalised rules via the
+ * downstream spread.
+ *
+ * An empty array is preserved (it is a meaningful "disable defaults"
+ * signal). A non-array value is dropped entirely so the engine's
+ * default rules kick back in.
+ */
+function applyFieldValidationNormalisation(obj: Record<string, unknown>): Record<string, unknown> {
+  if (!('validation' in obj)) return obj
+  if (!Array.isArray(obj.validation)) {
+    const { validation: _omit, ...rest } = obj
+    return rest
+  }
+  const normalised = sanitizeFieldValidationRules(obj.validation) ?? []
+  return { ...obj, validation: normalised }
+}
+
 function sanitizeFieldProperty(type: UniverMetaField['type'], property: unknown): Record<string, unknown> {
-  const obj = normalizeJson(property)
+  const obj = applyFieldValidationNormalisation(normalizeJson(property))
   if (type === 'select') {
     const options = extractSelectOptions(obj) ?? []
     return { ...obj, options }
@@ -6930,6 +7062,33 @@ export function univerMetaRouter(): Router {
         }
       })
 
+      // -----------------------------------------------------------------
+      // LOAD-BEARING — DO NOT REMOVE
+      //
+      // Wipes any persisted / in-memory Y.Doc state for this record so the
+      // next getOrCreateDoc re-seeds from the just-updated meta_records.data.
+      // Without this, the P0 stale-snapshot bug returns (docs/development/
+      // yjs-text-cell-seed-and-stale-guard-development-20260420.md).
+      //
+      // The batch PATCH path goes through RecordWriteService.patchRecords,
+      // which runs an equivalent hook on every commit that isn't
+      // source='yjs-bridge'. This direct-SQL route bypasses that service,
+      // so it must fire the invalidator itself.
+      //
+      // Best-effort: a purge failure is logged and swallowed; the REST
+      // write still succeeds.
+      // -----------------------------------------------------------------
+      if (yjsInvalidator) {
+        try {
+          await yjsInvalidator([recordId])
+        } catch (err) {
+          console.error(
+            `[univer-meta] Yjs invalidation failed for record ${recordId} — Yjs state may be stale until next idle-release:`,
+            err,
+          )
+        }
+      }
+
       const recordRes = await pool.query(
         'SELECT id, version, data FROM meta_records WHERE id = $1 AND sheet_id = $2',
         [recordId, sheetId],
@@ -8120,7 +8279,7 @@ export function univerMetaRouter(): Router {
         buildAttachmentSummaries: (q, sid, rows, af) => buildAttachmentSummaries(q, req, sid, rows, af),
         ensureAttachmentIdsExist,
       }
-      const recordWriteService = new RecordWriteService(pool, eventBus, writeHelpers)
+      const recordWriteService = new RecordWriteService(pool, eventBus, writeHelpers, yjsInvalidator)
 
       const result = await recordWriteService.patchRecords({
         sheetId,
@@ -8239,6 +8398,16 @@ export function univerMetaRouter(): Router {
 
       const conditions = body?.conditions && typeof body.conditions === 'object' ? body.conditions as never : null
       const actions = Array.isArray(body?.actions) ? body.actions : null
+      const linkValidationError = await validateDingTalkAutomationLinks(
+        pool.query.bind(pool),
+        sheetId,
+        actionType,
+        actionConfig,
+        actions,
+      )
+      if (linkValidationError) {
+        return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: linkValidationError } })
+      }
 
       const rule = await automationService.createRule(sheetId, {
         name,
@@ -8324,6 +8493,30 @@ export function univerMetaRouter(): Router {
 
       if (Object.keys(updates).length === 0) {
         return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'No fields to update' } })
+      }
+
+      if (typeof body?.actionType === 'string' || (body?.actionConfig && typeof body.actionConfig === 'object') || body?.actions !== undefined) {
+        const existing = await automationService.getRule(ruleId)
+        if (!existing || existing.sheet_id !== sheetId) {
+          return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Automation rule not found' } })
+        }
+        const nextActionType = typeof body?.actionType === 'string' ? body.actionType : existing.action_type
+        const nextActionConfig = body?.actionConfig && typeof body.actionConfig === 'object'
+          ? body.actionConfig
+          : existing.action_config
+        const nextActions = body?.actions !== undefined
+          ? Array.isArray(body.actions) ? body.actions : null
+          : existing.actions
+        const linkValidationError = await validateDingTalkAutomationLinks(
+          pool.query.bind(pool),
+          sheetId,
+          nextActionType,
+          nextActionConfig,
+          nextActions,
+        )
+        if (linkValidationError) {
+          return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: linkValidationError } })
+        }
       }
 
       const updated = await automationService.updateRule(ruleId, sheetId, {

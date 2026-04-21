@@ -173,6 +173,15 @@
           </div>
         </template>
 
+        <MetaFieldValidationPanel
+          v-if="configTarget && validationPanelVisible"
+          class="meta-field-mgr__validation"
+          :field-id="configTarget.id"
+          :field-type="validationPanelFieldType"
+          :rules="validationDraft"
+          :options="validationPanelOptions"
+          @update:rules="onValidationRulesChange"
+        />
         <div v-if="fieldConfigError" class="meta-field-mgr__error">{{ fieldConfigError }}</div>
         <div class="meta-field-mgr__config-actions">
           <button class="meta-field-mgr__btn-cancel" @click="closeConfig">Cancel</button>
@@ -208,7 +217,7 @@
 
 <script setup lang="ts">
 import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
-import type { MetaField, MetaFieldCreateType, MetaSheet } from '../types'
+import type { FieldValidationRule, MetaField, MetaFieldCreateType, MetaSheet } from '../types'
 import {
   normalizeStringArray,
   resolveAttachmentFieldProperty,
@@ -218,6 +227,95 @@ import {
   resolveRollupFieldProperty,
   resolveSelectFieldOptions,
 } from '../utils/field-config'
+import MetaFieldValidationPanel from './MetaFieldValidationPanel.vue'
+
+/** Field types where the validation panel is configurable. */
+const VALIDATION_PANEL_TYPES: ReadonlySet<string> = new Set(['string', 'number', 'select'])
+
+function mapTypeForValidationPanel(fieldType: string): 'text' | 'number' | 'select' {
+  if (fieldType === 'string') return 'text'
+  if (fieldType === 'number') return 'number'
+  return 'select'
+}
+
+/**
+ * Translate the engine-shape validation array stored on `field.property`
+ * (`{ type, params, message }`) into the flat UI shape the panel expects
+ * (`{ type, value, message }`).
+ */
+function rulesFromProperty(property: Record<string, unknown> | null | undefined): FieldValidationRule[] {
+  const raw = property?.validation
+  if (!Array.isArray(raw)) return []
+  const out: FieldValidationRule[] = []
+  for (const entry of raw) {
+    if (!entry || typeof entry !== 'object') continue
+    const obj = entry as Record<string, unknown>
+    const type = typeof obj.type === 'string' ? obj.type : ''
+    if (!type) continue
+    const message = typeof obj.message === 'string' ? obj.message : undefined
+    const params = obj.params && typeof obj.params === 'object' && !Array.isArray(obj.params)
+      ? (obj.params as Record<string, unknown>)
+      : undefined
+    let value: FieldValidationRule['value']
+    if (type === 'min' || type === 'max' || type === 'minLength' || type === 'maxLength') {
+      const raw = params?.value ?? (obj as { value?: unknown }).value
+      const num = typeof raw === 'number' ? raw : Number(raw)
+      if (Number.isFinite(num)) value = num
+    } else if (type === 'pattern') {
+      const raw = params?.regex ?? (obj as { value?: unknown }).value
+      if (typeof raw === 'string') value = raw
+    } else if (type === 'enum') {
+      const raw = params?.values ?? (obj as { value?: unknown }).value
+      if (Array.isArray(raw)) {
+        value = raw.filter((v): v is string => typeof v === 'string')
+      }
+    }
+    out.push({ type: type as FieldValidationRule['type'], ...(value !== undefined ? { value } : {}), ...(message ? { message } : {}) })
+  }
+  return out
+}
+
+/**
+ * Translate UI-shape rules back into the engine contract for persistence
+ * in `field.property.validation`. Drops entries the engine cannot
+ * enforce (missing required numeric/regex/enum value).
+ */
+function rulesToProperty(rules: FieldValidationRule[]): Array<Record<string, unknown>> {
+  const out: Array<Record<string, unknown>> = []
+  for (const rule of rules) {
+    const base: Record<string, unknown> = { type: rule.type }
+    if (rule.message) base.message = rule.message
+    switch (rule.type) {
+      case 'required':
+        out.push(base)
+        break
+      case 'min':
+      case 'max':
+      case 'minLength':
+      case 'maxLength': {
+        const num = typeof rule.value === 'number' ? rule.value : Number(rule.value)
+        if (!Number.isFinite(num)) continue
+        base.params = { value: num }
+        out.push(base)
+        break
+      }
+      case 'pattern': {
+        if (typeof rule.value !== 'string' || rule.value.length === 0) continue
+        base.params = { regex: rule.value }
+        out.push(base)
+        break
+      }
+      case 'enum': {
+        if (!Array.isArray(rule.value)) continue
+        const values = rule.value.filter((v): v is string => typeof v === 'string')
+        base.params = { values }
+        out.push(base)
+        break
+      }
+    }
+  }
+  return out
+}
 
 const FIELD_TYPES: MetaFieldCreateType[] = ['string', 'number', 'boolean', 'date', 'select', 'link', 'person', 'formula', 'lookup', 'rollup', 'attachment']
 const FIELD_ICONS: Record<string, string> = {
@@ -278,6 +376,12 @@ const attachmentDraft = reactive<{ maxFiles: number; acceptedMimeTypesText: stri
   maxFiles: 1,
   acceptedMimeTypesText: '',
 })
+const validationDraft = ref<FieldValidationRule[]>([])
+// True when the field had explicit validation rules stored OR the user
+// touched the panel. Keeps us from overwriting the engine's defaults
+// (e.g. default `enum` on select, default `maxLength: 10000` on string)
+// when the user opened the config section but never edited rules.
+const validationDraftTouched = ref(false)
 const fieldConfigBaseline = ref('')
 const fieldConfigOutdated = ref(false)
 const fieldConfigLiveRefreshText = ref('')
@@ -305,6 +409,28 @@ const fieldConfigWarningText = computed(() => {
   return fieldConfigBlockingReason.value || 'This field changed in the background. Save keeps your draft, or reload the latest settings.'
 })
 
+const validationPanelVisible = computed(() => {
+  const draftType = configDraftType.value
+  if (!draftType) return false
+  return VALIDATION_PANEL_TYPES.has(draftType)
+})
+
+const validationPanelFieldType = computed(() => {
+  return mapTypeForValidationPanel(configDraftType.value ?? '')
+})
+
+const validationPanelOptions = computed(() => {
+  if (configDraftType.value !== 'select') return undefined
+  return selectDraft.options
+    .map((option) => ({ value: option.value.trim() }))
+    .filter((option) => option.value.length > 0)
+})
+
+function onValidationRulesChange(rules: FieldValidationRule[]) {
+  validationDraft.value = [...rules]
+  validationDraftTouched.value = true
+}
+
 function requiresConfig(type: MetaFieldCreateType): boolean {
   return ['select', 'link', 'person', 'lookup', 'rollup', 'formula', 'attachment'].includes(type)
 }
@@ -329,15 +455,23 @@ function resetDrafts() {
   formulaDraft.expression = ''
   attachmentDraft.maxFiles = 1
   attachmentDraft.acceptedMimeTypesText = ''
+  validationDraft.value = []
+  validationDraftTouched.value = false
   fieldConfigError.value = ''
 }
 
 function serializeFieldDraft(type: string | null): string {
+  const validation = VALIDATION_PANEL_TYPES.has(type ?? '') && validationDraftTouched.value
+    ? rulesToProperty(validationDraft.value)
+    : undefined
   if (type === 'select') {
-    return JSON.stringify(selectDraft.options.map((option) => ({
-      value: option.value.trim(),
-      color: option.color.trim(),
-    })))
+    return JSON.stringify({
+      options: selectDraft.options.map((option) => ({
+        value: option.value.trim(),
+        color: option.color.trim(),
+      })),
+      validation,
+    })
   }
   if (type === 'link') {
     return JSON.stringify({
@@ -373,6 +507,9 @@ function serializeFieldDraft(type: string | null): string {
       maxFiles: attachmentDraft.maxFiles,
       acceptedMimeTypesText: attachmentDraft.acceptedMimeTypesText.trim(),
     })
+  }
+  if (type === 'string' || type === 'number') {
+    return JSON.stringify({ validation })
   }
   return ''
 }
@@ -434,6 +571,11 @@ function hydrateExistingFieldConfig(field: MetaField, options?: { liveRefreshTex
     const property = resolveAttachmentFieldProperty(field.property)
     attachmentDraft.maxFiles = property.maxFiles ?? 1
     attachmentDraft.acceptedMimeTypesText = property.acceptedMimeTypes.join(',')
+  }
+  if (VALIDATION_PANEL_TYPES.has(fieldType)) {
+    const loaded = rulesFromProperty(field.property ?? null)
+    validationDraft.value = loaded
+    validationDraftTouched.value = loaded.length > 0
   }
   fieldConfigBaseline.value = serializeFieldDraft(fieldType)
   fieldConfigOutdated.value = false
@@ -502,6 +644,10 @@ function currentDraftProperty(type: MetaFieldCreateType | string): Record<string
     : null
   fieldConfigError.value = ''
 
+  const validationProperty = VALIDATION_PANEL_TYPES.has(type) && validationDraftTouched.value
+    ? { validation: rulesToProperty(validationDraft.value) }
+    : {}
+
   if (normalizedType === 'select') {
     const options = selectDraft.options
       .map((option) => ({ value: option.value.trim(), color: option.color.trim() }))
@@ -510,7 +656,7 @@ function currentDraftProperty(type: MetaFieldCreateType | string): Record<string
       fieldConfigError.value = 'Select fields need at least one option'
       return undefined
     }
-    return { options }
+    return { options, ...validationProperty }
   }
   if (normalizedType === 'link') {
     if (!linkDraft.foreignSheetId || !targetSheets.value.some((sheet) => sheet.id === linkDraft.foreignSheetId)) {
@@ -566,6 +712,9 @@ function currentDraftProperty(type: MetaFieldCreateType | string): Record<string
       acceptedMimeTypes: normalizeStringArray(attachmentDraft.acceptedMimeTypesText.split(',')),
     }
   }
+  if (type === 'string' || type === 'number') {
+    return { ...validationProperty }
+  }
   return undefined
 }
 
@@ -604,6 +753,16 @@ function saveConfig() {
   const property = currentDraftProperty(fieldType)
   if (!property && fieldConfigError.value) return
   if (!property) return
+  // Skip no-op saves for types that only expose validation: if the user
+  // never touched the panel there is nothing to persist, and emitting
+  // an empty `property: {}` would otherwise clobber existing values on
+  // the server. Types with mandatory structural config (select/link/
+  // lookup/rollup/formula/attachment) always have keys to persist.
+  const onlyValidationSurface = (fieldType === 'string' || fieldType === 'number')
+  if (onlyValidationSurface && !validationDraftTouched.value) {
+    closeConfig()
+    return
+  }
   emit('update-field', configTarget.value.id, { property })
   closeConfig()
 }
@@ -789,4 +948,5 @@ onBeforeUnmount(() => {
 .meta-field-mgr__btn-cancel { padding: 4px 12px; border: 1px solid #ddd; border-radius: 3px; background: #fff; cursor: pointer; font-size: 12px; }
 .meta-field-mgr__btn-delete { padding: 4px 12px; background: #f56c6c; color: #fff; border: none; border-radius: 3px; cursor: pointer; font-size: 12px; }
 .meta-field-mgr__error { color: #f56c6c; font-size: 12px; }
+.meta-field-mgr__validation { margin-top: 4px; }
 </style>

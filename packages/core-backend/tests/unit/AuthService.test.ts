@@ -461,9 +461,13 @@ describe('AuthService.login', () => {
     )
     expect(poolMocks.query).toHaveBeenNthCalledWith(
       1,
-      expect.stringContaining('lower(COALESCE(username'),
+      expect.stringContaining('lower(username) = $2'),
       ['liqing', 'liqing', 'liqing'],
     )
+    const loginSql = String(poolMocks.query.mock.calls[0]?.[0] ?? '')
+    expect(loginSql).not.toContain('COALESCE(email')
+    expect(loginSql).not.toContain('COALESCE(username')
+    expect(loginSql).not.toContain('COALESCE(mobile')
   })
 
   it('returns null when a mobile identifier matches multiple users', async () => {
@@ -503,6 +507,48 @@ describe('AuthService.login', () => {
 
     const auth = new AuthService()
     const result = await auth.login('13900001234', 'WelcomePass9A')
+
+    expect(result).toBeNull()
+    expect(sessionMocks.createUserSession).not.toHaveBeenCalled()
+  })
+
+  it('returns null when one identifier matches different users across account fields', async () => {
+    const passwordHash = await bcrypt.hash('WelcomePass9A', 10)
+    poolMocks.query.mockResolvedValueOnce({
+      rows: [
+        {
+          id: 'user-1',
+          email: 'shared@example.com',
+          username: 'liqing',
+          mobile: '13900001234',
+          name: '李青',
+          role: 'user',
+          permissions: ['attendance:read'],
+          password_hash: passwordHash,
+          is_active: true,
+          must_change_password: false,
+          created_at: new Date('2026-04-18T00:00:00.000Z'),
+          updated_at: new Date('2026-04-18T00:00:00.000Z'),
+        },
+        {
+          id: 'user-2',
+          email: null,
+          username: 'shared@example.com',
+          mobile: '13900004567',
+          name: '林岚',
+          role: 'user',
+          permissions: ['attendance:read'],
+          password_hash: passwordHash,
+          is_active: true,
+          must_change_password: false,
+          created_at: new Date('2026-04-18T00:00:00.000Z'),
+          updated_at: new Date('2026-04-18T00:00:00.000Z'),
+        },
+      ],
+    })
+
+    const auth = new AuthService()
+    const result = await auth.login('shared@example.com', 'WelcomePass9A')
 
     expect(result).toBeNull()
     expect(sessionMocks.createUserSession).not.toHaveBeenCalled()
