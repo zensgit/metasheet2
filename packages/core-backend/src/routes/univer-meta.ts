@@ -53,8 +53,8 @@ const multitableFormulaEngine = new MultitableFormulaEngine()
 
 /**
  * Module-level Yjs invalidator set by `index.ts` when the Yjs collab
- * path is wired. Used by the direct-SQL PATCH handler at
- * `PATCH /records/:recordId` which bypasses `RecordWriteService`.
+ * path is wired. Used by REST write handlers that must purge stale Yjs
+ * state after committing `meta_records.data` outside the Yjs bridge.
  *
  * When `null`, no invalidation happens — safe for Yjs-off deployments.
  */
@@ -8278,7 +8278,7 @@ export function univerMetaRouter(): Router {
         buildAttachmentSummaries: (q, sid, rows, af) => buildAttachmentSummaries(q, req, sid, rows, af),
         ensureAttachmentIdsExist,
       }
-      const recordWriteService = new RecordWriteService(pool, eventBus, writeHelpers)
+      const recordWriteService = new RecordWriteService(pool, eventBus, writeHelpers, yjsInvalidator)
 
       const result = await recordWriteService.patchRecords({
         sheetId,

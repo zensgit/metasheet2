@@ -14,6 +14,7 @@
  * Y.Doc state for those records is wiped. Next `getOrCreateDoc`
  * re-seeds from the just-updated DB row.
  */
+import { readFile } from 'node:fs/promises'
 import { describe, it, expect, vi } from 'vitest'
 import * as Y from 'yjs'
 import { YjsSyncService } from '../../src/collab/yjs-sync-service'
@@ -262,6 +263,12 @@ describe('YjsRecordBridge.cancelPending', () => {
     // The manual staging verification plan step #7 in the verification MD
     // exercises the end-to-end path with a real HTTP PATCH.)
     expect(() => routesModule.setYjsInvalidatorForRoutes(null)).not.toThrow()
+  })
+
+  it('REST /patch route passes the module-level invalidator into RecordWriteService', async () => {
+    const source = await readFile(new URL('../../src/routes/univer-meta.ts', import.meta.url), 'utf8')
+
+    expect(source).toContain('new RecordWriteService(pool, eventBus, writeHelpers, yjsInvalidator)')
   })
 
   it('cancelPending on records with no pending flush is a no-op', () => {
