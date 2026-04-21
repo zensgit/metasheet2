@@ -32,6 +32,9 @@ import { validateRecord, getDefaultValidationRules } from '../multitable/field-v
 import type { FieldValidationConfig } from '../multitable/field-validation'
 import { conditionalPublicRateLimiter, publicFormContextLimiter, publicFormSubmitLimiter } from '../middleware/rate-limiter'
 import { getAutomationServiceInstance } from '../multitable/automation-service'
+import { validateDingTalkAutomationLinks } from '../multitable/dingtalk-automation-link-validation'
+import { listAutomationDingTalkGroupDeliveries } from '../multitable/dingtalk-group-delivery-service'
+import { listAutomationDingTalkPersonDeliveries } from '../multitable/dingtalk-person-delivery-service'
 import {
   publishMultitableSheetRealtime as publishMultitableSheetRealtimeShared,
   setRealtimeCacheInvalidator,
@@ -44,9 +47,23 @@ import {
   RecordValidationError as ServiceValidationError,
   RecordFieldForbiddenError as ServiceFieldForbiddenError,
   type RecordWriteHelpers,
+  type YjsInvalidator,
 } from '../multitable/record-write-service'
 
 const multitableFormulaEngine = new MultitableFormulaEngine()
+
+/**
+ * Module-level Yjs invalidator set by `index.ts` when the Yjs collab
+ * path is wired. Used by REST write handlers that must purge stale Yjs
+ * state after committing `meta_records.data` outside the Yjs bridge.
+ *
+ * When `null`, no invalidation happens — safe for Yjs-off deployments.
+ */
+let yjsInvalidator: YjsInvalidator | null = null
+
+export function setYjsInvalidatorForRoutes(invalidator: YjsInvalidator | null): void {
+  yjsInvalidator = invalidator
+}
 
 type UniverMetaField = {
   id: string
@@ -248,11 +265,36 @@ type PeopleSheetPreset = {
   fieldProperty: Record<string, unknown>
 }
 
+type PublicFormAccessMode = 'public' | 'dingtalk' | 'dingtalk_granted'
+
 type PublicFormConfig = {
   enabled?: boolean
   publicToken?: string
   expiresAt?: unknown
   expiresOn?: unknown
+  accessMode?: unknown
+  allowedUserIds?: unknown
+  allowedMemberGroupIds?: unknown
+}
+
+type PublicFormAllowedSubjectSummary = {
+  subjectType: 'user' | 'member-group'
+  subjectId: string
+  label: string
+  subtitle: string | null
+  isActive: boolean
+}
+
+type PublicFormShareConfigResponse = {
+  enabled: boolean
+  publicToken: string | null
+  expiresAt: string | null
+  status: 'active' | 'expired' | 'disabled'
+  accessMode: PublicFormAccessMode
+  allowedUserIds: string[]
+  allowedUsers: PublicFormAllowedSubjectSummary[]
+  allowedMemberGroupIds: string[]
+  allowedMemberGroups: PublicFormAllowedSubjectSummary[]
 }
 
 type DashboardChartType = 'bar' | 'line' | 'pie'
@@ -329,6 +371,20 @@ function parsePublicFormExpiryMs(value: unknown): number | null {
   return Number.isFinite(parsed) ? parsed : null
 }
 
+function normalizePublicFormAccessMode(value: unknown): PublicFormAccessMode {
+  if (value === 'dingtalk') return 'dingtalk'
+  if (value === 'dingtalk_granted') return 'dingtalk_granted'
+  return 'public'
+}
+
+function normalizePublicFormAllowlistIds(value: unknown): string[] {
+  return Array.from(new Set(normalizeJsonArray(value)))
+}
+
+function buildPublicFormToken(): string {
+  return buildId('pub')
+}
+
 function isPublicFormAccessAllowed(view: UniverMetaViewConfig | null | undefined, publicToken: string): boolean {
   if (!view || !publicToken) return false
   const publicForm = getPublicFormConfig(view)
@@ -338,6 +394,230 @@ function isPublicFormAccessAllowed(view: UniverMetaViewConfig | null | undefined
   const expiryMs = parsePublicFormExpiryMs(publicForm.expiresAt ?? publicForm.expiresOn)
   if (expiryMs !== null && Date.now() >= expiryMs) return false
   return true
+}
+
+async function loadPublicFormAllowedSubjectSummaries(
+  query: QueryFn,
+  config: PublicFormConfig | null | undefined,
+): Promise<{
+  allowedUserIds: string[]
+  allowedUsers: PublicFormAllowedSubjectSummary[]
+  allowedMemberGroupIds: string[]
+  allowedMemberGroups: PublicFormAllowedSubjectSummary[]
+}> {
+  const allowedUserIds = normalizePublicFormAllowlistIds(config?.allowedUserIds)
+  const allowedMemberGroupIds = normalizePublicFormAllowlistIds(config?.allowedMemberGroupIds)
+
+  const [userResult, groupResult] = await Promise.all([
+    allowedUserIds.length > 0
+      ? query(
+        `SELECT id, name, email, is_active
+         FROM users
+         WHERE id = ANY($1::text[])`,
+        [allowedUserIds],
+      )
+      : Promise.resolve({ rows: [], rowCount: 0 }),
+    allowedMemberGroupIds.length > 0
+      ? query(
+        `SELECT g.id::text AS id, g.name, g.description, COUNT(m.user_id)::int AS member_count
+         FROM platform_member_groups g
+         LEFT JOIN platform_member_group_members m ON m.group_id = g.id
+         WHERE g.id::text = ANY($1::text[])
+         GROUP BY g.id, g.name, g.description`,
+        [allowedMemberGroupIds],
+      )
+      : Promise.resolve({ rows: [], rowCount: 0 }),
+  ])
+
+  const usersById = new Map(
+    (userResult.rows as Array<{ id: string; name?: string | null; email?: string | null; is_active?: boolean | null }>)
+      .map((row) => [
+        String(row.id),
+        {
+          subjectType: 'user' as const,
+          subjectId: String(row.id),
+          label: String(row.name ?? row.email ?? row.id),
+          subtitle: typeof row.email === 'string' && row.email.trim().length > 0 ? row.email.trim() : null,
+          isActive: row.is_active !== false,
+        } satisfies PublicFormAllowedSubjectSummary,
+      ]),
+  )
+  const groupsById = new Map(
+    (groupResult.rows as Array<{ id: string; name?: string | null; description?: string | null; member_count?: number | null }>)
+      .map((row) => [
+        String(row.id),
+        {
+          subjectType: 'member-group' as const,
+          subjectId: String(row.id),
+          label: String(row.name ?? row.id),
+          subtitle:
+            typeof row.description === 'string' && row.description.trim().length > 0
+              ? row.description.trim()
+              : typeof row.member_count === 'number'
+                ? `${row.member_count} member${row.member_count === 1 ? '' : 's'}`
+                : 'Member group',
+          isActive: true,
+        } satisfies PublicFormAllowedSubjectSummary,
+      ]),
+  )
+
+  return {
+    allowedUserIds,
+    allowedUsers: allowedUserIds.map((userId) => usersById.get(userId) ?? {
+      subjectType: 'user',
+      subjectId: userId,
+      label: userId,
+      subtitle: null,
+      isActive: false,
+    }),
+    allowedMemberGroupIds,
+    allowedMemberGroups: allowedMemberGroupIds.map((groupId) => groupsById.get(groupId) ?? {
+      subjectType: 'member-group',
+      subjectId: groupId,
+      label: groupId,
+      subtitle: 'Member group',
+      isActive: true,
+    }),
+  }
+}
+
+async function serializePublicFormShareConfig(
+  query: QueryFn,
+  view: UniverMetaViewConfig | null | undefined,
+): Promise<PublicFormShareConfigResponse> {
+  const publicForm = getPublicFormConfig(view)
+  const enabled = publicForm?.enabled === true
+  const publicToken = typeof publicForm?.publicToken === 'string' && publicForm.publicToken.trim().length > 0
+    ? publicForm.publicToken.trim()
+    : null
+  const expiryMs = parsePublicFormExpiryMs(publicForm?.expiresAt ?? publicForm?.expiresOn)
+  const expiresAt = expiryMs === null ? null : new Date(expiryMs).toISOString()
+  const status = !enabled || !publicToken ? 'disabled' : expiryMs !== null && Date.now() >= expiryMs ? 'expired' : 'active'
+  const allowlists = await loadPublicFormAllowedSubjectSummaries(query, publicForm)
+  return {
+    enabled,
+    publicToken,
+    expiresAt,
+    status,
+    accessMode: normalizePublicFormAccessMode(publicForm?.accessMode),
+    allowedUserIds: allowlists.allowedUserIds,
+    allowedUsers: allowlists.allowedUsers,
+    allowedMemberGroupIds: allowlists.allowedMemberGroupIds,
+    allowedMemberGroups: allowlists.allowedMemberGroups,
+  }
+}
+
+async function loadDingTalkPublicFormAccessState(query: QueryFn, userId: string): Promise<{
+  hasBinding: boolean
+  grantEnabled: boolean
+}> {
+  const [identityResult, linkResult, grantResult] = await Promise.all([
+    query(
+      `SELECT 1
+       FROM user_external_identities
+       WHERE provider = $1 AND local_user_id = $2
+       LIMIT 1`,
+      ['dingtalk', userId],
+    ),
+    query(
+      `SELECT 1
+       FROM directory_account_links l
+       JOIN directory_accounts a ON a.id = l.directory_account_id
+       WHERE l.local_user_id = $1
+         AND l.link_status = 'linked'
+         AND a.provider = $2
+       LIMIT 1`,
+      [userId, 'dingtalk'],
+    ),
+    query(
+      `SELECT enabled
+       FROM user_external_auth_grants
+       WHERE provider = $1 AND local_user_id = $2
+       LIMIT 1`,
+      ['dingtalk', userId],
+    ),
+  ])
+
+  const hasBinding = identityResult.rows.length > 0 || linkResult.rows.length > 0
+  const grantRow = grantResult.rows[0] as { enabled?: boolean } | undefined
+  const grantEnabled = grantRow?.enabled === true
+
+  return {
+    hasBinding,
+    grantEnabled,
+  }
+}
+
+async function evaluateProtectedPublicFormAccess(
+  query: QueryFn,
+  req: Request,
+  view: UniverMetaViewConfig | null | undefined,
+): Promise<
+  | { allowed: true; accessMode: PublicFormAccessMode }
+  | { allowed: false; statusCode: number; code: string; message: string }
+> {
+  const accessMode = normalizePublicFormAccessMode(getPublicFormConfig(view)?.accessMode)
+  if (accessMode === 'public') {
+    return { allowed: true, accessMode }
+  }
+
+  const userId = req.user?.id?.toString() ?? req.user?.sub?.toString() ?? req.user?.userId?.toString() ?? ''
+  if (!userId) {
+    return {
+      allowed: false,
+      statusCode: 401,
+      code: 'DINGTALK_AUTH_REQUIRED',
+      message: 'DingTalk sign-in is required for this form',
+    }
+  }
+
+  const dingtalkAccess = await loadDingTalkPublicFormAccessState(query, userId)
+  if (!dingtalkAccess.hasBinding) {
+    return {
+      allowed: false,
+      statusCode: 403,
+      code: 'DINGTALK_BIND_REQUIRED',
+      message: 'A bound DingTalk account is required for this form',
+    }
+  }
+
+  if (accessMode === 'dingtalk_granted' && !dingtalkAccess.grantEnabled) {
+    return {
+      allowed: false,
+      statusCode: 403,
+      code: 'DINGTALK_GRANT_REQUIRED',
+      message: 'A DingTalk-authorized account is required for this form',
+    }
+  }
+
+  const publicForm = getPublicFormConfig(view)
+  const allowedUserIds = normalizePublicFormAllowlistIds(publicForm?.allowedUserIds)
+  const allowedMemberGroupIds = normalizePublicFormAllowlistIds(publicForm?.allowedMemberGroupIds)
+  if (allowedUserIds.length > 0 || allowedMemberGroupIds.length > 0) {
+    const directAllowed = allowedUserIds.includes(userId)
+    let memberGroupAllowed = false
+    if (!directAllowed && allowedMemberGroupIds.length > 0) {
+      const membershipResult = await query(
+        `SELECT 1
+         FROM platform_member_group_members
+         WHERE user_id = $1
+           AND group_id::text = ANY($2::text[])
+         LIMIT 1`,
+        [userId, allowedMemberGroupIds],
+      )
+      memberGroupAllowed = membershipResult.rows.length > 0
+    }
+    if (!directAllowed && !memberGroupAllowed) {
+      return {
+        allowed: false,
+        statusCode: 403,
+        code: 'DINGTALK_FORM_NOT_ALLOWED',
+        message: 'Only selected system users or member groups can access this form',
+      }
+    }
+  }
+
+  return { allowed: true, accessMode }
 }
 
 function appendQueryParam(path: string, key: string, value: string): string {
@@ -675,8 +955,125 @@ function sanitizeStringArray(value: unknown): string[] {
     .filter((item) => item.length > 0)
 }
 
+const FIELD_VALIDATION_RULE_TYPES: ReadonlySet<string> = new Set([
+  'required',
+  'min',
+  'max',
+  'minLength',
+  'maxLength',
+  'pattern',
+  'enum',
+  'custom',
+])
+
+/**
+ * Normalise a single validation-rule entry to the engine contract
+ * (`{ type, params?, message? }`).
+ *
+ * Accepts both the engine shape and the flat UI shape emitted by
+ * `MetaFieldValidationPanel` (`{ type, value, message }`) so that clients
+ * stuck on either format round-trip correctly. Returns `null` for
+ * entries we can't safely reason about.
+ */
+function normalizeFieldValidationRule(raw: unknown): Record<string, unknown> | null {
+  if (!isPlainObject(raw)) return null
+  const ruleType = typeof raw.type === 'string' ? raw.type : ''
+  if (!FIELD_VALIDATION_RULE_TYPES.has(ruleType)) return null
+
+  const message = typeof raw.message === 'string' && raw.message.length > 0 ? raw.message : undefined
+  const paramsRaw = isPlainObject(raw.params) ? raw.params : undefined
+  const flatValue = 'value' in raw ? raw.value : undefined
+
+  let params: Record<string, unknown> | undefined
+
+  switch (ruleType) {
+    case 'required':
+      break
+    case 'custom':
+      // `custom` rules are pass-throughs for external handlers — the
+      // engine doesn't interpret them, but downstream consumers rely
+      // on `params`, so keep it verbatim if present.
+      if (paramsRaw) params = { ...paramsRaw }
+      break
+    case 'min':
+    case 'max':
+    case 'minLength':
+    case 'maxLength': {
+      const candidate = paramsRaw && 'value' in paramsRaw ? paramsRaw.value : flatValue
+      const num = typeof candidate === 'number' ? candidate : Number(candidate)
+      if (!Number.isFinite(num)) return null
+      params = { value: num }
+      break
+    }
+    case 'pattern': {
+      const regex = paramsRaw && typeof paramsRaw.regex === 'string'
+        ? paramsRaw.regex
+        : typeof flatValue === 'string'
+          ? flatValue
+          : ''
+      if (!regex) return null
+      const flags = paramsRaw && typeof paramsRaw.flags === 'string' ? paramsRaw.flags : undefined
+      params = flags ? { regex, flags } : { regex }
+      break
+    }
+    case 'enum': {
+      let values: string[] | undefined
+      if (paramsRaw && Array.isArray(paramsRaw.values)) {
+        values = paramsRaw.values
+          .map((v) => (typeof v === 'string' ? v : typeof v === 'number' ? String(v) : ''))
+          .filter((v) => v.length > 0)
+      } else if (Array.isArray(flatValue)) {
+        values = flatValue
+          .map((v) => (typeof v === 'string' ? v : typeof v === 'number' ? String(v) : ''))
+          .filter((v) => v.length > 0)
+      }
+      if (!values) return null
+      params = { values }
+      break
+    }
+    default:
+      return null
+  }
+
+  return {
+    type: ruleType,
+    ...(params ? { params } : {}),
+    ...(message ? { message } : {}),
+  }
+}
+
+function sanitizeFieldValidationRules(value: unknown): Record<string, unknown>[] | undefined {
+  if (!Array.isArray(value)) return undefined
+  const normalised: Record<string, unknown>[] = []
+  for (const entry of value) {
+    const rule = normalizeFieldValidationRule(entry)
+    if (rule) normalised.push(rule)
+  }
+  return normalised
+}
+
+/**
+ * Rewrite the `validation` key on a field-property object to the engine
+ * contract. Applied once up front so every type-specific branch of
+ * `sanitizeFieldProperty` sees already-normalised rules via the
+ * downstream spread.
+ *
+ * An empty array is preserved (it is a meaningful "disable defaults"
+ * signal). A non-array value is dropped entirely so the engine's
+ * default rules kick back in.
+ */
+function applyFieldValidationNormalisation(obj: Record<string, unknown>): Record<string, unknown> {
+  if (!('validation' in obj)) return obj
+  if (!Array.isArray(obj.validation)) {
+    const { validation: _omit, ...rest } = obj
+    return rest
+  }
+  const normalised = sanitizeFieldValidationRules(obj.validation) ?? []
+  return { ...obj, validation: normalised }
+}
+
 function sanitizeFieldProperty(type: UniverMetaField['type'], property: unknown): Record<string, unknown> {
-  const obj = normalizeJson(property)
+  const obj = applyFieldValidationNormalisation(normalizeJson(property))
   if (type === 'select') {
     const options = extractSelectOptions(obj) ?? []
     return { ...obj, options }
@@ -5037,6 +5434,313 @@ export function univerMetaRouter(): Router {
     }
   })
 
+  router.get('/sheets/:sheetId/views/:viewId/form-share', async (req: Request, res: Response) => {
+    const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
+    const viewId = typeof req.params.viewId === 'string' ? req.params.viewId.trim() : ''
+    if (!sheetId || !viewId) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId and viewId are required' } })
+    }
+
+    try {
+      const pool = poolManager.get()
+      const current = await pool.query(
+        'SELECT id, sheet_id, name, type, filter_info, sort_info, group_info, hidden_field_ids, config FROM meta_views WHERE id = $1',
+        [viewId],
+      )
+      if (current.rows.length === 0) {
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `View not found: ${viewId}` } })
+      }
+
+      const row: any = current.rows[0]
+      if (String(row.sheet_id) !== sheetId) {
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `View ${viewId} does not belong to sheet ${sheetId}` } })
+      }
+
+      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      if (!capabilities.canManageViews) return sendForbidden(res)
+
+      const view: UniverMetaViewConfig = {
+        id: viewId,
+        sheetId,
+        name: String(row.name),
+        type: String(row.type ?? 'grid'),
+        filterInfo: normalizeJson(row.filter_info),
+        sortInfo: normalizeJson(row.sort_info),
+        groupInfo: normalizeJson(row.group_info),
+        hiddenFieldIds: normalizeJsonArray(row.hidden_field_ids),
+        config: normalizeJson(row.config),
+      }
+
+      return res.json({ ok: true, data: await serializePublicFormShareConfig(pool.query.bind(pool), view) })
+    } catch (err) {
+      const hint = getDbNotReadyMessage(err)
+      if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
+      console.error('[univer-meta] get form share config failed:', err)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load form share config' } })
+    }
+  })
+
+  router.patch('/sheets/:sheetId/views/:viewId/form-share', async (req: Request, res: Response) => {
+    const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
+    const viewId = typeof req.params.viewId === 'string' ? req.params.viewId.trim() : ''
+    if (!sheetId || !viewId) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId and viewId are required' } })
+    }
+
+    const schema = z.object({
+      enabled: z.boolean().optional(),
+      expiresAt: z.string().datetime().nullable().optional(),
+      accessMode: z.enum(['public', 'dingtalk', 'dingtalk_granted']).optional(),
+      allowedUserIds: z.array(z.string().min(1)).optional(),
+      allowedMemberGroupIds: z.array(z.string().min(1)).optional(),
+    })
+
+    const parsed = schema.safeParse(req.body)
+    if (!parsed.success) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+    }
+
+    try {
+      const pool = poolManager.get()
+      const current = await pool.query(
+        'SELECT id, sheet_id, name, type, filter_info, sort_info, group_info, hidden_field_ids, config FROM meta_views WHERE id = $1',
+        [viewId],
+      )
+      if (current.rows.length === 0) {
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `View not found: ${viewId}` } })
+      }
+
+      const row: any = current.rows[0]
+      if (String(row.sheet_id) !== sheetId) {
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `View ${viewId} does not belong to sheet ${sheetId}` } })
+      }
+
+      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      if (!capabilities.canManageViews) return sendForbidden(res)
+
+      const nextConfig = normalizeJson(row.config)
+      const existingPublicForm = getPublicFormConfig({
+        id: viewId,
+        sheetId,
+        name: String(row.name),
+        type: String(row.type ?? 'grid'),
+        filterInfo: normalizeJson(row.filter_info),
+        sortInfo: normalizeJson(row.sort_info),
+        groupInfo: normalizeJson(row.group_info),
+        hiddenFieldIds: normalizeJsonArray(row.hidden_field_ids),
+        config: nextConfig,
+      })
+      const nextEnabled = parsed.data.enabled ?? (existingPublicForm?.enabled === true)
+      const nextPublicToken = (() => {
+        const existing = typeof existingPublicForm?.publicToken === 'string' ? existingPublicForm.publicToken.trim() : ''
+        if (existing) return existing
+        return nextEnabled ? buildPublicFormToken() : ''
+      })()
+      const nextPublicForm: PublicFormConfig = {
+        ...(existingPublicForm ?? {}),
+        enabled: nextEnabled,
+        publicToken: nextPublicToken || undefined,
+        ...(parsed.data.expiresAt !== undefined
+          ? (parsed.data.expiresAt ? { expiresAt: parsed.data.expiresAt } : { expiresAt: null })
+          : (existingPublicForm?.expiresAt ?? existingPublicForm?.expiresOn) !== undefined
+            ? { expiresAt: existingPublicForm?.expiresAt ?? existingPublicForm?.expiresOn }
+            : {}),
+        accessMode: parsed.data.accessMode ?? normalizePublicFormAccessMode(existingPublicForm?.accessMode),
+        allowedUserIds: parsed.data.allowedUserIds !== undefined
+          ? normalizePublicFormAllowlistIds(parsed.data.allowedUserIds)
+          : normalizePublicFormAllowlistIds(existingPublicForm?.allowedUserIds),
+        allowedMemberGroupIds: parsed.data.allowedMemberGroupIds !== undefined
+          ? normalizePublicFormAllowlistIds(parsed.data.allowedMemberGroupIds)
+          : normalizePublicFormAllowlistIds(existingPublicForm?.allowedMemberGroupIds),
+      }
+      const nextAccessMode = normalizePublicFormAccessMode(nextPublicForm.accessMode)
+      const allowedUserIds = normalizePublicFormAllowlistIds(nextPublicForm.allowedUserIds)
+      const allowedMemberGroupIds = normalizePublicFormAllowlistIds(nextPublicForm.allowedMemberGroupIds)
+      if (nextAccessMode === 'public' && (allowedUserIds.length > 0 || allowedMemberGroupIds.length > 0)) {
+        return res.status(400).json({
+          ok: false,
+          error: {
+            code: 'VALIDATION_ERROR',
+            message: 'Allowed users and member groups require a DingTalk-protected access mode',
+          },
+        })
+      }
+      if (allowedUserIds.length > 0) {
+        const userCheck = await pool.query(
+          'SELECT id FROM users WHERE id = ANY($1::text[])',
+          [allowedUserIds],
+        )
+        const existingUserIds = new Set(
+          (userCheck.rows as Array<{ id: string }>).map((entry) => String(entry.id)),
+        )
+        const missingUserIds = allowedUserIds.filter((userId) => !existingUserIds.has(userId))
+        if (missingUserIds.length > 0) {
+          return res.status(400).json({
+            ok: false,
+            error: {
+              code: 'VALIDATION_ERROR',
+              message: `Unknown allowed users: ${missingUserIds.join(', ')}`,
+            },
+          })
+        }
+      }
+      if (allowedMemberGroupIds.length > 0) {
+        const groupCheck = await pool.query(
+          'SELECT id::text AS id FROM platform_member_groups WHERE id::text = ANY($1::text[])',
+          [allowedMemberGroupIds],
+        )
+        const existingGroupIds = new Set(
+          (groupCheck.rows as Array<{ id: string }>).map((entry) => String(entry.id)),
+        )
+        const missingGroupIds = allowedMemberGroupIds.filter((groupId) => !existingGroupIds.has(groupId))
+        if (missingGroupIds.length > 0) {
+          return res.status(400).json({
+            ok: false,
+            error: {
+              code: 'VALIDATION_ERROR',
+              message: `Unknown allowed member groups: ${missingGroupIds.join(', ')}`,
+            },
+          })
+        }
+      }
+      nextConfig.publicForm = nextPublicForm as Record<string, unknown>
+
+      await pool.query(
+        `UPDATE meta_views
+         SET config = $2::jsonb
+         WHERE id = $1`,
+        [viewId, JSON.stringify(nextConfig)],
+      )
+
+      const view: UniverMetaViewConfig = {
+        id: viewId,
+        sheetId,
+        name: String(row.name),
+        type: String(row.type ?? 'grid'),
+        filterInfo: normalizeJson(row.filter_info),
+        sortInfo: normalizeJson(row.sort_info),
+        groupInfo: normalizeJson(row.group_info),
+        hiddenFieldIds: normalizeJsonArray(row.hidden_field_ids),
+        config: nextConfig,
+      }
+      metaViewConfigCache.set(viewId, view)
+      return res.json({ ok: true, data: await serializePublicFormShareConfig(pool.query.bind(pool), view) })
+    } catch (err) {
+      const hint = getDbNotReadyMessage(err)
+      if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
+      console.error('[univer-meta] update form share config failed:', err)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to update form share config' } })
+    }
+  })
+
+  router.post('/sheets/:sheetId/views/:viewId/form-share/regenerate', async (req: Request, res: Response) => {
+    const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
+    const viewId = typeof req.params.viewId === 'string' ? req.params.viewId.trim() : ''
+    if (!sheetId || !viewId) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId and viewId are required' } })
+    }
+
+    try {
+      const pool = poolManager.get()
+      const current = await pool.query(
+        'SELECT id, sheet_id, name, type, filter_info, sort_info, group_info, hidden_field_ids, config FROM meta_views WHERE id = $1',
+        [viewId],
+      )
+      if (current.rows.length === 0) {
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `View not found: ${viewId}` } })
+      }
+
+      const row: any = current.rows[0]
+      if (String(row.sheet_id) !== sheetId) {
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `View ${viewId} does not belong to sheet ${sheetId}` } })
+      }
+
+      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      if (!capabilities.canManageViews) return sendForbidden(res)
+
+      const nextConfig = normalizeJson(row.config)
+      const existingPublicForm = getPublicFormConfig({
+        id: viewId,
+        sheetId,
+        name: String(row.name),
+        type: String(row.type ?? 'grid'),
+        filterInfo: normalizeJson(row.filter_info),
+        sortInfo: normalizeJson(row.sort_info),
+        groupInfo: normalizeJson(row.group_info),
+        hiddenFieldIds: normalizeJsonArray(row.hidden_field_ids),
+        config: nextConfig,
+      })
+      const nextPublicToken = buildPublicFormToken()
+      nextConfig.publicForm = {
+        ...(existingPublicForm ?? {}),
+        enabled: existingPublicForm?.enabled === true,
+        publicToken: nextPublicToken,
+        accessMode: normalizePublicFormAccessMode(existingPublicForm?.accessMode),
+      } as Record<string, unknown>
+
+      await pool.query(
+        `UPDATE meta_views
+         SET config = $2::jsonb
+         WHERE id = $1`,
+        [viewId, JSON.stringify(nextConfig)],
+      )
+
+      const view: UniverMetaViewConfig = {
+        id: viewId,
+        sheetId,
+        name: String(row.name),
+        type: String(row.type ?? 'grid'),
+        filterInfo: normalizeJson(row.filter_info),
+        sortInfo: normalizeJson(row.sort_info),
+        groupInfo: normalizeJson(row.group_info),
+        hiddenFieldIds: normalizeJsonArray(row.hidden_field_ids),
+        config: nextConfig,
+      }
+      metaViewConfigCache.set(viewId, view)
+      return res.json({
+        ok: true,
+        data: {
+          publicToken: (await serializePublicFormShareConfig(pool.query.bind(pool), view)).publicToken,
+        },
+      })
+    } catch (err) {
+      const hint = getDbNotReadyMessage(err)
+      if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
+      console.error('[univer-meta] regenerate form share token failed:', err)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to regenerate form share token' } })
+    }
+  })
+
+  router.get('/sheets/:sheetId/form-share-candidates', async (req: Request, res: Response) => {
+    const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
+    if (!sheetId) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId is required' } })
+    }
+
+    const q = typeof req.query.q === 'string' ? req.query.q.trim() : ''
+    const rawLimit = typeof req.query.limit === 'string' ? Number(req.query.limit) : undefined
+    const limit = Number.isFinite(rawLimit) ? Math.min(50, Math.max(1, Math.floor(rawLimit as number))) : 20
+
+    try {
+      const pool = poolManager.get()
+      const sheet = await loadSheetRow(pool.query.bind(pool), sheetId)
+      if (!sheet) {
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
+      }
+      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      if (!capabilities.canManageViews) return sendForbidden(res)
+
+      const items = (await listSheetPermissionCandidates(pool.query.bind(pool), sheetId, { q, limit }))
+        .filter((candidate) => candidate.subjectType === 'user' || candidate.subjectType === 'member-group')
+      return res.json({ ok: true, data: { items, total: items.length, limit, query: q } })
+    } catch (err) {
+      const hint = getDbNotReadyMessage(err)
+      if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
+      console.error('[univer-meta] list form-share candidates failed:', err)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to list form-share candidates' } })
+    }
+  })
+
   router.delete('/views/:viewId', async (req: Request, res: Response) => {
     const viewId = req.params.viewId
     if (!viewId || typeof viewId !== 'string') {
@@ -5582,21 +6286,34 @@ export function univerMetaRouter(): Router {
       const sheetId = resolved.sheetId
       const { access, capabilities, capabilityOrigin, sheetScope } = await resolveSheetReadableCapabilities(req, pool.query.bind(pool), sheetId)
       const publicAccessAllowed = isPublicFormAccessAllowed(resolved.view, publicTokenParam)
+      const protectedPublicAccess = publicAccessAllowed
+        ? await evaluateProtectedPublicFormAccess(pool.query.bind(pool), req, resolved.view)
+        : null
+      if (protectedPublicAccess?.allowed === false) {
+        return res.status(protectedPublicAccess.statusCode).json({
+          ok: false,
+          error: {
+            code: protectedPublicAccess.code,
+            message: protectedPublicAccess.message,
+          },
+        })
+      }
+      const effectivePublicAccessAllowed = publicAccessAllowed && (!protectedPublicAccess || protectedPublicAccess.allowed)
       if (!access.userId && !publicAccessAllowed) {
         return res.status(401).json({ error: 'Authentication required' })
       }
-      if (!publicAccessAllowed && !capabilities.canRead) return sendForbidden(res)
+      if (!effectivePublicAccessAllowed && !capabilities.canRead) return sendForbidden(res)
       const sheet = await loadSheetRow(pool.query.bind(pool), sheetId)
       if (!sheet) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
       }
 
       const fields = await loadFieldsForSheet(pool.query.bind(pool), sheetId)
-      const effectiveCapabilities = publicAccessAllowed ? PUBLIC_FORM_CAPABILITIES : capabilities
-      const effectiveCapabilityOrigin = publicAccessAllowed ? undefined : capabilityOrigin
-      const effectiveSheetScope = publicAccessAllowed ? undefined : sheetScope
-      const effectiveAccess = publicAccessAllowed ? { userId: '', permissions: [], isAdminRole: false } : access
-      if (publicAccessAllowed && recordIdParam) {
+      const effectiveCapabilities = effectivePublicAccessAllowed ? PUBLIC_FORM_CAPABILITIES : capabilities
+      const effectiveCapabilityOrigin = effectivePublicAccessAllowed ? undefined : capabilityOrigin
+      const effectiveSheetScope = effectivePublicAccessAllowed ? undefined : sheetScope
+      const effectiveAccess = effectivePublicAccessAllowed ? { userId: '', permissions: [], isAdminRole: false } : access
+      if (effectivePublicAccessAllowed && recordIdParam) {
         return res.status(400).json({
           ok: false,
           error: { code: 'VALIDATION_ERROR', message: 'Public forms do not support loading an existing record' },
@@ -5664,7 +6381,7 @@ export function univerMetaRouter(): Router {
           mode: 'form',
           readOnly: !effectiveCapabilities.canCreateRecord,
           submitPath: resolved.view
-            ? (publicAccessAllowed && publicTokenParam
+            ? (effectivePublicAccessAllowed && publicTokenParam
               ? buildPublicFormSubmitPath(resolved.view.id, publicTokenParam)
               : `/api/multitable/views/${resolved.view.id}/submit`)
             : '/api/multitable/records',
@@ -5740,13 +6457,26 @@ export function univerMetaRouter(): Router {
           ? req.query.publicToken.trim()
           : ''
       const publicAccessAllowed = isPublicFormAccessAllowed(view, publicTokenParam)
+      const protectedPublicAccess = publicAccessAllowed
+        ? await evaluateProtectedPublicFormAccess(pool.query.bind(pool), req, view)
+        : null
+      if (protectedPublicAccess?.allowed === false) {
+        return res.status(protectedPublicAccess.statusCode).json({
+          ok: false,
+          error: {
+            code: protectedPublicAccess.code,
+            message: protectedPublicAccess.message,
+          },
+        })
+      }
+      const effectivePublicAccessAllowed = publicAccessAllowed && (!protectedPublicAccess || protectedPublicAccess.allowed)
       if (!access.userId && !publicAccessAllowed) {
         return res.status(401).json({ error: 'Authentication required' })
       }
-      const effectiveCapabilities = publicAccessAllowed ? PUBLIC_FORM_CAPABILITIES : capabilities
-      const effectiveSheetScope = publicAccessAllowed ? undefined : sheetScope
-      const effectiveAccess = publicAccessAllowed ? { userId: '', permissions: [], isAdminRole: false } : access
-      if (publicAccessAllowed && parsed.data.recordId) {
+      const effectiveCapabilities = effectivePublicAccessAllowed ? PUBLIC_FORM_CAPABILITIES : capabilities
+      const effectiveSheetScope = effectivePublicAccessAllowed ? undefined : sheetScope
+      const effectiveAccess = effectivePublicAccessAllowed ? { userId: '', permissions: [], isAdminRole: false } : access
+      if (effectivePublicAccessAllowed && parsed.data.recordId) {
         return res.status(400).json({
           ok: false,
           error: { code: 'VALIDATION_ERROR', message: 'Public forms do not support updating an existing record' },
@@ -5963,7 +6693,12 @@ export function univerMetaRouter(): Router {
           `INSERT INTO meta_records (id, sheet_id, data, version, created_by)
            VALUES ($1, $2, $3::jsonb, 1, $4)
            RETURNING id, version`,
-          [resultRecordId, view.sheetId, JSON.stringify(patch), publicAccessAllowed ? null : getRequestActorId(req)],
+          [
+            resultRecordId,
+            view.sheetId,
+            JSON.stringify(patch),
+            effectivePublicAccessAllowed && !access.userId ? null : getRequestActorId(req),
+          ],
         )
         resultRecordId = String((insertRes as any).rows[0]?.id ?? resultRecordId)
         nextVersion = Number((insertRes as any).rows[0]?.version ?? 1)
@@ -6326,6 +7061,33 @@ export function univerMetaRouter(): Router {
           }
         }
       })
+
+      // -----------------------------------------------------------------
+      // LOAD-BEARING — DO NOT REMOVE
+      //
+      // Wipes any persisted / in-memory Y.Doc state for this record so the
+      // next getOrCreateDoc re-seeds from the just-updated meta_records.data.
+      // Without this, the P0 stale-snapshot bug returns (docs/development/
+      // yjs-text-cell-seed-and-stale-guard-development-20260420.md).
+      //
+      // The batch PATCH path goes through RecordWriteService.patchRecords,
+      // which runs an equivalent hook on every commit that isn't
+      // source='yjs-bridge'. This direct-SQL route bypasses that service,
+      // so it must fire the invalidator itself.
+      //
+      // Best-effort: a purge failure is logged and swallowed; the REST
+      // write still succeeds.
+      // -----------------------------------------------------------------
+      if (yjsInvalidator) {
+        try {
+          await yjsInvalidator([recordId])
+        } catch (err) {
+          console.error(
+            `[univer-meta] Yjs invalidation failed for record ${recordId} — Yjs state may be stale until next idle-release:`,
+            err,
+          )
+        }
+      }
 
       const recordRes = await pool.query(
         'SELECT id, version, data FROM meta_records WHERE id = $1 AND sheet_id = $2',
@@ -7517,7 +8279,7 @@ export function univerMetaRouter(): Router {
         buildAttachmentSummaries: (q, sid, rows, af) => buildAttachmentSummaries(q, req, sid, rows, af),
         ensureAttachmentIdsExist,
       }
-      const recordWriteService = new RecordWriteService(pool, eventBus, writeHelpers)
+      const recordWriteService = new RecordWriteService(pool, eventBus, writeHelpers, yjsInvalidator)
 
       const result = await recordWriteService.patchRecords({
         sheetId,
@@ -7626,7 +8388,7 @@ export function univerMetaRouter(): Router {
       const enabled = typeof body?.enabled === 'boolean' ? body.enabled : true
 
       const validTriggers = new Set(['record.created', 'record.updated', 'record.deleted', 'field.changed', 'field.value_changed', 'schedule.cron', 'schedule.interval', 'webhook.received'])
-      const validActions = new Set(['notify', 'update_field', 'update_record', 'create_record', 'send_webhook', 'send_notification', 'lock_record'])
+      const validActions = new Set(['notify', 'update_field', 'update_record', 'create_record', 'send_webhook', 'send_notification', 'send_dingtalk_group_message', 'send_dingtalk_person_message', 'lock_record'])
       if (!validTriggers.has(triggerType)) {
         return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: `Invalid trigger_type: ${triggerType}` } })
       }
@@ -7636,6 +8398,16 @@ export function univerMetaRouter(): Router {
 
       const conditions = body?.conditions && typeof body.conditions === 'object' ? body.conditions as never : null
       const actions = Array.isArray(body?.actions) ? body.actions : null
+      const linkValidationError = await validateDingTalkAutomationLinks(
+        pool.query.bind(pool),
+        sheetId,
+        actionType,
+        actionConfig,
+        actions,
+      )
+      if (linkValidationError) {
+        return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: linkValidationError } })
+      }
 
       const rule = await automationService.createRule(sheetId, {
         name,
@@ -7702,7 +8474,7 @@ export function univerMetaRouter(): Router {
         updates.trigger_config = JSON.stringify(body.triggerConfig)
       }
       if (typeof body?.actionType === 'string') {
-        const validActions = new Set(['notify', 'update_field', 'update_record', 'create_record', 'send_webhook', 'send_notification', 'lock_record'])
+        const validActions = new Set(['notify', 'update_field', 'update_record', 'create_record', 'send_webhook', 'send_notification', 'send_dingtalk_group_message', 'send_dingtalk_person_message', 'lock_record'])
         if (!validActions.has(body.actionType)) {
           return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: `Invalid action_type: ${body.actionType}` } })
         }
@@ -7721,6 +8493,30 @@ export function univerMetaRouter(): Router {
 
       if (Object.keys(updates).length === 0) {
         return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'No fields to update' } })
+      }
+
+      if (typeof body?.actionType === 'string' || (body?.actionConfig && typeof body.actionConfig === 'object') || body?.actions !== undefined) {
+        const existing = await automationService.getRule(ruleId)
+        if (!existing || existing.sheet_id !== sheetId) {
+          return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Automation rule not found' } })
+        }
+        const nextActionType = typeof body?.actionType === 'string' ? body.actionType : existing.action_type
+        const nextActionConfig = body?.actionConfig && typeof body.actionConfig === 'object'
+          ? body.actionConfig
+          : existing.action_config
+        const nextActions = body?.actions !== undefined
+          ? Array.isArray(body.actions) ? body.actions : null
+          : existing.actions
+        const linkValidationError = await validateDingTalkAutomationLinks(
+          pool.query.bind(pool),
+          sheetId,
+          nextActionType,
+          nextActionConfig,
+          nextActions,
+        )
+        if (linkValidationError) {
+          return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: linkValidationError } })
+        }
       }
 
       const updated = await automationService.updateRule(ruleId, sheetId, {
@@ -7778,6 +8574,68 @@ export function univerMetaRouter(): Router {
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
       console.error('[univer-meta] delete automation rule failed:', err)
       return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to delete automation rule' } })
+    }
+  })
+
+  router.get('/sheets/:sheetId/automations/:ruleId/dingtalk-person-deliveries', async (req: Request, res: Response) => {
+    const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId : ''
+    const ruleId = typeof req.params.ruleId === 'string' ? req.params.ruleId : ''
+    if (!sheetId || !ruleId) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId and ruleId are required' } })
+    }
+    try {
+      const pool = poolManager.get()
+      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      if (!capabilities.canManageAutomation) return sendForbidden(res)
+      const automationService = getAutomationServiceInstance()
+      if (!automationService) {
+        return res.status(503).json({ ok: false, error: { code: 'SERVICE_UNAVAILABLE', message: 'Automation service is not available' } })
+      }
+
+      const rule = await automationService.getRule(ruleId)
+      if (!rule || rule.sheet_id !== sheetId) {
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Automation rule not found' } })
+      }
+
+      const limit = Math.min(Math.max(Number(req.query.limit) || 50, 1), 200)
+      const deliveries = await listAutomationDingTalkPersonDeliveries(pool.query.bind(pool), ruleId, limit)
+      return res.json({ ok: true, data: { deliveries } })
+    } catch (err) {
+      const hint = getDbNotReadyMessage(err)
+      if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
+      console.error('[univer-meta] list dingtalk person deliveries failed:', err)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to list DingTalk person deliveries' } })
+    }
+  })
+
+  router.get('/sheets/:sheetId/automations/:ruleId/dingtalk-group-deliveries', async (req: Request, res: Response) => {
+    const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId : ''
+    const ruleId = typeof req.params.ruleId === 'string' ? req.params.ruleId : ''
+    if (!sheetId || !ruleId) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId and ruleId are required' } })
+    }
+    try {
+      const pool = poolManager.get()
+      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      if (!capabilities.canManageAutomation) return sendForbidden(res)
+      const automationService = getAutomationServiceInstance()
+      if (!automationService) {
+        return res.status(503).json({ ok: false, error: { code: 'SERVICE_UNAVAILABLE', message: 'Automation service is not available' } })
+      }
+
+      const rule = await automationService.getRule(ruleId)
+      if (!rule || rule.sheet_id !== sheetId) {
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Automation rule not found' } })
+      }
+
+      const limit = Math.min(Math.max(Number(req.query.limit) || 50, 1), 200)
+      const deliveries = await listAutomationDingTalkGroupDeliveries(pool.query.bind(pool), ruleId, limit)
+      return res.json({ ok: true, data: { deliveries } })
+    } catch (err) {
+      const hint = getDbNotReadyMessage(err)
+      if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
+      console.error('[univer-meta] list dingtalk group deliveries failed:', err)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to list DingTalk group deliveries' } })
     }
   })
 

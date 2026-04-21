@@ -20,7 +20,13 @@ const INVALID_TOKEN = 'wrong-token-nope'
 const TEST_VIEW_ID = 'view_pub_1'
 const TEST_SHEET_ID = 'sheet_pub_1'
 
-function makeViewRow(token: string, enabled = true, expiresAt?: number) {
+function makeViewRow(
+  token: string,
+  enabled = true,
+  expiresAt?: number,
+  accessMode: 'public' | 'dingtalk' | 'dingtalk_granted' = 'public',
+  allowlists: { allowedUserIds?: string[]; allowedMemberGroupIds?: string[] } = {},
+) {
   return {
     id: TEST_VIEW_ID,
     sheetId: TEST_SHEET_ID,
@@ -32,6 +38,9 @@ function makeViewRow(token: string, enabled = true, expiresAt?: number) {
         enabled,
         publicToken: token,
         ...(expiresAt !== undefined ? { expiresAt } : {}),
+        accessMode,
+        allowedUserIds: allowlists.allowedUserIds ?? [],
+        allowedMemberGroupIds: allowlists.allowedMemberGroupIds ?? [],
       },
     }),
     hiddenFieldIds: [],
@@ -55,8 +64,23 @@ function makeFieldRows() {
   ]
 }
 
-function buildQueryHandler(viewToken: string, opts: { enabled?: boolean; expiresAt?: number } = {}): QueryHandler {
-  const view = makeViewRow(viewToken, opts.enabled ?? true, opts.expiresAt)
+function buildQueryHandler(
+  viewToken: string,
+  opts: {
+    enabled?: boolean
+    expiresAt?: number
+    accessMode?: 'public' | 'dingtalk' | 'dingtalk_granted'
+    hasDingTalkBinding?: boolean
+    hasDingTalkGrant?: boolean
+    allowedUserIds?: string[]
+    allowedMemberGroupIds?: string[]
+    hasAllowedMemberGroup?: boolean
+  } = {},
+): QueryHandler {
+  const view = makeViewRow(viewToken, opts.enabled ?? true, opts.expiresAt, opts.accessMode ?? 'public', {
+    allowedUserIds: opts.allowedUserIds,
+    allowedMemberGroupIds: opts.allowedMemberGroupIds,
+  })
   const sheet = makeSheetRow()
   const fields = makeFieldRows()
   return (sql: string, params?: unknown[]) => {
@@ -76,6 +100,32 @@ function buildQueryHandler(viewToken: string, opts: { enabled?: boolean; expires
       return {
         rows: [{ id: 'rec_new_1', version: 1, data: JSON.stringify({ fld_1: 'Alice', fld_2: 'alice@test.com' }) }],
         rowCount: 1,
+      }
+    }
+    if (sql.includes('FROM user_external_identities')) {
+      return { rows: opts.hasDingTalkBinding ? [{ local_user_id: params?.[1] }] : [], rowCount: opts.hasDingTalkBinding ? 1 : 0 }
+    }
+    if (sql.includes('FROM directory_account_links')) {
+      return { rows: [], rowCount: 0 }
+    }
+    if (sql.includes('FROM user_external_auth_grants')) {
+      return { rows: opts.hasDingTalkGrant ? [{ enabled: true }] : [], rowCount: opts.hasDingTalkGrant ? 1 : 0 }
+    }
+    if (sql.includes('FROM platform_member_group_members') && sql.includes('group_id::text = ANY')) {
+      return { rows: opts.hasAllowedMemberGroup ? [{ user_id: params?.[0], group_id: 'group_allowed_1' }] : [], rowCount: opts.hasAllowedMemberGroup ? 1 : 0 }
+    }
+    if (sql.includes('SELECT id, name, email, is_active') && sql.includes('FROM users WHERE id = ANY')) {
+      const ids = Array.isArray(params?.[0]) ? (params?.[0] as string[]) : []
+      return {
+        rows: ids.map((id) => ({ id, name: `User ${id}`, email: `${id}@test.local`, is_active: true })),
+        rowCount: ids.length,
+      }
+    }
+    if (sql.includes('FROM platform_member_groups g') && sql.includes('LEFT JOIN platform_member_group_members')) {
+      const ids = Array.isArray(params?.[0]) ? (params?.[0] as string[]) : []
+      return {
+        rows: ids.map((id) => ({ id, name: `Group ${id}`, description: `Desc ${id}`, member_count: 2 })),
+        rowCount: ids.length,
       }
     }
     return { rows: [], rowCount: 0 }
@@ -196,6 +246,241 @@ describe('Public form flow', () => {
     // The important thing is it's not 401/403.
     expect(res.status).not.toBe(401)
     expect(res.status).not.toBe(403)
+  })
+
+  test('dingtalk-protected form redirects anonymous access to sign-in', async () => {
+    const { app } = await createApp({
+      queryHandler: buildQueryHandler(VALID_TOKEN, { accessMode: 'dingtalk' }),
+      user: null,
+    })
+
+    const res = await request(app)
+      .get(`/api/multitable/form-context?viewId=${TEST_VIEW_ID}&publicToken=${VALID_TOKEN}`)
+
+    expect(res.status).toBe(401)
+    expect(res.body.error?.code).toBe('DINGTALK_AUTH_REQUIRED')
+  })
+
+  test('dingtalk-protected form allows a bound signed-in user', async () => {
+    const { app } = await createApp({
+      queryHandler: buildQueryHandler(VALID_TOKEN, { accessMode: 'dingtalk', hasDingTalkBinding: true }),
+      user: { id: 'user_bound' },
+    })
+
+    const res = await request(app)
+      .get(`/api/multitable/form-context?viewId=${TEST_VIEW_ID}&publicToken=${VALID_TOKEN}`)
+
+    expect(res.status).toBe(200)
+    expect(res.body.ok).toBe(true)
+  })
+
+  test('dingtalk-granted form rejects a bound user without grant', async () => {
+    const { app } = await createApp({
+      queryHandler: buildQueryHandler(VALID_TOKEN, {
+        accessMode: 'dingtalk_granted',
+        hasDingTalkBinding: true,
+        hasDingTalkGrant: false,
+      }),
+      user: { id: 'user_bound' },
+    })
+
+    const res = await request(app)
+      .get(`/api/multitable/form-context?viewId=${TEST_VIEW_ID}&publicToken=${VALID_TOKEN}`)
+
+    expect(res.status).toBe(403)
+    expect(res.body.error?.code).toBe('DINGTALK_GRANT_REQUIRED')
+  })
+
+  test('dingtalk-protected form rejects a bound user outside the allowlist', async () => {
+    const { app } = await createApp({
+      queryHandler: buildQueryHandler(VALID_TOKEN, {
+        accessMode: 'dingtalk',
+        hasDingTalkBinding: true,
+        allowedUserIds: ['user_allowed'],
+      }),
+      user: { id: 'user_other' },
+    })
+
+    const res = await request(app)
+      .get(`/api/multitable/form-context?viewId=${TEST_VIEW_ID}&publicToken=${VALID_TOKEN}`)
+
+    expect(res.status).toBe(403)
+    expect(res.body.error?.code).toBe('DINGTALK_FORM_NOT_ALLOWED')
+  })
+
+  test('dingtalk-protected form allows a bound user through allowed member group membership', async () => {
+    const { app } = await createApp({
+      queryHandler: buildQueryHandler(VALID_TOKEN, {
+        accessMode: 'dingtalk',
+        hasDingTalkBinding: true,
+        allowedMemberGroupIds: ['group_allowed_1'],
+        hasAllowedMemberGroup: true,
+      }),
+      user: { id: 'user_bound' },
+    })
+
+    const res = await request(app)
+      .get(`/api/multitable/form-context?viewId=${TEST_VIEW_ID}&publicToken=${VALID_TOKEN}`)
+
+    expect(res.status).toBe(200)
+    expect(res.body.ok).toBe(true)
+  })
+
+  test('form share config routes expose and update protected access mode', async () => {
+    let storedConfig = {
+      publicForm: {
+        enabled: true,
+        publicToken: VALID_TOKEN,
+        accessMode: 'public',
+      },
+    }
+    const { app } = await createApp({
+      user: { id: 'admin_1', perms: ['multitable:write', 'multitable:share'] },
+      queryHandler: async (sql, params) => {
+        if (sql.includes('SELECT id, sheet_id, name, type, filter_info, sort_info, group_info, hidden_field_ids, config FROM meta_views WHERE id = $1')) {
+          expect(params).toEqual([TEST_VIEW_ID])
+          return {
+            rows: [{
+              id: TEST_VIEW_ID,
+              sheet_id: TEST_SHEET_ID,
+              name: 'Public Form View',
+              type: 'form',
+              filter_info: {},
+              sort_info: {},
+              group_info: {},
+              hidden_field_ids: [],
+              config: storedConfig,
+            }],
+          }
+        }
+        if (sql.includes('UPDATE meta_views') && sql.includes('SET config = $2::jsonb')) {
+          storedConfig = JSON.parse(String(params?.[1] ?? '{}'))
+          return { rows: [], rowCount: 1 }
+        }
+        throw new Error(`Unhandled SQL in test: ${sql}`)
+      },
+    })
+
+    const getResponse = await request(app)
+      .get(`/api/multitable/sheets/${TEST_SHEET_ID}/views/${TEST_VIEW_ID}/form-share`)
+      .expect(200)
+
+    expect(getResponse.body.data.accessMode).toBe('public')
+
+    const patchResponse = await request(app)
+      .patch(`/api/multitable/sheets/${TEST_SHEET_ID}/views/${TEST_VIEW_ID}/form-share`)
+      .send({ accessMode: 'dingtalk_granted' })
+      .expect(200)
+
+    expect(patchResponse.body.data.accessMode).toBe('dingtalk_granted')
+    expect(storedConfig.publicForm.accessMode).toBe('dingtalk_granted')
+  })
+
+  test('form share config exposes and updates allowlists', async () => {
+    let storedConfig = {
+      publicForm: {
+        enabled: true,
+        publicToken: VALID_TOKEN,
+        accessMode: 'dingtalk',
+        allowedUserIds: ['user_1'],
+        allowedMemberGroupIds: ['group_1'],
+      },
+    }
+    const { app } = await createApp({
+      user: { id: 'admin_1', perms: ['multitable:write'] },
+      queryHandler: async (sql, params) => {
+        if (sql.includes('SELECT id, sheet_id, name, type, filter_info, sort_info, group_info, hidden_field_ids, config FROM meta_views WHERE id = $1')) {
+          return {
+            rows: [{
+              id: TEST_VIEW_ID,
+              sheet_id: TEST_SHEET_ID,
+              name: 'Public Form View',
+              type: 'form',
+              filter_info: {},
+              sort_info: {},
+              group_info: {},
+              hidden_field_ids: [],
+              config: storedConfig,
+            }],
+          }
+        }
+        if (sql.includes('FROM users') && sql.includes('ANY($1::text[])')) {
+          return { rows: [{ id: 'user_1', name: 'User 1', email: 'user1@test.local', is_active: true }, { id: 'user_2', name: 'User 2', email: 'user2@test.local', is_active: true }] }
+        }
+        if (sql.includes('FROM platform_member_groups')) {
+          return { rows: [{ id: 'group_1', name: 'Ops', description: 'Operations', member_count: 3 }, { id: 'group_2', name: 'Sales', description: 'Sales team', member_count: 4 }] }
+        }
+        if (sql.includes('SELECT id FROM users WHERE id = ANY')) {
+          const ids = Array.isArray(params?.[0]) ? (params?.[0] as string[]) : []
+          return { rows: ids.map((id) => ({ id })) }
+        }
+        if (sql.includes('SELECT id::text AS id FROM platform_member_groups WHERE id::text = ANY')) {
+          const ids = Array.isArray(params?.[0]) ? (params?.[0] as string[]) : []
+          return { rows: ids.map((id) => ({ id })) }
+        }
+        if (sql.includes('UPDATE meta_views') && sql.includes('SET config = $2::jsonb')) {
+          storedConfig = JSON.parse(String(params?.[1] ?? '{}'))
+          return { rows: [], rowCount: 1 }
+        }
+        throw new Error(`Unhandled SQL in test: ${sql}`)
+      },
+    })
+
+    const getResponse = await request(app)
+      .get(`/api/multitable/sheets/${TEST_SHEET_ID}/views/${TEST_VIEW_ID}/form-share`)
+      .expect(200)
+
+    expect(getResponse.body.data.allowedUserIds).toEqual(['user_1'])
+    expect(getResponse.body.data.allowedUsers[0].label).toBe('User 1')
+    expect(getResponse.body.data.allowedMemberGroupIds).toEqual(['group_1'])
+
+    const patchResponse = await request(app)
+      .patch(`/api/multitable/sheets/${TEST_SHEET_ID}/views/${TEST_VIEW_ID}/form-share`)
+      .send({ allowedUserIds: ['user_2'], allowedMemberGroupIds: ['group_2'] })
+      .expect(200)
+
+    expect(patchResponse.body.data.allowedUserIds).toEqual(['user_2'])
+    expect(patchResponse.body.data.allowedMemberGroupIds).toEqual(['group_2'])
+    expect(storedConfig.publicForm.allowedUserIds).toEqual(['user_2'])
+    expect(storedConfig.publicForm.allowedMemberGroupIds).toEqual(['group_2'])
+  })
+
+  test('form share config rejects allowlists on fully public mode', async () => {
+    const storedConfig = {
+      publicForm: {
+        enabled: true,
+        publicToken: VALID_TOKEN,
+        accessMode: 'public',
+      },
+    }
+    const { app } = await createApp({
+      user: { id: 'admin_1', perms: ['multitable:write'] },
+      queryHandler: async (sql) => {
+        if (sql.includes('SELECT id, sheet_id, name, type, filter_info, sort_info, group_info, hidden_field_ids, config FROM meta_views WHERE id = $1')) {
+          return {
+            rows: [{
+              id: TEST_VIEW_ID,
+              sheet_id: TEST_SHEET_ID,
+              name: 'Public Form View',
+              type: 'form',
+              filter_info: {},
+              sort_info: {},
+              group_info: {},
+              hidden_field_ids: [],
+              config: storedConfig,
+            }],
+          }
+        }
+        throw new Error(`Unhandled SQL in test: ${sql}`)
+      },
+    })
+
+    const patchResponse = await request(app)
+      .patch(`/api/multitable/sheets/${TEST_SHEET_ID}/views/${TEST_VIEW_ID}/form-share`)
+      .send({ accessMode: 'public', allowedUserIds: ['user_2'] })
+      .expect(400)
+
+    expect(patchResponse.body.error?.message).toMatch(/require a DingTalk-protected access mode/i)
   })
 
   test('rate limit exceeded -> 429 with Retry-After header', async () => {

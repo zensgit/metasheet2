@@ -48,11 +48,11 @@
       <div class="directory-admin__account-grid">
         <div>
           <strong>本地用户</strong>
-          <div>{{ manualAdmissionResult.userName || manualAdmissionResult.email || manualAdmissionResult.userId }}</div>
+          <div>{{ manualAdmissionResult.userName || manualAdmissionResult.email || manualAdmissionResult.username || manualAdmissionResult.mobile || manualAdmissionResult.userId }}</div>
         </div>
         <div>
-          <strong>邮箱</strong>
-          <div>{{ manualAdmissionResult.email }}</div>
+          <strong>登录账号</strong>
+          <div>{{ manualAdmissionResult.email || manualAdmissionResult.username || manualAdmissionResult.mobile || manualAdmissionResult.userId }}</div>
         </div>
         <div>
           <strong>用户 ID</strong>
@@ -84,6 +84,60 @@
       <pre v-if="manualAdmissionResult.onboarding?.inviteMessage" class="directory-admin__invite">
 {{ manualAdmissionResult.onboarding.inviteMessage }}
       </pre>
+    </article>
+
+    <article v-if="autoAdmissionOnboardingPackets.length > 0" class="directory-admin__progress-card">
+      <div class="directory-admin__section-head">
+        <div>
+          <h2>本次自动准入临时凭据</h2>
+          <p class="directory-admin__hint">以下无邮箱目录成员已自动创建本地用户，请通过安全渠道下发登录账号与临时密码。</p>
+        </div>
+        <div class="directory-admin__actions">
+          <button class="directory-admin__button directory-admin__button--secondary" type="button" @click="clearAutoAdmissionOnboardingPackets()">
+            关闭结果
+          </button>
+        </div>
+      </div>
+
+      <article
+        v-for="packet in autoAdmissionOnboardingPackets"
+        :key="packet.userId"
+        class="directory-admin__review-admission"
+      >
+        <div class="directory-admin__account-grid">
+          <div>
+            <strong>本地用户</strong>
+            <div>{{ packet.name || packet.email || packet.username || packet.mobile || packet.userId }}</div>
+          </div>
+          <div>
+            <strong>登录账号</strong>
+            <div>{{ packet.email || packet.username || packet.mobile || packet.userId }}</div>
+          </div>
+          <div>
+            <strong>用户 ID</strong>
+            <div>{{ packet.userId }}</div>
+          </div>
+          <div>
+            <strong>手机号</strong>
+            <div>{{ packet.mobile || '未填写' }}</div>
+          </div>
+        </div>
+        <p class="directory-admin__status">
+          临时密码：{{ packet.temporaryPassword }}
+        </p>
+        <p v-if="packet.onboarding?.acceptInviteUrl" class="directory-admin__hint">
+          邀请链接：
+          <a :href="packet.onboarding.acceptInviteUrl" target="_blank" rel="noreferrer">
+            {{ packet.onboarding.acceptInviteUrl }}
+          </a>
+        </p>
+        <p v-else class="directory-admin__hint">
+          该账号未生成邀请链接，请直接分发登录账号和临时密码。
+        </p>
+        <pre v-if="packet.onboarding?.inviteMessage" class="directory-admin__invite">
+{{ packet.onboarding.inviteMessage }}
+        </pre>
+      </article>
     </article>
 
     <div class="directory-admin__layout">
@@ -438,7 +492,7 @@
               </div>
             </div>
             <p class="directory-admin__hint">
-              本地用户：{{ item.account.localUser ? (item.account.localUser.email || item.account.localUser.id) : '未绑定' }} ·
+              本地用户：{{ item.account.localUser ? describeLocalUserIdentifier(item.account.localUser) : '未绑定' }} ·
               外部用户：{{ item.account.externalUserId }} ·
               部门：{{ item.account.departmentPaths.join('，') || '未分配部门' }}
             </p>
@@ -453,7 +507,7 @@
             </div>
             <div v-if="item.kind === 'pending_binding'" class="directory-admin__form-grid directory-admin__form-grid--account">
               <label class="directory-admin__field">
-                <span>绑定到本地用户 ID / 邮箱</span>
+                <span>绑定到本地用户 ID / 邮箱 / 用户名 / 手机号</span>
                 <input
                   :value="readBindingDraft(item.account)"
                   class="directory-admin__input"
@@ -480,8 +534,8 @@
                 type="button"
                 @click="applyRecommendedLocalUser(item.account.id, recommendation)"
               >
-                <strong>{{ recommendation.localUser.name || recommendation.localUser.email || recommendation.localUser.id }}</strong>
-                <span>{{ recommendation.localUser.email || recommendation.localUser.id }}</span>
+                <strong>{{ describeLocalUserLabel(recommendation.localUser) }}</strong>
+                <span>{{ describeLocalUserIdentifier(recommendation.localUser) }}</span>
                 <small>{{ readRecommendationReasonLabel(recommendation.reasons) }}</small>
               </button>
             </div>
@@ -493,8 +547,8 @@
                 type="button"
                 @click="chooseLocalUser(item.account.id, user)"
               >
-                <strong>{{ user.name || user.email }}</strong>
-                <span>{{ user.email }}</span>
+                <strong>{{ describeLocalUserLabel(user) }}</strong>
+                <span>{{ describeLocalUserIdentifier(user) }}</span>
                 <small>{{ user.id }} · {{ user.role }} · {{ user.is_active ? 'active' : 'inactive' }}</small>
               </button>
             </div>
@@ -533,13 +587,23 @@
                   />
                 </label>
                 <label class="directory-admin__field">
-                  <span>邮箱</span>
+                  <span>邮箱（可选）</span>
                   <input
                     :value="readManualAdmissionDraft(item.account).email"
                     class="directory-admin__input"
                     type="email"
                     placeholder="例如 alpha@example.com"
                     @input="onManualAdmissionDraftInput(item.account.id, 'email', $event)"
+                  />
+                </label>
+                <label class="directory-admin__field">
+                  <span>用户名（可选）</span>
+                  <input
+                    :value="readManualAdmissionDraft(item.account).username"
+                    class="directory-admin__input"
+                    type="text"
+                    placeholder="例如 liqing"
+                    @input="onManualAdmissionDraftInput(item.account.id, 'username', $event)"
                   />
                 </label>
                 <label class="directory-admin__field">
@@ -553,7 +617,7 @@
                   />
                 </label>
               </div>
-              <p class="directory-admin__hint">创建成功后会保留邀请信息；若后续绑定失败，目录卡片会自动选中新建用户，便于继续重试。</p>
+              <p class="directory-admin__hint">姓名必填；邮箱、用户名、手机号至少填写一项。无邮箱用户会走临时密码 + 首登强制改密。</p>
             </div>
             <div class="directory-admin__actions">
               <button
@@ -900,7 +964,7 @@
               <div>
                 <strong>{{ account.name }}</strong>
                 <p class="directory-admin__hint">
-                  {{ account.localUser ? `本地用户：${account.localUser.email || account.localUser.id}` : '未绑定本地用户' }}
+                  {{ account.localUser ? `本地用户：${describeLocalUserIdentifier(account.localUser)}` : '未绑定本地用户' }}
                 </p>
               </div>
               <div class="directory-admin__chips">
@@ -936,7 +1000,7 @@
 
             <div class="directory-admin__form-grid directory-admin__form-grid--account">
               <label class="directory-admin__field">
-                <span>绑定到本地用户 ID / 邮箱</span>
+                <span>绑定到本地用户 ID / 邮箱 / 用户名 / 手机号</span>
                 <input
                   :value="readBindingDraft(account)"
                   class="directory-admin__input"
@@ -995,8 +1059,8 @@
                 type="button"
                 @click="chooseLocalUser(account.id, user)"
               >
-                <strong>{{ user.name || user.email }}</strong>
-                <span>{{ user.email }}</span>
+                <strong>{{ describeLocalUserLabel(user) }}</strong>
+                <span>{{ describeLocalUserIdentifier(user) }}</span>
                 <small>{{ user.id }} · {{ user.role }} · {{ user.is_active ? 'active' : 'inactive' }}</small>
               </button>
             </div>
@@ -1257,6 +1321,7 @@ type DirectoryAccount = {
   localUser: {
     id: string
     email: string | null
+    username?: string | null
     name: string | null
   } | null
   departmentPaths: string[]
@@ -1264,7 +1329,8 @@ type DirectoryAccount = {
 
 type LocalUserOption = {
   id: string
-  email: string
+  email: string | null
+  username?: string | null
   name: string | null
   mobile?: string | null
   role: string
@@ -1272,6 +1338,7 @@ type LocalUserOption = {
 }
 
 type OnboardingPacket = {
+  accountLabel?: string
   acceptInviteUrl?: string
   inviteMessage?: string
 }
@@ -1279,6 +1346,7 @@ type OnboardingPacket = {
 type ManualAdmissionDraft = {
   name: string
   email: string
+  username: string
   mobile: string
 }
 
@@ -1288,7 +1356,8 @@ type ManualAdmissionResult = {
   integrationId: string
   userId: string
   userName: string
-  email: string
+  email: string | null
+  username: string | null
   mobile: string
   temporaryPassword: string
   onboarding: OnboardingPacket | null
@@ -1296,6 +1365,16 @@ type ManualAdmissionResult = {
   bindError: string
   mobileBackfilled: boolean
   mobileBackfillError: string
+}
+
+type AutoAdmissionOnboardingPacket = {
+  userId: string
+  name: string
+  email: string | null
+  username: string | null
+  mobile: string | null
+  temporaryPassword: string
+  onboarding: OnboardingPacket | null
 }
 
 type InitialDirectoryNavigation = {
@@ -1401,6 +1480,7 @@ const userSearchError = reactive<Record<string, string>>({})
 const manualAdmissionDrafts = reactive<Record<string, ManualAdmissionDraft>>({})
 const manualAdmissionExpanded = reactive<Record<string, boolean>>({})
 const manualAdmissionResult = ref<ManualAdmissionResult | null>(null)
+const autoAdmissionOnboardingPackets = ref<AutoAdmissionOnboardingPacket[]>([])
 const grantToggles = reactive<Record<string, boolean>>({})
 const selectedReviewIds = reactive<Record<string, boolean>>({})
 const reviewDisableDingTalkGrant = ref(true)
@@ -1680,6 +1760,7 @@ function resetDraft() {
   for (const key of Object.keys(userSearchError)) delete userSearchError[key]
   for (const key of Object.keys(grantToggles)) delete grantToggles[key]
   for (const key of Object.keys(selectedReviewIds)) delete selectedReviewIds[key]
+  autoAdmissionOnboardingPackets.value = []
   draft.name = ''
   draft.corpId = ''
   draft.appKey = ''
@@ -1760,6 +1841,7 @@ function readMemberGroupSyncLabel(integration: DirectoryIntegration): string {
 async function selectIntegration(integrationId: string): Promise<void> {
   selectedIntegrationId.value = integrationId
   testResult.value = null
+  clearAutoAdmissionOnboardingPackets()
   clearFocusedAccount()
   accountPage.value = 1
   accountTotal.value = 0
@@ -1871,7 +1953,7 @@ async function loadIntegrations() {
 }
 
 function readBindingDraft(account: DirectoryAccount): string {
-  return bindingDrafts[account.id] ?? account.localUser?.email ?? account.localUser?.id ?? ''
+  return bindingDrafts[account.id] ?? describeLocalUserIdentifier(account.localUser) ?? ''
 }
 
 function readBindingDraftByAccountId(accountId: string): string {
@@ -1942,7 +2024,13 @@ function updateBindingDraft(accountId: string, value: string) {
   const selectedUser = selectedBindingUsers[accountId]
   if (!selectedUser) return
   const normalizedValue = value.trim()
-  if (normalizedValue !== selectedUser.id && normalizedValue !== (selectedUser.email || '')) {
+  const selectedIdentifiers = new Set([
+    selectedUser.id,
+    selectedUser.email || '',
+    selectedUser.username || '',
+    selectedUser.mobile || '',
+  ].filter((item) => item.trim().length > 0))
+  if (!selectedIdentifiers.has(normalizedValue)) {
     delete selectedBindingUsers[accountId]
     delete mobileOverrideConfirmations[accountId]
     delete mobileConflictHints[accountId]
@@ -2003,7 +2091,7 @@ async function searchLocalUsers(accountId: string) {
 }
 
 function chooseLocalUser(accountId: string, user: LocalUserOption) {
-  updateBindingDraft(accountId, user.email || user.id)
+  updateBindingDraft(accountId, describeLocalUserIdentifier(user))
   selectedBindingUsers[accountId] = user
   delete mobileOverrideConfirmations[accountId]
   delete mobileConflictHints[accountId]
@@ -2011,7 +2099,7 @@ function chooseLocalUser(accountId: string, user: LocalUserOption) {
 }
 
 function applyRecommendedLocalUser(accountId: string, recommendation: DirectoryBindingRecommendation) {
-  updateBindingDraft(accountId, recommendation.localUser.email || recommendation.localUser.id)
+  updateBindingDraft(accountId, describeLocalUserIdentifier(recommendation.localUser))
   selectedBindingUsers[accountId] = recommendation.localUser
   delete mobileOverrideConfirmations[accountId]
   delete mobileConflictHints[accountId]
@@ -2117,6 +2205,7 @@ function buildManualAdmissionDraft(account: DirectoryAccount): ManualAdmissionDr
   return {
     name: account.name?.trim() || '',
     email: account.email?.trim() || '',
+    username: '',
     mobile: account.mobile?.trim() || '',
   }
 }
@@ -2143,6 +2232,7 @@ function onManualAdmissionDraftInput(accountId: string, field: keyof ManualAdmis
   const current = manualAdmissionDrafts[accountId] ?? {
     name: '',
     email: '',
+    username: '',
     mobile: '',
   }
   manualAdmissionDrafts[accountId] = {
@@ -2153,11 +2243,26 @@ function onManualAdmissionDraftInput(accountId: string, field: keyof ManualAdmis
 
 function canSubmitManualAdmission(item: DirectoryReviewItem): boolean {
   const draft = readManualAdmissionDraft(item.account)
-  return draft.name.trim().length > 0 && draft.email.trim().length > 0
+  return draft.name.trim().length > 0
+    && (draft.email.trim().length > 0 || draft.username.trim().length > 0 || draft.mobile.trim().length > 0)
+}
+
+function describeLocalUserIdentifier(user: Pick<LocalUserOption, 'id' | 'email' | 'username' | 'mobile'> | null | undefined): string {
+  if (!user) return ''
+  return user.email || user.username || user.mobile || user.id
+}
+
+function describeLocalUserLabel(user: Pick<LocalUserOption, 'id' | 'email' | 'username' | 'mobile' | 'name'> | null | undefined): string {
+  if (!user) return ''
+  return user.name || describeLocalUserIdentifier(user)
 }
 
 function clearManualAdmissionResult(): void {
   manualAdmissionResult.value = null
+}
+
+function clearAutoAdmissionOnboardingPackets(): void {
+  autoAdmissionOnboardingPackets.value = []
 }
 
 function readCreatedLocalUserOption(data: Record<string, unknown>, fallback: ManualAdmissionDraft): LocalUserOption {
@@ -2168,12 +2273,34 @@ function readCreatedLocalUserOption(data: Record<string, unknown>, fallback: Man
   }
   return {
     id,
-    email: typeof user?.email === 'string' && user.email.trim().length > 0 ? user.email : fallback.email,
+    email: typeof user?.email === 'string' && user.email.trim().length > 0 ? user.email : (fallback.email || null),
+    username: typeof user?.username === 'string' && user.username.trim().length > 0 ? user.username : (fallback.username || null),
     name: typeof user?.name === 'string' && user.name.trim().length > 0 ? user.name : fallback.name,
     mobile: typeof user?.mobile === 'string' && user.mobile.trim().length > 0 ? user.mobile : null,
     role: typeof user?.role === 'string' && user.role.trim().length > 0 ? user.role : 'user',
     is_active: typeof user?.is_active === 'boolean' ? user.is_active : true,
   }
+}
+
+function readAutoAdmissionOnboardingPackets(data: Record<string, unknown> | undefined): AutoAdmissionOnboardingPacket[] {
+  const rawPackets = Array.isArray(data?.autoAdmissionOnboardingPackets) ? data.autoAdmissionOnboardingPackets : []
+  return rawPackets.flatMap((entry) => {
+    if (!entry || typeof entry !== 'object') return []
+    const packet = entry as Record<string, unknown>
+    const userId = typeof packet.userId === 'string' ? packet.userId.trim() : ''
+    if (!userId) return []
+    return [{
+      userId,
+      name: typeof packet.name === 'string' ? packet.name : '',
+      email: typeof packet.email === 'string' && packet.email.trim().length > 0 ? packet.email : null,
+      username: typeof packet.username === 'string' && packet.username.trim().length > 0 ? packet.username : null,
+      mobile: typeof packet.mobile === 'string' && packet.mobile.trim().length > 0 ? packet.mobile : null,
+      temporaryPassword: typeof packet.temporaryPassword === 'string' ? packet.temporaryPassword : '',
+      onboarding: packet.onboarding && typeof packet.onboarding === 'object'
+        ? packet.onboarding as OnboardingPacket
+        : null,
+    }]
+  })
 }
 
 function buildPayload() {
@@ -2249,12 +2376,15 @@ async function syncIntegration() {
   if (!selectedIntegration.value) return
   busy.value = true
   try {
+    clearAutoAdmissionOnboardingPackets()
     const response = await apiFetch(`/api/admin/directory/integrations/${selectedIntegration.value.id}/sync`, {
       method: 'POST',
     })
     const body = await readJson(response)
     if (!response.ok) throw new Error(readApiError(body, '目录同步失败'))
+    autoAdmissionOnboardingPackets.value = readAutoAdmissionOnboardingPackets(body?.data as Record<string, unknown> | undefined)
     const autoAdmittedCount = Number(body?.data?.run?.stats?.autoAdmittedCount ?? 0)
+    const autoAdmittedNoEmailCount = Number(body?.data?.run?.stats?.autoAdmittedNoEmailCount ?? 0)
     const autoAdmissionSkippedMissingEmailCount = Number(body?.data?.run?.stats?.autoAdmissionSkippedMissingEmailCount ?? 0)
     const autoAdmissionExcludedCount = Number(body?.data?.run?.stats?.autoAdmissionExcludedCount ?? 0)
     const memberGroupsSyncedCount = Number(body?.data?.run?.stats?.memberGroupsSyncedCount ?? 0)
@@ -2264,6 +2394,7 @@ async function syncIntegration() {
     const memberGroupDefaultNamespaceAdmissionsCount = Number(body?.data?.run?.stats?.memberGroupDefaultNamespaceAdmissionsCount ?? 0)
     if (
       autoAdmittedCount > 0
+      || autoAdmittedNoEmailCount > 0
       || autoAdmissionSkippedMissingEmailCount > 0
       || autoAdmissionExcludedCount > 0
       || memberGroupsSyncedCount > 0
@@ -2271,6 +2402,7 @@ async function syncIntegration() {
     ) {
       const parts = ['目录同步已完成']
       if (autoAdmittedCount > 0) parts.push(`自动准入 ${autoAdmittedCount} 位成员`)
+      if (autoAdmittedNoEmailCount > 0) parts.push(`其中 ${autoAdmittedNoEmailCount} 位成员无邮箱，已生成平台登录账号和临时密码`)
       if (autoAdmissionSkippedMissingEmailCount > 0) parts.push(`${autoAdmissionSkippedMissingEmailCount} 位成员因缺少邮箱未自动创建`)
       if (autoAdmissionExcludedCount > 0) parts.push(`${autoAdmissionExcludedCount} 位成员命中排除部门，未自动创建`)
       if (memberGroupsSyncedCount > 0) {
@@ -2657,7 +2789,7 @@ async function bindAccount(account: DirectoryAccount) {
     const boundAccount = body?.data?.account as DirectoryAccount | undefined
     if (boundAccount) {
       accounts.value = accounts.value.map((item) => (item.id === boundAccount.id ? boundAccount : item))
-      bindingDrafts[account.id] = boundAccount.localUser?.email || boundAccount.localUser?.id || readBindingDraft(account)
+      bindingDrafts[account.id] = describeLocalUserIdentifier(boundAccount.localUser) || readBindingDraft(account)
     }
 
     setStatus(`目录成员 ${account.name} 已绑定到本地用户`)
@@ -3007,11 +3139,12 @@ async function createAndBindReviewUser(item: DirectoryReviewItem) {
   const nextDraft: ManualAdmissionDraft = {
     name: draft.name.trim(),
     email: draft.email.trim(),
+    username: draft.username.trim(),
     mobile: draft.mobile.trim(),
   }
   manualAdmissionDrafts[item.account.id] = nextDraft
-  if (!nextDraft.name || !nextDraft.email) {
-    setStatus(`待处理成员 ${item.account.name} 的姓名和邮箱不能为空`, 'error')
+  if (!nextDraft.name || (!nextDraft.email && !nextDraft.username && !nextDraft.mobile)) {
+    setStatus(`待处理成员 ${item.account.name} 的姓名必填，且邮箱、用户名、手机号至少填写一项`, 'error')
     return
   }
 
@@ -3021,7 +3154,8 @@ async function createAndBindReviewUser(item: DirectoryReviewItem) {
       method: 'POST',
       body: JSON.stringify({
         name: nextDraft.name,
-        email: nextDraft.email,
+        email: nextDraft.email || undefined,
+        username: nextDraft.username || undefined,
         mobile: nextDraft.mobile || undefined,
         enableDingTalkGrant: readGrantToggle(item.account.id),
       }),
@@ -3037,7 +3171,7 @@ async function createAndBindReviewUser(item: DirectoryReviewItem) {
       ? data.onboarding as OnboardingPacket
       : null
 
-    updateBindingDraft(item.account.id, createdUser.email || createdUser.id)
+    updateBindingDraft(item.account.id, describeLocalUserIdentifier(createdUser))
     selectedBindingUsers[item.account.id] = createdUser
     clearBindingSearch(item.account.id)
     delete mobileOverrideConfirmations[item.account.id]
@@ -3051,7 +3185,8 @@ async function createAndBindReviewUser(item: DirectoryReviewItem) {
       integrationId: item.account.integrationId,
       userId: createdUser.id,
       userName: createdUser.name || nextDraft.name,
-      email: createdUser.email || nextDraft.email,
+      email: createdUser.email || nextDraft.email || null,
+      username: createdUser.username || nextDraft.username || null,
       mobile: createdUser.mobile || nextDraft.mobile,
       temporaryPassword,
       onboarding,

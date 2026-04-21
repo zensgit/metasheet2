@@ -585,6 +585,8 @@ export type AutomationActionType =
   | 'create_record'
   | 'send_webhook'
   | 'send_notification'
+  | 'send_dingtalk_group_message'
+  | 'send_dingtalk_person_message'
   | 'lock_record'
   // Legacy aliases
   | 'notify'
@@ -632,6 +634,7 @@ export interface AutomationExecution {
   triggerType: AutomationTriggerType
   startedAt: string
   completedAt?: string
+  duration?: number
   durationMs?: number
   steps?: AutomationStepResult[]
   error?: string
@@ -726,11 +729,19 @@ export interface FormShareConfig {
   publicToken: string | null
   expiresAt: string | null
   status: 'active' | 'expired' | 'disabled'
+  accessMode: 'public' | 'dingtalk' | 'dingtalk_granted'
+  allowedUserIds: string[]
+  allowedUsers: MetaSheetPermissionCandidate[]
+  allowedMemberGroupIds: string[]
+  allowedMemberGroups: MetaSheetPermissionCandidate[]
 }
 
 export interface FormShareConfigUpdate {
   enabled?: boolean
   expiresAt?: string | null
+  accessMode?: 'public' | 'dingtalk' | 'dingtalk_granted'
+  allowedUserIds?: string[]
+  allowedMemberGroupIds?: string[]
 }
 
 // --- API Tokens ---
@@ -778,6 +789,69 @@ export interface WebhookDelivery {
   success: boolean
   retryCount: number
   timestamp: string
+}
+
+// --- DingTalk Group Destinations ---
+export interface DingTalkGroupDestination {
+  id: string
+  name: string
+  webhookUrl: string
+  secret?: string
+  enabled: boolean
+  sheetId?: string
+  createdBy: string
+  createdAt: string
+  updatedAt?: string
+  lastTestedAt?: string
+  lastTestStatus?: 'success' | 'failed'
+  lastTestError?: string
+}
+
+export interface DingTalkGroupDestinationInput {
+  name: string
+  webhookUrl: string
+  secret?: string
+  enabled?: boolean
+  sheetId?: string
+}
+
+export interface DingTalkGroupDelivery {
+  id: string
+  destinationId: string
+  destinationName?: string
+  sourceType: 'manual_test' | 'automation'
+  subject: string
+  content: string
+  success: boolean
+  httpStatus?: number
+  responseBody?: string
+  errorMessage?: string
+  automationRuleId?: string
+  recordId?: string
+  initiatedBy?: string
+  createdAt: string
+  deliveredAt?: string
+}
+
+export interface DingTalkPersonDelivery {
+  id: string
+  localUserId: string
+  dingtalkUserId?: string
+  sourceType: 'manual_test' | 'automation'
+  subject: string
+  content: string
+  success: boolean
+  httpStatus?: number
+  responseBody?: string
+  errorMessage?: string
+  automationRuleId?: string
+  recordId?: string
+  initiatedBy?: string
+  createdAt: string
+  deliveredAt?: string
+  localUserLabel?: string
+  localUserSubtitle?: string
+  localUserIsActive: boolean
 }
 
 // --- Field Validation ---

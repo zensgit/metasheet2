@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { cpSync, mkdirSync } from 'node:fs'
+import { mkdirSync, readdirSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { spawnSync } from 'node:child_process'
 
@@ -12,7 +12,7 @@ Runs the Yjs internal rollout gate sequence:
 - retention health check
 - packet export
 - rollout report capture
-- signoff draft copy
+- signoff draft prefill
 
 Options:
   --base-url <url>        Base URL, default from YJS_BASE_URL or http://localhost:3000
@@ -101,7 +101,12 @@ function printPlan(opts) {
   console.log('  2. check-yjs-retention-health.mjs')
   console.log('  3. export-yjs-rollout-packet.mjs')
   console.log('  4. capture-yjs-rollout-report.mjs')
-  console.log('  5. copy signoff template into gate output directory')
+  console.log('  5. prefill signoff draft into gate output directory')
+}
+
+function extractFirstWrittenJsonPath(stdout) {
+  const match = stdout.match(/Wrote\s+(.+\.json)/)
+  return match ? match[1].trim() : ''
 }
 
 async function main() {
@@ -124,10 +129,12 @@ async function main() {
   const retentionScript = path.resolve(process.cwd(), 'scripts/ops/check-yjs-retention-health.mjs')
   const exportScript = path.resolve(process.cwd(), 'scripts/ops/export-yjs-rollout-packet.mjs')
   const reportScript = path.resolve(process.cwd(), 'scripts/ops/capture-yjs-rollout-report.mjs')
-  const signoffTemplate = path.resolve(process.cwd(), 'docs/operations/yjs-internal-rollout-signoff-template-20260416.md')
+  const signoffScript = path.resolve(process.cwd(), 'scripts/ops/prefill-yjs-rollout-signoff.mjs')
 
   const packetDir = path.join(opts.outputDir, 'packet')
   const reportsDir = path.join(opts.outputDir, 'reports')
+  const statusPath = path.join(opts.outputDir, 'status.json')
+  const retentionPath = path.join(opts.outputDir, 'retention.json')
   mkdirSync(opts.outputDir, { recursive: true })
 
   const statusResult = runNodeScript(statusScript, ['--json-only'], {
@@ -138,6 +145,7 @@ async function main() {
     process.stderr.write(statusResult.stderr)
     process.exit(statusResult.exitCode)
   }
+  writeFileSync(statusPath, statusResult.stdout, 'utf8')
 
   const retentionResult = runNodeScript(retentionScript, ['--json-only'], {
     YJS_DATABASE_URL: opts.databaseUrl,
@@ -146,6 +154,7 @@ async function main() {
     process.stderr.write(retentionResult.stderr)
     process.exit(retentionResult.exitCode)
   }
+  writeFileSync(retentionPath, retentionResult.stdout, 'utf8')
 
   const exportResult = runNodeScript(exportScript, ['--output-dir', packetDir])
   if (exportResult.exitCode !== 0) {
@@ -163,9 +172,48 @@ async function main() {
     process.exit(reportResult.exitCode)
   }
 
-  const signoffCopy = path.join(opts.outputDir, 'yjs-internal-rollout-signoff.md')
-  cpSync(signoffTemplate, signoffCopy)
+  const reportJsonPath =
+    extractFirstWrittenJsonPath(reportResult.stdout) ||
+    readdirSync(reportsDir)
+      .filter((file) => file.endsWith('.json'))
+      .sort()
+      .map((file) => path.join(reportsDir, file))
+      .at(-1) ||
+    ''
 
+  const signoffCopy = path.join(opts.outputDir, 'yjs-internal-rollout-signoff.md')
+  const signoffResult = runNodeScript(
+    signoffScript,
+    [
+      '--status-json',
+      statusPath,
+      '--retention-json',
+      retentionPath,
+      '--output-path',
+      signoffCopy,
+      '--packet-dir',
+      packetDir,
+      ...(reportJsonPath ? ['--report-json', reportJsonPath] : []),
+    ],
+    {
+      YJS_TRIAL_ENVIRONMENT: process.env.YJS_TRIAL_ENVIRONMENT || '',
+      YJS_TRIAL_OWNER: process.env.YJS_TRIAL_OWNER || '',
+      YJS_TRIAL_REVIEWER: process.env.YJS_TRIAL_REVIEWER || '',
+      YJS_TRIAL_WINDOW: process.env.YJS_TRIAL_WINDOW || '',
+      ENABLE_YJS_COLLAB: process.env.ENABLE_YJS_COLLAB || 'true',
+      YJS_TRIAL_SHEETS: process.env.YJS_TRIAL_SHEETS || '',
+      YJS_TRIAL_USERS: process.env.YJS_TRIAL_USERS || '',
+      YJS_TRIAL_USER_COUNT: process.env.YJS_TRIAL_USER_COUNT || '',
+      YJS_TRIAL_EXCLUDED_SHEETS: process.env.YJS_TRIAL_EXCLUDED_SHEETS || '',
+    }
+  )
+  if (signoffResult.exitCode !== 0) {
+    process.stderr.write(signoffResult.stderr)
+    process.exit(signoffResult.exitCode)
+  }
+
+  console.log(`Wrote status snapshot: ${statusPath}`)
+  console.log(`Wrote retention snapshot: ${retentionPath}`)
   console.log(`Wrote packet: ${packetDir}`)
   console.log(`Wrote reports: ${reportsDir}`)
   console.log(`Wrote signoff draft: ${signoffCopy}`)

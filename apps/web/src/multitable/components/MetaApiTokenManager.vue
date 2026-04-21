@@ -2,7 +2,7 @@
   <div v-if="visible" class="meta-api-mgr__overlay" @click.self="$emit('close')">
     <div class="meta-api-mgr">
       <div class="meta-api-mgr__header">
-        <h4 class="meta-api-mgr__title">API Tokens &amp; Webhooks</h4>
+        <h4 class="meta-api-mgr__title">API Tokens, Webhooks &amp; DingTalk Groups</h4>
         <button class="meta-api-mgr__close" type="button" @click="$emit('close')">&times;</button>
       </div>
 
@@ -24,6 +24,15 @@
           @click="activeTab = 'webhooks'"
         >
           Webhooks
+        </button>
+        <button
+          role="tab"
+          :aria-selected="activeTab === 'dingtalk-groups'"
+          class="meta-api-mgr__tab"
+          :class="{ 'meta-api-mgr__tab--active': activeTab === 'dingtalk-groups' }"
+          @click="activeTab = 'dingtalk-groups'"
+        >
+          DingTalk Groups
         </button>
       </div>
 
@@ -155,6 +164,154 @@
             </div>
           </div>
         </template>
+
+        <!-- ===== DINGTALK GROUPS TAB ===== -->
+        <template v-if="activeTab === 'dingtalk-groups'">
+          <section v-if="showDingTalkGroupForm" class="meta-api-mgr__form" data-dingtalk-group-form="true">
+            <div class="meta-api-mgr__form-title">
+              {{ editingDingTalkGroupId ? 'Edit DingTalk Group' : 'New DingTalk Group' }}
+            </div>
+            <label class="meta-api-mgr__label">Name</label>
+            <input
+              v-model="dingTalkGroupDraft.name"
+              class="meta-api-mgr__input"
+              type="text"
+              placeholder="Support group"
+              data-dingtalk-group-name="true"
+            />
+            <label class="meta-api-mgr__label">Webhook URL</label>
+            <input
+              v-model="dingTalkGroupDraft.webhookUrl"
+              class="meta-api-mgr__input"
+              type="url"
+              placeholder="https://oapi.dingtalk.com/robot/send?access_token=..."
+              data-dingtalk-group-webhook-url="true"
+            />
+            <label class="meta-api-mgr__label">Secret (optional)</label>
+            <input
+              v-model="dingTalkGroupDraft.secret"
+              class="meta-api-mgr__input"
+              type="text"
+              placeholder="SEC..."
+              data-dingtalk-group-secret="true"
+            />
+            <label class="meta-api-mgr__checkbox-label">
+              <input
+                v-model="dingTalkGroupDraft.enabled"
+                type="checkbox"
+                data-dingtalk-group-enabled="true"
+              />
+              Enabled
+            </label>
+            <div class="meta-api-mgr__form-actions">
+              <button
+                class="meta-api-mgr__btn meta-api-mgr__btn--primary"
+                type="button"
+                :disabled="!canSaveDingTalkGroup || busy"
+                data-dingtalk-group-save="true"
+                @click="onSaveDingTalkGroup"
+              >
+                {{ editingDingTalkGroupId ? 'Update' : 'Create' }}
+              </button>
+              <button class="meta-api-mgr__btn" type="button" @click="cancelDingTalkGroupForm">Cancel</button>
+            </div>
+          </section>
+
+          <button
+            v-if="!showDingTalkGroupForm"
+            class="meta-api-mgr__btn meta-api-mgr__btn--primary meta-api-mgr__btn-add"
+            type="button"
+            data-dingtalk-group-new="true"
+            @click="openDingTalkGroupForm"
+          >
+            + New DingTalk Group
+          </button>
+
+          <div v-if="dingTalkGroupsLoading" class="meta-api-mgr__empty">Loading DingTalk groups&#x2026;</div>
+          <div
+            v-else-if="!dingTalkGroups.length && !showDingTalkGroupForm"
+            class="meta-api-mgr__empty"
+            data-dingtalk-groups-empty="true"
+          >
+            No DingTalk groups yet.
+          </div>
+          <div
+            v-for="group in dingTalkGroups"
+            :key="group.id"
+            class="meta-api-mgr__card"
+            :data-dingtalk-group-id="group.id"
+          >
+            <div class="meta-api-mgr__card-header">
+              <strong class="meta-api-mgr__card-name">{{ group.name }}</strong>
+              <span class="meta-api-mgr__card-status" :data-dingtalk-group-status="group.enabled ? 'enabled' : 'disabled'">
+                {{ group.enabled ? 'Enabled' : 'Disabled' }}
+              </span>
+            </div>
+            <div class="meta-api-mgr__card-meta">
+              <span>Webhook: {{ maskDingTalkWebhookUrl(group.webhookUrl) }}</span>
+              <span>{{ group.sheetId ? 'Shared with this sheet' : 'Private legacy group' }}</span>
+              <span>Created: {{ formatDate(group.createdAt) }}</span>
+              <span v-if="group.lastTestedAt">Last test: {{ formatDate(group.lastTestedAt) }}</span>
+              <span v-if="group.lastTestStatus" :data-dingtalk-group-test-status="group.lastTestStatus">
+                Test status: {{ group.lastTestStatus }}
+              </span>
+            </div>
+            <div v-if="group.lastTestError" class="meta-api-mgr__card-meta meta-api-mgr__card-failures">
+              <span>Last error: {{ group.lastTestError }}</span>
+            </div>
+            <div class="meta-api-mgr__card-actions">
+              <button class="meta-api-mgr__btn" type="button" data-dingtalk-group-edit="true" @click="openEditDingTalkGroup(group)">
+                Edit
+              </button>
+              <button class="meta-api-mgr__btn" type="button" :disabled="busy" data-dingtalk-group-toggle="true" @click="onToggleDingTalkGroup(group)">
+                {{ group.enabled ? 'Disable' : 'Enable' }}
+              </button>
+              <button class="meta-api-mgr__btn" type="button" data-dingtalk-group-deliveries="true" @click="onViewDingTalkDeliveries(group.id)">
+                Deliveries
+              </button>
+              <button class="meta-api-mgr__btn" type="button" :disabled="busy" data-dingtalk-group-test-send="true" @click="onTestDingTalkGroup(group.id)">
+                Test send
+              </button>
+              <button class="meta-api-mgr__btn meta-api-mgr__btn--danger" type="button" :disabled="busy" data-dingtalk-group-delete="true" @click="onDeleteDingTalkGroup(group.id)">
+                Delete
+              </button>
+            </div>
+
+            <div
+              v-if="dingTalkDeliveriesGroupId === group.id"
+              class="meta-api-mgr__deliveries"
+              data-dingtalk-deliveries="true"
+            >
+              <strong class="meta-api-mgr__label">Recent Deliveries</strong>
+              <div v-if="dingTalkDeliveriesLoading" class="meta-api-mgr__empty" data-dingtalk-deliveries-loading="true">
+                Loading DingTalk deliveries…
+              </div>
+              <div
+                v-else-if="!dingTalkDeliveries.length"
+                class="meta-api-mgr__empty"
+                data-dingtalk-deliveries-empty="true"
+              >
+                No DingTalk deliveries yet.
+              </div>
+              <template v-else>
+                <div
+                  v-for="delivery in dingTalkDeliveries"
+                  :key="delivery.id"
+                  class="meta-api-mgr__delivery-row"
+                  :data-dingtalk-delivery-id="delivery.id"
+                >
+                  <span :class="delivery.success ? 'meta-api-mgr__delivery--ok' : 'meta-api-mgr__delivery--fail'">
+                    {{ delivery.success ? 'OK' : 'FAIL' }}
+                  </span>
+                  <span>{{ delivery.sourceType === 'manual_test' ? 'Manual test' : 'Automation' }}</span>
+                  <span>{{ delivery.subject }}</span>
+                  <span>HTTP {{ delivery.httpStatus ?? '-' }}</span>
+                  <span>{{ formatDate(delivery.createdAt) }}</span>
+                </div>
+              </template>
+            </div>
+          </div>
+        </template>
       </div>
     </div>
   </div>
@@ -162,11 +319,18 @@
 
 <script setup lang="ts">
 import { ref, computed, watch } from 'vue'
-import type { ApiToken, Webhook, WebhookDelivery } from '../types'
+import type {
+  ApiToken,
+  DingTalkGroupDelivery,
+  DingTalkGroupDestination,
+  Webhook,
+  WebhookDelivery,
+} from '../types'
 import type { MultitableApiClient } from '../api/client'
 
 const props = defineProps<{
   visible: boolean
+  sheetId?: string
   client?: MultitableApiClient
 }>()
 
@@ -174,7 +338,7 @@ const emit = defineEmits<{
   (e: 'close'): void
 }>()
 
-const activeTab = ref<'tokens' | 'webhooks'>('tokens')
+const activeTab = ref<'tokens' | 'webhooks' | 'dingtalk-groups'>('tokens')
 const error = ref<string | null>(null)
 const busy = ref(false)
 
@@ -197,8 +361,28 @@ const availableEvents = ['record.created', 'record.updated', 'record.deleted', '
 const deliveriesWebhookId = ref<string | null>(null)
 const deliveries = ref<WebhookDelivery[]>([])
 
+// ---- DingTalk groups ----
+const dingTalkGroups = ref<DingTalkGroupDestination[]>([])
+const dingTalkGroupsLoading = ref(false)
+const showDingTalkGroupForm = ref(false)
+const editingDingTalkGroupId = ref<string | null>(null)
+const dingTalkDeliveriesGroupId = ref<string | null>(null)
+const dingTalkDeliveriesLoading = ref(false)
+const dingTalkDeliveries = ref<DingTalkGroupDelivery[]>([])
+let dingTalkDeliveriesRequestToken = 0
+const dingTalkGroupDraft = ref({
+  name: '',
+  webhookUrl: '',
+  secret: '',
+  enabled: true,
+})
+
 const canSaveWebhook = computed(() => {
   return webhookDraft.value.name.trim() && webhookDraft.value.url.startsWith('https://') && webhookDraft.value.events.length > 0
+})
+
+const canSaveDingTalkGroup = computed(() => {
+  return dingTalkGroupDraft.value.name.trim() && dingTalkGroupDraft.value.webhookUrl.trim().startsWith('https://')
 })
 
 function formatDate(iso: string): string {
@@ -206,6 +390,23 @@ function formatDate(iso: string): string {
     return new Date(iso).toLocaleDateString()
   } catch {
     return iso
+  }
+}
+
+function maskDingTalkWebhookUrl(url: string): string {
+  try {
+    const parsed = new URL(url)
+    for (const key of ['access_token', 'timestamp', 'sign']) {
+      if (parsed.searchParams.has(key)) {
+        parsed.searchParams.set(key, '***')
+      }
+    }
+    if (parsed.password) {
+      parsed.password = '***'
+    }
+    return parsed.toString()
+  } catch {
+    return String(url || '').replace(/([?&](?:access_token|timestamp|sign)=)[^&]+/gi, '$1***')
   }
 }
 
@@ -411,6 +612,163 @@ async function onViewDeliveries(webhookId: string) {
   }
 }
 
+// ---- DingTalk group actions ----
+async function loadDingTalkGroups() {
+  if (!props.client) return
+  dingTalkGroupsLoading.value = true
+  error.value = null
+  try {
+    dingTalkGroups.value = await props.client.listDingTalkGroups(props.sheetId)
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : 'Failed to load DingTalk groups'
+  } finally {
+    dingTalkGroupsLoading.value = false
+  }
+}
+
+function openDingTalkGroupForm() {
+  editingDingTalkGroupId.value = null
+  dingTalkGroupDraft.value = {
+    name: '',
+    webhookUrl: '',
+    secret: '',
+    enabled: true,
+  }
+  showDingTalkGroupForm.value = true
+}
+
+function openEditDingTalkGroup(group: DingTalkGroupDestination) {
+  editingDingTalkGroupId.value = group.id
+  dingTalkGroupDraft.value = {
+    name: group.name,
+    webhookUrl: group.webhookUrl,
+    secret: group.secret ?? '',
+    enabled: group.enabled,
+  }
+  showDingTalkGroupForm.value = true
+}
+
+function cancelDingTalkGroupForm() {
+  showDingTalkGroupForm.value = false
+  editingDingTalkGroupId.value = null
+}
+
+async function onSaveDingTalkGroup() {
+  if (!props.client || busy.value || !canSaveDingTalkGroup.value) return
+  busy.value = true
+  error.value = null
+  try {
+    const createInput = {
+      name: dingTalkGroupDraft.value.name.trim(),
+      webhookUrl: dingTalkGroupDraft.value.webhookUrl.trim(),
+      secret: dingTalkGroupDraft.value.secret || undefined,
+      enabled: dingTalkGroupDraft.value.enabled,
+    }
+    if (editingDingTalkGroupId.value) {
+      await props.client.updateDingTalkGroup(editingDingTalkGroupId.value, createInput, props.sheetId)
+    } else {
+      await props.client.createDingTalkGroup({
+        ...createInput,
+        sheetId: props.sheetId,
+      })
+    }
+    cancelDingTalkGroupForm()
+    await loadDingTalkGroups()
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : 'Failed to save DingTalk group'
+  } finally {
+    busy.value = false
+  }
+}
+
+async function onToggleDingTalkGroup(group: DingTalkGroupDestination) {
+  if (!props.client || busy.value) return
+  busy.value = true
+  error.value = null
+  try {
+    await props.client.updateDingTalkGroup(group.id, { enabled: !group.enabled }, props.sheetId)
+    await loadDingTalkGroups()
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : 'Failed to toggle DingTalk group'
+  } finally {
+    busy.value = false
+  }
+}
+
+async function onTestDingTalkGroup(groupId: string) {
+  if (!props.client || busy.value) return
+  busy.value = true
+  error.value = null
+  try {
+    await props.client.testDingTalkGroup(groupId, undefined, props.sheetId)
+    await loadDingTalkGroups()
+    if (dingTalkDeliveriesGroupId.value === groupId) {
+      await loadDingTalkDeliveries(groupId)
+    }
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : 'Failed to test DingTalk group'
+  } finally {
+    busy.value = false
+  }
+}
+
+async function loadDingTalkDeliveries(groupId: string) {
+  if (!props.client) return
+  const requestToken = ++dingTalkDeliveriesRequestToken
+  dingTalkDeliveriesGroupId.value = groupId
+  dingTalkDeliveriesLoading.value = true
+  dingTalkDeliveries.value = []
+  error.value = null
+  try {
+    const deliveries = await props.client.getDingTalkGroupDeliveries(groupId, props.sheetId)
+    if (requestToken !== dingTalkDeliveriesRequestToken || dingTalkDeliveriesGroupId.value !== groupId) {
+      return
+    }
+    dingTalkDeliveries.value = deliveries
+  } catch (err) {
+    if (requestToken !== dingTalkDeliveriesRequestToken || dingTalkDeliveriesGroupId.value !== groupId) {
+      return
+    }
+    error.value = err instanceof Error ? err.message : 'Failed to load DingTalk deliveries'
+  } finally {
+    if (requestToken === dingTalkDeliveriesRequestToken && dingTalkDeliveriesGroupId.value === groupId) {
+      dingTalkDeliveriesLoading.value = false
+    }
+  }
+}
+
+async function onViewDingTalkDeliveries(groupId: string) {
+  if (!props.client) return
+  if (dingTalkDeliveriesGroupId.value === groupId) {
+    dingTalkDeliveriesRequestToken += 1
+    dingTalkDeliveriesGroupId.value = null
+    dingTalkDeliveriesLoading.value = false
+    dingTalkDeliveries.value = []
+    return
+  }
+  await loadDingTalkDeliveries(groupId)
+}
+
+async function onDeleteDingTalkGroup(groupId: string) {
+  if (!props.client || busy.value) return
+  busy.value = true
+  error.value = null
+  try {
+    await props.client.deleteDingTalkGroup(groupId, props.sheetId)
+    if (dingTalkDeliveriesGroupId.value === groupId) {
+      dingTalkDeliveriesRequestToken += 1
+      dingTalkDeliveriesGroupId.value = null
+      dingTalkDeliveriesLoading.value = false
+      dingTalkDeliveries.value = []
+    }
+    await loadDingTalkGroups()
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : 'Failed to delete DingTalk group'
+  } finally {
+    busy.value = false
+  }
+}
+
 watch(
   () => props.visible,
   (v) => {
@@ -419,6 +777,7 @@ watch(
       newTokenPlaintext.value = null
       void loadTokens()
       void loadWebhooks()
+      void loadDingTalkGroups()
     }
   },
   { immediate: true },

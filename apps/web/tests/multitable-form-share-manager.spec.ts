@@ -17,6 +17,11 @@ function fakeConfig(overrides: Record<string, unknown> = {}) {
     publicToken: 'tok_abc123',
     expiresAt: null,
     status: 'active',
+    accessMode: 'public',
+    allowedUserIds: [],
+    allowedUsers: [],
+    allowedMemberGroupIds: [],
+    allowedMemberGroups: [],
     ...overrides,
   }
 }
@@ -27,6 +32,18 @@ function mockClient(config = fakeConfig()) {
 
   const fetchFn = vi.fn(async (url: string, init?: RequestInit) => {
     const method = init?.method ?? 'GET'
+    if (method === 'GET' && url.includes('/form-share-candidates')) {
+      return ok({
+        items: [
+          { subjectType: 'user', subjectId: 'user_1', label: 'Alice', subtitle: 'alice@test.local', isActive: true, accessLevel: 'write' },
+          { subjectType: 'member-group', subjectId: 'group_ops', label: 'Ops', subtitle: 'Operations', isActive: true, accessLevel: 'write' },
+          { subjectType: 'user', subjectId: 'user_inactive', label: 'Inactive User', subtitle: 'inactive@test.local', isActive: false, accessLevel: 'write' },
+        ],
+        total: 3,
+        limit: 20,
+        query: '',
+      })
+    }
     if (method === 'GET' && url.includes('/form-share')) {
       return ok(config)
     }
@@ -154,5 +171,71 @@ describe('MetaFormShareManager', () => {
     expect(patchCalls.length).toBe(1)
     const body = JSON.parse(patchCalls[0][1].body as string)
     expect(body.enabled).toBe(false)
+  })
+
+  it('updates access mode', async () => {
+    const { client, fetchFn } = mockClient()
+    mount({ visible: true, sheetId: 'sh_1', viewId: 'v_1', client })
+    await flushPromises()
+
+    const select = document.querySelector('[data-form-share-access-mode]') as HTMLSelectElement
+    expect(select).toBeTruthy()
+    select.value = 'dingtalk_granted'
+    select.dispatchEvent(new Event('change'))
+    await flushPromises()
+
+    const patchCalls = fetchFn.mock.calls.filter(
+      (c: [string, RequestInit?]) => c[1]?.method === 'PATCH' && c[0].includes('/form-share'),
+    )
+    expect(patchCalls.length).toBeGreaterThan(0)
+    const body = JSON.parse(String(patchCalls.at(-1)?.[1]?.body ?? '{}'))
+    expect(body.accessMode).toBe('dingtalk_granted')
+  })
+
+  it('shows allowlist controls for DingTalk-protected forms', async () => {
+    const { client } = mockClient(fakeConfig({ accessMode: 'dingtalk' }))
+    mount({ visible: true, sheetId: 'sh_1', viewId: 'v_1', client })
+    await flushPromises()
+
+    expect(document.querySelector('[data-form-share-allowlist-search]')).toBeTruthy()
+    expect(document.querySelector('[data-form-share-add-subject="user:user_1"]')).toBeTruthy()
+    expect(document.querySelector('[data-form-share-add-subject="member-group:group_ops"]')).toBeTruthy()
+  })
+
+  it('adds an allowed user through the allowlist controls', async () => {
+    const { client, fetchFn } = mockClient(fakeConfig({ accessMode: 'dingtalk' }))
+    mount({ visible: true, sheetId: 'sh_1', viewId: 'v_1', client })
+    await flushPromises()
+
+    const addUserBtn = document.querySelector('[data-form-share-add-subject="user:user_1"]') as HTMLButtonElement
+    addUserBtn.click()
+    await flushPromises()
+
+    const patchCalls = fetchFn.mock.calls.filter(
+      (c: [string, RequestInit?]) => c[1]?.method === 'PATCH' && c[0].includes('/form-share'),
+    )
+    const body = JSON.parse(String(patchCalls.at(-1)?.[1]?.body ?? '{}'))
+    expect(body.allowedUserIds).toEqual(['user_1'])
+  })
+
+  it('blocks switching back to public while an allowlist is configured', async () => {
+    const { client, fetchFn } = mockClient(fakeConfig({
+      accessMode: 'dingtalk',
+      allowedUserIds: ['user_1'],
+      allowedUsers: [{ subjectType: 'user', subjectId: 'user_1', label: 'Alice', subtitle: 'alice@test.local', isActive: true }],
+    }))
+    mount({ visible: true, sheetId: 'sh_1', viewId: 'v_1', client })
+    await flushPromises()
+
+    const select = document.querySelector('[data-form-share-access-mode]') as HTMLSelectElement
+    select.value = 'public'
+    select.dispatchEvent(new Event('change'))
+    await flushPromises()
+
+    const patchCalls = fetchFn.mock.calls.filter(
+      (c: [string, RequestInit?]) => c[1]?.method === 'PATCH' && c[0].includes('/form-share'),
+    )
+    expect(JSON.stringify(patchCalls)).not.toContain('"accessMode":"public"')
+    expect(document.body.textContent).toContain('Clear the allowed users and member groups before switching back to a fully public form.')
   })
 })

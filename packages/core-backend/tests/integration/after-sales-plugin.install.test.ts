@@ -413,15 +413,19 @@ describe('after-sales plugin install integration', () => {
   async function seedSupervisorRecipient() {
     const { pool } = requireTestInfra()
     await pool.query(
-      `INSERT INTO users (id, email, name, password_hash, role, permissions, is_active, is_admin)
-       VALUES ($1, $2, $3, $4, $5, '[]'::jsonb, TRUE, FALSE)
+      `INSERT INTO roles (id, name)
+       VALUES ($1, $2)
+       ON CONFLICT (id) DO NOTHING`,
+      ['supervisor', 'Service Record Supervisor'],
+    )
+    await pool.query(
+      `INSERT INTO users (id, email, name, password_hash, role)
+       VALUES ($1, $2, $3, $4, $5)
        ON CONFLICT (id) DO UPDATE
        SET email = EXCLUDED.email,
            name = EXCLUDED.name,
            password_hash = EXCLUDED.password_hash,
-           role = EXCLUDED.role,
-           is_active = TRUE,
-           is_admin = FALSE`,
+           role = EXCLUDED.role`,
       [SUPERVISOR_USER_ID, SUPERVISOR_EMAIL, 'Service Record Supervisor', 'integration-test', 'supervisor'],
     )
     await pool.query(

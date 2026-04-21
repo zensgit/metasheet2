@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
+  buildDirectoryAutoAdmissionUsername,
+  buildUniqueLocalUserMatchMap,
   evaluateDirectoryAutoAdmissionEligibility,
   isDirectoryUserWithinAdmissionScope,
 } from '../../src/directory/directory-sync'
@@ -79,5 +81,29 @@ describe('directory auto admission scope', () => {
       inScope: true,
       missingEmail: true,
     })
+  })
+
+  it('builds a deterministic username for no-email auto-admission', () => {
+    expect(buildDirectoryAutoAdmissionUsername({
+      id: 'account-12345678-aaaa-bbbb-cccc-1234567890ab',
+      external_user_id: 'User.001',
+      union_id: null,
+      open_id: null,
+    })).toBe('dt_user_001_account1')
+  })
+
+  it('keeps only unique local-user identifier matches', () => {
+    const result = buildUniqueLocalUserMatchMap([
+      { id: 'user-1', mobile: '13900001234' },
+      { id: 'user-2', mobile: '13900001234' },
+      { id: 'user-3', mobile: '13900004567' },
+    ], (row) => row.mobile || '')
+
+    expect(result.uniqueMap).toEqual(new Map([
+      ['13900004567', 'user-3'],
+    ]))
+    expect(result.ambiguousKeys).toEqual(new Set([
+      '13900001234',
+    ]))
   })
 })

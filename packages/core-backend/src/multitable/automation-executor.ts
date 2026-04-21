@@ -5,8 +5,25 @@
 
 import { randomUUID } from 'crypto'
 import { Logger } from '../core/logger'
+import {
+  DingTalkBusinessError,
+  DingTalkRequestError,
+  fetchDingTalkAppAccessToken,
+  readDingTalkMessageConfig,
+  sendDingTalkWorkNotification,
+} from '../integrations/dingtalk/client'
 import type { EventBus } from '../integration/events/event-bus'
-import type { AutomationAction, AutomationActionType } from './automation-actions'
+import {
+  buildDingTalkMarkdown,
+  buildSignedDingTalkWebhookUrl,
+  validateDingTalkRobotResponse,
+} from '../integrations/dingtalk/robot'
+import type {
+  AutomationAction,
+  AutomationActionType,
+  SendDingTalkGroupMessageConfig,
+  SendDingTalkPersonMessageConfig,
+} from './automation-actions'
 import type { ConditionGroup } from './automation-conditions'
 import { evaluateConditions } from './automation-conditions'
 import type { AutomationTrigger } from './automation-triggers'
@@ -15,6 +32,343 @@ const logger = new Logger('AutomationExecutor')
 
 const WEBHOOK_TIMEOUT_MS = 5_000
 const MAX_WEBHOOK_RETRIES = 2
+const DINGTALK_PERSON_BATCH_SIZE = 100
+
+function readJsonSafely(response: Response): Promise<unknown> {
+  return response.json().catch(() => null)
+}
+
+function lookupTemplateValue(path: string, data: Record<string, unknown>): unknown {
+  const segments = path.split('.').filter(Boolean)
+  let current: unknown = data
+  for (const segment of segments) {
+    if (!current || typeof current !== 'object' || Array.isArray(current)) return undefined
+    current = (current as Record<string, unknown>)[segment]
+  }
+  return current
+}
+
+function renderTemplateValue(value: unknown): string {
+  if (value === null || value === undefined) return ''
+  if (typeof value === 'string') return value
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value)
+  try {
+    return JSON.stringify(value)
+  } catch {
+    return ''
+  }
+}
+
+function renderAutomationTemplate(template: string, data: Record<string, unknown>): string {
+  return template.replace(/\{\{\s*([\w.]+)\s*\}\}/g, (_match, key: string) =>
+    renderTemplateValue(lookupTemplateValue(key, data)),
+  )
+}
+
+function normalizeUserIds(value: unknown): string[] {
+  if (!Array.isArray(value)) return []
+  return Array.from(new Set(
+    value
+      .map((entry) => (typeof entry === 'string' ? entry.trim() : ''))
+      .filter(Boolean),
+  ))
+}
+
+function normalizeIdScalar(value: unknown, objectKeys: string[]): string[] {
+  if (typeof value === 'string') {
+    return value
+      .split(/[\n,]+/)
+      .map((entry) => entry.trim())
+      .filter(Boolean)
+  }
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return [String(value)]
+  }
+  if (typeof value === 'object' && value && !Array.isArray(value)) {
+    const record = value as Record<string, unknown>
+    for (const key of objectKeys) {
+      const candidate = record[key]
+      if (typeof candidate === 'string' && candidate.trim()) return [candidate.trim()]
+      if (typeof candidate === 'number' && Number.isFinite(candidate)) return [String(candidate)]
+    }
+  }
+  return []
+}
+
+function normalizeUserIdScalar(value: unknown): string[] {
+  return normalizeIdScalar(value, ['localUserId', 'userId', 'id', 'value'])
+}
+
+function normalizeMemberGroupIdScalar(value: unknown): string[] {
+  return normalizeIdScalar(value, ['memberGroupId', 'groupId', 'subjectId', 'id', 'value'])
+}
+
+function normalizeGroupDestinationIdScalar(value: unknown): string[] {
+  return normalizeIdScalar(value, ['destinationId', 'groupDestinationId', 'id', 'value'])
+}
+
+function normalizeUserIdsFromUnknown(value: unknown): string[] {
+  if (Array.isArray(value)) {
+    return Array.from(new Set(
+      value.flatMap((entry) => normalizeUserIdsFromUnknown(entry)),
+    ))
+  }
+  return normalizeUserIdScalar(value)
+}
+
+function normalizeMemberGroupIdsFromUnknown(value: unknown): string[] {
+  if (Array.isArray(value)) {
+    return Array.from(new Set(
+      value.flatMap((entry) => normalizeMemberGroupIdsFromUnknown(entry)),
+    ))
+  }
+  return normalizeMemberGroupIdScalar(value)
+}
+
+function normalizeGroupDestinationIdsFromUnknown(value: unknown): string[] {
+  if (Array.isArray(value)) {
+    return Array.from(new Set(
+      value.flatMap((entry) => normalizeGroupDestinationIdsFromUnknown(entry)),
+    ))
+  }
+  return normalizeGroupDestinationIdScalar(value)
+}
+
+function normalizeRecipientFieldPath(value: unknown): string {
+  if (typeof value !== 'string') return ''
+  const trimmed = value.trim()
+  if (!trimmed) return ''
+  return trimmed.replace(/^record\./, '')
+}
+
+function normalizeRecipientFieldPaths(primary: unknown, additional: unknown): string[] {
+  const values = [
+    primary,
+    ...(Array.isArray(additional) ? additional : [additional]),
+  ]
+
+  return Array.from(new Set(
+    values
+      .flatMap((value) => {
+        if (typeof value !== 'string') return []
+        return value
+          .split(/[\n,]+/)
+          .map((entry) => normalizeRecipientFieldPath(entry))
+          .filter(Boolean)
+      }),
+  ))
+}
+
+function resolveRecipientUserIdsFromRecord(recordData: Record<string, unknown>, fieldPaths: unknown[]): string[] {
+  return Array.from(new Set(
+    fieldPaths.flatMap((fieldPath) => {
+      const normalizedPath = normalizeRecipientFieldPath(fieldPath)
+      if (!normalizedPath) return []
+      return normalizeUserIdsFromUnknown(lookupTemplateValue(normalizedPath, recordData))
+    }),
+  ))
+}
+
+function resolveRecipientMemberGroupIdsFromRecord(recordData: Record<string, unknown>, fieldPaths: unknown[]): string[] {
+  return Array.from(new Set(
+    fieldPaths.flatMap((fieldPath) => {
+      const normalizedPath = normalizeRecipientFieldPath(fieldPath)
+      if (!normalizedPath) return []
+      return normalizeMemberGroupIdsFromUnknown(lookupTemplateValue(normalizedPath, recordData))
+    }),
+  ))
+}
+
+function resolveGroupDestinationIdsFromRecord(recordData: Record<string, unknown>, fieldPaths: unknown[]): string[] {
+  return Array.from(new Set(
+    fieldPaths.flatMap((fieldPath) => {
+      const normalizedPath = normalizeRecipientFieldPath(fieldPath)
+      if (!normalizedPath) return []
+      return normalizeGroupDestinationIdsFromUnknown(lookupTemplateValue(normalizedPath, recordData))
+    }),
+  ))
+}
+
+function chunkItems<T>(items: T[], size: number): T[][] {
+  if (items.length === 0) return []
+  const chunks: T[][] = []
+  for (let index = 0; index < items.length; index += size) {
+    chunks.push(items.slice(index, index + size))
+  }
+  return chunks
+}
+
+function stringifyResponseBody(payload: unknown, fallback: string | null = null): string | null {
+  if (payload === null || payload === undefined) return fallback
+  try {
+    return JSON.stringify(payload)
+  } catch {
+    return fallback
+  }
+}
+
+function parseViewConfig(raw: unknown): Record<string, unknown> | null {
+  if (!raw) return null
+  if (typeof raw === 'string') {
+    try {
+      const parsed = JSON.parse(raw) as unknown
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+        ? parsed as Record<string, unknown>
+        : null
+    } catch {
+      return null
+    }
+  }
+  return typeof raw === 'object' && !Array.isArray(raw) ? raw as Record<string, unknown> : null
+}
+
+function parsePublicFormExpiryMs(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isFinite(value)) return value
+  if (value instanceof Date) return value.getTime()
+  if (typeof value !== 'string') return null
+  const trimmed = value.trim()
+  if (!trimmed) return null
+  if (/^\d+$/.test(trimmed)) {
+    const numeric = Number(trimmed)
+    return Number.isFinite(numeric) ? numeric : null
+  }
+  const parsed = Date.parse(trimmed)
+  return Number.isFinite(parsed) ? parsed : null
+}
+
+function resolveAutomationAppBaseUrl(): string | null {
+  const raw = process.env.PUBLIC_APP_URL?.trim() || process.env.APP_BASE_URL?.trim() || ''
+  if (!raw) return null
+  return raw.endsWith('/') ? raw : `${raw}/`
+}
+
+function buildAppLink(baseUrl: string, path: string, search?: Record<string, string>): string {
+  const url = new URL(path.replace(/^\//, ''), baseUrl)
+  for (const [key, value] of Object.entries(search ?? {})) {
+    url.searchParams.set(key, value)
+  }
+  return url.toString()
+}
+
+async function recordDingTalkGroupDelivery(
+  queryFn: AutomationDeps['queryFn'],
+  input: {
+    destinationId: string
+    sourceType: 'automation' | 'manual_test'
+    subject: string
+    content: string
+    success: boolean
+    httpStatus?: number | null
+    responseBody?: string | null
+    errorMessage?: string | null
+    automationRuleId?: string | null
+    recordId?: string | null
+    initiatedBy?: string | null
+  },
+): Promise<void> {
+  await queryFn(
+    `INSERT INTO dingtalk_group_deliveries (
+       id, destination_id, source_type, subject, content, success,
+       http_status, response_body, error_message, automation_rule_id,
+       record_id, initiated_by, delivered_at
+     ) VALUES (
+       $1, $2, $3, $4, $5, $6,
+       $7, $8, $9, $10,
+       $11, $12, $13
+     )`,
+    [
+      randomUUID(),
+      input.destinationId,
+      input.sourceType,
+      input.subject,
+      input.content,
+      input.success,
+      input.httpStatus ?? null,
+      input.responseBody ?? null,
+      input.errorMessage ?? null,
+      input.automationRuleId ?? null,
+      input.recordId ?? null,
+      input.initiatedBy ?? null,
+      input.success ? new Date().toISOString() : null,
+    ],
+  )
+}
+
+async function recordDingTalkGroupDeliverySafely(
+  queryFn: AutomationDeps['queryFn'],
+  input: Parameters<typeof recordDingTalkGroupDelivery>[1],
+): Promise<void> {
+  try {
+    await recordDingTalkGroupDelivery(queryFn, input)
+  } catch (error) {
+    logger.warn('Failed to persist DingTalk group delivery history', {
+      error: error instanceof Error ? error.message : String(error),
+      destinationId: input.destinationId,
+      sourceType: input.sourceType,
+    })
+  }
+}
+
+async function recordDingTalkPersonDelivery(
+  queryFn: AutomationDeps['queryFn'],
+  input: {
+    localUserId: string
+    dingtalkUserId?: string | null
+    sourceType: 'automation'
+    subject: string
+    content: string
+    success: boolean
+    httpStatus?: number | null
+    responseBody?: string | null
+    errorMessage?: string | null
+    automationRuleId?: string | null
+    recordId?: string | null
+    initiatedBy?: string | null
+  },
+): Promise<void> {
+  await queryFn(
+    `INSERT INTO dingtalk_person_deliveries (
+       id, local_user_id, dingtalk_user_id, source_type, subject, content, success,
+       http_status, response_body, error_message, automation_rule_id,
+       record_id, initiated_by, delivered_at
+     ) VALUES (
+       $1, $2, $3, $4, $5, $6, $7,
+       $8, $9, $10, $11,
+       $12, $13, $14
+     )`,
+    [
+      randomUUID(),
+      input.localUserId,
+      input.dingtalkUserId ?? null,
+      input.sourceType,
+      input.subject,
+      input.content,
+      input.success,
+      input.httpStatus ?? null,
+      input.responseBody ?? null,
+      input.errorMessage ?? null,
+      input.automationRuleId ?? null,
+      input.recordId ?? null,
+      input.initiatedBy ?? null,
+      input.success ? new Date().toISOString() : null,
+    ],
+  )
+}
+
+async function recordDingTalkPersonDeliverySafely(
+  queryFn: AutomationDeps['queryFn'],
+  input: Parameters<typeof recordDingTalkPersonDelivery>[1],
+): Promise<void> {
+  try {
+    await recordDingTalkPersonDelivery(queryFn, input)
+  } catch (error) {
+    logger.warn('Failed to persist DingTalk person delivery history', {
+      error: error instanceof Error ? error.message : String(error),
+      localUserId: input.localUserId,
+      sourceType: input.sourceType,
+    })
+  }
+}
 
 // ── Types ─────────────────────────────────────────────────────────────────
 
@@ -51,9 +405,11 @@ export interface AutomationStepResult {
 }
 
 export interface ExecutionContext {
+  ruleId: string
   sheetId: string
   recordId: string
   recordData: Record<string, unknown>
+  ruleCreatedBy: string
   actorId?: string | null
   triggerEvent: unknown
 }
@@ -94,9 +450,11 @@ export class AutomationExecutor {
     // Build execution context from trigger event
     const payload = triggerEvent as Record<string, unknown>
     const context: ExecutionContext = {
+      ruleId: rule.id,
       sheetId: rule.sheetId,
       recordId: (payload?.recordId as string) ?? '',
       recordData: (payload?.data as Record<string, unknown>) ?? (payload?.changes as Record<string, unknown>) ?? {},
+      ruleCreatedBy: rule.createdBy,
       actorId: (payload?.actorId as string) ?? null,
       triggerEvent,
     }
@@ -156,6 +514,12 @@ export class AutomationExecutor {
             break
           case 'send_notification':
             result = await this.executeSendNotification(action.config, context)
+            break
+          case 'send_dingtalk_group_message':
+            result = await this.executeSendDingTalkGroupMessage(action.config as unknown as SendDingTalkGroupMessageConfig, context)
+            break
+          case 'send_dingtalk_person_message':
+            result = await this.executeSendDingTalkPersonMessage(action.config as unknown as SendDingTalkPersonMessageConfig, context)
             break
           case 'lock_record':
             result = await this.executeLockRecord(action.config, context)
@@ -362,6 +726,328 @@ export class AutomationExecutor {
     }
   }
 
+  private async executeSendDingTalkPersonMessage(
+    config: SendDingTalkPersonMessageConfig,
+    context: ExecutionContext,
+  ): Promise<AutomationStepResult> {
+    const staticUserIds = normalizeUserIds(config.userIds)
+    const staticMemberGroupIds = normalizeUserIds(config.memberGroupIds)
+    const recipientFieldPaths = normalizeRecipientFieldPaths(config.userIdFieldPath, config.userIdFieldPaths)
+    const memberGroupRecipientFieldPaths = normalizeRecipientFieldPaths(config.memberGroupIdFieldPath, config.memberGroupIdFieldPaths)
+    const recordUserIds = resolveRecipientUserIdsFromRecord(context.recordData, recipientFieldPaths)
+    const recordMemberGroupIds = resolveRecipientMemberGroupIdsFromRecord(context.recordData, memberGroupRecipientFieldPaths)
+    const memberGroupIds = Array.from(new Set([...staticMemberGroupIds, ...recordMemberGroupIds]))
+    const titleTemplate = typeof config.titleTemplate === 'string' ? config.titleTemplate.trim() : ''
+    const bodyTemplate = typeof config.bodyTemplate === 'string' ? config.bodyTemplate.trim() : ''
+    const publicFormViewId = typeof config.publicFormViewId === 'string' ? config.publicFormViewId.trim() : ''
+    const internalViewId = typeof config.internalViewId === 'string' ? config.internalViewId.trim() : ''
+    if (!titleTemplate) {
+      return { actionType: 'send_dingtalk_person_message', status: 'failed', error: 'DingTalk title template is required' }
+    }
+    if (!bodyTemplate) {
+      return { actionType: 'send_dingtalk_person_message', status: 'failed', error: 'DingTalk body template is required' }
+    }
+
+    let baseUrl: string | null = null
+    const linkLines: string[] = []
+    if (publicFormViewId || internalViewId) {
+      baseUrl = resolveAutomationAppBaseUrl()
+      if (!baseUrl) {
+        return {
+          actionType: 'send_dingtalk_person_message',
+          status: 'failed',
+          error: 'PUBLIC_APP_URL or APP_BASE_URL is required for DingTalk automation links',
+        }
+      }
+    }
+
+    if (publicFormViewId && baseUrl) {
+      const publicViewResult = await this.deps.queryFn(
+        `SELECT id, sheet_id, config
+           FROM meta_views
+          WHERE id = $1 AND sheet_id = $2 AND type = 'form'`,
+        [publicFormViewId, context.sheetId],
+      )
+      const publicView = (publicViewResult.rows[0] ?? null) as {
+        id: string
+        sheet_id: string
+        config: unknown
+      } | null
+      if (!publicView) {
+        return { actionType: 'send_dingtalk_person_message', status: 'failed', error: 'Public form view not found' }
+      }
+
+      const viewConfig = parseViewConfig(publicView.config)
+      const publicForm = viewConfig?.publicForm
+      const publicToken = publicForm && typeof publicForm === 'object' && !Array.isArray(publicForm)
+        ? typeof (publicForm as Record<string, unknown>).publicToken === 'string'
+          ? ((publicForm as Record<string, unknown>).publicToken as string).trim()
+          : ''
+        : ''
+      const enabled = publicForm && typeof publicForm === 'object' && !Array.isArray(publicForm)
+        ? (publicForm as Record<string, unknown>).enabled === true
+        : false
+
+      if (!enabled || !publicToken) {
+        return {
+          actionType: 'send_dingtalk_person_message',
+          status: 'failed',
+          error: 'Selected public form view is not shared',
+        }
+      }
+      const expiryMs = parsePublicFormExpiryMs(
+        publicForm && typeof publicForm === 'object' && !Array.isArray(publicForm)
+          ? (publicForm as Record<string, unknown>).expiresAt ?? (publicForm as Record<string, unknown>).expiresOn
+          : undefined,
+      )
+      if (expiryMs !== null && Date.now() >= expiryMs) {
+        return {
+          actionType: 'send_dingtalk_person_message',
+          status: 'failed',
+          error: 'Selected public form view has expired',
+        }
+      }
+
+      linkLines.push(`- [填写入口](${buildAppLink(baseUrl, `/multitable/public-form/${context.sheetId}/${publicFormViewId}`, { publicToken })})`)
+    }
+
+    if (internalViewId && baseUrl) {
+      const internalViewResult = await this.deps.queryFn(
+        `SELECT id
+           FROM meta_views
+          WHERE id = $1 AND sheet_id = $2`,
+        [internalViewId, context.sheetId],
+      )
+      if (!internalViewResult.rows[0]) {
+        return { actionType: 'send_dingtalk_person_message', status: 'failed', error: 'Internal view not found' }
+      }
+      linkLines.push(`- [处理入口](${buildAppLink(baseUrl, `/multitable/${context.sheetId}/${internalViewId}`, { recordId: context.recordId })})`)
+    }
+
+    const templateData: Record<string, unknown> = {
+      sheetId: context.sheetId,
+      recordId: context.recordId,
+      actorId: context.actorId ?? '',
+      record: context.recordData,
+    }
+    const renderedTitle = renderAutomationTemplate(titleTemplate, templateData).trim()
+    const renderedBody = renderAutomationTemplate(bodyTemplate, templateData).trim()
+    const bodyWithLinks = [
+      renderedBody,
+      linkLines.length > 0 ? ['**快捷入口**', ...linkLines].join('\n') : '',
+    ].filter(Boolean).join('\n\n')
+
+    let memberGroupUserIds: string[] = []
+    if (memberGroupIds.length > 0) {
+      const existingGroupsResult = await this.deps.queryFn(
+        'SELECT id::text AS id FROM platform_member_groups WHERE id::text = ANY($1::text[])',
+        [memberGroupIds],
+      )
+      const existingGroupIds = new Set(
+        (existingGroupsResult.rows as Array<Record<string, unknown>>)
+          .map((row) => (typeof row.id === 'string' ? row.id.trim() : ''))
+          .filter(Boolean),
+      )
+      const missingGroupIds = memberGroupIds.filter((groupId) => !existingGroupIds.has(groupId))
+      if (missingGroupIds.length > 0) {
+        return {
+          actionType: 'send_dingtalk_person_message',
+          status: 'failed',
+          error: `Member groups not found: ${missingGroupIds.join(', ')}`,
+        }
+      }
+
+      const memberGroupRecipientsResult = await this.deps.queryFn(
+        `SELECT DISTINCT gm.user_id::text AS local_user_id
+           FROM platform_member_group_members gm
+           JOIN users u ON u.id = gm.user_id
+          WHERE gm.group_id::text = ANY($1::text[])
+            AND u.is_active = TRUE`,
+        [memberGroupIds],
+      )
+      memberGroupUserIds = Array.from(new Set(
+        (memberGroupRecipientsResult.rows as Array<Record<string, unknown>>)
+          .map((row) => (typeof row.local_user_id === 'string' ? row.local_user_id.trim() : ''))
+          .filter(Boolean),
+      ))
+    }
+
+    const userIds = Array.from(new Set([...staticUserIds, ...memberGroupUserIds, ...recordUserIds]))
+    if (userIds.length === 0) {
+      if (memberGroupIds.length > 0) {
+        if (memberGroupRecipientFieldPaths.length > 0) {
+          return {
+            actionType: 'send_dingtalk_person_message',
+            status: 'failed',
+            error: `No local userIds resolved from member group record field paths: ${memberGroupRecipientFieldPaths.join(', ')}`,
+          }
+        }
+        return {
+          actionType: 'send_dingtalk_person_message',
+          status: 'failed',
+          error: `No local userIds resolved from member groups: ${memberGroupIds.join(', ')}`,
+        }
+      }
+      if (recipientFieldPaths.length > 0) {
+        return {
+          actionType: 'send_dingtalk_person_message',
+          status: 'failed',
+          error: `No local userIds resolved from record field paths: ${recipientFieldPaths.join(', ')}`,
+        }
+      }
+      if (memberGroupRecipientFieldPaths.length > 0) {
+        return {
+          actionType: 'send_dingtalk_person_message',
+          status: 'failed',
+          error: `No local userIds resolved from member group record field paths: ${memberGroupRecipientFieldPaths.join(', ')}`,
+        }
+      }
+      return {
+        actionType: 'send_dingtalk_person_message',
+        status: 'failed',
+        error: 'At least one local userId, memberGroupId, record recipient field path, or member group record field path is required',
+      }
+    }
+
+    const recipientsResult = await this.deps.queryFn(
+      `SELECT u.id AS local_user_id,
+              u.is_active AS local_user_active,
+              linked.external_user_id AS dingtalk_user_id
+         FROM users u
+         LEFT JOIN LATERAL (
+           SELECT a.external_user_id
+             FROM directory_account_links l
+             JOIN directory_accounts a ON a.id = l.directory_account_id
+            WHERE l.local_user_id = u.id
+              AND l.link_status = 'linked'
+              AND a.provider = 'dingtalk'
+              AND a.is_active = TRUE
+            ORDER BY a.updated_at DESC
+            LIMIT 1
+         ) linked ON TRUE
+        WHERE u.id = ANY($1::text[])`,
+      [userIds],
+    )
+
+    const recipientMap = new Map<string, { localUserId: string; dingtalkUserId: string }>()
+    for (const row of recipientsResult.rows as Array<Record<string, unknown>>) {
+      const localUserId = typeof row.local_user_id === 'string' ? row.local_user_id.trim() : ''
+      const dingtalkUserId = typeof row.dingtalk_user_id === 'string' ? row.dingtalk_user_id.trim() : ''
+      const isActive = row.local_user_active === true
+      if (!localUserId || !isActive || !dingtalkUserId || recipientMap.has(localUserId)) continue
+      recipientMap.set(localUserId, { localUserId, dingtalkUserId })
+    }
+
+    const missingUserIds = userIds.filter((userId) => !recipientMap.has(userId))
+    if (missingUserIds.length > 0) {
+      await Promise.all(missingUserIds.map((userId) => recordDingTalkPersonDeliverySafely(this.deps.queryFn, {
+        localUserId: userId,
+        sourceType: 'automation',
+        subject: renderedTitle,
+        content: bodyWithLinks,
+        success: false,
+        errorMessage: 'DingTalk account is not linked or user is inactive',
+        automationRuleId: context.ruleId,
+        recordId: context.recordId,
+        initiatedBy: context.actorId ?? null,
+      })))
+      return {
+        actionType: 'send_dingtalk_person_message',
+        status: 'failed',
+        error: `DingTalk account not linked for users: ${missingUserIds.join(', ')}`,
+      }
+    }
+
+    const resolvedRecipients = userIds
+      .map((userId) => recipientMap.get(userId))
+      .filter((entry): entry is { localUserId: string; dingtalkUserId: string } => Boolean(entry))
+    const batches = chunkItems(resolvedRecipients, DINGTALK_PERSON_BATCH_SIZE)
+
+    try {
+      const messageConfig = readDingTalkMessageConfig()
+      const accessToken = await fetchDingTalkAppAccessToken(messageConfig, { fetchFn: this.deps.fetchFn })
+      let responseCount = 0
+
+      for (const batch of batches) {
+        const result = await sendDingTalkWorkNotification(
+          accessToken,
+          {
+            userIds: batch.map((recipient) => recipient.dingtalkUserId),
+            title: renderedTitle,
+            content: bodyWithLinks,
+          },
+          messageConfig,
+          { fetchFn: this.deps.fetchFn },
+        )
+        const responseBody = stringifyResponseBody(result.raw)
+        responseCount += 1
+
+        await Promise.all(batch.map((recipient) => recordDingTalkPersonDeliverySafely(this.deps.queryFn, {
+          localUserId: recipient.localUserId,
+          dingtalkUserId: recipient.dingtalkUserId,
+          sourceType: 'automation',
+          subject: renderedTitle,
+          content: bodyWithLinks,
+          success: true,
+          httpStatus: 200,
+          responseBody,
+          automationRuleId: context.ruleId,
+          recordId: context.recordId,
+          initiatedBy: context.actorId ?? null,
+        })))
+      }
+
+      return {
+        actionType: 'send_dingtalk_person_message',
+        status: 'success',
+        output: {
+          notifiedUsers: resolvedRecipients.length,
+          staticRecipientCount: staticUserIds.length,
+          memberGroupRecipientCount: memberGroupUserIds.length,
+          dynamicRecipientCount: recordUserIds.length,
+          dynamicMemberGroupRecipientCount: recordMemberGroupIds.length,
+          memberGroupIds,
+          recipientFieldPath: recipientFieldPaths[0] ?? null,
+          recipientFieldPaths,
+          memberGroupRecipientFieldPath: memberGroupRecipientFieldPaths[0] ?? null,
+          memberGroupRecipientFieldPaths,
+          batchCount: batches.length,
+          linkCount: linkLines.length,
+          responseCount,
+        },
+      }
+    } catch (error) {
+      const httpStatus = error instanceof DingTalkRequestError ? error.statusCode : error instanceof DingTalkBusinessError ? 200 : null
+      const responseBody = error instanceof DingTalkRequestError
+        ? stringifyResponseBody(error.responseBody)
+        : error instanceof DingTalkBusinessError
+          ? stringifyResponseBody(error.responseBody)
+          : null
+      const errorMessage = error instanceof Error ? error.message : String(error)
+
+      await Promise.all(resolvedRecipients.map((recipient) => recordDingTalkPersonDeliverySafely(this.deps.queryFn, {
+        localUserId: recipient.localUserId,
+        dingtalkUserId: recipient.dingtalkUserId,
+        sourceType: 'automation',
+        subject: renderedTitle,
+        content: bodyWithLinks,
+        success: false,
+        httpStatus,
+        responseBody,
+        errorMessage,
+        automationRuleId: context.ruleId,
+        recordId: context.recordId,
+        initiatedBy: context.actorId ?? null,
+      })))
+
+      return {
+        actionType: 'send_dingtalk_person_message',
+        status: 'failed',
+        error: errorMessage,
+      }
+    }
+  }
+
   private async executeLockRecord(
     config: Record<string, unknown>,
     context: ExecutionContext,
@@ -382,6 +1068,316 @@ export class AutomationExecutor {
       }
     } catch (err) {
       return { actionType: 'lock_record', status: 'failed', error: err instanceof Error ? err.message : String(err) }
+    }
+  }
+
+  private async executeSendDingTalkGroupMessage(
+    config: SendDingTalkGroupMessageConfig,
+    context: ExecutionContext,
+  ): Promise<AutomationStepResult> {
+    const staticDestinationIds = Array.from(new Set([
+      ...(Array.isArray(config.destinationIds)
+        ? config.destinationIds
+          .filter((value): value is string => typeof value === 'string')
+          .map((value) => value.trim())
+          .filter(Boolean)
+        : []),
+      ...(typeof config.destinationId === 'string' && config.destinationId.trim()
+        ? [config.destinationId.trim()]
+        : []),
+    ]))
+    const destinationFieldPaths = normalizeRecipientFieldPaths(config.destinationIdFieldPath, config.destinationIdFieldPaths)
+    const recordDestinationIds = resolveGroupDestinationIdsFromRecord(context.recordData, destinationFieldPaths)
+    const destinationIds = Array.from(new Set([...staticDestinationIds, ...recordDestinationIds]))
+    const titleTemplate = typeof config.titleTemplate === 'string' ? config.titleTemplate.trim() : ''
+    const bodyTemplate = typeof config.bodyTemplate === 'string' ? config.bodyTemplate.trim() : ''
+    const publicFormViewId = typeof config.publicFormViewId === 'string' ? config.publicFormViewId.trim() : ''
+    const internalViewId = typeof config.internalViewId === 'string' ? config.internalViewId.trim() : ''
+
+    if (!destinationIds.length) {
+      if (destinationFieldPaths.length > 0) {
+        return {
+          actionType: 'send_dingtalk_group_message',
+          status: 'failed',
+          error: `No DingTalk destinationIds resolved from record field paths: ${destinationFieldPaths.join(', ')}`,
+        }
+      }
+      return { actionType: 'send_dingtalk_group_message', status: 'failed', error: 'At least one DingTalk destination or record destination field path is required' }
+    }
+    if (!titleTemplate) {
+      return { actionType: 'send_dingtalk_group_message', status: 'failed', error: 'DingTalk title template is required' }
+    }
+    if (!bodyTemplate) {
+      return { actionType: 'send_dingtalk_group_message', status: 'failed', error: 'DingTalk body template is required' }
+    }
+
+    const destinationResult = await this.deps.queryFn(
+      `SELECT id, name, webhook_url, secret, enabled
+         FROM dingtalk_group_destinations
+        WHERE id = ANY($1)
+          AND (
+            sheet_id = $2
+            OR (sheet_id IS NULL AND created_by = $3)
+          )`,
+      [destinationIds, context.sheetId, context.ruleCreatedBy],
+    )
+    const destinations = destinationResult.rows as Array<{
+      id: string
+      name: string
+      webhook_url: string
+      secret: string | null
+      enabled: boolean
+    }>
+    const destinationsById = new Map(destinations.map((destination) => [destination.id, destination]))
+    const missingDestinationIds = destinationIds.filter((id) => !destinationsById.has(id))
+    if (missingDestinationIds.length) {
+      return {
+        actionType: 'send_dingtalk_group_message',
+        status: 'failed',
+        error: `DingTalk destinations not found: ${missingDestinationIds.join(', ')}`,
+      }
+    }
+    const disabledDestinations = destinationIds
+      .map((id) => destinationsById.get(id))
+      .filter((destination): destination is NonNullable<typeof destination> => Boolean(destination) && destination.enabled !== true)
+    if (disabledDestinations.length) {
+      return {
+        actionType: 'send_dingtalk_group_message',
+        status: 'failed',
+        error: `DingTalk destinations are disabled: ${disabledDestinations.map((destination) => destination.name || destination.id).join(', ')}`,
+      }
+    }
+
+    let baseUrl: string | null = null
+    const linkLines: string[] = []
+    if (publicFormViewId || internalViewId) {
+      baseUrl = resolveAutomationAppBaseUrl()
+      if (!baseUrl) {
+        return {
+          actionType: 'send_dingtalk_group_message',
+          status: 'failed',
+          error: 'PUBLIC_APP_URL or APP_BASE_URL is required for DingTalk automation links',
+        }
+      }
+    }
+
+    if (publicFormViewId && baseUrl) {
+      const publicViewResult = await this.deps.queryFn(
+        `SELECT id, sheet_id, config
+           FROM meta_views
+          WHERE id = $1 AND sheet_id = $2 AND type = 'form'`,
+        [publicFormViewId, context.sheetId],
+      )
+      const publicView = (publicViewResult.rows[0] ?? null) as {
+        id: string
+        sheet_id: string
+        config: unknown
+      } | null
+      if (!publicView) {
+        return { actionType: 'send_dingtalk_group_message', status: 'failed', error: 'Public form view not found' }
+      }
+
+      const viewConfig = parseViewConfig(publicView.config)
+      const publicForm = viewConfig?.publicForm
+      const publicToken = publicForm && typeof publicForm === 'object' && !Array.isArray(publicForm)
+        ? typeof (publicForm as Record<string, unknown>).publicToken === 'string'
+          ? ((publicForm as Record<string, unknown>).publicToken as string).trim()
+          : ''
+        : ''
+      const enabled = publicForm && typeof publicForm === 'object' && !Array.isArray(publicForm)
+        ? (publicForm as Record<string, unknown>).enabled === true
+        : false
+
+      if (!enabled || !publicToken) {
+        return {
+          actionType: 'send_dingtalk_group_message',
+          status: 'failed',
+          error: 'Selected public form view is not shared',
+        }
+      }
+      const expiryMs = parsePublicFormExpiryMs(
+        publicForm && typeof publicForm === 'object' && !Array.isArray(publicForm)
+          ? (publicForm as Record<string, unknown>).expiresAt ?? (publicForm as Record<string, unknown>).expiresOn
+          : undefined,
+      )
+      if (expiryMs !== null && Date.now() >= expiryMs) {
+        return {
+          actionType: 'send_dingtalk_group_message',
+          status: 'failed',
+          error: 'Selected public form view has expired',
+        }
+      }
+
+      linkLines.push(`- [填写入口](${buildAppLink(baseUrl, `/multitable/public-form/${context.sheetId}/${publicFormViewId}`, { publicToken })})`)
+    }
+
+    if (internalViewId && baseUrl) {
+      const internalViewResult = await this.deps.queryFn(
+        `SELECT id
+           FROM meta_views
+          WHERE id = $1 AND sheet_id = $2`,
+        [internalViewId, context.sheetId],
+      )
+      if (!internalViewResult.rows[0]) {
+        return { actionType: 'send_dingtalk_group_message', status: 'failed', error: 'Internal view not found' }
+      }
+      linkLines.push(`- [处理入口](${buildAppLink(baseUrl, `/multitable/${context.sheetId}/${internalViewId}`, { recordId: context.recordId })})`)
+    }
+
+    const templateData: Record<string, unknown> = {
+      sheetId: context.sheetId,
+      recordId: context.recordId,
+      actorId: context.actorId ?? '',
+      record: context.recordData,
+    }
+    const renderedTitle = renderAutomationTemplate(titleTemplate, templateData).trim()
+    const renderedBody = renderAutomationTemplate(bodyTemplate, templateData).trim()
+    const bodyWithLinks = [
+      renderedBody,
+      linkLines.length > 0 ? ['**快捷入口**', ...linkLines].join('\n') : '',
+    ].filter(Boolean).join('\n\n')
+    const orderedDestinations = destinationIds
+      .map((id) => destinationsById.get(id))
+      .filter((destination): destination is NonNullable<typeof destination> => Boolean(destination))
+    const successfulDestinations: Array<{ id: string; name: string }> = []
+    const failedDestinations: Array<{ id: string; name: string; error: string }> = []
+
+    for (const destination of orderedDestinations) {
+      let deliveryRecorded = false
+      let responseStatus: number | null = null
+      let responseBody: string | null = null
+      const controller = new AbortController()
+      const timeout = setTimeout(() => controller.abort(), WEBHOOK_TIMEOUT_MS)
+      try {
+        const response = await (this.deps.fetchFn ?? globalThis.fetch)(
+          buildSignedDingTalkWebhookUrl(destination.webhook_url, destination.secret ?? undefined),
+          {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'User-Agent': 'MetaSheet-Automation-DingTalk/1.0',
+            },
+            body: JSON.stringify(buildDingTalkMarkdown(renderedTitle, bodyWithLinks)),
+            signal: controller.signal,
+          },
+        )
+        const parsed = await readJsonSafely(response)
+        responseStatus = response.status
+        responseBody = parsed ? JSON.stringify(parsed) : response.statusText || null
+        if (!response.ok) {
+          const errorMessage = `DingTalk request failed with HTTP ${response.status}`
+          deliveryRecorded = true
+          await recordDingTalkGroupDeliverySafely(this.deps.queryFn, {
+            destinationId: destination.id,
+            sourceType: 'automation',
+            subject: renderedTitle,
+            content: bodyWithLinks,
+            success: false,
+            httpStatus: response.status,
+            responseBody,
+            errorMessage,
+            automationRuleId: context.ruleId,
+            recordId: context.recordId,
+            initiatedBy: context.actorId ?? null,
+          })
+          failedDestinations.push({ id: destination.id, name: destination.name, error: errorMessage })
+          continue
+        }
+        try {
+          validateDingTalkRobotResponse(parsed)
+        } catch (err) {
+          const errorMessage = err instanceof Error ? err.message : String(err)
+          deliveryRecorded = true
+          await recordDingTalkGroupDeliverySafely(this.deps.queryFn, {
+            destinationId: destination.id,
+            sourceType: 'automation',
+            subject: renderedTitle,
+            content: bodyWithLinks,
+            success: false,
+            httpStatus: response.status,
+            responseBody,
+            errorMessage,
+            automationRuleId: context.ruleId,
+            recordId: context.recordId,
+            initiatedBy: context.actorId ?? null,
+          })
+          failedDestinations.push({ id: destination.id, name: destination.name, error: errorMessage })
+          continue
+        }
+        deliveryRecorded = true
+        await recordDingTalkGroupDeliverySafely(this.deps.queryFn, {
+          destinationId: destination.id,
+          sourceType: 'automation',
+          subject: renderedTitle,
+          content: bodyWithLinks,
+          success: true,
+          httpStatus: response.status,
+          responseBody,
+          automationRuleId: context.ruleId,
+          recordId: context.recordId,
+          initiatedBy: context.actorId ?? null,
+        })
+        successfulDestinations.push({ id: destination.id, name: destination.name })
+      } catch (err) {
+        if (!deliveryRecorded) {
+          await recordDingTalkGroupDeliverySafely(this.deps.queryFn, {
+            destinationId: destination.id,
+            sourceType: 'automation',
+            subject: renderedTitle,
+            content: bodyWithLinks,
+            success: false,
+            httpStatus: responseStatus,
+            responseBody,
+            errorMessage: err instanceof Error ? err.message : String(err),
+            automationRuleId: context.ruleId,
+            recordId: context.recordId,
+            initiatedBy: context.actorId ?? null,
+          })
+        }
+        failedDestinations.push({
+          id: destination.id,
+          name: destination.name,
+          error: err instanceof Error ? err.message : String(err),
+        })
+      } finally {
+        clearTimeout(timeout)
+      }
+    }
+
+    if (failedDestinations.length) {
+      return {
+        actionType: 'send_dingtalk_group_message',
+        status: 'failed',
+        error: `${failedDestinations.length} of ${orderedDestinations.length} DingTalk destinations failed: ${failedDestinations.map((destination) => `${destination.name} (${destination.error})`).join('; ')}`,
+        output: {
+          staticDestinationCount: staticDestinationIds.length,
+          dynamicDestinationCount: recordDestinationIds.length,
+          destinationIds: orderedDestinations.map((destination) => destination.id),
+          destinationNames: orderedDestinations.map((destination) => destination.name),
+          destinationFieldPath: destinationFieldPaths[0] ?? null,
+          destinationFieldPaths,
+          sentCount: successfulDestinations.length,
+          failedDestinationIds: failedDestinations.map((destination) => destination.id),
+          linkCount: linkLines.length,
+        },
+      }
+    }
+
+    return {
+      actionType: 'send_dingtalk_group_message',
+      status: 'success',
+      output: {
+        destinationId: successfulDestinations[0]?.id,
+        destinationName: successfulDestinations[0]?.name,
+        staticDestinationCount: staticDestinationIds.length,
+        dynamicDestinationCount: recordDestinationIds.length,
+        destinationIds: successfulDestinations.map((destination) => destination.id),
+        destinationNames: successfulDestinations.map((destination) => destination.name),
+        destinationFieldPath: destinationFieldPaths[0] ?? null,
+        destinationFieldPaths,
+        sentCount: successfulDestinations.length,
+        linkCount: linkLines.length,
+      },
     }
   }
 }

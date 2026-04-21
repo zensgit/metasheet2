@@ -288,6 +288,7 @@
       :sheet-id="workbench.activeSheetId.value"
       :fields="grid.fields.value"
       :client="workbench.client"
+      :views="workbench.views.value"
       @close="showAutomationManager = false"
       @updated="showAutomationManager = false"
     />
@@ -301,6 +302,7 @@
     />
     <MetaApiTokenManager
       :visible="showApiTokenManager"
+      :sheet-id="workbench.activeSheetId.value"
       :client="workbench.client"
       @close="showApiTokenManager = false"
     />

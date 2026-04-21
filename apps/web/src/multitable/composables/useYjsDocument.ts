@@ -35,10 +35,22 @@ function handleSyncMessage(
  * Composable that manages a Yjs document bound to a specific record,
  * connected via Socket.IO /yjs namespace.
  *
- * POC scope: single record, single text field, character-level merge,
- * disconnect/reconnect recovery.
+ * Scope: single record, text fields with minimal-diff edits (see
+ * `useYjsTextField` for the diff semantics), disconnect/reconnect
+ * recovery. Concurrent edits to different ranges of the same field
+ * merge per-range via Yjs CRDT; overlapping edits interleave at the
+ * nearest common anchor.
  */
-export function useYjsDocument(recordId: Ref<string | null>) {
+export interface UseYjsDocumentOptions {
+  /**
+   * Register Vue's onUnmounted cleanup automatically. Dynamic/lazy callers
+   * may instantiate this composable after setup(), where onUnmounted is not
+   * available; those callers must pass false and call dispose() themselves.
+   */
+  registerUnmount?: boolean
+}
+
+export function useYjsDocument(recordId: Ref<string | null>, options: UseYjsDocumentOptions = {}) {
   const doc = shallowRef<Y.Doc | null>(null)
   const connected = ref(false)
   const synced = ref(false)
@@ -49,6 +61,15 @@ export function useYjsDocument(recordId: Ref<string | null>) {
   const auth = useAuth()
   let socket: Socket | null = null
   let currentRecordId: string | null = null
+  /**
+   * Monotonically-increasing generation counter for connect()/disconnect()
+   * cycles. Every connect() bumps it; every await path checks `connectGen`
+   * against a captured copy and aborts if they differ. This closes the
+   * race where `disconnect()` fires while `getCurrentUserId()` is in
+   * flight — without the guard, the resolved promise would proceed to
+   * create a socket that the caller has already marked stale.
+   */
+  let connectGen = 0
 
   function normalizePresenceSnapshot(payload: unknown, expectedRecordId: string): YjsRecordPresence | null {
     if (!payload || typeof payload !== 'object') return null
@@ -81,6 +102,11 @@ export function useYjsDocument(recordId: Ref<string | null>) {
 
   async function connect(rid: string) {
     disconnect()
+    // Bump generation AFTER disconnect() so any await in a prior
+    // connect() sees a different value and bails. Capture locally so
+    // we can compare after every await.
+    connectGen += 1
+    const myGen = connectGen
     currentRecordId = rid
     error.value = null
 
@@ -90,7 +116,12 @@ export function useYjsDocument(recordId: Ref<string | null>) {
       error.value = 'Not authenticated'
       return
     }
-    currentUserId.value = await auth.getCurrentUserId().catch(() => null)
+    const resolvedUserId = await auth.getCurrentUserId().catch(() => null)
+    // Stale-guard: if disconnect() or another connect() ran during the
+    // getCurrentUserId() await, do NOT proceed to open a socket. The
+    // newer call is already in charge of wiring up the next doc.
+    if (myGen !== connectGen) return
+    currentUserId.value = resolvedUserId
 
     const yDoc = new Y.Doc()
     doc.value = yDoc
@@ -144,6 +175,15 @@ export function useYjsDocument(recordId: Ref<string | null>) {
       error.value = `${code}: ${msg}`
     })
 
+    socket.on('yjs:invalidated', (payload: unknown) => {
+      if (!payload || typeof payload !== 'object') return
+      const rid2 = (payload as { recordId?: unknown }).recordId
+      if (typeof rid2 !== 'string') return
+      if (rid2 !== currentRecordId) return
+      error.value = 'INVALIDATED: document invalidated by REST write'
+      disconnect()
+    })
+
     socket.on('disconnect', () => {
       connected.value = false
       synced.value = false
@@ -179,6 +219,9 @@ export function useYjsDocument(recordId: Ref<string | null>) {
   }
 
   function disconnect() {
+    // Bump generation so any in-flight connect() await aborts before it
+    // creates a socket/doc that nobody is going to watch.
+    connectGen += 1
     if (socket) {
       if (currentRecordId) {
         socket.emit('yjs:unsubscribe', { recordId: currentRecordId })
@@ -197,7 +240,7 @@ export function useYjsDocument(recordId: Ref<string | null>) {
   }
 
   // Auto-connect when recordId changes
-  watch(
+  const stopRecordWatch = watch(
     recordId,
     (newId) => {
       if (newId) connect(newId)
@@ -206,7 +249,14 @@ export function useYjsDocument(recordId: Ref<string | null>) {
     { immediate: true },
   )
 
-  onUnmounted(disconnect)
+  function dispose(): void {
+    try { stopRecordWatch() } catch { /* ignore */ }
+    disconnect()
+  }
+
+  if (options.registerUnmount !== false) {
+    onUnmounted(dispose)
+  }
 
   return {
     doc,
@@ -219,6 +269,7 @@ export function useYjsDocument(recordId: Ref<string | null>) {
     activeCollaboratorCount,
     connect,
     disconnect,
+    dispose,
     setActiveField,
     getFieldCollaborators,
   }

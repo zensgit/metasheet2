@@ -56,6 +56,10 @@ import type {
   Webhook,
   WebhookCreateInput,
   WebhookDelivery,
+  DingTalkGroupDestination,
+  DingTalkGroupDelivery,
+  DingTalkPersonDelivery,
+  DingTalkGroupDestinationInput,
 } from '../types'
 import { apiFetch } from '../../utils/api'
 
@@ -94,7 +98,7 @@ async function parseJson<T>(res: Response): Promise<T> {
   const raw = await res.text()
   const body = raw ? safeParseJson(raw) : null
   if (!res.ok) {
-    const payload = (body?.error ?? {}) as ApiErrorPayload
+    const payload = normalizeApiErrorPayload(body)
     const error = new Error(firstFieldError(payload.fieldErrors) ?? payload.message ?? `API ${res.status}`) as Error & {
       status?: number
       code?: string
@@ -111,15 +115,30 @@ async function parseJson<T>(res: Response): Promise<T> {
     throw error
   }
   if (res.status === 204 || !raw.trim()) return undefined as T
-  return (body?.data ?? body) as T
+  return (unwrapDataBody(body) ?? body) as T
 }
 
-function safeParseJson(raw: string): any {
+function safeParseJson(raw: string): unknown {
   try {
     return JSON.parse(raw)
   } catch {
     return null
   }
+}
+
+function normalizeApiErrorPayload(body: unknown): ApiErrorPayload {
+  if (!body || typeof body !== 'object') return {}
+  const record = body as Record<string, unknown>
+  const error = record.error
+  if (typeof error === 'string') return { message: error }
+  if (error && typeof error === 'object') return error as ApiErrorPayload
+  if (typeof record.message === 'string') return { message: record.message }
+  return {}
+}
+
+function unwrapDataBody(body: unknown): unknown {
+  if (!body || typeof body !== 'object') return undefined
+  return (body as { data?: unknown }).data
 }
 
 function firstFieldError(fieldErrors?: Record<string, string>): string | null {
@@ -332,6 +351,32 @@ function normalizeCommentMentionSuggestions(
       : [],
     total: typeof payload?.total === 'number' ? payload.total : 0,
     limit: typeof payload?.limit === 'number' ? payload.limit : 0,
+  }
+}
+
+function normalizeFormShareConfig(payload: Partial<FormShareConfig> | null | undefined): FormShareConfig {
+  const accessMode =
+    payload?.accessMode === 'dingtalk' || payload?.accessMode === 'dingtalk_granted'
+      ? payload.accessMode
+      : 'public'
+  return {
+    enabled: payload?.enabled === true,
+    publicToken: typeof payload?.publicToken === 'string' ? payload.publicToken : null,
+    expiresAt: typeof payload?.expiresAt === 'string' ? payload.expiresAt : null,
+    status: payload?.status === 'active' || payload?.status === 'expired' ? payload.status : 'disabled',
+    accessMode,
+    allowedUserIds: Array.isArray(payload?.allowedUserIds)
+      ? payload.allowedUserIds.filter((value): value is string => typeof value === 'string')
+      : [],
+    allowedUsers: normalizeSheetPermissionCandidates({
+      items: Array.isArray(payload?.allowedUsers) ? payload.allowedUsers : [],
+    }).items.filter((item) => item.subjectType === 'user'),
+    allowedMemberGroupIds: Array.isArray(payload?.allowedMemberGroupIds)
+      ? payload.allowedMemberGroupIds.filter((value): value is string => typeof value === 'string')
+      : [],
+    allowedMemberGroups: normalizeSheetPermissionCandidates({
+      items: Array.isArray(payload?.allowedMemberGroups) ? payload.allowedMemberGroups : [],
+    }).items.filter((item) => item.subjectType === 'member-group'),
   }
 }
 
@@ -717,7 +762,10 @@ export class MultitableApiClient {
 
   // --- Form context ---
   async loadFormContext(params: { sheetId?: string; viewId?: string; recordId?: string; publicToken?: string }): Promise<MetaFormContext> {
-    const res = await this.fetch(`/api/multitable/form-context${qs(params)}`)
+    const path = `/api/multitable/form-context${qs(params)}`
+    const res = params.publicToken && this.fetch === apiFetch
+      ? await apiFetch(path, { suppressUnauthorizedRedirect: true })
+      : await this.fetch(path)
     return parseJson(res)
   }
 
@@ -753,11 +801,15 @@ export class MultitableApiClient {
 
   // --- Form submit ---
   async submitForm(viewId: string, input: FormSubmitInput): Promise<FormSubmitResult> {
-    const res = await this.fetch(`/api/multitable/views/${viewId}/submit${qs({ publicToken: input.publicToken })}`, {
+    const path = `/api/multitable/views/${viewId}/submit${qs({ publicToken: input.publicToken })}`
+    const requestInit: RequestInit = {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(input),
-    })
+    }
+    const res = input.publicToken && this.fetch === apiFetch
+      ? await apiFetch(path, { ...requestInit, suppressUnauthorizedRedirect: true })
+      : await this.fetch(path, requestInit)
     return parseJson(res)
   }
 
@@ -995,7 +1047,8 @@ export class MultitableApiClient {
   // --- Form Share ---
   async getFormShareConfig(sheetId: string, viewId: string): Promise<FormShareConfig> {
     const res = await this.fetch(`/api/multitable/sheets/${encodeURIComponent(sheetId)}/views/${encodeURIComponent(viewId)}/form-share`)
-    return parseJson(res)
+    const data = await parseJson<Partial<FormShareConfig>>(res)
+    return normalizeFormShareConfig(data)
   }
 
   async updateFormShareConfig(sheetId: string, viewId: string, config: FormShareConfigUpdate): Promise<FormShareConfig> {
@@ -1004,7 +1057,8 @@ export class MultitableApiClient {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(config),
     })
-    return parseJson(res)
+    const data = await parseJson<Partial<FormShareConfig>>(res)
+    return normalizeFormShareConfig(data)
   }
 
   async regenerateFormShareToken(sheetId: string, viewId: string): Promise<{ publicToken: string }> {
@@ -1012,6 +1066,15 @@ export class MultitableApiClient {
       method: 'POST',
     })
     return parseJson(res)
+  }
+
+  async listFormShareCandidates(
+    sheetId: string,
+    params?: { q?: string; limit?: number },
+  ): Promise<{ items: MetaSheetPermissionCandidate[]; total: number; limit: number; query: string }> {
+    const res = await this.fetch(`/api/multitable/sheets/${encodeURIComponent(sheetId)}/form-share-candidates${qs(params ?? {})}`)
+    const data = await parseJson<{ items?: Array<Partial<MetaSheetPermissionCandidate>>; total?: number; limit?: number; query?: string }>(res)
+    return normalizeSheetPermissionCandidates(data)
   }
 
   // --- API Tokens ---
@@ -1082,6 +1145,53 @@ export class MultitableApiClient {
     return data.deliveries ?? []
   }
 
+  // --- DingTalk Group Destinations ---
+  async listDingTalkGroups(sheetId?: string): Promise<DingTalkGroupDestination[]> {
+    const res = await this.fetch(`/api/multitable/dingtalk-groups${qs(sheetId ? { sheetId } : {})}`)
+    const data = await parseJson<{ destinations: DingTalkGroupDestination[] }>(res)
+    return data.destinations ?? []
+  }
+
+  async createDingTalkGroup(input: DingTalkGroupDestinationInput): Promise<DingTalkGroupDestination> {
+    const res = await this.fetch('/api/multitable/dingtalk-groups', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(input),
+    })
+    return parseJson(res)
+  }
+
+  async updateDingTalkGroup(id: string, input: Partial<Omit<DingTalkGroupDestinationInput, 'sheetId'>>, sheetId?: string): Promise<DingTalkGroupDestination> {
+    const res = await this.fetch(`/api/multitable/dingtalk-groups/${encodeURIComponent(id)}${qs(sheetId ? { sheetId } : {})}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(input),
+    })
+    return parseJson(res)
+  }
+
+  async deleteDingTalkGroup(id: string, sheetId?: string): Promise<void> {
+    const res = await this.fetch(`/api/multitable/dingtalk-groups/${encodeURIComponent(id)}${qs(sheetId ? { sheetId } : {})}`, {
+      method: 'DELETE',
+    })
+    return parseJson(res)
+  }
+
+  async testDingTalkGroup(id: string, input?: { subject?: string; content?: string }, sheetId?: string): Promise<void> {
+    const res = await this.fetch(`/api/multitable/dingtalk-groups/${encodeURIComponent(id)}/test-send${qs(sheetId ? { sheetId } : {})}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(input ?? {}),
+    })
+    return parseJson(res)
+  }
+
+  async getDingTalkGroupDeliveries(id: string, sheetId?: string): Promise<DingTalkGroupDelivery[]> {
+    const res = await this.fetch(`/api/multitable/dingtalk-groups/${encodeURIComponent(id)}/deliveries${qs(sheetId ? { sheetId } : {})}`)
+    const data = await parseJson<{ deliveries: DingTalkGroupDelivery[] }>(res)
+    return data.deliveries ?? []
+  }
+
   // --- Automation V1: test / logs / stats ---
   async testAutomationRule(sheetId: string, ruleId: string): Promise<AutomationExecution> {
     const res = await this.fetch(
@@ -1104,6 +1214,22 @@ export class MultitableApiClient {
       `/api/multitable/sheets/${encodeURIComponent(sheetId)}/automations/${encodeURIComponent(ruleId)}/stats`,
     )
     return parseJson<AutomationStats>(res)
+  }
+
+  async getAutomationDingTalkPersonDeliveries(sheetId: string, ruleId: string, limit?: number): Promise<DingTalkPersonDelivery[]> {
+    const res = await this.fetch(
+      `/api/multitable/sheets/${encodeURIComponent(sheetId)}/automations/${encodeURIComponent(ruleId)}/dingtalk-person-deliveries${qs({ limit })}`,
+    )
+    const data = await parseJson<{ deliveries: DingTalkPersonDelivery[] }>(res)
+    return Array.isArray(data?.deliveries) ? data.deliveries : []
+  }
+
+  async getAutomationDingTalkGroupDeliveries(sheetId: string, ruleId: string, limit?: number): Promise<DingTalkGroupDelivery[]> {
+    const res = await this.fetch(
+      `/api/multitable/sheets/${encodeURIComponent(sheetId)}/automations/${encodeURIComponent(ruleId)}/dingtalk-group-deliveries${qs({ limit })}`,
+    )
+    const data = await parseJson<{ deliveries: DingTalkGroupDelivery[] }>(res)
+    return Array.isArray(data?.deliveries) ? data.deliveries : []
   }
 
   // --- Charts ---

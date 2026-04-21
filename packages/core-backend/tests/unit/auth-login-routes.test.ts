@@ -262,6 +262,39 @@ describe('auth login routes', () => {
     })
   })
 
+  it('accepts a generic identifier payload for login', async () => {
+    authServiceMocks.login.mockResolvedValue({
+      user: {
+        id: 'user-1',
+        email: null,
+        username: 'liqing',
+        mobile: '13900001234',
+        name: '李青',
+        role: 'user',
+        permissions: ['attendance:read'],
+        created_at: new Date('2026-03-13T00:00:00.000Z'),
+        updated_at: new Date('2026-03-13T00:00:00.000Z'),
+      },
+      token: 'jwt-login-token',
+    })
+
+    const response = await invokeRoute('post', '/login', {
+      body: {
+        identifier: 'liqing',
+        password: 'WelcomePass9A',
+      },
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect(authServiceMocks.login).toHaveBeenCalledWith(
+      'liqing',
+      'WelcomePass9A',
+      expect.objectContaining({
+        ipAddress: '127.0.0.1',
+      }),
+    )
+  })
+
   it('forwards x-tenant-id into the normal login flow', async () => {
     authServiceMocks.login.mockResolvedValue({
       user: {
