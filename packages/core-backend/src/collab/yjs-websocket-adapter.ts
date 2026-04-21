@@ -36,6 +36,11 @@ export type YjsPresenceSnapshot = {
   users: YjsPresenceUser[]
 }
 
+export type YjsInvalidatedPayload = {
+  recordId: string
+  reason: 'rest-write'
+}
+
 type SocketPresenceState = {
   userId: string
   fieldId: string | null
@@ -106,6 +111,22 @@ export class YjsWebSocketAdapter {
     return {
       activeRecordCount: this.recordPresence.size,
       activeSocketCount: [...this.recordPresence.values()].reduce((total, perRecord) => total + perRecord.size, 0),
+    }
+  }
+
+  /**
+   * Notify live editors that their in-memory Y.Doc was invalidated by an
+   * authoritative REST write. Clients should disconnect and fall back to REST
+   * until they explicitly reopen/reconnect, at which point the server will
+   * seed from the committed meta_records.data row.
+   */
+  notifyInvalidated(recordIds: string[]): void {
+    if (!this.namespace) return
+    for (const recordId of [...new Set(recordIds.filter((id) => typeof id === 'string' && id.length > 0))]) {
+      this.namespace.to(`yjs:${recordId}`).emit('yjs:invalidated', {
+        recordId,
+        reason: 'rest-write',
+      } satisfies YjsInvalidatedPayload)
     }
   }
 

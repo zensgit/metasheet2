@@ -223,6 +223,49 @@
                 </button>
               </div>
               <div v-if="dingTalkDestinationsError" class="meta-rule-editor__hint">{{ dingTalkDestinationsError }}</div>
+              <label class="meta-rule-editor__label">Record group field paths (optional)</label>
+              <input
+                v-model="action.config.destinationFieldPath"
+                class="meta-rule-editor__input"
+                type="text"
+                placeholder="record.opsDestinationId, record.escalationDestinationIds"
+                data-field="dingtalkDestinationFieldPath"
+              />
+              <label class="meta-rule-editor__label">Pick group field</label>
+              <select
+                class="meta-rule-editor__select"
+                data-field="dingtalkDestinationFieldSelect"
+                @change="appendGroupDestinationFieldPath(action, $event.target as HTMLSelectElement)"
+              >
+                <option value="">-- pick field --</option>
+                <option v-for="field in groupDestinationCandidateFields" :key="field.id" :value="field.id">
+                  {{ field.name }}
+                </option>
+              </select>
+              <div
+                v-if="selectedGroupDestinationFields(action).length"
+                class="meta-rule-editor__recipient-list meta-rule-editor__recipient-list--selected"
+              >
+                <button
+                  v-for="field in selectedGroupDestinationFields(action)"
+                  :key="field.id"
+                  class="meta-rule-editor__recipient-chip"
+                  type="button"
+                  :data-group-destination-field="field.id"
+                  @click="removeGroupDestinationFieldPath(action, field.id)"
+                >
+                  <strong>{{ field.label }}</strong>
+                  <span>{{ field.id }}</span>
+                  <em>Remove</em>
+                </button>
+              </div>
+              <div
+                v-for="warning in groupDestinationFieldPathWarnings(action.config.destinationFieldPath)"
+                :key="`group-destination-${warning}`"
+                class="meta-rule-editor__hint meta-rule-editor__hint--warning"
+              >
+                {{ warning }}
+              </div>
               <label class="meta-rule-editor__label">Title template</label>
               <input
                 v-model="action.config.titleTemplate"
@@ -288,6 +331,13 @@
                 <option value="">-- no public form link --</option>
                 <option v-for="view in formViews" :key="view.id" :value="view.id">{{ view.name }}</option>
               </select>
+              <div
+                v-for="warning in publicFormLinkWarnings(action.config.publicFormViewId, true)"
+                :key="`group-public-form-${warning}`"
+                class="meta-rule-editor__hint meta-rule-editor__hint--warning"
+              >
+                {{ warning }}
+              </div>
               <label class="meta-rule-editor__label">Internal processing view (optional)</label>
               <select
                 v-model="action.config.internalViewId"
@@ -297,9 +347,17 @@
                 <option value="">-- no internal link --</option>
                 <option v-for="view in internalViews" :key="view.id" :value="view.id">{{ view.name }}</option>
               </select>
+              <div
+                v-for="warning in internalViewLinkWarnings(action.config.internalViewId)"
+                :key="`group-internal-view-${warning}`"
+                class="meta-rule-editor__hint meta-rule-editor__hint--warning"
+              >
+                {{ warning }}
+              </div>
               <div class="meta-rule-editor__preview" data-field="groupMessageSummary">
                 <div class="meta-rule-editor__preview-title">Message summary</div>
                 <div><strong>Groups:</strong> {{ dingTalkGroupSummary(action) }}</div>
+                <div><strong>Record groups:</strong> {{ groupDestinationFieldPathSummary(action.config.destinationFieldPath) }}</div>
                 <div><strong>Title template:</strong> {{ templatePreviewText(action.config.titleTemplate, 'No title template') }}</div>
                 <div class="meta-rule-editor__preview-body"><strong>Body template:</strong> {{ templatePreviewText(action.config.bodyTemplate, 'No body template') }}</div>
                 <div class="meta-rule-editor__preview-line">
@@ -325,6 +383,7 @@
                   </button>
                 </div>
                 <div><strong>Public form:</strong> {{ viewSummaryName(action.config.publicFormViewId, 'No public form link') }}</div>
+                <div><strong>Public form access:</strong> {{ publicFormAccessSummary(action.config.publicFormViewId) }}</div>
                 <div><strong>Internal processing:</strong> {{ viewSummaryName(action.config.internalViewId, 'No internal link') }}</div>
               </div>
             </div>
@@ -451,6 +510,51 @@
               <div class="meta-rule-editor__hint">
                 Record data is keyed by field ID. Use comma or newline separated <code>record.&lt;fieldId&gt;</code> paths. The picker only lists user fields.
               </div>
+              <label class="meta-rule-editor__label">Record member group field paths (optional)</label>
+              <input
+                v-model="action.config.memberGroupRecipientFieldPath"
+                class="meta-rule-editor__input"
+                type="text"
+                placeholder="例如：record.watcherGroupIds, record.escalationGroupId"
+                data-field="dingtalkPersonMemberGroupRecipientFieldPath"
+              />
+              <label class="meta-rule-editor__label">Pick member group field</label>
+              <select
+                class="meta-rule-editor__select"
+                data-field="dingtalkPersonMemberGroupRecipientFieldSelect"
+                @change="appendMemberGroupRecipientFieldPath(action, $event.target as HTMLSelectElement)"
+              >
+                <option value="">-- choose a member group field --</option>
+                <option v-for="field in memberGroupRecipientCandidateFields" :key="field.id" :value="field.id">
+                  {{ field.name }} (record.{{ field.id }})
+                </option>
+              </select>
+              <div
+                v-if="selectedMemberGroupRecipientFields(action).length"
+                class="meta-rule-editor__recipient-list meta-rule-editor__recipient-list--selected"
+              >
+                <button
+                  v-for="field in selectedMemberGroupRecipientFields(action)"
+                  :key="field.id"
+                  class="meta-rule-editor__recipient-chip"
+                  type="button"
+                  :data-member-group-recipient-field="field.id"
+                  @click="removeMemberGroupRecipientFieldPath(action, field.id)"
+                >
+                  <strong>{{ field.label }}</strong>
+                  <em>Remove</em>
+                </button>
+              </div>
+              <div
+                v-for="warning in memberGroupRecipientFieldPathWarnings(action.config.memberGroupRecipientFieldPath)"
+                :key="`person-member-group-recipient-${warning}`"
+                class="meta-rule-editor__hint meta-rule-editor__hint--warning"
+              >
+                {{ warning }}
+              </div>
+              <div class="meta-rule-editor__hint">
+                Use comma or newline separated <code>record.&lt;fieldId&gt;</code> paths whose values resolve to member group IDs. The picker only lists explicit member group fields.
+              </div>
               <label class="meta-rule-editor__label">Title template</label>
               <input
                 v-model="action.config.titleTemplate"
@@ -516,6 +620,13 @@
                 <option value="">-- no public form link --</option>
                 <option v-for="view in formViews" :key="view.id" :value="view.id">{{ view.name }}</option>
               </select>
+              <div
+                v-for="warning in publicFormLinkWarnings(action.config.publicFormViewId)"
+                :key="`person-public-form-${warning}`"
+                class="meta-rule-editor__hint meta-rule-editor__hint--warning"
+              >
+                {{ warning }}
+              </div>
               <label class="meta-rule-editor__label">Internal processing view (optional)</label>
               <select
                 v-model="action.config.internalViewId"
@@ -525,10 +636,18 @@
                 <option value="">-- no internal link --</option>
                 <option v-for="view in internalViews" :key="view.id" :value="view.id">{{ view.name }}</option>
               </select>
+              <div
+                v-for="warning in internalViewLinkWarnings(action.config.internalViewId)"
+                :key="`person-internal-view-${warning}`"
+                class="meta-rule-editor__hint meta-rule-editor__hint--warning"
+              >
+                {{ warning }}
+              </div>
               <div class="meta-rule-editor__preview" data-field="personMessageSummary">
                 <div class="meta-rule-editor__preview-title">Message summary</div>
                 <div><strong>Recipients:</strong> {{ personRecipientSummary(action) }}</div>
                 <div><strong>Record recipients:</strong> {{ recipientFieldPathSummary(action.config.recipientFieldPath) }}</div>
+                <div><strong>Record member groups:</strong> {{ recipientFieldPathSummary(action.config.memberGroupRecipientFieldPath) }}</div>
                 <div><strong>Title template:</strong> {{ templatePreviewText(action.config.titleTemplate, 'No title template') }}</div>
                 <div class="meta-rule-editor__preview-body"><strong>Body template:</strong> {{ templatePreviewText(action.config.bodyTemplate, 'No body template') }}</div>
                 <div class="meta-rule-editor__preview-line">
@@ -554,6 +673,7 @@
                   </button>
                 </div>
                 <div><strong>Public form:</strong> {{ viewSummaryName(action.config.publicFormViewId, 'No public form link') }}</div>
+                <div><strong>Public form access:</strong> {{ publicFormAccessSummary(action.config.publicFormViewId) }}</div>
                 <div><strong>Internal processing:</strong> {{ viewSummaryName(action.config.internalViewId, 'No internal link') }}</div>
               </div>
             </div>
@@ -578,10 +698,35 @@
 
       <!-- Footer -->
       <div class="meta-rule-editor__footer">
+        <div class="meta-rule-editor__test-run-feedback">
+          <div v-if="savedRuleHasDingTalkActions" class="meta-rule-editor__hint meta-rule-editor__hint--warning" data-field="dingtalkTestRunWarning">
+            Test Run executes the saved rule and can send real DingTalk messages to configured groups or users.
+          </div>
+          <div v-if="!props.rule?.id" class="meta-rule-editor__hint" data-field="testRunUnsavedHint">
+            Save this automation before running a test.
+          </div>
+          <div
+            v-if="props.testRunState"
+            class="meta-rule-editor__test-run-status"
+            :class="`meta-rule-editor__test-run-status--${props.testRunState.status}`"
+            data-field="testRunStatus"
+            :data-status="props.testRunState.status"
+          >
+            {{ props.testRunState.message }}
+          </div>
+        </div>
         <button class="meta-rule-editor__btn meta-rule-editor__btn--primary" type="button" :disabled="!canSave || saving" data-action="save" @click="onSave">
           {{ saving ? 'Saving...' : 'Save' }}
         </button>
-        <button class="meta-rule-editor__btn" type="button" :disabled="saving" @click="onTestRun" data-action="test">Test Run</button>
+        <button
+          class="meta-rule-editor__btn"
+          type="button"
+          :disabled="saving || !props.rule?.id || props.testRunState?.status === 'running'"
+          @click="onTestRun"
+          data-action="test"
+        >
+          {{ props.testRunState?.status === 'running' ? 'Running...' : 'Test Run' }}
+        </button>
         <button class="meta-rule-editor__btn" type="button" @click="$emit('close')">Cancel</button>
       </div>
     </div>
@@ -610,6 +755,19 @@ import {
 } from '../utils/dingtalkNotificationTemplateTokens'
 import { listDingTalkTemplateSyntaxWarnings } from '../utils/dingtalkNotificationTemplateLint'
 import { renderDingTalkTemplateExample } from '../utils/dingtalkNotificationTemplateExample'
+import {
+  isDingTalkMemberGroupRecipientField,
+  listDingTalkGroupDestinationFieldPathWarnings,
+} from '../utils/dingtalkRecipientFieldWarnings'
+import {
+  describeDingTalkPublicFormLinkAccess,
+  listDingTalkPublicFormLinkBlockingErrors,
+  listDingTalkPublicFormLinkWarnings,
+} from '../utils/dingtalkPublicFormLinkWarnings'
+import {
+  listDingTalkInternalViewLinkBlockingErrors,
+  listDingTalkInternalViewLinkWarnings,
+} from '../utils/dingtalkInternalViewLinkWarnings'
 
 interface FieldPair {
   fieldId: string
@@ -627,10 +785,12 @@ type DraftActionConfig = Record<string, unknown> & {
   memberGroupIdsText?: string
   userIdsSearch?: string
   recipientFieldPath?: string
+  memberGroupRecipientFieldPath?: string
   message?: string
   destinationId?: string
   destinationIds?: string[]
   destinationPickerId?: string
+  destinationFieldPath?: string
   titleTemplate?: string
   bodyTemplate?: string
   publicFormViewId?: string
@@ -654,8 +814,12 @@ interface Draft {
 const props = defineProps<{
   sheetId: string
   rule?: AutomationRule
+  testRunState?: {
+    status: 'running' | 'success' | 'failed' | 'skipped'
+    message: string
+  }
   visible: boolean
-  fields: Array<{ id: string; name: string; type: string }>
+  fields: Array<{ id: string; name: string; type: string; property?: Record<string, unknown> }>
   client?: MultitableApiClient
   views?: MetaView[]
 }>()
@@ -679,9 +843,16 @@ const copiedPreviewKey = ref('')
 let personRecipientSuggestionLoadId = 0
 let copiedPreviewResetTimer: ReturnType<typeof setTimeout> | null = null
 
-const formViews = computed(() => (props.views ?? []).filter((view) => view.type === 'form'))
-const internalViews = computed(() => props.views ?? [])
+const formViews = computed(() => (props.views ?? []).filter((view) =>
+  view.type === 'form' && (!view.sheetId || view.sheetId === props.sheetId),
+))
+const internalViews = computed(() => (props.views ?? []).filter((view) => !view.sheetId || view.sheetId === props.sheetId))
+const groupDestinationCandidateFields = computed(() => props.fields)
 const recipientCandidateFields = computed(() => props.fields.filter((field) => field.type === 'user'))
+const memberGroupRecipientCandidateFields = computed(() => props.fields.filter(isDingTalkMemberGroupRecipientField))
+const savedRuleHasDingTalkActions = computed(() => ruleHasDingTalkActions(props.rule))
+const DINGTALK_TEST_RUN_CONFIRM_MESSAGE =
+  'Test Run executes the saved rule and can send real DingTalk messages to configured groups or users. Unsaved changes are not included. Continue?'
 
 const conditionOperators: Array<{ value: ConditionOperator; label: string }> = [
   { value: 'equals', label: 'Equals' },
@@ -715,6 +886,11 @@ function draftConfigFromAction(type: AutomationActionType, config: Record<string
     return {
       ...config,
       destinationIds: parseGroupDestinationIds(config.destinationIds ?? config.destinationId),
+      destinationFieldPath: Array.isArray(config.destinationIdFieldPaths)
+        ? config.destinationIdFieldPaths.join(', ')
+        : typeof config.destinationIdFieldPath === 'string'
+          ? config.destinationIdFieldPath
+          : '',
       destinationPickerId: '',
     }
   }
@@ -731,6 +907,11 @@ function draftConfigFromAction(type: AutomationActionType, config: Record<string
         ? config.userIdFieldPaths.join(', ')
         : typeof config.userIdFieldPath === 'string'
           ? config.userIdFieldPath
+          : '',
+      memberGroupRecipientFieldPath: Array.isArray(config.memberGroupIdFieldPaths)
+        ? config.memberGroupIdFieldPaths.join(', ')
+        : typeof config.memberGroupIdFieldPath === 'string'
+          ? config.memberGroupIdFieldPath
           : '',
       userIdsSearch: '',
     }
@@ -786,17 +967,25 @@ const canSave = computed(() => {
   for (const action of draft.value.actions) {
     if (action.type === 'send_dingtalk_group_message') {
       const destinationIds = parseGroupDestinationIds(action.config.destinationIds ?? action.config.destinationId)
+      const destinationFieldPath = typeof action.config.destinationFieldPath === 'string' ? action.config.destinationFieldPath.trim() : ''
       const titleTemplate = typeof action.config.titleTemplate === 'string' ? action.config.titleTemplate.trim() : ''
       const bodyTemplate = typeof action.config.bodyTemplate === 'string' ? action.config.bodyTemplate.trim() : ''
-      if (!destinationIds.length || !titleTemplate || !bodyTemplate) return false
+      if ((!destinationIds.length && !destinationFieldPath) || !titleTemplate || !bodyTemplate) return false
+      if (publicFormLinkBlockingErrors(action.config.publicFormViewId).length) return false
+      if (internalViewLinkBlockingErrors(action.config.internalViewId).length) return false
     }
     if (action.type === 'send_dingtalk_person_message') {
       const userIdsText = typeof action.config.userIdsText === 'string' ? action.config.userIdsText.trim() : ''
       const memberGroupIdsText = typeof action.config.memberGroupIdsText === 'string' ? action.config.memberGroupIdsText.trim() : ''
       const recipientFieldPath = typeof action.config.recipientFieldPath === 'string' ? action.config.recipientFieldPath.trim() : ''
+      const memberGroupRecipientFieldPath = typeof action.config.memberGroupRecipientFieldPath === 'string'
+        ? action.config.memberGroupRecipientFieldPath.trim()
+        : ''
       const titleTemplate = typeof action.config.titleTemplate === 'string' ? action.config.titleTemplate.trim() : ''
       const bodyTemplate = typeof action.config.bodyTemplate === 'string' ? action.config.bodyTemplate.trim() : ''
-      if ((!userIdsText && !memberGroupIdsText && !recipientFieldPath) || !titleTemplate || !bodyTemplate) return false
+      if ((!userIdsText && !memberGroupIdsText && !recipientFieldPath && !memberGroupRecipientFieldPath) || !titleTemplate || !bodyTemplate) return false
+      if (publicFormLinkBlockingErrors(action.config.publicFormViewId).length) return false
+      if (internalViewLinkBlockingErrors(action.config.internalViewId).length) return false
     }
   }
   return true
@@ -955,6 +1144,15 @@ function selectedGroupDestinations(action: DraftAction) {
   })
 }
 
+function selectedGroupDestinationFields(action: DraftAction) {
+  return parseRecipientFieldPathsText(action.config.destinationFieldPath)
+    .map((path) => ({
+      id: path,
+      label: recipientFieldSummaryLabel(path),
+    }))
+    .filter((item) => item.label)
+}
+
 function availableGroupDestinations(action: DraftAction) {
   const selected = new Set(parseGroupDestinationIds(action.config.destinationIds ?? action.config.destinationId))
   return dingTalkDestinations.value.filter((destination) => !selected.has(destination.id))
@@ -983,6 +1181,36 @@ function dingTalkGroupSummary(action: DraftAction) {
   return selected.map((item) => item.label).join(', ')
 }
 
+function groupDestinationFieldPathWarnings(value: unknown) {
+  return listDingTalkGroupDestinationFieldPathWarnings(value, props.fields)
+}
+
+function groupDestinationFieldPathSummary(value: unknown) {
+  const labels = parseRecipientFieldPathsText(value)
+    .map((path) => recipientFieldSummaryLabel(path))
+    .filter(Boolean)
+  if (!labels.length) return 'No dynamic group field'
+  return labels.join(', ')
+}
+
+function appendGroupDestinationFieldPath(action: DraftAction, select: HTMLSelectElement) {
+  const fieldId = select.value.trim()
+  if (!fieldId) return
+  const paths = parseRecipientFieldPathsText(action.config.destinationFieldPath)
+  paths.push(fieldId)
+  action.config.destinationFieldPath = Array.from(new Set(paths))
+    .map((path) => `record.${path}`)
+    .join(', ')
+  select.value = ''
+}
+
+function removeGroupDestinationFieldPath(action: DraftAction, path: string) {
+  action.config.destinationFieldPath = parseRecipientFieldPathsText(action.config.destinationFieldPath)
+    .filter((entry) => entry !== path)
+    .map((entry) => `record.${entry}`)
+    .join(', ')
+}
+
 function removePersonRecipientGroup(action: DraftAction, groupId: string) {
   action.config.memberGroupIdsText = parseMemberGroupIdsText(action.config.memberGroupIdsText)
     .filter((id) => id !== groupId)
@@ -1003,6 +1231,39 @@ function renderedTemplateExample(value: unknown, fallback: string) {
   if (typeof value !== 'string' || !value.trim()) return fallback
   const rendered = renderDingTalkTemplateExample(value).trim()
   return rendered || fallback
+}
+
+function publicFormLinkWarnings(value: unknown, warnWhenGroupAccessRisk = false) {
+  return listDingTalkPublicFormLinkWarnings(value, formViews.value, {
+    warnWhenFullyPublic: warnWhenGroupAccessRisk,
+    warnWhenProtectedWithoutAllowlist: warnWhenGroupAccessRisk,
+  })
+}
+
+function publicFormLinkBlockingErrors(value: unknown) {
+  return listDingTalkPublicFormLinkBlockingErrors(value, formViews.value)
+}
+
+function internalViewLinkWarnings(value: unknown) {
+  return listDingTalkInternalViewLinkWarnings(value, internalViews.value)
+}
+
+function internalViewLinkBlockingErrors(value: unknown) {
+  return listDingTalkInternalViewLinkBlockingErrors(value, internalViews.value)
+}
+
+function publicFormAccessSummary(value: unknown) {
+  return describeDingTalkPublicFormLinkAccess(value, formViews.value)
+}
+
+function isDingTalkActionType(value: unknown): boolean {
+  return value === 'send_dingtalk_group_message' || value === 'send_dingtalk_person_message'
+}
+
+function ruleHasDingTalkActions(rule: AutomationRule | undefined): boolean {
+  if (!rule) return false
+  return isDingTalkActionType(rule.actionType)
+    || (rule.actions ?? []).some((action) => isDingTalkActionType(action.type))
 }
 
 function copyPreviewText(key: string, text: string) {
@@ -1054,11 +1315,34 @@ function selectedRecipientFields(action: DraftAction) {
     .filter((item) => item.label)
 }
 
+function selectedMemberGroupRecipientFields(action: DraftAction) {
+  return parseRecipientFieldPathsText(action.config.memberGroupRecipientFieldPath)
+    .map((path) => ({
+      id: path,
+      label: recipientFieldSummaryLabel(path),
+    }))
+    .filter((item) => item.label)
+}
+
 function recipientFieldPathWarnings(value: unknown) {
   const candidateIds = new Set(recipientCandidateFields.value.map((field) => field.id))
   return parseRecipientFieldPathsText(value)
     .filter((path) => !candidateIds.has(path))
     .map((path) => `record.${path} is not a user field; DingTalk person messages expect local user IDs.`)
+}
+
+function memberGroupRecipientFieldPathWarnings(value: unknown) {
+  const fieldMap = new Map(props.fields.map((field) => [field.id, field]))
+  return parseRecipientFieldPathsText(value).flatMap((path) => {
+    const field = fieldMap.get(path)
+    if (!field) {
+      return [`record.${path} is not a known field in this sheet; DingTalk person member-group recipients expect field IDs that resolve to member group IDs.`]
+    }
+    if (field.type === 'user') {
+      return [`record.${path} is a user field; use Record recipient field paths instead.`]
+    }
+    return []
+  })
 }
 
 function recipientFieldPathSummary(value: unknown) {
@@ -1082,6 +1366,24 @@ function appendRecipientFieldPath(action: DraftAction, select: HTMLSelectElement
 
 function removeRecipientFieldPath(action: DraftAction, path: string) {
   action.config.recipientFieldPath = parseRecipientFieldPathsText(action.config.recipientFieldPath)
+    .filter((entry) => entry !== path)
+    .map((entry) => `record.${entry}`)
+    .join(', ')
+}
+
+function appendMemberGroupRecipientFieldPath(action: DraftAction, select: HTMLSelectElement) {
+  const fieldId = select.value.trim()
+  if (!fieldId) return
+  const paths = parseRecipientFieldPathsText(action.config.memberGroupRecipientFieldPath)
+  paths.push(fieldId)
+  action.config.memberGroupRecipientFieldPath = Array.from(new Set(paths))
+    .map((path) => `record.${path}`)
+    .join(', ')
+  select.value = ''
+}
+
+function removeMemberGroupRecipientFieldPath(action: DraftAction, path: string) {
+  action.config.memberGroupRecipientFieldPath = parseRecipientFieldPathsText(action.config.memberGroupRecipientFieldPath)
     .filter((entry) => entry !== path)
     .map((entry) => `record.${entry}`)
     .join(', ')
@@ -1162,6 +1464,7 @@ function defaultConfigForActionType(type: AutomationActionType): DraftActionConf
         destinationId: '',
         destinationIds: [],
         destinationPickerId: '',
+        destinationFieldPath: '',
         titleTemplate: '',
         bodyTemplate: '',
         publicFormViewId: '',
@@ -1173,6 +1476,7 @@ function defaultConfigForActionType(type: AutomationActionType): DraftActionConf
         memberGroupIdsText: '',
         userIdsSearch: '',
         recipientFieldPath: '',
+        memberGroupRecipientFieldPath: '',
         titleTemplate: '',
         bodyTemplate: '',
         publicFormViewId: '',
@@ -1227,11 +1531,15 @@ function buildPayload(): Partial<AutomationRule> {
   const actions = d.actions.map((action) => {
     if (action.type === 'send_dingtalk_group_message') {
       const destinationIds = parseGroupDestinationIds(action.config.destinationIds ?? action.config.destinationId)
+      const destinationIdFieldPaths = parseRecipientFieldPathsText(action.config.destinationFieldPath)
+        .map((path) => `record.${path}`)
       return {
         type: action.type,
         config: {
           destinationId: destinationIds[0] || undefined,
           destinationIds: destinationIds.length ? destinationIds : undefined,
+          ...(destinationIdFieldPaths[0] ? { destinationIdFieldPath: destinationIdFieldPaths[0] } : {}),
+          ...(destinationIdFieldPaths.length ? { destinationIdFieldPaths } : {}),
           titleTemplate: typeof action.config.titleTemplate === 'string' ? action.config.titleTemplate.trim() : '',
           bodyTemplate: typeof action.config.bodyTemplate === 'string' ? action.config.bodyTemplate.trim() : '',
           publicFormViewId: typeof action.config.publicFormViewId === 'string' && action.config.publicFormViewId.trim()
@@ -1258,13 +1566,17 @@ function buildPayload(): Partial<AutomationRule> {
         : []
       const userIdFieldPaths = parseRecipientFieldPathsText(action.config.recipientFieldPath)
         .map((path) => `record.${path}`)
+      const memberGroupIdFieldPaths = parseRecipientFieldPathsText(action.config.memberGroupRecipientFieldPath)
+        .map((path) => `record.${path}`)
       return {
         type: action.type,
         config: {
           userIds,
           memberGroupIds: memberGroupIds.length ? memberGroupIds : undefined,
-          userIdFieldPath: userIdFieldPaths[0] || undefined,
-          userIdFieldPaths: userIdFieldPaths.length ? userIdFieldPaths : undefined,
+          ...(userIdFieldPaths[0] ? { userIdFieldPath: userIdFieldPaths[0] } : {}),
+          ...(userIdFieldPaths.length ? { userIdFieldPaths } : {}),
+          ...(memberGroupIdFieldPaths[0] ? { memberGroupIdFieldPath: memberGroupIdFieldPaths[0] } : {}),
+          ...(memberGroupIdFieldPaths.length ? { memberGroupIdFieldPaths } : {}),
           titleTemplate: typeof action.config.titleTemplate === 'string' ? action.config.titleTemplate.trim() : '',
           bodyTemplate: typeof action.config.bodyTemplate === 'string' ? action.config.bodyTemplate.trim() : '',
           publicFormViewId: typeof action.config.publicFormViewId === 'string' && action.config.publicFormViewId.trim()
@@ -1304,9 +1616,9 @@ async function onSave() {
 }
 
 function onTestRun() {
-  if (props.rule?.id) {
-    emit('test', props.rule.id)
-  }
+  if (saving.value || props.testRunState?.status === 'running' || !props.rule?.id) return
+  if (savedRuleHasDingTalkActions.value && !window.confirm(DINGTALK_TEST_RUN_CONFIRM_MESSAGE)) return
+  emit('test', props.rule.id)
 }
 </script>
 
@@ -1371,6 +1683,23 @@ function onTestRun() {
 .meta-rule-editor__hint--error { color: #b91c1c; }
 
 .meta-rule-editor__hint--warning { color: #b45309; }
+
+.meta-rule-editor__test-run-feedback {
+  flex: 1 1 280px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.meta-rule-editor__test-run-status {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.meta-rule-editor__test-run-status--success { color: #15803d; }
+.meta-rule-editor__test-run-status--failed { color: #b91c1c; }
+.meta-rule-editor__test-run-status--skipped { color: #b45309; }
+.meta-rule-editor__test-run-status--running { color: #1d4ed8; }
 
 .meta-rule-editor__input,
 .meta-rule-editor__select,
@@ -1546,6 +1875,8 @@ function onTestRun() {
 
 .meta-rule-editor__footer {
   display: flex;
+  align-items: center;
+  flex-wrap: wrap;
   gap: 8px;
   padding: 12px 20px 16px;
   border-top: 1px solid #e2e8f0;

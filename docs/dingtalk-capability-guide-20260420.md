@@ -61,8 +61,8 @@ Supported:
 
 Current behavior:
 
-- one rule targets one group destination
-- one table can target multiple groups by using multiple rules
+- one rule can target multiple configured DingTalk group destinations
+- one rule can also resolve DingTalk group destination IDs from record field paths
 - destinations are manually registered; groups are not auto-imported from DingTalk
 
 ### 4. DingTalk person notifications
@@ -99,6 +99,11 @@ Protected forms still use the existing create-only public-form model:
 - public form = submit new data only
 - public form != view the internal table
 - public form != edit existing records
+
+Runtime guardrail:
+
+- DingTalk automation delivery only emits public-form links for same-sheet form views with active sharing
+- expired public-form sharing is rejected before sending the DingTalk message
 
 ### 6. Protected public-form allowlists
 
@@ -220,6 +225,16 @@ This is the preferred implementation for:
 
 - “the whole group sees the message, but only specific people can submit”
 
+Authoring guardrail:
+
+- group-message and person-message automations disable save when the selected public form link cannot produce a working fill link
+- group-message and person-message automations disable save when the selected internal processing view is not in the current sheet
+- automation create/update APIs reject invalid public form or internal processing links before rules are saved
+- group-message automations warn when the selected public form link is still fully public
+- group-message automations warn when a DingTalk-protected form has no allowed users or member groups
+- group-message and person-message automation previews show the selected public form access range before save
+- the warnings direct owners toward DingTalk-protected access plus allowlists
+
 ## Current limitations
 
 ### DingTalk groups
@@ -228,11 +243,16 @@ Not yet supported:
 
 - auto-syncing DingTalk group rosters
 - browsing a live DingTalk group list from OAuth
-- one rule selecting multiple groups in a single config row
 
-Current workaround:
+Currently supported:
 
-- create multiple rules, one per group
+- one rule can target multiple configured DingTalk group destinations
+- one rule can also resolve DingTalk group destination IDs from record field paths
+- authoring warns when record field paths point to user/member-group fields instead of group-destination ID fields
+
+Current workaround for live DingTalk group discovery:
+
+- manually register DingTalk robot webhook destinations per table
 
 ### Public-form precision beyond allowlists
 
@@ -260,7 +280,7 @@ Recommended future direction:
 
 Recommended next steps after the current branch chain lands:
 
-1. merge and deploy protected public-form modes and allowlists
+1. merge and deploy the current dynamic destination and form-link guardrail slices
 2. add shared/group-governed DingTalk destinations
 3. add row/field-level fill assignment
 4. add richer notification governance such as approval-oriented presets and review templates

@@ -51,6 +51,8 @@ export interface SendNotificationConfig {
 export interface SendDingTalkGroupMessageConfig {
   destinationId?: string
   destinationIds?: string[]
+  destinationIdFieldPath?: string
+  destinationIdFieldPaths?: string[]
   titleTemplate: string
   bodyTemplate: string
   publicFormViewId?: string
@@ -63,6 +65,8 @@ export interface SendDingTalkPersonMessageConfig {
   memberGroupIds?: string[]
   userIdFieldPath?: string
   userIdFieldPaths?: string[]
+  memberGroupIdFieldPath?: string
+  memberGroupIdFieldPaths?: string[]
   titleTemplate: string
   bodyTemplate: string
   publicFormViewId?: string

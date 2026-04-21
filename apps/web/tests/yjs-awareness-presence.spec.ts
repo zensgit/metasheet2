@@ -78,6 +78,29 @@ describe('Yjs awareness presence', () => {
     await flushUi(2)
 
     expect(emitMock).toHaveBeenCalledWith('yjs:subscribe', { recordId: 'rec_yjs_1' })
+
+    // Backend seeds Y.Text entries for string fields on fresh-doc
+    // create. Simulate that by pushing a SyncStep2 carrying a primer
+    // Y.Doc with `fld_body` already present. Without this, the seed
+    // guard in useYjsTextField keeps it inactive and never emits
+    // `yjs:presence`.
+    const encodingModule = await import('lib0/encoding')
+    const Y = await import('yjs')
+    const primer = new Y.Doc()
+    const seededBody = new Y.Text()
+    primer.getMap('fields').set('fld_body', seededBody)
+    const primerUpdate = Y.encodeStateAsUpdate(primer)
+    primer.destroy()
+    const encoder = encodingModule.createEncoder()
+    encodingModule.writeVarUint(encoder, 0)
+    encodingModule.writeVarUint(encoder, 1)
+    encodingModule.writeVarUint8Array(encoder, primerUpdate)
+    handlers.get('yjs:message')?.({
+      recordId: 'rec_yjs_1',
+      data: Array.from(encodingModule.toUint8Array(encoder)),
+    })
+    await flushUi(3)
+
     expect(emitMock).toHaveBeenCalledWith('yjs:presence', {
       recordId: 'rec_yjs_1',
       fieldId: 'fld_body',

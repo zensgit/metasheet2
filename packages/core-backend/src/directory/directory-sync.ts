@@ -572,6 +572,10 @@ function normalizeText(value: unknown): string {
   return typeof value === 'string' ? value.trim() : String(value ?? '').trim()
 }
 
+function normalizeMobileIdentifier(value: unknown): string {
+  return normalizeText(value).replace(/\s+/g, '')
+}
+
 function normalizeOptionalText(value: unknown): string | null {
   const text = normalizeText(value)
   return text.length > 0 ? text : null
@@ -586,7 +590,7 @@ function sanitizeDirectoryAdmissionName(value: string): string {
 }
 
 function sanitizeDirectoryAdmissionMobile(value: unknown): string | null {
-  const text = normalizeText(value).replace(/\s+/g, '')
+  const text = normalizeMobileIdentifier(value)
   if (!text) return null
   return text.slice(0, 32)
 }
@@ -1776,6 +1780,31 @@ async function markSyncFailure(integrationId: string, runId: string, message: st
   }
 }
 
+export function buildUniqueLocalUserMatchMap(
+  rows: LocalUserRow[],
+  readKey: (row: LocalUserRow) => string,
+): { uniqueMap: Map<string, string>; ambiguousKeys: Set<string> } {
+  const idsByKey = new Map<string, Set<string>>()
+  for (const row of rows) {
+    const key = readKey(row)
+    if (!key) continue
+    const ids = idsByKey.get(key) ?? new Set<string>()
+    ids.add(row.id)
+    idsByKey.set(key, ids)
+  }
+
+  const uniqueMap = new Map<string, string>()
+  const ambiguousKeys = new Set<string>()
+  for (const [key, ids] of idsByKey.entries()) {
+    if (ids.size === 1) {
+      uniqueMap.set(key, Array.from(ids)[0])
+    } else {
+      ambiguousKeys.add(key)
+    }
+  }
+  return { uniqueMap, ambiguousKeys }
+}
+
 async function loadMatchMaps(accounts: DirectoryAccountRow[]) {
   const externalKeys = Array.from(new Set(accounts.map((account) => account.external_key).filter(Boolean)))
   const unionIds = Array.from(new Set(
@@ -1795,7 +1824,7 @@ async function loadMatchMaps(accounts: DirectoryAccountRow[]) {
   ))
   const mobiles = Array.from(new Set(
     accounts
-      .map((account) => normalizeText(account.mobile))
+      .map((account) => normalizeMobileIdentifier(account.mobile))
       .filter(Boolean),
   ))
 
@@ -1825,7 +1854,7 @@ async function loadMatchMaps(accounts: DirectoryAccountRow[]) {
       ? query<LocalUserRow>(
         `SELECT id, mobile
          FROM users
-         WHERE mobile = ANY($1::text[])`,
+         WHERE regexp_replace(mobile, '\\s+', '', 'g') = ANY($1::text[])`,
         [mobiles],
       )
       : Promise.resolve({ rows: [] } as Awaited<ReturnType<typeof query<LocalUserRow>>>),
@@ -1840,20 +1869,23 @@ async function loadMatchMaps(accounts: DirectoryAccountRow[]) {
     if (openKey) scopedOpenIdentityMap.set(openKey, row.local_user_id)
   }
 
+  const emailMatches = buildUniqueLocalUserMatchMap(
+    emailUsers.rows,
+    (row) => normalizeText(row.email).toLowerCase(),
+  )
+  const mobileMatches = buildUniqueLocalUserMatchMap(
+    mobileUsers.rows,
+    (row) => normalizeMobileIdentifier(row.mobile),
+  )
+
   return {
     externalIdentityMap: new Map(externalIdentities.rows.map((row) => [row.external_key, row.local_user_id])),
     scopedUnionIdentityMap,
     scopedOpenIdentityMap,
-    emailMap: new Map(
-      emailUsers.rows
-        .map((row) => [normalizeText(row.email).toLowerCase(), row.id] as const)
-        .filter(([email]) => email.length > 0),
-    ),
-    mobileMap: new Map(
-      mobileUsers.rows
-        .map((row) => [normalizeText(row.mobile), row.id] as const)
-        .filter(([mobile]) => mobile.length > 0),
-    ),
+    emailMap: emailMatches.uniqueMap,
+    mobileMap: mobileMatches.uniqueMap,
+    ambiguousEmailKeys: emailMatches.ambiguousKeys,
+    ambiguousMobileKeys: mobileMatches.ambiguousKeys,
   }
 }
 
@@ -2031,7 +2063,15 @@ export async function syncDirectoryIntegration(
         }
       }
 
-      const { externalIdentityMap, scopedUnionIdentityMap, scopedOpenIdentityMap, emailMap, mobileMap } = await loadMatchMaps(
+      const {
+        externalIdentityMap,
+        scopedUnionIdentityMap,
+        scopedOpenIdentityMap,
+        emailMap,
+        mobileMap,
+        ambiguousEmailKeys,
+        ambiguousMobileKeys,
+      } = await loadMatchMaps(
         Array.from(accountIdMap.values()),
       )
 
@@ -2073,8 +2113,12 @@ export async function syncDirectoryIntegration(
             linkStatus = 'linked'
             matchStrategy = 'external_identity'
           } else {
-            const emailUserId = normalizeText(account.email).toLowerCase() ? emailMap.get(normalizeText(account.email).toLowerCase()) : undefined
-            const mobileUserId = normalizeText(account.mobile) ? mobileMap.get(normalizeText(account.mobile)) : undefined
+            const emailKey = normalizeText(account.email).toLowerCase()
+            const mobileKey = normalizeMobileIdentifier(account.mobile)
+            const emailUserId = emailKey ? emailMap.get(emailKey) : undefined
+            const mobileUserId = mobileKey ? mobileMap.get(mobileKey) : undefined
+            const hasAmbiguousIdentifierMatch = (emailKey.length > 0 && ambiguousEmailKeys.has(emailKey))
+              || (mobileKey.length > 0 && ambiguousMobileKeys.has(mobileKey))
             if (emailUserId) {
               localUserId = emailUserId
               linkStatus = 'pending'
@@ -2083,6 +2127,10 @@ export async function syncDirectoryIntegration(
               localUserId = mobileUserId
               linkStatus = 'pending'
               matchStrategy = 'mobile'
+            } else if (hasAmbiguousIdentifierMatch) {
+              localUserId = null
+              linkStatus = 'unmatched'
+              matchStrategy = 'none'
             } else {
               const autoAdmission = evaluateDirectoryAutoAdmissionEligibility({
                 admissionMode: config.admissionMode,
@@ -2174,6 +2222,8 @@ export async function syncDirectoryIntegration(
                   autoAdmittedCount += 1
                   if (cleanEmail) emailMap.set(cleanEmail.toLowerCase(), created.userId)
                   if (cleanMobile) mobileMap.set(cleanMobile, created.userId)
+                  if (cleanEmail) ambiguousEmailKeys.delete(cleanEmail.toLowerCase())
+                  if (cleanMobile) ambiguousMobileKeys.delete(cleanMobile)
                   externalIdentityMap.set(account.external_key, created.userId)
                   const scopedOpenIdentityKey = buildScopedIdentityKey(account.corp_id, account.open_id)
                   if (scopedOpenIdentityKey) scopedOpenIdentityMap.set(scopedOpenIdentityKey, created.userId)
@@ -3301,6 +3351,8 @@ export async function getDirectoryAccountSummary(accountId: string): Promise<Dir
 async function resolveDirectoryBindingUser(localUserRef: string): Promise<DirectoryBindingUserRow | null> {
   const ref = normalizeText(localUserRef)
   if (!ref) return null
+  const normalizedRef = ref.toLowerCase()
+  const normalizedMobile = normalizeMobileIdentifier(ref)
 
   const result = await query<DirectoryBindingUserRow>(
     `SELECT id,
@@ -3312,22 +3364,38 @@ async function resolveDirectoryBindingUser(localUserRef: string): Promise<Direct
             COALESCE(is_active, TRUE) AS is_active
      FROM users
      WHERE id = $1
-        OR LOWER(COALESCE(email, '')) = LOWER($1)
-        OR LOWER(COALESCE(username, '')) = LOWER($1)
-        OR regexp_replace(COALESCE(mobile, ''), '\\s+', '', 'g') = regexp_replace($1, '\\s+', '', 'g')
+        OR LOWER(email) = $2
+        OR LOWER(username) = $2
+        OR regexp_replace(mobile, '\\s+', '', 'g') = $3
      ORDER BY
        CASE
          WHEN id = $1 THEN 0
-         WHEN LOWER(COALESCE(email, '')) = LOWER($1) THEN 1
-         WHEN LOWER(COALESCE(username, '')) = LOWER($1) THEN 2
-         WHEN regexp_replace(COALESCE(mobile, ''), '\\s+', '', 'g') = regexp_replace($1, '\\s+', '', 'g') THEN 3
+         WHEN LOWER(email) = $2 THEN 1
+         WHEN LOWER(username) = $2 THEN 2
+         WHEN regexp_replace(mobile, '\\s+', '', 'g') = $3 THEN 3
          ELSE 4
        END
-     LIMIT 1`,
-    [ref],
+     LIMIT 2`,
+    [ref, normalizedRef, normalizedMobile],
   )
 
-  return result.rows[0] ?? null
+  const idMatch = result.rows.find((row) => row.id === ref)
+  if (idMatch) return idMatch
+
+  const distinctUserIds = new Set(result.rows.map((row) => row.id))
+  if (distinctUserIds.size > 1) throw new Error('Local user reference is ambiguous')
+
+  const emailMatches = result.rows.filter((row) => typeof row.email === 'string' && row.email.toLowerCase() === normalizedRef)
+  if (emailMatches.length > 1) throw new Error('Local user reference is ambiguous')
+  if (emailMatches.length === 1) return emailMatches[0]
+
+  const usernameMatches = result.rows.filter((row) => typeof row.username === 'string' && row.username.toLowerCase() === normalizedRef)
+  if (usernameMatches.length > 1) throw new Error('Local user reference is ambiguous')
+  if (usernameMatches.length === 1) return usernameMatches[0]
+
+  const mobileMatches = result.rows.filter((row) => typeof row.mobile === 'string' && normalizeMobileIdentifier(row.mobile) === normalizedMobile)
+  if (mobileMatches.length > 1) throw new Error('Local user reference is ambiguous')
+  return mobileMatches[0] ?? null
 }
 
 async function loadDirectoryBindingTargetAccount(directoryAccountId: string): Promise<DirectoryBindingTargetAccountRow | null> {
