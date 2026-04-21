@@ -253,10 +253,38 @@ describe('DingTalk automation link route validation', () => {
     expect(automationService.createRule).toHaveBeenCalledWith(SHEET_ID, expect.objectContaining({
       actionType: 'send_dingtalk_group_message',
       actionConfig: expect.objectContaining({
+        titleTemplate: 'Please fill',
+        bodyTemplate: 'Open form',
         publicFormViewId: VALID_FORM_VIEW_ID,
         internalViewId: INTERNAL_VIEW_ID,
       }),
     }))
+  })
+
+  it('rejects a DingTalk group rule without an effective destination before persisting the rule', async () => {
+    const { app, automationService } = await createApp()
+
+    const res = await request(app)
+      .post(`/api/multitable/sheets/${SHEET_ID}/automations`)
+      .send({
+        name: 'Notify group',
+        triggerType: 'record.created',
+        triggerConfig: {},
+        actionType: 'send_dingtalk_group_message',
+        actionConfig: {
+          destinationIds: [],
+          destinationIdFieldPath: 'record., ,',
+          titleTemplate: 'Please fill',
+          bodyTemplate: 'Open form',
+        },
+      })
+
+    expect(res.status).toBe(400)
+    expect(res.body.error).toEqual({
+      code: 'VALIDATION_ERROR',
+      message: 'At least one DingTalk destination or record destination field path is required',
+    })
+    expect(automationService.createRule).not.toHaveBeenCalled()
   })
 
   it('rejects an invalid internal processing link on automation create before persisting the rule', async () => {
@@ -281,6 +309,39 @@ describe('DingTalk automation link route validation', () => {
     expect(res.body.error).toEqual({
       code: 'VALIDATION_ERROR',
       message: `Internal processing view not found: ${MISSING_INTERNAL_VIEW_ID}`,
+    })
+    expect(automationService.createRule).not.toHaveBeenCalled()
+  })
+
+  it('rejects a V1 DingTalk person action without an effective recipient before persisting the rule', async () => {
+    const { app, automationService } = await createApp()
+
+    const res = await request(app)
+      .post(`/api/multitable/sheets/${SHEET_ID}/automations`)
+      .send({
+        name: 'Multi action person rule',
+        triggerType: 'record.created',
+        triggerConfig: {},
+        actionType: 'notify',
+        actionConfig: {},
+        actions: [
+          {
+            type: 'send_dingtalk_person_message',
+            config: {
+              userIds: [],
+              memberGroupIds: [','],
+              userIdFieldPath: 'record.',
+              titleTemplate: 'Please fill',
+              bodyTemplate: 'Open form',
+            },
+          },
+        ],
+      })
+
+    expect(res.status).toBe(400)
+    expect(res.body.error).toEqual({
+      code: 'VALIDATION_ERROR',
+      message: 'At least one local userId, memberGroupId, record recipient field path, or member group record field path is required',
     })
     expect(automationService.createRule).not.toHaveBeenCalled()
   })
@@ -321,6 +382,7 @@ describe('DingTalk automation link route validation', () => {
     const automationService = createMockAutomationService(makeAutomationRule({
       action_type: 'send_dingtalk_person_message',
       action_config: {
+        userIds: ['user_1'],
         title: 'Old title',
         content: 'Old content',
         publicFormViewId: VALID_FORM_VIEW_ID,
@@ -332,6 +394,7 @@ describe('DingTalk automation link route validation', () => {
       .patch(`/api/multitable/sheets/${SHEET_ID}/automations/${RULE_ID}`)
       .send({
         actionConfig: {
+          userIds: ['user_1'],
           title: 'New title',
           content: 'New content',
           publicFormViewId: EXPIRED_FORM_VIEW_ID,
@@ -344,6 +407,37 @@ describe('DingTalk automation link route validation', () => {
       message: `Selected public form view has expired: ${EXPIRED_FORM_VIEW_ID}`,
     })
     expect(automationService.getRule).toHaveBeenCalledWith(RULE_ID)
+    expect(automationService.updateRule).not.toHaveBeenCalled()
+  })
+
+  it('validates merged DingTalk action config on automation update', async () => {
+    const automationService = createMockAutomationService(makeAutomationRule({
+      action_type: 'send_dingtalk_person_message',
+      action_config: {
+        userIds: ['user_1'],
+        titleTemplate: 'Old title',
+        bodyTemplate: 'Old body',
+      },
+    }))
+    const { app } = await createApp({ automationService })
+
+    const res = await request(app)
+      .patch(`/api/multitable/sheets/${SHEET_ID}/automations/${RULE_ID}`)
+      .send({
+        actionConfig: {
+          userIds: [],
+          memberGroupIds: [],
+          userIdFieldPath: 'record.',
+          titleTemplate: 'New title',
+          bodyTemplate: 'New body',
+        },
+      })
+
+    expect(res.status).toBe(400)
+    expect(res.body.error).toEqual({
+      code: 'VALIDATION_ERROR',
+      message: 'At least one local userId, memberGroupId, record recipient field path, or member group record field path is required',
+    })
     expect(automationService.updateRule).not.toHaveBeenCalled()
   })
 

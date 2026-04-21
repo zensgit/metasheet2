@@ -689,6 +689,8 @@ import { renderDingTalkTemplateExample } from '../utils/dingtalkNotificationTemp
 import {
   isDingTalkMemberGroupRecipientField,
   listDingTalkGroupDestinationFieldPathWarnings,
+  listDingTalkPersonMemberGroupRecipientFieldPathWarnings,
+  listDingTalkPersonRecipientFieldPathWarnings,
 } from '../utils/dingtalkRecipientFieldWarnings'
 import {
   describeDingTalkPublicFormLinkAccess,
@@ -1068,24 +1070,11 @@ const selectedDingTalkPersonMemberGroupRecipientFields = computed(() => parseRec
   .filter((item) => item.label))
 
 function recipientFieldPathWarnings(value: string) {
-  const candidateIds = new Set(dingTalkPersonRecipientCandidateFields.value.map((field) => field.id))
-  return parseRecipientFieldPathsText(value)
-    .filter((path) => !candidateIds.has(path))
-    .map((path) => `record.${path} is not a user field; DingTalk person messages expect local user IDs.`)
+  return listDingTalkPersonRecipientFieldPathWarnings(value, props.fields)
 }
 
 function memberGroupRecipientFieldPathWarnings(value: string) {
-  const fieldMap = new Map(props.fields.map((field) => [field.id, field]))
-  return parseRecipientFieldPathsText(value).flatMap((path) => {
-    const field = fieldMap.get(path)
-    if (!field) {
-      return [`record.${path} is not a known field in this sheet; DingTalk person member-group recipients expect field IDs that resolve to member group IDs.`]
-    }
-    if (field.type === 'user') {
-      return [`record.${path} is a user field; use Record recipient field paths instead.`]
-    }
-    return []
-  })
+  return listDingTalkPersonMemberGroupRecipientFieldPathWarnings(value, props.fields)
 }
 
 const dingTalkPersonRecipientFieldSummary = computed(() => {
@@ -1363,18 +1352,23 @@ const canSave = computed(() => {
   if (draft.value.actionType === 'notify' && !draft.value.notifyMessage.trim()) return false
   if (draft.value.actionType === 'update_field' && (!draft.value.targetFieldId || !draft.value.targetValue.trim())) return false
   if (draft.value.actionType === 'send_dingtalk_group_message') {
-    if (!draft.value.dingtalkDestinationIds.length && !draft.value.dingtalkDestinationFieldPath.trim()) return false
+    const destinationFieldPaths = parseRecipientFieldPathsText(draft.value.dingtalkDestinationFieldPath)
+    if (!draft.value.dingtalkDestinationIds.length && !destinationFieldPaths.length) return false
     if (!draft.value.dingtalkTitleTemplate.trim()) return false
     if (!draft.value.dingtalkBodyTemplate.trim()) return false
     if (publicFormLinkBlockingErrors(draft.value.publicFormViewId).length) return false
     if (internalViewLinkBlockingErrors(draft.value.internalViewId).length) return false
   }
   if (draft.value.actionType === 'send_dingtalk_person_message') {
+    const userIds = parseUserIdsText(draft.value.dingtalkPersonUserIds)
+    const memberGroupIds = parseMemberGroupIdsText(draft.value.dingtalkPersonMemberGroupIds)
+    const recipientFieldPaths = parseRecipientFieldPathsText(draft.value.dingtalkPersonRecipientFieldPath)
+    const memberGroupRecipientFieldPaths = parseRecipientFieldPathsText(draft.value.dingtalkPersonMemberGroupRecipientFieldPath)
     if (
-      !draft.value.dingtalkPersonUserIds.trim()
-      && !draft.value.dingtalkPersonMemberGroupIds.trim()
-      && !draft.value.dingtalkPersonRecipientFieldPath.trim()
-      && !draft.value.dingtalkPersonMemberGroupRecipientFieldPath.trim()
+      !userIds.length
+      && !memberGroupIds.length
+      && !recipientFieldPaths.length
+      && !memberGroupRecipientFieldPaths.length
     ) return false
     if (!draft.value.dingtalkPersonTitleTemplate.trim()) return false
     if (!draft.value.dingtalkPersonBodyTemplate.trim()) return false
