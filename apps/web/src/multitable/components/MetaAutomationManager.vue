@@ -260,7 +260,14 @@
                 </button>
               </div>
               <div><strong>Public form:</strong> {{ viewSummaryName(draft.publicFormViewId, 'No public form link') }}</div>
-              <div><strong>Public form access:</strong> {{ publicFormAccessSummary(draft.publicFormViewId) }}</div>
+              <div
+                class="meta-automation__public-form-access"
+                :class="`meta-automation__public-form-access--${publicFormAccessLevel(draft.publicFormViewId)}`"
+                data-automation-public-form-access="group"
+                :data-access-level="publicFormAccessLevel(draft.publicFormViewId)"
+              >
+                <strong>Public form access:</strong> {{ publicFormAccessSummary(draft.publicFormViewId) }}
+              </div>
               <div><strong>Internal processing:</strong> {{ viewSummaryName(draft.internalViewId, 'No internal link') }}</div>
             </div>
           </template>
@@ -541,7 +548,14 @@
                 </button>
               </div>
               <div><strong>Public form:</strong> {{ viewSummaryName(draft.dingtalkPersonPublicFormViewId, 'No public form link') }}</div>
-              <div><strong>Public form access:</strong> {{ publicFormAccessSummary(draft.dingtalkPersonPublicFormViewId) }}</div>
+              <div
+                class="meta-automation__public-form-access"
+                :class="`meta-automation__public-form-access--${publicFormAccessLevel(draft.dingtalkPersonPublicFormViewId)}`"
+                data-automation-public-form-access="person"
+                :data-access-level="publicFormAccessLevel(draft.dingtalkPersonPublicFormViewId)"
+              >
+                <strong>Public form access:</strong> {{ publicFormAccessSummary(draft.dingtalkPersonPublicFormViewId) }}
+              </div>
               <div><strong>Internal processing:</strong> {{ viewSummaryName(draft.dingtalkPersonInternalViewId, 'No internal link') }}</div>
             </div>
           </template>
@@ -2054,6 +2068,36 @@ watch(
 }
 
 .meta-automation__card-link-access--unavailable {
+  background: #fef2f2;
+  color: #b91c1c;
+}
+
+.meta-automation__public-form-access {
+  border-radius: 8px;
+  padding: 6px 8px;
+}
+
+.meta-automation__public-form-access--none {
+  background: #f8fafc;
+  color: #475569;
+}
+
+.meta-automation__public-form-access--public {
+  background: #fffbeb;
+  color: #92400e;
+}
+
+.meta-automation__public-form-access--dingtalk {
+  background: #eff6ff;
+  color: #1d4ed8;
+}
+
+.meta-automation__public-form-access--dingtalk_granted {
+  background: #ecfdf5;
+  color: #047857;
+}
+
+.meta-automation__public-form-access--unavailable {
   background: #fef2f2;
   color: #b91c1c;
 }
