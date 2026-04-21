@@ -216,4 +216,36 @@ export type {
 
 export type { RateLimitConfig } from './RateLimiter'
 export { CircuitState } from './CircuitBreaker'
-export type { CircuitBreakerConfig } from './CircuitBreaker'
+export type {
+  CircuitBreakerConfig,
+  CircuitBreakerRuntimeOptions
+} from './CircuitBreaker'
+
+// Pluggable storage backends (memory default, optional Redis)
+export {
+  MemoryCircuitBreakerStore
+} from './circuit-breaker-store'
+export type {
+  CircuitBreakerStore,
+  CircuitBreakerThresholds,
+  CircuitBreakerSnapshot
+} from './circuit-breaker-store'
+
+export {
+  RedisCircuitBreakerStore,
+  CIRCUIT_RECORD_SUCCESS_LUA,
+  CIRCUIT_RECORD_FAILURE_LUA,
+  CIRCUIT_CHECK_AND_UPDATE_LUA,
+  CIRCUIT_TRANSITION_LUA,
+  applyRecordSuccessScript,
+  applyRecordFailureScript,
+  applyCheckAndUpdateScript,
+  applyTransitionScript,
+  emptyCircuitState
+} from './redis-circuit-breaker-store'
+
+export type {
+  RedisCircuitBreakerStoreOptions,
+  RedisCircuitClient,
+  CircuitScriptState
+} from './redis-circuit-breaker-store'

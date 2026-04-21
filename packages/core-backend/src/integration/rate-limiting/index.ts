@@ -15,6 +15,29 @@ export type {
   RateLimitResult
 } from './token-bucket'
 
+// Pluggable storage backends (memory default, optional Redis)
+export {
+  MemoryTokenBucketStore
+} from './token-bucket-store'
+
+export type {
+  TokenBucketStore,
+  ConsumeResult
+} from './token-bucket-store'
+
+export {
+  RedisTokenBucketStore,
+  TOKEN_BUCKET_LUA,
+  applyTokenBucketScript
+} from './redis-token-bucket-store'
+
+export type {
+  RedisTokenBucketStoreOptions,
+  RedisScriptClient,
+  ApplyTokenBucketArgs,
+  ApplyTokenBucketResult
+} from './redis-token-bucket-store'
+
 // Message Rate Limiter (MessageBus integration)
 export {
   MessageRateLimiter,

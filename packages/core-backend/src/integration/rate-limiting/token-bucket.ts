@@ -11,6 +11,7 @@
 
 import { Logger } from '../../core/logger'
 import { coreMetrics } from '../metrics/metrics'
+import type { TokenBucketStore, ConsumeResult } from './token-bucket-store'
 
 const logger = new Logger('TokenBucketRateLimiter')
 
@@ -67,8 +68,15 @@ export class TokenBucketRateLimiter {
   private readonly config: Required<RateLimiterConfig>
   private readonly buckets: Map<string, TokenBucket> = new Map()
   private cleanupInterval: NodeJS.Timeout | null = null
+  /**
+   * Optional pluggable store. When provided, `consumeAsync()` routes
+   * through it (typically Redis) for cross-process coordination. The
+   * legacy synchronous `consume()` API continues to use the in-process
+   * Map so no existing caller needs to change.
+   */
+  private readonly store: TokenBucketStore | null
 
-  constructor(config: RateLimiterConfig = {}) {
+  constructor(config: RateLimiterConfig = {}, store?: TokenBucketStore) {
     const tokensPerSecond = config.tokensPerSecond ?? 1000
 
     this.config = {
@@ -79,13 +87,52 @@ export class TokenBucketRateLimiter {
       bucketIdleTimeoutMs: config.bucketIdleTimeoutMs ?? 300000
     }
 
+    this.store = store ?? null
+
     // Start cleanup interval
     this.startCleanupInterval()
 
     logger.info('TokenBucketRateLimiter initialized', {
       tokensPerSecond: this.config.tokensPerSecond,
-      bucketCapacity: this.config.bucketCapacity
+      bucketCapacity: this.config.bucketCapacity,
+      store: this.store ? this.store.constructor?.name ?? 'custom' : 'memory-sync'
     })
+  }
+
+  /**
+   * Asynchronous consume path. When a `TokenBucketStore` was provided to
+   * the constructor, the call is dispatched through it (enabling Redis
+   * or other cross-process storage). When no store was configured, this
+   * method delegates to the synchronous in-process implementation so
+   * existing metrics and stats remain consistent.
+   */
+  async consumeAsync(key: string, tokens = 1): Promise<RateLimitResult> {
+    if (!this.store) {
+      return this.consume(key, tokens)
+    }
+
+    const raw: ConsumeResult = await this.store.consume(
+      key,
+      this.config.bucketCapacity,
+      this.config.tokensPerSecond,
+      tokens,
+    )
+
+    if (this.config.enableMetrics) {
+      coreMetrics.increment(
+        raw.allowed ? 'rate_limit_allowed' : 'rate_limit_rejected',
+        { key },
+      )
+      if (!raw.allowed) coreMetrics.increment('rate_limit_total_rejected')
+    }
+
+    return {
+      allowed: raw.allowed,
+      tokensRemaining: raw.tokensRemaining,
+      bucketCapacity: this.config.bucketCapacity,
+      retryAfterMs: raw.allowed ? 0 : Math.max(0, raw.retryAfterMs),
+      key,
+    }
   }
 
   /**
