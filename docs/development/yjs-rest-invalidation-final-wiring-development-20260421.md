@@ -72,6 +72,49 @@ The invalidator remains best effort. If it throws, the REST write still succeeds
 and the error is logged. This preserves write availability while reducing the
 normal successful path race.
 
+## Review Thread Close-Out: Frontend Opt-In Boundaries
+
+After the backend consistency fixes, the PR still had non-blocking Copilot
+review threads around frontend opt-in boundaries. Two low-risk tightenings were
+landed:
+
+### Direct Vite env access
+
+`isYjsCollabEnabled()` now reads the Vite flag through direct property access:
+
+```ts
+import.meta.env.VITE_ENABLE_YJS_COLLAB === 'true'
+```
+
+The prior implementation used dynamic indexing:
+
+```ts
+metaEnv?.[YJS_COLLAB_ENV_FLAG]
+```
+
+Direct access preserves Vite's normal compile-time replacement behavior. The
+`process.env` fallback remains only for Vitest's `vi.stubEnv` path.
+
+### Non-text editors avoid Yjs binding construction
+
+`MetaCellEditor` now constructs `useYjsCellBinding()` only when the editor is
+eligible at setup time:
+
+- field type is `string`
+- value is not date-like
+- `recordId` is present
+
+Other editors receive a tiny inert binding object. This keeps number/date/select
+/link/attachment editors on the REST path without creating Yjs document watchers
+or socket-related state when the flag is enabled.
+
+The larger suggestion to move Yjs imports behind dynamic imports was not included
+in this PR because it would turn a small POC close-out into a chunking/lazy-load
+refactor. The current change closes the runtime-footprint issue and preserves
+direct Vite flag replacement. Bundle splitting can remain a separate follow-up if
+we decide the opt-in path must also be physically excluded from the default
+bundle.
+
 ## Files Changed
 
 - `packages/core-backend/src/routes/univer-meta.ts`
@@ -84,6 +127,13 @@ normal successful path race.
 - `packages/core-backend/tests/unit/record-write-service.test.ts`
   - Adds an invocation-order test proving invalidation happens before
     realtime and eventBus notification.
+- `apps/web/src/multitable/composables/useYjsCellBinding.ts`
+  - Switches to direct `import.meta.env.VITE_ENABLE_YJS_COLLAB` access.
+- `apps/web/src/multitable/components/cells/MetaCellEditor.vue`
+  - Avoids constructing a Yjs binding for non-text editors.
+- `apps/web/tests/multitable-yjs-cell-editor.spec.ts`
+  - Adds eligibility tests proving non-string editors do not instantiate the
+    Yjs binding while normal string editors still do.
 
 ## Remaining Limitations
 

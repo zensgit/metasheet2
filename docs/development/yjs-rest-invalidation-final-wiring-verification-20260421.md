@@ -57,6 +57,65 @@ tsc
 EXIT=0
 ```
 
+### Frontend review-thread close-out
+
+Command:
+
+```bash
+pnpm --filter @metasheet/web exec vitest run \
+  tests/multitable-yjs-cell-binding.spec.ts \
+  tests/multitable-yjs-cell-editor.spec.ts \
+  --reporter=dot
+```
+
+Result:
+
+```text
+Test Files  2 passed (2)
+Tests       6 passed (6)
+```
+
+Command:
+
+```bash
+pnpm --filter @metasheet/web exec vitest run \
+  tests/yjs-text-field-diff.spec.ts \
+  tests/yjs-text-field-seed-guard.spec.ts \
+  tests/yjs-document-stale-guard.spec.ts \
+  tests/yjs-awareness-presence.spec.ts \
+  tests/multitable-yjs-cell-binding.spec.ts \
+  tests/multitable-yjs-cell-editor.spec.ts \
+  --reporter=dot
+```
+
+Result:
+
+```text
+Test Files  6 passed (6)
+Tests       32 passed (32)
+```
+
+Command:
+
+```bash
+pnpm --filter @metasheet/web exec vue-tsc -b --noEmit
+```
+
+Result:
+
+```text
+EXIT=0
+```
+
+Coverage from this run:
+
+- `isYjsCollabEnabled()` still treats only exact `"true"` as enabled.
+- Non-string `MetaCellEditor` instances do not construct `useYjsCellBinding`.
+- Normal string `MetaCellEditor` instances with a record ID still construct the
+  binding.
+- Existing Yjs diff, seed-guard, stale-connect guard, awareness, and cell-binding
+  behavior still pass.
+
 ### GitHub checks
 
 Observed on PR #960 before adding this documentation-only commit:

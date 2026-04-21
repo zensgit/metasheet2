@@ -138,7 +138,7 @@ import MetaAttachmentList from '../MetaAttachmentList.vue'
 import MetaYjsPresenceChip from '../MetaYjsPresenceChip.vue'
 import { attachmentAcceptAttr, resolveAttachmentFieldProperty, shouldReplaceAttachmentSelection, validateAttachmentSelection } from '../../utils/field-config'
 import { linkActionLabel as formatLinkActionLabel } from '../../utils/link-fields'
-import { useYjsCellBinding } from '../../composables/useYjsCellBinding'
+import { useYjsCellBinding, type YjsCellBinding } from '../../composables/useYjsCellBinding'
 
 const props = defineProps<{
   field: MetaField
@@ -192,16 +192,26 @@ const fieldIdRef = computed<string | null>(() => {
   if (!props.recordId) return null
   return props.field.id
 })
-const yjsBinding = useYjsCellBinding({
-  recordId: computed<string | null>(() => recordIdRef.value ?? null),
-  fieldId: fieldIdRef,
-  onFallback: (reason) => {
-    if (reason === 'disabled') return // expected, no noise
-    // Soft warning only — the REST path remains fully usable.
-    // eslint-disable-next-line no-console
-    console.warn(`[multitable] Yjs cell binding fell back to REST (${reason})`)
-  },
-})
+const inertYjsBinding: YjsCellBinding = {
+  active: ref(false),
+  text: ref(''),
+  setText: () => { /* inactive: non-text editors keep using REST */ },
+  collaborators: ref([]),
+  release: () => { /* nothing to release */ },
+}
+const yjsEligibleAtSetup = props.field?.type === 'string' && !isDateLike.value && !!props.recordId
+const yjsBinding = yjsEligibleAtSetup
+  ? useYjsCellBinding({
+      recordId: computed<string | null>(() => recordIdRef.value ?? null),
+      fieldId: fieldIdRef,
+      onFallback: (reason) => {
+        if (reason === 'disabled') return // expected, no noise
+        // Soft warning only — the REST path remains fully usable.
+        // eslint-disable-next-line no-console
+        console.warn(`[multitable] Yjs cell binding fell back to REST (${reason})`)
+      },
+    })
+  : inertYjsBinding
 const yjsActive = computed(() => yjsBinding.active.value)
 const yjsText = computed(() => yjsBinding.text.value)
 const yjsCollaborators = computed(() => yjsBinding.collaborators.value)

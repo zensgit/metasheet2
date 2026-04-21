@@ -39,9 +39,7 @@ export const YJS_COLLAB_ENV_FLAG = 'VITE_ENABLE_YJS_COLLAB'
  */
 export function isYjsCollabEnabled(): boolean {
   try {
-    const metaEnv = (import.meta as unknown as { env?: Record<string, unknown> }).env
-    const metaValue = metaEnv?.[YJS_COLLAB_ENV_FLAG]
-    if (metaValue === 'true') return true
+    if (import.meta.env.VITE_ENABLE_YJS_COLLAB === 'true') return true
     // Fallback to process.env so `vi.stubEnv` (which writes to process.env
     // in Node) picks the flag up in Vitest. In a browser build there is
     // no `process` global, so this check is a no-op.
