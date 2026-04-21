@@ -27,6 +27,17 @@
           <el-option label="已驳回" value="rejected" />
           <el-option label="已撤回" value="revoked" />
         </el-select>
+        <el-select
+          v-model="sourceSystemFilter"
+          placeholder="来源系统"
+          style="width: 140px; margin-left: 12px"
+          data-testid="approval-source-filter"
+          @change="handleSearch"
+        >
+          <el-option label="全部来源" value="all" />
+          <el-option label="平台审批" value="platform" />
+          <el-option label="PLM 审批" value="plm" />
+        </el-select>
         <el-button
           v-if="canWrite"
           type="primary"
@@ -259,6 +270,9 @@ const { canWrite } = useApprovalPermissions()
 const activeTab = ref<'pending' | 'mine' | 'cc' | 'completed'>('pending')
 const searchText = ref('')
 const statusFilter = ref<ApprovalStatus | ''>('')
+// Wave 2 WP2: source filter driving the `sourceSystem` query param on /api/approvals.
+// Default 'all' surfaces the unified feed; switching narrows to platform or PLM-mirrored rows.
+const sourceSystemFilter = ref<'all' | 'platform' | 'plm'>('all')
 const currentPage = ref(1)
 const pageSize = ref(10)
 
@@ -301,6 +315,7 @@ function loadCurrentTab() {
     status: (statusFilter.value || undefined) as ApprovalStatus | undefined,
     page: currentPage.value,
     pageSize: pageSize.value,
+    sourceSystem: sourceSystemFilter.value,
   }
   switch (activeTab.value) {
     case 'pending': store.loadPending(query); break

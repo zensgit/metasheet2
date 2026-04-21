@@ -303,7 +303,24 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
         )
       }
 
-      const sourceSystem = typeof req.query.sourceSystem === 'string' ? req.query.sourceSystem : undefined
+      // Wave 2 WP2: `sourceSystem` drives the unified Inbox filter.
+      //   - 'all'      → mixed feed across platform + plm (no filter)
+      //   - 'platform' → platform-owned approvals only
+      //   - 'plm'      → plm-mirrored approvals only
+      //   - undefined  → legacy behaviour (tab-driven default to 'platform')
+      const rawSourceSystem = typeof req.query.sourceSystem === 'string' ? req.query.sourceSystem.trim() : ''
+      if (rawSourceSystem && !['platform', 'plm', 'all'].includes(rawSourceSystem)) {
+        return res.status(400).json(
+          approvalErrorResponse(
+            'APPROVAL_SOURCE_SYSTEM_INVALID',
+            "sourceSystem must be one of 'platform', 'plm', or 'all'",
+          ),
+        )
+      }
+      const sourceSystem = rawSourceSystem === 'all' || rawSourceSystem === ''
+        ? undefined
+        : (rawSourceSystem as 'platform' | 'plm')
+      const sourceSystemProvided = rawSourceSystem !== ''
       const status = typeof req.query.status === 'string' ? req.query.status : undefined
       const workflowKey = typeof req.query.workflowKey === 'string' ? req.query.workflowKey : undefined
       const businessKey = typeof req.query.businessKey === 'string' ? req.query.businessKey : undefined
@@ -345,8 +362,16 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
         })
       }
 
+      // Determine the effective filter.
+      //   - Explicit 'platform' | 'plm'  → honour it verbatim
+      //   - Explicit 'all'               → unified feed (sourceSystem is undefined here)
+      //   - Not provided                 → preserve legacy default (tabs imply platform)
+      const effectiveSourceSystem = sourceSystemProvided
+        ? sourceSystem
+        : (tab ? 'platform' : undefined)
+
       const result = await bridgeService.listApprovals({
-        sourceSystem: sourceSystem ?? (tab ? 'platform' : undefined),
+        sourceSystem: effectiveSourceSystem,
         status,
         workflowKey,
         businessKey,

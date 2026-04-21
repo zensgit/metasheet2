@@ -278,6 +278,13 @@ export interface ApprovalListQuery {
   search?: string
   page?: number
   pageSize?: number
+  /**
+   * Wave 2 WP2: drives the unified Inbox source filter tab.
+   *   - 'all'      → mixed feed (platform + PLM)
+   *   - 'platform' → platform-owned only
+   *   - 'plm'      → PLM-mirrored only
+   */
+  sourceSystem?: 'all' | 'platform' | 'plm'
 }
 
 // ---------------------------------------------------------------------------
@@ -346,6 +353,7 @@ export async function listApprovals(
   if (query?.search) params.set('search', query.search)
   if (query?.page) params.set('page', String(query.page))
   if (query?.pageSize) params.set('pageSize', String(query.pageSize))
+  if (query?.sourceSystem) params.set('sourceSystem', query.sourceSystem)
   const qs = params.toString()
   return apiGet(`/api/approvals${qs ? `?${qs}` : ''}`)
 }
