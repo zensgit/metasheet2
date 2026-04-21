@@ -420,14 +420,14 @@ export class AuthService {
         const result = await pool.query(
           `SELECT id, email, username, mobile, name, role, permissions, password_hash, is_active, must_change_password, created_at, updated_at
            FROM users
-           WHERE lower(COALESCE(email, '')) = $1
-              OR lower(COALESCE(username, '')) = $2
-              OR regexp_replace(COALESCE(mobile, ''), '\\s+', '', 'g') = $3
+           WHERE lower(email) = $1
+              OR lower(username) = $2
+              OR regexp_replace(mobile, '\\s+', '', 'g') = $3
            ORDER BY
              CASE
-               WHEN lower(COALESCE(email, '')) = $1 THEN 0
-               WHEN lower(COALESCE(username, '')) = $2 THEN 1
-               WHEN regexp_replace(COALESCE(mobile, ''), '\\s+', '', 'g') = $3 THEN 2
+               WHEN lower(email) = $1 THEN 0
+               WHEN lower(username) = $2 THEN 1
+               WHEN regexp_replace(mobile, '\\s+', '', 'g') = $3 THEN 2
                ELSE 3
              END ASC,
              created_at ASC

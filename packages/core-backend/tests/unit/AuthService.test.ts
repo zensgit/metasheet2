@@ -461,9 +461,13 @@ describe('AuthService.login', () => {
     )
     expect(poolMocks.query).toHaveBeenNthCalledWith(
       1,
-      expect.stringContaining('lower(COALESCE(username'),
+      expect.stringContaining('lower(username) = $2'),
       ['liqing', 'liqing', 'liqing'],
     )
+    const loginSql = String(poolMocks.query.mock.calls[0]?.[0] ?? '')
+    expect(loginSql).not.toContain('COALESCE(email')
+    expect(loginSql).not.toContain('COALESCE(username')
+    expect(loginSql).not.toContain('COALESCE(mobile')
   })
 
   it('returns null when a mobile identifier matches multiple users', async () => {

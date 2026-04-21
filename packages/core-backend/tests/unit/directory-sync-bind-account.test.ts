@@ -189,6 +189,67 @@ describe('bindDirectoryAccount', () => {
     expect(pgMocks.transaction).not.toHaveBeenCalled()
   })
 
+  it('fails closed when a mobile binding reference matches multiple local users', async () => {
+    pgMocks.query
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'account-1',
+          integration_id: 'dir-1',
+          provider: 'dingtalk',
+          corp_id: 'dingcorp',
+          external_user_id: '0447654442691174',
+          union_id: 'union-1',
+          open_id: 'open-1',
+          external_key: 'union-1',
+          name: '林岚',
+          email: null,
+          mobile: '13900001234',
+        }],
+      })
+      .mockResolvedValueOnce({
+        rows: [{
+          local_user_id: null,
+          local_user_email: null,
+          local_user_name: null,
+        }],
+      })
+      .mockResolvedValueOnce({
+        rows: [
+          {
+            id: 'user-1',
+            email: null,
+            username: 'liqing',
+            mobile: '13900001234',
+            name: '李青',
+            role: 'user',
+            is_active: true,
+          },
+          {
+            id: 'user-2',
+            email: null,
+            username: 'linlan',
+            mobile: '139 0000 1234',
+            name: '林岚',
+            role: 'user',
+            is_active: true,
+          },
+        ],
+      })
+
+    await expect(bindDirectoryAccount('account-1', {
+      localUserRef: '139 0000 1234',
+      adminUserId: 'admin-1',
+      enableDingTalkGrant: true,
+    })).rejects.toThrow('Local user reference is ambiguous')
+
+    expect(pgMocks.query).toHaveBeenNthCalledWith(
+      3,
+      expect.stringContaining('LIMIT 2'),
+      ['139 0000 1234', '139 0000 1234', '13900001234'],
+    )
+    expect(pgMocks.transaction).not.toHaveBeenCalled()
+  })
+
   it('creates a local user and binds it to a directory account in one server-side admission flow', async () => {
     const clientQuery = vi.fn().mockResolvedValue({ rows: [] })
     pgMocks.transaction.mockImplementation(async (handler) => handler({ query: clientQuery }))
