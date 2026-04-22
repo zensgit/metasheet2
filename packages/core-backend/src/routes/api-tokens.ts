@@ -118,6 +118,8 @@ function serviceErrorResponse(res: Response, err: unknown, action: string): void
     message.includes('required')
     || message.includes('valid URL')
     || message.includes('HTTPS')
+    || message.includes('DingTalk robot')
+    || message.includes('DingTalk group webhook')
     || message.includes('At least one scope')
   ) {
     status = 400

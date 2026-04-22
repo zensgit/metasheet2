@@ -52,6 +52,7 @@ Notes:
 - if a stale or direct DingTalk group binding request is still denied by the backend, the frontend reports `Insufficient permissions` instead of a generic `API 403`
 - the DingTalk Groups tab explains that groups created there are bound to the current table, one table can have multiple groups, and automations can choose one or more groups as send targets
 - registering a DingTalk group destination does not import DingTalk group members and does not grant or control public form access
+- DingTalk group destination webhooks must be standard group robot URLs from `https://oapi.dingtalk.com/robot/send` and include an `access_token`; optional signature secrets must start with `SEC`
 - the current model manually registers a group webhook; it does not auto-import your DingTalk groups
 
 ## B. Configure a DingTalk person notification rule
