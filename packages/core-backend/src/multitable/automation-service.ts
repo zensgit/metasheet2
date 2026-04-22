@@ -7,7 +7,10 @@ import type { ConditionGroup } from './automation-conditions'
 import { AutomationExecutor, type AutomationRule as ExecutorRule, type AutomationExecution, type AutomationDeps } from './automation-executor'
 import type { AutomationAction } from './automation-actions'
 import type { AutomationTrigger } from './automation-triggers'
-import { AutomationScheduler } from './automation-scheduler'
+import { AutomationScheduler, type AutomationSchedulerLeaderOptions } from './automation-scheduler'
+import { RedisLeaderLock, type RedisLeaderLockClient } from './redis-leader-lock'
+import { getRedisClient } from '../db/redis'
+import { randomBytes } from 'crypto'
 import { AutomationLogService } from './automation-log-service'
 import {
   normalizeDingTalkAutomationActionInputs,
@@ -140,6 +143,27 @@ export function getAutomationServiceInstance(): AutomationService | null {
   return sharedAutomationService
 }
 
+/**
+ * Resolve the scheduler leader-lock options based on environment flags and
+ * Redis availability. Returns `null` when the feature flag is disabled or
+ * Redis cannot be reached — the scheduler then behaves exactly as before
+ * (every process runs its own timers).
+ *
+ * Feature flag: `ENABLE_SCHEDULER_LEADER_LOCK=true` (default false).
+ */
+export async function resolveAutomationSchedulerLeaderOptions(): Promise<AutomationSchedulerLeaderOptions | null> {
+  if (process.env.ENABLE_SCHEDULER_LEADER_LOCK !== 'true') return null
+  const redis = await getRedisClient()
+  if (!redis) return null
+  const client = redis as unknown as RedisLeaderLockClient
+  const leaderLock = new RedisLeaderLock({ client })
+  const ownerId = `scheduler:${process.pid}:${randomBytes(4).toString('hex')}`
+  const ttlMs = Number(process.env.SCHEDULER_LEADER_LOCK_TTL_MS) > 0
+    ? Number(process.env.SCHEDULER_LEADER_LOCK_TTL_MS)
+    : 30_000
+  return { leaderLock, ownerId, ttlMs }
+}
+
 export class AutomationService {
   private eventBus: EventBus
   private db: Kysely<Database>
@@ -150,7 +174,13 @@ export class AutomationService {
   /** Kept for backward-compat with raw SQL in executor actions */
   private queryFn: AutomationQueryFn
 
-  constructor(eventBus: EventBus, db: Kysely<Database>, queryFn: AutomationQueryFn, fetchFn?: typeof fetch) {
+  constructor(
+    eventBus: EventBus,
+    db: Kysely<Database>,
+    queryFn: AutomationQueryFn,
+    fetchFn?: typeof fetch,
+    schedulerLeaderOptions: AutomationSchedulerLeaderOptions | null = null,
+  ) {
     this.eventBus = eventBus
     this.db = db
     this.queryFn = queryFn
@@ -162,9 +192,12 @@ export class AutomationService {
     }
     this.executor = new AutomationExecutor(deps)
     this.logService = new AutomationLogService()
-    this.scheduler = new AutomationScheduler(async (rule) => {
-      await this.executeRule(rule, { _triggeredBy: 'schedule' })
-    })
+    this.scheduler = new AutomationScheduler(
+      async (rule) => {
+        await this.executeRule(rule, { _triggeredBy: 'schedule' })
+      },
+      schedulerLeaderOptions,
+    )
   }
 
   /** Expose log service for routes */
@@ -430,8 +463,14 @@ export class AutomationService {
   /**
    * Load all enabled rules across all sheets and register scheduled ones.
    * Called on startup.
+   *
+   * When a scheduler leader-lock is configured, we `await` the initial
+   * election verdict before registering rules so non-leaders never create
+   * duplicate timers between startup and the first `isLeader` decision.
    */
   async loadAndRegisterAllScheduled(): Promise<void> {
+    await this.scheduler.ready
+
     const rows = await this.db
       .selectFrom('automation_rules')
       .selectAll()

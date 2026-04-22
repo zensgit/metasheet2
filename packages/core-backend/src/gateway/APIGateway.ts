@@ -5,6 +5,12 @@ import * as crypto from 'crypto'
 import type { RateLimitConfig } from './RateLimiter';
 import { RateLimiter } from './RateLimiter'
 import { CircuitBreaker } from './CircuitBreaker'
+import type { CircuitBreakerStore } from './circuit-breaker-store'
+import {
+  RedisCircuitBreakerStore,
+  type RedisCircuitClient,
+} from './redis-circuit-breaker-store'
+import { getRedisClient } from '../db/redis'
 import { authService, type User } from '../auth/AuthService'
 import { Logger } from '../core/logger'
 
@@ -121,6 +127,13 @@ export class APIGateway extends EventEmitter {
   private cleanupTimer: NodeJS.Timeout | null = null  // Store timer reference for cleanup
   private isDestroyed = false  // Track destruction state
   private logger = new Logger('APIGateway')
+  /**
+   * Optional shared store used by every circuit breaker this gateway
+   * creates. Resolved on demand via `initRedisCircuitBreakerStore()` — if
+   * unresolved or unavailable, breakers fall back to the in-process
+   * memory implementation (the legacy behaviour).
+   */
+  private circuitBreakerStore: CircuitBreakerStore | null = null
   private metrics: APIMetrics = {
     totalRequests: 0,
     successfulRequests: 0,
@@ -340,11 +353,19 @@ export class APIGateway extends EventEmitter {
 
     // Create circuit breaker if needed
     if (endpoint.circuitBreaker && this.config.enableCircuitBreaker) {
-      this.circuitBreakers.set(key, new CircuitBreaker({
-        timeout: endpoint.timeout || this.config.timeout,
-        errorThreshold: 50,
-        resetTimeout: 30000
-      }))
+      this.circuitBreakers.set(
+        key,
+        new CircuitBreaker(
+          {
+            timeout: endpoint.timeout || this.config.timeout,
+            errorThreshold: 50,
+            resetTimeout: 30000,
+          },
+          this.circuitBreakerStore
+            ? { store: this.circuitBreakerStore, id: key }
+            : {},
+        ),
+      )
     }
 
     // Build middleware chain
@@ -773,6 +794,61 @@ export class APIGateway extends EventEmitter {
 
     this.emit('destroyed')
     this.logger.info('Gateway destroyed and resources cleaned up')
+  }
+
+  /**
+   * Attempt to wire a Redis-backed CircuitBreaker store into this gateway
+   * so breaker state is shared across replicas.
+   *
+   * Gated by two env flags:
+   *   - `ENABLE_REDIS_CIRCUIT_BREAKER_STORE=true` — opt-in (default off).
+   *   - `DISABLE_REDIS_CIRCUIT_BREAKER_STORE=true` — emergency kill switch
+   *     that overrides ENABLE without requiring code changes.
+   *
+   * Returns `true` when a Redis-backed store is now attached, `false`
+   * otherwise (and the gateway falls back to the legacy in-process path).
+   * Callers that want cluster-wide circuits should `await` this before
+   * invoking `registerEndpoint` — subsequent breakers will pick up the
+   * store, existing ones are re-created against it.
+   */
+  async initRedisCircuitBreakerStore(options: {
+    /** Optional override for tests / DI — defaults to `getRedisClient()`. */
+    clientFactory?: () => Promise<unknown | null>
+    /** Prefix applied to every circuit key. Default: 'apigw:cb:'. */
+    keyPrefix?: string
+  } = {}): Promise<boolean> {
+    if (process.env.ENABLE_REDIS_CIRCUIT_BREAKER_STORE !== 'true') {
+      return false
+    }
+    if (process.env.DISABLE_REDIS_CIRCUIT_BREAKER_STORE === 'true') {
+      return false
+    }
+
+    const factory = options.clientFactory ?? getRedisClient
+    try {
+      const client = await factory()
+      if (!client) return false
+      this.circuitBreakerStore = new RedisCircuitBreakerStore({
+        redis: client as unknown as RedisCircuitClient,
+        keyPrefix: options.keyPrefix ?? 'apigw:cb:',
+      })
+      this.logger.info('APIGateway: using Redis-backed circuit breaker store')
+      return true
+    } catch (err) {
+      this.logger.warn(
+        `APIGateway: Redis circuit breaker store init failed, falling back to memory: ${err instanceof Error ? err.message : String(err)}`,
+      )
+      return false
+    }
+  }
+
+  /**
+   * Introspection hook used by tests to assert which store a given
+   * endpoint's breaker is running against. Production callers should not
+   * depend on this method.
+   */
+  getCircuitBreakerStoreForTest(): CircuitBreakerStore | null {
+    return this.circuitBreakerStore
   }
 
   // Public methods

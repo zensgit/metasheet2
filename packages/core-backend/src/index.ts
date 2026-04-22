@@ -1653,7 +1653,20 @@ export class MetaSheetServer {
     try {
       const pool = poolManager.get()
       const { db: kyselyDb } = await import('./db/db')
-      this.automationService = new AutomationService(eventBus, kyselyDb, pool.query.bind(pool))
+      const { resolveAutomationSchedulerLeaderOptions } = await import(
+        './multitable/automation-service'
+      )
+      // Opt-in: respects ENABLE_SCHEDULER_LEADER_LOCK. Returns null (legacy
+      // behaviour) when the flag is off or Redis is unavailable, so this
+      // call is safe in every deployment.
+      const schedulerLeaderOptions = await resolveAutomationSchedulerLeaderOptions()
+      this.automationService = new AutomationService(
+        eventBus,
+        kyselyDb,
+        pool.query.bind(pool),
+        undefined,
+        schedulerLeaderOptions,
+      )
       this.automationService.init()
       setAutomationServiceInstance(this.automationService)
       await this.automationService.loadAndRegisterAllScheduled()
