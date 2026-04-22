@@ -304,6 +304,7 @@
       :visible="showApiTokenManager"
       :sheet-id="workbench.activeSheetId.value"
       :client="workbench.client"
+      :can-manage-automation="caps.canManageAutomation.value"
       @close="showApiTokenManager = false"
     />
   </div>
