@@ -40,3 +40,15 @@ The first run used a `0.75 USD` budget and exited with `Exceeded USD budget`. A 
 - raw `access_token`, `timestamp`, `sign`, URL password, and saved `SEC` secret are not reflected to the browser by those responses
 - frontend editing does not prefill saved secrets
 - frontend keep/replace/clear behavior is correctly encoded in the PATCH payload
+
+## Main rebase verification - 2026-04-22
+
+- Rebased only the credential redaction slice onto `origin/main@21683ef3c42b` after PR #1043 was squash-merged.
+- Rebased branch HEAD: `8de603836acb`.
+- `pnpm install --frozen-lockfile`: passed.
+- `pnpm --filter @metasheet/core-backend exec vitest run tests/unit/dingtalk-group-destination-response.test.ts tests/unit/dingtalk-group-destination-service.test.ts --watch=false`: passed, 2 files and 19 tests.
+- `pnpm --filter @metasheet/web exec vitest run tests/multitable-api-token-manager.spec.ts --watch=false`: passed, 1 file and 24 tests. The run printed a non-fatal local WebSocket port-in-use message and exited successfully.
+- `rg -n "serializeDingTalkGroupDestination|maskDingTalkRobotWebhookUrl|hasSecret|access_token=\\*\\*\\*|does not prefill saved secrets|explicitly clear|redact|credential|secret" ...`: passed.
+- `git diff --check`: passed.
+- `pnpm --filter @metasheet/core-backend build`: passed.
+- `pnpm --filter @metasheet/web build`: passed. Vite emitted only existing chunk-size and mixed static/dynamic import warnings.
