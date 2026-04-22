@@ -46,3 +46,42 @@ Result: passed.
 
 - Backend tests were not rerun because this slice changes only frontend test coverage.
 - Browser E2E against a live server was not run in this worktree.
+
+## Rebase Verification - 2026-04-22
+
+The PR branch was rebased from `origin/main@81edca7d` to `origin/main@ac0c8d26` after the on-prem bootstrap hardening merge.
+
+Commands rerun after rebase:
+
+```bash
+pnpm install --frozen-lockfile
+```
+
+Result: passed. Dependencies were restored from the lockfile.
+
+```bash
+pnpm --filter @metasheet/web exec vitest run tests/multitable-automation-manager.spec.ts tests/multitable-client.spec.ts tests/multitable-automation-rule-editor.spec.ts --watch=false
+```
+
+Result: passed. `3` files, `132` tests.
+
+```bash
+pnpm --filter @metasheet/web build
+```
+
+Result: passed. Existing Vite warnings remain:
+
+- `WorkflowDesigner.vue` is both dynamically and statically imported.
+- Some chunks exceed `500 kB` after minification.
+
+```bash
+git diff --check origin/main...HEAD
+```
+
+Result: passed.
+
+Notes:
+
+- The rebase was conflict-free.
+- The post-rebase diff remains limited to `apps/web/tests/multitable-automation-manager.spec.ts` and the two DingTalk verification/development notes.
+- `pnpm install` produced local plugin/tool `node_modules` symlink modifications in the temporary worktree; those are generated dependency artifacts and were not staged.
