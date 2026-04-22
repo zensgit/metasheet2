@@ -304,6 +304,58 @@ describe('DingTalk automation link route validation', () => {
     })
   })
 
+  it('rejects a DingTalk person rule without an effective recipient before persisting the rule', async () => {
+    const { app, automationService } = await createApp()
+
+    const res = await request(app)
+      .post(`/api/multitable/sheets/${SHEET_ID}/automations`)
+      .send({
+        name: 'Notify person',
+        triggerType: 'record.created',
+        triggerConfig: {},
+        actionType: 'send_dingtalk_person_message',
+        actionConfig: {
+          userIds: [],
+          memberGroupIds: [','],
+          userIdFieldPath: 'record.',
+          title: 'Please fill',
+          content: 'Open form',
+        },
+      })
+
+    expect(res.status).toBe(400)
+    expect(res.body.error).toEqual({
+      code: 'VALIDATION_ERROR',
+      message: 'At least one local userId, memberGroupId, record recipient field path, or member group record field path is required',
+    })
+    expect(automationService.createRule).not.toHaveBeenCalled()
+  })
+
+  it('rejects a DingTalk person rule without executable templates before persisting the rule', async () => {
+    const { app, automationService } = await createApp()
+
+    const res = await request(app)
+      .post(`/api/multitable/sheets/${SHEET_ID}/automations`)
+      .send({
+        name: 'Notify person',
+        triggerType: 'record.created',
+        triggerConfig: {},
+        actionType: 'send_dingtalk_person_message',
+        actionConfig: {
+          userIds: ['user_1'],
+          titleTemplate: ' ',
+          bodyTemplate: 'Open form',
+        },
+      })
+
+    expect(res.status).toBe(400)
+    expect(res.body.error).toEqual({
+      code: 'VALIDATION_ERROR',
+      message: 'DingTalk titleTemplate is required',
+    })
+    expect(automationService.createRule).not.toHaveBeenCalled()
+  })
+
   it('returns a canonical camelCase automation rule response with V1 DingTalk actions', async () => {
     const { app } = await createApp()
 
