@@ -642,6 +642,84 @@ describe('DingTalk automation link route validation', () => {
     expect(automationService.updateRule).not.toHaveBeenCalled()
   })
 
+  it('rejects an invalid public form link in a V1 DingTalk person action on automation update', async () => {
+    const automationService = createMockAutomationService(makeAutomationRule({
+      action_type: 'notify',
+      action_config: {},
+      actions: [{
+        type: 'send_dingtalk_person_message',
+        config: {
+          userIds: ['user_1'],
+          titleTemplate: 'Old title',
+          bodyTemplate: 'Old body',
+          publicFormViewId: VALID_FORM_VIEW_ID,
+        },
+      }],
+    }))
+    const { app } = await createApp({ automationService })
+
+    const res = await request(app)
+      .patch(`/api/multitable/sheets/${SHEET_ID}/automations/${RULE_ID}`)
+      .send({
+        actions: [{
+          type: 'send_dingtalk_person_message',
+          config: {
+            userIds: ['user_1'],
+            title: 'Please fill',
+            content: 'Open form',
+            publicFormViewId: DISABLED_FORM_VIEW_ID,
+          },
+        }],
+      })
+
+    expect(res.status).toBe(400)
+    expect(res.body.error).toEqual({
+      code: 'VALIDATION_ERROR',
+      message: `Selected public form view is not shared: ${DISABLED_FORM_VIEW_ID}`,
+    })
+    expect(automationService.getRule).toHaveBeenCalledWith(RULE_ID)
+    expect(automationService.updateRule).not.toHaveBeenCalled()
+  })
+
+  it('rejects an invalid internal link in a V1 DingTalk person action on automation update', async () => {
+    const automationService = createMockAutomationService(makeAutomationRule({
+      action_type: 'notify',
+      action_config: {},
+      actions: [{
+        type: 'send_dingtalk_person_message',
+        config: {
+          userIds: ['user_1'],
+          titleTemplate: 'Old title',
+          bodyTemplate: 'Old body',
+          internalViewId: INTERNAL_VIEW_ID,
+        },
+      }],
+    }))
+    const { app } = await createApp({ automationService })
+
+    const res = await request(app)
+      .patch(`/api/multitable/sheets/${SHEET_ID}/automations/${RULE_ID}`)
+      .send({
+        actions: [{
+          type: 'send_dingtalk_person_message',
+          config: {
+            userIds: ['user_1'],
+            title: 'Please process',
+            content: 'Open internal link',
+            internalViewId: MISSING_INTERNAL_VIEW_ID,
+          },
+        }],
+      })
+
+    expect(res.status).toBe(400)
+    expect(res.body.error).toEqual({
+      code: 'VALIDATION_ERROR',
+      message: `Internal processing view not found: ${MISSING_INTERNAL_VIEW_ID}`,
+    })
+    expect(automationService.getRule).toHaveBeenCalledWith(RULE_ID)
+    expect(automationService.updateRule).not.toHaveBeenCalled()
+  })
+
   it('validates merged DingTalk action config on automation update', async () => {
     const automationService = createMockAutomationService(makeAutomationRule({
       action_type: 'send_dingtalk_person_message',
