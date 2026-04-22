@@ -231,6 +231,7 @@ Authoring guardrail:
 
 - the DingTalk Groups management tab is visible only to users with table automation management permission
 - users without that permission do not trigger table-scoped DingTalk group binding requests from the frontend
+- code-only `FORBIDDEN` responses from table-scoped APIs are shown as `Insufficient permissions`, avoiding generic `API 403` copy
 - group-message and person-message automations disable save when the selected public form link cannot produce a working fill link
 - group-message and person-message automations disable save when the selected internal processing view is not in the current sheet
 - automation create/update APIs reject invalid public form or internal processing links before rules are saved

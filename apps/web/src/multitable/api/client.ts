@@ -99,7 +99,7 @@ async function parseJson<T>(res: Response): Promise<T> {
   const body = raw ? safeParseJson(raw) : null
   if (!res.ok) {
     const payload = normalizeApiErrorPayload(body)
-    const error = new Error(firstFieldError(payload.fieldErrors) ?? payload.message ?? `API ${res.status}`) as Error & {
+    const error = new Error(firstFieldError(payload.fieldErrors) ?? payload.message ?? defaultApiErrorMessage(payload.code, res.status)) as Error & {
       status?: number
       code?: string
       fieldErrors?: Record<string, string>
@@ -134,6 +134,19 @@ function normalizeApiErrorPayload(body: unknown): ApiErrorPayload {
   if (error && typeof error === 'object') return error as ApiErrorPayload
   if (typeof record.message === 'string') return { message: record.message }
   return {}
+}
+
+function defaultApiErrorMessage(code: string | undefined, status: number): string {
+  switch (code) {
+    case 'FORBIDDEN':
+      return 'Insufficient permissions'
+    case 'UNAUTHENTICATED':
+      return 'Please sign in to continue.'
+    case 'VALIDATION_ERROR':
+      return 'Please check the submitted data and try again.'
+    default:
+      return `API ${status}`
+  }
 }
 
 function unwrapDataBody(body: unknown): unknown {

@@ -348,6 +348,34 @@ describe('MultitableApiClient', () => {
     })
   })
 
+  it('maps code-only forbidden responses to insufficient permissions', async () => {
+    const client = new MultitableApiClient({
+      fetchFn: vi.fn().mockResolvedValue(new Response(JSON.stringify({
+        ok: false,
+        error: { code: 'FORBIDDEN' },
+      }), { status: 403 })),
+    })
+
+    const error = await client.listDingTalkGroups('sheet_1').catch((err) => err)
+
+    expect(error.message).toBe('Insufficient permissions')
+    expect(error.status).toBe(403)
+    expect(error.code).toBe('FORBIDDEN')
+  })
+
+  it('preserves legacy string error payloads for permission failures', async () => {
+    const client = new MultitableApiClient({
+      fetchFn: vi.fn().mockResolvedValue(new Response(JSON.stringify({
+        error: 'Insufficient permissions',
+      }), { status: 403 })),
+    })
+
+    const error = await client.listDingTalkGroups('sheet_1').catch((err) => err)
+
+    expect(error.message).toBe('Insufficient permissions')
+    expect(error.status).toBe(403)
+  })
+
   it('prepares a person field preset', async () => {
     const fetchFn = vi.fn().mockResolvedValue(new Response(JSON.stringify({
       ok: true,
