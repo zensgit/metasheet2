@@ -261,6 +261,49 @@ describe('DingTalk automation link route validation', () => {
     }))
   })
 
+  it('persists a DingTalk person rule when public form and internal links are valid', async () => {
+    const { app, automationService } = await createApp()
+
+    const res = await request(app)
+      .post(`/api/multitable/sheets/${SHEET_ID}/automations`)
+      .send({
+        name: 'Notify person',
+        triggerType: 'record.created',
+        triggerConfig: {},
+        actionType: 'send_dingtalk_person_message',
+        actionConfig: {
+          userIds: ['user_1'],
+          title: 'Please fill',
+          content: 'Open form',
+          publicFormViewId: VALID_FORM_VIEW_ID,
+          internalViewId: INTERNAL_VIEW_ID,
+        },
+      })
+
+    expect(res.status).toBe(200)
+    expect(res.body.ok).toBe(true)
+    expect(automationService.createRule).toHaveBeenCalledWith(SHEET_ID, expect.objectContaining({
+      actionType: 'send_dingtalk_person_message',
+      actionConfig: expect.objectContaining({
+        userIds: ['user_1'],
+        titleTemplate: 'Please fill',
+        bodyTemplate: 'Open form',
+        publicFormViewId: VALID_FORM_VIEW_ID,
+        internalViewId: INTERNAL_VIEW_ID,
+      }),
+    }))
+    expect(res.body.data.rule).toMatchObject({
+      actionType: 'send_dingtalk_person_message',
+      actionConfig: expect.objectContaining({
+        userIds: ['user_1'],
+        titleTemplate: 'Please fill',
+        bodyTemplate: 'Open form',
+        publicFormViewId: VALID_FORM_VIEW_ID,
+        internalViewId: INTERNAL_VIEW_ID,
+      }),
+    })
+  })
+
   it('returns a canonical camelCase automation rule response with V1 DingTalk actions', async () => {
     const { app } = await createApp()
 
