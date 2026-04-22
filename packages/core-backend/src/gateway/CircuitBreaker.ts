@@ -396,6 +396,15 @@ export class CircuitBreaker extends EventEmitter {
     this.removeAllListeners()
     this.emit('destroy')
   }
+
+  /**
+   * Introspection hook for unit tests — returns the configured shared
+   * store (or `null` for the legacy in-process path). Production code
+   * should not rely on this method.
+   */
+  getStoreForTest(): CircuitBreakerStore | null {
+    return this.store
+  }
 }
 
 // Factory functions

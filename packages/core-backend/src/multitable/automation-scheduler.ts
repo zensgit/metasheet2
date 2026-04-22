@@ -6,10 +6,32 @@
 
 import { Logger } from '../core/logger'
 import type { AutomationRule } from './automation-executor'
+import type { RedisLeaderLock } from './redis-leader-lock'
 
 const logger = new Logger('AutomationScheduler')
 
 export type ScheduleCallback = (rule: AutomationRule) => void | Promise<void>
+
+/**
+ * Optional leader-election configuration for the scheduler.
+ * When provided the scheduler will attempt to acquire the lock at startup
+ * and only run timers on the replica that currently holds it.
+ */
+export interface AutomationSchedulerLeaderOptions {
+  leaderLock: RedisLeaderLock
+  /** Redis key to claim. Default: 'automation-scheduler:leader'. */
+  lockKey?: string
+  /** Unique id for this process instance. */
+  ownerId: string
+  /** Lock TTL in ms. Default: 30_000. */
+  ttlMs?: number
+  /**
+   * Renewal cadence in ms. Defaults to `ttlMs / 3` which gives two
+   * renewal attempts before the TTL expires (handles one transient failure
+   * without losing the lock).
+   */
+  renewIntervalMs?: number
+}
 
 /**
  * Simplified cron parser for V1.
@@ -62,14 +84,124 @@ export function parseCronToIntervalMs(expression: string): number | null {
 export class AutomationScheduler {
   private timers: Map<string, NodeJS.Timeout> = new Map()
   private callback: ScheduleCallback
+  private readonly leaderOptions: AutomationSchedulerLeaderOptions | null
+  private readonly lockKey: string
+  private readonly ttlMs: number
+  private readonly renewIntervalMs: number
+  private renewalTimer: NodeJS.Timeout | null = null
+  private isLeader: boolean = false
+  /**
+   * Resolves once the initial leader-election attempt has completed. When
+   * no leader options are configured this is an already-resolved promise.
+   * Callers (e.g. `AutomationService`) can `await` it before bulk-loading
+   * rules to ensure the scheduler has an accurate `isLeader` verdict.
+   */
+  public readonly ready: Promise<void>
 
-  constructor(callback: ScheduleCallback) {
+  constructor(
+    callback: ScheduleCallback,
+    leaderOptions: AutomationSchedulerLeaderOptions | null = null,
+  ) {
     this.callback = callback
+    this.leaderOptions = leaderOptions
+    this.lockKey = leaderOptions?.lockKey ?? 'automation-scheduler:leader'
+    this.ttlMs = leaderOptions?.ttlMs ?? 30_000
+    // Renew at ttl/3 by default so two consecutive missed renewals are
+    // required before the lock times out.
+    this.renewIntervalMs =
+      leaderOptions?.renewIntervalMs ?? Math.max(1_000, Math.floor(this.ttlMs / 3))
+
+    if (leaderOptions) {
+      // Kick off acquisition asynchronously but expose a promise so callers
+      // can wait for the verdict before registering rules in bulk.
+      this.ready = this.attemptLeadership().catch((err) => {
+        logger.error(
+          'Leader-lock acquisition failed; scheduler will behave as non-leader',
+          err instanceof Error ? err : undefined,
+        )
+        this.isLeader = false
+      })
+    } else {
+      // No leader config → always act as leader (legacy behaviour).
+      this.isLeader = true
+      this.ready = Promise.resolve()
+    }
+  }
+
+  private async attemptLeadership(): Promise<void> {
+    if (!this.leaderOptions) return
+    const { leaderLock, ownerId } = this.leaderOptions
+    const won = await leaderLock.acquire(this.lockKey, ownerId, this.ttlMs)
+    this.isLeader = won
+    if (won) {
+      logger.info(
+        `Acquired scheduler leader lock ${this.lockKey} (owner=${ownerId}, ttl=${this.ttlMs}ms)`,
+      )
+      this.startRenewalLoop()
+    } else {
+      logger.info(
+        `Did not acquire scheduler leader lock ${this.lockKey}; operating as non-leader (owner=${ownerId})`,
+      )
+    }
+  }
+
+  private startRenewalLoop(): void {
+    if (!this.leaderOptions) return
+    if (this.renewalTimer) clearInterval(this.renewalTimer)
+    const { leaderLock, ownerId } = this.leaderOptions
+    this.renewalTimer = setInterval(() => {
+      // Fire and forget — errors inside the renew path flip the flag so
+      // the scheduler relinquishes gracefully on the next tick.
+      leaderLock.renew(this.lockKey, ownerId, this.ttlMs).then(
+        (ok) => {
+          if (!ok) this.relinquishLeadership('renewal rejected')
+        },
+        (err) => {
+          logger.warn(
+            `Leader renewal error for ${this.lockKey}: ${err instanceof Error ? err.message : String(err)}`,
+          )
+          this.relinquishLeadership('renewal error')
+        },
+      )
+    }, this.renewIntervalMs)
+    if (typeof this.renewalTimer.unref === 'function') {
+      this.renewalTimer.unref()
+    }
+  }
+
+  /**
+   * Tear down all active timers when the leadership lease is lost. A future
+   * process can reclaim the lock via normal TTL expiry — no forced retry
+   * here, which keeps the behaviour deterministic under network partition.
+   */
+  private relinquishLeadership(reason: string): void {
+    if (!this.isLeader) return
+    logger.warn(`Relinquishing scheduler leadership (${reason}); clearing ${this.timers.size} timer(s)`)
+    this.isLeader = false
+    for (const [ruleId, timer] of this.timers.entries()) {
+      clearInterval(timer)
+      logger.info(`Cleared schedule for rule ${ruleId} after leader loss`)
+    }
+    this.timers.clear()
+    if (this.renewalTimer) {
+      clearInterval(this.renewalTimer)
+      this.renewalTimer = null
+    }
+  }
+
+  /** Test / diagnostics hook. */
+  get leader(): boolean {
+    return this.isLeader
   }
 
   /**
    * Register a scheduled rule (cron or interval trigger).
    * If the rule is already registered, it will be replaced.
+   *
+   * When the scheduler is configured with a leader lock and this process
+   * is NOT the current leader, timer creation is silently skipped — the
+   * non-leader keeps tracking which rules *would* have been registered
+   * only via its in-memory state and relies on the leader to execute them.
    */
   register(rule: AutomationRule): void {
     // Unregister first if already exists
@@ -93,6 +225,12 @@ export class AutomationScheduler {
       }
     } else {
       // Not a schedule trigger — skip
+      return
+    }
+
+    if (!this.isLeader) {
+      // Non-leaders silently skip timer creation; the leader owns execution.
+      logger.debug(`Rule ${rule.id}: non-leader instance — skipping timer`)
       return
     }
 
@@ -153,5 +291,17 @@ export class AutomationScheduler {
       logger.info(`Destroyed schedule for rule ${ruleId}`)
     }
     this.timers.clear()
+    if (this.renewalTimer) {
+      clearInterval(this.renewalTimer)
+      this.renewalTimer = null
+    }
+    if (this.leaderOptions && this.isLeader) {
+      // Best-effort lock release so a replacement replica can take over
+      // without waiting for the full TTL. Failures are intentionally
+      // swallowed — Redis will eventually expire the key regardless.
+      const { leaderLock, ownerId } = this.leaderOptions
+      leaderLock.release(this.lockKey, ownerId).catch(() => {})
+      this.isLeader = false
+    }
   }
 }
