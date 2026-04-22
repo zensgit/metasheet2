@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import {
   describeDingTalkPublicFormLinkAccess,
+  describeDingTalkPublicFormLinkAudience,
   getDingTalkPublicFormLinkAccessLevel,
   getDingTalkPublicFormLinkAccessState,
   listDingTalkPublicFormLinkBlockingErrors,
@@ -160,6 +161,20 @@ describe('dingtalk public form link warnings', () => {
     expect(describeDingTalkPublicFormLinkAccess('missing_view', views, nowMs)).toBe('View unavailable in this sheet')
   })
 
+  it('describes selected public form audience for DingTalk message summaries', () => {
+    expect(describeDingTalkPublicFormLinkAudience('', views, nowMs)).toBe('No public form link')
+    expect(describeDingTalkPublicFormLinkAudience('view_form_enabled', views, nowMs)).toBe('Anyone with the link can submit')
+    expect(describeDingTalkPublicFormLinkAudience('view_form_protected', views, nowMs))
+      .toBe('No local allowlist limits are set; all bound DingTalk users can submit')
+    expect(describeDingTalkPublicFormLinkAudience('view_form_granted_without_allowlist', views, nowMs))
+      .toBe('No local allowlist limits are set; all authorized DingTalk users can submit')
+    expect(describeDingTalkPublicFormLinkAudience('view_form_protected_allowed_user', views, nowMs))
+      .toBe('1 local user can submit after DingTalk checks')
+    expect(describeDingTalkPublicFormLinkAudience('view_form_granted_allowed_group', views, nowMs))
+      .toBe('1 local member group can submit after DingTalk checks')
+    expect(describeDingTalkPublicFormLinkAudience('missing_view', views, nowMs)).toBe('Allowed audience unavailable')
+  })
+
   it('returns stable access levels for automation badges', () => {
     expect(getDingTalkPublicFormLinkAccessLevel('', views, nowMs)).toBe('none')
     expect(getDingTalkPublicFormLinkAccessLevel('view_form_enabled', views, nowMs)).toBe('public')
@@ -178,26 +193,31 @@ describe('dingtalk public form link warnings', () => {
 
   it('returns stable access state for automation summaries', () => {
     expect(getDingTalkPublicFormLinkAccessState('   ', views, nowMs)).toEqual({
+      audienceSummary: 'No public form link',
       hasSelection: false,
       level: 'none',
       summary: 'No public form link',
     })
     expect(getDingTalkPublicFormLinkAccessState('view_form_enabled', views, nowMs)).toEqual({
+      audienceSummary: 'Anyone with the link can submit',
       hasSelection: true,
       level: 'public',
       summary: 'Fully public; anyone with the link can submit',
     })
     expect(getDingTalkPublicFormLinkAccessState('view_form_protected_allowed_user', views, nowMs)).toEqual({
+      audienceSummary: '1 local user can submit after DingTalk checks',
       hasSelection: true,
       level: 'dingtalk',
       summary: 'DingTalk-bound users in allowlist can submit',
     })
     expect(getDingTalkPublicFormLinkAccessState('view_form_granted_allowed_group', views, nowMs)).toEqual({
+      audienceSummary: '1 local member group can submit after DingTalk checks',
       hasSelection: true,
       level: 'dingtalk_granted',
       summary: 'Authorized DingTalk users in allowlist can submit',
     })
     expect(getDingTalkPublicFormLinkAccessState('missing_view', views, nowMs)).toEqual({
+      audienceSummary: 'Allowed audience unavailable',
       hasSelection: true,
       level: 'unavailable',
       summary: 'View unavailable in this sheet',
