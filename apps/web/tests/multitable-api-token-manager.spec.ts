@@ -418,6 +418,19 @@ describe('MetaApiTokenManager', () => {
     expect(fetchFn.mock.calls.some(([url]) => String(url).includes('/api/multitable/dingtalk-groups?sheetId=sheet_1'))).toBe(true)
   })
 
+  it('hides DingTalk group management without automation permission', async () => {
+    const { client, fetchFn } = mockClient([], [], [], [fakeDingTalkGroup()])
+    mount({ visible: true, client, canManageAutomation: false })
+    await flushPromises()
+
+    const title = document.querySelector('.meta-api-mgr__title')
+    expect(title?.textContent).toBe('API Tokens & Webhooks')
+    const tabLabels = Array.from(document.querySelectorAll('[role="tab"]')).map((tab) => tab.textContent?.trim())
+    expect(tabLabels).toEqual(['API Tokens', 'Webhooks'])
+    expect(document.querySelector('[data-dingtalk-groups-permission-note]')?.textContent).toContain('DingTalk group bindings require automation management permission')
+    expect(fetchFn.mock.calls.some(([url]) => String(url).includes('/dingtalk-groups'))).toBe(false)
+  })
+
   it('masks DingTalk webhook access token in card display', async () => {
     const { client } = mockClient([], [], [], [fakeDingTalkGroup({
       webhookUrl: 'https://oapi.dingtalk.com/robot/send?access_token=super-secret-token',
