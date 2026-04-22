@@ -108,7 +108,14 @@ function mockApproval(index: number): UnifiedApprovalDTO {
   const status = statuses[index % statuses.length]
   // Surface an any-mode fixture on a stable slot so dev-mode always exercises the UI branch.
   const isAnyModeFixture = index % 5 === 1
-  const baseAssignmentNodeKey = isAnyModeFixture ? 'approval_any' : 'approval_1'
+  // Surface a parallel-gateway fixture on a stable slot so dev-mode always
+  // exercises the `currentNodeKeys` → "并行中" UI path. Parallel wins over
+  // any-mode on that slot because the any-mode badge already renders on many
+  // other indices.
+  const isParallelFixture = index % 7 === 3
+  const baseAssignmentNodeKey = isParallelFixture
+    ? 'parallel_fork'
+    : isAnyModeFixture ? 'approval_any' : 'approval_1'
   return {
     id: `apv_${index}`,
     sourceSystem: 'platform',
@@ -128,8 +135,32 @@ function mockApproval(index: number): UnifiedApprovalDTO {
     requestNo: `AP-${String(100000 + index)}`,
     formSnapshot: { fld_reason: '出差报销', fld_amount: 5000, fld_type: 'reimbursement' },
     currentNodeKey: status === 'pending' ? baseAssignmentNodeKey : null,
+    ...(status === 'pending' && isParallelFixture
+      ? { currentNodeKeys: ['legal_review', 'compliance_review'] as string[] }
+      : {}),
     assignments: status === 'pending'
-      ? (isAnyModeFixture
+      ? (isParallelFixture
+        ? [
+          {
+            id: `asgn_${index}_legal`,
+            type: 'approval',
+            assigneeId: 'user_legal',
+            sourceStep: 1,
+            nodeKey: 'legal_review',
+            isActive: true,
+            metadata: {},
+          },
+          {
+            id: `asgn_${index}_compliance`,
+            type: 'approval',
+            assigneeId: 'user_compliance',
+            sourceStep: 1,
+            nodeKey: 'compliance_review',
+            isActive: true,
+            metadata: {},
+          },
+        ]
+        : isAnyModeFixture
         ? [
           {
             id: `asgn_${index}_a`,

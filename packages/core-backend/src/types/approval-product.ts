@@ -7,9 +7,10 @@ export const APPROVAL_PRODUCT_PERMISSIONS = [
 
 export type ApprovalProductPermission = typeof APPROVAL_PRODUCT_PERMISSIONS[number]
 
-export type ApprovalNodeType = 'start' | 'approval' | 'cc' | 'condition' | 'end'
+export type ApprovalNodeType = 'start' | 'approval' | 'cc' | 'condition' | 'parallel' | 'end'
 export type ApprovalAssigneeType = 'user' | 'role'
 export type ApprovalMode = 'single' | 'all' | 'any'
+export type ParallelJoinMode = 'all' | 'any'
 export type EmptyAssigneePolicy = 'error' | 'auto-approve'
 export type ApprovalActionType = 'approve' | 'reject' | 'transfer' | 'revoke' | 'comment' | 'return'
 export type ApprovalStatus = 'draft' | 'pending' | 'approved' | 'rejected' | 'revoked' | 'cancelled'
@@ -29,7 +30,12 @@ export interface ApprovalNode {
   key: string
   type: ApprovalNodeType
   name?: string
-  config: ApprovalNodeConfig | ConditionNodeConfig | CcNodeConfig | Record<string, never>
+  config:
+    | ApprovalNodeConfig
+    | ConditionNodeConfig
+    | CcNodeConfig
+    | ParallelNodeConfig
+    | Record<string, never>
 }
 
 export interface ApprovalNodeConfig {
@@ -59,6 +65,18 @@ export interface ConditionRule {
 export interface CcNodeConfig {
   targetType: ApprovalAssigneeType
   targetIds: string[]
+}
+
+/**
+ * Parallel gateway (并行分支) — fans into N branches from `branches` (edgeKeys)
+ * and re-joins at `joinNodeKey`. `joinMode === 'all'` ("和") waits for every
+ * branch to reach the join node before advancing. `'any'` is reserved for
+ * a future wave and is not wired into the executor in v1.
+ */
+export interface ParallelNodeConfig {
+  branches: string[]
+  joinMode: ParallelJoinMode
+  joinNodeKey: string
 }
 
 export interface ApprovalEdge {
@@ -148,6 +166,13 @@ export interface UnifiedApprovalDTO {
   requestNo?: string | null
   formSnapshot?: Record<string, unknown> | null
   currentNodeKey?: string | null
+  /**
+   * Parallel gateway (并行分支) — populated only when the instance is in
+   * parallel state (length ≥ 2). For non-parallel state this equals
+   * `[currentNodeKey]` or is omitted. Callers that don't care about
+   * parallelism can keep using `currentNodeKey` unchanged.
+   */
+  currentNodeKeys?: string[] | null
   assignments: ApprovalAssignmentDTO[]
   createdAt: string
   updatedAt: string

@@ -2215,6 +2215,36 @@ components:
           items:
             type: string
       required: [targetType, targetIds]
+    ApprovalParallelNodeConfig:
+      type: object
+      description: |
+        Parallel gateway (并行分支) — fans into the listed branch edges and
+        re-joins at `joinNodeKey`. v1 only ships `joinMode: all` (会签 on
+        the join); `any` is reserved for a future wave.
+      properties:
+        branches:
+          type: array
+          minItems: 2
+          items:
+            type: string
+          description: |
+            Outgoing edgeKeys, one per branch. Each edge's downstream path
+            must reach `joinNodeKey` before any `end` or loop, and must not
+            share approver assignees with any other branch.
+        joinMode:
+          type: string
+          enum: [all, any]
+          description: |
+            Join policy at `joinNodeKey`. `all` waits for every branch to
+            report complete before advancing. `any` (future) would advance
+            on the first branch to complete.
+        joinNodeKey:
+          type: string
+          description: |
+            The approval / cc node every branch converges onto. Required —
+            lets the runtime short-circuit walker without structural
+            inference.
+      required: [branches, joinMode, joinNodeKey]
     ApprovalNode:
       type: object
       properties:
@@ -2222,7 +2252,7 @@ components:
           type: string
         type:
           type: string
-          enum: [start, approval, cc, condition, end]
+          enum: [start, approval, cc, condition, parallel, end]
         name:
           type: string
         config:
@@ -2417,6 +2447,17 @@ components:
         currentNodeKey:
           type: string
           nullable: true
+        currentNodeKeys:
+          type: array
+          nullable: true
+          items:
+            type: string
+          description: |
+            Parallel gateway (并行分支) runtime frontier. Present only when
+            the instance is inside a parallel region with ≥ 2 still-pending
+            branches. Each entry is the current approval node key for one
+            branch. When absent or length < 2, use `currentNodeKey`
+            unchanged for the linear / non-parallel flow.
         assignments:
           type: array
           items:

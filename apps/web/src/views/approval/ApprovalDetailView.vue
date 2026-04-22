@@ -13,6 +13,15 @@
       >
         {{ statusLabel(approval.status) }}
       </el-tag>
+      <el-tag
+        v-if="approval && isInParallelRegion"
+        type="warning"
+        size="large"
+        class="approval-detail__parallel-badge"
+        effect="light"
+      >
+        并行中 · {{ parallelBranchNodeKeys.map(nodeLabel).join(' / ') }}
+      </el-tag>
     </header>
 
     <el-alert
@@ -75,56 +84,115 @@
         <!-- Right: history timeline -->
         <div class="approval-detail__timeline">
           <h2>审批流程</h2>
-          <el-timeline v-if="store.history.length">
-            <el-timeline-item
-              v-for="item in store.history"
-              :key="item.id"
-              :type="timelineItemType(item.action, item.toStatus)"
-              :icon="timelineIcon(item.action, item.metadata)"
-              :hollow="item.toStatus === 'pending'"
-              size="large"
-              :timestamp="item.occurredAt ? formatDate(item.occurredAt) : '-'"
-              placement="top"
-            >
-              <div class="approval-detail__timeline-content">
-                <div class="approval-detail__timeline-header">
-                  <strong>{{ item.metadata?.autoApproved ? '系统自动审批' : (item.actorName ?? '系统') }}</strong>
-                  <el-tag :type="timelineActionTagType(item.action, item.metadata)" size="small">
-                    {{ actionLabel(item.action, item.metadata) }}
-                  </el-tag>
-                </div>
-                <p v-if="item.comment" class="approval-detail__timeline-comment">
-                  {{ item.comment }}
-                </p>
-                <div v-if="hasTimelineMetadata(item.metadata)" class="approval-detail__timeline-meta">
-                  <span v-if="item.metadata?.autoApproved" class="approval-detail__meta-badge approval-detail__meta-badge--auto">
-                    自动审批
+          <template v-if="store.history.length">
+            <!-- Parallel gateway (并行分支): cluster history entries under
+                 each branch's approval-node key so reviewers can trace
+                 per-branch decisions without re-reading the full timeline. -->
+            <template v-if="isInParallelRegion && timelineBranchGroups.length">
+              <div
+                v-for="group in timelineBranchGroups"
+                :key="group.key"
+                class="approval-detail__timeline-group"
+              >
+                <div class="approval-detail__timeline-group-header">
+                  <span class="approval-detail__timeline-group-label">
+                    {{ group.label }}
                   </span>
-                  <span v-if="item.metadata?.approvalMode" class="approval-detail__meta-badge">
-                    审批模式: {{ approvalModeLabel(item.metadata.approvalMode as string) }}
-                  </span>
-                  <span v-if="item.metadata?.aggregateComplete && item.metadata?.approvalMode === 'all'" class="approval-detail__meta-badge approval-detail__meta-badge--complete">
-                    会签完成
-                  </span>
-                  <span v-if="item.metadata?.aggregateComplete && item.metadata?.approvalMode === 'any'" class="approval-detail__meta-badge approval-detail__meta-badge--complete">
-                    或签完成
-                  </span>
-                  <span v-if="cancelledAssigneesLabel(item.metadata)" class="approval-detail__meta-badge approval-detail__meta-badge--cancelled">
-                    {{ cancelledAssigneesLabel(item.metadata) }}
-                  </span>
-                  <span v-if="item.action === 'sign' && item.metadata?.autoCancelled" class="approval-detail__meta-badge approval-detail__meta-badge--cancelled">
-                    （已被 {{ item.metadata?.aggregateCancelledBy || '发起人' }} 的决定覆盖）
-                  </span>
-                  <span v-if="item.action === 'return' && item.metadata?.targetNodeKey" class="approval-detail__meta-badge approval-detail__meta-badge--return">
-                    退回至: {{ nodeLabel(item.metadata.targetNodeKey as string) }}
-                  </span>
-                  <span v-if="item.metadata?.nodeKey" class="approval-detail__meta-badge">
-                    节点: {{ item.metadata.nodeKey }}
+                  <span class="approval-detail__timeline-group-count">
+                    {{ group.items.length }} 条
                   </span>
                 </div>
+                <el-timeline>
+                  <el-timeline-item
+                    v-for="item in group.items"
+                    :key="item.id"
+                    :type="timelineItemType(item.action, item.toStatus)"
+                    :icon="timelineIcon(item.action, item.metadata)"
+                    :hollow="item.toStatus === 'pending'"
+                    size="large"
+                    :timestamp="item.occurredAt ? formatDate(item.occurredAt) : '-'"
+                    placement="top"
+                  >
+                    <div class="approval-detail__timeline-content">
+                      <div class="approval-detail__timeline-header">
+                        <strong>{{ item.metadata?.autoApproved ? '系统自动审批' : (item.actorName ?? '系统') }}</strong>
+                        <el-tag :type="timelineActionTagType(item.action, item.metadata)" size="small">
+                          {{ actionLabel(item.action, item.metadata) }}
+                        </el-tag>
+                      </div>
+                      <p v-if="item.comment" class="approval-detail__timeline-comment">
+                        {{ item.comment }}
+                      </p>
+                      <div v-if="hasTimelineMetadata(item.metadata)" class="approval-detail__timeline-meta">
+                        <span v-if="item.metadata?.autoApproved" class="approval-detail__meta-badge approval-detail__meta-badge--auto">自动审批</span>
+                        <span v-if="item.metadata?.approvalMode" class="approval-detail__meta-badge">
+                          审批模式: {{ approvalModeLabel(item.metadata.approvalMode as string) }}
+                        </span>
+                        <span v-if="item.metadata?.aggregateComplete && item.metadata?.approvalMode === 'all'" class="approval-detail__meta-badge approval-detail__meta-badge--complete">会签完成</span>
+                        <span v-if="item.metadata?.aggregateComplete && item.metadata?.approvalMode === 'any'" class="approval-detail__meta-badge approval-detail__meta-badge--complete">或签完成</span>
+                        <span v-if="cancelledAssigneesLabel(item.metadata)" class="approval-detail__meta-badge approval-detail__meta-badge--cancelled">
+                          {{ cancelledAssigneesLabel(item.metadata) }}
+                        </span>
+                        <span v-if="item.action === 'sign' && item.metadata?.autoCancelled" class="approval-detail__meta-badge approval-detail__meta-badge--cancelled">
+                          （已被 {{ item.metadata?.aggregateCancelledBy || '发起人' }} 的决定覆盖）
+                        </span>
+                        <span v-if="item.action === 'return' && item.metadata?.targetNodeKey" class="approval-detail__meta-badge approval-detail__meta-badge--return">
+                          退回至: {{ nodeLabel(item.metadata.targetNodeKey as string) }}
+                        </span>
+                        <span v-if="item.metadata?.nodeKey" class="approval-detail__meta-badge">
+                          节点: {{ item.metadata.nodeKey }}
+                        </span>
+                      </div>
+                    </div>
+                  </el-timeline-item>
+                </el-timeline>
               </div>
-            </el-timeline-item>
-          </el-timeline>
+            </template>
+            <el-timeline v-else>
+              <el-timeline-item
+                v-for="item in store.history"
+                :key="item.id"
+                :type="timelineItemType(item.action, item.toStatus)"
+                :icon="timelineIcon(item.action, item.metadata)"
+                :hollow="item.toStatus === 'pending'"
+                size="large"
+                :timestamp="item.occurredAt ? formatDate(item.occurredAt) : '-'"
+                placement="top"
+              >
+                <div class="approval-detail__timeline-content">
+                  <div class="approval-detail__timeline-header">
+                    <strong>{{ item.metadata?.autoApproved ? '系统自动审批' : (item.actorName ?? '系统') }}</strong>
+                    <el-tag :type="timelineActionTagType(item.action, item.metadata)" size="small">
+                      {{ actionLabel(item.action, item.metadata) }}
+                    </el-tag>
+                  </div>
+                  <p v-if="item.comment" class="approval-detail__timeline-comment">
+                    {{ item.comment }}
+                  </p>
+                  <div v-if="hasTimelineMetadata(item.metadata)" class="approval-detail__timeline-meta">
+                    <span v-if="item.metadata?.autoApproved" class="approval-detail__meta-badge approval-detail__meta-badge--auto">自动审批</span>
+                    <span v-if="item.metadata?.approvalMode" class="approval-detail__meta-badge">
+                      审批模式: {{ approvalModeLabel(item.metadata.approvalMode as string) }}
+                    </span>
+                    <span v-if="item.metadata?.aggregateComplete && item.metadata?.approvalMode === 'all'" class="approval-detail__meta-badge approval-detail__meta-badge--complete">会签完成</span>
+                    <span v-if="item.metadata?.aggregateComplete && item.metadata?.approvalMode === 'any'" class="approval-detail__meta-badge approval-detail__meta-badge--complete">或签完成</span>
+                    <span v-if="cancelledAssigneesLabel(item.metadata)" class="approval-detail__meta-badge approval-detail__meta-badge--cancelled">
+                      {{ cancelledAssigneesLabel(item.metadata) }}
+                    </span>
+                    <span v-if="item.action === 'sign' && item.metadata?.autoCancelled" class="approval-detail__meta-badge approval-detail__meta-badge--cancelled">
+                      （已被 {{ item.metadata?.aggregateCancelledBy || '发起人' }} 的决定覆盖）
+                    </span>
+                    <span v-if="item.action === 'return' && item.metadata?.targetNodeKey" class="approval-detail__meta-badge approval-detail__meta-badge--return">
+                      退回至: {{ nodeLabel(item.metadata.targetNodeKey as string) }}
+                    </span>
+                    <span v-if="item.metadata?.nodeKey" class="approval-detail__meta-badge">
+                      节点: {{ item.metadata.nodeKey }}
+                    </span>
+                  </div>
+                </div>
+              </el-timeline-item>
+            </el-timeline>
+          </template>
           <el-empty v-else description="暂无审批历史" :image-size="80" />
         </div>
       </div>
@@ -343,6 +411,49 @@ const approval = computed(() => store.activeApproval)
 const isRequester = computed(() => {
   // Simple heuristic: mock current user as 'user_1'
   return approval.value?.requester?.id === 'user_1'
+})
+
+// Parallel gateway (并行分支) — the instance is inside a parallel region when
+// the backend surfaces `currentNodeKeys` with at least two entries. Templates
+// with a single-branch fallback or any other shape leave the field absent, so
+// existing linear-flow rendering is untouched.
+const parallelBranchNodeKeys = computed<string[]>(() => {
+  const nodeKeys = approval.value?.currentNodeKeys
+  return Array.isArray(nodeKeys) ? nodeKeys : []
+})
+const isInParallelRegion = computed(() => parallelBranchNodeKeys.value.length >= 2)
+
+interface TimelineGroup {
+  key: string
+  label: string
+  items: typeof store.history
+}
+
+// Group the history timeline by the approval-node key each entry targets so a
+// reviewer can scan each branch's decisions without interleaving. Entries
+// that lack a `metadata.nodeKey` (e.g. the 'created' row or cc broadcasts
+// from before the parallel fork) land in an "其他" group rendered last. The
+// group order follows first-seen order in the timeline, so branches appear
+// in the order the backend recorded them.
+const timelineBranchGroups = computed<TimelineGroup[]>(() => {
+  if (!isInParallelRegion.value) return []
+  const buckets = new Map<string, TimelineGroup>()
+  const order: string[] = []
+  const OTHER_KEY = '__other'
+  for (const item of store.history) {
+    const nodeKey = typeof item.metadata?.nodeKey === 'string' ? item.metadata.nodeKey : null
+    const bucketKey = nodeKey && parallelBranchNodeKeys.value.includes(nodeKey) ? nodeKey : OTHER_KEY
+    if (!buckets.has(bucketKey)) {
+      order.push(bucketKey)
+      buckets.set(bucketKey, {
+        key: bucketKey,
+        label: bucketKey === OTHER_KEY ? '其他' : nodeLabel(bucketKey),
+        items: [],
+      })
+    }
+    buckets.get(bucketKey)!.items.push(item)
+  }
+  return order.map((key) => buckets.get(key)!)
 })
 
 const actionDialogVisible = ref(false)
@@ -743,6 +854,39 @@ onMounted(async () => {
 .approval-detail__meta-badge--return {
   background: #fff7e6;
   color: #fa8c16;
+}
+
+.approval-detail__parallel-badge {
+  margin-left: 8px;
+  font-weight: 500;
+  letter-spacing: 0.05em;
+}
+
+.approval-detail__timeline-group {
+  border: 1px solid var(--el-border-color-lighter, #e4e7ed);
+  border-radius: 6px;
+  padding: 12px 16px;
+  margin-bottom: 12px;
+  background: var(--el-fill-color-blank, #fff);
+}
+
+.approval-detail__timeline-group-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+  padding-bottom: 6px;
+  border-bottom: 1px dashed var(--el-border-color-lighter, #ebedf0);
+}
+
+.approval-detail__timeline-group-label {
+  font-weight: 600;
+  color: var(--el-text-color-primary, #303133);
+}
+
+.approval-detail__timeline-group-count {
+  font-size: 12px;
+  color: var(--el-text-color-secondary, #606266);
 }
 
 .approval-detail__actions {

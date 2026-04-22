@@ -19,6 +19,7 @@ import type {
 import {
   ApprovalGraphExecutor,
   type ApprovalGraphAutoApprovalEvent,
+  type ParallelInstanceState,
   validateApprovalFormData,
 } from './ApprovalGraphExecutor'
 import type {
@@ -147,9 +148,10 @@ const FORM_FIELD_TYPES = new Set([
   'attachment',
 ])
 
-const APPROVAL_NODE_TYPES = new Set(['start', 'approval', 'cc', 'condition', 'end'])
+const APPROVAL_NODE_TYPES = new Set(['start', 'approval', 'cc', 'condition', 'parallel', 'end'])
 const CONDITION_OPERATORS = new Set(['eq', 'neq', 'gt', 'gte', 'lt', 'lte', 'in', 'isEmpty'])
 const APPROVAL_MODES = new Set<ApprovalMode>(['single', 'all', 'any'])
+const PARALLEL_JOIN_MODES = new Set(['all', 'any'])
 const EMPTY_ASSIGNEE_POLICIES = new Set<EmptyAssigneePolicy>(['error', 'auto-approve'])
 
 function toNullableRecord(value: unknown): Record<string, unknown> | null {
@@ -343,6 +345,33 @@ function normalizeApprovalGraph(value: unknown, context: ValidationContext): App
           targetIds: node.config.targetIds.map((entry) => entry.trim()),
         }
         break
+      case 'parallel':
+        if (!Array.isArray(node.config.branches)
+          || node.config.branches.some((entry) => !isNonEmptyString(entry))
+          || node.config.branches.length < 2) {
+          failValidation(
+            context,
+            `approvalGraph.nodes[${index}].config.branches must list at least two edgeKeys`,
+          )
+        }
+        if (!isNonEmptyString(node.config.joinNodeKey)) {
+          failValidation(
+            context,
+            `approvalGraph.nodes[${index}].config.joinNodeKey is required`,
+          )
+        }
+        if (typeof node.config.joinMode !== 'string' || !PARALLEL_JOIN_MODES.has(node.config.joinMode)) {
+          failValidation(
+            context,
+            `approvalGraph.nodes[${index}].config.joinMode must be 'all' or 'any'`,
+          )
+        }
+        normalizedNode.config = {
+          branches: (node.config.branches as string[]).map((entry) => entry.trim()),
+          joinMode: node.config.joinMode,
+          joinNodeKey: (node.config.joinNodeKey as string).trim(),
+        }
+        break
       case 'condition':
         if (!Array.isArray(node.config.branches)) {
           failValidation(context, `approvalGraph.nodes[${index}].config.branches must be an array`)
@@ -410,7 +439,119 @@ function normalizeApprovalGraph(value: unknown, context: ValidationContext): App
     failValidation(context, 'approvalGraph edges must reference known nodes')
   }
 
+  // Parallel-gateway structural validation: referenced edges and join node must
+  // exist; branches must not share approval-node assignees (v1 limitation — the
+  // approval_assignments.active-unique index cannot represent the same user
+  // being active in two branches at once). Nested parallel is rejected too.
+  const edgeMap = new Map(edges.map((edge) => [edge.key, edge]))
+  const nodeByKey = new Map(nodes.map((node) => [node.key, node]))
+  for (const node of nodes) {
+    if (node.type !== 'parallel') continue
+    const parallelConfig = node.config as { branches: string[]; joinNodeKey: string }
+    for (const branchEdgeKey of parallelConfig.branches) {
+      const edge = edgeMap.get(branchEdgeKey)
+      if (!edge || edge.source !== node.key) {
+        failValidation(
+          context,
+          `approvalGraph parallel node ${node.key} references unknown branch edge ${branchEdgeKey}`,
+        )
+      }
+    }
+    const joinNode = nodeByKey.get(parallelConfig.joinNodeKey)
+    if (!joinNode) {
+      failValidation(
+        context,
+        `approvalGraph parallel node ${node.key} references unknown join node ${parallelConfig.joinNodeKey}`,
+      )
+    }
+
+    // Collect the approval-node assignees reachable from each branch start up to
+    // the join node. Reject duplicate assigneeIds across branches because the
+    // active-assignment unique index cannot hold two active rows for the same
+    // user at once. Nested parallel is explicitly rejected in v1.
+    const assigneesPerBranch: Array<Set<string>> = []
+    for (const branchEdgeKey of parallelConfig.branches) {
+      const edge = edgeMap.get(branchEdgeKey)!
+      const branchAssignees = collectBranchAssignees(
+        edge.target,
+        parallelConfig.joinNodeKey,
+        nodeByKey,
+        edges,
+        context,
+      )
+      assigneesPerBranch.push(branchAssignees)
+    }
+    const seen = new Set<string>()
+    for (const branchAssignees of assigneesPerBranch) {
+      for (const assignee of branchAssignees) {
+        if (seen.has(assignee)) {
+          failValidation(
+            context,
+            `approvalGraph parallel node ${node.key} has duplicate approver '${assignee}' across branches`,
+          )
+        }
+        seen.add(assignee)
+      }
+    }
+  }
+
   return { nodes, edges }
+}
+
+function collectBranchAssignees(
+  startNodeKey: string,
+  joinNodeKey: string,
+  nodeByKey: Map<string, ApprovalGraph['nodes'][number]>,
+  edges: ApprovalGraph['edges'],
+  context: ValidationContext,
+): Set<string> {
+  const assignees = new Set<string>()
+  const outgoing = new Map<string, ApprovalGraph['edges']>()
+  for (const edge of edges) {
+    const existing = outgoing.get(edge.source) || []
+    existing.push(edge)
+    outgoing.set(edge.source, existing)
+  }
+
+  const visited = new Set<string>()
+  let currentKey: string | null = startNodeKey
+  while (currentKey) {
+    if (currentKey === joinNodeKey) return assignees
+    if (visited.has(currentKey)) {
+      failValidation(context, `approvalGraph parallel branch contains a cycle near ${currentKey}`)
+    }
+    visited.add(currentKey)
+    const node = nodeByKey.get(currentKey)
+    if (!node) {
+      failValidation(context, `approvalGraph parallel branch references unknown node ${currentKey}`)
+    }
+    if (node.type === 'parallel') {
+      failValidation(context, `approvalGraph parallel branch cannot contain nested parallel node ${node.key}`)
+    }
+    if (node.type === 'end') {
+      failValidation(
+        context,
+        `approvalGraph parallel branch must reach join before end (at ${node.key})`,
+      )
+    }
+    if (node.type === 'approval') {
+      const approvalConfig = node.config as { assigneeIds?: string[] }
+      for (const assignee of approvalConfig.assigneeIds ?? []) {
+        assignees.add(assignee)
+      }
+    }
+    // Walk the first outgoing edge — condition nodes aren't explored for every
+    // branch here (the form-data isn't available at template validation
+    // time), so duplicate detection is conservative across the statically
+    // reachable first-edge path. Condition branches inside parallel remain
+    // legal at runtime; this check only flags obvious overlaps.
+    const nextEdge = outgoing.get(currentKey)?.[0]
+    currentKey = nextEdge?.target ?? null
+  }
+  failValidation(
+    context,
+    `approvalGraph parallel branch starting near ${startNodeKey} never reaches join ${joinNodeKey}`,
+  )
 }
 
 function asApprovalGraph(value: Record<string, unknown>): ApprovalGraph {
@@ -458,6 +599,18 @@ function toUnifiedApprovalDTO(
   row: ApprovalInstanceRow,
   assignments: ApprovalAssignmentDTO[],
 ): UnifiedApprovalDTO {
+  // Surface `currentNodeKeys` when the instance is inside a parallel region so
+  // consumers (frontend timeline, callers checking `.length > 1`) can detect
+  // parallel state without peeking at metadata. When there's no parallel
+  // state, we leave the field undefined; callers continue to use
+  // `currentNodeKey` unchanged.
+  const parallelState = readParallelBranchStates(row.metadata)
+  const currentNodeKeys = parallelState
+    ? Object.values(parallelState.branches)
+        .filter((entry) => !entry.complete && entry.currentNodeKey)
+        .map((entry) => entry.currentNodeKey as string)
+    : undefined
+
   return {
     id: row.id,
     sourceSystem: row.source_system,
@@ -477,6 +630,7 @@ function toUnifiedApprovalDTO(
     requestNo: row.request_no,
     formSnapshot: toNullableRecord(row.form_snapshot),
     currentNodeKey: row.current_node_key,
+    ...(currentNodeKeys ? { currentNodeKeys } : {}),
     assignments,
     createdAt: row.created_at.toISOString(),
     updatedAt: row.updated_at.toISOString(),
@@ -579,6 +733,55 @@ function buildRuntimeGraph(approvalGraph: ApprovalGraph, policy: RuntimePolicy):
       ...(policy.revokeBeforeNodeKeys ? { revokeBeforeNodeKeys: [...policy.revokeBeforeNodeKeys] } : {}),
     },
   })
+}
+
+function buildPersistableParallelState(state: ParallelInstanceState): Record<string, unknown> {
+  return {
+    parallelNodeKey: state.parallelNodeKey,
+    joinNodeKey: state.joinNodeKey,
+    joinMode: state.joinMode,
+    branches: Object.fromEntries(
+      Object.entries(state.branches).map(([edgeKey, entry]) => [
+        edgeKey,
+        {
+          edgeKey: entry.edgeKey,
+          currentNodeKey: entry.currentNodeKey,
+          complete: entry.complete,
+        },
+      ]),
+    ),
+  }
+}
+
+function readParallelBranchStates(metadata: unknown): ParallelInstanceState | null {
+  if (!isRecord(metadata)) return null
+  const states = (metadata as { parallelBranchStates?: unknown }).parallelBranchStates
+  if (!isRecord(states)) return null
+  if (typeof states.parallelNodeKey !== 'string'
+    || typeof states.joinNodeKey !== 'string'
+    || (states.joinMode !== 'all' && states.joinMode !== 'any')
+    || !isRecord(states.branches)) {
+    return null
+  }
+  const branches: Record<string, ParallelInstanceState['branches'][string]> = {}
+  for (const [edgeKey, entryRaw] of Object.entries(states.branches)) {
+    if (!isRecord(entryRaw)) return null
+    const entry = entryRaw as { edgeKey?: unknown; currentNodeKey?: unknown; complete?: unknown }
+    if (typeof entry.edgeKey !== 'string') return null
+    if (entry.currentNodeKey !== null && typeof entry.currentNodeKey !== 'string') return null
+    if (typeof entry.complete !== 'boolean') return null
+    branches[edgeKey] = {
+      edgeKey: entry.edgeKey,
+      currentNodeKey: entry.currentNodeKey as string | null,
+      complete: entry.complete,
+    }
+  }
+  return {
+    parallelNodeKey: states.parallelNodeKey as string,
+    joinNodeKey: states.joinNodeKey as string,
+    joinMode: states.joinMode as 'all' | 'any',
+    branches,
+  }
 }
 
 export class ApprovalProductService {
@@ -925,6 +1128,11 @@ export class ApprovalProductService {
       permissions: actor.permissions || [],
     }
 
+    const instanceMetadata: Record<string, unknown> = { templateKey: bundle.template.key }
+    if (initial.parallelState) {
+      instanceMetadata.parallelBranchStates = buildPersistableParallelState(initial.parallelState)
+    }
+
     let client: ApprovalDbClient | null = null
     try {
       client = await pool.connect()
@@ -951,7 +1159,7 @@ export class ApprovalProductService {
           JSON.stringify(requesterSnapshot),
           JSON.stringify({ templateId: bundle.template.id, templateKey: bundle.template.key }),
           JSON.stringify({ rejectCommentRequired: true, allowRevoke: runtimeGraph.policy.allowRevoke, sourceOfTruth: 'platform' }),
-          JSON.stringify({ templateKey: bundle.template.key }),
+          JSON.stringify(instanceMetadata),
           initial.currentStep ?? 0,
           initial.totalSteps,
           bundle.template.id,
@@ -1036,9 +1244,35 @@ export class ApprovalProductService {
 
       const runtimeGraph = asRuntimeGraph(runtime.runtime_graph)
       const executor = new ApprovalGraphExecutor(runtimeGraph, toNullableRecord(instance.form_snapshot) || {})
-      const currentNodeKey = instance.current_node_key
+      const storedCurrentNodeKey = instance.current_node_key
       const actorRoles = actor.roles || []
       const actorName = actor.userName || actor.userId
+      const parallelState = readParallelBranchStates(instance.metadata)
+      const isInParallelRegion = Boolean(parallelState && storedCurrentNodeKey === parallelState.parallelNodeKey)
+
+      // Resolve the actor's effective branch node. In single-linear state this
+      // is `instance.current_node_key`. In a parallel region the actor's
+      // decision applies to *their* branch's current approval node, which
+      // is the `node_key` of one of their still-active assignments matching
+      // a pending branch frontier in `parallelBranchStates`.
+      let currentNodeKey: string | null = storedCurrentNodeKey
+      let actorBranchNodeKey: string | null = null
+      if (isInParallelRegion && parallelState) {
+        const pendingBranchNodeKeys = new Set(
+          Object.values(parallelState.branches)
+            .filter((entry) => !entry.complete && entry.currentNodeKey)
+            .map((entry) => entry.currentNodeKey as string),
+        )
+        const candidate = assignments.rows.find((assignment) => {
+          if (!assignmentMatchesActor(assignment, actor.userId, actorRoles)) return false
+          return assignment.node_key ? pendingBranchNodeKeys.has(assignment.node_key) : false
+        })
+        if (candidate?.node_key) {
+          actorBranchNodeKey = candidate.node_key
+          currentNodeKey = candidate.node_key
+        }
+      }
+
       const currentNodeAssignments = currentNodeKey
         ? assignments.rows.filter((assignment) => assignment.node_key === currentNodeKey)
         : []
@@ -1131,6 +1365,7 @@ export class ApprovalProductService {
                version = $2,
                current_node_key = NULL,
                current_step = total_steps,
+               metadata = COALESCE(metadata, '{}'::jsonb) - 'parallelBranchStates',
                updated_at = now()
            WHERE id = $1`,
           [id, nextVersion],
@@ -1167,6 +1402,16 @@ export class ApprovalProductService {
       }
 
       if (request.action === 'return') {
+        if (isInParallelRegion) {
+          // Return-to-node inside a parallel region is deferred to a
+          // follow-up wave; the route rejects with a typed error so clients
+          // can surface a specific message. See follow-ups in the dev MD.
+          throw new ServiceError(
+            'Return is not supported while the approval is in a parallel branch',
+            409,
+            'APPROVAL_RETURN_IN_PARALLEL_UNSUPPORTED',
+          )
+        }
         const targetNodeKey = request.targetNodeKey?.trim()
         if (!targetNodeKey) {
           throw new ServiceError('targetNodeKey is required for return', 400, 'VALIDATION_ERROR')
@@ -1230,6 +1475,7 @@ export class ApprovalProductService {
                version = $2,
                current_node_key = NULL,
                current_step = total_steps,
+               metadata = COALESCE(metadata, '{}'::jsonb) - 'parallelBranchStates',
                updated_at = now()
            WHERE id = $1`,
           [id, nextVersion],
@@ -1314,10 +1560,50 @@ export class ApprovalProductService {
           )
         }
       } else {
-        await this.deactivateAllActiveAssignments(client, id)
+        // Single-approver mode. In parallel state the blanket
+        // `deactivateAllActiveAssignments` would cancel sibling branches'
+        // pending assignments as well, so scope the deactivation to the
+        // actor's own branch node. Linear state keeps the legacy behavior.
+        if (isInParallelRegion) {
+          await this.deactivateActorAssignmentsAtNode(client, id, currentNodeKey, actor.userId, actorRoles)
+        } else {
+          await this.deactivateAllActiveAssignments(client, id)
+        }
       }
 
-      const resolution = executor.resolveAfterApprove(currentNodeKey)
+      const resolution = isInParallelRegion && parallelState && actorBranchNodeKey
+        ? executor.resolveAfterApproveInParallel(actorBranchNodeKey, parallelState)
+        : executor.resolveAfterApprove(currentNodeKey)
+
+      // Manage parallel branch state in `approval_instances.metadata`:
+      //   - If the resolution's `currentNodeKey` equals a parallel fork node
+      //     (either the same one we were already inside, or a brand-new
+      //     parallel region reached after a linear stage), persist / refresh
+      //     `parallelBranchStates` so subsequent dispatches can re-derive
+      //     branch nodes.
+      //   - Otherwise, strip any prior `parallelBranchStates` so the
+      //     instance returns to linear semantics.
+      const resolutionEntersParallel =
+        resolution.parallelState !== undefined
+        && resolution.currentNodeKey === resolution.parallelState.parallelNodeKey
+      if (resolutionEntersParallel && resolution.parallelState) {
+        await client.query(
+          `UPDATE approval_instances
+           SET metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('parallelBranchStates', $2::jsonb),
+               updated_at = now()
+           WHERE id = $1`,
+          [id, JSON.stringify(buildPersistableParallelState(resolution.parallelState))],
+        )
+      } else if (isInParallelRegion) {
+        await client.query(
+          `UPDATE approval_instances
+           SET metadata = COALESCE(metadata, '{}'::jsonb) - 'parallelBranchStates',
+               updated_at = now()
+           WHERE id = $1`,
+          [id],
+        )
+      }
+
       await client.query(
         `UPDATE approval_instances
          SET status = $2,
@@ -1342,6 +1628,11 @@ export class ApprovalProductService {
         nextNodeKey: resolution.currentNodeKey,
         approvalMode,
         aggregateComplete: true,
+      }
+      if (isInParallelRegion) {
+        approveRecordMetadata.parallelNodeKey = parallelState?.parallelNodeKey
+        approveRecordMetadata.parallelBranchComplete =
+          resolution.currentNodeKey !== parallelState?.parallelNodeKey
       }
       if (approvalMode === 'any' && aggregateCancelledAssigneeIds.length > 0) {
         approveRecordMetadata.aggregateCancelled = aggregateCancelledAssigneeIds
