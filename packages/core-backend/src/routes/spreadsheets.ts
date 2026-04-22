@@ -35,6 +35,27 @@ function toCellValue(value: unknown): Record<string, unknown> | null {
   return { value }
 }
 
+/**
+ * Thrown inside the cell-PUT transaction when the client's
+ * `expectedVersion` does not match the row's current `version`. Caught
+ * by the outer handler and converted to a 409 response so the
+ * transaction rolls back atomically (#526).
+ */
+class CellVersionConflictError extends Error {
+  constructor(
+    public sheetId: string,
+    public row: number,
+    public col: number,
+    public serverVersion: number,
+    public expectedVersion: number,
+  ) {
+    super(
+      `Cell version conflict for ${sheetId} row=${row} col=${col}: expected ${expectedVersion}, server has ${serverVersion}`,
+    )
+    this.name = 'CellVersionConflictError'
+  }
+}
+
 export function spreadsheetsRouter(_injector?: Injector, options: SpreadsheetRouterOptions = {}): Router {
   const r = Router()
   const db = options.db ?? defaultDb
@@ -342,7 +363,12 @@ export function spreadsheetsRouter(_injector?: Injector, options: SpreadsheetRou
         value: z.any().optional(),
         formula: z.string().optional(),
         dataType: z.string().optional(),
-        data_type: z.string().optional()
+        data_type: z.string().optional(),
+        // Optimistic-lock counter: when present, the server rejects the
+        // write with 409 unless the stored row's `version` matches. When
+        // absent, the handler falls back to last-write-wins for
+        // back-compat with older clients. See issue #526.
+        expectedVersion: z.number().int().nonnegative().optional(),
       })).min(1)
     })
     const parse = schema.safeParse(req.body)
@@ -375,9 +401,20 @@ export function spreadsheetsRouter(_injector?: Injector, options: SpreadsheetRou
           }
 
           if (existing) {
+            const currentVersion = typeof existing.version === 'number' ? existing.version : 1
+            if (typeof cell.expectedVersion === 'number' && cell.expectedVersion !== currentVersion) {
+              throw new CellVersionConflictError(
+                sheetId,
+                cell.row,
+                cell.col,
+                currentVersion,
+                cell.expectedVersion,
+              )
+            }
+            const nextVersion = currentVersion + 1
             const updated = await trx
               .updateTable('cells')
-              .set({ ...values, updated_at: new Date() })
+              .set({ ...values, updated_at: new Date(), version: nextVersion })
               .where('id', '=', existing.id)
               .returningAll()
               .executeTakeFirstOrThrow()
@@ -387,7 +424,7 @@ export function spreadsheetsRouter(_injector?: Injector, options: SpreadsheetRou
               .values({
                 cell_id: existing.id,
                 sheet_id: sheetId,
-                version_number: 1,
+                version_number: currentVersion,
                 value: toCellValue(existing.value),
                 formula: existing.formula ?? null,
                 format: null,
@@ -399,6 +436,20 @@ export function spreadsheetsRouter(_injector?: Injector, options: SpreadsheetRou
 
             results.push(updated)
             continue
+          }
+
+          if (typeof cell.expectedVersion === 'number') {
+            // Client expected an existing cell but the row is missing —
+            // either a concurrent delete or a stale client view. Refuse
+            // so the caller can refetch and reconcile rather than
+            // silently re-inserting.
+            throw new CellVersionConflictError(
+              sheetId,
+              cell.row,
+              cell.col,
+              0,
+              cell.expectedVersion,
+            )
           }
 
           const inserted = await trx
@@ -414,6 +465,20 @@ export function spreadsheetsRouter(_injector?: Injector, options: SpreadsheetRou
 
       return res.json({ ok: true, data: { cells: updatedCells } })
     } catch (error) {
+      if (error instanceof CellVersionConflictError) {
+        return res.status(409).json({
+          ok: false,
+          error: {
+            code: 'VERSION_CONFLICT',
+            message: error.message,
+            sheetId: error.sheetId,
+            row: error.row,
+            col: error.col,
+            serverVersion: error.serverVersion,
+            expectedVersion: error.expectedVersion,
+          },
+        })
+      }
       logger.error('Failed to update cells', error as Error)
       return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to update cells' } })
     }

@@ -793,6 +793,13 @@ export interface CellsTable {
   data_type: string | null
   formula: string | null
   computed_value: JsonObjectColumn | null
+  /**
+   * Optimistic-lock counter, incremented on every successful cell write.
+   * Default 1 (from migration `zzzz20260320150000_add_spreadsheet_permissions_and_cell_versions`).
+   * Clients supplying `expectedVersion` in a PUT will get a 409 on mismatch.
+   * See issue #526.
+   */
+  version: Generated<number>
   created_at: CreatedAt
   updated_at: UpdatedAt
 }
