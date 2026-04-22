@@ -50,6 +50,34 @@ Do not capture or paste:
 - temporary passwords
 - admin tokens
 
+## Evidence compiler
+
+Use the evidence compiler after the manual smoke is executed. It does not call DingTalk or staging; it validates the operator-provided result file, redacts secrets, and writes a reusable evidence summary.
+
+Create a template:
+
+```bash
+node scripts/ops/compile-dingtalk-p4-smoke-evidence.mjs \
+  --init-template output/dingtalk-p4-remote-smoke/evidence.json
+```
+
+After filling the template with results, compile it:
+
+```bash
+node scripts/ops/compile-dingtalk-p4-smoke-evidence.mjs \
+  --input output/dingtalk-p4-remote-smoke/evidence.json \
+  --output-dir output/dingtalk-p4-remote-smoke/20260422 \
+  --strict
+```
+
+Expected generated files:
+
+- `summary.json`
+- `summary.md`
+- `evidence.redacted.json`
+
+The compiler requires every smoke check in this document to be `pass` when `--strict` is used. It redacts DingTalk webhook `access_token`, `SEC...` secrets, bearer/JWT tokens, passwords, and public form tokens before writing artifacts.
+
 ## Smoke 1: Create table and public form
 
 Steps:
