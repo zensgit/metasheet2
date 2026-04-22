@@ -503,6 +503,9 @@ describe('MetaAutomationRuleEditor', () => {
     actionSelect.dispatchEvent(new Event('change'))
     await flushPromises()
 
+    const pickerHint = container.querySelector('[data-field="dingtalkDestinationPickerHint"]')
+    expect(pickerHint?.textContent).toContain('registered for this table')
+
     const destinationSelect = container.querySelector('[data-field="dingtalkDestinationPickerId"]') as HTMLSelectElement
     destinationSelect.value = 'dt_1'
     destinationSelect.dispatchEvent(new Event('change'))
@@ -640,6 +643,12 @@ describe('MetaAutomationRuleEditor', () => {
     actionSelect.value = 'send_dingtalk_group_message'
     actionSelect.dispatchEvent(new Event('change'))
     await flushPromises()
+
+    const fieldPathHint = container.querySelector('[data-field="dingtalkDestinationFieldPathHint"]')
+    expect(fieldPathHint?.textContent).toContain('DingTalk group destination ID')
+    expect(fieldPathHint?.textContent).toContain('not a local user')
+    expect(fieldPathHint?.textContent).toContain('member group')
+    expect(fieldPathHint?.textContent).toContain('DingTalk group name')
 
     const destinationFieldInput = container.querySelector('[data-field="dingtalkDestinationFieldPath"]') as HTMLInputElement
     destinationFieldInput.value = 'record.fld_2'
