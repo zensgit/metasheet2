@@ -527,6 +527,85 @@ describe('MetaApiTokenManager', () => {
     })
   })
 
+  it('disables DingTalk group save for invalid robot webhook settings', async () => {
+    const { client, fetchFn } = mockClient()
+    mount({ visible: true, client })
+    await flushPromises()
+
+    const dingTalkTab = document.querySelectorAll('[role="tab"]')[2] as HTMLButtonElement
+    dingTalkTab.click()
+    await flushPromises()
+
+    const newBtn = document.querySelector('[data-dingtalk-group-new]') as HTMLButtonElement
+    newBtn.click()
+    await flushPromises()
+
+    const nameInput = document.querySelector('[data-dingtalk-group-name]') as HTMLInputElement
+    nameInput.value = 'Support group'
+    nameInput.dispatchEvent(new Event('input', { bubbles: true }))
+
+    const urlInput = document.querySelector('[data-dingtalk-group-webhook-url]') as HTMLInputElement
+    urlInput.value = 'https://example.com/hook'
+    urlInput.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushPromises()
+
+    const saveBtn = document.querySelector('[data-dingtalk-group-save]') as HTMLButtonElement
+    expect(document.querySelector('[data-dingtalk-group-webhook-error]')?.textContent).toContain('https://oapi.dingtalk.com/robot/send')
+    expect(saveBtn.disabled).toBe(true)
+
+    urlInput.value = 'https://oapi.dingtalk.com/robot/send?access_token=test-token'
+    urlInput.dispatchEvent(new Event('input', { bubbles: true }))
+
+    const secretInput = document.querySelector('[data-dingtalk-group-secret]') as HTMLInputElement
+    secretInput.value = 'bad-secret'
+    secretInput.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushPromises()
+
+    expect(document.querySelector('[data-dingtalk-group-secret-error]')?.textContent).toContain('must start with SEC')
+    expect(saveBtn.disabled).toBe(true)
+    expect(fetchFn.mock.calls.some((c: [string, RequestInit?]) => c[1]?.method === 'POST' && c[0].includes('/dingtalk-groups'))).toBe(false)
+  })
+
+  it('omits unchanged legacy DingTalk webhook settings when editing metadata', async () => {
+    const legacyGroup = fakeDingTalkGroup({
+      webhookUrl: 'https://example.com/legacy-hook',
+      secret: 'legacy-secret',
+    })
+    const { client, fetchFn } = mockClient([], [], [], [legacyGroup])
+    mount({ visible: true, client })
+    await flushPromises()
+
+    const dingTalkTab = document.querySelectorAll('[role="tab"]')[2] as HTMLButtonElement
+    dingTalkTab.click()
+    await flushPromises()
+
+    const editBtn = document.querySelector('[data-dingtalk-group-edit]') as HTMLButtonElement
+    editBtn.click()
+    await flushPromises()
+
+    const nameInput = document.querySelector('[data-dingtalk-group-name]') as HTMLInputElement
+    nameInput.value = 'Legacy group renamed'
+    nameInput.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushPromises()
+
+    const saveBtn = document.querySelector('[data-dingtalk-group-save]') as HTMLButtonElement
+    expect(document.querySelector('[data-dingtalk-group-webhook-error]')).toBeNull()
+    expect(document.querySelector('[data-dingtalk-group-secret-error]')).toBeNull()
+    expect(saveBtn.disabled).toBe(false)
+
+    saveBtn.click()
+    await flushPromises()
+
+    const updateCalls = fetchFn.mock.calls.filter(
+      (c: [string, RequestInit?]) => c[1]?.method === 'PATCH' && c[0].includes('/dingtalk-groups/'),
+    )
+    expect(updateCalls.length).toBe(1)
+    expect(JSON.parse(updateCalls[0][1]?.body as string)).toEqual({
+      name: 'Legacy group renamed',
+      enabled: true,
+    })
+  })
+
   it('tests a DingTalk group destination', async () => {
     const { client, fetchFn } = mockClient([], [], [], [fakeDingTalkGroup()])
     mount({ visible: true, client })
