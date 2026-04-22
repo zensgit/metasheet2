@@ -181,3 +181,34 @@ Results:
 The OpenAPI contract gate checks for a clean committed dist after running the
 build; it is rerun after this fix commit is created so `git diff --quiet` can
 observe the regenerated files as baseline.
+
+Post-commit commands rerun:
+
+```bash
+./scripts/ops/attendance-run-gate-contract-case.sh openapi
+
+DATABASE_URL='postgresql://chouhua@127.0.0.1:5432/postgres' PGHOST=127.0.0.1 PGPORT=5432 PGDATABASE=postgres PGUSER=chouhua \
+  pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run \
+    tests/integration/approval-wp1-parallel-gateway.api.test.ts --reporter=dot
+
+DATABASE_URL='postgresql://chouhua@127.0.0.1:5432/postgres' PGHOST=127.0.0.1 PGPORT=5432 PGDATABASE=postgres PGUSER=chouhua \
+  pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run \
+    tests/integration/approval-wp1-any-mode.api.test.ts \
+    tests/integration/approval-pack1a-lifecycle.api.test.ts --reporter=dot
+
+DATABASE_URL='postgresql://chouhua@127.0.0.1:5432/postgres' PGHOST=127.0.0.1 PGPORT=5432 PGDATABASE=postgres PGUSER=chouhua \
+  pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run \
+    tests/integration/approval-wp2-source-filter.api.test.ts --reporter=dot
+```
+
+Post-commit results:
+
+- OpenAPI contract gate: passed.
+- WP1 parallel integration: 3/3 passed.
+- Pack 1A + or-mode regression: 4/4 passed.
+- WP2 source filter regression: 7/7 passed.
+
+Note: one local attempt to run all four integration files in the same Vitest
+process hit a PostgreSQL DDL deadlock in shared fixture setup. The split
+commands above are the stable pattern already used for this family of tests;
+CI runs these jobs in a clean database context.
