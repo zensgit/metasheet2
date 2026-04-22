@@ -49,6 +49,7 @@ Notes:
 - this is a management-side page, not a normal end-user page
 - the DingTalk Groups tab is shown only to users who can manage automations on the current table
 - users without that permission can still use API tokens and webhooks, but the UI will not preload or expose table-scoped DingTalk group bindings
+- if a stale or direct DingTalk group binding request is still denied by the backend, the frontend reports `Insufficient permissions` instead of a generic `API 403`
 - the current model manually registers a group webhook; it does not auto-import your DingTalk groups
 
 ## B. Configure a DingTalk person notification rule

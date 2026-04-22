@@ -431,6 +431,29 @@ describe('MetaApiTokenManager', () => {
     expect(fetchFn.mock.calls.some(([url]) => String(url).includes('/dingtalk-groups'))).toBe(false)
   })
 
+  it('shows readable permission errors when DingTalk group loading is forbidden', async () => {
+    const fetchFn = vi.fn(async (url: string, init?: RequestInit) => {
+      const method = init?.method ?? 'GET'
+      if (method === 'GET' && url.includes('/tokens') && !url.includes('/rotate')) {
+        return okResponse({ tokens: [] })
+      }
+      if (method === 'GET' && url.includes('/webhooks') && !url.includes('/deliveries')) {
+        return okResponse({ webhooks: [] })
+      }
+      if (method === 'GET' && url.includes('/dingtalk-groups')) {
+        return new Response(JSON.stringify({ ok: false, error: { code: 'FORBIDDEN' } }), {
+          status: 403,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      }
+      return okResponse({})
+    })
+    mount({ visible: true, client: new MultitableApiClient({ fetchFn }) })
+    await flushPromises()
+
+    expect(document.querySelector('[role="alert"]')?.textContent).toContain('Insufficient permissions')
+  })
+
   it('masks DingTalk webhook access token in card display', async () => {
     const { client } = mockClient([], [], [], [fakeDingTalkGroup({
       webhookUrl: 'https://oapi.dingtalk.com/robot/send?access_token=super-secret-token',
