@@ -242,8 +242,8 @@ Authoring guardrail:
 - group-message and person-message automations disable save when the selected public form link cannot produce a working fill link
 - group-message and person-message automations disable save when the selected internal processing view is not in the current sheet
 - automation create/update APIs reject invalid public form or internal processing links before rules are saved
-- group-message automations warn when the selected public form link is still fully public
-- group-message automations warn when a DingTalk-protected form has no allowed users or member groups
+- group-message and person-message automations warn when the selected public form link is still fully public
+- group-message and person-message automations warn when a DingTalk-protected form has no allowed users or member groups
 - group-message and person-message automation previews show the selected public form access range before save
 - group-message and person-message runtime messages show the internal processing link permission requirement after delivery
 - the warnings direct owners toward DingTalk-protected access plus allowlists

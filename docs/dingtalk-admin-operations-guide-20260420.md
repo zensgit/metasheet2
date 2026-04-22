@@ -113,8 +113,8 @@ Automation authoring guardrail:
 
 - if a selected public form view is not shared, has no public token, or has expired, the automation editor warns and disables save
 - if a selected internal processing view is no longer in the current sheet, the automation editor warns and disables save
-- if a DingTalk group rule links to a fully public form, the automation editor warns that anyone with the message link can submit
-- if a DingTalk group rule links to a DingTalk-protected form without allowed users or member groups, the editor warns that all bound or authorized DingTalk users can submit
+- if a DingTalk group or person rule links to a fully public form, the automation editor warns that anyone with the message link can submit
+- if a DingTalk group or person rule links to a DingTalk-protected form without allowed users or member groups, the editor warns that all bound or authorized DingTalk users can submit
 - the message summary and rule card show `Public form access`, including fully public, bound DingTalk users, authorized DingTalk users, and allowlist-constrained states
 - the message summary and rule card also show `Allowed audience`, derived from local allowlist users/member groups when the form is DingTalk-protected
 - the warning is advisory; runtime delivery still performs the backend validation before sending the link
@@ -232,8 +232,8 @@ Use:
 
 Authoring guardrail:
 
-- if the selected form is still fully public, the DingTalk group rule editor warns before save
-- if the selected protected form has no allowed users or member groups, the DingTalk group rule editor warns before save
+- if the selected form is still fully public, the DingTalk group/person rule editor warns before save
+- if the selected protected form has no allowed users or member groups, the DingTalk group/person rule editor warns before save
 - check `Public form access` and `Allowed audience` in the automation message summary, plus `Local allowlist limits` in form sharing before saving
 - switch the form to `Bound DingTalk users only` or `Authorized DingTalk users only` before relying on allowlists
 
