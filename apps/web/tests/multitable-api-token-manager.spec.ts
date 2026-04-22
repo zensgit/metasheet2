@@ -405,7 +405,10 @@ describe('MetaApiTokenManager', () => {
   // ---- DingTalk group tests ----
 
   it('switches to DingTalk groups tab', async () => {
-    const { client, fetchFn } = mockClient([], [], [], [fakeDingTalkGroup()])
+    const { client, fetchFn } = mockClient([], [], [], [
+      fakeDingTalkGroup(),
+      fakeDingTalkGroup({ id: 'dt_2', name: 'QA DingTalk Group' }),
+    ])
     mount({ visible: true, client })
     await flushPromises()
 
@@ -414,7 +417,11 @@ describe('MetaApiTokenManager', () => {
     await flushPromises()
 
     const cards = document.querySelectorAll('[data-dingtalk-group-id]')
-    expect(cards.length).toBe(1)
+    expect(cards.length).toBe(2)
+    const scopeNote = document.querySelector('[data-dingtalk-groups-scope-note]') as HTMLElement
+    expect(scopeNote?.textContent).toContain('bound to this table')
+    expect(scopeNote?.textContent).toContain('add multiple groups')
+    expect(scopeNote?.textContent).toContain('choose one or more in automations')
     expect(fetchFn.mock.calls.some(([url]) => String(url).includes('/api/multitable/dingtalk-groups?sheetId=sheet_1'))).toBe(true)
   })
 
