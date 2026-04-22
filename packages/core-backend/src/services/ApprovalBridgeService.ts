@@ -108,6 +108,19 @@ function compareHistoryDescending(
   return String(right.id).localeCompare(String(left.id))
 }
 
+function isPlmBridgeUnavailableError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false
+  return error.message.includes('HTTP client not initialized')
+}
+
+function plmBridgeUnavailableError(): ServiceError {
+  return new ServiceError(
+    'PLM approval bridge is not configured',
+    503,
+    'PLM_APPROVAL_BRIDGE_UNAVAILABLE',
+  )
+}
+
 function toUnifiedDTO(
   row: ApprovalInstanceRow,
   assignments: ApprovalAssignmentRow[] = [],
@@ -518,15 +531,26 @@ export class ApprovalBridgeService {
     let totalCount: number | null = null
 
     for (let pageOffset = 0; pageOffset < requestedWindow; pageOffset += PLM_SYNC_UPSTREAM_PAGE_SIZE) {
-      const result = await plmAdapter.getApprovals({
-        status: options?.status,
-        productId: options?.productId,
-        requesterId: options?.requesterId,
-        limit: PLM_SYNC_UPSTREAM_PAGE_SIZE,
-        offset: pageOffset,
-      })
+      let result
+      try {
+        result = await plmAdapter.getApprovals({
+          status: options?.status,
+          productId: options?.productId,
+          requesterId: options?.requesterId,
+          limit: PLM_SYNC_UPSTREAM_PAGE_SIZE,
+          offset: pageOffset,
+        })
+      } catch (error) {
+        if (isPlmBridgeUnavailableError(error)) {
+          throw plmBridgeUnavailableError()
+        }
+        throw error
+      }
 
       if (result.error) {
+        if (isPlmBridgeUnavailableError(result.error)) {
+          throw plmBridgeUnavailableError()
+        }
         throw new ServiceError(
           'Failed to fetch PLM approvals',
           502,

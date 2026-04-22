@@ -746,6 +746,17 @@ describe('approval bridge routes', () => {
     expect(response.body.error.code).toBe('ASSIGNEE_FILTER_UNSUPPORTED')
   })
 
+  it('returns a controlled unavailable response when the PLM adapter is not connected', async () => {
+    const plmAdapter = createPlmAdapterMock()
+    plmAdapter.getApprovals.mockRejectedValueOnce(new Error('HTTP client not initialized'))
+
+    const response = await request(createApp(plmAdapter))
+      .get('/api/approvals?sourceSystem=plm')
+      .expect(503)
+
+    expect(response.body.error.code).toBe('PLM_APPROVAL_BRIDGE_UNAVAILABLE')
+  })
+
   it('lists platform approvals without requiring a PLM adapter', async () => {
     const response = await request(createApp())
       .get('/api/approvals')
