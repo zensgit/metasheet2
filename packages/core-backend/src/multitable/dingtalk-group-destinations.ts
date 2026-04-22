@@ -3,6 +3,7 @@ export interface DingTalkGroupDestination {
   name: string
   webhookUrl: string
   secret?: string
+  hasSecret?: boolean
   enabled: boolean
   sheetId?: string
   createdBy: string

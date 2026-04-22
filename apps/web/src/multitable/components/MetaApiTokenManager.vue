@@ -219,11 +219,12 @@
               class="meta-api-mgr__input"
               type="text"
               placeholder="SEC..."
+              :disabled="dingTalkGroupDraft.clearSecret"
               aria-describedby="dingtalk-group-secret-help"
               data-dingtalk-group-secret="true"
             />
             <p id="dingtalk-group-secret-help" class="meta-api-mgr__help" data-dingtalk-group-secret-help="true">
-              Fill this only when the DingTalk robot uses signature security. Leave empty for robots without a SEC secret.
+              {{ dingTalkGroupSecretHelpText }}
             </p>
             <p
               v-if="dingTalkGroupSecretValidationMessage"
@@ -232,6 +233,18 @@
             >
               {{ dingTalkGroupSecretValidationMessage }}
             </p>
+            <label
+              v-if="editingDingTalkGroupOriginal?.hasSecret"
+              class="meta-api-mgr__checkbox-label"
+              data-dingtalk-group-clear-secret-row="true"
+            >
+              <input
+                v-model="dingTalkGroupDraft.clearSecret"
+                type="checkbox"
+                data-dingtalk-group-clear-secret="true"
+              />
+              Clear saved SEC secret
+            </label>
             <label class="meta-api-mgr__checkbox-label">
               <input
                 v-model="dingTalkGroupDraft.enabled"
@@ -286,6 +299,7 @@
             </div>
             <div class="meta-api-mgr__card-meta">
               <span>Webhook: {{ maskDingTalkWebhookUrl(group.webhookUrl) }}</span>
+              <span>Secret: {{ group.hasSecret ? 'configured' : 'not configured' }}</span>
               <span>{{ group.sheetId ? 'Shared with this sheet' : 'Private legacy group' }}</span>
               <span>Created: {{ formatDate(group.createdAt) }}</span>
               <span v-if="group.lastTestedAt">Last test: {{ formatDate(group.lastTestedAt) }}</span>
@@ -406,7 +420,7 @@ const dingTalkGroups = ref<DingTalkGroupDestination[]>([])
 const dingTalkGroupsLoading = ref(false)
 const showDingTalkGroupForm = ref(false)
 const editingDingTalkGroupId = ref<string | null>(null)
-const editingDingTalkGroupOriginal = ref<{ webhookUrl: string; secret: string } | null>(null)
+const editingDingTalkGroupOriginal = ref<{ webhookUrl: string; hasSecret: boolean } | null>(null)
 const dingTalkDeliveriesGroupId = ref<string | null>(null)
 const dingTalkDeliveriesLoading = ref(false)
 const dingTalkDeliveries = ref<DingTalkGroupDelivery[]>([])
@@ -415,6 +429,7 @@ const dingTalkGroupDraft = ref({
   name: '',
   webhookUrl: '',
   secret: '',
+  clearSecret: false,
   enabled: true,
 })
 
@@ -433,14 +448,21 @@ const dingTalkGroupWebhookChanged = computed(() => {
 })
 const dingTalkGroupSecretChanged = computed(() => {
   if (!editingDingTalkGroupId.value) return true
-  return dingTalkGroupDraft.value.secret.trim() !== (editingDingTalkGroupOriginal.value?.secret ?? '').trim()
+  if (dingTalkGroupDraft.value.clearSecret) return true
+  return Boolean(dingTalkGroupDraft.value.secret.trim())
 })
 const dingTalkGroupWebhookValidationMessage = computed(() =>
   dingTalkGroupWebhookChanged.value ? validateDingTalkGroupWebhookUrl(dingTalkGroupDraft.value.webhookUrl) : '',
 )
 const dingTalkGroupSecretValidationMessage = computed(() =>
-  dingTalkGroupSecretChanged.value ? validateDingTalkGroupSecret(dingTalkGroupDraft.value.secret) : '',
+  dingTalkGroupDraft.value.clearSecret ? '' : dingTalkGroupSecretChanged.value ? validateDingTalkGroupSecret(dingTalkGroupDraft.value.secret) : '',
 )
+const dingTalkGroupSecretHelpText = computed(() => {
+  if (editingDingTalkGroupOriginal.value?.hasSecret) {
+    return 'A SEC secret is already saved. Leave blank to keep it, enter a new SEC secret to replace it, or clear it below.'
+  }
+  return 'Fill this only when the DingTalk robot uses signature security. Leave empty for robots without a SEC secret.'
+})
 const canSaveDingTalkGroup = computed(() => {
   return canManageDingTalkGroups.value
     && dingTalkGroupDraft.value.name.trim()
@@ -742,6 +764,7 @@ function openDingTalkGroupForm() {
     name: '',
     webhookUrl: '',
     secret: '',
+    clearSecret: false,
     enabled: true,
   }
   showDingTalkGroupForm.value = true
@@ -752,12 +775,13 @@ function openEditDingTalkGroup(group: DingTalkGroupDestination) {
   editingDingTalkGroupId.value = group.id
   editingDingTalkGroupOriginal.value = {
     webhookUrl: group.webhookUrl,
-    secret: group.secret ?? '',
+    hasSecret: group.hasSecret === true || Boolean(group.secret),
   }
   dingTalkGroupDraft.value = {
     name: group.name,
     webhookUrl: group.webhookUrl,
-    secret: group.secret ?? '',
+    secret: '',
+    clearSecret: false,
     enabled: group.enabled,
   }
   showDingTalkGroupForm.value = true
@@ -783,7 +807,11 @@ async function onSaveDingTalkGroup() {
         enabled: dingTalkGroupDraft.value.enabled,
       }
       if (dingTalkGroupWebhookChanged.value) updateInput.webhookUrl = webhookUrl
-      if (dingTalkGroupSecretChanged.value) updateInput.secret = secret || ''
+      if (dingTalkGroupDraft.value.clearSecret) {
+        updateInput.secret = ''
+      } else if (secret) {
+        updateInput.secret = secret
+      }
       await props.client.updateDingTalkGroup(editingDingTalkGroupId.value, updateInput, props.sheetId)
     } else {
       await props.client.createDingTalkGroup({
