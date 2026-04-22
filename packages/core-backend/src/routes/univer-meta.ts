@@ -1872,6 +1872,9 @@ type MultitableSheetPermissionCandidate = {
   subtitle: string | null
   isActive: boolean
   accessLevel: MultitableSheetAccessLevel | null
+  dingtalkBound?: boolean | null
+  dingtalkGrantEnabled?: boolean | null
+  dingtalkPersonDeliveryAvailable?: boolean | null
 }
 
 const SHEET_READ_PERMISSION_CODES = new Set([
@@ -2261,6 +2264,95 @@ async function listSheetPermissionCandidates(
   )
 
   return candidates.filter((_candidate, index) => eligibility[index])
+}
+
+async function enrichFormShareCandidatesWithDingTalkStatus(
+  query: QueryFn,
+  candidates: MultitableSheetPermissionCandidate[],
+): Promise<MultitableSheetPermissionCandidate[]> {
+  const userIds = Array.from(new Set(
+    candidates
+      .filter((candidate) => candidate.subjectType === 'user')
+      .map((candidate) => candidate.subjectId.trim())
+      .filter((subjectId) => subjectId.length > 0),
+  ))
+  if (userIds.length === 0) {
+    return candidates.map((candidate) => candidate.subjectType === 'member-group'
+      ? {
+        ...candidate,
+        dingtalkBound: null,
+        dingtalkGrantEnabled: null,
+        dingtalkPersonDeliveryAvailable: null,
+      }
+      : candidate)
+  }
+
+  const [identityResult, deliveryResult, grantResult] = await Promise.all([
+    query(
+      `SELECT DISTINCT local_user_id
+       FROM user_external_identities
+       WHERE local_user_id = ANY($1::text[])
+         AND provider = $2`,
+      [userIds, 'dingtalk'],
+    ),
+    query(
+      `SELECT DISTINCT l.local_user_id
+       FROM directory_account_links l
+       JOIN directory_accounts a ON a.id = l.directory_account_id
+       WHERE l.local_user_id = ANY($1::text[])
+         AND l.link_status = 'linked'
+         AND a.provider = $2
+         AND a.is_active = TRUE
+         AND COALESCE(a.external_user_id, '') <> ''`,
+      [userIds, 'dingtalk'],
+    ),
+    query(
+      `SELECT local_user_id, BOOL_OR(enabled) AS enabled
+       FROM user_external_auth_grants
+       WHERE local_user_id = ANY($1::text[])
+         AND provider = $2
+       GROUP BY local_user_id`,
+      [userIds, 'dingtalk'],
+    ),
+  ])
+
+  const identityUserIds = new Set(
+    (identityResult.rows as Array<{ local_user_id?: string | null }>)
+      .map((row) => (typeof row.local_user_id === 'string' ? row.local_user_id.trim() : ''))
+      .filter((localUserId) => localUserId.length > 0),
+  )
+  const deliveryUserIds = new Set(
+    (deliveryResult.rows as Array<{ local_user_id?: string | null }>)
+      .map((row) => (typeof row.local_user_id === 'string' ? row.local_user_id.trim() : ''))
+      .filter((localUserId) => localUserId.length > 0),
+  )
+  const grantEnabledByUserId = new Map(
+    (grantResult.rows as Array<{ local_user_id?: string | null; enabled?: boolean | null }>)
+      .map((row) => [
+        typeof row.local_user_id === 'string' ? row.local_user_id.trim() : '',
+        row.enabled === true,
+      ] as const)
+      .filter(([localUserId]) => localUserId.length > 0),
+  )
+
+  return candidates.map((candidate) => {
+    if (candidate.subjectType === 'member-group') {
+      return {
+        ...candidate,
+        dingtalkBound: null,
+        dingtalkGrantEnabled: null,
+        dingtalkPersonDeliveryAvailable: null,
+      }
+    }
+    if (candidate.subjectType !== 'user') return candidate
+    const dingtalkPersonDeliveryAvailable = deliveryUserIds.has(candidate.subjectId)
+    return {
+      ...candidate,
+      dingtalkBound: dingtalkPersonDeliveryAvailable || identityUserIds.has(candidate.subjectId),
+      dingtalkGrantEnabled: grantEnabledByUserId.get(candidate.subjectId) === true,
+      dingtalkPersonDeliveryAvailable,
+    }
+  })
 }
 
 async function loadSheetPermissionScopeMap(
@@ -5756,8 +5848,9 @@ export function univerMetaRouter(): Router {
       const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canManageViews) return sendForbidden(res)
 
-      const items = (await listSheetPermissionCandidates(pool.query.bind(pool), sheetId, { q, limit }))
+      const candidates = (await listSheetPermissionCandidates(pool.query.bind(pool), sheetId, { q, limit }))
         .filter((candidate) => candidate.subjectType === 'user' || candidate.subjectType === 'member-group')
+      const items = await enrichFormShareCandidatesWithDingTalkStatus(pool.query.bind(pool), candidates)
       return res.json({ ok: true, data: { items, total: items.length, limit, query: q } })
     } catch (err) {
       const hint = getDbNotReadyMessage(err)

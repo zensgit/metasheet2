@@ -1733,6 +1733,141 @@ describe('Multitable sheet-scoped permissions API', () => {
     })
   })
 
+  test('lists form-share candidates with DingTalk binding status for person recipients', async () => {
+    const { app } = await createApp({
+      tokenPerms: ['multitable:write'],
+      userPermissionMap: {
+        user_linked: ['multitable:read'],
+        user_bound_only: ['multitable:read'],
+        user_unbound: ['multitable:read'],
+      },
+      queryHandler: async (sql, params) => {
+        if (sql.includes('SELECT id, base_id, name, description FROM meta_sheets WHERE id = $1')) {
+          expect(params).toEqual(['sheet_ops'])
+          return { rows: [{ id: 'sheet_ops', base_id: 'base_ops', name: 'Ops', description: null }] }
+        }
+        if (sql.includes('FROM spreadsheet_permissions') && sql.includes('sheet_id = ANY')) {
+          expect(params).toEqual(['user_sheet_acl_1', ['sheet_ops']])
+          return { rows: [] }
+        }
+        if (sql.includes('WITH user_candidates AS') && sql.includes('role_candidates AS')) {
+          expect(params).toEqual(['sheet_ops', '', '%', 20])
+          return {
+            rows: [
+              {
+                subject_type: 'user',
+                subject_id: 'user_linked',
+                user_name: 'Linked User',
+                user_email: 'linked@example.com',
+                user_is_active: true,
+                permission_codes: [],
+              },
+              {
+                subject_type: 'user',
+                subject_id: 'user_bound_only',
+                user_name: 'Bound Only',
+                user_email: 'bound@example.com',
+                user_is_active: true,
+                permission_codes: [],
+              },
+              {
+                subject_type: 'user',
+                subject_id: 'user_unbound',
+                user_name: 'Unbound User',
+                user_email: 'unbound@example.com',
+                user_is_active: true,
+                permission_codes: [],
+              },
+              {
+                subject_type: 'member-group',
+                subject_id: '3e9c4bc7-13c2-4d12-8b52-9f0d62045d3c',
+                group_name: 'North Region',
+                group_description: null,
+                member_count: 12,
+                user_is_active: true,
+                permission_codes: [],
+              },
+            ],
+          }
+        }
+        if (sql.includes('FROM user_external_identities')) {
+          expect(params).toEqual([['user_linked', 'user_bound_only', 'user_unbound'], 'dingtalk'])
+          return { rows: [{ local_user_id: 'user_bound_only' }] }
+        }
+        if (sql.includes('FROM directory_account_links l') && sql.includes('JOIN directory_accounts a')) {
+          expect(params).toEqual([['user_linked', 'user_bound_only', 'user_unbound'], 'dingtalk'])
+          return { rows: [{ local_user_id: 'user_linked' }] }
+        }
+        if (sql.includes('FROM user_external_auth_grants')) {
+          expect(params).toEqual([['user_linked', 'user_bound_only', 'user_unbound'], 'dingtalk'])
+          return {
+            rows: [
+              { local_user_id: 'user_linked', enabled: true },
+              { local_user_id: 'user_bound_only', enabled: false },
+            ],
+          }
+        }
+        throw new Error(`Unhandled SQL in test: ${sql}`)
+      },
+    })
+
+    const response = await request(app)
+      .get('/api/multitable/sheets/sheet_ops/form-share-candidates')
+      .expect(200)
+
+    expect(response.body.data).toEqual({
+      items: [
+        {
+          subjectType: 'user',
+          subjectId: 'user_linked',
+          label: 'Linked User',
+          subtitle: 'linked@example.com',
+          isActive: true,
+          accessLevel: null,
+          dingtalkBound: true,
+          dingtalkGrantEnabled: true,
+          dingtalkPersonDeliveryAvailable: true,
+        },
+        {
+          subjectType: 'user',
+          subjectId: 'user_bound_only',
+          label: 'Bound Only',
+          subtitle: 'bound@example.com',
+          isActive: true,
+          accessLevel: null,
+          dingtalkBound: true,
+          dingtalkGrantEnabled: false,
+          dingtalkPersonDeliveryAvailable: false,
+        },
+        {
+          subjectType: 'user',
+          subjectId: 'user_unbound',
+          label: 'Unbound User',
+          subtitle: 'unbound@example.com',
+          isActive: true,
+          accessLevel: null,
+          dingtalkBound: false,
+          dingtalkGrantEnabled: false,
+          dingtalkPersonDeliveryAvailable: false,
+        },
+        {
+          subjectType: 'member-group',
+          subjectId: '3e9c4bc7-13c2-4d12-8b52-9f0d62045d3c',
+          label: 'North Region',
+          subtitle: '12 members',
+          isActive: true,
+          accessLevel: null,
+          dingtalkBound: null,
+          dingtalkGrantEnabled: null,
+          dingtalkPersonDeliveryAvailable: null,
+        },
+      ],
+      total: 4,
+      limit: 20,
+      query: '',
+    })
+  })
+
   test('sets sheet permission access levels through the authoring endpoint', async () => {
     const deleteCalls: Array<unknown[] | undefined> = []
     const insertCalls: Array<unknown[] | undefined> = []
