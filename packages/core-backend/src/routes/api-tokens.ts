@@ -12,6 +12,7 @@ import { authenticate } from '../middleware/auth'
 import { ApiTokenService } from '../multitable/api-token-service'
 import { ALL_API_TOKEN_SCOPES } from '../multitable/api-tokens'
 import { DingTalkGroupDestinationService } from '../multitable/dingtalk-group-destination-service'
+import { toDingTalkGroupDestinationResponse } from '../multitable/dingtalk-group-destination-response'
 import { resolveSheetCapabilitiesForUser } from '../multitable/sheet-capabilities'
 import { WebhookService } from '../multitable/webhook-service'
 import { ALL_WEBHOOK_EVENT_TYPES } from '../multitable/webhooks'
@@ -320,7 +321,7 @@ export function apiTokensRouter(): Router {
     const sheetId = getSheetId(req.query.sheetId)
     if (sheetId && !await requireSheetAutomationAccess(res, userId, sheetId)) return
     const destinations = await dingTalkGroupDestinationService.listDestinations(userId, sheetId || undefined)
-    res.json({ ok: true, data: { destinations } })
+    res.json({ ok: true, data: { destinations: destinations.map(toDingTalkGroupDestinationResponse) } })
   })
 
   router.post('/api/multitable/dingtalk-groups', async (req: Request, res: Response) => {
@@ -340,7 +341,7 @@ export function apiTokensRouter(): Router {
         enabled: input.enabled,
         sheetId: sheetId || undefined,
       })
-      res.status(201).json({ ok: true, data: destination })
+      res.status(201).json({ ok: true, data: toDingTalkGroupDestinationResponse(destination) })
     } catch (err) {
       if (err instanceof z.ZodError) {
         zodError(res, err)
@@ -367,7 +368,7 @@ export function apiTokensRouter(): Router {
         secret: input.secret,
         enabled: input.enabled,
       }, sheetId || undefined)
-      res.json({ ok: true, data: destination })
+      res.json({ ok: true, data: toDingTalkGroupDestinationResponse(destination) })
     } catch (err) {
       if (err instanceof z.ZodError) {
         zodError(res, err)
