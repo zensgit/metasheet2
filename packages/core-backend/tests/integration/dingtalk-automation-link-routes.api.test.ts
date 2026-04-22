@@ -1074,6 +1074,67 @@ describe('DingTalk automation link route validation', () => {
     expect(mockPool.query.mock.calls.some(([sql]) => String(sql).includes('FROM meta_views'))).toBe(false)
   })
 
+  it('normalizes V1 DingTalk group action templates on automation update', async () => {
+    const automationService = createMockAutomationService(makeAutomationRule({
+      action_type: 'notify',
+      action_config: {},
+      actions: [{
+        type: 'send_dingtalk_group_message',
+        config: {
+          destinationId: 'group_1',
+          titleTemplate: 'Old title',
+          bodyTemplate: 'Old body',
+        },
+      }],
+    }))
+    const { app, mockPool } = await createApp({ automationService })
+
+    const res = await request(app)
+      .patch(`/api/multitable/sheets/${SHEET_ID}/automations/${RULE_ID}`)
+      .send({
+        actions: [{
+          type: 'send_dingtalk_group_message',
+          config: {
+            destinationId: 'group_1',
+            title: 'Please fill',
+            content: 'Open form',
+            publicFormViewId: VALID_FORM_VIEW_ID,
+            internalViewId: INTERNAL_VIEW_ID,
+          },
+        }],
+      })
+
+    expect(res.status).toBe(200)
+    expect(res.body.ok).toBe(true)
+    expect(automationService.getRule).toHaveBeenCalledWith(RULE_ID)
+    expect(automationService.updateRule).toHaveBeenCalledWith(RULE_ID, SHEET_ID, expect.objectContaining({
+      actions: expect.arrayContaining([
+        expect.objectContaining({
+          type: 'send_dingtalk_group_message',
+          config: expect.objectContaining({
+            destinationId: 'group_1',
+            titleTemplate: 'Please fill',
+            bodyTemplate: 'Open form',
+            publicFormViewId: VALID_FORM_VIEW_ID,
+            internalViewId: INTERNAL_VIEW_ID,
+          }),
+        }),
+      ]),
+    }))
+    expect(res.body.data.rule.actions).toEqual([
+      expect.objectContaining({
+        type: 'send_dingtalk_group_message',
+        config: expect.objectContaining({
+          titleTemplate: 'Please fill',
+          bodyTemplate: 'Open form',
+          publicFormViewId: VALID_FORM_VIEW_ID,
+          internalViewId: INTERNAL_VIEW_ID,
+        }),
+      }),
+    ])
+    expect(mockPool.query.mock.calls.some(([sql]) => String(sql).includes('FROM meta_views'))).toBe(true)
+  })
+
   it('rejects a DingTalk person action without executable templates on automation update', async () => {
     const automationService = createMockAutomationService(makeAutomationRule({
       action_type: 'send_dingtalk_person_message',
