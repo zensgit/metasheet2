@@ -49,3 +49,12 @@ claude -p --tools Read,Grep,Glob --max-budget-usd 0.75 "Read-only review. Inspec
 - `rg -n "does not import DingTalk group members|control form access|target DingTalk group robot settings|appears in this table's automation rule editor|registered for this table|DingTalk group destination ID|No DingTalk group destinations yet|SEC secret" ...`: passed.
 - `git diff --check`: passed.
 - `pnpm --filter @metasheet/web build`: passed. Vite emitted only existing chunk-size and mixed static/dynamic import warnings.
+
+## Main rebase verification - 2026-04-22
+
+- Rebased directly onto `origin/main@3c3dd1096f71` after PR #1039 was squash-merged.
+- Rebased branch HEAD: `2f1ba9c63f54`.
+- `pnpm --filter @metasheet/web exec vitest run tests/multitable-api-token-manager.spec.ts tests/multitable-automation-rule-editor.spec.ts --watch=false`: passed, 2 files and 77 tests.
+- `rg -n "does not import DingTalk group members|control form access|target DingTalk group robot settings|appears in this table's automation rule editor|registered for this table|DingTalk group destination ID|No DingTalk group destinations yet|SEC secret" ...`: passed.
+- `git diff --check`: passed.
+- `pnpm --filter @metasheet/web build`: passed. Vite emitted only existing chunk-size and mixed static/dynamic import warnings.
