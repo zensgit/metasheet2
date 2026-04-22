@@ -12,6 +12,7 @@ This guide explains the management-side UI flow for:
 - configuring table-triggered automation
 - configuring public form sharing
 - using protected public-form modes and allowlists
+- syncing DingTalk accounts and creating bound local users
 
 It does not cover end-user filling behavior beyond the links they receive.
 
@@ -20,6 +21,8 @@ It does not cover end-user filling behavior beyond the links they receive.
 - Send a table-triggered message to a DingTalk group: see [C. Configure a DingTalk group notification rule](#c-configure-a-dingtalk-group-notification-rule).
 - Send a form link that users can fill: see [D. Configure a public form](#d-configure-a-public-form).
 - Send to a DingTalk group while only selected local users or member groups can fill: see [E. Configure protected public-form allowlists](#e-configure-protected-public-form-allowlists) and [Scenario 2](#scenario-2-broadcast-to-a-group-but-only-selected-users-can-fill).
+- Create a local user from a synced DingTalk account without email: see [A0. Configure DingTalk directory accounts](#a0-configure-dingtalk-directory-accounts).
+- Diagnose unbound person recipients: see [G. Delivery history and troubleshooting](#g-delivery-history-and-troubleshooting).
 
 ## Before you start
 
@@ -27,8 +30,41 @@ You need all of the following:
 
 - access to the target table
 - permission to manage automation or form sharing on that table
+- DingTalk app credentials if you need sign-in, directory sync, or person work notifications
 - a DingTalk group robot webhook if you want group delivery
 - DingTalk-bound local users if you want person delivery or DingTalk-protected public forms
+
+## A0. Configure DingTalk directory accounts
+
+Management-side UI path:
+
+1. Open the admin directory management page.
+2. Configure or select a DingTalk directory integration.
+3. Run sync or wait for the configured schedule.
+4. Review synced accounts in the pending review queue or the member account list.
+5. For an unmatched account, either bind it to an existing local user or create a local user and bind it immediately.
+
+No-email local user creation:
+
+- name is required
+- at least one of email, username, or mobile is required
+- email may be empty
+- username or mobile can act as the login identifier
+- generated-password users are forced to change password at first sign-in
+- no-email users receive an onboarding packet in the admin result panel rather than an email invite
+
+Binding behavior:
+
+- manual creation writes a local `users` row
+- the new user is linked to the DingTalk directory account
+- the DingTalk grant is enabled by default unless the admin disables it
+- the account list refreshes after creation so operators can confirm the local link
+
+Important boundaries:
+
+- syncing a DingTalk account does not automatically authorize that raw DingTalk user to fill forms
+- form access still targets local users and local member groups
+- DingTalk department projection can help maintain local member groups, but DingTalk group robot bindings do not import group members
 
 ## A. Configure a DingTalk group destination
 
@@ -212,6 +248,33 @@ Use this when checking:
 - recipient is not bound to DingTalk
 - recipient selection is wrong
 - template or target link is wrong
+
+Person delivery status meanings:
+
+- `success`: the message was sent to a bound DingTalk user
+- `failed`: the DingTalk API/config/send path failed for a resolved recipient
+- `skipped`: the selected local user is inactive or does not have an active DingTalk binding
+
+Operational rule:
+
+- a skipped person recipient does not block messages to other bound recipients in the same action
+- if all recipients are skipped, the automation step is skipped and the delivery history shows the skipped users
+
+### Troubleshooting matrix
+
+| Symptom | Likely cause | Operator action |
+| --- | --- | --- |
+| DingTalk group test-send fails with webhook validation | webhook is not a standard DingTalk group robot URL or lacks `access_token` | copy the group robot webhook again from DingTalk robot settings |
+| DingTalk group test-send fails with signature error | robot uses signed mode but the saved secret is missing or not `SEC...` | edit the destination and set the current `SEC...` secret |
+| DingTalk group send returns non-zero `errcode` | DingTalk robot keyword/security policy or robot-side rule rejected the message | inspect delivery history `errorMessage` and `responseBody`, then adjust robot keyword/security settings or message template |
+| DingTalk group send returns HTTP non-2xx | DingTalk endpoint, network, or proxy rejected the request | inspect delivery history `httpStatus` and backend logs before retrying |
+| Person delivery shows `skipped` | local user is inactive or not bound to DingTalk | use the person delivery viewer `Skipped / unbound` filter, then bind the synced DingTalk account to the local user or create/bind from directory management |
+| Public form returns `DINGTALK_AUTH_REQUIRED` | visitor has not completed DingTalk sign-in | ask the user to reopen the link and sign in through DingTalk |
+| Public form returns `DINGTALK_BIND_REQUIRED` | DingTalk identity is not bound to a local user | bind or create the local user from directory management |
+| Public form returns `DINGTALK_GRANT_REQUIRED` | form requires `dingtalk_granted` but the local user has no enabled grant | enable the DingTalk grant for that local user |
+| Public form returns `DINGTALK_FORM_NOT_ALLOWED` | local user is outside the configured allowed users/member groups | update the form allowlist or add the user to an allowed local member group |
+| Internal processing link cannot open | notification delivery does not grant table/view permission | grant the required local table/view permission or use a public form link |
+| Delivery history cannot load | current user cannot manage automations or route failed | verify table automation permission and inspect backend logs |
 
 ## H. Common operating scenarios
 

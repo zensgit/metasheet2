@@ -3,7 +3,7 @@
 - Date: 2026-04-22
 - Goal: table trigger -> DingTalk group/person message -> form fill or internal processing -> permission-safe completion
 - Delivery mode: small stacked PRs; each implementation PR must include development and verification notes
-- Current base: continue after the DingTalk validation and granted-form guard stack through PR #1062
+- Current base: continue after the DingTalk validation, directory admission, and person delivery history stack through PR #1073
 
 ## Guiding Decisions
 
@@ -50,21 +50,21 @@
 
 ## P3: DingTalk Person Messaging And User Sync
 
-- [ ] Backend: keep `send_dingtalk_person_message` support for static `userIds`.
-- [ ] Backend: keep `send_dingtalk_person_message` support for `memberGroupIds`.
-- [ ] Backend: keep dynamic recipient field paths for local users and member groups.
-- [ ] Frontend: expose person recipient picker for local users and member groups.
-- [ ] Frontend: warn when selected recipients are not bound to DingTalk.
-- [ ] Directory sync: show synced DingTalk accounts without matched local users.
-- [ ] Directory sync: support admin-triggered local user creation without email.
-- [ ] Directory sync: bind newly created local users to the DingTalk external identity.
-- [ ] Delivery history: record person send success, failure, and skipped-unbound reasons.
+- [x] Backend: keep `send_dingtalk_person_message` support for static `userIds`.
+- [x] Backend: keep `send_dingtalk_person_message` support for `memberGroupIds`.
+- [x] Backend: keep dynamic recipient field paths for local users and member groups.
+- [x] Frontend: expose person recipient picker for local users and member groups.
+- [x] Frontend: warn when selected recipients are not bound to DingTalk.
+- [x] Directory sync: show synced DingTalk accounts without matched local users.
+- [x] Directory sync: support admin-triggered local user creation without email.
+- [x] Directory sync: bind newly created local users to the DingTalk external identity.
+- [x] Delivery history: record person send success, failure, and skipped-unbound reasons.
 
 ## P4: Documentation And Remote Smoke
 
-- [ ] Add an administrator guide for DingTalk app credentials, group robot binding, directory sync, and no-email user creation.
-- [ ] Add a user guide for table group binding, automation messages, public form links, and form access levels.
-- [ ] Add troubleshooting notes for webhook signature failures, unbound users, missing grants, no-email users, and links that cannot be opened.
+- [x] Add an administrator guide for DingTalk app credentials, group robot binding, directory sync, and no-email user creation.
+- [x] Add a user guide for table group binding, automation messages, public form links, and form access levels.
+- [x] Add troubleshooting notes for webhook signature failures, unbound users, missing grants, no-email users, and links that cannot be opened.
 - [ ] Remote smoke: create a table and form view.
 - [ ] Remote smoke: bind at least two DingTalk groups to the table.
 - [ ] Remote smoke: set the form to `dingtalk_granted`.
@@ -72,6 +72,10 @@
 - [ ] Remote smoke: verify an authorized user can open and submit.
 - [ ] Remote smoke: verify an unauthorized user cannot submit and no record is inserted.
 - [ ] Remote smoke: verify delivery history records group and person sends.
+
+Remote smoke checklist:
+
+- `docs/dingtalk-remote-smoke-checklist-20260422.md`
 
 ## Suggested Parallel Lanes
 

@@ -39,6 +39,7 @@ Supported:
 - syncing DingTalk departments and members into the directory mirror
 - review/bind/unbind governance
 - creating local users from synced members
+- creating and binding local users directly from the synced account list
 - auto-admission by department scope
 - excluding child departments from auto-admission
 - projecting DingTalk departments into `platform_member_groups`
@@ -79,6 +80,9 @@ Current model:
 - you choose local users
 - the system resolves their DingTalk bindings
 - unbound users cannot receive DingTalk person delivery
+- person delivery history records `success`, `failed`, and `skipped`
+- unbound or inactive local recipients are `skipped`; they do not block delivery to other bound recipients
+- operational troubleshooting lives in [DingTalk Admin Operations Guide](./dingtalk-admin-operations-guide-20260420.md)
 
 ### 5. Public forms and DingTalk-protected public forms
 
