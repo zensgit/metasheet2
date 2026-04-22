@@ -12,6 +12,7 @@
             <option value="">All statuses</option>
             <option value="success">Success</option>
             <option value="failed">Failed</option>
+            <option value="skipped">Skipped / unbound</option>
           </select>
           <button class="meta-person-delivery__btn" type="button" :disabled="loading" data-action="refresh" @click="loadData">Refresh</button>
         </div>
@@ -37,10 +38,10 @@
             </span>
             <span
               class="meta-person-delivery__badge"
-              :class="delivery.success ? 'meta-person-delivery__badge--success' : 'meta-person-delivery__badge--failed'"
-              :data-status="delivery.success ? 'success' : 'failed'"
+              :class="`meta-person-delivery__badge--${deliveryStatus(delivery)}`"
+              :data-status="deliveryStatus(delivery)"
             >
-              {{ delivery.success ? 'success' : 'failed' }}
+              {{ deliveryStatusLabel(delivery) }}
             </span>
             <span class="meta-person-delivery__time">{{ formatTime(delivery.createdAt) }}</span>
           </div>
@@ -49,7 +50,9 @@
             <span v-if="delivery.dingtalkUserId">DingTalk: {{ delivery.dingtalkUserId }}</span>
           </div>
           <div class="meta-person-delivery__subject">{{ delivery.subject }}</div>
-          <div v-if="!delivery.success && delivery.errorMessage" class="meta-person-delivery__error">{{ delivery.errorMessage }}</div>
+          <div v-if="deliveryStatus(delivery) !== 'success' && deliveryReason(delivery)" class="meta-person-delivery__error">
+            {{ deliveryReason(delivery) }}
+          </div>
         </div>
       </div>
     </div>
@@ -79,9 +82,32 @@ const errorMessage = ref('')
 
 const filteredDeliveries = computed(() => {
   if (!statusFilter.value) return deliveries.value
-  const expected = statusFilter.value === 'success'
-  return deliveries.value.filter((delivery) => delivery.success === expected)
+  return deliveries.value.filter((delivery) => deliveryStatus(delivery) === statusFilter.value)
 })
+
+type DeliveryStatus = 'success' | 'failed' | 'skipped'
+
+const UNBOUND_DINGTALK_REASON = 'DingTalk account is not linked or user is inactive'
+
+function deliveryStatus(delivery: DingTalkPersonDelivery): DeliveryStatus {
+  if (delivery.status === 'success' || delivery.status === 'failed' || delivery.status === 'skipped') return delivery.status
+  if (delivery.success) return 'success'
+  if (!delivery.dingtalkUserId && delivery.errorMessage === UNBOUND_DINGTALK_REASON) return 'skipped'
+  return 'failed'
+}
+
+function deliveryStatusLabel(delivery: DingTalkPersonDelivery): string {
+  const status = deliveryStatus(delivery)
+  if (status === 'skipped') return 'skipped'
+  return status
+}
+
+function deliveryReason(delivery: DingTalkPersonDelivery): string {
+  if (deliveryStatus(delivery) === 'skipped') {
+    return delivery.errorMessage || UNBOUND_DINGTALK_REASON
+  }
+  return delivery.errorMessage || ''
+}
 
 function formatTime(ts: string): string {
   try {
@@ -255,6 +281,11 @@ watch(
 .meta-person-delivery__badge--failed {
   background: #fee2e2;
   color: #dc2626;
+}
+
+.meta-person-delivery__badge--skipped {
+  background: #fef3c7;
+  color: #b45309;
 }
 
 .meta-person-delivery__time {
