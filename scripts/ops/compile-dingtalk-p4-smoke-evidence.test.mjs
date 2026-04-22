@@ -80,7 +80,7 @@ test('compile-dingtalk-p4-smoke-evidence compiles passing evidence and redacts s
         id,
         status: 'pass',
         evidence: {
-          notes: `${id} used https://oapi.dingtalk.com/robot/send?access_token=robot-secret and SECabcdefgh12345678`,
+          notes: `${id} used https://oapi.dingtalk.com/robot/send?access_token=robot-secret&timestamp=1690000000000&sign=robot-sign and SECabcdefgh12345678`,
           publicUrl: 'http://example.test/form?publicToken=pub_secret',
           authorization: 'Bearer abc.def.ghi',
           token: 'raw-token',
@@ -104,10 +104,14 @@ test('compile-dingtalk-p4-smoke-evidence compiles passing evidence and redacts s
 
     const redacted = readFileSync(path.join(outputDir, 'evidence.redacted.json'), 'utf8')
     assert.doesNotMatch(redacted, /robot-secret/)
+    assert.doesNotMatch(redacted, /1690000000000/)
+    assert.doesNotMatch(redacted, /robot-sign/)
     assert.doesNotMatch(redacted, /SECabcdefgh12345678/)
     assert.doesNotMatch(redacted, /pub_secret/)
     assert.doesNotMatch(redacted, /raw-token/)
     assert.match(redacted, /access_token=<redacted>/)
+    assert.match(redacted, /timestamp=<redacted>/)
+    assert.match(redacted, /sign=<redacted>/)
     assert.match(redacted, /SEC<redacted>/)
     assert.match(redacted, /publicToken=<redacted>/)
     assert.match(redacted, /"<redacted>"/)
