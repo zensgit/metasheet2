@@ -120,7 +120,15 @@ describe('DingTalk automation delivery routes', () => {
   })
 
   it('lists person delivery history and clamps limit=0 to one', async () => {
-    const personDeliveries = [{ id: 'person_delivery_1', success: true }]
+    const personDeliveries = [
+      { id: 'person_delivery_1', success: true, status: 'success' },
+      {
+        id: 'person_delivery_skipped',
+        success: false,
+        status: 'skipped',
+        errorMessage: 'DingTalk account is not linked or user is inactive',
+      },
+    ]
     const { app, listPersonDeliveries } = await createApp({ personDeliveries })
 
     const response = await request(app)

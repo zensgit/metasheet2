@@ -1213,13 +1213,26 @@ describe('AutomationExecutor', () => {
     })
   })
 
-  it('fails send_dingtalk_person_message when a user has no linked DingTalk account', async () => {
+  it('skips unlinked DingTalk person recipients while sending to linked users', async () => {
+    process.env.DINGTALK_APP_KEY = 'dt-app-key'
+    process.env.DINGTALK_APP_SECRET = 'dt-app-secret'
+    process.env.DINGTALK_AGENT_ID = '123456789'
+
     const queryFn = vi.fn()
       .mockResolvedValueOnce({
         rows: [{ local_user_id: 'user_1', local_user_active: true, dingtalk_user_id: 'dt-user-1' }],
       })
       .mockResolvedValue({ rows: [] })
-    deps = createMockDeps({ queryFn })
+    const fetchFn = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ access_token: 'app-access-token' }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ errcode: 0, errmsg: 'ok', task_id: 778899 }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      })) as unknown as typeof fetch
+    deps = createMockDeps({ queryFn, fetchFn })
     executor = new AutomationExecutor(deps)
 
     const rule = createMockRule({
@@ -1234,10 +1247,58 @@ describe('AutomationExecutor', () => {
     })
     const result = await executor.execute(rule, { recordId: 'r1', sheetId: 'sheet_1', actorId: 'user_1' })
 
-    expect(result.status).toBe('failed')
-    expect(result.steps[0].error).toContain('user_2')
+    expect(result.status).toBe('success')
+    expect(result.steps[0].output).toMatchObject({
+      notifiedUsers: 1,
+      skippedRecipientCount: 1,
+      skippedUserIds: ['user_2'],
+    })
+    const [, sendInit] = fetchFn.mock.calls[1] as [string, RequestInit]
+    expect(JSON.parse(sendInit.body as string).userid_list).toBe('dt-user-1')
+    const insertCalls = queryFn.mock.calls.filter((call) => String(call[0]).includes('INSERT INTO dingtalk_person_deliveries'))
+    expect(insertCalls).toHaveLength(2)
+    expect(insertCalls[0]?.[1]?.[1]).toBe('user_2')
+    expect(insertCalls[0]?.[1]?.[7]).toBe('skipped')
+    expect(insertCalls[1]?.[1]?.[1]).toBe('user_1')
+    expect(insertCalls[1]?.[1]?.[7]).toBe('success')
+  })
+
+  it('marks DingTalk person delivery as skipped when all recipients are unlinked', async () => {
+    const queryFn = vi.fn()
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValue({ rows: [] })
+    const fetchFn = vi.fn(async () => new Response('unexpected', { status: 500 })) as unknown as typeof fetch
+    deps = createMockDeps({ queryFn, fetchFn })
+    executor = new AutomationExecutor(deps)
+
+    const rule = createMockRule({
+      actions: [{
+        type: 'send_dingtalk_person_message',
+        config: {
+          userIds: ['user_1'],
+          titleTemplate: 'Title',
+          bodyTemplate: 'Body',
+        },
+      }],
+    })
+    const result = await executor.execute(rule, { recordId: 'r1', sheetId: 'sheet_1', actorId: 'user_1' })
+
+    expect(result.status).toBe('skipped')
+    expect(result.steps[0]).toMatchObject({
+      actionType: 'send_dingtalk_person_message',
+      status: 'skipped',
+      error: 'DingTalk account not linked for users: user_1',
+      output: {
+        notifiedUsers: 0,
+        skippedRecipientCount: 1,
+        skippedUserIds: ['user_1'],
+      },
+    })
+    expect(fetchFn).not.toHaveBeenCalled()
     const insertCall = queryFn.mock.calls.find((call) => String(call[0]).includes('INSERT INTO dingtalk_person_deliveries'))
-    expect(insertCall?.[1]?.[1]).toBe('user_2')
+    expect(insertCall?.[1]?.[1]).toBe('user_1')
+    expect(insertCall?.[1]?.[6]).toBe(false)
+    expect(insertCall?.[1]?.[7]).toBe('skipped')
   })
 
   it('executes send_dingtalk_person_message with dynamic record recipients', async () => {

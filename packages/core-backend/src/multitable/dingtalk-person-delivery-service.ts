@@ -6,6 +6,7 @@ export interface DingTalkPersonDelivery {
   subject: string
   content: string
   success: boolean
+  status: 'success' | 'failed' | 'skipped'
   httpStatus?: number
   responseBody?: string
   errorMessage?: string
@@ -29,6 +30,7 @@ type DeliveryRow = {
   subject: string
   content: string
   success: boolean
+  status: string | null
   http_status: number | null
   response_body: string | null
   error_message: string | null
@@ -42,6 +44,11 @@ type DeliveryRow = {
   local_user_is_active: boolean | null
 }
 
+function normalizeDeliveryStatus(status: string | null, success: boolean): DingTalkPersonDelivery['status'] {
+  if (status === 'success' || status === 'failed' || status === 'skipped') return status
+  return success ? 'success' : 'failed'
+}
+
 function mapDeliveryRow(row: DeliveryRow): DingTalkPersonDelivery {
   return {
     id: row.id,
@@ -51,6 +58,7 @@ function mapDeliveryRow(row: DeliveryRow): DingTalkPersonDelivery {
     subject: row.subject,
     content: row.content,
     success: row.success,
+    status: normalizeDeliveryStatus(row.status, row.success),
     httpStatus: row.http_status ?? undefined,
     responseBody: row.response_body ?? undefined,
     errorMessage: row.error_message ?? undefined,
@@ -79,6 +87,7 @@ export async function listAutomationDingTalkPersonDeliveries(
             d.subject,
             d.content,
             d.success,
+            d.status,
             d.http_status,
             d.response_body,
             d.error_message,

@@ -845,6 +845,7 @@ export interface DingTalkPersonDelivery {
   subject: string
   content: string
   success: boolean
+  status?: 'success' | 'failed' | 'skipped'
   httpStatus?: number
   responseBody?: string
   errorMessage?: string

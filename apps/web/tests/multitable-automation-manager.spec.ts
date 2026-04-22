@@ -57,9 +57,23 @@ function mockClient(
       subject: 'Ticket rec_1 ready',
       content: 'Please review the latest changes.',
       success: true,
+      status: 'success',
       createdAt: '2026-04-19T12:00:00.000Z',
       localUserLabel: 'Lin Lan',
       localUserSubtitle: 'lin@example.com',
+      localUserIsActive: true,
+    },
+    {
+      id: 'dpd_skipped',
+      localUserId: 'user_unbound',
+      sourceType: 'automation',
+      subject: 'Ticket rec_1 ready',
+      content: 'Please review the latest changes.',
+      success: false,
+      status: 'skipped',
+      errorMessage: 'DingTalk account is not linked or user is inactive',
+      createdAt: '2026-04-19T12:01:00.000Z',
+      localUserLabel: 'Unbound User',
       localUserIsActive: true,
     },
   ]
@@ -2045,6 +2059,19 @@ describe('MetaAutomationManager', () => {
     const delivery = document.querySelector('[data-person-delivery-id="dpd_1"]')
     expect(delivery?.textContent).toContain('Lin Lan')
     expect(delivery?.textContent).toContain('Ticket rec_1 ready')
+    const skippedDelivery = document.querySelector('[data-person-delivery-id="dpd_skipped"]')
+    expect(skippedDelivery?.textContent).toContain('Unbound User')
+    expect(skippedDelivery?.textContent).toContain('skipped')
+    expect(skippedDelivery?.textContent).toContain('DingTalk account is not linked or user is inactive')
+    expect(skippedDelivery?.querySelector('[data-status="skipped"]')).toBeTruthy()
+
+    const statusFilter = document.querySelector('.meta-person-delivery [data-field="statusFilter"]') as HTMLSelectElement
+    statusFilter.value = 'skipped'
+    statusFilter.dispatchEvent(new Event('change'))
+    await flushPromises()
+
+    expect(document.querySelector('[data-person-delivery-id="dpd_1"]')).toBeNull()
+    expect(document.querySelector('[data-person-delivery-id="dpd_skipped"]')?.textContent).toContain('Unbound User')
   })
 
   it('opens DingTalk group delivery viewer for group message rules', async () => {

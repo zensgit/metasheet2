@@ -1349,6 +1349,7 @@ export interface DingTalkPersonDeliveriesTable {
   subject: string
   content: string
   success: boolean
+  status: 'success' | 'failed' | 'skipped'
   http_status: number | null
   response_body: string | null
   error_message: string | null
