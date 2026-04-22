@@ -29,10 +29,20 @@ export type MultitableViewConfig = {
   config?: Record<string, unknown>
 }
 
+function normalizeQueryArg(
+  arg: MultitableLoaderQueryFn | { query: MultitableLoaderQueryFn },
+): MultitableLoaderQueryFn {
+  if (typeof arg === 'function') return arg
+  return arg.query.bind(arg)
+}
+
+const DEFAULT_VIEW_CACHE = new Map<string, MultitableViewConfig>()
+
 export async function loadSheetRow(
-  query: MultitableLoaderQueryFn,
+  poolOrQuery: MultitableLoaderQueryFn | { query: MultitableLoaderQueryFn },
   sheetId: string,
 ): Promise<MultitableSheetRow | null> {
+  const query = normalizeQueryArg(poolOrQuery)
   const result = await query(
     'SELECT id, base_id, name, description FROM meta_sheets WHERE id = $1 AND deleted_at IS NULL',
     [sheetId],
@@ -48,14 +58,15 @@ export async function loadSheetRow(
 }
 
 export async function loadFieldsForSheet(
-  pool: { query: MultitableLoaderQueryFn },
+  poolOrQuery: MultitableLoaderQueryFn | { query: MultitableLoaderQueryFn },
   sheetId: string,
   cache?: Map<string, MultitableField[]>,
 ): Promise<MultitableField[]> {
   const cached = cache?.get(sheetId)
   if (cached) return cached
 
-  const fieldRes = await pool.query(
+  const query = normalizeQueryArg(poolOrQuery)
+  const fieldRes = await query(
     'SELECT id, name, type, property, "order" FROM meta_fields WHERE sheet_id = $1 ORDER BY "order" ASC, id ASC',
     [sheetId],
   )
@@ -65,14 +76,15 @@ export async function loadFieldsForSheet(
 }
 
 export async function tryResolveView(
-  pool: { query: MultitableLoaderQueryFn },
+  poolOrQuery: MultitableLoaderQueryFn | { query: MultitableLoaderQueryFn },
   viewId: string,
-  cache?: Map<string, MultitableViewConfig>,
+  cache: Map<string, MultitableViewConfig> = DEFAULT_VIEW_CACHE,
 ): Promise<MultitableViewConfig | null> {
-  const cached = cache?.get(viewId)
+  const cached = cache.get(viewId)
   if (cached) return cached
 
-  const result = await pool.query(
+  const query = normalizeQueryArg(poolOrQuery)
+  const result = await query(
     'SELECT id, sheet_id, name, type, filter_info, sort_info, group_info, hidden_field_ids, config FROM meta_views WHERE id = $1',
     [viewId],
   )
@@ -90,6 +102,6 @@ export async function tryResolveView(
     hiddenFieldIds: normalizeJsonArray(row.hidden_field_ids),
     config: normalizeJson(row.config),
   }
-  cache?.set(viewId, view)
+  cache.set(viewId, view)
   return view
 }

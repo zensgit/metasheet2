@@ -19,6 +19,21 @@ import {
 import { rbacGuard, rbacGuardAny } from '../rbac/rbac'
 import { isAdmin, listUserPermissions } from '../rbac/service'
 import {
+  deriveCapabilities,
+  hasPermission,
+  normalizePermissionCodes,
+  resolveRequestAccess,
+  type MultitableCapabilities,
+  type ResolvedRequestAccess,
+} from '../multitable/access'
+import {
+  loadFieldsForSheet as loadFieldsForSheetShared,
+  loadSheetRow as loadSheetRowShared,
+  tryResolveView as tryResolveViewShared,
+  type MultitableViewConfig as SharedMultitableViewConfig,
+} from '../multitable/loaders'
+import { ensureLegacyBase as ensureLegacyBaseShared } from '../multitable/provisioning'
+import {
   queryRecordsWithCursor,
   buildRecordsCacheKey,
   type CursorPaginatedResult,
@@ -177,19 +192,6 @@ type UniverMetaBase = {
   color: string | null
   ownerId: string | null
   workspaceId: string | null
-}
-
-type MultitableCapabilities = {
-  canRead: boolean
-  canCreateRecord: boolean
-  canEditRecord: boolean
-  canDeleteRecord: boolean
-  canManageFields: boolean
-  canManageSheetAccess: boolean
-  canManageViews: boolean
-  canComment: boolean
-  canManageAutomation: boolean
-  canExport: boolean
 }
 
 type MultitableCapabilityOrigin = {
@@ -1800,48 +1802,20 @@ async function loadSheetFields(
   return fields
 }
 
-async function tryResolveView(pool: { query: QueryFn }, viewId: string): Promise<UniverMetaViewConfig | null> {
-  const cached = metaViewConfigCache.get(viewId)
-  if (cached) return cached
-
-  const result = await pool.query(
-    'SELECT id, sheet_id, name, type, filter_info, sort_info, group_info, hidden_field_ids, config FROM meta_views WHERE id = $1',
-    [viewId],
+async function tryResolveView(
+  pool: { query: QueryFn },
+  viewId: string,
+): Promise<UniverMetaViewConfig | null> {
+  return tryResolveViewShared(
+    pool as { query: QueryFn },
+    viewId,
+    metaViewConfigCache as Map<string, SharedMultitableViewConfig>,
   )
-  if (result.rows.length === 0) return null
-
-  const row: any = result.rows[0]
-  const view = {
-    id: String(row.id),
-    sheetId: String(row.sheet_id),
-    name: String(row.name),
-    type: String(row.type ?? 'grid'),
-    filterInfo: normalizeJson(row.filter_info),
-    sortInfo: normalizeJson(row.sort_info),
-    groupInfo: normalizeJson(row.group_info),
-    hiddenFieldIds: normalizeJsonArray(row.hidden_field_ids),
-    config: normalizeJson(row.config),
-  }
-  metaViewConfigCache.set(viewId, view)
-  return view
-}
-
-function normalizePermissionCodes(value: unknown): string[] {
-  if (!Array.isArray(value)) return []
-  return value
-    .map((item) => (typeof item === 'string' ? item.trim() : ''))
-    .filter((item) => item.length > 0)
 }
 
 function parseDingTalkAutomationDeliveryLimit(value: unknown): number {
   const raw = typeof value === 'string' ? Number(value) : undefined
   return Number.isFinite(raw) ? Math.min(Math.max(Math.floor(raw as number), 1), 200) : 50
-}
-
-type ResolvedRequestAccess = {
-  userId: string
-  permissions: string[]
-  isAdminRole: boolean
 }
 
 type SheetPermissionScope = {
@@ -1934,65 +1908,6 @@ const CANONICAL_SHEET_PERMISSION_CODE_BY_ACCESS_LEVEL: Record<MultitableSheetAcc
 
 function isSheetPermissionSubjectType(value: unknown): value is MultitableSheetPermissionSubjectType {
   return value === 'user' || value === 'role' || value === 'member-group'
-}
-
-async function resolveRequestAccess(req: Request): Promise<ResolvedRequestAccess> {
-  const userId = req.user?.id?.toString() ?? req.user?.sub?.toString() ?? req.user?.userId?.toString() ?? ''
-  const tokenRoles = normalizePermissionCodes(req.user?.roles)
-  const tokenPerms = normalizePermissionCodes(req.user?.perms)
-  const resolvedPermissions = normalizePermissionCodes((req.user as { permissions?: unknown } | undefined)?.permissions)
-  const role = typeof req.user?.role === 'string' ? req.user.role.trim() : ''
-  const isAdminRole = role === 'admin' || tokenRoles.includes('admin')
-  const directPermissions = tokenPerms.length > 0 ? tokenPerms : resolvedPermissions
-  if (!userId) {
-    return { userId, permissions: directPermissions, isAdminRole }
-  }
-
-  if (isAdminRole) {
-    return { userId, permissions: directPermissions, isAdminRole: true }
-  }
-
-  if (directPermissions.length > 0) {
-    return { userId, permissions: directPermissions, isAdminRole: false }
-  }
-
-  return {
-    userId,
-    permissions: await listUserPermissions(userId),
-    isAdminRole: await isAdmin(userId),
-  }
-}
-
-function hasPermission(permissions: string[], code: string): boolean {
-  if (permissions.includes(code)) return true
-  const [resource] = code.split(':')
-  return permissions.includes(`${resource}:*`) || permissions.includes('*:*')
-}
-
-function deriveCapabilities(permissions: string[], isAdminRole: boolean): MultitableCapabilities {
-  const canRead = isAdminRole || hasPermission(permissions, 'multitable:read') || hasPermission(permissions, 'multitable:write')
-  const canWrite = isAdminRole || hasPermission(permissions, 'multitable:write')
-  const canManageSheetAccess = isAdminRole || hasPermission(permissions, 'multitable:share')
-  const canComment = isAdminRole || hasPermission(permissions, 'comments:write') || hasPermission(permissions, 'comments:read')
-  const canManageAutomation =
-    isAdminRole ||
-    hasPermission(permissions, 'workflow:all') ||
-    hasPermission(permissions, 'workflow:write') ||
-    hasPermission(permissions, 'workflow:create') ||
-    hasPermission(permissions, 'workflow:execute')
-
-  return {
-    canRead,
-    canCreateRecord: canWrite,
-    canEditRecord: canWrite,
-    canDeleteRecord: canWrite,
-    canManageFields: canWrite,
-    canManageSheetAccess,
-    canManageViews: canWrite,
-    canComment,
-    canManageAutomation,
-    canExport: canRead,
-  }
 }
 
 function summarizeSheetPermissionCodes(codes: string[]): SheetPermissionScope {
@@ -3159,15 +3074,7 @@ function serializeBaseRow(row: any): UniverMetaBase {
   }
 }
 
-async function ensureLegacyBase(query: QueryFn): Promise<string> {
-  await query(
-    `INSERT INTO meta_bases (id, name, icon, color, owner_id, workspace_id)
-     VALUES ($1, $2, $3, $4, $5, $6)
-     ON CONFLICT (id) DO NOTHING`,
-    [DEFAULT_BASE_ID, DEFAULT_BASE_NAME, 'table', '#1677ff', null, null],
-  )
-  return DEFAULT_BASE_ID
-}
+const ensureLegacyBase = ensureLegacyBaseShared
 
 async function ensurePeopleSheetPreset(query: QueryFn, baseId: string): Promise<PeopleSheetPreset> {
   const existingSheets = await query(
@@ -3307,31 +3214,8 @@ async function ensurePeopleSheetPreset(query: QueryFn, baseId: string): Promise<
   }
 }
 
-async function loadSheetRow(
-  query: QueryFn,
-  sheetId: string,
-): Promise<{ id: string; baseId: string | null; name: string; description: string | null } | null> {
-  const result = await query(
-    'SELECT id, base_id, name, description FROM meta_sheets WHERE id = $1 AND deleted_at IS NULL',
-    [sheetId],
-  )
-  const row: any = result.rows[0]
-  if (!row) return null
-  return {
-    id: String(row.id),
-    baseId: typeof row.base_id === 'string' ? row.base_id : null,
-    name: String(row.name),
-    description: typeof row.description === 'string' ? row.description : null,
-  }
-}
-
-async function loadFieldsForSheet(query: QueryFn, sheetId: string): Promise<UniverMetaField[]> {
-  const result = await query(
-    'SELECT id, name, type, property, "order" FROM meta_fields WHERE sheet_id = $1 ORDER BY "order" ASC, id ASC',
-    [sheetId],
-  )
-  return result.rows.map((row: any) => serializeFieldRow(row))
-}
+const loadSheetRow = loadSheetRowShared
+const loadFieldsForSheet = loadFieldsForSheetShared
 
 async function ensureAttachmentIdsExist(
   query: QueryFn,
