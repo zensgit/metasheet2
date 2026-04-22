@@ -40,3 +40,14 @@ claude -p --tools Read,Grep,Glob --max-budget-usd 0.75 "Read-only review. Inspec
 - Version observed: `2.1.117 (Claude Code)`
 - Read-only review was executed with `Read,Grep,Glob` tools.
 - Claude reported no blocking issues. It noted a non-blocking clarity risk around a raw webhook fallback in the send loop; that fallback was removed and the automation target test still passed.
+
+## Stack rebase verification - 2026-04-22
+
+- Rebased onto `origin/codex/dingtalk-group-webhook-validation-20260422@34c83aa01d6a` after PR #1041 was replayed onto `main`.
+- Rebased branch HEAD: `8eb4a487844f`.
+- `pnpm install --frozen-lockfile`: passed.
+- `pnpm --filter @metasheet/core-backend exec vitest run tests/unit/dingtalk-group-destination-service.test.ts --watch=false`: passed, 1 file and 17 tests.
+- `pnpm --filter @metasheet/core-backend exec vitest run tests/unit/automation-v1.test.ts --watch=false`: passed, 1 file and 121 tests.
+- `rg -n "normalizeDingTalkRobotWebhookUrl|normalizeDingTalkRobotSecret|testSend rejects legacy invalid webhook URL without fetch|fails send_dingtalk_group_message for legacy invalid webhook without fetch|validates all DingTalk group webhooks before sending any destination|re-check|re-validate stored webhook" ...`: passed.
+- `git diff --check`: passed.
+- `pnpm --filter @metasheet/core-backend build`: passed.
