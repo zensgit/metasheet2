@@ -563,6 +563,67 @@ describe('MetaAutomationRuleEditor', () => {
     expect(client.listDingTalkGroups).toHaveBeenCalledWith('sheet_1')
   })
 
+  it('shows an empty state when no DingTalk groups are bound and still allows dynamic record destinations', async () => {
+    const saved = vi.fn()
+    const client = {
+      ...mockClient(),
+      listDingTalkGroups: vi.fn(async () => []),
+    }
+    const { container } = mount({
+      visible: true,
+      sheetId: 'sheet_1',
+      fields,
+      views,
+      client,
+      onSave: saved,
+    })
+    await flushPromises()
+
+    const nameInput = container.querySelector('[data-field="name"]') as HTMLInputElement
+    nameInput.value = 'Notify dynamic groups'
+    nameInput.dispatchEvent(new Event('input'))
+    await flushPromises()
+
+    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header select') as HTMLSelectElement
+    actionSelect.value = 'send_dingtalk_group_message'
+    actionSelect.dispatchEvent(new Event('change'))
+    await flushPromises()
+
+    const emptyState = container.querySelector('[data-field="dingtalkDestinationEmpty"]')
+    expect(emptyState?.textContent).toContain('No DingTalk groups are bound to this table yet')
+    expect(emptyState?.textContent).toContain('API Tokens & Webhooks')
+    expect(emptyState?.textContent).toContain('record group field path')
+
+    const titleInput = container.querySelector('[data-field="dingtalkTitleTemplate"]') as HTMLInputElement
+    titleInput.value = 'Ticket {{recordId}}'
+    titleInput.dispatchEvent(new Event('input'))
+
+    const bodyInput = container.querySelector('[data-field="dingtalkBodyTemplate"]') as HTMLTextAreaElement
+    bodyInput.value = 'Please review {{record.status}}'
+    bodyInput.dispatchEvent(new Event('input'))
+    await flushPromises()
+
+    const saveBtn = container.querySelector('[data-action="save"]') as HTMLButtonElement
+    expect(saveBtn.disabled).toBe(true)
+
+    const destinationFieldInput = container.querySelector('[data-field="dingtalkDestinationFieldPath"]') as HTMLInputElement
+    destinationFieldInput.value = 'record.fld_2'
+    destinationFieldInput.dispatchEvent(new Event('input'))
+    await flushPromises()
+
+    expect(saveBtn.disabled).toBe(false)
+    saveBtn.click()
+    await flushPromises()
+
+    expect(saved).toHaveBeenCalledTimes(1)
+    expect(saved.mock.calls[0][0].actionConfig).toEqual({
+      destinationIdFieldPath: 'record.fld_2',
+      destinationIdFieldPaths: ['record.fld_2'],
+      titleTemplate: 'Ticket {{recordId}}',
+      bodyTemplate: 'Please review {{record.status}}',
+    })
+  })
+
   it('loads and saves DingTalk group config from V1 actions when legacy action fields are stale', async () => {
     const saved = vi.fn()
     const client = mockClient()

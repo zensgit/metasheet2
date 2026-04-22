@@ -209,6 +209,13 @@
                 Only DingTalk group destinations registered for this table are listed here.
               </div>
               <div
+                v-if="!dingTalkDestinationsError && dingTalkDestinations.length === 0"
+                class="meta-rule-editor__hint"
+                data-field="dingtalkDestinationEmpty"
+              >
+                No DingTalk groups are bound to this table yet. Add one in API Tokens &amp; Webhooks &gt; DingTalk Groups, or use a record group field path below.
+              </div>
+              <div
                 v-if="selectedGroupDestinations(action).length"
                 class="meta-rule-editor__recipient-list meta-rule-editor__recipient-list--selected"
               >
