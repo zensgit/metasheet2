@@ -67,6 +67,8 @@
 - [x] Add troubleshooting notes for webhook signature failures, unbound users, missing grants, no-email users, and links that cannot be opened.
 - [x] Add a P4 remote-smoke evidence compiler that validates required checks and writes redacted `summary.json` / `summary.md` artifacts.
 - [x] Add a P4 API-only remote-smoke runner for table/form creation, group binding, `dingtalk_granted` setup, automation test-run, and delivery evidence bootstrap.
+- [x] Add a P4 remote-smoke preflight gate for local tooling, env input, webhook format, and backend health readiness.
+- [x] Harden P4 evidence strict mode so real DingTalk-client/admin checks require per-check manual evidence metadata.
 - [ ] Remote smoke: create a table and form view.
 - [ ] Remote smoke: bind at least two DingTalk groups to the table.
 - [ ] Remote smoke: set the form to `dingtalk_granted`.

@@ -50,6 +50,34 @@ const REQUIRED_CHECKS = [
 
 const CHECK_ID_SET = new Set(REQUIRED_CHECKS.map((check) => check.id))
 const VALID_STATUSES = new Set(['pass', 'fail', 'skipped', 'pending'])
+const API_BOOTSTRAP_CHECK_IDS = new Set([
+  'create-table-form',
+  'bind-two-dingtalk-groups',
+  'set-form-dingtalk-granted',
+  'delivery-history-group-person',
+])
+const MANUAL_EVIDENCE_REQUIREMENTS = [
+  {
+    id: 'send-group-message-form-link',
+    source: 'manual-client',
+    label: 'real DingTalk group message visibility',
+  },
+  {
+    id: 'authorized-user-submit',
+    source: 'manual-client',
+    label: 'authorized DingTalk-bound user submit',
+  },
+  {
+    id: 'unauthorized-user-denied',
+    source: 'manual-client',
+    label: 'unauthorized DingTalk-bound user denial',
+  },
+  {
+    id: 'no-email-user-create-bind',
+    source: 'manual-admin',
+    label: 'no-email DingTalk-synced account creation and binding',
+  },
+]
 
 function printHelp() {
   console.log(`Usage: node scripts/ops/compile-dingtalk-p4-smoke-evidence.mjs [options]
@@ -258,6 +286,96 @@ function normalizeChecks(evidence) {
   return checks
 }
 
+function isNonEmptyString(value) {
+  return typeof value === 'string' && value.trim().length > 0
+}
+
+function isDateLikeString(value) {
+  if (!isNonEmptyString(value)) return false
+  const time = Date.parse(value)
+  return Number.isFinite(time)
+}
+
+function normalizeEvidenceSource(evidence) {
+  if (!evidence || typeof evidence !== 'object' || Array.isArray(evidence)) return ''
+  const source = evidence.source ?? evidence.evidenceSource ?? evidence.kind
+  return isNonEmptyString(source) ? source.trim() : ''
+}
+
+function hasArtifactRefs(evidence) {
+  if (!evidence || typeof evidence !== 'object' || Array.isArray(evidence)) return false
+  const artifactCandidates = [
+    evidence.artifacts,
+    evidence.artifactRefs,
+    evidence.screenshots,
+    evidence.files,
+  ]
+  return artifactCandidates.some((candidate) => Array.isArray(candidate) && candidate.length > 0)
+}
+
+function hasSummary(evidence) {
+  if (!evidence || typeof evidence !== 'object' || Array.isArray(evidence)) return false
+  return isNonEmptyString(evidence.summary)
+    || isNonEmptyString(evidence.notes)
+    || isNonEmptyString(evidence.resultSummary)
+}
+
+function validateManualEvidenceRequirements(checksById) {
+  const issues = []
+  for (const requirement of MANUAL_EVIDENCE_REQUIREMENTS) {
+    const check = checksById.get(requirement.id)
+    if (!check || normalizeStatus(check.status) !== 'pass') continue
+
+    const evidence = check.evidence
+    const source = normalizeEvidenceSource(evidence)
+    if (source !== requirement.source) {
+      issues.push({
+        id: requirement.id,
+        code: 'manual_source_required',
+        message: `${requirement.id} requires evidence.source="${requirement.source}" for ${requirement.label}`,
+      })
+    }
+    if (!evidence || typeof evidence !== 'object' || Array.isArray(evidence)) {
+      issues.push({
+        id: requirement.id,
+        code: 'manual_evidence_object_required',
+        message: `${requirement.id} requires an evidence object`,
+      })
+      continue
+    }
+    if (!isNonEmptyString(evidence.operator) && !isNonEmptyString(evidence.performedBy)) {
+      issues.push({
+        id: requirement.id,
+        code: 'operator_required',
+        message: `${requirement.id} requires evidence.operator or evidence.performedBy`,
+      })
+    }
+    const performedAt = evidence.performedAt ?? evidence.executedAt ?? evidence.timestamp
+    if (!isDateLikeString(performedAt)) {
+      issues.push({
+        id: requirement.id,
+        code: 'performed_at_required',
+        message: `${requirement.id} requires evidence.performedAt, evidence.executedAt, or evidence.timestamp as a valid date`,
+      })
+    }
+    if (!hasArtifactRefs(evidence)) {
+      issues.push({
+        id: requirement.id,
+        code: 'artifact_refs_required',
+        message: `${requirement.id} requires per-check evidence.artifacts, evidence.artifactRefs, evidence.screenshots, or evidence.files`,
+      })
+    }
+    if (!hasSummary(evidence)) {
+      issues.push({
+        id: requirement.id,
+        code: 'summary_required',
+        message: `${requirement.id} requires evidence.summary, evidence.notes, or evidence.resultSummary`,
+      })
+    }
+  }
+  return issues
+}
+
 function buildSummary(evidence, inputFile, outputDir) {
   const checks = normalizeChecks(evidence)
   const byId = new Map(checks.map((check) => [check.id, check]))
@@ -277,7 +395,11 @@ function buildSummary(evidence, inputFile, outputDir) {
     .map((check) => ({ id: check.id, status: check.status }))
   const failedChecks = checks.filter((check) => check.status === 'fail').map((check) => check.id)
   const unknownChecks = checks.filter((check) => !CHECK_ID_SET.has(check.id)).map((check) => check.id)
-  const overallStatus = requiredChecksNotPassed.length === 0 && failedChecks.length === 0 ? 'pass' : 'fail'
+  const manualEvidenceIssues = validateManualEvidenceRequirements(byId)
+  const apiBootstrapRequired = requiredRows.filter((check) => API_BOOTSTRAP_CHECK_IDS.has(check.id))
+  const apiBootstrapStatus = apiBootstrapRequired.every((check) => check.status === 'pass') ? 'pass' : 'fail'
+  const remoteClientStatus = requiredChecksNotPassed.length === 0 && manualEvidenceIssues.length === 0 ? 'pass' : 'fail'
+  const overallStatus = requiredChecksNotPassed.length === 0 && failedChecks.length === 0 && manualEvidenceIssues.length === 0 ? 'pass' : 'fail'
   const sanitizedEvidence = sanitizeValue(evidence)
 
   return {
@@ -286,6 +408,8 @@ function buildSummary(evidence, inputFile, outputDir) {
     source: path.relative(process.cwd(), inputFile).replaceAll('\\', '/'),
     outputDir: path.relative(process.cwd(), outputDir).replaceAll('\\', '/'),
     overallStatus,
+    apiBootstrapStatus,
+    remoteClientStatus,
     totals: {
       totalChecks: checks.length,
       requiredChecks: REQUIRED_CHECKS.length,
@@ -301,6 +425,7 @@ function buildSummary(evidence, inputFile, outputDir) {
     requiredChecksNotPassed,
     failedChecks,
     unknownChecks,
+    manualEvidenceIssues: sanitizeValue(manualEvidenceIssues),
     sanitizedEvidence,
   }
 }
@@ -334,6 +459,9 @@ function renderMarkdown(summary) {
   const failures = summary.requiredChecksNotPassed.length
     ? summary.requiredChecksNotPassed.map((check) => `- \`${check.id}\`: ${check.status}`).join('\n')
     : '- None'
+  const manualIssues = summary.manualEvidenceIssues.length
+    ? summary.manualEvidenceIssues.map((issue) => `- \`${issue.id}\`: ${issue.message}`).join('\n')
+    : '- None'
 
   return `# DingTalk P4 Remote Smoke Evidence Summary
 
@@ -342,6 +470,10 @@ Generated at: ${summary.generatedAt}
 Source: \`${summary.source}\`
 
 Overall status: **${summary.overallStatus}**
+
+API bootstrap status: **${summary.apiBootstrapStatus}**
+
+Remote client status: **${summary.remoteClientStatus}**
 
 ## Required Checks
 
@@ -353,6 +485,10 @@ ${requiredLines.join('\n')}
 
 ${failures}
 
+## Manual Evidence Issues
+
+${manualIssues}
+
 ## Unknown Optional Checks
 
 ${unknownLines}
@@ -361,7 +497,7 @@ ${unknownLines}
 
 - This summary is generated from operator-provided evidence after executing \`docs/dingtalk-remote-smoke-checklist-20260422.md\`.
 - DingTalk webhook access tokens, SEC secrets, bearer tokens, JWTs, passwords, and public form tokens are redacted before writing artifacts.
-- A \`pass\` summary means the evidence file declares all required checks passed; it does not independently call DingTalk or staging.
+- A \`pass\` summary means all required checks passed and real DingTalk-client/admin checks include per-check manual evidence metadata. It does not independently call DingTalk or staging.
 `
 }
 
@@ -389,7 +525,9 @@ function compileEvidence(opts) {
   console.log(`Wrote ${path.relative(process.cwd(), summaryMdPath)}`)
 
   if (opts.strict && summary.overallStatus !== 'pass') {
-    throw new Error(`DingTalk P4 smoke evidence did not pass: ${summary.requiredChecksNotPassed.map((check) => `${check.id}:${check.status}`).join(', ')}`)
+    const notPassed = summary.requiredChecksNotPassed.map((check) => `${check.id}:${check.status}`)
+    const manualIssues = summary.manualEvidenceIssues.map((issue) => `${issue.id}:${issue.code}`)
+    throw new Error(`DingTalk P4 smoke evidence did not pass: ${[...notPassed, ...manualIssues].join(', ')}`)
   }
 
   return summary
