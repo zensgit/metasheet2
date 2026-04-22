@@ -578,6 +578,64 @@ describe('DingTalk automation link route validation', () => {
     expect(automationService.createRule).not.toHaveBeenCalled()
   })
 
+  it('rejects a V1 DingTalk person action with a non-object config before persisting the rule', async () => {
+    const { app, automationService } = await createApp()
+
+    const res = await request(app)
+      .post(`/api/multitable/sheets/${SHEET_ID}/automations`)
+      .send({
+        name: 'Multi action person rule',
+        triggerType: 'record.created',
+        triggerConfig: {},
+        actionType: 'notify',
+        actionConfig: {},
+        actions: [
+          {
+            type: 'send_dingtalk_person_message',
+            config: null,
+          },
+        ],
+      })
+
+    expect(res.status).toBe(400)
+    expect(res.body.error).toEqual({
+      code: 'VALIDATION_ERROR',
+      message: 'DingTalk action config must be an object',
+    })
+    expect(automationService.createRule).not.toHaveBeenCalled()
+  })
+
+  it('rejects a V1 DingTalk person action without executable templates before persisting the rule', async () => {
+    const { app, automationService } = await createApp()
+
+    const res = await request(app)
+      .post(`/api/multitable/sheets/${SHEET_ID}/automations`)
+      .send({
+        name: 'Multi action person rule',
+        triggerType: 'record.created',
+        triggerConfig: {},
+        actionType: 'notify',
+        actionConfig: {},
+        actions: [
+          {
+            type: 'send_dingtalk_person_message',
+            config: {
+              userIds: ['user_1'],
+              titleTemplate: ' ',
+              bodyTemplate: 'Open form',
+            },
+          },
+        ],
+      })
+
+    expect(res.status).toBe(400)
+    expect(res.body.error).toEqual({
+      code: 'VALIDATION_ERROR',
+      message: 'DingTalk titleTemplate is required',
+    })
+    expect(automationService.createRule).not.toHaveBeenCalled()
+  })
+
   it('validates V1 actions on automation create', async () => {
     const { app, automationService } = await createApp()
 
