@@ -29,6 +29,12 @@ export interface UnifiedApprovalDTO {
   requestNo?: string | null
   formSnapshot?: Record<string, unknown> | null
   currentNodeKey?: string | null
+  /**
+   * Parallel gateway (并行分支) — populated only when the instance is in a
+   * parallel region (length ≥ 2). Absent on linear state; callers that don't
+   * care about parallelism keep using `currentNodeKey` unchanged.
+   */
+  currentNodeKeys?: string[] | null
   assignments: ApprovalAssignmentDTO[]
   createdAt: string
   updatedAt: string

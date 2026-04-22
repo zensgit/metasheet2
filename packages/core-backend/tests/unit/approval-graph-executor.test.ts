@@ -262,6 +262,151 @@ describe('ApprovalGraphExecutor', () => {
       'finance-review',
     ])
   })
+
+  it('forks a parallel gateway into per-branch assignments and emits a parallelState', () => {
+    const runtimeGraph: RuntimeGraph = {
+      nodes: [
+        { key: 'start', type: 'start', config: {} },
+        {
+          key: 'parallel_fork',
+          type: 'parallel',
+          config: {
+            branches: ['edge-fork-a', 'edge-fork-b'],
+            joinMode: 'all',
+            joinNodeKey: 'finance-review',
+          },
+        },
+        {
+          key: 'legal-review',
+          type: 'approval',
+          config: { assigneeType: 'user', assigneeIds: ['legal-1'] },
+        },
+        {
+          key: 'compliance-review',
+          type: 'approval',
+          config: { assigneeType: 'user', assigneeIds: ['compliance-1'] },
+        },
+        {
+          key: 'finance-review',
+          type: 'approval',
+          config: { assigneeType: 'user', assigneeIds: ['finance-1'] },
+        },
+        { key: 'end', type: 'end', config: {} },
+      ],
+      edges: [
+        { key: 'edge-start-fork', source: 'start', target: 'parallel_fork' },
+        { key: 'edge-fork-a', source: 'parallel_fork', target: 'legal-review' },
+        { key: 'edge-fork-b', source: 'parallel_fork', target: 'compliance-review' },
+        { key: 'edge-a-join', source: 'legal-review', target: 'finance-review' },
+        { key: 'edge-b-join', source: 'compliance-review', target: 'finance-review' },
+        { key: 'edge-finance-end', source: 'finance-review', target: 'end' },
+      ],
+      policy: { allowRevoke: true },
+    }
+
+    const executor = new ApprovalGraphExecutor(runtimeGraph, {})
+    const initial = executor.resolveInitialState()
+
+    expect(initial.status).toBe('pending')
+    expect(initial.currentNodeKey).toBe('parallel_fork')
+    expect([...(initial.currentNodeKeys || [])].sort()).toEqual([
+      'compliance-review',
+      'legal-review',
+    ])
+    expect(initial.assignments.map((a) => ({ assigneeId: a.assigneeId, nodeKey: a.nodeKey })).sort((x, y) => x.assigneeId.localeCompare(y.assigneeId))).toEqual([
+      { assigneeId: 'compliance-1', nodeKey: 'compliance-review' },
+      { assigneeId: 'legal-1', nodeKey: 'legal-review' },
+    ])
+    expect(initial.parallelState).toBeDefined()
+    expect(initial.parallelState!.parallelNodeKey).toBe('parallel_fork')
+    expect(initial.parallelState!.joinNodeKey).toBe('finance-review')
+    expect(initial.parallelState!.joinMode).toBe('all')
+    const branchStates = initial.parallelState!.branches
+    expect(branchStates['edge-fork-a']).toEqual({
+      edgeKey: 'edge-fork-a',
+      currentNodeKey: 'legal-review',
+      complete: false,
+    })
+    expect(branchStates['edge-fork-b']).toEqual({
+      edgeKey: 'edge-fork-b',
+      currentNodeKey: 'compliance-review',
+      complete: false,
+    })
+  })
+
+  it('keeps the instance pending when one parallel branch approves and the other is still active', () => {
+    const runtimeGraph: RuntimeGraph = {
+      nodes: [
+        { key: 'start', type: 'start', config: {} },
+        {
+          key: 'parallel_fork',
+          type: 'parallel',
+          config: {
+            branches: ['edge-fork-a', 'edge-fork-b'],
+            joinMode: 'all',
+            joinNodeKey: 'finance-review',
+          },
+        },
+        {
+          key: 'legal-review',
+          type: 'approval',
+          config: { assigneeType: 'user', assigneeIds: ['legal-1'] },
+        },
+        {
+          key: 'compliance-review',
+          type: 'approval',
+          config: { assigneeType: 'user', assigneeIds: ['compliance-1'] },
+        },
+        {
+          key: 'finance-review',
+          type: 'approval',
+          config: { assigneeType: 'user', assigneeIds: ['finance-1'] },
+        },
+        { key: 'end', type: 'end', config: {} },
+      ],
+      edges: [
+        { key: 'edge-start-fork', source: 'start', target: 'parallel_fork' },
+        { key: 'edge-fork-a', source: 'parallel_fork', target: 'legal-review' },
+        { key: 'edge-fork-b', source: 'parallel_fork', target: 'compliance-review' },
+        { key: 'edge-a-join', source: 'legal-review', target: 'finance-review' },
+        { key: 'edge-b-join', source: 'compliance-review', target: 'finance-review' },
+        { key: 'edge-finance-end', source: 'finance-review', target: 'end' },
+      ],
+      policy: { allowRevoke: true },
+    }
+
+    const executor = new ApprovalGraphExecutor(runtimeGraph, {})
+    const initial = executor.resolveInitialState()
+
+    const afterLegal = executor.resolveAfterApproveInParallel('legal-review', initial.parallelState!)
+    expect(afterLegal.status).toBe('pending')
+    expect(afterLegal.currentNodeKey).toBe('parallel_fork')
+    expect(afterLegal.currentNodeKeys).toEqual(['compliance-review'])
+    expect(afterLegal.assignments).toEqual([])
+    expect(afterLegal.parallelState!.branches['edge-fork-a']).toEqual({
+      edgeKey: 'edge-fork-a',
+      currentNodeKey: null,
+      complete: true,
+    })
+    expect(afterLegal.parallelState!.branches['edge-fork-b']).toEqual({
+      edgeKey: 'edge-fork-b',
+      currentNodeKey: 'compliance-review',
+      complete: false,
+    })
+
+    const afterCompliance = executor.resolveAfterApproveInParallel('compliance-review', afterLegal.parallelState!)
+    expect(afterCompliance.status).toBe('pending')
+    expect(afterCompliance.currentNodeKey).toBe('finance-review')
+    expect(afterCompliance.currentNodeKeys).toBeUndefined()
+    expect(afterCompliance.assignments).toEqual([
+      {
+        assignmentType: 'user',
+        assigneeId: 'finance-1',
+        nodeKey: 'finance-review',
+        sourceStep: 3,
+      },
+    ])
+  })
 })
 
 describe('validateApprovalFormData', () => {
