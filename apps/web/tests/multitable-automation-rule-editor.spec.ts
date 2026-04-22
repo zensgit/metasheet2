@@ -1013,6 +1013,64 @@ describe('MetaAutomationRuleEditor', () => {
       .toContain('1 local user can submit after DingTalk checks')
   })
 
+  it('warns when a DingTalk person message includes a fully public form link', async () => {
+    const client = mockClient()
+    const { container } = mount({
+      visible: true,
+      sheetId: 'sheet_1',
+      fields,
+      views,
+      client,
+    })
+    await flushPromises()
+
+    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header select') as HTMLSelectElement
+    actionSelect.value = 'send_dingtalk_person_message'
+    actionSelect.dispatchEvent(new Event('change'))
+    await flushPromises()
+
+    const publicFormSelect = container.querySelector('[data-field="dingtalkPersonPublicFormViewId"]') as HTMLSelectElement
+    publicFormSelect.value = 'view_form'
+    publicFormSelect.dispatchEvent(new Event('change'))
+    await flushPromises()
+
+    expect(container.textContent).toContain('Public form sharing for "Public Form" is fully public')
+    expect(container.textContent).toContain('Use DingTalk-protected access and an allowlist')
+    expect(container.querySelector('[data-field="personPublicFormAccessSummary-0"]')?.getAttribute('data-access-level'))
+      .toBe('public')
+    expect(container.querySelector('[data-field="personMessageSummary"]')?.textContent)
+      .toContain('Fully public; anyone with the link can submit')
+  })
+
+  it('warns when a DingTalk person message uses a protected public form without an allowlist', async () => {
+    const client = mockClient()
+    const { container } = mount({
+      visible: true,
+      sheetId: 'sheet_1',
+      fields,
+      views: viewsWithProtectedPublicFormWithoutAllowlist,
+      client,
+    })
+    await flushPromises()
+
+    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header select') as HTMLSelectElement
+    actionSelect.value = 'send_dingtalk_person_message'
+    actionSelect.dispatchEvent(new Event('change'))
+    await flushPromises()
+
+    const publicFormSelect = container.querySelector('[data-field="dingtalkPersonPublicFormViewId"]') as HTMLSelectElement
+    publicFormSelect.value = 'view_form'
+    publicFormSelect.dispatchEvent(new Event('change'))
+    await flushPromises()
+
+    expect(container.textContent).toContain('Public form sharing for "Public Form" allows all bound DingTalk users to submit')
+    expect(container.textContent).toContain('add allowed users or member groups')
+    expect(container.querySelector('[data-field="personPublicFormAudienceSummary-0"]')?.textContent)
+      .toContain('No local allowlist limits are set; all bound DingTalk users can submit')
+    expect(container.querySelector('[data-field="personMessageSummary"]')?.textContent)
+      .toContain('No local allowlist limits are set; all bound DingTalk users can submit')
+  })
+
   it('emits DingTalk person action config with optional links', async () => {
     const saved = vi.fn()
     const client = mockClient()

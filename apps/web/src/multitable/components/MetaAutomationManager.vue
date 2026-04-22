@@ -503,7 +503,7 @@
               <option v-for="view in formViews" :key="view.id" :value="view.id">{{ view.name }}</option>
             </select>
             <div
-              v-for="warning in publicFormLinkWarnings(draft.dingtalkPersonPublicFormViewId)"
+              v-for="warning in publicFormLinkWarnings(draft.dingtalkPersonPublicFormViewId, true)"
               :key="`draft-person-public-form-${warning}`"
               class="meta-automation__hint meta-automation__hint--warning"
             >
@@ -1079,10 +1079,10 @@ function renderedTemplateExample(value: string, fallback: string) {
   return rendered || fallback
 }
 
-function publicFormLinkWarnings(value: unknown, warnWhenGroupAccessRisk = false) {
+function publicFormLinkWarnings(value: unknown, warnWhenDingTalkAccessRisk = false) {
   return listDingTalkPublicFormLinkWarnings(value, formViews.value, {
-    warnWhenFullyPublic: warnWhenGroupAccessRisk,
-    warnWhenProtectedWithoutAllowlist: warnWhenGroupAccessRisk,
+    warnWhenFullyPublic: warnWhenDingTalkAccessRisk,
+    warnWhenProtectedWithoutAllowlist: warnWhenDingTalkAccessRisk,
   })
 }
 
