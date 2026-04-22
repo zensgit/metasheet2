@@ -144,3 +144,40 @@ Results:
 - `git diff --check`: passed.
 
 Note: the full-unit count is one higher than the original delivery summary because `origin/main` now includes the #1077 WP2 source filter regression test.
+
+## CI follow-up verification — 2026-04-23
+
+PR #1081 first CI run exposed two packaging gaps that were not covered by the
+focused local commands:
+
+- `pnpm type-check` runs web type checking and caught `TemplateDetailView.vue`
+  maps that were typed as `Record<ApprovalNodeType, ...>` but did not include
+  the new `parallel` node type.
+- `contracts (openapi)` caught generated dist drift after
+  `packages/openapi/src/base.yml` added the parallel schema fields.
+
+Fixes applied:
+
+- Added `parallel` label / timeline / icon / tag entries to
+  `apps/web/src/views/approval/TemplateDetailView.vue`.
+- Rebuilt and committed `packages/openapi/dist/openapi.json`,
+  `packages/openapi/dist/openapi.yaml`, and
+  `packages/openapi/dist/combined.openapi.yml`.
+
+Commands rerun:
+
+```bash
+pnpm exec tsx packages/openapi/tools/build.ts
+pnpm --filter @metasheet/web exec vue-tsc -b --noEmit
+pnpm --filter @metasheet/core-backend exec tsc --noEmit --pretty false
+```
+
+Results:
+
+- OpenAPI build: completed and regenerated the expected dist files.
+- Frontend `vue-tsc -b --noEmit`: passed.
+- Backend TypeScript: passed with zero diagnostics.
+
+The OpenAPI contract gate checks for a clean committed dist after running the
+build; it is rerun after this fix commit is created so `git diff --quiet` can
+observe the regenerated files as baseline.

@@ -199,6 +199,7 @@ function nodeTypeLabel(type: ApprovalNodeType) {
     approval: '审批',
     cc: '抄送',
     condition: '条件',
+    parallel: '并行',
     end: '结束',
   }
   return map[type] ?? type
@@ -210,6 +211,7 @@ function nodeTimelineType(type: ApprovalNodeType): string {
     approval: 'warning',
     cc: 'success',
     condition: 'danger',
+    parallel: 'warning',
     end: 'info',
   }
   return map[type] ?? 'info'
@@ -221,6 +223,7 @@ function nodeTimelineIcon(type: ApprovalNodeType) {
     approval: UserFilled,
     cc: Message,
     condition: QuestionFilled,
+    parallel: QuestionFilled,
     end: CircleCheckFilled,
   }
   return map[type] ?? undefined
@@ -232,6 +235,7 @@ function nodeTagType(type: ApprovalNodeType): string {
     approval: 'warning',
     cc: 'success',
     condition: 'danger',
+    parallel: 'warning',
     end: 'info',
   }
   return map[type] ?? ''

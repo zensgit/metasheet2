@@ -3365,6 +3365,37 @@
           "targetIds"
         ]
       },
+      "ApprovalParallelNodeConfig": {
+        "type": "object",
+        "description": "Parallel gateway (并行分支) — fans into the listed branch edges and\nre-joins at `joinNodeKey`. v1 only ships `joinMode: all` (会签 on\nthe join); `any` is reserved for a future wave.\n",
+        "properties": {
+          "branches": {
+            "type": "array",
+            "minItems": 2,
+            "items": {
+              "type": "string"
+            },
+            "description": "Outgoing edgeKeys, one per branch. Each edge's downstream path\nmust reach `joinNodeKey` before any `end` or loop, and must not\nshare approver assignees with any other branch.\n"
+          },
+          "joinMode": {
+            "type": "string",
+            "enum": [
+              "all",
+              "any"
+            ],
+            "description": "Join policy at `joinNodeKey`. `all` waits for every branch to\nreport complete before advancing. `any` (future) would advance\non the first branch to complete.\n"
+          },
+          "joinNodeKey": {
+            "type": "string",
+            "description": "The approval / cc node every branch converges onto. Required —\nlets the runtime short-circuit walker without structural\ninference.\n"
+          }
+        },
+        "required": [
+          "branches",
+          "joinMode",
+          "joinNodeKey"
+        ]
+      },
       "ApprovalNode": {
         "type": "object",
         "properties": {
@@ -3378,6 +3409,7 @@
               "approval",
               "cc",
               "condition",
+              "parallel",
               "end"
             ]
           },
@@ -3703,6 +3735,14 @@
           "currentNodeKey": {
             "type": "string",
             "nullable": true
+          },
+          "currentNodeKeys": {
+            "type": "array",
+            "nullable": true,
+            "items": {
+              "type": "string"
+            },
+            "description": "Parallel gateway (并行分支) runtime frontier. Present only when\nthe instance is inside a parallel region with ≥ 2 still-pending\nbranches. Each entry is the current approval node key for one\nbranch. When absent or length < 2, use `currentNodeKey`\nunchanged for the linear / non-parallel flow.\n"
           },
           "assignments": {
             "type": "array",
