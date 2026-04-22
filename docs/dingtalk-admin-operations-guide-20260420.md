@@ -146,6 +146,7 @@ Behavior:
 - the system then resolves the local user
 - the local user must be directly allowed or belong to an allowed member group
 - without an allowlist, `Bound DingTalk users only` admits all bound DingTalk local users and `Authorized DingTalk users only` admits all locally authorized DingTalk users
+- the form share manager shows `Local allowlist limits` so owners can confirm whether no local limit is set or how many local users/member groups can fill after DingTalk checks
 
 Important rule:
 
@@ -218,7 +219,7 @@ Authoring guardrail:
 
 - if the selected form is still fully public, the DingTalk group rule editor warns before save
 - if the selected protected form has no allowed users or member groups, the DingTalk group rule editor warns before save
-- check `Public form access` in the automation message summary before saving
+- check `Public form access` in the automation message summary and `Local allowlist limits` in form sharing before saving
 - switch the form to `Bound DingTalk users only` or `Authorized DingTalk users only` before relying on allowlists
 
 ### Scenario 3: Notify specific staff only
@@ -257,6 +258,7 @@ Current gaps to be aware of:
 - DingTalk group roster is not auto-imported
 - row/field-specific fill assignment is not yet first-class
 - precise protected-form allowlists depend on local user/member-group governance, not raw DingTalk identities
+- the allowlist audience summary is derived from local allowlist users/groups; it does not infer or sync DingTalk group members
 
 ## K. Operational recommendations
 

@@ -54,6 +54,14 @@
                   <p class="meta-form-share__hint">
                     DingTalk is only the sign-in and delivery channel. The allowlist still targets your local users and member groups.
                   </p>
+                  <p
+                    class="meta-form-share__allowlist-summary"
+                    data-form-share-allowlist-summary="true"
+                    :data-user-count="allowedUserCount"
+                    :data-member-group-count="allowedMemberGroupCount"
+                  >
+                    {{ allowlistAudienceSummary }}
+                  </p>
                 </div>
               </div>
 
@@ -289,6 +297,24 @@ const accessModeHint = computed(() => {
 
 const allowedUsers = computed(() => config.value?.allowedUsers ?? [])
 const allowedMemberGroups = computed(() => config.value?.allowedMemberGroups ?? [])
+const allowedUserCount = computed(() => config.value?.allowedUserIds?.length ?? allowedUsers.value.length)
+const allowedMemberGroupCount = computed(() => config.value?.allowedMemberGroupIds?.length ?? allowedMemberGroups.value.length)
+const allowlistAudienceSummary = computed(() => {
+  const userCount = allowedUserCount.value
+  const memberGroupCount = allowedMemberGroupCount.value
+  if (userCount === 0 && memberGroupCount === 0) {
+    return 'No local allowlist limits are set; all users allowed by the selected DingTalk mode can fill this form.'
+  }
+
+  const parts: string[] = []
+  if (userCount > 0) {
+    parts.push(`${userCount} ${userCount === 1 ? 'local user' : 'local users'}`)
+  }
+  if (memberGroupCount > 0) {
+    parts.push(`${memberGroupCount} ${memberGroupCount === 1 ? 'local member group' : 'local member groups'}`)
+  }
+  return `Local allowlist limits: ${parts.join(' and ')} can fill after passing the selected DingTalk mode.`
+})
 const selectedSubjectKeys = computed(() => new Set([
   ...allowedUsers.value.map((user) => `user:${user.subjectId}`),
   ...allowedMemberGroups.value.map((group) => `member-group:${group.subjectId}`),
@@ -651,6 +677,17 @@ watch(candidateQuery, () => {
   display: flex;
   flex-direction: column;
   gap: 6px;
+}
+
+.meta-form-share__allowlist-summary {
+  align-self: flex-start;
+  background: #eff6ff;
+  border: 1px solid #bfdbfe;
+  border-radius: 999px;
+  color: #1d4ed8;
+  font-size: 12px;
+  margin: 0;
+  padding: 4px 10px;
 }
 
 .meta-form-share__chip-list {
