@@ -374,6 +374,65 @@ describe('DingTalk automation link route validation', () => {
     expect(res.body.data.rule).not.toHaveProperty('action_type')
   })
 
+  it('persists a V1 DingTalk person action when public form and internal links are valid', async () => {
+    const { app, automationService } = await createApp()
+
+    const res = await request(app)
+      .post(`/api/multitable/sheets/${SHEET_ID}/automations`)
+      .send({
+        name: 'Advanced person rule',
+        triggerType: 'record.created',
+        triggerConfig: {},
+        actionType: 'notify',
+        actionConfig: {},
+        conditions: { conjunction: 'AND', conditions: [] },
+        actions: [{
+          type: 'send_dingtalk_person_message',
+          config: {
+            userIds: ['user_1'],
+            title: 'Please fill',
+            content: 'Open form',
+            publicFormViewId: VALID_FORM_VIEW_ID,
+            internalViewId: INTERNAL_VIEW_ID,
+          },
+        }],
+      })
+
+    expect(res.status).toBe(200)
+    expect(res.body.ok).toBe(true)
+    expect(automationService.createRule).toHaveBeenCalledWith(SHEET_ID, expect.objectContaining({
+      actionType: 'notify',
+      actions: [
+        expect.objectContaining({
+          type: 'send_dingtalk_person_message',
+          config: expect.objectContaining({
+            userIds: ['user_1'],
+            titleTemplate: 'Please fill',
+            bodyTemplate: 'Open form',
+            publicFormViewId: VALID_FORM_VIEW_ID,
+            internalViewId: INTERNAL_VIEW_ID,
+          }),
+        }),
+      ],
+    }))
+    expect(res.body.data.rule).toMatchObject({
+      actionType: 'notify',
+      conditions: { conjunction: 'AND', conditions: [] },
+    })
+    expect(res.body.data.rule.actions).toEqual([
+      expect.objectContaining({
+        type: 'send_dingtalk_person_message',
+        config: expect.objectContaining({
+          userIds: ['user_1'],
+          titleTemplate: 'Please fill',
+          bodyTemplate: 'Open form',
+          publicFormViewId: VALID_FORM_VIEW_ID,
+          internalViewId: INTERNAL_VIEW_ID,
+        }),
+      }),
+    ])
+  })
+
   it('rejects a DingTalk group rule without an effective destination before persisting the rule', async () => {
     const { app, automationService } = await createApp()
 
