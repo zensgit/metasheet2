@@ -298,6 +298,10 @@ function describeDingTalkPublicFormRuntimeLines(publicForm: Record<string, unkno
   ]
 }
 
+function describeDingTalkInternalViewRuntimeLines(): string[] {
+  return ['- 处理权限：需登录系统并具备该表格/视图访问权限']
+}
+
 async function recordDingTalkGroupDelivery(
   queryFn: AutomationDeps['queryFn'],
   input: {
@@ -872,6 +876,7 @@ export class AutomationExecutor {
         return { actionType: 'send_dingtalk_person_message', status: 'failed', error: 'Internal view not found' }
       }
       linkLines.push(`- [处理入口](${buildAppLink(baseUrl, `/multitable/${context.sheetId}/${internalViewId}`, { recordId: context.recordId })})`)
+      linkLines.push(...describeDingTalkInternalViewRuntimeLines())
     }
 
     const templateData: Record<string, unknown> = {
@@ -1274,6 +1279,7 @@ export class AutomationExecutor {
         return { actionType: 'send_dingtalk_group_message', status: 'failed', error: 'Internal view not found' }
       }
       linkLines.push(`- [处理入口](${buildAppLink(baseUrl, `/multitable/${context.sheetId}/${internalViewId}`, { recordId: context.recordId })})`)
+      linkLines.push(...describeDingTalkInternalViewRuntimeLines())
     }
 
     const templateData: Record<string, unknown> = {

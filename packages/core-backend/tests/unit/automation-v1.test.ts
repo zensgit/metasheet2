@@ -454,6 +454,7 @@ describe('AutomationExecutor', () => {
     expect(payload.markdown.text).toContain('/multitable/public-form/sheet_1/view_form?publicToken=public-token')
     expect(payload.markdown.text).toContain('表单访问：任何获得链接的人可填写')
     expect(payload.markdown.text).toContain('/multitable/sheet_1/view_grid?recordId=r1')
+    expect(payload.markdown.text).toContain('处理权限：需登录系统并具备该表格/视图访问权限')
     expect((queryFn.mock.calls[3]?.[0] as string) ?? '').toContain('INSERT INTO dingtalk_group_deliveries')
   })
 
@@ -897,6 +898,7 @@ describe('AutomationExecutor', () => {
     expect(payload.msg.markdown.text).toContain('表单访问：钉钉登录 + 本地授权')
     expect(payload.msg.markdown.text).toContain('允许范围：1 个本地用户、1 个本地成员组通过钉钉校验后可填写')
     expect(payload.msg.markdown.text).toContain('/multitable/sheet_1/view_grid?recordId=r1')
+    expect(payload.msg.markdown.text).toContain('处理权限：需登录系统并具备该表格/视图访问权限')
     const insertCalls = queryFn.mock.calls.filter((call) => String(call[0]).includes('INSERT INTO dingtalk_person_deliveries'))
     expect(insertCalls).toHaveLength(2)
   })
