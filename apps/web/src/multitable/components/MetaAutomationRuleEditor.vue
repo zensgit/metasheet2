@@ -448,11 +448,15 @@
                   :key="personRecipientCandidateKey(candidate)"
                   class="meta-rule-editor__recipient-option"
                   type="button"
+                  :disabled="isInactivePersonRecipientCandidate(candidate)"
                   :data-person-recipient-suggestion="personRecipientCandidateKey(candidate)"
                   @click="addPersonRecipient(action, candidate, idx)"
                 >
                   <strong>{{ candidate.label }}</strong>
                   <span>{{ candidate.subtitle || candidate.subjectId }}</span>
+                  <span>{{ personRecipientSubjectLabel(candidate) }}</span>
+                  <span v-if="candidate.accessLevel">{{ personRecipientAccessLabel(candidate.accessLevel) }}</span>
+                  <span v-if="isInactivePersonRecipientCandidate(candidate)">Inactive users cannot be added</span>
                 </button>
               </div>
               <div v-else-if="typeof action.config.userIdsSearch === 'string' && action.config.userIdsSearch.trim()" class="meta-rule-editor__hint">No matching users or member groups</div>
@@ -1100,6 +1104,22 @@ function personRecipientCandidateKey(candidate: MetaSheetPermissionCandidate) {
   return personRecipientDirectoryKey(candidate.subjectType === 'member-group' ? 'member-group' : 'user', candidate.subjectId)
 }
 
+function isPersonRecipientCandidate(candidate: MetaSheetPermissionCandidate): boolean {
+  return candidate.subjectType === 'user' || candidate.subjectType === 'member-group'
+}
+
+function isInactivePersonRecipientCandidate(candidate: MetaSheetPermissionCandidate): boolean {
+  return candidate.subjectType === 'user' && candidate.isActive === false
+}
+
+function personRecipientSubjectLabel(candidate: MetaSheetPermissionCandidate): string {
+  return candidate.subjectType === 'member-group' ? 'Member group' : 'User'
+}
+
+function personRecipientAccessLabel(accessLevel: MetaSheetPermissionCandidate['accessLevel']): string {
+  return accessLevel ? `Access: ${accessLevel}` : ''
+}
+
 function rememberPersonRecipientSuggestions(items: MetaSheetPermissionCandidate[]) {
   const next = { ...personRecipientDirectory.value }
   for (const item of items) {
@@ -1129,6 +1149,7 @@ function availablePersonRecipientSuggestions(idx: number, action: DraftAction) {
   const selected = new Set(parseUserIdsText(action.config.userIdsText))
   const selectedGroups = new Set(parseMemberGroupIdsText(action.config.memberGroupIdsText))
   return (personRecipientSuggestions.value[idx] ?? []).filter((candidate) => {
+    if (!isPersonRecipientCandidate(candidate)) return false
     if (candidate.subjectType === 'member-group') return !selectedGroups.has(candidate.subjectId)
     return !selected.has(candidate.subjectId)
   })
@@ -1169,6 +1190,8 @@ async function loadPersonRecipientSuggestions(idx: number, action: DraftAction) 
 }
 
 function addPersonRecipient(action: DraftAction, candidate: MetaSheetPermissionCandidate, idx: number) {
+  if (!isPersonRecipientCandidate(candidate)) return
+  if (isInactivePersonRecipientCandidate(candidate)) return
   if (candidate.subjectType === 'member-group') {
     const ids = new Set(parseMemberGroupIdsText(action.config.memberGroupIdsText))
     ids.add(candidate.subjectId)

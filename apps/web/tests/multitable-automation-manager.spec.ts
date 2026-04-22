@@ -1903,6 +1903,82 @@ describe('MetaAutomationManager', () => {
     expect(client.listFormShareCandidates).toHaveBeenCalledTimes(2)
   })
 
+  it('disables inactive DingTalk person user candidates and shows candidate status in the inline form', async () => {
+    const { client } = mockClient([])
+    client.listFormShareCandidates = vi.fn(async () => ({
+      items: [
+        {
+          subjectType: 'user',
+          subjectId: 'user_inactive',
+          label: 'Inactive User',
+          subtitle: 'inactive@example.com',
+          isActive: false,
+          accessLevel: 'read',
+        },
+        {
+          subjectType: 'member-group',
+          subjectId: 'group_1',
+          label: 'Sales Team',
+          subtitle: '3 members',
+          isActive: true,
+          accessLevel: 'write',
+        },
+        {
+          subjectType: 'role',
+          subjectId: 'role_admin',
+          label: 'Admins',
+          subtitle: 'Role',
+          isActive: true,
+          accessLevel: 'admin',
+        },
+      ],
+      total: 3,
+      limit: 8,
+      query: 'inactive',
+    }))
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
+    await flushPromises()
+
+    const addBtn = container.querySelector('.meta-automation__btn-add') as HTMLButtonElement
+    addBtn.click()
+    await nextTick()
+
+    const actionSelect = container.querySelector('[data-automation-field="actionType"]') as HTMLSelectElement
+    actionSelect.value = 'send_dingtalk_person_message'
+    actionSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushPromises()
+
+    const searchInput = container.querySelector('[data-automation-field="dingtalkPersonUserSearch"]') as HTMLInputElement
+    searchInput.value = 'inactive'
+    searchInput.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushPromises()
+
+    const inactiveSuggestion = container.querySelector('[data-automation-person-suggestion="user:user_inactive"]') as HTMLButtonElement
+    expect(inactiveSuggestion.disabled).toBe(true)
+    expect(inactiveSuggestion.textContent).toContain('User')
+    expect(inactiveSuggestion.textContent).toContain('Access: read')
+    expect(inactiveSuggestion.textContent).toContain('Inactive users cannot be added')
+    expect(container.querySelector('[data-automation-person-suggestion="user:role_admin"]')).toBeNull()
+    expect(container.textContent).not.toContain('Admins')
+
+    inactiveSuggestion.click()
+    await flushPromises()
+
+    const userIdsInput = container.querySelector('[data-automation-field="dingtalkPersonUserIds"]') as HTMLTextAreaElement
+    expect(userIdsInput.value).toBe('')
+
+    const groupSuggestion = container.querySelector('[data-automation-person-suggestion="member-group:group_1"]') as HTMLButtonElement
+    expect(groupSuggestion.disabled).toBe(false)
+    expect(groupSuggestion.textContent).toContain('Member group')
+    expect(groupSuggestion.textContent).toContain('Access: write')
+    groupSuggestion.click()
+    await flushPromises()
+
+    const memberGroupIdsInput = container.querySelector('[data-automation-field="dingtalkPersonMemberGroupIds"]') as HTMLTextAreaElement
+    expect(memberGroupIdsInput.value).toBe('group_1')
+    expect(client.listFormShareCandidates).toHaveBeenCalledWith('sheet_1', { q: 'inactive', limit: 8 })
+  })
+
   it('opens DingTalk person delivery viewer for person message rules', async () => {
     const { client } = mockClient([
       fakeRule({
