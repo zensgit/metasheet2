@@ -57,6 +57,7 @@ const OBJECT_ID = 'installedAsset'
 const SHEET_ID = getObjectSheetId(PROJECT_ID, OBJECT_ID)
 const ASSET_CODE_FIELD_ID = getObjectFieldId(PROJECT_ID, OBJECT_ID, 'assetCode')
 const SERIAL_NO_FIELD_ID = getObjectFieldId(PROJECT_ID, OBJECT_ID, 'serialNo')
+const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 
 const require = createRequire(import.meta.url)
 
@@ -147,7 +148,7 @@ async function ensureMultitableSeamSchema(pool: Pool): Promise<void> {
   `)
 }
 
-describe('after-sales installer C-min contract against real multitable seam', () => {
+describeIfDatabase('after-sales installer C-min contract against real multitable seam', () => {
   let pool: Pool | undefined
   let schemaReady = false
 
@@ -159,12 +160,6 @@ describe('after-sales installer C-min contract against real multitable seam', ()
 
   beforeAll(async () => {
     const databaseUrl = process.env.DATABASE_URL?.trim()
-    if (!databaseUrl) {
-      throw new Error(
-        'DATABASE_URL is required for after-sales installer provisioning integration tests',
-      )
-    }
-
     pool = new Pool({ connectionString: databaseUrl })
     await ensureMultitableSeamSchema(pool)
     schemaReady = true

@@ -138,3 +138,33 @@ Results:
 - New integration: `after-sales-installer-provisioning.api.test.ts` 3/3 passed.
 - Focused unit regression: `after-sales-installer.test.ts` + `multitable-provisioning.test.ts` 48/48 passed.
 - `git diff --check`: passed.
+
+## CI guard verification — 2026-04-23
+
+After PR #1079 first CI run, the generic `Plugin System Tests / test (18.x)`
+job failed because it runs the broader Vitest sweep without `DATABASE_URL`.
+The M1 real-DB integration test is intentionally external-dependency-backed,
+so it now uses `describe.skip` when `DATABASE_URL` is absent. The explicit
+integration command remains unchanged and still exercises the real
+PostgreSQL-backed seam when `DATABASE_URL` is provided.
+
+Commands rerun:
+
+```bash
+pnpm --filter @metasheet/core-backend exec vitest run \
+  tests/integration/after-sales-installer-provisioning.api.test.ts --reporter=dot
+
+DATABASE_URL='postgresql://chouhua@127.0.0.1:5432/postgres' PGHOST=127.0.0.1 PGPORT=5432 PGDATABASE=postgres PGUSER=chouhua \
+  pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run \
+    tests/integration/after-sales-installer-provisioning.api.test.ts --reporter=dot
+
+pnpm --filter @metasheet/core-backend exec tsc --noEmit
+git diff --check
+```
+
+Results:
+
+- No-DB default Vitest path: 1 file skipped, 3 tests skipped, exit 0.
+- Real-DB integration path: 3/3 passed.
+- TypeScript: passed with zero diagnostics.
+- `git diff --check`: passed.
