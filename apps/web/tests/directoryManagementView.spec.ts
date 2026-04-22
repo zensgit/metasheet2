@@ -1041,6 +1041,123 @@ describe('DirectoryManagementView', () => {
     expect(container?.textContent).not.toContain('https://example.com/invite/abc')
   })
 
+  it('creates and binds a no-email local user from the account list', async () => {
+    apiFetchMock
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: {
+          items: [createIntegration()],
+        },
+      }))
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: { items: [] },
+      }))
+      .mockResolvedValueOnce(createJsonResponse(
+        createScheduleSnapshotPayload(),
+      ))
+      .mockResolvedValueOnce(createJsonResponse(
+        createAlertListPayload([]),
+      ))
+      .mockResolvedValueOnce(createJsonResponse(
+        createReviewItemsPayload([]),
+      ))
+      .mockResolvedValueOnce(createJsonResponse(
+        createAccountListPayload([createAccount({
+          id: 'account-list-no-email',
+          name: '王武',
+          email: null,
+          mobile: '13900008888',
+        })], { total: 1 }),
+      ))
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: {
+          user: {
+            id: 'user-created-list-no-email',
+            email: null,
+            username: 'wangwu',
+            name: '王武',
+            mobile: '13900008888',
+            role: 'user',
+            is_active: true,
+          },
+          temporaryPassword: 'Temp#888888',
+          onboarding: {
+            accountLabel: 'wangwu',
+            acceptInviteUrl: '',
+            inviteMessage: '账号：wangwu',
+          },
+        },
+      }))
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: {
+          items: [createIntegration()],
+        },
+      }))
+      .mockResolvedValueOnce(createJsonResponse(
+        createReviewItemsPayload([]),
+      ))
+      .mockResolvedValueOnce(createJsonResponse(
+        createAccountListPayload([createAccount({
+          id: 'account-list-no-email',
+          name: '王武',
+          email: null,
+          mobile: '13900008888',
+          linkStatus: 'linked',
+          matchStrategy: 'manual_admin',
+          localUser: {
+            id: 'user-created-list-no-email',
+            email: null,
+            username: 'wangwu',
+            name: '王武',
+          },
+        })], { total: 1 }),
+      ))
+
+    app = createApp(DirectoryManagementView)
+    registerRouterLink(app)
+    app.mount(container!)
+    await flushUi()
+
+    const accountsSection = findAccountsSection(container!)
+    const accountCard = accountsSection.querySelector('.directory-admin__account') as HTMLElement
+    expect(accountCard).toBeTruthy()
+    const toggleButton = Array.from(accountCard.querySelectorAll('button')).find((button) => button.textContent?.includes('手动创建用户'))
+    expect(toggleButton).toBeTruthy()
+    toggleButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi(2)
+
+    const usernameInput = Array.from(accountCard.querySelectorAll('input')).find((input) => input.getAttribute('placeholder') === '例如 liqing') as HTMLInputElement | undefined
+    expect(usernameInput).toBeTruthy()
+    usernameInput!.value = 'wangwu'
+    usernameInput!.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi(2)
+
+    const createAndBindButton = Array.from(accountCard.querySelectorAll('button')).find((button) => button.textContent?.includes('创建用户并绑定'))
+    expect(createAndBindButton).toBeTruthy()
+    createAndBindButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi(12)
+
+    expect(apiFetchMock).toHaveBeenCalledWith(
+      '/api/admin/directory/accounts/account-list-no-email/admit-user',
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({
+          name: '王武',
+          username: 'wangwu',
+          mobile: '13900008888',
+          enableDingTalkGrant: true,
+        }),
+      }),
+    )
+    expect(container?.textContent).toContain('最近创建并绑定结果')
+    expect(container?.textContent).toContain('新用户临时密码：Temp#888888')
+    expect(container?.textContent).toContain('账号：wangwu')
+    expect(container?.textContent).toContain('目录成员 王武 已创建本地用户并完成绑定')
+  })
+
   it('focuses a reviewed account and quick-binds it from the accounts banner', async () => {
     apiFetchMock
       .mockResolvedValueOnce(createJsonResponse({
