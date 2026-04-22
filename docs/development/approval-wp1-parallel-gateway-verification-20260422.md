@@ -107,3 +107,40 @@ $ pnpm --filter @metasheet/core-backend exec vitest run tests/unit --reporter=do
 - Nested parallel regions.
 - Branch-overlapping approvers (requires assignment-index rethink).
 - Regression test combining 或签 aggregation inside a parallel branch.
+## Rebase verification — 2026-04-22
+
+Rebased from the original delivery baseline onto `origin/main@d547d89fcfcfded72f2e78a16320111d6def4f54`.
+
+Rebased head:
+
+```text
+a452b3517 feat(approval): ship WP1 parallel gateway (并行分支) with join-all semantics
+```
+
+Commands rerun after rebase:
+
+```bash
+pnpm --filter @metasheet/core-backend exec tsc --noEmit --pretty false
+pnpm --filter @metasheet/web exec vue-tsc --noEmit
+
+DATABASE_URL='postgresql://chouhua@127.0.0.1:5432/postgres' PGHOST=127.0.0.1 PGPORT=5432 PGDATABASE=postgres PGUSER=chouhua \
+  pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run \
+    tests/integration/approval-wp1-parallel-gateway.api.test.ts \
+    tests/integration/approval-wp1-any-mode.api.test.ts \
+    tests/integration/approval-pack1a-lifecycle.api.test.ts \
+    tests/integration/approval-wp2-source-filter.api.test.ts --reporter=dot
+
+pnpm --filter @metasheet/core-backend exec vitest run tests/unit --reporter=dot
+
+git diff --check
+```
+
+Results:
+
+- Backend TypeScript: passed with zero diagnostics.
+- Frontend `vue-tsc`: passed.
+- Integration regression: 4 files passed, 14/14 tests passed.
+- Backend full unit suite: 123 files passed, 1591/1591 tests passed.
+- `git diff --check`: passed.
+
+Note: the full-unit count is one higher than the original delivery summary because `origin/main` now includes the #1077 WP2 source filter regression test.
