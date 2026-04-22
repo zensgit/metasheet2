@@ -52,7 +52,14 @@ describeIfDatabase('Approval Wave 2 WP2 sourceSystem filter', () => {
   const platformInstanceId = `apv_wp2_platform_${suiteSuffix}`
   const plmExternalId = `wp2_plm_${suiteSuffix}`
   const plmInstanceId = `plm:${plmExternalId}`
-  const createdIds = [platformInstanceId, plmInstanceId]
+  const platformCompletedInstanceId = `apv_wp2_platform_done_${suiteSuffix}`
+  const plmCompletedExternalId = `wp2_plm_done_${suiteSuffix}`
+  const plmCompletedInstanceId = `plm:${plmCompletedExternalId}`
+  const pendingCreatedIds = [platformInstanceId, plmInstanceId]
+  const completedCreatedIds = [platformCompletedInstanceId, plmCompletedInstanceId]
+  const createdIds = [...pendingCreatedIds, ...completedCreatedIds]
+  const tabActorId = `wp2-tab-actor-${suiteSuffix}`
+  const platformAssignmentId = randomUUID()
   // Keep workflow keys stable but collision-free so the filter test is unaffected
   // by any rows other integration suites may have left behind.
   const platformWorkflowKey = `wp2-platform-${suiteSuffix}`
@@ -78,6 +85,12 @@ describeIfDatabase('Approval Wave 2 WP2 sourceSystem filter', () => {
                0, 0, 'ok', now(), now())`,
       [platformInstanceId, platformWorkflowKey, `platform:wp2:${suiteSuffix}`, `WP2 platform approval ${suiteSuffix}`],
     )
+    await pool.query(
+      `INSERT INTO approval_assignments
+         (id, instance_id, assignment_type, assignee_id, source_step, node_key, is_active, metadata, created_at, updated_at)
+       VALUES ($1, $2, 'user', $3, 0, 'wp2_pending', TRUE, '{}'::jsonb, now(), now())`,
+      [platformAssignmentId, platformInstanceId, tabActorId],
+    )
 
     // Seed: one PLM-mirrored approval (matching the bridge's write shape).
     await pool.query(
@@ -92,6 +105,44 @@ describeIfDatabase('Approval Wave 2 WP2 sourceSystem filter', () => {
                '{"source_type":"eco","source_stage":"review","source_version":0}'::jsonb,
                0, 0, 'ok', now(), now())`,
       [plmInstanceId, plmExternalId, plmWorkflowKey, `plm:wp2:${suiteSuffix}`, `WP2 PLM approval ${suiteSuffix}`],
+    )
+
+    await pool.query(
+      `INSERT INTO approval_instances
+         (id, status, version, source_system, workflow_key, business_key, title,
+          requester_snapshot, subject_snapshot, policy_snapshot, metadata,
+          current_step, total_steps, sync_status, created_at, updated_at)
+       VALUES ($1, 'approved', 1, 'platform', $2, $3, $4,
+               $5::jsonb,
+               '{}'::jsonb, '{}'::jsonb, '{}'::jsonb,
+               0, 0, 'ok', now(), now())`,
+      [
+        platformCompletedInstanceId,
+        `${platformWorkflowKey}-done`,
+        `platform:wp2:done:${suiteSuffix}`,
+        `WP2 completed platform approval ${suiteSuffix}`,
+        JSON.stringify({ id: tabActorId, name: '平台发起人' }),
+      ],
+    )
+
+    await pool.query(
+      `INSERT INTO approval_instances
+         (id, status, version, source_system, external_approval_id, workflow_key, business_key, title,
+          requester_snapshot, subject_snapshot, policy_snapshot, metadata,
+          current_step, total_steps, sync_status, created_at, updated_at)
+       VALUES ($1, 'approved', 1, 'plm', $2, $3, $4, $5,
+               '{"id":"plm-completed-requester","name":"PLM 完成人"}'::jsonb,
+               '{"productNumber":"P-002","productName":"产品"}'::jsonb,
+               '{"rejectCommentRequired":true,"sourceOfTruth":"plm"}'::jsonb,
+               '{"source_type":"eco","source_stage":"done","source_version":1}'::jsonb,
+               0, 0, 'ok', now(), now())`,
+      [
+        plmCompletedInstanceId,
+        plmCompletedExternalId,
+        `${plmWorkflowKey}-done`,
+        `plm:wp2:done:${suiteSuffix}`,
+        `WP2 completed PLM approval ${suiteSuffix}`,
+      ],
     )
 
     server = new MetaSheetServer({
@@ -153,12 +204,56 @@ describeIfDatabase('Approval Wave 2 WP2 sourceSystem filter', () => {
     expect(plmRow).toBeTruthy()
     expect(plmRow?.sourceSystem).toBe('plm')
 
-    // Direct assertion: without workflow_key narrowing, the two rows tagged with our
-    // suite-specific business keys must both appear when sourceSystem=all.
+    // Direct assertion: without workflow_key narrowing, both seeded pending
+    // source systems must appear when sourceSystem=all.
     const unified = await getJson<ListResponse>(baseUrl, '/api/approvals?sourceSystem=all&limit=200', token)
-    const ourRows = unified.data.filter((row) => createdIds.includes(row.id))
+    const ourRows = unified.data.filter((row) => pendingCreatedIds.includes(row.id))
     expect(ourRows).toHaveLength(2)
     expect(new Set(ourRows.map((row) => row.sourceSystem))).toEqual(new Set(['platform', 'plm']))
+  })
+
+  it('keeps legacy pending tab scoped to platform assignments when sourceSystem is omitted', async () => {
+    const token = await authToken(baseUrl, tabActorId)
+    const payload = await getJson<ListResponse>(
+      baseUrl,
+      '/api/approvals?tab=pending&limit=200',
+      token,
+    )
+    const ourRows = payload.data.filter((row) => pendingCreatedIds.includes(row.id))
+    expect(ourRows.map((row) => row.id)).toEqual([platformInstanceId])
+    expect(ourRows[0]?.sourceSystem).toBe('platform')
+  })
+
+  it('includes PLM mirrored pending rows when sourceSystem=all is explicit on the pending tab', async () => {
+    const token = await authToken(baseUrl, tabActorId)
+    const payload = await getJson<ListResponse>(
+      baseUrl,
+      '/api/approvals?sourceSystem=all&tab=pending&limit=200',
+      token,
+    )
+    const ourRows = payload.data.filter((row) => pendingCreatedIds.includes(row.id))
+    expect(ourRows).toHaveLength(2)
+    expect(new Set(ourRows.map((row) => row.sourceSystem))).toEqual(new Set(['platform', 'plm']))
+  })
+
+  it('keeps legacy completed tab platform-scoped while explicit all includes external completed rows', async () => {
+    const token = await authToken(baseUrl, tabActorId)
+    const legacyPayload = await getJson<ListResponse>(
+      baseUrl,
+      '/api/approvals?tab=completed&limit=200',
+      token,
+    )
+    const legacyRows = legacyPayload.data.filter((row) => completedCreatedIds.includes(row.id))
+    expect(legacyRows.map((row) => row.id)).toEqual([platformCompletedInstanceId])
+
+    const unifiedPayload = await getJson<ListResponse>(
+      baseUrl,
+      '/api/approvals?sourceSystem=all&tab=completed&limit=200',
+      token,
+    )
+    const unifiedRows = unifiedPayload.data.filter((row) => completedCreatedIds.includes(row.id))
+    expect(unifiedRows).toHaveLength(2)
+    expect(new Set(unifiedRows.map((row) => row.sourceSystem))).toEqual(new Set(['platform', 'plm']))
   })
 
   it('scopes the feed to platform rows when sourceSystem=platform', async () => {

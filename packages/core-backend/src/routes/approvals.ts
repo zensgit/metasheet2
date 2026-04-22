@@ -378,6 +378,7 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
         assignee,
         search,
         tab,
+        includeExternalTabSources: rawSourceSystem === 'all',
         actorId: actorId || undefined,
         actorRoles,
         limit,

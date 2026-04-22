@@ -268,50 +268,67 @@ export class ApprovalBridgeService {
       params.push(`%${options.search}%`)
       paramIndex += 1
     }
+    const sourceSystem = options?.sourceSystem
+    const includeExternalTabSources = options?.includeExternalTabSources === true
     if (options?.tab && options.actorId) {
       const actorRoles = options.actorRoles && options.actorRoles.length > 0 ? options.actorRoles : ['__none__']
-      const actorIdParam = paramIndex++
-      params.push(options.actorId)
-      const actorRolesParam = paramIndex++
-      params.push(actorRoles)
-      conditions.push(`COALESCE(source_system, 'platform') = 'platform'`)
 
-      if (options.tab === 'pending') {
-        conditions.push(`status = 'pending'`)
-        conditions.push(
-          `id IN (
-            SELECT instance_id
-            FROM approval_assignments
-            WHERE is_active = TRUE
-              AND (
-                (assignment_type = 'user' AND assignee_id = $${actorIdParam})
-                OR (assignment_type = 'role' AND assignee_id = ANY($${actorRolesParam}))
+      if (sourceSystem === 'plm') {
+        // PLM assignment filtering is not available in phase 1. The source
+        // filter should still make the pending PLM queue visible instead of
+        // combining `source_system = 'plm'` with platform-only assignment rules.
+        if (options.tab === 'pending') {
+          conditions.push(`status = 'pending'`)
+        } else if (options.tab === 'mine') {
+          conditions.push(`requester_snapshot->>'id' = $${paramIndex++}`)
+          params.push(options.actorId)
+        } else if (options.tab === 'cc') {
+          conditions.push(
+            `id IN (
+              SELECT instance_id
+              FROM approval_records
+              WHERE action = 'cc'
+                AND metadata->>'targetType' = 'user'
+                AND metadata->>'targetId' = $${paramIndex++}
+            )`,
+          )
+          params.push(options.actorId)
+        } else if (options.tab === 'completed') {
+          conditions.push(`status <> 'pending'`)
+        }
+      } else if (includeExternalTabSources) {
+        const actorIdParam = paramIndex++
+        params.push(options.actorId)
+        const actorRolesParam = paramIndex++
+        params.push(actorRoles)
+
+        if (options.tab === 'pending') {
+          conditions.push(
+            `(
+              (
+                COALESCE(source_system, 'platform') = 'platform'
+                AND status = 'pending'
+                AND id IN (
+                  SELECT instance_id
+                  FROM approval_assignments
+                  WHERE is_active = TRUE
+                    AND (
+                      (assignment_type = 'user' AND assignee_id = $${actorIdParam})
+                      OR (assignment_type = 'role' AND assignee_id = ANY($${actorRolesParam}))
+                    )
+                )
               )
-          )`,
-        )
-      } else if (options.tab === 'mine') {
-        conditions.push(`requester_snapshot->>'id' = $${actorIdParam}`)
-      } else if (options.tab === 'cc') {
-        conditions.push(
-          `id IN (
-            SELECT instance_id
-            FROM approval_records
-            WHERE action = 'cc'
-              AND (
-                (metadata->>'targetType' = 'user' AND metadata->>'targetId' = $${actorIdParam})
-                OR (metadata->>'targetType' = 'role' AND metadata->>'targetId' = ANY($${actorRolesParam}))
+              OR (
+                COALESCE(source_system, 'platform') <> 'platform'
+                AND status = 'pending'
               )
-          )`,
-        )
-      } else if (options.tab === 'completed') {
-        conditions.push(`status <> 'pending'`)
-        conditions.push(
-          `(
-            requester_snapshot->>'id' = $${actorIdParam}
-            OR id IN (
-              SELECT instance_id FROM approval_records WHERE actor_id = $${actorIdParam}
-            )
-            OR id IN (
+            )`,
+          )
+        } else if (options.tab === 'mine') {
+          conditions.push(`requester_snapshot->>'id' = $${actorIdParam}`)
+        } else if (options.tab === 'cc') {
+          conditions.push(
+            `id IN (
               SELECT instance_id
               FROM approval_records
               WHERE action = 'cc'
@@ -319,15 +336,103 @@ export class ApprovalBridgeService {
                   (metadata->>'targetType' = 'user' AND metadata->>'targetId' = $${actorIdParam})
                   OR (metadata->>'targetType' = 'role' AND metadata->>'targetId' = ANY($${actorRolesParam}))
                 )
-            )
-            OR id IN (
+            )`,
+          )
+        } else if (options.tab === 'completed') {
+          conditions.push(
+            `(
+              (
+                COALESCE(source_system, 'platform') = 'platform'
+                AND status <> 'pending'
+                AND (
+                  requester_snapshot->>'id' = $${actorIdParam}
+                  OR id IN (
+                    SELECT instance_id FROM approval_records WHERE actor_id = $${actorIdParam}
+                  )
+                  OR id IN (
+                    SELECT instance_id
+                    FROM approval_records
+                    WHERE action = 'cc'
+                      AND (
+                        (metadata->>'targetType' = 'user' AND metadata->>'targetId' = $${actorIdParam})
+                        OR (metadata->>'targetType' = 'role' AND metadata->>'targetId' = ANY($${actorRolesParam}))
+                      )
+                  )
+                  OR id IN (
+                    SELECT instance_id
+                    FROM approval_assignments
+                    WHERE (assignment_type = 'user' AND assignee_id = $${actorIdParam})
+                       OR (assignment_type = 'role' AND assignee_id = ANY($${actorRolesParam}))
+                  )
+                )
+              )
+              OR (
+                COALESCE(source_system, 'platform') <> 'platform'
+                AND status <> 'pending'
+              )
+            )`,
+          )
+        }
+      } else {
+        const actorIdParam = paramIndex++
+        params.push(options.actorId)
+        const actorRolesParam = paramIndex++
+        params.push(actorRoles)
+        conditions.push(`COALESCE(source_system, 'platform') = 'platform'`)
+
+        if (options.tab === 'pending') {
+          conditions.push(`status = 'pending'`)
+          conditions.push(
+            `id IN (
               SELECT instance_id
               FROM approval_assignments
-              WHERE (assignment_type = 'user' AND assignee_id = $${actorIdParam})
-                 OR (assignment_type = 'role' AND assignee_id = ANY($${actorRolesParam}))
-            )
-          )`,
-        )
+              WHERE is_active = TRUE
+                AND (
+                  (assignment_type = 'user' AND assignee_id = $${actorIdParam})
+                  OR (assignment_type = 'role' AND assignee_id = ANY($${actorRolesParam}))
+                )
+            )`,
+          )
+        } else if (options.tab === 'mine') {
+          conditions.push(`requester_snapshot->>'id' = $${actorIdParam}`)
+        } else if (options.tab === 'cc') {
+          conditions.push(
+            `id IN (
+              SELECT instance_id
+              FROM approval_records
+              WHERE action = 'cc'
+                AND (
+                  (metadata->>'targetType' = 'user' AND metadata->>'targetId' = $${actorIdParam})
+                  OR (metadata->>'targetType' = 'role' AND metadata->>'targetId' = ANY($${actorRolesParam}))
+                )
+            )`,
+          )
+        } else if (options.tab === 'completed') {
+          conditions.push(`status <> 'pending'`)
+          conditions.push(
+            `(
+              requester_snapshot->>'id' = $${actorIdParam}
+              OR id IN (
+                SELECT instance_id FROM approval_records WHERE actor_id = $${actorIdParam}
+              )
+              OR id IN (
+                SELECT instance_id
+                FROM approval_records
+                WHERE action = 'cc'
+                  AND (
+                    (metadata->>'targetType' = 'user' AND metadata->>'targetId' = $${actorIdParam})
+                    OR (metadata->>'targetType' = 'role' AND metadata->>'targetId' = ANY($${actorRolesParam}))
+                  )
+              )
+              OR id IN (
+                SELECT instance_id
+                FROM approval_assignments
+                WHERE (assignment_type = 'user' AND assignee_id = $${actorIdParam})
+                   OR (assignment_type = 'role' AND assignee_id = ANY($${actorRolesParam}))
+              )
+            )`,
+          )
+        }
       }
     }
 
