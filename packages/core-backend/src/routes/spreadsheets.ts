@@ -2,6 +2,7 @@ import type { Request, Response } from 'express'
 import { Router } from 'express'
 import type { Injector } from '@wendellhu/redi'
 import type { Kysely } from 'kysely'
+import { sql } from 'kysely'
 import { randomUUID } from 'crypto'
 import { z } from 'zod'
 import { rbacGuard } from '../rbac/rbac'
@@ -411,13 +412,39 @@ export function spreadsheetsRouter(_injector?: Injector, options: SpreadsheetRou
                 cell.expectedVersion,
               )
             }
-            const nextVersion = currentVersion + 1
-            const updated = await trx
+            let updateQuery = trx
               .updateTable('cells')
-              .set({ ...values, updated_at: new Date(), version: nextVersion })
+              .set({ ...values, updated_at: new Date(), version: sql<number>`version + 1` })
               .where('id', '=', existing.id)
+
+            if (typeof cell.expectedVersion === 'number') {
+              // The version predicate is load-bearing. The earlier SELECT
+              // gives us a useful 409 payload, but only this UPDATE predicate
+              // makes the optimistic lock atomic under concurrent requests.
+              updateQuery = updateQuery.where('version', '=', cell.expectedVersion)
+            }
+
+            const updated = await updateQuery
               .returningAll()
-              .executeTakeFirstOrThrow()
+              .executeTakeFirst()
+
+            if (!updated) {
+              if (typeof cell.expectedVersion !== 'number') {
+                throw new Error(`Cell update failed for ${sheetId} row=${cell.row} col=${cell.col}`)
+              }
+              const latest = await trx
+                .selectFrom('cells')
+                .select(['version'])
+                .where('id', '=', existing.id)
+                .executeTakeFirst()
+              throw new CellVersionConflictError(
+                sheetId,
+                cell.row,
+                cell.col,
+                typeof latest?.version === 'number' ? latest.version : 0,
+                cell.expectedVersion,
+              )
+            }
 
             await trx
               .insertInto('cell_versions')

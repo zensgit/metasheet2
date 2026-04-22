@@ -63,7 +63,10 @@ interface CellRow {
  * Behavior is driven by the `cells` array passed in so each test can
  * seed a scenario.
  */
-function makeFakeDb(initial: CellRow[] = []) {
+function makeFakeDb(
+  initial: CellRow[] = [],
+  options: { afterSelect?: () => void; preserveExternalCellMutationsOnRollback?: boolean } = {},
+) {
   const cells = [...initial]
   const cellVersionsInserts: Array<Record<string, unknown>> = []
 
@@ -75,17 +78,22 @@ function makeFakeDb(initial: CellRow[] = []) {
   const trx = {
     selectFrom(table: 'cells') {
       if (table !== 'cells') throw new Error(`unexpected table ${table}`)
-      const state: { where?: { sheetId: string; row: number; col: number } } = {}
+      const state: { where?: { sheetId: string; row: number; col: number }; id?: string } = {}
       const chain: any = {
         selectAll() { return chain },
-        where(predicateBuilder: (eb: any) => any) {
+        select() { return chain },
+        where(fieldOrPredicate: string | ((eb: any) => any), _op?: string, value?: unknown) {
+          if (typeof fieldOrPredicate === 'string') {
+            if (fieldOrPredicate === 'id') state.id = value as string
+            return chain
+          }
           // Real Kysely `eb` is a callable with `.and` / `.or`. Build a
           // minimal shape sufficient for the handler's use:
           //   eb.and([eb('sheet_id','=',sheetId), eb('row_index','=',row), eb('col_index','=',col)])
           const eb: any = (col: string, _op: string, val: unknown) => ({ col, val })
           eb.and = (parts: Array<{ col: string; val: unknown }>) => parts
           eb.or = (parts: Array<{ col: string; val: unknown }>) => parts
-          const raw = predicateBuilder(eb)
+          const raw = fieldOrPredicate(eb)
           const conditions: Array<{ col: string; val: unknown }> = Array.isArray(raw)
             ? raw
             : raw && typeof raw === 'object' && 'col' in raw
@@ -98,29 +106,50 @@ function makeFakeDb(initial: CellRow[] = []) {
           return chain
         },
         async executeTakeFirst() {
+          if (state.id) {
+            const found = cells.find((c) => c.id === state.id)
+            return found ? { ...found } : undefined
+          }
           if (!state.where) return undefined
-          return cells.find(
+          const found = cells.find(
             (c) =>
               c.sheet_id === state.where!.sheetId &&
               c.row_index === state.where!.row &&
               c.column_index === state.where!.col,
           )
+          const snapshot = found ? { ...found } : undefined
+          options.afterSelect?.()
+          return snapshot
         },
       }
       return chain
     },
     updateTable(table: 'cells') {
       if (table !== 'cells') throw new Error(`unexpected updateTable ${table}`)
-      const state: { values?: Partial<CellRow>; id?: string } = {}
+      const state: { values?: Partial<CellRow>; id?: string; version?: number } = {}
       const chain = {
         set(values: Partial<CellRow>) { state.values = values; return chain },
-        where(_field: string, _op: string, value: string) { state.id = value; return chain },
+        where(field: string, _op: string, value: string | number) {
+          if (field === 'id') state.id = value as string
+          if (field === 'version') state.version = value as number
+          return chain
+        },
         returningAll() { return chain },
-        async executeTakeFirstOrThrow() {
+        async executeTakeFirst() {
           const row = cells.find((c) => c.id === state.id)
-          if (!row) throw new Error('row not found')
-          Object.assign(row, state.values ?? {})
+          if (!row) return undefined
+          if (typeof state.version === 'number' && row.version !== state.version) return undefined
+          const values = { ...(state.values ?? {}) } as Partial<CellRow>
+          if ('version' in values && typeof values.version !== 'number') {
+            values.version = row.version + 1
+          }
+          Object.assign(row, values)
           return { ...row }
+        },
+        async executeTakeFirstOrThrow() {
+          const row = await chain.executeTakeFirst()
+          if (!row) throw new Error('row not found')
+          return row
         },
       }
       return chain
@@ -168,7 +197,9 @@ function makeFakeDb(initial: CellRow[] = []) {
           try {
             return await cb(trx)
           } catch (err) {
-            cells.splice(0, cells.length, ...snapshotCells)
+            if (!options.preserveExternalCellMutationsOnRollback) {
+              cells.splice(0, cells.length, ...snapshotCells)
+            }
             cellVersionsInserts.splice(0, cellVersionsInserts.length, ...snapshotInserts)
             throw err
           }
@@ -277,6 +308,36 @@ describe('PUT /api/spreadsheets/:id/sheets/:sheetId/cells — cell version (#526
     // Stored row is unchanged — rollback worked.
     expect(state.cells[0].version).toBe(5)
     expect(state.cells[0].value).toEqual({ value: 'current' })
+    expect(state.cellVersionsInserts.length).toBe(0)
+  })
+
+  it('returns 409 when the row version changes between read and update', async () => {
+    let mutated = false
+    const { db, state } = makeFakeDb(
+      [nowRow({ version: 3, value: { value: 'current' } })],
+      {
+        preserveExternalCellMutationsOnRollback: true,
+        afterSelect: () => {
+          if (mutated) return
+          mutated = true
+          state.cells[0].version = 4
+          state.cells[0].value = { value: 'concurrent-write' }
+        },
+      },
+    )
+    activeDb = db
+    const router = await loadRouter()
+
+    const res = await callCellPut(router, {
+      cells: [{ row: 0, col: 0, value: 'stale-write', expectedVersion: 3 }],
+    })
+
+    expect(res.statusCode).toBe(409)
+    expect(res.jsonPayload.error.code).toBe('VERSION_CONFLICT')
+    expect(res.jsonPayload.error.serverVersion).toBe(4)
+    expect(res.jsonPayload.error.expectedVersion).toBe(3)
+    expect(state.cells[0].version).toBe(4)
+    expect(state.cells[0].value).toEqual({ value: 'concurrent-write' })
     expect(state.cellVersionsInserts.length).toBe(0)
   })
 

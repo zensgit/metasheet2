@@ -9,7 +9,7 @@
 
 | Risk flagged by reviewer (#526) | How the fix closes it | Test |
 |---|---|---|
-| Two concurrent PUTs silently overwrite each other | `cells.version` now read on update; `expectedVersion` mismatch throws `CellVersionConflictError` → 409 | `returns 409 VERSION_CONFLICT when expectedVersion does not match` |
+| Two concurrent PUTs silently overwrite each other | Opt-in writes use an atomic `UPDATE ... WHERE id = ? AND version = expectedVersion`; stale writers get `CellVersionConflictError` → 409 | `returns 409 VERSION_CONFLICT when expectedVersion does not match`; `returns 409 when the row version changes between read and update` |
 | One-cell failure might leave a partially-applied batch | `CellVersionConflictError` thrown inside `db.transaction().execute()` rolls back the whole batch | `409 on a batch aborts ALL cells in the batch` |
 | Older clients break on deploy | Legacy LWW preserved when `expectedVersion` is absent; version still bumps so future opt-ins work | `last-write-wins back-compat: omitted expectedVersion still works` |
 | Stale-client insert can undo a concurrent delete | 409 when `expectedVersion` is provided and row is missing | `returns 409 when expectedVersion is provided for a non-existent cell` |
@@ -24,7 +24,7 @@ pnpm --filter @metasheet/core-backend exec vitest run tests/unit/spreadsheet
 ```text
 ✓ tests/unit/spreadsheet-db.test.ts   (N tests)
 ✓ tests/unit/spreadsheet-api.test.ts  (N tests)
-✓ tests/unit/spreadsheets-cell-version.test.ts (6 tests)
+✓ tests/unit/spreadsheets-cell-version.test.ts (7 tests)
 
 Test Files  3 passed (3)
      Tests  89 passed (89)

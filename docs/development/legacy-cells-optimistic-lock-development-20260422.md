@@ -90,9 +90,10 @@ batch conflicts. See `test: 409 on a batch aborts ALL cells`.
 - `packages/core-backend/src/routes/spreadsheets.ts`
   - New `CellVersionConflictError` class (file-local).
   - Schema: optional `expectedVersion: number` per cell.
-  - Update path: read current `version`, validate against
-    `expectedVersion`, throw on mismatch, bump `version: currentVersion + 1`
-    on write.
+  - Update path: read current `version` for diagnostics, validate against
+    `expectedVersion`, then update with an atomic
+    `WHERE id = ? AND version = expectedVersion` predicate and
+    `version = version + 1` bump.
   - Insert path: reject with 409 when `expectedVersion` is provided
     (client thought the row existed).
   - Outer handler catches `CellVersionConflictError` and returns a 409
@@ -102,16 +103,17 @@ batch conflicts. See `test: 409 on a batch aborts ALL cells`.
     (`currentVersion`) instead of the prior hard-coded `1`.
 - `packages/core-backend/src/db/types.ts`
   - `CellsTable.version` added as `Generated<number>` to match the DB
-    default. Enables the Kysely `.set({ version: nextVersion })` call
+    default. Enables the Kysely `.set({ version: sql\`version + 1\` })` call
     to type-check and forces the TS tooling to recognize the column
     going forward.
 
 ## Tests
 
-`packages/core-backend/tests/unit/spreadsheets-cell-version.test.ts` (6 cases):
+`packages/core-backend/tests/unit/spreadsheets-cell-version.test.ts` (7 cases):
 
 - Accepts write when `expectedVersion` matches + bumps version
 - 409 when `expectedVersion` does not match (rolls back)
+- 409 when the row version changes between SELECT and UPDATE
 - 409 in a batch rolls back the batch atomically
 - Omitted `expectedVersion` = LWW back-compat (version still bumps)
 - 409 when `expectedVersion` provided for a non-existent cell
