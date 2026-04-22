@@ -5580,7 +5580,7 @@ export function univerMetaRouter(): Router {
       }
       if (allowedUserIds.length > 0) {
         const userCheck = await pool.query(
-          'SELECT id FROM users WHERE id = ANY($1::text[])',
+          'SELECT id, is_active FROM users WHERE id = ANY($1::text[])',
           [allowedUserIds],
         )
         const existingUserIds = new Set(
@@ -5593,6 +5593,19 @@ export function univerMetaRouter(): Router {
             error: {
               code: 'VALIDATION_ERROR',
               message: `Unknown allowed users: ${missingUserIds.join(', ')}`,
+            },
+          })
+        }
+        const inactiveUserIds = (userCheck.rows as Array<{ id: string; is_active?: boolean | null }>)
+          .filter((entry) => entry.is_active === false)
+          .map((entry) => String(entry.id))
+          .filter((userId) => allowedUserIds.includes(userId))
+        if (inactiveUserIds.length > 0) {
+          return res.status(400).json({
+            ok: false,
+            error: {
+              code: 'VALIDATION_ERROR',
+              message: `Inactive allowed users: ${inactiveUserIds.join(', ')}`,
             },
           })
         }
