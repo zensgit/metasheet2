@@ -649,7 +649,7 @@
                 <option v-for="view in formViews" :key="view.id" :value="view.id">{{ view.name }}</option>
               </select>
               <div
-                v-for="warning in publicFormLinkWarnings(action.config.publicFormViewId)"
+                v-for="warning in publicFormLinkWarnings(action.config.publicFormViewId, true)"
                 :key="`person-public-form-${warning}`"
                 class="meta-rule-editor__hint meta-rule-editor__hint--warning"
               >
@@ -1283,10 +1283,10 @@ function renderedTemplateExample(value: unknown, fallback: string) {
   return rendered || fallback
 }
 
-function publicFormLinkWarnings(value: unknown, warnWhenGroupAccessRisk = false) {
+function publicFormLinkWarnings(value: unknown, warnWhenDingTalkAccessRisk = false) {
   return listDingTalkPublicFormLinkWarnings(value, formViews.value, {
-    warnWhenFullyPublic: warnWhenGroupAccessRisk,
-    warnWhenProtectedWithoutAllowlist: warnWhenGroupAccessRisk,
+    warnWhenFullyPublic: warnWhenDingTalkAccessRisk,
+    warnWhenProtectedWithoutAllowlist: warnWhenDingTalkAccessRisk,
   })
 }
 

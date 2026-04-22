@@ -1153,6 +1153,65 @@ describe('MetaAutomationManager', () => {
     expect(container.querySelector('[data-automation-public-form-access="group"]')?.getAttribute('data-access-level')).toBe('dingtalk')
   })
 
+  it('warns when a DingTalk person message includes a fully public form link in the inline form', async () => {
+    const { client } = mockClient([])
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
+    await flushPromises()
+
+    const addBtn = container.querySelector('.meta-automation__btn-add') as HTMLButtonElement
+    addBtn.click()
+    await nextTick()
+
+    const actionSelect = container.querySelector('[data-automation-field="actionType"]') as HTMLSelectElement
+    actionSelect.value = 'send_dingtalk_person_message'
+    actionSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushPromises()
+
+    const publicFormSelect = container.querySelector('[data-automation-field="dingtalkPersonPublicFormViewId"]') as HTMLSelectElement
+    publicFormSelect.value = 'view_form'
+    publicFormSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushPromises()
+
+    expect(container.textContent).toContain('Public form sharing for "Public Form" is fully public')
+    expect(container.textContent).toContain('Use DingTalk-protected access and an allowlist')
+    expect(container.querySelector('[data-automation-summary="person"]')?.textContent).toContain('Fully public; anyone with the link can submit')
+    expect(container.querySelector('[data-automation-public-form-audience="person"]')?.textContent)
+      .toContain('Anyone with the link can submit')
+    expect(container.querySelector('[data-automation-public-form-access="person"]')?.getAttribute('data-access-level')).toBe('public')
+  })
+
+  it('warns when a DingTalk person message uses a protected public form without an allowlist in the inline form', async () => {
+    const { client } = mockClient([])
+    const { container } = mount({
+      visible: true,
+      sheetId: 'sheet_1',
+      fields,
+      views: viewsWithProtectedPublicFormWithoutAllowlist,
+      client,
+    })
+    await flushPromises()
+
+    const addBtn = container.querySelector('.meta-automation__btn-add') as HTMLButtonElement
+    addBtn.click()
+    await nextTick()
+
+    const actionSelect = container.querySelector('[data-automation-field="actionType"]') as HTMLSelectElement
+    actionSelect.value = 'send_dingtalk_person_message'
+    actionSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushPromises()
+
+    const publicFormSelect = container.querySelector('[data-automation-field="dingtalkPersonPublicFormViewId"]') as HTMLSelectElement
+    publicFormSelect.value = 'view_form'
+    publicFormSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushPromises()
+
+    expect(container.textContent).toContain('Public form sharing for "Public Form" allows all bound DingTalk users to submit')
+    expect(container.textContent).toContain('add allowed users or member groups')
+    expect(container.querySelector('[data-automation-public-form-audience="person"]')?.textContent)
+      .toContain('No local allowlist limits are set; all bound DingTalk users can submit')
+    expect(container.querySelector('[data-automation-public-form-access="person"]')?.getAttribute('data-access-level')).toBe('dingtalk')
+  })
+
   it('warns when a DingTalk person message selects a public form without a token in the inline form', async () => {
     const { client } = mockClient([])
     const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views: viewsWithMissingPublicToken, client })
