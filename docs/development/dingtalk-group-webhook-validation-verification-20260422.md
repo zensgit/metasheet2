@@ -49,3 +49,15 @@ claude -p --tools Read,Grep,Glob --max-budget-usd 0.75 "Read-only re-review afte
 - Read-only review was executed with `Read,Grep,Glob` tools.
 - Claude reported no blocking issues and noted a legacy edit compatibility risk. That risk was addressed by omitting unchanged webhook/secret fields from metadata-only edits and adding a regression test.
 - A second read-only re-review after that fix reported no blocking issues.
+
+## Main rebase verification - 2026-04-22
+
+- Rebased only the webhook validation slice onto `origin/main@9c57caf1b6ba` after PR #1040 was squash-merged.
+- Rebased branch HEAD: `503453ff80cc`.
+- `pnpm install --frozen-lockfile`: passed.
+- `pnpm --filter @metasheet/core-backend exec vitest run tests/unit/dingtalk-group-destination-service.test.ts --watch=false`: passed, 1 file and 16 tests.
+- `pnpm --filter @metasheet/web exec vitest run tests/multitable-api-token-manager.spec.ts --watch=false`: passed, 1 file and 23 tests. The run printed a non-fatal local WebSocket port-in-use message and exited successfully.
+- `rg -n "normalizeDingTalkRobotWebhookUrl|DingTalk robot webhook URL must use HTTPS|DingTalk group webhook URL must include access_token|DingTalk robot secret must start with SEC|data-dingtalk-group-webhook-error|validateDingTalkGroupWebhookUrl|standard group robot webhook URLs|omits unchanged legacy DingTalk webhook settings|access_token" ...`: passed.
+- `git diff --check`: passed.
+- `pnpm --filter @metasheet/core-backend build`: passed.
+- `pnpm --filter @metasheet/web build`: passed. Vite emitted only existing chunk-size and mixed static/dynamic import warnings.
