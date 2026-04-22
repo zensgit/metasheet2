@@ -601,7 +601,11 @@
             {{ describeTrigger(rule) }} &rarr; {{ describeAction(rule) }}
           </div>
           <div v-if="dingTalkCardLinks(rule).length" class="meta-automation__card-links">
-            <template v-for="link in dingTalkCardLinks(rule)" :key="link.key">
+            <div
+              v-for="link in dingTalkCardLinks(rule)"
+              :key="link.key"
+              class="meta-automation__card-link-item"
+            >
               <a
                 v-if="link.href"
                 class="meta-automation__btn meta-automation__btn-link"
@@ -621,7 +625,14 @@
               >
                 {{ link.label }}
               </button>
-            </template>
+              <span
+                v-if="link.accessSummary"
+                class="meta-automation__card-link-access"
+                :data-automation-card-link-access="link.key"
+              >
+                {{ link.accessSummary }}
+              </span>
+            </div>
           </div>
           <div v-if="ruleStats[rule.id]" class="meta-automation__card-stats">
             <span class="meta-automation__stat meta-automation__stat--success">{{ ruleStats[rule.id].success }} ok</span>
@@ -840,6 +851,7 @@ interface DingTalkCardLink {
   label: string
   href?: string
   viewId?: string
+  accessSummary?: string
 }
 
 function parseUserIdsText(value: string): string[] {
@@ -1091,6 +1103,7 @@ function dingTalkCardLinks(rule: AutomationRule): DingTalkCardLink[] {
           key,
           label: `Open public form: ${viewSummaryName(publicFormViewId, publicFormViewId)}`,
           href: buildPublicFormHref(publicFormViewId, publicToken),
+          accessSummary: describeDingTalkPublicFormLinkAccess(publicFormViewId, formViews.value),
         })
       }
     }
@@ -1997,6 +2010,22 @@ watch(
   flex-wrap: wrap;
   gap: 8px;
   margin-top: 2px;
+}
+
+.meta-automation__card-link-item {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.meta-automation__card-link-access {
+  border-radius: 999px;
+  background: #f8fafc;
+  color: #475569;
+  font-size: 12px;
+  line-height: 1;
+  padding: 5px 8px;
 }
 
 .meta-automation__card-actions {
