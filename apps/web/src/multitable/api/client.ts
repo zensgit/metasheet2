@@ -502,6 +502,15 @@ function normalizeSheetPermissionCandidates(
         accessLevel: item?.accessLevel === 'read' || item?.accessLevel === 'write' || item?.accessLevel === 'write-own' || item?.accessLevel === 'admin'
           ? item.accessLevel
           : null,
+        dingtalkBound: typeof item?.dingtalkBound === 'boolean' || item?.dingtalkBound === null
+          ? item.dingtalkBound ?? null
+          : null,
+        dingtalkGrantEnabled: typeof item?.dingtalkGrantEnabled === 'boolean' || item?.dingtalkGrantEnabled === null
+          ? item.dingtalkGrantEnabled ?? null
+          : null,
+        dingtalkPersonDeliveryAvailable: typeof item?.dingtalkPersonDeliveryAvailable === 'boolean' || item?.dingtalkPersonDeliveryAvailable === null
+          ? item.dingtalkPersonDeliveryAvailable ?? null
+          : null,
       })
     }
   }
