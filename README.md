@@ -30,6 +30,7 @@ MetaSheet V2 is a collaborative spreadsheet platform built on a modern microkern
 - **📊 Project Status?** → [Development Status](claudedocs/DEVELOPMENT_STATUS.md) (comprehensive overview)
 - **🔌 Need API Reference?** → [API Documentation](claudedocs/API_DOCUMENTATION.md) (complete API guide)
 - **🧭 Attendance Rule Examples?** → [Custom Rule Templates](docs/ATTENDANCE_CUSTOM_RULE_TEMPLATES.md)
+- **🔔 DingTalk forms and notifications?** → [DingTalk Admin Operations Guide](docs/dingtalk-admin-operations-guide-20260420.md)
 
 ### Prerequisites
 
@@ -221,6 +222,7 @@ OUT_DIR=artifacts
 
 - **[Feature Migration Assessment](claudedocs/FEATURE_MIGRATION_ASSESSMENT.md)** - Feature completeness analysis and migration recommendations
 - **[Phase 5 Completion Guide](claudedocs/PHASE5_COMPLETION_GUIDE.md)** - Phase 5 execution steps and checklist
+- **[DingTalk Admin Operations Guide](docs/dingtalk-admin-operations-guide-20260420.md)** - DingTalk group/person messages, public form access modes, and local user/member-group allowlists
 
 ### 🔧 Observability Documentation
 
