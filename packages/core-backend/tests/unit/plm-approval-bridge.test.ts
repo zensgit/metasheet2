@@ -74,4 +74,31 @@ describe('PLM approval bridge mapping', () => {
   it('requires a source id', () => {
     expect(() => toPlatformApprovalBridgeRecord({ id: '' })).toThrow('PLM approval bridge requires a source id')
   })
+
+  // Wave 2 WP2 contract: the bridge must pin externalSystem='plm' on every
+  // record because ApprovalBridgeService.upsertPlmMirror forwards this value
+  // as the `source_system` column on INSERT. The unified Inbox filter
+  // (sourceSystem=plm) relies on every bridged row carrying this literal.
+  it('Wave 2 WP2: pins externalSystem to the "plm" literal for every bridged record', () => {
+    const minimal = toPlatformApprovalBridgeRecord({ id: 'eco-wp2-min' })
+    expect(minimal.externalSystem).toBe('plm')
+
+    const complete = toPlatformApprovalBridgeRecord({
+      id: 'eco-wp2-full',
+      title: 'ECO-WP2',
+      status: 'approved',
+      type: 'eco',
+      stage: 'review',
+      product_id: 'prod-wp2',
+      product_number: 'PN-WP2',
+      product_name: 'Module',
+      requester_id: 'user-wp2',
+      requester_name: 'Tester',
+      created_at: '2026-04-21T00:00:00.000Z',
+      updated_at: '2026-04-21T01:00:00.000Z',
+      version: 3,
+    })
+    expect(complete.externalSystem).toBe('plm')
+    expect(complete.policy.sourceOfTruth).toBe('plm')
+  })
 })
