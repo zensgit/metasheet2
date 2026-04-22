@@ -1001,6 +1001,45 @@ describe('DingTalk automation link route validation', () => {
     expect(automationService.updateRule).not.toHaveBeenCalled()
   })
 
+  it('rejects a V1 DingTalk group action without an effective destination on automation update', async () => {
+    const automationService = createMockAutomationService(makeAutomationRule({
+      action_type: 'notify',
+      action_config: {},
+      actions: [{
+        type: 'send_dingtalk_group_message',
+        config: {
+          destinationId: 'group_1',
+          titleTemplate: 'Old title',
+          bodyTemplate: 'Old body',
+        },
+      }],
+    }))
+    const { app, mockPool } = await createApp({ automationService })
+
+    const res = await request(app)
+      .patch(`/api/multitable/sheets/${SHEET_ID}/automations/${RULE_ID}`)
+      .send({
+        actions: [{
+          type: 'send_dingtalk_group_message',
+          config: {
+            destinationIds: [],
+            destinationIdFieldPath: 'record., ,',
+            title: 'Please fill',
+            content: 'Open form',
+          },
+        }],
+      })
+
+    expect(res.status).toBe(400)
+    expect(res.body.error).toEqual({
+      code: 'VALIDATION_ERROR',
+      message: 'At least one DingTalk destination or record destination field path is required',
+    })
+    expect(automationService.getRule).toHaveBeenCalledWith(RULE_ID)
+    expect(automationService.updateRule).not.toHaveBeenCalled()
+    expect(mockPool.query.mock.calls.some(([sql]) => String(sql).includes('FROM meta_views'))).toBe(false)
+  })
+
   it('rejects a DingTalk person action without executable templates on automation update', async () => {
     const automationService = createMockAutomationService(makeAutomationRule({
       action_type: 'send_dingtalk_person_message',
