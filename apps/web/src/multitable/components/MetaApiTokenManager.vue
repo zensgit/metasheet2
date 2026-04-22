@@ -176,6 +176,11 @@
 
         <!-- ===== DINGTALK GROUPS TAB ===== -->
         <template v-if="canManageDingTalkGroups && activeTab === 'dingtalk-groups'">
+          <section class="meta-api-mgr__notice" data-dingtalk-groups-scope-note="true">
+            <strong>Table-scoped DingTalk groups</strong>
+            <span>Groups created here are bound to this table. You can add multiple groups and choose one or more in automations.</span>
+          </section>
+
           <section v-if="showDingTalkGroupForm" class="meta-api-mgr__form" data-dingtalk-group-form="true">
             <div class="meta-api-mgr__form-title">
               {{ editingDingTalkGroupId ? 'Edit DingTalk Group' : 'New DingTalk Group' }}
@@ -922,6 +927,9 @@ watch(canManageDingTalkGroups, (canManage) => {
   background: #eff6ff;
   color: #1e3a8a;
   border: 1px solid #bfdbfe;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
 }
 
 .meta-api-mgr__empty {
