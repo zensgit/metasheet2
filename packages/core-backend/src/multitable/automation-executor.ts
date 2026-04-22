@@ -16,6 +16,8 @@ import type { EventBus } from '../integration/events/event-bus'
 import {
   buildDingTalkMarkdown,
   buildSignedDingTalkWebhookUrl,
+  normalizeDingTalkRobotSecret,
+  normalizeDingTalkRobotWebhookUrl,
   validateDingTalkRobotResponse,
 } from '../integrations/dingtalk/robot'
 import type {
@@ -1299,6 +1301,56 @@ export class AutomationExecutor {
       .filter((destination): destination is NonNullable<typeof destination> => Boolean(destination))
     const successfulDestinations: Array<{ id: string; name: string }> = []
     const failedDestinations: Array<{ id: string; name: string; error: string }> = []
+    const runtimeWebhookByDestinationId = new Map<string, { webhookUrl: string; secret?: string }>()
+
+    for (const destination of orderedDestinations) {
+      try {
+        runtimeWebhookByDestinationId.set(destination.id, {
+          webhookUrl: normalizeDingTalkRobotWebhookUrl(destination.webhook_url),
+          secret: normalizeDingTalkRobotSecret(destination.secret ?? undefined),
+        })
+      } catch (err) {
+        failedDestinations.push({
+          id: destination.id,
+          name: destination.name,
+          error: err instanceof Error ? err.message : String(err),
+        })
+      }
+    }
+
+    if (failedDestinations.length) {
+      await Promise.all(failedDestinations.map((destination) =>
+        recordDingTalkGroupDeliverySafely(this.deps.queryFn, {
+          destinationId: destination.id,
+          sourceType: 'automation',
+          subject: renderedTitle,
+          content: bodyWithLinks,
+          success: false,
+          httpStatus: null,
+          responseBody: null,
+          errorMessage: destination.error,
+          automationRuleId: context.ruleId,
+          recordId: context.recordId,
+          initiatedBy: context.actorId ?? null,
+        }),
+      ))
+      return {
+        actionType: 'send_dingtalk_group_message',
+        status: 'failed',
+        error: `${failedDestinations.length} of ${orderedDestinations.length} DingTalk destinations failed validation: ${failedDestinations.map((destination) => `${destination.name} (${destination.error})`).join('; ')}`,
+        output: {
+          staticDestinationCount: staticDestinationIds.length,
+          dynamicDestinationCount: recordDestinationIds.length,
+          destinationIds: orderedDestinations.map((destination) => destination.id),
+          destinationNames: orderedDestinations.map((destination) => destination.name),
+          destinationFieldPath: destinationFieldPaths[0] ?? null,
+          destinationFieldPaths,
+          sentCount: 0,
+          failedDestinationIds: failedDestinations.map((destination) => destination.id),
+          linkCount: linkLines.length,
+        },
+      }
+    }
 
     for (const destination of orderedDestinations) {
       let deliveryRecorded = false
@@ -1307,8 +1359,12 @@ export class AutomationExecutor {
       const controller = new AbortController()
       const timeout = setTimeout(() => controller.abort(), WEBHOOK_TIMEOUT_MS)
       try {
+        const runtimeWebhook = runtimeWebhookByDestinationId.get(destination.id)
+        if (!runtimeWebhook) {
+          throw new Error(`DingTalk destination ${destination.name || destination.id} was not validated before send`)
+        }
         const response = await (this.deps.fetchFn ?? globalThis.fetch)(
-          buildSignedDingTalkWebhookUrl(destination.webhook_url, destination.secret ?? undefined),
+          buildSignedDingTalkWebhookUrl(runtimeWebhook.webhookUrl, runtimeWebhook.secret),
           {
             method: 'POST',
             headers: {

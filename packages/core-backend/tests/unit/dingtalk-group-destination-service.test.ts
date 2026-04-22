@@ -276,6 +276,30 @@ describe('DingTalkGroupDestinationService', () => {
     expect(setArg?.last_test_error).toBeNull()
   })
 
+  test('testSend rejects legacy invalid webhook URL without fetch', async () => {
+    const { db, roots } = createMockDb()
+    const fetchFn = vi.fn(async () => new Response(
+      JSON.stringify({ errcode: 0, errmsg: 'ok' }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } },
+    ))
+    const service = new DingTalkGroupDestinationService(db, fetchFn as typeof fetch)
+
+    executeTakeFirstQueue.push(destinationRow({ webhook_url: 'https://example.com/hook' }))
+    await expect(service.testSend('dt_1', 'user_1', {})).rejects.toThrow('DingTalk robot URL')
+
+    expect(fetchFn).not.toHaveBeenCalled()
+    expect(roots.insertInto).toHaveBeenCalledWith('dingtalk_group_deliveries')
+    const insertChain = roots.insertInto.mock.results[0]?.value as MockChain | undefined
+    const deliveryValues = insertChain?.values?.mock.calls[0]?.[0] as Record<string, unknown> | undefined
+    expect(deliveryValues?.success).toBe(false)
+    expect(deliveryValues?.http_status).toBeNull()
+    expect(deliveryValues?.error_message).toContain('DingTalk robot URL')
+    const updateChain = roots.updateTable.mock.results[0]?.value as MockChain | undefined
+    const setArg = updateChain?.set?.mock.calls[0]?.[0] as Record<string, unknown> | undefined
+    expect(setArg?.last_test_status).toBe('failed')
+    expect(setArg?.last_test_error).toContain('DingTalk robot URL')
+  })
+
   test('testSend allows shared destination access for non-owner on the same sheet', async () => {
     const { db } = createMockDb()
     const fetchFn = vi.fn(async () => new Response(
