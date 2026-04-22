@@ -157,6 +157,7 @@ Behavior:
 - the visitor must pass the selected DingTalk protection mode first
 - the system then resolves the local user
 - the local user must be directly allowed or belong to an allowed member group
+- allowed local users must exist and be active; inactive users are rejected when saving the allowlist
 - without an allowlist, `Bound DingTalk users only` admits all bound DingTalk local users and `Authorized DingTalk users only` admits all locally authorized DingTalk users
 - the form share manager shows `Local allowlist limits` so owners can confirm whether no local limit is set or how many local users/member groups can fill after DingTalk checks
 - the automation editor and rule cards show the same local allowlist audience as `Allowed audience`, so authors can verify it without reopening the form share manager

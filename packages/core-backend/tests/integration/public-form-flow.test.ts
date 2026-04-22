@@ -483,6 +483,54 @@ describe('Public form flow', () => {
     expect(patchResponse.body.error?.message).toMatch(/require a DingTalk-protected access mode/i)
   })
 
+  test('form share config rejects inactive allowed users', async () => {
+    const storedConfig = {
+      publicForm: {
+        enabled: true,
+        publicToken: VALID_TOKEN,
+        accessMode: 'dingtalk',
+      },
+    }
+    const { app } = await createApp({
+      user: { id: 'admin_1', perms: ['multitable:write'] },
+      queryHandler: async (sql, params) => {
+        if (sql.includes('SELECT id, sheet_id, name, type, filter_info, sort_info, group_info, hidden_field_ids, config FROM meta_views WHERE id = $1')) {
+          return {
+            rows: [{
+              id: TEST_VIEW_ID,
+              sheet_id: TEST_SHEET_ID,
+              name: 'Public Form View',
+              type: 'form',
+              filter_info: {},
+              sort_info: {},
+              group_info: {},
+              hidden_field_ids: [],
+              config: storedConfig,
+            }],
+          }
+        }
+        if (sql.includes('SELECT id, is_active FROM users WHERE id = ANY')) {
+          const ids = Array.isArray(params?.[0]) ? (params?.[0] as string[]) : []
+          return {
+            rows: ids.map((id) => ({ id, is_active: id !== 'user_inactive' })),
+            rowCount: ids.length,
+          }
+        }
+        throw new Error(`Unhandled SQL in test: ${sql}`)
+      },
+    })
+
+    const patchResponse = await request(app)
+      .patch(`/api/multitable/sheets/${TEST_SHEET_ID}/views/${TEST_VIEW_ID}/form-share`)
+      .send({ allowedUserIds: ['user_inactive'] })
+      .expect(400)
+
+    expect(patchResponse.body.error).toEqual({
+      code: 'VALIDATION_ERROR',
+      message: 'Inactive allowed users: user_inactive',
+    })
+  })
+
   test('rate limit exceeded -> 429 with Retry-After header', async () => {
     const { app } = await createApp({
       queryHandler: buildQueryHandler(VALID_TOKEN),
