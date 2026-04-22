@@ -212,3 +212,48 @@ Note: one local attempt to run all four integration files in the same Vitest
 process hit a PostgreSQL DDL deadlock in shared fixture setup. The split
 commands above are the stable pattern already used for this family of tests;
 CI runs these jobs in a clean database context.
+
+## Final main rebase — 2026-04-23
+
+After #1079 and #1080 were merged, PR #1081 became `BEHIND`. The branch was
+rebased onto `origin/main@2aa78e8680eb9f2e71e52e226de710886acb0ded` before
+final merge instead of bypassing the stale-branch gate.
+
+Rebased head stack:
+
+```text
+ecba58023 docs(approval): record WP1 CI follow-up verification
+ada6f3977 fix(approval): publish parallel node contract artifacts
+f5a3cf631 docs(approval): record WP1 parallel rebase verification
+3ae85fcee feat(approval): ship WP1 parallel gateway (并行分支) with join-all semantics
+```
+
+Commands rerun after final rebase:
+
+```bash
+./scripts/ops/attendance-run-gate-contract-case.sh openapi
+pnpm type-check
+git diff --check
+
+DATABASE_URL='postgresql://chouhua@127.0.0.1:5432/postgres' PGHOST=127.0.0.1 PGPORT=5432 PGDATABASE=postgres PGUSER=chouhua \
+  pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run \
+    tests/integration/approval-wp1-parallel-gateway.api.test.ts --reporter=dot
+
+DATABASE_URL='postgresql://chouhua@127.0.0.1:5432/postgres' PGHOST=127.0.0.1 PGPORT=5432 PGDATABASE=postgres PGUSER=chouhua \
+  pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run \
+    tests/integration/approval-wp1-any-mode.api.test.ts \
+    tests/integration/approval-pack1a-lifecycle.api.test.ts --reporter=dot
+
+DATABASE_URL='postgresql://chouhua@127.0.0.1:5432/postgres' PGHOST=127.0.0.1 PGPORT=5432 PGDATABASE=postgres PGUSER=chouhua \
+  pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run \
+    tests/integration/approval-wp2-source-filter.api.test.ts --reporter=dot
+```
+
+Final rebase results:
+
+- OpenAPI contract gate: passed.
+- Workspace type-check: passed.
+- `git diff --check`: passed.
+- WP1 parallel integration: 3/3 passed.
+- Pack 1A + or-mode regression: 4/4 passed.
+- WP2 source filter regression: 7/7 passed.
