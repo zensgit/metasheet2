@@ -69,3 +69,39 @@ pnpm --filter @metasheet/core-backend exec vitest run tests/unit --reporter=dot
    - Two instances sharing the same memory-backed lock: only the first one registers timers; the second silently skips both interval and cron triggers.
    - Legacy single-arg constructor still produces a scheduler that acts as leader — no regression in `automation-v1.test.ts` scheduler tests.
    - Renewal returning `0` (simulating TTL expiry / owner mismatch) triggers `relinquishLeadership`: timers are cleared, `isLeader` flips to `false`, renewal loop stops.
+## Rebase verification — 2026-04-22
+
+Rebased from the original delivery baseline onto `origin/main@d547d89fcfcfded72f2e78a16320111d6def4f54`.
+
+Rebased head:
+
+```text
+66fc64c3a feat(infra): wire APIGateway to Redis CircuitBreaker store + scheduler leader lock
+```
+
+Commands rerun after rebase:
+
+```bash
+pnpm --filter @metasheet/core-backend exec tsc --noEmit --pretty false
+
+pnpm --filter @metasheet/core-backend exec vitest run \
+  tests/unit/api-gateway-redis-wiring.test.ts \
+  tests/unit/redis-leader-lock.test.ts \
+  tests/unit/automation-scheduler-leader.test.ts \
+  tests/unit/redis-token-bucket-store.test.ts \
+  tests/unit/redis-circuit-breaker-store.test.ts \
+  tests/unit/rate-limiter.test.ts --reporter=dot
+
+pnpm --filter @metasheet/core-backend exec vitest run tests/unit --reporter=dot
+
+git diff --check
+```
+
+Results:
+
+- TypeScript: passed with zero diagnostics.
+- Focused Redis/gateway/scheduler regression: 6 files passed, 66/66 tests passed.
+- Backend full unit suite: 126 files passed, 1615/1615 tests passed.
+- `git diff --check`: passed.
+
+Note: the full-unit count is one higher than the original delivery summary because `origin/main` now includes the #1077 WP2 source filter regression test.
