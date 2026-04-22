@@ -2,7 +2,7 @@
   <div v-if="visible" class="meta-api-mgr__overlay" @click.self="$emit('close')">
     <div class="meta-api-mgr">
       <div class="meta-api-mgr__header">
-        <h4 class="meta-api-mgr__title">API Tokens, Webhooks &amp; DingTalk Groups</h4>
+        <h4 class="meta-api-mgr__title">{{ managerTitle }}</h4>
         <button class="meta-api-mgr__close" type="button" @click="$emit('close')">&times;</button>
       </div>
 
@@ -26,6 +26,7 @@
           Webhooks
         </button>
         <button
+          v-if="canManageDingTalkGroups"
           role="tab"
           :aria-selected="activeTab === 'dingtalk-groups'"
           class="meta-api-mgr__tab"
@@ -38,6 +39,14 @@
 
       <div class="meta-api-mgr__body">
         <div v-if="error" class="meta-api-mgr__error" role="alert">{{ error }}</div>
+        <div
+          v-if="!canManageDingTalkGroups"
+          class="meta-api-mgr__notice"
+          role="note"
+          data-dingtalk-groups-permission-note="true"
+        >
+          DingTalk group bindings require automation management permission for this table.
+        </div>
 
         <!-- ===== TOKENS TAB ===== -->
         <template v-if="activeTab === 'tokens'">
@@ -166,7 +175,7 @@
         </template>
 
         <!-- ===== DINGTALK GROUPS TAB ===== -->
-        <template v-if="activeTab === 'dingtalk-groups'">
+        <template v-if="canManageDingTalkGroups && activeTab === 'dingtalk-groups'">
           <section v-if="showDingTalkGroupForm" class="meta-api-mgr__form" data-dingtalk-group-form="true">
             <div class="meta-api-mgr__form-title">
               {{ editingDingTalkGroupId ? 'Edit DingTalk Group' : 'New DingTalk Group' }}
@@ -328,11 +337,14 @@ import type {
 } from '../types'
 import type { MultitableApiClient } from '../api/client'
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
   visible: boolean
   sheetId?: string
   client?: MultitableApiClient
-}>()
+  canManageAutomation?: boolean
+}>(), {
+  canManageAutomation: true,
+})
 
 const emit = defineEmits<{
   (e: 'close'): void
@@ -377,12 +389,17 @@ const dingTalkGroupDraft = ref({
   enabled: true,
 })
 
+const canManageDingTalkGroups = computed(() => props.canManageAutomation !== false)
+const managerTitle = computed(() => canManageDingTalkGroups.value
+  ? 'API Tokens, Webhooks & DingTalk Groups'
+  : 'API Tokens & Webhooks')
+
 const canSaveWebhook = computed(() => {
   return webhookDraft.value.name.trim() && webhookDraft.value.url.startsWith('https://') && webhookDraft.value.events.length > 0
 })
 
 const canSaveDingTalkGroup = computed(() => {
-  return dingTalkGroupDraft.value.name.trim() && dingTalkGroupDraft.value.webhookUrl.trim().startsWith('https://')
+  return canManageDingTalkGroups.value && dingTalkGroupDraft.value.name.trim() && dingTalkGroupDraft.value.webhookUrl.trim().startsWith('https://')
 })
 
 function formatDate(iso: string): string {
@@ -615,6 +632,11 @@ async function onViewDeliveries(webhookId: string) {
 // ---- DingTalk group actions ----
 async function loadDingTalkGroups() {
   if (!props.client) return
+  if (!canManageDingTalkGroups.value) {
+    clearDingTalkGroupState()
+    dingTalkGroupsLoading.value = false
+    return
+  }
   dingTalkGroupsLoading.value = true
   error.value = null
   try {
@@ -626,7 +648,21 @@ async function loadDingTalkGroups() {
   }
 }
 
+function clearDingTalkGroupState() {
+  dingTalkGroups.value = []
+  showDingTalkGroupForm.value = false
+  editingDingTalkGroupId.value = null
+  dingTalkDeliveriesRequestToken += 1
+  dingTalkDeliveriesGroupId.value = null
+  dingTalkDeliveriesLoading.value = false
+  dingTalkDeliveries.value = []
+  if (activeTab.value === 'dingtalk-groups') {
+    activeTab.value = 'tokens'
+  }
+}
+
 function openDingTalkGroupForm() {
+  if (!canManageDingTalkGroups.value) return
   editingDingTalkGroupId.value = null
   dingTalkGroupDraft.value = {
     name: '',
@@ -638,6 +674,7 @@ function openDingTalkGroupForm() {
 }
 
 function openEditDingTalkGroup(group: DingTalkGroupDestination) {
+  if (!canManageDingTalkGroups.value) return
   editingDingTalkGroupId.value = group.id
   dingTalkGroupDraft.value = {
     name: group.name,
@@ -654,7 +691,7 @@ function cancelDingTalkGroupForm() {
 }
 
 async function onSaveDingTalkGroup() {
-  if (!props.client || busy.value || !canSaveDingTalkGroup.value) return
+  if (!props.client || busy.value || !canManageDingTalkGroups.value || !canSaveDingTalkGroup.value) return
   busy.value = true
   error.value = null
   try {
@@ -682,7 +719,7 @@ async function onSaveDingTalkGroup() {
 }
 
 async function onToggleDingTalkGroup(group: DingTalkGroupDestination) {
-  if (!props.client || busy.value) return
+  if (!props.client || busy.value || !canManageDingTalkGroups.value) return
   busy.value = true
   error.value = null
   try {
@@ -696,7 +733,7 @@ async function onToggleDingTalkGroup(group: DingTalkGroupDestination) {
 }
 
 async function onTestDingTalkGroup(groupId: string) {
-  if (!props.client || busy.value) return
+  if (!props.client || busy.value || !canManageDingTalkGroups.value) return
   busy.value = true
   error.value = null
   try {
@@ -713,7 +750,7 @@ async function onTestDingTalkGroup(groupId: string) {
 }
 
 async function loadDingTalkDeliveries(groupId: string) {
-  if (!props.client) return
+  if (!props.client || !canManageDingTalkGroups.value) return
   const requestToken = ++dingTalkDeliveriesRequestToken
   dingTalkDeliveriesGroupId.value = groupId
   dingTalkDeliveriesLoading.value = true
@@ -738,7 +775,7 @@ async function loadDingTalkDeliveries(groupId: string) {
 }
 
 async function onViewDingTalkDeliveries(groupId: string) {
-  if (!props.client) return
+  if (!props.client || !canManageDingTalkGroups.value) return
   if (dingTalkDeliveriesGroupId.value === groupId) {
     dingTalkDeliveriesRequestToken += 1
     dingTalkDeliveriesGroupId.value = null
@@ -750,7 +787,7 @@ async function onViewDingTalkDeliveries(groupId: string) {
 }
 
 async function onDeleteDingTalkGroup(groupId: string) {
-  if (!props.client || busy.value) return
+  if (!props.client || busy.value || !canManageDingTalkGroups.value) return
   busy.value = true
   error.value = null
   try {
@@ -782,6 +819,15 @@ watch(
   },
   { immediate: true },
 )
+
+watch(canManageDingTalkGroups, (canManage) => {
+  if (!props.visible) return
+  if (canManage) {
+    void loadDingTalkGroups()
+  } else {
+    clearDingTalkGroupState()
+  }
+})
 </script>
 
 <style scoped>
@@ -867,6 +913,15 @@ watch(
   font-size: 13px;
   background: #fef2f2;
   color: #b91c1c;
+}
+
+.meta-api-mgr__notice {
+  padding: 10px 12px;
+  border-radius: 10px;
+  font-size: 13px;
+  background: #eff6ff;
+  color: #1e3a8a;
+  border: 1px solid #bfdbfe;
 }
 
 .meta-api-mgr__empty {

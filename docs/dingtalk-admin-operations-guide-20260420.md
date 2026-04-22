@@ -47,6 +47,8 @@ Management-side UI path:
 Notes:
 
 - this is a management-side page, not a normal end-user page
+- the DingTalk Groups tab is shown only to users who can manage automations on the current table
+- users without that permission can still use API tokens and webhooks, but the UI will not preload or expose table-scoped DingTalk group bindings
 - the current model manually registers a group webhook; it does not auto-import your DingTalk groups
 
 ## B. Configure a DingTalk person notification rule
