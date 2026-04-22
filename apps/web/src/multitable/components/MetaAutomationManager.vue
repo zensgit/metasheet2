@@ -1589,14 +1589,28 @@ function describeActionType(actionType: AutomationActionType, actionConfig: Reco
     case 'send_webhook':
       return 'Send webhook'
     case 'send_dingtalk_group_message':
-      return 'Send DingTalk group message'
+      return `Send DingTalk group message${describeDingTalkActionLinks(actionConfig)}`
     case 'send_dingtalk_person_message':
-      return 'Send DingTalk person message'
+      return `Send DingTalk person message${describeDingTalkActionLinks(actionConfig)}`
     case 'lock_record':
       return 'Lock record'
     default:
       return String(actionType)
   }
+}
+
+function describeDingTalkActionLinks(actionConfig: Record<string, unknown>): string {
+  const publicFormViewId = typeof actionConfig.publicFormViewId === 'string'
+    ? actionConfig.publicFormViewId.trim()
+    : ''
+  const internalViewId = typeof actionConfig.internalViewId === 'string'
+    ? actionConfig.internalViewId.trim()
+    : ''
+  const parts = [
+    publicFormViewId ? `Public form: ${viewSummaryName(publicFormViewId, publicFormViewId)}` : '',
+    internalViewId ? `Internal processing: ${viewSummaryName(internalViewId, internalViewId)}` : '',
+  ].filter(Boolean)
+  return parts.length ? ` · ${parts.join(' · ')}` : ''
 }
 
 function ruleHasActionType(rule: AutomationRule, actionType: AutomationActionType): boolean {
