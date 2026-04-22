@@ -786,6 +786,50 @@ describe('DingTalk automation link route validation', () => {
     expect(automationService.updateRule).not.toHaveBeenCalled()
   })
 
+  it('normalizes legacy DingTalk group actionConfig templates on automation update', async () => {
+    const automationService = createMockAutomationService(makeAutomationRule({
+      action_type: 'send_dingtalk_group_message',
+      action_config: {
+        destinationId: 'group_1',
+        titleTemplate: 'Old title',
+        bodyTemplate: 'Old body',
+      },
+    }))
+    const { app, mockPool } = await createApp({ automationService })
+
+    const res = await request(app)
+      .patch(`/api/multitable/sheets/${SHEET_ID}/automations/${RULE_ID}`)
+      .send({
+        actionConfig: {
+          destinationId: 'group_1',
+          title: 'Please fill',
+          content: 'Open form',
+          publicFormViewId: VALID_FORM_VIEW_ID,
+          internalViewId: INTERNAL_VIEW_ID,
+        },
+      })
+
+    expect(res.status).toBe(200)
+    expect(res.body.ok).toBe(true)
+    expect(automationService.getRule).toHaveBeenCalledWith(RULE_ID)
+    expect(automationService.updateRule).toHaveBeenCalledWith(RULE_ID, SHEET_ID, expect.objectContaining({
+      actionConfig: expect.objectContaining({
+        destinationId: 'group_1',
+        titleTemplate: 'Please fill',
+        bodyTemplate: 'Open form',
+        publicFormViewId: VALID_FORM_VIEW_ID,
+        internalViewId: INTERNAL_VIEW_ID,
+      }),
+    }))
+    expect(res.body.data.rule.actionConfig).toEqual(expect.objectContaining({
+      titleTemplate: 'Please fill',
+      bodyTemplate: 'Open form',
+      publicFormViewId: VALID_FORM_VIEW_ID,
+      internalViewId: INTERNAL_VIEW_ID,
+    }))
+    expect(mockPool.query.mock.calls.some(([sql]) => String(sql).includes('FROM meta_views'))).toBe(true)
+  })
+
   it('rejects an invalid public form link in a V1 DingTalk person action on automation update', async () => {
     const automationService = createMockAutomationService(makeAutomationRule({
       action_type: 'notify',
