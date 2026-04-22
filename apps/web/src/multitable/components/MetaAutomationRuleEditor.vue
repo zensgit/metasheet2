@@ -340,8 +340,10 @@
               </div>
               <div
                 v-if="action.config.publicFormViewId"
-                class="meta-rule-editor__hint"
+                class="meta-rule-editor__hint meta-rule-editor__access-summary"
+                :class="`meta-rule-editor__access-summary--${publicFormAccessLevel(action.config.publicFormViewId)}`"
                 :data-field="`groupPublicFormAccessSummary-${idx}`"
+                :data-access-level="publicFormAccessLevel(action.config.publicFormViewId)"
               >
                 <strong>Access:</strong> {{ publicFormAccessSummary(action.config.publicFormViewId) }}
               </div>
@@ -636,8 +638,10 @@
               </div>
               <div
                 v-if="action.config.publicFormViewId"
-                class="meta-rule-editor__hint"
+                class="meta-rule-editor__hint meta-rule-editor__access-summary"
+                :class="`meta-rule-editor__access-summary--${publicFormAccessLevel(action.config.publicFormViewId)}`"
                 :data-field="`personPublicFormAccessSummary-${idx}`"
+                :data-access-level="publicFormAccessLevel(action.config.publicFormViewId)"
               >
                 <strong>Access:</strong> {{ publicFormAccessSummary(action.config.publicFormViewId) }}
               </div>
@@ -777,6 +781,7 @@ import {
 } from '../utils/dingtalkRecipientFieldWarnings'
 import {
   describeDingTalkPublicFormLinkAccess,
+  getDingTalkPublicFormLinkAccessLevel,
   listDingTalkPublicFormLinkBlockingErrors,
   listDingTalkPublicFormLinkWarnings,
 } from '../utils/dingtalkPublicFormLinkWarnings'
@@ -1270,6 +1275,10 @@ function publicFormAccessSummary(value: unknown) {
   return describeDingTalkPublicFormLinkAccess(value, formViews.value)
 }
 
+function publicFormAccessLevel(value: unknown) {
+  return getDingTalkPublicFormLinkAccessLevel(value, formViews.value)
+}
+
 function isDingTalkActionType(value: unknown): boolean {
   return value === 'send_dingtalk_group_message' || value === 'send_dingtalk_person_message'
 }
@@ -1678,6 +1687,31 @@ function onTestRun() {
 
 .meta-rule-editor__section-title { font-size: 14px; font-weight: 600; color: #0f172a; }
 .meta-rule-editor__hint { font-weight: 400; color: #94a3b8; font-size: 12px; }
+
+.meta-rule-editor__access-summary {
+  border-radius: 8px;
+  padding: 6px 8px;
+}
+
+.meta-rule-editor__access-summary--public {
+  background: #fffbeb;
+  color: #92400e;
+}
+
+.meta-rule-editor__access-summary--dingtalk {
+  background: #eff6ff;
+  color: #1d4ed8;
+}
+
+.meta-rule-editor__access-summary--dingtalk_granted {
+  background: #ecfdf5;
+  color: #047857;
+}
+
+.meta-rule-editor__access-summary--unavailable {
+  background: #fef2f2;
+  color: #b91c1c;
+}
 
 .meta-rule-editor__label { font-size: 12px; font-weight: 600; color: #475569; margin-top: 4px; }
 
