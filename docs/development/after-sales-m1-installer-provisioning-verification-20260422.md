@@ -106,3 +106,35 @@ stack and is therefore not run as part of M1 verification.
 - M0 provisioning unit tests: 7/7 pass.
 - New integration test: 3/3 pass.
 - No scope deviations.
+## Rebase verification — 2026-04-22
+
+Rebased from the original delivery baseline onto `origin/main@d547d89fcfcfded72f2e78a16320111d6def4f54`.
+
+Rebased head:
+
+```text
+ad1ecb76d feat(after-sales): wire installer C-min through multitable/provisioning.ts
+```
+
+Commands rerun after rebase:
+
+```bash
+pnpm --filter @metasheet/core-backend exec tsc --noEmit --pretty false
+
+DATABASE_URL='postgresql://chouhua@127.0.0.1:5432/postgres' PGHOST=127.0.0.1 PGPORT=5432 PGDATABASE=postgres PGUSER=chouhua \
+  pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run \
+    tests/integration/after-sales-installer-provisioning.api.test.ts --reporter=dot
+
+pnpm --filter @metasheet/core-backend exec vitest run \
+  tests/unit/after-sales-installer.test.ts \
+  tests/unit/multitable-provisioning.test.ts --reporter=dot
+
+git diff --check
+```
+
+Results:
+
+- TypeScript: passed with zero diagnostics.
+- New integration: `after-sales-installer-provisioning.api.test.ts` 3/3 passed.
+- Focused unit regression: `after-sales-installer.test.ts` + `multitable-provisioning.test.ts` 48/48 passed.
+- `git diff --check`: passed.
