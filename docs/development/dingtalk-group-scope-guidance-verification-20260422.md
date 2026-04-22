@@ -35,3 +35,13 @@ git diff --check
 - Local CLI check: `claude --version`
 - Version observed: `2.1.117 (Claude Code)`
 - A read-only `claude -p` run was attempted with `--tools ""`. It could not inspect files in its session and did not edit files.
+
+## Rebase verification - 2026-04-22
+
+- Rebased onto `origin/main@f5bea874b6fd` after PR #1038 was merged.
+- Rebased branch HEAD: `ee117ff82d53`.
+- `pnpm install --frozen-lockfile`: passed.
+- `pnpm --filter @metasheet/web exec vitest run tests/multitable-api-token-manager.spec.ts --watch=false`: passed, 1 file and 21 tests.
+- `rg -n "data-dingtalk-groups-scope-note|Table-scoped DingTalk groups|bound to this table|add multiple groups|choose one or more in automations|one table can have multiple groups|dt_2" ...`: passed.
+- `git diff --check`: passed.
+- `pnpm --filter @metasheet/web build`: passed. Vite emitted only existing chunk-size and mixed static/dynamic import warnings.
