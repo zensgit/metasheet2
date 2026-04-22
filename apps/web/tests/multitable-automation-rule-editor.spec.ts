@@ -924,6 +924,37 @@ describe('MetaAutomationRuleEditor', () => {
     expect(container.querySelector('[data-field="groupMessageSummary"]')?.textContent).toContain('DingTalk-bound users in allowlist can submit')
   })
 
+  it('does not render access badges for whitespace-only public form ids', async () => {
+    const client = mockClient()
+    const { container } = mount({
+      visible: true,
+      sheetId: 'sheet_1',
+      fields,
+      views,
+      client,
+      rule: fakeRule({
+        actionType: 'send_dingtalk_group_message',
+        actionConfig: { publicFormViewId: '   ', destinationId: 'dt_1', titleTemplate: 'Ticket', bodyTemplate: 'Please fill' },
+        actions: [
+          {
+            type: 'send_dingtalk_group_message',
+            config: { publicFormViewId: '   ', destinationId: 'dt_1', titleTemplate: 'Ticket', bodyTemplate: 'Please fill' },
+          },
+          {
+            type: 'send_dingtalk_person_message',
+            config: { publicFormViewId: '\n\t', userIds: ['user_1'], titleTemplate: 'Ticket', bodyTemplate: 'Please fill' },
+          },
+        ],
+      }),
+    })
+    await flushPromises()
+
+    expect(container.querySelector('[data-field="groupPublicFormAccessSummary-0"]')).toBeNull()
+    expect(container.querySelector('[data-field="personPublicFormAccessSummary-1"]')).toBeNull()
+    expect(container.querySelector('[data-field="groupMessageSummary"]')?.textContent).toContain('No public form link')
+    expect(container.querySelector('[data-field="personMessageSummary"]')?.textContent).toContain('No public form link')
+  })
+
   it('shows DingTalk-authorized public form access next to the person form selector', async () => {
     const client = mockClient()
     const { container } = mount({

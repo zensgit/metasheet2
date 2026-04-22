@@ -1074,6 +1074,7 @@ describe('MetaAutomationManager', () => {
     expect(container.textContent).toContain('Use DingTalk-protected access and an allowlist')
     expect(container.querySelector('[data-automation-summary="group"]')?.textContent).toContain('Fully public; anyone with the link can submit')
     expect(container.querySelector('[data-automation-public-form-access="group"]')?.getAttribute('data-access-level')).toBe('public')
+    expect(container.querySelector('[data-automation-public-form-access="group"]')?.classList.contains('meta-automation__public-form-access--public')).toBe(true)
   })
 
   it('warns when a DingTalk group message uses a protected public form without an allowlist in the inline form', async () => {
@@ -1104,6 +1105,7 @@ describe('MetaAutomationManager', () => {
     expect(container.textContent).toContain('Public form sharing for "Public Form" allows all bound DingTalk users to submit')
     expect(container.textContent).toContain('add allowed users or member groups')
     expect(container.querySelector('[data-automation-public-form-access="group"]')?.getAttribute('data-access-level')).toBe('dingtalk')
+    expect(container.querySelector('[data-automation-public-form-access="group"]')?.classList.contains('meta-automation__public-form-access--dingtalk')).toBe(true)
   })
 
   it('does not warn when a DingTalk group message uses a protected public form with an allowlist in the inline form', async () => {
@@ -1158,6 +1160,7 @@ describe('MetaAutomationManager', () => {
 
     expect(container.textContent).toContain('Public form sharing for "Public Form" is missing a public token')
     expect(container.querySelector('[data-automation-public-form-access="person"]')?.getAttribute('data-access-level')).toBe('unavailable')
+    expect(container.querySelector('[data-automation-public-form-access="person"]')?.classList.contains('meta-automation__public-form-access--unavailable')).toBe(true)
   })
 
   it('disables creating a DingTalk person automation when the selected public form link cannot work', async () => {
@@ -2234,6 +2237,7 @@ describe('MetaAutomationManager', () => {
     expect(summary?.textContent).toContain('Public Form')
     expect(summary?.textContent).toContain('Fully public; anyone with the link can submit')
     expect(container.querySelector('[data-automation-public-form-access="person"]')?.getAttribute('data-access-level')).toBe('public')
+    expect(container.querySelector('[data-automation-public-form-access="person"]')?.classList.contains('meta-automation__public-form-access--public')).toBe(true)
     expect(summary?.textContent).toContain('No internal link')
   })
 

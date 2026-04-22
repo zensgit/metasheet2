@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest'
 import {
   describeDingTalkPublicFormLinkAccess,
   getDingTalkPublicFormLinkAccessLevel,
+  getDingTalkPublicFormLinkAccessState,
   listDingTalkPublicFormLinkBlockingErrors,
   listDingTalkPublicFormLinkWarnings,
 } from '../src/multitable/utils/dingtalkPublicFormLinkWarnings'
@@ -173,6 +174,34 @@ describe('dingtalk public form link warnings', () => {
     expect(getDingTalkPublicFormLinkAccessLevel('view_form_missing_token', views, nowMs)).toBe('unavailable')
     expect(getDingTalkPublicFormLinkAccessLevel('view_form_expired', views, nowMs)).toBe('unavailable')
     expect(getDingTalkPublicFormLinkAccessLevel('view_form_expires_on', views, nowMs)).toBe('unavailable')
+  })
+
+  it('returns stable access state for automation summaries', () => {
+    expect(getDingTalkPublicFormLinkAccessState('   ', views, nowMs)).toEqual({
+      hasSelection: false,
+      level: 'none',
+      summary: 'No public form link',
+    })
+    expect(getDingTalkPublicFormLinkAccessState('view_form_enabled', views, nowMs)).toEqual({
+      hasSelection: true,
+      level: 'public',
+      summary: 'Fully public; anyone with the link can submit',
+    })
+    expect(getDingTalkPublicFormLinkAccessState('view_form_protected_allowed_user', views, nowMs)).toEqual({
+      hasSelection: true,
+      level: 'dingtalk',
+      summary: 'DingTalk-bound users in allowlist can submit',
+    })
+    expect(getDingTalkPublicFormLinkAccessState('view_form_granted_allowed_group', views, nowMs)).toEqual({
+      hasSelection: true,
+      level: 'dingtalk_granted',
+      summary: 'Authorized DingTalk users in allowlist can submit',
+    })
+    expect(getDingTalkPublicFormLinkAccessState('missing_view', views, nowMs)).toEqual({
+      hasSelection: true,
+      level: 'unavailable',
+      summary: 'View unavailable in this sheet',
+    })
   })
 
   it('separates blocking link errors from advisory access warnings', () => {
