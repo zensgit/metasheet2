@@ -39,3 +39,13 @@ claude -p --tools Read,Grep,Glob --max-budget-usd 0.75 "Read-only review. Inspec
 - Version observed: `2.1.117 (Claude Code)`
 - Read-only review was executed with `Read,Grep,Glob` tools.
 - Claude reported no blocking issues. Minor notes were copy redundancy and broader i18n consistency risks, which do not block this slice.
+
+## Rebase verification - 2026-04-22
+
+- Rebased onto `origin/codex/dingtalk-group-scope-guidance-20260422@8f659abc396c` after PR #1039 was replayed onto `main`.
+- Rebased branch HEAD: `16a1aa78fa76`.
+- `pnpm install --frozen-lockfile`: passed.
+- `pnpm --filter @metasheet/web exec vitest run tests/multitable-api-token-manager.spec.ts tests/multitable-automation-rule-editor.spec.ts --watch=false`: passed, 2 files and 77 tests.
+- `rg -n "does not import DingTalk group members|control form access|target DingTalk group robot settings|appears in this table's automation rule editor|registered for this table|DingTalk group destination ID|No DingTalk group destinations yet|SEC secret" ...`: passed.
+- `git diff --check`: passed.
+- `pnpm --filter @metasheet/web build`: passed. Vite emitted only existing chunk-size and mixed static/dynamic import warnings.
