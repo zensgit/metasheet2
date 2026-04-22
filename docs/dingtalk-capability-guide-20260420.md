@@ -119,6 +119,7 @@ This enables the precise model:
 - send a form link to a DingTalk group or DingTalk user
 - only selected local users or local member groups can fill it
 - DingTalk verifies identity, but local allowlists decide access
+- backend form-share updates reject inactive local users in `allowedUserIds`, matching the frontend allowlist picker
 
 ### 7. Internal processing links
 
