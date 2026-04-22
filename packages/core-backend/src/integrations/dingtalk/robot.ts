@@ -15,6 +15,9 @@ interface DingTalkRobotResponse {
 
 export class DingTalkRobotResponseError extends Error {}
 
+const DINGTALK_ROBOT_WEBHOOK_HOST = 'oapi.dingtalk.com'
+const DINGTALK_ROBOT_WEBHOOK_PATH = '/robot/send'
+
 export function buildDingTalkMarkdown(subject: string, content: string): DingTalkRobotPayload {
   const title = subject.trim() || 'MetaSheet Notification'
   const body = content.trim() || title
@@ -25,6 +28,39 @@ export function buildDingTalkMarkdown(subject: string, content: string): DingTal
       text: `### ${title}\n\n${body}`,
     },
   }
+}
+
+export function normalizeDingTalkRobotWebhookUrl(value: string | undefined): string {
+  const webhookUrl = value?.trim()
+  if (!webhookUrl) throw new Error('Webhook URL is required')
+
+  let parsed: URL
+  try {
+    parsed = new URL(webhookUrl)
+  } catch {
+    throw new Error('Webhook URL is not a valid URL')
+  }
+
+  if (parsed.protocol !== 'https:') {
+    throw new Error('DingTalk robot webhook URL must use HTTPS')
+  }
+  if (parsed.hostname !== DINGTALK_ROBOT_WEBHOOK_HOST || parsed.pathname !== DINGTALK_ROBOT_WEBHOOK_PATH) {
+    throw new Error(`DingTalk group webhook URL must be a DingTalk robot URL from https://${DINGTALK_ROBOT_WEBHOOK_HOST}${DINGTALK_ROBOT_WEBHOOK_PATH}`)
+  }
+  if (!parsed.searchParams.get('access_token')?.trim()) {
+    throw new Error('DingTalk group webhook URL must include access_token')
+  }
+
+  return parsed.toString()
+}
+
+export function normalizeDingTalkRobotSecret(value: string | undefined): string | undefined {
+  const secret = value?.trim()
+  if (!secret) return undefined
+  if (!secret.startsWith('SEC')) {
+    throw new Error('DingTalk robot secret must start with SEC')
+  }
+  return secret
 }
 
 export function buildSignedDingTalkWebhookUrl(baseUrl: string, secret?: string): string {

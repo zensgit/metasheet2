@@ -552,6 +552,97 @@ describe('AutomationExecutor', () => {
     expect(insertCalls).toHaveLength(2)
   })
 
+  it('fails send_dingtalk_group_message for legacy invalid webhook without fetch', async () => {
+    const queryFn = vi.fn()
+      .mockResolvedValueOnce({
+        rows: [{ id: 'dt_1', name: 'Legacy Group', webhook_url: 'https://example.com/hook', secret: null, enabled: true }],
+      })
+      .mockResolvedValue({ rows: [] })
+    const fetchFn = vi.fn(async () => new Response(JSON.stringify({ errcode: 0, errmsg: 'ok' }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    })) as unknown as typeof fetch
+
+    deps = createMockDeps({ queryFn, fetchFn })
+    executor = new AutomationExecutor(deps)
+
+    const rule = createMockRule({
+      actions: [{
+        type: 'send_dingtalk_group_message',
+        config: {
+          destinationId: 'dt_1',
+          titleTemplate: 'Record {{record.title}} ready',
+          bodyTemplate: 'Status: {{record.status}}',
+        },
+      }],
+    })
+
+    const result = await executor.execute(rule, {
+      recordId: 'r1',
+      data: { title: 'Incident', status: 'open' },
+      sheetId: 'sheet_1',
+      actorId: 'user_1',
+    })
+
+    expect(result.status).toBe('failed')
+    expect(result.steps[0].error).toContain('DingTalk robot URL')
+    expect(result.steps[0].output).toEqual(expect.objectContaining({
+      sentCount: 0,
+      failedDestinationIds: ['dt_1'],
+    }))
+    expect(fetchFn).not.toHaveBeenCalled()
+    const insertCalls = queryFn.mock.calls.filter((call) => String(call[0]).includes('INSERT INTO dingtalk_group_deliveries'))
+    expect(insertCalls).toHaveLength(1)
+    expect(insertCalls[0]?.[1]?.[8]).toContain('DingTalk robot URL')
+  })
+
+  it('validates all DingTalk group webhooks before sending any destination', async () => {
+    const queryFn = vi.fn()
+      .mockResolvedValueOnce({
+        rows: [
+          { id: 'dt_valid', name: 'Ops Group', webhook_url: 'https://oapi.dingtalk.com/robot/send?access_token=test', secret: null, enabled: true },
+          { id: 'dt_legacy', name: 'Legacy Group', webhook_url: 'https://example.com/hook', secret: null, enabled: true },
+        ],
+      })
+      .mockResolvedValue({ rows: [] })
+    const fetchFn = vi.fn(async () => new Response(JSON.stringify({ errcode: 0, errmsg: 'ok' }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    })) as unknown as typeof fetch
+
+    deps = createMockDeps({ queryFn, fetchFn })
+    executor = new AutomationExecutor(deps)
+
+    const rule = createMockRule({
+      actions: [{
+        type: 'send_dingtalk_group_message',
+        config: {
+          destinationIds: ['dt_valid', 'dt_legacy'],
+          titleTemplate: 'Record {{record.title}} ready',
+          bodyTemplate: 'Status: {{record.status}}',
+        },
+      }],
+    })
+
+    const result = await executor.execute(rule, {
+      recordId: 'r1',
+      data: { title: 'Incident', status: 'open' },
+      sheetId: 'sheet_1',
+      actorId: 'user_1',
+    })
+
+    expect(result.status).toBe('failed')
+    expect(result.steps[0].error).toContain('1 of 2 DingTalk destinations failed validation')
+    expect(result.steps[0].output).toEqual(expect.objectContaining({
+      sentCount: 0,
+      failedDestinationIds: ['dt_legacy'],
+    }))
+    expect(fetchFn).not.toHaveBeenCalled()
+    const insertCalls = queryFn.mock.calls.filter((call) => String(call[0]).includes('INSERT INTO dingtalk_group_deliveries'))
+    expect(insertCalls).toHaveLength(1)
+    expect(insertCalls[0]?.[1]?.[1]).toBe('dt_legacy')
+  })
+
   it('executes send_dingtalk_group_message with dynamic record destinations', async () => {
     const queryFn = vi.fn()
       .mockResolvedValueOnce({
