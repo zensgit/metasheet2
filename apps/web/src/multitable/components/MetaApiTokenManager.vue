@@ -206,6 +206,13 @@
             <p id="dingtalk-group-webhook-help" class="meta-api-mgr__help" data-dingtalk-group-webhook-help="true">
               Paste the robot webhook from the target DingTalk group robot settings. After saving, this destination appears in this table's automation rule editor. The access token is stored for delivery but masked in this UI.
             </p>
+            <p
+              v-if="dingTalkGroupWebhookValidationMessage && dingTalkGroupDraft.webhookUrl.trim()"
+              class="meta-api-mgr__help meta-api-mgr__help--error"
+              data-dingtalk-group-webhook-error="true"
+            >
+              {{ dingTalkGroupWebhookValidationMessage }}
+            </p>
             <label class="meta-api-mgr__label">Secret (optional)</label>
             <input
               v-model="dingTalkGroupDraft.secret"
@@ -217,6 +224,13 @@
             />
             <p id="dingtalk-group-secret-help" class="meta-api-mgr__help" data-dingtalk-group-secret-help="true">
               Fill this only when the DingTalk robot uses signature security. Leave empty for robots without a SEC secret.
+            </p>
+            <p
+              v-if="dingTalkGroupSecretValidationMessage"
+              class="meta-api-mgr__help meta-api-mgr__help--error"
+              data-dingtalk-group-secret-error="true"
+            >
+              {{ dingTalkGroupSecretValidationMessage }}
             </p>
             <label class="meta-api-mgr__checkbox-label">
               <input
@@ -392,6 +406,7 @@ const dingTalkGroups = ref<DingTalkGroupDestination[]>([])
 const dingTalkGroupsLoading = ref(false)
 const showDingTalkGroupForm = ref(false)
 const editingDingTalkGroupId = ref<string | null>(null)
+const editingDingTalkGroupOriginal = ref<{ webhookUrl: string; secret: string } | null>(null)
 const dingTalkDeliveriesGroupId = ref<string | null>(null)
 const dingTalkDeliveriesLoading = ref(false)
 const dingTalkDeliveries = ref<DingTalkGroupDelivery[]>([])
@@ -412,8 +427,25 @@ const canSaveWebhook = computed(() => {
   return webhookDraft.value.name.trim() && webhookDraft.value.url.startsWith('https://') && webhookDraft.value.events.length > 0
 })
 
+const dingTalkGroupWebhookChanged = computed(() => {
+  if (!editingDingTalkGroupId.value) return true
+  return dingTalkGroupDraft.value.webhookUrl.trim() !== (editingDingTalkGroupOriginal.value?.webhookUrl ?? '').trim()
+})
+const dingTalkGroupSecretChanged = computed(() => {
+  if (!editingDingTalkGroupId.value) return true
+  return dingTalkGroupDraft.value.secret.trim() !== (editingDingTalkGroupOriginal.value?.secret ?? '').trim()
+})
+const dingTalkGroupWebhookValidationMessage = computed(() =>
+  dingTalkGroupWebhookChanged.value ? validateDingTalkGroupWebhookUrl(dingTalkGroupDraft.value.webhookUrl) : '',
+)
+const dingTalkGroupSecretValidationMessage = computed(() =>
+  dingTalkGroupSecretChanged.value ? validateDingTalkGroupSecret(dingTalkGroupDraft.value.secret) : '',
+)
 const canSaveDingTalkGroup = computed(() => {
-  return canManageDingTalkGroups.value && dingTalkGroupDraft.value.name.trim() && dingTalkGroupDraft.value.webhookUrl.trim().startsWith('https://')
+  return canManageDingTalkGroups.value
+    && dingTalkGroupDraft.value.name.trim()
+    && !dingTalkGroupWebhookValidationMessage.value
+    && !dingTalkGroupSecretValidationMessage.value
 })
 
 function formatDate(iso: string): string {
@@ -439,6 +471,32 @@ function maskDingTalkWebhookUrl(url: string): string {
   } catch {
     return String(url || '').replace(/([?&](?:access_token|timestamp|sign)=)[^&]+/gi, '$1***')
   }
+}
+
+function validateDingTalkGroupWebhookUrl(value: string): string {
+  const webhookUrl = value.trim()
+  if (!webhookUrl) return 'Webhook URL is required'
+  let parsed: URL
+  try {
+    parsed = new URL(webhookUrl)
+  } catch {
+    return 'Webhook URL is not a valid URL'
+  }
+  if (parsed.protocol !== 'https:') return 'DingTalk robot webhook URL must use HTTPS'
+  if (parsed.hostname !== 'oapi.dingtalk.com' || parsed.pathname !== '/robot/send') {
+    return 'Use the DingTalk group robot webhook from https://oapi.dingtalk.com/robot/send'
+  }
+  if (!parsed.searchParams.get('access_token')?.trim()) {
+    return 'DingTalk group robot webhook must include access_token'
+  }
+  return ''
+}
+
+function validateDingTalkGroupSecret(value: string): string {
+  const secret = value.trim()
+  if (!secret) return ''
+  if (!secret.startsWith('SEC')) return 'DingTalk robot secret must start with SEC'
+  return ''
 }
 
 // ---- Token actions ----
@@ -666,6 +724,7 @@ function clearDingTalkGroupState() {
   dingTalkGroups.value = []
   showDingTalkGroupForm.value = false
   editingDingTalkGroupId.value = null
+  editingDingTalkGroupOriginal.value = null
   dingTalkDeliveriesRequestToken += 1
   dingTalkDeliveriesGroupId.value = null
   dingTalkDeliveriesLoading.value = false
@@ -678,6 +737,7 @@ function clearDingTalkGroupState() {
 function openDingTalkGroupForm() {
   if (!canManageDingTalkGroups.value) return
   editingDingTalkGroupId.value = null
+  editingDingTalkGroupOriginal.value = null
   dingTalkGroupDraft.value = {
     name: '',
     webhookUrl: '',
@@ -690,6 +750,10 @@ function openDingTalkGroupForm() {
 function openEditDingTalkGroup(group: DingTalkGroupDestination) {
   if (!canManageDingTalkGroups.value) return
   editingDingTalkGroupId.value = group.id
+  editingDingTalkGroupOriginal.value = {
+    webhookUrl: group.webhookUrl,
+    secret: group.secret ?? '',
+  }
   dingTalkGroupDraft.value = {
     name: group.name,
     webhookUrl: group.webhookUrl,
@@ -702,6 +766,7 @@ function openEditDingTalkGroup(group: DingTalkGroupDestination) {
 function cancelDingTalkGroupForm() {
   showDingTalkGroupForm.value = false
   editingDingTalkGroupId.value = null
+  editingDingTalkGroupOriginal.value = null
 }
 
 async function onSaveDingTalkGroup() {
@@ -709,17 +774,23 @@ async function onSaveDingTalkGroup() {
   busy.value = true
   error.value = null
   try {
-    const createInput = {
-      name: dingTalkGroupDraft.value.name.trim(),
-      webhookUrl: dingTalkGroupDraft.value.webhookUrl.trim(),
-      secret: dingTalkGroupDraft.value.secret || undefined,
-      enabled: dingTalkGroupDraft.value.enabled,
-    }
+    const name = dingTalkGroupDraft.value.name.trim()
+    const webhookUrl = dingTalkGroupDraft.value.webhookUrl.trim()
+    const secret = dingTalkGroupDraft.value.secret.trim()
     if (editingDingTalkGroupId.value) {
-      await props.client.updateDingTalkGroup(editingDingTalkGroupId.value, createInput, props.sheetId)
+      const updateInput: { name: string; webhookUrl?: string; secret?: string; enabled: boolean } = {
+        name,
+        enabled: dingTalkGroupDraft.value.enabled,
+      }
+      if (dingTalkGroupWebhookChanged.value) updateInput.webhookUrl = webhookUrl
+      if (dingTalkGroupSecretChanged.value) updateInput.secret = secret || ''
+      await props.client.updateDingTalkGroup(editingDingTalkGroupId.value, updateInput, props.sheetId)
     } else {
       await props.client.createDingTalkGroup({
-        ...createInput,
+        name,
+        webhookUrl,
+        secret: secret || undefined,
+        enabled: dingTalkGroupDraft.value.enabled,
         sheetId: props.sheetId,
       })
     }
@@ -1022,6 +1093,10 @@ watch(canManageDingTalkGroups, (canManage) => {
   font-size: 12px;
   line-height: 1.45;
   color: #64748b;
+}
+
+.meta-api-mgr__help--error {
+  color: #b91c1c;
 }
 
 .meta-api-mgr__checkboxes {

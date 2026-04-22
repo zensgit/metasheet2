@@ -19,6 +19,8 @@ import type {
 
 const logger = new Logger('DingTalkGroupDestinationService')
 const DINGTALK_REQUEST_TIMEOUT_MS = 5_000
+const DINGTALK_ROBOT_WEBHOOK_HOST = 'oapi.dingtalk.com'
+const DINGTALK_ROBOT_WEBHOOK_PATH = '/robot/send'
 
 type DingTalkGroupDestinationRow = {
   id: string
@@ -37,6 +39,39 @@ type DingTalkGroupDestinationRow = {
 
 function generateId(): string {
   return randomBytes(16).toString('hex')
+}
+
+function normalizeDingTalkRobotWebhookUrl(value: string | undefined): string {
+  const webhookUrl = value?.trim()
+  if (!webhookUrl) throw new Error('Webhook URL is required')
+
+  let parsed: URL
+  try {
+    parsed = new URL(webhookUrl)
+  } catch {
+    throw new Error('Webhook URL is not a valid URL')
+  }
+
+  if (parsed.protocol !== 'https:') {
+    throw new Error('DingTalk robot webhook URL must use HTTPS')
+  }
+  if (parsed.hostname !== DINGTALK_ROBOT_WEBHOOK_HOST || parsed.pathname !== DINGTALK_ROBOT_WEBHOOK_PATH) {
+    throw new Error(`DingTalk group webhook URL must be a DingTalk robot URL from https://${DINGTALK_ROBOT_WEBHOOK_HOST}${DINGTALK_ROBOT_WEBHOOK_PATH}`)
+  }
+  if (!parsed.searchParams.get('access_token')?.trim()) {
+    throw new Error('DingTalk group webhook URL must include access_token')
+  }
+
+  return parsed.toString()
+}
+
+function normalizeDingTalkRobotSecret(value: string | undefined): string | undefined {
+  const secret = value?.trim()
+  if (!secret) return undefined
+  if (!secret.startsWith('SEC')) {
+    throw new Error('DingTalk robot secret must start with SEC')
+  }
+  return secret
 }
 
 function rowToDestination(row: DingTalkGroupDestinationRow): DingTalkGroupDestination {
@@ -111,19 +146,10 @@ export class DingTalkGroupDestinationService {
 
   async createDestination(userId: string, input: DingTalkGroupDestinationCreateInput): Promise<DingTalkGroupDestination> {
     const name = input.name?.trim()
-    const webhookUrl = input.webhookUrl?.trim()
+    const webhookUrl = normalizeDingTalkRobotWebhookUrl(input.webhookUrl)
+    const secret = normalizeDingTalkRobotSecret(input.secret)
     const sheetId = typeof input.sheetId === 'string' && input.sheetId.trim() ? input.sheetId.trim() : null
     if (!name) throw new Error('Destination name is required')
-    if (!webhookUrl) throw new Error('Webhook URL is required')
-    try {
-      const parsed = new URL(webhookUrl)
-      if (process.env.NODE_ENV === 'production' && parsed.protocol !== 'https:') {
-        throw new Error('Webhook URL must use HTTPS in production')
-      }
-    } catch (error) {
-      if (error instanceof Error && error.message.includes('HTTPS')) throw error
-      throw new Error('Webhook URL is not a valid URL')
-    }
 
     const id = generateId()
     const enabled = input.enabled ?? true
@@ -133,7 +159,7 @@ export class DingTalkGroupDestinationService {
       id,
       name,
       webhook_url: webhookUrl,
-      secret: input.secret ?? null,
+      secret: secret ?? null,
       enabled,
       sheet_id: sheetId,
       created_by: userId,
@@ -145,7 +171,7 @@ export class DingTalkGroupDestinationService {
       id,
       name,
       webhookUrl,
-      secret: input.secret,
+      secret,
       enabled,
       ...(sheetId ? { sheetId } : {}),
       createdBy: userId,
@@ -225,20 +251,9 @@ export class DingTalkGroupDestinationService {
       updates.name = name
     }
     if (input.webhookUrl !== undefined) {
-      const webhookUrl = input.webhookUrl.trim()
-      if (!webhookUrl) throw new Error('Webhook URL is required')
-      try {
-        const parsed = new URL(webhookUrl)
-        if (process.env.NODE_ENV === 'production' && parsed.protocol !== 'https:') {
-          throw new Error('Webhook URL must use HTTPS in production')
-        }
-      } catch (error) {
-        if (error instanceof Error && error.message.includes('HTTPS')) throw error
-        throw new Error('Webhook URL is not a valid URL')
-      }
-      updates.webhook_url = webhookUrl
+      updates.webhook_url = normalizeDingTalkRobotWebhookUrl(input.webhookUrl)
     }
-    if (input.secret !== undefined) updates.secret = input.secret || null
+    if (input.secret !== undefined) updates.secret = normalizeDingTalkRobotSecret(input.secret) ?? null
     if (input.enabled !== undefined) updates.enabled = input.enabled
 
     await this.db.updateTable('dingtalk_group_destinations')

@@ -105,25 +105,59 @@ describe('DingTalkGroupDestinationService', () => {
   })
 
   test('creates and lists destinations', async () => {
-    const { db } = createMockDb()
+    const { db, roots } = createMockDb()
     const service = new DingTalkGroupDestinationService(db, vi.fn())
 
     const created = await service.createDestination('user_1', {
       name: ' Ops DingTalk Group ',
       webhookUrl: 'https://oapi.dingtalk.com/robot/send?access_token=test-token',
-      secret: 'SEC123',
+      secret: ' SEC123 ',
       sheetId: 'sheet_1',
     })
 
     expect(created.name).toBe('Ops DingTalk Group')
+    expect(created.secret).toBe('SEC123')
     expect(created.enabled).toBe(true)
     expect(created.sheetId).toBe('sheet_1')
+    const insertChain = roots.insertInto.mock.results[0]?.value as MockChain | undefined
+    const values = insertChain?.values?.mock.calls[0]?.[0] as Record<string, unknown> | undefined
+    expect(values?.secret).toBe('SEC123')
 
     executeQueue.push([destinationRow({ sheet_id: 'sheet_1' }), destinationRow({ id: 'dt_legacy', sheet_id: null })])
     const listed = await service.listDestinations('user_1', 'sheet_1')
     expect(listed).toHaveLength(2)
     expect(listed[0].name).toBe('Ops DingTalk Group')
     expect(listed[0].sheetId).toBe('sheet_1')
+  })
+
+  test.each([
+    ['http://oapi.dingtalk.com/robot/send?access_token=test-token', 'HTTPS'],
+    ['https://example.com/robot/send?access_token=test-token', 'DingTalk robot URL'],
+    ['https://oapi.dingtalk.com/wrong?access_token=test-token', 'DingTalk robot URL'],
+    ['https://oapi.dingtalk.com/robot/send', 'access_token'],
+  ])('rejects invalid DingTalk robot webhook URL on create: %s', async (webhookUrl, expectedMessage) => {
+    const { db, roots } = createMockDb()
+    const service = new DingTalkGroupDestinationService(db, vi.fn())
+
+    await expect(service.createDestination('user_1', {
+      name: 'Ops DingTalk Group',
+      webhookUrl,
+    })).rejects.toThrow(expectedMessage)
+
+    expect(roots.insertInto).not.toHaveBeenCalled()
+  })
+
+  test('rejects invalid DingTalk robot secret on create', async () => {
+    const { db, roots } = createMockDb()
+    const service = new DingTalkGroupDestinationService(db, vi.fn())
+
+    await expect(service.createDestination('user_1', {
+      name: 'Ops DingTalk Group',
+      webhookUrl: 'https://oapi.dingtalk.com/robot/send?access_token=test-token',
+      secret: 'bad-secret',
+    })).rejects.toThrow('DingTalk robot secret must start with SEC')
+
+    expect(roots.insertInto).not.toHaveBeenCalled()
   })
 
   test('shared sheet destinations can be managed by non-owners on the same sheet', async () => {
@@ -168,6 +202,19 @@ describe('DingTalkGroupDestinationService', () => {
     expect(updated.name).toBe('Updated group')
     expect(updated.enabled).toBe(false)
     expect(updated.webhookUrl).toContain('access_token=next')
+  })
+
+  test('rejects invalid DingTalk robot webhook URL on update', async () => {
+    const { db, roots } = createMockDb()
+    const service = new DingTalkGroupDestinationService(db, vi.fn())
+
+    executeTakeFirstQueue.push(destinationRow())
+
+    await expect(service.updateDestination('dt_1', 'user_1', {
+      webhookUrl: 'https://example.com/hook',
+    })).rejects.toThrow('DingTalk robot URL')
+
+    expect(roots.updateTable).not.toHaveBeenCalled()
   })
 
   test('lists deliveries for a destination', async () => {
