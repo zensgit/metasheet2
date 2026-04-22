@@ -82,6 +82,7 @@ function fakeDingTalkGroup(overrides: Partial<DingTalkGroupDestination> = {}): D
     id: 'dt_1',
     name: 'Ops DingTalk Group',
     webhookUrl: 'https://oapi.dingtalk.com/robot/send?access_token=test-token',
+    hasSecret: false,
     enabled: true,
     sheetId: 'sheet_1',
     createdBy: 'user_1',
@@ -569,7 +570,7 @@ describe('MetaApiTokenManager', () => {
   it('omits unchanged legacy DingTalk webhook settings when editing metadata', async () => {
     const legacyGroup = fakeDingTalkGroup({
       webhookUrl: 'https://example.com/legacy-hook',
-      secret: 'legacy-secret',
+      hasSecret: true,
     })
     const { client, fetchFn } = mockClient([], [], [], [legacyGroup])
     mount({ visible: true, client })
@@ -603,6 +604,48 @@ describe('MetaApiTokenManager', () => {
     expect(JSON.parse(updateCalls[0][1]?.body as string)).toEqual({
       name: 'Legacy group renamed',
       enabled: true,
+    })
+  })
+
+  it('does not prefill saved DingTalk group secret and can clear it explicitly', async () => {
+    const signedGroup = fakeDingTalkGroup({
+      webhookUrl: 'https://oapi.dingtalk.com/robot/send?access_token=***',
+      hasSecret: true,
+    })
+    const { client, fetchFn } = mockClient([], [], [], [signedGroup])
+    mount({ visible: true, client })
+    await flushPromises()
+
+    const dingTalkTab = document.querySelectorAll('[role="tab"]')[2] as HTMLButtonElement
+    dingTalkTab.click()
+    await flushPromises()
+
+    const editBtn = document.querySelector('[data-dingtalk-group-edit]') as HTMLButtonElement
+    editBtn.click()
+    await flushPromises()
+
+    const secretInput = document.querySelector('[data-dingtalk-group-secret]') as HTMLInputElement
+    expect(secretInput.value).toBe('')
+    expect(document.querySelector('[data-dingtalk-group-secret-help]')?.textContent).toContain('already saved')
+
+    const clearSecret = document.querySelector('[data-dingtalk-group-clear-secret]') as HTMLInputElement
+    expect(clearSecret).toBeTruthy()
+    clearSecret.checked = true
+    clearSecret.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushPromises()
+
+    const saveBtn = document.querySelector('[data-dingtalk-group-save]') as HTMLButtonElement
+    saveBtn.click()
+    await flushPromises()
+
+    const updateCalls = fetchFn.mock.calls.filter(
+      (c: [string, RequestInit?]) => c[1]?.method === 'PATCH' && c[0].includes('/dingtalk-groups/'),
+    )
+    expect(updateCalls.length).toBe(1)
+    expect(JSON.parse(updateCalls[0][1]?.body as string)).toEqual({
+      name: 'Ops DingTalk Group',
+      enabled: true,
+      secret: '',
     })
   })
 
