@@ -51,3 +51,13 @@ claude -p --tools Read,Grep,Glob --max-budget-usd 0.75 "Read-only review. Inspec
 - `rg -n "normalizeDingTalkRobotWebhookUrl|normalizeDingTalkRobotSecret|testSend rejects legacy invalid webhook URL without fetch|fails send_dingtalk_group_message for legacy invalid webhook without fetch|validates all DingTalk group webhooks before sending any destination|re-check|re-validate stored webhook" ...`: passed.
 - `git diff --check`: passed.
 - `pnpm --filter @metasheet/core-backend build`: passed.
+
+## Main rebase verification - 2026-04-22
+
+- Rebased directly onto `origin/main@c8aa605ea735` after PR #1041 was squash-merged.
+- Rebased branch HEAD: `67e0221e5f4e`.
+- `pnpm --filter @metasheet/core-backend exec vitest run tests/unit/dingtalk-group-destination-service.test.ts --watch=false`: passed, 1 file and 17 tests.
+- `pnpm --filter @metasheet/core-backend exec vitest run tests/unit/automation-v1.test.ts --watch=false`: passed, 1 file and 121 tests.
+- `rg -n "normalizeDingTalkRobotWebhookUrl|normalizeDingTalkRobotSecret|testSend rejects legacy invalid webhook URL without fetch|fails send_dingtalk_group_message for legacy invalid webhook without fetch|validates all DingTalk group webhooks before sending any destination|re-check|re-validate stored webhook" ...`: passed.
+- `git diff --check`: passed.
+- `pnpm --filter @metasheet/core-backend build`: passed.
