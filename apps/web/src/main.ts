@@ -2,6 +2,7 @@
  * Vue Application Entry Point
  */
 import { createApp } from 'vue'
+import { createPinia } from 'pinia'
 import { createRouter, createWebHistory } from 'vue-router'
 import ElementPlus from 'element-plus'
 import 'element-plus/dist/index.css'
@@ -143,6 +144,7 @@ router.beforeEach(async (to, _from, next) => {
 async function bootstrap(): Promise<void> {
   const app = createApp(App)
   app.use(ElementPlus)
+  app.use(createPinia())
   app.use(router)
 
   await router.isReady()
