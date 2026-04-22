@@ -355,6 +355,64 @@ describe('DingTalk automation link route validation', () => {
     })
   })
 
+  it('persists a DingTalk person rule when public form access requires DingTalk authorization', async () => {
+    const { app, mockPool, automationService } = await createApp({
+      queryHandler: createDingTalkLinkQueryHandler([
+        ...makeViewRows(),
+        {
+          id: GRANTED_FORM_VIEW_ID,
+          sheet_id: SHEET_ID,
+          type: 'form',
+          config: {
+            publicForm: {
+              enabled: true,
+              publicToken: 'pub_granted_token',
+              accessMode: 'dingtalk_granted',
+              allowedUserIds: ['user_1'],
+            },
+          },
+        },
+      ]),
+    })
+
+    const res = await request(app)
+      .post(`/api/multitable/sheets/${SHEET_ID}/automations`)
+      .send({
+        name: 'Notify granted person',
+        triggerType: 'record.created',
+        triggerConfig: {},
+        actionType: 'send_dingtalk_person_message',
+        actionConfig: {
+          userIds: ['user_1'],
+          title: 'Please fill',
+          content: 'Open form',
+          publicFormViewId: GRANTED_FORM_VIEW_ID,
+          internalViewId: INTERNAL_VIEW_ID,
+        },
+      })
+
+    expect(res.status).toBe(200)
+    expect(res.body.ok).toBe(true)
+    expect(automationService.createRule).toHaveBeenCalledWith(SHEET_ID, expect.objectContaining({
+      actionType: 'send_dingtalk_person_message',
+      actionConfig: expect.objectContaining({
+        userIds: ['user_1'],
+        titleTemplate: 'Please fill',
+        bodyTemplate: 'Open form',
+        publicFormViewId: GRANTED_FORM_VIEW_ID,
+        internalViewId: INTERNAL_VIEW_ID,
+      }),
+    }))
+    expect(res.body.data.rule.actionConfig).toEqual(expect.objectContaining({
+      userIds: ['user_1'],
+      titleTemplate: 'Please fill',
+      bodyTemplate: 'Open form',
+      publicFormViewId: GRANTED_FORM_VIEW_ID,
+      internalViewId: INTERNAL_VIEW_ID,
+    }))
+    expect(mockPool.query.mock.calls.some(([sql]) => String(sql).includes('FROM meta_views'))).toBe(true)
+  })
+
   it('rejects a DingTalk person rule without an effective recipient before persisting the rule', async () => {
     const { app, automationService } = await createApp()
 
@@ -534,6 +592,79 @@ describe('DingTalk automation link route validation', () => {
         }),
       }),
     ])
+  })
+
+  it('persists a V1 DingTalk person action when public form access requires DingTalk authorization', async () => {
+    const { app, mockPool, automationService } = await createApp({
+      queryHandler: createDingTalkLinkQueryHandler([
+        ...makeViewRows(),
+        {
+          id: GRANTED_FORM_VIEW_ID,
+          sheet_id: SHEET_ID,
+          type: 'form',
+          config: {
+            publicForm: {
+              enabled: true,
+              publicToken: 'pub_granted_token',
+              accessMode: 'dingtalk_granted',
+              allowedUserIds: ['user_1'],
+            },
+          },
+        },
+      ]),
+    })
+
+    const res = await request(app)
+      .post(`/api/multitable/sheets/${SHEET_ID}/automations`)
+      .send({
+        name: 'Advanced granted person rule',
+        triggerType: 'record.created',
+        triggerConfig: {},
+        actionType: 'notify',
+        actionConfig: {},
+        conditions: { conjunction: 'AND', conditions: [] },
+        actions: [{
+          type: 'send_dingtalk_person_message',
+          config: {
+            userIds: ['user_1'],
+            title: 'Please fill',
+            content: 'Open form',
+            publicFormViewId: GRANTED_FORM_VIEW_ID,
+            internalViewId: INTERNAL_VIEW_ID,
+          },
+        }],
+      })
+
+    expect(res.status).toBe(200)
+    expect(res.body.ok).toBe(true)
+    expect(automationService.createRule).toHaveBeenCalledWith(SHEET_ID, expect.objectContaining({
+      actionType: 'notify',
+      actions: [
+        expect.objectContaining({
+          type: 'send_dingtalk_person_message',
+          config: expect.objectContaining({
+            userIds: ['user_1'],
+            titleTemplate: 'Please fill',
+            bodyTemplate: 'Open form',
+            publicFormViewId: GRANTED_FORM_VIEW_ID,
+            internalViewId: INTERNAL_VIEW_ID,
+          }),
+        }),
+      ],
+    }))
+    expect(res.body.data.rule.actions).toEqual([
+      expect.objectContaining({
+        type: 'send_dingtalk_person_message',
+        config: expect.objectContaining({
+          userIds: ['user_1'],
+          titleTemplate: 'Please fill',
+          bodyTemplate: 'Open form',
+          publicFormViewId: GRANTED_FORM_VIEW_ID,
+          internalViewId: INTERNAL_VIEW_ID,
+        }),
+      }),
+    ])
+    expect(mockPool.query.mock.calls.some(([sql]) => String(sql).includes('FROM meta_views'))).toBe(true)
   })
 
   it('rejects an invalid public form link in a V1 DingTalk person action before persisting the rule', async () => {
