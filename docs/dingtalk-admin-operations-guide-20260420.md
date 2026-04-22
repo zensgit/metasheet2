@@ -39,8 +39,8 @@ Management-side UI path:
 3. Go to the `DingTalk Groups` tab.
 4. Create a destination with:
    - group name
-   - webhook URL
-   - optional secret
+   - webhook URL from the target DingTalk group robot settings
+   - optional `SEC...` secret if the group robot uses signature security
    - enabled state
 5. Use `Test send` to verify delivery.
 
@@ -51,6 +51,7 @@ Notes:
 - users without that permission can still use API tokens and webhooks, but the UI will not preload or expose table-scoped DingTalk group bindings
 - if a stale or direct DingTalk group binding request is still denied by the backend, the frontend reports `Insufficient permissions` instead of a generic `API 403`
 - the DingTalk Groups tab explains that groups created there are bound to the current table, one table can have multiple groups, and automations can choose one or more groups as send targets
+- registering a DingTalk group destination does not import DingTalk group members and does not grant or control public form access
 - the current model manually registers a group webhook; it does not auto-import your DingTalk groups
 
 ## B. Configure a DingTalk person notification rule

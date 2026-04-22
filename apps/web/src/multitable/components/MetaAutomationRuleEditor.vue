@@ -205,6 +205,9 @@
                   {{ destination.name }}
                 </option>
               </select>
+              <div class="meta-rule-editor__hint" data-field="dingtalkDestinationPickerHint">
+                Only DingTalk group destinations registered for this table are listed here.
+              </div>
               <div
                 v-if="selectedGroupDestinations(action).length"
                 class="meta-rule-editor__recipient-list meta-rule-editor__recipient-list--selected"
@@ -231,6 +234,9 @@
                 placeholder="record.opsDestinationId, record.escalationDestinationIds"
                 data-field="dingtalkDestinationFieldPath"
               />
+              <div class="meta-rule-editor__hint" data-field="dingtalkDestinationFieldPathHint">
+                Use record fields whose value is a DingTalk group destination ID, not a local user, member group, or DingTalk group name.
+              </div>
               <label class="meta-rule-editor__label">Pick group field</label>
               <select
                 class="meta-rule-editor__select"

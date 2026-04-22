@@ -179,6 +179,7 @@
           <section class="meta-api-mgr__notice" data-dingtalk-groups-scope-note="true">
             <strong>Table-scoped DingTalk groups</strong>
             <span>Groups created here are bound to this table. You can add multiple groups and choose one or more in automations.</span>
+            <span>Register DingTalk robot webhooks as send destinations for this table. This does not import DingTalk group members or control form access.</span>
           </section>
 
           <section v-if="showDingTalkGroupForm" class="meta-api-mgr__form" data-dingtalk-group-form="true">
@@ -199,16 +200,24 @@
               class="meta-api-mgr__input"
               type="url"
               placeholder="https://oapi.dingtalk.com/robot/send?access_token=..."
+              aria-describedby="dingtalk-group-webhook-help"
               data-dingtalk-group-webhook-url="true"
             />
+            <p id="dingtalk-group-webhook-help" class="meta-api-mgr__help" data-dingtalk-group-webhook-help="true">
+              Paste the robot webhook from the target DingTalk group robot settings. After saving, this destination appears in this table's automation rule editor. The access token is stored for delivery but masked in this UI.
+            </p>
             <label class="meta-api-mgr__label">Secret (optional)</label>
             <input
               v-model="dingTalkGroupDraft.secret"
               class="meta-api-mgr__input"
               type="text"
               placeholder="SEC..."
+              aria-describedby="dingtalk-group-secret-help"
               data-dingtalk-group-secret="true"
             />
+            <p id="dingtalk-group-secret-help" class="meta-api-mgr__help" data-dingtalk-group-secret-help="true">
+              Fill this only when the DingTalk robot uses signature security. Leave empty for robots without a SEC secret.
+            </p>
             <label class="meta-api-mgr__checkbox-label">
               <input
                 v-model="dingTalkGroupDraft.enabled"
@@ -247,7 +256,7 @@
             class="meta-api-mgr__empty"
             data-dingtalk-groups-empty="true"
           >
-            No DingTalk groups yet.
+            No DingTalk group destinations yet. Add a group robot webhook before configuring group-message automations.
           </div>
           <div
             v-for="group in dingTalkGroups"
@@ -1006,6 +1015,13 @@ watch(canManageDingTalkGroups, (canManage) => {
   font-size: 13px;
   background: #fff;
   box-sizing: border-box;
+}
+
+.meta-api-mgr__help {
+  margin: -2px 0 2px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: #64748b;
 }
 
 .meta-api-mgr__checkboxes {
