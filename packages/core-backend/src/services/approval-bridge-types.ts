@@ -86,6 +86,7 @@ export interface ApprovalQueryOptions {
   assignee?: string
   search?: string
   tab?: 'pending' | 'mine' | 'cc' | 'completed'
+  includeExternalTabSources?: boolean
   actorId?: string
   actorRoles?: string[]
   limit?: number
