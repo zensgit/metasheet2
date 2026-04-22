@@ -422,6 +422,8 @@ describe('MetaApiTokenManager', () => {
     expect(scopeNote?.textContent).toContain('bound to this table')
     expect(scopeNote?.textContent).toContain('add multiple groups')
     expect(scopeNote?.textContent).toContain('choose one or more in automations')
+    expect(scopeNote?.textContent).toContain('does not import DingTalk group members')
+    expect(scopeNote?.textContent).toContain('control form access')
     expect(fetchFn.mock.calls.some(([url]) => String(url).includes('/api/multitable/dingtalk-groups?sheetId=sheet_1'))).toBe(true)
   })
 
@@ -487,9 +489,19 @@ describe('MetaApiTokenManager', () => {
     dingTalkTab.click()
     await flushPromises()
 
+    expect(document.querySelector('[data-dingtalk-groups-empty]')?.textContent).toContain('Add a group robot webhook')
+
     const newBtn = document.querySelector('[data-dingtalk-group-new]') as HTMLButtonElement
     newBtn.click()
     await flushPromises()
+
+    const webhookHelp = document.querySelector('[data-dingtalk-group-webhook-help]') as HTMLElement
+    expect(webhookHelp?.textContent).toContain('DingTalk group robot settings')
+    expect(webhookHelp?.textContent).toContain("appears in this table's automation rule editor")
+    expect(webhookHelp?.textContent).toContain('masked in this UI')
+    const secretHelp = document.querySelector('[data-dingtalk-group-secret-help]') as HTMLElement
+    expect(secretHelp?.textContent).toContain('signature security')
+    expect(secretHelp?.textContent).toContain('without a SEC secret')
 
     const nameInput = document.querySelector('[data-dingtalk-group-name]') as HTMLInputElement
     nameInput.value = 'Support group'

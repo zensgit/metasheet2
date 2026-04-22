@@ -233,6 +233,8 @@ Authoring guardrail:
 - users without that permission do not trigger table-scoped DingTalk group binding requests from the frontend
 - code-only `FORBIDDEN` responses from table-scoped APIs are shown as `Insufficient permissions`, avoiding generic `API 403` copy
 - the DingTalk Groups tab describes table-scoped binding, that one table can have multiple groups, and that automations can choose one or more groups
+- the DingTalk Groups form clarifies that the webhook comes from the target group robot, that `SEC...` is only for signed robots, and that registering a destination does not import DingTalk group members or grant form access
+- dynamic `Record group field paths` must resolve to DingTalk group destination IDs, not local user fields, member group IDs, or DingTalk group names
 - group-message and person-message automations disable save when the selected public form link cannot produce a working fill link
 - group-message and person-message automations disable save when the selected internal processing view is not in the current sheet
 - automation create/update APIs reject invalid public form or internal processing links before rules are saved
