@@ -92,6 +92,13 @@
               </option>
             </select>
             <div
+              v-if="!dingTalkDestinations.length"
+              class="meta-automation__hint"
+              data-automation-field="dingtalkDestinationEmpty"
+            >
+              No DingTalk groups are bound to this table yet. Add one in API Tokens &amp; Webhooks &gt; DingTalk Groups, or use a record group field path below.
+            </div>
+            <div
               v-if="selectedDingTalkGroupDestinations.length"
               class="meta-automation__recipient-list meta-automation__recipient-list--selected"
             >
