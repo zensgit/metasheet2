@@ -237,6 +237,24 @@ test('validate-dingtalk-staging-evidence-packet rejects destination path travers
   }
 })
 
+test('validate-dingtalk-staging-evidence-packet rejects unregistered evidence entries', () => {
+  const tmpDir = makeTmpDir()
+  const packetDir = path.join(tmpDir, 'packet')
+
+  try {
+    writePacket(packetDir)
+    mkdirSync(path.join(packetDir, 'evidence/99-old-session'), { recursive: true })
+    writeFileSync(path.join(packetDir, 'evidence/99-old-session/stale.txt'), 'stale\n', 'utf8')
+
+    const result = runValidator(['--packet-dir', packetDir])
+
+    assert.equal(result.status, 1)
+    assert.match(result.stderr, /evidence\/99-old-session is not registered in manifest includedEvidence/)
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+
 test('validate-dingtalk-staging-evidence-packet rejects secret-like raw evidence', () => {
   const tmpDir = makeTmpDir()
   const packetDir = path.join(tmpDir, 'packet')

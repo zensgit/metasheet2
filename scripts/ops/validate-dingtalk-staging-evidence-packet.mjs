@@ -138,6 +138,33 @@ function requireEmptyArray(value, field, failures) {
   return value
 }
 
+function evidenceTopLevelName(destination) {
+  if (typeof destination !== 'string') return ''
+  const parts = destination.replaceAll('\\', '/').split('/').filter(Boolean)
+  if (parts[0] !== 'evidence' || !parts[1]) return ''
+  return parts[1]
+}
+
+function validateRegisteredEvidenceEntries(packetDir, includedEvidence, failures) {
+  const evidenceDir = path.join(packetDir, 'evidence')
+  if (!existsSync(evidenceDir)) return
+  if (!statSync(evidenceDir).isDirectory()) {
+    failures.push('evidence is not a directory')
+    return
+  }
+
+  const registered = new Set(
+    Array.isArray(includedEvidence)
+      ? includedEvidence.map((entry) => evidenceTopLevelName(entry?.destination)).filter(Boolean)
+      : [],
+  )
+  for (const entry of readdirSync(evidenceDir, { withFileTypes: true })) {
+    if (!registered.has(entry.name)) {
+      failures.push(`evidence/${entry.name} is not registered in manifest includedEvidence`)
+    }
+  }
+}
+
 function hasPassingCheck(requiredChecks, id) {
   return Array.isArray(requiredChecks) && requiredChecks.some((check) => check?.id === id && check.status === 'pass')
 }
@@ -259,6 +286,7 @@ function validatePacket(packetDir) {
   if (!Array.isArray(manifest.includedEvidence) || manifest.includedEvidence.length === 0) {
     failures.push('manifest includedEvidence is empty')
   } else {
+    validateRegisteredEvidenceEntries(packetDir, manifest.includedEvidence, failures)
     manifest.includedEvidence.forEach((entry, index) => validateIncludedEvidence(packetDir, entry, index, failures))
   }
 

@@ -317,6 +317,22 @@ function validateEvidenceDir(sourceDir, opts) {
 }
 
 function clearGeneratedPacketMarkers(outputDir) {
+  const manifestPath = path.join(outputDir, 'manifest.json')
+  const readmePath = path.join(outputDir, 'README.md')
+  let isExistingPacket = false
+  if (existsSync(manifestPath) && statSync(manifestPath).isFile()) {
+    try {
+      isExistingPacket = readJsonFile(manifestPath, 'manifest.json')?.packet === 'dingtalk-staging-evidence-packet'
+    } catch {
+      isExistingPacket = false
+    }
+  }
+  if (!isExistingPacket && existsSync(readmePath) && statSync(readmePath).isFile()) {
+    isExistingPacket = readFileSync(readmePath, 'utf8').includes('# DingTalk Staging Evidence Packet')
+  }
+  if (isExistingPacket) {
+    rmSync(path.join(outputDir, 'evidence'), { recursive: true, force: true })
+  }
   for (const file of ['manifest.json', 'README.md']) {
     rmSync(path.join(outputDir, file), { force: true })
   }
@@ -326,6 +342,7 @@ function copyEvidenceDir(sourceDir, outputDir, index, dingtalkP4FinalStatus) {
   const destinationName = `${String(index + 1).padStart(2, '0')}-${sanitizeEvidenceName(sourceDir)}`
   const destination = path.join(outputDir, 'evidence', destinationName)
   mkdirSync(path.dirname(destination), { recursive: true })
+  rmSync(destination, { recursive: true, force: true })
   cpSync(sourceDir, destination, { recursive: true })
   return {
     source: path.relative(process.cwd(), sourceDir).replaceAll('\\', '/'),

@@ -86,6 +86,7 @@
 - [x] Add a P4 evidence recorder CLI so operators can safely update manual checks without hand-editing `evidence.json`.
 - [x] Add a P4 strict artifact secret scan so finalization catches raw secret-like text artifacts before packet handoff.
 - [x] Add a P4 unauthorized denial evidence contract so pass evidence must prove submit blocking and zero record insert.
+- [x] Harden P4 unauthorized denial record counts so zero-insert proof rejects negative or fractional counters.
 - [x] Add a P4 remote-smoke TODO exporter so status runs generate an executable checklist for remaining evidence.
 - [x] Auto-refresh P4 smoke status and remote TODO reports from the session bootstrap/finalize commands.
 - [x] Add a P4 no-email admin evidence helper so manual-admin proof uses concrete artifact names and structured result fields.
@@ -93,6 +94,7 @@
 - [x] Add a P4 final remote-smoke docs generator so release-ready sessions produce final development and verification notes.
 - [x] Add a P4 manual target readiness gate so authorized, unauthorized, and no-email DingTalk validation targets are recorded before final smoke.
 - [x] Add a P4 local regression gate runner so ops/product verification commands produce JSON/MD evidence before final remote smoke.
+- [x] Harden P4 packet export and publish validation so reused packet directories cannot carry stale unregistered evidence.
 - [ ] Remote smoke: create a table and form view.
 - [ ] Remote smoke: bind at least two DingTalk groups to the table.
 - [ ] Remote smoke: set the form to `dingtalk_granted`.

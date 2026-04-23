@@ -673,6 +673,45 @@ test('dingtalk-p4-evidence-record accepts equal before and after record counts f
   }
 })
 
+test('dingtalk-p4-evidence-record rejects negative and fractional unauthorized denial record counts', () => {
+  const tmpDir = makeTmpDir()
+  const sessionDir = path.join(tmpDir, 'session')
+
+  try {
+    writeEvidence(sessionDir)
+    const artifactRef = writeArtifact(sessionDir, 'unauthorized-user-denied')
+    const baseArgs = [
+      '--session-dir',
+      sessionDir,
+      '--check-id',
+      'unauthorized-user-denied',
+      '--status',
+      'pass',
+      '--source',
+      'manual-client',
+      '--operator',
+      'qa',
+      '--summary',
+      'Unauthorized DingTalk-bound user was blocked.',
+      '--artifact',
+      artifactRef,
+      '--submit-blocked',
+      '--blocked-reason',
+      'Visible grant-required error.',
+    ]
+
+    const negative = runScript([...baseArgs, '--before-record-count', '-1', '--after-record-count', '-1'])
+    assert.equal(negative.status, 1)
+    assert.match(negative.stderr, /--before-record-count must be a non-negative integer/)
+
+    const fractional = runScript([...baseArgs, '--record-insert-delta', '0.5'])
+    assert.equal(fractional.status, 1)
+    assert.match(fractional.stderr, /--record-insert-delta must be a non-negative integer/)
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+
 test('dingtalk-p4-evidence-record rejects wrong manual pass source', () => {
   const tmpDir = makeTmpDir()
   const sessionDir = path.join(tmpDir, 'session')

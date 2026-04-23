@@ -306,6 +306,7 @@ function parseArgs(argv) {
 function readNumberValue(value, flag) {
   const parsed = Number(value)
   if (!Number.isFinite(parsed)) throw new Error(`${flag} must be a finite number`)
+  if (!Number.isInteger(parsed) || parsed < 0) throw new Error(`${flag} must be a non-negative integer`)
   return parsed
 }
 

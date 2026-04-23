@@ -590,11 +590,16 @@ function finiteNumber(value) {
   return null
 }
 
+function nonNegativeInteger(value) {
+  const number = finiteNumber(value)
+  return number !== null && Number.isInteger(number) && number >= 0 ? number : null
+}
+
 function hasZeroRecordInsertDelta(evidence) {
-  const delta = finiteNumber(evidence.recordInsertDelta)
+  const delta = nonNegativeInteger(evidence.recordInsertDelta)
   if (delta !== null) return delta === 0
-  const before = finiteNumber(evidence.beforeRecordCount)
-  const after = finiteNumber(evidence.afterRecordCount)
+  const before = nonNegativeInteger(evidence.beforeRecordCount)
+  const after = nonNegativeInteger(evidence.afterRecordCount)
   return before !== null && after !== null && before === after
 }
 
@@ -605,6 +610,18 @@ function validateUnauthorizedDeniedEvidence(evidence) {
       id: 'unauthorized-user-denied',
       code: 'submit_blocked_required',
       message: 'unauthorized-user-denied pass evidence requires evidence.submitBlocked=true',
+    })
+  }
+  const countValues = [
+    ['recordInsertDelta', evidence.recordInsertDelta],
+    ['beforeRecordCount', evidence.beforeRecordCount],
+    ['afterRecordCount', evidence.afterRecordCount],
+  ].filter(([, value]) => value !== undefined && value !== null && value !== '')
+  if (countValues.some(([, value]) => nonNegativeInteger(value) === null)) {
+    issues.push({
+      id: 'unauthorized-user-denied',
+      code: 'record_count_non_negative_integer_required',
+      message: 'unauthorized-user-denied record counts must be non-negative integers',
     })
   }
   if (!hasZeroRecordInsertDelta(evidence)) {

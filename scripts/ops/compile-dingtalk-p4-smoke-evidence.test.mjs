@@ -512,6 +512,42 @@ test('compile-dingtalk-p4-smoke-evidence strict mode requires structured unautho
   }
 })
 
+test('compile-dingtalk-p4-smoke-evidence strict mode rejects invalid unauthorized denial record counts', () => {
+  const tmpDir = makeTmpDir()
+  const evidencePath = path.join(tmpDir, 'evidence.json')
+  const outputDir = path.join(tmpDir, 'compiled')
+
+  try {
+    writeEvidence(evidencePath, {
+      checks: requiredIds.map((id) => ({
+        id,
+        status: 'pass',
+        evidence: makePassingEvidenceForCheck(id, id === 'unauthorized-user-denied'
+          ? {
+              submitBlocked: true,
+              beforeRecordCount: -1,
+              afterRecordCount: -1,
+              blockedReason: 'Visible error showed the user is not in the allowlist.',
+            }
+          : {}),
+      })),
+    })
+
+    const result = spawnSync(process.execPath, [scriptPath, '--input', evidencePath, '--output-dir', outputDir, '--strict'], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+    })
+
+    assert.equal(result.status, 1)
+    assert.match(result.stderr, /record_count_non_negative_integer_required/)
+    const summary = JSON.parse(readFileSync(path.join(outputDir, 'summary.json'), 'utf8'))
+    assert.equal(summary.overallStatus, 'fail')
+    assert.equal(summary.manualEvidenceIssues.some((issue) => issue.code === 'record_count_non_negative_integer_required'), true)
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+
 test('compile-dingtalk-p4-smoke-evidence strict mode requires structured no-email admin evidence', () => {
   const tmpDir = makeTmpDir()
   const evidencePath = path.join(tmpDir, 'evidence.json')
