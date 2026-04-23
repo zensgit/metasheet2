@@ -20,6 +20,7 @@ import {
   APPROVAL_ERROR_CODES,
   type ApprovalBridgePlmAdapter,
 } from '../services/approval-bridge-types'
+import { publishApprovalCountsUpdate } from '../services/approval-realtime'
 import { isDatabaseSchemaError } from '../utils/database-errors'
 
 const logger = new Logger('ApprovalsRouter')
@@ -167,6 +168,42 @@ function handleApprovalsError(
 
   logger.error(fallbackMessage, error instanceof Error ? error : undefined)
   res.status(500).json(approvalErrorResponse(fallbackCode, fallbackMessage))
+}
+
+async function listDirectApprovalAssigneeIds(instanceId: string): Promise<string[]> {
+  if (!pool) return []
+  const result = await pool.query<{ assignee_id: string }>(
+    `SELECT DISTINCT assignee_id
+     FROM approval_assignments
+     WHERE instance_id = $1
+       AND is_active = TRUE
+       AND assignment_type = 'user'`,
+    [instanceId],
+  )
+  return result.rows
+    .map((row) => row.assignee_id)
+    .filter((userId) => typeof userId === 'string' && userId.trim().length > 0)
+}
+
+async function publishApprovalCountsForUsers(
+  options: ApprovalRouterOptions | undefined,
+  users: Array<{ userId: string; roles?: string[] }>,
+  reason: string,
+): Promise<void> {
+  const uniqueUsers = new Map<string, string[]>()
+  for (const user of users) {
+    const userId = user.userId.trim()
+    if (!userId || uniqueUsers.has(userId)) continue
+    uniqueUsers.set(userId, user.roles ?? [])
+  }
+
+  await Promise.all([...uniqueUsers.entries()].map(([userId, roles]) => publishApprovalCountsUpdate({
+    injector: options?.injector,
+    logger,
+    userId,
+    roles,
+    reason,
+  })))
 }
 
 export function approvalsRouter(options?: ApprovalRouterOptions): Router {
@@ -717,6 +754,11 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
         return res.json({ ok: true, skipped: true, reason: 'instance_not_materialized' })
       }
 
+      await publishApprovalCountsForUsers(
+        options,
+        [{ userId, roles: resolveApprovalActorRoles(req) }],
+        'mark-read',
+      )
       res.json({ ok: true })
     } catch (error) {
       handleApprovalsError(
@@ -800,6 +842,11 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
         params,
       )
 
+      await publishApprovalCountsForUsers(
+        options,
+        [{ userId, roles: resolveApprovalActorRoles(req) }],
+        'mark-all-read',
+      )
       res.json({ markedCount: result.rows.length })
     } catch (error) {
       handleApprovalsError(
@@ -842,6 +889,7 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
 
       const { id } = req.params
       const userName = resolveApprovalActorName(req, userId)
+      let remindedDirectAssigneeIds: string[] = []
 
       const client = await pool.connect()
       try {
@@ -956,9 +1004,38 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
           ],
         )
 
+        const directAssigneesResult = await client.query<{ assignee_id: string }>(
+          `SELECT DISTINCT assignee_id
+           FROM approval_assignments
+           WHERE instance_id = $1
+             AND is_active = TRUE
+             AND assignment_type = 'user'`,
+          [id],
+        )
+        remindedDirectAssigneeIds = directAssigneesResult.rows
+          .map((row) => row.assignee_id)
+          .filter((assigneeId) => assigneeId && assigneeId !== userId)
+
+        if (remindedDirectAssigneeIds.length > 0) {
+          await client.query(
+            `DELETE FROM approval_reads
+             WHERE instance_id = $1
+               AND user_id = ANY($2::text[])`,
+            [id, remindedDirectAssigneeIds],
+          )
+        }
+
         await client.query('COMMIT')
 
         logger.info(`Approval ${id} reminded by ${userId}`)
+        await publishApprovalCountsForUsers(
+          options,
+          [
+            { userId, roles: resolveApprovalActorRoles(req) },
+            ...remindedDirectAssigneeIds.map((assigneeId) => ({ userId: assigneeId })),
+          ],
+          'remind',
+        )
         res.json({
           ok: true,
           data: {
@@ -1085,6 +1162,16 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
         }
       }
 
+      const activeDirectAssignees = await listDirectApprovalAssigneeIds(req.params.id)
+      await publishApprovalCountsForUsers(
+        options,
+        [
+          { userId, roles: actor.roles },
+          ...(targetUserId ? [{ userId: targetUserId }] : []),
+          ...activeDirectAssignees.map((assigneeId) => ({ userId: assigneeId })),
+        ],
+        `action:${action}`,
+      )
       res.json(approval)
     } catch (error) {
       handleApprovalsError(
@@ -1193,6 +1280,15 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
         await client.query('COMMIT')
 
         logger.info(`Approval ${id} approved by ${userId}`)
+        const activeDirectAssignees = await listDirectApprovalAssigneeIds(id)
+        await publishApprovalCountsForUsers(
+          options,
+          [
+            { userId, roles: resolveApprovalActorRoles(req) },
+            ...activeDirectAssignees.map((assigneeId) => ({ userId: assigneeId })),
+          ],
+          'legacy-approve',
+        )
         res.json({
           ok: true,
           data: {
@@ -1328,6 +1424,15 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
         await client.query('COMMIT')
 
         logger.info(`Approval ${id} rejected by ${userId}: ${reason}`)
+        const activeDirectAssignees = await listDirectApprovalAssigneeIds(id)
+        await publishApprovalCountsForUsers(
+          options,
+          [
+            { userId, roles: resolveApprovalActorRoles(req) },
+            ...activeDirectAssignees.map((assigneeId) => ({ userId: assigneeId })),
+          ],
+          'legacy-reject',
+        )
         res.json({
           ok: true,
           data: {
