@@ -27,6 +27,31 @@ const requiredPacketFiles = [
     description: 'DingTalk stack merge readiness context',
   },
   {
+    path: 'docs/dingtalk-admin-operations-guide-20260420.md',
+    kind: 'operations-guide',
+    description: 'admin procedures for DingTalk app setup, directory users, group robots, and troubleshooting',
+  },
+  {
+    path: 'docs/dingtalk-user-workflow-guide-20260422.md',
+    kind: 'user-guide',
+    description: 'table-owner workflow for DingTalk group/person notifications and protected form links',
+  },
+  {
+    path: 'docs/dingtalk-synced-account-local-user-guide-20260420.md',
+    kind: 'user-governance-guide',
+    description: 'manual and auto-admission paths for DingTalk-synced accounts, including no-email users',
+  },
+  {
+    path: 'docs/dingtalk-remote-smoke-checklist-20260422.md',
+    kind: 'checklist',
+    description: 'P4 remote smoke checklist for protected forms, multi-group sends, and DingTalk-bound users',
+  },
+  {
+    path: 'docs/development/dingtalk-feature-plan-and-todo-20260422.md',
+    kind: 'plan',
+    description: 'current DingTalk feature plan, TODO status, and remaining remote smoke tasks',
+  },
+  {
     path: 'docker/app.staging.env.example',
     kind: 'config-template',
     description: 'canonical staging env template; copy to docker/app.staging.env and fill secrets',
@@ -183,7 +208,8 @@ ${evidenceLines}
 3. Validate the env with \`bash scripts/ops/validate-env-file.sh docker/app.staging.env\`.
 4. Deploy a pinned tag with \`DEPLOY_IMAGE_TAG=<tag> bash scripts/ops/deploy-dingtalk-staging.sh\`.
 5. Execute \`docs/development/dingtalk-staging-execution-checklist-20260408.md\`.
-6. Re-export this packet with \`--include-output <evidence-dir>\` after smoke evidence exists.
+6. Execute \`docs/dingtalk-remote-smoke-checklist-20260422.md\` for P4 DingTalk form/group/person coverage.
+7. Re-export this packet with \`--include-output <evidence-dir>\` after smoke evidence exists.
 
 ## Non-Goals
 
