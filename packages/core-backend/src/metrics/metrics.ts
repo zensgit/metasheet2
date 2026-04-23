@@ -520,11 +520,51 @@ registry.registerMetric(apigwCbStoreUsedTotal)
 registry.registerMetric(apigwCbInitTotal)
 registry.registerMetric(automationSchedulerLeaderGauge)
 
+function trimConfiguredMetricsToken(raw: string | undefined): string | null {
+  const token = typeof raw === 'string' ? raw.trim() : ''
+  return token.length > 0 ? token : null
+}
+
+export function resolveMetricsScrapeToken(env: NodeJS.ProcessEnv = process.env): string | null {
+  return trimConfiguredMetricsToken(env.METRICS_SCRAPE_TOKEN)
+}
+
+function resolveProvidedMetricsToken(req: Request): string | null {
+  const bearer = typeof req.headers.authorization === 'string' ? req.headers.authorization.trim() : ''
+  if (bearer.startsWith('Bearer ')) {
+    const token = bearer.slice(7).trim()
+    if (token) return token
+  }
+  const headerToken = typeof req.headers['x-metrics-token'] === 'string' ? req.headers['x-metrics-token'].trim() : ''
+  return headerToken || null
+}
+
+export function createMetricsAuthMiddleware(getToken: () => string | null = () => resolveMetricsScrapeToken()) {
+  return (req: Request, res: Response, next: NextFunction) => {
+    const expectedToken = getToken()
+    if (!expectedToken) return next()
+
+    const providedToken = resolveProvidedMetricsToken(req)
+    if (providedToken === expectedToken) return next()
+
+    res.setHeader('WWW-Authenticate', 'Bearer realm="metrics"')
+    return res.status(401).json({
+      ok: false,
+      error: {
+        code: 'UNAUTHORIZED',
+        message: 'Metrics scrape token required',
+      },
+    })
+  }
+}
+
 export function installMetrics(app: Application) {
-  app.get('/metrics', async (_req, res) => {
+  const metricsAuthMiddleware = createMetricsAuthMiddleware()
+
+  app.get('/metrics', metricsAuthMiddleware, async (_req, res) => {
     res.json(await registry.getMetricsAsJSON())
   })
-  app.get('/metrics/prom', async (_req, res) => {
+  app.get('/metrics/prom', metricsAuthMiddleware, async (_req, res) => {
     res.set('Content-Type', registry.contentType)
     res.end(await registry.metrics())
   })
