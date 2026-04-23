@@ -64,7 +64,25 @@
     </el-alert>
 
     <el-tabs v-model="activeTab" class="approval-center__tabs" @tab-change="handleTabChange">
-      <el-tab-pane label="待我处理" name="pending">
+      <el-tab-pane name="pending">
+        <!-- Wave 2 WP3 slice 1: 红点 / 待办计数 — render the server-provided
+             pending count alongside the tab label. Hidden when the count is
+             zero so the badge never shows an empty bubble. The count is the
+             total across the user's assignments (not the current page), so
+             use a dedicated state slot instead of the store's per-page
+             `pendingCount` computed. -->
+        <template #label>
+          <span class="approval-center__tab-label">
+            <span>待我处理</span>
+            <el-badge
+              v-if="pendingBadgeCount > 0"
+              :value="pendingBadgeCount"
+              :max="99"
+              class="approval-center__tab-badge"
+              data-testid="approval-pending-badge"
+            />
+          </span>
+        </template>
         <el-table
           v-loading="store.loading"
           :data="store.pendingApprovals"
@@ -262,10 +280,26 @@ import { Search } from '@element-plus/icons-vue'
 import type { UnifiedApprovalDTO, ApprovalStatus } from '../../types/approval'
 import { useApprovalStore } from '../../approvals/store'
 import { useApprovalPermissions } from '../../approvals/permissions'
+import { getPendingCount } from '../../approvals/api'
 
 const router = useRouter()
 const store = useApprovalStore()
 const { canWrite } = useApprovalPermissions()
+
+// Wave 2 WP3 slice 1: server-owned pending count. Refreshed on mount and tab
+// switch so the badge matches the 待办 tab after any action reduces the user's
+// assignment queue.
+const pendingBadgeCount = ref(0)
+async function refreshPendingBadgeCount(): Promise<void> {
+  try {
+    const result = await getPendingCount(sourceSystemFilter.value)
+    pendingBadgeCount.value = Number.isFinite(result.count) ? result.count : 0
+  } catch {
+    // Badge is decorative — do not surface errors here; the tab itself
+    // surfaces list-load failures via `store.error`.
+    pendingBadgeCount.value = 0
+  }
+}
 
 const activeTab = ref<'pending' | 'mine' | 'cc' | 'completed'>('pending')
 const searchText = ref('')
@@ -328,6 +362,9 @@ function loadCurrentTab() {
 function handleTabChange() {
   currentPage.value = 1
   loadCurrentTab()
+  // Refresh badge whenever the user re-enters the 待办 tab so recent actions
+  // reflect immediately.
+  void refreshPendingBadgeCount()
 }
 
 function handleSearch() {
@@ -346,6 +383,7 @@ function handleRowClick(row: UnifiedApprovalDTO) {
 
 onMounted(() => {
   loadCurrentTab()
+  void refreshPendingBadgeCount()
 })
 </script>
 
@@ -386,5 +424,15 @@ onMounted(() => {
   margin-top: 16px;
   display: flex;
   justify-content: flex-end;
+}
+
+.approval-center__tab-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.approval-center__tab-badge {
+  margin-left: 4px;
 }
 </style>

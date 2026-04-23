@@ -235,6 +235,19 @@
             >
               转交
             </el-button>
+            <!-- Wave 2 WP3 slice 1: 催办. Visible only for the requester on
+                 a pending instance; server-side rate-limits to once per hour
+                 per user per instance (429 → surfaced as a friendly toast). -->
+            <el-button
+              v-if="isRequester"
+              type="primary"
+              plain
+              :loading="remindLoading"
+              data-testid="approval-remind-button"
+              @click="handleRemind"
+            >
+              <el-icon style="margin-right: 4px"><Bell /></el-icon>催一下
+            </el-button>
             <el-popconfirm
               v-if="isRequester"
               title="确认撤回此审批？"
@@ -400,6 +413,7 @@ import type { ApprovalActionType } from '../../types/approval'
 import { useApprovalStore } from '../../approvals/store'
 import { useApprovalPermissions } from '../../approvals/permissions'
 import { useApprovalTemplateStore } from '../../approvals/templateStore'
+import { remindApproval } from '../../approvals/api'
 
 const route = useRoute()
 const router = useRouter()
@@ -714,6 +728,43 @@ async function handleRevoke() {
     await store.loadHistory(id)
   } catch {
     ElMessage.error('撤回失败，请重试')
+  }
+}
+
+// Wave 2 WP3 slice 1: 催办. Loading state is local to this button so the main
+// approve/reject action row does not go into a spinner while a requester
+// nudges. On 429 we surface the server-supplied `lastRemindedAt` so the user
+// knows why the button rejected them.
+const remindLoading = ref(false)
+
+function formatRemindAgo(lastRemindedAt?: string): string {
+  if (!lastRemindedAt) return '刚刚'
+  const timestamp = new Date(lastRemindedAt).getTime()
+  if (!Number.isFinite(timestamp)) return '刚刚'
+  const diffMs = Math.max(0, Date.now() - timestamp)
+  const minutes = Math.floor(diffMs / 60000)
+  if (minutes <= 0) return '刚刚'
+  if (minutes < 60) return `${minutes} 分钟前`
+  const hours = Math.floor(minutes / 60)
+  return `${hours} 小时前`
+}
+
+async function handleRemind() {
+  const id = route.params.id as string
+  if (remindLoading.value) return
+  remindLoading.value = true
+  try {
+    const result = await remindApproval(id)
+    if (result.ok) {
+      ElMessage.success('已催办')
+      await store.loadHistory(id)
+    } else if (result.status === 429) {
+      ElMessage.warning(`已在 ${formatRemindAgo(result.error.lastRemindedAt)}催办过`)
+    } else {
+      ElMessage.error(result.error.message || '催办失败，请重试')
+    }
+  } finally {
+    remindLoading.value = false
   }
 }
 

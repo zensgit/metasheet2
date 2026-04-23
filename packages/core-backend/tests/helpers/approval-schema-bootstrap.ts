@@ -1,7 +1,7 @@
 import { poolManager } from '../../src/integration/db/connection-pool'
 
 const APPROVAL_SCHEMA_BOOTSTRAP_KEY = 'approval-schema-bootstrap'
-const APPROVAL_SCHEMA_BOOTSTRAP_VERSION = '20260423-once-per-db'
+const APPROVAL_SCHEMA_BOOTSTRAP_VERSION = '20260423-wp3-remind-action'
 
 /**
  * Ensures the approval schema (tables, constraints, indexes, sequences) is
@@ -14,6 +14,7 @@ const APPROVAL_SCHEMA_BOOTSTRAP_VERSION = '20260423-once-per-db'
  *   - zzzz20260404100000_extend_approval_tables_for_bridge.ts
  *   - zzzz20260411120100_approval_templates_and_instance_extensions.ts
  *   - zzzz20260411123000_add_created_action_to_approval_records.ts
+ *   - zzzz20260423120000_add_remind_action_to_approval_records.ts
  *
  * ### Concurrency — why an advisory lock
  *
@@ -174,7 +175,7 @@ export async function ensureApprovalSchemaReady(): Promise<void> {
     await client.query(`
       ALTER TABLE approval_records
       ADD CONSTRAINT approval_records_action_check
-      CHECK (action IN ('created', 'approve', 'reject', 'return', 'revoke', 'transfer', 'sign', 'comment', 'cc'))
+      CHECK (action IN ('created', 'approve', 'reject', 'return', 'revoke', 'transfer', 'sign', 'comment', 'cc', 'remind'))
     `)
     await client.query(`CREATE INDEX IF NOT EXISTS idx_approval_records_instance ON approval_records(instance_id)`)
     await client.query(`CREATE INDEX IF NOT EXISTS idx_approval_records_instance_action_time ON approval_records(instance_id, action, occurred_at DESC)`)
