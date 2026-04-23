@@ -1,0 +1,96 @@
+{
+  "ok": true,
+  "apiBase": "http://142.171.239.56:8081/api",
+  "authSource": "token",
+  "cleanupAttempted": true,
+  "cleanupOk": true,
+  "startedAt": "2026-04-23T02:23:21.278Z",
+  "finishedAt": "2026-04-23T02:23:24.453Z",
+  "reportPath": "output/legacy-cells-conflict-smoke/142-8081-dbadmin-20260423-102321/report.json",
+  "reportMdPath": "output/legacy-cells-conflict-smoke/142-8081-dbadmin-20260423-102321/report.md",
+  "checks": [
+    {
+      "name": "config.valid",
+      "ok": true,
+      "missing": []
+    },
+    {
+      "name": "auth.token",
+      "ok": true
+    },
+    {
+      "name": "spreadsheet.create",
+      "ok": true
+    },
+    {
+      "name": "cell.seed",
+      "ok": true,
+      "status": 200,
+      "version": 1
+    },
+    {
+      "name": "cell.session-a-read",
+      "ok": true
+    },
+    {
+      "name": "cell.session-b-read",
+      "ok": true
+    },
+    {
+      "name": "cell.session-a-update",
+      "ok": true,
+      "status": 200,
+      "version": 2
+    },
+    {
+      "name": "cell.session-b-conflict",
+      "ok": true,
+      "status": 409,
+      "serverVersion": 2,
+      "expectedVersion": 1
+    },
+    {
+      "name": "cell.conflict-version-payload",
+      "ok": true
+    },
+    {
+      "name": "cell.final-value-preserved",
+      "ok": true
+    },
+    {
+      "name": "cell.final-version-current",
+      "ok": true
+    },
+    {
+      "name": "spreadsheet.cleanup",
+      "ok": true,
+      "status": 200
+    }
+  ],
+  "spreadsheetId": "34cfa156-50c6-4d34-bedf-58f0e73e51fa",
+  "sheetId": "706e0710-f3cc-4cf1-88cd-ab9cdfb6c51f",
+  "conflict": {
+    "code": "VERSION_CONFLICT",
+    "message": "Cell version conflict for 706e0710-f3cc-4cf1-88cd-ab9cdfb6c51f row=0 col=0: expected 1, server has 2",
+    "sheetId": "706e0710-f3cc-4cf1-88cd-ab9cdfb6c51f",
+    "row": 0,
+    "col": 0,
+    "serverVersion": 2,
+    "expectedVersion": 1
+  },
+  "finalCell": {
+    "id": "f297a918-f201-417b-a96d-cb05da445dc9",
+    "sheet_id": "706e0710-f3cc-4cf1-88cd-ab9cdfb6c51f",
+    "row_index": 0,
+    "column_index": 0,
+    "value": {
+      "value": "session-a"
+    },
+    "data_type": null,
+    "formula": null,
+    "computed_value": null,
+    "created_at": "2026-04-23T02:22:19.563Z",
+    "updated_at": "2026-04-23T02:22:20.281Z",
+    "version": 2
+  }
+}
