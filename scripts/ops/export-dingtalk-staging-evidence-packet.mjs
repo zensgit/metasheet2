@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { cpSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 
 const DEFAULT_OUTPUT_DIR = 'artifacts/dingtalk-staging-evidence-packet'
@@ -168,10 +168,6 @@ function parseArgs(argv) {
     }
   }
 
-  if (opts.requireDingTalkP4Pass && opts.includeOutputDirs.length === 0) {
-    throw new Error('--require-dingtalk-p4-pass requires at least one --include-output session directory')
-  }
-
   return opts
 }
 
@@ -290,6 +286,12 @@ function validateEvidenceDir(sourceDir, opts) {
   return opts.requireDingTalkP4Pass ? validateDingTalkP4FinalPass(sourceDir) : null
 }
 
+function clearGeneratedPacketMarkers(outputDir) {
+  for (const file of ['manifest.json', 'README.md']) {
+    rmSync(path.join(outputDir, file), { force: true })
+  }
+}
+
 function copyEvidenceDir(sourceDir, outputDir, index, dingtalkP4FinalStatus) {
   const destinationName = `${String(index + 1).padStart(2, '0')}-${sanitizeEvidenceName(sourceDir)}`
   const destination = path.join(outputDir, 'evidence', destinationName)
@@ -365,6 +367,10 @@ ${gateLine}
 async function main() {
   try {
     const opts = parseArgs(process.argv.slice(2))
+    clearGeneratedPacketMarkers(opts.outputDir)
+    if (opts.requireDingTalkP4Pass && opts.includeOutputDirs.length === 0) {
+      throw new Error('--require-dingtalk-p4-pass requires at least one --include-output session directory')
+    }
     const evidenceValidations = opts.includeOutputDirs.map((dir) => validateEvidenceDir(dir, opts))
     mkdirSync(opts.outputDir, { recursive: true })
 

@@ -364,6 +364,99 @@ test('export-dingtalk-staging-evidence-packet prevalidates all required P4 evide
   }
 })
 
+test('export-dingtalk-staging-evidence-packet clears stale packet markers before gated validation failure', () => {
+  const tmpDir = makeTmpDir()
+  const outputDir = path.join(tmpDir, 'packet')
+  const validEvidenceDir = path.join(tmpDir, '142-session-valid')
+  const invalidEvidenceDir = path.join(tmpDir, '142-session-invalid')
+
+  try {
+    writeDingTalkP4Session(validEvidenceDir)
+    const initialResult = spawnSync(
+      process.execPath,
+      [scriptPath, '--output-dir', outputDir, '--include-output', validEvidenceDir, '--require-dingtalk-p4-pass'],
+      {
+        cwd: repoRoot,
+        encoding: 'utf8',
+      },
+    )
+
+    assert.equal(initialResult.status, 0, initialResult.stderr)
+    assert.equal(existsSync(path.join(outputDir, 'manifest.json')), true)
+    assert.equal(existsSync(path.join(outputDir, 'README.md')), true)
+
+    writeDingTalkP4Session(invalidEvidenceDir, {
+      sessionSummary: {
+        sessionPhase: 'bootstrap',
+        overallStatus: 'manual_pending',
+        finalStrictStatus: 'not_run',
+      },
+    })
+    const failedResult = spawnSync(
+      process.execPath,
+      [scriptPath, '--output-dir', outputDir, '--include-output', invalidEvidenceDir, '--require-dingtalk-p4-pass'],
+      {
+        cwd: repoRoot,
+        encoding: 'utf8',
+      },
+    )
+
+    assert.equal(failedResult.status, 1)
+    assert.match(failedResult.stderr, /included DingTalk P4 session is not final pass/)
+    assert.equal(existsSync(path.join(outputDir, 'manifest.json')), false)
+    assert.equal(existsSync(path.join(outputDir, 'README.md')), false)
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+
+test('export-dingtalk-staging-evidence-packet clears ungated packet markers before gated validation failure', () => {
+  const tmpDir = makeTmpDir()
+  const outputDir = path.join(tmpDir, 'packet')
+  const legacyEvidenceDir = path.join(tmpDir, 'legacy-smoke-output')
+  const invalidEvidenceDir = path.join(tmpDir, '142-session-invalid')
+
+  try {
+    mkdirSync(legacyEvidenceDir, { recursive: true })
+    writeFileSync(path.join(legacyEvidenceDir, 'summary.json'), JSON.stringify({ ok: true }), 'utf8')
+    const initialResult = spawnSync(
+      process.execPath,
+      [scriptPath, '--output-dir', outputDir, '--include-output', legacyEvidenceDir],
+      {
+        cwd: repoRoot,
+        encoding: 'utf8',
+      },
+    )
+
+    assert.equal(initialResult.status, 0, initialResult.stderr)
+    assert.equal(existsSync(path.join(outputDir, 'manifest.json')), true)
+    assert.equal(existsSync(path.join(outputDir, 'README.md')), true)
+
+    writeDingTalkP4Session(invalidEvidenceDir, {
+      sessionSummary: {
+        sessionPhase: 'bootstrap',
+        overallStatus: 'manual_pending',
+        finalStrictStatus: 'not_run',
+      },
+    })
+    const failedResult = spawnSync(
+      process.execPath,
+      [scriptPath, '--output-dir', outputDir, '--include-output', invalidEvidenceDir, '--require-dingtalk-p4-pass'],
+      {
+        cwd: repoRoot,
+        encoding: 'utf8',
+      },
+    )
+
+    assert.equal(failedResult.status, 1)
+    assert.match(failedResult.stderr, /included DingTalk P4 session is not final pass/)
+    assert.equal(existsSync(path.join(outputDir, 'manifest.json')), false)
+    assert.equal(existsSync(path.join(outputDir, 'README.md')), false)
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+
 test('export-dingtalk-staging-evidence-packet requires included evidence for final gate', () => {
   const tmpDir = makeTmpDir()
 

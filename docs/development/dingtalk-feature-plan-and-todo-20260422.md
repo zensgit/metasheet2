@@ -76,6 +76,7 @@
 - [x] Add a P4 smoke session env template initializer for secure one-command staging setup.
 - [x] Add P4 smoke session finalization so completed manual evidence reruns strict compile and refreshes the session summary.
 - [x] Add a P4 final-pass packet gate so release evidence export rejects unfinished, failed, stale-schema, or partially compiled sessions.
+- [x] Clear generated packet markers before gated export validation so failed reruns cannot leave a stale passing `manifest.json` or `README.md`.
 - [ ] Remote smoke: create a table and form view.
 - [ ] Remote smoke: bind at least two DingTalk groups to the table.
 - [ ] Remote smoke: set the form to `dingtalk_granted`.
