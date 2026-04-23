@@ -27,6 +27,7 @@ strict compile. After the session succeeds, place manual artifacts in the
 generated workspace and run compile-dingtalk-p4-smoke-evidence.mjs --strict.
 
 Options:
+  --init-env-template <file>       Write a safe editable env template and exit
   --env-file <file>                Optional KEY=VALUE file to read before env/CLI
   --api-base <url>                 Backend API base, default ${DEFAULT_API_BASE}
   --web-base <url>                 Public app base used by DingTalk message links
@@ -132,6 +133,7 @@ function parseArgs(argv) {
   const envFileValues = envFile ? parseEnvFile(envFile) : {}
   const env = { ...envFileValues, ...process.env }
   const opts = {
+    initEnvTemplate: null,
     envFile,
     apiBase: envValue(env, 'DINGTALK_P4_API_BASE', 'API_BASE') || DEFAULT_API_BASE,
     webBase: envValue(env, 'DINGTALK_P4_WEB_BASE', 'WEB_BASE', 'PUBLIC_APP_URL'),
@@ -156,6 +158,10 @@ function parseArgs(argv) {
     const arg = argv[i]
     switch (arg) {
       case '--env-file':
+        i += 1
+        break
+      case '--init-env-template':
+        opts.initEnvTemplate = path.resolve(process.cwd(), readRequiredValue(argv, i, arg))
         i += 1
         break
       case '--api-base':
@@ -231,6 +237,42 @@ function parseArgs(argv) {
   }
 
   return opts
+}
+
+function renderEnvTemplate() {
+  return `# DingTalk P4 smoke session env template
+# Fill this file locally or on the staging host. Do not commit it.
+# Run:
+#   node scripts/ops/dingtalk-p4-smoke-session.mjs --env-file <this-file> --output-dir output/dingtalk-p4-remote-smoke-session/<run>
+
+DINGTALK_P4_API_BASE=http://142.171.239.56:8900
+DINGTALK_P4_WEB_BASE=http://142.171.239.56:8081
+
+# Admin/table-owner bearer token. Keep private.
+DINGTALK_P4_AUTH_TOKEN=
+
+# DingTalk group robot webhooks. Full webhook URLs must stay private.
+DINGTALK_P4_GROUP_A_WEBHOOK=
+DINGTALK_P4_GROUP_B_WEBHOOK=
+
+# Optional SEC... robot signing secrets.
+DINGTALK_P4_GROUP_A_SECRET=
+DINGTALK_P4_GROUP_B_SECRET=
+
+# Local user IDs or member group IDs allowed to submit the dingtalk_granted form.
+# Use comma-separated values when there are multiple entries.
+DINGTALK_P4_ALLOWED_USER_IDS=
+DINGTALK_P4_ALLOWED_MEMBER_GROUP_IDS=
+
+# Optional local user IDs for direct DingTalk person-message delivery history.
+DINGTALK_P4_PERSON_USER_IDS=
+`
+}
+
+function writeEnvTemplate(file) {
+  mkdirSync(path.dirname(file), { recursive: true })
+  writeFileSync(file, renderEnvTemplate(), 'utf8')
+  console.log(`Wrote ${relativePath(file)}`)
 }
 
 function makeRunId() {
@@ -443,8 +485,12 @@ function runSession(opts) {
 
 try {
   const opts = parseArgs(process.argv.slice(2))
-  const summary = runSession(opts)
-  if (summary.overallStatus === 'fail') process.exit(1)
+  if (opts.initEnvTemplate) {
+    writeEnvTemplate(opts.initEnvTemplate)
+  } else {
+    const summary = runSession(opts)
+    if (summary.overallStatus === 'fail') process.exit(1)
+  }
 } catch (error) {
   console.error(`[dingtalk-p4-smoke-session] ERROR: ${redactString(error instanceof Error ? error.message : String(error))}`)
   process.exit(1)

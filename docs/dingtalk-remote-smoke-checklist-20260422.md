@@ -128,9 +128,18 @@ Example check evidence:
 
 Use the session orchestrator for the normal 142/staging P4 run. It runs preflight, bootstraps the API-addressable smoke workspace, compiles a non-strict evidence summary, and writes a session report. It stops before the API runner when preflight fails.
 
+Create a local env template first:
+
 ```bash
 node scripts/ops/dingtalk-p4-smoke-session.mjs \
-  --env-file /secure/local/dingtalk-p4.env \
+  --init-env-template output/dingtalk-p4-remote-smoke-session/dingtalk-p4.env
+```
+
+Fill the generated file outside git with real staging and DingTalk robot inputs.
+
+```bash
+node scripts/ops/dingtalk-p4-smoke-session.mjs \
+  --env-file output/dingtalk-p4-remote-smoke-session/dingtalk-p4.env \
   --output-dir output/dingtalk-p4-remote-smoke-session/142-session
 ```
 
