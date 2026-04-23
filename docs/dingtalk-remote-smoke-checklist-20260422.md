@@ -156,8 +156,11 @@ Expected generated files:
 - `compiled/evidence.redacted.json`
 - `session-summary.json`
 - `session-summary.md`
+- `smoke-status.json`
+- `smoke-status.md`
+- `smoke-todo.md`
 
-Expected session status is usually `manual_pending` after the API runner succeeds, because the real DingTalk-client/admin checks still need operator proof. Fill `workspace/evidence.json`, place files in `workspace/artifacts/<check-id>/`, then finalize the session:
+Expected session status is usually `manual_pending` after the API runner succeeds, because the real DingTalk-client/admin checks still need operator proof. The session command refreshes `smoke-status.json`, `smoke-status.md`, and `smoke-todo.md` automatically. Use `smoke-todo.md` as the next-action checklist, fill `workspace/evidence.json`, place files in `workspace/artifacts/<check-id>/`, then finalize the session:
 
 ```bash
 node scripts/ops/dingtalk-p4-smoke-status.mjs \
@@ -212,7 +215,7 @@ node scripts/ops/dingtalk-p4-smoke-session.mjs \
   --finalize output/dingtalk-p4-remote-smoke-session/142-session
 ```
 
-Finalizing reruns strict evidence compile, refreshes `session-summary.json` / `session-summary.md`, and returns non-zero until the manual evidence bundle is complete.
+Finalizing reruns strict evidence compile, refreshes `session-summary.json` / `session-summary.md`, refreshes `smoke-status.json` / `smoke-status.md` / `smoke-todo.md`, and returns non-zero until the manual evidence bundle is complete.
 
 After finalization passes, prefer the one-command final handoff wrapper. It exports the final gated packet, runs the publish validator, and writes `handoff-summary.json` / `handoff-summary.md`:
 
