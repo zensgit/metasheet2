@@ -1,7 +1,7 @@
 import { poolManager } from '../../src/integration/db/connection-pool'
 
 const APPROVAL_SCHEMA_BOOTSTRAP_KEY = 'approval-schema-bootstrap'
-const APPROVAL_SCHEMA_BOOTSTRAP_VERSION = '20260423-wp4-template-category'
+const APPROVAL_SCHEMA_BOOTSTRAP_VERSION = '20260423-wp4-template-acl'
 
 /**
  * Ensures the approval schema (tables, constraints, indexes, sequences) is
@@ -287,7 +287,27 @@ export async function ensureApprovalSchemaReady(): Promise<void> {
     `)
     await client.query(`CREATE INDEX IF NOT EXISTS idx_approval_templates_status_updated ON approval_templates(status, updated_at DESC)`)
     await client.query(`ALTER TABLE approval_templates ADD COLUMN IF NOT EXISTS category TEXT`)
+    await client.query(`ALTER TABLE approval_templates ADD COLUMN IF NOT EXISTS visibility_scope JSONB NOT NULL DEFAULT '{"type":"all","ids":[]}'::jsonb`)
+    await client.query(`UPDATE approval_templates SET visibility_scope = '{"type":"all","ids":[]}'::jsonb WHERE visibility_scope IS NULL`)
+    await client.query(`
+      DO $$
+      BEGIN
+        ALTER TABLE approval_templates
+          ADD CONSTRAINT approval_templates_visibility_scope_shape
+          CHECK (
+            jsonb_typeof(visibility_scope) = 'object'
+            AND visibility_scope ? 'type'
+            AND visibility_scope->>'type' IN ('all', 'dept', 'role', 'user')
+            AND (
+              NOT (visibility_scope ? 'ids')
+              OR jsonb_typeof(visibility_scope->'ids') = 'array'
+            )
+          );
+      EXCEPTION WHEN duplicate_object THEN NULL;
+      END $$;
+    `)
     await client.query(`CREATE INDEX IF NOT EXISTS idx_approval_templates_category_status ON approval_templates(category, status) WHERE category IS NOT NULL`)
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_approval_templates_visibility_scope_type ON approval_templates ((visibility_scope->>'type'))`)
     await client.query(`CREATE INDEX IF NOT EXISTS idx_approval_template_versions_template ON approval_template_versions(template_id, version DESC)`)
     await client.query(`CREATE INDEX IF NOT EXISTS idx_approval_published_definitions_template_version ON approval_published_definitions(template_version_id, published_at DESC)`)
     await client.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_approval_published_definitions_active_template ON approval_published_definitions(template_id) WHERE is_active = TRUE`)

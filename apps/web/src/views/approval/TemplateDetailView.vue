@@ -105,6 +105,71 @@
               </el-button>
             </template>
           </div>
+          <div class="template-detail__visibility">
+            <span class="template-detail__category-label">可见范围:</span>
+            <template v-if="!editingVisibility">
+              <el-tag size="small" effect="plain" data-testid="template-detail-visibility-tag">
+                {{ visibilityScopeLabel(template.visibilityScope) }}
+              </el-tag>
+              <span
+                v-if="template.visibilityScope.type !== 'all'"
+                class="template-detail__visibility-ids"
+                data-testid="template-detail-visibility-ids"
+              >
+                {{ template.visibilityScope.ids.join(', ') }}
+              </span>
+              <el-button
+                v-if="canManageTemplates"
+                text
+                size="small"
+                data-testid="template-detail-visibility-edit-button"
+                style="margin-left: 8px"
+                @click="beginEditVisibility"
+              >
+                编辑
+              </el-button>
+            </template>
+            <template v-else>
+              <el-select
+                v-model="visibilityTypeDraft"
+                size="small"
+                style="width: 120px; margin-right: 8px"
+                data-testid="template-detail-visibility-type"
+              >
+                <el-option label="全员" value="all" />
+                <el-option label="部门" value="dept" />
+                <el-option label="角色" value="role" />
+                <el-option label="用户" value="user" />
+              </el-select>
+              <el-input
+                v-model="visibilityIdsDraft"
+                size="small"
+                placeholder="逗号分隔 id，如 dept-finance, role-manager"
+                style="width: 320px; margin-right: 8px"
+                :disabled="visibilityTypeDraft === 'all'"
+                data-testid="template-detail-visibility-ids-input"
+                @keyup.enter="saveVisibility"
+                @keyup.escape="cancelEditVisibility"
+              />
+              <el-button
+                type="primary"
+                size="small"
+                :loading="visibilitySaving"
+                data-testid="template-detail-visibility-save-button"
+                @click="saveVisibility"
+              >
+                保存
+              </el-button>
+              <el-button
+                size="small"
+                :disabled="visibilitySaving"
+                data-testid="template-detail-visibility-cancel-button"
+                @click="cancelEditVisibility"
+              >
+                取消
+              </el-button>
+            </template>
+          </div>
           <div class="template-detail__meta">
             <span>模板 Key: {{ template.key }}</span>
             <span>当前版本: {{ template.activeVersionId ?? '无' }}</span>
@@ -212,10 +277,17 @@ import {
   CircleCheckFilled,
 } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
-import type { ApprovalNodeType, FormFieldType, ApprovalMode, EmptyAssigneePolicy } from '../../types/approval'
+import type {
+  ApprovalNodeType,
+  FormFieldType,
+  ApprovalMode,
+  EmptyAssigneePolicy,
+  ApprovalTemplateVisibilityScope,
+  ApprovalTemplateVisibilityType,
+} from '../../types/approval'
 import { useApprovalTemplateStore } from '../../approvals/templateStore'
 import { useApprovalPermissions } from '../../approvals/permissions'
-import { updateTemplateCategory } from '../../approvals/api'
+import { updateTemplateCategory, updateTemplateVisibilityScope } from '../../approvals/api'
 
 const route = useRoute()
 const router = useRouter()
@@ -228,6 +300,10 @@ const template = computed(() => store.activeTemplate)
 const editingCategory = ref(false)
 const categoryDraft = ref('')
 const categorySaving = ref(false)
+const editingVisibility = ref(false)
+const visibilityTypeDraft = ref<ApprovalTemplateVisibilityType>('all')
+const visibilityIdsDraft = ref('')
+const visibilitySaving = ref(false)
 
 function beginEditCategory() {
   if (!template.value) return
@@ -260,6 +336,61 @@ async function saveCategory() {
     ElMessage.error(e?.message ?? '更新分类失败')
   } finally {
     categorySaving.value = false
+  }
+}
+
+function visibilityScopeLabel(scope: ApprovalTemplateVisibilityScope): string {
+  if (!scope || scope.type === 'all') return '全员可见'
+  const map: Record<ApprovalTemplateVisibilityType, string> = {
+    all: '全员可见',
+    dept: '按部门',
+    role: '按角色',
+    user: '按用户',
+  }
+  return map[scope.type]
+}
+
+function beginEditVisibility() {
+  if (!template.value) return
+  visibilityTypeDraft.value = template.value.visibilityScope.type
+  visibilityIdsDraft.value = template.value.visibilityScope.ids.join(', ')
+  editingVisibility.value = true
+}
+
+function cancelEditVisibility() {
+  editingVisibility.value = false
+  visibilityTypeDraft.value = 'all'
+  visibilityIdsDraft.value = ''
+}
+
+async function saveVisibility() {
+  if (!template.value || visibilitySaving.value) return
+  const ids = visibilityIdsDraft.value
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter(Boolean)
+  if (visibilityTypeDraft.value !== 'all' && ids.length === 0) {
+    ElMessage.error('可见范围至少需要一个 id')
+    return
+  }
+  const nextScope: ApprovalTemplateVisibilityScope = visibilityTypeDraft.value === 'all'
+    ? { type: 'all', ids: [] }
+    : { type: visibilityTypeDraft.value, ids: Array.from(new Set(ids)) }
+  const current = template.value.visibilityScope
+  if (current.type === nextScope.type && current.ids.join('\n') === nextScope.ids.join('\n')) {
+    editingVisibility.value = false
+    return
+  }
+  visibilitySaving.value = true
+  try {
+    const updated = await updateTemplateVisibilityScope(template.value.id, nextScope)
+    store.activeTemplate = updated
+    editingVisibility.value = false
+    ElMessage.success('已更新模板可见范围')
+  } catch (e: any) {
+    ElMessage.error(e?.message ?? '更新可见范围失败')
+  } finally {
+    visibilitySaving.value = false
   }
 }
 
@@ -427,12 +558,14 @@ onMounted(() => {
   flex-wrap: wrap;
 }
 
-.template-detail__category {
+.template-detail__category,
+.template-detail__visibility {
   display: flex;
   align-items: center;
   gap: 4px;
   margin-bottom: 12px;
   font-size: 13px;
+  flex-wrap: wrap;
 }
 
 .template-detail__category-label {
@@ -441,6 +574,10 @@ onMounted(() => {
 }
 
 .template-detail__category-empty {
+  color: var(--el-text-color-secondary, #909399);
+}
+
+.template-detail__visibility-ids {
   color: var(--el-text-color-secondary, #909399);
 }
 

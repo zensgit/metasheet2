@@ -159,6 +159,8 @@ export function mockPublishedTemplate(overrides?: Partial<ApprovalTemplateDetail
     key: 'TPL-001',
     name: '通用审批模板',
     description: '适用于日常审批流程',
+    category: null,
+    visibilityScope: { type: 'all', ids: [] },
     status: 'published',
     activeVersionId: 'ver_1_1',
     latestVersionId: 'ver_1_1',

@@ -16,6 +16,7 @@ import type {
   ApprovalActionRequest,
   ApprovalStatus,
   ApprovalTemplateStatus,
+  ApprovalTemplateVisibilityScope,
   FormField,
 } from '../types/approval'
 
@@ -39,6 +40,7 @@ function mockTemplateListItem(index: number): ApprovalTemplateListItemDTO {
     name: `审批模板 ${index}`,
     description: index % 2 === 0 ? '通用审批模板' : null,
     category: MOCK_TEMPLATE_CATEGORIES[index % MOCK_TEMPLATE_CATEGORIES.length],
+    visibilityScope: { type: 'all', ids: [] },
     status: statuses[index % statuses.length],
     activeVersionId: statuses[index % statuses.length] === 'published' ? `ver_${index}_1` : null,
     latestVersionId: `ver_${index}_1`,
@@ -384,6 +386,23 @@ export async function updateTemplateCategory(
   const response = await apiFetch(`/api/approval-templates/${encodeURIComponent(templateId)}`, {
     method: 'PATCH',
     body: JSON.stringify({ category }),
+  })
+  if (!response.ok) {
+    throw new Error(`API error: ${response.status} ${response.statusText}`)
+  }
+  return response.json()
+}
+
+export async function updateTemplateVisibilityScope(
+  templateId: string,
+  visibilityScope: ApprovalTemplateVisibilityScope,
+): Promise<ApprovalTemplateDetailDTO> {
+  if (USE_MOCK) {
+    return { ...mockTemplateDetail(templateId), visibilityScope }
+  }
+  const response = await apiFetch(`/api/approval-templates/${encodeURIComponent(templateId)}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ visibilityScope }),
   })
   if (!response.ok) {
     throw new Error(`API error: ${response.status} ${response.statusText}`)

@@ -882,6 +882,20 @@ describe('Approval E2E Permissions', () => {
       expect(meta?.textContent).toContain('TPL-001')
     })
 
+    it('template detail shows visibility scope metadata', async () => {
+      setMockPermissions(['approval-templates:manage'])
+      routeParams = { id: 'tpl_1' }
+      mockActiveTemplate.value = mockPublishedTemplate({
+        visibilityScope: { type: 'role', ids: ['finance', 'manager'] },
+      })
+      await mountTemplateDetailView()
+
+      const visibilityTag = container!.querySelector('[data-testid="template-detail-visibility-tag"]')
+      expect(visibilityTag?.textContent).toContain('按角色')
+      const visibilityIds = container!.querySelector('[data-testid="template-detail-visibility-ids"]')
+      expect(visibilityIds?.textContent).toContain('finance, manager')
+    })
+
     it('back button navigates to /approval-templates', async () => {
       setMockPermissions(['approval-templates:manage'])
       routeParams = { id: 'tpl_1' }

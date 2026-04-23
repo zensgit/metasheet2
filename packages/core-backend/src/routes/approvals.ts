@@ -15,7 +15,11 @@ import { authenticate } from '../middleware/auth'
 import { rbacGuard } from '../rbac/rbac'
 import { REFUND_WORKFLOW_KEY, type AfterSalesApprovalBridgeService } from '../services/AfterSalesApprovalBridgeService'
 import { ApprovalBridgeService, ServiceError } from '../services/ApprovalBridgeService'
-import { ApprovalProductService, resolveApprovalListPaging } from '../services/ApprovalProductService'
+import {
+  ApprovalProductService,
+  resolveApprovalListPaging,
+  type ApprovalTemplateVisibilityActor,
+} from '../services/ApprovalProductService'
 import {
   APPROVAL_ERROR_CODES,
   type ApprovalBridgePlmAdapter,
@@ -96,6 +100,51 @@ function resolveApprovalActorRoles(req: Request): string[] {
     : []
 }
 
+function resolveApprovalActorPermissions(req: Request): string[] {
+  const permissions = Array.isArray(req.user?.permissions)
+    ? req.user!.permissions.filter((permission): permission is string => typeof permission === 'string')
+    : []
+  const tokenPerms = Array.isArray((req.user as { perms?: unknown })?.perms)
+    ? ((req.user as { perms: unknown }).perms as unknown[]).filter((permission): permission is string => typeof permission === 'string')
+    : []
+  return Array.from(new Set([...permissions, ...tokenPerms].map((permission) => permission.trim()).filter(Boolean)))
+}
+
+function resolveApprovalActorDepartmentIds(req: Request): string[] {
+  const user = req.user as Record<string, unknown> | undefined
+  const candidates = [
+    user?.department,
+    user?.departmentId,
+    user?.deptId,
+    user?.dept,
+  ]
+  const fromScalars = candidates
+    .filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
+    .map((value) => value.trim())
+  const fromArrays = [user?.departmentIds, user?.departments]
+    .flatMap((value) => Array.isArray(value) ? value : [])
+    .filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
+    .map((value) => value.trim())
+  return Array.from(new Set([...fromScalars, ...fromArrays]))
+}
+
+function resolveApprovalTemplateVisibilityActor(req: Request): ApprovalTemplateVisibilityActor | undefined {
+  const userId = resolveApprovalActorId(req)
+  if (!userId) return undefined
+  const roles = resolveApprovalActorRoles(req)
+  const permissions = resolveApprovalActorPermissions(req)
+  return {
+    userId,
+    departmentIds: resolveApprovalActorDepartmentIds(req),
+    roles,
+    permissions,
+    isTemplateManager: req.user?.role === 'admin'
+      || roles.includes('admin')
+      || permissions.includes('*:*')
+      || permissions.includes('approval-templates:manage'),
+  }
+}
+
 function approvalVersionConflictResponse(currentVersion: number) {
   return {
     ok: false,
@@ -173,8 +222,14 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
   const r = Router()
   const productService = getProductService()
 
-  r.get('/api/approval-templates', authenticate, rbacGuard('approval-templates:manage'), async (req: Request, res: Response) => {
+  r.get('/api/approval-templates', authenticate, async (req: Request, res: Response) => {
     try {
+      const actor = resolveApprovalTemplateVisibilityActor(req)
+      if (!actor) {
+        return res.status(401).json(
+          approvalErrorResponse('APPROVAL_USER_REQUIRED', 'User ID not found in token'),
+        )
+      }
       const page = parsePaging(req.query.page, 1, Number.MAX_SAFE_INTEGER)
       const pageSize = parsePaging(req.query.pageSize, 20)
       const { limit, offset } = resolveApprovalListPaging(page, pageSize)
@@ -186,6 +241,7 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
         status: typeof req.query.status === 'string' ? req.query.status : undefined,
         search: typeof req.query.search === 'string' ? req.query.search : undefined,
         category: rawCategory.length > 0 ? rawCategory : undefined,
+        actor,
         limit,
         offset,
       })
@@ -208,9 +264,15 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
 
   // Wave 2 WP4 slice 1 — served *above* `/api/approval-templates/:id` so
   // Express's matcher does not mistake `categories` for a template id.
-  r.get('/api/approval-templates/categories', authenticate, rbacGuard('approval-templates:manage'), async (_req: Request, res: Response) => {
+  r.get('/api/approval-templates/categories', authenticate, async (req: Request, res: Response) => {
     try {
-      const data = await productService.listTemplateCategories()
+      const actor = resolveApprovalTemplateVisibilityActor(req)
+      if (!actor) {
+        return res.status(401).json(
+          approvalErrorResponse('APPROVAL_USER_REQUIRED', 'User ID not found in token'),
+        )
+      }
+      const data = await productService.listTemplateCategories(actor)
       res.json({ data })
     } catch (error) {
       handleApprovalsError(
@@ -229,6 +291,7 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
         name: req.body?.name,
         description: req.body?.description,
         category: req.body?.category,
+        visibilityScope: req.body?.visibilityScope,
         formSchema: req.body?.formSchema,
         approvalGraph: req.body?.approvalGraph,
       })
@@ -243,9 +306,15 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
     }
   })
 
-  r.get('/api/approval-templates/:id', authenticate, rbacGuard('approval-templates:manage'), async (req: Request, res: Response) => {
+  r.get('/api/approval-templates/:id', authenticate, async (req: Request, res: Response) => {
     try {
-      const template = await productService.getTemplate(req.params.id)
+      const actor = resolveApprovalTemplateVisibilityActor(req)
+      if (!actor) {
+        return res.status(401).json(
+          approvalErrorResponse('APPROVAL_USER_REQUIRED', 'User ID not found in token'),
+        )
+      }
+      const template = await productService.getTemplate(req.params.id, actor)
       if (!template) {
         return res.status(404).json(
           approvalErrorResponse('APPROVAL_TEMPLATE_NOT_FOUND', 'Approval template not found'),
@@ -272,6 +341,7 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
         // explicitly included it, so an absent field does not wipe existing
         // values. `null` is a legitimate "clear" signal.
         ...('category' in (req.body ?? {}) ? { category: req.body.category } : {}),
+        ...('visibilityScope' in (req.body ?? {}) ? { visibilityScope: req.body.visibilityScope } : {}),
         formSchema: req.body?.formSchema,
         approvalGraph: req.body?.approvalGraph,
       })
@@ -510,10 +580,9 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
           userName: resolveApprovalActorName(req, userId),
           email: typeof req.user?.email === 'string' ? req.user.email : undefined,
           department: typeof req.user?.department === 'string' ? req.user.department : undefined,
+          departmentIds: resolveApprovalActorDepartmentIds(req),
           roles: resolveApprovalActorRoles(req),
-          permissions: Array.isArray(req.user?.permissions)
-            ? req.user!.permissions.filter((permission): permission is string => typeof permission === 'string')
-            : undefined,
+          permissions: resolveApprovalActorPermissions(req),
         },
       )
 
