@@ -653,6 +653,39 @@ test('dingtalk-p4-evidence-record rejects secret-like summary input', () => {
   }
 })
 
+test('dingtalk-p4-evidence-record rejects client_secret summary input', () => {
+  const tmpDir = makeTmpDir()
+  const sessionDir = path.join(tmpDir, 'session')
+
+  try {
+    writeEvidence(sessionDir)
+    const artifactRef = writeArtifact(sessionDir, 'authorized-user-submit')
+
+    const result = runScript([
+      '--session-dir',
+      sessionDir,
+      '--check-id',
+      'authorized-user-submit',
+      '--status',
+      'pass',
+      '--source',
+      'manual-client',
+      '--operator',
+      'qa',
+      '--summary',
+      'client_secret=abcdefghijklmnopqrstuvwxyz123456',
+      '--artifact',
+      artifactRef,
+    ])
+
+    assert.equal(result.status, 1)
+    assert.match(result.stderr, /--summary contains secret-like value: client_secret/)
+    assert.doesNotMatch(result.stderr, /abcdefghijklmnopqrstuvwxyz123456/)
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+
 test('dingtalk-p4-evidence-record rejects secret-like text artifacts', () => {
   const tmpDir = makeTmpDir()
   const sessionDir = path.join(tmpDir, 'session')
@@ -686,6 +719,44 @@ test('dingtalk-p4-evidence-record rejects secret-like text artifacts', () => {
     assert.equal(result.status, 1)
     assert.match(result.stderr, /artifact .* contains secret-like value: dingtalk_robot_webhook/)
     assert.doesNotMatch(result.stderr, /robot-secret-token/)
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+
+test('dingtalk-p4-evidence-record rejects client_secret text artifacts', () => {
+  const tmpDir = makeTmpDir()
+  const sessionDir = path.join(tmpDir, 'session')
+
+  try {
+    writeEvidence(sessionDir)
+    const artifactRef = writeArtifact(
+      sessionDir,
+      'authorized-user-submit',
+      'leak.txt',
+      'DINGTALK_CLIENT_SECRET=abcdefghijklmnopqrstuvwxyz123456\n',
+    )
+
+    const result = runScript([
+      '--session-dir',
+      sessionDir,
+      '--check-id',
+      'authorized-user-submit',
+      '--status',
+      'pass',
+      '--source',
+      'manual-client',
+      '--operator',
+      'qa',
+      '--summary',
+      'Allowed user submit proof.',
+      '--artifact',
+      artifactRef,
+    ])
+
+    assert.equal(result.status, 1)
+    assert.match(result.stderr, /artifact .* contains secret-like value: client_secret/)
+    assert.doesNotMatch(result.stderr, /abcdefghijklmnopqrstuvwxyz123456/)
   } finally {
     rmSync(tmpDir, { recursive: true, force: true })
   }

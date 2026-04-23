@@ -388,7 +388,7 @@ test('dingtalk-p4-smoke-session runs preflight, API runner, and non-strict compi
     assert.equal(sessionSummary.pendingChecks.some((check) => check.id === 'send-group-message-form-link' && check.manual), true)
     assert.equal(sessionSummary.nextCommands.some((command) => command.includes('dingtalk-p4-smoke-status.mjs')), true)
     assert.equal(sessionSummary.nextCommands.some((command) => command.includes('dingtalk-p4-evidence-record.mjs')), true)
-    assert.equal(sessionSummary.nextCommands.some((command) => command.includes('dingtalk-p4-final-closeout.mjs')), true)
+    assert.equal(sessionSummary.nextCommands.some((command) => command.includes('dingtalk-p4-final-closeout.mjs')), false)
     assert.equal(sessionSummary.nextCommands.some((command) => command.includes('--finalize')), true)
 
     const compiledSummary = JSON.parse(readFileSync(path.join(outputDir, 'compiled/summary.json'), 'utf8'))
@@ -524,7 +524,7 @@ test('dingtalk-p4-smoke-session finalize fails when strict evidence is incomplet
     assert.equal(existsSync(path.join(outputDir, 'smoke-todo.md')), true)
     assert.equal(sessionSummary.finalStrictSummary.manualEvidenceIssueCount > 0, true)
     assert.equal(sessionSummary.nextCommands.some((command) => command.includes('dingtalk-p4-evidence-record.mjs')), true)
-    assert.equal(sessionSummary.nextCommands.some((command) => command.includes('dingtalk-p4-final-closeout.mjs')), true)
+    assert.equal(sessionSummary.nextCommands.some((command) => command.includes('dingtalk-p4-final-closeout.mjs')), false)
     assert.equal(sessionSummary.nextCommands.some((command) => command.includes('--finalize')), true)
   } finally {
     rmSync(tmpDir, { recursive: true, force: true })

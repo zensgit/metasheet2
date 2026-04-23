@@ -387,8 +387,9 @@ ${gateLine}
 12. If debugging manually, finalize smoke evidence with \`node scripts/ops/dingtalk-p4-smoke-session.mjs --finalize <session-dir>\`.
 13. Re-run \`dingtalk-p4-smoke-status.mjs\` to confirm the status moved to \`handoff_pending\`.
 14. Run \`node scripts/ops/dingtalk-p4-final-handoff.mjs --session-dir <session-dir> --output-dir <packet-dir>\` after finalization passes.
-15. Generate final docs with \`node scripts/ops/dingtalk-p4-final-docs.mjs --session-dir <session-dir> --handoff-summary <packet-dir>/handoff-summary.json --require-release-ready\`.
-16. If debugging manually, re-export with \`--include-output <session-dir> --require-dingtalk-p4-pass\`, then validate with \`validate-dingtalk-staging-evidence-packet.mjs\`.
+15. Re-run \`node scripts/ops/dingtalk-p4-smoke-status.mjs --session-dir <session-dir> --handoff-summary <packet-dir>/handoff-summary.json --require-release-ready\`.
+16. Generate final docs with \`node scripts/ops/dingtalk-p4-final-docs.mjs --session-dir <session-dir> --handoff-summary <packet-dir>/handoff-summary.json --require-release-ready\`.
+17. If debugging manually, re-export with \`--include-output <session-dir> --require-dingtalk-p4-pass\`, then validate with \`validate-dingtalk-staging-evidence-packet.mjs\`.
 
 ## Non-Goals
 

@@ -182,6 +182,8 @@ test('dingtalk-p4-final-closeout can stop after release-ready status when docs a
       'final-handoff',
       'release-ready-status',
     ])
+    assert.equal(summary.outputs.developmentMd, '')
+    assert.equal(summary.outputs.verificationMd, '')
     assert.equal(existsSync(path.join(docsDir, 'dingtalk-final-remote-smoke-development-20260423.md')), false)
   } finally {
     rmSync(tmpDir, { recursive: true, force: true })

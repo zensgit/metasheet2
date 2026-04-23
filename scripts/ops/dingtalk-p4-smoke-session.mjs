@@ -691,7 +691,6 @@ function runSession(opts) {
     nextCommands: [
       statusCommand(outputDir),
       evidenceRecordCommand(outputDir),
-      finalCloseoutCommand(outputDir),
       finalizeCommand(outputDir, opts.allowExternalArtifactRefs),
       exportPacketCommand(outputDir),
     ],
@@ -780,7 +779,7 @@ function runFinalStrictCompile(opts) {
       : null,
     nextCommands: strictPassed
       ? [statusCommand(outputDir), finalCloseoutCommand(outputDir), finalHandoffCommand(outputDir), exportPacketCommand(outputDir, true)]
-      : [statusCommand(outputDir), evidenceRecordCommand(outputDir), finalCloseoutCommand(outputDir), finalizeCommand(outputDir, opts.allowExternalArtifactRefs), finalHandoffCommand(outputDir), exportPacketCommand(outputDir, true)],
+      : [statusCommand(outputDir), evidenceRecordCommand(outputDir), finalizeCommand(outputDir, opts.allowExternalArtifactRefs), finalHandoffCommand(outputDir), exportPacketCommand(outputDir, true)],
   }
 
   writeSessionSummary(summary, outputDir)

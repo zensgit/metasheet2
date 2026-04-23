@@ -477,8 +477,10 @@ function buildNextCommands(overallStatus, opts) {
   if (overallStatus === 'manual_pending') {
     commands.push(evidenceRecordCommand(opts))
   }
-  if (overallStatus === 'manual_pending' || overallStatus === 'finalize_pending') {
+  if (overallStatus === 'finalize_pending') {
     commands.push(finalCloseoutCommand(opts))
+  }
+  if (overallStatus === 'manual_pending' || overallStatus === 'finalize_pending') {
     commands.push(sessionCommand(opts, 'node scripts/ops/dingtalk-p4-smoke-session.mjs --finalize <session-dir>'))
   }
   if (overallStatus === 'handoff_pending' || overallStatus === 'finalize_pending') {

@@ -209,7 +209,7 @@ function docsOutputs(opts) {
 }
 
 function buildSummary(opts, steps) {
-  const docs = docsOutputs(opts)
+  const docs = opts.skipDocs ? null : docsOutputs(opts)
   const session = sessionSummary(opts)
   const handoff = handoffSummary(opts)
   const status = smokeStatusSummary(opts)
@@ -240,8 +240,8 @@ function buildSummary(opts, steps) {
       smokeStatusJson: relativePath(path.join(opts.sessionDir, 'smoke-status.json')),
       handoffSummaryJson: relativePath(path.join(opts.packetOutputDir, 'handoff-summary.json')),
       publishCheckJson: relativePath(path.join(opts.packetOutputDir, 'publish-check.json')),
-      developmentMd: relativePath(docs.developmentMd),
-      verificationMd: relativePath(docs.verificationMd),
+      developmentMd: docs ? relativePath(docs.developmentMd) : '',
+      verificationMd: docs ? relativePath(docs.verificationMd) : '',
     },
     final: {
       sessionPhase: session?.sessionPhase ?? 'not_available',
@@ -266,6 +266,8 @@ function renderMarkdown(summary) {
   const failures = summary.failures.length
     ? summary.failures.map((failure) => `- ${failure}`).join('\n')
     : '- None'
+  const developmentMd = summary.outputs.developmentMd || 'not_generated (--skip-docs)'
+  const verificationMd = summary.outputs.verificationMd || 'not_generated (--skip-docs)'
 
   return `# DingTalk P4 Final Closeout Summary
 
@@ -291,8 +293,8 @@ ${stepRows.join('\n')}
 - Smoke status: \`${summary.outputs.smokeStatusJson}\`
 - Handoff summary: \`${summary.outputs.handoffSummaryJson}\`
 - Publish check: \`${summary.outputs.publishCheckJson}\`
-- Development MD: \`${summary.outputs.developmentMd}\`
-- Verification MD: \`${summary.outputs.verificationMd}\`
+- Development MD: \`${developmentMd}\`
+- Verification MD: \`${verificationMd}\`
 
 ## Final Status
 
