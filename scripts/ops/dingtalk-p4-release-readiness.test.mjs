@@ -13,10 +13,22 @@ function makeTmpDir() {
   return mkdtempSync(path.join(tmpdir(), 'dingtalk-p4-release-readiness-'))
 }
 
-function runScript(args) {
+function runScript(args, options = {}) {
   return spawnSync(process.execPath, [scriptPath, ...args], {
     cwd: repoRoot,
     encoding: 'utf8',
+    env: {
+      ...process.env,
+      ...(options.env ?? {}),
+    },
+  })
+}
+
+function runScriptWithSelftest(args) {
+  return runScript(args, {
+    env: {
+      DINGTALK_P4_RELEASE_READINESS_ALLOW_SELFTEST: '1',
+    },
   })
 }
 
@@ -61,7 +73,7 @@ test('dingtalk-p4-release-readiness fails when private env readiness fails even 
       DINGTALK_P4_NO_EMAIL_DINGTALK_EXTERNAL_ID: '',
     })
 
-    const result = runScript([
+    const result = runScriptWithSelftest([
       '--p4-env-file', envFile,
       '--regression-profile', 'selftest',
       '--output-dir', outputDir,
@@ -91,7 +103,7 @@ test('dingtalk-p4-release-readiness passes with complete env and passing regress
   try {
     writeEnv(envFile)
 
-    const result = runScript([
+    const result = runScriptWithSelftest([
       '--p4-env-file', envFile,
       '--regression-profile', 'selftest',
       '--output-dir', outputDir,
@@ -117,7 +129,7 @@ test('dingtalk-p4-release-readiness reports manual_pending when regression is pl
   try {
     writeEnv(envFile)
 
-    const result = runScript([
+    const result = runScriptWithSelftest([
       '--p4-env-file', envFile,
       '--regression-profile', 'selftest',
       '--regression-plan-only',
@@ -141,7 +153,7 @@ test('dingtalk-p4-release-readiness allow-failures keeps reports inspectable wit
   try {
     writeEnv(envFile, { DINGTALK_P4_AUTH_TOKEN: '' })
 
-    const result = runScript([
+    const result = runScriptWithSelftest([
       '--p4-env-file', envFile,
       '--regression-profile', 'selftest',
       '--allow-failures',
@@ -160,4 +172,24 @@ test('dingtalk-p4-release-readiness rejects invalid public regression profile', 
 
   assert.notEqual(result.status, 0)
   assert.match(result.stderr, /--regression-profile must be one of: ops, product, all/)
+})
+
+test('dingtalk-p4-release-readiness rejects test-only regression profile unless explicitly unlocked', () => {
+  const rejected = runScript(['--regression-profile', 'selftest'])
+
+  assert.notEqual(rejected.status, 0)
+  assert.match(rejected.stderr, /--regression-profile must be one of: ops, product, all/)
+
+  const tmpDir = makeTmpDir()
+  try {
+    const unlocked = runScript(['--regression-profile', 'selftest', '--regression-plan-only', '--output-dir', tmpDir], {
+      env: {
+        DINGTALK_P4_RELEASE_READINESS_ALLOW_SELFTEST: '1',
+      },
+    })
+    assert.notEqual(unlocked.status, 0)
+    assert.doesNotMatch(unlocked.stderr, /--regression-profile must be one of/)
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
 })
