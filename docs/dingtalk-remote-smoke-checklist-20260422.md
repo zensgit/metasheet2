@@ -234,7 +234,7 @@ node scripts/ops/dingtalk-p4-evidence-record.mjs \
 
 The generated `evidence.json` also includes a `adminEvidence` helper object for this check. Fill `emailWasBlank`, `createdLocalUserId`, `boundDingTalkExternalId`, and `accountLinkedAfterRefresh` before final strict compile when that information is available.
 
-If the current evidence update is expected to complete all remaining remote-smoke checks, add `--finalize-when-ready`. The recorder will refresh smoke status first, then auto-run strict finalize only when the session is actually ready:
+If the current evidence update is expected to complete all remaining remote-smoke checks, prefer `--closeout-when-ready`. The recorder will refresh smoke status first, then auto-run the final closeout chain only when the session is actually ready:
 
 ```bash
 node scripts/ops/dingtalk-p4-evidence-record.mjs \
@@ -246,10 +246,15 @@ node scripts/ops/dingtalk-p4-evidence-record.mjs \
   --summary "Admin created and bound a no-email DingTalk-synced local user; temporary password is redacted." \
   --artifact artifacts/no-email-user-create-bind/admin-create-bind-result.png \
   --artifact artifacts/no-email-user-create-bind/account-linked-after-refresh.png \
-  --finalize-when-ready
+  --closeout-when-ready \
+  --closeout-packet-output-dir artifacts/dingtalk-staging-evidence-packet/142-final \
+  --closeout-docs-output-dir docs/development \
+  --closeout-date 20260423
 ```
 
-When auto-finalize succeeds, the recorder prints the next `dingtalk-p4-final-handoff.mjs` command directly.
+Use `--finalize-when-ready` instead only when debugging strict finalize separately. Do not combine it with `--closeout-when-ready`.
+
+When auto-closeout succeeds, the recorder prints the completed `dingtalk-p4-final-closeout.mjs` command. When auto-finalize succeeds in the lower-level debug path, it prints the next `dingtalk-p4-final-handoff.mjs` command directly.
 
 After all manual evidence has been recorded, prefer the closeout wrapper when you want a single local command for the rest of the release chain. It runs strict finalize, final handoff, release-ready status, and final remote-smoke docs generation:
 

@@ -81,6 +81,7 @@ node scripts/ops/dingtalk-p4-release-readiness.mjs \
 ```
 
 - This should only start the session when env readiness and local regression both pass.
+- When the smoke session starts successfully, release-readiness may still return/report `manual_pending` because the API bootstrap can pass while DingTalk-client/admin evidence remains outstanding.
 - [ ] Run the real command above with populated private values.
 - [ ] Confirm generated files:
   - `workspace/evidence.json`
@@ -108,6 +109,7 @@ node scripts/ops/dingtalk-p4-release-readiness.mjs \
 - [ ] Do not include full webhooks, signing secrets, bearer tokens, public form tokens, temporary passwords, or cookies in artifacts.
 - [x] Recorder updates with `--session-dir` now refresh `smoke-status.json`, `smoke-status.md`, and `smoke-todo.md` automatically.
 - [x] The final manual evidence update can use `--finalize-when-ready` to auto-attempt strict finalize when no required checks remain.
+- [x] The final manual evidence update can use `--closeout-when-ready` to auto-run final closeout when no required checks remain.
 
 ## Evidence Recorder Commands
 
@@ -152,10 +154,15 @@ node scripts/ops/dingtalk-p4-evidence-record.mjs \
   --summary "Admin created and bound a no-email DingTalk-synced local user; temporary password is redacted." \
   --artifact artifacts/no-email-user-create-bind/admin-create-bind-result.png \
   --artifact artifacts/no-email-user-create-bind/account-linked-after-refresh.png \
-  --finalize-when-ready
+  --closeout-when-ready \
+  --closeout-packet-output-dir artifacts/dingtalk-staging-evidence-packet/142-final \
+  --closeout-docs-output-dir docs/development \
+  --closeout-date 20260423
 ```
 
 - `--finalize-when-ready` should be used only on the update that is expected to complete the remaining manual evidence. It refreshes smoke status first and only runs strict finalize when the session has actually reached `finalize_pending`.
+- `--closeout-when-ready` is the faster final path for the last manual evidence update. It refreshes smoke status first and only runs final closeout when the session has actually reached `finalize_pending`.
+- Do not combine `--finalize-when-ready` and `--closeout-when-ready`; use the former for targeted debugging and the latter for the normal final handoff chain.
 
 ## Finalization
 

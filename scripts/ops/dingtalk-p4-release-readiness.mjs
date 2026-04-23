@@ -281,9 +281,12 @@ function runSmokeSession(opts) {
   const smokeStatusMd = path.join(opts.smokeOutputDir, 'smoke-status.md')
   const smokeTodoMd = path.join(opts.smokeOutputDir, 'smoke-todo.md')
   const sessionSummary = readJsonIfExists(sessionSummaryJson)
+  const status = result.exitCode === 0
+    ? sessionSummary?.overallStatus ?? 'pass'
+    : 'fail'
   return {
     requested: true,
-    status: result.exitCode === 0 ? 'pass' : 'fail',
+    status,
     exitCode: result.exitCode,
     outputDir: relativePath(opts.smokeOutputDir),
     stdoutLog: relativePath(stdoutLog),
@@ -356,7 +359,7 @@ function renderMarkdown(summary) {
   lines.push('## Next Step')
   lines.push('')
   if (summary.runSmokeSession) {
-    if (summary.smokeSession?.status === 'pass') {
+    if (summary.smokeSession?.status === 'pass' || summary.smokeSession?.status === 'manual_pending') {
       lines.push('Smoke session was started automatically after readiness passed. Continue with manual DingTalk evidence collection inside the generated session workspace.')
     } else {
       lines.push('Smoke session was requested but not completed successfully. Resolve the blocking gate or smoke-session failure first, then rerun this command.')
@@ -401,7 +404,11 @@ function run(opts) {
   if (opts.runSmokeSession) {
     if (readinessStatus === 'pass') {
       smokeSession = runSmokeSession(opts)
-      if (smokeSession.status !== 'pass') overallStatus = 'fail'
+      if (smokeSession.status === 'manual_pending') {
+        overallStatus = 'manual_pending'
+      } else if (smokeSession.status !== 'pass') {
+        overallStatus = 'fail'
+      }
     } else {
       smokeSession = {
         requested: true,

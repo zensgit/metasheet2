@@ -129,6 +129,18 @@ console.log('fake finalize ran')
 `, 'utf8')
 }
 
+function writeFinalCloseoutStub(scriptFile, markerFile) {
+  writeFileSync(scriptFile, `#!/usr/bin/env node
+import fs from 'node:fs'
+import path from 'node:path'
+
+const args = process.argv.slice(2)
+fs.mkdirSync(path.dirname(${JSON.stringify(markerFile)}), { recursive: true })
+fs.writeFileSync(${JSON.stringify(markerFile)}, JSON.stringify({ args }, null, 2) + '\\n')
+console.log('fake closeout ran')
+`, 'utf8')
+}
+
 test('dingtalk-p4-evidence-record records passing manual client evidence', () => {
   const tmpDir = makeTmpDir()
   const sessionDir = path.join(tmpDir, 'session')
@@ -446,6 +458,104 @@ test('dingtalk-p4-evidence-record auto-finalizes once refreshed smoke status rea
     assert.equal(sessionSummary.sessionPhase, 'finalize')
     assert.equal(sessionSummary.overallStatus, 'pass')
     assert.equal(sessionSummary.finalStrictStatus, 'pass')
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+
+test('dingtalk-p4-evidence-record auto-runs final closeout once refreshed smoke status reaches finalize_pending', () => {
+  const tmpDir = makeTmpDir()
+  const sessionDir = path.join(tmpDir, 'session')
+  const packetDir = path.join(tmpDir, 'packet')
+  const docsDir = path.join(tmpDir, 'docs')
+  const closeoutStub = path.join(tmpDir, 'fake-closeout.mjs')
+  const markerFile = path.join(tmpDir, 'closeout.marker.json')
+
+  try {
+    writeMostlyPassingEvidence(sessionDir, 'no-email-user-create-bind')
+    writeFinalCloseoutStub(closeoutStub, markerFile)
+    const artifactRefA = writeArtifact(sessionDir, 'no-email-user-create-bind', 'admin-create-bind-result.png')
+    const artifactRefB = writeArtifact(sessionDir, 'no-email-user-create-bind', 'account-linked-after-refresh.png')
+
+    const result = runScript([
+      '--session-dir',
+      sessionDir,
+      '--check-id',
+      'no-email-user-create-bind',
+      '--status',
+      'pass',
+      '--source',
+      'manual-admin',
+      '--operator',
+      'qa-admin',
+      '--summary',
+      'Admin created and bound a no-email DingTalk-synced local user; temporary password is redacted.',
+      '--artifact',
+      artifactRefA,
+      '--artifact',
+      artifactRefB,
+      '--closeout-when-ready',
+      '--closeout-packet-output-dir',
+      packetDir,
+      '--closeout-docs-output-dir',
+      docsDir,
+      '--closeout-date',
+      '20260423',
+      '--closeout-skip-docs',
+    ], {
+      env: {
+        DINGTALK_P4_EVIDENCE_RECORD_FINAL_CLOSEOUT_SCRIPT: closeoutStub,
+      },
+    })
+
+    assert.equal(result.status, 0, result.stderr)
+    assert.match(result.stdout, /Final closeout completed: node scripts\/ops\/dingtalk-p4-final-closeout\.mjs/)
+    const marker = JSON.parse(readFileSync(markerFile, 'utf8'))
+    assert.deepEqual(marker.args, [
+      '--session-dir',
+      sessionDir,
+      '--packet-output-dir',
+      packetDir,
+      '--docs-output-dir',
+      docsDir,
+      '--date',
+      '20260423',
+      '--skip-docs',
+    ])
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+
+test('dingtalk-p4-evidence-record rejects conflicting auto closeout and finalize flags', () => {
+  const tmpDir = makeTmpDir()
+  const sessionDir = path.join(tmpDir, 'session')
+
+  try {
+    writeEvidence(sessionDir)
+    const artifactRef = writeArtifact(sessionDir, 'authorized-user-submit')
+
+    const result = runScript([
+      '--session-dir',
+      sessionDir,
+      '--check-id',
+      'authorized-user-submit',
+      '--status',
+      'pass',
+      '--source',
+      'manual-client',
+      '--operator',
+      'qa',
+      '--summary',
+      'Allowed user submit proof.',
+      '--artifact',
+      artifactRef,
+      '--finalize-when-ready',
+      '--closeout-when-ready',
+    ])
+
+    assert.equal(result.status, 1)
+    assert.match(result.stderr, /--closeout-when-ready cannot be combined with --finalize-when-ready/)
   } finally {
     rmSync(tmpDir, { recursive: true, force: true })
   }

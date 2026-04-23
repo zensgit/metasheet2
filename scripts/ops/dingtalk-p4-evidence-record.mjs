@@ -23,6 +23,7 @@ const MANUAL_SOURCE_BY_CHECK_ID = new Map([
 ])
 const STATUS_SCRIPT_ENV = 'DINGTALK_P4_EVIDENCE_RECORD_STATUS_SCRIPT'
 const FINALIZE_SCRIPT_ENV = 'DINGTALK_P4_EVIDENCE_RECORD_FINALIZE_SCRIPT'
+const FINAL_CLOSEOUT_SCRIPT_ENV = 'DINGTALK_P4_EVIDENCE_RECORD_FINAL_CLOSEOUT_SCRIPT'
 const SECRET_PATTERNS = [
   {
     name: 'dingtalk_robot_webhook',
@@ -81,6 +82,13 @@ Options:
   --blocked-reason <text>    Set evidence.blockedReason
   --no-refresh-status        Skip automatic smoke-status refresh after write
   --finalize-when-ready      After refresh, auto-run --finalize when smoke status is ready
+  --closeout-when-ready      After refresh, auto-run final closeout when smoke status is ready
+  --closeout-packet-output-dir <dir>
+                             Packet dir forwarded to final closeout
+  --closeout-docs-output-dir <dir>
+                             Docs dir forwarded to final closeout
+  --closeout-date <yyyymmdd> Date suffix forwarded to final closeout docs
+  --closeout-skip-docs       Forward --skip-docs to final closeout
   --dry-run                  Validate and print the updated check without writing
   --help                     Show this help
 
@@ -123,6 +131,11 @@ function parseArgs(argv) {
     blockedReason: '',
     noRefreshStatus: false,
     finalizeWhenReady: false,
+    closeoutWhenReady: false,
+    closeoutPacketOutputDir: '',
+    closeoutDocsOutputDir: '',
+    closeoutDate: '',
+    closeoutSkipDocs: false,
     dryRun: false,
   }
 
@@ -194,6 +207,24 @@ function parseArgs(argv) {
       case '--finalize-when-ready':
         opts.finalizeWhenReady = true
         break
+      case '--closeout-when-ready':
+        opts.closeoutWhenReady = true
+        break
+      case '--closeout-packet-output-dir':
+        opts.closeoutPacketOutputDir = path.resolve(process.cwd(), readRequiredValue(argv, i, arg))
+        i += 1
+        break
+      case '--closeout-docs-output-dir':
+        opts.closeoutDocsOutputDir = path.resolve(process.cwd(), readRequiredValue(argv, i, arg))
+        i += 1
+        break
+      case '--closeout-date':
+        opts.closeoutDate = readRequiredValue(argv, i, arg).trim()
+        i += 1
+        break
+      case '--closeout-skip-docs':
+        opts.closeoutSkipDocs = true
+        break
       case '--dry-run':
         opts.dryRun = true
         break
@@ -222,6 +253,21 @@ function parseArgs(argv) {
   }
   if (opts.finalizeWhenReady && opts.dryRun) {
     throw new Error('--finalize-when-ready cannot be combined with --dry-run')
+  }
+  if (opts.closeoutWhenReady && !opts.sessionDir) {
+    throw new Error('--closeout-when-ready requires --session-dir')
+  }
+  if (opts.closeoutWhenReady && opts.finalizeWhenReady) {
+    throw new Error('--closeout-when-ready cannot be combined with --finalize-when-ready')
+  }
+  if (opts.closeoutWhenReady && opts.noRefreshStatus) {
+    throw new Error('--closeout-when-ready cannot be combined with --no-refresh-status')
+  }
+  if (opts.closeoutWhenReady && opts.dryRun) {
+    throw new Error('--closeout-when-ready cannot be combined with --dry-run')
+  }
+  if (opts.closeoutDate && !/^\d{8}$/.test(opts.closeoutDate)) {
+    throw new Error('--closeout-date must be formatted as yyyymmdd')
   }
   return opts
 }
@@ -452,6 +498,24 @@ function handoffCommand(sessionDir) {
   ].join(' ')
 }
 
+function finalCloseoutArgs(opts) {
+  return [
+    '--session-dir',
+    opts.sessionDir,
+    ...(opts.closeoutPacketOutputDir ? ['--packet-output-dir', opts.closeoutPacketOutputDir] : []),
+    ...(opts.closeoutDocsOutputDir ? ['--docs-output-dir', opts.closeoutDocsOutputDir] : []),
+    ...(opts.closeoutDate ? ['--date', opts.closeoutDate] : []),
+    ...(opts.closeoutSkipDocs ? ['--skip-docs'] : []),
+  ]
+}
+
+function finalCloseoutCommand(opts) {
+  return [
+    'node scripts/ops/dingtalk-p4-final-closeout.mjs',
+    ...finalCloseoutArgs(opts),
+  ].map((part) => part.startsWith(process.cwd()) ? relativePath(part) : part).join(' ')
+}
+
 function refreshSmokeStatus(sessionDir) {
   const script = process.env[STATUS_SCRIPT_ENV] || 'scripts/ops/dingtalk-p4-smoke-status.mjs'
   const result = runNodeTool(script, ['--session-dir', sessionDir])
@@ -481,6 +545,11 @@ function runFinalizeSession(sessionDir) {
   }
 }
 
+function runFinalCloseout(opts) {
+  const script = process.env[FINAL_CLOSEOUT_SCRIPT_ENV] || 'scripts/ops/dingtalk-p4-final-closeout.mjs'
+  return runNodeTool(script, finalCloseoutArgs(opts))
+}
+
 function refreshAfterWrite(opts) {
   if (!opts.sessionDir || opts.noRefreshStatus) return
 
@@ -498,9 +567,19 @@ function refreshAfterWrite(opts) {
     console.log(`Smoke TODO progress: ${todos.completed}/${todos.total} complete, ${todos.remaining} remaining`)
   }
 
-  if (!opts.finalizeWhenReady) return
+  if (!opts.finalizeWhenReady && !opts.closeoutWhenReady) return
   if (!shouldFinalizeWhenReady(statusRefresh.summary)) {
-    console.log(`Auto finalize not attempted; current smoke status is ${statusRefresh.summary?.overallStatus ?? 'unknown'}`)
+    const action = opts.closeoutWhenReady ? 'closeout' : 'finalize'
+    console.log(`Auto ${action} not attempted; current smoke status is ${statusRefresh.summary?.overallStatus ?? 'unknown'}`)
+    return
+  }
+
+  if (opts.closeoutWhenReady) {
+    const closeout = runFinalCloseout(opts)
+    if (closeout.exitCode !== 0) {
+      throw new Error(`evidence updated and smoke status refreshed, but auto closeout failed; rerun ${finalCloseoutCommand(opts)} (${compactText(closeout.stderr || closeout.stdout) || 'unknown error'})`)
+    }
+    console.log(`Final closeout completed: ${finalCloseoutCommand(opts)}`)
     return
   }
 
