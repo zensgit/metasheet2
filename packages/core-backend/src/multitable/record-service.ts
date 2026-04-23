@@ -6,9 +6,11 @@ import {
   ensureAttachmentIdsExist as ensureAttachmentIdsExistShared,
   normalizeAttachmentIds as normalizeAttachmentIdsShared,
 } from './attachment-service'
-import { extractSelectOptions, normalizeJson, normalizeJsonArray } from './field-codecs'
+import { extractSelectOptions, normalizeJson, normalizeJsonArray, type MultitableField } from './field-codecs'
 import { getDefaultValidationRules, validateRecord } from './field-validation-engine'
 import type { FieldValidationConfig } from './field-validation'
+import { loadFieldsForSheet } from './loaders'
+import { isFieldAlwaysReadOnly, isFieldPermissionHidden } from './permission-derivation'
 import { publishMultitableSheetRealtime } from './realtime-publish'
 import { ensureRecordWriteAllowed, type AccessInfo, type SheetPermissionScope } from './sheet-capabilities'
 
@@ -24,14 +26,7 @@ export interface ConnectionPool {
   transaction: <T>(handler: TransactionHandler<T>) => Promise<T>
 }
 
-export type UniverMetaField = {
-  id: string
-  name: string
-  type: 'string' | 'number' | 'boolean' | 'date' | 'formula' | 'select' | 'link' | 'lookup' | 'rollup' | 'attachment'
-  options?: Array<{ value: string; color?: string }>
-  order?: number
-  property?: Record<string, unknown>
-}
+export type UniverMetaField = MultitableField
 
 export type LinkFieldConfig = {
   foreignSheetId: string
@@ -43,6 +38,16 @@ type CreateFieldGuard = {
   options?: string[]
   link?: LinkFieldConfig | null
 }
+
+type FieldMutationGuard = {
+  type: UniverMetaField['type']
+  options?: string[]
+  readOnly: boolean
+  hidden: boolean
+  link?: LinkFieldConfig | null
+}
+
+export type YjsInvalidator = (recordIds: string[]) => Promise<void> | void
 
 export class VersionConflictError extends Error {
   constructor(
@@ -96,6 +101,21 @@ export class RecordValidationFailedError extends Error {
   }
 }
 
+export class RecordPatchFieldValidationError extends Error {
+  public readonly code: string
+  public readonly statusCode: number
+
+  constructor(public readonly fieldErrors: Record<string, string>) {
+    const messages = Object.values(fieldErrors)
+    const hiddenOnly = messages.length > 0 && messages.every((message) => message === 'Field is hidden')
+    const readonlyOnly = messages.length > 0 && messages.every((message) => message === 'Field is readonly')
+    super(hiddenOnly ? 'Hidden field update rejected' : readonlyOnly ? 'Readonly field update rejected' : 'Validation failed')
+    this.name = 'RecordPatchFieldValidationError'
+    this.code = hiddenOnly ? 'FIELD_HIDDEN' : readonlyOnly ? 'FIELD_READONLY' : 'VALIDATION_ERROR'
+    this.statusCode = hiddenOnly || readonlyOnly ? 403 : 400
+  }
+}
+
 export type RecordCreateInput = {
   sheetId: string
   data: Record<string, unknown>
@@ -122,6 +142,24 @@ export type RecordDeleteInput = {
 export type RecordDeleteResult = {
   recordId: string
   sheetId: string
+}
+
+export type RecordPatchInput = {
+  recordId: string
+  sheetId: string
+  data: Record<string, unknown>
+  expectedVersion?: number
+  access: AccessInfo
+  capabilities: MultitableCapabilities
+  sheetScope?: SheetPermissionScope
+}
+
+export type RecordPatchResult = {
+  recordId: string
+  sheetId: string
+  version: number
+  fields: UniverMetaField[]
+  patch: Record<string, unknown>
 }
 
 function isUndefinedTableError(err: unknown, tableName: string): boolean {
@@ -217,6 +255,26 @@ function buildCreateFieldGuardMap(rows: unknown[]): Map<string, CreateFieldGuard
   return guards
 }
 
+function buildFieldMutationGuardMap(fields: UniverMetaField[]): Map<string, FieldMutationGuard> {
+  return new Map(
+    fields.map((field) => {
+      const property = normalizeJson(field.property)
+      const base: FieldMutationGuard = {
+        type: field.type,
+        readOnly: isFieldAlwaysReadOnly(field),
+        hidden: isFieldPermissionHidden(field),
+      }
+      if (field.type === 'select') {
+        return [field.id, { ...base, options: field.options?.map((option) => option.value) ?? [] }] as const
+      }
+      if (field.type === 'link') {
+        return [field.id, { ...base, link: parseLinkFieldConfig(property) }] as const
+      }
+      return [field.id, base] as const
+    }),
+  )
+}
+
 function buildDirectValidationFields(rows: unknown[]) {
   return (rows as Array<Record<string, unknown>>).map((row) => {
     const property = normalizeJson(row.property)
@@ -238,6 +296,7 @@ export class RecordService {
   constructor(
     private pool: ConnectionPool,
     private eventBus: EventBus,
+    private yjsInvalidator: YjsInvalidator | null = null,
   ) {}
 
   async createRecord(input: RecordCreateInput): Promise<RecordCreateResult> {
@@ -484,6 +543,209 @@ export class RecordService {
     return {
       recordId,
       sheetId,
+    }
+  }
+
+  async patchRecord(input: RecordPatchInput): Promise<RecordPatchResult> {
+    const { recordId, sheetId, data, expectedVersion, access, capabilities, sheetScope } = input
+
+    if (!capabilities.canEditRecord) {
+      throw new RecordPermissionError('Insufficient permissions')
+    }
+
+    const fields = await loadFieldsForSheet(this.pool.query.bind(this.pool), sheetId)
+    if (fields.length === 0) {
+      throw new RecordNotFoundError(`Sheet not found: ${sheetId}`)
+    }
+
+    const fieldById = buildFieldMutationGuardMap(fields)
+    const fieldErrors: Record<string, string> = {}
+    const patch: Record<string, unknown> = {}
+    const linkUpdates = new Map<string, { ids: string[]; cfg: LinkFieldConfig }>()
+
+    for (const [fieldId, value] of Object.entries(data)) {
+      const field = fieldById.get(fieldId)
+      if (!field) {
+        fieldErrors[fieldId] = 'Unknown field'
+        continue
+      }
+      if (field.hidden) {
+        fieldErrors[fieldId] = 'Field is hidden'
+        continue
+      }
+      if (field.readOnly === true || field.type === 'lookup' || field.type === 'rollup') {
+        fieldErrors[fieldId] = 'Field is readonly'
+        continue
+      }
+      if (field.type === 'select') {
+        if (typeof value !== 'string') {
+          fieldErrors[fieldId] = 'Select value must be a string'
+          continue
+        }
+        const allowed = new Set(field.options ?? [])
+        if (value !== '' && !allowed.has(value)) {
+          fieldErrors[fieldId] = 'Invalid select option'
+          continue
+        }
+      }
+      if (field.type === 'link') {
+        if (!field.link) {
+          fieldErrors[fieldId] = 'Link field is missing foreign sheet configuration'
+          continue
+        }
+        const ids = normalizeLinkIds(value)
+        if (field.link.limitSingleRecord && ids.length > 1) {
+          fieldErrors[fieldId] = 'Only one linked record is allowed'
+          continue
+        }
+        const tooLong = ids.find((id) => id.length > 50)
+        if (tooLong) {
+          fieldErrors[fieldId] = `Link id too long: ${tooLong}`
+          continue
+        }
+        if (ids.length > 0) {
+          const exists = await this.pool.query(
+            'SELECT id FROM meta_records WHERE sheet_id = $1 AND id = ANY($2::text[])',
+            [field.link.foreignSheetId, ids],
+          )
+          const found = new Set(
+            (exists.rows as Array<Record<string, unknown>>)
+              .map((row) => (typeof row.id === 'string' ? row.id : ''))
+              .filter((id) => id.length > 0),
+          )
+          const missing = ids.filter((id) => !found.has(id))
+          if (missing.length > 0) {
+            fieldErrors[fieldId] = `Linked record not found: ${missing.join(', ')}`
+            continue
+          }
+        }
+        patch[fieldId] = ids
+        linkUpdates.set(fieldId, { ids, cfg: field.link })
+        continue
+      }
+      if (field.type === 'attachment') {
+        const ids = normalizeAttachmentIdsShared(value)
+        const tooLong = ids.find((id) => id.length > 100)
+        if (tooLong) {
+          fieldErrors[fieldId] = `Attachment id too long: ${tooLong}`
+          continue
+        }
+        const attachmentError = await ensureAttachmentIdsExistShared({
+          query: this.pool.query.bind(this.pool),
+          sheetId,
+          fieldId,
+          attachmentIds: ids,
+        })
+        if (attachmentError) {
+          fieldErrors[fieldId] = attachmentError
+          continue
+        }
+        patch[fieldId] = ids
+        continue
+      }
+      if (field.type === 'formula') {
+        if (typeof value !== 'string') {
+          fieldErrors[fieldId] = 'Formula value must be a string'
+          continue
+        }
+        if (value !== '' && !value.startsWith('=')) {
+          fieldErrors[fieldId] = 'Formula must start with ='
+          continue
+        }
+      }
+      patch[fieldId] = value
+    }
+
+    if (Object.keys(fieldErrors).length > 0) {
+      throw new RecordPatchFieldValidationError(fieldErrors)
+    }
+
+    let nextVersion = 1
+    await this.pool.transaction(async ({ query }) => {
+      const currentRes = await query(
+        'SELECT id, version, created_by FROM meta_records WHERE id = $1 AND sheet_id = $2 FOR UPDATE',
+        [recordId, sheetId],
+      )
+      if (currentRes.rows.length === 0) {
+        throw new RecordNotFoundError(`Record not found: ${recordId}`)
+      }
+      const currentRow = currentRes.rows[0] as Record<string, unknown>
+      if (!ensureRecordWriteAllowed(
+        capabilities,
+        sheetScope,
+        access,
+        typeof currentRow.created_by === 'string' ? currentRow.created_by : null,
+        'edit',
+      )) {
+        throw new RecordPermissionError('Record editing is not allowed for this row')
+      }
+
+      const serverVersion = Number(currentRow.version ?? 1)
+      if (typeof expectedVersion === 'number' && expectedVersion !== serverVersion) {
+        throw new VersionConflictError(recordId, serverVersion)
+      }
+
+      if (Object.keys(patch).length > 0) {
+        const updateRes = await query(
+          `UPDATE meta_records
+           SET data = data || $1::jsonb, updated_at = now(), version = version + 1
+           WHERE id = $2 AND sheet_id = $3
+           RETURNING version`,
+          [JSON.stringify(patch), recordId, sheetId],
+        )
+        nextVersion = Number((updateRes.rows[0] as { version?: unknown } | undefined)?.version ?? serverVersion)
+      } else {
+        nextVersion = serverVersion
+      }
+
+      for (const [fieldId, { ids }] of linkUpdates.entries()) {
+        const currentLinks = await query(
+          'SELECT foreign_record_id FROM meta_links WHERE field_id = $1 AND record_id = $2',
+          [fieldId, recordId],
+        )
+        const existingIds = (currentLinks.rows as Array<Record<string, unknown>>).map((row) => String(row.foreign_record_id))
+        const existing = new Set(existingIds)
+        const next = new Set(ids)
+        const toDelete = existingIds.filter((id) => !next.has(id))
+        const toInsert = ids.filter((id) => !existing.has(id))
+
+        if (toDelete.length > 0) {
+          await query(
+            'DELETE FROM meta_links WHERE field_id = $1 AND record_id = $2 AND foreign_record_id = ANY($3::text[])',
+            [fieldId, recordId, toDelete],
+          )
+        }
+        for (const foreignId of toInsert) {
+          await query(
+            `INSERT INTO meta_links (id, field_id, record_id, foreign_record_id)
+             VALUES ($1, $2, $3, $4)
+             ON CONFLICT DO NOTHING`,
+            [`lnk_${randomUUID()}`.slice(0, 50), fieldId, recordId, foreignId],
+          )
+        }
+        if (ids.length === 0) {
+          await query('DELETE FROM meta_links WHERE field_id = $1 AND record_id = $2', [fieldId, recordId])
+        }
+      }
+    })
+
+    if (this.yjsInvalidator) {
+      try {
+        await this.yjsInvalidator([recordId])
+      } catch (err) {
+        console.error(
+          `[record-service] Yjs invalidation failed for record ${recordId} — Yjs state may be stale until next idle-release:`,
+          err,
+        )
+      }
+    }
+
+    return {
+      recordId,
+      sheetId,
+      version: nextVersion,
+      fields,
+      patch,
     }
   }
 }

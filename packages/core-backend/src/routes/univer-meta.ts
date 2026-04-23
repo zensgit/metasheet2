@@ -94,6 +94,7 @@ import {
   RecordFieldForbiddenError as RecordServiceFieldForbiddenError,
   RecordPermissionError as RecordServicePermissionError,
   RecordValidationFailedError as RecordCreateValidationFailedError,
+  RecordPatchFieldValidationError as RecordServicePatchFieldValidationError,
 } from '../multitable/record-service'
 
 const multitableFormulaEngine = new MultitableFormulaEngine()
@@ -6806,199 +6807,18 @@ export function univerMetaRouter(): Router {
       }
       if (!capabilities.canEditRecord) return sendForbidden(res)
 
-      const fields = await loadFieldsForSheet(pool.query.bind(pool), sheetId)
-      const fieldById = buildFieldMutationGuardMap(fields)
-
-      const data = parsed.data.data ?? {}
-      const fieldErrors: Record<string, string> = {}
-      const patch: Record<string, unknown> = {}
-      const linkUpdates = new Map<string, { ids: string[]; cfg: LinkFieldConfig }>()
-
-      for (const [fieldId, value] of Object.entries(data)) {
-        const field = fieldById.get(fieldId)
-        if (!field) {
-          fieldErrors[fieldId] = 'Unknown field'
-          continue
-        }
-        if (field.hidden) {
-          fieldErrors[fieldId] = 'Field is hidden'
-          continue
-        }
-        if (field.readOnly === true || field.type === 'lookup' || field.type === 'rollup') {
-          fieldErrors[fieldId] = 'Field is readonly'
-          continue
-        }
-        if (field.type === 'select') {
-          if (typeof value !== 'string') {
-            fieldErrors[fieldId] = 'Select value must be a string'
-            continue
-          }
-          const allowed = new Set(field.options ?? [])
-          if (value !== '' && !allowed.has(value)) {
-            fieldErrors[fieldId] = 'Invalid select option'
-            continue
-          }
-        }
-        if (field.type === 'link') {
-          if (!field.link) {
-            fieldErrors[fieldId] = 'Link field is missing foreign sheet configuration'
-            continue
-          }
-          const ids = normalizeLinkIds(value)
-          if (field.link.limitSingleRecord && ids.length > 1) {
-            fieldErrors[fieldId] = 'Only one linked record is allowed'
-            continue
-          }
-          const tooLong = ids.find((id) => id.length > 50)
-          if (tooLong) {
-            fieldErrors[fieldId] = `Link id too long: ${tooLong}`
-            continue
-          }
-          if (ids.length > 0) {
-            const exists = await pool.query(
-              'SELECT id FROM meta_records WHERE sheet_id = $1 AND id = ANY($2::text[])',
-              [field.link.foreignSheetId, ids],
-            )
-            const found = new Set((exists.rows as any[]).map((row: any) => String(row.id)))
-            const missing = ids.filter((id) => !found.has(id))
-            if (missing.length > 0) {
-              fieldErrors[fieldId] = `Linked record not found: ${missing.join(', ')}`
-              continue
-            }
-          }
-          patch[fieldId] = ids
-          linkUpdates.set(fieldId, { ids, cfg: field.link })
-          continue
-        }
-        if (field.type === 'attachment') {
-          const ids = normalizeAttachmentIds(value)
-          const tooLong = ids.find((id) => id.length > 100)
-          if (tooLong) {
-            fieldErrors[fieldId] = `Attachment id too long: ${tooLong}`
-            continue
-          }
-          const attachmentError = await ensureAttachmentIdsExist(pool.query.bind(pool), sheetId, fieldId, ids)
-          if (attachmentError) {
-            fieldErrors[fieldId] = attachmentError
-            continue
-          }
-          patch[fieldId] = ids
-          continue
-        }
-        if (field.type === 'formula') {
-          if (typeof value !== 'string') {
-            fieldErrors[fieldId] = 'Formula value must be a string'
-            continue
-          }
-          if (value !== '' && !value.startsWith('=')) {
-            fieldErrors[fieldId] = 'Formula must start with ='
-            continue
-          }
-        }
-        patch[fieldId] = value
-      }
-
-      if (Object.keys(fieldErrors).length > 0) {
-        const hiddenOnly = Object.values(fieldErrors).every((message) => message === 'Field is hidden')
-        const readonlyOnly = Object.values(fieldErrors).every((message) => message === 'Field is readonly')
-        return res.status(hiddenOnly || readonlyOnly ? 403 : 400).json({
-          ok: false,
-          error: {
-            code: hiddenOnly ? 'FIELD_HIDDEN' : readonlyOnly ? 'FIELD_READONLY' : 'VALIDATION_ERROR',
-            message: hiddenOnly ? 'Hidden field update rejected' : readonlyOnly ? 'Readonly field update rejected' : 'Validation failed',
-            fieldErrors,
-          },
-        })
-      }
-
-      let nextVersion = 1
-      await pool.transaction(async ({ query }) => {
-        const currentRes = await query(
-          'SELECT id, version, created_by FROM meta_records WHERE id = $1 AND sheet_id = $2 FOR UPDATE',
-          [recordId, sheetId],
-        )
-        if ((currentRes as any).rows.length === 0) {
-          throw new NotFoundError(`Record not found: ${recordId}`)
-        }
-        const currentRow: any = (currentRes as any).rows[0]
-        if (!ensureRecordWriteAllowed(capabilities, sheetScope, access, typeof currentRow?.created_by === 'string' ? currentRow.created_by : null, 'edit')) {
-          throw new PermissionError('Record editing is not allowed for this row')
-        }
-        const serverVersion = Number(currentRow?.version ?? 1)
-        if (typeof parsed.data.expectedVersion === 'number' && parsed.data.expectedVersion !== serverVersion) {
-          throw new VersionConflictError(recordId, serverVersion)
-        }
-
-        if (Object.keys(patch).length > 0) {
-          const updateRes = await query(
-            `UPDATE meta_records
-             SET data = data || $1::jsonb, updated_at = now(), version = version + 1
-             WHERE id = $2 AND sheet_id = $3
-             RETURNING version`,
-            [JSON.stringify(patch), recordId, sheetId],
-          )
-          nextVersion = Number((updateRes as any).rows[0]?.version ?? serverVersion)
-        } else {
-          nextVersion = serverVersion
-        }
-
-        for (const [fieldId, { ids }] of linkUpdates.entries()) {
-          const currentLinks = await query(
-            'SELECT foreign_record_id FROM meta_links WHERE field_id = $1 AND record_id = $2',
-            [fieldId, recordId],
-          )
-          const existingIds = (currentLinks as any).rows.map((row: any) => String(row.foreign_record_id))
-          const existing = new Set(existingIds)
-          const next = new Set(ids)
-          const toDelete = existingIds.filter((id) => !next.has(id))
-          const toInsert = ids.filter((id) => !existing.has(id))
-
-          if (toDelete.length > 0) {
-            await query(
-              'DELETE FROM meta_links WHERE field_id = $1 AND record_id = $2 AND foreign_record_id = ANY($3::text[])',
-              [fieldId, recordId, toDelete],
-            )
-          }
-          for (const foreignId of toInsert) {
-            await query(
-              `INSERT INTO meta_links (id, field_id, record_id, foreign_record_id)
-               VALUES ($1, $2, $3, $4)
-               ON CONFLICT DO NOTHING`,
-              [buildId('lnk').slice(0, 50), fieldId, recordId, foreignId],
-            )
-          }
-          if (ids.length === 0) {
-            await query('DELETE FROM meta_links WHERE field_id = $1 AND record_id = $2', [fieldId, recordId])
-          }
-        }
+      const recordService = new RecordService(pool, eventBus, yjsInvalidator)
+      const patchResult = await recordService.patchRecord({
+        recordId,
+        sheetId,
+        data: parsed.data.data ?? {},
+        expectedVersion: parsed.data.expectedVersion,
+        access,
+        capabilities,
+        sheetScope,
       })
-
-      // -----------------------------------------------------------------
-      // LOAD-BEARING — DO NOT REMOVE
-      //
-      // Wipes any persisted / in-memory Y.Doc state for this record so the
-      // next getOrCreateDoc re-seeds from the just-updated meta_records.data.
-      // Without this, the P0 stale-snapshot bug returns (docs/development/
-      // yjs-text-cell-seed-and-stale-guard-development-20260420.md).
-      //
-      // The batch PATCH path goes through RecordWriteService.patchRecords,
-      // which runs an equivalent hook on every commit that isn't
-      // source='yjs-bridge'. This direct-SQL route bypasses that service,
-      // so it must fire the invalidator itself.
-      //
-      // Best-effort: a purge failure is logged and swallowed; the REST
-      // write still succeeds.
-      // -----------------------------------------------------------------
-      if (yjsInvalidator) {
-        try {
-          await yjsInvalidator([recordId])
-        } catch (err) {
-          console.error(
-            `[univer-meta] Yjs invalidation failed for record ${recordId} — Yjs state may be stale until next idle-release:`,
-            err,
-          )
-        }
-      }
+      const fields = patchResult.fields
+      const nextVersion = patchResult.version
 
       const recordRes = await pool.query(
         'SELECT id, version, data FROM meta_records WHERE id = $1 AND sheet_id = $2',
@@ -7059,7 +6879,17 @@ export function univerMetaRouter(): Router {
         },
       })
     } catch (err) {
-      if (err instanceof VersionConflictError) {
+      if (err instanceof RecordServicePatchFieldValidationError) {
+        return res.status(err.statusCode).json({
+          ok: false,
+          error: {
+            code: err.code,
+            message: err.message,
+            fieldErrors: err.fieldErrors,
+          },
+        })
+      }
+      if (err instanceof RecordServiceVersionConflictError || err instanceof VersionConflictError) {
         return res.status(409).json({
           ok: false,
           error: {
@@ -7069,14 +6899,15 @@ export function univerMetaRouter(): Router {
           },
         })
       }
-      if (err instanceof NotFoundError) {
+      if (err instanceof RecordServiceNotFoundError || err instanceof NotFoundError) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: err.message } })
       }
-      if (err instanceof PermissionError) {
+      if (err instanceof RecordServicePermissionError || err instanceof PermissionError) {
         return sendForbidden(res, err.message)
       }
-      if (err instanceof ValidationError) {
-        return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: err.message } })
+      if (err instanceof RecordServiceValidationError || err instanceof ValidationError) {
+        const code = err instanceof RecordServiceValidationError ? err.code : 'VALIDATION_ERROR'
+        return res.status(400).json({ ok: false, error: { code, message: err.message } })
       }
       const hint = getDbNotReadyMessage(err)
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
