@@ -21,6 +21,11 @@ vi.mock('../../src/metrics/metrics', () => ({
 import { isPublicFormAuthBypass, isWhitelisted, jwtAuthMiddleware, optionalJwtAuthMiddleware } from '../../src/auth/jwt-middleware'
 
 describe('jwt auth whitelist', () => {
+  it('does not whitelist metrics endpoints anymore', () => {
+    expect(isWhitelisted('/metrics')).toBe(false)
+    expect(isWhitelisted('/metrics/prom')).toBe(false)
+  })
+
   it('allows DingTalk launch without a bearer token', () => {
     expect(isWhitelisted('/api/auth/dingtalk/launch')).toBe(true)
     expect(isWhitelisted('/api/auth/dingtalk/launch?redirect=%2Fdashboard')).toBe(true)

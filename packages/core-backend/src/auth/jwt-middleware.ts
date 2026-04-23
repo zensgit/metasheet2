@@ -6,8 +6,6 @@ import { authService } from './AuthService'
 const AUTH_WHITELIST = [
   '/health',
   '/api/health',
-  '/metrics',
-  '/metrics/prom',
   '/api/auth/login',
   '/api/auth/register',
   '/api/auth/invite/preview',
