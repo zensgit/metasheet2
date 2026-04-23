@@ -71,6 +71,7 @@
 - [x] Harden P4 evidence strict mode so real DingTalk-client/admin checks require per-check manual evidence metadata.
 - [x] Add a P4 manual evidence kit generator with required manual evidence fields and artifact folders.
 - [x] Add a P4 strict artifact gate so manual pass evidence must reference self-contained non-empty files under `artifacts/<check-id>/`.
+- [x] Make the P4 API-only runner output a complete smoke workspace with `evidence.json`, `manual-evidence-checklist.md`, and manual artifact folders.
 - [ ] Remote smoke: create a table and form view.
 - [ ] Remote smoke: bind at least two DingTalk groups to the table.
 - [ ] Remote smoke: set the form to `dingtalk_granted`.
