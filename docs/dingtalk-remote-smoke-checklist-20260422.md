@@ -165,6 +165,11 @@ node scripts/ops/dingtalk-p4-remote-smoke.mjs \
 Expected output:
 
 - `evidence.json`
+- `manual-evidence-checklist.md`
+- `artifacts/send-group-message-form-link/`
+- `artifacts/authorized-user-submit/`
+- `artifacts/unauthorized-user-denied/`
+- `artifacts/no-email-user-create-bind/`
 
 The runner intentionally leaves these checks as `pending`:
 
@@ -173,7 +178,7 @@ The runner intentionally leaves these checks as `pending`:
 - unauthorized DingTalk-bound user is blocked and inserts no record
 - no-email DingTalk-synced account creation and binding
 
-If no `--person-user` is provided, person delivery evidence is also `pending`. Fill those manual results in `evidence.json`, then run the compiler with `--strict`.
+If no `--person-user` is provided, person delivery evidence is also `pending`. Fill the manual checks in the generated `evidence.json`, place files in the matching `artifacts/<check-id>/` folders, then run the compiler with `--strict`.
 
 ## Smoke 1: Create table and public form
 
