@@ -553,6 +553,50 @@ describe('Public form flow', () => {
     })
   })
 
+  test('form share config rejects unknown allowed member groups', async () => {
+    const storedConfig = {
+      publicForm: {
+        enabled: true,
+        publicToken: VALID_TOKEN,
+        accessMode: 'dingtalk',
+      },
+    }
+    const { app } = await createApp({
+      user: { id: 'admin_1', perms: ['multitable:write'] },
+      queryHandler: async (sql) => {
+        if (sql.includes('SELECT id, sheet_id, name, type, filter_info, sort_info, group_info, hidden_field_ids, config FROM meta_views WHERE id = $1')) {
+          return {
+            rows: [{
+              id: TEST_VIEW_ID,
+              sheet_id: TEST_SHEET_ID,
+              name: 'Public Form View',
+              type: 'form',
+              filter_info: {},
+              sort_info: {},
+              group_info: {},
+              hidden_field_ids: [],
+              config: storedConfig,
+            }],
+          }
+        }
+        if (sql.includes('SELECT id::text AS id FROM platform_member_groups WHERE id::text = ANY')) {
+          return { rows: [] }
+        }
+        throw new Error(`Unhandled SQL in test: ${sql}`)
+      },
+    })
+
+    const patchResponse = await request(app)
+      .patch(`/api/multitable/sheets/${TEST_SHEET_ID}/views/${TEST_VIEW_ID}/form-share`)
+      .send({ allowedMemberGroupIds: ['group_missing'] })
+      .expect(400)
+
+    expect(patchResponse.body.error).toEqual({
+      code: 'VALIDATION_ERROR',
+      message: 'Unknown allowed member groups: group_missing',
+    })
+  })
+
   test('rate limit exceeded -> 429 with Retry-After header', async () => {
     const { app } = await createApp({
       queryHandler: buildQueryHandler(VALID_TOKEN),

@@ -28,25 +28,25 @@
 
 ## P1: DingTalk Group Standard Workflow
 
-- [ ] Backend: verify table-scoped DingTalk group destinations support multiple groups per table.
-- [ ] Backend: verify create, update, delete, list, test-send, and delivery history routes enforce automation/write permissions.
-- [ ] Backend: verify webhook URLs and robot secrets are redacted in responses, logs, and delivery diagnostics.
-- [ ] Frontend: expose DingTalk group binding in the table integration or existing API token manager surface.
-- [ ] Frontend: let users add, edit, delete, and test-send DingTalk group robot destinations.
-- [ ] Frontend: show that group binding does not import DingTalk group members and does not grant form fill permission by itself.
-- [ ] Automation UI: let users choose a bound DingTalk group for `send_dingtalk_group_message`.
-- [ ] Automation UI: let users include public form and internal processing links in group messages.
-- [ ] Runtime: confirm a group message link opens the form and permission checks still gate access.
+- [x] Backend: verify table-scoped DingTalk group destinations support multiple groups per table.
+- [x] Backend: verify create, update, delete, list, test-send, and delivery history routes enforce automation/write permissions.
+- [x] Backend: verify webhook URLs and robot secrets are redacted in responses, logs, and delivery diagnostics.
+- [x] Frontend: expose DingTalk group binding in the table integration or existing API token manager surface.
+- [x] Frontend: let users add, edit, delete, and test-send DingTalk group robot destinations.
+- [x] Frontend: show that group binding does not import DingTalk group members and does not grant form fill permission by itself.
+- [x] Automation UI: let users choose a bound DingTalk group for `send_dingtalk_group_message`.
+- [x] Automation UI: let users include public form and internal processing links in group messages.
+- [x] Runtime: confirm a group message link opens the form and permission checks still gate access.
 
 ## P2: Form Access And Assigned Fillers
 
-- [ ] Form share UI: support `public`, `dingtalk`, and `dingtalk_granted` access modes.
-- [ ] Form share UI: allow table owners to choose allowed local users and member groups for DingTalk-protected modes.
-- [ ] Form share UI: explain that only selected local users/member groups can fill when allowlists are configured.
-- [ ] Backend: keep `dingtalk_granted` submit guard before record insert.
-- [ ] Backend: reject inactive allowed users and invalid member groups when saving form access settings.
-- [ ] Automation UI: display the selected form access level before saving a DingTalk action.
-- [ ] Runtime copy: show clear errors for auth required, DingTalk binding required, grant required, and not in allowlist.
+- [x] Form share UI: support `public`, `dingtalk`, and `dingtalk_granted` access modes.
+- [x] Form share UI: allow table owners to choose allowed local users and member groups for DingTalk-protected modes.
+- [x] Form share UI: explain that only selected local users/member groups can fill when allowlists are configured.
+- [x] Backend: keep `dingtalk_granted` submit guard before record insert.
+- [x] Backend: reject inactive allowed users and invalid member groups when saving form access settings.
+- [x] Automation UI: display the selected form access level before saving a DingTalk action.
+- [x] Runtime copy: show clear errors for auth required, DingTalk binding required, grant required, and not in allowlist.
 
 ## P3: DingTalk Person Messaging And User Sync
 
@@ -65,6 +65,7 @@
 - [x] Add an administrator guide for DingTalk app credentials, group robot binding, directory sync, and no-email user creation.
 - [x] Add a user guide for table group binding, automation messages, public form links, and form access levels.
 - [x] Add troubleshooting notes for webhook signature failures, unbound users, missing grants, no-email users, and links that cannot be opened.
+- [x] Add a P4 remote-smoke evidence compiler that validates required checks and writes redacted `summary.json` / `summary.md` artifacts.
 - [ ] Remote smoke: create a table and form view.
 - [ ] Remote smoke: bind at least two DingTalk groups to the table.
 - [ ] Remote smoke: set the form to `dingtalk_granted`.

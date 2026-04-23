@@ -76,6 +76,11 @@ const requiredPacketFiles = [
     kind: 'script',
     description: 'validates env, resolves image tag, runs docker compose, and checks backend health',
   },
+  {
+    path: 'scripts/ops/compile-dingtalk-p4-smoke-evidence.mjs',
+    kind: 'script',
+    description: 'compiles redacted P4 remote-smoke evidence summaries from operator-provided results',
+  },
 ]
 
 function printHelp() {
@@ -209,7 +214,8 @@ ${evidenceLines}
 4. Deploy a pinned tag with \`DEPLOY_IMAGE_TAG=<tag> bash scripts/ops/deploy-dingtalk-staging.sh\`.
 5. Execute \`docs/development/dingtalk-staging-execution-checklist-20260408.md\`.
 6. Execute \`docs/dingtalk-remote-smoke-checklist-20260422.md\` for P4 DingTalk form/group/person coverage.
-7. Re-export this packet with \`--include-output <evidence-dir>\` after smoke evidence exists.
+7. Compile smoke evidence with \`node scripts/ops/compile-dingtalk-p4-smoke-evidence.mjs --input <evidence.json> --output-dir <evidence-dir> --strict\`.
+8. Re-export this packet with \`--include-output <evidence-dir>\` after smoke evidence exists.
 
 ## Non-Goals
 
