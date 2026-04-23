@@ -77,3 +77,33 @@ pnpm --filter @metasheet/web exec vitest run \
 - pending-count 响应是**additive**：`count` 字段语义未变；`unreadCount` 是新增。slice 1 的断言（只看 `count`）继续绿。
 - slice 1 的前端红点 spec（`approvalCenterRemindBadge`) 仅更新了 `getPendingCount` mock 以同时提供 `unreadCount`——view 现在消费 `unreadCount`，但因 mock 里两值相等，断言的徽标数字不变。
 - `approvalCenterSourceFilter.spec` 不 stub `approvals/api`，生产代码里 USE_MOCK 会返回 fallback 对象，view 可以成功 mount，原断言继续绿。（输出里有 `[Vue warn]: Failed to resolve component: el-badge / el-tooltip / el-icon`；这是 pre-existing 的 stub 覆盖缺失，不影响断言。）
+
+## Codex Rebase Verification - 2026-04-23
+
+Branch was rebased to `origin/main@059ea44fc`.
+
+```bash
+git fetch origin main
+git rebase --autostash origin/main
+pnpm --filter @metasheet/core-backend exec vitest run \
+  tests/integration/approval-wp3-reads.api.test.ts \
+  --reporter=dot
+pnpm --filter @metasheet/web exec vitest run \
+  tests/approvalCenterUnreadBadge.spec.ts \
+  tests/approvalCenterRemindBadge.spec.ts \
+  --reporter=dot
+pnpm --filter @metasheet/core-backend exec tsc --noEmit
+pnpm --filter @metasheet/web exec vue-tsc -b --noEmit
+```
+
+Result:
+
+- Rebase: success, new branch head `51c641c08`.
+- Backend integration: `7/7` skipped because local `DATABASE_URL` is not set. This must be re-run in CI or a local Postgres environment.
+- Frontend specs: `12/12` passed.
+- Backend `tsc --noEmit`: exit `0`.
+- Frontend `vue-tsc -b --noEmit`: exit `0`.
+
+Review note:
+
+- Codex compared this branch against a local temporary `codex/approval-reads-20260423` branch and selected this Claude branch for PR. This branch is strictly more complete: `unreadCount`, `mark-all-read`, PLM unsynced skipped semantics, and cross-user unread isolation are all covered.
