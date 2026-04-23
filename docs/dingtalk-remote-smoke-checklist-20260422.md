@@ -165,7 +165,15 @@ node scripts/ops/dingtalk-p4-smoke-session.mjs \
 
 Finalizing reruns strict evidence compile, refreshes `session-summary.json` / `session-summary.md`, and returns non-zero until the manual evidence bundle is complete.
 
-After finalization passes, export a handoff packet with the final-pass gate enabled:
+After finalization passes, prefer the one-command final handoff wrapper. It exports the final gated packet, runs the publish validator, and writes `handoff-summary.json` / `handoff-summary.md`:
+
+```bash
+node scripts/ops/dingtalk-p4-final-handoff.mjs \
+  --session-dir output/dingtalk-p4-remote-smoke-session/142-session \
+  --output-dir artifacts/dingtalk-staging-evidence-packet/142-final
+```
+
+If debugging the individual steps, export a handoff packet with the final-pass gate enabled:
 
 ```bash
 node scripts/ops/export-dingtalk-staging-evidence-packet.mjs \
