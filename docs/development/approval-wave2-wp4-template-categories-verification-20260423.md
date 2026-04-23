@@ -199,3 +199,36 @@ Local note:
 - DB-backed WP4 integration remains documented above as requiring
   `DATABASE_URL`. This environment does not currently provide local Postgres,
   so CI or a DB-backed developer shell must re-run it before production rollout.
+
+## Post-#1132 admin-merge rebase verification - 2026-04-23
+
+Context:
+
+- #1131 and #1132 were admin-squash-merged first.
+- Rebasing this branch on `origin/main@c37957f0d` produced one conflict in
+  `packages/core-backend/tests/helpers/approval-schema-bootstrap.ts`.
+- Resolution kept both schemas: WP3 `approval_reads` and WP4
+  `approval_templates.category`, with bootstrap version advanced to
+  `20260423-wp4-template-category`.
+
+Commands:
+
+```bash
+pnpm --filter @metasheet/core-backend exec vitest run \
+  tests/unit/approval-product-service.test.ts \
+  tests/unit/approval-template-routes.test.ts \
+  --reporter=dot
+pnpm --filter @metasheet/web exec vitest run \
+  tests/approvalTemplateCenterCategory.spec.ts \
+  --reporter=dot
+pnpm --filter @metasheet/core-backend exec tsc --noEmit
+pnpm --filter @metasheet/web exec vue-tsc -b --noEmit
+```
+
+Result:
+
+- `approval-product-service.test.ts`: `6/6` passed.
+- `approval-template-routes.test.ts`: `4/4` passed.
+- `approvalTemplateCenterCategory.spec.ts`: `6/6` passed.
+- Backend `tsc --noEmit`: exit `0`.
+- Frontend `vue-tsc -b --noEmit`: exit `0`.
