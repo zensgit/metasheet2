@@ -31,7 +31,7 @@ async function createApp(args: {
     getPermCacheStatus: vi.fn(),
   }))
   vi.doMock('../../src/integration/events/event-bus', () => ({
-    eventBus: { publish: publishSpy },
+    eventBus: { publish: publishSpy, emit: vi.fn() },
   }))
 
   const { poolManager } = await import('../../src/integration/db/connection-pool')
@@ -64,16 +64,25 @@ describe('Multitable sheet realtime events', () => {
     const { app, publishSpy } = await createApp({
       tokenPerms: ['multitable:write'],
       queryHandler: async (sql, params) => {
+        if (sql.includes('FROM spreadsheet_permissions')) {
+          expect(params).toEqual(['user_realtime_1', ['sheet_ops']])
+          return { rows: [] }
+        }
         if (sql.includes('SELECT id FROM meta_sheets WHERE id = $1 AND deleted_at IS NULL')) {
           expect(params).toEqual(['sheet_ops'])
           return { rows: [{ id: 'sheet_ops' }] }
         }
-        if (sql.includes('SELECT id, type, property FROM meta_fields WHERE sheet_id = $1')) {
+        if (sql.includes('SELECT id, name, type, property FROM meta_fields WHERE sheet_id = $1')) {
           expect(params).toEqual(['sheet_ops'])
-          return { rows: [{ id: 'fld_title', type: 'string', property: {} }] }
+          return { rows: [{ id: 'fld_title', name: 'Title', type: 'string', property: {} }] }
         }
         if (sql.includes('INSERT INTO meta_records') && sql.includes('RETURNING version')) {
-          expect(params).toEqual([expect.stringMatching(/^rec_/), 'sheet_ops', JSON.stringify({ fld_title: 'Alpha' })])
+          expect(params).toEqual([
+            expect.stringMatching(/^rec_/),
+            'sheet_ops',
+            JSON.stringify({ fld_title: 'Alpha' }),
+            'user_realtime_1',
+          ])
           return { rows: [{ version: 1 }] }
         }
         throw new Error(`Unhandled SQL in test: ${sql}`)
@@ -112,6 +121,10 @@ describe('Multitable sheet realtime events', () => {
     const { app, publishSpy } = await createApp({
       tokenPerms: ['multitable:write'],
       queryHandler: async (sql, params) => {
+        if (sql.includes('FROM spreadsheet_permissions')) {
+          expect(params).toEqual(['user_realtime_1', ['sheet_ops']])
+          return { rows: [] }
+        }
         if (sql.includes('SELECT id, sheet_id, name, type, filter_info, sort_info, group_info, hidden_field_ids, config FROM meta_views WHERE id = $1')) {
           expect(params).toEqual(['view_form_ops'])
           return {
@@ -136,9 +149,9 @@ describe('Multitable sheet realtime events', () => {
           expect(params).toEqual(['sheet_ops'])
           return { rows: [{ id: 'fld_title', name: 'Title', type: 'string', property: {}, order: 1 }] }
         }
-        if (sql.includes('SELECT id, version FROM meta_records WHERE id = $1 AND sheet_id = $2 FOR UPDATE')) {
+        if (sql.includes('SELECT id, version, created_by FROM meta_records WHERE id = $1 AND sheet_id = $2 FOR UPDATE')) {
           expect(params).toEqual(['rec_1', 'sheet_ops'])
-          return { rows: [{ id: 'rec_1', version: 4 }] }
+          return { rows: [{ id: 'rec_1', version: 4, created_by: 'user_realtime_1' }] }
         }
         if (sql.includes('UPDATE meta_records') && sql.includes('RETURNING version')) {
           expect(params).toEqual([JSON.stringify({ fld_title: 'Updated title' }), 'rec_1', 'sheet_ops'])
@@ -182,6 +195,10 @@ describe('Multitable sheet realtime events', () => {
     const { app, publishSpy } = await createApp({
       tokenPerms: ['multitable:write'],
       queryHandler: async (sql, params) => {
+        if (sql.includes('FROM spreadsheet_permissions')) {
+          expect(params).toEqual(['user_realtime_1', ['sheet_ops']])
+          return { rows: [] }
+        }
         if (sql.includes('SELECT id FROM meta_sheets WHERE id = $1 AND deleted_at IS NULL')) {
           expect(params).toEqual(['sheet_ops'])
           return { rows: [{ id: 'sheet_ops' }] }
@@ -190,9 +207,9 @@ describe('Multitable sheet realtime events', () => {
           expect(params).toEqual(['sheet_ops'])
           return { rows: [{ id: 'fld_title', name: 'Title', type: 'string', property: {} }] }
         }
-        if (sql.includes('SELECT id, version FROM meta_records WHERE sheet_id = $1 AND id = $2 FOR UPDATE')) {
+        if (sql.includes('SELECT id, version, created_by FROM meta_records WHERE sheet_id = $1 AND id = $2 FOR UPDATE')) {
           expect(params).toEqual(['sheet_ops', 'rec_1'])
-          return { rows: [{ id: 'rec_1', version: 2 }] }
+          return { rows: [{ id: 'rec_1', version: 2, created_by: 'user_realtime_1' }] }
         }
         if (sql.includes('UPDATE meta_records') && sql.includes('WHERE sheet_id = $2 AND id = $3')) {
           expect(params).toEqual([JSON.stringify({ fld_title: 'Bulk patched' }), 'sheet_ops', 'rec_1'])
