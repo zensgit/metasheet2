@@ -101,6 +101,13 @@ Strict mode also requires real manual evidence metadata for the checks that only
 - `unauthorized-user-denied`: `source: "manual-client"`
 - `no-email-user-create-bind`: `source: "manual-admin"`
 
+Strict artifact refs are self-contained by default:
+
+- Use relative paths only.
+- Put each file under `artifacts/<check-id>/` next to the input `evidence.json`.
+- The referenced path must exist, be a file, and be non-empty.
+- External URL refs are rejected unless `--allow-external-artifact-refs` is passed. Prefer local files for release evidence because URL-only proof can be edited or become unavailable.
+
 Example check evidence:
 
 ```json
@@ -112,7 +119,7 @@ Example check evidence:
     "operator": "qa",
     "performedAt": "2026-04-22T15:00:00.000Z",
     "summary": "Allowed DingTalk-bound user opened the group link and submitted one record.",
-    "artifacts": ["screenshots/authorized-submit.png"]
+    "artifacts": ["artifacts/authorized-user-submit/authorized-submit.png"]
   }
 }
 ```
