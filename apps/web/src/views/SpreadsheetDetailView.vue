@@ -77,6 +77,16 @@
 import { computed, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { apiFetch } from '../utils/api'
+import {
+  buildCellVersionMap,
+  formatCellVersionConflict,
+  isCellVersionConflict,
+  mergeCellVersionMap,
+  withExpectedCellVersions,
+  type CellVersionMap,
+  type SpreadsheetCellPatch,
+  type SpreadsheetServerCell,
+} from '../utils/spreadsheetCellVersions'
 
 interface SheetItem {
   id: string
@@ -87,6 +97,11 @@ interface SpreadsheetDetail {
   id: string
   name: string
   sheets: SheetItem[]
+}
+
+interface ServerCell extends SpreadsheetServerCell {
+  value: unknown
+  formula: string | null
 }
 
 const route = useRoute()
@@ -104,11 +119,19 @@ const cellType = ref<string>('')
 const statusMessage = ref('')
 const statusKind = ref<'success' | 'error'>('success')
 const lastResponse = ref('')
+const cellVersions = ref<CellVersionMap>({})
 
 const spreadsheetId = computed(() => route.params.id as string)
 
-function selectSheet(id: string) {
+async function selectSheet(id: string) {
   selectedSheetId.value = id
+  statusMessage.value = ''
+  try {
+    await fetchSelectedSheetCells()
+  } catch (error) {
+    statusKind.value = 'error'
+    statusMessage.value = error instanceof Error ? error.message : 'Failed to load sheet cells'
+  }
 }
 
 function goBack() {
@@ -118,6 +141,7 @@ function goBack() {
 async function fetchSpreadsheet() {
   if (!spreadsheetId.value) return
   loading.value = true
+  statusMessage.value = ''
   try {
     const response = await apiFetch(`/api/spreadsheets/${spreadsheetId.value}`)
     const payload = await response.json().catch(() => null)
@@ -125,8 +149,14 @@ async function fetchSpreadsheet() {
       throw new Error(payload?.error?.message || 'Failed to load spreadsheet')
     }
     spreadsheet.value = payload.data
-    if (!selectedSheetId.value && spreadsheet.value?.sheets?.length) {
-      selectedSheetId.value = spreadsheet.value.sheets[0].id
+    const sheetIds = new Set(spreadsheet.value?.sheets?.map((sheet) => sheet.id) ?? [])
+    if (!selectedSheetId.value || !sheetIds.has(selectedSheetId.value)) {
+      selectedSheetId.value = spreadsheet.value?.sheets?.[0]?.id ?? ''
+    }
+    if (selectedSheetId.value) {
+      await fetchSelectedSheetCells()
+    } else {
+      cellVersions.value = {}
     }
   } catch (error) {
     statusKind.value = 'error'
@@ -134,6 +164,26 @@ async function fetchSpreadsheet() {
   } finally {
     loading.value = false
   }
+}
+
+async function fetchSelectedSheetCells() {
+  if (!spreadsheetId.value || !selectedSheetId.value) {
+    cellVersions.value = {}
+    return
+  }
+
+  const sheetId = selectedSheetId.value
+  cellVersions.value = {}
+  const response = await apiFetch(`/api/spreadsheets/${spreadsheetId.value}/sheets/${sheetId}/cells`)
+  const payload = await response.json().catch(() => null)
+  if (!response.ok || !payload?.ok) {
+    throw new Error(payload?.error?.message || 'Failed to load sheet cells')
+  }
+
+  if (selectedSheetId.value !== sheetId) return
+  const cells = Array.isArray(payload.data?.cells) ? payload.data.cells as ServerCell[] : []
+  cellVersions.value = buildCellVersionMap(cells)
+  lastResponse.value = JSON.stringify(payload.data, null, 2)
 }
 
 async function updateCell() {
@@ -145,22 +195,29 @@ async function updateCell() {
   updating.value = true
   statusMessage.value = ''
   try {
+    const cell: SpreadsheetCellPatch = {
+      row: cellRow.value,
+      col: cellCol.value,
+      value: cellValue.value || null,
+      formula: cellFormula.value || undefined,
+      dataType: cellType.value || undefined
+    }
+    const cells = withExpectedCellVersions([cell], cellVersions.value)
     const response = await apiFetch(`/api/spreadsheets/${spreadsheetId.value}/sheets/${selectedSheetId.value}/cells`, {
       method: 'PUT',
       body: JSON.stringify({
-        cells: [{
-          row: cellRow.value,
-          col: cellCol.value,
-          value: cellValue.value || null,
-          formula: cellFormula.value || undefined,
-          dataType: cellType.value || undefined
-        }]
+        cells
       })
     })
     const payload = await response.json().catch(() => null)
     if (!response.ok || !payload?.ok) {
+      if (response.status === 409 && isCellVersionConflict(payload?.error)) {
+        throw new Error(formatCellVersionConflict(payload.error))
+      }
       throw new Error(payload?.error?.message || 'Failed to update cell')
     }
+    const updatedCells = Array.isArray(payload.data?.cells) ? payload.data.cells as ServerCell[] : []
+    cellVersions.value = mergeCellVersionMap(cellVersions.value, updatedCells)
     statusKind.value = 'success'
     statusMessage.value = 'Cell updated.'
     lastResponse.value = JSON.stringify(payload.data, null, 2)

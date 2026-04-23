@@ -261,6 +261,16 @@
 import { ref, computed, onMounted, onUnmounted, nextTick, watch } from 'vue'
 import { formulaEngine } from '../utils/formulaEngine'
 import { apiFetch } from '../utils/api'
+import {
+  buildCellVersionMap,
+  formatCellVersionConflict,
+  isCellVersionConflict,
+  mergeCellVersionMap,
+  withExpectedCellVersions,
+  type CellVersionMap,
+  type SpreadsheetCellPatch,
+  type SpreadsheetServerCell,
+} from '../utils/spreadsheetCellVersions'
 import ContextMenu from '../components/ContextMenu.vue'
 import type { MenuItem } from '../components/ContextMenu.vue'
 
@@ -289,9 +299,7 @@ interface ServerSheet {
   column_count: number
 }
 
-interface ServerCell {
-  row_index: number
-  column_index: number
+interface ServerCell extends SpreadsheetServerCell {
   value: unknown
   formula: string | null
 }
@@ -318,6 +326,7 @@ const lastSaved = ref('')
 const saveNotice = ref('')
 const lastSyncedData = ref<string[][] | null>(null)
 const lastSyncedSize = ref<{ rows: number; cols: number } | null>(null)
+const cellVersions = ref<CellVersionMap>({})
 const gridSpreadsheetId = ref<string | null>(null)
 const gridSheetId = ref<string | null>(null)
 
@@ -363,6 +372,7 @@ const rowHeights = ref<Record<number, number>>({})
 
 // 初始化数据
 function initData() {
+  cellVersions.value = {}
   data.value = Array(rows.value).fill(null).map(() =>
     Array(cols.value).fill('')
   )
@@ -616,6 +626,7 @@ function normalizeCellValue(value: unknown): string {
 }
 
 function applyServerCells(cells: ServerCell[], sizeHint?: { rows: number; cols: number }) {
+  cellVersions.value = buildCellVersionMap(cells)
   let maxRow = DEFAULT_ROWS - 1
   let maxCol = DEFAULT_COLS - 1
 
@@ -673,6 +684,7 @@ function loadGridDataFromStorage(): string[][] | null {
 }
 
 function applyLocalData(savedData: string[][], sizeHint?: { rows: number; cols: number }) {
+  cellVersions.value = {}
   const dataRows = savedData.length
   const dataCols = savedData[0]?.length ?? DEFAULT_COLS
   const targetRows = Math.max(sizeHint?.rows ?? DEFAULT_ROWS, dataRows)
@@ -711,6 +723,7 @@ function storeGridIds(spreadsheetId: string, sheetId: string) {
 function clearGridIds() {
   gridSpreadsheetId.value = null
   gridSheetId.value = null
+  cellVersions.value = {}
   localStorage.removeItem(GRID_SPREADSHEET_ID_KEY)
   localStorage.removeItem(GRID_SHEET_ID_KEY)
 }
@@ -809,6 +822,7 @@ async function loadCellsFromServer(
     }
     rows.value = resolvedSize.rows
     cols.value = resolvedSize.cols
+    cellVersions.value = {}
     data.value = buildEmptyData(rows.value, cols.value)
     recalculateAll()
     snapshotSyncedState()
@@ -819,8 +833,8 @@ async function loadCellsFromServer(
   }
 }
 
-function buildChangedCellPayload(): Array<{ row: number; col: number; value?: string | null; formula?: string }> {
-  const cells: Array<{ row: number; col: number; value?: string | null; formula?: string }> = []
+function buildChangedCellPayload(): SpreadsheetCellPatch[] {
+  const cells: SpreadsheetCellPatch[] = []
   for (let r = 0; r < rows.value; r++) {
     for (let c = 0; c < cols.value; c++) {
       const raw = data.value[r]?.[c] ?? ''
@@ -838,7 +852,7 @@ function buildChangedCellPayload(): Array<{ row: number; col: number; value?: st
       }
     }
   }
-  return cells
+  return withExpectedCellVersions(cells, cellVersions.value)
 }
 
 // 保存数据
@@ -870,6 +884,8 @@ async function saveData() {
     const payload = await response.json().catch(() => null)
 
     if (response.ok && payload?.ok) {
+      const updatedCells = Array.isArray(payload.data?.cells) ? payload.data.cells as ServerCell[] : []
+      cellVersions.value = mergeCellVersionMap(cellVersions.value, updatedCells)
       lastSaved.value = new Date().toLocaleTimeString()
       snapshotSyncedState()
       saveNotice.value = '已保存'
@@ -890,6 +906,12 @@ async function saveData() {
 
       alert('保存成功！')
     } else {
+      if (response.status === 409 && isCellVersionConflict(payload?.error)) {
+        const message = formatCellVersionConflict(payload.error, { locale: 'zh-CN' })
+        saveNotice.value = message
+        alert(message)
+        return
+      }
       throw new Error(payload?.error?.message || '保存失败')
     }
   } catch (error) {
@@ -1176,6 +1198,7 @@ watch(autoSaveEnabled, (enabled) => {
 async function loadSavedData() {
   lastSyncedData.value = null
   lastSyncedSize.value = null
+  cellVersions.value = {}
   const sizeHint = loadGridSizeFromStorage()
   const localData = loadGridDataFromStorage()
 
