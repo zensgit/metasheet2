@@ -87,6 +87,7 @@
 - [x] Add a P4 remote-smoke TODO exporter so status runs generate an executable checklist for remaining evidence.
 - [x] Auto-refresh P4 smoke status and remote TODO reports from the session bootstrap/finalize commands.
 - [x] Add a P4 no-email admin evidence helper so manual-admin proof uses concrete artifact names and structured result fields.
+- [x] Add a final DingTalk development plan and TODO so remote smoke execution can be followed step-by-step.
 - [ ] Remote smoke: create a table and form view.
 - [ ] Remote smoke: bind at least two DingTalk groups to the table.
 - [ ] Remote smoke: set the form to `dingtalk_granted`.
