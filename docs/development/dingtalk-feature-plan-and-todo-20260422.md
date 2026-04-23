@@ -74,6 +74,7 @@
 - [x] Make the P4 API-only runner output a complete smoke workspace with `evidence.json`, `manual-evidence-checklist.md`, and manual artifact folders.
 - [x] Add a P4 smoke session orchestrator that runs preflight, API workspace bootstrap, non-strict compile, and a redacted session summary.
 - [x] Add a P4 smoke session env template initializer for secure one-command staging setup.
+- [x] Add P4 smoke session finalization so completed manual evidence reruns strict compile and refreshes the session summary.
 - [ ] Remote smoke: create a table and form view.
 - [ ] Remote smoke: bind at least two DingTalk groups to the table.
 - [ ] Remote smoke: set the form to `dingtalk_granted`.

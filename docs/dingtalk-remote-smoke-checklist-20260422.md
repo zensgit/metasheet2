@@ -156,14 +156,14 @@ Expected generated files:
 - `session-summary.json`
 - `session-summary.md`
 
-Expected session status is usually `manual_pending` after the API runner succeeds, because the real DingTalk-client/admin checks still need operator proof. Fill `workspace/evidence.json`, place files in `workspace/artifacts/<check-id>/`, then run strict compile:
+Expected session status is usually `manual_pending` after the API runner succeeds, because the real DingTalk-client/admin checks still need operator proof. Fill `workspace/evidence.json`, place files in `workspace/artifacts/<check-id>/`, then finalize the session:
 
 ```bash
-node scripts/ops/compile-dingtalk-p4-smoke-evidence.mjs \
-  --input output/dingtalk-p4-remote-smoke-session/142-session/workspace/evidence.json \
-  --output-dir output/dingtalk-p4-remote-smoke-session/142-session/compiled \
-  --strict
+node scripts/ops/dingtalk-p4-smoke-session.mjs \
+  --finalize output/dingtalk-p4-remote-smoke-session/142-session
 ```
+
+Finalizing reruns strict evidence compile, refreshes `session-summary.json` / `session-summary.md`, and returns non-zero until the manual evidence bundle is complete.
 
 ## Preflight Gate
 

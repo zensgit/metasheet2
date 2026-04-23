@@ -24,10 +24,11 @@ Runs a DingTalk P4 smoke session in one operator command:
 
 This script does not fill real DingTalk-client/admin evidence and does not run
 strict compile. After the session succeeds, place manual artifacts in the
-generated workspace and run compile-dingtalk-p4-smoke-evidence.mjs --strict.
+generated workspace and run --finalize <session-dir>.
 
 Options:
   --init-env-template <file>       Write a safe editable env template and exit
+  --finalize <session-dir>         Run strict compile for an existing session and refresh session summary
   --env-file <file>                Optional KEY=VALUE file to read before env/CLI
   --api-base <url>                 Backend API base, default ${DEFAULT_API_BASE}
   --web-base <url>                 Public app base used by DingTalk message links
@@ -134,6 +135,7 @@ function parseArgs(argv) {
   const env = { ...envFileValues, ...process.env }
   const opts = {
     initEnvTemplate: null,
+    finalizeDir: null,
     envFile,
     apiBase: envValue(env, 'DINGTALK_P4_API_BASE', 'API_BASE') || DEFAULT_API_BASE,
     webBase: envValue(env, 'DINGTALK_P4_WEB_BASE', 'WEB_BASE', 'PUBLIC_APP_URL'),
@@ -162,6 +164,10 @@ function parseArgs(argv) {
         break
       case '--init-env-template':
         opts.initEnvTemplate = path.resolve(process.cwd(), readRequiredValue(argv, i, arg))
+        i += 1
+        break
+      case '--finalize':
+        opts.finalizeDir = path.resolve(process.cwd(), readRequiredValue(argv, i, arg))
         i += 1
         break
       case '--api-base':
@@ -234,6 +240,13 @@ function parseArgs(argv) {
       default:
         throw new Error(`Unknown argument: ${arg}`)
     }
+  }
+
+  if (opts.initEnvTemplate && opts.finalizeDir) {
+    throw new Error('--init-env-template and --finalize are mutually exclusive')
+  }
+  if (opts.finalizeDir && opts.outputDir) {
+    throw new Error('--output-dir is not used with --finalize; pass the session directory to --finalize')
   }
 
   return opts
@@ -361,9 +374,57 @@ function computeOverallStatus(steps, pendingChecks) {
   return pendingChecks.length > 0 ? 'manual_pending' : 'pass'
 }
 
+function strictCompileCommand(evidencePath, compiledDir) {
+  return `node scripts/ops/compile-dingtalk-p4-smoke-evidence.mjs --input ${relativePath(evidencePath)} --output-dir ${relativePath(compiledDir)} --strict`
+}
+
+function exportPacketCommand(outputDir) {
+  return `node scripts/ops/export-dingtalk-staging-evidence-packet.mjs --include-output ${relativePath(outputDir)}`
+}
+
+function finalizeCommand(outputDir, allowExternalArtifactRefs = false) {
+  return [
+    'node scripts/ops/dingtalk-p4-smoke-session.mjs',
+    '--finalize',
+    relativePath(outputDir),
+    ...(allowExternalArtifactRefs ? ['--allow-external-artifact-refs'] : []),
+  ].join(' ')
+}
+
+function renderFinalStrictSummary(summary) {
+  const final = summary.finalStrictSummary
+  if (!final) return ''
+  const issues = Array.isArray(final.manualEvidenceIssues) && final.manualEvidenceIssues.length
+    ? final.manualEvidenceIssues.map((issue) => `- \`${issue.id}\`: ${issue.code}`).join('\n')
+    : '- None'
+  const notPassed = Array.isArray(final.requiredChecksNotPassed) && final.requiredChecksNotPassed.length
+    ? final.requiredChecksNotPassed.map((check) => `- \`${check.id}\`: ${check.status}`).join('\n')
+    : '- None'
+
+  return `
+## Final Strict Summary
+
+Final strict status: **${summary.finalStrictStatus}**
+
+API bootstrap status: **${final.apiBootstrapStatus ?? 'unknown'}**
+
+Remote client status: **${final.remoteClientStatus ?? 'unknown'}**
+
+Required checks not passed:
+
+${notPassed}
+
+Manual evidence issues:
+
+${issues}
+`
+}
+
 function renderMarkdown(summary) {
   const rows = summary.steps.map((step) => {
-    const notes = step.stderr || step.stdout.split(/\r?\n/).filter(Boolean).at(-1) || ''
+    const stdout = typeof step.stdout === 'string' ? step.stdout : ''
+    const stderr = typeof step.stderr === 'string' ? step.stderr : ''
+    const notes = stderr || stdout.split(/\r?\n/).filter(Boolean).at(-1) || ''
     return `| \`${step.id}\` | ${step.label} | ${step.status} | ${step.exitCode} | ${notes.replaceAll('|', '\\|')} |`
   })
   const pending = summary.pendingChecks.length
@@ -392,6 +453,8 @@ ${pending}
 ## Next Commands
 
 ${commands}
+
+${renderFinalStrictSummary(summary)}
 
 ## Secret Handling
 
@@ -471,12 +534,89 @@ function runSession(opts) {
     workspaceDir: relativePath(workspaceDir),
     compiledDir: relativePath(compiledDir),
     overallStatus: computeOverallStatus(steps, pendingChecks),
+    sessionPhase: 'bootstrap',
+    finalStrictStatus: 'not_run',
     steps,
     pendingChecks,
     nextCommands: [
-      `node scripts/ops/compile-dingtalk-p4-smoke-evidence.mjs --input ${relativePath(evidencePath)} --output-dir ${relativePath(compiledDir)} --strict`,
-      `node scripts/ops/export-dingtalk-staging-evidence-packet.mjs --include-output ${relativePath(outputDir)}`,
+      finalizeCommand(outputDir, opts.allowExternalArtifactRefs),
+      exportPacketCommand(outputDir),
     ],
+  }
+
+  writeSessionSummary(summary, outputDir)
+  return summary
+}
+
+function runFinalStrictCompile(opts) {
+  const outputDir = opts.finalizeDir
+  const preflightDir = path.join(outputDir, 'preflight')
+  const workspaceDir = path.join(outputDir, 'workspace')
+  const compiledDir = path.join(outputDir, 'compiled')
+  const evidencePath = path.join(workspaceDir, 'evidence.json')
+  const priorSummaryPath = path.join(outputDir, 'session-summary.json')
+
+  if (!existsSync(evidencePath)) {
+    throw new Error(`session workspace evidence does not exist: ${relativePath(evidencePath)}`)
+  }
+
+  const priorSummary = readJsonIfExists(priorSummaryPath)
+  const env = buildChildEnv(opts)
+  const strictCompileArgs = [
+    'scripts/ops/compile-dingtalk-p4-smoke-evidence.mjs',
+    '--input',
+    evidencePath,
+    '--output-dir',
+    compiledDir,
+    '--strict',
+    ...(opts.allowExternalArtifactRefs ? ['--allow-external-artifact-refs'] : []),
+  ]
+  const strictStep = runNodeStep(
+    'strict-compile',
+    'Compile final strict P4 smoke evidence',
+    strictCompileArgs[0],
+    strictCompileArgs.slice(1),
+    compiledDir,
+    env,
+  )
+  const priorSteps = Array.isArray(priorSummary?.steps)
+    ? priorSummary.steps.filter((step) => step?.id !== 'strict-compile')
+    : []
+  const steps = [...priorSteps, strictStep]
+  const pendingChecks = extractPendingManualChecks(evidencePath)
+  const compiledSummary = readJsonIfExists(path.join(compiledDir, 'summary.json'))
+  const strictPassed = strictStep.status === 'pass' && compiledSummary?.overallStatus === 'pass'
+  const summary = {
+    tool: 'dingtalk-p4-smoke-session',
+    runId: priorSummary?.runId ?? makeRunId(),
+    generatedAt: new Date().toISOString(),
+    outputDir: relativePath(outputDir),
+    preflightDir: relativePath(preflightDir),
+    workspaceDir: relativePath(workspaceDir),
+    compiledDir: relativePath(compiledDir),
+    overallStatus: strictPassed ? 'pass' : 'fail',
+    sessionPhase: 'finalize',
+    finalStrictStatus: strictPassed ? 'pass' : 'fail',
+    steps,
+    pendingChecks,
+    finalStrictSummary: compiledSummary
+      ? {
+          overallStatus: compiledSummary.overallStatus,
+          apiBootstrapStatus: compiledSummary.apiBootstrapStatus,
+          remoteClientStatus: compiledSummary.remoteClientStatus,
+          requiredChecksNotPassed: compiledSummary.requiredChecksNotPassed ?? [],
+          manualEvidenceIssues: compiledSummary.manualEvidenceIssues ?? [],
+          manualEvidenceIssueCount: Array.isArray(compiledSummary.manualEvidenceIssues)
+            ? compiledSummary.manualEvidenceIssues.length
+            : 0,
+          requiredChecksNotPassedCount: Array.isArray(compiledSummary.requiredChecksNotPassed)
+            ? compiledSummary.requiredChecksNotPassed.length
+            : 0,
+        }
+      : null,
+    nextCommands: strictPassed
+      ? [exportPacketCommand(outputDir)]
+      : [finalizeCommand(outputDir, opts.allowExternalArtifactRefs), exportPacketCommand(outputDir)],
   }
 
   writeSessionSummary(summary, outputDir)
@@ -487,6 +627,9 @@ try {
   const opts = parseArgs(process.argv.slice(2))
   if (opts.initEnvTemplate) {
     writeEnvTemplate(opts.initEnvTemplate)
+  } else if (opts.finalizeDir) {
+    const summary = runFinalStrictCompile(opts)
+    if (summary.overallStatus !== 'pass') process.exit(1)
   } else {
     const summary = runSession(opts)
     if (summary.overallStatus === 'fail') process.exit(1)

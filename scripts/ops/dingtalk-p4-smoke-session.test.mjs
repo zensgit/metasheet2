@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { spawn, spawnSync } from 'node:child_process'
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import http from 'node:http'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
@@ -9,9 +9,83 @@ import { fileURLToPath } from 'node:url'
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
 const scriptPath = path.join(repoRoot, 'scripts', 'ops', 'dingtalk-p4-smoke-session.mjs')
+const requiredIds = [
+  'create-table-form',
+  'bind-two-dingtalk-groups',
+  'set-form-dingtalk-granted',
+  'send-group-message-form-link',
+  'authorized-user-submit',
+  'unauthorized-user-denied',
+  'delivery-history-group-person',
+  'no-email-user-create-bind',
+]
+const manualClientIds = new Set([
+  'send-group-message-form-link',
+  'authorized-user-submit',
+  'unauthorized-user-denied',
+])
+const manualAdminIds = new Set(['no-email-user-create-bind'])
 
 function makeTmpDir() {
   return mkdtempSync(path.join(tmpdir(), 'dingtalk-p4-smoke-session-'))
+}
+
+function manualArtifactRefForCheck(id) {
+  return `artifacts/${id}/evidence.txt`
+}
+
+function makePassingEvidenceForCheck(id) {
+  if (manualClientIds.has(id) || manualAdminIds.has(id)) {
+    return {
+      source: manualClientIds.has(id) ? 'manual-client' : 'manual-admin',
+      operator: 'qa',
+      performedAt: '2026-04-22T15:00:00.000Z',
+      summary: `${id} manual evidence ok`,
+      artifacts: [manualArtifactRefForCheck(id)],
+    }
+  }
+  return {
+    source: 'api-bootstrap',
+    notes: `${id} ok`,
+  }
+}
+
+function writeCompletedSession(sessionDir, options = {}) {
+  const workspaceDir = path.join(sessionDir, 'workspace')
+  mkdirSync(workspaceDir, { recursive: true })
+  const evidence = {
+    runId: 'remote-20260422',
+    executedAt: '2026-04-22T15:00:00.000Z',
+    environment: {
+      apiBase: 'http://142.171.239.56:8900',
+      webBase: 'http://142.171.239.56:8081',
+      operator: 'qa',
+    },
+    checks: requiredIds.map((id) => ({
+      id,
+      status: 'pass',
+      evidence: makePassingEvidenceForCheck(id),
+    })),
+    artifacts: [],
+  }
+  writeFileSync(path.join(workspaceDir, 'evidence.json'), `${JSON.stringify(evidence, null, 2)}\n`, 'utf8')
+  for (const id of [...manualClientIds, ...manualAdminIds]) {
+    const artifactRef = manualArtifactRefForCheck(id)
+    if (options.omitArtifactFor === id) continue
+    const artifactPath = path.join(workspaceDir, artifactRef)
+    mkdirSync(path.dirname(artifactPath), { recursive: true })
+    writeFileSync(artifactPath, `${id} evidence\n`, 'utf8')
+  }
+  writeFileSync(path.join(sessionDir, 'session-summary.json'), `${JSON.stringify({
+    tool: 'dingtalk-p4-smoke-session',
+    runId: 'existing-session',
+    generatedAt: '2026-04-22T15:00:00.000Z',
+    steps: [
+      { id: 'preflight', label: 'preflight', status: 'pass', exitCode: 0 },
+      { id: 'api-runner', label: 'api runner', status: 'pass', exitCode: 0 },
+      { id: 'compile', label: 'compile', status: 'pass', exitCode: 0 },
+    ],
+  }, null, 2)}\n`, 'utf8')
 }
 
 function readRequestBody(req) {
@@ -282,10 +356,13 @@ test('dingtalk-p4-smoke-session runs preflight, API runner, and non-strict compi
     assert.doesNotMatch(sessionSummaryText, /SECabcdefghijklmnop12345678/)
     const sessionSummary = JSON.parse(sessionSummaryText)
     assert.equal(sessionSummary.overallStatus, 'manual_pending')
+    assert.equal(sessionSummary.sessionPhase, 'bootstrap')
+    assert.equal(sessionSummary.finalStrictStatus, 'not_run')
     assert.deepEqual(sessionSummary.steps.map((step) => step.id), ['preflight', 'api-runner', 'compile'])
     assert.equal(sessionSummary.steps.every((step) => step.status === 'pass'), true)
     assert.equal(sessionSummary.pendingChecks.some((check) => check.id === 'authorized-user-submit' && check.manual), true)
     assert.equal(sessionSummary.pendingChecks.some((check) => check.id === 'send-group-message-form-link' && check.manual), true)
+    assert.equal(sessionSummary.nextCommands.some((command) => command.includes('--finalize')), true)
 
     const compiledSummary = JSON.parse(readFileSync(path.join(outputDir, 'compiled/summary.json'), 'utf8'))
     assert.equal(compiledSummary.overallStatus, 'fail')
@@ -336,4 +413,88 @@ test('dingtalk-p4-smoke-session stops after failed preflight', () => {
   } finally {
     rmSync(tmpDir, { recursive: true, force: true })
   }
+})
+
+test('dingtalk-p4-smoke-session finalizes completed manual evidence with strict compile', () => {
+  const tmpDir = makeTmpDir()
+  const outputDir = path.join(tmpDir, 'session')
+
+  try {
+    writeCompletedSession(outputDir)
+
+    const result = spawnSync(process.execPath, [
+      scriptPath,
+      '--finalize',
+      outputDir,
+    ], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+    })
+
+    assert.equal(result.status, 0, result.stderr || result.stdout)
+    assert.equal(existsSync(path.join(outputDir, 'compiled/summary.json')), true)
+    const compiledSummary = JSON.parse(readFileSync(path.join(outputDir, 'compiled/summary.json'), 'utf8'))
+    assert.equal(compiledSummary.overallStatus, 'pass')
+
+    const sessionSummary = JSON.parse(readFileSync(path.join(outputDir, 'session-summary.json'), 'utf8'))
+    assert.equal(sessionSummary.runId, 'existing-session')
+    assert.equal(sessionSummary.overallStatus, 'pass')
+    assert.equal(sessionSummary.sessionPhase, 'finalize')
+    assert.equal(sessionSummary.finalStrictStatus, 'pass')
+    assert.deepEqual(sessionSummary.steps.map((step) => step.id), ['preflight', 'api-runner', 'compile', 'strict-compile'])
+    assert.equal(sessionSummary.steps.at(-1).status, 'pass')
+    assert.equal(sessionSummary.pendingChecks.length, 0)
+    assert.equal(sessionSummary.finalStrictSummary.overallStatus, 'pass')
+    assert.equal(sessionSummary.nextCommands.some((command) => command.includes('--strict')), false)
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+
+test('dingtalk-p4-smoke-session finalize fails when strict evidence is incomplete', () => {
+  const tmpDir = makeTmpDir()
+  const outputDir = path.join(tmpDir, 'session')
+
+  try {
+    writeCompletedSession(outputDir, { omitArtifactFor: 'authorized-user-submit' })
+
+    const result = spawnSync(process.execPath, [
+      scriptPath,
+      '--finalize',
+      outputDir,
+    ], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+    })
+
+    assert.equal(result.status, 1)
+    assert.match(result.stdout, /session-summary\.json/)
+    const sessionSummary = JSON.parse(readFileSync(path.join(outputDir, 'session-summary.json'), 'utf8'))
+    assert.equal(sessionSummary.overallStatus, 'fail')
+    assert.equal(sessionSummary.sessionPhase, 'finalize')
+    assert.equal(sessionSummary.finalStrictStatus, 'fail')
+    assert.equal(sessionSummary.steps.at(-1).id, 'strict-compile')
+    assert.equal(sessionSummary.steps.at(-1).status, 'fail')
+    assert.equal(sessionSummary.finalStrictSummary.overallStatus, 'fail')
+    assert.equal(sessionSummary.finalStrictSummary.manualEvidenceIssueCount > 0, true)
+    assert.equal(sessionSummary.nextCommands.some((command) => command.includes('--finalize')), true)
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+
+test('dingtalk-p4-smoke-session rejects finalize output-dir ambiguity', () => {
+  const result = spawnSync(process.execPath, [
+    scriptPath,
+    '--finalize',
+    'output/session',
+    '--output-dir',
+    'output/other',
+  ], {
+    cwd: repoRoot,
+    encoding: 'utf8',
+  })
+
+  assert.equal(result.status, 1)
+  assert.match(result.stderr, /--output-dir is not used with --finalize/)
 })
