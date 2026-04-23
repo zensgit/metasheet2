@@ -86,6 +86,11 @@ const requiredPacketFiles = [
     kind: 'script',
     description: 'runs the API-only part of P4 remote smoke and writes bootstrap evidence for manual completion',
   },
+  {
+    path: 'scripts/ops/dingtalk-p4-smoke-preflight.mjs',
+    kind: 'script',
+    description: 'validates P4 remote-smoke inputs and local tooling before calling staging or DingTalk',
+  },
 ]
 
 function printHelp() {
@@ -219,10 +224,11 @@ ${evidenceLines}
 4. Deploy a pinned tag with \`DEPLOY_IMAGE_TAG=<tag> bash scripts/ops/deploy-dingtalk-staging.sh\`.
 5. Execute \`docs/development/dingtalk-staging-execution-checklist-20260408.md\`.
 6. Execute \`docs/dingtalk-remote-smoke-checklist-20260422.md\` for P4 DingTalk form/group/person coverage.
-7. Optionally bootstrap API-addressable evidence with \`node scripts/ops/dingtalk-p4-remote-smoke.mjs --output-dir <evidence-dir>\`.
-8. Complete the manual DingTalk-client checks in \`evidence.json\`.
-9. Compile smoke evidence with \`node scripts/ops/compile-dingtalk-p4-smoke-evidence.mjs --input <evidence.json> --output-dir <evidence-dir> --strict\`.
-10. Re-export this packet with \`--include-output <evidence-dir>\` after smoke evidence exists.
+7. Run the preflight gate with \`node scripts/ops/dingtalk-p4-smoke-preflight.mjs --output-dir <preflight-dir>\`.
+8. Optionally bootstrap API-addressable evidence with \`node scripts/ops/dingtalk-p4-remote-smoke.mjs --output-dir <evidence-dir>\`.
+9. Complete the manual DingTalk-client checks in \`evidence.json\`.
+10. Compile smoke evidence with \`node scripts/ops/compile-dingtalk-p4-smoke-evidence.mjs --input <evidence.json> --output-dir <evidence-dir> --strict\`.
+11. Re-export this packet with \`--include-output <evidence-dir>\` after smoke evidence exists.
 
 ## Non-Goals
 

@@ -19,6 +19,30 @@ const requiredIds = [
   'delivery-history-group-person',
   'no-email-user-create-bind',
 ]
+const manualClientIds = new Set([
+  'send-group-message-form-link',
+  'authorized-user-submit',
+  'unauthorized-user-denied',
+])
+const manualAdminIds = new Set(['no-email-user-create-bind'])
+
+function makePassingEvidenceForCheck(id, extras = {}) {
+  if (manualClientIds.has(id) || manualAdminIds.has(id)) {
+    return {
+      source: manualClientIds.has(id) ? 'manual-client' : 'manual-admin',
+      operator: 'qa',
+      performedAt: '2026-04-22T15:00:00.000Z',
+      summary: `${id} manual evidence ok`,
+      artifacts: [`screenshots/${id}.png`],
+      ...extras,
+    }
+  }
+  return {
+    source: 'api-bootstrap',
+    notes: `${id} ok`,
+    ...extras,
+  }
+}
 
 function makeTmpDir() {
   return mkdtempSync(path.join(tmpdir(), 'dingtalk-p4-smoke-evidence-'))
@@ -38,9 +62,7 @@ function writeEvidence(file, overrides = {}) {
     checks: requiredIds.map((id) => ({
       id,
       status: 'pass',
-      evidence: {
-        notes: `${id} ok`,
-      },
+      evidence: makePassingEvidenceForCheck(id),
     })),
     artifacts: [],
     ...overrides,
@@ -79,12 +101,12 @@ test('compile-dingtalk-p4-smoke-evidence compiles passing evidence and redacts s
       checks: requiredIds.map((id) => ({
         id,
         status: 'pass',
-        evidence: {
+        evidence: makePassingEvidenceForCheck(id, {
           notes: `${id} used https://oapi.dingtalk.com/robot/send?access_token=robot-secret&timestamp=1690000000000&sign=robot-sign and SECabcdefgh12345678`,
           publicUrl: 'http://example.test/form?publicToken=pub_secret',
           authorization: 'Bearer abc.def.ghi',
           token: 'raw-token',
-        },
+        }),
       })),
     })
 
@@ -100,7 +122,10 @@ test('compile-dingtalk-p4-smoke-evidence compiles passing evidence and redacts s
 
     const summary = JSON.parse(readFileSync(path.join(outputDir, 'summary.json'), 'utf8'))
     assert.equal(summary.overallStatus, 'pass')
+    assert.equal(summary.apiBootstrapStatus, 'pass')
+    assert.equal(summary.remoteClientStatus, 'pass')
     assert.equal(summary.requiredChecksNotPassed.length, 0)
+    assert.equal(summary.manualEvidenceIssues.length, 0)
 
     const redacted = readFileSync(path.join(outputDir, 'evidence.redacted.json'), 'utf8')
     assert.doesNotMatch(redacted, /robot-secret/)
@@ -120,6 +145,42 @@ test('compile-dingtalk-p4-smoke-evidence compiles passing evidence and redacts s
   }
 })
 
+test('compile-dingtalk-p4-smoke-evidence strict mode rejects pass checks without manual evidence metadata', () => {
+  const tmpDir = makeTmpDir()
+  const evidencePath = path.join(tmpDir, 'evidence.json')
+  const outputDir = path.join(tmpDir, 'compiled')
+
+  try {
+    writeEvidence(evidencePath, {
+      checks: requiredIds.map((id) => ({
+        id,
+        status: 'pass',
+        evidence: {
+          source: 'api-bootstrap',
+          notes: `${id} marked pass without real manual evidence`,
+        },
+      })),
+    })
+
+    const result = spawnSync(process.execPath, [scriptPath, '--input', evidencePath, '--output-dir', outputDir, '--strict'], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+    })
+
+    assert.equal(result.status, 1)
+    assert.match(result.stderr, /manual_source_required/)
+    assert.match(result.stderr, /authorized-user-submit/)
+    const summary = JSON.parse(readFileSync(path.join(outputDir, 'summary.json'), 'utf8'))
+    assert.equal(summary.overallStatus, 'fail')
+    assert.equal(summary.apiBootstrapStatus, 'pass')
+    assert.equal(summary.remoteClientStatus, 'fail')
+    assert.equal(summary.manualEvidenceIssues.some((issue) => issue.id === 'authorized-user-submit'), true)
+    assert.equal(summary.manualEvidenceIssues.some((issue) => issue.id === 'send-group-message-form-link'), true)
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+
 test('compile-dingtalk-p4-smoke-evidence strict mode fails when required checks are not passed', () => {
   const tmpDir = makeTmpDir()
   const evidencePath = path.join(tmpDir, 'evidence.json')
@@ -128,7 +189,7 @@ test('compile-dingtalk-p4-smoke-evidence strict mode fails when required checks 
   try {
     writeEvidence(evidencePath, {
       checks: [
-        ...requiredIds.slice(0, -1).map((id) => ({ id, status: 'pass', evidence: { notes: `${id} ok` } })),
+        ...requiredIds.slice(0, -1).map((id) => ({ id, status: 'pass', evidence: makePassingEvidenceForCheck(id) })),
         { id: requiredIds.at(-1), status: 'fail', evidence: { notes: 'no-email path failed' } },
       ],
     })

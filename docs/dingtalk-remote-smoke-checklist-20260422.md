@@ -78,6 +78,49 @@ Expected generated files:
 
 The compiler requires every smoke check in this document to be `pass` when `--strict` is used. It redacts DingTalk webhook `access_token`, `SEC...` secrets, bearer/JWT tokens, passwords, and public form tokens before writing artifacts.
 
+Strict mode also requires real manual evidence metadata for the checks that only a DingTalk client or administrator can prove. For each check below, add `source`, `operator`, `performedAt`, `summary` or `notes`, and at least one per-check artifact reference:
+
+- `send-group-message-form-link`: `source: "manual-client"`
+- `authorized-user-submit`: `source: "manual-client"`
+- `unauthorized-user-denied`: `source: "manual-client"`
+- `no-email-user-create-bind`: `source: "manual-admin"`
+
+Example check evidence:
+
+```json
+{
+  "id": "authorized-user-submit",
+  "status": "pass",
+  "evidence": {
+    "source": "manual-client",
+    "operator": "qa",
+    "performedAt": "2026-04-22T15:00:00.000Z",
+    "summary": "Allowed DingTalk-bound user opened the group link and submitted one record.",
+    "artifacts": ["screenshots/authorized-submit.png"]
+  }
+}
+```
+
+## Preflight Gate
+
+Before calling staging or DingTalk, run the preflight gate to check local tooling, required URLs, bearer token presence, DingTalk webhook format, optional `SEC...` secret format, allowlist inputs, and backend `/health`. It writes only redacted summaries.
+
+```bash
+node scripts/ops/dingtalk-p4-smoke-preflight.mjs \
+  --api-base "$DINGTALK_P4_API_BASE" \
+  --web-base "$DINGTALK_P4_WEB_BASE" \
+  --auth-token "$DINGTALK_P4_AUTH_TOKEN" \
+  --group-a-webhook "$DINGTALK_P4_GROUP_A_WEBHOOK" \
+  --group-b-webhook "$DINGTALK_P4_GROUP_B_WEBHOOK" \
+  --allowed-user "$DINGTALK_P4_ALLOWED_USER_ID" \
+  --output-dir output/dingtalk-p4-remote-smoke/preflight-142
+```
+
+Expected generated files:
+
+- `preflight-summary.json`
+- `preflight-summary.md`
+
 ## API-Only Smoke Runner
 
 Use the API-only runner to prepare the disposable test resources and collect backend evidence before the manual DingTalk-client checks. It creates a table, a form view, two group destinations, a `dingtalk_granted` form share, a group automation rule, and optional person-message rule when `--person-user` is supplied.
@@ -102,6 +145,7 @@ Expected output:
 
 The runner intentionally leaves these checks as `pending`:
 
+- real DingTalk group message visibility, form link, and access-copy screenshot
 - authorized DingTalk-bound user opens and submits from the real DingTalk group message
 - unauthorized DingTalk-bound user is blocked and inserts no record
 - no-email DingTalk-synced account creation and binding

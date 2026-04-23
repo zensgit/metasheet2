@@ -660,10 +660,11 @@ async function runSmoke(opts, evidence) {
     }
   }
 
-  setCheck(evidence, 'send-group-message-form-link', opts.skipAutomationTestRun ? 'pending' : 'pass', {
+  setCheck(evidence, 'send-group-message-form-link', 'pending', {
     notes: opts.skipAutomationTestRun
       ? 'Created the DingTalk group automation rule, but --skip-automation-test-run left actual send evidence pending.'
-      : 'Created and test-ran a DingTalk group automation rule with the protected form view link.',
+      : 'API test-run produced group delivery rows, but real DingTalk group message visibility and link/access-copy screenshots are still manual-client evidence.',
+    source: 'api-bootstrap',
     sheetId,
     formViewId,
     groupRuleId,

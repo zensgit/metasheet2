@@ -44,6 +44,10 @@ test('export-dingtalk-staging-evidence-packet copies required handoff files and 
       existsSync(path.join(outputDir, 'scripts/ops/dingtalk-p4-remote-smoke.mjs')),
       true,
     )
+    assert.equal(
+      existsSync(path.join(outputDir, 'scripts/ops/dingtalk-p4-smoke-preflight.mjs')),
+      true,
+    )
     assert.equal(existsSync(path.join(outputDir, 'scripts/ops/deploy-dingtalk-staging.sh')), true)
     assert.equal(existsSync(path.join(outputDir, 'docker/app.staging.env.example')), true)
 
@@ -66,11 +70,16 @@ test('export-dingtalk-staging-evidence-packet copies required handoff files and 
       manifest.files.some((file) => file.path === 'scripts/ops/dingtalk-p4-remote-smoke.mjs'),
       true,
     )
+    assert.equal(
+      manifest.files.some((file) => file.path === 'scripts/ops/dingtalk-p4-smoke-preflight.mjs'),
+      true,
+    )
 
     const readme = readFileSync(path.join(outputDir, 'README.md'), 'utf8')
     assert.match(readme, /DingTalk Staging Evidence Packet/)
     assert.match(readme, /docs\/dingtalk-remote-smoke-checklist-20260422\.md/)
     assert.match(readme, /dingtalk-p4-remote-smoke\.mjs/)
+    assert.match(readme, /dingtalk-p4-smoke-preflight\.mjs/)
     assert.match(readme, /compile-dingtalk-p4-smoke-evidence\.mjs/)
     assert.match(readme, /No runtime evidence directory was included/)
     assert.match(readme, /Does not store secrets/)
