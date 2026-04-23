@@ -178,7 +178,7 @@
         <template v-if="canManageDingTalkGroups && activeTab === 'dingtalk-groups'">
           <section class="meta-api-mgr__notice" data-dingtalk-groups-scope-note="true">
             <strong>Table-scoped DingTalk groups</strong>
-            <span>Groups created here are bound to this table. You can add multiple groups and choose one or more in automations.</span>
+            <span>Groups created here are bound to this table. You can add multiple groups and choose one or more in automations; organization catalog groups are listed read-only when shared with your organization.</span>
             <span>Register DingTalk robot webhooks as send destinations for this table. This does not import DingTalk group members or control form access.</span>
           </section>
 
@@ -300,7 +300,7 @@
             <div class="meta-api-mgr__card-meta">
               <span>Webhook: {{ maskDingTalkWebhookUrl(group.webhookUrl) }}</span>
               <span>Secret: {{ group.hasSecret ? 'configured' : 'not configured' }}</span>
-              <span>{{ group.sheetId ? 'Shared with this sheet' : 'Private legacy group' }}</span>
+              <span>{{ dingTalkGroupScopeLabel(group) }}</span>
               <span>Created: {{ formatDate(group.createdAt) }}</span>
               <span v-if="group.lastTestedAt">Last test: {{ formatDate(group.lastTestedAt) }}</span>
               <span v-if="group.lastTestStatus" :data-dingtalk-group-test-status="group.lastTestStatus">
@@ -311,21 +311,24 @@
               <span>Last error: {{ group.lastTestError }}</span>
             </div>
             <div class="meta-api-mgr__card-actions">
-              <button class="meta-api-mgr__btn" type="button" data-dingtalk-group-edit="true" @click="openEditDingTalkGroup(group)">
+              <button v-if="canMutateDingTalkGroup(group)" class="meta-api-mgr__btn" type="button" data-dingtalk-group-edit="true" @click="openEditDingTalkGroup(group)">
                 Edit
               </button>
-              <button class="meta-api-mgr__btn" type="button" :disabled="busy" data-dingtalk-group-toggle="true" @click="onToggleDingTalkGroup(group)">
+              <button v-if="canMutateDingTalkGroup(group)" class="meta-api-mgr__btn" type="button" :disabled="busy" data-dingtalk-group-toggle="true" @click="onToggleDingTalkGroup(group)">
                 {{ group.enabled ? 'Disable' : 'Enable' }}
               </button>
-              <button class="meta-api-mgr__btn" type="button" data-dingtalk-group-deliveries="true" @click="onViewDingTalkDeliveries(group.id)">
+              <button class="meta-api-mgr__btn" type="button" data-dingtalk-group-deliveries="true" @click="onViewDingTalkDeliveries(group)">
                 Deliveries
               </button>
-              <button class="meta-api-mgr__btn" type="button" :disabled="busy" data-dingtalk-group-test-send="true" @click="onTestDingTalkGroup(group.id)">
+              <button v-if="canMutateDingTalkGroup(group)" class="meta-api-mgr__btn" type="button" :disabled="busy" data-dingtalk-group-test-send="true" @click="onTestDingTalkGroup(group)">
                 Test send
               </button>
-              <button class="meta-api-mgr__btn meta-api-mgr__btn--danger" type="button" :disabled="busy" data-dingtalk-group-delete="true" @click="onDeleteDingTalkGroup(group.id)">
+              <button v-if="canMutateDingTalkGroup(group)" class="meta-api-mgr__btn meta-api-mgr__btn--danger" type="button" :disabled="busy" data-dingtalk-group-delete="true" @click="onDeleteDingTalkGroup(group)">
                 Delete
               </button>
+              <span v-else class="meta-api-mgr__card-readonly" data-dingtalk-group-readonly="true">
+                Managed by organization admins
+              </span>
             </div>
 
             <div
@@ -519,6 +522,23 @@ function validateDingTalkGroupSecret(value: string): string {
   if (!secret) return ''
   if (!secret.startsWith('SEC')) return 'DingTalk robot secret must start with SEC'
   return ''
+}
+
+function dingTalkGroupScope(group: DingTalkGroupDestination): 'private' | 'sheet' | 'org' {
+  if (group.scope === 'org' || group.orgId) return 'org'
+  if (group.scope === 'sheet' || group.sheetId) return 'sheet'
+  return 'private'
+}
+
+function dingTalkGroupScopeLabel(group: DingTalkGroupDestination): string {
+  const scope = dingTalkGroupScope(group)
+  if (scope === 'org') return group.orgId ? `Organization catalog group: ${group.orgId}` : 'Organization catalog group'
+  if (scope === 'sheet') return group.sheetId ? `Shared with sheet: ${group.sheetId}` : 'Shared with this sheet'
+  return 'Private legacy group'
+}
+
+function canMutateDingTalkGroup(group: DingTalkGroupDestination): boolean {
+  return dingTalkGroupScope(group) !== 'org'
 }
 
 // ---- Token actions ----
@@ -771,7 +791,7 @@ function openDingTalkGroupForm() {
 }
 
 function openEditDingTalkGroup(group: DingTalkGroupDestination) {
-  if (!canManageDingTalkGroups.value) return
+  if (!canManageDingTalkGroups.value || !canMutateDingTalkGroup(group)) return
   editingDingTalkGroupId.value = group.id
   editingDingTalkGroupOriginal.value = {
     webhookUrl: group.webhookUrl,
@@ -832,7 +852,7 @@ async function onSaveDingTalkGroup() {
 }
 
 async function onToggleDingTalkGroup(group: DingTalkGroupDestination) {
-  if (!props.client || busy.value || !canManageDingTalkGroups.value) return
+  if (!props.client || busy.value || !canManageDingTalkGroups.value || !canMutateDingTalkGroup(group)) return
   busy.value = true
   error.value = null
   try {
@@ -845,15 +865,16 @@ async function onToggleDingTalkGroup(group: DingTalkGroupDestination) {
   }
 }
 
-async function onTestDingTalkGroup(groupId: string) {
-  if (!props.client || busy.value || !canManageDingTalkGroups.value) return
+async function onTestDingTalkGroup(group: DingTalkGroupDestination) {
+  if (!props.client || busy.value || !canManageDingTalkGroups.value || !canMutateDingTalkGroup(group)) return
+  const groupId = group.id
   busy.value = true
   error.value = null
   try {
     await props.client.testDingTalkGroup(groupId, undefined, props.sheetId)
     await loadDingTalkGroups()
     if (dingTalkDeliveriesGroupId.value === groupId) {
-      await loadDingTalkDeliveries(groupId)
+      await loadDingTalkDeliveries(group)
     }
   } catch (err) {
     error.value = err instanceof Error ? err.message : 'Failed to test DingTalk group'
@@ -862,15 +883,17 @@ async function onTestDingTalkGroup(groupId: string) {
   }
 }
 
-async function loadDingTalkDeliveries(groupId: string) {
+async function loadDingTalkDeliveries(group: DingTalkGroupDestination) {
   if (!props.client || !canManageDingTalkGroups.value) return
+  const groupId = group.id
+  const sheetId = dingTalkGroupScope(group) === 'org' ? undefined : props.sheetId
   const requestToken = ++dingTalkDeliveriesRequestToken
   dingTalkDeliveriesGroupId.value = groupId
   dingTalkDeliveriesLoading.value = true
   dingTalkDeliveries.value = []
   error.value = null
   try {
-    const deliveries = await props.client.getDingTalkGroupDeliveries(groupId, props.sheetId)
+    const deliveries = await props.client.getDingTalkGroupDeliveries(groupId, sheetId)
     if (requestToken !== dingTalkDeliveriesRequestToken || dingTalkDeliveriesGroupId.value !== groupId) {
       return
     }
@@ -887,8 +910,9 @@ async function loadDingTalkDeliveries(groupId: string) {
   }
 }
 
-async function onViewDingTalkDeliveries(groupId: string) {
+async function onViewDingTalkDeliveries(group: DingTalkGroupDestination) {
   if (!props.client || !canManageDingTalkGroups.value) return
+  const groupId = group.id
   if (dingTalkDeliveriesGroupId.value === groupId) {
     dingTalkDeliveriesRequestToken += 1
     dingTalkDeliveriesGroupId.value = null
@@ -896,11 +920,12 @@ async function onViewDingTalkDeliveries(groupId: string) {
     dingTalkDeliveries.value = []
     return
   }
-  await loadDingTalkDeliveries(groupId)
+  await loadDingTalkDeliveries(group)
 }
 
-async function onDeleteDingTalkGroup(groupId: string) {
-  if (!props.client || busy.value || !canManageDingTalkGroups.value) return
+async function onDeleteDingTalkGroup(group: DingTalkGroupDestination) {
+  if (!props.client || busy.value || !canManageDingTalkGroups.value || !canMutateDingTalkGroup(group)) return
+  const groupId = group.id
   busy.value = true
   error.value = null
   try {
@@ -1204,8 +1229,16 @@ watch(canManageDingTalkGroups, (canManage) => {
 
 .meta-api-mgr__card-actions {
   display: flex;
+  flex-wrap: wrap;
+  align-items: center;
   gap: 8px;
   margin-top: 4px;
+}
+
+.meta-api-mgr__card-readonly {
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 600;
 }
 
 /* Deliveries */

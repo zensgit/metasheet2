@@ -29,12 +29,14 @@
 ## P1: DingTalk Group Standard Workflow
 
 - [x] Backend: verify table-scoped DingTalk group destinations support multiple groups per table.
+- [x] Backend: add organization-scoped DingTalk group destination catalog v1 with org membership read/use and admin-only mutation.
 - [x] Backend: verify create, update, delete, list, test-send, and delivery history routes enforce automation/write permissions.
 - [x] Backend: verify webhook URLs and robot secrets are redacted in responses, logs, and delivery diagnostics.
 - [x] Frontend: expose DingTalk group binding in the table integration or existing API token manager surface.
 - [x] Frontend: let users add, edit, delete, and test-send DingTalk group robot destinations.
 - [x] Frontend: show that group binding does not import DingTalk group members and does not grant form fill permission by itself.
 - [x] Automation UI: let users choose a bound DingTalk group for `send_dingtalk_group_message`.
+- [x] Automation UI: show organization catalog DingTalk groups in selectors with read-only catalog labeling.
 - [x] Automation UI: let users include public form and internal processing links in group messages.
 - [x] Runtime: confirm a group message link opens the form and permission checks still gate access.
 

@@ -10,6 +10,7 @@
 
 - [x] Multiple DingTalk groups per table
 - [x] Group robot binding UI/API
+- [x] Organization-scoped DingTalk group destination catalog v1
 - [x] Group automation with form links
 - [x] Form access modes: `public`, `dingtalk`, and `dingtalk_granted`
 - [x] Local user/member-group allowlist for DingTalk-protected forms

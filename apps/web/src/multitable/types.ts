@@ -802,7 +802,9 @@ export interface DingTalkGroupDestination {
   secret?: string
   hasSecret?: boolean
   enabled: boolean
+  scope?: 'private' | 'sheet' | 'org'
   sheetId?: string
+  orgId?: string
   createdBy: string
   createdAt: string
   updatedAt?: string
@@ -816,7 +818,9 @@ export interface DingTalkGroupDestinationInput {
   webhookUrl: string
   secret?: string
   enabled?: boolean
+  scope?: 'private' | 'sheet' | 'org'
   sheetId?: string
+  orgId?: string
 }
 
 export interface DingTalkGroupDelivery {

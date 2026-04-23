@@ -88,15 +88,18 @@
             >
               <option value="">-- add DingTalk group --</option>
               <option v-for="destination in availableDingTalkGroupDestinations" :key="destination.id" :value="destination.id">
-                {{ destination.name }}
+                {{ destination.name }} · {{ dingTalkDestinationScopeLabel(destination) }}
               </option>
             </select>
+            <div class="meta-automation__hint" data-automation-field="dingtalkDestinationPickerHint">
+              DingTalk groups registered for this table or shared from the organization catalog are listed here.
+            </div>
             <div
               v-if="!dingTalkDestinations.length"
               class="meta-automation__hint"
               data-automation-field="dingtalkDestinationEmpty"
             >
-              No DingTalk groups are bound to this table yet. Add one in API Tokens &amp; Webhooks &gt; DingTalk Groups, or use a record group field path below.
+              No DingTalk groups are available for this table yet. Add one in API Tokens &amp; Webhooks &gt; DingTalk Groups, ask an admin to share an organization catalog group, or use a record group field path below.
             </div>
             <div
               v-if="selectedDingTalkGroupDestinations.length"
@@ -1102,13 +1105,34 @@ function dingTalkGroupName(destinationId: string) {
   return dingTalkDestinations.value.find((item) => item.id === destinationId)?.name ?? destinationId
 }
 
+function dingTalkDestinationScope(destination?: DingTalkGroupDestination): 'private' | 'sheet' | 'org' {
+  if (!destination) return 'private'
+  if (destination.scope === 'org' || destination.orgId) return 'org'
+  if (destination.scope === 'sheet' || destination.sheetId) return 'sheet'
+  return 'private'
+}
+
+function dingTalkDestinationScopeLabel(destination?: DingTalkGroupDestination): string {
+  const scope = dingTalkDestinationScope(destination)
+  if (scope === 'org') return 'Organization catalog'
+  if (scope === 'sheet') return 'This table'
+  return 'Private'
+}
+
+function dingTalkDestinationSubtitle(destination?: DingTalkGroupDestination): string | undefined {
+  const scope = dingTalkDestinationScope(destination)
+  if (scope === 'org') return destination?.orgId ? `organization catalog: ${destination.orgId}` : 'organization catalog'
+  if (scope === 'sheet') return destination?.sheetId ? `sheet: ${destination.sheetId}` : 'this table'
+  return 'private'
+}
+
 const selectedDingTalkGroupDestinations = computed(() =>
   draft.value.dingtalkDestinationIds.map((id) => {
     const destination = dingTalkDestinations.value.find((item) => item.id === id)
     return {
       id,
       label: destination?.name ?? id,
-      subtitle: destination?.sheetId ? `sheet: ${destination.sheetId}` : undefined,
+      subtitle: dingTalkDestinationSubtitle(destination),
     }
   }),
 )

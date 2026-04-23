@@ -1185,11 +1185,22 @@ export class AutomationExecutor {
 
     const destinationResult = await this.deps.queryFn(
       `SELECT id, name, webhook_url, secret, enabled
-         FROM dingtalk_group_destinations
+         FROM dingtalk_group_destinations dg
         WHERE id = ANY($1)
           AND (
             sheet_id = $2
-            OR (sheet_id IS NULL AND created_by = $3)
+            OR (sheet_id IS NULL AND org_id IS NULL AND created_by = $3)
+            OR (
+              sheet_id IS NULL
+              AND org_id IS NOT NULL
+              AND EXISTS (
+                SELECT 1
+                FROM user_orgs uo
+                WHERE uo.user_id = $3
+                  AND uo.org_id = dg.org_id
+                  AND uo.is_active = true
+              )
+            )
           )`,
       [destinationIds, context.sheetId, context.ruleCreatedBy],
     )

@@ -858,7 +858,9 @@ describe('AutomationExecutor', () => {
   it('scopes send_dingtalk_group_message destinations to the current sheet and rule creator', async () => {
     const queryFn = vi.fn(async (sql: string, params?: unknown[]) => {
       expect(sql).toContain('sheet_id = $2')
-      expect(sql).toContain('created_by = $3')
+      expect(sql).toContain('org_id IS NULL AND created_by = $3')
+      expect(sql).toContain('FROM user_orgs uo')
+      expect(sql).toContain('uo.org_id = dg.org_id')
       expect(params).toEqual([['dt_other_sheet'], 'sheet_1', 'user_1'])
       return { rows: [], rowCount: 0 }
     })
