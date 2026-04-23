@@ -210,6 +210,22 @@ node scripts/ops/dingtalk-p4-evidence-record.mjs \
   --blocked-reason "Visible error showed the user is not in the allowlist."
 ```
 
+For `no-email-user-create-bind`, capture the admin result panel and refreshed account row without exposing the temporary password:
+
+```bash
+node scripts/ops/dingtalk-p4-evidence-record.mjs \
+  --session-dir output/dingtalk-p4-remote-smoke-session/142-session \
+  --check-id no-email-user-create-bind \
+  --status pass \
+  --source manual-admin \
+  --operator qa-admin \
+  --summary "Admin created and bound a no-email DingTalk-synced local user; temporary password is redacted." \
+  --artifact artifacts/no-email-user-create-bind/admin-create-bind-result.png \
+  --artifact artifacts/no-email-user-create-bind/account-linked-after-refresh.png
+```
+
+The generated `evidence.json` also includes a `adminEvidence` helper object for this check. Fill `emailWasBlank`, `createdLocalUserId`, `boundDingTalkExternalId`, and `accountLinkedAfterRefresh` before final strict compile when that information is available.
+
 ```bash
 node scripts/ops/dingtalk-p4-smoke-session.mjs \
   --finalize output/dingtalk-p4-remote-smoke-session/142-session
@@ -432,6 +448,12 @@ Expected:
 - onboarding packet is shown
 - temporary password is shown only in the admin result panel
 - the account list refreshes and shows the local link
+
+Evidence:
+
+- `artifacts/no-email-user-create-bind/admin-create-bind-result.png`
+- `artifacts/no-email-user-create-bind/account-linked-after-refresh.png`
+- optional `artifacts/no-email-user-create-bind/temp-password-redacted-note.txt` confirming the temporary password was not copied into evidence
 
 ## Pass criteria
 

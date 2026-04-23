@@ -107,6 +107,11 @@ const MANUAL_EVIDENCE_REQUIREMENTS = [
     id: 'no-email-user-create-bind',
     source: 'manual-admin',
     label: 'no-email DingTalk-synced account creation and binding',
+    suggestedArtifacts: [
+      'artifacts/no-email-user-create-bind/admin-create-bind-result.png',
+      'artifacts/no-email-user-create-bind/account-linked-after-refresh.png',
+      'artifacts/no-email-user-create-bind/temp-password-redacted-note.txt',
+    ],
   },
 ]
 const MANUAL_EVIDENCE_BY_ID = new Map(MANUAL_EVIDENCE_REQUIREMENTS.map((requirement) => [requirement.id, requirement]))
@@ -219,6 +224,18 @@ function makeTemplateEvidence(checkId) {
       summary: '',
       artifacts: [],
       instructions: `Required when status is pass: ${manualRequirement.label}; include real DingTalk-client/admin evidence, not API bootstrap output.`,
+      suggestedArtifacts: manualRequirement.suggestedArtifacts ?? [],
+      ...(checkId === 'no-email-user-create-bind'
+        ? {
+            adminEvidence: {
+              emailWasBlank: null,
+              createdLocalUserId: '',
+              boundDingTalkExternalId: '',
+              accountLinkedAfterRefresh: null,
+              temporaryPasswordRedacted: true,
+            },
+          }
+        : {}),
     }
   }
 
@@ -262,7 +279,10 @@ function artifactDirForCheck(checkId) {
 
 function renderManualEvidenceChecklist() {
   const rows = MANUAL_EVIDENCE_REQUIREMENTS.map((requirement) => {
-    return `| \`${requirement.id}\` | \`${requirement.source}\` | ${requirement.label} | \`${artifactDirForCheck(requirement.id)}/\` |`
+    const suggested = Array.isArray(requirement.suggestedArtifacts) && requirement.suggestedArtifacts.length
+      ? requirement.suggestedArtifacts.map((artifact) => `\`${artifact}\``).join('<br>')
+      : `\`${artifactDirForCheck(requirement.id)}/\``
+    return `| \`${requirement.id}\` | \`${requirement.source}\` | ${requirement.label} | ${suggested} |`
   })
 
   return `# DingTalk P4 Manual Evidence Kit
@@ -271,9 +291,16 @@ Use this kit after running \`scripts/ops/dingtalk-p4-remote-smoke.mjs\` or after
 
 ## Required Manual Evidence
 
-| Check ID | Required Source | What It Proves | Suggested Artifact Folder |
+| Check ID | Required Source | What It Proves | Suggested Artifacts |
 | --- | --- | --- | --- |
 ${rows.join('\n')}
+
+## No-email Admin Evidence
+
+- Create a local user from a synced DingTalk account while leaving email empty.
+- Capture the create-and-bind result panel without exposing the temporary password.
+- Capture the refreshed account row showing the local user link.
+- Record \`evidence.adminEvidence.emailWasBlank: true\`, \`createdLocalUserId\`, \`boundDingTalkExternalId\`, and \`accountLinkedAfterRefresh: true\` when updating \`evidence.json\`.
 
 ## Fill Rules
 

@@ -388,6 +388,12 @@ function manualSourceForCheck(check) {
 
 function evidenceRecordCommandForCheck(opts, check) {
   if (!opts.sessionDir || !check.manual) return ''
+  const artifactRef = check.id === 'no-email-user-create-bind'
+    ? 'artifacts/no-email-user-create-bind/admin-create-bind-result.png'
+    : `artifacts/${check.id}/<file>`
+  const summary = check.id === 'no-email-user-create-bind'
+    ? '"Admin created and bound a no-email DingTalk-synced local user; temporary password is redacted."'
+    : '"<summary>"'
   const args = [
     'node scripts/ops/dingtalk-p4-evidence-record.mjs',
     '--session-dir',
@@ -401,9 +407,9 @@ function evidenceRecordCommandForCheck(opts, check) {
     '--operator',
     '<operator>',
     '--summary',
-    '"<summary>"',
+    summary,
     '--artifact',
-    `artifacts/${check.id}/<file>`,
+    artifactRef,
   ]
   if (check.id === 'unauthorized-user-denied') {
     args.push(

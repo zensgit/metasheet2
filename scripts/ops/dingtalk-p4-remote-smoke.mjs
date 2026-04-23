@@ -60,6 +60,11 @@ const MANUAL_EVIDENCE_REQUIREMENTS = [
     id: 'no-email-user-create-bind',
     source: 'manual-admin',
     label: 'no-email DingTalk-synced account creation and binding',
+    suggestedArtifacts: [
+      'artifacts/no-email-user-create-bind/admin-create-bind-result.png',
+      'artifacts/no-email-user-create-bind/account-linked-after-refresh.png',
+      'artifacts/no-email-user-create-bind/temp-password-redacted-note.txt',
+    ],
   },
 ]
 const MANUAL_EVIDENCE_BY_ID = new Map(MANUAL_EVIDENCE_REQUIREMENTS.map((requirement) => [requirement.id, requirement]))
@@ -356,6 +361,18 @@ function makeManualEvidenceSkeleton(checkId, notes, extra = {}) {
     artifacts: [],
     notes,
     instructions: `Required before strict pass: ${requirement.label}; place evidence files under ${artifactDirForCheck(checkId)}/ and reference them with relative paths.`,
+    suggestedArtifacts: requirement.suggestedArtifacts ?? [],
+    ...(checkId === 'no-email-user-create-bind'
+      ? {
+          adminEvidence: {
+            emailWasBlank: null,
+            createdLocalUserId: '',
+            boundDingTalkExternalId: '',
+            accountLinkedAfterRefresh: null,
+            temporaryPasswordRedacted: true,
+          },
+        }
+      : {}),
     ...extra,
   }
 }
@@ -508,7 +525,10 @@ async function requestJson(opts, route, options = {}) {
 
 function renderManualEvidenceChecklist() {
   const rows = MANUAL_EVIDENCE_REQUIREMENTS.map((requirement) => {
-    return `| \`${requirement.id}\` | \`${requirement.source}\` | ${requirement.label} | \`${artifactDirForCheck(requirement.id)}/\` |`
+    const suggested = Array.isArray(requirement.suggestedArtifacts) && requirement.suggestedArtifacts.length
+      ? requirement.suggestedArtifacts.map((artifact) => `\`${artifact}\``).join('<br>')
+      : `\`${artifactDirForCheck(requirement.id)}/\``
+    return `| \`${requirement.id}\` | \`${requirement.source}\` | ${requirement.label} | ${suggested} |`
   })
 
   return `# DingTalk P4 Manual Evidence Checklist
@@ -518,9 +538,16 @@ The API runner has prepared backend resources and bootstrap evidence. Fill the
 manual checks below from real DingTalk-client or administrator actions before
 running strict compile.
 
-| Check ID | Required Source | What It Proves | Artifact Folder |
+| Check ID | Required Source | What It Proves | Suggested Artifacts |
 | --- | --- | --- | --- |
 ${rows.join('\n')}
+
+## No-email Admin Evidence
+
+- Use the admin directory sync page to create a local user from a synced DingTalk account with the email field left blank.
+- Capture the create-and-bind result panel without exposing the temporary password.
+- Capture the refreshed account row showing the local user link.
+- Record \`evidence.adminEvidence.emailWasBlank: true\`, \`createdLocalUserId\`, \`boundDingTalkExternalId\`, and \`accountLinkedAfterRefresh: true\` when updating \`evidence.json\`.
 
 ## Fill Rules
 
