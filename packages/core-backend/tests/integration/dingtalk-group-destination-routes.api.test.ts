@@ -12,6 +12,7 @@ function makeDestination(overrides: Record<string, unknown> = {}) {
     webhookUrl: 'https://oapi.dingtalk.com/robot/send?access_token=secret-token&timestamp=123&sign=abc',
     secret: 'SECsecret',
     enabled: true,
+    scope: 'sheet',
     sheetId: SHEET_ID,
     createdBy: 'user_1',
     createdAt: '2026-04-22T00:00:00.000Z',
@@ -37,6 +38,8 @@ function makeDelivery(overrides: Record<string, unknown> = {}) {
 
 async function createApp(options: {
   canManageAutomation?: boolean
+  authUser?: Record<string, unknown>
+  orgMember?: boolean
   serviceOverrides?: Record<string, ReturnType<typeof vi.fn>>
 } = {}) {
   vi.resetModules()
@@ -54,10 +57,13 @@ async function createApp(options: {
   const resolveSheetCapabilitiesForUser = vi.fn(async () => ({
     capabilities: { canManageAutomation: options.canManageAutomation ?? true },
   }))
-  const query = vi.fn()
+  const query = vi.fn(async () => ({
+    rows: options.orgMember === false ? [] : [{ ok: 1 }],
+    rowCount: options.orgMember === false ? 0 : 1,
+  }))
 
   const authenticate = (req: any, _res: any, next: () => void) => {
-    req.user = { id: 'user_1', roles: [], perms: ['workflow:write'] }
+    req.user = options.authUser ?? { id: 'user_1', roles: [], perms: ['workflow:write'] }
     next()
   }
 
@@ -134,6 +140,78 @@ describe('DingTalk group destination routes', () => {
     expect(Object.prototype.hasOwnProperty.call(response.body.data, 'secret')).toBe(false)
   })
 
+  it('creates an organization-scoped destination only for admins', async () => {
+    const { app, service } = await createApp({
+      authUser: { id: 'admin_1', roles: ['admin'], perms: ['workflow:write'] },
+      serviceOverrides: {
+        createDestination: vi.fn(async () => makeDestination({
+          scope: 'org',
+          sheetId: undefined,
+          orgId: 'org_1',
+          createdBy: 'admin_1',
+        })),
+      },
+    })
+
+    const response = await request(app)
+      .post('/api/multitable/dingtalk-groups')
+      .send({
+        name: 'Org Ops DingTalk Group',
+        webhookUrl: 'https://oapi.dingtalk.com/robot/send?access_token=secret-token',
+        scope: 'org',
+        orgId: 'org_1',
+      })
+      .expect(201)
+
+    expect(service.createDestination).toHaveBeenCalledWith('admin_1', expect.objectContaining({
+      name: 'Org Ops DingTalk Group',
+      scope: 'org',
+      orgId: 'org_1',
+    }))
+    expect(response.body.data.scope).toBe('org')
+    expect(response.body.data.orgId).toBe('org_1')
+  })
+
+  it('rejects organization-scoped destination creation for non-admins', async () => {
+    const { app, service } = await createApp()
+
+    await request(app)
+      .post('/api/multitable/dingtalk-groups')
+      .send({
+        name: 'Org Ops DingTalk Group',
+        webhookUrl: 'https://oapi.dingtalk.com/robot/send?access_token=secret-token',
+        scope: 'org',
+        orgId: 'org_1',
+      })
+      .expect(403)
+
+    expect(service.createDestination).not.toHaveBeenCalled()
+  })
+
+  it('lists an organization catalog with private destinations for active org members', async () => {
+    const { app, service, query } = await createApp({
+      serviceOverrides: {
+        listDestinations: vi.fn(async () => [
+          makeDestination({ id: 'dt_private', scope: 'private', sheetId: undefined }),
+          makeDestination({ id: 'dt_org_1', scope: 'org', sheetId: undefined, orgId: 'org_1' }),
+          makeDestination({ id: 'dt_org_2', scope: 'org', sheetId: undefined, orgId: 'org_2' }),
+        ]),
+      },
+    })
+
+    const response = await request(app)
+      .get('/api/multitable/dingtalk-groups')
+      .query({ orgId: 'org_1' })
+      .expect(200)
+
+    expect(query).toHaveBeenCalledWith(
+      'SELECT 1 FROM user_orgs WHERE user_id = $1 AND org_id = $2 AND is_active = true LIMIT 1',
+      ['user_1', 'org_1'],
+    )
+    expect(service.listDestinations).toHaveBeenCalledWith('user_1', undefined, 'org_1')
+    expect(response.body.data.destinations.map((item: { id: string }) => item.id)).toEqual(['dt_private', 'dt_org_1'])
+  })
+
   it.each([
     ['PATCH', `/api/multitable/dingtalk-groups/${DESTINATION_ID}`, 'updateDestination'],
     ['DELETE', `/api/multitable/dingtalk-groups/${DESTINATION_ID}`, 'deleteDestination'],
@@ -185,6 +263,30 @@ describe('DingTalk group destination routes', () => {
       'user_1',
       { subject: 'Route test', content: 'Body' },
       SHEET_ID,
+      undefined,
     )
+  })
+
+  it('lists delivery history for an organization destination shared with the caller org', async () => {
+    const { app, service, query } = await createApp({
+      serviceOverrides: {
+        getDestinationById: vi.fn(async () => makeDestination({
+          scope: 'org',
+          sheetId: undefined,
+          orgId: 'org_1',
+        })),
+      },
+    })
+
+    await request(app)
+      .get(`/api/multitable/dingtalk-groups/${DESTINATION_ID}/deliveries`)
+      .query({ limit: '20' })
+      .expect(200)
+
+    expect(query).toHaveBeenCalledWith(
+      'SELECT 1 FROM user_orgs WHERE user_id = $1 AND org_id = $2 AND is_active = true LIMIT 1',
+      ['user_1', 'org_1'],
+    )
+    expect(service.listDeliveries).toHaveBeenCalledWith(DESTINATION_ID, 20)
   })
 })

@@ -84,6 +84,7 @@ function fakeDingTalkGroup(overrides: Partial<DingTalkGroupDestination> = {}): D
     webhookUrl: 'https://oapi.dingtalk.com/robot/send?access_token=test-token',
     hasSecret: false,
     enabled: true,
+    scope: 'sheet',
     sheetId: 'sheet_1',
     createdBy: 'user_1',
     createdAt: '2026-04-01T00:00:00Z',
@@ -687,6 +688,32 @@ describe('MetaApiTokenManager', () => {
     expect(rows[0]?.textContent).toContain('Please fill incident details')
     expect(rows[0]?.textContent).toContain('Automation')
     expect(fetchFn.mock.calls.some(([url]) => String(url).includes('/api/multitable/dingtalk-groups/dt_1/deliveries?sheetId=sheet_1'))).toBe(true)
+  })
+
+  it('shows organization catalog DingTalk groups as read-only and loads deliveries without sheet scope', async () => {
+    const { client, fetchFn } = mockClient([], [], [], [
+      fakeDingTalkGroup({ scope: 'org', sheetId: undefined, orgId: 'org_1' }),
+    ], [fakeDingTalkDelivery()])
+    mount({ visible: true, client })
+    await flushPromises()
+
+    const dingTalkTab = document.querySelectorAll('[role="tab"]')[2] as HTMLButtonElement
+    dingTalkTab.click()
+    await flushPromises()
+
+    const card = document.querySelector('[data-dingtalk-group-id="dt_1"]') as HTMLElement
+    expect(card?.textContent).toContain('Organization catalog group: org_1')
+    expect(card?.querySelector('[data-dingtalk-group-readonly]')?.textContent).toContain('Managed by organization admins')
+    expect(card?.querySelector('[data-dingtalk-group-edit]')).toBeNull()
+    expect(card?.querySelector('[data-dingtalk-group-toggle]')).toBeNull()
+    expect(card?.querySelector('[data-dingtalk-group-test-send]')).toBeNull()
+    expect(card?.querySelector('[data-dingtalk-group-delete]')).toBeNull()
+
+    const deliveriesBtn = card.querySelector('[data-dingtalk-group-deliveries]') as HTMLButtonElement
+    deliveriesBtn.click()
+    await flushPromises()
+
+    expect(fetchFn.mock.calls.some(([url]) => String(url) === '/api/multitable/dingtalk-groups/dt_1/deliveries')).toBe(true)
   })
 
   it('refreshes open DingTalk delivery history after test send', async () => {

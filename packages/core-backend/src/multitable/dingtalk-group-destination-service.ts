@@ -29,6 +29,7 @@ type DingTalkGroupDestinationRow = {
   secret: string | null
   enabled: boolean
   sheet_id: string | null
+  org_id: string | null
   created_by: string
   created_at: string | Date
   updated_at?: string | Date | null
@@ -42,13 +43,16 @@ function generateId(): string {
 }
 
 function rowToDestination(row: DingTalkGroupDestinationRow): DingTalkGroupDestination {
+  const scope = row.org_id ? 'org' : row.sheet_id ? 'sheet' : 'private'
   return {
     id: row.id,
     name: row.name,
     webhookUrl: row.webhook_url,
     secret: row.secret ?? undefined,
     enabled: row.enabled,
+    scope,
     sheetId: row.sheet_id ?? undefined,
+    orgId: row.org_id ?? undefined,
     createdBy: row.created_by,
     createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : row.created_at,
     updatedAt: row.updated_at ? (row.updated_at instanceof Date ? row.updated_at.toISOString() : row.updated_at) : undefined,
@@ -116,7 +120,13 @@ export class DingTalkGroupDestinationService {
     const webhookUrl = normalizeDingTalkRobotWebhookUrl(input.webhookUrl)
     const secret = normalizeDingTalkRobotSecret(input.secret)
     const sheetId = typeof input.sheetId === 'string' && input.sheetId.trim() ? input.sheetId.trim() : null
+    const orgId = typeof input.orgId === 'string' && input.orgId.trim() ? input.orgId.trim() : null
+    const scope = input.scope ?? (orgId ? 'org' : sheetId ? 'sheet' : 'private')
     if (!name) throw new Error('Destination name is required')
+    if (sheetId && orgId) throw new Error('DingTalk group destination cannot be both sheet and organization scoped')
+    if (scope === 'sheet' && !sheetId) throw new Error('sheetId is required for sheet-scoped DingTalk group destinations')
+    if (scope === 'org' && !orgId) throw new Error('orgId is required for organization DingTalk group destinations')
+    if (scope === 'private' && (sheetId || orgId)) throw new Error('private DingTalk group destinations cannot include sheetId or orgId')
 
     const id = generateId()
     const enabled = input.enabled ?? true
@@ -129,6 +139,7 @@ export class DingTalkGroupDestinationService {
       secret: secret ?? null,
       enabled,
       sheet_id: sheetId,
+      org_id: orgId,
       created_by: userId,
       created_at: now,
     }).execute()
@@ -140,27 +151,64 @@ export class DingTalkGroupDestinationService {
       webhookUrl,
       secret,
       enabled,
+      scope,
       ...(sheetId ? { sheetId } : {}),
+      ...(orgId ? { orgId } : {}),
       createdBy: userId,
       createdAt: now,
     }
   }
 
-  async listDestinations(userId: string, sheetId?: string): Promise<DingTalkGroupDestination[]> {
+  async listDestinations(userId: string, sheetId?: string, orgId?: string): Promise<DingTalkGroupDestination[]> {
     const normalizedSheetId = typeof sheetId === 'string' && sheetId.trim() ? sheetId.trim() : ''
+    const normalizedOrgId = typeof orgId === 'string' && orgId.trim() ? orgId.trim() : ''
     let builder = this.db.selectFrom('dingtalk_group_destinations').selectAll()
-    if (normalizedSheetId) {
+    if (normalizedOrgId) {
+      builder = builder.where((eb) =>
+        eb.or([
+          eb('org_id', '=', normalizedOrgId),
+          eb.and([
+            eb('sheet_id', 'is', null),
+            eb('org_id', 'is', null),
+            eb('created_by', '=', userId),
+          ]),
+        ]),
+      )
+    } else if (normalizedSheetId) {
       builder = builder.where((eb) =>
         eb.or([
           eb('sheet_id', '=', normalizedSheetId),
+          eb.exists(
+            eb.selectFrom('user_orgs')
+              .select('user_id')
+              .whereRef('user_orgs.org_id', '=', 'dingtalk_group_destinations.org_id')
+              .where('user_orgs.user_id', '=', userId)
+              .where('user_orgs.is_active', '=', true),
+          ),
           eb.and([
             eb('sheet_id', 'is', null),
+            eb('org_id', 'is', null),
             eb('created_by', '=', userId),
           ]),
         ]),
       )
     } else {
-      builder = builder.where('created_by', '=', userId)
+      builder = builder.where((eb) =>
+        eb.or([
+          eb.exists(
+            eb.selectFrom('user_orgs')
+              .select('user_id')
+              .whereRef('user_orgs.org_id', '=', 'dingtalk_group_destinations.org_id')
+              .where('user_orgs.user_id', '=', userId)
+              .where('user_orgs.is_active', '=', true),
+          ),
+          eb.and([
+            eb('sheet_id', 'is', null),
+            eb('org_id', 'is', null),
+            eb('created_by', '=', userId),
+          ]),
+        ]),
+      )
     }
     const rows = await builder.orderBy('created_at', 'desc').execute()
     return rows.map((row) => rowToDestination(row as Parameters<typeof rowToDestination>[0]))
@@ -189,6 +237,7 @@ export class DingTalkGroupDestinationService {
     id: string,
     userId: string,
     sheetId?: string,
+    orgId?: string,
   ): Promise<DingTalkGroupDestinationRow> {
     const row = await this.db.selectFrom('dingtalk_group_destinations')
       .selectAll()
@@ -197,6 +246,10 @@ export class DingTalkGroupDestinationService {
     if (!row) throw new Error('Destination not found')
     if (row.sheet_id !== null) {
       if (!sheetId || row.sheet_id !== sheetId) throw new Error('Not authorized')
+      return row
+    }
+    if (row.org_id !== null) {
+      if (!orgId || row.org_id !== orgId) throw new Error('Not authorized')
       return row
     }
     if (row.created_by !== userId) throw new Error('Not authorized')
@@ -208,8 +261,9 @@ export class DingTalkGroupDestinationService {
     userId: string,
     input: DingTalkGroupDestinationUpdateInput,
     sheetId?: string,
+    orgId?: string,
   ): Promise<DingTalkGroupDestination> {
-    await this.loadAuthorizedDestination(id, userId, sheetId)
+    await this.loadAuthorizedDestination(id, userId, sheetId, orgId)
 
     const updates: Record<string, unknown> = { updated_at: nowTimestamp() }
     if (input.name !== undefined) {
@@ -235,8 +289,8 @@ export class DingTalkGroupDestinationService {
     return rowToDestination(updated as Parameters<typeof rowToDestination>[0])
   }
 
-  async deleteDestination(id: string, userId: string, sheetId?: string): Promise<void> {
-    await this.loadAuthorizedDestination(id, userId, sheetId)
+  async deleteDestination(id: string, userId: string, sheetId?: string, orgId?: string): Promise<void> {
+    await this.loadAuthorizedDestination(id, userId, sheetId, orgId)
     await this.db.deleteFrom('dingtalk_group_destinations')
       .where('id', '=', id)
       .execute()
@@ -247,8 +301,9 @@ export class DingTalkGroupDestinationService {
     userId: string,
     input: DingTalkGroupTestSendInput,
     sheetId?: string,
+    orgId?: string,
   ): Promise<{ ok: true }> {
-    const row = await this.loadAuthorizedDestination(id, userId, sheetId)
+    const row = await this.loadAuthorizedDestination(id, userId, sheetId, orgId)
 
     const subject = input.subject?.trim() || 'MetaSheet DingTalk group test'
     const content = input.content?.trim() || 'This is a standard DingTalk group destination test message.'

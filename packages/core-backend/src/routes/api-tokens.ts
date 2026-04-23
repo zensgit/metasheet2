@@ -60,7 +60,9 @@ const CreateDingTalkGroupSchema = z.object({
   webhookUrl: z.string().url(),
   secret: z.string().optional(),
   enabled: z.boolean().optional(),
+  scope: z.enum(['private', 'sheet', 'org']).optional(),
   sheetId: z.string().optional(),
+  orgId: z.string().optional(),
 })
 
 const UpdateDingTalkGroupSchema = z.object({
@@ -79,6 +81,65 @@ function getSheetId(value: unknown): string {
   return typeof value === 'string' ? value.trim() : ''
 }
 
+function getOrgId(value: unknown): string {
+  return typeof value === 'string' ? value.trim() : ''
+}
+
+function isAdminRequest(req: Request): boolean {
+  const user = req.user as Record<string, unknown> | undefined
+  const role = typeof user?.role === 'string' ? user.role.trim() : ''
+  const roles = Array.isArray(user?.roles) ? user.roles.map((value) => String(value).trim()) : []
+  const permissions = [
+    ...(Array.isArray(user?.permissions) ? user.permissions : []),
+    ...(Array.isArray(user?.perms) ? user.perms : []),
+  ].map((value) => String(value).trim())
+  return Boolean(user?.isAdmin || user?.is_admin)
+    || role === 'admin'
+    || roles.includes('admin')
+    || permissions.includes('*')
+    || permissions.includes('admin')
+    || permissions.includes('dingtalk:admin')
+}
+
+function rejectMixedScope(res: Response, sheetId: string, orgId: string): boolean {
+  if (!sheetId || !orgId) return false
+  res.status(400).json({
+    ok: false,
+    error: { code: 'VALIDATION_ERROR', message: 'sheetId and orgId cannot be used together' },
+  })
+  return true
+}
+
+function rejectInvalidDingTalkGroupScope(
+  res: Response,
+  scope: 'private' | 'sheet' | 'org' | undefined,
+  sheetId: string,
+  orgId: string,
+): boolean {
+  if (scope === 'private' && (sheetId || orgId)) {
+    res.status(400).json({
+      ok: false,
+      error: { code: 'VALIDATION_ERROR', message: 'private DingTalk group destinations cannot include sheetId or orgId' },
+    })
+    return true
+  }
+  if (scope === 'sheet' && !sheetId) {
+    res.status(400).json({
+      ok: false,
+      error: { code: 'VALIDATION_ERROR', message: 'sheetId is required for sheet-scoped DingTalk group destinations' },
+    })
+    return true
+  }
+  if (scope === 'org' && !orgId) {
+    res.status(400).json({
+      ok: false,
+      error: { code: 'VALIDATION_ERROR', message: 'orgId is required for organization DingTalk group destinations' },
+    })
+    return true
+  }
+  return false
+}
+
 async function requireSheetAutomationAccess(res: Response, userId: string, sheetId: string): Promise<boolean> {
   if (!sheetId) {
     res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId is required' } })
@@ -90,6 +151,33 @@ async function requireSheetAutomationAccess(res: Response, userId: string, sheet
     return false
   }
   return true
+}
+
+async function requireOrgMemberAccess(res: Response, userId: string, orgId: string): Promise<boolean> {
+  if (!orgId) {
+    res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'orgId is required' } })
+    return false
+  }
+  const result = await query(
+    'SELECT 1 FROM user_orgs WHERE user_id = $1 AND org_id = $2 AND is_active = true LIMIT 1',
+    [userId, orgId],
+  )
+  if (!result.rows.length) {
+    res.status(403).json({ ok: false, error: { code: 'FORBIDDEN' } })
+    return false
+  }
+  return true
+}
+
+async function requireOrgReadAccess(req: Request, res: Response, userId: string, orgId: string): Promise<boolean> {
+  if (isAdminRequest(req)) return true
+  return requireOrgMemberAccess(res, userId, orgId)
+}
+
+function requireOrgAdminAccess(req: Request, res: Response): boolean {
+  if (isAdminRequest(req)) return true
+  res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: 'Admin role required' } })
+  return false
 }
 
 function getUserId(req: Request): string {
@@ -319,9 +407,13 @@ export function apiTokensRouter(): Router {
       return
     }
     const sheetId = getSheetId(req.query.sheetId)
+    const orgId = getOrgId(req.query.orgId)
+    if (rejectMixedScope(res, sheetId, orgId)) return
     if (sheetId && !await requireSheetAutomationAccess(res, userId, sheetId)) return
-    const destinations = await dingTalkGroupDestinationService.listDestinations(userId, sheetId || undefined)
-    res.json({ ok: true, data: { destinations: destinations.map(toDingTalkGroupDestinationResponse) } })
+    if (orgId && !await requireOrgReadAccess(req, res, userId, orgId)) return
+    const destinations = await dingTalkGroupDestinationService.listDestinations(userId, sheetId || undefined, orgId || undefined)
+    const filtered = orgId ? destinations.filter((destination) => destination.orgId === orgId || destination.scope === 'private') : destinations
+    res.json({ ok: true, data: { destinations: filtered.map(toDingTalkGroupDestinationResponse) } })
   })
 
   router.post('/api/multitable/dingtalk-groups', async (req: Request, res: Response) => {
@@ -333,13 +425,19 @@ export function apiTokensRouter(): Router {
     try {
       const input = CreateDingTalkGroupSchema.parse(req.body)
       const sheetId = getSheetId(input.sheetId)
+      const orgId = getOrgId(input.orgId)
+      if (rejectMixedScope(res, sheetId, orgId)) return
+      if (rejectInvalidDingTalkGroupScope(res, input.scope, sheetId, orgId)) return
+      if ((orgId || input.scope === 'org') && !requireOrgAdminAccess(req, res)) return
       if (sheetId && !await requireSheetAutomationAccess(res, userId, sheetId)) return
       const destination = await dingTalkGroupDestinationService.createDestination(userId, {
         name: input.name,
         webhookUrl: input.webhookUrl,
         secret: input.secret,
         enabled: input.enabled,
+        scope: input.scope,
         sheetId: sheetId || undefined,
+        orgId: orgId || undefined,
       })
       res.status(201).json({ ok: true, data: toDingTalkGroupDestinationResponse(destination) })
     } catch (err) {
@@ -361,13 +459,16 @@ export function apiTokensRouter(): Router {
     try {
       const input = UpdateDingTalkGroupSchema.parse(req.body)
       const sheetId = getSheetId(req.query.sheetId)
+      const orgId = getOrgId(req.query.orgId)
+      if (rejectMixedScope(res, sheetId, orgId)) return
+      if (orgId && !requireOrgAdminAccess(req, res)) return
       if (sheetId && !await requireSheetAutomationAccess(res, userId, sheetId)) return
       const destination = await dingTalkGroupDestinationService.updateDestination(req.params.id, userId, {
         name: input.name,
         webhookUrl: input.webhookUrl,
         secret: input.secret,
         enabled: input.enabled,
-      }, sheetId || undefined)
+      }, sheetId || undefined, orgId || undefined)
       res.json({ ok: true, data: toDingTalkGroupDestinationResponse(destination) })
     } catch (err) {
       if (err instanceof z.ZodError) {
@@ -387,8 +488,11 @@ export function apiTokensRouter(): Router {
     }
     try {
       const sheetId = getSheetId(req.query.sheetId)
+      const orgId = getOrgId(req.query.orgId)
+      if (rejectMixedScope(res, sheetId, orgId)) return
+      if (orgId && !requireOrgAdminAccess(req, res)) return
       if (sheetId && !await requireSheetAutomationAccess(res, userId, sheetId)) return
-      await dingTalkGroupDestinationService.deleteDestination(req.params.id, userId, sheetId || undefined)
+      await dingTalkGroupDestinationService.deleteDestination(req.params.id, userId, sheetId || undefined, orgId || undefined)
       res.status(204).end()
     } catch (err) {
       logger.error('Failed to delete DingTalk group destination', err instanceof Error ? err : undefined)
@@ -403,13 +507,18 @@ export function apiTokensRouter(): Router {
       return
     }
     const sheetId = getSheetId(req.query.sheetId)
+    const orgId = getOrgId(req.query.orgId)
+    if (rejectMixedScope(res, sheetId, orgId)) return
     if (sheetId && !await requireSheetAutomationAccess(res, userId, sheetId)) return
+    if (orgId && !await requireOrgReadAccess(req, res, userId, orgId)) return
     const destination = await dingTalkGroupDestinationService.getDestinationById(req.params.id)
     if (!destination) {
       res.status(404).json({ ok: false, error: { code: 'NOT_FOUND' } })
       return
     }
-    if (destination.sheetId ? destination.sheetId !== sheetId : destination.createdBy !== userId) {
+    if (destination.orgId) {
+      if (!await requireOrgReadAccess(req, res, userId, destination.orgId)) return
+    } else if (destination.sheetId ? destination.sheetId !== sheetId : destination.createdBy !== userId) {
       res.status(403).json({ ok: false, error: { code: 'FORBIDDEN' } })
       return
     }
@@ -427,8 +536,11 @@ export function apiTokensRouter(): Router {
     try {
       const input = DingTalkGroupTestSendSchema.parse(req.body ?? {})
       const sheetId = getSheetId(req.query.sheetId)
+      const orgId = getOrgId(req.query.orgId)
+      if (rejectMixedScope(res, sheetId, orgId)) return
+      if (orgId && !requireOrgAdminAccess(req, res)) return
       if (sheetId && !await requireSheetAutomationAccess(res, userId, sheetId)) return
-      await dingTalkGroupDestinationService.testSend(req.params.id, userId, input, sheetId || undefined)
+      await dingTalkGroupDestinationService.testSend(req.params.id, userId, input, sheetId || undefined, orgId || undefined)
       res.status(204).end()
     } catch (err) {
       if (err instanceof z.ZodError) {

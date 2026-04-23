@@ -68,6 +68,7 @@ function destinationRow(overrides: Record<string, unknown> = {}) {
     secret: 'SEC123',
     enabled: true,
     sheet_id: null,
+    org_id: null,
     created_by: 'user_1',
     created_at: '2026-04-19T10:00:00.000Z',
     updated_at: '2026-04-19T10:10:00.000Z',
@@ -118,16 +119,59 @@ describe('DingTalkGroupDestinationService', () => {
     expect(created.name).toBe('Ops DingTalk Group')
     expect(created.secret).toBe('SEC123')
     expect(created.enabled).toBe(true)
+    expect(created.scope).toBe('sheet')
     expect(created.sheetId).toBe('sheet_1')
     const insertChain = roots.insertInto.mock.results[0]?.value as MockChain | undefined
     const values = insertChain?.values?.mock.calls[0]?.[0] as Record<string, unknown> | undefined
     expect(values?.secret).toBe('SEC123')
+    expect(values?.org_id).toBeNull()
 
     executeQueue.push([destinationRow({ sheet_id: 'sheet_1' }), destinationRow({ id: 'dt_legacy', sheet_id: null })])
     const listed = await service.listDestinations('user_1', 'sheet_1')
     expect(listed).toHaveLength(2)
     expect(listed[0].name).toBe('Ops DingTalk Group')
+    expect(listed[0].scope).toBe('sheet')
     expect(listed[0].sheetId).toBe('sheet_1')
+  })
+
+  test('creates organization-scoped destinations', async () => {
+    const { db, roots } = createMockDb()
+    const service = new DingTalkGroupDestinationService(db, vi.fn())
+
+    const created = await service.createDestination('admin_1', {
+      name: 'Org Ops DingTalk Group',
+      webhookUrl: 'https://oapi.dingtalk.com/robot/send?access_token=test-token',
+      scope: 'org',
+      orgId: 'org_1',
+    })
+
+    expect(created.scope).toBe('org')
+    expect(created.orgId).toBe('org_1')
+    expect(created.sheetId).toBeUndefined()
+    const insertChain = roots.insertInto.mock.results[0]?.value as MockChain | undefined
+    const values = insertChain?.values?.mock.calls[0]?.[0] as Record<string, unknown> | undefined
+    expect(values?.sheet_id).toBeNull()
+    expect(values?.org_id).toBe('org_1')
+  })
+
+  test('rejects invalid organization destination scope combinations', async () => {
+    const { db, roots } = createMockDb()
+    const service = new DingTalkGroupDestinationService(db, vi.fn())
+
+    await expect(service.createDestination('admin_1', {
+      name: 'Org Ops DingTalk Group',
+      webhookUrl: 'https://oapi.dingtalk.com/robot/send?access_token=test-token',
+      scope: 'org',
+    })).rejects.toThrow('orgId is required')
+
+    await expect(service.createDestination('admin_1', {
+      name: 'Private Ops DingTalk Group',
+      webhookUrl: 'https://oapi.dingtalk.com/robot/send?access_token=test-token',
+      scope: 'private',
+      orgId: 'org_1',
+    })).rejects.toThrow('private DingTalk group destinations cannot include sheetId or orgId')
+
+    expect(roots.insertInto).not.toHaveBeenCalled()
   })
 
   test.each([
@@ -180,6 +224,30 @@ describe('DingTalkGroupDestinationService', () => {
     expect(updated.name).toBe('Updated shared group')
     expect(updated.sheetId).toBe('sheet_1')
     expect(roots.updateTable).toHaveBeenCalledWith('dingtalk_group_destinations')
+  })
+
+  test('organization destinations require matching org authorization for mutation', async () => {
+    const { db, roots } = createMockDb()
+    const service = new DingTalkGroupDestinationService(db, vi.fn())
+
+    executeTakeFirstQueue.push(destinationRow({ id: 'dt_org', org_id: 'org_1', created_by: 'admin_1' }))
+    executeTakeFirstQueue.push(destinationRow({
+      id: 'dt_org',
+      org_id: 'org_1',
+      created_by: 'admin_1',
+      name: 'Updated org group',
+    }))
+
+    const updated = await service.updateDestination('dt_org', 'admin_2', {
+      name: 'Updated org group',
+    }, undefined, 'org_1')
+
+    expect(updated.scope).toBe('org')
+    expect(updated.orgId).toBe('org_1')
+    expect(roots.updateTable).toHaveBeenCalledWith('dingtalk_group_destinations')
+
+    executeTakeFirstQueue.push(destinationRow({ id: 'dt_org', org_id: 'org_1', created_by: 'admin_1' }))
+    await expect(service.deleteDestination('dt_org', 'admin_2', undefined, 'org_2')).rejects.toThrow('Not authorized')
   })
 
   test('updates a destination', async () => {

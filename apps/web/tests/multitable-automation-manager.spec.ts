@@ -863,6 +863,67 @@ describe('MetaAutomationManager', () => {
     expect(fetchFn.mock.calls.some(([url]) => String(url).includes('/api/multitable/dingtalk-groups?sheetId=sheet_1'))).toBe(true)
   })
 
+  it('labels organization catalog DingTalk groups in the automation form', async () => {
+    const { client, fetchFn } = mockClient([], {
+      dingTalkGroups: [{
+        id: 'dt_org',
+        name: 'Org Ops Group',
+        webhookUrl: 'https://oapi.dingtalk.com/robot/send?access_token=test-org',
+        enabled: true,
+        scope: 'org',
+        orgId: 'org_1',
+        createdBy: 'admin_1',
+        createdAt: '2026-04-01T00:00:00Z',
+      }],
+    })
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
+    await flushPromises()
+
+    const addBtn = container.querySelector('.meta-automation__btn-add') as HTMLButtonElement
+    addBtn.click()
+    await nextTick()
+
+    const nameInput = container.querySelector('[data-automation-field="name"]') as HTMLInputElement
+    nameInput.value = 'Org DingTalk notify'
+    nameInput.dispatchEvent(new Event('input', { bubbles: true }))
+
+    const actionSelect = container.querySelector('[data-automation-field="actionType"]') as HTMLSelectElement
+    actionSelect.value = 'send_dingtalk_group_message'
+    actionSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushPromises()
+
+    const destinationSelect = container.querySelector('[data-automation-field="dingtalkDestinationPickerId"]') as HTMLSelectElement
+    expect(destinationSelect.textContent).toContain('Organization catalog')
+    destinationSelect.value = 'dt_org'
+    destinationSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushPromises()
+
+    const chip = container.querySelector('[data-automation-group-destination="dt_org"]') as HTMLElement
+    expect(chip?.textContent).toContain('Org Ops Group')
+    expect(chip?.textContent).toContain('organization catalog: org_1')
+
+    const titleInput = container.querySelector('[data-automation-field="dingtalkTitleTemplate"]') as HTMLInputElement
+    titleInput.value = 'Ticket {{recordId}}'
+    titleInput.dispatchEvent(new Event('input', { bubbles: true }))
+
+    const bodyInput = container.querySelector('[data-automation-field="dingtalkBodyTemplate"]') as HTMLTextAreaElement
+    bodyInput.value = 'Please fill {{record.status}}'
+    bodyInput.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushPromises()
+
+    const saveBtn = container.querySelector('.meta-automation__btn--primary') as HTMLButtonElement
+    saveBtn.click()
+    await flushPromises()
+
+    const postCalls = fetchFn.mock.calls.filter(([, init]: [string, RequestInit | undefined]) => init?.method === 'POST')
+    expect(postCalls.length).toBe(1)
+    const body = JSON.parse(postCalls[0][1]?.body as string)
+    expect(body.actionConfig).toMatchObject({
+      destinationId: 'dt_org',
+      destinationIds: ['dt_org'],
+    })
+  })
+
   it('shows an empty state when no DingTalk groups are bound and still allows dynamic record destinations', async () => {
     const { client, fetchFn } = mockClient([], { dingTalkGroups: [] })
     const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
@@ -882,7 +943,7 @@ describe('MetaAutomationManager', () => {
     await flushPromises()
 
     const emptyState = container.querySelector('[data-automation-field="dingtalkDestinationEmpty"]')
-    expect(emptyState?.textContent).toContain('No DingTalk groups are bound to this table yet')
+    expect(emptyState?.textContent).toContain('No DingTalk groups are available for this table yet')
     expect(emptyState?.textContent).toContain('API Tokens & Webhooks')
     expect(emptyState?.textContent).toContain('record group field path')
 
