@@ -31,6 +31,11 @@ Options:
   --allowed-user <id>              Local user allowed to fill; repeatable
   --allowed-member-group <id>      Allowed local member group; repeatable
   --person-user <id>               Optional local user for person smoke; repeatable
+  --authorized-user <id>           DingTalk-bound allowed local user for manual submit proof
+  --unauthorized-user <id>         DingTalk-bound non-allowlisted local user for denial proof
+  --no-email-dingtalk-external-id <id>
+                                  Synced DingTalk account without local user/email for admin proof
+  --require-manual-targets         Fail if the three manual target IDs above are missing
   --output-dir <dir>               Output directory, default ${DEFAULT_OUTPUT_ROOT}/<run-id>
   --timeout-ms <ms>                API health timeout, default 10000
   --skip-api                       Skip GET /health
@@ -41,7 +46,8 @@ Environment fallbacks match dingtalk-p4-remote-smoke.mjs:
   DINGTALK_P4_GROUP_A_WEBHOOK, DINGTALK_P4_GROUP_B_WEBHOOK,
   DINGTALK_P4_GROUP_A_SECRET, DINGTALK_P4_GROUP_B_SECRET,
   DINGTALK_P4_ALLOWED_USER_IDS, DINGTALK_P4_ALLOWED_MEMBER_GROUP_IDS,
-  DINGTALK_P4_PERSON_USER_IDS
+  DINGTALK_P4_PERSON_USER_IDS, DINGTALK_P4_AUTHORIZED_USER_ID,
+  DINGTALK_P4_UNAUTHORIZED_USER_ID, DINGTALK_P4_NO_EMAIL_DINGTALK_EXTERNAL_ID
 `)
 }
 
@@ -128,6 +134,10 @@ function parseArgs(argv) {
     allowedUserIds: splitList(envValue(env, 'DINGTALK_P4_ALLOWED_USER_IDS', 'DINGTALK_P4_ALLOWED_USER_ID')),
     allowedMemberGroupIds: splitList(envValue(env, 'DINGTALK_P4_ALLOWED_MEMBER_GROUP_IDS', 'DINGTALK_P4_ALLOWED_MEMBER_GROUP_ID')),
     personUserIds: splitList(envValue(env, 'DINGTALK_P4_PERSON_USER_IDS', 'DINGTALK_P4_PERSON_USER_ID')),
+    authorizedUserId: envValue(env, 'DINGTALK_P4_AUTHORIZED_USER_ID'),
+    unauthorizedUserId: envValue(env, 'DINGTALK_P4_UNAUTHORIZED_USER_ID'),
+    noEmailDingTalkExternalId: envValue(env, 'DINGTALK_P4_NO_EMAIL_DINGTALK_EXTERNAL_ID'),
+    requireManualTargets: false,
     outputDir: null,
     timeoutMs: 10_000,
     skipApi: false,
@@ -178,6 +188,21 @@ function parseArgs(argv) {
       case '--person-user':
         appendList(opts.personUserIds, readRequiredValue(argv, i, arg))
         i += 1
+        break
+      case '--authorized-user':
+        opts.authorizedUserId = readRequiredValue(argv, i, arg).trim()
+        i += 1
+        break
+      case '--unauthorized-user':
+        opts.unauthorizedUserId = readRequiredValue(argv, i, arg).trim()
+        i += 1
+        break
+      case '--no-email-dingtalk-external-id':
+        opts.noEmailDingTalkExternalId = readRequiredValue(argv, i, arg).trim()
+        i += 1
+        break
+      case '--require-manual-targets':
+        opts.requireManualTargets = true
         break
       case '--output-dir':
         opts.outputDir = path.resolve(process.cwd(), readRequiredValue(argv, i, arg))
@@ -343,6 +368,36 @@ function validateAllowlist(opts, summary) {
   })
 }
 
+function manualTargets(opts) {
+  return {
+    authorizedUserId: opts.authorizedUserId || opts.allowedUserIds[0] || '',
+    unauthorizedUserId: opts.unauthorizedUserId || '',
+    noEmailDingTalkExternalId: opts.noEmailDingTalkExternalId || '',
+  }
+}
+
+function validateManualTargets(opts, summary) {
+  const targets = manualTargets(opts)
+  const missing = []
+  if (!targets.authorizedUserId) missing.push('authorized user')
+  if (!targets.unauthorizedUserId) missing.push('unauthorized user')
+  if (!targets.noEmailDingTalkExternalId) missing.push('no-email DingTalk external id')
+
+  addCheck(
+    summary,
+    'manual-targets-declared',
+    'Manual DingTalk-client/admin target identities are declared',
+    missing.length === 0 ? 'pass' : opts.requireManualTargets ? 'fail' : 'skipped',
+    {
+      ...targets,
+      missing,
+      notes: missing.length === 0
+        ? 'Manual evidence checklist can name each operator target.'
+        : 'Set manual target env values before final release smoke to avoid ambiguous screenshots.',
+    },
+  )
+}
+
 function validateLocalFiles(summary) {
   const missing = REQUIRED_LOCAL_FILES.filter((file) => !existsSync(path.resolve(process.cwd(), file)))
   addCheck(summary, 'local-tools-present', 'Remote-smoke docs and runner scripts are present', missing.length ? 'fail' : 'pass', {
@@ -447,6 +502,7 @@ async function runPreflight(opts) {
       allowedUserCount: 0,
       allowedMemberGroupCount: 0,
       personUserCount: 0,
+      manualTargets: {},
     },
     checks: [],
     overallStatus: 'fail',
@@ -458,6 +514,7 @@ async function runPreflight(opts) {
   validateWebhooks(opts, summary)
   validateSecrets(opts, summary)
   validateAllowlist(opts, summary)
+  validateManualTargets(opts, summary)
   await validateApiHealth(opts, summary)
 
   summary.environment = {
@@ -471,6 +528,7 @@ async function runPreflight(opts) {
     allowedUserCount: opts.allowedUserIds.length,
     allowedMemberGroupCount: opts.allowedMemberGroupIds.length,
     personUserCount: opts.personUserIds.length,
+    manualTargets: manualTargets(opts),
   }
   summary.overallStatus = hasFailure(summary) ? 'fail' : 'pass'
 

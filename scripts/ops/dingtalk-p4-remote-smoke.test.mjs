@@ -283,6 +283,12 @@ test('dingtalk-p4-remote-smoke runs API chain, writes pending manual gates, and 
       'user_authorized',
       '--person-user',
       'user_person_bound',
+      '--authorized-user',
+      'user_authorized',
+      '--unauthorized-user',
+      'user_unauthorized',
+      '--no-email-dingtalk-external-id',
+      'dt_no_email_001',
       '--output-dir',
       outputDir,
     ])
@@ -309,6 +315,11 @@ test('dingtalk-p4-remote-smoke runs API chain, writes pending manual gates, and 
     assert.doesNotMatch(evidenceText, /public_token_should_not_leak/)
 
     const evidence = JSON.parse(evidenceText)
+    assert.deepEqual(evidence.manualTargets, {
+      authorizedUserId: 'user_authorized',
+      unauthorizedUserId: 'user_unauthorized',
+      noEmailDingTalkExternalId: 'dt_no_email_001',
+    })
     const byId = new Map(evidence.checks.map((check) => [check.id, check]))
     assert.equal(byId.get('create-table-form').status, 'pass')
     assert.equal(byId.get('bind-two-dingtalk-groups').status, 'pass')
@@ -322,7 +333,10 @@ test('dingtalk-p4-remote-smoke runs API chain, writes pending manual gates, and 
     assert.equal(byId.get('send-group-message-form-link').evidence.operator, '')
     assert.equal(byId.get('send-group-message-form-link').evidence.apiBootstrap.groupRuleDeliveryCount, 2)
     assert.equal(byId.get('authorized-user-submit').evidence.source, 'manual-client')
+    assert.equal(byId.get('authorized-user-submit').evidence.manualTarget.authorizedUserId, 'user_authorized')
+    assert.equal(byId.get('unauthorized-user-denied').evidence.manualTarget.unauthorizedUserId, 'user_unauthorized')
     assert.equal(byId.get('no-email-user-create-bind').evidence.source, 'manual-admin')
+    assert.equal(byId.get('no-email-user-create-bind').evidence.adminEvidence.targetDingTalkExternalId, 'dt_no_email_001')
     assert.deepEqual(
       byId.get('no-email-user-create-bind').evidence.suggestedArtifacts,
       [
@@ -337,6 +351,9 @@ test('dingtalk-p4-remote-smoke runs API chain, writes pending manual gates, and 
     const checklist = readFileSync(path.join(outputDir, 'manual-evidence-checklist.md'), 'utf8')
     assert.match(checklist, /manual-client/)
     assert.match(checklist, /manual-admin/)
+    assert.match(checklist, /Manual Targets/)
+    assert.match(checklist, /user_unauthorized/)
+    assert.match(checklist, /dt_no_email_001/)
     assert.match(checklist, /artifacts\/authorized-user-submit/)
     assert.match(checklist, /admin-create-bind-result\.png/)
     assert.match(checklist, /temporary password/)

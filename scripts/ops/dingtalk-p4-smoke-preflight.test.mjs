@@ -100,6 +100,12 @@ test('dingtalk-p4-smoke-preflight passes with valid inputs and redacts secrets',
       'user_authorized',
       '--person-user',
       'user_person_bound',
+      '--authorized-user',
+      'user_authorized',
+      '--unauthorized-user',
+      'user_unauthorized',
+      '--no-email-dingtalk-external-id',
+      'dt_no_email_001',
       '--output-dir',
       outputDir,
     ])
@@ -129,10 +135,51 @@ test('dingtalk-p4-smoke-preflight passes with valid inputs and redacts secrets',
     assert.equal(byId.get('local-tools-present').status, 'pass')
     assert.equal(byId.get('api-health').status, 'pass')
     assert.equal(byId.get('person-smoke-input').status, 'pass')
+    assert.equal(byId.get('manual-targets-declared').status, 'pass')
     assert.equal(summary.environment.authTokenPresent, true)
     assert.equal(summary.environment.allowedUserCount, 1)
+    assert.deepEqual(summary.environment.manualTargets, {
+      authorizedUserId: 'user_authorized',
+      unauthorizedUserId: 'user_unauthorized',
+      noEmailDingTalkExternalId: 'dt_no_email_001',
+    })
   } finally {
     await server.close()
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+
+test('dingtalk-p4-smoke-preflight can require manual target identities', () => {
+  const tmpDir = makeTmpDir()
+  const outputDir = path.join(tmpDir, 'preflight')
+
+  try {
+    const result = runScript([
+      '--skip-api',
+      '--require-manual-targets',
+      '--api-base',
+      'http://127.0.0.1:8900',
+      '--web-base',
+      'https://metasheet.example.test',
+      '--auth-token',
+      'secret-admin-token',
+      '--group-a-webhook',
+      'https://oapi.dingtalk.com/robot/send?access_token=robot-secret-a',
+      '--group-b-webhook',
+      'https://oapi.dingtalk.com/robot/send?access_token=robot-secret-b',
+      '--allowed-user',
+      'user_authorized',
+      '--output-dir',
+      outputDir,
+    ])
+
+    assert.equal(result.status, 1)
+    const summary = JSON.parse(readFileSync(path.join(outputDir, 'preflight-summary.json'), 'utf8'))
+    const check = summary.checks.find((entry) => entry.id === 'manual-targets-declared')
+    assert.equal(summary.overallStatus, 'fail')
+    assert.equal(check.status, 'fail')
+    assert.deepEqual(check.details.missing, ['unauthorized user', 'no-email DingTalk external id'])
+  } finally {
     rmSync(tmpDir, { recursive: true, force: true })
   }
 })

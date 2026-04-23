@@ -315,6 +315,9 @@ test('dingtalk-p4-smoke-session writes an editable env template', () => {
     assert.match(content, /DINGTALK_P4_AUTH_TOKEN=/)
     assert.match(content, /DINGTALK_P4_GROUP_A_WEBHOOK=/)
     assert.match(content, /DINGTALK_P4_ALLOWED_USER_IDS=/)
+    assert.match(content, /DINGTALK_P4_AUTHORIZED_USER_ID=/)
+    assert.match(content, /DINGTALK_P4_UNAUTHORIZED_USER_ID=/)
+    assert.match(content, /DINGTALK_P4_NO_EMAIL_DINGTALK_EXTERNAL_ID=/)
     assert.doesNotMatch(content, /secret-admin-token/)
     assert.equal(existsSync(path.join(tmpDir, 'session-summary.json')), false)
   } finally {
@@ -339,6 +342,9 @@ test('dingtalk-p4-smoke-session runs preflight, API runner, and non-strict compi
       'DINGTALK_P4_GROUP_A_SECRET=SECabcdefghijklmnop12345678',
       'DINGTALK_P4_ALLOWED_USER_IDS=user_authorized',
       'DINGTALK_P4_PERSON_USER_IDS=user_person_bound',
+      'DINGTALK_P4_AUTHORIZED_USER_ID=user_authorized',
+      'DINGTALK_P4_UNAUTHORIZED_USER_ID=user_unauthorized',
+      'DINGTALK_P4_NO_EMAIL_DINGTALK_EXTERNAL_ID=dt_no_email_001',
     ].join('\n'), 'utf8')
 
     const result = await runScript([
@@ -367,6 +373,11 @@ test('dingtalk-p4-smoke-session runs preflight, API runner, and non-strict compi
     assert.equal(sessionSummary.overallStatus, 'manual_pending')
     assert.equal(sessionSummary.sessionPhase, 'bootstrap')
     assert.equal(sessionSummary.finalStrictStatus, 'not_run')
+    assert.deepEqual(sessionSummary.manualTargets, {
+      authorizedUserId: 'user_authorized',
+      unauthorizedUserId: 'user_unauthorized',
+      noEmailDingTalkExternalId: 'dt_no_email_001',
+    })
     assert.deepEqual(sessionSummary.steps.map((step) => step.id), ['preflight', 'api-runner', 'compile', 'status-report'])
     assert.equal(sessionSummary.steps.every((step) => step.status === 'pass'), true)
     assert.equal(sessionSummary.statusReport.status, 'pass')
@@ -381,6 +392,11 @@ test('dingtalk-p4-smoke-session runs preflight, API runner, and non-strict compi
     const compiledSummary = JSON.parse(readFileSync(path.join(outputDir, 'compiled/summary.json'), 'utf8'))
     assert.equal(compiledSummary.overallStatus, 'fail')
     assert.equal(compiledSummary.remoteClientStatus, 'fail')
+    const evidence = JSON.parse(readFileSync(path.join(outputDir, 'workspace/evidence.json'), 'utf8'))
+    assert.equal(evidence.manualTargets.unauthorizedUserId, 'user_unauthorized')
+    assert.equal(evidence.manualTargets.noEmailDingTalkExternalId, 'dt_no_email_001')
+    const preflightSummary = JSON.parse(readFileSync(path.join(outputDir, 'preflight/preflight-summary.json'), 'utf8'))
+    assert.equal(preflightSummary.checks.find((check) => check.id === 'manual-targets-declared').status, 'pass')
     assert.equal(fakeApi.requests.some((request) => request.pathname === '/health'), true)
     assert.equal(fakeApi.requests.some((request) => request.pathname.endsWith('/dingtalk-person-deliveries')), true)
   } finally {

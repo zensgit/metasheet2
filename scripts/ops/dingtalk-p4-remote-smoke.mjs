@@ -95,6 +95,10 @@ Options:
   --group-a-secret <secret>        Optional DingTalk group A SEC... secret
   --group-b-secret <secret>        Optional DingTalk group B SEC... secret
   --person-user <id>               Optional local user for person-message smoke; repeatable
+  --authorized-user <id>           DingTalk-bound allowed local user for manual submit proof
+  --unauthorized-user <id>         DingTalk-bound non-allowlisted local user for denial proof
+  --no-email-dingtalk-external-id <id>
+                                  Synced DingTalk account without local user/email for admin proof
   --output-dir <dir>               Output directory, default ${DEFAULT_OUTPUT_ROOT}/<run-id>
   --timeout-ms <ms>                Per-request timeout, default 15000
   --skip-health                    Skip GET /health
@@ -111,7 +115,8 @@ Environment fallbacks:
   DINGTALK_P4_GROUP_A_SECRET, DINGTALK_GROUP_A_SECRET
   DINGTALK_P4_GROUP_B_SECRET, DINGTALK_GROUP_B_SECRET
   DINGTALK_P4_ALLOWED_USER_IDS, DINGTALK_P4_ALLOWED_MEMBER_GROUP_IDS
-  DINGTALK_P4_PERSON_USER_IDS
+  DINGTALK_P4_PERSON_USER_IDS, DINGTALK_P4_AUTHORIZED_USER_ID,
+  DINGTALK_P4_UNAUTHORIZED_USER_ID, DINGTALK_P4_NO_EMAIL_DINGTALK_EXTERNAL_ID
 `)
 }
 
@@ -160,6 +165,9 @@ function parseArgs(argv) {
     allowedUserIds: splitList(envValue('DINGTALK_P4_ALLOWED_USER_IDS', 'DINGTALK_P4_ALLOWED_USER_ID')),
     allowedMemberGroupIds: splitList(envValue('DINGTALK_P4_ALLOWED_MEMBER_GROUP_IDS', 'DINGTALK_P4_ALLOWED_MEMBER_GROUP_ID')),
     personUserIds: splitList(envValue('DINGTALK_P4_PERSON_USER_IDS', 'DINGTALK_P4_PERSON_USER_ID')),
+    authorizedUserId: envValue('DINGTALK_P4_AUTHORIZED_USER_ID'),
+    unauthorizedUserId: envValue('DINGTALK_P4_UNAUTHORIZED_USER_ID'),
+    noEmailDingTalkExternalId: envValue('DINGTALK_P4_NO_EMAIL_DINGTALK_EXTERNAL_ID'),
     outputDir: null,
     timeoutMs: 15_000,
     skipHealth: false,
@@ -208,6 +216,18 @@ function parseArgs(argv) {
         break
       case '--person-user':
         appendList(opts.personUserIds, readRequiredValue(argv, i, arg))
+        i += 1
+        break
+      case '--authorized-user':
+        opts.authorizedUserId = readRequiredValue(argv, i, arg).trim()
+        i += 1
+        break
+      case '--unauthorized-user':
+        opts.unauthorizedUserId = readRequiredValue(argv, i, arg).trim()
+        i += 1
+        break
+      case '--no-email-dingtalk-external-id':
+        opts.noEmailDingTalkExternalId = readRequiredValue(argv, i, arg).trim()
         i += 1
         break
       case '--output-dir':
@@ -344,6 +364,14 @@ function artifactDirForCheck(checkId) {
   return path.join('artifacts', checkId)
 }
 
+function manualTargets(opts) {
+  return {
+    authorizedUserId: opts.authorizedUserId || opts.allowedUserIds[0] || '',
+    unauthorizedUserId: opts.unauthorizedUserId || '',
+    noEmailDingTalkExternalId: opts.noEmailDingTalkExternalId || '',
+  }
+}
+
 function makeManualEvidenceSkeleton(checkId, notes, extra = {}) {
   const requirement = MANUAL_EVIDENCE_BY_ID.get(checkId)
   if (!requirement) {
@@ -352,6 +380,18 @@ function makeManualEvidenceSkeleton(checkId, notes, extra = {}) {
       ...extra,
     }
   }
+
+  const { adminEvidence: extraAdminEvidence, ...restExtra } = extra
+  const adminEvidence = checkId === 'no-email-user-create-bind'
+    ? {
+        emailWasBlank: null,
+        createdLocalUserId: '',
+        boundDingTalkExternalId: '',
+        accountLinkedAfterRefresh: null,
+        temporaryPasswordRedacted: true,
+        ...(extraAdminEvidence ?? {}),
+      }
+    : null
 
   return {
     source: requirement.source,
@@ -362,18 +402,8 @@ function makeManualEvidenceSkeleton(checkId, notes, extra = {}) {
     notes,
     instructions: `Required before strict pass: ${requirement.label}; place evidence files under ${artifactDirForCheck(checkId)}/ and reference them with relative paths.`,
     suggestedArtifacts: requirement.suggestedArtifacts ?? [],
-    ...(checkId === 'no-email-user-create-bind'
-      ? {
-          adminEvidence: {
-            emailWasBlank: null,
-            createdLocalUserId: '',
-            boundDingTalkExternalId: '',
-            accountLinkedAfterRefresh: null,
-            temporaryPasswordRedacted: true,
-          },
-        }
-      : {}),
-    ...extra,
+    ...(adminEvidence ? { adminEvidence } : {}),
+    ...restExtra,
   }
 }
 
@@ -397,6 +427,7 @@ function createEvidence(opts, runId) {
       apiBase: opts.apiBase,
       webBase: opts.webBase || '',
     },
+    manualTargets: manualTargets(opts),
     checks,
     artifacts: [],
   }
@@ -409,18 +440,40 @@ function setCheck(evidence, id, status, data) {
   check.evidence = sanitizeValue(data)
 }
 
-function pendingManualChecks(evidence) {
+function pendingManualChecks(evidence, opts) {
+  const targets = manualTargets(opts)
   setCheck(evidence, 'authorized-user-submit', 'pending', makeManualEvidenceSkeleton(
     'authorized-user-submit',
-    'Manual DingTalk-client validation required: open the group message as an allowed DingTalk-bound local user, sign in if prompted, submit, and verify a record was inserted.',
+    targets.authorizedUserId
+      ? `Manual DingTalk-client validation required: open the group message as allowed local user ${targets.authorizedUserId}, sign in if prompted, submit, and verify a record was inserted.`
+      : 'Manual DingTalk-client validation required: open the group message as an allowed DingTalk-bound local user, sign in if prompted, submit, and verify a record was inserted.',
+    {
+      manualTarget: {
+        authorizedUserId: targets.authorizedUserId,
+      },
+    },
   ))
   setCheck(evidence, 'unauthorized-user-denied', 'pending', makeManualEvidenceSkeleton(
     'unauthorized-user-denied',
-    'Manual DingTalk-client validation required: open the same form as a DingTalk-bound user outside the allowlist and verify access or submit is blocked with no record insert.',
+    targets.unauthorizedUserId
+      ? `Manual DingTalk-client validation required: open the same form as non-allowlisted local user ${targets.unauthorizedUserId} and verify access or submit is blocked with no record insert.`
+      : 'Manual DingTalk-client validation required: open the same form as a DingTalk-bound user outside the allowlist and verify access or submit is blocked with no record insert.',
+    {
+      manualTarget: {
+        unauthorizedUserId: targets.unauthorizedUserId,
+      },
+    },
   ))
   setCheck(evidence, 'no-email-user-create-bind', 'pending', makeManualEvidenceSkeleton(
     'no-email-user-create-bind',
-    'Manual admin validation required: create and bind a synced DingTalk account without email, confirm the onboarding packet is shown only in the result panel.',
+    targets.noEmailDingTalkExternalId
+      ? `Manual admin validation required: create and bind synced DingTalk account ${targets.noEmailDingTalkExternalId} without email, confirm the onboarding packet is shown only in the result panel.`
+      : 'Manual admin validation required: create and bind a synced DingTalk account without email, confirm the onboarding packet is shown only in the result panel.',
+    {
+      adminEvidence: {
+        targetDingTalkExternalId: targets.noEmailDingTalkExternalId,
+      },
+    },
   ))
 }
 
@@ -523,7 +576,23 @@ async function requestJson(opts, route, options = {}) {
   }
 }
 
-function renderManualEvidenceChecklist() {
+function markdownCell(value) {
+  return String(value ?? '').replaceAll('|', '\\|').replaceAll('\n', '<br>')
+}
+
+function renderManualTargets(evidence) {
+  const targets = evidence.manualTargets ?? {}
+  const rows = [
+    ['authorized-user-submit', 'allowed DingTalk-bound local user', targets.authorizedUserId || '<missing>'],
+    ['unauthorized-user-denied', 'non-allowlisted DingTalk-bound local user', targets.unauthorizedUserId || '<missing>'],
+    ['no-email-user-create-bind', 'synced DingTalk external account without local user/email', targets.noEmailDingTalkExternalId || '<missing>'],
+  ]
+  return rows
+    .map(([checkId, role, target]) => `| \`${checkId}\` | ${markdownCell(role)} | \`${markdownCell(target)}\` |`)
+    .join('\n')
+}
+
+function renderManualEvidenceChecklist(evidence) {
   const rows = MANUAL_EVIDENCE_REQUIREMENTS.map((requirement) => {
     const suggested = Array.isArray(requirement.suggestedArtifacts) && requirement.suggestedArtifacts.length
       ? requirement.suggestedArtifacts.map((artifact) => `\`${artifact}\``).join('<br>')
@@ -541,6 +610,12 @@ running strict compile.
 | Check ID | Required Source | What It Proves | Suggested Artifacts |
 | --- | --- | --- | --- |
 ${rows.join('\n')}
+
+## Manual Targets
+
+| Check ID | Target Role | Target ID |
+| --- | --- | --- |
+${renderManualTargets(evidence)}
 
 ## No-email Admin Evidence
 
@@ -576,7 +651,7 @@ function writeEvidenceWorkspace(outputDir, evidence) {
     mkdirSync(path.join(outputDir, artifactDirForCheck(requirement.id)), { recursive: true })
   }
   writeFileSync(evidencePath, `${JSON.stringify(sanitizeValue(evidence), null, 2)}\n`, 'utf8')
-  writeFileSync(checklistPath, renderManualEvidenceChecklist(), 'utf8')
+  writeFileSync(checklistPath, renderManualEvidenceChecklist(evidence), 'utf8')
   return evidencePath
 }
 
@@ -850,7 +925,7 @@ async function runSmoke(opts, evidence) {
     personUserCount: opts.personUserIds.length,
   })
 
-  pendingManualChecks(evidence)
+  pendingManualChecks(evidence, opts)
 }
 
 async function main() {

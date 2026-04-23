@@ -40,6 +40,11 @@ Options:
   --allowed-user <id>              Local user allowed to fill; repeatable
   --allowed-member-group <id>      Allowed local member group; repeatable
   --person-user <id>               Optional local user for person smoke; repeatable
+  --authorized-user <id>           DingTalk-bound allowed local user for manual submit proof
+  --unauthorized-user <id>         DingTalk-bound non-allowlisted local user for denial proof
+  --no-email-dingtalk-external-id <id>
+                                  Synced DingTalk account without local user/email for admin proof
+  --require-manual-targets         Fail preflight if manual target IDs are missing
   --output-dir <dir>               Session output directory, default ${DEFAULT_OUTPUT_ROOT}/<run-id>
   --timeout-ms <ms>                Per-request timeout for child tools, default 15000
   --skip-api                       Skip preflight GET /health only
@@ -58,7 +63,8 @@ Environment fallbacks:
   DINGTALK_P4_GROUP_A_SECRET, DINGTALK_GROUP_A_SECRET
   DINGTALK_P4_GROUP_B_SECRET, DINGTALK_GROUP_B_SECRET
   DINGTALK_P4_ALLOWED_USER_IDS, DINGTALK_P4_ALLOWED_MEMBER_GROUP_IDS
-  DINGTALK_P4_PERSON_USER_IDS
+  DINGTALK_P4_PERSON_USER_IDS, DINGTALK_P4_AUTHORIZED_USER_ID,
+  DINGTALK_P4_UNAUTHORIZED_USER_ID, DINGTALK_P4_NO_EMAIL_DINGTALK_EXTERNAL_ID
 `)
 }
 
@@ -147,12 +153,16 @@ function parseArgs(argv) {
     allowedUserIds: splitList(envValue(env, 'DINGTALK_P4_ALLOWED_USER_IDS', 'DINGTALK_P4_ALLOWED_USER_ID')),
     allowedMemberGroupIds: splitList(envValue(env, 'DINGTALK_P4_ALLOWED_MEMBER_GROUP_IDS', 'DINGTALK_P4_ALLOWED_MEMBER_GROUP_ID')),
     personUserIds: splitList(envValue(env, 'DINGTALK_P4_PERSON_USER_IDS', 'DINGTALK_P4_PERSON_USER_ID')),
+    authorizedUserId: envValue(env, 'DINGTALK_P4_AUTHORIZED_USER_ID'),
+    unauthorizedUserId: envValue(env, 'DINGTALK_P4_UNAUTHORIZED_USER_ID'),
+    noEmailDingTalkExternalId: envValue(env, 'DINGTALK_P4_NO_EMAIL_DINGTALK_EXTERNAL_ID'),
     outputDir: null,
     timeoutMs: 15_000,
     skipApi: false,
     skipHealth: false,
     skipTestSend: false,
     skipAutomationTestRun: false,
+    requireManualTargets: false,
     allowExternalArtifactRefs: false,
   }
 
@@ -210,6 +220,18 @@ function parseArgs(argv) {
         appendList(opts.personUserIds, readRequiredValue(argv, i, arg))
         i += 1
         break
+      case '--authorized-user':
+        opts.authorizedUserId = readRequiredValue(argv, i, arg).trim()
+        i += 1
+        break
+      case '--unauthorized-user':
+        opts.unauthorizedUserId = readRequiredValue(argv, i, arg).trim()
+        i += 1
+        break
+      case '--no-email-dingtalk-external-id':
+        opts.noEmailDingTalkExternalId = readRequiredValue(argv, i, arg).trim()
+        i += 1
+        break
       case '--output-dir':
         opts.outputDir = path.resolve(process.cwd(), readRequiredValue(argv, i, arg))
         i += 1
@@ -229,6 +251,9 @@ function parseArgs(argv) {
         break
       case '--skip-automation-test-run':
         opts.skipAutomationTestRun = true
+        break
+      case '--require-manual-targets':
+        opts.requireManualTargets = true
         break
       case '--allow-external-artifact-refs':
         opts.allowExternalArtifactRefs = true
@@ -279,6 +304,12 @@ DINGTALK_P4_ALLOWED_MEMBER_GROUP_IDS=
 
 # Optional local user IDs for direct DingTalk person-message delivery history.
 DINGTALK_P4_PERSON_USER_IDS=
+
+# Manual DingTalk-client/admin target identities for final screenshots.
+# If DINGTALK_P4_AUTHORIZED_USER_ID is blank, the first allowed user is used as the suggested authorized target.
+DINGTALK_P4_AUTHORIZED_USER_ID=
+DINGTALK_P4_UNAUTHORIZED_USER_ID=
+DINGTALK_P4_NO_EMAIL_DINGTALK_EXTERNAL_ID=
 `
 }
 
@@ -326,6 +357,17 @@ function buildChildEnv(opts) {
     DINGTALK_P4_ALLOWED_USER_IDS: opts.allowedUserIds.join(','),
     DINGTALK_P4_ALLOWED_MEMBER_GROUP_IDS: opts.allowedMemberGroupIds.join(','),
     DINGTALK_P4_PERSON_USER_IDS: opts.personUserIds.join(','),
+    DINGTALK_P4_AUTHORIZED_USER_ID: opts.authorizedUserId,
+    DINGTALK_P4_UNAUTHORIZED_USER_ID: opts.unauthorizedUserId,
+    DINGTALK_P4_NO_EMAIL_DINGTALK_EXTERNAL_ID: opts.noEmailDingTalkExternalId,
+  }
+}
+
+function manualTargets(opts) {
+  return {
+    authorizedUserId: opts.authorizedUserId || opts.allowedUserIds[0] || '',
+    unauthorizedUserId: opts.unauthorizedUserId || '',
+    noEmailDingTalkExternalId: opts.noEmailDingTalkExternalId || '',
   }
 }
 
@@ -587,6 +629,7 @@ function runSession(opts) {
     '--timeout-ms',
     String(opts.timeoutMs),
     ...(opts.skipApi ? ['--skip-api'] : []),
+    ...(opts.requireManualTargets ? ['--require-manual-targets'] : []),
   ]
   steps.push(runNodeStep('preflight', 'Validate P4 smoke inputs and backend health', preflightArgs[0], preflightArgs.slice(1), preflightDir, env))
 
@@ -628,6 +671,7 @@ function runSession(opts) {
     overallStatus: computeOverallStatus(steps, pendingChecks),
     sessionPhase: 'bootstrap',
     finalStrictStatus: 'not_run',
+    manualTargets: manualTargets(opts),
     steps,
     pendingChecks,
     nextCommands: [
@@ -701,6 +745,7 @@ function runFinalStrictCompile(opts) {
     overallStatus: strictPassed ? 'pass' : 'fail',
     sessionPhase: 'finalize',
     finalStrictStatus: strictPassed ? 'pass' : 'fail',
+    manualTargets: priorSummary?.manualTargets ?? manualTargets(opts),
     steps,
     pendingChecks,
     finalStrictSummary: compiledSummary
