@@ -199,6 +199,11 @@ export interface ApprovalTemplateListItemDTO {
   key: string
   name: string
   description: string | null
+  /**
+   * Wave 2 WP4 slice 1 — business category label (eg 请假 / 采购). `null`
+   * means the template is uncategorized. Mirrors the backend column.
+   */
+  category: string | null
   status: ApprovalTemplateStatus
   activeVersionId: string | null
   latestVersionId: string | null

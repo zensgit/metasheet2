@@ -43,6 +43,68 @@
         <!-- Template info -->
         <div class="template-detail__info">
           <p v-if="template.description">{{ template.description }}</p>
+          <!--
+            Wave 2 WP4 slice 1 — 模板分类. Read-only for non-admins; inline
+            editable for `approval-templates:manage`. We intentionally keep
+            this as a single field instead of building a full edit mode —
+            that broader editor is deferred to a later WP4 slice.
+          -->
+          <div class="template-detail__category">
+            <span class="template-detail__category-label">模板分类:</span>
+            <template v-if="!editingCategory">
+              <el-tag
+                v-if="template.category"
+                size="small"
+                type="info"
+                effect="plain"
+                data-testid="template-detail-category-tag"
+              >
+                {{ template.category }}
+              </el-tag>
+              <span v-else class="template-detail__category-empty" data-testid="template-detail-category-empty">
+                未分组
+              </span>
+              <el-button
+                v-if="canManageTemplates"
+                text
+                size="small"
+                data-testid="template-detail-category-edit-button"
+                style="margin-left: 8px"
+                @click="beginEditCategory"
+              >
+                编辑
+              </el-button>
+            </template>
+            <template v-else>
+              <el-input
+                v-model="categoryDraft"
+                size="small"
+                placeholder="分组标识，用于模板中心筛选，留空表示未分组"
+                style="width: 240px; margin-right: 8px"
+                maxlength="64"
+                data-testid="template-detail-category-input"
+                @keyup.enter="saveCategory"
+                @keyup.escape="cancelEditCategory"
+              />
+              <el-button
+                type="primary"
+                size="small"
+                :loading="categorySaving"
+                data-testid="template-detail-category-save-button"
+                @click="saveCategory"
+              >
+                保存
+              </el-button>
+              <el-button
+                size="small"
+                :disabled="categorySaving"
+                data-testid="template-detail-category-cancel-button"
+                @click="cancelEditCategory"
+              >
+                取消
+              </el-button>
+            </template>
+          </div>
           <div class="template-detail__meta">
             <span>模板 Key: {{ template.key }}</span>
             <span>当前版本: {{ template.activeVersionId ?? '无' }}</span>
@@ -139,7 +201,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import {
   ArrowLeft,
@@ -149,16 +211,57 @@ import {
   QuestionFilled,
   CircleCheckFilled,
 } from '@element-plus/icons-vue'
+import { ElMessage } from 'element-plus'
 import type { ApprovalNodeType, FormFieldType, ApprovalMode, EmptyAssigneePolicy } from '../../types/approval'
 import { useApprovalTemplateStore } from '../../approvals/templateStore'
 import { useApprovalPermissions } from '../../approvals/permissions'
+import { updateTemplateCategory } from '../../approvals/api'
 
 const route = useRoute()
 const router = useRouter()
 const store = useApprovalTemplateStore()
-const { canWrite } = useApprovalPermissions()
+const { canWrite, canManageTemplates } = useApprovalPermissions()
 
 const template = computed(() => store.activeTemplate)
+
+// Wave 2 WP4 slice 1 — inline category editor state.
+const editingCategory = ref(false)
+const categoryDraft = ref('')
+const categorySaving = ref(false)
+
+function beginEditCategory() {
+  if (!template.value) return
+  categoryDraft.value = template.value.category ?? ''
+  editingCategory.value = true
+}
+
+function cancelEditCategory() {
+  editingCategory.value = false
+  categoryDraft.value = ''
+}
+
+async function saveCategory() {
+  if (!template.value || categorySaving.value) return
+  const trimmed = categoryDraft.value.trim()
+  const nextCategory = trimmed.length > 0 ? trimmed : null
+  const currentCategory = template.value.category ?? null
+  if (nextCategory === currentCategory) {
+    editingCategory.value = false
+    return
+  }
+  categorySaving.value = true
+  try {
+    const updated = await updateTemplateCategory(template.value.id, nextCategory)
+    // Patch the cached store so the header refreshes without a round-trip.
+    store.activeTemplate = updated
+    editingCategory.value = false
+    ElMessage.success(nextCategory ? `已更新分类为 ${nextCategory}` : '已清除模板分类')
+  } catch (e: any) {
+    ElMessage.error(e?.message ?? '更新分类失败')
+  } finally {
+    categorySaving.value = false
+  }
+}
 
 function statusTagType(status: string) {
   const map: Record<string, string> = {
@@ -322,6 +425,23 @@ onMounted(() => {
   font-size: 13px;
   color: var(--el-text-color-secondary, #909399);
   flex-wrap: wrap;
+}
+
+.template-detail__category {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-bottom: 12px;
+  font-size: 13px;
+}
+
+.template-detail__category-label {
+  color: var(--el-text-color-regular, #606266);
+  margin-right: 4px;
+}
+
+.template-detail__category-empty {
+  color: var(--el-text-color-secondary, #909399);
 }
 
 .template-detail__content {

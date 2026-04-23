@@ -7,6 +7,7 @@ type TemplateRow = {
   key: string
   name: string
   description: string | null
+  category: string | null
   status: 'draft' | 'published' | 'archived'
   active_version_id: string | null
   latest_version_id: string | null
@@ -62,6 +63,7 @@ const routeState = vi.hoisted(() => {
       key: 'travel-request',
       name: 'Travel Request',
       description: 'Base template',
+      category: null,
       status: 'draft',
       active_version_id: null,
       latest_version_id: null,
@@ -146,11 +148,15 @@ const routeState = vi.hoisted(() => {
 
     if (normalized.startsWith('INSERT INTO approval_templates')) {
       const timestamp = now()
+      // Wave 2 WP4 slice 1 — production SQL is:
+      //   INSERT INTO approval_templates (key, name, description, category, status)
+      //   VALUES ($1, $2, $3, $4, 'draft')
       const row: TemplateRow = {
         id: `tpl-${state.templateSeq++}`,
         key: String(params[0]),
         name: String(params[1]),
         description: params[2] == null ? null : String(params[2]),
+        category: params[3] == null ? null : String(params[3]),
         status: 'draft',
         active_version_id: null,
         latest_version_id: null,
@@ -188,6 +194,11 @@ const routeState = vi.hoisted(() => {
       if (normalized.includes('description = $')) {
         const value = params[index++]
         row.description = value == null ? null : String(value)
+      }
+      if (normalized.includes('category = $')) {
+        // Wave 2 WP4 slice 1 — category updates on the parent row.
+        const value = params[index++]
+        row.category = value == null ? null : String(value)
       }
       row.updated_at = now()
       return { rows: [row], rowCount: 1 }

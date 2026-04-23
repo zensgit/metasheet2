@@ -207,6 +207,13 @@ export interface ApprovalTemplateListItemDTO {
   key: string
   name: string
   description: string | null
+  /**
+   * Wave 2 WP4 slice 1 — business category (eg 请假 / 采购). Trimmed string,
+   * <= 64 chars, or `null` for uncategorized templates. Lives on the parent
+   * `approval_templates` row (not on the version) so editing category alone
+   * does not spawn a new version.
+   */
+  category: string | null
   status: ApprovalTemplateStatus
   activeVersionId: string | null
   latestVersionId: string | null
@@ -223,6 +230,11 @@ export interface CreateApprovalTemplateRequest {
   key: string
   name: string
   description?: string | null
+  /**
+   * Wave 2 WP4 slice 1 — optional category. Empty string or whitespace is
+   * normalized to `null`; values longer than 64 chars trigger 400.
+   */
+  category?: string | null
   formSchema: FormSchema
   approvalGraph: ApprovalGraph
 }
@@ -231,6 +243,11 @@ export interface UpdateApprovalTemplateRequest {
   key?: string
   name?: string
   description?: string | null
+  /**
+   * Wave 2 WP4 slice 1 — when provided, updates `approval_templates.category`
+   * directly without creating a new template version.
+   */
+  category?: string | null
   formSchema?: FormSchema
   approvalGraph?: ApprovalGraph
 }

@@ -1,7 +1,7 @@
 import { poolManager } from '../../src/integration/db/connection-pool'
 
 const APPROVAL_SCHEMA_BOOTSTRAP_KEY = 'approval-schema-bootstrap'
-const APPROVAL_SCHEMA_BOOTSTRAP_VERSION = '20260423-wp3-approval-reads'
+const APPROVAL_SCHEMA_BOOTSTRAP_VERSION = '20260423-wp4-template-category'
 
 /**
  * Ensures the approval schema (tables, constraints, indexes, sequences) is
@@ -16,6 +16,7 @@ const APPROVAL_SCHEMA_BOOTSTRAP_VERSION = '20260423-wp3-approval-reads'
  *   - zzzz20260411123000_add_created_action_to_approval_records.ts
  *   - zzzz20260423120000_add_remind_action_to_approval_records.ts
  *   - zzzz20260423140000_create_approval_reads.ts
+ *   - zzzz20260423150000_add_approval_template_category.ts
  *
  * ### Concurrency — why an advisory lock
  *
@@ -285,6 +286,8 @@ export async function ensureApprovalSchemaReady(): Promise<void> {
       END $$;
     `)
     await client.query(`CREATE INDEX IF NOT EXISTS idx_approval_templates_status_updated ON approval_templates(status, updated_at DESC)`)
+    await client.query(`ALTER TABLE approval_templates ADD COLUMN IF NOT EXISTS category TEXT`)
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_approval_templates_category_status ON approval_templates(category, status) WHERE category IS NOT NULL`)
     await client.query(`CREATE INDEX IF NOT EXISTS idx_approval_template_versions_template ON approval_template_versions(template_id, version DESC)`)
     await client.query(`CREATE INDEX IF NOT EXISTS idx_approval_published_definitions_template_version ON approval_published_definitions(template_version_id, published_at DESC)`)
     await client.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_approval_published_definitions_active_template ON approval_published_definitions(template_id) WHERE is_active = TRUE`)

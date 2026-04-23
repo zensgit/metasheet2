@@ -27,6 +27,10 @@ const USE_MOCK = import.meta.env.DEV || (globalThis as any).__APPROVAL_MOCK__ ==
 // ---------------------------------------------------------------------------
 // Mock data factories
 // ---------------------------------------------------------------------------
+// Wave 2 WP4 slice 1 — mock categories cycle through a small set so the dev
+// template center can exercise the dropdown filter without a live backend.
+const MOCK_TEMPLATE_CATEGORIES: Array<string | null> = ['请假', '采购', '报销', null]
+
 function mockTemplateListItem(index: number): ApprovalTemplateListItemDTO {
   const statuses: ApprovalTemplateStatus[] = ['published', 'draft', 'archived']
   return {
@@ -34,6 +38,7 @@ function mockTemplateListItem(index: number): ApprovalTemplateListItemDTO {
     key: `TPL-${String(index).padStart(3, '0')}`,
     name: `审批模板 ${index}`,
     description: index % 2 === 0 ? '通用审批模板' : null,
+    category: MOCK_TEMPLATE_CATEGORIES[index % MOCK_TEMPLATE_CATEGORIES.length],
     status: statuses[index % statuses.length],
     activeVersionId: statuses[index % statuses.length] === 'published' ? `ver_${index}_1` : null,
     latestVersionId: `ver_${index}_1`,
@@ -65,6 +70,7 @@ function mockTemplateDetail(id: string): ApprovalTemplateDetailDTO {
   return {
     ...mockTemplateListItem(1),
     id,
+    category: '请假',
     status: 'published',
     activeVersionId: 'ver_1_1',
     formSchema: { fields: mockFormFields() },
@@ -299,6 +305,10 @@ function mockHistory(approvalId: string): UnifiedApprovalHistoryDTO[] {
 export interface TemplateListQuery {
   status?: ApprovalTemplateStatus
   search?: string
+  /**
+   * Wave 2 WP4 slice 1 — 按分类过滤模板。空字符串或缺省 = 不过滤。
+   */
+  category?: string
   page?: number
   pageSize?: number
 }
@@ -328,6 +338,7 @@ export async function listTemplates(
   if (USE_MOCK) {
     let items = Array.from({ length: 12 }, (_, i) => mockTemplateListItem(i + 1))
     if (query?.status) items = items.filter((t) => t.status === query.status)
+    if (query?.category) items = items.filter((t) => t.category === query.category)
     if (query?.search) {
       const q = query.search.toLowerCase()
       items = items.filter((t) => t.name.toLowerCase().includes(q))
@@ -340,10 +351,65 @@ export async function listTemplates(
   const params = new URLSearchParams()
   if (query?.status) params.set('status', query.status)
   if (query?.search) params.set('search', query.search)
+  if (query?.category) params.set('category', query.category)
   if (query?.page) params.set('page', String(query.page))
   if (query?.pageSize) params.set('pageSize', String(query.pageSize))
   const qs = params.toString()
   return apiGet(`/api/approval-templates${qs ? `?${qs}` : ''}`)
+}
+
+/**
+ * Wave 2 WP4 slice 1 — fetch distinct categories for the template center filter.
+ */
+export async function listTemplateCategories(): Promise<string[]> {
+  if (USE_MOCK) {
+    return MOCK_TEMPLATE_CATEGORIES.filter((c): c is string => typeof c === 'string' && c.length > 0)
+  }
+  const payload = await apiGet<{ data?: string[] }>('/api/approval-templates/categories')
+  return Array.isArray(payload?.data) ? payload.data : []
+}
+
+/**
+ * Wave 2 WP4 slice 1 — update a template's category inline. Thin PATCH
+ * wrapper; we do not expose a generic `updateTemplate` because slice 1 only
+ * touches category, not the form/graph.
+ */
+export async function updateTemplateCategory(
+  templateId: string,
+  category: string | null,
+): Promise<ApprovalTemplateDetailDTO> {
+  if (USE_MOCK) {
+    return { ...mockTemplateDetail(templateId), category }
+  }
+  const response = await apiFetch(`/api/approval-templates/${encodeURIComponent(templateId)}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ category }),
+  })
+  if (!response.ok) {
+    throw new Error(`API error: ${response.status} ${response.statusText}`)
+  }
+  return response.json()
+}
+
+/**
+ * Wave 2 WP4 slice 1 — clone a template as a new draft. Returns the cloned
+ * `ApprovalTemplateDetailDTO` so callers can navigate to its detail page.
+ */
+export async function cloneTemplate(templateId: string): Promise<ApprovalTemplateDetailDTO> {
+  if (USE_MOCK) {
+    const base = mockTemplateDetail(templateId)
+    const newId = `tpl_copy_${Date.now()}`
+    return {
+      ...base,
+      id: newId,
+      key: `${base.key}_copy_${Math.random().toString(16).slice(2, 8)}`,
+      name: `${base.name} (副本)`,
+      status: 'draft',
+      activeVersionId: null,
+      latestVersionId: `ver_${newId}_1`,
+    }
+  }
+  return apiPost(`/api/approval-templates/${encodeURIComponent(templateId)}/clone`, {})
 }
 
 export async function getTemplate(id: string): Promise<ApprovalTemplateDetailDTO> {
