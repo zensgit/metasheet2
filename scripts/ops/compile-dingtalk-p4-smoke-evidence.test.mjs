@@ -38,6 +38,13 @@ function makePassingEvidenceForCheck(id, extras = {}) {
       performedAt: '2026-04-22T15:00:00.000Z',
       summary: `${id} manual evidence ok`,
       artifacts: [manualArtifactRefForCheck(id)],
+      ...(id === 'unauthorized-user-denied'
+        ? {
+            submitBlocked: true,
+            recordInsertDelta: 0,
+            blockedReason: 'Visible form error showed the user is not in the DingTalk allowlist.',
+          }
+        : {}),
       ...extras,
     }
   }
@@ -447,6 +454,45 @@ test('compile-dingtalk-p4-smoke-evidence strict mode rejects pass checks without
     assert.equal(summary.remoteClientStatus, 'fail')
     assert.equal(summary.manualEvidenceIssues.some((issue) => issue.id === 'authorized-user-submit'), true)
     assert.equal(summary.manualEvidenceIssues.some((issue) => issue.id === 'send-group-message-form-link'), true)
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+
+test('compile-dingtalk-p4-smoke-evidence strict mode requires structured unauthorized denial evidence', () => {
+  const tmpDir = makeTmpDir()
+  const evidencePath = path.join(tmpDir, 'evidence.json')
+  const outputDir = path.join(tmpDir, 'compiled')
+
+  try {
+    writeEvidence(evidencePath, {
+      checks: requiredIds.map((id) => ({
+        id,
+        status: 'pass',
+        evidence: makePassingEvidenceForCheck(id, id === 'unauthorized-user-denied'
+          ? {
+              submitBlocked: false,
+              recordInsertDelta: 1,
+              blockedReason: '',
+            }
+          : {}),
+      })),
+    })
+
+    const result = spawnSync(process.execPath, [scriptPath, '--input', evidencePath, '--output-dir', outputDir, '--strict'], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+    })
+
+    assert.equal(result.status, 1)
+    assert.match(result.stderr, /submit_blocked_required/)
+    assert.match(result.stderr, /record_insert_delta_zero_required/)
+    assert.match(result.stderr, /blocked_reason_required/)
+    const summary = JSON.parse(readFileSync(path.join(outputDir, 'summary.json'), 'utf8'))
+    assert.equal(summary.overallStatus, 'fail')
+    assert.equal(summary.manualEvidenceIssues.some((issue) => issue.code === 'submit_blocked_required'), true)
+    assert.equal(summary.manualEvidenceIssues.some((issue) => issue.code === 'record_insert_delta_zero_required'), true)
+    assert.equal(summary.manualEvidenceIssues.some((issue) => issue.code === 'blocked_reason_required'), true)
   } finally {
     rmSync(tmpDir, { recursive: true, force: true })
   }

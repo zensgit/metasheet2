@@ -181,6 +181,22 @@ node scripts/ops/dingtalk-p4-evidence-record.mjs \
 
 For pass evidence, put the referenced file under `workspace/artifacts/<check-id>/` before running the recorder. The recorder validates the relative path, non-empty local file, manual source, and obvious secret-like text before updating `workspace/evidence.json`.
 
+For `unauthorized-user-denied`, also record the structured no-insert proof:
+
+```bash
+node scripts/ops/dingtalk-p4-evidence-record.mjs \
+  --session-dir output/dingtalk-p4-remote-smoke-session/142-session \
+  --check-id unauthorized-user-denied \
+  --status pass \
+  --source manual-client \
+  --operator qa \
+  --summary "Unauthorized DingTalk-bound user was blocked and no record was inserted." \
+  --artifact artifacts/unauthorized-user-denied/unauthorized-denied.png \
+  --submit-blocked \
+  --record-insert-delta 0 \
+  --blocked-reason "Visible error showed the user is not in the allowlist."
+```
+
 ```bash
 node scripts/ops/dingtalk-p4-smoke-session.mjs \
   --finalize output/dingtalk-p4-remote-smoke-session/142-session
