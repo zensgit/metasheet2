@@ -3,6 +3,21 @@
     <header class="template-center__header">
       <h1>审批模板</h1>
       <div class="template-center__toolbar">
+        <el-select
+          v-model="categoryFilter"
+          placeholder="全部分类"
+          clearable
+          data-testid="template-center-category-filter"
+          style="width: 160px; margin-right: 12px"
+          @change="handleCategoryChange"
+        >
+          <el-option
+            v-for="category in categories"
+            :key="category"
+            :label="category"
+            :value="category"
+          />
+        </el-select>
         <el-input
           v-model="searchText"
           placeholder="搜索模板名称"
@@ -62,9 +77,23 @@
       @row-click="handleRowClick"
     >
       <el-table-column prop="name" label="模板名称" min-width="200" />
-      <el-table-column prop="description" label="描述" min-width="200">
+      <el-table-column prop="description" label="描述" min-width="180">
         <template #default="{ row }">
           {{ row.description ?? '-' }}
+        </template>
+      </el-table-column>
+      <el-table-column label="分类" width="120">
+        <template #default="{ row }">
+          <el-tag
+            v-if="row.category"
+            size="small"
+            type="info"
+            effect="plain"
+            data-testid="template-center-row-category"
+          >
+            {{ row.category }}
+          </el-tag>
+          <span v-else class="template-center__category-empty">未分组</span>
         </template>
       </el-table-column>
       <el-table-column label="状态" width="100">
@@ -88,7 +117,7 @@
           {{ formatDate(row.createdAt) }}
         </template>
       </el-table-column>
-      <el-table-column label="操作" width="120" fixed="right">
+      <el-table-column label="操作" width="180" fixed="right">
         <template #default="{ row }">
           <el-button
             v-if="row.status === 'published' && canWrite"
@@ -97,6 +126,15 @@
             @click.stop="startApproval(row.id)"
           >
             发起审批
+          </el-button>
+          <el-button
+            v-if="canManageTemplates"
+            size="small"
+            :loading="cloningId === row.id"
+            data-testid="template-center-clone-button"
+            @click.stop="handleClone(row)"
+          >
+            克隆
           </el-button>
         </template>
       </el-table-column>
@@ -125,9 +163,11 @@
 import { ref, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { Search } from '@element-plus/icons-vue'
+import { ElMessage } from 'element-plus'
 import type { ApprovalTemplateListItemDTO, ApprovalTemplateStatus } from '../../types/approval'
 import { useApprovalTemplateStore } from '../../approvals/templateStore'
 import { useApprovalPermissions } from '../../approvals/permissions'
+import { cloneTemplate, listTemplateCategories } from '../../approvals/api'
 
 const router = useRouter()
 const store = useApprovalTemplateStore()
@@ -135,6 +175,10 @@ const { canWrite, canManageTemplates } = useApprovalPermissions()
 
 const statusTab = ref<'all' | ApprovalTemplateStatus>('all')
 const searchText = ref('')
+// Wave 2 WP4 slice 1 — category filter state. `''` = no filter.
+const categoryFilter = ref<string>('')
+const categories = ref<string[]>([])
+const cloningId = ref<string | null>(null)
 const currentPage = ref(1)
 const pageSize = ref(10)
 
@@ -165,9 +209,22 @@ function loadData() {
   store.loadTemplates({
     status: statusTab.value === 'all' ? undefined : statusTab.value,
     search: searchText.value || undefined,
+    // Wave 2 WP4 slice 1 — only pass `category` when it's a non-empty
+    // selection so the backend filter stays inert for "全部分类".
+    category: categoryFilter.value || undefined,
     page: currentPage.value,
     pageSize: pageSize.value,
   })
+}
+
+async function loadCategories() {
+  try {
+    categories.value = await listTemplateCategories()
+  } catch (e: any) {
+    // Non-fatal: dropdown just stays empty. The rest of the page continues
+    // to work without the filter.
+    categories.value = []
+  }
 }
 
 function handleTabChange() {
@@ -176,6 +233,11 @@ function handleTabChange() {
 }
 
 function handleSearch() {
+  currentPage.value = 1
+  loadData()
+}
+
+function handleCategoryChange() {
   currentPage.value = 1
   loadData()
 }
@@ -193,8 +255,26 @@ function startApproval(templateId: string) {
   router.push({ path: `/approvals/new/${templateId}` })
 }
 
+async function handleClone(row: ApprovalTemplateListItemDTO) {
+  if (!canManageTemplates.value) return
+  if (cloningId.value) return
+  cloningId.value = row.id
+  try {
+    const cloned = await cloneTemplate(row.id)
+    ElMessage.success(`已克隆模板：${cloned.name}`)
+    // Refresh categories in the background; navigation should not wait on it.
+    void loadCategories()
+    router.push({ path: `/approval-templates/${cloned.id}` })
+  } catch (e: any) {
+    ElMessage.error(e?.message ?? '克隆模板失败')
+  } finally {
+    cloningId.value = null
+  }
+}
+
 onMounted(() => {
   loadData()
+  loadCategories()
 })
 </script>
 
@@ -235,5 +315,10 @@ onMounted(() => {
   margin-top: 16px;
   display: flex;
   justify-content: flex-end;
+}
+
+.template-center__category-empty {
+  color: var(--el-text-color-secondary, #909399);
+  font-size: 12px;
 }
 </style>

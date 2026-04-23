@@ -178,9 +178,14 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
       const page = parsePaging(req.query.page, 1, Number.MAX_SAFE_INTEGER)
       const pageSize = parsePaging(req.query.pageSize, 20)
       const { limit, offset } = resolveApprovalListPaging(page, pageSize)
+      // Wave 2 WP4 slice 1 — `?category=xxx` equality filter. Empty / missing
+      // leaves the filter unset, which matches all categories AND uncategorized
+      // rows (same semantics as before the slice).
+      const rawCategory = typeof req.query.category === 'string' ? req.query.category.trim() : ''
       const result = await productService.listTemplates({
         status: typeof req.query.status === 'string' ? req.query.status : undefined,
         search: typeof req.query.search === 'string' ? req.query.search : undefined,
+        category: rawCategory.length > 0 ? rawCategory : undefined,
         limit,
         offset,
       })
@@ -201,12 +206,29 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
     }
   })
 
+  // Wave 2 WP4 slice 1 — served *above* `/api/approval-templates/:id` so
+  // Express's matcher does not mistake `categories` for a template id.
+  r.get('/api/approval-templates/categories', authenticate, rbacGuard('approval-templates:manage'), async (_req: Request, res: Response) => {
+    try {
+      const data = await productService.listTemplateCategories()
+      res.json({ data })
+    } catch (error) {
+      handleApprovalsError(
+        res,
+        error,
+        'APPROVAL_TEMPLATE_CATEGORY_LIST_FAILED',
+        'Failed to list approval template categories',
+      )
+    }
+  })
+
   r.post('/api/approval-templates', authenticate, rbacGuard('approval-templates:manage'), async (req: Request, res: Response) => {
     try {
       const template = await productService.createTemplate({
         key: req.body?.key,
         name: req.body?.name,
         description: req.body?.description,
+        category: req.body?.category,
         formSchema: req.body?.formSchema,
         approvalGraph: req.body?.approvalGraph,
       })
@@ -246,6 +268,10 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
         key: req.body?.key,
         name: req.body?.name,
         description: req.body?.description,
+        // Wave 2 WP4 slice 1 — only pass `category` along when the caller
+        // explicitly included it, so an absent field does not wipe existing
+        // values. `null` is a legitimate "clear" signal.
+        ...('category' in (req.body ?? {}) ? { category: req.body.category } : {}),
         formSchema: req.body?.formSchema,
         approvalGraph: req.body?.approvalGraph,
       })
@@ -256,6 +282,25 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
         error,
         'APPROVAL_TEMPLATE_UPDATE_FAILED',
         'Failed to update approval template',
+      )
+    }
+  })
+
+  // Wave 2 WP4 slice 1 — clone an existing template as a new draft. Always
+  // creates the clone as draft; no `published_definition` is copied over, so
+  // the caller must publish the clone separately before it can initiate
+  // instances. Mounted *before* the per-id publish route would not matter
+  // (path is distinct), but we keep it adjacent to the other per-id routes.
+  r.post('/api/approval-templates/:id/clone', authenticate, rbacGuard('approval-templates:manage'), async (req: Request, res: Response) => {
+    try {
+      const template = await productService.cloneTemplate(req.params.id)
+      res.status(201).json(template)
+    } catch (error) {
+      handleApprovalsError(
+        res,
+        error,
+        'APPROVAL_TEMPLATE_CLONE_FAILED',
+        'Failed to clone approval template',
       )
     }
   })

@@ -34,11 +34,18 @@ import { ServiceError } from './ApprovalBridgeService'
 interface ApprovalTemplateListQuery {
   status?: string
   search?: string
+  /**
+   * Wave 2 WP4 slice 1 — equality filter on `approval_templates.category`.
+   * Empty / undefined leaves the filter unset (returns all categories AND
+   * uncategorized rows). Trimmed by the router before reaching this layer.
+   */
+  category?: string
   limit: number
   offset: number
 }
 
 type TemplateVersionPreference = 'active' | 'latest'
+const TEMPLATE_CLONE_KEY_ATTEMPTS = 3
 
 interface CreateApprovalActor {
   userId: string
@@ -54,6 +61,10 @@ type TemplateRow = {
   key: string
   name: string
   description: string | null
+  /**
+   * Wave 2 WP4 slice 1 — nullable group label for the template center filter.
+   */
+  category: string | null
   status: 'draft' | 'published' | 'archived'
   active_version_id: string | null
   latest_version_id: string | null
@@ -70,6 +81,12 @@ type TemplateVersionRow = {
   approval_graph: Record<string, unknown>
   created_at: Date
   updated_at: Date
+}
+
+function isPostgresUniqueViolation(error: unknown): boolean {
+  return typeof error === 'object'
+    && error !== null
+    && (error as { code?: unknown }).code === '23505'
 }
 
 type PublishedDefinitionRow = {
@@ -91,6 +108,11 @@ type TemplateMetadataPatch = {
   key?: string
   name?: string
   description?: string | null
+  /**
+   * Wave 2 WP4 slice 1 — category edits on the parent template row. Explicit
+   * `null` clears the field; `undefined` leaves it untouched.
+   */
+  category?: string | null
 }
 
 type ApprovalRecordInsert = {
@@ -564,6 +586,8 @@ function toApprovalTemplateListItemDTO(row: TemplateRow): ApprovalTemplateListIt
     key: row.key,
     name: row.name,
     description: row.description,
+    // Wave 2 WP4 slice 1 — older rows predate the column; coerce undefined to null.
+    category: row.category ?? null,
     status: row.status,
     activeVersionId: row.active_version_id,
     latestVersionId: row.latest_version_id,
@@ -671,6 +695,34 @@ function normalizeOptionalString(value: unknown): string | null | undefined {
     throw new ServiceError('String value expected', 400, 'VALIDATION_ERROR')
   }
   return value.trim()
+}
+
+/**
+ * Wave 2 WP4 slice 1 — category normalization.
+ *   - `undefined` → `undefined` (meaning "caller didn't touch this field")
+ *   - `null` / empty / whitespace → `null` (explicit "clear")
+ *   - non-empty string → trimmed
+ *   - > 64 chars → 400 VALIDATION_ERROR
+ *   - non-string → 400 VALIDATION_ERROR
+ */
+const APPROVAL_TEMPLATE_CATEGORY_MAX_LENGTH = 64
+
+function normalizeTemplateCategory(value: unknown): string | null | undefined {
+  if (value === undefined) return undefined
+  if (value === null) return null
+  if (typeof value !== 'string') {
+    throw new ServiceError('category must be a string', 400, 'VALIDATION_ERROR')
+  }
+  const trimmed = value.trim()
+  if (trimmed.length === 0) return null
+  if (trimmed.length > APPROVAL_TEMPLATE_CATEGORY_MAX_LENGTH) {
+    throw new ServiceError(
+      `category must be at most ${APPROVAL_TEMPLATE_CATEGORY_MAX_LENGTH} characters`,
+      400,
+      'VALIDATION_ERROR',
+    )
+  }
+  return trimmed
 }
 
 function assertApprovalGraph(value: unknown, context: ValidationContext = REQUEST_VALIDATION_CONTEXT): ApprovalGraph {
@@ -801,6 +853,10 @@ export class ApprovalProductService {
       params.push(`%${query.search}%`)
       index += 1
     }
+    if (query.category) {
+      conditions.push(`category = $${index++}`)
+      params.push(query.category)
+    }
 
     const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : ''
 
@@ -839,6 +895,8 @@ export class ApprovalProductService {
     const key = normalizeRequiredString(request.key, 'key')
     const name = normalizeRequiredString(request.name, 'name')
     const description = normalizeOptionalString(request.description)
+    // Wave 2 WP4 slice 1 — category is optional; `undefined`/empty → null.
+    const category = normalizeTemplateCategory(request.category) ?? null
     const formSchema = assertFormSchema(request.formSchema)
     const approvalGraph = assertApprovalGraph(request.approvalGraph)
 
@@ -848,10 +906,10 @@ export class ApprovalProductService {
       await client.query('BEGIN')
 
       const templateResult = await client.query<TemplateRow>(
-        `INSERT INTO approval_templates (key, name, description, status)
-         VALUES ($1, $2, $3, 'draft')
+        `INSERT INTO approval_templates (key, name, description, category, status)
+         VALUES ($1, $2, $3, $4, 'draft')
          RETURNING *`,
-        [key, name, description ?? null],
+        [key, name, description ?? null, category],
       )
       let template = templateResult.rows[0]
 
@@ -894,6 +952,12 @@ export class ApprovalProductService {
     if (request.key !== undefined) metadataPatch.key = normalizeRequiredString(request.key, 'key')
     if (request.name !== undefined) metadataPatch.name = normalizeRequiredString(request.name, 'name')
     if (request.description !== undefined) metadataPatch.description = normalizeOptionalString(request.description) ?? null
+    if (request.category !== undefined) {
+      // Wave 2 WP4 slice 1 — category lives on the parent row and is NOT
+      // snapshotted into a new `approval_template_versions` record. Changing
+      // only category leaves the form/approval graph untouched.
+      metadataPatch.category = normalizeTemplateCategory(request.category) ?? null
+    }
 
     const formSchema = request.formSchema !== undefined ? assertFormSchema(request.formSchema) : undefined
     const approvalGraph = request.approvalGraph !== undefined ? assertApprovalGraph(request.approvalGraph) : undefined
@@ -928,6 +992,10 @@ export class ApprovalProductService {
         if (metadataPatch.description !== undefined) {
           setClauses.push(`description = $${index++}`)
           params.push(metadataPatch.description)
+        }
+        if (metadataPatch.category !== undefined) {
+          setClauses.push(`category = $${index++}`)
+          params.push(metadataPatch.category)
         }
         setClauses.push('updated_at = now()')
         params.push(id)
@@ -1089,6 +1157,130 @@ export class ApprovalProductService {
     } finally {
       client?.release()
     }
+  }
+
+  /**
+   * Wave 2 WP4 slice 1 — list distinct, non-null categories used by templates
+   * in `approval_templates`. Drives the template center dropdown filter.
+   *
+   * Returns a sorted array of strings. We do this server-side rather than
+   * client-side because the template row count is small and this keeps the
+   * frontend from paging through every template just to populate a filter.
+   */
+  async listTemplateCategories(): Promise<string[]> {
+    if (!pool) throw new Error('Database not available')
+    const result = await pool.query<{ category: string }>(
+      `SELECT DISTINCT category
+       FROM approval_templates
+       WHERE category IS NOT NULL
+       ORDER BY category ASC`,
+    )
+    return result.rows.map((row) => row.category).filter((v) => typeof v === 'string' && v.length > 0)
+  }
+
+  /**
+   * Wave 2 WP4 slice 1 — clone an existing template as a new DRAFT.
+   *
+   * Copies:
+   *   - formSchema + approvalGraph from the source's latest version
+   *   - category (so the clone lands in the same group)
+   * Does NOT copy:
+   *   - published_definition (the clone is a draft until the caller publishes)
+   *   - status (the clone is always 'draft')
+   *   - version history (fresh version 1)
+   *
+   * Name / key mutations:
+   *   - name:  `"{original} (副本)"`
+   *   - key:   `"{original}_copy_<6 hex chars>"`     (guarantees uniqueness)
+   *
+   * Permission: callers must already hold `approval-templates:manage`; this
+   * method treats the clone as an ordinary draft creation from the acting
+   * admin's perspective.
+   */
+  async cloneTemplate(id: string): Promise<ApprovalTemplateDetailDTO> {
+    if (!pool) throw new Error('Database not available')
+
+    // Load the source bundle — we prefer the `latest` version so that
+    // in-flight draft edits carry over, but the source template itself can
+    // sit in any status (draft / published / archived).
+    const source = await this.loadTemplateBundle(id, undefined, 'latest')
+    if (!source) {
+      throw new ServiceError('Approval template not found', 404, 'APPROVAL_TEMPLATE_NOT_FOUND')
+    }
+    if (!source.version) {
+      throw new ServiceError('Approval template has no version to clone', 400, 'APPROVAL_TEMPLATE_VERSION_NOT_FOUND')
+    }
+
+    const newName = `${source.template.name} (副本)`
+
+    for (let attempt = 0; attempt < TEMPLATE_CLONE_KEY_ATTEMPTS; attempt += 1) {
+      // `crypto.randomBytes(3).toString('hex')` yields exactly 6 hex chars.
+      const copySuffix = crypto.randomBytes(3).toString('hex')
+      const newKey = `${source.template.key}_copy_${copySuffix}`
+      let client: ApprovalDbClient | null = null
+      try {
+        client = await pool.connect()
+        await client.query('BEGIN')
+
+        const templateResult = await client.query<TemplateRow>(
+          `INSERT INTO approval_templates (key, name, description, category, status)
+           VALUES ($1, $2, $3, $4, 'draft')
+           RETURNING *`,
+          [newKey, newName, source.template.description, source.template.category ?? null],
+        )
+        let template = templateResult.rows[0]
+
+        const versionResult = await client.query<TemplateVersionRow>(
+          `INSERT INTO approval_template_versions (template_id, version, status, form_schema, approval_graph)
+           VALUES ($1, 1, 'draft', $2, $3)
+           RETURNING *`,
+          [
+            template.id,
+            JSON.stringify(source.version.form_schema),
+            JSON.stringify(source.version.approval_graph),
+          ],
+        )
+        const version = versionResult.rows[0]
+
+        const updatedTemplateResult = await client.query<TemplateRow>(
+          `UPDATE approval_templates
+           SET latest_version_id = $1, updated_at = now()
+           WHERE id = $2
+           RETURNING *`,
+          [version.id, template.id],
+        )
+        template = updatedTemplateResult.rows[0]
+
+        await client.query('COMMIT')
+
+        return toApprovalTemplateDetailDTO({
+          template,
+          version,
+          publishedDefinition: null,
+        })
+      } catch (error) {
+        await rollbackQuietly(client)
+        if (isPostgresUniqueViolation(error) && attempt < TEMPLATE_CLONE_KEY_ATTEMPTS - 1) {
+          continue
+        }
+        if (isPostgresUniqueViolation(error)) {
+          throw new ServiceError(
+            'Approval template clone key conflict',
+            409,
+            'APPROVAL_TEMPLATE_CLONE_KEY_CONFLICT',
+          )
+        }
+        throw error
+      } finally {
+        client?.release()
+      }
+    }
+
+    throw new ServiceError(
+      'Approval template clone key conflict',
+      409,
+      'APPROVAL_TEMPLATE_CLONE_KEY_CONFLICT',
+    )
   }
 
   async createApproval(request: CreateApprovalRequest, actor: CreateApprovalActor): Promise<UnifiedApprovalDTO> {

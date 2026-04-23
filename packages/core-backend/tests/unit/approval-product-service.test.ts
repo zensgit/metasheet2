@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import crypto from 'crypto'
 
 const pgState = vi.hoisted(() => ({
   client: {
@@ -594,5 +595,124 @@ describe('ApprovalProductService', () => {
       remainingAssignments: 1,
     })
     expect(pgState.client.release).toHaveBeenCalledTimes(1)
+  })
+
+  it('retries template clone key generation on a unique violation', async () => {
+    const randomBytesSpy = vi.spyOn(crypto, 'randomBytes')
+      .mockReturnValueOnce(Buffer.from('aaaaaa', 'hex') as never)
+      .mockReturnValueOnce(Buffer.from('bbbbbb', 'hex') as never)
+
+    const sourceTemplate = {
+      id: 'tpl-source',
+      key: 'travel',
+      name: 'Travel',
+      description: 'Travel template',
+      category: '请假',
+      status: 'archived',
+      active_version_id: null,
+      latest_version_id: 'ver-source',
+      created_at: new Date('2026-04-23T00:00:00.000Z'),
+      updated_at: new Date('2026-04-23T00:00:00.000Z'),
+    }
+    const sourceVersion = {
+      id: 'ver-source',
+      template_id: 'tpl-source',
+      version: 3,
+      status: 'archived',
+      form_schema: { fields: [] },
+      approval_graph: { nodes: [], edges: [] },
+      created_at: new Date('2026-04-23T00:00:00.000Z'),
+      updated_at: new Date('2026-04-23T00:00:00.000Z'),
+    }
+
+    pgState.pool.query.mockImplementation(async (sql: string) => {
+      const statement = normalize(sql)
+      if (statement.startsWith('SELECT * FROM approval_templates WHERE id = $1')) {
+        return { rows: [sourceTemplate], rowCount: 1 }
+      }
+      if (statement.startsWith('SELECT * FROM approval_template_versions WHERE id = $1')) {
+        return { rows: [sourceVersion], rowCount: 1 }
+      }
+      if (statement.startsWith('SELECT * FROM approval_published_definitions')) {
+        return { rows: [], rowCount: 0 }
+      }
+      throw new Error(`Unhandled pool query: ${statement}`)
+    })
+
+    let templateInsertAttempts = 0
+    pgState.client.query.mockImplementation(async (sql: string, params?: unknown[]) => {
+      const statement = normalize(sql)
+      if (statement === 'BEGIN' || statement === 'ROLLBACK' || statement === 'COMMIT') {
+        return { rows: [], rowCount: 0 }
+      }
+      if (statement.startsWith('INSERT INTO approval_templates')) {
+        templateInsertAttempts += 1
+        if (templateInsertAttempts === 1) {
+          throw Object.assign(new Error('duplicate key'), {
+            code: '23505',
+            constraint: 'idx_approval_templates_key',
+          })
+        }
+        expect(params?.[0]).toBe('travel_copy_bbbbbb')
+        return {
+          rows: [{
+            ...sourceTemplate,
+            id: 'tpl-clone',
+            key: 'travel_copy_bbbbbb',
+            name: 'Travel (副本)',
+            status: 'draft',
+            active_version_id: null,
+            latest_version_id: null,
+          }],
+          rowCount: 1,
+        }
+      }
+      if (statement.startsWith('INSERT INTO approval_template_versions')) {
+        return {
+          rows: [{
+            ...sourceVersion,
+            id: 'ver-clone',
+            template_id: 'tpl-clone',
+            version: 1,
+            status: 'draft',
+          }],
+          rowCount: 1,
+        }
+      }
+      if (statement.startsWith('UPDATE approval_templates SET latest_version_id')) {
+        return {
+          rows: [{
+            ...sourceTemplate,
+            id: 'tpl-clone',
+            key: 'travel_copy_bbbbbb',
+            name: 'Travel (副本)',
+            status: 'draft',
+            active_version_id: null,
+            latest_version_id: 'ver-clone',
+          }],
+          rowCount: 1,
+        }
+      }
+      throw new Error(`Unhandled client query: ${statement}`)
+    })
+
+    const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+    const service = new ApprovalProductService()
+    const result = await service.cloneTemplate('tpl-source')
+
+    expect(result).toMatchObject({
+      id: 'tpl-clone',
+      key: 'travel_copy_bbbbbb',
+      name: 'Travel (副本)',
+      status: 'draft',
+      category: '请假',
+      latestVersionId: 'ver-clone',
+    })
+    expect(templateInsertAttempts).toBe(2)
+    expect(pgState.client.query.mock.calls.filter(([sql]) => normalize(sql as string) === 'ROLLBACK')).toHaveLength(1)
+    expect(pgState.client.query.mock.calls.filter(([sql]) => normalize(sql as string) === 'COMMIT')).toHaveLength(1)
+    expect(pgState.client.release).toHaveBeenCalledTimes(2)
+
+    randomBytesSpy.mockRestore()
   })
 })
