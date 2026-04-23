@@ -419,9 +419,16 @@ export async function createApproval(req: CreateApprovalRequest): Promise<Unifie
  * source system. Used by the 待办 tab badge; the response is intentionally
  * scalar so the caller does not need to fetch the full list just to render
  * the indicator.
+ *
+ * Wave 2 WP3 slice 2 extends the response with `unreadCount`: the subset of
+ * the same assignments whose `approval_reads` row has not been written for
+ * the current user. The badge switches to `unreadCount` as the primary
+ * semantic ("有未读"); `count` is still exposed so callers can render a
+ * "待办 X (其中 Y 未读)" tooltip.
  */
 export interface PendingCountResponse {
   count: number
+  unreadCount: number
   degraded?: boolean
 }
 
@@ -430,10 +437,53 @@ export async function getPendingCount(
 ): Promise<PendingCountResponse> {
   if (USE_MOCK) {
     const fallback = sourceSystem === 'platform' ? 2 : sourceSystem === 'plm' ? 1 : 3
-    return { count: fallback }
+    // Mock mode: mirror the server's additive contract — treat every pending
+    // row as unread so the dev-mode badge matches the list below.
+    return { count: fallback, unreadCount: fallback }
   }
   const qs = sourceSystem ? `?sourceSystem=${encodeURIComponent(sourceSystem)}` : ''
   return apiGet(`/api/approvals/pending-count${qs}`)
+}
+
+/**
+ * Wave 2 WP3 slice 2 — mark a single approval as read for the current user.
+ *
+ * Used by `ApprovalDetailView` on-mount (fire-and-forget). The endpoint is
+ * idempotent — a second call simply refreshes `read_at`. A missing instance
+ * (unsynced PLM edge) is reported as `{ ok:true, skipped:true }` so the
+ * detail view never surfaces a noisy error.
+ */
+export interface MarkApprovalReadResponse {
+  ok: boolean
+  skipped?: boolean
+  reason?: string
+}
+
+export async function markApprovalRead(id: string): Promise<MarkApprovalReadResponse> {
+  if (USE_MOCK) {
+    return { ok: true }
+  }
+  return apiPost(`/api/approvals/${encodeURIComponent(id)}/mark-read`, {})
+}
+
+/**
+ * Wave 2 WP3 slice 2 — mark every active assignment as read for the current
+ * user. Used by the 审批中心 "全部标记已读" action; honours the 待办 tab's
+ * current `sourceSystem` filter so the user's intent ("clear my unread badge
+ * for this tab") is preserved.
+ */
+export interface MarkAllApprovalsReadResponse {
+  markedCount: number
+}
+
+export async function markAllApprovalsRead(
+  sourceSystem: 'all' | 'platform' | 'plm' = 'all',
+): Promise<MarkAllApprovalsReadResponse> {
+  if (USE_MOCK) {
+    const fallback = sourceSystem === 'platform' ? 2 : sourceSystem === 'plm' ? 1 : 3
+    return { markedCount: fallback }
+  }
+  return apiPost(`/api/approvals/mark-all-read`, { sourceSystem })
 }
 
 /**

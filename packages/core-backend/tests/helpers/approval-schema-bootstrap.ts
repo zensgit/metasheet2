@@ -1,7 +1,7 @@
 import { poolManager } from '../../src/integration/db/connection-pool'
 
 const APPROVAL_SCHEMA_BOOTSTRAP_KEY = 'approval-schema-bootstrap'
-const APPROVAL_SCHEMA_BOOTSTRAP_VERSION = '20260423-wp3-remind-action'
+const APPROVAL_SCHEMA_BOOTSTRAP_VERSION = '20260423-wp3-approval-reads'
 
 /**
  * Ensures the approval schema (tables, constraints, indexes, sequences) is
@@ -15,6 +15,7 @@ const APPROVAL_SCHEMA_BOOTSTRAP_VERSION = '20260423-wp3-remind-action'
  *   - zzzz20260411120100_approval_templates_and_instance_extensions.ts
  *   - zzzz20260411123000_add_created_action_to_approval_records.ts
  *   - zzzz20260423120000_add_remind_action_to_approval_records.ts
+ *   - zzzz20260423140000_create_approval_reads.ts
  *
  * ### Concurrency — why an advisory lock
  *
@@ -213,6 +214,19 @@ export async function ensureApprovalSchemaReady(): Promise<void> {
     await client.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_approval_assignments_active_unique ON approval_assignments(instance_id, assignment_type, assignee_id) WHERE is_active = TRUE`)
     await client.query(`CREATE INDEX IF NOT EXISTS idx_approval_assignments_lookup ON approval_assignments(assignment_type, assignee_id, is_active)`)
     await client.query(`CREATE INDEX IF NOT EXISTS idx_approval_assignments_instance ON approval_assignments(instance_id, is_active)`)
+
+    // Wave 2 WP3 slice 2 — approval_reads: per-user "已读" state for the 未读
+    // badge. FK cascade mirrors approval_records / approval_assignments so
+    // instance deletion also purges read state.
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS approval_reads (
+        user_id TEXT NOT NULL,
+        instance_id TEXT NOT NULL REFERENCES approval_instances(id) ON DELETE CASCADE,
+        read_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        PRIMARY KEY (user_id, instance_id)
+      )
+    `)
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_approval_reads_user_read_at ON approval_reads(user_id, read_at DESC)`)
 
     await client.query(`
       CREATE TABLE IF NOT EXISTS approval_templates (

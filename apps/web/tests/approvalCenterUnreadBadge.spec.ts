@@ -1,11 +1,12 @@
 /**
- * Wave 2 WP3 slice 1 — 红点 / 催办 frontend specs.
+ * Wave 2 WP3 slice 2 — 已读/未读 frontend specs.
  *
- * Covers two surfaces:
- *   1. `ApprovalCenterView` renders a red badge on the 待我处理 tab with the
- *      server-provided count when > 0, and hides it when 0.
- *   2. `ApprovalDetailView` exposes a "催一下" button for the requester on a
- *      pending instance and maps the API result (200 vs 429) to a toast.
+ * Covers three surfaces introduced by the slice 2 contract:
+ *   1. `ApprovalCenterView` badge reads `unreadCount` (not `count`) from the
+ *      pending-count endpoint.
+ *   2. Clicking "全部标记已读" invokes `markAllApprovalsRead` with the current
+ *      sourceSystem and re-polls the badge afterwards, flipping to 0.
+ *   3. `ApprovalDetailView` fires `markApprovalRead(instance.id)` on mount.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, defineComponent, h, nextTick, ref, type App as VueApp } from 'vue'
@@ -15,12 +16,10 @@ import { createApp, defineComponent, h, nextTick, ref, type App as VueApp } from
 // without triggering the "cannot access X before initialization" guard.
 // ---------------------------------------------------------------------------
 const pushSpy = vi.fn().mockResolvedValue(undefined)
-// Slice 2 (approval_reads) extended the endpoint to return `unreadCount`; the
-// badge now reads that instead of the raw `count`. The mock returns both so
-// this slice-1 spec still asserts the legacy contract alongside the new one.
 const getPendingCountSpy = vi.fn<(sourceSystem?: 'all' | 'platform' | 'plm') => Promise<{ count: number; unreadCount: number }>>()
+const markAllApprovalsReadSpy = vi.fn<(sourceSystem?: 'all' | 'platform' | 'plm') => Promise<{ markedCount: number }>>()
+const markApprovalReadSpy = vi.fn<(id: string) => Promise<{ ok: boolean }>>()
 const remindApprovalSpy = vi.fn()
-const markApprovalReadSpy = vi.fn().mockResolvedValue({ ok: true })
 const elSuccessSpy = vi.fn()
 const elWarningSpy = vi.fn()
 const elErrorSpy = vi.fn()
@@ -34,7 +33,7 @@ vi.mock('vue-router', async () => {
       back: vi.fn(),
     }),
     useRoute: () => ({
-      params: { id: 'apv_remind_target' },
+      params: { id: 'apv_read_target' },
       query: {},
       path: '/approvals',
       meta: {},
@@ -110,9 +109,9 @@ vi.mock('../src/approvals/templateStore', () => ({
 
 vi.mock('../src/approvals/api', () => ({
   getPendingCount: (sourceSystem?: 'all' | 'platform' | 'plm') => getPendingCountSpy(sourceSystem),
+  markAllApprovalsRead: (sourceSystem?: 'all' | 'platform' | 'plm') => markAllApprovalsReadSpy(sourceSystem),
+  markApprovalRead: (id: string) => markApprovalReadSpy(id),
   remindApproval: (...args: unknown[]) => remindApprovalSpy(...args),
-  markApprovalRead: (...args: unknown[]) => markApprovalReadSpy(...args),
-  markAllApprovalsRead: vi.fn().mockResolvedValue({ markedCount: 0 }),
 }))
 
 // ---------------------------------------------------------------------------
@@ -268,6 +267,14 @@ const ElBadge = defineComponent({
   },
 })
 
+const ElTooltip = defineComponent({
+  name: 'ElTooltip',
+  props: { content: String, placement: String },
+  render() {
+    return h('span', { 'data-el-tooltip': this.content }, this.$slots.default?.())
+  },
+})
+
 const ElIcon = defineComponent({
   name: 'ElIcon',
   render() {
@@ -332,7 +339,7 @@ const ElTimelineItem = defineComponent({
 
 const stubDirective = { mounted() {}, updated() {} }
 
-async function flushUi(cycles = 4): Promise<void> {
+async function flushUi(cycles = 6): Promise<void> {
   for (let i = 0; i < cycles; i += 1) {
     await Promise.resolve()
     await nextTick()
@@ -353,6 +360,7 @@ function registerCommonStubs(app: VueApp<Element>): void {
   app.component('ElAlert', ElAlert)
   app.component('ElEmpty', ElEmpty)
   app.component('ElBadge', ElBadge)
+  app.component('ElTooltip', ElTooltip)
   app.component('ElIcon', ElIcon)
   app.component('ElPopconfirm', ElPopconfirm)
   app.component('ElDialog', ElDialog)
@@ -368,12 +376,14 @@ function registerCommonStubs(app: VueApp<Element>): void {
 // Specs
 // ---------------------------------------------------------------------------
 
-describe('ApprovalCenterView 待办红点 (WP3 slice 1)', () => {
+describe('ApprovalCenterView 未读红点 (WP3 slice 2)', () => {
   let app: VueApp<Element> | null = null
   let container: HTMLDivElement | null = null
 
   beforeEach(() => {
     getPendingCountSpy.mockReset()
+    markAllApprovalsReadSpy.mockReset()
+    markApprovalReadSpy.mockReset()
     remindApprovalSpy.mockReset()
     pushSpy.mockClear()
     elSuccessSpy.mockClear()
@@ -398,12 +408,8 @@ describe('ApprovalCenterView 待办红点 (WP3 slice 1)', () => {
     vi.clearAllMocks()
   })
 
-  async function mountCenter(pendingCount: number): Promise<void> {
-    // Slice 1 contract: badge shows `count`. Slice 2 flips the primary
-    // semantic to `unreadCount`, so for this spec the two are equal — the
-    // server would report every active assignment as unread when nothing has
-    // been read yet, matching the intent of the slice-1 fixture.
-    getPendingCountSpy.mockResolvedValue({ count: pendingCount, unreadCount: pendingCount })
+  async function mountCenter(initial: { count: number; unreadCount: number }): Promise<void> {
+    getPendingCountSpy.mockResolvedValue(initial)
     const { default: ApprovalCenterView } = await import('../src/views/approval/ApprovalCenterView.vue')
     const Host = defineComponent({
       setup() {
@@ -413,45 +419,115 @@ describe('ApprovalCenterView 待办红点 (WP3 slice 1)', () => {
     app = createApp(Host)
     registerCommonStubs(app)
     app.mount(container!)
-    await flushUi(6)
+    await flushUi()
   }
 
-  it('renders a badge with the server count on mount when > 0', async () => {
-    await mountCenter(5)
+  it('renders the badge with unreadCount (not count) on mount', async () => {
+    await mountCenter({ count: 7, unreadCount: 3 })
     expect(getPendingCountSpy).toHaveBeenCalledWith('all')
     const badge = container!.querySelector('[data-testid="approval-pending-badge"]') as HTMLElement | null
     expect(badge).toBeTruthy()
-    // el-badge prop is mapped to data-badge-value in our stub; the content is
-    // the same integer the endpoint returned.
-    expect(badge?.getAttribute('data-badge-value')).toBe('5')
+    expect(badge?.getAttribute('data-badge-value')).toBe('3')
   })
 
-  it('hides the badge when the pending count is 0', async () => {
-    await mountCenter(0)
-    expect(getPendingCountSpy).toHaveBeenCalled()
+  it('hides the badge when unreadCount is 0 even if count > 0', async () => {
+    await mountCenter({ count: 4, unreadCount: 0 })
     const badge = container!.querySelector('[data-testid="approval-pending-badge"]')
     expect(badge).toBeNull()
   })
+
+  it('全部标记已读 calls the API with the current sourceSystem and refreshes the badge to 0', async () => {
+    getPendingCountSpy.mockResolvedValueOnce({ count: 4, unreadCount: 3 })
+    markAllApprovalsReadSpy.mockResolvedValueOnce({ markedCount: 3 })
+    // After the mark-all call the component re-fetches pending-count; the
+    // second response should drop the unread count to 0 so the badge clears.
+    getPendingCountSpy.mockResolvedValueOnce({ count: 4, unreadCount: 0 })
+
+    const { default: ApprovalCenterView } = await import('../src/views/approval/ApprovalCenterView.vue')
+    const Host = defineComponent({
+      setup() {
+        return () => h(ApprovalCenterView as any)
+      },
+    })
+    app = createApp(Host)
+    registerCommonStubs(app)
+    app.mount(container!)
+    await flushUi()
+
+    const badgeBefore = container!.querySelector('[data-testid="approval-pending-badge"]') as HTMLElement | null
+    expect(badgeBefore?.getAttribute('data-badge-value')).toBe('3')
+
+    const button = container!.querySelector('[data-testid="approval-mark-all-read"]') as HTMLButtonElement
+    expect(button).toBeTruthy()
+    button.click()
+    await flushUi()
+
+    expect(markAllApprovalsReadSpy).toHaveBeenCalledWith('all')
+    expect(elSuccessSpy).toHaveBeenCalled()
+    // getPendingCount fired twice: once on mount, once after mark-all-read.
+    expect(getPendingCountSpy.mock.calls.length).toBeGreaterThanOrEqual(2)
+
+    const badgeAfter = container!.querySelector('[data-testid="approval-pending-badge"]')
+    expect(badgeAfter).toBeNull()
+  })
+
+  it('disables 全部标记已读 when there is nothing unread', async () => {
+    await mountCenter({ count: 2, unreadCount: 0 })
+    const button = container!.querySelector('[data-testid="approval-mark-all-read"]') as HTMLButtonElement
+    expect(button).toBeTruthy()
+    expect(button.hasAttribute('disabled')).toBe(true)
+  })
+
+  it('refreshes the unread badge when sourceSystem changes', async () => {
+    getPendingCountSpy
+      .mockResolvedValueOnce({ count: 7, unreadCount: 3 })
+      .mockResolvedValueOnce({ count: 2, unreadCount: 1 })
+
+    const { default: ApprovalCenterView } = await import('../src/views/approval/ApprovalCenterView.vue')
+    const Host = defineComponent({
+      setup() {
+        return () => h(ApprovalCenterView as any)
+      },
+    })
+    app = createApp(Host)
+    registerCommonStubs(app)
+    app.mount(container!)
+    await flushUi()
+
+    const initialBadge = container!.querySelector('[data-testid="approval-pending-badge"]') as HTMLElement | null
+    expect(initialBadge?.getAttribute('data-badge-value')).toBe('3')
+
+    const filter = container!.querySelector('[data-testid="approval-source-filter"]') as HTMLSelectElement
+    filter.value = 'plm'
+    filter.dispatchEvent(new Event('change'))
+    await flushUi()
+
+    expect(getPendingCountSpy).toHaveBeenLastCalledWith('plm')
+    const updatedBadge = container!.querySelector('[data-testid="approval-pending-badge"]') as HTMLElement | null
+    expect(updatedBadge?.getAttribute('data-badge-value')).toBe('1')
+  })
 })
 
-describe('ApprovalDetailView 催一下 (WP3 slice 1)', () => {
+describe('ApprovalDetailView mark-read on mount (WP3 slice 2)', () => {
   let app: VueApp<Element> | null = null
   let container: HTMLDivElement | null = null
 
   beforeEach(() => {
     getPendingCountSpy.mockReset()
+    markAllApprovalsReadSpy.mockReset()
+    markApprovalReadSpy.mockReset()
     remindApprovalSpy.mockReset()
     pushSpy.mockClear()
     elSuccessSpy.mockClear()
     elWarningSpy.mockClear()
     elErrorSpy.mockClear()
     mockActiveApproval.value = {
-      id: 'apv_remind_target',
+      id: 'apv_read_target',
       sourceSystem: 'platform',
       status: 'pending',
       requester: { id: 'user_1', name: '申请人' },
-      title: '催办目标',
-      requestNo: 'AP-999999',
+      title: '已读目标',
+      requestNo: 'AP-888888',
       templateId: null,
       templateVersionId: null,
       publishedDefinitionId: null,
@@ -487,66 +563,20 @@ describe('ApprovalDetailView 催一下 (WP3 slice 1)', () => {
     app = createApp(Host)
     registerCommonStubs(app)
     app.mount(container!)
-    await flushUi(6)
+    await flushUi()
   }
 
-  it('shows the 催一下 button for the requester on a pending approval', async () => {
+  it('fires markApprovalRead with the route id on mount', async () => {
+    markApprovalReadSpy.mockResolvedValue({ ok: true })
     await mountDetail()
-    const button = container!.querySelector('[data-testid="approval-remind-button"]') as HTMLButtonElement | null
-    expect(button).toBeTruthy()
-    expect(button!.textContent).toContain('催一下')
+    expect(markApprovalReadSpy).toHaveBeenCalledWith('apv_read_target')
   })
 
-  it('calls the remind API and shows a success toast on 200', async () => {
-    remindApprovalSpy.mockResolvedValueOnce({
-      ok: true,
-      data: {
-        id: 'apv_remind_target',
-        action: 'remind',
-        remindedAt: new Date().toISOString(),
-        bridged: false,
-        sourceSystem: 'platform',
-      },
-    })
+  it('does not surface an error toast when mark-read rejects', async () => {
+    markApprovalReadSpy.mockRejectedValue(new Error('network'))
     await mountDetail()
-    const button = container!.querySelector('[data-testid="approval-remind-button"]') as HTMLButtonElement
-    button.click()
-    await flushUi(6)
-    expect(remindApprovalSpy).toHaveBeenCalledWith('apv_remind_target')
-    expect(elSuccessSpy).toHaveBeenCalledWith('已催办')
-  })
-
-  it('surfaces the throttle message when the server returns 429', async () => {
-    const lastRemindedAt = new Date(Date.now() - 5 * 60 * 1000).toISOString()
-    remindApprovalSpy.mockResolvedValueOnce({
-      ok: false,
-      status: 429,
-      error: {
-        code: 'APPROVAL_REMIND_THROTTLED',
-        message: 'Remind is rate-limited',
-        lastRemindedAt,
-        retryAfterSeconds: 3600,
-      },
-    })
-    await mountDetail()
-    const button = container!.querySelector('[data-testid="approval-remind-button"]') as HTMLButtonElement
-    button.click()
-    await flushUi(6)
-    expect(remindApprovalSpy).toHaveBeenCalledWith('apv_remind_target')
-    expect(elWarningSpy).toHaveBeenCalled()
-    const message = elWarningSpy.mock.calls[0]?.[0] as string
-    expect(message).toContain('已在')
-    expect(message).toContain('催办过')
-    expect(elSuccessSpy).not.toHaveBeenCalled()
-  })
-
-  it('hides the 催一下 button when the current user is not the requester', async () => {
-    mockActiveApproval.value = {
-      ...mockActiveApproval.value,
-      requester: { id: 'user_not_the_current', name: '他人' },
-    }
-    await mountDetail()
-    const button = container!.querySelector('[data-testid="approval-remind-button"]')
-    expect(button).toBeNull()
+    await flushUi()
+    expect(markApprovalReadSpy).toHaveBeenCalledWith('apv_read_target')
+    expect(elErrorSpy).not.toHaveBeenCalled()
   })
 })
