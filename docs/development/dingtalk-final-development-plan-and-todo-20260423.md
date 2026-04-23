@@ -2,9 +2,9 @@
 
 - Date: 2026-04-23
 - Goal: finish DingTalk group/person/form-access workflow through remote smoke and release evidence handoff
-- Current base branch: `codex/dingtalk-p4-no-email-admin-evidence-helper-20260423`
-- Current base commit: `154fafd5d`
-- Remaining work type: remote smoke execution, evidence collection, final handoff, and final verification notes
+- Current base branch: `codex/dingtalk-p4-next-20260423` from `origin/main`
+- Current base commit: `2ee8a4e6d`
+- Remaining work type: private remote-smoke inputs, remote smoke execution, evidence collection, final handoff, product gate, and final verification notes
 
 ## Current State
 
@@ -23,12 +23,13 @@
 
 ## PR Stack To Confirm
 
-- [ ] Confirm #1104 CI success: unauthorized denial evidence contract
-- [ ] Confirm #1105 CI success: remote smoke TODO export
-- [ ] Confirm #1106 CI success: session status autorefresh
-- [ ] Confirm #1107 CI success: no-email admin evidence helper
-- [ ] Merge or promote the stack in order after earlier base PRs are merged
-- [ ] Re-run targeted local checks after any promotion or rebase
+- [x] Confirm #1104 merged: unauthorized denial evidence contract
+- [x] Confirm #1105 merged: remote smoke TODO export
+- [x] Confirm #1106 merged: session status autorefresh
+- [x] Confirm #1107 merged: no-email admin evidence helper
+- [x] Confirm #1118 merged: organization-scoped DingTalk group destination catalog v1
+- [x] Merge or promote the stack in order after earlier base PRs are merged
+- [x] Re-run targeted local checks after promotion to `origin/main`: `node scripts/ops/dingtalk-p4-regression-gate.mjs --profile ops --output-dir output/dingtalk-p4-regression-gate/142-ops --fail-fast`
 
 ## Remote Smoke Inputs
 
@@ -50,13 +51,15 @@
 
 ## Remote Smoke Execution
 
-- [ ] Create env template:
+- [x] Create env template with private file permissions:
 
 ```bash
 node scripts/ops/dingtalk-p4-smoke-session.mjs \
   --init-env-template output/dingtalk-p4-remote-smoke-session/dingtalk-p4.env
 ```
 
+- Generated locally at `output/dingtalk-p4-remote-smoke-session/dingtalk-p4.env`.
+- The template is intentionally untracked and is now written with `0600` permissions.
 - [ ] Fill the env file outside git.
 - [ ] Run the session:
 
@@ -187,8 +190,19 @@ node scripts/ops/dingtalk-p4-regression-gate.mjs \
   --output-dir output/dingtalk-p4-regression-gate/142-ops
 ```
 
-- [ ] Run the ops profile before final remote smoke.
-- [ ] Attach or reference `output/dingtalk-p4-regression-gate/142-ops/summary.json` and `summary.md` in final verification notes.
+- [x] Run the ops profile before final remote smoke.
+- [x] Attach or reference `output/dingtalk-p4-regression-gate/142-ops/summary.json` and `summary.md` in final verification notes.
+- [x] Run release readiness locally with the generated template and ops profile:
+
+```bash
+node scripts/ops/dingtalk-p4-release-readiness.mjs \
+  --p4-env-file output/dingtalk-p4-remote-smoke-session/dingtalk-p4.env \
+  --regression-profile ops \
+  --output-dir output/dingtalk-p4-release-readiness/142-local \
+  --allow-failures
+```
+
+- Current readiness status is `fail` only because private env values are intentionally blank: admin token, group A/B webhooks, allowlist, and manual target identities.
 
 ## Product Regression Gates
 
