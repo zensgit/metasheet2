@@ -446,6 +446,7 @@ test('dingtalk-p4-smoke-session finalizes completed manual evidence with strict 
     assert.equal(sessionSummary.pendingChecks.length, 0)
     assert.equal(sessionSummary.finalStrictSummary.overallStatus, 'pass')
     assert.equal(sessionSummary.nextCommands.some((command) => command.includes('--strict')), false)
+    assert.equal(sessionSummary.nextCommands.some((command) => command.includes('--require-dingtalk-p4-pass')), true)
   } finally {
     rmSync(tmpDir, { recursive: true, force: true })
   }

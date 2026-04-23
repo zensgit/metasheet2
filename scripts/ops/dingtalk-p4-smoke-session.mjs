@@ -378,8 +378,13 @@ function strictCompileCommand(evidencePath, compiledDir) {
   return `node scripts/ops/compile-dingtalk-p4-smoke-evidence.mjs --input ${relativePath(evidencePath)} --output-dir ${relativePath(compiledDir)} --strict`
 }
 
-function exportPacketCommand(outputDir) {
-  return `node scripts/ops/export-dingtalk-staging-evidence-packet.mjs --include-output ${relativePath(outputDir)}`
+function exportPacketCommand(outputDir, requireFinalPass = false) {
+  return [
+    'node scripts/ops/export-dingtalk-staging-evidence-packet.mjs',
+    '--include-output',
+    relativePath(outputDir),
+    ...(requireFinalPass ? ['--require-dingtalk-p4-pass'] : []),
+  ].join(' ')
 }
 
 function finalizeCommand(outputDir, allowExternalArtifactRefs = false) {
@@ -615,8 +620,8 @@ function runFinalStrictCompile(opts) {
         }
       : null,
     nextCommands: strictPassed
-      ? [exportPacketCommand(outputDir)]
-      : [finalizeCommand(outputDir, opts.allowExternalArtifactRefs), exportPacketCommand(outputDir)],
+      ? [exportPacketCommand(outputDir, true)]
+      : [finalizeCommand(outputDir, opts.allowExternalArtifactRefs), exportPacketCommand(outputDir, true)],
   }
 
   writeSessionSummary(summary, outputDir)
