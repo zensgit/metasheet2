@@ -550,6 +550,12 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
   // diverges from LIST's PLM-specific "status=pending without assignment
   // join" branch on purpose — the task contract explicitly defines this count
   // as `is_active=TRUE assignments for the current user`.
+  //
+  // Wave 2 WP3 slice 2 extends the response with `unreadCount` — the subset
+  // of the same assignments that have no `approval_reads` row for the user.
+  // A single query with a LEFT JOIN + FILTER (WHERE ... IS NULL) keeps the
+  // 待办 badge to one round-trip; the DISTINCT guards the role-side duplicate
+  // rows the existing `count` already relied on.
   r.get('/api/approvals/pending-count', authenticate, rbacGuard('approvals', 'read'), async (req: Request, res: Response) => {
     try {
       if (!pool) {
@@ -595,22 +601,168 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
         params.push(sourceSystem)
       }
 
-      const countResult = await pool.query<{ count: string }>(
-        `SELECT COUNT(DISTINCT a.instance_id)::text AS count
+      const countResult = await pool.query<{ count: string; unread_count: string }>(
+        `SELECT COUNT(DISTINCT a.instance_id)::text AS count,
+                COUNT(DISTINCT a.instance_id) FILTER (WHERE r.instance_id IS NULL)::text AS unread_count
          FROM approval_assignments a
          INNER JOIN approval_instances i ON i.id = a.instance_id
+         LEFT JOIN approval_reads r ON r.instance_id = a.instance_id AND r.user_id = $1
          WHERE ${conditions.join(' AND ')}`,
         params,
       )
 
-      res.json({ count: parseInt(countResult.rows[0]?.count || '0', 10) })
+      res.json({
+        count: parseInt(countResult.rows[0]?.count || '0', 10),
+        unreadCount: parseInt(countResult.rows[0]?.unread_count || '0', 10),
+      })
     } catch (error) {
       handleApprovalsError(
         res,
         error,
         'APPROVAL_PENDING_COUNT_FAILED',
         'Failed to compute pending approval count',
-        () => res.json({ count: 0, degraded: true }),
+        () => res.json({ count: 0, unreadCount: 0, degraded: true }),
+      )
+    }
+  })
+
+  // Wave 2 WP3 slice 2 — mark-read (个人已读).
+  //
+  // Permission model: `approvals:read` only. Anyone who can see the approval
+  // can record a "read" row for themselves — this is presence data, not an
+  // approval action, so it intentionally does NOT require assignee / requester
+  // checks (the pending-count query is already scoped to the actor, so an
+  // outsider's read row never pollutes someone else's unreadCount).
+  //
+  // PLM / external sources: approvals whose `instance_id` never materialized
+  // on the platform side (edge: PLM bridge hasn't synced yet) would FK-violate
+  // on insert. To keep the detail view's fire-and-forget call safe we verify
+  // the instance exists first and return `{ ok: true, skipped: true }` when
+  // it doesn't — the detail view already tolerates missing instances via the
+  // 404 handled by its loadDetail call.
+  r.post('/api/approvals/:id/mark-read', authenticate, rbacGuard('approvals', 'read'), async (req: Request, res: Response) => {
+    try {
+      if (!pool) {
+        return res.status(503).json(
+          approvalErrorResponse('APPROVALS_DATABASE_UNAVAILABLE', 'Database not available'),
+        )
+      }
+
+      const userId = resolveApprovalActorId(req)
+      if (!userId) {
+        return res.status(401).json(
+          approvalErrorResponse('APPROVAL_USER_REQUIRED', 'User ID not found in token'),
+        )
+      }
+
+      const { id } = req.params
+
+      const instanceResult = await pool.query<{ id: string }>(
+        `SELECT id FROM approval_instances WHERE id = $1`,
+        [id],
+      )
+      if (instanceResult.rows.length === 0) {
+        // Unsynced PLM / external reference — no-op so the detail view's
+        // fire-and-forget call never toasts an error.
+        return res.json({ ok: true, skipped: true, reason: 'instance_not_materialized' })
+      }
+
+      await pool.query(
+        `INSERT INTO approval_reads (user_id, instance_id, read_at)
+         VALUES ($1, $2, now())
+         ON CONFLICT (user_id, instance_id)
+         DO UPDATE SET read_at = EXCLUDED.read_at`,
+        [userId, id],
+      )
+
+      res.json({ ok: true })
+    } catch (error) {
+      handleApprovalsError(
+        res,
+        error,
+        'APPROVAL_MARK_READ_FAILED',
+        'Failed to mark approval as read',
+      )
+    }
+  })
+
+  // Wave 2 WP3 slice 2 — bulk mark-all-read (全部标记已读).
+  //
+  // Scope: every active assignment targeting the current user (user OR role
+  // match), matching pending-count's "my active queue" definition. A single
+  // INSERT ... SELECT + ON CONFLICT keeps the operation to one round-trip.
+  // `sourceSystem` is honoured to match the 待办 tab's current filter so the
+  // user's intent ("clear my unread badge for the current tab") is preserved.
+  r.post('/api/approvals/mark-all-read', authenticate, rbacGuard('approvals', 'read'), async (req: Request, res: Response) => {
+    try {
+      if (!pool) {
+        return res.status(503).json(
+          approvalErrorResponse('APPROVALS_DATABASE_UNAVAILABLE', 'Database not available'),
+        )
+      }
+
+      const userId = resolveApprovalActorId(req)
+      if (!userId) {
+        return res.status(401).json(
+          approvalErrorResponse('APPROVAL_USER_REQUIRED', 'User ID not found in token'),
+        )
+      }
+
+      const rawSourceSystem = typeof req.body?.sourceSystem === 'string'
+        ? req.body.sourceSystem.trim()
+        : ''
+      if (rawSourceSystem && !['platform', 'plm', 'all'].includes(rawSourceSystem)) {
+        return res.status(400).json(
+          approvalErrorResponse(
+            'APPROVAL_SOURCE_SYSTEM_INVALID',
+            "sourceSystem must be one of 'platform', 'plm', or 'all'",
+          ),
+        )
+      }
+      const sourceSystem = rawSourceSystem === 'all' || rawSourceSystem === ''
+        ? null
+        : (rawSourceSystem as 'platform' | 'plm')
+      const actorRoles = resolveApprovalActorRoles(req)
+      const actorRolesParam = actorRoles.length > 0 ? actorRoles : ['__none__']
+
+      const conditions: string[] = [
+        `a.is_active = TRUE`,
+        `i.status = 'pending'`,
+        `(
+          (a.assignment_type = 'user' AND a.assignee_id = $2)
+          OR (a.assignment_type = 'role' AND a.assignee_id = ANY($3))
+        )`,
+      ]
+      const params: unknown[] = [userId, userId, actorRolesParam]
+
+      if (sourceSystem) {
+        conditions.push(`COALESCE(i.source_system, 'platform') = $${params.length + 1}`)
+        params.push(sourceSystem)
+      }
+
+      // The INSERT target distinct instance_ids so the role-join duplicates
+      // don't produce constraint contention inside a single statement.
+      const result = await pool.query<{ instance_id: string }>(
+        `INSERT INTO approval_reads (user_id, instance_id, read_at)
+         SELECT $1, instance_id, now() FROM (
+           SELECT DISTINCT a.instance_id
+           FROM approval_assignments a
+           INNER JOIN approval_instances i ON i.id = a.instance_id
+           WHERE ${conditions.join(' AND ')}
+         ) AS targets
+         ON CONFLICT (user_id, instance_id)
+         DO UPDATE SET read_at = EXCLUDED.read_at
+         RETURNING instance_id`,
+        params,
+      )
+
+      res.json({ markedCount: result.rows.length })
+    } catch (error) {
+      handleApprovalsError(
+        res,
+        error,
+        'APPROVAL_MARK_ALL_READ_FAILED',
+        'Failed to mark approvals as read',
       )
     }
   })

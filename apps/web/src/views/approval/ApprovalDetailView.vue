@@ -413,7 +413,7 @@ import type { ApprovalActionType } from '../../types/approval'
 import { useApprovalStore } from '../../approvals/store'
 import { useApprovalPermissions } from '../../approvals/permissions'
 import { useApprovalTemplateStore } from '../../approvals/templateStore'
-import { remindApproval } from '../../approvals/api'
+import { markApprovalRead, remindApproval } from '../../approvals/api'
 
 const route = useRoute()
 const router = useRouter()
@@ -773,6 +773,14 @@ async function handleRemind() {
 // ---------------------------------------------------------------------------
 onMounted(async () => {
   const id = route.params.id as string
+  // Wave 2 WP3 slice 2 — fire-and-forget mark-read. Runs in parallel with the
+  // detail load so the unread badge drops immediately while the detail view
+  // keeps rendering regardless of mark-read's outcome. Errors are logged but
+  // never surfaced via toast: this is silent presence data, not an action.
+  void markApprovalRead(id).catch((error) => {
+    // eslint-disable-next-line no-console
+    console.warn('[approval-detail] mark-read failed', error)
+  })
   await Promise.all([store.loadDetail(id), store.loadHistory(id)])
   if (store.activeApproval?.templateId) {
     await templateStore.loadTemplate(store.activeApproval.templateId).catch(() => undefined)

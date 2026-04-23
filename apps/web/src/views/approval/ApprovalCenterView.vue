@@ -65,24 +65,44 @@
 
     <el-tabs v-model="activeTab" class="approval-center__tabs" @tab-change="handleTabChange">
       <el-tab-pane name="pending">
-        <!-- Wave 2 WP3 slice 1: 红点 / 待办计数 — render the server-provided
-             pending count alongside the tab label. Hidden when the count is
-             zero so the badge never shows an empty bubble. The count is the
-             total across the user's assignments (not the current page), so
-             use a dedicated state slot instead of the store's per-page
-             `pendingCount` computed. -->
+        <!-- Wave 2 WP3 slice 1/2: 红点 / 未读计数 — badge shows `unreadCount`
+             (未读), not the total `count` (待办). Hidden when unread is zero so
+             the badge never renders an empty bubble. A tooltip surfaces the
+             "待办 X / 其中 Y 未读" pair so the total is still discoverable
+             without muddling the primary semantic. Refreshed on mount and on
+             tab switch (slice 1) plus after 全部标记已读 (slice 2). -->
         <template #label>
           <span class="approval-center__tab-label">
             <span>待我处理</span>
-            <el-badge
+            <el-tooltip
               v-if="pendingBadgeCount > 0"
-              :value="pendingBadgeCount"
-              :max="99"
-              class="approval-center__tab-badge"
-              data-testid="approval-pending-badge"
-            />
+              :content="`待办 ${pendingTotalCount} / 其中 ${pendingBadgeCount} 未读`"
+              placement="top"
+            >
+              <el-badge
+                :value="pendingBadgeCount"
+                :max="99"
+                class="approval-center__tab-badge"
+                data-testid="approval-pending-badge"
+              />
+            </el-tooltip>
           </span>
         </template>
+        <!-- Wave 2 WP3 slice 2 — bulk 全部标记已读. Disabled until the server
+             reports at least one unread row for the current filter so clicking
+             never issues a no-op round-trip. -->
+        <div class="approval-center__tab-toolbar">
+          <el-button
+            type="primary"
+            plain
+            :disabled="pendingBadgeCount <= 0"
+            :loading="markingAllRead"
+            data-testid="approval-mark-all-read"
+            @click="handleMarkAllRead"
+          >
+            全部标记已读
+          </el-button>
+        </div>
         <el-table
           v-loading="store.loading"
           :data="store.pendingApprovals"
@@ -277,27 +297,51 @@
 import { ref, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { Search } from '@element-plus/icons-vue'
+import { ElMessage } from 'element-plus'
 import type { UnifiedApprovalDTO, ApprovalStatus } from '../../types/approval'
 import { useApprovalStore } from '../../approvals/store'
 import { useApprovalPermissions } from '../../approvals/permissions'
-import { getPendingCount } from '../../approvals/api'
+import { getPendingCount, markAllApprovalsRead } from '../../approvals/api'
 
 const router = useRouter()
 const store = useApprovalStore()
 const { canWrite } = useApprovalPermissions()
 
-// Wave 2 WP3 slice 1: server-owned pending count. Refreshed on mount and tab
-// switch so the badge matches the 待办 tab after any action reduces the user's
-// assignment queue.
+// Wave 2 WP3 slice 1/2: server-owned pending badge. Slice 1 drove the count
+// off active assignments; slice 2 flips the primary semantic to `unreadCount`
+// (rows the user hasn't opened). The total `count` is preserved for the
+// tooltip so "待办 X / 其中 Y 未读" stays discoverable.
 const pendingBadgeCount = ref(0)
+const pendingTotalCount = ref(0)
 async function refreshPendingBadgeCount(): Promise<void> {
   try {
     const result = await getPendingCount(sourceSystemFilter.value)
-    pendingBadgeCount.value = Number.isFinite(result.count) ? result.count : 0
+    pendingBadgeCount.value = Number.isFinite(result.unreadCount) ? result.unreadCount : 0
+    pendingTotalCount.value = Number.isFinite(result.count) ? result.count : 0
   } catch {
     // Badge is decorative — do not surface errors here; the tab itself
     // surfaces list-load failures via `store.error`.
     pendingBadgeCount.value = 0
+    pendingTotalCount.value = 0
+  }
+}
+
+// Wave 2 WP3 slice 2 — bulk 全部标记已读. Honours the current sourceSystem tab
+// so the button's effect matches the tooltip the user is looking at.
+const markingAllRead = ref(false)
+async function handleMarkAllRead(): Promise<void> {
+  if (markingAllRead.value) return
+  markingAllRead.value = true
+  try {
+    const result = await markAllApprovalsRead(sourceSystemFilter.value)
+    ElMessage.success(result.markedCount > 0
+      ? `已标记 ${result.markedCount} 条为已读`
+      : '当前范围内无未读审批')
+    await refreshPendingBadgeCount()
+  } catch {
+    ElMessage.error('标记已读失败，请重试')
+  } finally {
+    markingAllRead.value = false
   }
 }
 
@@ -434,5 +478,11 @@ onMounted(() => {
 
 .approval-center__tab-badge {
   margin-left: 4px;
+}
+
+.approval-center__tab-toolbar {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 12px;
 }
 </style>
