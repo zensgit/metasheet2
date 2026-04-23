@@ -2,9 +2,9 @@
 
 - Date: 2026-04-23
 - Goal: finish DingTalk group/person/form-access workflow through remote smoke and release evidence handoff
-- Current base branch: `codex/dingtalk-p4-next-20260423` from `origin/main`
-- Current base commit: `a432a97a1`
-- Remaining work type: private remote-smoke inputs, remote smoke execution, evidence collection, final handoff, product gate, and final verification notes
+- Current base branch: `codex/dingtalk-p4-product-gate-v2-20260423` from `origin/main`
+- Current base commit: `76ddfeacd`
+- Remaining work type: private remote-smoke inputs, remote smoke execution, evidence collection, final handoff, and final verification notes
 
 ## Current State
 
@@ -206,16 +206,20 @@ node scripts/ops/dingtalk-p4-release-readiness.mjs \
 
 ## Product Regression Gates
 
-- [ ] Run the product profile when dependency/runtime state is ready:
+- [x] Run the product profile when dependency/runtime state is ready:
 
 ```bash
 node scripts/ops/dingtalk-p4-regression-gate.mjs \
   --profile product \
-  --output-dir output/dingtalk-p4-regression-gate/142-product
+  --output-dir output/dingtalk-p4-regression-gate/142-product \
+  --fail-fast
 ```
 
-- [ ] Confirm `summary.json` has `overallStatus: "pass"`.
-- [ ] Review per-check logs under `logs/` if any product gate fails.
+- [x] Confirm `summary.json` has `overallStatus: "pass"`.
+- [x] Review per-check logs under `logs/` if any product gate fails.
+- [x] Attach or reference `output/dingtalk-p4-regression-gate/142-product/summary.json` and `summary.md` in final verification notes.
+
+Result: 13 passed, 0 failed, 0 skipped. The product profile covered backend DingTalk automation link routes, public form flow, DingTalk delivery routes, org destination catalog routes, DingTalk group/person services, automation v1 contracts, web DingTalk binding/access/client tests, web automation catalog tests, backend build, and web build.
 
 ## Final Documentation Outputs
 

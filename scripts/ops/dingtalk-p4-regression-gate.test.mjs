@@ -59,6 +59,32 @@ test('dingtalk-p4-regression-gate writes an ops plan without executing checks', 
   }
 })
 
+test('dingtalk-p4-regression-gate product plan covers org destination catalog checks', () => {
+  const outputDir = makeTmpDir()
+
+  try {
+    const result = runScript([
+      '--profile', 'product',
+      '--plan-only',
+      '--output-dir', outputDir,
+    ])
+
+    assert.equal(result.status, 0, result.stderr || result.stdout)
+    const summary = readJson(path.join(outputDir, 'summary.json'))
+    assert.equal(summary.profile, 'product')
+    assert.equal(summary.planOnly, true)
+    assert.equal(summary.overallStatus, 'plan_only')
+    assert.equal(summary.totals.total, 13)
+    assert.ok(summary.checks.every((check) => check.status === 'skipped'))
+    assert.ok(summary.checks.some((check) => check.command.includes('dingtalk-group-destination-routes.api.test.ts')))
+    assert.ok(summary.checks.some((check) => check.command.includes('automation-v1.test.ts')))
+    assert.ok(summary.checks.some((check) => check.command.includes('multitable-automation-manager.spec.ts')))
+    assert.ok(summary.checks.some((check) => check.command.includes('multitable-automation-rule-editor.spec.ts')))
+  } finally {
+    rmSync(outputDir, { recursive: true, force: true })
+  }
+})
+
 test('dingtalk-p4-regression-gate executes fast selftest checks and captures logs', () => {
   const outputDir = makeTmpDir()
 
