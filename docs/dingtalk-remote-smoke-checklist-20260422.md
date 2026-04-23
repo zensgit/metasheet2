@@ -78,6 +78,36 @@ Expected generated files:
 
 The compiler requires every smoke check in this document to be `pass` when `--strict` is used. It redacts DingTalk webhook `access_token`, `SEC...` secrets, bearer/JWT tokens, passwords, and public form tokens before writing artifacts.
 
+## API-Only Smoke Runner
+
+Use the API-only runner to prepare the disposable test resources and collect backend evidence before the manual DingTalk-client checks. It creates a table, a form view, two group destinations, a `dingtalk_granted` form share, a group automation rule, and optional person-message rule when `--person-user` is supplied.
+
+Do not paste secrets into docs or chat. Supply them through secure shell env, a local password manager, or a temporary shell session on the staging host.
+
+```bash
+node scripts/ops/dingtalk-p4-remote-smoke.mjs \
+  --api-base "$DINGTALK_P4_API_BASE" \
+  --web-base "$DINGTALK_P4_WEB_BASE" \
+  --auth-token "$DINGTALK_P4_AUTH_TOKEN" \
+  --group-a-webhook "$DINGTALK_P4_GROUP_A_WEBHOOK" \
+  --group-b-webhook "$DINGTALK_P4_GROUP_B_WEBHOOK" \
+  --allowed-user "$DINGTALK_P4_ALLOWED_USER_ID" \
+  --person-user "$DINGTALK_P4_PERSON_USER_ID" \
+  --output-dir output/dingtalk-p4-remote-smoke/142-api
+```
+
+Expected output:
+
+- `evidence.json`
+
+The runner intentionally leaves these checks as `pending`:
+
+- authorized DingTalk-bound user opens and submits from the real DingTalk group message
+- unauthorized DingTalk-bound user is blocked and inserts no record
+- no-email DingTalk-synced account creation and binding
+
+If no `--person-user` is provided, person delivery evidence is also `pending`. Fill those manual results in `evidence.json`, then run the compiler with `--strict`.
+
 ## Smoke 1: Create table and public form
 
 Steps:
