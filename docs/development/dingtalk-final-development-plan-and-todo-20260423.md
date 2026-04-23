@@ -38,8 +38,8 @@
 - [ ] Staging backend base URL
 - [ ] Staging web base URL
 - [ ] Admin/table-owner bearer token, supplied outside git and not pasted into docs
-- [ ] DingTalk group robot webhook A
-- [ ] DingTalk group robot webhook B
+- [ ] DingTalk group robot webhook A: `https://oapi.dingtalk.com/robot/send?access_token=...`
+- [ ] DingTalk group robot webhook B: `https://oapi.dingtalk.com/robot/send?access_token=...`
 - [ ] Optional DingTalk group robot signing secrets
 - [ ] Authorized local user ID bound to DingTalk
 - [ ] Unauthorized DingTalk-bound local user for denial check
@@ -50,6 +50,11 @@
   - `DINGTALK_P4_AUTHORIZED_USER_ID`
   - `DINGTALK_P4_UNAUTHORIZED_USER_ID`
   - `DINGTALK_P4_NO_EMAIL_DINGTALK_EXTERNAL_ID`
+- [x] Tooling now validates the canonical DingTalk robot webhook URL shape before readiness/preflight/remote smoke:
+  - HTTPS only
+  - host `oapi.dingtalk.com`
+  - path `/robot/send`
+  - non-empty `access_token`
 
 ## Remote Smoke Execution
 

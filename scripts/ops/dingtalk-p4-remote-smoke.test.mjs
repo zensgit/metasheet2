@@ -123,7 +123,11 @@ function createFakeApiServer() {
         groupCount += 1
         assert.equal(body.sheetId, 'sheet_1')
         assert.equal(body.enabled, true)
-        assert.match(body.webhookUrl, /access_token=robot-secret-/)
+        const webhook = new URL(body.webhookUrl)
+        assert.equal(webhook.protocol, 'https:')
+        assert.equal(webhook.hostname, 'oapi.dingtalk.com')
+        assert.equal(webhook.pathname, '/robot/send')
+        assert.match(webhook.searchParams.get('access_token'), /robot-secret-/)
         if (body.secret) assert.match(body.secret, /^SEC/)
         sendJson(res, 201, {
           ok: true,
@@ -420,6 +424,34 @@ test('dingtalk-p4-remote-smoke rejects missing auth token before making requests
   assert.equal(result.status, 1)
   assert.match(result.stderr, /--auth-token/)
   assert.doesNotMatch(result.stderr, /robot-secret-a/)
+})
+
+test('dingtalk-p4-remote-smoke rejects invalid robot webhook before making requests', async () => {
+  const fakeApi = createFakeApiServer()
+
+  try {
+    const apiBase = await fakeApi.listen()
+    const result = await runScript([
+      '--api-base',
+      apiBase,
+      '--auth-token',
+      'secret-admin-token',
+      '--group-a-webhook',
+      'https://example.com/robot/send?access_token=robot-secret-a',
+      '--group-b-webhook',
+      'https://oapi.dingtalk.com/robot/send',
+      '--allowed-user',
+      'user_authorized',
+    ])
+
+    assert.equal(result.code, 1)
+    assert.match(result.stderr, /--group-a-webhook/)
+    assert.match(result.stderr, /DingTalk robot URL/)
+    assert.doesNotMatch(result.stderr, /robot-secret-a/)
+    assert.equal(fakeApi.requests.length, 0)
+  } finally {
+    await fakeApi.close()
+  }
 })
 
 test('dingtalk-p4-remote-smoke rejects malformed DingTalk robot secrets', () => {

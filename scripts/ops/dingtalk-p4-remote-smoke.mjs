@@ -83,8 +83,8 @@ fills them from manual evidence.
 
 Required inputs:
   --auth-token <token>             Bearer token for an admin/table owner
-  --group-a-webhook <url>          DingTalk group A robot webhook
-  --group-b-webhook <url>          DingTalk group B robot webhook
+  --group-a-webhook <url>          DingTalk group A robot webhook; https://oapi.dingtalk.com/robot/send?access_token=...
+  --group-b-webhook <url>          DingTalk group B robot webhook; https://oapi.dingtalk.com/robot/send?access_token=...
   --allowed-user <id>              Local user allowed to fill; repeatable
   --allowed-member-group <id>      Allowed local member group; repeatable
                                   Provide at least one allowed user or group.
@@ -277,12 +277,18 @@ function normalizeBaseUrl(value, label) {
 function validateWebhookUrl(value, label) {
   try {
     const url = new URL(value)
-    if (url.protocol !== 'http:' && url.protocol !== 'https:') {
-      throw new Error('must use http or https')
+    if (url.protocol !== 'https:') {
+      throw new Error('must use HTTPS')
+    }
+    if (url.hostname !== 'oapi.dingtalk.com' || url.pathname !== '/robot/send') {
+      throw new Error('must be a DingTalk robot URL from https://oapi.dingtalk.com/robot/send')
+    }
+    if (!url.searchParams.get('access_token')?.trim()) {
+      throw new Error('must include access_token')
     }
     return url.toString()
   } catch (error) {
-    throw new Error(`${label} must be a valid http(s) URL: ${error instanceof Error ? error.message : String(error)}`)
+    throw new Error(`${label} must be a valid DingTalk robot webhook URL: ${error instanceof Error ? error.message : String(error)}`)
   }
 }
 

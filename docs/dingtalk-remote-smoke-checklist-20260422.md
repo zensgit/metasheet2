@@ -336,7 +336,9 @@ The validator fails unless the packet was exported with the final-pass gate, con
 
 ## Preflight Gate
 
-Before calling staging or DingTalk, run the preflight gate to check local tooling, required URLs, bearer token presence, DingTalk webhook format, optional `SEC...` secret format, allowlist inputs, and backend `/health`. It writes only redacted summaries.
+Before calling staging or DingTalk, run the preflight gate to check local tooling, required URLs, bearer token presence, DingTalk webhook URL shape, optional `SEC...` secret format, allowlist inputs, and backend `/health`. It writes only redacted summaries. The webhook check is local shape validation only; it does not call DingTalk or verify robot reachability/delivery.
+
+Robot webhook URLs must use `https://oapi.dingtalk.com/robot/send?access_token=...`. Extra DingTalk signing parameters such as `timestamp` and `sign` may be present, but reports redact the `access_token`.
 
 ```bash
 node scripts/ops/dingtalk-p4-smoke-preflight.mjs \
@@ -345,7 +347,7 @@ node scripts/ops/dingtalk-p4-smoke-preflight.mjs \
   --auth-token "$DINGTALK_P4_AUTH_TOKEN" \
   --group-a-webhook "$DINGTALK_P4_GROUP_A_WEBHOOK" \
   --group-b-webhook "$DINGTALK_P4_GROUP_B_WEBHOOK" \
-  --allowed-user "$DINGTALK_P4_ALLOWED_USER_ID" \
+  --allowed-user "$DINGTALK_P4_ALLOWED_USER_IDS" \
   --output-dir output/dingtalk-p4-remote-smoke/preflight-142
 ```
 
@@ -367,8 +369,8 @@ node scripts/ops/dingtalk-p4-remote-smoke.mjs \
   --auth-token "$DINGTALK_P4_AUTH_TOKEN" \
   --group-a-webhook "$DINGTALK_P4_GROUP_A_WEBHOOK" \
   --group-b-webhook "$DINGTALK_P4_GROUP_B_WEBHOOK" \
-  --allowed-user "$DINGTALK_P4_ALLOWED_USER_ID" \
-  --person-user "$DINGTALK_P4_PERSON_USER_ID" \
+  --allowed-user "$DINGTALK_P4_ALLOWED_USER_IDS" \
+  --person-user "$DINGTALK_P4_PERSON_USER_IDS" \
   --output-dir output/dingtalk-p4-remote-smoke/142-api
 ```
 

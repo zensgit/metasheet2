@@ -179,7 +179,9 @@ DINGTALK_P4_WEB_BASE=${quoteEnv(opts.webBase)}
 # Admin/table-owner bearer token for the staging backend.
 DINGTALK_P4_AUTH_TOKEN=""
 
-# Two independent DingTalk robot webhooks. Keep full URLs only in this private file.
+# Two independent DingTalk robot webhooks.
+# Required URL shape: https://oapi.dingtalk.com/robot/send?access_token=...
+# Keep full URLs only in this private file.
 DINGTALK_P4_GROUP_A_WEBHOOK=""
 DINGTALK_P4_GROUP_B_WEBHOOK=""
 
@@ -350,7 +352,13 @@ function safeUrl(value) {
 
 function isValidRobotWebhook(value) {
   const url = safeUrl(value)
-  return Boolean(url && url.protocol === 'https:' && url.hostname === 'oapi.dingtalk.com' && url.searchParams.get('access_token'))
+  return Boolean(
+    url
+      && url.protocol === 'https:'
+      && url.hostname === 'oapi.dingtalk.com'
+      && url.pathname === '/robot/send'
+      && url.searchParams.get('access_token')?.trim(),
+  )
 }
 
 function checkEnvMode(file) {

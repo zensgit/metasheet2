@@ -24,8 +24,8 @@ Options:
   --api-base <url>                 Backend API base, default ${DEFAULT_API_BASE}
   --web-base <url>                 Public app base used by DingTalk message links
   --auth-token <token>             Bearer token presence check only
-  --group-a-webhook <url>          DingTalk group A robot webhook
-  --group-b-webhook <url>          DingTalk group B robot webhook
+  --group-a-webhook <url>          DingTalk group A robot webhook; https://oapi.dingtalk.com/robot/send?access_token=...
+  --group-b-webhook <url>          DingTalk group B robot webhook; https://oapi.dingtalk.com/robot/send?access_token=...
   --group-a-secret <secret>        Optional DingTalk group A SEC... secret
   --group-b-secret <secret>        Optional DingTalk group B SEC... secret
   --allowed-user <id>              Local user allowed to fill; repeatable
@@ -314,10 +314,13 @@ function validateWebhook(value, label) {
   } catch {
     return `${label} must be a valid URL`
   }
-  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
-    return `${label} must use http or https`
+  if (url.protocol !== 'https:') {
+    return `${label} must use HTTPS`
   }
-  if (!url.searchParams.get('access_token')) {
+  if (url.hostname !== 'oapi.dingtalk.com' || url.pathname !== '/robot/send') {
+    return `${label} must be a DingTalk robot URL from https://oapi.dingtalk.com/robot/send`
+  }
+  if (!url.searchParams.get('access_token')?.trim()) {
     return `${label} must include access_token`
   }
   return ''
