@@ -75,6 +75,7 @@ Options:
   --publish-check-json <file>   Optional publish-check.json path
   --output-json <file>          Output status JSON, default <session-dir>/smoke-status.json
   --output-md <file>            Output status Markdown, default <session-dir>/smoke-status.md
+  --output-todo-md <file>       Output executable TODO Markdown, default <session-dir>/smoke-todo.md
   --require-release-ready       Exit non-zero unless overallStatus is release_ready
   --help                        Show this help
 `)
@@ -102,6 +103,7 @@ function parseArgs(argv) {
     publishCheckJson: '',
     outputJson: '',
     outputMd: '',
+    outputTodoMd: '',
     requireReleaseReady: false,
   }
 
@@ -140,6 +142,10 @@ function parseArgs(argv) {
         opts.outputMd = path.resolve(process.cwd(), readRequiredValue(argv, i, arg))
         i += 1
         break
+      case '--output-todo-md':
+        opts.outputTodoMd = path.resolve(process.cwd(), readRequiredValue(argv, i, arg))
+        i += 1
+        break
       case '--require-release-ready':
         opts.requireReleaseReady = true
         break
@@ -158,10 +164,12 @@ function parseArgs(argv) {
     opts.compiledSummary ||= path.join(opts.sessionDir, 'compiled', 'summary.json')
     opts.outputJson ||= path.join(opts.sessionDir, 'smoke-status.json')
     opts.outputMd ||= path.join(opts.sessionDir, 'smoke-status.md')
+    opts.outputTodoMd ||= path.join(opts.sessionDir, 'smoke-todo.md')
   } else {
     const outputRoot = path.resolve(process.cwd(), DEFAULT_OUTPUT_ROOT, makeRunId())
     opts.outputJson ||= path.join(outputRoot, 'smoke-status.json')
     opts.outputMd ||= path.join(outputRoot, 'smoke-status.md')
+    opts.outputTodoMd ||= path.join(outputRoot, 'smoke-todo.md')
   }
 
   if (!opts.sessionDir && !opts.sessionSummary && !opts.evidence && !opts.compiledSummary && !opts.handoffSummary && !opts.publishCheckJson) {
@@ -374,6 +382,73 @@ function evidenceRecordCommand(opts) {
   ].join(' '))
 }
 
+function manualSourceForCheck(check) {
+  return check.id === 'no-email-user-create-bind' ? 'manual-admin' : 'manual-client'
+}
+
+function evidenceRecordCommandForCheck(opts, check) {
+  if (!opts.sessionDir || !check.manual) return ''
+  const args = [
+    'node scripts/ops/dingtalk-p4-evidence-record.mjs',
+    '--session-dir',
+    '<session-dir>',
+    '--check-id',
+    check.id,
+    '--status',
+    'pass',
+    '--source',
+    manualSourceForCheck(check),
+    '--operator',
+    '<operator>',
+    '--summary',
+    '"<summary>"',
+    '--artifact',
+    `artifacts/${check.id}/<file>`,
+  ]
+  if (check.id === 'unauthorized-user-denied') {
+    args.push(
+      '--submit-blocked',
+      '--record-insert-delta',
+      '0',
+      '--blocked-reason',
+      '"<visible denial reason>"',
+    )
+  }
+  return sessionCommand(opts, args.join(' '))
+}
+
+function buildRemoteSmokeTodos(requiredChecks, opts) {
+  const items = requiredChecks.map((check) => {
+    const completed = check.status === 'pass' && check.manualEvidenceIssueCount === 0
+    const firstIssue = check.issues[0]
+    const nextAction = completed
+      ? 'done'
+      : firstIssue?.message
+        ? firstIssue.message
+        : check.manual
+          ? `capture real DingTalk evidence and record ${check.id}`
+          : `rerun or inspect API/bootstrap evidence for ${check.id}`
+    return {
+      id: check.id,
+      label: check.label,
+      todo: check.todo,
+      status: check.status,
+      manual: check.manual,
+      completed,
+      issueCount: check.manualEvidenceIssueCount,
+      nextAction,
+      evidenceRecordCommand: completed ? '' : evidenceRecordCommandForCheck(opts, check),
+    }
+  })
+
+  return {
+    total: items.length,
+    completed: items.filter((item) => item.completed).length,
+    remaining: items.filter((item) => !item.completed).length,
+    items,
+  }
+}
+
 function buildNextCommands(overallStatus, opts) {
   const commands = []
   if (!opts.sessionDir) {
@@ -447,6 +522,7 @@ function buildSummary(opts) {
     },
     requiredChecks,
     gaps,
+    remoteSmokeTodos: buildRemoteSmokeTodos(requiredChecks, opts),
     handoff,
     nextCommands: [],
   }
@@ -460,6 +536,9 @@ function renderMarkdown(summary) {
   const checkRows = summary.requiredChecks.map((check) => {
     const issue = check.issues.length ? check.issues.map((entry) => entry.code).join(', ') : ''
     return `| \`${markdownEscape(check.id)}\` | ${markdownEscape(check.status)} | ${check.manual ? 'yes' : 'no'} | ${markdownEscape(check.source)} | ${markdownEscape(issue)} |`
+  })
+  const todoRows = summary.remoteSmokeTodos.items.map((item) => {
+    return `| ${item.completed ? 'done' : 'todo'} | \`${markdownEscape(item.id)}\` | ${markdownEscape(item.status)} | ${item.manual ? 'yes' : 'no'} | ${markdownEscape(item.todo)} |`
   })
   const gaps = summary.gaps.length
     ? summary.gaps.map((gap) => `- \`${gap.id}\`: ${markdownEscape(gap.nextAction)} (${gap.status})`).join('\n')
@@ -492,6 +571,14 @@ Publish status: **${summary.handoff.publishStatus}**
 | --- | --- | --- | --- | --- |
 ${checkRows.join('\n')}
 
+## Remote Smoke TODO
+
+Progress: **${summary.remoteSmokeTodos.completed}/${summary.remoteSmokeTodos.total}** complete, **${summary.remoteSmokeTodos.remaining}** remaining.
+
+| State | Check | Status | Manual | TODO |
+| --- | --- | --- | --- | --- |
+${todoRows.join('\n')}
+
 ## Gaps
 
 ${gaps}
@@ -507,13 +594,56 @@ ${commands}
 `
 }
 
+function renderTodoMarkdown(summary) {
+  const checklist = summary.remoteSmokeTodos.items.map((item) => {
+    const marker = item.completed ? 'x' : ' '
+    return `- [${marker}] \`${markdownEscape(item.id)}\` - ${markdownEscape(item.todo)}. Status: ${markdownEscape(item.status)}. Next: ${markdownEscape(item.nextAction)}.`
+  })
+  const commands = summary.remoteSmokeTodos.items
+    .filter((item) => !item.completed && item.evidenceRecordCommand)
+    .map((item) => `- \`${markdownEscape(item.evidenceRecordCommand)}\``)
+  const nextCommands = summary.nextCommands.length
+    ? summary.nextCommands.map((command) => `- \`${markdownEscape(command)}\``)
+    : ['- None']
+
+  return `# DingTalk P4 Remote Smoke TODO
+
+Generated at: ${summary.generatedAt}
+
+Overall status: **${summary.overallStatus}**
+
+Progress: **${summary.remoteSmokeTodos.completed}/${summary.remoteSmokeTodos.total}** complete, **${summary.remoteSmokeTodos.remaining}** remaining.
+
+## Checklist
+
+${checklist.join('\n')}
+
+## Evidence Recorder Commands
+
+${commands.length ? commands.join('\n') : '- None'}
+
+## Next Session Commands
+
+${nextCommands.join('\n')}
+
+## Notes
+
+- This TODO file is generated from \`smoke-status.json\` inputs and contains redacted command templates only.
+- Put manual artifacts under \`workspace/artifacts/<check-id>/\` before running an evidence recorder command.
+- Re-run \`dingtalk-p4-smoke-status.mjs\` after each evidence update to refresh this TODO file.
+`
+}
+
 function writeSummary(summary, opts) {
   mkdirSync(path.dirname(opts.outputJson), { recursive: true })
   mkdirSync(path.dirname(opts.outputMd), { recursive: true })
+  mkdirSync(path.dirname(opts.outputTodoMd), { recursive: true })
   writeFileSync(opts.outputJson, `${JSON.stringify(sanitizeValue(summary), null, 2)}\n`, 'utf8')
   writeFileSync(opts.outputMd, renderMarkdown(summary), 'utf8')
+  writeFileSync(opts.outputTodoMd, renderTodoMarkdown(summary), 'utf8')
   console.log(`Wrote ${relativePath(opts.outputJson)}`)
   console.log(`Wrote ${relativePath(opts.outputMd)}`)
+  console.log(`Wrote ${relativePath(opts.outputTodoMd)}`)
 }
 
 try {
