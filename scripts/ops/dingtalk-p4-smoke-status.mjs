@@ -354,6 +354,26 @@ function sessionCommand(opts, command) {
   return command.replaceAll('<session-dir>', relativePath(opts.sessionDir))
 }
 
+function evidenceRecordCommand(opts) {
+  return sessionCommand(opts, [
+    'node scripts/ops/dingtalk-p4-evidence-record.mjs',
+    '--session-dir',
+    '<session-dir>',
+    '--check-id',
+    '<check-id>',
+    '--status',
+    'pass',
+    '--source',
+    '<manual-client|manual-admin>',
+    '--operator',
+    '<operator>',
+    '--summary',
+    '"<summary>"',
+    '--artifact',
+    'artifacts/<check-id>/<file>',
+  ].join(' '))
+}
+
 function buildNextCommands(overallStatus, opts) {
   const commands = []
   if (!opts.sessionDir) {
@@ -361,6 +381,9 @@ function buildNextCommands(overallStatus, opts) {
     return commands
   }
 
+  if (overallStatus === 'manual_pending') {
+    commands.push(evidenceRecordCommand(opts))
+  }
   if (overallStatus === 'manual_pending' || overallStatus === 'finalize_pending') {
     commands.push(sessionCommand(opts, 'node scripts/ops/dingtalk-p4-smoke-session.mjs --finalize <session-dir>'))
   }

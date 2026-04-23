@@ -104,6 +104,10 @@ test('export-dingtalk-staging-evidence-packet copies required handoff files and 
       true,
     )
     assert.equal(
+      existsSync(path.join(outputDir, 'scripts/ops/dingtalk-p4-evidence-record.mjs')),
+      true,
+    )
+    assert.equal(
       existsSync(path.join(outputDir, 'scripts/ops/dingtalk-p4-smoke-status.mjs')),
       true,
     )
@@ -147,6 +151,10 @@ test('export-dingtalk-staging-evidence-packet copies required handoff files and 
       true,
     )
     assert.equal(
+      manifest.files.some((file) => file.path === 'scripts/ops/dingtalk-p4-evidence-record.mjs'),
+      true,
+    )
+    assert.equal(
       manifest.files.some((file) => file.path === 'scripts/ops/dingtalk-p4-smoke-status.mjs'),
       true,
     )
@@ -165,6 +173,7 @@ test('export-dingtalk-staging-evidence-packet copies required handoff files and 
     assert.match(readme, /dingtalk-p4-remote-smoke\.mjs/)
     assert.match(readme, /dingtalk-p4-smoke-preflight\.mjs/)
     assert.match(readme, /dingtalk-p4-smoke-session\.mjs/)
+    assert.match(readme, /dingtalk-p4-evidence-record\.mjs/)
     assert.match(readme, /dingtalk-p4-smoke-status\.mjs/)
     assert.match(readme, /dingtalk-p4-final-handoff\.mjs/)
     assert.match(readme, /validate-dingtalk-staging-evidence-packet\.mjs/)

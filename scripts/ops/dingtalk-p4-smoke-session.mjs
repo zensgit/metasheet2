@@ -403,6 +403,26 @@ function statusCommand(outputDir) {
   ].join(' ')
 }
 
+function evidenceRecordCommand(outputDir) {
+  return [
+    'node scripts/ops/dingtalk-p4-evidence-record.mjs',
+    '--session-dir',
+    relativePath(outputDir),
+    '--check-id',
+    '<check-id>',
+    '--status',
+    'pass',
+    '--source',
+    '<manual-client|manual-admin>',
+    '--operator',
+    '<operator>',
+    '--summary',
+    '"<summary>"',
+    '--artifact',
+    'artifacts/<check-id>/<file>',
+  ].join(' ')
+}
+
 function finalizeCommand(outputDir, allowExternalArtifactRefs = false) {
   return [
     'node scripts/ops/dingtalk-p4-smoke-session.mjs',
@@ -561,6 +581,7 @@ function runSession(opts) {
     pendingChecks,
     nextCommands: [
       statusCommand(outputDir),
+      evidenceRecordCommand(outputDir),
       finalizeCommand(outputDir, opts.allowExternalArtifactRefs),
       exportPacketCommand(outputDir),
     ],
@@ -638,7 +659,7 @@ function runFinalStrictCompile(opts) {
       : null,
     nextCommands: strictPassed
       ? [statusCommand(outputDir), finalHandoffCommand(outputDir), exportPacketCommand(outputDir, true)]
-      : [statusCommand(outputDir), finalizeCommand(outputDir, opts.allowExternalArtifactRefs), finalHandoffCommand(outputDir), exportPacketCommand(outputDir, true)],
+      : [statusCommand(outputDir), evidenceRecordCommand(outputDir), finalizeCommand(outputDir, opts.allowExternalArtifactRefs), finalHandoffCommand(outputDir), exportPacketCommand(outputDir, true)],
   }
 
   writeSessionSummary(summary, outputDir)

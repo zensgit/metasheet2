@@ -107,6 +107,11 @@ const requiredPacketFiles = [
     description: 'orchestrates P4 preflight, API-only smoke workspace bootstrap, and non-strict evidence compile',
   },
   {
+    path: 'scripts/ops/dingtalk-p4-evidence-record.mjs',
+    kind: 'script',
+    description: 'updates one P4 evidence check safely without hand-editing evidence.json',
+  },
+  {
     path: 'scripts/ops/dingtalk-p4-smoke-status.mjs',
     kind: 'script',
     description: 'summarizes a P4 smoke session, evidence gaps, finalization state, and handoff readiness',
@@ -367,7 +372,7 @@ ${gateLine}
 7. Run the session orchestrator with \`node scripts/ops/dingtalk-p4-smoke-session.mjs --output-dir <session-dir>\`.
 8. If needed, debug individual steps with \`dingtalk-p4-smoke-preflight.mjs\` and \`dingtalk-p4-remote-smoke.mjs\`.
 9. Check remaining evidence gaps with \`node scripts/ops/dingtalk-p4-smoke-status.mjs --session-dir <session-dir>\`.
-10. Complete the manual DingTalk-client checks in \`<session-dir>/workspace/evidence.json\`.
+10. Record manual DingTalk-client/admin checks with \`node scripts/ops/dingtalk-p4-evidence-record.mjs --session-dir <session-dir> ...\`.
 11. Finalize smoke evidence with \`node scripts/ops/dingtalk-p4-smoke-session.mjs --finalize <session-dir>\`.
 12. Re-run \`dingtalk-p4-smoke-status.mjs\` to confirm the status moved to \`handoff_pending\`.
 13. Run \`node scripts/ops/dingtalk-p4-final-handoff.mjs --session-dir <session-dir> --output-dir <packet-dir>\` after finalization passes.

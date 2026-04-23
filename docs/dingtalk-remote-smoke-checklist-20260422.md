@@ -165,6 +165,21 @@ node scripts/ops/dingtalk-p4-smoke-status.mjs \
 
 The status report writes `smoke-status.json` / `smoke-status.md` and shows whether the run is blocked, waiting for manual evidence, ready to finalize, waiting for handoff, or release-ready.
 
+Use the evidence recorder instead of hand-editing JSON when adding one manual check at a time:
+
+```bash
+node scripts/ops/dingtalk-p4-evidence-record.mjs \
+  --session-dir output/dingtalk-p4-remote-smoke-session/142-session \
+  --check-id authorized-user-submit \
+  --status pass \
+  --source manual-client \
+  --operator qa \
+  --summary "Allowed DingTalk-bound user opened the group link and submitted one record." \
+  --artifact artifacts/authorized-user-submit/authorized-submit.png
+```
+
+For pass evidence, put the referenced file under `workspace/artifacts/<check-id>/` before running the recorder. The recorder validates the relative path, non-empty local file, manual source, and obvious secret-like text before updating `workspace/evidence.json`.
+
 ```bash
 node scripts/ops/dingtalk-p4-smoke-session.mjs \
   --finalize output/dingtalk-p4-remote-smoke-session/142-session
