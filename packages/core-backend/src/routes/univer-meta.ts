@@ -39,6 +39,20 @@ import {
   type CursorPaginatedResult,
   type LoadedMultitableRecord,
 } from '../multitable/records'
+import {
+  buildAttachmentSummaries as buildAttachmentSummariesShared,
+  deleteAttachmentBinary as deleteAttachmentBinaryShared,
+  ensureAttachmentIdsExist as ensureAttachmentIdsExistShared,
+  normalizeAttachmentIds as normalizeAttachmentIdsShared,
+  readAttachmentBinary as readAttachmentBinaryShared,
+  readAttachmentForDelete as readAttachmentForDeleteShared,
+  readAttachmentMetadata as readAttachmentMetadataShared,
+  serializeAttachmentRow as serializeAttachmentRowShared,
+  serializeAttachmentSummaryMap as serializeAttachmentSummaryMapShared,
+  softDeleteAttachmentRow as softDeleteAttachmentRowShared,
+  storeAttachment as storeAttachmentShared,
+  type MultitableAttachment as SharedMultitableAttachment,
+} from '../multitable/attachment-service'
 import { StorageServiceImpl } from '../services/StorageService'
 import { createUploadMiddleware, loadMulter } from '../types/multer'
 import type { RequestWithFile } from '../types/multer'
@@ -228,15 +242,7 @@ type LinkedRecordSummary = {
   display: string
 }
 
-type MultitableAttachment = {
-  id: string
-  filename: string
-  mimeType: string
-  size: number
-  url: string
-  thumbnailUrl: string | null
-  uploadedAt: string | null
-}
+type MultitableAttachment = SharedMultitableAttachment
 
 type MultitableSheetRealtimePayload = {
   spreadsheetId: string
@@ -875,9 +881,7 @@ function normalizeLinkIds(value: unknown): string[] {
     })
 }
 
-function normalizeAttachmentIds(value: unknown): string[] {
-  return normalizeLinkIds(value)
-}
+const normalizeAttachmentIds = normalizeAttachmentIdsShared
 
 function normalizeSearchTerm(value: unknown): string {
   return typeof value === 'string' ? value.trim().toLowerCase() : ''
@@ -3116,13 +3120,6 @@ function getAttachmentStorageService(): StorageServiceImpl {
   return multitableAttachmentStorage
 }
 
-function buildAttachmentUrl(req: Request, attachmentId: string, thumbnail: boolean = false): string {
-  const protocol = req.protocol || 'http'
-  const host = req.get('host') || 'localhost:8900'
-  const query = thumbnail ? '?thumbnail=true' : ''
-  return `${protocol}://${host}/api/multitable/attachments/${encodeURIComponent(attachmentId)}${query}`
-}
-
 function getRequestActorId(req: Request): string | null {
   const actorId = req.user?.id
   return typeof actorId === 'string' && actorId.trim().length > 0 ? actorId.trim() : null
@@ -3137,23 +3134,7 @@ function isImageMimeType(mimeType: string | null | undefined): boolean {
   return typeof mimeType === 'string' && mimeType.toLowerCase().startsWith('image/')
 }
 
-function serializeAttachmentRow(req: Request, row: any): MultitableAttachment {
-  const id = String(row.id)
-  const mimeType = typeof row.mime_type === 'string' ? row.mime_type : 'application/octet-stream'
-  return {
-    id,
-    filename: typeof row.filename === 'string' ? row.filename : typeof row.original_name === 'string' ? row.original_name : id,
-    mimeType,
-    size: Number(row.size ?? 0),
-    url: buildAttachmentUrl(req, id),
-    thumbnailUrl: isImageMimeType(mimeType) ? buildAttachmentUrl(req, id, true) : null,
-    uploadedAt: row.created_at instanceof Date
-      ? row.created_at.toISOString()
-      : typeof row.created_at === 'string'
-        ? row.created_at
-        : null,
-  }
-}
+const serializeAttachmentRow = serializeAttachmentRowShared
 
 function serializeBaseRow(row: any): UniverMetaBase {
   return {
@@ -3315,27 +3296,7 @@ async function ensureAttachmentIdsExist(
   fieldId: string,
   attachmentIds: string[],
 ): Promise<string | null> {
-  if (attachmentIds.length === 0) return null
-
-  const result = await query(
-    `SELECT id, field_id
-     FROM multitable_attachments
-     WHERE sheet_id = $1
-       AND deleted_at IS NULL
-       AND id = ANY($2::text[])`,
-    [sheetId, attachmentIds],
-  )
-  const rows = result.rows as Array<{ id: string; field_id: string | null }>
-  const found = new Set(rows.map((row) => String(row.id)))
-  const missing = attachmentIds.filter((id) => !found.has(id))
-  if (missing.length > 0) {
-    return `Attachment(s) not found: ${missing.join(', ')}`
-  }
-  const mismatchedField = rows.find((row) => row.field_id && String(row.field_id) !== fieldId)
-  if (mismatchedField) {
-    return `Attachment belongs to a different field: ${mismatchedField.id}`
-  }
-  return null
+  return ensureAttachmentIdsExistShared({ query, sheetId, fieldId, attachmentIds })
 }
 
 async function buildLinkSummaries(
@@ -3435,72 +3396,10 @@ async function buildAttachmentSummaries(
   rows: UniverMetaRecord[],
   attachmentFields: UniverMetaField[],
 ): Promise<Map<string, Map<string, MultitableAttachment[]>>> {
-  const result = new Map<string, Map<string, MultitableAttachment[]>>()
-  if (rows.length === 0 || attachmentFields.length === 0) return result
-
-  const attachmentFieldIds = new Set(attachmentFields.map((field) => field.id))
-  const attachmentIds = new Set<string>()
-
-  for (const row of rows) {
-    for (const field of attachmentFields) {
-      for (const attachmentId of normalizeAttachmentIds(row.data[field.id])) {
-        attachmentIds.add(attachmentId)
-      }
-    }
-  }
-
-  const idList = Array.from(attachmentIds)
-  if (idList.length === 0) return result
-
-  const attachmentRes = await query(
-    `SELECT id, sheet_id, record_id, field_id, filename, original_name, mime_type, size, created_at
-     FROM multitable_attachments
-     WHERE sheet_id = $1
-       AND deleted_at IS NULL
-       AND id = ANY($2::text[])`,
-    [sheetId, idList],
-  )
-
-  const attachmentById = new Map<string, any>()
-  for (const row of attachmentRes.rows as any[]) {
-    attachmentById.set(String(row.id), row)
-  }
-
-  for (const row of rows) {
-    const byField = new Map<string, MultitableAttachment[]>()
-    for (const field of attachmentFields) {
-      const summaries = normalizeAttachmentIds(row.data[field.id])
-        .map((attachmentId) => attachmentById.get(attachmentId))
-        .filter((attachmentRow): attachmentRow is any => {
-          if (!attachmentRow) return false
-          if (attachmentRow.field_id && !attachmentFieldIds.has(String(attachmentRow.field_id))) return false
-          return !attachmentRow.field_id || String(attachmentRow.field_id) === field.id
-        })
-        .map((attachmentRow) => serializeAttachmentRow(req, attachmentRow))
-
-      if (summaries.length > 0) {
-        byField.set(field.id, summaries)
-      }
-    }
-
-    if (byField.size > 0) {
-      result.set(row.id, byField)
-    }
-  }
-
-  return result
+  return buildAttachmentSummariesShared({ query, req, sheetId, rows, attachmentFields })
 }
 
-function serializeAttachmentSummaryMap(
-  attachmentSummaries: Map<string, Map<string, MultitableAttachment[]>>,
-): Record<string, Record<string, MultitableAttachment[]>> {
-  return Object.fromEntries(
-    Array.from(attachmentSummaries.entries()).map(([recordId, fieldMap]) => [
-      recordId,
-      Object.fromEntries(Array.from(fieldMap.entries()).map(([fieldId, summaries]) => [fieldId, summaries])),
-    ]),
-  )
-}
+const serializeAttachmentSummaryMap = serializeAttachmentSummaryMapShared
 
 async function loadRecordSummaries(
   query: QueryFn,
@@ -7619,63 +7518,24 @@ export function univerMetaRouter(): Router {
           }
 
           const storage = getAttachmentStorageService()
-          const extension = path.extname(file.originalname || '')
-          const storageFilename = `${randomUUID()}${extension}`
-          const userId = req.user?.sub || req.user?.userId || req.user?.id || 'anonymous'
-          const uploaded = await storage.upload(file.buffer, {
-            filename: storageFilename,
-            contentType: file.mimetype,
-            path: path.join(sheetId, fieldId ?? 'unassigned'),
-            metadata: {
-              originalName: file.originalname,
-              sheetId,
-              ...(recordId ? { recordId } : {}),
-              ...(fieldId ? { fieldId } : {}),
+          const userIdRaw = req.user?.sub || req.user?.userId || req.user?.id || 'anonymous'
+          const userId = typeof userIdRaw === 'number' ? String(userIdRaw) : userIdRaw
+          const { row: attachmentRow } = await storeAttachmentShared({
+            query: pool.query.bind(pool),
+            storage,
+            sheetId,
+            recordId,
+            fieldId,
+            file,
+            uploaderId: userId,
+            idGenerator: () => buildId('att').slice(0, 50),
+          })
+          return res.status(201).json({
+            ok: true,
+            data: {
+              attachment: serializeAttachmentRow(req, attachmentRow),
             },
           })
-
-          try {
-            const attachmentId = buildId('att').slice(0, 50)
-            const insert = await pool.query(
-              `INSERT INTO multitable_attachments
-                 (id, sheet_id, record_id, field_id, storage_file_id, filename, original_name, mime_type, size, storage_path, storage_provider, metadata, created_by)
-               VALUES
-                 ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, $13)
-               RETURNING id, filename, original_name, mime_type, size, created_at`,
-              [
-                attachmentId,
-                sheetId,
-                recordId,
-                fieldId,
-                uploaded.id,
-                file.originalname || storageFilename,
-                file.originalname || null,
-                file.mimetype || 'application/octet-stream',
-                file.size,
-                uploaded.path,
-                'local',
-                JSON.stringify({
-                  storageFileId: uploaded.id,
-                  storageUrl: uploaded.url,
-                }),
-                userId,
-              ],
-            )
-            const attachmentRow = (insert.rows as any[])[0]
-            return res.status(201).json({
-              ok: true,
-              data: {
-                attachment: serializeAttachmentRow(req, attachmentRow),
-              },
-            })
-          } catch (dbErr) {
-            try {
-              await storage.delete(uploaded.id)
-            } catch {
-              // best-effort cleanup after DB failure
-            }
-            throw dbErr
-          }
         } catch (err) {
           if (err instanceof ValidationError) {
             return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: err.message } })
@@ -7705,19 +7565,15 @@ export function univerMetaRouter(): Router {
 
     try {
       const pool = poolManager.get()
-      const attachmentRes = await pool.query(
-        `SELECT id, sheet_id, storage_file_id, filename, original_name, mime_type, size
-         FROM multitable_attachments
-         WHERE id = $1 AND deleted_at IS NULL`,
-        [attachmentId],
-      )
-      const row: any = attachmentRes.rows[0]
-      if (!row) {
+      const metadata = await readAttachmentMetadataShared({
+        query: pool.query.bind(pool),
+        attachmentId,
+      })
+      if (!metadata) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Attachment not found: ${attachmentId}` } })
       }
-      const sheetId = typeof row.sheet_id === 'string' ? row.sheet_id : ''
-      if (sheetId) {
-        const { access, capabilities } = await resolveSheetReadableCapabilities(req, pool.query.bind(pool), sheetId)
+      if (metadata.sheetId) {
+        const { access, capabilities } = await resolveSheetReadableCapabilities(req, pool.query.bind(pool), metadata.sheetId)
         if (!access.userId) {
           return res.status(401).json({ error: 'Authentication required' })
         }
@@ -7725,9 +7581,9 @@ export function univerMetaRouter(): Router {
       }
 
       const storage = getAttachmentStorageService()
-      const buffer = await storage.download(String(row.storage_file_id))
-      const mimeType = typeof row.mime_type === 'string' ? row.mime_type : 'application/octet-stream'
-      const fileName = typeof row.filename === 'string' ? row.filename : typeof row.original_name === 'string' ? row.original_name : attachmentId
+      const buffer = await readAttachmentBinaryShared({ storage, storageFileId: metadata.storageFileId })
+      const mimeType = metadata.mimeType
+      const fileName = metadata.filename ?? metadata.originalName ?? attachmentId
       const forceInline = req.query.thumbnail === 'true' || isImageMimeType(mimeType)
 
       res.setHeader('Content-Type', mimeType)
@@ -7757,46 +7613,43 @@ export function univerMetaRouter(): Router {
         version: number
         patch: Record<string, unknown>
       } | null = null
-      const attachmentRes = await pool.query(
-        `SELECT id, sheet_id, record_id, field_id, storage_file_id, created_by
-         FROM multitable_attachments
-         WHERE id = $1 AND deleted_at IS NULL`,
-        [attachmentId],
-      )
-      const attachmentRow: any = attachmentRes.rows[0]
+      const attachmentRow = await readAttachmentForDeleteShared({
+        query: pool.query.bind(pool),
+        attachmentId,
+      })
       if (!attachmentRow) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Attachment not found: ${attachmentId}` } })
       }
       const access = await resolveRequestAccess(req)
-      const sheetCapabilities = await resolveSheetCapabilities(req, pool.query.bind(pool), String(attachmentRow.sheet_id))
+      const sheetCapabilities = await resolveSheetCapabilities(req, pool.query.bind(pool), attachmentRow.sheetId)
       if (!sheetCapabilities.capabilities.canEditRecord) return sendForbidden(res)
-      if (typeof attachmentRow.record_id === 'string' && attachmentRow.record_id) {
+      if (attachmentRow.recordId) {
         const creatorMap = await loadRecordCreatorMap(
           pool.query.bind(pool),
-          String(attachmentRow.sheet_id),
-          [String(attachmentRow.record_id)],
+          attachmentRow.sheetId,
+          [attachmentRow.recordId],
         )
         if (!ensureRecordWriteAllowed(
           sheetCapabilities.capabilities,
           sheetCapabilities.sheetScope,
           access,
-          creatorMap.get(String(attachmentRow.record_id)),
+          creatorMap.get(attachmentRow.recordId),
           'edit',
         )) return sendForbidden(res, 'Record editing is not allowed for this row')
       } else if (!ensureRecordWriteAllowed(
         sheetCapabilities.capabilities,
         sheetCapabilities.sheetScope,
         access,
-        typeof attachmentRow.created_by === 'string' ? attachmentRow.created_by : null,
+        attachmentRow.createdBy,
         'edit',
       )) {
         return sendForbidden(res, 'Attachment deletion is not allowed for this draft attachment')
       }
 
       await pool.transaction(async ({ query }) => {
-        const recordId = typeof attachmentRow.record_id === 'string' ? attachmentRow.record_id : null
-        const fieldId = typeof attachmentRow.field_id === 'string' ? attachmentRow.field_id : null
-        const sheetId = String(attachmentRow.sheet_id)
+        const recordId = attachmentRow.recordId
+        const fieldId = attachmentRow.fieldId
+        const sheetId = attachmentRow.sheetId
 
         if (recordId && fieldId) {
           const recordRes = await query(
@@ -7827,18 +7680,11 @@ export function univerMetaRouter(): Router {
           }
         }
 
-        await query(
-          'UPDATE multitable_attachments SET deleted_at = now(), updated_at = now() WHERE id = $1',
-          [attachmentId],
-        )
+        await softDeleteAttachmentRowShared({ query, attachmentId })
       })
 
       const storage = getAttachmentStorageService()
-      try {
-        await storage.delete(String(attachmentRow.storage_file_id))
-      } catch {
-        // best-effort storage cleanup
-      }
+      await deleteAttachmentBinaryShared({ storage, storageFileId: attachmentRow.storageFileId })
 
       if (updatedRecordRealtimeScope) {
         publishMultitableSheetRealtime({
