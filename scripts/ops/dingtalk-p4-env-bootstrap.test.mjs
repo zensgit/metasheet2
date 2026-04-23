@@ -13,11 +13,15 @@ function makeTmpDir() {
   return mkdtempSync(path.join(tmpdir(), 'dingtalk-p4-env-bootstrap-'))
 }
 
-function runScript(args) {
+function runScript(args, env = {}) {
+  const nextEnv = { ...process.env, ...env }
+  for (const [key, value] of Object.entries(env)) {
+    if (value === undefined) delete nextEnv[key]
+  }
   return spawnSync(process.execPath, [scriptPath, ...args], {
     cwd: repoRoot,
     encoding: 'utf8',
-    env: { ...process.env },
+    env: nextEnv,
   })
 }
 
@@ -129,6 +133,85 @@ test('dingtalk-p4-env-bootstrap passes with complete env and derives authorized 
     })
     assert.equal(summary.nextCommands.some((command) => command.includes('--require-manual-targets')), true)
     assert.doesNotMatch(readFileSync(path.join(outputDir, 'readiness-summary.md'), 'utf8'), /robot-secret/)
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+
+test('dingtalk-p4-env-bootstrap safely updates private env values without leaking secrets', () => {
+  const tmpDir = makeTmpDir()
+  const envFile = path.join(tmpDir, 'dingtalk-p4.env')
+  const outputDir = path.join(tmpDir, 'readiness')
+
+  try {
+    const init = runScript(['--init', '--p4-env-file', envFile])
+    assert.equal(init.status, 0, init.stderr || init.stdout)
+
+    const update = runScript([
+      '--p4-env-file',
+      envFile,
+      '--set-from-env',
+      'DINGTALK_P4_AUTH_TOKEN',
+      '--set',
+      'DINGTALK_P4_GROUP_A_WEBHOOK=https://oapi.dingtalk.com/robot/send?access_token=robot-secret-a',
+      '--set',
+      'DINGTALK_P4_GROUP_B_WEBHOOK=https://oapi.dingtalk.com/robot/send?access_token=robot-secret-b',
+      '--set',
+      'DINGTALK_P4_ALLOWED_USER_IDS=user_authorized,user_secondary',
+      '--set',
+      'DINGTALK_P4_PERSON_USER_IDS=user_person_bound',
+      '--set',
+      'DINGTALK_P4_UNAUTHORIZED_USER_ID=user_unauthorized',
+      '--set',
+      'DINGTALK_P4_NO_EMAIL_DINGTALK_EXTERNAL_ID=dt_no_email_001',
+    ], {
+      DINGTALK_P4_AUTH_TOKEN: 'secret-admin-token',
+    })
+
+    assert.equal(update.status, 0, update.stderr || update.stdout)
+    assert.doesNotMatch(update.stdout, /secret-admin-token/)
+    assert.doesNotMatch(update.stdout, /robot-secret-a/)
+    assert.match(update.stdout, /DINGTALK_P4_AUTH_TOKEN: <redacted>/)
+    assert.match(update.stdout, /DINGTALK_P4_ALLOWED_USER_IDS: 2 entries/)
+    if (process.platform !== 'win32') {
+      assert.equal(statSync(envFile).mode & 0o777, 0o600)
+    }
+
+    const envText = readFileSync(envFile, 'utf8')
+    assert.match(envText, /DINGTALK_P4_AUTH_TOKEN="secret-admin-token"/)
+    assert.match(envText, /access_token=robot-secret-a/)
+
+    const check = runScript(['--check', '--p4-env-file', envFile, '--output-dir', outputDir])
+    assert.equal(check.status, 0, check.stderr || check.stdout)
+    const summary = JSON.parse(readFileSync(path.join(outputDir, 'readiness-summary.json'), 'utf8'))
+    assert.equal(summary.overallStatus, 'pass')
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+
+test('dingtalk-p4-env-bootstrap rejects unsafe update keys and missing source env values', () => {
+  const tmpDir = makeTmpDir()
+  const envFile = path.join(tmpDir, 'dingtalk-p4.env')
+
+  try {
+    const init = runScript(['--init', '--p4-env-file', envFile])
+    assert.equal(init.status, 0, init.stderr || init.stdout)
+
+    const unknown = runScript(['--p4-env-file', envFile, '--set', 'UNKNOWN=value'])
+    assert.equal(unknown.status, 1)
+    assert.match(unknown.stderr, /only supports known DingTalk P4 env keys/)
+
+    const missing = runScript([
+      '--p4-env-file',
+      envFile,
+      '--set-from-env',
+      'DINGTALK_P4_AUTH_TOKEN',
+    ], {
+      DINGTALK_P4_AUTH_TOKEN: undefined,
+    })
+    assert.equal(missing.status, 1)
+    assert.match(missing.stderr, /is not present in the process environment/)
   } finally {
     rmSync(tmpDir, { recursive: true, force: true })
   }

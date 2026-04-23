@@ -9,6 +9,24 @@ const DEFAULT_OUTPUT_ROOT = 'output/dingtalk-p4-env-readiness'
 const DEFAULT_API_BASE = 'http://142.171.239.56:8900'
 const DEFAULT_WEB_BASE = 'http://142.171.239.56:8081'
 
+const P4_ENV_KEYS = [
+  'DINGTALK_P4_API_BASE',
+  'DINGTALK_P4_WEB_BASE',
+  'DINGTALK_P4_AUTH_TOKEN',
+  'DINGTALK_P4_GROUP_A_WEBHOOK',
+  'DINGTALK_P4_GROUP_B_WEBHOOK',
+  'DINGTALK_P4_GROUP_A_SECRET',
+  'DINGTALK_P4_GROUP_B_SECRET',
+  'DINGTALK_P4_ALLOWED_USER_IDS',
+  'DINGTALK_P4_ALLOWED_MEMBER_GROUP_IDS',
+  'DINGTALK_P4_PERSON_USER_IDS',
+  'DINGTALK_P4_AUTHORIZED_USER_ID',
+  'DINGTALK_P4_UNAUTHORIZED_USER_ID',
+  'DINGTALK_P4_NO_EMAIL_DINGTALK_EXTERNAL_ID',
+]
+
+const P4_ENV_KEY_SET = new Set(P4_ENV_KEYS)
+
 const SECRET_KEYS = new Set([
   'DINGTALK_P4_AUTH_TOKEN',
   'DINGTALK_P4_GROUP_A_WEBHOOK',
@@ -31,6 +49,9 @@ Options:
   --output-dir <dir>        Report output dir, default ${DEFAULT_OUTPUT_ROOT}/<run-id>
   --api-base <url>          Template API base, default ${DEFAULT_API_BASE}
   --web-base <url>          Template web base, default ${DEFAULT_WEB_BASE}
+  --set <KEY=VALUE>         Safely update one known P4 env key without echoing the value
+  --set-from-env <KEY>      Copy one known P4 env key from the current process environment
+  --unset <KEY>             Clear one known P4 env key
   --force                   Allow --init to overwrite an existing env file
   --help                    Show this help
 
@@ -38,6 +59,8 @@ Typical flow:
   node scripts/ops/dingtalk-p4-env-bootstrap.mjs --init
   # Fill ${DEFAULT_ENV_FILE} outside git.
   node scripts/ops/dingtalk-p4-env-bootstrap.mjs --check
+  # Or safely update fields without printing raw secret values:
+  DINGTALK_P4_AUTH_TOKEN=... node scripts/ops/dingtalk-p4-env-bootstrap.mjs --set-from-env DINGTALK_P4_AUTH_TOKEN
   node scripts/ops/dingtalk-p4-smoke-session.mjs --env-file ${DEFAULT_ENV_FILE} --require-manual-targets --output-dir output/dingtalk-p4-remote-smoke-session/142-session
 `)
 }
@@ -59,6 +82,9 @@ function parseArgs(argv) {
     apiBase: DEFAULT_API_BASE,
     webBase: DEFAULT_WEB_BASE,
     force: false,
+    set: [],
+    setFromEnv: [],
+    unset: [],
   }
 
   for (let i = 0; i < argv.length; i += 1) {
@@ -87,6 +113,18 @@ function parseArgs(argv) {
         opts.webBase = readRequiredValue(argv, i, arg)
         i += 1
         break
+      case '--set':
+        opts.set.push(parseEnvAssignment(readRequiredValue(argv, i, arg)))
+        i += 1
+        break
+      case '--set-from-env':
+        opts.setFromEnv.push(validateP4EnvKey(readRequiredValue(argv, i, arg), arg))
+        i += 1
+        break
+      case '--unset':
+        opts.unset.push(validateP4EnvKey(readRequiredValue(argv, i, arg), arg))
+        i += 1
+        break
       case '--force':
         opts.force = true
         break
@@ -99,11 +137,27 @@ function parseArgs(argv) {
     }
   }
 
-  if (!opts.init && !opts.check) {
-    throw new Error('expected --init, --check, or both')
+  if (!opts.init && !opts.check && opts.set.length === 0 && opts.setFromEnv.length === 0 && opts.unset.length === 0) {
+    throw new Error('expected --init, --check, --set, --set-from-env, or --unset')
   }
 
   return opts
+}
+
+function validateP4EnvKey(key, flag = '--set') {
+  if (!P4_ENV_KEY_SET.has(key)) {
+    throw new Error(`${flag} only supports known DingTalk P4 env keys: ${P4_ENV_KEYS.join(', ')}`)
+  }
+  return key
+}
+
+function parseEnvAssignment(raw) {
+  const equalsIndex = raw.indexOf('=')
+  if (equalsIndex <= 0) {
+    throw new Error('--set expects KEY=VALUE')
+  }
+  const key = validateP4EnvKey(raw.slice(0, equalsIndex), '--set')
+  return { key, value: raw.slice(equalsIndex + 1) }
 }
 
 function makeRunId() {
@@ -154,6 +208,74 @@ function initEnv(opts) {
   writeFileSync(opts.envFile, renderTemplate(opts), { encoding: 'utf8', mode: 0o600 })
   chmodSync(opts.envFile, 0o600)
   console.log(`[dingtalk-p4-env-bootstrap] wrote private env template: ${opts.envFile}`)
+}
+
+function collectUpdates(opts) {
+  const updates = new Map()
+  for (const { key, value } of opts.set) {
+    updates.set(key, value)
+  }
+  for (const key of opts.setFromEnv) {
+    if (process.env[key] === undefined) {
+      throw new Error(`--set-from-env ${key} is not present in the process environment`)
+    }
+    updates.set(key, process.env[key] ?? '')
+  }
+  for (const key of opts.unset) {
+    updates.set(key, '')
+  }
+  return updates
+}
+
+function summarizeUpdateValue(key, value) {
+  if (!value) return 'blank'
+  const listKeys = new Set([
+    'DINGTALK_P4_ALLOWED_USER_IDS',
+    'DINGTALK_P4_ALLOWED_MEMBER_GROUP_IDS',
+    'DINGTALK_P4_PERSON_USER_IDS',
+  ])
+  if (listKeys.has(key)) return `${splitList(value).length} entries`
+  if (SECRET_KEYS.has(key)) return `<redacted>, ${value.length} chars`
+  return `set, ${value.length} chars`
+}
+
+function renderEnvLine(key, value) {
+  return `${key}=${quoteEnv(value)}`
+}
+
+function updateEnv(opts) {
+  const updates = collectUpdates(opts)
+  if (updates.size === 0) return
+  if (!existsSync(opts.envFile)) {
+    throw new Error(`env file does not exist: ${opts.envFile}; run --init first`)
+  }
+
+  const content = readFileSync(opts.envFile, 'utf8')
+  const lines = content.replace(/\r?\n$/, '').split(/\r?\n/)
+  const remaining = new Map(updates)
+  const nextLines = lines.map((line) => {
+    const match = line.match(/^([A-Za-z_][A-Za-z0-9_]*)=/)
+    if (!match || !remaining.has(match[1])) return line
+    const key = match[1]
+    const value = remaining.get(key)
+    remaining.delete(key)
+    return renderEnvLine(key, value)
+  })
+
+  if (remaining.size > 0 && nextLines.some((line) => line.trim())) {
+    nextLines.push('')
+  }
+  for (const [key, value] of remaining.entries()) {
+    nextLines.push(renderEnvLine(key, value))
+  }
+
+  writeFileSync(opts.envFile, `${nextLines.join('\n')}\n`, { encoding: 'utf8', mode: 0o600 })
+  chmodSync(opts.envFile, 0o600)
+
+  console.log(`[dingtalk-p4-env-bootstrap] updated private env: ${opts.envFile}`)
+  for (const [key, value] of updates.entries()) {
+    console.log(`- ${key}: ${summarizeUpdateValue(key, value)}`)
+  }
 }
 
 function unquoteEnvValue(value) {
@@ -402,6 +524,7 @@ function main() {
   try {
     const opts = parseArgs(process.argv.slice(2))
     if (opts.init) initEnv(opts)
+    updateEnv(opts)
     if (opts.check) checkReadiness(opts)
   } catch (error) {
     console.error(`[dingtalk-p4-env-bootstrap] ERROR: ${redactString(error instanceof Error ? error.message : String(error))}`)
