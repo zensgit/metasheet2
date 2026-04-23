@@ -1,5 +1,8 @@
 import { poolManager } from '../../src/integration/db/connection-pool'
 
+const APPROVAL_SCHEMA_BOOTSTRAP_KEY = 'approval-schema-bootstrap'
+const APPROVAL_SCHEMA_BOOTSTRAP_VERSION = '20260423-once-per-db'
+
 /**
  * Ensures the approval schema (tables, constraints, indexes, sequences) is
  * materialized for the integration-test suite.
@@ -23,10 +26,17 @@ import { poolManager } from '../../src/integration/db/connection-pool'
  * race in `pg_class`, producing Postgres errors 42710 (duplicate_object) or
  * 23505 (unique violation on `pg_class`/`pg_constraint`).
  *
- * We serialize the entire DDL sequence with a session-scoped advisory lock
- * acquired inside a dedicated `pg.PoolClient` and released automatically on
- * `COMMIT` / `ROLLBACK` (that is what `pg_advisory_xact_lock` does — as
- * opposed to `pg_advisory_lock`, which would require an explicit unlock).
+ * We serialize the entire DDL sequence with a session-scoped advisory lock and
+ * a DB-persisted version marker. The advisory lock prevents concurrent
+ * bootstraps from interleaving, while the marker prevents worker B from running
+ * the same DDL after worker A has already committed and started its HTTP server.
+ * That second phase matters because otherwise worker B's repeat ALTER/INDEX
+ * statements can still deadlock with worker A's live API queries.
+ *
+ * The advisory lock is acquired inside a dedicated `pg.PoolClient` and released
+ * automatically on `COMMIT` / `ROLLBACK` (that is what
+ * `pg_advisory_xact_lock` does — as opposed to `pg_advisory_lock`, which would
+ * require an explicit unlock).
  *
  * The lock key is `hashtext('approval-schema-bootstrap')` — int4 up-cast by
  * Postgres to int8 for the one-arg form of `pg_advisory_xact_lock`.
@@ -44,7 +54,23 @@ export async function ensureApprovalSchemaReady(): Promise<void> {
   const client = await pool.connect()
   try {
     await client.query('BEGIN')
-    await client.query(`SELECT pg_advisory_xact_lock(hashtext('approval-schema-bootstrap'))`)
+    await client.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [APPROVAL_SCHEMA_BOOTSTRAP_KEY])
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS approval_test_schema_bootstrap_state (
+        key TEXT PRIMARY KEY,
+        version TEXT NOT NULL,
+        completed_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      )
+    `)
+    const marker = await client.query<{ version: string }>(
+      `SELECT version FROM approval_test_schema_bootstrap_state WHERE key = $1`,
+      [APPROVAL_SCHEMA_BOOTSTRAP_KEY],
+    )
+    if (marker.rows[0]?.version === APPROVAL_SCHEMA_BOOTSTRAP_VERSION) {
+      await client.query('COMMIT')
+      return
+    }
 
     await client.query('CREATE EXTENSION IF NOT EXISTS pgcrypto')
 
@@ -249,6 +275,15 @@ export async function ensureApprovalSchemaReady(): Promise<void> {
     await client.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_approval_published_definitions_active_template ON approval_published_definitions(template_id) WHERE is_active = TRUE`)
 
     await client.query(`CREATE SEQUENCE IF NOT EXISTS approval_request_no_seq START WITH 100001 INCREMENT BY 1`)
+
+    await client.query(
+      `INSERT INTO approval_test_schema_bootstrap_state (key, version, completed_at)
+       VALUES ($1, $2, now())
+       ON CONFLICT (key)
+       DO UPDATE SET version = EXCLUDED.version,
+                     completed_at = EXCLUDED.completed_at`,
+      [APPROVAL_SCHEMA_BOOTSTRAP_KEY, APPROVAL_SCHEMA_BOOTSTRAP_VERSION],
+    )
 
     await client.query('COMMIT')
   } catch (error) {
