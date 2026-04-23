@@ -636,10 +636,9 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
   //
   // PLM / external sources: approvals whose `instance_id` never materialized
   // on the platform side (edge: PLM bridge hasn't synced yet) would FK-violate
-  // on insert. To keep the detail view's fire-and-forget call safe we verify
-  // the instance exists first and return `{ ok: true, skipped: true }` when
-  // it doesn't — the detail view already tolerates missing instances via the
-  // 404 handled by its loadDetail call.
+  // on insert. To keep the detail view's fire-and-forget call safe we use
+  // INSERT ... SELECT from approval_instances atomically and return
+  // `{ ok: true, skipped: true }` when no row materializes.
   r.post('/api/approvals/:id/mark-read', authenticate, rbacGuard('approvals', 'read'), async (req: Request, res: Response) => {
     try {
       if (!pool) {
@@ -657,23 +656,21 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
 
       const { id } = req.params
 
-      const instanceResult = await pool.query<{ id: string }>(
-        `SELECT id FROM approval_instances WHERE id = $1`,
-        [id],
+      const markReadResult = await pool.query<{ instance_id: string }>(
+        `INSERT INTO approval_reads (user_id, instance_id, read_at)
+         SELECT $1, id, now()
+         FROM approval_instances
+         WHERE id = $2
+         ON CONFLICT (user_id, instance_id)
+         DO UPDATE SET read_at = EXCLUDED.read_at
+         RETURNING instance_id`,
+        [userId, id],
       )
-      if (instanceResult.rows.length === 0) {
+      if (markReadResult.rows.length === 0) {
         // Unsynced PLM / external reference — no-op so the detail view's
         // fire-and-forget call never toasts an error.
         return res.json({ ok: true, skipped: true, reason: 'instance_not_materialized' })
       }
-
-      await pool.query(
-        `INSERT INTO approval_reads (user_id, instance_id, read_at)
-         VALUES ($1, $2, now())
-         ON CONFLICT (user_id, instance_id)
-         DO UPDATE SET read_at = EXCLUDED.read_at`,
-        [userId, id],
-      )
 
       res.json({ ok: true })
     } catch (error) {
@@ -748,7 +745,9 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
            SELECT DISTINCT a.instance_id
            FROM approval_assignments a
            INNER JOIN approval_instances i ON i.id = a.instance_id
+           LEFT JOIN approval_reads r ON r.instance_id = a.instance_id AND r.user_id = $1
            WHERE ${conditions.join(' AND ')}
+             AND r.instance_id IS NULL
          ) AS targets
          ON CONFLICT (user_id, instance_id)
          DO UPDATE SET read_at = EXCLUDED.read_at

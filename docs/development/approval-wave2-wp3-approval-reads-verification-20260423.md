@@ -107,3 +107,42 @@ Result:
 Review note:
 
 - Codex compared this branch against a local temporary `codex/approval-reads-20260423` branch and selected this Claude branch for PR. This branch is strictly more complete: `unreadCount`, `mark-all-read`, PLM unsynced skipped semantics, and cross-user unread isolation are all covered.
+
+## Bot-review hardening verification - 2026-04-23
+
+Changes addressed:
+
+- `POST /api/approvals/:id/mark-read` now uses one atomic
+  `INSERT ... SELECT ... FROM approval_instances ... ON CONFLICT` statement,
+  removing the SELECT/INSERT foreign-key race.
+- `POST /api/approvals/mark-all-read` now inserts only currently unread
+  rows, so `markedCount` reports records transitioned from unread to read
+  instead of all visible pending records.
+- `ApprovalCenterView` now refreshes the unread badge when `sourceSystem`
+  changes, keeping the list, badge, and "mark all read" state on the same
+  filter.
+
+Commands:
+
+```bash
+pnpm --filter @metasheet/web exec vitest run \
+  tests/approvalCenterUnreadBadge.spec.ts \
+  tests/approvalCenterRemindBadge.spec.ts \
+  --reporter=dot
+pnpm --filter @metasheet/core-backend exec tsc --noEmit
+pnpm --filter @metasheet/web exec vue-tsc -b --noEmit
+```
+
+Result:
+
+- `approvalCenterUnreadBadge.spec.ts`: `7/7` passed.
+- `approvalCenterRemindBadge.spec.ts`: `6/6` passed.
+- Backend `tsc --noEmit`: exit `0`.
+- Frontend `vue-tsc -b --noEmit`: exit `0`.
+
+Local note:
+
+- Backend integration remains documented above as requiring `DATABASE_URL`.
+  This environment does not currently provide a local Postgres URL, so CI or
+  a DB-backed developer shell must re-run the integration group before final
+  production rollout.

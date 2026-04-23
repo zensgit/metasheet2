@@ -32,7 +32,7 @@
           placeholder="来源系统"
           style="width: 140px; margin-left: 12px"
           data-testid="approval-source-filter"
-          @change="handleSearch"
+          @change="handleSourceSystemChange"
         >
           <el-option label="全部来源" value="all" />
           <el-option label="平台审批" value="platform" />
@@ -414,6 +414,12 @@ function handleTabChange() {
 function handleSearch() {
   currentPage.value = 1
   loadCurrentTab()
+}
+
+function handleSourceSystemChange() {
+  currentPage.value = 1
+  loadCurrentTab()
+  void refreshPendingBadgeCount()
 }
 
 function handlePageChange(page: number) {

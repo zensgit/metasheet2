@@ -477,6 +477,35 @@ describe('ApprovalCenterView 未读红点 (WP3 slice 2)', () => {
     expect(button).toBeTruthy()
     expect(button.hasAttribute('disabled')).toBe(true)
   })
+
+  it('refreshes the unread badge when sourceSystem changes', async () => {
+    getPendingCountSpy
+      .mockResolvedValueOnce({ count: 7, unreadCount: 3 })
+      .mockResolvedValueOnce({ count: 2, unreadCount: 1 })
+
+    const { default: ApprovalCenterView } = await import('../src/views/approval/ApprovalCenterView.vue')
+    const Host = defineComponent({
+      setup() {
+        return () => h(ApprovalCenterView as any)
+      },
+    })
+    app = createApp(Host)
+    registerCommonStubs(app)
+    app.mount(container!)
+    await flushUi()
+
+    const initialBadge = container!.querySelector('[data-testid="approval-pending-badge"]') as HTMLElement | null
+    expect(initialBadge?.getAttribute('data-badge-value')).toBe('3')
+
+    const filter = container!.querySelector('[data-testid="approval-source-filter"]') as HTMLSelectElement
+    filter.value = 'plm'
+    filter.dispatchEvent(new Event('change'))
+    await flushUi()
+
+    expect(getPendingCountSpy).toHaveBeenLastCalledWith('plm')
+    const updatedBadge = container!.querySelector('[data-testid="approval-pending-badge"]') as HTMLElement | null
+    expect(updatedBadge?.getAttribute('data-badge-value')).toBe('1')
+  })
 })
 
 describe('ApprovalDetailView mark-read on mount (WP3 slice 2)', () => {

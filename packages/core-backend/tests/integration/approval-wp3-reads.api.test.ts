@@ -244,10 +244,8 @@ describeIfDatabase('Approval Wave 2 WP3 slice 2 — approval_reads endpoints', (
     })
     expect(response.status).toBe(200)
     const payload = await response.json() as { markedCount: number }
-    // All three instances are now read — instance[0] was already marked, and
-    // the upsert re-runs on it (ON CONFLICT DO UPDATE), so the response
-    // contains the count of affected rows across the entire active queue.
-    expect(payload.markedCount).toBe(3)
+    // Only unread targets are processed; instance[0] was already marked read.
+    expect(payload.markedCount).toBe(2)
 
     const counts = await fetchCount(baseUrl, token, 'all')
     expect(counts.count).toBe(3)
