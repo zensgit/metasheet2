@@ -403,6 +403,44 @@ function statusCommand(outputDir) {
   ].join(' ')
 }
 
+function statusReportPaths(outputDir) {
+  return {
+    smokeStatusJson: path.join(outputDir, 'smoke-status.json'),
+    smokeStatusMd: path.join(outputDir, 'smoke-status.md'),
+    smokeTodoMd: path.join(outputDir, 'smoke-todo.md'),
+  }
+}
+
+function runStatusReportStep(outputDir, env) {
+  return runNodeStep(
+    'status-report',
+    'Refresh smoke status and remote TODO reports',
+    'scripts/ops/dingtalk-p4-smoke-status.mjs',
+    ['--session-dir', outputDir],
+    outputDir,
+    env,
+  )
+}
+
+function buildStatusReportSummary(outputDir, statusStep) {
+  const paths = statusReportPaths(outputDir)
+  const statusSummary = readJsonIfExists(paths.smokeStatusJson)
+  return {
+    status: statusStep.status,
+    smokeStatusJson: existsSync(paths.smokeStatusJson) ? relativePath(paths.smokeStatusJson) : '',
+    smokeStatusMd: existsSync(paths.smokeStatusMd) ? relativePath(paths.smokeStatusMd) : '',
+    smokeTodoMd: existsSync(paths.smokeTodoMd) ? relativePath(paths.smokeTodoMd) : '',
+    overallStatus: statusSummary?.overallStatus ?? 'not_available',
+    remoteSmokeTodos: statusSummary?.remoteSmokeTodos
+      ? {
+          total: statusSummary.remoteSmokeTodos.total,
+          completed: statusSummary.remoteSmokeTodos.completed,
+          remaining: statusSummary.remoteSmokeTodos.remaining,
+        }
+      : null,
+  }
+}
+
 function evidenceRecordCommand(outputDir) {
   return [
     'node scripts/ops/dingtalk-p4-evidence-record.mjs',
@@ -472,6 +510,17 @@ function renderMarkdown(summary) {
     ? summary.pendingChecks.map((check) => `- \`${check.id}\`: ${check.status}${check.manual ? ' (manual evidence required)' : ''}`).join('\n')
     : '- None'
   const commands = summary.nextCommands.map((command) => `- \`${command}\``).join('\n')
+  const statusReport = summary.statusReport
+    ? `
+## Status Report
+
+Status report: \`${summary.statusReport.smokeStatusJson || 'not_available'}\`
+
+Remote TODO: \`${summary.statusReport.smokeTodoMd || 'not_available'}\`
+
+Remote TODO progress: **${summary.statusReport.remoteSmokeTodos?.completed ?? 0}/${summary.statusReport.remoteSmokeTodos?.total ?? 0}** complete, **${summary.statusReport.remoteSmokeTodos?.remaining ?? 'unknown'}** remaining.
+`
+    : ''
 
   return `# DingTalk P4 Smoke Session Summary
 
@@ -494,6 +543,8 @@ ${pending}
 ## Next Commands
 
 ${commands}
+
+${statusReport}
 
 ${renderFinalStrictSummary(summary)}
 
@@ -588,7 +639,17 @@ function runSession(opts) {
   }
 
   writeSessionSummary(summary, outputDir)
-  return summary
+  const statusStep = runStatusReportStep(outputDir, env)
+  const finalSteps = [...steps.filter((step) => step.id !== 'status-report'), statusStep]
+  const finalSummary = {
+    ...summary,
+    generatedAt: new Date().toISOString(),
+    overallStatus: computeOverallStatus(finalSteps, pendingChecks),
+    steps: finalSteps,
+    statusReport: buildStatusReportSummary(outputDir, statusStep),
+  }
+  writeSessionSummary(finalSummary, outputDir)
+  return finalSummary
 }
 
 function runFinalStrictCompile(opts) {
@@ -663,7 +724,17 @@ function runFinalStrictCompile(opts) {
   }
 
   writeSessionSummary(summary, outputDir)
-  return summary
+  const statusStep = runStatusReportStep(outputDir, env)
+  const finalSteps = [...steps.filter((step) => step.id !== 'status-report'), statusStep]
+  const finalSummary = {
+    ...summary,
+    generatedAt: new Date().toISOString(),
+    overallStatus: strictPassed && statusStep.status === 'pass' ? 'pass' : 'fail',
+    steps: finalSteps,
+    statusReport: buildStatusReportSummary(outputDir, statusStep),
+  }
+  writeSessionSummary(finalSummary, outputDir)
+  return finalSummary
 }
 
 try {
