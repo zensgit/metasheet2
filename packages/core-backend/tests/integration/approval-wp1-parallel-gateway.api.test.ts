@@ -84,7 +84,7 @@ function buildFormSchema() {
  * Branch B: compliance-review (single approver, user compliance-1)
  * Shared join: finance-review (single approver, user finance-1)
  */
-function buildParallelGatewayGraph() {
+function buildParallelGatewayGraph(joinMode: 'all' | 'any' = 'all') {
   return {
     nodes: [
       { key: 'start', type: 'start', config: {} },
@@ -93,7 +93,7 @@ function buildParallelGatewayGraph() {
         type: 'parallel',
         config: {
           branches: ['edge-fork-legal', 'edge-fork-compliance'],
-          joinMode: 'all',
+          joinMode,
           joinNodeKey: 'finance_review',
         },
       },
@@ -333,6 +333,155 @@ describeIfDatabase('Approval Wave 2 WP1 parallel-gateway (并行分支) API', ()
       nodeKey: 'finance_review',
       nextNodeKey: null,
       aggregateComplete: true,
+    })
+  })
+
+  it('joins after the first completed branch and cancels sibling branches (joinMode=any)', async () => {
+    const adminToken = await authToken(baseUrl, 'approval-admin-parallel-any')
+    const requesterToken = await authToken(baseUrl, 'requester-parallel-any')
+    const legalToken = await authToken(baseUrl, 'legal-1')
+    const complianceToken = await authToken(baseUrl, 'compliance-1')
+    const financeToken = await authToken(baseUrl, 'finance-1')
+
+    const templateKey = `approval-wp1-parallel-any-${Date.now()}`
+
+    const templateResponse = await jsonRequest(baseUrl, '/api/approval-templates', adminToken, {
+      method: 'POST',
+      body: {
+        key: templateKey,
+        name: 'Parallel Gateway Any Template',
+        description: 'WP1 parallel-gateway join-any integration',
+        formSchema: buildFormSchema(),
+        approvalGraph: buildParallelGatewayGraph('any'),
+      },
+    })
+    expect(templateResponse.status).toBe(201)
+    const template = await templateResponse.json() as { id: string }
+    createdTemplateIds.add(template.id)
+
+    const publishResponse = await jsonRequest(baseUrl, `/api/approval-templates/${template.id}/publish`, adminToken, {
+      method: 'POST',
+      body: { policy: { allowRevoke: true } },
+    })
+    expect(publishResponse.status).toBe(200)
+
+    const createResponse = await jsonRequest(baseUrl, '/api/approvals', requesterToken, {
+      method: 'POST',
+      body: {
+        templateId: template.id,
+        formData: { reason: 'parallel-gateway join-any request' },
+      },
+    })
+    expect(createResponse.status).toBe(201)
+    const createdApproval = await createResponse.json() as {
+      id: string
+      status: string
+      currentNodeKey: string | null
+      currentNodeKeys?: string[] | null
+      assignments: Array<{ assigneeId: string; isActive: boolean; nodeKey?: string | null }>
+    }
+    createdApprovalIds.add(createdApproval.id)
+    expect(createdApproval.status).toBe('pending')
+    expect(createdApproval.currentNodeKey).toBe('parallel_fork')
+    expect([...(createdApproval.currentNodeKeys || [])].sort()).toEqual([
+      'compliance_review',
+      'legal_review',
+    ])
+
+    const legalApproveResponse = await jsonRequest(baseUrl, `/api/approvals/${createdApproval.id}/actions`, legalToken, {
+      method: 'POST',
+      body: { action: 'approve', comment: 'legal wins join-any' },
+    })
+    expect(legalApproveResponse.status).toBe(200)
+    const afterLegal = await legalApproveResponse.json() as {
+      status: string
+      currentNodeKey: string | null
+      currentNodeKeys?: string[] | null
+      assignments: Array<{ assigneeId: string; isActive: boolean; nodeKey?: string | null; metadata?: JsonRecord }>
+    }
+    expect(afterLegal.status).toBe('pending')
+    expect(afterLegal.currentNodeKey).toBe('finance_review')
+    expect(afterLegal.currentNodeKeys).toBeFalsy()
+    expect(
+      afterLegal.assignments
+        .filter((a) => a.isActive)
+        .map((a) => ({ assigneeId: a.assigneeId, nodeKey: a.nodeKey })),
+    ).toEqual([
+      { assigneeId: 'finance-1', nodeKey: 'finance_review' },
+    ])
+
+    const pool = poolManager.get()
+    const assignmentResult = await pool.query<ApprovalAssignmentRow>(
+      `SELECT assignee_id, node_key, is_active, metadata
+       FROM approval_assignments
+       WHERE instance_id = $1
+       ORDER BY created_at ASC`,
+      [createdApproval.id],
+    )
+    const complianceAssignment = assignmentResult.rows.find((row) => row.assignee_id === 'compliance-1')
+    expect(complianceAssignment?.is_active).toBe(false)
+    expect(complianceAssignment?.metadata).toMatchObject({
+      parallelCancelledBy: 'legal-1',
+      parallelJoinMode: 'any',
+      parallelNodeKey: 'parallel_fork',
+    })
+
+    const instanceResult = await pool.query<ApprovalInstanceRow>(
+      `SELECT status, current_node_key, metadata FROM approval_instances WHERE id = $1`,
+      [createdApproval.id],
+    )
+    expect(instanceResult.rows[0]?.current_node_key).toBe('finance_review')
+    expect((instanceResult.rows[0]?.metadata as JsonRecord | undefined)?.parallelBranchStates).toBeUndefined()
+
+    const complianceApproveResponse = await jsonRequest(
+      baseUrl,
+      `/api/approvals/${createdApproval.id}/actions`,
+      complianceToken,
+      {
+        method: 'POST',
+        body: { action: 'approve', comment: 'too late' },
+      },
+    )
+    expect(complianceApproveResponse.status).toBe(403)
+
+    const financeApproveResponse = await jsonRequest(baseUrl, `/api/approvals/${createdApproval.id}/actions`, financeToken, {
+      method: 'POST',
+      body: { action: 'approve', comment: 'finance ok' },
+    })
+    expect(financeApproveResponse.status).toBe(200)
+    const afterFinance = await financeApproveResponse.json() as {
+      status: string
+      currentNodeKey: string | null
+      assignments: Array<{ assigneeId: string; isActive: boolean }>
+    }
+    expect(afterFinance.status).toBe('approved')
+    expect(afterFinance.currentNodeKey).toBeNull()
+    expect(afterFinance.assignments.filter((a) => a.isActive)).toHaveLength(0)
+
+    const recordsResult = await pool.query<ApprovalRecordRow>(
+      `SELECT action, actor_id, to_status, metadata
+       FROM approval_records
+       WHERE instance_id = $1
+       ORDER BY to_version ASC, created_at ASC`,
+      [createdApproval.id],
+    )
+    const legalApproveRecord = recordsResult.rows.find((row) => row.action === 'approve' && row.actor_id === 'legal-1')
+    expect(legalApproveRecord?.metadata).toMatchObject({
+      nodeKey: 'legal_review',
+      nextNodeKey: 'finance_review',
+      parallelNodeKey: 'parallel_fork',
+      parallelBranchComplete: true,
+      parallelJoinMode: 'any',
+      parallelCancelledAssignees: ['compliance-1'],
+    })
+    const cancellationRecord = recordsResult.rows.find((row) =>
+      row.action === 'sign' && row.metadata.parallelAutoCancelled === true)
+    expect(cancellationRecord?.metadata).toMatchObject({
+      nodeKey: 'legal_review',
+      parallelJoinMode: 'any',
+      parallelNodeKey: 'parallel_fork',
+      parallelCancelledBy: 'legal-1',
+      cancelledAssignees: ['compliance-1'],
     })
   })
 

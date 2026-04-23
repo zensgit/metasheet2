@@ -422,12 +422,10 @@ export class ApprovalGraphExecutor {
    *     if the branch moved to another approval node in the same branch OR
    *     reached the join node while siblings remain pending. The route layer
    *     persists the updated `parallelState` into `metadata.parallelBranchStates`.
-   *   - A post-join resolution (`resolveFromNode(joinNodeKey)`) once every
-   *     branch has reported complete under `joinMode='all'`. In that case
-   *     `parallelState` carries the final archived state map.
-   *
-   * The `joinMode='any'` path is reserved for a future wave and currently
-   * throws; see the dev MD follow-up list.
+   *   - A post-join resolution (`resolveFromNode(joinNodeKey)`) once the
+   *     join condition is met. `joinMode='all'` waits for every branch;
+   *     `joinMode='any'` advances as soon as this branch reaches the join.
+   *     In both cases `parallelState` carries the final archived state map.
    */
   resolveAfterApproveInParallel(
     branchNodeKey: string,
@@ -438,9 +436,6 @@ export class ApprovalGraphExecutor {
     )
     if (!branch) {
       throw new Error(`Parallel branch with current node ${branchNodeKey} not found in state`)
-    }
-    if (currentState.joinMode !== 'all') {
-      throw new Error(`Parallel joinMode '${currentState.joinMode}' is not supported in v1`)
     }
     const aggregateMode = this.getApprovalMode(branchNodeKey)
 
@@ -490,8 +485,9 @@ export class ApprovalGraphExecutor {
       branches: updatedBranches,
     }
     const allComplete = Object.values(updatedState.branches).every((entry) => entry.complete)
+    const joinSatisfied = currentState.joinMode === 'any' || allComplete
 
-    if (!allComplete) {
+    if (!joinSatisfied) {
       // Still waiting on siblings; keep the instance pending with fewer active branches.
       const pendingBranches = Object.values(updatedState.branches).filter((entry) => !entry.complete)
       return {
@@ -509,7 +505,9 @@ export class ApprovalGraphExecutor {
       }
     }
 
-    // All branches complete — advance past the join node.
+    // Join condition satisfied — advance past the join node. For join-any the
+    // route layer cancels sibling branch assignments before inserting the
+    // post-join assignments returned here.
     const postJoin = this.resolveFromNode(currentState.joinNodeKey, {
       aggregateMode,
       aggregateComplete: true,
@@ -698,13 +696,10 @@ export class ApprovalGraphExecutor {
         if (!parallelConfig) {
           throw new Error(`Parallel node ${node.key} has invalid config`)
         }
-        if (parallelConfig.joinMode !== 'all') {
-          throw new Error(`Parallel joinMode '${parallelConfig.joinMode}' is not supported in v1`)
-        }
 
         const branchStates: Record<string, ParallelBranchState> = {}
         const branchAssignments: ApprovalGraphAssignment[] = []
-        let allBranchesAutoComplete = true
+        const branchAdvances: Array<{ edgeKey: string; advance: BranchAdvance }> = []
 
         for (const edgeKey of parallelConfig.branches) {
           const branchStartNode = this.targetForEdge(edgeKey)
@@ -715,9 +710,35 @@ export class ApprovalGraphExecutor {
             { fromNodeKey: branchStartNode, includeStartNode: true },
             parallelConfig.joinNodeKey,
           )
+          branchAdvances.push({ edgeKey, advance })
+        }
+
+        const anyAutoCompleteWinner = parallelConfig.joinMode === 'any'
+          ? branchAdvances.find((entry) => entry.advance.kind === 'reached-join')
+          : undefined
+        if (anyAutoCompleteWinner) {
+          // A branch with only cc / auto-approval work reached the join
+          // immediately. Under join-any that branch wins before sibling
+          // approval assignments are created.
+          const postJoin = this.resolveFromNode(parallelConfig.joinNodeKey, context)
+          return {
+            ...postJoin,
+            ccEvents: [
+              ...ccEvents,
+              ...anyAutoCompleteWinner.advance.ccEvents,
+              ...postJoin.ccEvents,
+            ],
+            autoApprovalEvents: [
+              ...autoApprovalEvents,
+              ...anyAutoCompleteWinner.advance.autoApprovalEvents,
+              ...postJoin.autoApprovalEvents,
+            ],
+          }
+        }
+
+        for (const { edgeKey, advance } of branchAdvances) {
           ccEvents.push(...advance.ccEvents)
           autoApprovalEvents.push(...advance.autoApprovalEvents)
-
           if (advance.kind === 'pending-approval') {
             branchStates[edgeKey] = {
               edgeKey,
@@ -725,7 +746,6 @@ export class ApprovalGraphExecutor {
               complete: false,
             }
             branchAssignments.push(...advance.assignments)
-            allBranchesAutoComplete = false
           } else {
             branchStates[edgeKey] = {
               edgeKey,
@@ -735,6 +755,7 @@ export class ApprovalGraphExecutor {
           }
         }
 
+        const allBranchesAutoComplete = Object.values(branchStates).every((entry) => entry.complete)
         if (allBranchesAutoComplete) {
           // Every branch fast-forwarded through auto-approvals / cc to the join
           // node. Continue walking past the join node directly.
