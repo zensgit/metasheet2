@@ -18,6 +18,7 @@
 - [x] No-email local user create-and-bind
 - [x] Delivery history for group/person sends
 - [x] P4 smoke session, evidence recorder, status TODO, strict finalization, handoff packet, and publish validation
+- [x] P4 local regression gate runner with redacted JSON/MD output for ops/product verification evidence
 
 ## PR Stack To Confirm
 
@@ -177,25 +178,29 @@ node scripts/ops/dingtalk-p4-smoke-status.mjs \
 
 ## Local Regression Gates
 
-- [ ] `node --test scripts/ops/dingtalk-p4-smoke-session.test.mjs`
-- [ ] `node --test scripts/ops/dingtalk-p4-smoke-status.test.mjs`
-- [ ] `node --test scripts/ops/dingtalk-p4-remote-smoke.test.mjs`
-- [ ] `node --test scripts/ops/compile-dingtalk-p4-smoke-evidence.test.mjs`
-- [ ] `node --test scripts/ops/dingtalk-p4-evidence-record.test.mjs`
-- [ ] `node --test scripts/ops/dingtalk-p4-offline-handoff.test.mjs scripts/ops/dingtalk-p4-final-handoff.test.mjs scripts/ops/validate-dingtalk-staging-evidence-packet.test.mjs`
-- [ ] `git diff --check`
+- [x] Add one-command local regression gate with redacted JSON/MD reports:
+
+```bash
+node scripts/ops/dingtalk-p4-regression-gate.mjs \
+  --profile ops \
+  --output-dir output/dingtalk-p4-regression-gate/142-ops
+```
+
+- [ ] Run the ops profile before final remote smoke.
+- [ ] Attach or reference `output/dingtalk-p4-regression-gate/142-ops/summary.json` and `summary.md` in final verification notes.
 
 ## Product Regression Gates
 
-- [ ] `pnpm --filter @metasheet/core-backend exec vitest run tests/integration/dingtalk-automation-link-routes.api.test.ts --watch=false`
-- [ ] `pnpm --filter @metasheet/core-backend exec vitest run tests/integration/public-form-flow.test.ts --watch=false`
-- [ ] `pnpm --filter @metasheet/core-backend exec vitest run tests/integration/dingtalk-delivery-routes.api.test.ts --watch=false`
-- [ ] `pnpm --filter @metasheet/core-backend exec vitest run tests/unit/dingtalk-group-destination-service.test.ts tests/unit/dingtalk-person-delivery-service.test.ts --watch=false`
-- [ ] `pnpm --filter @metasheet/web exec vitest run tests/multitable-api-token-manager.spec.ts --watch=false`
-- [ ] `pnpm --filter @metasheet/web exec vitest run tests/multitable-form-share-manager.spec.ts --watch=false`
-- [ ] `pnpm --filter @metasheet/web exec vitest run tests/multitable-client.spec.ts --watch=false`
-- [ ] `pnpm --filter @metasheet/core-backend build`
-- [ ] `pnpm --filter @metasheet/web build`
+- [ ] Run the product profile when dependency/runtime state is ready:
+
+```bash
+node scripts/ops/dingtalk-p4-regression-gate.mjs \
+  --profile product \
+  --output-dir output/dingtalk-p4-regression-gate/142-product
+```
+
+- [ ] Confirm `summary.json` has `overallStatus: "pass"`.
+- [ ] Review per-check logs under `logs/` if any product gate fails.
 
 ## Final Documentation Outputs
 
