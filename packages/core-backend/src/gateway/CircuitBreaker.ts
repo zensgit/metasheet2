@@ -38,6 +38,15 @@ interface RequestRecord {
   error?: Error
 }
 
+/**
+ * Minimal shape used for dependency-injected Prometheus counters so unit
+ * tests can stub them without pulling prom-client in. Mirrors the subset
+ * of the prom-client `Counter<'store'>` API we touch.
+ */
+export interface CircuitBreakerStoreUsedCounter {
+  labels(labels: { store: 'redis' | 'memory' }): { inc(value?: number): void }
+}
+
 export interface CircuitBreakerRuntimeOptions {
   /**
    * Optional pluggable store for cross-process state (typically
@@ -47,6 +56,13 @@ export interface CircuitBreakerRuntimeOptions {
   store?: CircuitBreakerStore
   /** Circuit identifier when using a shared store. Default: 'default'. */
   id?: string
+  /**
+   * Optional Prometheus counter incremented each time the breaker records
+   * a success/failure or refreshes state. Injected rather than imported so
+   * unit tests can run without a live registry. See
+   * `apigw_cb_store_used_total{store}` in `metrics/metrics.ts`.
+   */
+  storeUsedCounter?: CircuitBreakerStoreUsedCounter
 }
 
 export class CircuitBreaker extends EventEmitter {
@@ -60,6 +76,7 @@ export class CircuitBreaker extends EventEmitter {
   private cleanupTimer: NodeJS.Timeout
   private readonly store: CircuitBreakerStore | null
   private readonly circuitId: string
+  private readonly storeUsedCounter: CircuitBreakerStoreUsedCounter | null
 
   constructor(
     config: CircuitBreakerConfig = {},
@@ -78,6 +95,7 @@ export class CircuitBreaker extends EventEmitter {
 
     this.store = runtime.store ?? null
     this.circuitId = runtime.id ?? 'default'
+    this.storeUsedCounter = runtime.storeUsedCounter ?? null
 
     this.metrics = {
       requests: 0,
@@ -92,6 +110,22 @@ export class CircuitBreaker extends EventEmitter {
 
     // Clean up old records periodically
     this.cleanupTimer = setInterval(() => this.cleanupWindow(), 1000)
+  }
+
+  /**
+   * Increment the injected store-used counter, tagging the label with the
+   * kind of backing store this breaker is currently using. No-ops when no
+   * counter was injected (unit tests, legacy boot paths). Errors from the
+   * counter itself are swallowed so metrics can never break request flow.
+   */
+  private noteStoreUsage(): void {
+    if (!this.storeUsedCounter) return
+    const label: 'redis' | 'memory' = this.store ? 'redis' : 'memory'
+    try {
+      this.storeUsedCounter.labels({ store: label }).inc()
+    } catch {
+      // Metrics failures must not propagate into breaker logic.
+    }
   }
 
   private thresholds(): CircuitBreakerThresholds {
@@ -109,6 +143,7 @@ export class CircuitBreaker extends EventEmitter {
    */
   async refreshSharedState(): Promise<CircuitState> {
     if (!this.store) return this.state
+    this.noteStoreUsage()
     const snap = await this.store.checkAndUpdate(
       this.circuitId,
       this.thresholds(),
@@ -129,6 +164,7 @@ export class CircuitBreaker extends EventEmitter {
   /** Record a success/failure through the shared store (no-op if none). */
   async reportToStore(success: boolean): Promise<void> {
     if (!this.store) return
+    this.noteStoreUsage()
     const snap = success
       ? await this.store.recordSuccess(this.circuitId, this.thresholds())
       : await this.store.recordFailure(this.circuitId, this.thresholds())
@@ -210,6 +246,7 @@ export class CircuitBreaker extends EventEmitter {
     }
 
     this.requestWindow.push(record)
+    this.noteStoreUsage()
     this.metrics.requests++
     this.metrics.successes++
     this.metrics.latencies.push(latency)
@@ -235,6 +272,7 @@ export class CircuitBreaker extends EventEmitter {
     }
 
     this.requestWindow.push(record)
+    this.noteStoreUsage()
     this.metrics.requests++
     this.metrics.failures++
     this.metrics.latencies.push(latency)

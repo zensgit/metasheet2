@@ -62,7 +62,8 @@ import {
   claimPluginObjectScope,
   createPluginScopedMultitableApi,
 } from './multitable/plugin-scope'
-import { installMetrics, requestMetricsMiddleware } from './metrics/metrics'
+import { installMetrics, metrics as promMetrics, requestMetricsMiddleware } from './metrics/metrics'
+import { APIGateway } from './gateway/APIGateway'
 import { getPoolStats } from './db/pg'
 import { isDatabaseSchemaError } from './utils/database-errors'
 import { startOperationAuditRetention } from './audit/operation-audit-retention'
@@ -167,6 +168,7 @@ export class MetaSheetServer {
   private stopOperationAuditRetention?: () => void
   private stopMultitableAttachmentCleanup?: () => void
   private automationService?: AutomationService
+  private apiGateway?: APIGateway
   private yjsCleanupTimer?: NodeJS.Timeout
   private yjsSyncMetricsSource?: { getMetrics(): { activeDocCount: number; docIds: string[] } }
   private yjsBridgeMetricsSource?: { getMetrics(): { pendingWriteCount: number; observedDocCount: number; flushSuccessCount: number; flushFailureCount: number } }
@@ -1582,15 +1584,17 @@ export class MetaSheetServer {
       }
     })())
 
-    // 4. Destroy API Gateway resources
-    // shutdownTasks.push((async () => {
-    //   try {
-    //     this.apiGateway.destroy()
-    //     this.logger.info('API Gateway resources released')
-    //   } catch (err) {
-    //     this.logger.warn(`API Gateway cleanup error: ${err instanceof Error ? err.message : String(err)}`)
-    //   }
-    // })())
+    // 4. Destroy API Gateway resources (only if one was constructed during start()).
+    shutdownTasks.push((async () => {
+      try {
+        if (this.apiGateway) {
+          this.apiGateway.destroy()
+          this.logger.info('API Gateway resources released')
+        }
+      } catch (err) {
+        this.logger.warn(`API Gateway cleanup error: ${err instanceof Error ? err.message : String(err)}`)
+      }
+    })())
 
     // Wait for all shutdown tasks with timeout
     await Promise.race([
@@ -1649,6 +1653,37 @@ export class MetaSheetServer {
       }
     }
 
+    // Initialize APIGateway + attempt Redis-backed circuit breaker store.
+    // The gateway itself is a long-lived container for request-routing
+    // primitives (rate limiters / circuit breakers).  Even when no code
+    // path currently calls `registerEndpoint` on the running server, we
+    // still need a live instance so future callers can reuse it AND so
+    // `initRedisCircuitBreakerStore()` runs at boot (instead of being
+    // dead library code — the follow-up captured in PR #1080's review).
+    try {
+      this.apiGateway = new APIGateway(this.app, {
+        // Keep the gateway passive for now — main routing still lives in
+        // the Express router chain above.  We disable CORS/metrics/logging
+        // middleware on this instance to avoid double-registration under
+        // `/api`; those concerns are already owned by MetaSheetServer.
+        enableCors: false,
+        enableLogging: false,
+        enableMetrics: false,
+        enableCircuitBreaker: true,
+        initOutcomeCounter: promMetrics.apigwCbInitTotal,
+        circuitBreakerStoreUsedCounter: promMetrics.apigwCbStoreUsedTotal,
+      })
+      const activated = await this.apiGateway.initRedisCircuitBreakerStore()
+      this.logger.info(
+        `APIGateway initialized (redis circuit breaker store: ${activated ? 'attached' : 'memory fallback'})`,
+      )
+    } catch (e) {
+      this.logger.error(
+        'APIGateway initialization failed; continuing in degraded mode',
+        e as Error,
+      )
+    }
+
     // Initialize AutomationService
     try {
       const pool = poolManager.get()
@@ -1666,6 +1701,7 @@ export class MetaSheetServer {
         pool.query.bind(pool),
         undefined,
         schedulerLeaderOptions,
+        { leaderStateGauge: promMetrics.automationSchedulerLeaderGauge },
       )
       this.automationService.init()
       setAutomationServiceInstance(this.automationService)

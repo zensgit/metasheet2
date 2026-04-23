@@ -4,7 +4,7 @@ import { EventEmitter } from 'events'
 import * as crypto from 'crypto'
 import type { RateLimitConfig } from './RateLimiter';
 import { RateLimiter } from './RateLimiter'
-import { CircuitBreaker } from './CircuitBreaker'
+import { CircuitBreaker, type CircuitBreakerStoreUsedCounter } from './CircuitBreaker'
 import type { CircuitBreakerStore } from './circuit-breaker-store'
 import {
   RedisCircuitBreakerStore,
@@ -13,6 +13,19 @@ import {
 import { getRedisClient } from '../db/redis'
 import { authService, type User } from '../auth/AuthService'
 import { Logger } from '../core/logger'
+
+/**
+ * Minimal Prometheus counter shape injected into APIGateway so
+ * `initRedisCircuitBreakerStore` can report its flag/reachability outcome.
+ * Kept in this file to match the DI pattern used elsewhere (no prom-client
+ * import in the gateway module itself — see CircuitBreaker/AutomationScheduler
+ * for parity).
+ */
+export interface APIGatewayInitOutcomeCounter {
+  labels(labels: {
+    outcome: 'redis_attached' | 'fell_back_to_memory' | 'skipped_by_flag'
+  }): { inc(value?: number): void }
+}
 
 export interface APIEndpoint {
   path: string
@@ -76,6 +89,19 @@ export interface GatewayConfig {
   corsOptions?: CorsOptions
   timeout?: number
   retries?: number
+  /**
+   * Optional Prometheus counter fed by `initRedisCircuitBreakerStore`
+   * with label `outcome ∈ {redis_attached, fell_back_to_memory,
+   * skipped_by_flag}`. Injected rather than imported so unit tests don't
+   * need a live registry.
+   */
+  initOutcomeCounter?: APIGatewayInitOutcomeCounter
+  /**
+   * Optional Prometheus counter passed through to every created
+   * CircuitBreaker so breaker ops are labelled with `store ∈ {redis,
+   * memory}`. See `CircuitBreaker.storeUsedCounter` for details.
+   */
+  circuitBreakerStoreUsedCounter?: CircuitBreakerStoreUsedCounter
 }
 
 export interface CorsOptions {
@@ -119,7 +145,7 @@ interface CacheEntry {
 export class APIGateway extends EventEmitter {
   private app: Application
   private router: Router
-  private config: Required<GatewayConfig>
+  private config: Required<Omit<GatewayConfig, 'initOutcomeCounter' | 'circuitBreakerStoreUsedCounter'>>
   private endpoints: Map<string, APIEndpoint> = new Map()
   private rateLimiters: Map<string, RateLimiter> = new Map()
   private circuitBreakers: Map<string, CircuitBreaker> = new Map()
@@ -134,6 +160,13 @@ export class APIGateway extends EventEmitter {
    * memory implementation (the legacy behaviour).
    */
   private circuitBreakerStore: CircuitBreakerStore | null = null
+  /**
+   * Optional Prometheus counter updated once per init invocation. Only
+   * `labels({outcome}).inc()` is used, so dead-simple test doubles work.
+   */
+  private readonly initOutcomeCounter: APIGatewayInitOutcomeCounter | null
+  /** Passed through to every created CircuitBreaker — see CircuitBreaker.ts. */
+  private readonly circuitBreakerStoreUsedCounter: CircuitBreakerStoreUsedCounter | null
   private metrics: APIMetrics = {
     totalRequests: 0,
     successfulRequests: 0,
@@ -167,6 +200,8 @@ export class APIGateway extends EventEmitter {
       timeout: config.timeout || 30000,
       retries: config.retries || 3
     }
+    this.initOutcomeCounter = config.initOutcomeCounter ?? null
+    this.circuitBreakerStoreUsedCounter = config.circuitBreakerStoreUsedCounter ?? null
 
     this.setupMiddleware()
     this.setupCleanupTimer()
@@ -361,9 +396,14 @@ export class APIGateway extends EventEmitter {
             errorThreshold: 50,
             resetTimeout: 30000,
           },
-          this.circuitBreakerStore
-            ? { store: this.circuitBreakerStore, id: key }
-            : {},
+          {
+            ...(this.circuitBreakerStore
+              ? { store: this.circuitBreakerStore, id: key }
+              : {}),
+            ...(this.circuitBreakerStoreUsedCounter
+              ? { storeUsedCounter: this.circuitBreakerStoreUsedCounter }
+              : {}),
+          },
         ),
       )
     }
@@ -818,27 +858,49 @@ export class APIGateway extends EventEmitter {
     keyPrefix?: string
   } = {}): Promise<boolean> {
     if (process.env.ENABLE_REDIS_CIRCUIT_BREAKER_STORE !== 'true') {
+      this.recordInitOutcome('skipped_by_flag')
       return false
     }
     if (process.env.DISABLE_REDIS_CIRCUIT_BREAKER_STORE === 'true') {
+      this.recordInitOutcome('skipped_by_flag')
       return false
     }
 
     const factory = options.clientFactory ?? getRedisClient
     try {
       const client = await factory()
-      if (!client) return false
+      if (!client) {
+        this.recordInitOutcome('fell_back_to_memory')
+        return false
+      }
       this.circuitBreakerStore = new RedisCircuitBreakerStore({
         redis: client as unknown as RedisCircuitClient,
         keyPrefix: options.keyPrefix ?? 'apigw:cb:',
       })
       this.logger.info('APIGateway: using Redis-backed circuit breaker store')
+      this.recordInitOutcome('redis_attached')
       return true
     } catch (err) {
       this.logger.warn(
         `APIGateway: Redis circuit breaker store init failed, falling back to memory: ${err instanceof Error ? err.message : String(err)}`,
       )
+      this.recordInitOutcome('fell_back_to_memory')
       return false
+    }
+  }
+
+  /**
+   * Emit one `apigw_cb_init_total` counter tick. Isolated so the call
+   * sites stay flat and any counter errors are contained to metrics.
+   */
+  private recordInitOutcome(
+    outcome: 'redis_attached' | 'fell_back_to_memory' | 'skipped_by_flag',
+  ): void {
+    if (!this.initOutcomeCounter) return
+    try {
+      this.initOutcomeCounter.labels({ outcome }).inc()
+    } catch {
+      // Metrics failures must not interfere with gateway startup.
     }
   }
 
