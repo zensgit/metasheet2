@@ -165,6 +165,23 @@ node scripts/ops/dingtalk-p4-smoke-session.mjs \
 
 Finalizing reruns strict evidence compile, refreshes `session-summary.json` / `session-summary.md`, and returns non-zero until the manual evidence bundle is complete.
 
+After finalization passes, export a handoff packet with the final-pass gate enabled:
+
+```bash
+node scripts/ops/export-dingtalk-staging-evidence-packet.mjs \
+  --include-output output/dingtalk-p4-remote-smoke-session/142-session \
+  --require-dingtalk-p4-pass \
+  --output-dir artifacts/dingtalk-staging-evidence-packet/142-final
+```
+
+The packet exporter rejects the included session unless the final pass is machine-verifiable:
+
+- `session-summary.json` must be from `dingtalk-p4-smoke-session`, have `sessionPhase: "finalize"`, `overallStatus: "pass"`, `finalStrictStatus: "pass"`, no `pendingChecks`, and a passing `strict-compile` step.
+- `compiled/summary.json` must be from `compile-dingtalk-p4-smoke-evidence`, have `overallStatus`, `apiBootstrapStatus`, and `remoteClientStatus` all set to `pass`.
+- All eight required checks must exist with `status: "pass"`.
+- `requiredChecksNotPassed`, `manualEvidenceIssues`, `failedChecks`, and `missingRequiredChecks` must be arrays and empty.
+- The exporter does not create secrets, but it copies raw included evidence. Review and redact raw workspace/artifact files before release handoff.
+
 ## Preflight Gate
 
 Before calling staging or DingTalk, run the preflight gate to check local tooling, required URLs, bearer token presence, DingTalk webhook format, optional `SEC...` secret format, allowlist inputs, and backend `/health`. It writes only redacted summaries.

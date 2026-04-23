@@ -75,6 +75,7 @@
 - [x] Add a P4 smoke session orchestrator that runs preflight, API workspace bootstrap, non-strict compile, and a redacted session summary.
 - [x] Add a P4 smoke session env template initializer for secure one-command staging setup.
 - [x] Add P4 smoke session finalization so completed manual evidence reruns strict compile and refreshes the session summary.
+- [x] Add a P4 final-pass packet gate so release evidence export rejects unfinished, failed, stale-schema, or partially compiled sessions.
 - [ ] Remote smoke: create a table and form view.
 - [ ] Remote smoke: bind at least two DingTalk groups to the table.
 - [ ] Remote smoke: set the form to `dingtalk_granted`.
