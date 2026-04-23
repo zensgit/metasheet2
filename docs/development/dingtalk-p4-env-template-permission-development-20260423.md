@@ -2,7 +2,7 @@
 
 - Date: 2026-04-23
 - Branch: `codex/dingtalk-p4-next-20260423`
-- Base: `origin/main` at `4e2c60ae1`
+- Base: `origin/main` at `a432a97a1`
 - Scope: make the P4 smoke-session env template compatible with the release readiness private-file gate
 
 ## Problem
