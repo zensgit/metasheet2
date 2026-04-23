@@ -656,7 +656,7 @@
                 v-if="item.kind === 'pending_binding' && isManualAdmissionExpanded(item.account.id)"
                 class="directory-admin__button"
                 type="button"
-                :disabled="reviewProcessingAccountId === item.account.id || !canSubmitManualAdmission(item)"
+                :disabled="reviewProcessingAccountId === item.account.id || !canSubmitManualAdmission(item.account)"
                 @click="void createAndBindReviewUser(item)"
               >
                 {{ reviewProcessingAccountId === item.account.id ? '处理中...' : '创建用户并绑定' }}
@@ -1030,6 +1030,15 @@
                 {{ readBindingSearchLoading(account.id) ? '搜索中...' : '搜索本地用户' }}
               </button>
               <button
+                v-if="!account.localUser"
+                class="directory-admin__button directory-admin__button--secondary"
+                type="button"
+                :disabled="bindingAccountId === account.id"
+                @click="toggleManualAdmission(account)"
+              >
+                {{ isManualAdmissionExpanded(account.id) ? '收起手动创建' : '手动创建用户' }}
+              </button>
+              <button
                 class="directory-admin__button"
                 type="button"
                 :disabled="bindingAccountId === account.id || readBindingDraft(account).trim().length === 0"
@@ -1046,6 +1055,66 @@
               >
                 {{ unbindingAccountId === account.id ? '解绑中...' : '解除绑定' }}
               </button>
+            </div>
+
+            <div
+              v-if="!account.localUser && isManualAdmissionExpanded(account.id)"
+              class="directory-admin__review-admission"
+            >
+              <p class="directory-admin__hint">从当前钉钉同步成员创建本地用户并立即绑定。邮箱可为空，用户名或手机号可作为登录账号。</p>
+              <div class="directory-admin__form-grid">
+                <label class="directory-admin__field">
+                  <span>姓名</span>
+                  <input
+                    :value="readManualAdmissionDraft(account).name"
+                    class="directory-admin__input"
+                    type="text"
+                    placeholder="例如 李青"
+                    @input="onManualAdmissionDraftInput(account.id, 'name', $event)"
+                  />
+                </label>
+                <label class="directory-admin__field">
+                  <span>邮箱（可选）</span>
+                  <input
+                    :value="readManualAdmissionDraft(account).email"
+                    class="directory-admin__input"
+                    type="email"
+                    placeholder="例如 alpha@example.com"
+                    @input="onManualAdmissionDraftInput(account.id, 'email', $event)"
+                  />
+                </label>
+                <label class="directory-admin__field">
+                  <span>用户名（可选）</span>
+                  <input
+                    :value="readManualAdmissionDraft(account).username"
+                    class="directory-admin__input"
+                    type="text"
+                    placeholder="例如 liqing"
+                    @input="onManualAdmissionDraftInput(account.id, 'username', $event)"
+                  />
+                </label>
+                <label class="directory-admin__field">
+                  <span>手机号</span>
+                  <input
+                    :value="readManualAdmissionDraft(account).mobile"
+                    class="directory-admin__input"
+                    type="text"
+                    placeholder="可选：目录手机号会自动带入"
+                    @input="onManualAdmissionDraftInput(account.id, 'mobile', $event)"
+                  />
+                </label>
+              </div>
+              <p class="directory-admin__hint">姓名必填；邮箱、用户名、手机号至少填写一项。无邮箱用户会走临时密码 + 首登强制改密。</p>
+              <div class="directory-admin__actions">
+                <button
+                  class="directory-admin__button"
+                  type="button"
+                  :disabled="bindingAccountId === account.id || !canSubmitManualAdmission(account)"
+                  @click="void createAndBindAccountUser(account)"
+                >
+                  {{ bindingAccountId === account.id ? '处理中...' : '创建用户并绑定' }}
+                </button>
+              </div>
             </div>
 
             <p v-if="readBindingSearchError(account.id)" class="directory-admin__status directory-admin__status--error">
@@ -2241,8 +2310,8 @@ function onManualAdmissionDraftInput(accountId: string, field: keyof ManualAdmis
   }
 }
 
-function canSubmitManualAdmission(item: DirectoryReviewItem): boolean {
-  const draft = readManualAdmissionDraft(item.account)
+function canSubmitManualAdmission(account: DirectoryAccount): boolean {
+  const draft = readManualAdmissionDraft(account)
   return draft.name.trim().length > 0
     && (draft.email.trim().length > 0 || draft.username.trim().length > 0 || draft.mobile.trim().length > 0)
 }
@@ -3134,30 +3203,32 @@ async function backfillUserMobileAndBindReviewItem(item: DirectoryReviewItem) {
   }
 }
 
-async function createAndBindReviewUser(item: DirectoryReviewItem) {
-  const draft = readManualAdmissionDraft(item.account)
+async function createAndBindDirectoryAccountUser(account: DirectoryAccount, context: 'review' | 'account') {
+  const memberLabel = context === 'review' ? '待处理成员' : '目录成员'
+  const draft = readManualAdmissionDraft(account)
   const nextDraft: ManualAdmissionDraft = {
     name: draft.name.trim(),
     email: draft.email.trim(),
     username: draft.username.trim(),
     mobile: draft.mobile.trim(),
   }
-  manualAdmissionDrafts[item.account.id] = nextDraft
+  manualAdmissionDrafts[account.id] = nextDraft
   if (!nextDraft.name || (!nextDraft.email && !nextDraft.username && !nextDraft.mobile)) {
-    setStatus(`待处理成员 ${item.account.name} 的姓名必填，且邮箱、用户名、手机号至少填写一项`, 'error')
+    setStatus(`${memberLabel} ${account.name} 的姓名必填，且邮箱、用户名、手机号至少填写一项`, 'error')
     return
   }
 
-  reviewProcessingAccountId.value = item.account.id
+  if (context === 'review') reviewProcessingAccountId.value = account.id
+  else bindingAccountId.value = account.id
   try {
-    const response = await apiFetch(`/api/admin/directory/accounts/${encodeURIComponent(item.account.id)}/admit-user`, {
+    const response = await apiFetch(`/api/admin/directory/accounts/${encodeURIComponent(account.id)}/admit-user`, {
       method: 'POST',
       body: JSON.stringify({
         name: nextDraft.name,
         email: nextDraft.email || undefined,
         username: nextDraft.username || undefined,
         mobile: nextDraft.mobile || undefined,
-        enableDingTalkGrant: readGrantToggle(item.account.id),
+        enableDingTalkGrant: readGrantToggle(account.id),
       }),
     })
     const body = await readJson(response)
@@ -3171,18 +3242,18 @@ async function createAndBindReviewUser(item: DirectoryReviewItem) {
       ? data.onboarding as OnboardingPacket
       : null
 
-    updateBindingDraft(item.account.id, describeLocalUserIdentifier(createdUser))
-    selectedBindingUsers[item.account.id] = createdUser
-    clearBindingSearch(item.account.id)
-    delete mobileOverrideConfirmations[item.account.id]
-    delete mobileConflictHints[item.account.id]
-    delete manualAdmissionExpanded[item.account.id]
-    delete manualAdmissionDrafts[item.account.id]
+    updateBindingDraft(account.id, describeLocalUserIdentifier(createdUser))
+    selectedBindingUsers[account.id] = createdUser
+    clearBindingSearch(account.id)
+    delete mobileOverrideConfirmations[account.id]
+    delete mobileConflictHints[account.id]
+    delete manualAdmissionExpanded[account.id]
+    delete manualAdmissionDrafts[account.id]
     await refreshAfterReviewBindings()
     manualAdmissionResult.value = {
-      accountId: item.account.id,
-      accountName: item.account.name,
-      integrationId: item.account.integrationId,
+      accountId: account.id,
+      accountName: account.name,
+      integrationId: account.integrationId,
       userId: createdUser.id,
       userName: createdUser.name || nextDraft.name,
       email: createdUser.email || nextDraft.email || null,
@@ -3195,12 +3266,21 @@ async function createAndBindReviewUser(item: DirectoryReviewItem) {
       mobileBackfilled: nextDraft.mobile.length === 0 || (createdUser.mobile ?? '') === nextDraft.mobile,
       mobileBackfillError: '',
     }
-    setStatus(`待处理成员 ${item.account.name} 已创建本地用户并完成绑定`)
+    setStatus(`${memberLabel} ${account.name} 已创建本地用户并完成绑定`)
   } catch (error) {
     setStatus(error instanceof Error ? error.message : '创建本地用户并绑定失败', 'error')
   } finally {
-    reviewProcessingAccountId.value = ''
+    if (context === 'review') reviewProcessingAccountId.value = ''
+    else bindingAccountId.value = ''
   }
+}
+
+async function createAndBindReviewUser(item: DirectoryReviewItem) {
+  await createAndBindDirectoryAccountUser(item.account, 'review')
+}
+
+async function createAndBindAccountUser(account: DirectoryAccount) {
+  await createAndBindDirectoryAccountUser(account, 'account')
 }
 
 async function retryBackfillUserMobileAndBindReviewItem(item: DirectoryReviewItem) {
