@@ -164,7 +164,17 @@ node scripts/ops/dingtalk-p4-smoke-status.mjs \
   --session-dir output/dingtalk-p4-remote-smoke-session/142-session
 ```
 
-The status report writes `smoke-status.json` / `smoke-status.md` and shows whether the run is blocked, waiting for manual evidence, ready to finalize, waiting for handoff, or release-ready.
+The status report writes `smoke-status.json`, `smoke-status.md`, and `smoke-todo.md`. It shows whether the run is blocked, waiting for manual evidence, ready to finalize, waiting for handoff, or release-ready.
+
+Use `smoke-todo.md` as the operator checklist for the remaining remote smoke evidence. It maps every required P4 check to a checked or unchecked item, includes per-check recorder command templates for manual DingTalk-client/admin evidence, and keeps secrets redacted.
+
+To write the TODO file to a custom path:
+
+```bash
+node scripts/ops/dingtalk-p4-smoke-status.mjs \
+  --session-dir output/dingtalk-p4-remote-smoke-session/142-session \
+  --output-todo-md output/dingtalk-p4-remote-smoke-session/142-session/remote-smoke-todo.md
+```
 
 Use the evidence recorder instead of hand-editing JSON when adding one manual check at a time:
 

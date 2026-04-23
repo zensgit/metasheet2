@@ -141,9 +141,55 @@ test('dingtalk-p4-smoke-status reports manual pending gaps for bootstrap session
     assert.equal(summary.overallStatus, 'manual_pending')
     assert.equal(summary.totals.gaps > 0, true)
     assert.equal(summary.requiredChecks.find((check) => check.id === 'authorized-user-submit').status, 'pending')
+    assert.equal(summary.remoteSmokeTodos.remaining > 0, true)
+    assert.equal(summary.remoteSmokeTodos.items.find((item) => item.id === 'authorized-user-submit').completed, false)
     assert.equal(summary.nextCommands.some((command) => command.includes('dingtalk-p4-evidence-record.mjs')), true)
     assert.equal(summary.nextCommands.some((command) => command.includes('--finalize')), true)
     assert.equal(existsSync(path.join(sessionDir, 'smoke-status.md')), true)
+    assert.equal(existsSync(path.join(sessionDir, 'smoke-todo.md')), true)
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+
+test('dingtalk-p4-smoke-status writes an executable remote smoke TODO report', () => {
+  const tmpDir = makeTmpDir()
+  const sessionDir = path.join(tmpDir, '142-session')
+  const todoMd = path.join(tmpDir, 'todo', 'remote-smoke-todo.md')
+
+  try {
+    writeSession(sessionDir, {
+      sessionPhase: 'bootstrap',
+      sessionOverallStatus: 'manual_pending',
+      finalStrictStatus: 'not_run',
+      steps: [
+        { id: 'preflight', status: 'pass', exitCode: 0 },
+        { id: 'api-runner', status: 'pass', exitCode: 0 },
+        { id: 'compile', status: 'pass', exitCode: 0 },
+      ],
+      checkOverrides: {
+        'unauthorized-user-denied': {
+          status: 'pending',
+          evidence: {
+            summary: 'blocked by Bearer very-secret-admin-token-should-hide',
+          },
+        },
+      },
+    })
+
+    const result = runScript(['--session-dir', sessionDir, '--output-todo-md', todoMd])
+
+    assert.equal(result.status, 0, result.stderr)
+    const todoText = readFileSync(todoMd, 'utf8')
+    assert.match(todoText, /DingTalk P4 Remote Smoke TODO/)
+    assert.match(todoText, /unauthorized-user-denied/)
+    assert.match(todoText, /--submit-blocked/)
+    assert.match(todoText, /--record-insert-delta/)
+    assert.doesNotMatch(todoText, /very-secret-admin-token-should-hide/)
+    const summary = JSON.parse(readFileSync(path.join(sessionDir, 'smoke-status.json'), 'utf8'))
+    const unauthorizedTodo = summary.remoteSmokeTodos.items.find((item) => item.id === 'unauthorized-user-denied')
+    assert.equal(unauthorizedTodo.completed, false)
+    assert.match(unauthorizedTodo.evidenceRecordCommand, /--blocked-reason/)
   } finally {
     rmSync(tmpDir, { recursive: true, force: true })
   }
