@@ -172,6 +172,7 @@ node scripts/ops/dingtalk-p4-evidence-record.mjs \
 
 - `--finalize-when-ready` should be used only on the update that is expected to complete the remaining manual evidence. It refreshes smoke status first and only runs strict finalize when the session has actually reached `finalize_pending`.
 - `--closeout-when-ready` is the faster final path for the last manual evidence update. It refreshes smoke status first and only runs final closeout when the session has actually reached `finalize_pending`.
+- If the final run intentionally uses external artifact references, pass `--allow-external-artifact-refs` on the evidence recorder and final closeout paths so strict finalize and closeout validate the same artifact policy.
 - Do not combine `--finalize-when-ready` and `--closeout-when-ready`; use the former for targeted debugging and the latter for the normal final handoff chain.
 - No-email admin evidence is now strict: final compile requires `adminEvidence.emailWasBlank: true`, `createdLocalUserId`, `boundDingTalkExternalId`, `accountLinkedAfterRefresh: true`, and `temporaryPasswordRedacted: true`.
 

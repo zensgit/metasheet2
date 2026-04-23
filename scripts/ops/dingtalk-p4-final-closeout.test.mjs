@@ -199,6 +199,34 @@ test('dingtalk-p4-final-closeout can stop after release-ready status when docs a
   }
 })
 
+test('dingtalk-p4-final-closeout forwards external artifact allowance to strict finalize', () => {
+  const tmpDir = makeTmpDir()
+  const sessionDir = path.join(tmpDir, '142-session')
+  const packetDir = path.join(tmpDir, 'packet')
+
+  try {
+    writeReadyForFinalizeSession(sessionDir)
+
+    const result = runScript([
+      '--session-dir',
+      sessionDir,
+      '--packet-output-dir',
+      packetDir,
+      '--date',
+      '20260423',
+      '--skip-docs',
+      '--allow-external-artifact-refs',
+    ])
+
+    assert.equal(result.status, 0, result.stderr || result.stdout)
+    const summary = JSON.parse(readFileSync(path.join(packetDir, 'closeout-summary.json'), 'utf8'))
+    assert.equal(summary.status, 'pass')
+    assert.match(summary.steps[0].command, /--allow-external-artifact-refs/)
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+
 test('dingtalk-p4-final-closeout fails early and writes a summary when finalize fails', () => {
   const tmpDir = makeTmpDir()
   const sessionDir = path.join(tmpDir, '142-session')

@@ -123,7 +123,7 @@ if (!sessionDir) {
   process.exit(2)
 }
 fs.mkdirSync(path.dirname(${JSON.stringify(markerFile)}), { recursive: true })
-fs.writeFileSync(${JSON.stringify(markerFile)}, 'ran\\n')
+fs.writeFileSync(${JSON.stringify(markerFile)}, JSON.stringify({ args }, null, 2) + '\\n')
 fs.writeFileSync(path.join(sessionDir, 'session-summary.json'), JSON.stringify({
   tool: 'dingtalk-p4-smoke-session',
   runId: 'session-142',
@@ -457,6 +457,7 @@ test('dingtalk-p4-evidence-record auto-finalizes once refreshed smoke status rea
       'dt_no_email_001',
       '--admin-account-linked-after-refresh',
       '--finalize-when-ready',
+      '--allow-external-artifact-refs',
     ], {
       env: {
         DINGTALK_P4_EVIDENCE_RECORD_FINALIZE_SCRIPT: finalizeStub,
@@ -465,6 +466,11 @@ test('dingtalk-p4-evidence-record auto-finalizes once refreshed smoke status rea
 
     assert.equal(result.status, 0, result.stderr)
     assert.equal(existsSync(markerFile), true)
+    assert.deepEqual(JSON.parse(readFileSync(markerFile, 'utf8')).args, [
+      '--finalize',
+      sessionDir,
+      '--allow-external-artifact-refs',
+    ])
     assert.match(result.stdout, /Finalized session in .*session-summary\.json/)
     assert.match(result.stdout, /Next handoff command: node scripts\/ops\/dingtalk-p4-final-handoff\.mjs --session-dir/)
     const sessionSummary = JSON.parse(readFileSync(path.join(sessionDir, 'session-summary.json'), 'utf8'))
@@ -530,6 +536,7 @@ test('dingtalk-p4-evidence-record auto-runs final closeout once refreshed smoke 
       '--closeout-date',
       '20260423',
       '--closeout-skip-docs',
+      '--allow-external-artifact-refs',
     ], {
       env: {
         DINGTALK_P4_EVIDENCE_RECORD_FINAL_CLOSEOUT_SCRIPT: closeoutStub,
@@ -549,6 +556,7 @@ test('dingtalk-p4-evidence-record auto-runs final closeout once refreshed smoke 
       '--date',
       '20260423',
       '--skip-docs',
+      '--allow-external-artifact-refs',
     ])
   } finally {
     rmSync(tmpDir, { recursive: true, force: true })

@@ -605,6 +605,33 @@ test('dingtalk-p4-smoke-session finalizes completed manual evidence with strict 
   }
 })
 
+test('dingtalk-p4-smoke-session preserves external artifact allowance in final closeout command', () => {
+  const tmpDir = makeTmpDir()
+  const outputDir = path.join(tmpDir, 'session')
+
+  try {
+    writeCompletedSession(outputDir)
+
+    const result = spawnSync(process.execPath, [
+      scriptPath,
+      '--finalize',
+      outputDir,
+      '--allow-external-artifact-refs',
+    ], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+    })
+
+    assert.equal(result.status, 0, result.stderr || result.stdout)
+    const sessionSummary = JSON.parse(readFileSync(path.join(outputDir, 'session-summary.json'), 'utf8'))
+    const closeoutCommand = sessionSummary.nextCommands.find((command) => command.includes('dingtalk-p4-final-closeout.mjs'))
+    assert.match(closeoutCommand, /--allow-external-artifact-refs/)
+    assert.equal(sessionSummary.nextCommands.some((command) => command.includes('dingtalk-p4-final-handoff.mjs')), true)
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+
 test('dingtalk-p4-smoke-session finalize fails when strict evidence is incomplete', () => {
   const tmpDir = makeTmpDir()
   const outputDir = path.join(tmpDir, 'session')

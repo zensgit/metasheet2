@@ -440,7 +440,7 @@ function finalHandoffCommand(outputDir) {
   ].join(' ')
 }
 
-function finalCloseoutCommand(outputDir) {
+function finalCloseoutCommand(outputDir, allowExternalArtifactRefs = false) {
   return [
     'node scripts/ops/dingtalk-p4-final-closeout.mjs',
     '--session-dir',
@@ -449,6 +449,7 @@ function finalCloseoutCommand(outputDir) {
     'artifacts/dingtalk-staging-evidence-packet/142-final',
     '--docs-output-dir',
     'docs/development',
+    ...(allowExternalArtifactRefs ? ['--allow-external-artifact-refs'] : []),
   ].join(' ')
 }
 
@@ -780,7 +781,7 @@ function runFinalStrictCompile(opts) {
         }
       : null,
     nextCommands: strictPassed
-      ? [statusCommand(outputDir), finalCloseoutCommand(outputDir), finalHandoffCommand(outputDir), exportPacketCommand(outputDir, true)]
+      ? [statusCommand(outputDir), finalCloseoutCommand(outputDir, opts.allowExternalArtifactRefs), finalHandoffCommand(outputDir), exportPacketCommand(outputDir, true)]
       : [statusCommand(outputDir), evidenceRecordCommand(outputDir), finalizeCommand(outputDir, opts.allowExternalArtifactRefs), finalHandoffCommand(outputDir), exportPacketCommand(outputDir, true)],
   }
 

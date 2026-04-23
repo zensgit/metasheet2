@@ -96,6 +96,8 @@ Options:
                              Docs dir forwarded to final closeout
   --closeout-date <yyyymmdd> Date suffix forwarded to final closeout docs
   --closeout-skip-docs       Forward --skip-docs to final closeout
+  --allow-external-artifact-refs
+                             Forward to auto finalize/final closeout strict compile
   --dry-run                  Validate and print the updated check without writing
   --help                     Show this help
 
@@ -147,6 +149,7 @@ function parseArgs(argv) {
     closeoutDocsOutputDir: '',
     closeoutDate: '',
     closeoutSkipDocs: false,
+    allowExternalArtifactRefs: false,
     dryRun: false,
   }
 
@@ -249,6 +252,9 @@ function parseArgs(argv) {
         break
       case '--closeout-skip-docs':
         opts.closeoutSkipDocs = true
+        break
+      case '--allow-external-artifact-refs':
+        opts.allowExternalArtifactRefs = true
         break
       case '--dry-run':
         opts.dryRun = true
@@ -565,11 +571,12 @@ function statusRefreshCommand(sessionDir) {
   ].join(' ')
 }
 
-function finalizeCommand(sessionDir) {
+function finalizeCommand(sessionDir, allowExternalArtifactRefs = false) {
   return [
     'node scripts/ops/dingtalk-p4-smoke-session.mjs',
     '--finalize',
     relativePath(sessionDir),
+    ...(allowExternalArtifactRefs ? ['--allow-external-artifact-refs'] : []),
   ].join(' ')
 }
 
@@ -589,6 +596,7 @@ function finalCloseoutArgs(opts) {
     ...(opts.closeoutDocsOutputDir ? ['--docs-output-dir', opts.closeoutDocsOutputDir] : []),
     ...(opts.closeoutDate ? ['--date', opts.closeoutDate] : []),
     ...(opts.closeoutSkipDocs ? ['--skip-docs'] : []),
+    ...(opts.allowExternalArtifactRefs ? ['--allow-external-artifact-refs'] : []),
   ]
 }
 
@@ -617,10 +625,14 @@ function shouldFinalizeWhenReady(statusSummary) {
     && (statusSummary.totals?.gaps ?? 1) === 0
 }
 
-function runFinalizeSession(sessionDir) {
+function runFinalizeSession(opts) {
   const script = process.env[FINALIZE_SCRIPT_ENV] || 'scripts/ops/dingtalk-p4-smoke-session.mjs'
-  const result = runNodeTool(script, ['--finalize', sessionDir])
-  const summaryPath = sessionSummaryPath(sessionDir)
+  const result = runNodeTool(script, [
+    '--finalize',
+    opts.sessionDir,
+    ...(opts.allowExternalArtifactRefs ? ['--allow-external-artifact-refs'] : []),
+  ])
+  const summaryPath = sessionSummaryPath(opts.sessionDir)
   return {
     ...result,
     sessionSummaryJson: summaryPath,
@@ -666,9 +678,9 @@ function refreshAfterWrite(opts) {
     return
   }
 
-  const finalize = runFinalizeSession(opts.sessionDir)
+  const finalize = runFinalizeSession(opts)
   if (finalize.exitCode !== 0) {
-    throw new Error(`evidence updated and smoke status refreshed, but auto finalize failed; rerun ${finalizeCommand(opts.sessionDir)} (${compactText(finalize.stderr || finalize.stdout) || 'unknown error'})`)
+    throw new Error(`evidence updated and smoke status refreshed, but auto finalize failed; rerun ${finalizeCommand(opts.sessionDir, opts.allowExternalArtifactRefs)} (${compactText(finalize.stderr || finalize.stdout) || 'unknown error'})`)
   }
 
   console.log(`Finalized session in ${relativePath(finalize.sessionSummaryJson)}`)
