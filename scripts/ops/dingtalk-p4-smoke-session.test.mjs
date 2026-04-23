@@ -343,6 +343,16 @@ test('dingtalk-p4-smoke-session rejects non-canonical robot webhook during prefl
   const outputDir = path.join(tmpDir, 'session')
 
   try {
+    mkdirSync(path.join(outputDir, 'workspace'), { recursive: true })
+    mkdirSync(path.join(outputDir, 'compiled'), { recursive: true })
+    writeFileSync(path.join(outputDir, 'workspace', 'evidence.json'), JSON.stringify({
+      checks: [{ id: 'authorized-user-submit', status: 'pass' }],
+    }), 'utf8')
+    writeFileSync(path.join(outputDir, 'compiled', 'summary.json'), JSON.stringify({
+      overallStatus: 'pass',
+      stale: true,
+    }), 'utf8')
+
     const result = spawnSync(process.execPath, [
       scriptPath,
       '--skip-api',
@@ -600,6 +610,10 @@ test('dingtalk-p4-smoke-session finalizes completed manual evidence with strict 
     assert.equal(sessionSummary.nextCommands.some((command) => command.includes('dingtalk-p4-final-closeout.mjs')), true)
     assert.equal(sessionSummary.nextCommands.some((command) => command.includes('dingtalk-p4-final-handoff.mjs')), true)
     assert.equal(sessionSummary.nextCommands.some((command) => command.includes('--require-dingtalk-p4-pass')), true)
+    assert.equal(sessionSummary.nextCommands.every((command) => !command.includes('artifacts/dingtalk-staging-evidence-packet/142-final')), true)
+    assert.equal(sessionSummary.nextCommands.some((command) => command.includes('artifacts/dingtalk-staging-evidence-packet/session-final')), true)
+    assert.equal(sessionSummary.nextCommands.some((command) => command.includes('export-dingtalk-staging-evidence-packet.mjs') && command.includes('--output-dir')), true)
+    assert.equal(sessionSummary.nextCommands.some((command) => command.includes('dingtalk-p4-final-handoff.mjs') && command.includes('--output-dir')), true)
   } finally {
     rmSync(tmpDir, { recursive: true, force: true })
   }
@@ -626,6 +640,8 @@ test('dingtalk-p4-smoke-session preserves external artifact allowance in final c
     const sessionSummary = JSON.parse(readFileSync(path.join(outputDir, 'session-summary.json'), 'utf8'))
     const closeoutCommand = sessionSummary.nextCommands.find((command) => command.includes('dingtalk-p4-final-closeout.mjs'))
     assert.match(closeoutCommand, /--allow-external-artifact-refs/)
+    assert.match(closeoutCommand, /artifacts\/dingtalk-staging-evidence-packet\/session-final/)
+    assert.doesNotMatch(closeoutCommand, /142-final/)
     assert.equal(sessionSummary.nextCommands.some((command) => command.includes('dingtalk-p4-final-handoff.mjs')), true)
   } finally {
     rmSync(tmpDir, { recursive: true, force: true })
@@ -638,6 +654,12 @@ test('dingtalk-p4-smoke-session finalize fails when strict evidence is incomplet
 
   try {
     writeCompletedSession(outputDir, { omitArtifactFor: 'authorized-user-submit' })
+    mkdirSync(path.join(outputDir, 'compiled'), { recursive: true })
+    writeFileSync(path.join(outputDir, 'compiled', 'summary.json'), JSON.stringify({
+      overallStatus: 'pass',
+      manualEvidenceIssues: [],
+      stale: true,
+    }), 'utf8')
 
     const result = spawnSync(process.execPath, [
       scriptPath,
@@ -660,6 +682,9 @@ test('dingtalk-p4-smoke-session finalize fails when strict evidence is incomplet
     assert.equal(sessionSummary.steps.at(-1).status, 'pass')
     assert.equal(sessionSummary.finalStrictSummary.overallStatus, 'fail')
     assert.equal(sessionSummary.statusReport.status, 'pass')
+    const compiledSummary = JSON.parse(readFileSync(path.join(outputDir, 'compiled', 'summary.json'), 'utf8'))
+    assert.equal(compiledSummary.overallStatus, 'fail')
+    assert.equal(compiledSummary.stale, undefined)
     assert.equal(existsSync(path.join(outputDir, 'smoke-todo.md')), true)
     assert.equal(sessionSummary.finalStrictSummary.manualEvidenceIssueCount > 0, true)
     assert.equal(sessionSummary.nextCommands.some((command) => command.includes('dingtalk-p4-evidence-record.mjs')), true)

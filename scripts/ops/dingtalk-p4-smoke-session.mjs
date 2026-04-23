@@ -1,10 +1,11 @@
 #!/usr/bin/env node
 
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import path from 'node:path'
 
 const DEFAULT_OUTPUT_ROOT = 'output/dingtalk-p4-remote-smoke-session'
+const DEFAULT_PACKET_ROOT = 'artifacts/dingtalk-staging-evidence-packet'
 const DEFAULT_API_BASE = 'http://127.0.0.1:8900'
 const MANUAL_CHECK_IDS = new Set([
   'send-group-message-form-link',
@@ -423,9 +424,22 @@ function strictCompileCommand(evidencePath, compiledDir) {
   return `node scripts/ops/compile-dingtalk-p4-smoke-evidence.mjs --input ${relativePath(evidencePath)} --output-dir ${relativePath(compiledDir)} --strict`
 }
 
+function sanitizeName(value) {
+  return path
+    .basename(value)
+    .replace(/[^A-Za-z0-9._-]/g, '-')
+    .replace(/^-+|-+$/g, '') || 'session'
+}
+
+function packetOutputDirForSession(outputDir) {
+  return path.resolve(process.cwd(), DEFAULT_PACKET_ROOT, `${sanitizeName(outputDir)}-final`)
+}
+
 function exportPacketCommand(outputDir, requireFinalPass = false) {
   return [
     'node scripts/ops/export-dingtalk-staging-evidence-packet.mjs',
+    '--output-dir',
+    relativePath(packetOutputDirForSession(outputDir)),
     '--include-output',
     relativePath(outputDir),
     ...(requireFinalPass ? ['--require-dingtalk-p4-pass'] : []),
@@ -437,6 +451,8 @@ function finalHandoffCommand(outputDir) {
     'node scripts/ops/dingtalk-p4-final-handoff.mjs',
     '--session-dir',
     relativePath(outputDir),
+    '--output-dir',
+    relativePath(packetOutputDirForSession(outputDir)),
   ].join(' ')
 }
 
@@ -446,7 +462,7 @@ function finalCloseoutCommand(outputDir, allowExternalArtifactRefs = false) {
     '--session-dir',
     relativePath(outputDir),
     '--packet-output-dir',
-    'artifacts/dingtalk-staging-evidence-packet/142-final',
+    relativePath(packetOutputDirForSession(outputDir)),
     '--docs-output-dir',
     'docs/development',
     ...(allowExternalArtifactRefs ? ['--allow-external-artifact-refs'] : []),
@@ -467,6 +483,25 @@ function statusReportPaths(outputDir) {
     smokeStatusMd: path.join(outputDir, 'smoke-status.md'),
     smokeTodoMd: path.join(outputDir, 'smoke-todo.md'),
   }
+}
+
+function clearBootstrapOutputs(outputDir) {
+  for (const entry of [
+    'preflight',
+    'workspace',
+    'compiled',
+    'session-summary.json',
+    'session-summary.md',
+    'smoke-status.json',
+    'smoke-status.md',
+    'smoke-todo.md',
+  ]) {
+    rmSync(path.join(outputDir, entry), { recursive: true, force: true })
+  }
+}
+
+function clearFinalCompileOutputs(outputDir) {
+  rmSync(path.join(outputDir, 'compiled'), { recursive: true, force: true })
 }
 
 function runStatusReportStep(outputDir, env) {
@@ -636,6 +671,7 @@ function runSession(opts) {
   const env = buildChildEnv(opts)
   const steps = []
 
+  clearBootstrapOutputs(outputDir)
   mkdirSync(outputDir, { recursive: true })
 
   const preflightArgs = [
@@ -736,6 +772,7 @@ function runFinalStrictCompile(opts) {
     '--strict',
     ...(opts.allowExternalArtifactRefs ? ['--allow-external-artifact-refs'] : []),
   ]
+  clearFinalCompileOutputs(outputDir)
   const strictStep = runNodeStep(
     'strict-compile',
     'Compile final strict P4 smoke evidence',
