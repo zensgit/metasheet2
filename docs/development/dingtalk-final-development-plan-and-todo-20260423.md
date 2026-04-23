@@ -193,6 +193,16 @@ node scripts/ops/dingtalk-p4-smoke-status.mjs \
 
 ## Final Documentation Outputs
 
+- [x] Add a gated final documentation generator:
+
+```bash
+node scripts/ops/dingtalk-p4-final-docs.mjs \
+  --session-dir output/dingtalk-p4-remote-smoke-session/142-session \
+  --handoff-summary artifacts/dingtalk-staging-evidence-packet/142-final/handoff-summary.json \
+  --require-release-ready \
+  --output-dir docs/development
+```
+
 - [ ] Create `docs/development/dingtalk-final-remote-smoke-development-20260423.md`
 - [ ] Create `docs/development/dingtalk-final-remote-smoke-verification-20260423.md`
 - [ ] Include remote smoke session path, final packet path, commands run, pass/fail status, and residual risks.
