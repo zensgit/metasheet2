@@ -213,6 +213,34 @@ function runScript(args) {
   })
 }
 
+test('dingtalk-p4-smoke-session writes an editable env template', () => {
+  const tmpDir = makeTmpDir()
+  const envPath = path.join(tmpDir, 'dingtalk-p4.env')
+
+  try {
+    const result = spawnSync(process.execPath, [
+      scriptPath,
+      '--init-env-template',
+      envPath,
+    ], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+    })
+
+    assert.equal(result.status, 0, result.stderr)
+    assert.match(result.stdout, /Wrote .*dingtalk-p4\.env/)
+    const content = readFileSync(envPath, 'utf8')
+    assert.match(content, /DINGTALK_P4_API_BASE=/)
+    assert.match(content, /DINGTALK_P4_AUTH_TOKEN=/)
+    assert.match(content, /DINGTALK_P4_GROUP_A_WEBHOOK=/)
+    assert.match(content, /DINGTALK_P4_ALLOWED_USER_IDS=/)
+    assert.doesNotMatch(content, /secret-admin-token/)
+    assert.equal(existsSync(path.join(tmpDir, 'session-summary.json')), false)
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+
 test('dingtalk-p4-smoke-session runs preflight, API runner, and non-strict compile', async () => {
   const tmpDir = makeTmpDir()
   const outputDir = path.join(tmpDir, 'session')
