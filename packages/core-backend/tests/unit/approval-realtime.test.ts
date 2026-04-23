@@ -50,20 +50,20 @@ describe('approval realtime count publisher', () => {
     })
   })
 
-  it('uses CollabService.sendTo and suppresses publish failures', async () => {
-    const sendTo = vi.fn()
+  it('uses the authenticated user room and suppresses publish failures', async () => {
+    const broadcastTo = vi.fn()
     const warn = vi.fn()
     const query = vi.fn<ApprovalCountQuery>(async () => ({ rows: [{ count: '0', unread_count: '0' }] }))
 
     await publishApprovalCountsUpdate({
-      collabService: { sendTo },
+      collabService: { broadcastTo },
       logger: { warn },
       userId: 'u1',
       reason: 'mark-all-read',
       query,
     })
 
-    expect(sendTo).toHaveBeenCalledWith('u1', 'approval:counts-updated', expect.objectContaining({
+    expect(broadcastTo).toHaveBeenCalledWith('auth-user:u1', 'approval:counts-updated', expect.objectContaining({
       count: 0,
       unreadCount: 0,
       reason: 'mark-all-read',

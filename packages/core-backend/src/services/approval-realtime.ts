@@ -1,6 +1,7 @@
 import type { Injector } from '@wendellhu/redi'
 import { ICollabService, type ICollabService as CollabServicePort, type ILogger } from '../di/identifiers'
 import { pool } from '../db/pg'
+import { buildAuthenticatedUserRoom } from './CollabService'
 
 export type ApprovalCountSourceSystem = 'all' | 'platform' | 'plm'
 
@@ -94,7 +95,7 @@ export async function buildApprovalCountsUpdatedPayload(
 export async function publishApprovalCountsUpdate(
   input: {
     injector?: Injector
-    collabService?: Pick<CollabServicePort, 'sendTo'>
+    collabService?: Pick<CollabServicePort, 'broadcastTo'>
     logger?: Pick<ILogger, 'warn'>
     userId: string
     roles?: string[]
@@ -107,7 +108,7 @@ export async function publishApprovalCountsUpdate(
     if (!collabService) return
     const payload = await buildApprovalCountsUpdatedPayload(input)
     if (!payload) return
-    collabService.sendTo(input.userId, 'approval:counts-updated', payload)
+    collabService.broadcastTo(buildAuthenticatedUserRoom(input.userId), 'approval:counts-updated', payload)
   } catch (error) {
     input.logger?.warn(
       'Failed to publish approval count update',

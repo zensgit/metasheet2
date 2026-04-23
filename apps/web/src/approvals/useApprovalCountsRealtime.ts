@@ -86,13 +86,13 @@ export function useApprovalCountsRealtime(options: UseApprovalCountsRealtimeOpti
 
     connectionPromise = (async () => {
       try {
-        const userId = await auth.getCurrentUserId().catch(() => null)
-        if (disconnected || !userId) return null
+        const token = auth.getToken()
+        if (disconnected || !token) return null
 
         const nextSocket = io(resolveApprovalCountsRealtimeBaseUrl(), {
           path: '/socket.io',
           transports: ['websocket', 'polling'],
-          query: { userId },
+          auth: { token },
         })
 
         nextSocket.on('approval:counts-updated', (payload: unknown) => {

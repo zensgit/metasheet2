@@ -16,7 +16,7 @@ vi.mock('socket.io-client', () => ({
 
 vi.mock('../src/composables/useAuth', () => ({
   useAuth: () => ({
-    getCurrentUserId: vi.fn().mockResolvedValue('approval-user-1'),
+    getToken: vi.fn().mockReturnValue('jwt-token'),
   }),
 }))
 
@@ -54,7 +54,7 @@ describe('useApprovalCountsRealtime', () => {
 
     expect(ioSpy).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({
       path: '/socket.io',
-      query: { userId: 'approval-user-1' },
+      auth: { token: 'jwt-token' },
     }))
 
     socketHandlers.get('approval:counts-updated')?.({

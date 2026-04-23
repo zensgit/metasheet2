@@ -3,7 +3,12 @@ import { Server as SocketServer } from 'socket.io'
 import type { Server as HttpServer } from 'http'
 import type { ILogger } from '../di/identifiers'
 import type { EventBus } from '../integration/events/event-bus'
+import { authService } from '../auth/AuthService'
 import { buildCommentInboxRoom, buildCommentRecordRoom, buildCommentSheetRoom } from './commentRooms'
+
+export function buildAuthenticatedUserRoom(userId: string): string {
+  return `auth-user:${userId}`
+}
 
 export class CollabService {
   private io: SocketServer | null = null
@@ -35,6 +40,29 @@ export class CollabService {
     const value = Array.isArray(raw) ? raw[0] : raw
     if (typeof value === 'string' && value.trim().length > 0) return value.trim()
     return undefined
+  }
+
+  private getTokenFromSocket(socket: Socket): string | undefined {
+    const authToken = (socket.handshake.auth as { token?: unknown } | undefined)?.token
+    if (typeof authToken === 'string' && authToken.trim().length > 0) return authToken.trim()
+    const raw = socket.handshake.query.token
+    const value = Array.isArray(raw) ? raw[0] : raw
+    if (typeof value === 'string' && value.trim().length > 0) return value.trim()
+    return undefined
+  }
+
+  private async joinAuthenticatedUserRoom(socket: Socket): Promise<void> {
+    const token = this.getTokenFromSocket(socket)
+    if (!token) return
+    try {
+      const user = await authService.verifyToken(token)
+      const userId = user?.id?.toString().trim()
+      if (!userId) return
+      socket.join(buildAuthenticatedUserRoom(userId))
+      this.logger.debug(`WebSocket client ${socket.id} joined authenticated user room for ${userId}`)
+    } catch (error) {
+      this.logger.warn('WebSocket authenticated user room join failed', error instanceof Error ? error : undefined)
+    }
   }
 
   private resolveTarget(options?: { userId?: string; socketId?: string }): string | null {
@@ -143,6 +171,7 @@ export class CollabService {
         socket.join(userId)
         this.logger.debug(`WebSocket client ${socket.id} joined user room ${userId}`)
       }
+      void this.joinAuthenticatedUserRoom(socket)
 
       socket.on('disconnect', () => {
         const userId = this.getUserIdFromSocket(socket)
