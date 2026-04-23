@@ -1,0 +1,323 @@
+#!/usr/bin/env node
+
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
+import { homedir } from 'node:os'
+import path from 'node:path'
+
+const DEFAULT_ENV_FILE = path.join(homedir(), '.config', 'yuantus', 'dingtalk-p4-staging.env')
+const DEFAULT_OUTPUT_ROOT = 'output/dingtalk-p4-release-readiness'
+const SCHEMA_VERSION = 1
+const PUBLIC_REGRESSION_PROFILES = ['ops', 'product', 'all']
+
+function printHelp() {
+  console.log(`Usage: node scripts/ops/dingtalk-p4-release-readiness.mjs [options]
+
+Combines the private DingTalk P4 env readiness check and local P4 regression
+gate into one go/no-go report before the final 142/staging smoke.
+
+Options:
+  --p4-env-file <file>             Env file path, default ${DEFAULT_ENV_FILE}
+  --regression-profile <profile>   Regression profile: ops, product, or all; default ops
+  --regression-plan-only           Plan regression commands without executing them
+  --output-dir <dir>               Output dir, default ${DEFAULT_OUTPUT_ROOT}/<run-id>
+  --timeout-ms <ms>                Forwarded to regression gate
+  --allow-failures                 Exit 0 but still write fail/manual_pending status
+  --help                           Show this help
+
+Typical flow:
+  node scripts/ops/dingtalk-p4-release-readiness.mjs
+  # If overallStatus is pass, run:
+  node scripts/ops/dingtalk-p4-smoke-session.mjs --env-file ${DEFAULT_ENV_FILE} --require-manual-targets --output-dir output/dingtalk-p4-remote-smoke-session/142-session
+`)
+}
+
+function readRequiredValue(argv, index, flag) {
+  const next = argv[index + 1]
+  if (!next || next.startsWith('--')) {
+    throw new Error(`${flag} requires a value`)
+  }
+  return next
+}
+
+function makeRunId() {
+  return `dingtalk-p4-release-readiness-${new Date().toISOString().replace(/[:.]/g, '-').replace(/Z$/, 'Z')}`
+}
+
+function parsePositiveInteger(value, flag, { allowZero = false } = {}) {
+  if (!/^\d+$/.test(String(value))) {
+    throw new Error(`${flag} must be ${allowZero ? 'a non-negative' : 'a positive'} integer`)
+  }
+  const next = Number.parseInt(value, 10)
+  if (!allowZero && next <= 0) {
+    throw new Error(`${flag} must be a positive integer`)
+  }
+  return next
+}
+
+function parseArgs(argv) {
+  const opts = {
+    p4EnvFile: DEFAULT_ENV_FILE,
+    regressionProfile: 'ops',
+    regressionPlanOnly: false,
+    outputDir: '',
+    timeoutMs: 0,
+    allowFailures: false,
+  }
+
+  for (let i = 0; i < argv.length; i += 1) {
+    const arg = argv[i]
+    switch (arg) {
+      case '--p4-env-file':
+        opts.p4EnvFile = path.resolve(process.cwd(), readRequiredValue(argv, i, arg))
+        i += 1
+        break
+      case '--regression-profile':
+        opts.regressionProfile = readRequiredValue(argv, i, arg).trim()
+        i += 1
+        break
+      case '--regression-plan-only':
+        opts.regressionPlanOnly = true
+        break
+      case '--output-dir':
+        opts.outputDir = path.resolve(process.cwd(), readRequiredValue(argv, i, arg))
+        i += 1
+        break
+      case '--timeout-ms':
+        opts.timeoutMs = parsePositiveInteger(readRequiredValue(argv, i, arg), arg, { allowZero: true })
+        i += 1
+        break
+      case '--allow-failures':
+        opts.allowFailures = true
+        break
+      case '--help':
+        printHelp()
+        process.exit(0)
+        break
+      default:
+        throw new Error(`Unknown argument: ${arg}`)
+    }
+  }
+
+  if (!PUBLIC_REGRESSION_PROFILES.includes(opts.regressionProfile) && !opts.regressionProfile.startsWith('selftest')) {
+    throw new Error(`--regression-profile must be one of: ${PUBLIC_REGRESSION_PROFILES.join(', ')}`)
+  }
+
+  if (!opts.outputDir) {
+    opts.outputDir = path.resolve(process.cwd(), DEFAULT_OUTPUT_ROOT, makeRunId())
+  }
+  return opts
+}
+
+function redactString(value) {
+  return String(value ?? '')
+    .replace(/(access_token=)[^&\s)]+/gi, '$1<redacted>')
+    .replace(/(publicToken=)[^&\s)]+/gi, '$1<redacted>')
+    .replace(/([?&](?:sign|timestamp)=)[^&\s)]+/gi, '$1<redacted>')
+    .replace(/((?:client_secret|DINGTALK_CLIENT_SECRET|DINGTALK_STATE_SECRET)=)[^\s&]+/gi, '$1<redacted>')
+    .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]+/gi, 'Bearer <redacted>')
+    .replace(/\bSEC[A-Za-z0-9+/=_-]{8,}\b/g, 'SEC<redacted>')
+    .replace(/\beyJ[A-Za-z0-9._-]{20,}\b/g, '<jwt:redacted>')
+}
+
+function sanitizeValue(value) {
+  if (value === null || value === undefined) return value
+  if (typeof value === 'string') return redactString(value)
+  if (typeof value === 'number' || typeof value === 'boolean') return value
+  if (Array.isArray(value)) return value.map((entry) => sanitizeValue(entry))
+  if (typeof value === 'object') {
+    const next = {}
+    for (const [key, entryValue] of Object.entries(value)) {
+      next[key] = sanitizeValue(entryValue)
+    }
+    return next
+  }
+  return value
+}
+
+function relativePath(file) {
+  return path.relative(process.cwd(), file).replaceAll('\\', '/')
+}
+
+function shellQuote(value) {
+  return `'${String(value).replaceAll("'", "'\\''")}'`
+}
+
+function runNodeTool(args) {
+  const result = spawnSync(process.execPath, args, {
+    cwd: process.cwd(),
+    encoding: 'utf8',
+    maxBuffer: 20 * 1024 * 1024,
+  })
+  return {
+    exitCode: result.status ?? 1,
+    stdout: redactString(result.stdout ?? ''),
+    stderr: redactString(result.stderr || result.error?.message || ''),
+  }
+}
+
+function readJsonIfExists(file) {
+  if (!existsSync(file)) return null
+  return JSON.parse(readFileSync(file, 'utf8'))
+}
+
+function runEnvReadiness(opts, envDir) {
+  const jsonPath = path.join(envDir, 'readiness-summary.json')
+  const mdPath = path.join(envDir, 'readiness-summary.md')
+  const result = runNodeTool([
+    'scripts/ops/dingtalk-p4-env-bootstrap.mjs',
+    '--check',
+    '--p4-env-file',
+    opts.p4EnvFile,
+    '--output-dir',
+    envDir,
+  ])
+  const summary = readJsonIfExists(jsonPath)
+  return {
+    id: 'env-readiness',
+    label: 'Private DingTalk P4 env readiness',
+    status: summary?.overallStatus === 'pass' ? 'pass' : 'fail',
+    exitCode: result.exitCode,
+    summaryJson: existsSync(jsonPath) ? relativePath(jsonPath) : null,
+    summaryMd: existsSync(mdPath) ? relativePath(mdPath) : null,
+    stdout: result.stdout.trim(),
+    stderr: result.stderr.trim(),
+    details: summary
+      ? {
+          envFile: summary.envFile,
+          environment: summary.environment,
+          failedChecks: summary.checks.filter((check) => check.status === 'fail').map((check) => check.id),
+        }
+      : {},
+  }
+}
+
+function runRegressionGate(opts, regressionDir) {
+  const args = [
+    'scripts/ops/dingtalk-p4-regression-gate.mjs',
+    '--profile',
+    opts.regressionProfile,
+    '--output-dir',
+    regressionDir,
+  ]
+  if (opts.regressionPlanOnly) args.push('--plan-only')
+  if (opts.timeoutMs > 0) args.push('--timeout-ms', String(opts.timeoutMs))
+  const result = runNodeTool(args)
+  const jsonPath = path.join(regressionDir, 'summary.json')
+  const mdPath = path.join(regressionDir, 'summary.md')
+  const summary = readJsonIfExists(jsonPath)
+  const status = summary?.overallStatus === 'pass'
+    ? 'pass'
+    : summary?.overallStatus === 'plan_only'
+      ? 'skipped'
+      : 'fail'
+  return {
+    id: 'regression-gate',
+    label: `Local DingTalk P4 regression gate (${opts.regressionProfile})`,
+    status,
+    exitCode: result.exitCode,
+    summaryJson: existsSync(jsonPath) ? relativePath(jsonPath) : null,
+    summaryMd: existsSync(mdPath) ? relativePath(mdPath) : null,
+    stdout: result.stdout.trim(),
+    stderr: result.stderr.trim(),
+    details: summary
+      ? {
+          profile: summary.profile,
+          planOnly: summary.planOnly,
+          totals: summary.totals,
+          failedChecks: summary.checks.filter((check) => check.status === 'fail').map((check) => check.id),
+        }
+      : {},
+  }
+}
+
+function computeOverallStatus(checks) {
+  if (checks.some((check) => check.status === 'fail')) return 'fail'
+  if (checks.some((check) => check.status === 'skipped')) return 'manual_pending'
+  return 'pass'
+}
+
+function renderMarkdown(summary) {
+  const lines = [
+    '# DingTalk P4 Release Readiness',
+    '',
+    `- Overall status: **${summary.overallStatus}**`,
+    `- Generated at: \`${summary.generatedAt}\``,
+    `- Env file: \`${summary.p4EnvFile}\``,
+    `- Regression profile: \`${summary.regressionProfile}\``,
+    `- Regression plan only: \`${summary.regressionPlanOnly}\``,
+    '',
+    '## Gates',
+    '',
+    '| Gate | Status | Exit | Summary | Failed checks |',
+    '| --- | --- | ---: | --- | --- |',
+  ]
+
+  for (const gate of summary.gates) {
+    const failedChecks = gate.details?.failedChecks?.length ? gate.details.failedChecks.map((id) => `\`${id}\``).join('<br>') : ''
+    const summaryLink = gate.summaryMd ? `[md](${gate.summaryMd})` : ''
+    lines.push(`| \`${gate.id}\` | ${gate.status} | ${gate.exitCode} | ${summaryLink} | ${failedChecks} |`)
+  }
+
+  lines.push('')
+  lines.push('## Next Step')
+  lines.push('')
+  if (summary.overallStatus === 'pass') {
+    lines.push('Run the final remote smoke session:')
+    lines.push('')
+    lines.push('```bash')
+    lines.push(`node scripts/ops/dingtalk-p4-smoke-session.mjs \\`)
+    lines.push(`  --env-file ${shellQuote(summary.p4EnvFile)} \\`)
+    lines.push('  --require-manual-targets \\')
+    lines.push('  --output-dir output/dingtalk-p4-remote-smoke-session/142-session')
+    lines.push('```')
+  } else {
+    lines.push('Do not run the final remote smoke yet. Resolve failed gates first, then rerun this readiness command.')
+  }
+
+  lines.push('')
+  lines.push('## Secret Policy')
+  lines.push('')
+  lines.push('Bearer tokens, DingTalk robot access tokens, SEC secrets, JWTs, public form tokens, timestamps, and signs are redacted from this report.')
+  return `${lines.join('\n')}\n`
+}
+
+function run(opts) {
+  mkdirSync(opts.outputDir, { recursive: true })
+  const envDir = path.join(opts.outputDir, 'env-readiness')
+  const regressionDir = path.join(opts.outputDir, 'regression-gate')
+  mkdirSync(envDir, { recursive: true })
+  mkdirSync(regressionDir, { recursive: true })
+
+  const gates = [
+    runEnvReadiness(opts, envDir),
+    runRegressionGate(opts, regressionDir),
+  ]
+  const overallStatus = computeOverallStatus(gates)
+  const summary = sanitizeValue({
+    tool: 'dingtalk-p4-release-readiness',
+    schemaVersion: SCHEMA_VERSION,
+    generatedAt: new Date().toISOString(),
+    outputDir: relativePath(opts.outputDir),
+    p4EnvFile: opts.p4EnvFile,
+    regressionProfile: opts.regressionProfile,
+    regressionPlanOnly: opts.regressionPlanOnly,
+    overallStatus,
+    gates,
+  })
+
+  const jsonPath = path.join(opts.outputDir, 'release-readiness-summary.json')
+  const mdPath = path.join(opts.outputDir, 'release-readiness-summary.md')
+  writeFileSync(jsonPath, `${JSON.stringify(summary, null, 2)}\n`, 'utf8')
+  writeFileSync(mdPath, renderMarkdown(summary), 'utf8')
+  console.log(`[dingtalk-p4-release-readiness] ${overallStatus}: ${relativePath(jsonPath)}`)
+  return overallStatus === 'pass' || opts.allowFailures ? 0 : 1
+}
+
+try {
+  const opts = parseArgs(process.argv.slice(2))
+  process.exit(run(opts))
+} catch (error) {
+  console.error(`[dingtalk-p4-release-readiness] ERROR: ${redactString(error instanceof Error ? error.message : String(error))}`)
+  process.exit(1)
+}
