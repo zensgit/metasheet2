@@ -50,6 +50,37 @@ const REQUIRED_CHECKS = [
 
 const CHECK_ID_SET = new Set(REQUIRED_CHECKS.map((check) => check.id))
 const VALID_STATUSES = new Set(['pass', 'fail', 'skipped', 'pending'])
+const MAX_SECRET_SCAN_BYTES = 2 * 1024 * 1024
+const SECRET_PATTERNS = [
+  {
+    name: 'dingtalk_robot_webhook',
+    regex: /https:\/\/oapi\.dingtalk\.com\/robot\/send\?[^\s"'`<>]*access_token=(?!<redacted>|\$|%24|\(\?)[^\s&"'`<>]{8,}/i,
+  },
+  {
+    name: 'access_token_param',
+    regex: /(?:^|[?&])access_token=(?!<redacted>|\$|%24|replace-me|\(\?)[A-Za-z0-9._~+/=-]{16,}/i,
+  },
+  {
+    name: 'bearer_token',
+    regex: /\bBearer\s+(?!<redacted>|\$|\{)[A-Za-z0-9._~+/=-]{20,}/i,
+  },
+  {
+    name: 'dingtalk_sec_secret',
+    regex: /\bSEC(?=[A-Za-z0-9+/=-]{12,}\b)(?=[A-Za-z0-9+/=-]*\d)[A-Za-z0-9+/=-]{12,}\b/,
+  },
+  {
+    name: 'jwt',
+    regex: /\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/,
+  },
+  {
+    name: 'dingtalk_secret_assignment',
+    regex: /\b(?:DINGTALK_CLIENT_SECRET|DINGTALK_STATE_SECRET|client_secret)\s*=\s*(?!<redacted>|replace-me|\$|\s|$)[^\s&"'`<>]{8,}/i,
+  },
+  {
+    name: 'public_form_token',
+    regex: /\bpublicToken=(?!<redacted>|\$)[A-Za-z0-9._~+/=-]{12,}/i,
+  },
+]
 const API_BOOTSTRAP_CHECK_IDS = new Set([
   'create-table-form',
   'bind-two-dingtalk-groups',
@@ -440,6 +471,30 @@ function isAbsoluteArtifactPath(value) {
   return path.isAbsolute(value) || path.win32.isAbsolute(value) || value.replaceAll('\\', '/').startsWith('//')
 }
 
+function isLikelyText(buffer) {
+  return !buffer.includes(0)
+}
+
+function scanArtifactFileForSecrets(checkId, artifactRef, file) {
+  const stats = statSync(file)
+  if (!stats.isFile() || stats.size <= 0 || stats.size > MAX_SECRET_SCAN_BYTES) return []
+  const buffer = readFileSync(file)
+  if (!isLikelyText(buffer)) return []
+  const content = buffer.toString('utf8')
+  const issues = []
+  for (const pattern of SECRET_PATTERNS) {
+    if (pattern.regex.test(content)) {
+      issues.push(artifactIssue(
+        checkId,
+        'artifact_secret_detected',
+        `${checkId} artifact file contains secret-like value (${pattern.name})`,
+        artifactRef,
+      ))
+    }
+  }
+  return issues
+}
+
 function validateManualArtifactRefs(checkId, evidence, evidenceDir, opts) {
   const issues = []
   const refs = collectArtifactRefs(evidence)
@@ -492,7 +547,9 @@ function validateManualArtifactRefs(checkId, evidence, evidenceDir, opts) {
     }
     if (stat.size <= 0) {
       issues.push(artifactIssue(checkId, 'artifact_ref_empty', `${checkId} artifact file is empty`, trimmed))
+      continue
     }
+    issues.push(...scanArtifactFileForSecrets(checkId, normalizedRef, fullPath))
   }
   return issues
 }

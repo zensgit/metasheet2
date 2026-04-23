@@ -106,6 +106,7 @@ Strict artifact refs are self-contained by default:
 - Use relative paths only.
 - Put each file under `artifacts/<check-id>/` next to the input `evidence.json`.
 - The referenced path must exist, be a file, and be non-empty.
+- Small text artifact files are scanned for common raw secret shapes during strict compile.
 - External URL refs are rejected unless `--allow-external-artifact-refs` is passed. Prefer local files for release evidence because URL-only proof can be edited or become unavailable.
 
 Example check evidence:
