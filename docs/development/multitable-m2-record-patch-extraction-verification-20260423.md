@@ -146,3 +146,26 @@ additions on this branch are:
 The reviewer can decide whether to merge these three files as a
 follow-up patch. They are additive — no conflict with `059ea44fc` is
 possible.
+
+## Codex Rebase Verification - 2026-04-23
+
+Branch was checked after `origin/main@059ea44fc` became the shared base.
+
+```bash
+git fetch origin main
+git rebase --autostash origin/main
+pnpm --filter @metasheet/core-backend exec vitest run \
+  tests/integration/multitable-record-patch.api.test.ts \
+  --reporter=dot
+pnpm --filter @metasheet/core-backend exec tsc --noEmit
+```
+
+Result:
+
+- Rebase: already up to date on `origin/main@059ea44fc`.
+- `multitable-record-patch.api.test.ts`: `6/6` passed.
+- Backend `tsc --noEmit`: exit `0`.
+
+Review note:
+
+- This branch remains pure additive coverage + docs. No source file is changed.
