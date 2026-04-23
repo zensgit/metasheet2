@@ -141,6 +141,7 @@ test('compile-dingtalk-p4-smoke-evidence writes an editable template', () => {
     assert.equal(template.checks.find((check) => check.id === 'authorized-user-submit').evidence.performedAt, '')
     assert.deepEqual(template.checks.find((check) => check.id === 'authorized-user-submit').evidence.artifacts, [])
     assert.equal(template.checks.find((check) => check.id === 'no-email-user-create-bind').evidence.source, 'manual-admin')
+    assert.equal(template.checks.find((check) => check.id === 'no-email-user-create-bind').evidence.adminEvidence.temporaryPasswordRedacted, true)
   } finally {
     rmSync(tmpDir, { recursive: true, force: true })
   }
@@ -170,6 +171,8 @@ test('compile-dingtalk-p4-smoke-evidence writes a manual evidence kit', () => {
     const checklist = readFileSync(path.join(kitDir, 'manual-evidence-checklist.md'), 'utf8')
     assert.match(checklist, /manual-client/)
     assert.match(checklist, /manual-admin/)
+    assert.match(checklist, /admin-create-bind-result\.png/)
+    assert.match(checklist, /temporary password/)
     assert.match(checklist, /Do not paste DingTalk robot full webhook URLs/)
   } finally {
     rmSync(tmpDir, { recursive: true, force: true })

@@ -323,12 +323,23 @@ test('dingtalk-p4-remote-smoke runs API chain, writes pending manual gates, and 
     assert.equal(byId.get('send-group-message-form-link').evidence.apiBootstrap.groupRuleDeliveryCount, 2)
     assert.equal(byId.get('authorized-user-submit').evidence.source, 'manual-client')
     assert.equal(byId.get('no-email-user-create-bind').evidence.source, 'manual-admin')
+    assert.deepEqual(
+      byId.get('no-email-user-create-bind').evidence.suggestedArtifacts,
+      [
+        'artifacts/no-email-user-create-bind/admin-create-bind-result.png',
+        'artifacts/no-email-user-create-bind/account-linked-after-refresh.png',
+        'artifacts/no-email-user-create-bind/temp-password-redacted-note.txt',
+      ],
+    )
+    assert.equal(byId.get('no-email-user-create-bind').evidence.adminEvidence.temporaryPasswordRedacted, true)
     assert.equal(byId.get('delivery-history-group-person').evidence.personRuleDeliveryCount, 1)
 
     const checklist = readFileSync(path.join(outputDir, 'manual-evidence-checklist.md'), 'utf8')
     assert.match(checklist, /manual-client/)
     assert.match(checklist, /manual-admin/)
     assert.match(checklist, /artifacts\/authorized-user-submit/)
+    assert.match(checklist, /admin-create-bind-result\.png/)
+    assert.match(checklist, /temporary password/)
 
     assert.equal(fakeApi.requests.every((request) => request.headers.authorization === 'Bearer secret-admin-token'), true)
     assert.equal(fakeApi.requests.some((request) => request.pathname.endsWith('/dingtalk-person-deliveries')), true)

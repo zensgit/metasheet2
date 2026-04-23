@@ -195,6 +195,43 @@ test('dingtalk-p4-smoke-status writes an executable remote smoke TODO report', (
   }
 })
 
+test('dingtalk-p4-smoke-status suggests a concrete no-email admin evidence command', () => {
+  const tmpDir = makeTmpDir()
+  const sessionDir = path.join(tmpDir, '142-session')
+
+  try {
+    writeSession(sessionDir, {
+      sessionPhase: 'bootstrap',
+      sessionOverallStatus: 'manual_pending',
+      finalStrictStatus: 'not_run',
+      steps: [
+        { id: 'preflight', status: 'pass', exitCode: 0 },
+        { id: 'api-runner', status: 'pass', exitCode: 0 },
+        { id: 'compile', status: 'pass', exitCode: 0 },
+      ],
+      checkOverrides: {
+        'no-email-user-create-bind': {
+          status: 'pending',
+        },
+      },
+    })
+
+    const result = runScript(['--session-dir', sessionDir])
+
+    assert.equal(result.status, 0, result.stderr)
+    const todoText = readFileSync(path.join(sessionDir, 'smoke-todo.md'), 'utf8')
+    assert.match(todoText, /--source manual-admin/)
+    assert.match(todoText, /admin-create-bind-result\.png/)
+    assert.match(todoText, /temporary password is redacted/)
+    const summary = JSON.parse(readFileSync(path.join(sessionDir, 'smoke-status.json'), 'utf8'))
+    const noEmailTodo = summary.remoteSmokeTodos.items.find((item) => item.id === 'no-email-user-create-bind')
+    assert.match(noEmailTodo.evidenceRecordCommand, /manual-admin/)
+    assert.match(noEmailTodo.evidenceRecordCommand, /admin-create-bind-result\.png/)
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+
 test('dingtalk-p4-smoke-status reports handoff pending after final strict pass', () => {
   const tmpDir = makeTmpDir()
   const sessionDir = path.join(tmpDir, '142-session')
