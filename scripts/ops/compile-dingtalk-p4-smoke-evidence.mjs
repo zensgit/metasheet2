@@ -554,6 +554,49 @@ function validateManualArtifactRefs(checkId, evidence, evidenceDir, opts) {
   return issues
 }
 
+function finiteNumber(value) {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null
+  if (typeof value === 'string' && value.trim()) {
+    const parsed = Number(value)
+    return Number.isFinite(parsed) ? parsed : null
+  }
+  return null
+}
+
+function hasZeroRecordInsertDelta(evidence) {
+  const delta = finiteNumber(evidence.recordInsertDelta)
+  if (delta !== null) return delta === 0
+  const before = finiteNumber(evidence.beforeRecordCount)
+  const after = finiteNumber(evidence.afterRecordCount)
+  return before !== null && after !== null && before === after
+}
+
+function validateUnauthorizedDeniedEvidence(evidence) {
+  const issues = []
+  if (evidence.submitBlocked !== true) {
+    issues.push({
+      id: 'unauthorized-user-denied',
+      code: 'submit_blocked_required',
+      message: 'unauthorized-user-denied pass evidence requires evidence.submitBlocked=true',
+    })
+  }
+  if (!hasZeroRecordInsertDelta(evidence)) {
+    issues.push({
+      id: 'unauthorized-user-denied',
+      code: 'record_insert_delta_zero_required',
+      message: 'unauthorized-user-denied pass evidence requires evidence.recordInsertDelta=0 or equal beforeRecordCount/afterRecordCount',
+    })
+  }
+  if (!isNonEmptyString(evidence.blockedReason) && !isNonEmptyString(evidence.errorSummary) && !isNonEmptyString(evidence.visibleErrorSummary)) {
+    issues.push({
+      id: 'unauthorized-user-denied',
+      code: 'blocked_reason_required',
+      message: 'unauthorized-user-denied pass evidence requires evidence.blockedReason, evidence.errorSummary, or evidence.visibleErrorSummary',
+    })
+  }
+  return issues
+}
+
 function validateManualEvidenceRequirements(checksById, evidenceDir, opts) {
   const issues = []
   for (const requirement of MANUAL_EVIDENCE_REQUIREMENTS) {
@@ -607,6 +650,9 @@ function validateManualEvidenceRequirements(checksById, evidenceDir, opts) {
         code: 'summary_required',
         message: `${requirement.id} requires evidence.summary, evidence.notes, or evidence.resultSummary`,
       })
+    }
+    if (requirement.id === 'unauthorized-user-denied') {
+      issues.push(...validateUnauthorizedDeniedEvidence(evidence))
     }
   }
   return issues

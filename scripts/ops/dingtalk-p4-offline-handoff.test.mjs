@@ -244,6 +244,15 @@ function fillManualEvidence(sessionDir) {
       `${check.id} verified in offline handoff chain`,
       '--artifact',
       artifactRef,
+      ...(check.id === 'unauthorized-user-denied'
+        ? [
+            '--submit-blocked',
+            '--record-insert-delta',
+            '0',
+            '--blocked-reason',
+            'Visible error showed the user is not in the allowlist.',
+          ]
+        : []),
     ])
     assert.equal(result.status, 0, result.stderr || result.stdout)
   }

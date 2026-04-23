@@ -97,6 +97,50 @@ test('dingtalk-p4-evidence-record records passing manual client evidence', () =>
   }
 })
 
+test('dingtalk-p4-evidence-record records structured unauthorized denial evidence', () => {
+  const tmpDir = makeTmpDir()
+  const sessionDir = path.join(tmpDir, 'session')
+
+  try {
+    const evidencePath = writeEvidence(sessionDir)
+    const artifactRef = writeArtifact(sessionDir, 'unauthorized-user-denied')
+
+    const result = runScript([
+      '--session-dir',
+      sessionDir,
+      '--check-id',
+      'unauthorized-user-denied',
+      '--status',
+      'pass',
+      '--source',
+      'manual-client',
+      '--operator',
+      'qa',
+      '--performed-at',
+      '2026-04-23T10:00:00.000Z',
+      '--summary',
+      'Unauthorized DingTalk-bound user was blocked.',
+      '--artifact',
+      artifactRef,
+      '--submit-blocked',
+      '--record-insert-delta',
+      '0',
+      '--blocked-reason',
+      'Visible error showed the user is not in the allowlist.',
+    ])
+
+    assert.equal(result.status, 0, result.stderr)
+    const evidence = JSON.parse(readFileSync(evidencePath, 'utf8'))
+    const check = evidence.checks.find((entry) => entry.id === 'unauthorized-user-denied')
+    assert.equal(check.status, 'pass')
+    assert.equal(check.evidence.submitBlocked, true)
+    assert.equal(check.evidence.recordInsertDelta, 0)
+    assert.equal(check.evidence.blockedReason, 'Visible error showed the user is not in the allowlist.')
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+
 test('dingtalk-p4-evidence-record supports dry-run without writing evidence', () => {
   const tmpDir = makeTmpDir()
   const sessionDir = path.join(tmpDir, 'session')
@@ -168,6 +212,82 @@ test('dingtalk-p4-evidence-record preserves existing evidence metadata', () => {
     assert.equal(updatedCheck.evidence.instructions, 'Keep this operator guidance.')
     assert.deepEqual(updatedCheck.evidence.apiBootstrap, { tableId: 'table_1' })
     assert.equal(updatedCheck.evidence.operator, 'qa')
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+
+test('dingtalk-p4-evidence-record rejects incomplete unauthorized denial evidence', () => {
+  const tmpDir = makeTmpDir()
+  const sessionDir = path.join(tmpDir, 'session')
+
+  try {
+    writeEvidence(sessionDir)
+    const artifactRef = writeArtifact(sessionDir, 'unauthorized-user-denied')
+
+    const result = runScript([
+      '--session-dir',
+      sessionDir,
+      '--check-id',
+      'unauthorized-user-denied',
+      '--status',
+      'pass',
+      '--source',
+      'manual-client',
+      '--operator',
+      'qa',
+      '--summary',
+      'Unauthorized DingTalk-bound user was blocked.',
+      '--artifact',
+      artifactRef,
+      '--record-insert-delta',
+      '1',
+    ])
+
+    assert.equal(result.status, 1)
+    assert.match(result.stderr, /requires --submit-blocked/)
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+
+test('dingtalk-p4-evidence-record accepts equal before and after record counts for unauthorized denial', () => {
+  const tmpDir = makeTmpDir()
+  const sessionDir = path.join(tmpDir, 'session')
+
+  try {
+    const evidencePath = writeEvidence(sessionDir)
+    const artifactRef = writeArtifact(sessionDir, 'unauthorized-user-denied')
+
+    const result = runScript([
+      '--session-dir',
+      sessionDir,
+      '--check-id',
+      'unauthorized-user-denied',
+      '--status',
+      'pass',
+      '--source',
+      'manual-client',
+      '--operator',
+      'qa',
+      '--summary',
+      'Unauthorized DingTalk-bound user was blocked.',
+      '--artifact',
+      artifactRef,
+      '--submit-blocked',
+      '--before-record-count',
+      '7',
+      '--after-record-count',
+      '7',
+      '--blocked-reason',
+      'Visible grant-required error.',
+    ])
+
+    assert.equal(result.status, 0, result.stderr)
+    const evidence = JSON.parse(readFileSync(evidencePath, 'utf8'))
+    const check = evidence.checks.find((entry) => entry.id === 'unauthorized-user-denied')
+    assert.equal(check.evidence.beforeRecordCount, 7)
+    assert.equal(check.evidence.afterRecordCount, 7)
   } finally {
     rmSync(tmpDir, { recursive: true, force: true })
   }

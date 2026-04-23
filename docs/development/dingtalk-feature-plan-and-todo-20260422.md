@@ -83,6 +83,7 @@
 - [x] Add an offline P4 session-to-handoff chain test so the local tooling contract stays verified without real DingTalk credentials.
 - [x] Add a P4 evidence recorder CLI so operators can safely update manual checks without hand-editing `evidence.json`.
 - [x] Add a P4 strict artifact secret scan so finalization catches raw secret-like text artifacts before packet handoff.
+- [x] Add a P4 unauthorized denial evidence contract so pass evidence must prove submit blocking and zero record insert.
 - [ ] Remote smoke: create a table and form view.
 - [ ] Remote smoke: bind at least two DingTalk groups to the table.
 - [ ] Remote smoke: set the form to `dingtalk_granted`.

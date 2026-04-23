@@ -42,6 +42,13 @@ function makePassingEvidenceForCheck(id) {
       performedAt: '2026-04-22T15:00:00.000Z',
       summary: `${id} manual evidence ok`,
       artifacts: [manualArtifactRefForCheck(id)],
+      ...(id === 'unauthorized-user-denied'
+        ? {
+            submitBlocked: true,
+            recordInsertDelta: 0,
+            blockedReason: 'Visible error showed the user is not in the allowlist.',
+          }
+        : {}),
     }
   }
   return {

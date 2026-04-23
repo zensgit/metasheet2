@@ -65,6 +65,11 @@ Options:
   --summary <text>           Human-readable result summary
   --notes <text>             Optional notes
   --artifact <path>          Relative artifact path; repeatable
+  --submit-blocked           Set evidence.submitBlocked=true for unauthorized-user-denied
+  --record-insert-delta <n>  Set evidence.recordInsertDelta
+  --before-record-count <n>  Set evidence.beforeRecordCount
+  --after-record-count <n>   Set evidence.afterRecordCount
+  --blocked-reason <text>    Set evidence.blockedReason
   --dry-run                  Validate and print the updated check without writing
   --help                     Show this help
 
@@ -100,6 +105,11 @@ function parseArgs(argv) {
     summary: '',
     notes: '',
     artifacts: [],
+    submitBlocked: false,
+    recordInsertDelta: null,
+    beforeRecordCount: null,
+    afterRecordCount: null,
+    blockedReason: '',
     dryRun: false,
   }
 
@@ -146,6 +156,25 @@ function parseArgs(argv) {
         opts.artifacts.push(readRequiredValue(argv, i, arg).trim())
         i += 1
         break
+      case '--submit-blocked':
+        opts.submitBlocked = true
+        break
+      case '--record-insert-delta':
+        opts.recordInsertDelta = readNumberValue(readRequiredValue(argv, i, arg), arg)
+        i += 1
+        break
+      case '--before-record-count':
+        opts.beforeRecordCount = readNumberValue(readRequiredValue(argv, i, arg), arg)
+        i += 1
+        break
+      case '--after-record-count':
+        opts.afterRecordCount = readNumberValue(readRequiredValue(argv, i, arg), arg)
+        i += 1
+        break
+      case '--blocked-reason':
+        opts.blockedReason = readRequiredValue(argv, i, arg).trim()
+        i += 1
+        break
       case '--dry-run':
         opts.dryRun = true
         break
@@ -167,6 +196,12 @@ function parseArgs(argv) {
   if (!opts.status) throw new Error('--status is required')
   if (!VALID_STATUSES.has(opts.status)) throw new Error(`--status must be one of: ${Array.from(VALID_STATUSES).join(', ')}`)
   return opts
+}
+
+function readNumberValue(value, flag) {
+  const parsed = Number(value)
+  if (!Number.isFinite(parsed)) throw new Error(`${flag} must be a finite number`)
+  return parsed
 }
 
 function relativePath(file) {
@@ -269,12 +304,31 @@ function validateManualPass(opts) {
   if (!isDateLike(opts.performedAt)) throw new Error('--performed-at must be a valid date')
 }
 
+function hasZeroRecordInsertDelta(opts) {
+  if (opts.recordInsertDelta !== null) return opts.recordInsertDelta === 0
+  return opts.beforeRecordCount !== null && opts.afterRecordCount !== null && opts.beforeRecordCount === opts.afterRecordCount
+}
+
+function validateUnauthorizedDeniedPass(opts) {
+  if (opts.checkId !== 'unauthorized-user-denied' || opts.status !== 'pass') return
+  if (opts.submitBlocked !== true) {
+    throw new Error('unauthorized-user-denied pass evidence requires --submit-blocked')
+  }
+  if (!hasZeroRecordInsertDelta(opts)) {
+    throw new Error('unauthorized-user-denied pass evidence requires --record-insert-delta 0 or equal --before-record-count/--after-record-count')
+  }
+  if (!opts.blockedReason) {
+    throw new Error('unauthorized-user-denied pass evidence requires --blocked-reason')
+  }
+}
+
 function validateInputs(opts) {
   for (const [label, value] of [
     ['--source', opts.source],
     ['--operator', opts.operator],
     ['--summary', opts.summary],
     ['--notes', opts.notes],
+    ['--blocked-reason', opts.blockedReason],
   ]) {
     assertNoSecretText(value, label)
   }
@@ -282,6 +336,7 @@ function validateInputs(opts) {
     throw new Error('--performed-at must be a valid date')
   }
   validateManualPass(opts)
+  validateUnauthorizedDeniedPass(opts)
 }
 
 function findCheck(evidence, checkId) {
@@ -298,6 +353,11 @@ function buildEvidencePayload(opts, artifactRefs) {
   if (opts.summary) payload.summary = opts.summary
   if (opts.notes) payload.notes = opts.notes
   if (artifactRefs.length > 0) payload.artifacts = artifactRefs
+  if (opts.submitBlocked) payload.submitBlocked = true
+  if (opts.recordInsertDelta !== null) payload.recordInsertDelta = opts.recordInsertDelta
+  if (opts.beforeRecordCount !== null) payload.beforeRecordCount = opts.beforeRecordCount
+  if (opts.afterRecordCount !== null) payload.afterRecordCount = opts.afterRecordCount
+  if (opts.blockedReason) payload.blockedReason = opts.blockedReason
   return payload
 }
 
