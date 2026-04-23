@@ -7,7 +7,11 @@ import type { ConditionGroup } from './automation-conditions'
 import { AutomationExecutor, type AutomationRule as ExecutorRule, type AutomationExecution, type AutomationDeps } from './automation-executor'
 import type { AutomationAction } from './automation-actions'
 import type { AutomationTrigger } from './automation-triggers'
-import { AutomationScheduler, type AutomationSchedulerLeaderOptions } from './automation-scheduler'
+import {
+  AutomationScheduler,
+  type AutomationSchedulerLeaderOptions,
+  type AutomationSchedulerRuntimeOptions,
+} from './automation-scheduler'
 import { RedisLeaderLock, type RedisLeaderLockClient } from './redis-leader-lock'
 import { getRedisClient } from '../db/redis'
 import { randomBytes } from 'crypto'
@@ -180,6 +184,7 @@ export class AutomationService {
     queryFn: AutomationQueryFn,
     fetchFn?: typeof fetch,
     schedulerLeaderOptions: AutomationSchedulerLeaderOptions | null = null,
+    schedulerRuntime: AutomationSchedulerRuntimeOptions = {},
   ) {
     this.eventBus = eventBus
     this.db = db
@@ -197,6 +202,7 @@ export class AutomationService {
         await this.executeRule(rule, { _triggeredBy: 'schedule' })
       },
       schedulerLeaderOptions,
+      schedulerRuntime,
     )
   }
 

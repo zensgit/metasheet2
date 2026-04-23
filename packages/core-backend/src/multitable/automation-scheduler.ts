@@ -13,6 +13,17 @@ const logger = new Logger('AutomationScheduler')
 export type ScheduleCallback = (rule: AutomationRule) => void | Promise<void>
 
 /**
+ * Minimal Prometheus gauge shape used via dependency injection so the
+ * scheduler module stays import-light and unit tests don't need a real
+ * prom-client registry. Mirrors the subset of the gauge API we touch.
+ */
+export interface AutomationSchedulerLeaderGauge {
+  labels(labels: {
+    state: 'leader' | 'follower' | 'relinquished'
+  }): { set(value: number): void }
+}
+
+/**
  * Optional leader-election configuration for the scheduler.
  * When provided the scheduler will attempt to acquire the lock at startup
  * and only run timers on the replica that currently holds it.
@@ -31,6 +42,20 @@ export interface AutomationSchedulerLeaderOptions {
    * without losing the lock).
    */
   renewIntervalMs?: number
+}
+
+/**
+ * Optional second constructor argument for the scheduler — purely for
+ * dependency injection of observability hooks.  Keeps the `leaderOptions`
+ * API signature stable (Sprint 6 contract) while letting callers pass a
+ * Prometheus gauge without threading it through leader-lock options.
+ */
+export interface AutomationSchedulerRuntimeOptions {
+  /**
+   * Prometheus gauge reporting the current leader state. Each transition
+   * sets exactly one of the labels to `1` and the other two to `0`.
+   */
+  leaderStateGauge?: AutomationSchedulerLeaderGauge
 }
 
 /**
@@ -90,6 +115,7 @@ export class AutomationScheduler {
   private readonly renewIntervalMs: number
   private renewalTimer: NodeJS.Timeout | null = null
   private isLeader: boolean = false
+  private readonly leaderStateGauge: AutomationSchedulerLeaderGauge | null
   /**
    * Resolves once the initial leader-election attempt has completed. When
    * no leader options are configured this is an already-resolved promise.
@@ -101,6 +127,7 @@ export class AutomationScheduler {
   constructor(
     callback: ScheduleCallback,
     leaderOptions: AutomationSchedulerLeaderOptions | null = null,
+    runtime: AutomationSchedulerRuntimeOptions = {},
   ) {
     this.callback = callback
     this.leaderOptions = leaderOptions
@@ -110,8 +137,13 @@ export class AutomationScheduler {
     // required before the lock times out.
     this.renewIntervalMs =
       leaderOptions?.renewIntervalMs ?? Math.max(1_000, Math.floor(this.ttlMs / 3))
+    this.leaderStateGauge = runtime.leaderStateGauge ?? null
 
     if (leaderOptions) {
+      // Default to "follower" until the initial acquisition attempt
+      // concludes.  This guarantees the gauge always reports a value once
+      // the scheduler is constructed, even before `ready` resolves.
+      this.setLeaderGauge('follower')
       // Kick off acquisition asynchronously but expose a promise so callers
       // can wait for the verdict before registering rules in bulk.
       this.ready = this.attemptLeadership().catch((err) => {
@@ -120,11 +152,38 @@ export class AutomationScheduler {
           err instanceof Error ? err : undefined,
         )
         this.isLeader = false
+        this.setLeaderGauge('follower')
       })
     } else {
       // No leader config → always act as leader (legacy behaviour).
       this.isLeader = true
+      this.setLeaderGauge('leader')
       this.ready = Promise.resolve()
+    }
+  }
+
+  /**
+   * Report the current leader state to the injected Prometheus gauge.
+   * Sets exactly one of {leader, follower, relinquished} to 1 and the
+   * other two to 0 so Prometheus queries like
+   * `automation_scheduler_leader{state="leader"} == 1` unambiguously
+   * identify the current node. No-op when no gauge was injected.
+   */
+  private setLeaderGauge(
+    state: 'leader' | 'follower' | 'relinquished',
+  ): void {
+    if (!this.leaderStateGauge) return
+    const all: Array<'leader' | 'follower' | 'relinquished'> = [
+      'leader',
+      'follower',
+      'relinquished',
+    ]
+    try {
+      for (const s of all) {
+        this.leaderStateGauge.labels({ state: s }).set(s === state ? 1 : 0)
+      }
+    } catch {
+      // Metrics failures must not break the scheduler.
     }
   }
 
@@ -137,11 +196,13 @@ export class AutomationScheduler {
       logger.info(
         `Acquired scheduler leader lock ${this.lockKey} (owner=${ownerId}, ttl=${this.ttlMs}ms)`,
       )
+      this.setLeaderGauge('leader')
       this.startRenewalLoop()
     } else {
       logger.info(
         `Did not acquire scheduler leader lock ${this.lockKey}; operating as non-leader (owner=${ownerId})`,
       )
+      this.setLeaderGauge('follower')
     }
   }
 
@@ -178,6 +239,7 @@ export class AutomationScheduler {
     if (!this.isLeader) return
     logger.warn(`Relinquishing scheduler leadership (${reason}); clearing ${this.timers.size} timer(s)`)
     this.isLeader = false
+    this.setLeaderGauge('relinquished')
     for (const [ruleId, timer] of this.timers.entries()) {
       clearInterval(timer)
       logger.info(`Cleared schedule for rule ${ruleId} after leader loss`)

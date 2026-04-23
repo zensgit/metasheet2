@@ -429,6 +429,27 @@ const metricsStreamErrorsTotal = new client.Counter({
   labelNames: [] as const
 })
 
+// API Gateway + CircuitBreaker observability (Lane 3 / collab-infra rollout).
+// These are exposed via the shared registry so operators can query the
+// same `/metrics/prom` endpoint; no new endpoint is introduced.
+const apigwCbStoreUsedTotal = new client.Counter({
+  name: 'apigw_cb_store_used_total',
+  help: 'CircuitBreaker store operations by backing implementation',
+  labelNames: ['store'] as const
+})
+
+const apigwCbInitTotal = new client.Counter({
+  name: 'apigw_cb_init_total',
+  help: 'APIGateway.initRedisCircuitBreakerStore outcome counts',
+  labelNames: ['outcome'] as const
+})
+
+const automationSchedulerLeaderGauge = new client.Gauge({
+  name: 'automation_scheduler_leader',
+  help: 'AutomationScheduler leader-lock state (1=current state, 0=other)',
+  labelNames: ['state'] as const
+})
+
 registry.registerMetric(httpHistogram)
 registry.registerMetric(httpSummary)
 registry.registerMetric(httpRequestsTotal)
@@ -495,6 +516,9 @@ registry.registerMetric(rpcLatencySeconds)
 registry.registerMetric(metricsStreamClients)
 registry.registerMetric(metricsStreamPushesTotal)
 registry.registerMetric(metricsStreamErrorsTotal)
+registry.registerMetric(apigwCbStoreUsedTotal)
+registry.registerMetric(apigwCbInitTotal)
+registry.registerMetric(automationSchedulerLeaderGauge)
 
 export function installMetrics(app: Application) {
   app.get('/metrics', async (_req, res) => {
@@ -597,7 +621,11 @@ export const metrics = {
   // Metrics Stream
   metricsStreamClients,
   metricsStreamPushesTotal,
-  metricsStreamErrorsTotal
+  metricsStreamErrorsTotal,
+  // APIGateway + CircuitBreaker (Lane 3 / collab-infra rollout)
+  apigwCbStoreUsedTotal,
+  apigwCbInitTotal,
+  automationSchedulerLeaderGauge
 }
 
 /**
