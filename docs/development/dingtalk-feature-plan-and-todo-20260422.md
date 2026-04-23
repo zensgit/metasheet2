@@ -70,6 +70,7 @@
 - [x] Add a P4 remote-smoke preflight gate for local tooling, env input, webhook format, and backend health readiness.
 - [x] Harden P4 evidence strict mode so real DingTalk-client/admin checks require per-check manual evidence metadata.
 - [x] Add a P4 manual evidence kit generator with required manual evidence fields and artifact folders.
+- [x] Add a P4 strict artifact gate so manual pass evidence must reference self-contained non-empty files under `artifacts/<check-id>/`.
 - [ ] Remote smoke: create a table and form view.
 - [ ] Remote smoke: bind at least two DingTalk groups to the table.
 - [ ] Remote smoke: set the form to `dingtalk_granted`.

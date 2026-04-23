@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 
 const DEFAULT_OUTPUT_ROOT = 'output/dingtalk-p4-remote-smoke'
@@ -91,6 +91,8 @@ Options:
   --output-dir <dir>       Output directory, default ${DEFAULT_OUTPUT_ROOT}/<run-id>
   --init-template <file>   Write an editable evidence template and exit
   --init-kit <dir>         Write evidence.json plus manual evidence folders/checklist and exit
+  --allow-external-artifact-refs
+                           Allow URL artifact refs for manual evidence instead of requiring local files
   --strict                 Exit non-zero unless all required checks pass
   --help                   Show this help
 
@@ -122,6 +124,7 @@ function parseArgs(argv) {
     outputDir: null,
     initTemplate: null,
     initKit: null,
+    allowExternalArtifactRefs: false,
     strict: false,
   }
 
@@ -146,6 +149,9 @@ function parseArgs(argv) {
         break
       case '--strict':
         opts.strict = true
+        break
+      case '--allow-external-artifact-refs':
+        opts.allowExternalArtifactRefs = true
         break
       case '--help':
         printHelp()
@@ -242,7 +248,8 @@ ${rows.join('\n')}
 
 - Keep \`status: "pending"\` until the real DingTalk-client or admin action has been performed.
 - When setting one of the checks above to \`pass\`, fill \`evidence.operator\`, \`evidence.performedAt\`, \`evidence.summary\`, and \`evidence.artifacts\`.
-- Artifact refs should point to screenshots, exported logs, or notes captured during the real smoke run.
+- Artifact refs should point to non-empty files captured during the real smoke run. Put them under \`artifacts/<check-id>/\` next to \`evidence.json\`.
+- External URL artifact refs are rejected by default in strict mode. Use \`--allow-external-artifact-refs\` only when the artifact store is controlled and durable.
 - Do not paste DingTalk robot full webhook URLs, \`SEC...\` secrets, bearer tokens, admin tokens, public form tokens, temporary passwords, or raw cookies.
 
 ## Compile
@@ -380,15 +387,33 @@ function normalizeEvidenceSource(evidence) {
   return isNonEmptyString(source) ? source.trim() : ''
 }
 
-function hasArtifactRefs(evidence) {
-  if (!evidence || typeof evidence !== 'object' || Array.isArray(evidence)) return false
+function normalizeArtifactRefsFromValue(value) {
+  if (Array.isArray(value)) {
+    return value.flatMap((entry) => normalizeArtifactRefsFromValue(entry))
+  }
+  if (value === null || value === undefined) return []
+  if (typeof value === 'string') return [value]
+  if (value && typeof value === 'object') {
+    for (const key of ['path', 'file', 'url', 'href']) {
+      if (Object.hasOwn(value, key)) return [value[key]]
+    }
+  }
+  return [value]
+}
+
+function collectArtifactRefs(evidence) {
+  if (!evidence || typeof evidence !== 'object' || Array.isArray(evidence)) return []
   const artifactCandidates = [
     evidence.artifacts,
     evidence.artifactRefs,
     evidence.screenshots,
     evidence.files,
   ]
-  return artifactCandidates.some((candidate) => Array.isArray(candidate) && candidate.length > 0)
+  return artifactCandidates.flatMap((candidate) => normalizeArtifactRefsFromValue(candidate))
+}
+
+function hasArtifactRefs(evidence) {
+  return collectArtifactRefs(evidence).length > 0
 }
 
 function hasSummary(evidence) {
@@ -398,7 +423,81 @@ function hasSummary(evidence) {
     || isNonEmptyString(evidence.resultSummary)
 }
 
-function validateManualEvidenceRequirements(checksById) {
+function isExternalArtifactRef(value) {
+  return /^[a-z][a-z0-9+.-]*:\/\//i.test(value)
+}
+
+function artifactIssue(id, code, message, artifactRef) {
+  return {
+    id,
+    code,
+    message,
+    ...(typeof artifactRef === 'string' && artifactRef ? { artifactRef: redactString(artifactRef) } : {}),
+  }
+}
+
+function isAbsoluteArtifactPath(value) {
+  return path.isAbsolute(value) || path.win32.isAbsolute(value) || value.replaceAll('\\', '/').startsWith('//')
+}
+
+function validateManualArtifactRefs(checkId, evidence, evidenceDir, opts) {
+  const issues = []
+  const refs = collectArtifactRefs(evidence)
+  const expectedPrefix = `artifacts/${checkId}/`
+  const evidenceRoot = path.resolve(evidenceDir)
+  for (const ref of refs) {
+    if (!isNonEmptyString(ref)) {
+      issues.push(artifactIssue(checkId, 'artifact_ref_invalid', `${checkId} has an empty artifact reference`))
+      continue
+    }
+
+    const trimmed = ref.trim()
+    if (isExternalArtifactRef(trimmed)) {
+      if (!opts.allowExternalArtifactRefs) {
+        issues.push(artifactIssue(checkId, 'artifact_ref_external_disallowed', `${checkId} external artifact refs require --allow-external-artifact-refs`, trimmed))
+      }
+      continue
+    }
+
+    if (isAbsoluteArtifactPath(trimmed)) {
+      issues.push(artifactIssue(checkId, 'artifact_ref_not_relative', `${checkId} artifact refs must be relative paths`, trimmed))
+      continue
+    }
+
+    const normalizedInput = trimmed.replaceAll('\\', '/')
+    const rawSegments = normalizedInput.split('/').filter(Boolean)
+    const normalizedRef = path.posix.normalize(normalizedInput)
+    if (rawSegments.includes('..') || normalizedRef.startsWith('../') || normalizedRef === '..') {
+      issues.push(artifactIssue(checkId, 'artifact_ref_path_traversal', `${checkId} artifact refs cannot traverse outside the evidence directory`, trimmed))
+      continue
+    }
+    if (!normalizedRef.startsWith(expectedPrefix)) {
+      issues.push(artifactIssue(checkId, 'artifact_ref_wrong_folder', `${checkId} artifact refs must live under ${expectedPrefix}`, trimmed))
+      continue
+    }
+
+    const fullPath = path.resolve(evidenceDir, normalizedRef)
+    if (fullPath !== evidenceRoot && !fullPath.startsWith(`${evidenceRoot}${path.sep}`)) {
+      issues.push(artifactIssue(checkId, 'artifact_ref_path_traversal', `${checkId} artifact refs cannot traverse outside the evidence directory`, trimmed))
+      continue
+    }
+    if (!existsSync(fullPath)) {
+      issues.push(artifactIssue(checkId, 'artifact_ref_missing', `${checkId} artifact file does not exist`, trimmed))
+      continue
+    }
+    const stat = statSync(fullPath)
+    if (!stat.isFile()) {
+      issues.push(artifactIssue(checkId, 'artifact_ref_not_file', `${checkId} artifact ref must point to a file`, trimmed))
+      continue
+    }
+    if (stat.size <= 0) {
+      issues.push(artifactIssue(checkId, 'artifact_ref_empty', `${checkId} artifact file is empty`, trimmed))
+    }
+  }
+  return issues
+}
+
+function validateManualEvidenceRequirements(checksById, evidenceDir, opts) {
   const issues = []
   for (const requirement of MANUAL_EVIDENCE_REQUIREMENTS) {
     const check = checksById.get(requirement.id)
@@ -442,6 +541,8 @@ function validateManualEvidenceRequirements(checksById) {
         code: 'artifact_refs_required',
         message: `${requirement.id} requires per-check evidence.artifacts, evidence.artifactRefs, evidence.screenshots, or evidence.files`,
       })
+    } else {
+      issues.push(...validateManualArtifactRefs(requirement.id, evidence, evidenceDir, opts))
     }
     if (!hasSummary(evidence)) {
       issues.push({
@@ -454,7 +555,7 @@ function validateManualEvidenceRequirements(checksById) {
   return issues
 }
 
-function buildSummary(evidence, inputFile, outputDir) {
+function buildSummary(evidence, inputFile, outputDir, opts = {}) {
   const checks = normalizeChecks(evidence)
   const byId = new Map(checks.map((check) => [check.id, check]))
   const requiredRows = REQUIRED_CHECKS.map((required) => {
@@ -473,7 +574,7 @@ function buildSummary(evidence, inputFile, outputDir) {
     .map((check) => ({ id: check.id, status: check.status }))
   const failedChecks = checks.filter((check) => check.status === 'fail').map((check) => check.id)
   const unknownChecks = checks.filter((check) => !CHECK_ID_SET.has(check.id)).map((check) => check.id)
-  const manualEvidenceIssues = validateManualEvidenceRequirements(byId)
+  const manualEvidenceIssues = validateManualEvidenceRequirements(byId, path.dirname(inputFile), opts)
   const apiBootstrapRequired = requiredRows.filter((check) => API_BOOTSTRAP_CHECK_IDS.has(check.id))
   const apiBootstrapStatus = apiBootstrapRequired.every((check) => check.status === 'pass') ? 'pass' : 'fail'
   const remoteClientStatus = requiredChecksNotPassed.length === 0 && manualEvidenceIssues.length === 0 ? 'pass' : 'fail'
@@ -589,7 +690,9 @@ function compileEvidence(opts) {
   const outputDir = opts.outputDir ?? path.resolve(process.cwd(), DEFAULT_OUTPUT_ROOT, runId)
   mkdirSync(outputDir, { recursive: true })
 
-  const summary = buildSummary(evidence, opts.input, outputDir)
+  const summary = buildSummary(evidence, opts.input, outputDir, {
+    allowExternalArtifactRefs: opts.allowExternalArtifactRefs,
+  })
   const summaryJsonPath = path.join(outputDir, 'summary.json')
   const summaryMdPath = path.join(outputDir, 'summary.md')
   const redactedEvidencePath = path.join(outputDir, 'evidence.redacted.json')

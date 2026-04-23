@@ -26,6 +26,10 @@ const manualClientIds = new Set([
 ])
 const manualAdminIds = new Set(['no-email-user-create-bind'])
 
+function manualArtifactRefForCheck(id) {
+  return `artifacts/${id}/evidence.txt`
+}
+
 function makePassingEvidenceForCheck(id, extras = {}) {
   if (manualClientIds.has(id) || manualAdminIds.has(id)) {
     return {
@@ -33,7 +37,7 @@ function makePassingEvidenceForCheck(id, extras = {}) {
       operator: 'qa',
       performedAt: '2026-04-22T15:00:00.000Z',
       summary: `${id} manual evidence ok`,
-      artifacts: [`screenshots/${id}.png`],
+      artifacts: [manualArtifactRefForCheck(id)],
       ...extras,
     }
   }
@@ -48,7 +52,44 @@ function makeTmpDir() {
   return mkdtempSync(path.join(tmpdir(), 'dingtalk-p4-smoke-evidence-'))
 }
 
-function writeEvidence(file, overrides = {}) {
+function collectArtifactRefsFromValue(value) {
+  if (Array.isArray(value)) return value.flatMap((entry) => collectArtifactRefsFromValue(entry))
+  if (typeof value === 'string') return [value]
+  if (value && typeof value === 'object') {
+    for (const key of ['path', 'file', 'url', 'href']) {
+      if (typeof value[key] === 'string') return [value[key]]
+    }
+  }
+  return []
+}
+
+function collectArtifactRefs(evidence) {
+  return [
+    evidence?.artifacts,
+    evidence?.artifactRefs,
+    evidence?.screenshots,
+    evidence?.files,
+  ].flatMap((candidate) => collectArtifactRefsFromValue(candidate))
+}
+
+function writeManualArtifactFiles(evidenceFile, evidence, options = {}) {
+  const evidenceDir = path.dirname(evidenceFile)
+  for (const check of evidence.checks ?? []) {
+    if (!manualClientIds.has(check.id) && !manualAdminIds.has(check.id)) continue
+    if (check.status !== 'pass') continue
+
+    for (const artifactRef of collectArtifactRefs(check.evidence)) {
+      if (/^[a-z][a-z0-9+.-]*:\/\//i.test(artifactRef)) continue
+      if (path.isAbsolute(artifactRef) || artifactRef.includes('..')) continue
+
+      const fullPath = path.join(evidenceDir, artifactRef)
+      mkdirSync(path.dirname(fullPath), { recursive: true })
+      writeFileSync(fullPath, options.emptyRefs?.has(artifactRef) ? '' : `${check.id} manual evidence\n`, 'utf8')
+    }
+  }
+}
+
+function writeEvidence(file, overrides = {}, options = {}) {
   const evidence = {
     runId: 'remote-20260422',
     executedAt: '2026-04-22T15:00:00.000Z',
@@ -68,6 +109,7 @@ function writeEvidence(file, overrides = {}) {
     ...overrides,
   }
   writeFileSync(file, `${JSON.stringify(evidence, null, 2)}\n`, 'utf8')
+  if (options.createArtifacts !== false) writeManualArtifactFiles(file, evidence, options)
   return evidence
 }
 
@@ -176,6 +218,163 @@ test('compile-dingtalk-p4-smoke-evidence compiles passing evidence and redacts s
     assert.match(redacted, /SEC<redacted>/)
     assert.match(redacted, /publicToken=<redacted>/)
     assert.match(redacted, /"<redacted>"/)
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+
+test('compile-dingtalk-p4-smoke-evidence strict mode rejects missing manual artifact files', () => {
+  const tmpDir = makeTmpDir()
+  const evidencePath = path.join(tmpDir, 'evidence.json')
+  const outputDir = path.join(tmpDir, 'compiled')
+
+  try {
+    writeEvidence(evidencePath, {}, { createArtifacts: false })
+
+    const result = spawnSync(process.execPath, [scriptPath, '--input', evidencePath, '--output-dir', outputDir, '--strict'], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+    })
+
+    assert.equal(result.status, 1)
+    assert.match(result.stderr, /artifact_ref_missing/)
+    const summary = JSON.parse(readFileSync(path.join(outputDir, 'summary.json'), 'utf8'))
+    assert.equal(summary.overallStatus, 'fail')
+    assert.equal(summary.manualEvidenceIssues.some((issue) => issue.code === 'artifact_ref_missing'), true)
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+
+test('compile-dingtalk-p4-smoke-evidence strict mode rejects wrong manual artifact folders', () => {
+  const tmpDir = makeTmpDir()
+  const evidencePath = path.join(tmpDir, 'evidence.json')
+  const outputDir = path.join(tmpDir, 'compiled')
+
+  try {
+    writeEvidence(evidencePath, {
+      checks: requiredIds.map((id) => ({
+        id,
+        status: 'pass',
+        evidence: makePassingEvidenceForCheck(id, id === 'authorized-user-submit'
+          ? { artifacts: ['artifacts/send-group-message-form-link/authorized-submit.txt'] }
+          : {}),
+      })),
+    })
+
+    const result = spawnSync(process.execPath, [scriptPath, '--input', evidencePath, '--output-dir', outputDir, '--strict'], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+    })
+
+    assert.equal(result.status, 1)
+    assert.match(result.stderr, /artifact_ref_wrong_folder/)
+    const summary = JSON.parse(readFileSync(path.join(outputDir, 'summary.json'), 'utf8'))
+    assert.equal(summary.manualEvidenceIssues.some((issue) => issue.id === 'authorized-user-submit' && issue.code === 'artifact_ref_wrong_folder'), true)
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+
+test('compile-dingtalk-p4-smoke-evidence strict mode rejects absolute and traversal artifact refs', () => {
+  const tmpDir = makeTmpDir()
+  const evidencePath = path.join(tmpDir, 'evidence.json')
+  const outputDir = path.join(tmpDir, 'compiled')
+  const absoluteArtifactPath = path.join(tmpDir, 'absolute-evidence.txt')
+
+  try {
+    writeFileSync(absoluteArtifactPath, 'absolute evidence\n', 'utf8')
+    writeEvidence(evidencePath, {
+      checks: requiredIds.map((id) => ({
+        id,
+        status: 'pass',
+        evidence: makePassingEvidenceForCheck(id, {
+          ...(id === 'send-group-message-form-link' ? { artifacts: [absoluteArtifactPath] } : {}),
+          ...(id === 'authorized-user-submit' ? { artifacts: ['../outside-evidence.txt'] } : {}),
+        }),
+      })),
+    })
+
+    const result = spawnSync(process.execPath, [scriptPath, '--input', evidencePath, '--output-dir', outputDir, '--strict'], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+    })
+
+    assert.equal(result.status, 1)
+    assert.match(result.stderr, /artifact_ref_not_relative/)
+    assert.match(result.stderr, /artifact_ref_path_traversal/)
+    const summary = JSON.parse(readFileSync(path.join(outputDir, 'summary.json'), 'utf8'))
+    assert.equal(summary.manualEvidenceIssues.some((issue) => issue.code === 'artifact_ref_not_relative'), true)
+    assert.equal(summary.manualEvidenceIssues.some((issue) => issue.code === 'artifact_ref_path_traversal'), true)
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+
+test('compile-dingtalk-p4-smoke-evidence strict mode rejects empty manual artifact files', () => {
+  const tmpDir = makeTmpDir()
+  const evidencePath = path.join(tmpDir, 'evidence.json')
+  const outputDir = path.join(tmpDir, 'compiled')
+  const emptyArtifactRef = manualArtifactRefForCheck('authorized-user-submit')
+
+  try {
+    writeEvidence(evidencePath, {}, { emptyRefs: new Set([emptyArtifactRef]) })
+
+    const result = spawnSync(process.execPath, [scriptPath, '--input', evidencePath, '--output-dir', outputDir, '--strict'], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+    })
+
+    assert.equal(result.status, 1)
+    assert.match(result.stderr, /artifact_ref_empty/)
+    const summary = JSON.parse(readFileSync(path.join(outputDir, 'summary.json'), 'utf8'))
+    assert.equal(summary.manualEvidenceIssues.some((issue) => issue.id === 'authorized-user-submit' && issue.code === 'artifact_ref_empty'), true)
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+
+test('compile-dingtalk-p4-smoke-evidence strict mode rejects external artifacts unless explicitly allowed', () => {
+  const tmpDir = makeTmpDir()
+  const evidencePath = path.join(tmpDir, 'evidence.json')
+  const outputDir = path.join(tmpDir, 'compiled')
+  const allowedOutputDir = path.join(tmpDir, 'compiled-allowed')
+
+  try {
+    writeEvidence(evidencePath, {
+      checks: requiredIds.map((id) => ({
+        id,
+        status: 'pass',
+        evidence: makePassingEvidenceForCheck(id, id === 'authorized-user-submit'
+          ? { artifacts: ['https://evidence.example.test/authorized-submit.png'] }
+          : {}),
+      })),
+    })
+
+    const blocked = spawnSync(process.execPath, [scriptPath, '--input', evidencePath, '--output-dir', outputDir, '--strict'], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+    })
+
+    assert.equal(blocked.status, 1)
+    assert.match(blocked.stderr, /artifact_ref_external_disallowed/)
+
+    const allowed = spawnSync(process.execPath, [
+      scriptPath,
+      '--input',
+      evidencePath,
+      '--output-dir',
+      allowedOutputDir,
+      '--strict',
+      '--allow-external-artifact-refs',
+    ], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+    })
+
+    assert.equal(allowed.status, 0, allowed.stderr)
+    const summary = JSON.parse(readFileSync(path.join(allowedOutputDir, 'summary.json'), 'utf8'))
+    assert.equal(summary.overallStatus, 'pass')
   } finally {
     rmSync(tmpDir, { recursive: true, force: true })
   }
