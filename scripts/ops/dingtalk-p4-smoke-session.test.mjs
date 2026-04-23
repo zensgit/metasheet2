@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { spawn, spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import http from 'node:http'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
@@ -319,6 +319,7 @@ test('dingtalk-p4-smoke-session writes an editable env template', () => {
     assert.match(content, /DINGTALK_P4_UNAUTHORIZED_USER_ID=/)
     assert.match(content, /DINGTALK_P4_NO_EMAIL_DINGTALK_EXTERNAL_ID=/)
     assert.doesNotMatch(content, /secret-admin-token/)
+    assert.equal(statSync(envPath).mode & 0o777, 0o600)
     assert.equal(existsSync(path.join(tmpDir, 'session-summary.json')), false)
   } finally {
     rmSync(tmpDir, { recursive: true, force: true })

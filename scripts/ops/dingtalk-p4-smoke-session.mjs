@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import path from 'node:path'
 
@@ -27,7 +27,7 @@ strict compile. After the session succeeds, place manual artifacts in the
 generated workspace and run --finalize <session-dir>.
 
 Options:
-  --init-env-template <file>       Write a safe editable env template and exit
+  --init-env-template <file>       Write a private 0600 safe editable env template and exit
   --finalize <session-dir>         Run strict compile for an existing session and refresh session summary
   --env-file <file>                Optional KEY=VALUE file to read before env/CLI
   --api-base <url>                 Backend API base, default ${DEFAULT_API_BASE}
@@ -280,6 +280,7 @@ function parseArgs(argv) {
 function renderEnvTemplate() {
   return `# DingTalk P4 smoke session env template
 # Fill this file locally or on the staging host. Do not commit it.
+# This template is written with 0600 permissions by dingtalk-p4-smoke-session.mjs.
 # Run:
 #   node scripts/ops/dingtalk-p4-smoke-session.mjs --env-file <this-file> --output-dir output/dingtalk-p4-remote-smoke-session/<run>
 
@@ -315,7 +316,8 @@ DINGTALK_P4_NO_EMAIL_DINGTALK_EXTERNAL_ID=
 
 function writeEnvTemplate(file) {
   mkdirSync(path.dirname(file), { recursive: true })
-  writeFileSync(file, renderEnvTemplate(), 'utf8')
+  writeFileSync(file, renderEnvTemplate(), { encoding: 'utf8', mode: 0o600 })
+  chmodSync(file, 0o600)
   console.log(`Wrote ${relativePath(file)}`)
 }
 
