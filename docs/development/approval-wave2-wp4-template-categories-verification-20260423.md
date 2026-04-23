@@ -127,3 +127,35 @@ pnpm --filter @metasheet/web exec vitest run \
 | 前端 WP4 spec | ✅ 6/6 |
 | 前端既有审批 spec 回归 | ✅ 91/91 |
 | 文档交付（development + verification） | ✅ |
+
+## Codex Rebase Verification - 2026-04-23
+
+Branch was rebased to `origin/main@059ea44fc`.
+
+```bash
+git fetch origin main
+git rebase --autostash origin/main
+pnpm --filter @metasheet/core-backend exec vitest run \
+  tests/integration/approval-wp4-template-categories.api.test.ts \
+  tests/unit/approval-template-routes.test.ts \
+  --reporter=dot
+pnpm --filter @metasheet/web exec vitest run \
+  tests/approvalTemplateCenterCategory.spec.ts \
+  --reporter=dot
+pnpm --filter @metasheet/core-backend exec tsc --noEmit
+pnpm --filter @metasheet/web exec vue-tsc -b --noEmit
+```
+
+Result:
+
+- Rebase: success, new branch head `a0c78b6ef`.
+- `approval-template-routes.test.ts`: `4/4` passed.
+- Backend integration: `8/8` skipped because local `DATABASE_URL` is not set. This must be re-run in CI or a local Postgres environment.
+- `approvalTemplateCenterCategory.spec.ts`: `6/6` passed.
+- Backend `tsc --noEmit`: exit `0`.
+- Frontend `vue-tsc -b --noEmit`: exit `0`.
+
+Review note:
+
+- Scope is coherent: template category + clone only.
+- OpenAPI/SDK parity is explicitly deferred. If CI has a contract parity gate, add that layer before merge; otherwise this is not a blocker for the implementation PR.
