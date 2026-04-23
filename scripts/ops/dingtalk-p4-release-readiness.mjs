@@ -9,6 +9,8 @@ const DEFAULT_ENV_FILE = path.join(homedir(), '.config', 'yuantus', 'dingtalk-p4
 const DEFAULT_OUTPUT_ROOT = 'output/dingtalk-p4-release-readiness'
 const SCHEMA_VERSION = 1
 const PUBLIC_REGRESSION_PROFILES = ['ops', 'product', 'all']
+const TEST_ONLY_REGRESSION_PROFILES = ['selftest', 'selftest-secret']
+const SELFTEST_UNLOCK_ENV = 'DINGTALK_P4_RELEASE_READINESS_ALLOW_SELFTEST'
 
 function printHelp() {
   console.log(`Usage: node scripts/ops/dingtalk-p4-release-readiness.mjs [options]
@@ -99,7 +101,9 @@ function parseArgs(argv) {
     }
   }
 
-  if (!PUBLIC_REGRESSION_PROFILES.includes(opts.regressionProfile) && !opts.regressionProfile.startsWith('selftest')) {
+  const selftestProfileAllowed = TEST_ONLY_REGRESSION_PROFILES.includes(opts.regressionProfile)
+    && process.env[SELFTEST_UNLOCK_ENV] === '1'
+  if (!PUBLIC_REGRESSION_PROFILES.includes(opts.regressionProfile) && !selftestProfileAllowed) {
     throw new Error(`--regression-profile must be one of: ${PUBLIC_REGRESSION_PROFILES.join(', ')}`)
   }
 
