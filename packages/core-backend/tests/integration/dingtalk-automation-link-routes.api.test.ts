@@ -12,6 +12,7 @@ type QueryHandler = (sql: string, params?: unknown[]) => QueryResult | Promise<Q
 const SHEET_ID = 'sheet_dingtalk_links'
 const OTHER_SHEET_ID = 'sheet_other'
 const VALID_FORM_VIEW_ID = 'view_form_valid'
+const GRANTED_FORM_VIEW_ID = 'view_form_granted'
 const DISABLED_FORM_VIEW_ID = 'view_form_disabled'
 const EXPIRED_FORM_VIEW_ID = 'view_form_expired'
 const OTHER_SHEET_FORM_VIEW_ID = 'view_form_other_sheet'
@@ -259,6 +260,56 @@ describe('DingTalk automation link route validation', () => {
         internalViewId: INTERNAL_VIEW_ID,
       }),
     }))
+  })
+
+  it('persists a DingTalk group rule when public form access requires DingTalk authorization', async () => {
+    const { app, mockPool, automationService } = await createApp({
+      queryHandler: createDingTalkLinkQueryHandler([
+        ...makeViewRows(),
+        {
+          id: GRANTED_FORM_VIEW_ID,
+          sheet_id: SHEET_ID,
+          type: 'form',
+          config: {
+            publicForm: {
+              enabled: true,
+              publicToken: 'pub_granted_token',
+              accessMode: 'dingtalk_granted',
+              allowedUserIds: ['user_1'],
+            },
+          },
+        },
+      ]),
+    })
+
+    const res = await request(app)
+      .post(`/api/multitable/sheets/${SHEET_ID}/automations`)
+      .send({
+        name: 'Notify granted group',
+        triggerType: 'record.created',
+        triggerConfig: {},
+        actionType: 'send_dingtalk_group_message',
+        actionConfig: {
+          destinationId: 'group_1',
+          title: 'Please fill',
+          content: 'Open form',
+          publicFormViewId: GRANTED_FORM_VIEW_ID,
+          internalViewId: INTERNAL_VIEW_ID,
+        },
+      })
+
+    expect(res.status).toBe(200)
+    expect(res.body.ok).toBe(true)
+    expect(automationService.createRule).toHaveBeenCalledWith(SHEET_ID, expect.objectContaining({
+      actionType: 'send_dingtalk_group_message',
+      actionConfig: expect.objectContaining({
+        titleTemplate: 'Please fill',
+        bodyTemplate: 'Open form',
+        publicFormViewId: GRANTED_FORM_VIEW_ID,
+        internalViewId: INTERNAL_VIEW_ID,
+      }),
+    }))
+    expect(mockPool.query.mock.calls.some(([sql]) => String(sql).includes('FROM meta_views'))).toBe(true)
   })
 
   it('persists a DingTalk person rule when public form and internal links are valid', async () => {
