@@ -36,6 +36,7 @@ Options:
   --no-email-dingtalk-external-id <id>
                                   Synced DingTalk account without local user/email for admin proof
   --require-manual-targets         Fail if the three manual target IDs above are missing
+  --require-person-user            Fail if no person-message local user ID is supplied
   --output-dir <dir>               Output directory, default ${DEFAULT_OUTPUT_ROOT}/<run-id>
   --timeout-ms <ms>                API health timeout, default 10000
   --skip-api                       Skip GET /health
@@ -138,6 +139,7 @@ function parseArgs(argv) {
     unauthorizedUserId: envValue(env, 'DINGTALK_P4_UNAUTHORIZED_USER_ID'),
     noEmailDingTalkExternalId: envValue(env, 'DINGTALK_P4_NO_EMAIL_DINGTALK_EXTERNAL_ID'),
     requireManualTargets: false,
+    requirePersonUser: false,
     outputDir: null,
     timeoutMs: 10_000,
     skipApi: false,
@@ -203,6 +205,9 @@ function parseArgs(argv) {
         break
       case '--require-manual-targets':
         opts.requireManualTargets = true
+        break
+      case '--require-person-user':
+        opts.requirePersonUser = true
         break
       case '--output-dir':
         opts.outputDir = path.resolve(process.cwd(), readRequiredValue(argv, i, arg))
@@ -363,11 +368,13 @@ function validateAllowlist(opts, summary) {
     allowedUserCount,
     allowedMemberGroupCount,
   })
-  addCheck(summary, 'person-smoke-input', 'Optional DingTalk person smoke recipients are declared', opts.personUserIds.length > 0 ? 'pass' : 'skipped', {
+  addCheck(summary, 'person-smoke-input', 'DingTalk person smoke recipients are declared', opts.personUserIds.length > 0 ? 'pass' : opts.requirePersonUser ? 'fail' : 'skipped', {
     personUserCount: opts.personUserIds.length,
     notes: opts.personUserIds.length > 0
       ? 'Person delivery can be bootstrapped by the API runner.'
-      : 'Person delivery will remain pending until --person-user is supplied or manual evidence is filled.',
+      : opts.requirePersonUser
+        ? 'Set --person-user or DINGTALK_P4_PERSON_USER_IDS before final release smoke; delivery-history-group-person is required.'
+        : 'Person delivery will remain pending until --person-user is supplied or manual evidence is filled.',
   })
 }
 

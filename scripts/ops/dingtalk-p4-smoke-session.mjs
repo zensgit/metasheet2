@@ -33,13 +33,13 @@ Options:
   --api-base <url>                 Backend API base, default ${DEFAULT_API_BASE}
   --web-base <url>                 Public app base used by DingTalk message links
   --auth-token <token>             Bearer token for admin/table owner
-  --group-a-webhook <url>          DingTalk group A robot webhook
-  --group-b-webhook <url>          DingTalk group B robot webhook
+  --group-a-webhook <url>          DingTalk group A robot webhook; https://oapi.dingtalk.com/robot/send?access_token=...
+  --group-b-webhook <url>          DingTalk group B robot webhook; https://oapi.dingtalk.com/robot/send?access_token=...
   --group-a-secret <secret>        Optional DingTalk group A SEC... secret
   --group-b-secret <secret>        Optional DingTalk group B SEC... secret
   --allowed-user <id>              Local user allowed to fill; repeatable
   --allowed-member-group <id>      Allowed local member group; repeatable
-  --person-user <id>               Optional local user for person smoke; repeatable
+  --person-user <id>               Local user for final person smoke; repeatable
   --authorized-user <id>           DingTalk-bound allowed local user for manual submit proof
   --unauthorized-user <id>         DingTalk-bound non-allowlisted local user for denial proof
   --no-email-dingtalk-external-id <id>
@@ -291,6 +291,7 @@ DINGTALK_P4_WEB_BASE=http://142.171.239.56:8081
 DINGTALK_P4_AUTH_TOKEN=
 
 # DingTalk group robot webhooks. Full webhook URLs must stay private.
+# Required URL shape: https://oapi.dingtalk.com/robot/send?access_token=...
 DINGTALK_P4_GROUP_A_WEBHOOK=
 DINGTALK_P4_GROUP_B_WEBHOOK=
 
@@ -303,7 +304,7 @@ DINGTALK_P4_GROUP_B_SECRET=
 DINGTALK_P4_ALLOWED_USER_IDS=
 DINGTALK_P4_ALLOWED_MEMBER_GROUP_IDS=
 
-# Optional local user IDs for direct DingTalk person-message delivery history.
+# Required local user IDs for final direct DingTalk person-message delivery history.
 DINGTALK_P4_PERSON_USER_IDS=
 
 # Manual DingTalk-client/admin target identities for final screenshots.
@@ -644,6 +645,7 @@ function runSession(opts) {
     String(opts.timeoutMs),
     ...(opts.skipApi ? ['--skip-api'] : []),
     ...(opts.requireManualTargets ? ['--require-manual-targets'] : []),
+    '--require-person-user',
   ]
   steps.push(runNodeStep('preflight', 'Validate P4 smoke inputs and backend health', preflightArgs[0], preflightArgs.slice(1), preflightDir, env))
 

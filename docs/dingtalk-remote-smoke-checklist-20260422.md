@@ -348,6 +348,8 @@ node scripts/ops/dingtalk-p4-smoke-preflight.mjs \
   --group-a-webhook "$DINGTALK_P4_GROUP_A_WEBHOOK" \
   --group-b-webhook "$DINGTALK_P4_GROUP_B_WEBHOOK" \
   --allowed-user "$DINGTALK_P4_ALLOWED_USER_IDS" \
+  --person-user "$DINGTALK_P4_PERSON_USER_IDS" \
+  --require-person-user \
   --output-dir output/dingtalk-p4-remote-smoke/preflight-142
 ```
 
@@ -358,7 +360,9 @@ Expected generated files:
 
 ## API-Only Smoke Runner
 
-Use the API-only runner directly when debugging the session's API step. It prepares the disposable test resources and collects backend evidence before the manual DingTalk-client checks. It creates a table, a form view, two group destinations, a `dingtalk_granted` form share, a group automation rule, and optional person-message rule when `--person-user` is supplied.
+Use the API-only runner directly when debugging the session's API step. It prepares the disposable test resources and collects backend evidence before the manual DingTalk-client checks. It creates a table, a form view, two group destinations, a `dingtalk_granted` form share, a group automation rule, and a person-message rule when `--person-user` is supplied.
+
+For final 142 release smoke, `DINGTALK_P4_PERSON_USER_IDS` is required because `delivery-history-group-person` is a required P4 check. The API-only runner still supports omitting `--person-user` for debugging, but that output cannot complete the final strict evidence gate.
 
 Do not paste secrets into docs or chat. Supply them through secure shell env, a local password manager, or a temporary shell session on the staging host.
 
@@ -390,7 +394,7 @@ The runner intentionally leaves these checks as `pending`:
 - unauthorized DingTalk-bound user is blocked and inserts no record
 - no-email DingTalk-synced account creation and binding
 
-If no `--person-user` is provided, person delivery evidence is also `pending`. Fill the manual checks in the generated `evidence.json`, place files in the matching `artifacts/<check-id>/` folders, then run the compiler with `--strict`.
+If no `--person-user` is provided during API-only debugging, person delivery evidence is also `pending`. For final release smoke, rerun the preflight/session with `DINGTALK_P4_PERSON_USER_IDS` instead of trying to satisfy `delivery-history-group-person` manually. Fill the manual checks in the generated `evidence.json`, place files in the matching `artifacts/<check-id>/` folders, then run the compiler with `--strict`.
 
 ## Smoke 1: Create table and public form
 

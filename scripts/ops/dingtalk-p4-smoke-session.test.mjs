@@ -325,6 +325,7 @@ test('dingtalk-p4-smoke-session writes an editable env template', () => {
     assert.match(content, /DINGTALK_P4_API_BASE=/)
     assert.match(content, /DINGTALK_P4_AUTH_TOKEN=/)
     assert.match(content, /DINGTALK_P4_GROUP_A_WEBHOOK=/)
+    assert.match(content, /https:\/\/oapi\.dingtalk\.com\/robot\/send\?access_token=\.\.\./)
     assert.match(content, /DINGTALK_P4_ALLOWED_USER_IDS=/)
     assert.match(content, /DINGTALK_P4_AUTHORIZED_USER_ID=/)
     assert.match(content, /DINGTALK_P4_UNAUTHORIZED_USER_ID=/)
@@ -332,6 +333,106 @@ test('dingtalk-p4-smoke-session writes an editable env template', () => {
     assert.doesNotMatch(content, /secret-admin-token/)
     assert.equal(statSync(envPath).mode & 0o777, 0o600)
     assert.equal(existsSync(path.join(tmpDir, 'session-summary.json')), false)
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+
+test('dingtalk-p4-smoke-session rejects non-canonical robot webhook during preflight', () => {
+  const tmpDir = makeTmpDir()
+  const outputDir = path.join(tmpDir, 'session')
+
+  try {
+    const result = spawnSync(process.execPath, [
+      scriptPath,
+      '--skip-api',
+      '--api-base',
+      'http://127.0.0.1:8900',
+      '--web-base',
+      'https://metasheet.example.test',
+      '--auth-token',
+      'secret-admin-token',
+      '--group-a-webhook',
+      'http://oapi.dingtalk.com/robot/send?access_token=robot-secret-a',
+      '--group-b-webhook',
+      'https://example.com/robot/send?access_token=robot-secret-b',
+      '--allowed-user',
+      'user_authorized',
+      '--output-dir',
+      outputDir,
+    ], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+    })
+
+    assert.equal(result.status, 1)
+    assert.doesNotMatch(result.stdout, /secret-admin-token/)
+    assert.doesNotMatch(result.stderr, /robot-secret-a/)
+    assert.doesNotMatch(result.stderr, /robot-secret-b/)
+    assert.equal(existsSync(path.join(outputDir, 'preflight/preflight-summary.json')), true)
+    assert.equal(existsSync(path.join(outputDir, 'workspace/evidence.json')), false)
+    assert.equal(existsSync(path.join(outputDir, 'compiled/summary.json')), false)
+
+    const preflightText = readFileSync(path.join(outputDir, 'preflight/preflight-summary.json'), 'utf8')
+    assert.doesNotMatch(preflightText, /robot-secret-a/)
+    assert.doesNotMatch(preflightText, /robot-secret-b/)
+    assert.match(preflightText, /access_token=<redacted>/)
+    const preflight = JSON.parse(preflightText)
+    const webhookCheck = preflight.checks.find((check) => check.id === 'group-webhooks-valid')
+    assert.equal(webhookCheck.status, 'fail')
+    assert.equal(webhookCheck.details.failures.some((failure) => failure.includes('HTTPS')), true)
+    assert.equal(webhookCheck.details.failures.some((failure) => failure.includes('DingTalk robot URL')), true)
+
+    const sessionSummaryText = readFileSync(path.join(outputDir, 'session-summary.json'), 'utf8')
+    assert.doesNotMatch(sessionSummaryText, /robot-secret-a/)
+    assert.doesNotMatch(sessionSummaryText, /robot-secret-b/)
+    const sessionSummary = JSON.parse(sessionSummaryText)
+    assert.equal(sessionSummary.overallStatus, 'fail')
+    assert.deepEqual(sessionSummary.steps.map((step) => step.id), ['preflight', 'status-report'])
+    assert.equal(sessionSummary.steps[0].status, 'fail')
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+
+test('dingtalk-p4-smoke-session requires person user before bootstrapping workspace', () => {
+  const tmpDir = makeTmpDir()
+  const outputDir = path.join(tmpDir, 'session')
+
+  try {
+    const result = spawnSync(process.execPath, [
+      scriptPath,
+      '--skip-api',
+      '--api-base',
+      'http://127.0.0.1:8900',
+      '--web-base',
+      'https://metasheet.example.test',
+      '--auth-token',
+      'secret-admin-token',
+      '--group-a-webhook',
+      'https://oapi.dingtalk.com/robot/send?access_token=robot-secret-a',
+      '--group-b-webhook',
+      'https://oapi.dingtalk.com/robot/send?access_token=robot-secret-b',
+      '--allowed-user',
+      'user_authorized',
+      '--output-dir',
+      outputDir,
+    ], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+    })
+
+    assert.equal(result.status, 1)
+    assert.equal(existsSync(path.join(outputDir, 'preflight/preflight-summary.json')), true)
+    assert.equal(existsSync(path.join(outputDir, 'workspace/evidence.json')), false)
+    assert.equal(existsSync(path.join(outputDir, 'compiled/summary.json')), false)
+    const preflight = JSON.parse(readFileSync(path.join(outputDir, 'preflight/preflight-summary.json'), 'utf8'))
+    const personCheck = preflight.checks.find((check) => check.id === 'person-smoke-input')
+    assert.equal(personCheck.status, 'fail')
+    assert.match(personCheck.details.notes, /delivery-history-group-person/)
+    const sessionSummary = JSON.parse(readFileSync(path.join(outputDir, 'session-summary.json'), 'utf8'))
+    assert.equal(sessionSummary.overallStatus, 'fail')
+    assert.deepEqual(sessionSummary.steps.map((step) => step.id), ['preflight', 'status-report'])
   } finally {
     rmSync(tmpDir, { recursive: true, force: true })
   }

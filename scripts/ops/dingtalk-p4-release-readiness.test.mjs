@@ -93,6 +93,38 @@ process.exit(${exitCode})
 `, 'utf8')
 }
 
+function writeSmokeSessionEnvProbeStub(scriptFile) {
+  writeFileSync(scriptFile, `#!/usr/bin/env node
+import fs from 'node:fs'
+import path from 'node:path'
+
+const args = process.argv.slice(2)
+const outputDir = args[args.indexOf('--output-dir') + 1]
+fs.mkdirSync(outputDir, { recursive: true })
+const leakedEnv = process.env.DINGTALK_P4_AUTH_TOKEN || process.env.DINGTALK_P4_GROUP_A_WEBHOOK || ''
+fs.writeFileSync(path.join(outputDir, 'session-summary.json'), JSON.stringify({
+  sessionPhase: 'bootstrap',
+  overallStatus: leakedEnv ? 'fail' : 'manual_pending',
+  finalStrictStatus: 'pending',
+  leakedEnv,
+}, null, 2) + '\\n')
+fs.writeFileSync(path.join(outputDir, 'session-summary.md'), '# session\\n')
+fs.writeFileSync(path.join(outputDir, 'smoke-status.json'), JSON.stringify({ overallStatus: leakedEnv ? 'fail' : 'manual_pending' }, null, 2) + '\\n')
+fs.writeFileSync(path.join(outputDir, 'smoke-status.md'), '# status\\n')
+fs.writeFileSync(path.join(outputDir, 'smoke-todo.md'), '# todo\\n')
+`, 'utf8')
+}
+
+function writeSmokeSessionNoSummaryStub(scriptFile) {
+  writeFileSync(scriptFile, `#!/usr/bin/env node
+import fs from 'node:fs'
+const args = process.argv.slice(2)
+const outputDir = args[args.indexOf('--output-dir') + 1]
+fs.mkdirSync(outputDir, { recursive: true })
+console.log('fake smoke session exited without summary')
+`, 'utf8')
+}
+
 test('dingtalk-p4-release-readiness fails when private env readiness fails even if regression passes', () => {
   const tmpDir = makeTmpDir()
   const envFile = path.join(tmpDir, 'dingtalk-p4.env')
@@ -232,6 +264,75 @@ test('dingtalk-p4-release-readiness reports manual_pending after automatically l
     const markdown = readFileSync(path.join(outputDir, 'release-readiness-summary.md'), 'utf8')
     assert.match(markdown, /## Smoke Session/)
     assert.match(markdown, /started automatically/)
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+
+test('dingtalk-p4-release-readiness launches smoke-session with env-file inputs isolated from process env', () => {
+  const tmpDir = makeTmpDir()
+  const envFile = path.join(tmpDir, 'dingtalk-p4.env')
+  const outputDir = path.join(tmpDir, 'readiness')
+  const stubPath = path.join(tmpDir, 'fake-smoke-session-env-probe.mjs')
+
+  try {
+    writeEnv(envFile)
+    writeSmokeSessionEnvProbeStub(stubPath)
+
+    const result = runScriptWithSelftest([
+      '--p4-env-file', envFile,
+      '--regression-profile', 'selftest',
+      '--run-smoke-session',
+      '--smoke-output-dir', path.join(tmpDir, 'session'),
+      '--output-dir', outputDir,
+    ], {
+      env: {
+        [SMOKE_SESSION_SCRIPT_ENV]: stubPath,
+        DINGTALK_P4_AUTH_TOKEN: 'parent-env-token-must-not-reach-smoke-session',
+        DINGTALK_P4_GROUP_A_WEBHOOK: 'https://oapi.dingtalk.com/robot/send?access_token=parent-env-token',
+      },
+    })
+
+    assert.equal(result.status, 1)
+    const summary = readSummary(outputDir)
+    assert.equal(summary.overallStatus, 'manual_pending')
+    assert.equal(summary.smokeSession.status, 'manual_pending')
+    assert.equal(summary.smokeSession.overallStatus, 'manual_pending')
+    const sessionSummary = JSON.parse(readFileSync(path.join(tmpDir, 'session/session-summary.json'), 'utf8'))
+    assert.equal(sessionSummary.leakedEnv, '')
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+
+test('dingtalk-p4-release-readiness fails if smoke-session exits without a valid summary', () => {
+  const tmpDir = makeTmpDir()
+  const envFile = path.join(tmpDir, 'dingtalk-p4.env')
+  const outputDir = path.join(tmpDir, 'readiness')
+  const stubPath = path.join(tmpDir, 'fake-smoke-session-no-summary.mjs')
+
+  try {
+    writeEnv(envFile)
+    writeSmokeSessionNoSummaryStub(stubPath)
+
+    const result = runScriptWithSelftest([
+      '--p4-env-file', envFile,
+      '--regression-profile', 'selftest',
+      '--run-smoke-session',
+      '--smoke-output-dir', path.join(tmpDir, 'session'),
+      '--output-dir', outputDir,
+    ], {
+      env: {
+        [SMOKE_SESSION_SCRIPT_ENV]: stubPath,
+      },
+    })
+
+    assert.equal(result.status, 1)
+    const summary = readSummary(outputDir)
+    assert.equal(summary.overallStatus, 'fail')
+    assert.equal(summary.smokeSession.status, 'fail')
+    assert.equal(summary.smokeSession.reason, 'missing_session_summary')
+    assert.equal(summary.smokeSession.sessionSummaryJson, null)
   } finally {
     rmSync(tmpDir, { recursive: true, force: true })
   }

@@ -44,7 +44,7 @@
 - [ ] Authorized local user ID bound to DingTalk
 - [ ] Unauthorized DingTalk-bound local user for denial check
 - [ ] Optional allowed member group ID
-- [ ] Optional person-message local user ID
+- [ ] Person-message local user ID for required `delivery-history-group-person`
 - [ ] Synced DingTalk account without matched local user for no-email admin check
 - [x] Tooling records manual target identities in preflight/session/evidence outputs:
   - `DINGTALK_P4_AUTHORIZED_USER_ID`
@@ -55,6 +55,7 @@
   - host `oapi.dingtalk.com`
   - path `/robot/send`
   - non-empty `access_token`
+- [x] Tooling now fails final readiness/preflight/session startup when `DINGTALK_P4_PERSON_USER_IDS` is missing, because person delivery history is required for the final P4 gate.
 
 ## Remote Smoke Execution
 

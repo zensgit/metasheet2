@@ -439,6 +439,12 @@ function checkReadiness(opts) {
   })
 
   const personUserIds = splitList(envValue(values, 'DINGTALK_P4_PERSON_USER_IDS'))
+  addCheck(summary, 'person-smoke-input', 'Person-message smoke recipient is declared for final delivery history', personUserIds.length > 0 ? 'pass' : 'fail', {
+    personUserCount: personUserIds.length,
+    notes: personUserIds.length > 0
+      ? 'Person delivery can be bootstrapped by the final smoke session.'
+      : 'Set DINGTALK_P4_PERSON_USER_IDS before final release smoke; delivery-history-group-person is a required P4 check.',
+  })
   const authorizedUserId = envValue(values, 'DINGTALK_P4_AUTHORIZED_USER_ID') || allowedUserIds[0] || ''
   const unauthorizedUserId = envValue(values, 'DINGTALK_P4_UNAUTHORIZED_USER_ID')
   const noEmailDingTalkExternalId = envValue(values, 'DINGTALK_P4_NO_EMAIL_DINGTALK_EXTERNAL_ID')
@@ -471,7 +477,7 @@ function checkReadiness(opts) {
     },
   }
   summary.nextCommands = [
-    `node scripts/ops/dingtalk-p4-smoke-preflight.mjs --env-file ${shellQuote(opts.envFile)} --require-manual-targets --output-dir output/dingtalk-p4-remote-smoke-preflight/142-readiness`,
+    `node scripts/ops/dingtalk-p4-smoke-preflight.mjs --env-file ${shellQuote(opts.envFile)} --require-manual-targets --require-person-user --output-dir output/dingtalk-p4-remote-smoke-preflight/142-readiness`,
     `node scripts/ops/dingtalk-p4-smoke-session.mjs --env-file ${shellQuote(opts.envFile)} --require-manual-targets --output-dir output/dingtalk-p4-remote-smoke-session/142-session`,
   ]
   summary.overallStatus = summary.checks.some((check) => check.status === 'fail') ? 'fail' : 'pass'

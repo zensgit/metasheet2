@@ -13,6 +13,33 @@ const PUBLIC_REGRESSION_PROFILES = ['ops', 'product', 'all']
 const TEST_ONLY_REGRESSION_PROFILES = ['selftest', 'selftest-secret']
 const SELFTEST_UNLOCK_ENV = 'DINGTALK_P4_RELEASE_READINESS_ALLOW_SELFTEST'
 const SMOKE_SESSION_SCRIPT_ENV = 'DINGTALK_P4_RELEASE_READINESS_SMOKE_SESSION_SCRIPT'
+const SMOKE_SESSION_INPUT_ENV_KEYS = [
+  'DINGTALK_P4_API_BASE',
+  'API_BASE',
+  'DINGTALK_P4_WEB_BASE',
+  'WEB_BASE',
+  'PUBLIC_APP_URL',
+  'DINGTALK_P4_AUTH_TOKEN',
+  'ADMIN_TOKEN',
+  'AUTH_TOKEN',
+  'DINGTALK_P4_GROUP_A_WEBHOOK',
+  'DINGTALK_GROUP_A_WEBHOOK',
+  'DINGTALK_P4_GROUP_B_WEBHOOK',
+  'DINGTALK_GROUP_B_WEBHOOK',
+  'DINGTALK_P4_GROUP_A_SECRET',
+  'DINGTALK_GROUP_A_SECRET',
+  'DINGTALK_P4_GROUP_B_SECRET',
+  'DINGTALK_GROUP_B_SECRET',
+  'DINGTALK_P4_ALLOWED_USER_IDS',
+  'DINGTALK_P4_ALLOWED_USER_ID',
+  'DINGTALK_P4_ALLOWED_MEMBER_GROUP_IDS',
+  'DINGTALK_P4_ALLOWED_MEMBER_GROUP_ID',
+  'DINGTALK_P4_PERSON_USER_IDS',
+  'DINGTALK_P4_PERSON_USER_ID',
+  'DINGTALK_P4_AUTHORIZED_USER_ID',
+  'DINGTALK_P4_UNAUTHORIZED_USER_ID',
+  'DINGTALK_P4_NO_EMAIL_DINGTALK_EXTERNAL_ID',
+]
 
 function printHelp() {
   console.log(`Usage: node scripts/ops/dingtalk-p4-release-readiness.mjs [options]
@@ -166,17 +193,26 @@ function shellQuote(value) {
   return `'${String(value).replaceAll("'", "'\\''")}'`
 }
 
-function runNodeTool(args) {
+function runNodeTool(args, options = {}) {
   const result = spawnSync(process.execPath, args, {
     cwd: process.cwd(),
     encoding: 'utf8',
     maxBuffer: 20 * 1024 * 1024,
+    ...(options.env ? { env: options.env } : {}),
   })
   return {
     exitCode: result.status ?? 1,
     stdout: redactString(result.stdout ?? ''),
     stderr: redactString(result.stderr || result.error?.message || ''),
   }
+}
+
+function smokeSessionEnv() {
+  const env = { ...process.env }
+  for (const key of SMOKE_SESSION_INPUT_ENV_KEYS) {
+    delete env[key]
+  }
+  return env
 }
 
 function writeTextFile(file, content) {
@@ -272,7 +308,7 @@ function runSmokeSession(opts) {
     opts.smokeOutputDir,
   ]
   if (opts.smokeTimeoutMs > 0) args.push('--timeout-ms', String(opts.smokeTimeoutMs))
-  const result = runNodeTool(args)
+  const result = runNodeTool(args, { env: smokeSessionEnv() })
   writeTextFile(stdoutLog, result.stdout)
   writeTextFile(stderrLog, result.stderr)
   const sessionSummaryJson = path.join(opts.smokeOutputDir, 'session-summary.json')
@@ -281,13 +317,15 @@ function runSmokeSession(opts) {
   const smokeStatusMd = path.join(opts.smokeOutputDir, 'smoke-status.md')
   const smokeTodoMd = path.join(opts.smokeOutputDir, 'smoke-todo.md')
   const sessionSummary = readJsonIfExists(sessionSummaryJson)
-  const status = result.exitCode === 0
-    ? sessionSummary?.overallStatus ?? 'pass'
+  const hasValidSessionSummary = typeof sessionSummary?.overallStatus === 'string' && sessionSummary.overallStatus.trim()
+  const status = result.exitCode === 0 && hasValidSessionSummary
+    ? sessionSummary.overallStatus
     : 'fail'
   return {
     requested: true,
     status,
     exitCode: result.exitCode,
+    reason: result.exitCode === 0 && !hasValidSessionSummary ? 'missing_session_summary' : null,
     outputDir: relativePath(opts.smokeOutputDir),
     stdoutLog: relativePath(stdoutLog),
     stderrLog: relativePath(stderrLog),
