@@ -41,6 +41,10 @@
 - [ ] Optional allowed member group ID
 - [ ] Optional person-message local user ID
 - [ ] Synced DingTalk account without matched local user for no-email admin check
+- [x] Tooling records manual target identities in preflight/session/evidence outputs:
+  - `DINGTALK_P4_AUTHORIZED_USER_ID`
+  - `DINGTALK_P4_UNAUTHORIZED_USER_ID`
+  - `DINGTALK_P4_NO_EMAIL_DINGTALK_EXTERNAL_ID`
 
 ## Remote Smoke Execution
 
@@ -57,6 +61,7 @@ node scripts/ops/dingtalk-p4-smoke-session.mjs \
 ```bash
 node scripts/ops/dingtalk-p4-smoke-session.mjs \
   --env-file output/dingtalk-p4-remote-smoke-session/dingtalk-p4.env \
+  --require-manual-targets \
   --output-dir output/dingtalk-p4-remote-smoke-session/142-session
 ```
 
@@ -68,6 +73,7 @@ node scripts/ops/dingtalk-p4-smoke-session.mjs \
   - `smoke-status.json`
   - `smoke-status.md`
   - `smoke-todo.md`
+  - manual targets are present in `preflight/preflight-summary.json`, `workspace/evidence.json`, and `session-summary.json`
 
 - [ ] Confirm API/bootstrap checks pass:
   - `create-table-form`
