@@ -56,6 +56,7 @@ describe('approvals routes', () => {
     pgState.pool.connect.mockReset()
     pgState.client.query.mockReset()
     pgState.client.release.mockReset()
+    pgState.pool.query.mockResolvedValue({ rows: [], rowCount: 0 })
     pgState.pool.connect.mockResolvedValue(pgState.client)
 
     const { approvalsRouter } = await import('../../src/routes/approvals')

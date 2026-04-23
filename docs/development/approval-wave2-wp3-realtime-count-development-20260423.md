@@ -37,12 +37,15 @@ publish to the legacy naked `query.userId` room.
 `CollabService` now also supports an authenticated user room:
 
 - frontend sends JWT via `handshake.auth.token`
-- backend verifies the token with `authService.verifyToken`
+- backend verifies the token with a lazy `authService.verifyToken` import
 - socket joins `auth-user:<userId>`
 - approval realtime publisher emits only to that authenticated room
 
 This preserves existing legacy socket behavior for other consumers while
 protecting approval count updates from forged `query.userId` subscriptions.
+The auth service import is intentionally lazy because `AuthService` pulls in
+RBAC/metrics modules; importing it at `CollabService` module load time can
+double-register global Prometheus metrics during parallel test collection.
 
 ## Frontend Design
 
@@ -58,6 +61,8 @@ update the badge state; socket failures do not surface to the user.
 - `packages/core-backend/src/services/CollabService.ts`
 - `packages/core-backend/src/routes/approvals.ts`
 - `packages/core-backend/tests/unit/approval-realtime.test.ts`
+- `packages/core-backend/tests/unit/approvals-routes.test.ts`
+- `packages/core-backend/tests/unit/approvals-bridge-routes.test.ts`
 - `apps/web/src/approvals/useApprovalCountsRealtime.ts`
 - `apps/web/src/views/approval/ApprovalCenterView.vue`
 - `apps/web/tests/approvalCountsRealtime.spec.ts`

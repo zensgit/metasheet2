@@ -3,7 +3,6 @@ import { Server as SocketServer } from 'socket.io'
 import type { Server as HttpServer } from 'http'
 import type { ILogger } from '../di/identifiers'
 import type { EventBus } from '../integration/events/event-bus'
-import { authService } from '../auth/AuthService'
 import { buildCommentInboxRoom, buildCommentRecordRoom, buildCommentSheetRoom } from './commentRooms'
 
 export function buildAuthenticatedUserRoom(userId: string): string {
@@ -55,6 +54,9 @@ export class CollabService {
     const token = this.getTokenFromSocket(socket)
     if (!token) return
     try {
+      // AuthService pulls in RBAC/metrics modules; keep it lazy so importing CollabService
+      // does not register global metrics during parallel unit-test collection.
+      const { authService } = await import('../auth/AuthService')
       const user = await authService.verifyToken(token)
       const userId = user?.id?.toString().trim()
       if (!userId) return

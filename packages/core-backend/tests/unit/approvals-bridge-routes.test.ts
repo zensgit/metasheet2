@@ -278,6 +278,17 @@ const routeState = vi.hoisted(() => {
       return { rows, rowCount: rows.length }
     }
 
+    if (normalized.startsWith('SELECT DISTINCT assignee_id FROM approval_assignments')) {
+      const rows = Array.from(state.assignments.values())
+        .filter((row) => (
+          row.instance_id === String(params[0])
+          && row.is_active
+          && row.assignment_type === 'user'
+        ))
+        .map((row) => ({ assignee_id: row.assignee_id }))
+      return { rows, rowCount: rows.length }
+    }
+
     if (normalized.startsWith('SELECT id, action, actor_id, actor_name, comment, from_status, to_status, metadata, occurred_at FROM approval_records')) {
       const rows = state.records
         .filter((row) => row.instance_id === String(params[0]))
