@@ -86,6 +86,42 @@ test('compile-dingtalk-p4-smoke-evidence writes an editable template', () => {
     assert.equal(template.checks.length, requiredIds.length)
     assert.deepEqual(template.checks.map((check) => check.id), requiredIds)
     assert.equal(template.checks.every((check) => check.status === 'pending'), true)
+    assert.equal(template.checks.find((check) => check.id === 'create-table-form').evidence.source, 'api-bootstrap')
+    assert.equal(template.checks.find((check) => check.id === 'send-group-message-form-link').evidence.source, 'manual-client')
+    assert.equal(template.checks.find((check) => check.id === 'authorized-user-submit').evidence.operator, '')
+    assert.equal(template.checks.find((check) => check.id === 'authorized-user-submit').evidence.performedAt, '')
+    assert.deepEqual(template.checks.find((check) => check.id === 'authorized-user-submit').evidence.artifacts, [])
+    assert.equal(template.checks.find((check) => check.id === 'no-email-user-create-bind').evidence.source, 'manual-admin')
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+
+test('compile-dingtalk-p4-smoke-evidence writes a manual evidence kit', () => {
+  const tmpDir = makeTmpDir()
+  const kitDir = path.join(tmpDir, 'manual-kit')
+
+  try {
+    const result = spawnSync(process.execPath, [scriptPath, '--init-kit', kitDir], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+    })
+
+    assert.equal(result.status, 0, result.stderr)
+    assert.equal(existsSync(path.join(kitDir, 'evidence.json')), true)
+    assert.equal(existsSync(path.join(kitDir, 'manual-evidence-checklist.md')), true)
+    assert.equal(existsSync(path.join(kitDir, 'artifacts/send-group-message-form-link')), true)
+    assert.equal(existsSync(path.join(kitDir, 'artifacts/authorized-user-submit')), true)
+    assert.equal(existsSync(path.join(kitDir, 'artifacts/unauthorized-user-denied')), true)
+    assert.equal(existsSync(path.join(kitDir, 'artifacts/no-email-user-create-bind')), true)
+
+    const template = JSON.parse(readFileSync(path.join(kitDir, 'evidence.json'), 'utf8'))
+    assert.equal(template.checks.find((check) => check.id === 'send-group-message-form-link').evidence.source, 'manual-client')
+    assert.equal(template.checks.find((check) => check.id === 'no-email-user-create-bind').evidence.source, 'manual-admin')
+    const checklist = readFileSync(path.join(kitDir, 'manual-evidence-checklist.md'), 'utf8')
+    assert.match(checklist, /manual-client/)
+    assert.match(checklist, /manual-admin/)
+    assert.match(checklist, /Do not paste DingTalk robot full webhook URLs/)
   } finally {
     rmSync(tmpDir, { recursive: true, force: true })
   }

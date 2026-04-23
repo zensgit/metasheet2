@@ -54,7 +54,23 @@ Do not capture or paste:
 
 Use the evidence compiler after the manual smoke is executed. It does not call DingTalk or staging; it validates the operator-provided result file, redacts secrets, and writes a reusable evidence summary.
 
-Create a template:
+Create a manual evidence kit when starting a full remote smoke run:
+
+```bash
+node scripts/ops/compile-dingtalk-p4-smoke-evidence.mjs \
+  --init-kit output/dingtalk-p4-remote-smoke/142-manual-kit
+```
+
+Expected generated files:
+
+- `evidence.json`
+- `manual-evidence-checklist.md`
+- `artifacts/send-group-message-form-link/`
+- `artifacts/authorized-user-submit/`
+- `artifacts/unauthorized-user-denied/`
+- `artifacts/no-email-user-create-bind/`
+
+Create only the JSON template when you do not need artifact folders:
 
 ```bash
 node scripts/ops/compile-dingtalk-p4-smoke-evidence.mjs \

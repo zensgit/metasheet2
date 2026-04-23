@@ -78,6 +78,7 @@ const MANUAL_EVIDENCE_REQUIREMENTS = [
     label: 'no-email DingTalk-synced account creation and binding',
   },
 ]
+const MANUAL_EVIDENCE_BY_ID = new Map(MANUAL_EVIDENCE_REQUIREMENTS.map((requirement) => [requirement.id, requirement]))
 
 function printHelp() {
   console.log(`Usage: node scripts/ops/compile-dingtalk-p4-smoke-evidence.mjs [options]
@@ -89,12 +90,16 @@ Options:
   --input <file>           Evidence JSON to compile
   --output-dir <dir>       Output directory, default ${DEFAULT_OUTPUT_ROOT}/<run-id>
   --init-template <file>   Write an editable evidence template and exit
+  --init-kit <dir>         Write evidence.json plus manual evidence folders/checklist and exit
   --strict                 Exit non-zero unless all required checks pass
   --help                   Show this help
 
 Examples:
   node scripts/ops/compile-dingtalk-p4-smoke-evidence.mjs \\
     --init-template output/dingtalk-p4-remote-smoke/evidence.json
+
+  node scripts/ops/compile-dingtalk-p4-smoke-evidence.mjs \\
+    --init-kit output/dingtalk-p4-remote-smoke/142-manual-kit
 
   node scripts/ops/compile-dingtalk-p4-smoke-evidence.mjs \\
     --input output/dingtalk-p4-remote-smoke/evidence.json \\
@@ -116,6 +121,7 @@ function parseArgs(argv) {
     input: null,
     outputDir: null,
     initTemplate: null,
+    initKit: null,
     strict: false,
   }
 
@@ -134,6 +140,10 @@ function parseArgs(argv) {
         opts.initTemplate = path.resolve(process.cwd(), readRequiredValue(argv, i, arg))
         i += 1
         break
+      case '--init-kit':
+        opts.initKit = path.resolve(process.cwd(), readRequiredValue(argv, i, arg))
+        i += 1
+        break
       case '--strict':
         opts.strict = true
         break
@@ -146,8 +156,9 @@ function parseArgs(argv) {
     }
   }
 
-  if (opts.initTemplate && opts.input) {
-    throw new Error('--init-template cannot be combined with --input')
+  const initModes = [opts.initTemplate, opts.initKit].filter(Boolean).length
+  if (initModes > 1 || (initModes > 0 && opts.input)) {
+    throw new Error('--init-template, --init-kit, and --input are mutually exclusive')
   }
 
   return opts
@@ -159,6 +170,25 @@ function nowIso() {
 
 function makeRunId() {
   return `dingtalk-p4-${new Date().toISOString().replace(/[:.]/g, '-').replace(/Z$/, 'Z')}`
+}
+
+function makeTemplateEvidence(checkId) {
+  const manualRequirement = MANUAL_EVIDENCE_BY_ID.get(checkId)
+  if (manualRequirement) {
+    return {
+      source: manualRequirement.source,
+      operator: '',
+      performedAt: '',
+      summary: '',
+      artifacts: [],
+      instructions: `Required when status is pass: ${manualRequirement.label}; include real DingTalk-client/admin evidence, not API bootstrap output.`,
+    }
+  }
+
+  return {
+    source: API_BOOTSTRAP_CHECK_IDS.has(checkId) ? 'api-bootstrap' : '',
+    notes: '',
+  }
 }
 
 function makeTemplate() {
@@ -177,9 +207,7 @@ function makeTemplate() {
       id: check.id,
       label: check.label,
       status: 'pending',
-      evidence: {
-        notes: '',
-      },
+      evidence: makeTemplateEvidence(check.id),
     })),
     artifacts: [],
   }
@@ -189,6 +217,56 @@ function writeTemplate(file) {
   mkdirSync(path.dirname(file), { recursive: true })
   writeFileSync(file, `${JSON.stringify(makeTemplate(), null, 2)}\n`, 'utf8')
   console.log(`Wrote ${path.relative(process.cwd(), file)}`)
+}
+
+function artifactDirForCheck(checkId) {
+  return path.join('artifacts', checkId)
+}
+
+function renderManualEvidenceChecklist() {
+  const rows = MANUAL_EVIDENCE_REQUIREMENTS.map((requirement) => {
+    return `| \`${requirement.id}\` | \`${requirement.source}\` | ${requirement.label} | \`${artifactDirForCheck(requirement.id)}/\` |`
+  })
+
+  return `# DingTalk P4 Manual Evidence Kit
+
+Use this kit after running \`scripts/ops/dingtalk-p4-remote-smoke.mjs\` or after manually executing \`docs/dingtalk-remote-smoke-checklist-20260422.md\`.
+
+## Required Manual Evidence
+
+| Check ID | Required Source | What It Proves | Suggested Artifact Folder |
+| --- | --- | --- | --- |
+${rows.join('\n')}
+
+## Fill Rules
+
+- Keep \`status: "pending"\` until the real DingTalk-client or admin action has been performed.
+- When setting one of the checks above to \`pass\`, fill \`evidence.operator\`, \`evidence.performedAt\`, \`evidence.summary\`, and \`evidence.artifacts\`.
+- Artifact refs should point to screenshots, exported logs, or notes captured during the real smoke run.
+- Do not paste DingTalk robot full webhook URLs, \`SEC...\` secrets, bearer tokens, admin tokens, public form tokens, temporary passwords, or raw cookies.
+
+## Compile
+
+\`\`\`bash
+node scripts/ops/compile-dingtalk-p4-smoke-evidence.mjs \\
+  --input evidence.json \\
+  --output-dir compiled \\
+  --strict
+\`\`\`
+`
+}
+
+function writeManualEvidenceKit(dir) {
+  mkdirSync(dir, { recursive: true })
+  const evidencePath = path.join(dir, 'evidence.json')
+  const checklistPath = path.join(dir, 'manual-evidence-checklist.md')
+  writeFileSync(evidencePath, `${JSON.stringify(makeTemplate(), null, 2)}\n`, 'utf8')
+  writeFileSync(checklistPath, renderManualEvidenceChecklist(), 'utf8')
+  for (const requirement of MANUAL_EVIDENCE_REQUIREMENTS) {
+    mkdirSync(path.join(dir, artifactDirForCheck(requirement.id)), { recursive: true })
+  }
+  console.log(`Wrote ${path.relative(process.cwd(), evidencePath)}`)
+  console.log(`Wrote ${path.relative(process.cwd(), checklistPath)}`)
 }
 
 function parseEvidence(file) {
@@ -537,6 +615,8 @@ try {
   const opts = parseArgs(process.argv.slice(2))
   if (opts.initTemplate) {
     writeTemplate(opts.initTemplate)
+  } else if (opts.initKit) {
+    writeManualEvidenceKit(opts.initKit)
   } else {
     compileEvidence(opts)
   }
