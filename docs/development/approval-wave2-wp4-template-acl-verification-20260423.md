@@ -67,6 +67,14 @@ pnpm exec tsx packages/openapi/tools/build.ts
 
 Result: regenerated `packages/openapi/dist/{combined.openapi.yml,openapi.json,openapi.yaml}` for the new approval template visibility contract.
 
+OpenAPI contract gate:
+
+```bash
+./scripts/ops/attendance-run-gate-contract-case.sh openapi
+```
+
+Result: passed after committing the regenerated dist artifacts. The script intentionally verifies two known negative attendance import contract cases and reports them as expected failures before returning `OK`.
+
 Backend full unit/integration run without external PostgreSQL:
 
 ```bash
