@@ -95,9 +95,13 @@ function resolveApprovalActorName(req: Request, fallbackId: string): string {
 }
 
 function resolveApprovalActorRoles(req: Request): string[] {
-  return Array.isArray(req.user?.roles)
+  const role = typeof req.user?.role === 'string' && req.user.role.trim().length > 0
+    ? [req.user.role.trim()]
+    : []
+  const roles = Array.isArray(req.user?.roles)
     ? req.user!.roles.filter((role): role is string => typeof role === 'string' && role.trim().length > 0)
     : []
+  return Array.from(new Set([...role, ...roles]))
 }
 
 function resolveApprovalActorPermissions(req: Request): string[] {

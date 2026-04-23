@@ -9,6 +9,7 @@ Scope: WP4 slice 2 adds approval template visibility ACL and fills the deferred 
 - Existing templates remain compatible because old rows default to `all` and service reads also coalesce missing/invalid values to `all`.
 - `list/get/categories` filter by current actor unless the actor is a template manager.
 - Template managers are actors with `role=admin`, `roles` containing `admin`, `*:*`, or `approval-templates:manage`; they can still manage and see every template.
+- Route actor resolution accepts both legacy `req.user.role` and array `req.user.roles`, then de-duplicates them before visibility matching.
 - Non-manager visibility match rules:
   - `all`: visible to everyone authenticated.
   - `user`: current user id appears in `ids`.
