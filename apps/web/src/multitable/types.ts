@@ -214,6 +214,9 @@ export interface MetaSheetPermissionCandidate {
   subtitle?: string | null
   isActive: boolean
   accessLevel?: MetaSheetPermissionAccessLevel | null
+  dingtalkBound?: boolean | null
+  dingtalkGrantEnabled?: boolean | null
+  dingtalkPersonDeliveryAvailable?: boolean | null
 }
 
 export interface MetaFieldPermissionEntry {

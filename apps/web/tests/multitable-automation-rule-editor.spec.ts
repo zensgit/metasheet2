@@ -103,9 +103,36 @@ function mockClient() {
     })),
     listFormShareCandidates: vi.fn(async () => ({
       items: [
-        { subjectType: 'user', subjectId: 'user_1', label: 'Lin Lan', subtitle: 'lin@example.com', isActive: true },
-        { subjectType: 'user', subjectId: 'user_2', label: 'Zhao Ming', subtitle: 'zhao@example.com', isActive: true },
-        { subjectType: 'member-group', subjectId: 'group_1', label: 'Sales Team', subtitle: '3 members', isActive: true },
+        {
+          subjectType: 'user',
+          subjectId: 'user_1',
+          label: 'Lin Lan',
+          subtitle: 'lin@example.com',
+          isActive: true,
+          dingtalkBound: true,
+          dingtalkGrantEnabled: true,
+          dingtalkPersonDeliveryAvailable: true,
+        },
+        {
+          subjectType: 'user',
+          subjectId: 'user_2',
+          label: 'Zhao Ming',
+          subtitle: 'zhao@example.com',
+          isActive: true,
+          dingtalkBound: false,
+          dingtalkGrantEnabled: false,
+          dingtalkPersonDeliveryAvailable: false,
+        },
+        {
+          subjectType: 'member-group',
+          subjectId: 'group_1',
+          label: 'Sales Team',
+          subtitle: '3 members',
+          isActive: true,
+          dingtalkBound: null,
+          dingtalkGrantEnabled: null,
+          dingtalkPersonDeliveryAvailable: null,
+        },
       ],
       total: 3,
       limit: 8,
@@ -1894,8 +1921,12 @@ describe('MetaAutomationRuleEditor', () => {
 
     const suggestion = container.querySelector('[data-person-recipient-suggestion="user:user_1"]') as HTMLButtonElement
     expect(suggestion).toBeTruthy()
+    expect(suggestion.textContent).toContain('DingTalk direct message ready; form authorization enabled')
     suggestion.click()
     await flushPromises()
+
+    const selectedRecipient = container.querySelector('[data-person-recipient="user_1"]') as HTMLElement
+    expect(selectedRecipient.textContent).toContain('DingTalk direct message ready; form authorization enabled')
 
     searchInput.value = 'sales'
     searchInput.dispatchEvent(new Event('input'))
@@ -1903,8 +1934,12 @@ describe('MetaAutomationRuleEditor', () => {
 
     const groupSuggestion = container.querySelector('[data-person-recipient-suggestion="member-group:group_1"]') as HTMLButtonElement
     expect(groupSuggestion).toBeTruthy()
+    expect(groupSuggestion.textContent).toContain('Member group members are checked individually for DingTalk delivery')
     groupSuggestion.click()
     await flushPromises()
+
+    const selectedGroup = container.querySelector('[data-person-member-group="group_1"]') as HTMLElement
+    expect(selectedGroup.textContent).toContain('Member group members are checked individually for DingTalk delivery')
 
     const userIdsInput = container.querySelector('[data-field="dingtalkPersonUserIds"]') as HTMLTextAreaElement
     expect(userIdsInput.value).toBe('user_1')
@@ -1943,6 +1978,9 @@ describe('MetaAutomationRuleEditor', () => {
             subtitle: 'inactive@example.com',
             isActive: false,
             accessLevel: 'read',
+            dingtalkBound: false,
+            dingtalkGrantEnabled: false,
+            dingtalkPersonDeliveryAvailable: false,
           },
           {
             subjectType: 'member-group',
@@ -1951,6 +1989,9 @@ describe('MetaAutomationRuleEditor', () => {
             subtitle: '3 members',
             isActive: true,
             accessLevel: 'write',
+            dingtalkBound: null,
+            dingtalkGrantEnabled: null,
+            dingtalkPersonDeliveryAvailable: null,
           },
           {
             subjectType: 'role',
@@ -1989,6 +2030,7 @@ describe('MetaAutomationRuleEditor', () => {
     expect(inactiveSuggestion.disabled).toBe(true)
     expect(inactiveSuggestion.textContent).toContain('User')
     expect(inactiveSuggestion.textContent).toContain('Access: read')
+    expect(inactiveSuggestion.textContent).toContain('No DingTalk delivery link; person message will skip until linked')
     expect(inactiveSuggestion.textContent).toContain('Inactive users cannot be added')
     expect(container.querySelector('[data-person-recipient-suggestion="user:role_admin"]')).toBeNull()
     expect(container.textContent).not.toContain('Admins')
@@ -2003,6 +2045,7 @@ describe('MetaAutomationRuleEditor', () => {
     expect(groupSuggestion.disabled).toBe(false)
     expect(groupSuggestion.textContent).toContain('Member group')
     expect(groupSuggestion.textContent).toContain('Access: write')
+    expect(groupSuggestion.textContent).toContain('Member group members are checked individually for DingTalk delivery')
     groupSuggestion.click()
     await flushPromises()
 

@@ -314,6 +314,7 @@
                 <span>{{ candidate.subtitle || candidate.subjectId }}</span>
                 <span>{{ personRecipientSubjectLabel(candidate) }}</span>
                 <span v-if="candidate.accessLevel">{{ personRecipientAccessLabel(candidate.accessLevel) }}</span>
+                <span v-if="personRecipientDingTalkStatusLabel(candidate.subjectType, candidate)">{{ personRecipientDingTalkStatusLabel(candidate.subjectType, candidate) }}</span>
                 <span v-if="isInactivePersonRecipientCandidate(candidate)">Inactive users cannot be added</span>
               </button>
             </div>
@@ -329,6 +330,7 @@
               >
                 <strong>{{ recipient.label }}</strong>
                 <span>{{ recipient.subtitle || recipient.id }}</span>
+                <span v-if="personRecipientDingTalkStatusLabel('user', recipient)">{{ personRecipientDingTalkStatusLabel('user', recipient) }}</span>
                 <em>Remove</em>
               </button>
             </div>
@@ -343,6 +345,7 @@
               >
                 <strong>{{ group.label }}</strong>
                 <span>{{ group.subtitle || group.id }}</span>
+                <span v-if="personRecipientDingTalkStatusLabel('member-group', group)">{{ personRecipientDingTalkStatusLabel('member-group', group) }}</span>
                 <em>Remove</em>
               </button>
             </div>
@@ -878,7 +881,16 @@ const dingtalkPersonUserSearch = ref('')
 const dingtalkPersonUserSearchLoading = ref(false)
 const dingtalkPersonUserSearchError = ref('')
 const dingtalkPersonUserSuggestions = ref<MetaSheetPermissionCandidate[]>([])
-const dingtalkPersonUserDirectory = ref<Record<string, { label: string; subtitle?: string }>>({})
+
+type DingTalkPersonRecipientDirectoryEntry = {
+  label: string
+  subtitle?: string
+  dingtalkBound?: boolean | null
+  dingtalkGrantEnabled?: boolean | null
+  dingtalkPersonDeliveryAvailable?: boolean | null
+}
+
+const dingtalkPersonUserDirectory = ref<Record<string, DingTalkPersonRecipientDirectoryEntry>>({})
 const copiedPreviewKey = ref('')
 let dingtalkPersonSuggestionLoadId = 0
 let copiedPreviewResetTimer: ReturnType<typeof setTimeout> | null = null
@@ -941,29 +953,62 @@ function personRecipientAccessLabel(accessLevel: MetaSheetPermissionCandidate['a
   return accessLevel ? `Access: ${accessLevel}` : ''
 }
 
+function personRecipientDingTalkStatusLabel(
+  subjectType: MetaSheetPermissionCandidate['subjectType'],
+  status: Pick<MetaSheetPermissionCandidate, 'dingtalkBound' | 'dingtalkGrantEnabled' | 'dingtalkPersonDeliveryAvailable'>,
+): string {
+  if (subjectType === 'member-group') return 'Member group members are checked individually for DingTalk delivery'
+  if (subjectType !== 'user') return ''
+  if (status.dingtalkPersonDeliveryAvailable === false) return 'No DingTalk delivery link; person message will skip until linked'
+  if (status.dingtalkPersonDeliveryAvailable === true && status.dingtalkGrantEnabled === true) return 'DingTalk direct message ready; form authorization enabled'
+  if (status.dingtalkPersonDeliveryAvailable === true && status.dingtalkGrantEnabled === false) return 'DingTalk direct message ready; form authorization not enabled'
+  if (status.dingtalkBound === false) return 'Not bound to DingTalk; person message may skip until linked'
+  if (status.dingtalkBound === true && status.dingtalkGrantEnabled === true) return 'DingTalk bound; form authorization enabled'
+  if (status.dingtalkBound === true && status.dingtalkGrantEnabled === false) return 'DingTalk bound; form authorization not enabled'
+  return ''
+}
+
 function rememberDingTalkPersonSuggestions(items: MetaSheetPermissionCandidate[]) {
   const next = { ...dingtalkPersonUserDirectory.value }
   for (const item of items) {
     if (item.subjectType !== 'user' && item.subjectType !== 'member-group') continue
-    next[personRecipientDirectoryKey(item.subjectType, item.subjectId)] = { label: item.label, subtitle: item.subtitle ?? undefined }
+    next[personRecipientDirectoryKey(item.subjectType, item.subjectId)] = {
+      label: item.label,
+      subtitle: item.subtitle ?? undefined,
+      dingtalkBound: item.dingtalkBound ?? null,
+      dingtalkGrantEnabled: item.dingtalkGrantEnabled ?? null,
+      dingtalkPersonDeliveryAvailable: item.dingtalkPersonDeliveryAvailable ?? null,
+    }
   }
   dingtalkPersonUserDirectory.value = next
 }
 
 const selectedDingTalkPersonRecipients = computed(() =>
-  parseUserIdsText(draft.value.dingtalkPersonUserIds).map((id) => ({
-    id,
-    label: dingtalkPersonUserDirectory.value[personRecipientDirectoryKey('user', id)]?.label ?? id,
-    subtitle: dingtalkPersonUserDirectory.value[personRecipientDirectoryKey('user', id)]?.subtitle,
-  })),
+  parseUserIdsText(draft.value.dingtalkPersonUserIds).map((id) => {
+    const directoryEntry = dingtalkPersonUserDirectory.value[personRecipientDirectoryKey('user', id)]
+    return {
+      id,
+      label: directoryEntry?.label ?? id,
+      subtitle: directoryEntry?.subtitle,
+      dingtalkBound: directoryEntry?.dingtalkBound ?? null,
+      dingtalkGrantEnabled: directoryEntry?.dingtalkGrantEnabled ?? null,
+      dingtalkPersonDeliveryAvailable: directoryEntry?.dingtalkPersonDeliveryAvailable ?? null,
+    }
+  }),
 )
 
 const selectedDingTalkPersonMemberGroups = computed(() =>
-  parseMemberGroupIdsText(draft.value.dingtalkPersonMemberGroupIds).map((id) => ({
-    id,
-    label: dingtalkPersonUserDirectory.value[personRecipientDirectoryKey('member-group', id)]?.label ?? id,
-    subtitle: dingtalkPersonUserDirectory.value[personRecipientDirectoryKey('member-group', id)]?.subtitle,
-  })),
+  parseMemberGroupIdsText(draft.value.dingtalkPersonMemberGroupIds).map((id) => {
+    const directoryEntry = dingtalkPersonUserDirectory.value[personRecipientDirectoryKey('member-group', id)]
+    return {
+      id,
+      label: directoryEntry?.label ?? id,
+      subtitle: directoryEntry?.subtitle,
+      dingtalkBound: directoryEntry?.dingtalkBound ?? null,
+      dingtalkGrantEnabled: directoryEntry?.dingtalkGrantEnabled ?? null,
+      dingtalkPersonDeliveryAvailable: directoryEntry?.dingtalkPersonDeliveryAvailable ?? null,
+    }
+  }),
 )
 
 const availableDingTalkPersonSuggestions = computed(() => {

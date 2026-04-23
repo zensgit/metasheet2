@@ -27,6 +27,74 @@ describe('MultitableApiClient', () => {
     await expect(client.resolveComment('c1')).resolves.toBeUndefined()
   })
 
+  it('normalizes form share candidate DingTalk status fields', async () => {
+    const fetchFn = vi.fn(async (input: string) => {
+      expect(input).toBe('/api/multitable/sheets/sheet_1/form-share-candidates?q=lin&limit=8')
+      return new Response(JSON.stringify({
+        ok: true,
+        data: {
+          items: [
+            {
+              subjectType: 'user',
+              subjectId: 'user_1',
+              label: 'Lin Lan',
+              subtitle: 'lin@example.com',
+              isActive: true,
+              accessLevel: 'write',
+              dingtalkBound: true,
+              dingtalkGrantEnabled: false,
+              dingtalkPersonDeliveryAvailable: true,
+            },
+            {
+              subjectType: 'member-group',
+              subjectId: 'group_1',
+              label: 'Sales Team',
+              subtitle: '3 members',
+              isActive: true,
+              dingtalkBound: null,
+              dingtalkGrantEnabled: null,
+              dingtalkPersonDeliveryAvailable: null,
+            },
+          ],
+          total: 2,
+          limit: 8,
+          query: 'lin',
+        },
+      }), { status: 200 })
+    })
+    const client = new MultitableApiClient({ fetchFn })
+
+    await expect(client.listFormShareCandidates('sheet_1', { q: 'lin', limit: 8 })).resolves.toEqual({
+      items: [
+        {
+          subjectType: 'user',
+          subjectId: 'user_1',
+          label: 'Lin Lan',
+          subtitle: 'lin@example.com',
+          isActive: true,
+          accessLevel: 'write',
+          dingtalkBound: true,
+          dingtalkGrantEnabled: false,
+          dingtalkPersonDeliveryAvailable: true,
+        },
+        {
+          subjectType: 'member-group',
+          subjectId: 'group_1',
+          label: 'Sales Team',
+          subtitle: '3 members',
+          isActive: true,
+          accessLevel: null,
+          dingtalkBound: null,
+          dingtalkGrantEnabled: null,
+          dingtalkPersonDeliveryAvailable: null,
+        },
+      ],
+      total: 2,
+      limit: 8,
+      query: 'lin',
+    })
+  })
+
   it('normalizes automation rule list responses from snake_case API rows', async () => {
     const fetchFn = vi.fn(async (input: string) => {
       expect(input).toBe('/api/multitable/sheets/sheet_1/automations')
