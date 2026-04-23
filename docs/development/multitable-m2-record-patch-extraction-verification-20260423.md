@@ -14,7 +14,10 @@ Paired with: `docs/development/multitable-m2-record-patch-extraction-development
   (`tests/integration/multitable-record-patch.api.test.ts`) that locks the
   extracted PATCH handler's HTTP contract and SQL/tx ordering against the
   mock pool.
-- No source files were modified on top of `059ea44fc`.
+- Bot-review hardening on top of the original coverage also restores the
+  direct `PATCH /records/:recordId` side effects in `RecordService.patchRecord()`:
+  `publishMultitableSheetRealtime(...)` and
+  `eventBus.emit('multitable.record.updated', ...)`.
 
 ## Commands & results
 
@@ -130,22 +133,22 @@ failures were resolved by intervening commits on `main`.
 | Existing unit suite green | 133 files / 1684 tests pass |
 | Adjacent integration suites green | 19/19 pass |
 | Merged slice unit tests still green | 11/11 pass |
-| No source files modified beyond merged slice | verified via `git status` (source tree = `059ea44fc`) |
+| Direct PATCH realtime/eventBus side effects covered | pass |
 
-## Not committed
+## Follow-up patch scope
 
 Per the brief's "STOP and report — do not commit half-baked" escape
 clause, this branch did NOT land a duplicate of the extraction the
-sibling agent already merged as `059ea44fc`. The only outstanding
-additions on this branch are:
+sibling agent already merged as `059ea44fc`. The follow-up additions on
+this branch are:
 
 - `packages/core-backend/tests/integration/multitable-record-patch.api.test.ts`
+- `packages/core-backend/src/multitable/record-service.ts`
 - `docs/development/multitable-m2-record-patch-extraction-development-20260423.md`
 - `docs/development/multitable-m2-record-patch-extraction-verification-20260423.md`
 
-The reviewer can decide whether to merge these three files as a
-follow-up patch. They are additive — no conflict with `059ea44fc` is
-possible.
+The test remains the main value of the branch; the source change is the
+minimal side-effect restoration required by review.
 
 ## Codex Rebase Verification - 2026-04-23
 
@@ -168,4 +171,32 @@ Result:
 
 Review note:
 
-- This branch remains pure additive coverage + docs. No source file is changed.
+- The direct PATCH path is no longer pure coverage: it now asserts and emits
+  the same realtime/eventBus side effects expected from the route contract.
+
+## Bot-review hardening verification - 2026-04-23
+
+Changes addressed:
+
+- Direct `PATCH /records/:recordId` now publishes
+  `record-updated` realtime payloads after the DB transaction.
+- Direct `PATCH /records/:recordId` now emits
+  `multitable.record.updated` on the shared event bus.
+- Integration mocks no longer include the impossible `data` column on the
+  `FOR UPDATE` rows.
+- Link mutation ordering assertion now requires INSERT link operations after
+  DELETE link operations, not just after the record UPDATE.
+
+Commands:
+
+```bash
+pnpm --filter @metasheet/core-backend exec vitest run \
+  tests/integration/multitable-record-patch.api.test.ts \
+  --reporter=dot
+pnpm --filter @metasheet/core-backend exec tsc --noEmit
+```
+
+Result:
+
+- `multitable-record-patch.api.test.ts`: `6/6` passed.
+- Backend `tsc --noEmit`: exit `0`.

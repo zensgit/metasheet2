@@ -740,6 +740,28 @@ export class RecordService {
       }
     }
 
+    const actorId = access.userId ?? 'system'
+    publishMultitableSheetRealtime({
+      spreadsheetId: sheetId,
+      actorId,
+      source: 'multitable',
+      kind: 'record-updated',
+      recordId,
+      recordIds: [recordId],
+      fieldIds: Object.keys(patch),
+      recordPatches: [{
+        recordId,
+        version: nextVersion,
+        patch,
+      }],
+    })
+    this.eventBus.emit('multitable.record.updated', {
+      sheetId,
+      recordId,
+      data: patch,
+      actorId,
+    })
+
     return {
       recordId,
       sheetId,

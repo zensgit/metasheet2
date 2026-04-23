@@ -24,9 +24,11 @@ Rather than commit a duplicate extraction, this branch reconciles by:
    shipped unit-only coverage; prior to this branch there was no integration
    test wrapping the extracted PATCH handler in supertest against a mock pool.
 
-No source files in `packages/core-backend/src/**` were modified by this
-branch on top of `059ea44fc`. The branch is purely additive for tests +
-reconciliation docs.
+Bot-review hardening later added one minimal source fix on top of
+`059ea44fc`: direct `PATCH /records/:recordId` now emits the same
+realtime and event-bus update side effects that the route contract
+expects after a successful DB transaction. The rest of the branch remains
+integration coverage + reconciliation docs.
 
 ## Context — what the merged slice delivered
 
@@ -57,11 +59,11 @@ through the Express router with a mock pool + spy Yjs invalidator:
 
 | Scenario | Assertion |
 |---|---|
-| Happy path: text field update | 200 response, `commentsScope` shape, invalidator called with `[recordId]` |
+| Happy path: text field update | 200 response, `commentsScope` shape, invalidator called with `[recordId]`, realtime publish, `multitable.record.updated` event |
 | Aggregated validation errors | 400, `fieldErrors` map, `code: VALIDATION_ERROR` |
 | All-readonly field errors | 403, `code: FIELD_READONLY`, `message: "Readonly field update rejected"` |
 | Version conflict | 409, `code: VERSION_CONFLICT`, `serverVersion` present |
-| Link diff update | UPDATE precedes DELETE-links and INSERT-links within tx; Yjs invalidator fires once post-tx |
+| Link diff update | UPDATE precedes DELETE-links and INSERT-links within tx; INSERT-links run after DELETE-links; Yjs invalidator, realtime publish, and eventBus fire once post-tx |
 | Yjs invalidator throws | PATCH still returns 200; `console.error` with `"Yjs invalidation failed"` message fires (best-effort contract preserved) |
 
 The test file intentionally asserts the exact SQL sequence the extracted
@@ -117,6 +119,10 @@ are load-bearing across rebuilds:
   empty target list → `DELETE FROM meta_links WHERE field_id = $1 AND record_id = $2`.
 - Yjs invalidator is fired exactly once per successful PATCH with the
   single-element array `[recordId]`, after the DB tx commits.
+- Direct PATCH publishes one `record-updated` realtime payload after the
+  DB tx commits.
+- Direct PATCH emits one `multitable.record.updated` event with the
+  changed field patch and actor id.
 - Invalidator failure must NOT fail the PATCH response; the error must
   reach `console.error` with `"Yjs invalidation failed"` in the
   message.

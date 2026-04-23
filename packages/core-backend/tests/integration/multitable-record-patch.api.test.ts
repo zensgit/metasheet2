@@ -23,6 +23,8 @@ async function createApp(args: {
 }) {
   vi.resetModules()
   const publishSpy = vi.fn()
+  const emitSpy = vi.fn()
+  const realtimePublishSpy = vi.fn()
 
   vi.doMock('../../src/rbac/service', () => ({
     isAdmin: vi.fn().mockResolvedValue(false),
@@ -32,8 +34,15 @@ async function createApp(args: {
     getPermCacheStatus: vi.fn(),
   }))
   vi.doMock('../../src/integration/events/event-bus', () => ({
-    eventBus: { publish: publishSpy, emit: vi.fn() },
+    eventBus: { publish: publishSpy, emit: emitSpy },
   }))
+  vi.doMock('../../src/multitable/realtime-publish', async (importOriginal) => {
+    const actual = await importOriginal<typeof import('../../src/multitable/realtime-publish')>()
+    return {
+      ...actual,
+      publishMultitableSheetRealtime: realtimePublishSpy,
+    }
+  })
 
   const { poolManager } = await import('../../src/integration/db/connection-pool')
   const univerMetaModule = await import('../../src/routes/univer-meta')
@@ -58,7 +67,7 @@ async function createApp(args: {
   })
   app.use('/api/multitable', univerMetaModule.univerMetaRouter())
 
-  return { app, publishSpy, mockPool }
+  return { app, publishSpy, emitSpy, realtimePublishSpy, mockPool }
 }
 
 /**
@@ -81,7 +90,7 @@ describe('Multitable PATCH /records/:recordId (record-service extraction)', () =
 
   test('patches a text field and returns the hydrated record payload', async () => {
     const yjsInvalidatorSpy = vi.fn(async (_: string[]) => {})
-    const { app } = await createApp({
+    const { app, emitSpy, realtimePublishSpy } = await createApp({
       tokenPerms: ['multitable:write'],
       yjsInvalidator: yjsInvalidatorSpy,
       queryHandler: async (sql, params) => {
@@ -100,7 +109,7 @@ describe('Multitable PATCH /records/:recordId (record-service extraction)', () =
         if (sql.includes('SELECT id, version, created_by FROM meta_records WHERE id = $1 AND sheet_id = $2 FOR UPDATE')) {
           expect(params).toEqual(['rec_1', 'sheet_ops'])
           return {
-            rows: [{ id: 'rec_1', version: 7, created_by: 'user_patch_1', data: { fld_title: 'Previous' } }],
+            rows: [{ id: 'rec_1', version: 7, created_by: 'user_patch_1' }],
           }
         }
         if (sql.includes('UPDATE meta_records') && sql.includes('RETURNING version')) {
@@ -139,6 +148,25 @@ describe('Multitable PATCH /records/:recordId (record-service extraction)', () =
       recordId: 'rec_1',
     })
     expect(yjsInvalidatorSpy).toHaveBeenCalledWith(['rec_1'])
+    expect(realtimePublishSpy).toHaveBeenCalledWith(expect.objectContaining({
+      spreadsheetId: 'sheet_ops',
+      actorId: 'user_patch_1',
+      kind: 'record-updated',
+      recordId: 'rec_1',
+      recordIds: ['rec_1'],
+      fieldIds: ['fld_title'],
+      recordPatches: [{
+        recordId: 'rec_1',
+        version: 8,
+        patch: { fld_title: 'Updated title' },
+      }],
+    }))
+    expect(emitSpy).toHaveBeenCalledWith('multitable.record.updated', {
+      sheetId: 'sheet_ops',
+      recordId: 'rec_1',
+      data: { fld_title: 'Updated title' },
+      actorId: 'user_patch_1',
+    })
   })
 
   test('returns 400 with aggregated fieldErrors when multiple fields fail validation', async () => {
@@ -228,7 +256,7 @@ describe('Multitable PATCH /records/:recordId (record-service extraction)', () =
           return { rows: [{ id: 'fld_title', name: 'Title', type: 'string', property: {}, order: 1 }] }
         }
         if (sql.includes('SELECT id, version, created_by FROM meta_records WHERE id = $1 AND sheet_id = $2 FOR UPDATE')) {
-          return { rows: [{ id: 'rec_1', version: 11, created_by: 'user_patch_1', data: {} }] }
+          return { rows: [{ id: 'rec_1', version: 11, created_by: 'user_patch_1' }] }
         }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
@@ -250,7 +278,7 @@ describe('Multitable PATCH /records/:recordId (record-service extraction)', () =
   test('updates link targets: diff-inserts new links and removes dropped ones', async () => {
     const yjsInvalidatorSpy = vi.fn(async (_: string[]) => {})
     const captured: Array<{ sql: string; params?: unknown[] }> = []
-    const { app } = await createApp({
+    const { app, emitSpy, realtimePublishSpy } = await createApp({
       tokenPerms: ['multitable:write'],
       yjsInvalidator: yjsInvalidatorSpy,
       queryHandler: async (sql, params) => {
@@ -281,7 +309,7 @@ describe('Multitable PATCH /records/:recordId (record-service extraction)', () =
         }
         if (sql.includes('SELECT id, version, created_by FROM meta_records WHERE id = $1 AND sheet_id = $2 FOR UPDATE')) {
           return {
-            rows: [{ id: 'rec_1', version: 2, created_by: 'user_patch_1', data: { fld_customer: ['rec_c1', 'rec_c2'] } }],
+            rows: [{ id: 'rec_1', version: 2, created_by: 'user_patch_1' }],
           }
         }
         if (sql.includes('UPDATE meta_records') && sql.includes('RETURNING version')) {
@@ -331,10 +359,21 @@ describe('Multitable PATCH /records/:recordId (record-service extraction)', () =
     const insertLinksIdx = captured.findIndex(({ sql }) => sql.includes('INSERT INTO meta_links'))
     expect(updateIdx).toBeGreaterThanOrEqual(0)
     expect(deleteLinksIdx).toBeGreaterThan(updateIdx)
-    expect(insertLinksIdx).toBeGreaterThan(updateIdx)
+    expect(insertLinksIdx).toBeGreaterThan(deleteLinksIdx)
     // Yjs invalidation happens AFTER the tx commits. Spy was called once.
     expect(yjsInvalidatorSpy).toHaveBeenCalledTimes(1)
     expect(yjsInvalidatorSpy).toHaveBeenCalledWith(['rec_1'])
+    expect(realtimePublishSpy).toHaveBeenCalledWith(expect.objectContaining({
+      kind: 'record-updated',
+      recordId: 'rec_1',
+      fieldIds: ['fld_customer'],
+    }))
+    expect(emitSpy).toHaveBeenCalledWith('multitable.record.updated', expect.objectContaining({
+      sheetId: 'sheet_ops',
+      recordId: 'rec_1',
+      data: { fld_customer: ['rec_c2', 'rec_c3'] },
+      actorId: 'user_patch_1',
+    }))
   })
 
   test('preserves best-effort Yjs invalidation: PATCH returns 200 even when the invalidator throws', async () => {
@@ -373,7 +412,6 @@ describe('Multitable PATCH /records/:recordId (record-service extraction)', () =
               id: 'rec_1',
               version: 2,
               created_by: 'user_patch_1',
-              data: { fld_files: ['att_old_1', 'att_old_2'] },
             }],
           }
         }
