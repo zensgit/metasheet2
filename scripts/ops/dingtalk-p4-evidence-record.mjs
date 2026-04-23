@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
 import path from 'node:path'
 
 const VALID_STATUSES = new Set(['pass', 'fail', 'skipped', 'pending'])
@@ -20,6 +21,8 @@ const MANUAL_SOURCE_BY_CHECK_ID = new Map([
   ['unauthorized-user-denied', 'manual-client'],
   ['no-email-user-create-bind', 'manual-admin'],
 ])
+const STATUS_SCRIPT_ENV = 'DINGTALK_P4_EVIDENCE_RECORD_STATUS_SCRIPT'
+const FINALIZE_SCRIPT_ENV = 'DINGTALK_P4_EVIDENCE_RECORD_FINALIZE_SCRIPT'
 const SECRET_PATTERNS = [
   {
     name: 'dingtalk_robot_webhook',
@@ -52,7 +55,9 @@ function printHelp() {
 
 Updates one check inside a DingTalk P4 smoke evidence.json file. This is a
 local helper for recording manual remote-smoke proof without hand-editing JSON.
-It does not call DingTalk or staging.
+With --session-dir, it also refreshes smoke-status.json / smoke-status.md /
+smoke-todo.md automatically after a successful write. It does not call
+DingTalk or staging.
 
 Options:
   --session-dir <dir>        Session directory; defaults evidence to <dir>/workspace/evidence.json
@@ -70,6 +75,8 @@ Options:
   --before-record-count <n>  Set evidence.beforeRecordCount
   --after-record-count <n>   Set evidence.afterRecordCount
   --blocked-reason <text>    Set evidence.blockedReason
+  --no-refresh-status        Skip automatic smoke-status refresh after write
+  --finalize-when-ready      After refresh, auto-run --finalize when smoke status is ready
   --dry-run                  Validate and print the updated check without writing
   --help                     Show this help
 
@@ -110,6 +117,8 @@ function parseArgs(argv) {
     beforeRecordCount: null,
     afterRecordCount: null,
     blockedReason: '',
+    noRefreshStatus: false,
+    finalizeWhenReady: false,
     dryRun: false,
   }
 
@@ -175,6 +184,12 @@ function parseArgs(argv) {
         opts.blockedReason = readRequiredValue(argv, i, arg).trim()
         i += 1
         break
+      case '--no-refresh-status':
+        opts.noRefreshStatus = true
+        break
+      case '--finalize-when-ready':
+        opts.finalizeWhenReady = true
+        break
       case '--dry-run':
         opts.dryRun = true
         break
@@ -195,6 +210,15 @@ function parseArgs(argv) {
   if (!REQUIRED_CHECK_IDS.has(opts.checkId)) throw new Error(`unknown DingTalk P4 check id: ${opts.checkId}`)
   if (!opts.status) throw new Error('--status is required')
   if (!VALID_STATUSES.has(opts.status)) throw new Error(`--status must be one of: ${Array.from(VALID_STATUSES).join(', ')}`)
+  if (opts.finalizeWhenReady && !opts.sessionDir) {
+    throw new Error('--finalize-when-ready requires --session-dir')
+  }
+  if (opts.finalizeWhenReady && opts.noRefreshStatus) {
+    throw new Error('--finalize-when-ready cannot be combined with --no-refresh-status')
+  }
+  if (opts.finalizeWhenReady && opts.dryRun) {
+    throw new Error('--finalize-when-ready cannot be combined with --dry-run')
+  }
   return opts
 }
 
@@ -218,6 +242,12 @@ function redactString(value) {
     .replace(/\beyJ[A-Za-z0-9._-]{20,}\b/g, '<jwt:redacted>')
 }
 
+function compactText(value) {
+  const text = redactString(value ?? '').trim()
+  if (!text) return ''
+  return text.length > 500 ? `${text.slice(0, 497)}...` : text
+}
+
 function assertNoSecretText(value, label) {
   const text = String(value ?? '')
   for (const pattern of SECRET_PATTERNS) {
@@ -238,6 +268,11 @@ function readEvidence(file) {
   } catch (error) {
     throw new Error(`failed to parse evidence JSON: ${error instanceof Error ? error.message : String(error)}`)
   }
+}
+
+function readJsonIfExists(file) {
+  if (!existsSync(file) || !statSync(file).isFile()) return null
+  return JSON.parse(readFileSync(file, 'utf8'))
 }
 
 function isDateLike(value) {
@@ -361,6 +396,120 @@ function buildEvidencePayload(opts, artifactRefs) {
   return payload
 }
 
+function runNodeTool(script, args) {
+  const resolvedScript = path.resolve(process.cwd(), script)
+  const result = spawnSync(process.execPath, [resolvedScript, ...args], {
+    cwd: process.cwd(),
+    encoding: 'utf8',
+    maxBuffer: 20 * 1024 * 1024,
+    env: process.env,
+  })
+  return {
+    exitCode: result.status ?? 1,
+    stdout: redactString(result.stdout ?? ''),
+    stderr: redactString(result.stderr || result.error?.message || ''),
+  }
+}
+
+function smokeStatusPaths(sessionDir) {
+  return {
+    smokeStatusJson: path.join(sessionDir, 'smoke-status.json'),
+    smokeStatusMd: path.join(sessionDir, 'smoke-status.md'),
+    smokeTodoMd: path.join(sessionDir, 'smoke-todo.md'),
+  }
+}
+
+function sessionSummaryPath(sessionDir) {
+  return path.join(sessionDir, 'session-summary.json')
+}
+
+function statusRefreshCommand(sessionDir) {
+  return [
+    'node scripts/ops/dingtalk-p4-smoke-status.mjs',
+    '--session-dir',
+    relativePath(sessionDir),
+  ].join(' ')
+}
+
+function finalizeCommand(sessionDir) {
+  return [
+    'node scripts/ops/dingtalk-p4-smoke-session.mjs',
+    '--finalize',
+    relativePath(sessionDir),
+  ].join(' ')
+}
+
+function handoffCommand(sessionDir) {
+  return [
+    'node scripts/ops/dingtalk-p4-final-handoff.mjs',
+    '--session-dir',
+    relativePath(sessionDir),
+  ].join(' ')
+}
+
+function refreshSmokeStatus(sessionDir) {
+  const script = process.env[STATUS_SCRIPT_ENV] || 'scripts/ops/dingtalk-p4-smoke-status.mjs'
+  const result = runNodeTool(script, ['--session-dir', sessionDir])
+  const paths = smokeStatusPaths(sessionDir)
+  return {
+    ...paths,
+    ...result,
+    summary: readJsonIfExists(paths.smokeStatusJson),
+  }
+}
+
+function shouldFinalizeWhenReady(statusSummary) {
+  if (!statusSummary || typeof statusSummary !== 'object') return false
+  return statusSummary.overallStatus === 'finalize_pending'
+    && (statusSummary.remoteSmokeTodos?.remaining ?? 1) === 0
+    && (statusSummary.totals?.gaps ?? 1) === 0
+}
+
+function runFinalizeSession(sessionDir) {
+  const script = process.env[FINALIZE_SCRIPT_ENV] || 'scripts/ops/dingtalk-p4-smoke-session.mjs'
+  const result = runNodeTool(script, ['--finalize', sessionDir])
+  const summaryPath = sessionSummaryPath(sessionDir)
+  return {
+    ...result,
+    sessionSummaryJson: summaryPath,
+    summary: readJsonIfExists(summaryPath),
+  }
+}
+
+function refreshAfterWrite(opts) {
+  if (!opts.sessionDir || opts.noRefreshStatus) return
+
+  const statusRefresh = refreshSmokeStatus(opts.sessionDir)
+  if (statusRefresh.exitCode !== 0) {
+    throw new Error(`evidence updated but smoke status refresh failed; rerun ${statusRefreshCommand(opts.sessionDir)} (${compactText(statusRefresh.stderr || statusRefresh.stdout) || 'unknown error'})`)
+  }
+
+  console.log(`Refreshed ${relativePath(statusRefresh.smokeStatusJson)}`)
+  if (statusRefresh.summary?.overallStatus) {
+    console.log(`Smoke overall status: ${statusRefresh.summary.overallStatus}`)
+  }
+  if (statusRefresh.summary?.remoteSmokeTodos) {
+    const todos = statusRefresh.summary.remoteSmokeTodos
+    console.log(`Smoke TODO progress: ${todos.completed}/${todos.total} complete, ${todos.remaining} remaining`)
+  }
+
+  if (!opts.finalizeWhenReady) return
+  if (!shouldFinalizeWhenReady(statusRefresh.summary)) {
+    console.log(`Auto finalize not attempted; current smoke status is ${statusRefresh.summary?.overallStatus ?? 'unknown'}`)
+    return
+  }
+
+  const finalize = runFinalizeSession(opts.sessionDir)
+  if (finalize.exitCode !== 0) {
+    throw new Error(`evidence updated and smoke status refreshed, but auto finalize failed; rerun ${finalizeCommand(opts.sessionDir)} (${compactText(finalize.stderr || finalize.stdout) || 'unknown error'})`)
+  }
+
+  console.log(`Finalized session in ${relativePath(finalize.sessionSummaryJson)}`)
+  if (finalize.summary?.overallStatus === 'pass' && finalize.summary?.finalStrictStatus === 'pass') {
+    console.log(`Next handoff command: ${handoffCommand(opts.sessionDir)}`)
+  }
+}
+
 function updateEvidence(evidence, opts) {
   const { index, check } = findCheck(evidence, opts.checkId)
   const artifactRefs = opts.status === 'pass' ? validateArtifactRefs(opts) : []
@@ -393,6 +542,7 @@ try {
     mkdirSync(path.dirname(opts.evidence), { recursive: true })
     writeFileSync(opts.evidence, `${JSON.stringify(evidence, null, 2)}\n`, 'utf8')
     console.log(`Updated ${updatedCheck.id} in ${relativePath(opts.evidence)}`)
+    refreshAfterWrite(opts)
   }
 } catch (error) {
   console.error(`[dingtalk-p4-evidence-record] ERROR: ${redactString(error instanceof Error ? error.message : String(error))}`)

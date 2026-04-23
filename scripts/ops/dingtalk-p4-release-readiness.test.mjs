@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url'
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
 const scriptPath = path.join(repoRoot, 'scripts', 'ops', 'dingtalk-p4-release-readiness.mjs')
+const SMOKE_SESSION_SCRIPT_ENV = 'DINGTALK_P4_RELEASE_READINESS_SMOKE_SESSION_SCRIPT'
 
 function makeTmpDir() {
   return mkdtempSync(path.join(tmpdir(), 'dingtalk-p4-release-readiness-'))
@@ -24,9 +25,11 @@ function runScript(args, options = {}) {
   })
 }
 
-function runScriptWithSelftest(args) {
+function runScriptWithSelftest(args, options = {}) {
   return runScript(args, {
+    ...options,
     env: {
+      ...(options.env ?? {}),
       DINGTALK_P4_RELEASE_READINESS_ALLOW_SELFTEST: '1',
     },
   })
@@ -58,6 +61,36 @@ function writeEnv(file, overrides = {}) {
 
 function readSummary(outputDir) {
   return JSON.parse(readFileSync(path.join(outputDir, 'release-readiness-summary.json'), 'utf8'))
+}
+
+function writeSmokeSessionStub(scriptFile, { exitCode = 0 } = {}) {
+  writeFileSync(scriptFile, `#!/usr/bin/env node
+import fs from 'node:fs'
+import path from 'node:path'
+
+const args = process.argv.slice(2)
+const outputDir = args[args.indexOf('--output-dir') + 1]
+if (!outputDir) {
+  console.error('missing --output-dir')
+  process.exit(2)
+}
+fs.mkdirSync(outputDir, { recursive: true })
+fs.writeFileSync(path.join(outputDir, 'session-summary.json'), JSON.stringify({
+  sessionPhase: 'bootstrap',
+  overallStatus: ${JSON.stringify(exitCode === 0 ? 'pass' : 'fail')},
+  finalStrictStatus: ${JSON.stringify(exitCode === 0 ? 'pending' : 'fail')},
+}, null, 2) + '\\n')
+fs.writeFileSync(path.join(outputDir, 'session-summary.md'), '# session\\n')
+fs.writeFileSync(path.join(outputDir, 'smoke-status.json'), JSON.stringify({ status: ${JSON.stringify(exitCode === 0 ? 'pass' : 'fail')} }, null, 2) + '\\n')
+fs.writeFileSync(path.join(outputDir, 'smoke-status.md'), '# status\\n')
+fs.writeFileSync(path.join(outputDir, 'smoke-todo.md'), '# todo\\n')
+if (process.env.FAKE_SMOKE_MARKER) {
+  fs.mkdirSync(path.dirname(process.env.FAKE_SMOKE_MARKER), { recursive: true })
+  fs.writeFileSync(process.env.FAKE_SMOKE_MARKER, 'ran\\n')
+}
+console.log('fake smoke session ran')
+process.exit(${exitCode})
+`, 'utf8')
 }
 
 test('dingtalk-p4-release-readiness fails when private env readiness fails even if regression passes', () => {
@@ -162,6 +195,110 @@ test('dingtalk-p4-release-readiness allow-failures keeps reports inspectable wit
 
     assert.equal(result.status, 0)
     assert.equal(readSummary(outputDir).overallStatus, 'fail')
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+
+test('dingtalk-p4-release-readiness can launch smoke-session automatically after readiness passes', () => {
+  const tmpDir = makeTmpDir()
+  const envFile = path.join(tmpDir, 'dingtalk-p4.env')
+  const outputDir = path.join(tmpDir, 'readiness')
+  const stubPath = path.join(tmpDir, 'fake-smoke-session.mjs')
+
+  try {
+    writeEnv(envFile)
+    writeSmokeSessionStub(stubPath)
+
+    const result = runScriptWithSelftest([
+      '--p4-env-file', envFile,
+      '--regression-profile', 'selftest',
+      '--run-smoke-session',
+      '--smoke-output-dir', path.join(tmpDir, 'session'),
+      '--output-dir', outputDir,
+    ], {
+      env: {
+        [SMOKE_SESSION_SCRIPT_ENV]: stubPath,
+      },
+    })
+
+    assert.equal(result.status, 0, result.stderr || result.stdout)
+    const summary = readSummary(outputDir)
+    assert.equal(summary.overallStatus, 'pass')
+    assert.equal(summary.smokeSession.status, 'pass')
+    assert.equal(summary.smokeSession.sessionSummaryJson.endsWith('session-summary.json'), true)
+    assert.equal(existsSync(path.join(outputDir, 'smoke-session.stdout.log')), true)
+    const markdown = readFileSync(path.join(outputDir, 'release-readiness-summary.md'), 'utf8')
+    assert.match(markdown, /## Smoke Session/)
+    assert.match(markdown, /started automatically/)
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+
+test('dingtalk-p4-release-readiness blocks smoke-session launch when readiness fails', () => {
+  const tmpDir = makeTmpDir()
+  const envFile = path.join(tmpDir, 'dingtalk-p4.env')
+  const outputDir = path.join(tmpDir, 'readiness')
+  const stubPath = path.join(tmpDir, 'fake-smoke-session.mjs')
+  const markerPath = path.join(tmpDir, 'marker.txt')
+
+  try {
+    writeEnv(envFile, { DINGTALK_P4_AUTH_TOKEN: '' })
+    writeSmokeSessionStub(stubPath)
+
+    const result = runScriptWithSelftest([
+      '--p4-env-file', envFile,
+      '--regression-profile', 'selftest',
+      '--run-smoke-session',
+      '--smoke-output-dir', path.join(tmpDir, 'session'),
+      '--output-dir', outputDir,
+    ], {
+      env: {
+        [SMOKE_SESSION_SCRIPT_ENV]: stubPath,
+        FAKE_SMOKE_MARKER: markerPath,
+      },
+    })
+
+    assert.equal(result.status, 1)
+    const summary = readSummary(outputDir)
+    assert.equal(summary.overallStatus, 'fail')
+    assert.equal(summary.smokeSession.status, 'blocked')
+    assert.equal(summary.smokeSession.reason, 'release_readiness_failed')
+    assert.equal(existsSync(markerPath), false)
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+
+test('dingtalk-p4-release-readiness fails when smoke-session exits non-zero', () => {
+  const tmpDir = makeTmpDir()
+  const envFile = path.join(tmpDir, 'dingtalk-p4.env')
+  const outputDir = path.join(tmpDir, 'readiness')
+  const stubPath = path.join(tmpDir, 'fake-smoke-session-fail.mjs')
+
+  try {
+    writeEnv(envFile)
+    writeSmokeSessionStub(stubPath, { exitCode: 1 })
+
+    const result = runScriptWithSelftest([
+      '--p4-env-file', envFile,
+      '--regression-profile', 'selftest',
+      '--run-smoke-session',
+      '--smoke-output-dir', path.join(tmpDir, 'session'),
+      '--output-dir', outputDir,
+      '--allow-failures',
+    ], {
+      env: {
+        [SMOKE_SESSION_SCRIPT_ENV]: stubPath,
+      },
+    })
+
+    assert.equal(result.status, 0)
+    const summary = readSummary(outputDir)
+    assert.equal(summary.overallStatus, 'fail')
+    assert.equal(summary.smokeSession.status, 'fail')
+    assert.equal(summary.smokeSession.overallStatus, 'fail')
   } finally {
     rmSync(tmpDir, { recursive: true, force: true })
   }

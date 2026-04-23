@@ -194,6 +194,14 @@ node scripts/ops/dingtalk-p4-evidence-record.mjs \
 
 For pass evidence, put the referenced file under `workspace/artifacts/<check-id>/` before running the recorder. The recorder validates the relative path, non-empty local file, manual source, and obvious secret-like text before updating `workspace/evidence.json`.
 
+When `--session-dir` is used, the recorder also refreshes:
+
+- `smoke-status.json`
+- `smoke-status.md`
+- `smoke-todo.md`
+
+This means the normal operator loop no longer needs a separate `dingtalk-p4-smoke-status.mjs` command after every successful evidence update.
+
 For `unauthorized-user-denied`, also record the structured no-insert proof:
 
 ```bash
@@ -225,6 +233,42 @@ node scripts/ops/dingtalk-p4-evidence-record.mjs \
 ```
 
 The generated `evidence.json` also includes a `adminEvidence` helper object for this check. Fill `emailWasBlank`, `createdLocalUserId`, `boundDingTalkExternalId`, and `accountLinkedAfterRefresh` before final strict compile when that information is available.
+
+If the current evidence update is expected to complete all remaining remote-smoke checks, add `--finalize-when-ready`. The recorder will refresh smoke status first, then auto-run strict finalize only when the session is actually ready:
+
+```bash
+node scripts/ops/dingtalk-p4-evidence-record.mjs \
+  --session-dir output/dingtalk-p4-remote-smoke-session/142-session \
+  --check-id no-email-user-create-bind \
+  --status pass \
+  --source manual-admin \
+  --operator qa-admin \
+  --summary "Admin created and bound a no-email DingTalk-synced local user; temporary password is redacted." \
+  --artifact artifacts/no-email-user-create-bind/admin-create-bind-result.png \
+  --artifact artifacts/no-email-user-create-bind/account-linked-after-refresh.png \
+  --finalize-when-ready
+```
+
+When auto-finalize succeeds, the recorder prints the next `dingtalk-p4-final-handoff.mjs` command directly.
+
+After all manual evidence has been recorded, prefer the closeout wrapper when you want a single local command for the rest of the release chain. It runs strict finalize, final handoff, release-ready status, and final remote-smoke docs generation:
+
+```bash
+node scripts/ops/dingtalk-p4-final-closeout.mjs \
+  --session-dir output/dingtalk-p4-remote-smoke-session/142-session \
+  --packet-output-dir artifacts/dingtalk-staging-evidence-packet/142-final \
+  --docs-output-dir docs/development \
+  --date 20260423
+```
+
+Expected closeout outputs:
+
+- `artifacts/dingtalk-staging-evidence-packet/142-final/closeout-summary.json`
+- `artifacts/dingtalk-staging-evidence-packet/142-final/closeout-summary.md`
+- `artifacts/dingtalk-staging-evidence-packet/142-final/handoff-summary.json`
+- `artifacts/dingtalk-staging-evidence-packet/142-final/publish-check.json`
+- `docs/development/dingtalk-final-remote-smoke-development-20260423.md`
+- `docs/development/dingtalk-final-remote-smoke-verification-20260423.md`
 
 ```bash
 node scripts/ops/dingtalk-p4-smoke-session.mjs \

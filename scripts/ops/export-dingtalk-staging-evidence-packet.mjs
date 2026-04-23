@@ -122,6 +122,16 @@ const requiredPacketFiles = [
     description: 'exports a finalized P4 smoke session, validates the packet, and writes handoff summaries',
   },
   {
+    path: 'scripts/ops/dingtalk-p4-final-docs.mjs',
+    kind: 'script',
+    description: 'generates final remote-smoke development and verification Markdown from release-ready summaries',
+  },
+  {
+    path: 'scripts/ops/dingtalk-p4-final-closeout.mjs',
+    kind: 'script',
+    description: 'runs strict finalize, final handoff, release-ready status, and final docs in one closeout command',
+  },
+  {
     path: 'scripts/ops/validate-dingtalk-staging-evidence-packet.mjs',
     kind: 'script',
     description: 'validates final gated evidence packets and scans for secret-like raw evidence before handoff',
@@ -373,10 +383,12 @@ ${gateLine}
 8. If needed, debug individual steps with \`dingtalk-p4-smoke-preflight.mjs\` and \`dingtalk-p4-remote-smoke.mjs\`.
 9. Check remaining evidence gaps with \`node scripts/ops/dingtalk-p4-smoke-status.mjs --session-dir <session-dir>\`.
 10. Record manual DingTalk-client/admin checks with \`node scripts/ops/dingtalk-p4-evidence-record.mjs --session-dir <session-dir> ...\`.
-11. Finalize smoke evidence with \`node scripts/ops/dingtalk-p4-smoke-session.mjs --finalize <session-dir>\`.
-12. Re-run \`dingtalk-p4-smoke-status.mjs\` to confirm the status moved to \`handoff_pending\`.
-13. Run \`node scripts/ops/dingtalk-p4-final-handoff.mjs --session-dir <session-dir> --output-dir <packet-dir>\` after finalization passes.
-14. If debugging manually, re-export with \`--include-output <session-dir> --require-dingtalk-p4-pass\`, then validate with \`validate-dingtalk-staging-evidence-packet.mjs\`.
+11. Prefer \`node scripts/ops/dingtalk-p4-final-closeout.mjs --session-dir <session-dir> --packet-output-dir <packet-dir>\` after all manual evidence is complete.
+12. If debugging manually, finalize smoke evidence with \`node scripts/ops/dingtalk-p4-smoke-session.mjs --finalize <session-dir>\`.
+13. Re-run \`dingtalk-p4-smoke-status.mjs\` to confirm the status moved to \`handoff_pending\`.
+14. Run \`node scripts/ops/dingtalk-p4-final-handoff.mjs --session-dir <session-dir> --output-dir <packet-dir>\` after finalization passes.
+15. Generate final docs with \`node scripts/ops/dingtalk-p4-final-docs.mjs --session-dir <session-dir> --handoff-summary <packet-dir>/handoff-summary.json --require-release-ready\`.
+16. If debugging manually, re-export with \`--include-output <session-dir> --require-dingtalk-p4-pass\`, then validate with \`validate-dingtalk-staging-evidence-packet.mjs\`.
 
 ## Non-Goals
 

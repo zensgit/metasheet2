@@ -116,6 +116,14 @@ test('export-dingtalk-staging-evidence-packet copies required handoff files and 
       true,
     )
     assert.equal(
+      existsSync(path.join(outputDir, 'scripts/ops/dingtalk-p4-final-docs.mjs')),
+      true,
+    )
+    assert.equal(
+      existsSync(path.join(outputDir, 'scripts/ops/dingtalk-p4-final-closeout.mjs')),
+      true,
+    )
+    assert.equal(
       existsSync(path.join(outputDir, 'scripts/ops/validate-dingtalk-staging-evidence-packet.mjs')),
       true,
     )
@@ -163,6 +171,14 @@ test('export-dingtalk-staging-evidence-packet copies required handoff files and 
       true,
     )
     assert.equal(
+      manifest.files.some((file) => file.path === 'scripts/ops/dingtalk-p4-final-docs.mjs'),
+      true,
+    )
+    assert.equal(
+      manifest.files.some((file) => file.path === 'scripts/ops/dingtalk-p4-final-closeout.mjs'),
+      true,
+    )
+    assert.equal(
       manifest.files.some((file) => file.path === 'scripts/ops/validate-dingtalk-staging-evidence-packet.mjs'),
       true,
     )
@@ -176,6 +192,8 @@ test('export-dingtalk-staging-evidence-packet copies required handoff files and 
     assert.match(readme, /dingtalk-p4-evidence-record\.mjs/)
     assert.match(readme, /dingtalk-p4-smoke-status\.mjs/)
     assert.match(readme, /dingtalk-p4-final-handoff\.mjs/)
+    assert.match(readme, /dingtalk-p4-final-docs\.mjs/)
+    assert.match(readme, /dingtalk-p4-final-closeout\.mjs/)
     assert.match(readme, /validate-dingtalk-staging-evidence-packet\.mjs/)
     assert.match(readme, /compile-dingtalk-p4-smoke-evidence\.mjs/)
     assert.match(readme, /No runtime evidence directory was included/)

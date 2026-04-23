@@ -362,6 +362,18 @@ function sessionCommand(opts, command) {
   return command.replaceAll('<session-dir>', relativePath(opts.sessionDir))
 }
 
+function finalCloseoutCommand(opts) {
+  return sessionCommand(opts, [
+    'node scripts/ops/dingtalk-p4-final-closeout.mjs',
+    '--session-dir',
+    '<session-dir>',
+    '--packet-output-dir',
+    'artifacts/dingtalk-staging-evidence-packet/142-final',
+    '--docs-output-dir',
+    'docs/development',
+  ].join(' '))
+}
+
 function evidenceRecordCommand(opts) {
   return sessionCommand(opts, [
     'node scripts/ops/dingtalk-p4-evidence-record.mjs',
@@ -466,9 +478,11 @@ function buildNextCommands(overallStatus, opts) {
     commands.push(evidenceRecordCommand(opts))
   }
   if (overallStatus === 'manual_pending' || overallStatus === 'finalize_pending') {
+    commands.push(finalCloseoutCommand(opts))
     commands.push(sessionCommand(opts, 'node scripts/ops/dingtalk-p4-smoke-session.mjs --finalize <session-dir>'))
   }
   if (overallStatus === 'handoff_pending' || overallStatus === 'finalize_pending') {
+    commands.push(finalCloseoutCommand(opts))
     commands.push(sessionCommand(opts, 'node scripts/ops/dingtalk-p4-final-handoff.mjs --session-dir <session-dir>'))
   }
   if (overallStatus === 'fail') {
@@ -636,7 +650,8 @@ ${nextCommands.join('\n')}
 
 - This TODO file is generated from \`smoke-status.json\` inputs and contains redacted command templates only.
 - Put manual artifacts under \`workspace/artifacts/<check-id>/\` before running an evidence recorder command.
-- Re-run \`dingtalk-p4-smoke-status.mjs\` after each evidence update to refresh this TODO file.
+- When you use \`dingtalk-p4-evidence-record.mjs\` with \`--session-dir\`, smoke status and TODO files refresh automatically after a successful write.
+- Re-run \`dingtalk-p4-smoke-status.mjs\` only for a manual refresh or after direct \`evidence.json\` edits.
 `
 }
 

@@ -439,6 +439,18 @@ function finalHandoffCommand(outputDir) {
   ].join(' ')
 }
 
+function finalCloseoutCommand(outputDir) {
+  return [
+    'node scripts/ops/dingtalk-p4-final-closeout.mjs',
+    '--session-dir',
+    relativePath(outputDir),
+    '--packet-output-dir',
+    'artifacts/dingtalk-staging-evidence-packet/142-final',
+    '--docs-output-dir',
+    'docs/development',
+  ].join(' ')
+}
+
 function statusCommand(outputDir) {
   return [
     'node scripts/ops/dingtalk-p4-smoke-status.mjs',
@@ -679,6 +691,7 @@ function runSession(opts) {
     nextCommands: [
       statusCommand(outputDir),
       evidenceRecordCommand(outputDir),
+      finalCloseoutCommand(outputDir),
       finalizeCommand(outputDir, opts.allowExternalArtifactRefs),
       exportPacketCommand(outputDir),
     ],
@@ -766,8 +779,8 @@ function runFinalStrictCompile(opts) {
         }
       : null,
     nextCommands: strictPassed
-      ? [statusCommand(outputDir), finalHandoffCommand(outputDir), exportPacketCommand(outputDir, true)]
-      : [statusCommand(outputDir), evidenceRecordCommand(outputDir), finalizeCommand(outputDir, opts.allowExternalArtifactRefs), finalHandoffCommand(outputDir), exportPacketCommand(outputDir, true)],
+      ? [statusCommand(outputDir), finalCloseoutCommand(outputDir), finalHandoffCommand(outputDir), exportPacketCommand(outputDir, true)]
+      : [statusCommand(outputDir), evidenceRecordCommand(outputDir), finalCloseoutCommand(outputDir), finalizeCommand(outputDir, opts.allowExternalArtifactRefs), finalHandoffCommand(outputDir), exportPacketCommand(outputDir, true)],
   }
 
   writeSessionSummary(summary, outputDir)

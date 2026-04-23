@@ -2,8 +2,8 @@
 
 - Date: 2026-04-23
 - Goal: finish DingTalk group/person/form-access workflow through remote smoke and release evidence handoff
-- Current base branch: `codex/dingtalk-p4-product-gate-v2-20260423` from `origin/main`
-- Current base commit: `76ddfeacd`
+- Current base branch: `codex/dingtalk-next-slice-20260423` from `origin/main`
+- Current base commit: `8d2d3e1b0`
 - Remaining work type: private remote-smoke inputs, remote smoke execution, evidence collection, final handoff, and final verification notes
 
 ## Current State
@@ -20,6 +20,8 @@
 - [x] Delivery history for group/person sends
 - [x] P4 smoke session, evidence recorder, status TODO, strict finalization, handoff packet, and publish validation
 - [x] P4 local regression gate runner with redacted JSON/MD output for ops/product verification evidence
+- [x] Evidence recorder auto-refresh for smoke status/TODO and optional auto-finalize handoff
+- [x] Final closeout wrapper for strict finalize, final handoff, release-ready gate, and final remote-smoke docs
 
 ## PR Stack To Confirm
 
@@ -51,25 +53,35 @@
 
 ## Remote Smoke Execution
 
-- [x] Create env template with private file permissions:
+- [x] Create the canonical private env file with `0600` permissions:
 
 ```bash
-node scripts/ops/dingtalk-p4-smoke-session.mjs \
-  --init-env-template output/dingtalk-p4-remote-smoke-session/dingtalk-p4.env
+node scripts/ops/dingtalk-p4-env-bootstrap.mjs --init
 ```
 
-- Generated locally at `output/dingtalk-p4-remote-smoke-session/dingtalk-p4.env`.
-- The template is intentionally untracked and is now written with `0600` permissions.
-- [ ] Fill the env file outside git.
-- [ ] Run the session:
+- Canonical env file: `$HOME/.config/yuantus/dingtalk-p4-staging.env`
+- The private env is intentionally untracked and is written with `0600` permissions.
+- [x] Add a safe setter for the canonical private env:
 
 ```bash
-node scripts/ops/dingtalk-p4-smoke-session.mjs \
-  --env-file output/dingtalk-p4-remote-smoke-session/dingtalk-p4.env \
-  --require-manual-targets \
-  --output-dir output/dingtalk-p4-remote-smoke-session/142-session
+node scripts/ops/dingtalk-p4-env-bootstrap.mjs \
+  --p4-env-file "$HOME/.config/yuantus/dingtalk-p4-staging.env" \
+  --set-from-env DINGTALK_P4_AUTH_TOKEN
 ```
 
+- [ ] Fill the private env outside git with the real staging/admin and DingTalk values.
+- [x] Add a one-command release-readiness + smoke-session handoff:
+
+```bash
+node scripts/ops/dingtalk-p4-release-readiness.mjs \
+  --p4-env-file "$HOME/.config/yuantus/dingtalk-p4-staging.env" \
+  --regression-profile ops \
+  --run-smoke-session \
+  --smoke-output-dir output/dingtalk-p4-remote-smoke-session/142-session
+```
+
+- This should only start the session when env readiness and local regression both pass.
+- [ ] Run the real command above with populated private values.
 - [ ] Confirm generated files:
   - `workspace/evidence.json`
   - `workspace/manual-evidence-checklist.md`
@@ -94,6 +106,8 @@ node scripts/ops/dingtalk-p4-smoke-session.mjs \
 - [ ] `no-email-user-create-bind`: admin creates local user from synced DingTalk account with no email; confirm binding after refresh.
 - [ ] Store artifacts only under `workspace/artifacts/<check-id>/`.
 - [ ] Do not include full webhooks, signing secrets, bearer tokens, public form tokens, temporary passwords, or cookies in artifacts.
+- [x] Recorder updates with `--session-dir` now refresh `smoke-status.json`, `smoke-status.md`, and `smoke-todo.md` automatically.
+- [x] The final manual evidence update can use `--finalize-when-ready` to auto-attempt strict finalize when no required checks remain.
 
 ## Evidence Recorder Commands
 
@@ -137,12 +151,31 @@ node scripts/ops/dingtalk-p4-evidence-record.mjs \
   --operator <operator> \
   --summary "Admin created and bound a no-email DingTalk-synced local user; temporary password is redacted." \
   --artifact artifacts/no-email-user-create-bind/admin-create-bind-result.png \
-  --artifact artifacts/no-email-user-create-bind/account-linked-after-refresh.png
+  --artifact artifacts/no-email-user-create-bind/account-linked-after-refresh.png \
+  --finalize-when-ready
 ```
+
+- `--finalize-when-ready` should be used only on the update that is expected to complete the remaining manual evidence. It refreshes smoke status first and only runs strict finalize when the session has actually reached `finalize_pending`.
 
 ## Finalization
 
-- [ ] Run final strict compile:
+- [x] Add one-command final closeout wrapper:
+
+```bash
+node scripts/ops/dingtalk-p4-final-closeout.mjs \
+  --session-dir output/dingtalk-p4-remote-smoke-session/142-session \
+  --packet-output-dir artifacts/dingtalk-staging-evidence-packet/142-final \
+  --docs-output-dir docs/development \
+  --date 20260423
+```
+
+- The closeout wrapper runs strict finalize, final handoff, release-ready status, and final remote-smoke docs generation in order.
+- [ ] Run the closeout wrapper against the real 142/staging session after all manual evidence is recorded.
+- [ ] Confirm generated closeout files:
+  - `artifacts/dingtalk-staging-evidence-packet/142-final/closeout-summary.json`
+  - `artifacts/dingtalk-staging-evidence-packet/142-final/closeout-summary.md`
+
+- [ ] If debugging finalization separately, run final strict compile:
 
 ```bash
 node scripts/ops/dingtalk-p4-smoke-session.mjs \
@@ -158,7 +191,7 @@ node scripts/ops/dingtalk-p4-smoke-session.mjs \
 
 ## Final Handoff
 
-- [ ] Export and validate final packet:
+- [ ] Export and validate final packet, either through `dingtalk-p4-final-closeout.mjs` above or directly:
 
 ```bash
 node scripts/ops/dingtalk-p4-final-handoff.mjs \
@@ -180,6 +213,16 @@ node scripts/ops/dingtalk-p4-smoke-status.mjs \
   --require-release-ready
 ```
 
+- [ ] Generate final remote-smoke development and verification docs, either through `dingtalk-p4-final-closeout.mjs` or directly:
+
+```bash
+node scripts/ops/dingtalk-p4-final-docs.mjs \
+  --session-dir output/dingtalk-p4-remote-smoke-session/142-session \
+  --handoff-summary artifacts/dingtalk-staging-evidence-packet/142-final/handoff-summary.json \
+  --require-release-ready \
+  --output-dir docs/development
+```
+
 ## Local Regression Gates
 
 - [x] Add one-command local regression gate with redacted JSON/MD reports:
@@ -196,13 +239,23 @@ node scripts/ops/dingtalk-p4-regression-gate.mjs \
 
 ```bash
 node scripts/ops/dingtalk-p4-release-readiness.mjs \
-  --p4-env-file output/dingtalk-p4-remote-smoke-session/dingtalk-p4.env \
+  --p4-env-file "$HOME/.config/yuantus/dingtalk-p4-staging.env" \
   --regression-profile ops \
   --output-dir output/dingtalk-p4-release-readiness/142-local \
   --allow-failures
 ```
 
-- Current readiness status is `fail` only because private env values are intentionally blank: admin token, group A/B webhooks, allowlist, and manual target identities.
+- [x] Add automatic smoke-session handoff after readiness passes:
+
+```bash
+node scripts/ops/dingtalk-p4-release-readiness.mjs \
+  --p4-env-file "$HOME/.config/yuantus/dingtalk-p4-staging.env" \
+  --regression-profile ops \
+  --run-smoke-session \
+  --smoke-output-dir output/dingtalk-p4-remote-smoke-session/142-session
+```
+
+- Current readiness status is still `fail` against the real private env until admin token, group A/B webhooks, allowlist, and manual target identities are filled.
 
 ## Product Regression Gates
 

@@ -144,9 +144,12 @@ test('dingtalk-p4-smoke-status reports manual pending gaps for bootstrap session
     assert.equal(summary.remoteSmokeTodos.remaining > 0, true)
     assert.equal(summary.remoteSmokeTodos.items.find((item) => item.id === 'authorized-user-submit').completed, false)
     assert.equal(summary.nextCommands.some((command) => command.includes('dingtalk-p4-evidence-record.mjs')), true)
+    assert.equal(summary.nextCommands.some((command) => command.includes('dingtalk-p4-final-closeout.mjs')), true)
     assert.equal(summary.nextCommands.some((command) => command.includes('--finalize')), true)
     assert.equal(existsSync(path.join(sessionDir, 'smoke-status.md')), true)
     assert.equal(existsSync(path.join(sessionDir, 'smoke-todo.md')), true)
+    const todoText = readFileSync(path.join(sessionDir, 'smoke-todo.md'), 'utf8')
+    assert.match(todoText, /evidence-record\.mjs.*refresh automatically/)
   } finally {
     rmSync(tmpDir, { recursive: true, force: true })
   }
@@ -245,6 +248,7 @@ test('dingtalk-p4-smoke-status reports handoff pending after final strict pass',
     const summary = JSON.parse(readFileSync(path.join(sessionDir, 'smoke-status.json'), 'utf8'))
     assert.equal(summary.overallStatus, 'handoff_pending')
     assert.equal(summary.totals.gaps, 0)
+    assert.equal(summary.nextCommands.some((command) => command.includes('dingtalk-p4-final-closeout.mjs')), true)
     assert.equal(summary.nextCommands.some((command) => command.includes('dingtalk-p4-final-handoff.mjs')), true)
   } finally {
     rmSync(tmpDir, { recursive: true, force: true })

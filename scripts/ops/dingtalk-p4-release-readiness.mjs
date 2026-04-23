@@ -7,10 +7,12 @@ import path from 'node:path'
 
 const DEFAULT_ENV_FILE = path.join(homedir(), '.config', 'yuantus', 'dingtalk-p4-staging.env')
 const DEFAULT_OUTPUT_ROOT = 'output/dingtalk-p4-release-readiness'
+const DEFAULT_SMOKE_OUTPUT_DIR = 'output/dingtalk-p4-remote-smoke-session/142-session'
 const SCHEMA_VERSION = 1
 const PUBLIC_REGRESSION_PROFILES = ['ops', 'product', 'all']
 const TEST_ONLY_REGRESSION_PROFILES = ['selftest', 'selftest-secret']
 const SELFTEST_UNLOCK_ENV = 'DINGTALK_P4_RELEASE_READINESS_ALLOW_SELFTEST'
+const SMOKE_SESSION_SCRIPT_ENV = 'DINGTALK_P4_RELEASE_READINESS_SMOKE_SESSION_SCRIPT'
 
 function printHelp() {
   console.log(`Usage: node scripts/ops/dingtalk-p4-release-readiness.mjs [options]
@@ -22,6 +24,9 @@ Options:
   --p4-env-file <file>             Env file path, default ${DEFAULT_ENV_FILE}
   --regression-profile <profile>   Regression profile: ops, product, or all; default ops
   --regression-plan-only           Plan regression commands without executing them
+  --run-smoke-session              If readiness passes, start the final smoke session automatically
+  --smoke-output-dir <dir>         Smoke session output dir, default ${DEFAULT_SMOKE_OUTPUT_DIR}
+  --smoke-timeout-ms <ms>          Forwarded to dingtalk-p4-smoke-session.mjs; 0 uses its default
   --output-dir <dir>               Output dir, default ${DEFAULT_OUTPUT_ROOT}/<run-id>
   --timeout-ms <ms>                Forwarded to regression gate
   --allow-failures                 Exit 0 but still write fail/manual_pending status
@@ -29,8 +34,8 @@ Options:
 
 Typical flow:
   node scripts/ops/dingtalk-p4-release-readiness.mjs
-  # If overallStatus is pass, run:
-  node scripts/ops/dingtalk-p4-smoke-session.mjs --env-file ${DEFAULT_ENV_FILE} --require-manual-targets --output-dir output/dingtalk-p4-remote-smoke-session/142-session
+  # Or collapse readiness + smoke handoff into one command:
+  node scripts/ops/dingtalk-p4-release-readiness.mjs --run-smoke-session --smoke-output-dir ${DEFAULT_SMOKE_OUTPUT_DIR}
 `)
 }
 
@@ -62,6 +67,9 @@ function parseArgs(argv) {
     p4EnvFile: DEFAULT_ENV_FILE,
     regressionProfile: 'ops',
     regressionPlanOnly: false,
+    runSmokeSession: false,
+    smokeOutputDir: path.resolve(process.cwd(), DEFAULT_SMOKE_OUTPUT_DIR),
+    smokeTimeoutMs: 0,
     outputDir: '',
     timeoutMs: 0,
     allowFailures: false,
@@ -80,6 +88,17 @@ function parseArgs(argv) {
         break
       case '--regression-plan-only':
         opts.regressionPlanOnly = true
+        break
+      case '--run-smoke-session':
+        opts.runSmokeSession = true
+        break
+      case '--smoke-output-dir':
+        opts.smokeOutputDir = path.resolve(process.cwd(), readRequiredValue(argv, i, arg))
+        i += 1
+        break
+      case '--smoke-timeout-ms':
+        opts.smokeTimeoutMs = parsePositiveInteger(readRequiredValue(argv, i, arg), arg, { allowZero: true })
+        i += 1
         break
       case '--output-dir':
         opts.outputDir = path.resolve(process.cwd(), readRequiredValue(argv, i, arg))
@@ -160,6 +179,11 @@ function runNodeTool(args) {
   }
 }
 
+function writeTextFile(file, content) {
+  mkdirSync(path.dirname(file), { recursive: true })
+  writeFileSync(file, `${redactString(content ?? '')}`, 'utf8')
+}
+
 function readJsonIfExists(file) {
   if (!existsSync(file)) return null
   return JSON.parse(readFileSync(file, 'utf8'))
@@ -235,6 +259,46 @@ function runRegressionGate(opts, regressionDir) {
   }
 }
 
+function runSmokeSession(opts) {
+  const scriptPath = process.env[SMOKE_SESSION_SCRIPT_ENV] || 'scripts/ops/dingtalk-p4-smoke-session.mjs'
+  const stdoutLog = path.join(opts.outputDir, 'smoke-session.stdout.log')
+  const stderrLog = path.join(opts.outputDir, 'smoke-session.stderr.log')
+  const args = [
+    scriptPath,
+    '--env-file',
+    opts.p4EnvFile,
+    '--require-manual-targets',
+    '--output-dir',
+    opts.smokeOutputDir,
+  ]
+  if (opts.smokeTimeoutMs > 0) args.push('--timeout-ms', String(opts.smokeTimeoutMs))
+  const result = runNodeTool(args)
+  writeTextFile(stdoutLog, result.stdout)
+  writeTextFile(stderrLog, result.stderr)
+  const sessionSummaryJson = path.join(opts.smokeOutputDir, 'session-summary.json')
+  const sessionSummaryMd = path.join(opts.smokeOutputDir, 'session-summary.md')
+  const smokeStatusJson = path.join(opts.smokeOutputDir, 'smoke-status.json')
+  const smokeStatusMd = path.join(opts.smokeOutputDir, 'smoke-status.md')
+  const smokeTodoMd = path.join(opts.smokeOutputDir, 'smoke-todo.md')
+  const sessionSummary = readJsonIfExists(sessionSummaryJson)
+  return {
+    requested: true,
+    status: result.exitCode === 0 ? 'pass' : 'fail',
+    exitCode: result.exitCode,
+    outputDir: relativePath(opts.smokeOutputDir),
+    stdoutLog: relativePath(stdoutLog),
+    stderrLog: relativePath(stderrLog),
+    sessionSummaryJson: existsSync(sessionSummaryJson) ? relativePath(sessionSummaryJson) : null,
+    sessionSummaryMd: existsSync(sessionSummaryMd) ? relativePath(sessionSummaryMd) : null,
+    smokeStatusJson: existsSync(smokeStatusJson) ? relativePath(smokeStatusJson) : null,
+    smokeStatusMd: existsSync(smokeStatusMd) ? relativePath(smokeStatusMd) : null,
+    smokeTodoMd: existsSync(smokeTodoMd) ? relativePath(smokeTodoMd) : null,
+    sessionPhase: sessionSummary?.sessionPhase ?? null,
+    overallStatus: sessionSummary?.overallStatus ?? null,
+    finalStrictStatus: sessionSummary?.finalStrictStatus ?? null,
+  }
+}
+
 function computeOverallStatus(checks) {
   if (checks.some((check) => check.status === 'fail')) return 'fail'
   if (checks.some((check) => check.status === 'skipped')) return 'manual_pending'
@@ -263,17 +327,48 @@ function renderMarkdown(summary) {
     lines.push(`| \`${gate.id}\` | ${gate.status} | ${gate.exitCode} | ${summaryLink} | ${failedChecks} |`)
   }
 
+  if (summary.smokeSession?.requested) {
+    lines.push('')
+    lines.push('## Smoke Session')
+    lines.push('')
+    lines.push(`- Status: **${summary.smokeSession.status}**`)
+    if (summary.smokeSession.reason) {
+      lines.push(`- Reason: \`${summary.smokeSession.reason}\``)
+    }
+    if (summary.smokeSession.outputDir) {
+      lines.push(`- Output dir: \`${summary.smokeSession.outputDir}\``)
+    }
+    if (summary.smokeSession.sessionSummaryMd) {
+      lines.push(`- Session summary: [md](${summary.smokeSession.sessionSummaryMd})`)
+    }
+    if (summary.smokeSession.smokeStatusMd) {
+      lines.push(`- Smoke status: [md](${summary.smokeSession.smokeStatusMd})`)
+    }
+    if (summary.smokeSession.smokeTodoMd) {
+      lines.push(`- Smoke todo: [md](${summary.smokeSession.smokeTodoMd})`)
+    }
+    if (summary.smokeSession.stdoutLog) {
+      lines.push(`- Logs: [stdout](${summary.smokeSession.stdoutLog}) / [stderr](${summary.smokeSession.stderrLog})`)
+    }
+  }
+
   lines.push('')
   lines.push('## Next Step')
   lines.push('')
-  if (summary.overallStatus === 'pass') {
+  if (summary.runSmokeSession) {
+    if (summary.smokeSession?.status === 'pass') {
+      lines.push('Smoke session was started automatically after readiness passed. Continue with manual DingTalk evidence collection inside the generated session workspace.')
+    } else {
+      lines.push('Smoke session was requested but not completed successfully. Resolve the blocking gate or smoke-session failure first, then rerun this command.')
+    }
+  } else if (summary.overallStatus === 'pass') {
     lines.push('Run the final remote smoke session:')
     lines.push('')
     lines.push('```bash')
     lines.push(`node scripts/ops/dingtalk-p4-smoke-session.mjs \\`)
     lines.push(`  --env-file ${shellQuote(summary.p4EnvFile)} \\`)
     lines.push('  --require-manual-targets \\')
-    lines.push('  --output-dir output/dingtalk-p4-remote-smoke-session/142-session')
+    lines.push(`  --output-dir ${summary.defaultSmokeOutputDir}`)
     lines.push('```')
   } else {
     lines.push('Do not run the final remote smoke yet. Resolve failed gates first, then rerun this readiness command.')
@@ -297,7 +392,24 @@ function run(opts) {
     runEnvReadiness(opts, envDir),
     runRegressionGate(opts, regressionDir),
   ]
-  const overallStatus = computeOverallStatus(gates)
+  const readinessStatus = computeOverallStatus(gates)
+  let smokeSession = {
+    requested: opts.runSmokeSession,
+    status: 'not_requested',
+  }
+  let overallStatus = readinessStatus
+  if (opts.runSmokeSession) {
+    if (readinessStatus === 'pass') {
+      smokeSession = runSmokeSession(opts)
+      if (smokeSession.status !== 'pass') overallStatus = 'fail'
+    } else {
+      smokeSession = {
+        requested: true,
+        status: 'blocked',
+        reason: readinessStatus === 'manual_pending' ? 'regression_plan_only' : 'release_readiness_failed',
+      }
+    }
+  }
   const summary = sanitizeValue({
     tool: 'dingtalk-p4-release-readiness',
     schemaVersion: SCHEMA_VERSION,
@@ -306,8 +418,11 @@ function run(opts) {
     p4EnvFile: opts.p4EnvFile,
     regressionProfile: opts.regressionProfile,
     regressionPlanOnly: opts.regressionPlanOnly,
+    runSmokeSession: opts.runSmokeSession,
+    defaultSmokeOutputDir: DEFAULT_SMOKE_OUTPUT_DIR,
     overallStatus,
     gates,
+    smokeSession,
   })
 
   const jsonPath = path.join(opts.outputDir, 'release-readiness-summary.json')

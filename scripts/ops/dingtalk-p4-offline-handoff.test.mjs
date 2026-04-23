@@ -218,7 +218,7 @@ function runSyncScript(script, args) {
   })
 }
 
-function fillManualEvidence(sessionDir) {
+function fillManualEvidence(sessionDir, { finalizeWhenReady = false } = {}) {
   const evidencePath = path.join(sessionDir, 'workspace', 'evidence.json')
   const evidence = JSON.parse(readFileSync(evidencePath, 'utf8'))
   for (const check of evidence.checks) {
@@ -244,6 +244,7 @@ function fillManualEvidence(sessionDir) {
       `${check.id} verified in offline handoff chain`,
       '--artifact',
       artifactRef,
+      ...(finalizeWhenReady ? ['--finalize-when-ready'] : []),
       ...(check.id === 'unauthorized-user-denied'
         ? [
             '--submit-blocked',
@@ -298,14 +299,14 @@ test('DingTalk P4 offline handoff chain reaches release-ready without leaking se
     assertNoSecrets(sessionResult.stdout)
     assertNoSecrets(readFileSync(path.join(sessionDir, 'session-summary.json'), 'utf8'))
 
-    fillManualEvidence(sessionDir)
+    fillManualEvidence(sessionDir, { finalizeWhenReady: true })
 
-    const finalizeResult = runSyncScript(sessionScript, ['--finalize', sessionDir])
-    assert.equal(finalizeResult.status, 0, finalizeResult.stderr || finalizeResult.stdout)
     const finalizedSummary = JSON.parse(readFileSync(path.join(sessionDir, 'session-summary.json'), 'utf8'))
+    assert.equal(finalizedSummary.sessionPhase, 'finalize')
     assert.equal(finalizedSummary.overallStatus, 'pass')
     assert.equal(finalizedSummary.finalStrictStatus, 'pass')
     assert.equal(finalizedSummary.nextCommands.some((command) => command.includes('dingtalk-p4-smoke-status.mjs')), true)
+    assert.equal(finalizedSummary.nextCommands.some((command) => command.includes('dingtalk-p4-final-closeout.mjs')), true)
 
     const handoffResult = runSyncScript(handoffScript, [
       '--session-dir',
