@@ -86,6 +86,15 @@ import {
   type RecordWriteHelpers,
   type YjsInvalidator,
 } from '../multitable/record-write-service'
+import {
+  RecordService,
+  VersionConflictError as RecordServiceVersionConflictError,
+  RecordNotFoundError as RecordServiceNotFoundError,
+  RecordValidationError as RecordServiceValidationError,
+  RecordFieldForbiddenError as RecordServiceFieldForbiddenError,
+  RecordPermissionError as RecordServicePermissionError,
+  RecordValidationFailedError as RecordCreateValidationFailedError,
+} from '../multitable/record-service'
 
 const multitableFormulaEngine = new MultitableFormulaEngine()
 
@@ -7734,228 +7743,47 @@ export function univerMetaRouter(): Router {
       })
       const sheetId = resolved.sheetId
 
-      const sheetRes = await pool.query(
-        'SELECT id FROM meta_sheets WHERE id = $1 AND deleted_at IS NULL',
-        [sheetId],
-      )
-      if (sheetRes.rows.length === 0) {
-        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
-      }
       const { access, capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!access.userId) {
         return res.status(401).json({ error: 'Authentication required' })
       }
-      if (!capabilities.canCreateRecord) return sendForbidden(res)
-
-      const fieldRes = await pool.query(
-        'SELECT id, name, type, property FROM meta_fields WHERE sheet_id = $1',
-        [sheetId],
-      )
-      if (fieldRes.rows.length === 0) {
-        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
-      }
-
-      const fieldById = new Map<string, { type: UniverMetaField['type']; options?: string[]; link?: LinkFieldConfig | null }>()
-      for (const f of fieldRes.rows as any[]) {
-        const type = mapFieldType(String(f.type ?? 'string'))
-        if (type === 'select') {
-          const options = extractSelectOptions(f.property)?.map(o => o.value) ?? []
-          fieldById.set(String(f.id), { type, options })
-          continue
-        }
-        if (type === 'link') {
-          fieldById.set(String(f.id), { type, link: parseLinkFieldConfig(f.property) })
-          continue
-        }
-        fieldById.set(String(f.id), { type })
-      }
-
-      const patch: Record<string, unknown> = {}
-      const linkUpdates = new Map<string, { ids: string[]; cfg: LinkFieldConfig }>()
-      for (const [fieldId, value] of Object.entries(data)) {
-        const field = fieldById.get(fieldId)
-        if (!field) {
-          return res.status(400).json({
-            ok: false,
-            error: { code: 'VALIDATION_ERROR', message: `Unknown fieldId: ${fieldId}` },
-          })
-        }
-
-        if (field.type === 'lookup' || field.type === 'rollup') {
-          return res.status(403).json({
-            ok: false,
-            error: { code: 'FIELD_READONLY', message: `Field is readonly: ${fieldId}` },
-          })
-        }
-
-        if (field.type === 'select') {
-          if (typeof value !== 'string') {
-            return res.status(400).json({
-              ok: false,
-              error: { code: 'VALIDATION_ERROR', message: `Select value must be string: ${fieldId}` },
-            })
-          }
-          const allowed = new Set(field.options ?? [])
-          if (value !== '' && !allowed.has(value)) {
-            return res.status(400).json({
-              ok: false,
-              error: { code: 'VALIDATION_ERROR', message: `Invalid select option for ${fieldId}: ${value}` },
-            })
-          }
-        }
-
-        if (field.type === 'link') {
-          if (field.link) {
-            const ids = normalizeLinkIds(value)
-            if (field.link.limitSingleRecord && ids.length > 1) {
-              return res.status(400).json({
-                ok: false,
-                error: { code: 'VALIDATION_ERROR', message: `Link field only allows a single record: ${fieldId}` },
-              })
-            }
-            const tooLong = ids.find((id) => id.length > 50)
-            if (tooLong) {
-              return res.status(400).json({
-                ok: false,
-                error: { code: 'VALIDATION_ERROR', message: `Link id too long (>50): ${tooLong}` },
-              })
-            }
-
-            if (ids.length > 0) {
-              const exists = await pool.query(
-                'SELECT id FROM meta_records WHERE sheet_id = $1 AND id = ANY($2::text[])',
-                [field.link.foreignSheetId, ids],
-              )
-              const found = new Set((exists as any).rows.map((r: any) => String(r.id)))
-              const missing = ids.filter((id) => !found.has(id))
-              if (missing.length > 0) {
-                return res.status(400).json({
-                  ok: false,
-                  error: {
-                    code: 'VALIDATION_ERROR',
-                    message: `Linked record(s) not found in sheet ${field.link.foreignSheetId}: ${missing.join(', ')}`,
-                  },
-                })
-              }
-            }
-
-            patch[fieldId] = ids
-            linkUpdates.set(fieldId, { ids, cfg: field.link })
-            continue
-          }
-
-          if (typeof value !== 'string') {
-            return res.status(400).json({
-              ok: false,
-              error: { code: 'VALIDATION_ERROR', message: `Link value must be string: ${fieldId}` },
-            })
-          }
-        }
-
-        if (field.type === 'attachment') {
-          const ids = normalizeAttachmentIds(value)
-          const tooLong = ids.find((id) => id.length > 100)
-          if (tooLong) {
-            return res.status(400).json({
-              ok: false,
-              error: { code: 'VALIDATION_ERROR', message: `Attachment id too long: ${tooLong}` },
-            })
-          }
-          const attachmentError = await ensureAttachmentIdsExist(pool.query.bind(pool), sheetId, fieldId, ids)
-          if (attachmentError) {
-            return res.status(400).json({
-              ok: false,
-              error: { code: 'VALIDATION_ERROR', message: attachmentError },
-            })
-          }
-          patch[fieldId] = ids
-          continue
-        }
-
-        if (field.type === 'formula') {
-          if (typeof value !== 'string') continue
-          if (value !== '' && !value.startsWith('=')) continue
-        }
-
-        patch[fieldId] = value
-      }
-
-      // --- Field validation rules (direct record create) ---
-      const directValidationFields = (fieldRes.rows as any[]).map((f: any) => {
-        const prop = normalizeJson(f.property) as Record<string, unknown> | undefined
-        const fType = mapFieldType(String(f.type ?? 'string'))
-        const explicitRules = Array.isArray(prop?.validation) ? prop!.validation as FieldValidationConfig : undefined
-        const defaultRules = getDefaultValidationRules(fType, prop ?? undefined)
-        const mergedRules = explicitRules ?? defaultRules
-        return {
-          id: String(f.id),
-          name: String(f.name ?? f.id),
-          type: fType,
-          config: mergedRules.length > 0 ? { validation: mergedRules } : undefined,
-        }
+      const recordService = new RecordService(pool, eventBus)
+      const result = await recordService.createRecord({
+        sheetId,
+        capabilities,
+        actorId: getRequestActorId(req),
+        data,
       })
-      const directValidationResult = validateRecord(directValidationFields, patch)
-      if (!directValidationResult.valid) {
+
+      return res.json({
+        ok: true,
+        data: {
+          record: {
+            id: result.recordId,
+            version: result.version,
+            data: result.data,
+          },
+        },
+      })
+    } catch (err) {
+      if (err instanceof RecordCreateValidationFailedError) {
         return res.status(422).json({
           error: 'VALIDATION_FAILED',
           message: 'Record validation failed',
-          fieldErrors: directValidationResult.errors,
+          fieldErrors: err.fieldErrors,
         })
       }
-
-      const recordId = `rec_${randomUUID()}`
-      const recordRes = await pool.transaction(async ({ query }) => {
-        const inserted = await query(
-          `INSERT INTO meta_records (id, sheet_id, data, version, created_by)
-           VALUES ($1, $2, $3::jsonb, 1, $4)
-           RETURNING version`,
-          [recordId, sheetId, JSON.stringify(patch), getRequestActorId(req)],
-        )
-
-        if (linkUpdates.size > 0) {
-          for (const [fieldId, { ids }] of linkUpdates.entries()) {
-            for (const foreignId of ids) {
-              await query(
-                `INSERT INTO meta_links (id, field_id, record_id, foreign_record_id)
-                 VALUES ($1, $2, $3, $4)
-                 ON CONFLICT DO NOTHING`,
-                [buildId('lnk').slice(0, 50), fieldId, recordId, foreignId],
-              )
-            }
-          }
-        }
-
-        return inserted
-      })
-
-      const version = Number((recordRes.rows[0] as any)?.version ?? 1)
-      publishMultitableSheetRealtime({
-        spreadsheetId: sheetId,
-        actorId: getRequestActorId(req),
-        source: 'multitable',
-        kind: 'record-created',
-        recordId,
-        recordIds: [recordId],
-        fieldIds: Object.keys(patch),
-        recordPatches: [{
-          recordId,
-          version,
-          patch,
-        }],
-      })
-      eventBus.emit('multitable.record.created', {
-        sheetId,
-        recordId,
-        data: patch,
-        actorId: getRequestActorId(req),
-      })
-      return res.json({ ok: true, data: { record: { id: recordId, version, data: patch } } })
-    } catch (err) {
-      if (err instanceof ValidationError) {
-        return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: err.message } })
+      if (err instanceof RecordServiceFieldForbiddenError) {
+        return res.status(403).json({ ok: false, error: { code: err.code, message: err.message } })
       }
-      if (err instanceof NotFoundError) {
+      if (err instanceof RecordServiceValidationError || err instanceof ServiceValidationError) {
+        return res.status(400).json({ ok: false, error: { code: err.code || 'VALIDATION_ERROR', message: err.message } })
+      }
+      if (err instanceof RecordServiceNotFoundError || err instanceof ServiceNotFoundError) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: err.message } })
+      }
+      if (err instanceof RecordServicePermissionError) {
+        return sendForbidden(res, err.message)
       }
       const hint = getDbNotReadyMessage(err)
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
@@ -7979,67 +7807,27 @@ export function univerMetaRouter(): Router {
       if (!access.userId) {
         return res.status(401).json({ error: 'Authentication required' })
       }
-      let deletedSheetId: string | null = null
-      const recordRes = await pool.query('SELECT id, sheet_id, created_by FROM meta_records WHERE id = $1', [recordId])
-      if (recordRes.rows.length === 0) {
-        throw new NotFoundError(`Record not found: ${recordId}`)
-      }
-      deletedSheetId = typeof (recordRes.rows[0] as any)?.sheet_id === 'string' ? String((recordRes.rows[0] as any).sheet_id) : null
-      if (deletedSheetId) {
-        const { capabilities, sheetScope } = await resolveSheetCapabilities(req, pool.query.bind(pool), deletedSheetId)
-        if (!capabilities.canDeleteRecord) return sendForbidden(res)
-        if (!ensureRecordWriteAllowed(
-          capabilities,
-          sheetScope,
-          access,
-          typeof (recordRes.rows[0] as any)?.created_by === 'string' ? String((recordRes.rows[0] as any).created_by) : null,
-          'delete',
-        )) return sendForbidden(res, 'Record deletion is not allowed for this row')
-      }
-      await pool.transaction(async ({ query }) => {
-        const recordRes = await query('SELECT id, sheet_id, version FROM meta_records WHERE id = $1 FOR UPDATE', [recordId])
-        if ((recordRes as any).rows.length === 0) {
-          throw new NotFoundError(`Record not found: ${recordId}`)
-        }
-
-        const currentRow: any = (recordRes as any).rows[0]
-        deletedSheetId = typeof currentRow?.sheet_id === 'string' ? currentRow.sheet_id : null
-        const serverVersion = Number(currentRow?.version ?? 1)
-        if (typeof expectedVersion === 'number' && expectedVersion !== serverVersion) {
-          throw new VersionConflictError(recordId, serverVersion)
-        }
-
-        try {
-          await query('DELETE FROM meta_links WHERE record_id = $1 OR foreign_record_id = $1', [recordId])
-        } catch (err) {
-          if (!isUndefinedTableError(err, 'meta_links')) throw err
-        }
-
-        await query('DELETE FROM meta_records WHERE id = $1', [recordId])
+      const recordService = new RecordService(pool, eventBus)
+      await recordService.deleteRecord({
+        recordId,
+        actorId: getRequestActorId(req),
+        expectedVersion,
+        access,
+        resolveSheetAccess: async (sheetId) => {
+          const { capabilities, sheetScope } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+          return { capabilities, ...(sheetScope ? { sheetScope } : {}) }
+        },
       })
-
-      if (deletedSheetId) {
-        publishMultitableSheetRealtime({
-          spreadsheetId: deletedSheetId,
-          actorId: getRequestActorId(req),
-          source: 'multitable',
-          kind: 'record-deleted',
-          recordId,
-          recordIds: [recordId],
-        })
-        eventBus.emit('multitable.record.deleted', {
-          sheetId: deletedSheetId,
-          recordId,
-          actorId: getRequestActorId(req),
-        })
-      }
 
       return res.json({ ok: true, data: { deleted: recordId } })
     } catch (err) {
-      if (err instanceof NotFoundError) {
+      if (err instanceof RecordServicePermissionError) {
+        return sendForbidden(res, err.message)
+      }
+      if (err instanceof RecordServiceNotFoundError || err instanceof ServiceNotFoundError) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: err.message } })
       }
-      if (err instanceof VersionConflictError) {
+      if (err instanceof RecordServiceVersionConflictError || err instanceof ServiceVersionConflictError) {
         return res.status(409).json({
           ok: false,
           error: {
