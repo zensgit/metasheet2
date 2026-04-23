@@ -291,6 +291,28 @@ describe('Public form flow', () => {
     expect(res.body.error?.code).toBe('DINGTALK_GRANT_REQUIRED')
   })
 
+  test('dingtalk-granted form rejects submit from a bound user without grant', async () => {
+    const { app, mockPool } = await createApp({
+      queryHandler: buildQueryHandler(VALID_TOKEN, {
+        accessMode: 'dingtalk_granted',
+        hasDingTalkBinding: true,
+        hasDingTalkGrant: false,
+      }),
+      user: { id: 'user_bound' },
+    })
+
+    const res = await request(app)
+      .post(`/api/multitable/views/${TEST_VIEW_ID}/submit?publicToken=${VALID_TOKEN}`)
+      .send({
+        publicToken: VALID_TOKEN,
+        data: { fld_1: 'Alice', fld_2: 'alice@test.com' },
+      })
+
+    expect(res.status).toBe(403)
+    expect(res.body.error?.code).toBe('DINGTALK_GRANT_REQUIRED')
+    expect(mockPool.query.mock.calls.some(([sql]) => String(sql).includes('INSERT INTO meta_records'))).toBe(false)
+  })
+
   test('dingtalk-protected form rejects a bound user outside the allowlist', async () => {
     const { app } = await createApp({
       queryHandler: buildQueryHandler(VALID_TOKEN, {
