@@ -407,6 +407,160 @@ describe('ApprovalGraphExecutor', () => {
       },
     ])
   })
+
+  it('advances past the join when one joinMode=any branch reaches the join', () => {
+    const runtimeGraph: RuntimeGraph = {
+      nodes: [
+        { key: 'start', type: 'start', config: {} },
+        {
+          key: 'parallel_fork',
+          type: 'parallel',
+          config: {
+            branches: ['edge-fork-a', 'edge-fork-b'],
+            joinMode: 'any',
+            joinNodeKey: 'finance-review',
+          },
+        },
+        {
+          key: 'legal-review',
+          type: 'approval',
+          config: { assigneeType: 'user', assigneeIds: ['legal-1'] },
+        },
+        {
+          key: 'compliance-review',
+          type: 'approval',
+          config: { assigneeType: 'user', assigneeIds: ['compliance-1'] },
+        },
+        {
+          key: 'finance-review',
+          type: 'approval',
+          config: { assigneeType: 'user', assigneeIds: ['finance-1'] },
+        },
+        { key: 'end', type: 'end', config: {} },
+      ],
+      edges: [
+        { key: 'edge-start-fork', source: 'start', target: 'parallel_fork' },
+        { key: 'edge-fork-a', source: 'parallel_fork', target: 'legal-review' },
+        { key: 'edge-fork-b', source: 'parallel_fork', target: 'compliance-review' },
+        { key: 'edge-a-join', source: 'legal-review', target: 'finance-review' },
+        { key: 'edge-b-join', source: 'compliance-review', target: 'finance-review' },
+        { key: 'edge-finance-end', source: 'finance-review', target: 'end' },
+      ],
+      policy: { allowRevoke: true },
+    }
+
+    const executor = new ApprovalGraphExecutor(runtimeGraph, {})
+    const initial = executor.resolveInitialState()
+
+    expect(initial.currentNodeKey).toBe('parallel_fork')
+    expect(initial.parallelState!.joinMode).toBe('any')
+    expect([...(initial.currentNodeKeys || [])].sort()).toEqual([
+      'compliance-review',
+      'legal-review',
+    ])
+
+    const afterLegal = executor.resolveAfterApproveInParallel('legal-review', initial.parallelState!)
+    expect(afterLegal.status).toBe('pending')
+    expect(afterLegal.currentNodeKey).toBe('finance-review')
+    expect(afterLegal.currentNodeKeys).toBeUndefined()
+    expect(afterLegal.parallelState!.branches['edge-fork-a']).toEqual({
+      edgeKey: 'edge-fork-a',
+      currentNodeKey: null,
+      complete: true,
+    })
+    expect(afterLegal.parallelState!.branches['edge-fork-b']).toEqual({
+      edgeKey: 'edge-fork-b',
+      currentNodeKey: 'compliance-review',
+      complete: false,
+    })
+    expect(afterLegal.assignments).toEqual([
+      {
+        assignmentType: 'user',
+        assigneeId: 'finance-1',
+        nodeKey: 'finance-review',
+        sourceStep: 3,
+      },
+    ])
+  })
+
+  it('preserves pre-parallel events when a joinMode=any branch auto-completes during fanout', () => {
+    const runtimeGraph: RuntimeGraph = {
+      nodes: [
+        { key: 'start', type: 'start', config: {} },
+        { key: 'notify-before-fork', type: 'cc', config: { targetType: 'role', targetIds: ['ops'] } },
+        {
+          key: 'parallel_fork',
+          type: 'parallel',
+          config: {
+            branches: ['edge-fork-auto', 'edge-fork-pending'],
+            joinMode: 'any',
+            joinNodeKey: 'finance-review',
+          },
+        },
+        {
+          key: 'auto-review',
+          type: 'approval',
+          config: {
+            assigneeType: 'user',
+            assigneeIds: [],
+            approvalMode: 'all',
+            emptyAssigneePolicy: 'auto-approve',
+          },
+        },
+        {
+          key: 'compliance-review',
+          type: 'approval',
+          config: { assigneeType: 'user', assigneeIds: ['compliance-1'] },
+        },
+        {
+          key: 'finance-review',
+          type: 'approval',
+          config: { assigneeType: 'user', assigneeIds: ['finance-1'] },
+        },
+        { key: 'end', type: 'end', config: {} },
+      ],
+      edges: [
+        { key: 'edge-start-notify', source: 'start', target: 'notify-before-fork' },
+        { key: 'edge-notify-fork', source: 'notify-before-fork', target: 'parallel_fork' },
+        { key: 'edge-fork-auto', source: 'parallel_fork', target: 'auto-review' },
+        { key: 'edge-fork-pending', source: 'parallel_fork', target: 'compliance-review' },
+        { key: 'edge-auto-join', source: 'auto-review', target: 'finance-review' },
+        { key: 'edge-pending-join', source: 'compliance-review', target: 'finance-review' },
+        { key: 'edge-finance-end', source: 'finance-review', target: 'end' },
+      ],
+      policy: { allowRevoke: true },
+    }
+
+    const executor = new ApprovalGraphExecutor(runtimeGraph, {})
+    const initial = executor.resolveInitialState()
+
+    expect(initial.status).toBe('pending')
+    expect(initial.currentNodeKey).toBe('finance-review')
+    expect(initial.parallelState).toBeUndefined()
+    expect(initial.assignments).toEqual([
+      {
+        assignmentType: 'user',
+        assigneeId: 'finance-1',
+        nodeKey: 'finance-review',
+        sourceStep: 3,
+      },
+    ])
+    expect(initial.ccEvents).toEqual([
+      {
+        nodeKey: 'notify-before-fork',
+        targetType: 'role',
+        targetId: 'ops',
+      },
+    ])
+    expect(initial.autoApprovalEvents).toEqual([
+      {
+        nodeKey: 'auto-review',
+        sourceStep: 1,
+        approvalMode: 'all',
+        reason: 'empty-assignee',
+      },
+    ])
+  })
 })
 
 describe('validateApprovalFormData', () => {

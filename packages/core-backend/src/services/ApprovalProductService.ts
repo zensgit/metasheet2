@@ -1502,6 +1502,7 @@ export class ApprovalProductService {
       //                    (aggregateCancelledBy/aggregateCancelledAt metadata) + one 'sign' record.
       //   'single' / default: exactly one assignee expected; blanket-deactivate all active rows.
       let aggregateCancelledAssigneeIds: string[] = []
+      let parallelCancelledAssigneeIds: string[] = []
       if (approvalMode === 'all') {
         await this.deactivateActorAssignmentsAtNode(client, id, currentNodeKey, actor.userId, actorRoles)
         const remainingAssignments = currentNodeAssignments.length - actorAssignments.length
@@ -1575,6 +1576,47 @@ export class ApprovalProductService {
         ? executor.resolveAfterApproveInParallel(actorBranchNodeKey, parallelState)
         : executor.resolveAfterApprove(currentNodeKey)
 
+      const parallelAnyWinner =
+        isInParallelRegion
+        && parallelState?.joinMode === 'any'
+        && resolution.currentNodeKey !== parallelState.parallelNodeKey
+      if (parallelAnyWinner && parallelState) {
+        const pendingSiblingNodeKeys = new Set(
+          Object.values(parallelState.branches)
+            .filter((entry) => !entry.complete && entry.currentNodeKey && entry.currentNodeKey !== currentNodeKey)
+            .map((entry) => entry.currentNodeKey as string),
+        )
+        const siblingAssignments = assignments.rows.filter((assignment) =>
+          assignment.is_active
+          && assignment.node_key
+          && pendingSiblingNodeKeys.has(assignment.node_key))
+        parallelCancelledAssigneeIds = Array.from(
+          new Set(siblingAssignments.map((assignment) => assignment.assignee_id)),
+        )
+        if (siblingAssignments.length > 0) {
+          await client.query(
+            `UPDATE approval_assignments
+             SET is_active = FALSE,
+                 metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object(
+                   'parallelCancelledBy', $3::text,
+                   'parallelCancelledAt', now()::text,
+                   'parallelJoinMode', 'any',
+                   'parallelNodeKey', $4::text
+                 ),
+                 updated_at = now()
+             WHERE instance_id = $1
+               AND is_active = TRUE
+               AND id = ANY($2::uuid[])`,
+            [
+              id,
+              siblingAssignments.map((assignment) => assignment.id),
+              actor.userId,
+              parallelState.parallelNodeKey,
+            ],
+          )
+        }
+      }
+
       // Manage parallel branch state in `approval_instances.metadata`:
       //   - If the resolution's `currentNodeKey` equals a parallel fork node
       //     (either the same one we were already inside, or a brand-new
@@ -1633,6 +1675,10 @@ export class ApprovalProductService {
         approveRecordMetadata.parallelNodeKey = parallelState?.parallelNodeKey
         approveRecordMetadata.parallelBranchComplete =
           resolution.currentNodeKey !== parallelState?.parallelNodeKey
+        if (parallelAnyWinner) {
+          approveRecordMetadata.parallelJoinMode = 'any'
+          approveRecordMetadata.parallelCancelledAssignees = parallelCancelledAssigneeIds
+        }
       }
       if (approvalMode === 'any' && aggregateCancelledAssigneeIds.length > 0) {
         approveRecordMetadata.aggregateCancelled = aggregateCancelledAssigneeIds
@@ -1666,6 +1712,26 @@ export class ApprovalProductService {
             aggregateMode: 'any',
             aggregateCancelledBy: actor.userId,
             cancelledAssignees: aggregateCancelledAssigneeIds,
+          },
+        })
+      }
+      if (parallelAnyWinner && parallelCancelledAssigneeIds.length > 0) {
+        await this.insertApprovalRecord(client, id, {
+          action: 'sign',
+          actorId: 'system',
+          actorName: 'System',
+          comment: null,
+          fromStatus: instance.status,
+          toStatus: resolution.status,
+          fromVersion: instance.version,
+          toVersion: nextVersion,
+          metadata: {
+            nodeKey: currentNodeKey,
+            parallelAutoCancelled: true,
+            parallelJoinMode: 'any',
+            parallelNodeKey: parallelState?.parallelNodeKey,
+            parallelCancelledBy: actor.userId,
+            cancelledAssignees: parallelCancelledAssigneeIds,
           },
         })
       }
