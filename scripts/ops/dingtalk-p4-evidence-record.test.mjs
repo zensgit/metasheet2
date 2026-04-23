@@ -72,6 +72,13 @@ function setCheckPassEvidence(sessionDir, evidence, checkId) {
       performedAt: '2026-04-23T10:00:00.000Z',
       summary: 'Admin created and bound a no-email DingTalk-synced local user; temporary password is redacted.',
       artifacts: [primaryArtifact, secondaryArtifact],
+      adminEvidence: {
+        emailWasBlank: true,
+        createdLocalUserId: 'local_no_email_001',
+        boundDingTalkExternalId: 'dt_no_email_001',
+        accountLinkedAfterRefresh: true,
+        temporaryPasswordRedacted: true,
+      },
     }
     return
   }
@@ -443,6 +450,12 @@ test('dingtalk-p4-evidence-record auto-finalizes once refreshed smoke status rea
       artifactRefA,
       '--artifact',
       artifactRefB,
+      '--admin-email-was-blank',
+      '--admin-created-local-user-id',
+      'local_no_email_001',
+      '--admin-bound-dingtalk-external-id',
+      'dt_no_email_001',
+      '--admin-account-linked-after-refresh',
       '--finalize-when-ready',
     ], {
       env: {
@@ -458,6 +471,15 @@ test('dingtalk-p4-evidence-record auto-finalizes once refreshed smoke status rea
     assert.equal(sessionSummary.sessionPhase, 'finalize')
     assert.equal(sessionSummary.overallStatus, 'pass')
     assert.equal(sessionSummary.finalStrictStatus, 'pass')
+    const evidence = JSON.parse(readFileSync(path.join(sessionDir, 'workspace/evidence.json'), 'utf8'))
+    const noEmail = evidence.checks.find((check) => check.id === 'no-email-user-create-bind')
+    assert.deepEqual(noEmail.evidence.adminEvidence, {
+      emailWasBlank: true,
+      createdLocalUserId: 'local_no_email_001',
+      boundDingTalkExternalId: 'dt_no_email_001',
+      accountLinkedAfterRefresh: true,
+      temporaryPasswordRedacted: true,
+    })
   } finally {
     rmSync(tmpDir, { recursive: true, force: true })
   }
@@ -494,6 +516,12 @@ test('dingtalk-p4-evidence-record auto-runs final closeout once refreshed smoke 
       artifactRefA,
       '--artifact',
       artifactRefB,
+      '--admin-email-was-blank',
+      '--admin-created-local-user-id',
+      'local_no_email_001',
+      '--admin-bound-dingtalk-external-id',
+      'dt_no_email_001',
+      '--admin-account-linked-after-refresh',
       '--closeout-when-ready',
       '--closeout-packet-output-dir',
       packetDir,
@@ -693,6 +721,72 @@ test('dingtalk-p4-evidence-record rejects manual pass evidence without artifacts
 
     assert.equal(result.status, 1)
     assert.match(result.stderr, /requires at least one --artifact/)
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+
+test('dingtalk-p4-evidence-record rejects no-email admin pass evidence without structured admin fields', () => {
+  const tmpDir = makeTmpDir()
+  const sessionDir = path.join(tmpDir, 'session')
+
+  try {
+    writeEvidence(sessionDir)
+    const artifactRef = writeArtifact(sessionDir, 'no-email-user-create-bind', 'admin-create-bind-result.png')
+
+    const result = runScript([
+      '--session-dir',
+      sessionDir,
+      '--check-id',
+      'no-email-user-create-bind',
+      '--status',
+      'pass',
+      '--source',
+      'manual-admin',
+      '--operator',
+      'qa-admin',
+      '--summary',
+      'No-email user was created and bound.',
+      '--artifact',
+      artifactRef,
+    ])
+
+    assert.equal(result.status, 1)
+    assert.match(result.stderr, /requires --admin-email-was-blank/)
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+
+test('dingtalk-p4-evidence-record rejects admin evidence flags for non-admin checks', () => {
+  const tmpDir = makeTmpDir()
+  const sessionDir = path.join(tmpDir, 'session')
+
+  try {
+    writeEvidence(sessionDir)
+    const artifactRef = writeArtifact(sessionDir, 'authorized-user-submit')
+
+    const result = runScript([
+      '--session-dir',
+      sessionDir,
+      '--check-id',
+      'authorized-user-submit',
+      '--status',
+      'pass',
+      '--source',
+      'manual-client',
+      '--operator',
+      'qa',
+      '--summary',
+      'Allowed user submit proof.',
+      '--artifact',
+      artifactRef,
+      '--admin-created-local-user-id',
+      'local_no_email_001',
+    ])
+
+    assert.equal(result.status, 1)
+    assert.match(result.stderr, /admin evidence flags can only be used with no-email-user-create-bind/)
   } finally {
     rmSync(tmpDir, { recursive: true, force: true })
   }

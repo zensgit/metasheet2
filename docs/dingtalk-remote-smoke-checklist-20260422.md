@@ -229,10 +229,14 @@ node scripts/ops/dingtalk-p4-evidence-record.mjs \
   --operator qa-admin \
   --summary "Admin created and bound a no-email DingTalk-synced local user; temporary password is redacted." \
   --artifact artifacts/no-email-user-create-bind/admin-create-bind-result.png \
-  --artifact artifacts/no-email-user-create-bind/account-linked-after-refresh.png
+  --artifact artifacts/no-email-user-create-bind/account-linked-after-refresh.png \
+  --admin-email-was-blank \
+  --admin-created-local-user-id <local-user-id> \
+  --admin-bound-dingtalk-external-id <dingtalk-external-id> \
+  --admin-account-linked-after-refresh
 ```
 
-The generated `evidence.json` also includes a `adminEvidence` helper object for this check. Fill `emailWasBlank`, `createdLocalUserId`, `boundDingTalkExternalId`, and `accountLinkedAfterRefresh` before final strict compile when that information is available.
+The recorder writes the `adminEvidence` helper object for this check. Final strict compile requires `emailWasBlank: true`, `createdLocalUserId`, `boundDingTalkExternalId`, `accountLinkedAfterRefresh: true`, and `temporaryPasswordRedacted: true`.
 
 If the current evidence update is expected to complete all remaining remote-smoke checks, prefer `--closeout-when-ready`. The recorder will refresh smoke status first, then auto-run the final closeout chain only when the session is actually ready:
 
@@ -246,6 +250,10 @@ node scripts/ops/dingtalk-p4-evidence-record.mjs \
   --summary "Admin created and bound a no-email DingTalk-synced local user; temporary password is redacted." \
   --artifact artifacts/no-email-user-create-bind/admin-create-bind-result.png \
   --artifact artifacts/no-email-user-create-bind/account-linked-after-refresh.png \
+  --admin-email-was-blank \
+  --admin-created-local-user-id <local-user-id> \
+  --admin-bound-dingtalk-external-id <dingtalk-external-id> \
+  --admin-account-linked-after-refresh \
   --closeout-when-ready \
   --closeout-packet-output-dir artifacts/dingtalk-staging-evidence-packet/142-final \
   --closeout-docs-output-dir docs/development \

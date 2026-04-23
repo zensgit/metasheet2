@@ -244,6 +244,16 @@ function fillManualEvidence(sessionDir, { finalizeWhenReady = false } = {}) {
       `${check.id} verified in offline handoff chain`,
       '--artifact',
       artifactRef,
+      ...(check.id === 'no-email-user-create-bind'
+        ? [
+            '--admin-email-was-blank',
+            '--admin-created-local-user-id',
+            'local_no_email_001',
+            '--admin-bound-dingtalk-external-id',
+            'dt_no_email_001',
+            '--admin-account-linked-after-refresh',
+          ]
+        : []),
       ...(finalizeWhenReady ? ['--finalize-when-ready'] : []),
       ...(check.id === 'unauthorized-user-denied'
         ? [

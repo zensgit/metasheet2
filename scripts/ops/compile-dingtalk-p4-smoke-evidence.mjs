@@ -624,6 +624,54 @@ function validateUnauthorizedDeniedEvidence(evidence) {
   return issues
 }
 
+function validateNoEmailAdminEvidence(evidence) {
+  const issues = []
+  const adminEvidence = evidence?.adminEvidence
+  if (!adminEvidence || typeof adminEvidence !== 'object' || Array.isArray(adminEvidence)) {
+    return [{
+      id: 'no-email-user-create-bind',
+      code: 'admin_evidence_object_required',
+      message: 'no-email-user-create-bind pass evidence requires evidence.adminEvidence',
+    }]
+  }
+  if (adminEvidence.emailWasBlank !== true) {
+    issues.push({
+      id: 'no-email-user-create-bind',
+      code: 'email_was_blank_required',
+      message: 'no-email-user-create-bind pass evidence requires evidence.adminEvidence.emailWasBlank=true',
+    })
+  }
+  if (!isNonEmptyString(adminEvidence.createdLocalUserId)) {
+    issues.push({
+      id: 'no-email-user-create-bind',
+      code: 'created_local_user_id_required',
+      message: 'no-email-user-create-bind pass evidence requires evidence.adminEvidence.createdLocalUserId',
+    })
+  }
+  if (!isNonEmptyString(adminEvidence.boundDingTalkExternalId)) {
+    issues.push({
+      id: 'no-email-user-create-bind',
+      code: 'bound_dingtalk_external_id_required',
+      message: 'no-email-user-create-bind pass evidence requires evidence.adminEvidence.boundDingTalkExternalId',
+    })
+  }
+  if (adminEvidence.accountLinkedAfterRefresh !== true) {
+    issues.push({
+      id: 'no-email-user-create-bind',
+      code: 'account_linked_after_refresh_required',
+      message: 'no-email-user-create-bind pass evidence requires evidence.adminEvidence.accountLinkedAfterRefresh=true',
+    })
+  }
+  if (adminEvidence.temporaryPasswordRedacted !== true) {
+    issues.push({
+      id: 'no-email-user-create-bind',
+      code: 'temporary_password_redacted_required',
+      message: 'no-email-user-create-bind pass evidence requires evidence.adminEvidence.temporaryPasswordRedacted=true',
+    })
+  }
+  return issues
+}
+
 function validateManualEvidenceRequirements(checksById, evidenceDir, opts) {
   const issues = []
   for (const requirement of MANUAL_EVIDENCE_REQUIREMENTS) {
@@ -680,6 +728,9 @@ function validateManualEvidenceRequirements(checksById, evidenceDir, opts) {
     }
     if (requirement.id === 'unauthorized-user-denied') {
       issues.push(...validateUnauthorizedDeniedEvidence(evidence))
+    }
+    if (requirement.id === 'no-email-user-create-bind') {
+      issues.push(...validateNoEmailAdminEvidence(evidence))
     }
   }
   return issues

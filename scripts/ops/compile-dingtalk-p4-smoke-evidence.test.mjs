@@ -45,6 +45,17 @@ function makePassingEvidenceForCheck(id, extras = {}) {
             blockedReason: 'Visible form error showed the user is not in the DingTalk allowlist.',
           }
         : {}),
+      ...(id === 'no-email-user-create-bind'
+        ? {
+            adminEvidence: {
+              emailWasBlank: true,
+              createdLocalUserId: 'local_no_email_001',
+              boundDingTalkExternalId: 'dt_no_email_001',
+              accountLinkedAfterRefresh: true,
+              temporaryPasswordRedacted: true,
+            },
+          }
+        : {}),
       ...extras,
     }
   }
@@ -496,6 +507,53 @@ test('compile-dingtalk-p4-smoke-evidence strict mode requires structured unautho
     assert.equal(summary.manualEvidenceIssues.some((issue) => issue.code === 'submit_blocked_required'), true)
     assert.equal(summary.manualEvidenceIssues.some((issue) => issue.code === 'record_insert_delta_zero_required'), true)
     assert.equal(summary.manualEvidenceIssues.some((issue) => issue.code === 'blocked_reason_required'), true)
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+
+test('compile-dingtalk-p4-smoke-evidence strict mode requires structured no-email admin evidence', () => {
+  const tmpDir = makeTmpDir()
+  const evidencePath = path.join(tmpDir, 'evidence.json')
+  const outputDir = path.join(tmpDir, 'compiled')
+
+  try {
+    writeEvidence(evidencePath, {
+      checks: requiredIds.map((id) => ({
+        id,
+        status: 'pass',
+        evidence: makePassingEvidenceForCheck(id, id === 'no-email-user-create-bind'
+          ? {
+              adminEvidence: {
+                emailWasBlank: false,
+                createdLocalUserId: '',
+                boundDingTalkExternalId: '',
+                accountLinkedAfterRefresh: false,
+                temporaryPasswordRedacted: false,
+              },
+            }
+          : {}),
+      })),
+    })
+
+    const result = spawnSync(process.execPath, [scriptPath, '--input', evidencePath, '--output-dir', outputDir, '--strict'], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+    })
+
+    assert.equal(result.status, 1)
+    assert.match(result.stderr, /email_was_blank_required/)
+    assert.match(result.stderr, /created_local_user_id_required/)
+    assert.match(result.stderr, /bound_dingtalk_external_id_required/)
+    assert.match(result.stderr, /account_linked_after_refresh_required/)
+    assert.match(result.stderr, /temporary_password_redacted_required/)
+    const summary = JSON.parse(readFileSync(path.join(outputDir, 'summary.json'), 'utf8'))
+    assert.equal(summary.overallStatus, 'fail')
+    assert.equal(summary.manualEvidenceIssues.some((issue) => issue.code === 'email_was_blank_required'), true)
+    assert.equal(summary.manualEvidenceIssues.some((issue) => issue.code === 'created_local_user_id_required'), true)
+    assert.equal(summary.manualEvidenceIssues.some((issue) => issue.code === 'bound_dingtalk_external_id_required'), true)
+    assert.equal(summary.manualEvidenceIssues.some((issue) => issue.code === 'account_linked_after_refresh_required'), true)
+    assert.equal(summary.manualEvidenceIssues.some((issue) => issue.code === 'temporary_password_redacted_required'), true)
   } finally {
     rmSync(tmpDir, { recursive: true, force: true })
   }

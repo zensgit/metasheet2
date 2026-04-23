@@ -49,6 +49,17 @@ function makePassingEvidenceForCheck(id) {
             blockedReason: 'Visible error showed the user is not in the allowlist.',
           }
         : {}),
+      ...(id === 'no-email-user-create-bind'
+        ? {
+            adminEvidence: {
+              emailWasBlank: true,
+              createdLocalUserId: 'local_no_email_001',
+              boundDingTalkExternalId: 'dt_no_email_001',
+              accountLinkedAfterRefresh: true,
+              temporaryPasswordRedacted: true,
+            },
+          }
+        : {}),
     }
   }
   return {

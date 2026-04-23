@@ -80,6 +80,13 @@ Options:
   --before-record-count <n>  Set evidence.beforeRecordCount
   --after-record-count <n>   Set evidence.afterRecordCount
   --blocked-reason <text>    Set evidence.blockedReason
+  --admin-email-was-blank    Set evidence.adminEvidence.emailWasBlank=true for no-email-user-create-bind
+  --admin-created-local-user-id <id>
+                             Set evidence.adminEvidence.createdLocalUserId
+  --admin-bound-dingtalk-external-id <id>
+                             Set evidence.adminEvidence.boundDingTalkExternalId
+  --admin-account-linked-after-refresh
+                             Set evidence.adminEvidence.accountLinkedAfterRefresh=true
   --no-refresh-status        Skip automatic smoke-status refresh after write
   --finalize-when-ready      After refresh, auto-run --finalize when smoke status is ready
   --closeout-when-ready      After refresh, auto-run final closeout when smoke status is ready
@@ -129,6 +136,10 @@ function parseArgs(argv) {
     beforeRecordCount: null,
     afterRecordCount: null,
     blockedReason: '',
+    adminEmailWasBlank: null,
+    adminCreatedLocalUserId: '',
+    adminBoundDingTalkExternalId: '',
+    adminAccountLinkedAfterRefresh: null,
     noRefreshStatus: false,
     finalizeWhenReady: false,
     closeoutWhenReady: false,
@@ -200,6 +211,20 @@ function parseArgs(argv) {
       case '--blocked-reason':
         opts.blockedReason = readRequiredValue(argv, i, arg).trim()
         i += 1
+        break
+      case '--admin-email-was-blank':
+        opts.adminEmailWasBlank = true
+        break
+      case '--admin-created-local-user-id':
+        opts.adminCreatedLocalUserId = readRequiredValue(argv, i, arg).trim()
+        i += 1
+        break
+      case '--admin-bound-dingtalk-external-id':
+        opts.adminBoundDingTalkExternalId = readRequiredValue(argv, i, arg).trim()
+        i += 1
+        break
+      case '--admin-account-linked-after-refresh':
+        opts.adminAccountLinkedAfterRefresh = true
         break
       case '--no-refresh-status':
         opts.noRefreshStatus = true
@@ -331,6 +356,10 @@ function isDateLike(value) {
   return Number.isFinite(Date.parse(value))
 }
 
+function isNonEmptyString(value) {
+  return typeof value === 'string' && value.trim().length > 0
+}
+
 function normalizeArtifactRef(value) {
   const normalized = value.replaceAll('\\', '/').trim()
   if (!normalized) throw new Error('artifact ref cannot be empty')
@@ -408,6 +437,32 @@ function validateUnauthorizedDeniedPass(opts) {
   }
 }
 
+function hasNoEmailAdminInputs(opts) {
+  return opts.adminEmailWasBlank !== null
+    || isNonEmptyString(opts.adminCreatedLocalUserId)
+    || isNonEmptyString(opts.adminBoundDingTalkExternalId)
+    || opts.adminAccountLinkedAfterRefresh !== null
+}
+
+function validateNoEmailAdminPass(opts) {
+  if (hasNoEmailAdminInputs(opts) && opts.checkId !== 'no-email-user-create-bind') {
+    throw new Error('admin evidence flags can only be used with no-email-user-create-bind')
+  }
+  if (opts.checkId !== 'no-email-user-create-bind' || opts.status !== 'pass') return
+  if (opts.adminEmailWasBlank !== true) {
+    throw new Error('no-email-user-create-bind pass evidence requires --admin-email-was-blank')
+  }
+  if (!isNonEmptyString(opts.adminCreatedLocalUserId)) {
+    throw new Error('no-email-user-create-bind pass evidence requires --admin-created-local-user-id')
+  }
+  if (!isNonEmptyString(opts.adminBoundDingTalkExternalId)) {
+    throw new Error('no-email-user-create-bind pass evidence requires --admin-bound-dingtalk-external-id')
+  }
+  if (opts.adminAccountLinkedAfterRefresh !== true) {
+    throw new Error('no-email-user-create-bind pass evidence requires --admin-account-linked-after-refresh')
+  }
+}
+
 function validateInputs(opts) {
   for (const [label, value] of [
     ['--source', opts.source],
@@ -415,6 +470,8 @@ function validateInputs(opts) {
     ['--summary', opts.summary],
     ['--notes', opts.notes],
     ['--blocked-reason', opts.blockedReason],
+    ['--admin-created-local-user-id', opts.adminCreatedLocalUserId],
+    ['--admin-bound-dingtalk-external-id', opts.adminBoundDingTalkExternalId],
   ]) {
     assertNoSecretText(value, label)
   }
@@ -423,6 +480,7 @@ function validateInputs(opts) {
   }
   validateManualPass(opts)
   validateUnauthorizedDeniedPass(opts)
+  validateNoEmailAdminPass(opts)
 }
 
 function findCheck(evidence, checkId) {
@@ -444,7 +502,32 @@ function buildEvidencePayload(opts, artifactRefs) {
   if (opts.beforeRecordCount !== null) payload.beforeRecordCount = opts.beforeRecordCount
   if (opts.afterRecordCount !== null) payload.afterRecordCount = opts.afterRecordCount
   if (opts.blockedReason) payload.blockedReason = opts.blockedReason
+  if (opts.checkId === 'no-email-user-create-bind' && opts.status === 'pass') {
+    payload.adminEvidence = {
+      emailWasBlank: true,
+      createdLocalUserId: opts.adminCreatedLocalUserId,
+      boundDingTalkExternalId: opts.adminBoundDingTalkExternalId,
+      accountLinkedAfterRefresh: true,
+      temporaryPasswordRedacted: true,
+    }
+  }
   return payload
+}
+
+function mergeEvidencePayload(previousEvidence, payload) {
+  const next = {
+    ...previousEvidence,
+    ...payload,
+  }
+  if (previousEvidence.adminEvidence || payload.adminEvidence) {
+    next.adminEvidence = {
+      ...(previousEvidence.adminEvidence && typeof previousEvidence.adminEvidence === 'object' && !Array.isArray(previousEvidence.adminEvidence)
+        ? previousEvidence.adminEvidence
+        : {}),
+      ...(payload.adminEvidence ?? {}),
+    }
+  }
+  return next
 }
 
 function runNodeTool(script, args) {
@@ -603,10 +686,7 @@ function updateEvidence(evidence, opts) {
   const updatedCheck = {
     ...check,
     status: opts.status,
-    evidence: {
-      ...previousEvidence,
-      ...buildEvidencePayload(opts, artifactRefs),
-    },
+    evidence: mergeEvidencePayload(previousEvidence, buildEvidencePayload(opts, artifactRefs)),
   }
   evidence.checks[index] = updatedCheck
   evidence.updatedAt = new Date().toISOString()

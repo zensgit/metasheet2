@@ -62,6 +62,15 @@ function evidenceForCheck(sessionDir, id) {
     evidence.recordInsertDelta = 0
     evidence.blockedReason = 'Visible error showed the user is not in the allowlist.'
   }
+  if (id === 'no-email-user-create-bind') {
+    evidence.adminEvidence = {
+      emailWasBlank: true,
+      createdLocalUserId: 'local_no_email_001',
+      boundDingTalkExternalId: 'dt_no_email_001',
+      accountLinkedAfterRefresh: true,
+      temporaryPasswordRedacted: true,
+    }
+  }
   return evidence
 }
 

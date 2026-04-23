@@ -230,6 +230,11 @@ test('dingtalk-p4-smoke-status suggests a concrete no-email admin evidence comma
     const noEmailTodo = summary.remoteSmokeTodos.items.find((item) => item.id === 'no-email-user-create-bind')
     assert.match(noEmailTodo.evidenceRecordCommand, /manual-admin/)
     assert.match(noEmailTodo.evidenceRecordCommand, /admin-create-bind-result\.png/)
+    assert.match(noEmailTodo.evidenceRecordCommand, /account-linked-after-refresh\.png/)
+    assert.match(noEmailTodo.evidenceRecordCommand, /--admin-email-was-blank/)
+    assert.match(noEmailTodo.evidenceRecordCommand, /--admin-created-local-user-id/)
+    assert.match(noEmailTodo.evidenceRecordCommand, /--admin-bound-dingtalk-external-id/)
+    assert.match(noEmailTodo.evidenceRecordCommand, /--admin-account-linked-after-refresh/)
   } finally {
     rmSync(tmpDir, { recursive: true, force: true })
   }

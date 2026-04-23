@@ -432,6 +432,18 @@ function evidenceRecordCommandForCheck(opts, check) {
       '"<visible denial reason>"',
     )
   }
+  if (check.id === 'no-email-user-create-bind') {
+    args.push(
+      '--artifact',
+      'artifacts/no-email-user-create-bind/account-linked-after-refresh.png',
+      '--admin-email-was-blank',
+      '--admin-created-local-user-id',
+      '<local-user-id>',
+      '--admin-bound-dingtalk-external-id',
+      '<dingtalk-external-id>',
+      '--admin-account-linked-after-refresh',
+    )
+  }
   return sessionCommand(opts, args.join(' '))
 }
 

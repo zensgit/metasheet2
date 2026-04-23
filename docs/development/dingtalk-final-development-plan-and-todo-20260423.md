@@ -154,6 +154,10 @@ node scripts/ops/dingtalk-p4-evidence-record.mjs \
   --summary "Admin created and bound a no-email DingTalk-synced local user; temporary password is redacted." \
   --artifact artifacts/no-email-user-create-bind/admin-create-bind-result.png \
   --artifact artifacts/no-email-user-create-bind/account-linked-after-refresh.png \
+  --admin-email-was-blank \
+  --admin-created-local-user-id <local-user-id> \
+  --admin-bound-dingtalk-external-id <dingtalk-external-id> \
+  --admin-account-linked-after-refresh \
   --closeout-when-ready \
   --closeout-packet-output-dir artifacts/dingtalk-staging-evidence-packet/142-final \
   --closeout-docs-output-dir docs/development \
@@ -163,6 +167,7 @@ node scripts/ops/dingtalk-p4-evidence-record.mjs \
 - `--finalize-when-ready` should be used only on the update that is expected to complete the remaining manual evidence. It refreshes smoke status first and only runs strict finalize when the session has actually reached `finalize_pending`.
 - `--closeout-when-ready` is the faster final path for the last manual evidence update. It refreshes smoke status first and only runs final closeout when the session has actually reached `finalize_pending`.
 - Do not combine `--finalize-when-ready` and `--closeout-when-ready`; use the former for targeted debugging and the latter for the normal final handoff chain.
+- No-email admin evidence is now strict: final compile requires `adminEvidence.emailWasBlank: true`, `createdLocalUserId`, `boundDingTalkExternalId`, `accountLinkedAfterRefresh: true`, and `temporaryPasswordRedacted: true`.
 
 ## Finalization
 
