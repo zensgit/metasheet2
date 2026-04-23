@@ -334,6 +334,42 @@ test('compile-dingtalk-p4-smoke-evidence strict mode rejects empty manual artifa
   }
 })
 
+test('compile-dingtalk-p4-smoke-evidence strict mode rejects secret-like manual artifact files', () => {
+  const tmpDir = makeTmpDir()
+  const evidencePath = path.join(tmpDir, 'evidence.json')
+  const outputDir = path.join(tmpDir, 'compiled')
+  const artifactRef = manualArtifactRefForCheck('authorized-user-submit')
+  const rawWebhook = 'https://oapi.dingtalk.com/robot/send?access_token=robot-secret-token-0123456789'
+  const rawSecret = 'SECabcdefghijklmnop12345678'
+
+  try {
+    writeEvidence(evidencePath)
+    writeFileSync(path.join(tmpDir, artifactRef), `${rawWebhook}\n${rawSecret}\n`, 'utf8')
+
+    const result = spawnSync(process.execPath, [scriptPath, '--input', evidencePath, '--output-dir', outputDir, '--strict'], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+    })
+
+    assert.equal(result.status, 1)
+    assert.match(result.stderr, /artifact_secret_detected/)
+    assert.doesNotMatch(result.stderr, /robot-secret-token/)
+    assert.doesNotMatch(result.stderr, /SECabcdefghijklmnop12345678/)
+    const summaryText = readFileSync(path.join(outputDir, 'summary.json'), 'utf8')
+    assert.doesNotMatch(summaryText, /robot-secret-token/)
+    assert.doesNotMatch(summaryText, /SECabcdefghijklmnop12345678/)
+    const summary = JSON.parse(summaryText)
+    assert.equal(summary.overallStatus, 'fail')
+    assert.equal(summary.manualEvidenceIssues.some((issue) => (
+      issue.id === 'authorized-user-submit'
+        && issue.code === 'artifact_secret_detected'
+        && issue.artifactRef === artifactRef
+    )), true)
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+
 test('compile-dingtalk-p4-smoke-evidence strict mode rejects external artifacts unless explicitly allowed', () => {
   const tmpDir = makeTmpDir()
   const evidencePath = path.join(tmpDir, 'evidence.json')
