@@ -106,6 +106,11 @@ const requiredPacketFiles = [
     kind: 'script',
     description: 'orchestrates P4 preflight, API-only smoke workspace bootstrap, and non-strict evidence compile',
   },
+  {
+    path: 'scripts/ops/validate-dingtalk-staging-evidence-packet.mjs',
+    kind: 'script',
+    description: 'validates final gated evidence packets and scans for secret-like raw evidence before handoff',
+  },
 ]
 
 function printHelp() {
@@ -354,6 +359,7 @@ ${gateLine}
 9. Complete the manual DingTalk-client checks in \`<session-dir>/workspace/evidence.json\`.
 10. Finalize smoke evidence with \`node scripts/ops/dingtalk-p4-smoke-session.mjs --finalize <session-dir>\`.
 11. Re-export this packet with \`--include-output <session-dir> --require-dingtalk-p4-pass\` after finalization passes.
+12. Validate the release handoff with \`node scripts/ops/validate-dingtalk-staging-evidence-packet.mjs --packet-dir <packet-dir>\`.
 
 ## Non-Goals
 

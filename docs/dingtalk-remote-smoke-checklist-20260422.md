@@ -182,6 +182,16 @@ The packet exporter rejects the included session unless the final pass is machin
 - `requiredChecksNotPassed`, `manualEvidenceIssues`, `failedChecks`, and `missingRequiredChecks` must be arrays and empty.
 - The exporter does not create secrets, but it copies raw included evidence. Review and redact raw workspace/artifact files before release handoff.
 
+Before publishing or sending the packet, run the release handoff validator:
+
+```bash
+node scripts/ops/validate-dingtalk-staging-evidence-packet.mjs \
+  --packet-dir artifacts/dingtalk-staging-evidence-packet/142-final \
+  --output-json artifacts/dingtalk-staging-evidence-packet/142-final-publish-check.json
+```
+
+The validator fails unless the packet was exported with the final-pass gate, contains at least one passing P4 evidence directory, and does not contain common raw secret shapes such as DingTalk robot webhooks, `SEC...` secrets, bearer tokens, JWTs, client secrets, or public form tokens.
+
 ## Preflight Gate
 
 Before calling staging or DingTalk, run the preflight gate to check local tooling, required URLs, bearer token presence, DingTalk webhook format, optional `SEC...` secret format, allowlist inputs, and backend `/health`. It writes only redacted summaries.
