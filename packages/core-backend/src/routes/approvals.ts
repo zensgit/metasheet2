@@ -542,6 +542,253 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
     }
   })
 
+  // Wave 2 WP3 slice 1: count the current user's active pending assignments so
+  // the 待办 tab can render a red-badge indicator. Filtered by sourceSystem so
+  // the frontend can ask for `all | platform | plm` without fetching the full
+  // list. Semantics mirror the LIST pending tab's assignment rule uniformly
+  // across source systems (user OR role match on approval_assignments), which
+  // diverges from LIST's PLM-specific "status=pending without assignment
+  // join" branch on purpose — the task contract explicitly defines this count
+  // as `is_active=TRUE assignments for the current user`.
+  r.get('/api/approvals/pending-count', authenticate, rbacGuard('approvals', 'read'), async (req: Request, res: Response) => {
+    try {
+      if (!pool) {
+        return res.status(503).json(
+          approvalErrorResponse('APPROVALS_DATABASE_UNAVAILABLE', 'Database not available'),
+        )
+      }
+
+      const userId = resolveApprovalActorId(req)
+      if (!userId) {
+        return res.status(401).json(
+          approvalErrorResponse('APPROVAL_USER_REQUIRED', 'User ID not found in token'),
+        )
+      }
+
+      const rawSourceSystem = typeof req.query.sourceSystem === 'string' ? req.query.sourceSystem.trim() : ''
+      if (rawSourceSystem && !['platform', 'plm', 'all'].includes(rawSourceSystem)) {
+        return res.status(400).json(
+          approvalErrorResponse(
+            'APPROVAL_SOURCE_SYSTEM_INVALID',
+            "sourceSystem must be one of 'platform', 'plm', or 'all'",
+          ),
+        )
+      }
+      const sourceSystem = rawSourceSystem === 'all' || rawSourceSystem === ''
+        ? null
+        : (rawSourceSystem as 'platform' | 'plm')
+      const actorRoles = resolveApprovalActorRoles(req)
+      const actorRolesParam = actorRoles.length > 0 ? actorRoles : ['__none__']
+
+      const conditions: string[] = [
+        `a.is_active = TRUE`,
+        `i.status = 'pending'`,
+        `(
+          (a.assignment_type = 'user' AND a.assignee_id = $1)
+          OR (a.assignment_type = 'role' AND a.assignee_id = ANY($2))
+        )`,
+      ]
+      const params: unknown[] = [userId, actorRolesParam]
+
+      if (sourceSystem) {
+        conditions.push(`COALESCE(i.source_system, 'platform') = $${params.length + 1}`)
+        params.push(sourceSystem)
+      }
+
+      const countResult = await pool.query<{ count: string }>(
+        `SELECT COUNT(DISTINCT a.instance_id)::text AS count
+         FROM approval_assignments a
+         INNER JOIN approval_instances i ON i.id = a.instance_id
+         WHERE ${conditions.join(' AND ')}`,
+        params,
+      )
+
+      res.json({ count: parseInt(countResult.rows[0]?.count || '0', 10) })
+    } catch (error) {
+      handleApprovalsError(
+        res,
+        error,
+        'APPROVAL_PENDING_COUNT_FAILED',
+        'Failed to compute pending approval count',
+        () => res.json({ count: 0, degraded: true }),
+      )
+    }
+  })
+
+  // Wave 2 WP3 slice 1: 催办 (remind / nudge). Records a `remind` row on
+  // approval_records so the timeline preserves the nudge event; the task
+  // boundary explicitly defers external notification channels (IM/email/push)
+  // to Phase 3 Notification Hub. PLM-sourced approvals are recorded locally
+  // but not forwarded upstream (bridged=false in the response).
+  //
+  // Permission model: a dedicated endpoint rather than bolting onto
+  // `/actions` so that the requester — who may not hold `approvals:act` —
+  // can still nudge. Guarded by `approvals:read`, then the handler refines:
+  // requester OR `approvals:act` perm.
+  //
+  // Rate limit: at most 1 remind per instance per user per hour. Uses
+  // `occurred_at > now() - interval '1 hour'` so the clock lives in the DB
+  // and stays consistent with the recorded timestamp.
+  r.post('/api/approvals/:id/remind', authenticate, rbacGuard('approvals', 'read'), async (req: Request, res: Response) => {
+    try {
+      if (!pool) {
+        return res.status(503).json(
+          approvalErrorResponse('APPROVALS_DATABASE_UNAVAILABLE', 'Database not available'),
+        )
+      }
+
+      const userId = resolveApprovalActorId(req)
+      if (!userId) {
+        return res.status(401).json(
+          approvalErrorResponse('APPROVAL_USER_REQUIRED', 'User ID not found in token'),
+        )
+      }
+
+      const { id } = req.params
+      const userName = resolveApprovalActorName(req, userId)
+
+      const client = await pool.connect()
+      try {
+        await client.query('BEGIN')
+
+        const instanceResult = await client.query<{
+          id: string
+          status: string
+          source_system: string | null
+          requester_snapshot: { id?: string | null } | null
+        }>(
+          `SELECT id, status, source_system, requester_snapshot
+           FROM approval_instances
+           WHERE id = $1
+           FOR UPDATE`,
+          [id],
+        )
+
+        if (instanceResult.rows.length === 0) {
+          await client.query('ROLLBACK')
+          return res.status(404).json(
+            approvalErrorResponse('APPROVAL_NOT_FOUND', 'Approval instance not found'),
+          )
+        }
+
+        const instance = instanceResult.rows[0]
+        const requesterId = instance.requester_snapshot?.id ?? null
+        const actorPerms = Array.isArray(req.user?.permissions)
+          ? req.user!.permissions.filter((p): p is string => typeof p === 'string')
+          : []
+        const actorPermsFromToken = Array.isArray((req.user as { perms?: unknown })?.perms)
+          ? ((req.user as { perms: unknown }).perms as unknown[]).filter((p): p is string => typeof p === 'string')
+          : []
+        const combinedPerms = [...actorPerms, ...actorPermsFromToken]
+        const actorRoles = resolveApprovalActorRoles(req)
+        const isAdminUser = actorRoles.includes('admin') || req.user?.role === 'admin'
+        const hasActPerm = isAdminUser
+          || combinedPerms.includes('*:*')
+          || combinedPerms.includes('approvals:*')
+          || combinedPerms.includes('approvals:act')
+        const isRequester = requesterId != null && requesterId === userId
+
+        if (!isRequester && !hasActPerm) {
+          await client.query('ROLLBACK')
+          return res.status(403).json(
+            approvalErrorResponse(
+              'APPROVAL_REMIND_FORBIDDEN',
+              'Only the requester or an approver may remind this approval',
+            ),
+          )
+        }
+
+        if (instance.status !== 'pending') {
+          await client.query('ROLLBACK')
+          return res.status(400).json(
+            approvalErrorResponse(
+              'APPROVAL_REMIND_STATUS_INVALID',
+              `Cannot remind: current status is ${instance.status}`,
+            ),
+          )
+        }
+
+        // 1-hour soft rate limit — a previous remind by the same actor on
+        // the same instance within the window returns 429 and never writes
+        // a duplicate record.
+        const recentResult = await client.query<{ occurred_at: Date }>(
+          `SELECT occurred_at FROM approval_records
+           WHERE instance_id = $1
+             AND action = 'remind'
+             AND actor_id = $2
+             AND occurred_at > now() - INTERVAL '1 hour'
+           ORDER BY occurred_at DESC
+           LIMIT 1`,
+          [id, userId],
+        )
+
+        if (recentResult.rows.length > 0) {
+          await client.query('ROLLBACK')
+          const lastAt = recentResult.rows[0].occurred_at
+          const lastIso = lastAt instanceof Date ? lastAt.toISOString() : String(lastAt)
+          return res.status(429).json({
+            ok: false,
+            error: {
+              code: 'APPROVAL_REMIND_THROTTLED',
+              message: 'Remind is rate-limited to once per instance per hour',
+              lastRemindedAt: lastIso,
+              retryAfterSeconds: 3600,
+            },
+          })
+        }
+
+        const bridged = false
+        const metadata = {
+          remindedBy: userId,
+          remindedAt: new Date().toISOString(),
+          sourceSystem: instance.source_system ?? 'platform',
+          bridged,
+        }
+
+        await client.query(
+          `INSERT INTO approval_records
+           (instance_id, action, actor_id, actor_name, comment, from_status, to_status, from_version, to_version, metadata, ip_address, user_agent)
+           VALUES ($1, 'remind', $2, $3, NULL, $4, $4, 0, 0, $5, $6, $7)`,
+          [
+            id,
+            userId,
+            userName,
+            instance.status,
+            JSON.stringify(metadata),
+            req.ip || null,
+            req.get('user-agent') || null,
+          ],
+        )
+
+        await client.query('COMMIT')
+
+        logger.info(`Approval ${id} reminded by ${userId}`)
+        res.json({
+          ok: true,
+          data: {
+            id,
+            action: 'remind',
+            remindedAt: metadata.remindedAt,
+            bridged,
+            sourceSystem: metadata.sourceSystem,
+          },
+        })
+      } catch (innerError) {
+        await client.query('ROLLBACK')
+        throw innerError
+      } finally {
+        client.release()
+      }
+    } catch (error) {
+      handleApprovalsError(
+        res,
+        error,
+        'APPROVAL_REMIND_FAILED',
+        'Failed to remind approval',
+      )
+    }
+  })
+
   r.post('/api/approvals/:id/actions', authenticate, rbacGuard('approvals', 'act'), async (req: Request, res: Response) => {
     try {
       const bridgeService = getBridgeService(options)

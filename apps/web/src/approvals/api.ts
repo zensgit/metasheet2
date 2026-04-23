@@ -5,7 +5,7 @@
  * Uses apiFetch/apiGet/apiPost from project utils.
  * Includes mock fallback for development when backend is not available.
  */
-import { apiGet, apiPost } from '../utils/api'
+import { apiFetch, apiGet, apiPost } from '../utils/api'
 import type {
   ApprovalTemplateListItemDTO,
   ApprovalTemplateDetailDTO,
@@ -410,6 +410,106 @@ export async function createApproval(req: CreateApprovalRequest): Promise<Unifie
     }
   }
   return apiPost('/api/approvals', req)
+}
+
+/**
+ * Wave 2 WP3 slice 1 — pending count (红点数据源).
+ *
+ * Returns the total active-assignment count for the current user, scoped by
+ * source system. Used by the 待办 tab badge; the response is intentionally
+ * scalar so the caller does not need to fetch the full list just to render
+ * the indicator.
+ */
+export interface PendingCountResponse {
+  count: number
+  degraded?: boolean
+}
+
+export async function getPendingCount(
+  sourceSystem: 'all' | 'platform' | 'plm' = 'all',
+): Promise<PendingCountResponse> {
+  if (USE_MOCK) {
+    const fallback = sourceSystem === 'platform' ? 2 : sourceSystem === 'plm' ? 1 : 3
+    return { count: fallback }
+  }
+  const qs = sourceSystem ? `?sourceSystem=${encodeURIComponent(sourceSystem)}` : ''
+  return apiGet(`/api/approvals/pending-count${qs}`)
+}
+
+/**
+ * Wave 2 WP3 slice 1 — 催办 result shape. Exposes the 429 throttle state so
+ * the UI can surface "已在 N 分钟前催办过" instead of a generic error.
+ */
+export type RemindApprovalResult =
+  | {
+      ok: true
+      data: {
+        id: string
+        action: 'remind'
+        remindedAt: string
+        bridged: boolean
+        sourceSystem: string | null
+      }
+    }
+  | {
+      ok: false
+      error: {
+        code: string
+        message: string
+        lastRemindedAt?: string
+        retryAfterSeconds?: number
+      }
+      status: number
+    }
+
+/**
+ * Send a remind event on an approval instance.
+ *
+ * Uses `apiFetch` directly (not `apiPost`) so the caller can branch on the
+ * 429 rate-limit status without losing the `lastRemindedAt` hint carried in
+ * the response body.
+ */
+export async function remindApproval(id: string): Promise<RemindApprovalResult> {
+  if (USE_MOCK) {
+    return {
+      ok: true,
+      data: {
+        id,
+        action: 'remind',
+        remindedAt: new Date().toISOString(),
+        bridged: false,
+        sourceSystem: 'platform',
+      },
+    }
+  }
+  const response = await apiFetch(`/api/approvals/${encodeURIComponent(id)}/remind`, {
+    method: 'POST',
+    body: JSON.stringify({}),
+  })
+  const payload = await response.json().catch(() => null)
+  if (response.status === 429) {
+    return {
+      ok: false,
+      error: {
+        code: payload?.error?.code ?? 'APPROVAL_REMIND_THROTTLED',
+        message: payload?.error?.message ?? 'Remind is rate-limited',
+        lastRemindedAt: payload?.error?.lastRemindedAt,
+        retryAfterSeconds: payload?.error?.retryAfterSeconds,
+      },
+      status: 429,
+    }
+  }
+  if (!response.ok) {
+    return {
+      ok: false,
+      error: {
+        code: payload?.error?.code ?? 'APPROVAL_REMIND_FAILED',
+        message: payload?.error?.message ?? `API error: ${response.status} ${response.statusText}`,
+      },
+      status: response.status,
+    }
+  }
+  return payload as RemindApprovalResult
 }
 
 export async function dispatchAction(
