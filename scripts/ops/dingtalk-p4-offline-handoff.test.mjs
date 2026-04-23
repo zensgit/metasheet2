@@ -11,6 +11,7 @@ const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../
 const sessionScript = path.join(repoRoot, 'scripts', 'ops', 'dingtalk-p4-smoke-session.mjs')
 const handoffScript = path.join(repoRoot, 'scripts', 'ops', 'dingtalk-p4-final-handoff.mjs')
 const statusScript = path.join(repoRoot, 'scripts', 'ops', 'dingtalk-p4-smoke-status.mjs')
+const recordScript = path.join(repoRoot, 'scripts', 'ops', 'dingtalk-p4-evidence-record.mjs')
 const manualClientIds = new Set([
   'send-group-message-form-link',
   'authorized-user-submit',
@@ -226,16 +227,28 @@ function fillManualEvidence(sessionDir) {
     const artifactPath = path.join(sessionDir, 'workspace', artifactRef)
     mkdirSync(path.dirname(artifactPath), { recursive: true })
     writeFileSync(artifactPath, `${check.id} offline manual proof\n`, 'utf8')
-    check.status = 'pass'
-    check.evidence = {
-      source: manualClientIds.has(check.id) ? 'manual-client' : 'manual-admin',
-      operator: 'qa',
-      performedAt: '2026-04-23T10:00:00.000Z',
-      summary: `${check.id} verified in offline handoff chain`,
-      artifacts: [artifactRef],
-    }
+    const result = runSyncScript(recordScript, [
+      '--session-dir',
+      sessionDir,
+      '--check-id',
+      check.id,
+      '--status',
+      'pass',
+      '--source',
+      manualClientIds.has(check.id) ? 'manual-client' : 'manual-admin',
+      '--operator',
+      'qa',
+      '--performed-at',
+      '2026-04-23T10:00:00.000Z',
+      '--summary',
+      `${check.id} verified in offline handoff chain`,
+      '--artifact',
+      artifactRef,
+    ])
+    assert.equal(result.status, 0, result.stderr || result.stdout)
   }
-  writeFileSync(evidencePath, `${JSON.stringify(evidence, null, 2)}\n`, 'utf8')
+  const updated = JSON.parse(readFileSync(evidencePath, 'utf8'))
+  assert.equal(updated.updatedBy, 'dingtalk-p4-evidence-record')
 }
 
 function assertNoSecrets(value) {

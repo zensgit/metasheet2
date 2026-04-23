@@ -141,6 +141,7 @@ test('dingtalk-p4-smoke-status reports manual pending gaps for bootstrap session
     assert.equal(summary.overallStatus, 'manual_pending')
     assert.equal(summary.totals.gaps > 0, true)
     assert.equal(summary.requiredChecks.find((check) => check.id === 'authorized-user-submit').status, 'pending')
+    assert.equal(summary.nextCommands.some((command) => command.includes('dingtalk-p4-evidence-record.mjs')), true)
     assert.equal(summary.nextCommands.some((command) => command.includes('--finalize')), true)
     assert.equal(existsSync(path.join(sessionDir, 'smoke-status.md')), true)
   } finally {
