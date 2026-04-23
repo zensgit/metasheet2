@@ -82,6 +82,12 @@ CREATE INDEX IF NOT EXISTS idx_approval_templates_category_status
 
 源模板可以处于任意状态（`draft / published / archived`），克隆不因源状态阻塞，目的是让管理员从历史模板产出新方案。
 
+Bot-review hardening: clone key generation now retries on PostgreSQL unique
+violations (`23505`) before returning a deterministic
+`APPROVAL_TEMPLATE_CLONE_KEY_CONFLICT` service error. This keeps the normal
+path simple while avoiding an avoidable 500 if two clone requests hit the same
+six-hex suffix.
+
 ### 3.3 `/api/approval-templates/categories`
 
 新增 `GET /api/approval-templates/categories` 返回 `{ data: string[] }`，按字母序去重。用于前端模板中心的分类下拉过滤。
@@ -106,7 +112,7 @@ CREATE INDEX IF NOT EXISTS idx_approval_templates_category_status
   - `listTemplates` 增 `category` equality filter
   - `createTemplate` 持久化 `category`（normalize 后写入）
   - `updateTemplate` 把 `category` 并入 metadata patch —— 不触发新版本
-  - 新增 `listTemplateCategories()` 与 `cloneTemplate(id)`
+  - 新增 `listTemplateCategories()` 与 `cloneTemplate(id)`；`cloneTemplate` 对 key 唯一冲突做有限重试
   - 新增 `normalizeTemplateCategory` 校验（trim / ≤64 字 / 非字符串报 400）
 - `packages/core-backend/src/routes/approvals.ts`
   - LIST 接收 `?category=xxx`
@@ -128,7 +134,7 @@ CREATE INDEX IF NOT EXISTS idx_approval_templates_category_status
   - 工具栏新增 `<el-select>` 分类下拉
   - 每行新增分类标签列（未分组显示"未分组"）
   - 每行新增「克隆」按钮（`canManageTemplates` 门控）
-  - `handleClone()` → `cloneTemplate()` + 成功后路由到新模板 detail
+  - `handleClone()` → `cloneTemplate()` + 成功后路由到新模板 detail；分类刷新改为后台执行，避免阻塞跳转
 - `apps/web/src/views/approval/TemplateDetailView.vue`
   - 信息区新增模板分类行，展示 tag 或"未分组"
   - 管理员看到「编辑」按钮 → 展开 inline `<el-input>` → 「保存」调用 `updateTemplateCategory`
@@ -136,7 +142,7 @@ CREATE INDEX IF NOT EXISTS idx_approval_templates_category_status
 
 ### Tests
 
-- `packages/core-backend/tests/integration/approval-wp4-template-categories.api.test.ts` — 7 用例：create、detail、list filter、categories 端点、PATCH 不滚版本、克隆 happy path、403、404
+- `packages/core-backend/tests/integration/approval-wp4-template-categories.api.test.ts` — 8 用例：create、detail、list filter、categories 端点、PATCH 不滚版本、克隆 happy path、archived clone、403、404
 - `apps/web/tests/approvalTemplateCenterCategory.spec.ts` — 6 用例：下拉来源、过滤调用、清空过滤、分类列 tag、克隆调用+导航、克隆失败不导航
 
 ### 测试基础设施补充

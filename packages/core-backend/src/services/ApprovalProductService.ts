@@ -45,6 +45,7 @@ interface ApprovalTemplateListQuery {
 }
 
 type TemplateVersionPreference = 'active' | 'latest'
+const TEMPLATE_CLONE_KEY_ATTEMPTS = 3
 
 interface CreateApprovalActor {
   userId: string
@@ -80,6 +81,12 @@ type TemplateVersionRow = {
   approval_graph: Record<string, unknown>
   created_at: Date
   updated_at: Date
+}
+
+function isPostgresUniqueViolation(error: unknown): boolean {
+  return typeof error === 'object'
+    && error !== null
+    && (error as { code?: unknown }).code === '23505'
 }
 
 type PublishedDefinitionRow = {
@@ -1204,59 +1211,76 @@ export class ApprovalProductService {
       throw new ServiceError('Approval template has no version to clone', 400, 'APPROVAL_TEMPLATE_VERSION_NOT_FOUND')
     }
 
-    // `crypto.randomBytes(3).toString('hex')` yields exactly 6 hex chars.
-    // Low collision risk given small template count + uniqueness on `key`.
-    const copySuffix = crypto.randomBytes(3).toString('hex')
-    const newKey = `${source.template.key}_copy_${copySuffix}`
     const newName = `${source.template.name} (副本)`
 
-    let client: ApprovalDbClient | null = null
-    try {
-      client = await pool.connect()
-      await client.query('BEGIN')
+    for (let attempt = 0; attempt < TEMPLATE_CLONE_KEY_ATTEMPTS; attempt += 1) {
+      // `crypto.randomBytes(3).toString('hex')` yields exactly 6 hex chars.
+      const copySuffix = crypto.randomBytes(3).toString('hex')
+      const newKey = `${source.template.key}_copy_${copySuffix}`
+      let client: ApprovalDbClient | null = null
+      try {
+        client = await pool.connect()
+        await client.query('BEGIN')
 
-      const templateResult = await client.query<TemplateRow>(
-        `INSERT INTO approval_templates (key, name, description, category, status)
-         VALUES ($1, $2, $3, $4, 'draft')
-         RETURNING *`,
-        [newKey, newName, source.template.description, source.template.category ?? null],
-      )
-      let template = templateResult.rows[0]
+        const templateResult = await client.query<TemplateRow>(
+          `INSERT INTO approval_templates (key, name, description, category, status)
+           VALUES ($1, $2, $3, $4, 'draft')
+           RETURNING *`,
+          [newKey, newName, source.template.description, source.template.category ?? null],
+        )
+        let template = templateResult.rows[0]
 
-      const versionResult = await client.query<TemplateVersionRow>(
-        `INSERT INTO approval_template_versions (template_id, version, status, form_schema, approval_graph)
-         VALUES ($1, 1, 'draft', $2, $3)
-         RETURNING *`,
-        [
-          template.id,
-          JSON.stringify(source.version.form_schema),
-          JSON.stringify(source.version.approval_graph),
-        ],
-      )
-      const version = versionResult.rows[0]
+        const versionResult = await client.query<TemplateVersionRow>(
+          `INSERT INTO approval_template_versions (template_id, version, status, form_schema, approval_graph)
+           VALUES ($1, 1, 'draft', $2, $3)
+           RETURNING *`,
+          [
+            template.id,
+            JSON.stringify(source.version.form_schema),
+            JSON.stringify(source.version.approval_graph),
+          ],
+        )
+        const version = versionResult.rows[0]
 
-      const updatedTemplateResult = await client.query<TemplateRow>(
-        `UPDATE approval_templates
-         SET latest_version_id = $1, updated_at = now()
-         WHERE id = $2
-         RETURNING *`,
-        [version.id, template.id],
-      )
-      template = updatedTemplateResult.rows[0]
+        const updatedTemplateResult = await client.query<TemplateRow>(
+          `UPDATE approval_templates
+           SET latest_version_id = $1, updated_at = now()
+           WHERE id = $2
+           RETURNING *`,
+          [version.id, template.id],
+        )
+        template = updatedTemplateResult.rows[0]
 
-      await client.query('COMMIT')
+        await client.query('COMMIT')
 
-      return toApprovalTemplateDetailDTO({
-        template,
-        version,
-        publishedDefinition: null,
-      })
-    } catch (error) {
-      await rollbackQuietly(client)
-      throw error
-    } finally {
-      client?.release()
+        return toApprovalTemplateDetailDTO({
+          template,
+          version,
+          publishedDefinition: null,
+        })
+      } catch (error) {
+        await rollbackQuietly(client)
+        if (isPostgresUniqueViolation(error) && attempt < TEMPLATE_CLONE_KEY_ATTEMPTS - 1) {
+          continue
+        }
+        if (isPostgresUniqueViolation(error)) {
+          throw new ServiceError(
+            'Approval template clone key conflict',
+            409,
+            'APPROVAL_TEMPLATE_CLONE_KEY_CONFLICT',
+          )
+        }
+        throw error
+      } finally {
+        client?.release()
+      }
     }
+
+    throw new ServiceError(
+      'Approval template clone key conflict',
+      409,
+      'APPROVAL_TEMPLATE_CLONE_KEY_CONFLICT',
+    )
   }
 
   async createApproval(request: CreateApprovalRequest, actor: CreateApprovalActor): Promise<UnifiedApprovalDTO> {

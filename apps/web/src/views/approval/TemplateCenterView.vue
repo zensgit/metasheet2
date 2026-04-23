@@ -10,7 +10,6 @@
           data-testid="template-center-category-filter"
           style="width: 160px; margin-right: 12px"
           @change="handleCategoryChange"
-          @clear="handleCategoryChange"
         >
           <el-option
             v-for="category in categories"
@@ -263,9 +262,8 @@ async function handleClone(row: ApprovalTemplateListItemDTO) {
   try {
     const cloned = await cloneTemplate(row.id)
     ElMessage.success(`已克隆模板：${cloned.name}`)
-    // Refresh the category list in case the clone exposed a new value; then
-    // navigate the admin straight to the clone's detail page so they can edit.
-    await loadCategories()
+    // Refresh categories in the background; navigation should not wait on it.
+    void loadCategories()
     router.push({ path: `/approval-templates/${cloned.id}` })
   } catch (e: any) {
     ElMessage.error(e?.message ?? '克隆模板失败')

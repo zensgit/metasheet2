@@ -159,3 +159,43 @@ Review note:
 
 - Scope is coherent: template category + clone only.
 - OpenAPI/SDK parity is explicitly deferred. If CI has a contract parity gate, add that layer before merge; otherwise this is not a blocker for the implementation PR.
+
+## Bot-review hardening verification - 2026-04-23
+
+Changes addressed:
+
+- `cloneTemplate()` retries clone-key generation on PostgreSQL unique
+  violations (`23505`) before surfacing a deterministic
+  `APPROVAL_TEMPLATE_CLONE_KEY_CONFLICT` error.
+- Template center category clear no longer double-fires list reloads through
+  both Element Plus `clear` and `change`.
+- Clone navigation no longer waits for category refresh; `loadCategories()` now
+  refreshes in the background after a successful clone.
+
+Commands:
+
+```bash
+pnpm --filter @metasheet/core-backend exec vitest run \
+  tests/unit/approval-product-service.test.ts \
+  tests/unit/approval-template-routes.test.ts \
+  --reporter=dot
+pnpm --filter @metasheet/web exec vitest run \
+  tests/approvalTemplateCenterCategory.spec.ts \
+  --reporter=dot
+pnpm --filter @metasheet/core-backend exec tsc --noEmit
+pnpm --filter @metasheet/web exec vue-tsc -b --noEmit
+```
+
+Result:
+
+- `approval-product-service.test.ts`: `6/6` passed.
+- `approval-template-routes.test.ts`: `4/4` passed.
+- `approvalTemplateCenterCategory.spec.ts`: `6/6` passed.
+- Backend `tsc --noEmit`: exit `0`.
+- Frontend `vue-tsc -b --noEmit`: exit `0`.
+
+Local note:
+
+- DB-backed WP4 integration remains documented above as requiring
+  `DATABASE_URL`. This environment does not currently provide local Postgres,
+  so CI or a DB-backed developer shell must re-run it before production rollout.
