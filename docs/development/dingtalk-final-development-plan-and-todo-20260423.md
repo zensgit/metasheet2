@@ -3,7 +3,7 @@
 - Date: 2026-04-23
 - Goal: finish DingTalk group/person/form-access workflow through remote smoke and release evidence handoff
 - Current base branch: `codex/dingtalk-p4-next-20260423` from `origin/main`
-- Current base commit: `4e2c60ae1`
+- Current base commit: `a432a97a1`
 - Remaining work type: private remote-smoke inputs, remote smoke execution, evidence collection, final handoff, product gate, and final verification notes
 
 ## Current State
