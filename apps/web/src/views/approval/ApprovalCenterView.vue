@@ -302,6 +302,7 @@ import type { UnifiedApprovalDTO, ApprovalStatus } from '../../types/approval'
 import { useApprovalStore } from '../../approvals/store'
 import { useApprovalPermissions } from '../../approvals/permissions'
 import { getPendingCount, markAllApprovalsRead } from '../../approvals/api'
+import { useApprovalCountsRealtime, type ApprovalCountsUpdatedPayload } from '../../approvals/useApprovalCountsRealtime'
 
 const router = useRouter()
 const store = useApprovalStore()
@@ -313,11 +314,15 @@ const { canWrite } = useApprovalPermissions()
 // tooltip so "待办 X / 其中 Y 未读" stays discoverable.
 const pendingBadgeCount = ref(0)
 const pendingTotalCount = ref(0)
+function applyPendingBadgeCount(count: number, unreadCount: number): void {
+  pendingBadgeCount.value = Number.isFinite(unreadCount) ? unreadCount : 0
+  pendingTotalCount.value = Number.isFinite(count) ? count : 0
+}
+
 async function refreshPendingBadgeCount(): Promise<void> {
   try {
     const result = await getPendingCount(sourceSystemFilter.value)
-    pendingBadgeCount.value = Number.isFinite(result.unreadCount) ? result.unreadCount : 0
-    pendingTotalCount.value = Number.isFinite(result.count) ? result.count : 0
+    applyPendingBadgeCount(result.count, result.unreadCount)
   } catch {
     // Badge is decorative — do not surface errors here; the tab itself
     // surfaces list-load failures via `store.error`.
@@ -325,6 +330,15 @@ async function refreshPendingBadgeCount(): Promise<void> {
     pendingTotalCount.value = 0
   }
 }
+
+function handleRealtimeCountsUpdated(payload: ApprovalCountsUpdatedPayload): void {
+  const scopedCounts = payload.countsBySourceSystem?.[sourceSystemFilter.value] ?? payload
+  applyPendingBadgeCount(scopedCounts.count, scopedCounts.unreadCount)
+}
+
+useApprovalCountsRealtime({
+  onCountsUpdated: handleRealtimeCountsUpdated,
+})
 
 // Wave 2 WP3 slice 2 — bulk 全部标记已读. Honours the current sourceSystem tab
 // so the button's effect matches the tooltip the user is looking at.
