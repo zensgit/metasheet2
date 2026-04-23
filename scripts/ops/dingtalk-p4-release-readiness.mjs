@@ -193,6 +193,19 @@ function shellQuote(value) {
   return `'${String(value).replaceAll("'", "'\\''")}'`
 }
 
+function buildSmokeSessionCommand(opts) {
+  const args = [
+    'node scripts/ops/dingtalk-p4-smoke-session.mjs',
+    '--env-file',
+    shellQuote(opts.p4EnvFile),
+    '--require-manual-targets',
+    '--output-dir',
+    shellQuote(relativePath(opts.smokeOutputDir)),
+  ]
+  if (opts.smokeTimeoutMs > 0) args.push('--timeout-ms', String(opts.smokeTimeoutMs))
+  return args.join(' ')
+}
+
 function runNodeTool(args, options = {}) {
   const result = spawnSync(process.execPath, args, {
     cwd: process.cwd(),
@@ -406,10 +419,7 @@ function renderMarkdown(summary) {
     lines.push('Run the final remote smoke session:')
     lines.push('')
     lines.push('```bash')
-    lines.push(`node scripts/ops/dingtalk-p4-smoke-session.mjs \\`)
-    lines.push(`  --env-file ${shellQuote(summary.p4EnvFile)} \\`)
-    lines.push('  --require-manual-targets \\')
-    lines.push(`  --output-dir ${summary.defaultSmokeOutputDir}`)
+    lines.push(summary.plannedSmokeSession.command)
     lines.push('```')
   } else {
     lines.push('Do not run the final remote smoke yet. Resolve failed gates first, then rerun this readiness command.')
@@ -464,6 +474,11 @@ function run(opts) {
     regressionProfile: opts.regressionProfile,
     regressionPlanOnly: opts.regressionPlanOnly,
     runSmokeSession: opts.runSmokeSession,
+    plannedSmokeSession: {
+      outputDir: relativePath(opts.smokeOutputDir),
+      timeoutMs: opts.smokeTimeoutMs,
+      command: buildSmokeSessionCommand(opts),
+    },
     defaultSmokeOutputDir: DEFAULT_SMOKE_OUTPUT_DIR,
     overallStatus,
     gates,

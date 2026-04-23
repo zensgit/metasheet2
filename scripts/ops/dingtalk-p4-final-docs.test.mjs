@@ -127,6 +127,10 @@ function runScript(args) {
   })
 }
 
+function relativePath(file) {
+  return path.relative(repoRoot, file).replaceAll('\\', '/')
+}
+
 test('dingtalk-p4-final-docs generates release-ready development and verification notes', () => {
   const tmpDir = makeTmpDir()
 
@@ -154,6 +158,8 @@ test('dingtalk-p4-final-docs generates release-ready development and verificatio
     assert.match(developmentText, /Compiled status: \*\*pass\*\*/)
     assert.match(verificationText, /DingTalk Final Remote Smoke Verification/)
     assert.match(verificationText, /dingtalk-p4-final-docs\.mjs/)
+    assert.equal(verificationText.includes(`--output-dir ${relativePath(outputDir)}`), true)
+    assert.match(verificationText, /--date 20260423/)
     assert.match(verificationText, /Required checks passed: 8\/8/)
   } finally {
     rmSync(tmpDir, { recursive: true, force: true })

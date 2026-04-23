@@ -199,6 +199,9 @@ function buildModel(opts) {
     generatedAt: new Date().toISOString(),
     sessionDir: relativePath(opts.sessionDir),
     packetDir: redactString(packetDir),
+    outputDir: relativePath(opts.outputDir),
+    developmentMd: relativePath(opts.developmentMd),
+    verificationMd: relativePath(opts.verificationMd),
     handoffSummary: relativePath(opts.handoffSummary),
     statusSummary: relativePath(opts.statusSummary),
     compiledSummary: relativePath(opts.compiledSummary),
@@ -320,7 +323,8 @@ node scripts/ops/dingtalk-p4-final-docs.mjs \\
   --session-dir ${model.sessionDir} \\
   --handoff-summary ${model.handoffSummary} \\
   --require-release-ready \\
-  --output-dir docs/development
+  --output-dir ${model.outputDir} \\
+  --date ${model.date}
 \`\`\`
 
 ## Actual Results

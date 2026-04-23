@@ -121,6 +121,9 @@ test('dingtalk-p4-final-closeout finalizes, hands off, gates release-ready, and 
 
   try {
     writeReadyForFinalizeSession(sessionDir)
+    mkdirSync(docsDir, { recursive: true })
+    writeFileSync(path.join(docsDir, 'dingtalk-final-remote-smoke-development-20260423.md'), '# stale development\n', 'utf8')
+    writeFileSync(path.join(docsDir, 'dingtalk-final-remote-smoke-verification-20260423.md'), '# stale verification\n', 'utf8')
 
     const result = runScript([
       '--session-dir',
@@ -194,6 +197,40 @@ test('dingtalk-p4-final-closeout can stop after release-ready status when docs a
     assert.equal(summary.outputs.developmentMd, '')
     assert.equal(summary.outputs.verificationMd, '')
     assert.equal(existsSync(path.join(docsDir, 'dingtalk-final-remote-smoke-development-20260423.md')), false)
+    assert.equal(existsSync(path.join(docsDir, 'dingtalk-final-remote-smoke-verification-20260423.md')), false)
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+
+test('dingtalk-p4-final-closeout clears stale closeout summaries before early validation failures', () => {
+  const tmpDir = makeTmpDir()
+  const missingSessionDir = path.join(tmpDir, 'missing-session')
+  const packetDir = path.join(tmpDir, 'packet')
+
+  try {
+    mkdirSync(packetDir, { recursive: true })
+    writeJson(path.join(packetDir, 'closeout-summary.json'), {
+      tool: 'dingtalk-p4-final-closeout',
+      status: 'pass',
+      stale: true,
+    })
+    writeFileSync(path.join(packetDir, 'closeout-summary.md'), '# stale pass\n', 'utf8')
+
+    const result = runScript([
+      '--session-dir',
+      missingSessionDir,
+      '--packet-output-dir',
+      packetDir,
+      '--date',
+      '20260423',
+      '--skip-docs',
+    ])
+
+    assert.equal(result.status, 1)
+    assert.match(result.stderr, /--session-dir must point to an existing directory/)
+    assert.equal(existsSync(path.join(packetDir, 'closeout-summary.json')), false)
+    assert.equal(existsSync(path.join(packetDir, 'closeout-summary.md')), false)
   } finally {
     rmSync(tmpDir, { recursive: true, force: true })
   }

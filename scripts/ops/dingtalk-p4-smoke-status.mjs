@@ -362,13 +362,29 @@ function sessionCommand(opts, command) {
   return command.replaceAll('<session-dir>', relativePath(opts.sessionDir))
 }
 
+function sanitizeName(value) {
+  return path
+    .basename(value)
+    .replace(/[^A-Za-z0-9._-]/g, '-')
+    .replace(/^-+|-+$/g, '') || 'session'
+}
+
+function packetOutputDirForStatus(opts) {
+  if (opts.handoffSummary) return path.dirname(opts.handoffSummary)
+  if (opts.publishCheckJson) return path.dirname(opts.publishCheckJson)
+  if (opts.sessionDir) {
+    return path.resolve(process.cwd(), 'artifacts/dingtalk-staging-evidence-packet', `${sanitizeName(opts.sessionDir)}-final`)
+  }
+  return path.resolve(process.cwd(), 'artifacts/dingtalk-staging-evidence-packet/<session-name>-final')
+}
+
 function finalCloseoutCommand(opts) {
   return sessionCommand(opts, [
     'node scripts/ops/dingtalk-p4-final-closeout.mjs',
     '--session-dir',
     '<session-dir>',
     '--packet-output-dir',
-    'artifacts/dingtalk-staging-evidence-packet/142-final',
+    relativePath(packetOutputDirForStatus(opts)),
     '--docs-output-dir',
     'docs/development',
   ].join(' '))

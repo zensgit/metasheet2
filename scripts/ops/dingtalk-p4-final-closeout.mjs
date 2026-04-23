@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import path from 'node:path'
 
@@ -208,6 +208,18 @@ function docsOutputs(opts) {
   }
 }
 
+function clearStaleCloseoutOutputs(opts) {
+  rmSync(opts.summaryJson, { force: true })
+  rmSync(opts.summaryMd, { force: true })
+}
+
+function clearSkippedDocsOutputs(opts) {
+  if (!opts.skipDocs) return
+  const docs = docsOutputs(opts)
+  rmSync(docs.developmentMd, { force: true })
+  rmSync(docs.verificationMd, { force: true })
+}
+
 function buildSummary(opts, steps) {
   const docs = opts.skipDocs ? null : docsOutputs(opts)
   const session = sessionSummary(opts)
@@ -327,7 +339,9 @@ function writeSummary(summary, opts) {
 }
 
 function runCloseout(opts) {
+  clearStaleCloseoutOutputs(opts)
   validatePaths(opts)
+  clearSkippedDocsOutputs(opts)
   const steps = []
 
   const finalizeStep = runNodeStep(

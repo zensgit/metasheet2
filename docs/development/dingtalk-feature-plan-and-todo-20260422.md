@@ -95,6 +95,7 @@
 - [x] Add a P4 manual target readiness gate so authorized, unauthorized, and no-email DingTalk validation targets are recorded before final smoke.
 - [x] Add a P4 local regression gate runner so ops/product verification commands produce JSON/MD evidence before final remote smoke.
 - [x] Harden P4 packet export and publish validation so reused packet directories cannot carry stale unregistered evidence.
+- [x] Harden P4 closeout guidance so generated commands honor configured packet/docs paths and stale closeout docs/summaries are cleared.
 - [ ] Remote smoke: create a table and form view.
 - [ ] Remote smoke: bind at least two DingTalk groups to the table.
 - [ ] Remote smoke: set the form to `dingtalk_granted`.

@@ -186,6 +186,39 @@ test('dingtalk-p4-release-readiness passes with complete env and passing regress
   }
 })
 
+test('dingtalk-p4-release-readiness planned smoke command respects configured output and timeout', () => {
+  const tmpDir = makeTmpDir()
+  const envFile = path.join(tmpDir, 'dingtalk-p4.env')
+  const outputDir = path.join(tmpDir, 'readiness')
+  const smokeOutputDir = path.join(tmpDir, 'custom-smoke-session')
+
+  try {
+    writeEnv(envFile)
+
+    const result = runScriptWithSelftest([
+      '--p4-env-file', envFile,
+      '--regression-profile', 'selftest',
+      '--smoke-output-dir', smokeOutputDir,
+      '--smoke-timeout-ms', '12345',
+      '--output-dir', outputDir,
+    ])
+
+    assert.equal(result.status, 0, result.stderr || result.stdout)
+    const summary = readSummary(outputDir)
+    assert.equal(summary.overallStatus, 'pass')
+    assert.equal(summary.plannedSmokeSession.outputDir.endsWith('custom-smoke-session'), true)
+    assert.equal(summary.plannedSmokeSession.timeoutMs, 12345)
+    assert.match(summary.plannedSmokeSession.command, /custom-smoke-session/)
+    assert.match(summary.plannedSmokeSession.command, /--timeout-ms 12345/)
+
+    const markdown = readFileSync(path.join(outputDir, 'release-readiness-summary.md'), 'utf8')
+    assert.match(markdown, /custom-smoke-session/)
+    assert.match(markdown, /--timeout-ms 12345/)
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+
 test('dingtalk-p4-release-readiness reports manual_pending when regression is plan-only', () => {
   const tmpDir = makeTmpDir()
   const envFile = path.join(tmpDir, 'dingtalk-p4.env')

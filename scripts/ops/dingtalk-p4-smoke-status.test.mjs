@@ -108,6 +108,10 @@ function runScript(args) {
   })
 }
 
+function relativePath(file) {
+  return path.relative(repoRoot, file).replaceAll('\\', '/')
+}
+
 test('dingtalk-p4-smoke-status reports manual pending gaps for bootstrap sessions', () => {
   const tmpDir = makeTmpDir()
   const sessionDir = path.join(tmpDir, '142-session')
@@ -255,6 +259,28 @@ test('dingtalk-p4-smoke-status reports handoff pending after final strict pass',
     assert.equal(summary.totals.gaps, 0)
     assert.equal(summary.nextCommands.some((command) => command.includes('dingtalk-p4-final-closeout.mjs')), true)
     assert.equal(summary.nextCommands.some((command) => command.includes('dingtalk-p4-final-handoff.mjs')), true)
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+
+test('dingtalk-p4-smoke-status final closeout command uses configured packet summary directory', () => {
+  const tmpDir = makeTmpDir()
+  const sessionDir = path.join(tmpDir, '142-session')
+  const packetDir = path.join(tmpDir, 'custom-packet')
+  const handoffSummary = path.join(packetDir, 'handoff-summary.json')
+
+  try {
+    writeSession(sessionDir)
+
+    const result = runScript(['--session-dir', sessionDir, '--handoff-summary', handoffSummary])
+
+    assert.equal(result.status, 0, result.stderr)
+    const summary = JSON.parse(readFileSync(path.join(sessionDir, 'smoke-status.json'), 'utf8'))
+    const closeoutCommand = summary.nextCommands.find((command) => command.includes('dingtalk-p4-final-closeout.mjs'))
+    assert.equal(typeof closeoutCommand, 'string')
+    assert.equal(closeoutCommand.includes(relativePath(packetDir)), true)
+    assert.equal(closeoutCommand.includes('artifacts/dingtalk-staging-evidence-packet/142-final'), false)
   } finally {
     rmSync(tmpDir, { recursive: true, force: true })
   }
