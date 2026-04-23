@@ -970,6 +970,67 @@ describe('DingTalk automation link route validation', () => {
     expect(automationService.updateRule).not.toHaveBeenCalled()
   })
 
+  it('rejects a DingTalk group action without an effective destination on automation update', async () => {
+    const automationService = createMockAutomationService(makeAutomationRule({
+      action_type: 'send_dingtalk_group_message',
+      action_config: {
+        destinationId: 'group_1',
+        titleTemplate: 'Old title',
+        bodyTemplate: 'Old body',
+      },
+    }))
+    const { app } = await createApp({ automationService })
+
+    const res = await request(app)
+      .patch(`/api/multitable/sheets/${SHEET_ID}/automations/${RULE_ID}`)
+      .send({
+        actionConfig: {
+          destinationIds: [],
+          destinationIdFieldPath: 'record., ,',
+          titleTemplate: 'New title',
+          bodyTemplate: 'New body',
+        },
+      })
+
+    expect(res.status).toBe(400)
+    expect(res.body.error).toEqual({
+      code: 'VALIDATION_ERROR',
+      message: 'At least one DingTalk destination or record destination field path is required',
+    })
+    expect(automationService.getRule).toHaveBeenCalledWith(RULE_ID)
+    expect(automationService.updateRule).not.toHaveBeenCalled()
+  })
+
+  it('rejects a DingTalk person action without executable templates on automation update', async () => {
+    const automationService = createMockAutomationService(makeAutomationRule({
+      action_type: 'send_dingtalk_person_message',
+      action_config: {
+        userIds: ['user_1'],
+        titleTemplate: 'Old title',
+        bodyTemplate: 'Old body',
+      },
+    }))
+    const { app } = await createApp({ automationService })
+
+    const res = await request(app)
+      .patch(`/api/multitable/sheets/${SHEET_ID}/automations/${RULE_ID}`)
+      .send({
+        actionConfig: {
+          userIds: ['user_1'],
+          titleTemplate: ' ',
+          bodyTemplate: 'New body',
+        },
+      })
+
+    expect(res.status).toBe(400)
+    expect(res.body.error).toEqual({
+      code: 'VALIDATION_ERROR',
+      message: 'DingTalk titleTemplate is required',
+    })
+    expect(automationService.getRule).toHaveBeenCalledWith(RULE_ID)
+    expect(automationService.updateRule).not.toHaveBeenCalled()
+  })
+
   it('does not revalidate DingTalk links for enable-only updates', async () => {
     const automationService = createMockAutomationService(makeAutomationRule({
       action_config: {
