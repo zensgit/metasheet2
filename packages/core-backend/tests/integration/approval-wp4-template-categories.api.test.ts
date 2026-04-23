@@ -11,11 +11,10 @@
  *       - key:   `"{original}_copy_<6 hex chars>"`
  *       - same formSchema + approvalGraph + category
  *       - status 'draft' (no `publishedDefinition` carried over)
- *   - 403 when the caller lacks `approval-templates:manage`
+ *   - 403 when the caller lacks `approval-templates:manage` for clone
  *   - 404 when the source template id does not exist
  *
- * ACL / 可见范围, 字段联动, 条件显隐 are other WP4 targets explicitly deferred
- * to later slices.
+ * Slice 2 extends the same surface with template visibility ACL.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import net from 'net'
@@ -104,7 +103,7 @@ describeIfDatabase('Approval Wave 2 WP4 slice 1 — template categories & clone'
     await ensureApprovalSchemaReady()
 
     // The approval schema bootstrap does not cover the RBAC tables, so the
-    // route-level `rbacGuard('approval-templates:manage')` fallback path
+    // clone's route-level `rbacGuard('approval-templates:manage')` fallback path
     // (DB isAdmin + userHasPermission + namespace-admission) would throw
     // against missing relations and surface as 500 instead of the 403 we
     // want to assert below. Materializing empty stub tables lets the normal
@@ -182,7 +181,12 @@ describeIfDatabase('Approval Wave 2 WP4 slice 1 — template categories & clone'
 
   async function createTemplate(
     token: string,
-    overrides: { key: string; name: string; category?: string | null },
+    overrides: {
+      key: string
+      name: string
+      category?: string | null
+      visibilityScope?: { type: 'all' | 'dept' | 'role' | 'user'; ids: string[] }
+    },
   ): Promise<{ id: string; category: string | null; key: string; name: string }> {
     const body: Record<string, unknown> = {
       key: overrides.key,
@@ -191,6 +195,7 @@ describeIfDatabase('Approval Wave 2 WP4 slice 1 — template categories & clone'
       approvalGraph: buildLinearGraph(),
     }
     if (overrides.category !== undefined) body.category = overrides.category
+    if (overrides.visibilityScope !== undefined) body.visibilityScope = overrides.visibilityScope
     const response = await jsonRequest(baseUrl, '/api/approval-templates', token, {
       method: 'POST',
       body,
@@ -430,5 +435,82 @@ describeIfDatabase('Approval Wave 2 WP4 slice 1 — template categories & clone'
     expect(response.status).toBe(404)
     const payload = await response.json() as { error?: { code?: string } }
     expect(payload.error?.code).toBe('APPROVAL_TEMPLATE_NOT_FOUND')
+  })
+
+  it('filters template list/detail by user and role visibility for non-managers', async () => {
+    const adminToken = await devToken(baseUrl, `wp4-admin-acl-${suiteSuffix}`)
+    const userOnly = await createTemplate(adminToken, {
+      key: `wp4-acl-user-${suiteSuffix}`,
+      name: 'WP4 ACL User',
+      visibilityScope: { type: 'user', ids: [`visible-user-${suiteSuffix}`] },
+    })
+    const roleOnly = await createTemplate(adminToken, {
+      key: `wp4-acl-role-${suiteSuffix}`,
+      name: 'WP4 ACL Role',
+      visibilityScope: { type: 'role', ids: [`visible-role-${suiteSuffix}`] },
+    })
+    const allVisible = await createTemplate(adminToken, {
+      key: `wp4-acl-all-${suiteSuffix}`,
+      name: 'WP4 ACL All',
+    })
+
+    const visibleUserToken = await devToken(baseUrl, `visible-user-${suiteSuffix}`, {
+      roles: 'employee',
+      perms: 'approvals:read',
+    })
+    const hiddenUserToken = await devToken(baseUrl, `hidden-user-${suiteSuffix}`, {
+      roles: 'employee',
+      perms: 'approvals:read',
+    })
+    const roleUserToken = await devToken(baseUrl, `role-user-${suiteSuffix}`, {
+      roles: `employee,visible-role-${suiteSuffix}`,
+      perms: 'approvals:read',
+    })
+
+    const visibleResponse = await jsonRequest(baseUrl, `/api/approval-templates?pageSize=200`, visibleUserToken)
+    expect(visibleResponse.status).toBe(200)
+    const visiblePayload = await visibleResponse.json() as { data: Array<{ id: string }> }
+    const visibleIds = new Set(visiblePayload.data.map((row) => row.id))
+    expect(visibleIds.has(userOnly.id)).toBe(true)
+    expect(visibleIds.has(roleOnly.id)).toBe(false)
+    expect(visibleIds.has(allVisible.id)).toBe(true)
+
+    const hiddenResponse = await jsonRequest(baseUrl, `/api/approval-templates?pageSize=200`, hiddenUserToken)
+    expect(hiddenResponse.status).toBe(200)
+    const hiddenPayload = await hiddenResponse.json() as { data: Array<{ id: string }> }
+    const hiddenIds = new Set(hiddenPayload.data.map((row) => row.id))
+    expect(hiddenIds.has(userOnly.id)).toBe(false)
+    expect(hiddenIds.has(roleOnly.id)).toBe(false)
+    expect(hiddenIds.has(allVisible.id)).toBe(true)
+
+    const roleResponse = await jsonRequest(baseUrl, `/api/approval-templates?pageSize=200`, roleUserToken)
+    expect(roleResponse.status).toBe(200)
+    const rolePayload = await roleResponse.json() as { data: Array<{ id: string }> }
+    const roleIds = new Set(rolePayload.data.map((row) => row.id))
+    expect(roleIds.has(roleOnly.id)).toBe(true)
+
+    const hiddenDetailResponse = await jsonRequest(baseUrl, `/api/approval-templates/${userOnly.id}`, hiddenUserToken)
+    expect(hiddenDetailResponse.status).toBe(404)
+    const visibleDetailResponse = await jsonRequest(baseUrl, `/api/approval-templates/${userOnly.id}`, visibleUserToken)
+    expect(visibleDetailResponse.status).toBe(200)
+    const visibleDetail = await visibleDetailResponse.json() as {
+      visibilityScope: { type: string; ids: string[] }
+    }
+    expect(visibleDetail.visibilityScope).toEqual({ type: 'user', ids: [`visible-user-${suiteSuffix}`] })
+  })
+
+  it('lets template managers see scoped templates regardless of visibility scope', async () => {
+    const adminToken = await devToken(baseUrl, `wp4-admin-acl-manager-${suiteSuffix}`)
+    const scoped = await createTemplate(adminToken, {
+      key: `wp4-acl-manager-${suiteSuffix}`,
+      name: 'WP4 ACL Manager',
+      visibilityScope: { type: 'user', ids: [`someone-else-${suiteSuffix}`] },
+    })
+
+    const managerResponse = await jsonRequest(baseUrl, `/api/approval-templates/${scoped.id}`, adminToken)
+    expect(managerResponse.status).toBe(200)
+    const detail = await managerResponse.json() as { id: string; visibilityScope: { type: string; ids: string[] } }
+    expect(detail.id).toBe(scoped.id)
+    expect(detail.visibilityScope).toEqual({ type: 'user', ids: [`someone-else-${suiteSuffix}`] })
   })
 })

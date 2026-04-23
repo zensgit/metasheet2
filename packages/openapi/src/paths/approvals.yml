@@ -438,7 +438,9 @@ paths:
       summary: List approval templates
       description: |
         Returns a paginated list of approval templates. Supports search by name
-        and filtering by status (draft, published, archived).
+        and filtering by status/category. Non-template-managers only receive
+        templates visible to their actor scope (`all`, matching department,
+        role, or user). Template managers can see all templates.
       security:
         - bearerAuth: []
       parameters:
@@ -452,16 +454,20 @@ paths:
             type: string
             enum: [draft, published, archived]
         - in: query
-          name: limit
+          name: category
+          schema:
+            type: string
+        - in: query
+          name: page
+          schema:
+            type: integer
+            minimum: 1
+        - in: query
+          name: pageSize
           schema:
             type: integer
             minimum: 1
             maximum: 200
-        - in: query
-          name: offset
-          schema:
-            type: integer
-            minimum: 0
       responses:
         '200':
           description: OK
@@ -470,24 +476,19 @@ paths:
               schema:
                 type: object
                 properties:
-                  ok:
-                    type: boolean
-                    example: true
                   data:
-                    type: object
-                    properties:
-                      items:
-                        type: array
-                        items:
-                          $ref: '#/components/schemas/ApprovalTemplateListItem'
-                      total:
-                        type: integer
-                      limit:
-                        type: integer
-                      offset:
-                        type: integer
-                    required: [items, total, limit, offset]
-                required: [ok, data]
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/ApprovalTemplateListItem'
+                  total:
+                    type: integer
+                  limit:
+                    type: integer
+                    description: Effective page size.
+                  offset:
+                    type: integer
+                    description: Zero-based offset derived from page/pageSize.
+                required: [data, total, limit, offset]
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
     post:
@@ -498,6 +499,8 @@ paths:
         Creates a new approval template in draft status. Requires key (unique),
         name, formSchema (with fields), and approvalGraph (nodes + edges).
         The template must be published before it can be used to initiate approvals.
+        Optional category and visibilityScope metadata live on the parent
+        template row and do not become version snapshots.
       security:
         - bearerAuth: []
       requestBody:
@@ -523,13 +526,38 @@ paths:
         '400': { $ref: '#/components/responses/ValidationError' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
+  /api/approval-templates/categories:
+    get:
+      operationId: listApprovalTemplateCategories
+      tags: [Approval Templates]
+      summary: List approval template categories
+      description: |
+        Returns distinct non-null categories visible to the current actor.
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      type: string
+                required: [data]
+        '401': { $ref: '#/components/responses/Unauthorized' }
   /api/approval-templates/{id}:
     get:
       operationId: getApprovalTemplate
       tags: [Approval Templates]
       summary: Get approval template detail
       description: |
-        Returns the full template including formSchema and approvalGraph.
+        Returns the full template including formSchema and approvalGraph when
+        the current actor can see the template. Template managers can see all
+        templates.
       security:
         - bearerAuth: []
       parameters:
@@ -560,8 +588,9 @@ paths:
       tags: [Approval Templates]
       summary: Update approval template draft
       description: |
-        Updates an existing template. Each update automatically creates a new
-        version. All fields are optional; only provided fields are updated.
+        Updates an existing template. formSchema/approvalGraph updates create a
+        new version; metadata-only updates such as category or visibilityScope
+        update the parent row in place. All fields are optional.
       security:
         - bearerAuth: []
       parameters:
@@ -594,6 +623,39 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
+  /api/approval-templates/{id}/clone:
+    post:
+      operationId: cloneApprovalTemplate
+      tags: [Approval Templates]
+      summary: Clone approval template
+      description: |
+        Clones an existing template's latest formSchema/approvalGraph into a
+        new draft template. Category and visibilityScope are copied; published
+        definitions and version history are not copied.
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApprovalTemplateDetail'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: Clone key conflict
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
   /api/approval-templates/{id}/publish:
     post:
       operationId: publishApprovalTemplate

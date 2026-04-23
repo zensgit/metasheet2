@@ -3873,6 +3873,14 @@
             "type": "string",
             "nullable": true
           },
+          "category": {
+            "type": "string",
+            "nullable": true,
+            "maxLength": 64
+          },
+          "visibilityScope": {
+            "$ref": "#/components/schemas/ApprovalTemplateVisibilityScope"
+          },
           "status": {
             "type": "string",
             "enum": [
@@ -3902,11 +3910,40 @@
           "id",
           "key",
           "name",
+          "category",
+          "visibilityScope",
           "status",
           "activeVersionId",
           "latestVersionId",
           "createdAt",
           "updatedAt"
+        ]
+      },
+      "ApprovalTemplateVisibilityScope": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "all",
+              "dept",
+              "role",
+              "user"
+            ],
+            "description": "Visibility mode. `all` ignores `ids`."
+          },
+          "ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 100,
+            "description": "Department, role, or user ids for scoped visibility."
+          }
+        },
+        "required": [
+          "type",
+          "ids"
         ]
       },
       "ApprovalTemplateDetail": {
@@ -3944,6 +3981,14 @@
             "type": "string",
             "nullable": true
           },
+          "category": {
+            "type": "string",
+            "nullable": true,
+            "maxLength": 64
+          },
+          "visibilityScope": {
+            "$ref": "#/components/schemas/ApprovalTemplateVisibilityScope"
+          },
           "formSchema": {
             "$ref": "#/components/schemas/FormSchema"
           },
@@ -3970,6 +4015,14 @@
           "description": {
             "type": "string",
             "nullable": true
+          },
+          "category": {
+            "type": "string",
+            "nullable": true,
+            "maxLength": 64
+          },
+          "visibilityScope": {
+            "$ref": "#/components/schemas/ApprovalTemplateVisibilityScope"
           },
           "formSchema": {
             "$ref": "#/components/schemas/FormSchema"
@@ -5468,7 +5521,7 @@
           "Approval Templates"
         ],
         "summary": "List approval templates",
-        "description": "Returns a paginated list of approval templates. Supports search by name\nand filtering by status (draft, published, archived).\n",
+        "description": "Returns a paginated list of approval templates. Supports search by name\nand filtering by status/category. Non-template-managers only receive\ntemplates visible to their actor scope (`all`, matching department,\nrole, or user). Template managers can see all templates.\n",
         "security": [
           {
             "bearerAuth": []
@@ -5496,19 +5549,26 @@
           },
           {
             "in": "query",
-            "name": "limit",
+            "name": "category",
             "schema": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 200
+              "type": "string"
             }
           },
           {
             "in": "query",
-            "name": "offset",
+            "name": "page",
             "schema": {
               "type": "integer",
-              "minimum": 0
+              "minimum": 1
+            }
+          },
+          {
+            "in": "query",
+            "name": "pageSize",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200
             }
           }
         ],
@@ -5520,40 +5580,29 @@
                 "schema": {
                   "type": "object",
                   "properties": {
-                    "ok": {
-                      "type": "boolean",
-                      "example": true
-                    },
                     "data": {
-                      "type": "object",
-                      "properties": {
-                        "items": {
-                          "type": "array",
-                          "items": {
-                            "$ref": "#/components/schemas/ApprovalTemplateListItem"
-                          }
-                        },
-                        "total": {
-                          "type": "integer"
-                        },
-                        "limit": {
-                          "type": "integer"
-                        },
-                        "offset": {
-                          "type": "integer"
-                        }
-                      },
-                      "required": [
-                        "items",
-                        "total",
-                        "limit",
-                        "offset"
-                      ]
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/ApprovalTemplateListItem"
+                      }
+                    },
+                    "total": {
+                      "type": "integer"
+                    },
+                    "limit": {
+                      "type": "integer",
+                      "description": "Effective page size."
+                    },
+                    "offset": {
+                      "type": "integer",
+                      "description": "Zero-based offset derived from page/pageSize."
                     }
                   },
                   "required": [
-                    "ok",
-                    "data"
+                    "data",
+                    "total",
+                    "limit",
+                    "offset"
                   ]
                 }
               }
@@ -5573,7 +5622,7 @@
           "Approval Templates"
         ],
         "summary": "Create approval template",
-        "description": "Creates a new approval template in draft status. Requires key (unique),\nname, formSchema (with fields), and approvalGraph (nodes + edges).\nThe template must be published before it can be used to initiate approvals.\n",
+        "description": "Creates a new approval template in draft status. Requires key (unique),\nname, formSchema (with fields), and approvalGraph (nodes + edges).\nThe template must be published before it can be used to initiate approvals.\nOptional category and visibilityScope metadata live on the parent\ntemplate row and do not become version snapshots.\n",
         "security": [
           {
             "bearerAuth": []
@@ -5625,6 +5674,47 @@
         }
       }
     },
+    "/api/approval-templates/categories": {
+      "get": {
+        "operationId": "listApprovalTemplateCategories",
+        "tags": [
+          "Approval Templates"
+        ],
+        "summary": "List approval template categories",
+        "description": "Returns distinct non-null categories visible to the current actor.\n",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    }
+                  },
+                  "required": [
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
     "/api/approval-templates/{id}": {
       "get": {
         "operationId": "getApprovalTemplate",
@@ -5632,7 +5722,7 @@
           "Approval Templates"
         ],
         "summary": "Get approval template detail",
-        "description": "Returns the full template including formSchema and approvalGraph.\n",
+        "description": "Returns the full template including formSchema and approvalGraph when\nthe current actor can see the template. Template managers can see all\ntemplates.\n",
         "security": [
           {
             "bearerAuth": []
@@ -5689,7 +5779,7 @@
           "Approval Templates"
         ],
         "summary": "Update approval template draft",
-        "description": "Updates an existing template. Each update automatically creates a new\nversion. All fields are optional; only provided fields are updated.\n",
+        "description": "Updates an existing template. formSchema/approvalGraph updates create a\nnew version; metadata-only updates such as category or visibilityScope\nupdate the parent row in place. All fields are optional.\n",
         "security": [
           {
             "bearerAuth": []
@@ -5750,6 +5840,62 @@
           },
           "404": {
             "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/api/approval-templates/{id}/clone": {
+      "post": {
+        "operationId": "cloneApprovalTemplate",
+        "tags": [
+          "Approval Templates"
+        ],
+        "summary": "Clone approval template",
+        "description": "Clones an existing template's latest formSchema/approvalGraph into a\nnew draft template. Category and visibilityScope are copied; published\ndefinitions and version history are not copied.\n",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "Created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApprovalTemplateDetail"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "description": "Clone key conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
           }
         }
       }

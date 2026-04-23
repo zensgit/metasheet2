@@ -15,6 +15,7 @@ export type EmptyAssigneePolicy = 'error' | 'auto-approve'
 export type ApprovalActionType = 'approve' | 'reject' | 'transfer' | 'revoke' | 'comment' | 'return'
 export type ApprovalStatus = 'draft' | 'pending' | 'approved' | 'rejected' | 'revoked' | 'cancelled'
 export type ApprovalTemplateStatus = 'draft' | 'published' | 'archived'
+export type ApprovalTemplateVisibilityType = 'all' | 'dept' | 'role' | 'user'
 export type FormFieldType =
   | 'text'
   | 'textarea'
@@ -204,6 +205,7 @@ export interface ApprovalTemplateListItemDTO {
    * means the template is uncategorized. Mirrors the backend column.
    */
   category: string | null
+  visibilityScope: ApprovalTemplateVisibilityScope
   status: ApprovalTemplateStatus
   activeVersionId: string | null
   latestVersionId: string | null
@@ -214,6 +216,11 @@ export interface ApprovalTemplateListItemDTO {
 export interface ApprovalTemplateDetailDTO extends ApprovalTemplateListItemDTO {
   formSchema: FormSchema
   approvalGraph: ApprovalGraph
+}
+
+export interface ApprovalTemplateVisibilityScope {
+  type: ApprovalTemplateVisibilityType
+  ids: string[]
 }
 
 export interface ApprovalTemplateVersionDetailDTO {

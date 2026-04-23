@@ -82,6 +82,7 @@ const listTemplateCategoriesSpy = vi.fn<[], Promise<string[]>>().mockResolvedVal
 const cloneTemplateSpy = vi.fn<[string], Promise<any>>().mockResolvedValue({
   id: 'tpl_clone_1',
   name: 'Clone',
+  visibilityScope: { type: 'all', ids: [] },
 })
 
 vi.mock('../src/approvals/api', () => ({
@@ -332,6 +333,7 @@ function buildTemplate(overrides: Record<string, unknown>) {
     name: '审批模板 1',
     description: null,
     category: null,
+    visibilityScope: { type: 'all', ids: [] },
     status: 'published',
     activeVersionId: 'ver_1',
     latestVersionId: 'ver_1',
@@ -368,6 +370,7 @@ describe('TemplateCenterView — WP4 slice 1 category filter + clone', () => {
       activeVersionId: null,
       latestVersionId: 'ver_clone_1',
       category: '请假',
+      visibilityScope: { type: 'all', ids: [] },
     })
     pushSpy.mockClear()
 
@@ -465,6 +468,18 @@ describe('TemplateCenterView — WP4 slice 1 category filter + clone', () => {
     const tagTexts = Array.from(tags).map((el) => (el.textContent ?? '').trim())
     expect(tagTexts).toContain('请假')
     expect(tagTexts).toContain('采购')
+  })
+
+  it('renders visibility scope summary per row', async () => {
+    mockTemplates.value = [
+      buildTemplate({ id: 'tpl_a', visibilityScope: { type: 'all', ids: [] } }),
+      buildTemplate({ id: 'tpl_b', visibilityScope: { type: 'role', ids: ['manager', 'finance'] } }),
+    ]
+    await mountView()
+    const tags = container!.querySelectorAll('[data-testid="template-center-row-visibility"]')
+    const texts = Array.from(tags).map((el) => (el.textContent ?? '').trim())
+    expect(texts).toContain('全员可见')
+    expect(texts).toContain('角色 2')
   })
 
   it('clicking 克隆 calls cloneTemplate + routes to the new detail page', async () => {

@@ -96,6 +96,13 @@
           <span v-else class="template-center__category-empty">未分组</span>
         </template>
       </el-table-column>
+      <el-table-column label="可见范围" width="160">
+        <template #default="{ row }">
+          <el-tag size="small" effect="plain" data-testid="template-center-row-visibility">
+            {{ visibilityScopeLabel(row.visibilityScope) }}
+          </el-tag>
+        </template>
+      </el-table-column>
       <el-table-column label="状态" width="100">
         <template #default="{ row }">
           <el-tag
@@ -198,6 +205,17 @@ function templateStatusLabel(status: string) {
     archived: '已归档',
   }
   return map[status] ?? status
+}
+
+function visibilityScopeLabel(scope: ApprovalTemplateListItemDTO['visibilityScope']) {
+  if (!scope || scope.type === 'all') return '全员可见'
+  const count = scope.ids?.length ?? 0
+  const map: Record<string, string> = {
+    dept: '部门',
+    role: '角色',
+    user: '用户',
+  }
+  return `${map[scope.type] ?? scope.type} ${count}`
 }
 
 function formatDate(dateStr: string) {

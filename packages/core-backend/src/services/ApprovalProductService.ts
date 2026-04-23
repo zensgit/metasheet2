@@ -4,6 +4,7 @@ import type {
   ApprovalActionRequest,
   ApprovalTemplateDetailDTO,
   ApprovalTemplateListItemDTO,
+  ApprovalTemplateVisibilityScope,
   ApprovalTemplateVersionDetailDTO,
   ApprovalGraph,
   ApprovalMode,
@@ -40,6 +41,7 @@ interface ApprovalTemplateListQuery {
    * uncategorized rows). Trimmed by the router before reaching this layer.
    */
   category?: string
+  actor?: ApprovalTemplateVisibilityActor
   limit: number
   offset: number
 }
@@ -52,8 +54,17 @@ interface CreateApprovalActor {
   userName?: string
   email?: string
   department?: string
+  departmentIds?: string[]
   roles?: string[]
   permissions?: string[]
+}
+
+export interface ApprovalTemplateVisibilityActor {
+  userId: string
+  departmentIds: string[]
+  roles: string[]
+  permissions: string[]
+  isTemplateManager: boolean
 }
 
 type TemplateRow = {
@@ -65,6 +76,7 @@ type TemplateRow = {
    * Wave 2 WP4 slice 1 — nullable group label for the template center filter.
    */
   category: string | null
+  visibility_scope?: Record<string, unknown> | null
   status: 'draft' | 'published' | 'archived'
   active_version_id: string | null
   latest_version_id: string | null
@@ -113,6 +125,7 @@ type TemplateMetadataPatch = {
    * `null` clears the field; `undefined` leaves it untouched.
    */
   category?: string | null
+  visibilityScope?: ApprovalTemplateVisibilityScope
 }
 
 type ApprovalRecordInsert = {
@@ -588,6 +601,7 @@ function toApprovalTemplateListItemDTO(row: TemplateRow): ApprovalTemplateListIt
     description: row.description,
     // Wave 2 WP4 slice 1 — older rows predate the column; coerce undefined to null.
     category: row.category ?? null,
+    visibilityScope: readTemplateVisibilityScope(row.visibility_scope),
     status: row.status,
     activeVersionId: row.active_version_id,
     latestVersionId: row.latest_version_id,
@@ -706,6 +720,9 @@ function normalizeOptionalString(value: unknown): string | null | undefined {
  *   - non-string → 400 VALIDATION_ERROR
  */
 const APPROVAL_TEMPLATE_CATEGORY_MAX_LENGTH = 64
+const APPROVAL_TEMPLATE_VISIBILITY_ID_MAX_LENGTH = 128
+const APPROVAL_TEMPLATE_VISIBILITY_ID_MAX_COUNT = 100
+const APPROVAL_TEMPLATE_VISIBILITY_TYPES = new Set(['all', 'dept', 'role', 'user'])
 
 function normalizeTemplateCategory(value: unknown): string | null | undefined {
   if (value === undefined) return undefined
@@ -723,6 +740,107 @@ function normalizeTemplateCategory(value: unknown): string | null | undefined {
     )
   }
   return trimmed
+}
+
+function normalizeTemplateVisibilityScope(value: unknown): ApprovalTemplateVisibilityScope | undefined {
+  if (value === undefined) return undefined
+  if (value === null) return { type: 'all', ids: [] }
+  if (!isRecord(value)) {
+    throw new ServiceError('visibilityScope must be an object', 400, 'VALIDATION_ERROR')
+  }
+  if (typeof value.type !== 'string' || !APPROVAL_TEMPLATE_VISIBILITY_TYPES.has(value.type)) {
+    throw new ServiceError('visibilityScope.type must be all, dept, role, or user', 400, 'VALIDATION_ERROR')
+  }
+  if (value.type === 'all') return { type: 'all', ids: [] }
+  if (!Array.isArray(value.ids)) {
+    throw new ServiceError('visibilityScope.ids must be an array', 400, 'VALIDATION_ERROR')
+  }
+  const ids = Array.from(new Set(
+    value.ids.map((entry) => {
+      if (typeof entry !== 'string') {
+        throw new ServiceError('visibilityScope.ids must contain strings', 400, 'VALIDATION_ERROR')
+      }
+      const trimmed = entry.trim()
+      if (trimmed.length === 0) {
+        throw new ServiceError('visibilityScope.ids must not contain empty values', 400, 'VALIDATION_ERROR')
+      }
+      if (trimmed.length > APPROVAL_TEMPLATE_VISIBILITY_ID_MAX_LENGTH) {
+        throw new ServiceError(
+          `visibilityScope.ids values must be at most ${APPROVAL_TEMPLATE_VISIBILITY_ID_MAX_LENGTH} characters`,
+          400,
+          'VALIDATION_ERROR',
+        )
+      }
+      return trimmed
+    }),
+  ))
+  if (ids.length === 0) {
+    throw new ServiceError('visibilityScope.ids must contain at least one id for scoped templates', 400, 'VALIDATION_ERROR')
+  }
+  if (ids.length > APPROVAL_TEMPLATE_VISIBILITY_ID_MAX_COUNT) {
+    throw new ServiceError(
+      `visibilityScope.ids must contain at most ${APPROVAL_TEMPLATE_VISIBILITY_ID_MAX_COUNT} ids`,
+      400,
+      'VALIDATION_ERROR',
+    )
+  }
+  return { type: value.type, ids } as ApprovalTemplateVisibilityScope
+}
+
+function readTemplateVisibilityScope(value: unknown): ApprovalTemplateVisibilityScope {
+  if (!isRecord(value)) return { type: 'all', ids: [] }
+  if (typeof value.type !== 'string' || !APPROVAL_TEMPLATE_VISIBILITY_TYPES.has(value.type)) {
+    return { type: 'all', ids: [] }
+  }
+  if (value.type === 'all') return { type: 'all', ids: [] }
+  const ids = Array.isArray(value.ids)
+    ? value.ids
+        .filter((entry): entry is string => typeof entry === 'string' && entry.trim().length > 0)
+        .map((entry) => entry.trim())
+    : []
+  return { type: value.type, ids } as ApprovalTemplateVisibilityScope
+}
+
+function applyTemplateVisibilityFilter(
+  conditions: string[],
+  params: unknown[],
+  index: number,
+  actor?: ApprovalTemplateVisibilityActor,
+): number {
+  if (!actor || actor.isTemplateManager) return index
+
+  const userParam = index++
+  params.push(actor.userId)
+  const deptParam = index++
+  params.push(actor.departmentIds.length > 0 ? actor.departmentIds : ['__approval_template_no_dept__'])
+  const roleParam = index++
+  params.push(actor.roles.length > 0 ? actor.roles : ['__approval_template_no_role__'])
+
+  conditions.push(`(
+    COALESCE(visibility_scope->>'type', 'all') = 'all'
+    OR (
+      visibility_scope->>'type' = 'user'
+      AND EXISTS (
+        SELECT 1 FROM jsonb_array_elements_text(COALESCE(visibility_scope->'ids', '[]'::jsonb)) AS visible_ids(id)
+        WHERE visible_ids.id = $${userParam}
+      )
+    )
+    OR (
+      visibility_scope->>'type' = 'dept'
+      AND EXISTS (
+        SELECT 1 FROM jsonb_array_elements_text(COALESCE(visibility_scope->'ids', '[]'::jsonb)) AS visible_ids(id)
+        WHERE visible_ids.id = ANY($${deptParam}::text[])
+      )
+    )
+    OR (
+      visibility_scope->>'type' = 'role'
+      AND EXISTS (
+        SELECT 1 FROM jsonb_array_elements_text(COALESCE(visibility_scope->'ids', '[]'::jsonb)) AS visible_ids(id)
+        WHERE visible_ids.id = ANY($${roleParam}::text[])
+      )
+    )
+  )`)
+  return index
 }
 
 function assertApprovalGraph(value: unknown, context: ValidationContext = REQUEST_VALIDATION_CONTEXT): ApprovalGraph {
@@ -857,6 +975,7 @@ export class ApprovalProductService {
       conditions.push(`category = $${index++}`)
       params.push(query.category)
     }
+    index = applyTemplateVisibilityFilter(conditions, params, index, query.actor)
 
     const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : ''
 
@@ -879,8 +998,8 @@ export class ApprovalProductService {
     }
   }
 
-  async getTemplate(id: string): Promise<ApprovalTemplateDetailDTO | null> {
-    const bundle = await this.loadTemplateBundle(id, undefined, 'latest')
+  async getTemplate(id: string, actor?: ApprovalTemplateVisibilityActor): Promise<ApprovalTemplateDetailDTO | null> {
+    const bundle = await this.loadTemplateBundle(id, undefined, 'latest', actor)
     return bundle ? toApprovalTemplateDetailDTO(bundle) : null
   }
 
@@ -897,6 +1016,7 @@ export class ApprovalProductService {
     const description = normalizeOptionalString(request.description)
     // Wave 2 WP4 slice 1 — category is optional; `undefined`/empty → null.
     const category = normalizeTemplateCategory(request.category) ?? null
+    const visibilityScope = normalizeTemplateVisibilityScope(request.visibilityScope) ?? { type: 'all', ids: [] }
     const formSchema = assertFormSchema(request.formSchema)
     const approvalGraph = assertApprovalGraph(request.approvalGraph)
 
@@ -906,10 +1026,10 @@ export class ApprovalProductService {
       await client.query('BEGIN')
 
       const templateResult = await client.query<TemplateRow>(
-        `INSERT INTO approval_templates (key, name, description, category, status)
-         VALUES ($1, $2, $3, $4, 'draft')
+        `INSERT INTO approval_templates (key, name, description, category, visibility_scope, status)
+         VALUES ($1, $2, $3, $4, $5, 'draft')
          RETURNING *`,
-        [key, name, description ?? null, category],
+        [key, name, description ?? null, category, JSON.stringify(visibilityScope)],
       )
       let template = templateResult.rows[0]
 
@@ -958,6 +1078,9 @@ export class ApprovalProductService {
       // only category leaves the form/approval graph untouched.
       metadataPatch.category = normalizeTemplateCategory(request.category) ?? null
     }
+    if (request.visibilityScope !== undefined) {
+      metadataPatch.visibilityScope = normalizeTemplateVisibilityScope(request.visibilityScope) ?? { type: 'all', ids: [] }
+    }
 
     const formSchema = request.formSchema !== undefined ? assertFormSchema(request.formSchema) : undefined
     const approvalGraph = request.approvalGraph !== undefined ? assertApprovalGraph(request.approvalGraph) : undefined
@@ -996,6 +1119,10 @@ export class ApprovalProductService {
         if (metadataPatch.category !== undefined) {
           setClauses.push(`category = $${index++}`)
           params.push(metadataPatch.category)
+        }
+        if (metadataPatch.visibilityScope !== undefined) {
+          setClauses.push(`visibility_scope = $${index++}`)
+          params.push(JSON.stringify(metadataPatch.visibilityScope))
         }
         setClauses.push('updated_at = now()')
         params.push(id)
@@ -1167,13 +1294,18 @@ export class ApprovalProductService {
    * client-side because the template row count is small and this keeps the
    * frontend from paging through every template just to populate a filter.
    */
-  async listTemplateCategories(): Promise<string[]> {
+  async listTemplateCategories(actor?: ApprovalTemplateVisibilityActor): Promise<string[]> {
     if (!pool) throw new Error('Database not available')
+    const conditions: string[] = ['category IS NOT NULL']
+    const params: unknown[] = []
+    applyTemplateVisibilityFilter(conditions, params, 1, actor)
+    const where = `WHERE ${conditions.join(' AND ')}`
     const result = await pool.query<{ category: string }>(
       `SELECT DISTINCT category
        FROM approval_templates
-       WHERE category IS NOT NULL
+       ${where}
        ORDER BY category ASC`,
+      params,
     )
     return result.rows.map((row) => row.category).filter((v) => typeof v === 'string' && v.length > 0)
   }
@@ -1223,10 +1355,16 @@ export class ApprovalProductService {
         await client.query('BEGIN')
 
         const templateResult = await client.query<TemplateRow>(
-          `INSERT INTO approval_templates (key, name, description, category, status)
-           VALUES ($1, $2, $3, $4, 'draft')
+          `INSERT INTO approval_templates (key, name, description, category, visibility_scope, status)
+           VALUES ($1, $2, $3, $4, $5, 'draft')
            RETURNING *`,
-          [newKey, newName, source.template.description, source.template.category ?? null],
+          [
+            newKey,
+            newName,
+            source.template.description,
+            source.template.category ?? null,
+            JSON.stringify(readTemplateVisibilityScope(source.template.visibility_scope)),
+          ],
         )
         let template = templateResult.rows[0]
 
@@ -1286,7 +1424,15 @@ export class ApprovalProductService {
   async createApproval(request: CreateApprovalRequest, actor: CreateApprovalActor): Promise<UnifiedApprovalDTO> {
     if (!pool) throw new Error('Database not available')
 
-    const bundle = await this.loadTemplateBundle(request.templateId, undefined, 'active')
+    const bundle = await this.loadTemplateBundle(request.templateId, undefined, 'active', {
+      userId: actor.userId,
+      departmentIds: actor.departmentIds ?? (actor.department ? [actor.department] : []),
+      roles: actor.roles ?? [],
+      permissions: actor.permissions ?? [],
+      isTemplateManager: (actor.permissions ?? []).includes('approval-templates:manage')
+        || (actor.permissions ?? []).includes('*:*')
+        || (actor.roles ?? []).includes('admin'),
+    })
     if (!bundle) {
       throw new ServiceError('Approval template not found', 404, 'APPROVAL_TEMPLATE_NOT_FOUND')
     }
@@ -2004,10 +2150,11 @@ export class ApprovalProductService {
     templateId: string,
     explicitVersionId?: string,
     preferredVersion: TemplateVersionPreference = 'active',
+    actor?: ApprovalTemplateVisibilityActor,
   ): Promise<TemplateBundle | null> {
     if (!pool) throw new Error('Database not available')
 
-    return this.loadTemplateBundleWithClient(pool, templateId, explicitVersionId, preferredVersion)
+    return this.loadTemplateBundleWithClient(pool, templateId, explicitVersionId, preferredVersion, actor)
   }
 
   private async loadTemplateBundleWithClient(
@@ -2015,10 +2162,14 @@ export class ApprovalProductService {
     templateId: string,
     explicitVersionId?: string,
     preferredVersion: TemplateVersionPreference = 'active',
+    actor?: ApprovalTemplateVisibilityActor,
   ): Promise<TemplateBundle | null> {
+    const conditions = ['id = $1']
+    const params: unknown[] = [templateId]
+    applyTemplateVisibilityFilter(conditions, params, 2, actor)
     const templateResult = await client.query<TemplateRow>(
-      `SELECT * FROM approval_templates WHERE id = $1`,
-      [templateId],
+      `SELECT * FROM approval_templates WHERE ${conditions.join(' AND ')}`,
+      params,
     )
     const template = templateResult.rows[0]
     if (!template) return null

@@ -8,6 +8,7 @@ type TemplateRow = {
   name: string
   description: string | null
   category: string | null
+  visibility_scope: Record<string, unknown> | null
   status: 'draft' | 'published' | 'archived'
   active_version_id: string | null
   latest_version_id: string | null
@@ -64,6 +65,7 @@ const routeState = vi.hoisted(() => {
       name: 'Travel Request',
       description: 'Base template',
       category: null,
+      visibility_scope: { type: 'all', ids: [] },
       status: 'draft',
       active_version_id: null,
       latest_version_id: null,
@@ -123,7 +125,15 @@ const routeState = vi.hoisted(() => {
     }
 
     if (normalized.startsWith('SELECT COUNT(*)::text AS count FROM approval_templates')) {
-      return { rows: [{ count: String(state.templates.size) }], rowCount: 1 }
+      const rows = Array.from(state.templates.values()).filter((row) => {
+        if (!normalized.includes('visibility_scope')) return true
+        const scope = row.visibility_scope
+        if (!scope || scope.type === 'all') return true
+        if (scope.type === 'user') return (scope.ids as string[]).includes('template-admin')
+        if (scope.type === 'role') return (scope.ids as string[]).includes('admin')
+        return false
+      })
+      return { rows: [{ count: String(rows.length) }], rowCount: 1 }
     }
 
     if (
@@ -131,6 +141,14 @@ const routeState = vi.hoisted(() => {
       || normalized.startsWith('SELECT * FROM approval_templates WHERE id = $1')
     ) {
       const row = state.templates.get(String(params[0]))
+      if (row && normalized.includes('visibility_scope')) {
+        const scope = row.visibility_scope
+        const visible = !scope
+          || scope.type === 'all'
+          || (scope.type === 'user' && (scope.ids as string[]).includes('template-admin'))
+          || (scope.type === 'role' && (scope.ids as string[]).includes('admin'))
+        return { rows: visible ? [row] : [], rowCount: visible ? 1 : 0 }
+      }
       return { rows: row ? [row] : [], rowCount: row ? 1 : 0 }
     }
 
@@ -148,15 +166,16 @@ const routeState = vi.hoisted(() => {
 
     if (normalized.startsWith('INSERT INTO approval_templates')) {
       const timestamp = now()
-      // Wave 2 WP4 slice 1 — production SQL is:
-      //   INSERT INTO approval_templates (key, name, description, category, status)
-      //   VALUES ($1, $2, $3, $4, 'draft')
+      const hasVisibilityScope = normalized.includes('visibility_scope')
       const row: TemplateRow = {
         id: `tpl-${state.templateSeq++}`,
         key: String(params[0]),
         name: String(params[1]),
         description: params[2] == null ? null : String(params[2]),
         category: params[3] == null ? null : String(params[3]),
+        visibility_scope: hasVisibilityScope
+          ? parseJson(params[4])
+          : { type: 'all', ids: [] },
         status: 'draft',
         active_version_id: null,
         latest_version_id: null,
@@ -199,6 +218,9 @@ const routeState = vi.hoisted(() => {
         // Wave 2 WP4 slice 1 — category updates on the parent row.
         const value = params[index++]
         row.category = value == null ? null : String(value)
+      }
+      if (normalized.includes('visibility_scope = $')) {
+        row.visibility_scope = parseJson(params[index++])
       }
       row.updated_at = now()
       return { rows: [row], rowCount: 1 }
@@ -369,6 +391,7 @@ describe('approval template routes', () => {
     expect(response.body.key).toBe('expense-approval')
     expect(response.body.status).toBe('draft')
     expect(response.body.latestVersionId).toMatch(/^ver-/)
+    expect(response.body.visibilityScope).toEqual({ type: 'all', ids: [] })
     expect(response.body.formSchema.fields).toHaveLength(1)
     expect(response.body.approvalGraph.nodes[1].config).toEqual({
       assigneeType: 'role',
@@ -376,6 +399,47 @@ describe('approval template routes', () => {
       approvalMode: 'all',
       emptyAssigneePolicy: 'auto-approve',
     })
+  })
+
+  it('creates and patches template visibility scope metadata without rotating versions', async () => {
+    const app = createApp()
+
+    const createResponse = await request(app)
+      .post('/api/approval-templates')
+      .send({
+        key: 'dept-expense',
+        name: 'Dept Expense',
+        visibilityScope: { type: 'dept', ids: ['finance', 'ops'] },
+        formSchema: {
+          fields: [{ id: 'amount', type: 'number', label: 'Amount', required: true }],
+        },
+        approvalGraph: {
+          nodes: [
+            { key: 'start', type: 'start', config: {} },
+            { key: 'approve_1', type: 'approval', config: { assigneeType: 'role', assigneeIds: ['finance'] } },
+            { key: 'end', type: 'end', config: {} },
+          ],
+          edges: [
+            { key: 'e1', source: 'start', target: 'approve_1' },
+            { key: 'e2', source: 'approve_1', target: 'end' },
+          ],
+        },
+      })
+
+    expect(createResponse.status).toBe(201)
+    expect(createResponse.body.visibilityScope).toEqual({ type: 'dept', ids: ['finance', 'ops'] })
+    const originalVersionId = createResponse.body.latestVersionId
+
+    const patchResponse = await request(app)
+      .patch(`/api/approval-templates/${createResponse.body.id}`)
+      .send({
+        visibilityScope: { type: 'role', ids: ['manager'] },
+      })
+
+    expect(patchResponse.status).toBe(200)
+    expect(patchResponse.body.visibilityScope).toEqual({ type: 'role', ids: ['manager'] })
+    expect(patchResponse.body.latestVersionId).toBe(originalVersionId)
+    expect(routeState.state.versions.size).toBe(1)
   })
 
   it('patches template metadata and creates a new draft version when graph changes', async () => {

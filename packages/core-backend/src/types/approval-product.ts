@@ -15,6 +15,7 @@ export type EmptyAssigneePolicy = 'error' | 'auto-approve'
 export type ApprovalActionType = 'approve' | 'reject' | 'transfer' | 'revoke' | 'comment' | 'return'
 export type ApprovalStatus = 'draft' | 'pending' | 'approved' | 'rejected' | 'revoked' | 'cancelled'
 export type ApprovalTemplateStatus = 'draft' | 'published' | 'archived'
+export type ApprovalTemplateVisibilityType = 'all' | 'dept' | 'role' | 'user'
 export type FormFieldType =
   | 'text'
   | 'textarea'
@@ -214,6 +215,11 @@ export interface ApprovalTemplateListItemDTO {
    * does not spawn a new version.
    */
   category: string | null
+  /**
+   * Wave 2 WP4 slice 2 — template visibility ACL. Older templates default to
+   * `{ type: 'all', ids: [] }` and remain globally visible.
+   */
+  visibilityScope: ApprovalTemplateVisibilityScope
   status: ApprovalTemplateStatus
   activeVersionId: string | null
   latestVersionId: string | null
@@ -226,6 +232,11 @@ export interface ApprovalTemplateDetailDTO extends ApprovalTemplateListItemDTO {
   approvalGraph: ApprovalGraph
 }
 
+export interface ApprovalTemplateVisibilityScope {
+  type: ApprovalTemplateVisibilityType
+  ids: string[]
+}
+
 export interface CreateApprovalTemplateRequest {
   key: string
   name: string
@@ -235,6 +246,7 @@ export interface CreateApprovalTemplateRequest {
    * normalized to `null`; values longer than 64 chars trigger 400.
    */
   category?: string | null
+  visibilityScope?: ApprovalTemplateVisibilityScope | null
   formSchema: FormSchema
   approvalGraph: ApprovalGraph
 }
@@ -248,6 +260,7 @@ export interface UpdateApprovalTemplateRequest {
    * directly without creating a new template version.
    */
   category?: string | null
+  visibilityScope?: ApprovalTemplateVisibilityScope | null
   formSchema?: FormSchema
   approvalGraph?: ApprovalGraph
 }

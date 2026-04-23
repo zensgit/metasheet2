@@ -2538,6 +2538,12 @@ components:
         description:
           type: string
           nullable: true
+        category:
+          type: string
+          nullable: true
+          maxLength: 64
+        visibilityScope:
+          $ref: '#/components/schemas/ApprovalTemplateVisibilityScope'
         status:
           type: string
           enum: [draft, published, archived]
@@ -2553,7 +2559,21 @@ components:
         updatedAt:
           type: string
           format: date-time
-      required: [id, key, name, status, activeVersionId, latestVersionId, createdAt, updatedAt]
+      required: [id, key, name, category, visibilityScope, status, activeVersionId, latestVersionId, createdAt, updatedAt]
+    ApprovalTemplateVisibilityScope:
+      type: object
+      properties:
+        type:
+          type: string
+          enum: [all, dept, role, user]
+          description: Visibility mode. `all` ignores `ids`.
+        ids:
+          type: array
+          items:
+            type: string
+          maxItems: 100
+          description: Department, role, or user ids for scoped visibility.
+      required: [type, ids]
     ApprovalTemplateDetail:
       allOf:
         - $ref: '#/components/schemas/ApprovalTemplateListItem'
@@ -2574,6 +2594,12 @@ components:
         description:
           type: string
           nullable: true
+        category:
+          type: string
+          nullable: true
+          maxLength: 64
+        visibilityScope:
+          $ref: '#/components/schemas/ApprovalTemplateVisibilityScope'
         formSchema:
           $ref: '#/components/schemas/FormSchema'
         approvalGraph:
@@ -2589,6 +2615,12 @@ components:
         description:
           type: string
           nullable: true
+        category:
+          type: string
+          nullable: true
+          maxLength: 64
+        visibilityScope:
+          $ref: '#/components/schemas/ApprovalTemplateVisibilityScope'
         formSchema:
           $ref: '#/components/schemas/FormSchema'
         approvalGraph:
