@@ -10,6 +10,10 @@ import {
   RedisTokenBucketStore,
   type RedisScriptClient,
 } from '../../src/integration/rate-limiting/redis-token-bucket-store'
+import {
+  RedisLeaderLock,
+  type RedisLeaderLockClient,
+} from '../../src/multitable/redis-leader-lock'
 
 const redisUrl = process.env.REDIS_URL
 const describeIfRedis = redisUrl ? describe : describe.skip
@@ -93,5 +97,27 @@ describeIfRedis('Redis runtime stores live smoke', () => {
     const afterFlush = await store.checkAndUpdate('svc-a', thresholds)
     expect(afterFlush.state).toBe(CircuitState.OPEN)
     expect(afterFlush.windowFailures).toBe(3)
+  })
+
+  it('executes owner-scoped leader lock operations against a real Redis server', async () => {
+    prefix = `ms2:leader:${Date.now()}:${Math.random().toString(16).slice(2)}:`
+    const lockKey = `${prefix}scheduler`
+    const lock = new RedisLeaderLock({
+      client: redis as unknown as RedisLeaderLockClient,
+    })
+
+    await expect(lock.acquire(lockKey, 'node-a', 5_000)).resolves.toBe(true)
+    await expect(lock.acquire(lockKey, 'node-b', 5_000)).resolves.toBe(false)
+    await expect(lock.isHeldBy(lockKey, 'node-a')).resolves.toBe(true)
+
+    await expect(lock.renew(lockKey, 'node-b', 5_000)).resolves.toBe(false)
+    await expect(lock.renew(lockKey, 'node-a', 5_000)).resolves.toBe(true)
+
+    await expect(lock.release(lockKey, 'node-b')).resolves.toBe(false)
+    await expect(lock.isHeldBy(lockKey, 'node-a')).resolves.toBe(true)
+
+    await expect(lock.release(lockKey, 'node-a')).resolves.toBe(true)
+    await expect(lock.acquire(lockKey, 'node-b', 5_000)).resolves.toBe(true)
+    await expect(lock.isHeldBy(lockKey, 'node-b')).resolves.toBe(true)
   })
 })
