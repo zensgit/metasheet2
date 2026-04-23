@@ -124,6 +124,38 @@ Example check evidence:
 }
 ```
 
+## Session Orchestrator
+
+Use the session orchestrator for the normal 142/staging P4 run. It runs preflight, bootstraps the API-addressable smoke workspace, compiles a non-strict evidence summary, and writes a session report. It stops before the API runner when preflight fails.
+
+```bash
+node scripts/ops/dingtalk-p4-smoke-session.mjs \
+  --env-file /secure/local/dingtalk-p4.env \
+  --output-dir output/dingtalk-p4-remote-smoke-session/142-session
+```
+
+Expected generated files:
+
+- `preflight/preflight-summary.json`
+- `preflight/preflight-summary.md`
+- `workspace/evidence.json`
+- `workspace/manual-evidence-checklist.md`
+- `workspace/artifacts/<check-id>/`
+- `compiled/summary.json`
+- `compiled/summary.md`
+- `compiled/evidence.redacted.json`
+- `session-summary.json`
+- `session-summary.md`
+
+Expected session status is usually `manual_pending` after the API runner succeeds, because the real DingTalk-client/admin checks still need operator proof. Fill `workspace/evidence.json`, place files in `workspace/artifacts/<check-id>/`, then run strict compile:
+
+```bash
+node scripts/ops/compile-dingtalk-p4-smoke-evidence.mjs \
+  --input output/dingtalk-p4-remote-smoke-session/142-session/workspace/evidence.json \
+  --output-dir output/dingtalk-p4-remote-smoke-session/142-session/compiled \
+  --strict
+```
+
 ## Preflight Gate
 
 Before calling staging or DingTalk, run the preflight gate to check local tooling, required URLs, bearer token presence, DingTalk webhook format, optional `SEC...` secret format, allowlist inputs, and backend `/health`. It writes only redacted summaries.
@@ -146,7 +178,7 @@ Expected generated files:
 
 ## API-Only Smoke Runner
 
-Use the API-only runner to prepare the disposable test resources and collect backend evidence before the manual DingTalk-client checks. It creates a table, a form view, two group destinations, a `dingtalk_granted` form share, a group automation rule, and optional person-message rule when `--person-user` is supplied.
+Use the API-only runner directly when debugging the session's API step. It prepares the disposable test resources and collects backend evidence before the manual DingTalk-client checks. It creates a table, a form view, two group destinations, a `dingtalk_granted` form share, a group automation rule, and optional person-message rule when `--person-user` is supplied.
 
 Do not paste secrets into docs or chat. Supply them through secure shell env, a local password manager, or a temporary shell session on the staging host.
 
