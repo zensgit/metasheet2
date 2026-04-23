@@ -395,6 +395,14 @@ function finalHandoffCommand(outputDir) {
   ].join(' ')
 }
 
+function statusCommand(outputDir) {
+  return [
+    'node scripts/ops/dingtalk-p4-smoke-status.mjs',
+    '--session-dir',
+    relativePath(outputDir),
+  ].join(' ')
+}
+
 function finalizeCommand(outputDir, allowExternalArtifactRefs = false) {
   return [
     'node scripts/ops/dingtalk-p4-smoke-session.mjs',
@@ -552,6 +560,7 @@ function runSession(opts) {
     steps,
     pendingChecks,
     nextCommands: [
+      statusCommand(outputDir),
       finalizeCommand(outputDir, opts.allowExternalArtifactRefs),
       exportPacketCommand(outputDir),
     ],
@@ -628,8 +637,8 @@ function runFinalStrictCompile(opts) {
         }
       : null,
     nextCommands: strictPassed
-      ? [finalHandoffCommand(outputDir), exportPacketCommand(outputDir, true)]
-      : [finalizeCommand(outputDir, opts.allowExternalArtifactRefs), finalHandoffCommand(outputDir), exportPacketCommand(outputDir, true)],
+      ? [statusCommand(outputDir), finalHandoffCommand(outputDir), exportPacketCommand(outputDir, true)]
+      : [statusCommand(outputDir), finalizeCommand(outputDir, opts.allowExternalArtifactRefs), finalHandoffCommand(outputDir), exportPacketCommand(outputDir, true)],
   }
 
   writeSessionSummary(summary, outputDir)
