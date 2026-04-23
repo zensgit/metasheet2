@@ -70,7 +70,37 @@ Key references:
 - [directory-sync.ts](../packages/core-backend/src/directory/directory-sync.ts)
 - [DirectoryManagementView.vue](../apps/web/src/views/DirectoryManagementView.vue)
 
-### 2. Department-scoped auto-admission during sync
+### 2. Manual admission from the synced account list
+
+Supported.
+
+Admin flow:
+
+1. Open the directory management page.
+2. Open the synced member account list.
+3. Find an unmatched DingTalk account.
+4. Expand manual creation.
+5. Enter `name` and at least one identifier:
+   - `email`
+   - `username`
+   - `mobile`
+6. Submit `create user and bind`.
+
+Backend behavior:
+
+- calls the same `admit-user` route used by the review queue
+- allows email to be omitted when username or mobile is present
+- creates the local user
+- binds the new local user to the DingTalk external identity
+- returns the onboarding packet and temporary password when applicable
+
+Operational value:
+
+- admins can handle unmatched synced members directly from the account list
+- no separate user-management page is needed for the create-and-bind operation
+- the account list refreshes after success so the local link is visible immediately
+
+### 3. Department-scoped auto-admission during sync
 
 Supported.
 
@@ -95,7 +125,7 @@ Key references:
 - [directory-sync.ts](../packages/core-backend/src/directory/directory-sync.ts)
 - [DirectoryManagementView.vue](../apps/web/src/views/DirectoryManagementView.vue)
 
-### 3. What is created locally
+### 4. What is created locally
 
 When admission succeeds, the system creates or updates all of the following:
 
@@ -186,6 +216,51 @@ Evidence:
 
 - [auth.ts](../packages/core-backend/src/routes/auth.ts)
 - [ForcePasswordChangeView.vue](../apps/web/src/views/ForcePasswordChangeView.vue)
+
+## Troubleshooting
+
+### Sync completed but no local user was created
+
+Check:
+
+- the latest directory sync run record
+- whether the account is still waiting in the review queue
+- whether the account is outside the configured auto-admission department scope
+- whether alerts show a DingTalk permission or payload error
+
+Manual admission from the synced account list is the fallback when the account is valid but outside auto-admission scope.
+
+### The local identifier already exists
+
+Do not create a duplicate user.
+
+Recommended action:
+
+- bind the synced DingTalk account to the existing local user
+- verify the existing user is active
+- then enable the DingTalk grant if protected forms require `dingtalk_granted`
+
+### The synced account cannot be pre-bound
+
+Common cause:
+
+- the DingTalk sync payload does not contain a usable `openId` or `unionId`
+
+Recommended action:
+
+- verify DingTalk app permissions
+- re-run directory sync after permissions are fixed
+- retry manual admission or binding from the account list
+
+### No email invite was sent
+
+This is expected for no-email users.
+
+Use:
+
+- the onboarding packet
+- the generated temporary password
+- the forced password-change flow on first login
 
 ## What is not yet true on current `main`
 

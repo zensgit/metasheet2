@@ -372,6 +372,7 @@ async function recordDingTalkPersonDelivery(
     subject: string
     content: string
     success: boolean
+    status?: 'success' | 'failed' | 'skipped'
     httpStatus?: number | null
     responseBody?: string | null
     errorMessage?: string | null
@@ -383,12 +384,12 @@ async function recordDingTalkPersonDelivery(
   await queryFn(
     `INSERT INTO dingtalk_person_deliveries (
        id, local_user_id, dingtalk_user_id, source_type, subject, content, success,
-       http_status, response_body, error_message, automation_rule_id,
+       status, http_status, response_body, error_message, automation_rule_id,
        record_id, initiated_by, delivered_at
      ) VALUES (
        $1, $2, $3, $4, $5, $6, $7,
-       $8, $9, $10, $11,
-       $12, $13, $14
+       $8, $9, $10, $11, $12,
+       $13, $14, $15
      )`,
     [
       randomUUID(),
@@ -398,6 +399,7 @@ async function recordDingTalkPersonDelivery(
       input.subject,
       input.content,
       input.success,
+      input.status ?? (input.success ? 'success' : 'failed'),
       input.httpStatus ?? null,
       input.responseBody ?? null,
       input.errorMessage ?? null,
@@ -528,7 +530,8 @@ export class AutomationExecutor {
       execution.steps = await this.executeActions(rule.actions, context)
 
       const hasFailed = execution.steps.some((s) => s.status === 'failed')
-      execution.status = hasFailed ? 'failed' : 'success'
+      const allSkipped = execution.steps.length > 0 && execution.steps.every((s) => s.status === 'skipped')
+      execution.status = hasFailed ? 'failed' : allSkipped ? 'skipped' : 'success'
       if (hasFailed) {
         const failedStep = execution.steps.find((s) => s.status === 'failed')
         execution.error = failedStep?.error ?? 'Action failed'
@@ -1003,21 +1006,29 @@ export class AutomationExecutor {
         subject: renderedTitle,
         content: bodyWithLinks,
         success: false,
+        status: 'skipped',
         errorMessage: 'DingTalk account is not linked or user is inactive',
         automationRuleId: context.ruleId,
         recordId: context.recordId,
         initiatedBy: context.actorId ?? null,
       })))
-      return {
-        actionType: 'send_dingtalk_person_message',
-        status: 'failed',
-        error: `DingTalk account not linked for users: ${missingUserIds.join(', ')}`,
-      }
     }
 
     const resolvedRecipients = userIds
       .map((userId) => recipientMap.get(userId))
       .filter((entry): entry is { localUserId: string; dingtalkUserId: string } => Boolean(entry))
+    if (resolvedRecipients.length === 0) {
+      return {
+        actionType: 'send_dingtalk_person_message',
+        status: 'skipped',
+        error: `DingTalk account not linked for users: ${missingUserIds.join(', ')}`,
+        output: {
+          notifiedUsers: 0,
+          skippedRecipientCount: missingUserIds.length,
+          skippedUserIds: missingUserIds,
+        },
+      }
+    }
     const batches = chunkItems(resolvedRecipients, DINGTALK_PERSON_BATCH_SIZE)
 
     try {
@@ -1046,6 +1057,7 @@ export class AutomationExecutor {
           subject: renderedTitle,
           content: bodyWithLinks,
           success: true,
+          status: 'success',
           httpStatus: 200,
           responseBody,
           automationRuleId: context.ruleId,
@@ -1063,6 +1075,8 @@ export class AutomationExecutor {
           memberGroupRecipientCount: memberGroupUserIds.length,
           dynamicRecipientCount: recordUserIds.length,
           dynamicMemberGroupRecipientCount: recordMemberGroupIds.length,
+          skippedRecipientCount: missingUserIds.length,
+          skippedUserIds: missingUserIds,
           memberGroupIds,
           recipientFieldPath: recipientFieldPaths[0] ?? null,
           recipientFieldPaths,
@@ -1089,6 +1103,7 @@ export class AutomationExecutor {
         subject: renderedTitle,
         content: bodyWithLinks,
         success: false,
+        status: 'failed',
         httpStatus,
         responseBody,
         errorMessage,
