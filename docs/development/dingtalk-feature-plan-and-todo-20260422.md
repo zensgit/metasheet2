@@ -78,6 +78,7 @@
 - [x] Add a P4 final-pass packet gate so release evidence export rejects unfinished, failed, stale-schema, or partially compiled sessions.
 - [x] Clear generated packet markers before gated export validation so failed reruns cannot leave a stale passing `manifest.json` or `README.md`.
 - [x] Add a P4 packet publish validator for final gated packet shape and common raw secret leakage checks.
+- [x] Add a one-command P4 final handoff wrapper that exports, validates, and summarizes a finalized session packet.
 - [ ] Remote smoke: create a table and form view.
 - [ ] Remote smoke: bind at least two DingTalk groups to the table.
 - [ ] Remote smoke: set the form to `dingtalk_granted`.
