@@ -14,6 +14,14 @@ pnpm --filter @metasheet/core-backend exec vitest run tests/unit/approval-templa
 
 Result: `5/5` passed.
 
+Backend RBAC boundary coverage:
+
+```bash
+pnpm --filter @metasheet/core-backend exec vitest run tests/unit/approval-rbac-boundary.test.ts tests/unit/approval-template-routes.test.ts --watch=false --reporter=dot
+```
+
+Result: `25/25` passed. This verifies users with no approval permissions still receive `403` on template read routes; route-level `approvals:read` remains the first boundary, with template ACL filtering applied after RBAC.
+
 Frontend template and permission coverage:
 
 ```bash
@@ -50,6 +58,30 @@ Result:
 packages/openapi/src/base.yml ok
 packages/openapi/src/paths/approvals.yml ok
 ```
+
+OpenAPI dist generation:
+
+```bash
+pnpm exec tsx packages/openapi/tools/build.ts
+```
+
+Result: regenerated `packages/openapi/dist/{combined.openapi.yml,openapi.json,openapi.yaml}` for the new approval template visibility contract.
+
+Backend full unit/integration run without external PostgreSQL:
+
+```bash
+pnpm --filter @metasheet/core-backend exec vitest run --reporter=dot
+```
+
+Result: `2533/2533` passed, `47` skipped. The run logs expected local PostgreSQL `database "chouhua" does not exist` messages from degraded lifecycle paths; the suite exits `0`.
+
+## CI Failure Follow-Up
+
+The first PR run exposed three issues and this branch now contains fixes:
+
+- Migration replay failed because the new migration accepted `pg.Pool`; it now uses `Kysely<unknown>` and `sql.execute(db)`.
+- OpenAPI contract failed because generated `dist` artifacts were not committed; the dist files have been regenerated.
+- RBAC boundary failed because template read routes were treated as authentication-only; they now require `approvals:read` before visibility ACL filtering.
 
 ## Database-Backed Integration
 

@@ -226,7 +226,7 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
   const r = Router()
   const productService = getProductService()
 
-  r.get('/api/approval-templates', authenticate, async (req: Request, res: Response) => {
+  r.get('/api/approval-templates', authenticate, rbacGuard('approvals:read'), async (req: Request, res: Response) => {
     try {
       const actor = resolveApprovalTemplateVisibilityActor(req)
       if (!actor) {
@@ -268,7 +268,7 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
 
   // Wave 2 WP4 slice 1 — served *above* `/api/approval-templates/:id` so
   // Express's matcher does not mistake `categories` for a template id.
-  r.get('/api/approval-templates/categories', authenticate, async (req: Request, res: Response) => {
+  r.get('/api/approval-templates/categories', authenticate, rbacGuard('approvals:read'), async (req: Request, res: Response) => {
     try {
       const actor = resolveApprovalTemplateVisibilityActor(req)
       if (!actor) {
@@ -310,7 +310,7 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
     }
   })
 
-  r.get('/api/approval-templates/:id', authenticate, async (req: Request, res: Response) => {
+  r.get('/api/approval-templates/:id', authenticate, rbacGuard('approvals:read'), async (req: Request, res: Response) => {
     try {
       const actor = resolveApprovalTemplateVisibilityActor(req)
       if (!actor) {

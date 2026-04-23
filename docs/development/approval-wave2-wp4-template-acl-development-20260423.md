@@ -20,9 +20,10 @@ Scope: WP4 slice 2 adds approval template visibility ACL and fills the deferred 
 
 - `POST /api/approval-templates` accepts optional `visibilityScope`; missing means all visible.
 - `PATCH /api/approval-templates/:id` can update `visibilityScope` without creating a new version.
-- `GET /api/approval-templates` and `GET /api/approval-templates/:id` are authenticated read surfaces, not manager-only surfaces; the ACL filter is the access boundary.
+- `GET /api/approval-templates`, `GET /api/approval-templates/categories`, and `GET /api/approval-templates/:id` require `approvals:read`, then apply template ACL filtering. The ACL is not a replacement for route-level RBAC.
 - `POST /api/approvals` now checks the template ACL before initiating from a published template.
 - `POST /api/approval-templates/:id/clone` copies category and visibility scope into the draft clone.
+- The migration uses the Kysely migrator signature (`up(db: Kysely<unknown>)`) rather than a raw `pg.Pool`.
 
 ## Verification
 
