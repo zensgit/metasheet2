@@ -159,6 +159,13 @@ Expected generated files:
 Expected session status is usually `manual_pending` after the API runner succeeds, because the real DingTalk-client/admin checks still need operator proof. Fill `workspace/evidence.json`, place files in `workspace/artifacts/<check-id>/`, then finalize the session:
 
 ```bash
+node scripts/ops/dingtalk-p4-smoke-status.mjs \
+  --session-dir output/dingtalk-p4-remote-smoke-session/142-session
+```
+
+The status report writes `smoke-status.json` / `smoke-status.md` and shows whether the run is blocked, waiting for manual evidence, ready to finalize, waiting for handoff, or release-ready.
+
+```bash
 node scripts/ops/dingtalk-p4-smoke-session.mjs \
   --finalize output/dingtalk-p4-remote-smoke-session/142-session
 ```
@@ -171,6 +178,15 @@ After finalization passes, prefer the one-command final handoff wrapper. It expo
 node scripts/ops/dingtalk-p4-final-handoff.mjs \
   --session-dir output/dingtalk-p4-remote-smoke-session/142-session \
   --output-dir artifacts/dingtalk-staging-evidence-packet/142-final
+```
+
+After final handoff, re-run status with the handoff summary when you need a single release-readiness gate:
+
+```bash
+node scripts/ops/dingtalk-p4-smoke-status.mjs \
+  --session-dir output/dingtalk-p4-remote-smoke-session/142-session \
+  --handoff-summary artifacts/dingtalk-staging-evidence-packet/142-final/handoff-summary.json \
+  --require-release-ready
 ```
 
 If debugging the individual steps, export a handoff packet with the final-pass gate enabled:
