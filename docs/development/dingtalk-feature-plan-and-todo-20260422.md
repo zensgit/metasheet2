@@ -112,6 +112,7 @@ Remote smoke checklist:
 
 - `docs/dingtalk-remote-smoke-checklist-20260422.md`
 - `docs/development/dingtalk-p4-remaining-todo-20260424.md`
+- `docs/development/dingtalk-p4-current-remaining-development-todo-20260424.md`
 
 ## Suggested Parallel Lanes
 
