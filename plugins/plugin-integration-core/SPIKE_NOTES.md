@@ -1,28 +1,26 @@
 # M0 Spike Findings — plugin-integration-core
 
-> Status: ✅ Spike complete. Runtime path confirmed. 4 committed tests pass.
+> Status: ✅ Spike complete. Runtime path confirmed. Runtime teardown gaps #1/#2 have a host-side follow-up.
 > Date: 2026-04-24
-> PR #0 review: all 5 issues resolved in-file; 3 kernel-side gaps remain (see below).
+> PR #0 review: all 5 issues resolved in-file; 1 kernel-side service gap remains (see below).
 
 ---
 
-## ⚠ Known kernel gaps — TODO before production
+## Kernel gap status
 
-These are kernel-side limitations surfaced during spike. M0 works *around* them but they must be addressed (in the kernel, not in this plugin) before the M1 pipeline runner ships. Each bullet cites an exact file:line so a follow-up PR can target it.
+These are kernel-side limitations surfaced during spike. M0 works *around* them, but M1 pipeline work should treat this list as the runtime safety baseline.
 
-### 1. `http.addRoute` has no functional `removeRoute`
+### 1. `http.addRoute` has no functional `removeRoute` — fixed by host-owned teardown
 
-`packages/core-backend/src/index.ts:284` implements `removeRoute(path)` as a no-op that only emits `logger.warn('Route removal not implemented')`. Consequence: when this plugin is deactivated or hot-reloaded the Express route registered at `plugins/plugin-integration-core/index.cjs:56` persists in the running process. In M1 that will mean stale `/api/integration/pipelines/*` endpoints bound to dead code after any reload.
+The host now wraps plugin-owned routes with an owner registration. On plugin deactivation or activation failure, `MetaSheetServer` marks those wrappers inactive; stale wrappers call `next()`, so a later clean reactivation can serve the same path without hitting old closures.
 
-**Scope of fix**: either implement real route removal on the Express `Router` (rebuild router on deactivate) or introduce a plugin-scoped sub-router that can be dropped atomically.
+Express stack entries are still not physically removed, but they are no longer behaviorally active after host cleanup.
 
-### 2. `communication.register` has no `unregister`
+### 2. `communication.register` has no `unregister` — fixed by host-owned teardown
 
-`packages/core-backend/src/index.ts:1320-1338` builds the `communication` helper with `register(name, api)` that does `pluginApis.set(name, api)`. There is no matching delete. If this plugin re-activates under a new module instance, the previous namespace remains and `communication.call('integration-core', ...)` may hit the stale closure.
+The runtime now records communication namespaces by owning plugin. Deactivation and activation failure delete owned namespaces from the host `pluginApis` map. The plugin context also exposes optional `communication.unregister(name)` for explicit cleanup, but plugins do not need to rely on it for host safety.
 
-**Scope of fix**: add `unregister(name)` to the `PluginCommunication` surface and call it from `deactivatePluginByName` (`src/index.ts:1410`).
-
-### 3. `services.security.encrypt/decrypt` declared in types but not wired
+### 3. `services.security.encrypt/decrypt` declared in types but not wired — still open
 
 `packages/core-backend/src/types/plugin.ts` declares `PluginServices.security` (and several other services) but the runtime factory at `src/index.ts:1351-1356` only injects `notification / automationRegistry / rbacProvisioning / platformAppInstances` and casts the result with `as unknown as PluginServices`. Any plugin written against the type declaration would silently get `undefined` at runtime.
 
@@ -45,7 +43,7 @@ Active plugin loader path: `packages/core-backend/src/index.ts:1087` — `create
 
 - `context.api` → full `CoreAPI` with `http.addRoute`, `multitable` (scoped via `createPluginScopedMultitableApi`), `database`, `events`, etc.
 - `context.services` → at runtime only `notification / automationRegistry / rbacProvisioning / platformAppInstances`. The richer `PluginServices` type is a cast, not a binding.
-- `context.communication` → `{ call, register, on, emit }`; in-process `pluginApis` Map. **No unregister (see gap #2)**.
+- `context.communication` → `{ call, register, unregister, on, emit }`; in-process `pluginApis` Map with host-owned cleanup on deactivate or activation failure.
 - `context.storage` → in-memory `Map` per plugin — NOT persistent. Do not use for real state; use `context.api.database` instead.
 - `context.logger` → plugin-scoped `Logger`.
 
@@ -90,11 +88,13 @@ node plugins/plugin-integration-core/__tests__/plugin-runtime-smoke.test.cjs
 node plugins/plugin-integration-core/__tests__/credential-store.test.cjs
 node plugins/plugin-integration-core/__tests__/db.test.cjs
 node plugins/plugin-integration-core/__tests__/staging-installer.test.cjs
+node --import tsx plugins/plugin-integration-core/__tests__/host-loader-smoke.test.mjs
+node plugins/plugin-integration-core/__tests__/migration-sql.test.cjs
 ```
 
 Or: `pnpm -F plugin-integration-core test`.
 
-All 4 test files pass without a live database or the metasheet2 server — they exercise pure logic and mocked contexts. Two things remain untested at this layer and require downstream work:
+The plugin-level test files pass without a live database or the metasheet2 server — they exercise pure logic, mocked contexts, `PluginLoader` discovery/load, and static migration structure. Two things remain untested at this layer and require downstream work:
 
 - The SQL migration `057_create_integration_core_tables.sql` has not been applied against a real Postgres instance. M1 must include `pnpm migrate` CI.
 - Full plugin activation through `PluginLoader` + `createPluginContext` requires booting the backend. The smoke test uses a mocked context that replicates the documented shape but does not exercise the real host.
