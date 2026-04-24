@@ -5,6 +5,7 @@
   "displayName": "Integration Core",
   "description": "PLM/ERP integration pipeline core: ingest, cleanse, validate, upsert, dead-letter, replay. System plugin.",
   "author": { "name": "MetaSheet" },
+  "license": "UNLICENSED",
   "engine": { "metasheet": ">=2.0.0-0" },
   "main": "index.cjs",
   "capabilities": { "views": [], "workflows": [], "functions": [] },
