@@ -214,6 +214,27 @@
             </el-table>
           </div>
 
+          <div class="template-detail__section">
+            <h2>字段显隐规则</h2>
+            <el-empty
+              v-if="visibilityRuleSummaries.length === 0"
+              description="暂无字段显隐规则"
+              :image-size="60"
+            />
+            <el-table v-else :data="visibilityRuleSummaries" style="width: 100%" stripe>
+              <el-table-column label="字段" min-width="160">
+                <template #default="{ row }">
+                  {{ row.field.label }}
+                </template>
+              </el-table-column>
+              <el-table-column label="规则说明" min-width="260">
+                <template #default="{ row }">
+                  {{ row.summary }}
+                </template>
+              </el-table-column>
+            </el-table>
+          </div>
+
           <!-- Approval graph section -->
           <div class="template-detail__section">
             <h2>审批流程</h2>
@@ -288,6 +309,7 @@ import type {
 import { useApprovalTemplateStore } from '../../approvals/templateStore'
 import { useApprovalPermissions } from '../../approvals/permissions'
 import { updateTemplateCategory, updateTemplateVisibilityScope } from '../../approvals/api'
+import { describeFieldVisibilityRule } from '../../approvals/fieldVisibility'
 
 const route = useRoute()
 const router = useRouter()
@@ -295,6 +317,16 @@ const store = useApprovalTemplateStore()
 const { canWrite, canManageTemplates } = useApprovalPermissions()
 
 const template = computed(() => store.activeTemplate)
+const visibilityRuleSummaries = computed(() => {
+  const currentTemplate = template.value
+  if (!currentTemplate) return []
+  return currentTemplate.formSchema.fields
+    .map((field) => ({
+      field,
+      summary: describeFieldVisibilityRule(field, currentTemplate.formSchema),
+    }))
+    .filter((entry) => entry.summary !== null)
+})
 
 // Wave 2 WP4 slice 1 — inline category editor state.
 const editingCategory = ref(false)

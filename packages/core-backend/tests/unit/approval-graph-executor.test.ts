@@ -593,6 +593,89 @@ describe('validateApprovalFormData', () => {
     ])
   })
 
+  it('skips hidden required fields when their visibility rule is not satisfied', () => {
+    const formSchema: FormSchema = {
+      fields: [
+        {
+          id: 'showDetails',
+          type: 'select',
+          label: 'Show Details',
+          required: true,
+          options: [
+            { label: 'Yes', value: 'yes' },
+            { label: 'No', value: 'no' },
+          ],
+        },
+        {
+          id: 'details',
+          type: 'textarea',
+          label: 'Details',
+          required: true,
+          visibilityRule: {
+            fieldId: 'showDetails',
+            operator: 'eq',
+            value: 'yes',
+          },
+        },
+      ],
+    }
+
+    const errors = validateApprovalFormData(formSchema, {
+      showDetails: 'no',
+    })
+
+    expect(errors).toEqual([])
+  })
+
+  it('supports simple visibility operators for visible fields', () => {
+    const formSchema: FormSchema = {
+      fields: [
+        {
+          id: 'selector',
+          type: 'select',
+          label: 'Selector',
+          required: true,
+          options: [
+            { label: 'A', value: 'a' },
+            { label: 'B', value: 'b' },
+          ],
+        },
+        {
+          id: 'dependentText',
+          type: 'text',
+          label: 'Dependent Text',
+          visibilityRule: {
+            fieldId: 'selector',
+            operator: 'in',
+            values: ['a', 'b'],
+          },
+        },
+        {
+          id: 'emptyOnly',
+          type: 'text',
+          label: 'Empty Only',
+          visibilityRule: {
+            fieldId: 'dependentText',
+            operator: 'isEmpty',
+          },
+        },
+      ],
+    }
+
+    const visibleErrors = validateApprovalFormData(formSchema, {
+      selector: 'a',
+      dependentText: 'hello',
+    })
+    expect(visibleErrors).toEqual([])
+
+    const hiddenErrors = validateApprovalFormData(formSchema, {
+      selector: 'a',
+      dependentText: 'hello',
+      emptyOnly: 'should-not-be-validated',
+    })
+    expect(hiddenErrors).toEqual([])
+  })
+
   it('enforces pattern, length, numeric, and date window constraints from field props', () => {
     const formSchema: FormSchema = {
       fields: [

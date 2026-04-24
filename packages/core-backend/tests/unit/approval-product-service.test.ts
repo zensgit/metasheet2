@@ -715,4 +715,171 @@ describe('ApprovalProductService', () => {
 
     randomBytesSpy.mockRestore()
   })
+
+  it('persists visibility rules when creating a template', async () => {
+    const request = {
+      key: 'expense-with-rule',
+      name: 'Expense With Rule',
+      description: 'Template with dependent field visibility',
+      visibilityScope: { type: 'all', ids: [] },
+      formSchema: {
+        fields: [
+          {
+            id: 'showDetails',
+            type: 'select',
+            label: 'Show Details',
+            required: true,
+            options: [
+              { label: 'Yes', value: 'yes' },
+              { label: 'No', value: 'no' },
+            ],
+          },
+          {
+            id: 'details',
+            type: 'textarea',
+            label: 'Details',
+            required: true,
+            visibilityRule: {
+              fieldId: 'showDetails',
+              operator: 'eq',
+              value: 'yes',
+            },
+          },
+        ],
+      },
+      approvalGraph: buildRuntimeGraph(),
+    }
+
+    pgState.client.query.mockImplementation(async (sql: string, params?: unknown[]) => {
+      const statement = normalize(sql)
+      if (statement === 'BEGIN' || statement === 'COMMIT' || statement === 'ROLLBACK') {
+        return { rows: [], rowCount: 0 }
+      }
+      if (statement.startsWith('INSERT INTO approval_templates')) {
+        return {
+          rows: [{
+            id: 'tpl-visibility',
+            key: String(params?.[0]),
+            name: String(params?.[1]),
+            description: params?.[2] == null ? null : String(params?.[2]),
+            category: null,
+            visibility_scope: JSON.parse(String(params?.[4])),
+            status: 'draft',
+            active_version_id: null,
+            latest_version_id: null,
+            created_at: new Date('2026-04-11T00:00:00.000Z'),
+            updated_at: new Date('2026-04-11T00:00:00.000Z'),
+          }],
+          rowCount: 1,
+        }
+      }
+      if (statement.startsWith('INSERT INTO approval_template_versions')) {
+        return {
+          rows: [{
+            id: 'ver-visibility',
+            template_id: 'tpl-visibility',
+            version: 1,
+            status: 'draft',
+            form_schema: JSON.parse(String(params?.[1])),
+            approval_graph: JSON.parse(String(params?.[2])),
+            created_at: new Date('2026-04-11T00:00:00.000Z'),
+            updated_at: new Date('2026-04-11T00:00:00.000Z'),
+          }],
+          rowCount: 1,
+        }
+      }
+      if (statement.startsWith('UPDATE approval_templates')) {
+        return {
+          rows: [{
+            id: 'tpl-visibility',
+            key: 'expense-with-rule',
+            name: 'Expense With Rule',
+            description: 'Template with dependent field visibility',
+            category: null,
+            visibility_scope: { type: 'all', ids: [] },
+            status: 'draft',
+            active_version_id: 'ver-visibility',
+            latest_version_id: 'ver-visibility',
+            created_at: new Date('2026-04-11T00:00:00.000Z'),
+            updated_at: new Date('2026-04-11T00:00:00.000Z'),
+          }],
+          rowCount: 1,
+        }
+      }
+      throw new Error(`Unhandled query: ${statement}`)
+    })
+
+    const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+    const service = new ApprovalProductService()
+    const result = await service.createTemplate(request as never)
+
+    expect(result.formSchema.fields[1].visibilityRule).toEqual({
+      fieldId: 'showDetails',
+      operator: 'eq',
+      value: 'yes',
+    })
+    expect(pgState.client.release).toHaveBeenCalledTimes(1)
+  })
+
+  it('rejects invalid visibility rules before hitting the database', async () => {
+    const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+    const service = new ApprovalProductService()
+
+    await expect(service.createTemplate({
+      key: 'broken-rule',
+      name: 'Broken Rule',
+      formSchema: {
+        fields: [
+          {
+            id: 'showDetails',
+            type: 'select',
+            label: 'Show Details',
+            options: [
+              { label: 'Yes', value: 'yes' },
+              { label: 'No', value: 'no' },
+            ],
+          },
+          {
+            id: 'details',
+            type: 'textarea',
+            label: 'Details',
+            visibilityRule: {
+              fieldId: 'missing-field',
+              operator: 'eq',
+              value: 'yes',
+            },
+          },
+        ],
+      },
+      approvalGraph: buildRuntimeGraph(),
+    } as never)).rejects.toMatchObject({
+      message: 'formSchema.fields[1].visibilityRule.fieldId must reference an existing field',
+      statusCode: 400,
+      code: 'VALIDATION_ERROR',
+    })
+    expect(pgState.pool.connect).not.toHaveBeenCalled()
+
+    await expect(service.createTemplate({
+      key: 'self-rule',
+      name: 'Self Rule',
+      formSchema: {
+        fields: [
+          {
+            id: 'details',
+            type: 'textarea',
+            label: 'Details',
+            visibilityRule: {
+              fieldId: 'details',
+              operator: 'isEmpty',
+            },
+          },
+        ],
+      },
+      approvalGraph: buildRuntimeGraph(),
+    } as never)).rejects.toMatchObject({
+      message: 'formSchema.fields[0].visibilityRule cannot reference itself',
+      statusCode: 400,
+      code: 'VALIDATION_ERROR',
+    })
+  })
 })

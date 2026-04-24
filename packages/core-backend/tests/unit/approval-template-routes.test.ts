@@ -363,7 +363,20 @@ describe('approval template routes', () => {
         name: 'Expense Approval',
         description: 'Travel and expense approvals',
         formSchema: {
-          fields: [{ id: 'amount', type: 'number', label: 'Amount', required: true }],
+          fields: [
+            { id: 'showDetails', type: 'select', label: 'Show Details', required: true, options: [{ label: 'Yes', value: 'yes' }, { label: 'No', value: 'no' }] },
+            {
+              id: 'details',
+              type: 'textarea',
+              label: 'Details',
+              required: true,
+              visibilityRule: {
+                fieldId: 'showDetails',
+                operator: 'eq',
+                value: 'yes',
+              },
+            },
+          ],
         },
         approvalGraph: {
           nodes: [
@@ -392,7 +405,12 @@ describe('approval template routes', () => {
     expect(response.body.status).toBe('draft')
     expect(response.body.latestVersionId).toMatch(/^ver-/)
     expect(response.body.visibilityScope).toEqual({ type: 'all', ids: [] })
-    expect(response.body.formSchema.fields).toHaveLength(1)
+    expect(response.body.formSchema.fields).toHaveLength(2)
+    expect(response.body.formSchema.fields[1].visibilityRule).toEqual({
+      fieldId: 'showDetails',
+      operator: 'eq',
+      value: 'yes',
+    })
     expect(response.body.approvalGraph.nodes[1].config).toEqual({
       assigneeType: 'role',
       assigneeIds: ['finance'],

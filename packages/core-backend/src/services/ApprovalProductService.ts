@@ -12,6 +12,8 @@ import type {
   CreateApprovalTemplateRequest,
   EmptyAssigneePolicy,
   FormSchema,
+  FormFieldVisibilityOperator,
+  FormFieldVisibilityRule,
   PublishApprovalTemplateRequest,
   RuntimeGraph,
   RuntimePolicy,
@@ -21,6 +23,7 @@ import {
   ApprovalGraphExecutor,
   type ApprovalGraphAutoApprovalEvent,
   type ParallelInstanceState,
+  pruneHiddenFormData,
   validateApprovalFormData,
 } from './ApprovalGraphExecutor'
 import type {
@@ -288,6 +291,8 @@ function normalizeFormField(
     failValidation(context, `formSchema.fields[${index}].props must be an object`)
   }
 
+  const visibilityRule = normalizeFormFieldVisibilityRule(value.visibilityRule, index, context)
+
   return {
     id: value.id.trim(),
     type: value.type as FormSchema['fields'][number]['type'],
@@ -304,6 +309,7 @@ function normalizeFormField(
         }
       : {}),
     ...(isRecord(value.props) ? { props: { ...value.props } } : {}),
+    ...(visibilityRule ? { visibilityRule } : {}),
   } as FormSchema['fields'][number]
 }
 
@@ -312,9 +318,110 @@ function assertFormSchema(value: unknown, context: ValidationContext = REQUEST_V
     failValidation(context, 'formSchema must contain fields')
   }
 
-  return {
-    fields: value.fields.map((field, index) => normalizeFormField(field, index, context)),
+  const fields = value.fields.map((field, index) => normalizeFormField(field, index, context))
+  if (new Set(fields.map((field) => field.id)).size !== fields.length) {
+    failValidation(context, 'formSchema field ids must be unique')
   }
+  validateFormFieldVisibilityRules(fields, context)
+
+  return { fields }
+}
+
+function normalizeFormFieldVisibilityRule(
+  value: unknown,
+  fieldIndex: number,
+  context: ValidationContext,
+): FormFieldVisibilityRule | undefined {
+  if (value === undefined) {
+    return undefined
+  }
+  if (!isRecord(value)) {
+    failValidation(context, `formSchema.fields[${fieldIndex}].visibilityRule must be an object`)
+  }
+  if (!isNonEmptyString(value.fieldId)) {
+    failValidation(context, `formSchema.fields[${fieldIndex}].visibilityRule.fieldId is required`)
+  }
+  if (value.fieldId.trim().length === 0) {
+    failValidation(context, `formSchema.fields[${fieldIndex}].visibilityRule.fieldId is required`)
+  }
+  if (value.fieldId.trim() === '') {
+    failValidation(context, `formSchema.fields[${fieldIndex}].visibilityRule.fieldId is required`)
+  }
+  if (!isVisibilityOperator(value.operator)) {
+    failValidation(context, `formSchema.fields[${fieldIndex}].visibilityRule.operator is invalid`)
+  }
+  if (value.operator !== 'in' && value.values !== undefined) {
+    failValidation(context, `formSchema.fields[${fieldIndex}].visibilityRule.values is only allowed for in`)
+  }
+
+  if (value.operator === 'in') {
+    if (!Array.isArray(value.values) || value.values.length === 0) {
+      failValidation(context, `formSchema.fields[${fieldIndex}].visibilityRule.values must be a non-empty array`)
+    }
+    return {
+      fieldId: value.fieldId.trim(),
+      operator: value.operator,
+      values: [...value.values],
+    }
+  }
+
+  if (value.value === undefined && value.operator !== 'isEmpty' && value.operator !== 'notEmpty') {
+    failValidation(context, `formSchema.fields[${fieldIndex}].visibilityRule.value is required`)
+  }
+  if (value.value !== undefined && (value.operator === 'isEmpty' || value.operator === 'notEmpty')) {
+    failValidation(context, `formSchema.fields[${fieldIndex}].visibilityRule does not accept value`)
+  }
+
+  return {
+    fieldId: value.fieldId.trim(),
+    operator: value.operator,
+    ...(value.value !== undefined ? { value: value.value } : {}),
+  }
+}
+
+function isVisibilityOperator(value: unknown): value is FormFieldVisibilityOperator {
+  return value === 'eq' || value === 'neq' || value === 'in' || value === 'isEmpty' || value === 'notEmpty'
+}
+
+function validateFormFieldVisibilityRules(
+  fields: FormSchema['fields'],
+  context: ValidationContext,
+): void {
+  const fieldMap = new Map(fields.map((field) => [field.id, field]))
+
+  fields.forEach((field, index) => {
+    const rule = field.visibilityRule
+    if (!rule) return
+
+    if (!fieldMap.has(rule.fieldId)) {
+      failValidation(
+        context,
+        `formSchema.fields[${index}].visibilityRule.fieldId must reference an existing field`,
+      )
+    }
+    if (rule.fieldId === field.id) {
+      failValidation(context, `formSchema.fields[${index}].visibilityRule cannot reference itself`)
+    }
+  })
+
+  const visitState = new Map<string, 0 | 1 | 2>()
+  const visit = (fieldId: string, path: string[]): void => {
+    const state = visitState.get(fieldId) || 0
+    if (state === 1) {
+      failValidation(context, `formSchema.fields visibility rules must not form a cycle: ${[...path, fieldId].join(' -> ')}`)
+    }
+    if (state === 2) return
+
+    visitState.set(fieldId, 1)
+    const field = fieldMap.get(fieldId)
+    const dependencyId = field?.visibilityRule?.fieldId
+    if (dependencyId) {
+      visit(dependencyId, [...path, fieldId])
+    }
+    visitState.set(fieldId, 2)
+  }
+
+  fields.forEach((field) => visit(field.id, []))
 }
 
 function normalizeApprovalGraph(value: unknown, context: ValidationContext): ApprovalGraph {
@@ -1441,7 +1548,8 @@ export class ApprovalProductService {
     }
 
     const formSchema = asFormSchema(bundle.version.form_schema)
-    const validationErrors = validateApprovalFormData(formSchema, request.formData)
+    const normalizedFormData = pruneHiddenFormData(formSchema, request.formData)
+    const validationErrors = validateApprovalFormData(formSchema, normalizedFormData)
     if (validationErrors.length > 0) {
       throw new ServiceError(
         'Approval form data is invalid',
@@ -1452,7 +1560,7 @@ export class ApprovalProductService {
     }
 
     const runtimeGraph = asRuntimeGraph(bundle.publishedDefinition.runtime_graph)
-    const executor = new ApprovalGraphExecutor(runtimeGraph, request.formData)
+    const executor = new ApprovalGraphExecutor(runtimeGraph, normalizedFormData)
     const initial = executor.resolveInitialState()
     const instanceId = crypto.randomUUID()
     const requestNo = await this.allocateRequestNo()
@@ -1504,7 +1612,7 @@ export class ApprovalProductService {
           bundle.version.id,
           bundle.publishedDefinition.id,
           requestNo,
-          JSON.stringify(request.formData),
+          JSON.stringify(normalizedFormData),
           initial.currentNodeKey,
         ],
       )
