@@ -336,11 +336,13 @@ test('dingtalk-p4-evidence-record refreshes smoke status outputs automatically f
 
     assert.equal(result.status, 0, result.stderr)
     assert.match(result.stdout, /Refreshed .*smoke-status\.json/)
+    assert.match(result.stdout, /Remote smoke phase: bootstrap_pending/)
     assert.equal(existsSync(path.join(sessionDir, 'smoke-status.json')), true)
     assert.equal(existsSync(path.join(sessionDir, 'smoke-status.md')), true)
     assert.equal(existsSync(path.join(sessionDir, 'smoke-todo.md')), true)
     const summary = JSON.parse(readFileSync(path.join(sessionDir, 'smoke-status.json'), 'utf8'))
     assert.equal(summary.overallStatus, 'manual_pending')
+    assert.equal(summary.remoteSmokePhase, 'bootstrap_pending')
     assert.equal(summary.requiredChecks.find((check) => check.id === 'authorized-user-submit').status, 'pass')
   } finally {
     rmSync(tmpDir, { recursive: true, force: true })
@@ -472,6 +474,7 @@ test('dingtalk-p4-evidence-record auto-finalizes once refreshed smoke status rea
       '--allow-external-artifact-refs',
     ])
     assert.match(result.stdout, /Finalized session in .*session-summary\.json/)
+    assert.match(result.stdout, /Remote smoke phase: finalize_pending/)
     assert.match(result.stdout, /Next handoff command: node scripts\/ops\/dingtalk-p4-final-handoff\.mjs --session-dir/)
     const sessionSummary = JSON.parse(readFileSync(path.join(sessionDir, 'session-summary.json'), 'utf8'))
     assert.equal(sessionSummary.sessionPhase, 'finalize')
@@ -545,6 +548,7 @@ test('dingtalk-p4-evidence-record auto-runs final closeout once refreshed smoke 
 
     assert.equal(result.status, 0, result.stderr)
     assert.match(result.stdout, /Final closeout completed: node scripts\/ops\/dingtalk-p4-final-closeout\.mjs/)
+    assert.match(result.stdout, /Remote smoke phase: finalize_pending/)
     const marker = JSON.parse(readFileSync(markerFile, 'utf8'))
     assert.deepEqual(marker.args, [
       '--session-dir',

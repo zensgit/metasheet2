@@ -330,6 +330,7 @@ function runSmokeSession(opts) {
   const smokeStatusMd = path.join(opts.smokeOutputDir, 'smoke-status.md')
   const smokeTodoMd = path.join(opts.smokeOutputDir, 'smoke-todo.md')
   const sessionSummary = readJsonIfExists(sessionSummaryJson)
+  const smokeStatusSummary = readJsonIfExists(smokeStatusJson)
   const hasValidSessionSummary = typeof sessionSummary?.overallStatus === 'string' && sessionSummary.overallStatus.trim()
   const status = result.exitCode === 0 && hasValidSessionSummary
     ? sessionSummary.overallStatus
@@ -350,6 +351,22 @@ function runSmokeSession(opts) {
     sessionPhase: sessionSummary?.sessionPhase ?? null,
     overallStatus: sessionSummary?.overallStatus ?? null,
     finalStrictStatus: sessionSummary?.finalStrictStatus ?? null,
+    remoteSmokePhase: smokeStatusSummary?.remoteSmokePhase ?? sessionSummary?.remoteSmokePhase ?? null,
+    remoteSmokeTodos: smokeStatusSummary?.remoteSmokeTodos
+      ? {
+          total: smokeStatusSummary.remoteSmokeTodos.total,
+          completed: smokeStatusSummary.remoteSmokeTodos.completed,
+          remaining: smokeStatusSummary.remoteSmokeTodos.remaining,
+        }
+      : null,
+    currentFocus: smokeStatusSummary?.executionPlan?.currentFocus
+      ? {
+          phaseLabel: smokeStatusSummary.executionPlan.currentFocus.phaseLabel,
+          checkId: smokeStatusSummary.executionPlan.currentFocus.checkId,
+          todo: smokeStatusSummary.executionPlan.currentFocus.todo,
+          nextAction: smokeStatusSummary.executionPlan.currentFocus.nextAction,
+        }
+      : null,
   }
 }
 
@@ -386,6 +403,15 @@ function renderMarkdown(summary) {
     lines.push('## Smoke Session')
     lines.push('')
     lines.push(`- Status: **${summary.smokeSession.status}**`)
+    if (summary.smokeSession.remoteSmokePhase) {
+      lines.push(`- Remote smoke phase: **${summary.smokeSession.remoteSmokePhase}**`)
+    }
+    if (summary.smokeSession.remoteSmokeTodos) {
+      lines.push(`- Remote TODO: **${summary.smokeSession.remoteSmokeTodos.completed}/${summary.smokeSession.remoteSmokeTodos.total}** complete, **${summary.smokeSession.remoteSmokeTodos.remaining}** remaining`)
+    }
+    if (summary.smokeSession.currentFocus) {
+      lines.push(`- Current focus: \`${summary.smokeSession.currentFocus.checkId}\` - ${summary.smokeSession.currentFocus.nextAction}`)
+    }
     if (summary.smokeSession.reason) {
       lines.push(`- Reason: \`${summary.smokeSession.reason}\``)
     }

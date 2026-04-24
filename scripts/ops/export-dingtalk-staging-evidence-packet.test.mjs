@@ -44,6 +44,7 @@ function writeDingTalkP4Session(dir, overrides = {}) {
     overallStatus: 'pass',
     apiBootstrapStatus: 'pass',
     remoteClientStatus: 'pass',
+    remoteSmokePhase: 'finalize_pending',
     totals: {
       totalChecks: dingtalkP4RequiredCheckIds.length,
       requiredChecks: dingtalkP4RequiredCheckIds.length,
@@ -305,6 +306,7 @@ test('export-dingtalk-staging-evidence-packet accepts finalized DingTalk P4 pass
     assert.equal(manifest.includedEvidence[0].dingtalkP4FinalStatus.status, 'pass')
     assert.equal(manifest.includedEvidence[0].dingtalkP4FinalStatus.finalStrictStatus, 'pass')
     assert.equal(manifest.includedEvidence[0].dingtalkP4FinalStatus.apiBootstrapStatus, 'pass')
+    assert.equal(manifest.includedEvidence[0].dingtalkP4FinalStatus.remoteSmokePhase, 'finalize_pending')
     assert.equal(manifest.includedEvidence[0].dingtalkP4FinalStatus.requiredChecks, 8)
     assert.equal(existsSync(path.join(outputDir, 'evidence/01-142-session/session-summary.json')), true)
 

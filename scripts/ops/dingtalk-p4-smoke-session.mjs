@@ -524,6 +524,7 @@ function buildStatusReportSummary(outputDir, statusStep) {
     smokeStatusMd: existsSync(paths.smokeStatusMd) ? relativePath(paths.smokeStatusMd) : '',
     smokeTodoMd: existsSync(paths.smokeTodoMd) ? relativePath(paths.smokeTodoMd) : '',
     overallStatus: statusSummary?.overallStatus ?? 'not_available',
+    remoteSmokePhase: statusSummary?.remoteSmokePhase ?? 'not_available',
     remoteSmokeTodos: statusSummary?.remoteSmokeTodos
       ? {
           total: statusSummary.remoteSmokeTodos.total,
@@ -582,6 +583,8 @@ API bootstrap status: **${final.apiBootstrapStatus ?? 'unknown'}**
 
 Remote client status: **${final.remoteClientStatus ?? 'unknown'}**
 
+Remote smoke phase: **${final.remoteSmokePhase ?? 'unknown'}**
+
 Required checks not passed:
 
 ${notPassed}
@@ -612,6 +615,8 @@ Status report: \`${summary.statusReport.smokeStatusJson || 'not_available'}\`
 Remote TODO: \`${summary.statusReport.smokeTodoMd || 'not_available'}\`
 
 Remote TODO progress: **${summary.statusReport.remoteSmokeTodos?.completed ?? 0}/${summary.statusReport.remoteSmokeTodos?.total ?? 0}** complete, **${summary.statusReport.remoteSmokeTodos?.remaining ?? 'unknown'}** remaining.
+
+Remote smoke phase: **${summary.statusReport.remoteSmokePhase ?? 'not_available'}**
 `
     : ''
 
@@ -620,6 +625,8 @@ Remote TODO progress: **${summary.statusReport.remoteSmokeTodos?.completed ?? 0}
 Generated at: ${summary.generatedAt}
 
 Overall status: **${summary.overallStatus}**
+
+Remote smoke phase: **${summary.remoteSmokePhase ?? summary.statusReport?.remoteSmokePhase ?? 'not_available'}**
 
 Output directory: \`${summary.outputDir}\`
 
@@ -713,6 +720,7 @@ function runSession(opts) {
   }
 
   const pendingChecks = extractPendingManualChecks(evidencePath)
+  const compiledSummary = readJsonIfExists(path.join(compiledDir, 'summary.json'))
   const summary = {
     tool: 'dingtalk-p4-smoke-session',
     runId,
@@ -722,6 +730,7 @@ function runSession(opts) {
     workspaceDir: relativePath(workspaceDir),
     compiledDir: relativePath(compiledDir),
     overallStatus: computeOverallStatus(steps, pendingChecks),
+    remoteSmokePhase: compiledSummary?.remoteSmokePhase ?? 'not_available',
     sessionPhase: 'bootstrap',
     finalStrictStatus: 'not_run',
     manualTargets: manualTargets(opts),
@@ -738,12 +747,14 @@ function runSession(opts) {
   writeSessionSummary(summary, outputDir)
   const statusStep = runStatusReportStep(outputDir, env)
   const finalSteps = [...steps.filter((step) => step.id !== 'status-report'), statusStep]
+  const statusReport = buildStatusReportSummary(outputDir, statusStep)
   const finalSummary = {
     ...summary,
     generatedAt: new Date().toISOString(),
     overallStatus: computeOverallStatus(finalSteps, pendingChecks),
+    remoteSmokePhase: statusReport.remoteSmokePhase ?? summary.remoteSmokePhase,
     steps: finalSteps,
-    statusReport: buildStatusReportSummary(outputDir, statusStep),
+    statusReport,
   }
   writeSessionSummary(finalSummary, outputDir)
   return finalSummary
@@ -797,6 +808,7 @@ function runFinalStrictCompile(opts) {
     workspaceDir: relativePath(workspaceDir),
     compiledDir: relativePath(compiledDir),
     overallStatus: strictPassed ? 'pass' : 'fail',
+    remoteSmokePhase: compiledSummary?.remoteSmokePhase ?? 'not_available',
     sessionPhase: 'finalize',
     finalStrictStatus: strictPassed ? 'pass' : 'fail',
     manualTargets: priorSummary?.manualTargets ?? manualTargets(opts),
@@ -807,6 +819,7 @@ function runFinalStrictCompile(opts) {
           overallStatus: compiledSummary.overallStatus,
           apiBootstrapStatus: compiledSummary.apiBootstrapStatus,
           remoteClientStatus: compiledSummary.remoteClientStatus,
+          remoteSmokePhase: compiledSummary.remoteSmokePhase,
           requiredChecksNotPassed: compiledSummary.requiredChecksNotPassed ?? [],
           manualEvidenceIssues: compiledSummary.manualEvidenceIssues ?? [],
           manualEvidenceIssueCount: Array.isArray(compiledSummary.manualEvidenceIssues)
@@ -825,12 +838,14 @@ function runFinalStrictCompile(opts) {
   writeSessionSummary(summary, outputDir)
   const statusStep = runStatusReportStep(outputDir, env)
   const finalSteps = [...steps.filter((step) => step.id !== 'status-report'), statusStep]
+  const statusReport = buildStatusReportSummary(outputDir, statusStep)
   const finalSummary = {
     ...summary,
     generatedAt: new Date().toISOString(),
     overallStatus: strictPassed && statusStep.status === 'pass' ? 'pass' : 'fail',
+    remoteSmokePhase: statusReport.remoteSmokePhase ?? summary.remoteSmokePhase,
     steps: finalSteps,
-    statusReport: buildStatusReportSummary(outputDir, statusStep),
+    statusReport,
   }
   writeSessionSummary(finalSummary, outputDir)
   return finalSummary

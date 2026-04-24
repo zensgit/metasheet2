@@ -22,6 +22,7 @@ const REQUIRED_CHECK_IDS = [
   'delivery-history-group-person',
   'no-email-user-create-bind',
 ]
+const VALID_REMOTE_SMOKE_PHASES = new Set(['bootstrap_pending', 'manual_pending', 'finalize_pending', 'fail'])
 const SECRET_PATTERNS = [
   {
     name: 'dingtalk_robot_webhook',
@@ -169,6 +170,13 @@ function hasPassingCheck(requiredChecks, id) {
   return Array.isArray(requiredChecks) && requiredChecks.some((check) => check?.id === id && check.status === 'pass')
 }
 
+function validateOptionalRemoteSmokePhase(value, field, failures) {
+  if (value === undefined || value === null) return
+  if (typeof value !== 'string' || !VALID_REMOTE_SMOKE_PHASES.has(value)) {
+    failures.push(`${field} is not a recognized remote smoke phase`)
+  }
+}
+
 function validateIncludedEvidence(packetDir, entry, index, failures) {
   const label = `includedEvidence[${index}]`
   let evidenceDir
@@ -190,6 +198,7 @@ function validateIncludedEvidence(packetDir, entry, index, failures) {
   if (status?.compiledOverallStatus !== 'pass') failures.push(`${label}.dingtalkP4FinalStatus.compiledOverallStatus is not pass`)
   if (status?.apiBootstrapStatus !== 'pass') failures.push(`${label}.dingtalkP4FinalStatus.apiBootstrapStatus is not pass`)
   if (status?.remoteClientStatus !== 'pass') failures.push(`${label}.dingtalkP4FinalStatus.remoteClientStatus is not pass`)
+  validateOptionalRemoteSmokePhase(status?.remoteSmokePhase, `${label}.dingtalkP4FinalStatus.remoteSmokePhase`, failures)
   if (status?.requiredChecks !== REQUIRED_CHECK_IDS.length) {
     failures.push(`${label}.dingtalkP4FinalStatus.requiredChecks is not ${REQUIRED_CHECK_IDS.length}`)
   }
@@ -220,6 +229,14 @@ function validateIncludedEvidence(packetDir, entry, index, failures) {
   if (compiledSummary.overallStatus !== 'pass') failures.push(`${label}/compiled/summary.json overallStatus is not pass`)
   if (compiledSummary.apiBootstrapStatus !== 'pass') failures.push(`${label}/compiled/summary.json apiBootstrapStatus is not pass`)
   if (compiledSummary.remoteClientStatus !== 'pass') failures.push(`${label}/compiled/summary.json remoteClientStatus is not pass`)
+  validateOptionalRemoteSmokePhase(compiledSummary.remoteSmokePhase, `${label}/compiled/summary.json remoteSmokePhase`, failures)
+  if (
+    typeof status?.remoteSmokePhase === 'string'
+    && typeof compiledSummary.remoteSmokePhase === 'string'
+    && status.remoteSmokePhase !== compiledSummary.remoteSmokePhase
+  ) {
+    failures.push(`${label}.dingtalkP4FinalStatus.remoteSmokePhase does not match compiled summary`)
+  }
   if (compiledSummary.totals?.pendingChecks !== 0) failures.push(`${label}/compiled/summary.json totals.pendingChecks is not 0`)
   if (compiledSummary.totals?.missingRequiredChecks !== 0) failures.push(`${label}/compiled/summary.json totals.missingRequiredChecks is not 0`)
   if (compiledSummary.totals?.failedChecks !== 0) failures.push(`${label}/compiled/summary.json totals.failedChecks is not 0`)

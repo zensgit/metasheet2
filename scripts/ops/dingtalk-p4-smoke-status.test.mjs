@@ -24,6 +24,12 @@ const manualIds = new Set([
   'unauthorized-user-denied',
   'no-email-user-create-bind',
 ])
+const apiBootstrapIds = new Set([
+  'create-table-form',
+  'bind-two-dingtalk-groups',
+  'set-form-dingtalk-granted',
+  'delivery-history-group-person',
+])
 
 function makeTmpDir() {
   return mkdtempSync(path.join(tmpdir(), 'dingtalk-p4-smoke-status-'))
@@ -65,12 +71,26 @@ function writeSession(sessionDir, options = {}) {
   const notPassed = requiredChecks
     .filter((check) => check.status !== 'pass')
     .map((check) => ({ id: check.id, status: check.status }))
+  const apiBootstrapStatus = options.apiBootstrapStatus
+    ?? (requiredChecks.every((check) => !apiBootstrapIds.has(check.id) || check.status === 'pass') ? 'pass' : 'fail')
+  const hasFailedCheck = requiredChecks.some((check) => check.status === 'fail')
+  const hasManualEvidenceIssues = Boolean(options.manualEvidenceIssues?.length)
+  const compiledOverallStatus = notPassed.length === 0 && !hasManualEvidenceIssues ? 'pass' : 'fail'
+  const remoteSmokePhase = options.remoteSmokePhase
+    ?? (hasFailedCheck
+      ? 'fail'
+      : apiBootstrapStatus !== 'pass'
+        ? 'bootstrap_pending'
+        : compiledOverallStatus === 'pass'
+          ? 'finalize_pending'
+          : 'manual_pending')
 
   writeJson(path.join(sessionDir, 'compiled', 'summary.json'), {
     tool: 'compile-dingtalk-p4-smoke-evidence',
-    overallStatus: notPassed.length === 0 && !options.manualEvidenceIssues?.length ? 'pass' : 'fail',
-    apiBootstrapStatus: 'pass',
-    remoteClientStatus: notPassed.length === 0 && !options.manualEvidenceIssues?.length ? 'pass' : 'fail',
+    overallStatus: compiledOverallStatus,
+    apiBootstrapStatus,
+    remoteClientStatus: compiledOverallStatus === 'pass' ? 'pass' : 'fail',
+    remoteSmokePhase,
     totals: {
       totalChecks: requiredCheckIds.length,
       requiredChecks: requiredCheckIds.length,
@@ -150,6 +170,7 @@ test('dingtalk-p4-smoke-status reports manual pending gaps for bootstrap session
     assert.doesNotMatch(summaryText, /secret-token-should-hide/)
     const summary = JSON.parse(summaryText)
     assert.equal(summary.overallStatus, 'manual_pending')
+    assert.equal(summary.remoteSmokePhase, 'manual_pending')
     assert.equal(summary.totals.gaps > 0, true)
     assert.equal(summary.requiredChecks.find((check) => check.id === 'authorized-user-submit').status, 'pending')
     assert.equal(summary.requiredChecks.find((check) => check.id === 'authorized-user-submit').docSection, 'Smoke 4')
@@ -165,10 +186,12 @@ test('dingtalk-p4-smoke-status reports manual pending gaps for bootstrap session
     assert.equal(existsSync(path.join(sessionDir, 'smoke-todo.md')), true)
     const statusMd = readFileSync(path.join(sessionDir, 'smoke-status.md'), 'utf8')
     assert.match(statusMd, /Ordered Execution Plan/)
+    assert.match(statusMd, /Remote smoke phase: \*\*manual_pending\*\*/)
     assert.match(statusMd, /Top-level Remote Smoke Steps/)
     assert.match(statusMd, /Current focus:/)
     const todoText = readFileSync(path.join(sessionDir, 'smoke-todo.md'), 'utf8')
     assert.match(todoText, /Current Focus/)
+    assert.match(todoText, /Remote smoke phase: \*\*manual_pending\*\*/)
     assert.match(todoText, /Ordered Phase Plan/)
     assert.match(todoText, /### 3\. Validate protected form access/)
     assert.match(todoText, /evidence-record\.mjs.*refresh automatically/)
@@ -315,6 +338,7 @@ test('dingtalk-p4-smoke-status reports handoff pending after final strict pass',
     assert.equal(result.status, 0, result.stderr)
     const summary = JSON.parse(readFileSync(path.join(sessionDir, 'smoke-status.json'), 'utf8'))
     assert.equal(summary.overallStatus, 'handoff_pending')
+    assert.equal(summary.remoteSmokePhase, 'finalize_pending')
     assert.equal(summary.totals.gaps, 0)
     assert.equal(summary.nextCommands.some((command) => command.includes('dingtalk-p4-final-closeout.mjs')), true)
     assert.equal(summary.nextCommands.some((command) => command.includes('dingtalk-p4-final-handoff.mjs')), true)
@@ -374,6 +398,7 @@ test('dingtalk-p4-smoke-status reports release ready with passing handoff and pu
     assert.equal(result.status, 0, result.stderr || result.stdout)
     const summary = JSON.parse(readFileSync(path.join(sessionDir, 'smoke-status.json'), 'utf8'))
     assert.equal(summary.overallStatus, 'release_ready')
+    assert.equal(summary.remoteSmokePhase, 'finalize_pending')
     assert.equal(summary.handoff.status, 'pass')
     assert.equal(summary.handoff.publishStatus, 'pass')
     assert.equal(summary.nextCommands.some((command) => command.includes('review the final packet')), true)
@@ -450,6 +475,7 @@ test('dingtalk-p4-smoke-status treats strict manual evidence issues as manual pe
     assert.doesNotMatch(summaryText, /very-secret-admin-token-should-hide/)
     const summary = JSON.parse(summaryText)
     assert.equal(summary.overallStatus, 'manual_pending')
+    assert.equal(summary.remoteSmokePhase, 'manual_pending')
     assert.equal(summary.requiredChecks.find((check) => check.id === 'authorized-user-submit').manualEvidenceIssueCount, 1)
     assert.equal(summary.nextCommands.some((command) => command.includes('--finalize')), true)
   } finally {

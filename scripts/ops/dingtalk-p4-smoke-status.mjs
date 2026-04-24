@@ -74,6 +74,13 @@ const REQUIRED_CHECKS = [
 
 const REQUIRED_CHECK_BY_ID = new Map(REQUIRED_CHECKS.map((check) => [check.id, check]))
 const VALID_STATUSES = new Set(['pass', 'fail', 'skipped', 'pending', 'missing'])
+const API_BOOTSTRAP_CHECK_IDS = new Set([
+  'create-table-form',
+  'bind-two-dingtalk-groups',
+  'set-form-dingtalk-granted',
+  'delivery-history-group-person',
+])
+const REMOTE_SMOKE_SUMMARY_PHASES = new Set(['bootstrap_pending', 'manual_pending', 'finalize_pending', 'fail'])
 const REMOTE_SMOKE_PHASES = [
   {
     id: 'bootstrap',
@@ -492,6 +499,33 @@ function computeOverallStatus({ sessionSummary, compiledSummary, requiredChecks,
   return 'release_ready'
 }
 
+function normalizeRemoteSmokePhase(value) {
+  const phase = typeof value === 'string' ? value.trim() : ''
+  return REMOTE_SMOKE_SUMMARY_PHASES.has(phase) ? phase : ''
+}
+
+function computeRemoteSmokePhase({ sessionSummary, compiledSummary, requiredChecks, gaps, overallStatus }) {
+  if (hasFailedSessionStep(sessionSummary) || hasFailedEvidence(requiredChecks, compiledSummary)) {
+    return 'fail'
+  }
+  const compiledPhase = normalizeRemoteSmokePhase(compiledSummary?.remoteSmokePhase)
+  if (compiledPhase) return compiledPhase
+  const finalStrictPhase = normalizeRemoteSmokePhase(sessionSummary?.finalStrictSummary?.remoteSmokePhase)
+  if (finalStrictPhase) return finalStrictPhase
+  const apiBootstrapStatus = typeof compiledSummary?.apiBootstrapStatus === 'string' ? compiledSummary.apiBootstrapStatus : ''
+  if (apiBootstrapStatus && apiBootstrapStatus !== 'pass') return 'bootstrap_pending'
+  if (requiredChecks.some((check) => API_BOOTSTRAP_CHECK_IDS.has(check.id) && check.status !== 'pass')) {
+    return 'bootstrap_pending'
+  }
+  if (gaps.length > 0 || requiredChecks.some((check) => check.status !== 'pass' || check.manualEvidenceIssueCount > 0)) {
+    return 'manual_pending'
+  }
+  if (overallStatus === 'release_ready' || overallStatus === 'handoff_pending' || overallStatus === 'finalize_pending') {
+    return 'finalize_pending'
+  }
+  return 'not_available'
+}
+
 function sessionCommand(opts, command) {
   if (!opts.sessionDir) return ''
   return command.replaceAll('<session-dir>', relativePath(opts.sessionDir))
@@ -764,6 +798,13 @@ function buildSummary(opts) {
     gaps,
     handoff,
   })
+  const remoteSmokePhase = computeRemoteSmokePhase({
+    sessionSummary,
+    compiledSummary,
+    requiredChecks,
+    gaps,
+    overallStatus,
+  })
 
   return {
     tool: 'dingtalk-p4-smoke-status',
@@ -773,6 +814,7 @@ function buildSummary(opts) {
     finalStrictStatus: sessionSummary?.finalStrictStatus ?? 'not_available',
     apiBootstrapStatus: compiledSummary?.apiBootstrapStatus ?? 'not_available',
     remoteClientStatus: compiledSummary?.remoteClientStatus ?? 'not_available',
+    remoteSmokePhase,
     inputs: {
       sessionDir: relativePath(opts.sessionDir),
       sessionSummary: opts.sessionSummary && existsSync(opts.sessionSummary) ? relativePath(opts.sessionSummary) : '',
@@ -849,6 +891,8 @@ Final strict status: **${summary.finalStrictStatus}**
 API bootstrap status: **${summary.apiBootstrapStatus}**
 
 Remote client status: **${summary.remoteClientStatus}**
+
+Remote smoke phase: **${summary.remoteSmokePhase}**
 
 Handoff status: **${summary.handoff.status}**
 
@@ -939,6 +983,8 @@ ${checklist.join('\n')}`
 Generated at: ${summary.generatedAt}
 
 Overall status: **${summary.overallStatus}**
+
+Remote smoke phase: **${summary.remoteSmokePhase}**
 
 Progress: **${summary.remoteSmokeTodos.completed}/${summary.remoteSmokeTodos.total}** complete, **${summary.remoteSmokeTodos.remaining}** remaining.
 

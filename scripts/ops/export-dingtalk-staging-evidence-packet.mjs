@@ -305,6 +305,7 @@ function validateDingTalkP4FinalPass(sourceDir) {
     compiledOverallStatus: compiledSummary.overallStatus,
     apiBootstrapStatus: compiledSummary.apiBootstrapStatus,
     remoteClientStatus: compiledSummary.remoteClientStatus,
+    remoteSmokePhase: compiledSummary.remoteSmokePhase ?? null,
     requiredChecks: DINGTALK_P4_REQUIRED_CHECK_IDS.length,
   }
 }

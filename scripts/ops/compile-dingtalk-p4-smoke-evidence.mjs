@@ -87,6 +87,7 @@ const API_BOOTSTRAP_CHECK_IDS = new Set([
   'set-form-dingtalk-granted',
   'delivery-history-group-person',
 ])
+const REMOTE_SMOKE_PHASES = new Set(['bootstrap_pending', 'manual_pending', 'finalize_pending', 'fail'])
 const MANUAL_EVIDENCE_REQUIREMENTS = [
   {
     id: 'send-group-message-form-link',
@@ -753,6 +754,23 @@ function validateManualEvidenceRequirements(checksById, evidenceDir, opts) {
   return issues
 }
 
+function computeRemoteSmokePhase({
+  overallStatus,
+  apiBootstrapStatus,
+  requiredChecksNotPassed,
+  failedChecks,
+  unknownChecks,
+  manualEvidenceIssues,
+}) {
+  if (failedChecks.length > 0 || unknownChecks.length > 0) return 'fail'
+  if (apiBootstrapStatus !== 'pass') return 'bootstrap_pending'
+  if (overallStatus === 'pass' && requiredChecksNotPassed.length === 0 && manualEvidenceIssues.length === 0) {
+    return 'finalize_pending'
+  }
+  if (requiredChecksNotPassed.length > 0 || manualEvidenceIssues.length > 0) return 'manual_pending'
+  return REMOTE_SMOKE_PHASES.has(overallStatus) ? overallStatus : 'fail'
+}
+
 function buildSummary(evidence, inputFile, outputDir, opts = {}) {
   const checks = normalizeChecks(evidence)
   const byId = new Map(checks.map((check) => [check.id, check]))
@@ -777,6 +795,14 @@ function buildSummary(evidence, inputFile, outputDir, opts = {}) {
   const apiBootstrapStatus = apiBootstrapRequired.every((check) => check.status === 'pass') ? 'pass' : 'fail'
   const remoteClientStatus = requiredChecksNotPassed.length === 0 && manualEvidenceIssues.length === 0 ? 'pass' : 'fail'
   const overallStatus = requiredChecksNotPassed.length === 0 && failedChecks.length === 0 && manualEvidenceIssues.length === 0 ? 'pass' : 'fail'
+  const remoteSmokePhase = computeRemoteSmokePhase({
+    overallStatus,
+    apiBootstrapStatus,
+    requiredChecksNotPassed,
+    failedChecks,
+    unknownChecks,
+    manualEvidenceIssues,
+  })
   const sanitizedEvidence = sanitizeValue(evidence)
 
   return {
@@ -787,6 +813,7 @@ function buildSummary(evidence, inputFile, outputDir, opts = {}) {
     overallStatus,
     apiBootstrapStatus,
     remoteClientStatus,
+    remoteSmokePhase,
     totals: {
       totalChecks: checks.length,
       requiredChecks: REQUIRED_CHECKS.length,
@@ -851,6 +878,8 @@ Overall status: **${summary.overallStatus}**
 API bootstrap status: **${summary.apiBootstrapStatus}**
 
 Remote client status: **${summary.remoteClientStatus}**
+
+Remote smoke phase: **${summary.remoteSmokePhase}**
 
 ## Required Checks
 

@@ -81,7 +81,23 @@ fs.writeFileSync(path.join(outputDir, 'session-summary.json'), JSON.stringify({
   finalStrictStatus: ${JSON.stringify(exitCode === 0 ? 'pending' : 'fail')},
 }, null, 2) + '\\n')
 fs.writeFileSync(path.join(outputDir, 'session-summary.md'), '# session\\n')
-fs.writeFileSync(path.join(outputDir, 'smoke-status.json'), JSON.stringify({ overallStatus: ${JSON.stringify(exitCode === 0 ? 'manual_pending' : 'fail')} }, null, 2) + '\\n')
+fs.writeFileSync(path.join(outputDir, 'smoke-status.json'), JSON.stringify({
+  overallStatus: ${JSON.stringify(exitCode === 0 ? 'manual_pending' : 'fail')},
+  remoteSmokePhase: ${JSON.stringify(exitCode === 0 ? 'manual_pending' : 'fail')},
+  remoteSmokeTodos: {
+    total: 8,
+    completed: 4,
+    remaining: ${JSON.stringify(exitCode === 0 ? 4 : 8)},
+  },
+  executionPlan: {
+    currentFocus: {
+      phaseLabel: 'Validate protected form access',
+      checkId: 'authorized-user-submit',
+      todo: 'Remote smoke: verify an authorized user can open and submit',
+      nextAction: 'capture real DingTalk evidence and record authorized-user-submit',
+    },
+  },
+}, null, 2) + '\\n')
 fs.writeFileSync(path.join(outputDir, 'smoke-status.md'), '# status\\n')
 fs.writeFileSync(path.join(outputDir, 'smoke-todo.md'), '# todo\\n')
 if (process.env.FAKE_SMOKE_MARKER) {
@@ -109,7 +125,10 @@ fs.writeFileSync(path.join(outputDir, 'session-summary.json'), JSON.stringify({
   leakedEnv,
 }, null, 2) + '\\n')
 fs.writeFileSync(path.join(outputDir, 'session-summary.md'), '# session\\n')
-fs.writeFileSync(path.join(outputDir, 'smoke-status.json'), JSON.stringify({ overallStatus: leakedEnv ? 'fail' : 'manual_pending' }, null, 2) + '\\n')
+fs.writeFileSync(path.join(outputDir, 'smoke-status.json'), JSON.stringify({
+  overallStatus: leakedEnv ? 'fail' : 'manual_pending',
+  remoteSmokePhase: leakedEnv ? 'fail' : 'manual_pending',
+}, null, 2) + '\\n')
 fs.writeFileSync(path.join(outputDir, 'smoke-status.md'), '# status\\n')
 fs.writeFileSync(path.join(outputDir, 'smoke-todo.md'), '# todo\\n')
 `, 'utf8')
@@ -292,10 +311,15 @@ test('dingtalk-p4-release-readiness reports manual_pending after automatically l
     assert.equal(summary.overallStatus, 'manual_pending')
     assert.equal(summary.smokeSession.status, 'manual_pending')
     assert.equal(summary.smokeSession.overallStatus, 'manual_pending')
+    assert.equal(summary.smokeSession.remoteSmokePhase, 'manual_pending')
+    assert.equal(summary.smokeSession.remoteSmokeTodos.remaining, 4)
+    assert.equal(summary.smokeSession.currentFocus.checkId, 'authorized-user-submit')
     assert.equal(summary.smokeSession.sessionSummaryJson.endsWith('session-summary.json'), true)
     assert.equal(existsSync(path.join(outputDir, 'smoke-session.stdout.log')), true)
     const markdown = readFileSync(path.join(outputDir, 'release-readiness-summary.md'), 'utf8')
     assert.match(markdown, /## Smoke Session/)
+    assert.match(markdown, /Remote smoke phase: \*\*manual_pending\*\*/)
+    assert.match(markdown, /Current focus: `authorized-user-submit`/)
     assert.match(markdown, /started automatically/)
   } finally {
     rmSync(tmpDir, { recursive: true, force: true })

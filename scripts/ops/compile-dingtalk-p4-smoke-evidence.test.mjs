@@ -223,8 +223,11 @@ test('compile-dingtalk-p4-smoke-evidence compiles passing evidence and redacts s
     assert.equal(summary.overallStatus, 'pass')
     assert.equal(summary.apiBootstrapStatus, 'pass')
     assert.equal(summary.remoteClientStatus, 'pass')
+    assert.equal(summary.remoteSmokePhase, 'finalize_pending')
     assert.equal(summary.requiredChecksNotPassed.length, 0)
     assert.equal(summary.manualEvidenceIssues.length, 0)
+    const summaryMd = readFileSync(path.join(outputDir, 'summary.md'), 'utf8')
+    assert.match(summaryMd, /Remote smoke phase: \*\*finalize_pending\*\*/)
 
     const redacted = readFileSync(path.join(outputDir, 'evidence.redacted.json'), 'utf8')
     assert.doesNotMatch(redacted, /robot-secret/)
@@ -261,6 +264,7 @@ test('compile-dingtalk-p4-smoke-evidence strict mode rejects missing manual arti
     assert.match(result.stderr, /artifact_ref_missing/)
     const summary = JSON.parse(readFileSync(path.join(outputDir, 'summary.json'), 'utf8'))
     assert.equal(summary.overallStatus, 'fail')
+    assert.equal(summary.remoteSmokePhase, 'manual_pending')
     assert.equal(summary.manualEvidenceIssues.some((issue) => issue.code === 'artifact_ref_missing'), true)
   } finally {
     rmSync(tmpDir, { recursive: true, force: true })
@@ -466,6 +470,7 @@ test('compile-dingtalk-p4-smoke-evidence strict mode rejects pass checks without
     assert.equal(summary.overallStatus, 'fail')
     assert.equal(summary.apiBootstrapStatus, 'pass')
     assert.equal(summary.remoteClientStatus, 'fail')
+    assert.equal(summary.remoteSmokePhase, 'manual_pending')
     assert.equal(summary.manualEvidenceIssues.some((issue) => issue.id === 'authorized-user-submit'), true)
     assert.equal(summary.manualEvidenceIssues.some((issue) => issue.id === 'send-group-message-form-link'), true)
   } finally {
@@ -617,6 +622,37 @@ test('compile-dingtalk-p4-smoke-evidence strict mode fails when required checks 
     assert.match(result.stderr, /no-email-user-create-bind:fail/)
     const summary = JSON.parse(readFileSync(path.join(outputDir, 'summary.json'), 'utf8'))
     assert.equal(summary.overallStatus, 'fail')
+    assert.equal(summary.remoteSmokePhase, 'fail')
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+
+test('compile-dingtalk-p4-smoke-evidence reports bootstrap pending when API bootstrap checks are incomplete', () => {
+  const tmpDir = makeTmpDir()
+  const evidencePath = path.join(tmpDir, 'evidence.json')
+  const outputDir = path.join(tmpDir, 'compiled')
+
+  try {
+    writeEvidence(evidencePath, {
+      checks: requiredIds.map((id) => ({
+        id,
+        status: id === 'create-table-form' ? 'pending' : 'pass',
+        evidence: makePassingEvidenceForCheck(id),
+      })),
+    })
+
+    const result = spawnSync(process.execPath, [scriptPath, '--input', evidencePath, '--output-dir', outputDir, '--strict'], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+    })
+
+    assert.equal(result.status, 1)
+    assert.match(result.stderr, /create-table-form:pending/)
+    const summary = JSON.parse(readFileSync(path.join(outputDir, 'summary.json'), 'utf8'))
+    assert.equal(summary.overallStatus, 'fail')
+    assert.equal(summary.apiBootstrapStatus, 'fail')
+    assert.equal(summary.remoteSmokePhase, 'bootstrap_pending')
   } finally {
     rmSync(tmpDir, { recursive: true, force: true })
   }

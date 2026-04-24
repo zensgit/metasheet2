@@ -98,6 +98,7 @@
 - [x] Harden P4 closeout guidance so generated commands honor configured packet/docs paths and stale closeout docs/summaries are cleared.
 - [x] Harden P4 smoke-session reruns so reused session directories cannot carry stale workspace/compiled artifacts or hardcoded packet next commands.
 - [x] Add a phased remote-smoke execution plan and check-level evidence snapshots to generated smoke status/TODO outputs.
+- [x] Add a stable P4 `remoteSmokePhase` contract across compiled evidence, smoke status, session summaries, release readiness, final docs, and packet metadata.
 - [ ] Remote smoke: create a table and form view.
 - [ ] Remote smoke: bind at least two DingTalk groups to the table.
 - [ ] Remote smoke: set the form to `dingtalk_granted`.
@@ -105,6 +106,7 @@
 - [ ] Remote smoke: verify an authorized user can open and submit.
 - [ ] Remote smoke: verify an unauthorized user cannot submit and no record is inserted.
 - [ ] Remote smoke: verify delivery history records group and person sends.
+- [ ] Remote smoke: verify a no-email DingTalk-synced local user can be created and bound by an administrator.
 
 Remote smoke checklist:
 

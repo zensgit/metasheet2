@@ -161,6 +161,12 @@ function statusOf(value) {
   return typeof value === 'string' && value.trim() ? value.trim() : 'not_available'
 }
 
+function compactSnapshot(value) {
+  if (value === null || value === undefined || value === '') return ''
+  const text = typeof value === 'string' ? value : JSON.stringify(value)
+  return text.length > 180 ? `${text.slice(0, 177)}...` : text
+}
+
 function requiredChecks(statusSummary, compiledSummary) {
   const fromStatus = Array.isArray(statusSummary?.requiredChecks) ? statusSummary.requiredChecks : []
   const fromCompiled = Array.isArray(compiledSummary?.requiredChecks) ? compiledSummary.requiredChecks : []
@@ -172,8 +178,11 @@ function requiredChecks(statusSummary, compiledSummary) {
     const check = byId.get(id) ?? {}
     return {
       id,
+      docSection: statusOf(check.docSection),
+      topLevelLabel: statusOf(check.topLevelLabel),
       status: statusOf(check.status),
       source: statusOf(check.source ?? check.evidence?.source),
+      evidenceSnapshot: compactSnapshot(check.evidenceSnapshot ?? check.evidence ?? null),
       manualEvidenceIssueCount: Number.isFinite(check.manualEvidenceIssueCount) ? check.manualEvidenceIssueCount : 0,
     }
   })
@@ -212,6 +221,7 @@ function buildModel(opts) {
     smokeStatus: statusOf(statusSummary.overallStatus),
     apiBootstrapStatus: statusOf(compiledSummary.apiBootstrapStatus),
     remoteClientStatus: statusOf(compiledSummary.remoteClientStatus),
+    remoteSmokePhase: statusOf(statusSummary.remoteSmokePhase ?? compiledSummary.remoteSmokePhase),
     handoffStatus: statusOf(handoffStatus),
     publishStatus: statusOf(publishStatus),
     secretFindingCount,
@@ -238,6 +248,7 @@ function validateReleaseReady(model, requireReleaseReady) {
   if (model.compiledStatus !== 'pass') failures.push('compiled summary overallStatus is not pass')
   if (model.apiBootstrapStatus !== 'pass') failures.push('API bootstrap status is not pass')
   if (model.remoteClientStatus !== 'pass') failures.push('remote client status is not pass')
+  if (model.remoteSmokePhase !== 'finalize_pending') failures.push('remote smoke phase is not finalize_pending')
   if (model.smokeStatus !== 'release_ready') failures.push('smoke status is not release_ready')
   if (model.handoffStatus !== 'pass') failures.push('handoff status is not pass')
   if (model.publishStatus !== 'pass') failures.push('publish status is not pass')
@@ -250,7 +261,7 @@ function validateReleaseReady(model, requireReleaseReady) {
 
 function renderCheckRows(model) {
   return model.requiredChecks
-    .map((check) => `| \`${markdownEscape(check.id)}\` | ${markdownEscape(check.status)} | ${markdownEscape(check.source)} | ${check.manualEvidenceIssueCount} |`)
+    .map((check) => `| ${markdownEscape(check.docSection)} | ${markdownEscape(check.topLevelLabel)} | \`${markdownEscape(check.id)}\` | ${markdownEscape(check.status)} | ${markdownEscape(check.source)} | ${markdownEscape(check.evidenceSnapshot)} | ${check.manualEvidenceIssueCount} |`)
     .join('\n')
 }
 
@@ -279,14 +290,15 @@ function renderDevelopment(model) {
 - Compiled status: **${model.compiledStatus}**
 - API bootstrap status: **${model.apiBootstrapStatus}**
 - Remote client status: **${model.remoteClientStatus}**
+- Remote smoke phase: **${model.remoteSmokePhase}**
 - Smoke status: **${model.smokeStatus}**
 - Handoff status: **${model.handoffStatus}**
 - Publish status: **${model.publishStatus}**
 
 ## Required Checks
 
-| Check | Status | Source | Manual Issues |
-| --- | --- | --- | --- |
+| Doc | Step | Check | Status | Source | Evidence Snapshot | Manual Issues |
+| --- | --- | --- | --- | --- | --- | --- |
 ${renderCheckRows(model)}
 
 ## Residual Risks
@@ -338,14 +350,15 @@ node scripts/ops/dingtalk-p4-final-docs.mjs \\
 - Compiled status: **${model.compiledStatus}**
 - API bootstrap status: **${model.apiBootstrapStatus}**
 - Remote client status: **${model.remoteClientStatus}**
+- Remote smoke phase: **${model.remoteSmokePhase}**
 - Smoke status: **${model.smokeStatus}**
 - Handoff status: **${model.handoffStatus}**
 - Publish status: **${model.publishStatus}**
 
 ## Required Checks
 
-| Check | Status | Source | Manual Issues |
-| --- | --- | --- | --- |
+| Doc | Step | Check | Status | Source | Evidence Snapshot | Manual Issues |
+| --- | --- | --- | --- | --- | --- | --- |
 ${renderCheckRows(model)}
 
 ## Failures

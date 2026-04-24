@@ -171,6 +171,15 @@ The status report writes `smoke-status.json`, `smoke-status.md`, and `smoke-todo
 
 Use `smoke-todo.md` as the operator checklist for the remaining remote smoke evidence. It groups the remaining work into ordered execution phases, highlights the current focus step, includes per-check recorder command templates for manual DingTalk-client/admin evidence, and keeps secrets redacted.
 
+`remoteSmokePhase` is also written into the generated reports as a stable machine-readable phase for the evidence collection flow:
+
+- `bootstrap_pending`: API/bootstrap checks are still incomplete.
+- `manual_pending`: bootstrap is complete, but real DingTalk-client/admin evidence is incomplete or has strict evidence issues.
+- `finalize_pending`: all required smoke evidence is present and the session is ready for strict finalization or handoff.
+- `fail`: an operational failure or failed check must be investigated.
+
+This field is intentionally narrower than `smoke-status.overallStatus`. `overallStatus` continues through later release states such as `handoff_pending` and `release_ready`; `remoteSmokePhase` only tracks the remote-smoke evidence collection phase.
+
 `smoke-status.md` now also includes:
 
 - an ordered execution-plan view for the remaining remote smoke phases;
@@ -331,6 +340,7 @@ The packet exporter rejects the included session unless the final pass is machin
 
 - `session-summary.json` must be from `dingtalk-p4-smoke-session`, have `sessionPhase: "finalize"`, `overallStatus: "pass"`, `finalStrictStatus: "pass"`, no `pendingChecks`, and a passing `strict-compile` step.
 - `compiled/summary.json` must be from `compile-dingtalk-p4-smoke-evidence`, have `overallStatus`, `apiBootstrapStatus`, and `remoteClientStatus` all set to `pass`.
+- `remoteSmokePhase` is copied into packet metadata when present and must be one of `bootstrap_pending`, `manual_pending`, `finalize_pending`, or `fail`.
 - All eight required checks must exist with `status: "pass"`.
 - `requiredChecksNotPassed`, `manualEvidenceIssues`, `failedChecks`, and `missingRequiredChecks` must be arrays and empty.
 - The exporter does not create secrets, but it copies raw included evidence. Review and redact raw workspace/artifact files before release handoff.

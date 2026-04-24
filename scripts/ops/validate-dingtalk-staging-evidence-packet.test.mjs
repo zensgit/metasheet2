@@ -49,6 +49,7 @@ function writeFinalSession(evidenceDir, overrides = {}) {
     overallStatus: 'pass',
     apiBootstrapStatus: 'pass',
     remoteClientStatus: 'pass',
+    remoteSmokePhase: 'finalize_pending',
     totals: {
       totalChecks: requiredCheckIds.length,
       requiredChecks: requiredCheckIds.length,
@@ -94,6 +95,7 @@ function writePacket(packetDir, overrides = {}) {
           compiledOverallStatus: 'pass',
           apiBootstrapStatus: 'pass',
           remoteClientStatus: 'pass',
+          remoteSmokePhase: 'finalize_pending',
           requiredChecks: requiredCheckIds.length,
           ...overrides.dingtalkP4FinalStatus,
         },
@@ -211,6 +213,30 @@ test('validate-dingtalk-staging-evidence-packet rejects non-final included evide
     assert.equal(result.status, 1)
     assert.match(result.stderr, /dingtalkP4FinalStatus\.finalStrictStatus is not pass/)
     assert.match(result.stderr, /strict-compile step is not pass/)
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+
+test('validate-dingtalk-staging-evidence-packet rejects invalid remote smoke phase metadata', () => {
+  const tmpDir = makeTmpDir()
+  const packetDir = path.join(tmpDir, 'packet')
+
+  try {
+    writePacket(packetDir, {
+      dingtalkP4FinalStatus: {
+        remoteSmokePhase: 'release_ready',
+      },
+      compiledSummary: {
+        remoteSmokePhase: 'release_ready',
+      },
+    })
+
+    const result = runValidator(['--packet-dir', packetDir])
+
+    assert.equal(result.status, 1)
+    assert.match(result.stderr, /dingtalkP4FinalStatus\.remoteSmokePhase is not a recognized remote smoke phase/)
+    assert.match(result.stderr, /compiled\/summary\.json remoteSmokePhase is not a recognized remote smoke phase/)
   } finally {
     rmSync(tmpDir, { recursive: true, force: true })
   }

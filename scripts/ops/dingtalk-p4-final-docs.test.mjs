@@ -42,10 +42,16 @@ function deepMerge(base, overrides) {
 }
 
 function releaseReadyChecks() {
-  return requiredCheckIds.map((id) => ({
+  return requiredCheckIds.map((id, index) => ({
     id,
+    docSection: `Smoke ${index + 1}`,
+    topLevelLabel: id,
     status: 'pass',
     source: id.includes('user') || id.includes('link') ? 'manual-client' : 'api-bootstrap',
+    evidenceSnapshot: {
+      id,
+      source: id.includes('user') || id.includes('link') ? 'manual-client' : 'api-bootstrap',
+    },
     manualEvidenceIssueCount: 0,
   }))
 }
@@ -59,6 +65,7 @@ function writeReleaseReadySession(rootDir, overrides = {}) {
     runId: 'session-142',
     sessionPhase: 'finalize',
     overallStatus: 'pass',
+    remoteSmokePhase: 'finalize_pending',
     finalStrictStatus: 'pass',
     pendingChecks: [],
     steps: [
@@ -73,6 +80,7 @@ function writeReleaseReadySession(rootDir, overrides = {}) {
     overallStatus: 'pass',
     apiBootstrapStatus: 'pass',
     remoteClientStatus: 'pass',
+    remoteSmokePhase: 'finalize_pending',
     requiredChecks: checks,
     requiredChecksNotPassed: [],
     manualEvidenceIssues: [],
@@ -82,6 +90,7 @@ function writeReleaseReadySession(rootDir, overrides = {}) {
   const statusSummary = deepMerge({
     tool: 'dingtalk-p4-smoke-status',
     overallStatus: 'release_ready',
+    remoteSmokePhase: 'finalize_pending',
     totals: {
       requiredChecks: requiredCheckIds.length,
       passedChecks: requiredCheckIds.length,
@@ -155,12 +164,15 @@ test('dingtalk-p4-final-docs generates release-ready development and verificatio
     const verificationText = readFileSync(verificationMd, 'utf8')
     assert.match(developmentText, /DingTalk Final Remote Smoke Development/)
     assert.match(developmentText, /Smoke status: \*\*release_ready\*\*/)
+    assert.match(developmentText, /Remote smoke phase: \*\*finalize_pending\*\*/)
+    assert.match(developmentText, /\| Doc \| Step \| Check \| Status \| Source \| Evidence Snapshot \| Manual Issues \|/)
     assert.match(developmentText, /Compiled status: \*\*pass\*\*/)
     assert.match(verificationText, /DingTalk Final Remote Smoke Verification/)
     assert.match(verificationText, /dingtalk-p4-final-docs\.mjs/)
     assert.equal(verificationText.includes(`--output-dir ${relativePath(outputDir)}`), true)
     assert.match(verificationText, /--date 20260423/)
     assert.match(verificationText, /Required checks passed: 8\/8/)
+    assert.match(verificationText, /Remote smoke phase: \*\*finalize_pending\*\*/)
   } finally {
     rmSync(tmpDir, { recursive: true, force: true })
   }

@@ -658,6 +658,9 @@ function refreshAfterWrite(opts) {
   if (statusRefresh.summary?.overallStatus) {
     console.log(`Smoke overall status: ${statusRefresh.summary.overallStatus}`)
   }
+  if (statusRefresh.summary?.remoteSmokePhase) {
+    console.log(`Remote smoke phase: ${statusRefresh.summary.remoteSmokePhase}`)
+  }
   if (statusRefresh.summary?.remoteSmokeTodos) {
     const todos = statusRefresh.summary.remoteSmokeTodos
     console.log(`Smoke TODO progress: ${todos.completed}/${todos.total} complete, ${todos.remaining} remaining`)
