@@ -2,7 +2,7 @@
 
 - Date: 2026-04-24
 - Branch: `codex/dingtalk-next-slice-20260423`
-- Current base commit: `33a0ed517`
+- Verified base commit: `07119e52c`
 - Goal: finish DingTalk P4 remote-smoke evidence, final handoff, and release-ready docs
 - Estimated remaining work: 10%-15% code fixes if real smoke exposes defects, 70%-80% remote verification and evidence collection, 10% final docs and PR closeout
 
@@ -13,11 +13,21 @@
 - Current open work is the real 142/staging remote-smoke execution and evidence closeout.
 - The current sandbox blocks local fake API tests that listen on `127.0.0.1`; run the full P4 regression in an environment that allows local loopback listening.
 
+## Latest Local Readiness Snapshot
+
+- Date: 2026-04-24
+- Verified base commit: `07119e52c`
+- Worktree was clean before this local readiness slice.
+- Static P4 ops script checks passed for 8 scripts.
+- Sandbox-safe P4 tests passed: 27/27, 37/37, and 25/25.
+- Full P4 regression was not run in this sandbox because fake API tests require local listening on `127.0.0.1`.
+- Real 142/staging smoke was not run; it still requires private environment inputs and DingTalk operator access.
+
 ## 1. Local Tooling Readiness
 
-- [ ] Confirm the worktree is clean with `git status --short`.
-- [ ] Confirm the PR branch contains at least commit `33a0ed517`.
-- [ ] Run static checks for all P4 ops scripts:
+- [x] Confirm the worktree is clean with `git status --short`.
+- [x] Confirm the PR branch contains at least commit `33a0ed517`.
+- [x] Run static checks for all P4 ops scripts:
 
 ```bash
 node --check scripts/ops/compile-dingtalk-p4-smoke-evidence.mjs
@@ -31,7 +41,7 @@ node --check scripts/ops/dingtalk-p4-final-docs.mjs
 git diff --check
 ```
 
-- [ ] Run sandbox-safe P4 tests:
+- [x] Run sandbox-safe P4 tests:
 
 ```bash
 node --test scripts/ops/compile-dingtalk-p4-smoke-evidence.test.mjs scripts/ops/dingtalk-p4-smoke-status.test.mjs
