@@ -36,7 +36,7 @@
 - [x] Create a private env file from the smoke-session template; keep it outside git-tracked docs and PR comments.
 - [ ] Fill `DINGTALK_P4_API_BASE` with the 142/staging API base.
 - [ ] Fill `DINGTALK_P4_WEB_BASE` with the reachable web origin used by DingTalk message links.
-- [ ] Fill `DINGTALK_P4_AUTH_TOKEN` with an authorized admin/API token from the approved private secret path.
+- [x] Fill `DINGTALK_P4_AUTH_TOKEN` with an authorized admin/API token from the approved private secret path.
 - [ ] Fill two real DingTalk group robot webhook URLs.
 - [ ] Fill optional DingTalk robot `SEC...` secrets if the robots require signing.
 - [ ] Fill allowed local user IDs and person delivery target IDs.
@@ -53,7 +53,10 @@ Latest local prep result:
 - Env template path: `output/dingtalk-p4-remote-smoke-session/dingtalk-p4.env`.
 - File mode: `0600`.
 - Git status: output path is ignored and not staged.
-- Readiness with the empty template still fails, as expected, until private token/webhooks/user targets are filled.
+- Admin token source: `/tmp/metasheet-main-admin-6h.jwt`, validated by `/api/auth/me` without printing token contents.
+- Token readiness result: `authTokenPresent: true`.
+- Readiness still fails, as expected, until private webhooks, allowlist/person inputs, and manual targets are filled.
+- Remaining failed readiness checks: `dingtalk_p4_group_a_webhook`, `group-a-webhook-shape`, `dingtalk_p4_group_b_webhook`, `group-b-webhook-shape`, `allowlist-present`, `person-smoke-input`, `manual-targets-declared`.
 
 ## P2 Non-Sandbox Regression Gate
 
