@@ -57,3 +57,11 @@ claudedocs/
 
 # Playwright artifacts (kept locally; referenced by docs/reports when needed)
 output/playwright/
+
+# DingTalk P4 smoke and handoff artifacts may contain private env values,
+# remote evidence screenshots, or generated packets.
+output/dingtalk-p4-remote-smoke/
+output/dingtalk-p4-remote-smoke-session/
+output/dingtalk-p4-regression-gate/
+output/dingtalk-p4-release-readiness/
+artifacts/dingtalk-staging-evidence-packet/

@@ -29,10 +29,11 @@
 - [x] Local static checks passed for 8 P4 ops scripts.
 - [x] Sandbox-safe P4 tests passed: 27/27, 37/37, and 25/25.
 - [x] Repo-tracked baseline TODO exists at `docs/development/dingtalk-p4-remaining-todo-20260424.md`.
+- [x] P4 smoke/session/regression/readiness output directories are gitignored to reduce the risk of committing private env or evidence artifacts.
 
 ## P1 Private 142/Staging Input Readiness
 
-- [ ] Create a private env file from the smoke-session template; keep it outside git-tracked docs and PR comments.
+- [x] Create a private env file from the smoke-session template; keep it outside git-tracked docs and PR comments.
 - [ ] Fill `DINGTALK_P4_API_BASE` with the 142/staging API base.
 - [ ] Fill `DINGTALK_P4_WEB_BASE` with the reachable web origin used by DingTalk message links.
 - [ ] Fill `DINGTALK_P4_AUTH_TOKEN` with an authorized admin/API token from the approved private secret path.
@@ -40,15 +41,23 @@
 - [ ] Fill optional DingTalk robot `SEC...` secrets if the robots require signing.
 - [ ] Fill allowed local user IDs and person delivery target IDs.
 - [ ] Fill authorized, unauthorized, and no-email DingTalk validation target IDs.
-- [ ] Confirm the env file permission is private and no secret values appear in tracked files.
+- [x] Confirm the env file permission is private and no secret values appear in tracked files.
 
 ```bash
 node scripts/ops/dingtalk-p4-smoke-session.mjs \
   --init-env-template output/dingtalk-p4-remote-smoke-session/dingtalk-p4.env
 ```
 
+Latest local prep result:
+
+- Env template path: `output/dingtalk-p4-remote-smoke-session/dingtalk-p4.env`.
+- File mode: `0600`.
+- Git status: output path is ignored and not staged.
+- Readiness with the empty template still fails, as expected, until private token/webhooks/user targets are filled.
+
 ## P2 Non-Sandbox Regression Gate
 
+- [x] Generate the all-profile regression plan-only output so the non-sandbox command list is fixed before final smoke.
 - [ ] Run the P4 regression gate in an environment that permits fake API servers on `127.0.0.1`.
 - [ ] Use `--profile all` before final smoke if the environment can run backend and frontend checks.
 - [ ] If the regression fails only because of sandbox local-listen limits, do not treat it as a product blocker.
@@ -60,6 +69,13 @@ node scripts/ops/dingtalk-p4-regression-gate.mjs \
   --output-dir output/dingtalk-p4-regression-gate/142-final \
   --timeout-ms 120000
 ```
+
+Latest local prep result:
+
+- Plan-only output path: `output/dingtalk-p4-regression-gate/142-final-plan/summary.json`.
+- Planned profile: `all`.
+- Planned checks: 23.
+- Execution status: `plan_only`; no product or fake API server tests were run in this sandbox.
 
 ## P3 Release Readiness And Remote Smoke Bootstrap
 
