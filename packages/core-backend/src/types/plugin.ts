@@ -873,6 +873,7 @@ export type PluginApiMethod = (...args: unknown[]) => unknown | Promise<unknown>
 export interface PluginCommunication {
   call<R = unknown>(plugin: string, method: string, ...args: unknown[]): Promise<R>
   register(name: string, api: Record<string, PluginApiMethod>): void
+  unregister?(name: string): boolean
   on(event: string, handler: EventHandler): void
   emit(event: string, data?: unknown): void
 }
