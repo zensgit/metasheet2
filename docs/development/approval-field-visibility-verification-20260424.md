@@ -15,7 +15,7 @@ pnpm --filter @metasheet/core-backend exec vitest run \
   tests/unit/approval-graph-executor.test.ts \
   tests/unit/approval-product-service.test.ts \
   tests/unit/approval-template-routes.test.ts \
-  --reporter=verbose
+  --reporter=dot
 ```
 
 Result:
@@ -29,7 +29,7 @@ Result:
 pnpm --filter @metasheet/web exec vitest run \
   tests/approval-field-visibility.spec.ts \
   tests/approval-e2e-permissions.spec.ts \
-  --reporter=verbose
+  --reporter=dot
 ```
 
 Result:
@@ -37,11 +37,22 @@ Result:
 - `2/2` files passed
 - `43/43` tests passed
 - Existing `el-badge` unresolved-component warnings remain in `approval-e2e-permissions.spec.ts`; they are pre-existing stub noise and do not fail the suite.
+- The current sandbox also prints a Vite HMR WebSocket `listen EPERM` warning on port `24678`; the test process still exits `0`.
 
 3. Frontend typecheck
 
 ```bash
 pnpm --filter @metasheet/web exec vue-tsc -b --noEmit
+```
+
+Result:
+
+- Exit `0`
+
+4. Backend typecheck
+
+```bash
+pnpm --filter @metasheet/core-backend exec tsc --noEmit --pretty false
 ```
 
 Result:
