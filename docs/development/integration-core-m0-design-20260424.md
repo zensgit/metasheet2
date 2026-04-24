@@ -15,9 +15,9 @@ The goal is to prove that `plugin-integration-core` can be loaded as a CJS syste
 - `plugins/plugin-integration-core/lib/db.cjs`
 - `plugins/plugin-integration-core/lib/staging-installer.cjs`
 - `plugins/plugin-integration-core/__tests__/*.test.cjs`
+- `plugins/plugin-integration-core/__tests__/*.test.mjs`
 - `plugins/plugin-integration-core/SPIKE_NOTES.md`
 - `packages/core-backend/migrations/057_create_integration_core_tables.sql`
-- `docs/integration-todo.md`
 
 ## Runtime Design
 
@@ -34,6 +34,39 @@ The communication API is intentionally skeletal in M0:
 - `getStatus()`
 
 M1 should attach the adapter registry, pipeline runner, dead-letter replay, and credential store operations behind this namespace.
+
+## M0 Gate Hardening
+
+Two lightweight gates were added after the initial M0 scaffold review.
+
+### No-Listen Host Loader Smoke
+
+`host-loader-smoke.test.mjs` imports the real backend `PluginLoader`, discovers `plugin-integration-core` through the manifest path, calls `load()`, and then activates the loaded plugin with a minimal runtime context. This covers the real manifest/main/module-loading path without opening an HTTP listener, which keeps it usable in restricted local sandboxes.
+
+The smoke asserts:
+
+- the plugin is discovered by id;
+- the loaded CJS module exposes `activate`;
+- `activate()` registers the integration health route;
+- `activate()` registers the `integration-core` communication namespace;
+- `ping()` and `getStatus()` are callable from the registered namespace.
+
+### Migration SQL Structure Smoke
+
+`migration-sql.test.cjs` statically checks migration `057_create_integration_core_tables.sql` until a live Postgres/PGlite execution gate is available.
+
+The smoke asserts:
+
+- the `integration_set_updated_at()` trigger helper exists;
+- the migration is forward-only and does not drop tables;
+- all seven expected `integration_*` tables are declared;
+- primary-key shapes match the intended model, including `integration_watermarks.pipeline_id` as the 1:1 pipeline watermark key;
+- scoped operational tables include `tenant_id` and `workspace_id`;
+- tables with `updated_at` that are expected to mutate have an `integration_set_updated_at()` trigger;
+- workspace-null uniqueness uses `COALESCE(workspace_id, '')`;
+- DDL table references, index targets, and foreign key targets are limited to `integration_*` tables.
+
+This is not a substitute for applying the migration against Postgres. It is an early guard against accidental scope drift and obvious DDL regressions.
 
 ## Security Boundaries
 
@@ -88,7 +121,9 @@ Migration `057_create_integration_core_tables.sql` creates seven operational tab
 - `integration_dead_letters`
 - `integration_schedules`
 
-All operational tables are scoped with `tenant_id`; workspace/project scope is present where applicable. Unique indexes use `COALESCE(workspace_id, '')` to avoid the Postgres `NULL != NULL` uniqueness trap on single-workspace deployments.
+Root operational tables carry direct `tenant_id` scope; pipeline child tables such as mappings, watermarks, and schedules inherit tenant/workspace scope through `integration_pipelines`. Unique indexes use `COALESCE(workspace_id, '')` to avoid the Postgres `NULL != NULL` uniqueness trap on single-workspace deployments.
+
+M0 does not enforce tenant/workspace consistency across referenced rows at the database layer. That remains a service-layer or trigger-level M1 gate because nullable `workspace_id` makes simple composite foreign keys insufficient in Postgres 14.
 
 ## Known Kernel Gaps
 
@@ -99,6 +134,13 @@ M0 documents, but does not fix, three plugin-kernel gaps:
 - `services.security` is declared in types but not injected by the active CJS runtime path.
 
 These are kernel follow-ups before the M1 pipeline runner is considered production-ready.
+
+## Remaining M1 Gates
+
+- Run migration `057_create_integration_core_tables.sql` against live Postgres or an in-repo PGlite-backed test once the dependency/environment is available.
+- Add a full `MetaSheetServer` hot-load smoke that binds an ephemeral listener and exercises `/api/plugins` plus `/api/integration/health`.
+- Enforce cross-row tenant/workspace consistency for pipeline references in service code or DB triggers before accepting external write paths.
+- Keep route/communication teardown as a kernel follow-up before long-lived integration pipeline routes are introduced.
 
 ## Non-Goals
 

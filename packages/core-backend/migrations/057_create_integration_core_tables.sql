@@ -122,6 +122,8 @@ CREATE INDEX IF NOT EXISTS idx_integration_runs_created_at ON integration_runs(c
 
 -- ---------------------------------------------------------------------------
 -- 5. Watermarks —— 增量水位（作用域跟随 pipeline）
+--    NOTE: tenant/workspace scope is inherited from integration_pipelines.
+--    DB-level cross-row scope enforcement is deferred to the M1 service layer.
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS integration_watermarks (
   pipeline_id       TEXT PRIMARY KEY REFERENCES integration_pipelines(id) ON DELETE CASCADE,
@@ -195,6 +197,11 @@ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'trg_integration_pipelines_updated_at') THEN
     CREATE TRIGGER trg_integration_pipelines_updated_at
       BEFORE UPDATE ON integration_pipelines
+      FOR EACH ROW EXECUTE FUNCTION integration_set_updated_at();
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'trg_integration_watermarks_updated_at') THEN
+    CREATE TRIGGER trg_integration_watermarks_updated_at
+      BEFORE UPDATE ON integration_watermarks
       FOR EACH ROW EXECUTE FUNCTION integration_set_updated_at();
   END IF;
   IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'trg_integration_dead_letters_updated_at') THEN

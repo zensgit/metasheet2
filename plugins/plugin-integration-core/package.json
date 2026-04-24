@@ -6,10 +6,12 @@
   "license": "UNLICENSED",
   "private": true,
   "scripts": {
-    "test": "node __tests__/plugin-runtime-smoke.test.cjs && node __tests__/credential-store.test.cjs && node __tests__/db.test.cjs && node __tests__/staging-installer.test.cjs",
+    "test": "node __tests__/plugin-runtime-smoke.test.cjs && node --import tsx __tests__/host-loader-smoke.test.mjs && node __tests__/credential-store.test.cjs && node __tests__/db.test.cjs && node __tests__/staging-installer.test.cjs && node __tests__/migration-sql.test.cjs",
     "test:runtime": "node __tests__/plugin-runtime-smoke.test.cjs",
+    "test:host-loader": "node --import tsx __tests__/host-loader-smoke.test.mjs",
     "test:credential": "node __tests__/credential-store.test.cjs",
     "test:db": "node __tests__/db.test.cjs",
-    "test:staging": "node __tests__/staging-installer.test.cjs"
+    "test:staging": "node __tests__/staging-installer.test.cjs",
+    "test:migration": "node __tests__/migration-sql.test.cjs"
   }
 }
