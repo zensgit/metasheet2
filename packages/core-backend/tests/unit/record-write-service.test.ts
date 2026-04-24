@@ -11,6 +11,7 @@ import {
   type UniverMetaField,
   type UniverMetaRecord,
 } from '../../src/multitable/record-write-service'
+import { createYjsInvalidationPostCommitHook } from '../../src/multitable/post-commit-hooks'
 
 // ---------------------------------------------------------------------------
 // Mock: publishMultitableSheetRealtime
@@ -485,7 +486,7 @@ describe('RecordWriteService', () => {
   })
 
   // -------------------------------------------------------------------------
-  // Yjs invalidation wiring (REST → Yjs consistency hook)
+  // Post-commit wiring (REST → Yjs consistency hook)
   // -------------------------------------------------------------------------
   //
   // These tests prove that `patchRecords` correctly drives the injected
@@ -495,10 +496,12 @@ describe('RecordWriteService', () => {
   // the `source` field that prevents bridge-originated writes from
   // destroying the live Y.Doc they just read from.
   //
-  describe('Yjs invalidation hook', () => {
-    it('calls the invalidator with committed record IDs on a default (source unset) patch', async () => {
+  describe('post-commit hooks', () => {
+    it('calls the Yjs invalidation hook with committed record IDs on a default (source unset) patch', async () => {
       const invalidator = vi.fn().mockResolvedValue(undefined)
-      const service = new RecordWriteService(pool, eventBus as any, helpers, invalidator)
+      const service = new RecordWriteService(pool, eventBus as any, helpers, [
+        createYjsInvalidationPostCommitHook(invalidator),
+      ])
 
       await service.patchRecords(buildTestInput())
 
@@ -508,7 +511,9 @@ describe('RecordWriteService', () => {
 
     it('invalidates before realtime broadcast and eventBus notification', async () => {
       const invalidator = vi.fn().mockResolvedValue(undefined)
-      const service = new RecordWriteService(pool, eventBus as any, helpers, invalidator)
+      const service = new RecordWriteService(pool, eventBus as any, helpers, [
+        createYjsInvalidationPostCommitHook(invalidator),
+      ])
 
       await service.patchRecords(buildTestInput())
 
@@ -519,9 +524,38 @@ describe('RecordWriteService', () => {
       expect(invalidator.mock.invocationCallOrder[0]).toBeLessThan(eventBus.emit.mock.invocationCallOrder[0])
     })
 
+    it('runs post-commit hooks before post-transaction recompute helpers', async () => {
+      const invalidator = vi.fn().mockResolvedValue(undefined)
+      const service = new RecordWriteService(pool, eventBus as any, helpers, [
+        createYjsInvalidationPostCommitHook(invalidator),
+      ])
+
+      await service.patchRecords(buildTestInput())
+
+      expect(invalidator).toHaveBeenCalledOnce()
+      expect(helpers.computeDependentLookupRollupRecords).toHaveBeenCalledOnce()
+      expect(invalidator.mock.invocationCallOrder[0]).toBeLessThan(
+        vi.mocked(helpers.computeDependentLookupRollupRecords).mock.invocationCallOrder[0],
+      )
+    })
+
+    it('runs post-commit hooks even when later recompute helpers fail', async () => {
+      const invalidator = vi.fn().mockResolvedValue(undefined)
+      helpers.computeDependentLookupRollupRecords = vi.fn().mockRejectedValue(new Error('recompute failed'))
+      const service = new RecordWriteService(pool, eventBus as any, helpers, [
+        createYjsInvalidationPostCommitHook(invalidator),
+      ])
+
+      await expect(service.patchRecords(buildTestInput())).rejects.toThrow('recompute failed')
+
+      expect(invalidator).toHaveBeenCalledOnce()
+    })
+
     it("calls the invalidator when source === 'rest' (explicit)", async () => {
       const invalidator = vi.fn().mockResolvedValue(undefined)
-      const service = new RecordWriteService(pool, eventBus as any, helpers, invalidator)
+      const service = new RecordWriteService(pool, eventBus as any, helpers, [
+        createYjsInvalidationPostCommitHook(invalidator),
+      ])
 
       await service.patchRecords(buildTestInput({ source: 'rest' }))
 
@@ -530,7 +564,9 @@ describe('RecordWriteService', () => {
 
     it("does NOT call the invalidator when source === 'yjs-bridge'", async () => {
       const invalidator = vi.fn().mockResolvedValue(undefined)
-      const service = new RecordWriteService(pool, eventBus as any, helpers, invalidator)
+      const service = new RecordWriteService(pool, eventBus as any, helpers, [
+        createYjsInvalidationPostCommitHook(invalidator),
+      ])
 
       // The bridge's own writes must not invalidate the Y.Doc they were
       // derived from — that would tear out a live editor mid-session and
@@ -542,7 +578,9 @@ describe('RecordWriteService', () => {
 
     it('does not fail the REST patch when the invalidator throws', async () => {
       const invalidator = vi.fn().mockRejectedValue(new Error('purge failed'))
-      const service = new RecordWriteService(pool, eventBus as any, helpers, invalidator)
+      const service = new RecordWriteService(pool, eventBus as any, helpers, [
+        createYjsInvalidationPostCommitHook(invalidator),
+      ])
 
       const result = await service.patchRecords(buildTestInput())
 
@@ -550,23 +588,25 @@ describe('RecordWriteService', () => {
       expect(invalidator).toHaveBeenCalledOnce()
     })
 
-    it('setYjsInvalidator replaces the callable post-construction', async () => {
+    it('setPostCommitHooks replaces the callable post-construction', async () => {
       const service = new RecordWriteService(pool, eventBus as any, helpers)
       const first = vi.fn().mockResolvedValue(undefined)
-      service.setYjsInvalidator(first)
+      service.setPostCommitHooks([createYjsInvalidationPostCommitHook(first)])
 
       await service.patchRecords(buildTestInput())
       expect(first).toHaveBeenCalledTimes(1)
 
-      // Replace with null → no-op, no throw.
-      service.setYjsInvalidator(null)
+      // Replace with empty hooks → no-op, no throw.
+      service.setPostCommitHooks([])
       await service.patchRecords(buildTestInput())
       expect(first).toHaveBeenCalledTimes(1) // still 1, no new call
     })
 
     it('passes every committed record ID (multi-record patch)', async () => {
       const invalidator = vi.fn().mockResolvedValue(undefined)
-      const service = new RecordWriteService(pool, eventBus as any, helpers, invalidator)
+      const service = new RecordWriteService(pool, eventBus as any, helpers, [
+        createYjsInvalidationPostCommitHook(invalidator),
+      ])
 
       // Two records in the same patch. The mock pool returns version=2
       // for any UPDATE regardless of recordId, so both commit.
@@ -580,6 +620,18 @@ describe('RecordWriteService', () => {
       expect(invalidator).toHaveBeenCalledTimes(1)
       const args = invalidator.mock.calls[0][0] as string[]
       expect(args.sort()).toEqual(['rec1', 'rec2'])
+    })
+
+    it('keeps running later hooks when an earlier hook throws', async () => {
+      const failing = vi.fn().mockRejectedValue(new Error('hook failed'))
+      const succeeding = vi.fn().mockResolvedValue(undefined)
+      const service = new RecordWriteService(pool, eventBus as any, helpers, [failing, succeeding])
+
+      const result = await service.patchRecords(buildTestInput())
+
+      expect(result.updated).toHaveLength(1)
+      expect(failing).toHaveBeenCalledOnce()
+      expect(succeeding).toHaveBeenCalledOnce()
     })
   })
 })

@@ -435,11 +435,11 @@ describe('Multitable PATCH /records/:recordId (record-service extraction)', () =
 
     expect(response.body.data.record.data.fld_files).toEqual(['att_new_1'])
     expect(yjsInvalidatorSpy).toHaveBeenCalledWith(['rec_1'])
-    // The warning log for invalidator failure must have fired so the
+    // The warning log for post-commit hook failure must have fired so the
     // operator can find the stale-snapshot lag.
     const hadWarning = errorSpy.mock.calls.some((call) => {
       const msg = call[0]
-      return typeof msg === 'string' && msg.includes('Yjs invalidation failed')
+      return typeof msg === 'string' && msg.includes('Post-commit hook failed')
     })
     expect(hadWarning).toBe(true)
     errorSpy.mockRestore()
