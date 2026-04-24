@@ -138,6 +138,12 @@ type PluginRuntimeState = {
   lastAttempt?: string
 }
 
+type PluginRouteRegistration = {
+  active: boolean
+  method: string
+  path: string
+}
+
 function disabledFeatureHandler(message: string): RequestHandler {
   return (_req, res) => {
     res.status(404).json({
@@ -158,6 +164,11 @@ export class MetaSheetServer {
   private pluginStatus = new Map<string, PluginRuntimeState>()
   private disabledPlugins = new Set<string>()
   private pluginApis = new Map<string, Record<string, PluginApiMethod>>()
+  private pluginRouteRegistrationSeq = 0
+  private pluginRouteRegistrations = new Map<string, PluginRouteRegistration>()
+  private pluginRouteRegistrationIdsByPlugin = new Map<string, Set<string>>()
+  private pluginCommunicationNamespacesByPlugin = new Map<string, Set<string>>()
+  private pluginCommunicationNamespaceOwners = new Map<string, string>()
   private port: number
   private host?: string
   private portLocked: boolean
@@ -687,6 +698,113 @@ export class MetaSheetServer {
     }
   }
 
+  private registerPluginRoute(pluginName: string, method: string, path: string, handler: RequestHandler): void {
+    const methodUpper = method.toUpperCase()
+    const methodLower = method.toLowerCase()
+    if (!['get', 'post', 'put', 'delete', 'patch'].includes(methodLower)) {
+      throw new Error(`Unsupported plugin route method: ${method}`)
+    }
+
+    const registrationId = `${pluginName}:${methodUpper}:${path}:${++this.pluginRouteRegistrationSeq}`
+    const registration: PluginRouteRegistration = {
+      active: true,
+      method: methodUpper,
+      path,
+    }
+    this.pluginRouteRegistrations.set(registrationId, registration)
+
+    const registrationIds = this.pluginRouteRegistrationIdsByPlugin.get(pluginName) ?? new Set<string>()
+    registrationIds.add(registrationId)
+    this.pluginRouteRegistrationIdsByPlugin.set(pluginName, registrationIds)
+
+    this.app[methodLower as 'get' | 'post' | 'put' | 'delete' | 'patch'](
+      path,
+      async (req: Request, res: Response, next: NextFunction) => {
+        if (!registration.active) {
+          return next()
+        }
+
+        const endTimer = (res as unknown as Record<string, unknown>).__metricsTimer as ((opts: { route: string; method: string }) => (statusCode: number) => void) | undefined
+        try {
+          await handler(req, res, next)
+        } catch (error) {
+          this.logger.error(`Plugin route handler error: ${pluginName} ${methodUpper} ${path}`, error as Error)
+          if (!res.headersSent) {
+            res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Internal server error' } })
+          }
+        } finally {
+          if (typeof endTimer === 'function') endTimer({ route: path, method: req.method })(res.statusCode)
+        }
+      },
+    )
+
+    this.logger.info(`Plugin route registered: ${pluginName} ${methodUpper} ${path}`)
+  }
+
+  private removePluginRoutes(pluginName: string, path?: string): void {
+    const registrationIds = this.pluginRouteRegistrationIdsByPlugin.get(pluginName)
+    if (!registrationIds) return
+
+    for (const registrationId of Array.from(registrationIds)) {
+      const registration = this.pluginRouteRegistrations.get(registrationId)
+      if (!registration) {
+        registrationIds.delete(registrationId)
+        continue
+      }
+      if (path && registration.path !== path) {
+        continue
+      }
+
+      registration.active = false
+      this.pluginRouteRegistrations.delete(registrationId)
+      registrationIds.delete(registrationId)
+      this.logger.info(`Plugin route disabled: ${pluginName} ${registration.method} ${registration.path}`)
+    }
+
+    if (registrationIds.size === 0) {
+      this.pluginRouteRegistrationIdsByPlugin.delete(pluginName)
+    }
+  }
+
+  private registerPluginCommunicationNamespace(pluginName: string, namespace: string, api: Record<string, PluginApiMethod>): void {
+    const owner = this.pluginCommunicationNamespaceOwners.get(namespace)
+    if (owner && owner !== pluginName) {
+      throw new Error(`Plugin communication namespace already registered: ${namespace}`)
+    }
+
+    this.pluginApis.set(namespace, api)
+    this.pluginCommunicationNamespaceOwners.set(namespace, pluginName)
+    const namespaces = this.pluginCommunicationNamespacesByPlugin.get(pluginName) ?? new Set<string>()
+    namespaces.add(namespace)
+    this.pluginCommunicationNamespacesByPlugin.set(pluginName, namespaces)
+  }
+
+  private unregisterPluginCommunicationNamespace(pluginName: string, namespace: string): boolean {
+    if (this.pluginCommunicationNamespaceOwners.get(namespace) !== pluginName) return false
+
+    const namespaces = this.pluginCommunicationNamespacesByPlugin.get(pluginName)
+    if (!namespaces?.has(namespace)) return false
+
+    namespaces.delete(namespace)
+    this.pluginApis.delete(namespace)
+    this.pluginCommunicationNamespaceOwners.delete(namespace)
+    if (namespaces.size === 0) {
+      this.pluginCommunicationNamespacesByPlugin.delete(pluginName)
+    }
+    this.logger.info(`Plugin communication namespace unregistered: ${pluginName} -> ${namespace}`)
+    return true
+  }
+
+  private cleanupPluginRuntimeRegistrations(pluginName: string): void {
+    this.removePluginRoutes(pluginName)
+
+    const namespaces = this.pluginCommunicationNamespacesByPlugin.get(pluginName)
+    if (!namespaces) return
+    for (const namespace of Array.from(namespaces)) {
+      this.unregisterPluginCommunicationNamespace(pluginName, namespace)
+    }
+  }
+
   /**
    * 配置中间件
    */
@@ -1089,9 +1207,25 @@ export class MetaSheetServer {
   private createPluginContext(loaded: LoadedPlugin): PluginContext {
     const coreApi = this.injector.get(ICoreAPI)
     const manifest = loaded.manifest
+    const pluginName = manifest.name
+    const pluginHttpApi = coreApi.http
+      ? {
+          ...coreApi.http,
+          addRoute: (method: string, path: string, handler: RequestHandler) => {
+            this.registerPluginRoute(pluginName, method, path, handler)
+          },
+          removeRoute: (path: string) => {
+            this.removePluginRoutes(pluginName, path)
+          },
+        }
+      : coreApi.http
+    const pluginBaseCoreApi = {
+      ...coreApi,
+      http: pluginHttpApi,
+    }
     const pluginCoreApi = coreApi.multitable
       ? {
-          ...coreApi,
+          ...pluginBaseCoreApi,
           multitable: createPluginScopedMultitableApi(coreApi.multitable, manifest.name, {
             ensureObjectInScope: async ({ pluginName, projectId, baseId, descriptor }) => {
               return poolManager.get().transaction(async ({ query }) => {
@@ -1184,7 +1318,7 @@ export class MetaSheetServer {
             },
           }),
         }
-      : coreApi
+      : pluginBaseCoreApi
     const storageCache = new Map<string, unknown>()
     const storage: PluginStorage = {
       async get<T = unknown>(key: string): Promise<T | null> {
@@ -1329,7 +1463,10 @@ export class MetaSheetServer {
         return fn(...args) as Promise<R>
       },
       register: (name: string, api: Record<string, PluginApiMethod>) => {
-        pluginApis.set(name, api)
+        this.registerPluginCommunicationNamespace(pluginName, name, api)
+      },
+      unregister: (name: string) => {
+        return this.unregisterPluginCommunicationNamespace(pluginName, name)
       },
       on: (event: string, handler: (data: unknown) => void) => {
         eventBus.on(event, handler)
@@ -1389,6 +1526,7 @@ export class MetaSheetServer {
       return this.setPluginRuntimeState(name, 'inactive')
     }
 
+    this.cleanupPluginRuntimeRegistrations(name)
     const context = this.createPluginContext(loaded)
     try {
       await pluginInstance.activate(context)
@@ -1396,6 +1534,7 @@ export class MetaSheetServer {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       this.logger.error(`Plugin activation failed: ${name}`, error as Error)
+      this.cleanupPluginRuntimeRegistrations(name)
       return this.setPluginRuntimeState(name, 'failed', message)
     }
   }
@@ -1417,18 +1556,21 @@ export class MetaSheetServer {
     }
 
     const pluginInstance = this.ensurePluginInstance(loaded)
+    let deactivationError: string | undefined
     if (pluginInstance && typeof pluginInstance.deactivate === 'function') {
       try {
         await pluginInstance.deactivate()
       } catch (error) {
-        const message = error instanceof Error ? error.message : String(error)
+        deactivationError = error instanceof Error ? error.message : String(error)
         this.logger.error(`Plugin deactivation failed: ${name}`, error as Error)
-        this.disabledPlugins.add(name)
-        return this.setPluginRuntimeState(name, 'failed', message)
       }
     }
 
+    this.cleanupPluginRuntimeRegistrations(name)
     this.disabledPlugins.add(name)
+    if (deactivationError) {
+      return this.setPluginRuntimeState(name, 'failed', deactivationError)
+    }
     return this.setPluginRuntimeState(name, 'inactive')
   }
 
