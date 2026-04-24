@@ -24,7 +24,7 @@ Output summary:
 ```text
 plugin-runtime-smoke: all assertions passed
 host-loader-smoke: PluginLoader load + activate path passed
-credential-store: 7 scenarios passed
+credential-store: 10 scenarios passed
 db.cjs: all CRUD + boundary + injection tests passed
 staging-installer: all 7 assertions passed
 migration-sql: 057 integration migration structure passed

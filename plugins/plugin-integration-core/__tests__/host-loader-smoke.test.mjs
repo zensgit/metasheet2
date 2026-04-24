@@ -69,7 +69,13 @@ function createHostContext() {
       async delete() {},
       async list() { return [] },
     },
-    services: {},
+    services: {
+      security: {
+        async encrypt(value) { return `enc:${Buffer.from(value, 'utf8').toString('base64')}` },
+        async decrypt(value) { return Buffer.from(value.slice(4), 'base64').toString('utf8') },
+        async hash(value) { return `hash:${value}` },
+      },
+    },
     config: {},
   }
 
@@ -109,6 +115,7 @@ async function main() {
   const status = await host.context.communication.call('integration-core', 'getStatus')
   assert.equal(status.plugin, 'plugin-integration-core')
   assert.equal(status.routesRegistered, 1)
+  assert.deepEqual(status.credentialStore, { source: 'host-security', format: 'enc' })
 
   await loaded.plugin.deactivate()
   assert.ok(host.logs.some((line) => line.includes('activated')), 'activation logged')

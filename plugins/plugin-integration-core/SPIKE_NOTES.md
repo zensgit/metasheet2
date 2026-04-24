@@ -26,7 +26,7 @@ The runtime now records communication namespaces by owning plugin. Deactivation 
 
 The adapter intentionally reuses `packages/core-backend/src/security/encrypted-secrets.ts`, so plugin credentials can share the platform `enc:` AES-GCM secret format. It also exposes hash/verify/token/audit/rate-limit/threat-scan helpers. Sandbox code execution remains explicitly unavailable in this runtime path rather than pretending to provide full VM isolation.
 
-**Current plugin state**: `lib/credential-store.cjs` remains self-contained (`v1:` format) for compatibility. M1 can migrate to `context.services.security.encrypt/decrypt` behind a backward-compatible reader that still accepts existing `v1:` payloads.
+**Current plugin state**: `lib/credential-store.cjs` now creates host-backed stores when `context.services.security` is present. New writes use the platform `enc:` format, and old `v1:` payloads remain readable through the legacy key path.
 
 ---
 
