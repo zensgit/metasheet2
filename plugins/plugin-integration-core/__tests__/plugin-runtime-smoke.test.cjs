@@ -26,6 +26,7 @@ function createMockContext() {
   const routes = []
   const registeredNamespaces = new Map()
   const logs = []
+  const databaseCalls = []
 
   return {
     context: {
@@ -36,6 +37,12 @@ function createMockContext() {
             assert.equal(typeof path, 'string', 'addRoute path must be string')
             assert.equal(typeof handler, 'function', 'addRoute handler must be function')
             routes.push({ method, path, handler })
+          },
+        },
+        database: {
+          async query(sql, params) {
+            databaseCalls.push({ sql, params })
+            return []
           },
         },
       },
@@ -62,7 +69,7 @@ function createMockContext() {
         },
       },
     },
-    inspect: { routes, namespaces: registeredNamespaces, logs },
+    inspect: { routes, namespaces: registeredNamespaces, logs, databaseCalls },
   }
 }
 
@@ -133,6 +140,12 @@ async function main() {
     { source: 'host-security', format: 'enc' },
     'status reports host-backed credential store',
   )
+  assert.equal(statusResult.externalSystems, true, 'external-system registry initialized')
+
+  // --- 5b. Comm API exposes external-system registry methods ------------
+  assert.equal(typeof commApi.upsertExternalSystem, 'function', 'comm api exposes upsertExternalSystem')
+  assert.equal(typeof commApi.getExternalSystem, 'function', 'comm api exposes getExternalSystem')
+  assert.equal(typeof commApi.listExternalSystems, 'function', 'comm api exposes listExternalSystems')
 
   // --- 6. Activation logged --------------------------------------------
   const hasActivationLog = inspect.logs.some(
