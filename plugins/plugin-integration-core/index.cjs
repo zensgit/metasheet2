@@ -17,24 +17,27 @@
 const PLUGIN_ID = 'plugin-integration-core'
 const COMMUNICATION_NAMESPACE = 'integration-core'
 const { createCredentialStore } = require('./lib/credential-store.cjs')
+const { createDb } = require('./lib/db.cjs')
+const { createExternalSystemRegistry } = require('./lib/external-systems.cjs')
 
+const MILESTONE = 'M1-external-systems'
 const registeredRoutes = []
 let activeContext = null
 let credentialStore = null
+let externalSystemRegistry = null
 
 function buildHealthPayload() {
   return {
     ok: true,
     plugin: PLUGIN_ID,
     ts: Date.now(),
-    milestone: 'M0-spike',
+    milestone: MILESTONE,
   }
 }
 
 function buildCommunicationApi() {
   return {
-    // M0: bare skeleton. M1 will wire adapter-registry / pipeline-runner /
-    // dead-letter / credential-store into this namespace.
+    // M0/M1 seam. Later slices will add pipeline-runner / dead-letter replay.
     async ping() {
       return { ok: true, plugin: PLUGIN_ID, ts: Date.now() }
     },
@@ -42,12 +45,25 @@ function buildCommunicationApi() {
       return {
         plugin: PLUGIN_ID,
         version: '0.1.0',
-        milestone: 'M0-spike',
+        milestone: MILESTONE,
         routesRegistered: registeredRoutes.length,
         credentialStore: credentialStore
           ? { source: credentialStore.source, format: credentialStore.format }
           : null,
+        externalSystems: Boolean(externalSystemRegistry),
       }
+    },
+    async upsertExternalSystem(input) {
+      if (!externalSystemRegistry) throw new Error('external system registry is not initialized')
+      return externalSystemRegistry.upsertExternalSystem(input)
+    },
+    async getExternalSystem(input) {
+      if (!externalSystemRegistry) throw new Error('external system registry is not initialized')
+      return externalSystemRegistry.getExternalSystem(input)
+    },
+    async listExternalSystems(input) {
+      if (!externalSystemRegistry) throw new Error('external system registry is not initialized')
+      return externalSystemRegistry.listExternalSystems(input)
     },
   }
 }
@@ -59,6 +75,14 @@ module.exports = {
     credentialStore = createCredentialStore({
       logger,
       security: context.services && context.services.security,
+    })
+    const db = createDb({
+      database: context.api && context.api.database,
+      logger,
+    })
+    externalSystemRegistry = createExternalSystemRegistry({
+      db,
+      credentialStore,
     })
 
     // --- HTTP routes ------------------------------------------------------
@@ -76,11 +100,11 @@ module.exports = {
   async deactivate() {
     if (!activeContext) return
     const logger = activeContext.logger || console
-    // PluginContext currently exposes no removeRoute hook for the addRoute
-    // helper used above; host is expected to drop the router on deactivate.
-    // We clear local state here so a re-activation starts clean.
+    // Host-owned route / communication teardown is handled by the kernel.
+    // Clear local module state so a re-activation starts clean.
     registeredRoutes.length = 0
     credentialStore = null
+    externalSystemRegistry = null
     activeContext = null
     logger.info(`[${PLUGIN_ID}] deactivated`)
   },
