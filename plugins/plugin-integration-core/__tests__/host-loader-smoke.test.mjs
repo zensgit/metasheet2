@@ -116,6 +116,8 @@ async function main() {
   assert.equal(status.plugin, 'plugin-integration-core')
   assert.equal(status.routesRegistered, 1)
   assert.deepEqual(status.credentialStore, { source: 'host-security', format: 'enc' })
+  assert.equal(status.externalSystems, true)
+  assert.equal(typeof host.namespaces.get('integration-core').upsertExternalSystem, 'function')
 
   await loaded.plugin.deactivate()
   assert.ok(host.logs.some((line) => line.includes('activated')), 'activation logged')
