@@ -3,20 +3,29 @@ paths:
     get:
       operationId: listApprovals
       tags: [Approvals]
-      summary: List platform approval instances
+      summary: List approval instances
       description: |
-        Returns a paginated list of approval instances. Use query parameters to
-        filter by tab: pending (assignee), mine (requesterId), cc (ccRecipientId),
-        or completed (status=approved,rejected,revoked).
+        Returns a paginated list of approval instances. The live route accepts
+        both page/pageSize and the older limit/offset pagination fallback.
+        Use `tab` for the current inbox lens, plus optional sourceSystem,
+        workflowKey, businessKey, assignee, status, and search filters.
       security:
         - bearerAuth: []
       parameters:
+        - in: query
+          name: sourceSystem
+          schema:
+            type: string
         - in: query
           name: status
           schema:
             type: string
         - in: query
-          name: requesterId
+          name: workflowKey
+          schema:
+            type: string
+        - in: query
+          name: businessKey
           schema:
             type: string
         - in: query
@@ -24,13 +33,24 @@ paths:
           schema:
             type: string
         - in: query
-          name: ccRecipientId
+          name: tab
           schema:
             type: string
         - in: query
-          name: templateId
+          name: search
           schema:
             type: string
+        - in: query
+          name: page
+          schema:
+            type: integer
+            minimum: 1
+        - in: query
+          name: pageSize
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
         - in: query
           name: limit
           schema:
@@ -48,26 +68,7 @@ paths:
           content:
             application/json:
               schema:
-                type: object
-                properties:
-                  ok:
-                    type: boolean
-                    example: true
-                  data:
-                    type: object
-                    properties:
-                      items:
-                        type: array
-                        items:
-                          $ref: '#/components/schemas/UnifiedApprovalDTO'
-                      total:
-                        type: integer
-                      limit:
-                        type: integer
-                      offset:
-                        type: integer
-                    required: [items, total, limit, offset]
-                required: [ok, data]
+                $ref: '#/components/schemas/ApprovalListResponse'
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '503': { $ref: '#/components/responses/ServiceUnavailable' }
@@ -94,14 +95,7 @@ paths:
           content:
             application/json:
               schema:
-                type: object
-                properties:
-                  ok:
-                    type: boolean
-                    example: true
-                  data:
-                    $ref: '#/components/schemas/UnifiedApprovalDTO'
-                required: [ok, data]
+                $ref: '#/components/schemas/UnifiedApprovalDTO'
         '400': { $ref: '#/components/responses/ValidationError' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
@@ -113,11 +107,68 @@ paths:
       deprecated: true
       summary: Get pending approvals for current actor
       description: |
-        Deprecated. Use GET /api/approvals?assignee={userId}&status=pending instead.
+        Deprecated. Use GET /api/approvals with `tab=pending` instead.
+      parameters:
+        - in: query
+          name: limit
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+        - in: query
+          name: offset
+          schema:
+            type: integer
+            minimum: 0
       security:
         - bearerAuth: []
       responses:
-        '200': { description: OK }
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyPendingApprovalListResponse'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/approvals/sync/plm:
+    post:
+      operationId: syncPlmApprovals
+      tags: [Approvals]
+      summary: Trigger a PLM approval sync
+      description: |
+        Pulls approval instances from the PLM bridge into the unified approval
+        inbox. Requires approvals:read and a configured PLM adapter.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                status:
+                  type: string
+                productId:
+                  type: string
+                requesterId:
+                  type: string
+                limit:
+                  type: integer
+                  minimum: 1
+                  maximum: 200
+                offset:
+                  type: integer
+                  minimum: 0
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApprovalPlmSyncResponse'
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '503': { $ref: '#/components/responses/ServiceUnavailable' }
@@ -144,14 +195,7 @@ paths:
           content:
             application/json:
               schema:
-                type: object
-                properties:
-                  ok:
-                    type: boolean
-                    example: true
-                  data:
-                    $ref: '#/components/schemas/UnifiedApprovalDTO'
-                required: [ok, data]
+                $ref: '#/components/schemas/UnifiedApprovalDTO'
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
@@ -190,14 +234,7 @@ paths:
           content:
             application/json:
               schema:
-                type: object
-                properties:
-                  ok:
-                    type: boolean
-                    example: true
-                  data:
-                    $ref: '#/components/schemas/UnifiedApprovalDTO'
-                required: [ok, data]
+                $ref: '#/components/schemas/UnifiedApprovalDTO'
         '400': { $ref: '#/components/responses/ValidationError' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
@@ -407,29 +444,130 @@ paths:
           content:
             application/json:
               schema:
-                type: object
-                properties:
-                  ok:
-                    type: boolean
-                    example: true
-                  data:
-                    type: object
-                    properties:
-                      items:
-                        type: array
-                        items:
-                          $ref: '#/components/schemas/UnifiedApprovalHistoryDTO'
-                      total:
-                        type: integer
-                      page:
-                        type: integer
-                      pageSize:
-                        type: integer
-                    required: [items]
-                required: [ok, data]
+                $ref: '#/components/schemas/ApprovalHistoryResponse'
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/approvals/pending-count:
+    get:
+      operationId: getApprovalPendingCount
+      tags: [Approvals]
+      summary: Get pending approval badge counts
+      description: |
+        Returns the current actor's active pending assignment count and the
+        unread subset used by the approval center badge.
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: query
+          name: sourceSystem
+          schema:
+            type: string
+            enum: [all, platform, plm]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApprovalPendingCountResponse'
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/approvals/{id}/mark-read:
+    post:
+      operationId: markApprovalRead
+      tags: [Approvals]
+      summary: Mark one approval as read
+      description: |
+        Records a read marker for the current actor. For unsynced external
+        approvals the route returns `{ ok: true, skipped: true }`.
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MarkApprovalReadResponse'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/approvals/mark-all-read:
+    post:
+      operationId: markAllApprovalsRead
+      tags: [Approvals]
+      summary: Mark all pending approvals as read
+      description: |
+        Marks every active pending assignment for the current actor as read.
+        `sourceSystem` scopes the operation to the current inbox filter.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                sourceSystem:
+                  type: string
+                  enum: [all, platform, plm]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MarkAllApprovalsReadResponse'
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /api/approvals/{id}/remind:
+    post:
+      operationId: remindApproval
+      tags: [Approvals]
+      summary: Remind pending approvers
+      description: |
+        Records a remind event for a pending approval. The requester or an
+        approver may call it. The route is rate-limited to once per instance
+        per actor per hour and returns 429 with the last remind timestamp when
+        throttled.
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RemindApprovalResponse'
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429':
+          description: Remind throttled
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
         '503': { $ref: '#/components/responses/ServiceUnavailable' }
   /api/approval-templates:
     get:
@@ -515,14 +653,7 @@ paths:
           content:
             application/json:
               schema:
-                type: object
-                properties:
-                  ok:
-                    type: boolean
-                    example: true
-                  data:
-                    $ref: '#/components/schemas/ApprovalTemplateDetail'
-                required: [ok, data]
+                $ref: '#/components/schemas/ApprovalTemplateDetail'
         '400': { $ref: '#/components/responses/ValidationError' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
@@ -572,14 +703,7 @@ paths:
           content:
             application/json:
               schema:
-                type: object
-                properties:
-                  ok:
-                    type: boolean
-                    example: true
-                  data:
-                    $ref: '#/components/schemas/ApprovalTemplateDetail'
-                required: [ok, data]
+                $ref: '#/components/schemas/ApprovalTemplateDetail'
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
@@ -611,14 +735,7 @@ paths:
           content:
             application/json:
               schema:
-                type: object
-                properties:
-                  ok:
-                    type: boolean
-                    example: true
-                  data:
-                    $ref: '#/components/schemas/ApprovalTemplateDetail'
-                required: [ok, data]
+                $ref: '#/components/schemas/ApprovalTemplateDetail'
         '400': { $ref: '#/components/responses/ValidationError' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
@@ -686,14 +803,7 @@ paths:
           content:
             application/json:
               schema:
-                type: object
-                properties:
-                  ok:
-                    type: boolean
-                    example: true
-                  data:
-                    $ref: '#/components/schemas/ApprovalTemplateVersionDetail'
-                required: [ok, data]
+                $ref: '#/components/schemas/ApprovalTemplateVersionDetail'
         '400': { $ref: '#/components/responses/ValidationError' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
@@ -725,14 +835,7 @@ paths:
           content:
             application/json:
               schema:
-                type: object
-                properties:
-                  ok:
-                    type: boolean
-                    example: true
-                  data:
-                    $ref: '#/components/schemas/ApprovalTemplateVersionDetail'
-                required: [ok, data]
+                $ref: '#/components/schemas/ApprovalTemplateVersionDetail'
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }

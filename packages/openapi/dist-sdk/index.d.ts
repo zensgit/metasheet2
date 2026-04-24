@@ -386,6 +386,36 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/approvals": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List approval instances
+         * @description Returns a paginated list of approval instances. The live route accepts
+         *     both page/pageSize and the older limit/offset pagination fallback.
+         *     Use `tab` for the current inbox lens, plus optional sourceSystem,
+         *     workflowKey, businessKey, assignee, status, and search filters.
+         */
+        get: operations["listApprovals"];
+        put?: never;
+        /**
+         * Create approval request from a published template
+         * @description Initiates a new approval instance from a published template. The formData
+         *     is validated against the template's formSchema (required fields, type
+         *     checks, enum legality). Returns 400 if the template is not published or
+         *     form validation fails. On success, generates request number (AP-XXXXXX).
+         */
+        post: operations["createApproval"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/approvals/pending": {
         parameters: {
             query?: never;
@@ -393,30 +423,35 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Get pending approvals for current actor */
-        get: {
-            parameters: {
-                query?: never;
-                header?: never;
-                path?: never;
-                cookie?: never;
-            };
-            requestBody?: never;
-            responses: {
-                /** @description OK */
-                200: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content?: never;
-                };
-                401: components["responses"]["Unauthorized"];
-                403: components["responses"]["Forbidden"];
-                503: components["responses"]["ServiceUnavailable"];
-            };
-        };
+        /**
+         * Get pending approvals for current actor
+         * @deprecated
+         * @description Deprecated. Use GET /api/approvals with `tab=pending` instead.
+         */
+        get: operations["listPendingApprovalsLegacy"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/approvals/sync/plm": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Trigger a PLM approval sync
+         * @description Pulls approval instances from the PLM bridge into the unified approval
+         *     inbox. Requires approvals:read and a configured PLM adapter.
+         */
+        post: operations["syncPlmApprovals"];
         delete?: never;
         options?: never;
         head?: never;
@@ -430,33 +465,42 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Get approval instance */
-        get: {
-            parameters: {
-                query?: never;
-                header?: never;
-                path: {
-                    id: string;
-                };
-                cookie?: never;
-            };
-            requestBody?: never;
-            responses: {
-                /** @description OK */
-                200: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content?: never;
-                };
-                401: components["responses"]["Unauthorized"];
-                403: components["responses"]["Forbidden"];
-                404: components["responses"]["NotFound"];
-                503: components["responses"]["ServiceUnavailable"];
-            };
-        };
+        /**
+         * Get approval instance
+         * @description Returns the full approval instance including formSnapshot, assignments,
+         *     and current status. PLM-backed approvals (id starting with 'plm:') are
+         *     resolved via the PLM adapter.
+         */
+        get: operations["getApproval"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/approvals/{id}/actions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Execute an approval action
+         * @description Unified action dispatch endpoint. Accepted actions: approve, reject,
+         *     transfer (requires targetUserId), revoke (subject to RuntimePolicy),
+         *     comment (does not change status), and return (requires targetNodeKey).
+         *     Concurrent writes are serialized with a database row lock. This endpoint
+         *     does not accept a client version field. 409 responses indicate a
+         *     conflicting current state after serialization, such as an invalid status
+         *     transition or a closed revoke window. The Wave 2 Pack 1A executor
+         *     follow-up will activate return semantics for template-runtime approvals.
+         */
+        post: operations["dispatchApprovalAction"];
         delete?: never;
         options?: never;
         head?: never;
@@ -472,64 +516,12 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Approve instance with optimistic locking */
-        post: {
-            parameters: {
-                query?: never;
-                header?: never;
-                path: {
-                    id: string;
-                };
-                cookie?: never;
-            };
-            requestBody: {
-                content: {
-                    "application/json": {
-                        version: number;
-                        comment?: string;
-                        metadata?: Record<string, never>;
-                    };
-                };
-            };
-            responses: {
-                /** @description OK */
-                200: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content: {
-                        "application/json": {
-                            /** @example true */
-                            ok?: boolean;
-                            data?: {
-                                /** @example demo-1 */
-                                id?: string;
-                                /** @example approved */
-                                status?: string;
-                                /** @example 1 */
-                                version?: number;
-                                /** @example 0 */
-                                prevVersion?: number;
-                            };
-                        };
-                    };
-                };
-                400: components["responses"]["ValidationError"];
-                401: components["responses"]["Unauthorized"];
-                403: components["responses"]["Forbidden"];
-                404: components["responses"]["NotFound"];
-                /** @description Version conflict */
-                409: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content: {
-                        "application/json": components["schemas"]["ErrorResponse"];
-                    };
-                };
-                503: components["responses"]["ServiceUnavailable"];
-            };
-        };
+        /**
+         * Approve instance with optimistic locking
+         * @deprecated
+         * @description Deprecated. Use POST /api/approvals/{id}/actions with {"action":"approve"} instead.
+         */
+        post: operations["approveApprovalLegacy"];
         delete?: never;
         options?: never;
         head?: never;
@@ -545,65 +537,12 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Reject instance with optimistic locking */
-        post: {
-            parameters: {
-                query?: never;
-                header?: never;
-                path: {
-                    id: string;
-                };
-                cookie?: never;
-            };
-            requestBody: {
-                content: {
-                    "application/json": {
-                        version: number;
-                        reason?: string;
-                        comment?: string;
-                        metadata?: Record<string, never>;
-                    };
-                };
-            };
-            responses: {
-                /** @description OK */
-                200: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content: {
-                        "application/json": {
-                            /** @example true */
-                            ok?: boolean;
-                            data?: {
-                                /** @example demo-1 */
-                                id?: string;
-                                /** @example rejected */
-                                status?: string;
-                                /** @example 2 */
-                                version?: number;
-                                /** @example 1 */
-                                prevVersion?: number;
-                            };
-                        };
-                    };
-                };
-                400: components["responses"]["ValidationError"];
-                401: components["responses"]["Unauthorized"];
-                403: components["responses"]["Forbidden"];
-                404: components["responses"]["NotFound"];
-                /** @description Version conflict */
-                409: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content: {
-                        "application/json": components["schemas"]["ErrorResponse"];
-                    };
-                };
-                503: components["responses"]["ServiceUnavailable"];
-            };
-        };
+        /**
+         * Reject instance with optimistic locking
+         * @deprecated
+         * @description Deprecated. Use POST /api/approvals/{id}/actions with {"action":"reject"} instead.
+         */
+        post: operations["rejectApprovalLegacy"];
         delete?: never;
         options?: never;
         head?: never;
@@ -619,51 +558,13 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Return instance with optimistic locking */
-        post: {
-            parameters: {
-                query?: never;
-                header?: never;
-                path: {
-                    id: string;
-                };
-                cookie?: never;
-            };
-            requestBody: {
-                content: {
-                    "application/json": {
-                        version: number;
-                    };
-                };
-            };
-            responses: {
-                /** @description OK */
-                200: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content: {
-                        "application/json": {
-                            /** @example true */
-                            ok?: boolean;
-                            data?: {
-                                /** @example demo-1 */
-                                id?: string;
-                                /** @example RETURNED */
-                                status?: string;
-                                /** @example 3 */
-                                version?: number;
-                                /** @example 2 */
-                                prevVersion?: number;
-                            };
-                        };
-                    };
-                };
-                401: components["responses"]["Unauthorized"];
-                403: components["responses"]["Forbidden"];
-                409: components["responses"]["ValidationError"];
-            };
-        };
+        /**
+         * Return instance with optimistic locking
+         * @deprecated
+         * @description Deprecated. Use POST /api/approvals/{id}/actions with
+         *     {"action":"return","targetNodeKey":"..."} instead.
+         */
+        post: operations["returnApprovalLegacy"];
         delete?: never;
         options?: never;
         head?: never;
@@ -679,51 +580,12 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Revoke instance with optimistic locking */
-        post: {
-            parameters: {
-                query?: never;
-                header?: never;
-                path: {
-                    id: string;
-                };
-                cookie?: never;
-            };
-            requestBody: {
-                content: {
-                    "application/json": {
-                        version: number;
-                    };
-                };
-            };
-            responses: {
-                /** @description OK */
-                200: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content: {
-                        "application/json": {
-                            /** @example true */
-                            ok?: boolean;
-                            data?: {
-                                /** @example demo-1 */
-                                id?: string;
-                                /** @example REVOKED */
-                                status?: string;
-                                /** @example 4 */
-                                version?: number;
-                                /** @example 3 */
-                                prevVersion?: number;
-                            };
-                        };
-                    };
-                };
-                401: components["responses"]["Unauthorized"];
-                403: components["responses"]["Forbidden"];
-                409: components["responses"]["ValidationError"];
-            };
-        };
+        /**
+         * Revoke instance with optimistic locking
+         * @deprecated
+         * @description Deprecated. Use POST /api/approvals/{id}/actions with {"action":"revoke"} instead.
+         */
+        post: operations["revokeApprovalLegacy"];
         delete?: never;
         options?: never;
         head?: never;
@@ -737,73 +599,244 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Get approval history (from approval_records) */
-        get: {
-            parameters: {
-                query?: {
-                    page?: number;
-                    pageSize?: number;
-                };
-                header?: never;
-                path: {
-                    id: string;
-                };
-                cookie?: never;
-            };
-            requestBody?: never;
-            responses: {
-                /** @description OK */
-                200: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content: {
-                        "application/json": {
-                            /** @example true */
-                            ok?: boolean;
-                            data?: {
-                                items?: {
-                                    /** @example rec-1 */
-                                    id?: string;
-                                    /**
-                                     * Format: date-time
-                                     * @example 2025-09-19T09:12:00Z
-                                     */
-                                    occurred_at?: string;
-                                    /** @example u1 */
-                                    actor_id?: string;
-                                    /** @example Reviewer One */
-                                    actor_name?: string;
-                                    /** @example approve */
-                                    action?: string;
-                                    /** @example LGTM */
-                                    comment?: string;
-                                    /** @example PENDING */
-                                    from_status?: string;
-                                    /** @example APPROVED */
-                                    to_status?: string;
-                                    /** @example 1 */
-                                    version?: number;
-                                    /** @example 0 */
-                                    from_version?: number | null;
-                                    /** @example 1 */
-                                    to_version?: number;
-                                }[];
-                                /** @example 1 */
-                                page?: number;
-                                /** @example 50 */
-                                pageSize?: number;
-                                /** @example 4 */
-                                total?: number;
-                            };
-                        };
-                    };
-                };
-                401: components["responses"]["Unauthorized"];
-                403: components["responses"]["Forbidden"];
-                503: components["responses"]["ServiceUnavailable"];
-            };
+        /**
+         * Get approval history
+         * @description Returns the paginated action history for an approval instance, including
+         *     create, approve, reject, transfer, revoke, and comment events with
+         *     actor details and timestamps.
+         */
+        get: operations["getApprovalHistory"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/approvals/pending-count": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
         };
+        /**
+         * Get pending approval badge counts
+         * @description Returns the current actor's active pending assignment count and the
+         *     unread subset used by the approval center badge.
+         */
+        get: operations["getApprovalPendingCount"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/approvals/{id}/mark-read": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Mark one approval as read
+         * @description Records a read marker for the current actor. For unsynced external
+         *     approvals the route returns `{ ok: true, skipped: true }`.
+         */
+        post: operations["markApprovalRead"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/approvals/mark-all-read": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Mark all pending approvals as read
+         * @description Marks every active pending assignment for the current actor as read.
+         *     `sourceSystem` scopes the operation to the current inbox filter.
+         */
+        post: operations["markAllApprovalsRead"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/approvals/{id}/remind": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Remind pending approvers
+         * @description Records a remind event for a pending approval. The requester or an
+         *     approver may call it. The route is rate-limited to once per instance
+         *     per actor per hour and returns 429 with the last remind timestamp when
+         *     throttled.
+         */
+        post: operations["remindApproval"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/approval-templates": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List approval templates
+         * @description Returns a paginated list of approval templates. Supports search by name
+         *     and filtering by status/category. Non-template-managers only receive
+         *     templates visible to their actor scope (`all`, matching department,
+         *     role, or user). Template managers can see all templates.
+         */
+        get: operations["listApprovalTemplates"];
+        put?: never;
+        /**
+         * Create approval template
+         * @description Creates a new approval template in draft status. Requires key (unique),
+         *     name, formSchema (with fields), and approvalGraph (nodes + edges).
+         *     The template must be published before it can be used to initiate approvals.
+         *     Optional category and visibilityScope metadata live on the parent
+         *     template row and do not become version snapshots.
+         */
+        post: operations["createApprovalTemplate"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/approval-templates/categories": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List approval template categories
+         * @description Returns distinct non-null categories visible to the current actor.
+         */
+        get: operations["listApprovalTemplateCategories"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/approval-templates/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get approval template detail
+         * @description Returns the full template including formSchema and approvalGraph when
+         *     the current actor can see the template. Template managers can see all
+         *     templates.
+         */
+        get: operations["getApprovalTemplate"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /**
+         * Update approval template draft
+         * @description Updates an existing template. formSchema/approvalGraph updates create a
+         *     new version; metadata-only updates such as category or visibilityScope
+         *     update the parent row in place. All fields are optional.
+         */
+        patch: operations["updateApprovalTemplate"];
+        trace?: never;
+    };
+    "/api/approval-templates/{id}/clone": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Clone approval template
+         * @description Clones an existing template's latest formSchema/approvalGraph into a
+         *     new draft template. Category and visibilityScope are copied; published
+         *     definitions and version history are not copied.
+         */
+        post: operations["cloneApprovalTemplate"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/approval-templates/{id}/publish": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Publish approval template
+         * @description Publishes the latest draft version of a template. Requires a RuntimePolicy
+         *     (allowRevoke, optional revokeBeforeNodeKeys). Generates a
+         *     publishedDefinition and runtimeGraph. After publishing, the template can
+         *     be used to initiate new approval instances.
+         */
+        post: operations["publishApprovalTemplate"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/approval-templates/{id}/versions/{versionId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get approval template version detail
+         * @description Returns a specific version of a template. Published versions include the
+         *     runtimeGraph with policy; draft versions have runtimeGraph set to null.
+         */
+        get: operations["getApprovalTemplateVersion"];
         put?: never;
         post?: never;
         delete?: never;
@@ -873,6 +906,64 @@ export interface paths {
                 403: components["responses"]["Forbidden"];
             };
         };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/attendance/punch/events": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List raw punch timeline events */
+        get: {
+            parameters: {
+                query?: {
+                    /** @description Optional target user. Cross-user access requires attendance admin/approver privileges. */
+                    userId?: string;
+                    from?: string;
+                    to?: string;
+                    page?: number;
+                    pageSize?: number;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: {
+                                items?: components["schemas"]["AttendancePunchEvent"][];
+                                total?: number;
+                                page?: number;
+                                pageSize?: number;
+                                /** Format: date */
+                                from?: string;
+                                /** Format: date */
+                                to?: string;
+                            };
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -1153,6 +1244,11 @@ export interface paths {
                         workDate: string;
                         /**
                          * Format: date
+                         * @description Compatibility snake_case alias for workDate.
+                         */
+                        work_date?: string;
+                        /**
+                         * Format: date
                          * @description Compatibility alias for workDate.
                          */
                         date?: string;
@@ -1161,6 +1257,11 @@ export interface paths {
                          * @enum {string}
                          */
                         requestType: "missed_check_in" | "missed_check_out" | "time_correction" | "leave" | "overtime";
+                        /**
+                         * @description Compatibility snake_case alias for requestType.
+                         * @enum {string}
+                         */
+                        request_type?: "missed_check_in" | "missed_check_out" | "time_correction" | "leave" | "overtime";
                         /**
                          * @description Compatibility alias for requestType.
                          * @enum {string}
@@ -1199,17 +1300,31 @@ export interface paths {
                         reason?: string;
                         /** @description Required for leave requests unless leaveTypeCode is provided. */
                         leaveTypeId?: string;
+                        /** @description Compatibility snake_case alias for leaveTypeId. */
+                        leave_type_id?: string;
                         /** @description Required for leave requests unless leaveTypeId is provided. */
                         leaveTypeCode?: string;
+                        /** @description Compatibility snake_case alias for leaveTypeCode. */
+                        leave_type_code?: string;
                         /** @description Required for overtime requests unless overtimeRuleName is provided. */
                         overtimeRuleId?: string;
+                        /** @description Compatibility snake_case alias for overtimeRuleId. */
+                        overtime_rule_id?: string;
                         /** @description Required for overtime requests unless overtimeRuleId is provided. */
                         overtimeRuleName?: string;
+                        /** @description Compatibility snake_case alias for overtimeRuleName. */
+                        overtime_rule_name?: string;
                         /** @description Required for overtime unless derived from requestedInAt/requestedOutAt. */
                         minutes?: number;
                         attachmentUrl?: string;
+                        /** @description Compatibility snake_case alias for attachmentUrl. */
+                        attachment_url?: string;
                         approvalFlowId?: string;
+                        /** @description Compatibility snake_case alias for approvalFlowId. */
+                        approval_flow_id?: string;
                         orgId?: string;
+                        /** @description Compatibility snake_case alias for orgId. */
+                        org_id?: string;
                     };
                 };
             };
@@ -1234,6 +1349,152 @@ export interface paths {
             };
         };
         delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/attendance/requests/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get attendance request by id */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: {
+                                request?: components["schemas"]["AttendanceRequest"];
+                            };
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+            };
+        };
+        /** Update a pending attendance request */
+        put: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: {
+                content: {
+                    "application/json": {
+                        /** Format: date */
+                        workDate?: string;
+                        /** Format: date */
+                        date?: string;
+                        /** @enum {string} */
+                        requestType?: "missed_check_in" | "missed_check_out" | "time_correction" | "leave" | "overtime";
+                        /** @enum {string} */
+                        type?: "missed_check_in" | "missed_check_out" | "time_correction" | "leave" | "overtime";
+                        /** Format: date-time */
+                        requestedInAt?: string;
+                        /** Format: date-time */
+                        requested_in_at?: string;
+                        /** Format: date-time */
+                        clockIn?: string;
+                        /** Format: date-time */
+                        requestedOutAt?: string;
+                        /** Format: date-time */
+                        requested_out_at?: string;
+                        /** Format: date-time */
+                        clockOut?: string;
+                        reason?: string;
+                        leaveTypeId?: string;
+                        leaveTypeCode?: string;
+                        overtimeRuleId?: string;
+                        overtimeRuleName?: string;
+                        minutes?: number;
+                        attachmentUrl?: string;
+                        approvalFlowId?: string;
+                        orgId?: string;
+                    };
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: {
+                                request?: components["schemas"]["AttendanceRequest"];
+                            };
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+                409: components["responses"]["Conflict"];
+            };
+        };
+        post?: never;
+        /** Cancel attendance request by id */
+        delete: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: {
+                                requestId?: string;
+                                status?: string;
+                                orgId?: string;
+                                userId?: string;
+                            };
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+            };
+        };
         options?: never;
         head?: never;
         patch?: never;
@@ -1725,6 +1986,7 @@ export interface paths {
                 };
                 401: components["responses"]["Unauthorized"];
                 403: components["responses"]["Forbidden"];
+                409: components["responses"]["Conflict"];
             };
         };
         options?: never;
@@ -1997,6 +2259,8 @@ export interface paths {
                         /** Format: date */
                         date: string;
                         name?: string | null;
+                        /** @enum {string} */
+                        type?: "holiday" | "working_day_override";
                         isWorkingDay?: boolean;
                         orgId?: string;
                     };
@@ -2033,7 +2297,35 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        get?: never;
+        /** Get attendance holiday by id */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: components["schemas"]["AttendanceHoliday"];
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+            };
+        };
         /** Update attendance holiday */
         put: {
             parameters: {
@@ -2050,6 +2342,8 @@ export interface paths {
                         /** Format: date */
                         date?: string;
                         name?: string | null;
+                        /** @enum {string} */
+                        type?: "holiday" | "working_day_override";
                         isWorkingDay?: boolean;
                         orgId?: string;
                     };
@@ -3298,6 +3592,8 @@ export interface paths {
                     "application/json": {
                         name: string;
                         requestType: string;
+                        /** @description Legacy alias for requestType. */
+                        type?: string;
                         steps?: components["schemas"]["AttendanceApprovalStep"][];
                         isActive?: boolean;
                         orgId?: string;
@@ -3339,7 +3635,36 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        get?: never;
+        /** Get approval flow */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: components["schemas"]["AttendanceApprovalFlow"];
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+            };
+        };
         /** Update approval flow */
         put: {
             parameters: {
@@ -3471,11 +3796,16 @@ export interface paths {
                     "application/json": {
                         name: string;
                         timezone?: string;
+                        /** @description Ordered shift IDs. */
                         shiftSequence: string[];
+                        /** @description Compatibility alias for shiftSequence. */
+                        shiftIds?: string[];
                         isActive?: boolean;
                         orgId?: string;
                         /** @description Legacy snake_case alias for shiftSequence. */
                         shift_sequence?: string[];
+                        /** @description Compatibility alias for shiftSequence. */
+                        shift_ids?: string[];
                         /** @description Legacy snake_case alias for isActive. */
                         is_active?: boolean;
                     };
@@ -3512,7 +3842,49 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        get?: never;
+        /** Get rotation rule */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: components["schemas"]["AttendanceRotationRule"];
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                /** @description Rotation rule not found */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            error?: {
+                                code?: string;
+                                message?: string;
+                            };
+                        };
+                    };
+                };
+            };
+        };
         /** Update rotation rule */
         put: {
             parameters: {
@@ -3528,7 +3900,10 @@ export interface paths {
                     "application/json": {
                         name?: string;
                         timezone?: string;
+                        /** @description Ordered shift IDs. */
                         shiftSequence?: string[];
+                        /** @description Legacy snake_case alias for shiftSequence. */
+                        shift_sequence?: string[];
                         isActive?: boolean;
                         orgId?: string;
                     };
@@ -3880,7 +4255,36 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        get?: never;
+        /** Get attendance rule set */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: components["schemas"]["AttendanceRuleSet"];
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+            };
+        };
         /** Update attendance rule set */
         put: {
             parameters: {
@@ -4774,6 +5178,10 @@ export interface paths {
                                 integrationId?: string;
                                 imported?: number;
                                 skipped?: Record<string, never>[];
+                                partialErrors?: {
+                                    userId?: string;
+                                    message?: string;
+                                }[];
                                 batchId?: string | null;
                                 run?: components["schemas"]["AttendanceIntegrationRun"];
                             };
@@ -5055,13 +5463,30 @@ export interface paths {
                 content: {
                     "application/json": {
                         templateId?: string;
+                        /** @description Compatibility alias for templateId. */
+                        payrollTemplateId?: string;
                         name?: string;
                         /** Format: date */
                         anchorDate?: string;
+                        /**
+                         * Format: date
+                         * @description Compatibility alias for anchorDate.
+                         */
+                        anchor_date?: string;
                         /** Format: date */
                         startDate?: string;
+                        /**
+                         * Format: date
+                         * @description Compatibility alias for startDate.
+                         */
+                        start_date?: string;
                         /** Format: date */
                         endDate?: string;
+                        /**
+                         * Format: date
+                         * @description Compatibility alias for endDate.
+                         */
+                        end_date?: string;
                         status?: string;
                         metadata?: Record<string, never>;
                         orgId?: string;
@@ -5101,7 +5526,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Batch generate payroll cycles from a template */
+        /**
+         * Batch generate payroll cycles from a template
+         * @description Requires a `templateId`/`payrollTemplateId` or an existing default payroll template for the org.
+         */
         post: {
             parameters: {
                 query?: never;
@@ -5113,8 +5541,14 @@ export interface paths {
                 content: {
                     "application/json": {
                         templateId?: string;
+                        /** @description Compatibility alias for templateId. */
+                        payrollTemplateId?: string;
                         /** Format: date */
-                        anchorDate: string;
+                        anchorDate?: string;
+                        /** @description Alternative to anchorDate. Use together with month. */
+                        year?: number;
+                        /** @description Alternative to anchorDate. Use together with year. */
+                        month?: number;
                         /** @default 1 */
                         count?: number;
                         /** @default open */
@@ -5122,7 +5556,7 @@ export interface paths {
                         namePrefix?: string;
                         metadata?: Record<string, never>;
                         orgId?: string;
-                    };
+                    } | unknown | unknown;
                 };
             };
             responses: {
@@ -5165,7 +5599,36 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        get?: never;
+        /** Get payroll cycle */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: components["schemas"]["AttendancePayrollCycle"];
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+            };
+        };
         /** Update payroll cycle */
         put: {
             parameters: {
@@ -5304,6 +5767,49 @@ export interface paths {
             cookie?: never;
         };
         /** Export payroll cycle summary (CSV) */
+        get: {
+            parameters: {
+                query?: {
+                    userId?: string;
+                    orgId?: string;
+                };
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description CSV export */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "text/csv": string;
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/attendance/payroll-cycles/{id}/export": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Export payroll cycle summary (CSV compatibility alias) */
         get: {
             parameters: {
                 query?: {
@@ -5762,7 +6268,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** List comments */
+        /**
+         * List comments
+         * @description Returns row-scoped comments, including optional field-thread comments and reply comments.
+         */
         get: {
             parameters: {
                 query: {
@@ -5793,7 +6302,10 @@ export interface paths {
             };
         };
         put?: never;
-        /** Create comment */
+        /**
+         * Create comment
+         * @description Creates a record comment, field comment, or one-level reply within an existing comment thread.
+         */
         post: {
             parameters: {
                 query?: never;
@@ -5806,9 +6318,13 @@ export interface paths {
                     "application/json": {
                         spreadsheetId: string;
                         rowId: string;
+                        /** @description Optional field-scoped thread anchor. Replies inherit the parent thread field scope. */
                         fieldId?: string;
                         content: string;
+                        /** @description Optional parent comment id. Reply-to-reply is rejected. */
                         parentId?: string;
+                        /** @description Optional explicit mention user ids. When omitted, the backend falls back to parsing mention tokens from content. */
+                        mentions?: string[];
                     };
                 };
             };
@@ -5836,6 +6352,399 @@ export interface paths {
         options?: never;
         head?: never;
         patch?: never;
+        trace?: never;
+    };
+    "/api/comments/inbox": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List comment inbox items
+         * @description Returns comments from other collaborators that either mention the current authenticated user or remain unread, including unread state, mention state, and navigation context.
+         */
+        get: {
+            parameters: {
+                query?: {
+                    limit?: number;
+                    offset?: number;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["CommentInboxResponse"];
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/comments/mention-candidates": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List comment mention candidates
+         * @description Returns active user suggestions for multitable comment authoring. The frontend may locally filter the returned candidates while the backend supports optional query narrowing.
+         */
+        get: {
+            parameters: {
+                query: {
+                    spreadsheetId: string;
+                    q?: string;
+                    limit?: number;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["CommentMentionCandidatesResponse"];
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/comments/unread-count": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get unread comment count
+         * @description Returns the count of unread comments from other collaborators that currently appear in the comment inbox.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["CommentUnreadCountResponse"];
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/comments/mention-summary": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Current-user mention inbox summary
+         * @description Returns a sheet-scoped summary of unresolved comments that mention the current authenticated user. Only unresolved comments are counted. Items are sorted by descending mentionedCount, then ascending rowId.
+         */
+        get: {
+            parameters: {
+                query: {
+                    spreadsheetId: string;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["CommentMentionSummaryResponse"];
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/comments/mention-summary/mark-read": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Mark mention inbox as read
+         * @description Marks all currently unresolved mention items for the current user in the given spreadsheet as read.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        spreadsheetId: string;
+                    };
+                };
+            };
+            responses: {
+                /** @description No Content */
+                204: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/comments/summary": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List unresolved comment presence summaries
+         * @description Returns unresolved comment counts per record, including per-field unresolved thread counts and current-user mention counts for badge rendering.
+         */
+        get: {
+            parameters: {
+                query: {
+                    spreadsheetId: string;
+                    /** @description Optional comma-separated row ids to scope the summary response. */
+                    rowIds?: string;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["CommentsSummaryResponse"];
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/comments/{commentId}/read": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Mark a comment as read */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    commentId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description No Content */
+                204: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/comments/{commentId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Delete a comment
+         * @description Hard-deletes an authored comment when it has no reply comments.
+         */
+        delete: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    commentId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description No Content */
+                204: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+                409: components["responses"]["Conflict"];
+            };
+        };
+        options?: never;
+        head?: never;
+        /**
+         * Update a comment
+         * @description Updates the content and explicit mentions of an existing unresolved comment authored by the current user.
+         */
+        patch: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    commentId: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        content: string;
+                        mentions?: string[];
+                    };
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: {
+                                comment?: components["schemas"]["Comment"];
+                            };
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+                409: components["responses"]["Conflict"];
+            };
+        };
         trace?: never;
     };
     "/api/comments/{commentId}/resolve": {
@@ -6592,6 +7501,166 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/multitable/sheets/{sheetId}/permissions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List sheet permission assignments */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    sheetId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: {
+                                items: components["schemas"]["MultitableSheetPermissionEntry"][];
+                            };
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/multitable/sheets/{sheetId}/permission-candidates": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List candidate people and roles for sheet permission authoring */
+        get: {
+            parameters: {
+                query?: {
+                    q?: string;
+                    limit?: number;
+                };
+                header?: never;
+                path: {
+                    sheetId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: {
+                                items: components["schemas"]["MultitableSheetPermissionCandidate"][];
+                                total: number;
+                                limit: number;
+                                query: string;
+                            };
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/multitable/sheets/{sheetId}/permissions/{subjectType}/{subjectId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /** Set a sheet access level for a person or role */
+        put: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    sheetId: string;
+                    subjectType: components["schemas"]["MultitableSheetPermissionSubjectType"];
+                    subjectId: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        /** @enum {string} */
+                        accessLevel: "read" | "write" | "write-own" | "admin" | "none";
+                    };
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: {
+                                subjectType: components["schemas"]["MultitableSheetPermissionSubjectType"];
+                                subjectId: string;
+                                /** @enum {string} */
+                                accessLevel: "read" | "write" | "write-own" | "admin" | "none";
+                                entry: components["schemas"]["MultitableSheetPermissionEntry"] | null;
+                            };
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+            };
+        };
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/multitable/fields": {
         parameters: {
             query?: never;
@@ -7237,6 +8306,8 @@ export interface paths {
                     /** @description Alternative to `sheetId`; at least one of `sheetId` or `viewId` should be provided. */
                     viewId?: string;
                     recordId?: string;
+                    /** @description Public form token from `view.config.publicForm.publicToken`. */
+                    publicToken?: string;
                 };
                 header?: never;
                 path?: never;
@@ -7449,7 +8520,10 @@ export interface paths {
         /** Submit a multitable form view */
         post: {
             parameters: {
-                query?: never;
+                query?: {
+                    /** @description Public form token from `view.config.publicForm.publicToken`. */
+                    publicToken?: string;
+                };
                 header?: never;
                 path: {
                     viewId: string;
@@ -7461,6 +8535,7 @@ export interface paths {
                     "application/json": {
                         recordId?: string;
                         expectedVersion?: number;
+                        publicToken?: string;
                         data?: {
                             [key: string]: unknown;
                         };
@@ -11027,9 +12102,8 @@ export interface paths {
                         name: string;
                         description?: string;
                         category?: string;
-                        bpmnXml?: string;
-                        nodes?: Record<string, never>[];
-                        edges?: Record<string, never>[];
+                        bpmnXml: string;
+                        version?: string | number;
                     };
                 };
             };
@@ -11097,8 +12171,7 @@ export interface paths {
                         description?: string;
                         category?: string;
                         bpmnXml?: string;
-                        nodes?: Record<string, never>[];
-                        edges?: Record<string, never>[];
+                        version?: string | number;
                     };
                 };
             };
@@ -11995,9 +13068,10 @@ export interface components {
             };
         };
         DirectErrorResponse: {
-            /** @default false */
-            success: boolean;
-            error?: string;
+            error?: {
+                code?: string;
+                message?: string;
+            };
         };
         User: {
             id?: string;
@@ -12026,18 +13100,23 @@ export interface components {
             id?: string;
             targetType?: string | null;
             targetId?: string | null;
+            /** @description Frontend alias for fieldId. */
             targetFieldId?: string | null;
             containerType?: string | null;
+            /** @description Frontend alias for spreadsheetId. */
             containerId?: string | null;
             spreadsheetId?: string | null;
             rowId?: string | null;
+            /** @description Backend field-thread identifier. Replies inherit the parent field scope. */
             fieldId?: string | null;
             content?: string;
             authorId?: string;
+            /** @description Parent comment id for one-level threaded replies. */
             parentId?: string | null;
             resolved?: boolean;
             createdAt?: string;
             updatedAt?: string;
+            /** @description Mentioned user identifiers parsed from comment content. */
             mentions?: string[];
         };
         CommentsListResponse: {
@@ -12051,6 +13130,101 @@ export interface components {
                 limit?: number;
                 /** @example 0 */
                 offset?: number;
+            };
+        };
+        CommentInboxItem: components["schemas"]["Comment"] & {
+            unread: boolean;
+            mentioned: boolean;
+            baseId?: string | null;
+            sheetId?: string | null;
+            viewId?: string | null;
+            recordId?: string | null;
+        };
+        CommentInboxResponse: {
+            /** @example true */
+            ok?: boolean;
+            data?: {
+                items?: components["schemas"]["CommentInboxItem"][];
+                /** @example 1 */
+                total?: number;
+                /** @example 50 */
+                limit?: number;
+                /** @example 0 */
+                offset?: number;
+            };
+        };
+        CommentMentionCandidate: {
+            id: string;
+            label: string;
+            subtitle?: string;
+        };
+        CommentMentionCandidatesResponse: {
+            /** @example true */
+            ok?: boolean;
+            data?: {
+                items?: components["schemas"]["CommentMentionCandidate"][];
+                /** @example 1 */
+                total?: number;
+                /** @example 50 */
+                limit?: number;
+            };
+        };
+        CommentUnreadCountResponse: {
+            /** @example true */
+            ok?: boolean;
+            data?: {
+                /** @example 0 */
+                count?: number;
+            };
+        };
+        CommentPresenceSummary: {
+            spreadsheetId?: string;
+            rowId?: string;
+            unresolvedCount?: number;
+            fieldCounts?: {
+                [key: string]: number;
+            };
+            /** @description Unresolved comments in this record that mention the current requester. */
+            mentionedCount?: number;
+            /** @description Per-field unresolved mention counts for the current requester. */
+            mentionedFieldCounts?: {
+                [key: string]: number;
+            };
+        };
+        CommentMentionSummaryItem: {
+            rowId: string;
+            /** @description Number of unresolved comments in this record that mention the current user. */
+            mentionedCount: number;
+            /** @description Number of unresolved mentioned comments in this record that have not been marked as read by the current user. */
+            unreadCount: number;
+            /** @description Deduplicated, sorted field ids where the user is mentioned. */
+            mentionedFieldIds: string[];
+        };
+        CommentMentionSummary: {
+            spreadsheetId: string;
+            /** @description Total number of unresolved comments mentioning the current user across all records. */
+            unresolvedMentionCount: number;
+            /** @description Total unresolved mentioned comments that have not been marked as read by the current user. */
+            unreadMentionCount: number;
+            /** @description Number of distinct records with unresolved mentions. */
+            mentionedRecordCount: number;
+            /** @description Number of distinct records with unread mentions. */
+            unreadRecordCount: number;
+            /** @description Per-record breakdown, sorted by mentionedCount desc, rowId asc. */
+            items: components["schemas"]["CommentMentionSummaryItem"][];
+        };
+        CommentMentionSummaryResponse: {
+            /** @example true */
+            ok?: boolean;
+            data?: components["schemas"]["CommentMentionSummary"];
+        };
+        CommentsSummaryResponse: {
+            /** @example true */
+            ok?: boolean;
+            data?: {
+                items?: components["schemas"]["CommentPresenceSummary"][];
+                /** @example 1 */
+                total?: number;
             };
         };
         PluginAdminEntry: {
@@ -12090,6 +13264,7 @@ export interface components {
             /** Format: date-time */
             created_at?: string;
         };
+        AttendancePunchEvent: components["schemas"]["AttendanceEvent"];
         AttendanceRecord: {
             id?: string;
             user_id?: string;
@@ -12770,12 +13945,75 @@ export interface components {
             canComment: boolean;
             canManageAutomation: boolean;
         };
+        /** @enum {string} */
+        MultitableSheetPermissionAccessLevel: "read" | "write" | "write-own" | "admin";
+        /** @enum {string} */
+        MultitableSheetPermissionSubjectType: "user" | "role";
+        MultitableSheetPermissionEntry: {
+            subjectType: components["schemas"]["MultitableSheetPermissionSubjectType"];
+            subjectId: string;
+            accessLevel: components["schemas"]["MultitableSheetPermissionAccessLevel"];
+            permissions: string[];
+            label: string;
+            subtitle?: string | null;
+            isActive: boolean;
+        };
+        MultitableSheetPermissionCandidate: {
+            subjectType: components["schemas"]["MultitableSheetPermissionSubjectType"];
+            subjectId: string;
+            label: string;
+            subtitle?: string | null;
+            isActive: boolean;
+            accessLevel?: components["schemas"]["MultitableSheetPermissionAccessLevel"] | null;
+        };
+        MultitableFieldCapability: {
+            visible: boolean;
+            editable: boolean;
+            commentable: boolean;
+            exportable: boolean;
+            formulaReadable: boolean;
+        };
+        MultitableFieldCapabilities: {
+            [key: string]: components["schemas"]["MultitableFieldCapability"];
+        };
+        MultitableDependencyNode: {
+            fieldId: string;
+            fieldName: string;
+            /** @enum {string} */
+            fieldType: "formula" | "lookup" | "rollup";
+            dependsOnFieldIds: string[];
+            dependsOnFieldNames: string[];
+            cyclic: boolean;
+            expression?: string | null;
+            linkFieldId?: string | null;
+            targetFieldId?: string | null;
+            foreignSheetId?: string | null;
+            /** @enum {string|null} */
+            aggregation?: "count" | "sum" | "avg" | "min" | "max" | null;
+            unresolvedFieldNames?: string[];
+        };
+        MultitableDependencyEdge: {
+            fromFieldId: string;
+            toFieldId: string;
+            /** @enum {string} */
+            kind: "formula-reference" | "lookup-link" | "lookup-target" | "rollup-link" | "rollup-target";
+        };
+        MultitableDependencyCycle: {
+            fieldIds: string[];
+            fieldNames: string[];
+        };
+        MultitableDependencyGraph: {
+            nodes: components["schemas"]["MultitableDependencyNode"][];
+            edges: components["schemas"]["MultitableDependencyEdge"][];
+            cycles: components["schemas"]["MultitableDependencyCycle"][];
+        };
         MultitableContext: {
             base?: components["schemas"]["MultitableBase"] | null;
             sheet?: components["schemas"]["MultitableSheet"] | null;
             sheets?: components["schemas"]["MultitableSheet"][];
             views?: components["schemas"]["MultitableView"][];
             capabilities?: components["schemas"]["MultitableCapabilities"];
+            fieldCapabilities?: components["schemas"]["MultitableFieldCapabilities"] | null;
         };
         MultitableViewData: {
             id: string;
@@ -12783,6 +14021,8 @@ export interface components {
             rows: components["schemas"]["MultitableRecord"][];
             linkSummaries?: components["schemas"]["MultitableViewLinkSummaries"];
             attachmentSummaries?: components["schemas"]["MultitableViewAttachmentSummaries"];
+            fieldCapabilities?: components["schemas"]["MultitableFieldCapabilities"] | null;
+            dependencyGraph?: components["schemas"]["MultitableDependencyGraph"] | null;
             view?: components["schemas"]["MultitableView"] | null;
             meta?: components["schemas"]["MultitableViewMeta"];
             page?: components["schemas"]["MultitablePage"];
@@ -12793,6 +14033,8 @@ export interface components {
             fields: components["schemas"]["MultitableField"][];
             record: components["schemas"]["MultitableRecord"];
             capabilities: components["schemas"]["MultitableCapabilities"];
+            fieldCapabilities?: components["schemas"]["MultitableFieldCapabilities"] | null;
+            dependencyGraph?: components["schemas"]["MultitableDependencyGraph"] | null;
             commentsScope: components["schemas"]["MultitableCommentsScope"];
             linkSummaries: components["schemas"]["MultitableLinkSummaryMap"];
             attachmentSummaries?: components["schemas"]["MultitableAttachmentSummaryMap"];
@@ -12806,6 +14048,8 @@ export interface components {
             view?: components["schemas"]["MultitableView"] | null;
             fields: components["schemas"]["MultitableField"][];
             capabilities: components["schemas"]["MultitableCapabilities"];
+            fieldCapabilities?: components["schemas"]["MultitableFieldCapabilities"] | null;
+            dependencyGraph?: components["schemas"]["MultitableDependencyGraph"] | null;
             record?: components["schemas"]["MultitableRecord"] | null;
             commentsScope?: components["schemas"]["MultitableCommentsScope"] | null;
             attachmentSummaries?: components["schemas"]["MultitableAttachmentSummaryMap"];
@@ -12819,7 +14063,10 @@ export interface components {
         MultitableRecordMutationResult: {
             record: components["schemas"]["MultitableRecord"];
             commentsScope: components["schemas"]["MultitableCommentsScope"];
+            records?: components["schemas"]["MultitableComputedRecord"][];
+            linkSummaries?: components["schemas"]["MultitableLinkSummaryMap"];
             attachmentSummaries?: components["schemas"]["MultitableAttachmentSummaryMap"];
+            relatedRecords?: components["schemas"]["MultitableRelatedRecord"][];
         };
         MultitableFormSubmitResult: {
             /** @enum {string} */
@@ -12834,6 +14081,365 @@ export interface components {
             linkSummaries?: components["schemas"]["MultitableViewLinkSummaries"];
             attachmentSummaries?: components["schemas"]["MultitableViewAttachmentSummaries"];
             relatedRecords?: components["schemas"]["MultitableRelatedRecord"][];
+        };
+        ApprovalNodeConfig: {
+            /** @enum {string} */
+            assigneeType: "user" | "role";
+            assigneeIds: string[];
+            /**
+             * @description Approval aggregation mode for a single approval node. `single`
+             *     preserves the Wave 1 behavior, `all` represents countersign, and
+             *     `any` represents any-sign.
+             * @enum {string}
+             */
+            approvalMode?: "single" | "all" | "any";
+            /**
+             * @description Behavior when the approval node resolves to zero assignees. `error`
+             *     blocks runtime execution, `auto-approve` allows the node to advance
+             *     automatically.
+             * @enum {string}
+             */
+            emptyAssigneePolicy?: "error" | "auto-approve";
+        };
+        ApprovalConditionRule: {
+            fieldId: string;
+            /** @enum {string} */
+            operator: "eq" | "neq" | "gt" | "gte" | "lt" | "lte" | "in" | "isEmpty";
+            value?: unknown;
+        };
+        ApprovalConditionBranch: {
+            edgeKey: string;
+            rules: components["schemas"]["ApprovalConditionRule"][];
+            /** @enum {string} */
+            conjunction?: "and" | "or";
+        };
+        ApprovalConditionNodeConfig: {
+            branches: components["schemas"]["ApprovalConditionBranch"][];
+            defaultEdgeKey?: string;
+        };
+        ApprovalCcNodeConfig: {
+            /** @enum {string} */
+            targetType: "user" | "role";
+            targetIds: string[];
+        };
+        /**
+         * @description Parallel gateway (并行分支) — fans into the listed branch edges and
+         *     re-joins at `joinNodeKey`. v1 only ships `joinMode: all` (会签 on
+         *     the join); `any` is reserved for a future wave.
+         */
+        ApprovalParallelNodeConfig: {
+            /**
+             * @description Outgoing edgeKeys, one per branch. Each edge's downstream path
+             *     must reach `joinNodeKey` before any `end` or loop, and must not
+             *     share approver assignees with any other branch.
+             */
+            branches: string[];
+            /**
+             * @description Join policy at `joinNodeKey`. `all` waits for every branch to
+             *     report complete before advancing. `any` (future) would advance
+             *     on the first branch to complete.
+             * @enum {string}
+             */
+            joinMode: "all" | "any";
+            /**
+             * @description The approval / cc node every branch converges onto. Required —
+             *     lets the runtime short-circuit walker without structural
+             *     inference.
+             */
+            joinNodeKey: string;
+        };
+        ApprovalNode: {
+            key: string;
+            /** @enum {string} */
+            type: "start" | "approval" | "cc" | "condition" | "parallel" | "end";
+            name?: string;
+            config: {
+                [key: string]: unknown;
+            };
+        };
+        ApprovalEdge: {
+            key: string;
+            source: string;
+            target: string;
+        };
+        ApprovalGraph: {
+            nodes: components["schemas"]["ApprovalNode"][];
+            edges: components["schemas"]["ApprovalEdge"][];
+        };
+        RuntimePolicy: {
+            allowRevoke: boolean;
+            revokeBeforeNodeKeys?: string[];
+        };
+        RuntimeGraph: components["schemas"]["ApprovalGraph"] & {
+            policy: components["schemas"]["RuntimePolicy"];
+        };
+        FormOption: {
+            label: string;
+            value: string;
+        };
+        FormField: {
+            id: string;
+            /** @enum {string} */
+            type: "text" | "textarea" | "number" | "date" | "datetime" | "select" | "multi-select" | "user" | "attachment";
+            label: string;
+            required?: boolean;
+            placeholder?: string;
+            defaultValue?: unknown;
+            options?: components["schemas"]["FormOption"][];
+            props?: {
+                [key: string]: unknown;
+            };
+        };
+        FormSchema: {
+            fields: components["schemas"]["FormField"][];
+        };
+        ApprovalRequesterSnapshot: {
+            id?: string;
+            name?: string;
+            department?: string;
+            title?: string;
+        } & {
+            [key: string]: unknown;
+        };
+        ApprovalSubjectSnapshot: {
+            [key: string]: unknown;
+        };
+        ApprovalPolicySnapshot: {
+            rejectCommentRequired?: boolean;
+            sourceOfTruth?: string;
+        } & {
+            [key: string]: unknown;
+        };
+        ApprovalAssignmentDTO: {
+            id: string;
+            type: string;
+            assigneeId: string;
+            sourceStep: number;
+            nodeKey?: string | null;
+            isActive: boolean;
+            /**
+             * @description Runtime-populated metadata. Optional keys written by the approval executor:
+             *       - `aggregateCancelledBy` (string): userId of the approver whose any-mode (或签)
+             *         first-wins decision deactivated this sibling assignment.
+             *       - `aggregateCancelledAt` (string, ISO-8601): timestamp when the cancellation fired.
+             *       - `aggregateMode` ('any'): aggregation mode that triggered the cancellation;
+             *         present alongside `aggregateCancelledBy` on cancelled sibling assignments.
+             */
+            metadata: {
+                [key: string]: unknown;
+            };
+        };
+        UnifiedApprovalDTO: {
+            id: string;
+            sourceSystem: string;
+            externalApprovalId?: string | null;
+            workflowKey?: string | null;
+            businessKey?: string | null;
+            title?: string | null;
+            status: string;
+            requester?: components["schemas"]["ApprovalRequesterSnapshot"] | null;
+            subject?: components["schemas"]["ApprovalSubjectSnapshot"] | null;
+            policy?: components["schemas"]["ApprovalPolicySnapshot"] | null;
+            currentStep?: number | null;
+            totalSteps?: number | null;
+            templateId?: string | null;
+            templateVersionId?: string | null;
+            publishedDefinitionId?: string | null;
+            requestNo?: string | null;
+            formSnapshot?: {
+                [key: string]: unknown;
+            } | null;
+            currentNodeKey?: string | null;
+            /**
+             * @description Parallel gateway (并行分支) runtime frontier. Present only when
+             *     the instance is inside a parallel region with ≥ 2 still-pending
+             *     branches. Each entry is the current approval node key for one
+             *     branch. When absent or length < 2, use `currentNodeKey`
+             *     unchanged for the linear / non-parallel flow.
+             */
+            currentNodeKeys?: string[] | null;
+            assignments: components["schemas"]["ApprovalAssignmentDTO"][];
+            /** Format: date-time */
+            createdAt: string;
+            /** Format: date-time */
+            updatedAt: string;
+        };
+        UnifiedApprovalHistoryDTO: {
+            id: string;
+            action: string;
+            actorId?: string | null;
+            /** @deprecated */
+            actor_id?: string | null;
+            actorName?: string | null;
+            /** @deprecated */
+            actor_name?: string | null;
+            comment?: string | null;
+            fromStatus?: string | null;
+            /** @deprecated */
+            from_status?: string | null;
+            toStatus?: string;
+            /** @deprecated */
+            to_status?: string;
+            /** Format: date-time */
+            occurredAt?: string | null;
+            /**
+             * Format: date-time
+             * @deprecated
+             */
+            occurred_at?: string | null;
+            version?: number | null;
+            /** @deprecated */
+            from_version?: number | null;
+            /** @deprecated */
+            to_version?: number | null;
+            metadata?: {
+                [key: string]: unknown;
+            };
+        };
+        LegacyPendingApprovalInstance: {
+            id: string;
+            status: string;
+            version: number;
+            source_system?: string | null;
+            /** Format: date-time */
+            created_at: string;
+            /** Format: date-time */
+            updated_at: string;
+        };
+        ApprovalListResponse: {
+            data: components["schemas"]["UnifiedApprovalDTO"][];
+            total: number;
+            limit: number;
+            offset: number;
+        };
+        LegacyPendingApprovalListResponse: {
+            data: components["schemas"]["LegacyPendingApprovalInstance"][];
+            total: number;
+            limit: number;
+            offset: number;
+            degraded?: boolean;
+        };
+        ApprovalHistoryResponse: {
+            /** @example true */
+            ok: boolean;
+            data: {
+                items: components["schemas"]["UnifiedApprovalHistoryDTO"][];
+                total: number;
+                page: number;
+                pageSize: number;
+            };
+        };
+        ApprovalPendingCountResponse: {
+            count: number;
+            unreadCount: number;
+            degraded?: boolean;
+        };
+        MarkApprovalReadResponse: {
+            ok: boolean;
+            skipped?: boolean;
+            reason?: string;
+        };
+        MarkAllApprovalsReadResponse: {
+            markedCount: number;
+        };
+        RemindApprovalData: {
+            id: string;
+            /** @enum {string} */
+            action: "remind";
+            /** Format: date-time */
+            remindedAt: string;
+            bridged: boolean;
+            sourceSystem: string | null;
+        };
+        RemindApprovalResponse: {
+            /** @example true */
+            ok: boolean;
+            data: components["schemas"]["RemindApprovalData"];
+        };
+        ApprovalPlmSyncResponse: {
+            success: boolean;
+            synced: number;
+            errors: {
+                [key: string]: unknown;
+            }[];
+        };
+        CreateApprovalRequest: {
+            templateId: string;
+            formData: {
+                [key: string]: unknown;
+            };
+        };
+        ApprovalActionRequest: {
+            /** @enum {string} */
+            action: "approve" | "reject" | "transfer" | "revoke" | "comment" | "return";
+            comment?: string;
+            targetUserId?: string;
+            targetNodeKey?: string;
+        };
+        ApprovalTemplateListItem: {
+            id: string;
+            key: string;
+            name: string;
+            description?: string | null;
+            category: string | null;
+            visibilityScope: components["schemas"]["ApprovalTemplateVisibilityScope"];
+            /** @enum {string} */
+            status: "draft" | "published" | "archived";
+            activeVersionId: string | null;
+            latestVersionId: string | null;
+            /** Format: date-time */
+            createdAt: string;
+            /** Format: date-time */
+            updatedAt: string;
+        };
+        ApprovalTemplateVisibilityScope: {
+            /**
+             * @description Visibility mode. `all` ignores `ids`.
+             * @enum {string}
+             */
+            type: "all" | "dept" | "role" | "user";
+            /** @description Department, role, or user ids for scoped visibility. */
+            ids: string[];
+        };
+        ApprovalTemplateDetail: components["schemas"]["ApprovalTemplateListItem"] & {
+            formSchema: components["schemas"]["FormSchema"];
+            approvalGraph: components["schemas"]["ApprovalGraph"];
+        };
+        CreateApprovalTemplateRequest: {
+            key: string;
+            name: string;
+            description?: string | null;
+            category?: string | null;
+            visibilityScope?: components["schemas"]["ApprovalTemplateVisibilityScope"];
+            formSchema: components["schemas"]["FormSchema"];
+            approvalGraph: components["schemas"]["ApprovalGraph"];
+        };
+        UpdateApprovalTemplateRequest: {
+            key?: string;
+            name?: string;
+            description?: string | null;
+            category?: string | null;
+            visibilityScope?: components["schemas"]["ApprovalTemplateVisibilityScope"];
+            formSchema?: components["schemas"]["FormSchema"];
+            approvalGraph?: components["schemas"]["ApprovalGraph"];
+        };
+        PublishApprovalTemplateRequest: {
+            policy: components["schemas"]["RuntimePolicy"];
+        };
+        ApprovalTemplateVersionDetail: {
+            id: string;
+            templateId: string;
+            version: number;
+            /** @enum {string} */
+            status: "draft" | "published" | "archived";
+            formSchema: components["schemas"]["FormSchema"];
+            approvalGraph: components["schemas"]["ApprovalGraph"];
+            runtimeGraph?: components["schemas"]["RuntimeGraph"] | null;
+            publishedDefinitionId?: string | null;
+            /** Format: date-time */
+            createdAt: string;
+            /** Format: date-time */
+            updatedAt: string;
         };
     };
     responses: {
@@ -12864,8 +14470,8 @@ export interface components {
                 "application/json": components["schemas"]["ErrorResponse"];
             };
         };
-        /** @description Conflict - Request conflicts with current resource state */
-        Conflict: {
+        /** @description Not found - Resource does not exist */
+        NotFound: {
             headers: {
                 [name: string]: unknown;
             };
@@ -12873,8 +14479,8 @@ export interface components {
                 "application/json": components["schemas"]["ErrorResponse"];
             };
         };
-        /** @description Not found - Resource does not exist */
-        NotFound: {
+        /** @description Conflict - Request conflicts with current resource state */
+        Conflict: {
             headers: {
                 [name: string]: unknown;
             };
@@ -12904,4 +14510,735 @@ export interface components {
     pathItems: never;
 }
 export type $defs = Record<string, never>;
-export type operations = Record<string, never>;
+export interface operations {
+    listApprovals: {
+        parameters: {
+            query?: {
+                sourceSystem?: string;
+                status?: string;
+                workflowKey?: string;
+                businessKey?: string;
+                assignee?: string;
+                tab?: string;
+                search?: string;
+                page?: number;
+                pageSize?: number;
+                limit?: number;
+                offset?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApprovalListResponse"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            503: components["responses"]["ServiceUnavailable"];
+        };
+    };
+    createApproval: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateApprovalRequest"];
+            };
+        };
+        responses: {
+            /** @description Created */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UnifiedApprovalDTO"];
+                };
+            };
+            400: components["responses"]["ValidationError"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            503: components["responses"]["ServiceUnavailable"];
+        };
+    };
+    listPendingApprovalsLegacy: {
+        parameters: {
+            query?: {
+                limit?: number;
+                offset?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LegacyPendingApprovalListResponse"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            503: components["responses"]["ServiceUnavailable"];
+        };
+    };
+    syncPlmApprovals: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    status?: string;
+                    productId?: string;
+                    requesterId?: string;
+                    limit?: number;
+                    offset?: number;
+                };
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApprovalPlmSyncResponse"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            503: components["responses"]["ServiceUnavailable"];
+        };
+    };
+    getApproval: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UnifiedApprovalDTO"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            503: components["responses"]["ServiceUnavailable"];
+        };
+    };
+    dispatchApprovalAction: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ApprovalActionRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UnifiedApprovalDTO"];
+                };
+            };
+            400: components["responses"]["ValidationError"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            /** @description Conflict or invalid state transition */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            503: components["responses"]["ServiceUnavailable"];
+        };
+    };
+    approveApprovalLegacy: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    version: number;
+                    comment?: string;
+                    metadata?: {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            400: components["responses"]["ValidationError"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            /** @description Version conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            503: components["responses"]["ServiceUnavailable"];
+        };
+    };
+    rejectApprovalLegacy: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    version: number;
+                    reason?: string;
+                    comment?: string;
+                    metadata?: {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            400: components["responses"]["ValidationError"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            /** @description Version conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            503: components["responses"]["ServiceUnavailable"];
+        };
+    };
+    returnApprovalLegacy: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    version: number;
+                };
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            400: components["responses"]["ValidationError"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            /** @description Version conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    revokeApprovalLegacy: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    version: number;
+                };
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            400: components["responses"]["ValidationError"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            /** @description Version conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    getApprovalHistory: {
+        parameters: {
+            query?: {
+                page?: number;
+                pageSize?: number;
+            };
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApprovalHistoryResponse"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            503: components["responses"]["ServiceUnavailable"];
+        };
+    };
+    getApprovalPendingCount: {
+        parameters: {
+            query?: {
+                sourceSystem?: "all" | "platform" | "plm";
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApprovalPendingCountResponse"];
+                };
+            };
+            400: components["responses"]["ValidationError"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            503: components["responses"]["ServiceUnavailable"];
+        };
+    };
+    markApprovalRead: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MarkApprovalReadResponse"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            503: components["responses"]["ServiceUnavailable"];
+        };
+    };
+    markAllApprovalsRead: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    /** @enum {string} */
+                    sourceSystem?: "all" | "platform" | "plm";
+                };
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MarkAllApprovalsReadResponse"];
+                };
+            };
+            400: components["responses"]["ValidationError"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            503: components["responses"]["ServiceUnavailable"];
+        };
+    };
+    remindApproval: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RemindApprovalResponse"];
+                };
+            };
+            400: components["responses"]["ValidationError"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            /** @description Remind throttled */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            503: components["responses"]["ServiceUnavailable"];
+        };
+    };
+    listApprovalTemplates: {
+        parameters: {
+            query?: {
+                search?: string;
+                status?: "draft" | "published" | "archived";
+                category?: string;
+                page?: number;
+                pageSize?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        data: components["schemas"]["ApprovalTemplateListItem"][];
+                        total: number;
+                        /** @description Effective page size. */
+                        limit: number;
+                        /** @description Zero-based offset derived from page/pageSize. */
+                        offset: number;
+                    };
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    createApprovalTemplate: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateApprovalTemplateRequest"];
+            };
+        };
+        responses: {
+            /** @description Created */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApprovalTemplateDetail"];
+                };
+            };
+            400: components["responses"]["ValidationError"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    listApprovalTemplateCategories: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        data: string[];
+                    };
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+        };
+    };
+    getApprovalTemplate: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApprovalTemplateDetail"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    updateApprovalTemplate: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdateApprovalTemplateRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApprovalTemplateDetail"];
+                };
+            };
+            400: components["responses"]["ValidationError"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    cloneApprovalTemplate: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Created */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApprovalTemplateDetail"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            /** @description Clone key conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    publishApprovalTemplate: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PublishApprovalTemplateRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApprovalTemplateVersionDetail"];
+                };
+            };
+            400: components["responses"]["ValidationError"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    getApprovalTemplateVersion: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+                versionId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApprovalTemplateVersionDetail"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+}

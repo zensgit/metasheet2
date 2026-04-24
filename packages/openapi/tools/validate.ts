@@ -1,10 +1,13 @@
 #!/usr/bin/env tsx
 import fs from 'fs'
 import path from 'path'
+import { fileURLToPath } from 'url'
 import yaml from 'js-yaml'
 
+const __dirname = path.dirname(fileURLToPath(import.meta.url))
+
 function isAuthWhitelisted(p: string): boolean {
-  return p.startsWith('/api/auth/') || p === '/health' || p.startsWith('/metrics')
+  return p.startsWith('/api/auth/') || p === '/health' || p === '/api/health' || p.startsWith('/metrics')
 }
 
 function main() {
@@ -33,4 +36,3 @@ function main() {
 }
 
 main()
-
