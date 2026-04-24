@@ -34,8 +34,8 @@
 ## P1 Private 142/Staging Input Readiness
 
 - [x] Create a private env file from the smoke-session template; keep it outside git-tracked docs and PR comments.
-- [ ] Fill `DINGTALK_P4_API_BASE` with the 142/staging API base.
-- [ ] Fill `DINGTALK_P4_WEB_BASE` with the reachable web origin used by DingTalk message links.
+- [x] Fill `DINGTALK_P4_API_BASE` with the 142/staging API base.
+- [x] Fill `DINGTALK_P4_WEB_BASE` with the reachable web origin used by DingTalk message links.
 - [x] Fill `DINGTALK_P4_AUTH_TOKEN` with an authorized admin/API token from the approved private secret path.
 - [ ] Fill two real DingTalk group robot webhook URLs.
 - [ ] Fill optional DingTalk robot `SEC...` secrets if the robots require signing.
@@ -67,6 +67,14 @@ Latest user-target readiness result:
 - Readiness now reports `allowedUserCount: 1`, `personUserCount: 1`, and an authorized manual target.
 - Remaining failed readiness checks: `dingtalk_p4_group_a_webhook`, `group-a-webhook-shape`, `dingtalk_p4_group_b_webhook`, `group-b-webhook-shape`, `manual-targets-declared`.
 - 142 did not have a second DingTalk-bound local user or a no-email DingTalk external identity available in the queried data, so unauthorized/no-email targets remain manual setup blockers.
+
+Latest blocker handoff result:
+
+- `DINGTALK_P4_API_BASE` and `DINGTALK_P4_WEB_BASE` are filled in the private env template with 142 defaults.
+- 142 had no saved `dingtalk_group_destinations` rows available to reuse as group A/B robot webhooks.
+- The backend container was observed as host-local on `127.0.0.1:8900`; if using that backend address, run final smoke from the 142 host or first verify a routable API base from the operator machine.
+- Current permissions do not allow additional external connectivity checks, so endpoint reachability is not claimed as verified in this slice.
+- Remaining required human/private inputs are two real DingTalk robot webhooks, a second DingTalk-bound unauthorized user, and a no-email DingTalk external identity.
 
 ## P2 Non-Sandbox Regression Gate
 
