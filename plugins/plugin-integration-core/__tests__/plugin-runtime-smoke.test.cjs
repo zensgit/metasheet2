@@ -54,6 +54,13 @@ function createMockContext() {
         warn: (msg) => logs.push(['warn', msg]),
         error: (msg) => logs.push(['error', msg]),
       },
+      services: {
+        security: {
+          async encrypt(value) { return `enc:${Buffer.from(value, 'utf8').toString('base64')}` },
+          async decrypt(value) { return Buffer.from(value.slice(4), 'base64').toString('utf8') },
+          async hash(value) { return `hash:${value}` },
+        },
+      },
     },
     inspect: { routes, namespaces: registeredNamespaces, logs },
   }
@@ -121,6 +128,11 @@ async function main() {
   const statusResult = await commApi.getStatus()
   assert.equal(statusResult.plugin, 'plugin-integration-core', 'status.plugin')
   assert.equal(statusResult.routesRegistered, 1, 'status.routesRegistered')
+  assert.deepEqual(
+    statusResult.credentialStore,
+    { source: 'host-security', format: 'enc' },
+    'status reports host-backed credential store',
+  )
 
   // --- 6. Activation logged --------------------------------------------
   const hasActivationLog = inspect.logs.some(

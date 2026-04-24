@@ -25,7 +25,7 @@ CREATE TABLE IF NOT EXISTS integration_external_systems (
   kind                  TEXT NOT NULL,       -- 'plm:yuantus' | 'erp:k3-wise-webapi' | 'erp:k3-wise-sqlserver' | 'http' | 'postgres' | ...
   role                  TEXT NOT NULL CHECK (role IN ('source', 'target', 'bidirectional')),
   config                JSONB NOT NULL DEFAULT '{}'::jsonb,        -- base_url / host / port / db_name / account_set_id / env / 其它非密码字段
-  credentials_encrypted TEXT,                                       -- lib/credential-store.cjs 加密后 ciphertext，永不明文
+  credentials_encrypted TEXT,                                       -- lib/credential-store.cjs ciphertext；新写 enc:，兼容读旧 v1:，永不明文
   capabilities          JSONB NOT NULL DEFAULT '{}'::jsonb,        -- { read, write, introspect, watermarkFields: [] }
   status                TEXT NOT NULL DEFAULT 'inactive' CHECK (status IN ('active', 'inactive', 'error')),
   last_tested_at        TIMESTAMPTZ,

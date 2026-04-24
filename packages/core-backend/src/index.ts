@@ -99,6 +99,7 @@ import { startDirectorySyncScheduler, stopDirectorySyncScheduler } from './direc
 import { canaryRoutes } from './routes/canary-routes'
 import { CanaryRouter } from './canary/CanaryRouter'
 import { createCanaryInterceptor } from './canary/CanaryInterceptor'
+import { PluginRuntimeSecurityService } from './security/plugin-runtime-security-service'
 import workflowRouter from './routes/workflow'
 import workflowDesignerRouter from './routes/workflow-designer'
 import plmWorkbenchRouter from './routes/plm-workbench'
@@ -185,6 +186,7 @@ export class MetaSheetServer {
   private yjsBridgeMetricsSource?: { getMetrics(): { pendingWriteCount: number; observedDocCount: number; flushSuccessCount: number; flushFailureCount: number } }
   private yjsSocketMetricsSource?: { getMetrics(): { activeRecordCount: number; activeSocketCount: number } }
   private afterSalesApprovalBridgeService: AfterSalesApprovalBridgeService
+  private pluginRuntimeSecurityService = new PluginRuntimeSecurityService()
   // Optional bypass/degraded-mode flags for local debug
   private disableWorkflow = process.env.DISABLE_WORKFLOW === 'true'
   private disableEventBus = process.env.DISABLE_EVENT_BUS === 'true'
@@ -1492,6 +1494,7 @@ export class MetaSheetServer {
         automationRegistry,
         rbacProvisioning,
         platformAppInstances,
+        security: this.pluginRuntimeSecurityService,
       } as unknown as import('./types/plugin').PluginServices,
       storage,
       config: {},

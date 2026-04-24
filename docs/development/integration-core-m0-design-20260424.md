@@ -72,13 +72,12 @@ This is not a substitute for applying the migration against Postgres. It is an e
 
 ### Credentials
 
-`lib/credential-store.cjs` uses AES-256-GCM envelope encryption.
+`lib/credential-store.cjs` now prefers the host-backed `context.services.security` service when available.
 
-- Production requires `INTEGRATION_ENCRYPTION_KEY`.
-- Development/test may use a deterministic fallback key with a warning.
+- New host-backed writes use the platform `enc:` secret format.
+- Existing legacy `v1:` payloads remain readable through the previous AES-256-GCM key path.
+- If the host security service is not present, production still requires `INTEGRATION_ENCRYPTION_KEY`; development/test may use a deterministic fallback key with a warning.
 - Public callers receive fingerprints, not plaintext.
-
-The plugin does not depend on `context.services.security` yet because the runtime path currently does not inject that service despite the type declaration. This gap is documented in `SPIKE_NOTES.md`.
 
 ### Database
 

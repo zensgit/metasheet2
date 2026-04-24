@@ -6,19 +6,20 @@
 // Wraps external-system credentials (K3 WISE WebAPI passwords, SQL Server
 // connection strings, PLM tokens, etc.) in AES-256-GCM envelope encryption.
 //
-// Runtime note (see SPIKE_NOTES.md): the documented `context.services.security`
-// API is declared in types/plugin.ts but NOT wired at runtime
-// (src/index.ts:1351-1356 only binds notification / automationRegistry /
-// rbacProvisioning / platformAppInstances). We therefore keep this module
-// self-contained and depend only on Node's built-in `crypto`.
+// Runtime note (see SPIKE_NOTES.md): the host now injects
+// `context.services.security` into the active CJS plugin runtime. New
+// credentials should use that host-backed `enc:` format. This module still
+// keeps the legacy `v1:` implementation so existing encrypted values remain
+// readable during migration.
 //
 // Key provisioning:
 //   env INTEGRATION_ENCRYPTION_KEY = 64-hex-char (32-byte) or 44-b64-char key
 //   production (NODE_ENV=production): key required — startup refuses otherwise
 //   development / test: falls back to a deterministic dev key with a warning
 //
-// Ciphertext format (version-tagged so we can rotate in place later):
-//   "v1:<iv_b64>:<tag_b64>:<data_b64>"
+// Ciphertext formats:
+//   new host-backed values: "enc:<platform ciphertext>"
+//   legacy plugin values:  "v1:<iv_b64>:<tag_b64>:<data_b64>"
 // ---------------------------------------------------------------------------
 
 const crypto = require('node:crypto')
@@ -27,6 +28,7 @@ const ALGORITHM = 'aes-256-gcm'
 const KEY_BYTES = 32
 const IV_BYTES = 12
 const VERSION_TAG = 'v1'
+const HOST_PREFIX = 'enc:'
 const ENV_KEY_NAME = 'INTEGRATION_ENCRYPTION_KEY'
 
 // Dev-only deterministic fallback. 32 bytes. Do NOT ship to production.
@@ -106,19 +108,88 @@ function decrypt(ciphertext, key) {
   return decrypted.toString('utf8')
 }
 
+function isLegacyCiphertext(value) {
+  return typeof value === 'string' && value.startsWith(`${VERSION_TAG}:`)
+}
+
+function isHostCiphertext(value) {
+  return typeof value === 'string' && value.startsWith(HOST_PREFIX)
+}
+
+function isSecurityService(candidate) {
+  return Boolean(
+    candidate &&
+    typeof candidate.encrypt === 'function' &&
+    typeof candidate.decrypt === 'function',
+  )
+}
+
+async function hashWithSecurity(security, value) {
+  if (security && typeof security.hash === 'function') {
+    return security.hash(value)
+  }
+  return crypto.createHash('sha256').update(value).digest('hex')
+}
+
+function createLegacyKeyResolver({ logger } = {}) {
+  let resolved = null
+  return () => {
+    if (!resolved) resolved = resolveKey({ logger })
+    return resolved
+  }
+}
+
 /**
- * Create a credential store bound to a concrete key. Exposed to other plugin
- * modules during activate() so they never need to handle raw keys directly.
+ * Create a credential store exposed to other plugin modules during activate().
+ *
+ * With a host security service, new writes use the platform `enc:` format while
+ * legacy `v1:` payloads remain readable via the old key path. Without a host
+ * service, the store preserves the original self-contained `v1:` behavior.
  */
-function createCredentialStore({ logger } = {}) {
+function createCredentialStore({ logger, security } = {}) {
+  if (security !== undefined && !isSecurityService(security)) {
+    throw new Error('createCredentialStore: security service must expose encrypt() and decrypt()')
+  }
+
+  if (isSecurityService(security)) {
+    const resolveLegacyKey = createLegacyKeyResolver({ logger })
+    return {
+      source: 'host-security',
+      format: 'enc',
+      async encrypt(plaintext) {
+        if (typeof plaintext !== 'string') {
+          throw new TypeError('encrypt: plaintext must be a string')
+        }
+        return security.encrypt(plaintext)
+      },
+      async decrypt(ciphertext) {
+        if (typeof ciphertext !== 'string') {
+          throw new TypeError('decrypt: ciphertext must be a string')
+        }
+        if (isLegacyCiphertext(ciphertext)) {
+          return decrypt(ciphertext, resolveLegacyKey().key)
+        }
+        return security.decrypt(ciphertext)
+      },
+      async fingerprint(ciphertext) {
+        if (typeof ciphertext !== 'string') {
+          throw new TypeError('fingerprint: ciphertext must be a string')
+        }
+        const digest = await hashWithSecurity(security, ciphertext)
+        return String(digest).slice(0, 16)
+      },
+    }
+  }
+
   const { key, source } = resolveKey({ logger })
 
   return {
     source, // 'env' | 'dev-fallback' — for observability only
-    encrypt(plaintext) {
+    format: 'v1',
+    async encrypt(plaintext) {
       return encrypt(plaintext, key)
     },
-    decrypt(ciphertext) {
+    async decrypt(ciphertext) {
       return decrypt(ciphertext, key)
     },
     /**
@@ -127,7 +198,7 @@ function createCredentialStore({ logger } = {}) {
      * correlation. Callers that need to hand a value back to a UI should use
      * this instead of `decrypt`.
      */
-    fingerprint(ciphertext) {
+    async fingerprint(ciphertext) {
       // HMAC-SHA256 truncated; key-scoped so fingerprints are stable per
       // deployment but not reversible outside it.
       const h = crypto.createHmac('sha256', key).update(ciphertext).digest('hex')
@@ -139,5 +210,13 @@ function createCredentialStore({ logger } = {}) {
 module.exports = {
   createCredentialStore,
   // Exposed for tests only — do not import from other plugin modules.
-  __internals: { encrypt, decrypt, decodeKey, DEV_FALLBACK_KEY_HEX, ENV_KEY_NAME },
+  __internals: {
+    encrypt,
+    decrypt,
+    decodeKey,
+    isHostCiphertext,
+    isLegacyCiphertext,
+    DEV_FALLBACK_KEY_HEX,
+    ENV_KEY_NAME,
+  },
 }

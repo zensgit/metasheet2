@@ -16,9 +16,11 @@
 
 const PLUGIN_ID = 'plugin-integration-core'
 const COMMUNICATION_NAMESPACE = 'integration-core'
+const { createCredentialStore } = require('./lib/credential-store.cjs')
 
 const registeredRoutes = []
 let activeContext = null
+let credentialStore = null
 
 function buildHealthPayload() {
   return {
@@ -42,6 +44,9 @@ function buildCommunicationApi() {
         version: '0.1.0',
         milestone: 'M0-spike',
         routesRegistered: registeredRoutes.length,
+        credentialStore: credentialStore
+          ? { source: credentialStore.source, format: credentialStore.format }
+          : null,
       }
     },
   }
@@ -51,6 +56,10 @@ module.exports = {
   async activate(context) {
     activeContext = context
     const logger = context.logger || console
+    credentialStore = createCredentialStore({
+      logger,
+      security: context.services && context.services.security,
+    })
 
     // --- HTTP routes ------------------------------------------------------
     context.api.http.addRoute('GET', '/api/integration/health', async (_req, res) => {
@@ -71,6 +80,7 @@ module.exports = {
     // helper used above; host is expected to drop the router on deactivate.
     // We clear local state here so a re-activation starts clean.
     registeredRoutes.length = 0
+    credentialStore = null
     activeContext = null
     logger.info(`[${PLUGIN_ID}] deactivated`)
   },
