@@ -44,6 +44,7 @@
 - [ ] Fill the unauthorized DingTalk manual validation target.
 - [ ] Fill the no-email DingTalk manual validation target.
 - [x] Confirm the env file permission is private and no secret values appear in tracked files.
+- [x] Run the offline final-input status checker to produce a redacted blocked/ready snapshot before release-readiness.
 
 ```bash
 node scripts/ops/dingtalk-p4-smoke-session.mjs \
@@ -75,6 +76,13 @@ Latest blocker handoff result:
 - The backend container was observed as host-local on `127.0.0.1:8900`; if using that backend address, run final smoke from the 142 host or first verify a routable API base from the operator machine.
 - Current permissions do not allow additional external connectivity checks, so endpoint reachability is not claimed as verified in this slice.
 - Remaining required human/private inputs are two real DingTalk robot webhooks, a second DingTalk-bound unauthorized user, and a no-email DingTalk external identity.
+
+Latest final-input status result:
+
+- Added an offline checker at `scripts/ops/dingtalk-p4-final-input-status.mjs`.
+- Generated a redacted current snapshot under ignored output with `--allow-blocked`.
+- Current status is `blocked`, as expected, because group A/B webhooks, unauthorized target, and no-email external id are not yet present.
+- The checker can be run without `--allow-blocked` after final inputs are supplied; a zero exit code then becomes the precondition for release-readiness and real smoke.
 
 ## P2 Non-Sandbox Regression Gate
 

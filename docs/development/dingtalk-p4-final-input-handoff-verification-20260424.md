@@ -16,6 +16,8 @@ rg -n "DINGTALK_P4_GROUP_A_WEBHOOK|DINGTALK_P4_UNAUTHORIZED_USER_ID|dingtalk-p4-
   docs/development/dingtalk-p4-final-input-handoff-20260424.md \
   docs/development/dingtalk-p4-final-input-handoff-development-20260424.md \
   docs/development/dingtalk-p4-final-input-handoff-verification-20260424.md
+node --check scripts/ops/dingtalk-p4-final-input-status.mjs
+node --test scripts/ops/dingtalk-p4-final-input-status.test.mjs
 git diff --check
 ```
 
@@ -24,6 +26,8 @@ git diff --check
 - Local branch had been ahead by one commit before this slice; `8205f0d10` was pushed successfully.
 - Handoff document includes final input collection, safe setting commands, readiness command, smoke launch command, stop conditions, and closeout command.
 - `rg` found the required handoff sections and command references.
+- Offline final-input status checker syntax passed.
+- Offline final-input status checker tests passed 4/4.
 - `git diff --check` passed.
 
 ## Non-Run Items

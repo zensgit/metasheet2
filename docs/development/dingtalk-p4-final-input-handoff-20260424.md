@@ -49,6 +49,17 @@ If a robot has no signing secret, leave its secret variable empty and use `--uns
 
 ## Readiness Command
 
+First run the offline final-input status check. This does not call 142 or DingTalk and only emits redacted reports:
+
+```bash
+node scripts/ops/dingtalk-p4-final-input-status.mjs \
+  --env-file output/dingtalk-p4-remote-smoke-session/dingtalk-p4.env \
+  --output-json output/dingtalk-p4-final-input-status/142-final-inputs/summary.json \
+  --output-md output/dingtalk-p4-final-input-status/142-final-inputs/summary.md
+```
+
+Then run the release-readiness gate:
+
 ```bash
 node scripts/ops/dingtalk-p4-release-readiness.mjs \
   --p4-env-file output/dingtalk-p4-remote-smoke-session/dingtalk-p4.env \
