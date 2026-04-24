@@ -169,7 +169,18 @@ node scripts/ops/dingtalk-p4-smoke-status.mjs \
 
 The status report writes `smoke-status.json`, `smoke-status.md`, and `smoke-todo.md`. It shows whether the run is blocked, waiting for manual evidence, ready to finalize, waiting for handoff, or release-ready.
 
-Use `smoke-todo.md` as the operator checklist for the remaining remote smoke evidence. It maps every required P4 check to a checked or unchecked item, includes per-check recorder command templates for manual DingTalk-client/admin evidence, and keeps secrets redacted.
+Use `smoke-todo.md` as the operator checklist for the remaining remote smoke evidence. It groups the remaining work into ordered execution phases, highlights the current focus step, includes per-check recorder command templates for manual DingTalk-client/admin evidence, and keeps secrets redacted.
+
+`smoke-status.md` now also includes:
+
+- an ordered execution-plan view for the remaining remote smoke phases;
+- a `Top-level Remote Smoke Steps` table that maps the checklist Smoke 1-7 steps to check IDs, current status, and sanitized evidence snapshots;
+- the current next action for each top-level step without exposing webhook tokens, secrets, admin tokens, or public form tokens.
+
+For checklist alignment:
+
+- `Smoke 1` maps to both `create-table-form` and `set-form-dingtalk-granted`.
+- Delivery-history proof remains one combined check ID, `delivery-history-group-person`, even though the checklist calls out group and person history at different steps.
 
 To write the TODO file to a custom path:
 

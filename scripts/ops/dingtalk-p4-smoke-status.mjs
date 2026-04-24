@@ -11,53 +11,107 @@ const REQUIRED_CHECKS = [
     label: 'Create a table and form view',
     todo: 'Remote smoke: create a table and form view',
     manual: false,
+    docSection: 'Smoke 1',
+    topLevelLabel: 'Create table and form view',
   },
   {
     id: 'bind-two-dingtalk-groups',
     label: 'Bind at least two DingTalk groups',
     todo: 'Remote smoke: bind at least two DingTalk groups to the table',
     manual: false,
+    docSection: 'Smoke 2',
+    topLevelLabel: 'Bind two DingTalk groups',
   },
   {
     id: 'set-form-dingtalk-granted',
     label: 'Set the form to dingtalk_granted',
     todo: 'Remote smoke: set the form to `dingtalk_granted`',
     manual: false,
+    docSection: 'Smoke 1',
+    topLevelLabel: 'Set dingtalk_granted access',
   },
   {
     id: 'send-group-message-form-link',
     label: 'Send a DingTalk group message with a form link',
     todo: 'Remote smoke: send a group message with a form link',
     manual: true,
+    docSection: 'Smoke 3',
+    topLevelLabel: 'Send group message with form link',
   },
   {
     id: 'authorized-user-submit',
     label: 'Verify an authorized user can open and submit',
     todo: 'Remote smoke: verify an authorized user can open and submit',
     manual: true,
+    docSection: 'Smoke 4',
+    topLevelLabel: 'Authorized user submit',
   },
   {
     id: 'unauthorized-user-denied',
     label: 'Verify an unauthorized user cannot submit and no record is inserted',
     todo: 'Remote smoke: verify an unauthorized user cannot submit and no record is inserted',
     manual: true,
+    docSection: 'Smoke 5',
+    topLevelLabel: 'Unauthorized user denied',
   },
   {
     id: 'delivery-history-group-person',
     label: 'Verify group and person delivery history',
     todo: 'Remote smoke: verify delivery history records group and person sends',
     manual: false,
+    docSection: 'Smoke 6',
+    topLevelLabel: 'Delivery history',
   },
   {
     id: 'no-email-user-create-bind',
     label: 'Create and bind a no-email DingTalk-synced local user',
     todo: 'Checklist: no-email account creation and binding',
     manual: true,
+    docSection: 'Smoke 7',
+    topLevelLabel: 'No-email account create/bind',
   },
 ]
 
 const REQUIRED_CHECK_BY_ID = new Map(REQUIRED_CHECKS.map((check) => [check.id, check]))
 const VALID_STATUSES = new Set(['pass', 'fail', 'skipped', 'pending', 'missing'])
+const REMOTE_SMOKE_PHASES = [
+  {
+    id: 'bootstrap',
+    label: 'Bootstrap remote smoke workspace',
+    summary: 'Create the disposable table/form workspace, bind DingTalk groups, and enable dingtalk_granted access.',
+    checkIds: [
+      'create-table-form',
+      'bind-two-dingtalk-groups',
+      'set-form-dingtalk-granted',
+    ],
+  },
+  {
+    id: 'group-message',
+    label: 'Capture DingTalk group message evidence',
+    summary: 'Prove the real DingTalk group message is visible and the protected form link is usable from the client.',
+    checkIds: [
+      'send-group-message-form-link',
+    ],
+  },
+  {
+    id: 'client-access',
+    label: 'Validate protected form access',
+    summary: 'Prove the authorized user can submit and the unauthorized user is blocked with zero record insert.',
+    checkIds: [
+      'authorized-user-submit',
+      'unauthorized-user-denied',
+    ],
+  },
+  {
+    id: 'delivery-admin',
+    label: 'Validate delivery history and no-email admin flow',
+    summary: 'Confirm group/person delivery history and the admin-side no-email DingTalk account bind flow.',
+    checkIds: [
+      'delivery-history-group-person',
+      'no-email-user-create-bind',
+    ],
+  },
+]
 
 function printHelp() {
   console.log(`Usage: node scripts/ops/dingtalk-p4-smoke-status.mjs [options]
@@ -258,6 +312,82 @@ function manualIssuesById(compiledSummary) {
   return issues
 }
 
+function compactSnapshot(value) {
+  if (value === null || value === undefined || value === '') return null
+  if (Array.isArray(value)) {
+    const entries = value
+      .map((entry) => compactSnapshot(entry))
+      .filter((entry) => entry !== null)
+    return entries.length > 0 ? entries : null
+  }
+  if (typeof value === 'object') {
+    const next = {}
+    for (const [key, entry] of Object.entries(value)) {
+      const compacted = compactSnapshot(entry)
+      if (compacted !== null) next[key] = compacted
+    }
+    return Object.keys(next).length > 0 ? next : null
+  }
+  return value
+}
+
+function evidenceSnapshotForCheck(checkId, evidence) {
+  if (!evidence || typeof evidence !== 'object') return null
+  switch (checkId) {
+    case 'create-table-form':
+      return compactSnapshot({
+        baseId: evidence.baseId,
+        sheetId: evidence.sheetId,
+        fieldId: evidence.fieldId,
+        formViewId: evidence.formViewId,
+      })
+    case 'bind-two-dingtalk-groups':
+      return compactSnapshot({
+        destinationIds: evidence.destinationIds,
+        manualTestDeliveryCounts: evidence.manualTestDeliveryCounts,
+      })
+    case 'set-form-dingtalk-granted':
+      return compactSnapshot({
+        accessMode: evidence.accessMode,
+        formShareStatus: evidence.formShareStatus,
+        allowedUserCount: evidence.allowedUserCount,
+        allowedMemberGroupCount: evidence.allowedMemberGroupCount,
+      })
+    case 'send-group-message-form-link':
+      return compactSnapshot({
+        groupRuleId: evidence.apiBootstrap?.groupRuleId,
+        destinationIds: evidence.apiBootstrap?.destinationIds,
+        groupRuleDeliveryCount: evidence.apiBootstrap?.groupRuleDeliveryCount,
+      })
+    case 'authorized-user-submit':
+      return compactSnapshot({
+        authorizedUserId: evidence.manualTarget?.authorizedUserId,
+      })
+    case 'unauthorized-user-denied':
+      return compactSnapshot({
+        unauthorizedUserId: evidence.manualTarget?.unauthorizedUserId,
+        submitBlocked: evidence.submitBlocked,
+        recordInsertDelta: evidence.recordInsertDelta,
+        blockedReason: evidence.blockedReason,
+      })
+    case 'delivery-history-group-person':
+      return compactSnapshot({
+        groupRuleDeliveryCount: evidence.groupRuleDeliveryCount,
+        personRuleDeliveryCount: evidence.personRuleDeliveryCount,
+        personUserCount: evidence.personUserCount,
+      })
+    case 'no-email-user-create-bind':
+      return compactSnapshot({
+        targetDingTalkExternalId: evidence.adminEvidence?.targetDingTalkExternalId,
+        createdLocalUserId: evidence.adminEvidence?.createdLocalUserId,
+        boundDingTalkExternalId: evidence.adminEvidence?.boundDingTalkExternalId,
+        accountLinkedAfterRefresh: evidence.adminEvidence?.accountLinkedAfterRefresh,
+      })
+    default:
+      return null
+  }
+}
+
 function buildRequiredChecks(evidence, compiledSummary) {
   const evidenceChecks = checksFromEvidence(evidence)
   const compiledChecks = checksFromCompiled(compiledSummary)
@@ -273,14 +403,19 @@ function buildRequiredChecks(evidence, compiledSummary) {
         ? redactString(compiledCheck.evidence.source)
         : ''
     const issues = issueMap.get(required.id) ?? []
+    const preferredEvidence = evidenceCheck?.evidence ?? compiledCheck?.evidence ?? null
     return {
       id: required.id,
       label: required.label,
       todo: required.todo,
       manual: required.manual,
+      docSection: required.docSection,
+      topLevelLabel: required.topLevelLabel,
       status,
       source,
+      evidenceSnapshot: evidenceSnapshotForCheck(required.id, preferredEvidence),
       manualEvidenceIssueCount: issues.length,
+      firstIssueMessage: issues[0]?.message ?? '',
       issues,
     }
   })
@@ -414,6 +549,10 @@ function manualSourceForCheck(check) {
   return check.id === 'no-email-user-create-bind' ? 'manual-admin' : 'manual-client'
 }
 
+function artifactDirForCheck(checkId) {
+  return `workspace/artifacts/${checkId}/`
+}
+
 function evidenceRecordCommandForCheck(opts, check) {
   if (!opts.sessionDir || !check.manual) return ''
   const artifactRef = check.id === 'no-email-user-create-bind'
@@ -483,6 +622,7 @@ function buildRemoteSmokeTodos(requiredChecks, opts) {
       completed,
       issueCount: check.manualEvidenceIssueCount,
       nextAction,
+      artifactDir: check.manual ? artifactDirForCheck(check.id) : '',
       evidenceRecordCommand: completed ? '' : evidenceRecordCommandForCheck(opts, check),
     }
   })
@@ -492,6 +632,83 @@ function buildRemoteSmokeTodos(requiredChecks, opts) {
     completed: items.filter((item) => item.completed).length,
     remaining: items.filter((item) => !item.completed).length,
     items,
+  }
+}
+
+function buildExecutionPlan(remoteSmokeTodos) {
+  const itemsById = new Map(remoteSmokeTodos.items.map((item) => [item.id, item]))
+  let activePhaseAssigned = false
+
+  const phases = REMOTE_SMOKE_PHASES.map((phase, index) => {
+    const steps = phase.checkIds.map((checkId) => {
+      const item = itemsById.get(checkId) ?? {
+        id: checkId,
+        label: REQUIRED_CHECK_BY_ID.get(checkId)?.label ?? checkId,
+        todo: REQUIRED_CHECK_BY_ID.get(checkId)?.todo ?? checkId,
+        status: 'missing',
+        manual: REQUIRED_CHECK_BY_ID.get(checkId)?.manual ?? false,
+        completed: false,
+        nextAction: 'inspect smoke evidence',
+        artifactDir: '',
+        evidenceRecordCommand: '',
+      }
+      return {
+        id: item.id,
+        label: item.label,
+        todo: item.todo,
+        status: item.status,
+        manual: item.manual,
+        completed: item.completed,
+        nextAction: item.nextAction,
+        artifactDir: item.artifactDir,
+        evidenceRecordCommand: item.evidenceRecordCommand,
+      }
+    })
+    const completedChecks = steps.filter((step) => step.completed).length
+    const remainingChecks = steps.length - completedChecks
+    let status = 'pending'
+    if (remainingChecks === 0) {
+      status = 'done'
+    } else if (!activePhaseAssigned) {
+      status = 'in_progress'
+      activePhaseAssigned = true
+    }
+    return {
+      id: phase.id,
+      label: phase.label,
+      summary: phase.summary,
+      order: index + 1,
+      status,
+      totalChecks: steps.length,
+      completedChecks,
+      remainingChecks,
+      steps,
+    }
+  })
+
+  const currentPhase = phases.find((phase) => phase.status === 'in_progress') ?? null
+  const currentStep = currentPhase?.steps.find((step) => !step.completed) ?? null
+
+  return {
+    totalPhases: phases.length,
+    completedPhases: phases.filter((phase) => phase.status === 'done').length,
+    remainingPhases: phases.filter((phase) => phase.status !== 'done').length,
+    activePhaseId: currentPhase?.id ?? '',
+    phases,
+    currentFocus: currentPhase && currentStep
+      ? {
+          phaseId: currentPhase.id,
+          phaseLabel: currentPhase.label,
+          checkId: currentStep.id,
+          label: currentStep.label,
+          todo: currentStep.todo,
+          status: currentStep.status,
+          manual: currentStep.manual,
+          nextAction: currentStep.nextAction,
+          artifactDir: currentStep.artifactDir,
+          evidenceRecordCommand: currentStep.evidenceRecordCommand,
+        }
+      : null,
   }
 }
 
@@ -538,6 +755,8 @@ function buildSummary(opts) {
   const requiredChecks = buildRequiredChecks(evidence, compiledSummary)
   const gaps = buildGaps(requiredChecks)
   const handoff = summarizeHandoff(handoffSummary, publishCheck)
+  const remoteSmokeTodos = buildRemoteSmokeTodos(requiredChecks, opts)
+  const executionPlan = buildExecutionPlan(remoteSmokeTodos)
   const overallStatus = computeOverallStatus({
     sessionSummary,
     compiledSummary,
@@ -572,7 +791,8 @@ function buildSummary(opts) {
     },
     requiredChecks,
     gaps,
-    remoteSmokeTodos: buildRemoteSmokeTodos(requiredChecks, opts),
+    remoteSmokeTodos,
+    executionPlan,
     handoff,
     nextCommands: [],
   }
@@ -590,11 +810,30 @@ function renderMarkdown(summary) {
   const todoRows = summary.remoteSmokeTodos.items.map((item) => {
     return `| ${item.completed ? 'done' : 'todo'} | \`${markdownEscape(item.id)}\` | ${markdownEscape(item.status)} | ${item.manual ? 'yes' : 'no'} | ${markdownEscape(item.todo)} |`
   })
+  const todoById = new Map(summary.remoteSmokeTodos.items.map((item) => [item.id, item]))
+  const phaseRows = summary.executionPlan.phases.map((phase) => {
+    return `| ${phase.order}. ${markdownEscape(phase.label)} | ${markdownEscape(phase.status)} | ${phase.completedChecks}/${phase.totalChecks} | ${markdownEscape(phase.summary)} |`
+  })
+  const topLevelRows = summary.requiredChecks.map((check) => {
+    const todo = todoById.get(check.id)
+    const snapshot = check.evidenceSnapshot ? JSON.stringify(sanitizeValue(check.evidenceSnapshot)) : ''
+    return `| ${markdownEscape(check.docSection)} | \`${markdownEscape(check.id)}\` | ${markdownEscape(check.status)} | ${markdownEscape(snapshot)} | ${markdownEscape(todo?.nextAction ?? check.firstIssueMessage ?? '')} |`
+  })
   const gaps = summary.gaps.length
     ? summary.gaps.map((gap) => `- \`${gap.id}\`: ${markdownEscape(gap.nextAction)} (${gap.status})`).join('\n')
     : '- None'
   const commands = summary.nextCommands.length
     ? summary.nextCommands.map((command) => `- \`${markdownEscape(command)}\``).join('\n')
+    : '- None'
+  const currentFocus = summary.executionPlan.currentFocus
+    ? [
+        `- Phase: **${markdownEscape(summary.executionPlan.currentFocus.phaseLabel)}**`,
+        `- Check: \`${markdownEscape(summary.executionPlan.currentFocus.checkId)}\` - ${markdownEscape(summary.executionPlan.currentFocus.todo)}`,
+        `- Next: ${markdownEscape(summary.executionPlan.currentFocus.nextAction)}`,
+        ...(summary.executionPlan.currentFocus.artifactDir
+          ? [`- Artifacts: \`${markdownEscape(summary.executionPlan.currentFocus.artifactDir)}\``]
+          : []),
+      ].join('\n')
     : '- None'
 
   return `# DingTalk P4 Smoke Status
@@ -629,6 +868,22 @@ Progress: **${summary.remoteSmokeTodos.completed}/${summary.remoteSmokeTodos.tot
 | --- | --- | --- | --- | --- |
 ${todoRows.join('\n')}
 
+## Ordered Execution Plan
+
+Current focus:
+
+${currentFocus}
+
+| Phase | Status | Progress | Scope |
+| --- | --- | --- | --- |
+${phaseRows.join('\n')}
+
+## Top-level Remote Smoke Steps
+
+| Doc | Check | Status | Evidence Snapshot | Next |
+| --- | --- | --- | --- | --- |
+${topLevelRows.join('\n')}
+
 ## Gaps
 
 ${gaps}
@@ -645,9 +900,19 @@ ${commands}
 }
 
 function renderTodoMarkdown(summary) {
-  const checklist = summary.remoteSmokeTodos.items.map((item) => {
-    const marker = item.completed ? 'x' : ' '
-    return `- [${marker}] \`${markdownEscape(item.id)}\` - ${markdownEscape(item.todo)}. Status: ${markdownEscape(item.status)}. Next: ${markdownEscape(item.nextAction)}.`
+  const phaseSections = summary.executionPlan.phases.map((phase) => {
+    const checklist = phase.steps.map((item) => {
+      const marker = item.completed ? 'x' : ' '
+      const artifactLine = item.artifactDir ? ` Artifacts: \`${markdownEscape(item.artifactDir)}\`.` : ''
+      return `- [${marker}] \`${markdownEscape(item.id)}\` - ${markdownEscape(item.todo)}. Status: ${markdownEscape(item.status)}. Next: ${markdownEscape(item.nextAction)}.${artifactLine}`
+    })
+    return `### ${phase.order}. ${markdownEscape(phase.label)}
+
+Status: **${markdownEscape(phase.status)}**. Progress: **${phase.completedChecks}/${phase.totalChecks}**.
+
+${markdownEscape(phase.summary)}
+
+${checklist.join('\n')}`
   })
   const commands = summary.remoteSmokeTodos.items
     .filter((item) => !item.completed && item.evidenceRecordCommand)
@@ -655,6 +920,19 @@ function renderTodoMarkdown(summary) {
   const nextCommands = summary.nextCommands.length
     ? summary.nextCommands.map((command) => `- \`${markdownEscape(command)}\``)
     : ['- None']
+  const currentFocus = summary.executionPlan.currentFocus
+    ? [
+        `- Phase: **${markdownEscape(summary.executionPlan.currentFocus.phaseLabel)}**`,
+        `- Check: \`${markdownEscape(summary.executionPlan.currentFocus.checkId)}\` - ${markdownEscape(summary.executionPlan.currentFocus.todo)}`,
+        `- Next: ${markdownEscape(summary.executionPlan.currentFocus.nextAction)}`,
+        ...(summary.executionPlan.currentFocus.artifactDir
+          ? [`- Artifacts: \`${markdownEscape(summary.executionPlan.currentFocus.artifactDir)}\``]
+          : []),
+        ...(summary.executionPlan.currentFocus.evidenceRecordCommand
+          ? [`- Recorder: \`${markdownEscape(summary.executionPlan.currentFocus.evidenceRecordCommand)}\``]
+          : []),
+      ].join('\n')
+    : '- None'
 
   return `# DingTalk P4 Remote Smoke TODO
 
@@ -664,9 +942,13 @@ Overall status: **${summary.overallStatus}**
 
 Progress: **${summary.remoteSmokeTodos.completed}/${summary.remoteSmokeTodos.total}** complete, **${summary.remoteSmokeTodos.remaining}** remaining.
 
-## Checklist
+## Current Focus
 
-${checklist.join('\n')}
+${currentFocus}
+
+## Ordered Phase Plan
+
+${phaseSections.join('\n\n')}
 
 ## Evidence Recorder Commands
 

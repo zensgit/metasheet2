@@ -97,6 +97,7 @@
 - [x] Harden P4 packet export and publish validation so reused packet directories cannot carry stale unregistered evidence.
 - [x] Harden P4 closeout guidance so generated commands honor configured packet/docs paths and stale closeout docs/summaries are cleared.
 - [x] Harden P4 smoke-session reruns so reused session directories cannot carry stale workspace/compiled artifacts or hardcoded packet next commands.
+- [x] Add a phased remote-smoke execution plan and check-level evidence snapshots to generated smoke status/TODO outputs.
 - [ ] Remote smoke: create a table and form view.
 - [ ] Remote smoke: bind at least two DingTalk groups to the table.
 - [ ] Remote smoke: set the form to `dingtalk_granted`.
