@@ -1,0 +1,15 @@
+{
+  "name": "plugin-integration-core",
+  "version": "0.1.0",
+  "description": "PLM/ERP integration pipeline core (system plugin).",
+  "main": "index.cjs",
+  "license": "UNLICENSED",
+  "private": true,
+  "scripts": {
+    "test": "node __tests__/plugin-runtime-smoke.test.cjs && node __tests__/credential-store.test.cjs && node __tests__/db.test.cjs && node __tests__/staging-installer.test.cjs",
+    "test:runtime": "node __tests__/plugin-runtime-smoke.test.cjs",
+    "test:credential": "node __tests__/credential-store.test.cjs",
+    "test:db": "node __tests__/db.test.cjs",
+    "test:staging": "node __tests__/staging-installer.test.cjs"
+  }
+}
