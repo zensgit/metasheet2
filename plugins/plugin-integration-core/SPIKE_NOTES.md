@@ -1,8 +1,8 @@
 # M0 Spike Findings — plugin-integration-core
 
-> Status: ✅ Spike complete. Runtime path confirmed. Runtime teardown gaps #1/#2 have a host-side follow-up.
+> Status: ✅ Spike complete. Runtime path confirmed. Runtime teardown gaps #1/#2/#3 have host-side follow-ups.
 > Date: 2026-04-24
-> PR #0 review: all 5 issues resolved in-file; 1 kernel-side service gap remains (see below).
+> PR #0 review: all 5 issues resolved in-file; kernel-side runtime gaps are now tracked as fixed host capabilities.
 
 ---
 
@@ -20,13 +20,13 @@ Express stack entries are still not physically removed, but they are no longer b
 
 The runtime now records communication namespaces by owning plugin. Deactivation and activation failure delete owned namespaces from the host `pluginApis` map. The plugin context also exposes optional `communication.unregister(name)` for explicit cleanup, but plugins do not need to rely on it for host safety.
 
-### 3. `services.security.encrypt/decrypt` declared in types but not wired — still open
+### 3. `services.security.encrypt/decrypt` declared in types but not wired — fixed by host runtime adapter
 
-`packages/core-backend/src/types/plugin.ts` declares `PluginServices.security` (and several other services) but the runtime factory at `src/index.ts:1351-1356` only injects `notification / automationRegistry / rbacProvisioning / platformAppInstances` and casts the result with `as unknown as PluginServices`. Any plugin written against the type declaration would silently get `undefined` at runtime.
+`packages/core-backend/src/types/plugin.ts` declares `PluginServices.security` (and several other services). The active CJS runtime path now injects a host-backed `PluginRuntimeSecurityService` into `context.services.security` instead of leaving the typed property undefined.
 
-**Workaround in this plugin**: `lib/credential-store.cjs` is self-contained (Node `crypto`, `INTEGRATION_ENCRYPTION_KEY` env) and does not rely on `services.security`.
+The adapter intentionally reuses `packages/core-backend/src/security/encrypted-secrets.ts`, so plugin credentials can share the platform `enc:` AES-GCM secret format. It also exposes hash/verify/token/audit/rate-limit/threat-scan helpers. Sandbox code execution remains explicitly unavailable in this runtime path rather than pretending to provide full VM isolation.
 
-**Scope of fix**: instantiate a security service backed by `packages/core-backend/src/security/encrypted-secrets.ts` and add it to the `services` object at `src/index.ts:1356`. Then credential-store can migrate.
+**Current plugin state**: `lib/credential-store.cjs` remains self-contained (`v1:` format) for compatibility. M1 can migrate to `context.services.security.encrypt/decrypt` behind a backward-compatible reader that still accepts existing `v1:` payloads.
 
 ---
 
