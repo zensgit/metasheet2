@@ -39,8 +39,10 @@
 - [x] Fill `DINGTALK_P4_AUTH_TOKEN` with an authorized admin/API token from the approved private secret path.
 - [ ] Fill two real DingTalk group robot webhook URLs.
 - [ ] Fill optional DingTalk robot `SEC...` secrets if the robots require signing.
-- [ ] Fill allowed local user IDs and person delivery target IDs.
-- [ ] Fill authorized, unauthorized, and no-email DingTalk validation target IDs.
+- [x] Fill allowed local user IDs and person delivery target IDs.
+- [x] Fill the authorized DingTalk manual validation target.
+- [ ] Fill the unauthorized DingTalk manual validation target.
+- [ ] Fill the no-email DingTalk manual validation target.
 - [x] Confirm the env file permission is private and no secret values appear in tracked files.
 
 ```bash
@@ -57,6 +59,14 @@ Latest local prep result:
 - Token readiness result: `authTokenPresent: true`.
 - Readiness still fails, as expected, until private webhooks, allowlist/person inputs, and manual targets are filled.
 - Remaining failed readiness checks: `dingtalk_p4_group_a_webhook`, `group-a-webhook-shape`, `dingtalk_p4_group_b_webhook`, `group-b-webhook-shape`, `allowlist-present`, `person-smoke-input`, `manual-targets-declared`.
+
+Latest user-target readiness result:
+
+- 142 currently has one active DingTalk-bound and DingTalk-granted local user candidate.
+- Filled that user id into `DINGTALK_P4_ALLOWED_USER_IDS`, `DINGTALK_P4_PERSON_USER_IDS`, and `DINGTALK_P4_AUTHORIZED_USER_ID`.
+- Readiness now reports `allowedUserCount: 1`, `personUserCount: 1`, and an authorized manual target.
+- Remaining failed readiness checks: `dingtalk_p4_group_a_webhook`, `group-a-webhook-shape`, `dingtalk_p4_group_b_webhook`, `group-b-webhook-shape`, `manual-targets-declared`.
+- 142 did not have a second DingTalk-bound local user or a no-email DingTalk external identity available in the queried data, so unauthorized/no-email targets remain manual setup blockers.
 
 ## P2 Non-Sandbox Regression Gate
 
