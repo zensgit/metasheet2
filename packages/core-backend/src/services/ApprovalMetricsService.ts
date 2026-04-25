@@ -101,6 +101,17 @@ export interface MetricsReport {
   breachedTemplates: MetricsTopTemplateRow[]
 }
 
+export interface ApprovalBreachContext {
+  instanceId: string
+  templateId: string | null
+  templateName: string | null
+  currentNodeKey: string | null
+  requesterName: string | null
+  startedAt: string
+  slaHours: number | null
+  breachedAt: string | null
+}
+
 export interface MetricsSummaryQuery {
   tenantId?: string
   since?: Date | string
@@ -539,6 +550,67 @@ export class ApprovalMetricsService {
       [tenantId, limit],
     )
     return result.rows.map((row) => ({ ...row, node_breakdown: toNodeBreakdown(row.node_breakdown) }))
+  }
+
+  /**
+   * Wave 2 WP5 — breach notifier support. Returns per-instance context the
+   * notifier needs to compose human-readable messages: template name, current
+   * node, requester display name, started_at, sla_hours.
+   *
+   * The JOINs are LEFT so a missing template / instance row degrades to
+   * `null` rather than silently dropping a breach from the notification batch.
+   */
+  async listBreachContextByIds(instanceIds: string[]): Promise<ApprovalBreachContext[]> {
+    if (!Array.isArray(instanceIds) || instanceIds.length === 0) return []
+    const result = await this.query<{
+      instance_id: string
+      template_id: string | null
+      template_name: string | null
+      instance_title: string | null
+      current_node_key: string | null
+      requester_snapshot: unknown
+      started_at: string
+      sla_hours: string | number | null
+      sla_breached_at: string | null
+    }>(
+      `SELECT m.instance_id,
+              m.template_id,
+              m.started_at,
+              m.sla_hours,
+              m.sla_breached_at,
+              t.name AS template_name,
+              i.title AS instance_title,
+              i.current_node_key,
+              i.requester_snapshot
+         FROM approval_metrics m
+         LEFT JOIN approval_instances i ON i.id = m.instance_id
+         LEFT JOIN approval_templates t ON t.id = m.template_id
+        WHERE m.instance_id = ANY($1::text[])`,
+      [instanceIds],
+    )
+    return result.rows.map((row) => {
+      const requester = row.requester_snapshot && typeof row.requester_snapshot === 'object'
+        ? row.requester_snapshot as Record<string, unknown>
+        : null
+      const requesterName = typeof requester?.name === 'string' && requester.name.trim().length > 0
+        ? requester.name.trim()
+        : typeof requester?.id === 'string' && requester.id.trim().length > 0
+          ? requester.id.trim()
+          : null
+      const slaHours = row.sla_hours === null || row.sla_hours === undefined
+        ? null
+        : Number(row.sla_hours)
+      return {
+        instanceId: row.instance_id,
+        templateId: row.template_id,
+        templateName: row.template_name ?? row.instance_title ?? null,
+        currentNodeKey: row.current_node_key,
+        requesterName,
+        startedAt: row.started_at,
+        slaHours: Number.isFinite(slaHours) ? (slaHours as number) : null,
+        breachedAt: row.sla_breached_at,
+      }
+    })
   }
 
   private async mutateBreakdown(
