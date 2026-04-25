@@ -86,6 +86,10 @@ import {
   startApprovalSlaScheduler,
   stopApprovalSlaScheduler,
 } from './services/ApprovalSlaScheduler'
+import { ApprovalBreachNotifier } from './services/ApprovalBreachNotifier'
+import {
+  createApprovalBreachChannelsFromEnv,
+} from './services/breach-channels'
 import { rolesRouter } from './routes/roles'
 import { snapshotsRouter } from './routes/snapshots'
 import changeManagementRouter from './routes/change-management'
@@ -1904,9 +1908,21 @@ export class MetaSheetServer {
 
     try {
       const leaderOptions = await resolveApprovalSlaSchedulerLeaderOptions()
+      const breachNotifier = new ApprovalBreachNotifier({
+        channels: createApprovalBreachChannelsFromEnv(),
+      })
       startApprovalSlaScheduler({
         leaderOptions,
         runtime: { leaderStateGauge: promMetrics.approvalSlaSchedulerLeaderGauge },
+        onBreach: async (ids) => {
+          try {
+            await breachNotifier.notifyBreaches(ids)
+          } catch (notifyError) {
+            this.logger.warn(
+              `ApprovalBreachNotifier dispatch failed: ${notifyError instanceof Error ? notifyError.message : String(notifyError)}`,
+            )
+          }
+        },
       })
       this.logger.info('Approval SLA scheduler initialized')
     } catch (e) {
