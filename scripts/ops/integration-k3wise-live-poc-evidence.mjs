@@ -62,8 +62,16 @@ function asArray(value, field) {
   return value
 }
 
+// Customer evidence often serializes IDs (productId, runId) as numbers when
+// exported from spreadsheets that auto-coerce numeric strings. Accept finite
+// numbers and bigints as identifier text; arrays/objects/booleans/NaN/Infinity
+// still produce '' so downstream "missing required field" checks remain
+// authoritative.
 function text(value) {
-  return typeof value === 'string' ? value.trim() : ''
+  if (typeof value === 'string') return value.trim()
+  if (typeof value === 'number') return Number.isFinite(value) ? String(value) : ''
+  if (typeof value === 'bigint') return String(value)
+  return ''
 }
 
 function normalizeStatus(value) {

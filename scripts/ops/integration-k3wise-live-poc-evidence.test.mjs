@@ -145,6 +145,61 @@ test('buildEvidenceReport throws clear errors for non-coercible boolean values',
   )
 })
 
+// ----- numeric ID coercion (deferred from #1175 design doc, picked up here) -----
+
+test('buildEvidenceReport accepts numeric runId / productId from spreadsheet exports', () => {
+  const evidence = sampleEvidence()
+  evidence.materialSaveOnly.runId = 1234567890
+  evidence.bomPoC.productId = 99887766
+  const report = buildEvidenceReport(packet(), evidence)
+  assert.equal(report.decision, 'PASS')
+  assert.equal(
+    report.issues.some((issue) => issue.code === 'SAVE_ONLY_RUN_ID_REQUIRED'),
+    false,
+    'numeric runId should not raise SAVE_ONLY_RUN_ID_REQUIRED',
+  )
+  assert.equal(
+    report.issues.some((issue) => issue.code === 'BOM_PRODUCT_SCOPE_REQUIRED'),
+    false,
+    'numeric productId should not raise BOM_PRODUCT_SCOPE_REQUIRED',
+  )
+})
+
+test('buildEvidenceReport accepts bigint productId for very large external IDs', () => {
+  const evidence = sampleEvidence()
+  evidence.bomPoC.productId = 9007199254740993n
+  const report = buildEvidenceReport(packet(), evidence)
+  assert.equal(
+    report.issues.some((issue) => issue.code === 'BOM_PRODUCT_SCOPE_REQUIRED'),
+    false,
+    'bigint productId should not raise BOM_PRODUCT_SCOPE_REQUIRED',
+  )
+})
+
+test('buildEvidenceReport still rejects NaN / Infinity / object / array / null as missing IDs', () => {
+  for (const bogus of [NaN, Infinity, -Infinity, {}, [], null, undefined, true, false]) {
+    const evidence = sampleEvidence()
+    evidence.bomPoC.productId = bogus
+    const report = buildEvidenceReport(packet(), evidence)
+    assert.equal(
+      report.issues.some((issue) => issue.code === 'BOM_PRODUCT_SCOPE_REQUIRED'),
+      true,
+      `bogus productId ${JSON.stringify(bogus) ?? String(bogus)} should still raise BOM_PRODUCT_SCOPE_REQUIRED`,
+    )
+  }
+})
+
+test('buildEvidenceReport accepts numeric runId for materialSaveOnly evidence', () => {
+  const evidence = sampleEvidence()
+  evidence.materialSaveOnly.runId = 0
+  const report = buildEvidenceReport(packet(), evidence)
+  assert.equal(
+    report.issues.some((issue) => issue.code === 'SAVE_ONLY_RUN_ID_REQUIRED'),
+    false,
+    'runId of 0 (legitimate edge case) should not raise SAVE_ONLY_RUN_ID_REQUIRED',
+  )
+})
+
 test('CLI writes redacted JSON and Markdown reports', async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'integration-live-evidence-'))
   try {
