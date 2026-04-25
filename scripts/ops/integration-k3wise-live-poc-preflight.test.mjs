@@ -154,6 +154,95 @@ test('buildPacket blocks schema-qualified and quoted K3 core SQL table writes', 
   assert.equal(packet.safety.sqlServerMode, 'middle-table')
 })
 
+test('buildPacket coerces sqlServer.enabled "true" string and still applies allowedTables guard', () => {
+  // Customer types `enabled: "true"` instead of boolean true — without coercion
+  // the script would skip the entire SQL Server validation and the t_ICItem
+  // write would slip past. Same bug class as autoSubmit/autoAudit string truthy.
+  assert.throws(
+    () => buildPacket(gate({
+      sqlServer: {
+        enabled: 'true',
+        mode: 'middle-table',
+        allowedTables: ['t_ICItem'],
+      },
+    })),
+    (error) => error instanceof LivePocPreflightError && error.details.field === 'sqlServer.allowedTables',
+    'string "true" must enable SQL Server channel and trigger core-table guard',
+  )
+
+  // Mirror: enabled: false-like string disables the channel.
+  // Note: must override mode (sampleGate inherits mode='readonly') so the
+  // fallback 'disabled' actually fires; otherwise explicit mode wins.
+  const packet = buildPacket(gate({
+    sqlServer: { enabled: 'no', mode: undefined, allowedTables: [] },
+  }))
+  assert.equal(packet.safety.sqlServerMode, 'disabled', 'string "no" + no explicit mode disables sql server')
+})
+
+test('buildPacket coerces sqlServer.writeCoreTables "true" string', () => {
+  // Same string-truthy pattern: customer typing writeCoreTables: "true" was
+  // previously read as not-true (=== true comparison), bypassing the guard.
+  assert.throws(
+    () => buildPacket(gate({
+      sqlServer: {
+        enabled: true,
+        mode: 'middle-table',
+        writeCoreTables: 'true',
+        allowedTables: ['t_some_safe_table'],
+      },
+    })),
+    (error) => error instanceof LivePocPreflightError && error.details.field === 'sqlServer.allowedTables',
+    'string "true" on writeCoreTables must trigger core-table guard',
+  )
+})
+
+test('buildPacket coerces bom.enabled "true" string and enforces productId requirement', () => {
+  // Same bug class: customer types bom.enabled: "true" with no productId.
+  // Previously slipped past because === true read it as false → BOM PoC
+  // would run without a product scope.
+  assert.throws(
+    () => buildPacket(gate({
+      plm: { defaultProductId: undefined, config: {} },
+      bom: { enabled: 'true', productId: undefined },
+    })),
+    (error) => error instanceof LivePocPreflightError && error.details.field === 'bom.productId',
+    'string "true" on bom.enabled must trigger productId requirement',
+  )
+
+  // Mirror: false-like string disables BOM cleanly.
+  const packet = buildPacket(gate({
+    plm: { defaultProductId: undefined, config: {} },
+    bom: { enabled: '否', productId: undefined },
+  }))
+  const bomPipeline = packet.pipelines.find((pipeline) => pipeline.targetObject === 'bom')
+  assert.equal(bomPipeline, undefined, 'string "否" disables BOM PoC pipeline')
+})
+
+test('buildPacket accepts numeric 0/1 for boolean flags but rejects other numbers', () => {
+  // Common spreadsheet-export pattern: 0/1 as numeric booleans.
+  const packetTrue = buildPacket(gate({
+    sqlServer: { enabled: 1, mode: 'readonly', allowedTables: [] },
+  }))
+  assert.equal(packetTrue.safety.sqlServerMode, 'readonly', 'number 1 enables sql server')
+
+  const packetFalse = buildPacket(gate({
+    sqlServer: { enabled: 0, mode: undefined, allowedTables: [] },
+  }))
+  assert.equal(packetFalse.safety.sqlServerMode, 'disabled', 'number 0 + no explicit mode disables sql server')
+
+  // Non 0/1 number rejected with clear message.
+  assert.throws(
+    () => buildPacket(gate({ k3Wise: { autoSubmit: 2 } })),
+    (error) => error instanceof LivePocPreflightError && /0 or 1/.test(error.message),
+    'number 2 should produce a clear "0 or 1" error',
+  )
+  assert.throws(
+    () => buildPacket(gate({ k3Wise: { autoAudit: NaN } })),
+    (error) => error instanceof LivePocPreflightError && /finite/.test(error.message),
+    'NaN should produce a clear finite-number error',
+  )
+})
+
 test('buildPacket requires BOM product scope when BOM PoC is enabled', () => {
   assert.throws(
     () => buildPacket(gate({
