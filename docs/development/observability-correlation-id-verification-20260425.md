@@ -14,6 +14,8 @@
 | 3 | `npx vitest run tests/integration/correlation-header.api.test.ts` | **2 / 2 passed**, 1 file. |
 | 4 | `npx vitest run` (full unit + contract suite, from `packages/core-backend`) | **2555 passed, 47 skipped** across **194 files** (9 files skipped by config). |
 | 5 | `pnpm --filter @metasheet/core-backend exec vitest run tests/unit/correlation.test.ts tests/integration/correlation-header.api.test.ts --reporter=verbose` after review hardening | **12 / 12 passed**, 2 files. |
+| 6 | `pnpm --filter @metasheet/core-backend exec vitest run tests/unit/correlation.test.ts tests/unit/http-adapter-correlation.test.ts tests/integration/correlation-header.api.test.ts --reporter=verbose` after second review hardening | **18 / 18 passed**, 3 files. |
+| 7 | `pnpm --filter @metasheet/core-backend exec tsc --noEmit` after second review hardening | 0 errors, 0 warnings. |
 
 ## Command output — full suite tail
 
@@ -101,15 +103,18 @@ Routes that previously threw (and relied on express's default HTML 500) now surf
 - Moved `correlationIdMiddleware` before `cors()` so CORS preflight short-circuits still receive `X-Correlation-ID`.
 - Moved the global Express error handler out of early middleware setup and into a late `installGlobalErrorHandler()` call at the end of `MetaSheetServer.start()`, after routes and plugin routes are registered.
 - Changed the global error handler to call `next(err)` when `res.headersSent` is already true.
+- Configured CORS with `exposedHeaders: ['X-Correlation-ID']` so browser clients can read the response header.
 - Changed `HTTPAdapter` outbound propagation to preserve explicit caller-provided `X-Correlation-ID` / `x-correlation-id` headers.
 - Replaced the dynamic `require('../context/request-context')` in `HTTPAdapter` with a static import.
-- Added a supertest CORS preflight assertion; targeted correlation tests now pass `12 / 12`.
+- Extracted `applyCorrelationHeader(config)` from the `HTTPAdapter` interceptor so correlation propagation is covered without relying on Axios module-mock internals.
+- Added supertest CORS preflight/header-exposure assertions, error-handler `headersSent` coverage, and outbound header-helper tests; targeted correlation tests now pass `18 / 18`.
 
 Focused re-verification after review fixes:
 
 ```bash
 pnpm --filter @metasheet/core-backend exec vitest run \
   tests/unit/correlation.test.ts \
+  tests/unit/http-adapter-correlation.test.ts \
   tests/integration/correlation-header.api.test.ts \
   --reporter=verbose
 pnpm --filter @metasheet/core-backend exec tsc --noEmit
@@ -118,8 +123,8 @@ pnpm --filter @metasheet/core-backend exec tsc --noEmit
 Result:
 
 ```text
-Test Files  2 passed (2)
-Tests       12 passed (12)
+Test Files  3 passed (3)
+Tests       18 passed (18)
 tsc         exit 0
 ```
 

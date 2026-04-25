@@ -104,6 +104,18 @@ interface TokenProvider {
   onAuthError?: () => void;
 }
 
+export function applyCorrelationHeader(config: AxiosRequestConfig): AxiosRequestConfig {
+  const correlationId = getCorrelationId()
+  const headers = { ...(config.headers || {}) }
+  const hasCorrelationHeader = Object.keys(headers).some(
+    (key) => key.toLowerCase() === 'x-correlation-id'
+  )
+  if (correlationId && !hasCorrelationHeader) {
+    config.headers = { ...headers, 'X-Correlation-ID': correlationId }
+  }
+  return config
+}
+
 export class HTTPAdapter extends BaseDataAdapter {
   protected client: AxiosInstance | null = null
   private endpoints: Map<string, EndpointConfig> = new Map()
@@ -164,16 +176,7 @@ export class HTTPAdapter extends BaseDataAdapter {
               config.headers = { ...(config.headers || {}), Authorization: `Bearer ${token}` }
             }
           }
-          // Propagate the inbound correlation id on outbound requests so
-          // upstream systems can stitch logs across service boundaries.
-          const correlationId = getCorrelationId()
-          const headers = { ...(config.headers || {}) }
-          const hasCorrelationHeader = Object.keys(headers).some(
-            (key) => key.toLowerCase() === 'x-correlation-id'
-          )
-          if (correlationId && !hasCorrelationHeader) {
-            config.headers = { ...headers, 'X-Correlation-ID': correlationId }
-          }
+          applyCorrelationHeader(config)
           this.emit('request', { method: config.method, url: config.url })
           return config
         },

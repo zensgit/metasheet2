@@ -1,10 +1,15 @@
 import express from 'express'
 import cors from 'cors'
 import request from 'supertest'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 
 import { getCorrelationId, getRequestContext, runWithRequestContext } from '../../src/context/request-context'
-import { correlationIdMiddleware, isValidCorrelationId, resolveCorrelationId } from '../../src/middleware/correlation'
+import {
+  correlationErrorHandler,
+  correlationIdMiddleware,
+  isValidCorrelationId,
+  resolveCorrelationId,
+} from '../../src/middleware/correlation'
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
@@ -93,7 +98,7 @@ describe('correlationIdMiddleware (express integration)', () => {
   it('can wrap CORS preflight responses when installed before cors()', async () => {
     const app = express()
     app.use(correlationIdMiddleware)
-    app.use(cors())
+    app.use(cors({ exposedHeaders: ['X-Correlation-ID'] }))
 
     const res = await request(app)
       .options('/probe')
@@ -101,5 +106,61 @@ describe('correlationIdMiddleware (express integration)', () => {
       .set('Access-Control-Request-Method', 'GET')
 
     expect(res.headers['x-correlation-id']).toMatch(UUID_PATTERN)
+  })
+
+  it('exposes X-Correlation-ID to browser clients through CORS', async () => {
+    const app = express()
+    app.use(correlationIdMiddleware)
+    app.use(cors({ exposedHeaders: ['X-Correlation-ID'] }))
+    app.get('/probe', (_req, res) => res.json({ ok: true }))
+
+    const res = await request(app)
+      .get('/probe')
+      .set('Origin', 'https://example.test')
+
+    expect(res.headers['access-control-expose-headers']).toContain('X-Correlation-ID')
+  })
+})
+
+describe('correlationErrorHandler', () => {
+  it('returns a JSON error body with the request correlation id', async () => {
+    const logger = { error: vi.fn() }
+    const app = express()
+    app.use(correlationIdMiddleware)
+    app.get('/boom', () => {
+      const error = new Error('teapot')
+      ;(error as Error & { status: number }).status = 418
+      throw error
+    })
+    app.use(correlationErrorHandler(logger, 'test'))
+
+    const res = await request(app)
+      .get('/boom')
+      .set('X-Correlation-ID', 'err-trace-1')
+
+    expect(res.status).toBe(418)
+    expect(res.body).toMatchObject({
+      success: false,
+      error: 'teapot',
+      message: 'teapot',
+      correlationId: 'err-trace-1',
+    })
+    expect(logger.error).toHaveBeenCalled()
+  })
+
+  it('delegates to next when headers were already sent', () => {
+    const logger = { error: vi.fn() }
+    const handler = correlationErrorHandler(logger)
+    const error = new Error('late failure')
+    const next = vi.fn()
+
+    handler(
+      error,
+      { method: 'GET', path: '/stream', correlationId: 'sent-trace' } as any,
+      { headersSent: true } as any,
+      next,
+    )
+
+    expect(next).toHaveBeenCalledWith(error)
   })
 })

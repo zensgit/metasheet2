@@ -71,8 +71,7 @@ import { startMultitableAttachmentCleanup } from './multitable/attachment-orphan
 import { AutomationService, setAutomationServiceInstance } from './multitable/automation-service'
 import { tenantContext } from './db/sharding/tenant-context'
 import { attendanceAuditMiddleware, attendanceSecurityMiddleware } from './middleware/attendance-production'
-import { correlationIdMiddleware } from './middleware/correlation'
-import { getCorrelationId } from './context/request-context'
+import { correlationErrorHandler, correlationIdMiddleware } from './middleware/correlation'
 import { approvalsRouter } from './routes/approvals'
 import { authRouter } from './routes/auth'
 import { auditLogsRouter } from './routes/audit-logs'
@@ -818,7 +817,9 @@ export class MetaSheetServer {
     this.app.use(correlationIdMiddleware)
 
     // CORS
-    this.app.use(cors())
+    this.app.use(cors({
+      exposedHeaders: ['X-Correlation-ID'],
+    }))
 
     // API responses should always opt out of MIME sniffing, including early 4xx replies.
     this.app.use('/api', (_req: Request, res: Response, next: NextFunction) => {
@@ -1155,23 +1156,7 @@ export class MetaSheetServer {
     // clients can reference the request when filing bug reports. It must be
     // registered after all routes/plugin routes; Express only dispatches errors
     // to handlers that appear later in the middleware stack.
-    this.app.use((err: unknown, req: Request, res: Response, next: NextFunction) => {
-      const correlationId = req.correlationId ?? getCorrelationId()
-      const message = err instanceof Error ? err.message : String(err)
-      this.logger.error(`Unhandled route error: ${req.method} ${req.path}`, err instanceof Error ? err : new Error(message))
-      if (res.headersSent) return next(err)
-      const status = typeof (err as { status?: number })?.status === 'number'
-        ? (err as { status: number }).status
-        : typeof (err as { statusCode?: number })?.statusCode === 'number'
-          ? (err as { statusCode: number }).statusCode
-          : 500
-      res.status(status).json({
-        success: false,
-        error: status >= 500 ? 'Internal Server Error' : message,
-        message: process.env.NODE_ENV === 'production' && status >= 500 ? undefined : message,
-        correlationId
-      })
-    })
+    this.app.use(correlationErrorHandler(this.logger))
   }
 
   /**

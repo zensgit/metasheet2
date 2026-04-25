@@ -10,7 +10,7 @@
 import crypto from 'crypto'
 import type { NextFunction, Request, Response } from 'express'
 
-import { runWithRequestContext } from '../context/request-context'
+import { getCorrelationId, runWithRequestContext } from '../context/request-context'
 
 const CORRELATION_HEADER = 'x-correlation-id'
 const CORRELATION_PATTERN = /^[A-Za-z0-9_-]{1,128}$/
@@ -44,3 +44,30 @@ export function correlationIdMiddleware(req: Request, res: Response, next: NextF
 }
 
 export const CORRELATION_ID_HEADER = 'X-Correlation-ID'
+
+export type CorrelationErrorLogger = {
+  error(message: string, error: Error): void
+}
+
+export function correlationErrorHandler(
+  logger: CorrelationErrorLogger,
+  nodeEnv: string | undefined = process.env.NODE_ENV,
+) {
+  return (err: unknown, req: Request, res: Response, next: NextFunction): void => {
+    const correlationId = req.correlationId ?? getCorrelationId()
+    const message = err instanceof Error ? err.message : String(err)
+    logger.error(`Unhandled route error: ${req.method} ${req.path}`, err instanceof Error ? err : new Error(message))
+    if (res.headersSent) return next(err)
+    const status = typeof (err as { status?: number })?.status === 'number'
+      ? (err as { status: number }).status
+      : typeof (err as { statusCode?: number })?.statusCode === 'number'
+        ? (err as { statusCode: number }).statusCode
+        : 500
+    res.status(status).json({
+      success: false,
+      error: status >= 500 ? 'Internal Server Error' : message,
+      message: nodeEnv === 'production' && status >= 500 ? undefined : message,
+      correlationId,
+    })
+  }
+}
