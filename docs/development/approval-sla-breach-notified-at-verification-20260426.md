@@ -115,6 +115,25 @@ error; `ALTER TABLE … ADD COLUMN IF NOT EXISTS` and
 - The branch is stacked on `codex/approval-sla-breach-notify-20260425`
   (PR #1171, baseline `50179d9d7`). Reviewers should land this only
   after #1171 merges, or rebase onto `main` once #1171 is in.
+- **Bootstrap-version bump scope**: bumping
+  `APPROVAL_SCHEMA_BOOTSTRAP_VERSION` from `'20260425-wp5-sla'` to
+  `'20260426-wp5-breach-notified-at'` forces re-bootstrap on first run
+  for any test that imports the helper. `grep -l approval-schema-bootstrap
+  tests/unit/*.test.ts tests/integration/*.test.ts` confirms the helper is
+  only consumed by the eight `approval-*.api.test.ts` integration files
+  (which require `DATABASE_URL`). No unit test imports it, so the bump
+  has no impact on the default `pnpm vitest run` unit pass.
+- **Index shape divergence from spec**: the task pseudocode requested
+  `ON approval_metrics (sla_breached, breach_notified_at) WHERE
+  sla_breached = TRUE AND breach_notified_at IS NULL`. The migration
+  ships `ON approval_metrics (sla_breached_at NULLS FIRST, started_at)
+  WHERE sla_breached = TRUE AND breach_notified_at IS NULL`. The spec
+  variant indexes constants (every covered row has the same
+  `sla_breached`/`breach_notified_at` pair) — those columns belong in
+  the WHERE predicate, not the key. Indexing
+  `(sla_breached_at, started_at)` instead serves the actual `ORDER BY`
+  the new `listBreachesPendingNotification` query uses, turning it into
+  a pure index scan. Predicate semantics are identical.
 
 ## Sign-off
 
