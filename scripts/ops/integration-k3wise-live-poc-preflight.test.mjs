@@ -92,6 +92,68 @@ test('buildPacket blocks SQL Server writes to K3 core business tables', () => {
   )
 })
 
+test('buildPacket normalizes safe customer formatting variants', () => {
+  const packet = buildPacket(gate({
+    k3Wise: {
+      environment: ' UAT ',
+      autoSubmit: 'false',
+      autoAudit: 'no',
+    },
+    sqlServer: {
+      enabled: true,
+      mode: 'READONLY',
+      allowedTables: ['T_ICITEM'],
+    },
+  }), { generatedAt: '2026-04-25T00:00:00.000Z' })
+
+  assert.equal(packet.safety.environment, 'uat')
+  assert.equal(packet.gateSummary.k3Wise.environment, 'uat')
+  assert.equal(packet.safety.sqlServerMode, 'readonly')
+  assert.equal(packet.externalSystems.find((system) => system.kind === 'erp:k3-wise-sqlserver').config.mode, 'readonly')
+})
+
+test('buildPacket rejects truthy Submit/Audit strings and invalid flag values', () => {
+  for (const k3Wise of [
+    { autoSubmit: 'true' },
+    { autoAudit: 'yes' },
+    { autoSubmit: '是' },
+  ]) {
+    assert.throws(
+      () => buildPacket(gate({ k3Wise })),
+      (error) => error instanceof LivePocPreflightError && /Save-only/.test(error.message),
+    )
+  }
+
+  assert.throws(
+    () => buildPacket(gate({ k3Wise: { autoSubmit: 'maybe' } })),
+    (error) => error instanceof LivePocPreflightError && error.details.field === 'k3Wise.autoSubmit',
+  )
+})
+
+test('buildPacket blocks schema-qualified and quoted K3 core SQL table writes', () => {
+  for (const table of [' t_ICItem ', 'dbo.t_ICItem', '[dbo].[t_ICBomChild]', '"dbo"."t_ICBOM"']) {
+    assert.throws(
+      () => buildPacket(gate({
+        sqlServer: {
+          enabled: true,
+          mode: 'middle table',
+          allowedTables: [table],
+        },
+      })),
+      (error) => error instanceof LivePocPreflightError && error.details.field === 'sqlServer.allowedTables',
+    )
+  }
+
+  const packet = buildPacket(gate({
+    sqlServer: {
+      enabled: true,
+      mode: 'middle table',
+      allowedTables: ['t_ICItem_stage'],
+    },
+  }))
+  assert.equal(packet.safety.sqlServerMode, 'middle-table')
+})
+
 test('buildPacket requires BOM product scope when BOM PoC is enabled', () => {
   assert.throws(
     () => buildPacket(gate({
