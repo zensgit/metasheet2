@@ -1,0 +1,22 @@
+{
+  "manifestVersion": "2.0.0",
+  "name": "plugin-integration-core",
+  "version": "0.1.0",
+  "displayName": "Integration Core",
+  "description": "PLM/ERP integration pipeline core: ingest, cleanse, validate, upsert, dead-letter, replay. System plugin.",
+  "author": { "name": "MetaSheet" },
+  "license": "UNLICENSED",
+  "engine": { "metasheet": ">=2.0.0-0" },
+  "main": "index.cjs",
+  "capabilities": { "views": [], "workflows": [], "functions": [] },
+  "contributes": {
+    "views": []
+  },
+  "permissions": [
+    "http.addRoute",
+    "events.emit",
+    "events.listen",
+    "database.read",
+    "database.write"
+  ]
+}

@@ -9,6 +9,7 @@ import { sql } from 'kysely'
 import { Logger } from './logger'
 import * as Ajv from 'ajv'
 import type { CoreAPI } from '../types/plugin'
+import { getRequestContext } from '../context/request-context'
 
 // JSON Schema type for event validation
 interface JSONSchema {
@@ -78,6 +79,31 @@ interface Event {
   payload: unknown
   metadata: Record<string, unknown>
   occurred_at: Date
+}
+
+function enrichEventFromRequestContext(
+  options?: {
+    correlation_id?: string
+    metadata?: Record<string, unknown>
+  },
+): {
+  correlation_id?: string
+  metadata: Record<string, unknown>
+} {
+  const requestContext = getRequestContext()
+  const metadata = { ...(options?.metadata || {}) }
+
+  if (requestContext?.userId && metadata.user_id === undefined) {
+    metadata.user_id = requestContext.userId
+  }
+  if (requestContext?.tenantId && metadata.tenant_id === undefined) {
+    metadata.tenant_id = requestContext.tenantId
+  }
+
+  return {
+    correlation_id: options?.correlation_id || requestContext?.correlationId,
+    metadata,
+  }
 }
 
 interface EventHandler {
@@ -217,16 +243,18 @@ export class EventBusService extends EventEmitter {
     // Validate event schema
     await this.validateEventSchema(eventName, payload)
 
+    const requestContextDefaults = enrichEventFromRequestContext(options)
+
     const event: Event = {
       event_id: eventId,
       event_name: eventName,
       event_version: '1.0.0',
       source_id: options?.source_id || 'system',
       source_type: options?.source_type || 'system',
-      correlation_id: options?.correlation_id,
+      correlation_id: requestContextDefaults.correlation_id,
       causation_id: options?.causation_id,
       payload,
-      metadata: options?.metadata || {},
+      metadata: requestContextDefaults.metadata,
       occurred_at: new Date()
     }
 

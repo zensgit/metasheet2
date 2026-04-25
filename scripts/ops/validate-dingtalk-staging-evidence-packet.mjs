@@ -22,6 +22,7 @@ const REQUIRED_CHECK_IDS = [
   'delivery-history-group-person',
   'no-email-user-create-bind',
 ]
+const VALID_REMOTE_SMOKE_PHASES = new Set(['bootstrap_pending', 'manual_pending', 'finalize_pending', 'fail'])
 const SECRET_PATTERNS = [
   {
     name: 'dingtalk_robot_webhook',
@@ -138,8 +139,42 @@ function requireEmptyArray(value, field, failures) {
   return value
 }
 
+function evidenceTopLevelName(destination) {
+  if (typeof destination !== 'string') return ''
+  const parts = destination.replaceAll('\\', '/').split('/').filter(Boolean)
+  if (parts[0] !== 'evidence' || !parts[1]) return ''
+  return parts[1]
+}
+
+function validateRegisteredEvidenceEntries(packetDir, includedEvidence, failures) {
+  const evidenceDir = path.join(packetDir, 'evidence')
+  if (!existsSync(evidenceDir)) return
+  if (!statSync(evidenceDir).isDirectory()) {
+    failures.push('evidence is not a directory')
+    return
+  }
+
+  const registered = new Set(
+    Array.isArray(includedEvidence)
+      ? includedEvidence.map((entry) => evidenceTopLevelName(entry?.destination)).filter(Boolean)
+      : [],
+  )
+  for (const entry of readdirSync(evidenceDir, { withFileTypes: true })) {
+    if (!registered.has(entry.name)) {
+      failures.push(`evidence/${entry.name} is not registered in manifest includedEvidence`)
+    }
+  }
+}
+
 function hasPassingCheck(requiredChecks, id) {
   return Array.isArray(requiredChecks) && requiredChecks.some((check) => check?.id === id && check.status === 'pass')
+}
+
+function validateOptionalRemoteSmokePhase(value, field, failures) {
+  if (value === undefined || value === null) return
+  if (typeof value !== 'string' || !VALID_REMOTE_SMOKE_PHASES.has(value)) {
+    failures.push(`${field} is not a recognized remote smoke phase`)
+  }
 }
 
 function validateIncludedEvidence(packetDir, entry, index, failures) {
@@ -163,6 +198,7 @@ function validateIncludedEvidence(packetDir, entry, index, failures) {
   if (status?.compiledOverallStatus !== 'pass') failures.push(`${label}.dingtalkP4FinalStatus.compiledOverallStatus is not pass`)
   if (status?.apiBootstrapStatus !== 'pass') failures.push(`${label}.dingtalkP4FinalStatus.apiBootstrapStatus is not pass`)
   if (status?.remoteClientStatus !== 'pass') failures.push(`${label}.dingtalkP4FinalStatus.remoteClientStatus is not pass`)
+  validateOptionalRemoteSmokePhase(status?.remoteSmokePhase, `${label}.dingtalkP4FinalStatus.remoteSmokePhase`, failures)
   if (status?.requiredChecks !== REQUIRED_CHECK_IDS.length) {
     failures.push(`${label}.dingtalkP4FinalStatus.requiredChecks is not ${REQUIRED_CHECK_IDS.length}`)
   }
@@ -193,6 +229,14 @@ function validateIncludedEvidence(packetDir, entry, index, failures) {
   if (compiledSummary.overallStatus !== 'pass') failures.push(`${label}/compiled/summary.json overallStatus is not pass`)
   if (compiledSummary.apiBootstrapStatus !== 'pass') failures.push(`${label}/compiled/summary.json apiBootstrapStatus is not pass`)
   if (compiledSummary.remoteClientStatus !== 'pass') failures.push(`${label}/compiled/summary.json remoteClientStatus is not pass`)
+  validateOptionalRemoteSmokePhase(compiledSummary.remoteSmokePhase, `${label}/compiled/summary.json remoteSmokePhase`, failures)
+  if (
+    typeof status?.remoteSmokePhase === 'string'
+    && typeof compiledSummary.remoteSmokePhase === 'string'
+    && status.remoteSmokePhase !== compiledSummary.remoteSmokePhase
+  ) {
+    failures.push(`${label}.dingtalkP4FinalStatus.remoteSmokePhase does not match compiled summary`)
+  }
   if (compiledSummary.totals?.pendingChecks !== 0) failures.push(`${label}/compiled/summary.json totals.pendingChecks is not 0`)
   if (compiledSummary.totals?.missingRequiredChecks !== 0) failures.push(`${label}/compiled/summary.json totals.missingRequiredChecks is not 0`)
   if (compiledSummary.totals?.failedChecks !== 0) failures.push(`${label}/compiled/summary.json totals.failedChecks is not 0`)
@@ -211,6 +255,10 @@ function isLikelyText(buffer) {
   return !buffer.includes(0)
 }
 
+function redactedFindingPreview(match, patternName) {
+  return `<redacted ${patternName}; ${String(match ?? '').length} chars>`
+}
+
 function scanFileForSecrets(file, packetDir, findings) {
   const stats = statSync(file)
   if (!stats.isFile() || stats.size > MAX_SECRET_SCAN_BYTES) return 0
@@ -224,7 +272,7 @@ function scanFileForSecrets(file, packetDir, findings) {
       findings.push({
         file: path.relative(packetDir, file).replaceAll('\\', '/'),
         pattern: pattern.name,
-        preview: match[0].slice(0, 80),
+        preview: redactedFindingPreview(match[0], pattern.name),
       })
       matches += 1
     }
@@ -259,6 +307,7 @@ function validatePacket(packetDir) {
   if (!Array.isArray(manifest.includedEvidence) || manifest.includedEvidence.length === 0) {
     failures.push('manifest includedEvidence is empty')
   } else {
+    validateRegisteredEvidenceEntries(packetDir, manifest.includedEvidence, failures)
     manifest.includedEvidence.forEach((entry, index) => validateIncludedEvidence(packetDir, entry, index, failures))
   }
 

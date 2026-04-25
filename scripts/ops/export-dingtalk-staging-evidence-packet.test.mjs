@@ -44,6 +44,7 @@ function writeDingTalkP4Session(dir, overrides = {}) {
     overallStatus: 'pass',
     apiBootstrapStatus: 'pass',
     remoteClientStatus: 'pass',
+    remoteSmokePhase: 'finalize_pending',
     totals: {
       totalChecks: dingtalkP4RequiredCheckIds.length,
       requiredChecks: dingtalkP4RequiredCheckIds.length,
@@ -116,6 +117,14 @@ test('export-dingtalk-staging-evidence-packet copies required handoff files and 
       true,
     )
     assert.equal(
+      existsSync(path.join(outputDir, 'scripts/ops/dingtalk-p4-final-docs.mjs')),
+      true,
+    )
+    assert.equal(
+      existsSync(path.join(outputDir, 'scripts/ops/dingtalk-p4-final-closeout.mjs')),
+      true,
+    )
+    assert.equal(
       existsSync(path.join(outputDir, 'scripts/ops/validate-dingtalk-staging-evidence-packet.mjs')),
       true,
     )
@@ -163,6 +172,14 @@ test('export-dingtalk-staging-evidence-packet copies required handoff files and 
       true,
     )
     assert.equal(
+      manifest.files.some((file) => file.path === 'scripts/ops/dingtalk-p4-final-docs.mjs'),
+      true,
+    )
+    assert.equal(
+      manifest.files.some((file) => file.path === 'scripts/ops/dingtalk-p4-final-closeout.mjs'),
+      true,
+    )
+    assert.equal(
       manifest.files.some((file) => file.path === 'scripts/ops/validate-dingtalk-staging-evidence-packet.mjs'),
       true,
     )
@@ -176,6 +193,9 @@ test('export-dingtalk-staging-evidence-packet copies required handoff files and 
     assert.match(readme, /dingtalk-p4-evidence-record\.mjs/)
     assert.match(readme, /dingtalk-p4-smoke-status\.mjs/)
     assert.match(readme, /dingtalk-p4-final-handoff\.mjs/)
+    assert.match(readme, /dingtalk-p4-final-docs\.mjs/)
+    assert.match(readme, /dingtalk-p4-final-closeout\.mjs/)
+    assert.match(readme, /dingtalk-p4-smoke-status\.mjs --session-dir <session-dir> --handoff-summary <packet-dir>\/handoff-summary\.json --require-release-ready/)
     assert.match(readme, /validate-dingtalk-staging-evidence-packet\.mjs/)
     assert.match(readme, /compile-dingtalk-p4-smoke-evidence\.mjs/)
     assert.match(readme, /No runtime evidence directory was included/)
@@ -217,6 +237,51 @@ test('export-dingtalk-staging-evidence-packet copies optional runtime evidence d
   }
 })
 
+test('export-dingtalk-staging-evidence-packet clears stale evidence directories when reusing packet output', () => {
+  const tmpDir = makeTmpDir()
+  const outputDir = path.join(tmpDir, 'packet')
+  const firstEvidenceDir = path.join(tmpDir, 'old-smoke-output')
+  const secondEvidenceDir = path.join(tmpDir, 'new-smoke-output')
+
+  try {
+    mkdirSync(firstEvidenceDir, { recursive: true })
+    writeFileSync(path.join(firstEvidenceDir, 'summary.json'), JSON.stringify({ ok: 'old' }), 'utf8')
+    const firstResult = spawnSync(
+      process.execPath,
+      [scriptPath, '--output-dir', outputDir, '--include-output', firstEvidenceDir],
+      {
+        cwd: repoRoot,
+        encoding: 'utf8',
+      },
+    )
+
+    assert.equal(firstResult.status, 0, firstResult.stderr)
+    mkdirSync(path.join(outputDir, 'evidence/99-stale-session'), { recursive: true })
+    writeFileSync(path.join(outputDir, 'evidence/99-stale-session/stale.txt'), 'stale\n', 'utf8')
+
+    mkdirSync(secondEvidenceDir, { recursive: true })
+    writeFileSync(path.join(secondEvidenceDir, 'summary.json'), JSON.stringify({ ok: 'new' }), 'utf8')
+    const secondResult = spawnSync(
+      process.execPath,
+      [scriptPath, '--output-dir', outputDir, '--include-output', secondEvidenceDir],
+      {
+        cwd: repoRoot,
+        encoding: 'utf8',
+      },
+    )
+
+    assert.equal(secondResult.status, 0, secondResult.stderr)
+    const manifest = JSON.parse(readFileSync(path.join(outputDir, 'manifest.json'), 'utf8'))
+    assert.equal(manifest.includedEvidence.length, 1)
+    assert.equal(manifest.includedEvidence[0].destination, 'evidence/01-new-smoke-output')
+    assert.equal(existsSync(path.join(outputDir, 'evidence/01-old-smoke-output/summary.json')), false)
+    assert.equal(existsSync(path.join(outputDir, 'evidence/99-stale-session/stale.txt')), false)
+    assert.equal(existsSync(path.join(outputDir, 'evidence/01-new-smoke-output/summary.json')), true)
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+
 test('export-dingtalk-staging-evidence-packet accepts finalized DingTalk P4 pass evidence when required', () => {
   const tmpDir = makeTmpDir()
   const outputDir = path.join(tmpDir, 'packet')
@@ -241,6 +306,7 @@ test('export-dingtalk-staging-evidence-packet accepts finalized DingTalk P4 pass
     assert.equal(manifest.includedEvidence[0].dingtalkP4FinalStatus.status, 'pass')
     assert.equal(manifest.includedEvidence[0].dingtalkP4FinalStatus.finalStrictStatus, 'pass')
     assert.equal(manifest.includedEvidence[0].dingtalkP4FinalStatus.apiBootstrapStatus, 'pass')
+    assert.equal(manifest.includedEvidence[0].dingtalkP4FinalStatus.remoteSmokePhase, 'finalize_pending')
     assert.equal(manifest.includedEvidence[0].dingtalkP4FinalStatus.requiredChecks, 8)
     assert.equal(existsSync(path.join(outputDir, 'evidence/01-142-session/session-summary.json')), true)
 
@@ -441,6 +507,7 @@ test('export-dingtalk-staging-evidence-packet clears stale packet markers before
     assert.match(failedResult.stderr, /included DingTalk P4 session is not final pass/)
     assert.equal(existsSync(path.join(outputDir, 'manifest.json')), false)
     assert.equal(existsSync(path.join(outputDir, 'README.md')), false)
+    assert.equal(existsSync(path.join(outputDir, 'evidence/01-142-session-valid/session-summary.json')), false)
   } finally {
     rmSync(tmpDir, { recursive: true, force: true })
   }
@@ -488,6 +555,7 @@ test('export-dingtalk-staging-evidence-packet clears ungated packet markers befo
     assert.match(failedResult.stderr, /included DingTalk P4 session is not final pass/)
     assert.equal(existsSync(path.join(outputDir, 'manifest.json')), false)
     assert.equal(existsSync(path.join(outputDir, 'README.md')), false)
+    assert.equal(existsSync(path.join(outputDir, 'evidence/01-legacy-smoke-output/summary.json')), false)
   } finally {
     rmSync(tmpDir, { recursive: true, force: true })
   }
@@ -508,6 +576,32 @@ test('export-dingtalk-staging-evidence-packet requires included evidence for fin
 
     assert.equal(result.status, 1)
     assert.match(result.stderr, /--require-dingtalk-p4-pass requires at least one --include-output/)
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+
+test('export-dingtalk-staging-evidence-packet rejects non-packet output directories before cleanup', () => {
+  const tmpDir = makeTmpDir()
+  const outputDir = path.join(tmpDir, 'repo-like-dir')
+  const readmePath = path.join(outputDir, 'README.md')
+
+  try {
+    mkdirSync(outputDir, { recursive: true })
+    writeFileSync(readmePath, '# Not a generated packet\n', 'utf8')
+
+    const result = spawnSync(
+      process.execPath,
+      [scriptPath, '--output-dir', outputDir],
+      {
+        cwd: repoRoot,
+        encoding: 'utf8',
+      },
+    )
+
+    assert.equal(result.status, 1)
+    assert.match(result.stderr, /not a DingTalk staging evidence packet/)
+    assert.equal(readFileSync(readmePath, 'utf8'), '# Not a generated packet\n')
   } finally {
     rmSync(tmpDir, { recursive: true, force: true })
   }

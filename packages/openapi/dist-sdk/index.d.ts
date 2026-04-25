@@ -700,6 +700,28 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/approvals/metrics/report": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get approval metrics TopN report
+         * @description Returns admin-only approval observability data: the existing metrics
+         *     summary plus TopN slowest completed instances and templates with the
+         *     highest SLA breach rate.
+         */
+        get: operations["getApprovalMetricsReport"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/approval-templates": {
         parameters: {
             query?: never;
@@ -15009,6 +15031,91 @@ export interface operations {
                 };
             };
             503: components["responses"]["ServiceUnavailable"];
+        };
+    };
+    getApprovalMetricsReport: {
+        parameters: {
+            query?: {
+                since?: string;
+                until?: string;
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @example true */
+                        ok: boolean;
+                        data: {
+                            summary: {
+                                total?: number;
+                                approved?: number;
+                                rejected?: number;
+                                revoked?: number;
+                                returned?: number;
+                                running?: number;
+                                avgDurationSeconds?: number | null;
+                                p50DurationSeconds?: number | null;
+                                p95DurationSeconds?: number | null;
+                                slaBreachCount?: number;
+                                slaCandidateCount?: number;
+                                slaBreachRate?: number;
+                                byTemplate?: {
+                                    templateId?: string | null;
+                                    total?: number;
+                                    approved?: number;
+                                    rejected?: number;
+                                    revoked?: number;
+                                    avgDurationSeconds?: number | null;
+                                    slaBreachRate?: number;
+                                }[];
+                            };
+                            slowestInstances: {
+                                instanceId?: string;
+                                templateId?: string | null;
+                                /** Format: date-time */
+                                startedAt?: string;
+                                /** Format: date-time */
+                                terminalAt?: string | null;
+                                /** @enum {string|null} */
+                                terminalState?: "approved" | "rejected" | "revoked" | "returned" | null;
+                                durationSeconds?: number;
+                                slaHours?: number | null;
+                                slaBreached?: boolean;
+                                /** Format: date-time */
+                                slaBreachedAt?: string | null;
+                            }[];
+                            breachedTemplates: {
+                                templateId?: string | null;
+                                total?: number;
+                                slaCandidateCount?: number;
+                                slaBreachCount?: number;
+                                slaBreachRate?: number;
+                                avgDurationSeconds?: number | null;
+                                p95DurationSeconds?: number | null;
+                            }[];
+                        };
+                    };
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            /** @description Internal server error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     listApprovalTemplates: {

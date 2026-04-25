@@ -179,7 +179,9 @@ DINGTALK_P4_WEB_BASE=${quoteEnv(opts.webBase)}
 # Admin/table-owner bearer token for the staging backend.
 DINGTALK_P4_AUTH_TOKEN=""
 
-# Two independent DingTalk robot webhooks. Keep full URLs only in this private file.
+# Two independent DingTalk robot webhooks.
+# Required URL shape: https://oapi.dingtalk.com/robot/send?access_token=...
+# Keep full URLs only in this private file.
 DINGTALK_P4_GROUP_A_WEBHOOK=""
 DINGTALK_P4_GROUP_B_WEBHOOK=""
 
@@ -350,7 +352,18 @@ function safeUrl(value) {
 
 function isValidRobotWebhook(value) {
   const url = safeUrl(value)
-  return Boolean(url && url.protocol === 'https:' && url.hostname === 'oapi.dingtalk.com' && url.searchParams.get('access_token'))
+  return Boolean(
+    url
+      && url.protocol === 'https:'
+      && url.hostname === 'oapi.dingtalk.com'
+      && url.pathname === '/robot/send'
+      && url.searchParams.get('access_token')?.trim(),
+  )
+}
+
+function robotWebhookToken(value) {
+  const url = safeUrl(value)
+  return url?.searchParams.get('access_token')?.trim() ?? ''
 }
 
 function checkEnvMode(file) {
@@ -414,6 +427,13 @@ function checkReadiness(opts) {
   addCheck(summary, 'group-b-webhook-shape', 'Group B webhook uses DingTalk robot URL shape', isValidRobotWebhook(groupBWebhook) ? 'pass' : 'fail', {
     value: redactValue('DINGTALK_P4_GROUP_B_WEBHOOK', groupBWebhook),
   })
+  const groupAToken = robotWebhookToken(groupAWebhook)
+  const groupBToken = robotWebhookToken(groupBWebhook)
+  addCheck(summary, 'group-webhooks-distinct', 'Group A and B robot webhooks use distinct access tokens', groupAToken && groupBToken && groupAToken !== groupBToken ? 'pass' : 'fail', {
+    groupAWebhookPresent: Boolean(groupAWebhook),
+    groupBWebhookPresent: Boolean(groupBWebhook),
+    sameAccessToken: Boolean(groupAToken && groupBToken && groupAToken === groupBToken),
+  })
 
   for (const key of ['DINGTALK_P4_GROUP_A_SECRET', 'DINGTALK_P4_GROUP_B_SECRET']) {
     const value = envValue(values, key)
@@ -431,6 +451,12 @@ function checkReadiness(opts) {
   })
 
   const personUserIds = splitList(envValue(values, 'DINGTALK_P4_PERSON_USER_IDS'))
+  addCheck(summary, 'person-smoke-input', 'Person-message smoke recipient is declared for final delivery history', personUserIds.length > 0 ? 'pass' : 'fail', {
+    personUserCount: personUserIds.length,
+    notes: personUserIds.length > 0
+      ? 'Person delivery can be bootstrapped by the final smoke session.'
+      : 'Set DINGTALK_P4_PERSON_USER_IDS before final release smoke; delivery-history-group-person is a required P4 check.',
+  })
   const authorizedUserId = envValue(values, 'DINGTALK_P4_AUTHORIZED_USER_ID') || allowedUserIds[0] || ''
   const unauthorizedUserId = envValue(values, 'DINGTALK_P4_UNAUTHORIZED_USER_ID')
   const noEmailDingTalkExternalId = envValue(values, 'DINGTALK_P4_NO_EMAIL_DINGTALK_EXTERNAL_ID')
@@ -443,6 +469,11 @@ function checkReadiness(opts) {
     unauthorizedUserId,
     noEmailDingTalkExternalId,
     missing: missingManualTargets,
+  })
+  addCheck(summary, 'unauthorized-target-distinct', 'Unauthorized target is distinct from authorized and allowed users', unauthorizedUserId && unauthorizedUserId !== authorizedUserId && !allowedUserIds.includes(unauthorizedUserId) ? 'pass' : 'fail', {
+    authorizedUserId,
+    unauthorizedUserId,
+    unauthorizedInAllowedUsers: allowedUserIds.includes(unauthorizedUserId),
   })
 
   summary.environment = {
@@ -463,7 +494,7 @@ function checkReadiness(opts) {
     },
   }
   summary.nextCommands = [
-    `node scripts/ops/dingtalk-p4-smoke-preflight.mjs --env-file ${shellQuote(opts.envFile)} --require-manual-targets --output-dir output/dingtalk-p4-remote-smoke-preflight/142-readiness`,
+    `node scripts/ops/dingtalk-p4-smoke-preflight.mjs --env-file ${shellQuote(opts.envFile)} --require-manual-targets --require-person-user --output-dir output/dingtalk-p4-remote-smoke-preflight/142-readiness`,
     `node scripts/ops/dingtalk-p4-smoke-session.mjs --env-file ${shellQuote(opts.envFile)} --require-manual-targets --output-dir output/dingtalk-p4-remote-smoke-session/142-session`,
   ]
   summary.overallStatus = summary.checks.some((check) => check.status === 'fail') ? 'fail' : 'pass'

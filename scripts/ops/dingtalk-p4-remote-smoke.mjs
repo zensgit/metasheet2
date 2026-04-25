@@ -83,8 +83,8 @@ fills them from manual evidence.
 
 Required inputs:
   --auth-token <token>             Bearer token for an admin/table owner
-  --group-a-webhook <url>          DingTalk group A robot webhook
-  --group-b-webhook <url>          DingTalk group B robot webhook
+  --group-a-webhook <url>          DingTalk group A robot webhook; https://oapi.dingtalk.com/robot/send?access_token=...
+  --group-b-webhook <url>          DingTalk group B robot webhook; https://oapi.dingtalk.com/robot/send?access_token=...
   --allowed-user <id>              Local user allowed to fill; repeatable
   --allowed-member-group <id>      Allowed local member group; repeatable
                                   Provide at least one allowed user or group.
@@ -277,12 +277,26 @@ function normalizeBaseUrl(value, label) {
 function validateWebhookUrl(value, label) {
   try {
     const url = new URL(value)
-    if (url.protocol !== 'http:' && url.protocol !== 'https:') {
-      throw new Error('must use http or https')
+    if (url.protocol !== 'https:') {
+      throw new Error('must use HTTPS')
+    }
+    if (url.hostname !== 'oapi.dingtalk.com' || url.pathname !== '/robot/send') {
+      throw new Error('must be a DingTalk robot URL from https://oapi.dingtalk.com/robot/send')
+    }
+    if (!url.searchParams.get('access_token')?.trim()) {
+      throw new Error('must include access_token')
     }
     return url.toString()
   } catch (error) {
-    throw new Error(`${label} must be a valid http(s) URL: ${error instanceof Error ? error.message : String(error)}`)
+    throw new Error(`${label} must be a valid DingTalk robot webhook URL: ${error instanceof Error ? error.message : String(error)}`)
+  }
+}
+
+function robotWebhookToken(value) {
+  try {
+    return new URL(value).searchParams.get('access_token')?.trim() ?? ''
+  } catch {
+    return ''
   }
 }
 
@@ -299,10 +313,17 @@ function validateOptions(opts) {
   if (!opts.authToken) throw new Error('--auth-token or DINGTALK_P4_AUTH_TOKEN is required')
   opts.groupAWebhook = validateWebhookUrl(opts.groupAWebhook, '--group-a-webhook')
   opts.groupBWebhook = validateWebhookUrl(opts.groupBWebhook, '--group-b-webhook')
+  if (robotWebhookToken(opts.groupAWebhook) === robotWebhookToken(opts.groupBWebhook)) {
+    throw new Error('--group-a-webhook and --group-b-webhook must use different DingTalk robot access_token values')
+  }
   opts.groupASecret = validateSecret(opts.groupASecret, '--group-a-secret')
   opts.groupBSecret = validateSecret(opts.groupBSecret, '--group-b-secret')
   if (opts.allowedUserIds.length === 0 && opts.allowedMemberGroupIds.length === 0) {
     throw new Error('at least one --allowed-user or --allowed-member-group is required for dingtalk_granted')
+  }
+  const authorizedUserId = opts.authorizedUserId || opts.allowedUserIds[0] || ''
+  if (opts.unauthorizedUserId && (opts.unauthorizedUserId === authorizedUserId || opts.allowedUserIds.includes(opts.unauthorizedUserId))) {
+    throw new Error('--unauthorized-user must be distinct from --authorized-user and must not be included in --allowed-user')
   }
   if (!Number.isInteger(opts.timeoutMs) || opts.timeoutMs < 1_000 || opts.timeoutMs > 120_000) {
     throw new Error('--timeout-ms must be an integer between 1000 and 120000')

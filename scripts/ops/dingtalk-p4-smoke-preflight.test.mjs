@@ -222,6 +222,41 @@ test('dingtalk-p4-smoke-preflight reads env file without writing raw secrets', a
   }
 })
 
+test('dingtalk-p4-smoke-preflight requires person user when final gate is enabled', () => {
+  const tmpDir = makeTmpDir()
+  const outputDir = path.join(tmpDir, 'preflight')
+
+  try {
+    const result = runScript([
+      '--skip-api',
+      '--require-person-user',
+      '--api-base',
+      'http://127.0.0.1:8900',
+      '--web-base',
+      'https://metasheet.example.test',
+      '--auth-token',
+      'secret-admin-token',
+      '--group-a-webhook',
+      'https://oapi.dingtalk.com/robot/send?access_token=robot-secret-a',
+      '--group-b-webhook',
+      'https://oapi.dingtalk.com/robot/send?access_token=robot-secret-b',
+      '--allowed-user',
+      'user_authorized',
+      '--output-dir',
+      outputDir,
+    ])
+
+    assert.equal(result.status, 1)
+    const summary = JSON.parse(readFileSync(path.join(outputDir, 'preflight-summary.json'), 'utf8'))
+    const personCheck = summary.checks.find((check) => check.id === 'person-smoke-input')
+    assert.equal(summary.overallStatus, 'fail')
+    assert.equal(personCheck.status, 'fail')
+    assert.match(personCheck.details.notes, /delivery-history-group-person/)
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+
 test('dingtalk-p4-smoke-preflight fails when allowlist is missing', () => {
   const tmpDir = makeTmpDir()
   const outputDir = path.join(tmpDir, 'preflight')
@@ -288,6 +323,44 @@ test('dingtalk-p4-smoke-preflight fails on malformed webhook and invalid SEC sec
     assert.equal(summary.overallStatus, 'fail')
     assert.equal(summary.checks.find((check) => check.id === 'group-webhooks-valid').status, 'fail')
     assert.equal(summary.checks.find((check) => check.id === 'group-secrets-valid').status, 'fail')
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+
+test('dingtalk-p4-smoke-preflight rejects non-DingTalk robot webhook shapes', () => {
+  const tmpDir = makeTmpDir()
+  const outputDir = path.join(tmpDir, 'preflight')
+
+  try {
+    const result = runScript([
+      '--skip-api',
+      '--api-base',
+      'http://127.0.0.1:8900',
+      '--web-base',
+      'https://metasheet.example.test',
+      '--auth-token',
+      'secret-admin-token',
+      '--group-a-webhook',
+      'http://oapi.dingtalk.com/robot/send?access_token=robot-secret-a',
+      '--group-b-webhook',
+      'https://example.com/robot/send?access_token=robot-secret-b',
+      '--allowed-user',
+      'user_authorized',
+      '--output-dir',
+      outputDir,
+    ])
+
+    assert.equal(result.status, 1)
+    const summaryText = readFileSync(path.join(outputDir, 'preflight-summary.json'), 'utf8')
+    assert.doesNotMatch(summaryText, /robot-secret-a/)
+    assert.doesNotMatch(summaryText, /robot-secret-b/)
+    assert.match(summaryText, /access_token=<redacted>/)
+    const summary = JSON.parse(summaryText)
+    const webhookCheck = summary.checks.find((check) => check.id === 'group-webhooks-valid')
+    assert.equal(webhookCheck.status, 'fail')
+    assert.equal(webhookCheck.details.failures.some((failure) => failure.includes('HTTPS')), true)
+    assert.equal(webhookCheck.details.failures.some((failure) => failure.includes('DingTalk robot URL')), true)
   } finally {
     rmSync(tmpDir, { recursive: true, force: true })
   }

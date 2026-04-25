@@ -4148,6 +4148,172 @@ paths:
                 $ref: '#/components/schemas/ErrorResponse'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
+  /api/approvals/metrics/report:
+    get:
+      operationId: getApprovalMetricsReport
+      tags:
+        - Approvals
+      summary: Get approval metrics TopN report
+      description: |
+        Returns admin-only approval observability data: the existing metrics
+        summary plus TopN slowest completed instances and templates with the
+        highest SLA breach rate.
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: query
+          name: since
+          schema:
+            type: string
+            format: date-time
+        - in: query
+          name: until
+          schema:
+            type: string
+            format: date-time
+        - in: query
+          name: limit
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 50
+            default: 10
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                    example: true
+                  data:
+                    type: object
+                    properties:
+                      summary:
+                        type: object
+                        properties:
+                          total:
+                            type: integer
+                          approved:
+                            type: integer
+                          rejected:
+                            type: integer
+                          revoked:
+                            type: integer
+                          returned:
+                            type: integer
+                          running:
+                            type: integer
+                          avgDurationSeconds:
+                            type: number
+                            nullable: true
+                          p50DurationSeconds:
+                            type: number
+                            nullable: true
+                          p95DurationSeconds:
+                            type: number
+                            nullable: true
+                          slaBreachCount:
+                            type: integer
+                          slaCandidateCount:
+                            type: integer
+                          slaBreachRate:
+                            type: number
+                          byTemplate:
+                            type: array
+                            items:
+                              type: object
+                              properties:
+                                templateId:
+                                  type: string
+                                  nullable: true
+                                total:
+                                  type: integer
+                                approved:
+                                  type: integer
+                                rejected:
+                                  type: integer
+                                revoked:
+                                  type: integer
+                                avgDurationSeconds:
+                                  type: number
+                                  nullable: true
+                                slaBreachRate:
+                                  type: number
+                      slowestInstances:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            instanceId:
+                              type: string
+                            templateId:
+                              type: string
+                              nullable: true
+                            startedAt:
+                              type: string
+                              format: date-time
+                            terminalAt:
+                              type: string
+                              format: date-time
+                              nullable: true
+                            terminalState:
+                              type: string
+                              nullable: true
+                              enum:
+                                - approved
+                                - rejected
+                                - revoked
+                                - returned
+                            durationSeconds:
+                              type: integer
+                            slaHours:
+                              type: integer
+                              nullable: true
+                            slaBreached:
+                              type: boolean
+                            slaBreachedAt:
+                              type: string
+                              format: date-time
+                              nullable: true
+                      breachedTemplates:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            templateId:
+                              type: string
+                              nullable: true
+                            total:
+                              type: integer
+                            slaCandidateCount:
+                              type: integer
+                            slaBreachCount:
+                              type: integer
+                            slaBreachRate:
+                              type: number
+                            avgDurationSeconds:
+                              type: number
+                              nullable: true
+                            p95DurationSeconds:
+                              type: number
+                              nullable: true
+                    required:
+                      - summary
+                      - slowestInstances
+                      - breachedTemplates
+                required:
+                  - ok
+                  - data
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          description: Internal server error
   /api/approval-templates:
     get:
       operationId: listApprovalTemplates

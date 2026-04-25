@@ -231,6 +231,7 @@ function writeSummary(summary, opts) {
 
 function buildSummary(opts, steps) {
   const publishCheck = sanitizePublishCheck(readJsonIfExists(opts.publishCheckJson))
+  const sessionSummary = readJsonIfExists(path.join(opts.sessionDir, 'session-summary.json'))
   const failures = []
   for (const step of steps) {
     if (step.status !== 'pass') failures.push(`${step.id} failed with exit code ${step.exitCode}`)
@@ -244,6 +245,7 @@ function buildSummary(opts, steps) {
     generatedAt: new Date().toISOString(),
     status: steps.every((step) => step.status === 'pass') && publishCheck?.status === 'pass' ? 'pass' : 'fail',
     sessionDir: relativePath(opts.sessionDir),
+    sessionRunId: typeof sessionSummary?.runId === 'string' ? sessionSummary.runId : '',
     outputDir: relativePath(opts.outputDir),
     steps,
     publishCheck,

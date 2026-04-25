@@ -1,0 +1,589 @@
+'use strict'
+
+const assert = require('node:assert/strict')
+const path = require('node:path')
+const { createAdapterRegistry, createReadResult, createUpsertResult } = require(path.join(__dirname, '..', 'lib', 'contracts.cjs'))
+const { createPipelineRunner } = require(path.join(__dirname, '..', 'lib', 'pipeline-runner.cjs'))
+const { createDeadLetterStore } = require(path.join(__dirname, '..', 'lib', 'dead-letter.cjs'))
+const { createWatermarkStore } = require(path.join(__dirname, '..', 'lib', 'watermark.cjs'))
+const { createRunLogger } = require(path.join(__dirname, '..', 'lib', 'run-log.cjs'))
+
+function createMockDb() {
+  const tables = new Map([
+    ['integration_dead_letters', []],
+    ['integration_watermarks', []],
+    ['integration_runs', []],
+  ])
+
+  function rows(table) {
+    if (!tables.has(table)) tables.set(table, [])
+    return tables.get(table)
+  }
+
+  function matches(row, where) {
+    return Object.entries(where || {}).every(([key, value]) => {
+      if (value === null || value === undefined) return row[key] === null || row[key] === undefined
+      return row[key] === value
+    })
+  }
+
+  return {
+    tables,
+    async selectOne(table, where) {
+      return rows(table).find((row) => matches(row, where)) || null
+    },
+    async insertOne(table, row) {
+      const stored = {
+        ...row,
+        created_at: row.created_at || '2026-04-24T00:00:00.000Z',
+        updated_at: row.updated_at || '2026-04-24T00:00:00.000Z',
+      }
+      rows(table).push(stored)
+      return [stored]
+    },
+    async updateRow(table, set, where) {
+      const row = rows(table).find((candidate) => matches(candidate, where))
+      if (!row) return []
+      Object.assign(row, set, { updated_at: '2026-04-24T01:00:00.000Z' })
+      return [row]
+    },
+    async select(table, options = {}) {
+      return rows(table).filter((row) => matches(row, options.where || {}))
+    },
+  }
+}
+
+function createPipelineRegistry(pipeline, db) {
+  let nextRun = 1
+  return {
+    async getPipeline(input) {
+      assert.equal(input.id, pipeline.id)
+      return pipeline
+    },
+    async createPipelineRun(input) {
+      const id = `run_${nextRun++}`
+      const row = {
+        id,
+        tenant_id: input.tenantId,
+        workspace_id: input.workspaceId ?? null,
+        pipeline_id: input.pipelineId,
+        mode: input.mode,
+        triggered_by: input.triggeredBy,
+        status: input.status,
+        rows_read: input.rowsRead || 0,
+        rows_cleaned: input.rowsCleaned || 0,
+        rows_written: input.rowsWritten || 0,
+        rows_failed: input.rowsFailed || 0,
+        started_at: input.startedAt || null,
+        details: input.details || {},
+      }
+      await db.insertOne('integration_runs', row)
+      return {
+        id,
+        tenantId: input.tenantId,
+        workspaceId: input.workspaceId ?? null,
+        pipelineId: input.pipelineId,
+        mode: input.mode,
+        triggeredBy: input.triggeredBy,
+        status: input.status,
+        details: input.details || {},
+      }
+    },
+    async updatePipelineRun(input) {
+      const rows = await db.updateRow('integration_runs', {
+        status: input.status,
+        rows_read: input.rowsRead,
+        rows_cleaned: input.rowsCleaned,
+        rows_written: input.rowsWritten,
+        rows_failed: input.rowsFailed,
+        duration_ms: input.durationMs,
+        error_summary: input.errorSummary || null,
+        details: input.details || {},
+      }, {
+        tenant_id: input.tenantId,
+        workspace_id: input.workspaceId ?? null,
+        id: input.id,
+      })
+      const row = rows[0]
+      return {
+        id: row.id,
+        tenantId: row.tenant_id,
+        workspaceId: row.workspace_id ?? null,
+        pipelineId: row.pipeline_id,
+        status: row.status,
+        rowsRead: row.rows_read,
+        rowsCleaned: row.rows_cleaned,
+        rowsWritten: row.rows_written,
+        rowsFailed: row.rows_failed,
+        durationMs: row.duration_ms,
+        errorSummary: row.error_summary,
+        details: row.details,
+      }
+    },
+  }
+}
+
+function createExternalSystemRegistry() {
+  const systems = new Map([
+    ['source_1', { id: 'source_1', name: 'PLM mock', kind: 'mock-source', role: 'source', config: {} }],
+    ['target_1', { id: 'target_1', name: 'ERP mock', kind: 'mock-target', role: 'target', config: {} }],
+  ])
+  return {
+    async getExternalSystem(input) {
+      return systems.get(input.id)
+    },
+    async getExternalSystemForAdapter(input) {
+      const system = systems.get(input.id)
+      return system ? { ...system, credentials: { bearerToken: `${system.id}-token` } } : null
+    },
+  }
+}
+
+function createRunnerHarness({ sourceRecords, pipelineOverrides = {}, sourceRead, targetUpsert, erpFeedbackWriter } = {}) {
+  const db = createMockDb()
+  const targetRows = new Map()
+  const adapterSystems = []
+  const pipeline = {
+    id: 'pipe_1',
+    tenantId: 'tenant_1',
+    workspaceId: null,
+    projectId: 'project_1',
+    sourceSystemId: 'source_1',
+    sourceObject: 'materials',
+    targetSystemId: 'target_1',
+    targetObject: 'BD_MATERIAL',
+    mode: 'incremental',
+    status: 'active',
+    idempotencyKeyFields: ['code', 'revision'],
+    options: {
+      batchSize: 100,
+      watermark: { type: 'updated_at', field: 'updatedAt' },
+    },
+    fieldMappings: [
+      { sourceField: 'code', targetField: 'FNumber', transform: ['trim', 'upper'], validation: [{ type: 'required' }] },
+      { sourceField: 'qty', targetField: 'FQty', transform: { fn: 'toNumber' }, validation: [{ type: 'min', value: 1 }] },
+      { sourceField: 'name', targetField: 'FName', transform: { fn: 'trim' }, validation: [{ type: 'required' }] },
+    ],
+    ...pipelineOverrides,
+  }
+  const adapterRegistry = createAdapterRegistry()
+    .registerAdapter('mock-source', ({ system }) => ({
+      system,
+      async testConnection() { return { ok: true } },
+      async listObjects() { return [{ name: 'materials' }] },
+      async getSchema() { return { fields: [] } },
+      async read(input) {
+        if (sourceRead) return sourceRead(input)
+        const watermark = input.watermark && input.watermark.updatedAt
+        const records = watermark
+          ? sourceRecords.filter((record) => Date.parse(record.updatedAt) > Date.parse(watermark))
+          : sourceRecords.slice()
+        return createReadResult({ records })
+      },
+      async upsert() {
+        throw new Error('source upsert should not be called')
+      },
+    }))
+    .registerAdapter('mock-target', ({ system }) => {
+      adapterSystems.push(system)
+      return {
+      async testConnection() { return { ok: true } },
+      async listObjects() { return [{ name: 'BD_MATERIAL' }] },
+      async getSchema() { return { fields: [] } },
+      async read() { return createReadResult({ records: [] }) },
+      async upsert(input) {
+        if (targetUpsert) return targetUpsert(input)
+        let written = 0
+        let skipped = 0
+        const results = []
+        for (const record of input.records) {
+          const key = record._integration_idempotency_key
+          if (targetRows.has(key)) {
+            skipped += 1
+            continue
+          }
+          targetRows.set(key, record)
+          written += 1
+          results.push({ key })
+        }
+        return createUpsertResult({ written, skipped, results })
+      },
+      }
+    })
+
+  const pipelineRegistry = createPipelineRegistry(pipeline, db)
+  const runner = createPipelineRunner({
+    pipelineRegistry,
+    externalSystemRegistry: createExternalSystemRegistry(),
+    adapterRegistry,
+    deadLetterStore: createDeadLetterStore({ db, idGenerator: () => `dl_${db.tables.get('integration_dead_letters').length + 1}` }),
+    watermarkStore: createWatermarkStore({ db }),
+    runLogger: createRunLogger({ pipelineRegistry }),
+    erpFeedbackWriter,
+    clock: (() => {
+      let tick = 0
+      return () => tick++ * 25
+    })(),
+  })
+
+  return { adapterSystems, db, pipeline, runner, sourceRecords, targetRows }
+}
+
+async function main() {
+  // --- 1. Cleanse + validation failure goes to dead letter --------------
+  const cleanse = createRunnerHarness({
+    sourceRecords: [
+      { code: '  a-01  ', revision: 'r1', qty: '3.50', name: ' Bolt ', updatedAt: '2026-04-24T01:00:00.000Z' },
+      { code: 'b-02', revision: 'r1', qty: 'bad', name: 'Nut', updatedAt: '2026-04-24T02:00:00.000Z' },
+    ],
+  })
+  const first = await cleanse.runner.runPipeline({
+    tenantId: 'tenant_1',
+    workspaceId: null,
+    pipelineId: 'pipe_1',
+    mode: 'incremental',
+    triggeredBy: 'manual',
+  })
+  assert.equal(first.run.status, 'partial')
+  assert.equal(first.metrics.rowsRead, 2)
+  assert.equal(first.metrics.rowsCleaned, 1)
+  assert.equal(first.metrics.rowsWritten, 1)
+  assert.equal(first.metrics.rowsFailed, 1)
+  assert.deepEqual(cleanse.adapterSystems[0].credentials, { bearerToken: 'target_1-token' }, 'runner passes decrypted target credentials to adapter')
+  assert.equal(cleanse.targetRows.size, 1)
+  assert.equal(Array.from(cleanse.targetRows.values())[0].FNumber, 'A-01')
+  assert.equal(cleanse.db.tables.get('integration_dead_letters').length, 1)
+  assert.equal(await cleanse.db.selectOne('integration_watermarks', { pipeline_id: 'pipe_1' }), null, 'failed batch does not advance watermark')
+
+  // --- 2. Idempotency prevents duplicate target writes ------------------
+  const idem = createRunnerHarness({
+    sourceRecords: [
+      { code: 'a-01', revision: 'r1', qty: '3', name: 'Bolt', updatedAt: '2026-04-24T01:00:00.000Z' },
+    ],
+  })
+  const idemRun1 = await idem.runner.runPipeline({ tenantId: 'tenant_1', pipelineId: 'pipe_1', mode: 'full', triggeredBy: 'manual' })
+  const idemRun2 = await idem.runner.runPipeline({ tenantId: 'tenant_1', pipelineId: 'pipe_1', mode: 'full', triggeredBy: 'manual' })
+  assert.equal(idemRun1.metrics.rowsWritten, 1)
+  assert.equal(idemRun2.metrics.rowsWritten, 0)
+  assert.equal(idem.targetRows.size, 1)
+
+  // --- 3. Incremental runs only read records above stored watermark ------
+  const incrementalRecords = [
+    { code: 'a-01', revision: 'r1', qty: '3', name: 'Bolt', updatedAt: '2026-04-24T01:00:00.000Z' },
+  ]
+  const incremental = createRunnerHarness({ sourceRecords: incrementalRecords })
+  const incRun1 = await incremental.runner.runPipeline({ tenantId: 'tenant_1', pipelineId: 'pipe_1', mode: 'incremental', triggeredBy: 'manual' })
+  assert.equal(incRun1.metrics.rowsWritten, 1)
+  assert.equal((await incremental.db.selectOne('integration_watermarks', { pipeline_id: 'pipe_1' })).watermark_value, '2026-04-24T01:00:00.000Z')
+
+  incrementalRecords.push({ code: 'b-02', revision: 'r1', qty: '4', name: 'Nut', updatedAt: '2026-04-24T02:00:00.000Z' })
+  const incRun2 = await incremental.runner.runPipeline({ tenantId: 'tenant_1', pipelineId: 'pipe_1', mode: 'incremental', triggeredBy: 'manual' })
+  assert.equal(incRun2.metrics.rowsRead, 1)
+  assert.equal(incRun2.metrics.rowsWritten, 1)
+  assert.equal((await incremental.db.selectOne('integration_watermarks', { pipeline_id: 'pipe_1' })).watermark_value, '2026-04-24T02:00:00.000Z')
+
+  // --- 4. Dry-run previews records without target/dead-letter/watermark --
+  const dryRun = createRunnerHarness({
+    sourceRecords: [
+      {
+        code: 'a-01',
+        revision: 'r1',
+        qty: '3',
+        name: 'Bolt',
+        updatedAt: '2026-04-24T01:00:00.000Z',
+        password: 'source-secret',
+        headers: { Authorization: 'Bearer source-token' },
+        rawPayload: { token: 'raw-token' },
+      },
+      { code: 'bad', revision: 'r1', qty: 'oops', name: 'Bad', updatedAt: '2026-04-24T02:00:00.000Z', token: 'bad-token' },
+    ],
+  })
+  const dry = await dryRun.runner.runPipeline({
+    tenantId: 'tenant_1',
+    pipelineId: 'pipe_1',
+    mode: 'incremental',
+    triggeredBy: 'manual',
+    dryRun: true,
+    sampleLimit: 2,
+  })
+  assert.equal(dry.run.status, 'partial')
+  assert.equal(dry.metrics.rowsRead, 2)
+  assert.equal(dry.metrics.rowsCleaned, 1)
+  assert.equal(dry.metrics.rowsWritten, 0)
+  assert.equal(dry.metrics.rowsFailed, 1)
+  assert.equal(dry.preview.records.length, 1)
+  assert.equal(dry.preview.errors.length, 1)
+  assert.equal(dry.preview.records[0].source.password, '[redacted]')
+  assert.equal(dry.preview.records[0].source.headers.Authorization, '[redacted]')
+  assert.equal(dry.preview.records[0].source.rawPayload, '[redacted]')
+  assert.equal(dry.preview.errors[0].sourcePayload.token, '[redacted]')
+  assert.equal(dryRun.targetRows.size, 0, 'dry-run does not write target')
+  assert.equal(dryRun.db.tables.get('integration_dead_letters').length, 0, 'dry-run does not create dead letters')
+  assert.equal(await dryRun.db.selectOne('integration_watermarks', { pipeline_id: 'pipe_1' }), null, 'dry-run does not advance watermark')
+
+  // --- 4b. Idempotency failures are per-record dead letters -------------
+  const noId = createRunnerHarness({
+    sourceRecords: [
+      { code: 'a-01', revision: 'r1', qty: '3', name: 'Bolt', updatedAt: '2026-04-24T01:00:00.000Z' },
+    ],
+    pipelineOverrides: {
+      idempotencyKeyFields: ['missingId', 'revision'],
+    },
+  })
+  const noIdRun = await noId.runner.runPipeline({ tenantId: 'tenant_1', pipelineId: 'pipe_1', mode: 'full', triggeredBy: 'manual' })
+  assert.equal(noIdRun.run.status, 'partial')
+  assert.equal(noIdRun.metrics.rowsFailed, 1)
+  assert.equal(noId.db.tables.get('integration_dead_letters')[0].error_code, 'IDEMPOTENCY_FAILED')
+
+  // --- 4c. Target failures without item errors create an aggregate dead letter
+  const targetFailed = createRunnerHarness({
+    sourceRecords: [
+      { code: 'x-01', revision: 'r1', qty: '3', name: 'Bolt', updatedAt: '2026-04-24T01:00:00.000Z' },
+      { code: 'x-02', revision: 'r1', qty: '4', name: 'Nut', updatedAt: '2026-04-24T02:00:00.000Z' },
+      { code: 'x-03', revision: 'r1', qty: '5', name: 'Washer', updatedAt: '2026-04-24T03:00:00.000Z' },
+    ],
+    targetUpsert: async () => createUpsertResult({ written: 0, failed: 3, errors: [] }),
+  })
+  const targetFailedRun = await targetFailed.runner.runPipeline({ tenantId: 'tenant_1', pipelineId: 'pipe_1', mode: 'full', triggeredBy: 'manual' })
+  assert.equal(targetFailedRun.run.status, 'partial')
+  assert.equal(targetFailedRun.metrics.rowsFailed, 3)
+  assert.equal(targetFailed.db.tables.get('integration_dead_letters').length, 1)
+  assert.equal(targetFailed.db.tables.get('integration_dead_letters')[0].error_code, 'TARGET_WRITE_AGGREGATE_FAILED')
+  assert.equal(targetFailed.db.tables.get('integration_dead_letters')[0].source_payload.failed, 3)
+
+  // --- 4c.1. Adapter under-report creates aggregate failure and blocks watermark
+  const underReported = createRunnerHarness({
+    sourceRecords: [
+      { code: 'ur-01', revision: 'r1', qty: '3', name: 'Bolt', updatedAt: '2026-04-24T01:00:00.000Z' },
+      { code: 'ur-02', revision: 'r1', qty: '4', name: 'Nut', updatedAt: '2026-04-24T02:00:00.000Z' },
+    ],
+    targetUpsert: async () => createUpsertResult({ written: 1, failed: 0, errors: [] }),
+  })
+  const underReportedRun = await underReported.runner.runPipeline({ tenantId: 'tenant_1', pipelineId: 'pipe_1', mode: 'incremental', triggeredBy: 'manual' })
+  assert.equal(underReportedRun.run.status, 'partial')
+  assert.equal(underReportedRun.metrics.rowsWritten, 1)
+  assert.equal(underReportedRun.metrics.rowsFailed, 1)
+  assert.equal(underReported.db.tables.get('integration_dead_letters').length, 1)
+  assert.equal(underReported.db.tables.get('integration_dead_letters')[0].error_code, 'TARGET_WRITE_AGGREGATE_FAILED')
+  assert.equal(underReported.db.tables.get('integration_dead_letters')[0].source_payload.unaccountedFailed, 1)
+  assert.equal(await underReported.db.selectOne('integration_watermarks', { pipeline_id: 'pipe_1' }), null, 'under-reported target result does not advance watermark')
+
+  // --- 4c.1. Adapter errors count as failed even if failed=0 ------------
+  const errorOnly = createRunnerHarness({
+    sourceRecords: [
+      { code: 'err-01', revision: 'r1', qty: '3', name: 'Bolt', updatedAt: '2026-04-24T01:00:00.000Z' },
+    ],
+    targetUpsert: async (input) => createUpsertResult({
+      written: 0,
+      failed: 0,
+      errors: [
+        {
+          key: input.records[0]._integration_idempotency_key,
+          code: 'ERP_REJECTED',
+          message: 'business rule rejected',
+        },
+      ],
+    }),
+  })
+  const errorOnlyRun = await errorOnly.runner.runPipeline({ tenantId: 'tenant_1', pipelineId: 'pipe_1', mode: 'incremental', triggeredBy: 'manual' })
+  assert.equal(errorOnlyRun.run.status, 'partial')
+  assert.equal(errorOnlyRun.metrics.rowsFailed, 1)
+  assert.equal(errorOnly.db.tables.get('integration_dead_letters')[0].error_code, 'ERP_REJECTED')
+  assert.equal(await errorOnly.db.selectOne('integration_watermarks', { pipeline_id: 'pipe_1' }), null, 'error-only target result does not advance watermark')
+
+  // --- 4c.2. Itemized plus aggregate failures preserve replay evidence ---
+  const mixedFailure = createRunnerHarness({
+    sourceRecords: [
+      { code: 'mix-01', revision: 'r1', qty: '3', name: 'Bolt', updatedAt: '2026-04-24T01:00:00.000Z' },
+      { code: 'mix-02', revision: 'r1', qty: '4', name: 'Nut', updatedAt: '2026-04-24T02:00:00.000Z' },
+    ],
+    targetUpsert: async (input) => createUpsertResult({
+      written: 0,
+      failed: 2,
+      errors: [
+        {
+          key: input.records[0]._integration_idempotency_key,
+          code: 'ERP_REJECTED',
+          message: 'business rule rejected',
+        },
+      ],
+    }),
+  })
+  const mixedFailureRun = await mixedFailure.runner.runPipeline({ tenantId: 'tenant_1', pipelineId: 'pipe_1', mode: 'incremental', triggeredBy: 'manual' })
+  assert.equal(mixedFailureRun.run.status, 'partial')
+  assert.equal(mixedFailureRun.metrics.rowsFailed, 2)
+  assert.deepEqual(
+    mixedFailure.db.tables.get('integration_dead_letters').map((row) => row.error_code),
+    ['ERP_REJECTED', 'TARGET_WRITE_AGGREGATE_FAILED'],
+  )
+  assert.equal(mixedFailure.db.tables.get('integration_dead_letters')[1].source_payload.failed, 1)
+  assert.equal(await mixedFailure.db.selectOne('integration_watermarks', { pipeline_id: 'pipe_1' }), null, 'mixed target failures do not advance watermark')
+
+  // --- 4c.2. Unmatched target errors do not bind to the first record ----
+  const unmatched = createRunnerHarness({
+    sourceRecords: [
+      { code: 'u-01', revision: 'r1', qty: '3', name: 'Bolt', updatedAt: '2026-04-24T01:00:00.000Z' },
+      { code: 'u-02', revision: 'r1', qty: '4', name: 'Nut', updatedAt: '2026-04-24T02:00:00.000Z' },
+    ],
+    targetUpsert: async () => createUpsertResult({
+      written: 0,
+      failed: 0,
+      errors: [
+        {
+          key: 'missing-key',
+          code: 'ERP_UNKNOWN_RECORD',
+          message: 'not mapped',
+          record: { FNumber: 'remote-only', password: 'remote-secret' },
+        },
+      ],
+    }),
+  })
+  await unmatched.runner.runPipeline({ tenantId: 'tenant_1', pipelineId: 'pipe_1', mode: 'full', triggeredBy: 'manual' })
+  const unmatchedLetter = unmatched.db.tables.get('integration_dead_letters')[0]
+  assert.equal(unmatchedLetter.error_code, 'TARGET_WRITE_UNMATCHED_ERROR')
+  assert.equal(unmatchedLetter.source_payload.adapterError, true)
+  assert.equal(unmatchedLetter.source_payload.key, 'missing-key')
+  assert.equal(unmatchedLetter.transformed_payload.password, '[redacted]')
+
+  // --- 4d. ERP feedback writes target result summaries after upsert ----
+  const feedbackCalls = []
+  const feedback = createRunnerHarness({
+    sourceRecords: [
+      { code: 'k3-01', revision: 'r1', qty: '3', name: 'Bolt', updatedAt: '2026-04-24T01:00:00.000Z' },
+    ],
+    targetUpsert: async (input) => createUpsertResult({
+      written: 1,
+      failed: 0,
+      results: [
+        {
+          key: input.records[0]._integration_idempotency_key,
+          externalId: 'k3_item_1',
+          billNo: 'K3-BILL-001',
+          responseMessage: 'saved',
+        },
+      ],
+    }),
+    erpFeedbackWriter: {
+      async writeBack(input) {
+        feedbackCalls.push(input)
+        return {
+          ok: true,
+          skipped: false,
+          projectId: input.pipeline.projectId,
+          objectId: 'standard_materials',
+          keyField: '_integration_idempotency_key',
+          items: [
+            { key: input.writeResult.results[0].key, fields: { erpSyncStatus: 'synced' } },
+          ],
+          result: { written: 1 },
+        }
+      },
+    },
+  })
+  const feedbackRun = await feedback.runner.runPipeline({ tenantId: 'tenant_1', pipelineId: 'pipe_1', mode: 'full', triggeredBy: 'manual' })
+  assert.equal(feedbackCalls.length, 1)
+  assert.equal(feedbackCalls[0].pipeline.id, 'pipe_1')
+  assert.equal(feedbackCalls[0].runId, feedbackRun.run.id)
+  assert.equal(feedbackCalls[0].cleanRecords.length, 1)
+  assert.equal(feedbackCalls[0].writeResult.results[0].externalId, 'k3_item_1')
+  assert.deepEqual(feedbackRun.run.details.erpFeedback, [
+    {
+      ok: true,
+      skipped: false,
+      reason: null,
+      projectId: 'project_1',
+      objectId: 'standard_materials',
+      keyField: '_integration_idempotency_key',
+      items: 1,
+      written: 1,
+    },
+  ])
+
+  // --- 4e. Dry-run sampleLimit is a total cap across pages --------------
+  let page = 0
+  const pagedDryRun = createRunnerHarness({
+    sourceRecords: [],
+    sourceRead: async () => {
+      page += 1
+      return createReadResult({
+        records: [
+          { code: `p-${page}-1`, revision: 'r1', qty: '3', name: 'Bolt', updatedAt: `2026-04-24T0${page}:00:00.000Z` },
+          { code: `p-${page}-2`, revision: 'r1', qty: '3', name: 'Nut', updatedAt: `2026-04-24T0${page}:10:00.000Z` },
+        ],
+        nextCursor: page < 3 ? `cursor-${page + 1}` : null,
+        done: page >= 3,
+      })
+    },
+  })
+  const limitedDryRun = await pagedDryRun.runner.runPipeline({
+    tenantId: 'tenant_1',
+    pipelineId: 'pipe_1',
+    mode: 'incremental',
+    triggeredBy: 'manual',
+    dryRun: true,
+    sampleLimit: 2,
+  })
+  assert.equal(limitedDryRun.metrics.rowsRead, 2)
+  assert.equal(page, 1, 'dry-run stops once total sampleLimit is reached')
+
+  // --- 5. Replay processes dead-letter source payload and marks replayed -
+  const replay = createRunnerHarness({
+    sourceRecords: [],
+  })
+  const deadLetterStore = createDeadLetterStore({ db: replay.db, idGenerator: () => 'dl_1' })
+  await deadLetterStore.createDeadLetter({
+    tenantId: 'tenant_1',
+    workspaceId: null,
+    runId: 'run_original',
+    pipelineId: 'pipe_1',
+    sourcePayload: { code: 'c-03', revision: 'r2', qty: '5', name: 'Washer', updatedAt: '2026-04-24T03:00:00.000Z' },
+    transformedPayload: null,
+    errorCode: 'VALIDATION_FAILED',
+    errorMessage: 'old mapping failed',
+  })
+  const replayed = await replay.runner.replayDeadLetter({
+    tenantId: 'tenant_1',
+    workspaceId: null,
+    id: 'dl_1',
+  })
+  assert.equal(replayed.deadLetter.status, 'replayed')
+  assert.equal(replayed.replay.metrics.rowsWritten, 1)
+  assert.equal(replay.targetRows.size, 1)
+
+  const truncatedReplay = createRunnerHarness({
+    sourceRecords: [],
+  })
+  const truncatedStore = createDeadLetterStore({ db: truncatedReplay.db, idGenerator: () => 'dl_truncated' })
+  await truncatedStore.createDeadLetter({
+    tenantId: 'tenant_1',
+    workspaceId: null,
+    runId: 'run_original',
+    pipelineId: 'pipe_1',
+    sourcePayload: {
+      code: 'big-01',
+      revision: 'r1',
+      qty: '5',
+      name: 'Big',
+      details: Object.fromEntries(Array.from({ length: 30 }, (_, index) => [`field_${index}`, 'x'.repeat(2000)])),
+    },
+    transformedPayload: null,
+    errorCode: 'VALIDATION_FAILED',
+    errorMessage: 'large payload failed',
+  })
+  const replayError = await truncatedReplay.runner.replayDeadLetter({
+    tenantId: 'tenant_1',
+    workspaceId: null,
+    id: 'dl_truncated',
+  }).catch((error) => error)
+  assert.equal(replayError.name, 'PipelineRunnerError')
+  assert.equal(replayError.details.reason, 'PAYLOAD_TRUNCATED')
+  assert.equal(truncatedReplay.targetRows.size, 0, 'truncated replay is rejected before target write')
+
+  console.log('✓ pipeline-runner: cleanse/idempotency/incremental E2E tests passed')
+}
+
+main().catch((err) => {
+  console.error('✗ pipeline-runner FAILED')
+  console.error(err)
+  process.exit(1)
+})

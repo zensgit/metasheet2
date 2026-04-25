@@ -10,6 +10,12 @@ import { extractSelectOptions, normalizeJson, normalizeJsonArray, type Multitabl
 import { getDefaultValidationRules, validateRecord } from './field-validation-engine'
 import type { FieldValidationConfig } from './field-validation'
 import { loadFieldsForSheet } from './loaders'
+import {
+  createYjsInvalidationPostCommitHook,
+  type RecordPostCommitContext,
+  type RecordPostCommitHook,
+  type YjsInvalidator,
+} from './post-commit-hooks'
 import { isFieldAlwaysReadOnly, isFieldPermissionHidden } from './permission-derivation'
 import { publishMultitableSheetRealtime } from './realtime-publish'
 import { ensureRecordWriteAllowed, type AccessInfo, type SheetPermissionScope } from './sheet-capabilities'
@@ -46,8 +52,6 @@ type FieldMutationGuard = {
   hidden: boolean
   link?: LinkFieldConfig | null
 }
-
-export type YjsInvalidator = (recordIds: string[]) => Promise<void> | void
 
 export class VersionConflictError extends Error {
   constructor(
@@ -296,8 +300,16 @@ export class RecordService {
   constructor(
     private pool: ConnectionPool,
     private eventBus: EventBus,
-    private yjsInvalidator: YjsInvalidator | null = null,
+    private postCommitHooks: RecordPostCommitHook[] = [],
   ) {}
+
+  setPostCommitHooks(hooks: RecordPostCommitHook[]): void {
+    this.postCommitHooks = [...hooks]
+  }
+
+  setYjsInvalidator(invalidator: YjsInvalidator | null): void {
+    this.setPostCommitHooks(invalidator ? [createYjsInvalidationPostCommitHook(invalidator)] : [])
+  }
 
   async createRecord(input: RecordCreateInput): Promise<RecordCreateResult> {
     const { sheetId, data, actorId, capabilities } = input
@@ -729,14 +741,22 @@ export class RecordService {
       }
     })
 
-    if (this.yjsInvalidator) {
-      try {
-        await this.yjsInvalidator([recordId])
-      } catch (err) {
-        console.error(
-          `[record-service] Yjs invalidation failed for record ${recordId} — Yjs state may be stale until next idle-release:`,
-          err,
-        )
+    if (this.postCommitHooks.length > 0) {
+      const context: RecordPostCommitContext = {
+        recordIds: [recordId],
+        sheetId,
+        actorId: access.userId ?? 'system',
+        source: 'rest',
+      }
+      for (const hook of this.postCommitHooks) {
+        try {
+          await hook(context)
+        } catch (err) {
+          console.error(
+            `[record-service] Post-commit hook failed for record ${recordId} — downstream state may be stale until the next successful sync:`,
+            err,
+          )
+        }
       }
     }
 

@@ -71,10 +71,21 @@ import { startMultitableAttachmentCleanup } from './multitable/attachment-orphan
 import { AutomationService, setAutomationServiceInstance } from './multitable/automation-service'
 import { tenantContext } from './db/sharding/tenant-context'
 import { attendanceAuditMiddleware, attendanceSecurityMiddleware } from './middleware/attendance-production'
+import {
+  correlationContextEnrichmentMiddleware,
+  correlationErrorHandler,
+  correlationIdMiddleware,
+} from './middleware/correlation'
 import { approvalsRouter } from './routes/approvals'
 import { authRouter } from './routes/auth'
 import { auditLogsRouter } from './routes/audit-logs'
 import { approvalHistoryRouter } from './routes/approval-history'
+import { approvalMetricsRouter } from './routes/approval-metrics'
+import {
+  resolveApprovalSlaSchedulerLeaderOptions,
+  startApprovalSlaScheduler,
+  stopApprovalSlaScheduler,
+} from './services/ApprovalSlaScheduler'
 import { rolesRouter } from './routes/roles'
 import { snapshotsRouter } from './routes/snapshots'
 import changeManagementRouter from './routes/change-management'
@@ -99,6 +110,7 @@ import { startDirectorySyncScheduler, stopDirectorySyncScheduler } from './direc
 import { canaryRoutes } from './routes/canary-routes'
 import { CanaryRouter } from './canary/CanaryRouter'
 import { createCanaryInterceptor } from './canary/CanaryInterceptor'
+import { PluginRuntimeSecurityService } from './security/plugin-runtime-security-service'
 import workflowRouter from './routes/workflow'
 import workflowDesignerRouter from './routes/workflow-designer'
 import plmWorkbenchRouter from './routes/plm-workbench'
@@ -138,6 +150,12 @@ type PluginRuntimeState = {
   lastAttempt?: string
 }
 
+type PluginRouteRegistration = {
+  active: boolean
+  method: string
+  path: string
+}
+
 function disabledFeatureHandler(message: string): RequestHandler {
   return (_req, res) => {
     res.status(404).json({
@@ -158,6 +176,11 @@ export class MetaSheetServer {
   private pluginStatus = new Map<string, PluginRuntimeState>()
   private disabledPlugins = new Set<string>()
   private pluginApis = new Map<string, Record<string, PluginApiMethod>>()
+  private pluginRouteRegistrationSeq = 0
+  private pluginRouteRegistrations = new Map<string, PluginRouteRegistration>()
+  private pluginRouteRegistrationIdsByPlugin = new Map<string, Set<string>>()
+  private pluginCommunicationNamespacesByPlugin = new Map<string, Set<string>>()
+  private pluginCommunicationNamespaceOwners = new Map<string, string>()
   private port: number
   private host?: string
   private portLocked: boolean
@@ -174,6 +197,7 @@ export class MetaSheetServer {
   private yjsBridgeMetricsSource?: { getMetrics(): { pendingWriteCount: number; observedDocCount: number; flushSuccessCount: number; flushFailureCount: number } }
   private yjsSocketMetricsSource?: { getMetrics(): { activeRecordCount: number; activeSocketCount: number } }
   private afterSalesApprovalBridgeService: AfterSalesApprovalBridgeService
+  private pluginRuntimeSecurityService = new PluginRuntimeSecurityService()
   // Optional bypass/degraded-mode flags for local debug
   private disableWorkflow = process.env.DISABLE_WORKFLOW === 'true'
   private disableEventBus = process.env.DISABLE_EVENT_BUS === 'true'
@@ -687,12 +711,125 @@ export class MetaSheetServer {
     }
   }
 
+  private registerPluginRoute(pluginName: string, method: string, path: string, handler: RequestHandler): void {
+    const methodUpper = method.toUpperCase()
+    const methodLower = method.toLowerCase()
+    if (!['get', 'post', 'put', 'delete', 'patch'].includes(methodLower)) {
+      throw new Error(`Unsupported plugin route method: ${method}`)
+    }
+
+    const registrationId = `${pluginName}:${methodUpper}:${path}:${++this.pluginRouteRegistrationSeq}`
+    const registration: PluginRouteRegistration = {
+      active: true,
+      method: methodUpper,
+      path,
+    }
+    this.pluginRouteRegistrations.set(registrationId, registration)
+
+    const registrationIds = this.pluginRouteRegistrationIdsByPlugin.get(pluginName) ?? new Set<string>()
+    registrationIds.add(registrationId)
+    this.pluginRouteRegistrationIdsByPlugin.set(pluginName, registrationIds)
+
+    this.app[methodLower as 'get' | 'post' | 'put' | 'delete' | 'patch'](
+      path,
+      async (req: Request, res: Response, next: NextFunction) => {
+        if (!registration.active) {
+          return next()
+        }
+
+        const endTimer = (res as unknown as Record<string, unknown>).__metricsTimer as ((opts: { route: string; method: string }) => (statusCode: number) => void) | undefined
+        try {
+          await handler(req, res, next)
+        } catch (error) {
+          this.logger.error(`Plugin route handler error: ${pluginName} ${methodUpper} ${path}`, error as Error)
+          if (!res.headersSent) {
+            res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Internal server error' } })
+          }
+        } finally {
+          if (typeof endTimer === 'function') endTimer({ route: path, method: req.method })(res.statusCode)
+        }
+      },
+    )
+
+    this.logger.info(`Plugin route registered: ${pluginName} ${methodUpper} ${path}`)
+  }
+
+  private removePluginRoutes(pluginName: string, path?: string): void {
+    const registrationIds = this.pluginRouteRegistrationIdsByPlugin.get(pluginName)
+    if (!registrationIds) return
+
+    for (const registrationId of Array.from(registrationIds)) {
+      const registration = this.pluginRouteRegistrations.get(registrationId)
+      if (!registration) {
+        registrationIds.delete(registrationId)
+        continue
+      }
+      if (path && registration.path !== path) {
+        continue
+      }
+
+      registration.active = false
+      this.pluginRouteRegistrations.delete(registrationId)
+      registrationIds.delete(registrationId)
+      this.logger.info(`Plugin route disabled: ${pluginName} ${registration.method} ${registration.path}`)
+    }
+
+    if (registrationIds.size === 0) {
+      this.pluginRouteRegistrationIdsByPlugin.delete(pluginName)
+    }
+  }
+
+  private registerPluginCommunicationNamespace(pluginName: string, namespace: string, api: Record<string, PluginApiMethod>): void {
+    const owner = this.pluginCommunicationNamespaceOwners.get(namespace)
+    if (owner && owner !== pluginName) {
+      throw new Error(`Plugin communication namespace already registered: ${namespace}`)
+    }
+
+    this.pluginApis.set(namespace, api)
+    this.pluginCommunicationNamespaceOwners.set(namespace, pluginName)
+    const namespaces = this.pluginCommunicationNamespacesByPlugin.get(pluginName) ?? new Set<string>()
+    namespaces.add(namespace)
+    this.pluginCommunicationNamespacesByPlugin.set(pluginName, namespaces)
+  }
+
+  private unregisterPluginCommunicationNamespace(pluginName: string, namespace: string): boolean {
+    if (this.pluginCommunicationNamespaceOwners.get(namespace) !== pluginName) return false
+
+    const namespaces = this.pluginCommunicationNamespacesByPlugin.get(pluginName)
+    if (!namespaces?.has(namespace)) return false
+
+    namespaces.delete(namespace)
+    this.pluginApis.delete(namespace)
+    this.pluginCommunicationNamespaceOwners.delete(namespace)
+    if (namespaces.size === 0) {
+      this.pluginCommunicationNamespacesByPlugin.delete(pluginName)
+    }
+    this.logger.info(`Plugin communication namespace unregistered: ${pluginName} -> ${namespace}`)
+    return true
+  }
+
+  private cleanupPluginRuntimeRegistrations(pluginName: string): void {
+    this.removePluginRoutes(pluginName)
+
+    const namespaces = this.pluginCommunicationNamespacesByPlugin.get(pluginName)
+    if (!namespaces) return
+    for (const namespace of Array.from(namespaces)) {
+      this.unregisterPluginCommunicationNamespace(pluginName, namespace)
+    }
+  }
+
   /**
    * 配置中间件
    */
   private setupMiddleware(): void {
+    // Correlation-id must wrap every downstream middleware so AsyncLocalStorage
+    // is populated before CORS, request logging, auth, and route handlers run.
+    this.app.use(correlationIdMiddleware)
+
     // CORS
-    this.app.use(cors())
+    this.app.use(cors({
+      exposedHeaders: ['X-Correlation-ID'],
+    }))
 
     // API responses should always opt out of MIME sniffing, including early 4xx replies.
     this.app.use('/api', (_req: Request, res: Response, next: NextFunction) => {
@@ -754,6 +891,10 @@ export class MetaSheetServer {
       return next()
     })
 
+    // Post-auth enrichment: correlation ALS starts before auth so preflights
+    // are covered; once auth runs, attach user/tenant for downstream logs.
+    this.app.use(correlationContextEnrichmentMiddleware)
+
     this.app.use((req: Request, _res: Response, next: NextFunction) => {
       const tenantId = typeof req.user?.tenantId === 'string' && req.user.tenantId.trim().length > 0
         ? req.user.tenantId.trim()
@@ -811,6 +952,8 @@ export class MetaSheetServer {
     this.app.use(auditLogsRouter())
     // 路由：审批历史（从审计表衍生）
     this.app.use(approvalHistoryRouter({ injector: this.injector }))
+    // 路由：审批 SLA / 耗时指标（Wave 2 WP5）
+    this.app.use(approvalMetricsRouter())
     // 路由：角色/权限/表/文件/表权限（占位）
     this.app.use(rolesRouter())
     this.app.use(permissionsRouter())
@@ -1024,6 +1167,14 @@ export class MetaSheetServer {
     // Note: /metrics/prom endpoint is registered by installMetrics() in setupMiddleware()
   }
 
+  private installGlobalErrorHandler(): void {
+    // Global error handler — emits `correlationId` in the response body so API
+    // clients can reference the request when filing bug reports. It must be
+    // registered after all routes/plugin routes; Express only dispatches errors
+    // to handlers that appear later in the middleware stack.
+    this.app.use(correlationErrorHandler(this.logger))
+  }
+
   /**
    * 初始化缓存 (Phase 1)
    *
@@ -1089,9 +1240,25 @@ export class MetaSheetServer {
   private createPluginContext(loaded: LoadedPlugin): PluginContext {
     const coreApi = this.injector.get(ICoreAPI)
     const manifest = loaded.manifest
+    const pluginName = manifest.name
+    const pluginHttpApi = coreApi.http
+      ? {
+          ...coreApi.http,
+          addRoute: (method: string, path: string, handler: RequestHandler) => {
+            this.registerPluginRoute(pluginName, method, path, handler)
+          },
+          removeRoute: (path: string) => {
+            this.removePluginRoutes(pluginName, path)
+          },
+        }
+      : coreApi.http
+    const pluginBaseCoreApi = {
+      ...coreApi,
+      http: pluginHttpApi,
+    }
     const pluginCoreApi = coreApi.multitable
       ? {
-          ...coreApi,
+          ...pluginBaseCoreApi,
           multitable: createPluginScopedMultitableApi(coreApi.multitable, manifest.name, {
             ensureObjectInScope: async ({ pluginName, projectId, baseId, descriptor }) => {
               return poolManager.get().transaction(async ({ query }) => {
@@ -1184,7 +1351,7 @@ export class MetaSheetServer {
             },
           }),
         }
-      : coreApi
+      : pluginBaseCoreApi
     const storageCache = new Map<string, unknown>()
     const storage: PluginStorage = {
       async get<T = unknown>(key: string): Promise<T | null> {
@@ -1329,7 +1496,10 @@ export class MetaSheetServer {
         return fn(...args) as Promise<R>
       },
       register: (name: string, api: Record<string, PluginApiMethod>) => {
-        pluginApis.set(name, api)
+        this.registerPluginCommunicationNamespace(pluginName, name, api)
+      },
+      unregister: (name: string) => {
+        return this.unregisterPluginCommunicationNamespace(pluginName, name)
       },
       on: (event: string, handler: (data: unknown) => void) => {
         eventBus.on(event, handler)
@@ -1355,6 +1525,7 @@ export class MetaSheetServer {
         automationRegistry,
         rbacProvisioning,
         platformAppInstances,
+        security: this.pluginRuntimeSecurityService,
       } as unknown as import('./types/plugin').PluginServices,
       storage,
       config: {},
@@ -1389,6 +1560,7 @@ export class MetaSheetServer {
       return this.setPluginRuntimeState(name, 'inactive')
     }
 
+    this.cleanupPluginRuntimeRegistrations(name)
     const context = this.createPluginContext(loaded)
     try {
       await pluginInstance.activate(context)
@@ -1396,6 +1568,7 @@ export class MetaSheetServer {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       this.logger.error(`Plugin activation failed: ${name}`, error as Error)
+      this.cleanupPluginRuntimeRegistrations(name)
       return this.setPluginRuntimeState(name, 'failed', message)
     }
   }
@@ -1417,18 +1590,21 @@ export class MetaSheetServer {
     }
 
     const pluginInstance = this.ensurePluginInstance(loaded)
+    let deactivationError: string | undefined
     if (pluginInstance && typeof pluginInstance.deactivate === 'function') {
       try {
         await pluginInstance.deactivate()
       } catch (error) {
-        const message = error instanceof Error ? error.message : String(error)
+        deactivationError = error instanceof Error ? error.message : String(error)
         this.logger.error(`Plugin deactivation failed: ${name}`, error as Error)
-        this.disabledPlugins.add(name)
-        return this.setPluginRuntimeState(name, 'failed', message)
       }
     }
 
+    this.cleanupPluginRuntimeRegistrations(name)
     this.disabledPlugins.add(name)
+    if (deactivationError) {
+      return this.setPluginRuntimeState(name, 'failed', deactivationError)
+    }
     return this.setPluginRuntimeState(name, 'inactive')
   }
 
@@ -1584,6 +1760,14 @@ export class MetaSheetServer {
       }
     })())
 
+    shutdownTasks.push((async () => {
+      try {
+        stopApprovalSlaScheduler()
+      } catch (err) {
+        this.logger.warn(`Approval SLA scheduler shutdown failed: ${err instanceof Error ? err.message : String(err)}`)
+      }
+    })())
+
     // 4. Destroy API Gateway resources (only if one was constructed during start()).
     shutdownTasks.push((async () => {
       try {
@@ -1718,6 +1902,17 @@ export class MetaSheetServer {
       this.logger.error('Directory sync scheduler initialization failed; continuing in degraded mode', e as Error)
     }
 
+    try {
+      const leaderOptions = await resolveApprovalSlaSchedulerLeaderOptions()
+      startApprovalSlaScheduler({
+        leaderOptions,
+        runtime: { leaderStateGauge: promMetrics.approvalSlaSchedulerLeaderGauge },
+      })
+      this.logger.info('Approval SLA scheduler initialized')
+    } catch (e) {
+      this.logger.error('Approval SLA scheduler initialization failed; continuing in degraded mode', e as Error)
+    }
+
     // 加载插件并启动 HTTP 服务
     if (process.env.SKIP_PLUGINS === 'true') {
       this.logger.warn('Skipping plugin load (SKIP_PLUGINS=true)')
@@ -1752,6 +1947,7 @@ export class MetaSheetServer {
       const { YjsWebSocketAdapter } = await import('./collab/yjs-websocket-adapter')
       const { YjsRecordBridge } = await import('./collab/yjs-record-bridge')
       const { RecordWriteService } = await import('./multitable/record-write-service')
+      const { createYjsInvalidationPostCommitHook } = await import('./multitable/post-commit-hooks')
       const { db: kyselyDbYjs } = await import('./db/db')
       const collabIO = this.injector.get(ICollabService).getIO()
       if (collabIO) {
@@ -1942,7 +2138,9 @@ export class MetaSheetServer {
             yjsWsAdapter.notifyInvalidated(recordIds)
           }
         }
-        recordWriteService.setYjsInvalidator(yjsInvalidate)
+        recordWriteService.setPostCommitHooks([
+          createYjsInvalidationPostCommitHook(yjsInvalidate),
+        ])
         const univerMetaModule = await import('./routes/univer-meta')
         univerMetaModule.setYjsInvalidatorForRoutes(yjsInvalidate)
 
@@ -1977,6 +2175,8 @@ export class MetaSheetServer {
     } catch (e) {
       this.logger.error('Failed to initialize MetricsStreamService', e as Error)
     }
+
+    this.installGlobalErrorHandler()
 
     this.logger.info('Starting HTTP server listen phase...')
     await new Promise<void>((resolve, reject) => {

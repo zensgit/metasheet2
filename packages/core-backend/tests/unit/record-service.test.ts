@@ -11,6 +11,7 @@ import {
   type ConnectionPool,
   type QueryFn,
 } from '../../src/multitable/record-service'
+import { createYjsInvalidationPostCommitHook } from '../../src/multitable/post-commit-hooks'
 
 const mockPublish = vi.fn()
 vi.mock('../../src/multitable/realtime-publish', () => ({
@@ -306,7 +307,9 @@ describe('RecordService', () => {
       SELECT_LINK_TARGETS: { rows: [{ id: 'rec_customer_2' }] },
       SELECT_CURRENT_LINKS: { rows: [{ foreign_record_id: 'rec_customer_1' }] },
     })
-    const service = new RecordService(pool, eventBus as any, yjsInvalidator)
+    const service = new RecordService(pool, eventBus as any, [
+      createYjsInvalidationPostCommitHook(yjsInvalidator),
+    ])
 
     const result = await service.patchRecord({
       recordId: 'rec_existing',
