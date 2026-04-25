@@ -292,6 +292,14 @@ function validateWebhookUrl(value, label) {
   }
 }
 
+function robotWebhookToken(value) {
+  try {
+    return new URL(value).searchParams.get('access_token')?.trim() ?? ''
+  } catch {
+    return ''
+  }
+}
+
 function validateSecret(value, label) {
   const secret = typeof value === 'string' ? value.trim() : ''
   if (!secret) return ''
@@ -305,10 +313,17 @@ function validateOptions(opts) {
   if (!opts.authToken) throw new Error('--auth-token or DINGTALK_P4_AUTH_TOKEN is required')
   opts.groupAWebhook = validateWebhookUrl(opts.groupAWebhook, '--group-a-webhook')
   opts.groupBWebhook = validateWebhookUrl(opts.groupBWebhook, '--group-b-webhook')
+  if (robotWebhookToken(opts.groupAWebhook) === robotWebhookToken(opts.groupBWebhook)) {
+    throw new Error('--group-a-webhook and --group-b-webhook must use different DingTalk robot access_token values')
+  }
   opts.groupASecret = validateSecret(opts.groupASecret, '--group-a-secret')
   opts.groupBSecret = validateSecret(opts.groupBSecret, '--group-b-secret')
   if (opts.allowedUserIds.length === 0 && opts.allowedMemberGroupIds.length === 0) {
     throw new Error('at least one --allowed-user or --allowed-member-group is required for dingtalk_granted')
+  }
+  const authorizedUserId = opts.authorizedUserId || opts.allowedUserIds[0] || ''
+  if (opts.unauthorizedUserId && (opts.unauthorizedUserId === authorizedUserId || opts.allowedUserIds.includes(opts.unauthorizedUserId))) {
+    throw new Error('--unauthorized-user must be distinct from --authorized-user and must not be included in --allowed-user')
   }
   if (!Number.isInteger(opts.timeoutMs) || opts.timeoutMs < 1_000 || opts.timeoutMs > 120_000) {
     throw new Error('--timeout-ms must be an integer between 1000 and 120000')

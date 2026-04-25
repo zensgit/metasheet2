@@ -51,6 +51,7 @@ const REQUIRED_CHECKS = [
 const CHECK_ID_SET = new Set(REQUIRED_CHECKS.map((check) => check.id))
 const VALID_STATUSES = new Set(['pass', 'fail', 'skipped', 'pending'])
 const MAX_SECRET_SCAN_BYTES = 2 * 1024 * 1024
+const ARTIFACT_FRESHNESS_SKEW_MS = 5 * 60 * 1000
 const SECRET_PATTERNS = [
   {
     name: 'dingtalk_robot_webhook',
@@ -528,6 +529,8 @@ function validateManualArtifactRefs(checkId, evidence, evidenceDir, opts) {
   const refs = collectArtifactRefs(evidence)
   const expectedPrefix = `artifacts/${checkId}/`
   const evidenceRoot = path.resolve(evidenceDir)
+  const performedAt = evidence.performedAt ?? evidence.executedAt ?? evidence.timestamp
+  const performedAtMs = isDateLikeString(performedAt) ? Date.parse(performedAt) : null
   for (const ref of refs) {
     if (!isNonEmptyString(ref)) {
       issues.push(artifactIssue(checkId, 'artifact_ref_invalid', `${checkId} has an empty artifact reference`))
@@ -575,6 +578,10 @@ function validateManualArtifactRefs(checkId, evidence, evidenceDir, opts) {
     }
     if (stat.size <= 0) {
       issues.push(artifactIssue(checkId, 'artifact_ref_empty', `${checkId} artifact file is empty`, trimmed))
+      continue
+    }
+    if (performedAtMs !== null && stat.mtimeMs + ARTIFACT_FRESHNESS_SKEW_MS < performedAtMs) {
+      issues.push(artifactIssue(checkId, 'artifact_ref_stale', `${checkId} artifact file is older than evidence.performedAt`, trimmed))
       continue
     }
     issues.push(...scanArtifactFileForSecrets(checkId, normalizedRef, fullPath))

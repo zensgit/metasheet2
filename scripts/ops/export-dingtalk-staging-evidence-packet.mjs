@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 
 const DEFAULT_OUTPUT_DIR = 'artifacts/dingtalk-staging-evidence-packet'
@@ -317,7 +317,11 @@ function validateEvidenceDir(sourceDir, opts) {
   return opts.requireDingTalkP4Pass ? validateDingTalkP4FinalPass(sourceDir) : null
 }
 
-function clearGeneratedPacketMarkers(outputDir) {
+function inspectExistingPacketOutputDir(outputDir) {
+  if (!existsSync(outputDir)) return { exists: false, isExistingPacket: false, entryCount: 0 }
+  if (!statSync(outputDir).isDirectory()) {
+    throw new Error(`--output-dir must be a directory: ${outputDir}`)
+  }
   const manifestPath = path.join(outputDir, 'manifest.json')
   const readmePath = path.join(outputDir, 'README.md')
   let isExistingPacket = false
@@ -331,7 +335,22 @@ function clearGeneratedPacketMarkers(outputDir) {
   if (!isExistingPacket && existsSync(readmePath) && statSync(readmePath).isFile()) {
     isExistingPacket = readFileSync(readmePath, 'utf8').includes('# DingTalk Staging Evidence Packet')
   }
-  if (isExistingPacket) {
+  return {
+    exists: true,
+    isExistingPacket,
+    entryCount: readdirSync(outputDir).length,
+  }
+}
+
+function clearGeneratedPacketMarkers(outputDir) {
+  const inspected = inspectExistingPacketOutputDir(outputDir)
+  if (inspected.exists && inspected.entryCount > 0 && !inspected.isExistingPacket) {
+    throw new Error('--output-dir already exists and is not a DingTalk staging evidence packet; choose an empty/new packet directory')
+  }
+  const manifestPath = path.join(outputDir, 'manifest.json')
+  const readmePath = path.join(outputDir, 'README.md')
+  if (!inspected.exists || inspected.entryCount === 0) return
+  if (inspected.isExistingPacket) {
     rmSync(path.join(outputDir, 'evidence'), { recursive: true, force: true })
   }
   for (const file of ['manifest.json', 'README.md']) {

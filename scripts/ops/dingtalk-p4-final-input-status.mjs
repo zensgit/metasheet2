@@ -129,6 +129,15 @@ function isValidRobotWebhook(value) {
   }
 }
 
+function robotWebhookToken(value) {
+  if (!value) return ''
+  try {
+    return new URL(value).searchParams.get('access_token')?.trim() ?? ''
+  } catch {
+    return ''
+  }
+}
+
 function isValidRobotSecret(value) {
   return !value || /^SEC[A-Za-z0-9+/=_-]{8,}$/.test(value)
 }
@@ -217,6 +226,13 @@ function buildSummary(opts, values) {
   addCheck(summary, 'group-b-webhook-shape', 'Group B webhook has DingTalk robot URL shape', isValidRobotWebhook(groupBWebhook), {
     value: redactValue('DINGTALK_P4_GROUP_B_WEBHOOK', groupBWebhook),
   }, 'Use https://oapi.dingtalk.com/robot/send?access_token=...')
+  const groupAToken = robotWebhookToken(groupAWebhook)
+  const groupBToken = robotWebhookToken(groupBWebhook)
+  addCheck(summary, 'group-webhooks-distinct', 'Group A and B robot webhooks use distinct access tokens', Boolean(groupAToken && groupBToken && groupAToken !== groupBToken), {
+    groupAWebhookPresent: Boolean(groupAWebhook),
+    groupBWebhookPresent: Boolean(groupBWebhook),
+    sameAccessToken: Boolean(groupAToken && groupBToken && groupAToken === groupBToken),
+  }, 'Use two different DingTalk group robots so multi-destination delivery is meaningful.')
   addCheck(summary, 'group-a-secret-shape', 'Group A secret is blank or SEC-shaped', isValidRobotSecret(groupASecret), {
     present: Boolean(groupASecret),
     value: redactValue('DINGTALK_P4_GROUP_A_SECRET', groupASecret),

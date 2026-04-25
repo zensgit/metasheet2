@@ -361,6 +361,11 @@ function isValidRobotWebhook(value) {
   )
 }
 
+function robotWebhookToken(value) {
+  const url = safeUrl(value)
+  return url?.searchParams.get('access_token')?.trim() ?? ''
+}
+
 function checkEnvMode(file) {
   if (process.platform === 'win32') {
     return { checked: false, mode: null, ok: true }
@@ -422,6 +427,13 @@ function checkReadiness(opts) {
   addCheck(summary, 'group-b-webhook-shape', 'Group B webhook uses DingTalk robot URL shape', isValidRobotWebhook(groupBWebhook) ? 'pass' : 'fail', {
     value: redactValue('DINGTALK_P4_GROUP_B_WEBHOOK', groupBWebhook),
   })
+  const groupAToken = robotWebhookToken(groupAWebhook)
+  const groupBToken = robotWebhookToken(groupBWebhook)
+  addCheck(summary, 'group-webhooks-distinct', 'Group A and B robot webhooks use distinct access tokens', groupAToken && groupBToken && groupAToken !== groupBToken ? 'pass' : 'fail', {
+    groupAWebhookPresent: Boolean(groupAWebhook),
+    groupBWebhookPresent: Boolean(groupBWebhook),
+    sameAccessToken: Boolean(groupAToken && groupBToken && groupAToken === groupBToken),
+  })
 
   for (const key of ['DINGTALK_P4_GROUP_A_SECRET', 'DINGTALK_P4_GROUP_B_SECRET']) {
     const value = envValue(values, key)
@@ -457,6 +469,11 @@ function checkReadiness(opts) {
     unauthorizedUserId,
     noEmailDingTalkExternalId,
     missing: missingManualTargets,
+  })
+  addCheck(summary, 'unauthorized-target-distinct', 'Unauthorized target is distinct from authorized and allowed users', unauthorizedUserId && unauthorizedUserId !== authorizedUserId && !allowedUserIds.includes(unauthorizedUserId) ? 'pass' : 'fail', {
+    authorizedUserId,
+    unauthorizedUserId,
+    unauthorizedInAllowedUsers: allowedUserIds.includes(unauthorizedUserId),
   })
 
   summary.environment = {

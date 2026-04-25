@@ -581,6 +581,32 @@ test('export-dingtalk-staging-evidence-packet requires included evidence for fin
   }
 })
 
+test('export-dingtalk-staging-evidence-packet rejects non-packet output directories before cleanup', () => {
+  const tmpDir = makeTmpDir()
+  const outputDir = path.join(tmpDir, 'repo-like-dir')
+  const readmePath = path.join(outputDir, 'README.md')
+
+  try {
+    mkdirSync(outputDir, { recursive: true })
+    writeFileSync(readmePath, '# Not a generated packet\n', 'utf8')
+
+    const result = spawnSync(
+      process.execPath,
+      [scriptPath, '--output-dir', outputDir],
+      {
+        cwd: repoRoot,
+        encoding: 'utf8',
+      },
+    )
+
+    assert.equal(result.status, 1)
+    assert.match(result.stderr, /not a DingTalk staging evidence packet/)
+    assert.equal(readFileSync(readmePath, 'utf8'), '# Not a generated packet\n')
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+
 test('export-dingtalk-staging-evidence-packet rejects missing optional evidence directory', () => {
   const tmpDir = makeTmpDir()
 

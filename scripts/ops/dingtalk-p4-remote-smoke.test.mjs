@@ -454,6 +454,61 @@ test('dingtalk-p4-remote-smoke rejects invalid robot webhook before making reque
   }
 })
 
+test('dingtalk-p4-remote-smoke rejects duplicate robot webhooks before making requests', async () => {
+  const fakeApi = createFakeApiServer()
+
+  try {
+    const apiBase = await fakeApi.listen()
+    const result = await runScript([
+      '--api-base',
+      apiBase,
+      '--auth-token',
+      'secret-admin-token',
+      '--group-a-webhook',
+      'https://oapi.dingtalk.com/robot/send?access_token=robot-secret-same&timestamp=1',
+      '--group-b-webhook',
+      'https://oapi.dingtalk.com/robot/send?access_token=robot-secret-same&timestamp=2',
+      '--allowed-user',
+      'user_authorized',
+    ])
+
+    assert.equal(result.code, 1)
+    assert.match(result.stderr, /different DingTalk robot access_token/)
+    assert.doesNotMatch(result.stderr, /robot-secret-same/)
+    assert.equal(fakeApi.requests.length, 0)
+  } finally {
+    await fakeApi.close()
+  }
+})
+
+test('dingtalk-p4-remote-smoke rejects reused unauthorized user before making requests', async () => {
+  const fakeApi = createFakeApiServer()
+
+  try {
+    const apiBase = await fakeApi.listen()
+    const result = await runScript([
+      '--api-base',
+      apiBase,
+      '--auth-token',
+      'secret-admin-token',
+      '--group-a-webhook',
+      'https://oapi.dingtalk.com/robot/send?access_token=robot-secret-a',
+      '--group-b-webhook',
+      'https://oapi.dingtalk.com/robot/send?access_token=robot-secret-b',
+      '--allowed-user',
+      'user_authorized',
+      '--unauthorized-user',
+      'user_authorized',
+    ])
+
+    assert.equal(result.code, 1)
+    assert.match(result.stderr, /--unauthorized-user/)
+    assert.equal(fakeApi.requests.length, 0)
+  } finally {
+    await fakeApi.close()
+  }
+})
+
 test('dingtalk-p4-remote-smoke rejects malformed DingTalk robot secrets', () => {
   const result = spawnSync(process.execPath, [
     scriptPath,

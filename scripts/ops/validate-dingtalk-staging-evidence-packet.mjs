@@ -255,6 +255,10 @@ function isLikelyText(buffer) {
   return !buffer.includes(0)
 }
 
+function redactedFindingPreview(match, patternName) {
+  return `<redacted ${patternName}; ${String(match ?? '').length} chars>`
+}
+
 function scanFileForSecrets(file, packetDir, findings) {
   const stats = statSync(file)
   if (!stats.isFile() || stats.size > MAX_SECRET_SCAN_BYTES) return 0
@@ -268,7 +272,7 @@ function scanFileForSecrets(file, packetDir, findings) {
       findings.push({
         file: path.relative(packetDir, file).replaceAll('\\', '/'),
         pattern: pattern.name,
-        preview: match[0].slice(0, 80),
+        preview: redactedFindingPreview(match[0], pattern.name),
       })
       matches += 1
     }

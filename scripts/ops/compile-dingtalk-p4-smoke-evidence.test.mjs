@@ -395,6 +395,48 @@ test('compile-dingtalk-p4-smoke-evidence strict mode rejects secret-like manual 
   }
 })
 
+test('compile-dingtalk-p4-smoke-evidence strict mode rejects stale manual artifact files', async () => {
+  const tmpDir = makeTmpDir()
+  const evidencePath = path.join(tmpDir, 'evidence.json')
+  const outputDir = path.join(tmpDir, 'compiled')
+  const artifactRef = manualArtifactRefForCheck('authorized-user-submit')
+
+  try {
+    writeEvidence(evidencePath, {
+      checks: requiredIds.map((id) => ({
+        id,
+        status: 'pass',
+        evidence: makePassingEvidenceForCheck(id, id === 'authorized-user-submit'
+          ? {
+              performedAt: '2026-04-22T15:00:00.000Z',
+              artifacts: [artifactRef],
+            }
+          : {}),
+      })),
+    })
+    const artifactPath = path.join(tmpDir, artifactRef)
+    writeFileSync(artifactPath, 'authorized submit screenshot\n', 'utf8')
+    const oldTime = new Date('2026-04-22T14:00:00.000Z')
+    await import('node:fs/promises').then((fs) => fs.utimes(artifactPath, oldTime, oldTime))
+
+    const result = spawnSync(process.execPath, [scriptPath, '--input', evidencePath, '--output-dir', outputDir, '--strict'], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+    })
+
+    assert.equal(result.status, 1)
+    assert.match(result.stderr, /artifact_ref_stale/)
+    const summary = JSON.parse(readFileSync(path.join(outputDir, 'summary.json'), 'utf8'))
+    assert.equal(summary.manualEvidenceIssues.some((issue) => (
+      issue.id === 'authorized-user-submit'
+        && issue.code === 'artifact_ref_stale'
+        && issue.artifactRef === artifactRef
+    )), true)
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+
 test('compile-dingtalk-p4-smoke-evidence strict mode rejects external artifacts unless explicitly allowed', () => {
   const tmpDir = makeTmpDir()
   const evidencePath = path.join(tmpDir, 'evidence.json')

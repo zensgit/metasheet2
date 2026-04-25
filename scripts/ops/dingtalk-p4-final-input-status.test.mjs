@@ -156,6 +156,37 @@ test('dingtalk-p4-final-input-status rejects reused unauthorized target', () => 
   }
 })
 
+test('dingtalk-p4-final-input-status rejects duplicate group webhook access tokens', () => {
+  const tmpDir = makeTmpDir()
+  const envFile = path.join(tmpDir, 'dingtalk-p4.env')
+  const outputJson = path.join(tmpDir, 'summary.json')
+  const outputMd = path.join(tmpDir, 'summary.md')
+
+  try {
+    writeEnv(envFile, [
+      'DINGTALK_P4_API_BASE="http://142.171.239.56:8900"',
+      'DINGTALK_P4_WEB_BASE="http://142.171.239.56:8081"',
+      'DINGTALK_P4_AUTH_TOKEN="secret-admin-token"',
+      'DINGTALK_P4_GROUP_A_WEBHOOK="https://oapi.dingtalk.com/robot/send?access_token=robot-secret-same&timestamp=1"',
+      'DINGTALK_P4_GROUP_B_WEBHOOK="https://oapi.dingtalk.com/robot/send?access_token=robot-secret-same&timestamp=2"',
+      'DINGTALK_P4_ALLOWED_USER_IDS="user_authorized"',
+      'DINGTALK_P4_PERSON_USER_IDS="user_person_bound"',
+      'DINGTALK_P4_UNAUTHORIZED_USER_ID="user_unauthorized"',
+      'DINGTALK_P4_NO_EMAIL_DINGTALK_EXTERNAL_ID="dt_no_email_001"',
+    ])
+
+    const result = runScript(['--env-file', envFile, '--output-json', outputJson, '--output-md', outputMd])
+
+    assert.equal(result.status, 1)
+    const summary = JSON.parse(readFileSync(outputJson, 'utf8'))
+    const distinct = summary.checks.find((check) => check.id === 'group-webhooks-distinct')
+    assert.equal(distinct.status, 'fail')
+    assert.equal(distinct.details.sameAccessToken, true)
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+
 test('dingtalk-p4-final-input-status exits non-zero when blocked unless allowed', () => {
   const tmpDir = makeTmpDir()
   const envFile = path.join(tmpDir, 'dingtalk-p4.env')

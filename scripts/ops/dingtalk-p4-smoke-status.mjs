@@ -467,7 +467,26 @@ function hasFailedEvidence(requiredChecks, compiledSummary) {
   return Array.isArray(compiledSummary?.failedChecks) && compiledSummary.failedChecks.length > 0
 }
 
-function summarizeHandoff(handoffSummary, publishCheck) {
+function validateHandoffSummary(handoffSummary, opts, sessionSummary) {
+  if (!handoffSummary) return []
+  const failures = []
+  if (handoffSummary.tool !== 'dingtalk-p4-final-handoff') {
+    failures.push('handoff summary tool is not dingtalk-p4-final-handoff')
+  }
+  if (opts.sessionDir) {
+    const expectedSessionDir = relativePath(opts.sessionDir)
+    if (handoffSummary.sessionDir !== expectedSessionDir) {
+      failures.push(`handoff summary sessionDir does not match current session (${expectedSessionDir})`)
+    }
+  }
+  const expectedRunId = typeof sessionSummary?.runId === 'string' ? sessionSummary.runId : ''
+  if (expectedRunId && handoffSummary.sessionRunId !== expectedRunId) {
+    failures.push(`handoff summary sessionRunId does not match current session (${expectedRunId})`)
+  }
+  return failures
+}
+
+function summarizeHandoff(handoffSummary, publishCheck, opts, sessionSummary) {
   const handoffStatus = handoffSummary?.status ?? 'not_available'
   const publishStatus = handoffSummary?.publishCheck?.status ?? publishCheck?.status ?? 'not_available'
   const secretFindingCount = Array.isArray(handoffSummary?.publishCheck?.secretFindings)
@@ -475,7 +494,9 @@ function summarizeHandoff(handoffSummary, publishCheck) {
     : Array.isArray(publishCheck?.secretFindings)
       ? publishCheck.secretFindings.length
       : 0
+  const validationFailures = validateHandoffSummary(handoffSummary, opts, sessionSummary)
   const failures = [
+    ...validationFailures,
     ...(Array.isArray(handoffSummary?.failures) ? handoffSummary.failures : []),
     ...(Array.isArray(publishCheck?.failures) ? publishCheck.failures : []),
   ].map((failure) => redactString(failure))
@@ -484,6 +505,7 @@ function summarizeHandoff(handoffSummary, publishCheck) {
     status: handoffStatus,
     publishStatus,
     secretFindingCount,
+    validationFailures: validationFailures.map((failure) => redactString(failure)),
     failures,
   }
 }
@@ -495,6 +517,7 @@ function computeOverallStatus({ sessionSummary, compiledSummary, requiredChecks,
     return 'finalize_pending'
   }
   if (handoff.status === 'not_available' && handoff.publishStatus === 'not_available') return 'handoff_pending'
+  if (handoff.validationFailures?.length > 0) return 'fail'
   if (handoff.status !== 'pass' || handoff.publishStatus !== 'pass') return 'fail'
   return 'release_ready'
 }
@@ -788,7 +811,7 @@ function buildSummary(opts) {
 
   const requiredChecks = buildRequiredChecks(evidence, compiledSummary)
   const gaps = buildGaps(requiredChecks)
-  const handoff = summarizeHandoff(handoffSummary, publishCheck)
+  const handoff = summarizeHandoff(handoffSummary, publishCheck, opts, sessionSummary)
   const remoteSmokeTodos = buildRemoteSmokeTodos(requiredChecks, opts)
   const executionPlan = buildExecutionPlan(remoteSmokeTodos)
   const overallStatus = computeOverallStatus({

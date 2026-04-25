@@ -380,6 +380,8 @@ test('dingtalk-p4-smoke-status reports release ready with passing handoff and pu
     writeJson(handoffSummary, {
       tool: 'dingtalk-p4-final-handoff',
       status: 'pass',
+      sessionDir: relativePath(sessionDir),
+      sessionRunId: 'session-142',
       publishCheck: {
         status: 'pass',
         secretFindings: [],
@@ -402,6 +404,45 @@ test('dingtalk-p4-smoke-status reports release ready with passing handoff and pu
     assert.equal(summary.handoff.status, 'pass')
     assert.equal(summary.handoff.publishStatus, 'pass')
     assert.equal(summary.nextCommands.some((command) => command.includes('review the final packet')), true)
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+
+test('dingtalk-p4-smoke-status rejects stale handoff summaries from another session', () => {
+  const tmpDir = makeTmpDir()
+  const sessionDir = path.join(tmpDir, '142-session')
+  const packetDir = path.join(tmpDir, 'packet')
+  const handoffSummary = path.join(packetDir, 'handoff-summary.json')
+
+  try {
+    writeSession(sessionDir)
+    writeJson(handoffSummary, {
+      tool: 'dingtalk-p4-final-handoff',
+      status: 'pass',
+      sessionDir: 'output/dingtalk-p4-remote-smoke-session/other-session',
+      sessionRunId: 'other-run',
+      publishCheck: {
+        status: 'pass',
+        secretFindings: [],
+      },
+      failures: [],
+    })
+
+    const result = runScript([
+      '--session-dir',
+      sessionDir,
+      '--handoff-summary',
+      handoffSummary,
+      '--require-release-ready',
+    ])
+
+    assert.equal(result.status, 1)
+    const summary = JSON.parse(readFileSync(path.join(sessionDir, 'smoke-status.json'), 'utf8'))
+    assert.equal(summary.overallStatus, 'fail')
+    assert.equal(summary.handoff.validationFailures.length, 2)
+    assert.match(summary.handoff.validationFailures.join('\n'), /sessionDir does not match/)
+    assert.match(summary.handoff.validationFailures.join('\n'), /sessionRunId does not match/)
   } finally {
     rmSync(tmpDir, { recursive: true, force: true })
   }
