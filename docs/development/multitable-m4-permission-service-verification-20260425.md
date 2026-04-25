@@ -151,7 +151,8 @@ tsc         exit 0
 Additional assertions added:
 
 - `resolveReadableSheetIds trims before deduplication`
-- `listSheetPermissionCandidates batches role permission eligibility lookups`
+- `listSheetPermissionCandidates batches role, user, admin, and legacy user
+  permission eligibility lookups`
 
 ## Local environment note
 

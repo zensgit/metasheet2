@@ -482,7 +482,7 @@ describe('permission-service: request-keyed resolvers', () => {
     expect(calls[0].params?.[1]).toEqual(['sheet_2'])
   })
 
-  it('listSheetPermissionCandidates batches role permission eligibility lookups', async () => {
+  it('listSheetPermissionCandidates batches role and user permission eligibility lookups', async () => {
     vi.mocked(listUserPermissions).mockResolvedValue(['multitable:read'])
     vi.mocked(isAdmin).mockResolvedValue(false)
     const { query, calls } = makeQuery([
@@ -510,14 +510,23 @@ describe('permission-service: request-keyed resolvers', () => {
           { role_id: 'role_editor', permission_code: 'multitable:write' },
         ],
       }),
+      () => ({
+        rows: [
+          { user_id: 'user_reader', permission_code: 'multitable:read' },
+        ],
+      }),
+      () => ({ rows: [] }),
+      () => ({ rows: [] }),
     ])
 
     const candidates = await listSheetPermissionCandidates(query, 'sheet_1', { limit: 20 })
 
     expect(candidates.map((candidate) => candidate.subjectId)).toEqual(['user_reader', 'role_editor'])
-    expect(calls).toHaveLength(2)
+    expect(calls).toHaveLength(5)
     expect(calls[1].params?.[0]).toEqual(['role_editor'])
-    expect(listUserPermissions).toHaveBeenCalledTimes(1)
+    expect(calls[2].params?.[0]).toEqual(['user_reader'])
+    expect(listUserPermissions).not.toHaveBeenCalled()
+    expect(isAdmin).not.toHaveBeenCalled()
   })
 
   it('resolveSheetCapabilities labels origin as sheet-grant when scope expands base', async () => {

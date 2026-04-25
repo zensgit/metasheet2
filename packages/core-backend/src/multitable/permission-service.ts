@@ -27,7 +27,6 @@
 
 import type { Request } from 'express'
 
-import { isAdmin, listUserPermissions } from '../rbac/service'
 import {
   deriveCapabilities,
   deriveRowActions,
@@ -181,6 +180,81 @@ export function isSheetPermissionSubjectType(
   value: unknown,
 ): value is MultitableSheetPermissionSubjectType {
   return value === 'user' || value === 'role' || value === 'member-group'
+}
+
+async function loadCandidateUserEligibilityMap(
+  query: QueryFn,
+  userIds: string[],
+): Promise<Map<string, boolean>> {
+  const uniqueUserIds = Array.from(new Set(userIds.map((id) => id.trim()).filter(Boolean)))
+  const eligibility = new Map<string, boolean>(uniqueUserIds.map((id) => [id, false]))
+  if (uniqueUserIds.length === 0) return eligibility
+
+  try {
+    const permissionResult = await query(
+      `SELECT user_id, permission_code
+       FROM (
+         SELECT up.user_id, up.permission_code
+         FROM user_permissions up
+         WHERE up.user_id = ANY($1::text[])
+         UNION ALL
+         SELECT ur.user_id, rp.permission_code
+         FROM user_roles ur
+         JOIN role_permissions rp ON rp.role_id = ur.role_id
+         WHERE ur.user_id = ANY($1::text[])
+       ) permissions`,
+      [uniqueUserIds],
+    )
+    for (const row of permissionResult.rows as Array<{ user_id?: string | null; permission_code?: string | null }>) {
+      const userId = typeof row.user_id === 'string' ? row.user_id : ''
+      if (!userId) continue
+      const permissions = normalizePermissionCodes([row.permission_code ?? ''])
+      if (hasPermission(permissions, 'multitable:read') || hasPermission(permissions, 'multitable:write')) {
+        eligibility.set(userId, true)
+      }
+    }
+  } catch (err) {
+    if (
+      !isUndefinedTableError(err, 'user_permissions')
+      && !isUndefinedTableError(err, 'user_roles')
+      && !isUndefinedTableError(err, 'role_permissions')
+    ) {
+      throw err
+    }
+  }
+
+  try {
+    const adminResult = await query(
+      `SELECT user_id
+       FROM user_roles
+       WHERE user_id = ANY($1::text[])
+         AND role_id = $2`,
+      [uniqueUserIds, 'admin'],
+    )
+    for (const row of adminResult.rows as Array<{ user_id?: string | null }>) {
+      const userId = typeof row.user_id === 'string' ? row.user_id : ''
+      if (userId) eligibility.set(userId, true)
+    }
+  } catch (err) {
+    if (!isUndefinedTableError(err, 'user_roles')) throw err
+  }
+
+  const legacyResult = await query(
+    `SELECT id, permissions
+     FROM users
+     WHERE id = ANY($1::text[])`,
+    [uniqueUserIds],
+  )
+  for (const row of legacyResult.rows as Array<{ id?: string | null; permissions?: unknown }>) {
+    const userId = typeof row.id === 'string' ? row.id : ''
+    if (!userId) continue
+    const legacyPermissions = Array.isArray(row.permissions) ? normalizePermissionCodes(row.permissions) : []
+    if (hasPermission(legacyPermissions, 'multitable:read') || hasPermission(legacyPermissions, 'multitable:write')) {
+      eligibility.set(userId, true)
+    }
+  }
+
+  return eligibility
 }
 
 export function summarizeSheetPermissionCodes(codes: string[]): SheetPermissionScope {
@@ -446,21 +520,22 @@ export async function listSheetPermissionCandidates(
       rolePermissionsById.set(roleId, permissions)
     }
   }
+  const userEligibility = await loadCandidateUserEligibilityMap(
+    query,
+    candidates
+      .filter((candidate) => candidate.subjectType === 'user')
+      .map((candidate) => candidate.subjectId),
+  )
 
   const eligibility = await Promise.all(
-    candidates.map(async (candidate) => {
+    candidates.map((candidate) => {
       if (candidate.subjectType === 'member-group') return true
       if (candidate.subjectType === 'role') {
         if (candidate.subjectId === 'admin') return true
         const permissions = normalizePermissionCodes(rolePermissionsById.get(candidate.subjectId) ?? [])
         return hasPermission(permissions, 'multitable:read') || hasPermission(permissions, 'multitable:write')
       }
-
-      const [permissions, admin] = await Promise.all([
-        listUserPermissions(candidate.subjectId),
-        isAdmin(candidate.subjectId),
-      ])
-      return admin || hasPermission(permissions, 'multitable:read') || hasPermission(permissions, 'multitable:write')
+      return userEligibility.get(candidate.subjectId) === true
     }),
   )
 

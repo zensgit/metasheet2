@@ -112,11 +112,13 @@ New file: `packages/core-backend/src/multitable/permission-service.ts`.
   schema-write grant behavior.
 - Trimmed sheet ids before deduplication in `resolveReadableSheetIds()` so
   `"sheet_1"` and `" sheet_1 "` cannot diverge in permission scope lookup.
-- Batched role permission eligibility lookup in
-  `listSheetPermissionCandidates()` from per-role queries to one
-  `role_id = ANY($1::text[])` query. User eligibility still uses
-  `listUserPermissions()`/`isAdmin()` to preserve RBAC namespace-admission
-  semantics.
+- Batched candidate eligibility lookup in `listSheetPermissionCandidates()`
+  instead of calling `listUserPermissions()` / `isAdmin()` once per user.
+  The helper now resolves direct user permissions + role permissions with
+  `user_id = ANY($1::text[])`, checks admin role membership in one query, and
+  checks legacy `users.permissions` in one query. This preserves behavior for
+  multitable permissions because `multitable` is a non-namespaced permission
+  resource in the RBAC model; namespace admission does not filter these codes.
 - Removed the unused `deriveRowActions` import from `univer-meta.ts`.
 - Simplified the no-assignment `canExport` override to
   `capabilities.canExport`.
