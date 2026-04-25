@@ -65,6 +65,86 @@ test('buildEvidenceReport rejects unredacted secret-like evidence fields', () =>
   )
 })
 
+// ----- migration of bool-coercion sweep from preflight (#1168 / #1169) -----
+
+test('buildEvidenceReport returns FAIL when materialSaveOnly autoSubmit is the string "true"', () => {
+  const evidence = sampleEvidence()
+  evidence.materialSaveOnly.autoSubmit = 'true'
+  const report = buildEvidenceReport(packet(), evidence)
+  assert.equal(report.decision, 'FAIL')
+  assert.equal(report.issues.some((issue) => issue.code === 'SAVE_ONLY_VIOLATED'), true)
+})
+
+test('buildEvidenceReport returns FAIL when materialSaveOnly autoAudit is "yes" / "是" / "on" / "Y"', () => {
+  for (const variant of ['yes', '是', 'on', 'Y']) {
+    const evidence = sampleEvidence()
+    evidence.materialSaveOnly.autoAudit = variant
+    const report = buildEvidenceReport(packet(), evidence)
+    assert.equal(report.decision, 'FAIL', `variant ${JSON.stringify(variant)} should fail`)
+    assert.equal(
+      report.issues.some((issue) => issue.code === 'SAVE_ONLY_VIOLATED'),
+      true,
+      `variant ${JSON.stringify(variant)} should raise SAVE_ONLY_VIOLATED`,
+    )
+  }
+})
+
+test('buildEvidenceReport returns FAIL when bom.legacyPipelineOptionsSourceProductId is the string "true"', () => {
+  const evidence = sampleEvidence()
+  evidence.bomPoC.legacyPipelineOptionsSourceProductId = 'true'
+  const report = buildEvidenceReport(packet(), evidence)
+  assert.equal(report.decision, 'FAIL')
+  assert.equal(report.issues.some((issue) => issue.code === 'LEGACY_BOM_PRODUCT_ID_USED'), true)
+})
+
+test('buildEvidenceReport returns FAIL when materialSaveOnly autoSubmit is the number 1 (spreadsheet boolean)', () => {
+  const evidence = sampleEvidence()
+  evidence.materialSaveOnly.autoSubmit = 1
+  const report = buildEvidenceReport(packet(), evidence)
+  assert.equal(report.decision, 'FAIL')
+  assert.equal(report.issues.some((issue) => issue.code === 'SAVE_ONLY_VIOLATED'), true)
+})
+
+test('buildEvidenceReport accepts the number 0 / string "no" / "否" / "false" as legitimate Save-only confirmation', () => {
+  for (const falseLike of [0, 'no', '否', 'false', 'off']) {
+    const evidence = sampleEvidence()
+    evidence.materialSaveOnly.autoSubmit = falseLike
+    evidence.materialSaveOnly.autoAudit = falseLike
+    const report = buildEvidenceReport(packet(), evidence)
+    assert.equal(
+      report.issues.some((issue) => issue.code === 'SAVE_ONLY_VIOLATED'),
+      false,
+      `false-like ${JSON.stringify(falseLike)} should NOT raise SAVE_ONLY_VIOLATED`,
+    )
+  }
+})
+
+test('buildEvidenceReport throws clear errors for non-coercible boolean values', () => {
+  const evidence = sampleEvidence()
+  evidence.materialSaveOnly.autoSubmit = 'maybe'
+  assert.throws(
+    () => buildEvidenceReport(packet(), evidence),
+    (error) => error instanceof LivePocEvidenceError && error.details.field === 'materialSaveOnly.autoSubmit',
+    'unknown string boolean should throw with field name',
+  )
+
+  const evidence2 = sampleEvidence()
+  evidence2.materialSaveOnly.autoAudit = 2
+  assert.throws(
+    () => buildEvidenceReport(packet(), evidence2),
+    (error) => error instanceof LivePocEvidenceError && /0 or 1/.test(error.message),
+    'non-0/1 number should throw with "0 or 1" message',
+  )
+
+  const evidence3 = sampleEvidence()
+  evidence3.materialSaveOnly.autoSubmit = NaN
+  assert.throws(
+    () => buildEvidenceReport(packet(), evidence3),
+    (error) => error instanceof LivePocEvidenceError && /finite/.test(error.message),
+    'NaN should throw with "finite" message',
+  )
+})
+
 test('CLI writes redacted JSON and Markdown reports', async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'integration-live-evidence-'))
   try {

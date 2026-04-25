@@ -6,6 +6,13 @@ import { pathToFileURL } from 'node:url'
 const SECRET_KEY_PATTERN = /password|secret|token|session|credential|api[-_]?key|authorization/i
 const SAFE_SECRET_PLACEHOLDERS = new Set(['', '<redacted>', '<set-at-runtime>', 'redacted', '***'])
 const VALID_STATUSES = new Set(['pass', 'partial', 'fail', 'skipped', 'todo', 'blocked'])
+// Customer-supplied evidence often carries spreadsheet-export style booleans
+// (string "true" / "yes" / "是", or number 0 / 1). Strict `=== true` checks
+// silently let those slip past — same bug class as preflight #1168 / #1169.
+// Mirror that helper here (intentionally local; keeping evidence.mjs free
+// of cross-file imports for the customer-runnable script surface).
+const TRUE_BOOLEAN_TEXT = new Set(['true', '1', 'yes', 'y', 'on', '是', '启用', '开启'])
+const FALSE_BOOLEAN_TEXT = new Set(['false', '0', 'no', 'n', 'off', '否', '禁用', '关闭'])
 
 class LivePocEvidenceError extends Error {
   constructor(message, details = {}) {
@@ -17,6 +24,26 @@ class LivePocEvidenceError extends Error {
 
 function isPlainObject(value) {
   return Boolean(value && typeof value === 'object' && !Array.isArray(value))
+}
+
+function normalizeSafeBoolean(value, field) {
+  if (value === undefined || value === null) return false
+  if (typeof value === 'boolean') return value
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value)) {
+      throw new LivePocEvidenceError(`${field} must be a finite boolean, 0/1, or boolean-like string`, { field })
+    }
+    if (value === 1) return true
+    if (value === 0) return false
+    throw new LivePocEvidenceError(`${field} must be 0 or 1 when given as a number`, { field, received: value })
+  }
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase()
+    if (normalized.length === 0) return false
+    if (TRUE_BOOLEAN_TEXT.has(normalized)) return true
+    if (FALSE_BOOLEAN_TEXT.has(normalized)) return false
+  }
+  throw new LivePocEvidenceError(`${field} must be a boolean, 0/1, or boolean-like string`, { field })
 }
 
 function asObject(value, field) {
@@ -142,7 +169,7 @@ function evaluateMaterialSaveOnly(evidence, issues) {
   const status = normalizeStatus(save.status)
   if (status !== 'pass') return
 
-  if (save.autoSubmit === true || save.autoAudit === true) {
+  if (normalizeSafeBoolean(save.autoSubmit, 'materialSaveOnly.autoSubmit') || normalizeSafeBoolean(save.autoAudit, 'materialSaveOnly.autoAudit')) {
     addIssue(issues, 'fail', 'SAVE_ONLY_VIOLATED', 'material Save-only evidence has autoSubmit or autoAudit enabled', 'materialSaveOnly')
   }
   const rowsWritten = Number(save.rowsWritten)
@@ -164,7 +191,7 @@ function evaluateBom(packet, evidence, issues) {
   if (!text(bom.productId)) {
     addIssue(issues, 'fail', 'BOM_PRODUCT_SCOPE_REQUIRED', 'BOM PoC evidence must include productId', 'bomPoC')
   }
-  if (bom.legacyPipelineOptionsSourceProductId === true) {
+  if (normalizeSafeBoolean(bom.legacyPipelineOptionsSourceProductId, 'bomPoC.legacyPipelineOptionsSourceProductId')) {
     addIssue(issues, 'fail', 'LEGACY_BOM_PRODUCT_ID_USED', 'BOM PoC must not use pipeline.options.source.productId', 'bomPoC')
   }
 }
