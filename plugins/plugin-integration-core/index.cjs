@@ -21,12 +21,14 @@ const { createDb } = require('./lib/db.cjs')
 const { createExternalSystemRegistry } = require('./lib/external-systems.cjs')
 const { createAdapterRegistry } = require('./lib/contracts.cjs')
 const { createHttpAdapterFactory } = require('./lib/adapters/http-adapter.cjs')
+const { createPipelineRegistry } = require('./lib/pipelines.cjs')
 
 const registeredRoutes = []
 let activeContext = null
 let credentialStore = null
 let externalSystemRegistry = null
 let adapterRegistry = null
+let pipelineRegistry = null
 
 function buildHealthPayload() {
   return {
@@ -54,6 +56,7 @@ function buildCommunicationApi() {
           : null,
         externalSystems: Boolean(externalSystemRegistry),
         adapters: adapterRegistry ? adapterRegistry.listAdapterKinds() : [],
+        pipelines: Boolean(pipelineRegistry),
       }
     },
     async upsertExternalSystem(input) {
@@ -71,6 +74,30 @@ function buildCommunicationApi() {
     async listAdapterKinds() {
       if (!adapterRegistry) throw new Error('adapter registry is not initialized')
       return adapterRegistry.listAdapterKinds()
+    },
+    async upsertPipeline(input) {
+      if (!pipelineRegistry) throw new Error('pipeline registry is not initialized')
+      return pipelineRegistry.upsertPipeline(input)
+    },
+    async getPipeline(input) {
+      if (!pipelineRegistry) throw new Error('pipeline registry is not initialized')
+      return pipelineRegistry.getPipeline(input)
+    },
+    async listPipelines(input) {
+      if (!pipelineRegistry) throw new Error('pipeline registry is not initialized')
+      return pipelineRegistry.listPipelines(input)
+    },
+    async createPipelineRun(input) {
+      if (!pipelineRegistry) throw new Error('pipeline registry is not initialized')
+      return pipelineRegistry.createPipelineRun(input)
+    },
+    async updatePipelineRun(input) {
+      if (!pipelineRegistry) throw new Error('pipeline registry is not initialized')
+      return pipelineRegistry.updatePipelineRun(input)
+    },
+    async listPipelineRuns(input) {
+      if (!pipelineRegistry) throw new Error('pipeline registry is not initialized')
+      return pipelineRegistry.listPipelineRuns(input)
     },
   }
 }
@@ -93,6 +120,7 @@ module.exports = {
     })
     adapterRegistry = createAdapterRegistry({ logger })
       .registerAdapter('http', createHttpAdapterFactory())
+    pipelineRegistry = createPipelineRegistry({ db })
 
     // --- HTTP routes ------------------------------------------------------
     context.api.http.addRoute('GET', '/api/integration/health', async (_req, res) => {
@@ -116,6 +144,7 @@ module.exports = {
     credentialStore = null
     externalSystemRegistry = null
     adapterRegistry = null
+    pipelineRegistry = null
     activeContext = null
     logger.info(`[${PLUGIN_ID}] deactivated`)
   },

@@ -6,7 +6,7 @@
   "license": "UNLICENSED",
   "private": true,
   "scripts": {
-    "test": "node __tests__/plugin-runtime-smoke.test.cjs && node --import tsx __tests__/host-loader-smoke.test.mjs && node __tests__/credential-store.test.cjs && node __tests__/db.test.cjs && node __tests__/external-systems.test.cjs && node __tests__/adapter-contracts.test.cjs && node __tests__/http-adapter.test.cjs && node __tests__/staging-installer.test.cjs && node __tests__/migration-sql.test.cjs",
+    "test": "node __tests__/plugin-runtime-smoke.test.cjs && node --import tsx __tests__/host-loader-smoke.test.mjs && node __tests__/credential-store.test.cjs && node __tests__/db.test.cjs && node __tests__/external-systems.test.cjs && node __tests__/adapter-contracts.test.cjs && node __tests__/http-adapter.test.cjs && node __tests__/pipelines.test.cjs && node __tests__/staging-installer.test.cjs && node __tests__/migration-sql.test.cjs",
     "test:runtime": "node __tests__/plugin-runtime-smoke.test.cjs",
     "test:host-loader": "node --import tsx __tests__/host-loader-smoke.test.mjs",
     "test:credential": "node __tests__/credential-store.test.cjs",
@@ -14,6 +14,7 @@
     "test:external-systems": "node __tests__/external-systems.test.cjs",
     "test:adapter-contracts": "node __tests__/adapter-contracts.test.cjs",
     "test:http-adapter": "node __tests__/http-adapter.test.cjs",
+    "test:pipelines": "node __tests__/pipelines.test.cjs",
     "test:staging": "node __tests__/staging-installer.test.cjs",
     "test:migration": "node __tests__/migration-sql.test.cjs"
   }
