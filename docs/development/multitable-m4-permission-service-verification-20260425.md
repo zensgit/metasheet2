@@ -129,6 +129,30 @@ were internal `type`/`function` declarations in the monolith.
 - Existing `multitable-access.test.ts` remains green, proving the
   access.ts / permission-service.ts split composes correctly.
 
+## Review hardening verification — 2026-04-25
+
+Focused command:
+
+```bash
+pnpm --filter @metasheet/core-backend exec vitest run \
+  tests/unit/multitable-permission-service.test.ts \
+  --reporter=verbose
+pnpm --filter @metasheet/core-backend exec tsc --noEmit
+```
+
+Result:
+
+```text
+Test Files  1 passed (1)
+Tests       31 passed (31)
+tsc         exit 0
+```
+
+Additional assertions added:
+
+- `resolveReadableSheetIds trims before deduplication`
+- `listSheetPermissionCandidates batches role permission eligibility lookups`
+
 ## Local environment note
 
 `pnpm install --prefer-offline --ignore-scripts` was required because this

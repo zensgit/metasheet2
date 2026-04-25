@@ -30,10 +30,12 @@ import type { Request } from 'express'
 import { isAdmin, listUserPermissions } from '../rbac/service'
 import {
   deriveCapabilities,
+  deriveRowActions,
   hasPermission,
   normalizePermissionCodes,
   resolveRequestAccess,
   type MultitableCapabilities,
+  type MultitableRowActions,
   type ResolvedRequestAccess,
 } from './access'
 import {
@@ -42,6 +44,8 @@ import {
   type RecordPermissionScope,
   type ViewPermissionScope,
 } from './permission-derivation'
+
+export { deriveRowActions, type MultitableRowActions } from './access'
 
 export type QueryFn = (
   sql: string,
@@ -149,12 +153,6 @@ export type MultitableSheetPermissionCandidate = {
 export type MultitableCapabilityOrigin = {
   source: 'admin' | 'global-rbac' | 'sheet-grant' | 'sheet-scope'
   hasSheetAssignments: boolean
-}
-
-export type MultitableRowActions = {
-  canEdit: boolean
-  canDelete: boolean
-  canComment: boolean
 }
 
 export const PUBLIC_FORM_CAPABILITIES: MultitableCapabilities = {
@@ -429,18 +427,32 @@ export async function listSheetPermissionCandidates(
       } satisfies MultitableSheetPermissionCandidate
     })
 
+  const roleIds = Array.from(new Set(
+    candidates
+      .filter((candidate) => candidate.subjectType === 'role' && candidate.subjectId !== 'admin')
+      .map((candidate) => candidate.subjectId),
+  ))
+  const rolePermissionsById = new Map<string, string[]>()
+  if (roleIds.length > 0) {
+    const result = await query(
+      'SELECT role_id, permission_code FROM role_permissions WHERE role_id = ANY($1::text[])',
+      [roleIds],
+    )
+    for (const row of result.rows as Array<{ role_id?: string | null; permission_code?: string | null }>) {
+      const roleId = typeof row.role_id === 'string' ? row.role_id : ''
+      if (!roleId) continue
+      const permissions = rolePermissionsById.get(roleId) ?? []
+      if (typeof row.permission_code === 'string') permissions.push(row.permission_code)
+      rolePermissionsById.set(roleId, permissions)
+    }
+  }
+
   const eligibility = await Promise.all(
     candidates.map(async (candidate) => {
       if (candidate.subjectType === 'member-group') return true
       if (candidate.subjectType === 'role') {
         if (candidate.subjectId === 'admin') return true
-        const result = await query(
-          'SELECT permission_code FROM role_permissions WHERE role_id = $1',
-          [candidate.subjectId],
-        )
-        const permissions = normalizePermissionCodes(
-          (result.rows as Array<{ permission_code?: string | null }>).map((row) => row.permission_code ?? ''),
-        )
+        const permissions = normalizePermissionCodes(rolePermissionsById.get(candidate.subjectId) ?? [])
         return hasPermission(permissions, 'multitable:read') || hasPermission(permissions, 'multitable:write')
       }
 
@@ -851,7 +863,7 @@ export function applySheetPermissionScope(
     return {
       ...capabilities,
       canManageSheetAccess: capabilities.canManageSheetAccess && capabilities.canRead,
-      canExport: capabilities.canExport ?? capabilities.canRead,
+      canExport: capabilities.canExport,
     }
   }
   const canWriteAnyRecord = scope.canWrite || scope.canWriteOwn
@@ -957,16 +969,6 @@ export function deriveCapabilityOrigin(
   return {
     source: expandsBaseCapabilities ? 'sheet-grant' : 'sheet-scope',
     hasSheetAssignments: true,
-  }
-}
-
-// ── Row action helpers ──────────────────────────────────────────────────────
-
-export function deriveRowActions(capabilities: MultitableCapabilities): MultitableRowActions {
-  return {
-    canEdit: capabilities.canEditRecord,
-    canDelete: capabilities.canDeleteRecord,
-    canComment: capabilities.canComment,
   }
 }
 
@@ -1104,17 +1106,7 @@ export async function resolveSheetReadableCapabilities(
   capabilityOrigin: MultitableCapabilityOrigin
   sheetScope?: SheetPermissionScope
 }> {
-  const access = await resolveRequestAccess(req)
-  const baseCapabilities = deriveCapabilities(access.permissions, access.isAdminRole)
-  const scopeMap = await loadSheetPermissionScopeMap(query, [sheetId], access.userId)
-  const sheetScope = scopeMap.get(sheetId)
-  const capabilities = applyContextSheetSchemaWriteGrant(baseCapabilities, sheetScope, access.isAdminRole)
-  return {
-    access,
-    capabilities,
-    capabilityOrigin: deriveCapabilityOrigin(baseCapabilities, capabilities, sheetScope, access.isAdminRole),
-    ...(sheetScope ? { sheetScope } : {}),
-  }
+  return resolveSheetCapabilities(req, query, sheetId)
 }
 
 export async function resolveReadableSheetIds(
@@ -1122,7 +1114,7 @@ export async function resolveReadableSheetIds(
   query: QueryFn,
   sheetIds: Iterable<string>,
 ): Promise<Set<string>> {
-  const uniqueSheetIds = Array.from(new Set(Array.from(sheetIds).filter((sheetId) => sheetId.trim().length > 0)))
+  const uniqueSheetIds = Array.from(new Set(Array.from(sheetIds).map((sheetId) => sheetId.trim()).filter(Boolean)))
   if (uniqueSheetIds.length === 0) return new Set()
 
   const access = await resolveRequestAccess(req)

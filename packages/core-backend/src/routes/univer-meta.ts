@@ -34,7 +34,6 @@ import {
   deriveCapabilityOrigin,
   deriveDefaultRowActions,
   deriveRecordRowActions,
-  deriveRowActions,
   deriveSheetAccessLevel,
   enrichFormShareCandidatesWithDingTalkStatus,
   ensureRecordWriteAllowed,

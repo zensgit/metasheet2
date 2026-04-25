@@ -102,6 +102,25 @@ New file: `packages/core-backend/src/multitable/permission-service.ts`.
   response payloads at every route — no capability logic was inlined or
   simplified at call sites.
 
+## Review hardening — 2026-04-25
+
+- Reused `MultitableRowActions` and `deriveRowActions` from
+  `multitable/access.ts` via re-export instead of maintaining duplicate
+  definitions in `permission-service.ts`.
+- Made `resolveSheetReadableCapabilities()` delegate to
+  `resolveSheetCapabilities()` because both intentionally share the same
+  schema-write grant behavior.
+- Trimmed sheet ids before deduplication in `resolveReadableSheetIds()` so
+  `"sheet_1"` and `" sheet_1 "` cannot diverge in permission scope lookup.
+- Batched role permission eligibility lookup in
+  `listSheetPermissionCandidates()` from per-role queries to one
+  `role_id = ANY($1::text[])` query. User eligibility still uses
+  `listUserPermissions()`/`isAdmin()` to preserve RBAC namespace-admission
+  semantics.
+- Removed the unused `deriveRowActions` import from `univer-meta.ts`.
+- Simplified the no-assignment `canExport` override to
+  `capabilities.canExport`.
+
 ## Non-goals
 
 - No route behavior change.

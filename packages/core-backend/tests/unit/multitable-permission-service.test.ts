@@ -23,6 +23,7 @@ import {
   filterReadableSheetRowsForAccess,
   hasRecordPermissionAssignments,
   isSheetPermissionSubjectType,
+  listSheetPermissionCandidates,
   loadFieldPermissionScopeMap,
   loadRecordCreatorMap,
   loadRecordPermissionScopeMap,
@@ -463,6 +464,60 @@ describe('permission-service: request-keyed resolvers', () => {
     const req = { user: { id: 'user_1', roles: ['user'] } } as any
     const readable = await resolveReadableSheetIds(req, query, ['sheet_1', 'sheet_2'])
     expect(Array.from(readable)).toEqual(['sheet_2'])
+  })
+
+  it('resolveReadableSheetIds trims before deduplication', async () => {
+    vi.mocked(listUserPermissions).mockResolvedValue([])
+    vi.mocked(isAdmin).mockResolvedValue(false)
+    const { query, calls } = makeQuery([
+      () => ({
+        rows: [
+          { sheet_id: 'sheet_2', perm_code: 'multitable:read', subject_type: 'user' },
+        ],
+      }),
+    ])
+    const req = { user: { id: 'user_1', roles: ['user'] } } as any
+    const readable = await resolveReadableSheetIds(req, query, [' sheet_2 ', 'sheet_2', '  '])
+    expect(Array.from(readable)).toEqual(['sheet_2'])
+    expect(calls[0].params?.[1]).toEqual(['sheet_2'])
+  })
+
+  it('listSheetPermissionCandidates batches role permission eligibility lookups', async () => {
+    vi.mocked(listUserPermissions).mockResolvedValue(['multitable:read'])
+    vi.mocked(isAdmin).mockResolvedValue(false)
+    const { query, calls } = makeQuery([
+      () => ({
+        rows: [
+          {
+            subject_type: 'user',
+            subject_id: 'user_reader',
+            user_name: 'Reader',
+            user_email: 'reader@example.test',
+            user_is_active: true,
+            permission_codes: [],
+          },
+          {
+            subject_type: 'role',
+            subject_id: 'role_editor',
+            role_name: 'Editor',
+            user_is_active: true,
+            permission_codes: [],
+          },
+        ],
+      }),
+      () => ({
+        rows: [
+          { role_id: 'role_editor', permission_code: 'multitable:write' },
+        ],
+      }),
+    ])
+
+    const candidates = await listSheetPermissionCandidates(query, 'sheet_1', { limit: 20 })
+
+    expect(candidates.map((candidate) => candidate.subjectId)).toEqual(['user_reader', 'role_editor'])
+    expect(calls).toHaveLength(2)
+    expect(calls[1].params?.[0]).toEqual(['role_editor'])
+    expect(listUserPermissions).toHaveBeenCalledTimes(1)
   })
 
   it('resolveSheetCapabilities labels origin as sheet-grant when scope expands base', async () => {
