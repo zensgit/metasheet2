@@ -78,6 +78,39 @@ replicating the eviction policy on column reads or (b) accepting that the
 FIFO can mask a genuine retry — both undesirable. Removed cleanly; no
 defense-in-depth carve-out preserved.
 
+## Operational Considerations
+
+The semantic upgrade from best-effort-once to at-least-once introduces a
+**new operational consequence** that was absent in PR #1171: when the
+notifier finds pending breaches but every configured channel fails (or no
+channel is configured), the notifier logs a warn-level entry **every
+scheduler tick** per pending instance. Under the previous in-memory FIFO,
+the same instance was silently dropped after one attempt — log noise was
+self-limiting.
+
+Operators have three options before deployment:
+
+1. **Configure a real channel** (preferred). Set
+   `APPROVAL_BREACH_DINGTALK_WEBHOOK` (and the optional
+   `APPROVAL_BREACH_DINGTALK_SECRET` if signing is required) so the
+   DingTalk channel auto-registers. The first successful dispatch stamps
+   `breach_notified_at` and stops the retry loop.
+2. **Register a no-op stub channel** in code (returns `{ ok: true }`
+   unconditionally) when notifications are explicitly not desired but the
+   warn noise is unwanted. The stub silences the loop without sending
+   anything; pair with a cleanup job if `breach_notified_at` semantics
+   should not be permanently stamped.
+3. **Leave `onBreach` unwired** — the scheduler still flips
+   `sla_breached` for newly detected breaches but **skips** the
+   `listBreachesPendingNotification` lookup entirely. No retry, no warn
+   noise. Use this mode when SLA observability is needed for reporting /
+   dashboards but no real-time notifications are required. Note: rows
+   accumulate with `breach_notified_at IS NULL` indefinitely, so a future
+   notifier rollout will pick up the entire backlog on first tick.
+
+Recommended default: option 1 in production, option 3 in CI / dev / staging
+where channels are not configured.
+
 ## Failure Behaviour
 
 The notifier's no-throw contract is preserved:
