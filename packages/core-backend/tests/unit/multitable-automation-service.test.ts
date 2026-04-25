@@ -339,3 +339,273 @@ describe('AutomationService', () => {
     })
   })
 })
+
+import {
+  AutomationRuleValidationError,
+  parseCreateRuleInput,
+  parseDingTalkAutomationDeliveryLimit,
+  parseUpdateRuleInput,
+  preflightDingTalkAutomationCreate,
+  preflightDingTalkAutomationUpdate,
+  serializeAutomationRule,
+} from '../../src/multitable/automation-service'
+
+describe('M5 — Automation route helpers', () => {
+  describe('serializeAutomationRule', () => {
+    it('emits the legacy route shape (camelCase + nested trigger)', () => {
+      const rule = createMockRule({
+        id: 'atr_x',
+        sheet_id: 'sheet_x',
+        name: 'My Rule',
+        trigger_type: 'record.updated',
+        trigger_config: { fieldId: 'f1' },
+        action_type: 'send_notification',
+        action_config: { message: 'hi' },
+        created_at: '2026-01-02T03:04:05Z',
+        updated_at: '2026-01-02T03:04:05Z',
+        created_by: 'user_a',
+        conditions: undefined,
+        actions: null,
+      })
+
+      const out = serializeAutomationRule(rule)
+
+      expect(out).toEqual({
+        id: 'atr_x',
+        sheetId: 'sheet_x',
+        name: 'My Rule',
+        triggerType: 'record.updated',
+        triggerConfig: { fieldId: 'f1' },
+        trigger: { type: 'record.updated', config: { fieldId: 'f1' } },
+        conditions: undefined,
+        actions: undefined,
+        actionType: 'send_notification',
+        actionConfig: { message: 'hi' },
+        enabled: true,
+        createdAt: '2026-01-02T03:04:05Z',
+        updatedAt: '2026-01-02T03:04:05Z',
+        createdBy: 'user_a',
+      })
+    })
+
+    it('falls back to empty string / undefined for null name and createdBy', () => {
+      const rule = createMockRule({ name: null, created_by: null })
+      const out = serializeAutomationRule(rule)
+      expect(out.name).toBe('')
+      expect(out.createdBy).toBeUndefined()
+    })
+  })
+
+  describe('parseDingTalkAutomationDeliveryLimit', () => {
+    it('defaults to 50 when value is missing or non-numeric', () => {
+      expect(parseDingTalkAutomationDeliveryLimit(undefined)).toBe(50)
+      expect(parseDingTalkAutomationDeliveryLimit('not-a-number')).toBe(50)
+      expect(parseDingTalkAutomationDeliveryLimit(123 as unknown)).toBe(50)
+    })
+
+    it('clamps below 1 to 1 and above 200 to 200', () => {
+      expect(parseDingTalkAutomationDeliveryLimit('0')).toBe(1)
+      expect(parseDingTalkAutomationDeliveryLimit('-5')).toBe(1)
+      expect(parseDingTalkAutomationDeliveryLimit('5000')).toBe(200)
+    })
+
+    it('floors fractional values inside the valid range', () => {
+      expect(parseDingTalkAutomationDeliveryLimit('25.7')).toBe(25)
+      expect(parseDingTalkAutomationDeliveryLimit('200.9')).toBe(200)
+    })
+  })
+
+  describe('parseCreateRuleInput', () => {
+    it('extracts a well-formed body and forwards createdBy', () => {
+      const body = {
+        name: 'rule',
+        triggerType: 'record.created',
+        triggerConfig: { foo: 'bar' },
+        actionType: 'send_notification',
+        actionConfig: { userIds: ['u1'], message: 'hi' },
+        enabled: false,
+        conditions: { logic: 'and', conditions: [] },
+      }
+
+      const input = parseCreateRuleInput(body, 'user_a')
+
+      expect(input.name).toBe('rule')
+      expect(input.triggerType).toBe('record.created')
+      expect(input.triggerConfig).toEqual({ foo: 'bar' })
+      expect(input.actionType).toBe('send_notification')
+      expect(input.actionConfig).toEqual({ userIds: ['u1'], message: 'hi' })
+      expect(input.enabled).toBe(false)
+      expect(input.createdBy).toBe('user_a')
+      expect(input.conditions).toEqual({ logic: 'and', conditions: [] })
+    })
+
+    it('falls back to first action when actionType / actionConfig are absent', () => {
+      const body = {
+        triggerType: 'record.created',
+        actions: [{ type: 'send_notification', config: { message: 'hi' } }],
+      }
+
+      const input = parseCreateRuleInput(body, null)
+
+      expect(input.actionType).toBe('send_notification')
+      expect(input.actionConfig).toEqual({ message: 'hi' })
+      expect(input.actions).toEqual([{ type: 'send_notification', config: { message: 'hi' } }])
+    })
+
+    it('throws AutomationRuleValidationError for unknown trigger type', () => {
+      expect(() =>
+        parseCreateRuleInput(
+          { triggerType: 'never', actionType: 'send_notification' },
+          null,
+        ),
+      ).toThrow(AutomationRuleValidationError)
+    })
+
+    it('throws AutomationRuleValidationError for unknown action type', () => {
+      expect(() =>
+        parseCreateRuleInput(
+          { triggerType: 'record.created', actionType: 'shrug' },
+          null,
+        ),
+      ).toThrow(AutomationRuleValidationError)
+    })
+
+    it('defaults enabled to true and treats missing optional fields safely', () => {
+      const input = parseCreateRuleInput(
+        { triggerType: 'record.created', actionType: 'send_notification' },
+        null,
+      )
+      expect(input.enabled).toBe(true)
+      expect(input.triggerConfig).toEqual({})
+      expect(input.actionConfig).toEqual({})
+      expect(input.conditions).toBeNull()
+      expect(input.actions).toBeNull()
+    })
+  })
+
+  describe('parseUpdateRuleInput', () => {
+    it('returns null when no recognised fields are present', () => {
+      expect(parseUpdateRuleInput(undefined)).toBeNull()
+      expect(parseUpdateRuleInput({})).toBeNull()
+      expect(parseUpdateRuleInput({ ignored: 'x' })).toBeNull()
+    })
+
+    it('returns just the touched fields', () => {
+      const out = parseUpdateRuleInput({ enabled: false })
+      expect(out).toEqual({ enabled: false })
+    })
+
+    it('passes triggerConfig / actionConfig as objects (not stringified)', () => {
+      const out = parseUpdateRuleInput({
+        triggerConfig: { f: 'v' },
+        actionConfig: { x: 1 },
+      })
+      expect(out?.triggerConfig).toEqual({ f: 'v' })
+      expect(out?.actionConfig).toEqual({ x: 1 })
+    })
+
+    it('preserves explicit null for conditions and actions', () => {
+      const out = parseUpdateRuleInput({ conditions: null, actions: null })
+      expect(out?.conditions).toBeNull()
+      expect(out?.actions).toBeNull()
+    })
+
+    it('rejects an invalid trigger type', () => {
+      expect(() => parseUpdateRuleInput({ triggerType: 'nope' }))
+        .toThrow(AutomationRuleValidationError)
+    })
+
+    it('rejects an invalid action type', () => {
+      expect(() => parseUpdateRuleInput({ actionType: 'nope' }))
+        .toThrow(AutomationRuleValidationError)
+    })
+
+    it('accepts the legacy `notify` and `update_field` action types', () => {
+      expect(parseUpdateRuleInput({ actionType: 'notify' })?.actionType).toBe('notify')
+      expect(parseUpdateRuleInput({ actionType: 'update_field' })?.actionType).toBe('update_field')
+    })
+  })
+
+  describe('preflightDingTalkAutomationCreate', () => {
+    it('returns input unchanged for non-DingTalk action types', async () => {
+      const queryFn = vi.fn(async () => ({ rows: [], rowCount: 0 }))
+      const input = {
+        triggerType: 'record.created',
+        actionType: 'send_notification',
+        actionConfig: { message: 'hi', userIds: ['u1'] },
+        actions: null,
+      }
+
+      const out = await preflightDingTalkAutomationCreate(queryFn as never, 'sheet_x', input as never)
+
+      expect(out.actionType).toBe('send_notification')
+      expect(out.actionConfig).toEqual({ message: 'hi', userIds: ['u1'] })
+      expect(out.actions).toBeNull()
+    })
+
+    it('throws AutomationRuleValidationError when action config is invalid', async () => {
+      const queryFn = vi.fn(async () => ({ rows: [], rowCount: 0 }))
+      const input = {
+        triggerType: 'record.created',
+        actionType: 'send_dingtalk_group_message',
+        // missing destinationId / templates → validateDingTalkAutomationActionConfigs fails
+        actionConfig: {},
+        actions: null,
+      }
+
+      await expect(
+        preflightDingTalkAutomationCreate(queryFn as never, 'sheet_x', input as never),
+      ).rejects.toBeInstanceOf(AutomationRuleValidationError)
+    })
+  })
+
+  describe('preflightDingTalkAutomationUpdate', () => {
+    it('returns input unchanged when the update does not touch action fields', async () => {
+      const queryFn = vi.fn(async () => ({ rows: [], rowCount: 0 }))
+      const service = { getRule: vi.fn(async () => null) }
+      const input = { name: 'renamed' }
+
+      const out = await preflightDingTalkAutomationUpdate(
+        queryFn as never,
+        'sheet_x',
+        'atr_1',
+        input as never,
+        service as never,
+      )
+
+      expect(out).toEqual({ name: 'renamed' })
+      expect(service.getRule).not.toHaveBeenCalled()
+    })
+
+    it('returns null when existing rule belongs to a different sheet', async () => {
+      const queryFn = vi.fn(async () => ({ rows: [], rowCount: 0 }))
+      const existing = createMockRule({ id: 'atr_1', sheet_id: 'other_sheet' })
+      const service = { getRule: vi.fn(async () => existing) }
+
+      const out = await preflightDingTalkAutomationUpdate(
+        queryFn as never,
+        'sheet_x',
+        'atr_1',
+        { actionConfig: { foo: 'bar' } } as never,
+        service as never,
+      )
+
+      expect(out).toBeNull()
+    })
+
+    it('returns null when existing rule is missing', async () => {
+      const queryFn = vi.fn(async () => ({ rows: [], rowCount: 0 }))
+      const service = { getRule: vi.fn(async () => null) }
+
+      const out = await preflightDingTalkAutomationUpdate(
+        queryFn as never,
+        'sheet_x',
+        'atr_1',
+        { actionType: 'send_notification' } as never,
+        service as never,
+      )
+
+      expect(out).toBeNull()
+    })
+  })
+})

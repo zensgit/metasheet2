@@ -47,6 +47,18 @@ const VALID_TRIGGER_TYPES = new Set([
   'webhook.received',
 ])
 
+const VALID_ACTION_TYPES = new Set([
+  'notify',
+  'update_field',
+  'update_record',
+  'create_record',
+  'send_webhook',
+  'send_notification',
+  'send_dingtalk_group_message',
+  'send_dingtalk_person_message',
+  'lock_record',
+])
+
 /**
  * Legacy DB-shaped rule (from automation_rules table).
  * Kept for backward compatibility with existing CRUD routes.
@@ -244,6 +256,12 @@ export class AutomationService {
    * Create a new automation rule persisted to PostgreSQL.
    */
   async createRule(sheetId: string, input: CreateRuleInput): Promise<AutomationRule> {
+    if (!VALID_TRIGGER_TYPES.has(input.triggerType)) {
+      throw new AutomationRuleValidationError(`Invalid trigger_type: ${input.triggerType}`)
+    }
+    if (!VALID_ACTION_TYPES.has(input.actionType)) {
+      throw new AutomationRuleValidationError(`Invalid action_type: ${input.actionType}`)
+    }
     const ruleId = `atr_${randomUUID()}`
     const now = new Date().toISOString()
     const normalizedDingTalkInputs = normalizeDingTalkAutomationActionInputs(
@@ -340,6 +358,12 @@ export class AutomationService {
    * Returns the updated rule, or null if not found.
    */
   async updateRule(ruleId: string, sheetId: string, input: UpdateRuleInput): Promise<AutomationRule | null> {
+    if (input.triggerType !== undefined && !VALID_TRIGGER_TYPES.has(input.triggerType)) {
+      throw new AutomationRuleValidationError(`Invalid trigger_type: ${input.triggerType}`)
+    }
+    if (input.actionType !== undefined && !VALID_ACTION_TYPES.has(input.actionType)) {
+      throw new AutomationRuleValidationError(`Invalid action_type: ${input.actionType}`)
+    }
     const updates: Record<string, unknown> = {}
     const shouldValidateActions = input.actionType !== undefined || input.actionConfig !== undefined || input.actions !== undefined
     let normalizedActionConfigForUpdate: Record<string, unknown> | undefined
@@ -614,4 +638,270 @@ export class AutomationService {
       actions: (row.actions as AutomationAction[]) ?? null,
     }
   }
+}
+
+// ── Route helpers ────────────────────────────────────────────────────────
+
+export type SerializedAutomationRule = {
+  id: string
+  sheetId: string
+  name: string
+  triggerType: string
+  triggerConfig: Record<string, unknown>
+  trigger: { type: string; config: Record<string, unknown> }
+  conditions: ConditionGroup | undefined
+  actions: AutomationAction[] | undefined
+  actionType: string
+  actionConfig: Record<string, unknown>
+  enabled: boolean
+  createdAt: string
+  updatedAt: string
+  createdBy: string | undefined
+}
+
+/**
+ * Serialize a persisted automation rule for HTTP responses.
+ *
+ * Shape preserved verbatim from the legacy `univer-meta.ts` route.
+ */
+export function serializeAutomationRule(rule: AutomationRule): SerializedAutomationRule {
+  const triggerConfig = rule.trigger_config ?? {}
+  const actionConfig = rule.action_config ?? {}
+  return {
+    id: rule.id,
+    sheetId: rule.sheet_id,
+    name: rule.name ?? '',
+    triggerType: rule.trigger_type,
+    triggerConfig,
+    trigger: {
+      type: rule.trigger_type,
+      config: triggerConfig,
+    },
+    conditions: rule.conditions ?? undefined,
+    actions: rule.actions ?? undefined,
+    actionType: rule.action_type,
+    actionConfig,
+    enabled: rule.enabled,
+    createdAt: rule.created_at,
+    updatedAt: rule.updated_at,
+    createdBy: rule.created_by ?? undefined,
+  }
+}
+
+/**
+ * Clamp a DingTalk delivery `limit` query parameter to `[1, 200]`,
+ * defaulting to 50 when the value is missing or non-numeric.
+ */
+export function parseDingTalkAutomationDeliveryLimit(value: unknown): number {
+  const raw = typeof value === 'string' ? Number(value) : undefined
+  return Number.isFinite(raw) ? Math.min(Math.max(Math.floor(raw as number), 1), 200) : 50
+}
+
+/**
+ * Parse a `POST /sheets/:sheetId/automations` request body into a
+ * `CreateRuleInput`. Throws `AutomationRuleValidationError` for invalid
+ * trigger / action types.
+ */
+export function parseCreateRuleInput(
+  body: Record<string, unknown> | undefined,
+  createdBy: string | null,
+): CreateRuleInput {
+  const name = typeof body?.name === 'string' ? body.name : null
+  const triggerType = typeof body?.triggerType === 'string' ? body.triggerType : ''
+  const triggerConfig = body?.triggerConfig && typeof body.triggerConfig === 'object'
+    ? body.triggerConfig as Record<string, unknown>
+    : {}
+  let actions: unknown[] | null = Array.isArray(body?.actions) ? body!.actions as unknown[] : null
+  const firstAction = actions?.find(
+    (item): item is Record<string, unknown> => !!item && typeof item === 'object' && !Array.isArray(item),
+  )
+  let actionType = typeof body?.actionType === 'string' ? body.actionType : ''
+  let actionConfig: Record<string, unknown> = body?.actionConfig && typeof body.actionConfig === 'object'
+    ? body.actionConfig as Record<string, unknown>
+    : {}
+  if (!actionType && typeof firstAction?.type === 'string') actionType = firstAction.type
+  if (
+    Object.keys(actionConfig).length === 0 &&
+    firstAction?.config &&
+    typeof firstAction.config === 'object' &&
+    !Array.isArray(firstAction.config)
+  ) {
+    actionConfig = firstAction.config as Record<string, unknown>
+  }
+  const enabled = typeof body?.enabled === 'boolean' ? body.enabled : true
+
+  if (!VALID_TRIGGER_TYPES.has(triggerType)) {
+    throw new AutomationRuleValidationError(`Invalid trigger_type: ${triggerType}`)
+  }
+  if (!VALID_ACTION_TYPES.has(actionType)) {
+    throw new AutomationRuleValidationError(`Invalid action_type: ${actionType}`)
+  }
+
+  const conditions = body?.conditions && typeof body.conditions === 'object'
+    ? body.conditions as ConditionGroup
+    : null
+
+  return {
+    name,
+    triggerType,
+    triggerConfig,
+    actionType,
+    actionConfig,
+    enabled,
+    createdBy,
+    conditions,
+    actions: actions as AutomationAction[] | null,
+  }
+}
+
+/**
+ * Parse a `PATCH /sheets/:sheetId/automations/:ruleId` request body into an
+ * `UpdateRuleInput`. Returns `null` when the body has no recognised
+ * fields (route should respond with `400 VALIDATION_ERROR: No fields to
+ * update`). Throws `AutomationRuleValidationError` for invalid trigger /
+ * action types.
+ */
+export function parseUpdateRuleInput(body: Record<string, unknown> | undefined): UpdateRuleInput | null {
+  const input: UpdateRuleInput = {}
+  let touched = false
+
+  if (typeof body?.name === 'string') {
+    input.name = body.name
+    touched = true
+  }
+  if (typeof body?.triggerType === 'string') {
+    if (!VALID_TRIGGER_TYPES.has(body.triggerType)) {
+      throw new AutomationRuleValidationError(`Invalid trigger_type: ${body.triggerType}`)
+    }
+    input.triggerType = body.triggerType
+    touched = true
+  }
+  if (body?.triggerConfig && typeof body.triggerConfig === 'object') {
+    input.triggerConfig = body.triggerConfig as Record<string, unknown>
+    touched = true
+  }
+  if (typeof body?.actionType === 'string') {
+    if (!VALID_ACTION_TYPES.has(body.actionType)) {
+      throw new AutomationRuleValidationError(`Invalid action_type: ${body.actionType}`)
+    }
+    input.actionType = body.actionType
+    touched = true
+  }
+  if (body?.actionConfig && typeof body.actionConfig === 'object') {
+    input.actionConfig = body.actionConfig as Record<string, unknown>
+    touched = true
+  }
+  if (typeof body?.enabled === 'boolean') {
+    input.enabled = body.enabled
+    touched = true
+  }
+  if (body?.conditions !== undefined) {
+    input.conditions = body.conditions ? (body.conditions as ConditionGroup) : null
+    touched = true
+  }
+  if (body?.actions !== undefined) {
+    input.actions = Array.isArray(body.actions) ? (body.actions as AutomationAction[]) : null
+    touched = true
+  }
+
+  return touched ? input : null
+}
+
+/**
+ * Run the route-side DingTalk pre-flight: normalize + config + link
+ * validation. Returns a copy of `input` with normalized `actionConfig` /
+ * `actions` so the rule is persisted in canonical form. Throws
+ * `AutomationRuleValidationError` on any validation failure.
+ *
+ * This keeps the route as the link-validation boundary (the persistence
+ * layer must not see a request that references a cross-sheet view).
+ */
+export async function preflightDingTalkAutomationCreate(
+  queryFn: AutomationQueryFn,
+  sheetId: string,
+  input: CreateRuleInput,
+): Promise<CreateRuleInput> {
+  const normalized = normalizeDingTalkAutomationActionInputs(
+    input.actionType,
+    input.actionConfig ?? {},
+    input.actions ?? null,
+  )
+  const actionConfig = normalized.actionConfig && typeof normalized.actionConfig === 'object'
+    ? normalized.actionConfig as Record<string, unknown>
+    : input.actionConfig ?? {}
+  const actions = Array.isArray(normalized.actions)
+    ? normalized.actions as AutomationAction[]
+    : input.actions ?? null
+
+  const configErr = validateDingTalkAutomationActionConfigs(input.actionType, actionConfig, actions)
+  if (configErr) throw new AutomationRuleValidationError(configErr)
+
+  const linkErr = await validateDingTalkAutomationLinks(
+    queryFn,
+    sheetId,
+    input.actionType,
+    actionConfig,
+    actions,
+  )
+  if (linkErr) throw new AutomationRuleValidationError(linkErr)
+
+  return { ...input, actionConfig, actions }
+}
+
+/**
+ * PATCH-time DingTalk pre-flight. Only runs when the update touches
+ * `actionType`, `actionConfig`, or `actions` — otherwise no link validation
+ * is needed. When triggered, falls back to the existing rule's values for
+ * fields the request did not provide. Returns a copy of `input` with
+ * normalized values where they were provided. Returns `null` when the
+ * existing rule is missing or belongs to a different sheet.
+ */
+export async function preflightDingTalkAutomationUpdate(
+  queryFn: AutomationQueryFn,
+  sheetId: string,
+  ruleId: string,
+  input: UpdateRuleInput,
+  service: Pick<AutomationService, 'getRule'>,
+): Promise<UpdateRuleInput | null> {
+  const touchesAction =
+    input.actionType !== undefined ||
+    input.actionConfig !== undefined ||
+    input.actions !== undefined
+  if (!touchesAction) return input
+
+  const existing = await service.getRule(ruleId)
+  if (!existing || existing.sheet_id !== sheetId) return null
+
+  const nextActionType = input.actionType ?? existing.action_type
+  const nextActionConfig = input.actionConfig ?? existing.action_config
+  const nextActions: AutomationAction[] | null = input.actions !== undefined ? input.actions : existing.actions ?? null
+
+  const normalized = normalizeDingTalkAutomationActionInputs(nextActionType, nextActionConfig, nextActions)
+  const normalizedActionConfig = normalized.actionConfig && typeof normalized.actionConfig === 'object'
+    ? normalized.actionConfig as Record<string, unknown>
+    : nextActionConfig
+  const normalizedActions = Array.isArray(normalized.actions)
+    ? normalized.actions as AutomationAction[]
+    : nextActions
+
+  const configErr = validateDingTalkAutomationActionConfigs(
+    nextActionType,
+    normalizedActionConfig,
+    normalizedActions,
+  )
+  if (configErr) throw new AutomationRuleValidationError(configErr)
+
+  const linkErr = await validateDingTalkAutomationLinks(
+    queryFn,
+    sheetId,
+    nextActionType,
+    normalizedActionConfig,
+    normalizedActions,
+  )
+  if (linkErr) throw new AutomationRuleValidationError(linkErr)
+
+  const out: UpdateRuleInput = { ...input }
+  if (input.actionConfig !== undefined) out.actionConfig = normalizedActionConfig
+  if (input.actions !== undefined) out.actions = Array.isArray(input.actions) ? normalizedActions : null
+  return out
 }
