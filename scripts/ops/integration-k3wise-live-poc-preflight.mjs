@@ -7,6 +7,18 @@ const REQUIRED_TOP_LEVEL = ['tenantId', 'workspaceId', 'k3Wise', 'plm', 'rollbac
 const SECRET_KEY_PATTERN = /password|secret|token|session|credential|api[-_]?key|authorization/i
 const NON_PRODUCTION_ENVS = new Set(['test', 'testing', 'uat', 'sandbox', 'staging', 'dev', 'development'])
 const K3_CORE_TABLES = new Set(['t_icitem', 't_icbom', 't_icbomchild'])
+const TRUE_BOOLEAN_TEXT = new Set(['true', '1', 'yes', 'y', 'on', '是', '启用', '开启'])
+const FALSE_BOOLEAN_TEXT = new Set(['false', '0', 'no', 'n', 'off', '否', '禁用', '关闭'])
+const SQL_MODE_ALIASES = new Map([
+  ['read only', 'readonly'],
+  ['read-only', 'readonly'],
+  ['read_only', 'readonly'],
+  ['middle table', 'middle-table'],
+  ['middle_table', 'middle-table'],
+  ['stored procedure', 'stored-procedure'],
+  ['stored_procedure', 'stored-procedure'],
+])
+const SQL_MODES = new Set(['readonly', 'middle-table', 'stored-procedure'])
 
 class LivePocPreflightError extends Error {
   constructor(message, details = {}) {
@@ -45,6 +57,51 @@ function optionalArray(value, field) {
     throw new LivePocPreflightError(`${field} must be an array`, { field })
   }
   return value
+}
+
+function normalizeSafeBoolean(value, field) {
+  if (value === undefined || value === null) return false
+  if (typeof value === 'boolean') return value
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase()
+    if (normalized.length === 0) return false
+    if (TRUE_BOOLEAN_TEXT.has(normalized)) return true
+    if (FALSE_BOOLEAN_TEXT.has(normalized)) return false
+  }
+  throw new LivePocPreflightError(`${field} must be a boolean or false-like string`, { field })
+}
+
+function normalizeSqlMode(value, sqlEnabled) {
+  const fallback = sqlEnabled ? 'readonly' : 'disabled'
+  const text = optionalString(value)
+  if (!text) return fallback
+  const key = text.toLowerCase().replace(/\s+/g, ' ')
+  const normalized = SQL_MODE_ALIASES.get(key) || key
+  if (normalized === 'disabled' && !sqlEnabled) return normalized
+  if (!SQL_MODES.has(normalized)) {
+    throw new LivePocPreflightError('sqlServer.mode must be readonly, middle-table, or stored-procedure', {
+      field: 'sqlServer.mode',
+      mode: text,
+    })
+  }
+  return normalized
+}
+
+function normalizeSqlIdentifierPart(part) {
+  return part
+    .trim()
+    .replace(/^[\[`"']+|[\]`"']+$/g, '')
+    .trim()
+}
+
+function normalizeSqlObjectName(value) {
+  const parts = String(value)
+    .trim()
+    .toLowerCase()
+    .split('.')
+    .map(normalizeSqlIdentifierPart)
+    .filter(Boolean)
+  return parts.length > 0 ? parts[parts.length - 1] : ''
 }
 
 function validateUrl(value, field) {
@@ -136,26 +193,22 @@ function normalizeGate(input) {
     })
   }
 
-  if (k3Wise.autoSubmit === true || k3Wise.autoAudit === true) {
+  const autoSubmit = normalizeSafeBoolean(k3Wise.autoSubmit, 'k3Wise.autoSubmit')
+  const autoAudit = normalizeSafeBoolean(k3Wise.autoAudit, 'k3Wise.autoAudit')
+  if (autoSubmit || autoAudit) {
     throw new LivePocPreflightError('M2 live PoC packet is Save-only: autoSubmit and autoAudit must be false', {
       field: 'k3Wise.autoSubmit/autoAudit',
     })
   }
 
   const sqlEnabled = sqlServer.enabled === true
-  const sqlMode = optionalString(sqlServer.mode) || (sqlEnabled ? 'readonly' : 'disabled')
+  const sqlMode = normalizeSqlMode(sqlServer.mode, sqlEnabled)
   const allowedTables = optionalArray(sqlServer.allowedTables, 'sqlServer.allowedTables').map((table) => String(table))
-  const writesCoreTable = allowedTables.some((table) => K3_CORE_TABLES.has(table.toLowerCase()))
+  const writesCoreTable = allowedTables.some((table) => K3_CORE_TABLES.has(normalizeSqlObjectName(table)))
   if (sqlEnabled && sqlMode !== 'readonly' && (sqlServer.writeCoreTables === true || writesCoreTable)) {
     throw new LivePocPreflightError('SQL Server channel may not write K3 core business tables in live PoC', {
       field: 'sqlServer.allowedTables',
       allowedTables,
-    })
-  }
-  if (sqlEnabled && !['readonly', 'middle-table', 'stored-procedure'].includes(sqlMode)) {
-    throw new LivePocPreflightError('sqlServer.mode must be readonly, middle-table, or stored-procedure', {
-      field: 'sqlServer.mode',
-      mode: sqlMode,
     })
   }
 
@@ -186,9 +239,17 @@ function normalizeGate(input) {
     workspaceId,
     projectId,
     operator,
-    k3Wise,
+    k3Wise: {
+      ...k3Wise,
+      environment,
+      autoSubmit: false,
+      autoAudit: false,
+    },
     plm,
-    sqlServer,
+    sqlServer: {
+      ...sqlServer,
+      mode: sqlMode,
+    },
     rollback,
     fieldMappings,
     bom: {
