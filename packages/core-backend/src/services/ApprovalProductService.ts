@@ -31,6 +31,18 @@ import type {
 } from './approval-bridge-types'
 import { APPROVAL_ERROR_CODES } from './approval-bridge-types'
 import { ServiceError } from './ApprovalBridgeService'
+import { getApprovalMetricsService, type ApprovalMetricsService, type ApprovalTerminalState } from './ApprovalMetricsService'
+import { Logger } from '../core/logger'
+
+const metricsLogger = new Logger('ApprovalMetricsHook')
+
+function safeMetricsCall(label: string, fn: () => Promise<void>): void {
+  Promise.resolve()
+    .then(fn)
+    .catch((error) => {
+      metricsLogger.warn(`metrics hook ${label} failed: ${error instanceof Error ? error.message : String(error)}`)
+    })
+}
 
 interface ApprovalTemplateListQuery {
   status?: string
@@ -53,6 +65,7 @@ interface CreateApprovalActor {
   userId: string
   userName?: string
   email?: string
+  tenantId?: string
   department?: string
   departmentIds?: string[]
   roles?: string[]
@@ -77,6 +90,10 @@ type TemplateRow = {
    */
   category: string | null
   visibility_scope?: Record<string, unknown> | null
+  /**
+   * Wave 2 WP5 slice 1 — optional SLA in hours. `null` disables SLA tracking.
+   */
+  sla_hours: number | null
   status: 'draft' | 'published' | 'archived'
   active_version_id: string | null
   latest_version_id: string | null
@@ -126,6 +143,11 @@ type TemplateMetadataPatch = {
    */
   category?: string | null
   visibilityScope?: ApprovalTemplateVisibilityScope
+  /**
+   * Wave 2 WP5 slice 1 — SLA edits. `null` clears the SLA; `undefined` leaves
+   * it untouched.
+   */
+  slaHours?: number | null
 }
 
 type ApprovalRecordInsert = {
@@ -602,6 +624,8 @@ function toApprovalTemplateListItemDTO(row: TemplateRow): ApprovalTemplateListIt
     // Wave 2 WP4 slice 1 — older rows predate the column; coerce undefined to null.
     category: row.category ?? null,
     visibilityScope: readTemplateVisibilityScope(row.visibility_scope),
+    // Wave 2 WP5 slice 1 — older rows predate the column; coerce undefined to null.
+    slaHours: typeof row.sla_hours === 'number' ? row.sla_hours : null,
     status: row.status,
     activeVersionId: row.active_version_id,
     latestVersionId: row.latest_version_id,
@@ -740,6 +764,29 @@ function normalizeTemplateCategory(value: unknown): string | null | undefined {
     )
   }
   return trimmed
+}
+
+/**
+ * Wave 2 WP5 slice 1 — normalize SLA hours. Accepts positive integers or null;
+ * `undefined` leaves the field unset.
+ */
+const APPROVAL_TEMPLATE_SLA_MAX_HOURS = 24 * 365 // 1 year upper bound
+
+function normalizeTemplateSlaHours(value: unknown): number | null | undefined {
+  if (value === undefined) return undefined
+  if (value === null || value === '') return null
+  const parsed = typeof value === 'number' ? value : Number(value)
+  if (!Number.isFinite(parsed) || !Number.isInteger(parsed) || parsed <= 0) {
+    throw new ServiceError('slaHours must be a positive integer', 400, 'VALIDATION_ERROR')
+  }
+  if (parsed > APPROVAL_TEMPLATE_SLA_MAX_HOURS) {
+    throw new ServiceError(
+      `slaHours must be at most ${APPROVAL_TEMPLATE_SLA_MAX_HOURS}`,
+      400,
+      'VALIDATION_ERROR',
+    )
+  }
+  return parsed
 }
 
 function normalizeTemplateVisibilityScope(value: unknown): ApprovalTemplateVisibilityScope | undefined {
@@ -955,6 +1002,12 @@ function readParallelBranchStates(metadata: unknown): ParallelInstanceState | nu
 }
 
 export class ApprovalProductService {
+  /**
+   * Wave 2 WP5 slice 1 — optional metrics service injection so tests can
+   * pass a stub. Production default uses the process-wide singleton.
+   */
+  constructor(private readonly metrics: ApprovalMetricsService = getApprovalMetricsService()) {}
+
   async listTemplates(query: ApprovalTemplateListQuery): Promise<{ data: ApprovalTemplateListItemDTO[]; total: number }> {
     if (!pool) throw new Error('Database not available')
 
@@ -1017,6 +1070,8 @@ export class ApprovalProductService {
     // Wave 2 WP4 slice 1 — category is optional; `undefined`/empty → null.
     const category = normalizeTemplateCategory(request.category) ?? null
     const visibilityScope = normalizeTemplateVisibilityScope(request.visibilityScope) ?? { type: 'all', ids: [] }
+    const slaHoursNormalized = normalizeTemplateSlaHours(request.slaHours)
+    const slaHours = slaHoursNormalized === undefined ? null : slaHoursNormalized
     const formSchema = assertFormSchema(request.formSchema)
     const approvalGraph = assertApprovalGraph(request.approvalGraph)
 
@@ -1026,10 +1081,10 @@ export class ApprovalProductService {
       await client.query('BEGIN')
 
       const templateResult = await client.query<TemplateRow>(
-        `INSERT INTO approval_templates (key, name, description, category, visibility_scope, status)
-         VALUES ($1, $2, $3, $4, $5, 'draft')
+        `INSERT INTO approval_templates (key, name, description, category, visibility_scope, sla_hours, status)
+         VALUES ($1, $2, $3, $4, $5, $6, 'draft')
          RETURNING *`,
-        [key, name, description ?? null, category, JSON.stringify(visibilityScope)],
+        [key, name, description ?? null, category, JSON.stringify(visibilityScope), slaHours],
       )
       let template = templateResult.rows[0]
 
@@ -1081,6 +1136,10 @@ export class ApprovalProductService {
     if (request.visibilityScope !== undefined) {
       metadataPatch.visibilityScope = normalizeTemplateVisibilityScope(request.visibilityScope) ?? { type: 'all', ids: [] }
     }
+    if (request.slaHours !== undefined) {
+      const normalized = normalizeTemplateSlaHours(request.slaHours)
+      metadataPatch.slaHours = normalized === undefined ? null : normalized
+    }
 
     const formSchema = request.formSchema !== undefined ? assertFormSchema(request.formSchema) : undefined
     const approvalGraph = request.approvalGraph !== undefined ? assertApprovalGraph(request.approvalGraph) : undefined
@@ -1123,6 +1182,10 @@ export class ApprovalProductService {
         if (metadataPatch.visibilityScope !== undefined) {
           setClauses.push(`visibility_scope = $${index++}`)
           params.push(JSON.stringify(metadataPatch.visibilityScope))
+        }
+        if (metadataPatch.slaHours !== undefined) {
+          setClauses.push(`sla_hours = $${index++}`)
+          params.push(metadataPatch.slaHours)
         }
         setClauses.push('updated_at = now()')
         params.push(id)
@@ -1535,6 +1598,26 @@ export class ApprovalProductService {
       client?.release()
     }
 
+    // Wave 2 WP5 slice 1 — metrics start row is written after commit and
+    // guarded so a metrics failure cannot roll back the approval instance.
+    safeMetricsCall(`recordInstanceStart(${instanceId})`, async () => {
+      await this.metrics.recordInstanceStart({
+      instanceId,
+      templateId: bundle.template.id,
+      tenantId: actor.tenantId ?? null,
+      startedAt: new Date(),
+      slaHours: bundle.template.sla_hours ?? null,
+      initialNodeKey: initial.currentNodeKey,
+      })
+      if (initial.status === 'approved') {
+        await this.metrics.recordTerminal({
+          instanceId,
+          terminalState: 'approved',
+          terminalAt: new Date(),
+        })
+      }
+    })
+
     const approval = await this.getApproval(instanceId)
     if (!approval) {
       throw new ServiceError('Approval not found after creation', 500, 'APPROVAL_CREATE_FAILED')
@@ -1720,6 +1803,7 @@ export class ApprovalProductService {
           metadata: { nodeKey: currentNodeKey },
         }, actor)
         await client.query('COMMIT')
+        this.emitTerminalMetric(id, 'revoked')
         return (await this.getApproval(id))!
       }
 
@@ -1802,6 +1886,10 @@ export class ApprovalProductService {
         await this.insertAutoApprovalEvents(client, id, nextVersion, resolution.status, resolution.autoApprovalEvents)
         await this.insertCcEvents(client, id, nextVersion, resolution.status, resolution.ccEvents)
         await client.query('COMMIT')
+        this.emitNodeDecisionMetric(id, currentNodeKey, actor.userId)
+        if (resolution.currentNodeKey) {
+          this.emitNodeActivationMetric(id, resolution.currentNodeKey)
+        }
         return (await this.getApproval(id))!
       }
 
@@ -1830,6 +1918,8 @@ export class ApprovalProductService {
           metadata: { nodeKey: currentNodeKey },
         }, actor)
         await client.query('COMMIT')
+        this.emitNodeDecisionMetric(id, currentNodeKey, actor.userId)
+        this.emitTerminalMetric(id, 'rejected')
         return (await this.getApproval(id))!
       }
 
@@ -2077,6 +2167,15 @@ export class ApprovalProductService {
       await this.insertCcEvents(client, id, nextVersion, resolution.status, resolution.ccEvents)
 
       await client.query('COMMIT')
+
+      // Wave 2 WP5 slice 1 — emit metrics after commit so rollback failures
+      // never leave dangling breakdown entries. All hooks are guarded.
+      this.emitNodeDecisionMetric(id, currentNodeKey, actor.userId)
+      if (resolution.status === 'approved') {
+        this.emitTerminalMetric(id, 'approved')
+      } else if (resolution.currentNodeKey && resolution.currentNodeKey !== currentNodeKey) {
+        this.emitNodeActivationMetric(id, resolution.currentNodeKey)
+      }
     } catch (error) {
       await rollbackQuietly(client)
       throw error
@@ -2089,6 +2188,41 @@ export class ApprovalProductService {
       throw new ServiceError('Approval not found after action', 404, APPROVAL_ERROR_CODES.APPROVAL_NOT_FOUND)
     }
     return approval
+  }
+
+  /**
+   * Wave 2 WP5 slice 1 — metrics helpers. All calls are log-and-swallow so
+   * a metrics outage cannot fail the approval flow.
+   */
+  private emitNodeDecisionMetric(instanceId: string, nodeKey: string, actorId: string): void {
+    safeMetricsCall(`recordNodeDecision(${instanceId}/${nodeKey})`, () =>
+      this.metrics.recordNodeDecision({
+        instanceId,
+        nodeKey,
+        decidedAt: new Date(),
+        approverIds: [actorId],
+      }),
+    )
+  }
+
+  private emitNodeActivationMetric(instanceId: string, nodeKey: string): void {
+    safeMetricsCall(`recordNodeActivation(${instanceId}/${nodeKey})`, () =>
+      this.metrics.recordNodeActivation({
+        instanceId,
+        nodeKey,
+        activatedAt: new Date(),
+      }),
+    )
+  }
+
+  private emitTerminalMetric(instanceId: string, terminalState: ApprovalTerminalState): void {
+    safeMetricsCall(`recordTerminal(${instanceId}/${terminalState})`, () =>
+      this.metrics.recordTerminal({
+        instanceId,
+        terminalState,
+        terminalAt: new Date(),
+      }),
+    )
   }
 
   async getApproval(id: string): Promise<UnifiedApprovalDTO | null> {

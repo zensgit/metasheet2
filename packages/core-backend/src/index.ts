@@ -76,6 +76,8 @@ import { approvalsRouter } from './routes/approvals'
 import { authRouter } from './routes/auth'
 import { auditLogsRouter } from './routes/audit-logs'
 import { approvalHistoryRouter } from './routes/approval-history'
+import { approvalMetricsRouter } from './routes/approval-metrics'
+import { startApprovalSlaScheduler, stopApprovalSlaScheduler } from './services/ApprovalSlaScheduler'
 import { rolesRouter } from './routes/roles'
 import { snapshotsRouter } from './routes/snapshots'
 import changeManagementRouter from './routes/change-management'
@@ -938,6 +940,8 @@ export class MetaSheetServer {
     this.app.use(auditLogsRouter())
     // 路由：审批历史（从审计表衍生）
     this.app.use(approvalHistoryRouter({ injector: this.injector }))
+    // 路由：审批 SLA / 耗时指标（Wave 2 WP5）
+    this.app.use(approvalMetricsRouter())
     // 路由：角色/权限/表/文件/表权限（占位）
     this.app.use(rolesRouter())
     this.app.use(permissionsRouter())
@@ -1744,6 +1748,14 @@ export class MetaSheetServer {
       }
     })())
 
+    shutdownTasks.push((async () => {
+      try {
+        stopApprovalSlaScheduler()
+      } catch (err) {
+        this.logger.warn(`Approval SLA scheduler shutdown failed: ${err instanceof Error ? err.message : String(err)}`)
+      }
+    })())
+
     // 4. Destroy API Gateway resources (only if one was constructed during start()).
     shutdownTasks.push((async () => {
       try {
@@ -1876,6 +1888,13 @@ export class MetaSheetServer {
       this.logger.info('Directory sync scheduler initialized')
     } catch (e) {
       this.logger.error('Directory sync scheduler initialization failed; continuing in degraded mode', e as Error)
+    }
+
+    try {
+      startApprovalSlaScheduler()
+      this.logger.info('Approval SLA scheduler initialized')
+    } catch (e) {
+      this.logger.error('Approval SLA scheduler initialization failed; continuing in degraded mode', e as Error)
     }
 
     // 加载插件并启动 HTTP 服务
