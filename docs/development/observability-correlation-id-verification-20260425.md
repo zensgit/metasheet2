@@ -79,7 +79,7 @@ Proof is in the supertest-backed integration test (`tests/integration/correlatio
 
 ## Error-response body shape
 
-The new global error handler at the end of `setupMiddleware` emits:
+The new global error handler installed by `installGlobalErrorHandler()` at the end of `MetaSheetServer.start()` emits:
 
 ```json
 {
@@ -94,14 +94,34 @@ Routes that previously threw (and relied on express's default HTML 500) now surf
 
 ## Outbound HTTP propagation
 
-`packages/core-backend/src/data-adapters/HTTPAdapter.ts` — the shared axios client — reads `getCorrelationId()` inside its request interceptor and sets `X-Correlation-ID` on every outbound call when a correlation id is in scope and the caller has not already supplied a case-insensitive correlation header. The interceptor uses `require()` inside a `try/catch` so adapter instances constructed outside a request (e.g. integration fixtures) keep working without any correlation header.
+`packages/core-backend/src/data-adapters/HTTPAdapter.ts` — the shared axios client — reads `getCorrelationId()` inside its request interceptor and sets `X-Correlation-ID` on every outbound call when a correlation id is in scope and the caller has not already supplied a case-insensitive correlation header. The interceptor uses a static import; adapter instances constructed outside a request keep working because `getCorrelationId()` safely returns `undefined` when no AsyncLocalStorage scope exists.
 
 ## Review hardening — 2026-04-25
 
 - Moved `correlationIdMiddleware` before `cors()` so CORS preflight short-circuits still receive `X-Correlation-ID`.
+- Moved the global Express error handler out of early middleware setup and into a late `installGlobalErrorHandler()` call at the end of `MetaSheetServer.start()`, after routes and plugin routes are registered.
 - Changed the global error handler to call `next(err)` when `res.headersSent` is already true.
 - Changed `HTTPAdapter` outbound propagation to preserve explicit caller-provided `X-Correlation-ID` / `x-correlation-id` headers.
+- Replaced the dynamic `require('../context/request-context')` in `HTTPAdapter` with a static import.
 - Added a supertest CORS preflight assertion; targeted correlation tests now pass `12 / 12`.
+
+Focused re-verification after review fixes:
+
+```bash
+pnpm --filter @metasheet/core-backend exec vitest run \
+  tests/unit/correlation.test.ts \
+  tests/integration/correlation-header.api.test.ts \
+  --reporter=verbose
+pnpm --filter @metasheet/core-backend exec tsc --noEmit
+```
+
+Result:
+
+```text
+Test Files  2 passed (2)
+Tests       12 passed (12)
+tsc         exit 0
+```
 
 `grep -rn 'axios.create' packages/core-backend/src` returns exactly one hit — `HTTPAdapter` — so no other shared outbound client requires wiring. Ad-hoc `fetch(url, init)` call sites (a handful in plugin adapters) are deliberately not retrofitted; propagating the header there is follow-up work scoped to a shared `http` helper.
 

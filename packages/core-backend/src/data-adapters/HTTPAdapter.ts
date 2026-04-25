@@ -73,6 +73,7 @@ import {
   BaseDataAdapter,
   DataSourceConfig as _DataSourceConfig
 } from './BaseAdapter'
+import { getCorrelationId } from '../context/request-context'
 
 interface HTTPQueryOptions extends QueryOptions {
   method?: 'GET' | 'POST' | 'PUT' | 'DELETE' | 'PATCH'
@@ -165,18 +166,14 @@ export class HTTPAdapter extends BaseDataAdapter {
           }
           // Propagate the inbound correlation id on outbound requests so
           // upstream systems can stitch logs across service boundaries.
-          try {
-            // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-var-requires
-            const { getCorrelationId } = require('../context/request-context') as typeof import('../context/request-context')
-            const correlationId = getCorrelationId()
-            const headers = { ...(config.headers || {}) }
-            const hasCorrelationHeader = Object.keys(headers).some(
-              (key) => key.toLowerCase() === 'x-correlation-id'
-            )
-            if (correlationId && !hasCorrelationHeader) {
-              config.headers = { ...headers, 'X-Correlation-ID': correlationId }
-            }
-          } catch { /* context module missing — skip */ }
+          const correlationId = getCorrelationId()
+          const headers = { ...(config.headers || {}) }
+          const hasCorrelationHeader = Object.keys(headers).some(
+            (key) => key.toLowerCase() === 'x-correlation-id'
+          )
+          if (correlationId && !hasCorrelationHeader) {
+            config.headers = { ...headers, 'X-Correlation-ID': correlationId }
+          }
           this.emit('request', { method: config.method, url: config.url })
           return config
         },

@@ -71,7 +71,7 @@ The middleware is placed **before `cors()`** and **before** the existing `x-requ
 
 ### Global error handler — additive
 
-The pre-existing codebase had **no** global 4-argument express error handler wired into `index.ts` (a `telemetryErrorHandler` in `middleware/telemetry.ts` exists but is never registered). Routes throw and express's default HTML error page is used. I added a minimal handler at the end of `setupMiddleware` that (a) routes the error through `this.logger.error` (picks up `correlation_id` automatically via `mergeMeta`), (b) echoes `correlationId` in the JSON body, and (c) honours `err.status`/`err.statusCode` when present. In production 5xx responses hide the raw message; other classes pass through. If `res.headersSent` is already true, the handler calls `next(err)` so Express can delegate or close the request lifecycle rather than silently returning.
+The pre-existing codebase had **no** global 4-argument express error handler wired into `index.ts` (a `telemetryErrorHandler` in `middleware/telemetry.ts` exists but is never registered). Routes throw and express's default HTML error page is used. I added a minimal handler via `installGlobalErrorHandler()`, called at the end of `start()` after routes, plugin routes, Yjs, and metrics stream wiring. It (a) routes the error through `this.logger.error` (picks up `correlation_id` automatically via `mergeMeta`), (b) echoes `correlationId` in the JSON body, and (c) honours `err.status`/`err.statusCode` when present. In production 5xx responses hide the raw message; other classes pass through. If `res.headersSent` is already true, the handler calls `next(err)` so Express can delegate or close the request lifecycle rather than silently returning.
 
 ### Logger format — top-level `correlation_id`
 
@@ -81,7 +81,7 @@ The pre-existing codebase had **no** global 4-argument express error handler wir
 
 `HTTPAdapter` is the only shared outbound-HTTP client in the backend (`grep axios.create` returned a single hit). Per-file bespoke `fetch`/`node-fetch` call sites exist in a handful of plugins and adapters but each uses direct `fetch(url, init)` — adding `X-Correlation-ID` there would require editing each call site and is out of scope. This is documented as a follow-up: if/when a shared `http` helper lands, it should wire the interceptor uniformly.
 
-The interceptor uses `require()` inside a `try/catch` rather than a static `import` so adapter instantiation never becomes coupled to the context module's availability — `HTTPAdapter` is also used by integration tests that construct adapters outside an Express request, and a missing correlation id is the normal, safe state there.
+The interceptor uses a static `getCorrelationId()` import from the in-package request context module. Adapter instances constructed outside an Express request safely receive `undefined` from `getCorrelationId()` and therefore send no correlation header.
 
 ## Rollout safety
 

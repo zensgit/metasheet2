@@ -1148,10 +1148,13 @@ export class MetaSheetServer {
     })
 
     // Note: /metrics/prom endpoint is registered by installMetrics() in setupMiddleware()
+  }
 
+  private installGlobalErrorHandler(): void {
     // Global error handler — emits `correlationId` in the response body so API
-    // clients can reference the request when filing bug reports. Runs last so
-    // any route-level error bubbles up with the correlation context intact.
+    // clients can reference the request when filing bug reports. It must be
+    // registered after all routes/plugin routes; Express only dispatches errors
+    // to handlers that appear later in the middleware stack.
     this.app.use((err: unknown, req: Request, res: Response, next: NextFunction) => {
       const correlationId = req.correlationId ?? getCorrelationId()
       const message = err instanceof Error ? err.message : String(err)
@@ -2149,6 +2152,8 @@ export class MetaSheetServer {
     } catch (e) {
       this.logger.error('Failed to initialize MetricsStreamService', e as Error)
     }
+
+    this.installGlobalErrorHandler()
 
     this.logger.info('Starting HTTP server listen phase...')
     await new Promise<void>((resolve, reject) => {
