@@ -48,7 +48,7 @@
           class="approval-new__form"
         >
           <el-form-item
-            v-for="field in template.formSchema.fields"
+            v-for="field in visibleFields"
             :key="field.id"
             :label="field.label"
             :prop="field.id"
@@ -193,7 +193,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import type { FormInstance, FormRules } from 'element-plus'
@@ -201,6 +201,10 @@ import { ArrowLeft, Search, UploadFilled } from '@element-plus/icons-vue'
 import { useApprovalStore } from '../../approvals/store'
 import { useApprovalTemplateStore } from '../../approvals/templateStore'
 import { useApprovalPermissions } from '../../approvals/permissions'
+import {
+  getVisibleFormFields,
+  pruneHiddenFormData,
+} from '../../approvals/fieldVisibility'
 
 const route = useRoute()
 const router = useRouter()
@@ -211,11 +215,15 @@ const { canWrite } = useApprovalPermissions()
 const formRef = ref<FormInstance>()
 const formData = reactive<Record<string, unknown>>({})
 const template = computed(() => templateStore.activeTemplate)
+const visibleFields = computed(() => {
+  if (!template.value) return []
+  return getVisibleFormFields(template.value.formSchema, formData)
+})
+const visibleFieldIds = computed(() => visibleFields.value.map((field) => field.id))
 
 const formRules = computed<FormRules>(() => {
   const rules: FormRules = {}
-  if (!template.value) return rules
-  for (const field of template.value.formSchema.fields) {
+  for (const field of visibleFields.value) {
     if (field.required) {
       rules[field.id] = [
         { required: true, message: `请填写${field.label}`, trigger: 'blur' },
@@ -254,7 +262,7 @@ async function handleSubmit() {
   try {
     const result = await approvalStore.submitApproval({
       templateId,
-      formData: { ...formData },
+      formData: template.value ? pruneHiddenFormData(template.value.formSchema, formData) : { ...formData },
     })
     ElMessage.success('审批已提交')
     router.push({ name: 'approval-detail', params: { id: result.id } })
@@ -279,6 +287,29 @@ onMounted(async () => {
     }
   }
 })
+
+function syncVisibleFormState() {
+  if (!template.value) return
+  const visibleFieldIdSet = new Set(visibleFieldIds.value)
+  for (const key of Object.keys(formData)) {
+    if (!visibleFieldIdSet.has(key)) {
+      delete formData[key]
+    }
+  }
+  for (const field of visibleFields.value) {
+    if (formData[field.id] === undefined) {
+      if (field.defaultValue !== undefined) {
+        formData[field.id] = field.defaultValue
+      } else if (field.type === 'multi-select') {
+        formData[field.id] = []
+      }
+    }
+  }
+}
+
+watch([visibleFieldIds, template], () => {
+  syncVisibleFormState()
+}, { immediate: true })
 </script>
 
 <style scoped>
