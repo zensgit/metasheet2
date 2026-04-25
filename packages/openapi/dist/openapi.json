@@ -49,6 +49,22 @@
           }
         }
       },
+      "DirectErrorResponse": {
+        "type": "object",
+        "properties": {
+          "error": {
+            "type": "object",
+            "properties": {
+              "code": {
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      },
       "User": {
         "type": "object",
         "properties": {
@@ -607,6 +623,13 @@
             "format": "date-time"
           }
         }
+      },
+      "AttendancePunchEvent": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/AttendanceEvent"
+          }
+        ]
       },
       "AttendanceRecord": {
         "type": "object",
@@ -3517,6 +3540,38 @@
           "value"
         ]
       },
+      "FormFieldVisibilityRule": {
+        "type": "object",
+        "properties": {
+          "fieldId": {
+            "type": "string",
+            "description": "Field id that controls the dependent field's visibility."
+          },
+          "operator": {
+            "type": "string",
+            "enum": [
+              "eq",
+              "neq",
+              "in",
+              "isEmpty",
+              "notEmpty"
+            ]
+          },
+          "value": {
+            "nullable": true,
+            "description": "Single comparison value for eq/neq operators."
+          },
+          "values": {
+            "type": "array",
+            "items": {},
+            "description": "Candidate values for the in operator."
+          }
+        },
+        "required": [
+          "fieldId",
+          "operator"
+        ]
+      },
       "FormField": {
         "type": "object",
         "properties": {
@@ -3558,6 +3613,9 @@
           "props": {
             "type": "object",
             "additionalProperties": true
+          },
+          "visibilityRule": {
+            "$ref": "#/components/schemas/FormFieldVisibilityRule"
           }
         },
         "required": [
@@ -3781,9 +3839,19 @@
             "type": "string",
             "nullable": true
           },
+          "actor_id": {
+            "type": "string",
+            "nullable": true,
+            "deprecated": true
+          },
           "actorName": {
             "type": "string",
             "nullable": true
+          },
+          "actor_name": {
+            "type": "string",
+            "nullable": true,
+            "deprecated": true
           },
           "comment": {
             "type": "string",
@@ -3793,13 +3861,42 @@
             "type": "string",
             "nullable": true
           },
+          "from_status": {
+            "type": "string",
+            "nullable": true,
+            "deprecated": true
+          },
           "toStatus": {
             "type": "string"
+          },
+          "to_status": {
+            "type": "string",
+            "deprecated": true
           },
           "occurredAt": {
             "type": "string",
             "format": "date-time",
             "nullable": true
+          },
+          "occurred_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "deprecated": true
+          },
+          "version": {
+            "type": "integer",
+            "nullable": true
+          },
+          "from_version": {
+            "type": "integer",
+            "nullable": true,
+            "deprecated": true
+          },
+          "to_version": {
+            "type": "integer",
+            "nullable": true,
+            "deprecated": true
           },
           "metadata": {
             "type": "object",
@@ -3808,9 +3905,251 @@
         },
         "required": [
           "id",
+          "action"
+        ]
+      },
+      "LegacyPendingApprovalInstance": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "version": {
+            "type": "integer"
+          },
+          "source_system": {
+            "type": "string",
+            "nullable": true
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "id",
+          "status",
+          "version",
+          "created_at",
+          "updated_at"
+        ]
+      },
+      "ApprovalListResponse": {
+        "type": "object",
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/UnifiedApprovalDTO"
+            }
+          },
+          "total": {
+            "type": "integer"
+          },
+          "limit": {
+            "type": "integer"
+          },
+          "offset": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "data",
+          "total",
+          "limit",
+          "offset"
+        ]
+      },
+      "LegacyPendingApprovalListResponse": {
+        "type": "object",
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/LegacyPendingApprovalInstance"
+            }
+          },
+          "total": {
+            "type": "integer"
+          },
+          "limit": {
+            "type": "integer"
+          },
+          "offset": {
+            "type": "integer"
+          },
+          "degraded": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "data",
+          "total",
+          "limit",
+          "offset"
+        ]
+      },
+      "ApprovalHistoryResponse": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "example": true
+          },
+          "data": {
+            "type": "object",
+            "properties": {
+              "items": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/UnifiedApprovalHistoryDTO"
+                }
+              },
+              "total": {
+                "type": "integer"
+              },
+              "page": {
+                "type": "integer"
+              },
+              "pageSize": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "items",
+              "total",
+              "page",
+              "pageSize"
+            ]
+          }
+        },
+        "required": [
+          "ok",
+          "data"
+        ]
+      },
+      "ApprovalPendingCountResponse": {
+        "type": "object",
+        "properties": {
+          "count": {
+            "type": "integer"
+          },
+          "unreadCount": {
+            "type": "integer"
+          },
+          "degraded": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "count",
+          "unreadCount"
+        ]
+      },
+      "MarkApprovalReadResponse": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "skipped": {
+            "type": "boolean"
+          },
+          "reason": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "ok"
+        ]
+      },
+      "MarkAllApprovalsReadResponse": {
+        "type": "object",
+        "properties": {
+          "markedCount": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "markedCount"
+        ]
+      },
+      "RemindApprovalData": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "action": {
+            "type": "string",
+            "enum": [
+              "remind"
+            ]
+          },
+          "remindedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "bridged": {
+            "type": "boolean"
+          },
+          "sourceSystem": {
+            "type": "string",
+            "nullable": true
+          }
+        },
+        "required": [
+          "id",
           "action",
-          "toStatus",
-          "metadata"
+          "remindedAt",
+          "bridged",
+          "sourceSystem"
+        ]
+      },
+      "RemindApprovalResponse": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "example": true
+          },
+          "data": {
+            "$ref": "#/components/schemas/RemindApprovalData"
+          }
+        },
+        "required": [
+          "ok",
+          "data"
+        ]
+      },
+      "ApprovalPlmSyncResponse": {
+        "type": "object",
+        "properties": {
+          "success": {
+            "type": "boolean"
+          },
+          "synced": {
+            "type": "integer"
+          },
+          "errors": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": true
+            }
+          }
+        },
+        "required": [
+          "success",
+          "synced",
+          "errors"
         ]
       },
       "CreateApprovalRequest": {
@@ -4301,6 +4640,16 @@
           }
         }
       },
+      "Conflict": {
+        "description": "Conflict - Request conflicts with current resource state",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
+          }
+        }
+      },
       "ServiceUnavailable": {
         "description": "Service unavailable - Temporary server issues",
         "content": {
@@ -4758,14 +5107,21 @@
         "tags": [
           "Approvals"
         ],
-        "summary": "List platform approval instances",
-        "description": "Returns a paginated list of approval instances. Use query parameters to\nfilter by tab: pending (assignee), mine (requesterId), cc (ccRecipientId),\nor completed (status=approved,rejected,revoked).\n",
+        "summary": "List approval instances",
+        "description": "Returns a paginated list of approval instances. The live route accepts\nboth page/pageSize and the older limit/offset pagination fallback.\nUse `tab` for the current inbox lens, plus optional sourceSystem,\nworkflowKey, businessKey, assignee, status, and search filters.\n",
         "security": [
           {
             "bearerAuth": []
           }
         ],
         "parameters": [
+          {
+            "in": "query",
+            "name": "sourceSystem",
+            "schema": {
+              "type": "string"
+            }
+          },
           {
             "in": "query",
             "name": "status",
@@ -4775,7 +5131,14 @@
           },
           {
             "in": "query",
-            "name": "requesterId",
+            "name": "workflowKey",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "businessKey",
             "schema": {
               "type": "string"
             }
@@ -4789,16 +5152,33 @@
           },
           {
             "in": "query",
-            "name": "ccRecipientId",
+            "name": "tab",
             "schema": {
               "type": "string"
             }
           },
           {
             "in": "query",
-            "name": "templateId",
+            "name": "search",
             "schema": {
               "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "page",
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
+          },
+          {
+            "in": "query",
+            "name": "pageSize",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200
             }
           },
           {
@@ -4825,43 +5205,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "properties": {
-                    "ok": {
-                      "type": "boolean",
-                      "example": true
-                    },
-                    "data": {
-                      "type": "object",
-                      "properties": {
-                        "items": {
-                          "type": "array",
-                          "items": {
-                            "$ref": "#/components/schemas/UnifiedApprovalDTO"
-                          }
-                        },
-                        "total": {
-                          "type": "integer"
-                        },
-                        "limit": {
-                          "type": "integer"
-                        },
-                        "offset": {
-                          "type": "integer"
-                        }
-                      },
-                      "required": [
-                        "items",
-                        "total",
-                        "limit",
-                        "offset"
-                      ]
-                    }
-                  },
-                  "required": [
-                    "ok",
-                    "data"
-                  ]
+                  "$ref": "#/components/schemas/ApprovalListResponse"
                 }
               }
             }
@@ -4905,20 +5249,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "properties": {
-                    "ok": {
-                      "type": "boolean",
-                      "example": true
-                    },
-                    "data": {
-                      "$ref": "#/components/schemas/UnifiedApprovalDTO"
-                    }
-                  },
-                  "required": [
-                    "ok",
-                    "data"
-                  ]
+                  "$ref": "#/components/schemas/UnifiedApprovalDTO"
                 }
               }
             }
@@ -4946,7 +5277,26 @@
         ],
         "deprecated": true,
         "summary": "Get pending approvals for current actor",
-        "description": "Deprecated. Use GET /api/approvals?assignee={userId}&status=pending instead.\n",
+        "description": "Deprecated. Use GET /api/approvals with `tab=pending` instead.\n",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        ],
         "security": [
           {
             "bearerAuth": []
@@ -4954,7 +5304,80 @@
         ],
         "responses": {
           "200": {
-            "description": "OK"
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LegacyPendingApprovalListResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        }
+      }
+    },
+    "/api/approvals/sync/plm": {
+      "post": {
+        "operationId": "syncPlmApprovals",
+        "tags": [
+          "Approvals"
+        ],
+        "summary": "Trigger a PLM approval sync",
+        "description": "Pulls approval instances from the PLM bridge into the unified approval\ninbox. Requires approvals:read and a configured PLM adapter.\n",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "status": {
+                    "type": "string"
+                  },
+                  "productId": {
+                    "type": "string"
+                  },
+                  "requesterId": {
+                    "type": "string"
+                  },
+                  "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 200
+                  },
+                  "offset": {
+                    "type": "integer",
+                    "minimum": 0
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApprovalPlmSyncResponse"
+                }
+              }
+            }
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
@@ -4997,20 +5420,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "properties": {
-                    "ok": {
-                      "type": "boolean",
-                      "example": true
-                    },
-                    "data": {
-                      "$ref": "#/components/schemas/UnifiedApprovalDTO"
-                    }
-                  },
-                  "required": [
-                    "ok",
-                    "data"
-                  ]
+                  "$ref": "#/components/schemas/UnifiedApprovalDTO"
                 }
               }
             }
@@ -5069,20 +5479,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "properties": {
-                    "ok": {
-                      "type": "boolean",
-                      "example": true
-                    },
-                    "data": {
-                      "$ref": "#/components/schemas/UnifiedApprovalDTO"
-                    }
-                  },
-                  "required": [
-                    "ok",
-                    "data"
-                  ]
+                  "$ref": "#/components/schemas/UnifiedApprovalDTO"
                 }
               }
             }
@@ -5461,40 +5858,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "properties": {
-                    "ok": {
-                      "type": "boolean",
-                      "example": true
-                    },
-                    "data": {
-                      "type": "object",
-                      "properties": {
-                        "items": {
-                          "type": "array",
-                          "items": {
-                            "$ref": "#/components/schemas/UnifiedApprovalHistoryDTO"
-                          }
-                        },
-                        "total": {
-                          "type": "integer"
-                        },
-                        "page": {
-                          "type": "integer"
-                        },
-                        "pageSize": {
-                          "type": "integer"
-                        }
-                      },
-                      "required": [
-                        "items"
-                      ]
-                    }
-                  },
-                  "required": [
-                    "ok",
-                    "data"
-                  ]
+                  "$ref": "#/components/schemas/ApprovalHistoryResponse"
                 }
               }
             }
@@ -5507,6 +5871,226 @@
           },
           "404": {
             "$ref": "#/components/responses/NotFound"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        }
+      }
+    },
+    "/api/approvals/pending-count": {
+      "get": {
+        "operationId": "getApprovalPendingCount",
+        "tags": [
+          "Approvals"
+        ],
+        "summary": "Get pending approval badge counts",
+        "description": "Returns the current actor's active pending assignment count and the\nunread subset used by the approval center badge.\n",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "query",
+            "name": "sourceSystem",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "all",
+                "platform",
+                "plm"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApprovalPendingCountResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        }
+      }
+    },
+    "/api/approvals/{id}/mark-read": {
+      "post": {
+        "operationId": "markApprovalRead",
+        "tags": [
+          "Approvals"
+        ],
+        "summary": "Mark one approval as read",
+        "description": "Records a read marker for the current actor. For unsynced external\napprovals the route returns `{ ok: true, skipped: true }`.\n",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MarkApprovalReadResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        }
+      }
+    },
+    "/api/approvals/mark-all-read": {
+      "post": {
+        "operationId": "markAllApprovalsRead",
+        "tags": [
+          "Approvals"
+        ],
+        "summary": "Mark all pending approvals as read",
+        "description": "Marks every active pending assignment for the current actor as read.\n`sourceSystem` scopes the operation to the current inbox filter.\n",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "sourceSystem": {
+                    "type": "string",
+                    "enum": [
+                      "all",
+                      "platform",
+                      "plm"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MarkAllApprovalsReadResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        }
+      }
+    },
+    "/api/approvals/{id}/remind": {
+      "post": {
+        "operationId": "remindApproval",
+        "tags": [
+          "Approvals"
+        ],
+        "summary": "Remind pending approvers",
+        "description": "Records a remind event for a pending approval. The requester or an\napprover may call it. The route is rate-limited to once per instance\nper actor per hour and returns 429 with the last remind timestamp when\nthrottled.\n",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RemindApprovalResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "429": {
+            "description": "Remind throttled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
           },
           "503": {
             "$ref": "#/components/responses/ServiceUnavailable"
@@ -5884,20 +6468,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "properties": {
-                    "ok": {
-                      "type": "boolean",
-                      "example": true
-                    },
-                    "data": {
-                      "$ref": "#/components/schemas/ApprovalTemplateDetail"
-                    }
-                  },
-                  "required": [
-                    "ok",
-                    "data"
-                  ]
+                  "$ref": "#/components/schemas/ApprovalTemplateDetail"
                 }
               }
             }
@@ -5984,20 +6555,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "properties": {
-                    "ok": {
-                      "type": "boolean",
-                      "example": true
-                    },
-                    "data": {
-                      "$ref": "#/components/schemas/ApprovalTemplateDetail"
-                    }
-                  },
-                  "required": [
-                    "ok",
-                    "data"
-                  ]
+                  "$ref": "#/components/schemas/ApprovalTemplateDetail"
                 }
               }
             }
@@ -6051,20 +6609,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "properties": {
-                    "ok": {
-                      "type": "boolean",
-                      "example": true
-                    },
-                    "data": {
-                      "$ref": "#/components/schemas/ApprovalTemplateDetail"
-                    }
-                  },
-                  "required": [
-                    "ok",
-                    "data"
-                  ]
+                  "$ref": "#/components/schemas/ApprovalTemplateDetail"
                 }
               }
             }
@@ -6179,20 +6724,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "properties": {
-                    "ok": {
-                      "type": "boolean",
-                      "example": true
-                    },
-                    "data": {
-                      "$ref": "#/components/schemas/ApprovalTemplateVersionDetail"
-                    }
-                  },
-                  "required": [
-                    "ok",
-                    "data"
-                  ]
+                  "$ref": "#/components/schemas/ApprovalTemplateVersionDetail"
                 }
               }
             }
@@ -6249,20 +6781,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "properties": {
-                    "ok": {
-                      "type": "boolean",
-                      "example": true
-                    },
-                    "data": {
-                      "$ref": "#/components/schemas/ApprovalTemplateVersionDetail"
-                    }
-                  },
-                  "required": [
-                    "ok",
-                    "data"
-                  ]
+                  "$ref": "#/components/schemas/ApprovalTemplateVersionDetail"
                 }
               }
             }
