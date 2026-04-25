@@ -1,10 +1,11 @@
 #!/usr/bin/env node
 
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import path from 'node:path'
 
 const DEFAULT_OUTPUT_ROOT = 'output/dingtalk-p4-remote-smoke-session'
+const DEFAULT_PACKET_ROOT = 'artifacts/dingtalk-staging-evidence-packet'
 const DEFAULT_API_BASE = 'http://127.0.0.1:8900'
 const MANUAL_CHECK_IDS = new Set([
   'send-group-message-form-link',
@@ -33,13 +34,13 @@ Options:
   --api-base <url>                 Backend API base, default ${DEFAULT_API_BASE}
   --web-base <url>                 Public app base used by DingTalk message links
   --auth-token <token>             Bearer token for admin/table owner
-  --group-a-webhook <url>          DingTalk group A robot webhook
-  --group-b-webhook <url>          DingTalk group B robot webhook
+  --group-a-webhook <url>          DingTalk group A robot webhook; https://oapi.dingtalk.com/robot/send?access_token=...
+  --group-b-webhook <url>          DingTalk group B robot webhook; https://oapi.dingtalk.com/robot/send?access_token=...
   --group-a-secret <secret>        Optional DingTalk group A SEC... secret
   --group-b-secret <secret>        Optional DingTalk group B SEC... secret
   --allowed-user <id>              Local user allowed to fill; repeatable
   --allowed-member-group <id>      Allowed local member group; repeatable
-  --person-user <id>               Optional local user for person smoke; repeatable
+  --person-user <id>               Local user for final person smoke; repeatable
   --authorized-user <id>           DingTalk-bound allowed local user for manual submit proof
   --unauthorized-user <id>         DingTalk-bound non-allowlisted local user for denial proof
   --no-email-dingtalk-external-id <id>
@@ -291,6 +292,7 @@ DINGTALK_P4_WEB_BASE=http://142.171.239.56:8081
 DINGTALK_P4_AUTH_TOKEN=
 
 # DingTalk group robot webhooks. Full webhook URLs must stay private.
+# Required URL shape: https://oapi.dingtalk.com/robot/send?access_token=...
 DINGTALK_P4_GROUP_A_WEBHOOK=
 DINGTALK_P4_GROUP_B_WEBHOOK=
 
@@ -303,7 +305,7 @@ DINGTALK_P4_GROUP_B_SECRET=
 DINGTALK_P4_ALLOWED_USER_IDS=
 DINGTALK_P4_ALLOWED_MEMBER_GROUP_IDS=
 
-# Optional local user IDs for direct DingTalk person-message delivery history.
+# Required local user IDs for final direct DingTalk person-message delivery history.
 DINGTALK_P4_PERSON_USER_IDS=
 
 # Manual DingTalk-client/admin target identities for final screenshots.
@@ -422,9 +424,22 @@ function strictCompileCommand(evidencePath, compiledDir) {
   return `node scripts/ops/compile-dingtalk-p4-smoke-evidence.mjs --input ${relativePath(evidencePath)} --output-dir ${relativePath(compiledDir)} --strict`
 }
 
+function sanitizeName(value) {
+  return path
+    .basename(value)
+    .replace(/[^A-Za-z0-9._-]/g, '-')
+    .replace(/^-+|-+$/g, '') || 'session'
+}
+
+function packetOutputDirForSession(outputDir) {
+  return path.resolve(process.cwd(), DEFAULT_PACKET_ROOT, `${sanitizeName(outputDir)}-final`)
+}
+
 function exportPacketCommand(outputDir, requireFinalPass = false) {
   return [
     'node scripts/ops/export-dingtalk-staging-evidence-packet.mjs',
+    '--output-dir',
+    relativePath(packetOutputDirForSession(outputDir)),
     '--include-output',
     relativePath(outputDir),
     ...(requireFinalPass ? ['--require-dingtalk-p4-pass'] : []),
@@ -436,6 +451,21 @@ function finalHandoffCommand(outputDir) {
     'node scripts/ops/dingtalk-p4-final-handoff.mjs',
     '--session-dir',
     relativePath(outputDir),
+    '--output-dir',
+    relativePath(packetOutputDirForSession(outputDir)),
+  ].join(' ')
+}
+
+function finalCloseoutCommand(outputDir, allowExternalArtifactRefs = false) {
+  return [
+    'node scripts/ops/dingtalk-p4-final-closeout.mjs',
+    '--session-dir',
+    relativePath(outputDir),
+    '--packet-output-dir',
+    relativePath(packetOutputDirForSession(outputDir)),
+    '--docs-output-dir',
+    'docs/development',
+    ...(allowExternalArtifactRefs ? ['--allow-external-artifact-refs'] : []),
   ].join(' ')
 }
 
@@ -453,6 +483,25 @@ function statusReportPaths(outputDir) {
     smokeStatusMd: path.join(outputDir, 'smoke-status.md'),
     smokeTodoMd: path.join(outputDir, 'smoke-todo.md'),
   }
+}
+
+function clearBootstrapOutputs(outputDir) {
+  for (const entry of [
+    'preflight',
+    'workspace',
+    'compiled',
+    'session-summary.json',
+    'session-summary.md',
+    'smoke-status.json',
+    'smoke-status.md',
+    'smoke-todo.md',
+  ]) {
+    rmSync(path.join(outputDir, entry), { recursive: true, force: true })
+  }
+}
+
+function clearFinalCompileOutputs(outputDir) {
+  rmSync(path.join(outputDir, 'compiled'), { recursive: true, force: true })
 }
 
 function runStatusReportStep(outputDir, env) {
@@ -475,6 +524,7 @@ function buildStatusReportSummary(outputDir, statusStep) {
     smokeStatusMd: existsSync(paths.smokeStatusMd) ? relativePath(paths.smokeStatusMd) : '',
     smokeTodoMd: existsSync(paths.smokeTodoMd) ? relativePath(paths.smokeTodoMd) : '',
     overallStatus: statusSummary?.overallStatus ?? 'not_available',
+    remoteSmokePhase: statusSummary?.remoteSmokePhase ?? 'not_available',
     remoteSmokeTodos: statusSummary?.remoteSmokeTodos
       ? {
           total: statusSummary.remoteSmokeTodos.total,
@@ -533,6 +583,8 @@ API bootstrap status: **${final.apiBootstrapStatus ?? 'unknown'}**
 
 Remote client status: **${final.remoteClientStatus ?? 'unknown'}**
 
+Remote smoke phase: **${final.remoteSmokePhase ?? 'unknown'}**
+
 Required checks not passed:
 
 ${notPassed}
@@ -563,6 +615,8 @@ Status report: \`${summary.statusReport.smokeStatusJson || 'not_available'}\`
 Remote TODO: \`${summary.statusReport.smokeTodoMd || 'not_available'}\`
 
 Remote TODO progress: **${summary.statusReport.remoteSmokeTodos?.completed ?? 0}/${summary.statusReport.remoteSmokeTodos?.total ?? 0}** complete, **${summary.statusReport.remoteSmokeTodos?.remaining ?? 'unknown'}** remaining.
+
+Remote smoke phase: **${summary.statusReport.remoteSmokePhase ?? 'not_available'}**
 `
     : ''
 
@@ -571,6 +625,8 @@ Remote TODO progress: **${summary.statusReport.remoteSmokeTodos?.completed ?? 0}
 Generated at: ${summary.generatedAt}
 
 Overall status: **${summary.overallStatus}**
+
+Remote smoke phase: **${summary.remoteSmokePhase ?? summary.statusReport?.remoteSmokePhase ?? 'not_available'}**
 
 Output directory: \`${summary.outputDir}\`
 
@@ -622,6 +678,7 @@ function runSession(opts) {
   const env = buildChildEnv(opts)
   const steps = []
 
+  clearBootstrapOutputs(outputDir)
   mkdirSync(outputDir, { recursive: true })
 
   const preflightArgs = [
@@ -632,6 +689,7 @@ function runSession(opts) {
     String(opts.timeoutMs),
     ...(opts.skipApi ? ['--skip-api'] : []),
     ...(opts.requireManualTargets ? ['--require-manual-targets'] : []),
+    '--require-person-user',
   ]
   steps.push(runNodeStep('preflight', 'Validate P4 smoke inputs and backend health', preflightArgs[0], preflightArgs.slice(1), preflightDir, env))
 
@@ -662,6 +720,7 @@ function runSession(opts) {
   }
 
   const pendingChecks = extractPendingManualChecks(evidencePath)
+  const compiledSummary = readJsonIfExists(path.join(compiledDir, 'summary.json'))
   const summary = {
     tool: 'dingtalk-p4-smoke-session',
     runId,
@@ -671,6 +730,7 @@ function runSession(opts) {
     workspaceDir: relativePath(workspaceDir),
     compiledDir: relativePath(compiledDir),
     overallStatus: computeOverallStatus(steps, pendingChecks),
+    remoteSmokePhase: compiledSummary?.remoteSmokePhase ?? 'not_available',
     sessionPhase: 'bootstrap',
     finalStrictStatus: 'not_run',
     manualTargets: manualTargets(opts),
@@ -687,12 +747,14 @@ function runSession(opts) {
   writeSessionSummary(summary, outputDir)
   const statusStep = runStatusReportStep(outputDir, env)
   const finalSteps = [...steps.filter((step) => step.id !== 'status-report'), statusStep]
+  const statusReport = buildStatusReportSummary(outputDir, statusStep)
   const finalSummary = {
     ...summary,
     generatedAt: new Date().toISOString(),
     overallStatus: computeOverallStatus(finalSteps, pendingChecks),
+    remoteSmokePhase: statusReport.remoteSmokePhase ?? summary.remoteSmokePhase,
     steps: finalSteps,
-    statusReport: buildStatusReportSummary(outputDir, statusStep),
+    statusReport,
   }
   writeSessionSummary(finalSummary, outputDir)
   return finalSummary
@@ -721,6 +783,7 @@ function runFinalStrictCompile(opts) {
     '--strict',
     ...(opts.allowExternalArtifactRefs ? ['--allow-external-artifact-refs'] : []),
   ]
+  clearFinalCompileOutputs(outputDir)
   const strictStep = runNodeStep(
     'strict-compile',
     'Compile final strict P4 smoke evidence',
@@ -745,6 +808,7 @@ function runFinalStrictCompile(opts) {
     workspaceDir: relativePath(workspaceDir),
     compiledDir: relativePath(compiledDir),
     overallStatus: strictPassed ? 'pass' : 'fail',
+    remoteSmokePhase: compiledSummary?.remoteSmokePhase ?? 'not_available',
     sessionPhase: 'finalize',
     finalStrictStatus: strictPassed ? 'pass' : 'fail',
     manualTargets: priorSummary?.manualTargets ?? manualTargets(opts),
@@ -755,6 +819,7 @@ function runFinalStrictCompile(opts) {
           overallStatus: compiledSummary.overallStatus,
           apiBootstrapStatus: compiledSummary.apiBootstrapStatus,
           remoteClientStatus: compiledSummary.remoteClientStatus,
+          remoteSmokePhase: compiledSummary.remoteSmokePhase,
           requiredChecksNotPassed: compiledSummary.requiredChecksNotPassed ?? [],
           manualEvidenceIssues: compiledSummary.manualEvidenceIssues ?? [],
           manualEvidenceIssueCount: Array.isArray(compiledSummary.manualEvidenceIssues)
@@ -766,19 +831,21 @@ function runFinalStrictCompile(opts) {
         }
       : null,
     nextCommands: strictPassed
-      ? [statusCommand(outputDir), finalHandoffCommand(outputDir), exportPacketCommand(outputDir, true)]
+      ? [statusCommand(outputDir), finalCloseoutCommand(outputDir, opts.allowExternalArtifactRefs), finalHandoffCommand(outputDir), exportPacketCommand(outputDir, true)]
       : [statusCommand(outputDir), evidenceRecordCommand(outputDir), finalizeCommand(outputDir, opts.allowExternalArtifactRefs), finalHandoffCommand(outputDir), exportPacketCommand(outputDir, true)],
   }
 
   writeSessionSummary(summary, outputDir)
   const statusStep = runStatusReportStep(outputDir, env)
   const finalSteps = [...steps.filter((step) => step.id !== 'status-report'), statusStep]
+  const statusReport = buildStatusReportSummary(outputDir, statusStep)
   const finalSummary = {
     ...summary,
     generatedAt: new Date().toISOString(),
     overallStatus: strictPassed && statusStep.status === 'pass' ? 'pass' : 'fail',
+    remoteSmokePhase: statusReport.remoteSmokePhase ?? summary.remoteSmokePhase,
     steps: finalSteps,
-    statusReport: buildStatusReportSummary(outputDir, statusStep),
+    statusReport,
   }
   writeSessionSummary(finalSummary, outputDir)
   return finalSummary

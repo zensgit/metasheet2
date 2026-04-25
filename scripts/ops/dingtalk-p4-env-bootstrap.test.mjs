@@ -90,6 +90,7 @@ test('dingtalk-p4-env-bootstrap reports missing readiness fields without leaking
     const summary = JSON.parse(summaryText)
     assert.equal(summary.overallStatus, 'fail')
     assert.equal(summary.checks.find((check) => check.id === 'dingtalk_p4_group_b_webhook').status, 'fail')
+    assert.equal(summary.checks.find((check) => check.id === 'person-smoke-input').status, 'fail')
     assert.deepEqual(summary.checks.find((check) => check.id === 'manual-targets-declared').details.missing, [
       'unauthorized user',
       'no-email DingTalk external id',
@@ -124,6 +125,8 @@ test('dingtalk-p4-env-bootstrap passes with complete env and derives authorized 
     const summaryText = readFileSync(path.join(outputDir, 'readiness-summary.json'), 'utf8')
     const summary = JSON.parse(summaryText)
     assert.equal(summary.overallStatus, 'pass')
+    assert.equal(summary.checks.find((check) => check.id === 'group-a-webhook-shape').status, 'pass')
+    assert.equal(summary.checks.find((check) => check.id === 'group-b-webhook-shape').status, 'pass')
     assert.equal(summary.environment.authTokenPresent, true)
     assert.equal(summary.environment.groupASecretPresent, true)
     assert.deepEqual(summary.environment.manualTargets, {
@@ -133,6 +136,100 @@ test('dingtalk-p4-env-bootstrap passes with complete env and derives authorized 
     })
     assert.equal(summary.nextCommands.some((command) => command.includes('--require-manual-targets')), true)
     assert.doesNotMatch(readFileSync(path.join(outputDir, 'readiness-summary.md'), 'utf8'), /robot-secret/)
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+
+test('dingtalk-p4-env-bootstrap requires person smoke input for final P4 readiness', () => {
+  const tmpDir = makeTmpDir()
+  const envFile = path.join(tmpDir, 'dingtalk-p4.env')
+  const outputDir = path.join(tmpDir, 'readiness')
+
+  try {
+    writeEnv(envFile, [
+      'DINGTALK_P4_API_BASE="http://142.171.239.56:8900"',
+      'DINGTALK_P4_WEB_BASE="http://142.171.239.56:8081"',
+      'DINGTALK_P4_AUTH_TOKEN="secret-admin-token"',
+      'DINGTALK_P4_GROUP_A_WEBHOOK="https://oapi.dingtalk.com/robot/send?access_token=robot-secret-a"',
+      'DINGTALK_P4_GROUP_B_WEBHOOK="https://oapi.dingtalk.com/robot/send?access_token=robot-secret-b"',
+      'DINGTALK_P4_ALLOWED_USER_IDS="user_authorized"',
+      'DINGTALK_P4_UNAUTHORIZED_USER_ID="user_unauthorized"',
+      'DINGTALK_P4_NO_EMAIL_DINGTALK_EXTERNAL_ID="dt_no_email_001"',
+    ])
+
+    const result = runScript(['--check', '--p4-env-file', envFile, '--output-dir', outputDir])
+
+    assert.equal(result.status, 1)
+    const summary = JSON.parse(readFileSync(path.join(outputDir, 'readiness-summary.json'), 'utf8'))
+    const personCheck = summary.checks.find((check) => check.id === 'person-smoke-input')
+    assert.equal(summary.overallStatus, 'fail')
+    assert.equal(personCheck.status, 'fail')
+    assert.equal(personCheck.details.personUserCount, 0)
+    assert.match(personCheck.details.notes, /delivery-history-group-person/)
+    assert.equal(summary.nextCommands.some((command) => command.includes('--require-person-user')), true)
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+
+test('dingtalk-p4-env-bootstrap rejects duplicate webhooks and reused unauthorized target', () => {
+  const tmpDir = makeTmpDir()
+  const envFile = path.join(tmpDir, 'dingtalk-p4.env')
+  const outputDir = path.join(tmpDir, 'readiness')
+
+  try {
+    writeEnv(envFile, [
+      'DINGTALK_P4_API_BASE="http://142.171.239.56:8900"',
+      'DINGTALK_P4_WEB_BASE="http://142.171.239.56:8081"',
+      'DINGTALK_P4_AUTH_TOKEN="secret-admin-token"',
+      'DINGTALK_P4_GROUP_A_WEBHOOK="https://oapi.dingtalk.com/robot/send?access_token=robot-secret-same&timestamp=1"',
+      'DINGTALK_P4_GROUP_B_WEBHOOK="https://oapi.dingtalk.com/robot/send?access_token=robot-secret-same&timestamp=2"',
+      'DINGTALK_P4_ALLOWED_USER_IDS="user_authorized"',
+      'DINGTALK_P4_PERSON_USER_IDS="user_person_bound"',
+      'DINGTALK_P4_UNAUTHORIZED_USER_ID="user_authorized"',
+      'DINGTALK_P4_NO_EMAIL_DINGTALK_EXTERNAL_ID="dt_no_email_001"',
+    ])
+
+    const result = runScript(['--check', '--p4-env-file', envFile, '--output-dir', outputDir])
+
+    assert.equal(result.status, 1)
+    const summary = JSON.parse(readFileSync(path.join(outputDir, 'readiness-summary.json'), 'utf8'))
+    assert.equal(summary.checks.find((check) => check.id === 'group-webhooks-distinct').status, 'fail')
+    assert.equal(summary.checks.find((check) => check.id === 'unauthorized-target-distinct').status, 'fail')
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+
+test('dingtalk-p4-env-bootstrap rejects non-canonical DingTalk robot webhook shapes', () => {
+  const tmpDir = makeTmpDir()
+  const envFile = path.join(tmpDir, 'dingtalk-p4.env')
+  const outputDir = path.join(tmpDir, 'readiness')
+
+  try {
+    writeEnv(envFile, [
+      'DINGTALK_P4_API_BASE="http://142.171.239.56:8900"',
+      'DINGTALK_P4_WEB_BASE="http://142.171.239.56:8081"',
+      'DINGTALK_P4_AUTH_TOKEN="secret-admin-token"',
+      'DINGTALK_P4_GROUP_A_WEBHOOK="http://oapi.dingtalk.com/robot/send?access_token=robot-secret-a"',
+      'DINGTALK_P4_GROUP_B_WEBHOOK="https://oapi.dingtalk.com/wrong/path?access_token=robot-secret-b"',
+      'DINGTALK_P4_ALLOWED_USER_IDS="user_authorized"',
+      'DINGTALK_P4_UNAUTHORIZED_USER_ID="user_unauthorized"',
+      'DINGTALK_P4_NO_EMAIL_DINGTALK_EXTERNAL_ID="dt_no_email_001"',
+    ])
+
+    const result = runScript(['--check', '--p4-env-file', envFile, '--output-dir', outputDir])
+
+    assert.equal(result.status, 1)
+    const summaryText = readFileSync(path.join(outputDir, 'readiness-summary.json'), 'utf8')
+    assert.doesNotMatch(summaryText, /robot-secret-a/)
+    assert.doesNotMatch(summaryText, /robot-secret-b/)
+    assert.match(summaryText, /access_token=<redacted>/)
+    const summary = JSON.parse(summaryText)
+    assert.equal(summary.overallStatus, 'fail')
+    assert.equal(summary.checks.find((check) => check.id === 'group-a-webhook-shape').status, 'fail')
+    assert.equal(summary.checks.find((check) => check.id === 'group-b-webhook-shape').status, 'fail')
   } finally {
     rmSync(tmpDir, { recursive: true, force: true })
   }

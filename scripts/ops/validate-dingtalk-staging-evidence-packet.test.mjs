@@ -49,6 +49,7 @@ function writeFinalSession(evidenceDir, overrides = {}) {
     overallStatus: 'pass',
     apiBootstrapStatus: 'pass',
     remoteClientStatus: 'pass',
+    remoteSmokePhase: 'finalize_pending',
     totals: {
       totalChecks: requiredCheckIds.length,
       requiredChecks: requiredCheckIds.length,
@@ -94,6 +95,7 @@ function writePacket(packetDir, overrides = {}) {
           compiledOverallStatus: 'pass',
           apiBootstrapStatus: 'pass',
           remoteClientStatus: 'pass',
+          remoteSmokePhase: 'finalize_pending',
           requiredChecks: requiredCheckIds.length,
           ...overrides.dingtalkP4FinalStatus,
         },
@@ -216,6 +218,30 @@ test('validate-dingtalk-staging-evidence-packet rejects non-final included evide
   }
 })
 
+test('validate-dingtalk-staging-evidence-packet rejects invalid remote smoke phase metadata', () => {
+  const tmpDir = makeTmpDir()
+  const packetDir = path.join(tmpDir, 'packet')
+
+  try {
+    writePacket(packetDir, {
+      dingtalkP4FinalStatus: {
+        remoteSmokePhase: 'release_ready',
+      },
+      compiledSummary: {
+        remoteSmokePhase: 'release_ready',
+      },
+    })
+
+    const result = runValidator(['--packet-dir', packetDir])
+
+    assert.equal(result.status, 1)
+    assert.match(result.stderr, /dingtalkP4FinalStatus\.remoteSmokePhase is not a recognized remote smoke phase/)
+    assert.match(result.stderr, /compiled\/summary\.json remoteSmokePhase is not a recognized remote smoke phase/)
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+
 test('validate-dingtalk-staging-evidence-packet rejects destination path traversal', () => {
   const tmpDir = makeTmpDir()
   const packetDir = path.join(tmpDir, 'packet')
@@ -237,9 +263,28 @@ test('validate-dingtalk-staging-evidence-packet rejects destination path travers
   }
 })
 
+test('validate-dingtalk-staging-evidence-packet rejects unregistered evidence entries', () => {
+  const tmpDir = makeTmpDir()
+  const packetDir = path.join(tmpDir, 'packet')
+
+  try {
+    writePacket(packetDir)
+    mkdirSync(path.join(packetDir, 'evidence/99-old-session'), { recursive: true })
+    writeFileSync(path.join(packetDir, 'evidence/99-old-session/stale.txt'), 'stale\n', 'utf8')
+
+    const result = runValidator(['--packet-dir', packetDir])
+
+    assert.equal(result.status, 1)
+    assert.match(result.stderr, /evidence\/99-old-session is not registered in manifest includedEvidence/)
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+
 test('validate-dingtalk-staging-evidence-packet rejects secret-like raw evidence', () => {
   const tmpDir = makeTmpDir()
   const packetDir = path.join(tmpDir, 'packet')
+  const reportPath = path.join(tmpDir, 'publish-check.json')
 
   try {
     const evidenceDir = writePacket(packetDir)
@@ -250,11 +295,16 @@ test('validate-dingtalk-staging-evidence-packet rejects secret-like raw evidence
       'utf8',
     )
 
-    const result = runValidator(['--packet-dir', packetDir])
+    const result = runValidator(['--packet-dir', packetDir, '--output-json', reportPath])
 
     assert.equal(result.status, 1)
     assert.match(result.stderr, /secret-like value detected/)
     assert.match(result.stderr, /dingtalk_robot_webhook|dingtalk_sec_secret/)
+    const reportText = readFileSync(reportPath, 'utf8')
+    assert.doesNotMatch(reportText, /0123456789abcdef/)
+    assert.doesNotMatch(reportText, /SECabcdefghijklmnop12345678/)
+    const report = JSON.parse(reportText)
+    assert.match(report.secretFindings[0].preview, /^<redacted /)
   } finally {
     rmSync(tmpDir, { recursive: true, force: true })
   }

@@ -215,6 +215,10 @@ export interface ApprovalTemplateListItemDTO {
    */
   category: string | null
   visibilityScope: ApprovalTemplateVisibilityScope
+  /**
+   * Wave 2 WP5 slice 1 — optional SLA in hours. `null` disables tracking.
+   */
+  slaHours: number | null
   status: ApprovalTemplateStatus
   activeVersionId: string | null
   latestVersionId: string | null

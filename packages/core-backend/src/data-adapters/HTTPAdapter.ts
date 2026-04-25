@@ -73,6 +73,7 @@ import {
   BaseDataAdapter,
   DataSourceConfig as _DataSourceConfig
 } from './BaseAdapter'
+import { getCorrelationId } from '../context/request-context'
 
 interface HTTPQueryOptions extends QueryOptions {
   method?: 'GET' | 'POST' | 'PUT' | 'DELETE' | 'PATCH'
@@ -101,6 +102,18 @@ interface BatchRequestItem {
 interface TokenProvider {
   getToken: () => Promise<string | null>;
   onAuthError?: () => void;
+}
+
+export function applyCorrelationHeader(config: AxiosRequestConfig): AxiosRequestConfig {
+  const correlationId = getCorrelationId()
+  const headers = { ...(config.headers || {}) }
+  const hasCorrelationHeader = Object.keys(headers).some(
+    (key) => key.toLowerCase() === 'x-correlation-id'
+  )
+  if (correlationId && !hasCorrelationHeader) {
+    config.headers = { ...headers, 'X-Correlation-ID': correlationId }
+  }
+  return config
 }
 
 export class HTTPAdapter extends BaseDataAdapter {
@@ -163,6 +176,7 @@ export class HTTPAdapter extends BaseDataAdapter {
               config.headers = { ...(config.headers || {}), Authorization: `Bearer ${token}` }
             }
           }
+          applyCorrelationHeader(config)
           this.emit('request', { method: config.method, url: config.url })
           return config
         },

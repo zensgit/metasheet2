@@ -41,6 +41,7 @@ function mockTemplateListItem(index: number): ApprovalTemplateListItemDTO {
     description: index % 2 === 0 ? '通用审批模板' : null,
     category: MOCK_TEMPLATE_CATEGORIES[index % MOCK_TEMPLATE_CATEGORIES.length],
     visibilityScope: { type: 'all', ids: [] },
+    slaHours: null,
     status: statuses[index % statuses.length],
     activeVersionId: statuses[index % statuses.length] === 'published' ? `ver_${index}_1` : null,
     latestVersionId: `ver_${index}_1`,
@@ -408,6 +409,204 @@ export async function updateTemplateVisibilityScope(
     throw new Error(`API error: ${response.status} ${response.statusText}`)
   }
   return response.json()
+}
+
+/**
+ * Wave 2 WP5 slice 1 — update a template's SLA hours inline. `null` clears the
+ * SLA; positive integers set it. Admins only (backend enforces via RBAC).
+ */
+export async function updateTemplateSlaHours(
+  templateId: string,
+  slaHours: number | null,
+): Promise<ApprovalTemplateDetailDTO> {
+  if (USE_MOCK) {
+    return { ...mockTemplateDetail(templateId), slaHours }
+  }
+  const response = await apiFetch(`/api/approval-templates/${encodeURIComponent(templateId)}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ slaHours }),
+  })
+  if (!response.ok) {
+    throw new Error(`API error: ${response.status} ${response.statusText}`)
+  }
+  return response.json()
+}
+
+// ---------------------------------------------------------------------------
+// Wave 2 WP5 slice 1 — approval metrics (admin dashboard)
+// ---------------------------------------------------------------------------
+
+export interface ApprovalMetricsSummaryTemplateRow {
+  templateId: string | null
+  total: number
+  approved: number
+  rejected: number
+  revoked: number
+  avgDurationSeconds: number | null
+  slaBreachRate: number
+}
+
+export interface ApprovalMetricsSummary {
+  total: number
+  approved: number
+  rejected: number
+  revoked: number
+  returned: number
+  running: number
+  avgDurationSeconds: number | null
+  p50DurationSeconds: number | null
+  p95DurationSeconds: number | null
+  slaBreachCount: number
+  slaCandidateCount: number
+  slaBreachRate: number
+  byTemplate: ApprovalMetricsSummaryTemplateRow[]
+}
+
+export interface ApprovalMetricsTopInstanceRow {
+  instanceId: string
+  templateId: string | null
+  startedAt: string
+  terminalAt: string | null
+  terminalState: 'approved' | 'rejected' | 'revoked' | 'returned' | null
+  durationSeconds: number
+  slaHours: number | null
+  slaBreached: boolean
+  slaBreachedAt: string | null
+}
+
+export interface ApprovalMetricsTopTemplateRow {
+  templateId: string | null
+  total: number
+  slaCandidateCount: number
+  slaBreachCount: number
+  slaBreachRate: number
+  avgDurationSeconds: number | null
+  p95DurationSeconds: number | null
+}
+
+export interface ApprovalMetricsReport {
+  summary: ApprovalMetricsSummary
+  slowestInstances: ApprovalMetricsTopInstanceRow[]
+  breachedTemplates: ApprovalMetricsTopTemplateRow[]
+}
+
+export interface ApprovalMetricsNodeBreakdownEntry {
+  nodeKey: string
+  activatedAt: string | null
+  decidedAt: string | null
+  durationSeconds: number | null
+  approverIds: string[]
+}
+
+export interface ApprovalMetricsRow {
+  id: string
+  instance_id: string
+  template_id: string | null
+  tenant_id: string
+  started_at: string
+  terminal_at: string | null
+  terminal_state: 'approved' | 'rejected' | 'revoked' | 'returned' | null
+  duration_seconds: number | null
+  sla_hours: number | null
+  sla_breached: boolean
+  sla_breached_at: string | null
+  node_breakdown: ApprovalMetricsNodeBreakdownEntry[]
+}
+
+function emptyMetricsSummary(): ApprovalMetricsSummary {
+  return {
+    total: 0, approved: 0, rejected: 0, revoked: 0, returned: 0, running: 0,
+    avgDurationSeconds: null, p50DurationSeconds: null, p95DurationSeconds: null,
+    slaBreachCount: 0, slaCandidateCount: 0, slaBreachRate: 0, byTemplate: [],
+  }
+}
+
+export async function fetchApprovalMetricsSummary(query?: {
+  since?: string
+  until?: string
+}): Promise<ApprovalMetricsSummary> {
+  if (USE_MOCK) {
+    return {
+      total: 42, approved: 30, rejected: 5, revoked: 2, returned: 1, running: 4,
+      avgDurationSeconds: 7200, p50DurationSeconds: 6000, p95DurationSeconds: 18000,
+      slaBreachCount: 3, slaCandidateCount: 20, slaBreachRate: 0.15,
+      byTemplate: [
+        { templateId: 'tpl_1', total: 20, approved: 15, rejected: 3, revoked: 1, avgDurationSeconds: 6000, slaBreachRate: 0.1 },
+        { templateId: 'tpl_2', total: 12, approved: 10, rejected: 1, revoked: 1, avgDurationSeconds: 9000, slaBreachRate: 0.25 },
+      ],
+    }
+  }
+  const params = new URLSearchParams()
+  if (query?.since) params.set('since', query.since)
+  if (query?.until) params.set('until', query.until)
+  const qs = params.toString()
+  const data = await apiGet<{ ok: boolean; data: ApprovalMetricsSummary }>(
+    `/api/approvals/metrics/summary${qs ? `?${qs}` : ''}`,
+  )
+  return data?.data ?? emptyMetricsSummary()
+}
+
+export async function fetchApprovalMetricsReport(query?: {
+  since?: string
+  until?: string
+  limit?: number
+}): Promise<ApprovalMetricsReport> {
+  if (USE_MOCK) {
+    return {
+      summary: await fetchApprovalMetricsSummary(query),
+      slowestInstances: [
+        {
+          instanceId: 'apr_slowest_1',
+          templateId: 'tpl_1',
+          startedAt: '2026-04-25T00:00:00Z',
+          terminalAt: '2026-04-25T06:00:00Z',
+          terminalState: 'approved',
+          durationSeconds: 21_600,
+          slaHours: 4,
+          slaBreached: true,
+          slaBreachedAt: '2026-04-25T04:05:00Z',
+        },
+      ],
+      breachedTemplates: [
+        {
+          templateId: 'tpl_2',
+          total: 12,
+          slaCandidateCount: 10,
+          slaBreachCount: 3,
+          slaBreachRate: 0.3,
+          avgDurationSeconds: 9000,
+          p95DurationSeconds: 18000,
+        },
+      ],
+    }
+  }
+  const params = new URLSearchParams()
+  if (query?.since) params.set('since', query.since)
+  if (query?.until) params.set('until', query.until)
+  if (query?.limit) params.set('limit', String(query.limit))
+  const qs = params.toString()
+  const data = await apiGet<{ ok: boolean; data: ApprovalMetricsReport }>(
+    `/api/approvals/metrics/report${qs ? `?${qs}` : ''}`,
+  )
+  return data.data
+}
+
+export async function fetchApprovalMetricsBreaches(): Promise<ApprovalMetricsRow[]> {
+  if (USE_MOCK) return []
+  const data = await apiGet<{ ok: boolean; data: ApprovalMetricsRow[] }>('/api/approvals/metrics/breaches')
+  return data?.data ?? []
+}
+
+export async function fetchApprovalInstanceMetrics(instanceId: string): Promise<ApprovalMetricsRow | null> {
+  if (USE_MOCK) return null
+  try {
+    const data = await apiGet<{ ok: boolean; data: ApprovalMetricsRow }>(
+      `/api/approvals/metrics/instances/${encodeURIComponent(instanceId)}`,
+    )
+    return data?.data ?? null
+  } catch {
+    return null
+  }
 }
 
 /**

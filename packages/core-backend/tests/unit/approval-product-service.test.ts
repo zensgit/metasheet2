@@ -764,6 +764,7 @@ describe('ApprovalProductService', () => {
             description: params?.[2] == null ? null : String(params?.[2]),
             category: null,
             visibility_scope: JSON.parse(String(params?.[4])),
+            sla_hours: null,
             status: 'draft',
             active_version_id: null,
             latest_version_id: null,
@@ -797,6 +798,7 @@ describe('ApprovalProductService', () => {
             description: 'Template with dependent field visibility',
             category: null,
             visibility_scope: { type: 'all', ids: [] },
+            sla_hours: null,
             status: 'draft',
             active_version_id: 'ver-visibility',
             latest_version_id: 'ver-visibility',
@@ -880,6 +882,130 @@ describe('ApprovalProductService', () => {
       message: 'formSchema.fields[0].visibilityRule cannot reference itself',
       statusCode: 400,
       code: 'VALIDATION_ERROR',
+    })
+    expect(pgState.pool.connect).not.toHaveBeenCalled()
+  })
+
+  it('records terminal metrics for approvals auto-approved at creation', async () => {
+    const metrics = {
+      recordInstanceStart: vi.fn().mockResolvedValue(undefined),
+      recordTerminal: vi.fn().mockResolvedValue(undefined),
+      recordNodeActivation: vi.fn().mockResolvedValue(undefined),
+      recordNodeDecision: vi.fn().mockResolvedValue(undefined),
+      checkSlaBreaches: vi.fn().mockResolvedValue([]),
+      getMetricsSummary: vi.fn(),
+      getInstanceMetrics: vi.fn(),
+      listActiveBreaches: vi.fn(),
+    }
+    const autoApprovedGraph = {
+      nodes: [
+        { key: 'start', type: 'start', config: {} },
+        { key: 'approval_1', type: 'approval', config: { assigneeType: 'user', assigneeIds: [], emptyAssigneePolicy: 'auto-approve' } },
+        { key: 'end', type: 'end', config: {} },
+      ],
+      edges: [
+        { key: 'edge-start-approval', source: 'start', target: 'approval_1' },
+        { key: 'edge-approval-end', source: 'approval_1', target: 'end' },
+      ],
+      policy: { allowRevoke: true },
+    }
+
+    pgState.pool.query.mockImplementation(async (sql: string) => {
+      const statement = normalize(sql)
+      if (statement.startsWith('SELECT * FROM approval_templates WHERE id = $1')) {
+        return {
+          rows: [{
+            id: 'tpl-1',
+            key: 'auto',
+            name: 'Auto Approval',
+            description: null,
+            category: null,
+            visibility_scope: { type: 'all', ids: [] },
+            sla_hours: 4,
+            status: 'published',
+            active_version_id: 'ver-1',
+            latest_version_id: 'ver-1',
+            created_at: new Date(),
+            updated_at: new Date(),
+          }],
+          rowCount: 1,
+        }
+      }
+      if (statement.startsWith('SELECT * FROM approval_template_versions WHERE id = $1')) {
+        return {
+          rows: [{
+            id: 'ver-1',
+            template_id: 'tpl-1',
+            version: 1,
+            status: 'published',
+            form_schema: { fields: [] },
+            approval_graph: autoApprovedGraph,
+            created_at: new Date(),
+            updated_at: new Date(),
+          }],
+          rowCount: 1,
+        }
+      }
+      if (statement.startsWith('SELECT * FROM approval_published_definitions')) {
+        return {
+          rows: [{
+            id: 'pub-1',
+            template_id: 'tpl-1',
+            template_version_id: 'ver-1',
+            runtime_graph: autoApprovedGraph,
+            is_active: true,
+            published_at: new Date(),
+          }],
+          rowCount: 1,
+        }
+      }
+      if (statement.startsWith(`SELECT 'AP-' || nextval('approval_request_no_seq')::text AS request_no`)) {
+        return { rows: [{ request_no: 'AP-100999' }], rowCount: 1 }
+      }
+      if (statement.startsWith('SELECT * FROM approval_instances WHERE id = $1')) {
+        return { rows: [buildInstanceRow({ status: 'approved', current_node_key: null })], rowCount: 1 }
+      }
+      if (statement.startsWith('SELECT * FROM approval_assignments WHERE instance_id = $1')) {
+        return { rows: [], rowCount: 0 }
+      }
+      throw new Error(`Unhandled pool query: ${statement}`)
+    })
+
+    pgState.client.query.mockImplementation(async (sql: string) => {
+      const statement = normalize(sql)
+      if (statement === 'BEGIN' || statement === 'COMMIT') {
+        return { rows: [], rowCount: 0 }
+      }
+      if (statement.startsWith('INSERT INTO approval_instances')) {
+        return { rows: [], rowCount: 1 }
+      }
+      if (statement.startsWith('INSERT INTO approval_assignments')) {
+        return { rows: [], rowCount: 0 }
+      }
+      if (statement.startsWith('INSERT INTO approval_records')) {
+        return { rows: [], rowCount: 1 }
+      }
+      throw new Error(`Unhandled client query: ${statement}`)
+    })
+
+    const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+    const service = new ApprovalProductService(metrics as never)
+
+    await service.createApproval(
+      { templateId: 'tpl-1', formData: {} },
+      { userId: 'user-1', tenantId: 'tenant-a' },
+    )
+
+    await vi.waitFor(() => {
+      expect(metrics.recordInstanceStart).toHaveBeenCalledWith(expect.objectContaining({
+        templateId: 'tpl-1',
+        tenantId: 'tenant-a',
+        slaHours: 4,
+        initialNodeKey: null,
+      }))
+      expect(metrics.recordTerminal).toHaveBeenCalledWith(expect.objectContaining({
+        terminalState: 'approved',
+      }))
     })
   })
 })

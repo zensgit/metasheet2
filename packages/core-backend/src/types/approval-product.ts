@@ -229,6 +229,11 @@ export interface ApprovalTemplateListItemDTO {
    * `{ type: 'all', ids: [] }` and remain globally visible.
    */
   visibilityScope: ApprovalTemplateVisibilityScope
+  /**
+   * Wave 2 WP5 slice 1 — SLA deadline for new instances in whole hours.
+   * `null` disables SLA tracking for the template.
+   */
+  slaHours: number | null
   status: ApprovalTemplateStatus
   activeVersionId: string | null
   latestVersionId: string | null
@@ -256,6 +261,11 @@ export interface CreateApprovalTemplateRequest {
    */
   category?: string | null
   visibilityScope?: ApprovalTemplateVisibilityScope | null
+  /**
+   * Wave 2 WP5 slice 1 — optional SLA in hours. `null`/undefined disables
+   * SLA tracking; positive integers are required, 0 and negatives reject.
+   */
+  slaHours?: number | null
   formSchema: FormSchema
   approvalGraph: ApprovalGraph
 }
@@ -270,6 +280,11 @@ export interface UpdateApprovalTemplateRequest {
    */
   category?: string | null
   visibilityScope?: ApprovalTemplateVisibilityScope | null
+  /**
+   * Wave 2 WP5 slice 1 — when provided, updates `approval_templates.sla_hours`.
+   * Pass `null` to clear the SLA.
+   */
+  slaHours?: number | null
   formSchema?: FormSchema
   approvalGraph?: ApprovalGraph
 }
