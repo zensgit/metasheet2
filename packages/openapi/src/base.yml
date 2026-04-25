@@ -31,6 +31,16 @@ components:
               type: string
             message:
               type: string
+    DirectErrorResponse:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            code:
+              type: string
+            message:
+              type: string
     User:
       type: object
       properties:
@@ -399,6 +409,9 @@ components:
         created_at:
           type: string
           format: date-time
+    AttendancePunchEvent:
+      allOf:
+        - $ref: '#/components/schemas/AttendanceEvent'
     AttendanceRecord:
       type: object
       properties:
@@ -2307,6 +2320,23 @@ components:
         value:
           type: string
       required: [label, value]
+    FormFieldVisibilityRule:
+      type: object
+      properties:
+        fieldId:
+          type: string
+          description: Field id that controls the dependent field's visibility.
+        operator:
+          type: string
+          enum: [eq, neq, in, isEmpty, notEmpty]
+        value:
+          nullable: true
+          description: Single comparison value for eq/neq operators.
+        values:
+          type: array
+          items: {}
+          description: Candidate values for the in operator.
+      required: [fieldId, operator]
     FormField:
       type: object
       properties:
@@ -2330,6 +2360,8 @@ components:
         props:
           type: object
           additionalProperties: true
+        visibilityRule:
+          $ref: '#/components/schemas/FormFieldVisibilityRule'
       required: [id, type, label]
     FormSchema:
       type: object
@@ -2485,25 +2517,191 @@ components:
         actorId:
           type: string
           nullable: true
+        actor_id:
+          type: string
+          nullable: true
+          deprecated: true
         actorName:
           type: string
           nullable: true
+        actor_name:
+          type: string
+          nullable: true
+          deprecated: true
         comment:
           type: string
           nullable: true
         fromStatus:
           type: string
           nullable: true
+        from_status:
+          type: string
+          nullable: true
+          deprecated: true
         toStatus:
           type: string
+        to_status:
+          type: string
+          deprecated: true
         occurredAt:
           type: string
           format: date-time
           nullable: true
+        occurred_at:
+          type: string
+          format: date-time
+          nullable: true
+          deprecated: true
+        version:
+          type: integer
+          nullable: true
+        from_version:
+          type: integer
+          nullable: true
+          deprecated: true
+        to_version:
+          type: integer
+          nullable: true
+          deprecated: true
         metadata:
           type: object
           additionalProperties: true
-      required: [id, action, toStatus, metadata]
+      required: [id, action]
+    LegacyPendingApprovalInstance:
+      type: object
+      properties:
+        id:
+          type: string
+        status:
+          type: string
+        version:
+          type: integer
+        source_system:
+          type: string
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+      required: [id, status, version, created_at, updated_at]
+    ApprovalListResponse:
+      type: object
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/UnifiedApprovalDTO'
+        total:
+          type: integer
+        limit:
+          type: integer
+        offset:
+          type: integer
+      required: [data, total, limit, offset]
+    LegacyPendingApprovalListResponse:
+      type: object
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/LegacyPendingApprovalInstance'
+        total:
+          type: integer
+        limit:
+          type: integer
+        offset:
+          type: integer
+        degraded:
+          type: boolean
+      required: [data, total, limit, offset]
+    ApprovalHistoryResponse:
+      type: object
+      properties:
+        ok:
+          type: boolean
+          example: true
+        data:
+          type: object
+          properties:
+            items:
+              type: array
+              items:
+                $ref: '#/components/schemas/UnifiedApprovalHistoryDTO'
+            total:
+              type: integer
+            page:
+              type: integer
+            pageSize:
+              type: integer
+          required: [items, total, page, pageSize]
+      required: [ok, data]
+    ApprovalPendingCountResponse:
+      type: object
+      properties:
+        count:
+          type: integer
+        unreadCount:
+          type: integer
+        degraded:
+          type: boolean
+      required: [count, unreadCount]
+    MarkApprovalReadResponse:
+      type: object
+      properties:
+        ok:
+          type: boolean
+        skipped:
+          type: boolean
+        reason:
+          type: string
+      required: [ok]
+    MarkAllApprovalsReadResponse:
+      type: object
+      properties:
+        markedCount:
+          type: integer
+      required: [markedCount]
+    RemindApprovalData:
+      type: object
+      properties:
+        id:
+          type: string
+        action:
+          type: string
+          enum: [remind]
+        remindedAt:
+          type: string
+          format: date-time
+        bridged:
+          type: boolean
+        sourceSystem:
+          type: string
+          nullable: true
+      required: [id, action, remindedAt, bridged, sourceSystem]
+    RemindApprovalResponse:
+      type: object
+      properties:
+        ok:
+          type: boolean
+          example: true
+        data:
+          $ref: '#/components/schemas/RemindApprovalData'
+      required: [ok, data]
+    ApprovalPlmSyncResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+        synced:
+          type: integer
+        errors:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+      required: [success, synced, errors]
     CreateApprovalRequest:
       type: object
       properties:
@@ -2799,6 +2997,11 @@ components:
                 error:
                   code: "FILE_NOT_FOUND"
                   message: "File with ID 'file123' does not exist"
+    Conflict:
+      description: Conflict - Request conflicts with current resource state
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
     ServiceUnavailable:
       description: Service unavailable - Temporary server issues
       content:

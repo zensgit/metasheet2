@@ -51,6 +51,7 @@ const REQUIRED_CHECKS = [
 const CHECK_ID_SET = new Set(REQUIRED_CHECKS.map((check) => check.id))
 const VALID_STATUSES = new Set(['pass', 'fail', 'skipped', 'pending'])
 const MAX_SECRET_SCAN_BYTES = 2 * 1024 * 1024
+const ARTIFACT_FRESHNESS_SKEW_MS = 5 * 60 * 1000
 const SECRET_PATTERNS = [
   {
     name: 'dingtalk_robot_webhook',
@@ -87,6 +88,7 @@ const API_BOOTSTRAP_CHECK_IDS = new Set([
   'set-form-dingtalk-granted',
   'delivery-history-group-person',
 ])
+const REMOTE_SMOKE_PHASES = new Set(['bootstrap_pending', 'manual_pending', 'finalize_pending', 'fail'])
 const MANUAL_EVIDENCE_REQUIREMENTS = [
   {
     id: 'send-group-message-form-link',
@@ -527,6 +529,8 @@ function validateManualArtifactRefs(checkId, evidence, evidenceDir, opts) {
   const refs = collectArtifactRefs(evidence)
   const expectedPrefix = `artifacts/${checkId}/`
   const evidenceRoot = path.resolve(evidenceDir)
+  const performedAt = evidence.performedAt ?? evidence.executedAt ?? evidence.timestamp
+  const performedAtMs = isDateLikeString(performedAt) ? Date.parse(performedAt) : null
   for (const ref of refs) {
     if (!isNonEmptyString(ref)) {
       issues.push(artifactIssue(checkId, 'artifact_ref_invalid', `${checkId} has an empty artifact reference`))
@@ -576,6 +580,10 @@ function validateManualArtifactRefs(checkId, evidence, evidenceDir, opts) {
       issues.push(artifactIssue(checkId, 'artifact_ref_empty', `${checkId} artifact file is empty`, trimmed))
       continue
     }
+    if (performedAtMs !== null && stat.mtimeMs + ARTIFACT_FRESHNESS_SKEW_MS < performedAtMs) {
+      issues.push(artifactIssue(checkId, 'artifact_ref_stale', `${checkId} artifact file is older than evidence.performedAt`, trimmed))
+      continue
+    }
     issues.push(...scanArtifactFileForSecrets(checkId, normalizedRef, fullPath))
   }
   return issues
@@ -590,11 +598,16 @@ function finiteNumber(value) {
   return null
 }
 
+function nonNegativeInteger(value) {
+  const number = finiteNumber(value)
+  return number !== null && Number.isInteger(number) && number >= 0 ? number : null
+}
+
 function hasZeroRecordInsertDelta(evidence) {
-  const delta = finiteNumber(evidence.recordInsertDelta)
+  const delta = nonNegativeInteger(evidence.recordInsertDelta)
   if (delta !== null) return delta === 0
-  const before = finiteNumber(evidence.beforeRecordCount)
-  const after = finiteNumber(evidence.afterRecordCount)
+  const before = nonNegativeInteger(evidence.beforeRecordCount)
+  const after = nonNegativeInteger(evidence.afterRecordCount)
   return before !== null && after !== null && before === after
 }
 
@@ -605,6 +618,18 @@ function validateUnauthorizedDeniedEvidence(evidence) {
       id: 'unauthorized-user-denied',
       code: 'submit_blocked_required',
       message: 'unauthorized-user-denied pass evidence requires evidence.submitBlocked=true',
+    })
+  }
+  const countValues = [
+    ['recordInsertDelta', evidence.recordInsertDelta],
+    ['beforeRecordCount', evidence.beforeRecordCount],
+    ['afterRecordCount', evidence.afterRecordCount],
+  ].filter(([, value]) => value !== undefined && value !== null && value !== '')
+  if (countValues.some(([, value]) => nonNegativeInteger(value) === null)) {
+    issues.push({
+      id: 'unauthorized-user-denied',
+      code: 'record_count_non_negative_integer_required',
+      message: 'unauthorized-user-denied record counts must be non-negative integers',
     })
   }
   if (!hasZeroRecordInsertDelta(evidence)) {
@@ -619,6 +644,54 @@ function validateUnauthorizedDeniedEvidence(evidence) {
       id: 'unauthorized-user-denied',
       code: 'blocked_reason_required',
       message: 'unauthorized-user-denied pass evidence requires evidence.blockedReason, evidence.errorSummary, or evidence.visibleErrorSummary',
+    })
+  }
+  return issues
+}
+
+function validateNoEmailAdminEvidence(evidence) {
+  const issues = []
+  const adminEvidence = evidence?.adminEvidence
+  if (!adminEvidence || typeof adminEvidence !== 'object' || Array.isArray(adminEvidence)) {
+    return [{
+      id: 'no-email-user-create-bind',
+      code: 'admin_evidence_object_required',
+      message: 'no-email-user-create-bind pass evidence requires evidence.adminEvidence',
+    }]
+  }
+  if (adminEvidence.emailWasBlank !== true) {
+    issues.push({
+      id: 'no-email-user-create-bind',
+      code: 'email_was_blank_required',
+      message: 'no-email-user-create-bind pass evidence requires evidence.adminEvidence.emailWasBlank=true',
+    })
+  }
+  if (!isNonEmptyString(adminEvidence.createdLocalUserId)) {
+    issues.push({
+      id: 'no-email-user-create-bind',
+      code: 'created_local_user_id_required',
+      message: 'no-email-user-create-bind pass evidence requires evidence.adminEvidence.createdLocalUserId',
+    })
+  }
+  if (!isNonEmptyString(adminEvidence.boundDingTalkExternalId)) {
+    issues.push({
+      id: 'no-email-user-create-bind',
+      code: 'bound_dingtalk_external_id_required',
+      message: 'no-email-user-create-bind pass evidence requires evidence.adminEvidence.boundDingTalkExternalId',
+    })
+  }
+  if (adminEvidence.accountLinkedAfterRefresh !== true) {
+    issues.push({
+      id: 'no-email-user-create-bind',
+      code: 'account_linked_after_refresh_required',
+      message: 'no-email-user-create-bind pass evidence requires evidence.adminEvidence.accountLinkedAfterRefresh=true',
+    })
+  }
+  if (adminEvidence.temporaryPasswordRedacted !== true) {
+    issues.push({
+      id: 'no-email-user-create-bind',
+      code: 'temporary_password_redacted_required',
+      message: 'no-email-user-create-bind pass evidence requires evidence.adminEvidence.temporaryPasswordRedacted=true',
     })
   }
   return issues
@@ -681,8 +754,28 @@ function validateManualEvidenceRequirements(checksById, evidenceDir, opts) {
     if (requirement.id === 'unauthorized-user-denied') {
       issues.push(...validateUnauthorizedDeniedEvidence(evidence))
     }
+    if (requirement.id === 'no-email-user-create-bind') {
+      issues.push(...validateNoEmailAdminEvidence(evidence))
+    }
   }
   return issues
+}
+
+function computeRemoteSmokePhase({
+  overallStatus,
+  apiBootstrapStatus,
+  requiredChecksNotPassed,
+  failedChecks,
+  unknownChecks,
+  manualEvidenceIssues,
+}) {
+  if (failedChecks.length > 0 || unknownChecks.length > 0) return 'fail'
+  if (apiBootstrapStatus !== 'pass') return 'bootstrap_pending'
+  if (overallStatus === 'pass' && requiredChecksNotPassed.length === 0 && manualEvidenceIssues.length === 0) {
+    return 'finalize_pending'
+  }
+  if (requiredChecksNotPassed.length > 0 || manualEvidenceIssues.length > 0) return 'manual_pending'
+  return REMOTE_SMOKE_PHASES.has(overallStatus) ? overallStatus : 'fail'
 }
 
 function buildSummary(evidence, inputFile, outputDir, opts = {}) {
@@ -709,6 +802,14 @@ function buildSummary(evidence, inputFile, outputDir, opts = {}) {
   const apiBootstrapStatus = apiBootstrapRequired.every((check) => check.status === 'pass') ? 'pass' : 'fail'
   const remoteClientStatus = requiredChecksNotPassed.length === 0 && manualEvidenceIssues.length === 0 ? 'pass' : 'fail'
   const overallStatus = requiredChecksNotPassed.length === 0 && failedChecks.length === 0 && manualEvidenceIssues.length === 0 ? 'pass' : 'fail'
+  const remoteSmokePhase = computeRemoteSmokePhase({
+    overallStatus,
+    apiBootstrapStatus,
+    requiredChecksNotPassed,
+    failedChecks,
+    unknownChecks,
+    manualEvidenceIssues,
+  })
   const sanitizedEvidence = sanitizeValue(evidence)
 
   return {
@@ -719,6 +820,7 @@ function buildSummary(evidence, inputFile, outputDir, opts = {}) {
     overallStatus,
     apiBootstrapStatus,
     remoteClientStatus,
+    remoteSmokePhase,
     totals: {
       totalChecks: checks.length,
       requiredChecks: REQUIRED_CHECKS.length,
@@ -783,6 +885,8 @@ Overall status: **${summary.overallStatus}**
 API bootstrap status: **${summary.apiBootstrapStatus}**
 
 Remote client status: **${summary.remoteClientStatus}**
+
+Remote smoke phase: **${summary.remoteSmokePhase}**
 
 ## Required Checks
 

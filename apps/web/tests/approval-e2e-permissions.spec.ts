@@ -22,6 +22,7 @@ import {
   mockAutoApproveHistory,
   mockReturnHistory,
   mockTemplateWithModes,
+  mockTemplateWithVisibilityRules,
   mockPermissions,
   CURRENT_USER_ID,
 } from './helpers/approval-test-fixtures'
@@ -650,6 +651,28 @@ describe('Approval E2E Permissions', () => {
       })
     })
 
+    it('shows dependent fields only after the visibility rule is satisfied', async () => {
+      setMockPermissions(['approvals:read', 'approvals:write'])
+      routeParams = { templateId: 'tpl_visibility' }
+      mockActiveTemplate.value = mockTemplateWithVisibilityRules({ id: 'tpl_visibility' })
+
+      await mountNewView()
+
+      const initialLabels = Array.from(container!.querySelectorAll('[data-el-form-item] label'))
+        .map((label) => label.textContent?.trim())
+      expect(initialLabels).toContain('是否补充说明')
+      expect(initialLabels).not.toContain('补充说明')
+
+      const select = container!.querySelector('[data-el-select]') as HTMLSelectElement
+      select.value = 'yes'
+      select.dispatchEvent(new Event('change', { bubbles: true }))
+      await flushUi()
+
+      const visibleLabels = Array.from(container!.querySelectorAll('[data-el-form-item] label'))
+        .map((label) => label.textContent?.trim())
+      expect(visibleLabels).toContain('补充说明')
+    })
+
     it('writer viewing a pending approval with no assignment sees action buttons (view-level)', async () => {
       setMockPermissions(['approvals:read', 'approvals:write'])
       // The current detail view shows action buttons purely based on status === 'pending'.
@@ -894,6 +917,16 @@ describe('Approval E2E Permissions', () => {
       expect(visibilityTag?.textContent).toContain('按角色')
       const visibilityIds = container!.querySelector('[data-testid="template-detail-visibility-ids"]')
       expect(visibilityIds?.textContent).toContain('finance, manager')
+    })
+
+    it('template detail renders the field visibility section when rules exist', async () => {
+      setMockPermissions(['approval-templates:manage'])
+      routeParams = { id: 'tpl_visibility' }
+      mockActiveTemplate.value = mockTemplateWithVisibilityRules({ id: 'tpl_visibility' })
+
+      await mountTemplateDetailView()
+
+      expect(container?.textContent).toContain('字段显隐规则')
     })
 
     it('back button navigates to /approval-templates', async () => {

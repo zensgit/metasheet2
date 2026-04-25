@@ -169,7 +169,27 @@ node scripts/ops/dingtalk-p4-smoke-status.mjs \
 
 The status report writes `smoke-status.json`, `smoke-status.md`, and `smoke-todo.md`. It shows whether the run is blocked, waiting for manual evidence, ready to finalize, waiting for handoff, or release-ready.
 
-Use `smoke-todo.md` as the operator checklist for the remaining remote smoke evidence. It maps every required P4 check to a checked or unchecked item, includes per-check recorder command templates for manual DingTalk-client/admin evidence, and keeps secrets redacted.
+Use `smoke-todo.md` as the operator checklist for the remaining remote smoke evidence. It groups the remaining work into ordered execution phases, highlights the current focus step, includes per-check recorder command templates for manual DingTalk-client/admin evidence, and keeps secrets redacted.
+
+`remoteSmokePhase` is also written into the generated reports as a stable machine-readable phase for the evidence collection flow:
+
+- `bootstrap_pending`: API/bootstrap checks are still incomplete.
+- `manual_pending`: bootstrap is complete, but real DingTalk-client/admin evidence is incomplete or has strict evidence issues.
+- `finalize_pending`: all required smoke evidence is present and the session is ready for strict finalization or handoff.
+- `fail`: an operational failure or failed check must be investigated.
+
+This field is intentionally narrower than `smoke-status.overallStatus`. `overallStatus` continues through later release states such as `handoff_pending` and `release_ready`; `remoteSmokePhase` only tracks the remote-smoke evidence collection phase.
+
+`smoke-status.md` now also includes:
+
+- an ordered execution-plan view for the remaining remote smoke phases;
+- a `Top-level Remote Smoke Steps` table that maps the checklist Smoke 1-7 steps to check IDs, current status, and sanitized evidence snapshots;
+- the current next action for each top-level step without exposing webhook tokens, secrets, admin tokens, or public form tokens.
+
+For checklist alignment:
+
+- `Smoke 1` maps to both `create-table-form` and `set-form-dingtalk-granted`.
+- Delivery-history proof remains one combined check ID, `delivery-history-group-person`, even though the checklist calls out group and person history at different steps.
 
 To write the TODO file to a custom path:
 
@@ -193,6 +213,14 @@ node scripts/ops/dingtalk-p4-evidence-record.mjs \
 ```
 
 For pass evidence, put the referenced file under `workspace/artifacts/<check-id>/` before running the recorder. The recorder validates the relative path, non-empty local file, manual source, and obvious secret-like text before updating `workspace/evidence.json`.
+
+When `--session-dir` is used, the recorder also refreshes:
+
+- `smoke-status.json`
+- `smoke-status.md`
+- `smoke-todo.md`
+
+This means the normal operator loop no longer needs a separate `dingtalk-p4-smoke-status.mjs` command after every successful evidence update.
 
 For `unauthorized-user-denied`, also record the structured no-insert proof:
 
@@ -221,10 +249,59 @@ node scripts/ops/dingtalk-p4-evidence-record.mjs \
   --operator qa-admin \
   --summary "Admin created and bound a no-email DingTalk-synced local user; temporary password is redacted." \
   --artifact artifacts/no-email-user-create-bind/admin-create-bind-result.png \
-  --artifact artifacts/no-email-user-create-bind/account-linked-after-refresh.png
+  --artifact artifacts/no-email-user-create-bind/account-linked-after-refresh.png \
+  --admin-email-was-blank \
+  --admin-created-local-user-id <local-user-id> \
+  --admin-bound-dingtalk-external-id <dingtalk-external-id> \
+  --admin-account-linked-after-refresh
 ```
 
-The generated `evidence.json` also includes a `adminEvidence` helper object for this check. Fill `emailWasBlank`, `createdLocalUserId`, `boundDingTalkExternalId`, and `accountLinkedAfterRefresh` before final strict compile when that information is available.
+The recorder writes the `adminEvidence` helper object for this check. Final strict compile requires `emailWasBlank: true`, `createdLocalUserId`, `boundDingTalkExternalId`, `accountLinkedAfterRefresh: true`, and `temporaryPasswordRedacted: true`.
+
+If the current evidence update is expected to complete all remaining remote-smoke checks, prefer `--closeout-when-ready`. The recorder will refresh smoke status first, then auto-run the final closeout chain only when the session is actually ready:
+
+```bash
+node scripts/ops/dingtalk-p4-evidence-record.mjs \
+  --session-dir output/dingtalk-p4-remote-smoke-session/142-session \
+  --check-id no-email-user-create-bind \
+  --status pass \
+  --source manual-admin \
+  --operator qa-admin \
+  --summary "Admin created and bound a no-email DingTalk-synced local user; temporary password is redacted." \
+  --artifact artifacts/no-email-user-create-bind/admin-create-bind-result.png \
+  --artifact artifacts/no-email-user-create-bind/account-linked-after-refresh.png \
+  --admin-email-was-blank \
+  --admin-created-local-user-id <local-user-id> \
+  --admin-bound-dingtalk-external-id <dingtalk-external-id> \
+  --admin-account-linked-after-refresh \
+  --closeout-when-ready \
+  --closeout-packet-output-dir artifacts/dingtalk-staging-evidence-packet/142-final \
+  --closeout-docs-output-dir docs/development \
+  --closeout-date 20260423
+```
+
+Use `--finalize-when-ready` instead only when debugging strict finalize separately. Do not combine it with `--closeout-when-ready`.
+
+When auto-closeout succeeds, the recorder prints the completed `dingtalk-p4-final-closeout.mjs` command. When auto-finalize succeeds in the lower-level debug path, it prints the next `dingtalk-p4-final-handoff.mjs` command directly.
+
+After all manual evidence has been recorded, prefer the closeout wrapper when you want a single local command for the rest of the release chain. It runs strict finalize, final handoff, release-ready status, and final remote-smoke docs generation:
+
+```bash
+node scripts/ops/dingtalk-p4-final-closeout.mjs \
+  --session-dir output/dingtalk-p4-remote-smoke-session/142-session \
+  --packet-output-dir artifacts/dingtalk-staging-evidence-packet/142-final \
+  --docs-output-dir docs/development \
+  --date 20260423
+```
+
+Expected closeout outputs:
+
+- `artifacts/dingtalk-staging-evidence-packet/142-final/closeout-summary.json`
+- `artifacts/dingtalk-staging-evidence-packet/142-final/closeout-summary.md`
+- `artifacts/dingtalk-staging-evidence-packet/142-final/handoff-summary.json`
+- `artifacts/dingtalk-staging-evidence-packet/142-final/publish-check.json`
+- `docs/development/dingtalk-final-remote-smoke-development-20260423.md`
+- `docs/development/dingtalk-final-remote-smoke-verification-20260423.md`
 
 ```bash
 node scripts/ops/dingtalk-p4-smoke-session.mjs \
@@ -263,6 +340,7 @@ The packet exporter rejects the included session unless the final pass is machin
 
 - `session-summary.json` must be from `dingtalk-p4-smoke-session`, have `sessionPhase: "finalize"`, `overallStatus: "pass"`, `finalStrictStatus: "pass"`, no `pendingChecks`, and a passing `strict-compile` step.
 - `compiled/summary.json` must be from `compile-dingtalk-p4-smoke-evidence`, have `overallStatus`, `apiBootstrapStatus`, and `remoteClientStatus` all set to `pass`.
+- `remoteSmokePhase` is copied into packet metadata when present and must be one of `bootstrap_pending`, `manual_pending`, `finalize_pending`, or `fail`.
 - All eight required checks must exist with `status: "pass"`.
 - `requiredChecksNotPassed`, `manualEvidenceIssues`, `failedChecks`, and `missingRequiredChecks` must be arrays and empty.
 - The exporter does not create secrets, but it copies raw included evidence. Review and redact raw workspace/artifact files before release handoff.
@@ -279,7 +357,9 @@ The validator fails unless the packet was exported with the final-pass gate, con
 
 ## Preflight Gate
 
-Before calling staging or DingTalk, run the preflight gate to check local tooling, required URLs, bearer token presence, DingTalk webhook format, optional `SEC...` secret format, allowlist inputs, and backend `/health`. It writes only redacted summaries.
+Before calling staging or DingTalk, run the preflight gate to check local tooling, required URLs, bearer token presence, DingTalk webhook URL shape, optional `SEC...` secret format, allowlist inputs, and backend `/health`. It writes only redacted summaries. The webhook check is local shape validation only; it does not call DingTalk or verify robot reachability/delivery.
+
+Robot webhook URLs must use `https://oapi.dingtalk.com/robot/send?access_token=...`. Extra DingTalk signing parameters such as `timestamp` and `sign` may be present, but reports redact the `access_token`.
 
 ```bash
 node scripts/ops/dingtalk-p4-smoke-preflight.mjs \
@@ -288,7 +368,9 @@ node scripts/ops/dingtalk-p4-smoke-preflight.mjs \
   --auth-token "$DINGTALK_P4_AUTH_TOKEN" \
   --group-a-webhook "$DINGTALK_P4_GROUP_A_WEBHOOK" \
   --group-b-webhook "$DINGTALK_P4_GROUP_B_WEBHOOK" \
-  --allowed-user "$DINGTALK_P4_ALLOWED_USER_ID" \
+  --allowed-user "$DINGTALK_P4_ALLOWED_USER_IDS" \
+  --person-user "$DINGTALK_P4_PERSON_USER_IDS" \
+  --require-person-user \
   --output-dir output/dingtalk-p4-remote-smoke/preflight-142
 ```
 
@@ -299,7 +381,9 @@ Expected generated files:
 
 ## API-Only Smoke Runner
 
-Use the API-only runner directly when debugging the session's API step. It prepares the disposable test resources and collects backend evidence before the manual DingTalk-client checks. It creates a table, a form view, two group destinations, a `dingtalk_granted` form share, a group automation rule, and optional person-message rule when `--person-user` is supplied.
+Use the API-only runner directly when debugging the session's API step. It prepares the disposable test resources and collects backend evidence before the manual DingTalk-client checks. It creates a table, a form view, two group destinations, a `dingtalk_granted` form share, a group automation rule, and a person-message rule when `--person-user` is supplied.
+
+For final 142 release smoke, `DINGTALK_P4_PERSON_USER_IDS` is required because `delivery-history-group-person` is a required P4 check. The API-only runner still supports omitting `--person-user` for debugging, but that output cannot complete the final strict evidence gate.
 
 Do not paste secrets into docs or chat. Supply them through secure shell env, a local password manager, or a temporary shell session on the staging host.
 
@@ -310,8 +394,8 @@ node scripts/ops/dingtalk-p4-remote-smoke.mjs \
   --auth-token "$DINGTALK_P4_AUTH_TOKEN" \
   --group-a-webhook "$DINGTALK_P4_GROUP_A_WEBHOOK" \
   --group-b-webhook "$DINGTALK_P4_GROUP_B_WEBHOOK" \
-  --allowed-user "$DINGTALK_P4_ALLOWED_USER_ID" \
-  --person-user "$DINGTALK_P4_PERSON_USER_ID" \
+  --allowed-user "$DINGTALK_P4_ALLOWED_USER_IDS" \
+  --person-user "$DINGTALK_P4_PERSON_USER_IDS" \
   --output-dir output/dingtalk-p4-remote-smoke/142-api
 ```
 
@@ -331,7 +415,7 @@ The runner intentionally leaves these checks as `pending`:
 - unauthorized DingTalk-bound user is blocked and inserts no record
 - no-email DingTalk-synced account creation and binding
 
-If no `--person-user` is provided, person delivery evidence is also `pending`. Fill the manual checks in the generated `evidence.json`, place files in the matching `artifacts/<check-id>/` folders, then run the compiler with `--strict`.
+If no `--person-user` is provided during API-only debugging, person delivery evidence is also `pending`. For final release smoke, rerun the preflight/session with `DINGTALK_P4_PERSON_USER_IDS` instead of trying to satisfy `delivery-history-group-person` manually. Fill the manual checks in the generated `evidence.json`, place files in the matching `artifacts/<check-id>/` folders, then run the compiler with `--strict`.
 
 ## Smoke 1: Create table and public form
 

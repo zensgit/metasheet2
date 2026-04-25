@@ -49,6 +49,17 @@ function makePassingEvidenceForCheck(id) {
             blockedReason: 'Visible error showed the user is not in the allowlist.',
           }
         : {}),
+      ...(id === 'no-email-user-create-bind'
+        ? {
+            adminEvidence: {
+              emailWasBlank: true,
+              createdLocalUserId: 'local_no_email_001',
+              boundDingTalkExternalId: 'dt_no_email_001',
+              accountLinkedAfterRefresh: true,
+              temporaryPasswordRedacted: true,
+            },
+          }
+        : {}),
     }
   }
   return {
@@ -314,6 +325,7 @@ test('dingtalk-p4-smoke-session writes an editable env template', () => {
     assert.match(content, /DINGTALK_P4_API_BASE=/)
     assert.match(content, /DINGTALK_P4_AUTH_TOKEN=/)
     assert.match(content, /DINGTALK_P4_GROUP_A_WEBHOOK=/)
+    assert.match(content, /https:\/\/oapi\.dingtalk\.com\/robot\/send\?access_token=\.\.\./)
     assert.match(content, /DINGTALK_P4_ALLOWED_USER_IDS=/)
     assert.match(content, /DINGTALK_P4_AUTHORIZED_USER_ID=/)
     assert.match(content, /DINGTALK_P4_UNAUTHORIZED_USER_ID=/)
@@ -321,6 +333,116 @@ test('dingtalk-p4-smoke-session writes an editable env template', () => {
     assert.doesNotMatch(content, /secret-admin-token/)
     assert.equal(statSync(envPath).mode & 0o777, 0o600)
     assert.equal(existsSync(path.join(tmpDir, 'session-summary.json')), false)
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+
+test('dingtalk-p4-smoke-session rejects non-canonical robot webhook during preflight', () => {
+  const tmpDir = makeTmpDir()
+  const outputDir = path.join(tmpDir, 'session')
+
+  try {
+    mkdirSync(path.join(outputDir, 'workspace'), { recursive: true })
+    mkdirSync(path.join(outputDir, 'compiled'), { recursive: true })
+    writeFileSync(path.join(outputDir, 'workspace', 'evidence.json'), JSON.stringify({
+      checks: [{ id: 'authorized-user-submit', status: 'pass' }],
+    }), 'utf8')
+    writeFileSync(path.join(outputDir, 'compiled', 'summary.json'), JSON.stringify({
+      overallStatus: 'pass',
+      stale: true,
+    }), 'utf8')
+
+    const result = spawnSync(process.execPath, [
+      scriptPath,
+      '--skip-api',
+      '--api-base',
+      'http://127.0.0.1:8900',
+      '--web-base',
+      'https://metasheet.example.test',
+      '--auth-token',
+      'secret-admin-token',
+      '--group-a-webhook',
+      'http://oapi.dingtalk.com/robot/send?access_token=robot-secret-a',
+      '--group-b-webhook',
+      'https://example.com/robot/send?access_token=robot-secret-b',
+      '--allowed-user',
+      'user_authorized',
+      '--output-dir',
+      outputDir,
+    ], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+    })
+
+    assert.equal(result.status, 1)
+    assert.doesNotMatch(result.stdout, /secret-admin-token/)
+    assert.doesNotMatch(result.stderr, /robot-secret-a/)
+    assert.doesNotMatch(result.stderr, /robot-secret-b/)
+    assert.equal(existsSync(path.join(outputDir, 'preflight/preflight-summary.json')), true)
+    assert.equal(existsSync(path.join(outputDir, 'workspace/evidence.json')), false)
+    assert.equal(existsSync(path.join(outputDir, 'compiled/summary.json')), false)
+
+    const preflightText = readFileSync(path.join(outputDir, 'preflight/preflight-summary.json'), 'utf8')
+    assert.doesNotMatch(preflightText, /robot-secret-a/)
+    assert.doesNotMatch(preflightText, /robot-secret-b/)
+    assert.match(preflightText, /access_token=<redacted>/)
+    const preflight = JSON.parse(preflightText)
+    const webhookCheck = preflight.checks.find((check) => check.id === 'group-webhooks-valid')
+    assert.equal(webhookCheck.status, 'fail')
+    assert.equal(webhookCheck.details.failures.some((failure) => failure.includes('HTTPS')), true)
+    assert.equal(webhookCheck.details.failures.some((failure) => failure.includes('DingTalk robot URL')), true)
+
+    const sessionSummaryText = readFileSync(path.join(outputDir, 'session-summary.json'), 'utf8')
+    assert.doesNotMatch(sessionSummaryText, /robot-secret-a/)
+    assert.doesNotMatch(sessionSummaryText, /robot-secret-b/)
+    const sessionSummary = JSON.parse(sessionSummaryText)
+    assert.equal(sessionSummary.overallStatus, 'fail')
+    assert.deepEqual(sessionSummary.steps.map((step) => step.id), ['preflight', 'status-report'])
+    assert.equal(sessionSummary.steps[0].status, 'fail')
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+
+test('dingtalk-p4-smoke-session requires person user before bootstrapping workspace', () => {
+  const tmpDir = makeTmpDir()
+  const outputDir = path.join(tmpDir, 'session')
+
+  try {
+    const result = spawnSync(process.execPath, [
+      scriptPath,
+      '--skip-api',
+      '--api-base',
+      'http://127.0.0.1:8900',
+      '--web-base',
+      'https://metasheet.example.test',
+      '--auth-token',
+      'secret-admin-token',
+      '--group-a-webhook',
+      'https://oapi.dingtalk.com/robot/send?access_token=robot-secret-a',
+      '--group-b-webhook',
+      'https://oapi.dingtalk.com/robot/send?access_token=robot-secret-b',
+      '--allowed-user',
+      'user_authorized',
+      '--output-dir',
+      outputDir,
+    ], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+    })
+
+    assert.equal(result.status, 1)
+    assert.equal(existsSync(path.join(outputDir, 'preflight/preflight-summary.json')), true)
+    assert.equal(existsSync(path.join(outputDir, 'workspace/evidence.json')), false)
+    assert.equal(existsSync(path.join(outputDir, 'compiled/summary.json')), false)
+    const preflight = JSON.parse(readFileSync(path.join(outputDir, 'preflight/preflight-summary.json'), 'utf8'))
+    const personCheck = preflight.checks.find((check) => check.id === 'person-smoke-input')
+    assert.equal(personCheck.status, 'fail')
+    assert.match(personCheck.details.notes, /delivery-history-group-person/)
+    const sessionSummary = JSON.parse(readFileSync(path.join(outputDir, 'session-summary.json'), 'utf8'))
+    assert.equal(sessionSummary.overallStatus, 'fail')
+    assert.deepEqual(sessionSummary.steps.map((step) => step.id), ['preflight', 'status-report'])
   } finally {
     rmSync(tmpDir, { recursive: true, force: true })
   }
@@ -372,6 +494,7 @@ test('dingtalk-p4-smoke-session runs preflight, API runner, and non-strict compi
     assert.doesNotMatch(sessionSummaryText, /SECabcdefghijklmnop12345678/)
     const sessionSummary = JSON.parse(sessionSummaryText)
     assert.equal(sessionSummary.overallStatus, 'manual_pending')
+    assert.equal(sessionSummary.remoteSmokePhase, 'manual_pending')
     assert.equal(sessionSummary.sessionPhase, 'bootstrap')
     assert.equal(sessionSummary.finalStrictStatus, 'not_run')
     assert.deepEqual(sessionSummary.manualTargets, {
@@ -382,17 +505,20 @@ test('dingtalk-p4-smoke-session runs preflight, API runner, and non-strict compi
     assert.deepEqual(sessionSummary.steps.map((step) => step.id), ['preflight', 'api-runner', 'compile', 'status-report'])
     assert.equal(sessionSummary.steps.every((step) => step.status === 'pass'), true)
     assert.equal(sessionSummary.statusReport.status, 'pass')
+    assert.equal(sessionSummary.statusReport.remoteSmokePhase, 'manual_pending')
     assert.match(sessionSummary.statusReport.smokeTodoMd, /smoke-todo\.md$/)
     assert.equal(sessionSummary.statusReport.remoteSmokeTodos.remaining > 0, true)
     assert.equal(sessionSummary.pendingChecks.some((check) => check.id === 'authorized-user-submit' && check.manual), true)
     assert.equal(sessionSummary.pendingChecks.some((check) => check.id === 'send-group-message-form-link' && check.manual), true)
     assert.equal(sessionSummary.nextCommands.some((command) => command.includes('dingtalk-p4-smoke-status.mjs')), true)
     assert.equal(sessionSummary.nextCommands.some((command) => command.includes('dingtalk-p4-evidence-record.mjs')), true)
+    assert.equal(sessionSummary.nextCommands.some((command) => command.includes('dingtalk-p4-final-closeout.mjs')), false)
     assert.equal(sessionSummary.nextCommands.some((command) => command.includes('--finalize')), true)
 
     const compiledSummary = JSON.parse(readFileSync(path.join(outputDir, 'compiled/summary.json'), 'utf8'))
     assert.equal(compiledSummary.overallStatus, 'fail')
     assert.equal(compiledSummary.remoteClientStatus, 'fail')
+    assert.equal(compiledSummary.remoteSmokePhase, 'manual_pending')
     const evidence = JSON.parse(readFileSync(path.join(outputDir, 'workspace/evidence.json'), 'utf8'))
     assert.equal(evidence.manualTargets.unauthorizedUserId, 'user_unauthorized')
     assert.equal(evidence.manualTargets.noEmailDingTalkExternalId, 'dt_no_email_001')
@@ -468,24 +594,62 @@ test('dingtalk-p4-smoke-session finalizes completed manual evidence with strict 
     assert.equal(existsSync(path.join(outputDir, 'compiled/summary.json')), true)
     const compiledSummary = JSON.parse(readFileSync(path.join(outputDir, 'compiled/summary.json'), 'utf8'))
     assert.equal(compiledSummary.overallStatus, 'pass')
+    assert.equal(compiledSummary.remoteSmokePhase, 'finalize_pending')
 
     const sessionSummary = JSON.parse(readFileSync(path.join(outputDir, 'session-summary.json'), 'utf8'))
     assert.equal(sessionSummary.runId, 'existing-session')
     assert.equal(sessionSummary.overallStatus, 'pass')
+    assert.equal(sessionSummary.remoteSmokePhase, 'finalize_pending')
     assert.equal(sessionSummary.sessionPhase, 'finalize')
     assert.equal(sessionSummary.finalStrictStatus, 'pass')
     assert.deepEqual(sessionSummary.steps.map((step) => step.id), ['preflight', 'api-runner', 'compile', 'strict-compile', 'status-report'])
     assert.equal(sessionSummary.steps.at(-1).status, 'pass')
     assert.equal(sessionSummary.pendingChecks.length, 0)
     assert.equal(sessionSummary.finalStrictSummary.overallStatus, 'pass')
+    assert.equal(sessionSummary.finalStrictSummary.remoteSmokePhase, 'finalize_pending')
     assert.equal(sessionSummary.statusReport.status, 'pass')
+    assert.equal(sessionSummary.statusReport.remoteSmokePhase, 'finalize_pending')
     assert.equal(sessionSummary.statusReport.remoteSmokeTodos.remaining, 0)
     assert.equal(existsSync(path.join(outputDir, 'smoke-status.json')), true)
     assert.equal(existsSync(path.join(outputDir, 'smoke-todo.md')), true)
     assert.equal(sessionSummary.nextCommands.some((command) => command.includes('dingtalk-p4-smoke-status.mjs')), true)
     assert.equal(sessionSummary.nextCommands.some((command) => command.includes('--strict')), false)
+    assert.equal(sessionSummary.nextCommands.some((command) => command.includes('dingtalk-p4-final-closeout.mjs')), true)
     assert.equal(sessionSummary.nextCommands.some((command) => command.includes('dingtalk-p4-final-handoff.mjs')), true)
     assert.equal(sessionSummary.nextCommands.some((command) => command.includes('--require-dingtalk-p4-pass')), true)
+    assert.equal(sessionSummary.nextCommands.every((command) => !command.includes('artifacts/dingtalk-staging-evidence-packet/142-final')), true)
+    assert.equal(sessionSummary.nextCommands.some((command) => command.includes('artifacts/dingtalk-staging-evidence-packet/session-final')), true)
+    assert.equal(sessionSummary.nextCommands.some((command) => command.includes('export-dingtalk-staging-evidence-packet.mjs') && command.includes('--output-dir')), true)
+    assert.equal(sessionSummary.nextCommands.some((command) => command.includes('dingtalk-p4-final-handoff.mjs') && command.includes('--output-dir')), true)
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+
+test('dingtalk-p4-smoke-session preserves external artifact allowance in final closeout command', () => {
+  const tmpDir = makeTmpDir()
+  const outputDir = path.join(tmpDir, 'session')
+
+  try {
+    writeCompletedSession(outputDir)
+
+    const result = spawnSync(process.execPath, [
+      scriptPath,
+      '--finalize',
+      outputDir,
+      '--allow-external-artifact-refs',
+    ], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+    })
+
+    assert.equal(result.status, 0, result.stderr || result.stdout)
+    const sessionSummary = JSON.parse(readFileSync(path.join(outputDir, 'session-summary.json'), 'utf8'))
+    const closeoutCommand = sessionSummary.nextCommands.find((command) => command.includes('dingtalk-p4-final-closeout.mjs'))
+    assert.match(closeoutCommand, /--allow-external-artifact-refs/)
+    assert.match(closeoutCommand, /artifacts\/dingtalk-staging-evidence-packet\/session-final/)
+    assert.doesNotMatch(closeoutCommand, /142-final/)
+    assert.equal(sessionSummary.nextCommands.some((command) => command.includes('dingtalk-p4-final-handoff.mjs')), true)
   } finally {
     rmSync(tmpDir, { recursive: true, force: true })
   }
@@ -497,6 +661,12 @@ test('dingtalk-p4-smoke-session finalize fails when strict evidence is incomplet
 
   try {
     writeCompletedSession(outputDir, { omitArtifactFor: 'authorized-user-submit' })
+    mkdirSync(path.join(outputDir, 'compiled'), { recursive: true })
+    writeFileSync(path.join(outputDir, 'compiled', 'summary.json'), JSON.stringify({
+      overallStatus: 'pass',
+      manualEvidenceIssues: [],
+      stale: true,
+    }), 'utf8')
 
     const result = spawnSync(process.execPath, [
       scriptPath,
@@ -518,10 +688,17 @@ test('dingtalk-p4-smoke-session finalize fails when strict evidence is incomplet
     assert.equal(sessionSummary.steps.at(-1).id, 'status-report')
     assert.equal(sessionSummary.steps.at(-1).status, 'pass')
     assert.equal(sessionSummary.finalStrictSummary.overallStatus, 'fail')
+    assert.equal(sessionSummary.finalStrictSummary.remoteSmokePhase, 'manual_pending')
     assert.equal(sessionSummary.statusReport.status, 'pass')
+    assert.equal(sessionSummary.statusReport.remoteSmokePhase, 'manual_pending')
+    const compiledSummary = JSON.parse(readFileSync(path.join(outputDir, 'compiled', 'summary.json'), 'utf8'))
+    assert.equal(compiledSummary.overallStatus, 'fail')
+    assert.equal(compiledSummary.remoteSmokePhase, 'manual_pending')
+    assert.equal(compiledSummary.stale, undefined)
     assert.equal(existsSync(path.join(outputDir, 'smoke-todo.md')), true)
     assert.equal(sessionSummary.finalStrictSummary.manualEvidenceIssueCount > 0, true)
     assert.equal(sessionSummary.nextCommands.some((command) => command.includes('dingtalk-p4-evidence-record.mjs')), true)
+    assert.equal(sessionSummary.nextCommands.some((command) => command.includes('dingtalk-p4-final-closeout.mjs')), false)
     assert.equal(sessionSummary.nextCommands.some((command) => command.includes('--finalize')), true)
   } finally {
     rmSync(tmpDir, { recursive: true, force: true })

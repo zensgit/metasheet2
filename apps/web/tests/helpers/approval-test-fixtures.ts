@@ -185,6 +185,39 @@ export function mockDraftTemplate(overrides?: Partial<ApprovalTemplateDetailDTO>
   }
 }
 
+export function mockTemplateWithVisibilityRules(
+  overrides?: Partial<ApprovalTemplateDetailDTO>,
+): ApprovalTemplateDetailDTO {
+  return mockPublishedTemplate({
+    formSchema: {
+      fields: [
+        {
+          id: 'showDetails',
+          type: 'select',
+          label: '是否补充说明',
+          required: true,
+          options: [
+            { label: '是', value: 'yes' },
+            { label: '否', value: 'no' },
+          ],
+        },
+        {
+          id: 'details',
+          type: 'textarea',
+          label: '补充说明',
+          required: true,
+          visibilityRule: {
+            fieldId: 'showDetails',
+            operator: 'eq',
+            value: 'yes',
+          },
+        },
+      ],
+    },
+    ...overrides,
+  })
+}
+
 // ---------------------------------------------------------------------------
 // History fixtures
 // ---------------------------------------------------------------------------
