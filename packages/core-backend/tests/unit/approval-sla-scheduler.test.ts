@@ -111,4 +111,64 @@ describe('ApprovalSlaScheduler', () => {
     expect(second.leader).toBe(true)
     second.stop()
   })
+
+  it('retries acquisition as follower and takes over after the leader stops', async () => {
+    const store = new Map()
+    const leaderLock = new RedisLeaderLock({ client: new MemoryLeaderLockClient(store) })
+    const followerLock = new RedisLeaderLock({ client: new MemoryLeaderLockClient(store) })
+    const leaderCheck = vi.fn().mockResolvedValue([])
+    const followerCheck = vi.fn().mockResolvedValue(['apr-takeover'])
+
+    const leader = new ApprovalSlaScheduler({
+      // biome-ignore lint/suspicious/noExplicitAny: test double
+      metrics: { checkSlaBreaches: leaderCheck } as any,
+      leaderOptions: { leaderLock, ownerId: 'node-a', ttlMs: 30_000, retryIntervalMs: 100 },
+    })
+    const follower = new ApprovalSlaScheduler({
+      // biome-ignore lint/suspicious/noExplicitAny: test double
+      metrics: { checkSlaBreaches: followerCheck } as any,
+      intervalMs: 60_000,
+      leaderOptions: { leaderLock: followerLock, ownerId: 'node-b', ttlMs: 30_000, retryIntervalMs: 100 },
+    })
+    follower.start()
+    await Promise.all([leader.ready, follower.ready])
+
+    expect(leader.leader).toBe(true)
+    expect(follower.leader).toBe(false)
+
+    leader.stop()
+    await vi.advanceTimersByTimeAsync(120)
+
+    expect(follower.leader).toBe(true)
+    expect(await follower.tick(new Date('2026-04-25T10:00:00Z'))).toEqual(['apr-takeover'])
+    expect(followerCheck).toHaveBeenCalledTimes(1)
+    follower.stop()
+  })
+
+  it('updates the injected leader gauge across follower, leader, and relinquished states', async () => {
+    const values = new Map<string, number>()
+    const gauge = {
+      labels: ({ state }: { state: 'leader' | 'follower' | 'relinquished' }) => ({
+        set: (value: number) => { values.set(state, value) },
+      }),
+    }
+    const lock = new RedisLeaderLock({ client: new MemoryLeaderLockClient(new Map()) })
+
+    const scheduler = new ApprovalSlaScheduler({
+      // biome-ignore lint/suspicious/noExplicitAny: test double
+      metrics: { checkSlaBreaches: vi.fn().mockResolvedValue([]) } as any,
+      leaderOptions: { leaderLock: lock, ownerId: 'node-a', ttlMs: 30_000 },
+      runtime: { leaderStateGauge: gauge },
+    })
+    await scheduler.ready
+
+    expect(values.get('leader')).toBe(1)
+    expect(values.get('follower')).toBe(0)
+    expect(values.get('relinquished')).toBe(0)
+
+    scheduler.stop()
+    expect(values.get('leader')).toBe(0)
+    expect(values.get('follower')).toBe(0)
+    expect(values.get('relinquished')).toBe(1)
+  })
 })
