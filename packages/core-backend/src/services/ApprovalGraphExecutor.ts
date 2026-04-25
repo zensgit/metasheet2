@@ -6,6 +6,7 @@ import type {
   ConditionBranch,
   ConditionRule,
   FormField,
+  FormFieldVisibilityRule,
   FormSchema,
   ParallelNodeConfig,
   RuntimeGraph,
@@ -165,6 +166,89 @@ function isEmptyValue(value: unknown): boolean {
     || value === undefined
     || value === ''
     || (Array.isArray(value) && value.length === 0)
+}
+
+function evaluateVisibilityRule(rule: FormFieldVisibilityRule, formData: Record<string, unknown>): boolean {
+  const value = formData[rule.fieldId]
+  switch (rule.operator) {
+    case 'eq':
+      return value === rule.value
+    case 'neq':
+      return value !== rule.value
+    case 'in':
+      return Array.isArray(rule.values)
+        ? (Array.isArray(value)
+          ? value.some((entry) => rule.values!.includes(entry))
+          : rule.values.includes(value))
+        : false
+    case 'isEmpty':
+      return isEmptyValue(value)
+    case 'notEmpty':
+      return !isEmptyValue(value)
+    default:
+      return false
+  }
+}
+
+function buildVisibilityLookup(formSchema: FormSchema, formData: Record<string, unknown>): Map<string, boolean> {
+  const fieldMap = new Map(formSchema.fields.map((field) => [field.id, field]))
+  const cache = new Map<string, boolean>()
+  const stack = new Set<string>()
+
+  const isVisible = (fieldId: string): boolean => {
+    if (cache.has(fieldId)) {
+      return cache.get(fieldId) as boolean
+    }
+
+    const field = fieldMap.get(fieldId)
+    if (!field) {
+      cache.set(fieldId, false)
+      return false
+    }
+
+    if (!field.visibilityRule) {
+      cache.set(fieldId, true)
+      return true
+    }
+
+    if (stack.has(fieldId)) {
+      cache.set(fieldId, false)
+      return false
+    }
+
+    stack.add(fieldId)
+    const dependentFieldVisible = isVisible(field.visibilityRule.fieldId)
+    stack.delete(fieldId)
+
+    const visible = dependentFieldVisible
+      ? evaluateVisibilityRule(field.visibilityRule, formData)
+      : false
+    cache.set(fieldId, visible)
+    return visible
+  }
+
+  for (const field of formSchema.fields) {
+    isVisible(field.id)
+  }
+
+  return cache
+}
+
+export function getVisibleFormFieldIds(formSchema: FormSchema, formData: Record<string, unknown>): Set<string> {
+  const visibility = buildVisibilityLookup(formSchema, formData)
+  return new Set(formSchema.fields
+    .filter((field) => visibility.get(field.id) !== false)
+    .map((field) => field.id))
+}
+
+export function pruneHiddenFormData(
+  formSchema: FormSchema,
+  formData: Record<string, unknown>,
+): Record<string, unknown> {
+  const visibleFieldIds = getVisibleFormFieldIds(formSchema, formData)
+  return Object.fromEntries(
+    Object.entries(formData).filter(([fieldId]) => visibleFieldIds.has(fieldId)),
+  )
 }
 
 function normalizeApprovalMode(value: unknown): ApprovalMode {
@@ -336,8 +420,12 @@ function validateFieldConstraints(field: FormField, value: unknown): string[] {
 
 export function validateApprovalFormData(formSchema: FormSchema, formData: Record<string, unknown>): string[] {
   const errors: string[] = []
+  const visibleFieldIds = getVisibleFormFieldIds(formSchema, formData)
 
   for (const field of formSchema.fields) {
+    if (!visibleFieldIds.has(field.id)) {
+      continue
+    }
     const value = formData[field.id]
     if (field.required && isEmptyValue(value)) {
       errors.push(`${field.id} is required`)
