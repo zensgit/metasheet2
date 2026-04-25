@@ -15,7 +15,7 @@ Scope: WP5 slice 1 adds a per-instance approval metrics pipeline (总耗时 + no
 
 ### SLA breach scanner
 
-- `ApprovalSlaScheduler` is a 15-minute `setInterval` job started from `src/index.ts` during `initialize`. The tick calls `ApprovalMetricsService.checkSlaBreaches(now)`, which runs a single `UPDATE … SET sla_breached = TRUE, sla_breached_at = now WHERE terminal_at IS NULL AND sla_hours IS NOT NULL AND NOT sla_breached AND started_at + interval 'sla_hours hours' < now RETURNING instance_id`.
+- `ApprovalSlaScheduler` is a 15-minute `setInterval` job started from `src/index.ts` during `initialize`. The tick calls `ApprovalMetricsService.checkSlaBreaches(now)`, which runs a single `UPDATE … SET sla_breached = TRUE, sla_breached_at = now WHERE terminal_at IS NULL AND sla_hours IS NOT NULL AND NOT sla_breached AND started_at + (sla_hours * interval '1 hour') < now RETURNING instance_id`.
 - Reentrancy is guarded with an in-memory `running` flag; the timer is `.unref()`-ed so it cannot keep the process alive on its own.
 - Multi-pod deployments must disable the scheduler on all-but-one instance via `APPROVAL_SLA_SCHEDULER_DISABLED=1`. A leader-lock wrapper is a follow-up.
 
