@@ -47,6 +47,11 @@ function parseDate(value: unknown): Date | undefined {
   return Number.isFinite(parsed.getTime()) ? parsed : undefined
 }
 
+function parseLimit(value: unknown): number {
+  const parsed = Number.parseInt(String(value ?? '10'), 10)
+  return Math.max(1, Math.min(Number.isFinite(parsed) ? parsed : 10, 50))
+}
+
 export interface ApprovalMetricsRouterOptions {
   metricsService?: ApprovalMetricsServiceType
 }
@@ -69,6 +74,25 @@ export function approvalMetricsRouter(options?: ApprovalMetricsRouterOptions): R
       } catch (error) {
         logger.error(`metrics summary failed: ${error instanceof Error ? error.message : String(error)}`)
         return res.status(500).json({ ok: false, error: { code: 'METRICS_SUMMARY_FAILED', message: 'Failed to load approval metrics summary' } })
+      }
+    },
+  )
+
+  r.get('/api/approvals/metrics/report',
+    authenticate,
+    rbacGuard('approvals:admin'),
+    async (req: Request, res: Response) => {
+      try {
+        const report = await metricsService.getMetricsReport({
+          tenantId: resolveTenantId(req),
+          since: parseDate(req.query.since),
+          until: parseDate(req.query.until),
+          limit: parseLimit(req.query.limit),
+        })
+        return res.json({ ok: true, data: report })
+      } catch (error) {
+        logger.error(`metrics report failed: ${error instanceof Error ? error.message : String(error)}`)
+        return res.status(500).json({ ok: false, error: { code: 'METRICS_REPORT_FAILED', message: 'Failed to load approval metrics report' } })
       }
     },
   )

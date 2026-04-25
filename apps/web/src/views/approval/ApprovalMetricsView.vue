@@ -11,7 +11,7 @@
           start-placeholder="开始日期"
           end-placeholder="结束日期"
           value-format="YYYY-MM-DD"
-          @change="loadSummary"
+          @change="loadAll"
         />
         <el-button type="primary" @click="loadAll" :loading="loading">
           刷新
@@ -109,6 +109,69 @@
         </el-table-column>
       </el-table>
     </el-card>
+
+    <div class="approval-metrics__topn">
+      <el-card class="approval-metrics__section">
+        <template #header>
+          <span>TopN 最慢实例</span>
+        </template>
+        <el-table :data="slowestInstances" stripe v-loading="reportLoading" empty-text="暂无已完成实例">
+          <el-table-column label="实例" min-width="220">
+            <template #default="{ row }">
+              <el-link type="primary" @click="goInstance(row.instanceId)">
+                {{ row.instanceId }}
+              </el-link>
+            </template>
+          </el-table-column>
+          <el-table-column label="模板" min-width="180">
+            <template #default="{ row }">
+              <el-link v-if="row.templateId" type="primary" @click="goTemplate(row.templateId)">
+                {{ row.templateId }}
+              </el-link>
+              <span v-else class="metric-muted">未关联模板</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="耗时" width="120">
+            <template #default="{ row }">{{ formatDuration(row.durationSeconds) }}</template>
+          </el-table-column>
+          <el-table-column label="状态" width="120">
+            <template #default="{ row }">{{ row.terminalState || '-' }}</template>
+          </el-table-column>
+          <el-table-column label="完成时间" width="220">
+            <template #default="{ row }">{{ formatTimestamp(row.terminalAt) }}</template>
+          </el-table-column>
+        </el-table>
+      </el-card>
+
+      <el-card class="approval-metrics__section">
+        <template #header>
+          <span>TopN SLA 风险模板</span>
+        </template>
+        <el-table :data="breachedTemplates" stripe v-loading="reportLoading" empty-text="暂无 SLA 模板数据">
+          <el-table-column label="模板" min-width="220">
+            <template #default="{ row }">
+              <el-link v-if="row.templateId" type="primary" @click="goTemplate(row.templateId)">
+                {{ row.templateId }}
+              </el-link>
+              <span v-else class="metric-muted">未关联模板</span>
+            </template>
+          </el-table-column>
+          <el-table-column prop="total" label="总量" width="90" />
+          <el-table-column label="SLA 超时" width="120">
+            <template #default="{ row }">{{ row.slaBreachCount }} / {{ row.slaCandidateCount }}</template>
+          </el-table-column>
+          <el-table-column label="超时率" width="110">
+            <template #default="{ row }">{{ formatPercent(row.slaBreachRate) }}</template>
+          </el-table-column>
+          <el-table-column label="平均耗时" width="130">
+            <template #default="{ row }">{{ formatDuration(row.avgDurationSeconds) }}</template>
+          </el-table-column>
+          <el-table-column label="P95" width="130">
+            <template #default="{ row }">{{ formatDuration(row.p95DurationSeconds) }}</template>
+          </el-table-column>
+        </el-table>
+      </el-card>
+    </div>
   </section>
 </template>
 
@@ -117,9 +180,12 @@ import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import {
   fetchApprovalMetricsBreaches,
+  fetchApprovalMetricsReport,
   fetchApprovalMetricsSummary,
   type ApprovalMetricsRow,
   type ApprovalMetricsSummary,
+  type ApprovalMetricsTopInstanceRow,
+  type ApprovalMetricsTopTemplateRow,
 } from '../../approvals/api'
 
 const router = useRouter()
@@ -130,9 +196,12 @@ const summary = ref<ApprovalMetricsSummary>({
   slaBreachCount: 0, slaCandidateCount: 0, slaBreachRate: 0, byTemplate: [],
 })
 const breaches = ref<ApprovalMetricsRow[]>([])
+const slowestInstances = ref<ApprovalMetricsTopInstanceRow[]>([])
+const breachedTemplates = ref<ApprovalMetricsTopTemplateRow[]>([])
 const dateRange = ref<[string, string] | null>(null)
 const loading = ref(false)
 const breachLoading = ref(false)
+const reportLoading = ref(false)
 const errorMessage = ref('')
 
 const approvalRatePercent = computed(() => {
@@ -171,8 +240,24 @@ async function loadBreaches(): Promise<void> {
   }
 }
 
+async function loadReport(): Promise<void> {
+  reportLoading.value = true
+  try {
+    const query: { since?: string; until?: string; limit?: number } = { limit: 10 }
+    if (dateRange.value && dateRange.value[0]) query.since = `${dateRange.value[0]}T00:00:00Z`
+    if (dateRange.value && dateRange.value[1]) query.until = `${dateRange.value[1]}T23:59:59Z`
+    const report = await fetchApprovalMetricsReport(query)
+    slowestInstances.value = report.slowestInstances
+    breachedTemplates.value = report.breachedTemplates
+  } catch (error) {
+    errorMessage.value = `加载 TopN 报表失败: ${error instanceof Error ? error.message : String(error)}`
+  } finally {
+    reportLoading.value = false
+  }
+}
+
 async function loadAll(): Promise<void> {
-  await Promise.all([loadSummary(), loadBreaches()])
+  await Promise.all([loadSummary(), loadBreaches(), loadReport()])
 }
 
 function formatDuration(seconds: number | null | undefined): string {
@@ -251,5 +336,10 @@ onMounted(() => { void loadAll() })
 }
 .approval-metrics__section {
   width: 100%;
+}
+.approval-metrics__topn {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
+  gap: 16px;
 }
 </style>
