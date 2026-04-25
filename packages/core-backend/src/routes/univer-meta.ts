@@ -96,13 +96,13 @@ import { conditionalPublicRateLimiter, publicFormContextLimiter, publicFormSubmi
 import {
   AutomationRuleValidationError,
   getAutomationServiceInstance,
-  type AutomationRule as AutomationServiceRule,
+  parseCreateRuleInput,
+  parseDingTalkAutomationDeliveryLimit,
+  parseUpdateRuleInput,
+  preflightDingTalkAutomationCreate,
+  preflightDingTalkAutomationUpdate,
+  serializeAutomationRule,
 } from '../multitable/automation-service'
-import {
-  normalizeDingTalkAutomationActionInputs,
-  validateDingTalkAutomationActionConfigs,
-  validateDingTalkAutomationLinks,
-} from '../multitable/dingtalk-automation-link-validation'
 import { listAutomationDingTalkGroupDeliveries } from '../multitable/dingtalk-group-delivery-service'
 import { listAutomationDingTalkPersonDeliveries } from '../multitable/dingtalk-person-delivery-service'
 import {
@@ -1837,11 +1837,6 @@ async function tryResolveView(
     viewId,
     metaViewConfigCache as Map<string, SharedMultitableViewConfig>,
   )
-}
-
-function parseDingTalkAutomationDeliveryLimit(value: unknown): number {
-  const raw = typeof value === 'string' ? Number(value) : undefined
-  return Number.isFinite(raw) ? Math.min(Math.max(Math.floor(raw as number), 1), 200) : 50
 }
 
 function sendForbidden(res: Response, message = 'Insufficient permissions') {
@@ -6780,30 +6775,6 @@ export function univerMetaRouter(): Router {
 
   // ── Automation rule CRUD ──────────────────────────────────────────────
 
-  function serializeAutomationRule(rule: AutomationServiceRule) {
-    const triggerConfig = rule.trigger_config ?? {}
-    const actionConfig = rule.action_config ?? {}
-    return {
-      id: rule.id,
-      sheetId: rule.sheet_id,
-      name: rule.name ?? '',
-      triggerType: rule.trigger_type,
-      triggerConfig,
-      trigger: {
-        type: rule.trigger_type,
-        config: triggerConfig,
-      },
-      conditions: rule.conditions ?? undefined,
-      actions: rule.actions ?? undefined,
-      actionType: rule.action_type,
-      actionConfig,
-      enabled: rule.enabled,
-      createdAt: rule.created_at,
-      updatedAt: rule.updated_at,
-      createdBy: rule.created_by ?? undefined,
-    }
-  }
-
   router.get('/sheets/:sheetId/automations', async (req: Request, res: Response) => {
     const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId : ''
     if (!sheetId) {
@@ -6845,61 +6816,9 @@ export function univerMetaRouter(): Router {
         return res.status(503).json({ ok: false, error: { code: 'SERVICE_UNAVAILABLE', message: 'Automation service is not available' } })
       }
 
-      const body = req.body as Record<string, unknown> | undefined
-      const name = typeof body?.name === 'string' ? body.name : null
-      const triggerType = typeof body?.triggerType === 'string' ? body.triggerType : ''
-      const triggerConfig = (body?.triggerConfig && typeof body.triggerConfig === 'object') ? body.triggerConfig as Record<string, unknown> : {}
-      let actions = Array.isArray(body?.actions) ? body.actions : null
-      const firstAction = actions?.find((item): item is Record<string, unknown> => !!item && typeof item === 'object' && !Array.isArray(item))
-      let actionType = typeof body?.actionType === 'string' ? body.actionType : ''
-      let actionConfig = (body?.actionConfig && typeof body.actionConfig === 'object') ? body.actionConfig as Record<string, unknown> : {}
-      if (!actionType && typeof firstAction?.type === 'string') actionType = firstAction.type
-      if (Object.keys(actionConfig).length === 0 && firstAction?.config && typeof firstAction.config === 'object' && !Array.isArray(firstAction.config)) {
-        actionConfig = firstAction.config as Record<string, unknown>
-      }
-      const enabled = typeof body?.enabled === 'boolean' ? body.enabled : true
-
-      const validTriggers = new Set(['record.created', 'record.updated', 'record.deleted', 'field.changed', 'field.value_changed', 'schedule.cron', 'schedule.interval', 'webhook.received'])
-      const validActions = new Set(['notify', 'update_field', 'update_record', 'create_record', 'send_webhook', 'send_notification', 'send_dingtalk_group_message', 'send_dingtalk_person_message', 'lock_record'])
-      if (!validTriggers.has(triggerType)) {
-        return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: `Invalid trigger_type: ${triggerType}` } })
-      }
-      if (!validActions.has(actionType)) {
-        return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: `Invalid action_type: ${actionType}` } })
-      }
-
-      const conditions = body?.conditions && typeof body.conditions === 'object' ? body.conditions as never : null
-      const normalizedDingTalkInputs = normalizeDingTalkAutomationActionInputs(actionType, actionConfig, actions)
-      actionConfig = normalizedDingTalkInputs.actionConfig && typeof normalizedDingTalkInputs.actionConfig === 'object'
-        ? normalizedDingTalkInputs.actionConfig as Record<string, unknown>
-        : actionConfig
-      actions = Array.isArray(normalizedDingTalkInputs.actions) ? normalizedDingTalkInputs.actions : actions
-      const actionConfigValidationError = validateDingTalkAutomationActionConfigs(actionType, actionConfig, actions)
-      if (actionConfigValidationError) {
-        return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: actionConfigValidationError } })
-      }
-      const linkValidationError = await validateDingTalkAutomationLinks(
-        pool.query.bind(pool),
-        sheetId,
-        actionType,
-        actionConfig,
-        actions,
-      )
-      if (linkValidationError) {
-        return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: linkValidationError } })
-      }
-
-      const rule = await automationService.createRule(sheetId, {
-        name,
-        triggerType,
-        triggerConfig,
-        actionType,
-        actionConfig,
-        enabled,
-        createdBy: access.userId,
-        conditions,
-        actions: actions as never,
-      })
+      const parsed = parseCreateRuleInput(req.body as Record<string, unknown> | undefined, access.userId)
+      const input = await preflightDingTalkAutomationCreate(pool.query.bind(pool), sheetId, parsed)
+      const rule = await automationService.createRule(sheetId, input)
 
       return res.json({
         ok: true,
@@ -6933,104 +6852,22 @@ export function univerMetaRouter(): Router {
         return res.status(503).json({ ok: false, error: { code: 'SERVICE_UNAVAILABLE', message: 'Automation service is not available' } })
       }
 
-      const body = req.body as Record<string, unknown> | undefined
-      const updates: Record<string, unknown> = {}
-      let normalizedActionConfigForUpdate: Record<string, unknown> | undefined
-      let normalizedActionsForUpdate: unknown[] | null | undefined
-
-      if (typeof body?.name === 'string') updates.name = body.name
-      if (typeof body?.triggerType === 'string') {
-        const validTriggers = new Set(['record.created', 'record.updated', 'record.deleted', 'field.changed', 'field.value_changed', 'schedule.cron', 'schedule.interval', 'webhook.received'])
-        if (!validTriggers.has(body.triggerType)) {
-          return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: `Invalid trigger_type: ${body.triggerType}` } })
-        }
-        updates.trigger_type = body.triggerType
-      }
-      if (body?.triggerConfig && typeof body.triggerConfig === 'object') {
-        updates.trigger_config = JSON.stringify(body.triggerConfig)
-      }
-      if (typeof body?.actionType === 'string') {
-        const validActions = new Set(['notify', 'update_field', 'update_record', 'create_record', 'send_webhook', 'send_notification', 'send_dingtalk_group_message', 'send_dingtalk_person_message', 'lock_record'])
-        if (!validActions.has(body.actionType)) {
-          return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: `Invalid action_type: ${body.actionType}` } })
-        }
-        updates.action_type = body.actionType
-      }
-      if (body?.actionConfig && typeof body.actionConfig === 'object') {
-        updates.action_config = JSON.stringify(body.actionConfig)
-      }
-      if (typeof body?.enabled === 'boolean') updates.enabled = body.enabled
-      if (body?.conditions !== undefined) {
-        updates.conditions = body.conditions ? JSON.stringify(body.conditions) : null
-      }
-      if (body?.actions !== undefined) {
-        updates.actions = Array.isArray(body.actions) ? JSON.stringify(body.actions) : null
-      }
-
-      if (Object.keys(updates).length === 0) {
+      const parsed = parseUpdateRuleInput(req.body as Record<string, unknown> | undefined)
+      if (!parsed) {
         return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'No fields to update' } })
       }
-
-      if (typeof body?.actionType === 'string' || (body?.actionConfig && typeof body.actionConfig === 'object') || body?.actions !== undefined) {
-        const existing = await automationService.getRule(ruleId)
-        if (!existing || existing.sheet_id !== sheetId) {
-          return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Automation rule not found' } })
-        }
-        const nextActionType = typeof body?.actionType === 'string' ? body.actionType : existing.action_type
-        const nextActionConfig = body?.actionConfig && typeof body.actionConfig === 'object'
-          ? body.actionConfig
-          : existing.action_config
-        const nextActions = body?.actions !== undefined
-          ? Array.isArray(body.actions) ? body.actions : null
-          : existing.actions
-        const normalizedDingTalkInputs = normalizeDingTalkAutomationActionInputs(nextActionType, nextActionConfig, nextActions)
-        const normalizedNextActionConfig = normalizedDingTalkInputs.actionConfig && typeof normalizedDingTalkInputs.actionConfig === 'object'
-          ? normalizedDingTalkInputs.actionConfig as Record<string, unknown>
-          : nextActionConfig
-        const normalizedNextActions = Array.isArray(normalizedDingTalkInputs.actions)
-          ? normalizedDingTalkInputs.actions
-          : nextActions
-        const actionConfigValidationError = validateDingTalkAutomationActionConfigs(
-          nextActionType,
-          normalizedNextActionConfig,
-          normalizedNextActions,
-        )
-        if (actionConfigValidationError) {
-          return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: actionConfigValidationError } })
-        }
-        const linkValidationError = await validateDingTalkAutomationLinks(
-          pool.query.bind(pool),
-          sheetId,
-          nextActionType,
-          normalizedNextActionConfig,
-          normalizedNextActions,
-        )
-        if (linkValidationError) {
-          return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: linkValidationError } })
-        }
-        if (body?.actionConfig && typeof body.actionConfig === 'object') {
-          normalizedActionConfigForUpdate = normalizedNextActionConfig as Record<string, unknown>
-        }
-        if (body?.actions !== undefined) {
-          normalizedActionsForUpdate = Array.isArray(body.actions) ? normalizedNextActions as unknown[] : null
-        }
+      const input = await preflightDingTalkAutomationUpdate(
+        pool.query.bind(pool),
+        sheetId,
+        ruleId,
+        parsed,
+        automationService,
+      )
+      if (!input) {
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Automation rule not found' } })
       }
 
-      const updated = await automationService.updateRule(ruleId, sheetId, {
-        name: updates.name as string | null | undefined,
-        triggerType: updates.trigger_type as string | undefined,
-        triggerConfig: body?.triggerConfig && typeof body.triggerConfig === 'object'
-          ? body.triggerConfig as Record<string, unknown>
-          : undefined,
-        actionType: updates.action_type as string | undefined,
-        actionConfig: body?.actionConfig && typeof body.actionConfig === 'object'
-          ? normalizedActionConfigForUpdate ?? body.actionConfig as Record<string, unknown>
-          : undefined,
-        enabled: typeof body?.enabled === 'boolean' ? body.enabled : undefined,
-        conditions: body?.conditions !== undefined ? (body.conditions as never) : undefined,
-        actions: body?.actions !== undefined ? (normalizedActionsForUpdate ?? (Array.isArray(body.actions) ? body.actions : null)) as never : undefined,
-      })
-
+      const updated = await automationService.updateRule(ruleId, sheetId, input)
       if (!updated) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Automation rule not found' } })
       }
