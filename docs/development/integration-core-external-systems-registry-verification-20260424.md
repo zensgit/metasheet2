@@ -35,12 +35,20 @@ pnpm --filter @metasheet/core-backend exec tsc --noEmit
 - `upsertExternalSystem()` validates required tenant/name/kind fields.
 - `role` rejects values outside `source | target | bidirectional`.
 - `status` rejects values outside `active | inactive | error`.
+- `credentials` accepts only string, plain object, `null`, or `undefined`.
+- Credential arrays, dates, booleans, and numbers are rejected before encryption.
 - New rows encrypt `credentials` and store only `credentials_encrypted`.
 - Public result never contains plaintext credentials.
 - Public result never contains `credentials_encrypted`.
 - Public result exposes only coarse credential metadata: `hasCredentials`, `credentialFormat`, and `credentialFingerprint`.
+- Unknown stored credential prefixes map to `credentialFormat: null` rather than
+  adding an undocumented public format.
 - Updating without `credentials` preserves the stored credential.
 - Updating with `credentials: null` clears the stored credential.
+- A missing `db.select()` helper is rejected at registry construction because
+  `listExternalSystems()` requires it.
+- An empty `db.updateRow()` result during update throws
+  `ExternalSystemNotFoundError` instead of returning an optimistic success row.
 - `getExternalSystem()` returns safe public shape and throws `ExternalSystemNotFoundError` when absent.
 - `listExternalSystems()` scopes by tenant/workspace and supports `kind` filtering.
 - `workspaceId` scoping keeps `null` and another workspace isolated.

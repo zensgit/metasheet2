@@ -6,6 +6,7 @@ const {
   createExternalSystemRegistry,
   ExternalSystemNotFoundError,
   ExternalSystemValidationError,
+  __internals,
 } = require(path.join(__dirname, '..', 'lib', 'external-systems.cjs'))
 
 function createMockCredentialStore() {
@@ -150,7 +151,40 @@ async function main() {
   assert.equal(cleared.hasCredentials, false)
   assert.equal(cleared.credentialFormat, null)
 
-  // --- 5. Not-found and validation errors -------------------------------
+  // --- 5. Credential input and format boundaries ------------------------
+  for (const invalidCredentials of [123, true, ['token'], new Date('2026-04-24T00:00:00.000Z')]) {
+    let badCredentials = null
+    try {
+      await registry.upsertExternalSystem({
+        tenantId: 'tenant_1',
+        name: `bad-${typeof invalidCredentials}`,
+        kind: 'http',
+        credentials: invalidCredentials,
+      })
+    } catch (error) {
+      badCredentials = error
+    }
+    assert.ok(badCredentials instanceof ExternalSystemValidationError, 'invalid credential shape rejected')
+  }
+
+  db.rows.push({
+    id: 'sys_unknown',
+    tenant_id: 'tenant_1',
+    workspace_id: null,
+    project_id: null,
+    name: 'unknown credential',
+    kind: 'http',
+    role: 'source',
+    config: {},
+    capabilities: {},
+    status: 'active',
+    credentials_encrypted: 'legacy:opaque',
+  })
+  const unknownCredentialRows = await registry.listExternalSystems({ tenantId: 'tenant_1', workspaceId: null, kind: 'http' })
+  assert.equal(unknownCredentialRows[0].credentialFormat, null, 'unknown credential prefixes map to null')
+  assert.equal(__internals.detectCredentialFormat('legacy:opaque'), null)
+
+  // --- 6. Not-found and validation errors -------------------------------
   let notFound = null
   try {
     await registry.getExternalSystem({ tenantId: 'tenant_1', id: 'missing' })
@@ -179,6 +213,47 @@ async function main() {
     badShape = error
   }
   assert.ok(badShape, 'bad credential store shape rejected')
+
+  const dbWithoutSelect = { ...db }
+  delete dbWithoutSelect.select
+  let badDb = null
+  try {
+    createExternalSystemRegistry({ db: dbWithoutSelect, credentialStore })
+  } catch (error) {
+    badDb = error
+  }
+  assert.ok(badDb, 'db helper without select rejected')
+
+  const raceDb = createMockDb()
+  const raceRegistry = createExternalSystemRegistry({
+    db: {
+      ...raceDb,
+      async updateRow(table, set, where) {
+        raceDb.calls.push(['updateRow', table, { ...set }, { ...where }])
+        return []
+      },
+    },
+    credentialStore,
+    idGenerator: () => 'race_1',
+  })
+  await raceRegistry.upsertExternalSystem({
+    tenantId: 'tenant_1',
+    name: 'race',
+    kind: 'http',
+  })
+  let updateRace = null
+  try {
+    await raceRegistry.upsertExternalSystem({
+      tenantId: 'tenant_1',
+      id: 'race_1',
+      name: 'race',
+      kind: 'http',
+      status: 'active',
+    })
+  } catch (error) {
+    updateRace = error
+  }
+  assert.ok(updateRace instanceof ExternalSystemNotFoundError, 'empty update result is not reported as success')
 
   console.log('✓ external-systems: registry + credential boundary tests passed')
 }
