@@ -98,10 +98,14 @@ Justification (the task spec asked us to pick simpler with a written
 rationale):
 
 - The scheduler runs only on the leader, so one process is enough to
-  dedupe. Follower failover is rare and re-notification on takeover is an
-  acceptable v0 tradeoff (the next 15-minute tick would re-flag the same
-  rows anyway since `sla_breached_at` is set once per breach, not per
-  notification).
+  dedupe. Follower failover and process restarts cause **under**
+  notification, not duplicates: `ApprovalMetricsService.checkSlaBreaches`
+  filters on `sla_breached = FALSE` and flips the flag inside the same
+  `UPDATE … RETURNING`, so a row already flagged in a previous epoch never
+  re-enters the notifier pipeline. Losing the in-memory set on restart
+  means at most a previously-missed dispatch stays missed; we never
+  spam-notify a row twice. Acceptable for v0; the persistent column
+  follow-up below covers the missed-on-restart case.
 - A persistent `breach_notified_at` column would require:
   - a new Kysely migration in `db/migrations/`,
   - bumping `APPROVAL_SCHEMA_BOOTSTRAP_VERSION` in
