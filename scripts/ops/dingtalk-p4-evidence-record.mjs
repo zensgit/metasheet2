@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
 import path from 'node:path'
 
 const VALID_STATUSES = new Set(['pass', 'fail', 'skipped', 'pending'])
@@ -20,6 +21,9 @@ const MANUAL_SOURCE_BY_CHECK_ID = new Map([
   ['unauthorized-user-denied', 'manual-client'],
   ['no-email-user-create-bind', 'manual-admin'],
 ])
+const STATUS_SCRIPT_ENV = 'DINGTALK_P4_EVIDENCE_RECORD_STATUS_SCRIPT'
+const FINALIZE_SCRIPT_ENV = 'DINGTALK_P4_EVIDENCE_RECORD_FINALIZE_SCRIPT'
+const FINAL_CLOSEOUT_SCRIPT_ENV = 'DINGTALK_P4_EVIDENCE_RECORD_FINAL_CLOSEOUT_SCRIPT'
 const SECRET_PATTERNS = [
   {
     name: 'dingtalk_robot_webhook',
@@ -45,6 +49,10 @@ const SECRET_PATTERNS = [
     name: 'public_form_token',
     regex: /\bpublicToken=(?!<redacted>|\$)[A-Za-z0-9._~+/=-]{12,}/i,
   },
+  {
+    name: 'client_secret',
+    regex: /(?:^|[\s"'`&?])(?:client_secret|DINGTALK_CLIENT_SECRET|DINGTALK_STATE_SECRET)=(?!<redacted>|\$|\{)[^\s&"'`<>]{8,}/i,
+  },
 ]
 
 function printHelp() {
@@ -52,7 +60,9 @@ function printHelp() {
 
 Updates one check inside a DingTalk P4 smoke evidence.json file. This is a
 local helper for recording manual remote-smoke proof without hand-editing JSON.
-It does not call DingTalk or staging.
+With --session-dir, it also refreshes smoke-status.json / smoke-status.md /
+smoke-todo.md automatically after a successful write. It does not call
+DingTalk or staging.
 
 Options:
   --session-dir <dir>        Session directory; defaults evidence to <dir>/workspace/evidence.json
@@ -70,6 +80,24 @@ Options:
   --before-record-count <n>  Set evidence.beforeRecordCount
   --after-record-count <n>   Set evidence.afterRecordCount
   --blocked-reason <text>    Set evidence.blockedReason
+  --admin-email-was-blank    Set evidence.adminEvidence.emailWasBlank=true for no-email-user-create-bind
+  --admin-created-local-user-id <id>
+                             Set evidence.adminEvidence.createdLocalUserId
+  --admin-bound-dingtalk-external-id <id>
+                             Set evidence.adminEvidence.boundDingTalkExternalId
+  --admin-account-linked-after-refresh
+                             Set evidence.adminEvidence.accountLinkedAfterRefresh=true
+  --no-refresh-status        Skip automatic smoke-status refresh after write
+  --finalize-when-ready      After refresh, auto-run --finalize when smoke status is ready
+  --closeout-when-ready      After refresh, auto-run final closeout when smoke status is ready
+  --closeout-packet-output-dir <dir>
+                             Packet dir forwarded to final closeout
+  --closeout-docs-output-dir <dir>
+                             Docs dir forwarded to final closeout
+  --closeout-date <yyyymmdd> Date suffix forwarded to final closeout docs
+  --closeout-skip-docs       Forward --skip-docs to final closeout
+  --allow-external-artifact-refs
+                             Forward to auto finalize/final closeout strict compile
   --dry-run                  Validate and print the updated check without writing
   --help                     Show this help
 
@@ -110,6 +138,18 @@ function parseArgs(argv) {
     beforeRecordCount: null,
     afterRecordCount: null,
     blockedReason: '',
+    adminEmailWasBlank: null,
+    adminCreatedLocalUserId: '',
+    adminBoundDingTalkExternalId: '',
+    adminAccountLinkedAfterRefresh: null,
+    noRefreshStatus: false,
+    finalizeWhenReady: false,
+    closeoutWhenReady: false,
+    closeoutPacketOutputDir: '',
+    closeoutDocsOutputDir: '',
+    closeoutDate: '',
+    closeoutSkipDocs: false,
+    allowExternalArtifactRefs: false,
     dryRun: false,
   }
 
@@ -175,6 +215,47 @@ function parseArgs(argv) {
         opts.blockedReason = readRequiredValue(argv, i, arg).trim()
         i += 1
         break
+      case '--admin-email-was-blank':
+        opts.adminEmailWasBlank = true
+        break
+      case '--admin-created-local-user-id':
+        opts.adminCreatedLocalUserId = readRequiredValue(argv, i, arg).trim()
+        i += 1
+        break
+      case '--admin-bound-dingtalk-external-id':
+        opts.adminBoundDingTalkExternalId = readRequiredValue(argv, i, arg).trim()
+        i += 1
+        break
+      case '--admin-account-linked-after-refresh':
+        opts.adminAccountLinkedAfterRefresh = true
+        break
+      case '--no-refresh-status':
+        opts.noRefreshStatus = true
+        break
+      case '--finalize-when-ready':
+        opts.finalizeWhenReady = true
+        break
+      case '--closeout-when-ready':
+        opts.closeoutWhenReady = true
+        break
+      case '--closeout-packet-output-dir':
+        opts.closeoutPacketOutputDir = path.resolve(process.cwd(), readRequiredValue(argv, i, arg))
+        i += 1
+        break
+      case '--closeout-docs-output-dir':
+        opts.closeoutDocsOutputDir = path.resolve(process.cwd(), readRequiredValue(argv, i, arg))
+        i += 1
+        break
+      case '--closeout-date':
+        opts.closeoutDate = readRequiredValue(argv, i, arg).trim()
+        i += 1
+        break
+      case '--closeout-skip-docs':
+        opts.closeoutSkipDocs = true
+        break
+      case '--allow-external-artifact-refs':
+        opts.allowExternalArtifactRefs = true
+        break
       case '--dry-run':
         opts.dryRun = true
         break
@@ -195,12 +276,37 @@ function parseArgs(argv) {
   if (!REQUIRED_CHECK_IDS.has(opts.checkId)) throw new Error(`unknown DingTalk P4 check id: ${opts.checkId}`)
   if (!opts.status) throw new Error('--status is required')
   if (!VALID_STATUSES.has(opts.status)) throw new Error(`--status must be one of: ${Array.from(VALID_STATUSES).join(', ')}`)
+  if (opts.finalizeWhenReady && !opts.sessionDir) {
+    throw new Error('--finalize-when-ready requires --session-dir')
+  }
+  if (opts.finalizeWhenReady && opts.noRefreshStatus) {
+    throw new Error('--finalize-when-ready cannot be combined with --no-refresh-status')
+  }
+  if (opts.finalizeWhenReady && opts.dryRun) {
+    throw new Error('--finalize-when-ready cannot be combined with --dry-run')
+  }
+  if (opts.closeoutWhenReady && !opts.sessionDir) {
+    throw new Error('--closeout-when-ready requires --session-dir')
+  }
+  if (opts.closeoutWhenReady && opts.finalizeWhenReady) {
+    throw new Error('--closeout-when-ready cannot be combined with --finalize-when-ready')
+  }
+  if (opts.closeoutWhenReady && opts.noRefreshStatus) {
+    throw new Error('--closeout-when-ready cannot be combined with --no-refresh-status')
+  }
+  if (opts.closeoutWhenReady && opts.dryRun) {
+    throw new Error('--closeout-when-ready cannot be combined with --dry-run')
+  }
+  if (opts.closeoutDate && !/^\d{8}$/.test(opts.closeoutDate)) {
+    throw new Error('--closeout-date must be formatted as yyyymmdd')
+  }
   return opts
 }
 
 function readNumberValue(value, flag) {
   const parsed = Number(value)
   if (!Number.isFinite(parsed)) throw new Error(`${flag} must be a finite number`)
+  if (!Number.isInteger(parsed) || parsed < 0) throw new Error(`${flag} must be a non-negative integer`)
   return parsed
 }
 
@@ -212,10 +318,17 @@ function redactString(value) {
   return String(value ?? '')
     .replace(/(access_token=)[^&\s)]+/gi, '$1<redacted>')
     .replace(/(publicToken=)[^&\s)]+/gi, '$1<redacted>')
+    .replace(/((?:client_secret|DINGTALK_CLIENT_SECRET|DINGTALK_STATE_SECRET)=)[^&\s)"'`<>]+/gi, '$1<redacted>')
     .replace(/([?&](?:sign|timestamp)=)[^&\s)]+/gi, '$1<redacted>')
     .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]+/gi, 'Bearer <redacted>')
     .replace(/\bSEC[A-Za-z0-9+/=_-]{8,}\b/g, 'SEC<redacted>')
     .replace(/\beyJ[A-Za-z0-9._-]{20,}\b/g, '<jwt:redacted>')
+}
+
+function compactText(value) {
+  const text = redactString(value ?? '').trim()
+  if (!text) return ''
+  return text.length > 500 ? `${text.slice(0, 497)}...` : text
 }
 
 function assertNoSecretText(value, label) {
@@ -240,9 +353,18 @@ function readEvidence(file) {
   }
 }
 
+function readJsonIfExists(file) {
+  if (!existsSync(file) || !statSync(file).isFile()) return null
+  return JSON.parse(readFileSync(file, 'utf8'))
+}
+
 function isDateLike(value) {
   if (!value) return false
   return Number.isFinite(Date.parse(value))
+}
+
+function isNonEmptyString(value) {
+  return typeof value === 'string' && value.trim().length > 0
 }
 
 function normalizeArtifactRef(value) {
@@ -322,6 +444,32 @@ function validateUnauthorizedDeniedPass(opts) {
   }
 }
 
+function hasNoEmailAdminInputs(opts) {
+  return opts.adminEmailWasBlank !== null
+    || isNonEmptyString(opts.adminCreatedLocalUserId)
+    || isNonEmptyString(opts.adminBoundDingTalkExternalId)
+    || opts.adminAccountLinkedAfterRefresh !== null
+}
+
+function validateNoEmailAdminPass(opts) {
+  if (hasNoEmailAdminInputs(opts) && opts.checkId !== 'no-email-user-create-bind') {
+    throw new Error('admin evidence flags can only be used with no-email-user-create-bind')
+  }
+  if (opts.checkId !== 'no-email-user-create-bind' || opts.status !== 'pass') return
+  if (opts.adminEmailWasBlank !== true) {
+    throw new Error('no-email-user-create-bind pass evidence requires --admin-email-was-blank')
+  }
+  if (!isNonEmptyString(opts.adminCreatedLocalUserId)) {
+    throw new Error('no-email-user-create-bind pass evidence requires --admin-created-local-user-id')
+  }
+  if (!isNonEmptyString(opts.adminBoundDingTalkExternalId)) {
+    throw new Error('no-email-user-create-bind pass evidence requires --admin-bound-dingtalk-external-id')
+  }
+  if (opts.adminAccountLinkedAfterRefresh !== true) {
+    throw new Error('no-email-user-create-bind pass evidence requires --admin-account-linked-after-refresh')
+  }
+}
+
 function validateInputs(opts) {
   for (const [label, value] of [
     ['--source', opts.source],
@@ -329,6 +477,8 @@ function validateInputs(opts) {
     ['--summary', opts.summary],
     ['--notes', opts.notes],
     ['--blocked-reason', opts.blockedReason],
+    ['--admin-created-local-user-id', opts.adminCreatedLocalUserId],
+    ['--admin-bound-dingtalk-external-id', opts.adminBoundDingTalkExternalId],
   ]) {
     assertNoSecretText(value, label)
   }
@@ -337,6 +487,7 @@ function validateInputs(opts) {
   }
   validateManualPass(opts)
   validateUnauthorizedDeniedPass(opts)
+  validateNoEmailAdminPass(opts)
 }
 
 function findCheck(evidence, checkId) {
@@ -358,7 +509,188 @@ function buildEvidencePayload(opts, artifactRefs) {
   if (opts.beforeRecordCount !== null) payload.beforeRecordCount = opts.beforeRecordCount
   if (opts.afterRecordCount !== null) payload.afterRecordCount = opts.afterRecordCount
   if (opts.blockedReason) payload.blockedReason = opts.blockedReason
+  if (opts.checkId === 'no-email-user-create-bind' && opts.status === 'pass') {
+    payload.adminEvidence = {
+      emailWasBlank: true,
+      createdLocalUserId: opts.adminCreatedLocalUserId,
+      boundDingTalkExternalId: opts.adminBoundDingTalkExternalId,
+      accountLinkedAfterRefresh: true,
+      temporaryPasswordRedacted: true,
+    }
+  }
   return payload
+}
+
+function mergeEvidencePayload(previousEvidence, payload) {
+  const next = {
+    ...previousEvidence,
+    ...payload,
+  }
+  if (previousEvidence.adminEvidence || payload.adminEvidence) {
+    next.adminEvidence = {
+      ...(previousEvidence.adminEvidence && typeof previousEvidence.adminEvidence === 'object' && !Array.isArray(previousEvidence.adminEvidence)
+        ? previousEvidence.adminEvidence
+        : {}),
+      ...(payload.adminEvidence ?? {}),
+    }
+  }
+  return next
+}
+
+function runNodeTool(script, args) {
+  const resolvedScript = path.resolve(process.cwd(), script)
+  const result = spawnSync(process.execPath, [resolvedScript, ...args], {
+    cwd: process.cwd(),
+    encoding: 'utf8',
+    maxBuffer: 20 * 1024 * 1024,
+    env: process.env,
+  })
+  return {
+    exitCode: result.status ?? 1,
+    stdout: redactString(result.stdout ?? ''),
+    stderr: redactString(result.stderr || result.error?.message || ''),
+  }
+}
+
+function smokeStatusPaths(sessionDir) {
+  return {
+    smokeStatusJson: path.join(sessionDir, 'smoke-status.json'),
+    smokeStatusMd: path.join(sessionDir, 'smoke-status.md'),
+    smokeTodoMd: path.join(sessionDir, 'smoke-todo.md'),
+  }
+}
+
+function sessionSummaryPath(sessionDir) {
+  return path.join(sessionDir, 'session-summary.json')
+}
+
+function statusRefreshCommand(sessionDir) {
+  return [
+    'node scripts/ops/dingtalk-p4-smoke-status.mjs',
+    '--session-dir',
+    relativePath(sessionDir),
+  ].join(' ')
+}
+
+function finalizeCommand(sessionDir, allowExternalArtifactRefs = false) {
+  return [
+    'node scripts/ops/dingtalk-p4-smoke-session.mjs',
+    '--finalize',
+    relativePath(sessionDir),
+    ...(allowExternalArtifactRefs ? ['--allow-external-artifact-refs'] : []),
+  ].join(' ')
+}
+
+function handoffCommand(sessionDir) {
+  return [
+    'node scripts/ops/dingtalk-p4-final-handoff.mjs',
+    '--session-dir',
+    relativePath(sessionDir),
+  ].join(' ')
+}
+
+function finalCloseoutArgs(opts) {
+  return [
+    '--session-dir',
+    opts.sessionDir,
+    ...(opts.closeoutPacketOutputDir ? ['--packet-output-dir', opts.closeoutPacketOutputDir] : []),
+    ...(opts.closeoutDocsOutputDir ? ['--docs-output-dir', opts.closeoutDocsOutputDir] : []),
+    ...(opts.closeoutDate ? ['--date', opts.closeoutDate] : []),
+    ...(opts.closeoutSkipDocs ? ['--skip-docs'] : []),
+    ...(opts.allowExternalArtifactRefs ? ['--allow-external-artifact-refs'] : []),
+  ]
+}
+
+function finalCloseoutCommand(opts) {
+  return [
+    'node scripts/ops/dingtalk-p4-final-closeout.mjs',
+    ...finalCloseoutArgs(opts),
+  ].map((part) => part.startsWith(process.cwd()) ? relativePath(part) : part).join(' ')
+}
+
+function refreshSmokeStatus(sessionDir) {
+  const script = process.env[STATUS_SCRIPT_ENV] || 'scripts/ops/dingtalk-p4-smoke-status.mjs'
+  const result = runNodeTool(script, ['--session-dir', sessionDir])
+  const paths = smokeStatusPaths(sessionDir)
+  return {
+    ...paths,
+    ...result,
+    summary: readJsonIfExists(paths.smokeStatusJson),
+  }
+}
+
+function shouldFinalizeWhenReady(statusSummary) {
+  if (!statusSummary || typeof statusSummary !== 'object') return false
+  return statusSummary.overallStatus === 'finalize_pending'
+    && (statusSummary.remoteSmokeTodos?.remaining ?? 1) === 0
+    && (statusSummary.totals?.gaps ?? 1) === 0
+}
+
+function runFinalizeSession(opts) {
+  const script = process.env[FINALIZE_SCRIPT_ENV] || 'scripts/ops/dingtalk-p4-smoke-session.mjs'
+  const result = runNodeTool(script, [
+    '--finalize',
+    opts.sessionDir,
+    ...(opts.allowExternalArtifactRefs ? ['--allow-external-artifact-refs'] : []),
+  ])
+  const summaryPath = sessionSummaryPath(opts.sessionDir)
+  return {
+    ...result,
+    sessionSummaryJson: summaryPath,
+    summary: readJsonIfExists(summaryPath),
+  }
+}
+
+function runFinalCloseout(opts) {
+  const script = process.env[FINAL_CLOSEOUT_SCRIPT_ENV] || 'scripts/ops/dingtalk-p4-final-closeout.mjs'
+  return runNodeTool(script, finalCloseoutArgs(opts))
+}
+
+function refreshAfterWrite(opts) {
+  if (!opts.sessionDir || opts.noRefreshStatus) return
+
+  const statusRefresh = refreshSmokeStatus(opts.sessionDir)
+  if (statusRefresh.exitCode !== 0) {
+    throw new Error(`evidence updated but smoke status refresh failed; rerun ${statusRefreshCommand(opts.sessionDir)} (${compactText(statusRefresh.stderr || statusRefresh.stdout) || 'unknown error'})`)
+  }
+
+  console.log(`Refreshed ${relativePath(statusRefresh.smokeStatusJson)}`)
+  if (statusRefresh.summary?.overallStatus) {
+    console.log(`Smoke overall status: ${statusRefresh.summary.overallStatus}`)
+  }
+  if (statusRefresh.summary?.remoteSmokePhase) {
+    console.log(`Remote smoke phase: ${statusRefresh.summary.remoteSmokePhase}`)
+  }
+  if (statusRefresh.summary?.remoteSmokeTodos) {
+    const todos = statusRefresh.summary.remoteSmokeTodos
+    console.log(`Smoke TODO progress: ${todos.completed}/${todos.total} complete, ${todos.remaining} remaining`)
+  }
+
+  if (!opts.finalizeWhenReady && !opts.closeoutWhenReady) return
+  if (!shouldFinalizeWhenReady(statusRefresh.summary)) {
+    const action = opts.closeoutWhenReady ? 'closeout' : 'finalize'
+    console.log(`Auto ${action} not attempted; current smoke status is ${statusRefresh.summary?.overallStatus ?? 'unknown'}`)
+    return
+  }
+
+  if (opts.closeoutWhenReady) {
+    const closeout = runFinalCloseout(opts)
+    if (closeout.exitCode !== 0) {
+      throw new Error(`evidence updated and smoke status refreshed, but auto closeout failed; rerun ${finalCloseoutCommand(opts)} (${compactText(closeout.stderr || closeout.stdout) || 'unknown error'})`)
+    }
+    console.log(`Final closeout completed: ${finalCloseoutCommand(opts)}`)
+    return
+  }
+
+  const finalize = runFinalizeSession(opts)
+  if (finalize.exitCode !== 0) {
+    throw new Error(`evidence updated and smoke status refreshed, but auto finalize failed; rerun ${finalizeCommand(opts.sessionDir, opts.allowExternalArtifactRefs)} (${compactText(finalize.stderr || finalize.stdout) || 'unknown error'})`)
+  }
+
+  console.log(`Finalized session in ${relativePath(finalize.sessionSummaryJson)}`)
+  if (finalize.summary?.overallStatus === 'pass' && finalize.summary?.finalStrictStatus === 'pass') {
+    console.log(`Next handoff command: ${handoffCommand(opts.sessionDir)}`)
+  }
 }
 
 function updateEvidence(evidence, opts) {
@@ -370,10 +702,7 @@ function updateEvidence(evidence, opts) {
   const updatedCheck = {
     ...check,
     status: opts.status,
-    evidence: {
-      ...previousEvidence,
-      ...buildEvidencePayload(opts, artifactRefs),
-    },
+    evidence: mergeEvidencePayload(previousEvidence, buildEvidencePayload(opts, artifactRefs)),
   }
   evidence.checks[index] = updatedCheck
   evidence.updatedAt = new Date().toISOString()
@@ -393,6 +722,7 @@ try {
     mkdirSync(path.dirname(opts.evidence), { recursive: true })
     writeFileSync(opts.evidence, `${JSON.stringify(evidence, null, 2)}\n`, 'utf8')
     console.log(`Updated ${updatedCheck.id} in ${relativePath(opts.evidence)}`)
+    refreshAfterWrite(opts)
   }
 } catch (error) {
   console.error(`[dingtalk-p4-evidence-record] ERROR: ${redactString(error instanceof Error ? error.message : String(error))}`)

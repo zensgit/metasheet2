@@ -1,10 +1,17 @@
 #!/usr/bin/env tsx
 import fs from 'fs'
 import path from 'path'
+import { fileURLToPath } from 'url'
 import yaml from 'js-yaml'
 
+const __dirname = path.dirname(fileURLToPath(import.meta.url))
+
 function isAuthWhitelisted(p: string): boolean {
-  return p.startsWith('/api/auth/') || p === '/health' || p.startsWith('/metrics')
+  return p.startsWith('/api/auth/')
+    || p === '/health'
+    || p === '/api/health'
+    || p === '/api/permissions/health'
+    || p.startsWith('/metrics')
 }
 
 function main() {
@@ -14,7 +21,7 @@ function main() {
   const violations: string[] = []
   for (const p of Object.keys(paths)) {
     if (p.startsWith('/api/') && !isAuthWhitelisted(p)) {
-      const methods = Object.keys(paths[p])
+      const methods = Object.keys(paths[p]).filter((m) => !m.startsWith('x-'))
       for (const m of methods) {
         const sec = paths[p][m]?.security
         const hasBearer = Array.isArray(sec) && sec.some((s: any) => 'bearerAuth' in s)
@@ -33,4 +40,3 @@ function main() {
 }
 
 main()
-

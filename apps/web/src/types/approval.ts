@@ -16,6 +16,7 @@ export type ApprovalActionType = 'approve' | 'reject' | 'transfer' | 'revoke' | 
 export type ApprovalStatus = 'draft' | 'pending' | 'approved' | 'rejected' | 'revoked' | 'cancelled'
 export type ApprovalTemplateStatus = 'draft' | 'published' | 'archived'
 export type ApprovalTemplateVisibilityType = 'all' | 'dept' | 'role' | 'user'
+export type FormFieldVisibilityOperator = 'eq' | 'neq' | 'in' | 'isEmpty' | 'notEmpty'
 export type FormFieldType =
   | 'text'
   | 'textarea'
@@ -99,6 +100,13 @@ export interface FormOption {
   value: string
 }
 
+export interface FormFieldVisibilityRule {
+  fieldId: string
+  operator: FormFieldVisibilityOperator
+  value?: unknown
+  values?: unknown[]
+}
+
 export interface FormField {
   id: string
   type: FormFieldType
@@ -108,6 +116,7 @@ export interface FormField {
   defaultValue?: unknown
   options?: FormOption[]
   props?: Record<string, unknown>
+  visibilityRule?: FormFieldVisibilityRule
 }
 
 export interface FormSchema {

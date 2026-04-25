@@ -86,6 +86,7 @@
 - [x] Add a P4 evidence recorder CLI so operators can safely update manual checks without hand-editing `evidence.json`.
 - [x] Add a P4 strict artifact secret scan so finalization catches raw secret-like text artifacts before packet handoff.
 - [x] Add a P4 unauthorized denial evidence contract so pass evidence must prove submit blocking and zero record insert.
+- [x] Harden P4 unauthorized denial record counts so zero-insert proof rejects negative or fractional counters.
 - [x] Add a P4 remote-smoke TODO exporter so status runs generate an executable checklist for remaining evidence.
 - [x] Auto-refresh P4 smoke status and remote TODO reports from the session bootstrap/finalize commands.
 - [x] Add a P4 no-email admin evidence helper so manual-admin proof uses concrete artifact names and structured result fields.
@@ -93,6 +94,11 @@
 - [x] Add a P4 final remote-smoke docs generator so release-ready sessions produce final development and verification notes.
 - [x] Add a P4 manual target readiness gate so authorized, unauthorized, and no-email DingTalk validation targets are recorded before final smoke.
 - [x] Add a P4 local regression gate runner so ops/product verification commands produce JSON/MD evidence before final remote smoke.
+- [x] Harden P4 packet export and publish validation so reused packet directories cannot carry stale unregistered evidence.
+- [x] Harden P4 closeout guidance so generated commands honor configured packet/docs paths and stale closeout docs/summaries are cleared.
+- [x] Harden P4 smoke-session reruns so reused session directories cannot carry stale workspace/compiled artifacts or hardcoded packet next commands.
+- [x] Add a phased remote-smoke execution plan and check-level evidence snapshots to generated smoke status/TODO outputs.
+- [x] Add a stable P4 `remoteSmokePhase` contract across compiled evidence, smoke status, session summaries, release readiness, final docs, and packet metadata.
 - [ ] Remote smoke: create a table and form view.
 - [ ] Remote smoke: bind at least two DingTalk groups to the table.
 - [ ] Remote smoke: set the form to `dingtalk_granted`.
@@ -100,10 +106,13 @@
 - [ ] Remote smoke: verify an authorized user can open and submit.
 - [ ] Remote smoke: verify an unauthorized user cannot submit and no record is inserted.
 - [ ] Remote smoke: verify delivery history records group and person sends.
+- [ ] Remote smoke: verify a no-email DingTalk-synced local user can be created and bound by an administrator.
 
 Remote smoke checklist:
 
 - `docs/dingtalk-remote-smoke-checklist-20260422.md`
+- `docs/development/dingtalk-p4-remaining-todo-20260424.md`
+- `docs/development/dingtalk-p4-current-remaining-development-todo-20260424.md`
 
 ## Suggested Parallel Lanes
 

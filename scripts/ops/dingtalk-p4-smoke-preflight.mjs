@@ -24,8 +24,8 @@ Options:
   --api-base <url>                 Backend API base, default ${DEFAULT_API_BASE}
   --web-base <url>                 Public app base used by DingTalk message links
   --auth-token <token>             Bearer token presence check only
-  --group-a-webhook <url>          DingTalk group A robot webhook
-  --group-b-webhook <url>          DingTalk group B robot webhook
+  --group-a-webhook <url>          DingTalk group A robot webhook; https://oapi.dingtalk.com/robot/send?access_token=...
+  --group-b-webhook <url>          DingTalk group B robot webhook; https://oapi.dingtalk.com/robot/send?access_token=...
   --group-a-secret <secret>        Optional DingTalk group A SEC... secret
   --group-b-secret <secret>        Optional DingTalk group B SEC... secret
   --allowed-user <id>              Local user allowed to fill; repeatable
@@ -36,6 +36,7 @@ Options:
   --no-email-dingtalk-external-id <id>
                                   Synced DingTalk account without local user/email for admin proof
   --require-manual-targets         Fail if the three manual target IDs above are missing
+  --require-person-user            Fail if no person-message local user ID is supplied
   --output-dir <dir>               Output directory, default ${DEFAULT_OUTPUT_ROOT}/<run-id>
   --timeout-ms <ms>                API health timeout, default 10000
   --skip-api                       Skip GET /health
@@ -138,6 +139,7 @@ function parseArgs(argv) {
     unauthorizedUserId: envValue(env, 'DINGTALK_P4_UNAUTHORIZED_USER_ID'),
     noEmailDingTalkExternalId: envValue(env, 'DINGTALK_P4_NO_EMAIL_DINGTALK_EXTERNAL_ID'),
     requireManualTargets: false,
+    requirePersonUser: false,
     outputDir: null,
     timeoutMs: 10_000,
     skipApi: false,
@@ -203,6 +205,9 @@ function parseArgs(argv) {
         break
       case '--require-manual-targets':
         opts.requireManualTargets = true
+        break
+      case '--require-person-user':
+        opts.requirePersonUser = true
         break
       case '--output-dir':
         opts.outputDir = path.resolve(process.cwd(), readRequiredValue(argv, i, arg))
@@ -314,10 +319,13 @@ function validateWebhook(value, label) {
   } catch {
     return `${label} must be a valid URL`
   }
-  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
-    return `${label} must use http or https`
+  if (url.protocol !== 'https:') {
+    return `${label} must use HTTPS`
   }
-  if (!url.searchParams.get('access_token')) {
+  if (url.hostname !== 'oapi.dingtalk.com' || url.pathname !== '/robot/send') {
+    return `${label} must be a DingTalk robot URL from https://oapi.dingtalk.com/robot/send`
+  }
+  if (!url.searchParams.get('access_token')?.trim()) {
     return `${label} must include access_token`
   }
   return ''
@@ -360,11 +368,13 @@ function validateAllowlist(opts, summary) {
     allowedUserCount,
     allowedMemberGroupCount,
   })
-  addCheck(summary, 'person-smoke-input', 'Optional DingTalk person smoke recipients are declared', opts.personUserIds.length > 0 ? 'pass' : 'skipped', {
+  addCheck(summary, 'person-smoke-input', 'DingTalk person smoke recipients are declared', opts.personUserIds.length > 0 ? 'pass' : opts.requirePersonUser ? 'fail' : 'skipped', {
     personUserCount: opts.personUserIds.length,
     notes: opts.personUserIds.length > 0
       ? 'Person delivery can be bootstrapped by the API runner.'
-      : 'Person delivery will remain pending until --person-user is supplied or manual evidence is filled.',
+      : opts.requirePersonUser
+        ? 'Set --person-user or DINGTALK_P4_PERSON_USER_IDS before final release smoke; delivery-history-group-person is required.'
+        : 'Person delivery will remain pending until --person-user is supplied or manual evidence is filled.',
   })
 }
 

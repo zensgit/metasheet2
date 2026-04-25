@@ -31,6 +31,16 @@ components:
               type: string
             message:
               type: string
+    DirectErrorResponse:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            code:
+              type: string
+            message:
+              type: string
     User:
       type: object
       properties:
@@ -431,6 +441,9 @@ components:
         created_at:
           type: string
           format: date-time
+    AttendancePunchEvent:
+      allOf:
+        - $ref: '#/components/schemas/AttendanceEvent'
     AttendanceRecord:
       type: object
       properties:
@@ -2437,6 +2450,30 @@ components:
       required:
         - label
         - value
+    FormFieldVisibilityRule:
+      type: object
+      properties:
+        fieldId:
+          type: string
+          description: Field id that controls the dependent field's visibility.
+        operator:
+          type: string
+          enum:
+            - eq
+            - neq
+            - in
+            - isEmpty
+            - notEmpty
+        value:
+          nullable: true
+          description: Single comparison value for eq/neq operators.
+        values:
+          type: array
+          items: {}
+          description: Candidate values for the in operator.
+      required:
+        - fieldId
+        - operator
     FormField:
       type: object
       properties:
@@ -2469,6 +2506,8 @@ components:
         props:
           type: object
           additionalProperties: true
+        visibilityRule:
+          $ref: '#/components/schemas/FormFieldVisibilityRule'
       required:
         - id
         - type
@@ -2635,29 +2674,227 @@ components:
         actorId:
           type: string
           nullable: true
+        actor_id:
+          type: string
+          nullable: true
+          deprecated: true
         actorName:
           type: string
           nullable: true
+        actor_name:
+          type: string
+          nullable: true
+          deprecated: true
         comment:
           type: string
           nullable: true
         fromStatus:
           type: string
           nullable: true
+        from_status:
+          type: string
+          nullable: true
+          deprecated: true
         toStatus:
           type: string
+        to_status:
+          type: string
+          deprecated: true
         occurredAt:
           type: string
           format: date-time
           nullable: true
+        occurred_at:
+          type: string
+          format: date-time
+          nullable: true
+          deprecated: true
+        version:
+          type: integer
+          nullable: true
+        from_version:
+          type: integer
+          nullable: true
+          deprecated: true
+        to_version:
+          type: integer
+          nullable: true
+          deprecated: true
         metadata:
           type: object
           additionalProperties: true
       required:
         - id
         - action
-        - toStatus
-        - metadata
+    LegacyPendingApprovalInstance:
+      type: object
+      properties:
+        id:
+          type: string
+        status:
+          type: string
+        version:
+          type: integer
+        source_system:
+          type: string
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+      required:
+        - id
+        - status
+        - version
+        - created_at
+        - updated_at
+    ApprovalListResponse:
+      type: object
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/UnifiedApprovalDTO'
+        total:
+          type: integer
+        limit:
+          type: integer
+        offset:
+          type: integer
+      required:
+        - data
+        - total
+        - limit
+        - offset
+    LegacyPendingApprovalListResponse:
+      type: object
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/LegacyPendingApprovalInstance'
+        total:
+          type: integer
+        limit:
+          type: integer
+        offset:
+          type: integer
+        degraded:
+          type: boolean
+      required:
+        - data
+        - total
+        - limit
+        - offset
+    ApprovalHistoryResponse:
+      type: object
+      properties:
+        ok:
+          type: boolean
+          example: true
+        data:
+          type: object
+          properties:
+            items:
+              type: array
+              items:
+                $ref: '#/components/schemas/UnifiedApprovalHistoryDTO'
+            total:
+              type: integer
+            page:
+              type: integer
+            pageSize:
+              type: integer
+          required:
+            - items
+            - total
+            - page
+            - pageSize
+      required:
+        - ok
+        - data
+    ApprovalPendingCountResponse:
+      type: object
+      properties:
+        count:
+          type: integer
+        unreadCount:
+          type: integer
+        degraded:
+          type: boolean
+      required:
+        - count
+        - unreadCount
+    MarkApprovalReadResponse:
+      type: object
+      properties:
+        ok:
+          type: boolean
+        skipped:
+          type: boolean
+        reason:
+          type: string
+      required:
+        - ok
+    MarkAllApprovalsReadResponse:
+      type: object
+      properties:
+        markedCount:
+          type: integer
+      required:
+        - markedCount
+    RemindApprovalData:
+      type: object
+      properties:
+        id:
+          type: string
+        action:
+          type: string
+          enum:
+            - remind
+        remindedAt:
+          type: string
+          format: date-time
+        bridged:
+          type: boolean
+        sourceSystem:
+          type: string
+          nullable: true
+      required:
+        - id
+        - action
+        - remindedAt
+        - bridged
+        - sourceSystem
+    RemindApprovalResponse:
+      type: object
+      properties:
+        ok:
+          type: boolean
+          example: true
+        data:
+          $ref: '#/components/schemas/RemindApprovalData'
+      required:
+        - ok
+        - data
+    ApprovalPlmSyncResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+        synced:
+          type: integer
+        errors:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+      required:
+        - success
+        - synced
+        - errors
     CreateApprovalRequest:
       type: object
       properties:
@@ -2995,6 +3232,12 @@ components:
                 error:
                   code: FILE_NOT_FOUND
                   message: File with ID 'file123' does not exist
+    Conflict:
+      description: Conflict - Request conflicts with current resource state
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
     ServiceUnavailable:
       description: Service unavailable - Temporary server issues
       content:
@@ -3272,23 +3515,29 @@ paths:
       operationId: listApprovals
       tags:
         - Approvals
-      summary: List platform approval instances
-      description: >
-        Returns a paginated list of approval instances. Use query parameters to
-
-        filter by tab: pending (assignee), mine (requesterId), cc
-        (ccRecipientId),
-
-        or completed (status=approved,rejected,revoked).
+      summary: List approval instances
+      description: |
+        Returns a paginated list of approval instances. The live route accepts
+        both page/pageSize and the older limit/offset pagination fallback.
+        Use `tab` for the current inbox lens, plus optional sourceSystem,
+        workflowKey, businessKey, assignee, status, and search filters.
       security:
         - bearerAuth: []
       parameters:
+        - in: query
+          name: sourceSystem
+          schema:
+            type: string
         - in: query
           name: status
           schema:
             type: string
         - in: query
-          name: requesterId
+          name: workflowKey
+          schema:
+            type: string
+        - in: query
+          name: businessKey
           schema:
             type: string
         - in: query
@@ -3296,13 +3545,24 @@ paths:
           schema:
             type: string
         - in: query
-          name: ccRecipientId
+          name: tab
           schema:
             type: string
         - in: query
-          name: templateId
+          name: search
           schema:
             type: string
+        - in: query
+          name: page
+          schema:
+            type: integer
+            minimum: 1
+        - in: query
+          name: pageSize
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
         - in: query
           name: limit
           schema:
@@ -3320,32 +3580,7 @@ paths:
           content:
             application/json:
               schema:
-                type: object
-                properties:
-                  ok:
-                    type: boolean
-                    example: true
-                  data:
-                    type: object
-                    properties:
-                      items:
-                        type: array
-                        items:
-                          $ref: '#/components/schemas/UnifiedApprovalDTO'
-                      total:
-                        type: integer
-                      limit:
-                        type: integer
-                      offset:
-                        type: integer
-                    required:
-                      - items
-                      - total
-                      - limit
-                      - offset
-                required:
-                  - ok
-                  - data
+                $ref: '#/components/schemas/ApprovalListResponse'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '403':
@@ -3380,16 +3615,7 @@ paths:
           content:
             application/json:
               schema:
-                type: object
-                properties:
-                  ok:
-                    type: boolean
-                    example: true
-                  data:
-                    $ref: '#/components/schemas/UnifiedApprovalDTO'
-                required:
-                  - ok
-                  - data
+                $ref: '#/components/schemas/UnifiedApprovalDTO'
         '400':
           $ref: '#/components/responses/ValidationError'
         '401':
@@ -3405,14 +3631,73 @@ paths:
         - Approvals (Legacy)
       deprecated: true
       summary: Get pending approvals for current actor
-      description: >
-        Deprecated. Use GET /api/approvals?assignee={userId}&status=pending
-        instead.
+      description: |
+        Deprecated. Use GET /api/approvals with `tab=pending` instead.
+      parameters:
+        - in: query
+          name: limit
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+        - in: query
+          name: offset
+          schema:
+            type: integer
+            minimum: 0
       security:
         - bearerAuth: []
       responses:
         '200':
           description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyPendingApprovalListResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+  /api/approvals/sync/plm:
+    post:
+      operationId: syncPlmApprovals
+      tags:
+        - Approvals
+      summary: Trigger a PLM approval sync
+      description: |
+        Pulls approval instances from the PLM bridge into the unified approval
+        inbox. Requires approvals:read and a configured PLM adapter.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                status:
+                  type: string
+                productId:
+                  type: string
+                requesterId:
+                  type: string
+                limit:
+                  type: integer
+                  minimum: 1
+                  maximum: 200
+                offset:
+                  type: integer
+                  minimum: 0
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApprovalPlmSyncResponse'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '403':
@@ -3443,16 +3728,7 @@ paths:
           content:
             application/json:
               schema:
-                type: object
-                properties:
-                  ok:
-                    type: boolean
-                    example: true
-                  data:
-                    $ref: '#/components/schemas/UnifiedApprovalDTO'
-                required:
-                  - ok
-                  - data
+                $ref: '#/components/schemas/UnifiedApprovalDTO'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '403':
@@ -3496,16 +3772,7 @@ paths:
           content:
             application/json:
               schema:
-                type: object
-                properties:
-                  ok:
-                    type: boolean
-                    example: true
-                  data:
-                    $ref: '#/components/schemas/UnifiedApprovalDTO'
-                required:
-                  - ok
-                  - data
+                $ref: '#/components/schemas/UnifiedApprovalDTO'
         '400':
           $ref: '#/components/responses/ValidationError'
         '401':
@@ -3752,35 +4019,159 @@ paths:
           content:
             application/json:
               schema:
-                type: object
-                properties:
-                  ok:
-                    type: boolean
-                    example: true
-                  data:
-                    type: object
-                    properties:
-                      items:
-                        type: array
-                        items:
-                          $ref: '#/components/schemas/UnifiedApprovalHistoryDTO'
-                      total:
-                        type: integer
-                      page:
-                        type: integer
-                      pageSize:
-                        type: integer
-                    required:
-                      - items
-                required:
-                  - ok
-                  - data
+                $ref: '#/components/schemas/ApprovalHistoryResponse'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+  /api/approvals/pending-count:
+    get:
+      operationId: getApprovalPendingCount
+      tags:
+        - Approvals
+      summary: Get pending approval badge counts
+      description: |
+        Returns the current actor's active pending assignment count and the
+        unread subset used by the approval center badge.
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: query
+          name: sourceSystem
+          schema:
+            type: string
+            enum:
+              - all
+              - platform
+              - plm
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApprovalPendingCountResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+  /api/approvals/{id}/mark-read:
+    post:
+      operationId: markApprovalRead
+      tags:
+        - Approvals
+      summary: Mark one approval as read
+      description: |
+        Records a read marker for the current actor. For unsynced external
+        approvals the route returns `{ ok: true, skipped: true }`.
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MarkApprovalReadResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+  /api/approvals/mark-all-read:
+    post:
+      operationId: markAllApprovalsRead
+      tags:
+        - Approvals
+      summary: Mark all pending approvals as read
+      description: |
+        Marks every active pending assignment for the current actor as read.
+        `sourceSystem` scopes the operation to the current inbox filter.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                sourceSystem:
+                  type: string
+                  enum:
+                    - all
+                    - platform
+                    - plm
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MarkAllApprovalsReadResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+  /api/approvals/{id}/remind:
+    post:
+      operationId: remindApproval
+      tags:
+        - Approvals
+      summary: Remind pending approvers
+      description: |
+        Records a remind event for a pending approval. The requester or an
+        approver may call it. The route is rate-limited to once per instance
+        per actor per hour and returns 429 with the last remind timestamp when
+        throttled.
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RemindApprovalResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          description: Remind throttled
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
   /api/approvals/metrics/report:
@@ -4049,16 +4440,7 @@ paths:
           content:
             application/json:
               schema:
-                type: object
-                properties:
-                  ok:
-                    type: boolean
-                    example: true
-                  data:
-                    $ref: '#/components/schemas/ApprovalTemplateDetail'
-                required:
-                  - ok
-                  - data
+                $ref: '#/components/schemas/ApprovalTemplateDetail'
         '400':
           $ref: '#/components/responses/ValidationError'
         '401':
@@ -4115,16 +4497,7 @@ paths:
           content:
             application/json:
               schema:
-                type: object
-                properties:
-                  ok:
-                    type: boolean
-                    example: true
-                  data:
-                    $ref: '#/components/schemas/ApprovalTemplateDetail'
-                required:
-                  - ok
-                  - data
+                $ref: '#/components/schemas/ApprovalTemplateDetail'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '403':
@@ -4160,16 +4533,7 @@ paths:
           content:
             application/json:
               schema:
-                type: object
-                properties:
-                  ok:
-                    type: boolean
-                    example: true
-                  data:
-                    $ref: '#/components/schemas/ApprovalTemplateDetail'
-                required:
-                  - ok
-                  - data
+                $ref: '#/components/schemas/ApprovalTemplateDetail'
         '400':
           $ref: '#/components/responses/ValidationError'
         '401':
@@ -4250,16 +4614,7 @@ paths:
           content:
             application/json:
               schema:
-                type: object
-                properties:
-                  ok:
-                    type: boolean
-                    example: true
-                  data:
-                    $ref: '#/components/schemas/ApprovalTemplateVersionDetail'
-                required:
-                  - ok
-                  - data
+                $ref: '#/components/schemas/ApprovalTemplateVersionDetail'
         '400':
           $ref: '#/components/responses/ValidationError'
         '401':
@@ -4296,16 +4651,7 @@ paths:
           content:
             application/json:
               schema:
-                type: object
-                properties:
-                  ok:
-                    type: boolean
-                    example: true
-                  data:
-                    $ref: '#/components/schemas/ApprovalTemplateVersionDetail'
-                required:
-                  - ok
-                  - data
+                $ref: '#/components/schemas/ApprovalTemplateVersionDetail'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '403':
