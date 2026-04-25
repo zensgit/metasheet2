@@ -10,7 +10,7 @@
 import crypto from 'crypto'
 import type { NextFunction, Request, Response } from 'express'
 
-import { getCorrelationId, runWithRequestContext } from '../context/request-context'
+import { enrichRequestContext, getCorrelationId, runWithRequestContext } from '../context/request-context'
 
 const CORRELATION_HEADER = 'x-correlation-id'
 const CORRELATION_PATTERN = /^[A-Za-z0-9_-]{1,128}$/
@@ -38,12 +38,59 @@ export function correlationIdMiddleware(req: Request, res: Response, next: NextF
 
   // NOTE: this middleware intentionally runs before auth so CORS preflights
   // and whitelisted routes still get a correlation id. `userId` / `tenantId`
-  // on the context are populated later by a post-auth enrichment step
-  // (follow-up); attempting to read `req.user` here is always undefined.
+  // are populated later by `correlationContextEnrichmentMiddleware`, after
+  // authentication has attached `req.user`.
   runWithRequestContext({ correlationId }, () => next())
 }
 
 export const CORRELATION_ID_HEADER = 'X-Correlation-ID'
+
+function resolveRequestUserId(req: Request): string | undefined {
+  const candidates = [req.user?.id, req.user?.userId, req.user?.sub]
+  for (const candidate of candidates) {
+    if (typeof candidate === 'string' && candidate.trim().length > 0) {
+      return candidate.trim()
+    }
+    if (typeof candidate === 'number' && Number.isFinite(candidate)) {
+      return String(candidate)
+    }
+  }
+  return undefined
+}
+
+function resolveRequestTenantId(req: Request): string | undefined {
+  const requestWithTenant = req as Request & {
+    tenantId?: unknown
+    tenant?: { id?: unknown } | null
+  }
+  const candidates = [
+    requestWithTenant.tenantId,
+    requestWithTenant.tenant?.id,
+    req.user?.tenantId,
+    req.user?.tenant_id,
+  ]
+  for (const candidate of candidates) {
+    if (typeof candidate === 'string' && candidate.trim().length > 0) {
+      return candidate.trim()
+    }
+    if (typeof candidate === 'number' && Number.isFinite(candidate)) {
+      return String(candidate)
+    }
+  }
+  return undefined
+}
+
+export function correlationContextEnrichmentMiddleware(
+  req: Request,
+  _res: Response,
+  next: NextFunction,
+): void {
+  enrichRequestContext({
+    userId: resolveRequestUserId(req),
+    tenantId: resolveRequestTenantId(req),
+  })
+  next()
+}
 
 export type CorrelationErrorLogger = {
   error(message: string, error: Error): void

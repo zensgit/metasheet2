@@ -71,7 +71,11 @@ import { startMultitableAttachmentCleanup } from './multitable/attachment-orphan
 import { AutomationService, setAutomationServiceInstance } from './multitable/automation-service'
 import { tenantContext } from './db/sharding/tenant-context'
 import { attendanceAuditMiddleware, attendanceSecurityMiddleware } from './middleware/attendance-production'
-import { correlationErrorHandler, correlationIdMiddleware } from './middleware/correlation'
+import {
+  correlationContextEnrichmentMiddleware,
+  correlationErrorHandler,
+  correlationIdMiddleware,
+} from './middleware/correlation'
 import { approvalsRouter } from './routes/approvals'
 import { authRouter } from './routes/auth'
 import { auditLogsRouter } from './routes/audit-logs'
@@ -882,6 +886,10 @@ export class MetaSheetServer {
       if (req.path.startsWith('/api/')) return jwtAuthMiddleware(req, res, next)
       return next()
     })
+
+    // Post-auth enrichment: correlation ALS starts before auth so preflights
+    // are covered; once auth runs, attach user/tenant for downstream logs.
+    this.app.use(correlationContextEnrichmentMiddleware)
 
     this.app.use((req: Request, _res: Response, next: NextFunction) => {
       const tenantId = typeof req.user?.tenantId === 'string' && req.user.tenantId.trim().length > 0
