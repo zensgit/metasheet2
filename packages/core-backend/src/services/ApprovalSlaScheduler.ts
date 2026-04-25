@@ -3,21 +3,24 @@
  *
  * Runs a periodic (default 15 min) scan that flips `sla_breached = TRUE`
  * on approval_metrics rows whose `started_at + sla_hours` have elapsed.
- * Single-process interval with a one-run guard — multi-instance fleets
- * should either disable the scheduler on all but one pod (env
- * APPROVAL_SLA_SCHEDULER_DISABLED=1) or wrap this in leader election at
- * a future point.
+ * Single-process interval with a one-run guard. Multi-instance fleets can
+ * opt into a Redis leader lock via ENABLE_APPROVAL_SLA_LEADER_LOCK=true.
  */
 
+import { randomBytes } from 'crypto'
 import { Logger } from '../core/logger'
+import { getRedisClient } from '../db/redis'
+import { RedisLeaderLock, type RedisLeaderLockClient } from '../multitable/redis-leader-lock'
 import { getApprovalMetricsService, type ApprovalMetricsService } from './ApprovalMetricsService'
 
 const DEFAULT_INTERVAL_MS = 15 * 60 * 1000
 const MIN_INTERVAL_MS = 5000
+const DEFAULT_LOCK_TTL_MS = 30_000
 
 export interface ApprovalSlaSchedulerOptions {
   metrics?: ApprovalMetricsService
   intervalMs?: number
+  leaderOptions?: ApprovalSlaSchedulerLeaderOptions | null
   /**
    * Optional hook invoked once per breach cycle with the newly-breached
    * instance ids. Main caller wires it to approval audit + notifications.
@@ -26,36 +29,83 @@ export interface ApprovalSlaSchedulerOptions {
   logger?: Logger
 }
 
+export interface ApprovalSlaSchedulerLeaderOptions {
+  leaderLock: RedisLeaderLock
+  lockKey?: string
+  ownerId: string
+  ttlMs?: number
+  renewIntervalMs?: number
+}
+
 export class ApprovalSlaScheduler {
   private readonly logger: Logger
   private readonly metrics: ApprovalMetricsService
   private readonly intervalMs: number
+  private readonly leaderOptions: ApprovalSlaSchedulerLeaderOptions | null
+  private readonly lockKey: string
+  private readonly ttlMs: number
+  private readonly renewIntervalMs: number
   private readonly onBreach: ApprovalSlaSchedulerOptions['onBreach']
   private timer: NodeJS.Timeout | null = null
+  private renewalTimer: NodeJS.Timeout | null = null
   private running = false
+  private started = false
+  private isLeader = false
+  public readonly ready: Promise<void>
 
   constructor(options: ApprovalSlaSchedulerOptions = {}) {
     this.metrics = options.metrics ?? getApprovalMetricsService()
     this.intervalMs = Math.max(MIN_INTERVAL_MS, options.intervalMs ?? DEFAULT_INTERVAL_MS)
+    this.leaderOptions = options.leaderOptions ?? null
+    this.lockKey = this.leaderOptions?.lockKey ?? 'approval-sla-scheduler:leader'
+    this.ttlMs = this.leaderOptions?.ttlMs ?? DEFAULT_LOCK_TTL_MS
+    this.renewIntervalMs = this.leaderOptions?.renewIntervalMs ?? Math.max(1_000, Math.floor(this.ttlMs / 3))
     this.onBreach = options.onBreach
     this.logger = options.logger ?? new Logger('ApprovalSlaScheduler')
+    if (this.leaderOptions) {
+      this.ready = this.attemptLeadership().catch((error) => {
+        this.isLeader = false
+        this.logger.warn(`SLA leader-lock acquisition failed: ${error instanceof Error ? error.message : String(error)}`)
+      })
+    } else {
+      this.isLeader = true
+      this.ready = Promise.resolve()
+    }
   }
 
   start(): void {
-    if (this.timer) return
-    this.logger.info(`SLA scheduler starting with interval ${this.intervalMs}ms`)
-    this.timer = setInterval(() => { void this.tick() }, this.intervalMs)
-    if (typeof this.timer.unref === 'function') this.timer.unref()
+    if (this.started) return
+    this.started = true
+    this.ready.then(() => {
+      if (!this.started || !this.isLeader || this.timer) return
+      this.logger.info(`SLA scheduler starting with interval ${this.intervalMs}ms`)
+      this.timer = setInterval(() => { void this.tick() }, this.intervalMs)
+      if (typeof this.timer.unref === 'function') this.timer.unref()
+    }).catch((error) => {
+      this.logger.warn(`SLA scheduler start skipped after leader-lock error: ${error instanceof Error ? error.message : String(error)}`)
+    })
   }
 
   stop(): void {
-    if (!this.timer) return
-    clearInterval(this.timer)
-    this.timer = null
+    this.started = false
+    if (this.timer) {
+      clearInterval(this.timer)
+      this.timer = null
+    }
+    if (this.renewalTimer) {
+      clearInterval(this.renewalTimer)
+      this.renewalTimer = null
+    }
+    if (this.leaderOptions && this.isLeader) {
+      const { leaderLock, ownerId } = this.leaderOptions
+      leaderLock.release(this.lockKey, ownerId).catch(() => {})
+      this.isLeader = false
+    }
     this.logger.info('SLA scheduler stopped')
   }
 
   async tick(now: Date = new Date()): Promise<string[]> {
+    if (!this.isLeader) return []
     if (this.running) return []
     this.running = true
     try {
@@ -78,6 +128,55 @@ export class ApprovalSlaScheduler {
       this.running = false
     }
   }
+
+  get leader(): boolean {
+    return this.isLeader
+  }
+
+  private async attemptLeadership(): Promise<void> {
+    if (!this.leaderOptions) return
+    const { leaderLock, ownerId } = this.leaderOptions
+    const won = await leaderLock.acquire(this.lockKey, ownerId, this.ttlMs)
+    this.isLeader = won
+    if (won) {
+      this.logger.info(`Acquired SLA scheduler leader lock ${this.lockKey} (owner=${ownerId}, ttl=${this.ttlMs}ms)`)
+      this.startRenewalLoop()
+    } else {
+      this.logger.info(`Did not acquire SLA scheduler leader lock ${this.lockKey}; operating as non-leader (owner=${ownerId})`)
+    }
+  }
+
+  private startRenewalLoop(): void {
+    if (!this.leaderOptions) return
+    if (this.renewalTimer) clearInterval(this.renewalTimer)
+    const { leaderLock, ownerId } = this.leaderOptions
+    this.renewalTimer = setInterval(() => {
+      leaderLock.renew(this.lockKey, ownerId, this.ttlMs).then(
+        (ok) => {
+          if (!ok) this.relinquishLeadership('renewal rejected')
+        },
+        (error) => {
+          this.logger.warn(`SLA leader renewal error for ${this.lockKey}: ${error instanceof Error ? error.message : String(error)}`)
+          this.relinquishLeadership('renewal error')
+        },
+      )
+    }, this.renewIntervalMs)
+    if (typeof this.renewalTimer.unref === 'function') this.renewalTimer.unref()
+  }
+
+  private relinquishLeadership(reason: string): void {
+    if (!this.isLeader) return
+    this.logger.warn(`Relinquishing SLA scheduler leadership (${reason})`)
+    this.isLeader = false
+    if (this.timer) {
+      clearInterval(this.timer)
+      this.timer = null
+    }
+    if (this.renewalTimer) {
+      clearInterval(this.renewalTimer)
+      this.renewalTimer = null
+    }
+  }
 }
 
 let sharedScheduler: ApprovalSlaScheduler | null = null
@@ -94,5 +193,19 @@ export function stopApprovalSlaScheduler(): void {
   if (sharedScheduler) {
     sharedScheduler.stop()
     sharedScheduler = null
+  }
+}
+
+export async function resolveApprovalSlaSchedulerLeaderOptions(): Promise<ApprovalSlaSchedulerLeaderOptions | null> {
+  if (process.env.ENABLE_APPROVAL_SLA_LEADER_LOCK !== 'true') return null
+  const redis = await getRedisClient()
+  if (!redis) return null
+  const ttlMs = Number(process.env.APPROVAL_SLA_LEADER_LOCK_TTL_MS) > 0
+    ? Number(process.env.APPROVAL_SLA_LEADER_LOCK_TTL_MS)
+    : DEFAULT_LOCK_TTL_MS
+  return {
+    leaderLock: new RedisLeaderLock({ client: redis as unknown as RedisLeaderLockClient }),
+    ownerId: `approval-sla:${process.pid}:${randomBytes(4).toString('hex')}`,
+    ttlMs,
   }
 }
