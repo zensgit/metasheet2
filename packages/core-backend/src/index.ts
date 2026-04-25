@@ -81,7 +81,11 @@ import { authRouter } from './routes/auth'
 import { auditLogsRouter } from './routes/audit-logs'
 import { approvalHistoryRouter } from './routes/approval-history'
 import { approvalMetricsRouter } from './routes/approval-metrics'
-import { startApprovalSlaScheduler, stopApprovalSlaScheduler } from './services/ApprovalSlaScheduler'
+import {
+  resolveApprovalSlaSchedulerLeaderOptions,
+  startApprovalSlaScheduler,
+  stopApprovalSlaScheduler,
+} from './services/ApprovalSlaScheduler'
 import { rolesRouter } from './routes/roles'
 import { snapshotsRouter } from './routes/snapshots'
 import changeManagementRouter from './routes/change-management'
@@ -1899,7 +1903,8 @@ export class MetaSheetServer {
     }
 
     try {
-      startApprovalSlaScheduler()
+      const leaderOptions = await resolveApprovalSlaSchedulerLeaderOptions()
+      startApprovalSlaScheduler({ leaderOptions })
       this.logger.info('Approval SLA scheduler initialized')
     } catch (e) {
       this.logger.error('Approval SLA scheduler initialization failed; continuing in degraded mode', e as Error)
