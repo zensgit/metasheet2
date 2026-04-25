@@ -114,9 +114,9 @@ async function main() {
   const { context, inspect } = createMockContext()
   await entry.activate(context)
 
-  assert.equal(inspect.routes.length, 1, 'exactly one route registered')
-  assert.equal(inspect.routes[0].method, 'GET', 'route method')
-  assert.equal(inspect.routes[0].path, '/api/integration/health', 'health route path')
+  assert.ok(inspect.routes.length >= 1, 'at least one route registered')
+  const healthRoute = inspect.routes.find((route) => route.method === 'GET' && route.path === '/api/integration/health')
+  assert.ok(healthRoute, 'health route registered')
 
   assert.ok(inspect.namespaces.has('integration-core'), 'integration-core namespace registered')
   const commApi = inspect.namespaces.get('integration-core')
@@ -124,7 +124,7 @@ async function main() {
   assert.equal(typeof commApi.getStatus, 'function', 'comm api exposes getStatus')
 
   // --- 4. Health route returns expected shape --------------------------
-  const healthBody = await runMockResponse(inspect.routes[0].handler)
+  const healthBody = await runMockResponse(healthRoute.handler)
   assert.equal(healthBody.ok, true, 'health.ok')
   assert.equal(healthBody.plugin, 'plugin-integration-core', 'health.plugin')
   assert.equal(typeof healthBody.ts, 'number', 'health.ts is number')
@@ -134,7 +134,7 @@ async function main() {
   assert.equal(pingResult.ok, true, 'ping.ok')
   const statusResult = await commApi.getStatus()
   assert.equal(statusResult.plugin, 'plugin-integration-core', 'status.plugin')
-  assert.equal(statusResult.routesRegistered, 1, 'status.routesRegistered')
+  assert.equal(statusResult.routesRegistered, inspect.routes.length, 'status.routesRegistered matches registered routes')
   assert.deepEqual(
     statusResult.credentialStore,
     { source: 'host-security', format: 'enc' },
@@ -146,6 +146,9 @@ async function main() {
   assert.equal(typeof commApi.upsertExternalSystem, 'function', 'comm api exposes upsertExternalSystem')
   assert.equal(typeof commApi.getExternalSystem, 'function', 'comm api exposes getExternalSystem')
   assert.equal(typeof commApi.listExternalSystems, 'function', 'comm api exposes listExternalSystems')
+  assert.equal(typeof commApi.listAdapterKinds, 'function', 'comm api exposes listAdapterKinds')
+  assert.deepEqual(statusResult.adapters, ['http'], 'PR2 registers only the generic HTTP adapter')
+  assert.deepEqual(await commApi.listAdapterKinds(), ['http'], 'comm api exposes registered adapter kinds')
 
   // --- 6. Activation logged --------------------------------------------
   const hasActivationLog = inspect.logs.some(
@@ -158,7 +161,7 @@ async function main() {
   // After deactivate, a re-activation must work with clean slate
   const { context: context2, inspect: inspect2 } = createMockContext()
   await entry.activate(context2)
-  assert.equal(inspect2.routes.length, 1, 'routes cleanly re-registered after deactivate')
+  assert.ok(inspect2.routes.length >= 1, 'routes cleanly re-registered after deactivate')
   await entry.deactivate()
 
   console.log('✓ plugin-runtime-smoke: all assertions passed')

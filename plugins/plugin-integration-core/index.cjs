@@ -19,11 +19,14 @@ const COMMUNICATION_NAMESPACE = 'integration-core'
 const { createCredentialStore } = require('./lib/credential-store.cjs')
 const { createDb } = require('./lib/db.cjs')
 const { createExternalSystemRegistry } = require('./lib/external-systems.cjs')
+const { createAdapterRegistry } = require('./lib/contracts.cjs')
+const { createHttpAdapterFactory } = require('./lib/adapters/http-adapter.cjs')
 
 const registeredRoutes = []
 let activeContext = null
 let credentialStore = null
 let externalSystemRegistry = null
+let adapterRegistry = null
 
 function buildHealthPayload() {
   return {
@@ -50,6 +53,7 @@ function buildCommunicationApi() {
           ? { source: credentialStore.source, format: credentialStore.format }
           : null,
         externalSystems: Boolean(externalSystemRegistry),
+        adapters: adapterRegistry ? adapterRegistry.listAdapterKinds() : [],
       }
     },
     async upsertExternalSystem(input) {
@@ -63,6 +67,10 @@ function buildCommunicationApi() {
     async listExternalSystems(input) {
       if (!externalSystemRegistry) throw new Error('external system registry is not initialized')
       return externalSystemRegistry.listExternalSystems(input)
+    },
+    async listAdapterKinds() {
+      if (!adapterRegistry) throw new Error('adapter registry is not initialized')
+      return adapterRegistry.listAdapterKinds()
     },
   }
 }
@@ -83,6 +91,8 @@ module.exports = {
       db,
       credentialStore,
     })
+    adapterRegistry = createAdapterRegistry({ logger })
+      .registerAdapter('http', createHttpAdapterFactory())
 
     // --- HTTP routes ------------------------------------------------------
     context.api.http.addRoute('GET', '/api/integration/health', async (_req, res) => {
@@ -105,6 +115,7 @@ module.exports = {
     registeredRoutes.length = 0
     credentialStore = null
     externalSystemRegistry = null
+    adapterRegistry = null
     activeContext = null
     logger.info(`[${PLUGIN_ID}] deactivated`)
   },
