@@ -227,6 +227,12 @@ export const appRoutes: RouteRecordRaw[] = [
     meta: { title: 'Template Detail', titleZh: '模板详情', requiresAuth: true }
   },
   {
+    path: '/approvals/metrics',
+    name: 'approval-metrics',
+    component: () => import('../views/approval/ApprovalMetricsView.vue'),
+    meta: { title: 'Approval Metrics', titleZh: '审批耗时与 SLA', requiresAuth: true, requiresAdmin: true }
+  },
+  {
     path: '/admin/plugins',
     name: 'plugin-manager',
     component: PluginManagerView,

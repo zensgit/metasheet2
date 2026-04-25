@@ -170,6 +170,66 @@
               </el-button>
             </template>
           </div>
+          <!--
+            Wave 2 WP5 slice 1 — 模板 SLA. Positive integer hours or null
+            (留空). Visible to all; inline editable by admins.
+          -->
+          <div class="template-detail__sla">
+            <span class="template-detail__category-label">SLA (小时):</span>
+            <template v-if="!editingSla">
+              <el-tag
+                v-if="template.slaHours !== null && template.slaHours !== undefined"
+                size="small"
+                type="warning"
+                effect="plain"
+                data-testid="template-detail-sla-tag"
+              >
+                {{ template.slaHours }}
+              </el-tag>
+              <span v-else class="template-detail__category-empty" data-testid="template-detail-sla-empty">
+                未设置
+              </span>
+              <el-button
+                v-if="canManageTemplates"
+                text
+                size="small"
+                data-testid="template-detail-sla-edit-button"
+                style="margin-left: 8px"
+                @click="beginEditSla"
+              >
+                编辑
+              </el-button>
+            </template>
+            <template v-else>
+              <el-input-number
+                v-model="slaDraft"
+                :min="1"
+                :max="8760"
+                size="small"
+                style="width: 160px; margin-right: 8px"
+                data-testid="template-detail-sla-input"
+                placeholder="留空清除"
+                :controls="false"
+              />
+              <el-button
+                type="primary"
+                size="small"
+                :loading="slaSaving"
+                data-testid="template-detail-sla-save-button"
+                @click="saveSla"
+              >
+                保存
+              </el-button>
+              <el-button
+                size="small"
+                :disabled="slaSaving"
+                data-testid="template-detail-sla-cancel-button"
+                @click="cancelEditSla"
+              >
+                取消
+              </el-button>
+            </template>
+          </div>
           <div class="template-detail__meta">
             <span>模板 Key: {{ template.key }}</span>
             <span>当前版本: {{ template.activeVersionId ?? '无' }}</span>
@@ -287,7 +347,7 @@ import type {
 } from '../../types/approval'
 import { useApprovalTemplateStore } from '../../approvals/templateStore'
 import { useApprovalPermissions } from '../../approvals/permissions'
-import { updateTemplateCategory, updateTemplateVisibilityScope } from '../../approvals/api'
+import { updateTemplateCategory, updateTemplateSlaHours, updateTemplateVisibilityScope } from '../../approvals/api'
 
 const route = useRoute()
 const router = useRouter()
@@ -304,6 +364,47 @@ const editingVisibility = ref(false)
 const visibilityTypeDraft = ref<ApprovalTemplateVisibilityType>('all')
 const visibilityIdsDraft = ref('')
 const visibilitySaving = ref(false)
+// Wave 2 WP5 slice 1 — inline SLA editor state.
+const editingSla = ref(false)
+const slaDraft = ref<number | null>(null)
+const slaSaving = ref(false)
+
+function beginEditSla() {
+  if (!template.value) return
+  slaDraft.value = template.value.slaHours ?? null
+  editingSla.value = true
+}
+
+function cancelEditSla() {
+  editingSla.value = false
+  slaDraft.value = null
+}
+
+async function saveSla() {
+  if (!template.value || slaSaving.value) return
+  const raw = slaDraft.value
+  const nextSla = raw === null || raw === undefined || Number.isNaN(Number(raw)) ? null : Number(raw)
+  if (nextSla !== null && (!Number.isInteger(nextSla) || nextSla <= 0)) {
+    ElMessage.error('SLA 必须是正整数小时')
+    return
+  }
+  const current = template.value.slaHours ?? null
+  if (nextSla === current) {
+    editingSla.value = false
+    return
+  }
+  slaSaving.value = true
+  try {
+    const updated = await updateTemplateSlaHours(template.value.id, nextSla)
+    store.activeTemplate = updated
+    editingSla.value = false
+    ElMessage.success(nextSla === null ? '已清除 SLA' : `已更新 SLA 为 ${nextSla} 小时`)
+  } catch (e: any) {
+    ElMessage.error(e?.message ?? '更新 SLA 失败')
+  } finally {
+    slaSaving.value = false
+  }
+}
 
 function beginEditCategory() {
   if (!template.value) return

@@ -133,6 +133,13 @@ function resolveApprovalActorDepartmentIds(req: Request): string[] {
   return Array.from(new Set([...fromScalars, ...fromArrays]))
 }
 
+function resolveApprovalTenantId(req: Request): string | undefined {
+  const candidate = req.user?.tenantId
+  if (typeof candidate !== 'string') return undefined
+  const normalized = candidate.trim()
+  return normalized.length > 0 ? normalized : undefined
+}
+
 function resolveApprovalTemplateVisibilityActor(req: Request): ApprovalTemplateVisibilityActor | undefined {
   const userId = resolveApprovalActorId(req)
   if (!userId) return undefined
@@ -333,6 +340,7 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
         description: req.body?.description,
         category: req.body?.category,
         visibilityScope: req.body?.visibilityScope,
+        slaHours: req.body?.slaHours,
         formSchema: req.body?.formSchema,
         approvalGraph: req.body?.approvalGraph,
       })
@@ -383,6 +391,7 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
         // values. `null` is a legitimate "clear" signal.
         ...('category' in (req.body ?? {}) ? { category: req.body.category } : {}),
         ...('visibilityScope' in (req.body ?? {}) ? { visibilityScope: req.body.visibilityScope } : {}),
+        ...('slaHours' in (req.body ?? {}) ? { slaHours: req.body.slaHours } : {}),
         formSchema: req.body?.formSchema,
         approvalGraph: req.body?.approvalGraph,
       })
@@ -620,6 +629,7 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
           userId,
           userName: resolveApprovalActorName(req, userId),
           email: typeof req.user?.email === 'string' ? req.user.email : undefined,
+          tenantId: resolveApprovalTenantId(req),
           department: typeof req.user?.department === 'string' ? req.user.department : undefined,
           departmentIds: resolveApprovalActorDepartmentIds(req),
           roles: resolveApprovalActorRoles(req),
