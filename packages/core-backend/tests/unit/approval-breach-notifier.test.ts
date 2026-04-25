@@ -19,9 +19,11 @@ function ctx(id: string, overrides: Partial<ApprovalBreachContext> = {}): Approv
 
 function makeMetrics(contexts: ApprovalBreachContext[] = []) {
   const listBreachContextByIds = vi.fn().mockResolvedValue(contexts)
+  const markBreachNotified = vi.fn().mockResolvedValue(undefined)
   return {
-    metrics: { listBreachContextByIds } as any,
+    metrics: { listBreachContextByIds, markBreachNotified } as any,
     listBreachContextByIds,
+    markBreachNotified,
   }
 }
 
@@ -113,44 +115,109 @@ describe('ApprovalBreachNotifier', () => {
     expect(result.perChannel[0].errors).toEqual(['webhook not configured'])
   })
 
-  it('never notifies the same instance twice (in-memory dedupe)', async () => {
+  it('persists dedupe via markBreachNotified after at-least-one-channel success', async () => {
     const channel: BreachNotificationChannel = {
       name: 'dingtalk',
       send: vi.fn().mockResolvedValue({ ok: true }),
     }
-    const { metrics, listBreachContextByIds } = makeMetrics([ctx('inst-1'), ctx('inst-2')])
-    const notifier = new ApprovalBreachNotifier({ channels: [channel], metrics })
+    const { metrics, markBreachNotified } = makeMetrics([ctx('inst-1'), ctx('inst-2')])
+    const notifier = new ApprovalBreachNotifier({
+      channels: [channel],
+      metrics,
+      now: () => new Date('2026-04-26T10:00:00Z'),
+    })
 
-    const first = await notifier.notifyBreaches(['inst-1', 'inst-2'])
-    expect(first.notified).toBe(2)
+    const result = await notifier.notifyBreaches(['inst-1', 'inst-2'])
+    expect(result.notified).toBe(2)
     expect(channel.send).toHaveBeenCalledTimes(2)
-
-    listBreachContextByIds.mockResolvedValueOnce([ctx('inst-3')])
-    const second = await notifier.notifyBreaches(['inst-1', 'inst-2', 'inst-3'])
-    expect(second.requested).toBe(3)
-    expect(second.skipped).toBe(2)
-    expect(second.notified).toBe(1)
-    expect(channel.send).toHaveBeenCalledTimes(3)
+    expect(markBreachNotified).toHaveBeenCalledTimes(1)
+    const [ids, when] = markBreachNotified.mock.calls[0]
+    expect(ids).toEqual(['inst-1', 'inst-2'])
+    expect(when.toISOString()).toBe('2026-04-26T10:00:00.000Z')
   })
 
-  it('does not record an instance as notified if every channel fails', async () => {
+  it('does not call markBreachNotified when every channel fails for an instance', async () => {
+    const channel: BreachNotificationChannel = {
+      name: 'dingtalk',
+      send: vi.fn().mockResolvedValue({ ok: false, error: 'webhook 5xx' }),
+    }
+    const { metrics, markBreachNotified } = makeMetrics([ctx('inst-1')])
+    const notifier = new ApprovalBreachNotifier({ channels: [channel], metrics })
+
+    const result = await notifier.notifyBreaches(['inst-1'])
+    expect(result.notified).toBe(0)
+    expect(result.failed).toBe(1)
+    expect(markBreachNotified).not.toHaveBeenCalled()
+  })
+
+  it('marks only the instances whose channels reported at least one success', async () => {
     const channel: BreachNotificationChannel = {
       name: 'dingtalk',
       send: vi.fn()
         .mockResolvedValueOnce({ ok: false, error: 'fail-once' })
         .mockResolvedValueOnce({ ok: true }),
     }
-    const { metrics, listBreachContextByIds } = makeMetrics([ctx('inst-1')])
+    const { metrics, markBreachNotified } = makeMetrics([ctx('inst-1'), ctx('inst-2')])
     const notifier = new ApprovalBreachNotifier({ channels: [channel], metrics })
 
-    const first = await notifier.notifyBreaches(['inst-1'])
-    expect(first.notified).toBe(0)
-    expect(first.failed).toBe(1)
+    const result = await notifier.notifyBreaches(['inst-1', 'inst-2'])
+    expect(result.notified).toBe(1)
+    expect(result.sent).toBe(1)
+    expect(result.failed).toBe(1)
+    expect(markBreachNotified).toHaveBeenCalledTimes(1)
+    expect(markBreachNotified.mock.calls[0][0]).toEqual(['inst-2'])
+  })
 
-    listBreachContextByIds.mockResolvedValueOnce([ctx('inst-1')])
-    const second = await notifier.notifyBreaches(['inst-1'])
-    expect(second.notified).toBe(1)
-    expect(second.sent).toBe(1)
+  it('mixed-channel partial success still marks the instance as notified', async () => {
+    const goodSend = vi.fn().mockResolvedValue({ ok: true })
+    const badSend = vi.fn().mockResolvedValue({ ok: false, error: 'down' })
+    const { metrics, markBreachNotified } = makeMetrics([ctx('inst-1')])
+    const notifier = new ApprovalBreachNotifier({
+      channels: [
+        { name: 'dingtalk', send: badSend },
+        { name: 'email', send: goodSend },
+      ],
+      metrics,
+    })
+
+    const result = await notifier.notifyBreaches(['inst-1'])
+    expect(result.notified).toBe(1)
+    expect(result.sent).toBe(1)
+    expect(result.failed).toBe(1)
+    expect(markBreachNotified).toHaveBeenCalledTimes(1)
+    expect(markBreachNotified.mock.calls[0][0]).toEqual(['inst-1'])
+  })
+
+  it('does not throw when listBreachContextByIds rejects, and skips marking', async () => {
+    const channel: BreachNotificationChannel = {
+      name: 'dingtalk',
+      send: vi.fn().mockResolvedValue({ ok: true }),
+    }
+    const { metrics, markBreachNotified } = makeMetrics()
+    metrics.listBreachContextByIds = vi.fn().mockRejectedValue(new Error('db down'))
+    const notifier = new ApprovalBreachNotifier({ channels: [channel], metrics })
+
+    const result = await notifier.notifyBreaches(['inst-1', 'inst-2'])
+    expect(result.requested).toBe(2)
+    expect(result.skipped).toBe(2)
+    expect(result.notified).toBe(0)
+    expect(channel.send).not.toHaveBeenCalled()
+    expect(markBreachNotified).not.toHaveBeenCalled()
+  })
+
+  it('swallows markBreachNotified failures so the notifier still resolves cleanly', async () => {
+    const channel: BreachNotificationChannel = {
+      name: 'dingtalk',
+      send: vi.fn().mockResolvedValue({ ok: true }),
+    }
+    const { metrics, markBreachNotified } = makeMetrics([ctx('inst-1')])
+    markBreachNotified.mockRejectedValueOnce(new Error('db blip'))
+    const notifier = new ApprovalBreachNotifier({ channels: [channel], metrics })
+
+    const result = await notifier.notifyBreaches(['inst-1'])
+    expect(result.notified).toBe(1)
+    expect(result.sent).toBe(1)
+    expect(markBreachNotified).toHaveBeenCalledTimes(1)
   })
 
   it('returns a graceful empty result when no channels are configured', async () => {

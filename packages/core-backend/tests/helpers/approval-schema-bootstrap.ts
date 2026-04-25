@@ -1,7 +1,7 @@
 import { poolManager } from '../../src/integration/db/connection-pool'
 
 const APPROVAL_SCHEMA_BOOTSTRAP_KEY = 'approval-schema-bootstrap'
-const APPROVAL_SCHEMA_BOOTSTRAP_VERSION = '20260425-wp5-sla'
+const APPROVAL_SCHEMA_BOOTSTRAP_VERSION = '20260426-wp5-breach-notified-at'
 
 /**
  * Ensures the approval schema (tables, constraints, indexes, sequences) is
@@ -338,6 +338,7 @@ export async function ensureApprovalSchemaReady(): Promise<void> {
         sla_hours INTEGER,
         sla_breached BOOLEAN NOT NULL DEFAULT FALSE,
         sla_breached_at TIMESTAMPTZ,
+        breach_notified_at TIMESTAMPTZ,
         node_breakdown JSONB NOT NULL DEFAULT '[]'::jsonb,
         created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
         updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -356,6 +357,8 @@ export async function ensureApprovalSchemaReady(): Promise<void> {
     await client.query(`CREATE INDEX IF NOT EXISTS idx_approval_metrics_template ON approval_metrics(template_id) WHERE template_id IS NOT NULL`)
     await client.query(`CREATE INDEX IF NOT EXISTS idx_approval_metrics_sla_breached_active ON approval_metrics(tenant_id, sla_breached) WHERE sla_breached = TRUE`)
     await client.query(`CREATE INDEX IF NOT EXISTS idx_approval_metrics_sla_scan ON approval_metrics(started_at) WHERE terminal_at IS NULL AND sla_hours IS NOT NULL AND sla_breached = FALSE`)
+    await client.query(`ALTER TABLE approval_metrics ADD COLUMN IF NOT EXISTS breach_notified_at TIMESTAMPTZ`)
+    await client.query(`CREATE INDEX IF NOT EXISTS approval_metrics_breach_pending_idx ON approval_metrics (sla_breached_at NULLS FIRST, started_at) WHERE sla_breached = TRUE AND breach_notified_at IS NULL`)
     await client.query(`
       CREATE OR REPLACE FUNCTION approval_metrics_set_updated_at()
       RETURNS TRIGGER AS $$

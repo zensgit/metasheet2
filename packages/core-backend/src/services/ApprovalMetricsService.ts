@@ -537,6 +537,47 @@ export class ApprovalMetricsService {
     return { ...row, node_breakdown: toNodeBreakdown(row.node_breakdown) }
   }
 
+  /**
+   * Wave 2 WP5 follow-up — list instance ids whose breach has not yet been
+   * successfully notified. Used by the scheduler tick to retry failed
+   * dispatches across restarts and leader takeovers.
+   *
+   * Ordering: oldest breach first so the longest-overdue rows resurface
+   * before newer breaches when we hit the limit. NULLS FIRST keeps any
+   * legacy rows where `sla_breached_at` was never recorded at the front
+   * rather than starving them.
+   */
+  async listBreachesPendingNotification(limit: number = 200): Promise<string[]> {
+    const clamped = Math.max(1, Math.min(Number.isFinite(limit) ? limit : 200, 1000))
+    const result = await this.query<{ instance_id: string }>(
+      `SELECT instance_id
+         FROM approval_metrics
+        WHERE sla_breached = TRUE
+          AND breach_notified_at IS NULL
+        ORDER BY sla_breached_at NULLS FIRST, started_at ASC
+        LIMIT $1`,
+      [clamped],
+    )
+    return result.rows.map((row) => row.instance_id)
+  }
+
+  /**
+   * Wave 2 WP5 follow-up — record successful notification dispatch.
+   * Filters `breach_notified_at IS NULL` so a re-run can never overwrite
+   * an existing timestamp (preserves the earliest notify time on retries
+   * that race with a previous tick).
+   */
+  async markBreachNotified(instanceIds: string[], notifiedAt: Date = new Date()): Promise<void> {
+    if (!Array.isArray(instanceIds) || instanceIds.length === 0) return
+    await this.query(
+      `UPDATE approval_metrics
+          SET breach_notified_at = $2
+        WHERE instance_id = ANY($1::text[])
+          AND breach_notified_at IS NULL`,
+      [instanceIds, notifiedAt.toISOString()],
+    )
+  }
+
   async listActiveBreaches(input: { tenantId?: string | null; limit?: number } = {}): Promise<ApprovalMetricsRow[]> {
     const tenantId = resolveTenantId(input.tenantId)
     const limit = Math.max(1, Math.min(input.limit ?? 50, 200))
