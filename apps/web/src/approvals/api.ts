@@ -462,6 +462,34 @@ export interface ApprovalMetricsSummary {
   byTemplate: ApprovalMetricsSummaryTemplateRow[]
 }
 
+export interface ApprovalMetricsTopInstanceRow {
+  instanceId: string
+  templateId: string | null
+  startedAt: string
+  terminalAt: string | null
+  terminalState: 'approved' | 'rejected' | 'revoked' | 'returned' | null
+  durationSeconds: number
+  slaHours: number | null
+  slaBreached: boolean
+  slaBreachedAt: string | null
+}
+
+export interface ApprovalMetricsTopTemplateRow {
+  templateId: string | null
+  total: number
+  slaCandidateCount: number
+  slaBreachCount: number
+  slaBreachRate: number
+  avgDurationSeconds: number | null
+  p95DurationSeconds: number | null
+}
+
+export interface ApprovalMetricsReport {
+  summary: ApprovalMetricsSummary
+  slowestInstances: ApprovalMetricsTopInstanceRow[]
+  breachedTemplates: ApprovalMetricsTopTemplateRow[]
+}
+
 export interface ApprovalMetricsNodeBreakdownEntry {
   nodeKey: string
   activatedAt: string | null
@@ -516,6 +544,51 @@ export async function fetchApprovalMetricsSummary(query?: {
     `/api/approvals/metrics/summary${qs ? `?${qs}` : ''}`,
   )
   return data?.data ?? emptyMetricsSummary()
+}
+
+export async function fetchApprovalMetricsReport(query?: {
+  since?: string
+  until?: string
+  limit?: number
+}): Promise<ApprovalMetricsReport> {
+  if (USE_MOCK) {
+    return {
+      summary: await fetchApprovalMetricsSummary(query),
+      slowestInstances: [
+        {
+          instanceId: 'apr_slowest_1',
+          templateId: 'tpl_1',
+          startedAt: '2026-04-25T00:00:00Z',
+          terminalAt: '2026-04-25T06:00:00Z',
+          terminalState: 'approved',
+          durationSeconds: 21_600,
+          slaHours: 4,
+          slaBreached: true,
+          slaBreachedAt: '2026-04-25T04:05:00Z',
+        },
+      ],
+      breachedTemplates: [
+        {
+          templateId: 'tpl_2',
+          total: 12,
+          slaCandidateCount: 10,
+          slaBreachCount: 3,
+          slaBreachRate: 0.3,
+          avgDurationSeconds: 9000,
+          p95DurationSeconds: 18000,
+        },
+      ],
+    }
+  }
+  const params = new URLSearchParams()
+  if (query?.since) params.set('since', query.since)
+  if (query?.until) params.set('until', query.until)
+  if (query?.limit) params.set('limit', String(query.limit))
+  const qs = params.toString()
+  const data = await apiGet<{ ok: boolean; data: ApprovalMetricsReport }>(
+    `/api/approvals/metrics/report${qs ? `?${qs}` : ''}`,
+  )
+  return data.data
 }
 
 export async function fetchApprovalMetricsBreaches(): Promise<ApprovalMetricsRow[]> {

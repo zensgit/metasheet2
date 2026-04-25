@@ -73,10 +73,39 @@ export interface MetricsSummary {
   byTemplate: MetricsSummaryTemplateRow[]
 }
 
+export interface MetricsTopInstanceRow {
+  instanceId: string
+  templateId: string | null
+  startedAt: string
+  terminalAt: string | null
+  terminalState: ApprovalTerminalState | null
+  durationSeconds: number
+  slaHours: number | null
+  slaBreached: boolean
+  slaBreachedAt: string | null
+}
+
+export interface MetricsTopTemplateRow {
+  templateId: string | null
+  total: number
+  slaCandidateCount: number
+  slaBreachCount: number
+  slaBreachRate: number
+  avgDurationSeconds: number | null
+  p95DurationSeconds: number | null
+}
+
+export interface MetricsReport {
+  summary: MetricsSummary
+  slowestInstances: MetricsTopInstanceRow[]
+  breachedTemplates: MetricsTopTemplateRow[]
+}
+
 export interface MetricsSummaryQuery {
   tenantId?: string
   since?: Date | string
   until?: Date | string
+  limit?: number
 }
 
 const DEFAULT_TENANT_ID = 'default'
@@ -91,6 +120,10 @@ function normalizeDate(value: Date | string | undefined | null): Date | null {
   if (value instanceof Date) return value
   const parsed = new Date(value)
   return Number.isFinite(parsed.getTime()) ? parsed : null
+}
+
+function clampReportLimit(value: number | undefined | null): number {
+  return Math.max(1, Math.min(Number.isFinite(value) ? Number(value) : 10, 50))
 }
 
 function toNodeBreakdown(raw: unknown): NodeBreakdownEntry[] {
@@ -370,6 +403,114 @@ export class ApprovalMetricsService {
           revoked: Number.parseInt(tpl.revoked ?? '0', 10) || 0,
           avgDurationSeconds: parseNullableNumber(tpl.avg_duration),
           slaBreachRate: tplCandidate > 0 ? tplBreach / tplCandidate : 0,
+        }
+      }),
+    }
+  }
+
+  async getMetricsReport(input: MetricsSummaryQuery = {}): Promise<MetricsReport> {
+    const summary = await this.getMetricsSummary(input)
+    const tenantId = resolveTenantId(input.tenantId)
+    const since = normalizeDate(input.since)
+    const until = normalizeDate(input.until)
+    const limit = clampReportLimit(input.limit)
+
+    const conditions: string[] = ['tenant_id = $1']
+    const params: unknown[] = [tenantId]
+    if (since) {
+      params.push(since.toISOString())
+      conditions.push(`started_at >= $${params.length}`)
+    }
+    if (until) {
+      params.push(until.toISOString())
+      conditions.push(`started_at <= $${params.length}`)
+    }
+    const where = `WHERE ${conditions.join(' AND ')}`
+
+    const slowestLimitParam = [...params, limit]
+    const slowestInstances = await this.query<{
+      instance_id: string
+      template_id: string | null
+      started_at: string
+      terminal_at: string | null
+      terminal_state: ApprovalTerminalState | null
+      duration_seconds: string | number
+      sla_hours: string | number | null
+      sla_breached: boolean
+      sla_breached_at: string | null
+    }>(
+      `SELECT
+         instance_id,
+         template_id,
+         started_at,
+         terminal_at,
+         terminal_state,
+         duration_seconds,
+         sla_hours,
+         sla_breached,
+         sla_breached_at
+       FROM approval_metrics
+       ${where}
+         AND duration_seconds IS NOT NULL
+       ORDER BY duration_seconds DESC, terminal_at DESC NULLS LAST
+       LIMIT $${slowestLimitParam.length}`,
+      slowestLimitParam,
+    )
+
+    const templateLimitParam = [...params, limit]
+    const breachedTemplates = await this.query<{
+      template_id: string | null
+      total: string
+      sla_candidate_count: string
+      sla_breach_count: string
+      avg_duration: string | null
+      p95_duration: string | null
+    }>(
+      `SELECT
+         template_id,
+         COUNT(*)::text AS total,
+         COUNT(*) FILTER (WHERE sla_hours IS NOT NULL)::text AS sla_candidate_count,
+         COUNT(*) FILTER (WHERE sla_breached = TRUE)::text AS sla_breach_count,
+         AVG(duration_seconds) FILTER (WHERE duration_seconds IS NOT NULL)::text AS avg_duration,
+         PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY duration_seconds)
+           FILTER (WHERE duration_seconds IS NOT NULL)::text AS p95_duration
+       FROM approval_metrics
+       ${where}
+       GROUP BY template_id
+       HAVING COUNT(*) FILTER (WHERE sla_hours IS NOT NULL) > 0
+       ORDER BY
+         (COUNT(*) FILTER (WHERE sla_breached = TRUE))::float
+           / NULLIF(COUNT(*) FILTER (WHERE sla_hours IS NOT NULL), 0) DESC,
+         COUNT(*) FILTER (WHERE sla_breached = TRUE) DESC,
+         COUNT(*) DESC
+       LIMIT $${templateLimitParam.length}`,
+      templateLimitParam,
+    )
+
+    return {
+      summary,
+      slowestInstances: slowestInstances.rows.map((row) => ({
+        instanceId: row.instance_id,
+        templateId: row.template_id,
+        startedAt: row.started_at,
+        terminalAt: row.terminal_at,
+        terminalState: row.terminal_state,
+        durationSeconds: Number(row.duration_seconds) || 0,
+        slaHours: row.sla_hours === null ? null : Number(row.sla_hours),
+        slaBreached: row.sla_breached,
+        slaBreachedAt: row.sla_breached_at,
+      })),
+      breachedTemplates: breachedTemplates.rows.map((row) => {
+        const slaCandidateCount = Number.parseInt(row.sla_candidate_count ?? '0', 10) || 0
+        const slaBreachCount = Number.parseInt(row.sla_breach_count ?? '0', 10) || 0
+        return {
+          templateId: row.template_id,
+          total: Number.parseInt(row.total ?? '0', 10) || 0,
+          slaCandidateCount,
+          slaBreachCount,
+          slaBreachRate: slaCandidateCount > 0 ? slaBreachCount / slaCandidateCount : 0,
+          avgDurationSeconds: parseNullableNumber(row.avg_duration),
+          p95DurationSeconds: parseNullableNumber(row.p95_duration),
         }
       }),
     }

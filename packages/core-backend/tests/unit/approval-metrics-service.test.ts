@@ -305,6 +305,107 @@ describe('ApprovalMetricsService', () => {
     })
   })
 
+  describe('getMetricsReport', () => {
+    it('returns summary plus slowest instances and riskiest SLA templates', async () => {
+      queryMock
+        .mockResolvedValueOnce({
+          rows: [{
+            total: '2',
+            approved: '1',
+            rejected: '0',
+            revoked: '0',
+            returned: '0',
+            running: '1',
+            avg_duration: '3600',
+            p50_duration: '3600',
+            p95_duration: '7200',
+            sla_breach_count: '1',
+            sla_candidate_count: '2',
+          }],
+        })
+        .mockResolvedValueOnce({
+          rows: [{
+            template_id: 'tmpl-1',
+            total: '2',
+            approved: '1',
+            rejected: '0',
+            revoked: '0',
+            avg_duration: '3600',
+            sla_breach_count: '1',
+            sla_candidate_count: '2',
+          }],
+        })
+        .mockResolvedValueOnce({
+          rows: [{
+            instance_id: 'apr-slow',
+            template_id: 'tmpl-1',
+            started_at: '2026-04-25T01:00:00Z',
+            terminal_at: '2026-04-25T03:00:00Z',
+            terminal_state: 'approved',
+            duration_seconds: '7200',
+            sla_hours: '1',
+            sla_breached: true,
+            sla_breached_at: '2026-04-25T02:05:00Z',
+          }],
+        })
+        .mockResolvedValueOnce({
+          rows: [{
+            template_id: 'tmpl-1',
+            total: '2',
+            sla_candidate_count: '2',
+            sla_breach_count: '1',
+            avg_duration: '3600',
+            p95_duration: '7200',
+          }],
+        })
+
+      const report = await service.getMetricsReport({
+        tenantId: 'tenant-a',
+        since: '2026-04-01T00:00:00Z',
+        until: '2026-04-30T00:00:00Z',
+        limit: 500,
+      })
+
+      expect(report.summary.total).toBe(2)
+      expect(report.slowestInstances).toEqual([{
+        instanceId: 'apr-slow',
+        templateId: 'tmpl-1',
+        startedAt: '2026-04-25T01:00:00Z',
+        terminalAt: '2026-04-25T03:00:00Z',
+        terminalState: 'approved',
+        durationSeconds: 7200,
+        slaHours: 1,
+        slaBreached: true,
+        slaBreachedAt: '2026-04-25T02:05:00Z',
+      }])
+      expect(report.breachedTemplates[0]).toMatchObject({
+        templateId: 'tmpl-1',
+        total: 2,
+        slaCandidateCount: 2,
+        slaBreachCount: 1,
+        slaBreachRate: 0.5,
+        avgDurationSeconds: 3600,
+        p95DurationSeconds: 7200,
+      })
+
+      const slowestSql = normalize(queryMock.mock.calls[2][0])
+      expect(slowestSql).toContain('duration_seconds IS NOT NULL')
+      expect(slowestSql).toContain('ORDER BY duration_seconds DESC')
+      expect(slowestSql).toContain('LIMIT $4')
+      expect(queryMock.mock.calls[2][1]).toEqual([
+        'tenant-a',
+        '2026-04-01T00:00:00.000Z',
+        '2026-04-30T00:00:00.000Z',
+        50,
+      ])
+
+      const templatesSql = normalize(queryMock.mock.calls[3][0])
+      expect(templatesSql).toContain('HAVING COUNT(*) FILTER (WHERE sla_hours IS NOT NULL) > 0')
+      expect(templatesSql).toContain('sla_breached = TRUE')
+      expect(templatesSql).toContain('LIMIT $4')
+    })
+  })
+
   describe('listActiveBreaches', () => {
     it('queries active breached rows ordered by breach time', async () => {
       queryMock.mockResolvedValueOnce({
