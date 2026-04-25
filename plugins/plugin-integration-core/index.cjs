@@ -26,6 +26,7 @@ const { createDeadLetterStore } = require('./lib/dead-letter.cjs')
 const { createWatermarkStore } = require('./lib/watermark.cjs')
 const { createRunLogger } = require('./lib/run-log.cjs')
 const { createPipelineRunner } = require('./lib/pipeline-runner.cjs')
+const { registerIntegrationRoutes } = require('./lib/http-routes.cjs')
 
 const registeredRoutes = []
 let activeContext = null
@@ -151,6 +152,17 @@ module.exports = {
       res.json(buildHealthPayload())
     })
     registeredRoutes.push('GET /api/integration/health')
+    registeredRoutes.push(...registerIntegrationRoutes({
+      context,
+      logger,
+      services: {
+        externalSystemRegistry,
+        adapterRegistry,
+        pipelineRegistry,
+        pipelineRunner,
+        deadLetterStore,
+      },
+    }))
 
     // --- Cross-plugin communication --------------------------------------
     context.communication.register(COMMUNICATION_NAMESPACE, buildCommunicationApi())
