@@ -4,7 +4,7 @@
 
 Current status: backend mock MVP is merged, live customer-system verification is not yet executed.
 
-Local development verification for the preflight slice has passed: the packet generator unit test is 6/6, `plugin-integration-core` tests pass, plugin manifest validation reports 13/13 valid with 0 errors, and `git diff --check` is clean.
+Local development verification for the preflight and evidence slices has passed: the packet generator unit test is 6/6, the evidence compiler unit test is 6/6, `plugin-integration-core` tests pass, plugin manifest validation reports 13/13 valid with 0 errors, and `git diff --check` is clean.
 
 Merged backend scope:
 
@@ -27,6 +27,7 @@ Run these before touching a customer test system.
 | Check | Command | Expected result | Status |
 |---|---|---|---|
 | GATE preflight packet | `node scripts/ops/integration-k3wise-live-poc-preflight.mjs --input /tmp/k3wise-live-gate.json --out-dir artifacts/integration-live-poc/customer-test` | Generates redacted JSON/MD packet; blocks production, Submit/Audit, and unsafe SQL writes. | TODO |
+| Evidence report compiler | `node scripts/ops/integration-k3wise-live-poc-evidence.mjs --packet artifacts/integration-live-poc/customer-test/integration-k3wise-live-poc-packet.json --evidence /tmp/k3wise-live-evidence.json --out-dir artifacts/integration-live-poc/customer-test` | Generates redacted PASS/PARTIAL/FAIL evidence report. | TODO |
 | Plugin tests | `pnpm -F plugin-integration-core test` | All plugin tests pass. | TODO |
 | Plugin manifest validation | `node --import tsx scripts/validate-plugin-manifests.ts` | `plugin-integration-core` is valid. | TODO |
 | Backend tests if available | `pnpm --filter @metasheet/core-backend test:unit` | No regression in plugin runtime or API tests. | TODO |
