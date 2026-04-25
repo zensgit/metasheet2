@@ -163,6 +163,20 @@ export class HTTPAdapter extends BaseDataAdapter {
               config.headers = { ...(config.headers || {}), Authorization: `Bearer ${token}` }
             }
           }
+          // Propagate the inbound correlation id on outbound requests so
+          // upstream systems can stitch logs across service boundaries.
+          try {
+            // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-var-requires
+            const { getCorrelationId } = require('../context/request-context') as typeof import('../context/request-context')
+            const correlationId = getCorrelationId()
+            const headers = { ...(config.headers || {}) }
+            const hasCorrelationHeader = Object.keys(headers).some(
+              (key) => key.toLowerCase() === 'x-correlation-id'
+            )
+            if (correlationId && !hasCorrelationHeader) {
+              config.headers = { ...headers, 'X-Correlation-ID': correlationId }
+            }
+          } catch { /* context module missing — skip */ }
           this.emit('request', { method: config.method, url: config.url })
           return config
         },

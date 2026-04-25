@@ -71,6 +71,8 @@ import { startMultitableAttachmentCleanup } from './multitable/attachment-orphan
 import { AutomationService, setAutomationServiceInstance } from './multitable/automation-service'
 import { tenantContext } from './db/sharding/tenant-context'
 import { attendanceAuditMiddleware, attendanceSecurityMiddleware } from './middleware/attendance-production'
+import { correlationIdMiddleware } from './middleware/correlation'
+import { getCorrelationId } from './context/request-context'
 import { approvalsRouter } from './routes/approvals'
 import { authRouter } from './routes/auth'
 import { auditLogsRouter } from './routes/audit-logs'
@@ -811,6 +813,10 @@ export class MetaSheetServer {
    * 配置中间件
    */
   private setupMiddleware(): void {
+    // Correlation-id must wrap every downstream middleware so AsyncLocalStorage
+    // is populated before CORS, request logging, auth, and route handlers run.
+    this.app.use(correlationIdMiddleware)
+
     // CORS
     this.app.use(cors())
 
@@ -1142,6 +1148,27 @@ export class MetaSheetServer {
     })
 
     // Note: /metrics/prom endpoint is registered by installMetrics() in setupMiddleware()
+
+    // Global error handler — emits `correlationId` in the response body so API
+    // clients can reference the request when filing bug reports. Runs last so
+    // any route-level error bubbles up with the correlation context intact.
+    this.app.use((err: unknown, req: Request, res: Response, next: NextFunction) => {
+      const correlationId = req.correlationId ?? getCorrelationId()
+      const message = err instanceof Error ? err.message : String(err)
+      this.logger.error(`Unhandled route error: ${req.method} ${req.path}`, err instanceof Error ? err : new Error(message))
+      if (res.headersSent) return next(err)
+      const status = typeof (err as { status?: number })?.status === 'number'
+        ? (err as { status: number }).status
+        : typeof (err as { statusCode?: number })?.statusCode === 'number'
+          ? (err as { statusCode: number }).statusCode
+          : 500
+      res.status(status).json({
+        success: false,
+        error: status >= 500 ? 'Internal Server Error' : message,
+        message: process.env.NODE_ENV === 'production' && status >= 500 ? undefined : message,
+        correlationId
+      })
+    })
   }
 
   /**
