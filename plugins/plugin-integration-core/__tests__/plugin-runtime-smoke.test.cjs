@@ -141,14 +141,16 @@ async function main() {
     'status reports host-backed credential store',
   )
   assert.equal(statusResult.externalSystems, true, 'external-system registry initialized')
+  assert.ok(statusResult.adapters.includes('http'), 'status reports http adapter')
+  assert.ok(statusResult.adapters.includes('erp:k3-wise-webapi'), 'status reports K3 WISE WebAPI adapter')
+  assert.ok(statusResult.adapters.includes('erp:k3-wise-sqlserver'), 'status reports K3 WISE SQL Server adapter')
 
-  // --- 5b. Comm API exposes external-system registry methods ------------
+  // --- 5b. Comm API exposes registry methods ----------------------------
   assert.equal(typeof commApi.upsertExternalSystem, 'function', 'comm api exposes upsertExternalSystem')
   assert.equal(typeof commApi.getExternalSystem, 'function', 'comm api exposes getExternalSystem')
   assert.equal(typeof commApi.listExternalSystems, 'function', 'comm api exposes listExternalSystems')
   assert.equal(typeof commApi.listAdapterKinds, 'function', 'comm api exposes listAdapterKinds')
-  assert.deepEqual(statusResult.adapters, ['http'], 'PR2 registers only the generic HTTP adapter')
-  assert.deepEqual(await commApi.listAdapterKinds(), ['http'], 'comm api exposes registered adapter kinds')
+  assert.deepEqual(await commApi.listAdapterKinds(), statusResult.adapters, 'comm api adapter kinds match status')
 
   // --- 6. Activation logged --------------------------------------------
   const hasActivationLog = inspect.logs.some(
