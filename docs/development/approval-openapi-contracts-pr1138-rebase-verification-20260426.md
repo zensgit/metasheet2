@@ -93,6 +93,13 @@ Result:
 - 3 test files passed;
 - 19 tests passed.
 
+The approval SDK test now locks:
+
+- live approval inbox/read/remind routes;
+- approval metrics report path merged from main;
+- direct approval and template response contracts;
+- `FormField.visibilityRule` / `FormFieldVisibilityRule` schema exposure after #1139.
+
 ## Pending Remote Verification
 
 After #1138 is pushed, GitHub CI must rerun the repository checks. Because this PR changes generated OpenAPI artifacts and SDK declarations, the important gates are:

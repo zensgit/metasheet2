@@ -12,6 +12,7 @@ describe('approval OpenAPI paths', () => {
     expectTypeOf<paths['/api/approvals/{id}/mark-read']>().toBeObject()
     expectTypeOf<paths['/api/approvals/mark-all-read']>().toBeObject()
     expectTypeOf<paths['/api/approvals/{id}/remind']>().toBeObject()
+    expectTypeOf<paths['/api/approvals/metrics/report']>().toBeObject()
 
     expectTypeOf<
       paths['/api/approvals']['get']['responses']['200']['content']['application/json']
@@ -52,5 +53,11 @@ describe('approval OpenAPI paths', () => {
     expectTypeOf<
       paths['/api/approval-templates/{id}/publish']['post']['responses']['200']['content']['application/json']
     >().toEqualTypeOf<components['schemas']['ApprovalTemplateVersionDetail']>()
+    expectTypeOf<
+      components['schemas']['FormField']
+    >().toMatchTypeOf<{ visibilityRule?: components['schemas']['FormFieldVisibilityRule'] }>()
+    expectTypeOf<
+      components['schemas']['FormFieldVisibilityRule']['operator']
+    >().toEqualTypeOf<'eq' | 'neq' | 'in' | 'isEmpty' | 'notEmpty'>()
   })
 })

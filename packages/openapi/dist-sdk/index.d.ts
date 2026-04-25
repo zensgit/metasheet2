@@ -14199,6 +14199,16 @@ export interface components {
             label: string;
             value: string;
         };
+        FormFieldVisibilityRule: {
+            /** @description Field id that controls the dependent field's visibility. */
+            fieldId: string;
+            /** @enum {string} */
+            operator: "eq" | "neq" | "in" | "isEmpty" | "notEmpty";
+            /** @description Single comparison value for eq/neq operators. */
+            value?: unknown;
+            /** @description Candidate values for the in operator. */
+            values?: unknown[];
+        };
         FormField: {
             id: string;
             /** @enum {string} */
@@ -14211,6 +14221,7 @@ export interface components {
             props?: {
                 [key: string]: unknown;
             };
+            visibilityRule?: components["schemas"]["FormFieldVisibilityRule"];
         };
         FormSchema: {
             fields: components["schemas"]["FormField"][];

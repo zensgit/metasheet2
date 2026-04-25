@@ -43,6 +43,7 @@ Kept from PR #1138:
 Merged from main:
 
 - `GET /api/approvals/metrics/report`, which intentionally keeps the mainline `{ ok, data }` metrics response shape because `packages/core-backend/src/routes/approval-metrics.ts` returns that wrapper.
+- PR #1139 field visibility runtime types, now reflected in the OpenAPI schema through `FormField.visibilityRule` and `FormFieldVisibilityRule`.
 
 ## Validator Hardening
 
@@ -68,3 +69,9 @@ Regenerated:
 - `packages/openapi/dist-sdk/index.d.ts`
 
 The normal `pnpm --dir packages/openapi/dist-sdk build` command could not run inside the detached worktree because package-local dependencies were not installed there. The same generation steps were executed with the already installed main worktree tool binaries to avoid mutating dependency links in the detached worktree.
+
+## Post-#1139 Sync
+
+After PR #1139 was merged to `origin/main`, this branch was synchronized again. The second merge had no conflicts.
+
+The follow-up contract gap found during that sync was `FormField.visibilityRule`, added by #1139 at runtime but absent from the OpenAPI schema. The schema and generated SDK type test were updated before the branch was pushed.

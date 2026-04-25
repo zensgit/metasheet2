@@ -2450,6 +2450,30 @@ components:
       required:
         - label
         - value
+    FormFieldVisibilityRule:
+      type: object
+      properties:
+        fieldId:
+          type: string
+          description: Field id that controls the dependent field's visibility.
+        operator:
+          type: string
+          enum:
+            - eq
+            - neq
+            - in
+            - isEmpty
+            - notEmpty
+        value:
+          nullable: true
+          description: Single comparison value for eq/neq operators.
+        values:
+          type: array
+          items: {}
+          description: Candidate values for the in operator.
+      required:
+        - fieldId
+        - operator
     FormField:
       type: object
       properties:
@@ -2482,6 +2506,8 @@ components:
         props:
           type: object
           additionalProperties: true
+        visibilityRule:
+          $ref: '#/components/schemas/FormFieldVisibilityRule'
       required:
         - id
         - type
