@@ -71,7 +71,10 @@ Rules:
 - `config` and `capabilities` default to `{}`.
 - `credentials === undefined` preserves an existing credential on update.
 - `credentials === null` clears the stored credential.
-- object credentials are JSON-stringified before encryption.
+- Plain object credentials are JSON-stringified before encryption.
+- Credential arrays, dates, booleans, numbers, and other non-plain-object values
+  are rejected before encryption so accidental input shapes do not get silently
+  persisted.
 
 ## Public Output
 
@@ -96,14 +99,19 @@ No API in this slice returns decrypted credentials.
 
 - `enc` means the value was written by the host-backed platform security service.
 - `v1` means the row still contains a legacy plugin-local credential value.
-- `unknown` means a non-empty value exists but does not match a known prefix.
-- `null` means no credential is stored.
+- `null` means no credential is stored or the stored value has an unrecognized
+  prefix. Unknown encrypted payload prefixes are intentionally not surfaced as a
+  third public state.
 
 ## Trade-Offs
 
 This slice uses `selectOne -> insertOne/updateRow` instead of a database-native upsert because `db.cjs` intentionally has no raw SQL escape hatch and no scoped `upsert` primitive yet.
 
 That means concurrent same-scope same-name creates can race and rely on the database unique index to reject one writer. This is acceptable for the current seam. If external system registration becomes high-traffic or user-facing, add a validated `upsertByUnique()` helper to `db.cjs` rather than introducing raw SQL.
+
+The update path treats an empty `db.updateRow()` result as a lost-update race
+and throws `ExternalSystemNotFoundError` instead of returning an optimistic
+success shape.
 
 ## Deferred
 

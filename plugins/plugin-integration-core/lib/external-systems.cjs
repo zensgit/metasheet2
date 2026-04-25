@@ -124,7 +124,7 @@ function detectCredentialFormat(ciphertext) {
   if (typeof ciphertext !== 'string' || ciphertext.length === 0) return null
   if (ciphertext.startsWith('enc:')) return 'enc'
   if (ciphertext.startsWith('v1:')) return 'v1'
-  return 'unknown'
+  return null
 }
 
 async function fingerprintCredential(credentialStore, ciphertext) {
@@ -133,20 +133,36 @@ async function fingerprintCredential(credentialStore, ciphertext) {
 }
 
 async function publicRow(credentialStore, row) {
+  if (!row) return null
   return rowToPublicExternalSystem(row, await fingerprintCredential(credentialStore, row.credentials_encrypted))
+}
+
+function isPlainObject(value) {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false
+  const prototype = Object.getPrototypeOf(value)
+  return prototype === Object.prototype || prototype === null
 }
 
 async function maybeEncryptCredentials(credentialStore, credentials) {
   if (credentials === undefined) return undefined
   if (credentials === null || credentials === '') return null
-  const plaintext = typeof credentials === 'string'
-    ? credentials
-    : JSON.stringify(credentials)
-  return credentialStore.encrypt(plaintext)
+  if (typeof credentials === 'string') {
+    return credentialStore.encrypt(credentials)
+  }
+  if (isPlainObject(credentials)) {
+    return credentialStore.encrypt(JSON.stringify(credentials))
+  }
+  throw new ExternalSystemValidationError('credentials must be a string, a plain object, or null', { field: 'credentials' })
 }
 
 function createExternalSystemRegistry({ db, credentialStore, idGenerator = crypto.randomUUID } = {}) {
-  if (!db || typeof db.selectOne !== 'function' || typeof db.insertOne !== 'function' || typeof db.updateRow !== 'function') {
+  if (
+    !db ||
+    typeof db.selectOne !== 'function' ||
+    typeof db.insertOne !== 'function' ||
+    typeof db.updateRow !== 'function' ||
+    typeof db.select !== 'function'
+  ) {
     throw new Error('createExternalSystemRegistry: scoped db helper is required')
   }
   if (!credentialStore || typeof credentialStore.encrypt !== 'function' || typeof credentialStore.fingerprint !== 'function') {
@@ -195,7 +211,14 @@ function createExternalSystemRegistry({ db, credentialStore, idGenerator = crypt
         id: existing.id,
       })
       const row = Array.isArray(rows) ? rows[0] : rows?.rows?.[0]
-      return publicRow(credentialStore, row || { ...existing, ...updateRow })
+      if (!row) {
+        throw new ExternalSystemNotFoundError('external system not found during update', {
+          id: existing.id,
+          tenantId: normalized.tenantId,
+          workspaceId: normalized.workspaceId,
+        })
+      }
+      return publicRow(credentialStore, row)
     }
 
     const insertRow = {
