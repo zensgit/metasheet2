@@ -82,12 +82,12 @@ describe('xlsx-mapping helpers', () => {
       expect(result.truncated).toBe(true)
     })
 
-    it('returns empty result when the workbook has no sheets', () => {
-      const wb: Parameters<typeof buildXlsxBuffer>[0]['utils'] extends infer _U ? unknown : never = null
-      void wb
-      const minimalBuffer = makeBuffer([['x'], ['1']])
-      const empty = parseXlsxBuffer(xlsxModule, minimalBuffer, { sheetName: 'DoesNotExist' })
-      expect(empty.headers).toEqual(['x'])
+    it('falls back to the first sheet when the requested sheet name is unknown', () => {
+      const buffer = makeBuffer([['x'], ['1']], 'OnlySheet')
+      const result = parseXlsxBuffer(xlsxModule, buffer, { sheetName: 'DoesNotExist' })
+      expect(result.sheetName).toBe('OnlySheet')
+      expect(result.headers).toEqual(['x'])
+      expect(result.rows).toEqual([['1']])
     })
 
     it('exposes finite row + byte caps', () => {

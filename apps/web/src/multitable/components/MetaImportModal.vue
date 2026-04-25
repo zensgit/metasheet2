@@ -39,6 +39,9 @@
           <div v-if="restoredDraft" class="meta-import__warning">
             <span>Recovered your previous import draft for this sheet.</span>
           </div>
+          <div v-if="parseWarning" class="meta-import__warning">
+            <span>{{ parseWarning }}</span>
+          </div>
           <p class="meta-import__hint">{{ parsedRows.length }} record(s) detected. Map columns to fields:</p>
           <div v-if="hasImportDraftIssues" class="meta-import__warning">
             <span>{{ importDraftIssueText }}</span>
@@ -235,6 +238,7 @@ const lastAttemptRecords = ref<Array<Record<string, unknown>>>([])
 const lastAttemptRowIndexes = ref<number[]>([])
 const textareaRef = ref<HTMLTextAreaElement | null>(null)
 const parseError = ref('')
+const parseWarning = ref('')
 const manualFieldOverrides = ref<ImportFieldOverrides>({})
 const manualOverrideSummaries = ref<Record<string, LinkedRecordSummary[]>>({})
 const pickerTarget = ref<{ rowIndex: number; fieldId: string } | null>(null)
@@ -448,6 +452,7 @@ function restoreImportDraft() {
       : {}
     step.value = snapshot.step === 'preview' && parsedRows.value.length > 0 ? 'preview' : 'paste'
     parseError.value = ''
+    parseWarning.value = ''
     restoredDraft.value = true
     return true
   } catch {
@@ -552,6 +557,7 @@ function isXlsxFile(file: File): boolean {
 
 async function readAndSetXlsx(file: File) {
   parseError.value = ''
+  parseWarning.value = ''
   if (file.size > XLSX_MAX_BYTES) {
     parseError.value = `File too large (max ${(XLSX_MAX_BYTES / (1024 * 1024)).toFixed(0)} MB)`
     return
@@ -569,7 +575,7 @@ async function readAndSetXlsx(file: File) {
     parsedRows.value = result.rows
     fieldMapping.value = mapXlsxColumnsToFields(result.headers, importableFields.value).mapping
     if (result.truncated) {
-      parseError.value = `Imported the first ${parsedRows.value.length} rows; remaining rows were skipped (limit ${XLSX_MAX_ROWS}).`
+      parseWarning.value = `Imported the first ${parsedRows.value.length} rows; remaining rows were skipped (limit ${XLSX_MAX_ROWS}).`
     }
     step.value = 'preview'
   } catch (error: any) {
@@ -822,6 +828,7 @@ function resetState() {
   pickerTarget.value = null
   pickerVisible.value = false
   parseError.value = ''
+  parseWarning.value = ''
   restoredDraft.value = false
 }
 
