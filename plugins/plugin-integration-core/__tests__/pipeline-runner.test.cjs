@@ -139,7 +139,7 @@ function createExternalSystemRegistry() {
   }
 }
 
-function createRunnerHarness({ sourceRecords, pipelineOverrides = {}, sourceRead, targetUpsert } = {}) {
+function createRunnerHarness({ sourceRecords, pipelineOverrides = {}, sourceRead, targetUpsert, erpFeedbackWriter } = {}) {
   const db = createMockDb()
   const targetRows = new Map()
   const adapterSystems = []
@@ -219,6 +219,7 @@ function createRunnerHarness({ sourceRecords, pipelineOverrides = {}, sourceRead
     deadLetterStore: createDeadLetterStore({ db, idGenerator: () => `dl_${db.tables.get('integration_dead_letters').length + 1}` }),
     watermarkStore: createWatermarkStore({ db }),
     runLogger: createRunLogger({ pipelineRegistry }),
+    erpFeedbackWriter,
     clock: (() => {
       let tick = 0
       return () => tick++ * 25
@@ -444,7 +445,61 @@ async function main() {
   assert.equal(unmatchedLetter.source_payload.key, 'missing-key')
   assert.equal(unmatchedLetter.transformed_payload.password, '[redacted]')
 
-  // --- 4d. Dry-run sampleLimit is a total cap across pages --------------
+  // --- 4d. ERP feedback writes target result summaries after upsert ----
+  const feedbackCalls = []
+  const feedback = createRunnerHarness({
+    sourceRecords: [
+      { code: 'k3-01', revision: 'r1', qty: '3', name: 'Bolt', updatedAt: '2026-04-24T01:00:00.000Z' },
+    ],
+    targetUpsert: async (input) => createUpsertResult({
+      written: 1,
+      failed: 0,
+      results: [
+        {
+          key: input.records[0]._integration_idempotency_key,
+          externalId: 'k3_item_1',
+          billNo: 'K3-BILL-001',
+          responseMessage: 'saved',
+        },
+      ],
+    }),
+    erpFeedbackWriter: {
+      async writeBack(input) {
+        feedbackCalls.push(input)
+        return {
+          ok: true,
+          skipped: false,
+          projectId: input.pipeline.projectId,
+          objectId: 'standard_materials',
+          keyField: '_integration_idempotency_key',
+          items: [
+            { key: input.writeResult.results[0].key, fields: { erpSyncStatus: 'synced' } },
+          ],
+          result: { written: 1 },
+        }
+      },
+    },
+  })
+  const feedbackRun = await feedback.runner.runPipeline({ tenantId: 'tenant_1', pipelineId: 'pipe_1', mode: 'full', triggeredBy: 'manual' })
+  assert.equal(feedbackCalls.length, 1)
+  assert.equal(feedbackCalls[0].pipeline.id, 'pipe_1')
+  assert.equal(feedbackCalls[0].runId, feedbackRun.run.id)
+  assert.equal(feedbackCalls[0].cleanRecords.length, 1)
+  assert.equal(feedbackCalls[0].writeResult.results[0].externalId, 'k3_item_1')
+  assert.deepEqual(feedbackRun.run.details.erpFeedback, [
+    {
+      ok: true,
+      skipped: false,
+      reason: null,
+      projectId: 'project_1',
+      objectId: 'standard_materials',
+      keyField: '_integration_idempotency_key',
+      items: 1,
+      written: 1,
+    },
+  ])
+
+  // --- 4e. Dry-run sampleLimit is a total cap across pages --------------
   let page = 0
   const pagedDryRun = createRunnerHarness({
     sourceRecords: [],

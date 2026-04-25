@@ -247,6 +247,30 @@ function responseCode(data, config, fallback = 'OK') {
   )
 }
 
+function responseBillNo(data, config) {
+  return firstDefined(
+    config.billNoPath ? getPath(data, config.billNoPath) : undefined,
+    getPath(data, 'billNo'),
+    getPath(data, 'BillNo'),
+    getPath(data, 'number'),
+    getPath(data, 'Number'),
+    getPath(data, 'Result.Number'),
+    getPath(data, 'Result.ResponseStatus.SuccessEntitys.0.Number'),
+  )
+}
+
+function responseExternalId(data, config) {
+  return firstDefined(
+    config.externalIdPath ? getPath(data, config.externalIdPath) : undefined,
+    getPath(data, 'externalId'),
+    getPath(data, 'id'),
+    getPath(data, 'Id'),
+    getPath(data, 'FItemID'),
+    getPath(data, 'Result.Id'),
+    getPath(data, 'Result.ResponseStatus.SuccessEntitys.0.Id'),
+  )
+}
+
 function createK3WiseWebApiAdapter({ system, fetchImpl = globalThis.fetch, logger } = {}) {
   const normalizedSystem = normalizeExternalSystemForAdapter(system)
   const config = normalizedSystem.config
@@ -494,6 +518,10 @@ function createK3WiseWebApiAdapter({ system, fetchImpl = globalThis.fetch, logge
           key,
           object: request.object,
           status: 'written',
+          externalId: responseExternalId(save.data, config),
+          billNo: responseBillNo(save.data, config),
+          responseCode: responseCode(save.data, config, 'OK'),
+          responseMessage: responseMessage(save.data, config, 'K3 WISE save succeeded'),
           raw: save.data,
         })
       } catch (error) {
@@ -545,6 +573,8 @@ module.exports = {
     businessSuccess,
     extractRecordKey,
     normalizeObjects,
+    responseBillNo,
     responseCode,
+    responseExternalId,
   },
 }

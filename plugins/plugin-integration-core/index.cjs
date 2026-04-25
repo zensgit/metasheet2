@@ -27,6 +27,7 @@ const { createPipelineRegistry } = require('./lib/pipelines.cjs')
 const { createDeadLetterStore } = require('./lib/dead-letter.cjs')
 const { createWatermarkStore } = require('./lib/watermark.cjs')
 const { createRunLogger } = require('./lib/run-log.cjs')
+const { createErpFeedbackWriter } = require('./lib/erp-feedback.cjs')
 const { createPipelineRunner } = require('./lib/pipeline-runner.cjs')
 const { registerIntegrationRoutes } = require('./lib/http-routes.cjs')
 
@@ -39,6 +40,7 @@ let pipelineRegistry = null
 let deadLetterStore = null
 let watermarkStore = null
 let runLogger = null
+let erpFeedbackWriter = null
 let pipelineRunner = null
 
 function buildHealthPayload() {
@@ -69,6 +71,7 @@ function buildCommunicationApi() {
         adapters: adapterRegistry ? adapterRegistry.listAdapterKinds() : [],
         pipelines: Boolean(pipelineRegistry),
         runner: Boolean(pipelineRunner),
+        erpFeedback: Boolean(erpFeedbackWriter),
       }
     },
     async upsertExternalSystem(input) {
@@ -142,6 +145,10 @@ module.exports = {
     deadLetterStore = createDeadLetterStore({ db })
     watermarkStore = createWatermarkStore({ db })
     runLogger = createRunLogger({ pipelineRegistry })
+    erpFeedbackWriter = createErpFeedbackWriter({
+      context,
+      logger,
+    })
     pipelineRunner = createPipelineRunner({
       pipelineRegistry,
       externalSystemRegistry,
@@ -149,6 +156,7 @@ module.exports = {
       deadLetterStore,
       watermarkStore,
       runLogger,
+      erpFeedbackWriter,
     })
 
     // --- HTTP routes ------------------------------------------------------
@@ -188,6 +196,7 @@ module.exports = {
     deadLetterStore = null
     watermarkStore = null
     runLogger = null
+    erpFeedbackWriter = null
     pipelineRunner = null
     activeContext = null
     logger.info(`[${PLUGIN_ID}] deactivated`)

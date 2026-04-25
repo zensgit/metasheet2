@@ -132,6 +132,9 @@ function createPipelineRunner(deps = {}) {
   const deadLetterStore = requireDependency(deps, 'deadLetterStore', ['createDeadLetter'])
   const watermarkStore = requireDependency(deps, 'watermarkStore', ['getWatermark', 'setWatermark'])
   const runLogger = requireDependency(deps, 'runLogger', ['startRun', 'finishRun'])
+  const erpFeedbackWriter = deps.erpFeedbackWriter && typeof deps.erpFeedbackWriter.writeBack === 'function'
+    ? deps.erpFeedbackWriter
+    : null
   const clock = typeof deps.clock === 'function' ? deps.clock : () => Date.now()
 
   async function loadExternalSystemForAdapter(input) {
@@ -182,6 +185,39 @@ function createPipelineRunner(deps = {}) {
   async function writeDeadLetter(input) {
     if (input.dryRun) return
     await deadLetterStore.createDeadLetter(input)
+  }
+
+  async function writeErpFeedback({ context, run, writeResult, cleanRecords }) {
+    if (!erpFeedbackWriter || cleanRecords.length === 0) return null
+    try {
+      const feedback = await erpFeedbackWriter.writeBack({
+        tenantId: context.tenantId,
+        workspaceId: context.workspaceId,
+        runId: run.id,
+        pipeline: context.pipeline,
+        cleanRecords,
+        writeResult,
+      })
+      return {
+        ok: feedback.ok !== false,
+        skipped: feedback.skipped === true,
+        reason: feedback.reason || null,
+        projectId: feedback.projectId || null,
+        objectId: feedback.objectId || null,
+        keyField: feedback.keyField || null,
+        items: Array.isArray(feedback.items) ? feedback.items.length : 0,
+        written: feedback.result && Number.isFinite(Number(feedback.result.written))
+          ? Number(feedback.result.written)
+          : undefined,
+      }
+    } catch (error) {
+      return {
+        ok: false,
+        skipped: false,
+        reason: 'ERP_FEEDBACK_THROWN',
+        error: error && error.message ? error.message : String(error),
+      }
+    }
   }
 
   async function processRecord({ context, run, sourceRecord, cleanRecords, metrics, preview, dryRun }) {
@@ -306,6 +342,7 @@ function createPipelineRunner(deps = {}) {
       let cursor = input.cursor || null
       let page = 0
       let lastSuccessfulWatermark = null
+      const erpFeedback = []
       let remainingDryRunSamples = dryRun && Number.isInteger(input.sampleLimit) && input.sampleLimit > 0
         ? input.sampleLimit
         : null
@@ -376,6 +413,8 @@ function createPipelineRunner(deps = {}) {
               errorMessage: `target write failed for ${unitemizedFailures} record(s) without itemized errors`,
             })
           }
+          const feedback = await writeErpFeedback({ context, run, writeResult, cleanRecords })
+          if (feedback) erpFeedback.push(feedback)
         }
 
         if (metrics.rowsFailed === 0) {
@@ -404,6 +443,7 @@ function createPipelineRunner(deps = {}) {
           dryRun,
           watermarkAdvanced: !dryRun && metrics.rowsFailed === 0 && Boolean(lastSuccessfulWatermark),
           nextCursor: cursor,
+          erpFeedback,
         },
       })
       return {
