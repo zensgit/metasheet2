@@ -265,10 +265,11 @@ describe('YjsRecordBridge.cancelPending', () => {
     expect(() => routesModule.setYjsInvalidatorForRoutes(null)).not.toThrow()
   })
 
-  it('REST /patch route passes the module-level invalidator into RecordWriteService', async () => {
+  it('REST /patch route adapts the module-level invalidator into a post-commit hook', async () => {
     const source = await readFile(new URL('../../src/routes/univer-meta.ts', import.meta.url), 'utf8')
 
-    expect(source).toContain('new RecordWriteService(pool, eventBus, writeHelpers, yjsInvalidator)')
+    expect(source).toContain('new RecordWriteService(pool, eventBus, writeHelpers)')
+    expect(source).toContain('recordWriteService.setPostCommitHooks([createYjsInvalidationPostCommitHook(yjsInvalidator)])')
   })
 
   it('cancelPending on records with no pending flush is a no-op', () => {

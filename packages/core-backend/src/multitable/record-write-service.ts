@@ -16,6 +16,12 @@
 
 import type { EventBus } from '../integration/events/event-bus'
 import { publishMultitableSheetRealtime } from './realtime-publish'
+import {
+  createYjsInvalidationPostCommitHook,
+  type RecordPostCommitContext,
+  type RecordPostCommitHook,
+  type YjsInvalidator,
+} from './post-commit-hooks'
 
 // ---------------------------------------------------------------------------
 // Shared types (mirrors the ones in univer-meta.ts to avoid coupling)
@@ -178,19 +184,8 @@ export interface RecordPatchInput {
    * because those writes originate from the in-memory Y.Doc; destroying
    * that doc immediately after would tear out a live editor's state.
    */
-  source?: 'rest' | 'yjs-bridge'
+  source?: RecordPostCommitContext['source']
 }
-
-/**
- * Injected by `index.ts` when the Yjs path is wired. Takes record IDs
- * whose REST write just committed and wipes any Yjs state for them
- * (in-memory + persisted). Must first cancel any bridge-pending flushes
- * for those records — the wiring in `index.ts` composes both.
- *
- * Best-effort: errors are logged and swallowed; a failed invalidation
- * does NOT fail the REST write that already succeeded.
- */
-export type YjsInvalidator = (recordIds: string[]) => Promise<void>
 
 export interface RecordPatchResult {
   updated: Array<{ recordId: string; version: number }>
@@ -282,21 +277,27 @@ export class RecordWriteService {
     private eventBus: EventBus,
     private helpers: RecordWriteHelpers,
     /**
-     * Optional Yjs invalidator. Leave `null` when the Yjs collab path is
-     * disabled (flag off, non-Yjs deployments). When present, called
-     * after every successful `patchRecords` that did NOT originate from
-     * the Yjs bridge itself.
+     * Post-commit hooks run after the DB transaction succeeds but before
+     * realtime + eventBus notifications fan out. This keeps authoritative
+     * state cleanup in one seam without coupling the service to Yjs.
      */
-    private yjsInvalidator: YjsInvalidator | null = null,
+    private postCommitHooks: RecordPostCommitHook[] = [],
   ) {}
 
   /**
-   * Replace the Yjs invalidator after construction. Used when
-   * `YjsSyncService`/bridge are wired up later in the boot sequence than
-   * `RecordWriteService`.
+   * Replace post-commit hooks after construction. Used when downstream
+   * infrastructure (for example Yjs invalidation) wires later in boot.
+   */
+  setPostCommitHooks(hooks: RecordPostCommitHook[]): void {
+    this.postCommitHooks = [...hooks]
+  }
+
+  /**
+   * Back-compat shim for callers that still think in terms of "the Yjs
+   * invalidator". New wiring should prefer `setPostCommitHooks(...)`.
    */
   setYjsInvalidator(invalidator: YjsInvalidator | null): void {
-    this.yjsInvalidator = invalidator
+    this.setPostCommitHooks(invalidator ? [createYjsInvalidationPostCommitHook(invalidator)] : [])
   }
 
   /**
@@ -401,11 +402,12 @@ export class RecordWriteService {
    * 0. Validate changes (field writability, value constraints, expectedVersion consistency)
    * 1. DB transaction: SELECT FOR UPDATE → version check → field-type handling
    *    → `data || patch::jsonb` → link mutation → version++
-   * 2. Computed field recalculation (lookup/rollup)
-   * 3. Related record recomputation (cross-sheet)
-   * 4. Link/attachment summary rebuild for response
-   * 5. Realtime broadcast via `publishMultitableSheetRealtime()`
-   * 6. EventBus emit → webhook/automation trigger
+   * 2. Post-commit hooks (best effort, immediately after commit)
+   * 3. Computed field recalculation (lookup/rollup)
+   * 4. Related record recomputation (cross-sheet)
+   * 5. Link/attachment summary rebuild for response
+   * 6. Realtime broadcast via `publishMultitableSheetRealtime()`
+   * 7. EventBus emit → webhook/automation trigger
    */
   async patchRecords(input: RecordPatchInput): Promise<RecordPatchResult> {
     const {
@@ -588,7 +590,29 @@ export class RecordWriteService {
     })
 
     // -----------------------------------------------------------------------
-    // Step 2: Computed field recalculation (lookup / rollup)
+    // Step 2: Post-commit hooks (best effort, immediately after commit)
+    // -----------------------------------------------------------------------
+    if (this.postCommitHooks.length > 0 && updates.length > 0) {
+      const context: RecordPostCommitContext = {
+        recordIds: updates.map((update) => update.recordId),
+        sheetId,
+        actorId,
+        source: input.source,
+      }
+      for (const hook of this.postCommitHooks) {
+        try {
+          await hook(context)
+        } catch (err) {
+          console.error(
+            `[record-write] Post-commit hook failed for records ${context.recordIds.join(',')} — downstream state may be stale until the next successful sync:`,
+            err,
+          )
+        }
+      }
+    }
+
+    // -----------------------------------------------------------------------
+    // Step 3: Computed field recalculation (lookup / rollup)
     // -----------------------------------------------------------------------
     let computedRecords: Array<{ recordId: string; data: Record<string, unknown> }> | undefined
     let updatedRowsForSummaries: UniverMetaRecord[] = []
@@ -638,7 +662,7 @@ export class RecordWriteService {
     }
 
     // -----------------------------------------------------------------------
-    // Step 3: Related record recomputation (cross-sheet)
+    // Step 4: Related record recomputation (cross-sheet)
     // -----------------------------------------------------------------------
     const relatedRecords =
       updates.length > 0
@@ -658,7 +682,7 @@ export class RecordWriteService {
     const mergedRecords = h.mergeComputedRecords(computedRecords, sameSheetRelated)
 
     // -----------------------------------------------------------------------
-    // Step 4: Link / attachment summary rebuild
+    // Step 5: Link / attachment summary rebuild
     // -----------------------------------------------------------------------
     const relationalLinkFields = fields
       .map((field) => (field.type === 'link' ? { fieldId: field.id, cfg: h.parseLinkFieldConfig(field.property) } : null))
@@ -697,28 +721,6 @@ export class RecordWriteService {
             visiblePropertyFieldIds,
           )
         : undefined
-
-    // -----------------------------------------------------------------------
-    // Step 5: Yjs invalidation (post-commit, pre-notification, best effort)
-    //
-    // REST writes to meta_records.data make any persisted Y.Doc snapshot
-    // for those records stale. Drop in-memory + persisted Yjs state before
-    // notifying clients/listeners, so a fast reconnect cannot reopen the old
-    // snapshot. Skipped when the write itself originated from the Yjs bridge
-    // (those writes ARE the Y.Doc's content; invalidating would nuke a live
-    // editor).
-    // -----------------------------------------------------------------------
-    if (this.yjsInvalidator && input.source !== 'yjs-bridge' && updates.length > 0) {
-      const recordIds = updates.map((u) => u.recordId)
-      try {
-        await this.yjsInvalidator(recordIds)
-      } catch (err) {
-        console.error(
-          `[record-write] Yjs invalidation failed for records ${recordIds.join(',')} — Yjs state may be stale until next idle-release:`,
-          err,
-        )
-      }
-    }
 
     // -----------------------------------------------------------------------
     // Step 6: Realtime broadcast
