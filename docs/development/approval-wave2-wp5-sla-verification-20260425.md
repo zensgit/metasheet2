@@ -74,9 +74,39 @@ Typecheck:
 
 ```bash
 pnpm --filter @metasheet/core-backend exec tsc --noEmit
+pnpm --filter @metasheet/web exec vue-tsc -b --noEmit
 ```
 
-Result: exit 0.
+Result: both exit 0.
+
+## Review hardening verification — 2026-04-25
+
+Focused command:
+
+```bash
+pnpm --filter @metasheet/core-backend exec vitest run \
+  tests/unit/approval-metrics-service.test.ts \
+  tests/unit/approval-product-service.test.ts \
+  tests/unit/approval-sla-scheduler.test.ts \
+  --reporter=verbose
+pnpm --filter @metasheet/core-backend exec tsc --noEmit
+pnpm --filter @metasheet/web exec vue-tsc -b --noEmit
+```
+
+Result:
+
+```text
+Test Files  3 passed (3)
+Tests       24 passed (24)
+backend tsc exit 0
+vue-tsc     exit 0
+```
+
+Assertions updated:
+
+- `checkSlaBreaches` now asserts the interval-safe
+  `started_at + (sla_hours * interval '1 hour') < $1` SQL.
+- `getMetricsSummary` now asserts `slaCandidateCount` is returned directly.
 
 Local note: `/tmp/ms2-wp5-sla` initially had no `node_modules/.bin/vitest`; `pnpm install --offline --ignore-scripts` could not complete because `bcryptjs@3.0.3` was missing from the local pnpm store. To avoid network access, the focused test reused the already-installed sibling workspace symlinks from `/tmp/ms2-correlation-id`. No tracked dependency files were changed.
 

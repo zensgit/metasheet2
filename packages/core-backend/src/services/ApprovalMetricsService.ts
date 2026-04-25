@@ -68,6 +68,7 @@ export interface MetricsSummary {
   p50DurationSeconds: number | null
   p95DurationSeconds: number | null
   slaBreachCount: number
+  slaCandidateCount: number
   slaBreachRate: number
   byTemplate: MetricsSummaryTemplateRow[]
 }
@@ -253,7 +254,7 @@ export class ApprovalMetricsService {
        WHERE terminal_at IS NULL
          AND sla_hours IS NOT NULL
          AND sla_breached = FALSE
-         AND started_at + (sla_hours || ' hours')::interval < $1
+         AND started_at + (sla_hours * interval '1 hour') < $1
        RETURNING instance_id`,
       [now.toISOString()],
     )
@@ -356,6 +357,7 @@ export class ApprovalMetricsService {
       p50DurationSeconds: parseNullableNumber(row?.p50_duration),
       p95DurationSeconds: parseNullableNumber(row?.p95_duration),
       slaBreachCount,
+      slaCandidateCount,
       slaBreachRate: slaCandidateCount > 0 ? slaBreachCount / slaCandidateCount : 0,
       byTemplate: perTemplate.rows.map((tpl) => {
         const tplCandidate = Number.parseInt(tpl.sla_candidate_count ?? '0', 10) || 0

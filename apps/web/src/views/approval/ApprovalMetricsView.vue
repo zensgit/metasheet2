@@ -127,7 +127,7 @@ const router = useRouter()
 const summary = ref<ApprovalMetricsSummary>({
   total: 0, approved: 0, rejected: 0, revoked: 0, returned: 0, running: 0,
   avgDurationSeconds: null, p50DurationSeconds: null, p95DurationSeconds: null,
-  slaBreachCount: 0, slaBreachRate: 0, byTemplate: [],
+  slaBreachCount: 0, slaCandidateCount: 0, slaBreachRate: 0, byTemplate: [],
 })
 const breaches = ref<ApprovalMetricsRow[]>([])
 const dateRange = ref<[string, string] | null>(null)
@@ -143,12 +143,7 @@ const approvalRatePercent = computed(() => {
 
 const slaBreachRatePercent = computed(() => formatPercent(summary.value.slaBreachRate))
 
-const slaCandidateCount = computed(() => {
-  if (summary.value.slaBreachRate <= 0) {
-    return summary.value.slaBreachCount
-  }
-  return Math.round(summary.value.slaBreachCount / summary.value.slaBreachRate)
-})
+const slaCandidateCount = computed(() => summary.value.slaCandidateCount)
 
 async function loadSummary(): Promise<void> {
   loading.value = true

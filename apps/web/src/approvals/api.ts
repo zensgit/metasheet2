@@ -457,6 +457,7 @@ export interface ApprovalMetricsSummary {
   p50DurationSeconds: number | null
   p95DurationSeconds: number | null
   slaBreachCount: number
+  slaCandidateCount: number
   slaBreachRate: number
   byTemplate: ApprovalMetricsSummaryTemplateRow[]
 }
@@ -488,7 +489,7 @@ function emptyMetricsSummary(): ApprovalMetricsSummary {
   return {
     total: 0, approved: 0, rejected: 0, revoked: 0, returned: 0, running: 0,
     avgDurationSeconds: null, p50DurationSeconds: null, p95DurationSeconds: null,
-    slaBreachCount: 0, slaBreachRate: 0, byTemplate: [],
+    slaBreachCount: 0, slaCandidateCount: 0, slaBreachRate: 0, byTemplate: [],
   }
 }
 
@@ -500,7 +501,7 @@ export async function fetchApprovalMetricsSummary(query?: {
     return {
       total: 42, approved: 30, rejected: 5, revoked: 2, returned: 1, running: 4,
       avgDurationSeconds: 7200, p50DurationSeconds: 6000, p95DurationSeconds: 18000,
-      slaBreachCount: 3, slaBreachRate: 0.15,
+      slaBreachCount: 3, slaCandidateCount: 20, slaBreachRate: 0.15,
       byTemplate: [
         { templateId: 'tpl_1', total: 20, approved: 15, rejected: 3, revoked: 1, avgDurationSeconds: 6000, slaBreachRate: 0.1 },
         { templateId: 'tpl_2', total: 12, approved: 10, rejected: 1, revoked: 1, avgDurationSeconds: 9000, slaBreachRate: 0.25 },

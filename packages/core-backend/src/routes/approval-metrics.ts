@@ -60,9 +60,6 @@ export function approvalMetricsRouter(options?: ApprovalMetricsRouterOptions): R
     rbacGuard('approvals:admin'),
     async (req: Request, res: Response) => {
       try {
-        if (!isAdminActor(req)) {
-          return res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: 'Admin role required' } })
-        }
         const summary = await metricsService.getMetricsSummary({
           tenantId: resolveTenantId(req),
           since: parseDate(req.query.since),
@@ -81,9 +78,6 @@ export function approvalMetricsRouter(options?: ApprovalMetricsRouterOptions): R
     rbacGuard('approvals:admin'),
     async (req: Request, res: Response) => {
       try {
-        if (!isAdminActor(req)) {
-          return res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: 'Admin role required' } })
-        }
         const limit = Number.parseInt(String(req.query.limit ?? '50'), 10)
         const breaches = await metricsService.listActiveBreaches({
           tenantId: resolveTenantId(req),

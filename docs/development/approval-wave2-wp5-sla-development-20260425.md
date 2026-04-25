@@ -68,3 +68,16 @@ ApprovalGraphExecutor is pure in-memory; the task description mentioned adding h
 4. Or invoke the Kysely `down()` in the migration which performs steps 2 + 3 plus the trigger and constraint cleanup.
 
 Frontend rollback: redeploy without the `ApprovalMetricsView` route; the sidebar entry is purely additive.
+
+## Review hardening — 2026-04-25
+
+- Changed SLA breach interval SQL from `(sla_hours || ' hours')::interval`
+  to `sla_hours * interval '1 hour'` so Postgres does not attempt integer
+  text concatenation.
+- Removed duplicate global-admin checks from the summary and breaches routes.
+  Both routes already use `rbacGuard('approvals:admin')`; the extra
+  `isAdminActor()` gate could incorrectly reject users granted
+  `approvals:admin` through RBAC tables.
+- Exposed `slaCandidateCount` directly in backend and frontend summary DTOs.
+  The dashboard now reads the exact denominator instead of reconstructing it
+  from `slaBreachCount / slaBreachRate`, which was wrong when rate was zero.

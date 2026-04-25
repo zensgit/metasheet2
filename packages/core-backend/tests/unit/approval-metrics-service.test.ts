@@ -223,6 +223,7 @@ describe('ApprovalMetricsService', () => {
       expect(breached).toEqual(['apr-1', 'apr-9'])
       const [sql, params] = queryMock.mock.calls[0]
       expect(normalize(sql)).toContain(`sla_breached = TRUE`)
+      expect(normalize(sql)).toContain(`started_at + (sla_hours * interval '1 hour') < $1`)
       expect(normalize(sql)).toContain(`RETURNING instance_id`)
       expect(params[0]).toBe('2026-04-25T12:00:00.000Z')
     })
@@ -275,6 +276,7 @@ describe('ApprovalMetricsService', () => {
         p50DurationSeconds: 3600,
         p95DurationSeconds: 7200,
         slaBreachCount: 2,
+        slaCandidateCount: 5,
         slaBreachRate: 0.4,
       })
       expect(summary.byTemplate).toHaveLength(1)
