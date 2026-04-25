@@ -117,11 +117,13 @@ async function main() {
   assert.equal(status.routesRegistered, host.routes.length)
   assert.deepEqual(status.credentialStore, { source: 'host-security', format: 'enc' })
   assert.equal(status.externalSystems, true)
+  assert.ok(status.adapters.includes('http'), 'status reports http adapter')
+  assert.ok(status.adapters.includes('erp:k3-wise-webapi'), 'status reports K3 WISE WebAPI adapter')
+  assert.ok(status.adapters.includes('erp:k3-wise-sqlserver'), 'status reports K3 WISE SQL Server adapter')
   assert.equal(typeof host.namespaces.get('integration-core').upsertExternalSystem, 'function')
-  assert.deepEqual(status.adapters, ['http'])
   assert.deepEqual(
     await host.context.communication.call('integration-core', 'listAdapterKinds'),
-    ['http'],
+    status.adapters,
   )
 
   await loaded.plugin.deactivate()

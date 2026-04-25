@@ -6,7 +6,7 @@
   "license": "UNLICENSED",
   "private": true,
   "scripts": {
-    "test": "node __tests__/plugin-runtime-smoke.test.cjs && node --import tsx __tests__/host-loader-smoke.test.mjs && node __tests__/credential-store.test.cjs && node __tests__/db.test.cjs && node __tests__/external-systems.test.cjs && node __tests__/adapter-contracts.test.cjs && node __tests__/http-adapter.test.cjs && node __tests__/pipelines.test.cjs && node __tests__/transform-validator.test.cjs && node __tests__/runner-support.test.cjs && node __tests__/payload-redaction.test.cjs && node __tests__/pipeline-runner.test.cjs && node __tests__/http-routes.test.cjs && node __tests__/staging-installer.test.cjs && node __tests__/migration-sql.test.cjs",
+    "test": "node __tests__/plugin-runtime-smoke.test.cjs && node --import tsx __tests__/host-loader-smoke.test.mjs && node __tests__/credential-store.test.cjs && node __tests__/db.test.cjs && node __tests__/external-systems.test.cjs && node __tests__/adapter-contracts.test.cjs && node __tests__/http-adapter.test.cjs && node __tests__/pipelines.test.cjs && node __tests__/transform-validator.test.cjs && node __tests__/runner-support.test.cjs && node __tests__/payload-redaction.test.cjs && node __tests__/pipeline-runner.test.cjs && node __tests__/http-routes.test.cjs && node __tests__/k3-wise-adapters.test.cjs && node __tests__/staging-installer.test.cjs && node __tests__/migration-sql.test.cjs",
     "test:runtime": "node __tests__/plugin-runtime-smoke.test.cjs",
     "test:host-loader": "node --import tsx __tests__/host-loader-smoke.test.mjs",
     "test:credential": "node __tests__/credential-store.test.cjs",
@@ -20,6 +20,7 @@
     "test:payload-redaction": "node __tests__/payload-redaction.test.cjs",
     "test:pipeline-runner": "node __tests__/pipeline-runner.test.cjs",
     "test:http-routes": "node __tests__/http-routes.test.cjs",
+    "test:k3-wise-adapters": "node __tests__/k3-wise-adapters.test.cjs",
     "test:staging": "node __tests__/staging-installer.test.cjs",
     "test:migration": "node __tests__/migration-sql.test.cjs"
   }
