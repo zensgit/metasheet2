@@ -22,6 +22,10 @@ const { createExternalSystemRegistry } = require('./lib/external-systems.cjs')
 const { createAdapterRegistry } = require('./lib/contracts.cjs')
 const { createHttpAdapterFactory } = require('./lib/adapters/http-adapter.cjs')
 const { createPipelineRegistry } = require('./lib/pipelines.cjs')
+const { createDeadLetterStore } = require('./lib/dead-letter.cjs')
+const { createWatermarkStore } = require('./lib/watermark.cjs')
+const { createRunLogger } = require('./lib/run-log.cjs')
+const { createPipelineRunner } = require('./lib/pipeline-runner.cjs')
 
 const registeredRoutes = []
 let activeContext = null
@@ -29,6 +33,10 @@ let credentialStore = null
 let externalSystemRegistry = null
 let adapterRegistry = null
 let pipelineRegistry = null
+let deadLetterStore = null
+let watermarkStore = null
+let runLogger = null
+let pipelineRunner = null
 
 function buildHealthPayload() {
   return {
@@ -57,6 +65,7 @@ function buildCommunicationApi() {
         externalSystems: Boolean(externalSystemRegistry),
         adapters: adapterRegistry ? adapterRegistry.listAdapterKinds() : [],
         pipelines: Boolean(pipelineRegistry),
+        runner: Boolean(pipelineRunner),
       }
     },
     async upsertExternalSystem(input) {
@@ -99,6 +108,10 @@ function buildCommunicationApi() {
       if (!pipelineRegistry) throw new Error('pipeline registry is not initialized')
       return pipelineRegistry.listPipelineRuns(input)
     },
+    async runPipeline(input) {
+      if (!pipelineRunner) throw new Error('pipeline runner is not initialized')
+      return pipelineRunner.runPipeline(input)
+    },
   }
 }
 
@@ -121,6 +134,17 @@ module.exports = {
     adapterRegistry = createAdapterRegistry({ logger })
       .registerAdapter('http', createHttpAdapterFactory())
     pipelineRegistry = createPipelineRegistry({ db })
+    deadLetterStore = createDeadLetterStore({ db })
+    watermarkStore = createWatermarkStore({ db })
+    runLogger = createRunLogger({ pipelineRegistry })
+    pipelineRunner = createPipelineRunner({
+      pipelineRegistry,
+      externalSystemRegistry,
+      adapterRegistry,
+      deadLetterStore,
+      watermarkStore,
+      runLogger,
+    })
 
     // --- HTTP routes ------------------------------------------------------
     context.api.http.addRoute('GET', '/api/integration/health', async (_req, res) => {
@@ -145,6 +169,10 @@ module.exports = {
     externalSystemRegistry = null
     adapterRegistry = null
     pipelineRegistry = null
+    deadLetterStore = null
+    watermarkStore = null
+    runLogger = null
+    pipelineRunner = null
     activeContext = null
     logger.info(`[${PLUGIN_ID}] deactivated`)
   },
