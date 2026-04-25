@@ -98,13 +98,13 @@ async function main() {
   const host = createHostContext()
   await loaded.plugin.activate(host.context)
 
-  assert.equal(host.routes.length, 1, 'activate registers one route')
-  assert.equal(host.routes[0].method, 'GET')
-  assert.equal(host.routes[0].path, '/api/integration/health')
+  assert.ok(host.routes.length >= 1, 'activate registers at least one route')
+  const healthRoute = host.routes.find((route) => route.method === 'GET' && route.path === '/api/integration/health')
+  assert.ok(healthRoute, 'health route registered')
   assert.ok(host.namespaces.has('integration-core'), 'activate registers communication namespace')
 
   let responseBody = null
-  await host.routes[0].handler({}, { json(value) { responseBody = value } })
+  await healthRoute.handler({}, { json(value) { responseBody = value } })
   assert.equal(responseBody?.ok, true)
   assert.equal(responseBody?.plugin, 'plugin-integration-core')
 
@@ -114,10 +114,15 @@ async function main() {
 
   const status = await host.context.communication.call('integration-core', 'getStatus')
   assert.equal(status.plugin, 'plugin-integration-core')
-  assert.equal(status.routesRegistered, 1)
+  assert.equal(status.routesRegistered, host.routes.length)
   assert.deepEqual(status.credentialStore, { source: 'host-security', format: 'enc' })
   assert.equal(status.externalSystems, true)
   assert.equal(typeof host.namespaces.get('integration-core').upsertExternalSystem, 'function')
+  assert.deepEqual(status.adapters, ['http'])
+  assert.deepEqual(
+    await host.context.communication.call('integration-core', 'listAdapterKinds'),
+    ['http'],
+  )
 
   await loaded.plugin.deactivate()
   assert.ok(host.logs.some((line) => line.includes('activated')), 'activation logged')
