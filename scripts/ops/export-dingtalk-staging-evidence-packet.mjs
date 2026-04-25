@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 
 const DEFAULT_OUTPUT_DIR = 'artifacts/dingtalk-staging-evidence-packet'
@@ -120,6 +120,16 @@ const requiredPacketFiles = [
     path: 'scripts/ops/dingtalk-p4-final-handoff.mjs',
     kind: 'script',
     description: 'exports a finalized P4 smoke session, validates the packet, and writes handoff summaries',
+  },
+  {
+    path: 'scripts/ops/dingtalk-p4-final-docs.mjs',
+    kind: 'script',
+    description: 'generates final remote-smoke development and verification Markdown from release-ready summaries',
+  },
+  {
+    path: 'scripts/ops/dingtalk-p4-final-closeout.mjs',
+    kind: 'script',
+    description: 'runs strict finalize, final handoff, release-ready status, and final docs in one closeout command',
   },
   {
     path: 'scripts/ops/validate-dingtalk-staging-evidence-packet.mjs',
@@ -295,6 +305,7 @@ function validateDingTalkP4FinalPass(sourceDir) {
     compiledOverallStatus: compiledSummary.overallStatus,
     apiBootstrapStatus: compiledSummary.apiBootstrapStatus,
     remoteClientStatus: compiledSummary.remoteClientStatus,
+    remoteSmokePhase: compiledSummary.remoteSmokePhase ?? null,
     requiredChecks: DINGTALK_P4_REQUIRED_CHECK_IDS.length,
   }
 }
@@ -306,7 +317,42 @@ function validateEvidenceDir(sourceDir, opts) {
   return opts.requireDingTalkP4Pass ? validateDingTalkP4FinalPass(sourceDir) : null
 }
 
+function inspectExistingPacketOutputDir(outputDir) {
+  if (!existsSync(outputDir)) return { exists: false, isExistingPacket: false, entryCount: 0 }
+  if (!statSync(outputDir).isDirectory()) {
+    throw new Error(`--output-dir must be a directory: ${outputDir}`)
+  }
+  const manifestPath = path.join(outputDir, 'manifest.json')
+  const readmePath = path.join(outputDir, 'README.md')
+  let isExistingPacket = false
+  if (existsSync(manifestPath) && statSync(manifestPath).isFile()) {
+    try {
+      isExistingPacket = readJsonFile(manifestPath, 'manifest.json')?.packet === 'dingtalk-staging-evidence-packet'
+    } catch {
+      isExistingPacket = false
+    }
+  }
+  if (!isExistingPacket && existsSync(readmePath) && statSync(readmePath).isFile()) {
+    isExistingPacket = readFileSync(readmePath, 'utf8').includes('# DingTalk Staging Evidence Packet')
+  }
+  return {
+    exists: true,
+    isExistingPacket,
+    entryCount: readdirSync(outputDir).length,
+  }
+}
+
 function clearGeneratedPacketMarkers(outputDir) {
+  const inspected = inspectExistingPacketOutputDir(outputDir)
+  if (inspected.exists && inspected.entryCount > 0 && !inspected.isExistingPacket) {
+    throw new Error('--output-dir already exists and is not a DingTalk staging evidence packet; choose an empty/new packet directory')
+  }
+  const manifestPath = path.join(outputDir, 'manifest.json')
+  const readmePath = path.join(outputDir, 'README.md')
+  if (!inspected.exists || inspected.entryCount === 0) return
+  if (inspected.isExistingPacket) {
+    rmSync(path.join(outputDir, 'evidence'), { recursive: true, force: true })
+  }
   for (const file of ['manifest.json', 'README.md']) {
     rmSync(path.join(outputDir, file), { force: true })
   }
@@ -316,6 +362,7 @@ function copyEvidenceDir(sourceDir, outputDir, index, dingtalkP4FinalStatus) {
   const destinationName = `${String(index + 1).padStart(2, '0')}-${sanitizeEvidenceName(sourceDir)}`
   const destination = path.join(outputDir, 'evidence', destinationName)
   mkdirSync(path.dirname(destination), { recursive: true })
+  rmSync(destination, { recursive: true, force: true })
   cpSync(sourceDir, destination, { recursive: true })
   return {
     source: path.relative(process.cwd(), sourceDir).replaceAll('\\', '/'),
@@ -373,10 +420,13 @@ ${gateLine}
 8. If needed, debug individual steps with \`dingtalk-p4-smoke-preflight.mjs\` and \`dingtalk-p4-remote-smoke.mjs\`.
 9. Check remaining evidence gaps with \`node scripts/ops/dingtalk-p4-smoke-status.mjs --session-dir <session-dir>\`.
 10. Record manual DingTalk-client/admin checks with \`node scripts/ops/dingtalk-p4-evidence-record.mjs --session-dir <session-dir> ...\`.
-11. Finalize smoke evidence with \`node scripts/ops/dingtalk-p4-smoke-session.mjs --finalize <session-dir>\`.
-12. Re-run \`dingtalk-p4-smoke-status.mjs\` to confirm the status moved to \`handoff_pending\`.
-13. Run \`node scripts/ops/dingtalk-p4-final-handoff.mjs --session-dir <session-dir> --output-dir <packet-dir>\` after finalization passes.
-14. If debugging manually, re-export with \`--include-output <session-dir> --require-dingtalk-p4-pass\`, then validate with \`validate-dingtalk-staging-evidence-packet.mjs\`.
+11. Prefer \`node scripts/ops/dingtalk-p4-final-closeout.mjs --session-dir <session-dir> --packet-output-dir <packet-dir>\` after all manual evidence is complete.
+12. If debugging manually, finalize smoke evidence with \`node scripts/ops/dingtalk-p4-smoke-session.mjs --finalize <session-dir>\`.
+13. Re-run \`dingtalk-p4-smoke-status.mjs\` to confirm the status moved to \`handoff_pending\`.
+14. Run \`node scripts/ops/dingtalk-p4-final-handoff.mjs --session-dir <session-dir> --output-dir <packet-dir>\` after finalization passes.
+15. Re-run \`node scripts/ops/dingtalk-p4-smoke-status.mjs --session-dir <session-dir> --handoff-summary <packet-dir>/handoff-summary.json --require-release-ready\`.
+16. Generate final docs with \`node scripts/ops/dingtalk-p4-final-docs.mjs --session-dir <session-dir> --handoff-summary <packet-dir>/handoff-summary.json --require-release-ready\`.
+17. If debugging manually, re-export with \`--include-output <session-dir> --require-dingtalk-p4-pass\`, then validate with \`validate-dingtalk-staging-evidence-packet.mjs\`.
 
 ## Non-Goals
 

@@ -45,6 +45,17 @@ function makePassingEvidenceForCheck(id, extras = {}) {
             blockedReason: 'Visible form error showed the user is not in the DingTalk allowlist.',
           }
         : {}),
+      ...(id === 'no-email-user-create-bind'
+        ? {
+            adminEvidence: {
+              emailWasBlank: true,
+              createdLocalUserId: 'local_no_email_001',
+              boundDingTalkExternalId: 'dt_no_email_001',
+              accountLinkedAfterRefresh: true,
+              temporaryPasswordRedacted: true,
+            },
+          }
+        : {}),
       ...extras,
     }
   }
@@ -212,8 +223,11 @@ test('compile-dingtalk-p4-smoke-evidence compiles passing evidence and redacts s
     assert.equal(summary.overallStatus, 'pass')
     assert.equal(summary.apiBootstrapStatus, 'pass')
     assert.equal(summary.remoteClientStatus, 'pass')
+    assert.equal(summary.remoteSmokePhase, 'finalize_pending')
     assert.equal(summary.requiredChecksNotPassed.length, 0)
     assert.equal(summary.manualEvidenceIssues.length, 0)
+    const summaryMd = readFileSync(path.join(outputDir, 'summary.md'), 'utf8')
+    assert.match(summaryMd, /Remote smoke phase: \*\*finalize_pending\*\*/)
 
     const redacted = readFileSync(path.join(outputDir, 'evidence.redacted.json'), 'utf8')
     assert.doesNotMatch(redacted, /robot-secret/)
@@ -250,6 +264,7 @@ test('compile-dingtalk-p4-smoke-evidence strict mode rejects missing manual arti
     assert.match(result.stderr, /artifact_ref_missing/)
     const summary = JSON.parse(readFileSync(path.join(outputDir, 'summary.json'), 'utf8'))
     assert.equal(summary.overallStatus, 'fail')
+    assert.equal(summary.remoteSmokePhase, 'manual_pending')
     assert.equal(summary.manualEvidenceIssues.some((issue) => issue.code === 'artifact_ref_missing'), true)
   } finally {
     rmSync(tmpDir, { recursive: true, force: true })
@@ -380,6 +395,48 @@ test('compile-dingtalk-p4-smoke-evidence strict mode rejects secret-like manual 
   }
 })
 
+test('compile-dingtalk-p4-smoke-evidence strict mode rejects stale manual artifact files', async () => {
+  const tmpDir = makeTmpDir()
+  const evidencePath = path.join(tmpDir, 'evidence.json')
+  const outputDir = path.join(tmpDir, 'compiled')
+  const artifactRef = manualArtifactRefForCheck('authorized-user-submit')
+
+  try {
+    writeEvidence(evidencePath, {
+      checks: requiredIds.map((id) => ({
+        id,
+        status: 'pass',
+        evidence: makePassingEvidenceForCheck(id, id === 'authorized-user-submit'
+          ? {
+              performedAt: '2026-04-22T15:00:00.000Z',
+              artifacts: [artifactRef],
+            }
+          : {}),
+      })),
+    })
+    const artifactPath = path.join(tmpDir, artifactRef)
+    writeFileSync(artifactPath, 'authorized submit screenshot\n', 'utf8')
+    const oldTime = new Date('2026-04-22T14:00:00.000Z')
+    await import('node:fs/promises').then((fs) => fs.utimes(artifactPath, oldTime, oldTime))
+
+    const result = spawnSync(process.execPath, [scriptPath, '--input', evidencePath, '--output-dir', outputDir, '--strict'], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+    })
+
+    assert.equal(result.status, 1)
+    assert.match(result.stderr, /artifact_ref_stale/)
+    const summary = JSON.parse(readFileSync(path.join(outputDir, 'summary.json'), 'utf8'))
+    assert.equal(summary.manualEvidenceIssues.some((issue) => (
+      issue.id === 'authorized-user-submit'
+        && issue.code === 'artifact_ref_stale'
+        && issue.artifactRef === artifactRef
+    )), true)
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+
 test('compile-dingtalk-p4-smoke-evidence strict mode rejects external artifacts unless explicitly allowed', () => {
   const tmpDir = makeTmpDir()
   const evidencePath = path.join(tmpDir, 'evidence.json')
@@ -455,6 +512,7 @@ test('compile-dingtalk-p4-smoke-evidence strict mode rejects pass checks without
     assert.equal(summary.overallStatus, 'fail')
     assert.equal(summary.apiBootstrapStatus, 'pass')
     assert.equal(summary.remoteClientStatus, 'fail')
+    assert.equal(summary.remoteSmokePhase, 'manual_pending')
     assert.equal(summary.manualEvidenceIssues.some((issue) => issue.id === 'authorized-user-submit'), true)
     assert.equal(summary.manualEvidenceIssues.some((issue) => issue.id === 'send-group-message-form-link'), true)
   } finally {
@@ -501,6 +559,89 @@ test('compile-dingtalk-p4-smoke-evidence strict mode requires structured unautho
   }
 })
 
+test('compile-dingtalk-p4-smoke-evidence strict mode rejects invalid unauthorized denial record counts', () => {
+  const tmpDir = makeTmpDir()
+  const evidencePath = path.join(tmpDir, 'evidence.json')
+  const outputDir = path.join(tmpDir, 'compiled')
+
+  try {
+    writeEvidence(evidencePath, {
+      checks: requiredIds.map((id) => ({
+        id,
+        status: 'pass',
+        evidence: makePassingEvidenceForCheck(id, id === 'unauthorized-user-denied'
+          ? {
+              submitBlocked: true,
+              beforeRecordCount: -1,
+              afterRecordCount: -1,
+              blockedReason: 'Visible error showed the user is not in the allowlist.',
+            }
+          : {}),
+      })),
+    })
+
+    const result = spawnSync(process.execPath, [scriptPath, '--input', evidencePath, '--output-dir', outputDir, '--strict'], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+    })
+
+    assert.equal(result.status, 1)
+    assert.match(result.stderr, /record_count_non_negative_integer_required/)
+    const summary = JSON.parse(readFileSync(path.join(outputDir, 'summary.json'), 'utf8'))
+    assert.equal(summary.overallStatus, 'fail')
+    assert.equal(summary.manualEvidenceIssues.some((issue) => issue.code === 'record_count_non_negative_integer_required'), true)
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+
+test('compile-dingtalk-p4-smoke-evidence strict mode requires structured no-email admin evidence', () => {
+  const tmpDir = makeTmpDir()
+  const evidencePath = path.join(tmpDir, 'evidence.json')
+  const outputDir = path.join(tmpDir, 'compiled')
+
+  try {
+    writeEvidence(evidencePath, {
+      checks: requiredIds.map((id) => ({
+        id,
+        status: 'pass',
+        evidence: makePassingEvidenceForCheck(id, id === 'no-email-user-create-bind'
+          ? {
+              adminEvidence: {
+                emailWasBlank: false,
+                createdLocalUserId: '',
+                boundDingTalkExternalId: '',
+                accountLinkedAfterRefresh: false,
+                temporaryPasswordRedacted: false,
+              },
+            }
+          : {}),
+      })),
+    })
+
+    const result = spawnSync(process.execPath, [scriptPath, '--input', evidencePath, '--output-dir', outputDir, '--strict'], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+    })
+
+    assert.equal(result.status, 1)
+    assert.match(result.stderr, /email_was_blank_required/)
+    assert.match(result.stderr, /created_local_user_id_required/)
+    assert.match(result.stderr, /bound_dingtalk_external_id_required/)
+    assert.match(result.stderr, /account_linked_after_refresh_required/)
+    assert.match(result.stderr, /temporary_password_redacted_required/)
+    const summary = JSON.parse(readFileSync(path.join(outputDir, 'summary.json'), 'utf8'))
+    assert.equal(summary.overallStatus, 'fail')
+    assert.equal(summary.manualEvidenceIssues.some((issue) => issue.code === 'email_was_blank_required'), true)
+    assert.equal(summary.manualEvidenceIssues.some((issue) => issue.code === 'created_local_user_id_required'), true)
+    assert.equal(summary.manualEvidenceIssues.some((issue) => issue.code === 'bound_dingtalk_external_id_required'), true)
+    assert.equal(summary.manualEvidenceIssues.some((issue) => issue.code === 'account_linked_after_refresh_required'), true)
+    assert.equal(summary.manualEvidenceIssues.some((issue) => issue.code === 'temporary_password_redacted_required'), true)
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+
 test('compile-dingtalk-p4-smoke-evidence strict mode fails when required checks are not passed', () => {
   const tmpDir = makeTmpDir()
   const evidencePath = path.join(tmpDir, 'evidence.json')
@@ -523,6 +664,37 @@ test('compile-dingtalk-p4-smoke-evidence strict mode fails when required checks 
     assert.match(result.stderr, /no-email-user-create-bind:fail/)
     const summary = JSON.parse(readFileSync(path.join(outputDir, 'summary.json'), 'utf8'))
     assert.equal(summary.overallStatus, 'fail')
+    assert.equal(summary.remoteSmokePhase, 'fail')
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+
+test('compile-dingtalk-p4-smoke-evidence reports bootstrap pending when API bootstrap checks are incomplete', () => {
+  const tmpDir = makeTmpDir()
+  const evidencePath = path.join(tmpDir, 'evidence.json')
+  const outputDir = path.join(tmpDir, 'compiled')
+
+  try {
+    writeEvidence(evidencePath, {
+      checks: requiredIds.map((id) => ({
+        id,
+        status: id === 'create-table-form' ? 'pending' : 'pass',
+        evidence: makePassingEvidenceForCheck(id),
+      })),
+    })
+
+    const result = spawnSync(process.execPath, [scriptPath, '--input', evidencePath, '--output-dir', outputDir, '--strict'], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+    })
+
+    assert.equal(result.status, 1)
+    assert.match(result.stderr, /create-table-form:pending/)
+    const summary = JSON.parse(readFileSync(path.join(outputDir, 'summary.json'), 'utf8'))
+    assert.equal(summary.overallStatus, 'fail')
+    assert.equal(summary.apiBootstrapStatus, 'fail')
+    assert.equal(summary.remoteSmokePhase, 'bootstrap_pending')
   } finally {
     rmSync(tmpDir, { recursive: true, force: true })
   }
