@@ -14,9 +14,11 @@
  * ids on the leader process. Justification (per task spec):
  *   - The scheduler runs only on the leader; one process is enough.
  *   - Avoids touching the WP5 schema bootstrap version + a brand-new migration.
- *   - Restart-time re-notification is acceptable for v0; the next 15-min tick
- *     would re-flag breaches whose `sla_breached` was set in a previous epoch
- *     anyway, so re-notify on cold start is a conservative default.
+ *   - `checkSlaBreaches` only returns rows it flips from `sla_breached = FALSE`
+ *     to TRUE, so restart-time duplicate sends are not expected from the
+ *     scheduler path. Conversely, a dispatch missed after the DB flag flips is
+ *     not retried by the scheduler until a persistent `breach_notified_at`
+ *     follow-up exists.
  *   - The set is bounded (FIFO trim at MAX_NOTIFIED_IDS) so a long-lived
  *     leader cannot grow unbounded.
  *   - A persistent `breach_notified_at` column is tracked as a follow-up.

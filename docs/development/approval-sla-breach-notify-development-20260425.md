@@ -30,9 +30,12 @@ DingTalk and email channels.
     `APPROVAL_BREACH_EMAIL_FROM` / `APPROVAL_BREACH_EMAIL_TO` and logs a
     warn line per dispatch but always reports `ok: false`.
 - Wired the notifier into `ApprovalSlaScheduler.onBreach` from
-  `MetaSheetServer.start()`. The scheduler's existing try/catch around
-  `onBreach` (ApprovalSlaScheduler.ts L138-144) absorbs notifier failures;
-  we still wrap the call site for explicit logging.
+  `MetaSheetServer.start()`. Channels are registered only when their env is
+  explicitly configured so an unset DingTalk webhook / email stub does not
+  create noisy per-breach failure logs.
+  The scheduler's existing try/catch around `onBreach`
+  (ApprovalSlaScheduler.ts L138-144) absorbs notifier failures; we still
+  wrap the call site for explicit logging.
 - Added `ApprovalMetricsService.listBreachContextByIds(ids)` to JOIN
   `approval_metrics` + `approval_instances` + `approval_templates` so the
   notifier composes messages without reaching into pool directly.
@@ -56,10 +59,11 @@ The DingTalk channel reuses the leaf helpers from
 The HTTP send mirrors `multitable/automation-executor.ts:1393-1402`: native
 `fetch` + an `AbortController` for timeout. We deliberately did **not**
 import `postJsonWithRetry` from `NotificationService.ts`. The scheduler
-already retries on the next tick (default 15 minutes), so a single attempt
-with an explicit `ok: false` return keeps the notifier behavior simple and
-the in-memory dedupe set clean (only successful sends mark the instance as
-notified).
+marks a breach before notification (`checkSlaBreaches` flips
+`sla_breached = TRUE` and returns the ids), so this v0 path is best-effort:
+a channel failure is surfaced in logs / `NotifyResult`, but is not retried
+by a later scheduler tick. Persistent retry needs the follow-up
+`breach_notified_at` column.
 
 We did **not** reuse `DingTalkNotificationChannel` itself. Its
 `sender(notification, recipients)` signature is the legacy notification
@@ -98,7 +102,7 @@ Justification (the task spec asked us to pick simpler with a written
 rationale):
 
 - The scheduler runs only on the leader, so one process is enough to
-  dedupe. Follower failover and process restarts cause **under**
+  dedupe. Follower failover and process restarts can cause **under**
   notification, not duplicates: `ApprovalMetricsService.checkSlaBreaches`
   filters on `sla_breached = FALSE` and flips the flag inside the same
   `UPDATE … RETURNING`, so a row already flagged in a previous epoch never
@@ -117,8 +121,10 @@ rationale):
   - extra UPDATE round-trips per dispatch.
 - The set is bounded — `markNotified` evicts the oldest entry once the
   cap is hit, so a long-lived leader cannot grow unbounded memory.
-- Only successful dispatches mark an instance as notified. A run where
-  every channel fails is retried on the next breach tick.
+- Only successful dispatches mark an instance as notified inside the
+  notifier itself. This protects direct callers that retry the same id
+  batch, but the current scheduler path will not re-supply those ids after
+  the DB breach flag has been flipped.
 
 A persistent column is a follow-up. The dev MD records this so a future
 slice can land it without rediscovery.
@@ -127,10 +133,10 @@ slice can land it without rediscovery.
 
 | Env var | Default | Purpose |
 | --- | --- | --- |
-| `APPROVAL_BREACH_DINGTALK_WEBHOOK` | unset | DingTalk robot webhook URL with `access_token=` query string. Must be HTTPS on `oapi.dingtalk.com/robot/send`. Unset → channel reports `webhook not configured` and skips. |
+| `APPROVAL_BREACH_DINGTALK_WEBHOOK` | unset | DingTalk robot webhook URL with `access_token=` query string. Must be HTTPS on `oapi.dingtalk.com/robot/send`. Unset → DingTalk channel is not registered. |
 | `APPROVAL_BREACH_DINGTALK_SECRET` | unset | Optional `SEC...` signing secret. When provided, the channel appends `timestamp=` + `sign=` query params. |
 | `APPROVAL_BREACH_EMAIL_FROM` | unset | From-address for the email stub. Reserved for the follow-up that wires a real transport. |
-| `APPROVAL_BREACH_EMAIL_TO` | unset | Admin recipient for the email stub. |
+| `APPROVAL_BREACH_EMAIL_TO` | unset | Admin recipient for the email stub. Both email env vars must be set before the stub is registered. |
 | `PUBLIC_APP_URL` / `APP_BASE_URL` | unset | Base URL prepended to `/approval/<id>` in the message body. Unset → the notifier still composes a message but the link is omitted. |
 
 Webhook setup steps:
@@ -201,8 +207,8 @@ in-memory by design (see Idempotency section). A persistent
 ## Rollback
 
 1. `APPROVAL_BREACH_DINGTALK_WEBHOOK=` (empty) on the leader and restart.
-   The DingTalk channel reports `webhook not configured` and the scheduler
-   still flips `sla_breached`, just without notifications.
+   The DingTalk channel is not registered and the scheduler still flips
+   `sla_breached`, just without DingTalk notifications.
 2. To fully disable the notifier wiring, revert this commit. The
    pre-merge `onBreach` hook was a no-op so the scheduler reverts cleanly.
 3. `APPROVAL_SLA_SCHEDULER_DISABLED=1` continues to disable the scheduler

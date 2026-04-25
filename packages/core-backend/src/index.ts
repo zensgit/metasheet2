@@ -88,8 +88,7 @@ import {
 } from './services/ApprovalSlaScheduler'
 import { ApprovalBreachNotifier } from './services/ApprovalBreachNotifier'
 import {
-  createApprovalBreachDingTalkChannel,
-  createApprovalBreachEmailChannel,
+  createApprovalBreachChannelsFromEnv,
 } from './services/breach-channels'
 import { rolesRouter } from './routes/roles'
 import { snapshotsRouter } from './routes/snapshots'
@@ -1910,10 +1909,7 @@ export class MetaSheetServer {
     try {
       const leaderOptions = await resolveApprovalSlaSchedulerLeaderOptions()
       const breachNotifier = new ApprovalBreachNotifier({
-        channels: [
-          createApprovalBreachDingTalkChannel(),
-          createApprovalBreachEmailChannel(),
-        ],
+        channels: createApprovalBreachChannelsFromEnv(),
       })
       startApprovalSlaScheduler({
         leaderOptions,

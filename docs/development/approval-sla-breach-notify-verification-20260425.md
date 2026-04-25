@@ -29,11 +29,11 @@ cd packages/core-backend
 
 - Backend TypeScript check: passed with exit code 0 (no diagnostics).
 - `tests/unit/approval-breach-notifier.test.ts`: 8/8 passed.
-- `tests/unit/dingtalk-breach-channel.test.ts`: 6/6 passed.
+- `tests/unit/dingtalk-breach-channel.test.ts`: 9/9 passed.
 - `tests/unit/approval-sla-scheduler.test.ts`: 7/7 passed (regression
   green after notifier wiring).
 
-Aggregate: 21/21 tests, ~300ms total wall clock.
+Aggregate: 24/24 tests, ~300ms total wall clock.
 
 ## Covered Scenarios
 
@@ -48,9 +48,11 @@ Aggregate: 21/21 tests, ~300ms total wall clock.
 - Idempotency: two consecutive calls with overlapping ids re-dispatch only
   the genuinely new ids; previously-notified ones are reported in
   `skipped`.
-- Recovery: an instance whose every channel failed is **not** marked as
-  notified, so the next tick will re-dispatch and succeed once the
-  transient fault clears.
+- Direct-caller recovery: an instance whose every channel failed is **not**
+  marked as notified inside `ApprovalBreachNotifier`, so a caller that
+  retries the same id batch can re-dispatch. The scheduler path itself does
+  not retry after `checkSlaBreaches` flips `sla_breached = TRUE`; persistent
+  retry needs the documented `breach_notified_at` follow-up.
 - Zero configured channels reports a graceful `skipped` count without
   hitting the metrics service.
 - Missing context (notifier given an id whose JOIN returns nothing) still
@@ -71,6 +73,13 @@ Aggregate: 21/21 tests, ~300ms total wall clock.
   `validateDingTalkRobotResponse`.
 - Wraps network errors so the notifier sees `{ ok: false, error: <msg> }`
   instead of a thrown exception.
+
+### Channel env registration
+- No notification env → no channels are registered, avoiding noisy
+  `webhook not configured` / email-stub failure logs on every breach.
+- `APPROVAL_BREACH_DINGTALK_WEBHOOK` set → DingTalk channel is registered.
+- `APPROVAL_BREACH_EMAIL_FROM` + `APPROVAL_BREACH_EMAIL_TO` both set →
+  email stub is registered explicitly.
 
 All HTTP paths use a mocked `fetchFn`; no real HTTP calls are made.
 
@@ -139,5 +148,6 @@ template `请假申请`, requester `张三`, current node `manager`, started at
   as a follow-up.
 - Multi-process leader/notifier handoff. The notifier is leader-only by
   construction (it sits behind the scheduler's `onBreach`, which the
-  follower never invokes), and the in-memory dedupe is documented to
-  re-notify after a leader change.
+  follower never invokes). The current scheduler path is best-effort after
+  `sla_breached` flips; persistent retry / notified-state handoff is a
+  follow-up.

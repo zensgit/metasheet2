@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { ApprovalBreachDingTalkChannel } from '../../src/services/breach-channels/dingtalk-channel'
-import type { BreachMessage } from '../../src/services/breach-channels'
+import { createApprovalBreachChannelsFromEnv, type BreachMessage } from '../../src/services/breach-channels'
 
 const VALID_WEBHOOK = 'https://oapi.dingtalk.com/robot/send?access_token=abc123'
 const VALID_SECRET = 'SECexamplesecret'
@@ -105,5 +105,29 @@ describe('ApprovalBreachDingTalkChannel', () => {
     const result = await channel.send(sampleMessage())
     expect(result.ok).toBe(false)
     expect(result.error).toBe('connect ECONNREFUSED')
+  })
+})
+
+describe('createApprovalBreachChannelsFromEnv', () => {
+  it('does not register noisy channels when notification env is unset', () => {
+    const channels = createApprovalBreachChannelsFromEnv({})
+    expect(channels).toEqual([])
+  })
+
+  it('registers DingTalk only when a webhook is configured', () => {
+    const channels = createApprovalBreachChannelsFromEnv({
+      APPROVAL_BREACH_DINGTALK_WEBHOOK: VALID_WEBHOOK,
+      APPROVAL_BREACH_DINGTALK_SECRET: VALID_SECRET,
+    })
+    expect(channels.map((channel) => channel.name)).toEqual(['dingtalk'])
+  })
+
+  it('registers the email stub only when both endpoints are explicitly configured', () => {
+    expect(createApprovalBreachChannelsFromEnv({ APPROVAL_BREACH_EMAIL_FROM: 'ops@example.com' })).toEqual([])
+    const channels = createApprovalBreachChannelsFromEnv({
+      APPROVAL_BREACH_EMAIL_FROM: 'ops@example.com',
+      APPROVAL_BREACH_EMAIL_TO: 'admin@example.com',
+    })
+    expect(channels.map((channel) => channel.name)).toEqual(['email'])
   })
 })
