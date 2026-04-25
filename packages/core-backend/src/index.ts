@@ -1911,6 +1911,26 @@ export class MetaSheetServer {
       const breachNotifier = new ApprovalBreachNotifier({
         channels: createApprovalBreachChannelsFromEnv(),
       })
+
+      // Retry breaches that were flagged in a prior epoch but never had
+      // breach_notified_at persisted (e.g. previous leader crashed between
+      // channel.send and the notifier's persistence call). Best-effort —
+      // failure here must not block scheduler startup.
+      void breachNotifier
+        .notifyMissedBreaches()
+        .then((result) => {
+          if (result.requested > 0) {
+            this.logger.info(
+              `Approval breach replay on startup: requested=${result.requested} notified=${result.notified} skipped=${result.skipped} sent=${result.sent} failed=${result.failed}`,
+            )
+          }
+        })
+        .catch((err) => {
+          this.logger.warn(
+            `Approval breach replay on startup failed: ${err instanceof Error ? err.message : String(err)}`,
+          )
+        })
+
       startApprovalSlaScheduler({
         leaderOptions,
         runtime: { leaderStateGauge: promMetrics.approvalSlaSchedulerLeaderGauge },

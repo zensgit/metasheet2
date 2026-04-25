@@ -451,4 +451,70 @@ describe('ApprovalMetricsService', () => {
       expect(await service.getInstanceMetrics('missing')).toBeNull()
     })
   })
+
+  // ---- migration 058 / persistent breach_notified_at -----------------
+
+  describe('markBreachNotified', () => {
+    it('issues a guarded UPDATE that no-ops when breach_notified_at is already set', async () => {
+      queryMock.mockResolvedValueOnce({ rows: [] })
+      const at = new Date('2026-04-26T10:00:00Z')
+
+      await service.markBreachNotified('inst-1', at)
+
+      expect(queryMock).toHaveBeenCalledTimes(1)
+      const [sql, params] = queryMock.mock.calls[0]
+      expect(normalize(sql)).toContain('UPDATE approval_metrics')
+      expect(normalize(sql)).toContain('SET breach_notified_at = $1')
+      expect(normalize(sql)).toContain('WHERE instance_id = $2')
+      expect(normalize(sql)).toContain('AND breach_notified_at IS NULL')
+      expect(params).toEqual(['2026-04-26T10:00:00.000Z', 'inst-1'])
+    })
+
+    it('skips silently when given an empty or whitespace instance id (defensive)', async () => {
+      await service.markBreachNotified('', new Date())
+      await service.markBreachNotified('   ', new Date())
+      expect(queryMock).not.toHaveBeenCalled()
+    })
+
+    it('defaults `now` to current time when omitted', async () => {
+      queryMock.mockResolvedValueOnce({ rows: [] })
+      await service.markBreachNotified('inst-2')
+      expect(queryMock).toHaveBeenCalledTimes(1)
+      const [, params] = queryMock.mock.calls[0]
+      expect(typeof params[0]).toBe('string')
+      expect(params[0]).toMatch(/^\d{4}-\d{2}-\d{2}T/)
+    })
+  })
+
+  describe('findUnnotifiedBreaches', () => {
+    it('returns instance ids ordered by sla_breached_at, capped at default 500', async () => {
+      queryMock.mockResolvedValueOnce({
+        rows: [{ instance_id: 'inst-a' }, { instance_id: 'inst-b' }],
+      })
+
+      const ids = await service.findUnnotifiedBreaches()
+
+      expect(ids).toEqual(['inst-a', 'inst-b'])
+      const [sql] = queryMock.mock.calls[0]
+      expect(normalize(sql)).toContain('SELECT instance_id FROM approval_metrics')
+      expect(normalize(sql)).toContain('WHERE sla_breached = TRUE')
+      expect(normalize(sql)).toContain('AND breach_notified_at IS NULL')
+      expect(normalize(sql)).toContain('ORDER BY sla_breached_at ASC')
+      expect(normalize(sql)).toContain('LIMIT 500')
+    })
+
+    it('clamps the limit to a sane upper bound (5000)', async () => {
+      queryMock.mockResolvedValueOnce({ rows: [] })
+      await service.findUnnotifiedBreaches(99_999)
+      const [sql] = queryMock.mock.calls[0]
+      expect(normalize(sql)).toContain('LIMIT 5000')
+    })
+
+    it('falls back to default when limit is non-positive or non-finite', async () => {
+      queryMock.mockResolvedValueOnce({ rows: [] })
+      await service.findUnnotifiedBreaches(-1)
+      const [sql] = queryMock.mock.calls[0]
+      expect(normalize(sql)).toContain('LIMIT 500')
+    })
+  })
 })

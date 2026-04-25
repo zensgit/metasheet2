@@ -157,7 +157,7 @@ export class ApprovalBreachNotifier {
         }
       }
       if (anySent) {
-        this.markNotified(id)
+        await this.markNotified(id)
         notified += 1
       }
     }
@@ -170,6 +170,47 @@ export class ApprovalBreachNotifier {
       failed: totalFailed,
       perChannel: this.channels.map((channel) => perChannel[channel.name]),
     }
+  }
+
+  /**
+   * Replay any breaches that were previously flagged in the DB but never
+   * had `breach_notified_at` persisted. Intended to be called once on
+   * leader startup to recover from a notifier crash that lost the
+   * in-memory dedupe set after channel.send returned but before
+   * markNotified persisted.
+   *
+   * Safe to call repeatedly — `notifyBreaches` deduplicates internally
+   * (in-memory + DB markBreachNotified is no-op when already set), and
+   * `findUnnotifiedBreaches` only returns rows that legitimately need
+   * dispatch.
+   */
+  async notifyMissedBreaches(limit = 500): Promise<NotifyResult> {
+    let ids: string[]
+    try {
+      ids = await this.metrics.findUnnotifiedBreaches(limit)
+    } catch (error) {
+      this.logger.warn(`Missed-breach lookup failed: ${error instanceof Error ? error.message : String(error)}`)
+      return {
+        requested: 0,
+        notified: 0,
+        skipped: 0,
+        sent: 0,
+        failed: 0,
+        perChannel: this.channels.map((channel) => ({ channel: channel.name, sent: 0, failed: 0, errors: [] })),
+      }
+    }
+    if (ids.length === 0) {
+      return {
+        requested: 0,
+        notified: 0,
+        skipped: 0,
+        sent: 0,
+        failed: 0,
+        perChannel: this.channels.map((channel) => ({ channel: channel.name, sent: 0, failed: 0, errors: [] })),
+      }
+    }
+    this.logger.info(`Replaying ${ids.length} missed breach notifications from previous epoch`)
+    return this.notifyBreaches(ids)
   }
 
   private async dispatch(
@@ -215,13 +256,29 @@ export class ApprovalBreachNotifier {
     return `${this.appBaseUrl}/approval/${encodeURIComponent(instanceId)}`
   }
 
-  private markNotified(instanceId: string): void {
-    if (this.notifiedIds.has(instanceId)) return
-    this.notifiedIds.add(instanceId)
-    this.notifiedOrder.push(instanceId)
-    while (this.notifiedOrder.length > this.maxNotifiedIds) {
-      const evicted = this.notifiedOrder.shift()
-      if (evicted) this.notifiedIds.delete(evicted)
+  private async markNotified(instanceId: string): Promise<void> {
+    // In-memory dedupe (cheap, fast, intra-process).
+    const alreadyMarkedInMemory = this.notifiedIds.has(instanceId)
+    if (!alreadyMarkedInMemory) {
+      this.notifiedIds.add(instanceId)
+      this.notifiedOrder.push(instanceId)
+      while (this.notifiedOrder.length > this.maxNotifiedIds) {
+        const evicted = this.notifiedOrder.shift()
+        if (evicted) this.notifiedIds.delete(evicted)
+      }
+    }
+
+    // Persistent dedupe (survives restart). Best-effort: if the UPDATE
+    // throws (DB transient, etc.), we log and continue — the in-memory
+    // mark already prevents same-process re-send. Future restarts may
+    // re-attempt dispatch via notifyMissedBreaches; that path is
+    // designed to be safely re-runnable.
+    try {
+      await this.metrics.markBreachNotified(instanceId, this.now())
+    } catch (error) {
+      this.logger.warn(
+        `Failed to persist breach_notified_at for ${instanceId}: ${error instanceof Error ? error.message : String(error)}`,
+      )
     }
   }
 }

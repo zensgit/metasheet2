@@ -17,11 +17,22 @@ function ctx(id: string, overrides: Partial<ApprovalBreachContext> = {}): Approv
   }
 }
 
-function makeMetrics(contexts: ApprovalBreachContext[] = []) {
+function makeMetrics(
+  contexts: ApprovalBreachContext[] = [],
+  options: { unnotified?: string[] } = {},
+) {
   const listBreachContextByIds = vi.fn().mockResolvedValue(contexts)
+  const markBreachNotified = vi.fn().mockResolvedValue(undefined)
+  const findUnnotifiedBreaches = vi.fn().mockResolvedValue(options.unnotified ?? [])
   return {
-    metrics: { listBreachContextByIds } as any,
+    metrics: {
+      listBreachContextByIds,
+      markBreachNotified,
+      findUnnotifiedBreaches,
+    } as any,
     listBreachContextByIds,
+    markBreachNotified,
+    findUnnotifiedBreaches,
   }
 }
 
@@ -178,5 +189,118 @@ describe('ApprovalBreachNotifier', () => {
     expect(message.body).toContain('未知申请人')
     expect(message.body).toContain('未知节点')
     expect(message.link).toBe('https://app.example.com/approval/orphan-1')
+  })
+
+  // ---- migration 058 / persistent breach_notified_at ----------------------
+
+  it('persists breach_notified_at via metrics.markBreachNotified after a successful dispatch', async () => {
+    const channel: BreachNotificationChannel = {
+      name: 'dingtalk',
+      send: vi.fn().mockResolvedValue({ ok: true }),
+    }
+    const { metrics, markBreachNotified } = makeMetrics([ctx('inst-1'), ctx('inst-2')])
+    const fixedNow = new Date('2026-04-26T10:00:00Z')
+    const notifier = new ApprovalBreachNotifier({
+      channels: [channel],
+      metrics,
+      now: () => fixedNow,
+    })
+
+    await notifier.notifyBreaches(['inst-1', 'inst-2'])
+
+    expect(markBreachNotified).toHaveBeenCalledTimes(2)
+    expect(markBreachNotified).toHaveBeenCalledWith('inst-1', fixedNow)
+    expect(markBreachNotified).toHaveBeenCalledWith('inst-2', fixedNow)
+  })
+
+  it('does not persist breach_notified_at when every channel fails', async () => {
+    const failingChannel: BreachNotificationChannel = {
+      name: 'dingtalk',
+      send: vi.fn().mockResolvedValue({ ok: false, error: 'webhook 5xx' }),
+    }
+    const { metrics, markBreachNotified } = makeMetrics([ctx('inst-1')])
+    const notifier = new ApprovalBreachNotifier({ channels: [failingChannel], metrics })
+
+    const result = await notifier.notifyBreaches(['inst-1'])
+
+    expect(result.notified).toBe(0)
+    expect(result.failed).toBe(1)
+    expect(markBreachNotified).not.toHaveBeenCalled()
+  })
+
+  it('treats markBreachNotified failures as non-fatal (in-memory dedupe still applies)', async () => {
+    const channel: BreachNotificationChannel = {
+      name: 'dingtalk',
+      send: vi.fn().mockResolvedValue({ ok: true }),
+    }
+    const { metrics, markBreachNotified } = makeMetrics([ctx('inst-1'), ctx('inst-1')])
+    markBreachNotified.mockRejectedValueOnce(new Error('db pool exhausted'))
+    const notifier = new ApprovalBreachNotifier({ channels: [channel], metrics })
+
+    const first = await notifier.notifyBreaches(['inst-1'])
+    expect(first.notified).toBe(1)        // dispatch reported notified despite persist failure
+    expect(first.failed).toBe(0)
+    expect(channel.send).toHaveBeenCalledTimes(1)
+
+    // Second call within same process: in-memory dedupe still works,
+    // so we don't dispatch again. The lost persist will be picked up
+    // by notifyMissedBreaches on next leader restart.
+    const second = await notifier.notifyBreaches(['inst-1'])
+    expect(second.notified).toBe(0)
+    expect(second.skipped).toBe(1)
+    expect(channel.send).toHaveBeenCalledTimes(1)
+  })
+
+  // ---- notifyMissedBreaches (startup retry path) --------------------------
+
+  it('notifyMissedBreaches replays unnotified breaches from the previous epoch', async () => {
+    const channel: BreachNotificationChannel = {
+      name: 'dingtalk',
+      send: vi.fn().mockResolvedValue({ ok: true }),
+    }
+    const { metrics, findUnnotifiedBreaches, markBreachNotified } = makeMetrics(
+      [ctx('inst-old-1'), ctx('inst-old-2')],
+      { unnotified: ['inst-old-1', 'inst-old-2'] },
+    )
+    const notifier = new ApprovalBreachNotifier({ channels: [channel], metrics })
+
+    const result = await notifier.notifyMissedBreaches()
+
+    expect(findUnnotifiedBreaches).toHaveBeenCalledTimes(1)
+    expect(channel.send).toHaveBeenCalledTimes(2)
+    expect(result.notified).toBe(2)
+    expect(markBreachNotified).toHaveBeenCalledTimes(2)
+  })
+
+  it('notifyMissedBreaches is a no-op when no unnotified breaches exist', async () => {
+    const channel: BreachNotificationChannel = {
+      name: 'dingtalk',
+      send: vi.fn().mockResolvedValue({ ok: true }),
+    }
+    const { metrics, findUnnotifiedBreaches, markBreachNotified } = makeMetrics([], { unnotified: [] })
+    const notifier = new ApprovalBreachNotifier({ channels: [channel], metrics })
+
+    const result = await notifier.notifyMissedBreaches()
+
+    expect(findUnnotifiedBreaches).toHaveBeenCalledTimes(1)
+    expect(channel.send).not.toHaveBeenCalled()
+    expect(markBreachNotified).not.toHaveBeenCalled()
+    expect(result.requested).toBe(0)
+  })
+
+  it('notifyMissedBreaches survives a findUnnotifiedBreaches DB failure', async () => {
+    const channel: BreachNotificationChannel = {
+      name: 'dingtalk',
+      send: vi.fn().mockResolvedValue({ ok: true }),
+    }
+    const { metrics, findUnnotifiedBreaches } = makeMetrics()
+    findUnnotifiedBreaches.mockRejectedValueOnce(new Error('db down'))
+    const notifier = new ApprovalBreachNotifier({ channels: [channel], metrics })
+
+    const result = await notifier.notifyMissedBreaches()
+
+    expect(channel.send).not.toHaveBeenCalled()
+    expect(result.requested).toBe(0)
+    expect(result.failed).toBe(0)
   })
 })

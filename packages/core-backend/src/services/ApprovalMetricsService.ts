@@ -305,6 +305,49 @@ export class ApprovalMetricsService {
     return result.rows.map((row) => row.instance_id)
   }
 
+  /**
+   * Persist that the breach notifier successfully dispatched for the given
+   * instance. Sets `breach_notified_at` only if it was previously NULL — so
+   * a redundant call (e.g. retry after restart) is a safe no-op rather than
+   * a duplicate timestamp overwrite.
+   *
+   * Pairs with migration 058 (`breach_notified_at TIMESTAMPTZ NULL`).
+   */
+  async markBreachNotified(instanceId: string, now: Date = new Date()): Promise<void> {
+    if (typeof instanceId !== 'string' || instanceId.trim().length === 0) return
+    await this.query(
+      `UPDATE approval_metrics
+          SET breach_notified_at = $1
+        WHERE instance_id = $2
+          AND breach_notified_at IS NULL`,
+      [now.toISOString(), instanceId.trim()],
+    )
+  }
+
+  /**
+   * Find rows that were flagged as breached but never had a successful
+   * notifier dispatch persisted. Used by the notifier on startup to retry
+   * the dispatches that were lost when the previous leader process died
+   * between `channel.send` and `markNotified` (in-memory dedupe was lost
+   * but the DB flag was already TRUE so checkSlaBreaches would never
+   * return them again).
+   *
+   * Capped to keep the recovery query bounded; the caller is expected to
+   * iterate if more rows exist than the cap.
+   */
+  async findUnnotifiedBreaches(limit = 500): Promise<string[]> {
+    const cap = Number.isFinite(limit) && limit > 0 ? Math.min(Math.floor(limit), 5000) : 500
+    const result = await this.query<{ instance_id: string }>(
+      `SELECT instance_id
+         FROM approval_metrics
+        WHERE sla_breached = TRUE
+          AND breach_notified_at IS NULL
+        ORDER BY sla_breached_at ASC
+        LIMIT ${cap}`,
+    )
+    return result.rows.map((row) => row.instance_id)
+  }
+
   async getMetricsSummary(input: MetricsSummaryQuery = {}): Promise<MetricsSummary> {
     const tenantId = resolveTenantId(input.tenantId)
     const since = normalizeDate(input.since)
