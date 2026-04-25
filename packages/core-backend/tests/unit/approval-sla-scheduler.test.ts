@@ -12,11 +12,12 @@ describe('ApprovalSlaScheduler', () => {
 
   it('invokes checkSlaBreaches and the onBreach hook with breached ids', async () => {
     const checkSlaBreaches = vi.fn<(now: Date) => Promise<string[]>>().mockResolvedValue(['apr-1', 'apr-2'])
+    const listBreachesPendingNotification = vi.fn<() => Promise<string[]>>().mockResolvedValue([])
     const onBreach = vi.fn().mockResolvedValue(undefined)
 
     const scheduler = new ApprovalSlaScheduler({
       // biome-ignore lint/suspicious/noExplicitAny: test double
-      metrics: { checkSlaBreaches } as any,
+      metrics: { checkSlaBreaches, listBreachesPendingNotification } as any,
       intervalMs: 60_000,
       onBreach,
     })
@@ -25,7 +26,72 @@ describe('ApprovalSlaScheduler', () => {
 
     expect(breached).toEqual(['apr-1', 'apr-2'])
     expect(checkSlaBreaches).toHaveBeenCalledTimes(1)
+    expect(listBreachesPendingNotification).toHaveBeenCalledTimes(1)
     expect(onBreach).toHaveBeenCalledWith(['apr-1', 'apr-2'])
+  })
+
+  it('dispatches the union of newly-breached ids and retry-pending ids', async () => {
+    const checkSlaBreaches = vi.fn().mockResolvedValue(['new-1', 'shared'])
+    const listBreachesPendingNotification = vi.fn().mockResolvedValue(['retry-1', 'shared'])
+    const onBreach = vi.fn().mockResolvedValue(undefined)
+
+    const scheduler = new ApprovalSlaScheduler({
+      // biome-ignore lint/suspicious/noExplicitAny: test double
+      metrics: { checkSlaBreaches, listBreachesPendingNotification } as any,
+      onBreach,
+    })
+
+    const breached = await scheduler.tick(new Date('2026-04-25T10:00:00Z'))
+
+    expect(breached).toEqual(['new-1', 'shared'])
+    expect(onBreach).toHaveBeenCalledTimes(1)
+    expect(onBreach.mock.calls[0][0]).toEqual(['new-1', 'shared', 'retry-1'])
+  })
+
+  it('dispatches retry-pending ids even when no new breaches were flagged this tick', async () => {
+    const checkSlaBreaches = vi.fn().mockResolvedValue([])
+    const listBreachesPendingNotification = vi.fn().mockResolvedValue(['retry-1'])
+    const onBreach = vi.fn().mockResolvedValue(undefined)
+
+    const scheduler = new ApprovalSlaScheduler({
+      // biome-ignore lint/suspicious/noExplicitAny: test double
+      metrics: { checkSlaBreaches, listBreachesPendingNotification } as any,
+      onBreach,
+    })
+
+    await scheduler.tick(new Date('2026-04-25T10:00:00Z'))
+
+    expect(onBreach).toHaveBeenCalledWith(['retry-1'])
+  })
+
+  it('skips the pending lookup entirely when no onBreach is configured', async () => {
+    const checkSlaBreaches = vi.fn().mockResolvedValue(['apr-1'])
+    const listBreachesPendingNotification = vi.fn().mockResolvedValue([])
+
+    const scheduler = new ApprovalSlaScheduler({
+      // biome-ignore lint/suspicious/noExplicitAny: test double
+      metrics: { checkSlaBreaches, listBreachesPendingNotification } as any,
+    })
+
+    const breached = await scheduler.tick(new Date('2026-04-25T10:00:00Z'))
+
+    expect(breached).toEqual(['apr-1'])
+    expect(listBreachesPendingNotification).not.toHaveBeenCalled()
+  })
+
+  it('dispatches the new breaches even when listBreachesPendingNotification rejects', async () => {
+    const checkSlaBreaches = vi.fn().mockResolvedValue(['new-1'])
+    const listBreachesPendingNotification = vi.fn().mockRejectedValue(new Error('db blip'))
+    const onBreach = vi.fn().mockResolvedValue(undefined)
+
+    const scheduler = new ApprovalSlaScheduler({
+      // biome-ignore lint/suspicious/noExplicitAny: test double
+      metrics: { checkSlaBreaches, listBreachesPendingNotification } as any,
+      onBreach,
+    })
+
+    await scheduler.tick(new Date('2026-04-25T10:00:00Z'))
+    expect(onBreach).toHaveBeenCalledWith(['new-1'])
   })
 
   it('swallows checkSlaBreaches errors and returns an empty list', async () => {

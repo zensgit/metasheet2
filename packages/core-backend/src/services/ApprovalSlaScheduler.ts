@@ -139,9 +139,18 @@ export class ApprovalSlaScheduler {
       const breached = await this.metrics.checkSlaBreaches(now)
       if (breached.length > 0) {
         this.logger.warn(`SLA breaches flagged: ${breached.length}`)
-        if (this.onBreach) {
+      }
+      if (this.onBreach) {
+        let pending: string[] = []
+        try {
+          pending = await this.metrics.listBreachesPendingNotification()
+        } catch (error) {
+          this.logger.warn(`SLA pending-breach lookup failed: ${error instanceof Error ? error.message : String(error)}`)
+        }
+        const dispatch = mergeUnique(breached, pending)
+        if (dispatch.length > 0) {
           try {
-            await this.onBreach(breached)
+            await this.onBreach(dispatch)
           } catch (error) {
             this.logger.warn(`SLA onBreach hook failed: ${error instanceof Error ? error.message : String(error)}`)
           }
@@ -246,6 +255,21 @@ export class ApprovalSlaScheduler {
     }
     if (this.started) this.startAcquisitionRetryLoop()
   }
+}
+
+function mergeUnique(...lists: string[][]): string[] {
+  const seen = new Set<string>()
+  const out: string[] = []
+  for (const list of lists) {
+    if (!Array.isArray(list)) continue
+    for (const id of list) {
+      if (typeof id !== 'string' || id.length === 0) continue
+      if (seen.has(id)) continue
+      seen.add(id)
+      out.push(id)
+    }
+  }
+  return out
 }
 
 let sharedScheduler: ApprovalSlaScheduler | null = null
