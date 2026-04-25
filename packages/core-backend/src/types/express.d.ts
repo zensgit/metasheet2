@@ -36,6 +36,12 @@ declare global {
       requestId?: string
 
       /**
+       * End-to-end correlation id populated by the correlation middleware.
+       * Echoed back to callers via the `X-Correlation-ID` response header.
+       */
+      correlationId?: string
+
+      /**
        * Timestamp when the request was received.
        */
       startTime?: number

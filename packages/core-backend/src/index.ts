@@ -71,6 +71,7 @@ import { startMultitableAttachmentCleanup } from './multitable/attachment-orphan
 import { AutomationService, setAutomationServiceInstance } from './multitable/automation-service'
 import { tenantContext } from './db/sharding/tenant-context'
 import { attendanceAuditMiddleware, attendanceSecurityMiddleware } from './middleware/attendance-production'
+import { correlationErrorHandler, correlationIdMiddleware } from './middleware/correlation'
 import { approvalsRouter } from './routes/approvals'
 import { authRouter } from './routes/auth'
 import { auditLogsRouter } from './routes/audit-logs'
@@ -811,8 +812,14 @@ export class MetaSheetServer {
    * 配置中间件
    */
   private setupMiddleware(): void {
+    // Correlation-id must wrap every downstream middleware so AsyncLocalStorage
+    // is populated before CORS, request logging, auth, and route handlers run.
+    this.app.use(correlationIdMiddleware)
+
     // CORS
-    this.app.use(cors())
+    this.app.use(cors({
+      exposedHeaders: ['X-Correlation-ID'],
+    }))
 
     // API responses should always opt out of MIME sniffing, including early 4xx replies.
     this.app.use('/api', (_req: Request, res: Response, next: NextFunction) => {
@@ -1142,6 +1149,14 @@ export class MetaSheetServer {
     })
 
     // Note: /metrics/prom endpoint is registered by installMetrics() in setupMiddleware()
+  }
+
+  private installGlobalErrorHandler(): void {
+    // Global error handler — emits `correlationId` in the response body so API
+    // clients can reference the request when filing bug reports. It must be
+    // registered after all routes/plugin routes; Express only dispatches errors
+    // to handlers that appear later in the middleware stack.
+    this.app.use(correlationErrorHandler(this.logger))
   }
 
   /**
@@ -2122,6 +2137,8 @@ export class MetaSheetServer {
     } catch (e) {
       this.logger.error('Failed to initialize MetricsStreamService', e as Error)
     }
+
+    this.installGlobalErrorHandler()
 
     this.logger.info('Starting HTTP server listen phase...')
     await new Promise<void>((resolve, reject) => {

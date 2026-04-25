@@ -5,6 +5,8 @@
 import { AsyncLocalStorage } from 'async_hooks'
 import winston from 'winston'
 
+import { getCorrelationId } from '../context/request-context'
+
 type LogContext = {
   traceId?: string
   spanId?: string
@@ -41,12 +43,20 @@ function currentTraceIds(): LogContext {
 function mergeMeta(meta?: Record<string, unknown>): Record<string, unknown> | undefined {
   const store = contextStore.getStore()
   const traceMeta = currentTraceIds()
-  const merged = {
+  const correlationId = getCorrelationId()
+  const merged: Record<string, unknown> = {
     ...meta,
     ...traceMeta,
     requestId: store?.requestId ?? traceMeta.requestId,
     spanId: store?.spanId ?? traceMeta.spanId,
     traceId: store?.traceId ?? traceMeta.traceId
+  }
+  if (correlationId) {
+    merged.correlation_id = correlationId
+  }
+  // Strip keys whose value is undefined so downstream formatters don't emit them.
+  for (const key of Object.keys(merged)) {
+    if (merged[key] === undefined) delete merged[key]
   }
   return Object.keys(merged).length ? merged : undefined
 }
