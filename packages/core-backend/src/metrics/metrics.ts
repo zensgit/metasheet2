@@ -450,6 +450,12 @@ const automationSchedulerLeaderGauge = new client.Gauge({
   labelNames: ['state'] as const
 })
 
+const approvalSlaSchedulerLeaderGauge = new client.Gauge({
+  name: 'approval_sla_scheduler_leader',
+  help: 'ApprovalSlaScheduler leader-lock state (1=current state, 0=other)',
+  labelNames: ['state'] as const
+})
+
 registry.registerMetric(httpHistogram)
 registry.registerMetric(httpSummary)
 registry.registerMetric(httpRequestsTotal)
@@ -519,6 +525,7 @@ registry.registerMetric(metricsStreamErrorsTotal)
 registry.registerMetric(apigwCbStoreUsedTotal)
 registry.registerMetric(apigwCbInitTotal)
 registry.registerMetric(automationSchedulerLeaderGauge)
+registry.registerMetric(approvalSlaSchedulerLeaderGauge)
 
 function trimConfiguredMetricsToken(raw: string | undefined): string | null {
   const token = typeof raw === 'string' ? raw.trim() : ''
@@ -665,7 +672,8 @@ export const metrics = {
   // APIGateway + CircuitBreaker (Lane 3 / collab-infra rollout)
   apigwCbStoreUsedTotal,
   apigwCbInitTotal,
-  automationSchedulerLeaderGauge
+  automationSchedulerLeaderGauge,
+  approvalSlaSchedulerLeaderGauge
 }
 
 /**

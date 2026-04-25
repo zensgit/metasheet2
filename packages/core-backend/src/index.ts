@@ -1904,7 +1904,10 @@ export class MetaSheetServer {
 
     try {
       const leaderOptions = await resolveApprovalSlaSchedulerLeaderOptions()
-      startApprovalSlaScheduler({ leaderOptions })
+      startApprovalSlaScheduler({
+        leaderOptions,
+        runtime: { leaderStateGauge: promMetrics.approvalSlaSchedulerLeaderGauge },
+      })
       this.logger.info('Approval SLA scheduler initialized')
     } catch (e) {
       this.logger.error('Approval SLA scheduler initialization failed; continuing in degraded mode', e as Error)
